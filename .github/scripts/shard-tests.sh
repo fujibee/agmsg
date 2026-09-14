@@ -154,23 +154,23 @@ file_weight() {
 # failure #1107 was (a partition sized against a count baseline that went
 # stale as the suite roughly tripled).
 #
-#   MEASURED AGAINST: GitHub Actions run 34664794167 (#1159, tests.yml bats
-#   job, macos-latest, 5 shards, 2026-09-12). Whole-suite macOS wall summed
-#   over every file = 4212s across 1749 @test blocks => avg = 4212 / 1749 =
-#   2.408 s/test. Both seeds below are that run's per-file wall / that avg:
-#     test_remote_engine_start_refusal.bats  679s / 2.408 = round(281.9) = 282
-#     test_remote_status_liveness.bats       293s / 2.408 = round(121.7) = 122
+#   MEASURED AGAINST: GitHub Actions run 34835242576 (draft release-candidate
+#   PR #1240, tests.yml bats job, macos-latest, 5 shards, 2026-09-14, the
+#   merged integration+main tree). Whole-suite macOS wall summed over every
+#   file = 5496s across 2550 @test blocks => avg = 5496 / 2550 = 2.155 s/test.
+#   Both seeds below are that run's per-file wall / that avg:
+#     test_remote_engine_start_refusal.bats  631s / 2.155 = round(292.8) = 293
+#     test_remote_status_liveness.bats       364s / 2.155 = round(168.9) = 169
 #
-# STILL THESE VALUES after the integration+main merge grew the suite to 2550
-# @tests, even though they are now measurably under-seeded on this tree (the
-# reservation test test_ci_sharding.bats "a pinned file's shard is reserved,
-# not refilled" is red -- known, tracked, not fixed by this branch). A local
-# (non-Actions) remeasurement was tried and rejected: these two files are
-# wait/timeout-bound, not CPU-bound, so their cost does not scale with local
-# hardware speed the way the rest of the suite does, and a local per-file-wall
-# / local-whole-suite-avg ratio does not stand in for the same ratio on the
-# Actions runner. The refit needs a real Actions run's bats-timings artifact
-# (summarize-bats-timings.sh), same as the original #1159 measurement.
+# KNOWN LIMIT (#1243): even these correctly-measured values do not satisfy
+# tests/test_ci_sharding.bats's "a pinned file's shard is reserved, not
+# refilled" on this suite size (2550 @tests, ~1.46x #1159's 1749) -- the
+# ratio-based formula itself, not a stale measurement, is the gap now. The
+# same CI run's actual shard durations confirm it in practice: the shard
+# holding test_remote_status_liveness.bats was the slowest leg on both OSes
+# (macOS 29min vs 20/20/11/10 for the others). Tracked in #1243 for a
+# threshold/algorithm review; does not affect what ships, only CI wall-clock
+# balance, so left red rather than patched with an unmeasured number.
 #
 # The numerator (per-file wall) and the divisor (whole-suite avg) came from the
 # SAME run, so a refresh must re-derive BOTH together off one green run's
@@ -181,9 +181,9 @@ file_weight() {
 # basename each and nothing else.
 pin_seed() {
   if [ "$1" = test_remote_engine_start_refusal.bats ]; then
-    printf 282
+    printf 293
   elif [ "$1" = test_remote_status_liveness.bats ]; then
-    printf 122
+    printf 169
   else
     file_weight "$2"
   fi
