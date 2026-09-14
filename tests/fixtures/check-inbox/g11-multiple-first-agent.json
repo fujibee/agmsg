@@ -1,0 +1,88 @@
+{
+  "name": "g11-multiple-first-agent",
+  "description": "multiple identities for (project,type): only the FIRST registered agent's inbox is polled",
+  "input": {
+    "type": "codex",
+    "project": "/e/Workspace/mes-reference-impl",
+    "stdin": "",
+    "interval": null
+  },
+  "run": {
+    "marker": null,
+    "locks": [],
+    "watch": null
+  },
+  "runners": [
+    "bash",
+    "node"
+  ],
+  "teams": [
+    {
+      "name": "mes",
+      "agents": {
+        "Alpha": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        },
+        "Beta": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": 1,
+      "team": "mes",
+      "from": "claude",
+      "to": "Alpha",
+      "body": "for-alpha",
+      "created_at": "2026-07-20T10:00:00Z",
+      "read_at": null
+    },
+    {
+      "id": 2,
+      "team": "mes",
+      "from": "claude",
+      "to": "Beta",
+      "body": "for-beta",
+      "created_at": "2026-07-20T10:01:00Z",
+      "read_at": null
+    }
+  ],
+  "expected": {
+    "exitCode": 0,
+    "stdoutSemantic": {
+      "kind": "block",
+      "teams": [
+        {
+          "team": "mes",
+          "messages": [
+            {
+              "from": "claude",
+              "body": "for-alpha",
+              "created_at": "2026-07-20T10:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    "unreadIds": [
+      2
+    ],
+    "readIds": [
+      1
+    ],
+    "markerTouched": true,
+    "note": "first agent per teams config iteration order; runner pins Alpha first"
+  }
+}

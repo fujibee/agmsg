@@ -11,6 +11,28 @@ PROJECT="${2:?Missing project_path}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/lib/node.sh"
+
+# On Windows, avoid paying the MSYS process-launch cost for the entire inbox
+# path. Exit 78 is a side-effect-free capability result (old Node or no
+# node:sqlite); every other Node result is authoritative and must not be
+# replayed through bash, which could mark or deliver a message twice.
+_agmsg_detect_platform
+if [ "$_agmsg_platform" = "msys" ] && [ -f "$SCRIPT_DIR/check-inbox.js" ]; then
+  _agmsg_node_bin="$(agmsg_resolve_node)"
+  if command -v "$_agmsg_node_bin" >/dev/null 2>&1 || [ -x "$_agmsg_node_bin" ]; then
+    set +e
+    AGMSG_SKILL_DIR="$SKILL_DIR" "$_agmsg_node_bin" "$SCRIPT_DIR/check-inbox.js" "$TYPE" "$PROJECT"
+    _agmsg_node_status=$?
+    set -e
+    if [ "$_agmsg_node_status" -ne 78 ]; then
+      exit "$_agmsg_node_status"
+    fi
+  elif [ -n "${AGMSG_NODE:-}" ] || [ -n "${AGMSG_CODEX_NODE:-}" ]; then
+    echo "agmsg: configured Node.js ('$_agmsg_node_bin') was not found" >&2
+    exit 127
+  fi
+fi
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"

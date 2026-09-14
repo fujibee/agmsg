@@ -1,0 +1,78 @@
+{
+  "name": "g17-self-composite-lock",
+  "description": "actas lock owner recorded as composite <sid>.<pid> of THIS session (bare sid in stdin): self-match must succeed and delivery proceed",
+  "input": {
+    "type": "codex",
+    "project": "/e/Workspace/mes-reference-impl",
+    "stdin": "",
+    "interval": null,
+    "sessionId": "test-instance"
+  },
+  "run": {
+    "marker": null,
+    "locks": [
+      {
+        "team": "mes",
+        "agent": "Codex",
+        "owner": "test-instance.SELFPID",
+        "alive": true,
+        "note": "runner substitutes SELFPID with its own live pid; owner must normalize-match input.sessionId"
+      }
+    ],
+    "watch": null
+  },
+  "runners": [
+    "bash",
+    "node"
+  ],
+  "teams": [
+    {
+      "name": "mes",
+      "agents": {
+        "Codex": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": 1,
+      "team": "mes",
+      "from": "claude",
+      "to": "Codex",
+      "body": "deliver-to-self",
+      "created_at": "2026-07-20T10:00:00Z",
+      "read_at": null
+    }
+  ],
+  "expected": {
+    "exitCode": 0,
+    "stdoutSemantic": {
+      "kind": "block",
+      "teams": [
+        {
+          "team": "mes",
+          "messages": [
+            {
+              "from": "claude",
+              "body": "deliver-to-self",
+              "created_at": "2026-07-20T10:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    "unreadIds": [],
+    "readIds": [
+      1
+    ],
+    "markerTouched": true,
+    "note": "regression for BLOCKER-1: without composite normalization the live self pid makes the lock look like a live OTHER session and delivery is skipped forever"
+  }
+}

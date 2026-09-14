@@ -1,0 +1,71 @@
+{
+  "name": "g07-interval-zero",
+  "description": "interval=0 always delivers even with a fresh marker",
+  "input": {
+    "type": "codex",
+    "project": "/e/Workspace/mes-reference-impl",
+    "stdin": "",
+    "interval": 0
+  },
+  "run": {
+    "marker": {
+      "agent": "Codex",
+      "ageSeconds": 5
+    },
+    "locks": [],
+    "watch": null
+  },
+  "runners": [
+    "bash",
+    "node"
+  ],
+  "teams": [
+    {
+      "name": "mes",
+      "agents": {
+        "Codex": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": 1,
+      "team": "mes",
+      "from": "claude",
+      "to": "Codex",
+      "body": "pending",
+      "created_at": "2026-07-20T10:00:00Z",
+      "read_at": null
+    }
+  ],
+  "expected": {
+    "exitCode": 0,
+    "stdoutSemantic": {
+      "kind": "block",
+      "teams": [
+        {
+          "team": "mes",
+          "messages": [
+            {
+              "from": "claude",
+              "body": "pending",
+              "created_at": "2026-07-20T10:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    "unreadIds": [],
+    "readIds": [
+      1
+    ],
+    "markerTouched": true
+  }
+}

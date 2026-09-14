@@ -1,0 +1,58 @@
+{
+  "name": "g01-no-unread-codex",
+  "description": "no unread, codex type emits status JSON; marker touched",
+  "input": {
+    "type": "codex",
+    "project": "/e/Workspace/mes-reference-impl",
+    "stdin": "",
+    "interval": null
+  },
+  "run": {
+    "marker": null,
+    "locks": [],
+    "watch": null
+  },
+  "runners": [
+    "bash",
+    "node"
+  ],
+  "teams": [
+    {
+      "name": "mes",
+      "agents": {
+        "Codex": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": 1,
+      "team": "mes",
+      "from": "claude",
+      "to": "Codex",
+      "body": "old",
+      "created_at": "2026-07-20T10:00:00Z",
+      "read_at": "2026-07-20T09:00:00Z"
+    }
+  ],
+  "rawChecks": true,
+  "expected": {
+    "exitCode": 0,
+    "stdoutSemantic": {
+      "kind": "status",
+      "systemMessage": "agmsg: no new messages"
+    },
+    "unreadIds": [],
+    "readIds": [
+      1
+    ],
+    "markerTouched": true
+  }
+}
