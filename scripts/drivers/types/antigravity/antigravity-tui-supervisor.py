@@ -286,14 +286,14 @@ class TerminalScreen:
 class Supervisor:
     HUMAN_IDLE_STABLE_SECONDS=0.6
     def __init__(self, args):
-        self.a=args; self.project=str(Path(args.project).resolve()); self.owner=f'{uuid.uuid4()}.{os.getpid()}'
+        self.a=args; self.project=str(Path(args.project).absolute()); self.owner=f'{uuid.uuid4()}.{os.getpid()}'
         self.start=proc_start(os.getpid()); self.cap=uuid.uuid4().hex+uuid.uuid4().hex
         paths=self.call('paths').splitlines(); self.actas=Path(paths[0])
         key=self.actas.name.removeprefix('actas.').removesuffix('.session')
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':2,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'humanInputActive':False,'humanInputSawNonIdle':False,'durableAttention':False,'batch':None}
-        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
+        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.last_output=time.monotonic(); self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGUSR1, self.request_resume)
@@ -583,7 +583,8 @@ class Supervisor:
         # footerだけでは許可画面や入力途中を区別できない。空の入力欄も要求する。
         screen=getattr(self,'screen',None)
         if not screen or screen.uncertain or screen.state!='normal' or screen.decoder.getstate()[0]: return False
-        if time.monotonic()-getattr(self,'last_output',0)<0.3: return False
+        last_output=getattr(self,'last_output',0)
+        if last_output>0 and time.monotonic()-last_output<0.3: return False
         footer=screen.tail_with_prefix('? for shortcuts')
         if footer is None:return False
         footer_text=''.join(line.strip() for line in screen.lines()[footer[0]:footer[1]+1])
@@ -731,7 +732,7 @@ def main():
         for file in (ROOT/'run').glob('antigravity-reservation.*.json'):
             try:
                 reservation=json.loads(file.read_text()); state=json.loads(Path(reservation['state']).read_text())
-                if state.get('project')!=str(Path(a.project).resolve()) or state.get('team')!=a.team or state.get('role')!=a.name or reservation.get('kind')!='tui-pty': continue
+                if state.get('project')!=str(Path(a.project).absolute()) or state.get('team')!=a.team or state.get('role')!=a.name or reservation.get('kind')!='tui-pty': continue
                 live=False
                 try: live=process_still(int(reservation['pid']),reservation['start'])
                 except (ValueError,StartTimeUnreadable): pass

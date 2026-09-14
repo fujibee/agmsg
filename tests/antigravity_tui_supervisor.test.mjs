@@ -853,7 +853,39 @@ process.stdin.on('data', chunk => {
     'bash', quote(path.join(install, 'scripts/drivers/types/antigravity/antigravity-tui-monitor.sh')),
     '--project', quote(project), '--team', 'fixture', '--name', 'worker', '--agy', quote(fake), '--poll', '0.05',
   ].join(' ');
-  const child = spawn('script', ['-qefc', command, '/dev/null'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const ptyRelay = path.join(dir, 'pty-relay.py');
+  if (process.platform === 'darwin') fs.writeFileSync(ptyRelay, `
+import os
+import pty
+import select
+import sys
+
+pid, master = pty.fork()
+if pid == 0:
+    os.execlp('bash', 'bash', '-c', sys.argv[1])
+while True:
+    ready, _, _ = select.select([master, sys.stdin.buffer], [], [])
+    if master in ready:
+        try:
+            data = os.read(master, 8192)
+        except OSError:
+            break
+        if not data:
+            break
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    if sys.stdin.buffer in ready:
+        data = os.read(sys.stdin.fileno(), 8192)
+        if not data:
+            break
+        os.write(master, data)
+_, status = os.waitpid(pid, 0)
+sys.exit(os.waitstatus_to_exitcode(status))
+`);
+  const spawnPty = (cmd, childEnv) => process.platform === 'darwin'
+    ? spawn('python3', [ptyRelay, cmd], { env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] })
+    : spawn('script', ['-qefc', cmd, '/dev/null'], { env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawnPty(command, env);
   let output = '';
   child.stdout.on('data', chunk => { output += chunk.toString(); });
   child.stderr.on('data', chunk => { output += chunk.toString(); });
@@ -939,7 +971,7 @@ process.stdin.on('data', chunk => {
     replayState.humanInputSawNonIdle = true;
     fs.writeFileSync(path.join(install, 'run', stateFile), JSON.stringify(replayState));
     const replayCommand = 'stty rows 40 cols 120; exec ' + ['python3', supervisorPath, '--action', 'replay', '--project', project, '--team', 'fixture', '--name', 'worker', '--agy', fake, '--batch', uncertain.batch.id, '--confirm-id', uncertain.batch.messages[0].id].map(quote).join(' ');
-    const replay = spawn('script', ['-qefc', replayCommand, '/dev/null'], { env: { ...env, TEST_REPLAY_RECEIPT: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const replay = spawnPty(replayCommand, { ...env, TEST_REPLAY_RECEIPT: '1' });
     let replayOutput = '';
     replay.stdout.on('data', chunk => { replayOutput += chunk.toString(); });
     replay.stderr.on('data', chunk => { replayOutput += chunk.toString(); });
