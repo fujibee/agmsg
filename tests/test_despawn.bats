@@ -41,16 +41,16 @@ teardown() {
     >/dev/null 2>&1 3>&- &
   local wpid=$! i
   # Wait for the watcher to attach (it claims the lock + writes the ready sentinel).
-  for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
-  [ -e "$RUN/ready.team__alice" ]
-  [ -f "$RUN/actas.team__alice.session" ]
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$(_ready_path team alice)" ] && break; sleep 0.5; done
+  [ -e "$(_ready_path team alice)" ]
+  [ -f "$(_actas_session_path team alice)" ]
 
   run bash "$SCRIPTS/despawn.sh" team leader alice --timeout 10
   [ "$status" -eq 0 ]
   [[ "$output" == *"status=ok"* ]]
 
   # Member dropped its role: lock released and registration gone.
-  [ ! -f "$RUN/actas.team__alice.session" ]
+  [ ! -f "$(_actas_session_path team alice)" ]
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [[ "$output" != *alice* ]]
 
@@ -132,8 +132,8 @@ _wait_until_read_for_alice() {   # <body-substring> <budget-seconds>
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- &
   local wpid=$! i
-  for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
-  [ -e "$RUN/ready.team__alice" ]
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$(_ready_path team alice)" ] && break; sleep 0.5; done
+  [ -e "$(_ready_path team alice)" ]
 
   run bash "$SCRIPTS/despawn.sh" team leader alice --timeout 10
   [ "$status" -eq 0 ]
@@ -196,15 +196,15 @@ _stub_tmux_exit() {
 
 @test "despawn --force: kills recorded placement and drops registration without the member" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
-  printf '%s\t%s\t%s\n' '%99' "$PROJ" claude-code > "$RUN/spawn.team__alice"
-  printf 'somesid\n' > "$RUN/actas.team__alice.session"
+  printf '%s\t%s\t%s\n' '%99' "$PROJ" claude-code > "$(_spawn_record_path team alice)"
+  printf 'somesid\n' > "$(_actas_session_path team alice)"
   _stub_tmux_exit 0                                 # kill-pane confirms the teardown
 
   run bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -Fq 'status=forced'
-  [ ! -f "$RUN/spawn.team__alice" ]                 # placement record cleaned
-  [ ! -f "$RUN/actas.team__alice.session" ]         # lock released
+  [ ! -f "$(_spawn_record_path team alice)" ]                 # placement record cleaned
+  [ ! -f "$(_actas_session_path team alice)" ]         # lock released
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [[ "$output" != *alice* ]]                        # registration dropped
 }
@@ -216,14 +216,14 @@ _stub_tmux_exit() {
   # calls reset with a type nothing is registered under, so the registration
   # survives. The reader takes a fourth variable; this is the control.
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
-  printf '%s\t%s\t%s\t%s\n' '%99' "$PROJ" claude-code 'fence=/run/herdr-a.sock:term_X' > "$RUN/spawn.team__alice"
-  printf 'somesid\n' > "$RUN/actas.team__alice.session"
+  printf '%s\t%s\t%s\t%s\n' '%99' "$PROJ" claude-code 'fence=/run/herdr-a.sock:term_X' > "$(_spawn_record_path team alice)"
+  printf 'somesid\n' > "$(_actas_session_path team alice)"
   _stub_tmux_exit 0
 
   run bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
-  [ ! -f "$RUN/spawn.team__alice" ]
-  [ ! -f "$RUN/actas.team__alice.session" ]
+  [ ! -f "$(_spawn_record_path team alice)" ]
+  [ ! -f "$(_actas_session_path team alice)" ]
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [ "$(printf '%s\n' "$output" | grep -c alice)" -eq 0 ]   # dropped: the type reached reset intact
 }
@@ -231,7 +231,7 @@ _stub_tmux_exit() {
 @test "despawn --force: a plain placement closes only after its owner witness matches" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   printf '%s\t%s\t%s\t%s\n' 'plain:iterm:/dev/ttys040' "$PROJ" claude-code \
-    'fence=iterm:tty=/dev/ttys040,boot=123,boot_start=Sat_Sep_13_02:10:11_2026' > "$RUN/spawn.team__alice"
+    'fence=iterm:tty=/dev/ttys040,boot=123,boot_start=Sat_Sep_13_02:10:11_2026' > "$(_spawn_record_path team alice)"
   local bin="$TEST_SKILL_DIR/plain-bin"
   mkdir -p "$bin"
   cat > "$bin/ps" <<'EOF'
@@ -251,7 +251,7 @@ EOF
   run env PATH="$bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -Fq 'status=forced'
-  [ ! -f "$RUN/spawn.team__alice" ]
+  [ ! -f "$(_spawn_record_path team alice)" ]
   grep -Fq 'despawn /dev/ttys040' "$TEST_SKILL_DIR/plain-close.log"
 }
 
@@ -286,10 +286,10 @@ EOF
   source "$SCRIPTS/lib/self-write.sh"
   agmsg_role_session_record team alice sid-me "$PROJ" claude-code
   printf '%s\t%s\t%s\t%s\n' 'plain:iterm:/dev/ttys040' "$PROJ" claude-code \
-    'fence=iterm:tty=/dev/ttys040,boot=123,boot_start=Sat_Sep_13_02:00:00_2026' > "$RUN/spawn.team__alice"
+    'fence=iterm:tty=/dev/ttys040,boot=123,boot_start=Sat_Sep_13_02:00:00_2026' > "$(_spawn_record_path team alice)"
 
   agmsg_self_write team alice 'plain:iterm:/dev/ttys040' "sid-me.$$" >/dev/null
-  grep -Fq "pid=$$,start=Sat_Sep_13_02:10:11_2026,boot=123,boot_start=Sat_Sep_13_02:00:00_2026" "$RUN/spawn.team__alice"
+  grep -Fq "pid=$$,start=Sat_Sep_13_02:10:11_2026,boot=123,boot_start=Sat_Sep_13_02:00:00_2026" "$(_spawn_record_path team alice)"
 
   # The CLI process proof is now gone. Only the carried boot pair can prove
   # that the recorded tty is still the spawned window.
@@ -297,14 +297,14 @@ EOF
   run bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
   [[ "$output" == *"status=forced"* ]]
-  [ ! -f "$RUN/spawn.team__alice" ]
+  [ ! -f "$(_spawn_record_path team alice)" ]
   grep -Fq 'despawn /dev/ttys040' "$TEST_SKILL_DIR/plain-carry-close.log"
 }
 
 @test "despawn --force: a stale plain owner witness is named and kept for retry" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   printf '%s\t%s\t%s\t%s\n' 'plain:iterm:/dev/ttys040' "$PROJ" claude-code \
-    'fence=iterm:tty=/dev/ttys040,pid=123,start=OLD' > "$RUN/spawn.team__alice"
+    'fence=iterm:tty=/dev/ttys040,pid=123,start=OLD' > "$(_spawn_record_path team alice)"
   local bin="$TEST_SKILL_DIR/plain-bin-stale"
   mkdir -p "$bin"
   cat > "$bin/ps" <<'EOF'
@@ -316,7 +316,7 @@ EOF
   run env PATH="$bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -ne 0 ]
   printf '%s\n' "$output" | grep -Fq 'CLI process witness no longer matches'
-  [ -f "$RUN/spawn.team__alice" ]
+  [ -f "$(_spawn_record_path team alice)" ]
 }
 
 @test "despawn --force: an UNCONFIRMED teardown keeps the record and reports error (#625, --force side)" {
@@ -324,14 +324,14 @@ EOF
   # non-zero), the pane may still be alive. --force must NOT delete the record (the
   # only retry authority) or claim status=forced.
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
-  printf '%s\t%s\t%s\n' 'tmux:%99' "$PROJ" claude-code > "$RUN/spawn.team__alice"
+  printf '%s\t%s\t%s\n' 'tmux:%99' "$PROJ" claude-code > "$(_spawn_record_path team alice)"
   _stub_tmux_exit 1                                 # kill-pane FAILS -> not confirmed
 
   run bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -ne 0 ]
   grep -q "status=error" <<<"$output"
   grep -q "force-teardown-unconfirmed" <<<"$output"
-  [ -f "$RUN/spawn.team__alice" ]                   # record KEPT for a retry
+  [ -f "$(_spawn_record_path team alice)" ]                   # record KEPT for a retry
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [[ "$output" == *alice* ]]                        # registration NOT dropped
 }
@@ -341,12 +341,12 @@ EOF
   # so there is nothing to confirm — treat it as an unconfirmed teardown, keep the
   # record, and never hand the corrupt value to a terminal as a target.
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
-  printf '%s\t%s\t%s\n' 'garbage-ref' "$PROJ" claude-code > "$RUN/spawn.team__alice"
+  printf '%s\t%s\t%s\n' 'garbage-ref' "$PROJ" claude-code > "$(_spawn_record_path team alice)"
 
   run bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -ne 0 ]
   grep -q "status=error" <<<"$output"
-  [ -f "$RUN/spawn.team__alice" ]                   # record KEPT
+  [ -f "$(_spawn_record_path team alice)" ]                   # record KEPT
 }
 
 @test "despawn --force: errors when there is no placement record" {
@@ -360,7 +360,7 @@ EOF
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
   setup_live_owner "$RUN" sess-m
-  printf 'sess-m\n' > "$RUN/actas.team__alice.session"   # held live, no watcher to act
+  printf 'sess-m\n' > "$(_actas_session_path team alice)"   # held live, no watcher to act
 
   run bash "$SCRIPTS/despawn.sh" team leader alice --timeout 2
   [ "$status" -eq 3 ]
@@ -408,12 +408,12 @@ EOF
   # there, and the deletion made the --force it advises impossible. A free lock WITH
   # a record must NOT report ok and must NOT delete the record.
   bash "$SCRIPTS/join.sh" team alice cursor "$PROJ" >/dev/null
-  printf '%s\t%s\t%s\n' 'tmux:%99' "$PROJ" cursor > "$RUN/spawn.team__alice"
+  printf '%s\t%s\t%s\n' 'tmux:%99' "$PROJ" cursor > "$(_spawn_record_path team alice)"
   run bash "$SCRIPTS/despawn.sh" team leader alice
   [ "$status" -ne 0 ]
   grep -q "needs-force" <<<"$output"
   refute grep -q "status=ok" <<<"$output"
-  [ -f "$RUN/spawn.team__alice" ]              # record KEPT so --force can use it
+  [ -f "$(_spawn_record_path team alice)" ]              # record KEPT so --force can use it
   # ...and --force then works against the preserved record (teardown confirmed).
   _stub_tmux_exit 0
   run bash "$SCRIPTS/despawn.sh" team leader alice --force
@@ -424,8 +424,8 @@ EOF
 @test "despawn --force: kills a herdr: placement via herdr pane close" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   # Record a herdr-tagged placement (herdr: scheme prefix).
-  printf 'herdr:wC:p99\t%s\tclaude-code\n' "$PROJ" > "$RUN/spawn.team__alice"
-  printf 'somesid\n' > "$RUN/actas.team__alice.session"
+  printf 'herdr:wC:p99\t%s\tclaude-code\n' "$PROJ" > "$(_spawn_record_path team alice)"
+  printf 'somesid\n' > "$(_actas_session_path team alice)"
 
   # Stub herdr so we can assert the pane close call without touching real herdr.
   local stub_bin="$TEST_SKILL_DIR/stub-bin"
@@ -441,7 +441,7 @@ STUB
   run env PATH="$stub_bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
   [[ "$output" == *"status=forced"* ]]
-  [ ! -f "$RUN/spawn.team__alice" ]
+  [ ! -f "$(_spawn_record_path team alice)" ]
   # herdr was called with "pane close wC:p99" (prefix stripped).
   grep -q "pane close wC:p99" "$HERDR_CALL_LOG"
 }
@@ -509,8 +509,8 @@ _despawn_member_with_env() {   # <bindir> <env assignments...>
     >"$RUN/watch.out" 2>"$RUN/watch.err" 3>&- &
   WPID=$!
   local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
-  [ -e "$RUN/ready.team__alice" ]
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$(_ready_path team alice)" ] && break; sleep 0.5; done
+  [ -e "$(_ready_path team alice)" ]
 
   # The stub is the terminal for the CALLER too, not only for the watcher. The
   # caller asks the terminal whether the pane is still there (#1051), and without

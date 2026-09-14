@@ -819,7 +819,15 @@ fi
 if [ -n "$ACTIVE_NAME" ]; then
   while IFS=$'\t' read -r _rt _ra; do
     [ -z "$_rt" ] && continue
-    _rp="$(agmsg_ready_path "$_rt" "$_ra")"
+    # #1023 review: agmsg_ready_path fails (empty, rc 1) when both an
+    # id-keyed and a legacy sentinel exist for this pair. Checked explicitly
+    # -- an unchecked empty path here would silently drop the sentinel write
+    # (the redirect below fails quietly against ""), and a spawn.sh waiter
+    # would then just see a plain, unexplained status=timeout.
+    if ! _rp="$(agmsg_ready_path "$_rt" "$_ra")"; then
+      watch_log "warning: readiness sentinel path is ambiguous for '$_rt/$_ra' (both an id-keyed and a legacy sentinel exist); not signaling ready for this pair until the stale one is removed"
+      continue
+    fi
     # Stamp our session_id so cleanup (and a successor watcher) can tell whose
     # sentinel it is — keeps "present iff a live watcher is receiving" honest
     # across a quick actas restart. See #108 review.
