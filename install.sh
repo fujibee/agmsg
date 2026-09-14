@@ -103,7 +103,7 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # cursor) that had already drifted from the other two -- re-detecting one of
 # those three types as "codex" and then, via the template pick, overwriting
 # the SKILL.md the installer itself had written with the wrong flavor.
-AGMSG_SHARED_SKILL_TPL_TYPES="gemini antigravity opencode hermes cursor grok-build"
+AGMSG_SHARED_SKILL_TPL_TYPES="gemini antigravity opencode hermes cursor grok-build devin"
 
 # Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by
 # <dest>, so the fix's scope matches the defect's (#747):
@@ -239,7 +239,7 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --cmd <name>      Command & skill folder name (default: agmsg)"
       echo "                    Claude Code: /<cmd>, Codex/Gemini/Antigravity: \$<cmd>"
-      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity, opencode, hermes, cursor, grok-build"
+      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity, opencode, hermes, cursor, grok-build, devin"
       echo "                    Selects which template becomes SKILL.md (matches the"
       echo "                    <type> arg passed to join.sh / whoami.sh)"
       echo "  --update          Update skill scripts only (preserve DB and teams)"
