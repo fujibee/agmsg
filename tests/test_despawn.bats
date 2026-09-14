@@ -320,7 +320,7 @@ EOF
 }
 
 @test "despawn: a free lock WITH a placement record does not report ok or delete the record (#625)" {
-  # A monitor=no member (cursor) never holds an actas lock, so the graceful path
+  # A readiness_sentinel=no member (cursor) never holds an actas lock, so the graceful path
   # lands in `free` on every despawn. The old code read that as "gone", deleted the
   # placement record and reported status=ok — while the pane/process were still
   # there, and the deletion made the --force it advises impossible. A free lock WITH

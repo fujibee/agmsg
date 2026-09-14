@@ -59,7 +59,7 @@ bash scripts/drivers/types/antigravity/antigravity-monitor.sh \
 | busy/idle | turn/thread 通知、watchdog | 入力投入後から result までを busy とする |
 | 起動監督 | `codex-bridge-launcher.sh` | 小さな専用 launcher と bridge 内の再起動方針。Codex launcher 全体は複製しない |
 | 本文取得 | inline モードは `inbox.sh` を turn/start 前に呼ぶ | 未読取得と既読確定を分離する。既存 inbox の意味は変更しない |
-| Monitor 能力 | Codex も manifest 上は `monitor=no` | native Monitor は無いため `monitor=no` を維持する |
+| Monitor 能力 | Codex も manifest 上は `readiness_sentinel=no`（#1214 改名前は `monitor=no`） | native Monitor は無いため `readiness_sentinel=no` を維持する |
 
 参照コードは `scripts/drivers/types/codex/{codex-monitor.sh,codex-bridge.js,codex-bridge-launcher.sh,watch-once.sh,eligible-pairs.sh}`。
 Codex の RPC、thread 探索、TUI 接続、process/spawn は流用しない。
@@ -200,7 +200,7 @@ mode切替の停止処理が完了しなければ、その失敗を表示し tur
 
 `delivery_modes=monitor turn off` を追加する。
 `both` は初期版で提供しない。
-`monitor=no` は native Monitor がない事実と spawn の ready 待ち判定に使われているため維持する。
+`readiness_sentinel=no`（#1214 改名前は `monitor=no`）は native Monitor がない事実と spawn の ready 待ち判定に使われているため維持する。
 
 | 操作 | 設計する挙動 |
 |---|---|

@@ -280,6 +280,25 @@ EOF
   [ "$(g opencode detect_proc)" = "opencode opencode-*" ]
 }
 
+@test "type-registry: no manifest key is named 'monitor' -- delivery_modes alone answers mode support (#1214)" {
+  # A bare `monitor=` key read as a statement about the delivery MODE, colliding
+  # with `delivery_modes=monitor` (a type can carry both: no in-session Monitor
+  # TOOL and a real, settable monitor MODE at once -- codex is exactly this).
+  # Renamed to readiness_sentinel=; this pins the rename so the confusing name
+  # cannot come back on a new or edited manifest.
+  run grep -rl '^monitor=' "$SCRIPTS/drivers/types"/*/type.conf
+  [ -z "$output" ]
+}
+
+@test "type-registry: readiness_sentinel is readable and distinct from delivery_modes' own 'monitor' (#1214)" {
+  g() { env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get $1 $2"; }
+  # codex: no spawn-time handshake to await, but monitor IS a settable delivery
+  # mode -- the exact combination the old shared name could not express.
+  [ "$(g codex readiness_sentinel)" = no ]
+  [ "$(g claude-code readiness_sentinel)" = yes ]
+  case "$(g codex delivery_modes)" in *monitor*) : ;; *) return 1 ;; esac
+}
+
 @test "type-registry: session identity is a dedicated per-type datum, not inferred from detect" {
   g() { env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get $1 session_env"; }
   [ "$(g claude-code)" = "CLAUDE_CODE_SESSION_ID" ]

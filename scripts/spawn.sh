@@ -874,14 +874,29 @@ place_and_launch() {
 # receiving. Block until that appears so the leader doesn't send a job into the
 # cold-start window (before the watcher attaches) and lose it.
 #
-# Types with `monitor=no` do not produce a spawn-awaitable readiness sentinel, so
-# skip the wait. That covers types with no Monitor at all (codex) AND types whose
-# watcher attaches via the agent's own launch rather than a spawn-time sentinel
-# (grok-build, whose monitor mode is real but not awaitable here) — receive there
-# is poll-based or agent-launched anyway.
+# Types with `readiness_sentinel=no` do not produce a spawn-awaitable readiness
+# sentinel, so skip the wait. That covers types with no Monitor at all (codex)
+# AND types whose watcher attaches via the agent's own launch rather than a
+# spawn-time sentinel (grok-build, whose monitor mode is real but not awaitable
+# here) — receive there is poll-based or agent-launched anyway.
+#
+# NOT named `monitor=`: that name reads as a statement about delivery-mode
+# support and collided with `delivery_modes=monitor` in agents' own reports
+# (#1214) — a type can carry `delivery_modes=monitor` (a real, settable mode)
+# and `readiness_sentinel=no` (no spawn-time handshake to await) at once, and
+# `delivery_modes` alone answers "can this type be set to monitor mode".
+# Backward compat: an already-installed type.conf from before this rename
+# still carries only the bare `monitor=` key. readiness_sentinel
+# reading empty must not silently behave as "yes" (wait) for such a manifest
+# -- fall back to the legacy key so an old no-handshake manifest (codex)
+# still skips the wait instead of timing out. A manifest carrying BOTH (the
+# migration window) prefers the new key.
+READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" readiness_sentinel 2>/dev/null || true)"
+[ -n "$READINESS_SENTINEL" ] || READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" monitor 2>/dev/null || true)"
+
 READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")"
 SKIPPED_READINESS_BY_TYPE=0
-if [ "$(agmsg_type_get "$AGENT_TYPE" monitor)" = "no" ] && [ "$WAIT_READY" = "1" ]; then
+if [ "$READINESS_SENTINEL" = "no" ] && [ "$WAIT_READY" = "1" ]; then
   WAIT_READY=0
   SKIPPED_READINESS_BY_TYPE=1
   echo "spawn: '$AGENT_TYPE' has no spawn readiness handshake — skipping readiness wait (--no-wait implied)" >&2
