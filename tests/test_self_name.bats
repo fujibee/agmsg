@@ -508,6 +508,12 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   [ "$(_terminal_calls)" -eq 0 ]
 }
 
+@test "AGMSG_SELF_NAME=off never invokes an inherited herdr terminal" {
+  _install_fake_herdr; _under_herdr w1:p3
+  AGMSG_SELF_NAME=off agmsg_self_name_on_action team alice
+  [ "$(_terminal_calls)" -eq 0 ]
+}
+
 @test "the record writer keeps the mark, and the mark writer keeps the record" {
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/role-session.sh"

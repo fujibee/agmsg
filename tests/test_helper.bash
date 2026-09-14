@@ -12,6 +12,13 @@
 # setup_test_env. A file that deliberately exercises the switch itself
 # (test_self_name.bats, test_self_rename.bats) unsets this right after
 # loading -- that is a local, visible override, not a gap in this default.
+# Hard safety boundary: a test that opts back into self-naming must first install
+# a fake terminal. Clear every ambient terminal marker while this helper loads,
+# before any suite-level setup or test body can unset AGMSG_SELF_NAME. Tests that
+# deliberately model a real terminal restore these variables explicitly, using
+# a fake driver or a documented fixture socket.
+unset TMUX TMUX_PANE
+unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION
 export AGMSG_SELF_NAME=off
 
 setup_test_env() {
