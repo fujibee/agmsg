@@ -240,6 +240,7 @@ function sendFrame(socket, value) {
 
 function handleMessage(socket, message) {
   fs.appendFileSync(log, `${message.method}\n`);
+  if (message.method === "process/spawn") fs.appendFileSync(log, `${JSON.stringify(message.params.command)}\n`);
   if (message.method === "initialize") {
     sendFrame(socket, { jsonrpc: "2.0", id: message.id, result: {} });
   } else if (message.method === "thread/resume") {
@@ -343,7 +344,8 @@ EOF
 
   run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-existing \
-    --app-server "unix://$sock" --timeout 1 --interval 1 --max-wakes 1
+    --app-server "unix://$sock" --timeout 1 --interval 1 --max-wakes 1 \
+    --owner codex-session.12345
 
   kill "$server_pid" 2>/dev/null || true
 
@@ -353,6 +355,7 @@ EOF
   grep -q "initialize" "$log"
   grep -q "thread/resume" "$log"
   grep -q "process/spawn" "$log"
+  grep -q "codex-session.12345" "$log"
   grep -q "turn/start" "$log"
 }
 

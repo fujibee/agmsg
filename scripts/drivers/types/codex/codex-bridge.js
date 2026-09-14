@@ -43,6 +43,7 @@ Options:
   --name <agent>          Limit wakeups to one agent name.
   --timeout <sec>         watch-once timeout before re-arming (default: 300).
   --interval <sec>        watch-once poll interval (default: 2).
+  --owner <id>            actas owner token used to retain this session's locks.
   --max-wakes <n>         Stop after n wakeups, useful for tests.
   --stale-wake-limit <n>  Stop after n repeated unchanged wakeups (default: 1).
   --connect-timeout-ms <ms>
@@ -199,6 +200,7 @@ function parseArgs(argv) {
     pairs: [],
     workspaceRoots: [],
     turnTimeout: Number(process.env.AGMSG_CODEX_BRIDGE_TURN_TIMEOUT || 60),
+    ownerId: process.env.AGMSG_CODEX_OWNER_ID || "",
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -227,6 +229,8 @@ function parseArgs(argv) {
       opts.timeout = Number(argv[++i]);
     } else if (arg === "--interval") {
       opts.interval = Number(argv[++i]);
+    } else if (arg === "--owner") {
+      opts.ownerId = argv[++i];
     } else if (arg === "--max-wakes") {
       opts.maxWakes = Number(argv[++i]);
     } else if (arg === "--stale-wake-limit") {
@@ -1307,6 +1311,7 @@ class CodexBridge {
       "--interval",
       String(this.opts.interval),
     ];
+    if (this.opts.ownerId) command.push("--owner", this.opts.ownerId);
     for (const pair of this.identities) command.push("--pair", `${pair.team}\t${pair.name}`);
     try {
       await this.client.request("process/spawn", {
@@ -1573,8 +1578,10 @@ class CodexBridge {
     // that *some* eligible identity woke; ownership can change before this
     // turn starts, so never let a stale bridge membership mark another
     // session's messages read.
-    const eligible = spawnSync(BASH_BIN, [path.join(SCRIPT_DIR, "eligible-pairs.sh"), toPosixPath(this.opts.project), this.opts.type,
-      ...this.identities.flatMap((pair) => ["--pair", `${pair.team}\t${pair.name}`])], { cwd: this.opts.project, encoding: "utf8" });
+    const eligibleArgs = [path.join(SCRIPT_DIR, "eligible-pairs.sh"), toPosixPath(this.opts.project), this.opts.type];
+    if (this.opts.ownerId) eligibleArgs.push("--owner", this.opts.ownerId);
+    eligibleArgs.push(...this.identities.flatMap((pair) => ["--pair", `${pair.team}\t${pair.name}`]));
+    const eligible = spawnSync(BASH_BIN, eligibleArgs, { cwd: this.opts.project, encoding: "utf8" });
     if (eligible.error || eligible.status !== 0) {
       console.error("codex-bridge: could not resolve eligible identities before reading inbox");
       return "";

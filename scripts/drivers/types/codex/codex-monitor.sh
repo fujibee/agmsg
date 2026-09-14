@@ -23,6 +23,10 @@ source "$SCRIPT_DIR/../../../lib/compat.sh"
 # _agmsg_pid_alive for the app-server reuse decision below.
 # shellcheck source=../../../lib/instance-id.sh
 source "$SCRIPT_DIR/../../../lib/instance-id.sh"
+# agmsg_instance_id uses the enclosing Codex process to form the same composite
+# owner token that actas-claim writes into the lock.
+# shellcheck source=../../../lib/resolve-project.sh
+source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 # agmsg_write_atomic: the port file is published, not just written — a reader
 # turns its contents into a URL, and a numeric PREFIX of a real port is itself
 # a valid port, so no reader-side check can tell a half-written file from a
@@ -237,6 +241,17 @@ if ! port_alive "$PORT"; then
   exec_plain_codex
 fi
 SOCKET_URL="ws://127.0.0.1:$PORT"
+
+# The bridge is detached from this shell, so carry the Codex session's actas
+# owner explicitly. A bare session id is not enough: parallel Codex processes
+# may share it, while the lock records the composite session-id.pid token.
+if [ -z "${AGMSG_CODEX_OWNER_ID:-}" ] && [ -n "${CODEX_SESSION_ID:-}" ]; then
+  owner_pid="$(cat "$SERVER_PID" 2>/dev/null || true)"
+  if _agmsg_pid_valid "$owner_pid"; then
+    AGMSG_CODEX_OWNER_ID="$(agmsg_instance_id_from_pid "$CODEX_SESSION_ID" "$owner_pid")"
+  fi
+fi
+export AGMSG_CODEX_OWNER_ID
 
 "$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null
 
