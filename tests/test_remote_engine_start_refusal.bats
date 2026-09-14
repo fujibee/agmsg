@@ -414,3 +414,65 @@ skip_if_root() {
 
   rmdir "$lock" 2>/dev/null || true
 }
+
+@test "sync start: readiness cleanup is bounded by the wall clock (#779)" {
+  # The readiness loop starts a status probe, tail, awk and sleep on every
+  # turn. Counting 1600 turns as sixteen seconds is only true when all of that
+  # work is free. Slow the argv and liveness probes: after the engine is ended,
+  # status reaches the latter rather than the former. The old attempt-only loop
+  # would then need about thirty seconds; the clock budget reaches cleanup in
+  # five.
+  local slow_bin="$TEST_SKILL_DIR/slow-status-bin"
+  mkdir -p "$slow_bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case " $* " in *" -o args= "*|*" -o stat= "*) sleep 0.1 ;; esac' \
+    'exec /bin/ps "$@"' > "$slow_bin/ps"
+  chmod +x "$slow_bin/ps"
+
+  local lock="$TEST_SKILL_DIR/teams/testteam/.config.lock"
+  local pidfile="$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+  local starter engine i=0 j=0 released=0 err="$TEST_SKILL_DIR/bounded.err"
+
+  # The clock budget is deliberately shorter than the 300-attempt ceiling can
+  # reach through the slow probe. The ceiling remains a finite fallback, so an
+  # implementation that drops the clock turns this into a bounded red test,
+  # not an unbounded CI hang.
+  env PATH="$slow_bin:$PATH" AGMSG_SYNC_READY_SECONDS=5 \
+    AGMSG_SYNC_READY_TRIES=300 AGMSG_LOCK_SECONDS=2 \
+    bash "$SCRIPTS/remote.sh" sync start testteam >"$err" 2>&1 &
+  starter=$!
+
+  while [ ! -f "$pidfile" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.05; done
+  [ -f "$pidfile" ]
+  engine="$(cat "$pidfile")"
+
+  # Handshake 1: the initial lock is released while this caller is polling.
+  # A free lock after it returns would prove nothing, so require the starter to
+  # still be alive at the same moment.
+  while [ "$j" -lt 100 ]; do
+    if [ ! -d "$lock" ] && kill -0 "$starter" 2>/dev/null; then released=1; break; fi
+    j=$((j + 1)); sleep 0.05
+  done
+  [ "$released" -eq 1 ]
+
+  # Handshake 2: an external holder owns the lock before the engine ends.
+  # Handshake 3 follows immediately: the next branch this starter can take is
+  # the timeout cleanup, which must now fail to retake that holder's lock.
+  mkdir "$lock"
+  kill "$engine" 2>/dev/null || true
+
+  # Assert the cleanup branch, not a fragile elapsed-time threshold. The
+  # helper's ten-second condition wait leaves headroom for a loaded runner;
+  # without the wall-clock bound the finite 300-attempt ceiling exceeds it.
+  if ! wait_for_file_contains "$err" 'could not retake the registry lock'; then
+    kill "$starter" 2>/dev/null || true
+    wait "$starter" 2>/dev/null || true
+    kill "$engine" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
+    false
+  fi
+
+  [ -f "$pidfile" ]
+  rmdir "$lock" 2>/dev/null || true
+  wait "$starter" 2>/dev/null || true
+}
