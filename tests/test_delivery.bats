@@ -1362,6 +1362,14 @@ EOF
   grep -q "check-inbox.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
 }
 
+@test "delivery set turn (gemini): rule file tells the agent to run where.sh, not guess its terminal" {
+  bash "$SCRIPTS/delivery.sh" set turn gemini "$TEST_PROJECT"
+  grep -q "where.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
+  grep -q "drivers/terminals/<terminal>/SKILL.md" "$TEST_PROJECT/.agent/rules/agmsg.md"
+  grep -q "team.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
+  grep -q "arrange.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
+}
+
 @test "delivery set off (gemini): removes rule file" {
   bash "$SCRIPTS/delivery.sh" set turn gemini "$TEST_PROJECT"
   [ -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
@@ -2336,6 +2344,18 @@ JSON
   grep -q "check-inbox.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md"
 }
 
+@test "opencode set turn: rule file tells the agent to run where.sh, not guess its terminal" {
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
+  grep -q "where.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md"
+  grep -q "team.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md"
+}
+
+@test "opencode set monitor: rule file also tells the agent to run where.sh, not guess its terminal" {
+  bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT"
+  grep -q "where.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md"
+  grep -q "team.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md"
+}
+
 @test "opencode supports off mode: removes rule file" {
   bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
   [ -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
@@ -2447,6 +2467,12 @@ JSON
   grep -q "check-inbox.sh" "$TEST_PROJECT/.cursor/rules/agmsg.mdc"
 }
 
+@test "cursor set turn: rule file tells the agent to run where.sh, not guess its terminal" {
+  bash "$SCRIPTS/delivery.sh" set turn cursor "$TEST_PROJECT"
+  grep -q "where.sh" "$TEST_PROJECT/.cursor/rules/agmsg.mdc"
+  grep -q "team.sh" "$TEST_PROJECT/.cursor/rules/agmsg.mdc"
+}
+
 @test "cursor rule file is an always-apply .mdc (Cursor CLI auto-load)" {
   bash "$SCRIPTS/delivery.sh" set turn cursor "$TEST_PROJECT" >/dev/null
   # First non-empty line opens the frontmatter; alwaysApply must be declared so
@@ -2512,6 +2538,20 @@ JSON
 @test "antigravity supports monitor mode: writes the monitor rule marker" {
   run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
   [ "$status" -eq 0 ]
+  grep -qF '<!-- agmsg:antigravity:monitor -->' "$TEST_PROJECT/.agent/rules/agmsg.md"
+}
+
+@test "antigravity migrates turn's own generated rule file to the monitor marker, never refusing it as foreign" {
+  # The migration path compares the existing file byte-for-byte against a
+  # hardcoded copy of what turn mode generates, to tell "our own file, safe to
+  # overwrite" from "someone's hand-written rules, must not clobber". The two
+  # copies (rulefile_apply's actual output and this driver's own hardcoded
+  # expectation) have to stay in lockstep by hand — this pins that they do.
+  bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  [ -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  refute grep -qF '既存rulefileはagmsg形式ではありません' <<<"$output"
   grep -qF '<!-- agmsg:antigravity:monitor -->' "$TEST_PROJECT/.agent/rules/agmsg.md"
 }
 
@@ -3065,6 +3105,12 @@ JSON
   [[ "$output" == *"$TEST_PROJECT"* ]]
 }
 
+@test "delivery set turn (grok-build): rule also tells the agent to run where.sh, not guess its terminal" {
+  bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
+  grep -q "where.sh" "$TEST_PROJECT/.grok/rules/agmsg.md"
+  grep -q "team.sh" "$TEST_PROJECT/.grok/rules/agmsg.md"
+}
+
 @test "delivery set off (grok-build): removes the rule file" {
   bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
   [ -f "$TEST_PROJECT/.grok/rules/agmsg.md" ]
@@ -3090,6 +3136,12 @@ JSON
   [[ "$output" == *"agmsg-delivery-mode: monitor"* ]]
   [[ "$output" == *"monitor"* ]]
   [[ "$output" == *"watch.sh"* ]]
+}
+
+@test "delivery set monitor (grok-build): rule also tells the agent to run where.sh, not guess its terminal" {
+  GROK_SESSION_ID="grok-sess-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
+  grep -q "where.sh" "$TEST_PROJECT/.grok/rules/agmsg.md"
+  grep -q "team.sh" "$TEST_PROJECT/.grok/rules/agmsg.md"
 }
 
 @test "delivery status (grok-build): reports monitor when the monitor rule is present" {

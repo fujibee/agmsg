@@ -23,6 +23,17 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   grep -qF 'distinguishes 11 from 12' "$ROOT/scripts/drivers/terminals/herdr/SKILL.md"
 }
 
+@test "SKILL.md tells the agent to run where.sh before answering terminal/pane questions or using arrange/peek/poke, not to guess" {
+  grep -qF 'run `where.sh`' "$ROOT/SKILL.md"
+  grep -qiF 'never infer the driver from environment variables or a' "$ROOT/SKILL.md"
+  grep -qF 'scripts/drivers/terminals/<terminal>/SKILL.md' "$ROOT/SKILL.md"
+}
+
+@test "SKILL.md points teammate questions at team.sh, and teammate actions at peek/poke/arrange, not a guess" {
+  grep -qF "team.sh" "$ROOT/SKILL.md"
+  grep -qF 'peek.sh`/`poke.sh`/`arrange.sh <team> <name>' "$ROOT/SKILL.md"
+}
+
 @test "SKILL.md points at capabilities and the per-driver file (#1082)" {
   grep -qF 'capabilities=<list>' "$ROOT/SKILL.md"
   grep -qF 'scripts/drivers/terminals/<terminal>/SKILL.md' "$ROOT/SKILL.md"

@@ -52,6 +52,8 @@ source "$SCRIPT_DIR/lib/role-session.sh"  # role->session reverse lookup (#339)
 # plug calls it inside a subshell around its own long-lived spawn, so this
 # shell's descriptors are untouched. See lib/close-fds.sh.
 source "$SCRIPT_DIR/lib/close-fds.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/terminal-context-line.sh"
 
 # Identity sanity check — no point launching a watcher with an empty pair set.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
@@ -91,6 +93,23 @@ fi
 [ -z "$SESSION_ID" ] && SESSION_ID="${GROK_SESSION_ID:-}"
 # Fallback so the instruction is still actionable even outside a hook flow.
 [ -z "$SESSION_ID" ] && SESSION_ID="unknown-$$"
+
+# One where.sh call, rendered once, reused by every text-emitting exit below —
+# so a session always learns its own terminal driver and capabilities as the
+# FIRST thing in its context, before any Monitor-tool instruction, rather than
+# having to guess from env vars/grep the way #1171's incident agent did.
+TERMINAL_LINE="$(agmsg_terminal_context_line "$SESSION_ID" "$SKILL_DIR" 2>/dev/null || true)"
+[ -n "$TERMINAL_LINE" ] || TERMINAL_LINE="AGMSG terminal: could not be determined (agmsg_terminal_context_line produced no output)"
+
+# Companion to TERMINAL_LINE: that line is this session's OWN placement;
+# teammates' placement is team.sh's question, not this hook's to compute and
+# print stale — a teammate can move between this session start and the moment
+# the reader acts on it. So this points at the live command rather than a
+# snapshotted answer. Deliberately does not claim team.sh's output already
+# states per-teammate peek/poke/arrange reachability -- as of this line, it
+# does not (that display is tracked separately); wording this makes true only
+# what team.sh actually shows today.
+TEAM_LINE="AGMSG team.sh <team>: shows every teammate's placement and status. To act on one, run peek.sh/poke.sh/arrange.sh <team> <name> directly — its exit code says whether it worked and why not (see each driver's own SKILL.md), so there is no need to guess reachability first."
 
 # --- Skip spawned worktree sub-sessions (.claude/worktrees checkouts). ---
 # Claude Code's background-task feature runs a short-lived sub-session in an
@@ -315,6 +334,8 @@ if [ -f "$WATCHER_PIDFILE" ]; then
   existing=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
   if [ -n "$existing" ] && _agmsg_pid_alive_local "$existing"; then
     cat <<EOF
+$TERMINAL_LINE
+$TEAM_LINE
 AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
 No action needed — the existing watcher is the active one.
 EOF
@@ -432,6 +453,8 @@ if [ -n "$ROLE_NAME" ]; then
     SEAT_CLAIM="no role record was found for this session, but it still owns that role's actas exclusivity lock — claimed by this seat and carried across the resume — which is taken to stand in for the record (so if that lock were stale, this seating would be too)"
   fi
   cat <<EOF
+$TERMINAL_LINE
+$TEAM_LINE
 AGMSG monitor mode (resumed role \`$ROLE_NAME\` in team \`$ROLE_TEAM\`):
 $SEAT_CLAIM, so invoke the Monitor tool now with the following parameters, before
 any other action in this session.
@@ -470,6 +493,8 @@ _pair_count="$(printf '%s\n' "$PAIRS" | grep -c '.' || true)"
 if [ "${_pair_count:-0}" -le 1 ]; then
   WATCH_COMMAND="$(printf '%q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE")"
   cat <<EOF
+$TERMINAL_LINE
+$TEAM_LINE
 AGMSG monitor mode: invoke the Monitor tool now with the following parameters,
 before any other action in this session.
 
@@ -496,6 +521,8 @@ fi
 # for silence.
 _seat_list="$(printf '%s\n' "$PAIRS" | awk -F'\t' 'NF>=2 && $2!="" {print "  - /agmsg actas "$2}')"
 cat <<EOF
+$TERMINAL_LINE
+$TEAM_LINE
 AGMSG monitor mode: standing down — no inbox watcher was started for this session.
 
 This resumed session could not be matched to a seat (no role-session record, and

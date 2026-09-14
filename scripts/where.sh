@@ -22,10 +22,13 @@ set -euo pipefail
 #   the caller does not have one.
 #
 # Output (stdout, one line, key=value):
-#   resolved=true placement=<terminal>:<id> container=<container> capabilities=<list>
-#     A real, addressable pane was identified. `container` is best-effort
-#     extra context (e.g. the window/tab it lives in); if the driver could
-#     not answer THAT sub-question, container names why
+#   resolved=true placement=<terminal>:<id> terminal=<terminal> container=<container> capabilities=<list>
+#     A real, addressable pane was identified. `terminal` names the resolved
+#     driver explicitly — not only as the prefix of `placement`, which a
+#     caller matching on `terminal=` by itself (as the no-pane branch below
+#     already lets it do) would otherwise have to parse out by hand. `container`
+#     is best-effort extra context (e.g. the window/tab it lives in); if the
+#     driver could not answer THAT sub-question, container names why
 #     (unknown:<reason>) — that failure is about the container lookup, not
 #     about whether this session has a pane, which is already settled.
 #   resolved=true placement=none reason=no_addressable_pane terminal=<name> capabilities=<list>
@@ -92,5 +95,5 @@ fi
 # whether this session has a pane, which the branch above already settled.
 location="$(agmsg_team_location "$terminal" "$id")"
 container="${location##*$'\t'}"
-printf 'resolved=true placement=%s:%s container=%s capabilities=%s\n' "$terminal" "$id" "$container" "$capabilities"
+printf 'resolved=true placement=%s:%s terminal=%s container=%s capabilities=%s\n' "$terminal" "$id" "$terminal" "$container" "$capabilities"
 exit 0
