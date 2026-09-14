@@ -23,13 +23,17 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   grep -qF 'distinguishes 11 from 12' "$ROOT/scripts/drivers/terminals/herdr/SKILL.md"
 }
 
-@test "SKILL.md points at capabilities and the per-driver file, and is measurably shorter (#1082)" {
+@test "SKILL.md points at capabilities and the per-driver file (#1082)" {
   grep -qF 'capabilities=<list>' "$ROOT/SKILL.md"
   grep -qF 'scripts/drivers/terminals/<terminal>/SKILL.md' "$ROOT/SKILL.md"
-  # Measured baseline immediately before this issue's changes: 25276 bytes.
-  local size
-  size="$(wc -c < "$ROOT/SKILL.md" | tr -d ' ')"
-  [ "$size" -lt 25276 ]
+  # The byte-count claim in #1082's own PR (measured against its own parent
+  # commit at the time: 26829 -> 26400) is a one-time migration fact, not
+  # something to pin here as a literal -- SKILL.md legitimately grows for
+  # unrelated reasons afterward (a later PR proved that: this exact assertion
+  # broke on rebase when #1194 added the no-name peek summary form). What
+  # stays true regardless of the file's size is that the per-verb detail this
+  # issue moved out does not come back in prose form -- pinned above and in
+  # the herdr-specific-detail test.
 }
 
 @test "every shipped terminal driver has its own SKILL.md, and it lists verbs from ITS OWN manifest only (#1082)" {
