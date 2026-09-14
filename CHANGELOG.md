@@ -7,11 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.3.0] - 2026-09-14
 
 ### Added
-- Terminal driver v1 (integration/terminal-driver-v1 into main) (#1240)
+- Terminal drivers for tmux, herdr, and plain OS terminal windows: `peek`, `poke`, and `arrange` work through whichever terminal a member runs in (#1014, #1060, #1078, #1163, #1207)
+- `peek` with no member name summarizes the screens of the whole local team (#1194)
+- `where` reports this session's terminal, its pane, and the operations that terminal supports; Claude Code sessions are told their terminal at start (#1082, #1173, #1224)
+- `team` shows, for each teammate, whether `peek`, `poke`, and `arrange` can reach it, and why not when they cannot (#1232)
+- `fix`: a session proves which pane it is running in and repairs only its own name and placement records (#1152, #1157, #1188, #1191, #1227)
+- A session names its own pane when it acts, and `spawn` names the pane it created and sets its agent key (#1065, #1080, #1099)
+- `send` accepts `--body-file <path>` and `--body -` (stdin) like `poke`, and refuses a body that looks like a flag (#1101)
+- Antigravity (`agy`): the skill is installed where `agy` discovers skills, and monitor delivery with safe automatic resume is available on Linux (#1090, #1223)
 - Report a mark-read that lost to a concurrent writer (#1011) (#1013)
 - Deliver the inbox mid-turn via a PostToolUse hook, not only at Stop (#1003) (#1004)
 
+### Changed
+- `team` is read-only: the leader-side repair options `--fix`, `--fix-pane-names`, and `--rename-sessions` are removed; each session repairs itself with `fix` (#1152, #1211, #1213)
+- actas lock, readiness, and spawn records are keyed by team and member id, so team or member names containing `__` no longer collide (#1023)
+- Agent type detection follows an explicit priority, and `GEMINI_API_KEY` on its own is only a last resort (#1247)
+- Per-driver notes live at `scripts/drivers/terminals/<driver>/README.md`; `install --update` removes the old `SKILL.md` copies (#1248)
+
 ### Fixed
+- Codex seats that hold an actas lock no longer drop out of their own bridge's delivery, and spawned seats do not inherit it (#1239, #1245)
+- Claude Code's `actas` and `drop` instructions again start the watcher through the Monitor tool and confirm it attached (#1237)
+- `spawn` skips the readiness wait only when delivery is explicitly off or turn (#647)
+- A graceful `despawn` waits for the pane to close, not only for the lock (#1097)
+- herdr socket paths containing `:` round-trip through placement records (#1166)
+- `watch` and `inbox` deliver a backlog past the argument-length limit instead of failing silently (#777, #1045)
+- `check-inbox` consumes rows only after the payload is written (#1026)
+- The Windows hook payload stays off the login shell's stdout (#1015)
+- Antigravity's delivery plug parses under bash 3.2 (#1244)
 - Pass non-remote subcommands through (#590)
 - The remaining argv-to-stdin sites, plus a Windows CRLF row-separator bug (#991)
 - Give the identity lease a start token on Windows (#978)
