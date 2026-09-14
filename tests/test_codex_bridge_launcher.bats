@@ -142,10 +142,10 @@ put_record() {
 }
 
 write_request() {
-  local thread="$1" hash
+  local thread="$1" app_server="${2:-ws://127.0.0.1:1}" hash
   hash=$(SKILL_DIR="$TEST_SKILL_DIR" bash -c \
     'source "$1/lib/hash.sh"; printf "%s" "$2" | agmsg_sha1' _ "$SCRIPTS" "$PROJ")
-  printf 'codex\t%s\tws://127.0.0.1:1\n' "$thread" > "$RUN_DIR/codex-bridge-request.$hash"
+  printf 'codex\t%s\t%s\n' "$thread" "$app_server" > "$RUN_DIR/codex-bridge-request.$hash"
 }
 
 # Drive the launcher against a short-lived parent, blocking until it exits. fd 3
@@ -203,6 +203,17 @@ run_launcher() {
   put_record team alice rec-thread-1 "$PROJ" codex
   run_launcher
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.thread" 2>/dev/null)" = "rec-thread-1" ]
+}
+
+@test "launcher: ignores a stale request app-server URL and binds to its live server" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  write_request old-request-thread ws://127.0.0.1:2
+  run_launcher
+
+  [ -f "$CAPTURE" ]
+  grep -q -- "--app-server ws://127.0.0.1:1" "$CAPTURE"
+  ! grep -q -- "--app-server ws://127.0.0.1:2" "$CAPTURE"
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver" 2>/dev/null)" = "ws://127.0.0.1:1" ]
 }
 
 @test "launcher: replaces a stale role pidfile with the spawned bridge pid" {
