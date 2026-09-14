@@ -2808,7 +2808,16 @@ cmd_sync_start() {
   # ready does not have to spend this command's real production wait
   # (measured ~1min+: the ceiling is counted in iterations, not time (#779),
   # and each turn spawns several processes) to prove the timeout path.
+  #
+  # Anything but a plain positive integer falls back to the production
+  # default rather than being trusted -- in particular an empty or zero
+  # value must NOT make the `while` below skip straight to "not ready": that
+  # would silently change this command's real behavior on a malformed
+  # environment, not just its test-only timing (the same reasoning that kept
+  # an env-var knob out of herdr's boot wait previously).
   local ready_ceiling="${AGMSG_TEST_SYNC_START_READY_CEILING:-1600}"
+  case "$ready_ceiling" in ''|*[!0-9]*) ready_ceiling=1600 ;; esac
+  [ "$ready_ceiling" -gt 0 ] || ready_ceiling=1600
   [ $# -eq 1 ] || { echo "Usage: remote.sh sync start <team>" >&2; exit 1; }
   agmsg_validate_team_name "$team" || exit 1
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
