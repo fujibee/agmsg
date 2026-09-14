@@ -24,6 +24,8 @@ teardown() { teardown_test_env; }
   grep -q 'placement=none' <<<"$output"
   grep -q 'reason=no_addressable_pane' <<<"$output"
   grep -q 'terminal=plain' <<<"$output"
+  # #1082: the manifest's own ceiling reaches the caller verbatim.
+  grep -q 'capabilities=spawn despawn peek poke' <<<"$output"
 }
 
 @test "where: herdr with a live HERDR_PANE_ID resolves to that pane, terminal name is diagnostic only" {
@@ -35,6 +37,8 @@ teardown() { teardown_test_env; }
   # container is best-effort context, never absent outright — its failure
   # (no herdr on PATH here) must say why, not just vanish.
   grep -q 'container=' <<<"$output"
+  # #1082: same ceiling, read from herdr's own terminal.conf.
+  grep -q 'capabilities=spawn despawn peek poke where arrange name' <<<"$output"
 }
 
 # --- the required RED control (#1171): present-but-unidentifiable must NOT
@@ -65,4 +69,41 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 1 ]
   grep -q '^resolved=false' <<<"$output"
   grep -q "tnux" <<<"$output"
+}
+
+# --- #1082 acceptance: a manifest capability reaches the caller with no doc
+# edit anywhere. "frobnicate" names nothing real on purpose — its only
+# possible source is this fixture's terminal.conf, never a hand-written
+# description that could have drifted from it.
+_install_fixture_capability_driver() {
+  local d="$TEST_SKILL_DIR/plugins/terminals/probe"
+  mkdir -p "$d" "$TEST_SKILL_DIR/db"
+  cat > "$d/terminal.conf" <<'EOF'
+name=probe
+priority=15
+backend=test probe
+capabilities=name frobnicate
+EOF
+  cat > "$d/ops.sh" <<'EOF'
+terminal_check() { echo ok; }
+terminal_describe() { echo name=probe; }
+terminal_detect() { printf 'probe-pane\n'; }
+terminal_spawn() { printf 'probe-spawned\n'; }
+terminal_despawn() { :; }
+terminal_pane_state() { echo present; }
+terminal_peek() { :; }
+terminal_poke() { :; }
+terminal_where() { echo probe-container; }
+terminal_arrange() { echo unchanged; }
+terminal_name() { :; }
+EOF
+  printf 'terminals/probe\t%s\n' "$d" > "$TEST_SKILL_DIR/db/trusted-plugins"
+}
+
+@test "where: a capability added to a fixture driver's manifest alone reaches the caller (#1082)" {
+  _install_fixture_capability_driver
+  run bash "$SCRIPTS/where.sh"
+  [ "$status" -eq 0 ]
+  grep -q 'placement=probe:probe-pane' <<<"$output"
+  grep -q 'capabilities=name frobnicate' <<<"$output"
 }
