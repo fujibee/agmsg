@@ -313,6 +313,35 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
 }
 
+@test "a hand-started seat's record carries project and type, not the two empty fields arrange.sh refuses (#1137)" {
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  # None of send.sh/inbox.sh/history.sh pass project or type -- this call
+  # shape (2 args) is exactly what they do.
+  [ -z "$(_placement team alice)" ]
+  agmsg_self_name_on_action team alice
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local rec ref project type
+  rec="$(agmsg_spawn_path team alice)"
+  [ -f "$rec" ]
+  IFS=$'\t' read -r ref project type < "$rec"
+  [ "$ref" = 'tmux:/tmp/s:%3' ]
+  [ -n "$project" ]
+  [ -n "$type" ]
+}
+
+@test "a caller that already supplies project and type is never second-guessed (#1137)" {
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  agmsg_self_name_on_action team alice /explicit/project explicit-type
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local rec ref project type
+  rec="$(agmsg_spawn_path team alice)"
+  IFS=$'\t' read -r ref project type < "$rec"
+  [ "$project" = /explicit/project ]
+  [ "$type" = explicit-type ]
+}
+
 @test "named once but never recorded: the next action writes the missing record (#1109)" {
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   # A mark-only prior naming (watch.sh names with five args, no record): the mark
