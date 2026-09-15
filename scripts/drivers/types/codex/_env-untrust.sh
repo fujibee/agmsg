@@ -87,12 +87,13 @@ agmsg_type_env_untrusted() {
   # SKILL_DIR, when a caller happens to have set it, is trusted as-is; most
   # callers of this hook (e.g. where.sh) do not, so this falls back to the
   # SAME root the driver/type registries themselves resolve from (this
-  # file's own path under scripts/drivers/types/<name>/, three levels below
-  # the skill root) -- not a second, competing notion of "the skill root",
-  # just not depending on an env var this hook cannot assume is set.
+  # file's own path under scripts/drivers/types/<name>/_env-untrust.sh,
+  # FOUR levels below the skill root: codex -> types -> drivers -> scripts
+  # -> root) -- not a second, competing notion of "the skill root", just
+  # not depending on an env var this hook cannot assume is set.
   skill_root="${SKILL_DIR:-}"
   if [ -z "$skill_root" ]; then
-    skill_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)"
+    skill_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." 2>/dev/null && pwd)"
   fi
   if ! declare -F agmsg_sha1 >/dev/null 2>&1 || [ -z "$skill_root" ]; then
     indeterminate=1

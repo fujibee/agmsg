@@ -19,6 +19,11 @@
 # a fake driver or a documented fixture socket.
 unset TMUX TMUX_PANE TMUX_TMPDIR
 unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
+# The developer's own agmsg-spawned session (this one, running the suite)
+# carries AGMSG_SPAWNED=1 -- a bats subshell inherits it same as any other
+# env var, so codex-monitor's fail-open-vs-fail-closed branch would silently
+# follow the DEVELOPER's own spawned-ness instead of what each test sets.
+unset AGMSG_SPAWNED
 export AGMSG_SELF_NAME=off
 
 setup_test_env() {
@@ -31,6 +36,7 @@ setup_test_env() {
   # fake on PATH. CI runners carry none of these, so nothing changes there.
   unset TMUX TMUX_PANE TMUX_TMPDIR
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
+  unset AGMSG_SPAWNED
   export TEST_SKILL_DIR="$(mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 

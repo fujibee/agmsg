@@ -95,6 +95,33 @@ _marker_for_pid() {   # <pid> -> "<pid>.<witness>", or empty if unreadable
   AGMSG_CODEX_SHARED_APP_SERVER="not-a-marker" run bash "$SCRIPTS/where.sh"
   [ "$status" -ne 0 ]
   grep -q '^resolved=false' <<<"$output"
+
+  # No marker at all (a server started before this fix): the project's own
+  # recorded app-server pidfile alone must still be enough, with NO
+  # SKILL_DIR set -- exactly where.sh's own real-world environment (#1261
+  # review: an earlier revision's SKILL_DIR fallback resolved one directory
+  # too shallow and never found this file, so this path silently read as
+  # trusted on every install upgraded from before this fix). The recorded
+  # pid must be a genuine ANCESTOR of the where.sh child below -- a sibling
+  # process is never found by the ancestry walk -- so this uses a fake
+  # "app-server" that launches where.sh as its own child, records its own
+  # pid (not where.sh's) to the pidfile, and stays alive (blocked on that
+  # child) for the whole call so its cmdline is still readable when
+  # where.sh's ancestry walk and cmdline check run.
+  local hash pidfile helper
+  hash="$(printf '%s' "$PWD" | (. "$SCRIPTS/lib/hash.sh"; agmsg_sha1))"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  pidfile="$TEST_SKILL_DIR/run/codex-app-server.$hash.pid"
+  helper="$TEST_SKILL_DIR/fake-app-server-wrapper.sh"
+  cat > "$helper" <<EOF
+#!/usr/bin/env bash
+printf '%s' "\$\$" > "$pidfile"
+env -u SKILL_DIR bash "$SCRIPTS/where.sh"
+exit \$?
+EOF
+  run bash -c "exec -a codex-app-server-fake bash '$helper'"
+  [ "$status" -ne 0 ]
+  grep -q '^resolved=false' <<<"$output"
 }
 
 @test "where: tmux with a live \$TMUX_PANE resolves to that pane, terminal=tmux is explicit" {

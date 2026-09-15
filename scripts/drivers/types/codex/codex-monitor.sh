@@ -211,10 +211,25 @@ if [ -z "$PORT" ]; then
   # app-server's own pid it is known before forking, so it can be exported
   # directly on this command's own env prefix -- `$!` and the redirects
   # below are therefore byte-for-byte what they were before this change.
-  _witness="$(ps -o lstart= -p $$ 2>/dev/null | tr -s '[:space:]' '_')"
+  # Computing the witness must never abort THIS script under set -e --
+  # `ps -o lstart=` and its exact output shape are not guaranteed portable
+  # (measured: Windows/Git Bash CI failed here with no output at all, the
+  # monitor dying mid-computation before ever launching the app-server).
+  # `|| _witness=""` catches a failing `ps`/`tr`; empty output alone (rc 0,
+  # nothing printed) is caught by the trim below leaving it empty too.
+  _witness=""
+  _witness="$(ps -o lstart= -p $$ 2>/dev/null | tr -s '[:space:]' '_')" || _witness=""
   _witness="${_witness#_}"; _witness="${_witness%_}"
-  AGMSG_CODEX_SHARED_APP_SERVER="$$.$_witness" \
+  if [ -n "$_witness" ]; then
+    AGMSG_CODEX_SHARED_APP_SERVER="$$.$_witness" \
+      "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SERVER_LOG" 2>&1 3>&- 4>&- &
+  else
+    # The witness could not be computed on this platform: launch WITHOUT
+    # the marker rather than stamping a malformed one. Detection still
+    # works -- the pidfile-based check (_env-untrust.sh) covers a server
+    # with no marker at all, exactly like one started before this fix.
     "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SERVER_LOG" 2>&1 3>&- 4>&- &
+  fi
   server_bg="$!"
   echo "$server_bg" > "$SERVER_PID"
   # codex 0.144+ colorizes this banner even when stdout is a redirected file
