@@ -228,6 +228,10 @@ PY
     > "$run_dir/read-reservation.foreign.json"
   printf '{"state":"%s/missing-neutral.json"}\n' "$run_dir" \
     > "$run_dir/read-reservation.missing.json"
+  printf '{"pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$$" "$state" \
+    > "$run_dir/antigravity-reservation.legacy-missing.json"
+  printf '{"type":null,"state":"%s/missing-invalid.json"}\n' "$run_dir" \
+    > "$run_dir/antigravity-reservation.legacy-invalid.json"
   printf '{"type":"antigravity","pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$$" "$state" \
     > "$run_dir/read-reservation.fixture__worker.json"
 

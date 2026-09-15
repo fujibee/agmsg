@@ -8,7 +8,7 @@ for(const name of fs.existsSync(run)?fs.readdirSync(run):[]) {
   if(!((name.startsWith('read-reservation.')||name.startsWith('antigravity-reservation.'))&&name.endsWith('.json')))continue;
   const legacy=name.startsWith('antigravity-reservation.');
   const r=read(path.join(run,name));
-  if(legacy ? r.type && r.type!=='antigravity' : r.type!=='antigravity')continue;
+  if(legacy ? (Object.prototype.hasOwnProperty.call(r,'type') && r.type!=='antigravity') : r.type!=='antigravity')continue;
   const s=read(r.state);
   if(s.project!==path.resolve(project))continue;
   // Only ENOENT proves that the monitor exited. Every other read failure must

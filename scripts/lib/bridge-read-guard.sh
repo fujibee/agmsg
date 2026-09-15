@@ -39,12 +39,14 @@ _agmsg_bridge_guard_reservation() {
 }
 
 _agmsg_bridge_guard_type() {
-  local reservation="$1" type
-  type="$(node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(typeof r.type!=="string") process.exit(2); process.stdout.write(r.type)' "$reservation" 2>/dev/null)" || {
-    case "$(basename "$reservation")" in
-      antigravity-reservation.*.json) type=antigravity ;;
-      *) return 1 ;;
-    esac
+  local reservation="$1" type rc
+  type="$(node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(!Object.prototype.hasOwnProperty.call(r,"type")) process.exit(3); if(typeof r.type!=="string") process.exit(4); process.stdout.write(r.type)' "$reservation" 2>/dev/null)" || {
+    rc=$?
+    if [ "$rc" -eq 3 ] && [[ "$(basename "$reservation")" == antigravity-reservation.*.json ]]; then
+      type=antigravity
+    else
+      return 1
+    fi
   }
   case "$type" in
     ''|*[!A-Za-z0-9_-]*) return 1 ;;
