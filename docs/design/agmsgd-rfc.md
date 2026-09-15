@@ -2,7 +2,7 @@
 
 This is an RFC: a request for comments on a design, not a decision record. Decisions land as ADRs as usual once settled — this is published first, so the shape can change while changing it is still cheap.
 
-It assumes the terminal driver release has landed: every joined agent's pane has a name, and two commands work against that name — `peek` (look at an agent's screen without switching to it) and `poke` (type a line into its pane). If you have that release, you have everything this note builds on.
+It assumes the terminal driver released in 1.3.0. What that release added underneath — and what this builds on — is **identity at the terminal layer**: a pane knows which agent occupies it, the same way under tmux and under herdr, and that binding is recorded, checkable and repairable. `peek`, `poke` and `arrange` are conveniences built on the same naming. They are not what a delivery daemon needs; what it needs is to resolve an addressee to a place, and that is what 1.3.0 made possible.
 
 ## What this buys you
 
@@ -105,7 +105,7 @@ Choosing *not* to fetch immediately is only viable if finding things later is ch
 
 For each delivery the daemon picks exactly one way to reach the recipient, based on where that session actually runs:
 
-1. Session runs under a pane manager the daemon can control — tmux, herdr, or the agmsg desktop app? The daemon **pokes the named pane**: it types the notification line into the agent's terminal, the same way you would. One mechanism, identical for every agent type.
+1. Session runs under a pane manager the daemon can control — tmux, herdr, or the agmsg desktop app? The daemon **writes the notification into that pane**, through the same terminal driver that knows which agent occupies which pane. One mechanism, identical for every agent type. This is not the `poke` command: that one is a convenience for an agent deliberately typing into another agent's pane, and the daemon is not an agent — it is delivering a message to its addressee, which happens to travel the same way.
 2. No pane manager? Fall back to what the tool itself offers: Claude Code has a channel a running session listens on; Codex takes deliveries at its hook points (see the Codex section).
 3. Both would work at once — say, herdr managing panes that also live in tmux? The daemon uses the one **you are actually looking at**, and only that one. A message never arrives twice through two channels.
 
@@ -209,7 +209,7 @@ Sub-commands keep working: starting and stopping sync for a team stays a thing y
 
 Real-time delivery to Codex today requires launching it through a wrapper script so that a helper process (the "bridge") can reach it. That wrapper is the single largest source of Codex-related bugs we have shipped — orphaned helper processes, respawn loops, races at launch — and it cannot work with the Codex desktop app at all, since the app controls its own launch.
 
-Under this proposal, Codex delivery uses two official mechanisms and nothing else: its hooks (end of turn, and after each tool call while a turn runs) and, when it runs in a managed pane, a poke like any other agent. **Neither changes how Codex starts.** The one situation left uncovered is a Codex session in a bare terminal — no tmux, no herdr — sitting idle: nothing fires a hook, and there is no pane to poke. For exactly that case the old bridge remains available as an opt-in fallback, and we expect to retire even that once we can verify whether Codex's own shared app-server daemon (new in recent Codex versions) lets an ordinarily-launched session be reached from outside.
+Under this proposal, Codex delivery uses two official mechanisms and nothing else: its hooks (end of turn, and after each tool call while a turn runs) and, when it runs in a managed pane, the same write into the pane that every other agent type receives. **Neither changes how Codex starts.** The one situation left uncovered is a Codex session in a bare terminal — no tmux, no herdr — sitting idle: nothing fires a hook, and there is no pane to poke. For exactly that case the old bridge remains available as an opt-in fallback, and we expect to retire even that once we can verify whether Codex's own shared app-server daemon (new in recent Codex versions) lets an ordinarily-launched session be reached from outside.
 
 The **Codex desktop app** is tracked as its own environment. Its sandboxing means an agent inside it cannot write the message database directly, so sends from inside the app go through a small hand-off: the agent writes a request file, the daemon applies it to the database, and the agent reports "sent" only after the daemon confirms — if the daemon is not there to confirm, the send fails with an explicit error instead of pretending. (Today the same situation fails silently, which is worse.) A few facts about the app are still unmeasured; this note will be updated as they land.
 
