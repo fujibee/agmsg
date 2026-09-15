@@ -26,6 +26,9 @@
 
 : "${SKILL_DIR:?actas-lock.sh requires SKILL_DIR}"
 
+# shellcheck disable=SC1091
+. "$SKILL_DIR/scripts/lib/name-encode.sh"
+
 # Owner tokens are per-process instance ids (see instance-id.sh), not bare
 # session_ids — this is what keeps parallel --continue/--resume sessions that
 # share a session_id from each appearing to own the other's locks (#93). The
@@ -149,24 +152,6 @@ _agmsg_id_or_legacy_path() {   # <id-path> <legacy-path>
   [ -e "$1" ] && { printf '%s\n' "$1"; return 0; }
   [ -e "$2" ] && { printf '%s\n' "$2"; return 0; }
   printf '%s\n' "$1"
-}
-
-# Encode a team or agent name into a filesystem-safe form. Anything outside
-# [A-Za-z0-9._-] is percent-encoded byte-by-byte (UTF-8 safe, reversible).
-# An earlier underscore-replacement scheme was lossy: "foo bar" and "foo_bar"
-# collided on the same lock file, as did every Japanese team name (every
-# non-ASCII byte mapped to "_"). #65 review, finding 2.
-_actas_lock_encode() {
-  printf '%s' "$1" | LC_ALL=C awk '
-    BEGIN { for (n = 0; n < 256; n++) ord[sprintf("%c", n)] = n }
-    {
-      for (i = 1; i <= length($0); i++) {
-        c = substr($0, i, 1)
-        if (c ~ /[A-Za-z0-9._\-]/) printf "%s", c
-        else printf "%%%02X", ord[c]
-      }
-    }
-  '
 }
 
 # Bridge _agmsg_id_key_for's 3-way rc (0 resolved / 1 no id / 2 undetermined)

@@ -8,8 +8,8 @@ action=run
 case "${1:-}" in
   status|stop|resume|reset-guard|ack|replay) action="$1"; shift ;;
 esac
-# Linux/macOS で動作します。Windows では POSIX のプロセス識別を同じ保証で提供できないため、
-# 起動後に止められない状態を作らないよう拒否します。
+# Linux and macOS are supported. Windows is refused because it cannot provide
+# equivalent POSIX process identity guarantees.
 case "$(uname -s)" in
   Linux|Darwin) ;;
   *) echo 'Antigravity TUI monitor requires POSIX process primitives; this host is unsupported' >&2; exit 1 ;;

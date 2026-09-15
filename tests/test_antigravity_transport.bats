@@ -224,8 +224,16 @@ PY
   # the loop skipped the reservation entirely -- the test passed through without
   # ever reaching the code it names. (Measured.)
   printf '{"project":"%s","team":"fixture","role":"worker"}\n' "$PROJ" > "$state"
+  printf '{"type":"codex","state":"%s/missing-foreign.json"}\n' "$run_dir" \
+    > "$run_dir/read-reservation.foreign.json"
+  printf '{"state":"%s/missing-neutral.json"}\n' "$run_dir" \
+    > "$run_dir/read-reservation.missing.json"
   printf '{"pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$$" "$state" \
-    > "$run_dir/antigravity-reservation.fixture__worker.json"
+    > "$run_dir/antigravity-reservation.legacy-missing.json"
+  printf '{"type":null,"state":"%s/missing-invalid.json"}\n' "$run_dir" \
+    > "$run_dir/antigravity-reservation.legacy-invalid.json"
+  printf '{"type":"antigravity","pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$$" "$state" \
+    > "$run_dir/read-reservation.fixture__worker.json"
 
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
   [ "$status" -eq 0 ]
@@ -235,7 +243,7 @@ PY
   # exits 13 either way -- so what changed is only what it says: "検査に失敗しました"
   # read the same whether the check failed or could never run on this host, and
   # the operator's next move differs. Exit 13 is left alone; callers branch on it.
-  run node "$SCRIPTS/lib/bridge-read-guard.mjs" check "$run_dir/antigravity-reservation.fixture__worker.json" 1 fixture worker
+  run node "$SCRIPTS/drivers/types/antigravity/bridge-read-guard.mjs" check "$run_dir/read-reservation.fixture__worker.json" 1 fixture worker
   [ "$status" -eq 13 ]
   refute grep -q 'unsupported' <<<"$output"
 }
@@ -246,8 +254,8 @@ PY
   printf '{"project":"%s","team":"fixture","role":"worker"}\n' "$PROJ" > "$state"
   # This path reaches a non-process object on Linux (ENOTDIR) and is malformed
   # input for the macOS helper; neither may be mistaken for an exited process.
-  printf '{"pid":"../../dev/null","start":"x","state":"%s","kind":"tui-pty"}\n' "$state" \
-    > "$run_dir/antigravity-reservation.unreadable.json"
+  printf '{"type":"antigravity","pid":"../../dev/null","start":"x","state":"%s","kind":"tui-pty"}\n' "$state" \
+    > "$run_dir/read-reservation.unreadable.json"
 
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
   [ "$status" -ne 0 ]
@@ -259,9 +267,26 @@ PY
   ( exit 0 ) &
   local gone_pid=$!
   wait "$gone_pid"
-  printf '{"pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$gone_pid" "$state" \
-    > "$run_dir/antigravity-reservation.unreadable.json"
+  printf '{"type":"antigravity","pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$gone_pid" "$state" \
+    > "$run_dir/read-reservation.unreadable.json"
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
   [ "$status" -eq 0 ]
   grep -q '停止/要確認' <<<"$output"
+}
+
+@test "a plain inbox read cannot consume messages while a reservation exists" {
+  bash "$SCRIPTS/join.sh" fixture sender antigravity "$PROJ" >/dev/null
+  bash "$SCRIPTS/send.sh" fixture sender worker 'held message' >/dev/null
+  printf '{"type":"antigravity","state":"%s"}\n' "$TEST_SKILL_DIR/run/missing-state.json" \
+    > "$TEST_SKILL_DIR/run/read-reservation.fixture__worker.json"
+  run bash "$SCRIPTS/inbox.sh" fixture worker
+  [ "$status" -eq 0 ]
+  grep -q 'failed to record read state' <<<"$output"
+  run bash "$SCRIPTS/inbox.sh" fixture worker
+  grep -q 'held message' <<<"$output"
+}
+
+@test "a non-Antigravity storage load does not source the Antigravity guard" {
+  run bash -c 'source "$1/lib/storage.sh"; agmsg_storage_load; ! declare -F agmsg_type_bridge_guard_check >/dev/null 2>&1' _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
 }

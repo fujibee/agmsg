@@ -18,7 +18,7 @@ function _requirePosix(what) {
     throw new PlatformUnsupported(`Antigravity ${what} requires POSIX process and lock primitives; this host (${process.platform}) is unsupported`);
   }
 }
-const darwinInfo=new URL('../drivers/types/antigravity/mac-process-info.py',import.meta.url).pathname;
+const darwinInfo=new URL('./mac-process-info.py',import.meta.url).pathname;
 function _darwinProc(pid) {
   const out=spawnSync('python3',[darwinInfo,String(pid)],{encoding:'utf8'});
   if(out.status===1) { const e=Error(`pid ${pid} を確認できません`);e.code='ENOENT';throw e; }
@@ -88,14 +88,14 @@ if(process.argv[2]==='check') {
       && fs.readFileSync(reservation.actas,'utf8').trim()===reservation.owner;
     if(authorized && violations(reservation.violations).length===0) process.exit(0);
     const row=JSON.stringify({event:'read-denied',pid:Number(pid)})+'\n';
-    // 入力は本文を含まない。書込みに失敗しても拒否を維持する。
+    // The input contains no message body; keep refusing even if this write fails.
     if(process.platform==='darwin') _darwinLocked(reservation.violations,row,true);
     else spawnSync('flock',['-w','3',`${reservation.violations}.lock`,'bash','-c','cat >> "$1"','guard',reservation.violations],{input:row});
     console.error('agmsg: bridgeが受領管理中のため既読化を拒否しました');
-  // 失敗の理由を1つだけ 分けます。exit 13(拒否)は変えません ---- 呼び出し側が 13 で分岐して
-  // いるのと、拒否側に倒すのは元から正しいためです。変えるのは**何と言うか**だけ:
-  // 「検査に失敗しました」は、このホストでは検査が原理的にできない場合にも同じ文言でした。
-  // 運用者の次の一手が違います(調べる vs このホストでは使えない)。(#1090 レビュー)
+  // Keep the refusal code 13 unchanged: callers already branch on it and
+  // fail-closed behavior is the existing contract. Only the diagnostic wording
+  // differs, because an inspection failure and an unsupported host need
+  // different operator actions. (#1090 review)
   } catch (e) {
     if (e instanceof PlatformUnsupported) console.error(`agmsg: ${e.message}`);
     else console.error('agmsg: bridge予約/認可の検査に失敗しました');

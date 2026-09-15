@@ -808,8 +808,12 @@ root = Path(tempfile.mkdtemp())
 (root / 'run').mkdir()
 state = root / 'run' / 'state.json'
 state.write_text(json.dumps({'project': '/tmp/project', 'team': 'fixture', 'role': 'worker'}))
-reservation = root / 'run' / 'antigravity-reservation.fixture.json'
-reservation.write_text(json.dumps({'pid': os.getpid(), 'start': 'start', 'state': str(state), 'kind': 'tui-pty'}))
+foreign = root / 'run' / 'read-reservation.foreign.json'
+foreign.write_text(json.dumps({'type': 'codex', 'state': str(root / 'missing-foreign-state.json')}))
+missing_type = root / 'run' / 'read-reservation.missing.json'
+missing_type.write_text(json.dumps({'state': str(root / 'missing-neutral-state.json')}))
+reservation = root / 'run' / 'read-reservation.fixture__worker.json'
+reservation.write_text(json.dumps({'type': 'antigravity', 'pid': os.getpid(), 'start': 'start', 'state': str(state), 'kind': 'tui-pty'}))
 module.ROOT = root
 def unreadable(_pid, _start):
     raise module.StartTimeUnreadable('synthetic read failure')

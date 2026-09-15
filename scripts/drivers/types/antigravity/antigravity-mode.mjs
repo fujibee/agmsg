@@ -1,12 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {read,proc,PlatformUnsupported} from '../../../lib/bridge-read-guard.mjs';
+import {read,proc,PlatformUnsupported} from './bridge-read-guard.mjs';
 const run=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../../../run');
 const [command,project]=process.argv.slice(2);
 for(const name of fs.existsSync(run)?fs.readdirSync(run):[]) {
-  if(!name.startsWith('antigravity-reservation.')||!name.endsWith('.json'))continue;
-  const r=read(path.join(run,name)),s=read(r.state);
+  if(!((name.startsWith('read-reservation.')||name.startsWith('antigravity-reservation.'))&&name.endsWith('.json')))continue;
+  const legacy=name.startsWith('antigravity-reservation.');
+  const r=read(path.join(run,name));
+  if(legacy ? (Object.prototype.hasOwnProperty.call(r,'type') && r.type!=='antigravity') : r.type!=='antigravity')continue;
+  const s=read(r.state);
   if(s.project!==path.resolve(project))continue;
   // Only ENOENT proves that the monitor exited. Every other read failure must
   // stay visible: an unreadable process must not be treated as a dead one.
