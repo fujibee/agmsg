@@ -1,14 +1,14 @@
 # Remote sync — the minimum
 
-**Status:** the design being built to. Not implemented yet.
+**Status:** current — this is the model the shipped remote path implements.
 
-This replaces the onboarding half of `device-pairing.md`, and the remote connect
-onboarding design that used to sit beside it — that document was about the
-hosted service, so it does not belong in this repository. Two further documents were removed rather than kept as
-history: `local-first-onboarding.md`, whose onboarding this document replaces,
-and `authentication-result-handoff.md`, a proposal for a seam this design does
-not have — see "No authentication" below for what it removes. Their reasoning
-is in the git history. Sync itself — Stage 1, read state,
+This replaced an earlier onboarding design, together with the remote connect
+design that used to sit beside it — that one was about the hosted service, so it
+does not belong in this repository. Two further documents were removed rather
+than kept as history: one whose onboarding this document replaces, and a
+proposal for an authentication seam this design does not have — see
+"No authentication" below for what it removes. Their reasoning, and the
+documents themselves, are in the git history. Sync itself — messages, read state,
 retention gaps, the envelope format — is unchanged and specified elsewhere.
 
 ## What a remote is

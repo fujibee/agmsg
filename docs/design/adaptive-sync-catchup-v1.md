@@ -1,9 +1,10 @@
-# Adaptive sync catch-up (design draft)
+# Adaptive sync catch-up
 
-Status: DRAFT for review. OSS-side; destination `integration/remote`.
-No wire-contract or schema change → no ADR (see adr-discipline); a design doc
-suffices. If the design later needs to touch `server/spec/v1.md`, that part
-gets its own ADR judgement.
+Status: current — implemented in `scripts/internal/remote-sync.mjs`, which
+names this document at the two-stage page policy and the saturation signal.
+No wire-contract or schema change, so no ADR (see adr-discipline); a design doc
+suffices. If a later change needs to touch `server/spec/v1.md`, that part gets
+its own ADR judgement.
 
 ## Problem
 

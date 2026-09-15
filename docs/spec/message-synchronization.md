@@ -1,21 +1,23 @@
-# Stage-1 local-first remote synchronization specification
+# Local-first message synchronization specification
 
-**Status:** dogfood specification
+**Status:** current
 **Last updated:** 2026-07-25
 
 The irreversible architectural decisions behind this contract are recorded in
-[ADR 0005: Remote synchronization contract](../../adr/ref/0005-remote-sync-contract.md).
+[ADR 0005: Remote synchronization contract](../adr/0005-remote-sync-contract.md).
 
 ## Context
 
 The storage-axis ABI in ADR 0003 covers local message storage and delivery. It
 does not define the crash boundaries needed to replicate a local-first store to
-the versioned HTTP API in `server/spec/v1.md`. Stage 1 adds polling push/pull for
-dogfood while keeping `storage_send` local and independent of network health.
+the versioned HTTP API in `server/spec/v1.md`. This specification adds polling
+push/pull of messages while keeping `storage_send` local and independent of
+network health. Synchronizing read state is a separate contract, specified in
+[read-state synchronization](read-state-synchronization.md).
 
 The HTTP engine and the storage driver have different responsibilities. The
-engine owns transport, authentication, capability and binding validation,
-policy evaluation, retry classification, and polling. The driver owns every
+engine owns transport, capability and binding validation, policy evaluation,
+retry classification, and polling. The driver owns every
 local durability transition. In particular, the engine must never receive a
 new wire ID or envelope that was not already committed locally, and it must
 never advance a cursor ahead of durable local state.
@@ -24,8 +26,8 @@ never advance a cursor ahead of durable local state.
 
 ### Optional synchronization extension
 
-A storage driver may advertise the Stage-1 extension and implement these four
-operations in addition to the ADR 0003 ABI:
+A storage driver may advertise the message-synchronization extension and
+implement these four operations in addition to the ADR 0003 ABI:
 
 ```text
 storage_sync_prepare_push <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit>
@@ -34,9 +36,19 @@ storage_sync_apply_pull <local-team> <server-instance-id> <remote-team-id> <prot
 storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit> [<page-after>]
 ```
 
-The SQLite driver is the Stage-1 implementation. Drivers that do not advertise
-the extension remain valid local-only drivers. Core must fail clearly rather
-than emulate these durability operations outside an unsupported driver.
+More than one driver implements it, and they need not implement the same
+subset: the four operations above sit behind the capability `stage1-sync`, while
+the recovery operation defined at the end of this document sits behind
+`stage1-resync`. Those two strings, and `stage2-read-state` in the read-state
+specification, are the names drivers already advertise; they are held fixed
+because an external driver advertises them too, and the numbers in them carry no
+meaning beyond telling the three capabilities apart. A driver advertises each
+capability separately, so the recovery operation is
+genuinely optional rather than optional in name — a client that asks for it
+where it is not advertised is refused for want of the capability, not left to
+discover a missing command. Drivers that advertise no extension remain valid
+local-only drivers. Core must fail clearly rather than emulate these durability
+operations outside an unsupported driver.
 
 The binding is keyed by immutable `server_instance_id`, the server's stable
 team/stream ID, and protocol version. Endpoint URL is deliberately absent: the
@@ -44,8 +56,9 @@ same server database may move without invalidating its cursors. A different
 instance at the same URL is a different binding. The local team name selects
 local messages but is not the remote stream identity.
 
-Binding arguments contain no credentials or other secrets. Authentication
-material remains inside the HTTP engine. Bulk records never use argv: all input
+Binding arguments contain no credentials or other secrets, and neither does the
+transport: the HTTP contract carries no per-request credential, so there is no
+authentication material for either side to hold. Bulk records never use argv: all input
 and output use UTF-8 JSONL, one complete JSON object per line, so message data is
 not exposed through `ps(1)` and is not bounded by `ARG_MAX`.
 
@@ -59,12 +72,12 @@ prevents a reused local position from inheriting stale remote state.
 
 The bundled JSONL driver realizes the same contract without a mutable sidecar
 database. `events.jsonl` is the single append journal for local events and sync
-state. Its Stage-1 local position is the byte offset immediately after the
+state. Its local synchronization position is the byte offset immediately after the
 originating top-level `message_sent` record, paired with a persistent file
 generation. This sync position is separate from the driver's ordinal delivery
 cursor.
 
-Every Stage-1 operation holds the existing `events.jsonl.lock`, reads a complete
+Every operation above holds the existing `events.jsonl.lock`, reads a complete
 snapshot through its locked EOF, folds the immutable state records, and appends
 at most one complete transition record with one append write followed by
 `fsync`. Reservation, acknowledgement, quarantine/import outcomes, and the
@@ -89,8 +102,7 @@ for an existing reservation.
 It contains the engine's validated envelope selection and capability limits,
 but no credentials. The ABI is cipher-neutral: the driver creates the canonical
 envelope selected by the binding configuration. `none` is the default profile.
-The optional `age-v1` profile defined in
-[`../spec/ref/age-v1-profile.md`](../../spec/ref/age-v1-profile.md) performs its
+The optional [`age-v1` profile](age-v1-profile.md) performs its
 encrypt-once operation at this same boundary. Prepare receives only the public
 recipient manifest; age identity files remain in the HTTP engine's open path
 and never cross the storage-driver boundary.
@@ -213,7 +225,7 @@ optional `stage1-resync` capability:
 storage_sync_resync       # operator-approved recovery after HTTP 410
 ```
 
-HTTP 410 remains terminal during normal Stage-1 polling. Only the explicit
+HTTP 410 remains terminal during ordinary polling. Only the explicit
 operator command defined by the retention-gap specification may transactionally record the unavailable
 gap and advance to an authenticated retention floor; the engine never resets a
 transport cursor automatically.
@@ -234,8 +246,8 @@ transport cursor automatically.
 
 ## References
 
-- [HTTP API v1](../../../server/spec/v1.md)
-- [ADR 0003: storage-axis ABI and scope](../../adr/0003-storage-axis-driver-abi-and-scope.md)
+- [HTTP API v1](../../server/spec/v1.md)
+- [ADR 0003: storage-axis ABI and scope](../adr/0003-storage-axis-driver-abi-and-scope.md)
 - [Retention-gap resynchronization](retention-gap-resynchronization.md)
-- [ADR 0005: Remote synchronization contract](../../adr/ref/0005-remote-sync-contract.md)
+- [ADR 0005: Remote synchronization contract](../adr/0005-remote-sync-contract.md)
 - Issue #441 (local-first cross-machine replication proposal)

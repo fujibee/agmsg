@@ -1,13 +1,13 @@
 # agmsg `age-v1` cipher profile
 
-**Status:** proposed (dogfood profile)
+**Status:** current
 **Profile identifier:** `age-v1`
 **Envelope version:** `1`
 
 This document pins the first encrypted envelope profile for the agmsg remote
 sync protocol. It extends the opaque envelope in
-[`server/spec/v1.md`](../../../server/spec/v1.md) without changing the HTTP message
-schema or the Stage-1 storage-driver durability boundary.
+[`server/spec/v1.md`](../../server/spec/v1.md) without changing the HTTP message
+schema or the storage-driver durability boundary.
 
 `age-v1` is a standard binary [age v1 file][age-format], encrypted to native
 X25519 age recipients. It deliberately does not define another AEAD layer or a
@@ -291,7 +291,7 @@ atomically; a durable wire-only or `sealing` state is forbidden. Concurrent
 sealers for one local message may do redundant work, but only the transaction
 winner becomes visible and all callers subsequently emit that winner.
 
-The Stage-1 H1 rule is absolute: every retry, reconciliation attempt, crash
+The H1 rule is absolute: every retry, reconciliation attempt, crash
 recovery, export, and compaction replay for that wire ID MUST reuse the exact
 `v`, `cipher`, `key_id`, and `blob`. A client MUST NOT re-encrypt or re-encode
 the same published wire ID, even to the same recipients. A regression test MUST
@@ -320,7 +320,7 @@ context byte strings. Comparing only hashes, individual fields, or a prefix is
 insufficient. Implementations MUST NOT project any message field before this
 comparison succeeds.
 
-Failures map to the Stage-1 durable quarantine layer as follows:
+Failures map to the durable quarantine layer as follows:
 
 | Condition | Durable state |
 |---|---|
@@ -357,7 +357,9 @@ by the HTTP v1 three-layer state model.
   protected with platform-appropriate file permissions. The reference client
   validates the exact native identity bytes and passes those same bytes to age
   over a private pipe, preventing a path substitution between validation and
-  open. HTTP bearer credentials and age identities are separate secrets.
+  open. The transport carries no secret of its own (see
+  [the HTTP API](../../server/spec/v1.md)), so an age identity is the only
+  secret on this path and reaching the server never substitutes for holding one.
 - The profile does not define padding. Team relationship, key epoch, age-file
   length, approximate recipient count and rotation pattern, server arrival
   time, traffic frequency, and sequence remain visible. A `key_id` is public
