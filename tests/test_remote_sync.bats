@@ -468,7 +468,7 @@ prepare_push() {
 }
 
 @test "Stage-2 sync exports exact reads across holes and applies remote frontier separately" {
-  local first second page ids second_local context prepared applied db
+  local first second page ids second_local context prepared applied db jq_real jq_count jq_stub_bin
   first=$(jq -nc '
     {type:"sync_pull_message",server_seq:"1",id:"550e8400-e29b-41d4-a716-446655440031",
      server_received_at:"2026-07-21T06:00:00.000000Z",
@@ -498,14 +498,53 @@ prepare_push() {
   [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_exact")|.wire_id')" = \
     550e8400-e29b-41d4-a716-446655440032 ]
 
+  # Runtime process-count control for #969: the page, not each record, owns the
+  # jq invocation. The wrapper delegates to the real jq so this same call also
+  # proves the parsed values still reach the storage operation.
+  jq_real="$(command -v jq)"
+  jq_count="$BATS_TEST_TMPDIR/read-apply-jq-count"
+  jq_stub_bin="$BATS_TEST_TMPDIR/read-apply-bin"
+  mkdir -p "$jq_stub_bin"
+  : > "$jq_count"
+  cat > "$jq_stub_bin/jq" <<'EOF'
+#!/usr/bin/env bash
+printf '1\n' >> "$READ_APPLY_JQ_COUNT"
+exec "$READ_APPLY_REAL_JQ" "$@"
+EOF
+  chmod +x "$jq_stub_bin/jq"
+  export READ_APPLY_REAL_JQ="$jq_real" READ_APPLY_JQ_COUNT="$jq_count"
+  PATH="$jq_stub_bin:$PATH"
   applied=$(printf '%s\n%s\n' \
     '{"type":"sync_read_snapshot","min_available_seq":"0","current_seq":"2"}' \
     '{"type":"sync_read_frontier","member_id":"018f3f7e-0000-7000-8000-000000000010","server_seq":"2"}' |
     storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(wc -l < "$jq_count" | tr -d ' ')" -eq 1 ]
   [ "$(printf '%s\n' "$applied" | jq -r '.member_count')" = 1 ]
   [ "$(storage_list_unread demo bob | jq -s 'length')" -eq 0 ]
   db=$(agmsg_db_path demo)
   [ "$(agmsg_sqlite "$db" "SELECT transport_cursor FROM sync_bindings;" | tr -d '\r')" = 2 ]
+}
+
+@test "read-state apply rejects a malformed record from the page parser (#969)" {
+  local input
+  input=$(printf '%s\n%s\n' \
+    '{"type":"sync_read_snapshot","min_available_seq":"0","current_seq":"2"}' \
+    'not-json')
+
+  run storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 <<< "$input"
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q 'record 2: not one JSON value on its line'
+}
+
+@test "read-state apply rejects U+0000 before shell framing can change it (#969)" {
+  local input
+  input=$(printf '%s\n%s\n' \
+    '{"type":"sync_read_snapshot","min_available_seq":"0","current_seq":"2"}' \
+    '{"type":"sync_read_frontier","member_id":"018f3f7e-0000-7000-8000-000000000010\u0000","server_seq":"2"}')
+
+  run storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1 <<< "$input"
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q 'record 2: field member_id contains U+0000'
 }
 
 @test "Stage-2 rename mismatch blocks remote frontier in either ordering" {
