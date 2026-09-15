@@ -56,11 +56,18 @@ function _isPlainDigitString(s) {
   }
   return true;
 }
+// Node's setTimeout treats a delay above this 32-bit signed-int ceiling (and
+// one that resolves to Infinity, which a long-enough all-digit string does)
+// as if it were 1ms, not "wait longer" -- a plain-digit-string check alone
+// passes both, so it is not enough on its own: it has to also stay inside the
+// range setTimeout itself honors, or a huge override does the opposite of
+// falling back to the production delay.
+const MAX_SET_TIMEOUT_MS = 2147483647;
 function _resolveWatchRearmMs() {
   const raw = process.env.AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS;
   if (raw === undefined || !_isPlainDigitString(raw)) return 5000;
   const n = Number(raw);
-  return n > 0 ? n : 5000;
+  return Number.isFinite(n) && n >= 1 && n <= MAX_SET_TIMEOUT_MS ? n : 5000;
 }
 const WATCH_REARM_MS = _resolveWatchRearmMs();
 

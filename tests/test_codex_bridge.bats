@@ -1883,33 +1883,47 @@ EOF
   run node -e 'const fs=require("fs"),net=require("net");const s=process.argv[1];try{fs.unlinkSync(s)}catch(_){}const sv=net.createServer();sv.on("error",()=>process.exit(2));sv.listen(s,()=>sv.close(()=>{try{fs.unlinkSync(s)}catch(_){}process.exit(0)}));' "$TEST_SKILL_DIR/probe5.sock"
   [ "$status" -eq 0 ] || skip "unix socket listen not available"
 
-  local fake="$TEST_SKILL_DIR/rearm-fake3.js" sock="$TEST_SKILL_DIR/rearm3.sock" flog="$TEST_SKILL_DIR/rearm3.log"
-  _write_rearm_fake "$fake"; : > "$flog"
-  node "$fake" "$sock" "$flog" 3>&- &
-  local server_pid="$!"
-  for _ in {1..50}; do [ -S "$sock" ] && break; sleep 0.1; done
+  local fake="$TEST_SKILL_DIR/rearm-fake3.js"
+  _write_rearm_fake "$fake"
 
-  # "abc" is not a plain-digit string, so a correct implementation falls back
-  # to the production 5000ms delay. An implementation that instead trusted it
-  # (Number("abc") is NaN, and setTimeout clamps a NaN delay to 0) would try
-  # to re-arm again almost immediately -- caught here without paying the full
-  # 5000ms: the 2s window below is comfortably past the SEPARATE 1000ms
-  # MIN_ARM_INTERVAL_MS floor every re-arm path is also subject to (so a
-  # broken zero-delay implementation cannot hide behind that floor and still
-  # look slow), and comfortably short of the 5000ms production delay.
-  AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=abc node "$TYPES/codex/codex-bridge.js" \
-    --project "$PROJ" --team team --name alice --thread thread-x \
-    --app-server "unix://$sock" --timeout 1 --interval 1 >/dev/null 2>&1 3>&- &
-  local bpid="$!"
+  # A plain-digit-string check alone is not enough: Node's setTimeout treats a
+  # delay above 2147483647 (its 32-bit signed-int ceiling) OR one that
+  # resolves to Infinity (a long enough all-digit string overflows a double)
+  # as if it were 1ms, not "wait longer" -- the opposite of falling back. Each
+  # case below defeats the check a different way: non-digit, digit-shaped but
+  # over the ceiling, and digit-shaped but so long it overflows to Infinity.
+  local huge_digits; huge_digits="$(printf '9%.0s' $(seq 1 400))"
+  local case_names=(non-digit over-ceiling digit-overflow)
+  local case_values=("abc" "2147483648" "$huge_digits")
+  local i case_name value sock flog server_pid bpid arms
+  for i in "${!case_names[@]}"; do
+    case_name="${case_names[$i]}"
+    value="${case_values[$i]}"
+    sock="$TEST_SKILL_DIR/rearm3-$i.sock"
+    flog="$TEST_SKILL_DIR/rearm3-$i.log"
+    node "$fake" "$sock" "$flog" 3>&- &
+    server_pid="$!"
+    for _ in {1..50}; do [ -S "$sock" ] && break; sleep 0.1; done
 
-  for _ in {1..50}; do [ -s "$flog" ] && break; sleep 0.1; done
-  [ -s "$flog" ]
-  sleep 2
-  kill "$bpid" 2>/dev/null || true; wait "$bpid" 2>/dev/null || true
-  kill "$server_pid" 2>/dev/null || true
+    # Caught without paying the full 5000ms: the 2s window below is
+    # comfortably past the SEPARATE 1000ms MIN_ARM_INTERVAL_MS floor every
+    # re-arm path is also subject to (so a broken near-zero-delay
+    # implementation cannot hide behind that floor and still look slow), and
+    # comfortably short of the 5000ms production delay.
+    AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS="$value" node "$TYPES/codex/codex-bridge.js" \
+      --project "$PROJ" --team team --name alice --thread thread-x \
+      --app-server "unix://$sock" --timeout 1 --interval 1 >/dev/null 2>&1 3>&- &
+    bpid="$!"
 
-  local arms; arms="$(grep -c ' arm ' "$flog")"
-  [ "$arms" -eq 1 ]
+    for _ in {1..50}; do [ -s "$flog" ] && break; sleep 0.1; done
+    [ -s "$flog" ] || { echo "case $case_name: no arm was ever logged" >&2; return 1; }
+    sleep 2
+    kill "$bpid" 2>/dev/null || true; wait "$bpid" 2>/dev/null || true
+    kill "$server_pid" 2>/dev/null || true
+
+    arms="$(grep -c ' arm ' "$flog")"
+    [ "$arms" -eq 1 ] || { echo "case $case_name: expected exactly 1 arm within the window, saw $arms (override was not rejected)" >&2; return 1; }
+  done
 }
 
 @test "codex-bridge: a flood of distinct wakes is rate-limited, not a re-arm storm (#936)" {
