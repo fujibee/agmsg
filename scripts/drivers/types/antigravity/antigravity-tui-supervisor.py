@@ -12,6 +12,9 @@ HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[3]
 TRANSPORT=str(HERE/'inbox-transport.sh')
 
+def encode_component(value):
+    return ''.join(chr(byte) if chr(byte).isalnum() and byte < 128 or chr(byte) in '._-' else f'%{byte:02X}' for byte in str(value).encode())
+
 def atomic(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp=path.with_name(path.name+f'.{os.getpid()}.tmp')
@@ -98,7 +101,7 @@ def process_still(pid, start):
         return False
 
 class TerminalScreen:
-    """Receipt判定に必要な範囲だけを扱うfail-closedなVT画面モデル。"""
+    """Fail-closed VT screen model limited to the range needed for receipt checks."""
     def __init__(self, rows, cols):
         self.rows=max(1,rows); self.cols=max(1,cols); self.cells=[[' ']*self.cols for _ in range(self.rows)]
         self.row=0; self.col=0; self.saved=(0,0); self.state='normal'; self.sequence=''; self.decoder=codecs.getincrementaldecoder('utf-8')('replace'); self.uncertain=False; self.uncertain_reason=None; self.alternate_screen=False
@@ -170,8 +173,8 @@ class TerminalScreen:
         elif final=='F': self.row=max(0,self.row-n); self.col=0
         elif final=='G': self.col=min(self.cols-1,n-1)
         elif final=='Z' and not body.startswith(('?','>','=')):
-            # CBT (Cursor Backward Tabulation)。agy 1.1.27 の Read 表示で出力する。
-            # DECST8C で初期化される既定の8列tab stopだけを扱う。
+            # CBT (Cursor Backward Tabulation) appears in agy 1.1.27 Read output.
+            # Handle only the default eight-column tab stops initialized by DECST8C.
             for _ in range(n): self.col=max(0,((max(1,self.col)-1)//8)*8)
         elif final in ('H','f'):
             self.row=min(self.rows-1,max(0,(p[0] or 1)-1)); self.col=min(self.cols-1,max(0,(p[1] if len(p)>1 else 1)-1))
@@ -198,11 +201,11 @@ class TerminalScreen:
         elif final=='s': self.saved=(self.row,self.col)
         elif final=='u' and not body.startswith(('?','>','=')): self.row,self.col=self.saved
         elif final in ('h','l') and body.startswith('?') and any(value in (47,1047,1049) for value in p):
-            # agy 1.1.27 は起動から終了までalternate screenを通常画面として使う。
-            # 切替時は旧画面を捨て、切替後の完全なidle描画を改めて要求する。
+            # agy 1.1.27 uses the alternate screen as the normal screen throughout.
+            # Discard the old screen on a switch and require a complete idle render again.
             self.alternate_screen=final=='h'; self.clear()
         elif final=='W' and body=='?5':
-            # DECST8C: tab stopを9列目から8列ごとへ戻す。上のCBT/HTの既定値と一致する。
+            # DECST8C restores tab stops from column nine every eight columns, matching CBT/HT defaults.
             pass
         elif final in ('m','h','l','p','q','t','u','~'): pass
         else:self.mark_uncertain(f'unsupported-csi:{body}{final}')
@@ -244,8 +247,8 @@ class TerminalScreen:
     def lines(self): return [''.join(line).rstrip() for line in self.cells]
     def _expected_end(self, expected):
         lines=self.lines()
-        # agy のレンダラは狭い端末で、論理的には一行のreceiptを物理行へ折り返す。
-        # UUIDを含むexpected全体との一致だけを認め、空行をまたいだ合成はしない。
+        # On narrow terminals agy's renderer wraps one logical receipt across physical rows.
+        # Require the complete expected value, including its UUID; do not join across blank rows.
         for start in range(len(lines)):
             joined=''
             for end in range(start,len(lines)):
@@ -260,12 +263,12 @@ class TerminalScreen:
         end=self._expected_end(expected)
         return None if end is None else '\n'.join(self.lines()[end+1:])
     def tail_with_prefix(self, prefix):
-        """画面末尾に収まる物理折返しだけを論理行として照合する。"""
+        """Match only physical wraps that fit at the bottom of the screen."""
         lines=self.lines(); end=len(lines)-1
         while end>=0 and not lines[end].strip(): end-=1
         if end<0:return None
-        # agy 1.1.27で観測したfooter本体とstatusは64セル以内。幅に応じて
-        # 必要な物理行数だけを使い、画面中程の本文へは到達しない。
+        # The agy 1.1.27 footer and status observed in practice fit within 64 cells.
+        # Use only the rows required by the width and never reach into the body.
         budget=max(3,(64+self.cols-1)//self.cols+1)
         logical=''
         for row in range(end,max(-1,end-budget),-1):
@@ -273,7 +276,7 @@ class TerminalScreen:
             if logical.startswith(prefix): return row,end
         return None
     def run_before_with_prefix(self, before, prefix):
-        """指定位置の直前3行だけを物理折返しから戻す。"""
+        """Reconstruct wraps from only the three physical rows before a position."""
         lines=self.lines(); end=before-1
         while end>=0 and not lines[end].strip(): end-=1
         if end<0:return None
@@ -289,9 +292,9 @@ class Supervisor:
         self.a=args; self.project=str(Path(args.project).absolute()); self.owner=f'{uuid.uuid4()}.{os.getpid()}'
         self.start=proc_start(os.getpid()); self.cap=uuid.uuid4().hex+uuid.uuid4().hex
         paths=self.call('paths').splitlines(); self.actas=Path(paths[0])
-        key=self.actas.name.removeprefix('actas.').removesuffix('.session')
+        key=f'{encode_component(args.team)}__{encode_component(args.name)}'
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
-        self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
+        self.reservation=ROOT/'run'/f'read-reservation.{key}.json'; self.legacy_reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':2,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'humanInputActive':False,'humanInputSawNonIdle':False,'durableAttention':False,'batch':None}
         self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.last_output=time.monotonic(); self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
         signal.signal(signal.SIGTERM, self.request_stop)
@@ -310,7 +313,7 @@ class Supervisor:
         if not already_paused:
             print('\r\n[agmsg] 人間の入力中は自動配送を保留します。空の入力待ちに戻れば自動再開します',file=sys.stderr)
     def permission_input_rejection_reason(self):
-        """許可UIならNone、そうでなければfail-closedな診断理由を返す。"""
+        """Return None for the permission UI, otherwise a fail-closed diagnostic reason."""
         screen=getattr(self,'screen',None)
         if not screen:return 'screen-missing'
         if screen.uncertain:return screen.uncertain_reason or 'screen-uncertain'
@@ -318,13 +321,13 @@ class Supervisor:
         if screen.decoder.getstate()[0]:return 'decoder-pending'
         visible=[line.strip() for line in screen.lines() if line.strip()]
         if not visible:return 'screen-empty'
-        # 受信本文に同じ語句があっても誤認しないよう、modal footer と直近の選択肢を同時に要求する。
+        # Require both the modal footer and nearby choices so message text cannot trigger a false match.
         footer=screen.tail_with_prefix('esc to cancel')
         if footer:
             nav=screen.run_before_with_prefix(footer[0], '↑/↓ Navigate · tab Amend')
             if nav is None:return 'permission-nav-missing'
-            # 長いcommand/選択肢は端末幅に応じて複数の物理行へ折り返される。
-            # footer直前のnavを終端に、最大16論理行相当だけを戻してmodal本文を復元する。
+            # Long commands and choices wrap to multiple physical rows at the terminal width.
+            # Reconstruct at most 16 logical rows ending at the navigation immediately before the footer.
             physical_budget=max(16,(1024+screen.cols-1)//screen.cols)
             start=max(0,nav[0]-physical_budget)
             modal=''.join(line.strip() for line in screen.lines()[start:nav[1]+1])
@@ -340,7 +343,7 @@ class Supervisor:
             return 'trust-body-incomplete'
         return 'permission-footer-missing'
     def permission_screen_diagnostic(self):
-        """許可UIの構造だけを返す。command本文など画面内容は記録しない。"""
+        """Return only permission-UI structure; never record command text or other screen content."""
         screen=getattr(self,'screen',None)
         if not screen:return 'screen=missing'
         lines=screen.lines()
@@ -367,10 +370,10 @@ class Supervisor:
         return (f'rows={screen.rows},cols={screen.cols},cursor={screen.row},{screen.col},'
                 f'positions={positions},raw_seen={raw_seen},tail=[{";".join(tail)}]')
     def permission_input_ready(self):
-        """実測済みの許可UIだけは、人間の確認入力をrelayできる。"""
+        """Relay human confirmation input only for a permission UI that was observed as valid."""
         return self.permission_input_rejection_reason() is None
     def allow_permission_input(self):
-        # 現在のbatchはreceiptを待つ。既存の耐久pauseは触らず、通常入力の一時保留だけを立てる。
+        # The current batch waits for its receipt; preserve durable pause and set only a temporary input pause.
         self.state['humanInputActive']=True; self.state['humanInputSawNonIdle']=True; self.human_idle_since=None; self.save()
         print('\r\n[agmsg] 許可UIへの人間入力をrelayしました。受領確認後、空の入力待ちに戻れば自動再開します',file=sys.stderr)
     @staticmethod
@@ -450,8 +453,10 @@ class Supervisor:
     def acquire(self):
         mode=Path(self.project)/'.agent/rules/agmsg.md'
         if not mode.exists() or '<!-- agmsg:antigravity:monitor -->' not in mode.read_text(): raise RuntimeError('monitor設定が必要')
-        if self.reservation.exists():
-            old=json.loads(self.reservation.read_text())
+        existing=[file for file in (self.reservation,self.legacy_reservation) if file.exists()]
+        if len(existing)>1: raise RuntimeError('複数の予約形式が存在します')
+        if existing:
+            old=json.loads(existing[0].read_text())
             # ValueError stays here: it is about the RECORD (a pid that is not a
             # number), not about the process. The "is it gone" question is
             # process_still's, once, and an unreadable /proc propagates out of
@@ -462,7 +467,7 @@ class Supervisor:
             if self.state_file.exists():
                 old_state=json.loads(self.state_file.read_text())
                 if old_state.get('batch') and old_state['batch'].get('phase')!='completed': raise RuntimeError(self.unresolved_batch_message(old_state))
-            self.reservation.unlink()
+            existing[0].unlink()
         if self.state_file.exists():
             saved=self.migrate_state(json.loads(self.state_file.read_text()))
             if any(saved.get(k)!=self.state[k] for k in ('project','team','role')): raise RuntimeError('state不一致')
@@ -473,8 +478,8 @@ class Supervisor:
     def claim_reservation(self):
         self.call('claim'); self.state['owner']=self.owner; self.save(); self.violations.parent.mkdir(mode=0o700,exist_ok=True)
         self.violations.touch(mode=0o600,exist_ok=True); Path(str(self.violations)+'.lock').touch(mode=0o600,exist_ok=True)
-        # bridge-read-guard は fd 3 から改行を除いた値をハッシュする。
-        atomic(self.reservation,{'owner':self.owner,'pid':os.getpid(),'start':self.start,'state':str(self.state_file),'actas':str(self.actas),'violations':str(self.violations),'capHash':hashlib.sha256(self.cap.encode()).hexdigest(),'kind':'tui-pty'})
+        # The bridge read guard hashes the value read from fd 3 without its newline.
+        atomic(self.reservation,{'type':'antigravity','owner':self.owner,'pid':os.getpid(),'start':self.start,'state':str(self.state_file),'actas':str(self.actas),'violations':str(self.violations),'capHash':hashlib.sha256(self.cap.encode()).hexdigest(),'kind':'tui-pty'})
         self.acquired=True
     def reset_guard(self):
         if not self.state_file.exists(): raise RuntimeError('復旧対象のstateがありません')
@@ -527,12 +532,12 @@ class Supervisor:
         return '\n'.join(out)
     @staticmethod
     def batch_contains_receipt(batch):
-        """本文の物理行をrendererと同じくstrip連結してreceipt偽装を拒否する。"""
+        """Reject forged receipts by joining stripped physical lines as the renderer does."""
         receipt=batch.get('receipt','')
         return bool(receipt) and any(receipt in ''.join(line.strip() for line in m.get('body','').splitlines()) for m in batch.get('messages',[]))
     @staticmethod
     def batch_contains_idle_signature(batch):
-        """本文がidle画面を模した場合、後続の自動注入を明示resumeまで止める。"""
+        """Pause later automatic injection until explicit resume when the body imitates an idle screen."""
         return any(re.search(r'(?m)^>\s*$\n\? for shortcuts\b', m.get('body','')) for m in batch.get('messages',[]))
     def inject(self):
         b=self.state['batch']; data=self.envelope(b).encode()
@@ -577,10 +582,10 @@ class Supervisor:
             chosen.append(m);size+=n
         if not chosen:return
         self.state['batch']={'id':str(uuid.uuid4()),'phase':'prepared','messages':chosen}; self.state['supervisorPhase']='PREPARED'; self.save()
-        # peek/save中の画面遷移や人間入力も、注入直前に再検査する。
+        # Recheck screen transitions and human input during peek/save immediately before injection.
         if self.injection_ready(): self.inject()
     def input_ready(self):
-        # footerだけでは許可画面や入力途中を区別できない。空の入力欄も要求する。
+        # A footer alone cannot distinguish a permission screen from an in-progress input; require an empty input field too.
         screen=getattr(self,'screen',None)
         if not screen or screen.uncertain or screen.state!='normal' or screen.decoder.getstate()[0]: return False
         last_output=getattr(self,'last_output',0)
@@ -589,8 +594,8 @@ class Supervisor:
         if footer is None:return False
         footer_text=''.join(line.strip() for line in screen.lines()[footer[0]:footer[1]+1])
         if ' ·' not in footer_text:return False
-        # 画面全体の本文ではなく、最下部footerと直上の入力領域だけを見る。
-        # 狭幅ではfooter右端のstatusが物理行折返しになる。
+        # Inspect only the bottom footer and the input area above it, not the whole body.
+        # On narrow terminals the footer's right-hand status wraps physically.
         before=[line.strip() for line in screen.lines()[:footer[0]] if line.strip()]
         while before and all(ch in '─━-' for ch in before[-1]): before.pop()
         return bool(before) and before[-1]=='>'
@@ -598,7 +603,7 @@ class Supervisor:
         if not self.input_ready(): return False
         master=getattr(self,'master',None)
         if master is None:return True
-        # 画面モデルへ未反映のchild出力、または未処理の人間入力があれば保留する。
+        # Defer when child output is not reflected in the screen model or human input is pending.
         readable,_,_=select.select([sys.stdin.fileno(),master],[],[],0)
         return not readable and self.input_ready()
     def update_human_input_state(self):
@@ -639,8 +644,8 @@ class Supervisor:
                                       else 'not-waiting-for-result')
             permission_before_read=permission_before_reason is None
             r,_,_=select.select([sys.stdin.fileno(),self.master],[],[],0.2)
-            # child描画と親入力が同時にreadyなら、画面モデルを先に最新化する。
-            # permission UIの末尾が未反映のまま確認入力を通常入力と誤判定しない。
+            # If child rendering and parent input are ready together, update the screen model first.
+            # This prevents an unreflected permission footer from being mistaken for normal input.
             if self.master in r:
                 data=os.read(self.master,65536)
                 if not data: self.fail('agy TUIが終了'); break
@@ -695,23 +700,24 @@ class Supervisor:
 
 def recover(a):
     s=Supervisor(a)
-    if not s.reservation.exists() or not s.state_file.exists(): raise RuntimeError('復旧対象の予約/stateがありません')
-    reservation=json.loads(s.reservation.read_text()); state=s.migrate_state(json.loads(s.state_file.read_text())); batch=state.get('batch')
+    reservation_file=next((file for file in (s.reservation,s.legacy_reservation) if file.exists()),None)
+    if reservation_file is None or not s.state_file.exists(): raise RuntimeError('復旧対象の予約/stateがありません')
+    reservation=json.loads(reservation_file.read_text()); state=s.migrate_state(json.loads(s.state_file.read_text())); batch=state.get('batch')
     try: live=process_still(int(reservation['pid']),reservation['start'])
     except ValueError: live=False
     if live: raise RuntimeError('復旧対象のsupervisorが稼働中です')
     if not batch or batch.get('id')!=a.batch: raise RuntimeError('復旧batch IDが一致しません')
     expected=sorted(a.confirm_ids or []); actual=sorted(m['id'] for m in batch.get('messages',[]))
     if expected!=actual: raise RuntimeError('復旧batchのID集合が一致しません')
-    s.state=state; s.state['durableAttention']=False; s.reservation.unlink(); s.violations.write_text('')
+    s.state=state; s.state['durableAttention']=False; reservation_file.unlink(); s.violations.write_text('')
     s.claim_reservation()
     try:
         if a.action=='ack':
             s.state['batch']['phase']='completed'; s.state['supervisorPhase']='ACK_PENDING'; s.save(); s.ack()
             print('復旧ackを完了しました')
         else:
-            # replayは新しいagy子プロセスへ明示的に再投入する操作なので、終了した
-            # 旧セッションの通常入力pauseだけは持ち越さない。耐久manual pauseは別軸。
+            # Replay explicitly sends the batch to a new agy child, so do not carry over the
+            # old session's temporary input pause. Durable manual pause is a separate axis.
             s.state['humanInputActive']=False; s.state['humanInputSawNonIdle']=False
             s.state['batch']['phase']='prepared'; s.state['supervisorPhase']='PREPARED'; s.save(); s.launch(); s.loop()
     finally:
@@ -730,10 +736,11 @@ def main():
     if a.action in ('status','stop','resume'):
         matches=[]
         try:
-            for file in (ROOT/'run').glob('antigravity-reservation.*.json'):
+            files=list((ROOT/'run').glob('read-reservation.*.json'))+list((ROOT/'run').glob('antigravity-reservation.*.json'))
+            for file in files:
                 try:
                     reservation=json.loads(file.read_text()); state=json.loads(Path(reservation['state']).read_text())
-                    if state.get('project')!=str(Path(a.project).absolute()) or state.get('team')!=a.team or state.get('role')!=a.name or reservation.get('kind')!='tui-pty': continue
+                    if reservation.get('type','antigravity')!='antigravity' or state.get('project')!=str(Path(a.project).absolute()) or state.get('team')!=a.team or state.get('role')!=a.name or reservation.get('kind')!='tui-pty': continue
                     live=False
                     try: live=process_still(int(reservation['pid']),reservation['start'])
                     except FileNotFoundError: live=False
@@ -773,8 +780,8 @@ def main():
     s=Supervisor(a)
     try:s.run()
     except Exception as e:
-        # acquire前の拒否は既存supervisorのstateを所有していない。初期stateを
-        # fail() で保存すると、保全すべき未解決batchをbatch=Noneで上書きする。
+        # A refusal before acquire does not own the existing supervisor state. Saving the initial
+        # state via fail() would overwrite a batch that must be preserved with batch=None.
         if s.acquired:s.fail(str(e))
         else:print(str(e),file=sys.stderr)
         sys.exit(1)

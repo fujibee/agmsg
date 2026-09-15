@@ -808,7 +808,7 @@ root = Path(tempfile.mkdtemp())
 (root / 'run').mkdir()
 state = root / 'run' / 'state.json'
 state.write_text(json.dumps({'project': '/tmp/project', 'team': 'fixture', 'role': 'worker'}))
-reservation = root / 'run' / 'antigravity-reservation.fixture.json'
+reservation = root / 'run' / 'read-reservation.fixture__worker.json'
 reservation.write_text(json.dumps({'pid': os.getpid(), 'start': 'start', 'state': str(state), 'kind': 'tui-pty'}))
 module.ROOT = root
 def unreadable(_pid, _start):
