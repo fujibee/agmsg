@@ -29,83 +29,6 @@ const BASH_BIN = process.env.GIT_BASH || process.env.AGMSG_BASH || "bash";
 // #906 incident saturated a per-user pid limit with. A rate, not a poll cadence.
 const MIN_ARM_INTERVAL_MS = 1000;
 
-// Delay before re-arming watch-once after a FAILED run (a clean deadline exit
-// re-arms immediately; this is the failure-path backoff only). Production
-// default 5000ms, unchanged. AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS lets a
-// test that drives several failure/re-arm cycles to prove a failure-count
-// behavior (not this delay's length) skip paying 5s per cycle. Anything but a
-// plain positive integer falls back to the production default rather than
-// being trusted, the same reasoning as remote.sh's
-// AGMSG_TEST_SYNC_START_READY_CEILING (#1252): an empty or malformed value
-// must not silently change real re-arm timing.
-//
-// Digit check by literal character comparison, not a regex character class --
-// same reasoning as remote.sh's _remote_ceiling_is_plain_digits: keeps the
-// check's own alphabet fixed regardless of engine/locale quirks, rather than
-// trusting whatever a class like \d resolves to.
-function _isPlainDigitString(s) {
-  const digits = "0123456789";
-  if (typeof s !== "string" || s.length === 0) return false;
-  for (let i = 0; i < s.length; i += 1) {
-    const c = s[i];
-    let found = false;
-    for (let j = 0; j < digits.length; j += 1) {
-      if (c === digits[j]) { found = true; break; }
-    }
-    if (!found) return false;
-  }
-  return true;
-}
-// Node's setTimeout treats a delay above this 32-bit signed-int ceiling (and
-// one that resolves to Infinity, which a long-enough all-digit string does)
-// as if it were 1ms, not "wait longer" -- a plain-digit-string check alone
-// passes both, so it is not enough on its own: it has to also stay inside the
-// range setTimeout itself honors, or a huge override does the opposite of
-// falling back to the production delay.
-const MAX_SET_TIMEOUT_MS = 2147483647;
-function _resolveWatchRearmMs() {
-  const raw = process.env.AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS;
-  if (raw === undefined || !_isPlainDigitString(raw)) return 5000;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 1 && n <= MAX_SET_TIMEOUT_MS ? n : 5000;
-}
-const WATCH_REARM_MS = _resolveWatchRearmMs();
-const BRIDGE_STOP_POLL_MS = 100;
-
-function isMsysWindows() {
-  return /^(?:MINGW|MSYS|CLANGARM)/.test(process.env.MSYSTEM || "");
-}
-
-function parseBridgeStopRecord(text) {
-  const expected = ["v", "project", "pairs", "host", "pid", "start", "startsrc", "nonce", "expires"];
-  const values = Object.create(null);
-  const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : [];
-  if (lines.length !== expected.length) return null;
-  for (let i = 0; i < expected.length; i += 1) {
-    const prefix = `${expected[i]}=`;
-    if (!lines[i].startsWith(prefix)) return null;
-    values[expected[i]] = lines[i].slice(prefix.length);
-  }
-  if (values.v !== "1") return null;
-  if (!/^[0-9a-f]{40}$/.test(values.project) || !/^[0-9a-f]{40}$/.test(values.pairs)) return null;
-  if (!/^[1-9][0-9]*$/.test(values.pid) || !/^[0-9]+$/.test(values.start)) return null;
-  if (values.startsrc !== "pwsh" || !/^[0-9a-f]{40}$/.test(values.nonce)) return null;
-  if (!/^[0-9]+$/.test(values.expires) || !values.host || /[\r\n]/.test(values.host)) return null;
-  return values;
-}
-
-function bridgeStopRequestMatches(request, expected) {
-  return Boolean(request
-    && request.pid === expected.pid
-    && request.host === expected.host
-    && request.project === expected.project
-    && request.pairs === expected.pairs
-    && request.startsrc === expected.startsrc
-    && request.start === expected.start
-    && Number(request.expires) >= expected.now
-    && request.nonce !== expected.acceptedNonce);
-}
-
 function usage() {
   console.log(`Usage: codex-bridge.js --project <path> [--type codex] [--team <team>] [--name <agent>]
 
@@ -1032,6 +955,7 @@ class CodexBridge {
     this.watchRearmTimer = null;
     this.lastArmAt = 0;
     this.inlineInboxText = "";
+    this.inlinePromptQueue = [];
     this.stopping = false;
     const key = identities.length === 1
       ? `${identities[0].team}.${identities[0].name}`
@@ -1045,19 +969,6 @@ class CodexBridge {
     this.leasefile = path.join(RUN_DIR, `codex-bridge-lease.${process.pid}`);
     this.leaseStart = "";
     this.leaseStartSrc = "";
-    this.projectHash = crypto.createHash("sha1").update(this.opts.project).digest("hex");
-    this.pairsHash = crypto.createHash("sha1")
-      .update(
-        this.identities
-          .map((pair) => crypto.createHash("sha1").update(`${pair.team}\t${pair.name}`).digest("hex"))
-          .sort()
-          .join("\n"),
-      )
-      .digest("hex");
-    this.stopRequestPath = path.join(RUN_DIR, `codex-bridge-stop.${process.pid}`);
-    this.stopAckPath = `${this.stopRequestPath}.ack`;
-    this.stopRequestTimer = null;
-    this.acceptedStopNonce = "";
   }
 
   async run() {
@@ -1122,52 +1033,6 @@ class CodexBridge {
     // After armWatch, not before: the seat is a claim that this role is being
     // delivered to, and until the watch is armed that is not yet true.
     this.recordSeat();
-    this.startStopRequestPoll();
-  }
-
-  startStopRequestPoll() {
-    if (!isMsysWindows() || this.stopRequestTimer) return;
-    const check = () => {
-      try {
-        this.checkStopRequest();
-      } catch (error) {
-        console.error(`codex-bridge: stop request check failed: ${error.message}`);
-      }
-    };
-    this.stopRequestTimer = setInterval(check, BRIDGE_STOP_POLL_MS);
-    this.stopRequestTimer.unref?.();
-    check();
-  }
-
-  checkStopRequest() {
-    let text;
-    try {
-      text = fs.readFileSync(this.stopRequestPath, "utf8");
-    } catch (error) {
-      if (error && error.code === "ENOENT") return false;
-      throw error;
-    }
-    const request = parseBridgeStopRecord(text);
-    const now = Math.floor(Date.now() / 1000);
-    if (!bridgeStopRequestMatches(request, {
-      pid: String(process.pid),
-      host: os.hostname(),
-      project: this.projectHash,
-      pairs: this.pairsHash,
-      startsrc: this.leaseStartSrc,
-      start: this.leaseStart,
-      now,
-      acceptedNonce: this.acceptedStopNonce,
-    })) return false;
-
-    const tmp = `${this.stopAckPath}.tmp.${process.pid}.${request.nonce}`;
-    fs.writeFileSync(tmp, text, { mode: 0o600 });
-    fs.renameSync(tmp, this.stopAckPath);
-    this.acceptedStopNonce = request.nonce;
-    Promise.resolve(this.shutdown()).catch((error) => {
-      console.error(`codex-bridge: requested shutdown failed: ${error.message}`);
-    });
-    return true;
   }
 
   // Write the seat from the thread the bridge actually armed on (#579). Seating
@@ -1290,16 +1155,25 @@ class CodexBridge {
     if (!token) throw new Error("cannot determine process start token for identity lease");
     const host = os.hostname();
     if (!host) throw new Error("cannot determine hostname for identity lease");
+    const projectHash = crypto.createHash("sha1").update(this.opts.project).digest("hex");
     // Canonicalize the pair SET before hashing: hash each "team\tname" pair, then
     // sort the hex hashes (pure ASCII, so a byte sort in the launcher and a JS
     // code-unit sort here agree even for non-ASCII names) and hash the joined
     // list. codex-bridge-launcher.sh computes BRIDGE_PAIRS_HASH identically.
+    const pairsHash = crypto.createHash("sha1")
+      .update(
+        this.identities
+          .map((pair) => crypto.createHash("sha1").update(`${pair.team}\t${pair.name}`).digest("hex"))
+          .sort()
+          .join("\n"),
+      )
+      .digest("hex");
     this.leaseStart = token;
     this.leaseStartSrc = src;
     const body = [
       "v=1",
-      `project=${this.projectHash}`,
-      `pairs=${this.pairsHash}`,
+      `project=${projectHash}`,
+      `pairs=${pairsHash}`,
       `host=${host}`,
       `pid=${process.pid}`,
       `start=${token}`,
@@ -1546,7 +1420,7 @@ class CodexBridge {
     this.watchRearmTimer = setTimeout(() => {
       this.watchRearmTimer = null;
       this.armWatch().catch((error) => this.failClientHandler("process/exited", error));
-    }, WATCH_REARM_MS);
+    }, 5000);
   }
 
   clearWatchRearmTimer() {
@@ -1647,25 +1521,30 @@ class CodexBridge {
 
   async tryStartTurn() {
     if (!this.pendingWake || this.turnActive || !this.threadIdle) return;
+    let prompt;
+    let inlineDelivery = null;
     if (this.opts.inlineInbox) {
-      this.inlineInboxText = this.readInboxForPrompt();
-      if (!this.inlineInboxText.trim()) {
+      if (this.inlinePromptQueue.length === 0) this.inlinePromptQueue = this.readInboxForPrompts();
+      if (this.inlinePromptQueue.length === 0) {
         console.error("codex-bridge: pending wake had no inbox output; re-arming");
         this.pendingWake = false;
         await this.armWatch();
         return;
       }
+      inlineDelivery = this.inlinePromptQueue.shift();
+      prompt = inlineDelivery.text;
+    } else {
+      prompt = this.buildPrompt();
     }
-    const prompt = this.buildPrompt();
     this.turnActive = true;
     this.threadIdle = false;
     // Claim the wake BEFORE the request goes out, not after it succeeds. With
     // the claim left set across the await, a turn-end signal arriving mid-
     // request re-entered this method with the same wake and started a second
     // turn. The claim is restored on failure so the wake fires again (the
-    // inline inbox rows are already marked read by then, so the retry
-    // re-delivers the wake, not the payload — unchanged from before).
-    this.pendingWake = false;
+    // inline rows are acknowledged only after turn/start succeeds, so a failed
+    // request leaves them unread and the retry can deliver the payload again.
+    this.pendingWake = this.inlinePromptQueue.length > 0;
     this.startInFlight = true;
     this.inFlightTurnId = null;
     this.inFlightTurnEnded = false;
@@ -1676,12 +1555,21 @@ class CodexBridge {
         cwd: this.opts.project,
         runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
+      if (inlineDelivery) {
+        const ack = spawnSync(BASH_BIN, [path.join(SCRIPT_DIR, "codex-self-test-inbox.sh"), "ack", inlineDelivery.pair.team, inlineDelivery.pair.name, ...inlineDelivery.ids], { cwd: this.opts.project, encoding: "utf8" });
+        if (ack.error || ack.status !== 0) {
+          console.error(`codex-bridge: failed to acknowledge ${inlineDelivery.ids.length} delivered message(s) for ${inlineDelivery.pair.team}/${inlineDelivery.pair.name}; they may be shown again`);
+          this.inlinePromptQueue = [];
+          this.pendingWake = true;
+        }
+      }
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
       // Bound how long we treat the turn as active. The real app-server may
       // never send turn/completed; the watchdog (and thread/status idle) drive
       // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
       this.startTurnWatchdog();
     } catch (error) {
+      if (inlineDelivery) this.inlinePromptQueue.unshift(inlineDelivery);
       this.pendingWake = true;
       this.turnActive = false;
       this.threadIdle = true;
@@ -1789,7 +1677,27 @@ class CodexBridge {
     ].join("\n");
   }
 
-  readInboxForPrompt() {
+  buildSelfTestPrompt(record, pair, marker) {
+    const diagnose = path.join(SCRIPT_DIR, "codex-diagnose.sh");
+    return [
+      `agmsg self-delivery marker reached this Codex turn for ${pair.team}/${pair.name}.`,
+      "",
+      "Run the following confirmation command now. Do not use inbox.sh, history.sh, or direct DB access:",
+      `${shellQuote(diagnose)} ${shellQuote(this.opts.project)} ${shellQuote(pair.team)} ${shellQuote(pair.name)} --confirm ${shellQuote(marker.nonce)} ${shellQuote(String(record.id))}`,
+      "",
+      "Report the command result to the user. A send success, stored message, cursor movement, or turn completion is not confirmation by itself.",
+    ].join("\n");
+  }
+
+  formatNormalRecords(records) {
+    return [
+      `${records.length} new message(s):`,
+      "",
+      ...records.map((record) => `  [${record.at}] ${record.from}: ${String(record.body || "").replace(/\n/g, "\\n").replace(/\t/g, "\\t")}`),
+    ].join("\n");
+  }
+
+  readInboxForPrompts() {
     // Re-resolve locks immediately before reading. watch-once only tells us
     // that *some* eligible identity woke; ownership can change before this
     // turn starts, so never let a stale bridge membership mark another
@@ -1803,26 +1711,48 @@ class CodexBridge {
       return "";
     }
     const allowed = new Set((eligible.stdout || "").split(/\r?\n/).filter(Boolean));
-    const sections = [];
+    const prompts = [];
     for (const pair of this.identities) {
       if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
       // --quiet: an empty inbox must read back as EMPTY. The human-facing
       // "No new messages." line is non-blank, passed tryStartTurn's emptiness
       // check, and became the entire prompt of an injected turn.
-      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--quiet"], { cwd: this.opts.project, encoding: "utf8" });
-      if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
-      if ((result.stdout || "").trim()) sections.push(result.stdout.trim());
+      const result = spawnSync(BASH_BIN, [path.join(SCRIPT_DIR, "codex-self-test-inbox.sh"), "peek", pair.team, pair.name], { cwd: this.opts.project, encoding: "utf8" });
+      if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox transport failed for ${pair.team}/${pair.name}`); continue; }
+      const lines = (result.stdout || "").split(/\r?\n/).filter(Boolean);
+      const records = [];
+      let invalid = false;
+      for (const line of lines) {
+        try { records.push(JSON.parse(line)); } catch (_) { invalid = true; break; }
+      }
+      if (invalid) {
+        console.error(`codex-bridge: inbox transport returned invalid JSON for ${pair.team}/${pair.name}; leaving rows unread`);
+        continue;
+      }
+      let normal = [];
+      const flushNormal = () => {
+        if (normal.length === 0) return;
+        this.inlineInboxText = this.formatNormalRecords(normal);
+        prompts.push({ text: this.buildPrompt(), pair, ids: normal.map((record) => String(record.id)) });
+        normal = [];
+      };
+      for (const record of records) {
+        const marker = parseSelfTestMarker(record, pair);
+        if (marker) {
+          flushNormal();
+          prompts.push({ text: this.buildSelfTestPrompt(record, pair, marker), pair, ids: [String(record.id)] });
+        } else {
+          normal.push(record);
+        }
+      }
+      flushNormal();
     }
-    return sections.join("\n\n");
+    return prompts;
   }
 
   async shutdown() {
     if (this.stopping) return;
     this.stopping = true;
-    if (this.stopRequestTimer) {
-      clearInterval(this.stopRequestTimer);
-      this.stopRequestTimer = null;
-    }
     this.clearWatchRearmTimer();
     this.clearTurnWatchdog();
     if (this.watchHandle) {
@@ -1978,6 +1908,17 @@ function parseMaxId(stdout) {
   return match ? match[1] : "";
 }
 
+function parseSelfTestMarker(record, pair) {
+  if (!record || record.type !== "message_sent" || record.from !== pair.name || record.to !== pair.name) return null;
+  const match = String(record.body || "").match(/^agmsg-codex-self-test:v1:([A-Za-z0-9_-]+):([A-Fa-f0-9]{48})$/);
+  if (!match) return null;
+  return { diagnosisId: match[1], nonce: match[2] };
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -2028,11 +1969,4 @@ if (require.main === module) {
 // the property that matters — a diagnostic never continues someone else's
 // half-line — is a property of these two together, and driving them directly
 // is the only way to state it without standing up an app-server.
-module.exports = {
-  toPosixPath,
-  writeErr,
-  logLine,
-  isMsysWindows,
-  parseBridgeStopRecord,
-  bridgeStopRequestMatches,
-};
+module.exports = { toPosixPath, writeErr, logLine, parseSelfTestMarker, shellQuote };

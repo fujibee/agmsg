@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Usage:
-#   send.sh <team> <from> <to> <message> [--force]              # body as ONE quoted arg
+#   send.sh <team> <from> <to> <message> [--force] [--print-id] # body as ONE quoted arg
 #   send.sh <team> <from> <to> --body-file <path> [--force]     # body read from a file
 #   send.sh <team> <from> <to> --body - [--force]               # body read from stdin
 #
@@ -26,10 +26,15 @@ shift 3
 # --force is historically the trailing flag AFTER the body; recognize it only as the
 # last argument, so a --body-file body whose text happens to be "--force" is unaffected.
 FORCE=0
-if [ "$#" -gt 0 ] && [ "${!#}" = "--force" ]; then
-  FORCE=1
+PRINT_ID=0
+while [ "$#" -gt 0 ]; do
+  case "${!#}" in
+    --force) FORCE=1 ;;
+    --print-id) PRINT_ID=1 ;;
+    *) break ;;
+  esac
   set -- "${@:1:$#-1}"
-fi
+done
 
 case "${1:-}" in
   --body-file)
@@ -133,7 +138,9 @@ fi
 # the message log (an append-only message_sent event), not a direct INSERT.
 # storage_send re-inits its schema idempotently before writing, which subsumes the
 # #114 concurrent first-write race the old path retried around (a process seeing
-# the DB file before the table exists just creates it). The new id is not surfaced.
-storage_send "$TEAM" "$FROM" "$TO" "$BODY" >/dev/null
+# the DB file before the table exists just creates it). The id is surfaced only
+# for the explicit --print-id machine contract.
+MESSAGE_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY")"
 
 echo "Sent to $TO in team $TEAM"
+[ "$PRINT_ID" -eq 0 ] || echo "message_id=$MESSAGE_ID"

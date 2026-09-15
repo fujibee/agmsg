@@ -201,6 +201,33 @@ flowchart TD
   ended --> watch
 ```
 
+## End-to-end self-delivery diagnosis
+
+The fork-only `codex-diagnose.sh` keeps its optionless read-only three-layer
+diagnosis and adds an explicit two-turn test:
+
+```bash
+scripts/drivers/types/codex/codex-diagnose.sh <project> <team> <agent> --self-test
+```
+
+The start command sends one structured marker and returns `PENDING` with exit
+3. The marker-derived bridge turn runs `--confirm`; a matching project, Codex
+home, message id, nonce digest, and thread records `THREAD_CONFIRMED`.
+
+`THREAD_CONFIRMED` deliberately means no more than its name. Codex does not
+publish a stable TUI-instance id distinct from its thread id, so two TUI
+instances displaying the same thread cannot be distinguished by this script.
+The end-to-end result is complete only when the marker-derived turn is also
+visibly observed on the user's current TUI (`TUI_VISIBLE`). Do not substitute
+`inbox.sh`, `history.sh`, the local database, send success, cursor movement, or
+turn completion for that screen observation. The nonce challenge relies on
+that operational rule; nonce non-disclosure alone is not a technical proof.
+
+Internal record state `SENT` is displayed as `PENDING`. `SEND_FAILED`, an
+incomplete `PREPARED` record, or insufficient evidence exits 2; a confirmed
+mismatch or expiry exits 1. State files are retained under the run directory
+for diagnosis and are not an automatic repair mechanism.
+
 ## Worker Guardrails
 
 > ⚠️ **Never poll agmsg by launching a full Codex/Claude session on a short

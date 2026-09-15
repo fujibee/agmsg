@@ -1037,6 +1037,46 @@ EOF
   [[ "$output" =~ "started turn" ]]
 }
 
+@test "codex-bridge: structured self-test marker gets a dedicated confirm turn and exact ack" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) process.exit(1);'
+  [ "$status" -eq 0 ] || skip "node child_process.spawn is not available in this sandbox"
+
+  local nonce="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  bash "$SCRIPTS/send.sh" team alice alice "agmsg-codex-self-test:v1:diag-1:$nonce" >/dev/null
+  local fake="$TEST_SKILL_DIR/fake-app-server-self-test.js"
+  local captured="$TEST_SKILL_DIR/captured-self-test-prompt"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+const send = (v) => process.stdout.write(`${JSON.stringify(v)}\n`);
+rl.on("line", (line) => {
+  const m = JSON.parse(line);
+  if (m.method === "initialize") send({ jsonrpc:"2.0", id:m.id, result:{} });
+  else if (m.method === "thread/start") send({ jsonrpc:"2.0", id:m.id, result:{thread:{id:"thread-1",status:{type:"idle"}}} });
+  else if (m.method === "process/spawn") {
+    send({ jsonrpc:"2.0", id:m.id, result:{} });
+    setTimeout(() => send({ jsonrpc:"2.0", method:"process/exited", params:{processHandle:m.params.processHandle,exitCode:0,stdout:"status=pending count=1 max_id=marker-1\n",stderr:""} }), 10);
+  } else if (m.method === "turn/start") {
+    fs.writeFileSync(process.env.CAPTURED_PROMPT, m.params.input[0].text);
+    send({ jsonrpc:"2.0", id:m.id, result:{turn:{id:"turn-self-test"}} });
+    setTimeout(() => send({jsonrpc:"2.0",method:"turn/completed",params:{threadId:m.params.threadId,turn:{id:"turn-self-test"}}}),10);
+  } else if (m.method === "process/kill") send({jsonrpc:"2.0",id:m.id,result:{}});
+});
+EOF
+
+  CAPTURED_PROMPT="$captured" AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-1 --timeout 1 --interval 1 \
+    --request-timeout-ms 1000 --max-wakes 1 --inline-inbox
+  [ "$status" -eq 0 ]
+  grep -qF -- "--confirm '$nonce'" "$captured"
+  grep -qF "agmsg self-delivery marker reached this Codex turn" "$captured"
+  ! grep -qF "agmsg delivered the following unread messages" "$captured"
+  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 @test "codex-bridge: stops instead of looping on the same unread max_id" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
