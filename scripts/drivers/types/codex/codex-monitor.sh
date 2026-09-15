@@ -195,22 +195,26 @@ if [ -z "$PORT" ]; then
   # holds the whole test file open until the CI timeout. This app-server is
   # built to outlive its caller -- that is what the pidfile and the reuse checks
   # below are for -- so it is exactly the shape that keeps the pipe open.
-  # #1254 stage 1: mark the app-server's OWN environment (never this shell's --
-  # everything codex-monitor.sh launches afterwards, the foreground TUI exec
-  # included, must NOT inherit this) with its own (pid, start time), so a
-  # later reader can tell "this shell is running INSIDE that specific,
-  # still-live app-server" from "this env var leaked here from somewhere
-  # else entirely". A subshell that `exec`s into the app-server keeps the
-  # SAME pid across the exec (only the image changes), so `$$` read just
-  # before the exec IS the pid `$!` reports back to this shell after
-  # backgrounding -- there is no other way to hand a not-yet-forked
-  # process its own future pid.
-  (
-    _witness="$(ps -o lstart= -p $$ 2>/dev/null | tr -s '[:space:]' '_')"
-    _witness="${_witness#_}"; _witness="${_witness%_}"
-    export AGMSG_CODEX_SHARED_APP_SERVER="$$.$_witness"
-    exec "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0"
-  ) >>"$SERVER_LOG" 2>&1 3>&- 4>&- &
+  # #1254 stage 1: mark the app-server's environment (never this shell's own
+  # -- everything codex-monitor.sh launches afterwards, the foreground TUI
+  # exec included, must NOT inherit this) with THIS shell's own (pid, start
+  # time). The app-server does not yet have a pid of its own to hand it at
+  # this point (that only exists after `&` backgrounds it, which is too
+  # late to also be the value the SAME command line exports into it) -- an
+  # earlier revision solved that with a subshell that `exec`s into the
+  # app-server, but that extra layer broke the port-banner capture below on
+  # Windows/Git Bash (#1261 review). THIS shell's own pid works just as
+  # well: it is the app-server's actual parent (this `&` forks it as a
+  # child of the CURRENT shell; the later `exec` into the foreground TUI
+  # keeps this shell's pid unchanged, so that pid remains the app-server's
+  # true ancestor for as long as either is alive), and unlike the
+  # app-server's own pid it is known before forking, so it can be exported
+  # directly on this command's own env prefix -- `$!` and the redirects
+  # below are therefore byte-for-byte what they were before this change.
+  _witness="$(ps -o lstart= -p $$ 2>/dev/null | tr -s '[:space:]' '_')"
+  _witness="${_witness#_}"; _witness="${_witness%_}"
+  AGMSG_CODEX_SHARED_APP_SERVER="$$.$_witness" \
+    "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SERVER_LOG" 2>&1 3>&- 4>&- &
   server_bg="$!"
   echo "$server_bg" > "$SERVER_PID"
   # codex 0.144+ colorizes this banner even when stdout is a redirected file

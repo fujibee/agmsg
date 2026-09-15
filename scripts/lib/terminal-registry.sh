@@ -493,12 +493,11 @@ agmsg_terminal_epoch() {   # <terminal>
 # #1254: can THIS process trust the terminal env it inherited (HERDR_PANE_ID,
 # TMUX/TMUX_PANE, ...), or could that env actually belong to a DIFFERENT
 # seat entirely? Some agent types run a seat's shell commands inside a
-# process that outlives and is SHARED across several seats (codex's
-# per-project app-server, #1254) -- a later seat attached to that shared
-# process inherits whatever terminal env the process was BORN with (the
-# first seat's pane), not its own. Every caller that is about to trust an
-# inherited env for SELF-placement (never for reading an explicit target
-# id handed to it) must ask this first.
+# process that outlives and is SHARED across several seats -- a later seat
+# attached to that shared process inherits whatever terminal env the
+# process was BORN with (the first seat's pane), not its own. Every caller
+# that is about to trust an inherited env for SELF-placement (never for
+# reading an explicit target id handed to it) must ask this first.
 #
 # Type-neutral by design: this asks the CALLING session's own agent type
 # whether ITS inherited env can be trusted, the same way a type answers
@@ -506,7 +505,8 @@ agmsg_terminal_epoch() {   # <terminal>
 # type-specific knowledge (which env var, which pidfile, how to prove an
 # ancestor) lives entirely in that type's own driver hook
 # (scripts/drivers/types/<type>/_env-untrust.sh), never here and never in
-# any terminal driver's ops.sh (herdr/tmux must not know codex exists).
+# any terminal driver's ops.sh -- a terminal driver's own code must not
+# name any particular agent type at all.
 #
 # Prints a reason; rc 0 = untrusted (do not use the inherited env), rc 1 =
 # trusted (safe to use it). A type with no _env-untrust.sh hook, or whose

@@ -87,6 +87,14 @@ _marker_for_pid() {   # <pid> -> "<pid>.<witness>", or empty if unreadable
   else
     kill "$sibling_pid" 2>/dev/null || true
   fi
+
+  # A malformed marker (present, but not the <pid>.<start-witness> shape) is
+  # a BROKEN observation, not a genuine absence -- "cannot tell" folds into
+  # untrusted the same as a confirmed one, never into the inherited pane
+  # (#1261 review: this used to silently read as trusted).
+  AGMSG_CODEX_SHARED_APP_SERVER="not-a-marker" run bash "$SCRIPTS/where.sh"
+  [ "$status" -ne 0 ]
+  grep -q '^resolved=false' <<<"$output"
 }
 
 @test "where: tmux with a live \$TMUX_PANE resolves to that pane, terminal=tmux is explicit" {

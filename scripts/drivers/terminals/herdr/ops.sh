@@ -259,10 +259,11 @@ terminal_detect() {
   #
   # #1254: this is exactly the blind trust that names a DIFFERENT seat's
   # pane when this process is a shell command running inside a shared,
-  # reused execution context (a Codex per-project app-server is the
-  # measured case) that was born in someone else's pane. Gated through the
-  # type-neutral core question -- this driver names no agent type, and asks
-  # nothing it would not ask for every driver.
+  # reused execution context that was born in someone else's pane -- an
+  # agent type may report the inherited terminal env as untrusted for
+  # exactly this reason. Gated through the type-neutral core question --
+  # this driver names no agent type, and asks nothing it would not ask for
+  # every driver.
   if [ -n "${HERDR_PANE_ID:-}" ] && _herdr_pane_id_ok "${HERDR_PANE_ID}" \
     && ! agmsg_terminal_env_untrusted; then
     printf '%s:%s\n' "$socket" "${HERDR_PANE_ID}"
