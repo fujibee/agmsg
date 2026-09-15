@@ -3,20 +3,31 @@
 _AGMSG_BRIDGE_CORE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _AGMSG_BRIDGE_SKILL_DIR="$(cd "$_AGMSG_BRIDGE_CORE_LIB/../.." && pwd)"
 
+_agmsg_bridge_guard_encode() {
+  # Keep this byte encoding identical to actas-lock.sh without sourcing it:
+  # storage callers are not required to export SKILL_DIR.
+  printf '%s' "$1" | LC_ALL=C awk '
+    BEGIN { for (n = 0; n < 256; n++) ord[sprintf("%c", n)] = n }
+    {
+      for (i = 1; i <= length($0); i++) {
+        c = substr($0, i, 1)
+        if (c ~ /[A-Za-z0-9._\-]/) printf "%s", c
+        else printf "%%%02X", ord[c]
+      }
+    }
+  '
+}
+
 _agmsg_bridge_guard_path() {
   local team="$1" agent="$2"
-  # shellcheck disable=SC1091
-  source "$_AGMSG_BRIDGE_CORE_LIB/actas-lock.sh"
   printf '%s/run/read-reservation.%s__%s.json' "$_AGMSG_BRIDGE_SKILL_DIR" \
-    "$(_actas_lock_encode "$team")" "$(_actas_lock_encode "$agent")"
+    "$(_agmsg_bridge_guard_encode "$team")" "$(_agmsg_bridge_guard_encode "$agent")"
 }
 
 _agmsg_bridge_guard_legacy_path() {
   local team="$1" agent="$2"
-  # shellcheck disable=SC1091
-  source "$_AGMSG_BRIDGE_CORE_LIB/actas-lock.sh"
   printf '%s/run/antigravity-reservation.%s__%s.json' "$_AGMSG_BRIDGE_SKILL_DIR" \
-    "$(_actas_lock_encode "$team")" "$(_actas_lock_encode "$agent")"
+    "$(_agmsg_bridge_guard_encode "$team")" "$(_agmsg_bridge_guard_encode "$agent")"
 }
 
 _agmsg_bridge_guard_reservation() {
