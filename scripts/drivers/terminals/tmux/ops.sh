@@ -124,6 +124,19 @@ terminal_arrange() {
 # still under tmux). The session id arg is unused — tmux reports via the env.
 terminal_detect() {
   [ -n "${TMUX:-}" ] || return 1
+  # #1254: this process's inherited $TMUX/$TMUX_PANE can belong to a
+  # DIFFERENT seat entirely when it is a shell command running inside a
+  # shared, reused execution context (a Codex per-project app-server is the
+  # measured case: TMUX/TMUX_PANE reach every thread's tool commands the
+  # same way HERDR_PANE_ID does, and client-side -c cannot override or
+  # unset them). Unlike herdr, tmux has no session-id
+  # lookup to fall back on -- $TMUX_PANE IS the only way this ever
+  # identifies a pane -- so an untrusted env here means presence without
+  # identity, same shape as the $TMUX_PANE-unset case just below.
+  if agmsg_terminal_env_untrusted; then
+    echo "tmux: this session's inherited terminal env cannot be trusted (#1254) -- refusing to identify a pane through it" >&2
+    return 0
+  fi
   if [ -n "${TMUX_PANE:-}" ]; then
     # `<socket>:<pane>`, so whatever records this can later ask the RIGHT server.
     # $TMUX is "<socket-path>,<pid>,<session>"; the first field is the socket.

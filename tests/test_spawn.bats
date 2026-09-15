@@ -1262,6 +1262,26 @@ STUB
   [ "$rec_id" = "herdr:$HERDR_SOCKET_PATH:wT:pN" ]
 }
 
+# #1254: automatic herdr placement must be REFUSED, not attempted, when this
+# session's inherited HERDR_PANE_ID cannot be trusted (a Codex seat whose
+# shell commands run inside a shared, reused per-project app-server is the
+# measured case) -- splitting from / attaching to that inherited pane would
+# place the new member on a DIFFERENT seat's pane. --terminal-driver stays
+# available as the explicit bypass.
+@test "spawn: refuses automatic herdr placement when the inherited env cannot be trusted (#1254)" {
+  _setup_fake_herdr
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local witness
+  witness="$(ps -o lstart= -p $$ 2>/dev/null | tr -s '[:space:]' '_')"
+  witness="${witness#_}"; witness="${witness%_}"
+  [ -n "$witness" ] || skip "could not read this test shell's own process start time (ps -o lstart=)"
+  run env CODEX_THREAD_ID=fake-thread AGMSG_CODEX_SHARED_APP_SERVER="$$.$witness" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -ne 0 ]
+  grep -qF -- "--terminal-driver" <<<"$output"
+  [ ! -s "$HERDR_CALL_LOG" ]
+}
+
 @test "spawn: herdr split --split v maps to --direction down" {
   _setup_fake_herdr
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"

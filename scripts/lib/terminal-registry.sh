@@ -490,6 +490,61 @@ agmsg_terminal_epoch() {   # <terminal>
   return 0
 }
 
+# #1254: can THIS process trust the terminal env it inherited (HERDR_PANE_ID,
+# TMUX/TMUX_PANE, ...), or could that env actually belong to a DIFFERENT
+# seat entirely? Some agent types run a seat's shell commands inside a
+# process that outlives and is SHARED across several seats (codex's
+# per-project app-server, #1254) -- a later seat attached to that shared
+# process inherits whatever terminal env the process was BORN with (the
+# first seat's pane), not its own. Every caller that is about to trust an
+# inherited env for SELF-placement (never for reading an explicit target
+# id handed to it) must ask this first.
+#
+# Type-neutral by design: this asks the CALLING session's own agent type
+# whether ITS inherited env can be trusted, the same way a type answers
+# resume_arg's transcript-existence question (_transcript-exists.sh) -- the
+# type-specific knowledge (which env var, which pidfile, how to prove an
+# ancestor) lives entirely in that type's own driver hook
+# (scripts/drivers/types/<type>/_env-untrust.sh), never here and never in
+# any terminal driver's ops.sh (herdr/tmux must not know codex exists).
+#
+# Prints a reason; rc 0 = untrusted (do not use the inherited env), rc 1 =
+# trusted (safe to use it). A type with no _env-untrust.sh hook, or whose
+# hook cannot even be identified (agmsg_detect_cli_type failed), is
+# trusted -- the unchanged, pre-#1254 default for every type but the one
+# this issue is about. The hook's own INDETERMINATE (rc 2 -- ancestry or a
+# pidfile could not be read) folds into untrusted here, never into trusted:
+# not being able to tell is not a clean negative.
+agmsg_terminal_env_untrusted() {
+  declare -F agmsg_detect_cli_type >/dev/null 2>&1 || {
+    local _tdir
+    _tdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # shellcheck disable=SC1091
+    declare -F agmsg_type_get >/dev/null 2>&1 || . "$_tdir/type-registry.sh"
+    # shellcheck disable=SC1091
+    declare -F compat_get_comm >/dev/null 2>&1 || . "$_tdir/compat.sh"
+    # shellcheck disable=SC1091
+    . "$_tdir/detect-cli-type.sh"
+  }
+  local _type
+  _type="$(agmsg_detect_cli_type 2>/dev/null)" || return 1
+  [ -n "$_type" ] || return 1
+  local _hook
+  _hook="$(agmsg_type_dir "$_type" 2>/dev/null)/_env-untrust.sh"
+  [ -f "$_hook" ] || return 1
+  declare -F agmsg_type_env_untrusted >/dev/null 2>&1 || {
+    # shellcheck disable=SC1090
+    . "$_hook"
+  }
+  declare -F agmsg_type_env_untrusted >/dev/null 2>&1 || return 1
+  local _reason _rc=0
+  _reason="$(agmsg_type_env_untrusted 2>&1)" || _rc=$?
+  case "$_rc" in
+    0|2) printf '%s\n' "$_reason" >&2; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The pane this process is in, from the ENVIRONMENT alone: no driver loaded, no
 # terminal called. Prints "<terminal>\t<id>\t<epoch>" or nothing. This is the
 # fast half of self-naming on action: a seat that finds its mark equal to this
@@ -498,7 +553,12 @@ agmsg_terminal_epoch() {   # <terminal>
 # tmux from $TMUX/$TMUX_PANE (the driver's terminal_detect reads exactly those),
 # herdr from HERDR_PANE_ID (the driver's terminal_detect now prefers it too).
 # Under neither, nothing: plain has no pane to name.
+#
+# #1254: gated by agmsg_terminal_env_untrusted BEFORE either branch -- an
+# untrusted inherited env must not be handed back as this session's own
+# pane, tmux or herdr alike.
 agmsg_terminal_self_env() {
+  agmsg_terminal_env_untrusted && return 0
   if [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
     printf 'tmux\t%s:%s\t%s\n' "${TMUX%%,*}" "$TMUX_PANE" "$(agmsg_terminal_epoch tmux)"
     return 0
@@ -951,6 +1011,20 @@ agmsg_terminal_name_self() {
   # renamed to the new member's label and key. spawn sets it on that one
   # subprocess; a seat joining by hand keeps naming itself.
   [ "${AGMSG_SELF_NAME:-on}" != off ] || return 0
+
+  # #1254: the label-resolution path below (_agmsg_terminal_resolve_by_label)
+  # answers by asking a driver to search ACROSS its panes (e.g. herdr's
+  # `agent list`, scoped by the inherited HERDR_SOCKET_PATH) -- a different
+  # question from "trust the inherited pane id directly", but one that still
+  # runs against whatever terminal instance this process inherited, and runs
+  # BEFORE the env-detect fallback below, so gating that fallback alone is
+  # not enough (it would never be reached). Checked here, once, for the
+  # whole function: an untrusted env must not resolve a name through either
+  # path.
+  if agmsg_terminal_env_untrusted; then
+    echo "agmsg: this session's inherited terminal env cannot be trusted for self-naming (#1254) -- refusing to resolve a pane through it" >&2
+    return 1
+  fi
 
   # The BARE sid, whatever the caller had. A terminal knows the id the CLI
   # published; the composite "<sid>.<pid>" exists only inside agmsg, and handing

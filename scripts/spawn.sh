@@ -862,6 +862,20 @@ place_and_launch() {
   # No override: PRESERVE the detection order — $TMUX (tmux-inside-herdr backward
   # compat) → herdr → OS terminal. The nested spawn-placement decision is deferred to
   # the live matrix, so this does NOT switch to the registry's herdr-first resolver.
+  #
+  # #1254: both $TMUX and HERDR_PANE_ID below can belong to a DIFFERENT seat
+  # entirely when this process is a shell command running inside a shared,
+  # reused execution context (a Codex per-project app-server is the measured
+  # case) -- automatic placement through either would split from, or attach
+  # to, someone else's pane. Refuse automatic placement outright rather than
+  # guess between them or fall through to an OS terminal that was not asked
+  # for; --terminal-driver plain (or an explicit tmux/herdr choice, if the
+  # caller can prove it is not inside the shared context some other way)
+  # bypasses this detection entirely, above.
+  if agmsg_terminal_env_untrusted; then
+    die "this session's inherited terminal env cannot be trusted for automatic placement (#1254) -- pass --terminal-driver explicitly"
+  fi
+
   if [ -n "${TMUX:-}" ]; then
     launch_in_tmux
     echo "launched ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})"

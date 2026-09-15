@@ -44,6 +44,51 @@ teardown() { teardown_test_env; }
   grep -q 'capabilities=spawn despawn peek poke where arrange name' <<<"$output"
 }
 
+# #1254: a Codex seat whose shell commands run inside a SHARED, reused
+# per-project app-server inherits that server's own birth environment (the
+# FIRST seat's HERDR_PANE_ID/TMUX_PANE), not its own. where.sh must report
+# unresolved through that inherited env, never the wrong pane -- and a
+# LEAKED copy of the marker (its claimed pid genuinely not an ancestor of
+# this process, e.g. carried by something that has since moved into its own
+# real pane) must NOT be treated as evidence of a shared context either;
+# both outcomes of the same detection are pinned in one test.
+_marker_for_pid() {   # <pid> -> "<pid>.<witness>", or empty if unreadable
+  local pid="$1" w
+  w="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s '[:space:]' '_')"
+  w="${w#_}"; w="${w%_}"
+  [ -n "$w" ] || return 1
+  printf '%s.%s\n' "$pid" "$w"
+}
+
+@test "where: herdr under a Codex marker whose pid is a REAL ancestor reports unresolved, not the inherited pane; a leaked marker whose pid is NOT an ancestor does not (#1254)" {
+  export HERDR_ENV=1 HERDR_PANE_ID=w1:p4 HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock"
+  export CODEX_THREAD_ID=fake-thread
+  local real_marker
+  real_marker="$(_marker_for_pid "$$")"
+  [ -n "$real_marker" ] || skip "could not read this test shell's own process start time (ps -o lstart=)"
+
+  # A pid that is genuinely NOT in this process's ancestry, but IS alive and
+  # readable: a throwaway background sleep, a SIBLING of this test shell,
+  # never an ancestor of a later `bash where.sh` child.
+  sleep 5 & local sibling_pid=$!
+  local leaked_marker
+  leaked_marker="$(_marker_for_pid "$sibling_pid")" || leaked_marker=""
+
+  AGMSG_CODEX_SHARED_APP_SERVER="$real_marker" run bash "$SCRIPTS/where.sh"
+  [ "$status" -ne 0 ]
+  grep -q '^resolved=false' <<<"$output"
+
+  if [ -n "$leaked_marker" ]; then
+    AGMSG_CODEX_SHARED_APP_SERVER="$leaked_marker" run bash "$SCRIPTS/where.sh"
+    kill "$sibling_pid" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    grep -q '^resolved=true' <<<"$output"
+    grep -q "placement=herdr:$TEST_SKILL_DIR/herdr.sock:w1:p4" <<<"$output"
+  else
+    kill "$sibling_pid" 2>/dev/null || true
+  fi
+}
+
 @test "where: tmux with a live \$TMUX_PANE resolves to that pane, terminal=tmux is explicit" {
   export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
   mkdir -p "$FAKEBIN"
