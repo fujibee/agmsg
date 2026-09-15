@@ -67,7 +67,14 @@ PSEOF
   # owner with agmsg_instance_alive, which asks the kernel and not the fake `ps`.
   # A synthetic owner would make every test answer `owner_not_alive` -- the right
   # answer to the wrong question.
-  sleep 600 &
+  #
+  # Redirected (stdout, stderr, and bats' own fd 3) so this background child
+  # does not inherit and hold open a descriptor bats itself is reading from
+  # (#1187): a backgrounded process that keeps fd 3 open can leave bats
+  # waiting on it rather than on the test that actually finished, which is
+  # consistent with 'Executed N+1 instead of N' and a test being reported
+  # twice, seen twice on macOS CI. $! and the kill/wait cleanup are unchanged.
+  sleep 600 >/dev/null 2>&1 3>&- &
   OWNER_PID=$!
   PANE_PID=800
   _edge "$$" "$OWNER_PID"
@@ -529,7 +536,7 @@ w1:pX	$PANE_PID"
 @test "an owner whose process is gone is undetermined, not a proof about it (#1152)" {
   # A lock outlives the process that wrote it. Parsing a pid out of the file says
   # the file holds a number, not that the number is still this session.
-  sleep 60 & local dead=$!
+  sleep 60 >/dev/null 2>&1 3>&- & local dead=$!
   kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
   # The precondition is that the pid is GONE. On a loaded runner the number can
   # be handed to a new process between the wait and the read below (#1187,
@@ -552,7 +559,7 @@ w1:pX	$PANE_PID"
   # pane the stranger sits in. Measured 2026-09-13: before the fix this fixture
   # returned proved. The proof therefore requires positive identity: no marker,
   # no proof.
-  sleep 60 & local stranger=$!
+  sleep 60 >/dev/null 2>&1 3>&- & local stranger=$!
   _own agmsg seat "sid-1.$stranger"
   rm -f "$SKILL_DIR/run/cc-instance.$stranger"
   : > "$PS_TREE"
