@@ -739,8 +739,11 @@ def main():
             files=list((ROOT/'run').glob('read-reservation.*.json'))+list((ROOT/'run').glob('antigravity-reservation.*.json'))
             for file in files:
                 try:
-                    reservation=json.loads(file.read_text()); state=json.loads(Path(reservation['state']).read_text())
-                    if reservation.get('type','antigravity')!='antigravity' or state.get('project')!=str(Path(a.project).absolute()) or state.get('team')!=a.team or state.get('role')!=a.name or reservation.get('kind')!='tui-pty': continue
+                    reservation=json.loads(file.read_text())
+                    legacy=file.name.startswith('antigravity-reservation.')
+                    if (reservation.get('type')!='antigravity' and not (legacy and 'type' not in reservation)): continue
+                    state=json.loads(Path(reservation['state']).read_text())
+                    if state.get('project')!=str(Path(a.project).absolute()) or state.get('team')!=a.team or state.get('role')!=a.name or reservation.get('kind')!='tui-pty': continue
                     live=False
                     try: live=process_still(int(reservation['pid']),reservation['start'])
                     except FileNotFoundError: live=False

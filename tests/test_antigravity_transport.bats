@@ -224,7 +224,11 @@ PY
   # the loop skipped the reservation entirely -- the test passed through without
   # ever reaching the code it names. (Measured.)
   printf '{"project":"%s","team":"fixture","role":"worker"}\n' "$PROJ" > "$state"
-  printf '{"pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$$" "$state" \
+  printf '{"type":"codex","state":"%s/missing-foreign.json"}\n' "$run_dir" \
+    > "$run_dir/read-reservation.foreign.json"
+  printf '{"state":"%s/missing-neutral.json"}\n' "$run_dir" \
+    > "$run_dir/read-reservation.missing.json"
+  printf '{"type":"antigravity","pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$$" "$state" \
     > "$run_dir/read-reservation.fixture__worker.json"
 
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
@@ -246,7 +250,7 @@ PY
   printf '{"project":"%s","team":"fixture","role":"worker"}\n' "$PROJ" > "$state"
   # This path reaches a non-process object on Linux (ENOTDIR) and is malformed
   # input for the macOS helper; neither may be mistaken for an exited process.
-  printf '{"pid":"../../dev/null","start":"x","state":"%s","kind":"tui-pty"}\n' "$state" \
+  printf '{"type":"antigravity","pid":"../../dev/null","start":"x","state":"%s","kind":"tui-pty"}\n' "$state" \
     > "$run_dir/read-reservation.unreadable.json"
 
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
@@ -259,7 +263,7 @@ PY
   ( exit 0 ) &
   local gone_pid=$!
   wait "$gone_pid"
-  printf '{"pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$gone_pid" "$state" \
+  printf '{"type":"antigravity","pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$gone_pid" "$state" \
     > "$run_dir/read-reservation.unreadable.json"
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
   [ "$status" -eq 0 ]
