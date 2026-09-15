@@ -244,7 +244,9 @@ PY
   local run_dir="$TEST_SKILL_DIR/run"
   local state="$run_dir/antigravity-unreadable.state.json"
   printf '{"project":"%s","team":"fixture","role":"worker"}\n' "$PROJ" > "$state"
-  printf '{"pid":-1,"start":"x","state":"%s","kind":"tui-pty"}\n' "$state" \
+  # This path reaches a non-process object on Linux (ENOTDIR) and is malformed
+  # input for the macOS helper; neither may be mistaken for an exited process.
+  printf '{"pid":"../../dev/null","start":"x","state":"%s","kind":"tui-pty"}\n' "$state" \
     > "$run_dir/antigravity-reservation.unreadable.json"
 
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
