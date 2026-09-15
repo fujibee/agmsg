@@ -102,7 +102,16 @@ PSEOF
   done
 }
 teardown() {
-  [ -z "${OWNER_PID:-}" ] || kill "$OWNER_PID" 2>/dev/null || true
+  # Reaped right here, not left for the shell to notice later (#1187): a
+  # killed background job's exit status (143) and bash's own asynchronous
+  # "Terminated" notice both surface at whatever point the shell next checks
+  # jobs, which under a caller-applied errexit can be an unrelated later
+  # line -- the same reasoning the two per-test kills already apply to
+  # "dead"/"stranger" below.
+  if [ -n "${OWNER_PID:-}" ]; then
+    kill "$OWNER_PID" 2>/dev/null || true
+    wait "$OWNER_PID" 2>/dev/null || true
+  fi
   teardown_test_env
 }
 _start() { printf '%s\t%s\n' "$1" "$2" >> "$PS_START"; }
