@@ -32,16 +32,32 @@ if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
   source "$_AGMSG_DRIVER_LIB_DIR/sqlpath.sh"
 fi
 
-# <skill-root> = up two from scripts/lib/.
+# <skill-root> = up two from scripts/lib/. Cached per process: _AGMSG_DRIVER_LIB_DIR
+# is fixed at source time (above), so this resolves to the same path for the life
+# of the shell -- agmsg_driver_bases() calls this on every agmsg_type_dir /
+# agmsg_type_get lookup, and #1254's gate (agmsg_terminal_env_untrusted) added
+# call sites that make many such lookups per self-naming action; forking a `cd
+# && pwd` subshell for each one measurably added up (#1261 CI report: a macOS
+# runner hit its 30-minute job cap on the first test exercising the gate).
 _agmsg_driver_root() {
-  cd "$_AGMSG_DRIVER_LIB_DIR/../.." 2>/dev/null && pwd
+  if [ -z "${_AGMSG_DRIVER_ROOT_CACHE:-}" ]; then
+    _AGMSG_DRIVER_ROOT_CACHE="$(cd "$_AGMSG_DRIVER_LIB_DIR/../.." 2>/dev/null && pwd)"
+  fi
+  printf '%s\n' "$_AGMSG_DRIVER_ROOT_CACHE"
 }
 
 # Echo the search bases as "<kind>\t<dir>" lines, in priority order. <kind> is
 # "builtin" (in-tree, always trusted) or "external" (requires opt-in).
 agmsg_driver_bases() {
   local root
-  root="$(_agmsg_driver_root)" || return 0
+  # Inlines the cache check rather than calling _agmsg_driver_root through a
+  # command substitution -- this function is itself invoked via `<(...)` by
+  # every caller (agmsg_type_dir among them), so avoiding a SECOND, nested
+  # fork here halves the per-call cost of the cache added above.
+  if [ -z "${_AGMSG_DRIVER_ROOT_CACHE:-}" ]; then
+    _AGMSG_DRIVER_ROOT_CACHE="$(cd "$_AGMSG_DRIVER_LIB_DIR/../.." 2>/dev/null && pwd)"
+  fi
+  root="$_AGMSG_DRIVER_ROOT_CACHE"
   [ -n "$root" ] || return 0
   printf 'builtin\t%s\n' "$root/scripts/drivers"
   printf 'external\t%s\n' "$root/plugins"

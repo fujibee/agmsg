@@ -71,24 +71,49 @@ agmsg_detect_cli_type() {
   # 2. Process-tree detection via each type's `detect_proc=` name globs. Walk up
   # from this process; at each ancestor the first type whose glob matches wins
   # (the globs are disjoint, so order within a level is irrelevant).
-  local pid=$$ max_depth=10 depth=0 proc_name _pats _pat
+  #
+  # The (type, detect_proc) pairs are STATIC for this call -- they do not
+  # depend on which ancestor is being examined -- so they are read ONCE here,
+  # not once per ancestor. #1254 made this function's caller
+  # (agmsg_terminal_env_untrusted) run on every self-naming action, including
+  # from a shell with none of the strong detect= env vars set (a CI runner
+  # carries no CLAUDE_CODE_SESSION_ID/CODEX_THREAD_ID/...), which always falls
+  # through to this process-tree walk: re-reading every type's manifest via a
+  # fresh _agmsg_detect_order() at each of up to 10 ancestor levels turned one
+  # detection into ~10x its own already-nontrivial manifest I/O, slow enough
+  # to blow CI's 30-minute job cap on the first test that exercised it
+  # (test_self_name.bats, macOS runner, #1261 CI report).
+  # A newline+tab-delimited STRING, not a bash array: an array left with zero
+  # elements (no type declares detect_proc=) throws "unbound variable" under
+  # `set -u` on bash 3.2 (macOS's /bin/bash) the moment it is expanded with
+  # `${arr[@]}` -- fixed in bash 4.4, not available here. Matches this file's
+  # own _agmsg_detect_order and agmsg_terminal_candidates's `names` variable,
+  # which use the same string-accumulation shape for the same reason.
+  local _order_t _pats _proc_list=""
+  while IFS= read -r _order_t; do
+    [ -n "$_order_t" ] || continue
+    _pats="$(agmsg_type_get "$_order_t" detect_proc)"
+    [ -n "$_pats" ] || continue
+    _proc_list="${_proc_list}${_order_t}$(printf '\t')${_pats}
+"
+  done < <(_agmsg_detect_order)
+
+  local pid=$$ max_depth=10 depth=0 proc_name _pt _pp _pat
   while [ $depth -lt $max_depth ] && [ "$pid" != "1" ] && [ -n "$pid" ]; do
     proc_name=$(compat_get_comm "$pid" 2>/dev/null || true)
-    if [ -n "$proc_name" ]; then
-      while IFS= read -r _t; do
-        [ -n "$_t" ] || continue
-        _pats="$(agmsg_type_get "$_t" detect_proc)"
-        [ -n "$_pats" ] || continue
-        read -ra _toks <<<"$_pats"
+    if [ -n "$proc_name" ] && [ -n "$_proc_list" ]; then
+      while IFS=$'\t' read -r _pt _pp; do
+        [ -n "$_pt" ] || continue
+        read -ra _toks <<<"$_pp"
         for _pat in "${_toks[@]}"; do
           # $_pat is intentionally an UNQUOTED glob pattern matched against the
           # process name; read -ra already kept it out of pathname expansion.
           # shellcheck disable=SC2254
           case "$proc_name" in
-            $_pat) echo "$_t"; return 0 ;;
+            $_pat) echo "$_pt"; return 0 ;;
           esac
         done
-      done < <(_agmsg_detect_order)
+      done <<<"$_proc_list"
     fi
 
     # Move to parent process

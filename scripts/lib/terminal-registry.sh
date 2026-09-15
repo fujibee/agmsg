@@ -490,6 +490,52 @@ agmsg_terminal_epoch() {   # <terminal>
   return 0
 }
 
+# Cheap, SCOPED type identification for agmsg_terminal_env_untrusted below: is
+# THIS process plausibly one of the given (hook-bearing) types, checked
+# directly against each one's own `detect=`/`detect_proc=` manifest criteria
+# -- never the full cross-type priority resolution agmsg_detect_cli_type
+# does, which pays for every OTHER registered type's manifest too even though
+# this gate would never consult them. Same two-phase shape (strong env vars,
+# then a bounded process-tree walk), just restricted to "$@" instead of every
+# known type. Echoes the first matching type name, or nothing.
+_agmsg_terminal_env_untrusted_which_hooked() {
+  local _t _v _detect _toks
+  for _t in "$@"; do
+    _detect="$(agmsg_type_get "$_t" detect)"
+    [ -n "$_detect" ] && [ "$_detect" != explicit ] || continue
+    read -ra _toks <<<"$_detect"
+    for _v in "${_toks[@]}"; do
+      if [ -n "${!_v:-}" ]; then
+        printf '%s\n' "$_t"
+        return 0
+      fi
+    done
+  done
+
+  local _pid=$$ _max_depth=10 _depth=0 _proc_name _pats _pat
+  while [ "$_depth" -lt "$_max_depth" ] && [ "$_pid" != "1" ] && [ -n "$_pid" ]; do
+    _proc_name=$(compat_get_comm "$_pid" 2>/dev/null || true)
+    if [ -n "$_proc_name" ]; then
+      for _t in "$@"; do
+        _pats="$(agmsg_type_get "$_t" detect_proc)"
+        [ -n "$_pats" ] || continue
+        read -ra _toks <<<"$_pats"
+        for _pat in "${_toks[@]}"; do
+          # $_pat is intentionally an UNQUOTED glob pattern; read -ra already
+          # kept it out of pathname expansion.
+          # shellcheck disable=SC2254
+          case "$_proc_name" in
+            $_pat) printf '%s\n' "$_t"; return 0 ;;
+          esac
+        done
+      done
+    fi
+    _pid=$(compat_get_ppid "$_pid" 2>/dev/null || true)
+    _depth=$((_depth + 1))
+  done
+  return 1
+}
+
 # #1254: can THIS process trust the terminal env it inherited (HERDR_PANE_ID,
 # TMUX/TMUX_PANE, ...), or could that env actually belong to a DIFFERENT
 # seat entirely? Some agent types run a seat's shell commands inside a
@@ -510,39 +556,115 @@ agmsg_terminal_epoch() {   # <terminal>
 #
 # Prints a reason; rc 0 = untrusted (do not use the inherited env), rc 1 =
 # trusted (safe to use it). A type with no _env-untrust.sh hook, or whose
-# hook cannot even be identified (agmsg_detect_cli_type failed), is
-# trusted -- the unchanged, pre-#1254 default for every type but the one
-# this issue is about. The hook's own INDETERMINATE (rc 2 -- ancestry or a
-# pidfile could not be read) folds into untrusted here, never into trusted:
-# not being able to tell is not a clean negative.
+# hook cannot even be identified, is trusted -- the unchanged, pre-#1254
+# default for every type but the one this issue is about. The hook's own
+# INDETERMINATE (rc 2 -- ancestry or a pidfile could not be read) folds into
+# untrusted here, never into trusted: not being able to tell is not a clean
+# negative.
 agmsg_terminal_env_untrusted() {
-  declare -F agmsg_detect_cli_type >/dev/null 2>&1 || {
+  declare -F agmsg_type_get >/dev/null 2>&1 || {
     local _tdir
     _tdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     # shellcheck disable=SC1091
-    declare -F agmsg_type_get >/dev/null 2>&1 || . "$_tdir/type-registry.sh"
-    # shellcheck disable=SC1091
-    declare -F compat_get_comm >/dev/null 2>&1 || . "$_tdir/compat.sh"
-    # shellcheck disable=SC1091
-    . "$_tdir/detect-cli-type.sh"
+    . "$_tdir/type-registry.sh"
   }
-  local _type
-  _type="$(agmsg_detect_cli_type 2>/dev/null)" || return 1
-  [ -n "$_type" ] || return 1
-  local _hook
-  _hook="$(agmsg_type_dir "$_type" 2>/dev/null)/_env-untrust.sh"
-  [ -f "$_hook" ] || return 1
-  declare -F agmsg_type_env_untrusted >/dev/null 2>&1 || {
-    # shellcheck disable=SC1090
-    . "$_hook"
+  declare -F compat_get_comm >/dev/null 2>&1 || {
+    local _tdir2
+    _tdir2="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # shellcheck disable=SC1091
+    . "$_tdir2/compat.sh"
   }
-  declare -F agmsg_type_env_untrusted >/dev/null 2>&1 || return 1
-  local _reason _rc=0
-  _reason="$(agmsg_type_env_untrusted 2>&1)" || _rc=$?
-  case "$_rc" in
-    0|2) printf '%s\n' "$_reason" >&2; return 0 ;;
-    *) return 1 ;;
-  esac
+
+  # Memoized per PROCESS: the calling type and this shell's own inherited-env
+  # trust status cannot change between one gate check and the next within a
+  # single running process, and #1254 wired this gate into terminal_detect,
+  # self_env, and name_self -- several checks per self-naming action. A
+  # caller that sources this file once and drives several actions in the SAME
+  # shell (test_self_name.bats) benefits most; one that genuinely runs across
+  # process boundaries (join.sh, spawn.sh, where.sh -- each its own fresh
+  # `bash script.sh`) starts with an empty cache anyway, so this changes
+  # nothing for them.
+  if [ -n "${_AGMSG_TERMINAL_ENV_UNTRUSTED_DONE:-}" ]; then
+    [ -n "${_AGMSG_TERMINAL_ENV_UNTRUSTED_REASON:-}" ] && printf '%s\n' "$_AGMSG_TERMINAL_ENV_UNTRUSTED_REASON" >&2
+    return "$_AGMSG_TERMINAL_ENV_UNTRUSTED_RC"
+  fi
+
+  # Which (typically very few) registered types even declare an
+  # _env-untrust.sh hook at all -- pure filesystem globbing over
+  # agmsg_driver_bases' own search dirs, no process spawned -- and identify
+  # the calling type by checking ONLY those types' own manifest criteria
+  # directly (_agmsg_terminal_env_untrusted_which_hooked below), rather than
+  # running full CLI-type detection across EVERY registered type just to
+  # learn that none of the others have a hook this gate would ever consult
+  # anyway. Full detection (agmsg_detect_cli_type) reads every type's
+  # manifest several times over (once for priority, twice more for its own
+  # detect=/detect_fallback=) purely to rank types THIS gate does not care
+  # about; multiplied by #1254's several gate call sites per self-naming
+  # action, that was slow enough on a CI runner to blow a 30-minute job cap
+  # on the first test exercising it (#1261 CI report). Never less safe than
+  # full detection: if this scoped check matches a hooked type that a full,
+  # cross-type priority resolution would NOT have picked (another type's own
+  # strong signal also present), the hook itself still verifies genuine
+  # ancestry before calling anything untrusted -- at worst this runs one
+  # harmless extra check, never a wrong verdict.
+  # A space-separated STRING, not a bash array: an array left with zero
+  # elements (no registered type has this hook) throws "unbound variable"
+  # under `set -u` on bash 3.2 (macOS's /bin/bash, the exact shell the
+  # existing set -e/set -u leak canary in test_terminal_registry.bats runs
+  # under) the moment it is expanded with `${arr[*]}`/`${arr[@]}` -- fixed in
+  # bash 4.4, not available here (#1261 review). Matches agmsg_terminal_
+  # candidates's own `names` variable, same shape for the same reason.
+  local _base_kind _base_dir _hpath _htype _hooked=""
+  while IFS=$'\t' read -r _base_kind _base_dir; do
+    [ -d "$_base_dir/types" ] || continue
+    for _hpath in "$_base_dir"/types/*/_env-untrust.sh; do
+      [ -f "$_hpath" ] || continue
+      _htype="${_hpath%/_env-untrust.sh}"; _htype="${_htype##*/}"
+      case "$_htype" in ''|*[!a-zA-Z0-9_-]*) continue ;; esac
+      if [ "$_base_kind" != builtin ] && ! agmsg_driver_is_trusted types "$_htype" "${_hpath%/_env-untrust.sh}"; then
+        continue
+      fi
+      case " $_hooked " in *" $_htype "*) ;; *) _hooked="${_hooked:+$_hooked }$_htype" ;; esac
+    done
+  done < <(agmsg_driver_bases)
+
+  local _type="" _hook _reason="" _rc=1
+  # `|| _type=""`, not the bare `[ ... ] && _type="$(...)"` this replaced: that
+  # command substitution is the LAST command in the `&&` chain, so its ordinary
+  # "no hooked type matched" outcome (rc 1) was NOT shielded by the `&&` under
+  # `set -e` -- it aborted the whole calling script before this function could
+  # even return trusted (#1261 review: caught by the existing set -e leak
+  # canary in test_terminal_registry.bats). $_hooked is deliberately UNQUOTED
+  # below (word-split into args): each token was validated against
+  # [a-zA-Z0-9_-]+ above, so splitting on whitespace is exact, never a glob or
+  # IFS surprise.
+  if [ -n "$_hooked" ]; then
+    # shellcheck disable=SC2086
+    _type="$(_agmsg_terminal_env_untrusted_which_hooked $_hooked)" || _type=""
+  fi
+  if [ -n "$_type" ]; then
+    _hook="$(agmsg_type_dir "$_type" 2>/dev/null)/_env-untrust.sh"
+    if [ -f "$_hook" ]; then
+      declare -F agmsg_type_env_untrusted >/dev/null 2>&1 || {
+        # shellcheck disable=SC1090
+        . "$_hook"
+      }
+      if declare -F agmsg_type_env_untrusted >/dev/null 2>&1; then
+        local _hook_rc=0
+        _reason="$(agmsg_type_env_untrusted 2>&1)" || _hook_rc=$?
+        case "$_hook_rc" in
+          0|2) _rc=0 ;;
+          *) _rc=1; _reason="" ;;
+        esac
+      fi
+    fi
+  fi
+
+  _AGMSG_TERMINAL_ENV_UNTRUSTED_DONE=1
+  _AGMSG_TERMINAL_ENV_UNTRUSTED_RC=$_rc
+  _AGMSG_TERMINAL_ENV_UNTRUSTED_REASON="$_reason"
+  [ -n "$_reason" ] && printf '%s\n' "$_reason" >&2
+  return "$_rc"
 }
 
 # The pane this process is in, from the ENVIRONMENT alone: no driver loaded, no

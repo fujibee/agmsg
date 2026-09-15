@@ -103,9 +103,13 @@ EOF
 agmsg_type_get() {
   local name="$1" key="$2" def="${3:-}" dir line val
   dir="$(agmsg_type_dir "$name")" || { printf '%s\n' "$def"; return 0; }
-  # `|| true` so a no-match grep (exit 1) does not, under set -e + pipefail,
-  # abort the assignment before the default-return branch below is reached.
-  line="$( { grep -E "^[[:space:]]*${key}[[:space:]]*=" "$dir/type.conf" 2>/dev/null || true; } | head -1)"
+  # `-m1` (stop after the first match) does the same job as piping to `head
+  # -1` without a second forked process -- called once per (type, key) pair,
+  # and #1254's gate (agmsg_terminal_env_untrusted) calls this across every
+  # registered type on each check, so the extra fork was not free (#1261 CI
+  # report). `|| true` so a no-match grep (exit 1) does not, under set -e +
+  # pipefail, abort the assignment before the default-return branch below.
+  line="$(grep -m1 -E "^[[:space:]]*${key}[[:space:]]*=" "$dir/type.conf" 2>/dev/null || true)"
   if [ -z "$line" ]; then
     printf '%s\n' "$def"
     return 0
