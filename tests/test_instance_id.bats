@@ -199,6 +199,100 @@ gone_pid() {
   _agmsg_pid_alive 42
 }
 
+# --- #954: the ps cross-check must tell "proof of absence" from "absence of
+# proof". Both halves are asserted with the SAME genuinely-dead pid, so a result
+# of "alive" can ONLY be the canary suppressing the death verdict, never the pid
+# being live -- exactly the distinction the bug erased. ---
+
+@test "pid_alive: a truly-gone pid is PROVEN dead when ps answers, and cleanup fires (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # A pid this shell minted and reaped: kill(2) returns a real ESRCH, real ps
+  # lists our own $$ but not the gone pid -> positive proof of absence.
+  sh -c 'exit 0' & local gone=$!; wait "$gone" 2>/dev/null
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -ne 0 ] || { echo "a gone pid with a working ps read alive"; false; }
+  # The cleanup-side contract: `... || rm -f` DOES delete for a proven-gone pid.
+  local marker="$RUN_DIR/marker.$gone"; : > "$marker"
+  _agmsg_pid_alive_local "$gone" || rm -f "$marker"
+  [ ! -e "$marker" ] || { echo "cleanup did not fire on a proven-dead pid"; false; }
+}
+
+@test "pid_alive: a truly-gone pid reads ALIVE when ps cannot answer -- a failed observation is not proof, and cleanup is suppressed (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  sh -c 'exit 0' & local gone=$!; wait "$gone" 2>/dev/null
+  # ps cannot answer: it emits nothing and fails. The canary ($$) is absent from
+  # the output, so the helper cannot see even itself -> observation failed. The
+  # pid is genuinely gone, so "alive" here is UNAMBIGUOUSLY the canary firing.
+  ps() { return 1; }
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "a failed ps was read as proof of death (the #954 bug)"; false; }
+  # The cleanup-side contract: `... || rm -f` does NOT delete when we could not
+  # observe. The file a live process might still own is left intact.
+  local marker="$RUN_DIR/marker.$gone"; : > "$marker"
+  _agmsg_pid_alive_local "$gone" || rm -f "$marker"
+  [ -e "$marker" ] || { echo "cleanup fired on an UNKNOWN observation (UNKNOWN leaked to the cleanup side)"; false; }
+}
+
+@test "pid_alive: ps that omits the target but still lists the canary is proof of death (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # ps answers (lists $$, proving it ran) but does not list the target -> the
+  # target is provably gone even though ps was reachable.
+  kill() { echo "bash: kill: - No such process" >&2; return 1; }
+  ps() { printf '%s S\n' "$$"; }   # only the canary, never the queried target
+  run _agmsg_pid_alive_local 424242
+  [ "$status" -ne 0 ] || { echo "an answered ps that omits the target did not read dead"; false; }
+}
+
+@test "pid_alive: a snapshot with output but WITHOUT the canary is UNKNOWN, not death (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # The subtle leak: ps returns SOME lines but not our own $$ (a partial or garbage
+  # snapshot, or a failure that still printed something). Without the canary the
+  # observation is untrusted, so a genuinely-gone pid must STILL read alive -- a
+  # non-empty result is not itself proof the snapshot was complete. No retry count
+  # or partial output may turn this into a death verdict, and cleanup stays put.
+  sh -c 'exit 0' & local gone=$!; wait "$gone" 2>/dev/null
+  ps() { printf '999999 R\n'; }   # a line, but never $$ and never the target
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "a canary-less snapshot was read as proof of death"; false; }
+  local marker="$RUN_DIR/marker.$gone"; : > "$marker"
+  _agmsg_pid_alive_local "$gone" || rm -f "$marker"
+  [ -e "$marker" ] || { echo "cleanup fired on a canary-less snapshot (UNKNOWN leaked to cleanup)"; false; }
+}
+
+@test "pid_alive: a ps that lists the canary but EXITS NON-ZERO is a truncated snapshot -> UNKNOWN, not death (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # The last leak: ps prints part of the snapshot -- even our own $$ -- and THEN
+  # fails. The target's line may simply never have been reached, so its absence
+  # from a truncated listing is not proof. A non-zero exit must read as UNKNOWN
+  # regardless of what partial output was captured. (This is also why an "ps -Ao"
+  # a platform does not support fails safe rather than lying "gone".)
+  sh -c 'exit 0' & local gone=$!; wait "$gone" 2>/dev/null
+  ps() { printf '%s S\n' "$$"; return 1; }   # canary printed, then ps fails
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "a non-zero ps exit was read as proof of death despite partial output"; false; }
+  local marker="$RUN_DIR/marker.$gone"; : > "$marker"
+  _agmsg_pid_alive_local "$gone" || rm -f "$marker"
+  [ -e "$marker" ] || { echo "cleanup fired on a failed (truncated) ps snapshot"; false; }
+}
+
+@test "pid_alive: a failing ps under set -e does not terminate a non-conditional caller (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # The leaf helper's contract must not depend on caller syntax. Called as a bare
+  # statement under errexit, a ps that fails must not kill the shell before the
+  # UNKNOWN -> alive verdict: the observation failure has to surface as "alive",
+  # never as caller termination.
+  run bash -c '
+    set -e
+    source "'"$SKILL_DIR"'/scripts/lib/instance-id.sh"
+    ps() { return 1; }
+    kill() { echo "bash: kill: - No such process" >&2; return 1; }
+    _agmsg_pid_alive_local 99999999
+    echo REACHED-alive
+  '
+  [ "$status" -eq 0 ] || { echo "the caller shell died on a failing ps under set -e"; false; }
+  printf '%s\n' "$output" | grep -q REACHED-alive || { echo "did not continue past the helper call"; false; }
+}
+
 # --- agmsg_normalize_instance_id ---
 
 @test "normalize: a composite token passes through unchanged (idempotent)" {
