@@ -105,11 +105,16 @@ const duplicateMessage = Buffer.from(
   '{"body":"Run the test suite","body":"changed","created_at":"2026-07-20T06:30:00.000000Z","from_agent":"leader","to_agent":"worker-1"}',
   "utf8",
 );
-const unknownMessage = Buffer.from(
+// A newer sender may add a field this generator's profile version does not
+// know about yet; the receiving side must import the four known fields and
+// drop the rest rather than reject the message outright.
+const unknownFieldMessage = Buffer.from(
   '{"body":"Run the test suite","created_at":"2026-07-20T06:30:00.000000Z","extra":true,"from_agent":"leader","to_agent":"worker-1"}',
   "utf8",
 );
-const noncanonicalMessage = Buffer.from(
+// Key order was never meaningful (the four fields carry the same values
+// either way), so reordering them no longer makes a message malformed.
+const reorderedMessage = Buffer.from(
   '{"to_agent":"worker-1","from_agent":"leader","created_at":"2026-07-20T06:30:00.000000Z","body":"Run the test suite"}',
   "utf8",
 );
@@ -169,8 +174,8 @@ const output = {
       "authentication_failed"),
     encryptedVector("trailing-frame-byte", frame({ trailing: Buffer.from([0]) }), "authentication_failed"),
     encryptedVector("duplicate-message-key", frame({ message: duplicateMessage }), "malformed"),
-    encryptedVector("unknown-message-key", frame({ message: unknownMessage }), "malformed"),
-    encryptedVector("noncanonical-message", frame({ message: noncanonicalMessage }), "malformed"),
+    encryptedVector("unknown-message-field", frame({ message: unknownFieldMessage }), "importable"),
+    encryptedVector("reordered-message-fields", frame({ message: reorderedMessage }), "importable"),
   ],
 };
 
