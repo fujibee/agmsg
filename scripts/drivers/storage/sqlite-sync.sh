@@ -929,8 +929,15 @@ storage_sync_reconcile_push() {
     -- No sentinel. An earlier revision bounded with 9223372036854775807 as
     -- though it were infinity; it is the largest value events.seq can hold, so
     -- a candidate sitting exactly there was accepted by the old query and
-    -- refused by the new one. `IS NULL OR <` says what was meant and has no
+    -- refused by the new one. 'IS NULL OR <' says what was meant and has no
     -- boundary to collide with.
+    --
+    -- Single quotes on purpose. This whole statement is one double-quoted bash
+    -- string, so the shell sees every character here before SQLite does: a
+    -- backtick becomes command substitution, and a double quote ends the string
+    -- early. Either one breaks the push with an error naming the line the string
+    -- opens on, dozens of lines above this comment, which is why such a message
+    -- never points at the comment that caused it.
     CREATE TEMP TABLE sync_first_gap AS
       SELECT MIN(gap.seq) AS seq FROM events gap LEFT JOIN sync_messages gm
         ON gm.local_team='$tl' AND gm.server_instance_id='$server'
