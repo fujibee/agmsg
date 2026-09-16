@@ -553,12 +553,23 @@ EOF
     # Legacy project-keyed servers, from an install upgraded across #1254:
     # NEVER touch a live one -- its seat keeps using it until it exits on its
     # own (scope point 4). Only remove the record files once the recorded
-    # pid is confirmed dead.
-    local legacy_pidfile legacy_pid
+    # pid is confirmed dead. An unreadable or malformed pidfile is NOT proof
+    # of that: a failed `cat` must not fold into "empty" and read as dead --
+    # that would strip a LIVE legacy server's records out from under an
+    # install mid-upgrade, exactly the case this is supposed to leave alone.
+    # "Cannot tell" leaves the records in place and says so, same as every
+    # other indeterminate observation in this file.
+    local legacy_pidfile legacy_pid legacy_rc
     legacy_pidfile="$RUN_DIR/codex-app-server.$project_hash.pid"
     if [ -f "$legacy_pidfile" ]; then
-      legacy_pid="$(cat "$legacy_pidfile" 2>/dev/null || true)"
-      if [ -z "$legacy_pid" ] || ! _agmsg_pid_alive_local "$legacy_pid"; then
+      legacy_rc=0
+      legacy_pid="$(cat "$legacy_pidfile" 2>/dev/null)" || legacy_rc=$?
+      case "$legacy_pid" in
+        ''|*[!0-9]*) legacy_rc=1 ;;
+      esac
+      if [ "$legacy_rc" -ne 0 ]; then
+        echo "codex: this project's legacy app-server pidfile could not be read or is malformed -- leaving its records" >&2
+      elif ! _agmsg_pid_alive_local "$legacy_pid"; then
         rm -f "$RUN_DIR/codex-app-server.$project_hash.pid" \
               "$RUN_DIR/codex-app-server.$project_hash.port" \
               "$RUN_DIR/codex-app-server.$project_hash.version" \

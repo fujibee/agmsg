@@ -189,6 +189,25 @@ _agmsg_codex_seat_record_read() {   # <path>
 # above -- changes NOTHING and returns 1. Prints one line to stderr saying
 # which check failed, for the caller to relay. On success, kills the pid,
 # removes the record and its log, and returns 0.
+# 0 only if <pid> is alive RIGHT NOW, its cmdline still says codex app-server,
+# and its current start witness still matches <witnesssrc>/<witness> -- all
+# read fresh on every call, never cached. Prints nothing; the caller (which
+# knows the seat key and whether this is the first or the pre-kill check)
+# reports.
+_agmsg_codex_seat_pid_identity_ok() {   # <pid> <witnesssrc> <witness>
+  local pid="$1" wsrc="$2" witness="$3"
+  _agmsg_pid_alive_local "$pid" 2>/dev/null || return 1
+  local cur_cmd
+  cur_cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+  case "$cur_cmd" in
+    *codex*app-server*) ;;
+    *) return 1 ;;
+  esac
+  local cur_witness
+  cur_witness="$(_agmsg_codex_seat_witness "$pid" 2>/dev/null || true)"
+  [ -n "$cur_witness" ] && [ "$cur_witness" = "$wsrc	$witness" ]
+}
+
 _agmsg_codex_seat_record_stop() {   # <run_dir> <seat_key>
   local run_dir="$1" seat_key="$2" path
   path="$(_agmsg_codex_seat_record_path "$run_dir" "$seat_key")"
@@ -197,30 +216,20 @@ _agmsg_codex_seat_record_stop() {   # <run_dir> <seat_key>
     return 1
   }
   local first_gen="$SEAT_REC_GENERATION" pid="$SEAT_REC_PID"
-  if [ -z "$SEAT_REC_WITNESSSRC" ] || [ -z "$SEAT_REC_WITNESS" ]; then
+  local wsrc="$SEAT_REC_WITNESSSRC" witness="$SEAT_REC_WITNESS"
+  if [ -z "$wsrc" ] || [ -z "$witness" ]; then
     echo "codex seat $seat_key: no start witness was recorded for pid $pid -- leaving it, not stopping" >&2
     return 1
   fi
-  _agmsg_pid_alive_local "$pid" 2>/dev/null || {
+  if ! _agmsg_pid_alive_local "$pid" 2>/dev/null; then
     echo "codex seat $seat_key: recorded pid $pid is not alive -- nothing to stop, removing the record" >&2
     rm -f "$path" "$(_agmsg_codex_seat_log_path "$run_dir" "$seat_key")" 2>/dev/null || true
     return 1
-  }
-  local cur_cmd
-  cur_cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
-  case "$cur_cmd" in
-    *codex*app-server*) ;;
-    *)
-      echo "codex seat $seat_key: pid $pid is alive but its cmdline no longer says codex app-server -- leaving it, not stopping" >&2
-      return 1
-      ;;
-  esac
-  local cur_witness
-  cur_witness="$(_agmsg_codex_seat_witness "$pid" 2>/dev/null || true)"
-  if [ -z "$cur_witness" ] || [ "$cur_witness" != "$SEAT_REC_WITNESSSRC	$SEAT_REC_WITNESS" ]; then
-    echo "codex seat $seat_key: pid $pid's current start time no longer matches the recorded one -- leaving it, not stopping" >&2
-    return 1
   fi
+  _agmsg_codex_seat_pid_identity_ok "$pid" "$wsrc" "$witness" || {
+    echo "codex seat $seat_key: pid $pid no longer matches the recorded cmdline/start time -- leaving it, not stopping" >&2
+    return 1
+  }
   # Re-read right before signaling: the record must still describe the SAME
   # generation we validated above. If anything rewrote it in the meantime,
   # do nothing -- the new writer's own record is what governs now.
@@ -232,6 +241,15 @@ _agmsg_codex_seat_record_stop() {   # <run_dir> <seat_key>
     echo "codex seat $seat_key: record changed while stopping it -- leaving it alone" >&2
     return 1
   fi
+  # Re-verify the PID's own identity one more time, immediately before the
+  # kill: between the check above and here the process could have exited and
+  # its pid been reused by an unrelated process -- the generation re-read
+  # alone only proves the RECORD is unchanged, not that this pid is still
+  # the process it named a moment ago.
+  _agmsg_codex_seat_pid_identity_ok "$pid" "$wsrc" "$witness" || {
+    echo "codex seat $seat_key: pid $pid no longer matches immediately before stopping it -- leaving it alone" >&2
+    return 1
+  }
   kill "$pid" 2>/dev/null || true
   rm -f "$path" "$(_agmsg_codex_seat_log_path "$run_dir" "$seat_key")" 2>/dev/null || true
   return 0

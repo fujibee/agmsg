@@ -3062,6 +3062,27 @@ EOF
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.port" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.version" ]
   kill "$bpid" 2>/dev/null || true
+
+  # #1254 review: a legacy pidfile that cannot be read or is malformed must
+  # NOT be treated as proof its server is dead -- that would strip a LIVE
+  # legacy server's records out from under an install mid-upgrade, exactly
+  # what this cleanup is supposed to leave alone. A different project so this
+  # does not collide with the record already removed above.
+  local proj2; proj2="$(mktemp -d)"
+  bash "$SCRIPTS/join.sh" team alice codex "$proj2" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$proj2" >/dev/null
+  local h2; h2="$(printf '%s' "$proj2" | agmsg_sha1)"
+  printf 'not-a-pid' > "$TEST_SKILL_DIR/run/codex-app-server.$h2.pid"
+  : > "$TEST_SKILL_DIR/run/codex-app-server.$h2.port"
+  : > "$TEST_SKILL_DIR/run/codex-app-server.$h2.version"
+  : > "$TEST_SKILL_DIR/run/codex-app-server.$h2.log"
+
+  run bash "$SCRIPTS/delivery.sh" set off codex "$proj2"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_SKILL_DIR/run/codex-app-server.$h2.pid" ]
+  [ -f "$TEST_SKILL_DIR/run/codex-app-server.$h2.port" ]
+  [ -f "$TEST_SKILL_DIR/run/codex-app-server.$h2.version" ]
+  [ -f "$TEST_SKILL_DIR/run/codex-app-server.$h2.log" ]
 }
 
 # --- hermes (manual-only: delivery_modes=off, no automatic hook) ---
