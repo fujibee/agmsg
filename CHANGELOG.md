@@ -193,7 +193,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Narrow a claim I disproved myself two commits later
 - Delete a comment describing the control this one replaced
 - Point key.sh at the current design, and stop asserting the move has happened
-- Move the connect onboarding design to agmsg-cloud, and drop labels that point at nothing
 - Make the promise about this document weak enough to be true
 - Label what stands behind each claim, instead of asserting they all cite
 - Add a Japanese translation, and consolidate the derivation it mirrors
