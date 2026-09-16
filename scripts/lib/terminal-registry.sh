@@ -1247,7 +1247,19 @@ _agmsg_locator_instance_decode() {   # <kind> <encoded-instance>
             chunk="${payload%%\%*}"
             rest="${payload#*%}"
             [ "${#rest}" -ge 2 ] || return 1
-            code="${rest%${rest#??}}"
+            # NOT `${rest%${rest#??}}`: that idiom re-uses ${rest#??}'s VALUE as a
+            # glob PATTERN, and a value containing a backslash (e.g. a Windows path
+            # inside HERDR_SOCKET_PATH, "C:\Users\...") gets re-interpreted -- each
+            # backslash escapes the following character, so the pattern silently
+            # stops matching any suffix of $rest and `%` leaves it unchanged. `code`
+            # then holds the ENTIRE remainder instead of two hex digits, which never
+            # matches 25/3A below and this decode refuses with pane_malformed on any
+            # herdr instance whose socket path contains a backslash. Measured and
+            # reproduced on Windows; substring expansion below does not re-parse its
+            # result as a pattern, so it is immune. `${var:offset:length}` is plain
+            # bash substring expansion (bash 2.0+), not the 4.2+ negative-offset
+            # form, so no bash 3.2 compatibility concern.
+            code="${rest:0:2}"
             case "$code" in
               25) out="${out}${chunk}%" ;;
               3A) out="${out}${chunk}:" ;;
