@@ -48,24 +48,96 @@ function expectedContext(binding) {
   ]);
 }
 
+// Independent of sync-cipher.mjs's own strict-JSON reader on purpose: this
+// walks the raw text itself (rather than trusting JSON.parse, which silently
+// keeps only the last of a duplicate key) so a bug shared between the two
+// duplicate-key checks cannot hide behind a green verifier.
+function hasDuplicateTopLevelKey(text) {
+  let index = 0;
+  const length = text.length;
+  const skipWs = () => { while (index < length && /\s/u.test(text[index])) index += 1; };
+  function skipString() {
+    index += 1;
+    while (index < length) {
+      if (text[index] === "\\") { index += 2; continue; }
+      if (text[index] === '"') { index += 1; return; }
+      index += 1;
+    }
+    throw new Error("unterminated string");
+  }
+  function skipValue() {
+    skipWs();
+    const ch = text[index];
+    if (ch === '"') { skipString(); return; }
+    if (ch === "{") {
+      index += 1; skipWs();
+      if (text[index] === "}") { index += 1; return; }
+      for (;;) {
+        skipWs();
+        if (text[index] !== '"') throw new Error("expected object key");
+        skipString(); skipWs();
+        if (text[index] !== ":") throw new Error("expected colon");
+        index += 1; skipValue(); skipWs();
+        if (text[index] === ",") { index += 1; continue; }
+        if (text[index] === "}") { index += 1; return; }
+        throw new Error("expected , or }");
+      }
+    }
+    if (ch === "[") {
+      index += 1; skipWs();
+      if (text[index] === "]") { index += 1; return; }
+      for (;;) {
+        skipValue(); skipWs();
+        if (text[index] === ",") { index += 1; continue; }
+        if (text[index] === "]") { index += 1; return; }
+        throw new Error("expected , or ]");
+      }
+    }
+    const start = index;
+    while (index < length && !/[\s,}\]]/u.test(text[index])) index += 1;
+    if (index === start) throw new Error("unexpected token");
+  }
+
+  skipWs();
+  if (text[index] !== "{") return false;
+  index += 1; skipWs();
+  if (text[index] === "}") return false;
+  const seen = new Set();
+  let duplicate = false;
+  for (;;) {
+    skipWs();
+    if (text[index] !== '"') throw new Error("expected key");
+    const keyStart = index;
+    skipString();
+    const key = JSON.parse(text.slice(keyStart, index));
+    if (seen.has(key)) duplicate = true;
+    seen.add(key);
+    skipWs();
+    if (text[index] !== ":") throw new Error("expected colon");
+    index += 1; skipValue(); skipWs();
+    if (text[index] === ",") { index += 1; continue; }
+    if (text[index] === "}") break;
+    throw new Error("expected , or }");
+  }
+  return duplicate;
+}
+
+// A newer sender may add a field this verifier does not know about yet; a
+// message is importable once its four known fields are present strings and
+// no key repeats, regardless of what else rides along or what order the
+// fields are in.
 function canonicalMessage(bytes) {
+  const text = bytes.toString("utf8");
   let parsed;
   try {
-    parsed = JSON.parse(bytes.toString("utf8"));
+    parsed = JSON.parse(text);
   } catch {
     return false;
   }
   if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") return false;
-  const keys = Object.keys(parsed);
+  if (hasDuplicateTopLevelKey(text)) return false;
   const expectedKeys = ["body", "created_at", "from_agent", "to_agent"];
-  if (keys.length !== expectedKeys.length || !expectedKeys.every((key) => keys.includes(key))) return false;
-  if (expectedKeys.some((key) => typeof parsed[key] !== "string")) return false;
-  return Buffer.from(JSON.stringify({
-    body: parsed.body,
-    created_at: parsed.created_at,
-    from_agent: parsed.from_agent,
-    to_agent: parsed.to_agent,
-  }), "utf8").equals(bytes);
+  return expectedKeys.every((key) => typeof parsed[key] === "string");
 }
 
 function resolveVector(vector) {
