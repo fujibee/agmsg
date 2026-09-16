@@ -863,6 +863,14 @@ jobs:
       - name: M-y lock measurement (temporary, diagnostic only)
         if: needs.changes.outputs.docs_only != 'true' && matrix.leg == 'install helpers'
         run: |
+          # This step's own commands are meant to fail sometimes (a second
+          # mkdir on an existing dir, a nested BEGIN IMMEDIATE) -- that
+          # failure is the observation, not an error in the step. GitHub
+          # Actions runs bash steps under `set -e`, which would otherwise
+          # abort here on the first expected failure and lose everything
+          # after it (measured: the first run did exactly that, cutting off
+          # after the mkdir re-entrancy line). Disabled for this step only.
+          set +e
           LOG="$RUNNER_TEMP/m-y-windows-locks.log"
           : > "$LOG"
 
