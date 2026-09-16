@@ -3083,6 +3083,46 @@ EOF
   [ -f "$TEST_SKILL_DIR/run/codex-app-server.$h2.port" ]
   [ -f "$TEST_SKILL_DIR/run/codex-app-server.$h2.version" ]
   [ -f "$TEST_SKILL_DIR/run/codex-app-server.$h2.log" ]
+
+  # #1254 review: a refused stop signal must not be followed by removing the
+  # record anyway -- a live server whose only record was just deleted is the
+  # worst of the outcomes here, and returning success on top of that hides
+  # it entirely. Exercises _agmsg_codex_seat_record_stop directly (sourced
+  # into this test's own shell, not through a separate `bash delivery.sh`
+  # process) because shadowing the `kill` builtin only works within the
+  # same shell -- exported functions that override a builtin are not
+  # reliably honored across a fresh bash invocation on every platform this
+  # suite runs on.
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/compat.sh"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/instance-id.sh"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+  bash -c 'exec -a codex-app-server-fake sleep 30' &
+  local fake_server=$!
+  local waited=0
+  while ! kill -0 "$fake_server" 2>/dev/null && [ "$waited" -lt 30 ]; do
+    sleep 0.1; waited=$((waited + 1))
+  done
+  local witness_line wsrc wval seat_key3 rec3
+  witness_line="$(_agmsg_codex_seat_witness "$fake_server")"
+  wsrc="${witness_line%%$'\t'*}"
+  wval="${witness_line#*$'\t'}"
+  seat_key3="$(_agmsg_codex_seat_key_new)"
+  rec3="$(_agmsg_codex_seat_record_path "$TEST_SKILL_DIR/run" "$seat_key3")"
+  _agmsg_codex_seat_record_write "$rec3" "someproj" "$fake_server" "9999" "$wsrc" "$wval" "codex-cli-test"
+
+  kill() { return 1; }
+  run _agmsg_codex_seat_record_stop "$TEST_SKILL_DIR/run" "$seat_key3"
+  unset -f kill
+  [ "$status" -ne 0 ]
+  grep -qF "refused" <<<"$output"
+  [ -f "$rec3" ]
+  kill -0 "$fake_server" 2>/dev/null
+
+  kill -TERM "$fake_server" 2>/dev/null || true
+  wait "$fake_server" 2>/dev/null || true
 }
 
 # --- hermes (manual-only: delivery_modes=off, no automatic hook) ---

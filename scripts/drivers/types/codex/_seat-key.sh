@@ -250,7 +250,32 @@ _agmsg_codex_seat_record_stop() {   # <run_dir> <seat_key>
     echo "codex seat $seat_key: pid $pid no longer matches immediately before stopping it -- leaving it alone" >&2
     return 1
   }
-  kill "$pid" 2>/dev/null || true
+  # The signal's own result is never swallowed: a refused signal (the pid
+  # already gone, or a permission problem) must not be followed by removing
+  # the record anyway -- a live server with its own record erased is the
+  # worst of the three outcomes (worse than a stale record on a dead one,
+  # and worse than refusing outright), and reporting success on top of that
+  # would hide it from whoever reads this seat's status. On refusal: keep
+  # the record, report why, return non-zero.
+  if ! kill "$pid" 2>/dev/null; then
+    echo "codex seat $seat_key: the stop signal to pid $pid was refused -- leaving the record, not removing it" >&2
+    return 1
+  fi
+  # A successfully DELIVERED signal is not proof the process actually
+  # exited (SIGTERM can be ignored). Wait, bounded, for confirmed exit
+  # before removing the record -- the same "only positive proof of exit
+  # earns an action" rule codex-bridge-launcher.sh's own reaper follows.
+  # Timing out still alive is reported and leaves the record in place,
+  # never silently claimed as a success.
+  local waited=0 max_wait=50
+  while _agmsg_pid_alive_local "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$max_wait" ]; then
+      echo "codex seat $seat_key: pid $pid was signaled but is still alive after ${max_wait}00ms -- leaving the record, not removing it" >&2
+      return 1
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
   rm -f "$path" "$(_agmsg_codex_seat_log_path "$run_dir" "$seat_key")" 2>/dev/null || true
   return 0
 }
