@@ -216,6 +216,26 @@ _sqlite_sync_require_jq_binary() {
   return 1
 }
 
+# EVERY jq invocation in this driver goes through this wrapper, not `jq`
+# directly. #829's fix covered only the two values this driver SENDS through a
+# final `| @tsv` stage; #968 found a value this driver RECEIVES -- `roster_seqs`,
+# read via a plain `jq -r` -- carrying the same Windows CRLF into a caller that
+# then rejected it as non-canonical. The defect was never "the wrong flag on one
+# call", it was "no single place forces the flag", so a wrapper is the fix: a
+# future call site cannot forget `-b` because it never has occasion to spell out
+# `jq` at all.
+#
+# `_sqlite_sync_require_jq_binary` is cheap to call on every invocation: its
+# result is cached in `_AGMSG_JQ_BINARY_OK` after the first probe, so this adds
+# one `case` and nothing else once resolved. Call sites that already had an
+# explicit `_sqlite_sync_require_jq_binary || return N` earlier in the same
+# function (placed there to fail before anything is reserved or written) keep
+# that check -- it is now redundant with this wrapper's own check, not wrong.
+_sqlite_sync_jq() {
+  _sqlite_sync_require_jq_binary || return 1
+  jq -b "$@"
+}
+
 # <team> is the storage selector, threaded from the contract that called us.
 _sqlite_sync_schema() {
   command -v jq >/dev/null 2>&1 || {
@@ -444,16 +464,16 @@ storage_sync_resync() {
   command -v "$node_bin" >/dev/null 2>&1 && [ -f "$strict_parser" ] || return 10
   line=$("$node_bin" "$strict_parser" current_seq expected_transport_cursor \
     min_available_seq reason type) || { _sqlite_sync_why; return 13; }
-  printf '%s\n' "$line" | jq -e '
+  printf '%s\n' "$line" | _sqlite_sync_jq -e '
     (keys == ["current_seq","expected_transport_cursor","min_available_seq","reason","type"])
     and .type == "sync_resync" and .reason == "retention-gap-accepted"
     and (.expected_transport_cursor|type)=="string"
     and (.min_available_seq|type)=="string" and (.current_seq|type)=="string"' \
     >/dev/null 2>&1 || { _sqlite_sync_why; return 13; }
-  expected=$(printf '%s\n' "$line" | jq -r '.expected_transport_cursor')
-  floor=$(printf '%s\n' "$line" | jq -r '.min_available_seq')
-  current=$(printf '%s\n' "$line" | jq -r '.current_seq')
-  reason=$(printf '%s\n' "$line" | jq -r '.reason')
+  expected=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.expected_transport_cursor')
+  floor=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.min_available_seq')
+  current=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.current_seq')
+  reason=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.reason')
   _sqlite_sync_sequence "$expected" && _sqlite_sync_sequence "$floor" &&
     _sqlite_sync_sequence "$current" || { _sqlite_sync_why; return 13; }
   _sqlite_sync_decimal_le "$expected" "$floor" && [ "$expected" != "$floor" ] || { _sqlite_sync_why; return 13; }
@@ -614,24 +634,24 @@ storage_sync_prepare_push() {
 
   local prepare generation db tl input_ok version cipher key_json key_id recipients max_blob allow_new
   prepare=$(cat)
-  input_ok=$(printf '%s\n' "$prepare" | jq -r \
+  input_ok=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r \
     'select(.type=="sync_prepare" and (.envelope_v|type)=="number" and
             (.cipher|type)=="string" and has("key_id") and
             (.max_blob_bytes|type)=="number" and (.allow_new|type)=="boolean") | "ok"' 2>/dev/null)
   [ "$input_ok" = ok ] || { _sqlite_sync_why; return 13; }
-  version=$(printf '%s\n' "$prepare" | jq -r '.envelope_v')
-  cipher=$(printf '%s\n' "$prepare" | jq -r '.cipher')
-  key_json=$(printf '%s\n' "$prepare" | jq -c '.key_id')
-  key_id=$(printf '%s\n' "$prepare" | jq -r '.key_id // empty')
-  recipients=$(printf '%s\n' "$prepare" | jq -c '.recipients // []')
-  max_blob=$(printf '%s\n' "$prepare" | jq -r '.max_blob_bytes')
-  allow_new=$(printf '%s\n' "$prepare" | jq -r 'if .allow_new then 1 else 0 end')
+  version=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.envelope_v')
+  cipher=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.cipher')
+  key_json=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -c '.key_id')
+  key_id=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.key_id // empty')
+  recipients=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -c '.recipients // []')
+  max_blob=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.max_blob_bytes')
+  allow_new=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r 'if .allow_new then 1 else 0 end')
   [ "$version" = 1 ] || { _sqlite_sync_why; return 13; }
   case "$cipher" in
     none) [ "$key_json" = null ] && [ "$recipients" = '[]' ] || { _sqlite_sync_why; return 13; } ;;
     age-v1)
       printf '%s\n' "$key_id" | grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$' || { _sqlite_sync_why; return 13; }
-      [ "$(printf '%s\n' "$recipients" | jq -r 'length >= 1 and length <= 256 and (all(.[]; type=="string"))')" = true ] || { _sqlite_sync_why; return 13; }
+      [ "$(printf '%s\n' "$recipients" | _sqlite_sync_jq -r 'length >= 1 and length <= 256 and (all(.[]; type=="string"))')" = true ] || { _sqlite_sync_why; return 13; }
       ;;
     *) _sqlite_sync_why; return 13 ;;
   esac
@@ -681,7 +701,7 @@ storage_sync_prepare_push() {
   # thing retained per message is its position, local id and wire id — ids
   # only, no body, a handful of bytes each.
   if [ -n "$rows" ]; then
-    pending=$(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)' | wc -l) || { _sqlite_sync_why; return 13; }
+    pending=$(printf '%s\n' "$rows" | _sqlite_sync_jq -c 'select(.reserved==null)' | wc -l) || { _sqlite_sync_why; return 13; }
     pending=$((pending))
   fi
 
@@ -695,8 +715,8 @@ storage_sync_prepare_push() {
       seal_pos[$prepared]="$pos"; seal_local[$prepared]="$local_id"
       seal_wire[$prepared]="$wire"; prepared=$((prepared + 1))
     done < <(paste <(printf '%s\n' "$uuids") \
-                   <(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)') \
-             | jq -b -rR 'split("\t") as $pair | ($pair[1] | fromjson) as $row
+                   <(printf '%s\n' "$rows" | _sqlite_sync_jq -c 'select(.reserved==null)') \
+             | _sqlite_sync_jq -rR 'split("\t") as $pair | ($pair[1] | fromjson) as $row
                        | [$row.local_position, $row.local_id, $pair[0]] | @tsv')
     [ "$prepared" -eq "$pending" ] || { _sqlite_sync_why; return 13; }
     if [ -n "$key_id" ]; then q="'$(_sqlite_lit "$key_id")'"; else q="NULL"; fi
@@ -747,8 +767,8 @@ storage_sync_prepare_push() {
         sealed=$((sealed + chunk_count)); chunk_sql=""; chunk_count=0
       fi
     done < <(paste <(printf '%s\n' "$uuids") \
-                   <(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)') \
-      | jq -cR \
+                   <(printf '%s\n' "$rows" | _sqlite_sync_jq -c 'select(.reserved==null)') \
+      | _sqlite_sync_jq -cR \
         --arg cipher "$cipher" --arg key "$key_id" --arg team_id "$remote" \
         --argjson version "$version" --argjson protocol "$protocol" \
         --argjson max_blob "$max_blob" --argjson recipients "$recipients" '
@@ -763,7 +783,7 @@ storage_sync_prepare_push() {
            projection:{body:$row.body,created_at:$created,
                        from_agent:$row.from_agent,to_agent:$row.to_agent}}' \
       | "$node_bin" "$cipher_helper" seal-batch "$pending" \
-      | jq -b -r --unbuffered --arg cipher "$cipher" --argjson key "$key_json" '
+      | _sqlite_sync_jq -r --unbuffered --arg cipher "$cipher" --argjson key "$key_json" '
           select(.type=="sync_seal_result")
           | [(.index|tostring),
              (if .status=="ok" and .envelope.v==1 and .envelope.cipher==$cipher
@@ -840,7 +860,7 @@ storage_sync_reconcile_push() {
     # and this fails closed rather than proceeding on stale values from the
     # previous iteration.
     jq_ok=0
-    eval "$(printf '%s\n' "$line" | jq -r -s '
+    eval "$(printf '%s\n' "$line" | _sqlite_sync_jq -r -s '
       if length != 1 then error("one JSON value per line") else .[0] end
       | "type=\(.type // "" | tostring | @sh)",
       "pos=\(.local_position // "" | tostring | @sh)",
@@ -1014,7 +1034,7 @@ storage_sync_apply_pull() {
   local jq_err page_count record_index field_name
   jq_err=$(mktemp "${TMPDIR:-/tmp}/agmsg-sync-jq.XXXXXX") || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
   _AGMSG_SYNC_JQ_ERR="$jq_err"
-  exec 3< <(jq -j -R -s '
+  exec 3< <(_sqlite_sync_jq -j -R -s '
     def fields: ["type","next_after","server_seq","id","server_received_at",
                  "envelope.v","envelope.cipher","envelope.key_id","envelope.blob",
                  "status","policy_revision","local_security_revision","reason",
@@ -1431,7 +1451,7 @@ storage_sync_prepare_read_state() {
   db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
   _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || { _sqlite_sync_why; return 13; }
   context=$(cat)
-  [ "$(printf '%s\n' "$context" | jq -r '
+  [ "$(printf '%s\n' "$context" | _sqlite_sync_jq -r '
     select(.type=="sync_read_context" and (.min_available_seq|type)=="string" and
       (.current_seq|type)=="string" and (.members|type)=="array" and
       (.local_agents|type)=="array" and (.local_agents|length)<=1000 and
@@ -1473,7 +1493,7 @@ storage_sync_prepare_read_state() {
   roster_seqs_jq='select((.roster_seqs|type)=="null" or ((.roster_seqs|type)=="array" and
       (.roster_seqs|length)<=10000 and all(.roster_seqs[];
         (type=="string") and test("\\A(0|[1-9][0-9]{0,18})\\z")))) | "ok"'
-  [ "$(printf '%s\n' "$context" | jq -r "$roster_seqs_jq" 2>/dev/null)" = ok ] || {
+  [ "$(printf '%s\n' "$context" | _sqlite_sync_jq -r "$roster_seqs_jq" 2>/dev/null)" = ok ] || {
     echo "agmsg: sqlite-sync: roster_seqs is not a list of at most 10000 canonical sequences (#968)" >&2
     _sqlite_sync_why; return 13
   }
@@ -1485,19 +1505,19 @@ storage_sync_prepare_read_state() {
       _sqlite_sync_why; return 13
     }
   done <<EOF
-$(printf '%s\n' "$context" | jq -r '.roster_seqs // [] | .[]')
+$(printf '%s\n' "$context" | _sqlite_sync_jq -r '.roster_seqs // [] | .[]')
 EOF
-  floor=$(printf '%s\n' "$context" | jq -r '.min_available_seq')
-  current=$(printf '%s\n' "$context" | jq -r '.current_seq')
+  floor=$(printf '%s\n' "$context" | _sqlite_sync_jq -r '.min_available_seq')
+  current=$(printf '%s\n' "$context" | _sqlite_sync_jq -r '.current_seq')
   case "$floor:$current" in *[!0-9:]*) _sqlite_sync_why; return 13 ;; esac
   _sqlite_sync_decimal_le "$floor" "$current" &&
     _sqlite_sync_decimal_le "$current" 9223372036854775807 || { _sqlite_sync_why; return 13; }
-  members=$(printf '%s\n' "$context" | jq -c '.members[]')
+  members=$(printf '%s\n' "$context" | _sqlite_sync_jq -c '.members[]')
   count=0
   while IFS= read -r member; do
     [ -n "$member" ] || continue
-    id=$(printf '%s\n' "$member" | jq -r '.member_id')
-    name=$(printf '%s\n' "$member" | jq -r '.name')
+    id=$(printf '%s\n' "$member" | _sqlite_sync_jq -r '.member_id')
+    name=$(printf '%s\n' "$member" | _sqlite_sync_jq -r '.name')
     printf '%s\n' "$id" | grep -Eq \
       '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || { _sqlite_sync_why; return 13; }
     values="${values}${values:+,}('$id','$(_sqlite_lit "$name")')"
@@ -1505,7 +1525,7 @@ EOF
   done <<EOF
 $members
 EOF
-  local_agents=$(printf '%s\n' "$context" | jq -r '.local_agents[]')
+  local_agents=$(printf '%s\n' "$context" | _sqlite_sync_jq -r '.local_agents[]')
   while IFS= read -r agent; do
     [ -n "$agent" ] || continue
     local_values="${local_values}${local_values:+,}('$(_sqlite_lit "$agent")')"
@@ -1527,7 +1547,7 @@ EOF
   # frontier advanced on evidence that was not supplied.
   local insert_roster_seqs="" roster_values
   roster_values=$(printf '%s\n' "$context" |
-    jq -r '[.roster_seqs // [] | .[] | "(" + . + ")"] | join(",")')
+    _sqlite_sync_jq -r '[.roster_seqs // [] | .[] | "(" + . + ")"] | join(",")')
   if [ -n "$roster_values" ]; then
     insert_roster_seqs="INSERT OR IGNORE INTO roster_read_seqs VALUES $roster_values;"
   fi
@@ -1701,8 +1721,8 @@ storage_sync_block_read_state() {
   local generation db tl input member reason
   generation=$(_sqlite_sync_generation "$team") || { _sqlite_sync_why; return 13; }
   db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"; input=$(cat)
-  member=$(printf '%s\n' "$input" | jq -r 'select(.type=="sync_read_block")|.member_id // empty')
-  reason=$(printf '%s\n' "$input" | jq -r 'select(.type=="sync_read_block")|.reason // empty')
+  member=$(printf '%s\n' "$input" | _sqlite_sync_jq -r 'select(.type=="sync_read_block")|.member_id // empty')
+  reason=$(printf '%s\n' "$input" | _sqlite_sync_jq -r 'select(.type=="sync_read_block")|.reason // empty')
   printf '%s\n' "$member" | grep -Eq \
     '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || { _sqlite_sync_why; return 13; }
   [ "$reason" = read-state-limit-exceeded ] || { _sqlite_sync_why; return 13; }
@@ -1724,7 +1744,7 @@ storage_sync_unblock_read_state() {
   local generation db tl input member
   generation=$(_sqlite_sync_generation "$team") || { _sqlite_sync_why; return 13; }
   db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"; input=$(cat)
-  member=$(printf '%s\n' "$input" | jq -r 'select(.type=="sync_read_unblock")|.member_id // empty')
+  member=$(printf '%s\n' "$input" | _sqlite_sync_jq -r 'select(.type=="sync_read_unblock")|.member_id // empty')
   printf '%s\n' "$member" | grep -Eq \
     '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || { _sqlite_sync_why; return 13; }
   agmsg_sqlite "$db" "BEGIN IMMEDIATE;
@@ -1758,12 +1778,12 @@ storage_sync_apply_read_state() {
   printf '%s\n' 'BEGIN IMMEDIATE; CREATE TEMP TABLE sync_read_assert(ok INTEGER CHECK(ok=1));' > "$sql_file"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    type=$(printf '%s\n' "$line" | jq -r '.type // empty')
+    type=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.type // empty')
     case "$type" in
       sync_read_snapshot)
         [ -z "$floor" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        floor=$(printf '%s\n' "$line" | jq -r '.min_available_seq // empty')
-        current=$(printf '%s\n' "$line" | jq -r '.current_seq // empty')
+        floor=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.min_available_seq // empty')
+        current=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.current_seq // empty')
         case "$floor:$current" in *[!0-9:]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
         _sqlite_sync_decimal_le "$floor" "$current" &&
           _sqlite_sync_decimal_le "$current" 9223372036854775807 || {
@@ -1772,8 +1792,8 @@ storage_sync_apply_read_state() {
         ;;
       sync_read_frontier)
         [ -n "$current" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        member=$(printf '%s\n' "$line" | jq -r '.member_id // empty')
-        seq=$(printf '%s\n' "$line" | jq -r '.server_seq // empty')
+        member=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.member_id // empty')
+        seq=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.server_seq // empty')
         case "$seq" in ''|*[!0-9]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
         printf '%s\n' "$member" | grep -Eq \
           '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
@@ -1792,8 +1812,8 @@ storage_sync_apply_read_state() {
         ;;
       sync_read_exact)
         [ -n "$current" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        member=$(printf '%s\n' "$line" | jq -r '.member_id // empty')
-        wire=$(printf '%s\n' "$line" | jq -r '.wire_id // empty')
+        member=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.member_id // empty')
+        wire=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.wire_id // empty')
         printf '%s\n' "$member" | grep -Eq \
           '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
           || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
