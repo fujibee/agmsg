@@ -46,10 +46,32 @@ source "$SCRIPT_DIR/../../../lib/hash.sh"
 # which only pulls it in when actas-lock.sh has not already been loaded.
 # shellcheck source=../../../lib/instance-id.sh
 source "$SCRIPT_DIR/../../../lib/instance-id.sh"
+# _agmsg_codex_seat_key_ok / _agmsg_codex_seat_record_stop and friends.
+# shellcheck source=./_seat-key.sh
+source "$SCRIPT_DIR/_seat-key.sh"
+
+# #1254: this launcher runs for exactly one seat (the codex-monitor.sh that
+# spawned it), never a project as a whole. SEAT_KEY reaches it the same way
+# AGMSG_CODEX_BRIDGE_APP_SERVER already did -- inherited from the monitor's
+# own exported environment -- and is validated before it touches any path,
+# the same as a freshly generated one would be (design review): an inherited
+# value is still an external input.
+SEAT_KEY="${AGMSG_CODEX_SEAT_KEY:-}"
+_agmsg_codex_seat_key_ok "$SEAT_KEY" || {
+  echo "codex-bridge-launcher: missing or malformed AGMSG_CODEX_SEAT_KEY -- refusing to run" >&2
+  exit 1
+}
+# PROJECT_HASH is kept -- but ONLY for matching a bridge's own lease file
+# below (_reap_orphan_bridges), which codex-bridge.js writes independently
+# from a sha1 of --project and has no notion of a seat. A role's live bridge
+# is still ONE per (project, pair-set) regardless of which seat's dispatcher
+# spawned it, so that match stays project-scoped on purpose. Everything else
+# below -- the request file, the dispatcher/child locks, the rate-limiter
+# identity -- is this seat's own coordination and is keyed by SEAT_KEY so
+# concurrent seats in the same project never contend with each other over it.
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
-REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
-DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$PROJECT_HASH"
-SERVER_PID_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
+REQUEST_FILE="$RUN_DIR/codex-bridge-request.$SEAT_KEY"
+DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$SEAT_KEY"
 
 # shellcheck source=../../../lib/node.sh
 source "$SCRIPT_DIR/../../../lib/node.sh"
@@ -71,14 +93,10 @@ PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PRO
 
 mkdir -p "$RUN_DIR"
 
-# The app-server is shared by every Codex TUI in a project. Bind dispatcher and
-# role-child lifetime to that shared process rather than whichever TUI happened
-# to start first. Tests/older launchers without the sidecar retain parent-PID
-# fallback behavior.
-LIFETIME_PID="$(cat "$SERVER_PID_FILE" 2>/dev/null || true)"
-if [ -z "$LIFETIME_PID" ] || ! _agmsg_pid_alive_local "$LIFETIME_PID"; then
-  LIFETIME_PID="$PARENT_PID"
-fi
+# #1254: the app-server belongs to exactly this seat now, so its lifetime is
+# simply this seat's TUI (PARENT_PID) -- there is no more "whichever TUI
+# happened to start the shared server first" to bind to instead.
+LIFETIME_PID="$PARENT_PID"
 
 # Resource currently owned by this process, so the EXIT trap releases whichever
 # lock was taken (dispatcher or role child) without a second trap installer.
@@ -283,6 +301,13 @@ if [ -z "$ROLE_PAIR" ]; then
     done <<< "$current_pairs"
     poll_sleep
   done
+  # #1254: this seat's TUI (LIFETIME_PID) is gone. Stop the seat's own
+  # app-server -- and ONLY the dispatcher does this, never a role child, so
+  # exactly one attempt is ever made per seat. _agmsg_codex_seat_record_stop
+  # re-validates pid, witness and cmdline itself immediately before signaling
+  # anything; a failed or indeterminate check leaves the server running and
+  # reports why, it never guesses (see _seat-key.sh).
+  ( set +e; _agmsg_codex_seat_record_stop "$RUN_DIR" "$SEAT_KEY" )
   exit 0
 fi
 
@@ -292,7 +317,7 @@ fi
 # starts with an empty known_pairs and re-spawns the ENTIRE child set, so without
 # this lock every dispatcher generation left another full set of children behind.
 # The lock makes those re-spawns exit on arrival instead of accumulating.
-CHILD_LOCK_RESOURCE="codex-child:$PROJECT_HASH:$(printf '%s' "$ROLE_PAIR" | agmsg_sha1)"
+CHILD_LOCK_RESOURCE="codex-child:$SEAT_KEY:$(printf '%s' "$ROLE_PAIR" | agmsg_sha1)"
 acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
 
 # Bounded, not open-ended. The dispatcher only spawns a child for a pair it has
@@ -394,7 +419,7 @@ BRIDGE_PAIRS_HASH="$(printf '%s' "$(printf '%s' "$_pair_hashes" | LC_ALL=C sort 
 # spawn-rate reservation below -- keys on BOTH halves, so nothing is scoped by
 # role alone (project-blind keying is the bug class that produced #721 and the
 # earlier .meta collision).
-IDENTITY_HASH="$(printf '%s\n%s' "$PROJECT_HASH" "$BRIDGE_PAIRS_HASH" | agmsg_sha1)"
+IDENTITY_HASH="$(printf '%s\n%s' "$SEAT_KEY" "$BRIDGE_PAIRS_HASH" | agmsg_sha1)"
 
 # How long to wait for a reaped bridge to exit before treating it as stuck. The
 # real bridge shuts down async on SIGTERM and holds its thread as writer until it

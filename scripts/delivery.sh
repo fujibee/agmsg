@@ -526,28 +526,44 @@ $pairs
 EOF
   fi
 
-  # Tear down the project's shared app-server too. It is keyed per project
-  # (codex-app-server.<hash>.{pid,port,version}); turning delivery off means no
-  # bridge needs it, and leaving it running keeps a stale port the next launch
-  # would have to recreate anyway. Only kill the recorded pid when its cmdline
-  # confirms it is our app-server (a recycled pid could be unrelated); drop the
-  # record either way.
-  local project_hash server_pidfile server_pid server_cmd
+  # #1254: tear down every LIVE seat-keyed app-server this project has
+  # recorded (design review point: delivery mode/settings stay per-project;
+  # only this runtime-record cleanup enumerates seats). Uses the same
+  # re-validate-then-stop check codex-bridge-launcher.sh uses when a seat's
+  # own TUI exits -- pid, witness and cmdline are all re-confirmed
+  # immediately before anything is signaled; an indeterminate check leaves
+  # that seat's server running and reports why, it never guesses.
+  local project_hash rec
   project_hash="$(printf '%s' "$project" | agmsg_sha1 2>/dev/null || true)"
   if [ -n "$project_hash" ]; then
-    server_pidfile="$RUN_DIR/codex-app-server.$project_hash.pid"
-    if [ -f "$server_pidfile" ]; then
-      server_pid="$(cat "$server_pidfile" 2>/dev/null || true)"
-      if [ -n "$server_pid" ] && _agmsg_pid_alive_local "$server_pid"; then
-        server_cmd="$(compat_get_cmdline "$server_pid" 2>/dev/null || true)"
-        case "$server_cmd" in
-          *codex*app-server*) kill "$server_pid" 2>/dev/null || true ;;
-        esac
+    if ! command -v _agmsg_codex_seat_record_read >/dev/null 2>&1; then
+      # shellcheck disable=SC1091
+      . "$SCRIPT_DIR/drivers/types/codex/_seat-key.sh"
+    fi
+    for rec in "$RUN_DIR"/codex-app-server.*.record; do
+      [ -f "$rec" ] || continue
+      _agmsg_codex_seat_record_read "$rec" || continue
+      [ "$SEAT_REC_PROJECT" = "$project_hash" ] || continue
+      local rec_seat_key
+      rec_seat_key="${rec#"$RUN_DIR"/codex-app-server.}"
+      rec_seat_key="${rec_seat_key%.record}"
+      ( set +e; _agmsg_codex_seat_record_stop "$RUN_DIR" "$rec_seat_key" ) || true
+    done
+
+    # Legacy project-keyed servers, from an install upgraded across #1254:
+    # NEVER touch a live one -- its seat keeps using it until it exits on its
+    # own (scope point 4). Only remove the record files once the recorded
+    # pid is confirmed dead.
+    local legacy_pidfile legacy_pid
+    legacy_pidfile="$RUN_DIR/codex-app-server.$project_hash.pid"
+    if [ -f "$legacy_pidfile" ]; then
+      legacy_pid="$(cat "$legacy_pidfile" 2>/dev/null || true)"
+      if [ -z "$legacy_pid" ] || ! _agmsg_pid_alive_local "$legacy_pid"; then
+        rm -f "$RUN_DIR/codex-app-server.$project_hash.pid" \
+              "$RUN_DIR/codex-app-server.$project_hash.port" \
+              "$RUN_DIR/codex-app-server.$project_hash.version" \
+              "$RUN_DIR/codex-app-server.$project_hash.log"
       fi
-      rm -f "$RUN_DIR/codex-app-server.$project_hash.pid" \
-            "$RUN_DIR/codex-app-server.$project_hash.port" \
-            "$RUN_DIR/codex-app-server.$project_hash.version" \
-            "$RUN_DIR/codex-app-server.$project_hash.log"
     fi
   fi
 

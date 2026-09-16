@@ -2595,26 +2595,34 @@ EOF
   grep -q -- "--inline-inbox" "$log"
 }
 
-@test "session-start.sh for codex writes the bridge request from a ws:// port file alone (#1056)" {
+@test "session-start.sh for codex writes the bridge request from a seat record alone (#1056)" {
   # No AGMSG_CODEX_BRIDGE_APP_SERVER, no unix:// token on the agent's cmdline
   # (AGMSG_AGENT_PID is "" per setup()), and no .sock file -- the first three
-  # app-server probes all come up empty. Only the port file _app-server.sh's
-  # _agmsg_codex_app_server_url reads is present, carrying a ws:// port.
+  # app-server probes all come up empty. Only the seat record
+  # _app-server.sh's _agmsg_codex_app_server_url reads (via AGMSG_CODEX_SEAT_
+  # KEY, #1254) is present, carrying a ws:// port.
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   _seed_role_record team alice thread-ws-1056 "$TEST_PROJECT" codex
 
   # shellcheck disable=SC1091
   source "$SCRIPTS/lib/hash.sh"
-  local hash; hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+  local seat_key project_hash
+  seat_key="$(_agmsg_codex_seat_key_new)"
+  project_hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
   mkdir -p "$TEST_SKILL_DIR/run"
-  printf '50505' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  _agmsg_codex_seat_record_write \
+    "$(_agmsg_codex_seat_record_path "$TEST_SKILL_DIR/run" "$seat_key")" \
+    "$project_hash" "12345" "50505" "" "" "codex-cli-test"
 
   ( unset AGMSG_CODEX_BRIDGE_APP_SERVER
     AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+    AGMSG_CODEX_SEAT_KEY="$seat_key" \
     CODEX_THREAD_ID="thread-ws-1056" \
       bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null )
 
-  local request_file="$TEST_SKILL_DIR/run/codex-bridge-request.$hash"
+  local request_file="$TEST_SKILL_DIR/run/codex-bridge-request.$seat_key"
   [ -f "$request_file" ]
   grep -q -- "ws://127.0.0.1:50505" "$request_file"
 }
@@ -3239,8 +3247,16 @@ JSON
 
   # shellcheck disable=SC1090
   source "$SCRIPTS/lib/hash.sh"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
   mkdir -p "$TEST_SKILL_DIR/run"
-  cp "$portfile" "$TEST_SKILL_DIR/run/codex-app-server.$(printf '%s' "$TEST_PROJECT" | agmsg_sha1).port"
+  local seat_key project_hash silent_port
+  seat_key="$(_agmsg_codex_seat_key_new)"
+  project_hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  silent_port="$(cat "$portfile")"
+  _agmsg_codex_seat_record_write \
+    "$(_agmsg_codex_seat_record_path "$TEST_SKILL_DIR/run" "$seat_key")" \
+    "$project_hash" "$listener" "$silent_port" "" "" "codex-cli-test"
 
   local start finish elapsed
   start=$(date +%s)
@@ -3281,8 +3297,15 @@ JSON
 
   # shellcheck disable=SC1090
   source "$SCRIPTS/lib/hash.sh"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
   mkdir -p "$TEST_SKILL_DIR/run"
-  printf '1' > "$TEST_SKILL_DIR/run/codex-app-server.$(printf '%s' "$TEST_PROJECT" | agmsg_sha1).port"
+  local seat_key project_hash
+  seat_key="$(_agmsg_codex_seat_key_new)"
+  project_hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  _agmsg_codex_seat_record_write \
+    "$(_agmsg_codex_seat_record_path "$TEST_SKILL_DIR/run" "$seat_key")" \
+    "$project_hash" "$$" "1" "" "" "codex-cli-test"
 
   AGMSG_NODE="$fake" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
@@ -3309,7 +3332,14 @@ JSON
   source "$SCRIPTS/lib/role-session.sh"
   agmsg_role_session_record team alice thr-alice "$TEST_PROJECT" codex
   [ -n "$(agmsg_role_session_uuid team alice)" ]
-  printf '1' > "$TEST_SKILL_DIR/run/codex-app-server.$(printf '%s' "$TEST_PROJECT" | agmsg_sha1).port"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+  local seat_key project_hash
+  seat_key="$(_agmsg_codex_seat_key_new)"
+  project_hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  _agmsg_codex_seat_record_write \
+    "$(_agmsg_codex_seat_record_path "$TEST_SKILL_DIR/run" "$seat_key")" \
+    "$project_hash" "$$" "1" "" "" "codex-cli-test"
 
   local fake="$TEST_SKILL_DIR/fake-node-loaded"
   { printf '#!/usr/bin/env bash\n'; printf 'printf %%s\\\\n thr-alice\n'; } > "$fake"

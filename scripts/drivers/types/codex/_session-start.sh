@@ -164,8 +164,18 @@ agmsg_session_start() {
   [ -n "$app_server" ] || exit 0
 
   if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then
-    project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
-    request_file="$RUN_DIR/codex-bridge-request.$project_hash"
+    # #1254: the request file is this SEAT's own, never a project-wide one --
+    # AGMSG_CODEX_SEAT_KEY reaches this hook the same way AGMSG_CODEX_BRIDGE_
+    # APP_SERVER does (inherited from the app-server's own environment under
+    # --remote). Validated before it touches a path, same as everywhere else
+    # a seat key arrives from the environment (design review).
+    if ! command -v _agmsg_codex_seat_key_ok >/dev/null 2>&1; then
+      # shellcheck disable=SC1091
+      . "$SKILL_DIR/scripts/drivers/types/codex/_seat-key.sh"
+    fi
+    seat_key="${AGMSG_CODEX_SEAT_KEY:-}"
+    _agmsg_codex_seat_key_ok "$seat_key" || exit 0
+    request_file="$RUN_DIR/codex-bridge-request.$seat_key"
     tmp_request="$request_file.$$"
     mkdir -p "$RUN_DIR" 2>/dev/null || true
     printf '%s\t%s\t%s\n' "$TYPE" "$thread_id" "$app_server" > "$tmp_request"
