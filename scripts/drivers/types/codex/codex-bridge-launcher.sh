@@ -179,9 +179,9 @@ resolve_seat_identity() {
   while IFS="$TAB" read -r team name; do
     [ -n "$team" ] || continue
     agmsg_role_session_load "$team" "$name" 2>/dev/null || true
-    [ -n "$AGMSG_ROLE_SESSION_UUID" ] || continue
-    [ "$AGMSG_ROLE_SESSION_OWNER" = "$SEAT_OWNER" ] || continue
-    record_project="$AGMSG_ROLE_SESSION_PROJECT"
+    [ -n "${AGMSG_ROLE_SESSION_UUID:-}" ] || continue
+    [ "${AGMSG_ROLE_SESSION_OWNER:-}" = "$SEAT_OWNER" ] || continue
+    record_project="${AGMSG_ROLE_SESSION_PROJECT:-}"
     record_project_phys="$(agmsg_canonical_path "$record_project" 2>/dev/null || printf '%s' "$record_project")"
     [ "$record_project_phys" = "$PROJECT_PHYS" ] || continue
     printf '%s\t%s\n' "$team" "$name"
