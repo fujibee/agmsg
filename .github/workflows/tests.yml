@@ -853,6 +853,111 @@ jobs:
           fi
           bats --version
 
+      # TEMPORARY, measurement only (agmsgd design ledger M-y). Not a product
+      # change: this step and the one after it are removed once the numbers
+      # are captured, and this branch is never merged. Runs only on one leg
+      # (this one already installs sqlite3) so the matrix pays for it once.
+      # Same two-process contention shape as the macOS/Linux measurements for
+      # this row, including the kill -9 recovery case, so the three systems
+      # are comparable.
+      - name: M-y lock measurement (temporary, diagnostic only)
+        if: needs.changes.outputs.docs_only != 'true' && matrix.leg == 'install helpers'
+        run: |
+          LOG="$RUNNER_TEMP/m-y-windows-locks.log"
+          : > "$LOG"
+
+          echo "=== mkdir race (2 processes) ===" >> "$LOG"
+          LOCKDIR="$RUNNER_TEMP/m-y-lockdir"
+          rm -rf "$LOCKDIR"
+          race() {
+            local id="$1" hold="$2" attempts=0
+            until mkdir "$LOCKDIR" 2>/dev/null; do
+              attempts=$((attempts+1))
+              if [ "$attempts" -gt 4000 ]; then
+                echo "$id FAILED_TO_ACQUIRE attempts=$attempts $(date +%s.%N)" >> "$LOG"
+                return 1
+              fi
+              sleep 0.005
+            done
+            echo "$id ACQUIRED attempts=$attempts $(date +%s.%N) pid=$$" >> "$LOG"
+            echo "$$" > "$LOCKDIR/owner"
+            sleep "$hold"
+            echo "$id RELEASING $(date +%s.%N)" >> "$LOG"
+            rm -rf "$LOCKDIR"
+          }
+          race A 2 & PA=$!
+          race B 2 & PB=$!
+          wait "$PA" "$PB"
+
+          echo "=== mkdir re-entrancy, same process ===" >> "$LOG"
+          rm -rf "$RUNNER_TEMP/m-y-lockdir2"
+          mkdir "$RUNNER_TEMP/m-y-lockdir2" && echo "first mkdir: OK" >> "$LOG"
+          mkdir "$RUNNER_TEMP/m-y-lockdir2" 2>>"$LOG"
+          echo "second mkdir (same process): exit=$?" >> "$LOG"
+          rm -rf "$RUNNER_TEMP/m-y-lockdir2"
+
+          echo "=== mkdir crash recovery (kill -9 mid-hold) ===" >> "$LOG"
+          rm -rf "$RUNNER_TEMP/m-y-lockdir3"
+          ( mkdir "$RUNNER_TEMP/m-y-lockdir3"
+            echo $$ > "$RUNNER_TEMP/m-y-lockdir3/owner"
+            sleep 60 ) &
+          HOLDER=$!
+          sleep 2
+          echo "holder pid=$HOLDER" >> "$LOG"
+          kill -9 "$HOLDER" 2>>"$LOG" || true
+          sleep 1
+          if [ -d "$RUNNER_TEMP/m-y-lockdir3" ]; then
+            echo "lockdir persists after kill -9: YES" >> "$LOG"
+          else
+            echo "lockdir persists after kill -9: NO (auto-removed)" >> "$LOG"
+          fi
+
+          echo "=== sqlite BEGIN IMMEDIATE race (2 processes) ===" >> "$LOG"
+          DB="$RUNNER_TEMP/m-y-lock.db"
+          rm -f "$DB" "$DB-wal" "$DB-shm"
+          sqlite3 "$DB" "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS t (id INTEGER);"
+          sqlrace() {
+            local id="$1" hold="$2"
+            { echo ".timeout 5000"
+              echo "BEGIN IMMEDIATE;"
+              echo "SELECT '$id ACQUIRED ' || strftime('%s.%f','now');"
+              sleep "$hold"
+              echo "COMMIT;"
+              echo "SELECT '$id RELEASED ' || strftime('%s.%f','now');"
+            } | sqlite3 "$DB" >> "$LOG" 2>>"$LOG"
+          }
+          sqlrace A 2 & PA=$!
+          sleep 0.2
+          sqlrace B 2 & PB=$!
+          wait "$PA" "$PB"
+
+          echo "=== sqlite nested BEGIN IMMEDIATE, same connection ===" >> "$LOG"
+          sqlite3 "$DB" "BEGIN IMMEDIATE; BEGIN IMMEDIATE;" >> "$LOG" 2>&1
+          echo "nested begin exit=$?" >> "$LOG"
+
+          echo "=== sqlite crash recovery (kill -9 mid-hold) ===" >> "$LOG"
+          { echo "BEGIN IMMEDIATE;"
+            echo "SELECT 'HOLDING';"
+            sleep 60
+          } | sqlite3 "$DB" > "$RUNNER_TEMP/m-y-sqlite-holder.out" 2>&1 &
+          SQLPID=$!
+          sleep 2
+          echo "sqlite holder pid=$SQLPID" >> "$LOG"
+          kill -9 "$SQLPID" 2>>"$LOG" || true
+          sleep 1
+          sqlite3 "$DB" "BEGIN IMMEDIATE; SELECT 'RECOVERED'; COMMIT;" >> "$LOG" 2>&1
+          echo "recovery attempt exit=$?" >> "$LOG"
+
+          cat "$LOG"
+
+      - name: Upload M-y lock measurement (temporary, diagnostic only)
+        if: needs.changes.outputs.docs_only != 'true' && matrix.leg == 'install helpers' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m-y-windows-locks
+          path: ${{ runner.temp }}/m-y-windows-locks.log
+          retention-days: 3
+
       - name: Run tests
         if: needs.changes.outputs.docs_only != 'true'
         run: |
