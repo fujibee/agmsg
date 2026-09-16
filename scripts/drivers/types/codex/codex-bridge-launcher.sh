@@ -72,10 +72,6 @@ _agmsg_codex_seat_key_ok "$SEAT_KEY" || {
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$SEAT_KEY"
 DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$SEAT_KEY"
-# The role-session owner is normally the seat key carried by the monitored
-# app-server.  An explicit owner supplied by an actas flow remains authoritative
-# when one is present.
-SEAT_OWNER="${AGMSG_ROLE_SESSION_OWNER:-$SEAT_KEY}"
 
 # shellcheck source=../../../lib/node.sh
 source "$SCRIPT_DIR/../../../lib/node.sh"
@@ -169,23 +165,34 @@ resolve_identity() {  # prints "team<TAB>name" lines for the project's codex rol
     | sort -u
 }
 
-# Restrict the dispatcher to records belonging to THIS seat.  identities.sh is
-# project-wide, so it is only a candidate list; the role-session owner is the
-# seat-specific fact.  An empty result is deliberately not replaced with the
-# project list: the role is claimed after the TUI starts, and until its record
-# appears this dispatcher has no safe pair to launch.
-resolve_seat_identity() {
-  local identity="$1" team name record_project record_project_phys
-  while IFS="$TAB" read -r team name; do
-    [ -n "$team" ] || continue
-    agmsg_role_session_load "$team" "$name" 2>/dev/null || true
-    [ -n "${AGMSG_ROLE_SESSION_UUID:-}" ] || continue
-    [ "${AGMSG_ROLE_SESSION_OWNER:-}" = "$SEAT_OWNER" ] || continue
-    record_project="${AGMSG_ROLE_SESSION_PROJECT:-}"
-    record_project_phys="$(agmsg_canonical_path "$record_project" 2>/dev/null || printf '%s' "$record_project")"
-    [ "$record_project_phys" = "$PROJECT_PHYS" ] || continue
-    printf '%s\t%s\n' "$team" "$name"
-  done <<< "$identity" | sort -u
+# Read the seat's own request record. SessionStart writes the already-narrowed
+# role pair after the TUI claims it; a missing or ambiguous pair is not a
+# reason to consult the project-wide identity list.
+read_seat_request() {
+  REQUEST_THREAD=""
+  REQUEST_APP_SERVER="$APP_SERVER"
+  REQUEST_PAIR=""
+  local request_type="" request_team="" request_name=""
+  [ -f "$REQUEST_FILE" ] || return 1
+  IFS="$TAB" read -r request_type REQUEST_THREAD REQUEST_APP_SERVER request_team request_name \
+    < "$REQUEST_FILE" 2>/dev/null || return 1
+  [ "$request_type" = "$TYPE" ] || return 1
+  [ -n "$REQUEST_THREAD" ] || return 1
+  [ -n "$request_team" ] && [ -n "$request_name" ] || return 1
+  REQUEST_PAIR="$request_team$TAB$request_name"
+  return 0
+}
+
+request_pair_matches_record() {
+  local pair="$1" team name record_project record_project_phys
+  IFS="$TAB" read -r team name <<EOF
+$pair
+EOF
+  agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+  [ "${AGMSG_ROLE_SESSION_UUID:-}" = "$REQUEST_THREAD" ] || return 1
+  record_project="${AGMSG_ROLE_SESSION_PROJECT:-}"
+  record_project_phys="$(agmsg_canonical_path "$record_project" 2>/dev/null || printf '%s' "$record_project")"
+  [ "$record_project_phys" = "$PROJECT_PHYS" ]
 }
 
 # identities.sh opens and parses EVERY teams/*/config.json on every call: two
@@ -302,10 +309,14 @@ if [ -z "$ROLE_PAIR" ]; then
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
-    seat_pairs="$(resolve_seat_identity "$current_pairs")"
+    seat_pairs=""
+    if read_seat_request && request_pair_matches_record "$REQUEST_PAIR" \
+      && pair_registered "$REQUEST_PAIR" "$current_pairs"; then
+      seat_pairs="$REQUEST_PAIR"
+    fi
     [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
     if [ -z "$seat_pairs" ]; then
-      echo "codex-bridge-launcher: this seat has no recorded role yet; waiting without dispatch" >&2
+      echo "codex-bridge-launcher: this seat has no unambiguous request pair; waiting without dispatch" >&2
       # No owned pair is authoritative: forget any children this seat used to
       # own so a later re-registration can be dispatched again.
       known_pairs=""
@@ -750,16 +761,30 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # discover the live TUI thread via thread/loaded/list.
   thread_id="loaded"
   req_app_server="$APP_SERVER"
+  request_pair=""
   if [ -f "$REQUEST_FILE" ]; then
-    _rtype=""; _rthread=""; _rapp=""
-    IFS="$TAB" read -r _rtype _rthread _rapp < "$REQUEST_FILE" 2>/dev/null || true
+    _rtype=""; _rthread=""; _rapp=""; _rteam=""; _rname=""
+    IFS="$TAB" read -r _rtype _rthread _rapp _rteam _rname < "$REQUEST_FILE" 2>/dev/null || true
     [ -n "${_rthread:-}" ] && thread_id="$_rthread"
     [ -n "${_rapp:-}" ] && req_app_server="$_rapp"
+    if [ -n "${_rteam:-}" ] && [ -n "${_rname:-}" ]; then
+      request_pair="$_rteam$TAB$_rname"
+    fi
+  fi
+  if [ "$request_pair" != "$ROLE_PAIR" ]; then
+    if [ -f "$pidfile" ]; then
+      old_pid=""
+      IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
+      _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
+    fi
+    # The seat's request no longer names this role (or is ambiguous/missing).
+    # Retire the old child so a role change cannot leave two bridges alive.
+    exit 0
   fi
 
-  # A child launcher is role-scoped. The project request file only supplies a
-  # current app-server endpoint; its thread belongs to whichever role most
-  # recently fired SessionStart and must never override this role's seat.
+  # A child launcher is role-scoped. The seat request supplies the pair and
+  # thread selected by SessionStart; the role-session record is re-read and
+  # must agree before this child can bind a bridge.
   IFS="$TAB" read -r team name <<EOF
 $ids
 EOF
@@ -768,7 +793,8 @@ EOF
   rec_project="$AGMSG_ROLE_SESSION_PROJECT"
   rec_owner="$AGMSG_ROLE_SESSION_OWNER"
   rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
-  if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ]; then
+  if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ] \
+    || [ "$rec_thread" != "${_rthread:-}" ]; then
     # A role with no record (or one seated in another project) stays
     # deliberately unsubscribed (#150) and waits for a record to appear. That
     # wait is open-ended, so it has to be the cheapest path in the file.

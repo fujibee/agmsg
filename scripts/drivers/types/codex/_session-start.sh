@@ -178,7 +178,19 @@ agmsg_session_start() {
     request_file="$RUN_DIR/codex-bridge-request.$seat_key"
     tmp_request="$request_file.$$"
     mkdir -p "$RUN_DIR" 2>/dev/null || true
-    printf '%s\t%s\t%s\n' "$TYPE" "$thread_id" "$app_server" > "$tmp_request"
+    request_pair_count=$(printf '%s\n' "$PAIRS" | grep -c . || true)
+    if [ "$request_pair_count" -eq 1 ]; then
+      IFS=$'\t' read -r request_team request_name <<EOF
+$PAIRS
+EOF
+      printf '%s\t%s\t%s\t%s\t%s\n' "$TYPE" "$thread_id" "$app_server" \
+        "$request_team" "$request_name" > "$tmp_request"
+    else
+      # A seat with zero or multiple matching roles has no unambiguous pair;
+      # publish the thread and endpoint but leave the pair empty so the
+      # out-of-sandbox dispatcher waits instead of fanning out project roles.
+      printf '%s\t%s\t%s\t\n' "$TYPE" "$thread_id" "$app_server" > "$tmp_request"
+    fi
     mv "$tmp_request" "$request_file"
     exit 0
   fi

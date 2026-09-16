@@ -150,18 +150,29 @@ teardown() {
 
 # Write a role-session record (team, agent) -> thread for a project.
 put_record() {
-  local owner="${6:-$AGMSG_CODEX_SEAT_KEY}"
   SKILL_DIR="$TEST_SKILL_DIR" bash -c \
-    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6" "$7"' \
-    _ "$SCRIPTS" "$1" "$2" "$3" "$4" "$5" "$owner"
+    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6"' \
+    _ "$SCRIPTS" "$@"
+  request_file="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  request_pair=""
+  if [ -f "$request_file" ]; then
+    IFS=$'\t' read -r _rt _rthread _rapp _rteam _rname < "$request_file" || true
+    [ -n "${_rteam:-}" ] && [ -n "${_rname:-}" ] && request_pair="$_rteam"$'\t'"$_rname"
+  fi
+  if [ -z "$request_pair" ] || [ "$request_pair" = "$1"$'\t'"$2" ]; then
+    printf 'codex\t%s\tws://127.0.0.1:1\t%s\t%s\n' "$3" "$1" "$2" \
+      > "$request_file"
+  fi
 }
 
 write_request() {
   local thread="$1"
+  local pair_team="${2:-}" pair_name="${3:-}"
   # #1254: the request file is keyed by AGMSG_CODEX_SEAT_KEY now, not a
   # project hash -- this file's setup() exports one fixed key for the whole
   # suite, which every launcher invocation below inherits.
-  printf 'codex\t%s\tws://127.0.0.1:1\n' "$thread" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  printf 'codex\t%s\tws://127.0.0.1:1\t%s\t%s\n' "$thread" "$pair_team" "$pair_name" \
+    > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
 }
 
 # Start the dispatcher with enough lifetime to remain eligible under a loaded
@@ -213,10 +224,10 @@ run_launcher() {
 @test "launcher: passes the actas owner recorded by the claim" {
   setup_live_owner "$RUN_DIR" owner-session
   bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
-  export AGMSG_ROLE_SESSION_OWNER="$(grep '^owner=' "$RUN_DIR"/role-session.* 2>/dev/null | head -1 | cut -d= -f2-)"
+  write_request owner-session team alice
   run_launcher
   [ -f "$CAPTURE" ]
-  grep -q -- "--owner $AGMSG_ROLE_SESSION_OWNER" "$CAPTURE"
+  grep -q -- "--owner owner-session" "$CAPTURE"
 }
 
 @test "launcher: passes the active storage override as a workspace root" {
@@ -264,29 +275,10 @@ run_launcher() {
   wait "$driver_pid" 2>/dev/null || true
 }
 
-@test "launcher: starts one bridge per recorded role and thread (#150 phase 2)" {
+@test "launcher: dispatches only the role recorded for this seat (#1280)" {
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team alice thread-alice "$PROJ" codex
   put_record team bob thread-bob "$PROJ" codex
-  run_launcher
-
-  local i lines=0
-  for i in {1..30}; do
-    if [ -f "$CAPTURE" ]; then
-      lines=$(wc -l < "$CAPTURE" | tr -d ' ')
-    fi
-    [ "$lines" -ge 2 ] && break
-    sleep 0.1
-  done
-  [ "$lines" -ge 2 ]
-  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
-  grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
-}
-
-@test "launcher: dispatches only the role recorded for this seat" {
-  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
-  put_record team alice thread-alice "$PROJ" codex
-  put_record team bob thread-bob "$PROJ" codex other-seat
   run_launcher
 
   [ -f "$CAPTURE" ]
@@ -355,16 +347,15 @@ run_launcher() {
   wait "$parent_b" 2>/dev/null || true
 }
 
-@test "launcher: project request thread never overrides per-role recorded threads (#150 phase 2)" {
+@test "launcher: request pair selects the matching recorded thread (#150 phase 2)" {
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team alice thread-alice "$PROJ" codex
   put_record team bob thread-bob "$PROJ" codex
-  write_request thread-bob
+  write_request thread-bob team bob
   run_launcher
 
-  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
   grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
-  ! grep -q -- $'--pair team\talice --thread thread-bob' "$CAPTURE"
+  ! grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
 }
 
 @test "launcher: role record update keeps child scoped to the same pair" {
@@ -483,11 +474,10 @@ wait_for_child_count() {
   wait "$parent" 2>/dev/null || true
 }
 
-@test "launcher: the identity cache still sees a role added mid-loop (#466)" {
+@test "launcher: a role added mid-loop is used only after its request arrives (#466)" {
   # The poll no longer re-runs identities.sh every tick; it serves a cache
-  # guarded on the team configs' mtimes. This is the test that fails if that
-  # guard never invalidates: a role joined while the dispatcher is already
-  # looping has to be picked up anyway.
+  # guarded on the team configs' mtimes. A role joined while the dispatcher is
+  # already looping is eligible only when this seat's request names it.
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=20
   sleep 25 3>&- & local parent=$!
@@ -506,6 +496,9 @@ wait_for_child_count() {
   sleep 3
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team bob thread-bob "$PROJ" codex
+  # SessionStart publishes the seat's narrowed pair. Until that request is
+  # written, the project-wide identity is deliberately ignored.
+  write_request thread-bob team bob
   for i in {1..100}; do
     grep -q -- $'--pair team\tbob' "$CAPTURE" 2>/dev/null && break
     sleep 0.1
