@@ -924,6 +924,8 @@ jobs:
           DB="$RUNNER_TEMP/m-y-lock.db"
           rm -f "$DB" "$DB-wal" "$DB-shm"
           sqlite3 "$DB" "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS t (id INTEGER);"
+          MARKERDIR="$RUNNER_TEMP/m-y-release-markers"
+          mkdir -p "$MARKERDIR"
           sqlrace() {
             local id="$1" hold="$2" rc
             { echo ".timeout 5000"
@@ -940,6 +942,12 @@ jobs:
             # attempting COMMIT, to tell a real release failure apart from a
             # log-interleaving artifact between the two concurrent appends.
             echo "$id sqlite3_exit=$rc $(date +%s.%N)" >> "$LOG"
+            # Added per pm (M-y follow-up, second round): a FILE write,
+            # independent of the log's own stdout capture, so the artifact
+            # itself answers whether the release EVENT happened even if its
+            # stdout line was lost -- separating "lost output" from "the
+            # event never happened" instead of guessing between them.
+            echo "released rc=$rc $(date +%s.%N)" > "$MARKERDIR/${id}-$(date +%s%N).marker"
           }
           sqlrace A 2 & PA=$!
           sleep 0.2
@@ -970,7 +978,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: m-y-windows-locks
-          path: ${{ runner.temp }}/m-y-windows-locks.log
+          path: |
+            ${{ runner.temp }}/m-y-windows-locks.log
+            ${{ runner.temp }}/m-y-release-markers/
           retention-days: 3
 
       - name: Run tests
