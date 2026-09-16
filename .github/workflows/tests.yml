@@ -983,6 +983,51 @@ jobs:
             ${{ runner.temp }}/m-y-release-markers/
           retention-days: 3
 
+      # TEMPORARY, measurement only (agmsgd design ledger M-ab). Not a product
+      # change: this step and the one after it are removed once the numbers
+      # are captured, and this branch is never merged. Same kill -9 recovery
+      # shape as the macOS/Linux measurements for this row, so the three
+      # systems are comparable: does a background `sleep N &` (the candidate
+      # bash-side cut-off/expiry mechanism, not timeout(1)) outlive the
+      # process that started it, on git-bash?
+      - name: M-ab orphan-survival measurement (temporary, diagnostic only)
+        if: needs.changes.outputs.docs_only != 'true' && matrix.leg == 'install helpers'
+        run: |
+          LOG="$RUNNER_TEMP/m-ab-windows-orphan.log"
+          : > "$LOG"
+
+          echo "=== does a background sleep survive kill -9 of its starting process? ===" >> "$LOG"
+          bash -c 'sleep 30 & echo $! > "$RUNNER_TEMP/m-ab-sleeper.pid"; sleep 100' &
+          RESERVING_PID=$!
+          sleep 1
+          SLEEPER=$(cat "$RUNNER_TEMP/m-ab-sleeper.pid")
+          echo "reserving_process_pid=$RESERVING_PID sleeper_pid=$SLEEPER" >> "$LOG"
+          ps -o pid,ppid,stat,comm -p "$RESERVING_PID" >> "$LOG" 2>&1 || echo "ps on reserving pid failed" >> "$LOG"
+          ps -o pid,ppid,stat,comm -p "$SLEEPER" >> "$LOG" 2>&1 || echo "ps on sleeper pid failed" >> "$LOG"
+
+          echo "-- killing the reserving process (kill -9, simulated crash) --" >> "$LOG"
+          kill -9 "$RESERVING_PID" 2>>"$LOG" || true
+          sleep 1
+
+          echo "-- checking sleeper after parent death --" >> "$LOG"
+          ps -o pid,ppid,stat,comm -p "$SLEEPER" >> "$LOG" 2>&1
+          if kill -0 "$SLEEPER" 2>/dev/null; then
+            echo "RESULT: sleeper STILL ALIVE (orphaned)" >> "$LOG"
+          else
+            echo "RESULT: sleeper is dead (died with the reserving process/group)" >> "$LOG"
+          fi
+          kill "$SLEEPER" 2>/dev/null || true
+
+          cat "$LOG"
+
+      - name: Upload M-ab orphan-survival measurement (temporary, diagnostic only)
+        if: needs.changes.outputs.docs_only != 'true' && matrix.leg == 'install helpers' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m-ab-windows-orphan
+          path: ${{ runner.temp }}/m-ab-windows-orphan.log
+          retention-days: 3
+
       - name: Run tests
         if: needs.changes.outputs.docs_only != 'true'
         run: |
