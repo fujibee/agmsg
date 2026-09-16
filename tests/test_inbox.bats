@@ -339,7 +339,7 @@ delivered_to_operator() {
 
 # --- #1003: codex mid-turn delivery via PostToolUse emits the shape 0.149.1 wants ---
 #
-# These guard the "broken but green" tl named: a test that only checks a
+# These guard the "broken but green" case: a test that only checks a
 # PostToolUse hook entry EXISTS stays green even if check-inbox emits the wrong
 # shape. So they assert the SHAPE check-inbox actually emits, per event. (Whether
 # the model then receives it is unobserved — see the PR; measured here is only the
@@ -408,4 +408,65 @@ _codex_proj() {
   [ "$status" -eq 0 ]
   grep -q 'additive' <<<"$output"
   [ "$(pair_unread_count ctm alice)" -eq 0 ]
+}
+
+@test "inbox: an unread backlog past the argv ceiling still delivers (#1045/#777, stdin)" {
+  # The old inline-SQL path handed the whole backlog to sqlite3 as ONE argv
+  # element; once that exceeded the OS argument limit the call failed and the
+  # backlog could never clear itself. Building the statement into a temp file and
+  # passing it on stdin removes the ceiling.
+  #
+  # The backlog is built from many NORMAL-sized messages -- the real shape of the
+  # bug -- so the fixture itself never puts an oversized argument on argv. Linux
+  # caps a single argv element at 128 KB (MAX_ARG_STRLEN), which macOS does not;
+  # the earlier 200 KB single body passed on macOS and failed on the ubuntu
+  # runner with "Argument list too long". The COUNT is derived from the measured
+  # ARG_MAX so the delivered batch is guaranteed to exceed it ON THIS host -- a
+  # fixed size can sit under the limit where ARG_MAX is larger and pass green
+  # without exercising the ceiling at all.
+  local arg_max body count total i last filler
+  arg_max="$(getconf ARG_MAX)"
+  body=90000                                    # one message body, < 128 KB per-arg cap
+  count=$(( arg_max / body + 3 ))               # total payload > ARG_MAX, with margin
+  total=$(( count * body ))
+  [ "$total" -gt "$arg_max" ]                   # guarantee the ceiling is actually exceeded
+  filler="$(head -c "$body" /dev/zero | tr '\0' x)"
+  for i in $(seq 1 "$count"); do
+    bash "$SCRIPTS/send.sh" testteam bob alice "MSG${i}-${filler}-END${i}" >/dev/null
+  done
+  last="$count"
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  [ "$status" -eq 0 ]
+  grep -q "${count} new message(s):" <<<"$output"
+  # the first and last actually came through -- not a truncated or empty head
+  grep -q "MSG1-" <<<"$output"
+  grep -q "END${last}" <<<"$output"
+}
+
+# --- argv-length regression (#777) ---------------------------------------
+#
+# check-inbox.sh used to embed the whole unread backlog into ONE argv element
+# for `sqlite3 ':memory:' "<embedded SQL>"`. 100 messages of ~2000 bytes each
+# is about 200,000 bytes of body alone, well past Linux's MAX_ARG_STRLEN
+# (131,072 bytes -- measured directly in this same suite's environment, and
+# documented in scripts/history.sh; the ceiling is smaller still on Windows:
+# 32,767 characters). Before the fix this failed every single run with
+# "Argument list too long" -- the backlog that triggered it never shrinks on
+# its own, so it never recovered.
+
+@test "check-inbox: a backlog large enough to exceed the OS argv ceiling still delivers and marks read (#777)" {
+  bulk_send_direct testteam bob alice 100 2000 CIBIG
+
+  # Not delivered_to_operator() here: that helper embeds the WHOLE payload
+  # into its own single-shot json_valid('$esc') probe (an sqlite3 argv
+  # element again, just on the test side), so a body this size would trip
+  # the identical #777 ceiling one layer up and fail for a reason that has
+  # nothing to do with check-inbox.sh. Reading raw stdout directly, the way
+  # "multiple identities poll only the first agent's exact team rows" above
+  # already does, keeps this test pinned on the script under test.
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code /tmp/project-a"
+  [ "$status" -eq 0 ]
+  grep -qF -- "CIBIG-0-" <<< "$output"
+  grep -qF -- "CIBIG-99-" <<< "$output"
+  [ "$(unread_count alice)" -eq 0 ]
 }

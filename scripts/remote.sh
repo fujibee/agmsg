@@ -1081,9 +1081,16 @@ _remote_resolve_team_id() {
   # malformed candidate -- and it needs to reach the operator, not get
   # replaced by a single line that names two different causes at once and
   # lets the reader guess which one happened.
+  # The status is captured ON the assignment, not read bare on the next line:
+  # under errexit a bare failing assignment ends the shell before either the
+  # `status=$?` or the message below it (#1025). Today's sole caller happens to
+  # suppress that (its `|| exit 1` disables errexit inside the substitution —
+  # measured on bash 5.3 and 3.2), but a bare call dies silently on both, and
+  # this function should not depend on how it is invoked for its own error
+  # report to exist.
+  status=0
   out="$("$SCRIPT_DIR/remote-sync.sh" resolve-team \
-    --endpoint "$endpoint" --name "$name")"
-  status=$?
+    --endpoint "$endpoint" --name "$name")" || status=$?
   if [ "$status" -ne 0 ]; then
     echo "agmsg: could not look up '$name'" >&2
     return 1
@@ -2871,10 +2878,55 @@ cmd_status() {
 
 # --- sync lifecycle --------------------------------------------------------
 
+# Literal, char-by-char digit check -- not a `case ... [0-9]*)` bracket
+# expression. A bracket expression's character class is the CALLER's locale,
+# not this file's, and some locales widen it past ASCII (full-width digits
+# among them); `test =` against an explicit alphabet is locale- and
+# nocasematch-proof on both interpreters, the same reasoning
+# self-identity.sh's _agmsg_self_chars_in_set documents (kept local here
+# rather than sourcing that file, since nothing else in this script needs
+# it).
+_remote_ceiling_is_plain_digits() {   # <string>
+  # n=${#s} is its own statement, not part of the `local` line above it: under
+  # `set -u`, a later name in one `local ... =` list that reads an earlier
+  # one's value sees it as still-unbound (measured), the same reason
+  # self-identity.sh's _agmsg_self_chars_in_set splits them too.
+  local s="${1-}" alphabet="0123456789" m=10 i=0 j c found n
+  n=${#s}
+  [ "$n" -gt 0 ] || return 1
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    found=""
+    j=0
+    while [ "$j" -lt "$m" ]; do
+      [ "$c" = "${alphabet:$j:1}" ] && { found=1; break; }
+      j=$((j + 1))
+    done
+    [ -n "$found" ] || return 1
+    i=$((i + 1))
+  done
+  return 0
+}
+
 cmd_sync_start() {
   local team="${1:?Usage: remote.sh sync start <team>}" cfg connected_at disconnected_at \
     engine_state engine_pid started_pid ready_pid startup_nonce ready=0 i=0 \
     logfile log_offset=1
+  # Test-only override of the readiness-wait ceiling below, default unchanged
+  # (1600). Exists so a test that drives the engine into never becoming
+  # ready does not have to spend this command's real production wait
+  # (measured ~1min+: the ceiling is counted in iterations, not time (#779),
+  # and each turn spawns several processes) to prove the timeout path.
+  #
+  # Anything but a plain positive integer falls back to the production
+  # default rather than being trusted -- in particular an empty or zero
+  # value must NOT make the `while` below skip straight to "not ready": that
+  # would silently change this command's real behavior on a malformed
+  # environment, not just its test-only timing (the same reasoning that kept
+  # an env-var knob out of herdr's boot wait previously).
+  local ready_ceiling="${AGMSG_TEST_SYNC_START_READY_CEILING:-1600}"
+  _remote_ceiling_is_plain_digits "$ready_ceiling" || ready_ceiling=1600
+  [ "$ready_ceiling" -gt 0 ] || ready_ceiling=1600
   [ $# -eq 1 ] || { echo "Usage: remote.sh sync start <team>" >&2; exit 1; }
   agmsg_validate_team_name "$team" || exit 1
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
@@ -2957,7 +3009,7 @@ cmd_sync_start() {
   # that is late or missing for ANY reason costs this caller its own wait and
   # not the rest of the machine.
   agmsg_lock_release
-  while [ "$i" -lt 1600 ]; do
+  while [ "$i" -lt "$ready_ceiling" ]; do
     IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
     if [ "$engine_state" = "running" ] && [ "$ready_pid" = "$started_pid" ] &&
        tail -c "+$log_offset" "$logfile" 2>/dev/null |

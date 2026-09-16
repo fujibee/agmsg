@@ -144,6 +144,23 @@ agmsg_session_start() {
       app_server="unix://$socket_path"
     fi
   fi
+  if [ -z "$app_server" ]; then
+    # A ws:// (TCP) app-server has no socket file to find, and codex-monitor.sh
+    # passes the URL to `codex --remote`, not as a `unix://` token this script can
+    # scrape — so none of the three probes above can see it. The port file does
+    # carry the URL; reuse the helper codex-record-session.sh already uses for it.
+    #
+    # Refuse rather than source an empty path or look up an empty project: an
+    # unset SKILL_DIR or PROJECT here would not fail loudly, it would just
+    # never find the app-server and fall through to the "no app_server" exit
+    # below for the wrong reason (#1234 review).
+    [ -n "${SKILL_DIR:-}" ] && [ -n "${PROJECT:-}" ] || exit 0
+    if ! command -v _agmsg_codex_app_server_url >/dev/null 2>&1; then
+      # shellcheck disable=SC1091
+      . "$SKILL_DIR/scripts/drivers/types/codex/_app-server.sh"
+    fi
+    app_server="$(_agmsg_codex_app_server_url "$PROJECT")"
+  fi
   [ -n "$app_server" ] || exit 0
 
   if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then

@@ -116,3 +116,50 @@ _write_self_reporter() {
   grep -qx MARKER-ERR "$WORK/err.txt"
   grep -qx ping "$FD_REPORT.stdin"
 }
+
+# The mock remote server has the same shape as the engine above: a test
+# backgrounds it and it runs until killed, so any harness descriptor it inherits
+# and never closes it holds for the life of the shard. Under a parallel bats run
+# that was the harness's own high pipes -- measured, fd 143 and 146, held by six
+# survivors -- and bats then waited forever for an EOF the mock kept from
+# arriving, hanging the shard with every test already ok (#1107). The start sites
+# close fd 3 by name (`3>&-`), which never reaches 143/146; the mock closes the
+# range itself, mirroring the engine. Measured against a baseline, the descriptor
+# the listing opens appears in both and cancels; only a surviving inherited fd
+# shows as a difference.
+@test "the mock remote server does not inherit descriptors the harness opened (#1107)" {
+  local mock="$BATS_TEST_DIRNAME/helpers/mock_remote_server.py"
+  local py="${MOCK_PYTHON3:-$(command -v python3 || true)}"
+  [ -n "$py" ] || skip "python3 not on PATH"
+
+  # Baseline: nothing beyond 0/1/2 inherited.
+  MOCK_FD_REPORT="$WORK/fd-base" "$py" "$mock" 0 \
+    </dev/null >"$WORK/base.port" 2>/dev/null 3>&- &
+  local bpid=$! i
+  for i in $(seq 1 100); do [ -s "$WORK/fd-base" ] && break; sleep 0.1; done
+  kill "$bpid" 2>/dev/null || true; wait "$bpid" 2>/dev/null || true
+  local baseline; baseline="$(cat "$WORK/fd-base" 2>/dev/null)"
+
+  # Measured: high pipes inherited, exactly what the `3>&-` at each start site
+  # leaves open. The numbers are the ones the captured hang held; the assertion is
+  # only that a high inherited pipe does not survive into the server.
+  (
+    exec 143> >(cat >/dev/null) 146> >(cat >/dev/null)
+    MOCK_FD_REPORT="$WORK/fd-meas" "$py" "$mock" 0 \
+      </dev/null >"$WORK/meas.port" 2>/dev/null 3>&- &
+    mpid=$!
+    for i in $(seq 1 100); do [ -s "$WORK/fd-meas" ] && break; sleep 0.1; done
+    kill "$mpid" 2>/dev/null || true; wait "$mpid" 2>/dev/null || true
+  )
+  local measured; measured="$(cat "$WORK/fd-meas" 2>/dev/null)"
+
+  [ -n "$baseline$measured" ] || { echo "the report never appeared"; false; }
+  [ "$baseline" = "$measured" ] || {
+    echo "baseline [$baseline]  measured [$measured]"
+    false
+  }
+  if grep -qxE '143|146' <<<"$measured"; then
+    echo "an inherited harness pipe survived into the server: [$measured]"
+    false
+  fi
+}

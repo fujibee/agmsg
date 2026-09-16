@@ -36,6 +36,94 @@ teardown() {
   [[ "$output" =~ "hello from install" ]]
 }
 
+@test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
+  skip_unless_linux
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -x "$shim" ]
+  grep -Fq "# agmsg-shim-owner: $SK/scripts/drivers/types/antigravity/agy-tui.sh" "$shim"
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" status \
+    --project /tmp/not-joined --team demo --name agy
+  [ "$status" -eq 0 ]
+  grep -qF 'runtime: tui-pty 未起動' <<<"$output"
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" reset-guard \
+    --project /tmp/not-joined --team demo --name agy
+  [ "$status" -eq 1 ]
+  grep -qF '復旧対象のstateがありません' <<<"$output"
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" ack \
+    --project /tmp/not-joined --team demo --name agy --batch batch-1 --confirm-id message-1
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"復旧対象の予約/stateがありません"* ]]
+}
+
+@test "install: Antigravity TUI shim preserves foreign files and refreshes its owner only" {
+  mkdir -p "$FAKE_HOME/.agents/bin"
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo user-owned' > "$shim"
+  local before; before="$(cat "$shim")"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$(cat "$shim")" = "$before" ]
+
+  rm "$shim"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  # Not `sed -i`: BSD sed (macOS) reads the word after -i as a BACKUP SUFFIX, so
+  # the expression is taken as the filename and the whole call fails with
+  # "invalid command code". `\n` in a replacement is a GNU extension too. awk
+  # does both portably. (#1073)
+  awk '{ if ($0 ~ /exec bash /) print "# stale"; print }' "$shim" > "$shim.portable"
+  cat "$shim.portable" > "$shim"
+  rm -f "$shim.portable"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  refute grep -q '^# stale$' "$shim"
+
+  local owned_before; owned_before="$(cat "$shim")"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  [ "$(cat "$shim")" = "$owned_before" ]
+}
+
+@test "install: Antigravity TUI shim replaces its symlink without writing through it" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  local linked="$FAKE_HOME/linked-agy-tui"
+  cp "$shim" "$linked"
+  rm "$shim"
+  ln -s "$linked" "$shim"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ ! -L "$shim" ]
+  [ -x "$shim" ]
+  cmp "$shim" "$linked"
+}
+
+@test "install: Antigravity TUI launcher resolves one registered identity" {
+  skip_unless_linux
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local project="$FAKE_HOME/project"
+  local fake_agy="$FAKE_HOME/bin/agy"
+  mkdir -p "$project" "$(dirname "$fake_agy")"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fake_agy"
+  chmod +x "$fake_agy"
+  bash "$SK/scripts/join.sh" demo agy antigravity "$project"
+
+  run env HOME="$FAKE_HOME" PATH="$FAKE_HOME/bin:$PATH" \
+    "$FAKE_HOME/.agents/bin/agy-tui" status --project "$project"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"runtime: tui-pty 未起動"* ]]
+}
+
+@test "uninstall: removes only the owned Antigravity TUI shim" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -f "$shim" ]
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
+  [ ! -e "$shim" ]
+}
+
 @test "install: Codex skill documents safe Git Bash quoting for Windows PowerShell" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
 
@@ -69,6 +157,39 @@ teardown() {
   [ -x "$SK/uninstall.sh" ]
 }
 
+# #1249: scripts/drivers/terminals/{herdr,plain,tmux}/SKILL.md were renamed to
+# README.md so a directory-scanning skill loader (e.g. codex's) stops
+# mistaking each for its own standalone skill missing YAML frontmatter. `cp
+# -R` never deletes a file absent from the source tree, so an install made
+# before this rename would keep the stale SKILL.md forever without an
+# explicit cleanup on --update.
+@test "install --update: removes a pre-rename drivers/terminals/{herdr,plain,tmux}/SKILL.md, leaving only README.md" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  for d in herdr plain tmux; do
+    cp "$SK/scripts/drivers/terminals/$d/README.md" "$SK/scripts/drivers/terminals/$d/SKILL.md"
+  done
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  for d in herdr plain tmux; do
+    [ ! -f "$SK/scripts/drivers/terminals/$d/SKILL.md" ]
+    [ -s "$SK/scripts/drivers/terminals/$d/README.md" ]
+  done
+}
+
+# Review (#1249): the cleanup must name the three built-in dirs individually,
+# not glob scripts/drivers/terminals/*/SKILL.md -- nothing about that path is
+# exclusive to agmsg's own drivers, so a user can drop a custom driver
+# directory straight under scripts/drivers/terminals/ (not only through the
+# sanctioned AGMSG_PLUGIN_DIRS mechanism), and a glob-based cleanup would
+# delete a SKILL.md this install does not own.
+@test "install --update: does NOT touch a user-added driver's own SKILL.md under drivers/terminals/" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  mkdir -p "$SK/scripts/drivers/terminals/mycustom"
+  echo "user's own driver doc" > "$SK/scripts/drivers/terminals/mycustom/SKILL.md"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ -f "$SK/scripts/drivers/terminals/mycustom/SKILL.md" ]
+  [ "$(cat "$SK/scripts/drivers/terminals/mycustom/SKILL.md")" = "user's own driver doc" ]
+}
+
 @test "install: --update --cmd updates the named skill even when a backup skill exists" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local backup="$FAKE_HOME/.agents/skills/agmsg.backup-keep"
@@ -90,7 +211,7 @@ teardown() {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
   # Distinct per-install sentinels, not just each install's VERSION (which is
   # the same source-derived string for both and would not distinguish "one of
-  # them got silently updated" from "neither did" -- co2 review, #659).
+  # them got silently updated" from "neither did" -- review of #659).
   echo "agmsg sentinel" > "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
   echo "agmsg-second sentinel" > "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
 
@@ -111,7 +232,7 @@ teardown() {
   # exclude nothing on a real machine, while remaining broad enough to
   # collide with a legitimately chosen --cmd name (--cmd has no reserved-name
   # validation: "agmsg.bak-tool" installs today with no error). Two rounds of
-  # narrowing hit that same collision from co2 review on #659; the fix is to
+  # narrowing hit that same collision from the #659 review; the fix is to
   # not special-case names at all. A directory that still carries the .agmsg
   # marker is just another candidate, and more than one candidate is exactly
   # the ambiguity this fix already refuses to guess through.
@@ -377,12 +498,44 @@ PS1
   ! grep -q "__SKILL_NAME__" "$SK/SKILL.md"
 }
 
-# Regression guard for #83: the plugin's SKILL.md is consumed verbatim by the
-# Claude Code plugin install path, so it must not carry the install-time
-# __SKILL_NAME__ placeholder (which install.sh substitutes for the
-# generated-per-agent-type SKILL.md, but the plugin install does not).
-@test "plugin SKILL.md: repo SKILL.md has no unsubstituted __SKILL_NAME__ placeholder" {
-  ! grep -q "__SKILL_NAME__" "$REPO_ROOT/SKILL.md"
+# The root file is now a source template, so placeholders are expected there.
+# The renderer is the boundary that must remove them from every generated
+# artifact.
+@test "skill renderer substitutes every install-time placeholder" {
+  local rendered="$FAKE_HOME/rendered-codex.md"
+  run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill codex agmsg "$2"' _ "$REPO_ROOT" "$rendered"
+  [ "$status" -eq 0 ]
+  ! grep -q "__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__" "$rendered"
+}
+
+@test "skill renderer keeps terminal-driver guidance in every rendered artifact" {
+  local type rendered required
+  while IFS= read -r type; do
+    rendered="$FAKE_HOME/$type-terminal-driver.md"
+    run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill "$2" agmsg "$3"' _ "$REPO_ROOT" "$type" "$rendered"
+    [ "$status" -eq 0 ]
+    for required in \
+      'If argument is "version":' \
+      'version.sh' \
+      'If argument starts with "spawn"' \
+      'spawn.sh <type> <name>' \
+      '--ready-timeout' \
+      'status=ready' \
+      '--no-wait' \
+      'already held' \
+      'target CLI is missing' \
+      'If argument starts with "despawn"' \
+      'despawn.sh <team> $AGENT <name>' \
+      'ctrl:despawn' \
+      'no watcher' \
+      '--force' \
+      '--timeout'; do
+      grep -Fq -- "$required" "$rendered" || {
+        echo "rendered $type is missing terminal-driver fact: $required" >&2
+        return 1
+      }
+    done
+  done < <(agmsg_renderable_types "$REPO_ROOT")
 }
 
 @test "install: watch.sh self-cleans a prior watcher on re-invocation for the same sid" {
@@ -949,6 +1102,67 @@ EOF
   grep -q "whoami.sh \"\$(pwd)\" grok-build" "$FAKE_HOME/.grok/skills/agmsg/SKILL.md"
 }
 
+# --- Antigravity skill (~/.gemini/config/skills/<name>/SKILL.md) ---
+
+@test "install: drops an Antigravity SKILL.md when ~/.gemini/config exists" {
+  mkdir -p "$FAKE_HOME/.gemini/config"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local antigravity_skill="$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md"
+  [ -f "$antigravity_skill" ]
+  grep -q "whoami.sh \"\$(pwd)\" antigravity" "$antigravity_skill"
+  grep -q "^name: agmsg" "$antigravity_skill"
+}
+
+@test "install: Antigravity skill uses the CLI marker when config is absent" {
+  mkdir -p "$FAKE_HOME/.gemini/antigravity-cli"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -f "$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md" ]
+}
+
+@test "install: skips Antigravity skill when its markers are absent" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.gemini/config/skills/agmsg" ]
+}
+
+@test "install --update: installs Antigravity skill for upgraders without prior skill" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.gemini/config/skills/agmsg" ]
+  mkdir -p "$FAKE_HOME/.gemini/config"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ -f "$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md" ]
+  grep -q "whoami.sh \"\$(pwd)\" antigravity" "$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md"
+}
+
+@test "install --update: refreshes the Antigravity skill" {
+  mkdir -p "$FAKE_HOME/.gemini/config"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local antigravity_skill="$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md"
+  printf '%s\n' tampered > "$antigravity_skill"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  refute grep -q '^tampered$' "$antigravity_skill"
+  grep -q "whoami.sh \"\$(pwd)\" antigravity" "$antigravity_skill"
+}
+
+@test "install --update: removes the legacy top-level Antigravity resume helper" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local old="$SK/scripts/antigravity-resume.sh"
+  local current="$SK/scripts/drivers/types/antigravity/antigravity-resume.sh"
+  [ ! -e "$old" ]
+  [ -f "$current" ]
+  printf '%s\n' legacy > "$old"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ ! -e "$old" ]
+  [ -f "$current" ]
+}
+
+@test "uninstall: removes the Antigravity skill" {
+  mkdir -p "$FAKE_HOME/.gemini/config"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -d "$FAKE_HOME/.gemini/config/skills/agmsg" ]
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
+  [ ! -e "$FAKE_HOME/.gemini/config/skills/agmsg" ]
+}
+
 @test "install: --agent-type grok-build makes shared SKILL.md Grok-typed" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type grok-build
   grep -q "whoami.sh \"\$(pwd)\" grok-build" "$SK/SKILL.md"
@@ -966,7 +1180,7 @@ EOF
 # grepped for and was never broken -- it IS the fallback).
 @test "install: bare --update preserves every renderable type's SKILL.md flavor (#846)" {
   local t
-  for t in codex gemini antigravity opencode hermes cursor grok-build; do
+  while IFS= read -r t; do
     local cmd="agmsg-$t"
     HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd "$cmd" --agent-type "$t"
     local skill_md="$FAKE_HOME/.agents/skills/$cmd/SKILL.md"
@@ -974,7 +1188,7 @@ EOF
 
     HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update --cmd "$cmd"
     grep -q "whoami.sh \"\$(pwd)\" $t" "$skill_md"
-  done
+  done < <(agmsg_renderable_types "$REPO_ROOT")
 }
 
 # The Windows leg of the bats matrix selects by test NAME (filter "[Ww]indows"),
@@ -1278,4 +1492,31 @@ CYG
     return 0
   fi
   [ "$before" = "664" ]
+}
+
+@test "policy paragraphs in SKILL.md reach every installed skill, not just the repo's own" {
+  local type rendered
+  while IFS= read -r type; do
+    rendered="$FAKE_HOME/$type-policy.md"
+    run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill "$2" agmsg "$3"' _ "$BATS_TEST_DIRNAME/.." "$type" "$rendered"
+    [ "$status" -eq 0 ]
+    grep -Fq "There is NO register.sh" "$rendered"
+  done < <(agmsg_renderable_types "$BATS_TEST_DIRNAME/..")
+}
+
+@test "no rendered skill of any type still carries the unwired 'supplied by the type overlay' comment" {
+  # The shared root SKILL.md used to carry two lines that read like slot
+  # markers right after the spawn slot -- "shared actas/drop guidance is
+  # supplied by the type overlay" and "drop guidance is supplied by the type
+  # overlay" -- but neither matched the renderer's <!-- agmsg:slot NAME -->
+  # pattern, so they were never replaced and leaked into every type's
+  # installed SKILL.md verbatim instead of the type's real actas/drop text.
+  local type rendered
+  while IFS= read -r type; do
+    rendered="$FAKE_HOME/$type-overlay-comment.md"
+    run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill "$2" agmsg "$3"' _ "$BATS_TEST_DIRNAME/.." "$type" "$rendered"
+    [ "$status" -eq 0 ]
+    run grep -Fq "supplied by the type overlay" "$rendered"
+    [ "$status" -ne 0 ] || { echo "rendered $type still carries the unwired overlay comment" >&2; return 1; }
+  done < <(agmsg_renderable_types "$BATS_TEST_DIRNAME/..")
 }

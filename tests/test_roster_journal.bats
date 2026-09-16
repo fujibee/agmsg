@@ -445,7 +445,13 @@ EOF
 # below. Only the named command is replaced; everything else still resolves
 # normally, so the driver is exercised rather than a crippled shell.
 _shim_failing() {
-  local name="$1" dir="$TEST_SKILL_DIR/shim-$name"
+  # Two statements, not one. `local name="$1" dir="...$name"` declares BOTH
+  # names first and only then assigns, so the `$name` in the second value
+  # expands the fresh, still-unset local -- measured: fatal under `set -u`,
+  # and silently empty without it, which would have made $dir "shim-" for
+  # every command and shadowed nothing.
+  local name="$1"
+  local dir="$TEST_SKILL_DIR/shim-$name"
   mkdir -p "$dir"
   printf '%s\n' '#!/bin/sh' 'exit 1' > "$dir/$name"
   chmod +x "$dir/$name"

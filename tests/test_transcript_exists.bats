@@ -62,3 +62,12 @@ make_transcript() {
   HOME="" run agmsg_transcript_exists "uuid-123" "/Users/me/proj"
   [ "$status" -ne 0 ]
 }
+
+@test "transcript_exists: CLAUDE_CONFIG_DIR overrides \$HOME/.claude (multi-account profile) (#1229)" {
+  local profile="$BATS_TEST_TMPDIR/profile"
+  mkdir -p "$profile/projects/-Users-me-proj"
+  : > "$profile/projects/-Users-me-proj/uuid-prof.jsonl"
+  # Present under the profile root, absent under $HOME/.claude: this can only
+  # pass if CLAUDE_CONFIG_DIR, not HOME, decided where to look.
+  CLAUDE_CONFIG_DIR="$profile" agmsg_transcript_exists "uuid-prof" "/Users/me/proj"
+}

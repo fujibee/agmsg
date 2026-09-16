@@ -703,6 +703,25 @@ write_windows_spelling_fixtures() {
   kill -0 "$ENGINE_PID"
 }
 
+@test "sync start: an invalid readiness-wait override falls back to the production ceiling, not a skipped wait" {
+  # The fake node below writes its readiness marker essentially immediately,
+  # so this succeeds under the real production ceiling (1600) on its very
+  # first poll -- and would fail immediately, with no wait at all, if a
+  # malformed override (0 here) were trusted instead of validated: `while [
+  # "$i" -lt 0 ]` never runs even once, so the marker this fixture already
+  # wrote would never be checked.
+  local fake_node fake_bin ready_file="$TEST_SKILL_DIR/invalid-ceiling.ready"
+  fake_node="$(write_fake_node)"
+  fake_bin="$(write_fake_node_ps_fixture "$fake_node" "" "$ready_file")"
+
+  run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
+    AGMSG_TEST_LOG_READY_FILE="$ready_file" \
+    AGMSG_TEST_SYNC_START_READY_CEILING=0 \
+    bash "$SCRIPTS/remote.sh" sync start testteam
+  [ "$status" -eq 0 ]
+  refute grep -qF "did not become ready" <<<"$output"
+}
+
 @test "sync start reaps a ready-timeout child before releasing ownership" {
   local fake_node="$TEST_SKILL_DIR/fake-node-timeout" fake_bin lock child_pid_file child_pid
   child_pid_file="$TEST_SKILL_DIR/timeout-child.pid"
@@ -713,8 +732,14 @@ write_windows_spelling_fixtures() {
   chmod +x "$fake_node"
   fake_bin="$(write_fake_node_ps_fixture "$fake_node")"
 
+  # The fake node above never emits a readiness marker, so this pays the full
+  # production readiness-wait ceiling (minutes, not seconds -- #779) unless
+  # shortened; the assertions below are about what happens once it gives up,
+  # not about how long giving up takes, and `run` blocks synchronously either
+  # way, so there is no timing window elsewhere in this test to protect.
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
     AGMSG_TEST_CHILD_PID_FILE="$child_pid_file" \
+    AGMSG_TEST_SYNC_START_READY_CEILING=30 \
     bash "$SCRIPTS/remote.sh" sync start testteam
   [ "$status" -ne 0 ]
   [[ "$output" == *"did not become ready"* ]]
@@ -769,8 +794,11 @@ write_unownable_ps_fixture() {
   chmod +x "$fake_node"
   fake_bin="$(write_unownable_ps_fixture)"
 
+  # Same reasoning as the previous test: the unownable-ps fixture also never
+  # lets this reach readiness, so it pays the full ceiling unless shortened.
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
     AGMSG_TEST_CHILD_PID_FILE="$child_pid_file" \
+    AGMSG_TEST_SYNC_START_READY_CEILING=30 \
     bash "$SCRIPTS/remote.sh" sync start testteam
   [ "$status" -ne 0 ]
 

@@ -105,19 +105,23 @@ env:
   # Number of parallel bats shards per OS. The matrix and the shard helper must
   # stay in lockstep; the stable summary job below verifies that they do.
   #
-  # 4 -> 5 (#1107). Same change already on the terminal-driver integration branch;
-  # this is the main-targeted twin so main PRs stop hitting the same macOS cap.
-  # shard-tests.sh seeds each pinned file at one shard's AVERAGE share
-  # (total_tests/total), which grows with the suite while the pinned files do not,
-  # over-reserving the two pin shards and pushing the real load onto the non-pin
-  # ones. main is 1742 @tests here, so the worst-case non-pin shard
-  # (total*(N+2)/N^2) is 653 at N=4 and 488 at N=5 -- and a 4-shard macOS leg was
-  # already reaching the 30-min cap while still passing tests (a slow shard, not a
-  # hang: the workflow's own #848/#857 note). Five, not six, because the account
-  # runs at most FIVE macOS jobs at once (the concurrency header): a sixth would
-  # queue behind the other five of its own run. This does NOT fix the scaling
-  # property (pin_seed still grows, count still under-values wait-dominant files);
-  # that re-fit is #847.
+  # 4 -> 5 (#1107). The suite outgrew a 4-shard partition and a 4-shard macOS
+  # leg was reaching the 30-min cap while still passing tests (a slow shard,
+  # not a hang). Five, not six, because the account runs at most FIVE macOS
+  # jobs at once (the concurrency header): a sixth would queue behind the
+  # other five of its own run, inflating the wall clock past what a lighter
+  # shard buys.
+  #
+  # shard-tests.sh weights every file (pinned or not) by its own real measured
+  # macOS seconds from .github/scripts/bats-file-seconds.tsv (#1243) rather
+  # than @test count or a count-equivalent fit -- count was never more than a
+  # loose proxy for a file's real cost, and two prior fits against it (#847,
+  # then a #1243 predecessor that excluded pinned shards outright) each
+  # eventually drifted or traded balance away as the suite grew. Re-measure
+  # that table (its own header says how) when the suite's shape has moved
+  # enough that tests/test_ci_sharding.bats's balance-ratio assertion goes
+  # red, the same way #1107 itself was tracked: a constant sized against an
+  # older system stays right only as long as the system does.
   SHARD_TOTAL: 5
   # The Windows legs' sqlite3, pinned three ways (#824).
   #
@@ -391,9 +395,11 @@ jobs:
 
       - name: Run bats suite (this shard)
         if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
           set +e
-          xargs bats --print-output-on-failure < shard-files.txt
+          .github/scripts/run-bats-timed.sh shard-files.txt "$RUNNER_TEMP/bats-timings.tsv"
           status=$?
           : > "$RUNNER_TEMP/bats-done"
           exit $status
@@ -450,6 +456,16 @@ jobs:
           path: ${{ runner.temp }}/hang-samples.txt
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: Upload bats timings
+        if: always() && needs.changes.outputs.docs_only != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: bats-timings-${{ matrix.os }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/bats-timings.tsv
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Record which files this shard ran
         if: needs.changes.outputs.docs_only != 'true'
@@ -694,6 +710,18 @@ jobs:
           # differently there than on the hosts that were measured. The engine's
           # own bats leg is ubuntu and macos only, so this selects the two tests
           # that would notice and runs them on the platform in question.
+          # The codex hook wrapper (#1015). The defect is a Windows-only path -- a
+          # PowerShell one-liner that invokes Git Bash as a LOGIN shell, so the
+          # profile's output lands on the stdout codex parses -- and the fix
+          # moves the payload off that stdout. The bash half is bash's
+          # everywhere and is proved on the POSIX legs; the PowerShell half is
+          # asserted as a string there because nothing on those hosts can run
+          # it. This leg is the only place it is EXECUTED. Without it the fix
+          # ships to Windows having never run on Windows.
+          - leg: codex hook wrapper (#1015)
+            filter: "windows-wrapper"
+            target: tests/test_delivery.bats
+            sqlite: true
           - leg: driver input (#817)
             filter: "driver-input"
             target: tests/test_remote_sync_driver_input.bats
@@ -1127,6 +1155,44 @@ jobs:
       # what runs here is the count.
       - name: No new assertion that cannot fail
         run: .github/scripts/check-enforced-assertions.sh
+
+  errexit-status-reads:
+    name: errexit status reads
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Unconditional for the same reason as `enforced-assertions` above: a job
+    # that skips on some diffs is a required context that can sit pending. It
+    # is a static read of `scripts/**/*.sh`.
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ubuntu's bash is 5.x, and one of the three shapes this looks for is
+      # fatal ONLY on bash 3.2 (macOS /bin/bash). That is why the check is
+      # static: running it under one interpreter would miss the shape that
+      # kills the other. The behaviour was measured on both (see the header);
+      # what runs here is the count.
+      - name: No status read that errexit already decided
+        run: .github/scripts/check-errexit-status-reads.sh
+
+  unguarded-env-reads:
+    name: unguarded env reads
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Unconditional, like its two siblings above: a job that skips on some
+    # diffs is a required context that can sit pending. It is a static read of
+    # `scripts/**/*.sh`.
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite cannot do this one. Every entry point that reaches those
+      # files runs `set -euo pipefail`; tests/test_helper.bash sets no shell
+      # options, so a read that is only fatal under `-u` never fires in a test.
+      # Measured (#1129): with `set -u` forced into the helper, all 102 suites
+      # produced 8 reds and none was a defect in scripts/ -- and the suite was
+      # 129/129 green on the tree that still held the one confirmed defect of
+      # this class (#1126).
+      - name: No unguarded environment read
+        run: .github/scripts/check-unguarded-env-reads.sh
 
   private-names:
     name: internal names

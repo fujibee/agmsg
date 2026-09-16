@@ -148,6 +148,27 @@ write_request() {
   printf 'codex\t%s\tws://127.0.0.1:1\n' "$thread" > "$RUN_DIR/codex-bridge-request.$hash"
 }
 
+# Start the dispatcher with enough lifetime to remain eligible under a loaded
+# runner, but stop it as soon as the asynchronous bridge launch is observable.
+# A short foreground lifetime followed by a capture wait is not equivalent:
+# once the lifetime process exits, the dispatcher is no longer allowed to spawn
+# the role child that creates CAPTURE.
+run_launcher_until_capture() { # [ENV=VALUE ...]
+  sleep 30 3>&- & local parent=$!
+  env "$@" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  local dispatcher=$! seen=0 i
+  for i in {1..200}; do
+    if [ -f "$CAPTURE" ]; then seen=1; break; fi
+    sleep 0.1
+  done
+  kill "$parent" 2>/dev/null || true
+  wait "$parent" 2>/dev/null || true
+  # Retire the lifetime first and let the dispatcher observe that boundary.
+  # Killing the dispatcher first can strand the detached role child it spawned.
+  wait "$dispatcher" 2>/dev/null || true
+  [ "$seen" -eq 1 ]
+}
+
 # Drive the launcher against a short-lived parent, blocking until it exits. fd 3
 # is closed on the backgrounded parent and the launcher so a stray descriptor
 # can't keep bats from exiting on macOS (#bats-fd3).
@@ -171,6 +192,14 @@ run_launcher() {
   [ -f "$CAPTURE" ]
   grep -q -- "--thread rec-thread-1" "$CAPTURE"
   ! grep -q -- "--thread loaded" "$CAPTURE"
+}
+
+@test "launcher: passes the actas owner recorded by the claim" {
+  setup_live_owner "$RUN_DIR" owner-session
+  bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
+  run_launcher
+  [ -f "$CAPTURE" ]
+  grep -q -- "--owner owner-session" "$CAPTURE"
 }
 
 @test "launcher: passes the active storage override as a workspace root" {
@@ -476,19 +505,14 @@ wait_for_child_count() {
 
   put_record team alice thread-msys "$PROJ" codex
 
-  sleep 6 3>&- & local p=$!
-  MSYSTEM=MINGW64 PATH="$stubdir:$PATH" \
-    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
-  wait "$p" 2>/dev/null || true
-  local i
-  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+  run_launcher_until_capture MSYSTEM=MINGW64 PATH="$stubdir:$PATH" || true
 
   # A bridge was launched at all -- this is what the whole class costs on Windows.
   [ -f "$CAPTURE" ] || { echo "no bridge was started under a blind tasklist"; false; }
   grep -q -- '--thread thread-msys' "$CAPTURE"
 }
 
-@test "launcher: windows-native starts the bridge (#567)" {
+@test "launcher: windows-native starts the bridge (#1161)" {
   skip_unless_windows "the point is the real tasklist and the real MSYS pid space"
   # The counterpart to codex-monitor's windows-native test, and the half #582
   # does NOT fix: reaching the bridged handoff is not the same as delivering a
@@ -498,11 +522,7 @@ wait_for_child_count() {
   # started. Real tasklist, no stub.
   put_record team alice thread-win "$PROJ" codex
 
-  sleep 6 3>&- & local p=$!
-  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
-  wait "$p" 2>/dev/null || true
-  local i
-  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+  run_launcher_until_capture || true
 
   [ -f "$CAPTURE" ] || { echo "no bridge was started on native Windows"; false; }
   grep -q -- '--thread thread-win' "$CAPTURE"
@@ -550,9 +570,9 @@ _count_exact_role_bridges() { # <project> <name>
 # -- so the caller was handed a number that nothing had ever waited for. That is
 # the half of #984 needing no superset fixture, and it is why all five call sites
 # could fail, not only the superset one.
-_wait_exact_role_count() { # <project> <name> <want>
-  local i seen
-  for i in {1..100}; do
+_wait_exact_role_count() { # <project> <name> <want> [tries]
+  local i seen tries="${4:-100}"
+  for ((i = 0; i < tries; i++)); do
     seen="$(_count_exact_role_bridges "$1" "$2")"
     [ "$seen" = "$3" ] && { printf '%s' "$seen"; return 0; }
     sleep 0.1
@@ -574,8 +594,8 @@ _wait_exact_role_count() { # <project> <name> <want>
 # a precondition cannot be established, say which count was actually reached and
 # fail, rather than continuing into an assertion that no longer means what it
 # says.
-_require_launcher_bridge() { # <project> <name>
-  local seen; seen="$(_wait_exact_role_count "$1" "$2" 1)"
+_require_launcher_bridge() { # <project> <name> [tries]
+  local seen; seen="$(_wait_exact_role_count "$1" "$2" 1 "${3:-}")"
   [ "$seen" = 1 ] && return 0
   echo "the launcher never reached one {$2} bridge (saw $seen), so this test could not create the orphan it is about" >&2
   return 1
@@ -612,8 +632,12 @@ _spawn_fake() { # <project> <pair...>
   # never reach: this is the one assertion here that goes red if the waiter is
   # ever rewritten to return its `want` instead of what it saw. Every other
   # check in this file passes under that rewrite, which is the shape of the
-  # defect being fixed (#984). It costs the waiter's full 10s by design.
-  [ "$(_wait_exact_role_count "$PROJ" bob 1)" -eq 0 ]
+  # defect being fixed (#984). It costs the waiter's full wait by design --
+  # shortened to 5 tries (0.5s) here because the exact-{bob} count is STATIC
+  # for this whole wait: nothing spawned above or below can ever make it
+  # something other than 0, so ending early cannot turn a later true into a
+  # false pass.
+  [ "$(_wait_exact_role_count "$PROJ" bob 1 5)" -eq 0 ]
   # One that IS {alice} counts, with the other three still running.
   _spawn_fake "$PROJ" "team${tab}alice"; local solo=$FAKE_PID
   [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
@@ -633,9 +657,11 @@ _spawn_fake() { # <project> <pair...>
   # and the test carried on to delete pidfiles that did not exist and assert
   # against a bridge started during the wait. Green, with #937 never exercised.
   #
-  # Costs the waiter's full sweep by design -- an exhausted gate is what is
-  # being measured, so it cannot be short-circuited.
-  run _require_launcher_bridge "$PROJ" alice
+  # An exhausted gate is what is being measured, so its OUTCOME cannot be
+  # short-circuited -- but the exact-{alice} count is STATIC for this whole
+  # wait (no launcher runs here at all, so nothing can ever make it 1), so the
+  # sweep itself is shortened to 5 tries (0.5s).
+  run _require_launcher_bridge "$PROJ" alice 5
   [ "$status" -ne 0 ]
   # And it must say WHICH count it reached: an exhausted gate that fails with a
   # bare non-zero tells the next reader nothing about why.
@@ -807,4 +833,101 @@ _fake_alice_lease() { # sets FAKE_PID once its lease file exists
   sleep 3
   kill -0 "$victim"
   kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+# --- Windows start token: the lease schema must admit the source
+# codex-bridge.js writeLease() records on Windows, where /proc does not exist and
+# the only `ps` likely to be on PATH (MSYS's) rejects -o outright, so both POSIX
+# sources yield an empty token and the bridge can never publish a lease at all.
+#
+# _read_lease is the reaper's ONLY gate on a lease, so its accept/reject set is
+# the contract. These exercise it directly -- the pattern test_remote.bats uses
+# for _remote_endpoint_display -- rather than through the reaper: the reaper
+# needs a spawnable bridge and a live pid, which is exactly what does not work on
+# Git Bash (#567), and the schema question has nothing to do with either. Kept
+# out of the `windows-native` filter deliberately: nothing here runs PowerShell,
+# so these belong on every leg, not only the Windows one. ---
+_lease_verdict() { # <startsrc> <start> -> prints accept|reject
+  local h40=0123456789abcdef0123456789abcdef01234567
+  printf 'v=1\nproject=%s\npairs=%s\nhost=h\npid=123\nstart=%s\nstartsrc=%s\n' \
+    "$h40" "$h40" "$2" "$1" > "$TEST_SKILL_DIR/lease-under-test"
+  bash -c '
+    pattern="/^_read_lease() {/,/^}/p"
+    eval "$(sed -n "$pattern" "$1")"
+    _read_lease "$2" && echo accept || echo reject
+  ' _ "$LAUNCHER" "$TEST_SKILL_DIR/lease-under-test" 2>/dev/null
+}
+
+@test "launcher: the lease schema admits a pwsh start token" {
+  [ "$(_lease_verdict pwsh 639231441791462826)" = accept ]
+}
+
+@test "launcher: a pwsh lease whose token is not an integer is rejected, fail-closed" {
+  # .NET Ticks is a bare integer. Anything else under that label is a lease this
+  # side did not write, and a doubtful lease must never authorise a kill.
+  [ "$(_lease_verdict pwsh 6392314.5)" = reject ]
+  [ "$(_lease_verdict pwsh '')" = reject ]
+}
+
+@test "launcher: an unrecognised startsrc is rejected, fail-closed" {
+  # wmic is here on purpose, not as an arbitrary bad value: WMIC's CreationDate
+  # was the faster candidate and was deliberately NOT adopted, because a per-side
+  # "WMIC, else PowerShell" order lets the writer and the reaper resolve different
+  # sources for the same process whenever only one of them can reach wmic.exe.
+  # Rejecting the label pins that decision, so reintroducing it fails loudly.
+  [ "$(_lease_verdict wmic 20260824041348.411807+540)" = reject ]
+  [ "$(_lease_verdict bogus 123)" = reject ]
+}
+
+@test "launcher: proc and ps leases still parse (start-token regression)" {
+  [ "$(_lease_verdict proc 396341883)" = accept ]
+  [ "$(_lease_verdict ps 'Sun Aug 24 04:00:00 2026')" = accept ]
+  # ps stays exempt from the integer check (its token is a human date string
+  # whose punctuation varies by platform); proc does not.
+  [ "$(_lease_verdict proc abc)" = reject ]
+}
+
+_run_start_token() { # <pid> -> runs _start_token in a subshell
+  run bash -c '
+    pattern="/^_agmsg_is_windows() {/,/^}/p;/^_start_token() {/,/^}/p"
+    eval "$(sed -n "$pattern" "$1")"
+    _start_token "$2"
+  ' _ "$LAUNCHER" "$1"
+}
+
+@test "launcher: a live pid yields a proc or ps start token on POSIX" {
+  skip_on_windows "Windows has its own source; see the windows-native case"
+  _run_start_token $$
+  [ "$status" -eq 0 ]
+  local tab; tab=$(printf '\t')
+  case "${output%%"$tab"*}" in proc|ps) ;; *) false ;; esac
+  [ -n "${output#*"$tab"}" ]
+}
+
+@test "launcher: CLANGARM uname selects the Windows start token path" {
+  local stubdir="$TEST_SKILL_DIR/clangarm-bin"
+  mkdir -p "$stubdir"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" CLANGARM64_NT-10.0' > "$stubdir/uname"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" 639231441791462826' > "$stubdir/powershell.exe"
+  chmod +x "$stubdir/uname" "$stubdir/powershell.exe"
+
+  PATH="$stubdir:$PATH" _run_start_token 123
+  [ "$status" -eq 0 ]
+  [ "$output" = $'pwsh\t639231441791462826' ]
+}
+
+@test "launcher: windows-native a live pid yields an integer pwsh start token" {
+  skip_unless_windows "PowerShell and the Windows pid space are the point"
+  # The pid must be the WINDOWS one. MSYS/Cygwin number processes in their own
+  # space -- the same shell is MSYS pid 3994449 and winpid 19568 on our runner --
+  # and Get-Process only knows the latter, which is also the pid
+  # codex-bridge.js records as process.pid.
+  local winpid; winpid="$(cat /proc/$$/winpid)"
+  [ -n "$winpid" ]
+  _run_start_token "$winpid"
+  [ "$status" -eq 0 ]
+  local tab; tab=$(printf '\t')
+  [ "${output%%"$tab"*}" = pwsh ]
+  local tok="${output#*"$tab"}"
+  case "$tok" in ''|*[!0-9]*) false ;; esac
 }

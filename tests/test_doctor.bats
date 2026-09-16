@@ -15,7 +15,7 @@ teardown() {
 }
 
 # --- default scope: no filters = the whole installation -------------------
-#     (koit's round-2 call: other doctor-style commands -- claude/codex/brew/
+#     (settled in round 2: other doctor-style commands -- claude/codex/brew/
 #     flutter -- all default to "everything", so this one now does too. The
 #     old <project> <type>-required positional form is dropped, not kept for
 #     compatibility -- see doctor.sh's header comment.) ----------------------
@@ -122,7 +122,7 @@ teardown() {
 #     must never turn into a warning. Running the pre-fix version against a
 #     healthy real installation returned "9 team(s), 56 registration(s), 5
 #     warning(s)" purely from this -- an exit-code-contract violation caught
-#     by koit running doctor against real data, not by any of these fixtures,
+#     by running doctor against real data, not by any of these fixtures,
 #     which is exactly why real-data verification was asked for. -----------
 
 @test "doctor: a type with delivery_modes=off only is never queried against delivery.sh and never warns" {
@@ -150,7 +150,7 @@ teardown() {
 #     status emits scans the WHOLE run/ directory -- an installation-wide
 #     fact, not a (project, type) fact. Printing it inside every group that
 #     uses default runtime status repeats the identical line once per group;
-#     tl2 flagged this as duplication on the same real-installation run. ---
+#     review flagged this as duplication on the same real-installation run. ---
 
 @test "doctor: the install-wide 'watch processes' line appears once, not once per group" {
   # The line only appears when run/ exists (default runtime status guards
@@ -528,21 +528,57 @@ configured_off() {
 @test "doctor: --redacted also redacts the embedded delivery-status block, not just its own formatting" {
   local home_proj="$HOME/embedded-leak-check"
   mkdir -p "$home_proj"
-  bash "$SCRIPTS/join.sh" agmsg advisor codex "$home_proj" >/dev/null
-  # A live codex bridge for agmsg/advisor, minimal enough for
+  bash "$SCRIPTS/join.sh" agmsg helper codex "$home_proj" >/dev/null
+  # A live codex bridge for agmsg/helper, minimal enough for
   # _delivery.sh's agmsg_delivery_runtime_status to report it "alive": a
   # pidfile naming a real (this test's own) pid, and a matching metafile.
   mkdir -p "$TEST_SKILL_DIR/run"
-  printf '%s\n' "$$" > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.advisor.pid"
+  printf '%s\n' "$$" > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.helper.pid"
   {
     echo "pid=$$"
     echo "project=$home_proj"
     echo "type=codex"
-  } > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.advisor.meta"
+  } > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.helper.meta"
 
   run bash "$SCRIPTS/doctor.sh" --project "$home_proj" --type codex --redacted
   [ "$status" -eq 0 ]
   [[ "$output" == *"Codex bridge: team1/agent1 alive"* ]]
-  [[ "$output" != *"agmsg/advisor"* ]]
+  [[ "$output" != *"agmsg/helper"* ]]
   [[ "$output" != *"$HOME"* ]]
+}
+
+@test "doctor: a lock it cannot READ is lock=unreadable, never lock=none (#983)" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf 'sometoken.%s\n' "$$" > "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  chmod 000 "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  run bash "$SCRIPTS/doctor.sh" --project "$PROJ" --type claude-code
+  chmod 644 "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  # `lock=none` is a claim about the world; this is a claim about us. An
+  # operator reads `none` as "nothing here to clean up" and acts on it. Someone did
+  # exactly this today with a record he could not open: reported a seat dead,
+  # it was alive. (Review.)
+  grep -q 'lock=unreadable' <<<"$output"
+  refute grep -q 'lock=none' <<<"$output"
+}
+
+@test "doctor: a present-but-EMPTY lock is lock=empty, never lock=none (#1071)" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  : > "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  run bash "$SCRIPTS/doctor.sh" --project "$PROJ" --type claude-code
+  # The third word. The file is there and readable, and nothing in the tree
+  # writes an empty lock, so this is a torn write — reporting it as `none` is
+  # what invites the cleanup #1071 is about.
+  grep -q 'lock=empty' <<<"$output"
+  refute grep -q 'lock=none' <<<"$output"
+}
+
+@test "doctor: with no lock at all it still says lock=none (#983)" {
+  # The partner both tests above need: without it, a doctor that never printed
+  # `lock=none` would pass them, and the ordinary "nothing is claimed here" case
+  # is the one an operator reads most often.
+  mkdir -p "$TEST_SKILL_DIR/run"
+  rm -f "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  run bash "$SCRIPTS/doctor.sh" --project "$PROJ" --type claude-code
+  grep -q 'lock=none' <<<"$output"
 }

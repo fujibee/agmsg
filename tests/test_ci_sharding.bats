@@ -9,6 +9,50 @@ setup() {
   load 'test_helper'
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   SHARD="$REPO_ROOT/.github/scripts/shard-tests.sh"
+  TIMED_RUNNER="$REPO_ROOT/.github/scripts/run-bats-timed.sh"
+  TIMING_SUMMARY="$REPO_ROOT/.github/scripts/summarize-bats-timings.sh"
+  SECONDS_TABLE="$REPO_ROOT/.github/scripts/bats-file-seconds.tsv"
+}
+
+# Sum of a shard's files' own real seconds from the checked-in table, the same
+# way shard-tests.sh itself weights them: matched by basename, average-of-table
+# for anything absent. Used by the balance assertions below instead of @test
+# count now that placement is driven by real time, not count (#1243).
+shard_seconds() {
+  local index="$1" total="$2" dir="${3:-$REPO_ROOT}" f base secs sum=0 avg
+  avg="$(table_avg_seconds)"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    base="$(basename "$f")"
+    secs="$(awk -F'\t' -v b="$base" '$1 == b { print $2; exit }' "$SECONDS_TABLE")"
+    [ -n "$secs" ] || secs="$avg"
+    sum=$((sum + secs))
+  done < <(cd "$dir" && bash "$SHARD" "$index" "$total")
+  printf '%s' "$sum"
+}
+
+# The table's own average, computed the same way shard-tests.sh computes its
+# fallback -- kept as one value, not two, so this file's estimate of "what an
+# unmeasured file counts as" can never drift from the script's own.
+table_avg_seconds() {
+  awk -F'\t' '$0 !~ /^#/ && NF == 2 { sum += $2; n++ } END { if (n > 0) printf "%d", (sum / n) + 0.5; else print 1 }' "$SECONDS_TABLE"
+}
+
+@test "timing summary computes cross-run percentiles and per-run headroom" {
+  local timings
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  printf '%s\n' \
+    $'schema\trecord\trun_id\trun_attempt\tsha\tos\tshard\tshard_total\tfile\tstarted_at\tended_at\telapsed_seconds\tstatus' \
+    $'1\tfile_end\t1\t1\ta\tmacOS\t1\t4\ttests/a.bats\ts\te\t10\t0' \
+    $'1\tfile_end\t2\t1\tb\tmacOS\t2\t4\ttests/a.bats\ts\te\t30\t0' \
+    $'1\tshard\t1\t1\ta\tmacOS\t1\t4\t-\ts\te\t70\t0' \
+    $'1\tshard\t1\t1\ta\tmacOS\t2\t4\t-\ts\te\t90\t0' > "$timings"
+
+  run "$TIMING_SUMMARY" --timeout-seconds 100 "$timings"
+
+  [ "$status" -eq 0 ]
+  grep -Fq $'file\tmacOS\ttests/a.bats\t2\t10\t30\t30' <<< "$output"
+  grep -Fq $'run\t1\t1\tmacOS\t2\t90\t10\t0' <<< "$output"
 }
 
 all_test_files() {
@@ -27,6 +71,119 @@ union_of_shards() {
   run bash "$SHARD"
   [ "$status" -eq 2 ]
   [[ "$output" == *"usage:"* ]]
+}
+
+@test "timed bats runner is executable and self-documents its usage" {
+  [ -x "$TIMED_RUNNER" ]
+  run "$TIMED_RUNNER"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"usage:"* ]]
+}
+
+@test "timed bats runner records each file and the shard total" {
+  local fixture manifest timings fake_bin
+  fixture="$BATS_TEST_TMPDIR/fixture.bats"
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$fake_bin"
+  printf '@test "passes" { true; }\n' > "$fixture"
+  printf '%s\n' "$fixture" > "$manifest"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  run env PATH="$fake_bin:$PATH" GITHUB_RUN_ID=42 GITHUB_RUN_ATTEMPT=3 \
+    GITHUB_SHA=abc RUNNER_OS=macOS SHARD=2 SHARD_TOTAL=4 \
+    "$TIMED_RUNNER" "$manifest" "$timings"
+
+  [ "$status" -eq 0 ]
+  [ "$(awk -F '\t' '$2 == "file_start" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  [ "$(awk -F '\t' '$2 == "file_end" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  [ "$(awk -F '\t' '$2 == "shard" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  awk -F '\t' '$2 == "file_end" && $3 == 42 && $4 == 3 && $5 == "abc" && $6 == "macOS" && $7 == 2 && $8 == 4 && $9 != "" && $12 ~ /^[0-9]+$/ && $13 == 0 { ok=1 } END { exit !ok }' "$timings"
+}
+
+@test "timed bats runner records a failure and continues the shard" {
+  local manifest timings fake_bin calls
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  calls="$BATS_TEST_TMPDIR/calls.txt"
+  mkdir -p "$fake_bin"
+  printf '%s\n' tests/fail.bats tests/pass.bats > "$manifest"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo "$2" >> "$BATS_CALLS"' 'case "$2" in *fail*) exit 7 ;; esac' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  run env PATH="$fake_bin:$PATH" BATS_CALLS="$calls" "$TIMED_RUNNER" "$manifest" "$timings"
+
+  [ "$status" -eq 7 ]
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 2 ]
+  [ "$(awk -F '\t' '$2 == "file_end" { n++ } END { print n+0 }' "$timings")" -eq 2 ]
+  awk -F '\t' '$2 == "shard" && $13 == 7 { ok=1 } END { exit !ok }' "$timings"
+}
+
+@test "timed bats runner does not pass the manifest as test stdin" {
+  local manifest timings fake_bin calls stdin_capture
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  calls="$BATS_TEST_TMPDIR/calls.txt"
+  stdin_capture="$BATS_TEST_TMPDIR/stdin.txt"
+  mkdir -p "$fake_bin"
+  printf '%s\n' tests/first.bats tests/second.bats > "$manifest"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'echo "$2" >> "$BATS_CALLS"' \
+    'cat >> "$BATS_STDIN_CAPTURE"' \
+    'exit 0' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  run env PATH="$fake_bin:$PATH" BATS_CALLS="$calls" BATS_STDIN_CAPTURE="$stdin_capture" \
+    "$TIMED_RUNNER" "$manifest" "$timings"
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 2 ]
+  [ ! -s "$stdin_capture" ]
+}
+
+@test "timed bats runner records the interrupted shard on TERM" {
+  local manifest timings fake_bin ready release runner_pid rc i
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  ready="$BATS_TEST_TMPDIR/ready"
+  release="$BATS_TEST_TMPDIR/release"
+  mkdir -p "$fake_bin"
+  printf '%s\n' tests/running.bats > "$manifest"
+  printf '%s\n' '#!/usr/bin/env bash' ': > "$BATS_READY"' 'while [ ! -f "$BATS_RELEASE" ]; do sleep 0.05; done' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  PATH="$fake_bin:$PATH" BATS_READY="$ready" BATS_RELEASE="$release" \
+    "$TIMED_RUNNER" "$manifest" "$timings" > "$BATS_TEST_TMPDIR/runner.log" 2>&1 &
+  runner_pid=$!
+  i=0
+  while [ ! -f "$ready" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$ready" ]
+
+  kill -TERM "$runner_pid"
+  : > "$release"
+  rc=0
+  wait "$runner_pid" || rc=$?
+
+  [ "$rc" -eq 143 ]
+  [ "$(awk -F '\t' '$2 == "file_start" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  awk -F '\t' '$2 == "shard" && $13 == 143 { ok=1 } END { exit !ok }' "$timings"
+}
+
+@test "CI runs the timed runner and uploads each shard artifact" {
+  local workflow
+  workflow="$REPO_ROOT/.github/workflows/tests.yml"
+  grep -Fq '.github/scripts/run-bats-timed.sh shard-files.txt "$RUNNER_TEMP/bats-timings.tsv"' "$workflow"
+  grep -Fq 'name: bats-timings-${{ matrix.os }}-${{ matrix.shard }}' "$workflow"
+  grep -Fq 'path: ${{ runner.temp }}/bats-timings.tsv' "$workflow"
 }
 
 @test "the shards cover every test file exactly once" {
@@ -88,7 +245,7 @@ union_of_shards() {
 # The test above catches drift in the TOP TWO BY COUNT — exactly the metric
 # that misses the files pinned below (#847, #848): both are near the bottom
 # of the count-weighted sort (9 and 31 tests) despite carrying some of the
-# largest measured durations in the suite (722s and 380s; see
+# largest measured durations in the suite (679s and 293s; see
 # shard-tests.sh's own comment for the measurement). This test guards the
 # actual fix, not the metric that already worked.
 @test "the pinned-apart heavy files never share a shard, at any shard total >= 2 (#847, #848)" {
@@ -178,4 +335,67 @@ union_of_shards() {
   # ...and the shard job's display name must name the same total, or the run
   # log claims a split the workflow is not performing.
   grep -q "bats (\${{ matrix.os }} \${{ matrix.shard }}/$total)" "$wf"
+}
+
+# #1243: count was never the right proxy for a shard's real cost (a
+# background-process-heavy file can carry a tiny @test count while dominating
+# its shard's wall clock), and pinning a shard by EXCLUDING it from the
+# weighted pass -- a stronger, count-agnostic guarantee tried right before
+# this -- traded that off for balance: on the merged (2550 @test) tree it
+# floored 3 of 5 shards at ~29 minutes of the 30-minute cap regardless of how
+# well those 3 were packed, because excluding 2 shards outright left only 3
+# to absorb the other 120 files' real cost. Weighting every file (pinned or
+# not) by its own real seconds and letting a pinned shard's remaining budget
+# fill normally is what actually keeps every shard close to the mean; the
+# test below is the one that would fail if that regressed (at the real CI
+# shard total, where slots 1 and 2 hold the two pinned files, so this covers
+# them along with every other shard rather than needing a second test).
+
+@test "shard totals stay balanced by real measured seconds, not count (#1243)" {
+  # Loose ratio bound (1.15x): measured against the real table this comes out
+  # within 1.001x at total=5 -- 1.15 is deliberately not tight to that number,
+  # so ordinary tree growth does not need this test touched, only a genuinely
+  # new imbalance would trip it (which is exactly what happened in practice:
+  # a shard exceeded the 30-minute cap under the design this replaces).
+  local total=5 i s mean sum=0
+  local -a vals=()
+  for ((i = 1; i <= total; i++)); do
+    s="$(shard_seconds "$i" "$total")"
+    vals+=("$s")
+    sum=$((sum + s))
+  done
+  for s in "${vals[@]}"; do
+    # ratio = s / (sum/total), compared as s*total vs sum*1.15 to stay in
+    # integer arithmetic (bash has no floating point).
+    if [ $((s * total * 100)) -gt $((sum * 115)) ]; then
+      echo "shard at ${s}s exceeds 1.15x the mean (sum=${sum}s over $total shards)" >&2
+      return 1
+    fi
+  done
+}
+
+@test "a file missing from the seconds table is estimated at the average, not dropped (#1243)" {
+  # Reproduces the shape #1243's fallback exists for: a brand-new test file
+  # has no row in bats-file-seconds.tsv yet. It must still be assigned to
+  # exactly one shard (coverage never depends on the table), and its weight
+  # must come out as the table's average, not zero -- a zero weight would
+  # make shard-tests.sh under-count that shard's real load the same way
+  # count-based weighting once did for the two files #847 pinned.
+  local dir="$BATS_TEST_TMPDIR/tests-newfile"
+  mkdir -p "$dir"
+  cp "$REPO_ROOT"/tests/*.bats "$dir"/
+  printf '#!/usr/bin/env bats\n\n@test "placeholder" {\n  true\n}\n' > "$dir/test_zzz_unmeasured.bats"
+
+  local total=5 i found="" shard_files
+  for ((i = 1; i <= total; i++)); do
+    shard_files="$(cd "$REPO_ROOT" && bash "$SHARD" "$i" "$total" "$dir")"
+    if grep -qF "test_zzz_unmeasured.bats" <<<"$shard_files"; then
+      found="$i"
+    fi
+  done
+  [ -n "$found" ]
+
+  run env SHARD_TESTS_SECONDS_TABLE="$SECONDS_TABLE" bash "$SHARD" "$found" "$total" "$dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test_zzz_unmeasured.bats"* ]]
 }

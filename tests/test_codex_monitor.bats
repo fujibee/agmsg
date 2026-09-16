@@ -394,3 +394,28 @@ EOF
   # No truncating redirect to the published path.
   ! grep -qE '>[[:space:]]*"\$PORT_FILE"' "$src"
 }
+
+# --- fail-closed for a spawned seat ---
+
+@test "codex-monitor: a spawned seat (AGMSG_SPAWNED=1) fails CLOSED when the bridge cannot start" {
+  # Fail-open exists for a person at the keyboard. A seat spawned by agmsg has
+  # nobody at its pane, and a plain codex there never receives a message -- the
+  # same outcome as the shim bypass spawn was fixed to close. So with the
+  # spawn marker set, a broken bridge must refuse to start codex at all.
+  run env FAKE_CODEX_MODE=broken AGMSG_SPAWNED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --foo
+  [ "$status" -ne 0 ]
+  # No plain codex was started, bridged or not.
+  [ ! -e "$CALL_LOG" ]
+  # And the refusal says why, and that the session was spawned.
+  printf '%s\n' "$output" | grep -qF 'Refusing to start a plain Codex'
+  printf '%s\n' "$output" | grep -qF 'AGMSG_SPAWNED=1'
+}
+
+@test "codex-monitor: without the spawn marker the same failure still fails open (a person keeps a codex)" {
+  # The control for the test above: the ONLY difference is the marker.
+  run env FAKE_CODEX_MODE=broken AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --foo
+  [ "$status" -eq 0 ]
+  grep -qx 'plain-codex <--foo>' "$CALL_LOG"
+}
