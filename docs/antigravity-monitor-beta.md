@@ -78,7 +78,7 @@ When you type outside an injected receive turn, the supervisor immediately
 pauses delivery and prints this once to its own stderr:
 
 ```
-[agmsg] 人間の入力中は自動配送を保留します。空の入力待ちに戻れば自動再開します
+[agmsg] Automatic delivery is paused while a person is entering input. It will resume when the empty input prompt returns
 ```
 
 This is deliberate, not a failure. Live delivery resumes only after the
