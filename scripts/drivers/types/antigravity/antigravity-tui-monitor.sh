@@ -15,6 +15,6 @@ case "$(uname -s)" in
   *) echo 'Antigravity TUI monitor requires POSIX process primitives; this host is unsupported' >&2; exit 1 ;;
 esac
 if [ "$action" = run ]; then
-  [ -t 0 ] && [ -t 1 ] || { echo 'Antigravity TUI monitor は対話端末から起動してください' >&2; exit 1; }
+  [ -t 0 ] && [ -t 1 ] || { echo 'Antigravity TUI monitor must be started from an interactive terminal' >&2; exit 1; }
 fi
 exec python3 "$HERE/antigravity-tui-supervisor.py" --action "$action" "$@"

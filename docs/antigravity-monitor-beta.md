@@ -64,8 +64,8 @@ and do not need `agy` on `PATH`. Only the default `run` action requires a TTY.
 runtime: <role> tui-pty running     # supervisor alive, nothing in flight
 runtime: <role> tui-pty busy        # a batch is injected, waiting for the receipt
 runtime: <role> tui-pty paused      # auto-delivery is temporarily or durably paused; see below
-runtime: <role> tui-pty 停止/要確認  # the recorded process is gone
-runtime: tui-pty 未起動              # no supervisor is registered for this identity
+runtime: <role> tui-pty stopped/needs-attention  # the recorded process is gone
+runtime: tui-pty not started                     # no supervisor is registered for this identity
 ```
 
 When a batch is in flight, `status` also prints the batch id, its phase, and one
@@ -129,8 +129,8 @@ trips agmsg's read guard. The guard records a `read-denied` violation, the
 supervisor sees it, refuses to acknowledge the in-flight batch, and **stops**:
 
 ```
-通常inboxによる既読試行を検知; ackせず停止します
-復旧: 入力欄を空にしてから `agy-tui reset-guard --project <project> --team <team> --name <role>` を実行してください
+detected a mark-read attempt through the regular inbox; stopping without ack
+Recovery: clear the input field, then run `agy-tui reset-guard --project <project> --team <team> --name <role>`
 ```
 
 Nothing is lost — the messages stay unread — but delivery is down until you
@@ -148,7 +148,7 @@ input pause from a durable pause or an unresolved batch.
 
 | Symptom | Cause | Recovery |
 |---|---|---|
-| `通常inboxによる既読試行を検知` | a `read-denied` violation is latched | `agy-tui reset-guard …` |
+| `detected a mark-read attempt through the regular inbox` | a `read-denied` violation is latched | `agy-tui reset-guard …` |
 | A batch is stuck in `uncertain` / `NEEDS_ATTENTION` | the turn could not be verified | `agy-tui ack …` or `agy-tui replay …` |
 | `paused` after ordinary typing | `humanInputActive`; the supervisor is waiting for a safe idle transition | No command. Finish the human turn and return to the empty input prompt; delivery resumes automatically after the non-idle and stable-idle checks pass. |
 | `paused` with a durable manual-resume latch | `manualResumeRequired`; automatic resume is deliberately disabled | Clear the input box, then run `$agmsg resume` or `agy-tui resume …`. |

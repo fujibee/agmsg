@@ -69,7 +69,7 @@ PY
   cat "$_mon.portable" > "$_mon"
   run bash "$ROOT/scripts/drivers/types/antigravity/antigravity-resume.sh" /tmp/project
   [ "$status" -eq 1 ]
-  [[ "$output" == *"paused な Antigravity TUI が複数"* ]]
+  [[ "$output" == *"multiple paused Antigravity TUIs found"* ]]
 }
 
 @test "resume: no paused TUI fails closed" {
@@ -78,5 +78,5 @@ PY
   cat "$_mon.portable" > "$_mon"
   run bash "$ROOT/scripts/drivers/types/antigravity/antigravity-resume.sh" /tmp/project
   [ "$status" -eq 1 ]
-  [[ "$output" == *"paused な Antigravity TUI が見つかりません"* ]]
+  [[ "$output" == *"no paused Antigravity TUI found"* ]]
 }

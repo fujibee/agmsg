@@ -28,7 +28,7 @@ case "$command" in
    printf '%s/run/antigravity-bridge.%s.%s.%s.state.json\n' "$SKILL_DIR" "$(_actas_lock_encode "$project")" "$(_actas_lock_encode "$team")" "$(_actas_lock_encode "$role")"
    exit ;;
 esac
-bash "$SKILL_DIR/scripts/identities.sh" "$project" antigravity | awk -F '\t' -v t="$team" -v a="$role" '$1==t && $2==a { found=1 } END {exit !found}' || { echo '未登録role' >&2; exit 1; }
+bash "$SKILL_DIR/scripts/identities.sh" "$project" antigravity | awk -F '\t' -v t="$team" -v a="$role" '$1==t && $2==a { found=1 } END {exit !found}' || { echo 'unregistered role' >&2; exit 1; }
 case "$command" in
  claim) actas_lock_claim "$team" "$role" "$owner"; exit ;;
  verify)
@@ -50,8 +50,8 @@ esac
 # doctor used to tell with `lock=none`. (#983)
 _own_rc=0; _owner_check "$team" "$role" "$owner" || _own_rc=$?
 case "$_own_rc" in
-  1) echo '所有権不一致' >&2; exit 1 ;;
-  2) echo 'actas lock を読めないため所有権を確認できません（未確認のまま先へは進みません）' >&2; exit 1 ;;
+  1) echo 'ownership mismatch' >&2; exit 1 ;;
+  2) echo 'cannot read actas lock; ownership cannot be verified (will not proceed without verification)' >&2; exit 1 ;;
 esac
 agmsg_storage_load
 case "$command" in

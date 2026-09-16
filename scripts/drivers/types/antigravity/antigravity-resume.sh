@@ -18,11 +18,11 @@ while IFS=$'\t' read -r team role; do
 done < <(bash "$SCRIPT_DIR/../../../identities.sh" "$PROJECT" antigravity)
 
 if [ "$COUNT" -eq 0 ]; then
-  echo 'agmsg: paused な Antigravity TUI が見つかりません' >&2
+  echo 'agmsg: no paused Antigravity TUI found' >&2
   exit 1
 fi
 if [ "$COUNT" -ne 1 ]; then
-  echo 'agmsg: paused な Antigravity TUI が複数あります。team と role を指定して個別に再開してください:' >&2
+  echo 'agmsg: multiple paused Antigravity TUIs found; specify team and role to resume one:' >&2
   printf '  %s\n' "$PAUSED" >&2
   exit 1
 fi

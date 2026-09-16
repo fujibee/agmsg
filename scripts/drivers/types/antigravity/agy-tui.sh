@@ -36,17 +36,17 @@ if [ -z "$TEAM" ] && [ -z "$ROLE" ]; then
   if [ "$identity_count" -eq 1 ]; then
     IFS=$'\t' read -r TEAM ROLE <<< "$identities"
   elif [ "$identity_count" -gt 1 ]; then
-    printf 'agy-tui: projectに複数のantigravity identityがあります。--teamと--nameを指定してください。\n' >&2
+    printf 'agy-tui: project has multiple Antigravity identities; specify --team and --name.\n' >&2
     printf '%s\n' "$identities" | sed 's/^/  /' >&2
     exit 1
   else
-    printf 'agy-tui: projectにantigravity identityが一意に登録されていません。/agmsgでjoinするか--teamと--nameを指定してください。\n' >&2
+    printf 'agy-tui: project does not have exactly one registered Antigravity identity; join with /agmsg or specify --team and --name.\n' >&2
     exit 1
   fi
 fi
 
 if [ -z "$TEAM" ] || [ -z "$ROLE" ]; then
-  printf 'agy-tui: --teamと--nameは両方指定してください。\n' >&2
+  printf 'agy-tui: specify both --team and --name.\n' >&2
   exit 1
 fi
 
@@ -55,7 +55,7 @@ if [ -z "$ACTION" ]; then
     AGY="$(command -v agy || true)"
   fi
   if [ -z "$AGY" ] || [ ! -x "$AGY" ]; then
-    printf 'agy-tui: agyがPATHにありません。agyを導入するか--agy <path>を指定してください。\n' >&2
+    printf 'agy-tui: agy is not on PATH; install agy or specify --agy <path>.\n' >&2
     exit 1
   fi
 elif [ -z "$AGY" ]; then

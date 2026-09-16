@@ -21,7 +21,7 @@ function _requirePosix(what) {
 const darwinInfo=new URL('./mac-process-info.py',import.meta.url).pathname;
 function _darwinProc(pid) {
   const out=spawnSync('python3',[darwinInfo,String(pid)],{encoding:'utf8'});
-  if(out.status===1) { const e=Error(`pid ${pid} を確認できません`);e.code='ENOENT';throw e; }
+  if(out.status===1) { const e=Error(`cannot verify pid ${pid}`);e.code='ENOENT';throw e; }
   if(out.status!==0||!out.stdout.trim()) throw Error('macOS process identity is unreadable');
   const fields=out.stdout.trim().split('\t');
   if(fields.length!==3||!/^[0-9]+$/.test(fields[0])||!['R','Z'].includes(fields[1])||!/^darwin:[0-9]+:[0-9]{6}$/.test(fields[2])) throw Error('macOS process identity is malformed');
@@ -51,7 +51,7 @@ function _darwinLocked(file, data, append) {
     '    with open(sys.argv[2], "a") as target: target.write(sys.stdin.read())',
   ].join('\n');
   const out=spawnSync('python3',['-c',script,`${file}.lock`,file,append?'append':'read'],{encoding:'utf8',input:data||''});
-  if(out.status!==0) throw Error('違反記録の読取/lock失敗');
+  if(out.status!==0) throw Error('failed to read or lock the violation record');
   return out.stdout;
 }
 export function read(file) {return JSON.parse(fs.readFileSync(file,'utf8'));}
@@ -68,9 +68,9 @@ export function violations(file) {
   const out=process.platform==='darwin'
     ? {status:0,stdout:_darwinLocked(file,'',false)}
     : spawnSync('flock',['-w','3',`${file}.lock`,'cat',file],{encoding:'utf8'});
-  if(out.status!==0) throw Error('違反記録の読取/lock失敗');
+  if(out.status!==0) throw Error('failed to read or lock the violation record');
   const rows=out.stdout.trim()?out.stdout.trim().split('\n').map(JSON.parse):[];
-  for(const r of rows) if(r.event!=='read-denied'||!Number.isInteger(r.pid)) throw Error('違反記録破損');
+  for(const r of rows) if(r.event!=='read-denied'||!Number.isInteger(r.pid)) throw Error('corrupt violation record');
   return rows;
 }
 if(process.argv[2]==='check') {
@@ -91,14 +91,14 @@ if(process.argv[2]==='check') {
     // The input contains no message body; keep refusing even if this write fails.
     if(process.platform==='darwin') _darwinLocked(reservation.violations,row,true);
     else spawnSync('flock',['-w','3',`${reservation.violations}.lock`,'bash','-c','cat >> "$1"','guard',reservation.violations],{input:row});
-    console.error('agmsg: bridgeが受領管理中のため既読化を拒否しました');
+    console.error('agmsg: refusing to mark messages read while the bridge manages delivery');
   // Keep the refusal code 13 unchanged: callers already branch on it and
   // fail-closed behavior is the existing contract. Only the diagnostic wording
   // differs, because an inspection failure and an unsupported host need
   // different operator actions. (#1090 review)
   } catch (e) {
     if (e instanceof PlatformUnsupported) console.error(`agmsg: ${e.message}`);
-    else console.error('agmsg: bridge予約/認可の検査に失敗しました');
+    else console.error('agmsg: bridge reservation or authorization check failed');
   }
   process.exit(13);
 }

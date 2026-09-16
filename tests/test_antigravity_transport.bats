@@ -65,7 +65,7 @@ teardown() {
   printf 'sid-other\n' > "$LOCK"
   run bash "$TRANSPORT" peek "$PROJ" fixture worker sid-me
   [ "$status" -ne 0 ]
-  grep -q '所有権不一致' <<<"$output"
+  grep -q 'ownership mismatch' <<<"$output"
 }
 
 @test "transport peek: an unreadable lock is refused, and NOT as a mismatch" {
@@ -80,8 +80,8 @@ teardown() {
   run bash "$TRANSPORT" peek "$PROJ" fixture worker sid-me
   chmod 644 "$LOCK"
   [ "$status" -ne 0 ]
-  grep -q '所有権を確認できません' <<<"$output"
-  refute grep -q '所有権不一致' <<<"$output"
+  grep -q 'ownership cannot be verified' <<<"$output"
+  refute grep -q 'ownership mismatch' <<<"$output"
 }
 
 @test "supervisor proc_start: uses a native process identity on each POSIX host" {
@@ -237,10 +237,11 @@ PY
 
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
   [ "$status" -eq 0 ]
-  grep -q '停止/要確認' <<<"$output"
+  grep -q 'stopped/needs-attention' <<<"$output"
 
   # The guard's own entry. It was ALREADY fail-closed here -- its blanket catch
-  # exits 13 either way -- so what changed is only what it says: "検査に失敗しました"
+  # exits 13 either way -- so what changed is only what it says: the inspection
+  # failure is now distinguished from an unsupported host.
   # read the same whether the check failed or could never run on this host, and
   # the operator's next move differs. Exit 13 is left alone; callers branch on it.
   run node "$SCRIPTS/drivers/types/antigravity/bridge-read-guard.mjs" check "$run_dir/read-reservation.fixture__worker.json" 1 fixture worker
@@ -260,7 +261,7 @@ PY
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
   [ "$status" -ne 0 ]
   grep -q 'process identity is unreadable' <<<"$output"
-  refute grep -q '停止/要確認' <<<"$output"
+  refute grep -q 'stopped/needs-attention' <<<"$output"
 
   # A process that has actually exited is different from an unreadable
   # identity. ENOENT is the one safe signal for the stopped state.
@@ -271,7 +272,7 @@ PY
     > "$run_dir/read-reservation.unreadable.json"
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
   [ "$status" -eq 0 ]
-  grep -q '停止/要確認' <<<"$output"
+  grep -q 'stopped/needs-attention' <<<"$output"
 }
 
 @test "a plain inbox read cannot consume messages while a reservation exists" {

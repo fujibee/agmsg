@@ -47,13 +47,13 @@ EOF
 )"
     actual="$(cat "$file")"
     if [ "$actual" != "$expected" ]; then
-      echo '既存rulefileはagmsg形式ではありません' >&2; return 1
+      echo 'existing rule file is not in agmsg format' >&2; return 1
     fi
   fi
   {
     printf '%s\n' '<!-- agmsg:antigravity:monitor -->'
     printf '%s\n' '# agmsg Integration Rule'
-    printf '%s\n' '受領はAntigravity bridgeが管理します。inbox.sh/check-inbox.shを呼ばないでください。'
+    printf '%s\n' 'Message delivery is managed by the Antigravity bridge. Do not call inbox.sh/check-inbox.sh.'
   } > "$file"
 }
 agmsg_delivery_status() {
@@ -61,8 +61,8 @@ agmsg_delivery_status() {
   if [ -f "$file" ] && grep -q '^<!-- agmsg:antigravity:monitor -->$' "$file"; then echo 'mode: monitor'; else rulefile_status "$@"; fi
 }
 agmsg_delivery_on_enable() {
-  printf 'headless明示起動: bash %q --project %q --team <team> --name <role>\n' "$SKILL_DIR/scripts/drivers/types/antigravity/antigravity-monitor.sh" "$3"
-  printf 'TUI明示起動: bash %q --project %q --team <team> --name <role>\n' "$SKILL_DIR/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh" "$3"
+  printf 'Start headless explicitly: bash %q --project %q --team <team> --name <role>\n' "$SKILL_DIR/scripts/drivers/types/antigravity/antigravity-monitor.sh" "$3"
+  printf 'Start the TUI explicitly: bash %q --project %q --team <team> --name <role>\n' "$SKILL_DIR/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh" "$3"
 }
 agmsg_delivery_runtime_status() {
   node "$SKILL_DIR/scripts/drivers/types/antigravity/antigravity-mode.mjs" status "$2"

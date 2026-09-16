@@ -249,7 +249,7 @@ assert text.index('id=m-1') < text.index('id=m-2')
 assert text.count('[/agmsg message]') == 2
 assert '\\\\x1b' in text
 assert 'AGMSG_RECEIVED:batch-1' not in text
-assert 'ASCIIコロン（U+003A）、batch idを空白なしで連結' in text
+assert 'an ASCII colon (U+003A), and the batch id with no spaces' in text
 `);
 });
 
@@ -298,7 +298,7 @@ assert s.state['manualResumeRequired'] is False
 assert s.state['humanInputActive'] is True
 assert s.state['humanInputSawNonIdle'] is False
 assert s.state['supervisorPhase'] == 'WAITING_FOR_IDLE'
-assert notice.getvalue().count('空の入力待ちに戻れば自動再開') == 1
+assert notice.getvalue().count('resume when the empty input prompt returns') == 1
 `);
 });
 
@@ -464,7 +464,7 @@ assert s.state['manualResumeRequired'] is True, '既存の耐久pauseには触�
 assert s.state['humanInputActive'] is True
 assert s.state['humanInputSawNonIdle'] is True
 assert s.state['supervisorPhase'] == 'WAITING_FOR_RESULT'
-assert '受領確認後、空の入力待ちに戻れば自動再開' in notice.getvalue()
+assert 'resume after confirmation when the empty input prompt returns' in notice.getvalue()
 `);
 });
 
@@ -572,9 +572,9 @@ s.save = lambda: None
 s.stopping = False
 out = io.StringIO()
 with contextlib.redirect_stderr(out):
-    s.fail('通常inboxによる既読試行を検知')
+    s.fail('detected a mark-read attempt through the regular inbox')
 assert 'agy-tui reset-guard' in out.getvalue()
-assert 'ackせず停止します' in out.getvalue()
+assert 'stopping without ack' in out.getvalue()
 assert s.state['durableAttention'] is True
 `);
 });
@@ -615,7 +615,7 @@ s.state_file.write_text(json.dumps({**s.state, 'batch': {'id': 'batch-1', 'phase
 try:
     s.reset_guard()
 except RuntimeError as error:
-    assert '未解決batch' in str(error)
+    assert 'unresolved batch' in str(error)
 else:
     raise AssertionError('未解決batchを拒否しなかった')
 assert s.violations.read_text() == 'keep'
@@ -630,7 +630,7 @@ s.reservation.write_text(json.dumps({
 try:
     s.reset_guard()
 except RuntimeError as error:
-    assert '稼働中' in str(error)
+    assert 'running' in str(error)
 else:
     raise AssertionError('稼働中supervisorを拒否しなかった')
 assert s.violations.read_text() == 'keep'
@@ -785,10 +785,10 @@ test('TUI monitor は対話端末でない起動を拒否する', () => {
   const wrapper = new URL('../scripts/drivers/types/antigravity/antigravity-tui-monitor.sh', import.meta.url).pathname;
   const result = spawnSync('bash', [wrapper, '--help'], { encoding: 'utf8' });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /対話端末/);
+  assert.match(result.stderr, /interactive terminal/);
   const status = spawnSync('bash', [wrapper, 'status', '--project', '/tmp', '--team', 'no-such-team', '--name', 'no-such-role'], { encoding: 'utf8' });
   assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, /tui-pty 未起動/);
+  assert.match(status.stdout, /tui-pty not started/);
 });
 
 test('TUI status refuses an unreadable process identity', () => {
@@ -976,24 +976,24 @@ sys.exit(os.waitstatus_to_exitcode(status))
     const stop = spawnSync('python3', [supervisorPath, '--action', 'stop', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
     assert.equal(stop.status, 0, stop.stderr);
     await waitFor(() => child.exitCode !== null);
-    assert.match(run('delivery.sh', ['status', 'antigravity', project]), /runtime: worker tui-pty 停止\/要確認/);
+    assert.match(run('delivery.sh', ['status', 'antigravity', project]), /runtime: worker tui-pty stopped\/needs-attention/);
     const deadStatus = spawnSync('python3', [supervisorPath, '--action', 'status', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
     assert.equal(deadStatus.status, 0, deadStatus.stderr);
-    assert.match(deadStatus.stdout, /runtime: worker tui-pty 停止\/要確認/);
-    assert.match(stop.stdout, /停止要求を送信しました/);
+    assert.match(deadStatus.stdout, /runtime: worker tui-pty stopped\/needs-attention/);
+    assert.match(stop.stdout, /Stop request sent/);
     assert.match(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'), /"phase": "uncertain"|"phase":"uncertain"/);
     const unresolvedBeforeRecovery = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));
     const restartRejected = spawnSync('python3', [supervisorPath, '--project', project, '--team', 'fixture', '--name', 'worker', '--agy', fake], { env, encoding: 'utf8' });
     assert.notEqual(restartRejected.status, 0);
-    assert.match(restartRejected.stderr, /前回の受信を安全に既読確定できなかった/);
+    assert.match(restartRejected.stderr, /previous delivery could not be safely marked read/);
     assert.match(restartRejected.stderr, new RegExp('batch: ' + uncertain.batch.id + ' phase=uncertain messages=1'));
     assert.match(restartRejected.stderr, new RegExp('message IDs: ' + uncertain.batch.messages[0].id));
-    assert.match(restartRejected.stderr, /これは未処理とは限りません/);
+    assert.match(restartRejected.stderr, /does not necessarily mean the messages are unprocessed/);
     assert.match(restartRejected.stderr, /agy-tui status --project/);
     assert.match(restartRejected.stderr, /agy-tui ack --project/);
     assert.match(restartRejected.stderr, /agy-tui replay --project/);
-    assert.match(restartRejected.stderr, /AGMSG_RECEIVED行と返信を確認済みの場合だけ/);
-    assert.match(restartRejected.stderr, /判断できない場合はackせず/);
+    assert.match(restartRejected.stderr, /Mark read only after confirming the AGMSG_RECEIVED line and reply/);
+    assert.match(restartRejected.stderr, /If you cannot decide, do not ack/);
     assert.deepEqual(
       JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')),
       unresolvedBeforeRecovery,

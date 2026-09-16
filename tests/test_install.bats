@@ -46,17 +46,17 @@ teardown() {
   run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" status \
     --project /tmp/not-joined --team demo --name agy
   [ "$status" -eq 0 ]
-  grep -qF 'runtime: tui-pty 未起動' <<<"$output"
+  grep -qF 'runtime: tui-pty not started' <<<"$output"
 
   run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" reset-guard \
     --project /tmp/not-joined --team demo --name agy
   [ "$status" -eq 1 ]
-  grep -qF '復旧対象のstateがありません' <<<"$output"
+  grep -qF 'no state exists for recovery' <<<"$output"
 
   run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" ack \
     --project /tmp/not-joined --team demo --name agy --batch batch-1 --confirm-id message-1
   [ "$status" -eq 1 ]
-  [[ "$output" == *"復旧対象の予約/stateがありません"* ]]
+  [[ "$output" == *"no reservation or state exists for recovery"* ]]
 }
 
 @test "install: Antigravity TUI shim preserves foreign files and refreshes its owner only" {
@@ -112,7 +112,7 @@ teardown() {
   run env HOME="$FAKE_HOME" PATH="$FAKE_HOME/bin:$PATH" \
     "$FAKE_HOME/.agents/bin/agy-tui" status --project "$project"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"runtime: tui-pty 未起動"* ]]
+  [[ "$output" == *"runtime: tui-pty not started"* ]]
 }
 
 @test "uninstall: removes only the owned Antigravity TUI shim" {

@@ -108,7 +108,7 @@ test('IDLE中のpeek停止はNEEDS_ATTENTIONへ遷移せず予約を解放する
     fs.writeFileSync(`${barrier}.release`,'');
     await waitFor(()=>f.child.exitCode!==null);
     assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
-    assert.match(f.output(),/停止/);
+    assert.match(f.output(),/stopped/);
     assert.equal(f.state().batch,null);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>(name.startsWith('read-reservation.')||name.startsWith('antigravity-reservation.'))&&name.endsWith('.json')),false);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);
@@ -125,7 +125,7 @@ test('IDLE中のpeek非0終了後のgroup停止は正常停止として扱う',a
     try { process.kill(-f.child.pid,'SIGTERM'); } catch {}
     await waitFor(()=>f.child.exitCode!==null);
     assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
-    assert.match(f.output(),/停止/);
+    assert.match(f.output(),/stopped/);
     assert.equal(f.state().batch,null);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>(name.startsWith('read-reservation.')||name.startsWith('antigravity-reservation.'))&&name.endsWith('.json')),false);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);
@@ -139,7 +139,7 @@ test('IDLE中peek subprocessのSIGTERM終了は正常停止として扱う',asyn
     await waitFor(()=>fs.existsSync(`${signal}.reached`));
     await waitFor(()=>f.child.exitCode!==null);
     assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
-    assert.match(f.output(),/停止/);
+    assert.match(f.output(),/stopped/);
     assert.equal(f.state().batch,null);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>(name.startsWith('read-reservation.')||name.startsWith('antigravity-reservation.'))&&name.endsWith('.json')),false);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);
@@ -152,7 +152,7 @@ test('本文上限超過はNEEDS_ATTENTIONとして停止する',async()=>{
     await waitFor(()=>f.output().includes('ready'));
     f.sh('send.sh',['fixture','sender','worker','x'.repeat(65537)]);
     await waitFor(()=>f.output().includes('NEEDS_ATTENTION'));
-    assert.match(f.output(),/本文上限超過/);
+    assert.match(f.output(),/message size limit exceeded/);
     assert.equal(f.state().batch,null);
   } finally { await f.close(); }
 });
@@ -164,7 +164,7 @@ test('IDLE中verifyのSIGTERM終了は正常停止として扱う',async()=>{
     await waitFor(()=>f.output().includes('ready'));
     await waitFor(()=>f.child.exitCode!==null);
     assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
-    assert.match(f.output(),/停止/);
+    assert.match(f.output(),/stopped/);
     assert.equal(f.state().batch,null);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>(name.startsWith('read-reservation.')||name.startsWith('antigravity-reservation.'))&&name.endsWith('.json')),false);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);

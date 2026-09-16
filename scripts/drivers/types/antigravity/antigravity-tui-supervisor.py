@@ -58,17 +58,17 @@ def proc_start(pid):
         try:
             result=subprocess.run([sys.executable,str(ROOT/'scripts/drivers/types/antigravity/mac-process-info.py'),str(pid)],capture_output=True,text=True)
         except OSError as exc:
-            raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (libproc: {exc.strerror})') from exc
+            raise StartTimeUnreadable(f'cannot determine start time for pid {pid} (libproc: {exc.strerror})') from exc
         if result.returncode == 1:
             raise FileNotFoundError(errno.ENOENT, f'pid {pid} is not running')
         if result.returncode != 0:
-            raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (libproc)')
+            raise StartTimeUnreadable(f'cannot determine start time for pid {pid} (libproc)')
         fields=result.stdout.strip().split('\t')
         if len(fields)!=3 or not fields[2].startswith('darwin:'):
-            raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (libproc output)')
+            raise StartTimeUnreadable(f'cannot determine start time for pid {pid} (libproc output)')
         return fields[2]
     if sys.platform != 'linux':
-        raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (unsupported platform: {sys.platform})')
+        raise StartTimeUnreadable(f'cannot determine start time for pid {pid} (unsupported platform: {sys.platform})')
     try:
         raw=Path(f'/proc/{pid}/stat').read_text()
     except FileNotFoundError as exc:
@@ -76,13 +76,13 @@ def proc_start(pid):
         # actually there. On a system with no /proc at all, every pid looks
         # absent, and that is a fact about the system, not about the process.
         if not Path('/proc').is_dir():
-            raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (/proc がありません)') from exc
+            raise StartTimeUnreadable(f'cannot determine start time for pid {pid} (/proc is unavailable)') from exc
         raise
     except OSError as exc:
-        raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (/proc/{pid}/stat: {exc.strerror})') from exc
+        raise StartTimeUnreadable(f'cannot determine start time for pid {pid} (/proc/{pid}/stat: {exc.strerror})') from exc
     token=raw.split(') ',1)[1].split()[19]
     if not token.isdigit():
-        raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (/proc/{pid}/stat の 22 番目が数値ではありません)')
+        raise StartTimeUnreadable(f'cannot determine start time for pid {pid} (/proc/{pid}/stat field 22 is not numeric)')
     return token
 
 def process_still(pid, start):
@@ -302,7 +302,7 @@ class Supervisor:
         signal.signal(signal.SIGUSR1, self.request_resume)
         signal.signal(signal.SIGWINCH, self.request_resize)
     def request_stop(self, signum, _frame):
-        self.stop_reason=f'外部停止要求({signal.Signals(signum).name})'
+        self.stop_reason=f'external stop request ({signal.Signals(signum).name})'
     def request_resume(self, _signum, _frame):
         self.resume_requested=True
     def request_resize(self, _signum, _frame):
@@ -311,7 +311,7 @@ class Supervisor:
         already_paused=self.state.get('humanInputActive',False)
         self.state['humanInputActive']=True; self.state['humanInputSawNonIdle']=False; self.human_idle_since=None; self.save()
         if not already_paused:
-            print('\r\n[agmsg] 人間の入力中は自動配送を保留します。空の入力待ちに戻れば自動再開します',file=sys.stderr)
+            print('\r\n[agmsg] Automatic delivery is paused while a person is entering input. It will resume when the empty input prompt returns',file=sys.stderr)
     def permission_input_rejection_reason(self):
         """Return None for the permission UI, otherwise a fail-closed diagnostic reason."""
         screen=getattr(self,'screen',None)
@@ -375,7 +375,7 @@ class Supervisor:
     def allow_permission_input(self):
         # The current batch waits for its receipt; preserve durable pause and set only a temporary input pause.
         self.state['humanInputActive']=True; self.state['humanInputSawNonIdle']=True; self.human_idle_since=None; self.save()
-        print('\r\n[agmsg] 許可UIへの人間入力をrelayしました。受領確認後、空の入力待ちに戻れば自動再開します',file=sys.stderr)
+        print('\r\n[agmsg] Relayed human input to the permission UI. It will resume after confirmation when the empty input prompt returns',file=sys.stderr)
     @staticmethod
     def read_winsize(fd):
         return fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
@@ -404,7 +404,7 @@ class Supervisor:
             for fd in fds: os.close(fd)
         if p.returncode:
             detail=(p.stderr.strip() or p.stdout.strip() or f'exit {p.returncode}')
-            raise RuntimeError(f'{command}失敗: {detail}')
+            raise RuntimeError(f'{command} failed: {detail}')
         return p.stdout
     def save(self): atomic(self.state_file,self.state)
     @staticmethod
@@ -414,22 +414,22 @@ class Supervisor:
             state.update({'schemaVersion':2,'humanInputActive':False,'humanInputSawNonIdle':False,
                           'durableAttention':state.get('supervisorPhase')=='NEEDS_ATTENTION'})
         elif version!=2:
-            raise RuntimeError(f'未対応state schemaVersion={version}')
+            raise RuntimeError(f'unsupported state schemaVersion={version}')
         return state
     def fail(self, why):
         if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.state['batch']['phase']='uncertain'
         self.state['durableAttention']=True; self.state['supervisorPhase']='NEEDS_ATTENTION'; self.save()
-        message=f'\r\n{why}; ackせず停止します'
-        if why=='通常inboxによる既読試行を検知':
-            message+='\n復旧: 入力欄を空にしてから `agy-tui reset-guard --project <project> --team <team> --name <role>` を実行してください'
+        message=f'\r\n{why}; stopping without ack'
+        if why=='detected a mark-read attempt through the regular inbox':
+            message+='\nRecovery: clear the input field, then run `agy-tui reset-guard --project <project> --team <team> --name <role>`'
         print(message,file=sys.stderr); self.stopping=True
     def check_guard(self):
         reservation=json.loads(self.reservation.read_text())
-        if reservation['owner']!=self.owner or reservation['start']!=self.start: raise RuntimeError('予約所有権不一致')
-        if proc_start(os.getpid())!=self.start: raise RuntimeError('supervisor start token不一致')
-        if self.actas.read_text().strip()!=self.owner: raise RuntimeError('actas所有権不一致')
-        if self.violations.exists() and self.violations.read_text().strip(): raise RuntimeError('通常inboxによる既読試行を検知')
-        if self.child and proc_start(self.child)!=self.state.get('childStart'): raise RuntimeError('agy child start token不一致')
+        if reservation['owner']!=self.owner or reservation['start']!=self.start: raise RuntimeError('reservation ownership mismatch')
+        if proc_start(os.getpid())!=self.start: raise RuntimeError('supervisor start token mismatch')
+        if self.actas.read_text().strip()!=self.owner: raise RuntimeError('actas ownership mismatch')
+        if self.violations.exists() and self.violations.read_text().strip(): raise RuntimeError('detected a mark-read attempt through the regular inbox')
+        if self.child and proc_start(self.child)!=self.state.get('childStart'): raise RuntimeError('agy child start token mismatch')
     def unresolved_batch_message(self, state):
         batch=state['batch']; batch_id=str(batch.get('id','unknown'))
         messages=batch.get('messages',[]); ids=[str(message.get('id','unknown')) for message in messages]
@@ -438,23 +438,23 @@ class Supervisor:
         confirm=' '.join(f'--confirm-id {shlex.quote(message_id)}' for message_id in ids)
         recovery=f'--batch {shlex.quote(batch_id)} {confirm}'.rstrip()
         return '\n'.join([
-            '前回の受信を安全に既読確定できなかったため、新しいagy TUIを開始しません。',
+            'The previous delivery could not be safely marked read, so a new agy TUI will not start.',
             f'batch: {batch_id} phase={batch.get("phase")} messages={len(messages)}',
-            f'message IDs: {", ".join(ids) if ids else "なし"}',
-            'これは未処理とは限りません。次の基準で復旧方法を選んでください。',
-            '1. 状態を確認:',
+            f'message IDs: {", ".join(ids) if ids else "none"}',
+            'This does not necessarily mean the messages are unprocessed. Choose a recovery method using these criteria.',
+            '1. Inspect the state:',
             f'   agy-tui status {common}',
-            '2. agy画面で同じbatchのAGMSG_RECEIVED行と返信を確認済みの場合だけ既読確定:',
+            '2. Mark read only after confirming the AGMSG_RECEIVED line and reply for the same batch in the agy screen:',
             f'   agy-tui ack {common} {recovery}',
-            '3. agyがメッセージを受信していない場合は再配送（重複処理に注意）:',
+            '3. If agy did not receive the messages, replay them (beware of duplicate processing):',
             f'   agy-tui replay {common} {recovery}',
-            '判断できない場合はackせず、statusの出力とagy画面を確認してください。',
+            'If you cannot decide, do not ack; inspect the status output and the agy screen.',
         ])
     def acquire(self):
         mode=Path(self.project)/'.agent/rules/agmsg.md'
-        if not mode.exists() or '<!-- agmsg:antigravity:monitor -->' not in mode.read_text(): raise RuntimeError('monitor設定が必要')
+        if not mode.exists() or '<!-- agmsg:antigravity:monitor -->' not in mode.read_text(): raise RuntimeError('monitor configuration is required')
         existing=[file for file in (self.reservation,self.legacy_reservation) if file.exists()]
-        if len(existing)>1: raise RuntimeError('複数の予約形式が存在します')
+        if len(existing)>1: raise RuntimeError('multiple reservation formats exist')
         if existing:
             old=json.loads(existing[0].read_text())
             # ValueError stays here: it is about the RECORD (a pid that is not a
@@ -462,7 +462,7 @@ class Supervisor:
             # process_still's, once, and an unreadable /proc propagates out of
             # this block rather than being read as gone.
             try:
-                if process_still(int(old['pid']),old['start']): raise RuntimeError('既存Antigravity bridge/TUI supervisor が稼働中です')
+                if process_still(int(old['pid']),old['start']): raise RuntimeError('an existing Antigravity bridge/TUI supervisor is running')
             except (ProcessLookupError,ValueError): pass
             if self.state_file.exists():
                 old_state=json.loads(self.state_file.read_text())
@@ -470,7 +470,7 @@ class Supervisor:
             existing[0].unlink()
         if self.state_file.exists():
             saved=self.migrate_state(json.loads(self.state_file.read_text()))
-            if any(saved.get(k)!=self.state[k] for k in ('project','team','role')): raise RuntimeError('state不一致')
+            if any(saved.get(k)!=self.state[k] for k in ('project','team','role')): raise RuntimeError('state mismatch')
             self.state=saved
             self.state['owner']=self.owner
             self.human_input_restart_recovery=bool(self.state.get('humanInputActive'))
@@ -482,18 +482,18 @@ class Supervisor:
         atomic(self.reservation,{'type':'antigravity','owner':self.owner,'pid':os.getpid(),'start':self.start,'state':str(self.state_file),'actas':str(self.actas),'violations':str(self.violations),'capHash':hashlib.sha256(self.cap.encode()).hexdigest(),'kind':'tui-pty'})
         self.acquired=True
     def reset_guard(self):
-        if not self.state_file.exists(): raise RuntimeError('復旧対象のstateがありません')
+        if not self.state_file.exists(): raise RuntimeError('no state exists for recovery')
         state=self.migrate_state(json.loads(self.state_file.read_text()))
-        if any(state.get(k)!=self.state[k] for k in ('project','team','role')): raise RuntimeError('state不一致')
-        if state.get('batch'): raise RuntimeError('未解決batchがあります。reset-guardでは解除できません')
+        if any(state.get(k)!=self.state[k] for k in ('project','team','role')): raise RuntimeError('state mismatch')
+        if state.get('batch'): raise RuntimeError('an unresolved batch exists; reset-guard cannot clear it')
         self.call('claim')
         try:
             if self.reservation.exists():
                 reservation=json.loads(self.reservation.read_text())
-                if reservation.get('state')!=str(self.state_file) or reservation.get('kind')!='tui-pty': raise RuntimeError('別の予約が存在します')
-                if 'pid' not in reservation or 'start' not in reservation: raise RuntimeError('予約情報が壊れています')
+                if reservation.get('state')!=str(self.state_file) or reservation.get('kind')!='tui-pty': raise RuntimeError('a different reservation exists')
+                if 'pid' not in reservation or 'start' not in reservation: raise RuntimeError('reservation data is corrupt')
                 try:
-                    if process_still(int(reservation['pid']),reservation['start']): raise RuntimeError('TUI supervisorが稼働中です')
+                    if process_still(int(reservation['pid']),reservation['start']): raise RuntimeError('the TUI supervisor is running')
                 except (ProcessLookupError,ValueError): pass
             self.violations.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
             lock_path=Path(str(self.violations)+'.lock')
@@ -504,12 +504,12 @@ class Supervisor:
                         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB); acquired=True; break
                     except BlockingIOError:
                         time.sleep(0.1)
-                if not acquired: raise RuntimeError('violations lockを取得できません')
+                if not acquired: raise RuntimeError('could not acquire the violations lock')
                 self.violations.write_text('')
                 state['durableAttention']=False
                 if state.get('supervisorPhase')=='NEEDS_ATTENTION': state['supervisorPhase']='WAITING_FOR_IDLE'
                 atomic(self.state_file,state)
-            print('read-denied guardを解除しました。未読メッセージとack状態は変更していません')
+            print('read-denied guard cleared. Unread messages and ack state were not changed')
         finally:
             self.call('release')
     def launch(self):
@@ -528,7 +528,7 @@ class Supervisor:
         for m in batch['messages']:
             body=m['body'].replace('\x1b','\\x1b')
             out += [f'[agmsg message id={m["id"]}]',f'from: {m["from"]}',f'at: {m["at"]}','body:',body,'[/agmsg message]']
-        out += ['[/agmsg batch]','この受信を読んだら、英字 AGMSG_RECEIVED、ASCIIコロン（U+003A）、batch idを空白なしで連結した1行だけを最初に出力し、その後に通常どおり処理してください。形式を調べるためのツール実行は不要です。']
+        out += ['[/agmsg batch]','After reading this delivery, first output exactly one line consisting of AGMSG_RECEIVED, an ASCII colon (U+003A), and the batch id with no spaces, then proceed normally. Do not run tools to inspect the format.']
         return '\n'.join(out)
     @staticmethod
     def batch_contains_receipt(batch):
@@ -562,7 +562,7 @@ class Supervisor:
         self.state['batch']=None; self.state['supervisorPhase']='WAITING_FOR_IDLE'
         if pause_after_ack:
             self.human_input_seen=True; self.state['manualResumeRequired']=True
-            print('\r\n[agmsg] 本文にidle画面の署名を検知したため、後続の自動配送を停止しました。再開: $agmsg resume',file=sys.stderr)
+            print('\r\n[agmsg] Stopped subsequent automatic delivery because the message body contained an idle-screen signature. Resume: $agmsg resume',file=sys.stderr)
         self.save()
     def maybe_poll(self):
         if time.monotonic()-self.last_poll<self.a.poll: return
@@ -577,7 +577,7 @@ class Supervisor:
         msgs=[json.loads(x) for x in rows.splitlines()]; chosen=[]; size=0
         for m in msgs:
             n=len(m['body'].encode())
-            if n>65536: self.fail(f'本文上限超過 id={m["id"]}'); return
+            if n>65536: self.fail(f'message size limit exceeded id={m["id"]}'); return
             if size+n>65536: break
             chosen.append(m);size+=n
         if not chosen:return
@@ -626,16 +626,16 @@ class Supervisor:
         if now-self.human_idle_since<self.HUMAN_IDLE_STABLE_SECONDS:return
         self.state['humanInputActive']=False; self.state['humanInputSawNonIdle']=False
         self.human_input_restart_recovery=False; self.human_idle_since=None; self.save()
-        print('\r\n[agmsg] 空の入力待ちを確認したため自動配送を再開しました',file=sys.stderr)
+        print('\r\n[agmsg] Resumed automatic delivery after confirming the empty input prompt',file=sys.stderr)
     def loop(self):
         while not self.stopping:
             if self.resize_requested:
                 self.resize_requested=False; self.sync_winsize()
             if self.resume_requested:
                 self.resume_requested=False
-                if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中のresume要求を拒否'); continue
+                if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('refused resume request during a delivery turn'); continue
                 self.state['manualResumeRequired']=False; self.state['humanInputActive']=False; self.state['humanInputSawNonIdle']=False; self.human_input_restart_recovery=False; self.human_idle_since=None; self.state['supervisorPhase']='WAITING_FOR_IDLE'; self.save()
-                print('\r\nmonitor再開要求を受け付けました。空の入力待ち画面を確認してから配送します',file=sys.stderr)
+                print('\r\nAccepted monitor resume request. Delivery will continue after the empty input prompt is confirmed',file=sys.stderr)
             if self.stop_reason:
                 if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.fail(self.stop_reason)
                 break
@@ -648,7 +648,7 @@ class Supervisor:
             # This prevents an unreflected permission footer from being mistaken for normal input.
             if self.master in r:
                 data=os.read(self.master,65536)
-                if not data: self.fail('agy TUIが終了'); break
+                if not data: self.fail('agy TUI exited'); break
                 self.last_output=time.monotonic()
                 os.write(sys.stdout.fileno(),data); self.screen.feed(data); text=data.decode(errors='replace'); self.buffer=(self.buffer+text)[-65536:]
                 b=self.state.get('batch')
@@ -657,9 +657,9 @@ class Supervisor:
                     self.permission_raw_window=(getattr(self,'permission_raw_window','')+text)[-65536:]
                     receipt_tail=self.screen.lines_after(b.get('receipt'))
                     if receipt_tail is not None:
-                        if self.batch_contains_receipt(b): self.fail('受信本文にreceipt全体が含まれるためackしない')
-                        elif self.screen.uncertain:self.fail(f'未対応のterminal制御列をreceipt turn中に検知（理由={self.screen.uncertain_reason or "unknown"}）')
-                        elif self.failure_signature(receipt_tail): self.fail('TUI error/cancel/permission signatureを検知')
+                        if self.batch_contains_receipt(b): self.fail('refusing to ack because the receipt appears in the delivered body')
+                        elif self.screen.uncertain:self.fail(f'detected an unsupported terminal control sequence during the receipt turn (reason={self.screen.uncertain_reason or "unknown"})')
+                        elif self.failure_signature(receipt_tail): self.fail('detected a TUI error/cancel/permission signature')
                         else: self.ack()
             if sys.stdin.fileno() in r:
                 data=os.read(sys.stdin.fileno(),4096)
@@ -669,7 +669,7 @@ class Supervisor:
                 elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     reason=self.permission_input_rejection_reason()
                     diagnostic=self.permission_screen_diagnostic()
-                    self.fail(f'受信turn中の人間入力を検知（permission拒否理由=before:{permission_before_reason}, after:{reason}; screen={diagnostic}）')
+                    self.fail(f'detected human input during a delivery turn (permission rejection reason=before:{permission_before_reason}, after:{reason}; screen={diagnostic})')
                 else: self.pause_for_human_input()
                 os.write(self.master,data)
             self.update_human_input_state()
@@ -701,20 +701,20 @@ class Supervisor:
 def recover(a):
     s=Supervisor(a)
     reservation_file=next((file for file in (s.reservation,s.legacy_reservation) if file.exists()),None)
-    if reservation_file is None or not s.state_file.exists(): raise RuntimeError('復旧対象の予約/stateがありません')
+    if reservation_file is None or not s.state_file.exists(): raise RuntimeError('no reservation or state exists for recovery')
     reservation=json.loads(reservation_file.read_text()); state=s.migrate_state(json.loads(s.state_file.read_text())); batch=state.get('batch')
     try: live=process_still(int(reservation['pid']),reservation['start'])
     except ValueError: live=False
-    if live: raise RuntimeError('復旧対象のsupervisorが稼働中です')
-    if not batch or batch.get('id')!=a.batch: raise RuntimeError('復旧batch IDが一致しません')
+    if live: raise RuntimeError('the recovery target supervisor is running')
+    if not batch or batch.get('id')!=a.batch: raise RuntimeError('recovery batch ID does not match')
     expected=sorted(a.confirm_ids or []); actual=sorted(m['id'] for m in batch.get('messages',[]))
-    if expected!=actual: raise RuntimeError('復旧batchのID集合が一致しません')
+    if expected!=actual: raise RuntimeError('recovery batch ID set does not match')
     s.state=state; s.state['durableAttention']=False; reservation_file.unlink(); s.violations.write_text('')
     s.claim_reservation()
     try:
         if a.action=='ack':
             s.state['batch']['phase']='completed'; s.state['supervisorPhase']='ACK_PENDING'; s.save(); s.ack()
-            print('復旧ackを完了しました')
+            print('recovery ack completed')
         else:
             # Replay explicitly sends the batch to a new agy child, so do not carry over the
             # old session's temporary input pause. Durable manual pause is a separate axis.
@@ -727,11 +727,11 @@ def main():
     p=argparse.ArgumentParser(); p.add_argument('--project',required=True);p.add_argument('--team',required=True);p.add_argument('--name',required=True);p.add_argument('--agy',default='agy');p.add_argument('--poll',type=float,default=2);p.add_argument('--action',choices=['run','status','stop','resume','reset-guard','ack','replay'],default='run');p.add_argument('--batch');p.add_argument('--confirm-id',dest='confirm_ids',action='append')
     a=p.parse_args()
     if a.action in ('ack','replay'):
-        if not a.batch or not a.confirm_ids: raise RuntimeError('--batch と --confirm-id が必要です')
+        if not a.batch or not a.confirm_ids: raise RuntimeError('--batch and --confirm-id are required')
         recover(a); return
     if a.action=='reset-guard':
         try: Supervisor(a).reset_guard()
-        except Exception as e: print(f'reset-guard失敗: {e}',file=sys.stderr); sys.exit(1)
+        except Exception as e: print(f'reset-guard failed: {e}',file=sys.stderr); sys.exit(1)
         return
     if a.action in ('status','stop','resume'):
         matches=[]
@@ -758,11 +758,11 @@ def main():
             print(str(exc), file=sys.stderr)
             sys.exit(1)
         if a.action=='status':
-            if not matches: print('runtime: tui-pty 未起動'); return
+            if not matches: print('runtime: tui-pty not started'); return
             for _,reservation,state,live in matches:
                 batch=state.get('batch')
                 paused=state.get('manualResumeRequired') or state.get('humanInputActive') or state.get('durableAttention')
-                status='停止/要確認' if not live else 'paused' if paused else 'busy' if batch else 'running'
+                status='stopped/needs-attention' if not live else 'paused' if paused else 'busy' if batch else 'running'
                 print(f"runtime: {state.get('role')} tui-pty {status}")
                 if batch:
                     print(f"batch: {batch.get('id')} phase={batch.get('phase')} messages={len(batch.get('messages',[]))}")
@@ -770,15 +770,15 @@ def main():
             return
         live=[x for x in matches if x[3]]
         if len(live)!=1:
-            print('停止/再開対象のTUI supervisorが一意に特定できません', file=sys.stderr)
+            print('could not uniquely identify a TUI supervisor to stop or resume', file=sys.stderr)
             sys.exit(1)
         _,reservation,_,_=live[0]
         if a.action=='resume':
             os.kill(int(reservation['pid']),signal.SIGUSR1)
-            print('再開要求を送信しました。入力欄を空にしたことを確認済みの場合だけ使用してください')
+            print('Resume request sent. Use this only after confirming that the input field is empty')
             return
         os.kill(int(reservation['pid']),signal.SIGTERM)
-        print('停止要求を送信しました')
+        print('Stop request sent')
         return
     s=Supervisor(a)
     try:s.run()
