@@ -925,7 +925,7 @@ jobs:
           rm -f "$DB" "$DB-wal" "$DB-shm"
           sqlite3 "$DB" "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS t (id INTEGER);"
           sqlrace() {
-            local id="$1" hold="$2"
+            local id="$1" hold="$2" rc
             { echo ".timeout 5000"
               echo "BEGIN IMMEDIATE;"
               echo "SELECT '$id ACQUIRED ' || strftime('%s.%f','now');"
@@ -933,6 +933,13 @@ jobs:
               echo "COMMIT;"
               echo "SELECT '$id RELEASED ' || strftime('%s.%f','now');"
             } | sqlite3 "$DB" >> "$LOG" 2>>"$LOG"
+            rc=$?
+            # Added per tl (M-y follow-up): the first Windows run's log was
+            # missing an "A RELEASED" line, unlike macOS/Linux. This marker
+            # says whether A's sqlite3 process itself exited cleanly after
+            # attempting COMMIT, to tell a real release failure apart from a
+            # log-interleaving artifact between the two concurrent appends.
+            echo "$id sqlite3_exit=$rc $(date +%s.%N)" >> "$LOG"
           }
           sqlrace A 2 & PA=$!
           sleep 0.2
