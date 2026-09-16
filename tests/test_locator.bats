@@ -71,6 +71,22 @@ teardown() { teardown_test_env; }
   _agmsg_placement_split "$ref"
   [ "$_AGMSG_PS_TERM" = herdr ]
   [ "$_AGMSG_PS_ID" = '/run/a:b.sock:w1:p7' ]
+
+  # Windows herdr socket path: a drive-letter colon, backslashes, AND a literal
+  # "%3A" substring already present in the path (not agmsg's own escaping) --
+  # all three at once (#1275). The literal %3A round-trips unchanged rather
+  # than being re-decoded into a colon: a backslash landing right after a
+  # decoded %-escape used to make the decoder consume the rest of the string
+  # as one bogus "code" and refuse the whole id with pane_malformed (#1240
+  # regression, fixed by switching to substring expansion).
+  local win_id='C:\Users\x\herdr%3A.sock:w1:p7'
+  ref="$(agmsg_terminal_ref herdr "$win_id")"
+  [ "$ref" = 'herdr:v2:C%3A\Users\x\herdr%253A.sock:w1:p7' ]
+  [ "$(agmsg_terminal_ref_terminal "$ref")" = herdr ]
+  [ "$(agmsg_terminal_ref_id "$ref")" = "$win_id" ]
+  _agmsg_placement_split "$ref"
+  [ "$_AGMSG_PS_TERM" = herdr ]
+  [ "$_AGMSG_PS_ID" = "$win_id" ]
 }
 
 @test "fence codec: legacy instances stay compatible and colon-bearing paths round-trip" {
