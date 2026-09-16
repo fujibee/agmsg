@@ -38,6 +38,7 @@ setup() {
   # shellcheck disable=SC1091
   source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
   export AGMSG_CODEX_SEAT_KEY="$(_agmsg_codex_seat_key_new)"
+  unset AGMSG_ROLE_SESSION_OWNER
   export PROJ="$TEST_SKILL_DIR/proj"; mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
 
@@ -149,9 +150,10 @@ teardown() {
 
 # Write a role-session record (team, agent) -> thread for a project.
 put_record() {
+  local owner="${6:-$AGMSG_CODEX_SEAT_KEY}"
   SKILL_DIR="$TEST_SKILL_DIR" bash -c \
-    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6"' \
-    _ "$SCRIPTS" "$@"
+    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6" "$7"' \
+    _ "$SCRIPTS" "$1" "$2" "$3" "$4" "$5" "$owner"
 }
 
 write_request() {
@@ -211,9 +213,10 @@ run_launcher() {
 @test "launcher: passes the actas owner recorded by the claim" {
   setup_live_owner "$RUN_DIR" owner-session
   bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
+  export AGMSG_ROLE_SESSION_OWNER="$(grep '^owner=' "$RUN_DIR"/role-session.* 2>/dev/null | head -1 | cut -d= -f2-)"
   run_launcher
   [ -f "$CAPTURE" ]
-  grep -q -- "--owner owner-session" "$CAPTURE"
+  grep -q -- "--owner $AGMSG_ROLE_SESSION_OWNER" "$CAPTURE"
 }
 
 @test "launcher: passes the active storage override as a workspace root" {
@@ -278,6 +281,17 @@ run_launcher() {
   [ "$lines" -ge 2 ]
   grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
   grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
+}
+
+@test "launcher: dispatches only the role recorded for this seat" {
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team alice thread-alice "$PROJ" codex
+  put_record team bob thread-bob "$PROJ" codex other-seat
+  run_launcher
+
+  [ -f "$CAPTURE" ]
+  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
+  ! grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
 }
 
 @test "launcher: only one dispatcher runs per project" {

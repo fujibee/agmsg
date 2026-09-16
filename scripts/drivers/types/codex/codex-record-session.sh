@@ -203,5 +203,9 @@ fi
 # as-is. The project is recorded in its canonical (physical) form so records
 # carry one path spelling regardless of how the caller spelled the argument.
 agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
-agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" || true
+# A monitored Codex seat carries its own key through the app-server and into
+# this hook.  Use that key as the owner when the role was not claimed through
+# actas (the normal Codex path); an explicit actas owner still wins.
+record_owner="${AGMSG_ROLE_SESSION_OWNER:-${AGMSG_CODEX_SEAT_KEY:-}}"
+agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "$record_owner" || true
 exit 0

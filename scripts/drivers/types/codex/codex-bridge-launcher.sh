@@ -13,7 +13,7 @@ set -euo pipefail
 exec 3>&- 4>&-
 
 # Runs outside Codex's tool sandbox and owns the app-server connections. The
-# dispatcher starts one bridge per recorded Codex role in this project.
+# dispatcher starts bridges only for roles recorded as belonging to this seat.
 #
 # On codex 0.141+ the SessionStart hook cannot resolve the thread id
 # (CODEX_THREAD_ID is not exported and no rollout is written for --remote
@@ -72,6 +72,10 @@ _agmsg_codex_seat_key_ok "$SEAT_KEY" || {
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$SEAT_KEY"
 DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$SEAT_KEY"
+# The role-session owner is normally the seat key carried by the monitored
+# app-server.  An explicit owner supplied by an actas flow remains authoritative
+# when one is present.
+SEAT_OWNER="${AGMSG_ROLE_SESSION_OWNER:-$SEAT_KEY}"
 
 # shellcheck source=../../../lib/node.sh
 source "$SCRIPT_DIR/../../../lib/node.sh"
@@ -163,6 +167,25 @@ resolve_identity() {  # prints "team<TAB>name" lines for the project's codex rol
     | awk -v t="$TAB" 'NF >= 2 { print $1 t $2 }' \
     | { if [ -n "$ROLE_PAIR" ]; then grep -Fx "$ROLE_PAIR" || true; else cat; fi; } \
     | sort -u
+}
+
+# Restrict the dispatcher to records belonging to THIS seat.  identities.sh is
+# project-wide, so it is only a candidate list; the role-session owner is the
+# seat-specific fact.  An empty result is deliberately not replaced with the
+# project list: the role is claimed after the TUI starts, and until its record
+# appears this dispatcher has no safe pair to launch.
+resolve_seat_identity() {
+  local identity="$1" team name record_project record_project_phys
+  while IFS="$TAB" read -r team name; do
+    [ -n "$team" ] || continue
+    agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+    [ -n "$AGMSG_ROLE_SESSION_UUID" ] || continue
+    [ "$AGMSG_ROLE_SESSION_OWNER" = "$SEAT_OWNER" ] || continue
+    record_project="$AGMSG_ROLE_SESSION_PROJECT"
+    record_project_phys="$(agmsg_canonical_path "$record_project" 2>/dev/null || printf '%s' "$record_project")"
+    [ "$record_project_phys" = "$PROJECT_PHYS" ] || continue
+    printf '%s\t%s\n' "$team" "$name"
+  done <<< "$identity" | sort -u
 }
 
 # identities.sh opens and parses EVERY teams/*/config.json on every call: two
@@ -267,8 +290,9 @@ build_safety_state() {
   done <<< "$identity"
 }
 
-# actas may register the role a moment after launch, so retry while the parent
-# (codex-monitor.sh) is alive. Multiple identities are intentional (#150).
+# The role is claimed a moment after launch, so retry while the parent
+# (codex-monitor.sh) is alive. Never substitute the project's other identities
+# when this seat's own record is not available.
 # The parent only dispatches. Every role receives an independent child launcher
 # and therefore an independent bridge bound to its own recorded thread.
 if [ -z "$ROLE_PAIR" ]; then
@@ -278,14 +302,23 @@ if [ -z "$ROLE_PAIR" ]; then
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
+    seat_pairs="$(resolve_seat_identity "$current_pairs")"
     [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
+    if [ -z "$seat_pairs" ]; then
+      echo "codex-bridge-launcher: this seat has no recorded role yet; waiting without dispatch" >&2
+      # No owned pair is authoritative: forget any children this seat used to
+      # own so a later re-registration can be dispatched again.
+      known_pairs=""
+      poll_sleep
+      continue
+    fi
     # Forget pairs that are no longer registered. A child now exits by itself
     # once its own registration is gone, so a stale known_pairs entry would
     # suppress the respawn if that same pair were registered again later.
     retained=""
     while IFS= read -r seen_pair; do
       [ -n "$seen_pair" ] || continue
-      pair_registered "$seen_pair" "$current_pairs" || continue
+      pair_registered "$seen_pair" "$seat_pairs" || continue
       retained="${retained:+$retained$'\n'}$seen_pair"
     done <<< "$known_pairs"
     known_pairs="$retained"
@@ -298,7 +331,7 @@ if [ -z "$ROLE_PAIR" ]; then
       nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$LIFETIME_PID" "$child_pair" >/dev/null 2>&1 3>&- 4>&- &
       known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
       poll_reset
-    done <<< "$current_pairs"
+    done <<< "$seat_pairs"
     poll_sleep
   done
   # #1254: this seat's TUI (LIFETIME_PID) is gone. Stop the seat's own
@@ -311,7 +344,7 @@ if [ -z "$ROLE_PAIR" ]; then
   exit 0
 fi
 
-# One live child per (project, role) — #485. Children are `nohup`'d and bound to
+# One live child per (seat, role) — #485. Children are `nohup`'d and bound to
 # the shared app-server, while the dispatcher runs in the TUI's process group and
 # is killed by the SIGHUP a pane teardown delivers. A replacement dispatcher
 # starts with an empty known_pairs and re-spawns the ENTIRE child set, so without
