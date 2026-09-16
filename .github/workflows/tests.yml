@@ -993,6 +993,17 @@ jobs:
       - name: M-ab orphan-survival measurement (temporary, diagnostic only)
         if: needs.changes.outputs.docs_only != 'true' && matrix.leg == 'install helpers'
         run: |
+          # This step's own liveness checks are meant to observe a process
+          # that may already be gone -- that failure is the observation, not
+          # an error in the step. GitHub Actions runs bash steps under
+          # `set -e`, which would otherwise abort here (measured: it did,
+          # on the first Windows run). Disabled for this step only, matching
+          # the M-y step above. `kill -0` is the authoritative liveness
+          # check throughout (portable); `ps` is best-effort diagnostic
+          # context only, since git-bash's `ps` does not support `-o`
+          # (measured: "ps: unknown option -- o" on the first run) -- fall
+          # back to a bare `ps -p` and never treat its failure as fatal.
+          set +e
           LOG="$RUNNER_TEMP/m-ab-windows-orphan.log"
           : > "$LOG"
 
@@ -1002,15 +1013,15 @@ jobs:
           sleep 1
           SLEEPER=$(cat "$RUNNER_TEMP/m-ab-sleeper.pid")
           echo "reserving_process_pid=$RESERVING_PID sleeper_pid=$SLEEPER" >> "$LOG"
-          ps -o pid,ppid,stat,comm -p "$RESERVING_PID" >> "$LOG" 2>&1 || echo "ps on reserving pid failed" >> "$LOG"
-          ps -o pid,ppid,stat,comm -p "$SLEEPER" >> "$LOG" 2>&1 || echo "ps on sleeper pid failed" >> "$LOG"
+          ps -p "$RESERVING_PID" >> "$LOG" 2>&1
+          ps -p "$SLEEPER" >> "$LOG" 2>&1
 
           echo "-- killing the reserving process (kill -9, simulated crash) --" >> "$LOG"
-          kill -9 "$RESERVING_PID" 2>>"$LOG" || true
+          kill -9 "$RESERVING_PID" 2>>"$LOG"
           sleep 1
 
           echo "-- checking sleeper after parent death --" >> "$LOG"
-          ps -o pid,ppid,stat,comm -p "$SLEEPER" >> "$LOG" 2>&1
+          ps -p "$SLEEPER" >> "$LOG" 2>&1
           if kill -0 "$SLEEPER" 2>/dev/null; then
             echo "RESULT: sleeper STILL ALIVE (orphaned)" >> "$LOG"
           else
