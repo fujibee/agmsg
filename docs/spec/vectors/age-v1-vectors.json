@@ -40,9 +40,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBBZkdtZWxIZHpvdFRzWGhxZDhzak9vVnROU0ZnUEtGZFR5eCtseExYcFRzCm1QY0kvT1pwcFVuVDFxSEgrdEdJVmp6K1BlNTZSMk55ZU93em56bUZKZjAKLS0tIFRyNkJRUGRuVlgyOE5IL3YyWCs2WDlSV0ZMOHpWY2NDNWxOMG5rNEJGS3MKWEPo/CWDRIeS2+r2IQsJChR+VL7WSmrLYUKg3vS+aHpRACgF0V6V3ndA0Ba8RtDXFzXdTTlSo3CqCmtk/Ms3QcqYMaNhQSwZgFXNpeD8xcyHczIsQlo0EXUUHwmapCHG0jdlTtZmVVs10orP9tTzx2t4mRv1PNOxpB4DPtVX3zqkVA/3Wly+EOnky8fyI3R4v8ZB7sGAq987jMEP7qSmB79HpvxLL7bvIUnj/nCoEgYpOXAEA67+HhQDfqV37N4scFmmPBrf2/DyWKLHy5DiDRaFS47qNgr8WmCQo8Vj5n/9"
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB2L0ovSjNHcEYvUkRpVHZFZUxuWXVUY0l0dUhSYzFnUmI1SEJSblArdlZzCnNyb0JzVWF3U29hWGsvOTdFUjJic3oyelR3aXV6ck9UNHVrTmc0aVZYeFUKLS0tIHZJUWNVZDVzWEI2QWJOejE5TGhtSHZ2UlJISmJvOXpaWTVEbDU5UWFuN3cKdPeu2f4c09EzGTCwHV8AHxBJCWygrL1OehWd2QyMtxzAM70WRf3cySzqdKNBoYm5Za2ihvUNSZyZaW4wgMVMej3tsTON/MEkXEByUQaZnxmhfxhLRiAi/5WFoxS3BdylbpBiJhpB15eP89SudTTHskmi2a+QWZ8Ikr+DVVfrQWeHrNxfwJIw4aFDVDsaI+3//z+BAwRd9TQc2cMotsLE6b/jtJ+hlXwFp23GIomDGQZN6KssBI2ZacAlLIhBhQexlRBle9HwrBX8H6u0THEce5xTAtMO7ddLow32oWbPgN+L"
       },
-      "age_file_sha256": "017f8eade3961e3a6d4150383abaf12ddbe1e74508b5fca343778f8e6d3711e4",
+      "age_file_sha256": "6bc7aa872220b171d9137fb91d9501a7f7965de798ab7ad68c4c37ff279569ea",
       "decrypted_frame_sha256": "6c12c093ea0471a1c19cd8eb0475723411a72ca848b128289c5d19458487aae9",
       "identity": "team_a",
       "expected_state": "importable"
@@ -50,7 +50,7 @@
     {
       "name": "wrong-team-identity",
       "envelope_from": "valid",
-      "age_file_sha256": "017f8eade3961e3a6d4150383abaf12ddbe1e74508b5fca343778f8e6d3711e4",
+      "age_file_sha256": "6bc7aa872220b171d9137fb91d9501a7f7965de798ab7ad68c4c37ff279569ea",
       "decrypted_frame_sha256": "6c12c093ea0471a1c19cd8eb0475723411a72ca848b128289c5d19458487aae9",
       "identity": "team_b",
       "expected_state": "authentication_failed"
@@ -58,7 +58,7 @@
     {
       "name": "team-id-substitution",
       "envelope_from": "valid",
-      "age_file_sha256": "017f8eade3961e3a6d4150383abaf12ddbe1e74508b5fca343778f8e6d3711e4",
+      "age_file_sha256": "6bc7aa872220b171d9137fb91d9501a7f7965de798ab7ad68c4c37ff279569ea",
       "decrypted_frame_sha256": "6c12c093ea0471a1c19cd8eb0475723411a72ca848b128289c5d19458487aae9",
       "identity": "team_a",
       "binding_override": {
@@ -69,7 +69,7 @@
     {
       "name": "wire-id-substitution",
       "envelope_from": "valid",
-      "age_file_sha256": "017f8eade3961e3a6d4150383abaf12ddbe1e74508b5fca343778f8e6d3711e4",
+      "age_file_sha256": "6bc7aa872220b171d9137fb91d9501a7f7965de798ab7ad68c4c37ff279569ea",
       "decrypted_frame_sha256": "6c12c093ea0471a1c19cd8eb0475723411a72ca848b128289c5d19458487aae9",
       "identity": "team_a",
       "binding_override": {
@@ -80,7 +80,7 @@
     {
       "name": "protocol-version-substitution",
       "envelope_from": "valid",
-      "age_file_sha256": "017f8eade3961e3a6d4150383abaf12ddbe1e74508b5fca343778f8e6d3711e4",
+      "age_file_sha256": "6bc7aa872220b171d9137fb91d9501a7f7965de798ab7ad68c4c37ff279569ea",
       "decrypted_frame_sha256": "6c12c093ea0471a1c19cd8eb0475723411a72ca848b128289c5d19458487aae9",
       "identity": "team_a",
       "binding_override": {
@@ -91,7 +91,7 @@
     {
       "name": "key-id-substitution",
       "envelope_from": "valid",
-      "age_file_sha256": "017f8eade3961e3a6d4150383abaf12ddbe1e74508b5fca343778f8e6d3711e4",
+      "age_file_sha256": "6bc7aa872220b171d9137fb91d9501a7f7965de798ab7ad68c4c37ff279569ea",
       "decrypted_frame_sha256": "6c12c093ea0471a1c19cd8eb0475723411a72ca848b128289c5d19458487aae9",
       "identity": "team_a",
       "envelope_override": {
@@ -102,7 +102,7 @@
     {
       "name": "key-id-context-substitution",
       "envelope_from": "valid",
-      "age_file_sha256": "017f8eade3961e3a6d4150383abaf12ddbe1e74508b5fca343778f8e6d3711e4",
+      "age_file_sha256": "6bc7aa872220b171d9137fb91d9501a7f7965de798ab7ad68c4c37ff279569ea",
       "decrypted_frame_sha256": "6c12c093ea0471a1c19cd8eb0475723411a72ca848b128289c5d19458487aae9",
       "identity": "team_a",
       "envelope_override": {
@@ -114,7 +114,7 @@
     {
       "name": "cipher-substitution",
       "envelope_from": "valid",
-      "age_file_sha256": "017f8eade3961e3a6d4150383abaf12ddbe1e74508b5fca343778f8e6d3711e4",
+      "age_file_sha256": "6bc7aa872220b171d9137fb91d9501a7f7965de798ab7ad68c4c37ff279569ea",
       "decrypted_frame_sha256": "6c12c093ea0471a1c19cd8eb0475723411a72ca848b128289c5d19458487aae9",
       "identity": "team_a",
       "envelope_override": {
@@ -128,9 +128,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBnS1IwTWZ0bXdtdi9EWnlWbldtL3dxUXE1TWNMTkhrZXpjNnQvL1M0OG5vClpHVmFHdXJydHhQQWxDdUlqa1BXS1l1WFZ4NVJmUWc4Q1htK0lqdWNGOFUKLS0tIHpDK2NkVCtodXB1TUt2QTlseTdrbTl6RW9ETDRqZFkzbkdtN3Z4eHF2Q2cKznZDBEp2gpeqxVXMiVqH9HiUhJsUjo4Vm9J0IBEGUX4f8q0oOLtXEc+jvzBhjIK2dJv/vvcDEsOrEBcyv08CzuhMFmKf7oAo2Fggyn0LUvO7UU/mnX2THMvCiyBKJLdGJqTqhhHUT1C+iVBVuZ7nmlcFSnoXMRCLAVJ9B9VEDxlZpAMnHDuHitmtpfZAsXuNZuIIpEBe8szjcqAYpX8Z0eh200n9m3rWKLyA2pwWw4zLeCzujsw1Dwts4q4xsCdvEymPt9Y4zZHL6J3kOi57yfEjTuu3sM3AzhxQHkQxdVE="
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBnbnozSTh6Q1JPS09IL2hUeEN0YjdjRTRMRFpsZUsrMXdJRXlLRE1rOUhjCjE4bEUyOERhOWlzdEFwd0J2RjFEQWprbzNMcG0rNkErUUIzR2k0TVRWWWcKLS0tIEtCZENDU0paMitCbUJmR3AxZWdiUkNOOUljb1Y5NS9jaGI2cWs5N1VqV3cKBykzcaTzIlluanevT87l8MtHZglZE5SM8KGnLzW08OFygb2zoL9hCWF0hOanVsnWzUqIG7rVlE/oH8N5x+ET+ZpdOBaEVeUnCKMiVXMQdmkeyf9A4TW5YRKkHHzOPiFPmplOfPFZB+j2goTqv2mAbp/H0uiJRXeubyUBvfSjAWNQ92FvYbKafg+CbvFtLx0zePftO48w3q4UzFaSoXK3Ajec3oXVrz0oN1NGSTR6MdHZ6AJvXjLTbEGmim7uc69eT2mGMC/AztLKUMtmB73IiHqsE/3hYTfJ9TpOwBMfXZc="
       },
-      "age_file_sha256": "141e0513d9ecb606adf793363241c4a15f3d04fc21d68c9140fd9fca41a39f18",
+      "age_file_sha256": "e7684747da9e5944cd52fdfd77386c6f80121012c63278b58701564bc9a70447",
       "decrypted_frame_sha256": "8a16c6bd5009bae65a76d0f6fc24f9b8f5f3a2b02a128df1dcf55c607659078a",
       "identity": "team_a",
       "expected_state": "authentication_failed"
@@ -141,9 +141,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA4ekpTdktIUFZyTVp5ZGVtUGtPZTZlOG1XRW12YjYvNXBxKzBvRkRCSnhrCm9Wb2JDQjZtRkNpSEIyQlJpYVEwcmZCeEZZR1R0bVBBeTZSdGVNRkxBS28KLS0tIFdhcHFsamhENjFnOXRSQk1TUmc2akpyTVJVejlKRGVtcEE4TUJCZnpxd1UK6FwNrWmmXPzZcYNHdNL04IAa5cUa/eXqWgiQ7ylpGmaKJIG20OvEfA6c7B2BImhQXIYD3XzwaDZBsoRiRB6pvESOa8H7NiBMsU99E01l5YsL8VIBFLeceePdHd23XQiG5EhHjL9mZpXt8bU/IIawFFwGrC0i01ZJZQ7Eu58FZskGqQToyCGkKA7OKjmgOPvY7VsZKG1Q0o5fhR2I9k0/sRJRDljKcDB3DPGENp4RHkhbVBFHZTp8QIfkxlPdpVMU0TIuzvqI3v6MjK9TuyM92AfICA5kzI9MoKWXiaK91RnF"
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBiRURCZUxvTTdTWVpCSyt0ZUhjY1hsRDJjZXExUEl6d095WDZNdGNoZENZCm4wZS8zSG8vczBiSzV2NHp0bjdzenBFSHR2REc0MG14UEhnMWJCODBKSjgKLS0tIDcyakJSKzV2Rk1LOHJlRkVZTkJtbWVLa3hKSzBleFI5cE40WDdsRVBZZTQK1sigQ+gEiCvz8j8WrgAUhl42/VpBzajNOsNfexNcBpaHpND3mkYCyxCTVgd8U9DWa8mcYHTuw8MbfCEVKVskQdLG0IRYcgBPbU8e/e8dFn7cQHWlRzYk/Z/h3vd5YLTqrm5axCshMIZZKDA/XLy3VfvsAynBwH+uzWVgrkXrp8mSeDRpw54Q7QbFb4byVAf9JT38jU3rxSQAbWY2JiB3r00lb788cT89gSD7Ea8hGljF4PSX4dJ29/eEduw0fSWwB/PS67jm43Ie4kbIj//uc/5VbVGz98Ji4DZ35ldOOu7q"
       },
-      "age_file_sha256": "80fd9dce36b8acf9a071d08e3e45ecddb59891fc1e6f0a468b895f0f58b28dc3",
+      "age_file_sha256": "7c767b8bfc8d73e37efe9d6fd2a2d364fdf414a21a6b97416aed5fb8bdb80154",
       "decrypted_frame_sha256": "feb7b5fad89b086c4e4b825becce4d1f17b29530593e9ad2af20d9a0b05d9401",
       "identity": "team_a",
       "expected_state": "authentication_failed"
@@ -154,9 +154,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSAvQkxGZ2t0ZXNsVWhCVW1VaXB3bXQ3eVdUN3J0MUM3WTk5K2VjMmxjVTNZCnhSTUkzT1ljNWRYNE8zU2h0dlRGSmpzZnhWN2V1bFI2OUxVOHc3OTlXb28KLS0tIGhOVFE5T0c1VlZCcHhIOE4rM0pERklLN3NTbldmampPZHhaWk9PV2luRjgK264SPANo6judtKXnjhw16Hig6bGVH0xWIwhskKW5xj/VhL+s1kGb3YRYlBWz6lfL76yxX5mSemHc5To5x3t2DBMijEysy3AZK7d43zWeKzt3sq8U77cePLYk0NAt14LrX5qQjGXLAfa1HPs+bHxOQG/bboTCls2VpTohZURAMOZsqeGFyL96ARwS5xCOGPqWYQJkPwDXY8sSIzx6IF0vkAnJaaTBLlm1PtbPEykNq9tA6RiwQ2vyLIo6CQEB4DKVMbkfwgfzLpH6TuHVQwu+IoZEuy6UOcOeFreIwRVQ0au4"
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBTMzNVK3phQXZpT1MrVUg4dHdyNklNajFZZnZVYmpwL2RRV2tHWUxrclMwCmdCOGFjNUJNeFhZaTN6aytsaFJpZFRWVVNZb1RqODJpanJVdWZmMFh1aXcKLS0tIHpqWmdRMm9tZFpia21EbmE4OFVxbXRSbUo0Tlh1WVMvdkx1ZnR3Z1lDcnMKgzBRD2b+zN1CwnJmFPP7fMjmtiFiolUm3MWA2HedtH8nWBAMuLgvSx7XjpBEY9F2IJl3tyaOZznNDKRcHKwL+PIraWMp9WRnAh6mghkvefTZ6SPlKScuS/3BX3oFWfnGEAv+x21WPyZnwmgd9EngOkGNHWCoMMVem1dYvGeM4jXGwpcGCqYsgBmoS3ZVkepkHimE9aZB9aO6Hm+3NfsPXrt2agCxRyUJ7jH9efLoGraVT47HBV9Ms9tKyO+e5eduh0M/z8SoF20VBbjd50VcOtE33JPinrhM6ExE1vTRh/HP"
       },
-      "age_file_sha256": "abd5ce98de192db73b1a0316ecfd43d7538a663de77965bffdaa87a2bf718a7e",
+      "age_file_sha256": "8bc4b6372049f63a721ff65264755027c071d74edb3add0af5695e2ed5260a92",
       "decrypted_frame_sha256": "2742c81c80746a3a0ddee55883329b0a4b0458c5c7c344af770497c653adb9ea",
       "identity": "team_a",
       "expected_state": "authentication_failed"
@@ -167,9 +167,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBGR3RkWXhDWmtjRGxlNGhNdnlSWGhRZTVhZjd3QmRpaXRnVE5NVkdtampZClJZOEdXV2UyZDRGNFlZN2p4RTZ5NU05U2QraTFJYmFCREV4Ync0Z0xyS2sKLS0tIDN3WE1sd2hVSExZM0RFdG1pcHFYYnB2amF3NU1YTFZDUGx2aFdMR3R0SW8KnXdFuyN/xlerOxWcuz651Ui7lWNEjld3p1PSqhP4hMkw/hCPDOhroXAFfN2GkVmWTV7nINXYRgDdkYG6VunDtmmPxvnuj8OAMrkgSEeTvvBdupSMThzShEirEmsV03APzowzYbgsqFy0kDxOE16xRIyk8tQAKx2vp5YmxJCGxjk0wPbno9wUSqTlqod/RwudEpEZSMjF0Ty1NEnvo8Yt+MkgjyDeD7vCRN/BVpajwQu5glTcPGZ2FsTJVHHBGO/dQkSjWUFQxVtHBWvbr30TVFMUhk6ufwFhdRqqPDsm1opI"
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBkRHkybmNML3pleHNWNW1QU25HM1NBUnUxbmZtV0pDVnpXSm13MUtUbEg0CmpmdVdXeVoySHdGTlBWTUVNT0tkMXpHeEVCSHk3VWFyakZPK0xvQjBnc28KLS0tIDVWQ29jRWxPOTZpSG5TZjJVamNBSDU2WTU2RXBZdXJ1TTZJTkNvUnY5eEkKJ8Pi7BHBvsP1W9lhiDtWEYyh8hDZRr/1lCJnowjerryskKlLGr02wewzj1n1fcWb7eO8wszVF5j87GaCtvCrgeH5p5y6UQGRAoywXSUMAuypfTl6WlE96gcHMmso7l89hzVM+YXVWsy2yEjVE/ydXIVQg6TEYEAfpQVoJjkOctMnf9qYr1Q7A6AyK+fneq2IhdQUhG+GjMbZgJdT9YniGxOgbGj21e1h49s6RXl4ioO41bewR4z3xOrDb56MO2LPzDYPLbQku9OYZgn1HfbR6msXoSwT5pmhcvlzzF/DgS8x"
       },
-      "age_file_sha256": "45e30b59ede37c75f0272259c94e301e64cbb2039908d5ef087329e5d82f871f",
+      "age_file_sha256": "5f5d1d57bb092fbefb89b875e9a935c2f237e3a5cbded1f17769d44f050f314a",
       "decrypted_frame_sha256": "6df552fd079a05dba2646b996b9b37d70f692bae19265c199fd34fca5d748d75",
       "identity": "team_a",
       "expected_state": "authentication_failed"
@@ -180,9 +180,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBJRE9qUTFNblo2UE9yU2R1ZEI0M3NNTmJpUytUcXdYdmNNdWVqWkhnTUg4ClR4ME11eXlYQVY4aFE1NEk1QnN0SkJMRjNiTzgyellmMFg5UkVqZHdLWWcKLS0tIDRnaXM3Rkc4Tm1haFhHdzE3djJ4RFhpU2p4L2ZRbnRDNUNYb1FwbmZDd3cKmmFfOLWrZ6yqoG4yqvmkgJE8GUEaAPAJrFNXgoB2MpPCWhHoG5HpJ8cXnBADo6lCIAe9AuM="
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBleWExdG55V3FIdlJUMWFMNWp6U2ZKbXFFNVM0Q3FRWHBKVlc2R1AwRDBJCnZUVHpJQ0dCK0ZlTFc5OE9MNlZzUThIUFBMWGRzZHlWRXNsRDlZd1B3elEKLS0tIHdHYThMSHZGa2RvZHVkbE1kbXo2NWxkZEdGZUlsL2RMbnFBbjMxMDFKLzgKpMsuHAS0L8cV/S9XBeW9OclY8GAXS3+p5nfMbor0B0aiPcykoL4uoW6wNRoMleuWv7LjP4c="
       },
-      "age_file_sha256": "82b146b9897e45e250dc1fa2c9cc8fd7cf8129c9ac3bd90f8af516b1fdfc7407",
+      "age_file_sha256": "82698ca7d37e30a1ca8c3c624783d516c0afcaff77e3d89a10c1bbfcd1f07b5b",
       "decrypted_frame_sha256": "0d6f1128ff71ce30cf7bc83b39d7a26b4fc147c700405c881672f6f5de6c0ff2",
       "identity": "team_a",
       "expected_state": "authentication_failed"
@@ -193,9 +193,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBRSERiZ2RKNnZtWU1VZ2FIbkhQeGtKKzVjekFWcTBvbUxrQlVjU1JQTVRFCjNQNzNlaHJHeHY0RHptR1RzYm1FNjBsNloxNi9XWTIrUDlzb2lZVzVHRUkKLS0tIDExU2NjMmtoUE5lb1d1VFJGajVTOHBmdHZLZENGLzlOblRncnBVaXJGVUUKlDEy+Y9LkstMDUelLbCG69kdRfOLKRtH8Ff0A9PCC3YILkgZHWAzshcOgkZGh0VppJVM57YiKh8G3TP1aGnSDfRzM5PKFDiel6g68F8YtpoVKilHs49pRfSHuv1K/mqWskYrWS0rVpBdFM1QmA=="
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBpMDM0NW8va1ZjMmkzWHJqVURJWVRPMlIvTGVObEp1OVp2S1JRN1MrWlRFCi9SODRiNFkrVVpqdk1ldHRZci9pWDN1ZStsdFBaTjdxNnNHL0JYRU9CNjAKLS0tIHhNM0pFTytTTkpVUTRhZURReFkvMExUaS9pc0VRMzVYR1E2WFV2VVhFUnMKZAO74jSmLe7FkkFTahXIbF3hlDLphLQOUep4iNpk7FR0qdhq9C2m/74vsitb5vhFYQY+eY+fiLCHMqRrK1lMGMcC4hHxcrmG/2K+wcIkCf0GkhgVk3jhrK+o+6RlHgfjpkm2L+H/9GGoOTc/eg=="
       },
-      "age_file_sha256": "b92caeedf515364d56c24614fba06170505e93d6a439911977cc3aaf4004f10e",
+      "age_file_sha256": "42ac9ad3b6619bdaf19886b7a257ff7411e8df9ce19dc0f5ce5cbb0fe820f23f",
       "decrypted_frame_sha256": "78aaba8402edfc8cb5c2144a20405781541cc7db7e4dc4309f145b635796b139",
       "identity": "team_a",
       "expected_state": "malformed"
@@ -206,9 +206,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA3UFNld2V1dVgrSCtKWFNvaVFvbFAzdkF5Qy8vcHZMdUpGbm1yak9Jdkc4CmRLSDE5M1pqK2tTZDJsUVpjRGw5SUZtV2NyTjQ4eVEvTWtYelhIUWhjMGMKLS0tIDdtMGxzN0tNRWtMREQxTG9XNVJjdnp5N0VpVHNGVjc4dFZHL3FtdWRxODgKcqi9lFfoL0cjOjapUnXpMY/TP3Fb6kXEv9D/dCt6+s55jxOA3SNwFnV/lmkeMC+zeex7iwS8bGD79tBKun+30FvCjyC3zRrEzWhLvwFQGoan8ZnVVyWp0Eq1Dm9uxrr3Lxd8vlXlu87v6oN/WHE="
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBWQlErd0dmVnBHV0t3VStKNmJ0N0FqNHFMT3Mra2xRR3QrQ1ZlUUFPMndZCi93N1prRnBiUVh2SndtRTlOZXgwL1J0UTJoaFNSYWtWTmJ4eXBqWTNrQXcKLS0tIG9yZ3dxUTZiQlNxLzA3bEZ3b0hsb2wxbmovOG1ENEVEOFNoYXVyT044ZWsKgkNJ93zh41hrJlrwQ4Ehjw69s1rAv2Mwz0kp3erAQvFSKOefYB6DBQcjvxDHmFHyHgRLKs/6CIXO04NGotcvkXN6y0ixFcNtfFyGgrePbEOGq1XZp216Ze6Yv1plYRFsn+vgK3/SzqQXRYmVrEg="
       },
-      "age_file_sha256": "0dd21a5e6f700f829bf36d8edb50d32b7f21d13196e2ab0ae99d5e56fcbd2f89",
+      "age_file_sha256": "233bf3af62ab6e21f922df8e18003d43320d4ba1e1d8e307abf448f1afee3df3",
       "decrypted_frame_sha256": "32f3332c2b68fa6b91ec3ac603d4a7cd64e0d25a1884acd0b1e1fa44a596bb52",
       "identity": "team_a",
       "expected_state": "authentication_failed"
@@ -219,9 +219,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBIaHJkSnNSQW5PZWM4MG0vTkxuWGRGc2lRcW40bitOZkVYVkhwMkVvOUc0CmdBMko5dmZRQWpPNkFmUlpYODNWaGtNMmlqaDFHS1VTWk82dmVlR0dOSzgKLS0tIGRKU29Xc05rY2hmcFRuSjMxTnNLNUxmNDNPR0VKYzBzSVl2OW1tNzl5NUUK/nINjduXfcYs9ql7cpuO0cWkC2pPgy5JORiZn9BRdg79Kbdte/DPDtmsc9W5l2LHWmirjg60vpsOvKlB7NCx1pr2IYGRij+IoiPIsGK37ZYYgsvytO9ujs3J4f88265uPTKIyM1G62T3iVktzq5L2Of+hNp5pQX04qLVssffU336cGBQzoMNZG4MjdhYWCmZaoMLH9fNIRQOjV/ergy/4mQHjDyBAZHSkLb1TNkee3Yy8CJPu8RNYQcpVP/D0BIJP2iCDAH3pGGKSnpjaE6fA6qsED/PD/5jDrhqkgF13qRUJw=="
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBnMEU1YklIK2syWXUxUzI3QSsvNXhYd0JWeUdub1lDQ3I4UlF1UXBoaFJBCkJMQktkUnRJc2JkSWFZcnZUMU1HTHdWOFE4UGVtd1dxd0hZMFFGcmVlZWsKLS0tIHltWHkzRW11QVB2YU44ZUNKaG93VDVFMGtmTGlySmlxbUwvdHU2LzNmM3cKrwUuBQ8LD7B3/4beLLsh4xLAKuurN5vTXVgkLQcQYIEEIC2qf3kNXjWe8EI9Ki9o/XvBGvt6HuEXDbFGc78jQNZaqOySFOnI0zmsGMXW4D+6Qw4i5Jc4fcjo1lFVCPzDOGuDN0HQ8MVdxE+jH0jpFHYedUAp3vTcv2q+2nxxC+FDDo7pKLL+nAO3A/E4j9jrFjLnLnGpOQ2PoGvRzT/3FV6YMjPue5EXLT/7p7cxGKlxWwvveek29ZA8eTkOKj9Ifl41igXje2M4Kzcu9qjar/LXjxh3ILKh4Y0n2fFW3aNAmw=="
       },
-      "age_file_sha256": "1488c3d4ca5ca203b286176e6c3cc229f4e6a67aef402873a85eb3fd4471f642",
+      "age_file_sha256": "1151e079e81c469a840df94cc9dc65cdad8b2fff9973dfcc25ec7111a281e5f8",
       "decrypted_frame_sha256": "35082d6e87bd9875c0e64c9f7df031448d16adc6d298dfb3edcccbeaf4d72b5b",
       "identity": "team_a",
       "expected_state": "authentication_failed"
@@ -232,10 +232,23 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBaYzlxcDdZc2tNazB5WmFKMi9TeFluS1YwbCtGcjNCZXQwK2VlNVMrSkRvClhXRDJuMVFkamU5VXFxbmE2SXYyTXV4R0JnN2F3a1FpaFJ2WUc5Y0xFdUkKLS0tIDdIdjlhbzJ3elFGblpvWHl5WjhKbWhZK2xWa0RUcEQ0MnZkQWJYVkRsbjgKM6iJqw2HkOK0qaZzARFAwrcHV0NMPqZEAvWbKYW/cN6VZp04in/jjH/r1zuP3I7YEPc+UrVzjg5O2o7M5QycSp3QJ0kmBnl4TsGkhmj1qmUSKqizSvjwyhs362q76/99fxTrwj+660V1bLhNDk2JmLPU7diuV9fS3UMw7fGlIoxWUVHcquxcL76VJoYE271v4Cxo0GpCDlTly6To5uUQEVsJrUnbgNwSDLeXkl2qum6ptH3lh7pRXgKvp6Sa/ylSyb5VSMM3/uP0HGDGWWD7rW6XNLTn5jCVvBoHc2iNUq7r8MHamIcYBpMl/cC+v2WJ2ZI="
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSAwOFBraHEyakJCOVJOM29rem1aOHZoZ1NEQ2g1YzZaaUloa3VJNHk4ekZzClVwVG9CUjRaSFcrLzNVSEk3N0ZHTGdLbk8vcHZuNFJiVzJ6Wi9mcGxvQ1kKLS0tIHBoN1B2bjZqdFVLMllCeEJ0SmF4SWdXTmVtcFFvUE81MDVsck1zZ0NqOXMKAOfhF4j8LiL/eiTMTKNCvqJjXDaBZ8lFlIlCLsc/DMDLIh9ZydX9nZ9w2iyren+QQ0gmZa0Mmd1FF6S1OeUqdEd4t0/4qQIMtJ3CNpuldbj0sSKgI+1aCbSjsJJiKro8E9e9wOfmIRfHd2qYVcqwdHkRCIFAl18mgKmtdSyfmYC8h4411p5S5pkSUa+tBgSAe+u/BYuHjKeKGVVuQyYnbuIKddDvWG5ReODfnoPAAGza+hfayPb2c2d7kZf5uRJ4nKAVWceKCBrkmw5oYr1DkRDbjaWvf56UuLg0H3E0/++ayBvX0ZmYmFyfPl1zbPACr0s="
       },
-      "age_file_sha256": "4845abe239301c7ccebe0bcc6bf88d6be0c3e1c2d252078476759d9098556045",
+      "age_file_sha256": "115973617bc1613578a261aafae48cd2d83b7cae66bca47eb609aca14bfebe7a",
       "decrypted_frame_sha256": "ca751c2115a503b990e72a3870fca1a7c459421388cdc0c5bbbced6294920f8e",
+      "identity": "team_a",
+      "expected_state": "malformed"
+    },
+    {
+      "name": "duplicate-key-in-unknown-field",
+      "envelope": {
+        "v": 1,
+        "cipher": "age-v1",
+        "key_id": "epoch-1",
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSA4ZGdyd2RYRDNnOTlzTlgxUWFRTkZqOHY5Q2syMjNiMG15SllPbGR3dDJvCjF0cmdpUm5CSmd2elNMbTY5WlVvWGhFVjVTaUwvR0ZUL282cHB5dE9DdVkKLS0tIFVtVkc4c21FellGbXE2eEw3S0xNcDJwbmE5NE9qejFIbUxWNFlEZjBBRnMKoOLnlxSYwJ4ttiTAdYEBWITWUIqqMPXFV/kdpcKCRky3sSH6ejZUzt2S0Q5Ay6MhUkpDaF4LmIGq93dSLiLJT6zAG8CrS50p0vI+5Z0pT49k5LD3qQl5ntQVbQZre/rqtPpRDV6jyDW+6V44/iIl92tKQ7yf4PYTBPda2Qe6/ObkIxqFbQiigB79eLKDN90IwMuw/2uGrHdwJ/Ge9LZ0c5hEE6ZxIBFvhzrNo+F8qN81K90sIRP+le6fgIMrBv2AuA+4lJNcz27mae0tAtWjdI9HHlyURzS4Gm1S0YLJNm6lYFrglLycKOACLIpJnXtXLoOMTS60nQ=="
+      },
+      "age_file_sha256": "311d4785ec05759af09237120314b4129f751fa38884ee0411d20cf4a5e339b6",
+      "decrypted_frame_sha256": "565bb29a5a3d923cfdb18ff93bb834656380b68c4a3e78622ae18d30ff4e10ab",
       "identity": "team_a",
       "expected_state": "malformed"
     },
@@ -245,9 +258,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB4bjBnREExaTFrL1RHYW55TjE5Y2NlRjlwcHBlYUUzakhTay95ZTR0K3pRCndmNC9FSnR5dlVUeXdnLzZYdlpXcEdVNmJOZUZPcS9RU3d0a0FnVG5WUFEKLS0tIEUzWlhuUTNJdERVMlRwdzZKL2xoODdXUkFlTWJFZHVKOU9WQ09vMHdNU1kKJbE4QzFxE6KOy6ROAlDhf5zmjHazhTPZlsMTt+jisnzVUhP2xwBKCFJvd5g3AW9YO4w/YSpQkyp5Y02XCHNz1O8gKmBckS6Bue9krzeabq+aBo8XLQ7Z52dAZeMIaCE9tuRAFqOzZ/m1yD/O2mjvHqrFhIZVrBMraest5LL3jXnAdvJCw08YRUpUO2pYtdEjAJmiQMHxmxKpkR4J9mtvQ0OlWF7HHIKxm8o+GYYtKVCOOVDZ04lPimYMmrdjPLb4L5sA9x8fnTZP7k+v384zhnH300ESDzQPNOmSjm+3NcvXiUz8Rk6eke/1ONG2bQ=="
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBTcDZoQytLcGJ4VHdPeWhnSEorV1RpUUdYMTY0RnNBYndHSWlWbU5TMlU4CnpRenNtMUkwbjFmdW4wQXVxcndTZXJKenZIVlVZL1JWMjdZQ3BtaUlCdlEKLS0tIGk5dEFrdWlncEN1SWxmdUUvUmYrOEN2OE9ZOExMeFVSQTRCb2pmb1o2RTgKyLFwdCOEaoGjJZvyXfBRwljfLuDrlQLtWWaO/YeH/PHqzEMi+07VEurJiC2X6xLAB6LBLw9KotfibA6E8MW0eDWh2fAs6m6rQSn///QOJ9RqlLVf1Y0cCwrBBDQT6N1FClYi5zfYSmIwsdaBwj+PmJWdzxnF578WTUdstocEl6JykJ7ua5niurV++PB5L9L8xbBS4fQAGCHEdsEw6H0j1UP9SGfD6tk7qp2Fpg07cfTknS1kzKZl/af/opPNbLV3uCNoegA0XuRf3kOFF2Fb2Vb6QnWsIh1HbPOqoyyzAHxws20R2o4E9sAzXH+lFA=="
       },
-      "age_file_sha256": "4437673d1d1ee8314c600f235ceada8f09621ce24d8b858b6d72d2047174ba32",
+      "age_file_sha256": "dd625409b17a1678574f16de6d4a0a5d289eeea67bc8293a5fdd5b85ec2f2ce3",
       "decrypted_frame_sha256": "7fbb0d1ca51905c690409e32a54929021de2af8ffb491d9b9210384988fce53a",
       "identity": "team_a",
       "expected_state": "importable"
@@ -258,9 +271,9 @@
         "v": 1,
         "cipher": "age-v1",
         "key_id": "epoch-1",
-        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBsdksrVXVGZzRXZEJicXlOa1orbDRjTVVCYTFiTlQyem9uUzlrRFV6TkNVCldHcFVHc1lEb3hLV1NqV056eXYxaFllTVRpZmhFRXNBN0thWThsSTVCbDQKLS0tIFMyZEUxUUhFOEd6MUxXdXE4aUV5R2trUjZMQVhOSVdZSU9pOWo1OW1GZ2sKsbLs4FcruH1xss7MihwINRmx1xnciYeEpQs3n52k4PPAntBts+sER11dqrLr5pJEexSrtqxFtcnHAHRCKha0gCuplUeEcUbRlQhNeDODl1wG8jryua6+qepZha2rzbp0HRkWEioed7NDQq99Yv+UFIKquAowIAnoSRgyJpTqEMvizheYg83MtQns36IIF6NoZ9FmQyq42BfbfFd/5jPeaoqFB+KVIJCSQZZvTzwtYP5n60rea7EQeJQsCp+H4dsQT9jxwBde4LVwgAZY6GL9H/JUXpPts74WyUjUDf5Whhco"
+        "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBWN2FtcG4wSU9hVUUydUdIbG1rc2ZrRmZYeVE3Z3VsM1M3SWI5aTRuVFNnCkpuS3FHdEhUcks1cktpWFo4VDduZFJkZW1CWDdraXZhcG1CTEovZ2k0b1UKLS0tIGFaampRUVF3Y1FkQ2pzS0hKV2k2a3JkRWFUZ3B6L1VtNGhiNGVYclpuUU0KiOKkP9XFhLMrCofDvoLI9KUE6p7XMmSQzI5xFJjnu0vJ2m5bqBcLQbYN44nAYyzo5tygLYab7eltmki5J4jbis1ZMngvaQ+ysAMU1hSYAABMijgN+RmpFyvk9v6BoqignyzBqzgrujYj8/LcdM8vMGNIFC51wh+cmBC5WqbZFyTe6R/JSqmXoYoeNtve2Cgp7ouLOcFrjJ7dYm2zQlIb2sKhymYaQmF+cNdlLoJZ+BcqVP3OwGGDjnebiHmOqrqc3mA2wnjcZJWEVpiq//+NJQdBxblCO9m40F5on6UBEXVa"
       },
-      "age_file_sha256": "8f64072d56ea77e3c4d02469d37cd7b9a6a7de29afbeee58534d65359ca915e9",
+      "age_file_sha256": "5fcbe2dc360e5fb1980da065de0c49d16276ff515cad30e934515cd7701853bf",
       "decrypted_frame_sha256": "52153825b692c9f432db23c54195cc5c3978036707771bf4246f649dfc7cf863",
       "identity": "team_a",
       "expected_state": "importable"

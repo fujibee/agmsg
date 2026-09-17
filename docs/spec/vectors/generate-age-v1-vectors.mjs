@@ -105,6 +105,14 @@ const duplicateMessage = Buffer.from(
   '{"body":"Run the test suite","body":"changed","created_at":"2026-07-20T06:30:00.000000Z","from_agent":"leader","to_agent":"worker-1"}',
   "utf8",
 );
+// The four known fields are each present once; the duplicate is nested
+// inside an unknown field's own object. Tolerating an unknown field must not
+// also tolerate a duplicate key wherever it happens to sit.
+const duplicateKeyInUnknownFieldMessage = Buffer.from(
+  '{"body":"Run the test suite","created_at":"2026-07-20T06:30:00.000000Z","from_agent":"leader",' +
+  '"to_agent":"worker-1","extra":{"x":1,"x":2}}',
+  "utf8",
+);
 // A newer sender may add a field this generator's profile version does not
 // know about yet; the receiving side must import the four known fields and
 // drop the rest rather than reject the message outright.
@@ -174,6 +182,8 @@ const output = {
       "authentication_failed"),
     encryptedVector("trailing-frame-byte", frame({ trailing: Buffer.from([0]) }), "authentication_failed"),
     encryptedVector("duplicate-message-key", frame({ message: duplicateMessage }), "malformed"),
+    encryptedVector("duplicate-key-in-unknown-field", frame({ message: duplicateKeyInUnknownFieldMessage }),
+      "malformed"),
     encryptedVector("unknown-message-field", frame({ message: unknownFieldMessage }), "importable"),
     encryptedVector("reordered-message-fields", frame({ message: reorderedMessage }), "importable"),
   ],

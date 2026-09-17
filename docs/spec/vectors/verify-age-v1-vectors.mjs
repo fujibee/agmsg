@@ -51,10 +51,14 @@ function expectedContext(binding) {
 // Independent of sync-cipher.mjs's own strict-JSON reader on purpose: this
 // walks the raw text itself (rather than trusting JSON.parse, which silently
 // keeps only the last of a duplicate key) so a bug shared between the two
-// duplicate-key checks cannot hide behind a green verifier.
-function hasDuplicateTopLevelKey(text) {
+// duplicate-key checks cannot hide behind a green verifier. Every object
+// scope gets its own key set, recursively — an unknown field can carry an
+// object of its own, and a duplicate inside it is just as rejectable as one
+// at the top level.
+function hasDuplicateKey(text) {
   let index = 0;
   const length = text.length;
+  let duplicate = false;
   const skipWs = () => { while (index < length && /\s/u.test(text[index])) index += 1; };
   function skipString() {
     index += 1;
@@ -65,19 +69,25 @@ function hasDuplicateTopLevelKey(text) {
     }
     throw new Error("unterminated string");
   }
-  function skipValue() {
+  function walkValue() {
     skipWs();
     const ch = text[index];
     if (ch === '"') { skipString(); return; }
     if (ch === "{") {
       index += 1; skipWs();
+      const seen = new Set();
       if (text[index] === "}") { index += 1; return; }
       for (;;) {
         skipWs();
         if (text[index] !== '"') throw new Error("expected object key");
-        skipString(); skipWs();
+        const keyStart = index;
+        skipString();
+        const key = JSON.parse(text.slice(keyStart, index));
+        if (seen.has(key)) duplicate = true;
+        seen.add(key);
+        skipWs();
         if (text[index] !== ":") throw new Error("expected colon");
-        index += 1; skipValue(); skipWs();
+        index += 1; walkValue(); skipWs();
         if (text[index] === ",") { index += 1; continue; }
         if (text[index] === "}") { index += 1; return; }
         throw new Error("expected , or }");
@@ -87,7 +97,7 @@ function hasDuplicateTopLevelKey(text) {
       index += 1; skipWs();
       if (text[index] === "]") { index += 1; return; }
       for (;;) {
-        skipValue(); skipWs();
+        walkValue(); skipWs();
         if (text[index] === ",") { index += 1; continue; }
         if (text[index] === "]") { index += 1; return; }
         throw new Error("expected , or ]");
@@ -98,27 +108,7 @@ function hasDuplicateTopLevelKey(text) {
     if (index === start) throw new Error("unexpected token");
   }
 
-  skipWs();
-  if (text[index] !== "{") return false;
-  index += 1; skipWs();
-  if (text[index] === "}") return false;
-  const seen = new Set();
-  let duplicate = false;
-  for (;;) {
-    skipWs();
-    if (text[index] !== '"') throw new Error("expected key");
-    const keyStart = index;
-    skipString();
-    const key = JSON.parse(text.slice(keyStart, index));
-    if (seen.has(key)) duplicate = true;
-    seen.add(key);
-    skipWs();
-    if (text[index] !== ":") throw new Error("expected colon");
-    index += 1; skipValue(); skipWs();
-    if (text[index] === ",") { index += 1; continue; }
-    if (text[index] === "}") break;
-    throw new Error("expected , or }");
-  }
+  walkValue();
   return duplicate;
 }
 
@@ -135,7 +125,7 @@ function canonicalMessage(bytes) {
     return false;
   }
   if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") return false;
-  if (hasDuplicateTopLevelKey(text)) return false;
+  if (hasDuplicateKey(text)) return false;
   const expectedKeys = ["body", "created_at", "from_agent", "to_agent"];
   return expectedKeys.every((key) => typeof parsed[key] === "string");
 }
