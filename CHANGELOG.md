@@ -6,42 +6,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.3.1] - 2026-09-17
 
+Teams that use remote sync should update every machine to 1.3.1 or later. From this release the client reports its version to the server, so older clients can be told apart.
+
 ### Added
-- Announce the client's version to the server with Agmsg-Client-Version (#1290)
-- Plain driver: an agent-native substitute for peek/poke with no pane (#1256)
+- The client sends its version to the server in an `Agmsg-Client-Version` header on every request; a request without it comes from a client older than 1.3.1 (#1290)
+- `peek` and `poke` have an agent-native substitute on terminals with no addressable pane (#1256)
+- `agy-tui` passes everything after `--` to `agy`, for example `-- --dangerously-skip-permissions`, and rejects any other unknown option (#1291)
 
 ### Fixed
-- Stop percent-decode from mangling backslash-bearing herdr instances (#1275)
-- Stop a backtick in a SQL comment from running as command substitution (#1276)
-- Ignore a stale request app-server URL (#1305)
-- Agy-tui passes args after -- to agy, and says how to resume when paused (#1291)
-- Give every Monitor directive a timeout and a silent re-arm instruction (#1287)
-- Refuse the legacy rule-file check when its notes path is unset (#1303)
-- Accept the 1.3.0 rule file when switching to monitor, and document narrow agy permissions (#1289)
-- Dispatch only the role recorded for this seat (#1285)
-- Translate user-facing messages to English (#1281)
-- Restart a running sync engine on the new code during --update (#1288)
-- Tolerate unknown message fields on receive (#1282)
-- One app-server per seat, never shared (#1254) (#1273)
-- Detect systemd-supervised sync engines (#1006)
-- Support Antigravity monitors on macOS (#1253)
+- Codex: each seat runs its own app-server, and its bridge dispatcher starts only the role recorded for that seat instead of every role in the project (#1273, #1285)
+- Codex: a stale app-server URL left in a request file no longer overrides the live endpoint (#1305)
+- `install --update` restarts a sync engine that was running, on the new code, instead of leaving it stale (#1288)
+- Receiving tolerates unknown fields in a message, so a newer sender does not get its messages rejected (#1282)
+- Claude Code Monitor directives set a 30-minute timeout and tell the agent to re-arm silently when a watch expires (#1287)
+- Antigravity monitor works on macOS (#1253); switching an existing 1.3.0 project to monitor delivery is accepted (#1289, #1303); user-facing messages are in English (#1281); a paused start says how to resume (#1291)
+- Sync engines supervised by systemd are detected (#1006)
+- A backtick in a SQL comment no longer runs as a command substitution (#1276)
+- herdr instance names containing a backslash survive percent-decoding (#1275)
 
 ### Changed
-- Isolate Antigravity read reservation guard (#1271)
+- Antigravity's read-reservation guard lives in the Antigravity driver (#1271)
 
 ### Documentation
-- Describe server-side work in neutral terms
-- The daemon delivers through the driver, and poke is not how it does it (#1267)
-- Subscribe to tags, and resolve the identity at session start (#1251)
+- Antigravity permission guidance covers the exact invocation shapes `agy` prompts for, including `bash -lc` (#1289)
+- The design RFC describes tag subscriptions, session-start identity, and delivery through the driver (#1251, #1267)
 
 ## [1.3.0] - 2026-09-14
 
 ### Added
-- Terminal driver v1 (integration/terminal-driver-v1 into main) (#1240)
+- Terminal drivers for tmux, herdr, and plain OS terminal windows: `peek`, `poke`, and `arrange` work through whichever terminal a member runs in (#1014, #1060, #1078, #1163, #1207)
+- `peek` with no member name summarizes the screens of the whole local team (#1194)
+- `where` reports this session's terminal, its pane, and the operations that terminal supports; Claude Code sessions are told their terminal at start (#1082, #1173, #1224)
+- `team` shows, for each teammate, whether `peek`, `poke`, and `arrange` can reach it, and why not when they cannot (#1232)
+- `fix`: a session proves which pane it is running in and repairs only its own name and placement records (#1152, #1157, #1188, #1191, #1227)
+- A session names its own pane when it acts, and `spawn` names the pane it created and sets its agent key (#1065, #1080, #1099)
+- `send` accepts `--body-file <path>` and `--body -` (stdin) like `poke`, and refuses a body that looks like a flag (#1101)
+- Antigravity (`agy`): the skill is installed where `agy` discovers skills, and monitor delivery with safe automatic resume is available on Linux (#1090, #1223)
 - Report a mark-read that lost to a concurrent writer (#1011) (#1013)
 - Deliver the inbox mid-turn via a PostToolUse hook, not only at Stop (#1003) (#1004)
 
+### Changed
+- `team` is read-only: the leader-side repair options `--fix`, `--fix-pane-names`, and `--rename-sessions` are removed; each session repairs itself with `fix` (#1152, #1211, #1213)
+- actas lock, readiness, and spawn records are keyed by team and member id, so team or member names containing `__` no longer collide (#1023)
+- Agent type detection follows an explicit priority, and `GEMINI_API_KEY` on its own is only a last resort (#1247)
+- Per-driver notes live at `scripts/drivers/terminals/<driver>/README.md`; `install --update` removes the old `SKILL.md` copies (#1248)
+
 ### Fixed
+- Codex seats that hold an actas lock no longer drop out of their own bridge's delivery, and spawned seats do not inherit it (#1239, #1245)
+- Claude Code's `actas` and `drop` instructions again start the watcher through the Monitor tool and confirm it attached (#1237)
+- `spawn` skips the readiness wait only when delivery is explicitly off or turn (#647)
+- A graceful `despawn` waits for the pane to close, not only for the lock (#1097)
+- herdr socket paths containing `:` round-trip through placement records (#1166)
+- `watch` and `inbox` deliver a backlog past the argument-length limit instead of failing silently (#777, #1045)
+- `check-inbox` consumes rows only after the payload is written (#1026)
+- The Windows hook payload stays off the login shell's stdout (#1015)
+- Antigravity's delivery plug parses under bash 3.2 (#1244)
 - Pass non-remote subcommands through (#590)
 - The remaining argv-to-stdin sites, plus a Windows CRLF row-separator bug (#991)
 - Give the identity lease a start token on Windows (#978)
@@ -201,7 +220,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Narrow a claim I disproved myself two commits later
 - Delete a comment describing the control this one replaced
 - Point key.sh at the current design, and stop asserting the move has happened
-- Move the connect onboarding design to agmsg-cloud, and drop labels that point at nothing
 - Make the promise about this document weak enough to be true
 - Label what stands behind each claim, instead of asserting they all cite
 - Add a Japanese translation, and consolidate the derivation it mirrors
@@ -513,7 +531,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support spawning into herdr panes (#495)
 - Drag files onto a pane to insert their path (#481)
 - Adaptive catch-up so a backlog doesn't crawl at 100/5s
-- Add team-list.sh (agmsg team list --json, koit-approved)
+- Add team-list.sh (agmsg team list --json)
 - Add status --json and pending list/abort (ADR 0007 addendum)
 - Consume connected team credentials
 - Add scripts/remote.sh (connect/status/disconnect/doctor) per ADR 0007
@@ -548,10 +566,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve symlinks before trampoline compare; doctor checks node
 - Detect the macOS CLT python3 trampoline, not just PATH presence
 - Close the python3 dependency-tiering gap on the remote path
-- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation (co1 delta review round 2)
-- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer (co1 delta review)
-- Fail closed on incompleteness; shrink v1 schema (co1 P2, mentor-cc ruling)
-- Wire 'agmsg team list' into actual dispatch entry points (co1 P1)
+- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation
+- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer
+- Fail closed on incompleteness; shrink v1 schema
+- Wire 'agmsg team list' into actual dispatch entry points
 - Stop binding config JSON via .param set (#87-class tokenizer bug)
 - Hide imported identity at TTY
 - Separate token input from E2EE prompts
@@ -586,15 +604,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read messages from the event log too, not just the legacy table
 - Assert against the event log, not the legacy messages table
 - Escape interpolated names in rename/rename-team SQL (#223, #87)
-- Jsonl compact keys reads by tuple, not a space-join (co1 #221)
+- Jsonl compact keys reads by tuple, not a space-join (#221)
 - Make the jsonl driver parse under macOS bash 3.2 (#207, #221 CI)
-- Jsonl mark aborts on a failed existing-reads scan (co1 #207 residual)
-- Jsonl driver must not swallow failures as ok (co1 #207 review)
+- Jsonl mark aborts on a failed existing-reads scan (#207)
+- Jsonl driver must not swallow failures as ok (#207)
 - Watch-once stale-wake token = unread-set digest, not a max id (#207)
-- Document --limit semantics + make storage_history agent truly optional (co1 #206 review)
-- Export skips unknown event types; pin high-water with a tail-duplicate test (co1 #205 review)
-- Describe is a metadata op; surface backend errors; chronological reads (co1 re-review, #204)
-- Legacy read, pipefail framing, §1.4 control ops (co1 review, #204)
+- Document --limit semantics + make storage_history agent truly optional (#206)
+- Export skips unknown event types; pin high-water with a tail-duplicate test (#205)
+- Describe is a metadata op; surface backend errors; chronological reads (#204)
+- Legacy read, pipefail framing, §1.4 control ops (#204)
 
 ### Performance
 - Seal a bulk push page in parallel (#502)
@@ -622,8 +640,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close Stage 2 frontier edge cases
 - Define Stage 2 read-state synchronization
 - Note rename.sh/rename-team.sh/api.sh as sqlite-coupled known gaps
-- Correct the ctrl:despawn cursor-advance comment (co1 step-3 review)
-- Clarify stdout framing, cursor token, watch tip (co1 review, #203)
+- Correct the ctrl:despawn cursor-advance comment
+- Clarify stdout framing, cursor token, watch tip (#203)
 - Storage contract §2 — messages-only, opaque cursor, recipient-scoped read (#203)
 - Draft ADR 0003 — storage axis driver ABI, contract, scope (proposed)
 
@@ -851,7 +869,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 - Add supported-agents logo strip
-- List hermes in the --agent-type help (co1 nit)
+- List hermes in the --agent-type help
 - Add docs/plugins.md + README section + plugins/ drop-in dir
 - Refresh manifest table + paths for the 1.1.0 layout
 - Lead Quick Start with npx, the zero-clone install path
@@ -934,7 +952,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
-[1.3.1]: https://github.com/fujibee/agmsg/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/fujibee/agmsg/compare/v1.2.3...v1.3.0
 [1.2.3]: https://github.com/fujibee/agmsg/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/fujibee/agmsg/compare/v1.2.1...v1.2.2
