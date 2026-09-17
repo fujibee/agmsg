@@ -10,7 +10,7 @@ ROLE="${AGMSG_ANTIGRAVITY_ROLE:-}"
 AGY="${AGMSG_ANTIGRAVITY_BIN:-}"
 
 usage() {
-  printf '%s\n' 'Usage: agy-tui [status|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]'
+  printf '%s\n' 'Usage: agy-tui [status|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [-- agy options...]'
 }
 
 ACTION=""
@@ -18,6 +18,13 @@ case "${1:-}" in
   status|stop|resume|reset-guard|ack|replay) ACTION="$1"; shift ;;
 esac
 
+# PASSTHROUGH stays empty (and SAW_DASHDASH false) unless the caller writes a
+# literal --. That is the only thing that opens pass-through to agy -- an
+# unrecognized flag before it is a mistake to report, not a signal to start
+# forwarding blind (a typo like --tema would otherwise launch agy silently
+# carrying it, instead of failing here where it is obvious).
+PASSTHROUGH=()
+SAW_DASHDASH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) PROJECT="${2:?--project requires a value}"; shift 2 ;;
@@ -25,8 +32,11 @@ while [ $# -gt 0 ]; do
     --name) ROLE="${2:?--name requires a value}"; shift 2 ;;
     --agy) AGY="${2:?--agy requires a value}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
-    --) shift; break ;;
-    *) break ;;
+    --) shift; SAW_DASHDASH=1; PASSTHROUGH=("$@"); break ;;
+    *)
+      printf 'agy-tui: unknown option %s -- use -- to pass options through to agy, for example: -- --dangerously-skip-permissions\n' "$1" >&2
+      exit 1
+      ;;
   esac
 done
 
@@ -66,8 +76,11 @@ monitor_args=(
   --project "$PROJECT"
   --team "$TEAM"
   --name "$ROLE"
-  --agy "$AGY" "$@"
+  --agy "$AGY"
 )
+if [ "$SAW_DASHDASH" -eq 1 ]; then
+  monitor_args+=(-- "${PASSTHROUGH[@]}")
+fi
 if [ -n "$ACTION" ]; then
   exec bash "$HERE/antigravity-tui-monitor.sh" "$ACTION" "${monitor_args[@]}"
 fi

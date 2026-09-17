@@ -60,7 +60,7 @@ project; it refuses (fail-closed) if zero or several are registered. Pass them
 explicitly when the project has more than one.
 
 ```
-Usage: agy-tui [status|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]
+Usage: agy-tui [status|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [-- agy options...]
 ```
 
 Anything after `--` is passed to the real `agy` process unchanged, for

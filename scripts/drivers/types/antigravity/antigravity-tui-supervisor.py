@@ -733,12 +733,19 @@ def recover(a):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--project',required=True);p.add_argument('--team',required=True);p.add_argument('--name',required=True);p.add_argument('--agy',default='agy');p.add_argument('--poll',type=float,default=2);p.add_argument('--action',choices=['run','status','stop','resume','reset-guard','ack','replay'],default='run');p.add_argument('--batch');p.add_argument('--confirm-id',dest='confirm_ids',action='append')
-    # Anything agy-tui forwards after -- (e.g. --dangerously-skip-permissions)
-    # arrives here as unrecognized args, not a positional -- parse_known_args
-    # collects them instead of erroring, and launch() below execs them
-    # straight through to agy, unchanged, on every start this process makes
-    # (initial run and PREPARED-state resume both call the same launch()).
-    a,agy_args=p.parse_known_args(); a.agy_args=agy_args
+    # Anything agy-tui forwards after a literal -- (e.g.
+    # --dangerously-skip-permissions) is meant for agy, unchanged -- but only
+    # what comes after that explicit marker. agy-tui.sh now hard-refuses any
+    # OTHER unrecognized option itself (a typo like --tema must not silently
+    # become pass-through), so splitting here on the first -- and parsing
+    # everything before it strictly is what keeps that contract on this side
+    # too: an unrecognized flag before -- still raises, same as it always did.
+    argv=sys.argv[1:]
+    if '--' in argv:
+        i=argv.index('--'); known_argv,agy_args=argv[:i],argv[i+1:]
+    else:
+        known_argv,agy_args=argv,[]
+    a=p.parse_args(known_argv); a.agy_args=agy_args
     if a.action in ('ack','replay'):
         if not a.batch or not a.confirm_ids: raise RuntimeError('--batch and --confirm-id are required')
         recover(a); return

@@ -1033,14 +1033,15 @@ sys.exit(os.waitstatus_to_exitcode(status))
   }
 });
 
-test('agy-tui が -- の後ろで受け取った引数は起動されるagyへそのまま渡る (#1291)', async () => {
-  // agy-tui.sh and antigravity-tui-monitor.sh already forward everything
-  // after -- as bare trailing argv (the -- separator itself is consumed by
-  // the shell before reaching here, matching production). The bug this pins
-  // was in Python: argparse rejected those unrecognized args outright, and
-  // even ignoring that, launch()'s os.execvp hardcoded [self.a.agy] with no
-  // extra argv at all -- so --dangerously-skip-permissions never reached the
-  // real agy process regardless of how it was requested.
+test('agy-tui が -- の後ろで受け取った引数だけを起動されるagyへそのまま渡り、その前の未知optionは拒否する (#1291)', async () => {
+  // The pass-through has to be scoped to an explicit --, not "whatever
+  // agy-tui.sh does not recognize": review of the first version of this fix
+  // found that agy-tui.sh's old catch-all treated ANY unrecognized option as
+  // the start of pass-through, -- or not, so a typo like --tema would launch
+  // agy carrying it instead of failing loudly. Both directions are pinned
+  // here, through the real entry point (agy-tui.sh itself, not the Python
+  // supervisor invoked directly -- bypassing agy-tui.sh would let this pass
+  // even if the shell layer stopped forwarding args after -- correctly).
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agmsg-tui-argv-test-'));
   const install = path.join(dir, 'install');
   const project = path.join(dir, 'project');
@@ -1067,11 +1068,21 @@ test('agy-tui が -- の後ろで受け取った引数は起動されるagyへ�
     `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(dump)}\necho READY\nwhile :; do sleep 1; done\n`,
     { mode: 0o700 },
   );
-  const supervisorPath = path.join(install, 'scripts/drivers/types/antigravity/antigravity-tui-supervisor.py');
+  const agyTuiPath = path.join(install, 'scripts/drivers/types/antigravity/agy-tui.sh');
+
+  // A typo before -- must be refused, not silently forwarded to agy.
+  const typo = spawnSync(
+    'bash',
+    [agyTuiPath, 'status', '--project', project, '--team', 'fixture', '--name', 'worker', '--tema', 'oops'],
+    { env, encoding: 'utf8' },
+  );
+  assert.notEqual(typo.status, 0);
+  assert.match(typo.stderr, /unknown option --tema/);
+
   const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
   const command = 'stty rows 40 cols 120; exec ' + [
-    'python3', supervisorPath, '--action', 'run', '--project', project, '--team', 'fixture', '--name', 'worker',
-    '--agy', fake, '--poll', '0.05', '--dangerously-skip-permissions', '--extra-marker=agmsg-e2e-42',
+    'bash', agyTuiPath, '--project', project, '--team', 'fixture', '--name', 'worker',
+    '--agy', fake, '--', '--dangerously-skip-permissions', '--extra-marker=agmsg-e2e-42',
   ].map(quote).join(' ');
   const ptyRelay = path.join(dir, 'pty-relay.py');
   if (process.platform === 'darwin') fs.writeFileSync(ptyRelay, `
