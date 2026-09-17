@@ -197,6 +197,11 @@ settings_file() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
   [[ "$output" == *"watch processes:"* ]]
+  # `mode: monitor` reports configuration, not the runtime Monitor task; the
+  # claude-code-only note points at TaskList, not the background-task footer
+  # (#270).
+  [[ "$output" == *"configured hooks only"* ]]
+  [[ "$output" == *"Verify with TaskList"* ]]
 }
 
 # A pid that exists but this user cannot signal, so `kill -0` fails with EPERM
