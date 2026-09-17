@@ -223,8 +223,8 @@ run_launcher() {
 
 @test "launcher: passes the actas owner recorded by the claim" {
   setup_live_owner "$RUN_DIR" owner-session
+  export AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:1"
   bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
-  write_request owner-session team alice
   run_launcher
   [ -f "$CAPTURE" ]
   grep -q -- "--owner owner-session" "$CAPTURE"

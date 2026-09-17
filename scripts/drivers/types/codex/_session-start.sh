@@ -126,7 +126,7 @@ agmsg_session_start() {
     safe_pairs="${safe_pairs:+$safe_pairs$'\n'}${candidate_team}"$'\t'"${candidate_name}"
   done <<< "$PAIRS"
   PAIRS="$safe_pairs"
-  [ -n "$PAIRS" ] || exit 0
+  pair_count=$(printf '%s\n' "$PAIRS" | grep -c . || true)
   app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
   if [ -z "$app_server" ]; then
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
@@ -161,6 +161,24 @@ agmsg_session_start() {
     fi
     app_server="$(_agmsg_codex_app_server_url "$PROJECT")"
   fi
+  if [ -z "$app_server" ] && [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ] \
+    && [ "$pair_count" -ne 1 ]; then
+    # Even without an endpoint, clear a stale pair when this seat no longer
+    # has exactly one role for the current thread. The dispatcher will keep
+    # waiting until a later actas/session-start supplies an unambiguous pair.
+    if ! command -v _agmsg_codex_seat_key_ok >/dev/null 2>&1; then
+      # shellcheck disable=SC1091
+      . "$SKILL_DIR/scripts/drivers/types/codex/_seat-key.sh"
+    fi
+    seat_key="${AGMSG_CODEX_SEAT_KEY:-}"
+    _agmsg_codex_seat_key_ok "$seat_key" || exit 0
+    request_file="$RUN_DIR/codex-bridge-request.$seat_key"
+    tmp_request="$request_file.$$"
+    mkdir -p "$RUN_DIR" 2>/dev/null || true
+    printf '%s\t%s\t\t\n' "$TYPE" "$thread_id" > "$tmp_request"
+    mv "$tmp_request" "$request_file"
+    exit 0
+  fi
   [ -n "$app_server" ] || exit 0
 
   if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then
@@ -178,7 +196,7 @@ agmsg_session_start() {
     request_file="$RUN_DIR/codex-bridge-request.$seat_key"
     tmp_request="$request_file.$$"
     mkdir -p "$RUN_DIR" 2>/dev/null || true
-    request_pair_count=$(printf '%s\n' "$PAIRS" | grep -c . || true)
+    request_pair_count="$pair_count"
     if [ "$request_pair_count" -eq 1 ]; then
       IFS=$'\t' read -r request_team request_name <<EOF
 $PAIRS
@@ -196,7 +214,6 @@ EOF
   fi
 
   mkdir -p "$RUN_DIR" 2>/dev/null || true
-  pair_count=$(printf '%s\n' "$PAIRS" | grep -c . || true)
   if [ "$pair_count" = "1" ]; then
     IFS=$'\t' read -r key_team key_name <<EOF
 $PAIRS

@@ -710,6 +710,26 @@ else
   bridge_run=("$NODE_BIN" "$SCRIPT_DIR/codex-bridge.js")
 fi
 
+# Retire this role's bridge only when its lease proves the pid is the bridge
+# previously launched for this exact project and pair. A numeric pid alone is
+# not enough: after a quick exit it may already name an unrelated process.
+retire_recorded_bridge() {
+  local old_pid="" lease="" token=""
+  local lproj lpairs lhost lpid lstart lstartsrc
+  [ -f "$pidfile" ] || return 0
+  IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
+  _agmsg_pid_valid "$old_pid" || return 0
+  lease="$RUN_DIR/codex-bridge-lease.$old_pid"
+  [ -f "$lease" ] || return 0
+  _read_lease "$lease" || return 0
+  [ "$lpid" = "$old_pid" ] || return 0
+  [ "$lproj" = "$PROJECT_HASH" ] || return 0
+  [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] || return 0
+  token="$(_start_token "$old_pid" 2>/dev/null || true)"
+  [ -n "$token" ] && [ "$token" = "$lstartsrc	$lstart" ] || return 0
+  kill "$old_pid" 2>/dev/null || true
+}
+
 deregistered_ticks=0
 while _agmsg_pid_alive_local "$PARENT_PID"; do
   # Resolved once per iteration and threaded through the fingerprint, so a tick
@@ -728,14 +748,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   if [ -z "$current_ids" ]; then
     deregistered_ticks=$((deregistered_ticks + 1))
     if [ "$deregistered_ticks" -ge 2 ]; then
-      if [ -f "$pidfile" ]; then
-        old_pid=""
-        IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-        # _agmsg_pid_valid, not just non-empty: `kill 0` signals this
-        # launcher's own process group, so a corrupt pidfile would tear down
-        # the dispatcher and its siblings instead of one stale bridge.
-        _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
-      fi
+      retire_recorded_bridge
       exit 0
     fi
     sleep 0.3
@@ -748,11 +761,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # so the new role is actually subscribed instead of being stranded.
   build_safety_state "$current_ids"
   if [ "$SAFETY_STATE" != "$safety_state" ]; then
-    if [ -f "$pidfile" ]; then
-      old_pid=""
-      IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-      _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
-    fi
+    retire_recorded_bridge
     exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
   fi
   # Resolve the app-server URL (and thread) this iteration would launch against
@@ -772,11 +781,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     fi
   fi
   if [ "$request_pair" != "$ROLE_PAIR" ]; then
-    if [ -f "$pidfile" ]; then
-      old_pid=""
-      IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-      _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
-    fi
+    retire_recorded_bridge
     # The seat's request no longer names this role (or is ambiguous/missing).
     # Retire the old child so a role change cannot leave two bridges alive.
     exit 0
