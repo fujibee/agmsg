@@ -185,7 +185,7 @@ input pause from a durable pause or an unresolved batch.
 | A batch is stuck in `uncertain` / `NEEDS_ATTENTION` | the turn could not be verified | `agy-tui ack …` or `agy-tui replay …` |
 | `paused` after ordinary typing | `humanInputActive`; the supervisor is waiting for a safe idle transition | No command. Finish the human turn and return to the empty input prompt; delivery resumes automatically after the non-idle and stable-idle checks pass. |
 | `paused` with a durable manual-resume latch | `manualResumeRequired`; automatic resume is deliberately disabled | Clear the input box, then run `$agmsg resume` or `agy-tui resume …`. |
-| A real `agy` permission dialog appears mid-delivery | agy 1.2.5's permission screen is unrecognized; the keypress you send it counts as human input | Same as ordinary typing above: clear the dialog, return to the empty prompt, and delivery resumes on its own. Prefer `--dangerously-skip-permissions` (status box at the top) to avoid this case entirely. |
+| A real `agy` permission dialog appears while a batch is in flight (`WAITING_FOR_RESULT`) | agy 1.2.5's permission screen is not a recognized shape; the keypress you send it marks the batch `uncertain`, sets durable attention, and **stops the supervisor** | This is the same stuck-batch case above, not an ordinary pause: run `agy-tui status`, then `agy-tui ack` or `agy-tui replay` with `--batch <id>` and `--confirm-id <message-id>` for each pending message, then start the supervisor again. An empty input prompt does not bring it back on its own. Prefer `--dangerously-skip-permissions` (status box at the top) to avoid triggering this at all. |
 | A Python traceback after running `replay` | the batch `replay` was pointed at was already cleared by an earlier `ack` | Nothing to run — the message was already handled. Confirm with `agy-tui status`; do not re-run `replay`. |
 | `could not uniquely identify a TUI supervisor to stop or resume` | no supervisor is currently running for that identity | Run `agy-tui status` first to confirm whether one is expected to be there. |
 
@@ -282,14 +282,22 @@ Keep the list narrow otherwise. `command(gh)` allows every `gh` subcommand,
 including `gh api` with `-X DELETE`; prefer read-only forms such as
 `command(gh issue list)`.
 
-### Last resort: `--dangerously-skip-permissions`
+### `--dangerously-skip-permissions`
 
-The narrow allow-list above is the primary way to stop permission stalls — it
-only lets through the exact agmsg commands this driver actually runs. If a
-prompt still gets through anyway (a permission screen the supervisor's fixture
-set does not yet recognize, for example), `agy-tui`'s `--`
-[pass-through](#quick-start) can start `agy` with
-`--dangerously-skip-permissions` instead:
+The narrow allow-list above is the general-purpose way to stop permission
+stalls for `agy` — it only lets through the exact agmsg commands this driver
+actually runs, and is worth building out for any use where a stalled prompt
+merely delays a turn.
+
+For the experimental **monitor** seat specifically, this flag is the practical
+requirement today, not a last resort held in reserve: `agy` asks for
+permission in varying invocation shapes (see [Permissions for
+`agy`](#permissions-for-agy) above), an allow-list can only ever cover the
+shapes it was actually built against, and — unlike an ordinary CLI turn — a
+prompt the supervisor does not recognize during a delivery does not just
+stall, it **stops the supervisor entirely** with an uncertain batch (see
+[Known limitations](#known-limitations)). `agy-tui`'s `--`
+[pass-through](#quick-start) starts `agy` with it directly:
 
 ```bash
 agy-tui --team <team> --name <role> -- --dangerously-skip-permissions
@@ -394,17 +402,25 @@ killing the terminal you are working in. Stop the supervisor explicitly first.
   required for the supervisor.
 - **The input box is never proven empty.** The manual-resume latch exists because
   of this, and removing the latch would reintroduce draft corruption.
-- **A permission prompt during a delivery stops the supervisor.** Observed with
-  agy 1.2.5: its permission screen is not one of the recognized signatures, the
-  supervisor cannot tell it apart from ordinary human typing, and a keypress
-  there is treated as human input — which pauses delivery, the same as any
-  other keystroke. `--dangerously-skip-permissions` (see the status box at the
-  top) is the only known way to avoid triggering this at all.
-- **Any keystroke pauses delivery until the input is empty again**, not only
-  ones aimed at a dialog — this is the same ordinary-input pause described
-  under [Pause and resume](#pause-and-resume), restated here because it is one
-  of the concrete reasons a shared, interactively-used seat is not what this
-  driver is for today.
+- **A keystroke while idle pauses delivery; the same keystroke while a batch is
+  in flight stops the supervisor — these are two different outcomes, not one.**
+  While idle (no batch injected), typing pauses delivery the same way as any
+  other keystroke, and it resumes automatically once the input goes back to
+  empty; see [Pause and resume](#pause-and-resume). While a batch is in flight
+  (`WAITING_FOR_RESULT`) and the keypress is not a recognized permission-screen
+  shape, the supervisor cannot tell it apart from unexpected human interference
+  mid-delivery: it marks the batch `uncertain`, sets durable attention, and
+  **stops** — it does not merely pause, and an empty prompt does not bring it
+  back. This second case is what makes a shared, interactively-used seat not
+  what this driver is for today.
+- **A real permission dialog during a delivery is exactly the second case
+  above.** Observed with agy 1.2.5: its permission screen is not one of the
+  recognized signatures, so the keypress you send it stops the supervisor with
+  an uncertain batch — see the recovery table below.
+  `--dangerously-skip-permissions` (status box at the top) is the only known
+  way to avoid triggering this at all, which is why it is the practical
+  requirement for the experimental monitor seat today, not merely a
+  last-resort option.
 - **After a stop, the next start refuses until a person runs `ack` or `replay`
   for the uncertain batch, and `replay` run right after `ack` prints a Python
   traceback.** Observed: `ack` completes and clears the batch; a `replay`
