@@ -1153,7 +1153,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
   }
 });
 
-test('claim拒否は保持しているsupervisorのpidと停止コマンドを示す', () => {
+test('a claim refusal shows the pid of the holding supervisor and the stop command', () => {
   runPython(`
 import importlib.util, json, os, tempfile
 from pathlib import Path
