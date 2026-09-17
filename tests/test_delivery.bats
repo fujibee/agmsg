@@ -2551,7 +2551,7 @@ JSON
   [ -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
   run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  refute grep -qF '既存rulefileはagmsg形式ではありません' <<<"$output"
+  refute grep -qF 'existing rule file is not in agmsg format' <<<"$output"
   grep -qF '<!-- agmsg:antigravity:monitor -->' "$TEST_PROJECT/.agent/rules/agmsg.md"
 
   # Pre-#1248 agmsg (1.3.0 and earlier) wrote this exact text but named the
@@ -2590,7 +2590,7 @@ says whether it worked and, if not, why.
 EOF
   run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  refute grep -qF '既存rulefileはagmsg形式ではありません' <<<"$output"
+  refute grep -qF 'existing rule file is not in agmsg format' <<<"$output"
   grep -qF '<!-- agmsg:antigravity:monitor -->' "$rule_file"
 }
 
