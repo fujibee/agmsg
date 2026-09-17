@@ -1079,6 +1079,28 @@ test('agy-tui が -- の後ろで受け取った引数だけを起動されるag
   assert.notEqual(typo.status, 0);
   assert.match(typo.stderr, /unknown option --tema/);
 
+  // A trailing -- with nothing after it must not crash: bash 3.2 (what CI's
+  // macOS runners actually use) treats expanding an assigned-but-empty array
+  // under `set -u` as an unbound-variable error, not silently-empty.
+  const emptyDashDash = spawnSync(
+    'bash',
+    [agyTuiPath, 'status', '--project', project, '--team', 'fixture', '--name', 'worker', '--'],
+    { env, encoding: 'utf8' },
+  );
+  assert.equal(emptyDashDash.status, 0, emptyDashDash.stderr + emptyDashDash.stdout);
+
+  // --batch/--confirm-id are supervisor flags for ack/replay recovery, not
+  // agy-tui's own -- they relied on the old catch-all to reach the
+  // supervisor and were the actual CI failure once that catch-all became a
+  // hard refusal: without an explicit exemption they read as a typo too.
+  const ack = spawnSync(
+    'bash',
+    [agyTuiPath, 'ack', '--project', project, '--team', 'fixture', '--name', 'worker', '--batch', 'batch-1', '--confirm-id', 'message-1'],
+    { env, encoding: 'utf8' },
+  );
+  assert.equal(ack.status, 1, ack.stderr + ack.stdout);
+  assert.match(ack.stderr, /no reservation or state exists for recovery/);
+
   const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
   const command = 'stty rows 40 cols 120; exec ' + [
     'bash', agyTuiPath, '--project', project, '--team', 'fixture', '--name', 'worker',
