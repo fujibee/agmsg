@@ -45,6 +45,12 @@ CONNECT_SERVER_ID = "018f3f7e-3333-7000-8000-000000000001"
 # which is what a per-team edge does; a test sets it via /_test/health-team= to
 # make the server disagree with the client's binding.
 HEALTH_TEAM_ID = os.environ.get("MOCK_HEALTH_TEAM_ID", "")
+# The Agmsg-Client-Version header of the most recently received request, of
+# any method or route. None (not the string "unknown") when a request never
+# arrived, or arrived with no such header at all -- distinct from the client
+# sending the literal value "unknown", which a test needs to tell apart.
+# Read back via GET /_test/last-client-version.
+LAST_CLIENT_VERSION = None
 REGISTERED_TEAM_IDS = set()
 # team_id -> {"team_name": str, "members": [...]}, what /v1/connect was sent.
 REGISTERED_TEAMS = {}
@@ -264,7 +270,14 @@ class Handler(BaseHTTPRequestHandler):
         # Declared for the whole method: /_test/health-team assigns it, and
         # Python requires the declaration to precede the first mention anywhere
         # in the function — including the read in the /v1/health branch below.
-        global HEALTH_TEAM_ID, CONNECT_SERVER_ID, DROP_NEXT_CONNECT, FAIL_NEXT
+        global HEALTH_TEAM_ID, CONNECT_SERVER_ID, DROP_NEXT_CONNECT, FAIL_NEXT, LAST_CLIENT_VERSION
+        # Read before write, and only for a route under test: the inspection
+        # route itself is a request too, and capturing unconditionally would
+        # have it overwrite the very value it was asked to report.
+        if self.path == "/_test/last-client-version":
+            self._send_json(200, {"value": LAST_CLIENT_VERSION})
+            return
+        LAST_CLIENT_VERSION = self.headers.get("Agmsg-Client-Version")
         if self.path == "/v1/health":
             # Echo the team the caller asked about, the way a real per-team edge
             # answers. MOCK_HEALTH_TEAM_ID overrides it so a test can make the
@@ -584,6 +597,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._strip_capability_prefix()
+        global LAST_CLIENT_VERSION
+        LAST_CLIENT_VERSION = self.headers.get("Agmsg-Client-Version")
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b""
 

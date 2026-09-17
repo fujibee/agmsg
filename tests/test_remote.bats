@@ -1627,6 +1627,26 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   fi
 }
 
+# #963's sibling: the client announces its own version on every request, so a
+# server can eventually tell an unannounced (pre-1.3.1) client apart from one
+# that announced and could not read VERSION. Both directions in one test:
+# VERSION present names its value, VERSION absent still sends the fixed
+# "unknown" string rather than an empty value or no header at all.
+@test "remote pull: announces the client version, and 'unknown' when VERSION cannot be read" {
+  MOCK_TEAM_CIPHER_PROFILE=none
+  restart_mock_server
+
+  printf 'v1.3.1-test\n' > "$TEST_SKILL_DIR/VERSION"
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" versioned1
+  [ "$status" -eq 0 ]
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1-test" ]
+
+  rm -f "$TEST_SKILL_DIR/VERSION"
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" versioned2
+  [ "$status" -eq 0 ]
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "unknown" ]
+}
+
 # The three callers changed by #730, each with a start refusal injected.
 #
 # The refusal itself is covered in tests/test_remote_engine_start_refusal.bats,

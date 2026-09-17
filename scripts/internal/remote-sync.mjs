@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { appendFile, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
-import { closeSync, mkdtempSync, openSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ageExecutableVersion, CipherStateError, openEnvelope,
@@ -24,6 +24,37 @@ const MAX_CONNECTION_CONFIG_BYTES = 2 * 1024 * 1024;
 // answer: a bound a server can raise by saying so is not a bound. If the two
 // ever disagree, the client refuses rather than accepts the larger list.
 const MAX_TEAMS_PER_NAME = 16;
+const MAX_CLIENT_VERSION_LENGTH = 64;
+
+// Read once, on first use, and cached for the life of the process -- SKILL_DIR
+// (the install this process was launched from) does not change underneath a
+// running engine. "unknown" whenever the value cannot be produced (no
+// SKILL_DIR, no VERSION file, or a read failure): never empty and never
+// omitted, so a server can tell "announced, but unreadable" apart from "an
+// older client that never announces a version at all" (#963's sibling design,
+// memory/design/2026-09-17-agmsgd-client-version-header.md). Only printable
+// ASCII belongs in a header value, so anything else -- a stray control byte or
+// non-ASCII character from a corrupted or hand-edited VERSION file -- is
+// dropped rather than sent raw, and the result is capped well past any real
+// git-describe string but bounded regardless of what actually landed in the
+// file.
+let cachedClientVersion;
+function clientVersion() {
+  if (cachedClientVersion !== undefined) return cachedClientVersion;
+  const skillDir = process.env.SKILL_DIR;
+  let firstLine = "";
+  if (skillDir) {
+    try {
+      firstLine = readFileSync(join(skillDir, "VERSION"), "utf8").split(/\r?\n/u)[0] ?? "";
+    } catch {
+      firstLine = "";
+    }
+  }
+  const sanitized = [...firstLine].filter((ch) => ch >= " " && ch <= "~").join("")
+    .slice(0, MAX_CLIENT_VERSION_LENGTH).trim();
+  cachedClientVersion = sanitized || "unknown";
+  return cachedClientVersion;
+}
 
 function usage() {
   return `usage:
@@ -1473,6 +1504,7 @@ async function send(config, path, init, authHeaders) {
   const headers = {
     ...init.headers,
     "Agmsg-Protocol-Version": PROTOCOL,
+    "Agmsg-Client-Version": clientVersion(),
     "Agmsg-Team-ID": config.remote_team_id,
     ...authHeaders,
   };
@@ -1595,7 +1627,7 @@ async function health(serverUrl, teamId) {
   let response;
   try {
     response = await fetch(endpoint(serverUrl, "/v1/health"), {
-      headers: { "Agmsg-Team-ID": teamId },
+      headers: { "Agmsg-Team-ID": teamId, "Agmsg-Client-Version": clientVersion() },
       redirect: "error", signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
@@ -4057,7 +4089,7 @@ async function publicGet(serverUrl, path) {
   let response;
   try {
     response = await fetch(endpoint(serverUrl, path), {
-      headers: { "Agmsg-Protocol-Version": PROTOCOL },
+      headers: { "Agmsg-Protocol-Version": PROTOCOL, "Agmsg-Client-Version": clientVersion() },
       redirect: "error", signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
