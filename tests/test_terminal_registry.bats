@@ -94,6 +94,9 @@ elif [ "\$1" = pane ] && [ "\$2" = read ]; then
   printf 'herdr visible text\n'
 elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
   exit "\${HERDR_PANE_RENAME_RC:-0}"
+elif [ "\$1" = pane ] && [ "\$2" = get ]; then
+  # AGMSG_HERDR_PLACEMENT verifies the caller-created pane exists; failable per test.
+  exit "\${HERDR_PANE_GET_RC:-0}"
 elif [ "\$1" = agent ] && [ "\$2" = rename ]; then
   # The key rename. Failable per test (HERDR_AGENT_RENAME_RC), because "does it
   # fire when it should" and "does it answer ok when it failed" are different
@@ -736,6 +739,79 @@ EOF
   grep -q '\[pane\] \[split\]' "$ARGV_LOG"
   grep -q '\[pane\] \[rename\] \[wC:p9\] \[alice\]' "$ARGV_LOG"
   grep -q '\[pane\] \[run\] \[wC:p9\]' "$ARGV_LOG"
+}
+
+# AGMSG_HERDR_PLACEMENT: a caller that manages the tab layout itself creates the pane
+# and launches the boot; the driver only verifies, renames and records. This is the
+# herdr-scoped successor of the AGMSG_TERMINAL `{cmd}` template, which the herdr
+# driver's own split had stopped consulting inside a herdr pane.
+_install_placement_cmd() {   # <pane id to print> [exit code] [extra stdout line]
+  PLACE_LOG="$TEST_SKILL_DIR/place.log"
+  cat > "$FAKEBIN/place.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$1" > "$PLACE_LOG"
+${3:+printf '%s\\n' "$3"}
+printf '%s\n' "$1"
+exit ${2:-0}
+EOF
+  chmod +x "$FAKEBIN/place.sh"
+  export AGMSG_HERDR_PLACEMENT="$FAKEBIN/place.sh {cmd}"
+}
+
+@test "herdr: AGMSG_HERDR_PLACEMENT creates the pane instead of split/run; driver renames and records it" {
+  _install_fake_herdr "sess-77"
+  _install_placement_cmd wC:p7
+  agmsg_terminal_load herdr
+  export HERDR_PANE_ID='wC:p1'
+  run terminal_spawn alice /proj pane-v /boot
+  [ "$status" -eq 0 ]
+  [ "$output" = "$HERDR_SOCKET_PATH:wC:p7" ]
+  [ "$(cat "$PLACE_LOG")" = "/boot" ]                       # {cmd} = the boot, as AGMSG_TERMINAL did
+  refute grep -q '\[pane\] \[split\]' "$ARGV_LOG"            # the driver did not place
+  refute grep -q '\[pane\] \[run\]' "$ARGV_LOG"              # nor launch: the command did
+  grep -q '\[pane\] \[get\] \[wC:p7\]' "$ARGV_LOG"           # it verified the pane exists
+  grep -q '\[pane\] \[rename\] \[wC:p7\] \[alice\]' "$ARGV_LOG"
+}
+
+@test "herdr: AGMSG_HERDR_PLACEMENT without {cmd} is refused before any pane is touched" {
+  _install_fake_herdr "sess-77"
+  agmsg_terminal_load herdr
+  export HERDR_PANE_ID='wC:p1'
+  export AGMSG_HERDR_PLACEMENT="$FAKEBIN/place.sh"
+  run terminal_spawn alice /proj pane-v /boot
+  [ "$status" -eq 13 ]
+  [ "${output#*must contain a \{cmd\} placeholder}" != "$output" ]
+  refute grep -q '\[pane\]' "$ARGV_LOG"
+}
+
+@test "herdr: AGMSG_HERDR_PLACEMENT failure, multi-line or non-grammar output, or an unknown pane all return 13 without a split" {
+  _install_fake_herdr "sess-77"
+  agmsg_terminal_load herdr
+  export HERDR_PANE_ID='wC:p1'
+
+  _install_placement_cmd wC:p7 3
+  run terminal_spawn alice /proj pane-v /boot
+  [ "$status" -eq 13 ]
+  [ "${output#*command failed (rc=3)}" != "$output" ]
+
+  _install_placement_cmd wC:p7 0 'noise'
+  run terminal_spawn alice /proj pane-v /boot
+  [ "$status" -eq 13 ]
+  [ "${output#*exactly one line}" != "$output" ]
+
+  _install_placement_cmd '42'
+  run terminal_spawn alice /proj pane-v /boot
+  [ "$status" -eq 13 ]
+  [ "${output#*other than a bare herdr pane id}" != "$output" ]
+
+  _install_placement_cmd wC:p7
+  HERDR_PANE_GET_RC=1 run terminal_spawn alice /proj pane-v /boot
+  [ "$status" -eq 13 ]
+  [ "${output#*does not know it}" != "$output" ]
+
+  refute grep -q '\[pane\] \[split\]' "$ARGV_LOG"
+  refute grep -q '\[pane\] \[run\]' "$ARGV_LOG"
+  refute grep -q '\[pane\] \[rename\]' "$ARGV_LOG"
 }
 
 @test "herdr: terminal_spawn reaches the readiness arms under a NON-conditional set -e caller" {
