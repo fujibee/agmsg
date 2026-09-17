@@ -1683,8 +1683,8 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   run env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
     bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
-  [[ "$output" != *"illegal byte sequence"* ]]
-  [[ "$output" != *"sed:"* ]]
+  refute grep -qF -- "illegal byte sequence" <<<"$output"
+  refute grep -qF -- "sed:" <<<"$output"
   [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1--bad" ]
 }
 
