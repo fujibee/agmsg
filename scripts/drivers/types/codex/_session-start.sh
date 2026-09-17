@@ -126,6 +126,13 @@ agmsg_session_start() {
     safe_pairs="${safe_pairs:+$safe_pairs$'\n'}${candidate_team}"$'\t'"${candidate_name}"
   done <<< "$PAIRS"
   PAIRS="$safe_pairs"
+  # A request is an authority hand-off, not a best-effort hint. Never derive a
+  # path from an absent RUN_DIR or publish a record whose type is empty: callers
+  # that cannot provide either input must leave the previous request untouched.
+  if [ -z "${TYPE:-}" ] || [ -z "${RUN_DIR:-}" ]; then
+    echo "codex SessionStart: missing TYPE or RUN_DIR; refusing bridge request publication" >&2
+    return 0
+  fi
   request_type_value="${TYPE:-}"
   request_run_dir="${RUN_DIR:-}"
   pair_count=$(printf '%s\n' "${PAIRS:-}" | grep -c . || true)

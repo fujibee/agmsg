@@ -135,7 +135,9 @@ done <<< "$TEAMS"
 # after SessionStart, so publish the new pair (or an empty pair when the claim
 # is ambiguous) atomically at the same event. Other agent types have no request
 # file and do not enter this branch.
-if [ "$TYPE" = "codex" ] && [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] \
+if [ -z "${SKILL_DIR:-}" ] || [ -z "${TYPE:-}" ]; then
+  echo "actas claim: missing TYPE or SKILL_DIR; refusing bridge request publication" >&2
+elif [ "$TYPE" = "codex" ] && [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] \
   && [ -r "$SCRIPT_DIR/drivers/types/codex/_seat-key.sh" ]; then
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/drivers/types/codex/_seat-key.sh"
