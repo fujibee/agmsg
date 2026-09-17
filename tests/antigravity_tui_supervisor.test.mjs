@@ -1033,7 +1033,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
   }
 });
 
-test('agy-tui が -- の後ろで受け取った引数だけを起動されるagyへそのまま渡り、その前の未知optionは拒否する (#1291)', async () => {
+test('agy-tui passes only the arguments received after -- through unchanged to the spawned agy, and refuses an unknown option before it (#1291)', async () => {
   // The pass-through has to be scoped to an explicit --, not "whatever
   // agy-tui.sh does not recognize": review of the first version of this fix
   // found that agy-tui.sh's old catch-all treated ANY unrecognized option as
@@ -1144,7 +1144,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
   child.stderr.on('data', chunk => { output += chunk.toString(); });
   try {
     for (let i = 0; i < 200 && !fs.existsSync(dump); i += 1) await new Promise(resolve => setTimeout(resolve, 50));
-    assert.ok(fs.existsSync(dump), `fake agyの起動を検知できませんでした: ${output}`);
+    assert.ok(fs.existsSync(dump), `could not detect the fake agy launch: ${output}`);
     const argv = fs.readFileSync(dump, 'utf8').split('\n').filter(Boolean);
     assert.deepEqual(argv, ['--dangerously-skip-permissions', '--extra-marker=agmsg-e2e-42']);
   } finally {
