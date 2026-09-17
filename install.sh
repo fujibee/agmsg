@@ -378,6 +378,35 @@ if [ "$UPDATE_ONLY" = true ]; then
   SKILL_NAME="$(basename "$SKILL_DIR")"
   CMD_NAME="$SKILL_NAME"
   echo "  Updating $SKILL_NAME..."
+  # #963: a sync engine that is running when the write below starts either
+  # survives on the code it already loaded (silent -- `remote.sh status` still
+  # reports it as running, and nothing about the new scripts takes effect) or
+  # spawns a driver mid-write, reads a half-written file, and exits (visible,
+  # but stops syncing all the same). Snapshot which teams have an engine
+  # running NOW, before any file below is touched, using the install still on
+  # disk -- this is a plain read against a complete, unwritten tree, not the
+  # "must not depend on the tree mid-write" case agmsg_shq below is about.
+  # Restarting after the rewrite (further down) covers BOTH outcomes:
+  # a survivor is stopped and replaced, and a crasher is simply started fresh
+  # since its pidfile already reads as stale by then.
+  AGMSG_RUNNING_TEAMS=""
+  if [ -x "$SKILL_DIR/scripts/remote.sh" ]; then
+    while IFS= read -r _agmsg_status_line; do
+      [ -n "$_agmsg_status_line" ] || continue
+      _agmsg_running_team="$(printf '%s' "$_agmsg_status_line" | python3 -c '
+import json, sys
+try:
+    row = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+if row.get("engine_state") == "running":
+    print(row.get("local_team", ""))
+' 2>/dev/null || true)"
+      [ -n "$_agmsg_running_team" ] && AGMSG_RUNNING_TEAMS="$AGMSG_RUNNING_TEAMS
+$_agmsg_running_team"
+    done < <("$SKILL_DIR/scripts/remote.sh" status --json 2>/dev/null || true)
+  fi
+  unset _agmsg_status_line _agmsg_running_team
   if [ -z "$AGENT_TYPE" ]; then
     # Re-detect the type this install's shared SKILL.md was last rendered for,
     # from the whoami.sh line its own template prints (#846) -- every
@@ -597,15 +626,23 @@ if [ "$UPDATE_ONLY" = true ]; then
   echo "    In-flight watch.sh processes detect this and stand down on their own;"
   echo "    reopening the session brings delivery back."
   echo ""
-  echo "  ! A running sync engine stands down when it can tell it was updated, and"
-  echo "    does not come back. When it cannot tell, it keeps running the engine"
-  echo "    code it loaded before the update."
-  echo "    Check each team you sync remotely:"
+  # #963: a sync engine has no equivalent self-detection, so this update
+  # restarts one itself for every team the snapshot above found running.
+  if [ -n "$AGMSG_RUNNING_TEAMS" ]; then
+    while IFS= read -r _agmsg_team; do
+      [ -n "$_agmsg_team" ] || continue
+      if ! "$SKILL_DIR/scripts/remote.sh" sync restart "$_agmsg_team"; then
+        echo "  ! could not restart the sync engine for '$_agmsg_team'; run:" >&2
+        echo "      bash $SKILL_DIR/scripts/remote.sh sync restart $_agmsg_team" >&2
+      fi
+    done <<< "$AGMSG_RUNNING_TEAMS"
+    unset _agmsg_team
+  else
+    echo "  ~ no sync engine was running before this update; nothing to restart"
+  fi
   echo ""
-  echo "      remote.sh status <team>"
-  echo ""
-  echo "    There is no supported way to replace a running engine yet, and"
-  echo "    'engine stale' is not proof that one has stopped (#963, #954)."
+  echo "    'engine stale' after this is not proof a restart above failed on its"
+  echo "    own -- check: remote.sh status <team> (#963, #954)."
   echo ""
   echo "  ! If a project uses 'monitor'/'both'/'turn' delivery, re-run"
   echo "    'delivery.sh set <mode> <type> <project>' there. An upgrade (or a skill"

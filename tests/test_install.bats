@@ -15,9 +15,16 @@ setup() {
   # its pidfile on the raw session_id it passes — deterministic in CI and when
   # the suite runs under an agent process.
   export AGMSG_AGENT_PID=""
+  # Only the fake-engine #963 test below populates this; harmless elsewhere.
+  ENGINE_PIDS=""
 }
 
 teardown() {
+  local pid
+  for pid in $ENGINE_PIDS; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
   rm -rf "$FAKE_HOME"
 }
 
@@ -289,6 +296,78 @@ teardown() {
   # SessionStart/Stop hook, so the user is told to re-run delivery.sh set.
   [[ "$output" =~ "delivery.sh set" ]]
   [[ "$output" =~ "#133" ]]
+}
+
+# #963: a running sync engine either keeps executing the code it already
+# loaded (the write below never touches an in-memory process) or crashes
+# reading a half-written driver file mid-write -- either way it does not come
+# back on its own. Drives this through the real installer, not a unit-level
+# call, since the bug is specifically about what --update does around the
+# write. AGMSG_NODE + the ps fixture below stand in for a real Node/server so
+# the engine reaches readiness deterministically and in-process, the same
+# technique test_remote_status_liveness.bats uses; entirely within
+# FAKE_HOME, so this never touches a real installed engine.
+@test "install --update: replaces a running sync engine with one on the new code (#963)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" testteam alice claude-code /tmp/install-963-proj
+
+  local cfg="$SK/teams/testteam/config.json" escaped updated
+  escaped="$(sed "s/'/''/g" "$cfg")"
+  updated="$(sqlite_mem "
+    SELECT json_set('$escaped', '\$.remote_binding', json_object(
+      'endpoint', 'https://remote.example',
+      'server_instance_id', '018f0000-0000-7000-8000-000000000001',
+      'remote_team_id', '018f0000-0000-7000-8000-000000000002',
+      'protocol_version', 1,
+      'capabilities', json_object('write_allowed_ciphers', json_array('none')),
+      'connected_at', '2026-07-30T00:00:00Z',
+      'disconnected_at', null
+    ));")"
+  printf '%s\n' "$updated" > "$cfg"
+  mkdir -p "$SK/run"
+
+  local fake_node="$SK/fake-node" fake_bin="$SK/fake-node-bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'if [ "${1:-}" = "--version" ]; then echo v23.0.0; exit 0; fi' \
+    'echo "{\"event\":\"capabilities\",\"startup_nonce\":\"${AGMSG_SYNC_START_NONCE:-}\"}"' \
+    'trap "exit 0" TERM INT' \
+    'while :; do sleep 1; done' > "$fake_node"
+  chmod +x "$fake_node"
+  mkdir -p "$fake_bin"
+  # Answers only "-p <any pid> -o args=" -- with a fixed, matching cmdline for
+  # any pid asked about, since the engine's real pid is not known until after
+  # each start. Anything else goes to the real ps.
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'args=0' \
+    'case " $* " in *" -o args= "*) args=1 ;; esac' \
+    '[ "$args" = 1 ] || exec /bin/ps "$@"' \
+    "printf '%s\\n' 'bash $SK/scripts/internal/remote-sync.mjs run --team testteam'" > "$fake_bin/ps"
+  chmod +x "$fake_bin/ps"
+
+  run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" bash "$SK/scripts/remote.sh" sync start testteam
+  [ "$status" -eq 0 ]
+  local old_pid; old_pid="$(cat "$SK/run/remote-sync.testteam.pid")"
+  ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$old_pid"
+  kill -0 "$old_pid"
+
+  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+
+  # No engine from before the update remains.
+  sleep 1
+  run kill -0 "$old_pid"
+  [ "$status" -ne 0 ]
+
+  # The engine process now running executes the new install's code: a fresh
+  # pid, alive, and reported running by the (also just-updated) status command.
+  local new_pid; new_pid="$(cat "$SK/run/remote-sync.testteam.pid")"
+  ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$new_pid"
+  [ "$new_pid" != "$old_pid" ]
+  kill -0 "$new_pid"
+  run env PATH="$fake_bin:$PATH" bash "$SK/scripts/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"connected (engine running, pid $new_pid)"* ]]
 }
 
 @test "install: AGMSG_STORAGE_PATH override works against the installed skill" {

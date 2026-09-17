@@ -22,6 +22,7 @@ set -euo pipefail
 #     onboarding and the courier `fetch` path use --bundle/--confirm-digest.
 #   remote.sh status [<team>] [--json]
 #   remote.sh sync start <team>
+#   remote.sh sync restart <team>
 #   remote.sh disconnect <team>
 #   remote.sh forget [--yes] <team>
 #
@@ -3110,11 +3111,53 @@ cmd_sync_start() {
     echo "Sync engine started for '$team' (pid $started_pid)."
 }
 
+# Stop a running, unmanaged engine and start a fresh one on whatever code is
+# on disk right now (#963). A systemd-owned unit is left alone entirely --
+# not just refused past the admission check inside cmd_sync_start, but never
+# signalled here either, since systemd's own restart policy is that team's
+# supervisor, not this command. A team with no engine running is simply
+# started, same as `sync start` would do.
+cmd_sync_restart() {
+  local team="${1:?Usage: remote.sh sync restart <team>}" systemd_state systemd_pid \
+    engine_state engine_pid
+  [ $# -eq 1 ] || { echo "Usage: remote.sh sync restart <team>" >&2; exit 1; }
+  agmsg_validate_team_name "$team" || exit 1
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
+  # Asked directly, and BEFORE the pidfile-only status read below: a
+  # systemd-owned unit is refused unconditionally, in every one of its own
+  # states, not just the ones cmd_sync_start's admission check already
+  # refuses (starting/inactive/unknown) -- a systemd-owned engine that
+  # happens to be running right now must not be touched here either, since
+  # systemd's own restart policy is that team's supervisor, not this command.
+  IFS=$'\t' read -r systemd_state systemd_pid < <(_remote_systemd_engine_status "$team")
+  case "$systemd_state" in
+    running|starting|inactive|unknown)
+      echo "agmsg: systemd owns team '$team'; inspect or restart the user unit instead of sync restart" >&2
+      agmsg_lock_release
+      return 1
+      ;;
+  esac
+  IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
+  if [ "$engine_state" = "running" ]; then
+    if ! _remote_sync_engine_stop "$team"; then
+      echo "agmsg: sync engine pid $engine_pid for '$team' did not stop; not starting a new one" >&2
+      agmsg_lock_release
+      return 1
+    fi
+  fi
+  # Released before delegating: cmd_sync_start takes this same lock itself,
+  # and mkdir-based locking is not reentrant within one process (a second
+  # acquire here would spin against itself for the full budget, then fail).
+  agmsg_lock_release
+  cmd_sync_start "$team"
+}
+
 cmd_sync() {
   local action="${1:-}"
   case "$action" in
     start) shift; cmd_sync_start "$@" ;;
-    *) echo "Usage: remote.sh sync start <team>" >&2; exit 1 ;;
+    restart) shift; cmd_sync_restart "$@" ;;
+    *) echo "Usage: remote.sh sync start|restart <team>" >&2; exit 1 ;;
   esac
 }
 
