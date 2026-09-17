@@ -193,7 +193,8 @@ actually uses in `~/.gemini/antigravity-cli/settings.json`:
       "command(/home/you/.agents/skills/agmsg/scripts/identities.sh)",
       "command(bash /home/you/.agents/skills/agmsg/scripts/identities.sh)",
       "command(/home/you/.agents/skills/agmsg/scripts/whoami.sh)",
-      "command(bash /home/you/.agents/skills/agmsg/scripts/whoami.sh)"
+      "command(bash /home/you/.agents/skills/agmsg/scripts/whoami.sh)",
+      "command(bash -lc '~/.agents/skills/agmsg/scripts/whoami.sh \"$(pwd)\" antigravity')"
     ]
   }
 }
@@ -220,6 +221,22 @@ Two things that cost real debugging time:
   stay the simpler default because they sidestep reasoning about `~`
   expansion at all — but a `~`-prefixed rule is not the dead end this doc used
   to say it was.
+- **A `bash -lc '...'` wrapper is a third shape, and it needs the whole
+  command as its pattern.** An agmsg command containing shell syntax that
+  cannot pass through argv alone — `"$(pwd)"` in particular — gets wrapped
+  and prompted as `bash -lc '<the command, unexpanded>'` (for
+  example `bash -lc '~/.agents/skills/agmsg/scripts/whoami.sh "$(pwd)"
+  antigravity'`), and neither the bare-path nor the `bash <path>` entry
+  above covers that. The fix, re-measured the same way: an allow-rule that is
+  the *entire* `bash -lc '...'` string, quoting and all, exactly as shown in
+  the JSON above, does match — and a real negative control (the same wrapper
+  around an unrelated command) confirmed it wasn't already passing through
+  for some other reason. **Do not shorten the rule to just
+  `command(bash -lc)`.** That bare prefix was also measured, against a real
+  negative control: it matched *any* `bash -lc '<anything>'` command,
+  agmsg-related or not — the same hazard as the bare `command(gh)` warning
+  below, just for the interpreter instead of a program name. Keep the whole
+  wrapped string as the rule.
 - **Do not allow the inbox scripts.** Allowing `inbox.sh` — especially a
   fully-specified form like
   `command(bash …/scripts/inbox.sh <team> <role>)` — removes the speed bump in
