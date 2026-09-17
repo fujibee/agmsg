@@ -361,3 +361,32 @@ STUB
     "$BATS_TEST_TMPDIR/read.err"
   [ "$status_seen" -eq 0 ]
 }
+
+@test "sync: a missing node still answers 10, even when the jq also lacks -b (#829)" {
+  # TWO REFUSALS, AND THE ORDER BETWEEN THEM IS A CONTRACT.
+  #
+  # `storage_sync_resync` answers 10 for "no node, no strict parser" and 13 for
+  # everything else, and callers tell those apart. Resolving the jq capability at
+  # function scope -- which every other entry in this driver now does, to stop
+  # re-probing in each `$( )` subshell -- puts a second refusal in front of that
+  # one. Placed first it outranks the 10: measured 13 where the caller expects
+  # 10, with a node that is absent and a jq that happens to lack `-b`.
+  #
+  # So in this one function the gate sits after the node check. This case is what
+  # holds it there; move it back above `command -v "$node_bin"` and this reddens.
+  local bin; bin="$(stub_jq_without_b)"
+
+  run env REAL_PATH="$PATH" PATH="$bin:$PATH" \
+      AGMSG_SYNC_NODE_BIN=/nonexistent-node-binary bash -c '
+    export SKILL_DIR="$2" AGMSG_STORAGE_PATH="$3" AGMSG_STORAGE_DRIVER=sqlite
+    . "$1/lib/storage.sh"; agmsg_storage_load
+    storage_init demo >/dev/null 2>&1
+    printf "" | storage_sync_resync demo \
+      018f3f7e-0000-7000-8000-000000000000 \
+      018f3f7e-0000-7000-8000-000000000001 1
+  ' _ "$SCRIPTS" "$TEST_SKILL_DIR" "$BATS_TEST_TMPDIR/store-resync"
+
+  # ON THE NUMBER. A non-zero status is not the assertion -- 13 is also non-zero,
+  # and 13 is exactly the regression this guards against.
+  [ "$status" -eq 10 ]
+}

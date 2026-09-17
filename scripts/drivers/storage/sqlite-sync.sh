@@ -462,6 +462,13 @@ storage_sync_resync() {
   node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
   strict_parser="$SKILL_DIR/scripts/internal/strict-jsonl.mjs"
   command -v "$node_bin" >/dev/null 2>&1 && [ -f "$strict_parser" ] || return 10
+  # AFTER the node/parser check, unlike the other entries in this file.
+  # `storage_sync_resync` answers 10 for "no node, no strict parser" and 13 for
+  # everything else, and callers tell those apart. Resolving jq first would turn
+  # a missing node into a 13 whenever the jq also lacked `-b` -- measured: 10
+  # before this commit, 13 with the gate placed first. The gate buys an earlier,
+  # clearer refusal; it does not get to outrank an existing return code.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   line=$("$node_bin" "$strict_parser" current_seq expected_transport_cursor \
     min_available_seq reason type) || { _sqlite_sync_why; return 13; }
   printf '%s\n' "$line" | _sqlite_sync_jq -e '
@@ -826,6 +833,14 @@ storage_sync_prepare_push() {
 storage_sync_reconcile_push() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl line values="" type pos wire seq disposition jq_ok count=0
   generation=$(_sqlite_sync_generation "$team"); db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
@@ -989,6 +1004,14 @@ storage_sync_reconcile_push() {
 storage_sync_apply_pull() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl sql_file line type final_cursor="" corrupt=0 outcome_ids=""
   local seq wire received v cipher key_id blob status policy local_rev reason kind
@@ -1444,6 +1467,14 @@ storage_sync_reprocess() {
 storage_sync_prepare_read_state() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl context floor current members local_agents count values="" local_values=""
   local member id name agent insert_members="" insert_local_agents=""
@@ -1717,6 +1748,14 @@ EOF
 storage_sync_block_read_state() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl input member reason
   generation=$(_sqlite_sync_generation "$team") || { _sqlite_sync_why; return 13; }
@@ -1740,6 +1779,14 @@ storage_sync_block_read_state() {
 storage_sync_unblock_read_state() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl input member
   generation=$(_sqlite_sync_generation "$team") || { _sqlite_sync_why; return 13; }
@@ -1768,6 +1815,14 @@ storage_sync_unblock_read_state() {
 storage_sync_apply_read_state() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl sql_file line type floor="" current="" member seq wire
   generation=$(_sqlite_sync_generation "$team") || { _sqlite_sync_why; return 13; }
