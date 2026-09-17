@@ -196,11 +196,11 @@ settings_file() {
   run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"watch processes:"* ]]
+  grep -qF -- "watch processes:" <<<"$output"
   # `mode: monitor` reports configuration, not the runtime Monitor task; the
   # claude-code-only note points at TaskList, not the background-task footer
   # (#270).
-  [[ "$output" == *"configured hooks only"* ]]
+  grep -qF -- "configured hooks only" <<<"$output"
   [[ "$output" == *"Verify with TaskList"* ]]
 }
 
