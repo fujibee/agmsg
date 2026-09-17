@@ -679,7 +679,7 @@ class Supervisor:
         # already paused, carried over from the state file rather than from
         # anything this process just decided -- silently, unless told here.
         if self.state.get('manualResumeRequired') or self.state.get('humanInputActive') or self.state.get('durableAttention'):
-            print(f"配信は一時停止中です。再開: agy-tui resume --project {shlex.quote(self.project)} --team {shlex.quote(self.a.team)} --name {shlex.quote(self.a.name)}", file=sys.stderr)
+            print(f"[agmsg] Delivery is paused. Resume with: agy-tui resume --project {shlex.quote(self.project)} --team {shlex.quote(self.a.team)} --name {shlex.quote(self.a.name)}", file=sys.stderr)
     def run(self):
         self.acquire()
         self.print_resume_hint_if_paused()
