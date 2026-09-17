@@ -2627,6 +2627,27 @@ EOF
   grep -q -- "ws://127.0.0.1:50505" "$request_file"
 }
 
+@test "session-start.sh for codex retires a stale pair when its server is unavailable" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-tombstone "$TEST_PROJECT" codex
+
+  source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+  local seat_key request_file
+  seat_key="$(_agmsg_codex_seat_key_new)"
+  request_file="$TEST_SKILL_DIR/run/codex-bridge-request.$seat_key"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf 'codex\told-thread\tws://127.0.0.1:1\tteam\talice\n' > "$request_file"
+
+  ( unset AGMSG_CODEX_BRIDGE_APP_SERVER
+    AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+    AGMSG_CODEX_SEAT_KEY="$seat_key" \
+    CODEX_THREAD_ID="thread-tombstone" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null )
+
+  [ -f "$request_file" ]
+  [ "$(sed -n '1p' "$request_file")" = $'codex\tthread-tombstone\t\t' ]
+}
+
 @test "session-start.sh for codex stays quiet without monitor launcher env" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   local fake="$TEST_SKILL_DIR/fake-codex-bridge"

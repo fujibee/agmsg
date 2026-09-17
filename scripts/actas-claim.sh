@@ -156,20 +156,22 @@ elif [ "$TYPE" = "codex" ] && [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] \
       . "$SCRIPT_DIR/drivers/types/codex/_app-server.sh"
       request_server="$(_agmsg_codex_app_server_url "$PROJECT")"
     fi
-    if [ -n "$request_server" ]; then
-      request_tmp="$request_file.$$"
-      mkdir -p "$SKILL_DIR/run" 2>/dev/null || true
-      team_count=$(printf '%s\n' "$TEAMS" | grep -c . || true)
-      if [ "$team_count" -eq 1 ]; then
-        IFS= read -r request_team <<EOF
+    request_tmp="$request_file.$$"
+    mkdir -p "$SKILL_DIR/run" 2>/dev/null || true
+    team_count=$(printf '%s\n' "$TEAMS" | grep -c . || true)
+    if [ "$team_count" -eq 1 ] && [ -n "$request_server" ]; then
+      IFS= read -r request_team <<EOF
 $TEAMS
 EOF
-        printf '%s\t%s\t%s\t%s\t%s\n' "$TYPE" "$BARE_SID" "$request_server" "$request_team" "$NAME" > "$request_tmp"
-      else
-        printf '%s\t%s\t%s\t\n' "$TYPE" "$BARE_SID" "$request_server" > "$request_tmp"
-      fi
-      mv "$request_tmp" "$request_file"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$TYPE" "$BARE_SID" "$request_server" "$request_team" "$NAME" > "$request_tmp"
+    else
+      # Publish an empty-pair tombstone even when this seat's endpoint is
+      # unavailable. This retires the old role instead of leaving it as the
+      # dispatcher's stale authority; a later SessionStart can publish the
+      # non-empty pair once the per-seat URL is recoverable.
+      printf '%s\t%s\t%s\t\n' "$TYPE" "$BARE_SID" "$request_server" > "$request_tmp"
     fi
+    mv "$request_tmp" "$request_file"
   fi
 fi
 
