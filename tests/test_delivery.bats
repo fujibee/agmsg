@@ -474,9 +474,16 @@ eperm_pid() {
 @test "delivery set monitor: emits AGMSG-DIRECTIVE for Monitor invocation" {
   run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
-  [[ "$output" =~ "invoke the Monitor tool" ]]
-  [[ "$output" =~ "watch.sh" ]]
+  grep -q 'AGMSG-DIRECTIVE' <<<"$output"
+  grep -q 'invoke the Monitor tool' <<<"$output"
+  grep -q 'watch.sh' <<<"$output"
+  # Claude Code 2.1.271 caps every Monitor watch at 30 minutes and drops the
+  # unbounded 'persistent' option, notifying the agent to re-arm on expiry
+  # (#1270). Without an explicit timeout_ms the watch silently degrades to
+  # the 5-minute default, and without a re-arm instruction the agent has no
+  # reason to invoke Monitor again when that notice arrives.
+  grep -q 'timeout_ms: 1800000' <<<"$output"
+  [[ "$output" =~ "immediately re-arm it by invoking Monitor again" ]]
 }
 
 @test "delivery set both: emits AGMSG-DIRECTIVE for Monitor invocation" {

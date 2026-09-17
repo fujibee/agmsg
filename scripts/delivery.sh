@@ -484,8 +484,13 @@ AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
   command: $watch_command
   description: agmsg inbox stream
   persistent: true
+  timeout_ms: 1800000
 
-Pass the command above verbatim — the session_id is already filled in.
+Pass the command above verbatim — the session_id is already filled in. This
+watch expires after at most 30 minutes; when the expiry notice arrives,
+immediately re-arm it by invoking Monitor again with this exact command and
+description — delivery depends on it, since nothing else keeps the stream
+running.
 EOF
 }
 
