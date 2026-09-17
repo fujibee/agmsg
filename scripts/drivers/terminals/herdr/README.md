@@ -3,6 +3,28 @@ this session's terminal as `herdr`. Its manifest ceiling (`terminal.conf`):
 `spawn despawn peek poke where arrange name`. Every verb `where.sh` lists under
 `capabilities=` for herdr works; nothing here narrows that ceiling further.
 
+## Caller-owned placement: `AGMSG_HERDR_PLACEMENT`
+
+`spawn` normally places a member by splitting the spawning pane (`pane split`)
+or creating a tab (`--window`), then `pane run`s the boot in it. A caller that
+manages the layout of its herdr tab itself (a reconcile/layout library, a
+tab-lock, a placement journal) cannot let the driver split, because a pane the
+driver creates lands outside that layout and the caller can neither find it
+nor close it later. Set `AGMSG_HERDR_PLACEMENT` to a command template
+containing `{cmd}`; `spawn` then runs it instead of split + run. The command
+must (1) create the pane in this herdr instance, (2) launch the boot — `{cmd}`
+is replaced with the shell-quoted boot path, exactly as `AGMSG_TERMINAL`'s
+`{cmd}` is — inside that pane, and (3) print the bare pane id (`wN:pX`) as its
+only stdout line. The driver verifies the id with `pane get`, renames the pane
+with the member label, and records the placement, so `peek`, `poke`,
+`despawn` and `fix` reach the pane as usual. A failed command, an empty,
+multi-line or non-grammar stdout, or an id herdr does not know all fail with
+**13** before any pane is touched; the command owns whatever it created.
+Before 1.3.0 the `AGMSG_TERMINAL` template was consulted inside a herdr pane
+and served this purpose; the herdr driver's own split no longer does, so a
+caller that relied on it must set this variable (`AGMSG_TERMINAL` is still
+read on the non-tmux, non-herdr path).
+
 ## peek exit codes
 
 herdr's own `terminal_peek` returns exactly three failure codes, never a

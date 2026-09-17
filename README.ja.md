@@ -196,7 +196,7 @@ $agmsg              # Codex, Gemini CLI, Antigravity
 
 デフォルトでは `spawn` は**新しいエージェントが実際にリッスンし始めるまでブロックする** — ウォッチャーがアタッチし、レディネスの目印に触れる — その後 `status=ready` を表示するので、`spawn` が返ってきた瞬間にエージェントの起動直後の空白時間を気にせず作業を送れる。フックアンドフォーゲットなら `--no-wait`、待機時間の上限を決めたいなら `--ready-timeout <secs>`（デフォルト90、タイムアウト時は `status=timeout` を表示して終了コード3、呼び出し側は再spawnできる）を使う。Codexはこの待機をスキップする（Monitorがないため）。
 
-オプション: `--boot-prompt <text>`（初期タスク、上記参照）、`--project <path>`（デフォルト: 現在のプロジェクト）、`--team <team>`（プロジェクトにチームが1つだけなら自動解決）、`--terminal <tmpl>` / `$AGMSG_TERMINAL` / 設定 `spawn.terminal`（非tmux経路でターミナルコマンドを上書き。`{cmd}` プレースホルダーは生成されたブートスクリプトへのパスに置換される）。macOSでは、デフォルトで現在使っているターミナル（iTermまたはTerminal、`$TERM_PROGRAM` 経由で判定）を `open -a` で開く — これは単なるアプリ起動であり、ターミナルを直接スクリプト操作する場合に発生するAutomation/AppleScriptの権限プロンプトは**発生しない**。
+オプション: `--boot-prompt <text>`（初期タスク、上記参照）、`--project <path>`（デフォルト: 現在のプロジェクト）、`--team <team>`（プロジェクトにチームが1つだけなら自動解決）、`--terminal <tmpl>` / `$AGMSG_TERMINAL` / 設定 `spawn.terminal`（非tmux経路でターミナルコマンドを上書き。`{cmd}` プレースホルダーは生成されたブートスクリプトへのパスに置換される）。herdr pane 内では herdr driver が spawn 元 pane を自分で分割する。tab のレイアウトを自前で管理する呼び出し側は `$AGMSG_HERDR_PLACEMENT`（pane を作り、boot を起動し、素の pane id を出力する `{cmd}` テンプレート）を設定すると配置を自分の側に保てる — `scripts/drivers/terminals/herdr/README.md` を参照。macOSでは、デフォルトで現在使っているターミナル（iTermまたはTerminal、`$TERM_PROGRAM` 経由で判定）を `open -a` で開く — これは単なるアプリ起動であり、ターミナルを直接スクリプト操作する場合に発生するAutomation/AppleScriptの権限プロンプトは**発生しない**。
 
 特定のエージェントタイプにspawn時に常に追加のCLIフラグを渡したい場合（例えばデフォルトの権限モードやサンドボックスポリシー）、YAMLの**spawnオプション**ファイルに設定する — タイプごとに1セクション、その下にフラットな `--flag: value` マップを置く。パス: `$AGMSG_SPAWN_OPTIONS_FILE`、なければ `~/.agmsg/config/spawn_options.yaml`。ファイルやセクションがなければ何もしない。
 

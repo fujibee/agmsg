@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- herdr: `AGMSG_HERDR_PLACEMENT` — a `{cmd}` command template that creates the member's pane and launches the boot itself, for callers that manage the tab layout of a herdr session (a layout/reconcile library, a placement journal). The driver verifies the printed pane id, renames the pane and records it, and does not split or `pane run`. This restores, for herdr, what the `AGMSG_TERMINAL` `{cmd}` template did before the terminal drivers, which the herdr driver's own split had stopped consulting inside a herdr pane.
+
 ## [1.3.0] - 2026-09-14
 
 ### Added

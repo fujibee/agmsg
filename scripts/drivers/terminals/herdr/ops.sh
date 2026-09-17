@@ -461,6 +461,55 @@ terminal_spawn() {
   # Establish the instance BEFORE creating anything. Discovering afterwards
   # that the pane cannot be qualified would leave a live, unrecordable pane.
   socket="$(_herdr_env_socket)" || return 13
+  # Caller-owned placement (AGMSG_HERDR_PLACEMENT). A skill that already manages the
+  # pane layout of a herdr tab (a reconcile/layout library, a tab-lock, a placement
+  # journal) must create the pane ITSELF, or the split below lands the member outside
+  # that layout and the caller cannot find or close it afterwards. Before the terminal
+  # drivers, AGMSG_TERMINAL's `{cmd}` template did exactly this inside herdr; the
+  # herdr driver replaced that route with its own split, so the template stopped being
+  # consulted in a herdr pane. This variable is the herdr-scoped successor: a `{cmd}`
+  # command template that must (1) create the pane in THIS herdr instance, (2) launch
+  # the boot (`{cmd}`, shell-quoted, the same as AGMSG_TERMINAL) inside it, and (3)
+  # print the bare pane id (wN:pX) as its ONLY stdout line. Everything else the driver
+  # does for a pane it split itself still happens: the label rename, the qualified id.
+  # The readiness gate and `pane run` are the placement command's own responsibility
+  # (it decides how it starts the boot), so neither runs here. A failed command, an
+  # empty/multi-line/non-grammar stdout, or an id herdr does not know all return 13
+  # without touching any pane: the caller owns whatever it created.
+  if [ -n "${AGMSG_HERDR_PLACEMENT:-}" ]; then
+    case "$AGMSG_HERDR_PLACEMENT" in
+      *'{cmd}'*) : ;;
+      *) printf 'unsupported: AGMSG_HERDR_PLACEMENT must contain a {cmd} placeholder (got: %s)\n' "$AGMSG_HERDR_PLACEMENT" >&2; return 13 ;;
+    esac
+    local q_boot cmd out rc=0
+    q_boot="$(printf '%q' "$boot")"
+    cmd="${AGMSG_HERDR_PLACEMENT//\{cmd\}/$q_boot}"
+    out="$(bash -c "$cmd")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      printf 'unsupported: AGMSG_HERDR_PLACEMENT command failed (rc=%s); nothing was recorded — the command owns any pane it created\n' "$rc" >&2
+      return 13
+    fi
+    # Exactly one line, in the pane-id grammar. `$( )` strips one trailing newline;
+    # any remaining newline means more than one line was printed. (The newline is
+    # built with a sentinel: a bare `$(printf '\n')` is stripped to "" and would
+    # match everything.)
+    local nl; nl="$(printf '\nx')"; nl="${nl%x}"
+    case "$out" in
+      ''|*"$nl"*)
+        printf 'unsupported: AGMSG_HERDR_PLACEMENT must print exactly one line, the bare pane id (got: %s)\n' "$out" >&2; return 13 ;;
+    esac
+    _herdr_bare_ok "$out" || {
+      printf 'unsupported: AGMSG_HERDR_PLACEMENT printed something other than a bare herdr pane id (got: %s)\n' "$out" >&2; return 13; }
+    pane="$out"
+    qualified="$socket:$pane"
+    # The pane must exist in THIS instance: a stale or foreign id would be recorded
+    # and then peeked/poked/despawned against the wrong pane.
+    _herdr_cli "$qualified" pane get "$pane" >/dev/null 2>&1 || {
+      printf 'unsupported: AGMSG_HERDR_PLACEMENT returned pane %s, but herdr does not know it in this instance\n' "$pane" >&2; return 13; }
+    _herdr_cli "$qualified" pane rename "$pane" "$label" >/dev/null 2>&1 || true
+    printf '%s\n' "$qualified"
+    return 0
+  fi
   if [ "$target" = window ]; then
     # A window needs a workspace. Absent one, FAIL explicitly rather than
     # silently splitting a pane the caller did not ask for.
