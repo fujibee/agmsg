@@ -126,7 +126,9 @@ agmsg_session_start() {
     safe_pairs="${safe_pairs:+$safe_pairs$'\n'}${candidate_team}"$'\t'"${candidate_name}"
   done <<< "$PAIRS"
   PAIRS="$safe_pairs"
-  pair_count=$(printf '%s\n' "$PAIRS" | grep -c . || true)
+  request_type_value="${TYPE:-}"
+  request_run_dir="${RUN_DIR:-}"
+  pair_count=$(printf '%s\n' "${PAIRS:-}" | grep -c . || true)
   app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
   if [ -z "$app_server" ]; then
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
@@ -172,10 +174,10 @@ agmsg_session_start() {
     fi
     seat_key="${AGMSG_CODEX_SEAT_KEY:-}"
     _agmsg_codex_seat_key_ok "$seat_key" || exit 0
-    request_file="$RUN_DIR/codex-bridge-request.$seat_key"
+    request_file="$request_run_dir/codex-bridge-request.$seat_key"
     tmp_request="$request_file.$$"
-    mkdir -p "$RUN_DIR" 2>/dev/null || true
-    printf '%s\t%s\t\t\n' "$TYPE" "$thread_id" > "$tmp_request"
+    mkdir -p "$request_run_dir" 2>/dev/null || true
+    printf '%s\t%s\t\t\n' "$request_type_value" "$thread_id" > "$tmp_request"
     mv "$tmp_request" "$request_file"
     exit 0
   fi
@@ -193,21 +195,21 @@ agmsg_session_start() {
     fi
     seat_key="${AGMSG_CODEX_SEAT_KEY:-}"
     _agmsg_codex_seat_key_ok "$seat_key" || exit 0
-    request_file="$RUN_DIR/codex-bridge-request.$seat_key"
+    request_file="$request_run_dir/codex-bridge-request.$seat_key"
     tmp_request="$request_file.$$"
-    mkdir -p "$RUN_DIR" 2>/dev/null || true
+    mkdir -p "$request_run_dir" 2>/dev/null || true
     request_pair_count="$pair_count"
     if [ "$request_pair_count" -eq 1 ]; then
       IFS=$'\t' read -r request_team request_name <<EOF
 $PAIRS
 EOF
-      printf '%s\t%s\t%s\t%s\t%s\n' "$TYPE" "$thread_id" "$app_server" \
+      printf '%s\t%s\t%s\t%s\t%s\n' "$request_type_value" "$thread_id" "$app_server" \
         "$request_team" "$request_name" > "$tmp_request"
     else
       # A seat with zero or multiple matching roles has no unambiguous pair;
       # publish the thread and endpoint but leave the pair empty so the
       # out-of-sandbox dispatcher waits instead of fanning out project roles.
-      printf '%s\t%s\t%s\t\n' "$TYPE" "$thread_id" "$app_server" > "$tmp_request"
+      printf '%s\t%s\t%s\t\n' "$request_type_value" "$thread_id" "$app_server" > "$tmp_request"
     fi
     mv "$tmp_request" "$request_file"
     exit 0
