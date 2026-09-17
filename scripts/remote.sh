@@ -425,6 +425,50 @@ cmd_doctor() {
 
 # --- shared HTTP helpers (B1: never put secrets in curl's own argv/ps) ---
 
+# Same rule remote-sync.mjs's clientVersion() applies, so the two report the
+# same value from the same install: line 1 of SKILL_DIR/VERSION, printable
+# ASCII only, capped at 64 characters, "unknown" when it cannot be produced.
+# Computed once per process and cached -- pull calls through here twice in one
+# run (capabilities, then members). tr under LC_ALL=C strips on raw byte
+# value, not a locale-dependent character class, for the same reason
+# cmd_sync_start's digit-by-digit check avoids a bracket expression elsewhere
+# in this file.
+_REMOTE_CLIENT_VERSION=""
+_remote_client_version() {
+  if [ -n "$_REMOTE_CLIENT_VERSION" ]; then
+    printf '%s' "$_REMOTE_CLIENT_VERSION"
+    return
+  fi
+  local line="" sanitized=""
+  if [ -f "$SKILL_DIR/VERSION" ]; then
+    # read's own exit status is not the signal here: it returns 1 whenever the
+    # line it read had no trailing newline (a file written without one is
+    # still one readable line), and by then it has already set $line -- so
+    # `|| line=""` would discard a good read on exactly that shape. `|| true`
+    # only stops that nonzero status from tripping this file's `set -e`; it
+    # does not touch $line. Only the variable's own default ("", from the
+    # local above) speaks for a read that genuinely produced nothing, e.g.
+    # the file could not be opened.
+    IFS= read -r line < "$SKILL_DIR/VERSION" 2>/dev/null || true
+  fi
+  sanitized="$(LC_ALL=C printf '%s' "$line" | tr -cd '\40-\176')"
+  sanitized="${sanitized:0:64}"
+  sanitized="${sanitized#"${sanitized%%[![:space:]]*}"}"
+  sanitized="${sanitized%"${sanitized##*[![:space:]]}"}"
+  _REMOTE_CLIENT_VERSION="${sanitized:-unknown}"
+  printf '%s' "$_REMOTE_CLIENT_VERSION"
+}
+
+# Escapes \ and " for embedding inside a curl -K config's double-quoted
+# value. "printable ASCII" above still admits both characters, and curl's
+# config parser treats a backslash as an escape there (see _remote_curl_path
+# below) -- so an unescaped " in a value that ultimately comes from a file
+# outside this script's control (VERSION) could close the quoted value early
+# and let the rest of the line be read as a further config directive.
+_remote_curl_quote() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
 # _remote_curl_path <path> — render <path> for embedding INSIDE a curl -K config
 # file. On Windows/Git Bash, MSYS translates POSIX paths to Windows form only for
 # a native binary's argv, NOT for paths read from a config file's contents, so an
@@ -516,6 +560,7 @@ _remote_http_post_json() {
     printf 'request = "POST"\n'
     printf 'header = "Content-Type: application/json"\n'
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
+    printf 'header = "Agmsg-Client-Version: %s"\n' "$(_remote_curl_quote "$(_remote_client_version)")"
     printf 'dump-header = "%s"\n' "$(_remote_curl_path "$header_fifo")"
     printf 'connect-timeout = "10"\n'
     printf 'max-time = "15"\n'
@@ -588,6 +633,7 @@ _remote_http_get_json() {
     printf 'url = "%s"\n' "$url"
     printf 'request = "GET"\n'
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
+    printf 'header = "Agmsg-Client-Version: %s"\n' "$(_remote_curl_quote "$(_remote_client_version)")"
     printf 'header = "Agmsg-Team-ID: %s"\n' "$team_id"
     printf 'connect-timeout = "10"\n'
     printf 'max-time = "15"\n'

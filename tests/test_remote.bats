@@ -1629,17 +1629,36 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
 
 # #963's sibling: the client announces its own version on every request, so a
 # server can eventually tell an unannounced (pre-1.3.1) client apart from one
-# that announced and could not read VERSION. Both directions in one test:
-# VERSION present names its value, VERSION absent still sends the fixed
-# "unknown" string rather than an empty value or no header at all.
-@test "remote pull: announces the client version, and 'unknown' when VERSION cannot be read" {
+# that announced and could not read VERSION. Covers both call surfaces that
+# reach the agmsg server -- remote-sync.mjs's fetch() (through pull, which
+# also exercises the engine's own requests) and remote.sh's own curl helpers
+# (through connect's POST /v1/connect and pull's GET /v1/capabilities +
+# /v1/members) -- and both directions: VERSION present names its value,
+# VERSION absent still sends the fixed "unknown" string rather than an empty
+# value or no header at all.
+@test "remote pull and connect: announce the client version, and 'unknown' when VERSION cannot be read" {
   MOCK_TEAM_CIPHER_PROFILE=none
   restart_mock_server
 
   printf 'v1.3.1-test\n' > "$TEST_SKILL_DIR/VERSION"
+  # connect: the curl POST path (_remote_http_post_json). testteam already
+  # exists locally (setup()) and was minted with this mock server's team_id,
+  # so this is the cheapest way to reach it -- no new team or fixture needed.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1-test" ]
+  # connect started a background engine that keeps polling with the version it
+  # read at spawn time, cached for its own process life -- left running, its
+  # next cycle would overwrite the check below with this stale value. Same
+  # reason the pull further down is also disconnected before the final check.
+  bash "$SCRIPTS/remote.sh" disconnect testteam
+
+  # pull: the curl GET path (_remote_http_get_json, capabilities + members)
+  # and remote-sync.mjs's fetch() path, in the same call.
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" versioned1
   [ "$status" -eq 0 ]
   [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1-test" ]
+  bash "$SCRIPTS/remote.sh" disconnect versioned1
 
   rm -f "$TEST_SKILL_DIR/VERSION"
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" versioned2

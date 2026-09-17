@@ -31,9 +31,9 @@ const MAX_CLIENT_VERSION_LENGTH = 64;
 // running engine. "unknown" whenever the value cannot be produced (no
 // SKILL_DIR, no VERSION file, or a read failure): never empty and never
 // omitted, so a server can tell "announced, but unreadable" apart from "an
-// older client that never announces a version at all" (#963's sibling design,
-// memory/design/2026-09-17-agmsgd-client-version-header.md). Only printable
-// ASCII belongs in a header value, so anything else -- a stray control byte or
+// older client that never announces a version at all" (see the client version
+// header section of server/spec/v1.md). Only printable ASCII belongs in a
+// header value, so anything else -- a stray control byte or
 // non-ASCII character from a corrupted or hand-edited VERSION file -- is
 // dropped rather than sent raw, and the result is capped well past any real
 // git-describe string but bounded regardless of what actually landed in the
