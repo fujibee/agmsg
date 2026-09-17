@@ -345,13 +345,26 @@ teardown() {
   chmod +x "$fake_bin/ps"
 
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" bash "$SK/scripts/remote.sh" sync start testteam
+  # Captured and registered with teardown BEFORE the assertion below, not
+  # after: `run` itself cannot fail the test, but the `[ ]` that reads its
+  # status can end it right here, and a pid read only after that point is
+  # never added to $ENGINE_PIDS -- an engine this call actually started then
+  # outlives the test with nothing left to stop it (leaked on this machine,
+  # found and killed by hand; #963 review).
+  local old_pid=""
+  [ -f "$SK/run/remote-sync.testteam.pid" ] && old_pid="$(cat "$SK/run/remote-sync.testteam.pid")"
+  [ -n "$old_pid" ] && ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$old_pid"
   [ "$status" -eq 0 ]
-  local old_pid; old_pid="$(cat "$SK/run/remote-sync.testteam.pid")"
-  ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$old_pid"
   kill -0 "$old_pid"
 
   run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
     bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  # Same reason as above: whatever the pidfile names now -- the restarted
+  # engine on success, or the old one still if the restart step never ran --
+  # is registered before the status assertion that follows can end the test.
+  local new_pid=""
+  [ -f "$SK/run/remote-sync.testteam.pid" ] && new_pid="$(cat "$SK/run/remote-sync.testteam.pid")"
+  [ -n "$new_pid" ] && ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$new_pid"
   [ "$status" -eq 0 ]
 
   # No engine from before the update remains.
@@ -361,8 +374,6 @@ teardown() {
 
   # The engine process now running executes the new install's code: a fresh
   # pid, alive, and reported running by the (also just-updated) status command.
-  local new_pid; new_pid="$(cat "$SK/run/remote-sync.testteam.pid")"
-  ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$new_pid"
   [ "$new_pid" != "$old_pid" ]
   kill -0 "$new_pid"
   run env PATH="$fake_bin:$PATH" bash "$SK/scripts/remote.sh" status testteam
