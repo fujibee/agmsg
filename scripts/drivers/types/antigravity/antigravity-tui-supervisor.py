@@ -100,6 +100,68 @@ def process_still(pid, start):
     except FileNotFoundError:
         return False
 
+def tui_reservation_state(project, team, role, pid):
+    """How the seat's published TUI reservation sees `pid`.
+
+    'live' / 'gone' / 'unknown' when a reservation for this seat names that pid,
+    None when nothing on disk names it. The refusal message below is the only
+    caller: it turns an owner token into something an operator can act on, so a
+    reservation it cannot parse must not be reported as a verdict about the
+    process. Every unreadable file is skipped rather than raised on -- this runs
+    on the failure path of a claim, and a bad file there would replace a message
+    that already says something true with one that says nothing.
+    """
+    for file in list((ROOT/'run').glob('read-reservation.*.json'))+list((ROOT/'run').glob('antigravity-reservation.*.json')):
+        try:
+            reservation=json.loads(file.read_text())
+            if reservation.get('kind')!='tui-pty' or int(reservation.get('pid'))!=pid: continue
+            state=json.loads(Path(reservation['state']).read_text())
+            if state.get('project')!=str(Path(project).absolute()) or state.get('team')!=team or state.get('role')!=role: continue
+        except (OSError,KeyError,TypeError,ValueError,json.JSONDecodeError):
+            continue
+        try: return 'live' if process_still(pid,reservation['start']) else 'gone'
+        except (StartTimeUnreadable,OSError,KeyError,TypeError,ValueError): return 'unknown'
+    return None
+
+def explain_claim_refusal(detail, project, team, role):
+    """Turn `held:<owner>` into the state of the world plus the next command.
+
+    Shaped after the Codex bridge report in
+    `scripts/drivers/types/codex/_delivery.sh:163` -- subject line carrying
+    `<team>/<role> <state> (<why>)`, then the remedy as an indented sentence,
+    then the command itself indented under it. The same class of problem
+    (something else holds this seat, so it is not available here) already has an
+    answer in this project, and antigravity should not invent a second one.
+
+    What the raw verdict leaves out is all of it. The token is `<uuid>.<pid>`:
+    the uuid is minted per supervisor and identifies nothing a reader can look
+    up, and the pid is not labelled as one -- so the operator sees a bare number
+    and no way to learn that a TUI supervisor for this very seat is still
+    running, nor that `stop` reaches it from any terminal. The reservation this
+    seat publishes already holds those facts, and `status` already renders them.
+
+    Anything this cannot decode is returned untouched: an unrecognised verdict
+    keeps its original wording rather than being dressed up as a diagnosis.
+    """
+    if not detail.startswith('held:'): return detail
+    pid=detail[len('held:'):].rsplit('.',1)[-1]
+    if not pid.isdigit(): return detail
+    seat=f'--project {shlex.quote(str(Path(project).absolute()))} --team {shlex.quote(team)} --name {shlex.quote(role)}'
+    state=tui_reservation_state(project,team,role,int(pid))
+    if state=='live':
+        return (f'{team}/{role} 稼働中のTUI supervisorが保持しています (PID {pid})\n'
+                f'  停止してから起動し直してください。別の端末・別のセッションから起動したものにも届きます:\n'
+                f'    agy-tui stop {seat}\n'
+                f'  状態の確認: agy-tui status {seat}')
+    if state in ('gone','unknown'):
+        why='既に終了しています' if state=='gone' else '生死を判定できません'
+        return (f'{team}/{role} このseatのTUI予約はPID {pid}を指していますが、その processは{why}\n'
+                f'  状態を確認してから判断してください:\n'
+                f'    agy-tui status {seat}')
+    return (f'{team}/{role} PID {pid}が保持していますが、このseatのTUI予約はそのpidを指していません\n'
+            f'  別種のセッションが同じroleを保持している可能性があります。状態を確認してください:\n'
+            f'    agy-tui status {seat}')
+
 class TerminalScreen:
     """Fail-closed VT screen model limited to the range needed for receipt checks."""
     def __init__(self, rows, cols):
@@ -404,6 +466,8 @@ class Supervisor:
             for fd in fds: os.close(fd)
         if p.returncode:
             detail=(p.stderr.strip() or p.stdout.strip() or f'exit {p.returncode}')
+            # One place, so both callers of the claim (startup and reset-guard) get it.
+            if command=='claim': detail=explain_claim_refusal(detail,self.project,self.a.team,self.a.name)
             raise RuntimeError(f'{command}失敗: {detail}')
         return p.stdout
     def save(self): atomic(self.state_file,self.state)

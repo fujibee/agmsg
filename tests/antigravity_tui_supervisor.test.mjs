@@ -1032,3 +1032,41 @@ sys.exit(os.waitstatus_to_exitcode(status))
     if (child.exitCode === null) child.kill('SIGKILL');
   }
 });
+
+test('claim拒否は保持しているsupervisorのpidと停止コマンドを示す', () => {
+  runPython(`
+import importlib.util, json, os, tempfile
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+root = Path(tempfile.mkdtemp())
+module.ROOT = root
+(root / 'run').mkdir()
+project = root / 'proj'
+project.mkdir()
+state = root / 'state.json'
+state.write_text(json.dumps({'project': str(project.absolute()), 'team': 'demo', 'role': 'agy'}))
+pid = os.getpid()
+(root / 'run' / 'read-reservation.seat.json').write_text(json.dumps(
+    {'type': 'antigravity', 'kind': 'tui-pty', 'pid': pid,
+     'start': module.proc_start(pid), 'state': str(state)}))
+
+verdict = 'held:00000000-0000-0000-0000-000000000000.%d' % pid
+message = module.explain_claim_refusal(verdict, str(project), 'demo', 'agy')
+
+# The verdict alone is what this replaces, so it must not survive as the answer.
+assert message != verdict, 'held: の生の判定がそのまま出ている'
+assert 'demo/agy' in message, 'どのseatの話かが無い'
+assert str(pid) in message, '保持しているprocessのpidが無い'
+assert 'supervisor' in message, '何が保持しているのかが無い'
+assert 'agy-tui stop' in message, '次にやることが無い'
+assert '--name agy' in message, '停止コマンドがこのroleを指していない'
+
+# An owner token this cannot decode keeps its original wording rather than being
+# dressed up as a diagnosis.
+assert module.explain_claim_refusal('unknown:claim_failed', str(project), 'demo', 'agy') == 'unknown:claim_failed'
+assert module.explain_claim_refusal('held:no-pid-here', str(project), 'demo', 'agy') == 'held:no-pid-here'
+`);
+});
