@@ -286,6 +286,16 @@ run_launcher() {
   ! grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
 }
 
+@test "launcher: preserves team and name when request app-server is empty" {
+  put_record team alice thread-empty-app-server "$PROJ" codex
+  printf 'codex\tthread-empty-app-server\t\tteam\talice\n' \
+    > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  run_launcher
+
+  [ -f "$CAPTURE" ]
+  grep -q -- $'--pair team\talice --thread thread-empty-app-server' "$CAPTURE"
+}
+
 @test "launcher: only one dispatcher runs per project" {
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=8

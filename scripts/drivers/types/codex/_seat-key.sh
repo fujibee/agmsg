@@ -59,6 +59,37 @@ _agmsg_codex_seat_log_path() {   # <run_dir> <seat_key>
   printf '%s/codex-app-server.%s.log' "$1" "$2"
 }
 
+# Parse one five-field seat request without using `read` with a tab IFS. Bash
+# treats tab as IFS whitespace and collapses consecutive separators, which
+# shifts team/name left when app_server is intentionally empty. The request
+# format keeps tabs for compatibility; split the single line explicitly so
+# empty fields remain empty and malformed field counts fail closed.
+_agmsg_codex_request_parse() {   # <line>
+  local line="$1" tab=$'\t' rest
+  AGMSG_CODEX_REQUEST_TYPE=""
+  AGMSG_CODEX_REQUEST_THREAD=""
+  AGMSG_CODEX_REQUEST_APP_SERVER=""
+  AGMSG_CODEX_REQUEST_TEAM=""
+  AGMSG_CODEX_REQUEST_NAME=""
+  case "$line" in
+    *"$tab"*"$tab"*"$tab"*"$tab"*) ;;
+    # An ambiguous request intentionally has an empty team/name pair and ends
+    # after the third separator. Keep accepting that legacy four-field form.
+    *"$tab"*"$tab"*"$tab") ;;
+    *) return 1 ;;
+  esac
+  AGMSG_CODEX_REQUEST_TYPE="${line%%"$tab"*}"
+  rest="${line#*"$tab"}"
+  AGMSG_CODEX_REQUEST_THREAD="${rest%%"$tab"*}"
+  rest="${rest#*"$tab"}"
+  AGMSG_CODEX_REQUEST_APP_SERVER="${rest%%"$tab"*}"
+  rest="${rest#*"$tab"}"
+  AGMSG_CODEX_REQUEST_TEAM="${rest%%"$tab"*}"
+  AGMSG_CODEX_REQUEST_NAME="${rest#*"$tab"}"
+  case "$AGMSG_CODEX_REQUEST_NAME" in *"$tab"*) return 1 ;; esac
+  return 0
+}
+
 # Best-effort start witness for <pid>: "<src>\t<token>", or nothing (rc 1)
 # when this platform cannot supply one. NEVER required for normal operation
 # (a seat with no witness on record is simply never stopped automatically --

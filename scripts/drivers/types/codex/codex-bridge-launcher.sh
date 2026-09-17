@@ -172,10 +172,15 @@ read_seat_request() {
   REQUEST_THREAD=""
   REQUEST_APP_SERVER="$APP_SERVER"
   REQUEST_PAIR=""
-  local request_type="" request_team="" request_name=""
+  local request_line="" request_type="" request_team="" request_name=""
   [ -f "$REQUEST_FILE" ] || return 1
-  IFS="$TAB" read -r request_type REQUEST_THREAD REQUEST_APP_SERVER request_team request_name \
-    < "$REQUEST_FILE" 2>/dev/null || return 1
+  IFS= read -r request_line < "$REQUEST_FILE" 2>/dev/null || return 1
+  _agmsg_codex_request_parse "$request_line" || return 1
+  request_type="$AGMSG_CODEX_REQUEST_TYPE"
+  REQUEST_THREAD="$AGMSG_CODEX_REQUEST_THREAD"
+  REQUEST_APP_SERVER="$AGMSG_CODEX_REQUEST_APP_SERVER"
+  request_team="$AGMSG_CODEX_REQUEST_TEAM"
+  request_name="$AGMSG_CODEX_REQUEST_NAME"
   [ "$request_type" = "$TYPE" ] || return 1
   [ -n "$REQUEST_THREAD" ] || return 1
   [ -n "$request_team" ] && [ -n "$request_name" ] || return 1
@@ -391,7 +396,12 @@ safety_state="$SAFETY_STATE"
 thread_hint="loaded"
 if [ -f "$REQUEST_FILE" ]; then
   _hint_type=""; _hint_thread=""; _hint_app=""
-  IFS="$TAB" read -r _hint_type _hint_thread _hint_app < "$REQUEST_FILE" 2>/dev/null || true
+  _hint_line=""
+  IFS= read -r _hint_line < "$REQUEST_FILE" 2>/dev/null || true
+  _agmsg_codex_request_parse "$_hint_line" || true
+  _hint_type="$AGMSG_CODEX_REQUEST_TYPE"
+  _hint_thread="$AGMSG_CODEX_REQUEST_THREAD"
+  _hint_app="$AGMSG_CODEX_REQUEST_APP_SERVER"
   [ -n "${_hint_thread:-}" ] && thread_hint="$_hint_thread"
 fi
 safe_ids=""
@@ -762,7 +772,12 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   request_pair=""
   _rtype=""; _rthread=""; _rapp=""; _rteam=""; _rname=""
   if [ -f "$REQUEST_FILE" ]; then
-    IFS="$TAB" read -r _rtype _rthread _rapp _rteam _rname < "$REQUEST_FILE" 2>/dev/null || true
+    _request_line=""
+    IFS= read -r _request_line < "$REQUEST_FILE" 2>/dev/null || true
+    _agmsg_codex_request_parse "$_request_line" || true
+    _rtype="$AGMSG_CODEX_REQUEST_TYPE"; _rthread="$AGMSG_CODEX_REQUEST_THREAD"
+    _rapp="$AGMSG_CODEX_REQUEST_APP_SERVER"; _rteam="$AGMSG_CODEX_REQUEST_TEAM"
+    _rname="$AGMSG_CODEX_REQUEST_NAME"
     if [ -n "${_rteam:-}" ] && [ -n "${_rname:-}" ]; then
       request_pair="$_rteam$TAB$_rname"
     fi
@@ -916,10 +931,14 @@ EOF
     while _agmsg_pid_alive_local "$launched_pid"; do
       _bridge_request_pair=""
       if [ -f "$REQUEST_FILE" ]; then
-        _bridge_req_type=""; _bridge_req_thread=""; _bridge_req_app=""
-        _bridge_req_team=""; _bridge_req_name=""
-        IFS="$TAB" read -r _bridge_req_type _bridge_req_thread _bridge_req_app \
-          _bridge_req_team _bridge_req_name < "$REQUEST_FILE" 2>/dev/null || true
+        _bridge_request_line=""
+        IFS= read -r _bridge_request_line < "$REQUEST_FILE" 2>/dev/null || true
+        _agmsg_codex_request_parse "$_bridge_request_line" || true
+        _bridge_req_type="$AGMSG_CODEX_REQUEST_TYPE"
+        _bridge_req_thread="$AGMSG_CODEX_REQUEST_THREAD"
+        _bridge_req_app="$AGMSG_CODEX_REQUEST_APP_SERVER"
+        _bridge_req_team="$AGMSG_CODEX_REQUEST_TEAM"
+        _bridge_req_name="$AGMSG_CODEX_REQUEST_NAME"
         if [ -n "${_bridge_req_team:-}" ] && [ -n "${_bridge_req_name:-}" ]; then
           _bridge_request_pair="$_bridge_req_team$TAB$_bridge_req_name"
         fi

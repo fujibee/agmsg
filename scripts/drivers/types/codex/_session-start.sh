@@ -172,21 +172,8 @@ agmsg_session_start() {
   fi
   if [ -z "$app_server" ] && [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ] \
     && [ "$pair_count" -ne 1 ]; then
-    # Even without an endpoint, clear a stale pair when this seat no longer
-    # has exactly one role for the current thread. The dispatcher will keep
-    # waiting until a later actas/session-start supplies an unambiguous pair.
-    if ! command -v _agmsg_codex_seat_key_ok >/dev/null 2>&1; then
-      # shellcheck disable=SC1091
-      . "$SKILL_DIR/scripts/drivers/types/codex/_seat-key.sh"
-    fi
-    seat_key="${AGMSG_CODEX_SEAT_KEY:-}"
-    _agmsg_codex_seat_key_ok "$seat_key" || exit 0
-    request_file="$request_run_dir/codex-bridge-request.$seat_key"
-    tmp_request="$request_file.$$"
-    mkdir -p "$request_run_dir" 2>/dev/null || true
-    printf '%s\t%s\t\t\n' "$request_type_value" "$thread_id" > "$tmp_request"
-    mv "$tmp_request" "$request_file"
-    exit 0
+    echo "codex SessionStart: seat app-server URL is unavailable; refusing request publication" >&2
+    return 0
   fi
   [ -n "$app_server" ] || exit 0
 
