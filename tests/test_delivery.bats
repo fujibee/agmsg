@@ -2553,6 +2553,38 @@ JSON
   [ "$status" -eq 0 ]
   refute grep -qF '既存rulefileはagmsg形式ではありません' <<<"$output"
   grep -qF '<!-- agmsg:antigravity:monitor -->' "$TEST_PROJECT/.agent/rules/agmsg.md"
+
+  # Pre-#1248 agmsg (1.3.0 and earlier) wrote this exact text but named the
+  # per-driver notes file SKILL.md, renamed to README.md in #1248. Every
+  # upgraded user's untouched rule file has that one older byte, and must
+  # migrate the same way rather than being refused as a foreign file.
+  local rule_file="$TEST_PROJECT/.agent/rules/agmsg.md"
+  rm -f "$rule_file"
+  mkdir -p "$(dirname "$rule_file")"
+  cat > "$rule_file" <<EOF
+# agmsg Integration Rule
+
+## PostToolUse
+After each tool call, automatically check the agmsg inbox for unread messages.
+- Command: '$SCRIPTS/check-inbox.sh' 'antigravity' '$TEST_PROJECT'
+
+## Terminal/pane self-awareness
+Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
+— run '$SCRIPTS/where.sh' first and answer from its terminal=/capabilities=
+fields. Never guess from environment variables or a grep/ps command; a driver
+that IS present can be wrongly reported absent that way. Per-driver detail:
+'$SCRIPTS/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
+
+## Teammates: placement, status, and reaching them
+Placement and status for a teammate: '$SCRIPTS/team.sh' <team> — never a
+stale memory of their last known pane. Act on one with '$SCRIPTS/peek.sh'
+/ 'poke.sh' / 'arrange.sh' <team> <name> directly, not a guess: its exit code
+says whether it worked and, if not, why.
+EOF
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  refute grep -qF '既存rulefileはagmsg形式ではありません' <<<"$output"
+  grep -qF '<!-- agmsg:antigravity:monitor -->' "$rule_file"
 }
 
 @test "antigravity rejects both mode" {

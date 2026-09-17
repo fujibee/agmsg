@@ -45,8 +45,14 @@ stale memory of their last known pane. Act on one with '$SKILL_DIR/scripts/peek.
 says whether it worked and, if not, why.
 EOF
 )"
+    # Pre-#1248 agmsg (1.3.0 and earlier) wrote this same text but named the
+    # per-driver notes file SKILL.md instead of README.md (renamed in #1248,
+    # commit a54c9e23) -- that is the only byte that ever differed. Accept
+    # either form as agmsg's own generated content so an upgraded user's
+    # untouched rule file still migrates instead of being refused.
+    local expected_pre1248="${expected/drivers\/terminals\/<terminal>\/README.md/drivers\/terminals\/<terminal>\/SKILL.md}"
     actual="$(cat "$file")"
-    if [ "$actual" != "$expected" ]; then
+    if [ "$actual" != "$expected" ] && [ "$actual" != "$expected_pre1248" ]; then
       echo 'existing rule file is not in agmsg format' >&2; return 1
     fi
   fi

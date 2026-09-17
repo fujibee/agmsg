@@ -191,7 +191,9 @@ actually uses in `~/.gemini/antigravity-cli/settings.json`:
       "command(/home/you/.agents/skills/agmsg/scripts/send.sh)",
       "command(bash /home/you/.agents/skills/agmsg/scripts/send.sh)",
       "command(/home/you/.agents/skills/agmsg/scripts/identities.sh)",
-      "command(bash /home/you/.agents/skills/agmsg/scripts/identities.sh)"
+      "command(bash /home/you/.agents/skills/agmsg/scripts/identities.sh)",
+      "command(/home/you/.agents/skills/agmsg/scripts/whoami.sh)",
+      "command(bash /home/you/.agents/skills/agmsg/scripts/whoami.sh)"
     ]
   }
 }
@@ -199,11 +201,25 @@ actually uses in `~/.gemini/antigravity-cli/settings.json`:
 
 Two things that cost real debugging time:
 
-- **Write absolute paths.** A `~`-prefixed entry such as
-  `command(~/.agents/skills/agmsg/scripts/identities.sh)` does **not** match, so
-  the prompt keeps appearing while the entry looks present. This was measured
-  after a permission dialog for `identities.sh` collided with an injection and
-  stopped the supervisor.
+- **Write every invocation shape you actually use, `~` and absolute alike.**
+  `command(...)` matches the command string as written, so a bare-path entry
+  and a `bash `-prefixed entry for the same script are two different rules —
+  both are needed if the agent ever invokes the script both ways, the same
+  reasoning as the Claude Code permission guidance elsewhere in this skill. An
+  older version of this doc claimed a `~`-prefixed entry never matches; that
+  was re-measured on 2026-09-17 against agy 1.2.5 in headless `agy -p` mode
+  and does not hold: a bare `command(~/.agents/skills/agmsg/scripts/<x>)` rule
+  let a bare invocation of `<x>` run with no prompt, while a real negative
+  control — the identical command with no allow-rule at all — was auto-denied
+  with an explicit "a tool required the 'command' permission that headless
+  mode cannot prompt for" message, confirming the allow-list was genuinely
+  being enforced rather than bypassed by print mode. What did trip the match
+  was the invocation *shape*, not the `~`: that same bare `~`-form rule did
+  not cover a `bash ~/...`-prefixed invocation of the identical script, and
+  needed its own separate entry before that shape matched too. Absolute paths
+  stay the simpler default because they sidestep reasoning about `~`
+  expansion at all — but a `~`-prefixed rule is not the dead end this doc used
+  to say it was.
 - **Do not allow the inbox scripts.** Allowing `inbox.sh` — especially a
   fully-specified form like
   `command(bash …/scripts/inbox.sh <team> <role>)` — removes the speed bump in
