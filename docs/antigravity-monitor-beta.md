@@ -15,8 +15,8 @@ envelopes into its input and waits for the model to acknowledge them.
 > make. Resuming is a manual, explicit act (see
 > [Pause and resume](#pause-and-resume)).
 >
-> It is Linux-only in this first version, and pinned to the `agy` version whose
-> screen output was actually measured (see
+> It supports Linux and macOS (Windows is refused — no POSIX PTY), and is
+> pinned to the `agy` version whose screen output was actually measured (see
 > [Known limitations](#known-limitations)). It depends on `agy`'s terminal
 > rendering and may need updating as Antigravity changes.
 
@@ -45,7 +45,15 @@ agy-tui
 agy-tui status --project "$(pwd)" --team <team> --name <role>
 ```
 
-`agy-tui` is a small wrapper installed at `~/.agents/bin/agy-tui`. With no
+**Monitor delivery only happens through `agy-tui`.** Plain `agy`, started any
+other way, is ordinary Antigravity with no agmsg delivery at all — the
+supervisor is `agy-tui`'s PTY wrapper, and nothing else runs it or injects
+into it.
+
+`agy-tui` is a small wrapper installed at `~/.agents/bin/agy-tui`. That
+directory has to be on `PATH` for the bare `agy-tui` command above to resolve
+(agmsg's installer adds it; confirm with `command -v agy-tui`, or invoke
+`~/.agents/bin/agy-tui` by its full path if it is not on `PATH`). With no
 arguments it resolves `--project` from the current directory and resolves
 `--team` / `--name` from the single Antigravity identity registered for that
 project; it refuses (fail-closed) if zero or several are registered. Pass them
@@ -54,6 +62,12 @@ explicitly when the project has more than one.
 ```
 Usage: agy-tui [status|stop|resume|reset-guard|ack|replay] [--project <path>] [--team <team>] [--name <role>] [--agy <path>] [monitor options...]
 ```
+
+Anything after `--` is passed to the real `agy` process unchanged, for
+example `agy-tui --team T --name R -- --dangerously-skip-permissions`.
+`agy-tui` never adds that flag on its own — see
+[Permissions for `agy`](#permissions-for-agy) for when it is worth reaching
+for.
 
 `status`, `stop`, `resume` and `reset-guard` work from a non-interactive shell
 and do not need `agy` on `PATH`. Only the default `run` action requires a TTY.
@@ -213,6 +227,25 @@ Keep the list narrow otherwise. `command(gh)` allows every `gh` subcommand,
 including `gh api` with `-X DELETE`; prefer read-only forms such as
 `command(gh issue list)`.
 
+### Last resort: `--dangerously-skip-permissions`
+
+The narrow allow-list above is the primary way to stop permission stalls — it
+only lets through the exact agmsg commands this driver actually runs. If a
+prompt still gets through anyway (a permission screen the supervisor's fixture
+set does not yet recognize, for example), `agy-tui`'s `--`
+[pass-through](#quick-start) can start `agy` with
+`--dangerously-skip-permissions` instead:
+
+```bash
+agy-tui --team <team> --name <role> -- --dangerously-skip-permissions
+```
+
+State the trade-off to yourself before reaching for this: it does not narrow
+anything, it removes confirmation entirely. Every shell and tool call agy makes
+for the rest of that session runs unconfirmed — not just agmsg's — including
+ones triggered by a message this driver injects. `agy-tui` never adds this
+flag on its own; it is something you choose per-session, not a default.
+
 ## Mechanics
 
 - **Injection gate.** The supervisor injects only when the reconstructed screen
@@ -302,7 +335,8 @@ killing the terminal you are working in. Stop the supervisor explicitly first.
 - **The slash-command picker screen was never captured**, so it is not
   recognised specifically; it is only excluded because it does not match the
   idle signature.
-- **Linux only**, and `python3` is required for the supervisor.
+- **Linux and macOS**; Windows is refused (no POSIX PTY), and `python3` is
+  required for the supervisor.
 - **The input box is never proven empty.** The manual-resume latch exists because
   of this, and removing the latch would reintroduce draft corruption.
 

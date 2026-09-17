@@ -518,7 +518,7 @@ class Supervisor:
         if pid==0:
             fcntl.ioctl(0,termios.TIOCSWINSZ,winsize)
             attrs=termios.tcgetattr(0); attrs[3]&=~(termios.ECHO|termios.ECHONL); termios.tcsetattr(0,termios.TCSANOW,attrs)
-            os.chdir(self.project); os.execvp(self.a.agy,[self.a.agy])
+            os.chdir(self.project); os.execvp(self.a.agy,[self.a.agy]+self.a.agy_args)
         rows,cols,_,_=struct.unpack('HHHH',winsize)
         self.child=pid; self.master=master; self.screen=TerminalScreen(rows,cols); self.old=termios.tcgetattr(sys.stdin.fileno()); tty.setraw(sys.stdin.fileno())
         self.state.update({'childPid':pid,'childStart':proc_start(pid),'supervisorPhase':'WAITING_FOR_IDLE'}); self.save()
@@ -674,8 +674,15 @@ class Supervisor:
                 os.write(self.master,data)
             self.update_human_input_state()
             self.maybe_poll()
+    def print_resume_hint_if_paused(self):
+        # A restart (or a replay that leaves durableAttention set) can come up
+        # already paused, carried over from the state file rather than from
+        # anything this process just decided -- silently, unless told here.
+        if self.state.get('manualResumeRequired') or self.state.get('humanInputActive') or self.state.get('durableAttention'):
+            print(f"配信は一時停止中です。再開: agy-tui resume --project {shlex.quote(self.project)} --team {shlex.quote(self.a.team)} --name {shlex.quote(self.a.name)}", file=sys.stderr)
     def run(self):
         self.acquire()
+        self.print_resume_hint_if_paused()
         if (self.state.get('batch') or {}).get('phase')=='completed': self.ack()
         self.launch(); self.loop()
     def close(self):
@@ -719,13 +726,19 @@ def recover(a):
             # Replay explicitly sends the batch to a new agy child, so do not carry over the
             # old session's temporary input pause. Durable manual pause is a separate axis.
             s.state['humanInputActive']=False; s.state['humanInputSawNonIdle']=False
-            s.state['batch']['phase']='prepared'; s.state['supervisorPhase']='PREPARED'; s.save(); s.launch(); s.loop()
+            s.state['batch']['phase']='prepared'; s.state['supervisorPhase']='PREPARED'; s.save()
+            s.print_resume_hint_if_paused(); s.launch(); s.loop()
     finally:
         s.close()
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--project',required=True);p.add_argument('--team',required=True);p.add_argument('--name',required=True);p.add_argument('--agy',default='agy');p.add_argument('--poll',type=float,default=2);p.add_argument('--action',choices=['run','status','stop','resume','reset-guard','ack','replay'],default='run');p.add_argument('--batch');p.add_argument('--confirm-id',dest='confirm_ids',action='append')
-    a=p.parse_args()
+    # Anything agy-tui forwards after -- (e.g. --dangerously-skip-permissions)
+    # arrives here as unrecognized args, not a positional -- parse_known_args
+    # collects them instead of erroring, and launch() below execs them
+    # straight through to agy, unchanged, on every start this process makes
+    # (initial run and PREPARED-state resume both call the same launch()).
+    a,agy_args=p.parse_known_args(); a.agy_args=agy_args
     if a.action in ('ack','replay'):
         if not a.batch or not a.confirm_ids: raise RuntimeError('--batch and --confirm-id are required')
         recover(a); return
