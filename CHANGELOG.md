@@ -11,7 +11,7 @@ Teams that use remote sync should update every machine to 1.3.1 or later. From t
 ### Added
 - The client sends its version to the server in an `Agmsg-Client-Version` header on every request; a request without it comes from a client older than 1.3.1 (#1290)
 - `peek` and `poke` have an agent-native substitute on terminals with no addressable pane (#1256)
-- `agy-tui` passes everything after `--` to `agy`, for example `-- --dangerously-skip-permissions`, and rejects any other unknown option (#1291)
+- `agy-tui` passes everything after `--` to `agy`, and rejects any other unknown option (#1291)
 
 ### Fixed
 - Codex: each seat runs its own app-server, and its bridge dispatcher starts only the role recorded for that seat instead of every role in the project (#1273, #1285)
