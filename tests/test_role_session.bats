@@ -23,6 +23,14 @@ setup() {
 
 teardown() { teardown_test_env; }
 
+# stdout form, addressed through the real (memoized) primitive: production
+# never called the bare stdout wrapper this replaces (removed as unused
+# outside tests), so this local helper is what stands in for it here.
+_role_session_path() {   # <team> <agent>
+  _agmsg_role_session_path_into "$1" "$2"
+  printf '%s' "$_AGMSG_ROLE_SESSION_PATH"
+}
+
 # Register a (team, agent) pair for the test project under claude-code.
 fake_register() {
   local team="$1" agent="$2" proj="${3:-/tmp/p1}"
@@ -39,19 +47,19 @@ fake_session() {
 
 @test "record path: sits in run/ with role-session. prefix and __ separator" {
   local p
-  p=$(_agmsg_role_session_path "T" "alice")
+  p=$(_role_session_path "T" "alice")
   [[ "$p" == "$RUN_DIR/role-session.T__alice" ]]
 }
 
 @test "record path: percent-encodes special bytes like the actas lock" {
   local p
-  p=$(_agmsg_role_session_path "team/foo" "ag ent")
+  p=$(_role_session_path "team/foo" "ag ent")
   [[ "$p" == "$RUN_DIR/role-session.team%2Ffoo__ag%20ent" ]]
 }
 
 @test "record path: encodes non-ASCII (UTF-8) team names" {
   local p
-  p=$(_agmsg_role_session_path "チーム" alice)
+  p=$(_role_session_path "チーム" alice)
   [[ "$p" == *"%E3%83%81%E3%83%BC%E3%83%A0"* ]]
 }
 
@@ -64,7 +72,7 @@ fake_session() {
 
 @test "record: stores session/name/team/agent/type/project/updated_at fields" {
   agmsg_role_session_record T alice "sid-abc" /tmp/proj claude-code
-  local f; f=$(_agmsg_role_session_path T alice)
+  local f; f=$(_role_session_path T alice)
   grep -q "^session=sid-abc$"    "$f"
   grep -q "^name=T-alice$"       "$f"
   grep -q "^team=T$"             "$f"
@@ -76,7 +84,7 @@ fake_session() {
 
 @test "record: type is empty when omitted (back-compat 4-arg call)" {
   agmsg_role_session_record T alice "sid-abc" /tmp/proj
-  local f; f=$(_agmsg_role_session_path T alice)
+  local f; f=$(_role_session_path T alice)
   grep -q "^type=$" "$f"
 }
 
@@ -88,7 +96,7 @@ fake_session() {
 
 @test "record: name= joins team and agent whole (halves may contain '-')" {
   agmsg_role_session_record "team-x" "ag-1" "sid-1" /tmp/p
-  local f; f=$(_agmsg_role_session_path "team-x" "ag-1")
+  local f; f=$(_role_session_path "team-x" "ag-1")
   grep -q "^name=team-x-ag-1$" "$f"
 }
 
@@ -111,7 +119,7 @@ fake_session() {
 
 @test "record: empty sid is a no-op (writes nothing)" {
   agmsg_role_session_record T alice "" /tmp/p1
-  [ ! -f "$(_agmsg_role_session_path T alice)" ]
+  [ ! -f "$(_role_session_path T alice)" ]
 }
 
 @test "record: always returns 0 even when the run dir cannot be created" {
@@ -135,19 +143,6 @@ fake_session() {
 }
 
 # --- lookups (for PR-D / PR-E) ---
-
-@test "lookup_by_name: returns the record whose name= matches" {
-  agmsg_role_session_record T alice "sid-a" /tmp/p1
-  agmsg_role_session_record T bob   "sid-b" /tmp/p1
-  local out; out=$(agmsg_role_session_lookup_by_name "T-bob")
-  echo "$out" | grep -q "^session=sid-b$"
-  echo "$out" | grep -q "^agent=bob$"
-}
-
-@test "lookup_by_name: empty when no record matches" {
-  agmsg_role_session_record T alice "sid-a" /tmp/p1
-  [ -z "$(agmsg_role_session_lookup_by_name "T-nobody")" ]
-}
 
 @test "lookup_by_sid: returns the record whose session= matches" {
   agmsg_role_session_record T alice "sid-a" /tmp/p1
@@ -198,7 +193,7 @@ fake_session() {
   [ "$status" -eq 1 ]
   [[ "$output" =~ "status=held" ]]
   # No record was written (the thief never held the role).
-  [ ! -f "$(_agmsg_role_session_path T alice)" ]
+  [ ! -f "$(_role_session_path T alice)" ]
 }
 
 @test "actas-claim: record survives release + re-claim with the same sid" {

@@ -92,10 +92,19 @@ exec "$REAL_MKFIFO" "$@"
 STUB
   chmod +x "$STUB_SRC/mkfifo"
 
+  # It also writes one line to stderr. The copier inherits the helper's stderr,
+  # so that line lands where the redirect under test has to keep it out of
+  # bats's $output. Without a writer there, adding or removing `2> "$ERR_FILE"`
+  # changes nothing and the harness fix is unbound -- which is how it went in.
+  NOISE="stderr-noise-from-the-copier"
+  export NOISE
   cat > "$STUB_SRC/python3" <<'STUB'
 #!/usr/bin/env bash
 case "$*" in
-  *bounded-copy.py*) printf 'bounded-copy %s\n' "$*" >> "$CALL_LOG" ;;
+  *bounded-copy.py*)
+    printf 'bounded-copy %s\n' "$*" >> "$CALL_LOG"
+    printf '%s\n' "$NOISE" >&2
+    ;;
   *) printf 'python3 %s\n' "$*" >> "$CALL_LOG" ;;
 esac
 exec "$REAL_PYTHON3" "$@"
@@ -126,14 +135,31 @@ sandbox_path() {
   printf '%s' "$dir"
 }
 
+# STDERR GOES TO A FILE, NOT INTO $output.
+#
+# bats merges the two streams, and this helper's stderr is not reliably empty.
+# On a loaded macOS CI runner, bash reported
+#
+#   remote.sh: line NNN: .../agmsg-header-pipe.JVbrl7/header: Interrupted system call
+#
+# while opening the header fifo, and $output became that line followed by the
+# http code. Every exact comparison against "200" or "000" then fails on a code
+# that was in fact correct. Observed twice in one run, on a head that was green
+# on the author's machine. That is the boundary of what was observed -- a
+# loaded macOS CI runner produced it and no local run has. Load is the
+# candidate, not something any control here varied.
+#
+# The http code is the only thing on stdout, so separating the streams is what
+# makes an exact comparison mean what it says.
 post_under() {
   local bin="$1" body_file="$2" header_out="$3"
+  ERR_FILE="$BATS_TEST_TMPDIR/helper-stderr"
   run env PATH="$bin" CALL_LOG="$CALL_LOG" REAL_MKFIFO="$REAL_MKFIFO" \
-    REAL_PYTHON3="$REAL_PYTHON3" bash -c '
+    REAL_PYTHON3="$REAL_PYTHON3" NOISE="$NOISE" bash -c '
     set -uo pipefail
     . '"$SCRIPTS"'/remote.sh 2>/dev/null
     _remote_http_post_json "https://example.invalid/v1/x" "'"$body_file"'" \
-      "'"$BATS_TEST_TMPDIR"'/out-body" "'"$header_out"'"
+      "'"$BATS_TEST_TMPDIR"'/out-body" "'"$header_out"'" 2>"'"$ERR_FILE"'"
   '
 }
 
@@ -155,6 +181,22 @@ post_under() {
   run env PATH="$without" CALL_LOG="$CALL_LOG" REAL_MKFIFO="$REAL_MKFIFO" \
     bash -c 'mkfifo "$BATS_TEST_TMPDIR/control-fifo"'
   grep -q '^mkfifo ' "$CALL_LOG"
+}
+
+@test "the helper's stderr stays out of the code, and there IS stderr to keep out (#850)" {
+  # The control for the redirect itself, on the arm that starts a copier. Every
+  # other case compares $output against an exact code, and that comparison only
+  # means something because the streams are separated -- which in turn only
+  # means something when the stream is non-empty.
+  local bin; bin="$(sandbox_path no)"
+  body="$BATS_TEST_TMPDIR/body.json"; printf '{"t":"secret"}' > "$body"
+  hdr="$BATS_TEST_TMPDIR/headers.txt"
+
+  post_under "$bin" "$body" "$hdr"
+  [ "$status" -eq 0 ]
+
+  [ "$output" = "200" ]
+  grep -q -F -- "$NOISE" "$ERR_FILE"
 }
 
 @test "with the marker present, no fifo is made (#850)" {

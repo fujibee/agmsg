@@ -48,7 +48,7 @@ stored_types() {
 #
 # The values here come from send.sh, so this is a statement about the
 # product's own write path, not about a literal this test inserted. That
-# distinction is the whole point (tl ruling): a typeof() check on a value the
+# distinction is the whole point: a typeof() check on a value the
 # test wrote proves the test can write an integer.
 #
 # read_cursors is NOT here. A text AFFINITY on that column turns the 1005/999
@@ -193,7 +193,7 @@ stored_types() {
   [ -z "$called" ] || { echo "$called"; false; }
 }
 
-# The loss pm's advisory describes: a run interrupted after the config flipped
+# The loss the advisory describes: a run interrupted after the config flipped
 # leaves rows in BOTH stores, and re-running with the destination gone deletes
 # the shared copy on the strength of the flag alone.
 #

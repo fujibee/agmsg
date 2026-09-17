@@ -98,14 +98,16 @@ EOF
   [[ "$output" =~ "2 member" ]]
 }
 
-@test "join: re-join with same name adds registration instead of duplicate agent" {
+@test "join: re-join shows one row per registration without duplicating the member count" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-b
   run bash "$SCRIPTS/team.sh" myteam
   [ "$status" -eq 0 ]
   [[ "$output" =~ "alice" ]]
   [[ "$output" =~ "1 member" ]]
-  [[ "$output" =~ "+1 more" ]]
+  [ "$(printf '%s\n' "$output" | grep -c '^  alice (claude-code)')" -eq 2 ]
+  printf '%s\n' "$output" | grep -qF '/tmp/proj-a'
+  [[ "$output" =~ "/tmp/proj-b" ]]
 }
 
 @test "join: concurrent joins to the same team do not lose registrations (#141)" {
@@ -201,6 +203,17 @@ EOF
   [[ ! "$output" =~ ".parameter" ]]
   [[ ! "$output" =~ "Manage SQL parameter bindings" ]]
   [ "$(echo "$output" | grep -c "$agent")" -eq 1 ]
+}
+
+@test "team --json emits one full object per registration" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam alice codex /tmp/proj-b
+  run bash "$SCRIPTS/team.sh" myteam --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite_mem "SELECT json_valid('$(printf '%s' "$output" | sed "s/'/''/g")');")" -eq 1 ]
+  [ "$(sqlite_mem "SELECT json_array_length('$(printf '%s' "$output" | sed "s/'/''/g")');")" -eq 2 ]
+  [ "$(sqlite_mem "SELECT count(*) FROM json_each('$(printf '%s' "$output" | sed "s/'/''/g")') WHERE json_extract(value,'\$.member')='alice';")" -eq 2 ]
+  [ "$(sqlite_mem "SELECT count(*) FROM json_each('$(printf '%s' "$output" | sed "s/'/''/g")') WHERE json_type(value,'\$.pane_label')='object';")" -eq 2 ]
 }
 
 # --- whoami.sh ---
@@ -924,7 +937,46 @@ JSON
   # And the count agrees with the roster rather than with the join.
   [[ "$output" == *"3 member(s)"* ]]
   # The absence is described, not left blank.
-  [[ "$output" == *"no local registration"* ]]
+  [[ "$output" == *"n/a:no_local_registration"* ]]
+}
+
+# --- reach (#1224 follow-up): team.sh names what this session can do to a
+# teammate, not merely their placement. See test_team_status.bats for
+# agmsg_team_reach's own unit coverage; these confirm team.sh's WIRING into
+# it end to end, for the two cases that need no fake terminal binary at all.
+
+@test "team: a pulled (remote) member reaches as cannot, reason remote_registration" {
+  mkdir -p "$TEST_SKILL_DIR/teams/pulled2"
+  cat > "$TEST_SKILL_DIR/teams/pulled2/config.json" <<'JSON'
+{
+  "name": "pulled2",
+  "team_id": "018f3f7e-2222-7000-8000-000000000022",
+  "agents": {
+    "alice": { "member_id": "018f3f7e-2222-7000-8000-000000000030", "registrations": [] }
+  },
+  "created_at": "2026-07-29T00:00:00Z"
+}
+JSON
+  run bash "$SCRIPTS/team.sh" pulled2
+  [ "$status" -eq 0 ]
+  grep -qF 'reach=cannot:remote_registration' <<<"$output"
+
+  run bash "$SCRIPTS/team.sh" pulled2 --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.status');")" = cannot ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.reason');")" = remote_registration ]
+}
+
+@test "team: a locally registered member with no placement record reaches as cannot, reason no_placement_record" {
+  bash "$SCRIPTS/join.sh" noreachteam alice claude-code /tmp/project-y >/dev/null
+  run bash "$SCRIPTS/team.sh" noreachteam
+  [ "$status" -eq 0 ]
+  grep -qF 'reach=cannot:no_placement_record' <<<"$output"
+
+  run bash "$SCRIPTS/team.sh" noreachteam --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.status');")" = cannot ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.reason');")" = no_placement_record ]
 }
 
 @test "team: a locally registered member still lists its type and project" {
@@ -935,4 +987,65 @@ JSON
   [[ "$output" == *"alice (claude-code) — /tmp/project-x"* ]]
   [[ "$output" == *"1 member(s)"* ]]
   [[ "$output" != *"no local registration"* ]]
+}
+
+# The multi-line-usage regression this guards against predates the --fix removal
+# (#1110/#1152): passing USAGE through `${1:?...}` makes the shell prefix it with
+# its own "line N: 1:" and mangle it. Usage is one line now that --fix and its
+# siblings are gone, but the no-corruption property is worth keeping for the next
+# option this file grows.
+@test "team.sh with no argument prints usage, uncorrupted by the shell" {
+  run bash "$SCRIPTS/team.sh"
+  [ "$status" -eq 2 ]
+  # `refute`, not `! cmd`: a negated command cannot fail a bats test anywhere
+  # (#670), so `! grep -q` here would have asserted nothing at all.
+  refute grep -q 'line [0-9]*: 1:' <<<"$output"
+  [[ "$output" == "Usage: team.sh <team> [--json]" ]]
+}
+
+# --- #1140/#1152: team never creates a placement record --------------------------
+# Retained, not deleted, though it was buried in the #1110 repair block: review
+# caught that this one is a READ-ONLY safety property, not a --fix behaviour,
+# and had no equivalent surviving anywhere else (checked by grep across
+# team-status.sh, which only has the CREATE side of this, not the refusal).
+# team.sh is now purely read-only, which makes "it never writes a record" more
+# load-bearing than it was, not less.
+#
+# Confirmed non-vacuous both ways, on the pre-removal tree: with --fix present,
+# the SAME fixture's paired test showed record creation actually happening
+# (`team --fix creates a socket-qualified tmux record from the label`, deleted
+# alongside --fix itself); and removing the FIX==1 gate on the create-from-label
+# call reddened this exact assertion. This is not "nothing can create a record
+# because the code is gone" read back as a test -- it is the property that was
+# already true, and now must stay true with no flag standing behind it.
+_install_norecord_tmux_fixture() {
+  export NRT_LOG="$BATS_TEST_TMPDIR/tmux.log"; : > "$NRT_LOG"
+  local bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$bin"
+  cat > "$bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NRT_LOG"
+t=""; prev=""; for x in "$@"; do [ "$prev" = -t ] && t="$x"; prev="$x"; done
+_label() { case "$1" in %11) printf 'fixteam:alice';; %22) printf 'fixteam:bob';; esac; }
+case "$* " in
+  *list-panes*)                   printf '%s|%s\n%s|%s\n' '%11' 'fixteam:alice' '%22' 'fixteam:bob' ;;
+  *display-message*@agmsg_agent*) printf '%s|%s\n' "$t" "$(_label "$t")" ;;
+  *display-message*pane_title*)   printf '%s|%s\n' "$t" 'title' ;;
+  *show-options*)                 printf '%s\n' "$(_label "$t")" ;;
+esac
+exit 0
+STUB
+  chmod +x "$bin/tmux"
+  export PATH="$bin:$PATH"
+  export TMUX="/tmp/tsock,999,0"
+  export AGMSG_TERMINAL_DRIVER=tmux
+  bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
+  NRT_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
+  [ ! -e "$NRT_REC" ]                      # join writes no record: the measured state, naturally
+}
+
+@test "team (read-only) creates NO record even with a unique tmux label (#1140/#1152)" {
+  _install_norecord_tmux_fixture
+  run bash "$SCRIPTS/team.sh" fixteam
+  [ "$status" -eq 0 ]
+  [ ! -e "$NRT_REC" ]                       # a read-only status never creates a record
 }

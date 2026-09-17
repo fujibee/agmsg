@@ -24,8 +24,8 @@
  * reasons, one of them load-bearing today:
  *
  * 1. `-` must NOT be a boundary here. These two are the SHAPE's boundaries, and
- *    a shape is built out of hyphens: with `\b`, `<a>-<b>-cc1` could match from
- *    the middle and report `<b>-cc1`, naming a seat that does not exist while
+ *    a shape is built out of hyphens: with `\b`, `<a>-<b>-cc<n>` could match from
+ *    the middle and report `<b>-cc<n>`, naming a seat that does not exist while
  *    the real one goes unreported. Excluding `-` forces the match to start at
  *    the beginning of the name. (The bare-name boundaries are separate, and
  *    deliberately looser — see below.)
@@ -50,7 +50,7 @@ const AFTER = "(?![A-Za-z0-9_-])";
  *
  *   refusing `-` on the LEFT   missed `<team>-<name>`, 17 real occurrences
  *   refusing `-` on the RIGHT  missed `<name>-approved`, found in review
- *   suppressing when a role follows missed `<hyphenated-base>-cc1` entirely,
+ *   suppressing when a role follows missed `<hyphenated-base>-cc<n>` entirely,
  *     because the shape does not match it either
  *
  * Every hole came from the same wish. A duplicate report costs a reader one
@@ -63,8 +63,47 @@ const NAME_BEFORE = "(?<![A-Za-z0-9])";
 const NAME_AFTER = "(?![A-Za-z0-9])";
 
 /**
+ * A listed name used as a shell IDENTIFIER is code, not attribution, and is not
+ * reported. Measured on the tree (2026-09-06): one two-letter handle is also
+ * the name storage drivers give to a local variable, in 102 lines of `$name` /
+ * `${name}` / `name=` and 19 declaration lines (`local … name …`,
+ * `read -r … name …`), plus one arithmetic use `$(( name + … ))`. Listing the
+ * handle without these guards reports 262 lines for 106 real ones, which is how
+ * a check gets switched off.
+ *
+ * Each guard names ONE syntactic context and nothing wider:
+ *   $name, ${name}      a variable reference
+ *   name=               an assignment (prose puts a space before `=`)
+ *   (( … name … ))      shell arithmetic, until the closing paren
+ *   local … name …      a declaration line: the first word (after any
+ *                       `VAR=value` prefixes) is a declaring builtin, and the
+ *                       name sits before any `#`. A comment on the same line is
+ *                       still scanned.
+ *   data:…;base64,…     the payload of a data URI is opaque bytes; a two-letter
+ *                       name lands in one by chance (measured: one SVG's
+ *                       embedded PNG). The guard ends at the closing quote or
+ *                       whitespace, so text after the URI is scanned again.
+ * Nothing here refuses punctuation prose actually uses — `name.`, `name,`,
+ * `(name)`, `name's`, `name/other` all still report — so the guards cannot
+ * hide a sentence. They are tested one by one in tests/private_names.test.mjs.
+ */
+const NOT_IN_DATA_URI = "(?<!base64,[^\"'\\s]*)";
+const NOT_VARIABLE_REF = "(?<!\\$\\{?)";
+const NOT_IN_ARITHMETIC = "(?<!\\(\\([^)\\r\\n]*)";
+// Closed within ONE line on purpose: the pattern has no `m` flag, so `^` is the
+// start of whatever string it is run on, and `\s` / `[^#]` would both walk
+// across a newline. scan() feeds it one line at a time, but the pattern is
+// exported and must not depend on that: a declaration on line 1 could otherwise
+// hide an attribution on line 2 (measured with the pattern applied to a
+// two-line string). Space and tab only, and the run before the name stops at a
+// `#` OR a line break.
+const NOT_DECLARED =
+  "(?<!^[ \\t]*(?:[A-Za-z_][A-Za-z0-9_]*=[^ \\t\\r\\n]*[ \\t]+)*(?:local|declare|typeset|export|readonly|unset|read)[ \\t][^#\\r\\n]*)";
+const NOT_ASSIGNED = "(?!=)";
+
+/**
  * A seat name: a base, then a role, then an optional index. The base may
- * itself contain hyphens -- `<a>-<b>-cc1` is a seat, and a base of
+ * itself contain hyphens -- `<a>-<b>-cc<n>` is a seat, and a base of
  * `[a-z][a-z0-9]*` alone matched neither from `<a>` (where `-<b>` is not a
  * role) nor from `<b>` (where the preceding hyphen is refused).
  *
@@ -104,7 +143,11 @@ export function injectedPattern(names) {
   // attribution as the lowercase form. No capitalised variant exists on the
   // current tree, so this costs nothing today; it is for the one that will be
   // written, which a fixed sample cannot rule out.
-  return new RegExp(`${NAME_BEFORE}(?:${alternation})${NAME_AFTER}`, "gi");
+  return new RegExp(
+    `${NAME_BEFORE}${NOT_VARIABLE_REF}${NOT_IN_ARITHMETIC}${NOT_DECLARED}${NOT_IN_DATA_URI}` +
+    `(?:${alternation})${NAME_AFTER}${NOT_ASSIGNED}`,
+    "gi",
+  );
 }
 
 /** Read injected names from the environment: a literal list, or a file of them. */

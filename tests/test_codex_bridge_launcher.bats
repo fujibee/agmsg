@@ -25,6 +25,19 @@ setup() {
   setup_test_env
   export SKILL_DIR="$TEST_SKILL_DIR"
   export RUN_DIR="$SKILL_DIR/run"; mkdir -p "$RUN_DIR"
+  # #1254: the launcher now requires AGMSG_CODEX_SEAT_KEY (inherited from
+  # codex-monitor.sh's own environment in real use) and refuses to run
+  # without it. Generated fresh per TEST (never one fixed literal for the
+  # whole file): the dispatcher/child locks and the request file are keyed by
+  # this value now, not by $PROJ's hash, so a shared literal across tests
+  # would let one test's leftover lock or request file (teardown races a
+  # loaded runner) collide with the next test's -- exactly the isolation
+  # $PROJ's own per-test uniqueness used to give for free. Every launcher
+  # invocation below is a plain child process of this test, so it inherits
+  # this export without needing to repeat it at each of the ~20 call sites.
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/drivers/types/codex/_seat-key.sh"
+  export AGMSG_CODEX_SEAT_KEY="$(_agmsg_codex_seat_key_new)"
   export PROJ="$TEST_SKILL_DIR/proj"; mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
 
@@ -40,10 +53,42 @@ setup() {
   # Node binary codex-bridge-launcher.sh resolves this file through; pointing
   # it at bash makes bash the interpreter for this file regardless of its .js
   # name, so the launcher's default (no-custom-wrapper) path runs unmodified.
-  cat > "$SCRIPTS/drivers/types/codex/codex-bridge.js" <<EOF
+  # Mock bridge: records argv AND publishes the same per-PID identity lease the
+  # real bridge does (so the reaper, which reads leases, can find/spare it). All
+  # of $CAPTURE / $SCRIPTS / $RUN_DIR come from the environment it inherits.
+  cat > "$SCRIPTS/drivers/types/codex/codex-bridge.js" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$CAPTURE"
-[ -z "\${MOCK_BRIDGE_SLEEP:-}" ] || sleep "\$MOCK_BRIDGE_SLEEP"
+printf '%s\n' "$*" >> "$CAPTURE"
+source "$SCRIPTS/lib/hash.sh" 2>/dev/null || true
+_proj=""; _parr=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --project) _proj="$2"; shift 2 ;;
+    --pair) _parr+=("$2"); shift 2 ;;
+    *) shift ;;
+  esac
+done
+_lease="$RUN_DIR/codex-bridge-lease.$$"
+# Start token exactly as codex-bridge-launcher.sh _start_token computes it: /proc
+# field 22 where available, else a trimmed `ps -o lstart=`.
+if [ -r "/proc/$$/stat" ]; then
+  _s="$(cat "/proc/$$/stat")"; _r="${_s##*)}"; read -ra _a <<< "$_r"
+  _start="${_a[19]}"; _ssrc=proc
+else
+  _start="$(ps -o lstart= -p $$)"
+  _start="${_start#"${_start%%[![:space:]]*}"}"; _start="${_start%"${_start##*[![:space:]]}"}"
+  _ssrc=ps
+fi
+_ph=""
+for _pv in "${_parr[@]}"; do _ph="$_ph$(printf '%s' "$_pv" | agmsg_sha1)
+"; done
+_pairs_hash="$(printf '%s' "$(printf '%s' "$_ph" | LC_ALL=C sort | sed '/^$/d')" | agmsg_sha1)"
+{ printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=%s\n' \
+    "$(printf '%s' "$_proj" | agmsg_sha1)" \
+    "$_pairs_hash" \
+    "$(hostname)" "$$" "$_start" "$_ssrc" ; } > "$_lease.tmp" && mv "$_lease.tmp" "$_lease"
+trap 'rm -f "$_lease"' EXIT
+[ -z "${MOCK_BRIDGE_SLEEP:-}" ] || sleep "$MOCK_BRIDGE_SLEEP"
 exit 0
 EOF
   chmod +x "$SCRIPTS/drivers/types/codex/codex-bridge.js"
@@ -110,10 +155,32 @@ put_record() {
 }
 
 write_request() {
-  local thread="$1" hash
-  hash=$(SKILL_DIR="$TEST_SKILL_DIR" bash -c \
-    'source "$1/lib/hash.sh"; printf "%s" "$2" | agmsg_sha1' _ "$SCRIPTS" "$PROJ")
-  printf 'codex\t%s\tws://127.0.0.1:1\n' "$thread" > "$RUN_DIR/codex-bridge-request.$hash"
+  local thread="$1"
+  # #1254: the request file is keyed by AGMSG_CODEX_SEAT_KEY now, not a
+  # project hash -- this file's setup() exports one fixed key for the whole
+  # suite, which every launcher invocation below inherits.
+  printf 'codex\t%s\tws://127.0.0.1:1\n' "$thread" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+}
+
+# Start the dispatcher with enough lifetime to remain eligible under a loaded
+# runner, but stop it as soon as the asynchronous bridge launch is observable.
+# A short foreground lifetime followed by a capture wait is not equivalent:
+# once the lifetime process exits, the dispatcher is no longer allowed to spawn
+# the role child that creates CAPTURE.
+run_launcher_until_capture() { # [ENV=VALUE ...]
+  sleep 30 3>&- & local parent=$!
+  env "$@" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  local dispatcher=$! seen=0 i
+  for i in {1..200}; do
+    if [ -f "$CAPTURE" ]; then seen=1; break; fi
+    sleep 0.1
+  done
+  kill "$parent" 2>/dev/null || true
+  wait "$parent" 2>/dev/null || true
+  # Retire the lifetime first and let the dispatcher observe that boundary.
+  # Killing the dispatcher first can strand the detached role child it spawned.
+  wait "$dispatcher" 2>/dev/null || true
+  [ "$seen" -eq 1 ]
 }
 
 # Drive the launcher against a short-lived parent, blocking until it exits. fd 3
@@ -139,6 +206,14 @@ run_launcher() {
   [ -f "$CAPTURE" ]
   grep -q -- "--thread rec-thread-1" "$CAPTURE"
   ! grep -q -- "--thread loaded" "$CAPTURE"
+}
+
+@test "launcher: passes the actas owner recorded by the claim" {
+  setup_live_owner "$RUN_DIR" owner-session
+  bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
+  run_launcher
+  [ -f "$CAPTURE" ]
+  grep -q -- "--owner owner-session" "$CAPTURE"
 }
 
 @test "launcher: passes the active storage override as a workspace root" {
@@ -233,13 +308,16 @@ run_launcher() {
 @test "launcher: stale dispatcher reclamation remains singleton under contention" {
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=8
-  local hash lock_db
-  hash=$(printf '%s' "$PROJ" | bash -c 'source "$1"; agmsg_sha1' _ "$SCRIPTS/lib/hash.sh")
+  # #1254: the dispatcher lock is keyed by AGMSG_CODEX_SEAT_KEY now, not a
+  # project hash -- seed the stale row under that same resource name so this
+  # test still simulates what it means to (a crashed dispatcher's lock left
+  # behind for THIS seat).
+  local lock_db
   lock_db="$TEST_SKILL_DIR/db/messages.db"
-  sqlite3 "$lock_db" "CREATE TABLE locks(resource TEXT PRIMARY KEY, owner_pid INTEGER NOT NULL, acquired_at TEXT NOT NULL); INSERT INTO locks VALUES('codex-dispatcher:$hash', 99999999, datetime('now'));"
+  sqlite3 "$lock_db" "CREATE TABLE locks(resource TEXT PRIMARY KEY, owner_pid INTEGER NOT NULL, acquired_at TEXT NOT NULL); INSERT INTO locks VALUES('codex-dispatcher:$AGMSG_CODEX_SEAT_KEY', 99999999, datetime('now'));"
   # A crash from the former two-directory implementation can leave this behind.
   # The transactional lock protocol must not depend on that legacy reaper.
-  mkdir "$RUN_DIR/codex-bridge-dispatcher.$hash.reap"
+  mkdir "$RUN_DIR/codex-bridge-dispatcher.$AGMSG_CODEX_SEAT_KEY.reap"
   export AGMSG_TEST_DISPATCHER_STALE_BARRIER="$TEST_SKILL_DIR/stale-observed"
   sleep 10 3>&- & local parent_a=$!
   sleep 10 3>&- & local parent_b=$!
@@ -444,19 +522,14 @@ wait_for_child_count() {
 
   put_record team alice thread-msys "$PROJ" codex
 
-  sleep 6 3>&- & local p=$!
-  MSYSTEM=MINGW64 PATH="$stubdir:$PATH" \
-    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
-  wait "$p" 2>/dev/null || true
-  local i
-  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+  run_launcher_until_capture MSYSTEM=MINGW64 PATH="$stubdir:$PATH" || true
 
   # A bridge was launched at all -- this is what the whole class costs on Windows.
   [ -f "$CAPTURE" ] || { echo "no bridge was started under a blind tasklist"; false; }
   grep -q -- '--thread thread-msys' "$CAPTURE"
 }
 
-@test "launcher: windows-native starts the bridge (#567)" {
+@test "launcher: windows-native starts the bridge (#1161)" {
   skip_unless_windows "the point is the real tasklist and the real MSYS pid space"
   # The counterpart to codex-monitor's windows-native test, and the half #582
   # does NOT fix: reaching the bridged handoff is not the same as delivering a
@@ -466,12 +539,412 @@ wait_for_child_count() {
   # started. Real tasklist, no stub.
   put_record team alice thread-win "$PROJ" codex
 
-  sleep 6 3>&- & local p=$!
-  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
-  wait "$p" 2>/dev/null || true
-  local i
-  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+  run_launcher_until_capture || true
 
   [ -f "$CAPTURE" ] || { echo "no bridge was started on native Windows"; false; }
   grep -q -- '--thread thread-win' "$CAPTURE"
+}
+
+# --- #937: reap a same-(project,role) orphan via its per-PID identity lease ---
+
+# Bridges whose pair set is EXACTLY {<name>}: one `--pair`, and that pair naming
+# <name>. Distinct from a plain argv match on <name> -- the form these tests used
+# until #984 -- which counts any process with <name> anywhere in its argv,
+# including a bridge that serves <name> alongside others.
+#
+# That distinction is the one this file's superset test already turns on: a
+# bridge for {alice,bob} is not a bridge for {alice}. An argv match cannot see
+# it, so it cannot be used to wait for "the launcher has spawned its alice" in a
+# test that has itself just spawned an {alice,bob} bridge -- the gate opens on
+# the test's own fixture, before the launcher has done anything (#937).
+#
+# Counted with `grep`, not by splitting fields: a pair value is `team<TAB>name`,
+# and awk splits on tabs as well as spaces whatever `-F` says about the input,
+# so `$(i+1)` after `--pair` is only `team`. Measured that way first and it
+# counted 0 for a bridge that plainly had one alice pair.
+_count_exact_role_bridges() { # <project> <name>
+  ps -Ao pid=,args= 2>/dev/null \
+    | grep -F "codex-bridge.js" \
+    | grep -F -- "--project $1 " \
+    | while IFS= read -r line; do
+        # Exactly one --pair, and its value's NAME half is <name>. A pair is
+        # `team<TAB>name`, and the separator has two renderings to allow for:
+        # `ps` writes the tab as the four characters \011 -- three of them
+        # digits, so a single-character [^0-9A-Za-z] separator class matches
+        # nothing at all and the counter answers 0 to everything (#984).
+        [ "$(printf '%s' "$line" | grep -o -- '--pair' | grep -c .)" -eq 1 ] || continue
+        printf '%s' "$line" | grep -Eq -- "--pair [^ ]*(\\\\011|[^0-9A-Za-z])$2([^0-9A-Za-z]|\$)" || continue
+        printf '.\n'
+      done | grep -c . | tr -d ' '
+}
+
+# Poll until the exact-{<name>} count settles at <want>, then echo THE VALUE THAT
+# SATISFIED THE WAIT.
+#
+# The form these tests used until #984 re-counted after its loop, so what it
+# returned was a second, later observation. Between the two, the reaper kills the
+# orphan and the launcher respawns, and the count passes through 2 and through 0
+# -- so the caller was handed a number that nothing had ever waited for. That is
+# the half of #984 needing no superset fixture, and it is why all five call sites
+# could fail, not only the superset one.
+_wait_exact_role_count() { # <project> <name> <want> [tries]
+  local i seen tries="${4:-100}"
+  for ((i = 0; i < tries; i++)); do
+    seen="$(_count_exact_role_bridges "$1" "$2")"
+    [ "$seen" = "$3" ] && { printf '%s' "$seen"; return 0; }
+    sleep 0.1
+  done
+  printf '%s' "$seen"
+}
+
+# The gate the five reap tests open before they make an orphan: the launcher
+# must actually have ONE bridge for exactly {<name>} first.
+#
+# It has to be load-bearing, and a `for ... && break` loop is not. Exhausting
+# such a loop and breaking out of it are indistinguishable from the next line,
+# so a test whose launcher never spawned would go on to `rm -f` pidfiles that do
+# not exist, wait, and then be satisfied by a bridge the launcher started DURING
+# that wait -- green, having created no orphan and reaped none. The test would
+# pass without exercising #937 at all, and nothing would say so (#984).
+#
+# Same rule as the team-lock gate in test_remote_engine_start_refusal.bats: when
+# a precondition cannot be established, say which count was actually reached and
+# fail, rather than continuing into an assertion that no longer means what it
+# says.
+_require_launcher_bridge() { # <project> <name> [tries]
+  local seen; seen="$(_wait_exact_role_count "$1" "$2" 1 "${3:-}")"
+  [ "$seen" = 1 ] && return 0
+  echo "the launcher never reached one {$2} bridge (saw $seen), so this test could not create the orphan it is about" >&2
+  return 1
+}
+
+# Run the mock bridge directly for a given (project, pairs) so it publishes a
+# lease of that identity and stays alive. Sets FAKE_PID (NOT via $(...) -- a
+# background job in command substitution is killed when that subshell exits).
+_spawn_fake() { # <project> <pair...>
+  local proj="$1"; shift
+  local args=(--project "$proj") pv
+  for pv in "$@"; do args+=(--pair "$pv"); done
+  MOCK_BRIDGE_SLEEP=25 bash "$SCRIPTS/drivers/types/codex/codex-bridge.js" "${args[@]}" 3>&- &
+  FAKE_PID=$!
+}
+
+@test "launcher: the exact-role counter reads a pair set, not an argv substring (#984)" {
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}alice" "team${tab}bob";      local both=$FAKE_PID
+  _spawn_fake "$PROJ" "team${tab}alice2";                     local two=$FAKE_PID
+  _spawn_fake "$TEST_SKILL_DIR/other-proj" "team${tab}alice"; local other=$FAKE_PID
+  # Positive control FIRST. Without it, the zeroes below are also what a counter
+  # that answers 0 to everything produces -- including one whose pattern never
+  # matches the separator `ps` renders between a pair's team and its name (it is
+  # a tab, and `ps` writes it as the four characters \011, three of them digits).
+  [ "$(_wait_exact_role_count "$PROJ" alice2 1)" -eq 1 ]
+  # None of the three is a bridge whose pair set is {alice} in THIS project:
+  # {alice,bob} is a superset, {alice2} collides only by prefix, and the third
+  # is another project's.
+  [ "$(_count_exact_role_bridges "$PROJ" alice)" -eq 0 ]
+  # ... and {alice,bob} is not {bob} either -- the rule is set equality, not
+  # "serves this role". Asked through the waiter, with a `want` of 1 it will
+  # never reach: this is the one assertion here that goes red if the waiter is
+  # ever rewritten to return its `want` instead of what it saw. Every other
+  # check in this file passes under that rewrite, which is the shape of the
+  # defect being fixed (#984). It costs the waiter's full wait by design --
+  # shortened to 5 tries (0.5s) here because the exact-{bob} count is STATIC
+  # for this whole wait: nothing spawned above or below can ever make it
+  # something other than 0, so ending early cannot turn a later true into a
+  # false pass.
+  [ "$(_wait_exact_role_count "$PROJ" bob 1 5)" -eq 0 ]
+  # One that IS {alice} counts, with the other three still running.
+  _spawn_fake "$PROJ" "team${tab}alice"; local solo=$FAKE_PID
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
+  kill "$both" "$two" "$other" "$solo" 2>/dev/null || true
+  wait "$both" 2>/dev/null || true; wait "$two" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true; wait "$solo" 2>/dev/null || true
+}
+
+@test "launcher: an unreachable gate fails the test instead of continuing (#984)" {
+  # No launcher is started here at all, so the gate's condition can never be
+  # reached. It has to END the test.
+  #
+  # This is the control for the five reap tests: each calls the gate bare, so an
+  # unreachable precondition fails them -- but ONLY if the gate returns non-zero
+  # on exhaustion. The `for ... && break` gate it replaces returned nothing at
+  # all: reaching the count and running out of tries left the same state behind,
+  # and the test carried on to delete pidfiles that did not exist and assert
+  # against a bridge started during the wait. Green, with #937 never exercised.
+  #
+  # An exhausted gate is what is being measured, so its OUTCOME cannot be
+  # short-circuited -- but the exact-{alice} count is STATIC for this whole
+  # wait (no launcher runs here at all, so nothing can ever make it 1), so the
+  # sweep itself is shortened to 5 tries (0.5s).
+  run _require_launcher_bridge "$PROJ" alice 5
+  [ "$status" -ne 0 ]
+  # And it must say WHICH count it reached: an exhausted gate that fails with a
+  # bare non-zero tells the next reader nothing about why.
+  printf '%s' "$output" | grep -q 'never reached one {alice} bridge (saw 0)'
+}
+
+@test "launcher: reaps a same-(project,role) orphan the pidfile lost, converging to one (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  _require_launcher_bridge "$PROJ" alice
+  rm -f "$RUN_DIR"/codex-bridge.*.pid
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
+  kill "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true
+}
+
+@test "launcher: a reap for one role leaves a same-project OTHER role alive (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}bob"; local bob=$FAKE_PID
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  _require_launcher_bridge "$PROJ" alice
+  rm -f "$RUN_DIR"/codex-bridge.*.pid
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
+  kill -0 "$bob"
+  kill "$bob" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$bob" 2>/dev/null || true
+}
+
+@test "launcher: a reap for one project leaves the SAME role in another project alive (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$TEST_SKILL_DIR/other-proj" "team${tab}alice"; local other=$FAKE_PID
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  _require_launcher_bridge "$PROJ" alice
+  rm -f "$RUN_DIR"/codex-bridge.*.pid
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
+  kill -0 "$other"
+  kill "$other" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$other" 2>/dev/null || true
+}
+
+@test "launcher: a reap for role 'alice' does not sweep the prefix-colliding 'alice2' (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}alice2"; local alice2=$FAKE_PID
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  _require_launcher_bridge "$PROJ" alice
+  rm -f "$RUN_DIR"/codex-bridge.*.pid
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
+  kill -0 "$alice2"
+  kill "$alice2" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$alice2" 2>/dev/null || true
+}
+
+@test "launcher: an alice reaper does not kill a bridge that also serves bob (pair superset) (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}alice" "team${tab}bob"; local both=$FAKE_PID
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  # `both` carries `--pair team<TAB>alice`, so an argv match answers 1 for it
+  # before the launcher has spawned anything: this is the one site where the
+  # gate opened on the test's own fixture. The exact counter requires a pair set
+  # of {alice}, the same set inequality the `kill -0 "$both"` below relies on.
+  _require_launcher_bridge "$PROJ" alice
+  rm -f "$RUN_DIR"/codex-bridge.*.pid
+  # ONE exact-{alice} bridge: the launcher's. `both` is not counted here -- the
+  # `kill -0` below is what says it survived. The two assertions carry different
+  # halves of this test's claim.
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
+  # Its pair set is {alice,bob}, not {alice}: set inequality spares it.
+  kill -0 "$both"
+  kill "$both" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$both" 2>/dev/null || true
+}
+
+@test "launcher: a live bridge with no lease (legacy) is left alone, not killed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  # A same-(project,role) process that never published a lease -- an older bridge
+  # build. Fail-open: no lease, no kill. Spawn it, then remove its lease.
+  _spawn_fake "$PROJ" "team${tab}alice"; local legacy=$FAKE_PID
+  local j; for j in {1..50}; do [ -f "$RUN_DIR/codex-bridge-lease.$legacy" ] && break; sleep 0.1; done
+  rm -f "$RUN_DIR/codex-bridge-lease.$legacy"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$legacy"
+  kill "$legacy" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$legacy" 2>/dev/null || true
+}
+
+# --- #937 finding (4): the lease is the reaper's authority, so a broken one is a
+# new failure surface. Every malformed/partial/foreign lease must fail CLOSED
+# (no kill), asserted by a same-(project,alice) fake surviving the reaper. Each
+# starts from the valid lease the mock published, then corrupts that one file. ---
+_fake_alice_lease() { # sets FAKE_PID once its lease file exists
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}alice"
+  local j; for j in {1..50}; do [ -f "$RUN_DIR/codex-bridge-lease.$FAKE_PID" ] && break; sleep 0.1; done
+}
+
+@test "launcher: a truncated lease (missing fields) is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  head -3 "$lease" > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease with a foreign host is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  awk '{ if ($0 ~ /^host=/) print "host=some-other-host.invalid"; else print }' "$lease" > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease with an unknown extra key is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  { cat "$lease"; printf 'rogue=1\n'; } > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease with a duplicated key is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  { cat "$lease"; printf 'pid=99999\n'; } > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease whose start token no longer matches the live pid is not killed (#937)" {
+  # The reuse guard: if the process now at that pid started at a different time
+  # than the lease records (a recycled pid, an unrelated bridge), killing it would
+  # be a wrong-kill. The token must PROVE the live process is the leased one, or
+  # nothing happens. Same identity as the launcher, so only the token spares it.
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  # Rewrite start= to a value that cannot equal the live process's actual token
+  # (its src stays valid so the lease still parses; only the token is wrong).
+  awk '{ if ($0 ~ /^start=/) print "start=1"; else print }' "$lease" > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+# --- Windows start token: the lease schema must admit the source
+# codex-bridge.js writeLease() records on Windows, where /proc does not exist and
+# the only `ps` likely to be on PATH (MSYS's) rejects -o outright, so both POSIX
+# sources yield an empty token and the bridge can never publish a lease at all.
+#
+# _read_lease is the reaper's ONLY gate on a lease, so its accept/reject set is
+# the contract. These exercise it directly -- the pattern test_remote.bats uses
+# for _remote_endpoint_display -- rather than through the reaper: the reaper
+# needs a spawnable bridge and a live pid, which is exactly what does not work on
+# Git Bash (#567), and the schema question has nothing to do with either. Kept
+# out of the `windows-native` filter deliberately: nothing here runs PowerShell,
+# so these belong on every leg, not only the Windows one. ---
+_lease_verdict() { # <startsrc> <start> -> prints accept|reject
+  local h40=0123456789abcdef0123456789abcdef01234567
+  printf 'v=1\nproject=%s\npairs=%s\nhost=h\npid=123\nstart=%s\nstartsrc=%s\n' \
+    "$h40" "$h40" "$2" "$1" > "$TEST_SKILL_DIR/lease-under-test"
+  bash -c '
+    pattern="/^_read_lease() {/,/^}/p"
+    eval "$(sed -n "$pattern" "$1")"
+    _read_lease "$2" && echo accept || echo reject
+  ' _ "$LAUNCHER" "$TEST_SKILL_DIR/lease-under-test" 2>/dev/null
+}
+
+@test "launcher: the lease schema admits a pwsh start token" {
+  [ "$(_lease_verdict pwsh 639231441791462826)" = accept ]
+}
+
+@test "launcher: a pwsh lease whose token is not an integer is rejected, fail-closed" {
+  # .NET Ticks is a bare integer. Anything else under that label is a lease this
+  # side did not write, and a doubtful lease must never authorise a kill.
+  [ "$(_lease_verdict pwsh 6392314.5)" = reject ]
+  [ "$(_lease_verdict pwsh '')" = reject ]
+}
+
+@test "launcher: an unrecognised startsrc is rejected, fail-closed" {
+  # wmic is here on purpose, not as an arbitrary bad value: WMIC's CreationDate
+  # was the faster candidate and was deliberately NOT adopted, because a per-side
+  # "WMIC, else PowerShell" order lets the writer and the reaper resolve different
+  # sources for the same process whenever only one of them can reach wmic.exe.
+  # Rejecting the label pins that decision, so reintroducing it fails loudly.
+  [ "$(_lease_verdict wmic 20260824041348.411807+540)" = reject ]
+  [ "$(_lease_verdict bogus 123)" = reject ]
+}
+
+@test "launcher: proc and ps leases still parse (start-token regression)" {
+  [ "$(_lease_verdict proc 396341883)" = accept ]
+  [ "$(_lease_verdict ps 'Sun Aug 24 04:00:00 2026')" = accept ]
+  # ps stays exempt from the integer check (its token is a human date string
+  # whose punctuation varies by platform); proc does not.
+  [ "$(_lease_verdict proc abc)" = reject ]
+}
+
+_run_start_token() { # <pid> -> runs _start_token in a subshell
+  run bash -c '
+    pattern="/^_agmsg_is_windows() {/,/^}/p;/^_start_token() {/,/^}/p"
+    eval "$(sed -n "$pattern" "$1")"
+    _start_token "$2"
+  ' _ "$LAUNCHER" "$1"
+}
+
+@test "launcher: a live pid yields a proc or ps start token on POSIX" {
+  skip_on_windows "Windows has its own source; see the windows-native case"
+  _run_start_token $$
+  [ "$status" -eq 0 ]
+  local tab; tab=$(printf '\t')
+  case "${output%%"$tab"*}" in proc|ps) ;; *) false ;; esac
+  [ -n "${output#*"$tab"}" ]
+}
+
+@test "launcher: CLANGARM uname selects the Windows start token path" {
+  local stubdir="$TEST_SKILL_DIR/clangarm-bin"
+  mkdir -p "$stubdir"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" CLANGARM64_NT-10.0' > "$stubdir/uname"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" 639231441791462826' > "$stubdir/powershell.exe"
+  chmod +x "$stubdir/uname" "$stubdir/powershell.exe"
+
+  PATH="$stubdir:$PATH" _run_start_token 123
+  [ "$status" -eq 0 ]
+  [ "$output" = $'pwsh\t639231441791462826' ]
+}
+
+@test "launcher: windows-native a live pid yields an integer pwsh start token" {
+  skip_unless_windows "PowerShell and the Windows pid space are the point"
+  # The pid must be the WINDOWS one. MSYS/Cygwin number processes in their own
+  # space -- the same shell is MSYS pid 3994449 and winpid 19568 on our runner --
+  # and Get-Process only knows the latter, which is also the pid
+  # codex-bridge.js records as process.pid.
+  local winpid; winpid="$(cat /proc/$$/winpid)"
+  [ -n "$winpid" ]
+  _run_start_token "$winpid"
+  [ "$status" -eq 0 ]
+  local tab; tab=$(printf '\t')
+  [ "${output%%"$tab"*}" = pwsh ]
+  local tok="${output#*"$tab"}"
+  case "$tok" in ''|*[!0-9]*) false ;; esac
 }

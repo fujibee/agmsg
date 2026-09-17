@@ -75,6 +75,9 @@ commit_parsers = [
   { message = "^Isolate Codex monitor bridges by role", group = "<!-- 0 -->Added" },
   { message = "^Allow launcher-reserved bridge PID", group = "<!-- 1 -->Fixed" },
   { message = "^Stop telling every agent that key rotate", group = "<!-- 1 -->Fixed" },
+{ message = "^Naming is an invariant every entry point re-asserts", group = "<!-- 0 -->Added" },
+{ message = "^spawn: launch codex through the bundled monitor shim", group = "<!-- 1 -->Fixed" },
+{ message = "^Remove internal handles from the published tree", group = "<!-- 3 -->Changed" },
   # Everything else (merges, initial commit, misc) is intentionally dropped.
   { message = ".*", skip = true },
 ]

@@ -69,3 +69,8 @@
 {"endpoint": "https://example.com", "verdict": "allow", "why": "an ordinary name over https"}
 {"endpoint": "https://ex..ample.com", "verdict": "allow", "why": "doubled dot: odd, but both parsers accept it — not tightened beyond Node"}
 {"endpoint": "https://xn--wgv71a.example", "verdict": "allow", "why": "punycode name over https"}
+{"endpoint": "https://example.com/t/agsy_token", "verdict": "allow", "why": "a hosted capability path: the path IS the endpoint, and archiving/restoring it must carry it verbatim (#849)"}
+{"endpoint": "https://example.com/a\tb", "verdict": "deny", "why": "raw TAB in the path: the WHATWG parser deletes it, so the stored raw string and the parsed URL disagree — and line-wise readers of the stored value split on it (#849)"}
+{"endpoint": "https://example.com/a\nb", "verdict": "deny", "why": "raw LF in the path: same class — one stored value becomes two lines for any line-framed reader (#849)"}
+{"endpoint": "https://exam\rple.com/x", "verdict": "deny", "why": "raw CR: deleted by the parser before parsing, present in the stored raw string (#849)"}
+{"endpoint": "\thttps://example.com", "verdict": "deny", "why": "leading TAB: trimmed by the parser, kept in the raw string (#849)"}

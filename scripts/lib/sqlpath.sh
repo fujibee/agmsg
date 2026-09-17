@@ -25,11 +25,15 @@
 _AGMSG_SQLPATH_SH=1
 
 agmsg_sql_readfile_path() {
-  local path="$1"
+  # The quote is held in a variable, never written as \' in the pattern: bash
+  # 3.2 (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the
+  # inline form doubles a quote into \'\' there and into '' on bash 4+. Same
+  # reasoning, and same shape, as _sqlite_sync_lit_into in sqlite-sync.sh.
+  local path="$1" q="'"
   if command -v cygpath >/dev/null 2>&1; then
     path=$(cygpath -w "$path" 2>/dev/null || printf '%s' "$path")
   fi
-  printf '%s' "$path" | sed "s/'/''/g"
+  printf '%s' "${path//$q/$q$q}"
 }
 
 # True when sqlite can actually open <path>.

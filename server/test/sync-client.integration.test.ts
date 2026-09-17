@@ -110,12 +110,29 @@ storage_init "$2" >/dev/null`;
         await execFileAsync("bash", [remoteSh, "pull", "--endpoint", serverUrl,
           "--team-id", boundTeamId, boundTeam], { cwd: repositoryRoot, env });
       }
+      // #1050: both connect and pull leave a background sync engine running
+      // by design (docs/design/remote-sync.md's third phase, "Continue" —
+      // "leaves a sync engine running" / "keep syncing" / "continues" are the
+      // documented contract, not an accident). This suite drives every sync
+      // itself, one deterministic "once" call at a time, so a bootstrap-time
+      // engine racing an explicit call below is a false failure: whichever one
+      // reaches the server first "steals" that call's own events out of its
+      // stdout. Stop it right after it starts, per machine, rather than
+      // letting several accumulate across the loop. `_remote_sync_engine_stop`
+      // is remote.sh's own internal stop, called by sourcing rather than
+      // re-implementing it (remote.sh's own header comment: sourcing is what
+      // lets a test call the internal functions directly, #762) — the same
+      // function `disconnect` uses, minus disconnect's unwanted side effect of
+      // dropping the binding this suite still needs.
+      await execFileAsync("bash", ["-c",
+        `. "$1/scripts/remote.sh"; _remote_sync_engine_stop "$2"`,
+        "stage1-test", repositoryRoot, boundTeam], { cwd: repositoryRoot, env });
     }
     rosterFile = join(root, "local-roster.json");
     await writeFile(rosterFile, JSON.stringify({
       agents: { "machine-a": {}, "machine-b": {} },
     }));
-  });
+  }, 30000);
 
   afterAll(async () => {
     await app.close();
@@ -323,7 +340,7 @@ storage_list_unread "$2" "$3"`;
     await expect(sync(storeB, "once", "--team", localTeam)).rejects.toMatchObject({
       stderr: expect.stringContaining("invalid or disconnected"),
     });
-  }, 20_000);
+  }, 45_000);
 
   it("synchronizes a SQLite and JSONL peer in both directions without duplicates", async () => {
     const fromSqlite = "heterogeneous message from SQLite";

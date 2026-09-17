@@ -1,0 +1,146 @@
+# Per-file real macOS bats wall time (seconds), used by shard-tests.sh to
+# weight the CI partition by measured cost instead of @test count (#1243).
+# @test count is a loose, occasionally blind proxy for a file's real cost:
+# a file whose time is almost entirely waiting (background processes, poll
+# loops) can carry a tiny count while dominating its shard's wall clock, and
+# a file that is merely large in @test count is not necessarily slow. This
+# table sidesteps the proxy by using each file's own measured time directly.
+#
+# MEASURED AGAINST: GitHub Actions run 34845597032 (release-candidate draft
+# PR #1240, tests.yml bats job, macos-latest, 5 shards, 2026-09-14, the tree
+# after #1105/#1231/#1234/#1237/#1239/#1241/#1245 landed). Every shard in
+# that run completed (none timed out), so every file below has a real
+# file_end record -- summed from the run's 5 bats-timings-macos-latest-*
+# artifacts (file_end rows only, macOS only).
+#
+# A file with no row here (renamed, or added after this measurement) is
+# estimated at this table's own average seconds/file by shard-tests.sh,
+# never treated as zero-cost or dropped from the partition -- coverage does
+# not depend on this table being current. Refresh by re-running this
+# extraction against a green run's bats-timings artifacts once the tree
+# drifts enough that the balance this buys degrades (watched by
+# tests/test_ci_sharding.bats's balance-ratio assertion, not by a schedule).
+#
+# Columns: basename<TAB>seconds. Sorted by basename for a legible diff.
+test_actas_integration.bats	65
+test_actas_lock.bats	35
+test_antigravity_resume.bats	1
+test_antigravity_transport.bats	12
+test_api.bats	44
+test_app_release_signing.bats	1
+test_apply_fail_stderr.bats	0
+test_bin_agmsg.bats	2
+test_binding_mode.bats	3
+test_boot_command.bats	10
+test_bump_app_version.bats	0
+test_capability_docs.bats	2
+test_ci_forensics.bats	1
+test_ci_sharding.bats	69
+test_ci_workflow.bats	0
+test_claude_template.bats	1
+test_close_fds.bats	0
+test_cmdline_path_match.bats	1
+test_codex_bridge.bats	199
+test_codex_bridge_launcher.bats	281
+test_codex_monitor.bats	9
+test_codex_resume.bats	10
+test_codex_shim.bats	20
+test_compat.bats	3
+test_compat_posix.bats	1
+test_config.bats	2
+test_cut_release.bats	5
+test_delivery.bats	432
+test_despawn.bats	137
+test_dispatch.bats	75
+test_doctor.bats	97
+test_endpoint_scheme.bats	1
+test_endpoint_table_node.bats	0
+test_enforced_assertions.bats	2
+test_engine_inherited_fds.bats	21
+test_export.bats	37
+test_harness_self_name_off.bats	1
+test_hash.bats	4
+test_herdr_cli_routing.bats	3
+test_identity_path_forms.bats	6
+test_inbox.bats	114
+test_install.bats	109
+test_instance_id.bats	30
+test_jsonl_remote_sync.bats	44
+test_key.bats	72
+test_legacy_mirror.bats	11
+test_local_quoting.bats	1
+test_local_team_ids.bats	11
+test_locator.bats	5
+test_messaging.bats	124
+test_migrate_team_store.bats	151
+test_node_resolve.bats	1
+test_peek_poke.bats	22
+test_perf_harness.bats	12
+test_placement_actual_location.bats	2
+test_placement_collisions.bats	38
+test_plugin_registry.bats	7
+test_printed_command_paths.bats	10
+test_refute.bats	1
+test_registry_lock.bats	8
+test_release_ci_skip.bats	1
+test_release_dist_tag.bats	1
+test_remote.bats	453
+test_remote_curl_config_paths.bats	5
+test_remote_curl_stderr.bats	3
+test_remote_curl_stderr_get.bats	6
+test_remote_engine_start_refusal.bats	660
+test_remote_forget.bats	11
+test_remote_header_sink.bats	4
+test_remote_refusal.bats	18
+test_remote_setup_doc.bats	8
+test_remote_status_liveness.bats	346
+test_remote_sync.bats	328
+test_remote_sync_apply_blob.bats	5
+test_remote_sync_ca_bundle.bats	1
+test_remote_sync_driver_input.bats	0
+test_remote_sync_engine.bats	12
+test_remote_sync_reject_envelope.bats	5
+test_require_python3.bats	5
+test_reset_role_session.bats	13
+test_resolve_project.bats	35
+test_resume_seat_guard.bats	19
+test_resurrect_panes.bats	11
+test_role_session.bats	14
+test_roster_journal.bats	99
+test_self_fix.bats	13
+test_self_identity.bats	24
+test_self_name.bats	149
+test_self_proof.bats	42
+test_self_rename.bats	30
+test_self_write.bats	46
+test_self_write_lock.bats	36
+test_session_start_terminal_line.bats	12
+test_setup.bats	1
+test_shquote.bats	1
+test_spawn.bats	477
+test_spawn_fd_guard.bats	1
+test_spawn_options.bats	2
+test_sqlite_crlf.bats	9
+test_sqlite_sync_jq_binary.bats	5
+test_storage.bats	37
+test_storage_contract.bats	44
+test_sweep_enumeration.bats	9
+test_sync_autostart.bats	29
+test_sync_cipher.bats	7
+test_team.bats	198
+test_team_guidance_usage.bats	1
+test_team_list.bats	28
+test_team_status.bats	14
+test_teardown_reap.bats	3
+test_terminal_context_line.bats	2
+test_terminal_registry.bats	81
+test_token_locate.bats	3
+test_transcript_exists.bats	2
+test_type_registry.bats	36
+test_unguarded_env_reads.bats	2
+test_wait_helpers.bats	40
+test_watch.bats	317
+test_watch_install_changed.bats	24
+test_watch_once.bats	91
+test_watch_stuck_map.bats	3
+test_where.bats	1

@@ -125,6 +125,23 @@ case "$mode" in
 esac
 STUB
   chmod +x "$STUB_SRC/cygpath"
+
+  # A python3 that writes one line to stderr before becoming the real thing.
+  # The copier is started with its stderr INHERITED, so that line arrives on the
+  # helper's stderr -- which is what the redirect under test has to keep out of
+  # bats's $output. Without something that actually writes there, adding or
+  # removing the redirect changes nothing and the harness fix is unbound.
+  REAL_PYTHON3="$(command -v python3)"; export REAL_PYTHON3
+  NOISE="stderr-noise-from-the-copier"
+  export NOISE
+  cat > "$STUB_SRC/python3" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *bounded-copy.py*) printf '%s\n' "$NOISE" >&2 ;;
+esac
+exec "$REAL_PYTHON3" "$@"
+STUB
+  chmod +x "$STUB_SRC/python3"
 }
 
 teardown() { teardown_test_env; }
@@ -140,6 +157,7 @@ sandbox_path() {
     ln -s "$src" "$dir/$tool"
   done
   ln -s "$STUB_SRC/curl" "$dir/curl"
+  ln -sf "$STUB_SRC/python3" "$dir/python3"
   [ "$want_cygpath" = "yes" ] && ln -s "$STUB_SRC/cygpath" "$dir/cygpath"
   printf '%s' "$dir"
 }
@@ -147,16 +165,57 @@ sandbox_path() {
 # Runs the real helper under a sandbox PATH, and prints the http code. The
 # consumer the curl stub plays is named by the caller, so a test cannot
 # accidentally get a curl that accepts whatever the config happens to say.
+# STDERR GOES TO A FILE, NOT INTO $output.
+#
+# bats merges the two streams, and this helper's stderr is not reliably empty.
+# On a loaded macOS CI runner, bash reported
+#
+#   remote.sh: line NNN: .../agmsg-header-pipe.JVbrl7/header: Interrupted system call
+#
+# while opening the header fifo, and $output became that line followed by the
+# http code. Every exact comparison against "200" or "000" then fails on a code
+# that was in fact correct. Observed twice in one run, on a head that was green
+# on the author's machine. That is the boundary of what was observed -- a
+# loaded macOS CI runner produced it and no local run has. Load is the
+# candidate, not something any control here varied.
+#
+# The http code is the only thing on stdout, so separating the streams is what
+# makes an exact comparison mean what it says.
 post_under() {
   local bin="$1" consumer="$2" body_file="$3" extra="${4:-}"
+  ERR_FILE="$BATS_TEST_TMPDIR/helper-stderr"
   run env PATH="$bin" STUB_CURL_CONSUMER="$consumer" CFG_CAPTURE="$CFG_CAPTURE" \
+    NOISE="$NOISE" REAL_PYTHON3="$REAL_PYTHON3" \
     FAKE_ROOT="$FAKE_ROOT" bash -c '
     set -uo pipefail
     . '"$SCRIPTS"'/remote.sh 2>/dev/null
     '"$extra"'
     _remote_http_post_json "https://example.invalid/v1/x" "'"$body_file"'" \
-      "'"$BATS_TEST_TMPDIR"'/out-body" "'"$BATS_TEST_TMPDIR"'/out-header"
+      "'"$BATS_TEST_TMPDIR"'/out-body" "'"$BATS_TEST_TMPDIR"'/out-header" 2>"'"$ERR_FILE"'"
   '
+}
+
+@test "the helper's stderr stays out of the code, and there IS stderr to keep out (#850)" {
+  # THE CONTROL FOR THE REDIRECT ITSELF. Every other case here compares $output
+  # against an exact code; that comparison only means something because stdout
+  # and stderr are separated, and separation only means something when the
+  # stream is non-empty. On a quiet run, adding or removing `2> "$ERR_FILE"`
+  # changes nothing -- which is how the redirect went in unbound.
+  #
+  # The copier inherits the helper's stderr, so a python3 that writes one line
+  # before exec'ing puts a real line there. What CI produced was bash reporting
+  # an interrupted fifo open; this is a different writer to the same stream, and
+  # it is deterministic.
+  local bin; bin="$(sandbox_path no)"
+  body="$BATS_TEST_TMPDIR/body.json"
+  printf '{"t":"secret"}' > "$body"
+
+  post_under "$bin" posix "$body"
+  [ "$status" -eq 0 ]
+
+  # The code alone, and the noise really happened.
+  [ "$output" = "200" ]
+  grep -q -F -- "$NOISE" "$ERR_FILE"
 }
 
 @test "the sandbox decides whether cygpath exists — both directions (#850)" {

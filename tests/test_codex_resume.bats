@@ -356,19 +356,33 @@ fake_node_failing() {
 # banner has been parsed, which is after the server is running. The port file
 # carries the same string, so seating has to work from it alone.
 
-record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
-  local hash
+# #1254: the fallback is a seat's own RECORD now, not a project-hash-keyed
+# port file -- write one via the real writer (same one codex-monitor.sh uses)
+# and export AGMSG_CODEX_SEAT_KEY, which is how a caller's own environment
+# points _agmsg_codex_app_server_url at this exact record.
+_write_seat_record_port() {   # <project> <port-value>
+  local project="$1" port="$2" seat_key project_hash
   # shellcheck disable=SC1091
   source "$SKILL_DIR/scripts/lib/hash.sh"
-  hash="$(printf '%s' "$4" | agmsg_sha1)"
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/drivers/types/codex/_seat-key.sh"
+  seat_key="$(_agmsg_codex_seat_key_new)"
   mkdir -p "$TEST_SKILL_DIR/run"
-  printf '1' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  project_hash="$(printf '%s' "$project" | agmsg_sha1)"
+  _agmsg_codex_seat_record_write \
+    "$(_agmsg_codex_seat_record_path "$TEST_SKILL_DIR/run" "$seat_key")" \
+    "$project_hash" "12345" "$port" "" "" "codex-cli-test"
+  export AGMSG_CODEX_SEAT_KEY="$seat_key"
+}
+
+record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
+  _write_seat_record_port "$4" "1"
   ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
     AGMSG_NODE="$(fake_node_printing "$1")" \
       bash "$TYPES/codex/codex-record-session.sh" "$2" "$3" "$4" )
 }
 
-@test "codex record: seats from the port file when the app-server variable never arrives" {
+@test "codex record: seats from the seat record when the app-server variable never arrives" {
   local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
   printf 'thr-seated\nthr-unclaimed\n' > "$ids"
   source "$SKILL_DIR/scripts/lib/role-session.sh"
@@ -388,14 +402,10 @@ record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
   [ -z "$(recorded_uuid team alice)" ]
 }
 
-@test "codex record: a half-written port file is not turned into a URL" {
-  local proj ids hash; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+@test "codex record: a malformed seat record is not turned into a URL" {
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
   printf 'thr-unclaimed\n' > "$ids"
-  # shellcheck disable=SC1091
-  source "$SKILL_DIR/scripts/lib/hash.sh"
-  hash="$(printf '%s' "$proj" | agmsg_sha1)"
-  mkdir -p "$TEST_SKILL_DIR/run"
-  printf 'not-a-port' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  _write_seat_record_port "$proj" "not-a-port"
   ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
     AGMSG_NODE="$(fake_node_printing "$ids")" \
       bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
@@ -406,22 +416,18 @@ record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
   # Digits alone do not make a port. A prefix of a real port is also all digits,
   # which is why the writer publishes atomically — this bounds what anything
   # else could leave behind.
-  local proj ids hash bad
+  local proj ids bad
   proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
   printf 'thr-unclaimed\n' > "$ids"
-  # shellcheck disable=SC1091
-  source "$SKILL_DIR/scripts/lib/hash.sh"
-  hash="$(printf '%s' "$proj" | agmsg_sha1)"
-  mkdir -p "$TEST_SKILL_DIR/run"
   for bad in 0 65536 999999 00042; do
-    printf '%s' "$bad" > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+    _write_seat_record_port "$proj" "$bad"
     ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
       AGMSG_NODE="$(fake_node_printing "$ids")" \
         bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
     [ -z "$(recorded_uuid team alice)" ] || { echo "seated from port '$bad'"; false; }
   done
   # …and the boundary values that ARE ports still work.
-  printf '65535' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  _write_seat_record_port "$proj" "65535"
   ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
     AGMSG_NODE="$(fake_node_printing "$ids")" \
       bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )

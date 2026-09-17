@@ -4,6 +4,100 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-09-14
+
+### Added
+- Terminal drivers for tmux, herdr, and plain OS terminal windows: `peek`, `poke`, and `arrange` work through whichever terminal a member runs in (#1014, #1060, #1078, #1163, #1207)
+- `peek` with no member name summarizes the screens of the whole local team (#1194)
+- `where` reports this session's terminal, its pane, and the operations that terminal supports; Claude Code sessions are told their terminal at start (#1082, #1173, #1224)
+- `team` shows, for each teammate, whether `peek`, `poke`, and `arrange` can reach it, and why not when they cannot (#1232)
+- `fix`: a session proves which pane it is running in and repairs only its own name and placement records (#1152, #1157, #1188, #1191, #1227)
+- A session names its own pane when it acts, and `spawn` names the pane it created and sets its agent key (#1065, #1080, #1099)
+- `send` accepts `--body-file <path>` and `--body -` (stdin) like `poke`, and refuses a body that looks like a flag (#1101)
+- Antigravity (`agy`): the skill is installed where `agy` discovers skills, and monitor delivery with safe automatic resume is available on Linux (#1090, #1223)
+- Report a mark-read that lost to a concurrent writer (#1011) (#1013)
+- Deliver the inbox mid-turn via a PostToolUse hook, not only at Stop (#1003) (#1004)
+
+### Changed
+- `team` is read-only: the leader-side repair options `--fix`, `--fix-pane-names`, and `--rename-sessions` are removed; each session repairs itself with `fix` (#1152, #1211, #1213)
+- actas lock, readiness, and spawn records are keyed by team and member id, so team or member names containing `__` no longer collide (#1023)
+- Agent type detection follows an explicit priority, and `GEMINI_API_KEY` on its own is only a last resort (#1247)
+- Per-driver notes live at `scripts/drivers/terminals/<driver>/README.md`; `install --update` removes the old `SKILL.md` copies (#1248)
+
+### Fixed
+- Codex seats that hold an actas lock no longer drop out of their own bridge's delivery, and spawned seats do not inherit it (#1239, #1245)
+- Claude Code's `actas` and `drop` instructions again start the watcher through the Monitor tool and confirm it attached (#1237)
+- `spawn` skips the readiness wait only when delivery is explicitly off or turn (#647)
+- A graceful `despawn` waits for the pane to close, not only for the lock (#1097)
+- herdr socket paths containing `:` round-trip through placement records (#1166)
+- `watch` and `inbox` deliver a backlog past the argument-length limit instead of failing silently (#777, #1045)
+- `check-inbox` consumes rows only after the payload is written (#1026)
+- The Windows hook payload stays off the login shell's stdout (#1015)
+- Antigravity's delivery plug parses under bash 3.2 (#1244)
+- Pass non-remote subcommands through (#590)
+- The remaining argv-to-stdin sites, plus a Windows CRLF row-separator bug (#991)
+- Give the identity lease a start token on Windows (#978)
+- One wake, one turn — attribute mid-start turn-end signals by turn id (#889)
+- Discover a ws:// app-server in the SessionStart plug (#1057)
+- Refuse a non-string envelope.blob/cipher instead of storing "null" (#1042) (#1048)
+- Count roster mutations as held so the read frontier can advance (#968) (#986)
+- A store at the current schema revision skips init's write batch (#1001) (#1010)
+- Probe before the pipe, not inside it (#462) (#904)
+- Widen _wait_pidfile's window and name what it saw (#595) (#797)
+- Stand down instead of an unfiltered watcher when a resumed seat is unidentified (#982) (#993)
+- Refuse to guess between multiple installs on --update with no --cmd (#659)
+- Write Codex writable_roots through a symlinked config.toml instead of replacing the link (#747) (#995)
+- Stop the apply failure path from discarding the shell's stderr (#974)
+- Stand down when the installation is updated underneath (#963) (#965)
+
+### Performance
+- Batch the rollout mtime scan (#1035) (#1037)
+
+## [1.2.3] - 2026-08-22
+
+### Added
+- Emit push.posted when the POST is over, before the acks are written (#918)
+
+### Fixed
+- Name the sync engine in the update warning, not just watch.sh (#964)
+- Reap a same-(project,role) orphan before spawning (#906 link 2) (#943)
+- Preserve exact identity pairs in check-inbox (#721)
+- Exit when another writer owns the thread (#906 link 1) (#935)
+- Make the failure cap reach and bound the re-arm rate (#906 link 3) (#941)
+- Retry a busy apply that races EPIPE, keeping the hung-driver bound (#931)
+- A pulled field that is an array must not become shell words (#930)
+- Report a busy store as busy, not as a failed check, and wait for it (#920)
+- Say which check returned 13 (#911)
+
+### Performance
+- Index the two lookups that made import scale with the store (#956)
+- Quote SQL literals with a bash expansion, not a fork (#948)
+- A release PR is a version bump, not a third full matrix (#945)
+- Parse a pull page with one jq, framed by NUL, with no eval (#908, #940) (#942)
+- Check a pulled wire id without a process (#939)
+- Find the first gap once, not once per candidate (#932)
+- One jq per acknowledgement, not six forks (#927)
+- Quote each pulled message's fields once, not at 42 fork sites (#908) (#925)
+- Index events.legacy_id, looked up by value everywhere (#926)
+
+## [1.2.2] - 2026-08-20
+
+### Fixed
+- Keep curl's stderr on the GET path, in the shape the POST side ended up with (#850) (#854)
+- Correct a binding an older release left writable, and say what to run if you do not upgrade (#902)
+- Keep curl's stderr, and hold the temporaries in one condemned directory (#850) (#903)
+- Pass the history and unread-marker SQL on stdin (#777) (#899)
+- Pull a team larger than a command line, and say what it is doing (#882) (#895)
+- Keep the binding a re-point replaces instead of destroying it (#884)
+- Pin count-invisible heavy test files apart, raise the shard timeout with real margin (#885)
+- Derive --update's type re-detection from the same list as TPL_TYPE (#846) (#880)
+- Take the basename of the whole ps comm path (#770) (#771)
+- Map grok-build to grok in the pid walk (#860)
+- Fold sentinel '-' into the empty session-id path (#857)
+
+### Documentation
+- Say that main takes squash commits only (#845)
+
 ## [1.2.1] - 2026-08-18
 
 ### Added
@@ -42,6 +136,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A start that never began is a failed start, not a silent return (#810)
 
 ### Documentation
+- State the reason, not who gave it
 - A pushed head is not a shipped one
 - The header said builtins while calling three commands
 
@@ -98,7 +193,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Narrow a claim I disproved myself two commits later
 - Delete a comment describing the control this one replaced
 - Point key.sh at the current design, and stop asserting the move has happened
-- Move the connect onboarding design to agmsg-cloud, and drop labels that point at nothing
 - Make the promise about this document weak enough to be true
 - Label what stands behind each claim, instead of asserting they all cite
 - Add a Japanese translation, and consolidate the derivation it mirrors
@@ -410,7 +504,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support spawning into herdr panes (#495)
 - Drag files onto a pane to insert their path (#481)
 - Adaptive catch-up so a backlog doesn't crawl at 100/5s
-- Add team-list.sh (agmsg team list --json, koit-approved)
+- Add team-list.sh (agmsg team list --json)
 - Add status --json and pending list/abort (ADR 0007 addendum)
 - Consume connected team credentials
 - Add scripts/remote.sh (connect/status/disconnect/doctor) per ADR 0007
@@ -831,6 +925,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.3.0]: https://github.com/fujibee/agmsg/compare/v1.2.3...v1.3.0
+[1.2.3]: https://github.com/fujibee/agmsg/compare/v1.2.2...v1.2.3
+[1.2.2]: https://github.com/fujibee/agmsg/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/fujibee/agmsg/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.6...v1.2.0
 [1.2.0-rc.6]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.5...v1.2.0-rc.6
 [1.2.0-rc.5]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.4...v1.2.0-rc.5
