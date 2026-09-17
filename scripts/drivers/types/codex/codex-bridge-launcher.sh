@@ -908,6 +908,27 @@ EOF
   launched_pid=$!
   printf '%s\n' "$launched_pid" > "$pidfile"
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
+    # A custom bridge is foregrounded by the test harness, so a plain wait
+    # would hide a role change until the bridge exits on its own. Poll the
+    # request while it runs and retire this exact leased bridge when the seat
+    # selects another pair; the normal outer loop handles the same transition
+    # for the default bridge, which is not waited on here.
+    while _agmsg_pid_alive_local "$launched_pid"; do
+      _bridge_request_pair=""
+      if [ -f "$REQUEST_FILE" ]; then
+        _bridge_req_type=""; _bridge_req_thread=""; _bridge_req_app=""
+        _bridge_req_team=""; _bridge_req_name=""
+        IFS="$TAB" read -r _bridge_req_type _bridge_req_thread _bridge_req_app \
+          _bridge_req_team _bridge_req_name < "$REQUEST_FILE" 2>/dev/null || true
+        if [ -n "${_bridge_req_team:-}" ] && [ -n "${_bridge_req_name:-}" ]; then
+          _bridge_request_pair="$_bridge_req_team$TAB$_bridge_req_name"
+        fi
+      fi
+      if [ "$_bridge_request_pair" != "$ROLE_PAIR" ]; then
+        retire_recorded_bridge
+      fi
+      sleep 0.2
+    done
     wait "$launched_pid" 2>/dev/null || true
     recorded_pid=""
     IFS= read -r recorded_pid < "$pidfile" 2>/dev/null || true
