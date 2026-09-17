@@ -756,6 +756,22 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   fi
   deregistered_ticks=0
 
+  # Check the seat request before refreshing role-record safety state. Actas
+  # publishes role changes here; retire this child immediately when its pair is
+  # no longer the selected one.
+  request_pair=""
+  _rtype=""; _rthread=""; _rapp=""; _rteam=""; _rname=""
+  if [ -f "$REQUEST_FILE" ]; then
+    IFS="$TAB" read -r _rtype _rthread _rapp _rteam _rname < "$REQUEST_FILE" 2>/dev/null || true
+    if [ -n "${_rteam:-}" ] && [ -n "${_rname:-}" ]; then
+      request_pair="$_rteam$TAB$_rname"
+    fi
+  fi
+  if [ "$request_pair" != "$ROLE_PAIR" ]; then
+    retire_recorded_bridge
+    exit 0
+  fi
+
   # actas can join a second role after SessionStart. Re-exec through the same
   # safety filter when the registration set changes, replacing the old bridge
   # so the new role is actually subscribed instead of being stranded.
@@ -770,21 +786,9 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # discover the live TUI thread via thread/loaded/list.
   thread_id="loaded"
   req_app_server="$APP_SERVER"
-  request_pair=""
   if [ -f "$REQUEST_FILE" ]; then
-    _rtype=""; _rthread=""; _rapp=""; _rteam=""; _rname=""
-    IFS="$TAB" read -r _rtype _rthread _rapp _rteam _rname < "$REQUEST_FILE" 2>/dev/null || true
     [ -n "${_rthread:-}" ] && thread_id="$_rthread"
     [ -n "${_rapp:-}" ] && req_app_server="$_rapp"
-    if [ -n "${_rteam:-}" ] && [ -n "${_rname:-}" ]; then
-      request_pair="$_rteam$TAB$_rname"
-    fi
-  fi
-  if [ "$request_pair" != "$ROLE_PAIR" ]; then
-    retire_recorded_bridge
-    # The seat's request no longer names this role (or is ambiguous/missing).
-    # Retire the old child so a role change cannot leave two bridges alive.
-    exit 0
   fi
 
   # A child launcher is role-scoped. The seat request supplies the pair and
