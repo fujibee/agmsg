@@ -466,7 +466,14 @@ _remote_client_version() {
   # LC_ALL=C on both, matching is byte-oriented and that failure mode does
   # not arise; stderr is also discarded regardless, so a version string
   # stays silent on this path the same way the JS side's try/catch is.
-  sanitized="$(LC_ALL=C printf '%s' "$line" | LC_ALL=C sed 's/[^ -~]//g' 2>/dev/null)"
+  # `|| sanitized=""`, not left unguarded: the substitution runs inside a
+  # command substitution, which does not inherit this file's errexit on its
+  # own, so a nonzero sed here would otherwise leave whatever partial output
+  # it printed before failing sitting in $sanitized -- truncated to 64
+  # characters and sent as though it were a complete, validated value. Any
+  # failure of the pipeline now discards that partial output outright and
+  # falls through to the "unknown" fallback below instead.
+  sanitized="$(LC_ALL=C printf '%s' "$line" | LC_ALL=C sed 's/[^ -~]//g' 2>/dev/null)" || sanitized=""
   sanitized="${sanitized:0:64}"
   sanitized="${sanitized#"${sanitized%%[![:space:]]*}"}"
   sanitized="${sanitized%"${sanitized##*[![:space:]]}"}"
