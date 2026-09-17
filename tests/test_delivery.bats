@@ -483,7 +483,11 @@ eperm_pid() {
   # the 5-minute default, and without a re-arm instruction the agent has no
   # reason to invoke Monitor again when that notice arrives.
   grep -q 'timeout_ms: 1800000' <<<"$output"
-  [[ "$output" =~ "immediately re-arm it by invoking Monitor again" ]]
+  grep -q 'immediately re-arm it by invoking Monitor again' <<<"$output"
+  # The maintainer's follow-up to #1270: an agent that announces every silent
+  # re-arm ("re-armed", an acknowledgement, a summary) burns tokens every 30
+  # minutes for no reader benefit, so the directive must say to do it quietly.
+  [[ "$output" =~ "Re-arm it silently" ]]
 }
 
 @test "delivery set both: emits AGMSG-DIRECTIVE for Monitor invocation" {
