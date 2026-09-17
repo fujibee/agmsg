@@ -451,7 +451,13 @@ _remote_client_version() {
     # the file could not be opened.
     IFS= read -r line < "$SKILL_DIR/VERSION" 2>/dev/null || true
   fi
-  sanitized="$(LC_ALL=C printf '%s' "$line" | tr -cd '\40-\176')"
+  # sed, not tr: this function's dependency footprint is curated (see this
+  # file's own test sandboxes), and sed is already a dependency of the curl
+  # helpers below (_remote_curl_quote) -- no reason to add a second tool for
+  # the same class of job. The bracket expression is a literal byte range
+  # under LC_ALL=C, the same locale-stability reasoning as elsewhere in this
+  # file's character checks.
+  sanitized="$(LC_ALL=C printf '%s' "$line" | sed 's/[^ -~]//g')"
   sanitized="${sanitized:0:64}"
   sanitized="${sanitized#"${sanitized%%[![:space:]]*}"}"
   sanitized="${sanitized%"${sanitized##*[![:space:]]}"}"
