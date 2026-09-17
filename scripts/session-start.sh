@@ -512,7 +512,9 @@ monitor-branded tools are not valid for agmsg delivery. Do not start watch.sh
 with Bash/background/nohup or a shell task. Success is:
 
   - Monitor(agmsg inbox stream) starts
-  - the footer shows "1 monitor" (not "1 shell")
+  - TaskList shows a task whose description begins with "agmsg inbox
+    stream" for this session (the reliable check; the background-task
+    footer is not)
   - the transcript later contains Monitor event: "agmsg inbox stream"
 
 If the generic Monitor tool is unavailable, do not treat a background shell

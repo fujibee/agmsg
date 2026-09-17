@@ -277,18 +277,18 @@ Settings are per-project. Each `<project>/.claude/settings.local.json` gets exac
 For real-time delivery, verify the Claude Code runtime state:
 
 1. `ToolSearch select:Monitor` finds Claude Code's generic `Monitor` tool.
-2. The session starts `Monitor(agmsg inbox stream)` with the `watch.sh ... claude-code` command from the `AGMSG-DIRECTIVE`.
-3. The Claude Code footer shows `1 monitor`.
-4. The transcript contains `Monitor event: "agmsg inbox stream"` when messages arrive.
+2. The session starts `Monitor(agmsg inbox stream)` with the `watch.sh ... claude-code` command from the `AGMSG-DIRECTIVE` (or, after `actas <name>`, `Monitor(agmsg inbox stream (acting as <name>))`).
+3. `TaskList` shows a task whose description begins with `agmsg inbox stream` for this session.
+4. The transcript contains a `Monitor event: "agmsg inbox stream"` (or `"agmsg inbox stream (acting as <name>)"`) notification when messages arrive.
 
 These are failure states, even if `delivery.sh status` says `mode: monitor`:
 
-- The footer shows `1 shell`.
-- `watch.sh` is running only as a Bash/background/nohup shell process.
+- `TaskList` shows no task whose description begins with `agmsg inbox stream` for this session.
+- `watch.sh` is running only as a Bash/background/nohup shell process, not through the Monitor tool.
 - Tool search finds Azure Monitor, an MCP monitor, or any other monitor-branded tool instead of Claude Code's generic `Monitor` tool.
 - `ToolSearch select:Monitor` cannot find a generic `Monitor` tool.
 
-If the Monitor tool is unavailable, use `turn` delivery or manual `/agmsg` inbox checks as a fallback. Those modes still deliver queued messages, but they are not real-time monitor delivery.
+The background-task footer is not a reliable signal either way — it does not consistently reflect whether a Monitor is really streaming for this session, so check `TaskList` instead. If the Monitor tool is unavailable, use `turn` delivery or manual `/agmsg` inbox checks as a fallback. Those modes still deliver queued messages, but they are not real-time monitor delivery.
 
 ### Migrating from legacy `hook on/off`
 

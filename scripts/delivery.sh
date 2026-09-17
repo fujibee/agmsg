@@ -491,10 +491,12 @@ AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
 
 Pass the command above verbatim — the session_id is already filled in.
 Use Claude Code's generic Monitor tool only. Do not start this command with
-Bash/background/nohup or a shell task; a footer that shows "1 shell" is not
-real-time Monitor delivery. Success is "1 monitor" in the footer and transcript
-events named Monitor event: "agmsg inbox stream". If ToolSearch cannot find
-the generic Monitor tool, use turn/manual inbox as a fallback; that is not
+Bash/background/nohup or a shell task. Success is a TaskList entry whose
+description begins with "agmsg inbox stream" (after actas it reads
+"agmsg inbox stream (acting as <name>)") and, once messages arrive, a
+transcript event named to match. The background-task footer is not a
+reliable check either way; use TaskList. If ToolSearch cannot find the
+generic Monitor tool, use turn/manual inbox as a fallback; that is not
 real-time monitor delivery.
 EOF
 }
@@ -829,10 +831,12 @@ do_status() {
       claude-code)
         cat <<'EOF'
 note: status reports configured hooks only. For real-time delivery, Claude Code
-must also have a generic Monitor task named "agmsg inbox stream" running in the
-current session. Verify ToolSearch select:Monitor, footer "1 monitor", and
-transcript Monitor event: "agmsg inbox stream"; footer "1 shell" means the
-watcher was started as a shell/background task, not Monitor delivery.
+must also have a generic Monitor task running in the current session whose
+description begins with "agmsg inbox stream" (after actas: "agmsg inbox
+stream (acting as <name>)"). Verify with TaskList, not the background-task
+footer — the footer is not a reliable signal either way. A watch.sh started
+as a shell/background/nohup task instead of through the Monitor tool is not
+real-time delivery even while its process stays alive.
 EOF
         ;;
     esac

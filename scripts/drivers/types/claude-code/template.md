@@ -111,7 +111,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 <!-- /agmsg:slot spawn -->
 
 <!-- agmsg:slot mode -->
-If argument is "mode", run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status __AGENT_TYPE__ "$(pwd)"`. Show the output to the user. If it says `mode: monitor`, explicitly say this is only configuration status; runtime success still requires Claude Code's generic `Monitor(agmsg inbox stream)` task, footer `1 monitor`, and transcript `Monitor event: "agmsg inbox stream"`.
+If argument is "mode", run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status __AGENT_TYPE__ "$(pwd)"`. Show the output to the user, and if it says `mode: monitor` (or `both`), say explicitly that this reports project *configuration* only — it does not prove the runtime Monitor task is attached in the current session. To confirm the runtime state, run TaskList and look for a task whose description begins with `agmsg inbox stream` (after an `actas` it reads `agmsg inbox stream (acting as <name>)`) — that is the reliable check; the background-task footer is not (it does not reliably reflect whether a Monitor is really streaming for this session).
 
 For `mode monitor|turn|both|off`, run `delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"` and follow its `AGMSG-DIRECTIVE` block. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
 <!-- /agmsg:slot mode -->
