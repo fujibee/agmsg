@@ -57,7 +57,7 @@ _agmsg_codex_app_server_url() {
   local record port
   record="$(_agmsg_codex_seat_record_path "$SKILL_DIR/run" "$seat_key")"
   _agmsg_codex_seat_record_read "$record" || return 0
-  port="$SEAT_REC_PORT"
+  port="${SEAT_REC_PORT:-}"
   # Digits, and a port a TCP stack could have handed out. Digits alone are not
   # enough on their own — a prefix of a real port (5 of 52962) is all digits and
   # is itself a valid port, so this check cannot detect a partial read. The
