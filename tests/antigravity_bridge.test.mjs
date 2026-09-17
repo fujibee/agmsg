@@ -8,9 +8,10 @@ import {once} from 'node:events';
 import {forbiddenTool} from '../scripts/drivers/types/antigravity/antigravity-bridge.mjs';
 const repo=path.resolve(import.meta.dirname,'..');
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
-// 並列時は各fixtureが複数のbash/node子プロセスを生成するため、15秒では
-// 正常なNEEDS_ATTENTION到達をtimeoutと誤判定しうる。上限を60秒にする。
-async function waitFor(fn){for(let i=0;i<600;i++){if(fn())return;await delay(100);}throw Error('待機timeout');}
+// Under parallel runs each fixture spawns multiple bash/node child processes,
+// so 15 seconds can misjudge a normal NEEDS_ATTENTION arrival as a timeout.
+// Raise the limit to 60 seconds.
+async function waitFor(fn){for(let i=0;i<600;i++){if(fn())return;await delay(100);}throw Error('wait timeout');}
 function fixture(driver='sqlite',mode='success',extra={}) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'agmsg-agy-test-'));
   const install=path.join(dir,'install'),project=path.join(dir,'project');
@@ -35,7 +36,7 @@ function fixture(driver='sqlite',mode='success',extra={}) {
     }
   }};
 }
-for(const driver of ['sqlite','jsonl'])test(`隔離${driver}: 2通をSUCCESS後だけ既読化`,async()=>{
+for(const driver of ['sqlite','jsonl'])test(`isolated ${driver}: marks two messages read only after SUCCESS`,async()=>{
   const f=fixture(driver);try {
     await waitFor(()=>f.output().includes('ready'));
     f.sh('send.sh',['fixture','sender','worker','first']);
@@ -45,7 +46,7 @@ for(const driver of ['sqlite','jsonl'])test(`隔離${driver}: 2通をSUCCESS後�
     assert.equal(f.unread(),'');assert.equal(f.state().conversation_id,'fixture-conversation');
   }catch(e){e.message+='\n'+f.output();throw e;}finally{await f.close();}
 });
-test('stream tool検知は命令だけを見る',()=>{
+test('stream tool detection looks only at the command',()=>{
   const base={event:'step_update',step_update:{step_type:'tool',tool_info:{parameters:{CommandLine:'bash /tmp/inbox.sh team role'}}}};
   assert.equal(forbiddenTool(base),true);
   assert.equal(forbiddenTool({event:'step_update',step_update:{step_type:'agent_response',text_delta:'inbox.sh'}}),false);
@@ -53,7 +54,7 @@ test('stream tool検知は命令だけを見る',()=>{
   assert.equal(forbiddenTool(base),false);
 });
 
-test('予約なしの陽性対照ではinboxの既読化が進む',async()=>{
+test('without a reservation, the positive control still lets inbox marking-read proceed',async()=>{
   const f=fixture();
   try {
     await waitFor(()=>f.output().includes('ready'));
@@ -64,7 +65,7 @@ test('予約なしの陽性対照ではinboxの既読化が進む',async()=>{
   } finally { await f.close(); }
 });
 
-test('既知turn rulefileだけをmonitor markerへ移行する',async()=>{
+test('migrates only a known turn rulefile to the monitor marker',async()=>{
   const f=fixture();
   try {
     await waitFor(()=>f.output().includes('ready'));
@@ -77,7 +78,7 @@ test('既知turn rulefileだけをmonitor markerへ移行する',async()=>{
   } finally { await f.close(); }
 });
 
-test('未知rulefileのmonitor移行は拒否して内容を保持する',async()=>{
+test('refuses monitor migration for an unknown rulefile and preserves its content',async()=>{
   const f=fixture();
   try {
     await waitFor(()=>f.output().includes('ready'));
@@ -90,7 +91,7 @@ test('未知rulefileのmonitor移行は拒否して内容を保持する',async(
   } finally { await f.close(); }
 });
 
-test('二重起動を拒否する',async()=>{
+test('refuses a duplicate launch',async()=>{
   const f=fixture();
   try {
     await waitFor(()=>f.output().includes('ready'));
@@ -99,7 +100,7 @@ test('二重起動を拒否する',async()=>{
   } finally { await f.close(); }
 });
 
-test('IDLE中のpeek停止はNEEDS_ATTENTIONへ遷移せず予約を解放する',async()=>{
+test('stopping peek while idle does not transition to NEEDS_ATTENTION and releases the reservation',async()=>{
   const barrier=path.join(os.tmpdir(),`agmsg-peek-${process.pid}-${Date.now()}`);
   const f=fixture('sqlite','success',{AGMSG_TEST_PEEK_BARRIER:barrier});
   try {
@@ -115,7 +116,7 @@ test('IDLE中のpeek停止はNEEDS_ATTENTIONへ遷移せず予約を解放する
   } finally { fs.rmSync(`${barrier}.release`,{force:true}); fs.rmSync(`${barrier}.reached`,{force:true}); await f.close(); }
 });
 
-test('IDLE中のpeek非0終了後のgroup停止は正常停止として扱う',async()=>{
+test('a group stop after peek exits non-zero while idle is treated as a normal stop',async()=>{
   const failure=path.join(os.tmpdir(),`agmsg-peek-failure-${process.pid}-${Date.now()}`);
   const f=fixture('sqlite','success',{AGMSG_TEST_PEEK_FAILURE:failure});
   try {
@@ -132,7 +133,7 @@ test('IDLE中のpeek非0終了後のgroup停止は正常停止として扱う',a
   } finally { fs.rmSync(`${failure}.reached`,{force:true}); await f.close(); }
 });
 
-test('IDLE中peek subprocessのSIGTERM終了は正常停止として扱う',async()=>{
+test('a SIGTERM exit of the peek subprocess while idle is treated as a normal stop',async()=>{
   const signal=path.join(os.tmpdir(),`agmsg-peek-signal-${process.pid}-${Date.now()}`);
   const f=fixture('sqlite','success',{AGMSG_TEST_PEEK_SIGNAL:signal});
   try {
@@ -146,7 +147,7 @@ test('IDLE中peek subprocessのSIGTERM終了は正常停止として扱う',asyn
   } finally { fs.rmSync(`${signal}.reached`,{force:true}); await f.close(); }
 });
 
-test('本文上限超過はNEEDS_ATTENTIONとして停止する',async()=>{
+test('exceeding the body size limit stops as NEEDS_ATTENTION',async()=>{
   const f=fixture();
   try {
     await waitFor(()=>f.output().includes('ready'));
@@ -157,7 +158,7 @@ test('本文上限超過はNEEDS_ATTENTIONとして停止する',async()=>{
   } finally { await f.close(); }
 });
 
-test('IDLE中verifyのSIGTERM終了は正常停止として扱う',async()=>{
+test('a SIGTERM exit of verify while idle is treated as a normal stop',async()=>{
   const signal=path.join(os.tmpdir(),`agmsg-verify-signal-${process.pid}-${Date.now()}`);
   const f=fixture('sqlite','success',{AGMSG_TEST_VERIFY_SIGNAL:signal});
   try {
@@ -171,7 +172,7 @@ test('IDLE中verifyのSIGTERM終了は正常停止として扱う',async()=>{
   } finally { fs.rmSync(`${signal}.count`,{force:true}); await f.close(); }
 });
 
-test('completed batchの明示ack復旧はモデルを再実行しない',async()=>{
+test('an explicit ack recovery of a completed batch does not re-run the model',async()=>{
   const f=fixture('sqlite','attack');
   try {
     await waitFor(()=>f.output().includes('ready'));
@@ -188,7 +189,7 @@ test('completed batchの明示ack復旧はモデルを再実行しない',async(
   } finally { await f.close(); }
 });
 
-test('uncertain batchの明示replayは保存済みIDと本文を再投入する',async()=>{
+test('an explicit replay of an uncertain batch reinjects the saved IDs and body',async()=>{
   const f=fixture('sqlite','attack');
   try {
     await waitFor(()=>f.output().includes('ready'));
@@ -214,7 +215,7 @@ test('uncertain batchの明示replayは保存済みIDと本文を再投入する
   } finally { await f.close(); }
 });
 
-for(const mode of ['attack','append-failure','crash','broken'])test(`異常 ${mode}: batchを保持し自動ackしない`,async()=>{
+for(const mode of ['attack','append-failure','crash','broken'])test(`abnormal ${mode}: retains the batch and does not auto-ack`,async()=>{
   const f=fixture('sqlite',mode);try {
     await waitFor(()=>f.output().includes('ready'));
     f.sh('send.sh',['fixture','sender','worker','batch A']);

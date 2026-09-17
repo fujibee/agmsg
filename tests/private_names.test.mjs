@@ -43,8 +43,8 @@ test("the shape is case-sensitive, so 'non-CC runtimes' is not a seat", () => {
 
 test("an injected name is found where it abuts CJK", () => {
   // Real input: the Japanese design docs write the handle straight against a
-  // particle. Python's re would find nothing here (`の` is a word character to
-  // it), which is how a scan run in the wrong language reports a clean tree.
+  // particle. Python's re would find nothing here (U+306E is a word character
+  // to it), which is how a scan run in the wrong language reports a clean tree.
   const found = scan(`バイナリだけを持ち込む（${H}の裁定、2026-07-25`, "docs/design.ja.md",
     named(H));
   assert.deepEqual(found.map((f) => f.name), [H]);

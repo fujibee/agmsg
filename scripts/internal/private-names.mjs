@@ -32,8 +32,9 @@
  *
  * 2. It says what it means. `\b` is defined against `\w`, so reading a pattern
  *    requires knowing which characters that covers in this engine — and the
- *    answer differs between engines on the same text. Python's `re` treats `の`
- *    as a word character, so a handle written straight against a particle in
+ *    answer differs between engines on the same text. Python's `re` treats
+ *    U+306E (the hiragana particle "no") as a word character, so a handle
+ *    written straight against a particle in
  *    the Japanese docs matches nothing; JavaScript's `\w` is ASCII and finds
  *    it. Both were measured. The class below cannot drift that way, and those
  *    docs are real input here.

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// bridge検査用。実CLIの認証・storeには接続しない。
+// For bridge inspection. Does not connect to the real CLI's auth/store.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -24,7 +24,8 @@ for await (const line of createInterface({input: process.stdin})) {
     const install=process.env.FIXTURE_INSTALL;
     spawnSync('bash',[install+'/scripts/send.sh','fixture','sender','worker','late B'],{env:process.env});
     if(mode==='append-failure') {
-      // 空記録は読めるが追記不可の反例。親のstream検知を別に検証する。
+      // A counterexample where an empty record is readable but not appendable.
+      // Separately verifies the parent's stream detection.
       for(const name of fs.readdirSync(install+'/run'))if(name.endsWith('.violations'))fs.chmodSync(install+'/run/'+name,0o400);
     }
     spawnSync('bash',[install+'/scripts/inbox.sh','fixture','worker'],{env:process.env});

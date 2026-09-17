@@ -282,11 +282,12 @@ _sw_cell_session() {   # <id> <team> <agent> <type>
 
   # A rename_confirm type (codex) cannot be pre-read: its name is not on the
   # title, and the one header that carries it ("Thread name: ...") scrolls away
-  # early -- the manifest's own session_name_source says so ("scroll で消える、
-  # 確認に使うな"). Reading TITLE-based readback for such a type is not merely
-  # weaker, it is answering with a datum the manifest documents as unfit for
-  # this. So a type that declares rename_confirm is verified by NEWNESS of its
-  # own confirmation line instead, never by title/screen-header readback.
+  # early -- the manifest's own session_name_source says so ("it disappears on
+  # scroll; don't use it to check"). Reading TITLE-based readback for such a
+  # type is not merely weaker, it is answering with a datum the manifest
+  # documents as unfit for this. So a type that declares rename_confirm is
+  # verified by NEWNESS of its own confirmation line instead, never by
+  # title/screen-header readback.
   rename_confirm="$(agmsg_type_get "$type" rename_confirm 2>/dev/null || true)"
   if [ -n "$rename_confirm" ]; then
     before="$(_sw_rename_confirm_count "$id" "$rename_confirm" "$expected")" || {

@@ -149,17 +149,17 @@ def explain_claim_refusal(detail, project, team, role):
     seat=f'--project {shlex.quote(str(Path(project).absolute()))} --team {shlex.quote(team)} --name {shlex.quote(role)}'
     state=tui_reservation_state(project,team,role,int(pid))
     if state=='live':
-        return (f'{team}/{role} 稼働中のTUI supervisorが保持しています (PID {pid})\n'
-                f'  停止してから起動し直してください。別の端末・別のセッションから起動したものにも届きます:\n'
+        return (f'{team}/{role} is held by a running TUI supervisor (PID {pid})\n'
+                f'  Stop it, then start again. This also reaches one started from a different terminal or session:\n'
                 f'    agy-tui stop {seat}\n'
-                f'  状態の確認: agy-tui status {seat}')
+                f'  Check status: agy-tui status {seat}')
     if state in ('gone','unknown'):
-        why='既に終了しています' if state=='gone' else '生死を判定できません'
-        return (f'{team}/{role} このseatのTUI予約はPID {pid}を指していますが、その processは{why}\n'
-                f'  状態を確認してから判断してください:\n'
+        why='has already exited' if state=='gone' else 'cannot be determined as alive or dead'
+        return (f'{team}/{role} the TUI reservation for this seat points at PID {pid}, but that process {why}\n'
+                f'  Check status before deciding:\n'
                 f'    agy-tui status {seat}')
-    return (f'{team}/{role} PID {pid}が保持していますが、このseatのTUI予約はそのpidを指していません\n'
-            f'  別種のセッションが同じroleを保持している可能性があります。状態を確認してください:\n'
+    return (f'{team}/{role} PID {pid} holds it, but the TUI reservation for this seat does not point at that pid\n'
+            f'  A different kind of session may be holding the same role. Check status:\n'
             f'    agy-tui status {seat}')
 
 class TerminalScreen:
