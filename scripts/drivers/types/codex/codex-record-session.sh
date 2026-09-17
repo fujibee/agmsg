@@ -52,6 +52,8 @@ export SKILL_DIR
 # shellcheck disable=SC1091
 . "$SKILL_DIR/scripts/lib/hash.sh"
 # shellcheck disable=SC1091
+. "$SCRIPT_DIR/_seat-key.sh"
+# shellcheck disable=SC1091
 . "$SCRIPT_DIR/_app-server.sh"
 
 # Poison-record guard (best-effort bias: record nothing when unsure). A mangled
@@ -204,4 +206,22 @@ fi
 # carry one path spelling regardless of how the caller spelled the argument.
 agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
 agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" || true
+
+# The Codex actas flow reaches this script instead of actas-claim.sh. Publish
+# the same seat request here so a resumed seat's dispatcher has an authority
+# record even when SessionStart did not run. A recovered app-server is required
+# for a non-empty pair; without it, publish an empty-pair tombstone to retire
+# any stale role selection and let a later hook retry with the endpoint.
+if [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] && _agmsg_codex_seat_key_ok "$AGMSG_CODEX_SEAT_KEY"; then
+  request_file="$SKILL_DIR/run/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  request_server="$(_agmsg_codex_app_server_url "$PROJECT" 2>/dev/null || true)"
+  request_tmp="$request_file.$$"
+  mkdir -p "$SKILL_DIR/run" 2>/dev/null || true
+  if [ -n "$request_server" ]; then
+    printf 'codex\t%s\t%s\t%s\t%s\n' "$thread" "$request_server" "$TEAM" "$AGENT" > "$request_tmp"
+  else
+    printf 'codex\t%s\t%s\t\n' "$thread" "" > "$request_tmp"
+  fi
+  mv "$request_tmp" "$request_file"
+fi
 exit 0

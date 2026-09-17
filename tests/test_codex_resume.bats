@@ -389,6 +389,8 @@ record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
   agmsg_role_session_record team bob thr-seated "$proj" codex
   record_with_loaded_via_port_file "$ids" team alice "$proj"
   [ "$(recorded_uuid team alice)" = "thr-unclaimed" ]
+  request_file="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  [ "$(sed -n '1p' "$request_file")" = $'codex\tthr-unclaimed\tws://127.0.0.1:1\tteam\talice' ]
 }
 
 @test "codex record: no port file and no variable records nothing, it does not guess" {
