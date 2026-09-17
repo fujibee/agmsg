@@ -15,16 +15,45 @@ setup() {
   # its pidfile on the raw session_id it passes — deterministic in CI and when
   # the suite runs under an agent process.
   export AGMSG_AGENT_PID=""
-  # Only the fake-engine #963 test below populates this; harmless elsewhere.
-  ENGINE_PIDS=""
+  # Newline-separated "pid<TAB>expected cmdline substring" records. Only the
+  # tests below that intentionally leave a background process running past
+  # their next assertion populate this; harmless (stays empty) elsewhere.
+  WATCHED_PIDS=""
+}
+
+# Register <pid> for teardown, together with a substring that MUST appear in
+# its cmdline (read fresh from the real ps, below) before teardown may signal
+# it. Call this immediately after the pid becomes known -- before any
+# assertion that could end the test, not after (#963 review): `run` cannot
+# fail a test, but the check that follows it can, and a pid recorded only
+# after that point never reaches teardown if the test ends there. Two engines
+# leaked exactly that way and were found still running, days later, on a
+# shared machine.
+_agmsg_watch_pid() {
+  local pid="$1" expect="$2"
+  [ -n "$pid" ] || return 0
+  WATCHED_PIDS="${WATCHED_PIDS}${WATCHED_PIDS:+$'\n'}${pid}"$'\t'"${expect}"
 }
 
 teardown() {
-  local pid
-  for pid in $ENGINE_PIDS; do
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  done
+  local pid expect cmd
+  while IFS=$'\t' read -r pid expect; do
+    [ -n "$pid" ] || continue
+    # A pid recorded from a pidfile only says where the number came from, not
+    # which process holds it now -- the engine may have already exited and
+    # the number been reused by an unrelated process. /bin/ps by absolute
+    # path, never through $PATH: a test above may have prepended a fixture
+    # directory whose fake ps claims every pid matches, and by teardown that
+    # override is normally out of scope again (it was only ever exported for
+    # one `run env PATH=... ...` child), but naming the real binary directly
+    # costs nothing and removes the dependency on that being true.
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    kill -0 "$pid" 2>/dev/null || continue
+    cmd="$(/bin/ps -p "$pid" -o args= 2>/dev/null)"
+    case "$cmd" in
+      *"$expect"*) kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true ;;
+    esac
+  done <<< "$WATCHED_PIDS"
   rm -rf "$FAKE_HOME"
 }
 
@@ -344,16 +373,18 @@ teardown() {
     "printf '%s\\n' 'bash $SK/scripts/internal/remote-sync.mjs run --team testteam'" > "$fake_bin/ps"
   chmod +x "$fake_bin/ps"
 
+  local engine_signature="$SK/scripts/internal/remote-sync.mjs run --team testteam"
+
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" bash "$SK/scripts/remote.sh" sync start testteam
   # Captured and registered with teardown BEFORE the assertion below, not
   # after: `run` itself cannot fail the test, but the `[ ]` that reads its
   # status can end it right here, and a pid read only after that point is
-  # never added to $ENGINE_PIDS -- an engine this call actually started then
-  # outlives the test with nothing left to stop it (leaked on this machine,
-  # found and killed by hand; #963 review).
+  # never watched -- an engine this call actually started then outlives the
+  # test with nothing left to stop it (leaked on this machine, found and
+  # killed by hand; #963 review).
   local old_pid=""
   [ -f "$SK/run/remote-sync.testteam.pid" ] && old_pid="$(cat "$SK/run/remote-sync.testteam.pid")"
-  [ -n "$old_pid" ] && ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$old_pid"
+  _agmsg_watch_pid "$old_pid" "$engine_signature"
   [ "$status" -eq 0 ]
   kill -0 "$old_pid"
 
@@ -364,7 +395,7 @@ teardown() {
   # is registered before the status assertion that follows can end the test.
   local new_pid=""
   [ -f "$SK/run/remote-sync.testteam.pid" ] && new_pid="$(cat "$SK/run/remote-sync.testteam.pid")"
-  [ -n "$new_pid" ] && ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$new_pid"
+  _agmsg_watch_pid "$new_pid" "$engine_signature"
   [ "$status" -eq 0 ]
 
   # No engine from before the update remains.
@@ -633,12 +664,20 @@ PS1
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-projA
   local sid="resue-sid-$$"
 
+  local watch_signature="$SK/scripts/watch.sh $sid"
+
   bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code 3>&- &
   local first=$!
+  # Registered right after the pid is known, before wait_for_pidfile_pid --
+  # which can time out and end the test -- gets a chance to (#963 review,
+  # same shape as the sync-engine leak above: a pid recorded only after an
+  # assertion that can end the test is never watched by teardown).
+  _agmsg_watch_pid "$first" "$watch_signature"
   wait_for_pidfile_pid "$SK/run/watch.$sid.pid" "$first"
 
   bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code 3>&- &
   local second=$!
+  _agmsg_watch_pid "$second" "$watch_signature"
   wait_for_pidfile_pid "$SK/run/watch.$sid.pid" "$second"
   # The pidfile can flip to $second a beat before $first's TERM trap has
   # actually run — poll for its exit rather than checking the instant the
