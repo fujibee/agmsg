@@ -710,6 +710,10 @@ _seed_role_record() {
   local cmdline; cmdline=$(printf '%s\n' "$output" | sed -n 's/^[[:space:]]*command: //p')
   eval "set -- $cmdline"
   [ "$5" = "alice" ]
+  # The role-filtered directive gets its own verification guidance too, named
+  # for THIS role's suffixed description -- not just the generic branch's
+  # (#270: this branch used to exit before that block existed).
+  [[ "$output" == *'Monitor(agmsg inbox stream (acting as alice)) starts'* ]]
 }
 
 @test "session-start: an unrecorded sid emits the generic directive (#339)" {

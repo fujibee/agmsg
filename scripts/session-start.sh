@@ -469,6 +469,22 @@ re-establishes the role. Send with \`send.sh ... $ROLE_NAME ...\` (this session'
 active FROM is \`$ROLE_NAME\`). Each output line is one message:
 \`<ts> | <team> | <from> → <to> | <body>\`. React as they arrive.
 
+Use Claude Code's generic Monitor tool only. First confirm ToolSearch
+select:Monitor finds that generic tool; Azure Monitor, MCP monitor, or other
+monitor-branded tools are not valid for agmsg delivery. Do not start watch.sh
+with Bash/background/nohup or a shell task. Success is:
+
+  - Monitor(agmsg inbox stream (acting as $ROLE_NAME)) starts
+  - TaskList shows a task whose description begins with "agmsg inbox
+    stream (acting as $ROLE_NAME)" for this session (the reliable check;
+    the background-task footer is not)
+  - the transcript later contains Monitor event: "agmsg inbox stream
+    (acting as $ROLE_NAME)"
+
+If the generic Monitor tool is unavailable, do not treat a background shell
+watcher as success. Switch to turn delivery or run manual inbox checks instead;
+those fallbacks are not real-time monitor delivery.
+
 Note: On a /clear or --continue/--resume re-fire, you may shortly see a
 "Monitor … stopped" notification for an earlier 'agmsg inbox stream'
 task. That is the previous watcher being cleaned up — expected. Do NOT
