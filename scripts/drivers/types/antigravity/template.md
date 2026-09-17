@@ -28,7 +28,7 @@ If argument is "mode" (no further args):
 2. Show the output to the user.
 
 If argument starts with "mode" followed by a mode name:
-1. Antigravity supports `monitor`, `turn`, and `off`; `both` is not supported. `monitor` requires explicitly starting `antigravity-monitor.sh` or `antigravity-tui-monitor.sh`.
+1. Antigravity supports `monitor`, `turn`, and `off`; `both` is not supported. `monitor` requires explicitly starting `antigravity-monitor.sh` or `antigravity-tui-monitor.sh`, and is experimental — see `docs/antigravity-monitor-beta.md` before choosing it for a seat a person types into.
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`
 
 If argument is "hook on", run `delivery.sh set turn __AGENT_TYPE__ "$(pwd)"`.
