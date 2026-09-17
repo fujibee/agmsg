@@ -55,6 +55,11 @@ EOF
     local LEGACY_PRE1248_NOTES_PATH
     # shellcheck disable=SC1091
     source "$(dirname "${BASH_SOURCE[0]}")/legacy-pre1248-notes-path.sh"
+    # Refuse rather than read a value that failed to load: an empty path here
+    # would turn the substitution below into a no-op, and expected_pre1248
+    # would silently become a copy of expected -- matching nothing it should
+    # not, but also proving nothing about the actual pre-#1248 text.
+    [ -n "${LEGACY_PRE1248_NOTES_PATH:-}" ] || return 1
     local expected_pre1248="${expected/drivers\/terminals\/<terminal>\/README.md/$LEGACY_PRE1248_NOTES_PATH}"
     actual="$(cat "$file")"
     if [ "$actual" != "$expected" ] && [ "$actual" != "$expected_pre1248" ]; then
