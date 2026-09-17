@@ -10,7 +10,7 @@ setup() {
   # a terminal. PATH is prepended so the stubs win.
   export STUB_BIN="$TEST_SKILL_DIR/stub-bin"
   mkdir -p "$STUB_BIN"
-  for bin in claude codex grok hermes; do
+  for bin in claude codex grok hermes cursor-agent gemini agy copilot opencode; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/$bin"
     chmod +x "$STUB_BIN/$bin"
   done
@@ -18,14 +18,20 @@ setup() {
   cat > "$STUB_BIN/record.sh" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$CAPTURE"
+printf 'iterm\t/dev/ttys040\t123\tSat_Sep_13_02:10:11_2026\n' > "\${1}.plain-witness"
 EOF
   chmod +x "$STUB_BIN/record.sh"
   export PATH="$STUB_BIN:$PATH"
 
-  # Never inherit a real tmux server from the test runner — force the
-  # OS-terminal path, which we redirect into record.sh via a {cmd} template.
+  # Never inherit a real tmux server or herdr env from the test runner —
+  # force the OS-terminal path, which we redirect into record.sh via a {cmd}
+  # template. Unsetting HERDR_ENV/HERDR_PANE_ID is critical when the test
+  # runner itself is inside herdr: a real herdr pane split would affect the
+  # live session.
   unset TMUX
+  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID
   export AGMSG_TERMINAL="$STUB_BIN/record.sh {cmd}"
+  export AGMSG_TEST_PLAIN_WITNESS_ROW=$'iterm\t/dev/ttys040\t123\tSat_Sep_13_02:10:11_2026'
 
   export PROJ="$TEST_SKILL_DIR/proj"
   mkdir -p "$PROJ"
@@ -37,14 +43,14 @@ teardown() {
 
 # --- argument validation ---
 
-@test "spawn: rejects unsupported agent type (gemini)" {
-  run bash "$SCRIPTS/spawn.sh" gemini foo --project "$PROJ"
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "not supported by spawn yet" ]]
-}
-
-@test "spawn: rejects unsupported agent type (opencode)" {
-  run bash "$SCRIPTS/spawn.sh" opencode foo --project "$PROJ"
+@test "spawn: rejects a known type with neither cli= nor spawn= (#277)" {
+  # All nine built-ins are spawnable now, so the 'not supported by spawn yet'
+  # gate (a known type missing both cli= and spawn=) needs a fixture — no
+  # real built-in demonstrates it any more.
+  local nd="$TEST_SKILL_DIR/scripts/drivers/types/noclitype"
+  mkdir -p "$nd"
+  printf 'name=noclitype\ntemplate=template.md\n' > "$nd/type.conf"
+  run bash "$SCRIPTS/spawn.sh" noclitype foo --project "$PROJ"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "not supported by spawn yet" ]]
 }
@@ -83,6 +89,16 @@ teardown() {
   [[ "$output" =~ "not found on PATH" ]]
 }
 
+@test "spawn: a multi-word cli= (opencode) checks only its first word's existence (#277)" {
+  rm -f "$STUB_BIN/opencode"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env PATH="$STUB_BIN:/usr/bin:/bin" bash "$SCRIPTS/spawn.sh" opencode foo --project "$PROJ"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "'opencode' not found on PATH" ]]
+  # never searches for the literal multi-word string as one executable name
+  [[ "$output" != *"'opencode run --interactive' not found"* ]]
+}
+
 # --- team resolution ---
 
 @test "spawn: errors when no team is registered for the project" {
@@ -109,7 +125,7 @@ teardown() {
   local quoted="$TEST_SKILL_DIR/pro'j"
   mkdir -p "$quoted"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$quoted"
-  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$quoted"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$quoted" --no-wait
   [[ "$output" != *"no team is registered"* ]]
   [[ "$output" != *"syntax error"* ]]
 }
@@ -129,7 +145,7 @@ teardown() {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "spawned claude-code 'alice'" ]]
+  [[ "$output" =~ "launched claude-code 'alice'" ]]
 
   # alice is now registered to the resolved team.
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
@@ -151,8 +167,189 @@ teardown() {
   [[ "$output" == *"$PROJ"* ]]
 }
 
+@test "spawn: names the session <team>-<agent> when the type has name_arg (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  # claude-code's manifest declares name_arg=-n, so the boot script launches the
+  # CLI with `-n myteam-alice` (the resolved team joined to the agent name).
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"-n myteam-alice"* ]]
+}
+
+@test "spawn: boot script marks the session AGMSG_SPAWNED=1 (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # The spawned session carries the marker so the actas flow suppresses the
+  # hand-started "rename this session" tip.
+  [[ "$output" == *"export AGMSG_SPAWNED=1"* ]]
+}
+
+@test "spawn: a type without name_arg emits no name flag (#339)" {
+  # gemini's manifest has no name_arg=, so the boot script must not name the
+  # session -- no bare `-n` token, unchanged from pre-#339 behavior.
+  bash "$SCRIPTS/join.sh" gteam existing gemini "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" gemini bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" != *" -n "* ]]
+  [[ "$output" != *"gteam-bob"* ]]
+}
+
+# Seed a role-session record + its transcript so spawn's resume path fires.
+# Mirrors spawn's own project normalization + the driver's munging so the paths
+# line up. With want_transcript=0 the record exists but the transcript does not
+# (stale record → spawn must fall back to fresh).
+seed_resumable() {
+  local team="$1" agent="$2" uuid="$3" proj="$4" want_transcript="${5:-1}"
+  local norm munged
+  export SKILL_DIR="$TEST_SKILL_DIR"   # both libs below require it at source time
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/resolve-project.sh"
+  norm="$(cd "$proj" && pwd)"
+  norm="$(agmsg_normalize_project_path "$norm")"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record "$team" "$agent" "$uuid" "$norm"
+  if [ "$want_transcript" -eq 1 ]; then
+    munged="$(printf '%s' "$norm" | LC_ALL=C sed 's/[^A-Za-z0-9-]/-/g')"
+    mkdir -p "$HOME/.claude/projects/$munged"
+    : > "$HOME/.claude/projects/$munged/$uuid.jsonl"
+  fi
+}
+
+@test "spawn: resumes the role's prior session when record + transcript exist (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  seed_resumable myteam alice "sess-uuid-1" "$PROJ" 1
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # Resumed by uuid, still named after the role, still runs the actas prompt.
+  [[ "$output" == *"--resume sess-uuid-1"* ]]
+  [[ "$output" == *"-n myteam-alice"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn: --fresh forces a fresh session even when resumable (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  seed_resumable myteam alice "sess-uuid-1" "$PROJ" 1
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --fresh
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+  [[ "$output" == *"-n myteam-alice"* ]]   # naming still applies
+}
+
+@test "spawn: falls back to fresh when the record's transcript is gone (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  seed_resumable myteam alice "sess-uuid-1" "$PROJ" 0   # record only, no transcript
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+}
+
+@test "spawn: a fresh role (no record) boots fresh (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+}
+
+@test "spawn: a type without resume_arg never resumes (#339)" {
+  # gemini has no resume_arg in its manifest, so even with a record present the
+  # boot must be fresh (and gemini also has no name_arg, so no -n either).
+  bash "$SCRIPTS/join.sh" gteam existing gemini "$PROJ"
+  seed_resumable gteam bob "sess-uuid-9" "$PROJ" 1
+
+  run bash "$SCRIPTS/spawn.sh" gemini bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+}
+
+@test "spawn: codex resumes via the 'resume' subcommand right after the cli (#339)" {
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  # Record a codex role->session and a matching rollout (codex's transcript).
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record cxteam bob "cx-uuid-1" "$PROJ" codex
+  mkdir -p "$HOME/.codex/sessions/2026/07/05"
+  : > "$HOME/.codex/sessions/2026/07/05/rollout-2026-07-05T10-00-00-cx-uuid-1.jsonl"
+
+  run bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # Subcommand shape: `<shim> resume cx-uuid-1 ...` -- resume token right after
+  # the executable (the bundled codex-shim.sh, which forwards argv to codex).
+  [[ "$output" == *"codex-shim.sh resume cx-uuid-1"* ]]
+  [[ "$output" == *"actas"* ]]
+  # codex has no name_arg, so no -n.
+  [[ "$output" != *" -n "* ]]
+}
+
+@test "spawn: codex boots fresh when no rollout backs the record (#339)" {
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record cxteam bob "cx-uuid-gone" "$PROJ" codex   # record, no rollout
+
+  run bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"resume"* ]]
+}
+
+@test "spawn: boot script unsets the type's session-identity vars (#294)" {
+  # A same-type spawn (claude-code from a claude-code session) must not leak the
+  # parent's CLAUDE_CODE_SESSION_ID to the child, or the child mistakes the
+  # parent's session for its own and every turn fails with an Authentication
+  # error. The generated boot script unsets the type's detect= vars up front.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" == *"unset CLAUDE_CODE_SESSION_ID"* ]]
+  # The unset must come before the CLI launch line, so the exec'd child never
+  # sees the inherited var.
+  run bash -c "grep -n 'unset CLAUDE_CODE_SESSION_ID' '$boot' | cut -d: -f1"
+  local unset_line="$output"
+  run bash -c "grep -n 'actas' '$boot' | head -1 | cut -d: -f1"
+  [ "$unset_line" -lt "$output" ]
+}
+
+@test "spawn: does NOT unset a type's credential/detect vars (#294)" {
+  # The strip list is a dedicated spawn_unset_env=, NOT detect=. gemini's
+  # detect=GEMINI_CLI and detect_fallback=GEMINI_API_KEY: the session marker + a credential, not a session id —
+  # stripping them would break the spawned child's auth (the opposite of the fix).
+  # gemini has no spawn_unset_env=, so its boot script must emit no `unset` at all
+  # and in particular must never unset GEMINI_API_KEY.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" gemini alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" != *"unset GEMINI_API_KEY"* ]]
+  [[ "$output" != *"unset "* ]]
+}
+
 @test "spawn: grok-build launches the plain grok CLI with the actas prompt" {
-  # grok-build is spawnable and monitor=no, so spawn skips the readiness wait.
+  # grok-build is spawnable and readiness_sentinel=no, so spawn skips the readiness wait.
   # Delivery is a rule file (no hook), so no folder-trust flag is needed —
   # the launch is the bare `grok "/<cmd> actas <name>"`, like claude-code.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
@@ -185,7 +382,7 @@ teardown() {
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
   run cat "$boot"
-  [[ "$output" == *"codex -m gpt-5"* ]]
+  [[ "$output" == *"codex-shim.sh -m gpt-5"* ]]
 }
 
 @test "spawn --model: grok-build launch uses its --model flag" {
@@ -198,7 +395,13 @@ teardown() {
 }
 
 @test "spawn --model: refused for a type with no model_arg in its manifest" {
-  run bash "$SCRIPTS/spawn.sh" hermes foo --project "$PROJ" --model whatever --no-wait
+  # No real built-in is spawnable without a model_arg (#279 dropped hermes'
+  # spawnable=yes, its only remaining example) — fixture a minimal one,
+  # reusing the already-stubbed `claude` binary as its cli=.
+  local nd="$TEST_SKILL_DIR/scripts/drivers/types/nomodeltype"
+  mkdir -p "$nd"
+  printf 'name=nomodeltype\ntemplate=template.md\ncli=claude\nspawnable=yes\n' > "$nd/type.conf"
+  run bash "$SCRIPTS/spawn.sh" nomodeltype foo --project "$PROJ" --model whatever --no-wait
   [ "$status" -ne 0 ]
   [[ "$output" =~ "does not support --model" ]]
 }
@@ -210,6 +413,167 @@ teardown() {
   boot="$(cat "$CAPTURE")"
   run cat "$boot"
   [[ "$output" != *"--model"* ]]
+}
+
+# --- newly spawnable types (#277): cursor, gemini, antigravity, copilot, opencode ---
+
+@test "spawn: cursor launches cursor-agent with a bare positional prompt" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" cursor alice --project "$PROJ" --model sonnet-4-thinking --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"cursor-agent --model sonnet-4-thinking"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn: gemini launches gemini with a bare positional prompt" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" gemini alice --project "$PROJ" --model gemini-3-pro --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"gemini --model gemini-3-pro"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn: antigravity launches agy with --prompt-interactive (not a bare positional)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" antigravity alice --project "$PROJ" --model gemini-3-pro --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"agy --model gemini-3-pro --prompt-interactive"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn: copilot launches copilot with --interactive (not a bare positional)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" copilot alice --project "$PROJ" --model gpt-5.4 --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"copilot --model gpt-5.4 --interactive"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn: opencode launches opencode with --prompt (not a bare positional)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" opencode alice --project "$PROJ" --model anthropic/claude-opus-4-8 --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"opencode --model anthropic/claude-opus-4-8 --prompt"* ]]
+  # opencode's actas prompt uses the '$' skill prefix, not Claude Code's '/' (#283).
+  local cmd; cmd="$(basename "$TEST_SKILL_DIR")"
+  run grep -F "\$$cmd"'\ actas' "$boot"
+  [ "$status" -eq 0 ]
+  run grep -F "/$cmd"'\ actas' "$boot"
+  [ "$status" -ne 0 ]
+}
+
+@test "spawn: prompt_arg lands after spawn-options, immediately before the prompt" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local opts="$TEST_SKILL_DIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+antigravity:
+  --sandbox: true
+YAML
+  run env AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" antigravity alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"agy --sandbox --prompt-interactive"* ]]
+}
+
+# --- spawn options (#273): per-type extra CLI args from a YAML file ---
+
+@test "spawn: injects spawn-options flags from AGMSG_SPAWN_OPTIONS_FILE" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local opts="$TEST_SKILL_DIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+claude-code:
+  --permission-mode: acceptEdits
+  --dangerously-skip-permissions: true
+YAML
+  run env AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"claude --permission-mode acceptEdits --dangerously-skip-permissions"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn: spawn-options flags land after --model, before the actas prompt" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local opts="$TEST_SKILL_DIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+claude-code:
+  --permission-mode: acceptEdits
+YAML
+  run env AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --model claude-opus-4-8 --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"claude --model claude-opus-4-8 --permission-mode acceptEdits"* ]]
+}
+
+@test "spawn: a false spawn-options value suppresses that flag" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local opts="$TEST_SKILL_DIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+claude-code:
+  --dangerously-skip-permissions: false
+YAML
+  run env AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" != *"--dangerously-skip-permissions"* ]]
+}
+
+@test "spawn: only the spawned type's section applies, not another type's" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local opts="$TEST_SKILL_DIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+codex:
+  --sandbox: workspace-write
+YAML
+  run env AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" != *"--sandbox"* ]]
+}
+
+@test "spawn: no spawn-options file leaves the launch unchanged" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env AGMSG_SPAWN_OPTIONS_FILE="$TEST_SKILL_DIR/no-such-file.yaml" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"claude"*"actas"* ]]
+}
+
+@test "spawn: falls back to ~/.agmsg/config/spawn_options.yaml when the env var is unset" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  mkdir -p "$HOME/.agmsg/config"
+  cat > "$HOME/.agmsg/config/spawn_options.yaml" <<'YAML'
+claude-code:
+  --permission-mode: acceptEdits
+YAML
+  unset AGMSG_SPAWN_OPTIONS_FILE
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"--permission-mode acceptEdits"* ]]
 }
 
 @test "spawn: actas prompt uses the install command name (not hardcoded agmsg)" {
@@ -278,7 +642,7 @@ teardown() {
       [ -e "$notmux/$b" ] || ln -s "$f" "$notmux/$b" 2>/dev/null || true
     done
   done
-  run env TMUX="/tmp/fake,1,0" PATH="$STUB_BIN:$notmux" \
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" PATH="$STUB_BIN:$notmux" \
     bash "$SCRIPTS/spawn.sh" claude-code foo --project "$PROJ"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "tmux binary is not on PATH" ]]
@@ -296,13 +660,137 @@ teardown() {
   [[ "$output" == *"reviewer"* ]]
 }
 
+@test "spawn: resolve_team reads team configs via agmsg_sql_readfile_path (Windows-native sqlite3 regression)" {
+  # sqlite3.exe (native Windows) cannot readfile() a POSIX-form path: it returns
+  # NULL, the JSON probe yields no rows, and spawn dies with 'no team is
+  # registered' even though join succeeded. The helper cygpath-converts and
+  # SQL-escapes; a bare sed-escape here reintroduces the bug. No portable
+  # runtime probe exists (it needs a native sqlite3 plus a POSIX-form tmpdir),
+  # so assert the source directly.
+  run grep -F 'cfg_sql=$(agmsg_sql_readfile_path "$config_file")' "$SCRIPTS/spawn.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn: codex boot prompt uses the \$ skill prefix, not / (#283)" {
+  # codex invokes a skill with \$<cmd>, not Claude Code's /<cmd>. The boot script
+  # must carry \$<cmd> actas, never /<cmd> actas. (%q escapes the space as "\ ",
+  # so match the "<prefix><cmd>\ actas" token — the cd path's /<cmd>/proj has no
+  # "\ actas" and so can't false-match the slash form.)
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ"
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  local cmd; cmd="$(basename "$TEST_SKILL_DIR")"
+  run grep -F "\$$cmd"'\ actas' "$boot"
+  [ "$status" -eq 0 ]
+  run grep -F "/$cmd"'\ actas' "$boot"
+  [ "$status" -ne 0 ]
+}
+
+@test "spawn: claude-code boot prompt keeps the / slash prefix (#283)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  local cmd; cmd="$(basename "$TEST_SKILL_DIR")"
+  run grep -F "/$cmd"'\ actas' "$boot"
+  [ "$status" -eq 0 ]
+  run grep -F "\$$cmd"'\ actas' "$boot"
+  [ "$status" -ne 0 ]
+}
+
+@test "spawn: '/'-prefixed boot prompt is guarded against MSYS path conversion" {
+  # On Git Bash / MSYS, an argv token starting with '/' is rewritten to a
+  # Windows path when handed to a native binary: '/agmsg actas alice' arrives
+  # as 'C:/Program Files/Git/agmsg actas alice'. The boot script must scope it
+  # out via MSYS2_ARG_CONV_EXCL on the CLI launch line (prefix-scoped, NOT
+  # MSYS_NO_PATHCONV=1, so genuine path args keep converting).
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  local cmd; cmd="$(basename "$TEST_SKILL_DIR")"
+  # The guard must sit on the same line as the CLI invocation, ahead of it.
+  run grep -E "^MSYS2_ARG_CONV_EXCL=/$cmd claude" "$boot"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn: \$-prefixed boot prompt gets no MSYS guard (codex)" {
+  # '$'-prefixed prompts are not path-shaped, so no exclusion is emitted —
+  # keeps the boot script byte-identical for agentskills CLIs.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ"
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run grep -F "MSYS2_ARG_CONV_EXCL" "$boot"
+  [ "$status" -ne 0 ]
+}
+
+@test "spawn: boot script keeps the .command suffix only on macOS (#282)" {
+  # macOS `open -a Terminal` needs .command to execute the file; every other
+  # launcher runs it via bash or its shebang, and on Windows .command makes
+  # Explorer/psmux open it in Notepad instead of running it.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  if [ "$(uname -s)" = "Darwin" ]; then
+    [[ "$boot" == *.command ]]
+  else
+    [[ "$boot" != *.command ]]
+  fi
+}
+
+@test "spawn: macOS terminal launch does not steal focus (Terminal and iTerm)" {
+  # A no-op-Terminal spawn (no $TMUX, no AGMSG_TERMINAL override) exercises
+  # launch_macos_terminal() itself, which every other test in this file
+  # bypasses via the record.sh {cmd} template. `-g`/`--background` must be
+  # present so `open` never brings the newly launched terminal to the front
+  # -- without it, spawning from a caller with no tmux context (e.g. a GUI
+  # app) interrupts whatever the user is doing in the foreground app.
+  if [ "$(uname -s)" != "Darwin" ]; then
+    skip "launch_macos_terminal() is Darwin-only"
+  fi
+  unset AGMSG_TERMINAL
+  # Deterministic regardless of which terminal actually runs this test suite
+  # (launch_macos_terminal defaults to "iterm" when $TERM_PROGRAM is
+  # iTerm.app, which would otherwise make this assertion flaky on an iTerm
+  # dev machine).
+  unset TERM_PROGRAM
+  cat > "$STUB_BIN/open" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$CAPTURE"
+EOF
+  chmod +x "$STUB_BIN/open"
+
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  run cat "$CAPTURE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-g -a Terminal"* ]]
+
+  rm -f "$CAPTURE"
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  AGMSG_TERMINAL=iterm run bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  run cat "$CAPTURE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-g -a iTerm"* ]]
+}
+
 # --- pre-flight exclusivity check ---
 
 @test "spawn: refuses when the name is held by another live session" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code "$PROJ"
   # Forge a live owner for (myteam, alice).
   setup_live_owner "$TEST_SKILL_DIR/run" LIVESID
-  printf '%s\n' LIVESID > "$TEST_SKILL_DIR/run/actas.myteam__alice.session"
+  printf '%s\n' LIVESID > "$(_actas_session_path myteam alice)"
 
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ"
   [ "$status" -ne 0 ]
@@ -313,8 +801,14 @@ teardown() {
 
 @test "spawn: readiness handshake returns status=ready when the watcher attaches" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJ" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
-  local ready="$TEST_SKILL_DIR/run/ready.myteam__alice"
+  # alice must already be in the roster before resolving her ready path: #1023
+  # mints her member_id on join, and spawn.sh's OWN internal join.sh call (which
+  # runs before it resolves its own READY_PATH) will do the exact same thing --
+  # joining here first, idempotently, is what makes the two resolutions agree.
+  bash "$SCRIPTS/join.sh" myteam alice claude-code "$PROJ" >/dev/null
+  local ready="$(_ready_path myteam alice)"
   # The terminal "launch" just touches the ready sentinel (and comments out the
   # boot script so its interactive shell never runs in the test).
   run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
@@ -325,17 +819,121 @@ teardown() {
 
 @test "spawn: readiness handshake times out (status=timeout, exit 3) when nothing attaches" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJ" >/dev/null
   run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
     --ready-timeout 2 --terminal "true # {cmd}"
   [ "$status" -eq 3 ]
   [[ "$output" == *"status=timeout"* ]]
 }
 
-@test "spawn: --no-wait returns immediately with no readiness status" {
+@test "spawn: a monitor-capable type skips readiness when project delivery is off (#647)" {
+  # No hooks configured means this project's observable delivery mode is off.
+  # A claude-code type can produce a readiness sentinel, but no watcher will be
+  # started for this project, so waiting would only reach the timeout.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set off claude-code "$PROJ" >/dev/null
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 2 --terminal "true # {cmd}"
+  [ "$status" -eq 0 ]
+  grep -q "project delivery mode is 'off'" <<<"$output"
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-monitor-delivery" <<<"$output"
+  refute grep -q "status=timeout" <<<"$output"
+}
+
+@test "spawn: a failed delivery status keeps the readiness wait fail-closed (#647)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local delivery="$SCRIPTS/delivery.sh"
+  mv "$delivery" "$delivery.real"
+  cat > "$delivery" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "$delivery"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 1 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  grep -q "delivery status failed" <<<"$output"
+  grep -q "status=timeout" <<<"$output"
+  refute grep -q "no-monitor-delivery" <<<"$output"
+}
+
+@test "spawn: an unrecognized delivery status from the real command keeps the wait fail-closed (#647)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJ"
+  [ "$status" -eq 0 ]
+  grep -q "mode: off (unrecognized:" <<<"$output"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 1 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  grep -q "status output was not recognized" <<<"$output"
+  grep -q "status=timeout" <<<"$output"
+  refute grep -q "no-monitor-delivery" <<<"$output"
+}
+
+@test "spawn: unrecognized delivery status keeps the readiness wait fail-closed (#647)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local delivery="$SCRIPTS/delivery.sh"
+  mv "$delivery" "$delivery.real"
+  cat > "$delivery" <<'EOF'
+#!/usr/bin/env bash
+printf 'mode: maybe\n'
+EOF
+  chmod +x "$delivery"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 1 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  grep -q "status output was not recognized" <<<"$output"
+  grep -q "status=timeout" <<<"$output"
+  refute grep -q "no-monitor-delivery" <<<"$output"
+}
+
+@test "spawn: a known delivery prefix with a suffix remains unrecognized (#647)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local delivery="$SCRIPTS/delivery.sh"
+  mv "$delivery" "$delivery.real"
+  cat > "$delivery" <<'EOF'
+#!/usr/bin/env bash
+printf 'mode: turnips\n'
+EOF
+  chmod +x "$delivery"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 1 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  grep -q "status output was not recognized" <<<"$output"
+  grep -q "status=timeout" <<<"$output"
+  refute grep -q "no-monitor-delivery" <<<"$output"
+}
+
+@test "spawn: a suffixed explicit off status does not skip readiness (#647)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local delivery="$SCRIPTS/delivery.sh"
+  mv "$delivery" "$delivery.real"
+  cat > "$delivery" <<'EOF'
+#!/usr/bin/env bash
+printf 'mode: off (no agmsg delivery hooks installed for this project) garbage\n'
+EOF
+  chmod +x "$delivery"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 1 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  grep -q "status output was not recognized" <<<"$output"
+  grep -q "status=timeout" <<<"$output"
+  refute grep -q "no-monitor-delivery" <<<"$output"
+}
+
+@test "spawn: --no-wait on a readiness_sentinel=YES type still reports launched-unconfirmed (no post-input confirmation)" {
+  # Full-head review: --no-wait skips the readiness handshake by request, so startup is
+  # NOT confirmed — exactly like readiness_sentinel=no. Both no-confirmation paths must report
+  # status=launched-unconfirmed (a distinct note keeps the reasons apart). A readiness_sentinel=YES
+  # type (claude-code) with --no-wait is the arm that was silently falling through both
+  # branches with no status line at all.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
-  [[ "$output" != *"status="* ]]
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-wait" <<<"$output"
+  refute grep -q "status=ready" <<<"$output"
 }
 
 @test "spawn: codex skips the readiness wait (no Monitor)" {
@@ -345,12 +943,12 @@ teardown() {
   [[ "$output" == *"skipping readiness wait"* ]]
 }
 
-@test "spawn: grok-build skips the readiness wait even without --no-wait (monitor=no)" {
+@test "spawn: grok-build skips the readiness wait even without --no-wait (readiness_sentinel=no)" {
   # Regression guard: grok-build's monitor watcher attaches via the agent's
   # actas/rule launch (no SessionStart hook) and only in monitor mode, so there
-  # is no ready sentinel for spawn to await. With monitor=no, spawn must skip the
+  # is no ready sentinel for spawn to await. With readiness_sentinel=no, spawn must skip the
   # wait and return immediately instead of hanging a default turn/off-mode spawn
-  # until --ready-timeout. (Without this, monitor=yes made the wait fire.)
+  # until --ready-timeout. (Without this, readiness_sentinel=yes made the wait fire.)
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run env -u TMUX bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" \
     --terminal "true # {cmd}"
@@ -358,6 +956,74 @@ teardown() {
   [[ "$output" == *"skipping readiness wait"* ]]
   [[ "$output" != *"status=timeout"* ]]
   [[ "$output" != *"status=ready"* ]]
+}
+
+@test "spawn: an already-installed manifest with only the legacy monitor= key still skips the wait (#1214 back-compat)" {
+  # Simulates an install from before the readiness_sentinel rename: the copied
+  # type.conf carries ONLY the old bare monitor=no key, no readiness_sentinel=
+  # at all. readiness_sentinel reading empty must not silently behave as "yes"
+  # (wait) -- that would hang a no-handshake type's spawn until --ready-timeout.
+  local conf="$TEST_SKILL_DIR/scripts/drivers/types/codex/type.conf"
+  grep -v '^readiness_sentinel=' "$conf" > "$conf.new"
+  mv "$conf.new" "$conf"
+  printf 'monitor=no\n' >> "$conf"
+  refute grep -q '^readiness_sentinel=' "$conf"
+  grep -q '^monitor=no$' "$conf"
+
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" \
+    --terminal "true # {cmd}"
+  [ "$status" -eq 0 ]
+  grep -q "skipping readiness wait" <<< "$output"
+  refute grep -q "status=timeout" <<< "$output"
+}
+
+@test "spawn: a no-handshake type (readiness_sentinel=no) reports startup UNCONFIRMED, not a bare success" {
+  # Observed live: "spawned" printed while the agent had not started (a startup shell prompt
+  # ate the first keystroke of the boot command). A type with no readiness handshake
+  # cannot confirm startup, so spawn must say so DISTINCTLY — status=launched-unconfirmed
+  # with an explanation — instead of letting the placement line stand as success.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" \
+    --terminal "true # {cmd}"
+  [ "$status" -eq 0 ]
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-readiness-handshake" <<<"$output"
+  grep -q "STARTUP IS UNCONFIRMED" <<<"$output"
+  # the placement line is a placement FACT, not a success claim
+  grep -q "launched codex 'reviewer'" <<<"$output"
+  refute grep -q "spawned codex 'reviewer'" <<<"$output"
+}
+
+@test "spawn: --no-wait says 'launched' (never 'spawned'), and its unconfirmed NOTE differs from readiness_sentinel=no's" {
+  # The placement word is 'launched', never 'spawned', on the --no-wait path too; and
+  # the two no-confirmation reasons read apart — --no-wait carries note=no-wait, a
+  # readiness_sentinel=no type carries note=no-readiness-handshake (distinct wording).
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "launched claude-code 'alice'" <<<"$output"
+  refute grep -q "spawned claude-code 'alice'" <<<"$output"
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-wait" <<<"$output"
+  refute grep -q "note=no-readiness-handshake" <<<"$output"
+}
+
+@test "spawn: a CONFIRMED start (handshake) is the only path that proves startup (status=ready)" {
+  # The positive observation — the watcher attaching (the ready sentinel) — is what
+  # distinguishes "started" from "typed but never ran". Only status=ready asserts it.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  # See the readiness-handshake test above for why alice is joined before
+  # resolving her ready path.
+  bash "$SCRIPTS/join.sh" myteam alice claude-code "$PROJ" >/dev/null
+  local ready="$(_ready_path myteam alice)"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 10 --terminal "touch $ready # {cmd}"
+  [ "$status" -eq 0 ]
+  grep -q "launched claude-code 'alice'" <<<"$output"
+  grep -q "status=ready" <<<"$output"
+  refute grep -q "status=launched-unconfirmed" <<<"$output"
 }
 
 # --- initial prompt (--boot-prompt) ---
@@ -399,4 +1065,1127 @@ teardown() {
   [[ "$output" == *"actas"* ]]
   [[ "$output" == *"reviewer"* ]]
   [[ "$output" == *"REVIEW_THE_DIFF"* ]]
+}
+
+# --- #335: psmux on Windows cannot exec an extensionless boot script ---
+#
+# These fake `uname -s` (via a stub honoring $FAKE_UNAME_S) and stub `tmux` to
+# capture its argv, so the Windows launch path is exercised on a Linux/macOS
+# runner. On Windows the boot script must run through `bash -l`; elsewhere the
+# bare path (shebang-honored by Unix tmux) is kept.
+
+@test "spawn: launch_in_tmux runs the boot script via bash -l on Windows (#335)" {
+  local cap="$TEST_SKILL_DIR/tmux-argv.txt"
+  : > "$cap"
+  cat > "$STUB_BIN/uname" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${FAKE_UNAME_S:-Linux}"
+EOF
+  chmod +x "$STUB_BIN/uname"
+  cat > "$STUB_BIN/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$cap"
+case "\$1" in
+  new-window)   echo '@1' ;;
+  split-window) echo '%1' ;;
+esac
+exit 0
+EOF
+  chmod +x "$STUB_BIN/tmux"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  # Default target is a split pane.
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  # A new window is the other branch.
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
+    bash "$SCRIPTS/spawn.sh" claude-code bob --project "$PROJ" --no-wait --window
+  [ "$status" -eq 0 ]
+  # Both branches must launch through `bash -l <boot>`, not the bare path.
+  run grep -E 'split-window .* bash -l /' "$cap"
+  [ "$status" -eq 0 ]
+  run grep -E 'new-window .* bash -l /' "$cap"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn: launch_in_tmux keeps the bare boot path off Windows (#335)" {
+  local cap="$TEST_SKILL_DIR/tmux-argv.txt"
+  : > "$cap"
+  cat > "$STUB_BIN/uname" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${FAKE_UNAME_S:-Linux}"
+EOF
+  chmod +x "$STUB_BIN/uname"
+  cat > "$STUB_BIN/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$cap"
+case "\$1" in
+  new-window)   echo '@1' ;;
+  split-window) echo '%1' ;;
+esac
+exit 0
+EOF
+  chmod +x "$STUB_BIN/tmux"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" FAKE_UNAME_S="Linux" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  # Unix tmux honors the shebang, so no `bash -l` wrapper is emitted.
+  run grep -F 'bash -l' "$cap"
+  [ "$status" -ne 0 ]
+  # ...and the bare boot path is still the launched command.
+  run grep -E 'split-window .* /.*boot-' "$cap"
+  [ "$status" -eq 0 ]
+}
+
+# --- herdr placement ---
+
+# Helper: set up a fake herdr binary that records calls and returns canned JSON.
+_setup_fake_herdr() {
+  local herdr_stub="$STUB_BIN/herdr"
+  export HERDR_CALL_LOG="$TEST_SKILL_DIR/herdr-calls.log"
+  # Spawn-side naming calls `herdr agent rename` then reads the key back via
+  # `herdr agent list` + `herdr pane get` (terminal_team_observe). Model that
+  # faithfully: rename records the (pane_id -> key) mapping in this DB, list
+  # replays it, so the read-back sees exactly the key spawn just wrote and the
+  # realistic herdr tests exercise the SUCCESSFUL naming path (not the fallback).
+  export HERDR_AGENT_DB="$TEST_SKILL_DIR/herdr-agents.db"
+  : > "$HERDR_AGENT_DB"
+  # Same shape for labels: `pane rename` records (pane_id -> label), `pane get`
+  # replays the last one -- the caller pane's label is observable state (#1096).
+  export HERDR_LABEL_DB="$TEST_SKILL_DIR/herdr-labels.db"
+  : > "$HERDR_LABEL_DB"
+  cat > "$herdr_stub" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HERDR_CALL_LOG"
+# Responses are overridable so a test can hand back a differently shaped
+# document (reordered keys, nested fields, extra pane objects) without
+# rewriting the stub.
+DEFAULT_SPLIT='{"id":"cli:pane:split","result":{"pane":{"pane_id":"wT:pN","tab_id":"wT:tA"},"type":"pane_info"}}'
+DEFAULT_TAB='{"id":"cli:tab:create","result":{"root_pane":{"pane_id":"wT:pR","tab_id":"wT:tN"},"tab":{"tab_id":"wT:tN","label":"test"},"type":"tab_created"}}'
+case "$1/$2" in
+  pane/split)
+    printf '%s\n' "${HERDR_SPLIT_RESPONSE:-$DEFAULT_SPLIT}"
+    ;;
+  pane/rename)
+    # `pane rename <pane_id> <label>` -- record the mapping so `pane get` can
+    # replay it (#1096: the caller pane's label must be observable before and
+    # after a spawn, not just the argv). $3=pane id, $4=label.
+    printf '%s\t%s\n' "$3" "$4" >> "$HERDR_LABEL_DB"
+    echo '{"id":"cli:pane:rename","result":{"type":"ok"}}'
+    ;;
+  pane/run|pane/close)
+    echo '{"id":"cli:pane:'"$2"'","result":{"type":"ok"}}'
+    ;;
+  pane/process-info)
+    # requirement 1: default to a READY pane (foreground pgid == shell pid) so the
+    # readiness gate passes; a test overrides HERDR_PROCESS_INFO_RESPONSE (and its exit
+    # via HERDR_PROCESS_INFO_RC) to drive the not-ready / unknown arms. The default is
+    # assigned separately, NOT inside ${VAR:-…}: braces in a default terminate the
+    # parameter expansion early and leak trailing } into the output.
+    pi_out="$HERDR_PROCESS_INFO_RESPONSE"
+    [ -n "$pi_out" ] || pi_out='{"result":{"process_info":{"shell_pid":4242,"foreground_process_group_id":4242}}}'
+    printf '%s\n' "$pi_out"
+    exit "${HERDR_PROCESS_INFO_RC:-0}"
+    ;;
+  tab/create)
+    printf '%s\n' "${HERDR_TAB_RESPONSE:-$DEFAULT_TAB}"
+    ;;
+  tab/close)
+    echo '{"id":"cli:tab:close","result":{"type":"ok"}}'
+    ;;
+  agent/rename)
+    # `agent rename <pane_id> <key>` — record the mapping so `agent list` can
+    # replay it. $3=pane id, $4=key.
+    printf '%s\t%s\n' "$3" "$4" >> "$HERDR_AGENT_DB"
+    echo '{"id":"cli:agent:rename","result":{"type":"ok"}}'
+    ;;
+  agent/list)
+    # Replay the recorded (pane_id -> name) pairs as the agents array.
+    printf '{"result":{"agents":['
+    _first=1
+    if [ -f "$HERDR_AGENT_DB" ]; then
+      while IFS="$(printf '\t')" read -r _aid _akey; do
+        [ -n "$_aid" ] || continue
+        [ "$_first" -eq 1 ] || printf ','
+        printf '{"pane_id":"%s","name":"%s"}' "$_aid" "$_akey"
+        _first=0
+      done < "$HERDR_AGENT_DB"
+    fi
+    printf ']}}\n'
+    ;;
+  pane/get)
+    # Minimal valid pane document. The label is the LAST one `pane rename`
+    # recorded for this pane (so a test can read a pane's label back the way a
+    # person would), "pane" when none was. $3=pane id.
+    _label="$(awk -F'\t' -v id="$3" '$1==id{l=$2} END{print (l==""?"pane":l)}' "$HERDR_LABEL_DB" 2>/dev/null)"
+    [ -n "$_label" ] || _label=pane
+    printf '{"result":{"pane":{"pane_id":"%s","label":"%s","agent_status":"idle","terminal_title":"t"}}}\n' "$3" "$_label"
+    ;;
+  *)
+    echo '{"error":"unknown stub call: '"$*"'}' >&2
+    exit 1
+    ;;
+esac
+STUB
+  chmod +x "$herdr_stub"
+  export HERDR_ENV=1
+  export HERDR_PANE_ID="wT:pSelf"
+  export HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock"
+  export HERDR_WORKSPACE_ID="wT"
+  # Clear the terminal template so spawn does not take the template path.
+  unset AGMSG_TERMINAL
+  # Ensure the run/ directory exists for placement records.
+  mkdir -p "$TEST_SKILL_DIR/run"
+}
+
+@test "spawn: herdr split — launches in a herdr pane with herdr: placement record" {
+  _setup_fake_herdr
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launched claude-code 'alice' in herdr"* ]]
+
+  # herdr was called: pane split, pane rename, pane run.
+  grep -q "pane split wT:pSelf --direction right --no-focus" "$HERDR_CALL_LOG"
+  # The creation-time label is the final, team-prefixed one (#1096) -- the same
+  # string terminal_name writes -- never the bare name.
+  grep -q "^pane rename wT:pN myteam:alice$" "$HERDR_CALL_LOG"
+  refute grep -q "^pane rename wT:pN alice$" "$HERDR_CALL_LOG"
+  grep -q "pane run wT:pN" "$HERDR_CALL_LOG"
+
+  # Placement record uses herdr: scheme tag.
+  local rec="$(_spawn_record_path myteam alice)"
+  [ -f "$rec" ]
+  local rec_id
+  IFS=$'\t' read -r rec_id _ _ < "$rec"
+  [ "$rec_id" = "herdr:$HERDR_SOCKET_PATH:wT:pN" ]
+}
+
+@test "spawn: herdr split --split v maps to --direction down" {
+  _setup_fake_herdr
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --split v
+  [ "$status" -eq 0 ]
+  grep -q "pane split wT:pSelf --direction down --no-focus" "$HERDR_CALL_LOG"
+}
+
+@test "spawn: herdr --window uses tab create and extracts root_pane pane_id" {
+  _setup_fake_herdr
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --window
+  [ "$status" -eq 0 ]
+  # The window is created with the final, team-prefixed label too (#1096).
+  grep -q "tab create --workspace wT --label myteam:alice" "$HERDR_CALL_LOG"
+  grep -q "pane run wT:pR" "$HERDR_CALL_LOG"
+
+  local rec="$(_spawn_record_path myteam alice)"
+  [ -f "$rec" ]
+  local rec_id
+  IFS=$'\t' read -r rec_id _ _ < "$rec"
+  [ "$rec_id" = "herdr:$HERDR_SOCKET_PATH:wT:pR" ]
+}
+
+@test "spawn: herdr --window falls back to split when HERDR_WORKSPACE_ID is unset" {
+  _setup_fake_herdr
+  unset HERDR_WORKSPACE_ID
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --window
+  [ "$status" -eq 0 ]
+  # Fell back to split, not tab create.
+  refute grep -q "tab create" "$HERDR_CALL_LOG"
+  grep -q "pane split" "$HERDR_CALL_LOG"
+}
+
+@test "spawn: tmux takes priority over herdr (backward compat for tmux-inside-herdr)" {
+  _setup_fake_herdr
+  # Set $TMUX so the tmux path wins; re-set the terminal template so the test
+  # doesn't actually run tmux (use the stub recorder).
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%0"
+  export AGMSG_TERMINAL="$STUB_BIN/record.sh {cmd}"
+  # Provide a tmux stub that just records the call.
+  cat > "$STUB_BIN/tmux" <<'TMUXSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  split-window) echo "%99" ;;
+  select-pane|set-window-option) ;;
+esac
+TMUXSTUB
+  chmod +x "$STUB_BIN/tmux"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"in tmux"* ]]
+  # herdr was NOT called.
+  [ ! -f "$HERDR_CALL_LOG" ] || ! grep -q "pane split" "$HERDR_CALL_LOG"
+}
+
+# --- herdr response parsing: address the pane id by path, never by position ---
+#
+# herdr's replies are structured JSON, so key order and neighbouring objects
+# are not part of the contract. Reading the id positionally (last "pane_id" in
+# the text, or the first one inside a `[^}]*` window) silently selects a
+# different pane when the shape shifts — spawn would then rename that pane, run
+# the boot script in it, and persist its id as the placement record. These fix
+# the shapes that break positional matching.
+
+_spawn_recorded_id() {
+  local rec="$(_spawn_record_path myteam alice)" id
+  [ -f "$rec" ] || return 1
+  IFS=$'\t' read -r id _ _ < "$rec"
+  printf '%s' "$id"
+}
+
+@test "spawn: herdr split picks result.pane.pane_id even when another pane object follows it" {
+  _setup_fake_herdr
+  # A second pane object after the target: a trailing-match reader takes
+  # wT:pWRONG and would drive the wrong pane.
+  export HERDR_SPLIT_RESPONSE='{"id":"cli:pane:split","result":{"pane":{"pane_id":"wT:pRIGHT"},"neighbor":{"pane_id":"wT:pWRONG"}},"type":"pane_info"}'
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "pane run wT:pRIGHT" "$HERDR_CALL_LOG"
+  refute grep -q "wT:pWRONG" "$HERDR_CALL_LOG"
+  [ "$(_spawn_recorded_id)" = "herdr:$HERDR_SOCKET_PATH:wT:pRIGHT" ]
+}
+
+@test "spawn: herdr split tolerates reordered keys in the pane object" {
+  _setup_fake_herdr
+  export HERDR_SPLIT_RESPONSE='{"result":{"type":"pane_info","pane":{"tab_id":"wT:tA","cwd":"/x","pane_id":"wT:pLAST"}},"id":"cli:pane:split"}'
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  [ "$(_spawn_recorded_id)" = "herdr:$HERDR_SOCKET_PATH:wT:pLAST" ]
+}
+
+@test "spawn: herdr --window reads root_pane.pane_id past a nested object" {
+  _setup_fake_herdr
+  # `scroll` and `agent_session` are real herdr fields that sort before
+  # pane_id; a `[^}]*` window stops at the first closing brace and misses it.
+  export HERDR_TAB_RESPONSE='{"id":"cli:tab:create","result":{"root_pane":{"agent_session":{"kind":"id"},"scroll":{"offset_from_bottom":0},"pane_id":"wT:pNESTED"},"tab":{"tab_id":"wT:tN","pane_id":"wT:pTABWRONG"},"type":"tab_created"}}'
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --window
+  [ "$status" -eq 0 ]
+  grep -q "pane run wT:pNESTED" "$HERDR_CALL_LOG"
+  refute grep -q "wT:pTABWRONG" "$HERDR_CALL_LOG"
+  [ "$(_spawn_recorded_id)" = "herdr:$HERDR_SOCKET_PATH:wT:pNESTED" ]
+}
+
+@test "spawn: herdr split fails closed on a malformed or unusable response" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local body
+  # Not JSON at all; the right path missing; and a non-string value. None may
+  # be treated as a usable pane id, and none may leave a placement record.
+  for body in 'not json at all {{{' \
+              '{"id":"cli:pane:split","result":{"type":"ok"}}' \
+              '{"result":{"pane":{"pane_id":42}}}'; do
+    _setup_fake_herdr
+    export HERDR_SPLIT_RESPONSE="$body"
+    run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+    [ "$status" -ne 0 ]
+    # The pane-id extraction + fail-closed now lives in the herdr driver (its own
+    # tests pin the exact reasons); spawn reports the placement failure and — the
+    # contract that matters here — leaves NO placement record and renames/runs nothing.
+    grep -q "placement failed" <<<"$output"
+    [ ! -f "$(_spawn_record_path myteam alice)" ]
+    ! grep -q "pane run" "$HERDR_CALL_LOG"
+  done
+}
+
+# --- requirement 1: herdr pre-input pane readiness (process-info gate) ---
+# process-info's foreground_process_group_id == shell_pid says the shell is at its
+# prompt. The gate acts on THREE outcomes distinctly (like peek's 10/12/13).
+
+@test "spawn req1: a NOT-READY pane (foreground process running) is not typed — fail with reason, pane closed" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":100,"foreground_process_group_id":200}}}'
+  # The wait bound is FIXED (no env knob): this loops the whole bound (~5s) before failing.
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -ne 0 ]
+  grep -q "was not ready for input" <<<"$output"
+  refute grep -q "pane run" "$HERDR_CALL_LOG"     # the boot was NOT typed
+  grep -q "pane close" "$HERDR_CALL_LOG"          # the pane we created was closed
+  [ ! -f "$(_spawn_record_path myteam alice)" ]   # nothing launched -> no record
+}
+
+@test "spawn req1: UNKNOWN readiness (process-info errors) still types, warns BEFORE-typing, and records" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RC=1                  # process-info fails -> UNKNOWN (arm 3)
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "pane run" "$HERDR_CALL_LOG"            # arm 3 types anyway
+  grep -q "BEFORE the boot was typed" <<<"$output"
+  [ -f "$(_spawn_record_path myteam alice)" ]
+}
+
+@test "spawn req1: null==null process-info is UNKNOWN, not READY (equality only after validation)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":null,"foreground_process_group_id":null}}}'
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "BEFORE the boot was typed" <<<"$output"   # UNKNOWN, not a silent ready
+  grep -q "pane run" "$HERDR_CALL_LOG"
+}
+
+@test "spawn req1: a numeric-STRING pid is UNKNOWN on BOTH arms and either field (json_type must be integer)" {
+  # json_extract turns a JSON string "5" into 5, which would pass a digit
+  # check; the classifier requires json_type=integer on BOTH fields. Each case below
+  # must be UNKNOWN -> type + BEFORE-typing warning, NOT the NOT-READY 5s-wait/fail and
+  # NOT a silent ready. The cases pin the drift a one-sided control would miss:
+  #   - "5"/"5"  numeric string, EQUAL   (a value-only check would call it READY)
+  #   - "5"/"6"  numeric string, UNEQUAL (must NOT fall to NOT-READY; the gate is on the
+  #                                       values, not only the equality arm)
+  #   - 5 / "5"  MIXED: an integer and a numeric string (catches type-gating only ONE
+  #                                       field — the ungated string would match READY)
+  #   - "5"/ 5   MIXED the other way
+  local resp
+  for resp in '{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":"5"}}}' \
+              '{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":"6"}}}' \
+              '{"result":{"process_info":{"shell_pid":5,"foreground_process_group_id":"5"}}}' \
+              '{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":5}}}'; do
+    bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ" >/dev/null 2>&1 || true
+    _setup_fake_herdr
+    export HERDR_PROCESS_INFO_RESPONSE="$resp"
+    run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+    [ "$status" -eq 0 ]                                     || { echo "FAIL status=$status for $resp"; return 1; }
+    grep -q "BEFORE the boot was typed" <<<"$output"       || { echo "FAIL not UNKNOWN warning for $resp"; return 1; }
+    grep -q "pane run" "$HERDR_CALL_LOG"                    || { echo "FAIL not typed for $resp"; return 1; }
+    refute grep -q "was not ready for input" <<<"$output"  || { echo "FAIL fell to NOT-READY for $resp"; return 1; }
+  done
+}
+
+@test "spawn req1: a READY pane types with NO readiness warning" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr                                # default process-info = equal pids
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "pane run" "$HERDR_CALL_LOG"
+  refute grep -q "BEFORE the boot was typed" <<<"$output"
+}
+
+@test "spawn req1: a non-herdr (plain) spawn never runs the process-info gate" {
+  # The gate is herdr-only; a plain placement must not emit its warning.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  refute grep -q "BEFORE the boot was typed" <<<"$output"
+}
+
+@test "spawn req1: arm-3 (pre-input) and launched-unconfirmed (post-input) are DISTINCT messages" {
+  # The two 'unconfirmed' reasons must read apart. A readiness_sentinel=no type spawned
+  # through herdr with UNKNOWN readiness shows BOTH, worded differently.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RC=1                  # arm 3 (before-typing unknown)
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ"
+  [ "$status" -eq 0 ]
+  grep -q "BEFORE the boot was typed" <<<"$output"          # arm 3, before typing
+  grep -q "status=launched-unconfirmed" <<<"$output"         # requirement 2, after typing
+  grep -q "no-readiness-handshake" <<<"$output"
+}
+
+# --- --terminal-driver / AGMSG_TERMINAL_DRIVER override ---
+@test "spawn: --terminal-driver plain forces the OS-terminal path even when \$TMUX is set" {
+  # The default setup provides a {cmd} template (AGMSG_TERMINAL -> record.sh), so the
+  # plain path is captured. With $TMUX set, detection would pick tmux; the override
+  # must force the OS terminal instead.
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%0"
+  : > "$CAPTURE"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --terminal-driver plain
+  [ "$status" -eq 0 ]
+  grep -q "terminal template" <<<"$output"
+  [ -s "$CAPTURE" ]        # the OS-terminal launcher ran (record.sh captured it)
+}
+
+@test "spawn: AGMSG_TERMINAL_DRIVER=plain forces the OS-terminal path (env form)" {
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%0" AGMSG_TERMINAL_DRIVER=plain
+  : > "$CAPTURE"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  [ -s "$CAPTURE" ]
+}
+
+@test "spawn: --terminal-driver validates EARLY — before team resolution or any state change" {
+  # An unknown driver is a deterministic arg typo, so it must fail before spawn
+  # registers a role or writes a boot file, and before an unrelated 'no team' can mask
+  # it. With NO team registered for the project, a bogus driver must STILL error with
+  # 'unknown terminal driver' (not 'no team') — proving the check runs at parse time.
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --terminal-driver bogus
+  [ "$status" -ne 0 ]
+  grep -q "unknown terminal driver" <<<"$output"
+  refute grep -q "no team" <<<"$output"
+  # Nothing was registered for the spawn target (it failed before the pre-join).
+  [ ! -f "$(_spawn_record_path myteam alice)" ]
+}
+
+@test "spawn: a placement-record WRITE failure -> status=spawned-but-unrecorded, non-zero" {
+  # The record is the only authority peek/poke/despawn --force have. If the write
+  # fails (here: the run dir made read-only, so agmsg_write_atomic cannot even create
+  # its temp beside the record — the shape a real ENOSPC/permission failure takes),
+  # the member is live but unaddressable — a distinct, worse state than a clean spawn,
+  # so spawn reports status=spawned-but-unrecorded with the pane ref and exits
+  # non-zero, not ready. The atomic write also guarantees the failure NEVER truncates
+  # a correct existing record; here there is none yet, only the failed create.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  chmod 500 "$TEST_SKILL_DIR/run"                       # record write will fail
+  cat > "$STUB_BIN/tmux" <<'T'
+#!/usr/bin/env bash
+case "$1" in split-window) echo '%9' ;; select-pane|set-window-option) ;; esac
+exit 0
+T
+  chmod +x "$STUB_BIN/tmux"
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  chmod 700 "$TEST_SKILL_DIR/run"                       # restore so teardown can clean up
+  [ "$status" -ne 0 ]
+  grep -q "status=spawned-but-unrecorded" <<<"$output"
+  # The ref names the server that owns the pane (#1051): $TMUX is "/tmp/fake,1,0",
+  # so the socket is /tmp/fake. A bare 'tmux:%9' would not identify which tmux
+  # server to ask, and %9 is not unique across servers.
+  grep -q "tmux:/tmp/fake:%9" <<<"$output"
+}
+
+@test "spawn: the plain driver's locator protocol value does not leak, and its witness is recorded" {
+  # _launch_os_terminal captures terminal_spawn's record-op stdout and verifies
+  # it rather than letting the protocol value appear beside the human status.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  refute grep -qx -- 'iterm:/dev/ttys040' <<<"$output"
+  grep -q "terminal template" <<<"$output"     # the OS-terminal path did run
+  local rec="$(_spawn_record_path myteam alice)"
+  grep -Fq $'plain:iterm:/dev/ttys040\t' "$rec"
+  grep -Fq $'\tfence=iterm:tty=/dev/ttys040,boot=123,boot_start=Sat_Sep_13_02:10:11_2026' "$rec"
+}
+
+# --- codex launches through the bundled shim, by path (spawn_wrapper=) ---------
+# A person's shell reaches codex-shim.sh as a function or a PATH entry; the
+# non-interactive shell that runs a boot script has neither, so a bare `codex`
+# there is the real binary and the seat starts without --remote (measured: the
+# bridge restarts every few seconds against a thread it cannot own). The
+# manifest names the shim relative to the type directory and spawn addresses it
+# by that bundled path.
+
+# The executable of a boot script's CLI line: the first word that is not a
+# leading VAR=value assignment (the MSYS argv guard, #336, prefixes every line).
+_boot_line_executable() {
+  printf '%s\n' "$1" | awk '{ for (i = 1; i <= NF; i++) if ($i !~ /=/) { print $i; exit } }'
+}
+
+@test "spawn: codex is launched through the bundled shim by its absolute path, not a bare cli" {
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  # The CLI line's first word is the shim inside THIS skill dir -- not `codex`,
+  # not something found on PATH.
+  local shim; shim="$TEST_SKILL_DIR/scripts/drivers/types/codex/codex-shim.sh"
+  grep -qF "$shim" "$boot"
+  # And it is the executable of the actas line (the token before the prompt).
+  local line; line="$(grep -F 'actas' "$boot" | head -1)"
+  echo "actas line: $line"
+  [ "$(_boot_line_executable "$line")" = "$shim" ]
+  # The bare cli must not be launched anywhere in the script.
+  [ "$(grep -cE '^codex |^[A-Z_]+=[^ ]* codex ' "$boot")" -eq 0 ]
+}
+
+@test "spawn: a declared wrapper that is missing is a refusal, never a silent bare-cli launch" {
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  # Break the bundled shim (the type manifest still declares it).
+  chmod -x "$TEST_SKILL_DIR/scripts/drivers/types/codex/codex-shim.sh"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF 'launch wrapper'
+  printf '%s\n' "$output" | grep -qF 'codex-shim.sh'
+  # Nothing was placed or launched: no boot script was handed to the terminal.
+  [ ! -s "$CAPTURE" ]
+  chmod +x "$TEST_SKILL_DIR/scripts/drivers/types/codex/codex-shim.sh"
+}
+
+@test "spawn: a type without spawn_wrapper still launches its bare cli (claude-code)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  # The actas line's executable is the bare `claude` (resolved by the pane's
+  # PATH), with no wrapper in front of it.
+  local line; line="$(grep -F 'actas' "$boot" | head -1)"
+  echo "actas line: $line"
+  [ "$(_boot_line_executable "$line")" = claude ]
+  [ "$(grep -c 'codex-shim' "$boot")" -eq 0 ]
+}
+
+@test "spawn: a spawned codex reaches the real binary WITH --remote (argv read from the boot script's launch)" {
+  # End to end: run the boot script spawn wrote. Its shim resolves the real
+  # codex on PATH (a fake that records argv and can bring up an app-server),
+  # enters codex-monitor because the project is in monitor mode, and execs the
+  # real binary with --remote. The argv the fake recorded is the evidence.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" bash "$boot"
+  _assert_bridged_argv
+}
+
+@test "spawn: a codex seat spawned FROM a bridged codex seat still reaches the real binary WITH --remote" {
+  # codex-monitor exports AGMSG_CODEX_BRIDGE=1 right before it execs the bridged
+  # TUI, so a seat spawned from inside that session inherits it, and the shim
+  # passes straight to the real binary when it sees it -- ahead of any guard in
+  # codex-monitor (found in review). The boot script must unset the inherited
+  # bridge/opt-out state BEFORE the wrapper runs; this seeds all of it and reads
+  # the argv that arrives.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  # The guard sits BEFORE the act: the namespace-clearing line (every
+  # AGMSG_CODEX_* exported variable, enumerated at boot time) and the literal
+  # unset both precede the wrapper line. One assertion per line, on purpose: an
+  # `a && b && c` list does not fail the test when `a` fails.
+  local ns_ln lit_ln cli_ln
+  ns_ln="$(grep -n 'for _v in $(env | sed .*AGMSG_CODEX_' "$boot" | head -1 | cut -d: -f1)"
+  lit_ln="$(grep -n '^unset .*CODEX_THREAD_ID' "$boot" | head -1 | cut -d: -f1)"
+  cli_ln="$(grep -n 'codex-shim.sh' "$boot" | head -1 | cut -d: -f1)"
+  [ -n "$ns_ln" ]
+  [ -n "$lit_ln" ]
+  [ -n "$cli_ln" ]
+  [ "$ns_ln" -lt "$cli_ln" ]
+  [ "$lit_ln" -lt "$cli_ln" ]
+  grep -q '^unset .*AGMSG_REAL_CODEX' "$boot"
+  run env SHELL="$STUB_BIN/noshell" \
+    AGMSG_CODEX_BRIDGE=1 AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:1" AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+    CODEX_THREAD_ID=parent-thread bash "$boot"
+  _assert_bridged_argv
+}
+
+@test "spawn: an inherited AGMSG_CODEX_SHIM_DISABLE=1 does not make a spawned codex seat bypass the shim" {
+  # The shim's other early exit. Seeded ALONE, so this variable is proven
+  # handled on its own and not only in the company of the bridge one.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" \
+    AGMSG_CODEX_SHIM_DISABLE=1 bash "$boot"
+  _assert_bridged_argv
+}
+
+# Fake codex + bridge stack for the end-to-end launches: a `codex` on PATH that
+# records its argv and can serve a fake app-server, a stub bridge launcher, and a
+# stand-in for the shell the boot script execs into at the end.
+_install_fake_codex_bridge_stack() {
+  export CALL_LOG="$TEST_SKILL_DIR/codex-calls.log"
+  cat > "$STUB_BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo "codex-cli 0.142.2"; exit 0 ;;
+  app-server)
+    python3 - <<'PY'
+import socket, sys, os
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0)); s.listen(16); s.settimeout(0.2)
+print("codex app-server (WebSockets)")
+print("  listening on: ws://127.0.0.1:%d" % s.getsockname()[1]); sys.stdout.flush()
+ppid = os.getppid()
+while True:
+    if os.getppid() != ppid:
+        break
+    try:
+        c, _ = s.accept(); c.close()
+    except Exception:
+        pass
+PY
+    ;;
+  *)
+    printf 'real-codex' >> "$CALL_LOG"
+    for a in "$@"; do printf ' <%s>' "$a" >> "$CALL_LOG"; done
+    printf '\n' >> "$CALL_LOG"
+    ;;
+esac
+FAKE
+  chmod +x "$STUB_BIN/codex"
+  # The bridge launcher is detached and Node-based; stand in for it BY FILE in
+  # this test copy of the skill, not through AGMSG_CODEX_BRIDGE_LAUNCHER_CMD:
+  # the boot script unsets every shim-stack override, so an env hook set by the
+  # test would be cleared before the wrapper runs (which is the point).
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_SKILL_DIR/scripts/drivers/types/codex/codex-bridge-launcher.sh"
+  # The boot script ends with `exec "$SHELL" -i`; give it a shell that just exits.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/noshell"; chmod +x "$STUB_BIN/noshell"
+}
+
+# The evidence both end-to-end tests read: the real binary was reached exactly
+# once, bridged, with the actas prompt. Then the fake app-server is put down.
+_assert_bridged_argv() {
+  [ -f "$CALL_LOG" ]
+  # The real binary was reached exactly once, with the bridge flag and the actas prompt.
+  [ "$(grep -c '^real-codex' "$CALL_LOG")" -eq 1 ]
+  grep -q '^real-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
+  grep -q 'actas' "$CALL_LOG"
+  grep -q 'reviewer' "$CALL_LOG"
+  # Clean up the fake app-server the shim brought up.
+  local pf pid
+  for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
+    [ -f "$pf" ] || continue
+    pid="$(cat "$pf" 2>/dev/null)"; [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+  done
+}
+
+@test "spawn: an inherited PATH-wrapper install (AGMSG_CODEX_SHIM_WRAPPER/SCRIPT_DIR) cannot repoint the bundled shim" {
+  # The installed ~/.agents/bin wrapper exports AGMSG_CODEX_SHIM_WRAPPER=1 and
+  # AGMSG_CODEX_SHIM_SCRIPT_DIR before starting the bundled shim; a codex started
+  # through it passes both to anything it spawns. Inherited, the bundled shim
+  # would take the PARENT's script dir as its own (codex-shim.sh, the WRAPPER
+  # branch) -- here a stale directory with no delivery.sh, which the shim reads
+  # as "not a monitor project" and passes straight to the real binary (found in
+  # review). Seeded with exactly that, the seat must still arrive bridged.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  local stale; stale="$TEST_SKILL_DIR/stale-install"; mkdir -p "$stale"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" \
+    AGMSG_CODEX_SHIM_WRAPPER=1 AGMSG_CODEX_SHIM_SCRIPT_DIR="$stale" AGMSG_CODEX_SHIM_TARGET="$stale/codex" bash "$boot"
+  _assert_bridged_argv
+}
+
+@test "spawn: inherited resolution overrides (real binary, monitor, launcher) do not steer a spawned codex seat" {
+  # The remaining shim-stack inputs: a parent's AGMSG_REAL_CODEX,
+  # AGMSG_CODEX_MONITOR_CMD and the launcher command overrides. Seeded with paths
+  # that do not exist, the seat must still resolve everything from its own
+  # install and arrive bridged; if any of them leaked through, the launch would
+  # fail or go plain, and the argv below would not be recorded.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" \
+    AGMSG_REAL_CODEX=/nonexistent/parent-codex AGMSG_CODEX_MONITOR_CMD=/nonexistent/parent-monitor \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/nonexistent/parent-launcher AGMSG_CODEX_BRIDGE_CMD=/nonexistent/parent-bridge \
+    bash "$boot"
+  _assert_bridged_argv
+}
+
+@test "spawn: every environment variable the codex shim stack reads is cleared for a spawned seat (reader inventory)" {
+  # The list in type.conf is only as good as its coverage. This pins it to the
+  # readers: every ${AGMSG_CODEX_*} / ${AGMSG_REAL_CODEX} the shim, monitor and
+  # launcher consult must be in spawn_unset_env, so the next control variable
+  # added to the stack cannot be inherited by a spawned seat unnoticed. The
+  # spawn marker itself is the one exception -- it is what the seat is.
+  # Derivation: every `$VAR`/`${VAR` in the stack's bash files and every
+  # `process.env.VAR` in the bridge, for VAR matching AGMSG_* or CODEX_*.
+  # Each such name must be covered by spawn_unset_env — literally, or by a
+  # namespace entry (`PREFIX*`) — unless it is on the short, reasoned keep list
+  # below. A new reader outside the namespace fails here, which is the only way
+  # a deny rule can say "we would notice".
+  local dir="$SCRIPTS/drivers/types/codex" v listed entry covered
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/type-registry.sh"
+  listed="$(agmsg_type_get codex spawn_unset_env)"
+  # Kept on purpose (each with its reason in type.conf): the seat's own marker;
+  # agmsg-wide configuration the CLI's actas flow legitimately inherits; test
+  # hooks that only bats sets; and names that are script-local variables
+  # assigned inside the stack before they are read, never environment inputs
+  # (role-session lookup results, codex-monitor's parsed command/args/version,
+  # the doc URL constant from delivery.sh).
+  local keep=" AGMSG_SPAWNED AGMSG_BASH AGMSG_WATCH_ONCE_INTERVAL AGMSG_WATCH_ONCE_TIMEOUT AGMSG_TEST_DISPATCHER_STALE_BARRIER AGMSG_TEST_ASSUME_CODEX_SOCKET AGMSG_ROLE_SESSION_UUID AGMSG_ROLE_SESSION_PROJECT CODEX_ARGS CODEX_COMMAND CODEX_VERSION CODEX_MONITOR_DOC_URL "
+  local inventory missing=""
+  inventory="$( { grep -ohE '\$\{?(AGMSG_[A-Z0-9_]+|CODEX_[A-Z0-9_]+)' "$dir"/codex-shim.sh "$dir"/codex-monitor.sh "$dir"/_app-server.sh "$dir"/codex-bridge-launcher.sh "$dir"/codex-record-session.sh "$dir"/_session-start.sh "$dir"/codex-shim-install.sh "$dir"/_delivery.sh | sed -E 's/^\$\{?//'; grep -ohE 'process\.env\.(AGMSG_[A-Z0-9_]+|CODEX_[A-Z0-9_]+)' "$dir"/codex-bridge.js | sed 's/process\.env\.//'; } | sort -u )"
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    case "$keep" in *" $v "*) continue ;; esac
+    covered=0
+    for entry in $listed; do
+      case "$entry" in
+        *\*) case "$v" in "${entry%\*}"*) covered=1 ;; esac ;;
+        *)   [ "$v" = "$entry" ] && covered=1 ;;
+      esac
+    done
+    [ "$covered" -eq 1 ] || missing="$missing $v"
+  done <<LIST
+$inventory
+LIST
+  echo "inventory: $(printf '%s\n' "$inventory" | wc -l | tr -d ' ') names; not covered:$missing"
+  [ -z "$missing" ]
+  # Positive controls for the extractor: the inventory must contain the names
+  # the two review rounds found, or an empty scan would pass vacuously.
+  printf '%s\n' "$inventory" | grep -qx 'AGMSG_CODEX_SHIM_SCRIPT_DIR'
+  printf '%s\n' "$inventory" | grep -qx 'AGMSG_CODEX_BRIDGE'
+  printf '%s\n' "$inventory" | grep -qx 'CODEX_THREAD_ID'
+}
+
+@test "spawn: a shim-stack control variable that does not exist yet is still cleared (namespace, not list)" {
+  # The deny-list failed twice in review, each time by one name. The boot
+  # script therefore clears the whole AGMSG_CODEX_* namespace as enumerated from
+  # the environment at boot time. Seed a name no code reads today and dump the
+  # environment the real binary actually receives: the seeded name is gone,
+  # while an ordinary variable survives (positive control: the dump is real and
+  # the clearing is not "unset everything").
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  # Extend the fake: on the bridged launch, also dump its environment.
+  sed -i.bak 's|    printf .real-codex. >> "\$CALL_LOG"|    env > "$CALL_LOG.env"\n&|' "$STUB_BIN/codex"; rm -f "$STUB_BIN/codex.bak"
+  grep -q 'env > "\$CALL_LOG.env"' "$STUB_BIN/codex"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_FUTURE_KNOB=1 AGMSG_ROLE_SESSION_OWNER=parent-owner SPAWN_TEST_CANARY=alive bash "$boot"
+  _assert_bridged_argv
+  [ -f "$CALL_LOG.env" ]
+  grep -q '^SPAWN_TEST_CANARY=alive$' "$CALL_LOG.env"
+  [ "$(grep -c '^AGMSG_CODEX_FUTURE_KNOB=' "$CALL_LOG.env")" -eq 0 ]
+  # The bridge owner is identity state for the parent seat, so a spawned seat
+  # must not inherit it and accidentally match the parent's actas lock.
+  [ "$(grep -c '^AGMSG_ROLE_SESSION_OWNER=' "$CALL_LOG.env")" -eq 0 ]
+  # And the seat's own marker is NOT cleared by the namespace rule.
+  grep -q '^AGMSG_SPAWNED=1$' "$CALL_LOG.env"
+}
+
+# ----------------------------------------------------------------------------
+# Spawn-side naming: the spawner sets the pane's agent key right after creating
+# it, so a codex member (whose self-naming paths never run — they are all
+# Claude-Code-only) is not left keyless and reported identity=mismatch by `team`.
+#
+# These drive a real spawn through a FAKE herdr driver: its terminal.conf still
+# advertises the `name` capability (so _name_pane proceeds), but its ops are
+# scripted so no real pane is opened and the naming write / read-back are
+# controllable. The driver is forced with --terminal-driver herdr (routed to
+# launch_in_herdr, which is where the codex case lives).
+_install_fake_naming_herdr() {
+  # Overwrite ONLY ops.sh in this test's throwaway skill copy; keep terminal.conf
+  # (its capabilities line carries `name`). FAKE_* env vars steer each control.
+  local ops="$TEST_SKILL_DIR/scripts/drivers/terminals/herdr/ops.sh"
+  cat > "$ops" <<'OPS'
+# fake herdr ops for spawn-side naming tests — no real herdr calls.
+terminal_check()      { echo ok; return 0; }
+terminal_describe()   { printf 'capabilities=spawn despawn peek poke where arrange name\n'; }
+terminal_detect()     { return 0; }
+terminal_spawn() {
+  # Optionally drop the readiness sentinel spawn will wait on (set by the wait-path
+  # tests), simulating a watcher that attaches immediately so WAIT_READY completes
+  # fast. spawn clears the sentinel just before launching and calls this after, so
+  # the touch lands after the clear.
+  if [ -n "${FAKE_READY_TOUCH:-}" ]; then
+    mkdir -p "$(dirname "$FAKE_READY_TOUCH")" 2>/dev/null || true
+    : > "$FAKE_READY_TOUCH" 2>/dev/null || true
+  fi
+  printf '%s\n' "${FAKE_PANE_ID:-w0:p1}"; return 0
+}
+terminal_despawn()    { echo ok; return 0; }
+terminal_pane_state() { echo alive; return 0; }
+terminal_peek()       { printf ''; return 0; }
+terminal_poke()       { echo ok; return 0; }
+terminal_where()      { printf ''; return 0; }
+terminal_arrange()    { echo ok; return 0; }
+terminal_name() {
+  # Log every naming call (id team agent mode) so a control can prove the key was
+  # set with the right, type-independent (team, agent). FAKE_NAME_FAILS makes
+  # the first N calls reproduce herdr's pre-detection agent_not_found response.
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$FAKE_NAME_LOG"
+  local calls
+  calls="$(wc -l < "$FAKE_NAME_LOG" | tr -d ' ')"
+  if [ "$calls" -le "${FAKE_NAME_FAILS:-0}" ]; then
+    echo runtime_error
+    echo '{"error":{"code":"agent_not_found"}}' >&2
+    return 13
+  fi
+  echo ok
+  return "${FAKE_NAME_RC:-0}"
+}
+terminal_team_observe() {
+  # activity \t label \t key \t title. Field 3 (key) is what _name_pane reads
+  # back; FAKE_OBSERVE_KEY forces it (a sentinel => naming looks unconfirmed).
+  printf 'idle\tt:a\t%s\ttitle\n' "${FAKE_OBSERVE_KEY:-a0123456789abcdef01234567}"
+}
+OPS
+}
+
+# Assertions here use `grep`/`refute`, never `[[ ]]`: a non-last `[[ ]]` cannot fail
+# a test on bash 3.2 (#670), and the enforced-assertions checker holds the tree at a
+# baseline. Name-log content is grepped from the FILE (not `run cat`, which would
+# swap $output and hide the spawn-output assertions).
+
+@test "spawn-side naming: a codex seat that never actas'd still gets its agent key set" {
+  # The whole point: codex reaches its bridge, not the watcher, so none of the
+  # five self-naming call sites ever run for it. Spawn must set the key itself.
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  # spawn's OWN output (asserted while $output still holds it): naming succeeded,
+  # so this is NOT the unnamed status.
+  refute grep -qF "status=spawned-but-unnamed" <<<"$output"
+  # terminal_name was called for THIS pane with the seat's (team, agent) and the
+  # naming-on mode ("" — key AND label). Grep the log file directly.
+  local want; want="$(printf 'w0:p1\tcxteam\tbob\t')"
+  grep -qF -- "$want" "$FAKE_NAME_LOG"
+}
+
+@test "spawn-side naming: herdr retries agent_not_found until detection then confirms the key (#1100)" {
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  cat > "$STUB_BIN/sleep" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_SLEEP_LOG"
+EOF
+  chmod +x "$STUB_BIN/sleep"
+  export FAKE_SLEEP_LOG="$TEST_SKILL_DIR/sleep.log"
+  : > "$FAKE_SLEEP_LOG"
+
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_FAILS=2 \
+    FAKE_SLEEP_LOG="$FAKE_SLEEP_LOG" \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$FAKE_NAME_LOG" | tr -d ' ')" -eq 3 ]
+  [ "$(wc -l < "$FAKE_SLEEP_LOG" | tr -d ' ')" -eq 2 ]
+  refute grep -qF "status=spawned-but-unnamed" <<<"$output"
+}
+
+@test "spawn-side naming: herdr bounds a persistent agent_not_found and reports unnamed (#1100)" {
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  cat > "$STUB_BIN/sleep" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_SLEEP_LOG"
+EOF
+  chmod +x "$STUB_BIN/sleep"
+  export FAKE_SLEEP_LOG="$TEST_SKILL_DIR/sleep.log"
+  : > "$FAKE_SLEEP_LOG"
+
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_FAILS=99 \
+    FAKE_SLEEP_LOG="$FAKE_SLEEP_LOG" \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$FAKE_NAME_LOG" | tr -d ' ')" -eq 11 ]
+  [ "$(wc -l < "$FAKE_SLEEP_LOG" | tr -d ' ')" -eq 10 ]
+  grep -qF "status=spawned-but-unnamed" <<<"$output"
+}
+
+@test "spawn-side naming: a non-detection failure is not retried (#1100)" {
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_RC=13 \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$FAKE_NAME_LOG" | tr -d ' ')" -eq 1 ]
+  grep -qF "status=spawned-but-unnamed" <<<"$output"
+}
+
+@test "spawn-side naming: names a claude-code seat too, with the same key inputs a self-name would use" {
+  # Type-independence: spawn names claude-code with the identical (team, agent,
+  # mode) call agmsg_terminal_name_self makes, so the derived key is the same and
+  # a later self-naming re-asserts that value rather than changing it.
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" ccteam existing claude-code "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  # Same call shape as the codex case (only team/agent differ) — type-independent.
+  local want; want="$(printf 'w0:p1\tccteam\talice\t')"
+  grep -qF -- "$want" "$FAKE_NAME_LOG"
+  # Exactly one naming call from spawn; a later self-name with the same inputs is a
+  # no-op on the value (idempotent), so spawn does not need to repeat it.
+  [ "$(grep -c 'w0:p1' "$FAKE_NAME_LOG")" -eq 1 ]
+}
+
+@test "spawn-side naming: AGMSG_TERMINAL_NAMING=off still sets the key (mode=key), only the label is suppressed" {
+  # The key is addressing and must always be set; off suppresses the visible label
+  # only. So the naming call must carry mode=key, not be skipped.
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" AGMSG_TERMINAL_NAMING=off \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  local want; want="$(printf 'w0:p1\tcxteam\tbob\tkey')"
+  grep -qF -- "$want" "$FAKE_NAME_LOG"
+}
+
+@test "spawn-side naming: a naming that does not read back reports spawned-but-unnamed, NOT ready/launched" {
+  # The read-back is the point (the rule: only say named after reading back ok, like
+  # team --fix). terminal_name SUCCEEDS here (rc 0) but the key reads back as a
+  # missing sentinel — so ONLY the read-back catches it. Dropping the read-back
+  # and trusting the write's exit would turn this control green (mutation guard).
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_RC=0 \
+    FAKE_OBSERVE_KEY="unknown:agent_key_missing" \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  # Not fatal — the seat is reachable via the placement record — so exit 0.
+  [ "$status" -eq 0 ]
+  # A DISTINCT status, and crucially NOT a ready/launched-confirmed line.
+  grep -qF "status=spawned-but-unnamed" <<<"$output"
+  grep -qF "ref=herdr:w0:p1" <<<"$output"
+  refute grep -qF "status=ready" <<<"$output"
+  refute grep -qF "status=launched-unconfirmed" <<<"$output"
+}
+
+@test "spawn-side naming: EVERY driver non-value key prefix reads back as NOT named (seam with #1066 observe vocabulary)" {
+  # The read-back derives from the shared set (agmsg_observation_has_value /
+  # _AGMSG_OBSERVATION_NON_VALUE_PREFIXES), so any prefix a driver can put in the key
+  # field — including the decisive-absence `absent:*` #1066 added — must make spawn
+  # report NOT named. Iterating the set (rather than a hand-list) proves the
+  # derivation and auto-covers a future prefix. This is the #1065/#1066 seam.
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  [ -n "$_AGMSG_OBSERVATION_NON_VALUE_PREFIXES" ]   # the set must exist (post-#1066)
+  local i=0 p nm
+  for p in $_AGMSG_OBSERVATION_NON_VALUE_PREFIXES; do
+    i=$((i + 1)); nm="seam$i"
+    _install_fake_naming_herdr
+    bash "$SCRIPTS/join.sh" seamteam "$nm" codex "$PROJ"
+    export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"; : > "$FAKE_NAME_LOG"
+    run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_RC=0 \
+      FAKE_OBSERVE_KEY="${p}agent_key_unset" \
+      bash "$SCRIPTS/spawn.sh" codex "$nm" --project "$PROJ" --terminal-driver herdr --no-wait
+    [ "$status" -eq 0 ] || { echo "FAIL status=$status for prefix '$p'"; return 1; }
+    grep -qF "status=spawned-but-unnamed" <<<"$output" \
+      || { echo "FAIL prefix '$p' was not reported unnamed: $output"; return 1; }
+  done
+  # Mutation guard: a REAL value must read back as NAMED, else "answer everything
+  # unnamed" (e.g. dropping the read-back and always returning 1) also passes above.
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" seamteam seamok codex "$PROJ"
+  : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_RC=0 \
+    FAKE_OBSERVE_KEY="a0123456789abcdef01234567" \
+    bash "$SCRIPTS/spawn.sh" codex seamok --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  refute grep -qF "status=spawned-but-unnamed" <<<"$output"
+}
+
+@test "spawn-side naming: on the WAIT path a ready-but-unnamed seat reports spawned-but-unnamed AFTER the wait" {
+  # naming and readiness are independent facts: a seat can be receiving yet unnamed.
+  # The report must come AFTER the readiness wait (not bail before it), so the leader
+  # sees that the watcher attached. The `after=` field is emitted ONLY by the wait
+  # branch, so its presence proves the wait ran before the naming report.
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" wtteam alice claude-code "$PROJ"
+  # actas-lock.sh needs SKILL_DIR; spawn computes it as scripts/.. = TEST_SKILL_DIR,
+  # so setting it to the same value makes agmsg_ready_path match spawn's own path.
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/actas-lock.sh"
+  export FAKE_READY_TOUCH; FAKE_READY_TOUCH="$(agmsg_ready_path wtteam alice)"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"; : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_READY_TOUCH="$FAKE_READY_TOUCH" \
+    FAKE_NAME_RC=0 FAKE_OBSERVE_KEY="absent:agent_key_unset" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --terminal-driver herdr --ready-timeout 10
+  [ "$status" -eq 0 ]
+  grep -qF "status=spawned-but-unnamed" <<<"$output"
+  grep -qF "after=" <<<"$output"                 # proves the wait branch, not the pre-wait bail
+  refute grep -qF "status=ready" <<<"$output"
+}
+
+@test "spawn-side naming: on the WAIT path a named seat that becomes ready reports status=ready" {
+  # Positive control for the wait branch: naming succeeds and the sentinel appears,
+  # so the terminal status is ready (not spawned-but-unnamed).
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" wtteam alice claude-code "$PROJ"
+  # actas-lock.sh needs SKILL_DIR; spawn computes it as scripts/.. = TEST_SKILL_DIR,
+  # so setting it to the same value makes agmsg_ready_path match spawn's own path.
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/actas-lock.sh"
+  export FAKE_READY_TOUCH; FAKE_READY_TOUCH="$(agmsg_ready_path wtteam alice)"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"; : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_READY_TOUCH="$FAKE_READY_TOUCH" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --terminal-driver herdr --ready-timeout 10
+  [ "$status" -eq 0 ]
+  grep -qF "status=ready" <<<"$output"
+  refute grep -qF "status=spawned-but-unnamed" <<<"$output"
+}
+
+# --- #1096: the caller's pane is not the new member's to name ------------------------
+#
+# spawn pre-joins the new member by running join.sh in the CALLER's process, and
+# join's boot-time self-naming resolves "self" through that environment -- the
+# caller's pane. Before the fix the caller's pane took the new member's label and
+# key, and the tests below only ever looked at the NEW pane, so they stayed green.
+# The caller assertion is the one that goes red on that tree.
+
+@test "spawn: herdr -- the caller's pane keeps its label and key byte-for-byte across a spawn (#1096)" {
+  _setup_fake_herdr
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  # The caller's pane as a person sees it before the spawn: a label and a key,
+  # written through the same fake so `pane get` / the agent DB replay them.
+  "$STUB_BIN/herdr" pane rename wT:pSelf 'myteam:existing' >/dev/null
+  "$STUB_BIN/herdr" agent rename wT:pSelf a1111111111111111111111111 >/dev/null
+  local before_label before_key after_label after_key
+  before_label="$("$STUB_BIN/herdr" pane get wT:pSelf | sed -n 's/.*"label":"\([^"]*\)".*/\1/p')"
+  before_key="$(awk -F'\t' '$1=="wT:pSelf"{k=$2} END{print k}' "$HERDR_AGENT_DB")"
+  [ "$before_label" = 'myteam:existing' ]
+  [ "$before_key" = a1111111111111111111111111 ]
+  : > "$HERDR_CALL_LOG"
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  # After: the same two values, read back the same way, and no rename argv ever
+  # targeted the caller's pane.
+  after_label="$("$STUB_BIN/herdr" pane get wT:pSelf | sed -n 's/.*"label":"\([^"]*\)".*/\1/p')"
+  after_key="$(awk -F'\t' '$1=="wT:pSelf"{k=$2} END{print k}' "$HERDR_AGENT_DB")"
+  [ "$after_label" = "$before_label" ]
+  [ "$after_key" = "$before_key" ]
+  refute grep -qE '^(pane|agent) rename wT:pSelf ' "$HERDR_CALL_LOG"
+
+  # The NEW pane is the one named: prefixed label at creation, then the key.
+  grep -q '^pane rename wT:pN myteam:alice$' "$HERDR_CALL_LOG"
+  refute grep -q '^pane rename wT:pN alice$' "$HERDR_CALL_LOG"
+  grep -q '^agent rename wT:pN ' "$HERDR_CALL_LOG"
+  refute grep -qF 'status=spawned-but-unnamed' <<<"$output"
+}
+
+@test "join: names its own pane at boot (control), and not under AGMSG_SELF_NAME=off (#1096)" {
+  # The control half needs naming ON by default (against the fake herdr
+  # below, never a real terminal) to mean anything against the off half
+  # right after it -- opt back in from the harness's #1095 off
+  # (test_helper.bash).
+  unset AGMSG_SELF_NAME
+  _setup_fake_herdr
+  # Control: a seat joining from its own pane names it -- key and prefixed label.
+  bash "$SCRIPTS/join.sh" myteam bob claude-code "$PROJ"
+  grep -q '^agent rename wT:pSelf ' "$HERDR_CALL_LOG"
+  grep -q '^pane rename wT:pSelf myteam:bob$' "$HERDR_CALL_LOG"
+  : > "$HERDR_CALL_LOG"
+  # The switch spawn sets on its pre-join: the same join, no naming call at all.
+  AGMSG_SELF_NAME=off bash "$SCRIPTS/join.sh" myteam carol claude-code "$PROJ"
+  refute grep -q ' rename ' "$HERDR_CALL_LOG"
+  # ...and the join itself still happened: carol is registered for the project.
+  bash "$SCRIPTS/identities.sh" "$PROJ" claude-code | grep -q 'carol'
 }

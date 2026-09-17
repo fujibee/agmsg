@@ -1,0 +1,1514 @@
+:root {
+  --bg: #0b0e14;
+  --panel: #11151f;
+  --panel-2: #161b27;
+  --border: #232a3a;
+  /* One step brighter than --border, specifically for the pane frame
+     (--border alone was too faint to read as a visible box at
+     rest). Its own variable, not a --border change, so the other 27
+     places --border is used elsewhere in the UI stay as-is. */
+  --pane-border: #3a4660;
+  --fg: #c5c8c6;
+  --muted: #6b7280;
+  --accent: #7aa2f7;
+  --green: #9ece6a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 -apple-system, "SF Pro Text", Helvetica, Arial, sans-serif;
+}
+
+/* These sit at the very top of the window, same row as the overlaid macOS
+   traffic lights (titleBarStyle: Overlay) — left padding clears them
+   horizontally, same idea as .sidebar-head's top padding does vertically. */
+.startup-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px 8px 80px;
+  background: #4a1f1f;
+  color: #ffd7d7;
+  font-size: 12px;
+  border-bottom: 1px solid #6b2b2b;
+}
+.startup-error-banner button {
+  background: transparent;
+  border: 1px solid #ffd7d7;
+  color: #ffd7d7;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.startup-installing-banner {
+  display: flex;
+  align-items: center;
+  padding: 8px 14px 8px 80px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.startup-outdated-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px 8px 80px;
+  background: #4a3a1f;
+  color: #ffe7b3;
+  font-size: 12px;
+  border-bottom: 1px solid #6b552b;
+}
+.startup-outdated-banner button {
+  background: transparent;
+  border: 1px solid #ffe7b3;
+  color: #ffe7b3;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.startup-outdated-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+/* Deliberately unobtrusive — a way out for someone who really wants the
+   warning gone, not a peer action to "Update now". Two-class selector
+   (0,2,0) beats .startup-outdated-banner button's (0,1,1) without
+   !important. */
+.startup-outdated-banner .startup-outdated-banner-dismiss {
+  border: none;
+  padding: 0 4px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.6;
+}
+.startup-outdated-banner .startup-outdated-banner-dismiss:hover {
+  opacity: 1;
+}
+
+.startup-success-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px 8px 80px;
+  background: #1f4a2c;
+  color: #c8f7d4;
+  font-size: 12px;
+  border-bottom: 1px solid #2b6b41;
+}
+.startup-success-banner button {
+  background: transparent;
+  border: 1px solid #c8f7d4;
+  color: #c8f7d4;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Top bar */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+}
+.topbar select {
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.spacer {
+  flex: 1;
+}
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Flat dropdowns — drop the native macOS spinner for a custom chevron. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 28px 6px 10px;
+  font: inherit;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7280' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+select:hover,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* + New menu (collapsed-rail only — the expanded sidebar has its own
+   direct + buttons per section instead, see .section-add-btn) */
+.new-wrap {
+  position: relative;
+}
+.new-menu {
+  position: absolute;
+  top: 110%;
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 120px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.new-menu button {
+  background: none;
+  border: none;
+  color: var(--fg);
+  text-align: left;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.new-menu button:hover {
+  background: var(--bg);
+}
+.new-menu button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Right-click context menus (member row: Spawn/Rename/Leave; pane header:
+   Close/Move to). overflow is visible (not hidden) so the Move-to submenu can
+   pop out past the menu's own rounded edge. */
+.ctx-menu {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.ctx-menu button {
+  background: none;
+  border: none;
+  color: var(--fg);
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ctx-menu button:hover:not(:disabled) {
+  background: var(--bg);
+}
+.ctx-menu button.danger {
+  color: #f7768e;
+}
+.ctx-menu button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* "Move to ▸" — a hover-revealed submenu of other tabs. */
+.submenu-trigger {
+  position: relative;
+}
+.submenu-label {
+  display: block;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--fg);
+  cursor: default;
+}
+.submenu-trigger:hover .submenu-label {
+  background: var(--bg);
+}
+.submenu {
+  display: none;
+  flex-direction: column;
+  position: absolute;
+  left: 100%;
+  top: -1px;
+  min-width: 150px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.submenu-trigger:hover .submenu {
+  display: flex;
+}
+.submenu-empty {
+  display: block;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+/* Marks the current choice in a menu (e.g. the collapsed sidebar rail's
+   team-switch popup — see .rail-popup below). */
+.submenu button.active,
+.ctx-menu button.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+.submenu button.active::before,
+.ctx-menu button.active::before {
+  content: "✓ ";
+}
+
+/* Modals */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal {
+  width: 420px;
+  max-width: 90vw;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+.modal-title {
+  font-weight: 700;
+  font-size: 15px;
+  margin-bottom: 12px;
+}
+.modal-note {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+.modal label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.modal input {
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font: inherit;
+}
+.modal select {
+  width: 100%;
+}
+.path-row {
+  display: flex;
+  gap: 6px;
+}
+.path-row input {
+  flex: 1;
+}
+.path-row button {
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+.modal-err {
+  color: #f7768e;
+  font-size: 12px;
+  margin-bottom: 10px;
+  white-space: pre-wrap;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.modal-actions button {
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+.modal-actions button.primary {
+  background: var(--accent);
+  color: #0b0e14;
+  border: none;
+  font-weight: 600;
+}
+.modal-actions button.primary.danger {
+  background: #f7768e;
+}
+.modal-actions button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-decoration: underline;
+}
+.rename {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 0 0 6px;
+  font-size: 12px;
+}
+.rename:hover {
+  color: var(--accent);
+}
+
+/* While dragging a divider, force the resize cursor over the whole window
+   (including the terminal, which would otherwise show its own text cursor). */
+body.resizing-col,
+body.resizing-col * {
+  cursor: col-resize !important;
+}
+body.resizing-row,
+body.resizing-row * {
+  cursor: row-resize !important;
+}
+body.resizing-col,
+body.resizing-row {
+  user-select: none;
+}
+
+/* Draggable dividers: a generous grab area, but only a hairline is drawn
+   until hover (then the full strip lights up in the accent color). */
+.divider-v,
+.divider-h {
+  position: relative;
+  background: transparent;
+  flex: 0 0 3px;
+}
+.divider-v {
+  cursor: col-resize;
+}
+.divider-h {
+  height: 3px;
+  cursor: row-resize;
+}
+.divider-v::before,
+.divider-h::before {
+  content: "";
+  position: absolute;
+  background: var(--border);
+}
+.divider-v::before {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+}
+.divider-h::before {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+}
+.divider-v:hover::before {
+  left: 0;
+  width: 100%;
+  transform: none;
+  background: var(--accent);
+}
+.divider-h:hover::before {
+  top: 0;
+  height: 100%;
+  transform: none;
+  background: var(--accent);
+}
+
+/* Body split */
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* Sidebar */
+.sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+}
+/* Collapsed to an icon-only rail (issue #317 backlog) so panes get
+   more width; a fixed width overrides the draggable one from full size.
+   Spawning/messaging a member isn't offered from here at all — just +
+   (new team/agent), the current team (click to switch), and the app-user
+   avatar at the bottom (click for settings). */
+.sidebar.collapsed {
+  width: 44px;
+}
+/* Collapse/expand toggle — its own slim strip, level with the overlaid
+   macOS traffic lights (not a tall empty row below them, and not
+   crowded into brand-row either — its own row, just short and right by the
+   lights rather than adding real vertical space). */
+.sidebar-toggle-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  height: 28px;
+  padding: 0 6px;
+}
+.sidebar-collapse-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.sidebar-collapse-toggle:hover {
+  background: var(--panel-2);
+  color: var(--fg);
+}
+.sidebar-collapsed-rail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  /* No .sidebar-toggle-row above this in the collapsed state (it would
+     overlap the traffic lights at only 44px wide) — this provides its own
+     traffic-light clearance directly. */
+  padding: 34px 0 12px;
+}
+.rail-logo-mark-btn {
+  background: none;
+  border: none;
+  padding: 3px;
+  cursor: pointer;
+  border-radius: 6px;
+  display: flex;
+}
+.rail-logo-mark-btn:hover {
+  background: var(--panel-2);
+}
+.rail-logo-mark {
+  width: 26px;
+  height: 26px;
+  display: block;
+}
+.rail-icon-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--fg);
+  font-size: 15px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.rail-icon-btn:hover {
+  background: var(--panel-2);
+}
+.rail-menu-wrap {
+  position: relative;
+}
+.rail-spacer {
+  flex: 1;
+}
+/* Clicking the avatar also expands the sidebar — same action as the
+   agmsg mark button above it, since it had no action at all before. */
+.rail-avatar-btn {
+  background: none;
+  border: none;
+  padding: 3px;
+  cursor: pointer;
+  border-radius: 50%;
+  display: flex;
+}
+.rail-avatar-btn:hover {
+  background: var(--panel-2);
+}
+.sidebar-collapsed-rail .avatar {
+  width: 24px;
+  height: 24px;
+}
+/* Popups the rail's + / team buttons open — anchored to their own trigger
+   button (position: relative on .rail-menu-wrap / .new-wrap) rather than
+   the click-coordinate positioning .ctx-menu normally uses elsewhere
+   (member/pane/tab right-click menus), since these always open from the
+   same fixed rail position. */
+.rail-popup {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  margin-left: 4px;
+  z-index: 30;
+}
+/* Sidebar header: brand + New + team selector (moved out of a top bar). */
+.sidebar-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  /* Traffic-light clearance now lives on .sidebar-toggle-row above this
+     (same slot in both states) — this only needs its own small gap below
+     that row, not a second full clearance. */
+  padding: 4px 12px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.brand-row .logo {
+  height: 26px;
+  width: auto;
+  display: block;
+}
+.sidebar-head .brand {
+  font-size: 15px;
+}
+.sidebar-head select {
+  width: 100%;
+}
+.team-status-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-bottom: 1px solid var(--border);
+  padding: 3px 6px;
+}
+.team-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 6px 4px;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  color: inherit;
+  font-size: 11px;
+  text-align: left;
+}
+.team-status-row:hover,
+.team-status-row.active {
+  background: var(--panel-2);
+}
+.team-status-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-status-slot {
+  flex-shrink: 0;
+  width: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.team-status-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.team-status-dot.status-blocked { background: #f7768e; }
+.team-status-dot.status-working { background: #e0af68; }
+.team-status-dot.status-idle { background: var(--green); }
+.team-status-dot.status-unknown { background: var(--green); }
+.team-status-dot.status-empty { background: var(--muted); }
+.collapsed-team-status {
+  width: 28px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.collapsed-team-status .team-status-row {
+  justify-content: center;
+  gap: 0;
+  padding: 6px 0;
+}
+.language-switcher {
+  font-size: 11px;
+}
+.sidebar-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.sidebar-title-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.section-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.section-add-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.section-add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.filter-actions button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+}
+.members {
+  list-style: none;
+  margin: 0;
+  padding: 4px 6px;
+  flex: 1;
+  overflow-y: auto;
+}
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.member-check {
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin-left: 4px;
+}
+.member-check-slot {
+  flex-shrink: 0;
+  width: 13px;
+  margin-left: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.member {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+}
+.member:hover {
+  background: var(--panel-2);
+}
+.member-name {
+  font-weight: 600;
+}
+.agent-status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  vertical-align: middle;
+}
+.agent-status-dot.status-blocked { background: #f7768e; }
+.agent-status-dot.status-working {
+  background: #e0af68;
+  animation: agent-status-pulse 1.2s ease-in-out infinite;
+  animation-delay: var(--pulse-delay, 0s);
+}
+.agent-status-dot.status-idle { background: var(--green); }
+.agent-status-dot.status-unknown { background: var(--green); }
+
+@keyframes agent-status-pulse {
+  50% { opacity: 0.35; transform: scale(0.8); }
+}
+.member-types {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Sidebar footer: the current app-user identity (account-style, like the refs). */
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+/* Base look shared with the collapsed rail's own (smaller) avatar — see
+   .sidebar-collapsed-rail .avatar's size override below. */
+.avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, var(--accent), #5566c4);
+}
+.settings-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+}
+.settings-btn:hover {
+  background: var(--panel-2);
+  color: var(--fg);
+}
+.su-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.su-name {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.su-team {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Main */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  /* A little top room so the tabs sit just under the window's top edge. */
+  padding: 10px 8px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+/* `hidden` alone loses to our `display: flex` above (same issue as
+   .appuser-chat[hidden] below) — spelled out for the chat pane's maximize
+   state, which hides the tab strip so the chat pane can fill the content
+   area. */
+.tabs[hidden] {
+  display: none;
+}
+.tabs-drag-spacer {
+  flex: 1;
+  min-width: 24px;
+  align-self: stretch;
+}
+.tabs-drag-spacer.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+.tab {
+  display: inline-flex;
+  align-items: center;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  color: var(--muted);
+}
+.tab.active {
+  color: var(--fg);
+  background: var(--bg);
+}
+/* Dragging a pane header over a tab — see onDragOver on the tab in
+   App.tsx. Same dashed-outline language as .pane-cell.drop-target. */
+.tab.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+.tab button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 6px 8px;
+  font: inherit;
+}
+.tab-close {
+  opacity: 0.6;
+  padding-left: 0 !important;
+}
+.tab-rename-input {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 3px 6px;
+  margin: 3px 0;
+  font: inherit;
+  font-size: 13px;
+  width: 110px;
+}
+.tab-rename-input:focus {
+  outline: none;
+}
+.tab-close:hover {
+  opacity: 1;
+  color: #f7768e;
+}
+/* The "+" free-shell tab, pinned right after the last real tab (not part
+   of teamWindows.map, so it isn't a .tab itself — no close button, no
+   active/rename state, just an icon button that opens a new one). */
+.tab-new-shell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-end;
+  width: 26px;
+  height: 26px;
+  margin-bottom: 1px;
+  background: none;
+  border: none;
+  border-radius: 6px 6px 0 0;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tab-new-shell:hover {
+  color: var(--fg);
+  background: var(--panel-2);
+}
+
+/* Stage */
+.stage {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  background: var(--bg);
+}
+.room {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: Menlo, Monaco, "Courier New", monospace;
+  font-size: 12px;
+}
+/* Shared name coloring for both layouts. */
+.mf {
+  color: var(--accent);
+  font-weight: 600;
+}
+.mt {
+  color: var(--green);
+  font-weight: 600;
+}
+.arrow {
+  color: var(--muted);
+}
+
+.room-loading {
+  text-align: center;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 6px 0;
+}
+
+/* Team room: a from→to · time header once per run of same-pair messages, with
+   bodies stacked beneath (Slack/Discord style grouping). */
+.grp {
+  padding: 6px 0;
+}
+.grp-head {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin-bottom: 2px;
+}
+.grp-time {
+  color: var(--muted);
+  font-size: 11px;
+}
+.grp-body {
+  padding-left: 2px;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.empty {
+  color: var(--muted);
+  padding: 20px;
+}
+
+/* Show Team Room off + no pane tabs yet — the stage would otherwise be
+   entirely blank. */
+.stage-empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  padding: 20px;
+  text-align: center;
+}
+
+.term-pane {
+  width: 100%;
+  height: 100%;
+}
+
+/* Every pane is a permanent flat child of .stage, positioned by its window's
+   left/width % (set inline from React). This is deliberate: it's what lets a
+   pane move between tabs (Move to) as a pure reassignment rather than an
+   unmount/remount — the DOM node, its xterm instance, and the PTY session
+   underneath all survive the move, tmux-pane-move style. left/width come from
+   React (they depend on the window's live pane count); everything else is
+   here. A window normally holds one pane; Move to can split it into two. */
+.pane-cell {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 2px;
+}
+.pane-cell.inactive {
+  visibility: hidden;
+  z-index: 0;
+}
+.pane-cell:not(.inactive) {
+  z-index: 1;
+}
+/* .pane-cell's own z-index creates a stacking context, so the tooltip's
+   z-index:70 only wins inside its own pane-cell — against a sibling
+   pane-cell (a split-tab neighbor, same z-index:1) it can still lose and get
+   clipped. Bump the whole hovered pane-cell above its neighbor instead. */
+.pane-cell:has(.monitor-dot:hover) {
+  z-index: 20;
+}
+.pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--pane-border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+}
+/* Which pane has focus is otherwise only obvious from the terminal cursor —
+   easy to lose track of once a tab has more than one pane (tile/horizontal
+   layouts). :focus-within needs no JS: it tracks the xterm textarea's real
+   DOM focus automatically. The header brightens (--panel, L 9.4% -> --panel-2,
+   L 12.0%, +2.5pt) on top of the accent border below — only the focused
+   pane's header changes, so it reads by contrast against its neighbors. */
+.pane-cell:focus-within .pane-header {
+  background: var(--panel-2);
+}
+.pane-cell:focus-within .pane-header,
+.pane-cell:focus-within .term-pane {
+  border-color: var(--accent);
+}
+.pane-header-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* It's a <button> (click- or drag-to-swap — see swapSource in App.tsx),
+     styled back down to plain text so it doesn't look like a button until
+     hovered. */
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: grab;
+  border-radius: 3px;
+}
+.pane-header-label:hover {
+  background: var(--panel-2);
+}
+.pane-header-label.swap-armed {
+  background: var(--accent);
+  color: #fff;
+  cursor: grabbing;
+}
+/* Floating name chip that follows the cursor during a pane-header
+   pointer-drag — see startPaneDrag in App.tsx. pointer-events: none is load
+   -bearing: elementFromPoint-based hit-testing must see through this to
+   whatever's actually underneath (a tab, another pane cell, ...). */
+.pane-drag-chip {
+  position: fixed;
+  z-index: 100;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* The pane a drag is currently over — see onDragOver in App.tsx. Dashed
+   outline (not the focus ring's solid border) so a drop target reads as
+   distinct from "this pane has keyboard focus". */
+.pane-cell.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+/* Draggable dividers BETWEEN panes within one tab (issue #317) — absolutely
+   positioned within .stage (left/top/width/height % set inline from
+   collectDividers, see App.tsx), unlike .divider-v/.divider-h above (which
+   are flex-layout siblings for the sidebar/chat). Same grab-width (3px,
+   matching .divider-v/.divider-h's own `flex: 0 0 3px`) and
+   hairline-until-hover language as those (an earlier review — this one was
+   originally wider and stood out as inconsistent). z-index above .pane-cell
+   so the grab area isn't occluded by a neighboring pane's own box. */
+.pane-divider-v,
+.pane-divider-h {
+  position: absolute;
+  z-index: 5;
+  background: transparent;
+}
+.pane-divider-v {
+  min-width: 3px;
+  margin-left: -1.5px;
+  cursor: col-resize;
+}
+.pane-divider-h {
+  min-height: 3px;
+  margin-top: -1.5px;
+  cursor: row-resize;
+}
+.pane-divider-v::before,
+.pane-divider-h::before {
+  content: "";
+  position: absolute;
+  /* Invisible at rest now that the gap itself is a full terminal cell
+     — a static hairline sitting in the middle of that gap read as
+     a redundant, always-on divider line. Shows only on hover/while
+     actively dragging (below), same as before. */
+  background: transparent;
+}
+.pane-divider-v::before {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+}
+.pane-divider-h::before {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+}
+.pane-divider-v:hover::before,
+.pane-divider-v.pane-divider-dragging::before {
+  left: 0;
+  width: 100%;
+  transform: none;
+  background: var(--accent);
+}
+.pane-divider-h:hover::before,
+.pane-divider-h.pane-divider-dragging::before {
+  top: 0;
+  height: 100%;
+  transform: none;
+  background: var(--accent);
+}
+
+/* Directional split-drop preview (issue #317, classifyDrop's split zones):
+   the highlighted half is the one the dragged pane will occupy once
+   dropped — the target's existing pane keeps the other half. Without this,
+   the 16-zone rule (swap in the center, directional split near an edge)
+   would be undiscoverable — there'd be no visible difference between a
+   drop that swaps and one that splits until after the drop landed. */
+.pane-split-preview {
+  position: absolute;
+  z-index: 4;
+  background: var(--accent);
+  opacity: 0.25;
+  pointer-events: none;
+}
+.pane-split-preview.preview-top {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+}
+.pane-split-preview.preview-bottom {
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+}
+.pane-split-preview.preview-left {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 50%;
+}
+.pane-split-preview.preview-right {
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 50%;
+}
+/* Slow pulse shows which delivery path is watching this pane — see
+   Pane.native. Green = the type self-delivers (its own agmsg Monitor);
+   accent (blue) = the app's universal stdin-inject monitor is doing it.
+   The dot itself stays 7px, but the hoverable box is bigger (16px) so it's
+   easy to land on; the tooltip is a real element (not `title`) so it shows
+   reliably and instantly instead of depending on the OS's native-tooltip
+   delay/behavior. */
+.monitor-dot {
+  position: relative;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0 -2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+}
+.monitor-dot::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  animation: monitor-pulse 2.2s ease-in-out infinite;
+  animation-delay: var(--pulse-delay, 0s);
+}
+.monitor-dot.native::before {
+  background: var(--green);
+}
+.monitor-dot.app::before {
+  background: var(--accent);
+}
+@keyframes monitor-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.monitor-tip {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 6px;
+  padding: 4px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font-size: 11px;
+  white-space: nowrap;
+  z-index: 70;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.monitor-dot:hover .monitor-tip {
+  display: block;
+}
+.pane-header-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 0 0 8px;
+  font-size: 13px;
+  line-height: 1;
+}
+.pane-header-close:hover {
+  color: #f7768e;
+}
+.pane-cell .term-pane {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--pane-border);
+  border-top: none;
+}
+
+/* App-user chat: header (min/max controls) + history + composer, all one
+   flex column so the 3 states (issue #317 backlog) just resize
+   which pieces are visible/how much space they get, no separate hidden
+   toggles per piece anymore (see the JSX — only the wrap itself is hidden
+   via View > Show User Chat). */
+.appuser-chat-wrap {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+/* `hidden` alone loses to our `display: flex` above (same issue as .tabs
+   above) — spelled out for View > Show User Chat. */
+.appuser-chat-wrap[hidden] {
+  display: none;
+}
+/* Maximized: fill whatever space .main has left (the tab strip and stage
+   are hidden in this state — see their own [hidden] handling). Minimized:
+   shrink to just the header + composer's own content height, not the
+   chatHeight the normal state's inline style sets. */
+.appuser-chat-wrap.state-maximized {
+  flex: 1;
+  min-height: 0;
+}
+.appuser-chat-wrap.state-minimized {
+  flex-shrink: 0;
+}
+.appuser-chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  padding: 4px 8px 4px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.appuser-chat-controls {
+  display: flex;
+  gap: 2px;
+}
+.chat-ctrl-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.chat-ctrl-btn:hover {
+  background: var(--panel-2);
+  color: var(--fg);
+}
+.appuser-chat {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  background: var(--panel-2);
+  cursor: text;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chat-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  max-width: 80%;
+  padding: 4px 8px;
+  border-radius: 8px;
+  word-break: break-word;
+}
+.chat-line.out {
+  align-self: flex-end;
+  background: #1f3a5f;
+}
+.chat-line.in {
+  align-self: flex-start;
+  background: #1a2436;
+}
+.chat-time {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.chat-peer {
+  color: var(--accent);
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.chat-line.in .chat-peer {
+  color: var(--green);
+}
+.chat-body {
+  white-space: pre-wrap;
+}
+
+/* Composer — one rounded card holding identity, target, input and send. */
+.composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px 12px;
+  padding: 5px 5px 5px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.composer:focus-within {
+  border-color: var(--accent);
+}
+.composer .as {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.composer .as b {
+  color: var(--fg);
+  font-weight: 600;
+}
+.composer input {
+  flex: 1;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  outline: none;
+  padding: 7px 4px;
+  font: inherit;
+}
+/* The target dropdown blends into the card until hovered/focused. */
+.composer select {
+  background-color: transparent;
+  border-color: transparent;
+}
+.composer select:hover,
+.composer select:focus {
+  background-color: var(--panel);
+  border-color: var(--border);
+}
+.composer button {
+  background: var(--accent);
+  color: #0b0e14;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.composer button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

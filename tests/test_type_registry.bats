@@ -13,8 +13,22 @@
 
 load test_helper
 
-setup() { setup_test_env; }
+setup() {
+  setup_test_env
+  # shellcheck disable=SC1091
+  source "$BATS_TEST_DIRNAME/../scripts/lib/type-registry.sh"
+  # shellcheck disable=SC1091
+  source "$BATS_TEST_DIRNAME/../scripts/lib/skill-render.sh"
+}
 teardown() { teardown_test_env; }
+
+render_type() {
+  local type="$1" output="$TEST_SKILL_DIR/rendered-${1}.md"
+  if [ ! -f "$output" ]; then
+    SCRIPT_DIR="$BATS_TEST_DIRNAME/.." agmsg_render_skill "$type" agmsg "$output"
+  fi
+  printf '%s' "$output"
+}
 
 # Write a node-launcher fixture type into TEST_SKILL_DIR/scripts/drivers/types so the suite
 # exercises the spawn= (Node launcher) mechanism generically, with no dependency
@@ -29,11 +43,11 @@ write_node_launcher_fixtures() {
   printf '// stub node launcher fixture\n' > "$nd/nodetype-launcher.mjs"
 }
 
-@test "type-registry: known_types lists the nine built-ins" {
+@test "type-registry: known_types lists the ten built-ins" {
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; agmsg_known_types | sort -u | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,hermes,opencode" ]
+  [ "$output" = "agmsg-app,antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,hermes,opencode" ]
 }
 
 @test "type-registry: is_known_type accepts a built-in and rejects a bogus type" {
@@ -64,7 +78,188 @@ write_node_launcher_fixtures() {
   [ "$status" -ne 0 ]
 }
 
-@test "type-registry: spawnable set is exactly claude-code, codex, grok-build and hermes" {
+@test "skill renderer composes every built-in type without placeholders" {
+  local type rendered
+  while IFS= read -r type; do
+    rendered="$(render_type "$type")"
+    ! grep -q '__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__' "$rendered"
+    grep -Fq '<!-- agmsg:render-root -->' "$rendered"
+    grep -Fq "<!-- agmsg:render-overlay $type -->" "$rendered"
+    grep -Fq "whoami.sh \"\$(pwd)\" $type" "$rendered"
+    grep -Fq 'scripts/arrange.sh <team> <agent> <intent> <anchor-ref>' "$rendered"
+  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
+  grep -Fq "Program Files\\Git\\bin\\bash.exe" "$(render_type codex)"
+  grep -Fq 'Ensure monitor is running first' "$(render_type claude-code)"
+  grep -Fq 'hermes is not spawnable' "$(render_type hermes)"
+  grep -Fq 'Grok Build' "$(render_type grok-build)"
+  grep -Fq 'OpenCode monitor' "$(render_type opencode)"
+}
+
+renderer_failure_fixture() {
+  cp "$BATS_TEST_DIRNAME/../SKILL.md" "$SCRIPTS/SKILL.md"
+  printf 'existing rendered skill\n' > "$TEST_SKILL_DIR/rendered.md"
+}
+
+run_renderer_fixture() {
+  run env -i PATH="$PATH" SCRIPT_DIR="$SCRIPTS" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/skill-render.sh'; agmsg_render_skill codex agmsg '$TEST_SKILL_DIR/rendered.md'"
+}
+
+@test "skill renderer rejects a missing overlay without replacing the output" {
+  renderer_failure_fixture
+  rm "$SCRIPTS/drivers/types/codex/template.md"
+  run_renderer_fixture
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
+}
+
+@test "skill renderer rejects an unreadable overlay without replacing the output" {
+  renderer_failure_fixture
+  chmod 000 "$SCRIPTS/drivers/types/codex/template.md"
+  run_renderer_fixture
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
+}
+
+@test "skill renderer rejects an empty overlay without replacing the output" {
+  renderer_failure_fixture
+  : > "$SCRIPTS/drivers/types/codex/template.md"
+  run_renderer_fixture
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
+}
+
+@test "skill renderer rejects a nonempty overlay without its input marker" {
+  renderer_failure_fixture
+  # Keep the output-side marker in the root fixture so disabling the input
+  # marker check alone cannot be masked by the final composition check.
+  printf '\n<!-- agmsg:render-overlay codex -->\n' >> "$SCRIPTS/SKILL.md"
+  printf 'valid overlay body\n' > "$SCRIPTS/drivers/types/codex/template.md"
+  run_renderer_fixture
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
+}
+
+@test "skill renderer rejects a marker-valid overlay that renders no type marker" {
+  renderer_failure_fixture
+  cat > "$SCRIPTS/drivers/types/codex/template.md" <<'EOF'
+<!-- agmsg:slot unused -->
+<!-- agmsg:render-overlay __AGENT_TYPE__ -->
+<!-- /agmsg:slot unused -->
+EOF
+  run_renderer_fixture
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
+}
+
+@test "agent templates route remote-import intent before not_joined identity setup" {
+  local template not_joined first_time guard type
+  while IFS= read -r type; do
+    template="$(render_type "$type")"
+    not_joined="$(grep -n '^\*\*C) Not in a team:\*\*$' "$template" | cut -d: -f1)"
+    first_time="$(grep -n '^  > \*\*First-time setup required\.\*\*$' "$template" | cut -d: -f1)"
+    guard="$(grep -n 'Before first-time setup, inspect the user'"'"'s request' "$template" | cut -d: -f1)"
+    [ -n "$not_joined" ]
+    [ "$not_joined" -lt "$guard" ]
+    [ "$guard" -lt "$first_time" ]
+    sed -n "${guard},$((first_time - 1))p" "$template" |
+      grep -q 'do not call `join.sh`'
+    sed -n "${guard},$((first_time - 1))p" "$template" |
+      grep -q 'team-list.sh --json --scope all'
+    sed -n "${guard},$((first_time - 1))p" "$template" |
+      grep -q 'Go directly to `remote pull`'
+  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
+
+}
+
+@test "agent templates all explain that readable local history is not evidence a team is unencrypted (#682)" {
+  local template type
+  while IFS= read -r type; do
+    template="$(render_type "$type")"
+    grep -q "Readable local history is therefore not evidence that a team is unencrypted" "$template" \
+      || { echo "missing the e2ee-verification paragraph: $template" >&2; return 1; }
+  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
+}
+
+@test "the e2ee-verification explanation also appears in both remote-setup docs (#682)" {
+  grep -q "readable local message history is not evidence" "$BATS_TEST_DIRNAME/../docs/remote-setup.md"
+  grep -q "ローカルのメッセージ履歴が読めることは" "$BATS_TEST_DIRNAME/../docs/remote-setup.ja.md"
+}
+
+@test "every agent-readable surface routes key rotate, and none of them calls it unavailable" {
+  # The claim being guarded is not a wording preference: `key rotate` shipped
+  # on 2026-07-22 and seven days later ten surfaces began telling every agent
+  # it was "not available yet (they refuse unconditionally and change no
+  # state)". An agent reads one of these at startup, so the lie was answered
+  # to users far more often than any doc under docs/ is read.
+  #
+  # The negative half alone would pass on a file that says nothing at all, so
+  # both halves are asserted, and the count is explicit for the same reason as
+  # the #682 test above.
+  # A template is an installer INPUT: install.sh renders it with
+  # `sed s/__SKILL_NAME__/$CMD_NAME/g`, so a route written with a literal
+  # `agmsg` sends an agent installed as `--cmd m` at somebody else's install
+  # — and rotation changes key state, so that is not a cosmetic slip. The
+  # path is therefore asserted per surface kind, not as one shared substring:
+  # matching only `key.sh rotate <team>` is green for both spellings and
+  # would have let this through.
+  local surface type
+  while IFS= read -r type; do
+    surface="$(render_type "$type")"
+    grep -Fq 'Device pairing (`key request` / `key approve`) is not implemented' "$surface" \
+      || { echo "does not state the pairing commands are absent: $surface" >&2; return 1; }
+    ! grep -qiE 'rotat(e|ion)[^.]*not available' "$surface" \
+      || { echo "still calls rotation unavailable: $surface" >&2; return 1; }
+  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
+
+  # Bind the claim to the code. If `rotate` ever stops being a subcommand the
+  # surfaces above become wrong again, and this is the line that says so.
+  grep -qE '^[[:space:]]*rotate\)' "$BATS_TEST_DIRNAME/../scripts/key.sh"
+  grep -qE '^cmd_rotate\(\)' "$BATS_TEST_DIRNAME/../scripts/key.sh"
+
+  # The same false sentence also stood in key.sh itself, where `generate`
+  # refuses an existing key: it named rotation unavailable and sent the user
+  # to `show`. Assert the working route is offered there too.
+  grep -Fq 'To mint a replacement epoch instead:' "$BATS_TEST_DIRNAME/../scripts/key.sh"
+}
+
+@test "every agent template exposes declarative arrange without adding a public where verb" {
+  local template type
+  while IFS= read -r type; do
+    template="$(render_type "$type")"
+    grep -q 'scripts/arrange\.sh <team> <agent> <intent> <anchor-ref>' "$template"
+    grep -q '`moved` as a performed move and `unchanged`' "$template"
+    [ "$(grep -c 'If argument starts with "where"' "$template" || true)" -eq 0 ]
+  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
+}
+
+@test "every agent template routes team identity reads through team.sh, read-only, and repairs through fix.sh (#1152)" {
+  local template type renderable_types
+  renderable_types="$(agmsg_renderable_types "$TEST_SKILL_DIR")"
+  [ -n "$renderable_types" ]
+  grep -qxF 'claude-code' <<<"$renderable_types"
+  while IFS= read -r type; do
+    template="$(render_type "$type")"
+    grep -Fq 'If argument is "team" or "team --json"' "$template"
+    grep -Fq 'team.sh $TEAM [--json]' "$template"
+    grep -Fq 'This is read-only' "$template"
+    # The externally-typed repair flags are gone on purpose (koichi's ruling,
+    # #1152): forcing a fix into another seat's pane from outside is the
+    # defect this removal exists to end, not something to keep under another
+    # name. Their absence is the property this test protects, not their
+    # presence.
+    refute grep -Fq -- '--fix-pane-names' "$template"
+    refute grep -Fq -- '--rename-sessions' "$template"
+    # Repair is self-only, through fix.sh (already documented separately).
+    grep -Fq 'scripts/fix.sh' "$template"
+    grep -Fiq 'types' "$template"
+  done <<<"$renderable_types"
+}
+
+@test "type-registry: spawnable set is exactly eight of the ten built-ins (#277, #279)" {
+  # hermes deliberately stays out (#279): no known CLI mode starts it
+  # interactive with a seeded initial prompt. agmsg-app also stays out: it's
+  # the desktop app itself (spawnable=no), not a spawnable agent type.
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'
      while IFS= read -r t; do
@@ -72,17 +267,46 @@ write_node_launcher_fixtures() {
        [ \"\$(agmsg_type_get \"\$t\" spawnable)\" = yes ] && echo \"\$t\"
      done <<< \"\$(agmsg_known_types | sort -u)\" | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "claude-code,codex,grok-build,hermes" ]
+  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,opencode" ]
 }
 
 @test "type-registry: detection manifests carry the expected env / proc keys" {
   g() { env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get $1 $2"; }
   [ "$(g claude-code detect)" = "CLAUDE_CODE_SESSION_ID" ]
   [ "$(g codex detect)" = "CODEX_SANDBOX CODEX_THREAD_ID" ]
-  [ "$(g gemini detect)" = "GEMINI_API_KEY GOOGLE_GEMINI_CLI" ]
+  [ "$(g gemini priority)" = "1000" ]
+  [ "$(g gemini detect)" = "GEMINI_CLI" ]
+  [ "$(g gemini detect_fallback)" = "GEMINI_API_KEY" ]
   [ "$(g antigravity detect)" = "explicit" ]
   [ "$(g copilot detect)" = "explicit" ]
   [ "$(g opencode detect_proc)" = "opencode opencode-*" ]
+}
+
+@test "type-registry: no manifest key is named 'monitor' -- delivery_modes alone answers mode support (#1214)" {
+  # A bare `monitor=` key read as a statement about the delivery MODE, colliding
+  # with `delivery_modes=monitor` (a type can carry both: no in-session Monitor
+  # TOOL and a real, settable monitor MODE at once -- codex is exactly this).
+  # Renamed to readiness_sentinel=; this pins the rename so the confusing name
+  # cannot come back on a new or edited manifest.
+  run grep -rl '^monitor=' "$SCRIPTS/drivers/types"/*/type.conf
+  [ -z "$output" ]
+}
+
+@test "type-registry: readiness_sentinel is readable and distinct from delivery_modes' own 'monitor' (#1214)" {
+  g() { env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get $1 $2"; }
+  # codex: no spawn-time handshake to await, but monitor IS a settable delivery
+  # mode -- the exact combination the old shared name could not express.
+  [ "$(g codex readiness_sentinel)" = no ]
+  [ "$(g claude-code readiness_sentinel)" = yes ]
+  case "$(g codex delivery_modes)" in *monitor*) : ;; *) return 1 ;; esac
+}
+
+@test "type-registry: session identity is a dedicated per-type datum, not inferred from detect" {
+  g() { env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get $1 session_env"; }
+  [ "$(g claude-code)" = "CLAUDE_CODE_SESSION_ID" ]
+  [ "$(g codex)" = "CODEX_THREAD_ID" ]
+  [ "$(g grok-build)" = "GROK_SESSION_ID" ]
+  [ -z "$(g gemini)" ]
 }
 
 @test "type-registry: whoami detects codex end-to-end from CODEX_THREAD_ID" {
@@ -94,26 +318,27 @@ write_node_launcher_fixtures() {
   echo "$output" | grep -q "type=codex"
 }
 
-@test "type-registry: env-detection precedence is claude-code < codex < gemini" {
-  # Reproduce whoami's manifest-driven env sweep (sorted order) and assert the
-  # historical precedence: a runtime's own session var beats the GEMINI_* family,
-  # and detect=explicit types never win.
-  sweep() {
-    env -i PATH="$PATH" "$@" bash -c "
-      source '$SCRIPTS/lib/type-registry.sh'
-      while IFS= read -r t; do
-        [ -n \"\$t\" ] || continue
-        d=\$(agmsg_type_get \"\$t\" detect)
-        if [ -z \"\$d\" ] || [ \"\$d\" = explicit ]; then continue; fi
-        for v in \$d; do [ -n \"\${!v:-}\" ] && { echo \"\$t\"; exit 0; }; done
-      done <<< \"\$(agmsg_known_types | sort -u)\"
-      echo claude-code"
+@test "type-registry: detection precedence puts shared Gemini credentials last" {
+  # Exercise the production detector so priority, process evidence, and the
+  # weak credential fallback cannot drift apart.
+  detect() {
+    env -i PATH="$PATH" "$@" bash -c \
+      "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { echo test-shell; }; compat_get_ppid() { echo 1; }; agmsg_detect_cli_type"
   }
-  [ "$(sweep CODEX_THREAD_ID=x)" = codex ]
-  [ "$(sweep GEMINI_API_KEY=x)" = gemini ]
-  [ "$(sweep CLAUDE_CODE_SESSION_ID=x CODEX_THREAD_ID=y)" = claude-code ]
-  [ "$(sweep CODEX_SANDBOX=x GEMINI_API_KEY=y)" = codex ]
-  [ "$(sweep)" = claude-code ]
+  [ "$(detect CODEX_THREAD_ID=x)" = codex ]
+  [ "$(detect GEMINI_API_KEY=x GROK_SESSION_ID=y)" = grok-build ]
+  [ "$(detect GEMINI_API_KEY=x CODEX_THREAD_ID=y)" = codex ]
+  [ "$(detect GEMINI_CLI=x GEMINI_API_KEY=y)" = gemini ]
+  [ "$(detect GEMINI_API_KEY=x)" = gemini ]
+  [ "$(detect CLAUDE_CODE_SESSION_ID=x CODEX_THREAD_ID=y)" = claude-code ]
+  [ "$(detect)" = claude-code ]
+}
+
+@test "type-registry: a process marker beats a shared Gemini credential" {
+  run env -i PATH="$PATH" GEMINI_API_KEY=x bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { echo opencode; }; compat_get_ppid() { echo 1; }; agmsg_detect_cli_type"
+  [ "$status" -eq 0 ]
+  [ "$output" = opencode ]
 }
 
 @test "type-registry: manifests are DATA — never executed" {
@@ -203,6 +428,46 @@ write_node_launcher_fixtures() {
   write_node_launcher_fixtures
   run "$SCRIPTS/spawn.sh" nodetype someagent --project "$BATS_TEST_TMPDIR"
   [ "$status" -ne 0 ]
-  ! echo "$output" | grep -q "is not supported by spawn yet"
+  refute grep -q "is not supported by spawn yet" <<<"$output"
   ! echo "$output" | grep -q "unknown agent type"
+}
+
+@test "spawn: the node-launcher path also splices spawn-options tokens (before --initial-input) (#273)" {
+  write_node_launcher_fixtures
+  local proj="$BATS_TEST_TMPDIR/nodeproj"
+  mkdir -p "$proj"
+  bash "$SCRIPTS/join.sh" nodeteam existing claude-code "$proj"
+
+  local stub_bin="$BATS_TEST_TMPDIR/stub-bin"
+  mkdir -p "$stub_bin"
+  local capture="$BATS_TEST_TMPDIR/launch-capture.txt"
+  cat > "$stub_bin/record.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$capture"
+EOF
+  chmod +x "$stub_bin/record.sh"
+
+  local opts="$BATS_TEST_TMPDIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+nodetype:
+  --extra-flag: extra-value
+YAML
+
+  run env -u TMUX -u HERDR_ENV -u HERDR_PANE_ID AGMSG_TERMINAL="$stub_bin/record.sh {cmd}" \
+    AGMSG_TEST_PLAIN_WITNESS_ROW=$'iterm\t/dev/ttys040\t123\tSTART' \
+    AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" nodetype nodeagent --project "$proj" --no-wait
+  [ "$status" -eq 0 ]
+  local boot; boot="$(cat "$capture")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" == *"nodetype-launcher.mjs"* ]]
+  [[ "$output" == *"--extra-flag"* ]]
+  [[ "$output" == *"extra-value"* ]]
+  # spawn-options tokens land before --initial-input, matching the direct-CLI
+  # path's "before the actas prompt" placement.
+  local before_flag after_flag before_input
+  before_flag=$(grep -n -- "--extra-flag" "$boot" | head -1 | cut -d: -f1)
+  before_input=$(grep -n -- "--initial-input" "$boot" | head -1 | cut -d: -f1)
+  [ "$before_flag" -lt "$before_input" ]
 }

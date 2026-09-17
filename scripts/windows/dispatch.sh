@@ -12,6 +12,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 AGENT_TYPE="${AGMSG_AGENT_TYPE:-codex}"
+# Whether the type above was CHOSEN or merely defaulted (#783/#801). Resolved
+# into a detected type below, once the flags have been read.
+AGENT_TYPE_EXPLICIT="${AGMSG_AGENT_TYPE:+1}"
 PROJECT="$PWD"
 TEAM="${AGMSG_TEAM:-}"
 AGENT="${AGMSG_AGENT:-}"
@@ -25,6 +28,7 @@ commands:
   inbox
   send <to> <message>
   history [agent] [limit]
+  export [--agent <agent>] [--limit N] [--out <file>]
   team [team]
   config [show|set ...]
   mode [turn|off]
@@ -37,7 +41,7 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --type)    AGENT_TYPE="${2:?--type needs a value}"; shift 2 ;;
+    --type)    AGENT_TYPE="${2:?--type needs a value}"; AGENT_TYPE_EXPLICIT=1; shift 2 ;;
     --project) PROJECT="${2:?--project needs a path}"; shift 2 ;;
     --team)    TEAM="${2:?--team needs a value}"; shift 2 ;;
     --agent)   AGENT="${2:?--agent needs a value}"; shift 2 ;;
@@ -47,6 +51,28 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+
+# THE TYPE IS DETECTED, NOT GUESSED, WHENEVER NOBODY CHOSE ONE (#801).
+#
+# Every command below hands $AGENT_TYPE to a script that acts on it —
+# join.sh and reset.sh WRITE registrations with it, identities.sh and
+# delivery.sh read by it. Leaving the `codex` literal in place made those
+# writes real: a Claude Code user on Windows who never set AGMSG_AGENT_TYPE
+# would run `agmsg actas <name>`, have their identity resolved correctly from
+# the claude-code registration, and then be joined a SECOND time as codex —
+# one person, two identities. That is a broken state, not a misread message,
+# which is why detecting inside whoami.sh alone was not enough.
+#
+# An explicit --type or AGMSG_AGENT_TYPE is never overridden.
+if [ -z "$AGENT_TYPE_EXPLICIT" ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/../lib/type-registry.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/../lib/compat.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/../lib/detect-cli-type.sh"
+  AGENT_TYPE="$(agmsg_detect_cli_type)"
+fi
 
 if [ -n "$ARGV_FILE" ]; then
   if ! command -v base64 >/dev/null 2>&1; then
@@ -128,7 +154,17 @@ resolve_identity() {
   local whoami_output
   local whoami_code
   set +e
-  whoami_output="$(run_script whoami.sh "$PROJECT" "$AGENT_TYPE" 2>&1)"
+  # Still not passed when nobody chose it, even though $AGENT_TYPE now holds
+  # the same detected value: whoami.sh validates the type it is GIVEN, so
+  # passing it would put the fail-closed case back — a registry that cannot
+  # offer detect's literal fallback would stop every Windows caller instead of
+  # only one who mistyped. Letting whoami detect for itself costs a second
+  # process-tree walk and keeps that guard meaningful.
+  if [ -n "$AGENT_TYPE_EXPLICIT" ]; then
+    whoami_output="$(run_script whoami.sh "$PROJECT" "$AGENT_TYPE" 2>&1)"
+  else
+    whoami_output="$(run_script whoami.sh "$PROJECT" 2>&1)"
+  fi
   whoami_code=$?
   set -e
   if [ "$whoami_code" -ne 0 ]; then
@@ -188,13 +224,33 @@ case "$COMMAND" in
     run_script history.sh "${args[@]}"
     ;;
 
-  team)
-    team_arg="${1:-${TEAM:-}}"
-    if [ -z "$team_arg" ]; then
-      resolve_identity 1 0
-      team_arg="$RESOLVED_TEAM"
+  export)
+    # Resolve only the team export.sh requires; forward the rest of argv so the
+    # flag contract (--agent/--limit/--out) is identical to invoking export.sh
+    # directly. --agent stays opt-in — export is team-wide by default, so this
+    # does NOT inject the acting agent (that would make `agmsg export` filter
+    # differently from `export.sh --team <team>`). An explicit --team in argv
+    # wins over the resolved one (export.sh takes the last --team).
+    resolve_identity 1 0
+    args=(--team "$(first_team "$RESOLVED_TEAM")")
+    if [ "$#" -gt 0 ]; then
+      args+=("$@")
     fi
-    run_script team.sh "$(first_team "$team_arg")"
+    run_script export.sh "${args[@]}"
+    ;;
+
+  team)
+    if [ "${1:-}" = "list" ]; then
+      shift
+      run_script team-list.sh "$@"
+    else
+      team_arg="${1:-${TEAM:-}}"
+      if [ -z "$team_arg" ]; then
+        resolve_identity 1 0
+        team_arg="$RESOLVED_TEAM"
+      fi
+      run_script team.sh "$(first_team "$team_arg")"
+    fi
     ;;
 
   config)

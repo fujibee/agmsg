@@ -1,5 +1,7 @@
 # Plugins (external drivers)
 
+*[日本語](plugins.ja.md)*
+
 agmsg's pluggable units are **drivers**, grouped by **axis**:
 
 | axis | what it swaps | status |

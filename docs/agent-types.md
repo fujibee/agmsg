@@ -19,11 +19,16 @@ a manifest cannot execute code. Multi-value keys are whitespace-separated.
 |---|---|---|
 | `name` | yes | the type name (matches the directory) |
 | `template` | yes | the `/agmsg` command template filename, relative to the type dir (e.g. `template.md`); becomes `SKILL.md` |
+| `priority` | — | numeric auto-detection priority; lower values are checked first, with 50 as the default |
 | `detect` | — | env-var names whose presence selects this type. `explicit` = never auto-detected from the environment |
+| `detect_fallback` | — | weaker env-var names checked only after process detection, for shared credentials that are not reliable runtime markers |
 | `detect_proc` | — | parent-process-name glob patterns that select this type (e.g. `codex codex-*`) |
-| `cli` | spawnable types | the launch binary |
+| `session_env` | — | the single env-var name that carries this runtime's current session id. `join` passes its value to terminal self-naming; omitted means the type publishes no session id |
+| `cli` | spawnable types | the launch command. Usually a single binary name, but may be a fixed multi-word prefix (subcommand and/or flags a CLI needs ahead of its own options) — only the first word is resolved/checked as the executable; the rest are passed through as-is. Safe because this is manifest data agmsg ships, not runtime user input |
 | `spawnable` | — | `yes` if `spawn.sh` can launch this type |
 | `spawn` | — | a `.mjs` node-launcher (beside the manifest) `spawn.sh` runs via Node; also marks the type spawnable |
+| `model_arg` | — | the `--model`/`-m`-style flag `spawn --model <id>` passes through to the CLI; a type with no `model_arg` refuses `--model` |
+| `prompt_arg` | — | for a CLI that does not accept the actas prompt as a bare positional argument, the named flag whose value IS the prompt (e.g. antigravity's `--prompt-interactive`, copilot's `--interactive`, opencode's `--prompt`) — `spawn.sh` inserts it immediately before the (already-quoted) prompt. Unset = bare positional, the default |
 | `hooks_file` | yes | project-relative delivery hooks file (e.g. `.codex/hooks.json`) |
 | `monitor` | — | `yes` if the type exposes a native Monitor tool; `spawn` skips the readiness wait when `no` |
 | `delivery_modes` | — | space-separated delivery modes the type's CLI accepts (e.g. `monitor turn off`); `delivery.sh`'s gate rejects anything else. Defaults to `monitor turn both off` when omitted |
@@ -38,19 +43,21 @@ a manifest cannot execute code. Multi-value keys are whitespace-separated.
 
 `whoami.sh` auto-detects the running type when none is passed:
 
-1. **Environment** — the manifests' `detect=` env vars, evaluated in sorted type
-   order, which preserves the precedence claude-code < codex < gemini (a runtime's
-   own session vars beat the `GEMINI_*` family that users also set for the SDK).
-   `detect=explicit` types are never selected here.
+1. **Strong environment** — the manifests' `detect=` env vars, evaluated by
+   ascending `priority` (then type name). `detect=explicit` types are never
+   selected here.
 2. **Process tree** — walking up from the current process, the first type whose
-   `detect_proc=` glob matches the ancestor's name wins.
-3. Falls back to `claude-code`.
+   `detect_proc=` glob matches the ancestor's name wins, using the same priority
+   order.
+3. **Fallback environment** — `detect_fallback=` vars are checked only now.
+   This keeps shared credentials such as `GEMINI_API_KEY` from hiding a stronger
+   process marker for another CLI; `GEMINI_CLI` remains a strong Gemini marker.
+4. Falls back to `claude-code`.
 
-> Precedence note: env detection iterates types in **sorted name order**, so when
-> two types' `detect=` vars are both present the alphabetically-earlier type wins.
-> Keep `detect=` vars runtime-exclusive (a runtime's own session var, not a shared
-> SDK var) so ties don't arise; this is why the `GEMINI_*` family — which users
-> set without the CLI — sits behind the claude-code/codex session vars.
+> Precedence note: detection iterates types in ascending `priority`, then by name.
+> Keep strong `detect=` vars runtime-exclusive (a runtime's own session marker,
+> not a shared SDK credential) so ties do not arise. Shared credentials belong in
+> `detect_fallback=` and are considered only after process evidence.
 
 ### Delivery
 
@@ -108,9 +115,10 @@ template=template.md
 cli=codex
 spawnable=yes
 detect=CODEX_SANDBOX CODEX_THREAD_ID
+session_env=CODEX_THREAD_ID
 detect_proc=codex codex-*
 hooks_file=.codex/hooks.json
-monitor=no
+readiness_sentinel=no
 stop_output=json
 hook_windows_wrap=yes
 delivery_modes=monitor turn off

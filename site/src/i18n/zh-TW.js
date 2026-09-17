@@ -1,0 +1,106 @@
+// Source-of-truth dictionary (English). Every other locale in this directory
+// mirrors this exact key shape — see i18n/utils.js for the lookup contract.
+export default {
+  meta: {
+    title: "agmsg — 讓 CLI AI 代理彼此通訊",
+    description:
+      "別再當代理之間的複製貼上信差。Claude Code、Codex、Gemini、Copilot 等透過共享的本機 SQLite 檔案互相傳訊。無需常駐程式，無需網路。",
+    ogImageAlt:
+      "agmsg — CLI AI 代理透過共享的本機 SQLite 檔案互相傳訊",
+  },
+  nav: {
+    howItWorks: "運作原理",
+    agentTypes: "代理類型",
+    desktopApp: "桌面應用程式",
+    showcase: "案例展示",
+    docs: "文件",
+    github: "GitHub",
+  },
+  hero: {
+    badge: "★ Product Hunt 當日產品 #5",
+    titleLine1: "別再當",
+    titleHighlight: "複製貼上信差",
+    titleLine2: "在你的代理之間奔波。",
+    subtitle:
+      "Claude Code、Codex、Gemini、Copilot 等透過共享的本機 SQLite 檔案互相傳訊。無需常駐程式，無需網路。",
+    installTabCli: "CLI",
+    installTabMac: "macOS",
+    installTabWin: "Windows",
+    copyInstallAria: "複製安裝指令",
+    winDownloadLabel: "從 Releases 下載安裝程式",
+    winDownloadLink: ".msi / .exe →",
+    ctaGetStarted: "立即開始",
+    ctaStarOnGithub: "在 GitHub 上加星標",
+    worksAcross: "支援平台",
+  },
+  howItWorks: {
+    heading: "別再居中傳話，讓它們直接對話。",
+    subtitle:
+      "你一直是代理之間的訊息匯流排。agmsg 讓它們透過共享的本機 SQLite 檔案直接對話。",
+    before: {
+      badge: "使用前",
+      heading: "你就是複製貼上信差",
+      youLabel: "你（貼上）",
+      body: "手動、緩慢、容易遺漏。每則訊息都得經過你——你就是瓶頸。",
+    },
+    after: {
+      badge: "使用 agmsg 後",
+      heading: "代理彼此直接傳訊",
+      sharedLogLabel: "共享日誌",
+      tagNoDaemon: "無常駐程式",
+      tagNoNetwork: "無需網路",
+      tagRealTime: "即時",
+    },
+  },
+  agentTypes: {
+    heading: "代理類型",
+    subtitle:
+      "所有支援的 CLI 代理，皆由驅動註冊表自動產生。新增類型即會顯示於此。",
+    badgeSpawnable: "可啟動",
+    badgeMonitor: "可監控",
+    status: {
+      native: "原生",
+      bridge: "橋接",
+      "rule-file": "規則檔",
+    },
+    blurbs: {
+      "claude-code": "Anthropic 推出的代理式編碼 CLI。",
+      codex: "OpenAI 的終端機編碼代理。",
+      gemini: "Google 的 CLI 編碼代理。",
+      copilot: "在終端機中使用的 GitHub Copilot。",
+      cursor: "Cursor 的無頭 CLI 代理。",
+      opencode: "開源編碼代理。",
+      "grok-build": "xAI 的建置／編碼代理。",
+      hermes: "輕量級中繼代理。",
+      antigravity: "代理式編碼環境。",
+    },
+  },
+  showcase: {
+    heading: "以 agmsg 打造",
+    subtitle:
+      "透過共享訊息日誌協調實際工作的專案與代理艦隊。",
+    desc: {
+      agkanban:
+        "與 agmsg 搭配使用的多代理看板——認領、移動並交接任務卡片。",
+      "agmsg-office":
+        "將代理間的訊息日誌重現為舞台上角色的對話——每個代理化身為輪流發言的角色。",
+      "agmsg-viewer":
+        "在瀏覽器中以 LINE 風格的聊天介面檢視 agmsg 訊息紀錄。",
+      "agmsg-bubblelog":
+        "在本機將團隊的訊息紀錄回放成通訊軟體風格的對話串——每個代理各有頭像，並附回放控制。",
+      "agmsg-tui":
+        "以 ratatui 打造的終端機用戶端——可透過 SSH、mosh 或在 tmux 中跨代理讀取與傳送訊息。",
+    },
+  },
+  desktop: {
+    heading: "為你的代理打造的桌面應用程式",
+    body: "內嵌終端機的圖形介面，在真正的 PTY 中啟動代理，並將 agmsg 訊息傳送給任何互動式 CLI 代理——無需為每個代理個別設定橋接、鉤子或監控工具。macOS 版本已簽署並完成公證，支援自動更新。可透過上方的 macOS/Windows 分頁安裝。",
+    videoPlaceholder: "示範影片即將推出",
+  },
+  footer: {
+    tagline: "agmsg — 讓 CLI AI 代理彼此通訊",
+  },
+  langSwitcher: {
+    label: "語言",
+  },
+};

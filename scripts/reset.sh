@@ -26,10 +26,28 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/registry-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/roster-journal.sh"
+# Agent names that would misroute the $.agents.<name> JSON path below (#87
+# cluster — '.', '/', '\', '"', '[', ']' all have path meaning to json1).
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/validate.sh"
+# The advisory role->session record is torn down here too (#1041); it keys on the
+# same (team, agent) as the actas lock released below, via _actas_lock_encode.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/role-session.sh"
+# Escape as a SQL string literal (parity with join.sh/rename.sh/leave.sh):
+# concatenated into JSON paths below as `'$.agents.' || '<escaped>'` rather
+# than spliced into the path text, so a single quote can't break the
+# statement (#87 cluster).
+_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
 
 # Resolve the session's real project root (see #92) so a drop issued from a
 # subdir/worktree clears the registration on the project the session lives in.
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
+# Equivalent path spellings (#268) — a drop must remove a registration stored
+# in any Windows/MSYS form, not just the exact resolved string.
+PROJECT_SQL_IN=$(agmsg_project_sql_in_list "$PROJECT_PATH")
 
 # A drop releases the actas lock keyed under this session's per-process instance
 # id (#93). The template passes a bare $CLAUDE_CODE_SESSION_ID; normalize to the
@@ -52,6 +70,10 @@ if [ -z "$TARGET_AGENT" ]; then
     exit 1
   fi
 fi
+
+agmsg_validate_agent_name "$TARGET_AGENT" || exit 1
+TARGET_AGENT_SQL=$(_agmsg_sqlesc "$TARGET_AGENT")
+AGENT_TYPE_SQL=$(_agmsg_sqlesc "$AGENT_TYPE")
 
 if [ ! -d "$TEAMS_DIR" ]; then
   echo "No team registrations found."
@@ -76,10 +98,19 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     LOCK_FAILED=1
     continue
   fi
+  agmsg_roster_ensure "$TEAM_DIR" "$TEAM_CONFIG"
+  agmsg_roster_project_config "$TEAM_DIR" "$TEAM_CONFIG"
   CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
-  AGENT_JSON=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
-    "SELECT json_extract(:json, '$.agents.$TARGET_AGENT');")
+  # CONFIG_ESCAPED is spliced as a genuine SQL string literal below, NOT
+  # bound via `.param set`: the sqlite3 shell's dot-command tokenizer does
+  # not honour SQL '' escaping (unlike a real SQL statement's string
+  # literals), so `.param set :json '...'` silently mis-parses as soon as
+  # the config contains any single quote — e.g. an existing agent name like
+  # "al'ice" — corrupting :json for every query below it (#87 cluster; see
+  # resolve-project.sh's `resolve_team` for the same caveat).
+  AGENT_JSON=$(agmsg_sqlite_mem \
+    "SELECT json_extract('$CONFIG_ESCAPED', '\$.agents.' || '$TARGET_AGENT_SQL');")
   if [ -z "$AGENT_JSON" ] || [ "$AGENT_JSON" = "null" ]; then
     agmsg_lock_release
     continue
@@ -105,8 +136,8 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   MATCH_COUNT=$(agmsg_sqlite_mem "
     SELECT count(*)
     FROM json_each(json_extract('$NORMALIZED_ESCAPED', '\$.registrations'))
-    WHERE json_extract(value, '\$.type') = '$AGENT_TYPE'
-      AND json_extract(value, '\$.project') = '$PROJECT_PATH';
+    WHERE json_extract(value, '\$.type') = '$AGENT_TYPE_SQL'
+      AND json_extract(value, '\$.project') IN ($PROJECT_SQL_IN);
   ")
   if [ "$MATCH_COUNT" -eq 0 ]; then
     agmsg_lock_release
@@ -114,14 +145,15 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   fi
 
   FILTERED=$(agmsg_sqlite_mem "
-    SELECT json_object(
-      'registrations',
+    SELECT json_set(
+      '$NORMALIZED_ESCAPED',
+      '\$.registrations',
       COALESCE((
         SELECT json_group_array(json(value))
         FROM json_each(json_extract('$NORMALIZED_ESCAPED', '\$.registrations'))
         WHERE NOT (
-          json_extract(value, '\$.type') = '$AGENT_TYPE'
-          AND json_extract(value, '\$.project') = '$PROJECT_PATH'
+          json_extract(value, '\$.type') = '$AGENT_TYPE_SQL'
+          AND json_extract(value, '\$.project') IN ($PROJECT_SQL_IN)
         )
       ), json('[]'))
     );
@@ -132,11 +164,11 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   ")
 
   if [ "$REMAINING" -eq 0 ]; then
-    UPDATED=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
-      "SELECT json_remove(:json, '$.agents.$TARGET_AGENT');")
+    UPDATED=$(agmsg_sqlite_mem \
+      "SELECT json_remove('$CONFIG_ESCAPED', '\$.agents.' || '$TARGET_AGENT_SQL');")
   else
-    UPDATED=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
-      "SELECT json_set(:json, '$.agents.$TARGET_AGENT', json('$FILTERED_ESCAPED'));")
+    UPDATED=$(agmsg_sqlite_mem \
+      "SELECT json_set('$CONFIG_ESCAPED', '\$.agents.' || '$TARGET_AGENT_SQL', json('$FILTERED_ESCAPED'));")
   fi
 
   AGENT_COUNT=$(agmsg_sqlite_mem "
@@ -144,7 +176,18 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     FROM json_each(json_extract('$(printf '%s' "$UPDATED" | sed "s/'/''/g")', '\$.agents'));
   ")
 
-  if [ "$AGENT_COUNT" -eq 0 ]; then
+  if [ "$REMAINING" -eq 0 ] && agmsg_roster_has_journal "$TEAM_DIR"; then
+    MEMBER_ID=$(agmsg_sqlite_mem \
+      "SELECT COALESCE(json_extract('$AGENT_ESCAPED', '\$.member_id'),'');")
+    [ -n "$MEMBER_ID" ] || {
+      echo "agmsg: journaled member '$TARGET_AGENT' has no member_id" >&2
+      exit 1
+    }
+    agmsg_roster_append_left "$TEAM_DIR" "$MEMBER_ID" "$TARGET_AGENT" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    agmsg_roster_project_config "$TEAM_DIR" "$TEAM_CONFIG"
+    agmsg_lock_release
+  elif [ "$AGENT_COUNT" -eq 0 ]; then
     rm -f "$TEAM_CONFIG"
     agmsg_lock_release
     rmdir "$TEAM_DIR" 2>/dev/null || true
@@ -157,6 +200,27 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   TOUCHED_TEAMS=$((TOUCHED_TEAMS + 1))
   echo "Cleared $MATCH_COUNT registration(s) for $TARGET_AGENT from $TEAM_NAME"
 
+  # Remove the advisory role->session record for this seat (#1041). Nothing else
+  # deleted it, so it outlived every despawn -- graceful AND --force -- leaving one
+  # stale seat record (session uuid, name, team, type, project) per member ever
+  # spawned, which internal/resurrect-panes.sh reads.
+  #
+  # Two conditions the first cut got wrong (#1052 review, measured):
+  #  - ONLY when REMAINING is 0. The record is keyed on (team, agent) ALONE --
+  #    project is a field inside it -- so a peer still registered under a DIFFERENT
+  #    project shares this one file. Deleting it whenever any registration is
+  #    dropped tore the record out from under a live seat in another project. Ride
+  #    the same count the config removal above already uses.
+  #  - BEFORE the actas lock is released, not after. actas-claim acquires the lock
+  #    THEN writes the record, so a peer that legitimately claims in the window
+  #    between our release and our rm ends up holding the lock with no record --
+  #    its fresh record deleted by our late rm. Removing first closes that window.
+  # NOT gated on SESSION_ID: --force passes none and the record must go on both
+  # paths; the SESSION_ID gate stays on the lock release alone.
+  if [ "$REMAINING" -eq 0 ]; then
+    _agmsg_role_session_path_into "$TEAM_NAME" "$TARGET_AGENT"
+    rm -f "$_AGMSG_ROLE_SESSION_PATH" 2>/dev/null || true
+  fi
   # Release the actas lock for this (team, agent) pair so peer sessions can
   # claim it without waiting for owner-session-end / stale GC.
   if [ -n "$SESSION_ID" ]; then

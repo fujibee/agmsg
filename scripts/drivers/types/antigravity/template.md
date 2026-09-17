@@ -1,47 +1,8 @@
----
-name: __SKILL_NAME__
-description: Cross-agent messaging via SQLite. Send messages between Claude Code, Codex, Gemini CLI, and other agents. No daemon, no network, no dependencies beyond bash and sqlite3.
----
+<!-- This file is an overlay for the shared SKILL.md. -->
 
-Agent messaging command. **IMPORTANT: Always use the provided scripts. NEVER directly read or edit config files, DB, or team data. There is NO register.sh — use join.sh to join a team.**
-
-## Identity
-
-If you already know your AGENT and TEAMS from a previous `$__SKILL_NAME__` call in this session, skip to **Execute** below.
-
-Otherwise, run: `~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" antigravity`
-
-Four possible outputs:
-
-**A) Single identity:**
-`agent=<name> teams=<t1,t2,...> type=antigravity project=<path>`
-→ Remember AGENT and TEAMS, then go to **Execute**.
-
-**B) Multiple identities:**
-`multiple=true agents=<n1,n2,...> teams=<t1,t2,...> type=antigravity project=<path>`
-→ Ask the user which agent name to use for this session, then go to **Execute**.
-
-**C) Not in a team:**
-`not_joined=true available_teams=<t1,t2,...>` (or `available_teams=none`)
-→ Show the user the available teams from the output, then:
-
-  > **First-time setup required.**
-  > Joining a team so this agent can send and receive messages.
-  > - **Team name**: a group of agents that can message each other (available: <list from output>)
-  > - **Agent name**: this agent's identity within the team
-
-  1. Ask: "Enter a team name (joins existing or creates new)"
-  2. Ask: "Enter a name for this agent"
-  3. **You MUST use join.sh** — run: `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <agent_name> antigravity "$(pwd)"`
-  4. Show the result and explain:
-
-  > **Joined!** You can now use `$__SKILL_NAME__` to check and send messages.
-  > - `$__SKILL_NAME__` — check inbox
-  > - `$__SKILL_NAME__ send <agent> <message>` — send a message
-  > - `$__SKILL_NAME__ team` — list team members
-  > - `$__SKILL_NAME__ history` — message history
-
-  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick a delivery mode using exactly this prompt:
+<!-- agmsg:slot delivery -->
+<!-- agmsg:render-overlay __AGENT_TYPE__ -->
+  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick a delivery mode:
 
      ```
      Choose delivery mode for incoming messages:
@@ -50,87 +11,45 @@ Four possible outputs:
                   Stop hook pulls after each response.
 
        2) off  — No automatic delivery
-                  Manual $__SKILL_NAME__ only.
+                  Manual __CMD_PREFIX____SKILL_NAME__ only.
 
      [1]:
      ```
 
-     - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
-     - Map the chosen number to a mode (`1`→`turn`, `2`→`off`) and run:
-       `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> antigravity "$(pwd)"`
-     - Codex has no Monitor tool, so `monitor` and `both` modes are not offered here.
+     Empty input means `1` (turn). Map `1`→`turn` and `2`→`off`, then run:
+     `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`
 
-  6. Then check inbox for the newly joined team.
+     `monitor` requires explicitly starting either the dedicated headless bridge or `antigravity-tui-monitor.sh`. While the TUI monitor is active, do not call bare `__CMD_PREFIX____SKILL_NAME__`, `inbox.sh`, or `check-inbox.sh`; use the pending state reported by the supervisor instead.
+<!-- /agmsg:slot delivery -->
 
-**D) Suggestions for reuse:**
-`suggest=true agents=<n1,n2,...> teams=<t1,t2,...> type=antigravity project=<path> available_teams=<t1,t2,...>`
-→ No exact registration exists for this project, but there are same-type agent names registered elsewhere.
-
-  1. Show the suggested agent names to the user.
-  2. Ask whether to reuse one of those names or choose a new one.
-  3. Ask for the team name to join (existing or new).
-  4. Run: `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <agent_name> antigravity "$(pwd)"`
-  5. Then continue with the normal post-join flow above.
-
-## Execute
-
-**Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
-
-**If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
-1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
-2. Do NOT ask the user what to do — just run the inbox check.
-3. If there are messages, read and respond appropriately. To reply:
-   `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
-
-If argument is "history":
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/history.sh $TEAM $AGENT`
-
-If argument is "team":
-1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh $TEAM`
-
-If argument starts with "send" (e.g. "send misaki check the server"):
-1. Parse target agent and message from the arguments
-2. Determine which team the target agent belongs to, then run:
-   `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
-
-If argument is "config":
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh show`
-2. Show the output to the user.
-
-If argument starts with "config set" (e.g. "config set hook.check_interval 30"):
-1. Parse key and value from the arguments.
-2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh set <key> <value>`
-
-
-If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
-1. Parse the new role name.
-2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" antigravity` to see whether the role is already registered for this (project, type).
-3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> antigravity "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
-4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-5. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. (Codex has no Monitor tool, so receive still covers all of your registered roles in this project.)"
-
-If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
-1. Parse the role name.
-2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" antigravity <name>` to remove that role's registration.
-3. If the session's active FROM was `<name>`, clear that state.
-4. Tell the user: "Dropped role `<name>` from this project."
-
+<!-- agmsg:slot mode -->
 If argument is "mode" (no further args):
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status antigravity "$(pwd)"`
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status __AGENT_TYPE__ "$(pwd)"`
 2. Show the output to the user.
 
-If argument starts with "mode" followed by a mode name (e.g. "mode turn"):
-1. Parse the mode. Codex supports only `turn` and `off` — reject `monitor` and `both` with: "Codex has no Monitor tool; only `turn` or `off` modes are supported."
-2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> antigravity "$(pwd)"`
+If argument starts with "mode" followed by a mode name:
+1. Antigravity supports `monitor`, `turn`, and `off`; `both` is not supported. `monitor` requires explicitly starting `antigravity-monitor.sh` or `antigravity-tui-monitor.sh`.
+2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`
 
-If argument is "hook on" (legacy alias):
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn antigravity "$(pwd)"`
-2. Tell the user: "Delivery mode set to 'turn' (legacy hook on behavior)."
+If argument is "hook on", run `delivery.sh set turn __AGENT_TYPE__ "$(pwd)"`.
+If argument is "hook off", run `delivery.sh set off __AGENT_TYPE__ "$(pwd)"`.
+<!-- /agmsg:slot mode -->
 
-If argument is "hook off" (legacy alias):
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set off antigravity "$(pwd)"`
-2. Tell the user: "Delivery mode set to 'off'."
+<!-- agmsg:slot execute-extra -->
+First run `bash ~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh status --project <project> --team <team> --name <role>`. If the output reports that the `tui-pty` runtime has not started, apply the default no-argument behavior above as written. Any other line containing `tui-pty` means the Antigravity TUI monitor is active: **do not apply that default behavior**, and do not call bare `__CMD_PREFIX____SKILL_NAME__`, `inbox.sh`, or `check-inbox.sh`. Use this status command (`tui-monitor status`) for any required state checks; it neither redisplays message bodies nor marks them read. Acknowledge receipt to the TUI monitor with exactly one line, `AGMSG_RECEIVED:<batch-id>`, using the batch ID from the envelope header.
 
-If argument is "reset":
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" antigravity`
-2. Tell the user the result.
+If argument is "resume":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/antigravity/antigravity-resume.sh "$(pwd)"`
+2. Show the output. This resumes only when exactly one paused Antigravity TUI is registered for the current project; zero or multiple paused TUI instances fail closed.
+
+If `agy-tui` stopped after detecting a read attempt through the ordinary inbox path, do not run bare `__CMD_PREFIX____SKILL_NAME__`, `inbox.sh`, or `check-inbox.sh` again. After confirming that no batch is pending, run `~/.agents/bin/agy-tui reset-guard --project "$(pwd)" --team <team> --name <role>` to clear only the read-denied guard; it does not read or acknowledge messages.
+<!-- /agmsg:slot execute-extra -->
+
+<!-- agmsg:slot actas -->
+If argument starts with "actas" followed by an agent name:
+1. Parse the new role name and inspect the team roster when suggestions are needed.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" __AGENT_TYPE__`.
+3. If needed, join with `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> __AGENT_TYPE__ "$(pwd)"`.
+4. Set the session's active FROM to `<name>` for subsequent sends.
+5. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. The headless monitor delivers to a separate worker; the TUI monitor delivers to the same TUI in which it was explicitly started."
+<!-- /agmsg:slot actas -->

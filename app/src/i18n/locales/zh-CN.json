@@ -1,0 +1,232 @@
+{
+  "common": {
+    "cancel": "取消",
+    "browse": "浏览…",
+    "nameLabel": "名称",
+    "projectDirLabel": "项目目录",
+    "close": "关闭"
+  },
+  "startupError": {
+    "installing": "正在安装 agmsg…",
+    "installFailed": "无法安装 agmsg：{{error}}",
+    "loginShellFailed": "无法确定您的登录 Shell：{{error}}",
+    "loadTeamsFailed": "无法加载 agmsg 团队：{{error}}。是否已在 ~/.agents/skills/agmsg 安装 agmsg？",
+    "coreOutdated": "已安装的 agmsg CLI 版本过旧（{{installed}} < {{pinned}}），可能无法与此应用正常配合。",
+    "versionUnknown": "未知",
+    "updateNow": "立即更新",
+    "updating": "正在更新 agmsg…",
+    "updateFailed": "无法更新 agmsg：{{error}}",
+    "updateSucceeded": "已将 agmsg CLI 更新到 {{version}}。",
+    "dismiss": "关闭"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "collapse": "折叠侧边栏",
+    "expand": "展开侧边栏",
+    "newMenu": {
+      "trigger": "＋ 新建 ▾",
+      "team": "团队…",
+      "agent": "智能体…"
+    },
+    "team": {
+      "title": "团队",
+      "new": "新建团队"
+    },
+    "title": "智能体",
+    "newAgent": "新建智能体",
+    "filter": {
+      "all": "全部",
+      "none": "无"
+    },
+    "member": {
+      "checkboxTitle": "在团队聊天室中显示",
+      "titleRunning": "已在运行 — 点击以聚焦",
+      "titleSpawn": "在 PTY 面板中启动",
+      "noTypes": "—",
+      "emptyState": "暂无智能体。使用上方的 ＋ 按钮添加。"
+    },
+    "user": {
+      "title": "{{team}} 中的 app-user"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# 团队聊天室",
+    "close": "×",
+    "newShell": "新建 Shell 标签",
+    "shellLabel": "Shell"
+  },
+  "room": {
+    "loadingMore": "正在加载更多…",
+    "arrow": "→",
+    "emptyState": "暂无消息。"
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "自我监控 — 该类型自行投递 agmsg 消息",
+      "app": "应用监控 — agmsg 消息将注入此面板的标准输入"
+    },
+    "closeTitle": "关闭面板",
+    "closeGlyph": "×",
+    "swapTitle": "点击后再点击此标签页中的另一个面板即可交换位置"
+  },
+  "chat": {
+    "title": "聊天",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "还原",
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "你的消息（以 {{appUser}} 身份发送）会显示在这里。",
+      "noUser": "该团队暂无 app-user。",
+      "addOne": "添加一个"
+    }
+  },
+  "composer": {
+    "asLabel": "以 {{appUser}} 身份",
+    "targetPlaceholder": "发送至…",
+    "messagePlaceholder": "消息",
+    "sendButton": "发送",
+    "noAppUser": "无 app-user — 添加一个以收发消息",
+    "sendFailedAlert": "发送失败：{{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "移除 {{name}}？",
+      "body": "这将把 {{name}} 从 {{team}} 中移除，并关闭其正在运行的面板（如果有）。此操作无法在此处撤销。",
+      "confirmLabel": "离开"
+    },
+    "newTeam": {
+      "titleFirstRun": "欢迎 — 创建你的第一个团队",
+      "title": "新建团队",
+      "note": "创建团队，并将你添加为该团队的 app-user（底部聊天框的所有者）。",
+      "teamNameLabel": "团队名称",
+      "teamNamePlaceholder": "my-team",
+      "appUserLabel": "你的名字（app-user）",
+      "create": "创建"
+    },
+    "appUser": {
+      "title": "添加 app-user（你）",
+      "note": "app-user 是你在该团队中的身份 — 底部聊天框的所有者。每个团队仅限一个。",
+      "add": "添加"
+    },
+    "agent": {
+      "title": "添加智能体",
+      "typeLabel": "类型",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "添加并启动"
+    },
+    "rename": {
+      "title": "重命名 {{current}}",
+      "newNameLabel": "新名称",
+      "confirmButton": "重命名"
+    },
+    "confirm": {
+      "defaultLabel": "确认"
+    },
+    "settings": {
+      "title": "设置"
+    },
+    "closeWindow": {
+      "title": "关闭此标签页？",
+      "body": "这将停止此处运行的代理：{{names}}。此操作无法撤销。",
+      "confirmLabel": "关闭标签页"
+    },
+    "closePane": {
+      "title": "关闭 {{name}}？",
+      "body": "这将停止 {{name}}。此操作无法撤销。",
+      "confirmLabel": "关闭面板"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "启动到 ▸",
+      "spawnNewTab": "新标签页",
+      "existingTabsDivider": "— 现有标签页 —",
+      "rename": "重命名…",
+      "leave": "离开"
+    },
+    "pane": {
+      "close": "关闭",
+      "moveTo": "移动到 ▸",
+      "moveNewTab": "新标签页",
+      "noOtherTabs": "没有其他标签页",
+      "swapWith": "与…交换 ▸",
+      "noOtherPanes": "此标签页中没有其他面板"
+    },
+    "window": {
+      "rename": "重命名…",
+      "openShell": "打开 Shell",
+      "layout": "布局 ▸",
+      "layoutVertical": "纵向",
+      "layoutHorizontal": "横向",
+      "layoutTile": "平铺"
+    },
+    "room": {
+      "hide": "隐藏团队聊天室"
+    },
+    "chat": {
+      "hide": "隐藏我的聊天"
+    }
+  },
+  "terminal": {
+    "processExited": "[进程已退出]",
+    "failedToStart": "启动 “{{cmd}}” 失败：{{error}}"
+  },
+  "language": {
+    "label": "语言"
+  },
+  "settings": {
+    "title": "设置",
+    "terminalFontSize": {
+      "label": "终端字体大小"
+    },
+    "timezone": {
+      "label": "时区",
+      "auto": "自动 ({{zone}})"
+    }
+  },
+  "nativeMenu": {
+    "about": "关于 {{name}}",
+    "checkForUpdates": "检查更新…",
+    "hide": "隐藏 {{name}}",
+    "hideOthers": "隐藏其他",
+    "showAll": "全部显示",
+    "quit": "退出 {{name}}",
+    "editMenu": "编辑",
+    "undo": "撤销",
+    "redo": "重做",
+    "cut": "剪切",
+    "copy": "拷贝",
+    "paste": "粘贴",
+    "selectAll": "全选",
+    "viewMenu": "显示",
+    "showTeamRoom": "显示团队聊天室",
+    "showUserChat": "显示我的聊天",
+    "paneLayout": "面板布局",
+    "paneLayoutVertical": "纵向",
+    "paneLayoutHorizontal": "横向",
+    "paneLayoutTile": "平铺",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "actualSize": "实际大小",
+    "windowMenu": "窗口",
+    "minimize": "最小化",
+    "closeWindow": "关闭窗口"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "检查更新失败：{{error}}",
+    "updateAvailableBody": "{{name}} {{version}} 可用。是否立即安装并重启？",
+    "updateAvailableTitle": "有可用更新",
+    "installAndRestart": "安装并重启",
+    "later": "以后再说",
+    "updateFailed": "更新失败：{{error}}",
+    "upToDate": "当前已是最新版本。",
+    "noUpdatesTitle": "没有可用更新"
+  },
+  "stage": {
+    "emptyHint": "点击左侧的成员以启动代理。"
+  }
+}

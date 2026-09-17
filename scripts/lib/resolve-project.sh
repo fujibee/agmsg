@@ -39,6 +39,13 @@
 # shellcheck disable=SC1091
 . "$SKILL_DIR/scripts/lib/storage.sh"
 
+# _agmsg_pid_alive: the EPERM-aware liveness check both the ancestor walk and the
+# marker GC below need. Sourced here rather than left to the caller — a missing
+# definition used to mean the walk fell back to a bare `kill -0`, which reports a
+# live agent as gone under a sandbox. Double-source guarded.
+# shellcheck disable=SC1091
+. "$SKILL_DIR/scripts/lib/instance-id.sh"
+
 _agmsg_run_dir() { printf '%s/run' "$SKILL_DIR"; }
 
 # Canonicalize a directory path by resolving symlinks to its physical location.
@@ -57,7 +64,173 @@ agmsg_canonical_path() {
   fi
 }
 
+# Normalize only path spelling, not filesystem identity. Windows paths use the
+# mixed form used by Git for Windows (`C:/path`); POSIX paths keep their form
+# except for redundant trailing slashes.
+#
+# Trade-off: the reinterpretation is form-based, not platform-gated, so a POSIX
+# path whose first component is a single letter (`/c/foo`) is treated as an
+# MSYS drive form. Lookups stay correct either way — the variant set generated
+# below always includes the original spelling — but such paths are rare enough
+# on POSIX hosts that we prefer the simpler, platform-independent rule.
+agmsg_normalize_project_path() {
+  local p="$1" drive rest squeezed
+  [ -n "$p" ] || { printf '%s' "$p"; return 0; }
+  p="${p//\\//}"
+
+  # Collapse repeated slashes (C://x, /c//x) while preserving a UNC-style
+  # leading double slash.
+  squeezed=$(printf '%s' "$p" | tr -s '/')
+  case "$p" in
+    //*) p="/$squeezed" ;;
+    *)   p="$squeezed" ;;
+  esac
+
+  case "$p" in
+    /[A-Za-z])
+      drive=$(printf '%s' "${p#/}" | tr '[:lower:]' '[:upper:]')
+      printf '%s:/' "$drive"
+      return 0
+      ;;
+    /[A-Za-z]/*)
+      drive=$(printf '%s' "${p:1:1}" | tr '[:lower:]' '[:upper:]')
+      rest="${p:2}"
+      p="$drive:$rest"
+      ;;
+    [A-Za-z]:)
+      drive=$(printf '%s' "${p:0:1}" | tr '[:lower:]' '[:upper:]')
+      printf '%s:/' "$drive"
+      return 0
+      ;;
+    [A-Za-z]:/*)
+      drive=$(printf '%s' "${p:0:1}" | tr '[:lower:]' '[:upper:]')
+      p="$drive:${p:2}"
+      ;;
+  esac
+
+  case "$p" in
+    [A-Za-z]:/)
+      printf '%s' "$p"
+      return 0
+      ;;
+    */)
+      while [ "$p" != "/" ] && [ "${p%/}" != "$p" ]; do
+        p="${p%/}"
+      done
+      case "$p" in [A-Za-z]:) p="$p/" ;; esac
+      ;;
+  esac
+  printf '%s' "$p"
+}
+
+# Print equivalent project path spellings for lookup compatibility with legacy
+# registrations. The first line is the canonical comparison form.
+agmsg_project_path_variants() {
+  local raw="$1"
+  local norm="$1" drive lower rest mixed_lower msys_lower msys_upper native_upper native_lower
+  local variants=() existing
+  norm="$(agmsg_normalize_project_path "$norm")"
+
+  _agmsg_add_project_variant() {
+    local candidate="$1" seen
+    [ -n "$candidate" ] || return 0
+    # ${arr[@]+...} guards the empty-array expansion: under `set -u` bash 3.2
+    # (macOS default) treats "${variants[@]}" on an empty array as unbound.
+    for seen in ${variants[@]+"${variants[@]}"}; do
+      [ "$seen" = "$candidate" ] && return 0
+    done
+    variants[${#variants[@]}]="$candidate"
+  }
+
+  _agmsg_add_project_variant "$norm"
+  # The caller's exact spelling always participates — covers exotic forms the
+  # normalizer does not model (e.g. native UNC \\server\share).
+  _agmsg_add_project_variant "$raw"
+  case "$norm" in
+    [A-Z]:/*)
+      drive="${norm:0:1}"
+      lower="$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')"
+      rest="${norm:2}"
+      mixed_lower="$lower:$rest"
+      msys_lower="/$lower$rest"
+      msys_upper="/$drive$rest"
+      native_upper="$drive:${rest//\//\\}"
+      native_lower="$lower:${rest//\//\\}"
+
+      _agmsg_add_project_variant "$mixed_lower"
+      _agmsg_add_project_variant "$msys_lower"
+      _agmsg_add_project_variant "$msys_upper"
+      _agmsg_add_project_variant "$native_upper"
+      _agmsg_add_project_variant "$native_lower"
+      if [ "$norm" != "$drive:/" ]; then
+        _agmsg_add_project_variant "$norm/"
+        _agmsg_add_project_variant "$mixed_lower/"
+        _agmsg_add_project_variant "$msys_lower/"
+        _agmsg_add_project_variant "$msys_upper/"
+        _agmsg_add_project_variant "$native_upper\\"
+        _agmsg_add_project_variant "$native_lower\\"
+      fi
+      ;;
+    //*)
+      # UNC: registrations may be stored with backslashes and/or a trailing
+      # separator.
+      _agmsg_add_project_variant "${norm//\//\\}"
+      _agmsg_add_project_variant "$norm/"
+      _agmsg_add_project_variant "${norm//\//\\}\\"
+      ;;
+    /|[A-Z]:/) : ;;
+    /*)
+      # Legacy POSIX registrations may carry a trailing slash.
+      _agmsg_add_project_variant "$norm/"
+      ;;
+  esac
+
+  for existing in ${variants[@]+"${variants[@]}"}; do
+    printf '%s\n' "$existing"
+  done
+  unset -f _agmsg_add_project_variant
+}
+
+agmsg_project_sql_in_list() {
+  local path="$1" candidate escaped out=""
+  while IFS= read -r candidate; do
+    escaped=$(printf '%s' "$candidate" | sed "s/'/''/g")
+    out="${out:+$out,}'$escaped'"
+  done < <(agmsg_project_path_variants "$path")
+  printf '%s' "$out"
+}
+
+agmsg_find_registered_project_variant() {
+  local projects="$1" path="$2" candidate match match_norm home_norm
+  # #357: never resolve to `/` or $HOME. They are ancestors of nearly every
+  # directory, so one stray registration there (even in another team, or a
+  # leftover) would capture unrelated sessions -- the ancestor walk climbs
+  # through them and would otherwise MATCH them, silently rewriting a project to
+  # $HOME. The walk may still ASCEND through these dirs; it just must not land on
+  # one. (marker resolution, step 1, is unaffected.)
+  #
+  # The exclusion compares NORMALIZED paths, so a registration stored with a
+  # trailing/duplicate slash ("$HOME/", "//") -- which raw string compare would
+  # miss -- is still excluded (agmsg_normalize_project_path collapses/strips
+  # those). Normalization is logical, not symlink-resolving; see the PR notes.
+  home_norm="$(agmsg_normalize_project_path "${HOME:-}" 2>/dev/null || true)"
+  while IFS= read -r candidate; do
+    match=$(printf '%s\n' "$projects" | grep -Fx -- "$candidate" | head -n 1 || true)
+    if [ -n "$match" ]; then
+      match_norm="$(agmsg_normalize_project_path "$match" 2>/dev/null || printf '%s' "$match")"
+      case "$match_norm" in "/"|""|[A-Za-z]:|[A-Za-z]:/) continue ;; esac
+      { [ -n "$home_norm" ] && [ "$match_norm" = "$home_norm" ]; } && continue
+      printf '%s' "$match"
+      return 0
+    fi
+  done < <(agmsg_project_path_variants "$path")
+  return 1
+}
+
 # Map an agent type to the binary basename(s) its process may carry.
+# Names must be type-distinctive. Do not list `agent`: Homebrew grok-build
+# and the Cursor CLI installer both use that basename (#856). Matching it
+# would attach the wrong pid (#93). The alias is an intentional miss.
 _agmsg_agent_binaries() {
   case "$1" in
     claude-code) echo "claude" ;;
@@ -66,6 +239,7 @@ _agmsg_agent_binaries() {
     antigravity) echo "antigravity" ;;
     copilot)     echo "copilot" ;;
     opencode)    echo "opencode" ;;
+    grok-build)  echo "grok" ;;
     *)           echo "claude codex gemini" ;;
   esac
 }
@@ -73,19 +247,40 @@ _agmsg_agent_binaries() {
 # Does <pid> currently look like an agent process of <type>? Checks both the
 # `comm` name and argv[0] basename. Guards marker trust against PID recycling —
 # a recycled pid pointing at an unrelated process must not hijack resolution.
+#
+# Claude Code 2.1.x daemon architecture (#349): sessions run as version-named
+# binaries carrying a `--bg-spare` flag (e.g. ".../claude/versions/2.1.199
+# --bg-spare ..."), parented by a long-lived `claude daemon run ...` process.
+# `--bg-spare` appears on the real per-session binary too, so it is NOT a safe
+# exclusion signal — only "daemon run" identifies the daemon itself. Matching
+# plain comm/argv0 "claude" against the daemon would resolve the SAME shared
+# pid as "the enclosing agent" for every daemon-hosted session — reintroducing
+# the #93 collision class (cross-session watcher kills, immortal orphan
+# watchers). Two adjustments: never trust the daemon process itself, and
+# additionally recognize the version-named session binary so the walk stops
+# at the real per-session process instead of continuing past it to the
+# (excluded) daemon.
 agmsg_pid_is_agent() {
   local pid="$1" type="$2"
   [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
-  local binaries comm first base bin
+  _agmsg_pid_alive "$pid" || return 1
+  local binaries comm cmdline first base bin
   binaries=$(_agmsg_agent_binaries "$type")
   comm=$(compat_get_comm "$pid" 2>/dev/null || true)
-  first=$(compat_get_cmdline "$pid" 2>/dev/null | awk '{print $1}' || true)
+  cmdline=$(compat_get_cmdline "$pid" 2>/dev/null || true)
+  case "$cmdline" in
+    *"daemon run"*) return 1 ;;
+  esac
+  first=$(printf '%s' "$cmdline" | awk '{print $1}' || true)
   base=$(basename -- "${first:-}" 2>/dev/null || true)
   for bin in $binaries; do
     case "$comm" in "$bin"|"$bin"-*) return 0 ;; esac
     [ "$base" = "$bin" ] && return 0
   done
+  if [ "$type" = "claude-code" ]; then
+    case "$comm" in [0-9]*.[0-9]*.[0-9]*) return 0 ;; esac
+    case "$base" in [0-9]*.[0-9]*.[0-9]*) return 0 ;; esac
+  fi
   return 1
 }
 
@@ -151,25 +346,38 @@ agmsg_read_project_marker() {
 agmsg_marker_gc_stale() {
   local dir; dir="$(_agmsg_run_dir)"
   [ -d "$dir" ] || return 0
+  # Skip if _agmsg_pid_alive (EPERM-aware; instance-id.sh) isn't loaded, so a
+  # "command not found" can't fall through to `|| rm -f` and delete a live marker.
+  declare -F _agmsg_pid_alive >/dev/null 2>&1 || return 0
   local f pid
   for f in "$dir"/proj.*.project; do
     [ -f "$f" ] || continue
     pid=${f##*/proj.}; pid=${pid%.project}
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    kill -0 "$pid" 2>/dev/null || rm -f "$f"
+    _agmsg_pid_alive "$pid" || rm -f "$f"
   done
 }
 
-# List distinct registered project paths for <type>, one per line.
+# List distinct registered project paths for <type>, one per line. An optional
+# <team> scopes the scan to that team's config only (#357): a poison registration
+# in an unrelated team must not leak into this team's resolution. Omitting <team>
+# keeps the legacy all-teams scan for callers that don't know the target team
+# (whoami/actas/watch) — a deliberate phased migration.
 agmsg_registered_projects() {
-  local type="$1" teams_dir="$SKILL_DIR/teams" config_file cfg_sql type_sql
+  local type="$1" team="${2:-}" teams_dir="$SKILL_DIR/teams" config_file cfg_sql type_sql
   [ -d "$teams_dir" ] || return 0
   # Read config.json inside SQL via readfile() rather than binding it through a
   # `.param set` dot-command — the sqlite3 shell tokenizer doesn't honour SQL ''
   # escaping, so a config value with a single quote breaks the bind (#112). The
   # path and type are interpolated as SQL string literals with '' doubling.
   type_sql=$(printf '%s' "$type" | sed "s/'/''/g")
-  for config_file in "$teams_dir"/*/config.json; do
+  local -a configs
+  if [ -n "$team" ]; then
+    configs=("$teams_dir/$team/config.json")
+  else
+    configs=("$teams_dir"/*/config.json)
+  fi
+  for config_file in ${configs[@]+"${configs[@]}"}; do
     [ -f "$config_file" ] || continue
     cfg_sql=$(agmsg_sql_readfile_path "$config_file")
     sqlite3 :memory: "
@@ -197,7 +405,7 @@ agmsg_registered_projects() {
 # dir (the git checkout itself is then unregistered, so we decline and let the
 # ancestor walk handle it). return 1 when git is absent or nothing matches.
 agmsg_gitcommon_project() {
-  local start="$1" type="$2" common main projects
+  local start="$1" type="$2" team="${3:-}" common main projects match
   command -v git >/dev/null 2>&1 || return 1
   [ -d "$start" ] || return 1
   common=$(cd "$start" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 1
@@ -205,33 +413,42 @@ agmsg_gitcommon_project() {
   # --git-common-dir may be relative to <start>; make it absolute.
   case "$common" in /*) ;; *) common="$start/$common" ;; esac
   main=$(cd "$(dirname "$common")" 2>/dev/null && pwd) || return 1
-  projects="$(agmsg_registered_projects "$type")"
+  projects="$(agmsg_registered_projects "$type" "$team")"
   [ -n "$projects" ] || return 1
-  printf '%s\n' "$projects" | grep -Fxq "$main" || return 1
-  printf '%s' "$main"
+  match="$(agmsg_find_registered_project_variant "$projects" "$main")" || return 1
+  printf '%s' "$match"
 }
 
 # Echo the nearest ancestor of <start> (inclusive) that is a registered project
 # for <type>. return 1 when none matches.
 agmsg_ancestor_project() {
-  local start="$1" type="$2" projects d
-  projects="$(agmsg_registered_projects "$type")"
+  local start="$1" type="$2" team="${3:-}" projects d next match
+  projects="$(agmsg_registered_projects "$type" "$team")"
   [ -n "$projects" ] || return 1
-  d="$start"
-  while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "." ]; do
-    if printf '%s\n' "$projects" | grep -Fxq "$d"; then
-      printf '%s' "$d"
+  d="$(agmsg_normalize_project_path "$start")"
+  while [ -n "$d" ] && [ "$d" != "." ]; do
+    if match="$(agmsg_find_registered_project_variant "$projects" "$d")"; then
+      printf '%s' "$match"
       return 0
     fi
-    d=$(dirname "$d")
+    case "$d" in "/"|[A-Za-z]:|[A-Za-z]:/) break ;; esac
+    next=$(dirname "$d")
+    [ -z "$next" ] && break
+    [ "$next" = "$d" ] && break
+    d="$next"
   done
   return 1
 }
 
 # Resolve the real project root for a slash-command invocation.
-# Usage: agmsg_resolve_project <pwd_path> <type>
+# Usage: agmsg_resolve_project <pwd_path> <type> [team]
+# An optional <team> scopes the registry-based fallbacks (ancestor / git-common)
+# to that team, so a poison registration in another team can't capture this
+# resolution (#357). join.sh passes it (the join target team is known);
+# team-agnostic callers (whoami/actas/watch/reset) omit it and keep the legacy
+# all-teams behavior.
 agmsg_resolve_project() {
-  local pwd_path="$1" type="$2" pid marker anc gitc
+  local pwd_path="$1" type="$2" team="${3:-}" pid marker anc gitc
   # Explicit opt-out: caller passed a deliberate, possibly-unregistered path.
   if [ "${AGMSG_RESOLVE_PROJECT:-1}" = "0" ]; then
     printf '%s' "$pwd_path"; return 0
@@ -245,12 +462,12 @@ agmsg_resolve_project() {
   fi
   # 2) Nearest registered ancestor of pwd (git-independent; covers nested
   #    subdirs and worktrees that live under the registered project).
-  if anc="$(agmsg_ancestor_project "$pwd_path" "$type")" && [ -n "$anc" ]; then
+  if anc="$(agmsg_ancestor_project "$pwd_path" "$type" "$team")" && [ -n "$anc" ]; then
     printf '%s' "$anc"; return 0
   fi
   # 3) Registered main checkout of pwd's git repo (recovers a SIBLING worktree
   #    the ancestor walk cannot reach). Validated against the registry.
-  if gitc="$(agmsg_gitcommon_project "$pwd_path" "$type")" && [ -n "$gitc" ]; then
+  if gitc="$(agmsg_gitcommon_project "$pwd_path" "$type" "$team")" && [ -n "$gitc" ]; then
     printf '%s' "$gitc"; return 0
   fi
   # 4) Unchanged fallback.

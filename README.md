@@ -1,5 +1,7 @@
 # agmsg
 
+*[日本語](README.ja.md)*
+
 [![CI](https://img.shields.io/github/actions/workflow/status/fujibee/agmsg/tests.yml?branch=main&label=CI&logo=github)](https://github.com/fujibee/agmsg/actions/workflows/tests.yml)
 [![release](https://img.shields.io/github/v/release/fujibee/agmsg?label=release)](https://github.com/fujibee/agmsg/releases/latest)
 [![license](https://img.shields.io/github/license/fujibee/agmsg)](LICENSE)
@@ -58,9 +60,11 @@ npx agmsg
 #    OpenCode:     $agmsg
 ```
 
-That's it. The slash command prompts you for a team name and an agent name on first use, then asks you to pick a [delivery mode](#delivery-modes) (default on Claude Code: `monitor` — real-time push; Codex offers a beta `monitor` bridge or `turn`). After that, you talk to your agent naturally — see [First run](#first-run) below.
+That's it. The slash command prompts you for a team name and an agent name on first use, then asks you to pick a [delivery mode](#delivery-modes) (default on Claude Code and Codex: `monitor` — real-time push; Codex delivers it through a bridge). After that, you talk to your agent naturally — see [First run](#first-run) below.
 
 Prefer to inspect the code first, track the latest `main`, or pick a custom command name? See [Install](#install) below for the `setup.sh` one-liner, `git clone`, and the Claude Code plugin marketplace paths.
+
+To sync a team between two installs through the self-hosted reference server, follow [Remote setup](docs/remote-setup.md).
 
 ## How it works
 
@@ -199,7 +203,19 @@ By default `spawn` **blocks until the new agent is actually listening** — its 
 
 Options: `--boot-prompt <text>` (initial task; see above), `--project <path>` (default: current project), `--team <team>` (auto-resolved when the project has a single team), and `--terminal <tmpl>` / `$AGMSG_TERMINAL` / config `spawn.terminal` to override the terminal command on the non-tmux path (a `{cmd}` placeholder is replaced with the path to the generated boot script). On macOS the default opens whichever terminal you're currently in (iTerm or Terminal, via `$TERM_PROGRAM`) using `open -a` — a plain app launch, so it does **not** trigger the Automation/AppleScript permission prompts that scripting the terminal directly would.
 
-Only `claude-code` and `codex` are supported today. macOS is the primary target; Linux and Windows are best-effort (please open an issue/PR if your terminal isn't handled). Headless environments — no tmux **and** no usable terminal — error out, since the agent CLIs need an interactive terminal.
+To always pass a given agent type extra CLI flags on spawn (e.g. a default permission mode or sandbox policy), set them in a YAML **spawn options** file — one section per type, a flat `--flag: value` map underneath. Path: `$AGMSG_SPAWN_OPTIONS_FILE`, else `~/.agmsg/config/spawn_options.yaml`; a missing file or section is a no-op.
+
+```yaml
+claude-code:
+  --permission-mode: acceptEdits
+  --dangerously-skip-permissions: true   # a `true` value emits the flag with no argument
+
+codex:
+  --sandbox: workspace-write
+  --dangerously-skip-permissions: false  # a `false` value suppresses the flag entirely
+```
+
+Eight of the nine agent types are spawnable — `claude-code`, `codex`, `grok-build`, `cursor`, `gemini`, `antigravity`, `copilot`, `opencode`. `hermes` is not: its CLI has no mode that starts an interactive session pre-seeded with an initial prompt (#279). macOS is the primary target; Linux and Windows are best-effort (please open an issue/PR if your terminal isn't handled). Headless environments — no tmux **and** no usable terminal — error out, since the agent CLIs need an interactive terminal.
 
 ### Tear down a spawned agent (`despawn`)
 
@@ -216,14 +232,27 @@ By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control m
 
 Despawn only acts on the named member — the session running `despawn` is never torn down, and a broad-subscription watcher ignores a `ctrl:despawn` aimed at another role.
 
+### Bring a role back with its context (session resume)
+
+A role remembers the session that last embodied it: sessions are named
+`<team>-<agent>`, and `spawn` **resumes a role's previous session by default** —
+so re-spawning after a `despawn`, crash, or restart comes back in the prior
+conversation, not blank (`--fresh` forces new). With
+[tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect), one `~/.tmux.conf`
+line re-seats every role pane into its session after a tmux-server restart.
+
+See **[docs/session-resurrect.md](docs/session-resurrect.md)** for the tmux-resurrect
+setup, how it resolves each pane, what does and doesn't come back automatically, and
+the manual fallback.
+
 ## Delivery modes
 
 How incoming messages reach your agent. Pick one at first join via the prompt, or change it later with `/agmsg mode <name>`.
 
 | mode | mechanism | latency | who it's for |
 |---|---|---|---|
-| **`monitor`** (default on Claude Code) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
-| **`turn`** (default on Codex / Copilot CLI / OpenCode) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode (no Monitor tool); Claude Code users on a quieter loop |
+| **`monitor`** (default on Claude Code; on OpenCode with the opencode-sentinel plugin) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
+| **`turn`** (default on Codex / Copilot CLI / OpenCode without the plugin) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode users not running monitor; Claude Code users on a quieter loop |
 | **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
 | **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
 
@@ -297,9 +326,9 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 $agmsg                          — or /skills → agmsg
 ```
 
-Codex supports `mode monitor` as a **beta** app-server bridge, plus `mode turn` and `mode off`.
+Codex supports `mode monitor` through an app-server bridge, plus `mode turn` and `mode off`.
 
-> ⚠️ **The monitor beta changes how Codex starts — opt in only if you understand it.** Codex has no Monitor tool, so `mode monitor` prints a shell function that makes `codex` route through agmsg's monitor shim in your interactive shell. In monitor-mode projects the shim routes interactive launches through a bridge that turns incoming agmsg messages into turns on the current Codex thread; `codex exec` and non-monitor projects pass straight through to the real Codex. It depends on experimental Codex app-server behavior and has known rough edges (orphans on TUI close — #149; one identity per project — #150).
+> ⚠️ **Monitor mode changes how Codex starts — enable it knowing that.** Codex has no Monitor tool, so `mode monitor` prints a shell function that makes `codex` route through agmsg's monitor shim in your interactive shell. In monitor-mode projects the shim routes interactive launches through a bridge that turns incoming agmsg messages into turns on the current Codex thread; `codex exec` and non-monitor projects pass straight through to the real Codex. It depends on Codex app-server behavior and has a known limitation (orphans on TUI close — #149).
 
 If you prefer a global PATH shim, run `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` before the real Codex binary on PATH. You can also launch with `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh`. Codex sandboxing must allow writes to the skill's `db/`, `teams/`, and `run/` dirs — `install.sh` configures those `writable_roots` when `~/.codex/config.toml` exists. Setup notes and internals: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md).
 
@@ -317,7 +346,7 @@ The Copilot installer drops a `SKILL.md` at `~/.copilot/skills/agmsg/` so `/agms
 $agmsg
 ```
 
-Install with `./install.sh` (when `~/.config/opencode/` exists, the OpenCode-typed skill is placed automatically alongside the default Codex-typed shared skill). Use `--agent-type opencode` only for OpenCode-only environments where Codex is not installed. OpenCode is supported for manual and turn/off delivery workflows. It currently supports `mode turn` and `mode off`; `monitor`, `both`, and `spawn opencode` are not supported.
+Install with `./install.sh` (when `~/.config/opencode/` exists, the OpenCode-typed skill is placed automatically alongside the default Codex-typed shared skill). Use `--agent-type opencode` only for OpenCode-only environments where Codex is not installed. OpenCode supports `mode monitor` (via the external [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) plugin; without it the rule instructs a fallback to turn mode, which the agent follows rather than agmsg enforcing it), `mode turn`, and `mode off`. `spawn opencode` is available via `opencode --prompt` (TUI mode, which stays resident after the boot prompt's turn). `both` is not supported.
 
 This makes OpenCode useful as a local coding agent, including configurations backed by local providers such as Ollama.
 
@@ -326,17 +355,24 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ### Shell (any agent)
 
 ```bash
-~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>"
+~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>" [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
-~/.agents/skills/<cmd>/scripts/team.sh <team>
+~/.agents/skills/<cmd>/scripts/team.sh <team> [--json | --fix | --fix-pane-names | --rename-sessions]
+~/.agents/skills/<cmd>/scripts/placement-collisions.sh
 ~/.agents/skills/<cmd>/scripts/whoami.sh <project_path> <type>
 ~/.agents/skills/<cmd>/scripts/delivery.sh set <mode> <type> <project_path>
 ~/.agents/skills/<cmd>/scripts/delivery.sh status [<type> <project_path>]
 ~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
 
-`send.sh` takes exactly four positional arguments: `<team> <from> <to> "<message>"`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed.
+`team.sh` combines the roster with terminal placement, activity, delivery mode, and identity consistency. Verified identity is collapsed to `identity=ok`; mismatches and values that could not be observed are expanded with their evidence. `--json` emits every field for every registration. The repair flags report each action per identity cell as `changed`, `skipped`, `failed`, or (for a session name that could not be read back) `poked_unverified`. They are two different kinds of act: `--fix-pane-names` repairs the pane label and agent key through the terminal's own API and never types into a session; `--rename-sessions` repairs the CLI session name by typing the type's rename command (`/rename <team>-<agent>` for Claude Code, whatever the type's manifest declares otherwise) into the pane, and only after positively identifying a ready process there. `--fix` does both, unconditionally, including the keystroke. Pane liveness will join this view when the pane-state contract lands; until then the unavailable column is omitted rather than filled with `unknown`.
+
+`placement-collisions.sh` is a separate, read-only installation-wide report. It never repairs or removes a record; keeping this fleet observation outside `team.sh` prevents an operator-level scan from becoming part of a seat's repair path. Today it reports only the record-only layer: two DIFFERENT seats' records resolved to the same canonical (kind, instance, pane) locator, entirely from records on disk — no terminal is ever asked anything. A ref with no instance component to resolve (every herdr ref today; a legacy bare tmux `%N`/`@N`) is not joined by raw string equality; it is listed under `unscoped_records` instead, since record-only evidence cannot tell such refs apart across terminal instances. `collisions: none` means the walk completed and found nothing; `collisions: none_observed` paired with `coverage: partial` means something along the way (a team config, a placement record, an empty ref) could not be read, so the empty answer is not a proven one; `collisions: not_attempted` means there was no `teams/` directory to walk at all. An actual-location layer — matching a seat's own record against where a live census actually observes it — is designed but not yet wired here; see the script's header.
+
+Terminal identity has a different number of observable names on each backend. Herdr exposes three independent values: the visible pane label, its internal agent key, and the CLI session name. tmux exposes two: the `@agmsg_agent` pane option is the internal key, while the CLI owns `pane_title`, so there is no independent pane-label field after the CLI starts. `team.sh` reports that tmux field as `n/a` rather than treating an unavailable concept as a mismatch.
+
+`send.sh` takes four positional arguments — `<team> <from> <to> "<message>"` — plus an optional trailing `--force`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
 
 ## FAQ / Design notes
 
@@ -380,6 +416,10 @@ Yes. Messages live in SQLite and survive sessions. `history.sh <team>` replays t
 
 The message store is effectively a replay log. There's no one-shot "rehydrate from room X" command yet, but `history.sh` gives you the transcript and you can prompt a new agent with it. Treat persistence as the unlock that makes that possible.
 
+**How do you pronounce it?**
+
+"AG message" (ay-jee message), or spelled out as A-G-M-S-G. Either is fine.
+
 ## Update
 
 ```bash
@@ -392,11 +432,16 @@ DB and team configs are preserved. Only scripts and assets are updated.
 
 ## Uninstall
 
+An `uninstall.sh` copy ships inside every install, so this works whether you
+installed via `git clone`, `npx agmsg`, or the curl one-liner:
+
 ```bash
-./uninstall.sh              # Interactive (confirms each step)
-./uninstall.sh --yes        # Remove everything
-./uninstall.sh --keep-data  # Remove skill but keep DB and teams
+~/.agents/skills/agmsg/uninstall.sh              # Interactive (confirms each step)
+~/.agents/skills/agmsg/uninstall.sh --yes        # Remove everything
+~/.agents/skills/agmsg/uninstall.sh --keep-data  # Remove skill but keep DB and teams
 ```
+
+(If you have a `git clone` checkout handy, `./uninstall.sh` from the repo root works the same way.)
 
 Auto-detects installed skill directories and cleans up: skill files, slash commands, hooks, AGENTS.md sections, and team configs.
 
@@ -433,6 +478,8 @@ Claude Code's sandbox restricts filesystem writes to the project directory. In `
   }
 }
 ```
+
+The allowlist does not enable sandboxing by itself. Use `/sandbox` in Claude Code to choose a sandbox mode, or add `"enabled": true` alongside `"filesystem"` under `"sandbox"` to configure it in settings. The allowlist has no effect until sandboxing is enabled.
 
 This can also go in project-level `.claude/settings.local.json` if you prefer per-project scope. The allowlist merges across all settings scopes and takes effect immediately — no restart needed.
 
@@ -541,11 +588,21 @@ Full discovery order, the trust model, and authoring guidance:
 [docs/plugins.md](docs/plugins.md) (design rationale in
 [ADR 0002](docs/adr/0002-driver-discovery-and-plugin-opt-in.md)).
 
+## Building on agmsg
+
+Writing something *outside* agmsg's own scripts that reads or drives agmsg —
+a GUI app, a bot, a derivative project (`agmsg-shogi`, `agmsg-go`,
+`agmsg-mcp`, …)? Read data via `scripts/api.sh` (JSON out, no need to touch
+`messages.db` or `teams/*/config.json` directly — those are internal and free
+to change), and write through the existing scripts (`send.sh`, `join.sh`,
+…) rather than the database. Full guidance:
+[docs/building-on-agmsg.md](docs/building-on-agmsg.md).
+
 ## Community
 
 - **Product Hunt**: #5 Product of the Day, [2026-06-09 launch](https://www.producthunt.com/products/agmsg) — 219 upvotes, 39 comments
-- **Derivative projects**: `agmsg-shogi`, `agmsg-go`, `agmsg-mcp` (community-built)
-- **External contributors**: [@MiuraKatsu](https://github.com/MiuraKatsu) (Gemini support + whoami auto-detect), [@roundrop](https://github.com/roundrop) (Copilot CLI support), [@TOMONOSUKEJP](https://github.com/TOMONOSUKEJP) (native Windows / Git Bash), [@kenshin-yamada](https://github.com/kenshin-yamada) (watcher scoping fix), [@utenadev](https://github.com/utenadev) (OpenCode contribution), [@lucianlamp](https://github.com/lucianlamp) (native Windows PowerShell helpers), [@tatsuya6502](https://github.com/tatsuya6502) (sandboxed Bash tool support)
+- **Community projects** (also on the [showcase](https://agmsg.cc)): [`agkanban`](https://github.com/lucianlamp/agkanban) — multi-agent kanban board that pairs with agmsg; [`agmsg-office`](https://github.com/shinshin86/agmsg-office) — replays message logs as characters speaking on a stage; [`agmsg-viewer`](https://github.com/utenadev/agmsg-viewer) — message history in a chat interface in the browser; [`agmsg-bubblelog`](https://github.com/dreiachse-cyber/agmsg-bubblelog) — replays a team's log locally as a messenger-style thread; [`agmsg-tui`](https://github.com/rrrrnmtsu/agmsg-tui) — Rust/ratatui terminal client, friendly to SSH, mosh, and tmux
+- **External contributors**: [@MiuraKatsu](https://github.com/MiuraKatsu) (Gemini support + whoami auto-detect), [@roundrop](https://github.com/roundrop) (Copilot CLI support), [@TOMONOSUKEJP](https://github.com/TOMONOSUKEJP) (native Windows / Git Bash), [@kenshin-yamada](https://github.com/kenshin-yamada) (watcher scoping fix), [@utenadev](https://github.com/utenadev) (OpenCode contribution), [@lucianlamp](https://github.com/lucianlamp) (native Windows PowerShell helpers), [@tatsuya6502](https://github.com/tatsuya6502) (sandboxed Bash tool support), [@Masashi-Ono0611](https://github.com/Masashi-Ono0611) (project-path validation, watchdog and watcher fixes), [@chemica-tan](https://github.com/chemica-tan) (Windows codex bridge: project compare and port parsing), [@otsune](https://github.com/otsune) (Git Bash quoting from PowerShell), [@tsukimiya](https://github.com/tsukimiya) (OpenCode: resident spawn and monitor delivery)
 
 ## Project site (agmsg.cc)
 

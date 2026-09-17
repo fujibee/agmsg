@@ -1,0 +1,254 @@
+name: app release
+
+# Builds, signs, and (macOS) notarizes the desktop app (app/) for macOS and
+# Windows. Separate from release.yml, which ships the agmsg CLI to npm — this
+# workflow has its own tag namespace so the two release trains never collide.
+#
+# Trigger: push of a tag matching app-v*.*.*. Also runnable by hand
+# (workflow_dispatch) to validate the pipeline itself.
+#
+# STATUS: pushed and exercised via workflow_dispatch from feat/desktop-app.
+# macOS goes end to end (codesign, notarize, staple, artifact upload) as of
+# run 28582001692. Windows builds fine, but Trusted Signing's federated
+# identity trusts the main branch only, so the Azure login step 403s
+# (AADSTS700213) on every feature-branch run — first real signal on that
+# path comes from a main-branch run.
+#
+# Secrets this workflow uses (per report; names may need a final check once
+# push is authorized and they can be verified directly):
+#   macOS codesign + notarization:
+#     MACOS_CERTIFICATE_P12_BASE64   base64-encoded .p12 (Developer ID Application)
+#     MACOS_CERTIFICATE_PASSWORD     .p12 export password
+#     APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   notarytool credentials
+#   (the signing identity itself is hardcoded in tauri.conf.json, not a
+#   secret — don't set APPLE_SIGNING_IDENTITY as a step env var unless it's
+#   actually populated, an empty override breaks codesign)
+#   Windows codesign (Azure Trusted Signing via the TrustedSigning PowerShell
+#   module, wired into `tauri build` through bundle.windows.signCommand ->
+#   app/scripts/sign-windows.ps1 so signing happens BEFORE cab packing and
+#   updater .sig generation (#333). OIDC federated via azure/login — no
+#   client secret. Account: agmsg-artifact-signing, East US, endpoint
+#   https://eus.codesigning.azure.net/, certificate profile agmsg-app-signing
+#   (Public Trust, CN=Koichi Fujikawa). App registration:
+#   agmsg-github-actions, federated for the main branch):
+#     AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID
+#   Auto-updater artifact signing (keypair already generated locally, see
+#   app/scripts/build-notarize.sh):
+#     TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#
+# Deliberately does NOT publish a GitHub Release — it only builds and uploads
+# artifacts to the Actions run. Cutting an actual release stays a human-gated
+# step (upload the artifacts + latest.json by hand), matching release.yml's
+# human-approval gates for the CLI.
+
+on:
+  push:
+    tags:
+      - 'app-v*.*.*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  # Guard: on a tag build (app-vX.Y.Z), the tag's version must match the app's
+  # own tauri.conf.json version before either platform builds. Without this a
+  # forgotten bump ships an installer whose in-app version disagrees with the
+  # release tag (the v0.1.4 pin-bump-only slip). Same idea as the CLI's
+  # release.yml tag<->VERSION guard. Skipped on workflow_dispatch (no tag).
+  verify-version:
+    name: verify version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert tag matches tauri.conf.json version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "Not a tag build (${GITHUB_REF_NAME}) — skipping version assertion."
+            exit 0
+          fi
+          tag_version="${GITHUB_REF_NAME#app-v}"
+          conf_version="$(jq -r '.version' app/src-tauri/tauri.conf.json)"
+          if [ "$tag_version" != "$conf_version" ]; then
+            echo "::error::Tag version ($tag_version) != app/src-tauri/tauri.conf.json version ($conf_version). Run scripts/release/bump-app-version.sh $tag_version and commit the bump before tagging." >&2
+            exit 1
+          fi
+          echo "OK: tag app-v$tag_version matches tauri.conf.json version $conf_version"
+
+  build-macos:
+    name: build (macos)
+    needs: verify-version
+    runs-on: macos-latest
+    env:
+      # Step-level `if:` can't reference `secrets` directly (GitHub rejects
+      # it at dispatch-validation time), so resolve existence into a
+      # job-level env var here and check that instead.
+      HAS_MACOS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 != '' }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Bundle pinned agmsg-core
+        run: app/scripts/bundle-core.sh
+        working-directory: .
+        shell: bash
+
+      - name: Import Developer ID certificate
+        if: ${{ env.HAS_MACOS_CERT == 'true' }}
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN=build.keychain
+          security create-keychain -p "" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > cert.p12
+          security import cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN"
+          rm cert.p12
+
+      - name: Build (sign + notarize)
+        env:
+          # No APPLE_SIGNING_IDENTITY secret exists (or is needed) — the env
+          # var would override tauri.conf.json's hardcoded identity with an
+          # empty string if set here, which is what broke the first run.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agmsg-app-macos
+          path: |
+            app/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            app/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            app/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: warn
+
+  build-windows:
+    name: build (windows)
+    needs: verify-version
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write  # OIDC federated auth for azure/login — no client secret
+    env:
+      HAS_AZURE_CREDS: ${{ secrets.AZURE_CLIENT_ID != '' }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Bundle pinned agmsg-core
+        run: app/scripts/bundle-core.sh
+        working-directory: .
+        shell: bash
+
+      # Login BEFORE the build: Authenticode signing now happens inside
+      # `tauri build` (bundle > windows > signCommand -> sign-windows.ps1), so
+      # the Azure CLI credential must already exist when the bundler runs.
+      # Signing binaries after the build (the old post-build signing step,
+      # since removed) mutated bytes the updater's minisign .sig had already been
+      # computed over — every 0.1.4 update failed signature verification, and
+      # the in-place pass also corrupted the MSI's embedded cabinet (#333).
+      - name: Azure login (OIDC)
+        if: ${{ env.HAS_AZURE_CREDS == 'true' }}
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install TrustedSigning PowerShell module
+        if: ${{ env.HAS_AZURE_CREDS == 'true' }}
+        shell: pwsh
+        run: Install-Module -Name TrustedSigning -Force -Scope CurrentUser -Repository PSGallery
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          # With Azure creds, sign each artifact during bundling: the app exe
+          # is signed before it is packed into the MSI cab / NSIS installer,
+          # and the updater .sig is generated over the final signed bytes.
+          # Feature branches build unsigned (federated identity trusts main
+          # only, so there is no credential to sign with).
+          if [ "$HAS_AZURE_CREDS" = "true" ]; then
+            sign_script="${GITHUB_WORKSPACE//\\//}/app/scripts/sign-windows.ps1"
+            config="$(jq -cn --arg cmd "pwsh -NoProfile -ExecutionPolicy Bypass -File $sign_script %1" '{bundle: {windows: {signCommand: $cmd}}}')"
+            pnpm tauri build --config "$config"
+          else
+            pnpm tauri build
+          fi
+
+      - name: Verify Authenticode signatures
+        if: ${{ env.HAS_AZURE_CREDS == 'true' }}
+        shell: pwsh
+        run: |
+          $shipped = Get-ChildItem -Path src-tauri/target/release/bundle/msi/*.msi, src-tauri/target/release/bundle/nsis/*.exe
+          if ($shipped.Count -eq 0) { Write-Error "no shipped artifacts found to verify"; exit 1 }
+          foreach ($f in $shipped) {
+            $sig = Get-AuthenticodeSignature -FilePath $f.FullName
+            if ($sig.Status -ne 'Valid') {
+              Write-Error "$($f.Name): Authenticode status $($sig.Status) — signCommand did not run or failed silently"
+              exit 1
+            }
+            Write-Output "OK: $($f.Name) signed by $($sig.SignerCertificate.Subject)"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agmsg-app-windows
+          path: |
+            app/src-tauri/target/release/bundle/msi/*.msi
+            app/src-tauri/target/release/bundle/msi/*.msi.sig
+            app/src-tauri/target/release/bundle/nsis/*.exe
+            app/src-tauri/target/release/bundle/nsis/*.exe.sig
+          if-no-files-found: warn

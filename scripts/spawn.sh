@@ -40,7 +40,13 @@ set -euo pipefail
 #                      `{cmd}` placeholder is replaced with the path to the
 #                      generated boot script (an executable file the terminal
 #                      should run). Overrides $AGMSG_TERMINAL and config
-#                      `spawn.terminal`.
+#                      `spawn.terminal`. This is the OS-terminal COMMAND axis.
+#   --terminal-driver <name>
+#                      force WHICH terminal axis places the member: tmux | herdr |
+#                      plain. A different axis from --terminal above: this selects
+#                      the driver, that is the OS-terminal command template. Bypasses
+#                      detection (otherwise $TMUX -> tmux -> herdr -> OS terminal).
+#                      Overrides $AGMSG_TERMINAL_DRIVER (the CLI flag wins).
 #   --no-wait          don't block on the readiness handshake; return as soon
 #                      as the agent is launched (fire-and-forget)
 #   --ready-timeout N  seconds to wait for readiness before giving up
@@ -49,6 +55,18 @@ set -euo pipefail
 #                      through to the CLI unchecked (the CLI rejects unknown
 #                      ids); the flag spelling comes from the type's manifest
 #                      `model_arg=`. Refused for a type with no model_arg.
+#   --fresh            force a brand-new session even when the role has a
+#                      resumable prior session. Without it, a type that supports
+#                      resume (manifest `resume_arg=`) is brought back into its
+#                      last session's context when that transcript still exists
+#                      (#339); with it, spawn always boots fresh.
+#
+# Spawn options: extra CLI args to always pass a given type's launched
+# binary (e.g. a default permission mode or sandbox policy), configured
+# per-type in a YAML file rather than hardcoded — see
+# scripts/lib/spawn-options.sh. File: $AGMSG_SPAWN_OPTIONS_FILE, else
+# ~/.agmsg/config/spawn_options.yaml. Optional; a missing file/section is a
+# no-op.
 #
 # Readiness: by default spawn blocks until the new agent's watcher attaches and
 # is receiving (it prints `status=ready ...`), so a leader can safely send work
@@ -70,6 +88,16 @@ source "$SCRIPT_DIR/lib/actas-lock.sh"
 source "$SCRIPT_DIR/lib/type-registry.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/spawn-options.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/role-session.sh"  # role->session record lookup (#339)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/boot-command.sh"  # shared boot-command construction (#339)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/terminal-registry.sh"  # terminals axis: placement via drivers
 
 die() { echo "spawn: $*" >&2; exit 1; }
 
@@ -117,9 +145,14 @@ TEAM=""
 TMUX_TARGET="pane"   # pane | window
 SPLIT="h"            # h | v
 TERMINAL_TMPL=""     # --terminal override (resolved below if empty)
+# --terminal-driver / AGMSG_TERMINAL_DRIVER: a NEW surface that forces WHICH terminal
+# axis places the member (tmux | herdr | plain), bypassing detection. Distinct from
+# --terminal / AGMSG_TERMINAL, which is the OS-terminal command TEMPLATE (unchanged).
+TERMINAL_DRIVER="${AGMSG_TERMINAL_DRIVER:-}"
 WAIT_READY=1         # block until the spawned agent's watcher attaches
 READY_TIMEOUT=90     # seconds to wait for readiness before giving up
 MODEL_ID=""          # --model: pass-through model id for the launched CLI
+FRESH=0              # --fresh: force a fresh session even if the role is resumable
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -133,15 +166,31 @@ while [ $# -gt 0 ]; do
     --window)  TMUX_TARGET="window"; shift ;;
     --split)   SPLIT="${2:?--split needs h|v}"; shift 2 ;;
     --terminal) TERMINAL_TMPL="${2:?--terminal needs a template}"; shift 2 ;;
+    --terminal-driver) TERMINAL_DRIVER="${2:?--terminal-driver needs a name (tmux|herdr|plain)}"; shift 2 ;;
     --no-wait) WAIT_READY=0; shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?--ready-timeout needs seconds}"; shift 2 ;;
     --model) MODEL_ID="${2:?--model needs a model id}"; shift 2 ;;
+    --fresh) FRESH=1; shift ;;
     *) die "unknown option: $1" ;;
   esac
 done
 
 case "$SPLIT" in h|v) ;; *) die "--split must be 'h' or 'v'" ;; esac
 case "$READY_TIMEOUT" in ''|*[!0-9]*) die "--ready-timeout must be a whole number of seconds" ;; esac
+
+# Validate the terminal-driver override HERE, before any state change: it is a
+# deterministic argument typo, so it must fail like --split does — before the role is
+# registered and a boot file is written (place_and_launch runs after both), and
+# before an unrelated "no team" error can mask it. The accepted set is EXACTLY the
+# public contract place_and_launch dispatches (tmux|herdr|plain), derived from the
+# same list — an external spawn-capable driver would pass a capability check here but
+# have no dispatch arm, so it must be rejected at parse time, not after the pre-join.
+# Generalizing to arbitrary spawn-capable drivers is the launcher→driver reroute's
+# scope. place_and_launch keeps its own guard as defence in depth.
+case "$TERMINAL_DRIVER" in
+  ''|tmux|herdr|plain) ;;
+  *) die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER); expected tmux, herdr or plain" ;;
+esac
 
 # Resolve the terminal override for the non-tmux path:
 #   --terminal  >  $AGMSG_TERMINAL  >  config spawn.terminal
@@ -164,21 +213,56 @@ if [ ! -d "$PROJECT" ]; then
   die "project path does not exist: $PROJECT"
 fi
 PROJECT="$(cd "$PROJECT" && pwd)"
+PROJECT="$(agmsg_normalize_project_path "$PROJECT")"
 
 # --- Resolve the launch method from the manifest ---
 # A non-empty `spawn=` launcher means this type runs via a Node launcher (e.g. an
 # external add-on); otherwise it is a direct-CLI launch. The `cli=` binary is
 # REQUIRED for direct-CLI types and OPTIONAL for node launchers (which resolve
 # their own runtime). No per-type case — all data-driven from the manifest.
+#
+# `cli=` is trusted manifest data (agmsg ships it, not runtime user input), so
+# it may be a single binary name OR a fixed command-line prefix of several
+# space-separated tokens — a subcommand and/or fixed flags a CLI needs before
+# its own options (e.g. `opencode run --interactive`, whose message is not a
+# top-level argument). Only the first word names the actual executable to
+# resolve/check; the rest are passed through as-is in the boot script below.
 SPAWN_LAUNCHER="$(agmsg_type_get "$AGENT_TYPE" spawn)"
 CLI_BIN="$(agmsg_type_get "$AGENT_TYPE" cli)"
+CLI_BIN_EXE="${CLI_BIN%% *}"
 CLI_PATH=""
 if [ -n "$CLI_BIN" ]; then
-  command -v "$CLI_BIN" >/dev/null 2>&1 \
-    || die "'$CLI_BIN' not found on PATH — install the ${AGENT_TYPE} CLI first"
-  CLI_PATH="$(command -v "$CLI_BIN")"
+  command -v "$CLI_BIN_EXE" >/dev/null 2>&1 \
+    || die "'$CLI_BIN_EXE' not found on PATH — install the ${AGENT_TYPE} CLI first"
+  CLI_PATH="$(command -v "$CLI_BIN_EXE")"
 elif [ -z "$SPAWN_LAUNCHER" ]; then
   die "agent type '$AGENT_TYPE' manifest declares neither a 'cli' binary nor a 'spawn' launcher"
+fi
+
+# --- Optional launch wrapper (manifest `spawn_wrapper=`) ---
+# A type may name a script, relative to its own driver directory, that the boot
+# script runs INSTEAD of the bare `cli=` executable. codex needs this (#1063):
+# its monitor bridge is entered through codex-shim.sh, which is installed on
+# purpose as an interactive-shell FUNCTION (PR #193) — so it is not exported
+# and does not exist in the non-interactive shell that runs a boot script,
+# where `command -v codex` resolves the REAL binary and the spawned seat starts
+# without --remote (measured 2026-09-06: the bridge then restarts every few
+# seconds against a thread it cannot own, and no message is ever delivered).
+# The function form stays; what spawn needs is a resolution that works from a
+# non-interactive shell, so the wrapper is addressed by its bundled path —
+# never through PATH or function lookup. A wrapper that is declared but
+# missing or not executable is a REFUSAL: launching the bare CLI instead would
+# recreate the bypass with no signal, and the symptom is a seat that looks
+# spawned and never says a word. The `cli=` check above still applies, because
+# the wrapper needs the real binary too.
+SPAWN_WRAPPER=""
+_spawn_wrapper_rel="$(agmsg_type_get "$AGENT_TYPE" spawn_wrapper)"
+if [ -n "$_spawn_wrapper_rel" ]; then
+  _spawn_type_dir="$(agmsg_type_dir "$AGENT_TYPE")" \
+    || die "agent type '$AGENT_TYPE' declares spawn_wrapper but its driver directory could not be resolved"
+  SPAWN_WRAPPER="$_spawn_type_dir/$_spawn_wrapper_rel"
+  [ -x "$SPAWN_WRAPPER" ] \
+    || die "agent type '$AGENT_TYPE' declares a launch wrapper that is missing or not executable: $SPAWN_WRAPPER — refusing to launch the bare '$CLI_BIN_EXE' in its place (bypassing the wrapper is exactly what it exists to prevent)"
 fi
 
 # --model is pass-through: the model id is handed to the CLI unchecked (the CLI
@@ -190,6 +274,52 @@ MODEL_ARG="$(agmsg_type_get "$AGENT_TYPE" model_arg)"
 if [ -n "$MODEL_ID" ] && [ -z "$MODEL_ARG" ]; then
   die "agent type '$AGENT_TYPE' does not support --model (no model_arg in its manifest)"
 fi
+
+# Note: prompt_arg= (some CLIs require the actas prompt as a named flag's value
+# rather than a bare positional, e.g. antigravity's --prompt-interactive) is
+# resolved inside agmsg_role_cli_args (lib/boot-command.sh) now, so it stays in
+# sync with the name/resume flags across spawn and resurrect-panes.sh.
+
+# Session display name (#339). A type whose manifest declares `name_arg=` (e.g.
+# claude-code's -n) is launched with `<name_arg> <team>-<agent>`, so the spawned
+# session is born named after its role: meaningful in the prompt box / resume
+# picker, and -- key for the tmux-resurrect hook -- recorded verbatim in the
+# argv resurrect saves. Types without the key skip naming (unchanged). The name
+# joins team and agent with a '-'; either half may itself contain '-', so the
+# role-session record stores the whole `name=` for reverse lookup rather than
+# splitting it apart.
+# SESSION_NAME (<team>-<agent>) and the resume-or-fresh decision (#339) are both
+# computed AFTER team resolution below (a project-resolved --team is only known
+# then). The role-identity CLI args (name_arg/resume_arg/prompt) are emitted by
+# agmsg_role_cli_args (lib/boot-command.sh), so the launch flag order stays in
+# sync with resurrect-panes.sh.
+
+# Session-identity env vars to strip from a spawned same-type child (issue #294).
+# A terminal launcher (tmux new-window/split-window, a new OS terminal) copies
+# the parent shell's exported environment verbatim. When the spawner is itself a
+# session of the SAME CLI type (e.g. a claude-code session running
+# `agmsg spawn claude-code <name>`), the child inherits the parent's
+# session-identity vars (claude-code's CLAUDE_CODE_SESSION_ID) and mistakes the
+# parent's session for its own — every turn then fails with an Authentication
+# error despite valid credentials. Unset them in the generated boot script so the
+# child starts with a clean identity.
+#
+# This reads a dedicated `spawn_unset_env=` manifest key, NOT `detect=`. `detect=`
+# names the vars whoami uses to recognize a live session of a type, but those are
+# not always session-identity vars: gemini's `detect=GEMINI_API_KEY ...` is a
+# CREDENTIAL, and unsetting it would break the spawned child's auth — the opposite
+# of the fix. `spawn_unset_env=` lists only vars that are safe (and necessary) to
+# drop on spawn; unset (the default) strips nothing.
+SPAWN_UNSET_VARS="$(agmsg_type_get "$AGENT_TYPE" spawn_unset_env)"
+
+# Extra CLI args for this type from the spawn options file (opt-in, see
+# scripts/lib/spawn-options.sh). Read line-by-line — never word-split — so a
+# value containing spaces stays a single token.
+SPAWN_OPT_TOKENS=()
+while IFS= read -r _spawn_opt_tok; do
+  SPAWN_OPT_TOKENS+=("$_spawn_opt_tok")
+done < <(agmsg_spawn_options_tokens "$AGENT_TYPE")
+
 # Resolve the node launcher path from the manifest (not hardcoded), if any.
 SPAWN_AGENT=""
 if [ -n "$SPAWN_LAUNCHER" ]; then
@@ -206,16 +336,17 @@ fi
 # registered for this project (any type). Zero or many → require --team.
 resolve_team() {
   [ -d "$TEAMS_DIR" ] || return 0
-  local config_file team_name cfg_sql proj_sql count_for_project
+  local config_file team_name cfg_sql project_sql_in count_for_project
   local found=""
   # Read each config via readfile() and compare with SQL string literals rather
   # than `.param set` bindings: the sqlite3 shell's dot-command tokenizer does
   # NOT honour SQL '' escaping, so a value containing a single quote (a project
   # path like /tmp/pro'j) breaks `.param set`. SQL string literals do honour ''.
-  proj_sql=$(printf '%s' "$PROJECT" | sed "s/'/''/g")
+  project_sql_in=$(agmsg_project_sql_in_list "$PROJECT")
   for config_file in "$TEAMS_DIR"/*/config.json; do
     [ -f "$config_file" ] || continue
-    cfg_sql=$(printf '%s' "$config_file" | sed "s/'/''/g")
+    # readfile() needs a native-Windows path — agmsg_sql_readfile_path converts and SQL-escapes it.
+    cfg_sql=$(agmsg_sql_readfile_path "$config_file")
     team_name=$(agmsg_sqlite_mem \
       "SELECT json_extract(CAST(readfile('$cfg_sql') AS TEXT), '\$.name');")
     # Does any agent in this team have a registration for PROJECT (any type)?
@@ -231,7 +362,7 @@ resolve_team() {
       )
       SELECT COUNT(*)
       FROM agents, json_each(agents.registrations) AS r
-      WHERE json_extract(r.value, '\$.project') = '$proj_sql';
+      WHERE json_extract(r.value, '\$.project') IN ($project_sql_in);
     ")
     if [ "${count_for_project:-0}" -gt 0 ]; then
       found="${found:+$found
@@ -253,20 +384,48 @@ if [ -z "$TEAM" ]; then
   fi
 fi
 
+# Role's session display name (#339): now that TEAM is final, join it to the
+# agent name. Emitted into the boot script when the type declares name_arg.
+SESSION_NAME="${TEAM}-${NAME}"
+
+# Resume-or-fresh decision (#339): resumable session id, or empty for a fresh
+# boot. All fail-open gates (force --fresh, no resume_arg, no record, stale/
+# missing transcript) live in agmsg_role_resume_uuid (lib/boot-command.sh), so
+# spawn and resurrect-panes.sh decide identically.
+RESUME_UUID="$(agmsg_role_resume_uuid "$AGENT_TYPE" "$TEAM" "$NAME" "$PROJECT" "$FRESH")"
+
 # --- Pre-flight: refuse if <name> is currently held by another live session ---
 # The child's actas flow would refuse anyway; failing here avoids launching a
 # process that immediately can't take its identity.
-STATE="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null || echo free)"
+# No `|| echo free`: a failed classification is not "the role is free to take".
+# `unknown:` refuses alongside `other:` — spawning into a role whose holder we
+# could not determine is how two agents end up on one seat, and the caller can
+# simply try again. The two get different words because the operator's next move
+# differs: drop it over there, versus find out why the lock cannot be read. (#983)
+STATE="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null)" || STATE="unknown:state_call_failed"
 case "$STATE" in
   other:*)
     die "actas '$NAME' in team '$TEAM' is held by a live session (${STATE#other:}); drop it there first" ;;
+  unknown:*)
+    die "actas '$NAME' in team '$TEAM': could not determine who holds it (${STATE#unknown:}); not spawning into an unverified seat" ;;
 esac
 
 # --- Pre-join so the child's actas just claims (no interactive team prompt) ---
 # PROJECT here is the explicit spawn target (--project / $PWD), which may not be
 # registered yet. Opt out of #92 pwd-resolution so join.sh registers exactly
 # this path rather than rewriting it to the spawning session's own project.
-AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PROJECT" >/dev/null
+# AGMSG_SELF_NAME=off: this join runs in THIS process on behalf of the member
+# being spawned, and join's boot-time self-naming resolves "self" through the
+# environment it runs in -- the caller's pane (#1096: the caller's pane was
+# renamed to the new member's label and key, and the new pane got neither).
+# The new member names its own pane from its own process (actas, the action
+# hook); the caller's pane is not this member's to name.
+AGMSG_SELF_NAME=off AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PROJECT" >/dev/null
+# The team the terminal driver labels the new pane with at creation (herdr
+# `terminal_spawn`, #1096). A shell variable, not exported: the driver runs in
+# this process, and the spawned CLI's environment must not carry it.
+# shellcheck disable=SC2034  # read by the driver function, sourced into this process
+AGMSG_SPAWN_TEAM="$TEAM"
 
 # --- Build the boot script the new agent will run ---
 # Rather than embed a multiply-escaped command string into each platform's
@@ -291,40 +450,144 @@ AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PR
 # its identity AND acts on the task in the same first turn. This is the only way
 # to hand a one-shot goal to a codex peer, which has no Monitor and so never
 # notices a message sent after it goes idle (see docs/codex-monitor-beta.md).
-CMD_NAME="$(basename "$SKILL_DIR")"
-ACTAS_PROMPT="/${CMD_NAME} actas ${NAME}"
+# Base actas prompt: `<cmd_prefix><cmd_name> actas <name>` (the cmd_prefix "/"
+# vs "$" per-CLI subtlety and the custom-install command name live in
+# agmsg_actas_prompt, lib/boot-command.sh, shared with resurrect-panes.sh). When
+# --boot-prompt gives a task, append it newline-separated so the agent claims its
+# identity AND acts on the task in the same first turn -- the only way to hand a
+# one-shot goal to a codex peer, which has no Monitor.
+ACTAS_PROMPT="$(agmsg_actas_prompt "$AGENT_TYPE" "$NAME")"
 if [ -n "$PROMPT" ]; then
   ACTAS_PROMPT="${ACTAS_PROMPT}
 ${PROMPT}"
+fi
+
+# Git Bash / MSYS path conversion rewrites exec args that look like absolute
+# POSIX paths when invoking a native Windows binary: a '/<cmd> actas <name>'
+# initial prompt reaches the CLI as 'C:/Program Files/Git/<cmd> actas <name>'
+# and the agent never sees a valid skill invocation. Exclude args starting
+# with the slash command from conversion. The exclusion is prefix-scoped on
+# purpose — MSYS_NO_PATHCONV=1 would also stop converting genuine POSIX-path
+# args (e.g. a node launcher's --project /e/...) that native CLIs rely on.
+# Only the '/' prefix is path-shaped; '$'-prefixed prompts (#283) are never
+# converted, and the variable is inert outside MSYS environments.
+# cmd_prefix/cmd_name are resolved exactly as agmsg_actas_prompt does
+# (lib/boot-command.sh) -- #344 moved that resolution into the helper, so the two
+# inputs the guard needs are recomputed here rather than read from now-absent vars.
+_msys_cmd_name="$(basename "$SKILL_DIR")"
+_msys_cmd_prefix="$(agmsg_type_get "$AGENT_TYPE" cmd_prefix)"
+[ -n "$_msys_cmd_prefix" ] || _msys_cmd_prefix="/"
+MSYS_GUARD=""
+if [ "$_msys_cmd_prefix" = "/" ]; then
+  MSYS_GUARD="MSYS2_ARG_CONV_EXCL=/${_msys_cmd_name} "
 fi
 
 BOOT_DIR="${TMPDIR:-/tmp}/agmsg-spawn"
 mkdir -p "$BOOT_DIR" 2>/dev/null || true
 # Best-effort GC of boot scripts left behind by spawns whose window was closed
 # before the script could remove itself (see the trailing rm below).
-find "$BOOT_DIR" -name 'boot-*.command' -type f -mtime +1 -delete 2>/dev/null || true
+# GC matches both the bare and the .command-suffixed form (see the rename below).
+find "$BOOT_DIR" -name 'boot-*' -type f -mtime +1 -delete 2>/dev/null || true
 BOOT="$(mktemp "$BOOT_DIR/boot-XXXXXX")"
-mv "$BOOT" "$BOOT.command"   # .command so macOS `open` runs it in Terminal
-BOOT="$BOOT.command"
+# macOS `open -a Terminal` (launch_macos_terminal) only runs a file as a shell
+# script if it ends in .command, so rename there. Every other launcher invokes
+# the script through bash (Linux/Windows Terminal) or runs it via its shebang
+# (tmux) — and on Windows the .command extension makes Explorer/psmux open it in
+# Notepad instead of executing it (#282), so keep the bare executable path.
+case "$(uname -s)" in
+  Darwin) mv "$BOOT" "$BOOT.command"; BOOT="$BOOT.command" ;;
+esac
+PLAIN_WITNESS_REQUEST="${BOOT}.plain-witness-request"
+PLAIN_WITNESS="${BOOT}.plain-witness"
 {
   echo '#!/usr/bin/env bash'
   printf 'cd %q || exit 1\n' "$PROJECT"
+  # A plain OS-terminal spawn has no parent-side handle. The child window is the
+  # first authority that can observe its emulator, controlling tty and owner
+  # process. Only the plain launcher creates the request file, so tmux/herdr
+  # boots do no extra work. Publish atomically before starting the CLI.
+  printf 'if [ -f %q ]; then\n' "$PLAIN_WITNESS_REQUEST"
+  echo '  case "${TERM_PROGRAM:-}" in iTerm.app) _agmsg_emulator=iterm ;; Apple_Terminal) _agmsg_emulator=terminal ;; *) _agmsg_emulator=unknown ;; esac'
+  echo '  _agmsg_tty="$(tty 2>/dev/null || true)"'
+  echo '  _agmsg_start="$(ps -o lstart= -p "$$" 2>/dev/null | sed '\''s/^ *//; s/ *$//'\'' | tr '\'' '\'' '\''_'\'')"'
+  printf '  _agmsg_witness_tmp=%q.$$\n' "$PLAIN_WITNESS"
+  echo '  { printf '\''%s\t%s\t%s\t%s'\'' "$_agmsg_emulator" "$_agmsg_tty" "$$" "$_agmsg_start"; echo; } > "$_agmsg_witness_tmp"'
+  printf '  mv "$_agmsg_witness_tmp" %q\n' "$PLAIN_WITNESS"
+  echo 'fi'
+  # Mark the launched session as spawn-born (#339): the CLI inherits this, so the
+  # actas flow knows the session is already named <team>-<agent> (name_arg) and
+  # suppresses the "rename this session" tip meant for hand-started sessions.
+  echo 'export AGMSG_SPAWNED=1'
+  # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
+  # An entry ending in `*` is a NAMESPACE: every exported variable whose name
+  # starts with that prefix is unset, enumerated from `env` at boot time, so a
+  # control variable the type's runtime adds later is cleared without anyone
+  # remembering to list it (#1063: the codex shim stack keeps all of its runtime
+  # controls under AGMSG_CODEX_*, and two review rounds each found one more name
+  # a deny-list had missed). Names without `*` are unset literally.
+  if [ -n "$SPAWN_UNSET_VARS" ]; then
+    _unset_literal=""
+    for _v in $SPAWN_UNSET_VARS; do
+      case "$_v" in
+        *\*)
+          # `sed -e … -e …`, not `sed -n`: the emitted line must not contain a
+          # bare ` -n `, which is also claude-code's name flag and is asserted
+          # absent from a codex boot script.
+          _prefix="${_v%\*}"
+          printf 'for _v in $(env | sed -e '"'"'/^%s[A-Za-z0-9_]*=/!d'"'"' -e '"'"'s/=.*//'"'"'); do unset "$_v"; done\n' "$_prefix"
+          ;;
+        *) _unset_literal="$_unset_literal $_v" ;;
+      esac
+    done
+    [ -n "$_unset_literal" ] && printf 'unset%s\n' "$_unset_literal"
+  fi
   if [ -n "$SPAWN_AGENT" ]; then
     # Node-launcher path: pass the universal agmsg context + the actas prompt.
     # Type-specific config is the launcher's own default/env, so core stays
-    # generic and names no add-on.
-    printf '%q %q \\\n' "$NODE_BIN" "$SPAWN_AGENT"
+    # generic and names no add-on. Spawn-options tokens (if any) land before
+    # --initial-input, same relative position as the direct-CLI path below.
+    printf '%s%q %q \\\n' "$MSYS_GUARD" "$NODE_BIN" "$SPAWN_AGENT"
     printf '  --name %q \\\n' "$NAME"
     printf '  --team %q \\\n' "$TEAM"
     printf '  --project %q \\\n' "$PROJECT"
+    for _tok in ${SPAWN_OPT_TOKENS[@]+"${SPAWN_OPT_TOKENS[@]}"}; do
+      printf '  %q \\\n' "$_tok"
+    done
     printf '  --initial-input %q\n' "$ACTAS_PROMPT"
   else
-    # Direct-CLI launch: `<cli> [<model_arg> <model_id>] "/<cmd> actas <name>"`.
-    # model_arg is the manifest flag spelling (not %q-quoted — a bare flag like
-    # --model or -m); the model id is quoted.
-    printf '%q' "$CLI_BIN"
+    # Direct-CLI launch:
+    # `<cli> [<resume_arg> <uuid>] [<model_arg> <model_id>] [spawn-options...] [<name_arg> <name>] [<prompt_arg>] "/<cmd> actas <name>"`.
+    # cli is emitted unquoted — it is trusted fixed-prefix manifest data (see
+    # above) that may itself be several tokens (e.g. `opencode run --interactive`).
+    # The resume head (#339) is emitted RIGHT AFTER the cli, before all other
+    # args: mandatory for a subcommand-shaped resume (codex `resume <id>`),
+    # harmless for a flag-shaped one (claude `--resume <id>`) -- see
+    # agmsg_role_resume_head. model_arg is the manifest flag spelling (bare, not
+    # %q-quoted); the model id and every spawn-options token are quoted. The
+    # role-identity tail (name/prompt_arg + the actas prompt) is emitted by
+    # agmsg_role_cli_args so its flag order matches resurrect-panes.sh.
+    # MSYS_GUARD (#336) prefixes the CLI line as a command-local env assignment;
+    # emitted with %s (not %q) so it stays an assignment, not a single token.
+    # With a manifest spawn_wrapper, the wrapper's bundled path replaces the
+    # cli's FIRST word (the executable); any fixed-prefix tokens after it are
+    # kept, since the wrapper forwards its argv to the real binary.
+    if [ -n "$SPAWN_WRAPPER" ]; then
+      printf '%s%q' "$MSYS_GUARD" "$SPAWN_WRAPPER"
+      case "$CLI_BIN" in *' '*) printf ' %s' "${CLI_BIN#* }" ;; esac
+    else
+      printf '%s%s' "$MSYS_GUARD" "$CLI_BIN"
+    fi
+    agmsg_role_resume_head "$AGENT_TYPE" "$RESUME_UUID"
     [ -n "$MODEL_ID" ] && printf ' %s %q' "$MODEL_ARG" "$MODEL_ID"
-    printf ' %q\n' "$ACTAS_PROMPT"
+    for _tok in ${SPAWN_OPT_TOKENS[@]+"${SPAWN_OPT_TOKENS[@]}"}; do
+      printf ' %q' "$_tok"
+    done
+    # Role-identity tail: name the session and pass the actas prompt. The actas
+    # prompt runs in BOTH fresh and resume cases -- resume restores context only,
+    # so the actas re-run re-establishes the watcher, the lock, and the active
+    # FROM (claim is idempotent per sid).
+    agmsg_role_cli_args "$AGENT_TYPE" "$SESSION_NAME" "$ACTAS_PROMPT"
+    printf '\n'
   fi
   echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits
   echo 'exec "${SHELL:-/bin/bash}" -i'
@@ -335,6 +598,116 @@ chmod +x "$BOOT"
 # Placement — every launcher just runs $BOOT.
 # ============================================================================
 
+# Write the placement record, and REPORT if the write itself failed. The record is
+# the ONLY authority peek / poke / despawn --force have over a spawned member, so a
+# live pane with no record (disk full, permission) is a distinct, worse state than a
+# clean spawn — not a success (full-head review). We cannot un-spawn the pane
+# that already exists, so we do not roll back; we set a flag the main flow turns into
+# `status=spawned-but-unrecorded` (a DIFFERENT word from `spawned`) with the pane id,
+# and a non-zero exit, so the operator knows a window exists it cannot address.
+SPAWN_UNRECORDED=0
+SPAWN_UNREC_REF=""
+# requirement 1 (herdr): set when the pane's pre-input readiness could NOT be verified
+# before the boot was typed (herdr process-info did not answer). A WARNING, distinct
+# from the post-input startup verdict — see the note where it is emitted.
+SPAWN_READINESS_UNVERIFIED=0
+_record_placement() {   # <terminal> <id> [fence=...]
+  local rec ref fence="${3:-}" row
+  # #1023 review: agmsg_spawn_path fails (empty, rc 1) when both an id-keyed
+  # and a legacy placement record exist for this pair. Checked explicitly,
+  # not left to an empty $rec landing on SPAWN_UNRECORDED via a write to ""
+  # that happens to fail for an unrelated-looking reason.
+  if ! rec="$(agmsg_spawn_path "$TEAM" "$NAME")"; then
+    SPAWN_UNRECORDED=1
+    SPAWN_UNREC_REF="$(agmsg_terminal_ref "$1" "$2")"
+    return 1
+  fi
+  ref="$(agmsg_terminal_ref "$1" "$2")"
+  mkdir -p "$(dirname "$rec")" 2>/dev/null || true
+  # Atomic (temp + rename via agmsg_write_atomic, available transitively through
+  # terminal-registry.sh): a failed write must NOT truncate an existing correct
+  # record — SPAWN_UNRECORDED is reported only AFTER the old record is proven
+  # intact, not on top of one this write just emptied. The helper adds the
+  # trailing newline, so the row is passed without one.
+  row="$(printf '%s\t%s\t%s' "$ref" "$PROJECT" "$AGENT_TYPE")"
+  [ -z "$fence" ] || row="${row}$(printf '\t%s' "$fence")"
+  if ! agmsg_write_atomic "$rec" "$row" 2>/dev/null; then
+    SPAWN_UNRECORDED=1
+    SPAWN_UNREC_REF="$ref"
+    return 1
+  fi
+  return 0
+}
+
+# Spawn-side naming: the SPAWNER names the pane's agent key right after creating
+# it, because the spawned SIDE cannot. The five self-naming call sites of
+# agmsg_terminal_name_self are all Claude-Code paths (SessionStart, watcher, turn
+# delivery, join, actas), so a codex member (reached through its bridge, not the
+# watcher) never names itself and stays keyless -- `team` reads that as
+# identity=mismatch. spawn holds team+name+pane and the driver is already loaded,
+# so it can name ANY type's pane here; the five self-naming paths stay as-is (the
+# seat re-asserts the same value later -- this only ensures it is set from the
+# start).
+#
+# Naming failure is NOT fatal, deliberately: peek / poke / despawn --force resolve
+# a member through the placement record's pane id, NOT this key (the herdr driver
+# reads its internal key nowhere else), so a keyless member is still fully
+# reachable -- only `team`'s consistency view shows the mismatch. Unlike an
+# unrecorded placement (which DOES break reachability, hence its exit 1), a naming
+# miss leaves a working, addressable pane. So we do not die: set a flag the main
+# flow turns into `status=spawned-but-unnamed` (a DIFFERENT word from `spawned`)
+# in place of the normal ready/launched-confirmed status line, and leave the pane up.
+SPAWN_UNNAMED=0
+SPAWN_UNNAMED_REF=""
+_name_pane() {   # <terminal> <id> -> 0 named (or terminal has no name capability); 1 naming FAILED
+  local term="$1" id="$2" caps mode="" obs key name_err="" attempt=1
+  # A terminal without the `name` capability (plain: no addressable pane) never
+  # could name -- that is not a failure. Skip it, the way agmsg_terminal_name_self
+  # does when the capability is absent.
+  caps="$(agmsg_terminal_get "$term" capabilities 2>/dev/null)" || caps=""
+  case " $caps " in *" name "*) ;; *) return 0 ;; esac
+  # Self-contained, exactly as agmsg_terminal_name_self does (registry:528): load
+  # the driver so terminal_name / terminal_team_observe are THIS terminal's ops,
+  # not whichever driver happened to be loaded last. Idempotent — the caller loaded
+  # it a few lines up; a failed (re)load is a real failure to name.
+  agmsg_terminal_load "$term" || return 1
+  # AGMSG_TERMINAL_NAMING=off suppresses the visible LABEL only; the key is
+  # addressing and is set regardless -- the same policy agmsg_terminal_name_self
+  # hands the driver.
+  case "${AGMSG_TERMINAL_NAMING:-}" in off) mode=key ;; esac
+  # Record the ref (same <terminal>:<id> form _record_placement writes) so the
+  # caller's status line can name the pane on any failure below; only READ when
+  # SPAWN_UNNAMED gets set, so setting it before the attempt is harmless.
+  SPAWN_UNNAMED_REF="$(agmsg_terminal_ref "$term" "$id" 2>/dev/null || printf '%s:%s' "$term" "$id")"
+  # Herdr cannot name an agent until its screen detector has recognized the CLI.
+  # Measured on herdr 0.9.0 on this host (2026-09-12), from `pane run` through
+  # the first successful `agent rename`: Claude was 2.07--2.88 s (6/6), Codex
+  # was 2.57--5.11 s (14/14). Retry only the measured transient reason, for a
+  # rounded 10-second bound (11 attempts including the immediate one). Other
+  # failures -- a key collision or a missing hash tool, for example -- return
+  # immediately instead of making every naming failure pay the bound.
+  while :; do
+    name_err="$(terminal_name "$id" "$TEAM" "$NAME" "$mode" 2>&1 >/dev/null)" && break
+    [ "$term" = herdr ] || return 1
+    case "$name_err" in *agent_not_found*) ;; *) return 1 ;; esac
+    [ "$attempt" -lt 11 ] || return 1
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  # Write, then READ BACK -- do not claim named on the write's exit status alone
+  # (the team --fix shape). terminal_team_observe prints activity\tlabel\tkey\ttitle;
+  # field 3 is the key. `agmsg_observation_has_value` (terminal-registry.sh) is the
+  # single judge of "is this a real observed value or a reason marker": it rejects
+  # empty and every non-value prefix the drivers can emit
+  # (_AGMSG_OBSERVATION_NON_VALUE_PREFIXES = unknown:/n/a:/absent:), so a driver
+  # that decisively reports the key ABSENT (absent:*, added by the herdr/tmux
+  # observe fix) is caught here without this call site hand-listing the vocabulary.
+  obs="$(terminal_team_observe "$id" 2>/dev/null)" || return 1
+  key="$(printf '%s\n' "$obs" | awk -F'\t' 'NR==1{print $3}')"
+  agmsg_observation_has_value "$key" || return 1
+  return 0
+}
+
 launch_in_tmux() {
   # $TMUX is set (we are inside a tmux pane), but the `tmux` client binary
   # still has to be on PATH for split-window/new-window to work. In a
@@ -343,125 +716,165 @@ launch_in_tmux() {
   # aborting on a raw "tmux: command not found", and don't silently fall back
   # to an OS terminal — opening a separate window while inside tmux is more
   # confusing than an explicit error.
+  # $TMUX is set but the `tmux` client still has to be on PATH. Keep this spawn-level
+  # pre-check with its clear message (and its "do not fall back to an OS terminal"
+  # intent) rather than letting the driver abort on a raw "tmux: command not found".
   command -v tmux >/dev/null 2>&1 \
     || die "\$TMUX is set but the tmux binary is not on PATH; add it to PATH, or run outside tmux to use the OS-terminal path"
 
-  # Name the window/pane after the agent rather than letting tmux fall back to
-  # the boot script's filename (boot-XXXXXX). `automatic-rename off` keeps the
-  # name from being clobbered once the boot script runs the CLI / drops to a
-  # shell.
-  local target_id
-  if [ "$TMUX_TARGET" = "window" ]; then
-    target_id="$(tmux new-window -P -F '#{window_id}' -n "$NAME" -c "$PROJECT" "$BOOT")"
-    tmux set-window-option -t "$target_id" automatic-rename off 2>/dev/null || true
-  else
-    local dir="-h"; [ "$SPLIT" = "v" ] && dir="-v"
-    target_id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$PROJECT" "$BOOT")"
-    tmux select-pane -t "$target_id" -T "$NAME" 2>/dev/null || true
-  fi
-  # Record placement so `despawn --force` can tear this member down even if its
-  # watcher later can't respond to ctrl:despawn. tmux ids are self-describing:
-  # %N = pane (kill-pane), @N = window (kill-window). See #109.
-  printf '%s\t%s\t%s\n' "$target_id" "$PROJECT" "$AGENT_TYPE" \
-    > "$(agmsg_spawn_path "$TEAM" "$NAME")" 2>/dev/null || true
-}
-
-launch_macos_terminal() {
-  # `open -a` is a launch, not an AppleEvent, so it does not trip the
-  # Automation (TCC) consent prompts that `osascript ... do script` does.
-  local app="${1:-Terminal}"
-  case "$app" in
-    iterm|iterm2|iTerm|iTerm2) open -a iTerm "$BOOT" ;;
-    *)                         open -a Terminal "$BOOT" ;;
+  # On Windows (psmux), tmux launches processes via Windows APIs that do not process
+  # shebang lines; an extensionless boot script is accepted but never executed
+  # (#335). Wrap with `bash -l` — same pattern as launch_windows_terminal.
+  local -a tmux_boot=("$BOOT")
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) tmux_boot=(bash -l "$BOOT") ;;
   esac
-}
 
-launch_linux_terminal() {
-  local term
-  for term in x-terminal-emulator gnome-terminal konsole xfce4-terminal xterm; do
-    command -v "$term" >/dev/null 2>&1 || continue
-    case "$term" in
-      gnome-terminal) gnome-terminal --working-directory="$PROJECT" -- "$BOOT" ;;
-      konsole)        konsole --workdir "$PROJECT" -e "$BOOT" ;;
-      *)              "$term" -e "$BOOT" ;;
-    esac
-    return 0
-  done
-  die "no supported terminal emulator found (tried gnome-terminal/konsole/xterm/...); set AGMSG_TERMINAL or run inside tmux"
-}
-
-launch_windows_terminal() {
-  if command -v wt.exe >/dev/null 2>&1; then
-    wt.exe new-tab bash -l "$BOOT"
-    return 0
+  # Place THROUGH the tmux driver (the terminals axis). target fully specifies the
+  # placement: a window, or a horizontal/vertical split. The driver names the
+  # window/pane after the agent and turns automatic-rename off.
+  local target
+  if [ "$TMUX_TARGET" = "window" ]; then target=window
+  elif [ "$SPLIT" = "v" ];        then target=pane-v
+  else                                 target=pane-h
   fi
-  if command -v wt >/dev/null 2>&1; then
-    wt new-tab bash -l "$BOOT"
-    return 0
-  fi
-  die "Windows Terminal (wt) not found; set AGMSG_TERMINAL or run inside tmux"
+  agmsg_terminal_load tmux || die "could not load the tmux terminal driver"
+  local target_id
+  target_id="$(terminal_spawn "$NAME" "$PROJECT" "$target" "${tmux_boot[@]}")" \
+    || die "tmux placement failed"
+
+  # Record placement as <terminal>:<id> so despawn --force (and peek/poke) read the
+  # terminal from the record; despawn still tolerates the pre-axis bare %N/@N. See #109.
+  _record_placement tmux "$target_id" || true
+
+  # Name the pane's agent key from the spawner (see _name_pane's note): the spawned
+  # side's self-naming paths are Claude-Code-only, so a codex member would otherwise
+  # stay keyless. Non-fatal — a miss becomes status=spawned-but-unnamed, not a failure.
+  _name_pane tmux "$target_id" || SPAWN_UNNAMED=1
 }
 
-launch_with_template() {
-  # User-supplied terminal command. `{cmd}` is replaced with the path to the
-  # boot script (an executable file); if there is no placeholder, the path is
-  # appended. Quote it so a TMPDIR with spaces still works.
-  local q_boot; q_boot="$(printf '%q' "$BOOT")"
-  local cmd
-  if [[ "$TERMINAL_TMPL" == *"{cmd}"* ]]; then
-    cmd="${TERMINAL_TMPL//\{cmd\}/$q_boot}"
+# The OS-terminal launchers (macOS `open -g -a`, Linux emulators, Windows Terminal,
+# and the `{cmd}` template) now live in the PLAIN terminal driver
+# (drivers/terminals/plain/ops.sh); _launch_os_terminal below routes through it, so
+# the plain driver is a real production caller and the OS-terminal path has one
+# implementation, not two.
+
+is_herdr_env() {
+  [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] \
+    && command -v herdr >/dev/null 2>&1
+}
+
+launch_in_herdr() {
+  # --window needs a workspace. Keep spawn's fallback UX (warn + split) rather than
+  # the driver's hard "window target needs HERDR_WORKSPACE_ID" error: downgrade the
+  # target BEFORE calling the driver.
+  if [ "$TMUX_TARGET" = "window" ] && [ -z "${HERDR_WORKSPACE_ID:-}" ]; then
+    echo "spawn: --window requested but \$HERDR_WORKSPACE_ID is not set; falling back to split" >&2
+    TMUX_TARGET="pane"
+  fi
+  local target
+  if [ "$TMUX_TARGET" = "window" ]; then target=window
+  elif [ "$SPLIT" = "v" ];        then target=pane-v
+  else                                 target=pane-h
+  fi
+  # Place THROUGH the herdr driver: it splits/creates, extracts the new pane id (with
+  # the pane-id grammar guard, so a malformed/partial response fails closed), renames
+  # and runs the boot, and prints the new pane id.
+  agmsg_terminal_load herdr || die "could not load the herdr terminal driver"
+  # terminal_spawn carries requirement 1's THREE outcomes in its exit code: 0 typed and
+  # the pre-input state verified ready; 4 typed but that state UNVERIFIED; 3 NOT typed
+  # because the pane never reached its prompt. Capture the code and branch — a bare
+  # `|| die` would turn arm 4 (a success with a caveat) into a spurious failure.
+  local new_id rc=0
+  new_id="$(terminal_spawn "$NAME" "$PROJECT" "$target" "$BOOT")" || rc=$?
+  case "$rc" in
+    0) : ;;
+    4) SPAWN_READINESS_UNVERIFIED=1 ;;
+    3) die "herdr pane was not ready for input, so '${NAME}' was not launched (see the reason above)" ;;
+    *) die "herdr placement failed (split/tab create returned no usable pane id)" ;;
+  esac
+  # Record placement as <terminal>:<id>. despawn reads the terminal from the record
+  # (herdr pane ids contain ':', preserved by the first-colon ref split).
+  _record_placement herdr "$new_id" || true
+  # Name the pane's agent key from the spawner (see _name_pane). This is the case
+  # that matters: a codex member is reached through its bridge, not the watcher, so
+  # without this it stays keyless and `team` reports identity=mismatch. Non-fatal.
+  _name_pane herdr "$new_id" || SPAWN_UNNAMED=1
+}
+
+_launch_os_terminal() {
+  # Place THROUGH the plain terminal driver (2026-09-02: the driver claims
+  # capabilities=spawn despawn, so production must actually go through it, not a
+  # duplicate). plain's terminal_spawn does the OS-terminal launch — a {cmd} template
+  # on any OS, else the current macOS terminal (`open -g -a`) / a Linux emulator /
+  # Windows Terminal, with the same headless + platform guards it moved from here —
+  # and returns the child window's emulator-qualified tty after its boot handshake.
+  # It reads AGMSG_TERMINAL as the template / macOS app hint; hand it the resolved value.
+  agmsg_terminal_load plain || die "could not load the plain terminal driver"
+  # Request the child's one-shot witness before launching. A window that cannot
+  # report it is live but unrecordable, so the driver fails loudly instead of
+  # returning the legacy '-' sentinel as a false success.
+  : > "$PLAIN_WITNESS_REQUEST" \
+    || die "could not create the plain terminal spawn witness request"
+  local _plain_id _emulator _tty _pid _start _fence
+  _plain_id="$(AGMSG_TERMINAL="$TERMINAL_TMPL" AGMSG_PLAIN_SPAWN_WITNESS="$PLAIN_WITNESS" terminal_spawn "$NAME" "$PROJECT" - "$BOOT")" \
+    || die "could not open an OS terminal (see the reason above); run inside tmux/herdr or set a {cmd} AGMSG_TERMINAL"
+  terminal_id_ok "$_plain_id" && [ "$_plain_id" != '-' ] \
+    || die "the plain terminal driver returned an unexpected placement id ('${_plain_id}') — expected an emulator-qualified tty"
+  IFS=$'\t' read -r _emulator _tty _pid _start < "$PLAIN_WITNESS"
+  _fence="fence=${_emulator}:tty=${_tty},boot=${_pid},boot_start=${_start}"
+  _record_placement plain "$_plain_id" "$_fence" || true
+  rm -f "$PLAIN_WITNESS_REQUEST" "$PLAIN_WITNESS" 2>/dev/null || true
+  # "launched", NOT "spawned": every placement line below states only that the
+  # pane was created and the boot typed into it — a PLACEMENT fact. It is deliberately
+  # not the word "spawned", because whether the agent actually STARTED is answered
+  # later and separately by the status= line (status=ready = a positive observation
+  # that its watcher attached; status=launched-unconfirmed = a type with no handshake,
+  # so startup cannot be confirmed here). Observed live: "spawned" printed while the agent had
+  # not started (a shell prompt ate the first keystroke of the boot command).
+  # The message keeps the two shapes the tests and users know: a custom template vs a
+  # plain new window.
+  if [ -n "$TERMINAL_TMPL" ] && is_terminal_template "$TERMINAL_TMPL"; then
+    echo "launched ${AGENT_TYPE} '${NAME}' via custom terminal template"
   else
-    cmd="$TERMINAL_TMPL $q_boot"
+    echo "launched ${AGENT_TYPE} '${NAME}' in a new terminal window"
   fi
-  bash -c "$cmd"
 }
 
 place_and_launch() {
+  # --terminal-driver / AGMSG_TERMINAL_DRIVER forces WHICH axis places the member,
+  # bypassing detection. It is a spawn/name PREFERENCE on a NEW surface
+  # (2026-08-31); tmux/herdr each still require their own environment (a forced tmux
+  # split needs to be inside tmux, a forced herdr split needs HERDR_PANE_ID), so an
+  # impossible force fails in the launcher with that launcher's own error.
+  if [ -n "$TERMINAL_DRIVER" ]; then
+    agmsg_terminal_dir "$TERMINAL_DRIVER" >/dev/null 2>&1 \
+      || die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER); expected tmux, herdr or plain"
+    case "$TERMINAL_DRIVER" in
+      tmux)  launch_in_tmux;      echo "launched ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})" ;;
+      herdr) launch_in_herdr;     echo "launched ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})" ;;
+      plain) _launch_os_terminal ;;
+      *)     die "terminal driver '$TERMINAL_DRIVER' cannot place a spawn (no spawn capability)" ;;
+    esac
+    return 0
+  fi
+
+  # No override: PRESERVE the detection order — $TMUX (tmux-inside-herdr backward
+  # compat) → herdr → OS terminal. The nested spawn-placement decision is deferred to
+  # the live matrix, so this does NOT switch to the registry's herdr-first resolver.
   if [ -n "${TMUX:-}" ]; then
     launch_in_tmux
-    echo "spawned ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})"
+    echo "launched ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})"
     return 0
   fi
 
-  # Non-tmux: open an OS terminal. A {cmd} template wins outright on any OS.
-  if [ -n "$TERMINAL_TMPL" ] && is_terminal_template "$TERMINAL_TMPL"; then
-    launch_with_template
-    echo "spawned ${AGENT_TYPE} '${NAME}' via custom terminal template"
+  if is_herdr_env; then
+    launch_in_herdr
+    echo "launched ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})"
     return 0
   fi
 
-  case "$(uname -s)" in
-    Darwin)
-      # Default to the terminal the user is *currently* in, so spawning from
-      # iTerm opens iTerm rather than jarringly launching Terminal.app. A bare
-      # override (no {cmd}) is an explicit app-name hint and wins, e.g. "iterm".
-      local mac_app="${TERMINAL_TMPL:-}"
-      if [ -z "$mac_app" ]; then
-        case "${TERM_PROGRAM:-}" in
-          iTerm.app) mac_app="iterm" ;;
-          *)         mac_app="Terminal" ;;
-        esac
-      fi
-      launch_macos_terminal "$mac_app" ;;
-    Linux)
-      if [ -n "$TERMINAL_TMPL" ]; then
-        die "AGMSG_TERMINAL/spawn.terminal must contain a {cmd} placeholder on Linux (got: $TERMINAL_TMPL)"
-      fi
-      # No display → cannot open a GUI terminal, and there is no tmux to fall
-      # back to. The agent CLI needs an interactive terminal, so error.
-      if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-        die "headless environment: no tmux session and no display available — cannot open a terminal for ${CLI_BIN}. Run inside tmux, or set a {cmd} terminal template via AGMSG_TERMINAL."
-      fi
-      launch_linux_terminal ;;
-    MINGW*|MSYS*|CYGWIN*)
-      if [ -n "$TERMINAL_TMPL" ]; then
-        die "AGMSG_TERMINAL/spawn.terminal must contain a {cmd} placeholder on Windows (got: $TERMINAL_TMPL)"
-      fi
-      launch_windows_terminal ;;
-    *)
-      die "unsupported platform '$(uname -s)' for the non-tmux path; run inside tmux or set a {cmd} terminal template via AGMSG_TERMINAL." ;;
-  esac
-  echo "spawned ${AGENT_TYPE} '${NAME}' in a new terminal window"
+  _launch_os_terminal
 }
 
 # Readiness handshake (#108). The spawned agent's actas flow starts its watcher
@@ -469,15 +882,79 @@ place_and_launch() {
 # receiving. Block until that appears so the leader doesn't send a job into the
 # cold-start window (before the watcher attaches) and lose it.
 #
-# Types with `monitor=no` do not produce a spawn-awaitable readiness sentinel, so
-# skip the wait. That covers types with no Monitor at all (codex) AND types whose
-# watcher attaches via the agent's own launch rather than a spawn-time sentinel
-# (grok-build, whose monitor mode is real but not awaitable here) — receive there
-# is poll-based or agent-launched anyway.
-READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")"
-if [ "$(agmsg_type_get "$AGENT_TYPE" monitor)" = "no" ] && [ "$WAIT_READY" = "1" ]; then
+# Types with `readiness_sentinel=no` do not produce a spawn-awaitable readiness
+# sentinel, so skip the wait. That covers types with no Monitor at all (codex)
+# AND types whose watcher attaches via the agent's own launch rather than a
+# spawn-time sentinel (grok-build, whose monitor mode is real but not awaitable
+# here) — receive there is poll-based or agent-launched anyway.
+#
+# NOT named `monitor=`: that name reads as a statement about delivery-mode
+# support and collided with `delivery_modes=monitor` in agents' own reports
+# (#1214) — a type can carry `delivery_modes=monitor` (a real, settable mode)
+# and `readiness_sentinel=no` (no spawn-time handshake to await) at once, and
+# `delivery_modes` alone answers "can this type be set to monitor mode".
+# Backward compat: an already-installed type.conf from before this rename
+# still carries only the bare `monitor=` key. readiness_sentinel
+# reading empty must not silently behave as "yes" (wait) for such a manifest
+# -- fall back to the legacy key so an old no-handshake manifest (codex)
+# still skips the wait instead of timing out. A manifest carrying BOTH (the
+# migration window) prefers the new key.
+READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" readiness_sentinel 2>/dev/null || true)"
+[ -n "$READINESS_SENTINEL" ] || READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" monitor 2>/dev/null || true)"
+
+# #1023 review: agmsg_ready_path fails (empty, rc 1) when both an id-keyed
+# and a legacy ready sentinel exist for this pair. Checked explicitly here,
+# not left to an empty READY_PATH falling into the wait loop below and
+# reporting a plain status=timeout -- true, but for a reason that timeout
+# does not name (the loop below can never see a sentinel land at "").
+READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")" \
+  || die "'$NAME' in team '$TEAM': readiness sentinel path is ambiguous (both an id-keyed and a legacy sentinel exist); not spawning until the stale one is removed"
+SKIPPED_READINESS_BY_TYPE=0
+SKIPPED_READINESS_BY_MODE=0
+DELIVERY_MODE=""
+if [ "$READINESS_SENTINEL" = "no" ] && [ "$WAIT_READY" = "1" ]; then
   WAIT_READY=0
+  SKIPPED_READINESS_BY_TYPE=1
   echo "spawn: '$AGENT_TYPE' has no spawn readiness handshake — skipping readiness wait (--no-wait implied)" >&2
+fi
+
+# A readiness sentinel is written by the project's monitor delivery watcher, not
+# by the CLI itself. A monitor-capable type in a project configured for turn or
+# off therefore has no sentinel to await. Ask the existing status command for
+# the per-project mode and skip the impossible wait, preserving the distinction
+# from a type that has no handshake at all. If status cannot be read or its output
+# is not recognized, keep waiting: unreadable state is not evidence of mode=off.
+if [ "$WAIT_READY" = "1" ] && [ "$SKIPPED_READINESS_BY_TYPE" = "0" ]; then
+  _delivery_mode_line=""
+  _delivery_status=0
+  if ! _delivery_mode_line="$("$SCRIPT_DIR/delivery.sh" status "$AGENT_TYPE" "$PROJECT" 2>/dev/null)"; then
+    _delivery_status=1
+  fi
+  _delivery_mode_line="$(printf '%s\n' "$_delivery_mode_line" | sed -n '1p')"
+  if [ "$_delivery_status" -ne 0 ]; then
+    DELIVERY_MODE=unknown
+    echo "spawn: could not determine project delivery mode for '$AGENT_TYPE'; delivery status failed — keeping readiness wait" >&2
+  else
+    case "$_delivery_mode_line" in
+      "mode: monitor") DELIVERY_MODE=monitor ;;
+      "mode: both")    DELIVERY_MODE=both ;;
+      "mode: turn")    DELIVERY_MODE=turn ;;
+      "mode: off (no agmsg delivery hooks installed for this project)") DELIVERY_MODE=off ;;
+      *)               DELIVERY_MODE=unknown ;;
+    esac
+    if [ "$DELIVERY_MODE" = "unknown" ]; then
+      echo "spawn: could not determine project delivery mode for '$AGENT_TYPE'; status output was not recognized — keeping readiness wait" >&2
+    fi
+  fi
+  case "$DELIVERY_MODE" in
+    monitor|both) ;;
+    turn|off)
+      WAIT_READY=0
+      SKIPPED_READINESS_BY_MODE=1
+      echo "spawn: project delivery mode is '$DELIVERY_MODE' for '$AGENT_TYPE'; no readiness sentinel will arrive — skipping readiness wait (--no-wait implied)" >&2
+      ;;
+    unknown) ;;
+  esac
 fi
 
 # Clear any stale sentinel before launching so we only observe THIS spawn's
@@ -485,6 +962,42 @@ fi
 [ "$WAIT_READY" = "1" ] && rm -f "$READY_PATH" 2>/dev/null || true
 
 place_and_launch
+
+# requirement 1 arm 3 (herdr): the boot was typed, but the pane's pre-input readiness
+# could not be verified. Say so with the BEFORE-typing reason — deliberately worded
+# apart from the AFTER-typing "launched-unconfirmed" below, so an operator can tell
+# which check was blind (live measurement). By design this is only a WARNING: the final
+# startup verdict is still the post-input one — a watcher that then attaches makes the
+# status ready, and a monitor=no type still reports launched-unconfirmed on its own.
+if [ "$SPAWN_READINESS_UNVERIFIED" = "1" ]; then
+  echo "spawn: could not verify '${NAME}'s pane was at its shell prompt BEFORE the boot was typed (herdr process-info did not answer). If the agent does not appear, a startup shell prompt may have eaten the first keystroke — read the pane. This is the before-typing check; the startup confirmation below is separate." >&2
+fi
+
+# The pane was placed. If its placement record could not be written, the member is
+# running but unaddressable by peek/poke/despawn --force — report that distinctly and
+# fail, rather than let a normal `status=ready` imply everything is fine.
+if [ "$SPAWN_UNRECORDED" = "1" ]; then
+  echo "status=spawned-but-unrecorded name=${NAME} team=${TEAM} ref=${SPAWN_UNREC_REF}"
+  echo "spawn: '${NAME}' launched, but its placement record could not be written (disk full or a permission error) — peek/poke/despawn --force cannot reach it. The pane is ${SPAWN_UNREC_REF}; close it manually if needed." >&2
+  exit 1
+fi
+
+# Spawn-side naming: the pane was placed and recorded, but its terminal agent key
+# could not be set/confirmed. The member is still fully reachable — peek/poke/despawn
+# --force resolve it through the placement record, not this key — so this is NOT a
+# failed spawn (unlike the unrecorded case above, which loses the member). But it is
+# NOT ready/launched-confirmed either (the rule: do not report ready when the name did not
+# take). Reported by the helper below, and — crucially — only AFTER readiness is
+# settled: naming and readiness are INDEPENDENT facts (a seat can be receiving yet
+# unnamed), so bailing out before the wait would hide whether the watcher attached.
+# Distinct word (spawned-but-unnamed, never ready), exit 0; `team` shows the identity
+# mismatch until self-naming or `team --fix` sets the key. $1 carries the readiness
+# detail (e.g. after=Ns) when there is one.
+_emit_spawned_but_unnamed() {
+  echo "status=spawned-but-unnamed name=${NAME} team=${TEAM} ref=${SPAWN_UNNAMED_REF}${1:+ $1}"
+  echo "spawn: '${NAME}' launched and recorded, but its terminal agent key could not be set (the driver's rename/observe did not confirm it). The seat IS reachable — peek/poke/despawn --force work via the placement record; only \`team\` identity is affected. It self-heals when the agent next names itself, or run \`team --fix\`." >&2
+  exit 0
+}
 
 if [ "$WAIT_READY" = "1" ]; then
   waited=0
@@ -497,5 +1010,35 @@ if [ "$WAIT_READY" = "1" ]; then
     sleep 1
     waited=$((waited + 1))
   done
+  # Ready confirmed. Now report the naming result — the two are independent, so a
+  # seat that IS receiving but could not be named reports spawned-but-unnamed, not ready.
+  [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed "after=${waited}s"
   echo "status=ready name=${NAME} team=${TEAM} after=${waited}s"
+elif [ "$SKIPPED_READINESS_BY_MODE" = "1" ]; then
+  # The type can produce a sentinel, but this project has no active monitor
+  # delivery (turn/off/unrecognized). Startup is therefore unconfirmed for this
+  # invocation; distinguish the configuration cause from a type-level absence.
+  [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed
+  echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-monitor-delivery"
+  echo "spawn: '${NAME}' was launched, but project delivery mode '$DELIVERY_MODE' has no readiness watcher. Startup is UNCONFIRMED; enable monitor delivery or read the pane." >&2
+elif [ "$SKIPPED_READINESS_BY_TYPE" = "1" ]; then
+  # monitor=no: there is no readiness handshake, so spawn CANNOT confirm the agent
+  # actually started — only that its boot was placed/typed. Do not let the
+  # "spawned in <terminal>" placement log stand as success: a boot that never ran
+  # (measured — a shell that prompts at startup eats the FIRST keystroke of the boot
+  # command, so `/var/…/boot` becomes `var/…/boot: no such file or directory`) would
+  # otherwise read as a clean spawn. Report startup as UNCONFIRMED, distinctly.
+  # (No readiness handshake to wait on, so the naming result is reported now.)
+  [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed
+  echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-readiness-handshake"
+  echo "spawn: '${NAME}' was launched, but this type has no readiness handshake so its STARTUP IS UNCONFIRMED. If it does not appear, read its pane — a shell that prompts at startup (e.g. an update prompt) can eat the first keystroke of the boot command, and the failure then looks like a slow start." >&2
+else
+  # Explicit --no-wait (WAIT_READY cleared by the flag, not by a monitor=no type): the
+  # caller opted OUT of the readiness handshake, so — exactly like monitor=no — startup
+  # is not confirmed here, only that the boot was placed/typed. Both no-confirmation
+  # paths report launched-unconfirmed, so this arm must exist too; a distinct note keeps
+  # the two reasons legible. Silence (a bare `launched …` at rc 0) would imply success.
+  [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed
+  echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-wait"
+  echo "spawn: '${NAME}' was launched with --no-wait, so its STARTUP IS UNCONFIRMED (the readiness handshake was skipped by request). If it does not appear, read its pane." >&2
 fi

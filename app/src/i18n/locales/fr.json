@@ -1,0 +1,232 @@
+{
+  "common": {
+    "cancel": "Annuler",
+    "browse": "Parcourir…",
+    "nameLabel": "Nom",
+    "projectDirLabel": "Répertoire du projet",
+    "close": "Fermer"
+  },
+  "startupError": {
+    "installing": "Installation d'agmsg…",
+    "installFailed": "Impossible d'installer agmsg : {{error}}",
+    "loginShellFailed": "Impossible de déterminer votre shell de connexion : {{error}}",
+    "loadTeamsFailed": "Impossible de charger les équipes agmsg : {{error}}. agmsg est-il installé dans ~/.agents/skills/agmsg ?",
+    "coreOutdated": "Ton CLI agmsg est obsolète ({{installed}} < {{pinned}}) et pourrait ne pas fonctionner correctement avec cette app.",
+    "versionUnknown": "inconnue",
+    "updateNow": "Mettre à jour",
+    "updating": "Mise à jour d'agmsg…",
+    "updateFailed": "Impossible de mettre à jour agmsg : {{error}}",
+    "updateSucceeded": "CLI agmsg mis à jour vers {{version}}.",
+    "dismiss": "Ignorer"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "collapse": "Réduire la barre latérale",
+    "expand": "Développer la barre latérale",
+    "newMenu": {
+      "trigger": "＋ Nouveau ▾",
+      "team": "Équipe…",
+      "agent": "Agent…"
+    },
+    "team": {
+      "title": "Équipe",
+      "new": "Nouvelle équipe"
+    },
+    "title": "Agents",
+    "newAgent": "Nouvel agent",
+    "filter": {
+      "all": "tous",
+      "none": "aucun"
+    },
+    "member": {
+      "checkboxTitle": "afficher dans la salle d'équipe",
+      "titleRunning": "déjà en cours — cliquer pour afficher",
+      "titleSpawn": "démarrer dans un panneau PTY",
+      "noTypes": "—",
+      "emptyState": "Aucun agent pour l'instant. Utilisez le bouton ＋ ci-dessus pour en ajouter un."
+    },
+    "user": {
+      "title": "app-user dans {{team}}"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# salle d'équipe",
+    "close": "×",
+    "newShell": "Nouvel onglet shell",
+    "shellLabel": "Shell"
+  },
+  "room": {
+    "loadingMore": "Chargement…",
+    "arrow": "→",
+    "emptyState": "Aucun message pour l'instant."
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "Auto-surveillance — ce type délivre les messages agmsg par lui-même",
+      "app": "Moniteur de l'app — les messages agmsg sont injectés dans l'entrée standard de ce panneau"
+    },
+    "closeTitle": "fermer le panneau",
+    "closeGlyph": "×",
+    "swapTitle": "Cliquez, puis cliquez sur un autre panneau de cet onglet pour échanger les positions"
+  },
+  "chat": {
+    "title": "Discussion",
+    "minimize": "Réduire",
+    "maximize": "Agrandir",
+    "restore": "Restaurer",
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "Vos messages (en tant que {{appUser}}) apparaissent ici.",
+      "noUser": "Aucun app-user pour cette équipe. ",
+      "addOne": "En ajouter un"
+    }
+  },
+  "composer": {
+    "asLabel": "en tant que {{appUser}}",
+    "targetPlaceholder": "à…",
+    "messagePlaceholder": "message",
+    "sendButton": "envoyer",
+    "noAppUser": "aucun app-user — ajoutez-en un pour envoyer/recevoir",
+    "sendFailedAlert": "échec de l'envoi : {{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "Supprimer {{name}} ?",
+      "body": "Cela retire {{name}} de {{team}} et ferme son panneau s'il est en cours d'exécution. Cette action est irréversible depuis ici.",
+      "confirmLabel": "Quitter"
+    },
+    "newTeam": {
+      "titleFirstRun": "Bienvenue — créez votre première équipe",
+      "title": "Nouvelle équipe",
+      "note": "Crée l'équipe et vous ajoute comme son app-user (le propriétaire de la zone de discussion en bas).",
+      "teamNameLabel": "Nom de l'équipe",
+      "teamNamePlaceholder": "mon-equipe",
+      "appUserLabel": "Votre nom (app-user)",
+      "create": "Créer"
+    },
+    "appUser": {
+      "title": "Ajouter un app-user (vous)",
+      "note": "L'app-user est votre identité au sein de cette équipe — le propriétaire de la zone de discussion en bas. Un seul par équipe.",
+      "add": "Ajouter"
+    },
+    "agent": {
+      "title": "Ajouter un agent",
+      "typeLabel": "Type",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "Ajouter et démarrer"
+    },
+    "rename": {
+      "title": "Renommer {{current}}",
+      "newNameLabel": "Nouveau nom",
+      "confirmButton": "Renommer"
+    },
+    "confirm": {
+      "defaultLabel": "Confirmer"
+    },
+    "settings": {
+      "title": "Paramètres"
+    },
+    "closeWindow": {
+      "title": "Fermer cet onglet ?",
+      "body": "Cela arrêtera les agents en cours d'exécution ici : {{names}}. Cette action est irréversible.",
+      "confirmLabel": "Fermer l'onglet"
+    },
+    "closePane": {
+      "title": "Fermer {{name}} ?",
+      "body": "Cela arrêtera {{name}}. Cette action est irréversible.",
+      "confirmLabel": "Fermer le panneau"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "Démarrer vers ▸",
+      "spawnNewTab": "Nouvel onglet",
+      "existingTabsDivider": "— onglets existants —",
+      "rename": "Renommer…",
+      "leave": "Quitter"
+    },
+    "pane": {
+      "close": "Fermer",
+      "moveTo": "Déplacer vers ▸",
+      "moveNewTab": "Nouvel onglet",
+      "noOtherTabs": "Aucun autre onglet",
+      "swapWith": "Échanger avec ▸",
+      "noOtherPanes": "Aucun autre panneau dans cet onglet"
+    },
+    "window": {
+      "rename": "Renommer…",
+      "openShell": "Ouvrir un shell",
+      "layout": "Disposition ▸",
+      "layoutVertical": "Vertical",
+      "layoutHorizontal": "Horizontal",
+      "layoutTile": "Mosaïque"
+    },
+    "room": {
+      "hide": "Masquer la salle d'équipe"
+    },
+    "chat": {
+      "hide": "Masquer mon chat"
+    }
+  },
+  "terminal": {
+    "processExited": "[processus terminé]",
+    "failedToStart": "Échec du démarrage de « {{cmd}} » : {{error}}"
+  },
+  "language": {
+    "label": "Langue"
+  },
+  "settings": {
+    "title": "Paramètres",
+    "terminalFontSize": {
+      "label": "Taille de police du terminal"
+    },
+    "timezone": {
+      "label": "Fuseau horaire",
+      "auto": "Auto ({{zone}})"
+    }
+  },
+  "nativeMenu": {
+    "about": "À propos de {{name}}",
+    "checkForUpdates": "Rechercher des mises à jour…",
+    "hide": "Masquer {{name}}",
+    "hideOthers": "Masquer les autres",
+    "showAll": "Tout afficher",
+    "quit": "Quitter {{name}}",
+    "editMenu": "Édition",
+    "undo": "Annuler",
+    "redo": "Rétablir",
+    "cut": "Couper",
+    "copy": "Copier",
+    "paste": "Coller",
+    "selectAll": "Tout sélectionner",
+    "viewMenu": "Présentation",
+    "showTeamRoom": "Afficher la salle d'équipe",
+    "showUserChat": "Afficher mon chat",
+    "paneLayout": "Disposition des volets",
+    "paneLayoutVertical": "Vertical",
+    "paneLayoutHorizontal": "Horizontal",
+    "paneLayoutTile": "Mosaïque",
+    "zoomIn": "Zoom avant",
+    "zoomOut": "Zoom arrière",
+    "actualSize": "Taille réelle",
+    "windowMenu": "Fenêtre",
+    "minimize": "Réduire",
+    "closeWindow": "Fermer la fenêtre"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "Échec de la vérification des mises à jour : {{error}}",
+    "updateAvailableBody": "{{name}} {{version}} est disponible. Installer et redémarrer maintenant ?",
+    "updateAvailableTitle": "Mise à jour disponible",
+    "installAndRestart": "Installer et redémarrer",
+    "later": "Plus tard",
+    "updateFailed": "Échec de la mise à jour : {{error}}",
+    "upToDate": "Vous avez la dernière version.",
+    "noUpdatesTitle": "Aucune mise à jour"
+  },
+  "stage": {
+    "emptyHint": "Cliquez sur un membre à gauche pour démarrer un agent."
+  }
+}

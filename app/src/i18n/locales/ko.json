@@ -1,0 +1,232 @@
+{
+  "common": {
+    "cancel": "취소",
+    "browse": "찾아보기…",
+    "nameLabel": "이름",
+    "projectDirLabel": "프로젝트 디렉터리",
+    "close": "닫기"
+  },
+  "startupError": {
+    "installing": "agmsg 설치 중…",
+    "installFailed": "agmsg 설치에 실패했습니다: {{error}}",
+    "loginShellFailed": "로그인 셸을 확인할 수 없습니다: {{error}}",
+    "loadTeamsFailed": "agmsg 팀을 불러올 수 없습니다: {{error}}. ~/.agents/skills/agmsg 경로에 agmsg가 설치되어 있나요?",
+    "coreOutdated": "설치된 agmsg CLI가 오래되었습니다({{installed}} < {{pinned}}). 이 앱과 제대로 작동하지 않을 수 있습니다.",
+    "versionUnknown": "알 수 없음",
+    "updateNow": "지금 업데이트",
+    "updating": "agmsg 업데이트 중…",
+    "updateFailed": "agmsg 업데이트에 실패했습니다: {{error}}",
+    "updateSucceeded": "agmsg CLI를 {{version}}(으)로 업데이트했습니다.",
+    "dismiss": "닫기"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "collapse": "사이드바 접기",
+    "expand": "사이드바 펼치기",
+    "newMenu": {
+      "trigger": "＋ 새로 만들기 ▾",
+      "team": "팀…",
+      "agent": "에이전트…"
+    },
+    "team": {
+      "title": "팀",
+      "new": "새 팀"
+    },
+    "title": "에이전트",
+    "newAgent": "새 에이전트",
+    "filter": {
+      "all": "전체",
+      "none": "없음"
+    },
+    "member": {
+      "checkboxTitle": "팀 채팅방에 표시",
+      "titleRunning": "실행 중 — 클릭하면 포커스",
+      "titleSpawn": "PTY 창에서 실행",
+      "noTypes": "—",
+      "emptyState": "아직 에이전트가 없습니다. 위의 ＋ 버튼을 사용해 추가하세요."
+    },
+    "user": {
+      "title": "{{team}}의 app-user"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# 팀 채팅방",
+    "close": "×",
+    "newShell": "새 셸 탭",
+    "shellLabel": "셸"
+  },
+  "room": {
+    "loadingMore": "더 불러오는 중…",
+    "arrow": "→",
+    "emptyState": "아직 메시지가 없습니다."
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "자체 모니터링 — 이 유형은 agmsg 메시지를 직접 전달합니다",
+      "app": "앱 모니터 — agmsg 메시지가 이 창의 표준 입력(stdin)으로 주입됩니다"
+    },
+    "closeTitle": "창 닫기",
+    "closeGlyph": "×",
+    "swapTitle": "클릭한 다음 이 탭의 다른 패널을 클릭하면 위치가 바뀝니다"
+  },
+  "chat": {
+    "title": "채팅",
+    "minimize": "최소화",
+    "maximize": "최대화",
+    "restore": "복원",
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "{{appUser}}(으)로 보낸 메시지가 여기에 표시됩니다.",
+      "noUser": "이 팀에는 app-user가 없습니다. ",
+      "addOne": "추가하기"
+    }
+  },
+  "composer": {
+    "asLabel": "{{appUser}}(으)로",
+    "targetPlaceholder": "받는 사람…",
+    "messagePlaceholder": "메시지",
+    "sendButton": "보내기",
+    "noAppUser": "app-user 없음 — 송수신하려면 추가하세요",
+    "sendFailedAlert": "전송 실패: {{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "{{name}}을(를) 제거할까요?",
+      "body": "{{team}}에서 {{name}}을(를) 제거하고, 실행 중이라면 해당 창도 닫습니다. 이 작업은 여기서 되돌릴 수 없습니다.",
+      "confirmLabel": "나가기"
+    },
+    "newTeam": {
+      "titleFirstRun": "환영합니다 — 첫 팀을 만들어 보세요",
+      "title": "새 팀",
+      "note": "팀을 만들고 본인을 app-user(하단 채팅창의 소유자)로 추가합니다.",
+      "teamNameLabel": "팀 이름",
+      "teamNamePlaceholder": "my-team",
+      "appUserLabel": "본인 이름 (app-user)",
+      "create": "만들기"
+    },
+    "appUser": {
+      "title": "app-user 추가 (본인)",
+      "note": "app-user는 이 팀에서 본인의 신원으로, 하단 채팅창의 소유자입니다. 팀당 한 명만 가능합니다.",
+      "add": "추가"
+    },
+    "agent": {
+      "title": "에이전트 추가",
+      "typeLabel": "유형",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "추가 후 실행"
+    },
+    "rename": {
+      "title": "{{current}} 이름 변경",
+      "newNameLabel": "새 이름",
+      "confirmButton": "이름 변경"
+    },
+    "confirm": {
+      "defaultLabel": "확인"
+    },
+    "settings": {
+      "title": "설정"
+    },
+    "closeWindow": {
+      "title": "이 탭을 닫으시겠습니까?",
+      "body": "여기서 실행 중인 에이전트가 중지됩니다: {{names}}. 되돌릴 수 없습니다.",
+      "confirmLabel": "탭 닫기"
+    },
+    "closePane": {
+      "title": "{{name}}을(를) 닫으시겠습니까?",
+      "body": "{{name}}이(가) 중지됩니다. 되돌릴 수 없습니다.",
+      "confirmLabel": "패널 닫기"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "실행 위치 ▸",
+      "spawnNewTab": "새 탭",
+      "existingTabsDivider": "— 기존 탭 —",
+      "rename": "이름 변경…",
+      "leave": "나가기"
+    },
+    "pane": {
+      "close": "닫기",
+      "moveTo": "이동 ▸",
+      "moveNewTab": "새 탭",
+      "noOtherTabs": "다른 탭 없음",
+      "swapWith": "교체 ▸",
+      "noOtherPanes": "이 탭에 다른 창이 없음"
+    },
+    "window": {
+      "rename": "이름 변경…",
+      "openShell": "셸 열기",
+      "layout": "레이아웃 ▸",
+      "layoutVertical": "세로",
+      "layoutHorizontal": "가로",
+      "layoutTile": "타일"
+    },
+    "room": {
+      "hide": "팀 룸 숨기기"
+    },
+    "chat": {
+      "hide": "내 채팅 숨기기"
+    }
+  },
+  "terminal": {
+    "processExited": "[프로세스가 종료되었습니다]",
+    "failedToStart": "\"{{cmd}}\" 시작 실패: {{error}}"
+  },
+  "language": {
+    "label": "언어"
+  },
+  "settings": {
+    "title": "설정",
+    "terminalFontSize": {
+      "label": "터미널 글꼴 크기"
+    },
+    "timezone": {
+      "label": "시간대",
+      "auto": "자동 ({{zone}})"
+    }
+  },
+  "nativeMenu": {
+    "about": "{{name}} 정보",
+    "checkForUpdates": "업데이트 확인…",
+    "hide": "{{name}} 가리기",
+    "hideOthers": "기타 가리기",
+    "showAll": "모두 보기",
+    "quit": "{{name}} 종료",
+    "editMenu": "편집",
+    "undo": "실행 취소",
+    "redo": "다시 실행",
+    "cut": "잘라내기",
+    "copy": "복사",
+    "paste": "붙여넣기",
+    "selectAll": "모두 선택",
+    "viewMenu": "보기",
+    "showTeamRoom": "팀 룸 표시",
+    "showUserChat": "내 채팅 표시",
+    "paneLayout": "패널 레이아웃",
+    "paneLayoutVertical": "세로",
+    "paneLayoutHorizontal": "가로",
+    "paneLayoutTile": "타일",
+    "zoomIn": "확대",
+    "zoomOut": "축소",
+    "actualSize": "실제 크기",
+    "windowMenu": "윈도우",
+    "minimize": "최소화",
+    "closeWindow": "윈도우 닫기"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "업데이트 확인 실패: {{error}}",
+    "updateAvailableBody": "{{name}} {{version}} 버전을 사용할 수 있습니다. 지금 설치하고 재시작할까요?",
+    "updateAvailableTitle": "업데이트 있음",
+    "installAndRestart": "설치 후 재시작",
+    "later": "나중에",
+    "updateFailed": "업데이트 실패: {{error}}",
+    "upToDate": "최신 버전입니다.",
+    "noUpdatesTitle": "업데이트 없음"
+  },
+  "stage": {
+    "emptyHint": "왼쪽의 멤버를 클릭하여 에이전트를 시작하세요."
+  }
+}

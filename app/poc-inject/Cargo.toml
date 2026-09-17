@@ -1,0 +1,14 @@
+[package]
+name = "poc-inject"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Phase 0 PoC: prove the strategic core — own an agent's PTY, detect the
+# idle/ready prompt, and inject an agmsg message into its stdin so ANY
+# interactive CLI agent gets real-time delivery with no per-agent bridge.
+
+[dependencies]
+portable-pty = "0.8"
+rusqlite = { version = "0.31", features = ["bundled"] }
+anyhow = "1"

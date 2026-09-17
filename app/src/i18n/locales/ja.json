@@ -1,0 +1,232 @@
+{
+  "common": {
+    "cancel": "キャンセル",
+    "browse": "参照…",
+    "nameLabel": "名前",
+    "projectDirLabel": "プロジェクトディレクトリ",
+    "close": "閉じる"
+  },
+  "startupError": {
+    "installing": "agmsgをインストール中…",
+    "installFailed": "agmsgのインストールに失敗しました: {{error}}",
+    "loginShellFailed": "ログインシェルを取得できませんでした: {{error}}",
+    "loadTeamsFailed": "agmsgのチームを読み込めませんでした: {{error}}。agmsgは ~/.agents/skills/agmsg にインストールされていますか?",
+    "coreOutdated": "インストール済みのagmsg CLIが古い可能性があります({{installed}} < {{pinned}})。このアプリと正しく動作しない場合があります。",
+    "versionUnknown": "不明",
+    "updateNow": "今すぐアップデート",
+    "updating": "agmsgをアップデート中…",
+    "updateFailed": "agmsgのアップデートに失敗しました: {{error}}",
+    "updateSucceeded": "agmsg CLIを{{version}}にアップデートしました。",
+    "dismiss": "閉じる"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "collapse": "サイドバーを折りたたむ",
+    "expand": "サイドバーを展開",
+    "newMenu": {
+      "trigger": "＋ 新規 ▾",
+      "team": "チーム…",
+      "agent": "エージェント…"
+    },
+    "team": {
+      "title": "チーム",
+      "new": "新規チーム"
+    },
+    "title": "エージェント",
+    "newAgent": "新規エージェント",
+    "filter": {
+      "all": "すべて",
+      "none": "なし"
+    },
+    "member": {
+      "checkboxTitle": "チームルームに表示",
+      "titleRunning": "実行中 — クリックしてフォーカス",
+      "titleSpawn": "PTYペインで起動",
+      "noTypes": "—",
+      "emptyState": "エージェントはまだありません。上の＋ボタンから追加してください。"
+    },
+    "user": {
+      "title": "{{team}} のapp-user"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# チームルーム",
+    "close": "×",
+    "newShell": "新規シェルタブ",
+    "shellLabel": "シェル"
+  },
+  "room": {
+    "loadingMore": "さらに読み込み中…",
+    "arrow": "→",
+    "emptyState": "メッセージはまだありません。"
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "セルフモニタリング — このタイプは自身でagmsgメッセージを配信します",
+      "app": "アプリモニター — agmsgメッセージはこのペインの標準入力に注入されます"
+    },
+    "closeTitle": "ペインを閉じる",
+    "closeGlyph": "×",
+    "swapTitle": "クリックしてから、このタブ内の別のペインをクリックすると位置を入れ替えます"
+  },
+  "chat": {
+    "title": "チャット",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "元に戻す",
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "あなたのメッセージ（{{appUser}}として）がここに表示されます。",
+      "noUser": "このチームにapp-userがいません。 ",
+      "addOne": "追加する"
+    }
+  },
+  "composer": {
+    "asLabel": "{{appUser}} として",
+    "targetPlaceholder": "宛先…",
+    "messagePlaceholder": "メッセージ",
+    "sendButton": "送信",
+    "noAppUser": "app-userがいません — 送受信するには追加してください",
+    "sendFailedAlert": "送信に失敗しました: {{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "{{name}} を削除しますか？",
+      "body": "これにより {{name}} が {{team}} から削除され、実行中の場合はそのペインも閉じられます。この操作はここから元に戻せません。",
+      "confirmLabel": "削除"
+    },
+    "newTeam": {
+      "titleFirstRun": "ようこそ — 最初のチームを作成しましょう",
+      "title": "新しいチーム",
+      "note": "チームを作成し、あなたをapp-user（下部チャットボックスの所有者）として追加します。",
+      "teamNameLabel": "チーム名",
+      "teamNamePlaceholder": "my-team",
+      "appUserLabel": "あなたの名前（app-user）",
+      "create": "作成"
+    },
+    "appUser": {
+      "title": "app-user（あなた）を追加",
+      "note": "app-userはこのチームにおけるあなたの識別情報です — 下部チャットボックスの所有者です。チームごとに1人のみ。",
+      "add": "追加"
+    },
+    "agent": {
+      "title": "エージェントを追加",
+      "typeLabel": "タイプ",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "追加して起動"
+    },
+    "rename": {
+      "title": "{{current}} の名前を変更",
+      "newNameLabel": "新しい名前",
+      "confirmButton": "名前を変更"
+    },
+    "confirm": {
+      "defaultLabel": "確認"
+    },
+    "settings": {
+      "title": "設定"
+    },
+    "closeWindow": {
+      "title": "このタブを閉じますか?",
+      "body": "ここで動いているエージェントが停止します: {{names}}。元に戻せません。",
+      "confirmLabel": "タブを閉じる"
+    },
+    "closePane": {
+      "title": "{{name}} を閉じますか?",
+      "body": "{{name}} が停止します。元に戻せません。",
+      "confirmLabel": "ペインを閉じる"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "起動先 ▸",
+      "spawnNewTab": "新しいタブ",
+      "existingTabsDivider": "— 既存のタブ —",
+      "rename": "名前を変更…",
+      "leave": "削除"
+    },
+    "pane": {
+      "close": "閉じる",
+      "moveTo": "移動先 ▸",
+      "moveNewTab": "新しいタブ",
+      "noOtherTabs": "他のタブはありません",
+      "swapWith": "入れ替え ▸",
+      "noOtherPanes": "このタブに他のペインはありません"
+    },
+    "window": {
+      "rename": "名前を変更…",
+      "openShell": "シェルを開く",
+      "layout": "レイアウト ▸",
+      "layoutVertical": "縦",
+      "layoutHorizontal": "横",
+      "layoutTile": "タイル"
+    },
+    "room": {
+      "hide": "チームルームを非表示"
+    },
+    "chat": {
+      "hide": "自分のチャットを非表示"
+    }
+  },
+  "terminal": {
+    "processExited": "[プロセスが終了しました]",
+    "failedToStart": "\"{{cmd}}\" の起動に失敗しました: {{error}}"
+  },
+  "language": {
+    "label": "言語"
+  },
+  "settings": {
+    "title": "設定",
+    "terminalFontSize": {
+      "label": "ターミナルのフォントサイズ"
+    },
+    "timezone": {
+      "label": "タイムゾーン",
+      "auto": "自動 ({{zone}})"
+    }
+  },
+  "nativeMenu": {
+    "about": "{{name}} について",
+    "checkForUpdates": "アップデートを確認…",
+    "hide": "{{name}} を隠す",
+    "hideOthers": "ほかを隠す",
+    "showAll": "すべてを表示",
+    "quit": "{{name}} を終了",
+    "editMenu": "編集",
+    "undo": "取り消す",
+    "redo": "やり直す",
+    "cut": "カット",
+    "copy": "コピー",
+    "paste": "ペースト",
+    "selectAll": "すべてを選択",
+    "viewMenu": "表示",
+    "showTeamRoom": "チームルームを表示",
+    "showUserChat": "自分のチャットを表示",
+    "paneLayout": "ペインレイアウト",
+    "paneLayoutVertical": "縦",
+    "paneLayoutHorizontal": "横",
+    "paneLayoutTile": "タイル",
+    "zoomIn": "拡大",
+    "zoomOut": "縮小",
+    "actualSize": "実際のサイズ",
+    "windowMenu": "ウインドウ",
+    "minimize": "しまう",
+    "closeWindow": "ウインドウを閉じる"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "アップデートの確認に失敗しました: {{error}}",
+    "updateAvailableBody": "{{name}} {{version}} が利用可能です。インストールして再起動しますか？",
+    "updateAvailableTitle": "アップデートあり",
+    "installAndRestart": "インストールして再起動",
+    "later": "あとで",
+    "updateFailed": "アップデートに失敗しました: {{error}}",
+    "upToDate": "最新バージョンです。",
+    "noUpdatesTitle": "アップデートなし"
+  },
+  "stage": {
+    "emptyHint": "左のメンバーをクリックしてエージェントを起動してください。"
+  }
+}

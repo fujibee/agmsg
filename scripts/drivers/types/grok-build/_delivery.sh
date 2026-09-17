@@ -37,6 +37,11 @@ agmsg_delivery_apply() {
   local type="$1"
   local project="$2"
   local mode="$3"
+  # Refuse before any write: an empty SKILL_DIR would render broken guidance
+  # paths into the rule file, and the rm -f below removes the existing rule
+  # file first -- an unreadable value must never be treated as "nothing to
+  # preserve" (#1234 review).
+  [ -n "${SKILL_DIR:-}" ] || { echo "agmsg_delivery_apply (grok-build): SKILL_DIR is not set; refusing rather than writing a broken rule file" >&2; return 1; }
   local rule_file
   rule_file=$(resolve_hooks_file "$type" "$project")
 
@@ -51,7 +56,7 @@ agmsg_delivery_apply() {
 # agmsg — check your inbox each turn
 
 You belong to one or more agmsg teams. Before you respond to the user on each
-turn, check your agmsg inbox so you never miss a teammate's message.
+turn, check your agmsg inbox so you never miss a message from a teammate.
 
 1. Identify yourself (once per session is enough):
    \`$SKILL_DIR/scripts/whoami.sh '$project' $type\`
@@ -65,10 +70,29 @@ turn, check your agmsg inbox so you never miss a teammate's message.
 
 There is no background watcher in turn mode — this self-check is how delivery
 works. Removing this file turns automatic delivery off.
+
+## Terminal/pane self-awareness
+Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
+— run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
+fields. Never guess from environment variables or a grep/ps command; a driver
+that IS present can be wrongly reported absent that way. Per-driver detail:
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/README.md' (terminal= names which).
+
+## Teammates: placement, status, and reaching them
+Placement and status for a teammate: '$SKILL_DIR/scripts/team.sh' <team> — never a
+stale memory of their last known pane. Act on one with '$SKILL_DIR/scripts/peek.sh'
+/ 'poke.sh' / 'arrange.sh' <team> <name> directly, not a guess: its exit code
+says whether it worked and, if not, why.
 EOF
       ;;
     monitor)
       mkdir -p "$(dirname "$rule_file")"
+      # The watch.sh command below passes "${GROK_SESSION_ID:--}" (sentinel `-`),
+      # NOT "$GROK_SESSION_ID": Grok's monitor tool re-evaluates the command
+      # line, and a quoted-but-empty expansion is dropped entirely there —
+      # shifting project/type/name one slot left and leaving the watcher
+      # subscribed to nothing. `-` survives the re-eval as a real argument and
+      # watch.sh folds it into its empty-session-id resolution path.
       cat <<EOF > "$rule_file"
 <!-- agmsg-delivery-mode: monitor -->
 # agmsg — keep a real-time inbox watcher running
@@ -94,7 +118,7 @@ it once:
 2. Start the watcher with the \`monitor\` tool (that exact tool — not
    \`run_terminal_command\`), persistent, so each new message streams into the
    conversation as a notification. Pass these three fields verbatim:
-   - command: \`$SKILL_DIR/scripts/watch.sh "\$GROK_SESSION_ID" '$project' $type\`
+   - command: \`$SKILL_DIR/scripts/watch.sh "\${GROK_SESSION_ID:--}" '$project' $type\`
    - description: \`agmsg inbox stream\`
    - persistent: true
    Use the command EXACTLY as written. Do NOT append \`| head\`, \`| tail\`, any
@@ -113,6 +137,19 @@ it once:
 Launch it only once per session — if a watcher is already streaming, do not
 start a second one. Stopping is via the \`kill_command_or_subagent\` tool on the
 watcher's task id. Removing this file turns automatic delivery off.
+
+## Terminal/pane self-awareness
+Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
+— run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
+fields. Never guess from environment variables or a grep/ps command; a driver
+that IS present can be wrongly reported absent that way. Per-driver detail:
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/README.md' (terminal= names which).
+
+## Teammates: placement, status, and reaching them
+Placement and status for a teammate: '$SKILL_DIR/scripts/team.sh' <team> — never a
+stale memory of their last known pane. Act on one with '$SKILL_DIR/scripts/peek.sh'
+/ 'poke.sh' / 'arrange.sh' <team> <name> directly, not a guess: its exit code
+says whether it worked and, if not, why.
 EOF
       ;;
     off)
@@ -168,10 +205,12 @@ _agmsg_grok_emit_monitor_directive() {
 
   # Bake GROK_SESSION_ID in when it is set here, so the agent does not invent a
   # value and cleanup can find the pidfile. NOTE: Grok does NOT reliably export
-  # GROK_SESSION_ID into the `monitor` tool's own shell — the rule's literal
-  # "$GROK_SESSION_ID" can expand to empty there — so watch.sh self-generates a
-  # fallback id when its first arg is empty rather than failing. This directive
-  # path still bakes the real id when delivery.sh runs with it in the env.
+  # GROK_SESSION_ID into the `monitor` tool's own shell — that is why the rule
+  # passes "${GROK_SESSION_ID:--}": when unset it resolves to the sentinel `-`,
+  # which watch.sh folds into its empty-arg path and self-generates a fallback
+  # id rather than failing (a bare empty "" would be dropped by the re-eval and
+  # shift the remaining arguments). This directive path still bakes the real id
+  # when delivery.sh runs with it in the env.
   local session_id="${GROK_SESSION_ID:-}"
   if [ -z "$session_id" ]; then
     session_id="agmsg-$(compat_uuidgen | tr 'A-Z' 'a-z')"
@@ -182,7 +221,9 @@ _agmsg_grok_emit_monitor_directive() {
   if [ -f "$pidfile" ]; then
     local existing
     existing=$(cat "$pidfile" 2>/dev/null || true)
-    if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
+    # _agmsg_pid_alive_local, mirroring delivery.sh emit dedup: the recorded pid is
+    # watch.sh's own $$, which tasklist cannot see (#567).
+    if [ -n "$existing" ] && _agmsg_pid_alive_local "$existing"; then
       cat <<EOF
 
 A watch.sh is already streaming into this session (pid $existing). No
