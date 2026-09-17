@@ -1641,20 +1641,24 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   restart_mock_server
 
   printf 'v1.3.1-test\n' > "$TEST_SKILL_DIR/VERSION"
-  # connect: the curl POST path (_remote_http_post_json). testteam already
-  # exists locally (setup()) and was minted with this mock server's team_id,
-  # so this is the cheapest way to reach it -- no new team or fixture needed.
+  # connect: both curl helpers in one call -- _remote_http_post_json for
+  # POST /v1/connect itself, then _remote_http_get_json (via
+  # _remote_adopt_registration) for the capabilities/members follow-up. pull
+  # does NOT go through either: it reaches the server through
+  # remote-sync.sh pull-bootstrap, i.e. remote-sync.mjs's fetch() path only
+  # -- confirmed by grepping cmd_pull for both curl helper names and finding
+  # neither. testteam already exists locally (setup()) and was minted with
+  # this mock server's team_id, so this is the cheapest way to reach it.
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
   [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1-test" ]
   # connect started a background engine that keeps polling with the version it
   # read at spawn time, cached for its own process life -- left running, its
   # next cycle would overwrite the check below with this stale value. Same
-  # reason the pull further down is also disconnected before the final check.
+  # reason every step below also disconnects before the next check.
   bash "$SCRIPTS/remote.sh" disconnect testteam
 
-  # pull: the curl GET path (_remote_http_get_json, capabilities + members)
-  # and remote-sync.mjs's fetch() path, in the same call.
+  # pull: remote-sync.mjs's fetch() path only (see above).
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" versioned1
   [ "$status" -eq 0 ]
   [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1-test" ]
@@ -1664,6 +1668,24 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" versioned2
   [ "$status" -eq 0 ]
   [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "unknown" ]
+  bash "$SCRIPTS/remote.sh" disconnect versioned2
+
+  # An invalid byte in VERSION, under a UTF-8 locale, through connect again --
+  # a pull here would not exercise the bug this covers, per the note above.
+  # The curl helpers' sanitize step is a two-command pipeline (printf | sed),
+  # and LC_ALL=C binding to only the first of the two left sed running in the
+  # caller's own locale, where an invalid multibyte byte can make it fail
+  # outright ("illegal byte sequence" on stderr) instead of just not matching
+  # it (#1290 review). Forcing the locale here reproduces that even when the
+  # suite's own environment happens to be C already. testteam was
+  # disconnected, not forgotten, so it can be connected again.
+  printf 'v1.3.1-\xc3-bad\n' > "$TEST_SKILL_DIR/VERSION"
+  run env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+    bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"illegal byte sequence"* ]]
+  [[ "$output" != *"sed:"* ]]
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1--bad" ]
 }
 
 # The three callers changed by #730, each with a start refusal injected.

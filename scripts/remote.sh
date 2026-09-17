@@ -454,10 +454,19 @@ _remote_client_version() {
   # sed, not tr: this function's dependency footprint is curated (see this
   # file's own test sandboxes), and sed is already a dependency of the curl
   # helpers below (_remote_curl_quote) -- no reason to add a second tool for
-  # the same class of job. The bracket expression is a literal byte range
-  # under LC_ALL=C, the same locale-stability reasoning as elsewhere in this
-  # file's character checks.
-  sanitized="$(LC_ALL=C printf '%s' "$line" | sed 's/[^ -~]//g')"
+  # the same class of job. LC_ALL=C is set on BOTH commands, not just the
+  # first: an env-var prefix binds to the one command it precedes, so
+  # `LC_ALL=C printf ... | sed ...` left sed running in the caller's own
+  # locale. Under a UTF-8 locale, an invalid byte in VERSION (this line is
+  # read from a file this process does not control) can then make a
+  # multibyte-aware sed treat the bracket expression as a character class
+  # instead of a byte range and fail outright ("illegal byte sequence") with
+  # output on stderr, rather than simply not matching that byte -- the
+  # opposite of "drop what does not belong in a header value". Under
+  # LC_ALL=C on both, matching is byte-oriented and that failure mode does
+  # not arise; stderr is also discarded regardless, so a version string
+  # stays silent on this path the same way the JS side's try/catch is.
+  sanitized="$(LC_ALL=C printf '%s' "$line" | LC_ALL=C sed 's/[^ -~]//g' 2>/dev/null)"
   sanitized="${sanitized:0:64}"
   sanitized="${sanitized#"${sanitized%%[![:space:]]*}"}"
   sanitized="${sanitized%"${sanitized##*[![:space:]]}"}"
