@@ -2561,6 +2561,13 @@ JSON
   local rule_file="$TEST_PROJECT/.agent/rules/agmsg.md"
   rm -f "$rule_file"
   mkdir -p "$(dirname "$rule_file")"
+  # Sourced, not written out literally here, for the same #1249 reason
+  # _delivery.sh's own migration check sources it: this stays the only
+  # tracked place holding the pre-#1248 path, so a new stray SKILL.md
+  # reference anywhere else -- including elsewhere in this file -- still
+  # fails the #1249 check.
+  local LEGACY_PRE1248_NOTES_PATH
+  source "$SCRIPTS/drivers/types/antigravity/legacy-pre1248-notes-path.sh"
   cat > "$rule_file" <<EOF
 # agmsg Integration Rule
 
@@ -2573,7 +2580,7 @@ Asked about your own terminal, pane, or driver — or before using arrange/peek/
 — run '$SCRIPTS/where.sh' first and answer from its terminal=/capabilities=
 fields. Never guess from environment variables or a grep/ps command; a driver
 that IS present can be wrongly reported absent that way. Per-driver detail:
-'$SCRIPTS/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
+'$SCRIPTS/$LEGACY_PRE1248_NOTES_PATH' (terminal= names which).
 
 ## Teammates: placement, status, and reaching them
 Placement and status for a teammate: '$SCRIPTS/team.sh' <team> — never a

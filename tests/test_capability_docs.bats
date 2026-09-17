@@ -21,8 +21,17 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   # way a stale text reference would), so this one grep guards both.
   # install.sh's own --update cleanup and its test deliberately name the old
   # filename to find and remove it -- excluded as intentional, not stale.
+  #
+  # legacy-pre1248-notes-path.sh is the one other intentional exception: it
+  # holds the pre-#1248 antigravity rule-file text verbatim, byte for byte,
+  # so an old client's already-written rule file can still be recognized and
+  # migrated instead of refused as foreign (#1289). It is never emitted by
+  # any current code path, and it is the ONLY file this line lets hold that
+  # string; a stray SKILL.md reference added anywhere else, including
+  # elsewhere in _delivery.sh or test_delivery.bats, still fails this check.
   run bash -c "cd '$ROOT' && git grep -n 'terminals/[^ ]*/SKILL\.md' -- . \
-    ':!tests/test_capability_docs.bats' ':!install.sh' ':!tests/test_install.bats'"
+    ':!tests/test_capability_docs.bats' ':!install.sh' ':!tests/test_install.bats' \
+    ':!scripts/drivers/types/antigravity/legacy-pre1248-notes-path.sh'"
   [ "$status" -ne 0 ]
 }
 
