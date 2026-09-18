@@ -485,8 +485,18 @@ eperm_pid() {
   # Claude Code 2.1.271 caps every Monitor watch at 30 minutes and drops the
   # unbounded 'persistent' option, notifying the agent to re-arm on expiry
   # (#1270). Without an explicit timeout_ms the watch silently degrades to
-  # the 5-minute default, and without a re-arm instruction the agent has no
-  # reason to invoke Monitor again when that notice arrives.
+  # the 5-minute default -- timeout_ms is unconditional, present regardless
+  # of AGMSG_CC_MONITOR_KEEP_ALIVE below.
+  grep -q 'timeout_ms: 1800000' <<<"$output"
+  # AGMSG_CC_MONITOR_KEEP_ALIVE, default OFF: with it unset (the run above),
+  # the directive must NOT carry the re-arm wording -- most seats have
+  # nothing asking them to keep a watch alive across its own expiry, and
+  # rearm.sh covers the ones that do.
+  refute grep -q 'immediately re-arm it by invoking Monitor again' <<<"$output"
+  refute grep -q 'Re-arm it silently' <<<"$output"
+
+  run env AGMSG_CC_MONITOR_KEEP_ALIVE=1 bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
   grep -q 'timeout_ms: 1800000' <<<"$output"
   grep -q 'immediately re-arm it by invoking Monitor again' <<<"$output"
   # The maintainer's follow-up to #1270: an agent that announces every silent

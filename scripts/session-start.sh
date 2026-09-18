@@ -436,6 +436,22 @@ if [ -n "$ROLE_NAME" ] && [ -n "$ROLE_TEAM" ]; then
 fi
 
 WATCH="$SKILL_DIR/scripts/watch.sh"
+# AGMSG_CC_MONITOR_KEEP_ALIVE, default OFF: timeout_ms: 1800000 always stays
+# in both directives below (the Monitor tool caps every watch there
+# regardless), but the prose explaining the expiry and asking the agent to
+# re-arm on it is opt-in. Off by default because most Claude Code seats do
+# not need a standing watch kept alive across its own natural expiry;
+# rearm.sh covers the seats that do.
+REARM_NOTE=""
+if [ -n "${AGMSG_CC_MONITOR_KEEP_ALIVE:-}" ]; then
+  REARM_NOTE="
+This watch expires after at most 30 minutes; when the expiry notice arrives,
+immediately re-arm it by invoking Monitor again with this exact command and
+description — delivery depends on it, since nothing else keeps the stream
+running. Re-arm it silently: no message to the user, no \"re-armed\", no
+acknowledgement, no summary — just invoke Monitor again and continue,
+since announcing it every 30 minutes wastes tokens for no benefit."
+fi
 # Shell-quote each argv so the host can paste the command into Monitor and run
 # it verbatim. A plain '...' wrap breaks on paths with an apostrophe
 # (/Users/o'brien/...); printf %q escapes spaces, quotes and other metacharacters
@@ -463,13 +479,7 @@ any other action in this session.
   description: agmsg inbox stream (acting as $ROLE_NAME)
   persistent: true
   timeout_ms: 1800000
-
-This watch expires after at most 30 minutes; when the expiry notice arrives,
-immediately re-arm it by invoking Monitor again with this exact command and
-description — delivery depends on it, since nothing else keeps the stream
-running. Re-arm it silently: no message to the user, no "re-armed", no
-acknowledgement, no summary — just invoke Monitor again and continue,
-since announcing it every 30 minutes wastes tokens for no benefit.
+$REARM_NOTE
 
 The 4th argument restricts receive to \`$ROLE_NAME\` only and re-claims its actas
 exclusivity lock — a resume restores context but not runtime state, so this
@@ -526,13 +536,7 @@ before any other action in this session.
   description: agmsg inbox stream
   persistent: true
   timeout_ms: 1800000
-
-This watch expires after at most 30 minutes; when the expiry notice arrives,
-immediately re-arm it by invoking Monitor again with this exact command and
-description — delivery depends on it, since nothing else keeps the stream
-running. Re-arm it silently: no message to the user, no "re-armed", no
-acknowledgement, no summary — just invoke Monitor again and continue,
-since announcing it every 30 minutes wastes tokens for no benefit.
+$REARM_NOTE
 
 This streams incoming agmsg messages into the session in real time. Each
 output line is one message: \`<ts> | <team> | <from> → <to> | <body>\`.
