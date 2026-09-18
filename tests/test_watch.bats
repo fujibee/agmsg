@@ -20,6 +20,8 @@ setup() {
 }
 
 teardown() {
+  # Nothing to clean when setup() skipped before creating the sandbox (the 1.3.1 quarantine, #1262).
+  [ -n "${TEST_SKILL_DIR:-}" ] || return 0
   teardown_test_env
 }
 
