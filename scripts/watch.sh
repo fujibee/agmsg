@@ -3,6 +3,12 @@ set -u
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 
+# Captured before anything below parses or resolves them, so a self-restart
+# (see _install_changed's handling in the main loop) can exec the installed
+# watch.sh with the exact argv this process was launched with, rather than
+# replaying already-resolved values through resolution logic a second time.
+ORIG_ARGS=("$@")
+
 # Stream new agmsg messages for the current session as they arrive.
 #
 # Intended to be launched by Claude Code's Monitor tool from the SessionStart
@@ -679,6 +685,56 @@ _install_changed() {
   [ -n "$(find "$SCRIPT_DIR" -newer "$INSTALL_STAMP" -print -quit 2>/dev/null)" ]
 }
 
+# Bounded restart count, carried across the exec below via the environment --
+# a fresh process image starts with no memory of its own, and the whole point
+# of exec is that it never forks, so there is nowhere else to keep a counter.
+# Guards against a restart loop if the installation keeps changing faster than
+# this watcher can settle; on a real install this fires once, not repeatedly.
+AGMSG_WATCH_RESTART_LIMIT="${AGMSG_WATCH_RESTART_LIMIT:-5}"
+case "$AGMSG_WATCH_RESTART_LIMIT" in ''|*[!0-9]*) AGMSG_WATCH_RESTART_LIMIT=5 ;; esac
+
+# Restart on the new code in place of exiting (#684 follow-up). `exec` replaces
+# this process image without forking, so there is never a moment with two
+# watchers polling the same subscription, and every piece of state this
+# process owns on disk ($PIDFILE, $FILTERFILE, $READY_FILES, actas locks)
+# stays valid across the swap: it is keyed by $SESSION_ID and $$, and both are
+# unchanged -- exec keeps the same pid, and $ORIG_ARGS reproduces the same
+# session id and role. The read cursor lives in the storage driver, not in
+# this process, so a restart resumes from consumed state and delivers nothing
+# twice, exactly as a manual restart already does today.
+#
+# Falls back to the ORIGINAL exit (unchanged message) if the installed
+# watch.sh cannot be found executable -- missing, or not executable, which is
+# what an interrupted or partial install looks like -- so a broken install
+# still produces the same clear stop it always has, rather than looping on a
+# file that is not there to exec.
+_install_restart_or_exit() {
+  local new_watch="$SCRIPT_DIR/watch.sh" restarts
+  restarts="${AGMSG_WATCH_RESTART_COUNT:-0}"
+  case "$restarts" in ''|*[!0-9]*) restarts=0 ;; esac
+
+  if [ "$restarts" -ge "$AGMSG_WATCH_RESTART_LIMIT" ]; then
+    watch_report "the agmsg installation kept changing across $restarts restart(s) in a row; exiting rather than looping. Restart this session (or run /agmsg actas <name>) to resume delivery."
+    exit 0
+  fi
+
+  if [ -x "$new_watch" ]; then
+    watch_log "the agmsg installation was updated while this watcher was running; restarting on the new code (same process, same subscription)."
+    AGMSG_WATCH_RESTART_COUNT=$((restarts + 1))
+    export AGMSG_WATCH_RESTART_COUNT
+    # The watch_report call below is reached only if exec itself fails to
+    # replace the process image (e.g. an interpreter it can no longer exec);
+    # it is the fallback for that failure, not dead code.
+    # shellcheck disable=SC2093
+    exec "$new_watch" "${ORIG_ARGS[@]}"
+    watch_report "exec of the updated watch.sh failed; exiting instead of running stale code."
+    exit 1
+  fi
+
+  watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. Exiting rather than appearing to work. Restart this session (or run /agmsg actas <name>) to resume delivery."
+  exit 0
+}
+
 # Resolve subscription set.
 PAIRS="$("$SCRIPT_DIR/identities.sh" "$PROJECT_PATH" "$AGENT_TYPE")"
 if [ -n "$ACTIVE_NAME" ]; then
@@ -934,14 +990,14 @@ STUCK_MAP=""
 source "$SCRIPT_DIR/lib/watch-stuck-map.sh"
 
 while true; do
-  # The installation changed under us (#684). Say it on STDOUT, not stderr:
-  # stdout is the delivery channel the session is reading, and this watcher's
-  # stderr goes to /dev/null in every launcher we ship, which is why the
-  # original failure was silent for hours. Then exit, so "the monitor stopped"
-  # is what the session sees instead of a live process delivering nothing.
+  # The installation changed under us (#684). _install_restart_or_exit execs
+  # the new watch.sh in place when it can, so the stream never visibly stops;
+  # its own exit paths still report on STDOUT (watch_report, not watch_log --
+  # every launcher we ship sends this watcher's stderr to /dev/null) so "the
+  # monitor stopped" is what the session sees, instead of a live process
+  # silently delivering nothing.
   if _install_changed; then
-    printf 'agmsg watch: the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. Exiting rather than appearing to work. Restart this session (or run /agmsg actas <name>) to resume delivery.\n'
-    exit 0
+    _install_restart_or_exit
   fi
   # Liveness guard (#67): exit promptly once the originating agent session is
   # gone. A plain pipe gives no portable way to notice a *downstream* consumer
