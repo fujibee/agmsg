@@ -42,13 +42,48 @@ source "$SCRIPT_DIR/lib/type-registry.sh"       # required by detect-cli-type.sh
 source "$SCRIPT_DIR/lib/compat.sh"              # required by detect-cli-type.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/detect-cli-type.sh"     # agmsg_detect_cli_type (#1229 plain fallback)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/input-box.sh"           # agmsg_input_box_empty (#1321)
 
 die() { echo "poke: $*" >&2; exit 1; }
 
 TEAM="${1:-}"; NAME="${2:-}"
-USAGE="Usage: poke.sh <team> <name> --body-file <path> | --body - | <text>"
+USAGE="Usage: poke.sh <team> <name> [--retries N] [--retry-delay SECONDS] [--backoff fixed|exponential] --body-file <path> | --body - | <text>"
 [ -n "$TEAM" ] && [ -n "$NAME" ] || die "$USAGE"
 shift 2
+
+# Retry options, default off (RETRIES=0 means the loop near the bottom of
+# this script runs exactly once, same as before this existed). Pulled out
+# of the remaining args first, in any position, so they never disturb the
+# body-spec parsing below. Retries exist only for the input-box refusal
+# (#1321) — a transient condition (the person finishes typing) — never for
+# a driver-level failure (unreachable pane, no placement record, and so
+# on), which retrying would not fix.
+RETRIES=0
+RETRY_DELAY=2
+BACKOFF=exponential
+_REMAINING=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --retries)
+      [ $# -ge 2 ] || die "--retries needs a number"
+      case "$2" in ''|*[!0-9]*) die "--retries must be a non-negative integer, got: $2" ;; esac
+      RETRIES="$2"; shift 2 ;;
+    --retry-delay)
+      [ $# -ge 2 ] || die "--retry-delay needs a number of seconds"
+      case "$2" in ''|*[!0-9]*) die "--retry-delay must be a non-negative integer, got: $2" ;; esac
+      RETRY_DELAY="$2"; shift 2 ;;
+    --backoff)
+      [ $# -ge 2 ] || die "--backoff must be 'fixed' or 'exponential'"
+      case "$2" in
+        fixed|exponential) BACKOFF="$2" ;;
+        *) die "--backoff must be 'fixed' or 'exponential', got: $2" ;;
+      esac
+      shift 2 ;;
+    *) _REMAINING+=("$1"); shift ;;
+  esac
+done
+set -- "${_REMAINING[@]+"${_REMAINING[@]}"}"
 
 TEXT=""
 case "${1:-}" in
@@ -96,8 +131,48 @@ agmsg_terminal_load "$TERMINAL" \
 # driver's stdout is protocol, not for the operator — swallow it, keep the
 # driver's exit status (plain's unsupported 13 included), and put a one-line
 # human answer on each side.
+#
+# Input-box check (#1321), immediately before EVERY attempt including
+# retries — never once up front, since the box's own state is exactly what
+# each retry exists to wait out. INPUT_MARKER empty (this type set none in
+# its manifest) skips the check entirely: unconditional single terminal_poke
+# call, the same as before this existed.
+INPUT_MARKER="$(agmsg_type_get "$TYPE" input_prompt_marker)"
+INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
+
 RC=0
-terminal_poke "$BARE_ID" "$TEXT" >/dev/null || RC=$?
+ATTEMPT=0
+while :; do
+  RC=0
+  if [ -n "$INPUT_MARKER" ]; then
+    SCREEN=""
+    if SCREEN="$(terminal_peek "$BARE_ID" 2>/dev/null)"; then
+      agmsg_input_box_empty "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN" || RC=14
+    else
+      # Could not even read the screen -- fail toward NOT typing rather than
+      # invent a second refusal reason nothing asked for; see input-box.sh.
+      RC=14
+    fi
+  fi
+  if [ "$RC" -eq 0 ]; then
+    terminal_poke "$BARE_ID" "$TEXT" >/dev/null || RC=$?
+    break
+  fi
+  [ "$ATTEMPT" -lt "$RETRIES" ] || break
+  ATTEMPT=$((ATTEMPT + 1))
+  if [ "$BACKOFF" = exponential ]; then
+    WAIT=$((RETRY_DELAY * (1 << (ATTEMPT - 1))))
+    [ "$WAIT" -le 60 ] || WAIT=60
+  else
+    WAIT="$RETRY_DELAY"
+  fi
+  sleep "$WAIT"
+done
+
+if [ "$RC" -eq 14 ]; then
+  echo "poke: '$TEAM/$NAME' has a draft in its input box — refusing to type over it (input in progress)" >&2
+  exit 14
+fi
 
 # #1229: a bare plain:- target (id '-') has no pane at all — not a
 # reachability failure worth retrying, a structural absence. See

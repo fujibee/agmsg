@@ -880,3 +880,46 @@ EOF
   [ "$output" = moved ]
   grep -q '^tmux \[swap-pane\] \[-s\] \[%1\] \[-t\] \[%2\]$' "$ARGV_LOG"
 }
+
+# #1321: poke.sh must not type over a person's own half-typed draft. The two
+# canned screens below mirror a real Claude Code pane's own shape (measured
+# live 2026-09-18): a top rule carrying the pane's label, the ❯ prompt line,
+# a bottom rule -- the exact structure scripts/lib/input-box.sh's "boxed"
+# check scopes its search to. RULE60 is built, not hand-typed, so its length
+# (60 >= the 20-character run the checker requires) is provable, not eyeballed.
+_install_fake_herdr_input_box() {
+  local shape="$1" rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
+    printf "  printf '%%s\\\\n' '%s testteam-alice ─'\n" "$rule"
+    if [ "$shape" = draft ]; then
+      printf "  printf '%%s\\\\n' '❯ half-typed draft'\n"
+    else
+      printf "  printf '%%s\\\\n' '❯'\n"
+    fi
+    printf "  printf '%%s\\\\n' '%s'\n" "$rule"
+    printf 'fi\n'
+    printf 'exit 0\n'
+  } > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+}
+
+@test "poke.sh refuses a Claude Code seat with a draft in its input box, and types once the box is empty" {
+  _install_fake_herdr_input_box draft
+  _write_record "herdr:w1:p5"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -eq 14 ]
+  _out_has "input in progress"
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
+
+  : > "$ARGV_LOG"
+  _install_fake_herdr_input_box empty
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -eq 0 ]
+  _out_has "poked 'testteam/alice' via herdr"
+  grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+}

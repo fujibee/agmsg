@@ -11,7 +11,7 @@
 
 If asked, in ordinary language and in either English or Japanese, to re-arm this session's own agmsg monitor (no fixed trigger word — read the request as it is phrased): invoke Monitor with the standard command and description for this seat, and say nothing else.
 
-If asked to re-arm the team's Claude Code monitors (not just this session's own): run `~/.agents/skills/__SKILL_NAME__/scripts/rearm.sh` and report what it prints.
+If asked to re-arm every Claude Code seat in the team (not just this session's own): run `~/.agents/skills/__SKILL_NAME__/scripts/rearm.sh` and report what it prints.
 
 Claude Code commands may need permission and sandbox allowlists for `~/.agents/skills/__SKILL_NAME__/scripts/` and its writable `db/`, `teams/`, and `run/` directories.
 
