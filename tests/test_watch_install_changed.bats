@@ -116,6 +116,40 @@ _wait_for() {
 
   [ "$was_alive" -eq 0 ]
   grep -q 'installation was updated' "$out"
+
+  # Second lifecycle, same test (#684 review round 3): a STALE VERSION whose
+  # timestamp happens to TIE with this watcher's own start -- a coarse
+  # filesystem clock can produce this by coincidence -- must not be read as
+  # proof of completion either. A tie proves nothing either way, so only a
+  # VERSION strictly newer than the watcher's own start may count; otherwise
+  # an old, unrelated VERSION could make a still-mid-copy install look
+  # finished the moment its first scripts write lands.
+  local out2="$BATS_TEST_TMPDIR/out4.txt"
+  : > "$out2"
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" sid-684d "$PROJ" claude-code >"$out2" 2>/dev/null 3>&- 4>&- &
+  local pid2=$!
+
+  bash "$SCRIPTS/send.sh" team bob alice "before-tie-update" >/dev/null
+  _wait_for "grep -q 'before-tie-update' '$out2'" || true
+  grep -q 'before-tie-update' "$out2"
+
+  local stamp
+  stamp="$(ls "$TEST_SKILL_DIR"/run/.watch-start.* 2>/dev/null | head -1)"
+  [ -n "$stamp" ]
+  printf 'stale-unrelated-version\n' > "$TEST_SKILL_DIR/VERSION"
+  touch -r "$stamp" "$TEST_SKILL_DIR/VERSION"
+
+  touch "$SCRIPTS/config.sh"
+
+  _wait_for "! kill -0 $pid2 2>/dev/null" || true
+
+  local was_alive2=0
+  kill -0 "$pid2" 2>/dev/null && was_alive2=1
+  kill "$pid2" 2>/dev/null || true
+  wait "$pid2" 2>/dev/null || true
+
+  [ "$was_alive2" -eq 0 ]
+  grep -q 'installation was updated' "$out2"
 }
 
 @test "watch: keeps running when nothing in the installation changes (#684)" {

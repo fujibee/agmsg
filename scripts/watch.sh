@@ -694,17 +694,24 @@ _install_changed() {
 # VERSION is install.sh's own last write that touches anything under
 # scripts/ (cp -R scripts/, then chmod, THEN VERSION -- confirmed by reading
 # both its --update and fresh-install paths). No new marker to invent: an
-# install that has finished leaves VERSION at least as new as everything it
-# just copied, and one still mid-copy has not written it yet, or has not
-# written it again since this watcher's own start.
+# install that has finished leaves VERSION newer than everything it just
+# copied, and one still mid-copy has not written it yet, or has not written
+# it again since this watcher's own start.
 #
-# "at least as new as" ($INSTALL_STAMP not newer than VERSION), not strictly
-# newer, because a single install run can finish both writes within the same
-# filesystem clock tick on a coarse-resolution filesystem.
+# STRICTLY newer, not "at least as new as" (review finding, round 3): a
+# non-strict comparison lets an OLD, unrelated VERSION whose timestamp
+# happens to TIE with this watcher's own start -- a real possibility on a
+# coarse-timestamp filesystem -- pass as "complete" the moment a later
+# install's scripts write lands, before that install has written its OWN
+# VERSION. A tie proves nothing either way, so it is treated as NOT
+# complete: the one cost is that a genuinely-finished install landing in the
+# very same clock tick as this watcher's own start falls back to today's
+# visible exit instead of restarting -- rare, and no worse than before this
+# PR, never a mixed-generation exec.
 _install_complete() {
   local version_file="$SKILL_DIR/VERSION"
   [ -f "$version_file" ] || return 1
-  ! [ "$INSTALL_STAMP" -nt "$version_file" ]
+  [ "$version_file" -nt "$INSTALL_STAMP" ]
 }
 
 # Fixed, internal, non-negotiable (review finding: an env-supplied limit can
@@ -760,6 +767,13 @@ _install_restart_count_reset() {
 # equals its own sid, that call is a no-op self-confirmation (see
 # _actas_lock_try_claim's existing==sid branch), never a fresh claim that
 # could race a peer.
+#
+# This is scoped to today's lock ABI, unlike $PIDFILE/$FILTERFILE/$READY_FILES
+# above: cleanup does not touch the lock at all, so nothing here migrates it.
+# If a future release ever changes the lock's own path or format, the new
+# image's claim can no longer be counted on to see existing==sid, and this
+# self-restart path must not be used for that release -- it falls back to
+# today's stop-and-manually-rearm behavior instead, same as before this PR.
 #
 # Falls back to the ORIGINAL exit (unchanged message) if the install has not
 # (yet, or ever) published a complete generation, or if the installed
