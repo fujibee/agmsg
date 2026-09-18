@@ -98,13 +98,30 @@ _agmsg_input_box_empty_boxed() {
   return 0
 }
 
-# Flat style (Codex): no boxed delimiters. Two ways a naive "check only the
-# last marker line" reading goes wrong (#1321 review): a multi-line
-# draft whose FIRST line (the one carrying the marker) happens to be blank
-# itself, with the actual typed text on a continuation line below it; and a
-# stale marker left over higher up the screen while the live input box has
-# scrolled out of view (or this is quoted/transcript text, not the prompt
-# widget at all). Both must read as "not confirmed empty", never as empty.
+# Flat style (Codex): no boxed delimiters, so a bare "last line starting
+# with the marker" reading cannot tell a live input box from a stale "›"
+# left over on screen with the real box scrolled out of view (or quoted
+# transcript text) -- a proximity guess ("near the bottom") does not prove
+# that either, and was rejected on review (#1321) for exactly that reason:
+# a blank stale marker with blank lines after it, and no live box at all,
+# passed it.
+#
+# What actually distinguishes the live widget, measured read-only on 5
+# real, currently-running Codex panes on this machine (2026-09-18), every
+# one of them: the marker line is followed by exactly one blank
+# line, then a status footer line containing "·" (U+00B7, the field
+# separator in "<model> <effort> · <cwd> · <task>") -- e.g.
+#   › Ask Codex to do anything
+#
+#     gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task
+# That triplet is required; without it, refuse -- a "›" with no such
+# witness right below it is not confirmed to be the live box at all, no
+# matter how close to the bottom it sits. The measured placeholder Codex
+# shows when nothing has been typed is the literal text "Ask Codex to do
+# anything" (not a blank tail) -- empty means the marker line's own tail is
+# either that placeholder or genuinely blank; anything else, including a
+# continuation line's worth of real text one row below (which the blank-
+# line requirement above already catches), is a draft.
 _agmsg_input_box_empty_flat() {
   local marker="$1" screen="$2"
   local -a lines=()
@@ -124,28 +141,18 @@ _agmsg_input_box_empty_flat() {
   done
   [ "$marker_idx" -ge 0 ] || return 1
 
-  # Must sit near the very bottom of the visible screen. NOT measured
-  # against a real Codex pane (unlike Claude Code's boxed rule, captured
-  # live) -- this constant is a deliberately conservative placeholder;
-  # further from the bottom than this reads as "could not confirm", not
-  # "confirmed empty".
-  local near_bottom=6
-  [ $((n - marker_idx)) -le "$near_bottom" ] || return 1
-
-  # Everything strictly after the marker line must be blank -- a
-  # continuation line with real text is exactly the multi-line-draft case
-  # a check anchored only on the marker line's own tail would miss.
-  i=$((marker_idx + 1))
-  while [ "$i" -lt "$n" ]; do
-    case "${lines[$i]}" in
-      *[![:space:]]*) return 1 ;;
-    esac
-    i=$((i + 1))
-  done
+  local footer_idx=$((marker_idx + 2))
+  [ "$footer_idx" -lt "$n" ] || return 1
+  case "${lines[$((marker_idx + 1))]}" in *[![:space:]]*) return 1 ;; esac
+  case "${lines[$footer_idx]}" in *·*) ;; *) return 1 ;; esac
 
   local rest
   rest="${lines[$marker_idx]#"$marker"}"
   case "$rest" in ' '*) rest="${rest# }" ;; esac
-  case "$rest" in *[![:space:]]*) return 1 ;; esac
+  case "$rest" in
+    '') ;;
+    'Ask Codex to do anything') ;;
+    *) return 1 ;;
+  esac
   return 0
 }

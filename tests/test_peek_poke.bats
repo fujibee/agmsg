@@ -948,37 +948,51 @@ _install_fake_herdr_flat_screens() {
   _out_has "poked 'testteam/alice' via herdr"
   grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
 
-  # Codex (#1321 review): a multi-line draft whose OWN marker line
-  # looks empty, with the real text on a continuation line below it, must
-  # not read as empty.
+  # Codex, genuinely empty (#1321 review): the exact shape measured live on
+  # 5 real Codex panes (2026-09-18) -- marker line carrying Codex's own
+  # placeholder text, one blank line, a status footer containing "·".
+  # Still delivers.
   : > "$ARGV_LOG"
   _install_fake_herdr_flat_screens
-  export AGMSG_TEST_FLAT_SCREEN_FILE="$TEST_SKILL_DIR/flat-multiline.txt"
-  printf 'some transcript line\n›\nhalf-typed continuation\n' > "$AGMSG_TEST_FLAT_SCREEN_FILE"
+  export AGMSG_TEST_FLAT_SCREEN_FILE="$TEST_SKILL_DIR/flat-screen.txt"
+  printf 'some transcript line\n› Ask Codex to do anything\n\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' \
+    > "$AGMSG_TEST_FLAT_SCREEN_FILE"
   _write_codex_record codex1 "herdr:w1:p6"
-  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
-  [ "$status" -eq 14 ]
-  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
-
-  # Codex: a marker line present but far from the bottom of the visible
-  # screen (the live input box has scrolled out of view, or this is a
-  # stale/quoted "›" in the transcript, not the prompt) must not read as
-  # empty either.
-  : > "$ARGV_LOG"
-  {
-    printf '› old stale prompt\n'
-    for _i in $(seq 1 20); do printf 'transcript line %s\n' "$_i"; done
-  } > "$AGMSG_TEST_FLAT_SCREEN_FILE"
-  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
-  [ "$status" -eq 14 ]
-  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
-
-  # Codex: genuinely empty, marker at the very bottom -- still delivers.
-  : > "$ARGV_LOG"
-  printf 'some transcript line\n›\n' > "$AGMSG_TEST_FLAT_SCREEN_FILE"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
   [ "$status" -eq 0 ]
   grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+
+  # Codex, real single-line draft in the same measured shape -- the
+  # marker's own tail is neither blank nor the placeholder, so it refuses
+  # even with a valid footer witness right below it.
+  : > "$ARGV_LOG"
+  printf 'some transcript line\n› half typed draft\n\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' \
+    > "$AGMSG_TEST_FLAT_SCREEN_FILE"
+  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
+  [ "$status" -eq 14 ]
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
+
+  # Codex, multi-line draft: the marker line's OWN tail looks blank, but a
+  # continuation line sits where the footer witness must be -- refuses,
+  # because the blank-line-then-footer structure is broken, not because the
+  # continuation text itself was read.
+  : > "$ARGV_LOG"
+  printf 'some transcript line\n› \nhalf-typed continuation\n\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' \
+    > "$AGMSG_TEST_FLAT_SCREEN_FILE"
+  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
+  [ "$status" -eq 14 ]
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
+
+  # Codex, stale/off-screen marker: a blank "›" with blank lines after it
+  # and NO footer at all -- the exact shape the previous "near the bottom"
+  # guess accepted as empty (confirmed against that implementation before
+  # this fix), because proximity alone cannot tell a live box from a
+  # leftover one. The footer-witness requirement refuses it.
+  : > "$ARGV_LOG"
+  printf '›\n\n\n' > "$AGMSG_TEST_FLAT_SCREEN_FILE"
+  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
+  [ "$status" -eq 14 ]
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
 
   # plain (#1321 review): the input-box check must not block plain's
   # existing agent-registration -- but see #1229 for what plain does with a
