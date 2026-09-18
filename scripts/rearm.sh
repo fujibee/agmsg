@@ -7,15 +7,24 @@ set -euo pipefail
 #
 # Usage: rearm.sh <team>
 #
-# Scoped to $(pwd): a same-team seat registered to a different local project
-# is not a candidate (#1315 review) — it works on something else, and poking
-# it about a watch for a project it is not even in would be confusing, not
-# helpful. Every OTHER row team.sh reports is announced too, not silently
-# dropped: a registration with the wrong type, the wrong project, or a
-# non-monitor delivery mode gets its own "skipped (<reason>)" line, so an
-# operator reading the output never mistakes silence for "nothing else to
-# say" — without this, an excluded seat and a successfully-poked one would
-# look identical (absent from the output either way).
+# Scoped to the caller's own project: a same-team seat registered to a
+# different local project is not a candidate (#1315 review) — it works on
+# something else, and poking it about a watch for a project it is not even
+# in would be confusing, not helpful. "The caller's own project" is resolved
+# and normalized the same way join.sh registers one (agmsg_resolve_project
+# then agmsg_normalize_project_path), so a caller inside a subdirectory or a
+# sibling worktree of the registered root still matches it, and each
+# registration's own recorded project is further canonicalized (symlinks
+# resolved) before comparing — a raw string/pwd comparison alone missed a
+# same-project seat reached through a symlink or an equivalent spelling
+# (#1315 review, round 2).
+#
+# Every OTHER row team.sh reports is announced too, not silently dropped: a
+# registration with the wrong type, the wrong project, or a non-monitor
+# delivery mode gets its own "skipped (<reason>)" line, so an operator
+# reading the output never mistakes silence for "nothing else to say" —
+# without this, an excluded seat and a successfully-poked one would look
+# identical (absent from the output either way).
 #
 # This script does not check reachability itself: poke.sh resolves each
 # target's own driver and refuses a seat it cannot reach, printing why on
@@ -41,11 +50,22 @@ USAGE='Usage: rearm.sh <team>'
 TEAM="$1"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
 agmsg_validate_team_name "$TEAM" || exit 1
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
 
-PROJECT="$(pwd)"
+# Same pipeline join.sh stores a registration's project through, so the
+# caller's own project resolves to the identical value a matching
+# registration was recorded with -- then canonicalized (symlinks resolved)
+# for the final comparison against each row below, which is canonicalized
+# the same way.
+PROJECT="$(agmsg_resolve_project "$(pwd)" claude-code "$TEAM")"
+PROJECT="$(agmsg_normalize_project_path "$PROJECT")"
+PROJECT_CANON="$(agmsg_canonical_path "$PROJECT")"
+
 MESSAGE='Your agmsg monitor may have expired. Re-arm it now with the standard command for your seat, and say nothing.'
 
 MEMBERS_JSON="$(bash "$SCRIPT_DIR/team.sh" "$TEAM" --json)" || {
@@ -55,35 +75,32 @@ MEMBERS_JSON="$(bash "$SCRIPT_DIR/team.sh" "$TEAM" --json)" || {
 
 # One row per (member, type, project) registration -- team.sh's own
 # granularity, not one row per member -- so a member with several
-# registrations is judged, and reported, once per registration. "select"
-# only for a claude-code registration in THIS project with delivery monitor
-# or both; everything else is "skip" with a specific reason.
-ROWS="$(printf '%s' "$MEMBERS_JSON" | jq -r --arg project "$PROJECT" '
-  .[] | [
-    .member,
-    (if .type != "claude-code" then "skip"
-     elif .project != $project then "skip"
-     elif (.delivery == "monitor" or .delivery == "both") then "select"
-     else "skip" end),
-    (if .type != "claude-code" then ("not claude-code (type=" + .type + ")")
-     elif .project != $project then ("registered to a different project (" + .project + ")")
-     elif (.delivery == "monitor" or .delivery == "both") then .delivery
-     else ("delivery=" + .delivery) end)
-  ] | @tsv
-')"
+# registrations is judged, and reported, once per registration. The project
+# comparison itself happens in bash below, not here, because it needs
+# agmsg_canonical_path (a real filesystem resolution jq cannot do).
+ROWS="$(printf '%s' "$MEMBERS_JSON" | jq -r '.[] | [.member, .type, .project, .delivery] | @tsv')"
 
 CANDIDATES=""
 CANDIDATE_COUNT=0
-while IFS=$'\t' read -r member verdict detail; do
+while IFS=$'\t' read -r member type project delivery; do
   [ -n "$member" ] || continue
-  if [ "$verdict" = "select" ]; then
+  if [ "$type" != "claude-code" ]; then
+    echo "$member: skipped (not claude-code (type=$type))"
+    continue
+  fi
+  row_canon="$(agmsg_canonical_path "$(agmsg_normalize_project_path "$project")")"
+  if [ "$row_canon" != "$PROJECT_CANON" ]; then
+    echo "$member: skipped (registered to a different project ($project))"
+    continue
+  fi
+  if [ "$delivery" = monitor ] || [ "$delivery" = both ]; then
     if ! grep -qxF "$member" <<<"$CANDIDATES"; then
       CANDIDATES="$CANDIDATES$member
 "
       CANDIDATE_COUNT=$((CANDIDATE_COUNT + 1))
     fi
   else
-    echo "$member: skipped ($detail)"
+    echo "$member: skipped (delivery=$delivery)"
   fi
 done <<<"$ROWS"
 
