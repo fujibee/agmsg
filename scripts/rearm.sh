@@ -42,8 +42,10 @@ set -euo pipefail
 #
 # Exit 0 if at least one candidate was poked successfully, or if there was
 # no claude-code monitor/both seat registered to the caller's own project to
-# poke at all. Exit 1 only when there was at least one candidate and every
-# poke on it failed.
+# poke at all. Exit 1 when there was at least one candidate and every poke on
+# it failed, or when the caller's own project could not be verified against
+# the team's registered claude-code projects at all (see PROJECT_REGISTERED
+# below) -- that case pokes no one.
 
 USAGE='Usage: rearm.sh <team>'
 [ $# -eq 1 ] || { printf '%s\n' "$USAGE" >&2; exit 2; }
@@ -79,6 +81,33 @@ MEMBERS_JSON="$(bash "$SCRIPT_DIR/team.sh" "$TEAM" --json)" || {
 # comparison itself happens in bash below, not here, because it needs
 # agmsg_canonical_path (a real filesystem resolution jq cannot do).
 ROWS="$(printf '%s' "$MEMBERS_JSON" | jq -r '.[] | [.member, .type, .project, .delivery] | @tsv')"
+
+# agmsg_resolve_project deliberately fails OPEN: when no SessionStart marker,
+# no registered ancestor and no git-common-dir match are found, it still
+# prints the raw pwd and returns 0 rather than erroring. That fallback is
+# indistinguishable from a genuinely verified resolution by exit status
+# alone, so trusting PROJECT_CANON at face value here would let an unresolved
+# caller poke a same-named-by-coincidence project. Proof instead comes from
+# the team's own registry: PROJECT_CANON must match at least one existing
+# claude-code registration's own canonical project (any delivery mode --
+# this is a membership check, not the monitor/both filter below). No match
+# means resolution could not be confirmed, so refuse rather than silently
+# report "nothing to do".
+PROJECT_REGISTERED=0
+while IFS=$'\t' read -r reg_member reg_type reg_project _reg_delivery; do
+  [ -n "$reg_member" ] || continue
+  [ "$reg_type" = "claude-code" ] || continue
+  reg_canon="$(agmsg_canonical_path "$(agmsg_normalize_project_path "$reg_project")")"
+  if [ "$reg_canon" = "$PROJECT_CANON" ]; then
+    PROJECT_REGISTERED=1
+    break
+  fi
+done <<<"$ROWS"
+
+if [ "$PROJECT_REGISTERED" -ne 1 ]; then
+  echo "rearm: could not verify '$PROJECT' as a registered claude-code project in team '$TEAM' — refusing rather than trust an unresolved fallback path" >&2
+  exit 1
+fi
 
 CANDIDATES=""
 CANDIDATE_COUNT=0

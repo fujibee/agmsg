@@ -71,4 +71,20 @@ teardown() {
   grep -q "^bob: skipped (delivery=turn)" <<<"$output"
   grep -q "^carol: skipped (delivery=turn)" <<<"$output"
   [[ "$output" =~ "rearm: no claude-code seat registered to '$proj_a' in team 'fleet' is configured for monitor or both delivery" ]]
+
+  # Registry-verification control (#1315 review, round 3): a project with NO
+  # claude-code registration at all in this team is refused outright, rather
+  # than reported as "found zero monitor/both seats" -- proves PROJECT is
+  # checked against the team's own registered claude-code projects instead of
+  # trusting agmsg_resolve_project's raw-pwd fallback (which prints pwd and
+  # returns 0 even when marker/ancestor/git-common resolution all fail) at
+  # face value. Nobody is poked.
+  local proj_c="$BATS_TEST_TMPDIR/proj-c"
+  mkdir -p "$proj_c"
+  cd "$proj_c" || return 1
+  run bash "$SCRIPTS/rearm.sh" fleet
+  [ "$status" -ne 0 ]
+  ! grep -q ': refused' <<<"$output"
+  ! grep -q ': ok' <<<"$output"
+  grep -q "could not verify '$proj_c' as a registered claude-code project in team 'fleet'" <<<"$output"
 }
