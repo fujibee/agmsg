@@ -486,8 +486,10 @@ EOF
   # stays (the Monitor tool caps every watch there regardless), but the
   # prose explaining the expiry and asking the agent to re-arm on it is
   # opt-in. Off by default because most Claude Code seats do not need a
-  # standing watch kept alive across its own natural expiry; #1313 added
-  # rearm.sh for the seats that do.
+  # standing watch kept alive across its own natural expiry; #1313 added a
+  # way to cover the seats that do, since replaced (#1321) by the
+  # claude-code type's own template procedure (poke, not a dedicated
+  # command).
   local rearm_note=""
   if [ -n "${AGMSG_CC_MONITOR_KEEP_ALIVE:-}" ]; then
     rearm_note=" This watch expires after at most 30 minutes; when the expiry

@@ -11,7 +11,7 @@
 
 If asked, in ordinary language and in either English or Japanese, to re-arm this session's own agmsg monitor (no fixed trigger word — read the request as it is phrased): invoke Monitor with the standard command and description for this seat, and say nothing else.
 
-If asked to re-arm every Claude Code seat in the team (not just this session's own): run `~/.agents/skills/__SKILL_NAME__/scripts/rearm.sh` and report what it prints.
+If asked to re-arm every Claude Code seat in the team together (not just this session's own — no dedicated command for this, do it through poke: #1321): run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team> --json`, select the rows whose `type` is `claude-code` and whose `delivery` is `monitor` or `both`, deduplicated by member name. Whole team — never narrow this to your own project. For each selected seat, in turn with a gap of a few seconds between seats (poking them all at once starts every seat's model turn in the same instant and risks rate limits): write a one-line message asking that seat to re-arm its own agmsg monitor — phrase it in whoever asked's own words, or something equivalent — to a file, then `~/.agents/skills/__SKILL_NAME__/scripts/poke.sh <team> <seat> --retries 5 --retry-delay 2 --backoff exponential --body-file <path>`. A seat whose input box was still busy after every retry (poke exits 14) could not be reached this way; name it in your report rather than silently skipping it.
 
 Claude Code commands may need permission and sandbox allowlists for `~/.agents/skills/__SKILL_NAME__/scripts/` and its writable `db/`, `teams/`, and `run/` directories.
 

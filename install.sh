@@ -454,6 +454,12 @@ $_agmsg_running_team"
   # recursive copy cannot remove the old top-level file, so delete this one
   # known agmsg-owned path during --update; do not sweep user scripts.
   rm -f "$SKILL_DIR/scripts/antigravity-resume.sh"
+  # rearm.sh shipped in 1.3.1 and is removed again in 1.3.2 (#1321): a
+  # dedicated re-arm command is gone in favor of the same procedure done
+  # through poke.sh, described in natural language in each type's own
+  # template. A plain cp -R never deletes a file absent from the source
+  # tree, so an --update from 1.3.1 would otherwise keep this one forever.
+  rm -f "$SKILL_DIR/scripts/rearm.sh"
   # Ship the external-plugin drop-in dir (just its README) so the location exists
   # post-install. A plain cp — not cp -R --delete — preserves any plugins the
   # user dropped in and their db/trusted-plugins opt-ins.

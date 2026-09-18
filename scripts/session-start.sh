@@ -440,8 +440,9 @@ WATCH="$SKILL_DIR/scripts/watch.sh"
 # in both directives below (the Monitor tool caps every watch there
 # regardless), but the prose explaining the expiry and asking the agent to
 # re-arm on it is opt-in. Off by default because most Claude Code seats do
-# not need a standing watch kept alive across its own natural expiry;
-# rearm.sh covers the seats that do.
+# not need a standing watch kept alive across its own natural expiry; the
+# claude-code type's own template (#1321) covers the seats that do, via
+# poke rather than a dedicated command.
 REARM_NOTE=""
 if [ -n "${AGMSG_CC_MONITOR_KEEP_ALIVE:-}" ]; then
   REARM_NOTE="
