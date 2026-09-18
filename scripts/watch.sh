@@ -685,50 +685,108 @@ _install_changed() {
   [ -n "$(find "$SCRIPT_DIR" -newer "$INSTALL_STAMP" -print -quit 2>/dev/null)" ]
 }
 
-# Bounded restart count, carried across the exec below via the environment --
-# a fresh process image starts with no memory of its own, and the whole point
-# of exec is that it never forks, so there is nowhere else to keep a counter.
-# Guards against a restart loop if the installation keeps changing faster than
-# this watcher can settle; on a real install this fires once, not repeatedly.
-AGMSG_WATCH_RESTART_LIMIT="${AGMSG_WATCH_RESTART_LIMIT:-5}"
-case "$AGMSG_WATCH_RESTART_LIMIT" in ''|*[!0-9]*) AGMSG_WATCH_RESTART_LIMIT=5 ;; esac
+# True only once the install that touched scripts/ has FINISHED, not merely
+# started (review finding: install.sh rewrites the tree over a window, #963,
+# so watch.sh itself can already be executable while a sibling file it
+# sources is still old, missing, or half-written -- _install_changed alone
+# cannot tell "one file so far" from "the whole generation").
+#
+# VERSION is install.sh's own last write that touches anything under
+# scripts/ (cp -R scripts/, then chmod, THEN VERSION -- confirmed by reading
+# both its --update and fresh-install paths). No new marker to invent: an
+# install that has finished leaves VERSION at least as new as everything it
+# just copied, and one still mid-copy has not written it yet, or has not
+# written it again since this watcher's own start.
+#
+# "at least as new as" ($INSTALL_STAMP not newer than VERSION), not strictly
+# newer, because a single install run can finish both writes within the same
+# filesystem clock tick on a coarse-resolution filesystem.
+_install_complete() {
+  local version_file="$SKILL_DIR/VERSION"
+  [ -f "$version_file" ] || return 1
+  ! [ "$INSTALL_STAMP" -nt "$version_file" ]
+}
+
+# Fixed, internal, non-negotiable (review finding: an env-supplied limit can
+# be forged or inherited from an unrelated process). Tagged with this exact
+# (session id, pid) chain so a restart count inherited from a DIFFERENT
+# watcher's chain -- e.g. a stray leaked environment variable -- is never
+# mistaken for this one's own; exec preserves both session id and pid, so
+# this chain's own count always matches itself across every restart in it.
+_WATCH_INSTALL_RESTART_LIMIT=5
+_WATCH_INSTALL_RESTART_CHAIN="$SESSION_ID.$$"
+
+# Counts only CONSECUTIVE restarts: reset to zero the first time a cycle
+# passes with nothing changed (see the main loop below), so an ordinary,
+# well-spaced-out install is never more than one restart closer to the cap,
+# no matter how many separate installs this watcher has already lived
+# through.
+_install_restart_count() {
+  if [ "${AGMSG_WATCH_RESTART_CHAIN:-}" = "$_WATCH_INSTALL_RESTART_CHAIN" ]; then
+    case "${AGMSG_WATCH_RESTART_COUNT:-}" in
+      ''|*[!0-9]*) printf '0' ;;
+      *) printf '%s' "$AGMSG_WATCH_RESTART_COUNT" ;;
+    esac
+  else
+    printf '0'
+  fi
+}
+
+_install_restart_count_reset() {
+  [ -z "${AGMSG_WATCH_RESTART_COUNT:-}" ] && [ -z "${AGMSG_WATCH_RESTART_CHAIN:-}" ] && return 0
+  unset AGMSG_WATCH_RESTART_COUNT AGMSG_WATCH_RESTART_CHAIN
+}
 
 # Restart on the new code in place of exiting (#684 follow-up). `exec` replaces
 # this process image without forking, so there is never a moment with two
-# watchers polling the same subscription, and every piece of state this
-# process owns on disk ($PIDFILE, $FILTERFILE, $READY_FILES, actas locks)
-# stays valid across the swap: it is keyed by $SESSION_ID and $$, and both are
-# unchanged -- exec keeps the same pid, and $ORIG_ARGS reproduces the same
-# session id and role. The read cursor lives in the storage driver, not in
-# this process, so a restart resumes from consumed state and delivers nothing
-# twice, exactly as a manual restart already does today.
+# watchers polling the same subscription, and the read cursor lives in the
+# storage driver, not in this process, so a restart resumes from consumed
+# state and delivers nothing twice, exactly as a manual restart already does
+# today.
 #
-# Falls back to the ORIGINAL exit (unchanged message) if the installed
-# watch.sh cannot be found executable -- missing, or not executable, which is
-# what an interrupted or partial install looks like -- so a broken install
-# still produces the same clear stop it always has, rather than looping on a
-# file that is not there to exec.
+# `cleanup` (the EXIT trap's own function) runs BEFORE exec, releasing
+# $PIDFILE/$FILTERFILE/$READY_FILES under THIS image's own naming -- exec
+# skips the EXIT trap, so without this a future release that ever changes one
+# of those paths or formats would orphan the old-named file forever, nobody
+# left holding its name to clean it up. The new image re-creates all three
+# fresh under whichever naming its own code uses, exactly as a freshly
+# launched watcher would.
+#
+# The actas lock is deliberately NOT released here. Its lock file names this
+# session's own owner token ($SESSION_ID), and exec changes neither that nor
+# the pid, so the file stays continuously correct across the swap -- there is
+# no window where it reads as free. The new image's own startup still calls
+# actas_lock_claim for each pair it owns; since the recorded owner already
+# equals its own sid, that call is a no-op self-confirmation (see
+# _actas_lock_try_claim's existing==sid branch), never a fresh claim that
+# could race a peer.
+#
+# Falls back to the ORIGINAL exit (unchanged message) if the install has not
+# (yet, or ever) published a complete generation, or if the installed
+# watch.sh cannot be found executable -- an interrupted or partial install
+# looks like either -- so a still-changing or broken install still produces
+# the same clear stop it always has, rather than risking a mixed generation.
 _install_restart_or_exit() {
   local new_watch="$SCRIPT_DIR/watch.sh" restarts
-  restarts="${AGMSG_WATCH_RESTART_COUNT:-0}"
-  case "$restarts" in ''|*[!0-9]*) restarts=0 ;; esac
 
-  if [ "$restarts" -ge "$AGMSG_WATCH_RESTART_LIMIT" ]; then
+  if _install_complete && [ -x "$new_watch" ]; then
+    restarts="$(_install_restart_count)"
+    if [ "$restarts" -lt "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
+      watch_log "the agmsg installation was updated while this watcher was running; restarting on the new code (same process, same subscription)."
+      cleanup
+      AGMSG_WATCH_RESTART_COUNT=$((restarts + 1))
+      AGMSG_WATCH_RESTART_CHAIN="$_WATCH_INSTALL_RESTART_CHAIN"
+      export AGMSG_WATCH_RESTART_COUNT AGMSG_WATCH_RESTART_CHAIN
+      # The watch_report call below is reached only if exec itself fails to
+      # replace the process image (e.g. an interpreter it can no longer
+      # exec); it is the fallback for that failure, not dead code.
+      # shellcheck disable=SC2093
+      exec "$new_watch" "${ORIG_ARGS[@]}"
+      watch_report "exec of the updated watch.sh failed; exiting instead of running stale code."
+      exit 1
+    fi
     watch_report "the agmsg installation kept changing across $restarts restart(s) in a row; exiting rather than looping. Restart this session (or run /agmsg actas <name>) to resume delivery."
     exit 0
-  fi
-
-  if [ -x "$new_watch" ]; then
-    watch_log "the agmsg installation was updated while this watcher was running; restarting on the new code (same process, same subscription)."
-    AGMSG_WATCH_RESTART_COUNT=$((restarts + 1))
-    export AGMSG_WATCH_RESTART_COUNT
-    # The watch_report call below is reached only if exec itself fails to
-    # replace the process image (e.g. an interpreter it can no longer exec);
-    # it is the fallback for that failure, not dead code.
-    # shellcheck disable=SC2093
-    exec "$new_watch" "${ORIG_ARGS[@]}"
-    watch_report "exec of the updated watch.sh failed; exiting instead of running stale code."
-    exit 1
   fi
 
   watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. Exiting rather than appearing to work. Restart this session (or run /agmsg actas <name>) to resume delivery."
@@ -999,6 +1057,10 @@ while true; do
   if _install_changed; then
     _install_restart_or_exit
   fi
+  # Reaching here means this cycle saw no change -- the "one clean cycle"
+  # that ends a run of consecutive restarts (see _install_restart_count
+  # above). A no-op on a watcher that never restarted.
+  _install_restart_count_reset
   # Liveness guard (#67): exit promptly once the originating agent session is
   # gone. A plain pipe gives no portable way to notice a *downstream* consumer
   # that closed silently — printf '' raises no EPIPE, and macOS buffers a final

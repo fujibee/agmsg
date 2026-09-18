@@ -64,11 +64,15 @@ _wait_for() {
   # way a real install rewrites it. A marker line unique to the new copy is
   # what lets this test tell "the restarted process is running the new code"
   # from "the old process merely survived" -- the two would look identical if
-  # this only checked that delivery continued.
+  # this only checked that delivery continued. VERSION is install.sh's own
+  # last write that touches anything under scripts/ (see _install_complete);
+  # writing it here is what tells the watcher this generation is finished,
+  # not still mid-copy.
   awk 'NR==1 { print; print "echo watch-test-new-code-marker"; next } { print }' \
     "$SCRIPTS/watch.sh" > "$SCRIPTS/watch.sh.new"
   chmod +x "$SCRIPTS/watch.sh.new"
   mv "$SCRIPTS/watch.sh.new" "$SCRIPTS/watch.sh"
+  printf '0.0.0-test\n' > "$TEST_SKILL_DIR/VERSION"
 
   bash "$SCRIPTS/send.sh" team bob alice "after-the-update" >/dev/null
   _wait_for "grep -q 'after-the-update' '$out'" || true
@@ -83,6 +87,35 @@ _wait_for() {
 
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+}
+
+@test "watch: a scripts change with no completed VERSION keeps the original exit, never execs a half-finished install (#684)" {
+  local out="$BATS_TEST_TMPDIR/out3.txt"
+  : > "$out"
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" sid-684c "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local pid=$!
+
+  bash "$SCRIPTS/send.sh" team bob alice "before-half-update" >/dev/null
+  _wait_for "grep -q 'before-half-update' '$out'" || true
+  grep -q 'before-half-update' "$out"
+
+  # A change under scripts/ with no matching VERSION write -- what install.sh's
+  # own rewrite window looks like mid-copy (#963): some files already
+  # rewritten, the completion marker not yet published. Must not be exec'd as
+  # a finished generation.
+  touch "$SCRIPTS/config.sh"
+
+  # Same load-bearing `|| true` as the exit-path tests: a timeout here must
+  # not skip the reap below and leave a live watcher holding the runner open.
+  _wait_for "! kill -0 $pid 2>/dev/null" || true
+
+  local was_alive=0
+  kill -0 "$pid" 2>/dev/null && was_alive=1
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  [ "$was_alive" -eq 0 ]
+  grep -q 'installation was updated' "$out"
 }
 
 @test "watch: keeps running when nothing in the installation changes (#684)" {
@@ -140,6 +173,7 @@ _wait_for() {
   _wait_for "grep -q 'successor-control' '$out2'" || true
 
   touch "$SCRIPTS/config.sh"
+  printf '0.0.0-test\n' > "$TEST_SKILL_DIR/VERSION"
   bash "$SCRIPTS/send.sh" team bob alice "successor-after-update" >/dev/null
   _wait_for "grep -q 'successor-after-update' '$out2'" || true
 
