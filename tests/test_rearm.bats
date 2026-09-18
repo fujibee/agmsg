@@ -59,7 +59,7 @@ teardown() {
   grep -q '^carol: refused' <<<"$output"
   grep -q "^dave: skipped (not claude-code (type=codex))" <<<"$output"
   grep -q "^frank: skipped (registered to a different project ($proj_b))" <<<"$output"
-  [[ "$output" =~ "rearm: 0/3 claude-code monitor/both seat(s) poked in team 'fleet' for project '$proj_a'" ]]
+  grep -qF -- "rearm: 0/3 claude-code monitor/both seat(s) poked in team 'fleet' for project '$proj_a'" <<<"$output"
 
   # Same project, same members, but claude-code's own delivery mode in
   # proj_a is no longer monitor/both -- alice, bob and carol must now be
@@ -70,7 +70,7 @@ teardown() {
   grep -q "^alice: skipped (delivery=turn)" <<<"$output"
   grep -q "^bob: skipped (delivery=turn)" <<<"$output"
   grep -q "^carol: skipped (delivery=turn)" <<<"$output"
-  [[ "$output" =~ "rearm: no claude-code seat registered to '$proj_a' in team 'fleet' is configured for monitor or both delivery" ]]
+  grep -qF -- "rearm: no claude-code seat registered to '$proj_a' in team 'fleet' is configured for monitor or both delivery" <<<"$output"
 
   # Registry-verification control (#1315 review, round 3): a project with NO
   # claude-code registration at all in this team is refused outright, rather
@@ -84,7 +84,7 @@ teardown() {
   cd "$proj_c" || return 1
   run bash "$SCRIPTS/rearm.sh" fleet
   [ "$status" -ne 0 ]
-  ! grep -q ': refused' <<<"$output"
-  ! grep -q ': ok' <<<"$output"
+  refute grep -q ': refused' <<<"$output"
+  refute grep -q ': ok' <<<"$output"
   grep -q "could not verify '$proj_c' as a registered claude-code project in team 'fleet'" <<<"$output"
 }
