@@ -31,11 +31,18 @@ _AGMSG_INPUT_BOX_SH=1
 _AGMSG_INPUT_BOX_RULE20="────────────────────"
 
 # agmsg_input_box_empty <marker> <boxed:yes|""> <screen_text>
-# Returns 0 if the box this type's manifest describes is empty (safe to type
-# into), 1 otherwise — INCLUDING when <screen_text> does not carry enough
-# structure to decide. "Cannot tell" fails toward refusing to type, never
-# toward typing; the caller (poke.sh) is the one place that turns a 1 here
-# into a user-facing refusal.
+# Returns 0 if <screen_text>, AT THE MOMENT IT WAS READ, showed the box this
+# type's manifest describes as empty, 1 otherwise — INCLUDING when
+# <screen_text> does not carry enough structure to decide. "Cannot tell"
+# fails toward refusing to type, never toward typing; the caller (poke.sh)
+# is the one place that turns a 1 here into a user-facing refusal.
+#
+# This narrows the window a poke can corrupt a draft; it does not close it.
+# A person can start typing in the instant between this read and poke.sh's
+# actual keystroke, and that keystroke can still land mixed with theirs —
+# no mechanism here closes that gap (maintainer-accepted residual risk,
+# #1321 review). Never describe this as "poke cannot type into a non-empty
+# box" without that qualifier.
 agmsg_input_box_empty() {
   local marker="$1" boxed="$2" screen="$3"
   [ -n "$marker" ] || return 1
@@ -91,18 +98,53 @@ _agmsg_input_box_empty_boxed() {
   return 0
 }
 
-# Flat style (Codex): no boxed delimiters — take the LAST line starting with
-# <marker> and check for content after it.
+# Flat style (Codex): no boxed delimiters. Two ways a naive "check only the
+# last marker line" reading goes wrong (#1321 review): a multi-line
+# draft whose FIRST line (the one carrying the marker) happens to be blank
+# itself, with the actual typed text on a continuation line below it; and a
+# stale marker left over higher up the screen while the live input box has
+# scrolled out of view (or this is quoted/transcript text, not the prompt
+# widget at all). Both must read as "not confirmed empty", never as empty.
 _agmsg_input_box_empty_flat() {
   local marker="$1" screen="$2"
-  local line last="" found=0 rest
+  local -a lines=()
+  local line n=0
   while IFS= read -r line; do
-    case "$line" in
-      "$marker"*) last="$line"; found=1 ;;
-    esac
+    lines[n]="$line"
+    n=$((n + 1))
   done <<<"$screen"
-  [ "$found" -eq 1 ] || return 1
-  rest="${last#"$marker"}"
+  [ "$n" -gt 0 ] || return 1
+
+  local marker_idx=-1 i=0
+  while [ "$i" -lt "$n" ]; do
+    case "${lines[$i]}" in
+      "$marker"*) marker_idx="$i" ;;
+    esac
+    i=$((i + 1))
+  done
+  [ "$marker_idx" -ge 0 ] || return 1
+
+  # Must sit near the very bottom of the visible screen. NOT measured
+  # against a real Codex pane (unlike Claude Code's boxed rule, captured
+  # live) -- this constant is a deliberately conservative placeholder;
+  # further from the bottom than this reads as "could not confirm", not
+  # "confirmed empty".
+  local near_bottom=6
+  [ $((n - marker_idx)) -le "$near_bottom" ] || return 1
+
+  # Everything strictly after the marker line must be blank -- a
+  # continuation line with real text is exactly the multi-line-draft case
+  # a check anchored only on the marker line's own tail would miss.
+  i=$((marker_idx + 1))
+  while [ "$i" -lt "$n" ]; do
+    case "${lines[$i]}" in
+      *[![:space:]]*) return 1 ;;
+    esac
+    i=$((i + 1))
+  done
+
+  local rest
+  rest="${lines[$marker_idx]#"$marker"}"
   case "$rest" in ' '*) rest="${rest# }" ;; esac
   case "$rest" in *[![:space:]]*) return 1 ;; esac
   return 0

@@ -908,6 +908,31 @@ _install_fake_herdr_input_box() {
   export PATH="$FAKEBIN:$PATH"
 }
 
+_write_codex_record() {
+  local name="$1" ref="$2" path
+  path="$(bash -c '. "'"$SKILL_DIR"'/scripts/lib/actas-lock.sh"; agmsg_spawn_path testteam "$1"' _ "$name")"
+  [ -n "$path" ]
+  printf '%s\t/tmp/project-a\tcodex' "$ref" > "$path"
+}
+
+# Fake herdr for the flat (Codex) shape: one canned "pane read" screen per
+# call, taken in order, so ONE fake covers a multi-call scenario without a
+# stateful counter.
+_install_fake_herdr_flat_screens() {
+  local out="$FAKEBIN/herdr" i=0
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
+    printf '  case "$AGMSG_TEST_FLAT_SCREEN_FILE" in *) :;; esac\n'
+    printf '  cat "$AGMSG_TEST_FLAT_SCREEN_FILE"\n'
+    printf 'fi\n'
+    printf 'exit 0\n'
+  } > "$out"
+  chmod +x "$out"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 @test "poke.sh refuses a Claude Code seat with a draft in its input box, and types once the box is empty" {
   _install_fake_herdr_input_box draft
   _write_record "herdr:w1:p5"
@@ -922,4 +947,46 @@ _install_fake_herdr_input_box() {
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via herdr"
   grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+
+  # Codex (#1321 review): a multi-line draft whose OWN marker line
+  # looks empty, with the real text on a continuation line below it, must
+  # not read as empty.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_flat_screens
+  export AGMSG_TEST_FLAT_SCREEN_FILE="$TEST_SKILL_DIR/flat-multiline.txt"
+  printf 'some transcript line\n›\nhalf-typed continuation\n' > "$AGMSG_TEST_FLAT_SCREEN_FILE"
+  _write_codex_record codex1 "herdr:w1:p6"
+  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
+  [ "$status" -eq 14 ]
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
+
+  # Codex: a marker line present but far from the bottom of the visible
+  # screen (the live input box has scrolled out of view, or this is a
+  # stale/quoted "›" in the transcript, not the prompt) must not read as
+  # empty either.
+  : > "$ARGV_LOG"
+  {
+    printf '› old stale prompt\n'
+    for _i in $(seq 1 20); do printf 'transcript line %s\n' "$_i"; done
+  } > "$AGMSG_TEST_FLAT_SCREEN_FILE"
+  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
+  [ "$status" -eq 14 ]
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
+
+  # Codex: genuinely empty, marker at the very bottom -- still delivers.
+  : > "$ARGV_LOG"
+  printf 'some transcript line\n›\n' > "$AGMSG_TEST_FLAT_SCREEN_FILE"
+  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
+  [ "$status" -eq 0 ]
+  grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+
+  # plain (#1321 review): the input-box check must not block plain's
+  # existing agent-registration -- but see #1229 for what plain does with a
+  # real Claude Code caller (a hard refusal, no fallback needed here since
+  # this run has no ambient caller identity, matching the earlier `unset`
+  # in setup()); the point of this assertion is only that it did NOT come
+  # back as exit 14 (the input-box refusal), proving the check was skipped.
+  _write_named_record plaintarget 'plain:-'
+  run bash "$SCRIPTS/poke.sh" testteam plaintarget "hello"
+  [ "$status" -ne 14 ]
 }

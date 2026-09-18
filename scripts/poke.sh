@@ -29,6 +29,15 @@ set -euo pipefail
 # and the Enter becomes a newline instead of submitting (#619). herdr's
 # `agent prompt` submits by itself and needs no Enter dance. plain refuses
 # with "unsupported: <why>" on stderr, non-zero — never a silent 0.
+#
+# Before typing, a type that opted in (input_prompt_marker set in its
+# manifest) has its input box checked for a draft — see
+# scripts/lib/input-box.sh. That check narrows the window a poke can
+# corrupt a draft; it does NOT close it: a person can start typing in the
+# instant between the check and the actual keystroke below, and that
+# keystroke can still land mixed with theirs (maintainer-accepted residual
+# risk, #1321 review). "poke checked the box first" is not "poke cannot
+# ever type into a non-empty box".
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
@@ -137,8 +146,17 @@ agmsg_terminal_load "$TERMINAL" \
 # each retry exists to wait out. INPUT_MARKER empty (this type set none in
 # its manifest) skips the check entirely: unconditional single terminal_poke
 # call, the same as before this existed.
+#
+# Also skipped outright for the plain terminal (review): plain has no
+# addressable screen to read at all (terminal_peek always fails there, by
+# contract), so treating that failure as "could not confirm empty" would
+# refuse EVERY plain poke with exit 14 and never reach the existing
+# plain-specific fallback below (an agmsg message, when the caller can
+# resolve one) — a real regression, not a safety win, since plain never had
+# a screen for a draft to corrupt in the first place.
 INPUT_MARKER="$(agmsg_type_get "$TYPE" input_prompt_marker)"
 INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
+[ "$TERMINAL" = plain ] && INPUT_MARKER=""
 
 RC=0
 ATTEMPT=0
