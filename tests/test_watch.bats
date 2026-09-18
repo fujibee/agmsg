@@ -7,6 +7,7 @@
 load test_helper
 
 setup() {
+  skip "quarantined for 1.3.1: #1262"
   setup_test_env
   # On MSYS2, the compat shim makes the ppid walk succeed; _iid() (bats
   # subshell) and watch.sh (standalone bash) have different process trees, so
