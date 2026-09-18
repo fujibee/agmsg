@@ -216,6 +216,33 @@ _sqlite_sync_require_jq_binary() {
   return 1
 }
 
+# The roster-mutation kinds this client version accepts, cached for the life
+# of this process the same way `_AGMSG_JQ_BINARY_OK` is: one node fork per
+# `storage_sync_apply_pull` call (warmed at function scope, below), not one
+# per roster-kind message in the page. scripts/internal/wire-kinds.mjs is the
+# single definition; this is the only place that shells out to read it.
+_AGMSG_ROSTER_KINDS=""
+_AGMSG_ROSTER_KINDS_OK=""
+_sqlite_sync_roster_kinds() {
+  case "$_AGMSG_ROSTER_KINDS_OK" in
+    yes) printf '%s' "$_AGMSG_ROSTER_KINDS"; return 0 ;;
+    no)  return 1 ;;
+  esac
+  local node_bin kinds_script
+  node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
+  kinds_script="${SKILL_DIR:-}/scripts/internal/wire-kinds.mjs"
+  if command -v "$node_bin" >/dev/null 2>&1 && [ -f "$kinds_script" ] &&
+     _AGMSG_ROSTER_KINDS="$("$node_bin" "$kinds_script" roster-kinds 2>/dev/null)" &&
+     [ -n "$_AGMSG_ROSTER_KINDS" ]; then
+    _AGMSG_ROSTER_KINDS_OK=yes
+    printf '%s' "$_AGMSG_ROSTER_KINDS"
+    return 0
+  fi
+  _AGMSG_ROSTER_KINDS=""
+  _AGMSG_ROSTER_KINDS_OK=no
+  return 1
+}
+
 # EVERY jq invocation in this driver goes through this wrapper, not `jq`
 # directly. #829's fix covered only the two values this driver SENDS through a
 # final `| @tsv` stage; #968 found a value this driver RECEIVES -- `roster_seqs`,
@@ -1012,6 +1039,13 @@ storage_sync_apply_pull() {
   # which already resolved it at function scope. Warming it here makes the
   # subshells inherit `yes` and collapses that to 1.
   _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
+  # Warmed here for the same reason as the jq probe just above: every call
+  # site below is a `$( )`, so resolving it lazily inside the per-message loop
+  # would re-fork node once per roster-kind message instead of once per page.
+  _sqlite_sync_roster_kinds >/dev/null || {
+    echo "agmsg: storage sync apply could not resolve the accepted roster kinds" >&2
+    _sqlite_sync_why; return 13
+  }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl sql_file line type final_cursor="" corrupt=0 outcome_ids=""
   local seq wire received v cipher key_id blob status policy local_rev reason kind
@@ -1275,8 +1309,8 @@ storage_sync_apply_pull() {
 
     if [ "$status" = importable ]; then
       if [ -n "$kind" ]; then
-        case "$kind" in
-          member_joined|member_left|member_renamed|key_rotated) ;;
+        case " $_AGMSG_ROSTER_KINDS " in
+          *" $kind "*) ;;
           *)
             echo "agmsg: storage sync apply cannot acknowledge projection kind '$kind'" >&2
             _sqlite_sync_apply_fail; _sqlite_sync_why; return 13 ;;
@@ -1406,10 +1440,21 @@ storage_sync_apply_pull() {
 # This never changes the transport cursor; apply performs any resulting state
 # transition atomically against that already-advanced cursor.
 storage_sync_reprocess() {
-  local team="$1" server="$2" remote="$3" protocol="$4" limit="$5" after="${6:-}"
+  local team="$1" server="$2" remote="$3" protocol="$4" limit="$5" after="${6:-}" scope="${7:-}"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
   case "$limit" in ''|*[!0-9]*) _sqlite_sync_why; return 13 ;; esac
   [ "$limit" -ge 1 ] && [ "$limit" -le 1000 ] || { _sqlite_sync_why; return 13; }
+  # Default (empty scope): every status a caller may recover by supplying new
+  # key material, as cmd_unlock's reprocess always has. 'malformed': only rows
+  # the receiver itself failed to understand (#1284) -- a newer parser can
+  # revisit those; authentication_failed, corrupt_state and policy_violation
+  # cannot be fixed by a parser, and pending_key stays on the unlock path.
+  local status_sql
+  case "$scope" in
+    '') status_sql="'unsupported_cipher','pending_key','authentication_failed','malformed','policy_violation'" ;;
+    malformed) status_sql="'malformed'" ;;
+    *) _sqlite_sync_why; return 13 ;;
+  esac
   _sqlite_sync_schema "$team" || return $?
   local generation tl after_seq after_wire after_sql=""
   if [ -n "$after" ]; then
@@ -1436,8 +1481,7 @@ storage_sync_reprocess() {
        WHERE local_team='$tl' AND server_instance_id='$server'
          AND remote_team_id='$remote' AND protocol_version=$protocol
          AND driver_generation='$generation'
-         AND status IN ('unsupported_cipher','pending_key','authentication_failed',
-                        'malformed','policy_violation')
+         AND status IN ($status_sql)
          $after_sql
        ORDER BY CAST(server_seq AS INTEGER),wire_id LIMIT $((limit + 1))
     ), output AS (

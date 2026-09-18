@@ -31,8 +31,13 @@ operations in addition to the ADR 0003 ABI:
 storage_sync_prepare_push <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit>
 storage_sync_reconcile_push <local-team> <server-instance-id> <remote-team-id> <protocol-version>
 storage_sync_apply_pull <local-team> <server-instance-id> <remote-team-id> <protocol-version>
-storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit> [<page-after>]
+storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit> [<page-after>] [<scope>]
 ```
+
+`<scope>` narrows which quarantine statuses are eligible: omitted or empty is
+every recoverable-with-new-key-material status (unchanged); `malformed`
+narrows it to rows a receiver failed to parse, the set a newer parser alone
+can revisit. An unrecognized value is refused, never treated as the default.
 
 The SQLite driver is the Stage-1 implementation. Drivers that do not advertise
 the extension remain valid local-only drivers. Core must fail clearly rather
@@ -182,7 +187,10 @@ transport cursor. The engine reevaluates them against the current authenticated
 policy and installed identities, then passes the outcomes through apply-pull's
 existing atomic import transition. Reprocessing is explicit rather than part of
 every polling cycle, so a permanently invalid ciphertext cannot cause an
-automatic decrypt loop.
+automatic decrypt loop. A client may still trigger the `malformed` scope on its
+own, without an operator invoking it by name: at each point an updated parser
+can first exist for a running install -- engine start, which follows every
+update -- rather than on the polling cycle itself, keeping this invariant.
 
 Reprocess output is stable keyset pagination ordered by `(server_seq, wire_id)`.
 Each page contains at most `limit` `sync_reprocess_candidate` records and exactly

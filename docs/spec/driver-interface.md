@@ -310,7 +310,7 @@ may advertise `capabilities=stage1-sync` from `storage_describe` and implement:
 storage_sync_prepare_push <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit>
 storage_sync_reconcile_push <local-team> <server-instance-id> <remote-team-id> <protocol-version>
 storage_sync_apply_pull <local-team> <server-instance-id> <remote-team-id> <protocol-version>
-storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit> [<page-after>]
+storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit> [<page-after>] [<scope>]
 ```
 
 The extension is optional: a driver without it remains a conforming local-only
@@ -332,7 +332,13 @@ prefix. Apply-pull atomically quarantines unchanged envelopes, reconciles mapped
 echoes or imports unmapped wire IDs once, and advances the transport cursor only
 after durable local outcomes. Transport, decrypt/import, and read progress are
 independent. Reprocess emits blocking quarantine records for explicit policy/key
-reevaluation without rewinding transport. It uses the Stage-1 specification's stable
+reevaluation without rewinding transport. `<scope>` narrows which quarantine
+statuses are eligible; omitted or empty, it is every status a caller may
+recover with new key material (unchanged since before this argument existed).
+`malformed` narrows it to rows a receiver failed to parse, not a cipher or
+policy outcome -- the set a newer parser alone can revisit. A driver refuses
+an unrecognized scope value rather than treating it as the default. It uses
+the Stage-1 specification's stable
 `(server_seq,wire_id)` keyset page and mandatory `sync_reprocess_page` trailer,
 so one explicit engine invocation reaches every candidate without an early
 permanent failure starving later records. The complete framing, record schemas,

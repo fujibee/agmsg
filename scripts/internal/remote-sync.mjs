@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { ageExecutableVersion, CipherStateError, openEnvelope,
   readNativeAgeIdentity } from "./sync-cipher.mjs";
 import { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
+import { STORAGE_ROSTER_KINDS } from "./wire-kinds.mjs";
 export { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -69,7 +70,7 @@ function usage() {
   remote-sync.sh verify-age-handoff --team NAME --bundle FILE --out-dir DIRECTORY
   remote-sync.sh once --team NAME [--limit N]
   remote-sync.sh run --team NAME [--limit N] [--interval SECONDS]
-  remote-sync.sh reprocess --team NAME [--limit N]
+  remote-sync.sh reprocess --team NAME [--limit N] [--scope malformed]
   remote-sync.sh resync --team NAME --accept-floor SEQUENCE
   remote-sync.sh unblock-read --team NAME --member-id UUID
   remote-sync.sh set-endpoint --team NAME
@@ -3391,7 +3392,7 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
     const cursorRecord = records.at(-1);
     const rosterRecords = records.filter((record) =>
       record.type === "sync_pull_message" && record.status === "importable" &&
-      ["member_joined", "member_left", "member_renamed"].includes(record.projection?.kind));
+      STORAGE_ROSTER_KINDS.includes(record.projection?.kind));
     const messageRecords = records.filter((record) =>
       record.type !== "sync_pull_message" || !record.projection?.kind);
     const rosterApplied = rosterRecords.length > 0 ?
@@ -3696,7 +3697,14 @@ function validateReprocessDriverPage(pending, limit, requestedAfter) {
   return { state: states[0], candidates, page };
 }
 
-export async function reprocessCycle(config, limit, dependencies = {}) {
+// scope "" (default): every quarantine status cmd_unlock may recover by
+// supplying new key material -- unchanged from before #1284. scope
+// "malformed": only rows the receiver itself failed to understand, the set
+// #1284's automatic (cmd_sync_start) and explicit (remote.sh reprocess)
+// paths target -- a newer parser can revisit those; it cannot fix
+// authentication_failed, corrupt_state or policy_violation, and pending_key
+// stays on the unlock path.
+export async function reprocessCycle(config, limit, dependencies = {}, scope = "") {
   const healthCall = dependencies.healthCall ?? health;
   const requestCall = dependencies.requestCall ?? request;
   const driverCall = dependencies.driverCall ?? driver;
@@ -3725,6 +3733,26 @@ export async function reprocessCycle(config, limit, dependencies = {}) {
   // floor + (current-floor), rather than only the current retained window.
   const authenticatedSequenceSpace = retentionFloor +
     (BigInt(capabilities.current_seq) - retentionFloor);
+  // Counted and announced BEFORE anything below applies a single row: this
+  // never advances the cursor or the read frontier (comment on
+  // storage_sync_reprocess), so any row it imports lands as unread the
+  // instant it lands, and a caller who did not expect that deserves the
+  // number first, not a surprised inbox after the fact.
+  {
+    let pendingAfter = null;
+    let pendingCount = 0;
+    for (;;) {
+      const pendingExtra = scope ?
+        [String(limit), pendingAfter ?? "", scope] :
+        [String(limit), ...(pendingAfter === null ? [] : [pendingAfter])];
+      const pendingPage = await driverCall("reprocess", config, [], pendingExtra);
+      const { candidates, page } = validateReprocessDriverPage(pendingPage, limit, pendingAfter);
+      pendingCount += candidates.length;
+      if (!page.has_more) break;
+      pendingAfter = page.next_after;
+    }
+    await eventCall("reprocess.pending", { count: pendingCount });
+  }
   const seenTokens = new Set();
   const seenSequences = new Set();
   for (;;) {
@@ -3732,7 +3760,9 @@ export async function reprocessCycle(config, limit, dependencies = {}) {
     if (pageCount > authenticatedSequenceSpace + 1n) {
       throw new Error("driver reprocess walk exceeds authenticated sequence space");
     }
-    const extra = [String(limit), ...(after === null ? [] : [after])];
+    const extra = scope ?
+      [String(limit), after ?? "", scope] :
+      [String(limit), ...(after === null ? [] : [after])];
     const pending = await driverCall("reprocess", config, [], extra);
     const { state, candidates, page } = validateReprocessDriverPage(pending, limit, after);
     sequence(state.transport_cursor, "transport_cursor");
@@ -3784,8 +3814,7 @@ export async function reprocessCycle(config, limit, dependencies = {}) {
       } else {
         records.push(record);
         if (record.status === "importable" &&
-            ["member_joined", "member_left", "member_renamed"].includes(
-              record.projection?.kind)) {
+            STORAGE_ROSTER_KINDS.includes(record.projection?.kind)) {
           pendingRosterRecords.push(record);
         }
       }
@@ -3794,7 +3823,7 @@ export async function reprocessCycle(config, limit, dependencies = {}) {
       const cursorRecord = { type: "sync_pull_cursor", next_after: state.transport_cursor };
       const rosterRecords = records.filter((record) =>
         record.status === "importable" &&
-        ["member_joined", "member_left", "member_renamed"].includes(record.projection?.kind));
+        STORAGE_ROSTER_KINDS.includes(record.projection?.kind));
       const messageRecords = records.filter((record) => !record.projection?.kind);
       if (rosterRecords.length + messageRecords.length + rotationRecords.length !==
           storageRecords.length) {
@@ -3818,8 +3847,9 @@ export async function reprocessCycle(config, limit, dependencies = {}) {
     }
     after = page.next_after;
   }
+  const remainingExtra = scope ? ["1", "", scope] : ["1"];
   const remaining = validateReprocessDriverPage(
-    await driverCall("reprocess", config, [], ["1"]), 1, null);
+    await driverCall("reprocess", config, [], remainingExtra), 1, null);
   const result = {
     count: total,
     imported_count: imported,
@@ -4009,7 +4039,7 @@ export async function pullBootstrap(args, dependencies = {}) {
     const cursorRecord = { type: "sync_pull_cursor", next_after: page.next_after };
     const rosterRecords = records.filter((record) =>
       record.status === "importable" &&
-      ["member_joined", "member_left", "member_renamed"].includes(record.projection?.kind));
+      STORAGE_ROSTER_KINDS.includes(record.projection?.kind));
     const messageRecords = records.filter((record) => !record.projection?.kind);
     if (rosterRecords.length + messageRecords.length !== records.length) {
       throw new Error("pull bootstrap cannot apply this projection kind");
@@ -4269,7 +4299,13 @@ async function main() {
     await resyncCycle(config, args["accept-floor"] ?? "");
     return;
   }
-  if (command === "reprocess") { await reprocessCycle(config, limit); return; }
+  if (command === "reprocess") {
+    if (args.scope !== undefined && args.scope !== "malformed") {
+      throw new Error("scope must be 'malformed' when given");
+    }
+    await reprocessCycle(config, limit, {}, args.scope ?? "");
+    return;
+  }
   // An explicit --limit caps both push and pull; the default lets pull go large.
   const explicitCeiling = args.limit !== undefined ? Math.min(1000, limit) : null;
   if (command === "once") {
