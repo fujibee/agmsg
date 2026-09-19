@@ -174,16 +174,16 @@ while :; do
       # confirmed gone, unsupported, ...). Return it unchanged instead of
       # collapsing every peek failure into 14.
       RC="$PEEK_RC"
-    elif [ -n "$SCREEN" ]; then
+    else
+      # A successful-but-EMPTY read is NOT proof the box is empty: a real
+      # pane can transiently show nothing during a screen redraw or a
+      # switch to an alternate screen, and typing there would still land on
+      # top of a real draft. Refuse (14) the same as any other
+      # not-confirmed-empty screen; do not special-case empty content
+      # (#1321 review round 3 — reverts round 2's peek/poke-asymmetry
+      # shortcut).
       agmsg_input_box_empty "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN" || RC=14
     fi
-    # else: the read succeeded but the screen was empty -- there is no live
-    # agent UI on screen to hold a draft (a real live pane always draws
-    # something), so this check has nothing to protect. Fall through and let
-    # terminal_poke's own attempt (and its own exit code, e.g. 12 for "no
-    # live agent to receive") decide, rather than mask it behind 14 (the
-    # documented peek/poke asymmetry: reading a pane can succeed where
-    # submitting to it cannot).
   fi
   if [ "$RC" -eq 0 ]; then
     terminal_poke "$BARE_ID" "$TEXT" >/dev/null || RC=$?

@@ -692,24 +692,40 @@ EOF
 # does not.
 
 # herdr whose `agent prompt` FAILS (pane exists, no live agent to receive).
+# `pane read` returns the real empty-input-box shape so the #1321 pre-check
+# passes and the submission failure is what actually surfaces (an empty
+# read is NOT itself proof of "no draft" -- see poke.sh's own comment on
+# this -- so the fixture must show a genuinely empty box, not blank output).
 _install_fake_herdr_poke_fails() {
-  cat > "$FAKEBIN/herdr" <<EOF
-#!/usr/bin/env bash
-{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
-if [ "\$1" = agent ] && [ "\$2" = prompt ]; then echo "no live agent in pane" >&2; exit 1; fi
-exit 0
-EOF
+  local rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
+    printf "  printf '%%s\\\\n' '%s testteam-alice ─' '❯' '%s'\n" "$rule" "$rule"
+    printf '  exit 0\n'
+    printf 'fi\n'
+    printf 'if [ "$1" = agent ] && [ "$2" = prompt ]; then echo "no live agent in pane" >&2; exit 1; fi\n'
+    printf 'exit 0\n'
+  } > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
 
-# tmux whose send-keys FAILS (the pane is gone).
+# tmux whose send-keys FAILS (the pane is gone). `capture-pane` returns the
+# real empty-input-box shape for the same reason as the herdr fixture above.
 _install_fake_tmux_poke_fails() {
-  cat > "$FAKEBIN/tmux" <<EOF
-#!/usr/bin/env bash
-{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
-case "\$1" in send-keys) echo "can't find pane: %5" >&2; exit 1 ;; esac
-exit 0
-EOF
+  local rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''tmux'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf 'case "$1" in\n'
+    printf "  capture-pane) printf '%%s\\\\n' '%s testteam-alice ─' '❯' '%s' ;;\n" "$rule" "$rule"
+    printf '  send-keys) echo "can'\''t find pane: %%5" >&2; exit 1 ;;\n'
+    printf 'esac\n'
+    printf 'exit 0\n'
+  } > "$FAKEBIN/tmux"
   chmod +x "$FAKEBIN/tmux"; export PATH="$FAKEBIN:$PATH"
 }
 
