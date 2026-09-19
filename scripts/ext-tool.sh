@@ -141,26 +141,46 @@ cmd_setup() {
   esac
 }
 
-# Echoes the system clipboard's text, or returns non-zero if no known reader
-# is on PATH. Tries each candidate in order rather than picking one from
-# uname, so a platform with more than one option (Linux: Wayland vs X11)
-# still works, and a test can put a fake ahead of the real ones on PATH.
+# Runs ONE named clipboard-reader candidate's actual invocation (the flags
+# each one needs differ, so this exists rather than inlining them in the
+# loop below).
+_ext_tool_clipboard_try() {
+  case "$1" in
+    pbpaste) pbpaste ;;
+    wl-paste) wl-paste ;;
+    xclip) xclip -selection clipboard -o ;;
+    xsel) xsel --clipboard --output ;;
+    powershell.exe) powershell.exe -NoProfile -Command Get-Clipboard ;;
+    powershell) powershell -NoProfile -Command Get-Clipboard ;;
+  esac
+}
+
+# Echoes the system clipboard's text (stdout only) on success. Tries every
+# candidate found on PATH, in order, moving on to the next if one FAILS --
+# not just picking the first one found and stopping there regardless of
+# whether it actually works (review finding: PATH having a `pbpaste` that
+# fails for some reason used to abort immediately and misreport "no reader
+# found", never trying wl-paste/xclip/etc. after it). Each candidate's own
+# stderr is discarded, never surfaced to the caller: a clipboard reader is an
+# external-boundary command, and its failure output is not guaranteed free of
+# fragments of whatever is (or was) selected. Sets
+# _EXT_TOOL_CLIPBOARD_TRIED=1 the moment any candidate is actually attempted,
+# so the caller can tell "a reader was found but every one of them failed"
+# apart from "nothing on PATH at all" -- two different, both secret-free,
+# failure reasons, not one blurred together.
+_EXT_TOOL_CLIPBOARD_TRIED=0
 _ext_tool_read_clipboard() {
-  if command -v pbpaste >/dev/null 2>&1; then
-    pbpaste
-  elif command -v wl-paste >/dev/null 2>&1; then
-    wl-paste
-  elif command -v xclip >/dev/null 2>&1; then
-    xclip -selection clipboard -o
-  elif command -v xsel >/dev/null 2>&1; then
-    xsel --clipboard --output
-  elif command -v powershell.exe >/dev/null 2>&1; then
-    powershell.exe -NoProfile -Command Get-Clipboard
-  elif command -v powershell >/dev/null 2>&1; then
-    powershell -NoProfile -Command Get-Clipboard
-  else
-    return 1
-  fi
+  local bin out
+  _EXT_TOOL_CLIPBOARD_TRIED=0
+  for bin in pbpaste wl-paste xclip xsel powershell.exe powershell; do
+    command -v "$bin" >/dev/null 2>&1 || continue
+    _EXT_TOOL_CLIPBOARD_TRIED=1
+    if out="$(_ext_tool_clipboard_try "$bin" 2>/dev/null)"; then
+      printf '%s' "$out"
+      return 0
+    fi
+  done
+  return 1
 }
 
 cmd_secret() {
@@ -177,10 +197,14 @@ cmd_secret() {
 
   local value dest
   if [ "$from_clipboard" -eq 1 ]; then
-    value="$(_ext_tool_read_clipboard)" || {
-      echo "agmsg: no clipboard reader found on this platform (tried pbpaste, wl-paste, xclip, xsel, powershell Get-Clipboard)." >&2
+    if ! value="$(_ext_tool_read_clipboard)"; then
+      if [ "$_EXT_TOOL_CLIPBOARD_TRIED" -eq 1 ]; then
+        echo "agmsg: found a clipboard reader on PATH but it failed to read the clipboard." >&2
+      else
+        echo "agmsg: no clipboard reader found on this platform (tried pbpaste, wl-paste, xclip, xsel, powershell Get-Clipboard)." >&2
+      fi
       exit 1
-    }
+    fi
     [ -n "$value" ] || { echo "agmsg: clipboard is empty; nothing saved." >&2; exit 1; }
   else
     # A secret typed here never reaches an agent: read/written directly from

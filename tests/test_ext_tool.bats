@@ -239,17 +239,30 @@ teardown() { teardown_test_env; }
 
   # (vi) `secret --from-clipboard` reads the system clipboard instead of a
   # TTY (dogfood finding: `secret`'s plain form refuses under an agent's `!`,
-  # which has no real TTY). A fake pbpaste ahead of the real one on PATH
-  # proves the value flows through without ever appearing in this command's
-  # own output.
+  # which has no real TTY). A fake pbpaste that FAILS (not just a fake
+  # pbpaste that works) is put ahead of a fake wl-paste that succeeds, on
+  # PATH -- proving a failing first candidate is not fatal on its own and the
+  # search actually moves on to the next one (review finding: an earlier
+  # version stopped at the first candidate FOUND, not the first one that
+  # actually worked). Its stderr, which names the fake secret to prove it
+  # would otherwise leak, must never reach this command's own output.
   local clip_bin="$BATS_TEST_TMPDIR/fake-bin"
   mkdir -p "$clip_bin"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf %s "clip-secret-1284"' > "$clip_bin/pbpaste"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'echo "pbpaste: connection failed near clip-secret-1284" >&2' \
+    'exit 1' \
+    > "$clip_bin/pbpaste"
   chmod +x "$clip_bin/pbpaste"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf %s "clip-secret-1284"' > "$clip_bin/wl-paste"
+  chmod +x "$clip_bin/wl-paste"
   run env PATH="$clip_bin:$PATH" bash "$SCRIPTS/ext-tool.sh" secret et-team bot --from-clipboard
   [ "$status" -eq 0 ]
-  grep -qF "Saved." <<<"$output"
-  refute grep -qF "clip-secret-1284" <<<"$output"
+  # Exact match, not just a substring grep: pins the ENTIRE output to this
+  # one line, so a leaked stderr fragment from a failed candidate (or
+  # anything else unexpected) would fail this assertion, not just get missed
+  # by a loose grep.
+  [ "$output" = "Saved. (The value itself is not shown or logged.)" ]
   local secret_file="$TEST_SKILL_DIR/ext-tools/et-team/bot.secret"
   [ -f "$secret_file" ]
   [ "$(stat -c '%a' "$secret_file" 2>/dev/null || stat -f '%Lp' "$secret_file")" = "600" ]
