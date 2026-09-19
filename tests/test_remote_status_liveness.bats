@@ -102,11 +102,18 @@ write_fake_node_ps_fixture() {
   # `_agmsg_pid_alive` consults when kill(1) reports ESRCH -- goes to the real
   # ps.
   #
-  # Without that guard this fixture replies to EVERY ps call, for every pid,
-  # with an argv string and exit 0. Liveness then reads that string as a process
-  # state: non-empty and not starting with `Z`, so a killed engine reads as
-  # alive, `sync start` reports "already running", and the assertion that fails
-  # is the one about the new pid -- naming neither ps nor this fixture.
+  # And even for `-o args=`, only for a pid that is GENUINELY alive right now
+  # (checked here with a real kill -0, independent of anything the code under
+  # test has decided). Without that check this fixture answered every `-o
+  # args=` query, for every pid dead or alive, with the engine's argv string
+  # and exit 0 -- so if liveness ever answered "alive" for a pid that had
+  # actually already exited (#970: an incomplete `ps -Ao` snapshot on a loaded
+  # runner reads as unknown, and unknown defaults to alive), THIS check could
+  # never catch the mistake: it would confirm the stale pid's cmdline looks
+  # like the engine too, and `sync start` reports "already running" instead of
+  # starting the replacement (measured on a real CI red). A pid that is really
+  # gone gets the same answer a genuinely gone pid gets from real ps: nothing,
+  # non-zero.
   printf '%s\n' '#!/usr/bin/env bash' \
     'pid=""; args=0' \
     'for a in "$@"; do' \
@@ -114,12 +121,14 @@ write_fake_node_ps_fixture() {
     'done' \
     'case " $* " in *" -o args= "*) args=1 ;; esac' \
     '[ "$args" = 1 ] || exec /bin/ps "$@"' \
-    'set -- "$@"' \
+    'orig_args=("$@")' \
     'while [ $# -gt 0 ]; do' \
     '  if [ "$1" = "-p" ]; then pid="$2"; shift 2; else shift; fi' \
     'done' \
     "if { [ -n '$ready_file' ] && [ ! -f '$ready_file' ]; } || [ \"\$pid\" = '$foreign_pid' ]; then" \
     "  printf '%s\\n' 'sleep 30'" \
+    'elif ! kill -0 "$pid" 2>/dev/null; then' \
+    '  exec /bin/ps "${orig_args[@]}"' \
     'else' \
     "  printf '%s\\n' 'bash $SCRIPTS/internal/remote-sync.mjs run --team testteam'" \
     'fi' > "$fake_bin/ps"
