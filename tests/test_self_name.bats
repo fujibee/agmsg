@@ -31,6 +31,31 @@ setup() {
   FAKEBIN="$BATS_TEST_TMPDIR/bin"; mkdir -p "$FAKEBIN"
   ARGV_LOG="$BATS_TEST_TMPDIR/argv.log"; : > "$ARGV_LOG"
   export FAKEBIN ARGV_LOG
+  # #1137's project/type auto-detect (self-name.sh) calls agmsg_detect_cli_type,
+  # which walks up to 10 ancestor processes and shells out to a real `ps` at
+  # EVERY level (compat_get_comm and compat_get_ppid, scripts/lib/compat.sh) --
+  # up to ~40 forks per call. None of bats' own ancestors match a known CLI
+  # type, so the walk always runs the full 10 levels. compat.sh is re-sourced
+  # fresh inside self-name.sh on every slow-half call with no re-source guard,
+  # so a bash-function override of compat_get_ppid/compat_get_comm would not
+  # stick past the first call; stand a fake `ps` in front of the real one
+  # instead, for exactly the two invocation shapes compat_get_* uses. Both
+  # return nothing, so the walk's own loop condition (a non-empty next pid)
+  # ends it after one hop -- the same as a real, unmatched ancestor chain
+  # falling through to detect-cli-type.sh's documented "claude-code" default,
+  # just without the other nine forks per call. What is under test here is
+  # naming behaviour, not which real process happens to be bats' grandparent,
+  # so this does not change what any assertion in this file checks: #1137's
+  # tests still see project/type resolve non-empty, from the same default.
+  _real_ps="$(command -v ps)"
+  cat > "$FAKEBIN/ps" <<EOF
+#!/usr/bin/env bash
+case "\${1:-} \${2:-} \${3:-}" in
+  '-o ppid= -p'|'-o comm= -p') exit 0 ;;
+esac
+exec "$_real_ps" "\$@"
+EOF
+  chmod +x "$FAKEBIN/ps"
   # No terminal by default: each test sets the environment it wants.
   unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH
   # This file's whole subject is the naming primitive itself, against fakes
