@@ -77,6 +77,15 @@ _agmsg_pl_rc=$?
 # clean match; returns 1 (echoing nothing) on anything else, including an
 # empty or malformed name -- never guessed at, so a project string that
 # merely happens to start the same way is never mistaken for one.
+#
+# The candidate between the parens is also run through
+# agmsg_validate_tool_name (review finding) -- the SAME validator join.sh
+# itself gates a --tool argument through before it ever becomes a path
+# (drivers/ext-tools/<tool>/). Stripping the parens alone would display
+# whatever a corrupted or hand-edited registration happened to carry between
+# them, including something like "../slack" or "foo bar", as if it were a
+# real tool name; its own stderr is discarded here since this is a display
+# path, not the point the name is actually used as one.
 _ext_tool_name() {
   local project="$1" name
   case "$project" in
@@ -86,6 +95,7 @@ _ext_tool_name() {
       case "$name" in
         ''|*'('*|*')'*) return 1 ;;
       esac
+      agmsg_validate_tool_name "$name" 2>/dev/null || return 1
       printf '%s' "$name"
       return 0
       ;;
@@ -177,10 +187,15 @@ _member_status() {
     # Not _member_delivery: that reads a per-project settings-hooks file,
     # which does not and cannot exist for ext-tool's synthetic project
     # placeholder, and reports "unknown:delivery_status_rc_N" -- itself
-    # another error-shaped string for a thing that isn't broken.
-    # type.conf's own delivery_modes=off is unconditional for this type, so
-    # it is simply "off", not something to go ask delivery.sh about.
-    delivery=off
+    # another error-shaped string for a thing that isn't broken. Read the
+    # type's own manifest instead (agmsg_type_get, from lib/type-registry.sh,
+    # already sourced above) rather than assuming delivery_modes=off: a
+    # missing or unreadable manifest returns empty here (its own documented
+    # behavior, indistinguishable from a genuinely absent key), and that case
+    # must not be reported as the deliberate "off" a readable manifest would
+    # actually say -- review finding.
+    delivery="$(agmsg_type_get "$type" delivery_modes)"
+    [ -n "$delivery" ] || delivery="unknown:type_manifest_unreadable"
     _emit_row "$agent" "$type" "$project" - - - \
       - "$delivery" \
       n/a:not_applicable n/a:not_applicable n/a:not_applicable \
