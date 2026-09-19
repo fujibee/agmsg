@@ -256,8 +256,8 @@ EOF
   done <<<"$renderable_types"
 }
 
-@test "type-registry: spawnable set is exactly eight of the eleven built-ins (#277, #279)" {
-  # hermes and devin deliberately stay out (#279): no known CLI mode starts them
+@test "type-registry: spawnable set is exactly nine of the eleven built-ins (#277, #279)" {
+  # hermes deliberately stays out (#279): no known CLI mode starts it
   # interactive with a seeded initial prompt. agmsg-app also stays out: it's
   # the desktop app itself (spawnable=no), not a spawnable agent type.
   run env -i PATH="$PATH" bash -c \
@@ -267,7 +267,7 @@ EOF
        [ \"\$(agmsg_type_get \"\$t\" spawnable)\" = yes ] && echo \"\$t\"
      done <<< \"\$(agmsg_known_types | sort -u)\" | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,opencode" ]
+  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,devin,gemini,grok-build,opencode" ]
 }
 
 @test "type-registry: detection manifests carry the expected env / proc keys" {
@@ -384,7 +384,7 @@ EOF
   # join.sh and spawn.sh must be fully data-driven; whoami.sh is allowed only its
   # default fallback (echo "claude-code"). Any other type literal on a non-comment
   # line is a re-introduced per-type branch.
-  local types='claude-code|codex|gemini|antigravity|copilot|opencode|hermes'
+  local types='claude-code|codex|gemini|antigravity|copilot|opencode|hermes|devin'
   for f in join.sh spawn.sh; do
     run bash -c "sed 's/#.*//' '$SCRIPTS/$f' | grep -nE '$types' || true"
     [ -z "$output" ] || { echo "hardcoded type literal in $f:"; echo "$output"; false; }

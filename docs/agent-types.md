@@ -28,7 +28,7 @@ a manifest cannot execute code. Multi-value keys are whitespace-separated.
 | `spawnable` | — | `yes` if `spawn.sh` can launch this type |
 | `spawn` | — | a `.mjs` node-launcher (beside the manifest) `spawn.sh` runs via Node; also marks the type spawnable |
 | `model_arg` | — | the `--model`/`-m`-style flag `spawn --model <id>` passes through to the CLI; a type with no `model_arg` refuses `--model` |
-| `prompt_arg` | — | for a CLI that does not accept the actas prompt as a bare positional argument, the named flag whose value IS the prompt (e.g. antigravity's `--prompt-interactive`, copilot's `--interactive`, opencode's `--prompt`) — `spawn.sh` inserts it immediately before the (already-quoted) prompt. Unset = bare positional, the default |
+| `prompt_arg` | — | for a CLI that does not accept the actas prompt as a bare positional argument, the named flag whose value IS the prompt (e.g. antigravity's `--prompt-interactive`, copilot's `--interactive`, opencode's `--prompt`) — `spawn.sh` inserts it immediately before the (already-quoted) prompt. The value may also be a bare `--` end-of-options separator (devin) for a CLI whose positional prompt must be fenced off from option/subcommand parsing. Unset = bare positional, the default |
 | `hooks_file` | yes | project-relative delivery hooks file (e.g. `.codex/hooks.json`) |
 | `monitor` | — | `yes` if the type exposes a native Monitor tool; `spawn` skips the readiness wait when `no` |
 | `delivery_modes` | — | space-separated delivery modes the type's CLI accepts (e.g. `monitor turn off`); `delivery.sh`'s gate rejects anything else. Defaults to `monitor turn both off` when omitted |
