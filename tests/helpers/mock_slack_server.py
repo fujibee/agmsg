@@ -19,6 +19,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # (handle turns a Slack-reported error into a one-line failure).
 MOCK_SLACK_ERROR = os.environ.get("MOCK_SLACK_ERROR", "not_in_channel")
 REQUEST_LOG = os.environ.get("MOCK_SLACK_REQUEST_LOG", "")
+# Slack's real rate limiting is the one case that answers with a non-200
+# status (429) instead of a 200 {"ok": false, ...} envelope -- everything
+# else, including every other error, is a plain 200.
+MOCK_SLACK_HTTP_STATUS = int(os.environ.get("MOCK_SLACK_HTTP_STATUS", "200"))
 
 
 class LoopbackHTTPServer(HTTPServer):
@@ -45,12 +49,14 @@ class Handler(BaseHTTPRequestHandler):
                     "content_type": self.headers.get("Content-Type", ""),
                     "body": parsed_body,
                 }, fh)
-        if MOCK_SLACK_ERROR:
+        if MOCK_SLACK_HTTP_STATUS == 429:
+            payload = {"ok": False, "error": "ratelimited"}
+        elif MOCK_SLACK_ERROR:
             payload = {"ok": False, "error": MOCK_SLACK_ERROR}
         else:
             payload = {"ok": True, "channel": "C0000000000", "ts": "1234567890.000100"}
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
+        self.send_response(MOCK_SLACK_HTTP_STATUS)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

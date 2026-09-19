@@ -10,8 +10,8 @@ set -euo pipefail
 # Usage:
 #   setup status <config_path>
 #   setup check token <key_file>
-#   setup check channel <key_file> <channel>
-#   setup save <config_path> <key_file> <channel>
+#   setup check channel <key_file> <channel_id>
+#   setup save <config_path> <key_file> <channel_id>
 #   setup test <config_path>
 #
 # Never prints a token. `check token`/`check channel` take a key_file PATH,
@@ -41,56 +41,90 @@ cmd_status() {
   printf '{"missing":[%s]}\n' "$items"
 }
 
+# Report an _slack_api_call failure (transport error or an unexpected/429
+# HTTP status) as one JSON line, the same vocabulary handle uses on its own
+# failure line, so a caller reading either surface sees consistent wording.
+# <extra> is a jq OBJECT LITERAL to merge in (e.g. '{"exists":false}'), kept
+# as one plain argument rather than extra --arg/--argjson flags -- mixing
+# this function's OWN flag names into a $ARGS.named merge previously leaked
+# them as stray fields (an "err" key alongside "error") in the output.
+_slack_call_failure_json() {   # [<extra-object-json>]
+  local extra="${1:-{\}}" err_val
+  if [ -n "${_SLACK_CURL_DIAG:-}" ]; then
+    err_val="$_SLACK_CURL_DIAG"
+  else
+    case "$_SLACK_HTTP_CODE" in
+      429) err_val="rate_limited (HTTP 429)" ;;
+      *) err_val="unexpected HTTP $_SLACK_HTTP_CODE" ;;
+    esac
+  fi
+  jq -cn --arg err "$err_val" --argjson extra "$extra" '{ok: false, error: $err} + $extra'
+}
+
 cmd_check_token() {
-  local key_file="${1:?Usage: setup check token <key_file>}" token response ok
+  local key_file="${1:?Usage: setup check token <key_file>}" token out_file ok
   token="$(_slack_read_token "$key_file")" || {
     printf '{"ok":false,"error":"key file not readable or empty: %s"}\n' "$key_file"
     return 1
   }
-  response="$(_slack_api_post "$token" auth.test '{}')" || {
-    printf '{"ok":false,"error":"network error calling auth.test"}\n'
+  out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-setup.XXXXXX")"
+  if ! _slack_api_call "$token" POST auth.test "$out_file" '{}'; then
+    _slack_call_failure_json
+    rm -f "$out_file"
     return 1
-  }
-  ok="$(printf '%s' "$response" | jq -r '.ok // false')"
+  fi
+  case "$_SLACK_HTTP_CODE" in
+    2??) : ;;
+    *) _slack_call_failure_json; rm -f "$out_file"; return 1 ;;
+  esac
+  ok="$(jq -r '.ok // false' "$out_file")"
   if [ "$ok" = "true" ]; then
-    jq -cn --arg bot "$(printf '%s' "$response" | jq -r '.user // ""')" \
-      --arg team "$(printf '%s' "$response" | jq -r '.team // ""')" \
+    jq -cn --arg bot "$(jq -r '.user // ""' "$out_file")" \
+      --arg team "$(jq -r '.team // ""' "$out_file")" \
       '{ok: true, bot: $bot, team: $team}'
+    rm -f "$out_file"
     return 0
   fi
-  jq -cn --arg err "$(printf '%s' "$response" | jq -r '.error // "unknown_error"')" \
-    '{ok: false, error: $err}'
+  jq -cn --arg err "$(jq -r '.error // "unknown_error"' "$out_file")" '{ok: false, error: $err}'
+  rm -f "$out_file"
   return 1
 }
 
 cmd_check_channel() {
-  local key_file="${1:?Usage: setup check channel <key_file> <channel>}" \
-    channel="${2:?Usage: setup check channel <key_file> <channel>}" token response ok
+  local key_file="${1:?Usage: setup check channel <key_file> <channel_id>}" \
+    channel="${2:?Usage: setup check channel <key_file> <channel_id>}" token out_file ok
   token="$(_slack_read_token "$key_file")" || {
     printf '{"ok":false,"error":"key file not readable or empty: %s"}\n' "$key_file"
     return 1
   }
-  response="$(_slack_api_get "$token" "conversations.info?channel=$(_slack_urlenc "$channel")")" || {
-    printf '{"ok":false,"error":"network error calling conversations.info"}\n'
+  out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-setup.XXXXXX")"
+  if ! _slack_api_call "$token" GET "conversations.info?channel=$(_slack_urlenc "$channel")" "$out_file"; then
+    _slack_call_failure_json '{"exists":false}'
+    rm -f "$out_file"
     return 1
-  }
-  ok="$(printf '%s' "$response" | jq -r '.ok // false')"
+  fi
+  case "$_SLACK_HTTP_CODE" in
+    2??) : ;;
+    *) _slack_call_failure_json '{"exists":false}'; rm -f "$out_file"; return 1 ;;
+  esac
+  ok="$(jq -r '.ok // false' "$out_file")"
   if [ "$ok" != "true" ]; then
-    jq -cn --arg err "$(printf '%s' "$response" | jq -r '.error // "unknown_error"')" \
+    jq -cn --arg err "$(jq -r '.error // "unknown_error"' "$out_file")" \
       '{ok: false, exists: false, error: $err}'
+    rm -f "$out_file"
     return 1
   fi
   local is_member
-  is_member="$(printf '%s' "$response" |
-    jq -r 'if (.channel | type) == "object" then (.channel.is_member // false) else false end')"
+  is_member="$(jq -r 'if (.channel | type) == "object" then (.channel.is_member // false) else false end' "$out_file")"
+  rm -f "$out_file"
   jq -cn --argjson member "$is_member" '{ok: true, exists: true, bot_member: $member}'
   [ "$is_member" = "true" ]
 }
 
 cmd_save() {
-  local config_path="${1:?Usage: setup save <config_path> <key_file> <channel>}" \
-    key_file="${2:?Usage: setup save <config_path> <key_file> <channel>}" \
-    channel="${3:?Usage: setup save <config_path> <key_file> <channel>}"
+  local config_path="${1:?Usage: setup save <config_path> <key_file> <channel_id>}" \
+    key_file="${2:?Usage: setup save <config_path> <key_file> <channel_id>}" \
+    channel="${3:?Usage: setup save <config_path> <key_file> <channel_id>}"
   [ -r "$key_file" ] || die "key file not readable: $key_file"
   mkdir -p "$(dirname "$config_path")"
   umask 077
