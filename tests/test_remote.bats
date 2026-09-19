@@ -1018,6 +1018,22 @@ _capability_endpoint() {
   [[ "$output" == *"encryption: age-v1, key present"* ]]
 }
 
+@test "connect --e2ee: one engine cycle accepts an endpoint outside the plaintext allowlist" {
+  skip_if_no_age
+  local public_endpoint="http://0.0.0.0:$MOCK_PORT"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$public_endpoint" --e2ee testteam
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Connected: team 'testteam' (age-v1 encrypted)."* ]]
+
+  # connect waits only for the engine's capabilities marker. The cycle stamp
+  # is stronger evidence: it is written only after a complete health,
+  # capability, pull, and push cycle has returned successfully.
+  wait_for_file "$TEST_SKILL_DIR/run/remote-sync.testteam.cycles.json"
+  grep -qF '"type":"sync_cycle_stamp"' \
+    "$TEST_SKILL_DIR/run/remote-sync.testteam.cycles.json"
+}
+
 @test "connect defaults to plain even when the team already has a key" {
   skip_if_no_age
   bash "$SCRIPTS/key.sh" generate testteam
