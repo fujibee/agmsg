@@ -138,17 +138,73 @@ cmd_save() {
   printf '{"ok":true,"config_path":"%s"}\n' "$config_path"
 }
 
+# setup test posts directly rather than shelling out to handle (unlike the
+# old version of this function): it needs the posted message's channel/ts
+# back to offer a permalink, and handle's own reply must stay EMPTY for an
+# ordinary send (a non-empty reply wakes the sending seat again) -- the two
+# callers now want genuinely different things from the same API call.
 cmd_test() {
-  local config_path="${1:?Usage: setup test <config_path>}" reply rc=0
-  reply="$(jq -cn --arg cp "$config_path" \
-    '{team: "", from: "", to: "", body: "agmsg: Slack setup test message.", message_id: "setup-test", config_path: $cp}' |
-    "$SCRIPT_DIR/handle" 2>&1)" || rc=$?
-  if [ "$rc" -eq 0 ]; then
-    printf '{"ok":true}\n'
-    return 0
+  local config_path="${1:?Usage: setup test <config_path>}" \
+    key_file channel token out_file ok ts chan_id permalink
+  key_file="$(_slack_conf_get "$config_path" key_file)"
+  channel="$(_slack_conf_get "$config_path" channel)"
+  if [ -z "$key_file" ] || [ -z "$channel" ]; then
+    jq -cn '{ok: false, error: "member config is missing key_file or channel"}'
+    return 1
   fi
-  jq -cn --arg err "$reply" '{ok: false, error: $err}'
-  return 1
+  _slack_read_token "$key_file" || {
+    jq -cn --arg err "$_SLACK_TOKEN_ERROR" '{ok: false, error: $err}'
+    return 1
+  }
+  token="$_SLACK_TOKEN"
+
+  out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-setup.XXXXXX")"
+  if ! _slack_api_call "$token" POST chat.postMessage "$out_file" \
+      "$(jq -cn --arg channel "$channel" --arg text "agmsg: Slack setup test message." \
+        '{channel: $channel, text: $text}')"; then
+    _slack_call_failure_json
+    rm -f "$out_file"
+    return 1
+  fi
+  case "$_SLACK_HTTP_CODE" in
+    2??) : ;;
+    *) _slack_call_failure_json; rm -f "$out_file"; return 1 ;;
+  esac
+  ok="$(jq -r '.ok // false' "$out_file")"
+  if [ "$ok" != "true" ]; then
+    jq -cn --arg err "$(jq -r '.error // "unknown_error"' "$out_file")" '{ok: false, error: $err}'
+    rm -f "$out_file"
+    return 1
+  fi
+  ts="$(jq -r '.ts // empty' "$out_file")"
+  chan_id="$(jq -r '.channel // empty' "$out_file")"
+  rm -f "$out_file"
+
+  # Best-effort: the send already succeeded by this point, so a permalink
+  # fetch failing (a missing scope, a transient error) must not turn a
+  # working test into a reported failure -- it just means no link this time.
+  permalink=""
+  if [ -n "$ts" ] && [ -n "$chan_id" ]; then
+    local perm_file
+    perm_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-setup.XXXXXX")"
+    if _slack_api_call "$token" GET \
+        "chat.getPermalink?channel=$(_slack_urlenc "$chan_id")&message_ts=$(_slack_urlenc "$ts")" \
+        "$perm_file"; then
+      case "$_SLACK_HTTP_CODE" in
+        2??)
+          if [ "$(jq -r '.ok // false' "$perm_file")" = "true" ]; then
+            permalink="$(jq -r '.permalink // empty' "$perm_file")"
+          fi
+          ;;
+      esac
+    fi
+    rm -f "$perm_file"
+  fi
+  if [ -n "$permalink" ]; then
+    jq -cn --arg link "$permalink" '{ok: true, permalink: $link}'
+  else
+    jq -cn '{ok: true}'
+  fi
 }
 
 # curl handles the request line itself but not query-string encoding of an

@@ -5,10 +5,20 @@ member config exists yet. This is a guide for YOU (the seat LLM) to follow
 while talking to the user — `setup` itself does not talk to anyone; you run
 it, read its JSON, and decide what to say next.
 
+**Do not hardcode any path in this file, including `~/.agents/skills/agmsg`.**
+An install named anything other than `agmsg` (e.g. `agmsg-ext`) puts
+everything under that other name instead. You are reading this exact file
+from a real path already — it is `<skill-root>/scripts/drivers/ext-tools/slack/SETUP.md`
+— so derive `<skill-root>` from wherever you actually found it. `<config_path>`
+below is likewise whatever `join` told you it needs, in the message that sent
+you here, never a path you compute from a guessed skill name.
+
 Never ask the user to paste their bot token into the chat, and never run
 `setup save` with a token value you were given directly. The token goes in
-through `agmsg ext-tool secret`, which reads it without echoing and writes it
-to a file only you get the *path* to — you only ever handle that path.
+through `bash <skill-root>/scripts/ext-tool.sh secret <team> <name>` (not
+`agmsg ext-tool secret` — there is no such command), which reads it without
+echoing and writes it to a file only you get the *path* to — you only ever
+handle that path.
 
 ## The five steps
 
@@ -24,19 +34,21 @@ to a file only you get the *path* to — you only ever handle that path.
    starting with `xoxb-`.
 
 3. **Save the bot token as a secret.**
-   Tell the user to run, in their own terminal (not through you):
+   `secret` reads the token from a real terminal without echoing it, which
+   needs a TTY this session does not have when it is running inside Claude
+   Code's own `!` passthrough. Tell the user to open a separate terminal
+   (not through you) and run:
    ```
-   agmsg ext-tool secret <team> <name>
+   bash <skill-root>/scripts/ext-tool.sh secret <team> <name>
    ```
    and paste the `xoxb-…` token when prompted. This does not echo the token
    and does not go through you. It reports a file path back to the user —
-   ask them for that path (or read it from wherever `join`/`secret` recorded
-   it for this member, once that plumbing exists), and use it as
-   `<key_file>` below. **Never accept a pasted token value here.**
+   ask them for that path, and use it as `<key_file>` below. **Never accept
+   a pasted token value here.**
 
 4. **Verify the token, then pick and verify a channel.**
    ```
-   scripts/drivers/ext-tools/slack/setup check token <key_file>
+   <skill-root>/scripts/drivers/ext-tools/slack/setup check token <key_file>
    ```
    - `{"ok":true,...}` → token works, continue.
    - `{"ok":false,"error":"invalid_auth"}` → the token is wrong or was
@@ -53,7 +65,7 @@ to a file only you get the *path* to — you only ever handle that path.
    panel that opens shows the Channel ID at the very bottom (or: right-click
    the channel in the sidebar → "View channel details" → same place). Then:
    ```
-   scripts/drivers/ext-tools/slack/setup check channel <key_file> <channel_id>
+   <skill-root>/scripts/drivers/ext-tools/slack/setup check channel <key_file> <channel_id>
    ```
    - `{"ok":true,"exists":true,"bot_member":true}` → ready.
    - `{"ok":true,"exists":true,"bot_member":false}` → channel is real but the
@@ -66,14 +78,22 @@ to a file only you get the *path* to — you only ever handle that path.
 
 5. **Save, then send a real test message.**
    ```
-   scripts/drivers/ext-tools/slack/setup save <config_path> <key_file> <channel_id>
-   scripts/drivers/ext-tools/slack/setup test <config_path>
+   <skill-root>/scripts/drivers/ext-tools/slack/setup save <config_path> <key_file> <channel_id>
+   <skill-root>/scripts/drivers/ext-tools/slack/setup test <config_path>
    ```
-   `<config_path>` is `~/.agents/skills/agmsg/ext-tools/<team>/<name>.conf`.
-   `test` posts one real message ("agmsg: Slack setup test message.") and
-   reports `{"ok":true}` or `{"ok":false,"error":"..."}`. Confirm with the
-   user that it actually showed up in the channel before calling this done —
-   a `true` from Slack's API is not the same as a human having seen it.
+   `<config_path>` is whatever `join` told you it needs for this member — do
+   not compute it from a guessed skill root; a differently-named install
+   puts it somewhere else. `test` posts one real message
+   ("agmsg: Slack setup test message.") and reports `{"ok":true}`,
+   `{"ok":true,"permalink":"https://..."}`, or `{"ok":false,"error":"..."}`.
+   When a `permalink` comes back, share that link with the user directly
+   rather than asking "did it show up?" — it is only there for `setup test`;
+   an ordinary send through `handle` stays silent on purpose (a reply would
+   wake the sending seat again). No `permalink` field just means the link
+   itself could not be fetched (e.g. a missing scope) even though the
+   message did send — `"ok":true` on its own still means it worked, so ask
+   the user to look for it in that case instead of treating this as a
+   failure.
 
 ## Common failures, and what actually fixes them
 
