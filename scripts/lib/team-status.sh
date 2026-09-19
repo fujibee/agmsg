@@ -412,8 +412,13 @@ agmsg_team_render_json_row() {
   local key_cell="$4" key_expected="$5" key_actual="$6"
   local session_cell="$7" session_expected="$8" session_actual="$9"
   shift 9
-  local consistency="$1" reach_status="$2" reach_detail="$3"
-  printf '{"member":%s,"type":%s,"project":%s,"terminal":%s,"pane":%s,"container":%s,"activity":%s,"delivery":%s,"pane_label":%s,"agent_key":%s,"cli_session":%s,"consistency":%s,"reach":%s}' \
+  local consistency="$1" reach_status="$2" reach_detail="$3" tool="${4:-}"
+  # "tool" is the one field this row format has grown since #1284: null for
+  # every existing type, the ext-tool name (e.g. "slack") for an ext-tool
+  # registration. Every other key here is unchanged in name, meaning, and
+  # position -- an existing reader that only looks at known keys sees no
+  # difference.
+  printf '{"member":%s,"type":%s,"project":%s,"terminal":%s,"pane":%s,"container":%s,"activity":%s,"delivery":%s,"pane_label":%s,"agent_key":%s,"cli_session":%s,"consistency":%s,"reach":%s,"tool":%s}' \
     "$(_agmsg_team_json_quote "$member")" "$(_agmsg_team_json_quote "$type")" \
     "$(_agmsg_team_json_quote "$project")" "$(_agmsg_team_json_quote "$terminal")" \
     "$(_agmsg_team_json_quote "$pane")" "$(_agmsg_team_json_quote "$container")" \
@@ -423,7 +428,8 @@ agmsg_team_render_json_row() {
     "$(agmsg_team_identity_json "$key_cell" "$key_expected" "$key_actual")" \
     "$(agmsg_team_identity_json "$session_cell" "$session_expected" "$session_actual")" \
     "$(_agmsg_team_json_quote "$consistency")" \
-    "$(_agmsg_team_reach_json "$reach_status" "$reach_detail")"
+    "$(_agmsg_team_reach_json "$reach_status" "$reach_detail")" \
+    "$([ -n "$tool" ] && _agmsg_team_json_quote "$tool" || printf 'null')"
 }
 
 agmsg_team_render_human_row() {
@@ -431,14 +437,16 @@ agmsg_team_render_human_row() {
   local container="$6" activity="$7" delivery="$8"
   shift 8
   local pane_label="$1" agent_key="$2" cli_session="$3" consistency="$4"
-  local reach_status="$5" reach_detail="$6" reach_summary
+  local reach_status="$5" reach_detail="$6" tool="${7:-}" reach_summary type_display
   case "$reach_status" in
     can) reach_summary="can:${reach_detail// /,}" ;;
     *)   reach_summary="$reach_status:$reach_detail" ;;
   esac
+  type_display="$type"
+  [ -n "$tool" ] && type_display="$type ($tool)"
 
   printf '  %s (%s) — %s   [%s %s @%s activity=%s delivery=%s identity=%s reach=%s]\n' \
-    "$member" "$type" "$project" "$terminal" "$pane" "$container" \
+    "$member" "$type_display" "$project" "$terminal" "$pane" "$container" \
     "$activity" "$delivery" "$consistency" "$reach_summary"
   [ "$consistency" = ok ] && return 0
   _agmsg_team_identity_detail pane_label "$pane_label"

@@ -69,6 +69,30 @@ _agmsg_pl_rc=$?
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/team-status.sh"
 
+# ext-tool's own registration (see join.sh) stores a synthetic placeholder in
+# place of a real project path: "(ext-tool:<tool>)" -- it has no filesystem
+# project the way every other type does. This is the ONE place that parses
+# it, so every reader of a tool name (human display, --json's new "tool"
+# field) agrees on the same rule. Echoes the tool name and returns 0 on a
+# clean match; returns 1 (echoing nothing) on anything else, including an
+# empty or malformed name -- never guessed at, so a project string that
+# merely happens to start the same way is never mistaken for one.
+_ext_tool_name() {
+  local project="$1" name
+  case "$project" in
+    '(ext-tool:'*')')
+      name="${project#(ext-tool:}"
+      name="${name%)}"
+      case "$name" in
+        ''|*'('*|*')'*) return 1 ;;
+      esac
+      printf '%s' "$name"
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # Delivery belongs to a registration (type + project), not merely a member.
 _member_delivery() {
   local type="$1" project="$2" out first rc=0
@@ -82,6 +106,10 @@ _member_delivery() {
 }
 
 JSON_FIRST=1
+# A trailing, optional 21st argument: the ext-tool name (see _ext_tool_name),
+# empty for every other type. team.sh --json's shape does not change for any
+# existing field -- this is carried through as ONE new field ("tool") added
+# to the JSON object, and used only for the human table's type column.
 _emit_row() {
   local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
   local container="$6" activity="$7" delivery="$8"
@@ -90,7 +118,7 @@ _emit_row() {
   local key_cell="$4" key_expected="$5" key_actual="$6"
   local session_cell="$7" session_expected="$8" session_actual="$9"
   shift 9
-  local consistency="$1" reach_status="$2" reach_detail="$3"
+  local consistency="$1" reach_status="$2" reach_detail="$3" tool="${4:-}"
   if [ "$OUTPUT_MODE" = json ]; then
     [ "$JSON_FIRST" -eq 1 ] || printf ',\n'
     JSON_FIRST=0
@@ -99,12 +127,12 @@ _emit_row() {
       "$label_cell" "$label_expected" "$label_actual" \
       "$key_cell" "$key_expected" "$key_actual" \
       "$session_cell" "$session_expected" "$session_actual" "$consistency" \
-      "$reach_status" "$reach_detail"
+      "$reach_status" "$reach_detail" "$tool"
   else
     agmsg_team_render_human_row "$member" "$type" "$project" "$terminal" "$pane" \
       "$container" "$activity" "$delivery" \
       "$label_cell" "$key_cell" "$session_cell" "$consistency" \
-      "$reach_status" "$reach_detail"
+      "$reach_status" "$reach_detail" "$tool"
   fi
 }
 
@@ -132,6 +160,33 @@ _member_status() {
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration n/a \
       cannot remote_registration
+    return 0
+  fi
+  # ext-tool is a program, not a session: no terminal, pane, or screen was
+  # ever going to exist for it (scripts/drivers/types/ext-tool/type.conf
+  # declares spawnable=no, readiness_sentinel=no). Every other type's row
+  # gets here by trying to resolve a placement record and reporting exactly
+  # how that failed; doing the same for ext-tool would report a string of
+  # "unknown:no_placement_record"-shaped cells for a member that was never
+  # going to have one, reading as broken when it is working as designed. "-"
+  # in place of those fields, not a reused n/a:<reason> string, is what
+  # makes that visible at a glance instead of needing an explanation.
+  if [ "$type" = ext-tool ]; then
+    local tool=""
+    tool="$(_ext_tool_name "$project")" || tool=""
+    # Not _member_delivery: that reads a per-project settings-hooks file,
+    # which does not and cannot exist for ext-tool's synthetic project
+    # placeholder, and reports "unknown:delivery_status_rc_N" -- itself
+    # another error-shaped string for a thing that isn't broken.
+    # type.conf's own delivery_modes=off is unconditional for this type, so
+    # it is simply "off", not something to go ask delivery.sh about.
+    delivery=off
+    _emit_row "$agent" "$type" "$project" - - - \
+      - "$delivery" \
+      n/a:not_applicable n/a:not_applicable n/a:not_applicable \
+      n/a:not_applicable n/a:not_applicable n/a:not_applicable \
+      n/a:not_applicable n/a:not_applicable n/a:not_applicable \
+      n/a cannot no_terminal "$tool"
     return 0
   fi
   delivery="$(_member_delivery "$type" "$project")"
