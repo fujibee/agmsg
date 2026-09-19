@@ -155,32 +155,36 @@ _ext_tool_clipboard_try() {
   esac
 }
 
-# Echoes the system clipboard's text (stdout only) on success. Tries every
-# candidate found on PATH, in order, moving on to the next if one FAILS --
-# not just picking the first one found and stopping there regardless of
-# whether it actually works (review finding: PATH having a `pbpaste` that
-# fails for some reason used to abort immediately and misreport "no reader
-# found", never trying wl-paste/xclip/etc. after it). Each candidate's own
-# stderr is discarded, never surfaced to the caller: a clipboard reader is an
-# external-boundary command, and its failure output is not guaranteed free of
-# fragments of whatever is (or was) selected. Sets
-# _EXT_TOOL_CLIPBOARD_TRIED=1 the moment any candidate is actually attempted,
-# so the caller can tell "a reader was found but every one of them failed"
-# apart from "nothing on PATH at all" -- two different, both secret-free,
-# failure reasons, not one blurred together.
-_EXT_TOOL_CLIPBOARD_TRIED=0
+# Echoes the system clipboard's text (stdout only) on success (return 0).
+# Tries every candidate found on PATH, in order, moving on to the next if
+# one FAILS -- not just picking the first one found and stopping there
+# regardless of whether it actually works (review finding: PATH having a
+# `pbpaste` that fails for some reason used to abort immediately and
+# misreport "no reader found", never trying wl-paste/xclip/etc. after it).
+# Each candidate's own stderr is discarded, never surfaced to the caller: a
+# clipboard reader is an external-boundary command, and its failure output
+# is not guaranteed free of fragments of whatever is (or was) selected.
+#
+# Distinguishes "a reader was found but every one of them failed" (return 3)
+# from "nothing on PATH at all" (return 4) via the RETURN CODE, not a side
+# -effect variable: this function is always called as `value="$(...)"`, and
+# a command substitution runs in a SUBSHELL, so a plain variable assignment
+# made inside it (an earlier version set _EXT_TOOL_CLIPBOARD_TRIED=1 this
+# way) is invisible to the caller once the subshell exits -- the caller's
+# own copy never changes, which silently broke the whole distinction (review
+# finding: every one of these two cases was reported as "no reader found").
 _ext_tool_read_clipboard() {
-  local bin out
-  _EXT_TOOL_CLIPBOARD_TRIED=0
+  local bin out tried=0
   for bin in pbpaste wl-paste xclip xsel powershell.exe powershell; do
     command -v "$bin" >/dev/null 2>&1 || continue
-    _EXT_TOOL_CLIPBOARD_TRIED=1
+    tried=1
     if out="$(_ext_tool_clipboard_try "$bin" 2>/dev/null)"; then
       printf '%s' "$out"
       return 0
     fi
   done
-  return 1
+  [ "$tried" -eq 1 ] && return 3
+  return 4
 }
 
 cmd_secret() {
@@ -195,16 +199,26 @@ cmd_secret() {
   agmsg_validate_team_name "$team" || exit 1
   agmsg_validate_agent_name "$name" || exit 1
 
-  local value dest
+  local value dest clipboard_rc
   if [ "$from_clipboard" -eq 1 ]; then
-    if ! value="$(_ext_tool_read_clipboard)"; then
-      if [ "$_EXT_TOOL_CLIPBOARD_TRIED" -eq 1 ]; then
-        echo "agmsg: found a clipboard reader on PATH but it failed to read the clipboard." >&2
-      else
-        echo "agmsg: no clipboard reader found on this platform (tried pbpaste, wl-paste, xclip, xsel, powershell Get-Clipboard)." >&2
-      fi
-      exit 1
+    # The `if` here is load-bearing, not style: this script runs under
+    # `set -e`, and `value="$(_ext_tool_read_clipboard)"` as a bare statement
+    # (outside any condition) would trip errexit the instant that function
+    # returns non-zero, exiting the whole script right there -- before
+    # `clipboard_rc=$?` or the case below ever ran (review finding: this
+    # actually happened, so the two distinct failure messages were
+    # unreachable dead code; the script just exited with whatever raw exit
+    # code the function returned).
+    if value="$(_ext_tool_read_clipboard)"; then
+      clipboard_rc=0
+    else
+      clipboard_rc=$?
     fi
+    case "$clipboard_rc" in
+      0) ;;
+      3) echo "agmsg: found a clipboard reader on PATH but it failed to read the clipboard." >&2; exit 1 ;;
+      *) echo "agmsg: no clipboard reader found on this platform (tried pbpaste, wl-paste, xclip, xsel, powershell Get-Clipboard)." >&2; exit 1 ;;
+    esac
     [ -n "$value" ] || { echo "agmsg: clipboard is empty; nothing saved." >&2; exit 1; }
   else
     # A secret typed here never reaches an agent: read/written directly from

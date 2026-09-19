@@ -267,6 +267,20 @@ teardown() { teardown_test_env; }
   [ -f "$secret_file" ]
   [ "$(stat -c '%a' "$secret_file" 2>/dev/null || stat -f '%Lp' "$secret_file")" = "600" ]
   grep -qF "clip-secret-1284" "$secret_file"
+
+  # When EVERY candidate found on PATH fails, the caller must be told "found
+  # but failed", not "nothing found" -- these were being conflated (review
+  # finding): the function signaled "at least one was tried" through a plain
+  # variable assignment made from inside a `value="$(...)"` command
+  # substitution, which runs in a subshell, so the caller's own copy of that
+  # variable never actually changed. A separate PATH with ONLY the failing
+  # fake pbpaste (no wl-paste fallback this time) reproduces it.
+  local fail_only_bin="$BATS_TEST_TMPDIR/fail-only-bin"
+  mkdir -p "$fail_only_bin"
+  cp "$fake_bin/pbpaste" "$fail_only_bin/pbpaste"
+  run env PATH="$fail_only_bin:$PATH" bash "$SCRIPTS/ext-tool.sh" secret et-team bot2 --from-clipboard
+  [ "$status" -eq 1 ]
+  [ "$output" = "agmsg: found a clipboard reader on PATH but it failed to read the clipboard." ]
 }
 
 @test "ext-tool: setup save forwards extra args after config_path, check forwards them WITHOUT config_path" {
