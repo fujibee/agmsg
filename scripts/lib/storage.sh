@@ -176,7 +176,17 @@ _agmsg_partition_load() {
   for ((_i = 0; _i < _n; _i++)); do
     if [ "${_AGMSG_PARTITION_TEAM_KEYS[$_i]}" = "$team" ]; then
       _slot=$_i
-      if [ "${_AGMSG_PARTITION_TEAM_EPOCH[$_i]}" = "$_AGMSG_POLL_CYCLE_EPOCH" ]; then
+      # Epoch 0 is never a valid cache hit, even against itself: it is the
+      # value every caller that never advances _AGMSG_POLL_CYCLE_EPOCH sits
+      # at forever (every one-shot script, every test), and two such calls
+      # in the same process both stamped "epoch 0" would otherwise compare
+      # equal and the second would wrongly reuse the first's answer for the
+      # rest of that process's life (review, #1333 round 2) -- reviving the
+      # exact process-lifetime staleness this cache exists to avoid, just
+      # for callers outside watch.sh's own loop instead of inside it. Only
+      # watch.sh's loop ever bumps this past 0, so gating the HIT on that is
+      # what keeps every other caller's behavior unchanged (always fresh).
+      if [ "$_AGMSG_POLL_CYCLE_EPOCH" -gt 0 ] && [ "${_AGMSG_PARTITION_TEAM_EPOCH[$_i]}" = "$_AGMSG_POLL_CYCLE_EPOCH" ]; then
         name="${_AGMSG_PARTITION_TEAM_VALS[$_i]}"
       fi
       break

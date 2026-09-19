@@ -78,10 +78,14 @@ teardown() {
   [ "$cycles" -ge 2 ]
   local per_cycle=$((total / cycles))
   echo "per cycle: $per_cycle" >&3
-  # Measured (this change, isolated bats env, several runs): roughly
-  # 45-55/cycle after both stages above, against roughly 85-95/cycle on the
-  # code before #1330. Capped with headroom above the optimized figure for
-  # ordinary variance, and well under the pre-#1330 baseline so a regression
-  # back to it still fails this.
-  [ "$per_cycle" -le 70 ]
+  # Measured (this change, isolated bats env, several runs, stable): 45/cycle
+  # with both stages above, against 61/cycle with only #1329's first stage
+  # (main at fcf74408, before this PR) and 85-95/cycle before #1330 entirely.
+  # 70 (the prior cap) sat inside the 60-75 range #1329 alone already
+  # produces, so this test could pass on fcf74408 with none of this PR's own
+  # changes -- not a regression test for what this PR adds (review, #1333
+  # round 2). Confirmed on fcf74408 directly: 61/cycle, three runs, before
+  # settling on this cap. 55 sits strictly between the two, so losing this
+  # PR's cache (not just regressing to the pre-#1330 baseline) fails it.
+  [ "$per_cycle" -le 55 ]
 }
