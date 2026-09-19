@@ -13,14 +13,16 @@ source "$SCRIPT_DIR/../../../lib/actas-lock.sh"
 source "$SCRIPT_DIR/../../../lib/subscription.sh"
 
 requested=""
+owner_id="${AGMSG_CODEX_OWNER_ID:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --pair) requested="${requested:+$requested$'\n'}${2:?pair required}"; shift 2 ;;
+    --owner) owner_id="${2:?owner required}"; shift 2 ;;
     *) echo "eligible-pairs: unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
-pairs="$(agmsg_subscription_pairs "$PROJECT" "$TYPE" "")"
+pairs="$(agmsg_subscription_pairs "$PROJECT" "$TYPE" "$owner_id")"
 if [ -n "$requested" ]; then
   pairs="$(printf '%s\n' "$pairs" | while IFS=$'\t' read -r team name; do
     printf '%s\n' "$requested" | grep -Fxq "${team}"$'\t'"${name}" && printf '%s\t%s\n' "$team" "$name"

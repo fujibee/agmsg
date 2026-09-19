@@ -462,3 +462,29 @@ test("canonical plaintext rejects lone surrogates and impossible timestamps", as
   assert.throws(() => sealEnvelope({ ...base,
     projection: { ...base.projection, from_agent: "😀".repeat(129) } }), /from_agent/u);
 });
+
+test("receive tolerates an unknown message field but still rejects a duplicate key", async () => {
+  // A future sender may add a field this version does not know about yet.
+  // Enters at the real open path (openEnvelope -> openNone -> parseCanonicalProjection),
+  // not at the validation helper directly, so this exercises what a peer on
+  // the wire actually sees.
+  const withUnknownField = Buffer.from(JSON.stringify({
+    ...manifest.canonical_message, subject: "future field",
+  })).toString("base64");
+  const projection = await openEnvelope({
+    envelope: { v: 1, cipher: "none", key_id: null, blob: withUnknownField },
+    max_blob_bytes: 1_048_576,
+  });
+  assert.deepEqual(projection, manifest.canonical_message);
+  assert.deepEqual(Object.keys(projection).sort(),
+    ["body", "created_at", "from_agent", "to_agent"]);
+
+  const withDuplicateKey = Buffer.from(
+    '{"body":"one","body":"two","created_at":"2026-07-20T06:30:00.000000Z",' +
+    '"from_agent":"leader","to_agent":"worker-1"}',
+  ).toString("base64");
+  await assert.rejects(openEnvelope({
+    envelope: { v: 1, cipher: "none", key_id: null, blob: withDuplicateKey },
+    max_blob_bytes: 1_048_576,
+  }), (error) => error.state === "malformed");
+});

@@ -12,6 +12,7 @@ import process from "node:process";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Worker, isMainThread, parentPort, threadId, workerData } from "node:worker_threads";
+import { parseStrictJson } from "./strict-jsonl.mjs";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -81,7 +82,11 @@ function requireName(value, label) {
   return value;
 }
 
-function canonicalMessage(projection) {
+// Validates a message projection and returns only the fields the wire format
+// knows about. Used both to build the canonical send-side bytes (below) and,
+// on receive, to tolerate fields a newer sender added (see parseCanonicalProjection):
+// unknown fields are never read here, so they are dropped rather than rejected.
+function validateMessageFields(projection) {
   if (!projection || Array.isArray(projection) || typeof projection !== "object" ||
       typeof projection.body !== "string" || Buffer.byteLength(projection.body) < 1 ||
       Buffer.byteLength(projection.body) > 1_000_000 ||
@@ -92,12 +97,16 @@ function canonicalMessage(projection) {
   requireUnicodeScalars(projection.body, "body");
   requireName(projection.from_agent, "from_agent");
   requireName(projection.to_agent, "to_agent");
-  return Buffer.from(JSON.stringify({
+  return {
     body: projection.body,
     created_at: projection.created_at,
     from_agent: projection.from_agent,
     to_agent: projection.to_agent,
-  }), "utf8");
+  };
+}
+
+function canonicalMessage(projection) {
+  return Buffer.from(JSON.stringify(validateMessageFields(projection)), "utf8");
 }
 
 function canonicalRosterMutation(projection) {
@@ -158,17 +167,43 @@ function canonicalProjection(projection) {
     canonicalMessage(projection) : canonicalRosterMutation(projection);
 }
 
+// Roster mutations keep the closed-field contract: only their own kind, name,
+// and value checks (canonicalRosterMutation, unchanged) tell them apart from
+// an attempt to smuggle an unrecognized field into future wire history.
+const ROSTER_MUTATION_FIELDS = {
+  member_joined: ["kind", "mutation_id", "member_id", "name", "occurred_at"],
+  member_left: ["kind", "mutation_id", "member_id", "name", "occurred_at"],
+  member_renamed: ["kind", "mutation_id", "member_id", "from", "to", "occurred_at"],
+  key_rotated: ["kind", "mutation_id", "epoch", "key_id", "fingerprint", "occurred_at"],
+};
+
+function assertKnownFields(value, allowed, label) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) malformed(`${label} has an unrecognized field`);
+  }
+}
+
+// A newer sender may add fields this version does not know about yet
+// (forward compatibility, driver-interface.md's "must ignore" rule applied to
+// the wire). A message tolerates that: unknown fields are dropped, not
+// rejected, once the known fields pass the same checks as before. A roster
+// mutation does not — its field set stays closed, so an unrecognized field is
+// still malformed there. Byte-for-byte JCS is no longer required either way;
+// key order and whitespace never carried meaning, only which fields and
+// values were present. parseStrictJson still rejects a duplicate key, which
+// is the one representation ambiguity this parse must not tolerate.
 function parseCanonicalProjection(bytes) {
   let text;
   let value;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    value = JSON.parse(text);
+    value = parseStrictJson(text);
   } catch {
     malformed("message is not valid UTF-8 JSON");
   }
-  const canonical = canonicalProjection(value);
-  if (!canonical.equals(bytes)) malformed("projection is not canonical JCS");
+  if (value?.kind === undefined) return validateMessageFields(value);
+  canonicalRosterMutation(value);
+  assertKnownFields(value, ROSTER_MUTATION_FIELDS[value.kind], "roster mutation projection");
   return value;
 }
 

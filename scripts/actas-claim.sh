@@ -36,6 +36,18 @@ source "$SCRIPT_DIR/lib/actas-lock.sh"
 source "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/role-session.sh"  # role->session record (#339)
+# Terminal registry, for naming this pane after the claim (v1 scope, item 4). The
+# errexit lift is not decoration: on bash 3.2 a failure inside a sourced file
+# fires THIS script's `set -e`, so `. x || true` would take the script down
+# instead of the guard arm. Naming must never be able to fail a claim.
+_agmsg_tr_rc=0; _agmsg_tr_e=0
+case $- in *e*) _agmsg_tr_e=1 ;; esac
+set +e
+# shellcheck disable=SC1091
+[ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+_agmsg_tr_rc=$?
+[ "$_agmsg_tr_e" = 1 ] && set -e
+[ "$_agmsg_tr_rc" -eq 0 ] || echo "agmsg: terminal registry unavailable; this pane will not be named" >&2
 
 # Resolve the session's real project root (see #92) before any lookup, so an
 # actas issued from a subdir/worktree claims against the registered project
@@ -68,7 +80,13 @@ claimed=""
 while IFS= read -r team; do
   [ -z "$team" ] && continue
   result=$(actas_lock_claim "$team" "$NAME" "$SESSION_ID" 2>/dev/null || true)
+  # Only an explicit `ok` counts as claimed. Everything else — the two named
+  # refusals and anything unanticipated — rolls back and reports. Naming the
+  # successes rather than the failures is the whole point: a claim that failed
+  # before it learned anything prints a verdict now, but even a verdict nobody
+  # thought of must not read as success. (#983)
   case "$result" in
+    ok) : ;;
     held:*)
       # Roll back any partial claims so the user can retry cleanly.
       while IFS= read -r c_team; do
@@ -76,6 +94,21 @@ while IFS= read -r team; do
         actas_lock_release "$c_team" "$NAME" "$SESSION_ID" 2>/dev/null || true
       done <<< "$claimed"
       printf 'status=held team=%s owner=%s\n' "$team" "${result#held:}"
+      exit 1
+      ;;
+    *)
+      # Every non-success, named or not. `unknown:<reason>` carries its reason;
+      # anything else is reported under its own word rather than being silently
+      # accepted, which is what the old fall-through did.
+      case "$result" in
+        unknown:*) _why="${result#unknown:}" ;;
+        *)         _why="claim_unrecognized" ;;
+      esac
+      while IFS= read -r c_team; do
+        [ -z "$c_team" ] && continue
+        actas_lock_release "$c_team" "$NAME" "$SESSION_ID" 2>/dev/null || true
+      done <<< "$claimed"
+      printf 'status=unverified team=%s reason=%s\n' "$team" "$_why"
       exit 1
       ;;
   esac
@@ -94,8 +127,80 @@ BARE_SID="$(agmsg_instance_bare_sid "$SESSION_ID")"
 PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT")"
 while IFS= read -r team; do
   [ -z "$team" ] && continue
-  agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT_PHYS" "$TYPE" || true
+  agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT_PHYS" "$TYPE" "$SESSION_ID" || true
 done <<< "$TEAMS"
+
+# A monitored Codex seat's dispatcher reads its role pair from the seat request
+# rather than inferring it from the project roster. Actas can change the role
+# after SessionStart, so publish the new pair (or an empty pair when the claim
+# is ambiguous) atomically at the same event. Other agent types have no request
+# file and do not enter this branch.
+if [ -z "${SKILL_DIR:-}" ] || [ -z "${TYPE:-}" ]; then
+  echo "actas claim: missing TYPE or SKILL_DIR; refusing bridge request publication" >&2
+elif [ "$TYPE" = "codex" ] && [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] \
+  && [ -r "$SCRIPT_DIR/drivers/types/codex/_seat-key.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/drivers/types/codex/_seat-key.sh"
+  if _agmsg_codex_seat_key_ok "$AGMSG_CODEX_SEAT_KEY"; then
+    request_file="$SKILL_DIR/run/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+    request_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
+    if [ -z "$request_server" ] && [ -f "$request_file" ]; then
+      _request_line=""
+      IFS= read -r _request_line < "$request_file" 2>/dev/null || true
+      _agmsg_codex_request_parse "$_request_line" || true
+      request_server="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
+    fi
+    if [ -z "$request_server" ] && [ -r "$SCRIPT_DIR/drivers/types/codex/_app-server.sh" ]; then
+      # Resume can enter actas from the app-server process without inheriting
+      # its URL. Recover the same per-seat URL from the atomic seat record.
+      . "$SCRIPT_DIR/drivers/types/codex/_app-server.sh"
+      request_server="$(_agmsg_codex_app_server_url "$PROJECT")"
+    fi
+    request_tmp="$request_file.$$"
+    mkdir -p "$SKILL_DIR/run" 2>/dev/null || true
+    team_count=$(printf '%s\n' "$TEAMS" | grep -c . || true)
+    if [ "$team_count" -eq 1 ] && [ -n "$request_server" ]; then
+      IFS= read -r request_team <<EOF
+$TEAMS
+EOF
+      printf '%s\t%s\t%s\t%s\t%s\n' "$TYPE" "$BARE_SID" "$request_server" "$request_team" "$NAME" > "$request_tmp"
+    else
+      # Publish an empty-pair tombstone even when this seat's endpoint is
+      # unavailable. This retires the old role instead of leaving it as the
+      # dispatcher's stale authority; a later SessionStart can publish the
+      # non-empty pair once the per-seat URL is recoverable.
+      printf '%s\t%s\t%s\t\n' "$TYPE" "$BARE_SID" "$request_server" > "$request_tmp"
+    fi
+    mv "$request_tmp" "$request_file"
+  fi
+fi
+
+# Name this pane for the role just claimed, so peek/poke can reach a session a
+# human started by hand — not only one `spawn` placed. `|| true` twice over: the
+# claim is what the caller is waiting on, and naming must not be able to fail it
+# or delay its status line. A terminal that cannot name says so on stderr once.
+#
+# BARE_SID, not $SESSION_ID. In THIS script $SESSION_ID has been overwritten with
+# the normalized composite "<sid>.<pid>" (above), a token that exists only inside
+# agmsg; in session-start.sh the identically named variable holds the BARE sid the
+# CLI handed the hook, and it passes that. What a terminal knows is the bare one —
+# herdr stores exactly it in agent_session.value — so handing over the composite
+# asks a question no terminal can answer. It comes back as "cannot identify this
+# pane", which reads as a resolution problem and is an identifier mismatch, and
+# the `|| true` below means the claim still reports success while the pane goes
+# unnamed and unaddressable. watch.sh does the same lookup and was corrected the
+# same way (watch.sh:271); this was the remaining site.
+#
+# Once per claimed team, mirroring the role-session loop above: each (team, role)
+# gets its own record, because that pair is what peek/poke resolve by. The
+# VISIBLE pane name is whichever team comes last — panes have one name and a role
+# in two teams is one pane. Stable, since the order is $TEAMS'.
+if declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+  while IFS= read -r team; do
+    [ -z "$team" ] && continue
+    agmsg_terminal_name_self_safe "$BARE_SID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" record || true
+  done <<< "$TEAMS"
+fi
 
 # Start the engine for each claimed team, if one is not already up (#774).
 #

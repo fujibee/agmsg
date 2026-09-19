@@ -62,6 +62,7 @@ _SQLITE_SYNC_COMMIT_BYTES=131072
 _sqlite_sync_commit_chunk() {
   local db="$1" sql="$2"
   [ -n "$sql" ] || return 0
+  agmsg_sqlite_warm
   printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | agmsg_sqlite -bail "$db" >/dev/null 2>&1
 }
 
@@ -112,22 +113,31 @@ _sqlite_sync_valid_binding() {
 }
 
 _sqlite_sync_decimal_le() {
-  local left right
-  left=$(printf '%s' "$1" | sed 's/^0*//')
-  right=$(printf '%s' "$2" | sed 's/^0*//')
+  # Reports through the exit status (0 = left <= right, 1 = not), not by
+  # echoing "0"/"1" for a caller to capture with `$( )`: every caller used to
+  # wrap this in a command substitution, which forks a subshell exactly like
+  # the `printf | sed` this same fix removed above -- and #968's
+  # roster_seqs validation calls this once per entry, so that subshell was
+  # still one fork per entry even after the pipelines were gone (measured:
+  # ~103s left on a 10,001-entry list after that first fix alone). A bash
+  # function's own exit status is already whatever its last command's was,
+  # so returning the boolean directly costs nothing extra here.
+  local left="$1" right="$2"
+  # Strip leading zeros with a plain loop, not `printf | sed`: bash 3.2 has
+  # no extglob to strip a run of zeros in one substitution, so this walks one
+  # character at a time; `-gt 1`, not `-gt 0`, is what keeps a lone "0" from
+  # being stripped down to an empty string.
+  while [ "${#left}" -gt 1 ] && [ "${left:0:1}" = 0 ]; do left="${left:1}"; done
+  while [ "${#right}" -gt 1 ] && [ "${right:0:1}" = 0 ]; do right="${right:1}"; done
   [ -n "$left" ] || left=0
   [ -n "$right" ] || right=0
-  if [ "${#left}" -lt "${#right}" ] ||
-     { [ "${#left}" -eq "${#right}" ] && [[ "$left" < "$right" || "$left" = "$right" ]]; }; then
-    echo 1
-  else
-    echo 0
-  fi
+  [ "${#left}" -lt "${#right}" ] ||
+    { [ "${#left}" -eq "${#right}" ] && [[ "$left" < "$right" || "$left" = "$right" ]]; }
 }
 
 _sqlite_sync_sequence() {
   case "$1" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
-  [ "$(_sqlite_sync_decimal_le "$1" 9223372036854775807)" = 1 ]
+  _sqlite_sync_decimal_le "$1" 9223372036854775807
 }
 
 
@@ -204,6 +214,26 @@ _sqlite_sync_require_jq_binary() {
   _AGMSG_JQ_BINARY_OK=no
   _sqlite_sync_jq_binary_refusal
   return 1
+}
+
+# EVERY jq invocation in this driver goes through this wrapper, not `jq`
+# directly. #829's fix covered only the two values this driver SENDS through a
+# final `| @tsv` stage; #968 found a value this driver RECEIVES -- `roster_seqs`,
+# read via a plain `jq -r` -- carrying the same Windows CRLF into a caller that
+# then rejected it as non-canonical. The defect was never "the wrong flag on one
+# call", it was "no single place forces the flag", so a wrapper is the fix: a
+# future call site cannot forget `-b` because it never has occasion to spell out
+# `jq` at all.
+#
+# `_sqlite_sync_require_jq_binary` is cheap to call on every invocation: its
+# result is cached in `_AGMSG_JQ_BINARY_OK` after the first probe, so this adds
+# one `case` and nothing else once resolved. Call sites that already had an
+# explicit `_sqlite_sync_require_jq_binary || return N` earlier in the same
+# function (placed there to fail before anything is reserved or written) keep
+# that check -- it is now redundant with this wrapper's own check, not wrong.
+_sqlite_sync_jq() {
+  _sqlite_sync_require_jq_binary || return 1
+  jq -b "$@"
 }
 
 # <team> is the storage selector, threaded from the contract that called us.
@@ -432,22 +462,29 @@ storage_sync_resync() {
   node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
   strict_parser="$SKILL_DIR/scripts/internal/strict-jsonl.mjs"
   command -v "$node_bin" >/dev/null 2>&1 && [ -f "$strict_parser" ] || return 10
+  # AFTER the node/parser check, unlike the other entries in this file.
+  # `storage_sync_resync` answers 10 for "no node, no strict parser" and 13 for
+  # everything else, and callers tell those apart. Resolving jq first would turn
+  # a missing node into a 13 whenever the jq also lacked `-b` -- measured: 10
+  # before this commit, 13 with the gate placed first. The gate buys an earlier,
+  # clearer refusal; it does not get to outrank an existing return code.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   line=$("$node_bin" "$strict_parser" current_seq expected_transport_cursor \
     min_available_seq reason type) || { _sqlite_sync_why; return 13; }
-  printf '%s\n' "$line" | jq -e '
+  printf '%s\n' "$line" | _sqlite_sync_jq -e '
     (keys == ["current_seq","expected_transport_cursor","min_available_seq","reason","type"])
     and .type == "sync_resync" and .reason == "retention-gap-accepted"
     and (.expected_transport_cursor|type)=="string"
     and (.min_available_seq|type)=="string" and (.current_seq|type)=="string"' \
     >/dev/null 2>&1 || { _sqlite_sync_why; return 13; }
-  expected=$(printf '%s\n' "$line" | jq -r '.expected_transport_cursor')
-  floor=$(printf '%s\n' "$line" | jq -r '.min_available_seq')
-  current=$(printf '%s\n' "$line" | jq -r '.current_seq')
-  reason=$(printf '%s\n' "$line" | jq -r '.reason')
+  expected=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.expected_transport_cursor')
+  floor=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.min_available_seq')
+  current=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.current_seq')
+  reason=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.reason')
   _sqlite_sync_sequence "$expected" && _sqlite_sync_sequence "$floor" &&
     _sqlite_sync_sequence "$current" || { _sqlite_sync_why; return 13; }
-  [ "$(_sqlite_sync_decimal_le "$expected" "$floor")" = 1 ] && [ "$expected" != "$floor" ] || { _sqlite_sync_why; return 13; }
-  [ "$(_sqlite_sync_decimal_le "$floor" "$current")" = 1 ] || { _sqlite_sync_why; return 13; }
+  _sqlite_sync_decimal_le "$expected" "$floor" && [ "$expected" != "$floor" ] || { _sqlite_sync_why; return 13; }
+  _sqlite_sync_decimal_le "$floor" "$current" || { _sqlite_sync_why; return 13; }
   gap_start=$((10#$expected + 1))
   _sqlite_sync_sequence "$gap_start" || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
@@ -604,24 +641,24 @@ storage_sync_prepare_push() {
 
   local prepare generation db tl input_ok version cipher key_json key_id recipients max_blob allow_new
   prepare=$(cat)
-  input_ok=$(printf '%s\n' "$prepare" | jq -r \
+  input_ok=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r \
     'select(.type=="sync_prepare" and (.envelope_v|type)=="number" and
             (.cipher|type)=="string" and has("key_id") and
             (.max_blob_bytes|type)=="number" and (.allow_new|type)=="boolean") | "ok"' 2>/dev/null)
   [ "$input_ok" = ok ] || { _sqlite_sync_why; return 13; }
-  version=$(printf '%s\n' "$prepare" | jq -r '.envelope_v')
-  cipher=$(printf '%s\n' "$prepare" | jq -r '.cipher')
-  key_json=$(printf '%s\n' "$prepare" | jq -c '.key_id')
-  key_id=$(printf '%s\n' "$prepare" | jq -r '.key_id // empty')
-  recipients=$(printf '%s\n' "$prepare" | jq -c '.recipients // []')
-  max_blob=$(printf '%s\n' "$prepare" | jq -r '.max_blob_bytes')
-  allow_new=$(printf '%s\n' "$prepare" | jq -r 'if .allow_new then 1 else 0 end')
+  version=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.envelope_v')
+  cipher=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.cipher')
+  key_json=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -c '.key_id')
+  key_id=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.key_id // empty')
+  recipients=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -c '.recipients // []')
+  max_blob=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r '.max_blob_bytes')
+  allow_new=$(printf '%s\n' "$prepare" | _sqlite_sync_jq -r 'if .allow_new then 1 else 0 end')
   [ "$version" = 1 ] || { _sqlite_sync_why; return 13; }
   case "$cipher" in
     none) [ "$key_json" = null ] && [ "$recipients" = '[]' ] || { _sqlite_sync_why; return 13; } ;;
     age-v1)
       printf '%s\n' "$key_id" | grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$' || { _sqlite_sync_why; return 13; }
-      [ "$(printf '%s\n' "$recipients" | jq -r 'length >= 1 and length <= 256 and (all(.[]; type=="string"))')" = true ] || { _sqlite_sync_why; return 13; }
+      [ "$(printf '%s\n' "$recipients" | _sqlite_sync_jq -r 'length >= 1 and length <= 256 and (all(.[]; type=="string"))')" = true ] || { _sqlite_sync_why; return 13; }
       ;;
     *) _sqlite_sync_why; return 13 ;;
   esac
@@ -671,7 +708,7 @@ storage_sync_prepare_push() {
   # thing retained per message is its position, local id and wire id — ids
   # only, no body, a handful of bytes each.
   if [ -n "$rows" ]; then
-    pending=$(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)' | wc -l) || { _sqlite_sync_why; return 13; }
+    pending=$(printf '%s\n' "$rows" | _sqlite_sync_jq -c 'select(.reserved==null)' | wc -l) || { _sqlite_sync_why; return 13; }
     pending=$((pending))
   fi
 
@@ -685,8 +722,8 @@ storage_sync_prepare_push() {
       seal_pos[$prepared]="$pos"; seal_local[$prepared]="$local_id"
       seal_wire[$prepared]="$wire"; prepared=$((prepared + 1))
     done < <(paste <(printf '%s\n' "$uuids") \
-                   <(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)') \
-             | jq -b -rR 'split("\t") as $pair | ($pair[1] | fromjson) as $row
+                   <(printf '%s\n' "$rows" | _sqlite_sync_jq -c 'select(.reserved==null)') \
+             | _sqlite_sync_jq -rR 'split("\t") as $pair | ($pair[1] | fromjson) as $row
                        | [$row.local_position, $row.local_id, $pair[0]] | @tsv')
     [ "$prepared" -eq "$pending" ] || { _sqlite_sync_why; return 13; }
     if [ -n "$key_id" ]; then q="'$(_sqlite_lit "$key_id")'"; else q="NULL"; fi
@@ -737,8 +774,8 @@ storage_sync_prepare_push() {
         sealed=$((sealed + chunk_count)); chunk_sql=""; chunk_count=0
       fi
     done < <(paste <(printf '%s\n' "$uuids") \
-                   <(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)') \
-      | jq -cR \
+                   <(printf '%s\n' "$rows" | _sqlite_sync_jq -c 'select(.reserved==null)') \
+      | _sqlite_sync_jq -cR \
         --arg cipher "$cipher" --arg key "$key_id" --arg team_id "$remote" \
         --argjson version "$version" --argjson protocol "$protocol" \
         --argjson max_blob "$max_blob" --argjson recipients "$recipients" '
@@ -753,7 +790,7 @@ storage_sync_prepare_push() {
            projection:{body:$row.body,created_at:$created,
                        from_agent:$row.from_agent,to_agent:$row.to_agent}}' \
       | "$node_bin" "$cipher_helper" seal-batch "$pending" \
-      | jq -b -r --unbuffered --arg cipher "$cipher" --argjson key "$key_json" '
+      | _sqlite_sync_jq -r --unbuffered --arg cipher "$cipher" --argjson key "$key_json" '
           select(.type=="sync_seal_result")
           | [(.index|tostring),
              (if .status=="ok" and .envelope.v==1 and .envelope.cipher==$cipher
@@ -796,6 +833,14 @@ storage_sync_prepare_push() {
 storage_sync_reconcile_push() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl line values="" type pos wire seq disposition jq_ok count=0
   generation=$(_sqlite_sync_generation "$team"); db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
@@ -830,7 +875,7 @@ storage_sync_reconcile_push() {
     # and this fails closed rather than proceeding on stale values from the
     # previous iteration.
     jq_ok=0
-    eval "$(printf '%s\n' "$line" | jq -r -s '
+    eval "$(printf '%s\n' "$line" | _sqlite_sync_jq -r -s '
       if length != 1 then error("one JSON value per line") else .[0] end
       | "type=\(.type // "" | tostring | @sh)",
       "pos=\(.local_position // "" | tostring | @sh)",
@@ -867,7 +912,7 @@ storage_sync_reconcile_push() {
 
   # Stdin, for the same reason as the pull outcomes (#882): `$values` gains an
   # entry per acked message and a full catch-up push carries a thousand.
-  printf '%s\n' "BEGIN IMMEDIATE;
+  _sqlite_exec_stdin "$db" "BEGIN IMMEDIATE;
     CREATE TEMP TABLE incoming_sync_acks(
       local_position INTEGER UNIQUE,wire_id TEXT UNIQUE,server_seq TEXT UNIQUE);
     INSERT INTO incoming_sync_acks VALUES $values;
@@ -919,8 +964,15 @@ storage_sync_reconcile_push() {
     -- No sentinel. An earlier revision bounded with 9223372036854775807 as
     -- though it were infinity; it is the largest value events.seq can hold, so
     -- a candidate sitting exactly there was accepted by the old query and
-    -- refused by the new one. `IS NULL OR <` says what was meant and has no
+    -- refused by the new one. 'IS NULL OR <' says what was meant and has no
     -- boundary to collide with.
+    --
+    -- Single quotes on purpose. This whole statement is one double-quoted bash
+    -- string, so the shell sees every character here before SQLite does: a
+    -- backtick becomes command substitution, and a double quote ends the string
+    -- early. Either one breaks the push with an error naming the line the string
+    -- opens on, dozens of lines above this comment, which is why such a message
+    -- never points at the comment that caused it.
     CREATE TEMP TABLE sync_first_gap AS
       SELECT MIN(gap.seq) AS seq FROM events gap LEFT JOIN sync_messages gm
         ON gm.local_team='$tl' AND gm.server_instance_id='$server'
@@ -939,7 +991,7 @@ storage_sync_reconcile_push() {
     WHERE b.local_team='$tl' AND b.server_instance_id='$server'
       AND b.remote_team_id='$remote' AND b.protocol_version=$protocol
       AND b.driver_generation='$generation';
-    COMMIT;" | agmsg_sqlite -bail -batch "$db" >/dev/null 2>&1 || return 12
+    COMMIT;" >/dev/null 2>&1 || return 12
 
   _sqlite_data "$team" "SELECT json_object('type','sync_reconcile_result','push_cursor',
     CAST(push_cursor AS TEXT)) FROM sync_bindings WHERE local_team='$tl'
@@ -952,6 +1004,14 @@ storage_sync_reconcile_push() {
 storage_sync_apply_pull() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl sql_file line type final_cursor="" corrupt=0 outcome_ids=""
   local seq wire received v cipher key_id blob status policy local_rev reason kind
@@ -965,7 +1025,9 @@ storage_sync_apply_pull() {
   _AGMSG_SYNC_JQ_ERR=""
   trap 'case "${_AGMSG_SYNC_SQL_FILE:-}" in "${TMPDIR:-/tmp}"/agmsg-sync-sql.*) rm -f "$_AGMSG_SYNC_SQL_FILE" ;; esac
         case "${_AGMSG_SYNC_JQ_ERR:-}" in "${TMPDIR:-/tmp}"/agmsg-sync-jq.*) rm -f "$_AGMSG_SYNC_JQ_ERR" ;; esac' EXIT INT TERM HUP
-  printf '%s\n' 'BEGIN IMMEDIATE;' > "$sql_file"
+  printf '%s\n' 'BEGIN IMMEDIATE;
+    CREATE TEMP TABLE sync_apply_envelope(blob TEXT);
+    INSERT INTO temp.sync_apply_envelope VALUES(NULL);' > "$sql_file"
 
   # ONE jq FOR THE WHOLE PAGE, AND NO eval AT ALL (#908 item 3, #940).
   #
@@ -995,22 +1057,42 @@ storage_sync_apply_pull() {
   local jq_err page_count record_index field_name
   jq_err=$(mktemp "${TMPDIR:-/tmp}/agmsg-sync-jq.XXXXXX") || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
   _AGMSG_SYNC_JQ_ERR="$jq_err"
-  exec 3< <(jq -j -R -s '
+  exec 3< <(_sqlite_sync_jq -j -R -s '
     def fields: ["type","next_after","server_seq","id","server_received_at",
                  "envelope.v","envelope.cipher","envelope.key_id","envelope.blob",
                  "status","policy_revision","local_security_revision","reason",
                  "projection.kind","projection.from_agent","projection.to_agent",
                  "projection.body","projection.created_at"];
-    def pick($r; $name):
+    # envelope.blob and envelope.cipher have NO `// ""` default, unlike the twelve
+    # fields that do, and the value is `tostring`-ed below -- so on a message a
+    # JSON null, an absent key, or a number was silently stored as the plausible-
+    # looking text "null"/"12345", rc=0 (#1042). A `// ""` default (like the other
+    # twelve) would only trade "null" for "" -- still a silent non-ciphertext -- so
+    # instead REJECT a non-string, the way the two other unguarded fields already
+    # are: status against a whitelist, envelope.v against a numeric gate, both
+    # rc=13. A sentinel value was the alternative but it would add a thing four
+    # places (read/store/projection/migration) must recognise. The type is only
+    # known HERE, before `tostring` erases it (a real ciphertext and a former null
+    # both read as strings downstream), so the guard has to live in the pick. Only
+    # a sync_pull_message carries an envelope; a sync_pull_cursor legitimately has
+    # none, so the check is scoped to messages (a cursor reads blob/cipher but never
+    # uses them). An empty string is a present string and stays out of scope here.
+    def pick($n; $r; $name):
       (if   $name == "type"                    then $r.type // ""
        elif $name == "next_after"              then $r.next_after // ""
        elif $name == "server_seq"              then $r.server_seq // ""
        elif $name == "id"                      then $r.id // ""
        elif $name == "server_received_at"      then $r.server_received_at // ""
        elif $name == "envelope.v"              then $r.envelope.v
-       elif $name == "envelope.cipher"         then $r.envelope.cipher
+       elif $name == "envelope.cipher"         then
+             (if $r.type == "sync_pull_message"
+              then ($r.envelope.cipher | if type == "string" then . else error("record \($n): envelope.cipher is \(type), not a string") end)
+              else $r.envelope.cipher end)
        elif $name == "envelope.key_id"         then $r.envelope.key_id // ""
-       elif $name == "envelope.blob"           then $r.envelope.blob
+       elif $name == "envelope.blob"           then
+             (if $r.type == "sync_pull_message"
+              then ($r.envelope.blob | if type == "string" then . else error("record \($n): envelope.blob is \(type), not a string") end)
+              else $r.envelope.blob end)
        elif $name == "status"                  then $r.status
        elif $name == "policy_revision"         then $r.policy_revision // ""
        elif $name == "local_security_revision" then $r.local_security_revision // ""
@@ -1027,7 +1109,7 @@ storage_sync_apply_pull() {
         | (.key + 1) as $n
         | (try (.value | fromjson) catch error("record \($n): not one JSON value on its line")) as $r
         | fields[] as $name
-        | pick($r; $name) as $v
+        | pick($n; $r; $name) as $v
         | (if ($v | contains("\u0000"))
            then error("record \($n): field \($name) contains U+0000")
            else $v end) + "\u0000" )
@@ -1043,7 +1125,7 @@ storage_sync_apply_pull() {
       [ -s "$jq_err" ] && sed 's/^/agmsg: sqlite-sync: /' "$jq_err" >&2
       printf 'agmsg: sqlite-sync: %s\n' "$1" >&2
     fi
-    exec 3<&- 2>/dev/null || true
+    { exec 3<&-; } 2>/dev/null || true
     rm -f "$sql_file" "$jq_err"
     _AGMSG_SYNC_SQL_FILE=""; _AGMSG_SYNC_JQ_ERR=""
     trap - EXIT INT TERM HUP
@@ -1097,12 +1179,13 @@ storage_sync_apply_pull() {
     _sqlite_sync_lit_into "$at"; at_q="$_SQLITE_SYNC_LIT"
     q="'$key_id_q'"; [ -n "$key_id" ] || q=NULL
     printf "%s\n" "
+      UPDATE temp.sync_apply_envelope SET blob='$blob_q';
       INSERT OR IGNORE INTO sync_conflicts
         (local_team,server_instance_id,remote_team_id,protocol_version,
          driver_generation,server_seq,wire_id,envelope_v,cipher,key_id,blob,
          reason,observed_at)
       SELECT '$tl','$server','$remote',$protocol,'$generation','$seq','$wire',$v,
-             '$cipher_q',$q,'$blob_q',
+             '$cipher_q',$q,(SELECT blob FROM temp.sync_apply_envelope),
              'server sequence maps to another wire id',
              strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE EXISTS(SELECT 1 FROM sync_quarantine qx
@@ -1118,7 +1201,7 @@ storage_sync_apply_pull() {
          driver_generation,server_seq,wire_id,envelope_v,cipher,key_id,blob,
          reason,observed_at)
       SELECT '$tl','$server','$remote',$protocol,'$generation','$seq','$wire',$v,
-             '$cipher_q',$q,'$blob_q',
+             '$cipher_q',$q,(SELECT blob FROM temp.sync_apply_envelope),
              'wire id maps to another sequence or envelope',
              strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE EXISTS(SELECT 1 FROM sync_quarantine qx
@@ -1127,21 +1210,21 @@ storage_sync_apply_pull() {
           AND (qx.server_seq<>'$seq' OR qx.envelope_v<>$v
             OR qx.cipher<>'$cipher_q'
             OR COALESCE(qx.key_id,'')<>'$key_id_q'
-            OR qx.blob<>'$blob_q'))
+            OR qx.blob<>(SELECT blob FROM temp.sync_apply_envelope)))
          OR EXISTS(SELECT 1 FROM sync_messages mx
         WHERE mx.server_instance_id='$server' AND mx.remote_team_id='$remote'
           AND mx.protocol_version=$protocol AND mx.wire_id='$wire'
           AND (mx.server_seq IS NOT NULL AND mx.server_seq<>'$seq'
             OR mx.envelope_v<>$v OR mx.cipher<>'$cipher_q'
             OR COALESCE(mx.key_id,'')<>'$key_id_q'
-            OR mx.blob<>'$blob_q'));
+            OR mx.blob<>(SELECT blob FROM temp.sync_apply_envelope)));
       INSERT OR IGNORE INTO sync_quarantine
         (local_team,server_instance_id,remote_team_id,protocol_version,
          driver_generation,server_seq,wire_id,server_received_at,envelope_v,
          cipher,key_id,blob,status,policy_revision,local_security_revision,reason)
       VALUES('$tl','$server','$remote',$protocol,'$generation','$seq','$wire',
         '$received_q',$v,'$cipher_q',$q,
-        '$blob_q','$status','$policy_q',
+        (SELECT blob FROM temp.sync_apply_envelope),'$status','$policy_q',
         '$local_rev_q','$reason_q');
       UPDATE sync_quarantine SET status='$status',
           policy_revision='$policy_q',
@@ -1152,14 +1235,14 @@ storage_sync_apply_pull() {
          AND server_seq='$seq' AND envelope_v=$v
          AND cipher='$cipher_q'
          AND COALESCE(key_id,'')='$key_id_q'
-         AND blob='$blob_q'
+         AND blob=(SELECT blob FROM temp.sync_apply_envelope)
          AND status NOT IN ('corrupt_state','imported','reconciled');
       UPDATE sync_quarantine SET status='corrupt_state',reason='wire envelope mismatch'
        WHERE server_instance_id='$server' AND remote_team_id='$remote'
          AND protocol_version=$protocol AND wire_id='$wire'
          AND (server_seq<>'$seq' OR envelope_v<>$v OR cipher<>'$cipher_q'
               OR COALESCE(key_id,'')<>'$key_id_q'
-              OR blob<>'$blob_q');
+              OR blob<>(SELECT blob FROM temp.sync_apply_envelope));
       UPDATE sync_quarantine SET status='corrupt_state',reason='binding sequence conflict'
        WHERE server_instance_id='$server' AND remote_team_id='$remote'
          AND protocol_version=$protocol AND wire_id='$wire'
@@ -1173,13 +1256,13 @@ storage_sync_apply_pull() {
              AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
              AND m.wire_id='$wire' AND (m.envelope_v<>$v OR m.cipher<>'$cipher_q'
                OR COALESCE(m.key_id,'')<>'$key_id_q'
-               OR m.blob<>'$blob_q'
+               OR m.blob<>(SELECT blob FROM temp.sync_apply_envelope)
                OR (m.server_seq IS NOT NULL AND m.server_seq<>'$seq')));
       UPDATE sync_messages SET server_seq='$seq' WHERE server_instance_id='$server'
         AND remote_team_id='$remote' AND protocol_version=$protocol AND wire_id='$wire'
         AND envelope_v=$v AND cipher='$cipher_q'
         AND COALESCE(key_id,'')='$key_id_q'
-        AND blob='$blob_q' AND (server_seq IS NULL OR server_seq='$seq')
+        AND blob=(SELECT blob FROM temp.sync_apply_envelope) AND (server_seq IS NULL OR server_seq='$seq')
         AND EXISTS(SELECT 1 FROM sync_quarantine qx
           WHERE qx.server_instance_id='$server' AND qx.remote_team_id='$remote'
             AND qx.protocol_version=$protocol AND qx.wire_id='$wire'
@@ -1248,7 +1331,7 @@ storage_sync_apply_pull() {
            driver_generation,local_position,local_id,wire_id,envelope_v,cipher,
            key_id,blob,server_seq,direction)
         SELECT '$tl','$server','$remote',$protocol,'$generation',seq,id,'$wire',$v,
-               '$cipher_q',$q,'$blob_q','$seq','pull'
+               '$cipher_q',$q,(SELECT blob FROM temp.sync_apply_envelope),'$seq','pull'
           FROM events WHERE id='$local_id';
         UPDATE sync_quarantine SET status='imported' WHERE server_instance_id='$server'
           AND remote_team_id='$remote' AND protocol_version=$protocol AND wire_id='$wire'
@@ -1384,6 +1467,14 @@ storage_sync_reprocess() {
 storage_sync_prepare_read_state() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl context floor current members local_agents count values="" local_values=""
   local member id name agent insert_members="" insert_local_agents=""
@@ -1391,7 +1482,7 @@ storage_sync_prepare_read_state() {
   db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
   _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || { _sqlite_sync_why; return 13; }
   context=$(cat)
-  [ "$(printf '%s\n' "$context" | jq -r '
+  [ "$(printf '%s\n' "$context" | _sqlite_sync_jq -r '
     select(.type=="sync_read_context" and (.min_available_seq|type)=="string" and
       (.current_seq|type)=="string" and (.members|type)=="array" and
       (.local_agents|type)=="array" and (.local_agents|length)<=1000 and
@@ -1400,17 +1491,64 @@ storage_sync_prepare_read_state() {
       (.members|length)<=1000 and all(.members[];
         ((.member_id|type)=="string") and ((.name|type)=="string") and (.name|length)>0)) | "ok"' \
       2>/dev/null)" = ok ] || { _sqlite_sync_why; return 13; }
-  floor=$(printf '%s\n' "$context" | jq -r '.min_available_seq')
-  current=$(printf '%s\n' "$context" | jq -r '.current_seq')
+  # ...and the roster list on its own line, so a refusal here is told apart
+  # from the eight context checks above by the line number _sqlite_sync_why
+  # prints (#911) -- and says what it is in words as well. The bound is the
+  # size the contract test actually passes through this path (10,000): the
+  # list is one entry per roster mutation the team ever applied, so a team
+  # past it has had ten thousand joins, leaves or renames, which is a signal
+  # to look at the design, not a size to wave through. Over the bound is
+  # refused (13), which leaves the frontier where it was -- the safe side.
+  # Shape and size in jq, then the DOMAIN per entry through
+  # _sqlite_sync_sequence -- the same bound (9223372036854775807) this
+  # function already holds current_seq to, a hundred lines above. Two review
+  # findings shaped this:
+  #   - Shape alone let 9223372036854775808..9999999999999999999 through. The
+  #     temp table's INTEGER PRIMARY KEY (a rowid alias) refuses such a value
+  #     outright, so the whole read-prepare transaction died with a datatype
+  #     mismatch -- neither a 13 nor "no evidence", a way of failing the
+  #     contract does not name. Hence the domain check.
+  #   - The shape test is anchored \A..\z, not ^..$: in jq's regex engine $
+  #     also matches before one trailing newline, so "1\n" passed as a
+  #     sequence; the per-entry loop below then read "1", skipped the empty
+  #     line, and the SQL got (1\n), which SQLite accepts as 1 -- a malformed
+  #     entry exempting a real sequence, the one direction this must never
+  #     take. With absolute anchors no accepted entry can carry a newline, so
+  #     the line-framed loop sees exactly the entries jq accepted.
+  # Pure bash per entry, no fork; at most 10,000 entries.
+  # The jq program lives in a variable: bash 3.2 misparses the backslashes of
+  # \A and \z when they sit in a quoted string inside $( ), and the check
+  # then fails closed for every list (macOS CI, and the same 3.2 divergence
+  # #928 met with a quote). The same reason _SQLITE_SYNC_WIRE_RE is a variable.
+  local roster_seqs_jq
+  roster_seqs_jq='select((.roster_seqs|type)=="null" or ((.roster_seqs|type)=="array" and
+      (.roster_seqs|length)<=10000 and all(.roster_seqs[];
+        (type=="string") and test("\\A(0|[1-9][0-9]{0,18})\\z")))) | "ok"'
+  [ "$(printf '%s\n' "$context" | _sqlite_sync_jq -r "$roster_seqs_jq" 2>/dev/null)" = ok ] || {
+    echo "agmsg: sqlite-sync: roster_seqs is not a list of at most 10000 canonical sequences (#968)" >&2
+    _sqlite_sync_why; return 13
+  }
+  local roster_seq
+  while IFS= read -r roster_seq; do
+    [ -n "$roster_seq" ] || continue
+    _sqlite_sync_sequence "$roster_seq" || {
+      echo "agmsg: sqlite-sync: roster_seqs carries '$roster_seq', which is not a canonical sequence (#968)" >&2
+      _sqlite_sync_why; return 13
+    }
+  done <<EOF
+$(printf '%s\n' "$context" | _sqlite_sync_jq -r '.roster_seqs // [] | .[]')
+EOF
+  floor=$(printf '%s\n' "$context" | _sqlite_sync_jq -r '.min_available_seq')
+  current=$(printf '%s\n' "$context" | _sqlite_sync_jq -r '.current_seq')
   case "$floor:$current" in *[!0-9:]*) _sqlite_sync_why; return 13 ;; esac
-  [ "$(_sqlite_sync_decimal_le "$floor" "$current")" = 1 ] &&
-    [ "$(_sqlite_sync_decimal_le "$current" 9223372036854775807)" = 1 ] || { _sqlite_sync_why; return 13; }
-  members=$(printf '%s\n' "$context" | jq -c '.members[]')
+  _sqlite_sync_decimal_le "$floor" "$current" &&
+    _sqlite_sync_decimal_le "$current" 9223372036854775807 || { _sqlite_sync_why; return 13; }
+  members=$(printf '%s\n' "$context" | _sqlite_sync_jq -c '.members[]')
   count=0
   while IFS= read -r member; do
     [ -n "$member" ] || continue
-    id=$(printf '%s\n' "$member" | jq -r '.member_id')
-    name=$(printf '%s\n' "$member" | jq -r '.name')
+    id=$(printf '%s\n' "$member" | _sqlite_sync_jq -r '.member_id')
+    name=$(printf '%s\n' "$member" | _sqlite_sync_jq -r '.name')
     printf '%s\n' "$id" | grep -Eq \
       '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || { _sqlite_sync_why; return 13; }
     values="${values}${values:+,}('$id','$(_sqlite_lit "$name")')"
@@ -1418,7 +1556,7 @@ storage_sync_prepare_read_state() {
   done <<EOF
 $members
 EOF
-  local_agents=$(printf '%s\n' "$context" | jq -r '.local_agents[]')
+  local_agents=$(printf '%s\n' "$context" | _sqlite_sync_jq -r '.local_agents[]')
   while IFS= read -r agent; do
     [ -n "$agent" ] || continue
     local_values="${local_values}${local_values:+,}('$(_sqlite_lit "$agent")')"
@@ -1428,17 +1566,35 @@ EOF
   if [ "$count" -gt 0 ]; then
     insert_members="INSERT INTO incoming_read_members VALUES $values;"
   fi
+  # Sequences the engine knows to be roster mutations (#968). They occupy
+  # server sequence numbers but are, by design, not messages: the engine routes
+  # them to the roster driver, so they never gain a sync_messages mapping and
+  # (on the engine pull path) never enter sync_quarantine at all. Without this
+  # list the contiguity check below reads every one of them as a hole and pins
+  # the frontier at the first -- which is seq 1, the founding member_joined, on
+  # every team ever created. Validated above as decimal strings, so they are
+  # emitted as integers here without further quoting. Absent list => empty
+  # table => today's behavior (a frontier that cannot advance), never a
+  # frontier advanced on evidence that was not supplied.
+  local insert_roster_seqs="" roster_values
+  roster_values=$(printf '%s\n' "$context" |
+    _sqlite_sync_jq -r '[.roster_seqs // [] | .[] | "(" + . + ")"] | join(",")')
+  if [ -n "$roster_values" ]; then
+    insert_roster_seqs="INSERT OR IGNORE INTO roster_read_seqs VALUES $roster_values;"
+  fi
   if [ -n "$local_values" ]; then
     insert_local_agents="INSERT INTO local_read_agents VALUES $local_values;"
   fi
 
   # Stdin, third of the same kind (#882): `$insert_members` carries one row per
   # roster member and `$insert_local_agents` one per local agent.
-  printf '%s\n' "BEGIN IMMEDIATE;
+  _sqlite_exec_stdin "$db" "BEGIN IMMEDIATE;
     CREATE TEMP TABLE incoming_read_members(member_id TEXT UNIQUE,agent TEXT UNIQUE);
     CREATE TEMP TABLE local_read_agents(agent TEXT PRIMARY KEY);
+    CREATE TEMP TABLE roster_read_seqs(server_seq INTEGER PRIMARY KEY);
     $insert_members
     $insert_local_agents
+    $insert_roster_seqs
     UPDATE sync_read_members SET active=0 WHERE local_team='$tl'
       AND server_instance_id='$server' AND remote_team_id='$remote'
       AND protocol_version=$protocol AND driver_generation='$generation';
@@ -1484,32 +1640,57 @@ EOF
     INSERT INTO sync_read_prepared
       (local_team,server_instance_id,remote_team_id,protocol_version,
        driver_generation,member_id,server_seq)
-    WITH ordered AS (
+    WITH held AS (
+      -- The sequence space this client is expected to hold (#968): every
+      -- message in quarantine, plus every sequence the roster driver applied
+      -- as a roster mutation. A roster sequence that also has a quarantine row
+      -- (the bootstrap path quarantines them) is one row here, flagged roster.
+      SELECT q.local_team,q.server_instance_id,q.remote_team_id,q.protocol_version,
+             q.driver_generation,CAST(q.server_seq AS INTEGER) AS seq,q.status,q.wire_id,
+             EXISTS(SELECT 1 FROM roster_read_seqs r
+                     WHERE r.server_seq=CAST(q.server_seq AS INTEGER)) AS roster
+        FROM sync_quarantine q
+       WHERE q.local_team='$tl' AND q.server_instance_id='$server'
+         AND q.remote_team_id='$remote' AND q.protocol_version=$protocol
+         AND q.driver_generation='$generation'
+      UNION ALL
+      SELECT '$tl','$server','$remote',$protocol,'$generation',r.server_seq,'imported',NULL,1
+        FROM roster_read_seqs r
+       WHERE NOT EXISTS(SELECT 1 FROM sync_quarantine q
+                         WHERE q.local_team='$tl' AND q.server_instance_id='$server'
+                           AND q.remote_team_id='$remote' AND q.protocol_version=$protocol
+                           AND q.driver_generation='$generation'
+                           AND CAST(q.server_seq AS INTEGER)=r.server_seq)
+    ), ordered AS (
       SELECT rm.member_id,rm.agent,CAST(rm.remote_server_seq AS INTEGER) AS base,
              CAST(b.transport_cursor AS INTEGER) AS tip,
-             CAST(q.server_seq AS INTEGER) AS seq,q.status,m.local_position,e.to_agent,
-             ROW_NUMBER() OVER(PARTITION BY rm.member_id ORDER BY CAST(q.server_seq AS INTEGER)) AS rn
+             h.seq,h.status,h.roster,m.local_position,e.to_agent,
+             ROW_NUMBER() OVER(PARTITION BY rm.member_id ORDER BY h.seq) AS rn
         FROM sync_read_members rm JOIN sync_bindings b
           ON b.local_team=rm.local_team AND b.server_instance_id=rm.server_instance_id
          AND b.remote_team_id=rm.remote_team_id AND b.protocol_version=rm.protocol_version
          AND b.driver_generation=rm.driver_generation
-        LEFT JOIN sync_quarantine q ON q.local_team=rm.local_team
-         AND q.server_instance_id=rm.server_instance_id AND q.remote_team_id=rm.remote_team_id
-         AND q.protocol_version=rm.protocol_version AND q.driver_generation=rm.driver_generation
-         AND CAST(q.server_seq AS INTEGER)>CAST(rm.remote_server_seq AS INTEGER)
-         AND CAST(q.server_seq AS INTEGER)<=MIN(CAST(b.transport_cursor AS INTEGER),$current)
+        LEFT JOIN held h ON h.local_team=rm.local_team
+         AND h.server_instance_id=rm.server_instance_id AND h.remote_team_id=rm.remote_team_id
+         AND h.protocol_version=rm.protocol_version AND h.driver_generation=rm.driver_generation
+         AND h.seq>CAST(rm.remote_server_seq AS INTEGER)
+         AND h.seq<=MIN(CAST(b.transport_cursor AS INTEGER),$current)
         LEFT JOIN sync_messages m ON m.server_instance_id=rm.server_instance_id
          AND m.remote_team_id=rm.remote_team_id AND m.protocol_version=rm.protocol_version
-         AND m.wire_id=q.wire_id
+         AND m.wire_id=h.wire_id
         LEFT JOIN events e ON e.seq=m.local_position
        WHERE rm.local_team='$tl' AND rm.server_instance_id='$server'
          AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
          AND rm.driver_generation='$generation' AND rm.active=1
          AND rm.name_mismatch=0
     ), bad AS (
+      -- A roster sequence is accounted for by being a roster sequence: it has
+      -- no message mapping and never will. Everything else keeps the strict
+      -- reading -- a message sequence with no mapping, or missing from the
+      -- space entirely, is still a hole, so a lost message still pins.
       SELECT member_id,MIN(base+rn) AS seq FROM ordered
        WHERE seq IS NULL OR seq<>base+rn OR status NOT IN ('imported','reconciled')
-          OR local_position IS NULL
+          OR (local_position IS NULL AND roster=0)
           OR (to_agent=agent AND local_position>COALESCE((SELECT local_position
                 FROM read_cursors c WHERE c.team='$tl' AND c.agent=ordered.agent),0)
               AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
@@ -1529,7 +1710,7 @@ EOF
        AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
        AND rm.driver_generation='$generation' AND rm.active=1
        AND rm.name_mismatch=0;
-    COMMIT;" | agmsg_sqlite -bail -batch "$db" >/dev/null || { _sqlite_sync_why; return 13; }
+    COMMIT;" >/dev/null || { _sqlite_sync_why; return 13; }
 
   _sqlite_data "$team" "SELECT json_object('type','sync_read_frontier','member_id',f.member_id,
       'server_seq',f.server_seq) FROM sync_read_prepared f JOIN sync_read_members rm
@@ -1567,12 +1748,20 @@ EOF
 storage_sync_block_read_state() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl input member reason
   generation=$(_sqlite_sync_generation "$team") || { _sqlite_sync_why; return 13; }
   db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"; input=$(cat)
-  member=$(printf '%s\n' "$input" | jq -r 'select(.type=="sync_read_block")|.member_id // empty')
-  reason=$(printf '%s\n' "$input" | jq -r 'select(.type=="sync_read_block")|.reason // empty')
+  member=$(printf '%s\n' "$input" | _sqlite_sync_jq -r 'select(.type=="sync_read_block")|.member_id // empty')
+  reason=$(printf '%s\n' "$input" | _sqlite_sync_jq -r 'select(.type=="sync_read_block")|.reason // empty')
   printf '%s\n' "$member" | grep -Eq \
     '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || { _sqlite_sync_why; return 13; }
   [ "$reason" = read-state-limit-exceeded ] || { _sqlite_sync_why; return 13; }
@@ -1590,11 +1779,19 @@ storage_sync_block_read_state() {
 storage_sync_unblock_read_state() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl input member
   generation=$(_sqlite_sync_generation "$team") || { _sqlite_sync_why; return 13; }
   db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"; input=$(cat)
-  member=$(printf '%s\n' "$input" | jq -r 'select(.type=="sync_read_unblock")|.member_id // empty')
+  member=$(printf '%s\n' "$input" | _sqlite_sync_jq -r 'select(.type=="sync_read_unblock")|.member_id // empty')
   printf '%s\n' "$member" | grep -Eq \
     '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || { _sqlite_sync_why; return 13; }
   agmsg_sqlite "$db" "BEGIN IMMEDIATE;
@@ -1618,6 +1815,14 @@ storage_sync_unblock_read_state() {
 storage_sync_apply_read_state() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
+  # Resolve the jq capability ONCE per entry, in this function's own shell.
+  # The wrapper caches in `_AGMSG_JQ_BINARY_OK`, but nearly every call site here
+  # is a `$( )` or a pipeline, so the probe ran in a subshell and the cached
+  # answer died with it -- measured: 10 probes for one
+  # `storage_sync_prepare_read_state`, against 1 for `storage_sync_prepare_push`,
+  # which already resolved it at function scope. Warming it here makes the
+  # subshells inherit `yes` and collapses that to 1.
+  _sqlite_sync_require_jq_binary || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
   local generation db tl sql_file line type floor="" current="" member seq wire
   generation=$(_sqlite_sync_generation "$team") || { _sqlite_sync_why; return 13; }
@@ -1628,27 +1833,27 @@ storage_sync_apply_read_state() {
   printf '%s\n' 'BEGIN IMMEDIATE; CREATE TEMP TABLE sync_read_assert(ok INTEGER CHECK(ok=1));' > "$sql_file"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    type=$(printf '%s\n' "$line" | jq -r '.type // empty')
+    type=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.type // empty')
     case "$type" in
       sync_read_snapshot)
         [ -z "$floor" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        floor=$(printf '%s\n' "$line" | jq -r '.min_available_seq // empty')
-        current=$(printf '%s\n' "$line" | jq -r '.current_seq // empty')
+        floor=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.min_available_seq // empty')
+        current=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.current_seq // empty')
         case "$floor:$current" in *[!0-9:]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
-        [ "$(_sqlite_sync_decimal_le "$floor" "$current")" = 1 ] &&
-          [ "$(_sqlite_sync_decimal_le "$current" 9223372036854775807)" = 1 ] || {
+        _sqlite_sync_decimal_le "$floor" "$current" &&
+          _sqlite_sync_decimal_le "$current" 9223372036854775807 || {
             rm -f "$sql_file"; _sqlite_sync_why; return 13;
           }
         ;;
       sync_read_frontier)
         [ -n "$current" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        member=$(printf '%s\n' "$line" | jq -r '.member_id // empty')
-        seq=$(printf '%s\n' "$line" | jq -r '.server_seq // empty')
+        member=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.member_id // empty')
+        seq=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.server_seq // empty')
         case "$seq" in ''|*[!0-9]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
         printf '%s\n' "$member" | grep -Eq \
           '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
           || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        [ "$(_sqlite_sync_decimal_le "$seq" "$current")" = 1 ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+        _sqlite_sync_decimal_le "$seq" "$current" || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
         printf "%s\n" "INSERT INTO sync_read_assert SELECT CASE WHEN EXISTS(
           SELECT 1 FROM sync_read_members WHERE local_team='$tl'
             AND server_instance_id='$server' AND remote_team_id='$remote'
@@ -1662,8 +1867,8 @@ storage_sync_apply_read_state() {
         ;;
       sync_read_exact)
         [ -n "$current" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        member=$(printf '%s\n' "$line" | jq -r '.member_id // empty')
-        wire=$(printf '%s\n' "$line" | jq -r '.wire_id // empty')
+        member=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.member_id // empty')
+        wire=$(printf '%s\n' "$line" | _sqlite_sync_jq -r '.wire_id // empty')
         printf '%s\n' "$member" | grep -Eq \
           '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
           || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }

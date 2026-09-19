@@ -133,7 +133,13 @@ skip_if_root() {
   # command fails on a team literally named "'testteam'" -- measured, that is
   # what the first version of this test did. A printed route has to be run the
   # way it is meant to be run.
-  run bash -c "bash '$SCRIPTS/remote.sh' $args"
+  # The lifted command reaches a real engine start against an endpoint that
+  # never answers, so it would otherwise pay this command's full production
+  # readiness-wait ceiling (minutes, not seconds -- #779) just to prove the
+  # remedy parses and runs. AGMSG_TEST_SYNC_START_READY_CEILING shortens only
+  # that wait; the test cares whether the remedy reaches the engine-start
+  # path, not how long that path's own timeout takes.
+  run env AGMSG_TEST_SYNC_START_READY_CEILING=30 bash -c "bash '$SCRIPTS/remote.sh' $args"
   # "not refused" is not enough: a remedy that no longer parses is answered with
   # a usage line, which is also not a refusal. Measured -- changing only the
   # printed verb (start -> begin) left this test green until the two assertions
@@ -159,7 +165,9 @@ skip_if_root() {
 @test "sync start: a writable run dir still starts an engine (#730)" {
   # The control. Without it, every assertion above is satisfied by a
   # `sync start` that refuses unconditionally.
-  run bash "$SCRIPTS/remote.sh" sync start testteam
+  # The engine below never reaches https://remote.example, so this pays the
+  # readiness-wait ceiling in full unless shortened (see the #730 test above).
+  run env AGMSG_TEST_SYNC_START_READY_CEILING=30 bash "$SCRIPTS/remote.sh" sync start testteam
   # The engine is real here and will fail to reach https://remote.example, so
   # this does not assert success -- only that the refusal above is not what
   # happened, and that the pidfile path was reachable.
@@ -192,7 +200,11 @@ skip_if_root() {
   local pidfile="$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
   local starter i=0 j=0 freed=0
 
-  bash "$SCRIPTS/remote.sh" sync start testteam >/dev/null 2>&1 &
+  # Shortened (not removed): this test needs the starter to stay alive for
+  # its own poll window below (up to 3s, j<60), so the ceiling is cut well
+  # below production (1600) but kept comfortably above that window rather
+  # than cut to the same minimum used where nothing else depends on timing.
+  AGMSG_TEST_SYNC_START_READY_CEILING=100 bash "$SCRIPTS/remote.sh" sync start testteam >/dev/null 2>&1 &
   starter=$!
 
   # The engine existing is what says the START is over and the WAIT has begun.
@@ -315,7 +327,10 @@ skip_if_root() {
   local cycles="$TEST_SKILL_DIR/run/remote-sync.testteam.cycles.json"
   local starter engine foreign i=0
 
-  bash "$SCRIPTS/remote.sh" sync start testteam >/dev/null 2>&1 &
+  # `wait "$starter"` below blocks on however long the readiness wait takes,
+  # not on any fixed window of ours, so shortening it to the same minimum
+  # used elsewhere is safe here.
+  AGMSG_TEST_SYNC_START_READY_CEILING=30 bash "$SCRIPTS/remote.sh" sync start testteam >/dev/null 2>&1 &
   starter=$!
   while [ ! -f "$pidfile" ] && [ "$i" -lt 400 ]; do i=$((i + 1)); sleep 0.05; done
   [ -f "$pidfile" ]
@@ -364,7 +379,11 @@ skip_if_root() {
   local cycles="$TEST_SKILL_DIR/run/remote-sync.testteam.cycles.json"
   local starter engine i=0 err="$TEST_SKILL_DIR/retake.err"
 
-  bash "$SCRIPTS/remote.sh" sync start testteam >"$err" 2>&1 &
+  # The lock is taken by this test right after the starter releases it (near
+  # the very start of the readiness wait, not gated by its length) and held
+  # until this test's own teardown below, so the starter's eventual retake
+  # attempt fails regardless of how long its own wait took -- safe to shorten.
+  AGMSG_TEST_SYNC_START_READY_CEILING=30 bash "$SCRIPTS/remote.sh" sync start testteam >"$err" 2>&1 &
   starter=$!
   while [ ! -f "$pidfile" ] && [ "$i" -lt 400 ]; do i=$((i + 1)); sleep 0.05; done
   [ -f "$pidfile" ]

@@ -240,6 +240,7 @@ function sendFrame(socket, value) {
 
 function handleMessage(socket, message) {
   fs.appendFileSync(log, `${message.method}\n`);
+  if (message.method === "process/spawn") fs.appendFileSync(log, `${JSON.stringify(message.params.command)}\n`);
   if (message.method === "initialize") {
     sendFrame(socket, { jsonrpc: "2.0", id: message.id, result: {} });
   } else if (message.method === "thread/resume") {
@@ -343,7 +344,8 @@ EOF
 
   run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-existing \
-    --app-server "unix://$sock" --timeout 1 --interval 1 --max-wakes 1
+    --app-server "unix://$sock" --timeout 1 --interval 1 --max-wakes 1 \
+    --owner codex-session.12345
 
   kill "$server_pid" 2>/dev/null || true
 
@@ -353,6 +355,7 @@ EOF
   grep -q "initialize" "$log"
   grep -q "thread/resume" "$log"
   grep -q "process/spawn" "$log"
+  grep -q "codex-session.12345" "$log"
   grep -q "turn/start" "$log"
 }
 
@@ -1314,7 +1317,14 @@ EOF
   local runner
   runner="$(write_bridge_timeout_runner)"
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$runner" 10000 node "$TYPES/codex/codex-bridge.js" \
+  # The first watch-once failure below reschedules a re-arm through the
+  # production 5s failure backoff before the second process/spawn (the one
+  # that never answers) is even sent; AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS
+  # shortens that wait, which this test does not otherwise care about, since
+  # it is timing out the SECOND spawn's own request-timeout-ms, not the delay
+  # before it.
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$runner" 10000 node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1 \
     --request-timeout-ms 3000 --watch-failure-limit 2
 
@@ -1852,7 +1862,12 @@ EOF
 
   # fail, fail, wake, repeating: the old reset-to-0 held the counter below the
   # limit forever. With the decay it climbs, so the bridge stops itself.
-  run node "$TYPES/codex/codex-bridge.js" \
+  # Reaching the failure cap here means climbing through several fail/wake
+  # cycles (the decay this test exists to prove), each failure paying the
+  # production 5s re-arm backoff -- AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS
+  # shortens that wait; it is the cycle COUNT this test asserts on, not how
+  # long each cycle's backoff takes.
+  AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-x \
     --app-server "unix://$sock" --timeout 1 --interval 1
   kill "$server_pid" 2>/dev/null || true
@@ -1860,6 +1875,55 @@ EOF
   [ "$status" -ne 0 ]
   grep -q "stopping after" <<<"$output"
   grep -q "consecutive watch-once failure" <<<"$output"
+}
+
+@test "codex-bridge: an invalid watch-rearm override falls back to the production delay, not an immediate re-arm" {
+  run node -e 'const net=require("net"),crypto=require("crypto");if(!net||!crypto)process.exit(1);'
+  [ "$status" -eq 0 ] || skip "node net/crypto not available"
+  run node -e 'const fs=require("fs"),net=require("net");const s=process.argv[1];try{fs.unlinkSync(s)}catch(_){}const sv=net.createServer();sv.on("error",()=>process.exit(2));sv.listen(s,()=>sv.close(()=>{try{fs.unlinkSync(s)}catch(_){}process.exit(0)}));' "$TEST_SKILL_DIR/probe5.sock"
+  [ "$status" -eq 0 ] || skip "unix socket listen not available"
+
+  local fake="$TEST_SKILL_DIR/rearm-fake3.js"
+  _write_rearm_fake "$fake"
+
+  # A plain-digit-string check alone is not enough: Node's setTimeout treats a
+  # delay above 2147483647 (its 32-bit signed-int ceiling) OR one that
+  # resolves to Infinity (a long enough all-digit string overflows a double)
+  # as if it were 1ms, not "wait longer" -- the opposite of falling back. Each
+  # case below defeats the check a different way: non-digit, digit-shaped but
+  # over the ceiling, and digit-shaped but so long it overflows to Infinity.
+  local huge_digits; huge_digits="$(printf '9%.0s' $(seq 1 400))"
+  local case_names=(non-digit over-ceiling digit-overflow)
+  local case_values=("abc" "2147483648" "$huge_digits")
+  local i case_name value sock flog server_pid bpid arms
+  for i in "${!case_names[@]}"; do
+    case_name="${case_names[$i]}"
+    value="${case_values[$i]}"
+    sock="$TEST_SKILL_DIR/rearm3-$i.sock"
+    flog="$TEST_SKILL_DIR/rearm3-$i.log"
+    node "$fake" "$sock" "$flog" 3>&- &
+    server_pid="$!"
+    for _ in {1..50}; do [ -S "$sock" ] && break; sleep 0.1; done
+
+    # Caught without paying the full 5000ms: the 2s window below is
+    # comfortably past the SEPARATE 1000ms MIN_ARM_INTERVAL_MS floor every
+    # re-arm path is also subject to (so a broken near-zero-delay
+    # implementation cannot hide behind that floor and still look slow), and
+    # comfortably short of the 5000ms production delay.
+    AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS="$value" node "$TYPES/codex/codex-bridge.js" \
+      --project "$PROJ" --team team --name alice --thread thread-x \
+      --app-server "unix://$sock" --timeout 1 --interval 1 >/dev/null 2>&1 3>&- &
+    bpid="$!"
+
+    for _ in {1..50}; do [ -s "$flog" ] && break; sleep 0.1; done
+    [ -s "$flog" ] || { echo "case $case_name: no arm was ever logged" >&2; return 1; }
+    sleep 2
+    kill "$bpid" 2>/dev/null || true; wait "$bpid" 2>/dev/null || true
+    kill "$server_pid" 2>/dev/null || true
+
+    arms="$(grep -c ' arm ' "$flog")"
+    [ "$arms" -eq 1 ] || { echo "case $case_name: expected exactly 1 arm within the window, saw $arms (override was not rejected)" >&2; return 1; }
+  done
 }
 
 @test "codex-bridge: a flood of distinct wakes is rate-limited, not a re-arm storm (#936)" {
@@ -1993,4 +2057,298 @@ EOF
   [ "$(grep -c "proceeding without resume" <<<"$output")" -eq 0 ]
   grep -q "thread/resume" "$log"
   ! grep -q "process/spawn" "$log"
+}
+
+@test "codex-bridge: one wake starts one turn even when the previous turn's tail lands mid turn/start (duplicate-turn injection)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # Regression for a live-observed duplicate-turn injection. A wake deferred
+  # behind a running turn is delivered from onTurnEnded() when turn/completed
+  # arrives -- and while the resulting turn/start request is still IN FLIGHT,
+  # the app-server's independent thread/status idle for that SAME previous
+  # turn lands. With the wake claim only cleared after the request resolved,
+  # that second turn-end re-entered tryStartTurn() with the same wake and
+  # started a second turn whose whole prompt was inbox.sh's literal
+  # "No new messages." output (the first read had already consumed the rows).
+  local fake="$TEST_SKILL_DIR/fake-app-server-midstart-tail.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-midstart-tail.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const { spawnSync } = require("child_process");
+const log = process.argv[2];
+const scripts = process.argv[3];
+const rl = readline.createInterface({ input: process.stdin });
+let turns = 0;
+let spawns = 0;
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "turn/start") {
+    const text = ((message.params.input && message.params.input[0] && message.params.input[0].text) || "").replace(/\n/g, " ");
+    fs.appendFileSync(log, `turn/start ${text}\n`);
+  } else {
+    fs.appendFileSync(log, `${message.method}\n`);
+  }
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    // Resume an ACTIVE thread (a human turn is in flight); the wake defers.
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: message.params.threadId, status: { type: "active" } } } });
+    // The human turn reports completion; onTurnEnded delivers the wake.
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId } });
+    }, 80);
+  } else if (message.method === "process/spawn") {
+    spawns += 1;
+    // Wake 2 exists so the run terminates via --max-wakes; give it a real
+    // unread row so it starts a normal (non-empty) turn.
+    if (spawns === 2) {
+      spawnSync("bash", [`${scripts}/send.sh`, "team", "bob", "alice", "wake race probe two"], { encoding: "utf8" });
+    }
+    const id = spawns === 1 ? 5 : 6;
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: `status=pending count=1 max_id=${id}\n`, stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    turns += 1;
+    if (turns === 1) {
+      // The previous turn's OTHER tail signal arrives while this request is
+      // still unanswered...
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", method: "thread/status/changed", params: { threadId: message.params.threadId, status: { type: "idle" } } });
+      }, 20);
+      // ...and only later does the request resolve; the turn then completes.
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", id: message.id, result: {} });
+        setTimeout(() => {
+          send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId } });
+        }, 20);
+      }, 120);
+    } else {
+      send({ jsonrpc: "2.0", id: message.id, result: {} });
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId } });
+      }, 10);
+    }
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  # The unread row wake 1 will deliver inline.
+  bash "$SCRIPTS/send.sh" team bob alice "wake race probe one" >/dev/null
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log $SCRIPTS" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-race \
+    --timeout 1 --interval 1 --turn-timeout 30 --max-wakes 2 --inline-inbox
+
+  # `grep -q` rather than `[[ ]]` in the non-last positions: on bash 3.2,
+  # which is what macOS CI runs, a false `[[ ]]` there reports ok. Negated
+  # checks are written as count comparisons for the same reason (`! cmd`
+  # never trips errexit).
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -Fq "wakeup 1"
+  printf '%s\n' "$output" | grep -Fq "wakeup 2"
+  # Exactly one turn per wake: the mid-start tail must not mint a third.
+  [ "$(grep -c "^turn/start" "$log")" -eq 2 ]
+  # The duplicate wake must not be spent AT ALL — not even on an empty
+  # re-read that aborts. With --quiet an injected duplicate turn is invisible
+  # to the two checks above (the empty re-read aborts instead of becoming a
+  # sentinel prompt), so pin the re-read itself never happening.
+  [ "$(printf '%s\n' "$output" | grep -Fc "pending wake had no inbox output")" -eq 0 ]
+  # And no turn may ever carry the empty-inbox sentinel as its prompt.
+  [ "$(grep -c "No new messages." "$log")" -eq 0 ]
+}
+
+@test "codex-bridge: a turn fully notified before its turn/start ACK still ends promptly (deferred end, no watchdog wait)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # The dual of the duplicate-turn test above: a legal app-server ordering
+  # notifies the NEW turn's whole lifecycle -- turn/started, then
+  # turn/completed -- while the turn/start request is still unanswered.
+  # Discarding those as "stale previous-turn tails" would leave the bridge
+  # waiting out the idle watchdog (or hanging with --turn-timeout 0) and skip
+  # the maxWakes accounting. The end must be deferred and processed right
+  # after the ACK.
+  local fake="$TEST_SKILL_DIR/fake-app-server-preack-turn.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-preack-turn.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const log = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  fs.appendFileSync(log, `${message.method}\n`);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: message.params.threadId, status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: "status=pending count=1 max_id=5\n", stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    // The turn runs to completion before the request is ACKed.
+    send({ jsonrpc: "2.0", method: "turn/started", params: { threadId: message.params.threadId, turn: { id: "fast-1" } } });
+    send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "fast-1" } } });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", id: message.id, result: {} });
+    }, 60);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  bash "$SCRIPTS/send.sh" team bob alice "pre-ack fast turn probe" >/dev/null
+  local runner
+  runner=$(write_bridge_timeout_runner)
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$runner" 5000 node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-fast \
+    --timeout 1 --interval 1 --turn-timeout 30 --max-wakes 1 --inline-inbox
+
+  # `grep -q` rather than `[[ ]]` in the non-last positions: on bash 3.2,
+  # which is what macOS CI runs, a false `[[ ]]` there reports ok.
+  [ "$status" -eq 0 ]                 # not 124: ended via the deferred end, not a hang
+  printf '%s\n' "$output" | grep -Fq "started turn"
+  printf '%s\n' "$output" | grep -Fq "turn completed"
+}
+
+@test "codex-bridge: a stale idle landing after the new turn was seen starting does not end the running turn (id attribution)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # The composition of the two orderings above: the previous turn's
+  # turn/completed delivers the wake, the NEW turn's turn/started lands before
+  # the ACK -- and only THEN does the previous turn's independent
+  # thread/status idle straggle in. Phase-based attribution ("anything after
+  # the new turn was observed is the new turn's end") ends the actually-
+  # running new turn right after the ACK: with --max-wakes it shuts the
+  # bridge down before the turn's real completion. Identity-based attribution
+  # must drop the stale idle and end only on the id-matching turn/completed.
+  local fake="$TEST_SKILL_DIR/fake-app-server-stale-idle.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-stale-idle.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const { spawnSync } = require("child_process");
+const log = process.argv[2];
+const scripts = process.argv[3];
+const rl = readline.createInterface({ input: process.stdin });
+let turns = 0;
+let spawns = 0;
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+// Record WHEN the bridge went away (stdin EOF if it plainly exits, SIGTERM if
+// its shutdown kills the app-server child), so the test can assert it
+// outlived the raced turn's real completion.
+function bridgeGone() { fs.appendFileSync(log, "bridge-gone\n"); process.exit(0); }
+rl.on("close", bridgeGone);
+process.on("SIGTERM", bridgeGone);
+process.on("SIGHUP", bridgeGone);
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  fs.appendFileSync(log, `${message.method}\n`);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    // A human turn is in flight; the wake defers behind it.
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: message.params.threadId, status: { type: "active" } } } });
+    // The human turn reports completion; onTurnEnded delivers the wake.
+    // (--max-wakes must be 2 here: onTurnEnded checks maxWakes before it
+    // delivers the pending wake, so a limit of 1 would end the bridge at the
+    // human turn's completion without ever starting the raced turn.)
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "old-1" } } });
+    }, 80);
+  } else if (message.method === "process/spawn") {
+    spawns += 1;
+    // Wake 2 terminates the run via --max-wakes; give it a real unread row.
+    if (spawns === 2) {
+      spawnSync("bash", [`${scripts}/send.sh`, "team", "bob", "alice", "stale idle probe two"], { encoding: "utf8" });
+    }
+    const id = spawns === 1 ? 5 : 6;
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: `status=pending count=1 max_id=${id}\n`, stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    turns += 1;
+    const threadId = message.params.threadId;
+    if (turns === 1) {
+      // The new turn is seen starting...
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", method: "turn/started", params: { threadId, turn: { id: "new-1" } } });
+      }, 10);
+      // ...then the OLD turn's independent idle straggles in...
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", method: "thread/status/changed", params: { threadId, status: { type: "idle" } } });
+      }, 20);
+      // ...then the request is ACKed...
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", id: message.id, result: {} });
+      }, 80);
+      // ...and the new turn's REAL completion comes much later. The delay is
+      // deliberately far above the bridge's subprocess latency (send.sh /
+      // inbox.sh are real bash+sqlite runs): a misattributed end re-arms
+      // detection early and starts wake 2's turn well inside this window, so
+      // the ordering assertion below cannot be saved by a slow machine.
+      setTimeout(() => {
+        fs.appendFileSync(log, "true-completion-sent\n");
+        send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId, turn: { id: "new-1" } } });
+      }, 2000);
+    } else {
+      send({ jsonrpc: "2.0", id: message.id, result: {} });
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId, turn: { id: `later-${turns}` } } });
+      }, 10);
+    }
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  bash "$SCRIPTS/send.sh" team bob alice "stale idle probe one" >/dev/null
+  local runner
+  runner=$(write_bridge_timeout_runner)
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log $SCRIPTS" run node "$runner" 10000 node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-stale \
+    --timeout 1 --interval 1 --turn-timeout 30 --max-wakes 2 --inline-inbox
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "^turn/start" "$log")" -eq 2 ]
+  # The raced turn must still be running until its REAL completion: neither
+  # wake 2's turn (a misattributed end re-arms detection early) nor the
+  # bridge's own exit may appear in the log before true-completion-sent.
+  local completion_line second_turn_line gone_line i
+  completion_line="$(grep -n "^true-completion-sent" "$log" | head -1 | cut -d: -f1)"
+  second_turn_line="$(grep -n "^turn/start" "$log" | sed -n 2p | cut -d: -f1)"
+  # The fake records bridge-gone on its stdin EOF, which races the runner's
+  # own exit by a scheduler tick -- give it a moment to land.
+  for i in {1..20}; do
+    gone_line="$(grep -n "^bridge-gone" "$log" | head -1 | cut -d: -f1)"
+    [ -n "$gone_line" ] && break
+    sleep 0.1
+  done
+  [ -n "$completion_line" ]
+  [ -n "$second_turn_line" ]
+  [ -n "$gone_line" ]
+  [ "$completion_line" -lt "$second_turn_line" ]
+  [ "$completion_line" -lt "$gone_line" ]
 }

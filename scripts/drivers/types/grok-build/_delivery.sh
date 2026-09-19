@@ -37,6 +37,11 @@ agmsg_delivery_apply() {
   local type="$1"
   local project="$2"
   local mode="$3"
+  # Refuse before any write: an empty SKILL_DIR would render broken guidance
+  # paths into the rule file, and the rm -f below removes the existing rule
+  # file first -- an unreadable value must never be treated as "nothing to
+  # preserve" (#1234 review).
+  [ -n "${SKILL_DIR:-}" ] || { echo "agmsg_delivery_apply (grok-build): SKILL_DIR is not set; refusing rather than writing a broken rule file" >&2; return 1; }
   local rule_file
   rule_file=$(resolve_hooks_file "$type" "$project")
 
@@ -51,7 +56,7 @@ agmsg_delivery_apply() {
 # agmsg — check your inbox each turn
 
 You belong to one or more agmsg teams. Before you respond to the user on each
-turn, check your agmsg inbox so you never miss a teammate's message.
+turn, check your agmsg inbox so you never miss a message from a teammate.
 
 1. Identify yourself (once per session is enough):
    \`$SKILL_DIR/scripts/whoami.sh '$project' $type\`
@@ -65,6 +70,19 @@ turn, check your agmsg inbox so you never miss a teammate's message.
 
 There is no background watcher in turn mode — this self-check is how delivery
 works. Removing this file turns automatic delivery off.
+
+## Terminal/pane self-awareness
+Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
+— run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
+fields. Never guess from environment variables or a grep/ps command; a driver
+that IS present can be wrongly reported absent that way. Per-driver detail:
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/README.md' (terminal= names which).
+
+## Teammates: placement, status, and reaching them
+Placement and status for a teammate: '$SKILL_DIR/scripts/team.sh' <team> — never a
+stale memory of their last known pane. Act on one with '$SKILL_DIR/scripts/peek.sh'
+/ 'poke.sh' / 'arrange.sh' <team> <name> directly, not a guess: its exit code
+says whether it worked and, if not, why.
 EOF
       ;;
     monitor)
@@ -119,6 +137,19 @@ it once:
 Launch it only once per session — if a watcher is already streaming, do not
 start a second one. Stopping is via the \`kill_command_or_subagent\` tool on the
 watcher's task id. Removing this file turns automatic delivery off.
+
+## Terminal/pane self-awareness
+Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
+— run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
+fields. Never guess from environment variables or a grep/ps command; a driver
+that IS present can be wrongly reported absent that way. Per-driver detail:
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/README.md' (terminal= names which).
+
+## Teammates: placement, status, and reaching them
+Placement and status for a teammate: '$SKILL_DIR/scripts/team.sh' <team> — never a
+stale memory of their last known pane. Act on one with '$SKILL_DIR/scripts/peek.sh'
+/ 'poke.sh' / 'arrange.sh' <team> <name> directly, not a guess: its exit code
+says whether it worked and, if not, why.
 EOF
       ;;
     off)

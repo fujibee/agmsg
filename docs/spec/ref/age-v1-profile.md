@@ -257,12 +257,20 @@ For example, the context length for `key_id = "epoch-1"` is
 
 ### Canonical message bytes
 
-The message bytes MUST be RFC 8785 JCS encoding of exactly the same four-field
-plaintext object defined for `cipher: "none"` in the HTTP v1 specification:
+The message bytes a writer seals MUST be RFC 8785 JCS encoding of the same
+four-field plaintext object defined for `cipher: "none"` in the HTTP v1
+specification:
 
 ```json
 {"body":"Run the test suite","created_at":"2026-07-20T06:30:00.000000Z","from_agent":"leader","to_agent":"worker-1"}
 ```
+
+On receipt, known fields are validated as before; unknown fields are ignored.
+A reader does not require the message bytes to be byte-identical JCS: field
+presence, value shape, and the absence of a duplicate key are what is
+checked, not key order or the presence of a field this reader does not yet
+know about. A roster mutation's field set stays closed — an unrecognized
+field there is still rejected.
 
 All `none` plaintext validation rules still apply before encryption and after
 decryption. The complete framed plaintext and resulting binary age file must

@@ -5,7 +5,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
   utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { readNativeAgeIdentity } from "../scripts/internal/sync-cipher.mjs";
@@ -38,6 +38,7 @@ import {
   pullBootstrap,
   parseStrictJsonl,
   readStateCycle,
+  rosterSequencesFor,
   readStateUpdateBatches,
   reprocessCycle,
   request,
@@ -79,6 +80,7 @@ const candidates = [
 ];
 
 const credentialId = "018f3f7e-0000-7000-8000-000000000020";
+const authorityFileOptions = { mode: 0o644 };
 
 test("a rotator provisions its confirmed snapshot at the server boundary", async () => {
   const root = await mkdtemp(join(tmpdir(), "agmsg-local-key-rotation-"));
@@ -146,7 +148,7 @@ test("a rotator provisions its confirmed snapshot at the server boundary", async
         capabilities: { write_allowed_ciphers: ["none", "age-v1"] },
         cipher_profile: "age-v1", connected_at: "2026-07-29T00:00:00Z",
         disconnected_at: null },
-    })}\n`);
+    })}\n`, authorityFileOptions);
     await writeFile(join(teamDir, "roster.jsonl"), [
       JSON.stringify({ type: "key_rotated", ...rotation,
         at: "2026-07-30T00:00:00.000000Z", server_seq: undefined }),
@@ -452,7 +454,8 @@ async function writeConnectedTeam(root, overrides = {}) {
     ...overrides,
   };
   await writeFile(join(root, "teams", "demo", "config.json"),
-    `${JSON.stringify({ name: "demo", agents: {}, remote_binding: remoteBinding }, null, 2)}\n`);
+    `${JSON.stringify({ name: "demo", agents: {}, remote_binding: remoteBinding }, null, 2)}\n`,
+    authorityFileOptions);
 }
 
 test("connected binding is a bounded non-writable nofollow authority", async () => {
@@ -1385,6 +1388,104 @@ test("Stage-1-only driver skips the optional Stage-2 network path", async () => 
   }]]);
 });
 
+test("roster sequences: the journal's roster_synced records for this binding, and nothing on a missing or torn journal (#968)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-968-journal-"));
+  try {
+    const rosterFile = join(root, "teams", "demo", "config.json");
+    await mkdir(dirname(rosterFile), { recursive: true });
+    // No journal yet: no evidence, no sequences.
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile }), []);
+    const other = "018f3f7e-0000-7000-8000-00000000ffff";
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"), [
+      JSON.stringify({ type: "member_joined", id: "m1", name: "alice" }),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1", server_seq: "2", wire_id: "w1",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m0", server_seq: "1", wire_id: "w0",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+      // another binding's record is not this binding's evidence
+      JSON.stringify({ type: "roster_synced", mutation_id: "mx", server_seq: "7", wire_id: "wx",
+        server_instance_id: other, remote_team_id: config.remote_team_id }),
+      // duplicate of seq 2 collapses
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1b", server_seq: "2", wire_id: "w1b",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+    ].join("\n"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile }), ["1", "2"]);
+    // A torn journal (a line that is not JSON) yields nothing: a frontier is
+    // never advanced on evidence that could not be read whole. And it is
+    // NAMED, with the line, because a pinned frontier is also what #968
+    // looked like -- a silent fallback would be indistinguishable from the bug.
+    const events = [];
+    const eventCall = async (name, fields) => { events.push({ name, ...fields }); };
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"),
+      '{"type":"roster_synced","mutation_id":"m1","server_seq":"2","wire_id":"w1",' +
+      `"server_instance_id":"${config.server_instance_id}","remote_team_id":"${config.remote_team_id}"}\n{"type":"roster_syn`);
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].name, "read-state.roster-journal-unreadable");
+    assert.equal(events[0].line, 2);
+    assert.match(events[0].path, /roster\.jsonl$/u);
+    // A non-canonical sequence ("007") is corrupt evidence: the whole list is
+    // withheld and the line named, not the one record skipped -- a journal
+    // with one bad record is not a journal to take sequences from.
+    events.length = 0;
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"), [
+      JSON.stringify({ type: "roster_synced", mutation_id: "m0", server_seq: "1", wire_id: "w0",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+      JSON.stringify({ type: "roster_synced", mutation_id: "my", server_seq: "007", wire_id: "wy",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+    ].join("\n"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].line, 2);
+    // A sequence outside the domain is corrupt evidence, treated the same way
+    // (review finding: shape alone let 2^63..10^19-1 through).
+    events.length = 0;
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1", server_seq: "9223372036854775808", wire_id: "w1",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].line, 1);
+    assert.match(events[0].reason, /not a canonical sequence/u);
+    // MAX itself is a legal sequence.
+    events.length = 0;
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1", server_seq: "9223372036854775807", wire_id: "w1",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), ["9223372036854775807"]);
+    assert.equal(events.length, 0);
+    // No journal at all is not an anomaly (no roster before the first pull): quiet.
+    await rm(join(root, "teams", "demo", "roster.jsonl"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 0);
+    // An unreadable journal (a directory in its place) IS named.
+    await mkdir(join(root, "teams", "demo", "roster.jsonl"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reason, "EISDIR");
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("Stage-2 read-prepare carries the roster sequences into the context (#968)", async () => {
+  const events = [];
+  const harness = readStateHarness(threeMembers, ["masa-claude"], events);
+  let contextSeen = null;
+  const innerDriver = harness.driverCall;
+  await readStateCycle(config, 100, {
+    ...harness,
+    driverCall: async (operation, cfg, input) => {
+      if (operation === "read-prepare") contextSeen = input[0];
+      return innerDriver(operation, cfg, input);
+    },
+    rosterSequencesCall: async () => ["1", "2"],
+  });
+  assert.ok(contextSeen, "read-prepare was called");
+  assert.equal(contextSeen.type, "sync_read_context");
+  assert.deepEqual(contextSeen.roster_seqs, ["1", "2"]);
+});
+
 test("Stage-2 isolates a limit offender and continues read-only synchronization", async () => {
   const members = [
     { member_id: "018f3f7e-0000-7000-8000-000000000010", name: "causal-a" },
@@ -1755,7 +1856,7 @@ test("set-endpoint aligns the stored sync config's server_url with the moved bin
         remote_team_id: config.remote_team_id, protocol_version: 1,
         capabilities: { write_allowed_ciphers: ["none"] },
         cipher_profile: "none", connected_at: "2026-07-29T00:00:00Z",
-        disconnected_at: null } })}\n`);
+        disconnected_at: null } })}\n`, authorityFileOptions);
     const stored = { format_version: 1, local_team: "demo",
       server_url: "http://127.0.0.1:8787",
       server_instance_id: config.server_instance_id,
@@ -1764,7 +1865,7 @@ test("set-endpoint aligns the stored sync config's server_url with the moved bin
       local_security_history: [{ local_security_revision: "0",
         effective_from_seq: "1", minimum_security_mode: "plaintext-allowed" }] };
     await mkdir(join(root, "store", "remote-sync"), { recursive: true });
-    await writeFile(storedPath, JSON.stringify(stored));
+    await writeFile(storedPath, JSON.stringify(stored), authorityFileOptions);
     const capabilities = { protocol_version: 1,
       server_instance_id: config.server_instance_id,
       team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
@@ -1832,7 +1933,8 @@ test("set-endpoint cannot land a stale alignment over a newer move (#739 interle
     process.env.AGMSG_SYNC_STORAGE_DIR = join(root, "store");
     await mkdir(join(root, "teams", "demo"), { recursive: true });
     await mkdir(join(root, "store", "remote-sync"), { recursive: true });
-    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://x.example", 2))}\n`);
+    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://x.example", 2))}\n`,
+      authorityFileOptions);
     const stored = { format_version: 1, local_team: "demo",
       server_url: "https://o.example",
       server_instance_id: config.server_instance_id,
@@ -1840,7 +1942,7 @@ test("set-endpoint cannot land a stale alignment over a newer move (#739 interle
       cipher_profile: "none",
       local_security_history: [{ local_security_revision: "0",
         effective_from_seq: "1", minimum_security_mode: "plaintext-allowed" }] };
-    await writeFile(storedPath, JSON.stringify(stored));
+    await writeFile(storedPath, JSON.stringify(stored), authorityFileOptions);
     const capabilities = { protocol_version: 1,
       server_instance_id: config.server_instance_id,
       team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
@@ -1859,7 +1961,8 @@ test("set-endpoint cannot land a stale alignment over a newer move (#739 interle
     const staleOutcome = stale.catch((error) => error);
     while (releaseFetch === null) await new Promise((r) => setTimeout(r, 5));
     // B: moves the binding on to Y and completes its own alignment.
-    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://y.example", 3))}\n`);
+    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://y.example", 3))}\n`,
+      authorityFileOptions);
     await writeFile(storedPath, JSON.stringify({ ...stored, server_url: "https://y.example" }));
     releaseFetch();
     const outcome = await staleOutcome;
@@ -2294,6 +2397,10 @@ test("a staged input leaves nothing behind, whether the call succeeds or fails",
   const before = await residue();
 
   const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-residue-"));
+  t.after(async () => {
+    if (!root.startsWith(tmpdir())) throw new Error("unsafe test root");
+    await rm(root, { recursive: true, force: true });
+  });
   const input = Array.from({ length: 8 }, (_, index) => ({ type: "probe", index }));
 
   const ok = (pidFile, helperFile) => `#!/usr/bin/env bash
@@ -2583,7 +2690,12 @@ async function withDriverEnvironment(t, root, script, buildCalls) {
 test("storage driver subprocess cannot observe HTTP or age identity secrets", async () => {
   const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-env-"));
   const mock = join(root, "driver.sh");
+  // Same EPIPE race as the two stubs #759 fixed for #755: this one prints and
+  // exits without reading stdin, so a parent write/end that lands after exit
+  // hits a closed pipe and is reported as a driver failure. `cat` drains stdin
+  // first so the child stays alive until the parent has finished writing.
   await writeFile(mock, `#!/usr/bin/env bash
+cat >/dev/null
 [ -z "\${AGMSG_SYNC_TOKEN:-}" ] || exit 99
 [ -z "\${AGMSG_SYNC_TRUST_DIR:-}" ] || exit 95
 [ -z "\${AGMSG_AGE_IDENTITY:-}" ] || exit 98
