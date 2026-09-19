@@ -546,7 +546,12 @@ w1:pX	$PANE_PID"
   # A lock outlives the process that wrote it. Parsing a pid out of the file says
   # the file holds a number, not that the number is still this session.
   sleep 60 >/dev/null 2>&1 3>&- & local dead=$!
-  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  # `|| true` on BOTH calls, not just wait's: bats runs test bodies under
+  # errexit by default, and kill returns non-zero (ESRCH) if $dead has
+  # already exited on its own by the time this runs. Left bare, that aborts
+  # the test here -- before the pid-reuse guard below ever gets to decide
+  # whether this run is even measuring what it claims to (#1187).
+  kill "$dead" 2>/dev/null || true; wait "$dead" 2>/dev/null || true
   # The precondition is that the pid is GONE. On a loaded runner the number can
   # be handed to a new process between the wait and the read below (#1187,
   # seen twice on macOS); then this test is not measuring what it says, and a
@@ -575,7 +580,12 @@ w1:pX	$PANE_PID"
   _edge "$$" "$stranger"; _edge "$stranger" "$PANE_PID"; _edge "$PANE_PID" 1
   _driver_returns "w1:p9	$PANE_PID"
   run agmsg_self_proof agmsg seat w1:p9
-  kill "$stranger" 2>/dev/null; wait "$stranger" 2>/dev/null || true
+  # Same reason as the "dead owner" test above: bare under errexit (which
+  # `run` only suspends for the command it wraps, not for what follows), a
+  # kill failure here would abort the test on cleanup -- discarding a result
+  # `run` had already captured -- rather than ever reaching the assertions
+  # below.
+  kill "$stranger" 2>/dev/null || true; wait "$stranger" 2>/dev/null || true
   [ "$status" -eq 2 ]
   [ "$output" = "undetermined"$'\t'"owner_marker_absent" ]
 }
