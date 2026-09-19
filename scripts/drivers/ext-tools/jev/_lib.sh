@@ -119,8 +119,26 @@ _jev_api_call() {
   trap "rm -rf $(printf '%q' "$work_dir")" EXIT INT TERM
   cfg="$work_dir/config"
   curl_err="$work_dir/stderr"
+
+  # AGMSG_JEV_API_BASE is production-reachable code even though only tests
+  # set it (review finding, #1339): a curl -K config file is LINE-based, so an
+  # embedded newline in this value could inject a further directive (e.g. a
+  # second `header = "Authorization: ..."` line aimed at a different host)
+  # regardless of quoting -- the same class of risk _jev_key_looks_valid
+  # guards for the key itself. Reject it here rather than trust the source.
+  local api_base
+  api_base="$(_jev_api_base)"
+  case "$api_base" in
+    *$'\n'*)
+      _JEV_CURL_DIAG="invalid API base (embedded newline)"
+      rm -rf "$work_dir"
+      trap - EXIT INT TERM
+      return 1
+      ;;
+  esac
+
   {
-    printf 'url = "%s/api/alpha/decisions"\n' "$(_jev_api_base)"
+    printf 'url = "%s/api/alpha/decisions"\n' "$(_jev_curl_quote "$api_base")"
     printf 'request = "POST"\n'
     printf 'header = "Authorization: Bearer %s"\n' "$(_jev_curl_quote "$key")"
     printf 'header = "Content-Type: application/json; charset=utf-8"\n'
@@ -129,7 +147,13 @@ _jev_api_call() {
     printf 'max-time = "25"\n'
   } > "$cfg"
   chmod 600 "$cfg"
-  _JEV_HTTP_CODE="$(printf '%s' "$json" | curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>"$curl_err")" || rc=$?
+  # -q (--disable) MUST be curl's first argument: it stops curl from reading
+  # ~/.curlrc / the global curlrc at all (review finding, #1339). Without it, a
+  # curlrc enabling verbose/trace output can print the Authorization header
+  # to curl's own stderr, which line 2 below folds into $_JEV_CURL_DIAG --
+  # and that diagnostic becomes part of handle's one-line reply on a
+  # transport failure, leaking the key into agmsg message history.
+  _JEV_HTTP_CODE="$(printf '%s' "$json" | curl -q -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>"$curl_err")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     _JEV_CURL_DIAG="$(tr '\n' ' ' < "$curl_err" 2>/dev/null | cut -c1-200)"
     [ -n "$_JEV_CURL_DIAG" ] || _JEV_CURL_DIAG="curl exited $rc"

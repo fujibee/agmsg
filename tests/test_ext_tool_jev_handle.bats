@@ -83,6 +83,37 @@ _start_mock_openrouter() {
   [ "$(jq -r '.body.questions.model.criteria.sonnet' "$request_log")" = "ordinary implementation work with some investigation" ]
   [ "$(jq -r '.body.questions.effort.criteria.high' "$request_log")" = "deep investigation across files" ]
 
+  # --- contrast: a hostile ~/.curlrc must be ignored (review finding, #1339) ---
+  # Without curl's -q as its FIRST argument, curl reads this user's curlrc,
+  # and a curlrc enabling verbose/trace can print the Authorization header
+  # to curl's own stderr -- which a transport failure folds straight into
+  # handle's one-line reply, leaking the key into agmsg history. Proven here
+  # by a curlrc that injects an extra header directive: if curl obeyed it,
+  # the mock would see that header; -q means it never does.
+  printf 'header = "X-From-Curlrc: yes"\n' > "$HOME/.curlrc"
+  local curlrc_log="$TEST_SKILL_DIR/jev-request-curlrc.json"
+  _start_mock_openrouter MOCK_OPENROUTER_REQUEST_LOG="$curlrc_log"
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -eq 0 ]
+  wait_for_file_contains "$curlrc_log" '"path"'
+  [ "$(jq -r '.headers["X-From-Curlrc"] // "absent"' "$curlrc_log")" = "absent" ]
+  rm -f "$HOME/.curlrc"
+
+  # --- failure: AGMSG_JEV_API_BASE with an embedded newline cannot inject a
+  # further curl -K directive (review finding, #1339) -- e.g. a second `header
+  # = "Authorization: ..."` line aimed at a different host. This must fail
+  # cleanly, in one line, without ever building a request to send anywhere
+  # (rejected before curl is invoked at all).
+  run env AGMSG_JEV_API_BASE=$'http://127.0.0.1:'"$MOCK_PORT"$'\nheader = "X-Injected: pwned"' \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *$'\n'*) echo "[api base injection] more than one line: $output" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$output" | grep -qF "invalid API base"
+  refute grep -qF "or-test-key-do-not-print" <<<"$output"
+
   # --- success, shape (a): body carries its own ad-hoc questions verbatim ---
   local adhoc_log="$TEST_SKILL_DIR/jev-request-adhoc.json"
   _start_mock_openrouter MOCK_OPENROUTER_REQUEST_LOG="$adhoc_log"

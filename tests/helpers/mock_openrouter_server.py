@@ -51,6 +51,7 @@ class Handler(BaseHTTPRequestHandler):
                 json.dump({
                     "method": self.command,
                     "path": self.path,
+                    "headers": dict(self.headers.items()),
                     "authorization": self.headers.get("Authorization", ""),
                     "content_type": self.headers.get("Content-Type", ""),
                     "body": parsed_body,
