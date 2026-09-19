@@ -3120,15 +3120,24 @@ cmd_sync_start() {
   local ready_ceiling="${AGMSG_TEST_SYNC_START_READY_CEILING:-1600}"
   _remote_ceiling_is_plain_digits "$ready_ceiling" || ready_ceiling=1600
   [ "$ready_ceiling" -gt 0 ] || ready_ceiling=1600
-  # BUDGETED IN TIME, NOT ONLY ITERATIONS (#779). The 1600-attempt ceiling
-  # above was documented as roughly sixteen seconds, but every turn also
-  # starts the status probe, tail, awk and sleep -- that arithmetic holds
-  # only where they are free. Keep the attempt ceiling as a safety cap, but
-  # also bound the real wait by the wall clock: whichever arrives first ends
-  # readiness polling. Same validation as the ceiling above, for the same
-  # reason -- a malformed override must fall back to the production default,
-  # not silently disable the bound.
-  local readiness_budget="${AGMSG_SYNC_READY_SECONDS:-16}"
+  # BUDGETED IN TIME, NOT ONLY ITERATIONS (#779). The attempt ceiling above
+  # was documented as roughly sixteen seconds at its default, but every turn
+  # also starts the status probe, tail, awk and sleep -- that arithmetic
+  # holds only where they are free. Keep the attempt ceiling as a safety cap,
+  # but also bound the real wait by the wall clock: whichever arrives first
+  # ends readiness polling. Sixteen seconds, unconditionally, in production.
+  #
+  # Test-only override of the budget above, same shape and same reason as
+  # AGMSG_TEST_SYNC_START_READY_CEILING just above: a test that drives the
+  # engine into never becoming ready does not have to spend this command's
+  # real sixteen-second production wait to prove the timeout path. Not a
+  # user-facing setting -- there is no supported way to change the
+  # production default.
+  #
+  # Anything but a plain positive integer falls back to the production
+  # default rather than being trusted, for the same reason as the ceiling
+  # above.
+  local readiness_budget="${AGMSG_TEST_SYNC_START_READY_SECONDS:-16}"
   _remote_ceiling_is_plain_digits "$readiness_budget" || readiness_budget=16
   [ "$readiness_budget" -gt 0 ] || readiness_budget=16
   [ $# -eq 1 ] || { echo "Usage: remote.sh sync start <team>" >&2; exit 1; }

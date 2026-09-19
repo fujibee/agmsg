@@ -452,12 +452,12 @@ skip_if_root() {
   local pidfile="$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
   local starter engine i=0 j=0 released=0 err="$TEST_SKILL_DIR/bounded.err"
 
-  # The clock budget is deliberately shorter than the 300-attempt ceiling can
-  # reach through the slow probe. The ceiling remains a finite fallback, so an
-  # implementation that drops the clock turns this into a bounded red test,
-  # not an unbounded CI hang.
-  env PATH="$slow_bin:$PATH" AGMSG_SYNC_READY_SECONDS=5 \
-    AGMSG_SYNC_READY_TRIES=300 AGMSG_LOCK_SECONDS=2 \
+  # The clock budget is deliberately shorter than the 1600-attempt ceiling
+  # can reach through the slow probe. The ceiling remains a finite fallback,
+  # so an implementation that drops the clock turns this into a bounded red
+  # test, not an unbounded CI hang.
+  env PATH="$slow_bin:$PATH" AGMSG_TEST_SYNC_START_READY_SECONDS=5 \
+    AGMSG_LOCK_SECONDS=2 \
     bash "$SCRIPTS/remote.sh" sync start testteam >"$err" 2>&1 &
   starter=$!
 
