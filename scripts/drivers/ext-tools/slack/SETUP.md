@@ -41,19 +41,20 @@ only you get the *path* to — you only ever handle that path.
    ```
    This reads `pbpaste`/`wl-paste`/`xclip`/`xsel`/PowerShell's
    `Get-Clipboard` (whichever exists) and saves the value straight to a
-   0600 file, answering only "Saved. (The value itself is not shown or
-   logged.)" — you never see the token. If there is no clipboard access
-   (a headless environment, or the read fails), fall back to asking the
-   user to run it in a real terminal themselves instead, without
-   `--from-clipboard`:
+   0600 file, answering only "Saved to `<path>`. (The value itself is not
+   shown or logged.)" — you never see the token, only that path. Take
+   `<path>` from that line and use it as `<key_file>` below. If there is
+   no clipboard access (a headless environment, or the read fails), fall
+   back to asking the user to run it in a real terminal themselves
+   instead, without `--from-clipboard`:
    ```
    bash <skill-root>/scripts/ext-tool.sh secret <team> <name>
    ```
    which prompts and reads the token without echoing it — this form needs
    a real TTY, which is why it cannot run through you inside Claude Code's
-   own `!` passthrough. Either way, the command reports a file path back —
-   ask the user for it if they ran the fallback themselves, and use it as
-   `<key_file>` below. **Never accept a pasted token value in chat.**
+   own `!` passthrough. It reports the same "Saved to `<path>`." line; ask
+   the user to read it back to you since you did not run this form
+   yourself. **Never accept a pasted token value in chat.**
 
 4. **Verify the token, then pick and verify a channel.**
    ```
