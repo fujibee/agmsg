@@ -14,3 +14,9 @@ teams/
 .env
 .env.*
 /.secrets/
+run/
+
+# Python bytecode cache, created by running the antigravity supervisor
+# directly (e.g. py_compile, or importing it in a test)
+__pycache__/
+*.pyc

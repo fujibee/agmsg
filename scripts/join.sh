@@ -47,6 +47,8 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/registry-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/roster-journal.sh"
 # Scope resolution to the join target team (#357): a poison registration in an
 # unrelated team must not steer this join's ancestor/git-common fallback.
 # Registering a project AT $HOME or / is deliberately allowed -- both claude and
@@ -67,11 +69,17 @@ agmsg_lock_acquire "$TEAMS_DIR/$TEAM" || exit 1
 
 # --- Ensure team config exists ---
 if [ ! -f "$TEAM_CONFIG" ]; then
-  INITIAL_CONFIG=$(printf '{\n  "name": "%s",\n  "agents": {},\n  "created_at": "%s"\n}' \
-    "$TEAM" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+  INITIAL_CONFIG=$(printf '{\n  "name": "%s",\n  "team_id": "%s",\n  "agents": {},\n  "created_at": "%s"\n}' \
+    "$TEAM" "$(compat_uuid7)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
   agmsg_write_atomic "$TEAM_CONFIG" "$INITIAL_CONFIG"
   echo "Created team: $TEAM"
 fi
+
+# Identity state is journal-owned for id-bearing teams. Bootstrap teams created
+# in the short pre-journal window, then refresh the config's derived agents
+# cache before making any membership decision under this same registry lock.
+agmsg_roster_ensure "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
+agmsg_roster_project_config "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
 
 # --- Refuse silently reviving a name that rename.sh just renamed away (#360) ---
 # A CLI's slash-command history can resubmit `/agmsg actas <old_name>` well
@@ -118,15 +126,43 @@ EXISTING=$(agmsg_sqlite_mem "
 ")
 
 if [ -z "$EXISTING" ] || [ "$EXISTING" = "null" ]; then
-  AGENT_OBJ=$(sqlite3 :memory: "SELECT json_object('registrations', json_array(json('$REGISTRATION_ESCAPED')));")
+  TEAM_HAS_IDS=$(agmsg_sqlite_mem "
+    SELECT json_type(CAST(readfile('$(agmsg_sql_readfile_path "$TEAM_CONFIG")') AS TEXT), '\$.team_id');
+  ")
+  if [ "$TEAM_HAS_IDS" = "text" ]; then
+    NAME_OWNER=$(agmsg_roster_name_owner "$TEAMS_DIR/$TEAM" "$AGENT_ID")
+    if [ -n "$NAME_OWNER" ]; then
+      RETIRED_ID=$(agmsg_sqlite_mem "
+        SELECT COALESCE(json_extract(
+          CAST(readfile('$(agmsg_sql_readfile_path "$TEAM_CONFIG")') AS TEXT),
+          '\$.retired_members.' || '$AGENT_ID_SQL' || '.member_id'),'');")
+      if [ "$RETIRED_ID" != "$NAME_OWNER" ]; then
+        echo "Error: '$AGENT_ID' is permanently bound to another active identity in team '$TEAM'." >&2
+        exit 1
+      fi
+      MEMBER_ID="$NAME_OWNER"
+    else
+      MEMBER_ID="$(compat_uuid7)"
+    fi
+    JOINED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    agmsg_roster_append_joined "$TEAMS_DIR/$TEAM" "$MEMBER_ID" "$AGENT_ID" "$JOINED_AT"
+    AGENT_OBJ=$(sqlite3 :memory: "SELECT json_object(
+      'member_id', '$MEMBER_ID',
+      'registrations', json_array(json('$REGISTRATION_ESCAPED'))
+    );")
+  else
+    AGENT_OBJ=$(sqlite3 :memory: \
+      "SELECT json_object('registrations', json_array(json('$REGISTRATION_ESCAPED')));")
+  fi
 else
   EXISTING_ESCAPED=$(printf '%s' "$EXISTING" | sed "s/'/''/g")
   NORMALIZED=$(agmsg_sqlite_mem "
     WITH agent(a) AS (SELECT '$EXISTING_ESCAPED')
     SELECT CASE
       WHEN json_type(json_extract(a, '\$.registrations')) = 'array' THEN a
-      ELSE json_object(
-        'registrations',
+      ELSE json_set(
+        a,
+        '\$.registrations',
         json_array(json_object(
           'type', json_extract(a, '\$.type'),
           'project', json_extract(a, '\$.project')
@@ -189,6 +225,53 @@ UPDATED=$(agmsg_sqlite_mem \
   )
   FROM cfg;")
 agmsg_write_atomic "$TEAM_CONFIG" "$UPDATED"
+if agmsg_roster_has_journal "$TEAMS_DIR/$TEAM"; then
+  agmsg_roster_project_config "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
+fi
 agmsg_lock_release
+
+# Name this pane for the seat just joined -- the VISIBLE name only. join does not
+# write a placement record, and must not: it is not a claim of the seat. The same
+# identity can be joined from a second session while a first one holds it through
+# actas, and a record written here would point peek/poke/despawn at the pane that
+# does NOT hold it. Showing your own name on your own pane is harmless; declaring
+# yourself the seat's placement is not. (The 6th argument is omitted deliberately;
+# its default is the safe half.)
+#
+# A type may publish its current session id through the manifest's `session_env=`
+# variable. This is deliberately NOT inferred from `detect=`: detection answers
+# whether a runtime is present and may name several markers or credentials,
+# while session_env names exactly one value with exactly this meaning. A missing
+# key or unset value remains the honest "this type/session publishes no id" and
+# drivers that do not need one (tmux, via $TMUX_PANE) still name normally.
+#
+# The source carries the errexit lift: on bash 3.2 a failure inside a sourced
+# file fires THIS script's `set -e`, so a plain `. x || true` would take the join
+# down instead of skipping the naming. Nothing here may fail a join.
+_agmsg_tr_rc=0; _agmsg_tr_e=0
+case $- in *e*) _agmsg_tr_e=1 ;; esac
+set +e
+# shellcheck disable=SC1091
+[ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+_agmsg_tr_rc=$?
+[ "$_agmsg_tr_e" = 1 ] && set -e
+if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+  _agmsg_session_id=""
+  _agmsg_session_env="$(agmsg_type_get "$AGENT_TYPE" session_env)"
+  if [ -n "$_agmsg_session_env" ]; then
+    case "$_agmsg_session_env" in
+      [A-Za-z_]*)
+        case "$_agmsg_session_env" in
+          *[!A-Za-z0-9_]*)
+            printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
+              "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
+          *) _agmsg_session_id="${!_agmsg_session_env:-}" ;;
+        esac ;;
+      *) printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
+           "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
+    esac
+  fi
+  agmsg_terminal_name_self_safe "$_agmsg_session_id" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" || true
+fi
 
 echo "Joined team $TEAM as $AGENT_ID"

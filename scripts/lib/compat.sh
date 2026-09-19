@@ -58,6 +58,46 @@ _compat_cim_cmdline() {
 }
 
 # Get full command line of a process.  Replaces: ps -o args= -p <pid>
+# Does <cmdline> name <path>?
+#
+# It has to be asked as a function because the two sides are written in
+# different alphabets and only one of them is ours. `compat_get_cmdline` returns
+# what the OS says a process was started with; the path we compare it against
+# came out of this shell. Under Git Bash those disagree for the same file:
+# `$SKILL_DIR` is `/c/Users/...`, and a native binary launched from it reports
+# `C:/Users/...`. A `case` on one against the other never fires -- so every
+# check built that way answers "not ours" about a process that IS ours, and
+# does it silently, because a non-match is the ordinary answer.
+#
+# Measured on the reporting machine (#652): the sync engine was alive, its
+# `/proc/<pid>/cmdline` read
+#   "C:\Program Files\nodejs\node.exe" C:/Users/.../internal/remote-sync.mjs run --team ossb
+# while the comparison held /c/Users/.../internal/remote-sync.mjs. Forcing the
+# CIM source instead of /proc returned the same `C:/` form, so this is not about
+# where the cmdline is read from -- both sources speak Windows.
+#
+# Five call sites compared a shell path against an OS cmdline this way. Four of
+# them decide whether to kill a stale watcher, so on Windows they answered "not
+# ours" and left it running.
+#
+# `cygpath -m` is the mixed form -- `C:/Users/...`, forward slashes -- which is
+# what MSYS hands a native binary, and therefore what the process reports.
+# Off Windows there is no cygpath and this is the plain match and nothing else,
+# the same escape `agmsg_sql_readfile_path` takes.
+agmsg_cmdline_names_path() {
+  local cmdline="$1" path="$2" native
+  [ -n "$cmdline" ] && [ -n "$path" ] || return 1
+  case "$cmdline" in *"$path"*) return 0 ;; esac
+  command -v cygpath >/dev/null 2>&1 || return 1
+  native="$(cygpath -m "$path" 2>/dev/null || true)"
+  [ -n "$native" ] || return 1
+  # Identical forms would make this second look a copy of the first, not a
+  # second chance at it.
+  [ "$native" != "$path" ] || return 1
+  case "$cmdline" in *"$native"*) return 0 ;; esac
+  return 1
+}
+
 compat_get_cmdline() {
   local pid="$1"
   [ -z "$pid" ] && return 1
@@ -110,7 +150,14 @@ compat_get_comm() {
       fi
       ;;
     *)
-      ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null
+      # `ps -o comm=` prints the executable path on macOS. Piping it through
+      # `xargs basename` splits that path on whitespace (and eats quotes), so a
+      # binary under e.g. "~/Library/Application Support/..." resolves to
+      # "Application". Take the basename of the whole string instead.
+      local _comm
+      _comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+      [ -n "$_comm" ] || return 1
+      basename -- "$_comm" 2>/dev/null
       ;;
   esac
 }
@@ -132,6 +179,35 @@ compat_uuidgen() {
   fi | tr -d '\r'
 }
 
+# Generate a UUIDv7: 48-bit millisecond timestamp, version 7, RFC 4122
+# variant, and random tail bytes. Keep this in the core dependency tier:
+# /dev/urandom supplies the random bytes without invoking Python or another
+# optional runtime. No counter or other persistent state.
+compat_uuid7() {
+  local ms hex rnd
+  ms=$(( $(date -u +%s) * 1000 ))
+  hex=$(printf '%012x' "$ms")
+  rnd=$(head -c 10 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  printf '%s-%s-7%s-8%s-%s\n' \
+    "${hex:0:8}" "${hex:8:4}" "${rnd:0:3}" "${rnd:3:3}" "${rnd:6:12}"
+}
+
+# Get file size in bytes.
+# Replaces: stat -f %z (macOS) / stat -c %s (Linux/MSYS2)
+#
+# Same split as compat_file_mtime below, and added for the same kind of caller:
+# a bounded log has to know when to rotate, and `wc -c` on a file being
+# appended to is a second read of the whole thing.
+compat_file_size() {
+  local file="$1"
+  [ -z "$file" ] && return 1
+  _agmsg_detect_platform
+  case "$_agmsg_platform" in
+    macos)  stat -f %z "$file" 2>/dev/null ;;
+    *)      stat -c %s "$file" 2>/dev/null ;;
+  esac
+}
+
 # Get file modification time as epoch seconds.
 # Replaces: stat -f %m (macOS) / stat -c %Y (Linux/MSYS2)
 compat_file_mtime() {
@@ -142,4 +218,33 @@ compat_file_mtime() {
     macos)  stat -f %m "$file" 2>/dev/null ;;
     *)      stat -c %Y "$file" 2>/dev/null ;;
   esac
+}
+
+# Batch variant of compat_file_mtime: read NUL-separated paths on stdin
+# (find -print0) and emit one "<mtime><TAB><path>" line per file, spawning
+# one stat per argv batch instead of one process chain per file.
+#
+# Why a batch form exists at all: `mtime=$(compat_file_mtime "$f")` in a
+# per-file loop pays a command-substitution subshell + uname + stat for
+# every file (the subshell also discards the platform memo each time). On
+# Windows/MSYS2, where process creation is orders of magnitude costlier
+# than a Linux fork, that turns a scan of a few thousand files into
+# minutes of wall clock. xargs keeps each stat invocation under the argv
+# limit (cf. the E2BIG failures in #882), so arbitrarily long lists stay
+# safe.
+#
+# A path that vanishes between the listing and the stat batch (a real race
+# against a live writer) makes stat report an error for that file and exit
+# nonzero, but every surviving file is still printed -- so the error is
+# suppressed and the status discarded rather than letting one dead file
+# starve the caller of the whole list. Empty input is likewise quiet: stat
+# with no operands fails, which the same suppression covers.
+compat_files_mtime_0() {
+  _agmsg_detect_platform
+  local tab
+  tab=$(printf '\t')
+  case "$_agmsg_platform" in
+    macos)  xargs -0 stat -f "%m${tab}%N" 2>/dev/null ;;
+    *)      xargs -0 stat -c "%Y${tab}%n" 2>/dev/null ;;
+  esac || true
 }

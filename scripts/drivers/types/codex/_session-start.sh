@@ -25,7 +25,17 @@
 # portable compat_file_mtime, since `find -printf` is GNU-only (no
 # `-printf` on macOS/BSD find, which this repo also has to support). See #416.
 agmsg_newest_rollout_files() {
-  local dir="$1" limit="$2" f mtime
+  local dir="$1" limit="$2"
+  # Batch the mtime lookup (compat_files_mtime_0) instead of running
+  # `mtime=$(compat_file_mtime "$f")` in a per-file loop: that substitution
+  # forks a subshell + uname + stat for EVERY rollout, and on Windows/MSYS2
+  # -- where process creation is orders of magnitude costlier than a Linux
+  # fork -- the scan measured ~12 minutes against 2582 accumulated rollouts.
+  # This function runs inside the synchronous SessionStart hook, and
+  # agmsg_resolve_codex_thread calls it up to 3 times, so the per-file form
+  # blocks Codex startup for tens of minutes once a machine has real rollout
+  # history. One stat per argv batch resolves the same list in seconds.
+  #
   # `head -n "$limit"` here would close its read end after $limit lines while
   # `sort` may still be writing -- under this caller's `set -euo pipefail`,
   # that SIGPIPEs `sort` (status 141) and pipefail surfaces it as the whole
@@ -36,18 +46,15 @@ agmsg_newest_rollout_files() {
   # different mechanism. awk reads its input through to EOF regardless of
   # `n` (only *printing* stops early), so `sort` is always fully drained and
   # never SIGPIPEd.
-  # `|| true` on the mtime lookup: under set -e, a plain `var=$(cmd)`
-  # assignment DOES abort on cmd's failure (unlike a substitution used inside
-  # a test/conditional). A rollout that `find` listed but that Codex deletes
-  # or rotates before `stat` runs on it (a real possibility across the ~1-2s
-  # this loop can take with hundreds of files) would otherwise abort this
-  # whole while-loop subshell -- another way to reintroduce the "no
-  # candidate found" failure the ${mtime:-0} fallback below already exists to
-  # avoid.
-  find "$dir" -type f -name 'rollout-*.jsonl' 2>/dev/null | while IFS= read -r f; do
-    mtime=$(compat_file_mtime "$f" || true)
-    printf '%s\t%s\n' "${mtime:-0}" "$f"
-  done | sort -t "$(printf '\t')" -k1,1rn | awk -F'\t' -v n="$limit" 'NR<=n { sub(/^[^\t]*\t/, ""); print }'
+  #
+  # A rollout that `find` listed but that Codex deletes or rotates before
+  # the stat batch reaches it no longer needs special handling here:
+  # compat_files_mtime_0 suppresses the per-file error and still prints
+  # every surviving file, so a dead file can't starve the caller of the
+  # whole candidate list.
+  find "$dir" -type f -name 'rollout-*.jsonl' -print0 2>/dev/null \
+    | compat_files_mtime_0 \
+    | sort -t "$(printf '\t')" -k1,1rn | awk -F'\t' -v n="$limit" 'NR<=n { sub(/^[^\t]*\t/, ""); print }'
 }
 
 # Resolve the current Codex thread id. CODEX_THREAD_ID is only exported on the
@@ -119,7 +126,16 @@ agmsg_session_start() {
     safe_pairs="${safe_pairs:+$safe_pairs$'\n'}${candidate_team}"$'\t'"${candidate_name}"
   done <<< "$PAIRS"
   PAIRS="$safe_pairs"
-  [ -n "$PAIRS" ] || exit 0
+  # A request is an authority hand-off, not a best-effort hint. Never derive a
+  # path from an absent RUN_DIR or publish a record whose type is empty: callers
+  # that cannot provide either input must leave the previous request untouched.
+  if [ -z "${TYPE:-}" ] || [ -z "${RUN_DIR:-}" ]; then
+    echo "codex SessionStart: missing TYPE or RUN_DIR; refusing bridge request publication" >&2
+    return 0
+  fi
+  request_type_value="${TYPE:-}"
+  request_run_dir="${RUN_DIR:-}"
+  pair_count=$(printf '%s\n' "${PAIRS:-}" | grep -c . || true)
   app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
   if [ -z "$app_server" ]; then
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
@@ -137,20 +153,59 @@ agmsg_session_start() {
       app_server="unix://$socket_path"
     fi
   fi
-  [ -n "$app_server" ] || exit 0
-
+  if [ -z "$app_server" ]; then
+    # A ws:// (TCP) app-server has no socket file to find, and codex-monitor.sh
+    # passes the URL to `codex --remote`, not as a `unix://` token this script can
+    # scrape — so none of the three probes above can see it. The port file does
+    # carry the URL; reuse the helper codex-record-session.sh already uses for it.
+    #
+    # Refuse rather than source an empty path or look up an empty project: an
+    # unset SKILL_DIR or PROJECT here would not fail loudly, it would just
+    # never find the app-server and fall through to the "no app_server" exit
+    # below for the wrong reason (#1234 review).
+    [ -n "${SKILL_DIR:-}" ] && [ -n "${PROJECT:-}" ] || exit 0
+    if ! command -v _agmsg_codex_app_server_url >/dev/null 2>&1; then
+      # shellcheck disable=SC1091
+      . "$SKILL_DIR/scripts/drivers/types/codex/_app-server.sh"
+    fi
+    app_server="$(_agmsg_codex_app_server_url "$PROJECT")"
+  fi
   if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then
-    project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
-    request_file="$RUN_DIR/codex-bridge-request.$project_hash"
+    # #1254: the request file is this SEAT's own, never a project-wide one --
+    # AGMSG_CODEX_SEAT_KEY reaches this hook the same way AGMSG_CODEX_BRIDGE_
+    # APP_SERVER does (inherited from the app-server's own environment under
+    # --remote). Validated before it touches a path, same as everywhere else
+    # a seat key arrives from the environment (design review).
+    if ! command -v _agmsg_codex_seat_key_ok >/dev/null 2>&1; then
+      # shellcheck disable=SC1091
+      . "$SKILL_DIR/scripts/drivers/types/codex/_seat-key.sh"
+    fi
+    seat_key="${AGMSG_CODEX_SEAT_KEY:-}"
+    _agmsg_codex_seat_key_ok "$seat_key" || exit 0
+    request_file="$request_run_dir/codex-bridge-request.$seat_key"
     tmp_request="$request_file.$$"
-    mkdir -p "$RUN_DIR" 2>/dev/null || true
-    printf '%s\t%s\t%s\n' "$TYPE" "$thread_id" "$app_server" > "$tmp_request"
+    mkdir -p "$request_run_dir" 2>/dev/null || true
+    request_pair_count="$pair_count"
+    if [ "$request_pair_count" -eq 1 ] && [ -n "$app_server" ]; then
+      IFS=$'\t' read -r request_team request_name <<EOF
+$PAIRS
+EOF
+      printf '%s\t%s\t%s\t%s\t%s\n' "$request_type_value" "$thread_id" "$app_server" \
+        "$request_team" "$request_name" > "$tmp_request"
+    else
+      # A seat with zero or multiple matching roles has no unambiguous pair;
+      # when the endpoint is unavailable, a single matching role is also held
+      # back. Publish the thread and an empty pair so a stale role is retired;
+      # the dispatcher waits instead of fanning out project roles.
+      printf '%s\t%s\t%s\t\n' "$request_type_value" "$thread_id" "$app_server" > "$tmp_request"
+    fi
     mv "$tmp_request" "$request_file"
     exit 0
   fi
 
+  [ -n "$app_server" ] || exit 0
+
   mkdir -p "$RUN_DIR" 2>/dev/null || true
-  pair_count=$(printf '%s\n' "$PAIRS" | grep -c . || true)
   if [ "$pair_count" = "1" ]; then
     IFS=$'\t' read -r key_team key_name <<EOF
 $PAIRS
@@ -183,16 +238,33 @@ EOF
   fi
   local storage_dir
   storage_dir="$(agmsg_storage_dir)"
-  nohup "${bridge_run[@]}" \
-    --project "$PROJECT" \
-    --workspace-root "$storage_dir" \
-    --workspace-root "$SKILL_DIR/teams" \
-    --workspace-root "$SKILL_DIR/run" \
-    --type "$TYPE" \
-    "${bridge_pairs[@]}" \
-    --thread "$thread_id" \
-    --app-server "$app_server" \
-    --inline-inbox \
-    >>"$log" 2>&1 3>&- 4>&- &
+  # The bridge outlives this hook, so it must not carry the harness's
+  # descriptors — the same leak that hung a macOS CI shard from the launcher.
+  #
+  # This file is SOURCED into session-start.sh's global context, so calling the
+  # close here directly would shut descriptors belonging to the shell that
+  # sourced us. The subshell is what makes it safe: the close applies to the
+  # forked child, which is the process that goes on to become the bridge, and
+  # the parent keeps everything it had (review P1).
+  #
+  # The `3>&- 4>&-` stays on the spawn line as well. test_spawn_fd_guard.bats
+  # requires it there and says why: a file-level close can sit inside a
+  # function, inside a branch that never runs, or after the spawn it is meant
+  # to cover, so the guard is checked per line and the redundancy is deliberate.
+  # The subshell close is the part that reaches the descriptors bats numbered.
+  (
+    agmsg_close_inherited_fds
+    nohup "${bridge_run[@]}" \
+      --project "$PROJECT" \
+      --workspace-root "$storage_dir" \
+      --workspace-root "$SKILL_DIR/teams" \
+      --workspace-root "$SKILL_DIR/run" \
+      --type "$TYPE" \
+      "${bridge_pairs[@]}" \
+      --thread "$thread_id" \
+      --app-server "$app_server" \
+      --inline-inbox \
+      >>"$log" 2>&1 3>&- 4>&- &
+  )
   exit 0
 }

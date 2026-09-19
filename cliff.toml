@@ -74,6 +74,13 @@ commit_parsers = [
   { message = "^Fix Codex monitor multi-identity delivery", group = "<!-- 1 -->Fixed" },
   { message = "^Isolate Codex monitor bridges by role", group = "<!-- 0 -->Added" },
   { message = "^Allow launcher-reserved bridge PID", group = "<!-- 1 -->Fixed" },
+  { message = "^Stop telling every agent that key rotate", group = "<!-- 1 -->Fixed" },
+{ message = "^Naming is an invariant every entry point re-asserts", group = "<!-- 0 -->Added" },
+{ message = "^spawn: launch codex through the bundled monitor shim", group = "<!-- 1 -->Fixed" },
+{ message = "^Remove internal handles from the published tree", group = "<!-- 3 -->Changed" },
+{ message = "^sync-cipher: tolerate unknown message fields on receive", group = "<!-- 1 -->Fixed" },
+{ message = "^codex: one app-server per seat, never shared", group = "<!-- 1 -->Fixed" },
+{ message = "^plain driver: an agent-native substitute for peek/poke with no pane", group = "<!-- 0 -->Added" },
   # Everything else (merges, initial commit, misc) is intentionally dropped.
   { message = ".*", skip = true },
 ]

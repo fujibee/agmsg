@@ -4,7 +4,7 @@ set -euo pipefail
 # One-shot pending-message oracle for the Codex app-server bridge.
 #
 # Usage:
-#   watch-once.sh <project_path> <agent_type> [--name <agent>] [--team <team>] [--timeout <sec>] [--interval <sec>]
+#   watch-once.sh <project_path> <agent_type> [--name <agent>] [--team <team>] [--owner <owner>] [--timeout <sec>] [--interval <sec>]
 #
 # Exits:
 #   0  unread inbound exists for the subscription
@@ -40,6 +40,7 @@ shift 2
 ACTIVE_NAME=""
 TEAM_FILTER=""
 PAIR_FILTERS=""
+OWNER_ID="${AGMSG_CODEX_OWNER_ID:-}"
 TIMEOUT="${AGMSG_WATCH_ONCE_TIMEOUT:-300}"
 INTERVAL="${AGMSG_WATCH_ONCE_INTERVAL:-}"
 
@@ -48,10 +49,11 @@ while [ "$#" -gt 0 ]; do
     --name) ACTIVE_NAME="${2:?--name needs an agent name}"; shift 2 ;;
     --team) TEAM_FILTER="${2:?--team needs a team name}"; shift 2 ;;
     --pair) PAIR_FILTERS="${PAIR_FILTERS:+$PAIR_FILTERS$'\n'}${2:?--pair needs team<TAB>agent}"; shift 2 ;;
+    --owner) OWNER_ID="${2:?--owner needs an owner id}"; shift 2 ;;
     --timeout) TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
     --interval) INTERVAL="${2:?--interval needs seconds}"; shift 2 ;;
     -h|--help)
-      echo "Usage: watch-once.sh <project_path> <agent_type> [--name <agent>] [--team <team>] [--timeout <sec>] [--interval <sec>]"
+      echo "Usage: watch-once.sh <project_path> <agent_type> [--name <agent>] [--team <team>] [--owner <owner>] [--timeout <sec>] [--interval <sec>]"
       exit 0
       ;;
     *) echo "watch-once: unknown option: $1" >&2; exit 1 ;;
@@ -68,6 +70,7 @@ case "$INTERVAL" in ''|*[!0-9]*) echo "watch-once: --interval must be a whole nu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 source "$SCRIPT_DIR/../../../lib/storage.sh"
+agmsg_storage_load
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../../../lib/actas-lock.sh"
 # shellcheck disable=SC1091
@@ -76,9 +79,8 @@ source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 source "$SCRIPT_DIR/../../../lib/subscription.sh"
 
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
-DB="$(agmsg_db_path)"
 
-PAIRS="$(agmsg_subscription_pairs "$PROJECT_PATH" "$AGENT_TYPE" "" "$ACTIVE_NAME")" || exit 1
+PAIRS="$(agmsg_subscription_pairs "$PROJECT_PATH" "$AGENT_TYPE" "$OWNER_ID" "$ACTIVE_NAME")" || exit 1
 if [ -n "$TEAM_FILTER" ]; then
   PAIRS=$(printf '%s\n' "$PAIRS" | awk -v t="$TEAM_FILTER" -F'\t' 'NF >= 2 && $1 == t')
 fi
@@ -96,25 +98,70 @@ if [ -z "$PAIRS" ]; then
   exit 1
 fi
 
-WHERE_PAIRS="$(agmsg_subscription_where "$PAIRS")"
+# Bound by this run's lifetime, not by the moment polling happens to start
+# (#560): _AGMSG_WO_START is stamped at the top of the script, so startup cost
+# is inside the timeout rather than added to it.
+#
+# main's companion line here built WHERE_PAIRS for a raw `WHERE read_at IS NULL
+# AND (...)` query. That query is gone on this branch -- unread is read through
+# storage_list_unread per pair -- so carrying the assignment would leave a
+# variable nothing reads.
 deadline=$(( _AGMSG_WO_START + TIMEOUT ))
 
 while true; do
-  if [ -f "$DB" ]; then
-    row="$(agmsg_sqlite -separator $'\t' "$DB" "
-      SELECT COUNT(*), COALESCE(MAX(id), 0)
-      FROM messages
-      WHERE read_at IS NULL AND ($WHERE_PAIRS);
-    " 2>/dev/null || true)"
-    count="${row%%$'\t'*}"
-    max_id="${row#*$'\t'}"
-    case "$count" in ''|*[!0-9]*) count=0 ;; esac
-    case "$max_id" in ''|*[!0-9]*) max_id=0 ;; esac
+  {
+    # Unread across the subscription via the storage facade (§2.1, events ∪ legacy)
+    # — one storage_list_unread per pair, summed. max_id is an OPAQUE equality-only
+    # token for codex-bridge stale-wake detection (never ordered): a cksum DIGEST of
+    # the whole unread SET, so it changes whenever the set changes. A "greatest id"
+    # frontier could miss a set change under a backend whose ids aren't
+    # recency-ordered (jsonl); a set digest is robust on every backend.
+    count=0
+    all_ids=""
+    while IFS=$'\t' read -r _team _agent; do
+      [ -n "$_team" ] && [ -n "$_agent" ] || continue
+      # Asked per team, inside the loop: stores are per team, so whether one
+      # exists is a question about a team and there is no subscription-wide
+      # answer. It used to be asked once above the loop, when a single store
+      # served every team — that form skipped the whole subscription as soon as
+      # any store was missing. Mirrors check-inbox.sh and watch.sh.
+      storage_store_exists "$_team" || continue
+      u="$(storage_list_unread "$_team" "$_agent" 2>/dev/null || true)"
+      [ -n "$u" ] || continue
+      uarr="[$(printf '%s' "$u" | paste -sd, -)]"
+      # #777: this pair's unread backlog grows with every message sent to it,
+      # so interpolating it into ONE argv element eventually exceeds the OS's
+      # per-argument ceiling (Linux MAX_ARG_STRLEN=131,072 bytes; smaller
+      # still on Windows/macOS) and `agmsg_sqlite` fails with "Argument list
+      # too long" -- every single poll, since the backlog that triggered it
+      # never shrinks on its own (this script never marks anything read; see
+      # the file header). Pass the statement on stdin instead, mirroring
+      # drivers/storage/sqlite-sync.sh:1301 (`_sqlite_data_stdin`, #882) and
+      # history.sh/inbox.sh: printf is a bash builtin, so writing a large
+      # value to a temp file never execs and can hit neither that ceiling nor
+      # argv's at all. `|| continue` on mktemp failure matches the existing
+      # per-pair `continue` a few lines above: one pair's storage error must
+      # not end the whole subscription's poll.
+      _agmsg_wo_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-watchonce-ids.XXXXXX" 2>/dev/null) || continue
+      trap 'rm -f "$_agmsg_wo_sql"' EXIT HUP INT TERM
+      printf "%s\n" "SELECT json_extract(value,'\$.id') FROM json_each('$(printf '%s' "$uarr" | sed "s/'/''/g")');" \
+        > "$_agmsg_wo_sql"
+      ids="$(agmsg_sqlite ':memory:' < "$_agmsg_wo_sql" 2>/dev/null || true)"
+      rm -f "$_agmsg_wo_sql"
+      trap - EXIT HUP INT TERM
+      [ -n "$ids" ] || continue
+      count=$(( count + $(printf '%s\n' "$ids" | grep -c .) ))
+      all_ids="$all_ids$ids"$'\n'
+    done <<< "$PAIRS"
     if [ "$count" -gt 0 ]; then
+      # cksum = POSIX (no shasum dep). Field 1 is whitespace-free for the bridge's
+      # `max_id=(\S+)` parse. The bridge only compares it within one session, so the
+      # checksum needn't be stable across platforms — only deterministic per run.
+      max_id="$(printf '%s' "$all_ids" | sed '/^$/d' | LC_ALL=C sort | cksum | cut -d' ' -f1)"
       printf 'status=pending count=%s max_id=%s\n' "$count" "$max_id"
       exit 0
     fi
-  fi
+  }
 
   now=$(date +%s)
   if [ "$now" -ge "$deadline" ]; then

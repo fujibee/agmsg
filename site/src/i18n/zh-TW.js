@@ -73,6 +73,7 @@ export default {
       "grok-build": "xAI 的建置／編碼代理。",
       hermes: "輕量級中繼代理。",
       antigravity: "代理式編碼環境。",
+      devin: "自主AI軟體工程師CLI。",
     },
   },
   showcase: {

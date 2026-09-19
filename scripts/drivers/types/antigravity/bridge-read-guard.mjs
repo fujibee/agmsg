@@ -1,0 +1,104 @@
+// POSIX process identity and advisory-lock helpers shared by the Antigravity
+// bridge and mode controller.
+import fs from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+
+// Linux reads /proc/<pid>/stat and uses the flock utility. macOS reads ps and
+// uses Python fcntl for the same lock file. The direct mode and guard entry
+// points use this module too, so the portability boundary lives here.
+//
+// Importing this module never rejects a host. An operation that does not need
+// process inspection (for example disabling delivery with no reservation) must
+// still work everywhere.
+//
+export class PlatformUnsupported extends Error {}
+function _requirePosix(what) {
+  if (process.platform !== 'linux' && process.platform !== 'darwin') {
+    throw new PlatformUnsupported(`Antigravity ${what} requires POSIX process and lock primitives; this host (${process.platform}) is unsupported`);
+  }
+}
+const darwinInfo=new URL('./mac-process-info.py',import.meta.url).pathname;
+function _darwinProc(pid) {
+  const out=spawnSync('python3',[darwinInfo,String(pid)],{encoding:'utf8'});
+  if(out.status===1) { const e=Error(`cannot verify pid ${pid}`);e.code='ENOENT';throw e; }
+  if(out.status!==0||!out.stdout.trim()) throw Error('macOS process identity is unreadable');
+  const fields=out.stdout.trim().split('\t');
+  if(fields.length!==3||!/^[0-9]+$/.test(fields[0])||!['R','Z'].includes(fields[1])||!/^darwin:[0-9]+:[0-9]{6}$/.test(fields[2])) throw Error('macOS process identity is malformed');
+  return {ppid:Number(fields[0]),state:fields[1],start:fields[2]};
+}
+export function proc(pid) {
+  _requirePosix('process inspection');
+  if(process.platform==='linux') {
+    const fields=fs.readFileSync(`/proc/${pid}/stat`,'utf8').split(') ').slice(1).join(') ').split(' ');
+    return {ppid:Number(fields[1]),start:fields[19],state:fields[0]};
+  }
+  return _darwinProc(pid);
+}
+function _darwinLocked(file, data, append) {
+  const script = [
+    'import fcntl,sys,time',
+    'lock=open(sys.argv[1], "a+")',
+    'for _ in range(30):',
+    '    try:',
+    '        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB); break',
+    '    except BlockingIOError:',
+    '        time.sleep(0.1)',
+    'else: raise SystemExit(1)',
+    'if sys.argv[3] == "read":',
+    '    sys.stdout.write(open(sys.argv[2]).read())',
+    'else:',
+    '    with open(sys.argv[2], "a") as target: target.write(sys.stdin.read())',
+  ].join('\n');
+  const out=spawnSync('python3',['-c',script,`${file}.lock`,file,append?'append':'read'],{encoding:'utf8',input:data||''});
+  if(out.status!==0) throw Error('failed to read or lock the violation record');
+  return out.stdout;
+}
+export function read(file) {return JSON.parse(fs.readFileSync(file,'utf8'));}
+export function atomic(file,data) {
+  const tmp=`${file}.${process.pid}.tmp`;
+  const fd=fs.openSync(tmp,'wx',0o600);
+  try {fs.writeFileSync(fd,JSON.stringify(data)+'\n');fs.fsyncSync(fd);} finally {fs.closeSync(fd);}
+  fs.renameSync(tmp,file);
+  const dir=fs.openSync(new URL('.',`file://${file}`).pathname,'r');
+  try {fs.fsyncSync(dir);} finally {fs.closeSync(dir);}
+}
+export function violations(file) {
+  _requirePosix('violation inspection');
+  const out=process.platform==='darwin'
+    ? {status:0,stdout:_darwinLocked(file,'',false)}
+    : spawnSync('flock',['-w','3',`${file}.lock`,'cat',file],{encoding:'utf8'});
+  if(out.status!==0) throw Error('failed to read or lock the violation record');
+  const rows=out.stdout.trim()?out.stdout.trim().split('\n').map(JSON.parse):[];
+  for(const r of rows) if(r.event!=='read-denied'||!Number.isInteger(r.pid)) throw Error('corrupt violation record');
+  return rows;
+}
+if(process.argv[2]==='check') {
+  const [file,pid,team,role,...ids]=process.argv.slice(3);
+  try {
+    const reservation=read(file), state=read(reservation.state);
+    const cap=fs.readFileSync(0,'utf8');
+    const parent=proc(Number(pid));
+    const owner=proc(reservation.pid);
+    const authorized=cap && parent.ppid===reservation.pid && owner.start===reservation.start && owner.state!=='Z'
+      && createHash('sha256').update(cap).digest('hex')===reservation.capHash
+      && state.team===team && state.role===role && state.owner===reservation.owner
+      && state.batch?.phase==='completed' && state.batch.messages.length===ids.length
+      && JSON.stringify([...ids].sort())===JSON.stringify(state.batch.messages.map(m=>m.id).sort())
+      && fs.readFileSync(reservation.actas,'utf8').trim()===reservation.owner;
+    if(authorized && violations(reservation.violations).length===0) process.exit(0);
+    const row=JSON.stringify({event:'read-denied',pid:Number(pid)})+'\n';
+    // The input contains no message body; keep refusing even if this write fails.
+    if(process.platform==='darwin') _darwinLocked(reservation.violations,row,true);
+    else spawnSync('flock',['-w','3',`${reservation.violations}.lock`,'bash','-c','cat >> "$1"','guard',reservation.violations],{input:row});
+    console.error('agmsg: refusing to mark messages read while the bridge manages delivery');
+  // Keep the refusal code 13 unchanged: callers already branch on it and
+  // fail-closed behavior is the existing contract. Only the diagnostic wording
+  // differs, because an inspection failure and an unsupported host need
+  // different operator actions. (#1090 review)
+  } catch (e) {
+    if (e instanceof PlatformUnsupported) console.error(`agmsg: ${e.message}`);
+    else console.error('agmsg: bridge reservation or authorization check failed');
+  }
+  process.exit(13);
+}

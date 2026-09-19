@@ -4,6 +4,388 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-09-17
+
+Teams that use remote sync should update every machine to 1.3.1 or later. From this release the client reports its version to the server, so older clients can be told apart.
+
+The Antigravity monitor remains experimental: it is usable only on a dedicated seat that no person types into, started with `agy-tui ... -- --dangerously-skip-permissions`. For interactive Antigravity use, keep the default turn delivery. It runs on macOS and Linux only; on other systems the monitor refuses to start. This release's live check covered macOS only.
+
+### Added
+- The client sends its version to the server in an `Agmsg-Client-Version` header on every request; a request without it comes from a client older than 1.3.1 (#1290)
+- `peek` and `poke` have an agent-native substitute on terminals with no addressable pane (#1256)
+- `agy-tui` passes everything after `--` to `agy`, and rejects any other unknown option (#1291)
+- Devin is supported as an agent type (#898)
+
+### Fixed
+- Codex: each seat runs its own app-server, and its bridge dispatcher starts only the role recorded for that seat instead of every role in the project (#1273, #1285)
+- Codex: a stale app-server URL left in a request file no longer overrides the live endpoint (#1293, #1305)
+- `install --update` restarts a sync engine that was running, on the new code, instead of leaving it stale (#1288)
+- Receiving tolerates unknown fields in a message, so a newer sender does not get its messages rejected (#1282)
+- Claude Code Monitor directives set a 30-minute timeout (#1287). The instruction to re-arm silently on expiry is now opt-in, behind `AGMSG_CC_MONITOR_KEEP_ALIVE` (unset by default) — most seats do not need a watch kept alive across its own natural expiry, and `rearm.sh` covers the ones that do by poking every claude-code seat in a team whose delivery mode is monitor or both (#1315)
+- Antigravity monitor delivery, which is experimental, now also runs on macOS (#1253); switching an existing 1.3.0 project to monitor delivery is accepted (#1289, #1303); user-facing messages are in English (#1281); a refused claim names the process that holds the role and how to release it (#1301); the driver's messages and comments are all in English (#1313). See docs/antigravity-monitor-beta.md for its limitations before enabling it.
+- Sync engines supervised by systemd are detected (#1006)
+- Windows: every jq call in the sqlite driver forces binary output, so values read back from the server no longer carry a stray carriage return and fail the sequence check (#1277, #1278)
+- A backtick in a SQL comment no longer runs as a command substitution (#1276)
+- herdr instance names containing a backslash survive percent-decoding (#1275)
+
+### Changed
+- Antigravity's read-reservation guard lives in the Antigravity driver (#1271)
+
+### Documentation
+- `mode: monitor` means the mode is configured, and the docs say how to confirm the watcher is actually running (#270)
+- Antigravity permission guidance covers the exact invocation shapes `agy` prompts for, including `bash -lc` (#1289)
+- The design RFC describes tag subscriptions, session-start identity, and delivery through the driver (#1251, #1267)
+
+## [1.3.0] - 2026-09-14
+
+### Added
+- Terminal drivers for tmux, herdr, and plain OS terminal windows: `peek`, `poke`, and `arrange` work through whichever terminal a member runs in (#1014, #1060, #1078, #1163, #1207)
+- `peek` with no member name summarizes the screens of the whole local team (#1194)
+- `where` reports this session's terminal, its pane, and the operations that terminal supports; Claude Code sessions are told their terminal at start (#1082, #1173, #1224)
+- `team` shows, for each teammate, whether `peek`, `poke`, and `arrange` can reach it, and why not when they cannot (#1232)
+- `fix`: a session proves which pane it is running in and repairs only its own name and placement records (#1152, #1157, #1188, #1191, #1227)
+- A session names its own pane when it acts, and `spawn` names the pane it created and sets its agent key (#1065, #1080, #1099)
+- `send` accepts `--body-file <path>` and `--body -` (stdin) like `poke`, and refuses a body that looks like a flag (#1101)
+- Antigravity (`agy`): the skill is installed where `agy` discovers skills, and monitor delivery with safe automatic resume is available on Linux (#1090, #1223)
+- Report a mark-read that lost to a concurrent writer (#1011) (#1013)
+- Deliver the inbox mid-turn via a PostToolUse hook, not only at Stop (#1003) (#1004)
+
+### Changed
+- `team` is read-only: the leader-side repair options `--fix`, `--fix-pane-names`, and `--rename-sessions` are removed; each session repairs itself with `fix` (#1152, #1211, #1213)
+- actas lock, readiness, and spawn records are keyed by team and member id, so team or member names containing `__` no longer collide (#1023)
+- Agent type detection follows an explicit priority, and `GEMINI_API_KEY` on its own is only a last resort (#1247)
+- Per-driver notes live at `scripts/drivers/terminals/<driver>/README.md`; `install --update` removes the old `SKILL.md` copies (#1248)
+
+### Fixed
+- Codex seats that hold an actas lock no longer drop out of their own bridge's delivery, and spawned seats do not inherit it (#1239, #1245)
+- Claude Code's `actas` and `drop` instructions again start the watcher through the Monitor tool and confirm it attached (#1237)
+- `spawn` skips the readiness wait only when delivery is explicitly off or turn (#647)
+- A graceful `despawn` waits for the pane to close, not only for the lock (#1097)
+- herdr socket paths containing `:` round-trip through placement records (#1166)
+- `watch` and `inbox` deliver a backlog past the argument-length limit instead of failing silently (#777, #1045)
+- `check-inbox` consumes rows only after the payload is written (#1026)
+- The Windows hook payload stays off the login shell's stdout (#1015)
+- Antigravity's delivery plug parses under bash 3.2 (#1244)
+- Pass non-remote subcommands through (#590)
+- The remaining argv-to-stdin sites, plus a Windows CRLF row-separator bug (#991)
+- Give the identity lease a start token on Windows (#978)
+- One wake, one turn — attribute mid-start turn-end signals by turn id (#889)
+- Discover a ws:// app-server in the SessionStart plug (#1057)
+- Refuse a non-string envelope.blob/cipher instead of storing "null" (#1042) (#1048)
+- Count roster mutations as held so the read frontier can advance (#968) (#986)
+- A store at the current schema revision skips init's write batch (#1001) (#1010)
+- Probe before the pipe, not inside it (#462) (#904)
+- Widen _wait_pidfile's window and name what it saw (#595) (#797)
+- Stand down instead of an unfiltered watcher when a resumed seat is unidentified (#982) (#993)
+- Refuse to guess between multiple installs on --update with no --cmd (#659)
+- Write Codex writable_roots through a symlinked config.toml instead of replacing the link (#747) (#995)
+- Stop the apply failure path from discarding the shell's stderr (#974)
+- Stand down when the installation is updated underneath (#963) (#965)
+
+### Performance
+- Batch the rollout mtime scan (#1035) (#1037)
+
+## [1.2.3] - 2026-08-22
+
+### Added
+- Emit push.posted when the POST is over, before the acks are written (#918)
+
+### Fixed
+- Name the sync engine in the update warning, not just watch.sh (#964)
+- Reap a same-(project,role) orphan before spawning (#906 link 2) (#943)
+- Preserve exact identity pairs in check-inbox (#721)
+- Exit when another writer owns the thread (#906 link 1) (#935)
+- Make the failure cap reach and bound the re-arm rate (#906 link 3) (#941)
+- Retry a busy apply that races EPIPE, keeping the hung-driver bound (#931)
+- A pulled field that is an array must not become shell words (#930)
+- Report a busy store as busy, not as a failed check, and wait for it (#920)
+- Say which check returned 13 (#911)
+
+### Performance
+- Index the two lookups that made import scale with the store (#956)
+- Quote SQL literals with a bash expansion, not a fork (#948)
+- A release PR is a version bump, not a third full matrix (#945)
+- Parse a pull page with one jq, framed by NUL, with no eval (#908, #940) (#942)
+- Check a pulled wire id without a process (#939)
+- Find the first gap once, not once per candidate (#932)
+- One jq per acknowledgement, not six forks (#927)
+- Quote each pulled message's fields once, not at 42 fork sites (#908) (#925)
+- Index events.legacy_id, looked up by value everywhere (#926)
+
+## [1.2.2] - 2026-08-20
+
+### Fixed
+- Keep curl's stderr on the GET path, in the shape the POST side ended up with (#850) (#854)
+- Correct a binding an older release left writable, and say what to run if you do not upgrade (#902)
+- Keep curl's stderr, and hold the temporaries in one condemned directory (#850) (#903)
+- Pass the history and unread-marker SQL on stdin (#777) (#899)
+- Pull a team larger than a command line, and say what it is doing (#882) (#895)
+- Keep the binding a re-point replaces instead of destroying it (#884)
+- Pin count-invisible heavy test files apart, raise the shard timeout with real margin (#885)
+- Derive --update's type re-detection from the same list as TPL_TYPE (#846) (#880)
+- Take the basename of the whole ps comm path (#770) (#771)
+- Map grok-build to grok in the pid walk (#860)
+- Fold sentinel '-' into the empty session-id path (#857)
+
+### Documentation
+- Say that main takes squash commits only (#845)
+
+## [1.2.1] - 2026-08-18
+
+### Added
+- Windows can use the hosted service: connect reaches the server, the fingerprint is real, and doctor names a wedged lock (#868)
+
+### Fixed
+- Bound the wait on the local child without spawning anything to do it (#821)
+- Record provenance when git answers in another path space (#830) (#842)
+- Stop telling every agent that key rotate is unavailable (#841)
+- The guard was on the wrong job's step, and it silenced a real one
+
+## [1.2.0] - 2026-08-15
+
+### Fixed
+- The probe must not own a name two callers can share
+- The probe needs jq's status too, and a cached refusal must still speak
+- Require -b where sending needs it, and control the two values
+- Ask jq for binary output, and refuse a jq that cannot give it
+- Compare a command line and a path in one alphabet
+- Control the retake, and correct what the field report actually was
+- The cleanup after the wait must not speak for another engine
+- Let go of the registry lock before waiting for readiness
+- One cleanup path for the staged input, not two
+- Stage the input only for the driver that holds the lock
+- Hand the driver its input as a file, not down a pipe
+- Take the name out of the test, and check the call not its spelling
+- Check a pid we minted with the probe that can see it
+- Cleanup does not get to speak for the write
+- Write into a directory this call created, not a name it tested
+- Create and fill the private temp in one redirection
+- Create the private temp with builtins, not with mktemp
+- Publish the new contents only if all of them were written
+- Create the temp narrow instead of narrowing it after the write
+- Write the team binding with a mode, not with the umask's leftovers
+- An error page is not a protocol mismatch (#814)
+- A start that never began is a failed start, not a silent return (#810)
+
+### Documentation
+- State the reason, not who gave it
+- A pushed head is not a shipped one
+- The header said builtins while calling three commands
+
+## [1.2.0-rc.6] - 2026-08-15
+
+### Added
+- Do not start a team whose server has refused (#773)
+- Start a connected team's engine when an agent turns up
+- Keep the engine up when the server refuses, and let the reason be read
+- Default to the whole installation, narrow with --project/--type/--team (#654)
+- Say when another watcher is receiving for the same roles
+
+### Fixed
+- Close fd 3 and 4 on the spawn line, where the repo-wide check reads
+- Give both sides of the probe the same remaining seconds
+- Let the probe bound itself, and reap it before removing its files
+- Reap a timed-out refusal probe instead of leaving it to the machine
+- Put the refusal lookup under the same budget as the start
+- Close every inherited descriptor in the background start, not just 0/1/2
+- Stop asking whether the child is alive, and let go of the caller's streams
+- Enforce the negative, keep the remedy runnable, and reap the deliberate children
+- Cross each trigger, bound the wait, and make the assertions enforceable
+- Delete the dead restore, and make degraded entropy refuse rather than guess
+- Keep the holder beside the lock, and tidy it when the lock goes
+- Keep the phrase callers already match on
+- One token per lock, a holder that survives, and real entropy
+- Prove the lock is ours before releasing it, and quote the remedy
+- Budget the registry-lock wait in seconds, not in attempts (#779)
+- Let a leaked registry lock say who left it, and that it is stuck
+- Claim the pidfile before displacing the previous holder (#595)
+- The child's stderr reaches the log undecoded
+- A diagnostic never continues someone else's half-line
+- Every log line names the process that wrote it
+- Refuse a line carrying more than one JSON value (#780)
+- Carry the detected type to the scripts that WRITE with it (#801)
+- Validate the type the caller asked for, and stop dispatch guessing one (#783)
+- Carry the reason when the binding path cannot be resolved
+- Correct what the previous commit claimed about the identity catch
+- Say which condition failed, and which field an exit came from
+- Do not report a refusal older than the last successful cycle
+- Make main's collapse reachable, and keep the path when it fires
+- Deliver with exit 0 when the poll failed part-way (#658) (#745)
+- Decide liveness with the EPERM-aware check, not a bare kill -0
+- Let the filter file carry its own owner, so a predecessor cannot delete it
+- Scope the sharing warning to one project, and describe before appearing
+- Print a command per team, not a template with a hole in it
+- Say the engine is not running, in both places that can say it
+
+### Performance
+- Read a pulled message with one jq, not eighteen (#780)
+
+### Documentation
+- Let the reversal record say one thing about why the start fails
+- Narrow a claim I disproved myself two commits later
+- Delete a comment describing the control this one replaced
+- Point key.sh at the current design, and stop asserting the move has happened
+- Make the promise about this document weak enough to be true
+- Label what stands behind each claim, instead of asserting they all cite
+- Add a Japanese translation, and consolidate the derivation it mirrors
+- Make the printed command cover the sentence it supports
+- Widen the evidence to the tree, then widen the claim back to match it
+- Say which path was measured, instead of calling it "the supported path"
+- Trace the second route to age-v1 instead of leaving it open
+- Name which half of the policy check protects you, and close the open question
+- Audit the profile this document cites, and correct two claims it got wrong
+- State what remote sync protects, and what it does not
+- Say "documented, and measured otherwise" in all three places, not one
+- Carry main's correction — the discard is documented, not measured
+- Narrow the deletion rationale -- the subject was removed, not moved
+- Remove two superseded designs, and stop citing one as normative
+- Derive where the old ownership claim appears, instead of fixing the reported line
+- The two files are removed by their owners, and those are not the same owner
+- Make the comments say what the code now does
+
+### Reverted
+- Drop the refusal lookup; the loop it prevented no longer exists
+
+## [1.2.0-rc.5] - 2026-08-12
+
+### Added
+- Status can say whether anything has actually synced
+
+### Fixed
+- Restore all three traps the acquire takes, not just EXIT
+- Chain the caller's EXIT trap around the lock, and drop two tests that could not fail
+- Prove lock ownership in-process, and release only the lock taken
+- The team lock covers the engine spawn
+- Judge the cycle record before signalling, and keep its cleanup out of stop's verdict
+- A cycle record that cannot be cleared stops the start
+- Clear the cycle record where a new engine begins, and narrow what its absence claims
+
+## [1.2.0-rc.4] - 2026-08-11
+
+### Added
+- Set-endpoint moves a connected team's address, identity-checked
+
+### Fixed
+- The manual path, and a guard that never ran on an rc
+- Cut a release from the branch you are on
+- Do not name a cause this path did not establish (#731)
+- Say a live engine was left behind, not that a pidfile was kept (#731)
+- Say when a machine cannot name its own team
+- A failing cycle names the cause it already had
+- One CA setting for both clients, and a cycle error that names the cause
+- Treat NODE_EXTRA_CA_CERTS presence, not truthiness, as "explicitly set"
+- Bridge CURL_CA_BUNDLE into NODE_EXTRA_CA_CERTS
+- Bring set-endpoint's engine restart under the same rule (#730)
+- Say "start requested", and test the callers that say it (#730)
+- The failure note names a stream, not a position (#730)
+- A sync engine that cannot start says so (#730)
+- Self must count as a candidate before its own marker exists (review)
+- Let a provably-sole install migrate its own legacy shim (review)
+- Fail closed on legacy/unowned shims; scope --update forcing (review)
+- Stop evaling shim-derived content; state the consequence of forcing (review)
+- Refuse to clobber a Codex shim owned by a different install (#553)
+- Snapshot the binding for update atomically, under one lock
+- Give legacy bindings a revision before the CAS snapshots it
+- Gate the stored-config write on the binding it verified
+- Make set-endpoint's remedy reachable and its write CAS-guarded
+- One shape predicate for both status forms, not two (review)
+- Distinguish an unreadable team config from never-connected (#650)
+- Stop asserting bare off was deliberate (review)
+- Treat an unreadable/malformed settings file as unrecognized too (review)
+- Distinguish an unrecognized project from a deliberate off (#687)
+- Key the install stamp per process, not per session (#684)
+- Stop a watcher that is running code its installation no longer has (#684)
+- Collapse out-of-shape server error codes in send()'s message
+- Derive contracts_needed for tests/test_remote*.bats instead of naming exceptions (review)
+- Stop tests/test_remote_setup_doc.bats from forcing the age-v1/jsonl contracts (#706)
+- Stop a malformed JSON body from also reaching the terminal raw (review)
+- Sanitize the untrusted error code and pin the real transport error (review)
+- Stop discarding resolve-team's stderr and its actual cause (#726)
+- Use one endpoint validator
+
+### Changed
+- Split candidate listing out of agmsg_only_one_install (review)
+
+### Documentation
+- A red run does not mean nothing shipped
+- Remove a publish path that cannot exist
+- Document pull-bootstrap coverage and the restart gap
+- Describe the five callers that exist, not the four that did (#730)
+
+## [1.2.0-rc.3] - 2026-08-10
+
+### Fixed
+- Carry every events column through the per-team move (#710)
+- Validate the host on the https path too (#717)
+- Validate the port, and make the agreement check mean what it says (#717)
+- The refusal names the zone, and the list names what is allowed (#717)
+- Refuse an IPv6 zone index on both sides (#717)
+- An octet with a leading zero is not an address as written (#717)
+- Same input, same answer, and bind the call site (#717)
+- Allow plaintext http to a private IP, not just loopback (#717)
+- Narrow /v1/health's catch to actual DB unreachability (#705)
+- Stop the bound failing open, and give the cap a contract
+- The cap is bytes, so count the record in bytes
+- The log's ceiling was claimed, not delivered
+- Let the watcher say what it is doing, and stop the fallback standing down
+- Fix(ci): stop age-v1/jsonl contracts from running on a
+
+### Documentation
+- Scope the Compose check to the Compose path (review)
+- Make "Docker with Compose" a checkable requirement (#704)
+- The comment still carried the mechanism I had already retracted
+- Narrow the overview to what the walk establishes (#702)
+- Leave the main path to the main path (#702)
+- Make the bundle a step, and say the local address is the endpoint
+- The join step named an install the walkthrough never made
+
+## [1.2.0-rc.2] - 2026-08-08
+
+### Fixed
+- Prove the count, assert all three states, require exactly one (#689)
+- Ask whether the column is there before naming it (#689)
+- The reader set was derived too narrowly (#689)
+- Write every message to the legacy table again (#689)
+- Refuse to migrate a team whose source read cursor is not an integer
+- Advance the per-team store's event sequence floor past any copied cursor (#695)
+- "has ever connected" is not "is connected"
+- The first way out reproduced the command that had just failed
+- Name the way out, on the two screens that only named the problem
+- Compare held pairs as strings, not as patterns (#683)
+- Step aside while a pair is held, and say when it comes back (#683)
+- Release a pair another session has claimed (#683)
+- Stop classifying "required, no local key" as either encrypted or not
+- Scope the status-output description to a connected team, name the third value
+
+### Documentation
+- Repair a sentence the attribution removal cut in half
+- Explain what e2ee actually changes, so readable history isn't read as plaintext (#682)
+
+## [1.2.0-rc.1] - 2026-08-08
+
+### Added
+- Show who holds which lock, watcher, and bridge for a project (#640)
+- Name the lock and its cc-instance when an exclusion empties the set (#618)
+
+### Fixed
+- A printed command carries the path it has to be run from
+- Say what the check established, not what it suspects (#669)
+- Refuse to project from a file sqlite could not read (#669)
+- One path converter, and a readfile failure that says so (#669)
+- Derive npm's dist-tag from the version, so an rc is not `latest`
+- Narrow the ps fakes to the one question they stand in for
+- Drop a watermark wait this branch can never satisfy
+- Stop losing earlier teams' messages when a later team's query fails (#653)
+- Probe watcher pidfiles with the local pid probe (#613)
+- Drop a hardcoded pid and wait for a killed child in the bats suite (#606)
+- Don't let a failed mkdir -p abort the seat write (#602)
+
+### Documentation
+- Make joining from machine B a step, and translate (#672)
+- Retract the premise of the previous commit message (#669)
+- The port IS copied from compose, so pin it instead
+- Put the short way to start a server in the walkthrough
+
 ## [1.1.13] - 2026-08-01
 
 ### Fixed
@@ -16,6 +398,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Monitor delivery via opencode-sentinel plugin
+- Size a push batch in bytes and split it on 413 (re-land #609)
+- Size a push batch in bytes and split it when the server says 413
+- Answer /v1/health with the team the caller asked about
+- Add an authenticated-bundle ingress for disaster restore
+- Add `agmsg export` — dump a team's message history as JSONL (#597)
+- One file to hand over — handoff bundles the chain and its identities (#573)
+- Pull a team by name
+- Look a team up by name
+- Start a background sync engine on connect, stop it on disconnect
+- Stop taking a roster from the server (#530)
+- Add pull, the command a second machine runs
+- Let the engine pull a team it has never seen
+- Answer a pull with one consistent team snapshot
+- Let a second machine read a team it does not have
+- Upload the history a legacy store already has
+- Make the store layout a per-team driver choice
+- Register a client-owned team with POST /v1/connect
+- Migrate existing history into the per-team stores
+- Give each team its own message store
+- Thread a team selector through store resolution
 
 ### Fixed
 - Quote the project path into the generated monitor commands
@@ -27,6 +429,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compare status metadata project as canonical normalized paths (#511)
 - Validate project_path in set instead of mkdir-ing whatever it is given (#508)
 - A process you cannot signal is not a process that is gone (#505)
+- Balance the case pattern paren for bash 3.2
+- Deliver before reporting, and take the boundary out of `||`
+- Never mark a message read that the run then throws away
+- Decide from the declaration, and ask the driver about history
+- Run the engine when this machine can read, not when the team is plain
+- The locked team keeps its state, the caller keeps the route
+- Say why mkdir failed instead of calling everything a timeout
+- The caller can own the "what to do next" lines (#639)
+- Print an unlock command the operator can actually run
+- Keep the capability out of the terminal (#635)
+- Shell-quote the recovery command, and run it in the test
+- Make the refusals' recovery instructions actually work
+- Check the server's identity and declaration before adopting
+- A connect that already registered resumes instead of dead-ending
+- Enforce the team's declared cipher on write, fail-closed
+- Settle only from a batch that agrees, and name a remedy that works
+- Settle an undeclared team from a message it stores, never from connect
+- Let a repeat connect fill a declaration the team never had
+- Carry the team's declared cipher instead of inferring it from arrivals
+- Keep the per-line fd guard the repo already requires
+- Close the fds around the sourced plug's spawn too
+- The monitor leaks the same way, and it starts a daemon
+- Close inherited descriptors by range, not by name
+- Connect no longer calls the server's team name an org
+- Keep the acks a failed split already earned (#623)
+- Check the script on disk, not the directory it would sit in
+- Pin every mapped script, and answer before anything is installed
+- An unknown verb names the command to run instead
+- A cursor that is not a number is not proof of containment
+- Hand the roster driver its file, so a second machine can find it (#610)
+- Route the oversized event's detail through errorCode too
+- Read the error code from either shape a server sends
+- Name the local row when a single message is too large
+- A cursor that moved on is not a cursor that went missing (#607)
+- Prove the destination has the rows before deleting them (#604)
+- Answer health from the team row, not from the request header
+- A partial binding claim is refused, a plain 401 is not
+- Stop reporting every server error as a binding mismatch
+- The captured bundle is 0600, not whatever the umask was
+- Keep the current epoch until the rotation is confirmed (#585)
+- Validate a name lookup answer and bound its size
+- Order the registered_at backfill after messages exists
+- A pulled team starts the sync engine
+- Close fd 3 and 4 when spawning the sync engine
+- Page and compare team_seq numerically, not as text
+- List members that have no local registration (#540)
+- Resolve the migration's team config from the connection dir
+- Report age as optional, because it is
+- Run main when invoked through a symlinked path
+- Make the api.sh fallback actually deliver live messages (#525)
+- The sync harness teams are on the shared layout
+- Stop calling the migration that installing must not run
+- Move a store only when the team owns one
+- Ask agmsg where the store is instead of guessing
+- Read the event log, and stop dropping non-numeric ids
+- Read the team's store, not the store root
+- Pass the team to storage_init in the sync-client harness
+- Repair the readers the per-team split broke
+- Restore the FIFO path the merge dropped
+- Pass the team through the last selector-less callers
+- Move the team's store with the team
+- Escape tombstone updates directly
+- Keep platform checks portable
+- Stream large SQLite messages on stdin
+
+### Changed
+- Name the flag what it holds
+- Rename the layout axis to partition (#580)
 
 ### Documentation
 - Add agmsg-bubblelog and agmsg-tui to the showcase and README (#571)
@@ -35,6 +505,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mark spawn as supported via --prompt
 - Document safe Git Bash quoting from PowerShell
 - Document the permission allowlist agmsg needs on Claude Code (#551)
+- State the reason instead of naming the author
+- Put the SKILL.md paragraph after step 5, as in the templates
+- Machine B needs its own install, not just its own env vars
+- Five files read the connection dir, not four
+- A second machine is a separate install, not three env vars
+- Say that nothing checks the cursor storage class
+- Mark the string error shape as a bridge, not a second contract
+- The health comment still described the 404 that was replaced
+- State what protects the capture and what does not
+- The disaster route does put plaintext on disk — say so
+- User-facing remote setup guide; dogfood doc to ref (#554)
+- Handoff map for the test_remote.bats rewrite (not for merge)
+- Two machines rotating at once
+- Say which key seals the rotation record
+- How a key gets replaced
+- Say that run/ is left alone on purpose
+- Take 0003 back out of reference
+- Separate minting ids from rewriting history
+- File superseded work as reference, and start the remote-sync design
+- Put everything unpublished under draft/
+- Mark the authorization seam as unadopted (#510)
+- Hand a host one authentication result to authorize against (#509)
+- Specify device pairing end to end (#506)
 
 ## [1.1.11] - 2026-07-27
 
@@ -42,6 +535,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Offer monitor as the default delivery mode, drop the beta framing (#497)
 - Support spawning into herdr panes (#495)
 - Drag files onto a pane to insert their path (#481)
+- Adaptive catch-up so a backlog doesn't crawl at 100/5s
+- Add team-list.sh (agmsg team list --json)
+- Add status --json and pending list/abort (ADR 0007 addendum)
+- Consume connected team credentials
+- Add scripts/remote.sh (connect/status/disconnect/doctor) per ADR 0007
+- Add scripts/key.sh (generate/show/import/rotate) per ADR 0007
+- Add JSONL Stage-1 synchronization
+- Configure reference server retention
+- Add explicit retention gap recovery
+- Synchronize composite read state
+- Add Stage 2 read-state server API
+- Unify local read cursors across delivery paths
+- Driver-level store-existence check, not a messages.db file gate (#207)
+- Jsonl storage driver (jq default + duckdb opt-in) (#207)
+- Flip send + mark + watch to the event log (#206 step 3)
+- Route inbox/check-inbox/history reads through the facade (#206 phase 1)
+- Formalize event-log schema v1 + compaction contract (#205)
+- Driver facade + sqlite driver + contract test suite (#204)
 - Render terminals via WebGL, attached only to the active pane (#446)
 
 ### Fixed
@@ -57,9 +568,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound the self-clean race in the watcher re-invocation test (#440)
 - Shell-quote delivery hook command paths (F14) (#487)
 - Close #87-class SQLi/path-hazard gaps in rename/leave/reset/rename-team/team/api (#482)
+- Resolve symlinks before trampoline compare; doctor checks node
+- Detect the macOS CLT python3 trampoline, not just PATH presence
+- Close the python3 dependency-tiering gap on the remote path
+- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation
+- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer
+- Fail closed on incompleteness; shrink v1 schema
+- Wire 'agmsg team list' into actual dispatch entry points
+- Stop binding config JSON via .param set (#87-class tokenizer bug)
+- Hide imported identity at TTY
+- Separate token input from E2EE prompts
+- Preserve unverified exchange recovery state
+- Bound onboarding HTTP responses
+- Validate connected authentication authorities
+- Distinguish persisted cipher configuration
+- Align onboarding with protocol binding
+- Validate env-var name before shell use; drop advanced path for key import
+- Sharpen encryption-bootstrap wording for first-time setup (B3)
+- Never let the agent construct or run token/identity commands
+- Wire remote/key slash-command dispatch into all per-type templates
+- Add EXIT/INT/TERM cleanup traps to remaining secret-bearing temp files (nonblocking follow-up)
+- Address E1-E3 delta review findings (local-disconnect CAS, strict 200-only revoke, JSON-serializer credential write)
+- Address D1-D5 delta review findings (force-CAS bypass, orphaned-revoke recovery, credential-file atomicity, duplicate-key/unknown-field rejection, docs)
+- Address delta review findings R1-R5 (pending-file argv leak, URL-parse HTTPS bypasses, post-commit idempotency, force+omitted-team gap, UUIDv7 validation)
+- Address adversarial review findings B1/B3/B5/B6 (secret-argv leaks, unsafe auto-generate default, force-revoke ordering, resumable pending commit, strict response validation)
+- Address adversarial review findings B2/B4/B7
+- Reject active age stanza namespaces
+- Confine age GREASE handling
+- Accept bounded age GREASE stanzas
+- Bound reprocess pagination
+- Make JSONL sync transitions atomic
+- Harden JSONL synchronization state
+- Honor resolved Node runtime for resync
+- Enforce strict resync input framing
+- Bind read state to authoritative identities
+- Make Stage 2 recovery converge
+- Close Stage 2 synchronization edge cases
+- Preserve read state across renames
+- Enforce safe read cursor coverage
+- Read messages from the event log too, not just the legacy table
+- Assert against the event log, not the legacy messages table
+- Escape interpolated names in rename/rename-team SQL (#223, #87)
+- Jsonl compact keys reads by tuple, not a space-join (#221)
+- Make the jsonl driver parse under macOS bash 3.2 (#207, #221 CI)
+- Jsonl mark aborts on a failed existing-reads scan (#207)
+- Jsonl driver must not swallow failures as ok (#207)
+- Watch-once stale-wake token = unread-set digest, not a max id (#207)
+- Document --limit semantics + make storage_history agent truly optional (#206)
+- Export skips unknown event types; pin high-water with a tail-duplicate test (#205)
+- Describe is a metadata op; surface backend errors; chronological reads (#204)
+- Legacy read, pipefail framing, §1.4 control ops (#204)
+
+### Performance
+- Seal a bulk push page in parallel (#502)
+
+### Changed
+- Extract the v1 data plane as a registerable Fastify plugin
 
 ### Documentation
 - State how to pronounce agmsg (#498)
+- Preserve identity migration and denial gates
+- Consolidate pre-merge remote decisions
+- Pin clean-device connect entrypoint
+- Enforce manifest-first backfill writes
+- Prove promoted read-state mapping
+- Bound onboarding promotion recovery
+- Unify local-first onboarding activation
+- Define local-first onboarding
+- Correct the dependency model to 5 tiers, not 3
+- Add ADR 0007 (remote connect onboarding UX)
+- Document remote.sh/key.sh commands and slash-command mapping
+- Pin resync JSONL framing
+- Close resync retry and status gaps
+- Define retention gap resynchronization
+- Clarify local read-state identity
+- Close Stage 2 frontier edge cases
+- Define Stage 2 read-state synchronization
+- Note rename.sh/rename-team.sh/api.sh as sqlite-coupled known gaps
+- Correct the ctrl:despawn cursor-advance comment
+- Clarify stdout framing, cursor token, watch tip (#203)
+- Storage contract §2 — messages-only, opaque cursor, recipient-scoped read (#203)
+- Draft ADR 0003 — storage axis driver ABI, contract, scope (proposed)
 
 ## [1.1.10] - 2026-07-19
 
@@ -285,7 +874,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 - Add supported-agents logo strip
-- List hermes in the --agent-type help (co1 nit)
+- List hermes in the --agent-type help
 - Add docs/plugins.md + README section + plugins/ drop-in dir
 - Refresh manifest table + paths for the 1.1.0 layout
 - Lead Quick Start with npx, the zero-clone install path
@@ -368,6 +957,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.3.0]: https://github.com/fujibee/agmsg/compare/v1.2.3...v1.3.0
+[1.2.3]: https://github.com/fujibee/agmsg/compare/v1.2.2...v1.2.3
+[1.2.2]: https://github.com/fujibee/agmsg/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/fujibee/agmsg/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.6...v1.2.0
+[1.2.0-rc.6]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.5...v1.2.0-rc.6
+[1.2.0-rc.5]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.4...v1.2.0-rc.5
+[1.2.0-rc.4]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.3...v1.2.0-rc.4
+[1.2.0-rc.3]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.2...v1.2.0-rc.3
+[1.2.0-rc.2]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.1...v1.2.0-rc.2
+[1.2.0-rc.1]: https://github.com/fujibee/agmsg/compare/v1.1.13...v1.2.0-rc.1
 [1.1.13]: https://github.com/fujibee/agmsg/compare/app-v0.4.0...v1.1.13
 [1.1.12]: https://github.com/fujibee/agmsg/compare/v1.1.11...v1.1.12
 [1.1.11]: https://github.com/fujibee/agmsg/compare/v1.1.10...v1.1.11

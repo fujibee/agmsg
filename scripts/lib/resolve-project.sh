@@ -235,20 +235,28 @@ agmsg_find_registered_project_variant() {
 }
 
 # Map an agent type to the binary basename(s) its process may carry.
+#
 # Process names that identify an agent of <type>, taken from the type manifest's
 # detect_proc (drivers/types/<name>/type.conf) so a type added by dropping in a
 # directory is recognized here too. Glob tokens ("cursor-agent-*") are dropped:
 # the matcher below already tries "<bin>-*" for every entry it is given.
 #
 # The case arms are the fallback for a type whose manifest carries no detect_proc
-# (antigravity, copilot). Reaching the last one used to be routine rather than
-# exceptional: every type without an arm — cursor, grok-build, hermes — matched
-# against "claude codex gemini", so agmsg_pid_is_agent accepted an enclosing
-# Claude Code process as, say, a cursor agent. agmsg_resolve_project step 1 then
-# read THAT session's project marker, and a cursor member's project resolved to
-# the project of whoever was asking. reset.sh, handed a correct path, looked for
-# the registration under the caller's project and reported "No registrations
-# removed" while it sat in the roster.
+# (antigravity, copilot, hermes) or when type-registry.sh has not been sourced.
+# Reaching them used to be routine rather than exceptional: every type without
+# an arm — cursor, grok-build, hermes — matched against "claude codex gemini",
+# so agmsg_pid_is_agent accepted an enclosing Claude Code process as, say, a
+# cursor agent. agmsg_resolve_project step 1 then read THAT session's project
+# marker, and a cursor member's project resolved to the project of whoever was
+# asking. reset.sh, handed a correct path, looked for the registration under
+# the caller's project and reported "No registrations removed" while it sat in
+# the roster.
+#
+# Names must also be type-distinctive: do not add `agent` to any arm below.
+# Homebrew grok-build and the Cursor CLI installer both use that basename
+# (#856), and matching it would attach the wrong pid (#93) -- the alias is an
+# intentional miss, on the manifest side too (grok-build's detect_proc lists
+# `grok`, not `agent`).
 #
 # Memoized per type: agmsg_pid_is_agent runs inside agmsg_agent_pid's ppid walk
 # (up to 20 hops), and a manifest read per hop is a filesystem scan per hop.
@@ -272,6 +280,7 @@ _agmsg_agent_binaries() {
       antigravity) out="antigravity" ;;
       copilot)     out="copilot" ;;
       opencode)    out="opencode" ;;
+      grok-build)  out="grok" ;;
       *)           out="claude codex gemini" ;;
     esac
   fi

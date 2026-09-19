@@ -198,21 +198,253 @@ fn bash_command() -> Result<std::process::Command, String> {
     Ok(cmd)
 }
 
-fn db_path() -> PathBuf {
-    agmsg_base().join("db/messages.db")
+/// Where one team's store is, as agmsg reports it — never as the app guesses.
+///
+/// The app used to join `db/messages.db` itself, which is why a storage
+/// layout change broke it with nothing to notice: a hardcoded path cannot go
+/// stale loudly. Asking means the answer follows the layout.
+#[derive(Deserialize)]
+struct StoreInfo {
+    driver: String,
+    path: String,
+    /// A team that has never been written to has no store yet. Not an error —
+    /// it is an empty room.
+    exists: bool,
 }
 
-fn open_ro() -> Result<rusqlite::Connection, String> {
-    rusqlite::Connection::open_with_flags(
-        db_path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+/// `api.sh` is the contract; reading the file directly is an optimisation
+/// that only applies when the driver is one this app can parse.
+///
+/// Anything else — an unknown driver, a failed lookup — falls back to going
+/// through `api.sh`, which is slower and always right. It must never fall
+/// back to showing nothing: "I could not read it" rendered as an empty room
+/// is the same failure as the three this branch fixes, and the room looks
+/// identical in both cases.
+const DIRECTLY_READABLE_DRIVER: &str = "sqlite";
+
+fn store_info(team: &str) -> Result<StoreInfo, String> {
+    let raw = run_script("api.sh", &["get", "teams", team, "store"])?;
+    parse_jsonl::<StoreInfo>(&raw)
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("no store info for team {team}"))
+}
+
+/// The store to read directly for `team`, or `None` when the app must go
+/// through `api.sh` instead.
+///
+/// Logs the reason on the way past. Distinguishing "slow but working" from
+/// "fast but wrong" after the fact needs the fallback to leave a mark.
+fn direct_store_path(team: &str) -> Option<PathBuf> {
+    match store_info(team) {
+        Ok(info) if !info.exists => None,
+        Ok(info) if info.driver == DIRECTLY_READABLE_DRIVER => Some(PathBuf::from(info.path)),
+        Ok(info) => {
+            eprintln!(
+                "agmsg: team {team} uses the '{}' driver, which this app cannot read \
+                 directly — falling back to api.sh",
+                info.driver
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!("agmsg: could not resolve the store for team {team} ({e}) — falling back to api.sh");
+            None
+        }
+    }
+}
+
+/// New messages, from the event log and the legacy table together.
+///
+/// The read rule mirrors `storage_history()` in
+/// `scripts/drivers/storage/sqlite.sh`. `src` breaks ties between a legacy
+/// row and an event-log row carrying the same timestamp, so the two spaces
+/// interleave in one stable order — legacy first, matching the facade.
+///
+/// NOT enforced: nothing checks that this stays in step with the shell. The
+/// tests below assert what this returns, not that the facade agrees, so a
+/// change to `storage_history()` will not turn anything red here. Keeping
+/// the two aligned is currently a matter of someone remembering.
+///
+/// Two cursors because there are two id spaces: `events.seq` and the legacy
+/// `messages.id` autoincrement. They are unrelated counters, both starting
+/// at 1, so a single high-water mark would skip rows in whichever table was
+/// behind.
+const MESSAGES_SINCE_SQL: &str = "\
+    SELECT id, team, from_agent, to_agent, body, at, src, ord FROM (
+      SELECT id AS id, team, from_agent, to_agent, body, at AS at,
+             1 AS src, seq AS ord
+        FROM events
+       WHERE type='message_sent' AND seq > ?1
+      UNION ALL
+      SELECT CAST(id AS TEXT) AS id, team, from_agent, to_agent, body,
+             created_at AS at, 0 AS src, id AS ord
+        FROM messages
+       WHERE id > ?2
     )
-    .map_err(|e| e.to_string())
+    ORDER BY at ASC, src ASC, ord ASC";
+
+/// The same read against a store built before the event log, where `events`
+/// does not exist and the whole query above fails to prepare.
+const MESSAGES_SINCE_LEGACY_ONLY_SQL: &str = "\
+    SELECT CAST(id AS TEXT) AS id, team, from_agent, to_agent, body,
+           created_at AS at, 0 AS src, id AS ord
+      FROM messages
+     WHERE id > ?2
+     ORDER BY at ASC, ord ASC";
+
+/// Where each of the two id spaces has been read up to.
+#[derive(Clone, Copy, Default)]
+struct Cursors {
+    /// `events.seq`
+    seq: i64,
+    /// legacy `messages.id`
+    legacy_id: i64,
+}
+
+/// Reads rows newer than `cursors` and advances it past them.
+///
+/// A store that predates the event log has no `events` table, and one built
+/// by a current `storage_init` always has both — so the query is attempted
+/// whole and, if `events` is missing, retried against the legacy table
+/// alone. That is the released layout today: this machine's own store has
+/// `messages` with 6,285 rows and no `events` table at all.
+fn read_new_messages(
+    conn: &rusqlite::Connection,
+    cursors: &mut Cursors,
+) -> Result<Vec<Message>, rusqlite::Error> {
+    let run = |sql: &str| -> Result<Vec<(Message, i64, i64)>, rusqlite::Error> {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(rusqlite::params![cursors.seq, cursors.legacy_id], |r| {
+            Ok((
+                Message {
+                    id: r.get(0)?,
+                    team: r.get(1)?,
+                    from: r.get(2)?,
+                    to: r.get(3)?,
+                    body: r.get(4)?,
+                    created_at: r.get(5)?,
+                },
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+            ))
+        })?;
+        rows.collect()
+    };
+
+    let rows = match run(MESSAGES_SINCE_SQL) {
+        Ok(rows) => rows,
+        Err(_) => run(MESSAGES_SINCE_LEGACY_ONLY_SQL)?,
+    };
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (msg, src, ord) in rows {
+        if src == 1 {
+            cursors.seq = cursors.seq.max(ord);
+        } else {
+            cursors.legacy_id = cursors.legacy_id.max(ord);
+        }
+        out.push(msg);
+    }
+    Ok(out)
+}
+
+fn open_ro(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())
+}
+
+/// Every distinct store behind the teams this install knows about.
+///
+/// Deduplicated by path, which is what makes one function serve both
+/// partitions: under a shared store every team resolves to the same file and
+/// this yields one connection — today's behaviour exactly — while under
+/// per-team stores it yields one per team. The app does not branch on the
+/// partition because it does not need to know it.
+///
+/// Teams whose driver the app cannot read directly are absent here; their
+/// messages arrive through `api.sh` like everyone's history does.
+/// Live updates for a team the app cannot read directly, via `api.sh`.
+///
+/// Returns the messages after `last_seen` and the new watermark. `last_seen`
+/// is `None` the first time a team is seen, and then nothing is emitted —
+/// only the watermark is taken. The room loads its own history; replaying it
+/// here would duplicate everything already on screen.
+///
+/// Ids are opaque, so "after" cannot be a comparison. The list arrives
+/// oldest-first, so position in it is the only ordering available: find the
+/// watermark and take what follows. If it is not in the window at all —
+/// more than `limit` messages arrived between polls — the tail is emitted
+/// rather than nothing, since dropping messages silently is the failure this
+/// whole branch exists to remove.
+fn fallback_new_messages(team: &str, last_seen: Option<&str>) -> (Vec<Message>, Option<String>) {
+    const WINDOW: usize = 50;
+    let raw = match run_script(
+        "api.sh",
+        &["get", "teams", team, "messages", "--limit", "50"],
+    ) {
+        Ok(raw) => raw,
+        Err(_) => return (Vec::new(), last_seen.map(str::to_string)),
+    };
+    let all: Vec<Message> = parse_jsonl::<ApiMessage>(&raw)
+        .into_iter()
+        .map(|m| Message {
+            id: m.id,
+            team: m.team,
+            from: m.from,
+            to: m.to,
+            body: m.body,
+            created_at: m.created_at,
+        })
+        .collect();
+
+    let watermark = all.last().map(|m| m.id.clone()).or(last_seen.map(str::to_string));
+    let Some(last_seen) = last_seen else {
+        return (Vec::new(), watermark);
+    };
+    let fresh = match all.iter().position(|m| m.id == last_seen) {
+        Some(i) => all[i + 1..].to_vec(),
+        // Fell out of the window: everything here is newer than what was
+        // last seen, so all of it is fresh. Capped by WINDOW already.
+        None => all,
+    };
+    debug_assert!(fresh.len() <= WINDOW);
+    (fresh, watermark)
+}
+
+fn watchable_stores() -> (Vec<PathBuf>, Vec<String>) {
+    let teams = match run_script("api.sh", &["get", "teams"]) {
+        Ok(raw) => parse_jsonl::<ApiTeam>(&raw),
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    let mut direct: Vec<PathBuf> = Vec::new();
+    let mut via_api: Vec<String> = Vec::new();
+    for t in teams {
+        match direct_store_path(&t.name) {
+            Some(p) => {
+                if !direct.contains(&p) {
+                    direct.push(p);
+                }
+            }
+            None => via_api.push(t.name),
+        }
+    }
+    (direct, via_api)
 }
 
 #[derive(Clone, Serialize)]
 pub struct Message {
-    pub id: i64,
+    /// Opaque, per `api.sh`'s own contract: "Every id (message ids included)
+    /// is a JSON string, never a bare number — ids are opaque per the driver
+    /// interface spec, and today's sqlite integer ids are no exception."
+    ///
+    /// This was `i64`, which held only while every id came from the legacy
+    /// `messages` table's INTEGER PRIMARY KEY. Event-log ids are UUIDs
+    /// (`019faa2a-48ae-7067-bb7d-ace26fd8a6df`), so parsing them as an
+    /// integer failed — and because the parse sat inside a `filter_map`,
+    /// every event-log message was dropped without a trace. Ordering does
+    /// not depend on this value; the store returns rows already ordered.
+    pub id: String,
     pub team: String,
     pub from: String,
     pub to: String,
@@ -565,27 +797,30 @@ pub fn agmsg_members(team: String) -> Result<Vec<Member>, String> {
 pub fn agmsg_messages(
     team: String,
     limit: Option<u32>,
-    before_id: Option<i64>,
+    // Opaque, like the id it pages from — `api.sh` deliberately does not
+    // numeric-filter this one, "since event-log ids are UUIDs, not numeric".
+    before_id: Option<String>,
 ) -> Result<Vec<Message>, String> {
     let limit_s = limit.unwrap_or(30).to_string();
     let mut args = vec!["get", "teams", &team, "messages", "--limit", &limit_s];
-    let before_id_s;
-    if let Some(id) = before_id {
-        before_id_s = id.to_string();
+    if let Some(id) = before_id.as_deref() {
         args.push("--before-id");
-        args.push(&before_id_s);
+        args.push(id);
     }
     let raw = run_script("api.sh", &args)?;
+    // Every row is kept. The previous version parsed the id as an integer
+    // inside a filter_map, so a message whose id was not numeric vanished
+    // rather than surfacing as an error — which is every event-log message.
     Ok(parse_jsonl::<ApiMessage>(&raw)
         .into_iter()
-        .filter_map(|m| Some(Message {
-            id: m.id.parse().ok()?,
+        .map(|m| Message {
+            id: m.id,
             team: m.team,
             from: m.from,
             to: m.to,
             body: m.body,
             created_at: m.created_at,
-        }))
+        })
         .collect())
 }
 
@@ -695,42 +930,71 @@ pub fn start_watcher(app: AppHandle) {
         // installs it (and creates the DB) after this thread has already
         // started. Retry instead of giving up once, so that session isn't
         // permanently missing live updates and stdin-inject delivery.
-        let conn = loop {
-            match open_ro() {
-                Ok(c) => break c,
-                Err(_) => thread::sleep(Duration::from_millis(800)),
-            }
-        };
-        let mut last_id: i64 = conn
-            .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0))
-            .unwrap_or(0);
+        // One open connection and cursor pair per store, keyed by path.
+        let mut open: Vec<(PathBuf, rusqlite::Connection, Cursors)> = Vec::new();
+        // Re-enumerating costs a subprocess per team, so it happens on a much
+        // slower beat than the poll. `join` creating a team is an ordinary
+        // action, though, so it cannot be startup-only: "I joined and the app
+        // never showed it, until I restarted" is a bug report nobody can
+        // diagnose.
+        let mut ticks_until_rescan = 0u32;
+        // Teams the app cannot read directly, and how far each has been read.
+        // Polled on the rescan beat, not the fast one: this path costs a
+        // subprocess per team per poll.
+        let mut via_api: Vec<(String, Option<String>)> = Vec::new();
+
         loop {
-            let new_rows: Vec<Message> = {
-                let mut stmt = match conn.prepare(
-                    "SELECT id, team, from_agent, to_agent, body, created_at FROM messages \
-                     WHERE id>?1 ORDER BY id",
-                ) {
-                    Ok(s) => s,
-                    Err(_) => return,
-                };
-                let mapped = stmt.query_map(rusqlite::params![last_id], |r| {
-                    Ok(Message {
-                        id: r.get(0)?,
-                        team: r.get(1)?,
-                        from: r.get(2)?,
-                        to: r.get(3)?,
-                        body: r.get(4)?,
-                        created_at: r.get(5)?,
-                    })
-                });
-                match mapped {
-                    Ok(it) => it.filter_map(|r| r.ok()).collect(),
-                    Err(_) => Vec::new(),
+            if ticks_until_rescan == 0 {
+                ticks_until_rescan = 12; // ~10s at the poll interval below
+                let (direct, fallback) = watchable_stores();
+                for team in fallback {
+                    if !via_api.iter().any(|(t, _)| t == &team) {
+                        via_api.push((team, None));
+                    }
                 }
-            };
-            for m in new_rows {
-                last_id = m.id.max(last_id);
-                let _ = app.emit("agmsg-message", m);
+                for (team, seen) in via_api.iter_mut() {
+                    let (fresh, watermark) = fallback_new_messages(team, seen.as_deref());
+                    *seen = watermark;
+                    for m in fresh {
+                        let _ = app.emit("agmsg-message", m);
+                    }
+                }
+                for path in direct {
+                    if open.iter().any(|(p, _, _)| p == &path) {
+                        continue;
+                    }
+                    if let Ok(conn) = open_ro(&path) {
+                        // Start at the current end of both id spaces: the room
+                        // loads its own history separately, so replaying it
+                        // here would double every message already on screen.
+                        let cursors = Cursors {
+                            seq: conn
+                                .query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| {
+                                    r.get(0)
+                                })
+                                .unwrap_or(0),
+                            legacy_id: conn
+                                .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| {
+                                    r.get(0)
+                                })
+                                .unwrap_or(0),
+                        };
+                        open.push((path, conn, cursors));
+                    }
+                }
+            }
+            ticks_until_rescan -= 1;
+
+            // A read failure is transient here (a WAL checkpoint, a store
+            // being recreated), not a reason to end the thread — the previous
+            // version returned on a prepare error and the session went
+            // silently dead for the rest of its life.
+            for (_, conn, cursors) in open.iter_mut() {
+                if let Ok(new_rows) = read_new_messages(conn, cursors) {
+                    for m in new_rows {
+                        let _ = app.emit("agmsg-message", m);
+                    }
+                }
             }
             thread::sleep(Duration::from_millis(800));
         }
@@ -1003,5 +1267,202 @@ mod tests {
         assert!(native_proj.is_dir(), "native project dir should be created");
         let got = std::fs::read_to_string(dir.path().join("arg4.txt")).unwrap();
         assert_eq!(got, msys_proj, "join.sh $4 should be the MSYS form");
+    }
+
+    /// Builds a store the way `storage_init` does: the event log plus the
+    /// legacy table beside it, at the path [`super::db_path`] resolves to.
+    fn store_with(base: &std::path::Path, events: &[(&str, &str)], legacy: &[&str]) {
+        let db = base.join("db");
+        std::fs::create_dir_all(&db).unwrap();
+        let conn = rusqlite::Connection::open(db.join("messages.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (
+               seq INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL,
+               id TEXT NOT NULL, team TEXT, from_agent TEXT, to_agent TEXT,
+               body TEXT, msg_id TEXT, agent TEXT, at TEXT NOT NULL);
+             CREATE TABLE messages (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, team TEXT NOT NULL,
+               from_agent TEXT NOT NULL, to_agent TEXT NOT NULL, body TEXT NOT NULL,
+               created_at TEXT NOT NULL, read_at TEXT);",
+        )
+        .unwrap();
+        for (id, at) in events {
+            conn.execute(
+                "INSERT INTO events(type,id,team,from_agent,to_agent,body,at) \
+                 VALUES ('message_sent',?1,'t','leader','worker','from the event log',?2)",
+                rusqlite::params![id, at],
+            )
+            .unwrap();
+        }
+        for at in legacy {
+            conn.execute(
+                "INSERT INTO messages(team,from_agent,to_agent,body,created_at) \
+                 VALUES ('t','leader','worker','from the legacy table',?1)",
+                rusqlite::params![at],
+            )
+            .unwrap();
+        }
+    }
+
+    /// Goes red if either read-rule failure comes back. Both were silent:
+    /// the query ran, the parse "succeeded" by discarding rows, and the app
+    /// showed nothing while reporting no error at all.
+    ///
+    /// - **legacy table only** — the UUID-keyed row is missing.
+    /// - **id treated as a number** — the UUID row is the one that
+    ///   disappears, because it is the only id that is not numeric.
+    ///
+    /// The third failure — opening the wrong file — is a different axis and
+    /// is covered by `the_store_path_comes_from_agmsg_not_from_a_guess`.
+    ///
+    /// It exercises the watcher's own reader, not a copy of its SQL.
+    #[test]
+    #[serial]
+    fn a_sent_message_reaches_the_app_from_both_the_event_log_and_the_legacy_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        store_with(
+            dir.path(),
+            &[("019faa2a-48ae-7067-bb7d-ace26fd8a6df", "2026-07-28T10:00:01Z")],
+            &["2026-07-28T10:00:00Z"],
+        );
+
+        let conn = super::open_ro(&dir.path().join("db/messages.db"))
+            .expect("the store must open");
+        let mut cursors = super::Cursors::default();
+        let got = super::read_new_messages(&conn, &mut cursors).expect("read");
+
+        let ids: Vec<&str> = got.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["1", "019faa2a-48ae-7067-bb7d-ace26fd8a6df"],
+            "both rows must arrive, oldest first — a UUID id means the event \
+             log is being read, and losing it is how this broke before"
+        );
+        assert_eq!(got[1].body, "from the event log");
+
+        // A second poll returns nothing: both cursors advanced, and a
+        // shared one would have skipped whichever table was behind.
+        let again = super::read_new_messages(&conn, &mut cursors).expect("read");
+        assert!(again.is_empty(), "already-seen rows must not be re-emitted");
+    }
+
+    /// The released layout: a store from before the event log has no `events`
+    /// table at all, so the whole UNION fails to prepare. History must still
+    /// come through — the machine this was written on has 6,285 such rows.
+    #[test]
+    #[serial]
+    fn history_still_arrives_from_a_store_that_predates_the_event_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        let db = dir.path().join("db");
+        std::fs::create_dir_all(&db).unwrap();
+        let conn = rusqlite::Connection::open(db.join("messages.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, team TEXT NOT NULL,
+               from_agent TEXT NOT NULL, to_agent TEXT NOT NULL, body TEXT NOT NULL,
+               created_at TEXT NOT NULL, read_at TEXT);
+             INSERT INTO messages(team,from_agent,to_agent,body,created_at)
+               VALUES ('t','leader','worker','older than the event log',
+                       '2026-06-01T00:00:00Z');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = super::open_ro(&dir.path().join("db/messages.db")).unwrap();
+        let mut cursors = super::Cursors::default();
+        let got = super::read_new_messages(&conn, &mut cursors).expect("read");
+
+        assert_eq!(got.len(), 1, "a pre-event-log store must not read as empty");
+        assert_eq!(got[0].body, "older than the event log");
+    }
+
+    /// The third axis: the app must read where agmsg says the store is, not
+    /// where the app thinks it should be. Hardcoding the path is what let a
+    /// storage-layout change break the app with nothing to notice.
+    #[test]
+    #[serial]
+    fn the_store_path_comes_from_agmsg_not_from_a_guess() {
+        let _base = fake_base(&[(
+            "api.sh",
+            r#"echo '{"team":"alpha","driver":"sqlite","partition":"per-team","path":"/somewhere/else/alpha.db","exists":true}'"#,
+        )]);
+        assert_eq!(
+            super::direct_store_path("alpha"),
+            Some(std::path::PathBuf::from("/somewhere/else/alpha.db")),
+            "the reported path must be used verbatim — a layout the app has \
+             never heard of has to work without the app changing"
+        );
+    }
+
+    /// A driver this app cannot parse must send it back through `api.sh`,
+    /// which is slower and correct. Returning "no messages" instead would be
+    /// the same silent-empty failure as the bugs above.
+    #[test]
+    #[serial]
+    fn an_unreadable_driver_falls_back_rather_than_showing_an_empty_room() {
+        let _base = fake_base(&[(
+            "api.sh",
+            r#"echo '{"team":"alpha","driver":"jsonl","partition":"per-team","path":"/x/a.jsonl","exists":true}'"#,
+        )]);
+        assert_eq!(
+            super::direct_store_path("alpha"),
+            None,
+            "an unknown driver must not be opened as sqlite"
+        );
+    }
+
+    /// The fallback has to actually deliver, not merely be described.
+    ///
+    /// Written after noticing the previous commit claimed the watcher "falls
+    /// back to going through api.sh" when it did no such thing: teams it
+    /// could not read directly were simply skipped, so with no `store`
+    /// endpoint deployed the app had no live updates at all. History still
+    /// worked, which is exactly what made it invisible.
+    #[test]
+    #[serial]
+    fn a_team_read_through_api_sh_still_delivers_new_messages() {
+        let _base = fake_base(&[(
+            "api.sh",
+            r#"
+if [ "$4" = "store" ]; then
+  echo '{"team":"alpha","driver":"jsonl","partition":"per-team","path":"/x/a.jsonl","exists":true}'
+  exit 0
+fi
+echo '{"type":"message_sent","id":"m1","team":"alpha","from":"a","to":"b","body":"first","at":"t1"}'
+echo '{"type":"message_sent","id":"m2","team":"alpha","from":"a","to":"b","body":"second","at":"t2"}'
+"#,
+        )]);
+
+        // First sight takes a watermark and emits nothing — the room loads
+        // its own history.
+        let (fresh, mark) = super::fallback_new_messages("alpha", None);
+        assert!(fresh.is_empty(), "history must not be replayed as live");
+        assert_eq!(mark.as_deref(), Some("m2"));
+
+        // A message the app has not seen is delivered.
+        let (fresh, mark) = super::fallback_new_messages("alpha", Some("m1"));
+        assert_eq!(
+            fresh.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(),
+            vec!["second"],
+        );
+        assert_eq!(mark.as_deref(), Some("m2"));
+
+        // Nothing new means nothing emitted.
+        let (fresh, _) = super::fallback_new_messages("alpha", Some("m2"));
+        assert!(fresh.is_empty(), "already-seen rows must not be re-emitted");
+    }
+
+    /// A team nobody has written to yet has no store. That is an empty room,
+    /// not a failure, and must not be reported as one.
+    #[test]
+    #[serial]
+    fn a_team_with_no_store_yet_is_not_an_error() {
+        let _base = fake_base(&[(
+            "api.sh",
+            r#"echo '{"team":"alpha","driver":"sqlite","partition":"shared","path":"/x/db.sqlite","exists":false}'"#,
+        )]);
+        assert_eq!(super::direct_store_path("alpha"), None);
     }
 }

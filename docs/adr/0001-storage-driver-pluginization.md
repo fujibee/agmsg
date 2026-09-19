@@ -52,7 +52,7 @@ Vocabulary is **driver** (architectural unit), **plugin** (driver shipped outsid
 
 ### On interface unification across axes (decision 3)
 
-- **A. One interface for all three axes.** Considered briefly. Rejected after review: storage is CRUD-shaped, agent is runtime-glue-shaped, delivery is lifecycle-shaped. Forcing them through one interface either over-abstracts or leaks axis-specific semantics into the abstract one. Reviewer (aggie-co) made the strongest case for this rejection.
+- **A. One interface for all three axes.** Considered briefly. Rejected after review: storage is CRUD-shaped, agent is runtime-glue-shaped, delivery is lifecycle-shaped. Forcing them through one interface either over-abstracts or leaks axis-specific semantics into the abstract one. The strongest case for this rejection was made in review.
 - **B. Common protocol (discovery, config, dep-check, status codes) + axis-specific functions.** **Chosen.**
 
 ### On IDs (decision 4)

@@ -1,16 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: send.sh <team> <from> <to> <message> [--force]
+# Usage:
+#   send.sh <team> <from> <to> <message> [--force]              # body as ONE quoted arg
+#   send.sh <team> <from> <to> --body-file <path> [--force]     # body read from a file
+#   send.sh <team> <from> <to> --body - [--force]               # body read from stdin
+#
+# --body-file matches poke.sh, for the same reason (#507) AND to close #1101: a caller
+# who learned --body-file from poke used to have send take the literal string
+# "--body-file" as the message and exit zero (the flag has different meanings on the two
+# adjacent commands). A positional <message> also passes through the CALLER's shell first,
+# where a backtick or $( ) executes and its span silently vanishes; send bodies are longer
+# and likelier to contain them. So a message that is a bare unconsumed flag (starts with
+# --, and is not --body-file/--body) is now REFUSED rather than sent, and a mistyped flag
+# never lands as content. Trailing newlines are stripped from a file/stdin body, as in
+# poke (command-substitution semantics).
 
-TEAM="${1:?Usage: send.sh <team> <from> <to> <message> [--force]}"
+die() { echo "send.sh: $*" >&2; exit 1; }
+
+TEAM="${1:?Usage: send.sh <team> <from> <to> <message|--body-file PATH|--body -> [--force]}"
 FROM="${2:?Missing from agent}"
 TO="${3:?Missing to agent}"
-BODY="${4:?Missing message body}"
+shift 3
+
+# --force is historically the trailing flag AFTER the body; recognize it only as the
+# last argument, so a --body-file body whose text happens to be "--force" is unaffected.
 FORCE=0
-if [ "${5:-}" = "--force" ]; then
+if [ "$#" -gt 0 ] && [ "${!#}" = "--force" ]; then
   FORCE=1
+  set -- "${@:1:$#-1}"
 fi
+
+case "${1:-}" in
+  --body-file)
+    [ "$#" -eq 2 ] || die "--body-file takes exactly one path"
+    [ -r "${2:-}" ] || die "cannot read body file: ${2:-<missing>}"
+    BODY="$(cat -- "$2")"
+    ;;
+  --body)
+    { [ "$#" -eq 2 ] && [ "${2:-}" = "-" ]; } \
+      || die "--body accepts only '-' (read stdin); for a file use --body-file <path>"
+    BODY="$(cat)"
+    ;;
+  '')
+    die "Missing message body"
+    ;;
+  --*)
+    die "unrecognized option '${1}' — a message that starts with '-' must go through --body-file <path> or --body - (a bare flag is refused so a mistyped one is never sent as the message, #1101)"
+    ;;
+  *)
+    [ "$#" -eq 1 ] || die "got extra arguments — quote the message as ONE argument, or use --body-file <path>"
+    BODY="$1"
+    ;;
+esac
+[ -n "$BODY" ] || die "the message body is empty — nothing to send"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
@@ -23,8 +66,25 @@ source "$SCRIPT_DIR/lib/validate.sh"
 # never bypass team-name path safety.
 agmsg_validate_team_name "$TEAM" || exit 1
 
-DB="$(agmsg_db_path)"
+# A seat that sends names its own pane if it is not named (self-name.sh): the
+# 1.3.0 rule that every live seat's terminal id/name is right in any state,
+# tied to the action rather than to a CLI's boot path. Best-effort, never fails
+# the send; the common case is one file read.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/self-name.sh"
+agmsg_self_name_on_action "$TEAM" "$FROM"
+# And, once and early, fix its own CLI session name by typing /rename into its own
+# pane (self-rename.sh, #1081). Best-effort, never fails the send; opt out with
+# AGMSG_SELF_RENAME=off (or the whole family with AGMSG_SELF_NAME=off).
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/self-rename.sh"
+agmsg_self_rename_on_action "$TEAM" "$FROM"
 
+agmsg_storage_load
+DB="$(agmsg_db_path "$TEAM")"
+
+# Keep the full-schema bootstrap (registry + storage tables) for a first-ever
+# command; the message write itself goes through the storage facade below.
 [ -f "$DB" ] || bash "$SCRIPT_DIR/internal/init-db.sh" >/dev/null
 
 # #355: reject a from/to that isn't registered in <team> — an unnoticed typo
@@ -42,9 +102,9 @@ if [ "$FORCE" -ne 1 ]; then
       echo "Error: team '$TEAM' has no registered agents — cannot send as $role '$name' (use --force to bypass)." >&2
       return 1
     fi
-    local cfg_sql name_sql found roster
+    local cfg_sql name_sql found roster q="'"
     cfg_sql=$(agmsg_sql_readfile_path "$TEAM_CONFIG")
-    name_sql=$(printf '%s' "$name" | sed "s/'/''/g")
+    name_sql=${name//$q/$q$q}
     found=$(agmsg_sqlite_mem "
       WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
       cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw)
@@ -69,25 +129,11 @@ if [ "$FORCE" -ne 1 ]; then
   _agmsg_roster_check "to" "$TO" || exit 1
 fi
 
-# Escape EVERY interpolated value as a SQL string literal, not just body: a
-# team/agent name containing a single quote would otherwise break the INSERT
-# (correctness) or change its meaning (injection surface).
-_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
-INSERT="INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('$(_agmsg_sqlesc "$TEAM")', '$(_agmsg_sqlesc "$FROM")', '$(_agmsg_sqlesc "$TO")', '$(_agmsg_sqlesc "$BODY")');"
-
-# Retry once after ensuring the schema. Under a concurrent first-write fan-out
-# (leader → N members against a fresh/override store), one process can see the
-# DB file exist before the winning initializer has finished creating the table,
-# so its INSERT would hit "no such table". init-db.sh is idempotent + uses the
-# busy_timeout, so re-running it waits for the schema, then the INSERT lands.
-# See #114.
-# Pipe the SQL via stdin (not as an argv) so a large body cannot overflow the
-# OS command-line limit (the "Argument list too long" crash).
-if ! printf '%s
-' "$INSERT" | agmsg_sqlite "$DB" 2>/dev/null; then
-  bash "$SCRIPT_DIR/internal/init-db.sh" >/dev/null
-  printf '%s
-' "$INSERT" | agmsg_sqlite "$DB"
-fi
+# Write through the storage axis (§2.1 storage_send) — the active driver now owns
+# the message log (an append-only message_sent event), not a direct INSERT.
+# storage_send re-inits its schema idempotently before writing, which subsumes the
+# #114 concurrent first-write race the old path retried around (a process seeing
+# the DB file before the table exists just creates it). The new id is not surfaced.
+storage_send "$TEAM" "$FROM" "$TO" "$BODY" >/dev/null
 
 echo "Sent to $TO in team $TEAM"

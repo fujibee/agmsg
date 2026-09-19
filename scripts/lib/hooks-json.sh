@@ -10,17 +10,17 @@
 # #162 byte-count validation, #134 JSON escaping) — can be read and tested on
 # its own.
 #
-# Sourced by delivery.sh AFTER it defines SKILL_NAME (used to detect
+# Sourced by delivery.sh AFTER it defines SKILL_DIR (used to detect
 # agmsg-owned entries); the existing lib convention is for sourced modules to
 # reference caller-set globals rather than re-resolve them.
 
-sql_readfile_path() {
-  local path="$1"
-  if command -v cygpath >/dev/null 2>&1; then
-    path=$(cygpath -w "$path" 2>/dev/null || printf '%s' "$path")
-  fi
-  printf '%s' "$path" | sed "s/'/''/g"
-}
+# This file used to carry its own copy of the path converter. One definition
+# now, in lib/sqlpath.sh — see the note there for why a second copy is worse
+# than no copy (#669).
+if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  source "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/sqlpath.sh"
+fi
 
 # Strip any agmsg-owned hook entries from <event> in the JSON at <path>. An
 # entry is "agmsg-owned" when one of its inner hooks references a path under
@@ -36,10 +36,20 @@ strip_agmsg_event_file() {
   local path="$1"
   local event="$2"
   local sql_path
-  sql_path=$(sql_readfile_path "$path")
+  sql_path=$(agmsg_sql_readfile_path "$path")
   local tmp tmp_sql
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
-  tmp_sql=$(sql_readfile_path "$tmp")
+  tmp_sql=$(agmsg_sql_readfile_path "$tmp")
+  # Ownership is decided against the absolute install directory, not the bare
+  # skill name (#1038): a project's OWN hook whose command happens to contain
+  # the substring "agmsg" -- a natural name for a hook that cooperates with
+  # this tool -- used to match `instr(command, '$SKILL_NAME')` and get
+  # silently stripped alongside agmsg's real entries. $SKILL_DIR is this
+  # install's own absolute path; every command agmsg ever writes invokes a
+  # script under it, and nothing legitimately outside agmsg's install would
+  # ever contain that exact path as a substring.
+  local skill_dir_sql
+  skill_dir_sql=$(printf '%s' "$SKILL_DIR" | sed "s/'/''/g")
   # Write the result with writefile() rather than redirecting sqlite3's CLI
   # output. On strict sqlite3 builds (>= 3.50, shipped on Windows) the CLI
   # renders control bytes — e.g. a CR that rode in on a CRLF settings file —
@@ -62,7 +72,7 @@ strip_agmsg_event_file() {
       WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks.$event')) AS s
             WHERE NOT EXISTS (
               SELECT 1 FROM json_each(json_extract(s.value, '\$.hooks')) AS h
-              WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+              WHERE instr(json_extract(h.value, '\$.command'), '$skill_dir_sql') > 0
             )) = 0 THEN
         json_remove(src.j, '\$.hooks.$event')
       ELSE
@@ -71,7 +81,7 @@ strip_agmsg_event_file() {
            FROM json_each(json_extract(src.j, '\$.hooks.$event')) AS s
            WHERE NOT EXISTS (
              SELECT 1 FROM json_each(json_extract(s.value, '\$.hooks')) AS h
-             WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+             WHERE instr(json_extract(h.value, '\$.command'), '$skill_dir_sql') > 0
            ))
         )
     END, '') AS blob FROM src)
@@ -85,11 +95,41 @@ strip_agmsg_event_file() {
 # Bash. On native Windows, Codex runs each hook command via PowerShell, which
 # cannot execute a bare POSIX ".sh" path, so the hook exits non-zero. Codex hook
 # config supports a "commandWindows" key that takes precedence on Windows.
+#
+# The shell stays a LOGIN shell, and the payload no longer travels on its stdout
+# (#1015). `-l` reads the profile chain, and everything the profile prints goes
+# to that same stdout, ahead of the JSON -- codex parses the whole stream as one
+# document, so one line of profile chatter makes the payload unparseable, and by
+# then the hook has already consumed the rows. Measured on macOS and Linux as
+# well as reported on Windows: the mechanism is bash's, not Windows's.
+#
+# Dropping `-l` would close it and was the first plan. Measured instead: with a
+# profile that exports a PATH the command needs, the non-login shell cannot find
+# the tool and the hook exits without emitting anything. That trades a silent
+# loss for a total one, and only under a premise nobody has measured -- whether a
+# given Git Bash profile provides something the hook relies on. Keeping `-l`
+# needs no such premise.
+#
+# So: bash writes the command's own stdout to a file, PowerShell -- which read no
+# profile -- prints the file, and the login shell's stdout is discarded. The
+# braces are there so the redirect covers the whole command however it is
+# composed, not just its last element. The exit status is carried across
+# explicitly; without it the hook would report on `Remove-Item`.
+#
+# No `\"` anywhere in what is emitted: PowerShell reads a backslash-escaped
+# quote as a literal backslash and ends the string there (see the codex
+# template's warning).
 windows_wrap() {
   local posix_cmd="$1"
   local bash_cmd_ps
-  bash_cmd_ps=$(printf '%s' "$posix_cmd" | sed "s/'/''/g")
-  printf "\$b=\$env:GIT_BASH; if (-not \$b) { \$b=\$env:AGMSG_BASH }; if (-not \$b) { \$b='C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe' }; & \$b -lc '%s'" "$bash_cmd_ps"
+  bash_cmd_ps=$(printf '%s' "{ $posix_cmd ; } > \"\$AGMSG_HOOK_OUT\"" | sed "s/'/''/g")
+  # `printf '%s'`, never a format string. This text carries backslashes into
+  # PowerShell, and a format string puts a second round of escape processing
+  # between what is written here and what is emitted -- measured: three attempts
+  # at `Replace('\','/')` through a format emitted `\\`, `\` and then nothing,
+  # and only the last one was visible as wrong. One layer, and the layer is
+  # bash's own double-quote rules.
+  printf '%s' "\$b=\$env:GIT_BASH; if (-not \$b) { \$b=\$env:AGMSG_BASH }; if (-not \$b) { \$b='C:\\Program Files\\Git\\bin\\bash.exe' }; \$o=[IO.Path]::GetTempFileName(); \$s=[IO.Path]::GetTempFileName(); [IO.File]::WriteAllText(\$s,'$bash_cmd_ps',(New-Object System.Text.UTF8Encoding \$false)); \$env:AGMSG_HOOK_OUT=\$o; & \$b -l (\$s.Replace('\\','/')) | Out-Null; \$rc=\$LASTEXITCODE; Get-Content -Raw -LiteralPath \$o; Remove-Item -Force -LiteralPath \$o,\$s -ErrorAction SilentlyContinue; exit \$rc"
 }
 
 # Append a single entry of the form {"matcher":"","hooks":[{"type":"command","command":"<cmd>"}]}
@@ -105,7 +145,7 @@ add_event_entry_file() {
   local cmd="$3"
   local windows_wrap="${4:-}"
   local sql_path
-  sql_path=$(sql_readfile_path "$path")
+  sql_path=$(agmsg_sql_readfile_path "$path")
 
   # Build the entry with SQLite's own json_object()/json_array() so SQLite does
   # every JSON-level escape. Raw values go in as ordinary SQL string literals
@@ -127,7 +167,7 @@ add_event_entry_file() {
 
   local tmp tmp_sql
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
-  tmp_sql=$(sql_readfile_path "$tmp")
+  tmp_sql=$(agmsg_sql_readfile_path "$tmp")
   # writefile() instead of CLI redirect — see strip_agmsg_event_file for why
   # (strict sqlite3 caret-escapes control bytes in CLI output, #143/#102).
   # Validate writefile()'s byte count vs the content length — see
@@ -163,10 +203,10 @@ add_event_entry_file() {
 prune_empty_hooks_file() {
   local path="$1"
   local sql_path
-  sql_path=$(sql_readfile_path "$path")
+  sql_path=$(agmsg_sql_readfile_path "$path")
   local tmp tmp_sql
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
-  tmp_sql=$(sql_readfile_path "$tmp")
+  tmp_sql=$(agmsg_sql_readfile_path "$tmp")
   # writefile() instead of CLI redirect — see strip_agmsg_event_file (#143/#102).
   # Validate writefile()'s byte count vs the content length — see
   # strip_agmsg_event_file for why the exit code alone is insufficient (#162).

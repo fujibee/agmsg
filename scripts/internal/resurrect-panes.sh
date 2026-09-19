@@ -119,8 +119,12 @@ agmsg_resurrect_plan() {
     # to a bare shell. "the pane restored as a shell" alone can't catch this; the
     # lock is the source of truth for "is this role's owner alive right now". A
     # dead owner leaves a stale lock -> actas_lock_state reports free -> we reseat.
-    lockstate="$(actas_lock_state "${teams[$idx]}" "${agents[$idx]}" '' 2>/dev/null || echo free)"
-    case "$lockstate" in other:*) continue ;; esac
+    # No `|| echo free`: that turned a failed classification into "nobody holds
+    # it", which is the one answer that makes this loop ACT. `unknown:` skips
+    # alongside `other:` — re-seating a pane for a role we could not verify is
+    # the destructive direction, and the next run retries for free. (#983)
+    lockstate="$(actas_lock_state "${teams[$idx]}" "${agents[$idx]}" '' 2>/dev/null)" || lockstate="unknown:state_call_failed"
+    case "$lockstate" in other:*|unknown:*) continue ;; esac
 
     rty="${types[$idx]}"
     cli="$(agmsg_type_get "$rty" cli 2>/dev/null || true)"

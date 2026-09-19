@@ -98,14 +98,16 @@ EOF
   [[ "$output" =~ "2 member" ]]
 }
 
-@test "join: re-join with same name adds registration instead of duplicate agent" {
+@test "join: re-join shows one row per registration without duplicating the member count" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-b
   run bash "$SCRIPTS/team.sh" myteam
   [ "$status" -eq 0 ]
   [[ "$output" =~ "alice" ]]
   [[ "$output" =~ "1 member" ]]
-  [[ "$output" =~ "+1 more" ]]
+  [ "$(printf '%s\n' "$output" | grep -c '^  alice (claude-code)')" -eq 2 ]
+  printf '%s\n' "$output" | grep -qF '/tmp/proj-a'
+  [[ "$output" =~ "/tmp/proj-b" ]]
 }
 
 @test "join: concurrent joins to the same team do not lose registrations (#141)" {
@@ -150,10 +152,13 @@ EOF
   [[ "$output" =~ "bob" ]]
 }
 
-@test "leave: removes team dir when last member leaves" {
+@test "leave: retains an id-bearing team when its last member leaves" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
   bash "$SCRIPTS/leave.sh" myteam alice
-  [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
+  [ -f "$TEST_SKILL_DIR/teams/myteam/config.json" ]
+  [ -f "$TEST_SKILL_DIR/teams/myteam/roster.jsonl" ]
+  [ "$(sqlite_mem "SELECT json_array_length(
+    json_extract(readfile('$(rf "$TEST_SKILL_DIR/teams/myteam/config.json")'), '\$.agents'));")" -eq 0 ]
 }
 
 @test "leave: an agent name containing a single quote doesn't break the underlying SQL statement (#87-class)" {
@@ -198,6 +203,17 @@ EOF
   [[ ! "$output" =~ ".parameter" ]]
   [[ ! "$output" =~ "Manage SQL parameter bindings" ]]
   [ "$(echo "$output" | grep -c "$agent")" -eq 1 ]
+}
+
+@test "team --json emits one full object per registration" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam alice codex /tmp/proj-b
+  run bash "$SCRIPTS/team.sh" myteam --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite_mem "SELECT json_valid('$(printf '%s' "$output" | sed "s/'/''/g")');")" -eq 1 ]
+  [ "$(sqlite_mem "SELECT json_array_length('$(printf '%s' "$output" | sed "s/'/''/g")');")" -eq 2 ]
+  [ "$(sqlite_mem "SELECT count(*) FROM json_each('$(printf '%s' "$output" | sed "s/'/''/g")') WHERE json_extract(value,'\$.member')='alice';")" -eq 2 ]
+  [ "$(sqlite_mem "SELECT count(*) FROM json_each('$(printf '%s' "$output" | sed "s/'/''/g")') WHERE json_type(value,'\$.pane_label')='object';")" -eq 2 ]
 }
 
 # --- whoami.sh ---
@@ -336,6 +352,52 @@ EOF
   [[ "$output" =~ "type=claude-code" ]]
 }
 
+@test "whoami: rejects an explicit unknown type instead of answering not_joined (#783)" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  clear_autodetect_env
+  mock_no_agent_ps
+  run bash "$SCRIPTS/whoami.sh" /tmp/proj not-a-real-type
+  [ "$status" -eq 1 ]
+  # Plain commands, not `[[ ]]`: a non-last `[[ ]]` cannot fail the test on
+  # bash 3.2 (#670), and the absence check below is the one that carries the
+  # point of this fix.
+  grep -qF "Unknown agent type: 'not-a-real-type'" <<<"$output"
+  # The old behaviour was a truthful answer to a question the caller did not
+  # mean to ask, and it is that answer which must not appear.
+  refute grep -qF "not_joined=true" <<<"$output"
+}
+
+@test "whoami: the unknown-type error lists the registry, like join.sh's does (#783)" {
+  clear_autodetect_env
+  mock_no_agent_ps
+  run bash "$SCRIPTS/whoami.sh" /tmp/proj bogus-type
+  [ "$status" -eq 1 ]
+  # Derived from the registry rather than compared against a written-out list,
+  # so adding a type cannot leave this assertion behind.
+  local expected
+  expected="$(cd "$SCRIPTS" && bash -c 'source lib/type-registry.sh; agmsg_known_types | sort -u | paste -sd, - | sed "s/,/, /g"')"
+  [[ "$output" =~ "supported: $expected" ]]
+}
+
+# THE CHECK IS GUARDED ON $2, AND THIS IS THE TEST THAT SAYS SO. Validating the
+# RESOLVED type instead would pass every other test in this file and fail only
+# here: detect_cli_type's last exit is a hardcoded `claude-code` that no
+# registry lookup stands behind, so tying the no-argument path to it makes a
+# registry that cannot offer that name stop everyone, not just a caller who
+# mistyped. Removing the `[ -n "${2:-}" ]` guard turns this red.
+@test "whoami: no type argument still answers when the fallback name is not in the registry (#783)" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  clear_autodetect_env
+  mock_no_agent_ps
+  # Move it aside rather than delete it: what is under test is the registry no
+  # longer offering the name detect_cli_type falls back to.
+  mv "$TYPES/claude-code" "$TYPES/.claude-code-hidden"
+  run bash "$SCRIPTS/whoami.sh" /tmp/proj
+  mv "$TYPES/.claude-code-hidden" "$TYPES/claude-code"
+  [ "$status" -eq 0 ]
+  [[ ! "$output" =~ "Unknown agent type" ]]
+}
+
 # --- reset.sh ---
 
 @test "reset: removes only current project registration" {
@@ -350,12 +412,13 @@ EOF
   [[ "$output" =~ "agent=alice" ]]
 }
 
-@test "reset: removes agent when last registration is cleared" {
+@test "reset: retires the member when its last registration is cleared" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
   run bash "$SCRIPTS/reset.sh" /tmp/proj-a claude-code alice
   [ "$status" -eq 0 ]
   [[ "$output" =~ "removed 1 registration" ]]
-  [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
+  [ -f "$TEST_SKILL_DIR/teams/myteam/config.json" ]
+  [ -f "$TEST_SKILL_DIR/teams/myteam/roster.jsonl" ]
 }
 
 @test "reset: an explicit agent_id containing a single quote doesn't break the underlying SQL statement (#87-class)" {
@@ -366,7 +429,8 @@ EOF
   [[ ! "$output" =~ "syntax error" ]]
   [[ ! "$output" =~ ".parameter" ]]
   [[ "$output" =~ "removed 1 registration" ]]
-  [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
+  [ -f "$TEST_SKILL_DIR/teams/myteam/config.json" ]
+  [ -f "$TEST_SKILL_DIR/teams/myteam/roster.jsonl" ]
 }
 
 @test "reset: rejects an explicit agent_id containing path-hazard characters" {
@@ -421,6 +485,51 @@ EOF
   run bash "$SCRIPTS/inbox.sh" newteam bob
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hello" ]]
+}
+
+@test "rename-team: atomically migrates cursor and sync sidecars" {
+  bash "$SCRIPTS/join.sh" oldteam alice claude-code /tmp/proj-a
+  export SKILL_DIR="$TEST_SKILL_DIR" AGMSG_STORAGE_DRIVER=sqlite
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  storage_init oldteam >/dev/null
+  storage_read_cursor_consume oldteam alice 0 >/dev/null
+  _sqlite_sync_schema oldteam
+  local generation db renamed_db store_dir
+  generation=$(_sqlite_sync_generation oldteam)
+  # This team is on the default shared partition, so both names resolve to the same
+  # file and the rename rewrites columns rather than moving anything. A team that
+  # owns its store is covered separately, in the partition tests.
+  db=$(agmsg_db_path oldteam)
+  renamed_db="$db"
+  store_dir=$(agmsg_storage_dir)
+  agmsg_sqlite "$db" "INSERT INTO sync_bindings
+    (local_team,server_instance_id,remote_team_id,protocol_version,driver_generation)
+    VALUES('oldteam','018f3f7e-0000-7000-8000-000000000000',
+      '018f3f7e-0000-7000-8000-000000000001',1,'$generation');"
+  mkdir -p "$store_dir/remote-sync"
+  printf '{"local_team":"oldteam","binding":"fixture"}\n' \
+    > "$store_dir/remote-sync/oldteam.json"
+  chmod 600 "$store_dir/remote-sync/oldteam.json"
+  bash "$SCRIPTS/rename-team.sh" oldteam newteam
+  [ "$(agmsg_sqlite "$renamed_db" "SELECT team FROM read_cursors;" | tr -d '\r')" = newteam ]
+  [ "$(agmsg_sqlite "$renamed_db" "SELECT local_team FROM sync_bindings;" | tr -d '\r')" = newteam ]
+  [ ! -e "$store_dir/remote-sync/oldteam.json" ]
+  [ "$(jq -r '.local_team' "$store_dir/remote-sync/newteam.json")" = newteam ]
+}
+
+@test "rename-team: JSONL keeps the cursor with the renamed event stream" {
+  export SKILL_DIR="$TEST_SKILL_DIR" AGMSG_STORAGE_DRIVER=jsonl
+  bash "$SCRIPTS/join.sh" oldteam alice claude-code /tmp/proj-a
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  local id tip
+  id=$(storage_send oldteam bob alice hello)
+  tip=$(storage_watch_tip oldteam:alice)
+  storage_read_cursor_consume oldteam alice "$tip" "$id" >/dev/null
+  bash "$SCRIPTS/rename-team.sh" oldteam newteam
+  [ "$(storage_read_cursor_get newteam alice)" = "$tip" ]
+  [ "$(storage_history newteam | jq -r '.team')" = newteam ]
 }
 
 @test "rename-team: fails when old team is missing" {
@@ -480,6 +589,45 @@ EOF
   [[ "$output" =~ "claude-orchestrator" ]]
 }
 
+@test "rename: atomically migrates cursor and remote member association" {
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj-a
+  export SKILL_DIR="$TEST_SKILL_DIR" AGMSG_STORAGE_DRIVER=sqlite
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  storage_init myteam >/dev/null
+  storage_read_cursor_consume myteam claude 0 >/dev/null
+  _sqlite_sync_schema myteam
+  local generation db
+  generation=$(_sqlite_sync_generation myteam)
+  # An agent rename does not move the store, so one path serves both ends.
+  db=$(agmsg_db_path myteam)
+  agmsg_sqlite "$db" "INSERT INTO sync_read_members
+    (local_team,server_instance_id,remote_team_id,protocol_version,
+     driver_generation,member_id,agent,remote_agent)
+    VALUES('myteam','018f3f7e-0000-7000-8000-000000000000',
+      '018f3f7e-0000-7000-8000-000000000001',1,'$generation',
+      '018f3f7e-0000-7000-8000-000000000010','claude','claude');"
+  bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  [ "$(agmsg_sqlite "$db" "SELECT agent FROM read_cursors;" | tr -d '\r')" = claude-orchestrator ]
+  [ "$(agmsg_sqlite "$db" "SELECT agent FROM sync_read_members;" | tr -d '\r')" = claude-orchestrator ]
+  [ "$(agmsg_sqlite "$db" "SELECT name_mismatch FROM sync_read_members;" | tr -d '\r')" = 1 ]
+}
+
+@test "rename: JSONL keeps exact reads and cursor with the new agent name" {
+  export SKILL_DIR="$TEST_SKILL_DIR" AGMSG_STORAGE_DRIVER=jsonl
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj-a
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  local id tip
+  id=$(storage_send myteam bob claude hello)
+  tip=$(storage_watch_tip myteam:claude)
+  storage_read_cursor_consume myteam claude "$tip" "$id" >/dev/null
+  bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  [ "$(storage_read_cursor_get myteam claude-orchestrator)" = "$tip" ]
+  [ "$(storage_history myteam | jq -r '.to')" = claude-orchestrator ]
+  [ "$(storage_list_unread myteam claude-orchestrator | jq -s 'length')" -eq 0 ]
+}
+
 @test "rename: fails when old agent is missing" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
   run bash "$SCRIPTS/rename.sh" myteam nope newname
@@ -502,9 +650,12 @@ EOF
   [ "$status" -eq 0 ]
   [[ ! "$output" =~ "syntax error" ]]
   [[ ! "$output" =~ ".parameter" ]]
-  run bash "$SCRIPTS/team.sh" myteam
-  [[ "$output" =~ "$new" ]]
-  [[ ! "$output" =~ "$old" ]]
+  run node -e '
+    const config = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.exit(Number(!Object.hasOwn(config.agents, process.argv[2]) ||
+      Object.hasOwn(config.agents, process.argv[3])));
+  ' "$TEST_SKILL_DIR/teams/myteam/config.json" "$new" "$old"
+  [ "$status" -eq 0 ]
 }
 
 @test "rename: rejects an old/new agent name containing path-hazard characters" {
@@ -536,27 +687,22 @@ EOF
   [[ ! "$output" =~ "claude " ]]
 }
 
-@test "join: --force still revives a renamed-away name when explicitly requested" {
+@test "join: --force cannot reassign a renamed-away identity name" {
   bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
   bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
   run bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj --force
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "Joined team myteam as claude" ]]
-  run bash "$SCRIPTS/team.sh" myteam
-  [[ "$output" =~ "claude-orchestrator" ]]
-  [[ "$output" =~ "claude " ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "permanently bound" ]]
 }
 
-@test "join: after --force revives a name, a later normal join for it no longer needs --force" {
-  # Once --force deliberately reuses a renamed-away name, that identity's
-  # tombstone must be cleared — otherwise every subsequent registration
-  # (e.g. adding a second project) would keep hitting the same guard forever.
+@test "join: a rejected forced reassignment leaves the rename tombstone intact" {
   bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
   bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
-  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj --force
+  run bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj --force
+  [ "$status" -ne 0 ]
   run bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj-2
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "Joined team myteam as claude" ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "was renamed to 'claude-orchestrator'" ]]
 }
 
 @test "join: joining the new name after a rename succeeds normally" {
@@ -589,6 +735,66 @@ EOF
   [[ "$output" =~ "was renamed to 'bob'" ]]
   [[ ! "$output" =~ "syntax error" ]]
   [[ ! "$output" =~ ".parameter" ]]
+}
+
+# --- SQL string-literal escaping for interpolated names (#223, #87) ---
+# Team and agent names may contain a single quote (validate.sh only blocks path
+# traversal). Before escaping, such a name broke the INSERT/UPDATE and was an
+# injection surface (a name could widen the WHERE predicate). These pin the
+# escaping so a quoted name round-trips and a crafted name cannot touch other
+# rows.
+
+@test "rename-team: escapes quoted team names and migrates only the matching team" {
+  bash "$SCRIPTS/join.sh" "a'team"    alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" "a'team"    bob   claude-code /tmp/proj-b
+  bash "$SCRIPTS/join.sh" "keep'team" carol claude-code /tmp/proj-c
+  bash "$SCRIPTS/join.sh" "keep'team" dave  claude-code /tmp/proj-d
+  bash "$SCRIPTS/send.sh" "a'team"    alice bob  "moved"
+  bash "$SCRIPTS/send.sh" "keep'team" carol dave "stay"
+
+  run bash "$SCRIPTS/rename-team.sh" "a'team" "n'team"
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_SKILL_DIR/teams/a'team" ]
+  [ -f "$TEST_SKILL_DIR/teams/n'team/config.json" ]
+
+  # config "name" field updated to the quoted new name (json_set value escaped)
+  run sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_SKILL_DIR/teams/n'team/config.json")'), '\$.name');"
+  [ "$output" = "n'team" ]
+
+  # the message moved to the new quoted team name (messages + events UPDATE escaped)
+  run bash "$SCRIPTS/inbox.sh" "n'team" bob
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "moved" ]]
+
+  # the other quoted team is untouched — the WHERE predicate was not widened
+  run bash "$SCRIPTS/inbox.sh" "keep'team" dave
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "stay" ]]
+}
+
+@test "rename: escapes the agent name in the messages UPDATE without widening it" {
+  # rename.sh rewrites the legacy messages table directly. Seed it with the
+  # renamed agent's row plus an unrelated victim row that an unscoped/injection
+  # predicate would wrongly rewrite. The seed goes into team t's own store —
+  # the pre-split shared file is no longer what rename.sh reads.
+  bash "$SCRIPTS/join.sh" t alice claude-code /tmp/proj
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  storage_init t >/dev/null
+  local db; db="$(agmsg_db_path t)"
+  sqlite3 "$db" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('t', 'alice', 'x', 'a-msg');"
+  sqlite3 "$db" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('t', 'keepme', 'x', 'k-msg');"
+
+  run bash "$SCRIPTS/rename.sh" t alice carol
+  [ "$status" -eq 0 ]
+
+  # the renamed agent's row moved to the new name ...
+  run sqlite3 "$db" "SELECT from_agent FROM messages WHERE body='a-msg';"
+  [ "$output" = "carol" ]
+  # ... and the unrelated row was NOT rewritten (predicate stayed scoped)
+  run sqlite3 "$db" "SELECT from_agent FROM messages WHERE body='k-msg';"
+  [ "$output" = "keepme" ]
 }
 
 @test "join: rejects unknown agent type" {
@@ -700,4 +906,146 @@ EOF
   run bash "$SCRIPTS/join.sh" myteam alice grok-build /tmp/proj
   [ "$status" -eq 0 ]
   [ -f "$TEST_SKILL_DIR/teams/myteam/config.json" ]
+}
+
+@test "team: a pulled member with no local registration is listed and counted" {
+  # A machine that pulled a team holds members it has never registered locally:
+  # the roster is real, the registrations are empty, and that is the correct
+  # state rather than a broken one. The listing joined through the
+  # registrations array, so those members produced no row at all and the team
+  # read as empty.
+  mkdir -p "$TEST_SKILL_DIR/teams/pulled"
+  cat > "$TEST_SKILL_DIR/teams/pulled/config.json" <<'JSON'
+{
+  "name": "pulled",
+  "team_id": "018f3f7e-2222-7000-8000-000000000002",
+  "agents": {
+    "alice": { "member_id": "018f3f7e-2222-7000-8000-000000000010", "registrations": [] },
+    "bob":   { "member_id": "018f3f7e-2222-7000-8000-000000000011", "registrations": [] },
+    "carol": { "member_id": "018f3f7e-2222-7000-8000-000000000012",
+               "registrations": [ { "type": "claude-code", "project": "/tmp/p" } ] }
+  },
+  "created_at": "2026-07-29T00:00:00Z"
+}
+JSON
+  run bash "$SCRIPTS/team.sh" pulled
+  [ "$status" -eq 0 ]
+  # Every member appears, not just the one with a registration.
+  [[ "$output" == *"alice"* ]]
+  [[ "$output" == *"bob"* ]]
+  [[ "$output" == *"carol"* ]]
+  # And the count agrees with the roster rather than with the join.
+  [[ "$output" == *"3 member(s)"* ]]
+  # The absence is described, not left blank.
+  [[ "$output" == *"n/a:no_local_registration"* ]]
+}
+
+# --- reach (#1224 follow-up): team.sh names what this session can do to a
+# teammate, not merely their placement. See test_team_status.bats for
+# agmsg_team_reach's own unit coverage; these confirm team.sh's WIRING into
+# it end to end, for the two cases that need no fake terminal binary at all.
+
+@test "team: a pulled (remote) member reaches as cannot, reason remote_registration" {
+  mkdir -p "$TEST_SKILL_DIR/teams/pulled2"
+  cat > "$TEST_SKILL_DIR/teams/pulled2/config.json" <<'JSON'
+{
+  "name": "pulled2",
+  "team_id": "018f3f7e-2222-7000-8000-000000000022",
+  "agents": {
+    "alice": { "member_id": "018f3f7e-2222-7000-8000-000000000030", "registrations": [] }
+  },
+  "created_at": "2026-07-29T00:00:00Z"
+}
+JSON
+  run bash "$SCRIPTS/team.sh" pulled2
+  [ "$status" -eq 0 ]
+  grep -qF 'reach=cannot:remote_registration' <<<"$output"
+
+  run bash "$SCRIPTS/team.sh" pulled2 --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.status');")" = cannot ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.reason');")" = remote_registration ]
+}
+
+@test "team: a locally registered member with no placement record reaches as cannot, reason no_placement_record" {
+  bash "$SCRIPTS/join.sh" noreachteam alice claude-code /tmp/project-y >/dev/null
+  run bash "$SCRIPTS/team.sh" noreachteam
+  [ "$status" -eq 0 ]
+  grep -qF 'reach=cannot:no_placement_record' <<<"$output"
+
+  run bash "$SCRIPTS/team.sh" noreachteam --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.status');")" = cannot ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.reason');")" = no_placement_record ]
+}
+
+@test "team: a locally registered member still lists its type and project" {
+  # The fix must not change what a normal member looks like.
+  bash "$SCRIPTS/join.sh" localteam alice claude-code /tmp/project-x >/dev/null
+  run bash "$SCRIPTS/team.sh" localteam
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"alice (claude-code) — /tmp/project-x"* ]]
+  [[ "$output" == *"1 member(s)"* ]]
+  [[ "$output" != *"no local registration"* ]]
+}
+
+# The multi-line-usage regression this guards against predates the --fix removal
+# (#1110/#1152): passing USAGE through `${1:?...}` makes the shell prefix it with
+# its own "line N: 1:" and mangle it. Usage is one line now that --fix and its
+# siblings are gone, but the no-corruption property is worth keeping for the next
+# option this file grows.
+@test "team.sh with no argument prints usage, uncorrupted by the shell" {
+  run bash "$SCRIPTS/team.sh"
+  [ "$status" -eq 2 ]
+  # `refute`, not `! cmd`: a negated command cannot fail a bats test anywhere
+  # (#670), so `! grep -q` here would have asserted nothing at all.
+  refute grep -q 'line [0-9]*: 1:' <<<"$output"
+  [[ "$output" == "Usage: team.sh <team> [--json]" ]]
+}
+
+# --- #1140/#1152: team never creates a placement record --------------------------
+# Retained, not deleted, though it was buried in the #1110 repair block: review
+# caught that this one is a READ-ONLY safety property, not a --fix behaviour,
+# and had no equivalent surviving anywhere else (checked by grep across
+# team-status.sh, which only has the CREATE side of this, not the refusal).
+# team.sh is now purely read-only, which makes "it never writes a record" more
+# load-bearing than it was, not less.
+#
+# Confirmed non-vacuous both ways, on the pre-removal tree: with --fix present,
+# the SAME fixture's paired test showed record creation actually happening
+# (`team --fix creates a socket-qualified tmux record from the label`, deleted
+# alongside --fix itself); and removing the FIX==1 gate on the create-from-label
+# call reddened this exact assertion. This is not "nothing can create a record
+# because the code is gone" read back as a test -- it is the property that was
+# already true, and now must stay true with no flag standing behind it.
+_install_norecord_tmux_fixture() {
+  export NRT_LOG="$BATS_TEST_TMPDIR/tmux.log"; : > "$NRT_LOG"
+  local bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$bin"
+  cat > "$bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NRT_LOG"
+t=""; prev=""; for x in "$@"; do [ "$prev" = -t ] && t="$x"; prev="$x"; done
+_label() { case "$1" in %11) printf 'fixteam:alice';; %22) printf 'fixteam:bob';; esac; }
+case "$* " in
+  *list-panes*)                   printf '%s|%s\n%s|%s\n' '%11' 'fixteam:alice' '%22' 'fixteam:bob' ;;
+  *display-message*@agmsg_agent*) printf '%s|%s\n' "$t" "$(_label "$t")" ;;
+  *display-message*pane_title*)   printf '%s|%s\n' "$t" 'title' ;;
+  *show-options*)                 printf '%s\n' "$(_label "$t")" ;;
+esac
+exit 0
+STUB
+  chmod +x "$bin/tmux"
+  export PATH="$bin:$PATH"
+  export TMUX="/tmp/tsock,999,0"
+  export AGMSG_TERMINAL_DRIVER=tmux
+  bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
+  NRT_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
+  [ ! -e "$NRT_REC" ]                      # join writes no record: the measured state, naturally
+}
+
+@test "team (read-only) creates NO record even with a unique tmux label (#1140/#1152)" {
+  _install_norecord_tmux_fixture
+  run bash "$SCRIPTS/team.sh" fixteam
+  [ "$status" -eq 0 ]
+  [ ! -e "$NRT_REC" ]                       # a read-only status never creates a record
 }

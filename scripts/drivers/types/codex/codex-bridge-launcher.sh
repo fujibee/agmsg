@@ -4,10 +4,16 @@ set -euo pipefail
 # The launcher is detached from codex-monitor.sh and may outlive the shell that
 # invoked it. Never retain test-harness result/trace descriptors through the
 # dispatcher -> role child -> bridge process chain.
+#
+# 3 and 4 are closed here, as early as the script can, and then EVERY inherited
+# descriptor is closed once lib/close-fds.sh is reachable (just below). Naming
+# the two we expect is not enough: the harness picks the number, and a bridge
+# that kept it hung a macOS CI shard for 25 minutes with every test already
+# green. See scripts/lib/close-fds.sh.
 exec 3>&- 4>&-
 
 # Runs outside Codex's tool sandbox and owns the app-server connections. The
-# dispatcher starts one bridge per recorded Codex role in this project.
+# dispatcher starts bridges only for roles recorded as belonging to this seat.
 #
 # On codex 0.141+ the SessionStart hook cannot resolve the thread id
 # (CODEX_THREAD_ID is not exported and no rollout is written for --remote
@@ -24,6 +30,12 @@ ROLE_PAIR="${5:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
+# Before anything long-lived is spawned. Nothing above forks a process that
+# outlives this script, so closing here is as good as closing at line 1 — and
+# it is the earliest point at which lib/ is resolvable.
+# shellcheck source=../../../lib/close-fds.sh
+source "$SCRIPT_DIR/../../../lib/close-fds.sh"
+agmsg_close_inherited_fds
 # shellcheck source=../../../lib/hash.sh
 source "$SCRIPT_DIR/../../../lib/hash.sh"
 # The liveness helpers. Every lifetime and lock-owner check below goes through
@@ -34,10 +46,32 @@ source "$SCRIPT_DIR/../../../lib/hash.sh"
 # which only pulls it in when actas-lock.sh has not already been loaded.
 # shellcheck source=../../../lib/instance-id.sh
 source "$SCRIPT_DIR/../../../lib/instance-id.sh"
+# _agmsg_codex_seat_key_ok / _agmsg_codex_seat_record_stop and friends.
+# shellcheck source=./_seat-key.sh
+source "$SCRIPT_DIR/_seat-key.sh"
+
+# #1254: this launcher runs for exactly one seat (the codex-monitor.sh that
+# spawned it), never a project as a whole. SEAT_KEY reaches it the same way
+# AGMSG_CODEX_BRIDGE_APP_SERVER already did -- inherited from the monitor's
+# own exported environment -- and is validated before it touches any path,
+# the same as a freshly generated one would be (design review): an inherited
+# value is still an external input.
+SEAT_KEY="${AGMSG_CODEX_SEAT_KEY:-}"
+_agmsg_codex_seat_key_ok "$SEAT_KEY" || {
+  echo "codex-bridge-launcher: missing or malformed AGMSG_CODEX_SEAT_KEY -- refusing to run" >&2
+  exit 1
+}
+# PROJECT_HASH is kept -- but ONLY for matching a bridge's own lease file
+# below (_reap_orphan_bridges), which codex-bridge.js writes independently
+# from a sha1 of --project and has no notion of a seat. A role's live bridge
+# is still ONE per (project, pair-set) regardless of which seat's dispatcher
+# spawned it, so that match stays project-scoped on purpose. Everything else
+# below -- the request file, the dispatcher/child locks, the rate-limiter
+# identity -- is this seat's own coordination and is keyed by SEAT_KEY so
+# concurrent seats in the same project never contend with each other over it.
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
-REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
-DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$PROJECT_HASH"
-SERVER_PID_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
+REQUEST_FILE="$RUN_DIR/codex-bridge-request.$SEAT_KEY"
+DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$SEAT_KEY"
 
 # shellcheck source=../../../lib/node.sh
 source "$SCRIPT_DIR/../../../lib/node.sh"
@@ -59,14 +93,10 @@ PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PRO
 
 mkdir -p "$RUN_DIR"
 
-# The app-server is shared by every Codex TUI in a project. Bind dispatcher and
-# role-child lifetime to that shared process rather than whichever TUI happened
-# to start first. Tests/older launchers without the sidecar retain parent-PID
-# fallback behavior.
-LIFETIME_PID="$(cat "$SERVER_PID_FILE" 2>/dev/null || true)"
-if [ -z "$LIFETIME_PID" ] || ! _agmsg_pid_alive_local "$LIFETIME_PID"; then
-  LIFETIME_PID="$PARENT_PID"
-fi
+# #1254: the app-server belongs to exactly this seat now, so its lifetime is
+# simply this seat's TUI (PARENT_PID) -- there is no more "whichever TUI
+# happened to start the shared server first" to bind to instead.
+LIFETIME_PID="$PARENT_PID"
 
 # Resource currently owned by this process, so the EXIT trap releases whichever
 # lock was taken (dispatcher or role child) without a second trap installer.
@@ -133,6 +163,41 @@ resolve_identity() {  # prints "team<TAB>name" lines for the project's codex rol
     | awk -v t="$TAB" 'NF >= 2 { print $1 t $2 }' \
     | { if [ -n "$ROLE_PAIR" ]; then grep -Fx "$ROLE_PAIR" || true; else cat; fi; } \
     | sort -u
+}
+
+# Read the seat's own request record. SessionStart writes the already-narrowed
+# role pair after the TUI claims it; a missing or ambiguous pair is not a
+# reason to consult the project-wide identity list.
+read_seat_request() {
+  REQUEST_THREAD=""
+  REQUEST_APP_SERVER="$APP_SERVER"
+  REQUEST_PAIR=""
+  local request_line="" request_type="" request_team="" request_name=""
+  [ -f "$REQUEST_FILE" ] || return 1
+  IFS= read -r request_line < "$REQUEST_FILE" 2>/dev/null || return 1
+  _agmsg_codex_request_parse "$request_line" || return 1
+  request_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
+  REQUEST_THREAD="${AGMSG_CODEX_REQUEST_THREAD:-}"
+  REQUEST_APP_SERVER="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
+  request_team="${AGMSG_CODEX_REQUEST_TEAM:-}"
+  request_name="${AGMSG_CODEX_REQUEST_NAME:-}"
+  [ "$request_type" = "$TYPE" ] || return 1
+  [ -n "$REQUEST_THREAD" ] || return 1
+  [ -n "$request_team" ] && [ -n "$request_name" ] || return 1
+  REQUEST_PAIR="$request_team$TAB$request_name"
+  return 0
+}
+
+request_pair_matches_record() {
+  local pair="$1" team name record_project record_project_phys
+  IFS="$TAB" read -r team name <<EOF
+$pair
+EOF
+  agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+  [ "${AGMSG_ROLE_SESSION_UUID:-}" = "$REQUEST_THREAD" ] || return 1
+  record_project="${AGMSG_ROLE_SESSION_PROJECT:-}"
+  record_project_phys="$(agmsg_canonical_path "$record_project" 2>/dev/null || printf '%s' "$record_project")"
+  [ "$record_project_phys" = "$PROJECT_PHYS" ]
 }
 
 # identities.sh opens and parses EVERY teams/*/config.json on every call: two
@@ -213,7 +278,7 @@ poll_sleep() {
 }
 
 # Any change here can change the safe subscription set. Include the request
-# thread plus each role's recorded session/project, not merely registrations:
+# thread, owner, and each role's recorded project, not merely registrations:
 # actas/resume rewrites a role record without changing identities.sh output.
 # $1 is this tick's already-resolved identity list. It is passed in rather than
 # re-resolved so one iteration runs identities.sh once, not twice.
@@ -233,12 +298,13 @@ build_safety_state() {
   while IFS="$TAB" read -r team name; do
     [ -n "$team" ] || continue
     agmsg_role_session_load "$team" "$name" 2>/dev/null || true
-    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT"
+    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER"
   done <<< "$identity"
 }
 
-# actas may register the role a moment after launch, so retry while the parent
-# (codex-monitor.sh) is alive. Multiple identities are intentional (#150).
+# The role is claimed a moment after launch, so retry while the parent
+# (codex-monitor.sh) is alive. Never substitute the project's other identities
+# when this seat's own record is not available.
 # The parent only dispatches. Every role receives an independent child launcher
 # and therefore an independent bridge bound to its own recorded thread.
 if [ -z "$ROLE_PAIR" ]; then
@@ -248,14 +314,27 @@ if [ -z "$ROLE_PAIR" ]; then
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
+    seat_pairs=""
+    if read_seat_request && request_pair_matches_record "$REQUEST_PAIR" \
+      && pair_registered "$REQUEST_PAIR" "$current_pairs"; then
+      seat_pairs="$REQUEST_PAIR"
+    fi
     [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
+    if [ -z "$seat_pairs" ]; then
+      echo "codex-bridge-launcher: this seat has no unambiguous request pair; waiting without dispatch" >&2
+      # No owned pair is authoritative: forget any children this seat used to
+      # own so a later re-registration can be dispatched again.
+      known_pairs=""
+      poll_sleep
+      continue
+    fi
     # Forget pairs that are no longer registered. A child now exits by itself
     # once its own registration is gone, so a stale known_pairs entry would
     # suppress the respawn if that same pair were registered again later.
     retained=""
     while IFS= read -r seen_pair; do
       [ -n "$seen_pair" ] || continue
-      pair_registered "$seen_pair" "$current_pairs" || continue
+      pair_registered "$seen_pair" "$seat_pairs" || continue
       retained="${retained:+$retained$'\n'}$seen_pair"
     done <<< "$known_pairs"
     known_pairs="$retained"
@@ -268,19 +347,26 @@ if [ -z "$ROLE_PAIR" ]; then
       nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$LIFETIME_PID" "$child_pair" >/dev/null 2>&1 3>&- 4>&- &
       known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
       poll_reset
-    done <<< "$current_pairs"
+    done <<< "$seat_pairs"
     poll_sleep
   done
+  # #1254: this seat's TUI (LIFETIME_PID) is gone. Stop the seat's own
+  # app-server -- and ONLY the dispatcher does this, never a role child, so
+  # exactly one attempt is ever made per seat. _agmsg_codex_seat_record_stop
+  # re-validates pid, witness and cmdline itself immediately before signaling
+  # anything; a failed or indeterminate check leaves the server running and
+  # reports why, it never guesses (see _seat-key.sh).
+  ( set +e; _agmsg_codex_seat_record_stop "$RUN_DIR" "$SEAT_KEY" )
   exit 0
 fi
 
-# One live child per (project, role) — #485. Children are `nohup`'d and bound to
+# One live child per (seat, role) — #485. Children are `nohup`'d and bound to
 # the shared app-server, while the dispatcher runs in the TUI's process group and
 # is killed by the SIGHUP a pane teardown delivers. A replacement dispatcher
 # starts with an empty known_pairs and re-spawns the ENTIRE child set, so without
 # this lock every dispatcher generation left another full set of children behind.
 # The lock makes those re-spawns exit on arrival instead of accumulating.
-CHILD_LOCK_RESOURCE="codex-child:$PROJECT_HASH:$(printf '%s' "$ROLE_PAIR" | agmsg_sha1)"
+CHILD_LOCK_RESOURCE="codex-child:$SEAT_KEY:$(printf '%s' "$ROLE_PAIR" | agmsg_sha1)"
 acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
 
 # Bounded, not open-ended. The dispatcher only spawns a child for a pair it has
@@ -310,7 +396,12 @@ safety_state="$SAFETY_STATE"
 thread_hint="loaded"
 if [ -f "$REQUEST_FILE" ]; then
   _hint_type=""; _hint_thread=""; _hint_app=""
-  IFS="$TAB" read -r _hint_type _hint_thread _hint_app < "$REQUEST_FILE" 2>/dev/null || true
+  _hint_line=""
+  IFS= read -r _hint_line < "$REQUEST_FILE" 2>/dev/null || true
+  _agmsg_codex_request_parse "$_hint_line" || true
+  _hint_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
+  _hint_thread="${AGMSG_CODEX_REQUEST_THREAD:-}"
+  _hint_app="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
   [ -n "${_hint_thread:-}" ] && thread_hint="$_hint_thread"
 fi
 safe_ids=""
@@ -356,9 +447,258 @@ else
   bridge_key="$(printf '%s' "$ids" | agmsg_sha1)"
 fi
 bridge_pairs=()
+bridge_pair_values=()
 while IFS="$TAB" read -r candidate_team candidate_name; do
   bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")
+  bridge_pair_values+=("$candidate_team"$'\t'"$candidate_name")
 done <<< "$ids"
+# This launcher's identity, hashed the same way the bridge hashes its lease
+# (scripts/drivers/types/codex/codex-bridge.js writeLease): SHA-1 of the ASCII-
+# sorted per-pair SHA-1 hashes, joined by newlines. Hashing each pair FIRST means
+# the set order is decided by sorting hex (pure ASCII), so a byte sort here and a
+# code-unit sort in JS agree even for non-ASCII team/name -- the locale/Unicode
+# sort-order gap a raw-value sort would leave. PROJECT_HASH (above) is the project
+# half. Comparing hashes -- never raw values -- is what keeps a separator inside a
+# path or role from being misread as identity (#943).
+_pair_hashes=""
+for _pv in "${bridge_pair_values[@]}"; do
+  _pair_hashes="$_pair_hashes$(printf '%s' "$_pv" | agmsg_sha1)
+"
+done
+BRIDGE_PAIRS_HASH="$(printf '%s' "$(printf '%s' "$_pair_hashes" | LC_ALL=C sort | sed '/^$/d')" | agmsg_sha1)"
+
+
+# This launcher's full identity as one key: sha1 of the project hash and the
+# pair-set hash together. Everywhere identity is used -- the reap match AND the
+# spawn-rate reservation below -- keys on BOTH halves, so nothing is scoped by
+# role alone (project-blind keying is the bug class that produced #721 and the
+# earlier .meta collision).
+IDENTITY_HASH="$(printf '%s\n%s' "$SEAT_KEY" "$BRIDGE_PAIRS_HASH" | agmsg_sha1)"
+
+# How long to wait for a reaped bridge to exit before treating it as stuck. The
+# real bridge shuts down async on SIGTERM and holds its thread as writer until it
+# does, so this outlasts an ordinary shutdown.
+_REAP_WAIT_TICKS=50
+
+# A process's start token, at the best precision the platform offers and by the
+# SAME method codex-bridge.js writeLease() records for itself, so the two agree:
+#   Linux -> /proc/<pid>/stat field 22 (starttime in clock ticks): lossless, so a
+#            recycled pid is always distinguishable from the one we leased.
+#   else  -> `ps -o lstart=` (second precision). Echoes "<src><TAB><token>";
+#            returns non-zero (indeterminable) so the caller fails closed.
+#   win32 -> Process.StartTime.Ticks via PowerShell -- the same single source
+#            codex-bridge.js startToken() writes, so both sides always agree.
+#            WMIC is deprecated and already absent from some Windows 11 installs;
+#            a per-side "WMIC, else PowerShell" order would let the two record
+#            differently-FORMATTED tokens for the same process. powershell.exe
+#            and pwsh return identical Ticks, so falling back between those two
+#            binaries introduces no such divergence.
+#
+# The Windows branch is taken INSTEAD of the /proc branch, not merely before it:
+# MSYS/Cygwin do expose a working /proc, but it is keyed by the emulation layer's
+# own pid space while a lease records the Windows pid codex-bridge.js sees as
+# process.pid. Letting /proc win would return the start time of whatever
+# unrelated MSYS process sits at that number -- the recycled-pid confusion this
+# token exists to prevent, with nothing to signal it.
+_agmsg_is_windows() {
+  case "${_AGMSG_UNAME_S:=$(uname -s 2>/dev/null || echo unknown)}" in
+    MINGW*|MSYS*|CYGWIN*|CLANGARM*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_start_token() {
+  local pid="$1" s r tok bin
+  local -a a
+  if _agmsg_is_windows; then
+    for bin in powershell.exe pwsh; do
+      # `tr -d '\r'` because PowerShell writes CRLF and Node's .trim() on the
+      # writer side strips it there, so both end up with the bare digits.
+      tok="$("$bin" -NoProfile -NonInteractive -Command \
+        "(Get-Process -Id $pid).StartTime.Ticks" 2>/dev/null | tr -d '\r' | head -n 1)"
+      tok="${tok#"${tok%%[![:space:]]*}"}"
+      tok="${tok%"${tok##*[![:space:]]}"}"
+      case "$tok" in ''|*[!0-9]*) continue ;; esac
+      printf 'pwsh\t%s' "$tok"
+      return 0
+    done
+    return 1
+  fi
+  if [ -r "/proc/$pid/stat" ]; then
+    s="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+    r="${s##*)}"
+    read -ra a <<< "$r"
+    tok="${a[19]:-}"
+    case "$tok" in ''|*[!0-9]*) return 1 ;; esac
+    printf 'proc\t%s' "$tok"
+    return 0
+  fi
+  tok="$(ps -o lstart= -p "$pid" 2>/dev/null)"
+  # Trim leading/trailing whitespace only (ps pads); Node's .trim() on the writer
+  # side does the same, and both leave the internal single/double spaces intact,
+  # so the two strings compare equal.
+  tok="${tok#"${tok%%[![:space:]]*}"}"
+  tok="${tok%"${tok##*[![:space:]]}"}"
+  [ -n "$tok" ] || return 1
+  printf 'ps\t%s' "$tok"
+  return 0
+}
+
+# Parse a lease under an EXACT v=1 schema and fail closed on anything else. Sets
+# lproj/lpairs/lhost/lpid/lstart/lstartsrc and returns 0 only when the file is
+# precisely the seven expected keys, each once, no unknown or duplicate or extra
+# line, hashes 40-hex, pid numeric, startsrc proc|ps|pwsh. A malformed, truncated, or
+# tampered lease returns non-zero, so the reaper never kills on a doubtful one.
+_read_lease() {
+  local file="$1" line k v nlines=0 lv=""
+  local sv=0 sproj=0 spairs=0 shost=0 spid=0 sstart=0 ssrc=0
+  lproj=""; lpairs=""; lhost=""; lpid=""; lstart=""; lstartsrc=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    nlines=$((nlines + 1))
+    case "$line" in *=*) ;; *) return 1 ;; esac
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      v)        sv=$((sv + 1)); lv="$v" ;;
+      project)  sproj=$((sproj + 1)); lproj="$v" ;;
+      pairs)    spairs=$((spairs + 1)); lpairs="$v" ;;
+      host)     shost=$((shost + 1)); lhost="$v" ;;
+      pid)      spid=$((spid + 1)); lpid="$v" ;;
+      start)    sstart=$((sstart + 1)); lstart="$v" ;;
+      startsrc) ssrc=$((ssrc + 1)); lstartsrc="$v" ;;
+      *) return 1 ;;
+    esac
+  done < "$file"
+  [ "$nlines" -eq 7 ] || return 1
+  [ "$sv$sproj$spairs$shost$spid$sstart$ssrc" = "1111111" ] || return 1
+  [ "$lv" = "1" ] || return 1
+  case "$lproj" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#lproj}" -eq 40 ] || return 1
+  case "$lpairs" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#lpairs}" -eq 40 ] || return 1
+  case "$lpid" in *[!0-9]*|"") return 1 ;; esac
+  case "$lstartsrc" in proc|ps|pwsh) ;; *) return 1 ;; esac
+  [ -n "$lhost" ] || return 1
+  [ -n "$lstart" ] || return 1
+  # proc's starttime ticks and .NET's StartTime.Ticks are both bare integers, so
+  # a lease carrying anything else under either label fails closed here. ps stays
+  # exempt: its lstart is a human date string whose punctuation varies by
+  # platform, and writer and reader only ever compare it byte for byte.
+  case "$lstartsrc" in
+    proc|pwsh) case "$lstart" in *[!0-9]*|"") return 1 ;; esac ;;
+  esac
+  return 0
+}
+
+# Reap every live bridge that is EXACTLY this (project, pair-set), identified by
+# the per-PID lease it published (codex-bridge-lease.<pid>) -- not by
+# reconstructing argv from ps, which is a lossy representation that misread
+# identity five different ways. ps is used ONLY to enumerate live pids and to
+# read each one's start token. Every doubt fails CLOSED (no kill): a missing lease
+# (a legacy bridge), a malformed or partial one, a different or absent host, a
+# hash that is not ours, a start token that no longer matches. Non-Windows only
+# (the pid is only killable in this shell's pid namespace; Windows is the #458
+# mismatch) and a no-op with no process lister.
+_reap_orphan_bridges() {
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) return 0 ;; esac
+  command -v pgrep >/dev/null 2>&1 || return 0
+  local myhost pid lease cur killed="" waited
+  local lproj lpairs lhost lpid lstart lstartsrc
+  myhost="$(hostname 2>/dev/null)"
+  [ -n "$myhost" ] || return 0
+  for pid in $(pgrep -f 'codex-bridge\.js' 2>/dev/null); do
+    lease="$RUN_DIR/codex-bridge-lease.$pid"
+    [ -f "$lease" ] || continue
+    _read_lease "$lease" || continue
+    [ "$lpid" = "$pid" ] || continue
+    [ "$lhost" = "$myhost" ] || continue
+    [ "$lproj" = "$PROJECT_HASH" ] || continue
+    [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] || continue
+    # Reuse guard: the LIVE pid's actual start token (same source) must still equal
+    # the lease's. A recycled pid has a different token (lossless on Linux), so it
+    # is spared.
+    cur="$(_start_token "$pid")" || continue
+    [ "$cur" = "$lstartsrc	$lstart" ] || continue
+    kill "$pid" 2>/dev/null || true
+    killed="$killed$pid	$lstartsrc	$lstart
+"
+  done
+  [ -n "$killed" ] || return 0
+  # THE RULE for every check here (add a new one? read this first): a failed
+  # observation is proof of NOTHING. Killing and spawning each need their OWN
+  # positive proof, and on any observation failure we do NOTHING -- the timeout
+  # bounds the wait, a failed read is never re-read as state:
+  #   kill  only with proof of IDENTITY  -- the start token READ and MATCHED (above)
+  #   spawn only with proof of EXIT      -- the killed pid's token READ and now names
+  #                                         a DIFFERENT process (a replacement, below)
+  # Wait for each killed pid to exit. The ONLY positive proof of exit we can trust
+  # here is a start token that reads and DIFFERS: the pid now hosts another process,
+  # so the one we killed is gone. Everything else keeps waiting -- a token that reads
+  # UNCHANGED (still alive), and, deliberately, a token we could NOT read (which
+  # proves nothing: /proc or ps can fail transiently). We do NOT consult
+  # _agmsg_pid_alive_local: its false is not a trustworthy absence proof -- a
+  # transient ps failure there returns "gone" (missing pipefail, #954), the exact
+  # observation-as-state trap this loop exists to avoid. So a normal exit falls
+  # through to the timeout and returns 1: we do NOT spawn this pass, so a bridge
+  # still holding the thread as writer is never double-started (#935). The cost is
+  # not a stall but one cycle -- the next pass no longer sees the exited pid in
+  # pgrep and spawns then.
+  while IFS="$TAB" read -r pid lstartsrc lstart; do
+    [ -n "$pid" ] || continue
+    waited=0
+    while :; do
+      cur="$(_start_token "$pid")"
+      if [ -n "$cur" ] && [ "$cur" != "$lstartsrc	$lstart" ]; then break; fi
+      if [ "$waited" -ge "$_REAP_WAIT_TICKS" ]; then return 1; fi
+      sleep 0.1; waited=$((waited + 1))
+    done
+  done <<EOF
+$killed
+EOF
+  return 0
+}
+
+# A ceiling on bridge spawns for this identity: at most _SPAWN_MAX in _SPAWN_WINDOW
+# seconds. The reap converges duplicates to one, but a bridge that cannot stay up
+# (a launcher dying before it records the pidfile) would reap-and-respawn every
+# tick; this bounds that churn.
+#
+# Reservations are self-expiring marker FILES, not a shared lock. A lock has to be
+# reclaimed when its holder dies, and every read->decide->reclaim scheme races
+# (an owner check cannot be made atomic with the unlink -- ABA). So instead each
+# spawn creates its own uniquely named marker carrying its timestamp IN THE NAME;
+# the count is just how many unexpired markers exist. Nothing is ever reclaimed:
+# a crashed launcher's marker simply ages out of the window and any later pass
+# prunes it. Reserve-then-count means a concurrent pair both count each other and
+# both back off, so the cap is never exceeded (it may briefly under-count, which
+# for a coarse throttle is the safe direction).
+_SPAWN_WINDOW=30
+_SPAWN_MAX=5
+_spawn_rate_ok() {
+  local prefix="codex-bridge-rate.$IDENTITY_HASH."
+  local now cutoff mine f base ts n=0
+  now="$(date +%s)"
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  cutoff=$((now - _SPAWN_WINDOW))
+  # Reserve: create MY marker with an exclusive (noclobber) create so two
+  # launchers never share one name. The timestamp lives in the name, so the file
+  # is empty and there is no create-then-write window for a counter to misread.
+  mine="$RUN_DIR/${prefix}${now}.$$.${RANDOM}${RANDOM}"
+  ( set -o noclobber; : > "$mine" ) 2>/dev/null || return 1
+  # Count unexpired markers (mine included), pruning ones that have aged out. The
+  # timestamp is read from the NAME, never the contents.
+  for f in "$RUN_DIR/$prefix"*; do
+    [ -e "$f" ] || continue
+    base="${f##*/}"
+    ts="${base#"$prefix"}"; ts="${ts%%.*}"
+    case "$ts" in ''|*[!0-9]*) continue ;; esac
+    if [ "$ts" -lt "$cutoff" ]; then rm -f "$f" 2>/dev/null || true; continue; fi
+    n=$((n + 1))
+  done
+  # Over the cap: roll back my reservation and throttle.
+  if [ "$n" -gt "$_SPAWN_MAX" ]; then
+    rm -f "$mine" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
 pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
 log="$RUN_DIR/codex-bridge.$bridge_key.log"
 # Records the app-server URL the live bridge was launched against, so a later
@@ -380,6 +720,26 @@ else
   bridge_run=("$NODE_BIN" "$SCRIPT_DIR/codex-bridge.js")
 fi
 
+# Retire this role's bridge only when its lease proves the pid is the bridge
+# previously launched for this exact project and pair. A numeric pid alone is
+# not enough: after a quick exit it may already name an unrelated process.
+retire_recorded_bridge() {
+  local old_pid="" lease="" token=""
+  local lproj lpairs lhost lpid lstart lstartsrc
+  [ -f "$pidfile" ] || return 0
+  IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
+  _agmsg_pid_valid "$old_pid" || return 0
+  lease="$RUN_DIR/codex-bridge-lease.$old_pid"
+  [ -f "$lease" ] || return 0
+  _read_lease "$lease" || return 0
+  [ "$lpid" = "$old_pid" ] || return 0
+  [ "$lproj" = "$PROJECT_HASH" ] || return 0
+  [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] || return 0
+  token="$(_start_token "$old_pid" 2>/dev/null || true)"
+  [ -n "$token" ] && [ "$token" = "$lstartsrc	$lstart" ] || return 0
+  kill "$old_pid" 2>/dev/null || true
+}
+
 deregistered_ticks=0
 while _agmsg_pid_alive_local "$PARENT_PID"; do
   # Resolved once per iteration and threaded through the fingerprint, so a tick
@@ -398,14 +758,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   if [ -z "$current_ids" ]; then
     deregistered_ticks=$((deregistered_ticks + 1))
     if [ "$deregistered_ticks" -ge 2 ]; then
-      if [ -f "$pidfile" ]; then
-        old_pid=""
-        IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-        # _agmsg_pid_valid, not just non-empty: `kill 0` signals this
-        # launcher's own process group, so a corrupt pidfile would tear down
-        # the dispatcher and its siblings instead of one stale bridge.
-        _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
-      fi
+      retire_recorded_bridge
       exit 0
     fi
     sleep 0.3
@@ -413,42 +766,62 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   fi
   deregistered_ticks=0
 
+  # Check the seat request before refreshing role-record safety state. Actas
+  # publishes role changes here; retire this child immediately when its pair is
+  # no longer the selected one.
+  request_pair=""
+  _rtype=""; _rthread=""; _rapp=""; _rteam=""; _rname=""
+  if [ -f "$REQUEST_FILE" ]; then
+    _request_line=""
+    IFS= read -r _request_line < "$REQUEST_FILE" 2>/dev/null || true
+    _agmsg_codex_request_parse "$_request_line" || true
+    _rtype="${AGMSG_CODEX_REQUEST_TYPE:-}"; _rthread="${AGMSG_CODEX_REQUEST_THREAD:-}"
+    _rapp="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"; _rteam="${AGMSG_CODEX_REQUEST_TEAM:-}"
+    _rname="${AGMSG_CODEX_REQUEST_NAME:-}"
+    if [ -n "${_rteam:-}" ] && [ -n "${_rname:-}" ]; then
+      request_pair="$_rteam$TAB$_rname"
+    fi
+  fi
+  if [ "$request_pair" != "$ROLE_PAIR" ]; then
+    retire_recorded_bridge
+    exit 0
+  fi
+
   # actas can join a second role after SessionStart. Re-exec through the same
   # safety filter when the registration set changes, replacing the old bridge
   # so the new role is actually subscribed instead of being stranded.
   build_safety_state "$current_ids"
   if [ "$SAFETY_STATE" != "$safety_state" ]; then
-    if [ -f "$pidfile" ]; then
-      old_pid=""
-      IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-      _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
-    fi
+    retire_recorded_bridge
     exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
   fi
-  # Resolve the app-server URL (and thread) this iteration would launch against
-  # FIRST, so the reuse check can compare a live bridge's bound server with the
-  # current one. Thread source: a request file (older-codex hook) wins; otherwise
-  # discover the live TUI thread via thread/loaded/list.
+  # Resolve the thread this iteration would launch against. A request file may
+  # outlive the app-server that wrote it: SessionStart deliberately exits before
+  # rewriting the request when no recorded role belongs to the new thread, and
+  # actas records the role later without rewriting this project-wide file. The
+  # launcher's APP_SERVER argument, however, comes from the live app-server that
+  # owns this launcher generation, so it is the sole endpoint authority. Keep the
+  # request's thread hint for older Codex versions, but never let its stale URL
+  # override the live launcher's endpoint.
   thread_id="loaded"
   req_app_server="$APP_SERVER"
   if [ -f "$REQUEST_FILE" ]; then
-    _rtype=""; _rthread=""; _rapp=""
-    IFS="$TAB" read -r _rtype _rthread _rapp < "$REQUEST_FILE" 2>/dev/null || true
     [ -n "${_rthread:-}" ] && thread_id="$_rthread"
-    [ -n "${_rapp:-}" ] && req_app_server="$_rapp"
   fi
 
-  # A child launcher is role-scoped. The project request file only supplies a
-  # current app-server endpoint; its thread belongs to whichever role most
-  # recently fired SessionStart and must never override this role's seat.
+  # A child launcher is role-scoped. The seat request supplies the pair and
+  # thread selected by SessionStart; the role-session record is re-read and
+  # must agree before this child can bind a bridge.
   IFS="$TAB" read -r team name <<EOF
 $ids
 EOF
   agmsg_role_session_load "$team" "$name" 2>/dev/null || true
   rec_thread="$AGMSG_ROLE_SESSION_UUID"
   rec_project="$AGMSG_ROLE_SESSION_PROJECT"
+  rec_owner="$AGMSG_ROLE_SESSION_OWNER"
   rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
-  if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ]; then
+  if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ] \
+    || [ "$rec_thread" != "${_rthread:-}" ]; then
     # A role with no record (or one seated in another project) stays
     # deliberately unsubscribed (#150) and waits for a record to appear. That
     # wait is open-ended, so it has to be the cheapest path in the file.
@@ -459,6 +832,10 @@ EOF
 
   # The role-session record is the sole thread authority (#150 phase 2/#350).
 
+  # Reset each tick: a mismatched-live bridge (bound to a stale thread/app-server)
+  # sets these to its pid and the start token it had at that moment. We never kill
+  # it from here; the token is how the guard before the spawn proves it is gone.
+  need_kill=""; need_kill_token=""
   if [ -f "$pidfile" ]; then
     bridge_pid=""
     IFS= read -r bridge_pid < "$pidfile" 2>/dev/null || true
@@ -481,12 +858,58 @@ EOF
         poll_sleep
         continue
       fi
-      kill "$bridge_pid" 2>/dev/null || true
-      rm -f "$pidfile" "$appserver_file" "$thread_file"
-    else
-      rm -f "$pidfile" "$appserver_file" "$thread_file"
+      # A mismatched live bridge must be retired and rebound -- but NOT here.
+      # Tearing down (kill + wiping the recorded pidfile/app-server/thread) before
+      # the gates below would let a throttled or proof-less tick leave the binding
+      # wiped and un-rewritten, so a later launcher has nothing to rebind from
+      # (#350). Defer every teardown to the point we are actually committed to
+      # replacement -- and we do not kill it directly at all (below).
+      need_kill="$bridge_pid"
+      need_kill_token="$(_start_token "$bridge_pid" 2>/dev/null || true)"
     fi
   fi
+
+  # Bound the spawn rate first (a rate-limited tick changes nothing), then reap
+  # any orphan for this exact (project, role) so exactly one bridge remains. If a
+  # reaped bridge will not exit, do not spawn beside it this tick.
+  # In a set +e subshell: these two do a lot of probing whose non-zero results
+  # (no such process, an empty match, a lock already held) are normal, and the
+  # launcher runs under set -euo pipefail where a bare non-zero would exit it.
+  # Either returning non-zero means "not this tick" -- and because no teardown has
+  # run yet, the existing binding is left intact for the next tick / a rebind.
+  if ! ( set +e; _spawn_rate_ok ); then
+    poll_sleep
+    continue
+  fi
+  if ! ( set +e; _reap_orphan_bridges ); then
+    poll_sleep
+    continue
+  fi
+
+  # A mismatched-live bridge must be proven GONE before we spawn its replacement,
+  # or we double-start a writer that still holds the thread through async shutdown
+  # (#935). We do NOT kill it from here (the pidfile is a bare pid with no identity,
+  # so any direct kill could hit a reused pid; the lease-based reaper above is the
+  # only reuse-safe path that may signal it). And we do NOT ask _agmsg_pid_alive to
+  # "confirm" it is gone: a false from that helper can be a transient ps failure
+  # (#954), and a failed observation is not proof (see THE RULE above). The one
+  # positive proof we accept is the start token we stashed at detection now reading
+  # a DIFFERENT process -- the old pid has been reused, so the old writer is gone.
+  # A token that still matches (alive), or cannot be read (unproven), keeps the
+  # binding and retries; a normal exit is picked up next tick by the dead-pid path
+  # at the top of the loop. A lease-less bridge that never dies simply lingers
+  # (orphan survival is acceptable; a wrong-kill or a double-start is not).
+  if [ -n "$need_kill" ]; then
+    _nk_now="$(_start_token "$need_kill" 2>/dev/null || true)"
+    if [ -z "$need_kill_token" ] || [ -z "$_nk_now" ] || [ "$_nk_now" = "$need_kill_token" ]; then
+      poll_sleep
+      continue
+    fi
+  fi
+  # Committed to spawning now: clear the stale records immediately before writing
+  # the new ones, so no gate can bail out between the wipe and the rewrite.
+  rm -f "$pidfile" "$appserver_file" "$thread_file"
+  bridge_owner_args=(--owner "$rec_owner")
 
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
@@ -497,11 +920,37 @@ EOF
     "${bridge_pairs[@]}" \
     --thread "$thread_id" \
     --app-server "$req_app_server" \
+    "${bridge_owner_args[@]}" \
     --inline-inbox \
     >>"$log" 2>&1 3>&- 4>&- &
   launched_pid=$!
   printf '%s\n' "$launched_pid" > "$pidfile"
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
+    # A custom bridge is foregrounded by the test harness, so a plain wait
+    # would hide a role change until the bridge exits on its own. Poll the
+    # request while it runs and retire this exact leased bridge when the seat
+    # selects another pair; the normal outer loop handles the same transition
+    # for the default bridge, which is not waited on here.
+    while _agmsg_pid_alive_local "$launched_pid"; do
+      _bridge_request_pair=""
+      if [ -f "$REQUEST_FILE" ]; then
+        _bridge_request_line=""
+        IFS= read -r _bridge_request_line < "$REQUEST_FILE" 2>/dev/null || true
+        _agmsg_codex_request_parse "$_bridge_request_line" || true
+        _bridge_req_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
+        _bridge_req_thread="${AGMSG_CODEX_REQUEST_THREAD:-}"
+        _bridge_req_app="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
+        _bridge_req_team="${AGMSG_CODEX_REQUEST_TEAM:-}"
+        _bridge_req_name="${AGMSG_CODEX_REQUEST_NAME:-}"
+        if [ -n "${_bridge_req_team:-}" ] && [ -n "${_bridge_req_name:-}" ]; then
+          _bridge_request_pair="$_bridge_req_team$TAB$_bridge_req_name"
+        fi
+      fi
+      if [ "$_bridge_request_pair" != "$ROLE_PAIR" ]; then
+        retire_recorded_bridge
+      fi
+      sleep 0.2
+    done
     wait "$launched_pid" 2>/dev/null || true
     recorded_pid=""
     IFS= read -r recorded_pid < "$pidfile" 2>/dev/null || true

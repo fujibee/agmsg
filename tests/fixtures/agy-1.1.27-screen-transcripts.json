@@ -1,0 +1,40 @@
+{
+  "idle": {
+    "rows": 24,
+    "cols": 120,
+    "idle": true,
+    "transcript": "\u001b[?1049h\u001b[H\u001b[2J────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\n>\r\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\n? for shortcuts                                                                                  Gemini 3.8 Flash · high\r\u001b[2A\u001b[2C"
+  },
+  "trust": {
+    "rows": 24,
+    "cols": 120,
+    "idle": false,
+    "transcript": "\u001b[?1049h\u001b[H\u001b[2JAccessing workspace:\r\n\r\n<PROJECT>\r\n\r\nDo you trust the contents of this project?\r\n\r\nAntigravity CLI requires permission to read, edit, and execute files here.\r\n\r\n> Yes, I trust this folder\r\n  No, exit\r\n\r\n  ↑/↓ Navigate · enter Confirm                                      Gemini 3.8 Flash · high"
+  },
+  "permission": {
+    "rows": 28,
+    "cols": 120,
+    "idle": false,
+    "transcript": "\u001b[?1049h\u001b[H\u001b[2JCommand\r\n\r\nRequesting permission for:\r\n   bash <AGMSG_INSTALL>/scripts/identities.sh <PROJECT> antigravity\r\n\r\nDo you want to proceed?\r\n> 1. Yes\r\n  2. Yes, and always allow in this conversation\r\n  3. Yes, and persist this permission\r\n  4. No\r\n\r\n  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command\r\nesc to cancel                                                                        Gemini 3.8 Flash · high"
+  },
+  "generating": {
+    "rows": 24,
+    "cols": 120,
+    "idle": false,
+    "transcript": "\u001b[?1049h\u001b[H\u001b[2J▸ Thought for 2s\r\n  Processing Incoming Message Request\r\n⣷  Generating...\r\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\n>\r\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\nesc to cancel                                                                                    Gemini 3.8 Flash · high"
+  },
+  "narrow_idle": {
+    "rows": 24,
+    "cols": 40,
+    "idle": true,
+    "alternate_screen": false,
+    "transcript": "\u001b[?2026$p\u001b[?2027$p\u001b[>4m\u001b[=0;1u\u001b[?1049h\u001b[?25l\u001b[?5W\u001b[?2004h\u001b[>4;2m\u001b[=1;1u\u001b[?u\u001b[H\u001b[2J\n\u001b[6G▄▀▀▄\n\u001b[5G▀▀▀▀▀▀\n\u001b[4G▀▀▀▀▀▀▀▀\n  ▄▀▀    ▀▀▄\n ▄▀▀      ▀▀▄\n\n Welcome to the Antigravity CLI. You are\n\n ⣾  Signing in...\n ⣷ \n ⣯ \n ⣟ \n ⡿ \n ⢿ \n ⣻ \n ⣽ \n ⣾ \n ⣷ \n ⣯ \n ⣟ \n ⡿ \n ⢿ \n ⣻ \n ⣽ \n ⣾ \n ⣷ \u001b[>4m\u001b[=0;1u\u001b[?1049l\u001b[>4;2m\u001b[=1;1u\u001b[?u\u001b[0 q\n\u001b[J\n\u001b[6C▄▀▀▄\n\u001b[5D▀▀▀▀▀▀\n\u001b[7D▀▀▀▀▀▀▀▀\n\u001b[9D▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  \u001b[1mAntigravity CLI 1.1.27\u001b[m\n  airsurf@gmail.com\n  Gemini 3.8 Flash (High)\n  ~/projects/babelbiblenet-v2\n\n────────────────────────────────────────\n>\n────────────────────────────────────────\n? for shortcuts  \u001b[2mGemini 3.8 Flash · high\n\u001b[m\u001b[2A\u001b[2C\u001b[?25h\u001b[?25l\u001b[5A\u001b[17C (Google AI Pro)\n\n\n\n\n\u001b[33D\u001b[?25h\u001b[>4m\u001b[=0;1u\n\n\u001b[J\u001b[?2004l\u001b[0 q"
+  },
+  "narrow_trust": {
+    "rows": 24,
+    "cols": 40,
+    "idle": false,
+    "alternate_screen": false,
+    "transcript": "\u001b[?2026$p\u001b[?2027$p\u001b[>4m\u001b[=0;1u\u001b[?1049h\u001b[?25l\u001b[?5W\u001b[?2004h\u001b[>4;2m\u001b[=1;1u\u001b[?u\u001b[H\u001b[2J\n\u001b[6G▄▀▀▄\n\u001b[5G▀▀▀▀▀▀\n\u001b[4G▀▀▀▀▀▀▀▀\n  ▄▀▀    ▀▀▄\n ▄▀▀      ▀▀▄\n\n Welcome to the Antigravity CLI. You are\n\n ⣾  Signing in...\n ⣷ \n ⣯ \n ⣟ \n ⡿ \n ⢿ \n ⣻ \n ⣽ \n ⣾ \n ⣷ \n ⣯ \n ⣟ \n ⡿ \n ⢿ \n ⣻ \n ⣽ \n ⣾ \n ⣷ \n ⣯ \n ⣟ \u001b[H\u001b[1mAccessing workspace:\u001b[m\n\u001b[K\n\u001b[1m/tmp/agmsg-agy-narrow-viGm35\u001b[m\n\u001b[K\nDo you trust the contents of this projec\n\u001b[K\nAntigravity CLI requires permission to r\n\u001b[K\n> Yes, I trust this folder\n  No, exit\u001b[K\n\n  \u001b[1m↑/↓\u001b[m Navigate · \u001b[1menter\u001b[m Confirm\u001b[m\u001b[13;18H\u001b[2mGemini 3.8 Flash · high\u001b[m\u001b[>4m\u001b[=0;1u\n\u001b[24d\u001b[?1049l\u001b[?25h\u001b[?2004l"
+  }
+}

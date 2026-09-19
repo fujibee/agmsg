@@ -93,8 +93,8 @@ storage_import <file>
 バンドル済みドライバーは、状態を追記専用のイベントログとして表現する。各イベントは `type` 判別子を持つ1レコードである：
 
 ```jsonl
-{"type":"message_sent","id":"0192...","team":"agsuite","from":"aggie-cc","to":"aggie-co","body":"...","at":"2026-05-30T19:00:00Z"}
-{"type":"message_read","id":"0192...","msg_id":"0192...","agent":"aggie-co","at":"2026-05-30T19:05:00Z"}
+{"type":"message_sent","id":"0192...","team":"agsuite","from":"alice","to":"bob","body":"...","at":"2026-05-30T19:00:00Z"}
+{"type":"message_read","id":"0192...","msg_id":"0192...","agent":"bob","at":"2026-05-30T19:05:00Z"}
 {"type":"team_joined","id":"0192...","team":"agsuite","agent":"alice","agent_type":"claude-code","project":"/path","at":"..."}
 {"type":"team_left","id":"0192...","team":"agsuite","agent":"alice","at":"..."}
 ```

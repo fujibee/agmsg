@@ -4,7 +4,7 @@
   --panel-2: #161b27;
   --border: #232a3a;
   /* One step brighter than --border, specifically for the pane frame
-     (koit: --border alone was too faint to read as a visible box at
+     (--border alone was too faint to read as a visible box at
      rest). Its own variable, not a --border change, so the other 27
      places --border is used elsewhere in the UI stay as-is. */
   --pane-border: #3a4660;
@@ -492,7 +492,7 @@ body.resizing-row {
   display: flex;
   flex-direction: column;
 }
-/* Collapsed to an icon-only rail (issue #317 backlog — koit) so panes get
+/* Collapsed to an icon-only rail (issue #317 backlog) so panes get
    more width; a fixed width overrides the draggable one from full size.
    Spawning/messaging a member isn't offered from here at all — just +
    (new team/agent), the current team (click to switch), and the app-user
@@ -501,7 +501,7 @@ body.resizing-row {
   width: 44px;
 }
 /* Collapse/expand toggle — its own slim strip, level with the overlaid
-   macOS traffic lights (koit: not a tall empty row below them, and not
+   macOS traffic lights (not a tall empty row below them, and not
    crowded into brand-row either — its own row, just short and right by the
    lights rather than adding real vertical space). */
 .sidebar-toggle-row {
@@ -577,7 +577,7 @@ body.resizing-row {
 .rail-spacer {
   flex: 1;
 }
-/* Clicking the avatar also expands the sidebar (koit) — same action as the
+/* Clicking the avatar also expands the sidebar — same action as the
    agmsg mark button above it, since it had no action at all before. */
 .rail-avatar-btn {
   background: none;
@@ -1172,7 +1172,7 @@ body.resizing-row {
    collectDividers, see App.tsx), unlike .divider-v/.divider-h above (which
    are flex-layout siblings for the sidebar/chat). Same grab-width (3px,
    matching .divider-v/.divider-h's own `flex: 0 0 3px`) and
-   hairline-until-hover language as those (aggie review — this one was
+   hairline-until-hover language as those (an earlier review — this one was
    originally wider and stood out as inconsistent). z-index above .pane-cell
    so the grab area isn't occluded by a neighboring pane's own box. */
 .pane-divider-v,
@@ -1196,7 +1196,7 @@ body.resizing-row {
   content: "";
   position: absolute;
   /* Invisible at rest now that the gap itself is a full terminal cell
-     (koit) — a static hairline sitting in the middle of that gap read as
+     — a static hairline sitting in the middle of that gap read as
      a redundant, always-on divider line. Shows only on hover/while
      actively dragging (below), same as before. */
   background: transparent;
@@ -1352,7 +1352,7 @@ body.resizing-row {
 }
 
 /* App-user chat: header (min/max controls) + history + composer, all one
-   flex column so the 3 states (issue #317 backlog — koit) just resize
+   flex column so the 3 states (issue #317 backlog) just resize
    which pieces are visible/how much space they get, no separate hidden
    toggles per piece anymore (see the JSX — only the wrap itself is hidden
    via View > Show User Chat). */

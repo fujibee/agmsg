@@ -138,11 +138,23 @@ agmsg_type_template_path() {
   printf '%s\n' "$dir/$rel"
 }
 
-# Comma-or-space list helper: 0 if <value> is in the space-separated <name>'s <key>.
-agmsg_type_has() {
-  local name="$1" key="$2" want="$3" tok
-  for tok in $(agmsg_type_get "$name" "$key"); do
-    [ "$tok" = "$want" ] && return 0
-  done
-  return 1
+# Space-separated names of eligible agent types that have a skill template.
+# Types such as agmsg-app remain in the registry but are not renderable because
+# they deliberately have no template= manifest key. Keep this derived from the
+# registry so adding a templated type cannot leave install/test composition
+# loops silently stale.
+_agmsg_renderable_types() {
+  local type
+  while IFS= read -r type; do
+    [ -n "$type" ] || continue
+    if [ -n "$(agmsg_type_get "$type" template)" ]; then
+      printf '%s\n' "$type"
+    fi
+  done < <(agmsg_known_types | sort -u)
 }
+
+# Discovery here is an internal source-time computation. Keep the public
+# `agmsg_known_types` warning on explicit calls, but do not leak an untrusted
+# plugin warning into callers that merely source the registry (or into their
+# captured command output).
+AGMSG_RENDERABLE_SKILL_TYPES="$(_agmsg_renderable_types 2>/dev/null | paste -sd' ' -)"

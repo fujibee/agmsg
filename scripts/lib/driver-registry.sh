@@ -27,6 +27,11 @@
 # Resolve THIS lib's dir at source time (robust to later subshell/relative cwd).
 _AGMSG_DRIVER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 
+if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  source "$_AGMSG_DRIVER_LIB_DIR/sqlpath.sh"
+fi
+
 # <skill-root> = up two from scripts/lib/.
 _agmsg_driver_root() {
   cd "$_AGMSG_DRIVER_LIB_DIR/../.." 2>/dev/null && pwd
@@ -85,4 +90,35 @@ agmsg_driver_untrust() {
   tmp="$(mktemp "${TMPDIR:-/tmp}/agmsg-trust.XXXXXX")"
   grep -vE "^$(printf '%s/%s' "$axis" "$name" | sed 's/[][\.*^$/]/\\&/g')	" "$tf" > "$tmp" 2>/dev/null || true
   mv "$tmp" "$tf"
+}
+
+# Which driver a TEAM uses on <axis>, falling back to <default>.
+#
+# Teams choose independently: one team can sit on a per-team store while its
+# neighbour is still in the shared one. That is the point — the shared partition is
+# what every external reader of the database depends on, so a team only leaves
+# it when something (today: connecting to a remote) actually requires it.
+#
+# Axis-generic on purpose. The storage axis (sqlite / jsonl) is install-wide
+# today and is expected to become per-team later; when it does it reads this
+# same field rather than growing a second mechanism beside it.
+#
+# The choice lives in the team's own config.json, which is already the local
+# record of a team. A team that has never left the default records nothing,
+# which is why <default> is a required argument rather than a constant here.
+agmsg_driver_for_team() {
+  local axis="$1" team="$2" default="$3"
+  # The axis is interpolated into a JSON path, so it is checked rather than
+  # trusted even though every caller passes a literal.
+  case "$axis" in *[!a-z-]*|'') printf '%s\n' "$default"; return 0 ;; esac
+  local root cfg name
+  root="$(_agmsg_driver_root)" || { printf '%s\n' "$default"; return 0; }
+  cfg="$root/teams/$team/config.json"
+  [ -f "$cfg" ] || { printf '%s\n' "$default"; return 0; }
+  # readfile() rather than a shell read: a config may contain any UTF-8, and
+  # this mirrors how the rest of the tree reads these files.
+  name="$(sqlite3 :memory: \
+    "SELECT COALESCE(json_extract(readfile('$(agmsg_sql_readfile_path "$cfg")'), '\$.drivers.$axis'), '')" \
+    2>/dev/null | tr -d '\r')"
+  case "$name" in ''|null) printf '%s\n' "$default" ;; *) printf '%s\n' "$name" ;; esac
 }

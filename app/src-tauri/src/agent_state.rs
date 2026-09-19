@@ -109,7 +109,7 @@ impl DetectionTracker {
 /// the whole ~20-line window), these hints are only meaningful confined to
 /// the very bottom of the screen — matching them anywhere in the wider
 /// window risks tripping on ordinary scrollback that happens to mention
-/// one of the same words (co1 review, #384/grok).
+/// one of the same words (review, #384/grok).
 fn bottom_non_empty_lines<'a>(lines: &[&'a str], n: usize) -> Vec<&'a str> {
     let mut result: Vec<&'a str> = lines
         .iter()
@@ -145,7 +145,7 @@ fn grok_working_line(line: &str) -> bool {
 
 // grok's footer-hint dialogs need AND logic and bottom-two-line scoping
 // that plain substring matching over the whole flattened tail can't
-// express (co1 review, #384/grok) — TailBuffer::detection_tail evaluates
+// express (review, #384/grok) — TailBuffer::detection_tail evaluates
 // them against the real, still-line-structured text (before flattening
 // loses that structure) and bakes the result into these sentinels, which
 // classify() then just treats as two more literal patterns like any other
@@ -551,7 +551,7 @@ fn strip_ansi(input: &str) -> (String, Option<String>) {
                             // "response… 0.0s0.0s [stop]ccancl" was really
                             // three separate lines/regions). ANY row change
                             // — forward OR backward — gets a single
-                            // separator newline (co1 review: an earlier
+                            // separator newline (review: an earlier
                             // version only handled forward jumps, so an
                             // animation that repeatedly redraws the same
                             // upper panel — jump down, jump back up, jump
@@ -857,7 +857,7 @@ Would you like to proceed?\n\
 
     #[test]
     fn cursor_position_backward_row_jumps_also_get_a_newline() {
-        // co1 review, PR #395: an earlier version only inserted a newline
+        // review, PR #395: an earlier version only inserted a newline
         // for FORWARD row jumps, leaving `row` stale on a backward one —
         // grok's real "thinking" animation jumps back up to redraw an
         // earlier panel constantly, and that stale `row` meant the
@@ -1033,7 +1033,7 @@ Would you like to proceed?\n\
 
         // Only one of the three — a real permission dialog needs all of
         // them, so a lone mention (e.g. in ordinary help text) must NOT
-        // trigger Blocked (co1 review: this was the actual false-positive
+        // trigger Blocked (review: this was the actual false-positive
         // risk with a flat OR-list of single fragments).
         let mut partial = TailBuffer::default();
         partial.push(b"press Ctrl+o:always-approve to skip confirmations\nready\n");
@@ -1044,7 +1044,7 @@ Would you like to proceed?\n\
     fn grok_permission_hints_outside_the_bottom_two_lines_do_not_block() {
         // The three hints appear, but scrolled up out of the bottom two
         // lines by later, unrelated output — must not still read as
-        // Blocked (co1 review: herdr scopes this to bottom_non_empty_lines
+        // Blocked (review: herdr scopes this to bottom_non_empty_lines
         // (2), not the whole visible window).
         let mut tail = TailBuffer::default();
         tail.push(b"1/3:select  |  Ctrl+o:always-approve  |  Ctrl+c:cancel\nsome later normal output\nready\n");

@@ -1,0 +1,1387 @@
+#!/usr/bin/env bash
+# herdr terminal driver — a pane inside a herdr session.
+#
+# Sourced by the terminals registry into the caller's context. terminal_* only,
+# no set -e/-u.
+#
+# FACT BOUNDARY — what is measured vs still asserted (keep this honest):
+#   MEASURED on the real machine (2026-08-29; and live on
+#   a real workstation, herdr 0.8.0, 2026-09-02/03 — the resolver run against the real
+#   `agent list`, with positive controls):
+#     - `herdr agent list` is JSON; agent_session in the list is an OBJECT and the
+#       session id is at .value (inherited HERDR_PANE_ID is NOT trusted).
+#     - a session-less pane has the agent_session KEY ABSENT entirely; no live-list
+#       entry carries a JSON-null agent_session. B recognizes it by STRUCTURE, not by
+#       a value or a key-name set — both drift while the pane lives (agent_status
+#       changes; name/display_agent come and go): the agent_session key is absent, the
+#       pane_id is valid, the fixed identity anchor (agent/terminal_id/tab_id/
+#       workspace_id, measured always-present, 0 variance over 11 panes, 2026-09-04)
+#       is present, and NO field is object/array-valued (so a session moved to a renamed
+#       OBJECT/ARRAY key cannot pass; a session FLATTENED to a scalar is an unidentifiable
+#       residual — the cost of allowing unknown scalar extensions, named at the det CTE).
+#       display_agent was a string in one 2026-09-04 agent list; a NAMED bare pane was not
+#       observed by 2026-09-04 (its control is defensive).
+#     - the pane-id grammar (w1:p4, w1:pB, w5:p3, w1:pC).
+#     - `pane read --source <visible|recent|...>` (the --source values were measured live).
+#     - the internal agent-name key is a collision-resistant SHA-256 derivation of
+#       (team, agent) — see _herdr_internal_key for why concatenation/folding has a
+#       structural collision.
+#     - the existing spawn/despawn calls (pane split/run, tab create, pane close).
+#   ASSERTED, NOT yet measured against a live call: `herdr agent prompt`'s argv for
+#     poke and `herdr agent rename`'s argv for the internal name key (no agent-rename
+#     call in main to measure against). These stay flagged inline and in the PR body;
+#     the fixtures pin the control flow and the argv THIS driver emits, so a real-CLI
+#     mismatch is a localized one-line fix.
+
+# control op: herdr binary present?
+terminal_check() {
+  if command -v herdr >/dev/null 2>&1; then echo ok; return 0; fi
+  printf 'AGMSG-DIRECTIVE: {"type":"install_deps","driver":"terminals/herdr","reason":"herdr not found"}\n'
+  echo missing_deps
+  return 10
+}
+
+terminal_describe() {
+  printf 'name=herdr\n'
+  printf 'backend=herdr pane\n'
+  printf 'capabilities=spawn despawn peek poke where arrange name\n'
+  printf 'syntax_help=herdr --help\n'
+  printf 'skill_help=herdr --skill\n'
+  printf 'intent.place_below=herdr pane move SOURCE --new-tab; herdr pane move SOURCE --tab CONTAINER --split down --target-pane TARGET\n'
+  printf 'intent.place_right=herdr pane move SOURCE --new-tab; herdr pane move SOURCE --tab CONTAINER --split right --target-pane TARGET\n'
+  printf 'intent.swap=herdr pane swap --source-pane SOURCE --target-pane TARGET\n'
+}
+
+# place_below/place_right are idempotent; swap is not — two swaps restore the
+# original occupants. The caller must therefore report a native swap as moved
+# unless the driver explicitly reports changed=false.
+
+# Extract the pane id whose agent_session == <sid> from `herdr agent list` JSON.
+# Uses sqlite3 JSON1 (the codebase's no-jq convention). ASSERTED field names
+# (agent_session, pane_id) — verified by the live matrix. Prints the pane id, or
+# nothing (empty) if no entry matches.
+# Resolve <sid> to a pane via `agent list`, distinguishing THREE outcomes so the
+# caller can give an honest reason (2026-08-31):
+#   return 2         — could not ANSWER (herdr absent, or `agent list` errored/empty)
+#   return 0, pane   — answered, this session's pane is <pane>
+#   return 0, empty  — answered, but this session is not among the live agents
+_herdr_pane_for_session() {
+  local sid="$1" json rc=0
+  # `|| rc=$?` (not `; rc=$?`): a bare command-substitution assignment fires the
+  # caller's set -e the instant the command fails, so the next line never runs and
+  # the "could not answer" case can't be classified. The conditional context
+  # suppresses errexit and captures the status — same fix as agmsg_terminal_load.
+  json="$(herdr agent list 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || return 2
+  [ -n "$json" ] || return 2
+  local jesc valid vrc=0
+  jesc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  # POSITIVE PROOF the list is something we could actually read: exit-0 bytes are
+  # not proof of a live-agent set. Invalid JSON, a bad schema, or an unavailable
+  # sqlite all mean "could not answer" (return 2), NOT "answered, no match".
+  valid="$(sqlite3 :memory: "SELECT json_valid('$jesc')" 2>/dev/null)" || vrc=$?
+  [ "$vrc" -eq 0 ] || return 2
+  [ "$valid" = 1 ] || return 2
+  local q pane sesc jtype jtrc alen det badhit out orc
+  sesc="$(printf '%s' "$sid" | sed "s/'/''/g")"
+  # The claim "not among" is a claim about the WHOLE set, so it is only honest when
+  # every entry's membership is DECIDABLE. The trap (over several review rounds, then
+  # the live measurement) is grabbing a proxy for "decidable":
+  #   1 query succeeded  2 container is an array  3 an entry of the expected shape
+  #   exists  4 >=1 well-formed  5 same predicate twice  6 the '|' delimiter is in
+  #   the value  7 the pane-id "shape" is just a skeleton
+  # and — measured on the real machine — a BARE PANE with no agent_session at all is
+  # a NORMAL herdr member, not schema drift; treating it as "unreadable" made
+  # `well == alen` never hold, so not-among was unreachable and every absent session
+  # returned did-not-answer. The fix is to split "could not read this entry" from
+  # "this entry legitimately has no session":
+  #   DETERMINATE entry  — its membership is decidable: EITHER an agent_session OBJECT
+  #                        whose .value is text (comparable to the target), OR a pane
+  #                        POSITIVELY recognized as session-less by STRUCTURE (see the
+  #                        det CTE): agent_session key absent, a valid pane_id, the fixed
+  #                        identity anchor present, and NO field object/array-valued.
+  #                        NOT by agent_status's value or the key-name set — both drift
+  #                        while the pane lives, which is what made the value-pinned
+  #                        version intermittently green (round-8 twice).
+  #   indeterminate      — an agent_session PRESENT but malformed (scalar, or object
+  #                        without a text .value), OR a key-absent entry that is NOT the
+  #                        proven session-less structure (a session hidden under a renamed
+  #                        key: future_session:{…}, future_sessions:[…], session_ids:[…]
+  #                        — any object/array-valued field), a bare {}, or a shape lacking
+  #                        the anchor: the target could be hiding there unread, so it must
+  #                        NOT be silently ruled out.
+  # One query over the array at $q (the authority once found) returns four
+  # '|'-separated fields — alen, determinate count, "found-but-unusable-pane" count,
+  # and the matched pane id. The matched pane is the ONLY free-text field and it is
+  # constrained to the MEASURED herdr pane-id grammar, so it is [0-9A-Za-z:] only and
+  # the '|'/one-line framing cannot mis-split (a pane with '|' or a newline is not a
+  # usable id — the match is withheld and counted as found-but-unusable). Grammar
+  # (from read-only measurement, herdr 0.8.0: w1:p4, w1:pB, w5:p3; fixtures also
+  # wC:p4): w + >=1 alnum, exactly one ':', then p + >=1 alnum, alnum+':' only.
+  #   GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*' : w<n>:p<x>, n/x non-empty (rejects w:p, w1:t1)
+  #   NOT GLOB '*:*:*'                    : at most one ':' (rejects w1:x:p4)
+  #   NOT GLOB '*[^0-9A-Za-z:]*'          : alnum + ':' only (rejects '|', newline;
+  #                                         [^…] is GLOB's negated class, not [!…])
+  # Candidate paths: $.result.agents is the measured location; others are defensive.
+  for q in '$.result.agents' '$' '$.agents' '$.result'; do
+    jtrc=0
+    jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
+    [ "$jtrc" -eq 0 ] || return 2       # sqlite unavailable / JSON unparseable -> could not answer
+    [ "$jtype" = array ] || continue    # no array at this path -> not this shape (a valid {} lands here)
+    orc=0
+    out="$(sqlite3 :memory: "
+      WITH entries(value) AS (SELECT value FROM json_each('$jesc', '$q')),
+           -- Tag every object entry ONCE (one predicate, no drift). The entries
+           -- table is ALIASED (e) so the correlated json_each below binds e.value per
+           -- row -- without the alias a bare json_each(value) does NOT correlate and
+           -- returns the same answer for every row (measured).
+           tagged(value, pane_ok, as_type, anchor_ok, struct_free) AS (
+             -- pane_ok is normalized to a definite 0/1: a boolean expression
+             -- would be NULL when pane_id is ABSENT, and then a target session with
+             -- no pane_id lands in NEITHER hit (AND pane_ok -> NULL) nor badhit
+             -- (AND NOT pane_ok -> NULL), so present-but-unaddressable would read as
+             -- not-among. CASE WHEN … THEN 1 ELSE 0 END collapses the three-valued
+             -- logic so hit draws from pane_ok=1 and badhit from pane_ok=0.
+             SELECT e.value,
+               CASE WHEN json_type(e.value,'\$.pane_id') = 'text'
+                 AND json_extract(e.value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
+                 AND NOT (json_extract(e.value,'\$.pane_id') GLOB '*:*:*')
+                 AND NOT (json_extract(e.value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*')
+               THEN 1 ELSE 0 END,
+               json_type(e.value,'\$.agent_session'),
+               -- (c) the fixed bare-pane ANCHOR: the herdr-pane identity keys every
+               --     agent-list entry carries (measured always-present, 0 variance over
+               --     11 panes, live 2026-09-04). This is the POSITIVE proof the entry
+               --     is a real herdr pane, so a minimal or unknown shape that merely has
+               --     a pane_id-looking field is NOT taken for one.
+               CASE WHEN json_type(e.value,'\$.agent') IS NOT NULL
+                 AND json_type(e.value,'\$.terminal_id') IS NOT NULL
+                 AND json_type(e.value,'\$.tab_id') IS NOT NULL
+                 AND json_type(e.value,'\$.workspace_id') IS NOT NULL
+               THEN 1 ELSE 0 END,
+               -- (d‴) NO field is object- or array-valued -- every value is a scalar.
+               CASE WHEN NOT EXISTS (
+                 SELECT 1 FROM json_each(e.value) k WHERE k.type IN ('object','array'))
+               THEN 1 ELSE 0 END
+             FROM entries e WHERE json_type(e.value) = 'object'),
+           -- DECIDABLE = positively one of the two KNOWN kinds. B (a session-less pane)
+           -- is proven by STRUCTURE, never by a value or a key-NAME set -- both of those
+           -- drift while the pane lives (agent_status changes state; name/display_agent
+           -- appear and vanish when the agent is named or ends), so pinning to either
+           -- makes the predicate intermittently green and reopens the round-8 regression.
+           -- The four conditions (2026-09-04):
+           --   (a) the agent_session KEY is ABSENT (as_type IS NULL);
+           --   (b) a valid pane_id (grammar above);
+           --   (c) the fixed identity anchor is present (anchor_ok);
+           --   (d‴) no field is object- or array-valued (struct_free).
+           -- SCOPE of (d‴), stated exactly: it catches a session moved to a
+           -- renamed OBJECT or ARRAY key -- future_session:{…}, future_sessions:[…],
+           -- session_ids:[…], inner shape irrelevant -- because the MEASURED agent_session
+           -- is an object, so a structured value where none belongs fails struct_free and
+           -- the target it hides is NOT reported not-among. It does NOT catch a session
+           -- FLATTENED to a scalar (a future_session or session_id key whose VALUE is the
+           -- bare target string, not an object/array): that passes struct_free and enters
+           -- B. RESIDUAL, named not hidden: an unknown
+           -- SCALAR field secretly carrying a session id is unidentifiable here -- the
+           -- deliberate cost of ALLOWING unknown scalar extensions, which is required
+           -- because name / display_agent are real scalar fields that come and go and a
+           -- named bare pane must still reach not-among. If a scalar-flattened session is
+           -- ever observed, add a condition then (same treatment as the hash-collision and
+           -- the process-info residuals: written down, not hidden).
+           -- A scalar extension (name, display_agent -- measured as a string once in the
+           -- 2026-09-04 agent list) passes, so a NAMED bare pane still reaches not-among.
+           -- NOTE: a named bare pane (name present, agent_session absent) was NOT
+           -- observed as of 2026-09-04 (live measurement); its control is DEFENSIVE.
+           det(value) AS (
+             SELECT value FROM tagged
+             WHERE ( as_type = 'object' AND json_type(value,'\$.agent_session.value') = 'text' )
+                OR ( as_type IS NULL AND pane_ok = 1 AND anchor_ok = 1 AND struct_free = 1 )),
+           -- the target, present as a session entry with a usable (grammar) pane:
+           hit(pid) AS (
+             SELECT json_extract(value,'\$.pane_id') FROM tagged
+             WHERE as_type = 'object'
+               AND json_extract(value,'\$.agent_session.value') = '$sesc'
+               AND pane_ok = 1
+             LIMIT 1),
+           -- the target present as a session entry but with an UNUSABLE/absent pane id:
+           badhit(x) AS (
+             SELECT 1 FROM tagged
+             WHERE as_type = 'object'
+               AND json_extract(value,'\$.agent_session.value') = '$sesc'
+               AND pane_ok = 0
+             LIMIT 1)
+      SELECT (SELECT count(*) FROM entries),
+             (SELECT count(*) FROM det),
+             (SELECT count(*) FROM badhit),
+             (SELECT pid FROM hit)" 2>/dev/null)" || orc=$?
+    [ "$orc" -eq 0 ] || return 2
+    IFS='|' read -r alen det badhit pane <<< "$out"
+    # Found, with a usable pane id (grammar-constrained -> framing-safe).
+    if [ -n "$pane" ] && [ "$pane" != "null" ]; then printf '%s\n' "$pane"; return 0; fi
+    # Target present but its pane id is unusable -> we cannot address it: could not answer.
+    [ "${badhit:-0}" -gt 0 ] && return 2
+    # No match. Not-among is honest only if EVERY entry was decidable — positively a
+    # session entry (A) or a bare pane (B). Empty array: det==alen==0 -> not-among.
+    [ "${det:-0}" -eq "${alen:-0}" ] && return 0   # answered, this session is not among the agents
+    return 2   # some entry was neither A nor B (unknown/drift) -> the target may be unread
+  done
+  return 2   # no candidate array path (unknown schema) -> could not answer
+}
+
+# record op: we are under herdr iff HERDR_ENV=1. Resolve THIS pane from the
+# environment first: herdr sets HERDR_PANE_ID in every pane's process tree, and
+# it is the pane the process is actually in -- MEASURED 2026-09-08 on the live
+# workstation (herdr 0.8.0): of every process carrying both HERDR_PANE_ID and
+# a CLI session id, 176 sat in exactly the pane `agent list` reported for that
+# session and 0 did not. An earlier note here said the inherited value was not
+# trusted; that was a caution written without a measurement, and the cost of
+# it was one `agent list` round trip per self-identification plus a hard
+# requirement for a session id, which a seat that acts (send, inbox) does not
+# have at hand -- so every codex seat stayed nameless. The session-id lookup
+# remains as the fallback for a caller with a session id and no pane in its
+# environment. Non-zero if not under herdr; empty stdout if the pane cannot
+# be resolved.
+terminal_detect() {
+  local sid="${1:-}" socket
+  # PRESENCE (exit code) is HERDR_ENV=1 ALONE: whether herdr is on PATH is a
+  # terminal_check question ("can I operate it"), NOT "which terminal am I in"
+  # (2026-08-31). Conflating them would make a herdr session with no herdr
+  # on PATH place/name as tmux or plain. SELF-ID (stdout) is the pane from agent
+  # list, which may be EMPTY — the third value "could not resolve", NOT "not
+  # herdr". The reason (no session id / list did not answer, incl. herdr absent /
+  # answered but we are not in it) goes to stderr for resolve-for-name's error;
+  # resolve-for-placement uses only the exit code and needs no id.
+  [ "${HERDR_ENV:-}" = 1 ] || return 1
+  socket="$(_herdr_env_socket)" || return 0
+  # The pane we are in, from the environment: no round trip, no session id.
+  # Only a value of the measured pane-id grammar is taken; anything else
+  # falls through to the lookup rather than naming a pane that cannot exist.
+  if [ -n "${HERDR_PANE_ID:-}" ] && _herdr_pane_id_ok "${HERDR_PANE_ID}"; then
+    printf '%s:%s\n' "$socket" "${HERDR_PANE_ID}"
+    return 0
+  fi
+  if [ -z "$sid" ]; then
+    echo "herdr: no HERDR_PANE_ID in the environment and no session id to resolve this pane by" >&2
+    return 0
+  fi
+  local pane hrc=0
+  # `|| hrc=$?` (not `; hrc=$?`): a bare command-substitution assignment fires the
+  # caller's set -e when the helper returns non-zero, so the classification below
+  # never runs. The conditional context suppresses errexit and captures the code.
+  pane="$(_herdr_pane_for_session "$sid")" || hrc=$?
+  if [ "$hrc" -ne 0 ]; then
+    echo "herdr: 'agent list' did not answer (herdr not on PATH or errored) — cannot resolve this pane" >&2
+    return 0
+  fi
+  if [ -z "$pane" ]; then
+    echo "herdr: session '$sid' is not among the live agents — cannot resolve this pane" >&2
+    return 0
+  fi
+  printf '%s:%s\n' "$socket" "$pane"
+  return 0
+}
+
+# Read the new pane id from a herdr JSON result at one of the known paths.
+# The measured herdr pane-id grammar as ONE shell authority (the resolver and
+# the spawn side must not implement the predicate twice and drift). w + >=1 alnum,
+# exactly one ':', then p + >=1 alnum, alnum+':' only. A test cross-checks that this
+# agrees with the resolver's SQL GLOB form on the boundary values. (bash negated
+# class is [!…]; SQLite GLOB's is [^…] — same grammar, different dialect.)
+_herdr_pane_id_ok() {
+  # Delegate to the registry's single per-terminal id authority so the spawn-side
+  # extraction, the resolver's cross-check, and agmsg_terminal_ref_terminal all use
+  # ONE herdr pane grammar (do not implement the predicate twice). The herdr
+  # driver is always loaded through the registry, so the helper is in scope; a bare
+  # source without it falls back to the inline grammar rather than accepting anything.
+  # The grammar lives in terminal_id_ok below (the driver ABI hook the registry
+  # asks); this is its local name. It used to delegate UP to the registry, which
+  # held a case over three drivers -- the #1141 review turned that around: the
+  # driver is the authority on its own ids, the registry asks.
+  terminal_id_ok "$1"
+}
+
+# ABI hook: is <id> a herdr pane id in THIS driver's grammar? Asked by the
+# registry (`_agmsg_terminal_id_ok herdr <id>`) for every row the label
+# resolver reads and every ref it validates; a malformed row must answer no.
+#   w<workspace>:p<pane>, alphanumerics only, exactly one colon.
+# A herdr id is `wN:pX`, optionally qualified by the socket of the instance
+# that owns it: `<socket-path>:wN:pX` (#1055; the shape tmux took in #1051).
+# Pane ids repeat across running herdr sessions, so a bare id names a pane only
+# in whatever instance the ambient HERDR_SOCKET_PATH points at; a qualified id
+# names ONE pane, and every call about it goes to that socket (_herdr_cli). A
+# A socket path may contain spaces and colons. The shared locator registry
+# version-encodes a colon-bearing path when it crosses the locator boundary;
+# direct driver calls keep the raw path and split on the trailing pane fields.
+_herdr_sock_of() {   # <id> -> socket path, or "" for a bare id
+  case "$1" in
+    *:w*:p*) printf '%s' "${1%:*:*}" ;;
+    *) printf '' ;;
+  esac
+}
+_herdr_bare_of() {   # <id> -> wN:pX
+  case "$1" in
+    *:w*:p*) printf '%s' "${1#"${1%:*:*}":}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+_herdr_bare_ok() {   # <wN:pX>
+  case "$1" in
+    w[0-9A-Za-z]*:p[0-9A-Za-z]*) : ;;
+    *) return 1 ;;
+  esac
+  case "$1" in *:*:*) return 1 ;; esac
+  case "$1" in *[!0-9A-Za-z:]*) return 1 ;; esac
+  return 0
+}
+
+# The instance that owns an env-derived or newly-created pane. A bare pane id
+# cannot be recorded safely: the same id may name a different live pane in every
+# herdr instance. Keep absence and malformed input as distinct diagnostics.
+_herdr_env_socket() {
+  local sock="${HERDR_SOCKET_PATH:-}"
+  if [ -z "$sock" ]; then
+    echo "herdr: HERDR_SOCKET_PATH is unset — cannot identify this pane's instance" >&2
+    return 1
+  fi
+  case "$sock" in *[[:cntrl:]]*)
+    echo "herdr: HERDR_SOCKET_PATH is malformed — cannot identify this pane's instance" >&2
+    return 2 ;;
+  esac
+  printf '%s\n' "$sock"
+}
+terminal_id_ok() {   # <id>
+  local sock bare
+  # Control characters are checked on the WHOLE id first: `$( )` would strip a
+  # trailing newline from a split half and let it pass.
+  case "$1" in *[[:cntrl:]]*) return 1 ;; esac
+  sock="$(_herdr_sock_of "$1")"; bare="$(_herdr_bare_of "$1")"
+  case "$1" in :*) return 1 ;; esac
+  _herdr_bare_ok "$bare"
+}
+# The id's two halves, as the locator grammar wants them: "<instance>\t<pane>".
+# A bare id has no instance and is refused here -- a locator must name one.
+terminal_id_split() {   # <id>
+  local sock
+  terminal_id_ok "$1" || return 1
+  sock="$(_herdr_sock_of "$1")"
+  [ -n "$sock" ] || return 1
+  printf '%s\t%s\n' "$sock" "$(_herdr_bare_of "$1")"
+}
+# Run one herdr CLI call ABOUT <id>: a qualified id reaches its own instance
+# through HERDR_SOCKET_PATH; a bare id keeps the ambient one. The bare pane id
+# is what the CLI is given (via the caller's arguments), never the qualified one.
+_herdr_cli() {   # <id> <herdr args...>
+  local id="$1"; shift
+  local sock; sock="$(_herdr_sock_of "$id")"
+  if [ -n "$sock" ]; then HERDR_SOCKET_PATH="$sock" herdr "$@"; else herdr "$@"; fi
+}
+
+_herdr_new_pane_id() {
+  local json="$1" q pane esc
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  for q in '$.result.pane.pane_id' '$.result.root_pane.pane_id' '$.pane.pane_id' '$.root_pane.pane_id'; do
+    # A usable pane id must match the pane-id grammar, not merely be non-empty text:
+    # a numeric/null pane_id (malformed/partial response) OR a text one carrying a
+    # newline / '|' / wrong shape must fail closed — otherwise the caller renames/runs
+    # against a non-pane, and in the <terminal>:<id> record a newline breaks framing.
+    pane="$(sqlite3 :memory: "SELECT json_extract('$esc', '$q')" 2>/dev/null)"
+    _herdr_pane_id_ok "$pane" && { printf '%s\n' "$pane"; return 0; }
+  done
+  return 1
+}
+
+# requirement 1 (herdr pre-input readiness). Before typing the boot into the pane's
+# shell, confirm the shell is AT ITS PROMPT — nothing else in the foreground — so a
+# startup program (e.g. an oh-my-zsh update prompt) cannot eat the first keystroke.
+# The signal is STRUCTURAL and environment-independent (2026-09-04): herdr's
+# pane process-info reports shell_pid and foreground_process_group_id, and the shell is
+# at its prompt IFF the foreground process group IS the shell itself. No prompt string
+# is matched (zsh/bash/Windows alike) and no point-in-time value is baked in.
+#
+# Why not the obvious herdr calls (all MEASURED 2026-09-04, recorded so nobody re-hunts):
+#   - herdr agent start takes only a --kind enum, NOT an arbitrary boot script, and our
+#     spawn runs a boot script, so it cannot replace pane run.
+#   - herdr agent wait waits for an AGENT state; a pane with no agent yet is not in
+#     agent list (30 panes vs 11 agent-list entries), so it cannot see a bare shell.
+#   - agent list has no shell-readiness field; process-info is the one that does.
+#
+# NECESSARY, NOT SUFFICIENT (kept honest): this proves "no OTHER command is
+# running". It does NOT prove the keystroke survives — if the SHELL ITSELF is reading
+# (an oh-my-zsh "[Y/n]" has no child process), process-info returns equal and this
+# reports READY. That case was UNMEASURED as of 2026-09-04. So a first keystroke can
+# still be lost; that residual is caught AFTER typing by the readiness handshake /
+# launched-unconfirmed, never here. Do not read this gate as a guarantee.
+#
+# THREE outcomes, kept distinct (the positive-validation contract):
+#   0 READY      — command ok, BOTH ids present and canonical positive integers, EQUAL.
+#   1 NOT READY  — both ids validated the SAME way, and UNEQUAL (a foreground process).
+#   2 UNKNOWN    — the command failed, a field is missing, or a value is not a canonical
+#                  positive integer. "" == "" / null == null / same-malformed are NOT
+#                  ready: equality is read ONLY after both values pass validation. A
+#                  nonexistent pane and a malformed pane id return the SAME error, so
+#                  they are not split — both are UNKNOWN.
+_herdr_pane_input_ready() {
+  local pane="$1" info rc=0 sp fg jesc
+  info="$(_herdr_cli "$pane" pane process-info --pane "$(_herdr_bare_of "$pane")" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || return 2
+  jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
+  # Require the JSON TYPE to be integer, in the SAME payload, BEFORE reading the value:
+  # a JSON string "123" extracts as 123 and would pass a digit check, but a pid that
+  # arrives as a string is not a validated pid. The CASE yields the value only when
+  # json_type is 'integer', else empty -> the digit/positive guard below rejects it.
+  sp="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.shell_pid')='integer' THEN json_extract('$jesc','\$.result.process_info.shell_pid') ELSE '' END" 2>/dev/null)" || return 2
+  fg="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.foreground_process_group_id')='integer' THEN json_extract('$jesc','\$.result.process_info.foreground_process_group_id') ELSE '' END" 2>/dev/null)" || return 2
+  # Canonical positive integer (^[1-9][0-9]*$): reject empty (non-integer type / null /
+  # missing), a leading zero, and 0 or negatives. An unvalidated equality is no evidence.
+  case "$sp" in ''|0*|*[!0-9]*) return 2 ;; esac
+  case "$fg" in ''|0*|*[!0-9]*) return 2 ;; esac
+  if [ "$sp" = "$fg" ]; then return 0; fi
+  return 1
+}
+
+# record op: create a pane/window, launch boot, print its socket-qualified id.
+# Usage: terminal_spawn <name> <project> <target> <boot...>
+# <target> fully specifies the placement (no ambient config): 'window', or
+# 'pane-h' / 'pane-v' (herdr directions right / down). Mirrors spawn.sh's herdr
+# placement (tab create / pane split, then rename + run).
+terminal_spawn() {
+  local name="$1" project="$2" target="$3"; shift 3
+  local boot="$*" json pane qualified dir label socket
+  # The label the pane is created with. The driver's spawn signature carries no
+  # team; the caller hands it in AGMSG_SPAWN_TEAM (spawn.sh sets it from the
+  # resolved team). With it the label is the one vocabulary `_herdr_label`
+  # defines -- the same string terminal_name writes -- without it the bare name.
+  label="$name"
+  [ -z "${AGMSG_SPAWN_TEAM:-}" ] || label="$(_herdr_label "$AGMSG_SPAWN_TEAM" "$name")"
+  # Validate target explicitly — a typo must fail, not silently pick a default.
+  case "$target" in
+    window|pane-h|pane-v) : ;;
+    *) printf 'unsupported: unknown target: %s (window|pane-h|pane-v)\n' "$target" >&2; return 13 ;;
+  esac
+  # Establish the instance BEFORE creating anything. Discovering afterwards
+  # that the pane cannot be qualified would leave a live, unrecordable pane.
+  socket="$(_herdr_env_socket)" || return 13
+  if [ "$target" = window ]; then
+    # A window needs a workspace. Absent one, FAIL explicitly rather than
+    # silently splitting a pane the caller did not ask for.
+    [ -n "${HERDR_WORKSPACE_ID:-}" ] || {
+      printf 'unsupported: window target needs HERDR_WORKSPACE_ID\n' >&2; return 13; }
+    json="$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --label "$label" --cwd "$project" 2>/dev/null)" || return 13
+  else
+    case "$target" in pane-h) dir=right ;; *) dir=down ;; esac
+    json="$(herdr pane split "${HERDR_PANE_ID:-}" --direction "$dir" --no-focus --cwd "$project" 2>/dev/null)" || return 13
+  fi
+  pane="$(_herdr_new_pane_id "$json")" || return 13
+  qualified="$socket:$pane"
+  # The creation-time label is already the FINAL one (the same string
+  # terminal_name writes), not a bare name overwritten later. The bare name was
+  # the state a pane stayed in whenever the later naming failed (#1096: the key
+  # cannot be set until herdr has detected the agent, so the label write behind
+  # it never ran) -- there is no reason to create a state that only exists to
+  # be replaced. `pane rename` needs no agent detection; it works on a pane that
+  # is seconds old.
+  _herdr_cli "$qualified" pane rename "$pane" "$label" >/dev/null 2>&1 || true
+  # requirement 1: wait (bounded) for the shell to reach its prompt, then act on the
+  # THREE outcomes distinctly. Only NOT-READY(1) is retried — READY(0) and UNKNOWN(2)
+  # are terminal. Every iteration uses the SAME classifier; UNKNOWN is never folded into
+  # NOT READY. Exit codes carry the outcome to the caller: 0 typed+verified, 3 NOT typed
+  # (pane never ready), 4 typed but pre-input state UNVERIFIED.
+  #
+  # The bound is FIXED, not an env surface: a knob read from the environment could arrive
+  # empty / 0 / non-numeric and silently skip the observation (loop never runs -> UNKNOWN
+  # -> boot), which is the very thing this gate exists to prevent. ~5s (50 * 0.1s)
+  # covers a slow interactive-shell startup without a knob to misconfigure.
+  # `ready_rc=0; classifier || ready_rc=$?`, NOT `classifier; ready_rc=$?`: the classifier
+  # returns non-zero for NOT-READY(1)/UNKNOWN(2), and a bare command whose status is read
+  # on the next line takes a `set -e` caller down BEFORE the branch classifies it.
+  local ready_rc=2 tries=0
+  while [ "$tries" -lt 50 ]; do
+    ready_rc=0; _herdr_pane_input_ready "$qualified" || ready_rc=$?
+    [ "$ready_rc" = 1 ] || break
+    sleep 0.1 2>/dev/null || true
+    tries=$((tries + 1))
+  done
+  if [ "$ready_rc" = 1 ]; then
+    # NOT READY after the bound: a foreground process is still running, so a typed boot
+    # would be lost. Do NOT type; close the pane we created and fail with the reason.
+    printf 'unsupported: pane %s never returned to its shell prompt (a foreground process is still running); the boot was NOT typed, to avoid a lost keystroke\n' "$pane" >&2
+    _herdr_cli "$qualified" pane close "$pane" >/dev/null 2>&1 || true
+    return 3
+  fi
+  _herdr_cli "$qualified" pane run "$pane" "$boot" >/dev/null 2>&1 || return 13
+  printf '%s\n' "$qualified"
+  # UNKNOWN: the boot WAS typed, but the pre-input state could not be verified. Signal
+  # that distinctly (4) so the caller can warn — a DIFFERENT reason from a missing
+  # post-input handshake, and it must not silently read as a clean spawn.
+  if [ "$ready_rc" = 2 ]; then return 4; fi
+  return 0
+}
+
+# control op: close the herdr pane named by the bare id.
+# Is the recorded pane still there? READ ONLY — `agent list` and nothing else.
+#
+# Same reason as the tmux driver's: `terminal_despawn` collapses "already closed"
+# and "could not close" into 13, so it cannot tell a caller whether a graceful
+# teardown worked.
+#
+#   present / 0    the id appears in the list
+#   gone    / 0    the list answered, validly, and the id is not in it
+#   unknown / 10   herdr could not be reached, or answered something unreadable
+#
+# `gone` is a claim about the WHOLE list, so it is only made after the list has
+# been PROVEN readable — exit-0 bytes are not proof. Anything short of that is
+# `unknown`, because the caller deletes the placement record on `gone` alone.
+#
+# The read-and-validate preamble is deliberately the same shape as
+# `_herdr_pane_for_session` above and is NOT yet factored out of it: that
+# function is under review for a release block. Two copies of a preamble is a
+# thing to fix, not to leave unnamed — noted here so the next reader knows it is
+# known rather than accidental.
+terminal_pane_state() {
+  local id="$1" json rc=0
+  command -v herdr >/dev/null 2>&1 || { echo unknown; return 10; }
+  json="$(_herdr_cli "$id" agent list 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || { echo unknown; return 10; }
+  [ -n "$json" ] || { echo unknown; return 10; }
+
+  local jesc valid vrc=0
+  jesc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  valid="$(sqlite3 :memory: "SELECT json_valid('$jesc')" 2>/dev/null)" || vrc=$?
+  [ "$vrc" -eq 0 ] || { echo unknown; return 10; }
+  [ "$valid" = 1 ] || { echo unknown; return 10; }
+
+  # `gone` is the ONLY answer that deletes a placement record, so it has to be
+  # earned the same way `_herdr_pane_for_session` earns "not among": the claim is
+  # about the WHOLE set, so it is honest only when EVERY entry's membership is
+  # DECIDABLE. An array whose entries were never inspected proves nothing — a
+  # target hiding in an entry this driver cannot read is exactly the case that
+  # must not come back as `gone`.
+  #
+  # DECIDABLE here, for a pane_id question (narrower than the session question,
+  # which also has to recognize a session-less pane by structure): the entry is an
+  # object, carries a pane_id in the MEASURED grammar, and carries the fixed
+  # identity anchor that positively marks it a real herdr pane. Both known kinds —
+  # a session entry and a bare pane — satisfy this, because both carry a pane_id;
+  # anything else (a non-object entry, a missing/ungrammatical pane_id, an
+  # unanchored shape) is drift, and drift is `unknown`, never `gone`.
+  #
+  # `hit` is deliberately LOOSER than `det`: an exact pane_id match is evidence the
+  # pane exists whatever else the entry looks like, and `present` keeps the record.
+  # The asymmetry is the point — the cheap answer is permissive, the destructive
+  # one is not.
+  local iesc q jtype jtrc out orc alen det hit
+  iesc="$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")"   # responses carry the BARE pane
+  for q in '$.result.agents' '$' '$.agents' '$.result'; do
+    jtrc=0
+    jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
+    [ "$jtrc" -eq 0 ] || { echo unknown; return 10; }
+    [ "$jtype" = array ] || continue
+    orc=0
+    out="$(sqlite3 :memory: "
+      WITH entries(value) AS (SELECT value FROM json_each('$jesc', '$q')),
+           -- ALIASED (e) so the correlated json_each in the anchor test binds
+           -- e.value per row; a bare json_each(value) does not correlate.
+           tagged(pane_ok, anchor_ok, pid) AS (
+             SELECT
+               CASE WHEN json_type(e.value,'\$.pane_id') = 'text'
+                 AND json_extract(e.value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
+                 AND NOT (json_extract(e.value,'\$.pane_id') GLOB '*:*:*')
+                 AND NOT (json_extract(e.value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*')
+               THEN 1 ELSE 0 END,
+               CASE WHEN json_type(e.value,'\$.agent') IS NOT NULL
+                 AND json_type(e.value,'\$.terminal_id') IS NOT NULL
+                 AND json_type(e.value,'\$.tab_id') IS NOT NULL
+                 AND json_type(e.value,'\$.workspace_id') IS NOT NULL
+               THEN 1 ELSE 0 END,
+               json_extract(e.value,'\$.pane_id')
+             FROM entries e WHERE json_type(e.value) = 'object'),
+           det(x) AS (SELECT 1 FROM tagged WHERE pane_ok = 1 AND anchor_ok = 1),
+           hit(x) AS (SELECT 1 FROM tagged WHERE pid = '$iesc' LIMIT 1)
+      SELECT (SELECT count(*) FROM entries),
+             (SELECT count(*) FROM det),
+             (SELECT count(*) FROM hit)" 2>/dev/null)" || orc=$?
+    [ "$orc" -eq 0 ] || { echo unknown; return 10; }
+    IFS='|' read -r alen det hit <<< "$out"
+    if [ "${hit:-0}" -gt 0 ]; then echo present; return 0; fi
+    # No match. Not-present is honest only if every entry was decidable.
+    # Empty array: det == alen == 0 -> gone, which is correct (no panes at all).
+    if [ "${det:-0}" -eq "${alen:-0}" ]; then echo gone; return 0; fi
+    echo unknown
+    return 10
+  done
+  # No array at any candidate path: the list was readable JSON but not a shape
+  # this driver knows, which is "could not answer", not "not in it".
+  echo unknown
+  return 10
+}
+
+terminal_despawn() {
+  local id="$1"
+  _herdr_cli "$id" pane close "$(_herdr_bare_of "$id")" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  echo ok
+  return 0
+}
+
+# Ask herdr where a pane is. Existence is deliberately outside this op: a layout
+# query that does not contain the pane is an unanswered location query, so it is
+# unknown/10 rather than a claim that the pane is gone.
+terminal_where() {
+  local id="$1" json rc=0 esc container present
+  command -v herdr >/dev/null 2>&1 || { echo unknown; return 10; }
+  _herdr_pane_id_ok "$id" || { echo unsupported; return 13; }
+  json="$(_herdr_cli "$id" pane layout --pane "$(_herdr_bare_of "$id")" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$json" ] || { echo unknown; return 10; }
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  present="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id') = '$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")'" 2>/dev/null)" \
+    || { echo unknown; return 10; }
+  container="$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.layout.tab_id')" 2>/dev/null)" \
+    || { echo unknown; return 10; }
+  if [ "$present" != 1 ] || [ -z "$container" ]; then
+    echo unknown
+    echo "herdr: the layout answered but did not contain '$id'; pane existence must be checked separately" >&2
+    return 10
+  fi
+  printf '%s\n' "$container"
+  return 0
+}
+
+# Classify the requested terminal relationship from one pane-layout response.
+# Output: unchanged, different, ambiguous_layout, or runtime_error.
+_herdr_arrange_state() {
+  local json="$1" source="$2" intent="$3" target="$4" esc sesc tesc dir result rc=0
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  sesc="$(printf '%s' "$source" | sed "s/'/''/g")"
+  tesc="$(printf '%s' "$target" | sed "s/'/''/g")"
+  case "$intent" in place_below) dir=down ;; place_right) dir=right ;; *) echo unsupported; return 13 ;; esac
+  # A candidate split must contain both panes, have the requested direction,
+  # and agree with their rectangle order. Among those, the smallest area is the
+  # LCA equivalent. Equal-area candidates really occur in degenerate layouts
+  # (measured with a zero-height child); if more than one remains, fail closed.
+  result="$(sqlite3 :memory: "
+    WITH p AS (
+      SELECT json_extract(value,'\$.pane_id') id,
+             json_extract(value,'\$.rect.x') x, json_extract(value,'\$.rect.y') y,
+             json_extract(value,'\$.rect.width') w, json_extract(value,'\$.rect.height') h
+      FROM json_each('$esc','\$.result.layout.panes')
+    ), src AS (SELECT * FROM p WHERE id='$sesc'), tgt AS (SELECT * FROM p WHERE id='$tesc'),
+    candidates AS (
+      SELECT json_extract(s.value,'\$.rect.width') * json_extract(s.value,'\$.rect.height') area
+      FROM json_each('$esc','\$.result.layout.splits') s, src, tgt
+      WHERE json_extract(s.value,'\$.direction')='$dir'
+        AND src.x >= json_extract(s.value,'\$.rect.x')
+        AND src.y >= json_extract(s.value,'\$.rect.y')
+        AND src.x + src.w <= json_extract(s.value,'\$.rect.x') + json_extract(s.value,'\$.rect.width')
+        AND src.y + src.h <= json_extract(s.value,'\$.rect.y') + json_extract(s.value,'\$.rect.height')
+        AND tgt.x >= json_extract(s.value,'\$.rect.x')
+        AND tgt.y >= json_extract(s.value,'\$.rect.y')
+        AND tgt.x + tgt.w <= json_extract(s.value,'\$.rect.x') + json_extract(s.value,'\$.rect.width')
+        AND tgt.y + tgt.h <= json_extract(s.value,'\$.rect.y') + json_extract(s.value,'\$.rect.height')
+        AND (('$dir'='down' AND src.y = tgt.y + tgt.h AND src.x = tgt.x AND src.w = tgt.w)
+          OR ('$dir'='right' AND src.x = tgt.x + tgt.w AND src.y = tgt.y AND src.h = tgt.h))
+    ), m AS (SELECT min(area) area FROM candidates)
+    SELECT CASE
+      WHEN (SELECT count(*) FROM tgt) != 1 OR (SELECT count(*) FROM src) > 1 THEN 'unknown'
+      WHEN (SELECT count(*) FROM src) = 0 THEN 'source_missing'
+      WHEN (SELECT count(*) FROM candidates c,m WHERE c.area=m.area) > 1 THEN 'ambiguous_layout'
+      WHEN (SELECT count(*) FROM candidates) > 0 THEN 'unchanged'
+      ELSE 'different' END;" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$result" ] || { echo runtime_error; return 10; }
+  printf '%s\n' "$result"
+}
+
+_herdr_move_changed() {
+  local json="$1" esc
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  [ "$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.move_result.changed')" 2>/dev/null)" = 1 ]
+}
+
+_herdr_move_created_tab() {
+  local json="$1" esc
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  sqlite3 :memory: "SELECT json_extract('$esc','\$.result.move_result.created_tab.tab_id')" 2>/dev/null
+}
+
+_herdr_layout_has_pane() {
+  local json="$1" id="$2" esc iesc count
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  iesc="$(printf '%s' "$id" | sed "s/'/''/g")"
+  count="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id')='$iesc'" 2>/dev/null)" \
+    || return 1
+  [ "$count" = 1 ]
+}
+
+_herdr_swap_changed() {
+  local json="$1" esc changed
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  changed="$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.swap_result.changed')" 2>/dev/null)" \
+    || return 2
+  case "$changed" in
+    1|true) return 0 ;;
+    0|false) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+terminal_arrange() {
+  local source="$1" intent="$2" target="$3" layout source_layout state rc=0 tab first second temporary_tab swap_result
+  # Two panes are only arrangeable inside ONE instance: a qualified source and
+  # target naming different sockets is refused here, before any call is made.
+  if [ "$(_herdr_sock_of "$source")" != "$(_herdr_sock_of "$target")" ]; then
+    echo "herdr: cannot arrange across instances ('$source' vs '$target')" >&2
+    echo runtime_error; return 10
+  fi
+  command -v herdr >/dev/null 2>&1 || { echo runtime_error; return 10; }
+  _herdr_pane_id_ok "$source" && _herdr_pane_id_ok "$target" || { echo unsupported; return 13; }
+  case "$intent" in place_below|place_right|swap) : ;; *) echo unsupported; return 13 ;; esac
+  if [ "$intent" = swap ]; then
+    [ "$source" != "$target" ] || { echo unsupported; return 13; }
+    # Swap keeps both panes occupied, but the native command still needs a
+    # positive existence observation for each id. A layout response for one
+    # pane cannot establish the other when they live in different tabs.
+    layout="$(_herdr_cli "$target" pane layout --pane "$(_herdr_bare_of "$target")" 2>/dev/null)" || { echo runtime_error; return 10; }
+    [ -n "$layout" ] && _herdr_layout_has_pane "$layout" "$(_herdr_bare_of "$target")" \
+      || { echo unknown; return 10; }
+    source_layout="$(_herdr_cli "$source" pane layout --pane "$(_herdr_bare_of "$source")" 2>/dev/null)" || { echo runtime_error; return 10; }
+    [ -n "$source_layout" ] && _herdr_layout_has_pane "$source_layout" "$(_herdr_bare_of "$source")" \
+      || { echo unknown; return 10; }
+    swap_result="$(_herdr_cli "$source" pane swap --source-pane "$(_herdr_bare_of "$source")" --target-pane "$(_herdr_bare_of "$target")" 2>/dev/null)" \
+      || { echo runtime_error; return 12; }
+    [ -n "$swap_result" ] || { echo runtime_error; return 12; }
+    rc=0
+    _herdr_swap_changed "$swap_result" || rc=$?
+    case "$rc" in
+      0) echo moved; return 0 ;;
+      1) echo unchanged; return 0 ;;
+      *) echo runtime_error; return 12 ;;
+    esac
+  fi
+  layout="$(_herdr_cli "$target" pane layout --pane "$(_herdr_bare_of "$target")" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$layout" ] || { echo runtime_error; return 10; }
+  rc=0
+  state="$(_herdr_arrange_state "$layout" "$(_herdr_bare_of "$source")" "$intent" "$(_herdr_bare_of "$target")")" || rc=$?
+  case "$state" in
+    unchanged) echo unchanged; return 0 ;;
+    ambiguous_layout) echo ambiguous_layout; return 12 ;;
+    different) : ;;
+    source_missing)
+      # `pane layout --pane TARGET` only describes TARGET's tab. A source in a
+      # different tab is therefore absent from that response, but is still a
+      # valid move candidate. Ask the source itself before treating absence as
+      # "different"; an unanswered or malformed lookup remains unknown.
+      rc=0
+      source_layout="$(_herdr_cli "$source" pane layout --pane "$(_herdr_bare_of "$source")" 2>/dev/null)" || rc=$?
+      [ "$rc" -eq 0 ] && [ -n "$source_layout" ] && _herdr_layout_has_pane "$source_layout" "$(_herdr_bare_of "$source")" \
+        || { echo unknown; return 10; }
+      ;;
+    unknown) echo unknown; return 10 ;;
+    *) echo runtime_error; [ "$rc" -ne 0 ] && return "$rc"; return 10 ;;
+  esac
+  tab="$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$layout" | sed "s/'/''/g")','\$.result.layout.tab_id')" 2>/dev/null)" \
+    || { echo runtime_error; return 10; }
+  [ -n "$tab" ] || { echo runtime_error; return 10; }
+  first="$(_herdr_cli "$source" pane move "$(_herdr_bare_of "$source")" --new-tab --no-focus 2>/dev/null)" || { echo runtime_error; echo "herdr: failed before moving '$source' to a temporary tab" >&2; return 12; }
+  _herdr_move_changed "$first" || { echo runtime_error; echo "herdr: the temporary-tab move for '$source' did not report changed=true" >&2; return 12; }
+  temporary_tab="$(_herdr_move_created_tab "$first")" || temporary_tab=""
+  [ -n "$temporary_tab" ] || temporary_tab='<new tab id unavailable>'
+  case "$intent" in
+    place_below) second="$(_herdr_cli "$source" pane move "$(_herdr_bare_of "$source")" --tab "$tab" --split down --target-pane "$(_herdr_bare_of "$target")" --no-focus 2>/dev/null)" ;;
+    place_right) second="$(_herdr_cli "$source" pane move "$(_herdr_bare_of "$source")" --tab "$tab" --split right --target-pane "$(_herdr_bare_of "$target")" --no-focus 2>/dev/null)" ;;
+  esac || {
+    echo runtime_error
+    echo "herdr: '$source' is left in temporary tab '$temporary_tab': placing it back in tab '$tab' relative to '$target' failed" >&2
+    return 12
+  }
+  _herdr_move_changed "$second" || {
+    echo runtime_error
+    echo "herdr: '$source' may be left in temporary tab '$temporary_tab': the move back to tab '$tab' did not report changed=true" >&2
+    return 12
+  }
+  echo moved
+  return 0
+}
+
+# record op: print the visible pane buffer verbatim (NOT parsed — `agent read`/
+# `pane read` output is raw terminal text). --lines N selects herdr's recent
+# source and passes the requested depth through to the backend. ASSERTED argv.
+terminal_peek() {
+  local id="$1"; shift
+  local src=visible lines=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lines) src=recent; lines="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$lines" in ''|*[!0-9]*) lines="" ;; esac
+  # peek is a READ op: only the pane CONTENT may reach stdout. herdr writes an error
+  # JSON to STDOUT on failure (e.g. {"error":{"code":"pane_not_found",...}}), which the
+  # caller would otherwise read as the pane's content — "read" and "could-not-read"
+  # returning in the same shape (the third instance of one channel carrying two
+  # meanings). ISOLATE it (capture; the error body goes to stderr, never stdout), and
+  # SPLIT the single 13 so the caller can tell the cases apart:
+  #   plain has no peek path         -> 13 (unchanged; documented, and the templates say so)
+  #   the terminal is unreachable    -> 10 (herdr not on PATH / cannot even be run)
+  #   the pane is CONFIRMED gone     -> 12 (herdr's own reply says so — the only
+  #                                         reply this driver reads as absence)
+  #   the read failed for any other
+  #   reason (a denied socket, a
+  #   timeout, an unrecognized reply) -> 11 (existence is NOT decided; a caller
+  #                                          that branches on this must not treat
+  #                                          it as "gone" — #1158)
+  command -v herdr >/dev/null 2>&1 \
+    || { echo "herdr: not on PATH — cannot reach the terminal to peek pane '$id'" >&2; return 10; }
+  # READ contract: stdout must be the pane's visible text VERBATIM. A command
+  # substitution strips EVERY trailing newline; a following printf '%s\n' then invents
+  # exactly one back, so empty content becomes a lone newline and content ending in
+  # 0 or 2+ newlines is silently rewritten. Capture to a temp file instead,
+  # decide on rc, then cat the bytes unmodified. herdr writes its error JSON to
+  # STDOUT on failure, so on the failure path that body is a diagnostic -> stderr,
+  # never the caller's content.
+  local tmp rc=0 stderr_body=""
+  tmp="$(mktemp)" || { echo "herdr: could not allocate a temp file to peek pane '$id'" >&2; return 12; }
+  # `2>&1 1>"$tmp"` (order matters): stdout still lands in $tmp byte-for-byte on
+  # success, and whatever herdr wrote to its REAL stderr is captured into
+  # $stderr_body instead of the old `2>/dev/null`, which threw it away outright.
+  # That discard was the bug (#1158): an OS-level failure — measured as
+  # `PermissionDenied (Operation not permitted)` from a sandbox that denies
+  # socket operations — never reaches herdr's JSON reply at all, so dropping
+  # stderr left nothing to report except a guess.
+  if [ -n "$lines" ]; then
+    stderr_body="$(_herdr_cli "$id" pane read "$(_herdr_bare_of "$id")" --source "$src" --lines "$lines" 2>&1 1>"$tmp")" || rc=$?
+  else
+    stderr_body="$(_herdr_cli "$id" pane read "$(_herdr_bare_of "$id")" --source "$src" 2>&1 1>"$tmp")" || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    local stdout_body=""
+    [ -s "$tmp" ] && stdout_body="$(cat "$tmp")"
+    rm -f "$tmp"
+    # Forward both diagnostics verbatim — neither is the caller's content —
+    # instead of discarding one and inventing a single cause for both.
+    [ -n "$stdout_body" ] && printf '%s\n' "$stdout_body" >&2
+    [ -n "$stderr_body" ] && printf '%s\n' "$stderr_body" >&2
+    # ABSENCE is earned, not assumed: the same rule terminal_pane_state above
+    # applies to its own list, and the one the tmux driver applies to "no server
+    # running" — only herdr's OWN claim that the pane is gone may be read as
+    # gone. Say what happened, not what it might mean.
+    #
+    # The claim is read STRUCTURALLY (#1169): herdr's error reply is JSON with
+    # `error.code`, and only the code being exactly `pane_not_found`, about the
+    # pane we asked for, is gone. An earlier revision matched the substring
+    # anywhere in the body, so a different error whose message merely mentioned
+    # the word read as gone, and a renamed code would have silently become
+    # "unknown" -- the same family as #1158, a failure returning as a different
+    # value that looks like an answer. No sqlite3, no JSON, no code, a code
+    # about another pane: all of those are 11, with the body forwarded above.
+    local _code="" _pane="" _esc
+    if [ -n "$stdout_body" ] && command -v sqlite3 >/dev/null 2>&1; then
+      _esc="$(printf '%s' "$stdout_body" | sed "s/'/''/g")"
+      _code="$(sqlite3 :memory: "SELECT CASE WHEN json_valid('$_esc') AND json_type('$_esc','\$.error.code')='text' THEN json_extract('$_esc','\$.error.code') ELSE '' END" 2>/dev/null || true)"
+      _pane="$(sqlite3 :memory: "SELECT CASE WHEN json_valid('$_esc') AND json_type('$_esc','\$.error.pane')='text' THEN json_extract('$_esc','\$.error.pane') ELSE '' END" 2>/dev/null || true)"
+    fi
+    if [ "$_code" = pane_not_found ] && { [ -z "$_pane" ] || [ "$_pane" = "$(_herdr_bare_of "$id")" ]; }; then
+      echo "herdr: could not read pane '$id': the terminal reports it no longer exists" >&2
+      return 12
+    fi
+    if [ "$_code" = pane_not_found ]; then
+      echo "herdr: could not read pane '$id': the terminal reports pane '$_pane' does not exist -- a different pane, not this one" >&2
+      return 11
+    fi
+    echo "herdr: could not read pane '$id': ${stderr_body:-${stdout_body:-herdr exited $rc with no diagnostic on either channel}}" >&2
+    return 11
+  fi
+  cat "$tmp"   # only the real pane content reaches stdout, byte-for-byte
+  rm -f "$tmp"
+  return 0
+}
+
+# Optional team.sh observation extension. Prints activity, visible pane label,
+# terminal agent key, and CLI terminal title as four TAB-separated fields.
+terminal_team_observe() {
+  local id="$1" pane_json agents_json pesc aesc activity label key title
+  command -v herdr >/dev/null 2>&1 || return 10
+  _herdr_pane_id_ok "$id" || return 13
+  pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || return 10
+  agents_json="$(_herdr_cli "$id" agent list 2>/dev/null)" || return 10
+  pesc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
+  aesc="$(printf '%s' "$agents_json" | sed "s/'/''/g")"
+  activity="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.agent_status'),'unknown:activity_missing')" 2>/dev/null)" || return 10
+  label="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.label'),'unknown:pane_label_missing')" 2>/dev/null)" || return 10
+  title="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.terminal_title'),'unknown:terminal_title_missing')" 2>/dev/null)" || return 10
+  # Two different facts were collapsed into one value here, and the one this
+  # exists to repair travelled the ambiguous half. The agent list was already
+  # fetched successfully above (`|| return 10`), so reaching this point means the
+  # list was READ — what remains undecided is only which case produced no name:
+  #
+  #   no entry for this pane_id   -> the pane could not be located in the list.
+  #                                  Undecided: `unknown:` (team --fix skips it).
+  #   entry present, no `.name`   -> the list answered ABOUT this pane and it
+  #                                  carries no key. Decided: `absent:`, which
+  #                                  reaches team --fix as a mismatch. This is
+  #                                  the measured codex case.
+  #
+  # NULLIF is load-bearing, not defensive: `json_extract` returns SQL NULL for a
+  # missing key and for JSON null, but the EMPTY STRING for `"name":""` (measured).
+  # An empty key is decidedly not a key, yet without NULLIF it slipped past the
+  # COALESCE as a value -- and an empty field makes the wrapper call the whole
+  # observation `unknown:observe_malformed`, which --fix skips. So the one case
+  # this exists to repair would have been skipped again, taking the other three
+  # fields' observations down with it.
+  #
+  # The nesting does the split: the inner COALESCE fires only when a row matched,
+  # the outer one only when none did.
+  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT COALESCE(NULLIF(json_extract(value,'\$.name'),''),'absent:agent_key_unset') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")' LIMIT 1),'unknown:pane_not_in_agent_list')" 2>/dev/null)" || return 10
+  case "$activity$label$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac
+  printf '%s\t%s\t%s\t%s\n' "$activity" "$label" "$key" "$title"
+}
+
+# Positive input-readiness proof for team --fix. A pane is writable only when
+# Herdr itself recognizes an agent of the expected kind there and reports one of
+# its measured interactive lifecycle states. A shell prompt (including an OMZ
+# confirmation) is therefore not mistaken for an agent merely because it owns
+# the foreground process group.
+terminal_team_input_ready() {
+  local id="$1" expected="$2" raw escaped kind status rc=0
+  command -v herdr >/dev/null 2>&1 || { printf 'unknown:terminal_unreachable\n'; return 2; }
+  _herdr_pane_id_ok "$id" || { printf 'unknown:invalid_pane_id\n'; return 2; }
+  raw="$(_herdr_cli "$id" agent get "$(_herdr_bare_of "$id")" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    case "$raw" in
+      *agent_not_found*) printf 'not_ready:agent_not_found\n'; return 1 ;;
+      *) printf 'unknown:agent_query_failed\n'; return 2 ;;
+    esac
+  fi
+  escaped="$(printf '%s' "$raw" | sed "s/'/''/g")"
+  kind="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$escaped','$.result.agent.agent')='text' THEN json_extract('$escaped','$.result.agent.agent') ELSE '' END" 2>/dev/null)" \
+    || { printf 'unknown:agent_response_invalid\n'; return 2; }
+  status="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$escaped','$.result.agent.agent_status')='text' THEN json_extract('$escaped','$.result.agent.agent_status') ELSE '' END" 2>/dev/null)" \
+    || { printf 'unknown:agent_response_invalid\n'; return 2; }
+  [ -n "$kind" ] && [ -n "$status" ] \
+    || { printf 'unknown:agent_response_incomplete\n'; return 2; }
+  [ "$kind" = "$expected" ] \
+    || { printf 'not_ready:agent_kind_mismatch\n'; return 1; }
+  case "$status" in
+    idle|done|working) printf 'ready\n'; return 0 ;;
+    *) printf 'not_ready:agent_status_%s\n' "$status"; return 1 ;;
+  esac
+}
+
+# control op: submit <text> to the agent in the pane. herdr's `agent prompt`
+# submits on its own (no separate Enter, unlike tmux) — the #619 paste hazard is
+# a tmux send-keys concern, not herdr's. ASSERTED argv (agent prompt <id> <text>).
+terminal_poke() {
+  local id="$1" text="$2"
+  # Exit taxonomy: a terminal that is UNREACHABLE (herdr not on PATH) is 10; a
+  # pane that cannot RECEIVE — gone, or with no live agent to accept the
+  # prompt — is 12, unlike peek's narrower 11/12 split (#1158): a caller here
+  # already needs a live agent either way, so the two causes point at the same
+  # next action and are not worth separating. 13 stays reserved for a driver
+  # with no poke path at all (plain's permanent "no addressable pane"); a herdr
+  # pane whose agent has EXITED must not borrow it. This is the peek/poke
+  # asymmetry made concrete: peek reads a pane and succeeds even with no live
+  # agent, poke needs a running agent and so has a distinct "no one to
+  # receive" failure that peek does not.
+  command -v herdr >/dev/null 2>&1 \
+    || { echo runtime_error; echo "herdr: not on PATH — cannot reach the terminal to poke pane '$id'" >&2; return 10; }
+  local body rc=0
+  body="$(_herdr_cli "$id" agent prompt "$(_herdr_bare_of "$id")" "$text" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo runtime_error
+    # Same lesson as peek (#1158): forward what herdr actually said instead of
+    # discarding it via the old `>/dev/null 2>&1`. The sentence below stays
+    # hedged — it already names two possibilities rather than asserting one —
+    # but the reader deserves the real diagnostic alongside it, not silence.
+    [ -n "$body" ] && printf '%s\n' "$body" >&2
+    echo "herdr: could not deliver to pane '$id' — it may be gone, or have no live agent to receive (poke needs a running agent; peek does not)" >&2
+    return 12
+  fi
+  echo ok
+  return 0
+}
+
+# Derive herdr's INTERNAL resolvable agent-name key from (team, agent): a
+# COLLISION-RESISTANT 96-bit key (NOT injective — see below).
+#
+# The key must satisfy herdr's agent-name regex [a-z][a-z0-9_-]{0,31} AND, in
+# practice, not collide between live members — a collision makes `herdr agent
+# rename` clobber another member's addressing. FOLDING or CONCATENATING with any
+# literal separator has a STRUCTURAL (deterministic, reachable) collision, because
+# that separator can itself appear in a name (agmsg only forbids . / \ " [ ] control
+# chars and a leading '-', so ':', '-' and '_' are all legal in team AND agent
+# names):
+#     ("a-b","c") and ("a","b-c")   both fold to  a-b-c
+#     ("a:b","c") and ("a","b:c")   both join to  a:b:c   (the `<team>:<agent>` form too)
+# We DERIVE instead: 'a' + the first 24 hex (96 bits) of SHA-256 of the pair. The
+# pair is joined with a NEWLINE, a control char FORBIDDEN in both names
+# (scripts/lib/validate.sh rejects [[:cntrl:]]), so the PREIMAGE encoding is
+# unambiguous — this removes the structural '-'/':' ambiguity above. It is NOT
+# mathematically injective: any hash of arbitrary-length input into 96 bits has
+# collisions by pigeonhole. It is COLLISION-RESISTANT, which is what this needs:
+# herdr requires a unique name only AMONG LIVE agents (scope Naming), a population
+# of dozens in this store — 96 bits against dozens is far more than enough. A true
+# no-collision guarantee would need a persistent map + collision detection (storage
+# + migration), which is out of v1's scope. RECOVERY BOUNDARY on the vanishing
+# chance of a collision: terminal_name's `herdr agent rename` fails, and that is
+# non-fatal — the pane id in the placement record still resolves peek/poke.
+#
+# 'a' + 24 hex = 25 chars, leading letter, all within the regex. Uses the store's
+# canonical agmsg_sha256 (lib/hash.sh); sourced context may not have it, so load it
+# relative to this driver file. Prints the key, or non-zero if no SHA-256 tool.
+# The visible label, in ONE place: terminal_name writes it, terminal_spawn
+# creates the pane with it (#1096), and a test that pins the string pins both.
+_herdr_label() {   # <team> <agent>
+  printf '%s:%s\n' "$1" "$2"
+}
+
+_herdr_internal_key() {
+  local team="$1" agent="$2" hex
+  if ! command -v agmsg_sha256 >/dev/null 2>&1; then
+    local _libd
+    _libd="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../lib" 2>/dev/null && pwd)" || return 1
+    [ -n "$_libd" ] && [ -f "$_libd/hash.sh" ] && . "$_libd/hash.sh"
+  fi
+  command -v agmsg_sha256 >/dev/null 2>&1 || return 1
+  hex="$(printf '%s\n%s' "$team" "$agent" | agmsg_sha256)" || return 1
+  printf 'a%s\n' "${hex:0:24}"
+}
+
+# control op: name the pane (scope Naming). Two copies:
+#   VISIBLE:    herdr pane rename <id> <team>:<agent>   (free text, ':' is fine)
+#   RESOLVABLE: herdr agent rename <id> <key>           where <key> is the
+#               collision-resistant SHA-256 derivation above — an INTERNAL key,
+#               never shown; peek/poke go by the recorded pane id, so the user never
+#               meets it. Idempotent. The visible rename is the required one; a
+#               failed agent rename (a live-name collision, or no SHA-256 tool to
+#               derive the key) is non-fatal — the pane id in the record still
+#               resolves.
+# <mode> is `key` or absent. Absent means both names; `key` means the resolvable
+# one only, and the caller has already decided that (the registry reads the env
+# var, so the policy lives in one place and this only carries it out).
+#
+# Which of the two is which matters: `pane rename` is the label a person reads,
+# `agent rename` is the name herdr itself addresses the agent by, in its own
+# namespace — NOT what this repo's `peek`/`poke` resolve through, which is the
+# placement record's pane id. So under `key` that name is still established and
+# only the decoration is skipped —
+# and a key that cannot be set is an error there, because nothing else happened.
+# Which panes carry this agmsg label? One pane id per line; no match prints
+# nothing and still returns 0.
+#
+# `herdr pane list` returns every pane WITH its label in one call (measured: 38
+# panes, label present on each named one, null on the unnamed), so this needs no
+# per-pane round trip.
+#
+# This exists because neither of the other two ways to answer "which pane am I"
+# works for a codex seat (#1112). Its commands run under one shared app-server,
+# not in its pane, so the inherited HERDR_PANE_ID is the daemon's pane and all of
+# them resolve the same one; and herdr's own agent_session for those panes does
+# not match the thread actually running there. The label depends on neither -- it
+# was written per pane rather than inherited by a process.
+#
+# Which is a claim about its FAILURE MODE, not about its truth: the label is
+# written by `spawn`, repaired by `team --fix` and written by seats themselves,
+# so it is written by the same machinery that is producing the wrong answers.
+# Less likely to be wrong, not known to be right.
+terminal_find_by_label() {   # <label>
+  local label="$1" json esc socket
+  [ -n "$label" ] || return 0
+  socket="$(_herdr_env_socket)" || return 10
+  command -v herdr >/dev/null 2>&1 || return 10
+  json="$(herdr pane list 2>/dev/null)" || return 10
+  [ -n "$json" ] || return 10
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  local rows id
+  rows="$(sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$esc','\$.result.panes')
+                    WHERE json_extract(value,'\$.label') = '$(printf '%s' "$label" | sed "s/'/''/g")'
+                      AND json_extract(value,'\$.pane_id') IS NOT NULL" 2>/dev/null)" || return 10
+  # EMITTER HALF (#1134): print only pane ids in this driver's grammar. herdr's
+  # listing is trusted for labels, not for the shape of its ids, and a row that
+  # is not a pane id is not an answer -- it used to be printed with rc 0 as if
+  # it were one. What this half guarantees: this driver never hands the resolver
+  # a row it could not act on. It does NOT protect the resolver from another
+  # driver's rows, and the resolver does not lean on it: the resolver validates
+  # every row itself before counting (the reader half). Each half has its own
+  # test; fixing one does not make the other's test pass.
+  printf '%s\n' "$rows" | while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    _herdr_pane_id_ok "$id" || continue
+    printf '%s:%s\n' "$socket" "$id"
+  done
+  return 0
+}
+
+# What agmsg label does THIS one pane carry? Prints it and returns 0; 1 when the
+# pane carries none, 10 when herdr could not be reached, 13 for a ref this driver
+# cannot address.
+#
+# The confirmation half of `terminal_find_by_label` -- see the tmux driver for
+# why this is its own op and not a field of `terminal_team_observe`. Here it is
+# `herdr pane get <id>` against the listing's `herdr pane list`: one pane asked
+# about by name, so a listing whose filter was loose does not get to answer for
+# itself.
+terminal_label_of() {   # <id>
+  local id="$1" pane_json esc label
+  [ -n "$id" ] || return 13
+  command -v herdr >/dev/null 2>&1 || return 10
+  _herdr_pane_id_ok "$id" || return 13
+  pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || return 10
+  esc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
+  # NULLIF: json_extract returns SQL NULL for a missing key and '' for a key set
+  # to the empty string, and both mean "this pane carries no label" -- neither is
+  # a label to confirm against. COALESCE alone would let '' through and an empty
+  # target would then confirm itself.
+  label="$(sqlite3 :memory: "SELECT COALESCE(NULLIF(json_extract('$esc','\$.result.pane.label'),''),'')" 2>/dev/null)" || return 10
+  [ -n "$label" ] || return 1
+  printf '%s\n' "$label"
+  return 0
+}
+
+terminal_name() {
+  local id="$1" team="$2" name="$3" mode="${4:-}" label key
+  label="$(_herdr_label "$team" "$name")"
+
+  # THE KEY FIRST, and its failure is fatal.
+  #
+  # The reason is NOT that peek/poke resolve through the key — an earlier
+  # revision of this comment said so and it is false in this tree: those commands
+  # resolve through the placement record's pane id, and `_herdr_internal_key` is
+  # read nowhere outside this driver. The key is the name herdr knows the agent
+  # by, on its side.
+  #
+  # The reason that survives is the one below: the caller writes the placement
+  # record only when this returns 0. Ordering the label first meant a failed
+  # DECORATION returned 13 before the key was attempted and before the record was
+  # written, so a member ended up with neither name and no record — the
+  # requirement this driver serves broke through that door. tmux has always had
+  # this order; herdr was the one driver that put the ornament in front.
+  # Two DIFFERENT failures used to leave the same word and nothing else (#1127):
+  # the key could not be COMPUTED, and the server refused to APPLY it. Both
+  # printed `runtime_error` with herdr's own stderr thrown away, so a naming
+  # failure on a live seat could not be attributed to either -- measured on this
+  # fleet, where a seat's record was repaired in the same action that failed to
+  # name, and the message said only `(runtime_error)`.
+  #
+  # The token on stdout stays `runtime_error`: it is the driver contract and
+  # callers read it. What changes is that the REASON is no longer discarded --
+  # the pattern this file already uses elsewhere, a line on stderr naming which
+  # step failed, and for the server call the server's own words with it.
+  key="$(_herdr_internal_key "$team" "$name")" || {
+    echo runtime_error
+    echo "herdr: cannot compute the internal key for '$team/$name' — the sha256 helper is unavailable, so the pane was not named" >&2
+    return 13
+  }
+  local _err _rc=0
+  _err="$(_herdr_cli "$id" agent rename "$(_herdr_bare_of "$id")" "$key" 2>&1 >/dev/null)" || _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    echo runtime_error
+    echo "herdr: 'agent rename' for '$team/$name' on pane '$id' failed (rc=$_rc)${_err:+: $_err}" >&2
+    return 13
+  fi
+
+  # The label, and its failure is deliberately NOT fatal — the same shape tmux
+  # has. Not merely for symmetry: the caller writes the placement record only
+  # when this returns 0, and that record is the other half of addressing. A
+  # non-zero here would therefore throw away the very thing the reordering above
+  # exists to protect, for a decoration.
+  if [ "$mode" != key ]; then
+    _herdr_cli "$id" pane rename "$(_herdr_bare_of "$id")" "$label" >/dev/null 2>&1 || true
+  fi
+  echo ok
+  return 0
+}
+
+# OPTIONAL OP. Observe ONE candidate pane's process facts, as a strict record.
+# Contract and vocabulary: see the tmux driver's copy of this op and
+# scripts/lib/self-proof.sh. This op never classifies -- a failure is a non-zero
+# exit, and the coordinator turns that into `undetermined`, never a negative.
+#
+# stdout, on rc 0, exactly one line:
+#
+#   <pane-id><TAB><pid>[<TAB><pid>…]
+#
+# THE RESPONSE IS CHECKED TO BE ABOUT THE PANE WE ASKED FOR. `process_info`
+# carries its own `pane_id`, so an answer about a different pane is detectable
+# and is treated as no answer -- the same rule the tmux op's identity canary
+# enforces, for the same reason: this fact decides whether a seat may write into
+# a pane.
+#
+# EVERY VALUE IS TYPE-CHECKED BEFORE IT IS READ. A pid that arrives as the JSON
+# string "123" extracts as 123 and would pass a digit test, but a pid that came
+# as a string is not a validated pid -- so `json_type` is asked first, in the
+# same payload, exactly as _herdr_pane_input_ready does (#1051 review).
+#
+# A BAD ELEMENT FAILS THE WHOLE OBSERVATION. An earlier revision skipped entries
+# it could not read and returned whatever was left, which is a PARTIAL set
+# wearing the shape of a complete one -- and if the entry it skipped was the
+# owner's process, the coordinator would answer `disproved` about a pane the seat
+# is actually in. So the count of entries is compared against the count of
+# entries that yielded a valid pid, and a mismatch is no answer at all. (Review:
+# this is the same failure the pure classifier refuses for a malformed row.)
+terminal_pane_process_observe() {   # <candidate>
+  local id="${1-}" info jesc seen sp fg n_all n_ok pids p
+  command -v herdr >/dev/null 2>&1 || return 10
+  command -v sqlite3 >/dev/null 2>&1 || return 10
+  _herdr_pane_id_ok "$id" || return 13
+  info="$(_herdr_cli "$id" pane process-info --pane "$(_herdr_bare_of "$id")" 2>/dev/null)" || return 10
+  jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
+  seen="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.pane_id')='text' THEN json_extract('$jesc','\$.result.process_info.pane_id') ELSE '' END" 2>/dev/null)" || return 10
+  [ "$seen" = "$(_herdr_bare_of "$id")" ] || return 10   # the response names the BARE pane
+  # Both of these are part of the schema this op reads. Absent, or present with
+  # the wrong type, is a payload we do not understand -- not a pane without a
+  # shell.
+  sp="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.shell_pid')='integer' THEN json_extract('$jesc','\$.result.process_info.shell_pid') ELSE '' END" 2>/dev/null)" || return 10
+  fg="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.foreground_process_group_id')='integer' THEN json_extract('$jesc','\$.result.process_info.foreground_process_group_id') ELSE '' END" 2>/dev/null)" || return 10
+  # THREE SOURCES THAT OVERLAP BY DESIGN. The foreground process GROUP id is
+  # normally also one of the foreground processes, and the shell can be too, so
+  # the union is taken here -- where the overlap is a known property of this
+  # payload -- and the record carries each process once. The coordinator still
+  # refuses a record with a repeated pid: a repeat that survives this is a driver
+  # enumerating something other than what the contract says.
+  pids=""
+  _seen_pid() { local q; for q in $pids; do [ "$q" = "$1" ] && return 0; done; return 1; }
+  for p in "$sp" "$fg"; do
+    case "$p" in ''|0*|*[!0-9]*) return 10 ;; esac
+    _seen_pid "$p" || pids="$pids	$p"
+  done
+  # How many foreground entries there are, and how many of them yielded a pid of
+  # the right type. Equal or nothing: a dropped sibling is a hole in the set.
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.foreground_processes')='array' THEN json_array_length('$jesc','\$.result.process_info.foreground_processes') ELSE -1 END" 2>/dev/null)" || return 10
+  case "$n_all" in ''|*[!0-9]*) return 10 ;; esac
+  #
+  # TWO GUARDS THAT OVERLAP, both measured, because "one of them never ran" is
+  # the ordinary way a pair like this rots (delete each separately, not together):
+  #
+  #   the per-entry arm removed   -> 1 red   (a mistyped schema field)
+  #   the count check removed     -> 1 red   (a dropped sibling)
+  #   both removed                -> 2 reds
+  #
+  # A third variant, turning the arm's `return 10` into `continue`, produces ZERO
+  # reds -- and that is CORRECT, not a gap: without the increment the count no
+  # longer matches, so the whole observation still fails. Measured directly on
+  # the op rather than inferred: both spellings answer rc=10 with no output for
+  # the same payload. A mutation that changes no behaviour is not a blind spot.
+  n_ok=0
+  for p in $(sqlite3 :memory: "SELECT json_extract(value,'\$.pid') FROM json_each('$jesc','\$.result.process_info.foreground_processes') WHERE json_type(value,'\$.pid')='integer'" 2>/dev/null); do
+    case "$p" in ''|0*|*[!0-9]*) return 10 ;; esac
+    _seen_pid "$p" || pids="$pids	$p"
+    n_ok=$((n_ok + 1))
+  done
+  [ "$n_ok" -eq "$n_all" ] || return 10
+  unset -f _seen_pid
+  printf '%s%s\n' "$id" "$pids"
+}
+
+# OPTIONAL OP. Every pane this terminal can see, ACROSS EVERY INSTANCE, each row
+# carrying the instance it was seen in. Contract: see the tmux driver's copy.
+#
+# WHY THIS OP HAS TO EXIST FOR HERDR TOO, and what it cost to find out. A herdr
+# pane id is unique within ONE instance and nowhere else. Measured on this
+# machine, with two instances running:
+#
+#   instance   response pane_id   shell_pid   who is actually there
+#   jugemu     w1:p7              2727        one team's seat
+#   oma        w1:p7              80649       a different team's seat
+#
+# BOTH answer `pane_id=w1:p7`. So an id echoed back by the server proves the
+# server answered about the id we asked for -- never that the instance we meant
+# answered. Every row here is qualified with the SOCKET it came from, which is
+# the value that makes the row answerable again, exactly as the tmux driver
+# qualifies with its socket.
+#
+#   <instance><TAB><pane>    a pane observed in that instance
+#   !<TAB><instance>         that instance could NOT be read
+#
+# `session list --json` reports `running` per session, so a session declared not
+# running is SKIPPED -- that is a decided fact, not a gap. A running session
+# whose pane list fails is the gap, and it gets a named row rather than being
+# dropped: without it the sweep would read "nobody is there" for an instance
+# nobody could open.
+#
+# AN ENTRY WE DO NOT UNDERSTAND FAILS THE WHOLE ENUMERATION, as in
+# terminal_pane_process_observe: `running` must be a JSON boolean and
+# `socket_path` a JSON string, checked by type in the query itself, and the
+# number of entries is compared against the number that passed. A session we
+# could not parse might be the one holding the pane the caller is looking for.
+terminal_enumerate_panes() {
+  local sessions jesc n_all n_ok sockets sock out
+  command -v herdr >/dev/null 2>&1 || return 10
+  command -v sqlite3 >/dev/null 2>&1 || return 10
+  sessions="$(herdr session list --json 2>/dev/null)" || return 10
+  [ -n "$sessions" ] || return 10
+  jesc="$(printf '%s' "$sessions" | sed "s/'/''/g")"
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.sessions')='array' THEN json_array_length('$jesc','\$.sessions') ELSE -1 END" 2>/dev/null)" || return 10
+  case "$n_all" in ''|*[!0-9]*) return 10 ;; esac
+  n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$jesc','\$.sessions') WHERE json_type(value,'\$.running') IN ('true','false') AND json_type(value,'\$.socket_path')='text'" 2>/dev/null)" || return 10
+  case "$n_ok" in ''|*[!0-9]*) return 10 ;; esac
+  [ "$n_ok" -eq "$n_all" ] || return 10
+  # ONE PATH PER LINE, never word-split. A socket path is a path: a home
+  # directory with a space in it is ordinary, and `for x in $(...)` turned one
+  # instance into THREE fabricated ones -- each reported as holding the same
+  # pane, which reads as MORE coverage rather than less (found in review,
+  # reproduced: `/a path/with spaces/herdr.sock` became `/a`, `path/with`,
+  # `spaces/herdr.sock`). A path containing a newline is refused instead, since
+  # a line-based channel cannot carry one.
+  sockets="$(sqlite3 :memory: "SELECT json_extract(value,'\$.socket_path') FROM json_each('$jesc','\$.sessions') WHERE json_type(value,'\$.running')='true' AND json_type(value,'\$.socket_path')='text'" 2>/dev/null)" || return 10
+  while IFS= read -r sock; do
+    [ -n "$sock" ] || continue
+    case "$sock" in (*[[:cntrl:]]*) printf '!\t%s\n' "malformed_socket_path"; continue ;; esac
+    out="$(HERDR_SOCKET_PATH="$sock" herdr pane list 2>/dev/null)" || { printf '!\t%s\n' "$sock"; continue; }
+    _herdr_panes_of "$sock" "$out" || printf '!\t%s\n' "$sock"
+  done <<EOF
+$sockets
+EOF
+  return 0
+}
+
+# The pane ids in one `pane list` payload, each prefixed with its instance.
+# Separate so the strictness lives in one place: a payload whose `panes` is not
+# an array, or that holds an entry with no text `pane_id`, is not a short list --
+# it is a payload this driver does not understand, and the caller turns that into
+# a named hole rather than into "that instance has fewer panes".
+_herdr_panes_of() {   # <socket> <pane-list-json>
+  local sock="$1" jesc n_all n_ok ids
+  jesc="$(printf '%s' "$2" | sed "s/'/''/g")"
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.panes')='array' THEN json_array_length('$jesc','\$.result.panes') ELSE -1 END" 2>/dev/null)" || return 1
+  case "$n_all" in ''|*[!0-9]*) return 1 ;; esac
+  n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$jesc','\$.result.panes') WHERE json_type(value,'\$.pane_id')='text'" 2>/dev/null)" || return 1
+  case "$n_ok" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$n_ok" -eq "$n_all" ] || return 1
+  ids="$(sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$jesc','\$.result.panes') WHERE json_type(value,'\$.pane_id')='text'" 2>/dev/null)" || return 1
+  printf '%s\n' "$ids" | while IFS= read -r pane; do
+    [ -n "$pane" ] || continue
+    printf '%s\t%s\n' "$sock" "$pane"
+  done
+}
+
+# Fence for a self-write (#1152). Prints "<instance>\t<terminal_id>" for one pane:
+# the herdr instance this driver is talking to, named by its SOCKET PATH -- the
+# same string the sweep's enumeration (terminal_enumerate_panes) uses for an
+# instance, so a location the sweep hands a seat and the fence the seat stores
+# compare as equal strings (pane ids repeat across instances -- w1:p2 exists in
+# both `jugemu` and `oma`, measured 2026-09-11) -- and the pane's server-side
+# terminal_id (unique across sessions, 52 panes / 0 crossings; CHANGES
+# across a herdr restart, so a stored fence expires with the server and a later
+# write refuses instead of landing in whatever now sits at that pane id).
+# Each half is either a value or a namespaced reason; the caller compares both
+# against the stored pair right before each mutation. This is a PREFLIGHT check,
+# not an atomic fence: the read and the keystroke are separate calls, so a pane
+# closed and reused between them is not caught (a real fence would need herdr
+# to compare-and-type). What it removes is the day's actual accident -- a write
+# resolved in one session landing in another's live pane.
+terminal_fence() {   # <id>
+  local id="$1" instance pane_json esc tid
+  instance="$(_herdr_sock_of "$id")"
+  [ -n "$instance" ] || instance="${HERDR_SOCKET_PATH:-}"
+  [ -n "$instance" ] || instance="unknown:no_socket_in_env"
+  case "$instance" in *[[:cntrl:]]*) instance="unknown:socket_path_malformed" ;; esac
+  command -v herdr >/dev/null 2>&1 || { printf '%s\tunknown:terminal_unreachable\n' "$instance"; return 2; }
+  _herdr_pane_id_ok "$id" || { printf '%s\tunknown:invalid_pane_id\n' "$instance"; return 2; }
+  pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || { printf '%s\tunknown:pane_query_failed\n' "$instance"; return 2; }
+  esc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
+  tid="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$esc','\$.result.pane.terminal_id')='text' THEN json_extract('$esc','\$.result.pane.terminal_id') ELSE '' END" 2>/dev/null)" \
+    || { printf '%s\tunknown:pane_response_invalid\n' "$instance"; return 2; }
+  [ -n "$tid" ] || { printf '%s\tunknown:terminal_id_missing\n' "$instance"; return 2; }
+  case "$tid" in *[[:cntrl:]]*|*[[:space:]]*) printf '%s\tunknown:terminal_id_malformed\n' "$instance"; return 2 ;; esac
+  printf '%s\t%s\n' "$instance" "$tid"
+  case "$instance" in unknown:*) return 2 ;; esac
+  return 0
+}
