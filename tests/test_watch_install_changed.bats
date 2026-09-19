@@ -167,6 +167,36 @@ _wait_for() {
 
   [ "$was_alive2" -eq 0 ]
   grep -q 'installation was updated' "$out2"
+
+  # Third lifecycle (#684 review round 5): an out-of-range override must be
+  # rejected back to the fixed 60s production ceiling, not honored as-is.
+  # "0" (below the valid 1-60 range) is used rather than a huge value
+  # precisely because it is fast to disprove: if it were wrongly honored,
+  # the watcher would exit within about one poll cycle of the change, while
+  # a wrongly-honored huge value would look identical to correct behavior
+  # within any short test window. Staying alive well past that window is
+  # what proves the override was rejected -- this test does not wait out
+  # the full 60s ceiling itself, only long enough to rule out "0" having
+  # taken effect.
+  local out3="$BATS_TEST_TMPDIR/out5.txt"
+  : > "$out3"
+  AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=0 \
+    bash "$SCRIPTS/watch.sh" sid-684e "$PROJ" claude-code >"$out3" 2>/dev/null 3>&- 4>&- &
+  local pid3=$!
+
+  bash "$SCRIPTS/send.sh" team bob alice "before-invalid-override" >/dev/null
+  _wait_for "grep -q 'before-invalid-override' '$out3'" || true
+  grep -q 'before-invalid-override' "$out3"
+
+  touch "$SCRIPTS/config.sh"
+  sleep 5
+
+  local was_alive3=0
+  kill -0 "$pid3" 2>/dev/null && was_alive3=1
+  kill "$pid3" 2>/dev/null || true
+  wait "$pid3" 2>/dev/null || true
+
+  [ "$was_alive3" -eq 1 ]
 }
 
 @test "watch: keeps running when nothing in the installation changes (#684)" {

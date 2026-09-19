@@ -732,18 +732,32 @@ _install_ready() {
 # Time-based, not a poll count (#779's own reasoning applies here too): the
 # poll interval is itself configurable, so a count-based bound would silently
 # change how long this actually waits whenever the interval changes.
-# Overridable via the environment for tests, unlike the restart cap above --
-# this value is never carried across an exec or inherited from a different
-# process, so it carries none of that cap's forgeable/inherited-chain risk.
+#
+# Fixed production ceiling of 60s. The environment may only LOWER it, to an
+# integer from 1 to 60 inclusive (review finding, round 5): anything else --
+# non-numeric, zero, or above 60 -- is rejected back to 60, so an inherited or
+# forged value can never raise or remove the bound. 3-or-more-digit input is
+# rejected by pattern alone, before any numeric comparison, specifically so a
+# very long digit string is never handed to `[ -gt ]`/`-lt` at all -- some
+# shells' arithmetic evaluation is not guaranteed well-defined for arbitrarily
+# large integers, and this avoids relying on it being.
 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT="${AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT:-60}"
 case "$AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT" in
-  ''|*[!0-9]*) AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=60 ;;
+  [1-9]|[1-5][0-9]|60) ;;
+  *) AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=60 ;;
 esac
 
-# Wall-clock time this cycle first observed "changed but not ready" -- empty
-# means either nothing has changed yet, or it already resolved (readied and
+# Time this cycle first observed "changed but not ready" -- empty means
+# either nothing has changed yet, or it already resolved (readied and
 # restarted, which never returns here to clear it -- exec starts a fresh
 # process with this unset again -- so no explicit reset is needed there).
+#
+# Measured with $SECONDS, not `date +%s`: it needs no external command (so it
+# has no failure mode to handle), but it is NOT a monotonic clock -- per
+# bash's own manual, both the value recorded at shell startup and each later
+# reference are obtained by querying the system clock, so an administrative
+# clock change moves it exactly as it would move `date +%s`. The negative-
+# elapsed handling below stays in place because of this, not despite it.
 _INSTALL_INCOMPLETE_SINCE=""
 
 # Fixed, internal, non-negotiable (review finding: an env-supplied limit can
@@ -811,12 +825,19 @@ _install_restart_count_reset() {
 # returns, leaving the rest of this cycle's loop body -- the liveness guard,
 # message delivery, the sleep -- to run exactly as it would have if nothing
 # had changed. Delivery keeps working while an install is still in flight;
-# only once _WATCH_INSTALL_INCOMPLETE_TIMEOUT seconds have passed without
-# ever becoming ready does this fall back to the ORIGINAL, unchanged exit --
-# a still-changing-past-the-timeout or genuinely broken install still
+# only once AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT seconds have passed
+# without ever becoming ready does this fall back to the ORIGINAL, unchanged
+# exit -- a still-changing-past-the-timeout or genuinely broken install still
 # produces the same clear stop it always has, rather than an indefinite wait.
+#
+# A negative elapsed reading (round 5: only possible if the system clock was
+# moved backward mid-wait, since $SECONDS is wall-clock-based, not monotonic
+# -- confirmed against bash's own manual) is treated the same as "timeout
+# elapsed", not as "keep waiting": an elapsed time that cannot be trusted is
+# exactly the case the visible exit exists for, the same reasoning as an
+# install that is taking implausibly long.
 _handle_install_changed() {
-  local new_watch="$SCRIPT_DIR/watch.sh" restarts now
+  local new_watch="$SCRIPT_DIR/watch.sh" restarts elapsed
 
   if _install_ready; then
     _INSTALL_INCOMPLETE_SINCE=""
@@ -839,13 +860,12 @@ _handle_install_changed() {
     exit 0
   fi
 
-  now="$(date +%s)"
-  case "$now" in ''|*[!0-9]*) return 0 ;; esac
   if [ -z "$_INSTALL_INCOMPLETE_SINCE" ]; then
-    _INSTALL_INCOMPLETE_SINCE="$now"
+    _INSTALL_INCOMPLETE_SINCE="$SECONDS"
     return 0
   fi
-  if [ "$((now - _INSTALL_INCOMPLETE_SINCE))" -lt "$AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT" ]; then
+  elapsed=$((SECONDS - _INSTALL_INCOMPLETE_SINCE))
+  if [ "$elapsed" -ge 0 ] && [ "$elapsed" -lt "$AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT" ]; then
     return 0
   fi
 
