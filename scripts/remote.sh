@@ -2993,15 +2993,19 @@ _remote_ceiling_is_plain_digits() {   # <string>
 #   0  confirmed rows pending.
 #   1  confirmed nothing pending: no store file, or the table was never
 #      created -- both mean quarantine was never written, not that reading it
-#      failed.
+#      failed. A store that plainly does not exist is a fact this can read,
+#      not a read that failed, so it is 1 (confirmed), not 2.
 #   2  could not determine (a non-sqlite driver, for which this pre-check has
 #      no way to read local state, or a query against an existing store/table
-#      that itself failed). Names what could not be read on stderr; the
-#      caller falls through to the real, authoritative reprocess rather than
-#      silently skipping it -- idempotent and cheap when it turns out there
-#      was nothing after all, per storage_sync_reprocess's own contract.
+#      that itself failed). Names what could not be read on stderr, together
+#      with the command to check by hand. The caller does NOT fall through to
+#      the real reprocess here: that reopened the exact hang this local check
+#      exists to avoid (a test double with no server behind it), so 2 skips
+#      the automatic reprocess the same as 1 -- the difference is only that 2
+#      says so, on stderr, rather than passing in silence.
 _remote_quarantine_has_malformed() {
-  local team="$1" store_path="" count="" team_lit driver=""
+  local team="$1" store_path="" count="" team_lit driver="" fix_hint
+  fix_hint="run it by hand: bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") reprocess $(agmsg_shq "$team")"
   # Every reassignment below is guarded with `|| name=""`: this runs under
   # `set -e`, and a PLAIN reassignment of an already-`local`-declared name
   # (unlike `local name=$(...)`) DOES trip errexit on a failing command
@@ -3011,15 +3015,19 @@ _remote_quarantine_has_malformed() {
   driver="$(agmsg_storage_driver 2>/dev/null)" || driver="unknown"
   [ -n "$driver" ] || driver="unknown"
   if [ "$driver" != sqlite ]; then
-    echo "agmsg: local quarantine pre-check does not support storage driver '$driver' for '$team'; running reprocess to find out" >&2
+    echo "agmsg: local quarantine pre-check does not support storage driver '$driver' for '$team'; $fix_hint" >&2
     return 2
   fi
   store_path="$(agmsg_storage_dir 2>/dev/null)" || store_path=""
   if [ -z "$store_path" ]; then
-    echo "agmsg: cannot resolve the local store directory for '$team'; running reprocess to find out" >&2
+    echo "agmsg: cannot resolve the local store directory for '$team'; $fix_hint" >&2
     return 2
   fi
   store_path="$store_path/teams/$team/messages.db"
+  # No store file at all is a fact, not an unreadable one: a team with no
+  # local store has no rows of any kind, quarantine included, so "nothing
+  # pending" is simply true here, the same as a store whose sync_quarantine
+  # table was never created below.
   [ -f "$store_path" ] || return 1
   count="$(agmsg_sqlite "$store_path" \
     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_quarantine';" \
@@ -3028,7 +3036,7 @@ _remote_quarantine_has_malformed() {
     1) ;;
     0) return 1 ;;
     *)
-      echo "agmsg: cannot inspect local store '$store_path' for '$team'; running reprocess to find out" >&2
+      echo "agmsg: cannot inspect local store '$store_path' for '$team'; $fix_hint" >&2
       return 2
       ;;
   esac
@@ -3038,7 +3046,7 @@ _remote_quarantine_has_malformed() {
     2>/dev/null | tr -d '\r')" || count=""
   case "$count" in
     ''|*[!0-9]*)
-      echo "agmsg: cannot read quarantine state from local store '$store_path' for '$team'; running reprocess to find out" >&2
+      echo "agmsg: cannot read quarantine state from local store '$store_path' for '$team'; $fix_hint" >&2
       return 2
       ;;
     0) return 1 ;;
@@ -3287,14 +3295,17 @@ cmd_sync_start() {
   # Best-effort and after the engine is already up: a stale parser's leftover
   # quarantine is a backlog to catch up on, not a reason to delay or refuse
   # this start, and network trouble here must not read as "sync did not
-  # start" when it did. Gated on the local peek above: skip the network call
-  # only on a CONFIRMED zero (1) -- a pending count (0) or an undetermined
-  # local state (2, already named on stderr by the peek itself) both fall
-  # through to the real, authoritative reprocess.
+  # start" when it did. Gated on the local peek above: the real,
+  # authoritative reprocess runs ONLY on a CONFIRMED pending count (0). An
+  # undetermined local state (2, already named on stderr by the peek itself,
+  # with the command to check by hand) is left for the operator, not
+  # attempted here -- an automatic call on that path is exactly what reopened
+  # the hang against a test double with no server behind it; 1 (confirmed
+  # zero) has nothing to do either, silently.
   local pending_rc=0
   _remote_quarantine_has_malformed "$team" || pending_rc=$?
   case "$pending_rc" in
-    0|2)
+    0)
       _remote_reprocess_team "$team" || echo "agmsg: quarantine reprocess did not complete for '$team'; sync start still succeeded" >&2
       ;;
   esac
