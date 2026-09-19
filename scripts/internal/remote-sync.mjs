@@ -3738,13 +3738,16 @@ export async function reprocessCycle(config, limit, dependencies = {}, scope = "
   // storage_sync_reprocess), so any row it imports lands as unread the
   // instant it lands, and a caller who did not expect that deserves the
   // number first, not a surprised inbox after the fact.
-  {
+  //
+  // Scoped to `scope` being set (#1284's callers) only: cmd_unlock's default
+  // (unscoped) call must keep exactly the event stream and log content it
+  // had before this existed -- neither this extra walk nor its event fires
+  // there.
+  if (scope) {
     let pendingAfter = null;
     let pendingCount = 0;
     for (;;) {
-      const pendingExtra = scope ?
-        [String(limit), pendingAfter ?? "", scope] :
-        [String(limit), ...(pendingAfter === null ? [] : [pendingAfter])];
+      const pendingExtra = [String(limit), pendingAfter ?? "", scope];
       const pendingPage = await driverCall("reprocess", config, [], pendingExtra);
       const { candidates, page } = validateReprocessDriverPage(pendingPage, limit, pendingAfter);
       pendingCount += candidates.length;

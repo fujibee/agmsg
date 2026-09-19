@@ -423,6 +423,31 @@ prepare_push() {
   [ "$(agmsg_sqlite "$db" \
     "SELECT status FROM sync_quarantine WHERE wire_id='$auth_wire';" | tr -d '\r')" = authentication_failed ]
 
+  # cmd_sync_start's local, network-free pre-check (_remote_quarantine_has_malformed)
+  # must tell "confirmed nothing pending" apart from "could not determine",
+  # never collapsing an unreadable local state into a silent skip. Exercised
+  # directly, the way test_remote_status_liveness.bats already reaches other
+  # cmd_sync_start internals (#762: sourcing is what
+  # makes them testable at all).
+  run bash -c 'source "$1/remote.sh"; AGMSG_STORAGE_DRIVER=jsonl _remote_quarantine_has_malformed demo' \
+    _ "$SCRIPTS"
+  [ "$status" -eq 2 ]
+  grep -qF "does not support storage driver 'jsonl'" <<<"$output"
+
+  local empty_store_path="$BATS_TEST_TMPDIR/no-such-team-store"
+  run bash -c 'source "$1/remote.sh"; AGMSG_STORAGE_PATH="$2" _remote_quarantine_has_malformed noteam' \
+    _ "$SCRIPTS" "$empty_store_path"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+
+  local corrupt_dir="$BATS_TEST_TMPDIR/corrupt-store/teams/corruptteam"
+  mkdir -p "$corrupt_dir"
+  printf 'not a sqlite database' > "$corrupt_dir/messages.db"
+  run bash -c 'source "$1/remote.sh"; AGMSG_STORAGE_PATH="$2" _remote_quarantine_has_malformed corruptteam' \
+    _ "$SCRIPTS" "$BATS_TEST_TMPDIR/corrupt-store"
+  [ "$status" -eq 2 ]
+  grep -qF "cannot inspect local store" <<<"$output"
+
   # KIND-S: the accepted roster-mutation kinds live in exactly one place
   # (scripts/internal/wire-kinds.mjs). Mutation (run by hand, not
   # committed): putting a literal kind list back at any of the ten former
