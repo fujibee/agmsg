@@ -71,6 +71,7 @@ export default {
       "grok-build": "xAI의 빌드/코딩 에이전트.",
       hermes: "경량 릴레이 에이전트.",
       antigravity: "에이전틱 코딩 환경.",
+      devin: "자율형 AI 소프트웨어 엔지니어 CLI.",
     },
   },
   showcase: {

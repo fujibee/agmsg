@@ -1,16 +1,18 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
-import { appendFile, lstat, mkdir, open, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
-import { closeSync, mkdtempSync, openSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmdirSync,
+  rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ageExecutableVersion, CipherStateError, openEnvelope,
   readNativeAgeIdentity } from "./sync-cipher.mjs";
 import { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
+import { STORAGE_ROSTER_KINDS } from "./wire-kinds.mjs";
 export { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -24,6 +26,37 @@ const MAX_CONNECTION_CONFIG_BYTES = 2 * 1024 * 1024;
 // answer: a bound a server can raise by saying so is not a bound. If the two
 // ever disagree, the client refuses rather than accepts the larger list.
 const MAX_TEAMS_PER_NAME = 16;
+const MAX_CLIENT_VERSION_LENGTH = 64;
+
+// Read once, on first use, and cached for the life of the process -- SKILL_DIR
+// (the install this process was launched from) does not change underneath a
+// running engine. "unknown" whenever the value cannot be produced (no
+// SKILL_DIR, no VERSION file, or a read failure): never empty and never
+// omitted, so a server can tell "announced, but unreadable" apart from "an
+// older client that never announces a version at all" (see the client version
+// header section of server/spec/v1.md). Only printable ASCII belongs in a
+// header value, so anything else -- a stray control byte or
+// non-ASCII character from a corrupted or hand-edited VERSION file -- is
+// dropped rather than sent raw, and the result is capped well past any real
+// git-describe string but bounded regardless of what actually landed in the
+// file.
+let cachedClientVersion;
+function clientVersion() {
+  if (cachedClientVersion !== undefined) return cachedClientVersion;
+  const skillDir = process.env.SKILL_DIR;
+  let firstLine = "";
+  if (skillDir) {
+    try {
+      firstLine = readFileSync(join(skillDir, "VERSION"), "utf8").split(/\r?\n/u)[0] ?? "";
+    } catch {
+      firstLine = "";
+    }
+  }
+  const sanitized = [...firstLine].filter((ch) => ch >= " " && ch <= "~").join("")
+    .slice(0, MAX_CLIENT_VERSION_LENGTH).trim();
+  cachedClientVersion = sanitized || "unknown";
+  return cachedClientVersion;
+}
 
 function usage() {
   return `usage:
@@ -38,7 +71,7 @@ function usage() {
   remote-sync.sh verify-age-handoff --team NAME --bundle FILE --out-dir DIRECTORY
   remote-sync.sh once --team NAME [--limit N]
   remote-sync.sh run --team NAME [--limit N] [--interval SECONDS]
-  remote-sync.sh reprocess --team NAME [--limit N]
+  remote-sync.sh reprocess --team NAME [--limit N] [--scope malformed]
   remote-sync.sh resync --team NAME --accept-floor SEQUENCE
   remote-sync.sh unblock-read --team NAME --member-id UUID
   remote-sync.sh set-endpoint --team NAME
@@ -438,6 +471,20 @@ function zoneRefusal(host) {
 }
 
 export function validateEndpoint(rawEndpoint) {
+  // The WHATWG parser DELETES ASCII tab and newline (and trims leading and
+  // trailing C0/space) before parsing, so a URL carrying them can validate
+  // while the raw string -- which is what gets stored in the binding and
+  // later read back line-wise by consumers such as `remote status` -- still
+  // contains them. The premise of this validator (stated above) is that what
+  // is written in the URL is where the connection goes; a byte the parser
+  // silently removes breaks that premise, so it is refused rather than
+  // repaired (#849 review).
+  if (/[\u0000-\u001f\u007f]/.test(rawEndpoint)) {
+    return rejected(
+      "--endpoint must not contain control characters " +
+      "(tab, newline, any byte below 0x20, or DEL)",
+    );
+  }
   const authority = rawAuthority(rawEndpoint);
   if (authority === undefined) {
     return rejected("--endpoint must start with https:// (or http:// to a private IP address)");
@@ -594,12 +641,76 @@ export function authorityFileFault(stats, { maxBytes, privateFile }) {
   // there -- and because it is the LAST thing consulted, no message above can
   // be about it. That ordering is the fix, not a detail of it.
   if (process.platform !== "win32" && (stats.mode & (privateFile ? 0o077 : 0o022)) !== 0) {
+    // The mode it HAS, not only the mode it may not have. An operator reading
+    // "must not be writable by group or others" cannot tell whether they are
+    // looking at 0664 or 0666 or a directory bit, and the two remedies differ.
+    // Printed the way `chmod` and `ls` speak, four digits, so it can be
+    // compared with what `stat` prints without arithmetic.
+    const mode = (stats.mode & 0o7777).toString(8).padStart(4, "0");
     return privateFile
-      ? "must not be readable or writable by group or others"
-      : "must not be writable by group or others";
+      ? `must not be readable or writable by group or others (it is ${mode})`
+      : `must not be writable by group or others (it is ${mode})`;
   }
   return null;
 }
+
+// The command that clears the fault above, or null when there is nothing to
+// type. Same conditions, same function pair, deliberately: the sentence and
+// the condition drifted apart once already (#781), and a remedy derived by
+// re-reading the SENTENCE would drift the same way the moment the wording
+// changes. This re-asks the stats.
+//
+// Only the permission fault has one. A symlink, a directory or an oversized
+// file are not fixed by a mode change, and offering `chmod` for them would send
+// someone to do the wrong thing confidently.
+//
+// `go-w` and `go-rwx` rather than `644` and `600`: the check is about the group
+// and other bits, so the remedy touches those and leaves the owner's alone. A
+// numeric mode would also silently strip a read bit the operator meant to keep.
+// A path as ONE shell argument, for a command someone is expected to paste and
+// run. Same scheme as scripts/lib/shquote.sh: wrap in single quotes and replace
+// each embedded ' with '\'' -- close the quote, emit an escaped literal quote,
+// reopen it.
+//
+// Not cosmetic. A team name is validated only against empty / `.` / `..` / `/`
+// / `\` / a leading `-` / control characters (lib/validate.sh), so a space and
+// a single quote are both legal in one, and the store lives under $HOME, which
+// is outside our control entirely. An unquoted path turns the remedy we printed
+// into a command that operates on a DIFFERENT file, or on several -- the worst
+// possible outcome for a line whose whole job is "run this and you are fixed".
+export function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+export function authorityFileRemedy(stats, { privateFile }) {
+  if (process.platform === "win32") return null;
+  if (stats.isSymbolicLink() || !stats.isFile()) return null;
+  if ((stats.mode & (privateFile ? 0o077 : 0o022)) === 0) return null;
+  return privateFile ? "chmod go-rwx" : "chmod go-w";
+}
+// One sentence, built in one place. `authorityFileFault` exists as a single
+// function because the wording and the condition drifted apart once (#781);
+// two call sites assembling the sentence around it is the same hazard one level
+// out. Measured: unquoting the path at only the checkpoint site left the whole
+// suite green, because nothing drove that site -- so the pin has to be on the
+// construction, not on each caller.
+//
+// The remedy goes last, so the sentence still reads as a diagnosis first. An
+// operator who already knows what to do stops at the path; one who does not
+// gets a line to paste, quoted, about the file that is actually wrong.
+export function authorityFileError(subject, path, stats, { maxBytes, privateFile }) {
+  // `maxBytes` is forwarded, not dropped. Omitting it made this return null for
+  // an oversized file whose caller had already decided there WAS a fault, and
+  // the caller then threw that null. The suite caught it; the lesson is that a
+  // wrapper around a predicate has to take every argument the predicate reads.
+  const fault = authorityFileFault(stats, { maxBytes, privateFile });
+  if (!fault) return null;
+  const remedy = authorityFileRemedy(stats, { privateFile });
+  return new Error(
+    `${subject} ${fault}: ${path}` +
+    (remedy ? ` — fix it with: ${remedy} ${shellQuote(path)}` : ""));
+}
+
 
 async function readBoundedAuthorityFile(path, maxBytes, privateFile) {
   const before = await lstat(path);
@@ -607,8 +718,9 @@ async function readBoundedAuthorityFile(path, maxBytes, privateFile) {
   if (fault) {
     // The path too: the previous message named a property without naming what
     // had it, on a machine that may hold several.
-    throw new Error(
-      `${privateFile ? "remote credential" : "connected team binding"} ${fault}: ${path}`);
+    throw authorityFileError(
+      privateFile ? "remote credential" : "connected team binding",
+      path, before, { maxBytes, privateFile });
   }
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
@@ -1267,8 +1379,9 @@ function compareRetainedCheckpoint(config, retained) {
 
 async function readRetainedCheckpointFile(path) {
   const metadata = await lstat(path);
-  const fault = authorityFileFault(metadata, { privateFile: true });
-  if (fault) throw new Error(`retained age checkpoint ${fault}: ${path}`);
+  const checkpointFault = authorityFileError(
+    "retained age checkpoint", path, metadata, { privateFile: true });
+  if (checkpointFault) throw checkpointFault;
   const records = parseStrictJsonl(await readFile(path, "utf8"));
   if (records.length < 1 || records.length > 4096) {
     throw new Error("retained age checkpoint history is invalid");
@@ -1393,6 +1506,7 @@ async function send(config, path, init, authHeaders) {
   const headers = {
     ...init.headers,
     "Agmsg-Protocol-Version": PROTOCOL,
+    "Agmsg-Client-Version": clientVersion(),
     "Agmsg-Team-ID": config.remote_team_id,
     ...authHeaders,
   };
@@ -1515,7 +1629,7 @@ async function health(serverUrl, teamId) {
   let response;
   try {
     response = await fetch(endpoint(serverUrl, "/v1/health"), {
-      headers: { "Agmsg-Team-ID": teamId },
+      headers: { "Agmsg-Team-ID": teamId, "Agmsg-Client-Version": clientVersion() },
       redirect: "error", signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
@@ -1756,6 +1870,34 @@ export function discardInputDirectory(directory, reason) {
   }
 }
 
+// How long to wait for a driver that has stopped reading its stdin to exit on
+// its own before the pipe path's bound (the SIGKILL in runDriver's `fail`) is
+// applied. Derived from the storage busy timeout, since the only exit worth
+// waiting for is a busy child's, which comes that timeout after it starts
+// waiting; a few seconds of teardown slack past it.
+//
+// Bounded on BOTH ends. Below: a value that is not a sane non-negative integer
+// -- NaN, negative, or a huge one -- falls to the 5 s default. Above: the busy
+// timeout is capped at an hour before the slack is added, so the result can
+// never approach setTimeout's 32-bit millisecond limit. Past that limit Node
+// clamps a delay to 1 ms and would kill a busy child almost at once -- the
+// opposite of a grace -- so `Number.isSafeInteger` alone (which admits values
+// far past the timer limit) is not enough; the cap is what closes that.
+export function storageDriverExitGraceMs(busyTimeoutEnv = process.env.AGMSG_BUSY_TIMEOUT) {
+  // Empty is the 5 s default, exactly as the child reads it: storage.sh and the
+  // adapter use `${AGMSG_BUSY_TIMEOUT:-5000}`, where unset AND empty both mean
+  // 5000. Number("") is 0, not that default -- so an empty value taken literally
+  // would make the grace 5 s, equal to the child's busy timeout, and the SIGKILL
+  // would fire at the same moment a busy child exits 11, dropping it again. So
+  // normalise empty to the default before parsing, and keep this in step with
+  // the child's own default if that ever changes.
+  const raw = busyTimeoutEnv === undefined || busyTimeoutEnv === "" ? "5000" : busyTimeoutEnv;
+  const busyTimeoutMs = Number(raw);
+  const usable = Number.isSafeInteger(busyTimeoutMs) &&
+    busyTimeoutMs >= 0 && busyTimeoutMs <= 3_600_000 ? busyTimeoutMs : 5000;
+  return usable + 5000;
+}
+
 function runDriver({ args, label, operation, parse, input, rosterFile, team, bindingPath,
   holdsRegistryLock = false }) {
   return new Promise((resolve, reject) => {
@@ -1818,10 +1960,17 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     // later whether there was ever a pipe to write to.
     const staged = staging.fd !== null;
     let stdout = ""; let stderr = ""; let settled = false; let failure = null;
+    // The last stdin-write error, kept only so a child that exits 0 despite a
+    // broken write is not reported as a silent success. See the stdin handler.
+    let lastStdinError = null;
+    // Armed when a stdin write loses its reader, cleared when the call settles.
+    // See the stdin handler for what it bounds and why its length is what it is.
+    let stdinExitTimer = null;
 
     const settle = (error, value) => {
       if (settled) return;
       settled = true;
+      if (stdinExitTimer !== null) { clearTimeout(stdinExitTimer); stdinExitTimer = null; }
       releaseInput();
       if (error) reject(error); else resolve(value);
     };
@@ -1864,16 +2013,46 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     child.on("error", fail);
     // Only on the pipe path -- a staged input has no stdin stream to put this
     // on, and no write that could fail.
+    //
+    // A write to stdin that loses its reader is a SYMPTOM, not the verdict: the
+    // child exited before the whole input was sent and closing its read end
+    // turned the next write into EPIPE (on macOS -- socketpairs -- ENOTCONN or
+    // EPIPE depending on how far the write got; the errno set is not closed).
+    // The reason it exited is its exit code, and a busy `apply` exits 11 exactly
+    // here -- its page is larger than the pipe buffer, so it waits out the busy
+    // timeout and exits while the parent is still writing. Concluding
+    // "stdin-write failed" on the errno, ahead of the exit, is what masked that
+    // retryable 11 as an unrecoverable EPIPE and ended #910's reprocess.
+    //
+    // So stop writing and let 'exit' rule on the code. Keep the marker for
+    // diagnostics, but do not settle on it here: `failure` stays unset, so
+    // 'exit' reports the child's own answer.
+    //
+    // Not forever, though. This path keeps its pipe (the roster path stages, so
+    // it never has a lost-reader write), and the pipe path's bound against a
+    // child that stops reading AND does not exit is the SIGKILL in `fail` --
+    // written for exactly this, so "the process dies" is not traded for "the
+    // process cannot exit". Deferring to 'exit' must not drop that bound, so a
+    // timer keeps it: if no exit arrives, `fail` runs and kills, as before.
+    //
+    // Its length (storageDriverExitGraceMs) is not a tuning knob and not a wait
+    // the fast path ever feels: the only child worth waiting for is a busy one,
+    // which exits the busy timeout after it starts waiting, so any bound past
+    // that timeout catches every exit that is coming and delays only an
+    // already-broken child's failure.
+    //
+    // `settled` first, so nothing here runs after the call has ended -- a stdin
+    // error can arrive after 'exit' has already settled a non-zero exit, and
+    // without this it would arm a fresh timer past the cleared one.
     child.stdin?.on("error", (error) => {
-      // Where the failure came from, recorded at the boundary because the OS
-      // code cannot be asked for it: a write whose reader is gone is EPIPE on
-      // Linux, and on macOS -- socketpairs -- either ENOTCONN or EPIPE
-      // depending on how far the write got. That set is not closed, so nothing
-      // downstream can recognise this failure by errno without going stale on
-      // the next platform. The error is otherwise passed through untouched, so
-      // its code and message survive for diagnostics.
+      if (settled) return;
       error.driverFailurePhase = "stdin-write";
-      fail(error);
+      lastStdinError = error;
+      child.stdin.destroy();
+      if (stdinExitTimer === null) {
+        stdinExitTimer = setTimeout(() => fail(error), storageDriverExitGraceMs());
+        stdinExitTimer.unref?.();
+      }
     });
     // Every failure ends here, at 'exit'. A driver that merely exits non-zero is
     // the ordinary case and it needs this as much as a stream error does: it too
@@ -1882,6 +2061,10 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     // goes on to 'close', because only success has to parse all of stdout.
     child.on("exit", (code, signal) => {
       if (failure) { fail(failure); return; }
+      // A clean exit after a broken write is not a clean sync: the child cannot
+      // have read input the parent never finished sending, so a "success" here
+      // would be a sync of a truncated page. Report the write failure instead.
+      if (code === 0 && !signal && lastStdinError) { fail(lastStdinError); return; }
       if (code === 0 && !signal) return;
       // The team and the binding path, because the previous fallback said
       // "inspect its team storage and binding" and named neither -- on a
@@ -1893,11 +2076,23 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
       const diagnostic = stderr.trim() ||
         "driver returned a non-zero exit without diagnostics; inspect that team's storage" +
           bindingNote(bindingPath);
-      fail(new Error(
-        `${label} ${operation} failed${subject} (${describeChildExit(code, signal)}): ${diagnostic}`));
+      const error = new Error(
+        `${label} ${operation} failed${subject} (${describeChildExit(code, signal)}): ${diagnostic}`);
+      // The raw status, for the one caller that acts on a specific value -- the
+      // storage adapter's "busy" exit, see `driver` -- without parsing its own
+      // sentence back out of the message.
+      error.driverExitCode = code;
+      fail(error);
     });
     child.on("close", () => {
       if (failure) { settle(failure, null); return; }
+      // Order-independent with the exit above: whichever of them ran, a stdin
+      // write that lost its reader means the child cannot have received the
+      // whole page, so 'close' must not settle success on a truncated input --
+      // it fails closed on the recorded write error instead. The exit handler
+      // catches this when the exit is seen first; this catches the case where
+      // the write error was recorded only after a clean exit had returned.
+      if (lastStdinError) { settle(lastStdinError, null); return; }
       try {
         settle(null, parse(stdout));
       } catch (error) {
@@ -1912,10 +2107,37 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
   });
 }
 
-export async function driver(operation, config, input, extra = []) {
+// The storage adapter's exit status for "the store was busy" -- another writer
+// held it past the busy timeout (storage-sync-driver.sh says why it is 11). It
+// is the one driver failure that is about the moment rather than the input:
+// the same call succeeds once that writer is done. Every other non-zero exit
+// is a decision (a failed check, an unsupported operation) and asking again
+// does not change it, so nothing else is retried here.
+export const STORAGE_BUSY_EXIT = 11;
+// One wait is never longer than this; the budget is the total. The budget has
+// to outlast a real writer, not a polite one: the first prepare on a pulled
+// store held the lock for 63 s on the machine that filed #910 (155 s on a copy
+// of the same data), and that is the writer that killed the reprocess this
+// exists for. 5 minutes is that with margin for a slower disk.
+//
+// Constants, not an environment knob. The only reason to vary the budget was
+// that the right value is not settled -- #919 removes that first-prepare lock,
+// and the budget can come down then, here, in one place. A knob that accepts
+// an arbitrary string is a surface that has to be validated (not a number, not
+// finite, not safe) and each of those was a way back to "retry forever", the
+// one outcome a budget exists to rule out; the tests inject the sleep and do
+// not need a shorter budget. If an operator ever needs to tune this, that is
+// the moment to add the surface, with the reason.
+const STORAGE_BUSY_WAIT_CAP_MS = 30000;
+const STORAGE_BUSY_RETRY_BUDGET_MS = 300000;
+
+export async function driver(operation, config, input, extra = [], dependencies = {}) {
   const script = process.env.AGMSG_SYNC_DRIVER;
   if (!script) throw new Error("AGMSG_SYNC_DRIVER is not set");
-  return runDriver({
+  const sleepCall = dependencies.sleepCall ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const eventCall = dependencies.eventCall ?? event;
+  const budgetMs = STORAGE_BUSY_RETRY_BUDGET_MS;
+  const run = () => runDriver({
     args: [script, operation, config.local_team, config.server_instance_id,
       config.remote_team_id, String(config.protocol_version), ...extra],
     label: "storage sync",
@@ -1926,6 +2148,34 @@ export async function driver(operation, config, input, extra = []) {
       parseStrictJsonl(stdout) : parseJsonl(stdout)),
     input,
   });
+  // Retrying is safe ONLY because a busy call wrote nothing: every operation
+  // that writes does so in one BEGIN IMMEDIATE transaction fed with -bail (or
+  // as an argv statement, where the CLI stops at the first error), so a lock
+  // lost at BEGIN leaves the store as it was, and the prepare's chunked
+  // reservations are re-entrant by contract. The adapter exits 11 only when the
+  // last statement was the busy one -- the operation returned at that point.
+  let waitedMs = 0;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (error?.driverExitCode !== STORAGE_BUSY_EXIT) throw error;
+      const waitMs = Math.min(STORAGE_BUSY_WAIT_CAP_MS, 1000 * 2 ** (attempt - 1));
+      if (waitedMs + waitMs > budgetMs) {
+        // The driver's own sentence stays in front; what is added is how long
+        // this waited, so the operator can tell "held for minutes" from
+        // "held forever".
+        error.message += ` -- waited ${Math.round(waitedMs / 1000)} s for the store to come free ` +
+          `(the ${budgetMs / 1000} s budget) and it did not`;
+        error.code = "storage-busy";
+        error.retryable = true;
+        throw error;
+      }
+      await eventCall("driver.busy", { operation, attempt, wait_ms: waitMs, waited_ms: waitedMs });
+      await sleepCall(waitMs);
+      waitedMs += waitMs;
+    }
+  }
 }
 
 // The roster file to hand the driver, when this process can work it out.
@@ -2604,11 +2854,90 @@ export async function configure(args) {
     remote_team_id: config.remote_team_id });
 }
 
+// The server sequences this client holds as ROSTER mutations rather than as
+// messages (#968). The roster driver journals one `roster_synced` record per
+// applied mutation -- on the engine pull path and on the bootstrap path alike,
+// and since the same commit that put roster mutations on the transport -- so
+// the journal is the complete list of sequences that will never have a
+// message mapping. The read-state frontier check needs that list: without it
+// every roster sequence reads as a hole, and the first hole is seq 1 (the
+// founding member_joined) on every team.
+//
+// Failure direction: a journal that cannot be read, or a line that cannot be
+// parsed, yields NO sequences, which leaves the frontier check exactly as it
+// was -- pinned. A frontier is never advanced on evidence that was not read.
+// And it SAYS so: a pinned frontier is also what #968 looked like before this
+// change, so a silent fallback here would be indistinguishable from the bug it
+// fixes. The event names the file and, for a torn journal, the line. A journal
+// that does not exist yet is not an anomaly (a team has no roster before its
+// first pull) and is the one case that stays quiet.
+//
+// The whole journal is read on every read-state cycle. It holds one record
+// per roster mutation the team ever applied (30 on a 21,505-message team),
+// so it grows with membership events, not with traffic; the storage driver
+// bounds the list it will accept at 10,000 and refuses beyond that. Cutting
+// it at the members' read floor would need that floor here, and it lives in
+// storage (sync_read_members.remote_server_seq) -- a new driver op, if the
+// list ever grows enough to matter.
+export async function rosterSequencesFor(config, dependencies = {}) {
+  const readFileCall = dependencies.readFileCall ?? readFile;
+  const eventCall = dependencies.eventCall ?? event;
+  const rosterFile = dependencies.rosterFile ?? rosterFileFor(config.local_team);
+  if (!rosterFile) return [];
+  const journalPath = join(dirname(rosterFile), "roster.jsonl");
+  let text;
+  try { text = await readFileCall(journalPath, "utf8"); }
+  catch (error) {
+    if (error?.code !== "ENOENT") {
+      try {
+        await eventCall("read-state.roster-journal-unreadable", { path: journalPath,
+          reason: error?.code ?? error?.message ?? String(error) });
+      } catch { /* logging is best-effort */ }
+    }
+    return [];
+  }
+  const sequences = new Set();
+  const lines = text.split(/\r?\n/u);
+  for (const [index, line] of lines.entries()) {
+    if (!line) continue;
+    let record;
+    try { record = JSON.parse(line); }
+    catch (error) { // a torn journal is no evidence -- and is named, with its line
+      try {
+        await eventCall("read-state.roster-journal-unreadable", { path: journalPath,
+          line: index + 1, reason: error?.message ?? String(error) });
+      } catch { /* logging is best-effort */ }
+      return [];
+    }
+    if (record?.type !== "roster_synced" ||
+        record.server_instance_id !== config.server_instance_id ||
+        record.remote_team_id !== config.remote_team_id) continue;
+    // The sequence DOMAIN, through the one validator the rest of this file
+    // uses. Shape alone let 9223372036854775808..9999999999999999999 through
+    // (review finding); on the driver side the temp table's INTEGER PRIMARY
+    // KEY refuses such a value outright, so the whole read-prepare
+    // transaction died with a datatype mismatch -- neither a 13 nor "no
+    // evidence" (measured in review). A record outside the domain is corrupt
+    // evidence, treated like a torn line: named, and the whole list withheld.
+    try { sequence(record.server_seq, "roster journal server_seq"); }
+    catch (error) {
+      try {
+        await eventCall("read-state.roster-journal-unreadable", { path: journalPath,
+          line: index + 1, reason: error?.message ?? String(error) });
+      } catch { /* logging is best-effort */ }
+      return [];
+    }
+    sequences.add(record.server_seq);
+  }
+  return [...sequences].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : 1);
+}
+
 export async function readStateCycle(config, limit, dependencies = {}) {
   const driverCall = dependencies.driverCall ?? driver;
   const requestCall = dependencies.requestCall ?? request;
   const eventCall = dependencies.eventCall ?? event;
   const localAgentsCall = dependencies.localAgentsCall ?? localAgentRoster;
+  const rosterSequencesCall = dependencies.rosterSequencesCall ?? rosterSequencesFor;
   const driverCapabilities = await driverCall("capabilities", config, []);
   if (!stage2ReadStateSupported(driverCapabilities)) {
     await eventCall("read-state.skipped", { reason: "driver-capability-not-advertised" });
@@ -2649,9 +2978,10 @@ export async function readStateCycle(config, limit, dependencies = {}) {
       missing: unmaterialised,
     });
   }
+  const rosterSeqs = await rosterSequencesCall(config, dependencies);
   const prepared = await driverCall("read-prepare", config, [{ type: "sync_read_context",
     min_available_seq: capabilities.min_available_seq, current_seq: capabilities.current_seq,
-    members, local_agents: localAgents }]);
+    members, local_agents: localAgents, roster_seqs: rosterSeqs }]);
   const batches = readStateUpdateBatches(members, prepared);
   const pageLimit = Math.min(limit, 1000);
   let page;
@@ -3002,6 +3332,15 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
       }
       throw error;
     }
+    // The POST is over and every ack is in hand; the durable write has not
+    // started. This is the one boundary a reader of the log could not see:
+    // push.ack and push.reconciled are both emitted after recordAcks, so
+    // between push.prepared and push.ack sat the POST AND the reconcile with
+    // nothing to tell them apart (#913). Through note(), never bare: this event
+    // sits between the acks and the write that makes them durable, and a log
+    // that cannot be written must not cost that write -- the same reason the
+    // failing path above reports through note().
+    await note(eventCall, "push.posted", { count: posted.acks.length });
     await reportAcks(eventCall, await recordAcks(posted.acks));
   }
   // A full push page (and eligible) means at least a full page was available,
@@ -3054,7 +3393,7 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
     const cursorRecord = records.at(-1);
     const rosterRecords = records.filter((record) =>
       record.type === "sync_pull_message" && record.status === "importable" &&
-      ["member_joined", "member_left", "member_renamed"].includes(record.projection?.kind));
+      STORAGE_ROSTER_KINDS.includes(record.projection?.kind));
     const messageRecords = records.filter((record) =>
       record.type !== "sync_pull_message" || !record.projection?.kind);
     const rosterApplied = rosterRecords.length > 0 ?
@@ -3084,6 +3423,101 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
 // cadence: after any retryable failure the loop always backs off (exponential,
 // capped), so a machine that can't reach the server never hot-loops even while
 // catch-up would otherwise skip the wait.
+// The installation can be updated while an engine runs (#963). watch.sh
+// already detects that and stands down on its own; the engine used to find
+// out only by executing a half-written driver script -- and only when its
+// timing was unlucky enough to hit the write window (observed live: a
+// mid-rewrite storage-sync-driver.sh failed to parse, and the fatal named a
+// syntax error instead of the update).
+//
+// What is proof here went through review twice, and both cuts were the same
+// disease: an observable standing in for the fact. "mtime newer than the
+// engine's start clock" stands down every engine under a pre-existing
+// future mtime (clock skew, an archive with preserved timestamps).
+// "mtime changed against a baseline" stands down on a touch, a
+// metadata-only correction, a same-content re-copy -- the code in memory
+// and on disk still identical, and a stood-down sync engine does not come
+// back by itself. The fact that matters is CONTENT: the engine must stand
+// down exactly when the bytes on disk are no longer the bytes it started
+// from. So the baseline holds a content digest per file; a path or mtime
+// difference merely nominates a file for re-reading, and only a digest
+// that actually differs -- or a path that did not exist at start, a new
+// install artifact -- is proof. A benign mtime change is remembered so the
+// file is not re-read every cycle; content is the identity, the mtime is
+// only a cheap change hint.
+//
+// The failure direction is deliberate, in both phases: an OBSERVATION
+// failure is not evidence.
+//   - Baseline phase: one unreadable directory, one failed stat, one
+//     unreadable file and the whole detector is disabled (null), not
+//     partially armed. A partial baseline would recreate the false
+//     positive: a pre-existing file unreadable at start and readable later
+//     would look newly added. Disabled means exactly today's behavior.
+//   - Check phase: an entry that cannot be listed, stat'ed, or read is
+//     skipped and proves nothing. A rewrite that lands different bytes
+//     under the exact baseline mtime defeats the hint and is never
+//     re-read -- a miss, and a miss degrades to today's behavior, which
+//     is the safe side. A file DELETED by an update is deliberately not
+//     proof on its own; a real update always rewrites something.
+export async function collectInstallBaseline(rootDir, dependencies = {}) {
+  const readdirCall = dependencies.readdirCall ?? readdir;
+  const statCall = dependencies.statCall ?? stat;
+  const readFileCall = dependencies.readFileCall ?? readFile;
+  const baseline = new Map();
+  const pending = [rootDir];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let entries;
+    try { entries = await readdirCall(dir, { withFileTypes: true }); }
+    catch { return null; } // incomplete observation: the detector stays OFF
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) { pending.push(path); continue; }
+      if (!entry.isFile()) continue; // links and specials are not install artifacts
+      let stats, bytes;
+      try {
+        stats = await statCall(path);
+        bytes = await readFileCall(path);
+      } catch { return null; } // incomplete observation: the detector stays OFF
+      baseline.set(path, {
+        mtimeMs: stats.mtimeMs,
+        digest: createHash("sha256").update(bytes).digest("hex"),
+      });
+    }
+  }
+  return baseline;
+}
+
+export async function installChangedAgainst(rootDir, baseline, dependencies = {}) {
+  const readdirCall = dependencies.readdirCall ?? readdir;
+  const statCall = dependencies.statCall ?? stat;
+  const readFileCall = dependencies.readFileCall ?? readFile;
+  const pending = [rootDir];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let entries;
+    try { entries = await readdirCall(dir, { withFileTypes: true }); }
+    catch { continue; } // unreadable now: no evidence either way
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) { pending.push(path); continue; }
+      if (!entry.isFile()) continue;
+      let stats;
+      try { stats = await statCall(path); }
+      catch { continue; } // vanished or unreadable: no evidence
+      const known = baseline.get(path);
+      if (known === undefined) return path; // did not exist at start: a new install artifact
+      if (stats.mtimeMs === known.mtimeMs) continue; // no hint of change
+      let digest;
+      try { digest = createHash("sha256").update(await readFileCall(path)).digest("hex"); }
+      catch { continue; } // could not re-read: no evidence
+      if (digest !== known.digest) return path; // the bytes actually changed
+      known.mtimeMs = stats.mtimeMs; // benign touch: remember it, content is the identity
+    }
+  }
+  return null;
+}
+
 export async function runLoop(config, options, dependencies = {}) {
   const cycleCall = dependencies.cycleCall ?? cycle;
   const sleepCall = dependencies.sleepCall ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -3094,6 +3528,9 @@ export async function runLoop(config, options, dependencies = {}) {
   const recordRefusalCall = dependencies.recordRefusalCall ?? recordRefusal;
   const isRefusalCall = dependencies.isRefusalCall ?? isRefusal;
   const nowCall = dependencies.nowCall ?? (() => new Date().toISOString());
+  const collectInstallBaselineCall = dependencies.collectInstallBaselineCall ?? collectInstallBaseline;
+  const installChangedCall = dependencies.installChangedCall ?? installChangedAgainst;
+  const scriptsRoot = dependencies.scriptsRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
   // An explicit --limit is a ceiling for BOTH push and pull (request size /
   // memory / slow-link timeout); only the default lets the loop go large.
@@ -3104,9 +3541,41 @@ export async function runLoop(config, options, dependencies = {}) {
   const BASE_BACKOFF_MS = 1000;
   const MAX_BACKOFF_MS = 60000;
 
+  // Taken once, before the loop: the reference the update check diffs
+  // against. null means the tree could not be observed COMPLETELY, and an
+  // incomplete baseline must disarm the whole detector rather than arm part
+  // of it (see collectInstallBaseline).
+  let installBaseline = null;
+  try { installBaseline = await collectInstallBaselineCall(scriptsRoot); }
+  catch { installBaseline = null; } // an observation failure is not evidence (#963)
+
   let catchUp = false; // start steady; the first cycle reveals any backlog
   let consecutiveFailures = 0;
   for (;;) {
+    // Checked at the cycle boundary, BEFORE any driver can be spawned: past
+    // this point the loop executes scripts from disk, and executing updated
+    // scripts from an engine holding pre-update code is the mixed-version
+    // state watch.sh refuses by name (#963). Returning -- not throwing --
+    // makes this a stand-down, not a failure: main() finishes and the
+    // process exits 0. The pidfile is left for `status` to call stale; its
+    // stale line already names `remote.sh sync start <team>`.
+    let updatedPath = null;
+    if (installBaseline !== null) {
+      try { updatedPath = await installChangedCall(scriptsRoot, installBaseline); }
+      catch { updatedPath = null; } // an observation failure is not evidence (#963)
+    }
+    if (updatedPath !== null && updatedPath !== undefined) {
+      try {
+        await eventCall("stand-down", {
+          reason: "install-updated",
+          team: config.local_team,
+          changed_path: String(updatedPath),
+          message: "the agmsg installation was updated while this engine was running, so it is still executing the code from before the update. Standing down rather than appearing to work.",
+          restart: `remote.sh sync start ${config.local_team}`,
+        });
+      } catch { /* logging is best-effort; the stand-down does not depend on it */ }
+      return;
+    }
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);
     const pullLimit = ceiling ?? LARGE_LIMIT;
     try {
@@ -3229,7 +3698,14 @@ function validateReprocessDriverPage(pending, limit, requestedAfter) {
   return { state: states[0], candidates, page };
 }
 
-export async function reprocessCycle(config, limit, dependencies = {}) {
+// scope "" (default): every quarantine status cmd_unlock may recover by
+// supplying new key material -- unchanged from before #1284. scope
+// "malformed": only rows the receiver itself failed to understand, the set
+// #1284's automatic (cmd_sync_start) and explicit (remote.sh reprocess)
+// paths target -- a newer parser can revisit those; it cannot fix
+// authentication_failed, corrupt_state or policy_violation, and pending_key
+// stays on the unlock path.
+export async function reprocessCycle(config, limit, dependencies = {}, scope = "") {
   const healthCall = dependencies.healthCall ?? health;
   const requestCall = dependencies.requestCall ?? request;
   const driverCall = dependencies.driverCall ?? driver;
@@ -3258,6 +3734,29 @@ export async function reprocessCycle(config, limit, dependencies = {}) {
   // floor + (current-floor), rather than only the current retained window.
   const authenticatedSequenceSpace = retentionFloor +
     (BigInt(capabilities.current_seq) - retentionFloor);
+  // Counted and announced BEFORE anything below applies a single row: this
+  // never advances the cursor or the read frontier (comment on
+  // storage_sync_reprocess), so any row it imports lands as unread the
+  // instant it lands, and a caller who did not expect that deserves the
+  // number first, not a surprised inbox after the fact.
+  //
+  // Scoped to `scope` being set (#1284's callers) only: cmd_unlock's default
+  // (unscoped) call must keep exactly the event stream and log content it
+  // had before this existed -- neither this extra walk nor its event fires
+  // there.
+  if (scope) {
+    let pendingAfter = null;
+    let pendingCount = 0;
+    for (;;) {
+      const pendingExtra = [String(limit), pendingAfter ?? "", scope];
+      const pendingPage = await driverCall("reprocess", config, [], pendingExtra);
+      const { candidates, page } = validateReprocessDriverPage(pendingPage, limit, pendingAfter);
+      pendingCount += candidates.length;
+      if (!page.has_more) break;
+      pendingAfter = page.next_after;
+    }
+    await eventCall("reprocess.pending", { count: pendingCount });
+  }
   const seenTokens = new Set();
   const seenSequences = new Set();
   for (;;) {
@@ -3265,7 +3764,9 @@ export async function reprocessCycle(config, limit, dependencies = {}) {
     if (pageCount > authenticatedSequenceSpace + 1n) {
       throw new Error("driver reprocess walk exceeds authenticated sequence space");
     }
-    const extra = [String(limit), ...(after === null ? [] : [after])];
+    const extra = scope ?
+      [String(limit), after ?? "", scope] :
+      [String(limit), ...(after === null ? [] : [after])];
     const pending = await driverCall("reprocess", config, [], extra);
     const { state, candidates, page } = validateReprocessDriverPage(pending, limit, after);
     sequence(state.transport_cursor, "transport_cursor");
@@ -3317,8 +3818,7 @@ export async function reprocessCycle(config, limit, dependencies = {}) {
       } else {
         records.push(record);
         if (record.status === "importable" &&
-            ["member_joined", "member_left", "member_renamed"].includes(
-              record.projection?.kind)) {
+            STORAGE_ROSTER_KINDS.includes(record.projection?.kind)) {
           pendingRosterRecords.push(record);
         }
       }
@@ -3327,7 +3827,7 @@ export async function reprocessCycle(config, limit, dependencies = {}) {
       const cursorRecord = { type: "sync_pull_cursor", next_after: state.transport_cursor };
       const rosterRecords = records.filter((record) =>
         record.status === "importable" &&
-        ["member_joined", "member_left", "member_renamed"].includes(record.projection?.kind));
+        STORAGE_ROSTER_KINDS.includes(record.projection?.kind));
       const messageRecords = records.filter((record) => !record.projection?.kind);
       if (rosterRecords.length + messageRecords.length + rotationRecords.length !==
           storageRecords.length) {
@@ -3351,8 +3851,9 @@ export async function reprocessCycle(config, limit, dependencies = {}) {
     }
     after = page.next_after;
   }
+  const remainingExtra = scope ? ["1", "", scope] : ["1"];
   const remaining = validateReprocessDriverPage(
-    await driverCall("reprocess", config, [], ["1"]), 1, null);
+    await driverCall("reprocess", config, [], remainingExtra), 1, null);
   const result = {
     count: total,
     imported_count: imported,
@@ -3435,6 +3936,35 @@ export async function resyncCycle(config, acceptedFloor, dependencies = {}) {
 // credential. What it shares with the normal pull is the part that must not
 // diverge -- evaluatePull decides what may be imported, then roster mutations
 // and chat records go through the same two drivers as a connected cycle.
+/**
+ * A line of progress for a command that is otherwise silent for minutes (#882).
+ *
+ * STDERR, NEVER STDOUT. `cmd_pull` captures this process's stdout as the result
+ * channel -- `result="$(... pull-bootstrap ...)"` -- so anything written there
+ * is invisible until the command finishes AND rides in the same stream the
+ * caller greps for `pull_bootstrap_result`. stderr is not redirected by that
+ * caller, so it reaches the operator live and changes no parsing.
+ *
+ * WHY IT EXISTS: a verifier ran this against a real server, saw nothing for
+ * five minutes, concluded it had hung, and killed it. On Linux the same command
+ * takes 312 seconds and succeeds. Silence and a stall were indistinguishable,
+ * so thirty minutes went into diagnosing a command that was working.
+ *
+ * The lines separate FETCHING from APPLYING on purpose. Applying spawns a child
+ * process per batch; fetching does not. When this stops moving, which line it
+ * stopped on says which half to look at -- and on Windows, where the report
+ * came from, that is the whole question.
+ */
+function pullProgress(startedAt, message) {
+  // Elapsed, because a terminal does not timestamp its own scrollback. Without
+  // it a report of "it printed this and then stopped" cannot say whether the
+  // stop was ten seconds or ten minutes -- and on the Linux run that finished,
+  // the whole thing took 312 seconds, so a slow phase and a stuck one look the
+  // same to whoever is watching.
+  const elapsed = Math.round((Date.now() - startedAt) / 1000);
+  process.stderr.write(`agmsg: [${elapsed}s] ${message}\n`);
+}
+
 export async function pullBootstrap(args, dependencies = {}) {
   const publicSnapshotCall = dependencies.publicSnapshotCall ?? publicSnapshot;
   const requestPublicCall = dependencies.requestPublicCall ?? requestPublic;
@@ -3452,6 +3982,25 @@ export async function pullBootstrap(args, dependencies = {}) {
 
   // There is no connected binding yet, so this one call validates itself
   // rather than going through the checks the rest of the pull relies on.
+  const pullStartedAt = Date.now();
+  // THE HOST, NEVER THE ENDPOINT. A hosted endpoint is `https://host/t/<token>`
+  // and that token IS the capability: anyone who reads it off a terminal, a
+  // screen share, or a pasted log can connect as this team. This line is the
+  // one people paste -- it exists because someone sat in front of a silent
+  // command for 79 minutes and then wrote an issue about it.
+  //
+  // `hostOf` rather than anything written here: it is `new URL(...).host`, which
+  // drops path, query, fragment AND userinfo, and is already the rule this file
+  // uses for the refusal record `status` prints. `remote.sh` holds the same rule
+  // in shell (`_remote_endpoint_display`), and the reason both drop the path
+  // before the userinfo is that an `@` inside a path would otherwise decide
+  // where the host ends -- a URL parser gets that right without being told.
+  //
+  // The team name is what makes host-only enough to name the destination: a
+  // team has one endpoint.
+  pullProgress(pullStartedAt,
+    `pulling ${team} from ${hostOf(serverUrl) ?? "an unreadable endpoint"}` +
+    " -- this can take several minutes");
   const teamSnapshot = await publicSnapshotCall(serverUrl, teamId);
   const config = {
     format_version: 1,
@@ -3475,8 +4024,16 @@ export async function pullBootstrap(args, dependencies = {}) {
   let imported = 0;
   let ageV1Envelopes = 0;
   for (;;) {
+    // The cursor is the SERVER's value, and this path does not put it through
+    // `sequence()` before using it. A canonical sequence is digits; anything
+    // else goes to a terminal as a placeholder rather than as itself, because
+    // this line is pasted and control characters travel.
+    const shownCursor = /^[0-9]{1,20}$/.test(cursor) ? cursor : "an unreadable cursor";
+    pullProgress(pullStartedAt,
+      `fetching messages after ${shownCursor} (${imported} pulled so far)`);
     const page = await requestPublicCall(config,
       `/v1/teams/${teamId}/messages?after=${cursor}&limit=${limit}`);
+    pullProgress(pullStartedAt, `applying ${page.messages.length} messages`);
     const records = [];
     for (const message of page.messages) {
       if (message.envelope?.cipher === "age-v1") ageV1Envelopes += 1;
@@ -3486,7 +4043,7 @@ export async function pullBootstrap(args, dependencies = {}) {
     const cursorRecord = { type: "sync_pull_cursor", next_after: page.next_after };
     const rosterRecords = records.filter((record) =>
       record.status === "importable" &&
-      ["member_joined", "member_left", "member_renamed"].includes(record.projection?.kind));
+      STORAGE_ROSTER_KINDS.includes(record.projection?.kind));
     const messageRecords = records.filter((record) => !record.projection?.kind);
     if (rosterRecords.length + messageRecords.length !== records.length) {
       throw new Error("pull bootstrap cannot apply this projection kind");
@@ -3566,7 +4123,7 @@ async function publicGet(serverUrl, path) {
   let response;
   try {
     response = await fetch(endpoint(serverUrl, path), {
-      headers: { "Agmsg-Protocol-Version": PROTOCOL },
+      headers: { "Agmsg-Protocol-Version": PROTOCOL, "Agmsg-Client-Version": clientVersion() },
       redirect: "error", signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
@@ -3626,10 +4183,65 @@ async function publicSnapshot(serverUrl, teamId) {
 // primitive, so the two sides of the connection pair -- the shell writing the
 // binding, this file writing the stored sync config -- serialize against each
 // other, not just against themselves. Spin bounded the same way (~10s).
-async function withTeamConfigLock(team, fn) {
+// Tracks the ONE team-config lock this process currently holds, so a
+// terminating signal can release it before Node's default disposition tears
+// the process down. There is at most one, because withTeamConfigLock is never
+// called reentrantly within a single process (measured: SIGTERM with no
+// handler installed skips a pending `finally` entirely -- the same failure
+// mode as SIGKILL, not just power loss, so the ordinary stop path can leak
+// this lock too).
+let heldTeamConfigLock = null; // { lockDir, holderPath, token } | null
+
+// Same ownership check as the shell side's _agmsg_lock_drop: remove the
+// holder and the directory only when the recorded token is still ours. An
+// operator may have removed a stuck lock and a successor taken the same path
+// between our write and this call; deleting blind would take the lock away
+// from whoever holds it now.
+//
+// Synchronous throughout, on purpose, and callable from a signal handler:
+// the token compare and both removals happen on one call stack with no
+// `await` anywhere in it, so process.exit() right after this returns can
+// never land mid-release the way it could when this read the holder back
+// asynchronously (nothing forces the event loop to run between here and the
+// exit call that follows it).
+function releaseTeamConfigLockSync(held) {
+  let seen;
+  try {
+    seen = /^token (.+)$/m.exec(readFileSync(held.holderPath, "utf8"))?.[1];
+  } catch { seen = undefined; }
+  if (seen !== held.token) return;
+  try { unlinkSync(held.holderPath); } catch { /* already gone */ }
+  try { rmdirSync(held.lockDir); } catch { /* already gone */ }
+}
+
+let teamConfigLockSignalHandlersInstalled = false;
+function installTeamConfigLockSignalHandlers() {
+  if (teamConfigLockSignalHandlersInstalled) return;
+  teamConfigLockSignalHandlersInstalled = true;
+  // $(128 + signum), the same convention registry-lock.sh's own traps use.
+  // Not `async`: the handler must run start-to-finish on one call stack, the
+  // same reason releaseTeamConfigLockSync is synchronous rather than a
+  // sequence of awaited I/O the exit below could outrun.
+  for (const [signal, exitCode] of [["SIGTERM", 143], ["SIGINT", 130]]) {
+    process.on(signal, () => {
+      const held = heldTeamConfigLock;
+      heldTeamConfigLock = null;
+      if (held) { try { releaseTeamConfigLockSync(held); } catch { /* best effort */ } }
+      process.exit(exitCode);
+    });
+  }
+}
+
+export async function withTeamConfigLock(team, fn) {
+  // Installed once, on first use: this changes shutdown behavior for the
+  // whole process (Node otherwise terminates on SIGTERM/SIGINT with no
+  // handler at all), so it is scoped to callers that actually take this lock
+  // rather than applied unconditionally to every subcommand in this file.
+  installTeamConfigLockSignalHandlers();
   const lockDir = join(dirname(teamConfigPath(team)), ".config.lock");
+  const holderPath = `${lockDir}.holder`;
   for (let attempt = 0; ; attempt += 1) {
-    try { await mkdir(lockDir); break; }
+    try { mkdirSync(lockDir); break; }
     catch (error) {
       if (error?.code !== "EEXIST") throw error;
       // Same exit as the shell side (registry-lock.sh): a holder that died
@@ -3645,10 +4257,31 @@ async function withTeamConfigLock(team, fn) {
       await new Promise((resolveSleep) => setTimeout(resolveSleep, 10));
     }
   }
+  // WHO HOLDS IT (#778's own reasoning, mirrored from registry-lock.sh): a
+  // bare lock directory says something is holding it and nothing about what.
+  //
+  // mkdirSync above, the writeFileSync below, and recording the hold in
+  // heldTeamConfigLock all run on one call stack with no `await` between
+  // them. A signal is only ever delivered between event-loop turns, never
+  // inside a run of synchronous code, so there is no window where the
+  // directory exists on disk but nothing in this process yet knows it owns
+  // it -- which is exactly the gap the first version of this fix left open:
+  // mkdir and the holder write were two separate awaited calls, so a SIGTERM
+  // landing between them found heldTeamConfigLock still null and exited over
+  // an empty, un-annotated directory, the original bug moved into a
+  // narrower window instead of closed.
+  const token = randomBytes(16).toString("hex");
+  const held = { lockDir, holderPath, token };
+  try {
+    writeFileSync(holderPath,
+      `token ${token}\npid ${process.pid}\ncommand remote-sync.mjs\nhost ${hostname()}\n`);
+  } catch { /* best-effort: the lock is held as of the mkdir above regardless */ }
+  heldTeamConfigLock = held;
   try {
     return await fn();
   } finally {
-    await rmdir(lockDir).catch(() => {});
+    heldTeamConfigLock = null;
+    releaseTeamConfigLockSync(held);
   }
 }
 
@@ -3746,7 +4379,13 @@ async function main() {
     await resyncCycle(config, args["accept-floor"] ?? "");
     return;
   }
-  if (command === "reprocess") { await reprocessCycle(config, limit); return; }
+  if (command === "reprocess") {
+    if (args.scope !== undefined && args.scope !== "malformed") {
+      throw new Error("scope must be 'malformed' when given");
+    }
+    await reprocessCycle(config, limit, {}, args.scope ?? "");
+    return;
+  }
   // An explicit --limit caps both push and pull; the default lets pull go large.
   const explicitCeiling = args.limit !== undefined ? Math.min(1000, limit) : null;
   if (command === "once") {

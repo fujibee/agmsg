@@ -73,6 +73,7 @@ export default {
       "grok-build": "xAI's build/coding agent.",
       hermes: "Lightweight relay agent.",
       antigravity: "Agentic coding environment.",
+      devin: "Autonomous AI software engineer CLI.",
     },
   },
   showcase: {

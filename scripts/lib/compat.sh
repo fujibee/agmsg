@@ -150,7 +150,14 @@ compat_get_comm() {
       fi
       ;;
     *)
-      ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null
+      # `ps -o comm=` prints the executable path on macOS. Piping it through
+      # `xargs basename` splits that path on whitespace (and eats quotes), so a
+      # binary under e.g. "~/Library/Application Support/..." resolves to
+      # "Application". Take the basename of the whole string instead.
+      local _comm
+      _comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+      [ -n "$_comm" ] || return 1
+      basename -- "$_comm" 2>/dev/null
       ;;
   esac
 }
@@ -211,4 +218,33 @@ compat_file_mtime() {
     macos)  stat -f %m "$file" 2>/dev/null ;;
     *)      stat -c %Y "$file" 2>/dev/null ;;
   esac
+}
+
+# Batch variant of compat_file_mtime: read NUL-separated paths on stdin
+# (find -print0) and emit one "<mtime><TAB><path>" line per file, spawning
+# one stat per argv batch instead of one process chain per file.
+#
+# Why a batch form exists at all: `mtime=$(compat_file_mtime "$f")` in a
+# per-file loop pays a command-substitution subshell + uname + stat for
+# every file (the subshell also discards the platform memo each time). On
+# Windows/MSYS2, where process creation is orders of magnitude costlier
+# than a Linux fork, that turns a scan of a few thousand files into
+# minutes of wall clock. xargs keeps each stat invocation under the argv
+# limit (cf. the E2BIG failures in #882), so arbitrarily long lists stay
+# safe.
+#
+# A path that vanishes between the listing and the stat batch (a real race
+# against a live writer) makes stat report an error for that file and exit
+# nonzero, but every surviving file is still printed -- so the error is
+# suppressed and the status discarded rather than letting one dead file
+# starve the caller of the whole list. Empty input is likewise quiet: stat
+# with no operands fails, which the same suppression covers.
+compat_files_mtime_0() {
+  _agmsg_detect_platform
+  local tab
+  tab=$(printf '\t')
+  case "$_agmsg_platform" in
+    macos)  xargs -0 stat -f "%m${tab}%N" 2>/dev/null ;;
+    *)      xargs -0 stat -c "%Y${tab}%n" 2>/dev/null ;;
+  esac || true
 }

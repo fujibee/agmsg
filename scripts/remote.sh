@@ -22,6 +22,8 @@ set -euo pipefail
 #     onboarding and the courier `fetch` path use --bundle/--confirm-digest.
 #   remote.sh status [<team>] [--json]
 #   remote.sh sync start <team>
+#   remote.sh sync restart <team>
+#   remote.sh reprocess <team>
 #   remote.sh disconnect <team>
 #   remote.sh forget [--yes] <team>
 #
@@ -68,6 +70,10 @@ source "$SCRIPT_DIR/lib/node.sh"
 # keyed on watcher-only concepts (session/actas) this engine does not have.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/instance-id.sh"
+# agmsg_sha256 -- the age-v1 checkpoint below is a SHA-256 of the snapshot, and
+# `shasum` is absent in Git for Windows' Git Bash.
+# shellcheck source=lib/hash.sh
+source "$SCRIPT_DIR/lib/hash.sh"
 
 TEAMS_DIR="$CONNECTION_ROOT/teams"
 CRED_ROOT="$CONNECTION_ROOT/run/remote-credentials"
@@ -221,6 +227,113 @@ _remote_prompt_read() {
 # token, no state change, safe whether or not the team is already connected.
 # Currently just the age-binary-presence check (§8) — the natural home for
 # any future preflight check added later.
+# WHICH DIRECTORY TO REMOVE — the thing that was missing (#865).
+#
+# A registry lock left behind by a killed process is never broken by anything:
+# nothing expires, nothing sweeps, and acquire waits out its budget and fails
+# with `timed out acquiring registry lock`, which describes contention. The
+# operator's next move is to look for the process holding it; there is no
+# process, and no message anywhere names the directory to remove. A machine in
+# that state cannot get itself out.
+#
+# This REPORTS and removes nothing. The report alone ends "cannot recover":
+# it says which team, what the lock records, whether that process is running,
+# and prints the removal as a line to paste. Sweeping automatically is a
+# separate decision with a worse failure mode — a wrong verdict takes a lock
+# away from a process that is using it — and it is not made here.
+#
+# Not a check, so no `[x]`/`[ ]` and no effect on the exit code: a lock that
+# exists is not a failed prerequisite, and a doctor that exits non-zero because
+# a team is busy would be wrong every time somebody is joining.
+# One lock, reported. Split out so the two ways of finding them — a named team,
+# or a sweep — share this body and neither has to feed a loop from a string.
+# Joining the paths into one variable and reading it back would mean either an
+# unquoted heredoc, which runs command substitution on a team name, or unquoted
+# word splitting, which globs one.
+_remote_doctor_one_lock() {
+  local lock="$1" team holder pid state q
+  [ -d "$lock" ] || return 0
+  team="${lock%/.config.lock}"
+  team="${team##*/}"
+  if [ "$shown" -eq 0 ]; then
+    echo "Registry locks:"
+    shown=1
+  fi
+  holder="$lock.holder"
+  pid=""
+  [ -f "$holder" ] && pid="$(sed -n 's/^pid //p' "$holder" 2>/dev/null | head -1)"
+  # THREE ANSWERS, NOT TWO. "held" and "the holder is gone" are what the
+  # operator acts on; "cannot tell" is neither — a lock this could not ask
+  # about, and saying it is gone would be a guess. The guess that costs is the
+  # one that calls a live lock dead and then prints the command to remove it.
+  #
+  # WHICH IS WHY THE NUMBER IS VALIDATED BEFORE IT IS ASKED ABOUT.
+  # `_agmsg_pid_alive_local` returns false for a value it never put to the
+  # process table at all — non-numeric, leading zero, past the POSIX ceiling —
+  # and folding that into "not running" turned `pid not-a-pid` into a stale
+  # verdict with a removal beside it (raised in review). The same ceiling the
+  # helper uses, for the same reason it uses it.
+  if [ -z "$pid" ]; then
+    state="cannot tell — no holder recorded"
+  elif ! _agmsg_pid_valid "$pid" 2147483647; then
+    state="cannot tell — the holder record's pid is not a usable number"
+  elif _agmsg_pid_alive_local "$pid"; then
+    state="held — pid $pid is running"
+  else
+    state="stale — pid $pid is not running"
+  fi
+  echo "  $team: $state"
+  if [ -f "$holder" ]; then
+    echo "    records: $(tr '\n' ' ' < "$holder" 2>/dev/null)"
+  fi
+  echo "    created: $(ls -ld "$lock" 2>/dev/null || printf '%s (cannot stat)' "$lock")"
+  # QUOTED, because this is meant to be pasted. The store root and the team
+  # name can both contain a space, and an unquoted path becomes several
+  # arguments to `rm -r`. Same scheme as lib/shquote.sh.
+  q="$(printf "'%s'" "$(printf '%s' "$lock" | sed "s/'/'\\\\''/g")")"
+  if [ "$state" = "held — pid $pid is running" ]; then
+    echo "    a command is using this team. Nothing to do."
+  else
+    echo "    if no agmsg command is running for this team, remove it:"
+    echo "      rm -r $q"
+    [ -f "$holder" ] && echo "      rm -f $q.holder"
+    echo "    nothing but the lock lives in there — it holds no team data."
+  fi
+}
+
+_remote_doctor_locks() {
+  local only_team="${1:-}" lock shown=0
+  # A NAMED TEAM IS LOOKED AT DIRECTLY, and the sweep does not stop at `*`.
+  #
+  # Team names may begin with a dot — the validator rejects empty, `.`, `..`, a
+  # leading `-`, `/`, `\` and control characters, and nothing else — and `*`
+  # does not match a leading dot, so `.foo` was invisible to the sweep (raised
+  # in review). The two extra patterns cover `.foo` and `..foo`; `.` and `..`
+  # themselves cannot be team names.
+  #
+  # Globs rather than `find`, which is not on every PATH this tree is required
+  # to run under. Quoted, so a team name containing a space stays one path.
+  if [ -n "$only_team" ]; then
+    # VALIDATED BEFORE IT BECOMES A PATH. `cmd_doctor` takes its argument and,
+    # until this line, only ever put it in a header sentence — so nothing had
+    # ever checked it. Building `$TEAMS_DIR/$only_team/.config.lock` from it
+    # turned `doctor ../outside` into a read of a directory outside the store,
+    # reported with its records and a `rm -r` to paste (raised in review). The
+    # sweep it replaced never reached one only because no team was named that.
+    #
+    # The same validator every other team-taking path uses: it rejects empty,
+    # `.`, `..`, `/`, `\`, a leading `-` and control characters, and allows a
+    # leading dot and a space, which this reports on and must keep.
+    agmsg_validate_team_name "$only_team" || return 1
+    _remote_doctor_one_lock "$TEAMS_DIR/$only_team/.config.lock"
+  else
+    for lock in "$TEAMS_DIR"/*/.config.lock "$TEAMS_DIR"/.[!.]*/.config.lock "$TEAMS_DIR"/..?*/.config.lock; do
+      _remote_doctor_one_lock "$lock"
+    done
+  fi
+  [ "$shown" -eq 0 ] || echo
+}
+
 cmd_doctor() {
   local team="${1:-}"
   echo "Checking prerequisites${team:+ for team '$team'}..."
@@ -249,6 +362,26 @@ cmd_doctor() {
     echo "See https://github.com/FiloSottile/age for other install methods."
   fi
   echo
+  # Reported with age, and optional for the same reason: only end-to-end
+  # encryption needs it. Not failed=1 -- a machine syncing with cipher "none"
+  # is fully functional without it. Listed at all because when it IS missing
+  # the symptom lands after the team is registered, which reads like a server
+  # problem rather than a missing tool.
+  # "usable", not "on PATH": presence and usability are different questions and
+  # this line answers the second one -- a tool that is installed and fails, or
+  # that returns the wrong digest for a known input, reports unusable here.
+  if agmsg_sha256_usable; then
+    echo "  [x] usable SHA-256 tool  (optional)"
+  else
+    echo "  [ ] usable SHA-256 tool  (optional)"
+    echo
+    echo "End-to-end encryption needs one of 'shasum', 'sha256sum' or 'openssl' for key"
+    echo "fingerprints and the age-v1 checkpoint. Remote sync without --e2ee does not use it:"
+    echo "  macOS (Homebrew):      brew install openssl"
+    echo "  Debian/Ubuntu:         sudo apt install coreutils"
+    echo "  Windows (Git Bash):    ships with Git for Windows; reinstall it if 'sha256sum' is missing"
+  fi
+  echo
   if agmsg_python3_usable; then
     echo "  [x] python3 on PATH"
   else
@@ -275,8 +408,16 @@ cmd_doctor() {
     failed=1
   fi
   echo
+  # A REJECTED TEAM NAME ENDS THE COMMAND. The validator prints why; carrying on
+  # to "All prerequisite checks passed." after refusing to look at what was
+  # asked about would report success for a question nobody answered.
+  _remote_doctor_locks "$team" || exit 1
   if [ "$failed" -eq 0 ]; then
-    echo "All checks passed."
+    # NARROWED, because a lock report can sit above this line. "All checks
+    # passed." after "stale — pid 4711 is not running" and a `rm -r` reads as
+    # cancelling it, and the exit code deliberately does not move: a locked team
+    # is not a failed prerequisite (raised in review).
+    echo "All prerequisite checks passed."
   else
     echo "Some checks failed. See above."
     exit 1
@@ -285,54 +426,210 @@ cmd_doctor() {
 
 # --- shared HTTP helpers (B1: never put secrets in curl's own argv/ps) ---
 
+# Same rule remote-sync.mjs's clientVersion() applies, so the two report the
+# same value from the same install: line 1 of SKILL_DIR/VERSION, printable
+# ASCII only, capped at 64 characters, "unknown" when it cannot be produced.
+# Computed once per process and cached -- pull calls through here twice in one
+# run (capabilities, then members). tr under LC_ALL=C strips on raw byte
+# value, not a locale-dependent character class, for the same reason
+# cmd_sync_start's digit-by-digit check avoids a bracket expression elsewhere
+# in this file.
+_REMOTE_CLIENT_VERSION=""
+_remote_client_version() {
+  if [ -n "$_REMOTE_CLIENT_VERSION" ]; then
+    printf '%s' "$_REMOTE_CLIENT_VERSION"
+    return
+  fi
+  local line="" sanitized=""
+  if [ -f "$SKILL_DIR/VERSION" ]; then
+    # read's own exit status is not the signal here: it returns 1 whenever the
+    # line it read had no trailing newline (a file written without one is
+    # still one readable line), and by then it has already set $line -- so
+    # `|| line=""` would discard a good read on exactly that shape. `|| true`
+    # only stops that nonzero status from tripping this file's `set -e`; it
+    # does not touch $line. Only the variable's own default ("", from the
+    # local above) speaks for a read that genuinely produced nothing, e.g.
+    # the file could not be opened.
+    IFS= read -r line < "$SKILL_DIR/VERSION" 2>/dev/null || true
+  fi
+  # sed, not tr: this function's dependency footprint is curated (see this
+  # file's own test sandboxes), and sed is already a dependency of the curl
+  # helpers below (_remote_curl_quote) -- no reason to add a second tool for
+  # the same class of job. LC_ALL=C is set on BOTH commands, not just the
+  # first: an env-var prefix binds to the one command it precedes, so
+  # `LC_ALL=C printf ... | sed ...` left sed running in the caller's own
+  # locale. Under a UTF-8 locale, an invalid byte in VERSION (this line is
+  # read from a file this process does not control) can then make a
+  # multibyte-aware sed treat the bracket expression as a character class
+  # instead of a byte range and fail outright ("illegal byte sequence") with
+  # output on stderr, rather than simply not matching that byte -- the
+  # opposite of "drop what does not belong in a header value". Under
+  # LC_ALL=C on both, matching is byte-oriented and that failure mode does
+  # not arise; stderr is also discarded regardless, so a version string
+  # stays silent on this path the same way the JS side's try/catch is.
+  # `|| sanitized=""`, not left unguarded: the substitution runs inside a
+  # command substitution, which does not inherit this file's errexit on its
+  # own, so a nonzero sed here would otherwise leave whatever partial output
+  # it printed before failing sitting in $sanitized -- truncated to 64
+  # characters and sent as though it were a complete, validated value. Any
+  # failure of the pipeline now discards that partial output outright and
+  # falls through to the "unknown" fallback below instead.
+  sanitized="$(LC_ALL=C printf '%s' "$line" | LC_ALL=C sed 's/[^ -~]//g' 2>/dev/null)" || sanitized=""
+  sanitized="${sanitized:0:64}"
+  sanitized="${sanitized#"${sanitized%%[![:space:]]*}"}"
+  sanitized="${sanitized%"${sanitized##*[![:space:]]}"}"
+  _REMOTE_CLIENT_VERSION="${sanitized:-unknown}"
+  printf '%s' "$_REMOTE_CLIENT_VERSION"
+}
+
+# Escapes \ and " for embedding inside a curl -K config's double-quoted
+# value. "printable ASCII" above still admits both characters, and curl's
+# config parser treats a backslash as an escape there (see _remote_curl_path
+# below) -- so an unescaped " in a value that ultimately comes from a file
+# outside this script's control (VERSION) could close the quoted value early
+# and let the rest of the line be read as a further config directive.
+_remote_curl_quote() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# _remote_curl_path <path> — render <path> for embedding INSIDE a curl -K config
+# file. On Windows/Git Bash, MSYS translates POSIX paths to Windows form only for
+# a native binary's argv, NOT for paths read from a config file's contents, so an
+# embedded /tmp or /c/.. path is unopenable by native curl (→ curl fails → the
+# caller's HTTP 000). cygpath -m yields a Windows drive path with FORWARD slashes;
+# -w is wrong here because curl's config parser treats backslashes as escapes.
+# Capability-gated on cygpath so macOS/Linux (no cygpath) are unchanged.
+_remote_curl_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
 # _remote_http_post_json <url> <body_file> <out_body_file> <out_header_file> -> prints http_code
 # Posts <body_file> as the request body via a curl -K config file, so the
 # body (which holds the token) never appears in curl's own argv/ps. The
 # config file is 0600 and removed immediately after the call.
 _remote_http_post_json() {
   local url="$1" body_file="$2" out_file="$3" header_file="$4" cfg http_code \
-    fifo_dir header_fifo copier_pid curl_output curl_status=0
-  cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
-  fifo_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-header-pipe.XXXXXX")"
-  header_fifo="$fifo_dir/header"
-  mkfifo "$header_fifo"
+    work_dir header_fifo copier_pid curl_output curl_status=0 curl_err
+  # ONE ALLOCATION BEFORE THE TRAP, AND EVERYTHING ELSE INSIDE IT.
+  #
+  # Two things go wrong with the ordering this replaces, and this shape is the
+  # smallest one that closes both.
+  #
+  # A trap cannot expand what it cannot see. An EXIT trap set inside a function
+  # runs after that function's frame is gone, so a single-quoted body expands
+  # `$cfg` in the CALLER's scope, where no local of that name exists. It removes
+  # "" and returns 0, so the cleanup reads as working. Measured on bash 3.2.57
+  # and 5.3.15: a local is EMPTY inside an EXIT trap fired by errexit from
+  # within the function. `printf %q` fixes the value at set time and survives a
+  # TMPDIR containing spaces.
+  #
+  # And anything created BEFORE the trap is armed is unprotected. Making the
+  # config, then a directory, then arming the trap leaves a window where the
+  # second allocation fails and the first is stranded -- including a 0600 config
+  # naming the request body. Reordering cannot close it, because there is always
+  # a first allocation. So there is exactly one, and everything else is made
+  # inside a directory that is already condemned.
+  #
+  # It also removes a hazard rather than guarding it: the caller's header file
+  # lives OUTSIDE this directory, so `rm -rf` cannot reach it even on the marker
+  # path below, where `header_fifo` IS `header_file`.
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-curl.XXXXXX")"
+  trap "rm -rf $(printf '%q' "$work_dir")" EXIT INT TERM
+  cfg="$work_dir/config"
+  curl_err="$work_dir/stderr"
+  : > "$cfg"
   chmod 600 "$cfg"
-  trap 'rm -f "$cfg" "$header_fifo"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
-  # Reaped on both normal paths below (waited on success, killed and waited on
-  # failure), so this is short-lived by construction -- but the EXIT trap only
-  # removes files, it does not kill the copier. A signal arriving before curl
-  # opens the fifo therefore leaves it blocked on open() with no writer ever
-  # coming, and an inherited fd 3 would then hold a bats test file open to the
-  # timeout. Closing the fds costs nothing and removes that one path.
-  python3 "$SCRIPT_DIR/internal/bounded-copy.py" 65536 < "$header_fifo" > "$header_file" 3>&- 4>&- &
-  copier_pid=$!
+  # The headers go through a fifo so a hostile or broken server cannot make us
+  # buffer an unbounded response — bounded-copy.py enforces the ceiling while
+  # the transfer is still running. That mechanism needs a real named pipe.
+  #
+  # On Windows/Git Bash there is no real named pipe to have: MSYS emulates
+  # mkfifo with a .lnk file that only MSYS-aware programs understand, and curl
+  # there is a NATIVE binary. It cannot open what mkfifo made, so it fails and
+  # the caller sees the "000" it reports for every failure alike.
+  #
+  # Where cygpath exists, dump straight to the destination file and skip both
+  # the fifo and the copier. That gives up streaming enforcement of the size
+  # ceiling on that platform — curl's own `max-filesize` still applies to the
+  # BODY, and the header dump is what becomes unbounded. Stated rather than
+  # hidden, because it is a real difference between the platforms and not a
+  # detail of how the file is named.
+  #
+  # Gated on `command -v cygpath`, not on an OS name. Say what that probe
+  # actually asks, because it is narrower than the thing we care about: it is a
+  # CAPABILITY MARKER for an environment where MSYS fifos and a native curl
+  # coexist -- it does not test whether a real fifo can be made, and nothing
+  # here does. An earlier version of this comment claimed it did, which would
+  # have told the next reader that a machine passing the probe had been checked
+  # for the property that matters.
+  if command -v cygpath >/dev/null 2>&1; then
+    header_fifo="$header_file"
+    : > "$header_fifo"
+    copier_pid=""
+  else
+    header_fifo="$work_dir/header"
+    mkfifo "$header_fifo"
+    # Reaped on both normal paths below (waited on success, killed and waited on
+    # failure), so this is short-lived by construction -- but the EXIT trap only
+    # removes files, it does not kill the copier. A signal arriving before curl
+    # opens the fifo therefore leaves it blocked on open() with no writer ever
+    # coming, and an inherited fd 3 would then hold a bats test file open to the
+    # timeout. Closing the fds costs nothing and removes that one path.
+    python3 "$SCRIPT_DIR/internal/bounded-copy.py" 65536 < "$header_fifo" > "$header_file" 3>&- 4>&- &
+    copier_pid=$!
+  fi
   {
     printf 'url = "%s"\n' "$url"
     printf 'request = "POST"\n'
     printf 'header = "Content-Type: application/json"\n'
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
-    printf 'dump-header = "%s"\n' "$header_fifo"
+    printf 'header = "Agmsg-Client-Version: %s"\n' "$(_remote_curl_quote "$(_remote_client_version)")"
+    printf 'dump-header = "%s"\n' "$(_remote_curl_path "$header_fifo")"
     printf 'connect-timeout = "10"\n'
     printf 'max-time = "15"\n'
     printf 'max-filesize = "2097152"\n'
-    printf 'data = "@%s"\n' "$body_file"
+    printf 'data = "@%s"\n' "$(_remote_curl_path "$body_file")"
   } > "$cfg"
-  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null); then
+  # Do not discard curl's stderr. On failure it is the only record of WHY, and
+  # the caller only ever sees the HTTP code -- which this function reports as
+  # "000" for every kind of failure alike. A Windows run spent a long time on a
+  # bare 000 whose cause (curl could not open a path embedded in the config)
+  # was sitting in the stderr this line was throwing away.
+  #
+  # Captured rather than passed through, and shown only when curl actually
+  # failed: on the success path curl -sS is already silent, and a stray write
+  # to stderr here would land in the middle of a caller's output.
+  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>"$curl_err"); then
     :
   else
     curl_status=$?
   fi
+  # THE DIAGNOSIS COMES AFTER THE OUTCOME IS SETTLED, AND CANNOT CHANGE IT.
+  #
+  # This used to be one `&& && cat` line placed before the branch below. Under
+  # `set -e` a failing `cat` -- a closed stderr, a reader that went away, a full
+  # disk -- ends the function on the spot: the copier is never reaped, the
+  # work_dir is never removed, and the caller gets no code at all instead of the
+  # "000" this helper promises for every failure. Being unable to explain a
+  # failure must not turn it into a different failure.
+  #
+  # So: reap and decide first, then write the diagnosis best-effort.
   if [ "$curl_status" -ne 0 ]; then
-    kill "$copier_pid" 2>/dev/null || true
-    wait "$copier_pid" 2>/dev/null || true
+    [ -n "$copier_pid" ] && { kill "$copier_pid" 2>/dev/null || true; wait "$copier_pid" 2>/dev/null || true; }
     http_code="000"
-  elif wait "$copier_pid"; then
+  elif [ -z "$copier_pid" ] || wait "$copier_pid"; then
     http_code="$curl_output"
   else
     http_code="000"
   fi
-  rm -f "$cfg" "$header_fifo"
-  rmdir "$fifo_dir" 2>/dev/null || true
+  if [ "$curl_status" -ne 0 ] && [ -s "$curl_err" ]; then
+    cat "$curl_err" >&2 || true
+  fi
+  # One directory holds the config, the error file and the fifo, so the normal
+  # path removes exactly what the trap would have. The caller's header file is
+  # not in it and was never at risk from this line -- which is the point of the
+  # layout rather than a condition to remember.
+  rm -rf "$work_dir"
   trap - EXIT INT TERM
   printf '%s' "$http_code"
 }
@@ -342,28 +639,114 @@ _remote_http_post_json() {
 # Nothing else is sent, because there is nothing else to send: this protocol
 # carries no credential at all (see cmd_connect).
 _remote_http_get_json() {
-  local url="$1" team_id="$2" out_file="$3" cfg curl_output curl_status=0
-  cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
+  local url="$1" team_id="$2" out_file="$3" cfg curl_output curl_status=0 \
+    curl_err work_dir
+  # One allocation, then the trap, then everything else inside it -- the same
+  # shape as the POST helper and for the same two reasons. A trap set inside a
+  # function cannot expand that function's locals when it fires, so the path is
+  # baked in with printf %q; and anything created before the trap is armed is
+  # unprotected, so only one thing is.
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-curl.XXXXXX")"
+  trap "rm -rf $(printf '%q' "$work_dir")" EXIT INT TERM
+  cfg="$work_dir/config"
+  curl_err="$work_dir/stderr"
+  : > "$cfg"
   chmod 600 "$cfg"
-  trap 'rm -f "$cfg"' EXIT INT TERM
   {
     printf 'url = "%s"\n' "$url"
     printf 'request = "GET"\n'
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
+    printf 'header = "Agmsg-Client-Version: %s"\n' "$(_remote_curl_quote "$(_remote_client_version)")"
     printf 'header = "Agmsg-Team-ID: %s"\n' "$team_id"
     printf 'connect-timeout = "10"\n'
     printf 'max-time = "15"\n'
     printf 'max-filesize = "2097152"\n'
   } > "$cfg"
-  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null); then
+  # Same reason as the POST helper: discarding stderr leaves "000" as the only
+  # thing anyone sees, and "000" is what this reports for every failure alike.
+  # `pull` goes through here, so a failure on this path was as undiagnosable as
+  # the connect one that cost a Windows run its afternoon.
+  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>"$curl_err"); then
     :
   else
     curl_status=$?
   fi
+  # The outcome is settled BEFORE the diagnosis is written, and the write is
+  # best-effort. As one fatal `&&` chain this line ended the function whenever
+  # `cat` failed -- a closed stderr, a reader that went away -- so being unable
+  # to explain a failure returned no code at all instead of the "000" this
+  # helper promises. Reviewed and reversed on the POST side; the same shape
+  # would have been wrong here.
   [ "$curl_status" -eq 0 ] || curl_output="000"
-  rm -f "$cfg"
+  if [ "$curl_status" -ne 0 ] && [ -s "$curl_err" ]; then
+    cat "$curl_err" >&2 || true
+  fi
+  rm -rf "$work_dir"
   trap - EXIT INT TERM
   printf '%s' "$curl_output"
+}
+
+# _remote_archive_replaced_binding <cfg_escaped> <new_server_instance_id> \
+#   <new_remote_team_id> <new_protocol_version> <stamp>
+#
+# Echoes the config document with the current $.remote_binding moved into
+# $.previous_bindings, when — and only when — the binding being written names
+# a DIFFERENT identity (#849). The caller passes the SQL-escaped document and
+# re-escapes what comes back before splicing it into its own write.
+#
+# EVERY site that replaces $.remote_binding wholesale must run its document
+# through this first. There are two such writers — _remote_write_binding
+# below, and cmd_pull's bind-after-bootstrap write — and the non-destruction
+# invariant of #849 holds at the writer boundary only if both archive. (The
+# binding_revision-only touch-ups elsewhere replace nothing and are not
+# writers in this sense.)
+#
+# One entry per (server_instance_id, remote_team_id, protocol_version): an
+# entry for the identity being archived is replaced by the newer copy, and an
+# entry matching the identity being written becomes the live binding again
+# and leaves the archive. The array is therefore bounded by the number of
+# distinct such identity tuples this team has ever been bound to -- one per
+# server in the common case, more if the same server re-registers the team
+# or the protocol version moves -- never by how often the team moved
+# between them.
+#
+# `capabilities` is dropped from the archived copy: it is refetched on every
+# connect, and an archived copy would be the one stale snapshot nobody
+# re-reads. Restoring a previous binding is a reconnect to its endpoint --
+# which refetches -- never a copy of the archived object back into
+# $.remote_binding.
+#
+# A current binding with no server_instance_id never completed a
+# registration; there is no partition behind it to point back to, so it is
+# replaced without being archived, same as before.
+_remote_archive_replaced_binding() {
+  local cfg_escaped="$1" new_instance_sql new_team_sql pv="$4" stamp="$5"
+  new_instance_sql="$(_agmsg_sqlesc "$2")"
+  new_team_sql="$(_agmsg_sqlesc "$3")"
+  agmsg_sqlite_mem \
+    "WITH cfg(doc) AS (SELECT '$cfg_escaped'),
+     cur(b) AS (SELECT json_extract(doc, '\$.remote_binding') FROM cfg),
+     kept(arr) AS (SELECT coalesce((
+       SELECT json_group_array(json(value))
+         FROM cfg, json_each(coalesce(json_extract(cfg.doc, '\$.previous_bindings'), '[]'))
+        WHERE NOT (json_extract(value, '\$.server_instance_id') IS json_extract((SELECT b FROM cur), '\$.server_instance_id')
+               AND json_extract(value, '\$.remote_team_id')     IS json_extract((SELECT b FROM cur), '\$.remote_team_id')
+               AND json_extract(value, '\$.protocol_version')   IS json_extract((SELECT b FROM cur), '\$.protocol_version'))
+          AND NOT (json_extract(value, '\$.server_instance_id') IS '$new_instance_sql'
+               AND json_extract(value, '\$.remote_team_id')     IS '$new_team_sql'
+               AND json_extract(value, '\$.protocol_version')   IS $pv)), '[]'))
+     SELECT CASE
+       WHEN (SELECT b FROM cur) IS NOT NULL
+        AND json_extract((SELECT b FROM cur), '\$.server_instance_id') IS NOT NULL
+        AND NOT (json_extract((SELECT b FROM cur), '\$.server_instance_id') IS '$new_instance_sql'
+             AND json_extract((SELECT b FROM cur), '\$.remote_team_id')     IS '$new_team_sql'
+             AND json_extract((SELECT b FROM cur), '\$.protocol_version')   IS $pv)
+       THEN json_set(doc, '\$.previous_bindings',
+              json_insert((SELECT arr FROM kept), '\$[#]',
+                json(json_set(json_remove((SELECT b FROM cur), '\$.capabilities'),
+                              '\$.replaced_at', '$(_agmsg_sqlesc "$stamp")'))))
+       ELSE doc
+     END FROM cfg;"
 }
 
 # _remote_write_binding <cfg> <endpoint> <binding_cipher> <resp_file>
@@ -371,8 +754,10 @@ _remote_http_get_json() {
 # credential is stored: the snapshot holds nothing that cannot be fetched
 # again, and the team_id is a value we minted ourselves.
 #
-# ONE writer for both the first connect and the adopt path below. Two copies of
-# this object would drift, and the second copy is the one nobody re-reads.
+# ONE writer for both the first connect and the adopt path below — but NOT
+# for every path: cmd_pull binds after its bootstrap with a write of its own,
+# which is why the archive step above is a shared primitive rather than a
+# private step of this function.
 _remote_write_binding() {
   local cfg="$1" endpoint="$2" binding_cipher="$3" resp_file="$4" \
     expected_binding_revision="${5:-}"
@@ -407,6 +792,18 @@ _remote_write_binding() {
     fi
   fi
   cfg_escaped="$(sed "s/'/''/g" "$cfg")"
+  # A write that points the team at a DIFFERENT server must not orphan the
+  # binding it replaces (#849). The local sync rows and keys for the old server
+  # survive this write untouched -- they are keyed on (server_instance_id,
+  # remote_team_id, protocol_version) -- but the endpoint string in the binding
+  # is the only pointer back to them, so overwriting it strands data that is
+  # still on disk. The shared archive primitive above moves the current
+  # binding into $.previous_bindings, a sibling key the wholesale json_set on
+  # $.remote_binding never touches.
+  local archived_doc
+  archived_doc="$(_remote_archive_replaced_binding "$cfg_escaped" \
+    "$server_instance_id" "$remote_team_id" "$protocol_version" "$connected_at")"
+  cfg_escaped="$(printf '%s' "$archived_doc" | sed "s/'/''/g")"
   updated=$(agmsg_sqlite_mem \
     "SELECT json_set('$cfg_escaped', '\$.remote_binding', json_object(
        'endpoint', '$(_agmsg_sqlesc "$endpoint")',
@@ -754,9 +1151,16 @@ _remote_resolve_team_id() {
   # malformed candidate -- and it needs to reach the operator, not get
   # replaced by a single line that names two different causes at once and
   # lets the reader guess which one happened.
+  # The status is captured ON the assignment, not read bare on the next line:
+  # under errexit a bare failing assignment ends the shell before either the
+  # `status=$?` or the message below it (#1025). Today's sole caller happens to
+  # suppress that (its `|| exit 1` disables errexit inside the substitution —
+  # measured on bash 5.3 and 3.2), but a bare call dies silently on both, and
+  # this function should not depend on how it is invoked for its own error
+  # report to exist.
+  status=0
   out="$("$SCRIPT_DIR/remote-sync.sh" resolve-team \
-    --endpoint "$endpoint" --name "$name")"
-  status=$?
+    --endpoint "$endpoint" --name "$name")" || status=$?
   if [ "$status" -ne 0 ]; then
     echo "agmsg: could not look up '$name'" >&2
     return 1
@@ -927,9 +1331,17 @@ cmd_pull() {
   case "$pulled_protocol" in ''|*[!0-9]*)
     echo "agmsg: server answered with an invalid protocol version" >&2; exit 1 ;; esac
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
-  local bind_at escaped caps_escaped updated
+  local bind_at escaped caps_escaped updated archived_doc
   bind_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   escaped=$(sed "s/'/''/g" "$cfg")
+  # This is the second wholesale writer of $.remote_binding (#849): a pull
+  # into a team that already holds a binding to a DIFFERENT server would
+  # otherwise replace it with no way back. Same archive primitive as
+  # _remote_write_binding, so the non-destruction invariant holds at the
+  # writer boundary, not just on the connect path.
+  archived_doc="$(_remote_archive_replaced_binding "$escaped" \
+    "$pulled_sid" "$pulled_id" "$pulled_protocol" "$bind_at")"
+  escaped="$(printf '%s' "$archived_doc" | sed "s/'/''/g")"
   caps_escaped=$(printf '%s' "$pulled_caps" | sed "s/'/''/g")
   updated=$(agmsg_sqlite_mem \
     "SELECT json_set('$escaped', '\$.remote_binding', json_object(
@@ -1617,7 +2029,7 @@ _remote_sync_engine_start_locked() {
   # Stop only an engine whose argv proves that it owns this team. A stale
   # pidfile may point at a recycled, unrelated process and must never authorize
   # signalling that process.
-  IFS=$'\t' read -r old_state old_pid < <(_remote_sync_engine_status "$team")
+  IFS=$'\t' read -r old_state old_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   if [ "$old_state" = "running" ]; then
     kill "$old_pid" 2>/dev/null || true
   fi
@@ -1684,7 +2096,7 @@ _remote_sync_engine_stop() {
   local team="$1" pidfile pid state
   pidfile="$(_remote_sync_engine_pidfile "$team")"
   [ -f "$pidfile" ] || return 0
-  IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team")
+  IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   if [ "$state" = "running" ]; then
     if ! _remote_sync_engine_reap_owned "$team" "$pid"; then
       echo "agmsg: sync engine pid $pid did not stop" >&2
@@ -1706,11 +2118,84 @@ _remote_sync_engine_stop() {
   rm -f "$(_remote_sync_engine_cycle_stamp "$team")" 2>/dev/null || true
 }
 
+# Return the systemd user-unit state as "state<TAB>pid".
+#
+# A unit that is not installed is not a systemd-managed team here, so callers
+# retain the pidfile behavior. An existing unit is different: an active unit
+# whose MainPID cannot be authenticated is UNKNOWN and must not be shadowed by
+# a new unmanaged engine. The command can be replaced in tests; no host
+# systemd query is needed there.
+_remote_systemd_engine_status() {
+  local team="$1" unit show load active sub pid command systemctl_bin
+  unit="agmsg-remote-sync-$team.service"
+  systemctl_bin="${AGMSG_SYSTEMCTL:-systemctl}"
+  command -v "$systemctl_bin" >/dev/null 2>&1 || { printf 'unavailable\t\n'; return; }
+  show="$($systemctl_bin --user show "$unit" -p LoadState -p ActiveState -p SubState -p MainPID 2>/dev/null)" || {
+    printf 'absent\t\n'
+    return
+  }
+  load="$(printf '%s\n' "$show" | sed -n 's/^LoadState=//p')"
+  active="$(printf '%s\n' "$show" | sed -n 's/^ActiveState=//p')"
+  sub="$(printf '%s\n' "$show" | sed -n 's/^SubState=//p')"
+  pid="$(printf '%s\n' "$show" | sed -n 's/^MainPID=//p')"
+  [ "$load" = "not-found" ] && { printf 'absent\t\n'; return; }
+  case "$active:$sub" in
+    active:running)
+      if _agmsg_pid_valid "$pid" && _agmsg_pid_alive_local "$pid"; then
+        command="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+        if agmsg_cmdline_names_path "$command" "$SCRIPT_DIR/internal/remote-sync.mjs" &&
+           case "$command" in *" run --team $team") true ;; *) false ;; esac; then
+          printf 'running\t%s\n' "$pid"
+        else
+          printf 'unknown\t%s\n' "$pid"
+        fi
+      else
+        printf 'unknown\t%s\n' "$pid"
+      fi
+      ;;
+    active:starting|active:reloading|active:auto-restart|activating:*|deactivating:*)
+      printf 'starting\t%s\n' "$pid"
+      ;;
+    inactive:*|failed:*)
+      printf 'inactive\t%s\n' "$pid"
+      ;;
+    *)
+      printf 'unknown\t%s\n' "$pid"
+      ;;
+  esac
+}
+
 # Print "<state>\t<pid>", where pid is empty when no valid pid is available.
 # A live PID is not enough: PID reuse can make an unrelated process pass
 # kill -0, so running requires the exact engine script/team suffix in argv.
+# The optional --pidfile-only mode is internal: lifecycle operations use it
+# when they must inspect only the unmanaged engine represented by this
+# command's pidfile. Human/JSON status and sync-start admission deliberately
+# omit it so an exported environment value cannot hide a systemd-owned engine.
 _remote_sync_engine_status() {
-  local team="$1" pidfile pid command expected
+  local team="$1" mode="${2:-}" pidfile pid command expected systemd_state systemd_pid
+  case "$mode" in
+    ""|--pidfile-only) ;;
+    *)
+      echo "agmsg: internal error: unknown sync engine status mode '$mode'" >&2
+      return 2
+      ;;
+  esac
+  REMOTE_SYNC_ENGINE_SUPERVISOR=""
+  REMOTE_SYNC_ENGINE_SUPERVISOR_PID=""
+  if [ "$mode" != --pidfile-only ]; then
+    IFS=$'\t' read -r systemd_state systemd_pid < <(_remote_systemd_engine_status "$team")
+  else
+    systemd_state=absent
+  fi
+  case "$systemd_state" in
+    running|starting|inactive|unknown)
+      REMOTE_SYNC_ENGINE_SUPERVISOR="systemd"
+      REMOTE_SYNC_ENGINE_SUPERVISOR_PID="$systemd_pid"
+      printf '%s\t%s\n' "$systemd_state" "$systemd_pid"
+      return
+      ;;
+  esac
   pidfile="$(_remote_sync_engine_pidfile "$team")"
   if [ ! -f "$pidfile" ]; then
     printf 'stopped\t\n'
@@ -1742,7 +2227,7 @@ _remote_sync_engine_status() {
 _remote_sync_engine_reap_owned() {
   local team="$1" owned_pid="$2" state pid signal attempts
   for signal in TERM KILL; do
-    IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team")
+    IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team" --pidfile-only)
     if ! _agmsg_pid_alive_local "$owned_pid"; then return 0; fi
     [ "$state" = "running" ] && [ "$pid" = "$owned_pid" ] || return 1
     kill "-$signal" "$owned_pid" 2>/dev/null || true
@@ -1821,7 +2306,7 @@ _remote_configure_keyed_team() {
     echo "agmsg: could not export the initial age-v1 snapshot for team '$team'; sync was not started." >&2
     return 1
   fi
-  snapshot_sha="$(shasum -a 256 "$snapshot_file" | awk '{print $1}')"
+  snapshot_sha="$(agmsg_sha256 < "$snapshot_file")"
   if ! bash "$SCRIPT_DIR/remote-sync.sh" configure \
       --team "$team" \
       --server "$endpoint" \
@@ -1875,6 +2360,16 @@ cmd_connect() {
       ;;
   esac
   key_id="$(_remote_read_config_field "$cfg" '$.remote_key.current.key_id')"
+  # Asked HERE: before the key is minted and before the registration POST.
+  # Every SHA-256 in the e2ee path -- the fingerprint printed by `key.sh
+  # generate`, and the age-v1 checkpoint that starts the sync engine -- happens
+  # at or after those, so a device without one used to register the team and
+  # only then fail, reporting "binding recorded, sync engine not started" for
+  # what is a missing command-line tool. Same category as the `age` preflight:
+  # a prerequisite of end-to-end encryption, so it is only asked under --e2ee.
+  if [ "$e2ee" -eq 1 ]; then
+    agmsg_require_sha256 || exit 1
+  fi
   if [ "$e2ee" -eq 1 ] && { [ -z "$key_id" ] || [ "$key_id" = "null" ]; }; then
     bash "$SCRIPT_DIR/key.sh" generate "$team" || exit 1
     key_id="$(_remote_read_config_field "$cfg" '$.remote_key.current.key_id')"
@@ -2144,6 +2639,12 @@ _remote_status_one() {
   case "$engine_state" in
     running)
       echo "$team	connected (engine running, pid $engine_pid) since $connected_at" ;;
+    starting)
+      echo "$team	connected (engine starting under systemd, pid $engine_pid; do not run sync start) since $connected_at" ;;
+    inactive)
+      echo "$team	connected (engine inactive under systemd; run: systemctl --user restart agmsg-remote-sync-$team.service) since $connected_at" ;;
+    unknown)
+      echo "$team	connected (engine state unknown under systemd; do not run sync start; inspect systemctl --user status agmsg-remote-sync-$team.service) since $connected_at" ;;
     stopped)
       echo "$team	connected (engine stopped — run: bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") sync start $(agmsg_shq "$team")) since $connected_at" ;;
     stale)
@@ -2240,6 +2741,42 @@ _remote_status_one() {
     echo "		encryption: required, no local key"
   else
     echo "		encryption: none"
+  fi
+  # What this team was bound to before, and when it was replaced (#849). The
+  # archived binding is the only pointer back to that server's local sync rows
+  # and keys, so a repair must not depend on the operator remembering the URL.
+  #
+  # Displayed through _remote_endpoint_display, which keeps scheme/host/port
+  # and DROPS the path -- for a hosted endpoint the path IS the capability.
+  # That means the printed form is NOT the value to reconnect with; the exact
+  # endpoint stays in the team's config, and the trailing line says so instead
+  # of pretending the display is it.
+  #
+  # One JSON object per row, NOT tab-separated fields: validateEndpoint now
+  # refuses raw control bytes, but a binding written by an OLDER version can
+  # hold an endpoint carrying them, and the archive keeps whatever the binding
+  # held. JSON escapes every byte below 0x20, so a row is one line whatever
+  # the endpoint contains; the per-field extraction below re-reads each row as
+  # JSON, and the printed values are additionally stripped of control bytes so
+  # nothing steers the terminal.
+  local prev_row prev_endpoint prev_replaced prev_any=0
+  while IFS= read -r prev_row; do
+    [ -n "$prev_row" ] || continue
+    prev_endpoint="$(agmsg_sqlite_mem \
+      "SELECT json_extract('$(printf '%s' "$prev_row" | sed "s/'/''/g")', '\$.e');")"
+    prev_replaced="$(agmsg_sqlite_mem \
+      "SELECT json_extract('$(printf '%s' "$prev_row" | sed "s/'/''/g")', '\$.a');")"
+    prev_endpoint="$(_remote_endpoint_display "$prev_endpoint")"
+    prev_endpoint="${prev_endpoint//[[:cntrl:]]/}"
+    prev_replaced="${prev_replaced//[[:cntrl:]]/}"
+    prev_any=1
+    echo "		previous: was bound to $prev_endpoint until $prev_replaced"
+  done < <(agmsg_sqlite_mem \
+    "SELECT json_object('e', json_extract(value, '\$.endpoint'),
+                        'a', coalesce(json_extract(value, '\$.replaced_at'), 'an unrecorded time'))
+       FROM json_each(coalesce(json_extract('$(sed "s/'/''/g" "$cfg")', '\$.previous_bindings'), '[]'));")
+  if [ "$prev_any" -eq 1 ]; then
+    echo "		          to restore one, reconnect to its full endpoint — it is kept under previous_bindings in this team's config.json, and is not printed here because it can embed the access token"
   fi
 }
 
@@ -2411,11 +2948,189 @@ cmd_status() {
 
 # --- sync lifecycle --------------------------------------------------------
 
+# Literal, char-by-char digit check -- not a `case ... [0-9]*)` bracket
+# expression. A bracket expression's character class is the CALLER's locale,
+# not this file's, and some locales widen it past ASCII (full-width digits
+# among them); `test =` against an explicit alphabet is locale- and
+# nocasematch-proof on both interpreters, the same reasoning
+# self-identity.sh's _agmsg_self_chars_in_set documents (kept local here
+# rather than sourcing that file, since nothing else in this script needs
+# it).
+_remote_ceiling_is_plain_digits() {   # <string>
+  # n=${#s} is its own statement, not part of the `local` line above it: under
+  # `set -u`, a later name in one `local ... =` list that reads an earlier
+  # one's value sees it as still-unbound (measured), the same reason
+  # self-identity.sh's _agmsg_self_chars_in_set splits them too.
+  local s="${1-}" alphabet="0123456789" m=10 i=0 j c found n
+  n=${#s}
+  [ "$n" -gt 0 ] || return 1
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    found=""
+    j=0
+    while [ "$j" -lt "$m" ]; do
+      [ "$c" = "${alphabet:$j:1}" ] && { found=1; break; }
+      j=$((j + 1))
+    done
+    [ -n "$found" ] || return 1
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# A local, read-only peek at whether this team has anything #1284's reprocess
+# would attempt -- no network. cmd_sync_start's automatic call (below) uses
+# this to skip the health check and capabilities fetch reprocessCycle always
+# opens with, on the overwhelmingly common case of nothing pending, rather
+# than pay a round trip against the server on every single engine start --
+# including a start driven by a test double that answers nothing. An
+# unconditional call here hung the fake-node engine-start suite, which never
+# expects sync start to make a network call at all.
+#
+# Three outcomes, not two: a confirmed zero and a check that
+# could not run are different facts, and collapsing them into one "nothing to
+# do" used to let an unreadable local state skip reprocessing in silence.
+#   0  confirmed rows pending.
+#   1  confirmed nothing pending: no store path exists at all, or the table
+#      was never created -- both mean quarantine was never written, not that
+#      reading it failed. Nothing existing at the path is a fact this can
+#      read, not a read that failed, so it is 1 (confirmed), not 2.
+#   2  could not determine (a non-sqlite driver, for which this pre-check has
+#      no way to read local state; something at the store path that is not a
+#      plain, readable file -- a directory, a FIFO, a permissions problem;
+#      or a query against an existing store/table that itself failed). Names
+#      what could not be read on stderr, together
+#      with the command to check by hand. The caller does NOT fall through to
+#      the real reprocess here: that reopened the exact hang this local check
+#      exists to avoid (a test double with no server behind it), so 2 skips
+#      the automatic reprocess the same as 1 -- the difference is only that 2
+#      says so, on stderr, rather than passing in silence.
+_remote_quarantine_has_malformed() {
+  local team="$1" store_path="" count="" team_lit driver="" fix_hint
+  fix_hint="run it by hand: bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") reprocess $(agmsg_shq "$team")"
+  # Every reassignment below is guarded with `|| name=""`: this runs under
+  # `set -e`, and a PLAIN reassignment of an already-`local`-declared name
+  # (unlike `local name=$(...)`) DOES trip errexit on a failing command
+  # substitution -- measured directly; without the guard, a genuinely
+  # unreadable store did not reach any of the `case` branches below at all,
+  # it took the whole sourcing script down with sqlite3's own exit code.
+  driver="$(agmsg_storage_driver 2>/dev/null)" || driver="unknown"
+  [ -n "$driver" ] || driver="unknown"
+  if [ "$driver" != sqlite ]; then
+    echo "agmsg: local quarantine pre-check does not support storage driver '$driver' for '$team'; $fix_hint" >&2
+    return 2
+  fi
+  store_path="$(agmsg_storage_dir 2>/dev/null)" || store_path=""
+  if [ -z "$store_path" ]; then
+    echo "agmsg: cannot resolve the local store directory for '$team'; $fix_hint" >&2
+    return 2
+  fi
+  store_path="$store_path/teams/$team/messages.db"
+  # Nothing AT ALL there is a fact, not an unreadable one: a team with no
+  # local store has no rows of any kind, quarantine included, so "nothing
+  # pending" is simply true here, the same as a store whose sync_quarantine
+  # table was never created below. Something at that path that is not a
+  # plain, readable file (a directory, a FIFO, a permissions problem) is a
+  # DIFFERENT fact -- this cannot say there is nothing there, only that it
+  # cannot read what there is -- so that case is 2, named, not a silent 1.
+  [ -e "$store_path" ] || return 1
+  if [ ! -f "$store_path" ] || [ ! -r "$store_path" ]; then
+    echo "agmsg: local store '$store_path' for '$team' is not a readable regular file; $fix_hint" >&2
+    return 2
+  fi
+  count="$(agmsg_sqlite "$store_path" \
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_quarantine';" \
+    2>/dev/null | tr -d '\r')" || count=""
+  case "$count" in
+    1) ;;
+    0) return 1 ;;
+    *)
+      echo "agmsg: cannot inspect local store '$store_path' for '$team'; $fix_hint" >&2
+      return 2
+      ;;
+  esac
+  team_lit="'$(printf '%s' "$team" | sed "s/'/''/g")'"
+  count="$(agmsg_sqlite "$store_path" \
+    "SELECT COUNT(*) FROM sync_quarantine WHERE local_team=$team_lit AND status='malformed';" \
+    2>/dev/null | tr -d '\r')" || count=""
+  case "$count" in
+    ''|*[!0-9]*)
+      echo "agmsg: cannot read quarantine state from local store '$store_path' for '$team'; $fix_hint" >&2
+      return 2
+      ;;
+    0) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Re-evaluates quarantine rows this client's own earlier parser could not
+# understand (unknown kind, invalid roster mutation, ...) against the CURRENT
+# parser (#1284). A parser only gets newer through an update, and an update
+# always restarts the engine (#963), so this is called from cmd_sync_start on
+# every path that is about to (re)start it; it is also available by hand,
+# without restarting anything, as `remote.sh reprocess <team>`. Idempotent:
+# nothing pending is a normal, cheap 0-row outcome, not an error, and this
+# never touches the transport cursor or read frontier (storage_sync_reprocess
+# does not either) -- an imported row lands as unread through the ordinary
+# oracle, same as any other pull.
+_remote_reprocess_team() {
+  local team="$1" out pending pending_count result reprocessed imported unrecoverable
+  out="$(bash "$SCRIPT_DIR/remote-sync.sh" reprocess --team "$team" --scope malformed 2>&1)" || {
+    printf '%s\n' "$out" >&2
+    echo "agmsg: reprocess failed for '$team'" >&2
+    return 1
+  }
+  pending="$(printf '%s\n' "$out" | grep '"event":"reprocess.pending"' | tail -1)"
+  if [ -n "$pending" ]; then
+    pending_count="$(_remote_json_field "$pending" '$.count')"
+    case "$pending_count" in
+      ''|0) ;;
+      *) echo "agmsg: $pending_count quarantined row(s) will come back as unread" ;;
+    esac
+  fi
+  result="$(printf '%s\n' "$out" | grep '"event":"reprocess.complete"' | tail -1)"
+  [ -n "$result" ] || {
+    echo "agmsg: reprocess produced no completion result for '$team'" >&2
+    return 1
+  }
+  reprocessed="$(_remote_json_field "$result" '$.count')"
+  imported="$(_remote_json_field "$result" '$.imported_count')"
+  case "$reprocessed" in ''|*[!0-9]*) reprocessed=0 ;; esac
+  case "$imported" in ''|*[!0-9]*) imported=0 ;; esac
+  unrecoverable=$((reprocessed - imported))
+  echo "quarantine: reprocessed=$reprocessed imported=$imported unrecoverable=$unrecoverable pending=$unrecoverable"
+}
+
 cmd_sync_start() {
   local team="${1:?Usage: remote.sh sync start <team>}" cfg connected_at disconnected_at \
     engine_state engine_pid started_pid ready_pid startup_nonce ready=0 i=0 \
-    logfile log_offset=1 readiness_max="${AGMSG_SYNC_READY_TRIES:-1600}" \
-    readiness_budget="${AGMSG_SYNC_READY_SECONDS:-16}" readiness_started readiness_elapsed
+    logfile log_offset=1 readiness_started readiness_elapsed
+  # Test-only override of the readiness-wait ceiling below, default unchanged
+  # (1600). Exists so a test that drives the engine into never becoming
+  # ready does not have to spend this command's real production wait
+  # (measured ~1min+: the ceiling is counted in iterations, not time (#779),
+  # and each turn spawns several processes) to prove the timeout path.
+  #
+  # Anything but a plain positive integer falls back to the production
+  # default rather than being trusted -- in particular an empty or zero
+  # value must NOT make the `while` below skip straight to "not ready": that
+  # would silently change this command's real behavior on a malformed
+  # environment, not just its test-only timing (the same reasoning that kept
+  # an env-var knob out of herdr's boot wait previously).
+  local ready_ceiling="${AGMSG_TEST_SYNC_START_READY_CEILING:-1600}"
+  _remote_ceiling_is_plain_digits "$ready_ceiling" || ready_ceiling=1600
+  [ "$ready_ceiling" -gt 0 ] || ready_ceiling=1600
+  # BUDGETED IN TIME, NOT ONLY ITERATIONS (#779). The 1600-attempt ceiling
+  # above was documented as roughly sixteen seconds, but every turn also
+  # starts the status probe, tail, awk and sleep -- that arithmetic holds
+  # only where they are free. Keep the attempt ceiling as a safety cap, but
+  # also bound the real wait by the wall clock: whichever arrives first ends
+  # readiness polling. Same validation as the ceiling above, for the same
+  # reason -- a malformed override must fall back to the production default,
+  # not silently disable the bound.
+  local readiness_budget="${AGMSG_SYNC_READY_SECONDS:-16}"
+  _remote_ceiling_is_plain_digits "$readiness_budget" || readiness_budget=16
+  [ "$readiness_budget" -gt 0 ] || readiness_budget=16
   [ $# -eq 1 ] || { echo "Usage: remote.sh sync start <team>" >&2; exit 1; }
   agmsg_validate_team_name "$team" || exit 1
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
@@ -2438,11 +3153,18 @@ cmd_sync_start() {
   fi
 
   IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team")
-  if [ "$engine_state" = "running" ]; then
-    echo "Sync engine already running (pid $engine_pid)."
-    agmsg_lock_release
-    return
-  fi
+  case "$engine_state" in
+    running)
+      echo "Sync engine already running (pid $engine_pid)."
+      agmsg_lock_release
+      return
+      ;;
+    starting|inactive|unknown)
+      echo "agmsg: systemd owns team '$team' in state '$engine_state'; inspect or restart the user unit instead of sync start" >&2
+      agmsg_lock_release
+      return 1
+      ;;
+  esac
 
   logfile="$CONNECTION_ROOT/run/remote-sync.$team.log"
   [ -f "$logfile" ] && log_offset=$(( $(wc -c < "$logfile" | tr -d ' ') + 1 ))
@@ -2491,15 +3213,12 @@ cmd_sync_start() {
   # that is late or missing for ANY reason costs this caller its own wait and
   # not the rest of the machine.
   #
-  # BUDGETED IN TIME, NOT ITERATIONS (#779). The 1600 attempts were documented
-  # as roughly sixteen seconds, but every turn also starts the status probe,
-  # tail, awk and sleep. That arithmetic holds only where they are free. Keep
-  # the attempt ceiling as a safety cap, but make the stated wait a wall-clock
-  # budget: whichever arrives first ends readiness polling.
+  # readiness_budget (declared above) starts counting here, right before the
+  # loop that spends it.
   readiness_started="$(date +%s)"
   agmsg_lock_release
-  while [ "$i" -lt "$readiness_max" ]; do
-    IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team")
+  while [ "$i" -lt "$ready_ceiling" ]; do
+    IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
     if [ "$engine_state" = "running" ] && [ "$ready_pid" = "$started_pid" ] &&
        tail -c "+$log_offset" "$logfile" 2>/dev/null |
          awk -v nonce="\"startup_nonce\":\"$startup_nonce\"" '
@@ -2599,14 +3318,96 @@ cmd_sync_start() {
     return 1
   fi
     echo "Sync engine started for '$team' (pid $started_pid)."
+  # Best-effort and after the engine is already up: a stale parser's leftover
+  # quarantine is a backlog to catch up on, not a reason to delay or refuse
+  # this start, and network trouble here must not read as "sync did not
+  # start" when it did. Gated on the local peek above: the real,
+  # authoritative reprocess runs ONLY on a CONFIRMED pending count (0). An
+  # undetermined local state (2, already named on stderr by the peek itself,
+  # with the command to check by hand) is left for the operator, not
+  # attempted here -- an automatic call on that path is exactly what reopened
+  # the hang against a test double with no server behind it; 1 (confirmed
+  # zero) has nothing to do either, silently.
+  local pending_rc=0
+  _remote_quarantine_has_malformed "$team" || pending_rc=$?
+  case "$pending_rc" in
+    0)
+      _remote_reprocess_team "$team" || echo "agmsg: quarantine reprocess did not complete for '$team'; sync start still succeeded" >&2
+      ;;
+  esac
+}
+
+# Stop a running, unmanaged engine and start a fresh one on whatever code is
+# on disk right now (#963). A systemd-owned unit is left alone entirely --
+# not just refused past the admission check inside cmd_sync_start, but never
+# signalled here either, since systemd's own restart policy is that team's
+# supervisor, not this command. A team with no engine running is simply
+# started, same as `sync start` would do.
+cmd_sync_restart() {
+  local team="${1:?Usage: remote.sh sync restart <team>}" systemd_state systemd_pid \
+    engine_state engine_pid
+  [ $# -eq 1 ] || { echo "Usage: remote.sh sync restart <team>" >&2; exit 1; }
+  agmsg_validate_team_name "$team" || exit 1
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
+  # Asked directly, and BEFORE the pidfile-only status read below: a
+  # systemd-owned unit is refused unconditionally, in every one of its own
+  # states, not just the ones cmd_sync_start's admission check already
+  # refuses (starting/inactive/unknown) -- a systemd-owned engine that
+  # happens to be running right now must not be touched here either, since
+  # systemd's own restart policy is that team's supervisor, not this command.
+  IFS=$'\t' read -r systemd_state systemd_pid < <(_remote_systemd_engine_status "$team")
+  case "$systemd_state" in
+    running|starting|inactive|unknown)
+      echo "agmsg: systemd owns team '$team'; inspect or restart the user unit instead of sync restart" >&2
+      agmsg_lock_release
+      return 1
+      ;;
+  esac
+  IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
+  if [ "$engine_state" = "running" ]; then
+    if ! _remote_sync_engine_stop "$team"; then
+      echo "agmsg: sync engine pid $engine_pid for '$team' did not stop; not starting a new one" >&2
+      agmsg_lock_release
+      return 1
+    fi
+  fi
+  # Released before delegating: cmd_sync_start takes this same lock itself,
+  # and mkdir-based locking is not reentrant within one process (a second
+  # acquire here would spin against itself for the full budget, then fail).
+  agmsg_lock_release
+  cmd_sync_start "$team"
 }
 
 cmd_sync() {
   local action="${1:-}"
   case "$action" in
     start) shift; cmd_sync_start "$@" ;;
-    *) echo "Usage: remote.sh sync start <team>" >&2; exit 1 ;;
+    restart) shift; cmd_sync_restart "$@" ;;
+    *) echo "Usage: remote.sh sync start|restart <team>" >&2; exit 1 ;;
   esac
+}
+
+# The explicit form of the same catch-up cmd_sync_start already runs
+# automatically (#1284): reprocesses quarantine rows this client's own
+# earlier parser could not understand, against the parser on disk right now,
+# without starting or restarting anything.
+cmd_reprocess() {
+  local team="${1:?Usage: remote.sh reprocess <team>}"
+  [ $# -eq 1 ] || { echo "Usage: remote.sh reprocess <team>" >&2; exit 1; }
+  agmsg_validate_team_name "$team" || exit 1
+  local cfg connected_at disconnected_at
+  cfg="$(_remote_team_config "$team")"
+  connected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.connected_at')"
+  disconnected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.disconnected_at')"
+  if [ -z "$connected_at" ] || [ "$connected_at" = "null" ]; then
+    echo "agmsg: team '$team' has no active remote binding; connect or pull it first" >&2
+    exit 1
+  fi
+  if [ -n "$disconnected_at" ] && [ "$disconnected_at" != "null" ]; then
+    echo "agmsg: team '$team' is disconnected; connect or pull it before reprocessing" >&2
+    exit 1
+  fi
+  _remote_reprocess_team "$team" || exit 1
 }
 
 # --- disconnect ------------------------------------------------------------
@@ -2996,7 +3797,7 @@ cmd_set_endpoint() {
     done
   fi
 
-  IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team")
+  IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   [ "$engine_state" = "running" ] && was_running=1
   _remote_sync_engine_stop "$team" || {
     echo "agmsg: the sync engine did not stop; refusing to move the endpoint under it" >&2
@@ -3027,7 +3828,7 @@ cmd_set_endpoint() {
   # command ran is restarted too (never silently left stopped, and a restart
   # is what hands it the moved address -- a running engine keeps its old
   # config in memory). _remote_sync_engine_start kills a live engine first.
-  IFS=$'\t' read -r end_state end_pid < <(_remote_sync_engine_status "$team")
+  IFS=$'\t' read -r end_state end_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   if [ "$was_running" -eq 1 ] || [ "$end_state" = "running" ]; then
     # Same rule as cmd_pull and cmd_connect: the move is this command's purpose
     # and it is done by here, so a start failure reports rather than fails --
@@ -3057,12 +3858,13 @@ case "${1:-}" in
   unlock) shift; agmsg_require_python3 "remote unlock" || exit 1; cmd_unlock "$@" ;;
   status) shift; agmsg_require_python3 "remote status" || exit 1; cmd_status "$@" ;;
   sync) shift; cmd_sync "$@" ;;
+  reprocess) shift; cmd_reprocess "$@" ;;
   disconnect) shift; agmsg_require_python3 "remote disconnect" || exit 1; cmd_disconnect "$@" ;;
   set-endpoint) shift; agmsg_require_python3 "remote set-endpoint" || exit 1; cmd_set_endpoint "$@" ;;
   forget) shift; agmsg_require_python3 "remote forget" || exit 1; cmd_forget "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   *)
-    echo "Usage: remote.sh <connect|pull|unlock|status|sync|set-endpoint|disconnect|forget|doctor> ..." >&2
+    echo "Usage: remote.sh <connect|pull|unlock|status|sync|reprocess|set-endpoint|disconnect|forget|doctor> ..." >&2
     exit 1 ;;
 esac
 fi

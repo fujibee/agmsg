@@ -10,10 +10,10 @@ set -euo pipefail
 # every type. --project / --type / --team narrow it and combine freely. This
 # matches how claude/codex/brew/flutter doctor all behave (no scope argument,
 # default to everything) rather than requiring a cross-section up front --
-# koit's call, made explicit because the earlier <project> <type>-required
+# Made explicit here because the earlier <project> <type>-required
 # form had it backwards: a reporter who doesn't already know which project/type
 # to name can't use a doctor that demands one. Positional <project> <type> is
-# not kept for compatibility -- koit judged it not worth carrying (see PR/report
+# not kept for compatibility -- it was judged not worth carrying (see PR/report
 # history for round 2), and a stale positional form alongside flags that mean
 # something different by default would be its own source of confusion.
 #
@@ -342,9 +342,9 @@ _redact_text() {
 # --- scan one (project, type) pair, buffer its block ------------------------
 #
 # Buffered into REPORT_BLOCKS rather than printed inline: the summary line
-# koit asked for has to come FIRST on screen ("撃った人が最初に見るのはそ
-# こ"), but its counts (teams/registrations/warnings) aren't known until
-# every pair in the scope has been scanned. Nothing here is large enough for
+# has to come FIRST on screen -- it is the first thing the person who ran
+# the command looks at -- but its counts (teams/registrations/warnings)
+# aren't known until every pair in the scope has been scanned. Nothing here is large enough for
 # buffering to matter -- even the whole install across every team is a
 # handful of KB.
 REPORT_BLOCKS=""
@@ -460,21 +460,55 @@ _doctor_scan_pair() {
 
       _redact_team "$team"; dteam="$_REDACT_OUT"
       _redact_agent "$agent"; dagent="$_REDACT_OUT"
-      owner="$(actas_lock_owner "$team" "$agent")"
-
+      # `lock=none` is a claim about the world; an unreadable lock is a claim
+      # about us. The reader that fed this line answered "" for both, so doctor
+      # printed "no lock" for a lock it could not read — which is exactly the
+      # output an operator uses to conclude there is nothing here to clean up.
+      # (Review.) A real instance the same day: someone read a record they could
+      # not open, reported
+      # a seat as dead, and it was alive. A diagnostic that says `none` when it
+      # means `could not look` makes people repeat that. Three reads, three
+      # words. (#983)
+      _own_r="$(actas_lock_read "$team" "$agent")"
+      case "${_own_r%%$'\t'*}" in
+        unreadable)
+          reg_lines="${reg_lines}$(printf '  %-22s lock=unreadable' "$dteam/$dagent")"$'\n'
+          _redact_project "$project"
+          _warn "[$_REDACT_OUT] lock could not be read: $dteam/$dagent (not reported as absent)"
+          continue
+          ;;
+        absent)
+          reg_lines="${reg_lines}$(printf '  %-22s lock=none' "$dteam/$dagent")"$'\n'
+          continue
+          ;;
+      esac
+      owner="${_own_r#*$'\t'}"
+      # Read fine, and empty. A distinct fact from both of the above: the file is
+      # there and nothing in the tree ever writes it empty, so this is a torn
+      # write, not a free role. Saying `none` here would invite the cleanup that
+      # #1071 is about.
       if [ -z "$owner" ]; then
-        reg_lines="${reg_lines}$(printf '  %-22s lock=none' "$dteam/$dagent")"$'\n'
+        reg_lines="${reg_lines}$(printf '  %-22s lock=empty' "$dteam/$dagent")"$'\n'
+        _redact_project "$project"
+        _warn "[$_REDACT_OUT] lock file is present but empty: $dteam/$dagent (torn write; not reported as free)"
         continue
       fi
       _any_owner=1
 
-      if agmsg_instance_alive "$owner"; then
-        alive_word="alive"
-      else
-        alive_word="STALE"
-        _redact_project "$project"
-        _warn "[$_REDACT_OUT] stale lock: $dteam/$dagent (owner=$(_redact_owner "$owner"))"
-      fi
+      # Three-way: `alive` is a fact, `STALE` is a fact, and "could not find out"
+      # is neither. Reporting the third as STALE is a diagnostic that invents its
+      # own finding — and doctor's whole job is to be believed. (#983)
+      _alive_rc=0
+      agmsg_instance_alive "$owner" || _alive_rc=$?
+      case "$_alive_rc" in
+        0) alive_word="alive" ;;
+        1) alive_word="STALE"
+           _redact_project "$project"
+           _warn "[$_REDACT_OUT] stale lock: $dteam/$dagent (owner=$(_redact_owner "$owner"))" ;;
+        *) alive_word="unknown"
+           _redact_project "$project"
+           _warn "[$_REDACT_OUT] lock owner liveness could not be determined: $dteam/$dagent (owner=$(_redact_owner "$owner")); not treating it as stale" ;;
+      esac
 
       cc_note=""
       if agmsg_instance_is_composite "$owner"; then
@@ -506,7 +540,7 @@ _doctor_scan_pair() {
           # Only when the lock itself is legitimately live: a stale lock
           # having no watcher is unremarkable (already covered above), but
           # an alive lock with no watcher means the role claims exclusivity
-          # and isn't receiving -- the shape #605 and koit's own example
+          # and isn't receiving -- the shape #605 and the reported example
           # both were.
           if [ "$alive_word" = "alive" ]; then
             _redact_project "$project"

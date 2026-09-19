@@ -651,6 +651,90 @@ PY_BIND
   [[ "$output" == *"no current key"* ]]
 }
 
+# --- fingerprint: never print one that was not computed (#861) -------------
+
+# A recipient fingerprint exists so two people can read the same short string
+# to each other over a separate channel and agree they hold the same key. If
+# the digest cannot be computed, BOTH of them see an empty string and both say
+# it matches. That is worse than no fingerprint at all, so a digest that fails
+# has to stop the command rather than print a label with nothing after it.
+#
+# Driven by making the first digest arm fail rather than by emptying PATH:
+# key.sh needs a dozen other tools to reach this line, and a PATH restricted
+# far enough to hide `shasum` would stop it long before the fingerprint for
+# reasons that have nothing to do with #861.
+break_the_digest() {
+  local shim="$TEST_SKILL_DIR/broken-digest"
+  mkdir -p "$shim"
+  # All three arms, so this does not quietly become "the second arm answered".
+  local tool
+  for tool in shasum sha256sum openssl; do
+    printf '#!/bin/sh\nexit 1\n' > "$shim/$tool"
+    chmod +x "$shim/$tool"
+  done
+  printf '%s' "$shim"
+}
+
+@test "key generate: a digest that fails stops the command, no blank fingerprint" {
+  skip_if_no_age
+  local shim; shim="$(break_the_digest)"
+  run env PATH="$shim:$PATH" bash "$SCRIPTS/key.sh" generate testteam
+  [ "$status" -ne 0 ]
+  # The label must not appear with an empty value after it. Matching the label
+  # plus end-of-line is the whole point: `*"Recipient fingerprint:"*` would be
+  # satisfied by exactly the broken output this test exists to reject.
+  refute grep -qE 'Recipient fingerprint: *$' <<<"$output"
+}
+
+@test "key show: a digest that fails stops the command, no blank fingerprint" {
+  skip_if_no_age
+  bash "$SCRIPTS/key.sh" generate testteam
+  local shim; shim="$(break_the_digest)"
+  run env PATH="$shim:$PATH" bash "$SCRIPTS/key.sh" show testteam
+  [ "$status" -ne 0 ]
+  refute grep -qE 'Recipient fingerprint: *$' <<<"$output"
+}
+
+# A TOOL THAT SUCCEEDS AND LIES. The shim above exits 1, which any status check
+# catches. This one exits 0 and prints a well-formed digest that is not the
+# digest of the input — and `key.sh` is its own CLI: `generate`, `show`,
+# `import` and `rotate` all reach a digest without passing `connect`'s
+# preflight, so for one head the preflight was the only thing asking whether the
+# answer was right and none of these four asked it. Raised in review.
+#
+# Driven from `key.sh` deliberately, not from the helper: the claim is about
+# what this command does, and a helper-level case cannot fail if a caller stops
+# using the helper.
+@test "key generate: a tool that returns the wrong digest stops the command" {
+  skip_if_no_age
+  local shim="$TEST_SKILL_DIR/lying-digest"
+  mkdir -p "$shim"
+  local tool
+  for tool in shasum sha256sum openssl; do
+    printf '#!/bin/sh\ncat >/dev/null\necho "%s  -"\n' \
+      1111111111111111111111111111111111111111111111111111111111111111 > "$shim/$tool"
+    chmod +x "$shim/$tool"
+  done
+  # Control: it exits 0 and its answer has the shape of a digest, so nothing
+  # short of asking a question with a known answer distinguishes it.
+  run env PATH="$shim:$PATH" bash -c 'printf x | shasum -a 256'
+  [ "$status" -eq 0 ]
+
+  run env PATH="$shim:$PATH" bash "$SCRIPTS/key.sh" generate testteam
+  [ "$status" -ne 0 ]
+  refute grep -qE '1111111111111111' <<<"$output"
+}
+
+# The control for the three above: with the digest working, the same commands
+# print a fingerprint that is actually there. Without this, they would all
+# still pass if key.sh had simply stopped working entirely.
+@test "key generate: the working case still prints a non-empty fingerprint" {
+  skip_if_no_age
+  run bash "$SCRIPTS/key.sh" generate testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qE 'Recipient fingerprint: [0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}$'
+}
+
 # --- dispatch --------------------------------------------------------------
 
 @test "key.sh: unknown subcommand prints usage and exits non-zero" {

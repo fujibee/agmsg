@@ -17,7 +17,7 @@ the ~8 min of `age` sealing measured for the same volume.
 The batch **contract is already bulk-capable**: `POST /v1/messages` stores an
 atomic, idempotent batch of 1..1000 under a single team-row lock with one
 range sequence allocation, and the push side already frames 1000-wire batches.
-So nothing on the wire or in the cloud ingest needs to change. The only defect
+So nothing on the wire or in the server's ingest needs to change. The only defect
 is the loop's fixed small page + inter-cycle wait.
 
 ## Where the backlog comes from (why a mode/flag is wrong)
@@ -210,9 +210,9 @@ instead of spinning.
 - **Server range sequence allocation** — already the contract shape: `POST
   /v1/messages` locks the team row once and allocates a sequence *range* for the
   new IDs in that batch (`UPDATE teams SET team_seq = team_seq + $count
-  RETURNING`), never per-message. This is a cloud-ingest implementation
+  RETURNING`), never per-message. This is a server-side implementation
   requirement to pin with a test, not a contract change.
-- **Large-batch accept** — no new API. The cloud ingest implements the existing
+- **Large-batch accept** — no new API. The server implements the existing
   `POST /v1/messages` (atomic, idempotent, 1..1000); catch-up simply sends full
   1000 batches back-to-back.
 - **Resumability / no whole-batch loss** — each 1000 batch is one transaction
@@ -230,10 +230,7 @@ instead of spinning.
 
 ## Scope / ownership
 
-- OSS-side change to `remote-sync run` only → `integration/remote`. Steady-state
+- Client-side change to `remote-sync run` only → `integration/remote`. Steady-state
   behaviour and the wire contract are untouched.
-- Cloud ingest (`POST /v1/messages` with range allocation + the pre-connect
-  capacity gate) is the separate cloud-side task and needs no contract change.
-- Pre-connect capacity estimate/reservation (refuse before starting if the
-  history won't fit the plan) remains the backfill start gate as previously
-  decided.
+- Server ingest (`POST /v1/messages` with range allocation) is a separate
+  server-side task and needs no contract change.

@@ -279,7 +279,7 @@ _jsonl_unread_duckdb() {
   [ -f "$tpl" ] || return 1
   sql="$(cat "$tpl")"
   sql="${sql//__LG__/$lg}"
-  sql="${sql//__TL__/$tl}"
+  sql="${sql//__TEAM__/$tl}"
   sql="${sql//__AL__/$al}"
   sql="${sql//__CUR__/$cursor}"
   printf '%s\n' "$sql" | duckdb -noheader -list 2>/dev/null

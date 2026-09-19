@@ -435,3 +435,8 @@ setup_git_repo() {
   [ "$result" = "$base/parent" ]
   rm -rf "$base"
 }
+
+@test "agent-binaries: grok-build maps to grok (#859)" {
+  [ "$(_agmsg_agent_binaries grok-build)" = "grok" ]
+  [ "$(_agmsg_agent_binaries claude-code)" = "claude" ]
+}

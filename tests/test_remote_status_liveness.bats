@@ -703,6 +703,25 @@ write_windows_spelling_fixtures() {
   kill -0 "$ENGINE_PID"
 }
 
+@test "sync start: an invalid readiness-wait override falls back to the production ceiling, not a skipped wait" {
+  # The fake node below writes its readiness marker essentially immediately,
+  # so this succeeds under the real production ceiling (1600) on its very
+  # first poll -- and would fail immediately, with no wait at all, if a
+  # malformed override (0 here) were trusted instead of validated: `while [
+  # "$i" -lt 0 ]` never runs even once, so the marker this fixture already
+  # wrote would never be checked.
+  local fake_node fake_bin ready_file="$TEST_SKILL_DIR/invalid-ceiling.ready"
+  fake_node="$(write_fake_node)"
+  fake_bin="$(write_fake_node_ps_fixture "$fake_node" "" "$ready_file")"
+
+  run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
+    AGMSG_TEST_LOG_READY_FILE="$ready_file" \
+    AGMSG_TEST_SYNC_START_READY_CEILING=0 \
+    bash "$SCRIPTS/remote.sh" sync start testteam
+  [ "$status" -eq 0 ]
+  refute grep -qF "did not become ready" <<<"$output"
+}
+
 @test "sync start reaps a ready-timeout child before releasing ownership" {
   local fake_node="$TEST_SKILL_DIR/fake-node-timeout" fake_bin lock child_pid_file child_pid
   child_pid_file="$TEST_SKILL_DIR/timeout-child.pid"
@@ -713,8 +732,14 @@ write_windows_spelling_fixtures() {
   chmod +x "$fake_node"
   fake_bin="$(write_fake_node_ps_fixture "$fake_node")"
 
+  # The fake node above never emits a readiness marker, so this pays the full
+  # production readiness-wait ceiling (minutes, not seconds -- #779) unless
+  # shortened; the assertions below are about what happens once it gives up,
+  # not about how long giving up takes, and `run` blocks synchronously either
+  # way, so there is no timing window elsewhere in this test to protect.
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
     AGMSG_TEST_CHILD_PID_FILE="$child_pid_file" \
+    AGMSG_TEST_SYNC_START_READY_CEILING=30 \
     bash "$SCRIPTS/remote.sh" sync start testteam
   [ "$status" -ne 0 ]
   [[ "$output" == *"did not become ready"* ]]
@@ -769,8 +794,11 @@ write_unownable_ps_fixture() {
   chmod +x "$fake_node"
   fake_bin="$(write_unownable_ps_fixture)"
 
+  # Same reasoning as the previous test: the unownable-ps fixture also never
+  # lets this reach readiness, so it pays the full ceiling unless shortened.
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
     AGMSG_TEST_CHILD_PID_FILE="$child_pid_file" \
+    AGMSG_TEST_SYNC_START_READY_CEILING=30 \
     bash "$SCRIPTS/remote.sh" sync start testteam
   [ "$status" -ne 0 ]
 
@@ -860,4 +888,125 @@ write_unownable_ps_fixture() {
   # helper is defined in instance-id.sh, so no definition is counted here.
   run bash -c "grep -v '^[[:space:]]*#' \"\$1\" | sed 's/_agmsg_pid_alive_local//g' | grep -c '_agmsg_pid_alive'" _ "$SCRIPTS/remote.sh"
   [ "$output" = "0" ]
+}
+
+
+# systemd-supervised engine detection for #894. The process itself is real;
+# only systemctl is replaced, so these tests exercise the same argv/liveness
+# checks used on a host while remaining independent of the test runner's user bus.
+write_systemd_show_fixture() {
+  local state="$1" pid="$2" sub=dead fake="$TEST_SKILL_DIR/fake-systemctl"
+  [ "$state" = active ] && sub=running
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'if [ "${1:-}" = "--user" ] && [ "${2:-}" = "show" ]; then' \
+    "  printf '%s\n' 'LoadState=loaded' 'ActiveState=$state' 'SubState=$sub' 'MainPID=$pid'" \
+    '  exit 0' \
+    'fi' \
+    'exit 1' > "$fake"
+  chmod +x "$fake"
+  printf '%s\n' "$fake"
+}
+
+legacy_skip_systemd_probe_name() {
+  # Build the removed name without retaining it as a discoverable setting in
+  # the tree. These tests prove that an old wrapper exporting it is harmless.
+  printf '%s%s\n' AGMSG_SKIP_SYSTEMD _PROBE
+}
+
+@test "status: exported skip variable cannot hide a verified systemd engine (#894)" {
+  start_matching_engine
+  rm -f "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+  local fake_bin fake_systemctl
+  fake_bin="$(write_matching_ps_fixture)"
+  fake_systemctl="$(write_systemd_show_fixture active "$ENGINE_PID")"
+
+  run env PATH="$fake_bin:$PATH" AGMSG_SYSTEMCTL="$fake_systemctl" \
+    "$(legacy_skip_systemd_probe_name)=1" \
+    bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "connected (engine running, pid $ENGINE_PID)"
+  refute grep -qi 'stale\|stopped' <<<"$output"
+}
+
+@test "JSON status: exported skip variable cannot hide a verified systemd engine (#894)" {
+  start_matching_engine
+  rm -f "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+  local fake_bin fake_systemctl
+  fake_bin="$(write_matching_ps_fixture)"
+  fake_systemctl="$(write_systemd_show_fixture active "$ENGINE_PID")"
+
+  run env PATH="$fake_bin:$PATH" AGMSG_SYSTEMCTL="$fake_systemctl" \
+    "$(legacy_skip_systemd_probe_name)=1" \
+    bash "$SCRIPTS/remote.sh" status testteam --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite_mem "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")', '\$.engine_state');")" = running ]
+  [ "$(sqlite_mem "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")', '\$.engine_pid');")" = "$ENGINE_PID" ]
+}
+
+@test "sync start: exported skip variable cannot duplicate an active systemd engine (#894)" {
+  start_matching_engine
+  rm -f "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+  local fake_bin fake_systemctl
+  fake_bin="$(write_matching_ps_fixture)"
+  fake_systemctl="$(write_systemd_show_fixture active "$ENGINE_PID")"
+
+  run env PATH="$fake_bin:$PATH" AGMSG_SYSTEMCTL="$fake_systemctl" \
+    "$(legacy_skip_systemd_probe_name)=1" \
+    bash "$SCRIPTS/remote.sh" sync start testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "already running (pid $ENGINE_PID)"
+  [ "$(find "$TEST_SKILL_DIR/run" -maxdepth 1 -name 'remote-sync.testteam.pid' | wc -l)" -eq 0 ]
+}
+
+@test "engine status: pidfile-only mode does not invoke the systemd probe (#894)" {
+  start_matching_engine
+  local fake_bin fake_systemctl probe_log="$TEST_SKILL_DIR/systemctl-called"
+  fake_bin="$(write_matching_ps_fixture)"
+  fake_systemctl="$TEST_SKILL_DIR/fake-systemctl-counting"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    ': > "$AGMSG_TEST_SYSTEMCTL_PROBE_LOG"' \
+    "printf '%s\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running' 'MainPID=$ENGINE_PID'" \
+    > "$fake_systemctl"
+  chmod +x "$fake_systemctl"
+
+  run env PATH="$fake_bin:$PATH" AGMSG_SYSTEMCTL="$fake_systemctl" \
+    AGMSG_TEST_SYSTEMCTL_PROBE_LOG="$probe_log" \
+    bash -c 'source "$1/remote.sh"; _remote_sync_engine_status testteam --pidfile-only' _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'running\t'"$ENGINE_PID" ]
+  [ ! -e "$probe_log" ]
+}
+
+@test "engine status: rejects an unknown internal mode (#894)" {
+  run bash -c 'source "$1/remote.sh"; _remote_sync_engine_status testteam --unknown-mode' _ "$SCRIPTS"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown sync engine status mode '--unknown-mode'"* ]]
+}
+
+@test "sync start: refuses an active systemd unit with unverified identity (#894)" {
+  sleep 30 &
+  local foreign_pid=$!
+  ENGINE_PIDS="$ENGINE_PIDS $foreign_pid"
+  local fake_bin fake_systemctl
+  fake_bin="$(write_matching_ps_fixture)"
+  fake_systemctl="$(write_systemd_show_fixture active "$foreign_pid")"
+
+  run env PATH="$fake_bin:$PATH" AGMSG_SYSTEMCTL="$fake_systemctl" \
+    bash "$SCRIPTS/remote.sh" sync start testteam
+  [ "$status" -eq 1 ]
+  printf '%s\n' "$output" | grep -q -F -- "systemd owns team 'testteam'"
+  refute test -f "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+}
+
+
+@test "status: reports an inactive systemd unit with restart guidance (#894)" {
+  start_matching_engine
+  rm -f "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+  local fake_systemctl
+  fake_systemctl="$(write_systemd_show_fixture inactive 0)"
+
+  run env AGMSG_SYSTEMCTL="$fake_systemctl" bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "engine inactive under systemd"
+  printf '%s\n' "$output" | grep -q -F -- "systemctl --user restart agmsg-remote-sync-testteam.service"
 }

@@ -185,7 +185,18 @@ for SKILL_DIR in "${SKILL_DIRS[@]}"; do
   fi
 done
 
-# --- 2c. Remove native Windows helpers ---
+# --- 2c. Remove Antigravity skill ---
+for SKILL_DIR in "${SKILL_DIRS[@]}"; do
+  SKILL_NAME="$(basename "$SKILL_DIR")"
+  ANTIGRAVITY_SKILL="$HOME/.gemini/config/skills/$SKILL_NAME"
+  if [ -d "$ANTIGRAVITY_SKILL" ]; then
+    rm -rf "$ANTIGRAVITY_SKILL"
+    echo "  - removed /$SKILL_NAME skill from ~/.gemini/config/skills/"
+    REMOVED=true
+  fi
+done
+
+# --- 2d. Remove native Windows helpers ---
 for SKILL_DIR in "${SKILL_DIRS[@]}"; do
   SKILL_NAME="$(basename "$SKILL_DIR")"
   for helper in "$AGENTS_DIR/$SKILL_NAME.ps1" "$AGENTS_DIR/$SKILL_NAME-run.sh"; do
@@ -211,6 +222,21 @@ if [ "$REMOVED_SQLITE_SHIM" = true ] && [ -f "$SQLITE_SHIM_CACHE" ]; then
   rm "$SQLITE_SHIM_CACHE"
   echo "  - removed $SQLITE_SHIM_CACHE"
   REMOVED=true
+fi
+
+# Remove the Antigravity launcher only when it belongs to an installation
+# selected above. A same-named user file or another install's shim is retained.
+ANTIGRAVITY_TUI_SHIM="$AGENTS_DIR/bin/agy-tui"
+if [ -f "$ANTIGRAVITY_TUI_SHIM" ]; then
+  for SKILL_DIR in "${SKILL_DIRS[@]}"; do
+    owner="# agmsg-shim-owner: $SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
+    if grep -Fxq "$owner" "$ANTIGRAVITY_TUI_SHIM" 2>/dev/null; then
+      rm "$ANTIGRAVITY_TUI_SHIM"
+      echo "  - removed $ANTIGRAVITY_TUI_SHIM"
+      REMOVED=true
+      break
+    fi
+  done
 fi
 
 # --- 3. Remove skill directories ---

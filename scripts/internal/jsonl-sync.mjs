@@ -6,6 +6,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import process from "node:process";
 import { parseStrictJsonl } from "./strict-jsonl.mjs";
 import { sealEnvelope } from "./sync-cipher.mjs";
+import { ROSTER_KINDS } from "./wire-kinds.mjs";
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -469,8 +470,7 @@ function validatePull(records) {
     if (BigInt(message.server_seq) <= previous) fail("pull messages are not ordered");
     previous = BigInt(message.server_seq);
     if (message.status === "importable") {
-      const rosterKind = ["member_joined", "member_left", "member_renamed", "key_rotated"]
-        .includes(message.projection?.kind);
+      const rosterKind = ROSTER_KINDS.includes(message.projection?.kind);
       const chatProjection = message.projection && message.projection.kind === undefined &&
         typeof message.projection.body === "string" &&
         typeof message.projection.from_agent === "string" &&
@@ -581,7 +581,19 @@ function afterReprocessToken(message, after) {
   return sequenceOrder > 0n || (sequenceOrder === 0n && message.id > after.id);
 }
 
-function reprocess(path, target, limit, afterText) {
+// Default (empty scope): every status a caller may recover by supplying new
+// key material, as cmd_unlock's reprocess always has. 'malformed': only rows
+// the receiver itself failed to understand (#1284) -- a newer parser can
+// revisit those; authentication_failed, corrupt_state and policy_violation
+// cannot be fixed by a parser, and pending_key stays on the unlock path.
+const REPROCESS_SCOPES = {
+  "": ["unsupported_cipher", "pending_key", "authentication_failed", "malformed", "policy_violation"],
+  malformed: ["malformed"],
+};
+
+function reprocess(path, target, limit, afterText, scope) {
+  const statuses = REPROCESS_SCOPES[scope ?? ""];
+  if (!statuses) fail("reprocess scope is invalid");
   const after = parseReprocessToken(afterText);
   let records = readRecords(path);
   let generation = storedGeneration(records);
@@ -596,8 +608,7 @@ function reprocess(path, target, limit, afterText) {
   process.stdout.write(`${JSON.stringify({ type: "sync_state", driver_generation: generation,
     transport_cursor: state.transportCursor })}\n`);
   const eligible = [...state.quarantineByWire.values()]
-    .filter((message) => ["unsupported_cipher", "pending_key", "authentication_failed",
-      "malformed", "policy_violation"].includes(message.status))
+    .filter((message) => statuses.includes(message.status))
     .sort((left, right) => BigInt(left.server_seq) < BigInt(right.server_seq) ? -1 :
       BigInt(left.server_seq) > BigInt(right.server_seq) ? 1 : left.id.localeCompare(right.id))
     .filter((message) => afterReprocessToken(message, after));
@@ -621,7 +632,7 @@ async function stdin() {
 }
 
 async function main() {
-  const [operation, path, localTeam, server, remote, protocolText, extra, pageAfter] =
+  const [operation, path, localTeam, server, remote, protocolText, extra, pageAfter, scope] =
     process.argv.slice(2);
   if (operation === "rotate-generation") {
     readRecords(path);
@@ -647,7 +658,7 @@ async function main() {
     if (input.trim() !== "" || !Number.isInteger(limit) || limit < 1 || limit > 1000) {
       fail("reprocess input or limit is invalid");
     }
-    reprocess(path, target, limit, pageAfter);
+    reprocess(path, target, limit, pageAfter, scope);
   } else {
     fail("unknown JSONL sync operation", 2);
   }

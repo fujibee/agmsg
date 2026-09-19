@@ -13,6 +13,14 @@ teardown() {
   teardown_test_env
 }
 
+lock_path() {
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c 'source "$1/lib/actas-lock.sh"; actas_lock_path team alice' _ "$SCRIPTS"
+}
+
+record_owner() {
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c 'source "$1/lib/role-session.sh"; _agmsg_role_session_path_into team alice; _agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" owner' _ "$SCRIPTS"
+}
+
 # --- lifetime bound vs slow startup (#558) -----------------------------------
 #
 # The bridge force-kills this child at (timeout + interval + 10) seconds from
@@ -105,6 +113,39 @@ _assert_startup_was_delayed() {
   [[ "$output" =~ "hello pending" ]]
 }
 
+# --- argv-length regression (#777) --------------------------------------
+#
+# This pair's unread ids used to be embedded into ONE argv element for
+# `sqlite3 ':memory:' "<embedded SQL>"`, with the failure swallowed by a
+# trailing `2>/dev/null || true` -- so `ids` silently became empty and the
+# `[ -n "$ids" ] || continue` a few lines later skipped the whole team every
+# single poll, never marking anything read (this script never does) and
+# never reporting it pending either.
+#
+# 100 messages of ~2000 bytes each is about 200,000 bytes of body alone,
+# well past Linux's MAX_ARG_STRLEN (131,072 bytes; smaller still on
+# Windows/macOS).
+@test "watch-once: a backlog large enough to exceed the OS argv ceiling still reports pending (#777)" {
+  bulk_send_direct team bob alice 100 2000 WOBIG
+
+  run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --timeout 2 --interval 1
+  [ "$status" -eq 0 ]
+  grep -qF -- "status=pending" <<< "$output"
+  [[ "$output" =~ "count=100" ]]
+}
+
+@test "watch-once: keeps a pair whose actas lock belongs to this owner" {
+  setup_live_owner "$TEST_SKILL_DIR/run" owner-session
+  bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
+  local owner
+  owner="$(record_owner)"
+  bash "$SCRIPTS/send.sh" team bob alice "owned pending" >/dev/null
+
+  run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --owner "$owner" --timeout 1 --interval 1
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "status=pending" ]]
+}
+
 @test "watch-once: ignores messages already read by inbox.sh" {
   bash "$SCRIPTS/send.sh" team bob alice "read already" >/dev/null
   bash "$SCRIPTS/inbox.sh" team alice >/dev/null
@@ -141,6 +182,21 @@ _assert_startup_was_delayed() {
   bash "$SCRIPTS/send.sh" team bob alice "locked out" >/dev/null
 
   run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --timeout 1 --interval 1
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "no available subscription" ]]
+}
+
+@test "watch-once: excludes a pair whose actas lock belongs to another owner" {
+  setup_live_owner "$TEST_SKILL_DIR/run" other-session
+  bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice other-session >/dev/null
+  local owner
+  owner="$(record_owner)"
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c 'source "$1/lib/actas-lock.sh"; actas_lock_release team alice "$2"' _ "$SCRIPTS" "$owner" >/dev/null
+  setup_live_owner "$TEST_SKILL_DIR/run" replacement-session
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c 'source "$1/lib/actas-lock.sh"; actas_lock_claim team alice replacement-session' _ "$SCRIPTS" >/dev/null
+  bash "$SCRIPTS/send.sh" team bob alice "other owner" >/dev/null
+
+  run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --owner "$owner" --timeout 1 --interval 1
   [ "$status" -eq 1 ]
   [[ "$output" =~ "no available subscription" ]]
 }

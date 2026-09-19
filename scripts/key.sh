@@ -35,6 +35,10 @@ source "$SCRIPT_DIR/lib/operator-guidance.sh"
 source "$SCRIPT_DIR/lib/shquote.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/roster-journal.sh"
+# agmsg_sha256 -- `shasum` is absent in Git for Windows' Git Bash, and every
+# digest below is either a fingerprint a human compares or an E2EE checkpoint.
+# shellcheck source=lib/hash.sh
+source "$SCRIPT_DIR/lib/hash.sh"
 
 TEAMS_DIR="$CONNECTION_ROOT/teams"
 CRED_ROOT="$CONNECTION_ROOT/run/remote-credentials"
@@ -86,12 +90,25 @@ _key_read_config_field() {
 # Short, human-comparable digest of a recipient string (SSH-key-fingerprint
 # style grouping) — for the H7 fingerprint-verification step:
 # two people compare this same short string over a separate channel.
+#
+# Fails rather than returning a short string it could not compute: see the
+# callers, which now take the value into a variable of its own before printing
+# it. An empty fingerprint is the worst possible output here -- both people see
+# the same blank and agree.
+#
+# THAT REFUSAL RIDES ON `set -o pipefail`, LINE 2. `agmsg_sha256` is in the
+# middle of this pipeline, and `cut` and `sed` are perfectly happy with the
+# empty input a failed digest leaves them: without pipefail the pipeline exits 0
+# with an empty string, the caller's assignment succeeds, and the label prints
+# with nothing after it. Dropping `pipefail` reddens both "no blank
+# fingerprint" cases in tests/test_key.bats, which is the control for this
+# paragraph -- if you are here because you want to simplify line 2, run them.
 _key_fingerprint() {
-  printf '%s' "$1" | shasum -a 256 | cut -c1-16 | sed 's/\(....\)/\1-/g;s/-$//'
+  printf '%s' "$1" | agmsg_sha256 | cut -c1-16 | sed 's/\(....\)/\1-/g;s/-$//'
 }
 
 _key_fingerprint_sha256() {
-  printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  printf '%s' "$1" | agmsg_sha256
 }
 
 # A timestamp alone collides when two epochs are minted within the same
@@ -295,8 +312,10 @@ cmd_generate() {
   existing="$(_key_read_config_field "$cfg" '$.remote_key.current.key_id')"
   if [ -n "$existing" ] && [ "$existing" != "null" ]; then
     agmsg_lock_release
-    echo "agmsg: team '$team' already has a key (key_id=$existing); rotation is not available in this release. To view it:" >&2
+    echo "agmsg: team '$team' already has a key (key_id=$existing). To view it:" >&2
     echo "  bash $(agmsg_shq "$SKILL_DIR/scripts/key.sh") show $(agmsg_shq "$team")" >&2
+    echo "To mint a replacement epoch instead:" >&2
+    echo "  bash $(agmsg_shq "$SKILL_DIR/scripts/key.sh") rotate $(agmsg_shq "$team")" >&2
     exit 1
   fi
 
@@ -319,8 +338,17 @@ cmd_generate() {
   _key_write_epoch_locked "$cfg" "$(_key_epoch_json "$key_id" 0 0 "$recipient" null "$created_at")"
   agmsg_lock_release
 
+  # Computed into a variable of its own, NOT inline in the echo. A command
+  # substitution that fails inside a simple command's arguments leaves that
+  # command's own status untouched, so `echo` succeeded and printed the label
+  # with nothing after it. A bare assignment's status IS the substitution's, so
+  # `set -e` stops here instead. (Same reasoning as remote.sh's `existing=` note;
+  # `local fp_short="$(...)"` would put the status back on the declaration and
+  # undo it.)
+  local fp_short
+  fp_short="$(_key_fingerprint "$recipient")"
   echo "Generated a new key for team '$team'."
-  echo "Recipient fingerprint: $(_key_fingerprint "$recipient")"
+  echo "Recipient fingerprint: $fp_short"
   echo
   # What the key IS, always: true whoever ran this, so it is never held back.
   #
@@ -413,8 +441,10 @@ cmd_show() {
   fi
 
   if [ "$reveal" -eq 0 ]; then
+    local fp_short
+    fp_short="$(_key_fingerprint "$recipient")"
     echo "Team: $team"
-    echo "Recipient fingerprint: $(_key_fingerprint "$recipient")"
+    echo "Recipient fingerprint: $fp_short"
     echo "Public recipient: $recipient"
     return
   fi
@@ -576,8 +606,10 @@ cmd_import() {
       _key_write_identity_atomic "$cred_dir/$staged_key_id.key" "$identity"
       agmsg_lock_release
       unset identity
+      local fp_short
+      fp_short="$(_key_fingerprint "$recipient")"
       echo "Imported replacement key for team '$team' (key_id=$staged_key_id)."
-      echo "Recipient fingerprint: $(_key_fingerprint "$recipient")"
+      echo "Recipient fingerprint: $fp_short"
       return
     fi
     # Matches the existing epoch: just store this device's copy of the
@@ -596,8 +628,10 @@ cmd_import() {
   fi
   unset identity
 
+  local fp_short
+  fp_short="$(_key_fingerprint "$recipient")"
   echo "Imported key for team '$team'."
-  echo "Recipient fingerprint: $(_key_fingerprint "$recipient")"
+  echo "Recipient fingerprint: $fp_short"
 }
 
 cmd_rotate() {
@@ -760,7 +794,7 @@ EOF
     echo "agmsg: could not read the current authority-confirmed epoch snapshot." >&2
     exit 1
   fi
-  previous_snapshot_sha="$(shasum -a 256 "$previous_snapshot" | awk '{print $1}')"
+  previous_snapshot_sha="$(agmsg_sha256 < "$previous_snapshot")"
   rm -f "$previous_snapshot"
   writer_generation="$(agmsg_sqlite_mem \
     "SELECT CAST('$(_agmsg_sqlesc "$(_key_read_config_field "$cfg" '$.remote_key.current.writer_generation')")' AS INTEGER) + 1;")"
@@ -781,8 +815,10 @@ EOF
   fi
   agmsg_lock_release
 
+  local fp_short
+  fp_short="$(_key_fingerprint "$recipient")"
   echo "Generated replacement key for team '$team' (epoch=$next_epoch, key_id=$key_id)."
-  echo "Recipient fingerprint: $(_key_fingerprint "$recipient")"
+  echo "Recipient fingerprint: $fp_short"
   echo "The private key was not written to the journal; distribute it out of band."
   echo "On an interactive terminal, run:"
   echo "  bash $(agmsg_shq "$SKILL_DIR/scripts/key.sh") show $(agmsg_shq "$team") --key-id $(agmsg_shq "$key_id") --reveal-secret"

@@ -228,6 +228,9 @@ agmsg_find_registered_project_variant() {
 }
 
 # Map an agent type to the binary basename(s) its process may carry.
+# Names must be type-distinctive. Do not list `agent`: Homebrew grok-build
+# and the Cursor CLI installer both use that basename (#856). Matching it
+# would attach the wrong pid (#93). The alias is an intentional miss.
 _agmsg_agent_binaries() {
   case "$1" in
     claude-code) echo "claude" ;;
@@ -236,6 +239,7 @@ _agmsg_agent_binaries() {
     antigravity) echo "antigravity" ;;
     copilot)     echo "copilot" ;;
     opencode)    echo "opencode" ;;
+    grok-build)  echo "grok" ;;
     *)           echo "claude codex gemini" ;;
   esac
 }

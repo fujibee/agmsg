@@ -22,6 +22,7 @@ Open an issue on [`fujibee/agmsg`](https://github.com/fujibee/agmsg/issues). Inc
 3. Run the test suite: `bats tests/`.
 4. Match the surrounding code style. Bash is the primary language; use `set -euo pipefail` at the top of every script.
 5. Update docs if the change is user-visible.
+6. PRs land on `main` as a single squash commit — merge and rebase merges are disabled on the repository. Your branch's commits are collapsed into one, so write the PR title to read well as that commit's subject. There is no need to tidy your branch history before review.
 
 ## Releases
 

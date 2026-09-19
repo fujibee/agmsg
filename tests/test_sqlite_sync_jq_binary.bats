@@ -279,3 +279,114 @@ STUB
   # And nothing was said, because nothing was wrong.
   [ -z "$output" ]
 }
+
+# A jq that adds CR to the values this driver READS back, and only to those.
+#
+# The stub above is scoped to `@tsv` because that is where #829's field report
+# measured the CR -- on the send path. #968 is the other direction: `roster_seqs`
+# arrives from the server and is read back through a plain `jq -r`, and the CR
+# rides into `_sqlite_sync_sequence`, which refuses it as non-canonical.
+#
+# Scoped for the same reason the other one is, and the restriction is again the
+# honest part: a stub that CR-terminated every line would also poison
+# `min_available_seq`, `current_seq` and the member ids in this same function, so
+# a failure could no longer be attributed to the read path under test. Filters
+# naming `roster_seqs` are exactly the two calls that carry #968's value.
+stub_jq_crlf_on_read() {
+  local bin="$TEST_SKILL_DIR/jq-crlf-read"
+  mkdir -p "$bin"
+  cat > "$bin/jq" <<STUB
+#!/usr/bin/env bash
+real="$(command -v jq)"
+for a in "\$@"; do
+  case "\$a" in -b|-b*) exec "\$real" "\$@" ;; esac
+done
+roster=0
+for a in "\$@"; do
+  case "\$a" in *roster_seqs*) roster=1 ;; esac
+done
+if [ "\$roster" = 1 ]; then
+  "\$real" "\$@" | sed 's/\$/\r/'
+  exit "\${PIPESTATUS[0]}"
+fi
+exec "\$real" "\$@"
+STUB
+  chmod +x "$bin/jq"
+  printf '%s' "$bin"
+}
+
+@test "sync: a CRLF jq does not put a trailing CR on a value read back (#968)" {
+  # THE READ PATH, WHICH #829's FIX DID NOT COVER.
+  #
+  # #829 put `-b` on the three call sites that SEND. `roster_seqs` is read back
+  # from the server through a call that had none, so the CR reached
+  # `_sqlite_sync_sequence` and the driver refused its own server's answer. The
+  # wrapper is what makes that unreachable: a read path cannot lose `-b` because
+  # it never spells out `jq`.
+  #
+  # This case fails if it ever can again -- remove `-b` from `_sqlite_sync_jq`,
+  # or reintroduce a bare `jq` on this path, and the CR comes back.
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store-read"
+  export AGMSG_STORAGE_DRIVER=sqlite
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  storage_init demo >/dev/null
+
+  local context
+  context=$(jq -nc --arg member "018f3f7e-0000-7000-8000-000000000010" '
+    {type:"sync_read_context",min_available_seq:"0",current_seq:"2",
+     local_agents:["bob"],members:[{member_id:$member,name:"bob"}],
+     roster_seqs:["1","2"]}')
+
+  local bin; bin="$(stub_jq_crlf_on_read)"
+  # RUN IN THIS SHELL, for the same reason the two cases above do: the driver's
+  # functions are defined here by `agmsg_storage_load` and a `bash -c` child
+  # would report "command not found" instead of exercising them.
+  local saved_path="$PATH" status_seen=0
+  PATH="$bin:$PATH"
+  printf '%s\n' "$context" \
+    | storage_sync_prepare_read_state demo \
+        018f3f7e-0000-7000-8000-000000000000 \
+        018f3f7e-0000-7000-8000-000000000001 1 >/dev/null 2>"$BATS_TEST_TMPDIR/read.err" \
+    || status_seen=$?
+  PATH="$saved_path"
+
+  # ON THE VALUE, NOT MERELY ON THE EXIT CODE. A driver that refused this
+  # context for some unrelated reason would also be non-zero, so the refusal
+  # #968 names is what is asserted absent.
+  refute grep -q "is not a canonical sequence (#968)" "$BATS_TEST_TMPDIR/read.err"
+  refute grep -q "roster_seqs is not a list of at most 10000 canonical sequences (#968)" \
+    "$BATS_TEST_TMPDIR/read.err"
+  [ "$status_seen" -eq 0 ]
+}
+
+@test "sync: a missing node still answers 10, even when the jq also lacks -b (#829)" {
+  # TWO REFUSALS, AND THE ORDER BETWEEN THEM IS A CONTRACT.
+  #
+  # `storage_sync_resync` answers 10 for "no node, no strict parser" and 13 for
+  # everything else, and callers tell those apart. Resolving the jq capability at
+  # function scope -- which every other entry in this driver now does, to stop
+  # re-probing in each `$( )` subshell -- puts a second refusal in front of that
+  # one. Placed first it outranks the 10: measured 13 where the caller expects
+  # 10, with a node that is absent and a jq that happens to lack `-b`.
+  #
+  # So in this one function the gate sits after the node check. This case is what
+  # holds it there; move it back above `command -v "$node_bin"` and this reddens.
+  local bin; bin="$(stub_jq_without_b)"
+
+  run env REAL_PATH="$PATH" PATH="$bin:$PATH" \
+      AGMSG_SYNC_NODE_BIN=/nonexistent-node-binary bash -c '
+    export SKILL_DIR="$2" AGMSG_STORAGE_PATH="$3" AGMSG_STORAGE_DRIVER=sqlite
+    . "$1/lib/storage.sh"; agmsg_storage_load
+    storage_init demo >/dev/null 2>&1
+    printf "" | storage_sync_resync demo \
+      018f3f7e-0000-7000-8000-000000000000 \
+      018f3f7e-0000-7000-8000-000000000001 1
+  ' _ "$SCRIPTS" "$TEST_SKILL_DIR" "$BATS_TEST_TMPDIR/store-resync"
+
+  # ON THE NUMBER. A non-zero status is not the assertion -- 13 is also non-zero,
+  # and 13 is exactly the regression this guards against.
+  [ "$status" -eq 10 ]
+}

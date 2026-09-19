@@ -64,6 +64,11 @@ cleanup_sync_engines() {
 teardown() {
   kill "$MOCK_SERVER_PID" 2>/dev/null || true
   wait "$MOCK_SERVER_PID" 2>/dev/null || true
+  if [ -n "${MOCK_SERVER_B_PID:-}" ]; then
+    kill "$MOCK_SERVER_B_PID" 2>/dev/null || true
+    wait "$MOCK_SERVER_B_PID" 2>/dev/null || true
+    MOCK_SERVER_B_PID=""
+  fi
 
   local cleanup_status=0
   if ! cleanup_sync_engines "$TEST_SKILL_DIR" "primary"; then
@@ -115,7 +120,7 @@ skip_if_no_age() {
   run bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
   [[ "$output" == *"age / age-keygen on PATH"* ]]
-  [[ "$output" == *"All checks passed."* ]]
+  [[ "$output" == *"All prerequisite checks passed."* ]]
 }
 
 @test "remote doctor: is read-only (no token required, no state touched)" {
@@ -162,7 +167,7 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   sqlite_mem "SELECT coalesce(json_extract(CAST(readfile('$escaped') AS TEXT), '\$.remote_binding.$2'), '');"
 }
 
-@test "connect: a POST that committed but lost its response recovers on retry (#143)" {
+@test "connect: a POST that committed but lost its response recovers on retry" {
   # Arm the cut: the next /v1/connect registers the team and answers nothing.
   run curl -sS "$ENDPOINT/_test/drop-next-connect"
   [ "$status" -eq 0 ]
@@ -182,7 +187,7 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   [ "$(_binding_field testteam remote_team_name)" = "testteam" ]
 }
 
-@test "connect: refuses to re-anchor a binding to a different server instance (#143)" {
+@test "connect: refuses to re-anchor a binding to a different server instance" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
   local anchored
@@ -196,7 +201,27 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   run curl -sS "$ENDPOINT/_test/rotate-server-id"
   [ "$status" -eq 0 ]
 
+  # #1176: this assertion goes red on CI roughly 3 times in 16 runs and has
+  # never once reproduced locally (15 isolated repeats, a whole-file run, a
+  # deliberate 6s delay here to give the background sync engine's poll a
+  # chance to fire, and the exact 4-file combination the age-v1-contract leg
+  # runs -- all green). Whatever the CI-only condition is, the state that
+  # would show it is gone the moment teardown() runs rm -rf on
+  # $TEST_SKILL_DIR. Dump it into the test's own output NOW, unconditionally
+  # -- bats only surfaces this stream when the test actually fails, so it
+  # costs nothing on the green runs and is exactly what the next red one is
+  # missing today.
+  echo "DIAG(#1176) pre-reconnect: date=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ 2>/dev/null || date -u)"
+  echo "DIAG(#1176) pre-reconnect: live server /v1/health = $(curl -sS "$ENDPOINT/v1/health" 2>&1)"
+  echo "DIAG(#1176) pre-reconnect: anchored=$anchored"
+  echo "DIAG(#1176) pre-reconnect: server.log tail:"
+  { tail -n 20 "$TEST_SKILL_DIR/server.log" 2>&1 | sed 's/^/DIAG(#1176)   /'; } || true
+  echo "DIAG(#1176) pre-reconnect: sync engine pidfile: $(cat "$TEST_SKILL_DIR/run/remote-sync.testteam.pid" 2>&1 || true)"
+  echo "DIAG(#1176) pre-reconnect: sync engine log tail:"
+  { tail -n 20 "$TEST_SKILL_DIR/run/remote-sync.testteam.log" 2>&1 | sed 's/^/DIAG(#1176)   /'; } || true
+
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  echo "DIAG(#1176) reconnect: status=$status output=$output"
   [ "$status" -ne 0 ]
   [[ "$output" == *"Refusing to re-anchor"* ]]
   # The binding still points at the server it was made against.
@@ -214,7 +239,7 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   [ "$(_binding_field testteam server_instance_id)" != "$anchored" ]
 }
 
-@test "connect: a repeat run cannot restate the registered cipher profile (#143)" {
+@test "connect: a repeat run cannot restate the registered cipher profile" {
   # Declaring age-v1 means minting a key, so this one needs age. The refusal
   # itself does not -- the quoting it prints is covered without age in
   # test_shquote.bats, at the function that owns it.
@@ -491,7 +516,7 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   [ "$(_binding_field testteam endpoint)" = "$ENDPOINT" ]
 }
 
-@test "connect: the printed recovery command is shell-safe for a hostile team name (#143)" {
+@test "connect: the printed recovery command is shell-safe for a hostile team name" {
   # This asserts the CALL SITE, not the helper. tests/test_shquote.bats pins
   # what agmsg_shq does; nothing there stops remote.sh from going back to a
   # bare '$team', and the case that would catch it needs age and so never runs
@@ -565,14 +590,14 @@ _capability_endpoint() {
   printf '%s' "$ENDPOINT/t/$CAPABILITY_SECRET"
 }
 
-@test "redaction: adoption success does not print the capability (#143)" {
+@test "redaction: adoption success does not print the capability" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   assert_no_capability "adopting that registration" \
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: an unreadable capabilities response does not print it (#143)" {
+@test "redaction: an unreadable capabilities response does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS "$ENDPOINT/_test/fail-next?route=capabilities" >/dev/null
@@ -580,7 +605,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: an unreadable roster response does not print it (#143)" {
+@test "redaction: an unreadable roster response does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS "$ENDPOINT/_test/fail-next?route=members" >/dev/null
@@ -588,7 +613,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: a server-instance mismatch does not print it (#143)" {
+@test "redaction: a server-instance mismatch does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS "$ENDPOINT/_test/rotate-server-id" >/dev/null
@@ -596,7 +621,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: a team-name mismatch does not print it (#143)" {
+@test "redaction: a team-name mismatch does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS --get --data-urlencode "from=testteam" --data-urlencode "to=someone-elses" \
@@ -605,7 +630,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: a roster mismatch does not print it (#143)" {
+@test "redaction: a roster mismatch does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" updated
@@ -615,7 +640,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: a cipher-profile mismatch does not print it (#143)" {
+@test "redaction: a cipher-profile mismatch does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS --get --data-urlencode "team_name=testteam" --data-urlencode "profile=age-v1" \
@@ -624,7 +649,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: the helper drops path, query, fragment and userinfo (#143)" {
+@test "redaction: the helper drops path, query, fragment and userinfo" {
   # The one source-level claim kept: it is about the helper's own behaviour,
   # not about who remembers to call it.
   eval "$(sed -n '/^_remote_endpoint_display() {/,/^}/p' "$SCRIPTS/remote.sh")"
@@ -635,7 +660,7 @@ _capability_endpoint() {
   [ "$(_remote_endpoint_display 'https://host/a@b/c')" = "https://host" ]
 }
 
-@test "connect: refuses to adopt a registration whose roster is not this team's (#143)" {
+@test "connect: refuses to adopt a registration whose roster is not this team's" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
 
@@ -1550,7 +1575,7 @@ VALUES ('remote-pending.$key', $owner_pid, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
     || skip "all doctor prerequisites are not installed"
   run bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"All checks passed."* ]]
+  [[ "$output" == *"All prerequisite checks passed."* ]]
 }
 
 PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
@@ -1600,6 +1625,67 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
     [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
       "SELECT COUNT(*) FROM events WHERE team='cloned';")" -eq 0 ]
   fi
+}
+
+# #963's sibling: the client announces its own version on every request, so a
+# server can eventually tell an unannounced (pre-1.3.1) client apart from one
+# that announced and could not read VERSION. Covers both call surfaces that
+# reach the agmsg server -- remote-sync.mjs's fetch() (through pull, which
+# also exercises the engine's own requests) and remote.sh's own curl helpers
+# (through connect's POST /v1/connect and pull's GET /v1/capabilities +
+# /v1/members) -- and both directions: VERSION present names its value,
+# VERSION absent still sends the fixed "unknown" string rather than an empty
+# value or no header at all.
+@test "remote pull and connect: announce the client version, and 'unknown' when VERSION cannot be read" {
+  MOCK_TEAM_CIPHER_PROFILE=none
+  restart_mock_server
+
+  printf 'v1.3.1-test\n' > "$TEST_SKILL_DIR/VERSION"
+  # connect: both curl helpers in one call -- _remote_http_post_json for
+  # POST /v1/connect itself, then _remote_http_get_json (via
+  # _remote_adopt_registration) for the capabilities/members follow-up. pull
+  # does NOT go through either: it reaches the server through
+  # remote-sync.sh pull-bootstrap, i.e. remote-sync.mjs's fetch() path only
+  # -- confirmed by grepping cmd_pull for both curl helper names and finding
+  # neither. testteam already exists locally (setup()) and was minted with
+  # this mock server's team_id, so this is the cheapest way to reach it.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1-test" ]
+  # connect started a background engine that keeps polling with the version it
+  # read at spawn time, cached for its own process life -- left running, its
+  # next cycle would overwrite the check below with this stale value. Same
+  # reason every step below also disconnects before the next check.
+  bash "$SCRIPTS/remote.sh" disconnect testteam
+
+  # pull: remote-sync.mjs's fetch() path only (see above).
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" versioned1
+  [ "$status" -eq 0 ]
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1-test" ]
+  bash "$SCRIPTS/remote.sh" disconnect versioned1
+
+  rm -f "$TEST_SKILL_DIR/VERSION"
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" versioned2
+  [ "$status" -eq 0 ]
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "unknown" ]
+  bash "$SCRIPTS/remote.sh" disconnect versioned2
+
+  # An invalid byte in VERSION, under a UTF-8 locale, through connect again --
+  # a pull here would not exercise the bug this covers, per the note above.
+  # The curl helpers' sanitize step is a two-command pipeline (printf | sed),
+  # and LC_ALL=C binding to only the first of the two left sed running in the
+  # caller's own locale, where an invalid multibyte byte can make it fail
+  # outright ("illegal byte sequence" on stderr) instead of just not matching
+  # it (#1290 review). Forcing the locale here reproduces that even when the
+  # suite's own environment happens to be C already. testteam was
+  # disconnected, not forgotten, so it can be connected again.
+  printf 'v1.3.1-\xc3-bad\n' > "$TEST_SKILL_DIR/VERSION"
+  run env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+    bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  refute grep -qF -- "illegal byte sequence" <<<"$output"
+  refute grep -qF -- "sed:" <<<"$output"
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1--bad" ]
 }
 
 # The three callers changed by #730, each with a start refusal injected.
@@ -1707,7 +1793,7 @@ _deny_engine_pidfile() {
   [[ "$output" == *"already has history"* ]]
 }
 
-@test "remote pull: refuses a team whose history is in the LEGACY table (#147)" {
+@test "remote pull: refuses a team whose history is in the LEGACY table" {
   # The shape the old guard could not see. It counted the event log only, so a
   # store whose history lives in the legacy `messages` table read as empty --
   # and this is the one case the guard exists to refuse. Asking the driver
@@ -1949,7 +2035,7 @@ PY_BIND
   [ "$(sqlite_mem "SELECT json_extract(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.remote_binding.cipher_profile');")" = "age-v1" ]
 }
 
-@test "remote pull: a declared-sealed EMPTY team without the key does not start its engine (#147)" {
+@test "remote pull: a declared-sealed EMPTY team without the key does not start its engine" {
   # The hole the envelope count left. Zero sealed envelopes arrive, so a
   # count-based gate never asks about the key at all and starts the engine --
   # on a machine that cannot read a word of what this team is about to
@@ -1967,7 +2053,7 @@ PY_BIND
   [ ! -f "$TEST_SKILL_DIR/run/remote-sync.encrypted.pid" ]
 }
 
-@test "remote pull: a declared-sealed EMPTY team WITH the key starts its engine (#147)" {
+@test "remote pull: a declared-sealed EMPTY team WITH the key starts its engine" {
   skip_if_no_age
   # The other side of the same gate: same declaration, same zero envelopes,
   # and the key present. Without this case a version that simply never starts
@@ -2003,7 +2089,7 @@ PY_BIND
   [[ "$output" != *"local but locked"* ]]
 }
 
-@test "remote pull: an unreadable local history stops the pull, loudly (#147)" {
+@test "remote pull: an unreadable local history stops the pull, loudly" {
   # An unknown history is not an empty one. Rounding it down is how the
   # non-fast-forward guard stops guarding -- the single case it exists to
   # refuse would sail through it. And the old code did worse than round: the
@@ -2087,7 +2173,7 @@ PY_BIND
   [ "$after" = "$before" ]
 }
 
-@test "pull decision: the engine follows the key, not the ciphertext (#147)" {
+@test "pull decision: the engine follows the key, not the ciphertext" {
   skip_if_no_age
   # The predicate on its own. The pull fixture cannot produce a team that is
   # both freshly pulled AND already keyed -- that state is created by a caller
@@ -2133,7 +2219,7 @@ PY_BIND
   [ "$status" -ne 0 ]
 }
 
-# unlock, with a start refusal injected (#730). advisor ruled this had to be
+# unlock, with a start refusal injected (#730). Review ruled this had to be
 # pinned rather than described: unlock is the only caller that discards the
 # helper's status with `|| true` and converts it, through
 # REMOTE_SYNC_ENGINE_PID and the readiness loop, into its own failure. A
@@ -2582,7 +2668,7 @@ PY
   local no_age; no_age="$(path_without_age)"
   run env PATH="$no_age" bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"All checks passed"* ]]
+  [[ "$output" == *"All prerequisite checks passed"* ]]
   [[ "$output" == *"optional"* ]]
   [[ "$output" != *"is required for end-to-end encryption"* ]]
 }
@@ -2595,6 +2681,67 @@ PY
   [ "$status" -eq 1 ]
   [[ "$output" == *"[ ] python3 on PATH"* ]]
   [[ "$output" == *"Some checks failed"* ]]
+}
+
+# --- SHA-256 availability (#861) -------------------------------------------
+
+# All three arms present but failing. Shadowing rather than emptying PATH:
+# connect needs most of the toolchain to reach the point under test, and a
+# PATH stripped far enough to hide these would stop it much earlier for
+# reasons that have nothing to do with #861.
+broken_digest_path() {
+  local dir tool
+  dir="$(mktemp -d)"
+  for tool in shasum sha256sum openssl; do
+    printf '#!/bin/sh\nexit 1\n' > "$dir/$tool"
+    chmod +x "$dir/$tool"
+  done
+  printf '%s' "$dir"
+}
+
+@test "remote doctor: reports a SHA-256 tool, and its absence does not fail the run" {
+  local broken; broken="$(broken_digest_path)"
+  run env PATH="$broken:$PATH" bash "$SCRIPTS/remote.sh" doctor
+  # Optional, exactly like age: a team on cipher "none" never computes one.
+  [ "$status" -eq 0 ]
+  # "usable", not "on PATH": this shim IS on PATH and fails when run, which is
+  # the distinction the line was reworded to keep -- see hash.sh.
+  grep -qF -- '[ ] usable SHA-256 tool' <<<"$output"
+  # grep, not `[[ ]]`: a non-last `[[ ]]` cannot fail a test on bash 3.2 (#670).
+  # The summary was narrowed to "prerequisite" when doctor gained the lock
+  # report (#865): an unqualified "All checks passed." sitting above a stale
+  # lock and a removal command reads as cancelling the diagnosis.
+  grep -qF -- 'All prerequisite checks passed' <<<"$output"
+}
+
+@test "remote doctor: reports the SHA-256 tool as usable when one works" {
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- '[x] usable SHA-256 tool' <<<"$output"
+}
+
+# The bug this preflight exists for: the first SHA-256 in a `connect --e2ee`
+# happens after the team is registered with the server, so the operator's news
+# of a missing tool arrived as a half-finished connect.
+@test "remote connect --e2ee: refuses BEFORE registering when no SHA-256 works" {
+  local broken; broken="$(broken_digest_path)"
+  run env PATH="$broken:$PATH" bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --e2ee testteam
+  [ "$status" -ne 0 ]
+  grep -qF -- 'SHA-256' <<<"$output"
+  # And the team is still unregistered. This is the half that makes it a
+  # PREflight: asserting only the message would pass just as well if the
+  # check ran after the POST.
+  run python3 -c "import json;print(json.load(open('$SCRIPTS/../teams/testteam/config.json')).get('remote_binding'))"
+  [ "$output" = "None" ]
+}
+
+# Plain sync never computes a SHA-256, so the same broken machine must still
+# be able to connect. Without this the preflight could be moved ahead of the
+# --e2ee test and nothing would notice.
+@test "remote connect without --e2ee: a broken SHA-256 tool does not block it" {
+  local broken; broken="$(broken_digest_path)"
+  run env PATH="$broken:$PATH" bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
 }
 
 @test "remote pull: a name is enough — no UUID is carried by hand" {
@@ -2690,7 +2837,7 @@ assert_lookup_rejected() {
   assert_lookup_rejected root_name
 }
 
-@test "remote pull: the unlock line it prints can actually be run (#147)" {
+@test "remote pull: the unlock line it prints can actually be run" {
   # Typed, not read. A remedy line is only worth printing if a shell can run
   # it: this takes the line out of the output, fills the placeholders, and
   # requires the failure to be about the BUNDLE -- never "command not found"
@@ -2713,4 +2860,465 @@ assert_lookup_rejected() {
   [[ "$output" != *"command not found"* ]]
   [[ "$output" != *"No such file or directory"*"remote.sh"* ]]
   [[ "$output" != *"Usage: remote.sh unlock"* ]]
+}
+
+# --- doctor names the wedged lock, and removes nothing (#865) ---------------
+#
+# A registry lock left by a killed process is never broken: acquire waits out
+# its budget and says "timed out acquiring registry lock", which describes
+# contention, and no message anywhere names the directory to remove. `doctor` is
+# where that becomes findable.
+
+doctor_lock_dead_pid() {  # a pid that is genuinely not running
+  local p
+  sleep 0 &
+  p=$!
+  wait "$p" 2>/dev/null || true
+  printf '%s' "$p"
+}
+
+make_lock() {  # make_lock <team> [pid]
+  mkdir -p "$TEST_SKILL_DIR/teams/$1"
+  mkdir -p "$TEST_SKILL_DIR/teams/$1/.config.lock"
+  if [ -n "${2:-}" ]; then
+    printf 'token t\npid %s\ncommand join.sh\nhost h\n' "$2" \
+      > "$TEST_SKILL_DIR/teams/$1/.config.lock.holder"
+  fi
+}
+
+@test "remote doctor: a lock whose holder is gone is named, with the way out (#865)" {
+  local gone; gone="$(doctor_lock_dead_pid)"
+  # CONTROL: the pid really is not running, asserted before it is written into
+  # the holder — a number that merely happened to be free would make this pass
+  # for a reason that has nothing to do with the report.
+  run bash -c ". \"$SCRIPTS/lib/instance-id.sh\"; _agmsg_pid_alive_local $gone"
+  [ "$status" -ne 0 ]
+
+  make_lock wedged "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "wedged: stale — pid $gone is not running" <<<"$output"
+  grep -qF -- "rm -r " <<<"$output"
+  # REPORTS ONLY. The whole point of doing this before an automatic sweep is
+  # that a wrong verdict must not cost anything.
+  [ -d "$TEST_SKILL_DIR/teams/wedged/.config.lock" ]
+}
+
+@test "remote doctor: a lock whose holder is alive is not called stale (#865)" {
+  sleep 30 &
+  local live=$!
+  # CONTROL: alive at the moment doctor runs, not merely spawned.
+  run bash -c ". \"$SCRIPTS/lib/instance-id.sh\"; _agmsg_pid_alive_local $live"
+  [ "$status" -eq 0 ]
+
+  make_lock busy "$live"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "busy: held — pid $live is running" <<<"$output"
+  # And it must NOT offer to remove a lock somebody is using.
+  refute grep -qF -- "if no agmsg command is running for this team" <<<"$output"
+  kill "$live" 2>/dev/null || true
+}
+
+@test "remote doctor: a lock with no holder record says it cannot tell (#865)" {
+  # Neither "held" nor "gone": written by a version that recorded nothing, or by
+  # a process killed between creating the lock and writing its record. Guessing
+  # here is what would cost a live lock.
+  make_lock unknown
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "unknown: cannot tell — no holder recorded" <<<"$output"
+  grep -qF -- "rm -r " <<<"$output"
+}
+
+@test "remote doctor: says nothing about locks when there are none (#865)" {
+  # The negative control for the three above: the section is absent on a healthy
+  # install, so "Registry locks:" appearing at all is a finding.
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  refute grep -qF -- "Registry locks:" <<<"$output"
+}
+
+@test "remote doctor: a lock does not fail the run (#865)" {
+  # A team being locked is not a failed prerequisite. If it set the exit code,
+  # doctor would fail every time somebody is joining.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock wedged "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "All prerequisite checks passed." <<<"$output"
+}
+
+@test "remote doctor <team>: reports that team's lock and not another's (#865)" {
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock mine "$gone"
+  make_lock theirs "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor mine
+  [ "$status" -eq 0 ]
+  grep -qF -- "mine: stale" <<<"$output"
+  refute grep -qF -- "theirs: stale" <<<"$output"
+}
+
+@test "remote doctor: a pid that was never asked about is not called stale (#865)" {
+  # THE VERDICT AND THE REMOVAL RIDE TOGETHER, so "false" from the liveness
+  # helper is not enough on its own: it is also false for a value the helper
+  # refused to put to the process table at all. `pid not-a-pid` and a number
+  # past the POSIX ceiling were being reported as stale, with `rm -r` beside
+  # them (raised in review).
+  make_lock badpid
+  printf 'token t\npid not-a-pid\ncommand join.sh\nhost h\n' \
+    > "$TEST_SKILL_DIR/teams/badpid/.config.lock.holder"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "badpid: cannot tell" <<<"$output"
+  refute grep -qF -- "badpid: stale" <<<"$output"
+
+  # CONTROL: the helper does answer false for it, so this case is measuring the
+  # validation and not some other difference.
+  run bash -c ". \"$SCRIPTS/lib/instance-id.sh\"; _agmsg_pid_alive_local not-a-pid"
+  [ "$status" -ne 0 ]
+}
+
+@test "remote doctor: a pid past the POSIX ceiling is not called stale (#865)" {
+  make_lock hugepid
+  printf 'token t\npid 2147483648\ncommand join.sh\nhost h\n' \
+    > "$TEST_SKILL_DIR/teams/hugepid/.config.lock.holder"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "hugepid: cannot tell" <<<"$output"
+  refute grep -qF -- "hugepid: stale" <<<"$output"
+}
+
+@test "remote doctor: a team whose name begins with a dot is swept too (#865)" {
+  # `*` does not match a leading dot, and the team validator allows one — so the
+  # sweep walked past `.hidden` entirely (raised in review). The validator
+  # rejects empty, `.`, `..`, a leading `-`, `/`, `\` and control characters,
+  # and nothing else.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock .hidden "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- ".hidden: stale" <<<"$output"
+}
+
+@test "remote doctor: the summary does not cancel a lock finding (#865)" {
+  # "All checks passed." above a stale lock and a removal command reads as
+  # withdrawing them. The exit code deliberately stays 0 — a locked team is not
+  # a failed prerequisite — so the wording is what has to carry the distinction.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock wedged "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "All prerequisite checks passed." <<<"$output"
+  refute grep -qE '^All checks passed\.$' <<<"$output"
+}
+
+@test "remote doctor <team>: a traversal argument is refused and reads nothing (#865)" {
+  # The named-team lookup builds a path from the argument, and until this was
+  # added nothing had ever validated it — `cmd_doctor` only ever put the value
+  # in a header sentence. A sentinel outside the store proves the refusal is
+  # about reach and not about the string.
+  local outside="$BATS_TEST_TMPDIR/outside"
+  mkdir -p "$outside/.config.lock"
+  printf 'token t\npid 1\ncommand join.sh\nhost h\n' > "$outside/.config.lock.holder"
+  # CONTROL: the sentinel is real and would be reported if it were reached —
+  # the same shape, under a team name, IS reported (the case above).
+  [ -d "$outside/.config.lock" ]
+
+  run bash "$SCRIPTS/remote.sh" doctor "../../$(basename "$BATS_TEST_TMPDIR")/outside"
+  [ "$status" -ne 0 ]
+  refute grep -qF -- "Registry locks:" <<<"$output"
+  refute grep -qF -- "rm -r " <<<"$output"
+  grep -qF -- "invalid team name" <<<"$output"
+  # And it must not claim the prerequisites verdict for a question it refused.
+  refute grep -qF -- "All prerequisite checks passed." <<<"$output"
+}
+
+@test "remote doctor <team>: a slash in the name is refused (#865)" {
+  run bash "$SCRIPTS/remote.sh" doctor "a/b"
+  [ "$status" -ne 0 ]
+  grep -qF -- "invalid team name" <<<"$output"
+}
+
+@test "remote doctor <team>: an ordinary and a dot-leading name still resolve (#865)" {
+  # The validator allows both, and the direct lookup has to keep working for
+  # them — a refusal that took the legitimate names with it would be the
+  # cheapest way to pass the two cases above.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock plain "$gone"
+  make_lock .dotted "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor plain
+  [ "$status" -eq 0 ]
+  grep -qF -- "plain: stale" <<<"$output"
+  run bash "$SCRIPTS/remote.sh" doctor .dotted
+  [ "$status" -eq 0 ]
+  grep -qF -- ".dotted: stale" <<<"$output"
+}
+
+# --- #849: pointing a team at a different server keeps the old binding ------
+#
+# The local sync rows and keys for a server are keyed on (server_instance_id,
+# remote_team_id, protocol_version) and survive a re-point untouched; the
+# endpoint string in the binding is the only pointer back to them. Before
+# #849, connect's wholesale json_set on $.remote_binding overwrote that
+# pointer, orphaning data that was still on disk.
+
+start_second_mock_server() {
+  : > "$TEST_SKILL_DIR/server-b.port"
+  MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
+    "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
+      </dev/null > "$TEST_SKILL_DIR/server-b.port" 2>"$TEST_SKILL_DIR/server-b.log" 3>&- &
+  MOCK_SERVER_B_PID=$!
+  wait_for_file_contains "$TEST_SKILL_DIR/server-b.port" '^[0-9][0-9]*$'
+  MOCK_PORT_B="$(cat "$TEST_SKILL_DIR/server-b.port")"
+  ENDPOINT_B="http://127.0.0.1:$MOCK_PORT_B"
+  # A different address is not a different server until the identity differs:
+  # rotate B's instance id so the two mocks are two servers, not one server
+  # reachable on two ports.
+  run curl -sS "$ENDPOINT_B/_test/rotate-server-id"
+  [ "$status" -eq 0 ]
+}
+
+_config_json_path() {  # $1 = team, $2 = full json path (no leading $.)
+  local cfg="$TEST_SKILL_DIR/teams/$1/config.json" resolved escaped
+  resolved="$(rf "$cfg")"
+  escaped="$(printf '%s' "$resolved" | sed "s/'/''/g")"
+  sqlite_mem "SELECT coalesce(json_extract(CAST(readfile('$escaped') AS TEXT), '\$.$2'), '');"
+}
+
+_previous_count() {  # $1 = team
+  local cfg="$TEST_SKILL_DIR/teams/$1/config.json" resolved escaped
+  resolved="$(rf "$cfg")"
+  escaped="$(printf '%s' "$resolved" | sed "s/'/''/g")"
+  sqlite_mem "SELECT coalesce(json_array_length(json_extract(CAST(readfile('$escaped') AS TEXT), '\$.previous_bindings')), 0);"
+}
+
+@test "connect: pointing at a different server archives the replaced binding (#849)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local instance_a revision_a
+  instance_a="$(_binding_field testteam server_instance_id)"
+  [ -n "$instance_a" ]
+  revision_a="$(_binding_field testteam binding_revision)"
+
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+
+  # The live binding is B's.
+  [ "$(_binding_field testteam endpoint)" = "$ENDPOINT_B" ]
+  # A's binding is in the archive: same identity and endpoint it had, stamped
+  # with when it was replaced. Its capability snapshot is not carried along --
+  # capabilities are refetched on every connect, and an archived copy would be
+  # the one stale snapshot nobody re-reads.
+  [ "$(_previous_count testteam)" = "1" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].endpoint')" = "$ENDPOINT" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].server_instance_id')" = "$instance_a" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].binding_revision')" = "$revision_a" ]
+  [ -n "$(_config_json_path testteam 'previous_bindings[0].replaced_at')" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].capabilities')" = "" ]
+}
+
+@test "connect: a round trip A -> B -> A restores A's binding and its partition rows (#849)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local instance_a team_id journal
+  instance_a="$(_binding_field testteam server_instance_id)"
+  [ -n "$instance_a" ]
+  team_id="$(_config_json_path testteam team_id)"
+  [ -n "$team_id" ]
+
+  # A row in A's partition of the local journal: the archived binding is the
+  # pointer back to rows like this one.
+  journal="$TEST_SKILL_DIR/teams/testteam/roster.jsonl"
+  printf '%s\n' "{\"type\":\"roster_synced\",\"mutation_id\":\"m-849\",\"server_seq\":\"8\",\"wire_id\":\"550e8400-e29b-41d4-a716-446655440849\",\"server_instance_id\":\"$instance_a\",\"remote_team_id\":\"$team_id\"}" >> "$journal"
+
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+
+  # The archived endpoint string is the value the repair needs; connect to it.
+  local archived_endpoint
+  archived_endpoint="$(_config_json_path testteam 'previous_bindings[0].endpoint')"
+  [ "$archived_endpoint" = "$ENDPOINT" ]
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$archived_endpoint" testteam
+  [ "$status" -eq 0 ]
+
+  # The SAME server instance, adopted -- not a fresh registration.
+  [ "$(_binding_field testteam server_instance_id)" = "$instance_a" ]
+  # B is archived now; A's entry left the archive when A became current again.
+  [ "$(_previous_count testteam)" = "1" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].endpoint')" = "$ENDPOINT_B" ]
+  # The row in A's partition survived the whole dance.
+  grep -qF -- "\"server_instance_id\":\"$instance_a\"" "$journal"
+}
+
+@test "connect: flipping between two servers keeps one archive entry per server (#849)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local instance_a
+  instance_a="$(_binding_field testteam server_instance_id)"
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+  # Two servers ever seen; the one not currently bound is the only entry, no
+  # matter how many times the team moved between them.
+  [ "$(_previous_count testteam)" = "1" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].server_instance_id')" = "$instance_a" ]
+}
+
+@test "connect: reconnecting to the same server does not create an archive entry (#849)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  [ "$(_config_json_path testteam previous_bindings)" = "" ]
+}
+
+@test "remote status: shows the replaced endpoint after a re-point (#849)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local endpoint_a="$ENDPOINT"
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  grep -qF -- "previous: was bound to $endpoint_a" <<<"$output"
+  grep -qF -- "kept under previous_bindings in this team's config.json" <<<"$output"
+}
+
+@test "remote status: a path-bearing archived endpoint is displayed host-only, kept exact in config (#849)" {
+  # For a hosted endpoint the path IS the capability. The archive must carry
+  # the exact value (it is the input to the restore), and status must not
+  # print it.
+  local cap; cap="$(_capability_endpoint)"
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
+  [ "$status" -eq 0 ]
+  local instance_a
+  instance_a="$(_binding_field testteam server_instance_id)"
+  [ -n "$instance_a" ]
+
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+
+  # The archive holds the exact path-bearing endpoint, verbatim.
+  [ "$(_config_json_path testteam 'previous_bindings[0].endpoint')" = "$cap" ]
+
+  # Status shows the host-only form plus the pointer to the config -- and
+  # leaks neither the token nor the capability path.
+  assert_no_capability "previous: was bound to $ENDPOINT until" \
+    bash "$SCRIPTS/remote.sh" status testteam
+
+  # The archived exact value is the restore input: reconnecting with it
+  # re-anchors to the same server instance.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$(_config_json_path testteam 'previous_bindings[0].endpoint')" testteam
+  [ "$status" -eq 0 ]
+  [ "$(_binding_field testteam server_instance_id)" = "$instance_a" ]
+}
+
+@test "connect: refuses an endpoint carrying a raw control byte (#849)" {
+  # The WHATWG parser deletes TAB/LF before parsing, so without the explicit
+  # refusal the raw stored endpoint and the URL actually used would disagree
+  # -- and the stored value would split any line-framed reader.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT/t/pa	th" testteam
+  [ "$status" -ne 0 ]
+  grep -qF -- "must not contain control characters" <<<"$output"
+  # Control for the refusal's reach: the same endpoint without the control
+  # byte is accepted (the refusal is about the byte, not the path). /t/ is
+  # the path shape the mock serves the API beneath.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT/t/path" testteam
+  [ "$status" -eq 0 ]
+}
+
+@test "remote status: an archived endpoint stored by an older version with raw control bytes leaks nothing (#849)" {
+  # validateEndpoint refuses control bytes NOW, but a binding written by an
+  # older version can still hold them, and the archive keeps whatever the
+  # binding held. The fixture below is such a binding: a capability-style
+  # path with a raw TAB inside it, and a raw LF in the host region.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local cfg="$TEST_SKILL_DIR/teams/testteam/config.json"
+  MOCK_PORT="$MOCK_PORT" python3 - "$cfg" <<'PY'
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+port = os.environ["MOCK_PORT"]
+document["remote_binding"]["endpoint"] = (
+    "http://127.0.0.1\n:" + port + "/t/agsy_legacy_secret_849\ttail")
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(document, handle)
+    handle.write("\n")
+PY
+
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+  # The archive keeps the legacy value verbatim (it is still the only pointer
+  # back), control bytes and all.
+  [ "$(_config_json_path testteam 'previous_bindings[0].server_instance_id')" != "" ]
+
+  run bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  # No token, no capability path, exactly one previous line, and the
+  # replaced_at field intact beside it -- a raw TAB or LF in the stored
+  # endpoint must not split the line or bleed fragments into the output.
+  [ "$(grep -cF -- "previous: was bound to" <<<"$output")" -eq 1 ]
+  grep -qF -- "until 2" <<<"$output"
+  refute grep -qF -- "agsy_legacy_secret_849" <<<"$output"
+  refute grep -qF -- "/t/" <<<"$output"
+  refute grep -qF -- "tail" <<<"$output"
+}
+
+@test "pull: re-pointing an already-bound team archives the replaced binding too (#849)" {
+  # $.remote_binding has TWO wholesale writers -- _remote_write_binding and
+  # cmd_pull's bind-after-bootstrap write. The invariant "a re-point does not
+  # destroy the binding it replaces" has to hold at the writer boundary, so
+  # this drives the pull entry, not connect.
+  #
+  # The team pull re-points: a local team with a binding to another server
+  # and NO history -- cmd_pull's own guard names this the continue case ("a
+  # local shell with nothing in it"). Built the way an older install leaves
+  # it: config in place, binding written directly.
+  local pull_team_id="018f3f7e-2222-7000-8000-000000000002"
+  bash "$SCRIPTS/join.sh" rebound alice claude-code /tmp/project-a
+  local cfg="$TEST_SKILL_DIR/teams/rebound/config.json" old_instance
+  old_instance="018f3f7e-9999-7000-8000-00000000dead"
+  OLD_INSTANCE="$old_instance" PULL_TEAM_ID="$pull_team_id" python3 - "$cfg" <<'PY'
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+document["team_id"] = os.environ["PULL_TEAM_ID"]
+document["remote_binding"] = {
+    "endpoint": "https://old-server.example:8443/t/former_home",
+    "server_instance_id": os.environ["OLD_INSTANCE"],
+    "remote_team_id": os.environ["PULL_TEAM_ID"],
+    "remote_team_name": "rebound",
+    "protocol_version": 1,
+    "cipher_profile": "none",
+    "connected_at": "2026-01-01T00:00:00Z",
+    "disconnected_at": None,
+    "binding_revision": 3,
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(document, handle)
+    handle.write("\n")
+PY
+
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" \
+    --team-id "$pull_team_id" rebound
+  [ "$status" -eq 0 ] || { echo "pull refused: $output"; false; }
+
+  # The pull re-bound the team (different identity), and the binding it
+  # replaced is in the archive, not gone.
+  [ "$(_binding_field rebound server_instance_id)" != "$old_instance" ]
+  [ "$(_previous_count rebound)" = "1" ]
+  [ "$(_config_json_path rebound 'previous_bindings[0].server_instance_id')" = "$old_instance" ]
+  [ "$(_config_json_path rebound 'previous_bindings[0].endpoint')" = "https://old-server.example:8443/t/former_home" ]
+  [ -n "$(_config_json_path rebound 'previous_bindings[0].replaced_at')" ]
 }

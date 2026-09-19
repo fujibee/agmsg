@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
-  writeFile } from "node:fs/promises";
+  utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { readNativeAgeIdentity } from "../scripts/internal/sync-cipher.mjs";
@@ -13,6 +14,8 @@ import {
   ageSnapshotDigest,
   activateKeyRotations,
   authorityFileFault,
+  authorityFileRemedy,
+  shellQuote,
   describeChildExit,
   canonicalJson,
   consistentReadStateContext,
@@ -20,11 +23,15 @@ import {
   cycle,
   discardInputDirectory,
   driver,
+  STORAGE_BUSY_EXIT,
+  storageDriverExitGraceMs,
   exportAgeHandoff,
   exportAgeSnapshot,
   isRetryable,
   initialAgeSnapshot,
   isRefusal,
+  collectInstallBaseline,
+  installChangedAgainst,
   runLoop,
   loadConfig,
   nextLocalAgeSnapshot,
@@ -32,6 +39,7 @@ import {
   pullBootstrap,
   parseStrictJsonl,
   readStateCycle,
+  rosterSequencesFor,
   readStateUpdateBatches,
   reprocessCycle,
   request,
@@ -51,6 +59,7 @@ import {
   validateMembers,
   validateReadStatePage,
   validateResyncResult,
+  withTeamConfigLock,
   validateResyncStatus,
   verifyAgeSnapshot,
   verifyAgeHandoff,
@@ -73,6 +82,7 @@ const candidates = [
 ];
 
 const credentialId = "018f3f7e-0000-7000-8000-000000000020";
+const authorityFileOptions = { mode: 0o644 };
 
 test("a rotator provisions its confirmed snapshot at the server boundary", async () => {
   const root = await mkdtemp(join(tmpdir(), "agmsg-local-key-rotation-"));
@@ -140,7 +150,7 @@ test("a rotator provisions its confirmed snapshot at the server boundary", async
         capabilities: { write_allowed_ciphers: ["none", "age-v1"] },
         cipher_profile: "age-v1", connected_at: "2026-07-29T00:00:00Z",
         disconnected_at: null },
-    })}\n`);
+    })}\n`, authorityFileOptions);
     await writeFile(join(teamDir, "roster.jsonl"), [
       JSON.stringify({ type: "key_rotated", ...rotation,
         at: "2026-07-30T00:00:00.000000Z", server_seq: undefined }),
@@ -446,7 +456,8 @@ async function writeConnectedTeam(root, overrides = {}) {
     ...overrides,
   };
   await writeFile(join(root, "teams", "demo", "config.json"),
-    `${JSON.stringify({ name: "demo", agents: {}, remote_binding: remoteBinding }, null, 2)}\n`);
+    `${JSON.stringify({ name: "demo", agents: {}, remote_binding: remoteBinding }, null, 2)}\n`,
+    authorityFileOptions);
 }
 
 test("connected binding is a bounded non-writable nofollow authority", async () => {
@@ -508,6 +519,137 @@ test("a file fault names the condition that failed, and permissions last", () =>
     assert.match(
       authorityFileFault(stats({ mode: 0o666 }), { maxBytes: 100 }),
       /must not be writable by group or others/u);
+
+    // The mode it HAS. #804: a machine that joined on an older version carries
+    // a 0664 config, upgrading does not rewrite it, and the operator was told
+    // which bits are forbidden without being told which ones are set.
+    assert.match(
+      authorityFileFault(stats({ mode: 0o664 }), { maxBytes: 100 }), /\(it is 0664\)/u);
+    assert.match(
+      authorityFileFault(stats({ mode: 0o666 }), { maxBytes: 100, privateFile: true }),
+      /\(it is 0666\)/u);
+    // Four digits, so it can be compared with `stat` output without arithmetic
+    // -- and so a setuid bit shows up rather than being masked away.
+    assert.match(
+      authorityFileFault(stats({ mode: 0o4664 }), { maxBytes: 100 }), /\(it is 4664\)/u);
+  }
+});
+
+test("the permission fault carries the command that clears it, and nothing else does", () => {
+  const stats = (over = {}) => ({
+    isSymbolicLink: () => false, isFile: () => true, size: 10, mode: 0o600, ...over,
+  });
+  if (process.platform === "win32") return;
+
+  // The two faults a mode change fixes, and the two different remedies. `go-w`
+  // for the binding and `go-rwx` for the credential: the checks differ, so the
+  // commands do.
+  assert.equal(authorityFileRemedy(stats({ mode: 0o664 }), {}), "chmod go-w");
+  assert.equal(
+    authorityFileRemedy(stats({ mode: 0o640 }), { privateFile: true }), "chmod go-rwx");
+
+  // Nothing to type. Offering `chmod` for these would send someone to do the
+  // wrong thing confidently, which is worse than saying less.
+  assert.equal(authorityFileRemedy(stats({ isSymbolicLink: () => true, mode: 0o666 }), {}), null);
+  assert.equal(authorityFileRemedy(stats({ isFile: () => false, mode: 0o666 }), {}), null);
+  // Already correct: no fault, so no remedy.
+  assert.equal(authorityFileRemedy(stats({ mode: 0o644 }), {}), null);
+  assert.equal(authorityFileRemedy(stats({ mode: 0o600 }), { privateFile: true }), null);
+
+  // The pair must agree. A remedy offered where there is no fault, or withheld
+  // where there is one, is the drift this function pair exists to prevent --
+  // the same drift #781 fixed between the sentence and the condition.
+  for (const mode of [0o600, 0o640, 0o644, 0o660, 0o664, 0o666, 0o700, 0o777]) {
+    for (const privateFile of [false, true]) {
+      const fault = authorityFileFault(stats({ mode }), { maxBytes: 100, privateFile });
+      const remedy = authorityFileRemedy(stats({ mode }), { privateFile });
+      assert.equal(
+        remedy !== null, fault !== null,
+        `mode 0${mode.toString(8)} privateFile=${privateFile}: fault=${fault} remedy=${remedy}`);
+    }
+  }
+});
+
+test("the remedy we print is a command that runs, on a path that fights back", async () => {
+  if (process.platform === "win32") return;
+
+  // THE PRODUCTION ENTRY, not the pieces beside it. An earlier version of this
+  // test built the command itself out of `authorityFileRemedy` and
+  // `shellQuote` -- which proves those two work and says nothing about whether
+  // the sentence production emits uses either. Deleting the `shellQuote` call
+  // from both throw sites left it green. This drives `loadConfig`, takes the
+  // message it actually throws, and cuts the command out of that.
+  //
+  // A team name may contain a space and a single quote -- lib/validate.sh
+  // rejects only empty, `.`, `..`, `/`, `\\`, a leading `-`, and control
+  // characters -- and the store sits under $HOME, which is outside our control
+  // entirely.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-remedy-"));
+  const previousConnection = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  const previousSkill = process.env.SKILL_DIR;
+  try {
+    const team = "a b's team";
+    const dir = join(root, "teams", team);
+    await mkdir(dir, { recursive: true });
+    const target = join(dir, "config.json");
+    const bystander = join(root, "bystander");
+    await writeFile(target, JSON.stringify({ local_team: team }));
+    await writeFile(bystander, "{}\n");
+    await chmod(target, 0o664);
+    await chmod(bystander, 0o664);
+
+    process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+    delete process.env.SKILL_DIR;
+
+    // The premise: production refuses this file, and says so with a command.
+    // Without asserting it, a message that stopped offering one would leave the
+    // rest of this test skipping quietly.
+    let message = null;
+    await assert.rejects(() => loadConfig(team), (error) => {
+      message = error.message;
+      return true;
+    });
+    assert.match(message, /must not be writable by group or others \(it is 0664\)/u);
+    assert.ok(message.includes(" — fix it with: "), `no remedy offered: ${message}`);
+
+    const command = message.split(" — fix it with: ")[1];
+    const ran = spawnSync("sh", ["-c", command], { encoding: "utf8" });
+    assert.equal(ran.status, 0, `printed command failed: ${command}\n${ran.stderr}`);
+
+    const after = await stat(target);
+    // It changed, into a mode the engine accepts, stated the way it states it.
+    assert.notEqual(after.mode & 0o7777, 0o664);
+    assert.equal(after.mode & 0o022, 0);
+    assert.equal(authorityFileFault(after, { maxBytes: 100, privateFile: false }), null);
+    // And only it. Unquoted, the command would have split at the space and been
+    // about a different file, or about several.
+    assert.equal((await stat(bystander)).mode & 0o7777, 0o664);
+  } finally {
+    if (previousConnection === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = previousConnection;
+    if (previousSkill === undefined) delete process.env.SKILL_DIR;
+    else process.env.SKILL_DIR = previousSkill;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("shellQuote survives what the validator lets through", () => {
+  if (process.platform === "win32") return;
+
+  // Round-trip through a real shell rather than comparing to an expected
+  // string: the question is what the pasting shell does with it, and an
+  // expected-string assertion would only re-state the implementation.
+  for (const value of [
+    "/plain/path",
+    "/with a space/config.json",
+    "/with'a'quote/config.json",
+    "/both it's here/config.json",
+    "/$(touch pwned)/config.json",
+    "/back\\slash/config.json",
+  ]) {
+    const out = spawnSync("sh", ["-c", `printf %s ${shellQuote(value)}`], { encoding: "utf8" });
+    assert.equal(out.status, 0, `shell rejected ${shellQuote(value)}`);
+    assert.equal(out.stdout, value, `did not round-trip: ${value}`);
   }
 });
 
@@ -1248,6 +1390,104 @@ test("Stage-1-only driver skips the optional Stage-2 network path", async () => 
   }]]);
 });
 
+test("roster sequences: the journal's roster_synced records for this binding, and nothing on a missing or torn journal (#968)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-968-journal-"));
+  try {
+    const rosterFile = join(root, "teams", "demo", "config.json");
+    await mkdir(dirname(rosterFile), { recursive: true });
+    // No journal yet: no evidence, no sequences.
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile }), []);
+    const other = "018f3f7e-0000-7000-8000-00000000ffff";
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"), [
+      JSON.stringify({ type: "member_joined", id: "m1", name: "alice" }),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1", server_seq: "2", wire_id: "w1",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m0", server_seq: "1", wire_id: "w0",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+      // another binding's record is not this binding's evidence
+      JSON.stringify({ type: "roster_synced", mutation_id: "mx", server_seq: "7", wire_id: "wx",
+        server_instance_id: other, remote_team_id: config.remote_team_id }),
+      // duplicate of seq 2 collapses
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1b", server_seq: "2", wire_id: "w1b",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+    ].join("\n"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile }), ["1", "2"]);
+    // A torn journal (a line that is not JSON) yields nothing: a frontier is
+    // never advanced on evidence that could not be read whole. And it is
+    // NAMED, with the line, because a pinned frontier is also what #968
+    // looked like -- a silent fallback would be indistinguishable from the bug.
+    const events = [];
+    const eventCall = async (name, fields) => { events.push({ name, ...fields }); };
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"),
+      '{"type":"roster_synced","mutation_id":"m1","server_seq":"2","wire_id":"w1",' +
+      `"server_instance_id":"${config.server_instance_id}","remote_team_id":"${config.remote_team_id}"}\n{"type":"roster_syn`);
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].name, "read-state.roster-journal-unreadable");
+    assert.equal(events[0].line, 2);
+    assert.match(events[0].path, /roster\.jsonl$/u);
+    // A non-canonical sequence ("007") is corrupt evidence: the whole list is
+    // withheld and the line named, not the one record skipped -- a journal
+    // with one bad record is not a journal to take sequences from.
+    events.length = 0;
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"), [
+      JSON.stringify({ type: "roster_synced", mutation_id: "m0", server_seq: "1", wire_id: "w0",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+      JSON.stringify({ type: "roster_synced", mutation_id: "my", server_seq: "007", wire_id: "wy",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+    ].join("\n"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].line, 2);
+    // A sequence outside the domain is corrupt evidence, treated the same way
+    // (review finding: shape alone let 2^63..10^19-1 through).
+    events.length = 0;
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1", server_seq: "9223372036854775808", wire_id: "w1",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].line, 1);
+    assert.match(events[0].reason, /not a canonical sequence/u);
+    // MAX itself is a legal sequence.
+    events.length = 0;
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1", server_seq: "9223372036854775807", wire_id: "w1",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), ["9223372036854775807"]);
+    assert.equal(events.length, 0);
+    // No journal at all is not an anomaly (no roster before the first pull): quiet.
+    await rm(join(root, "teams", "demo", "roster.jsonl"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 0);
+    // An unreadable journal (a directory in its place) IS named.
+    await mkdir(join(root, "teams", "demo", "roster.jsonl"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reason, "EISDIR");
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("Stage-2 read-prepare carries the roster sequences into the context (#968)", async () => {
+  const events = [];
+  const harness = readStateHarness(threeMembers, ["masa-claude"], events);
+  let contextSeen = null;
+  const innerDriver = harness.driverCall;
+  await readStateCycle(config, 100, {
+    ...harness,
+    driverCall: async (operation, cfg, input) => {
+      if (operation === "read-prepare") contextSeen = input[0];
+      return innerDriver(operation, cfg, input);
+    },
+    rosterSequencesCall: async () => ["1", "2"],
+  });
+  assert.ok(contextSeen, "read-prepare was called");
+  assert.equal(contextSeen.type, "sync_read_context");
+  assert.deepEqual(contextSeen.roster_seqs, ["1", "2"]);
+});
+
 test("Stage-2 isolates a limit offender and continues read-only synchronization", async () => {
   const members = [
     { member_id: "018f3f7e-0000-7000-8000-000000000010", name: "causal-a" },
@@ -1618,7 +1858,7 @@ test("set-endpoint aligns the stored sync config's server_url with the moved bin
         remote_team_id: config.remote_team_id, protocol_version: 1,
         capabilities: { write_allowed_ciphers: ["none"] },
         cipher_profile: "none", connected_at: "2026-07-29T00:00:00Z",
-        disconnected_at: null } })}\n`);
+        disconnected_at: null } })}\n`, authorityFileOptions);
     const stored = { format_version: 1, local_team: "demo",
       server_url: "http://127.0.0.1:8787",
       server_instance_id: config.server_instance_id,
@@ -1627,7 +1867,7 @@ test("set-endpoint aligns the stored sync config's server_url with the moved bin
       local_security_history: [{ local_security_revision: "0",
         effective_from_seq: "1", minimum_security_mode: "plaintext-allowed" }] };
     await mkdir(join(root, "store", "remote-sync"), { recursive: true });
-    await writeFile(storedPath, JSON.stringify(stored));
+    await writeFile(storedPath, JSON.stringify(stored), authorityFileOptions);
     const capabilities = { protocol_version: 1,
       server_instance_id: config.server_instance_id,
       team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
@@ -1695,7 +1935,8 @@ test("set-endpoint cannot land a stale alignment over a newer move (#739 interle
     process.env.AGMSG_SYNC_STORAGE_DIR = join(root, "store");
     await mkdir(join(root, "teams", "demo"), { recursive: true });
     await mkdir(join(root, "store", "remote-sync"), { recursive: true });
-    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://x.example", 2))}\n`);
+    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://x.example", 2))}\n`,
+      authorityFileOptions);
     const stored = { format_version: 1, local_team: "demo",
       server_url: "https://o.example",
       server_instance_id: config.server_instance_id,
@@ -1703,7 +1944,7 @@ test("set-endpoint cannot land a stale alignment over a newer move (#739 interle
       cipher_profile: "none",
       local_security_history: [{ local_security_revision: "0",
         effective_from_seq: "1", minimum_security_mode: "plaintext-allowed" }] };
-    await writeFile(storedPath, JSON.stringify(stored));
+    await writeFile(storedPath, JSON.stringify(stored), authorityFileOptions);
     const capabilities = { protocol_version: 1,
       server_instance_id: config.server_instance_id,
       team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
@@ -1722,7 +1963,8 @@ test("set-endpoint cannot land a stale alignment over a newer move (#739 interle
     const staleOutcome = stale.catch((error) => error);
     while (releaseFetch === null) await new Promise((r) => setTimeout(r, 5));
     // B: moves the binding on to Y and completes its own alignment.
-    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://y.example", 3))}\n`);
+    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://y.example", 3))}\n`,
+      authorityFileOptions);
     await writeFile(storedPath, JSON.stringify({ ...stored, server_url: "https://y.example" }));
     releaseFetch();
     const outcome = await staleOutcome;
@@ -1958,28 +2200,77 @@ exit 7
   }
 });
 
-test("the storage driver that stops reading its input fails the call and is not left running",
+test("SIGTERM while this process holds the team config lock releases it before exit",
+  { timeout: 30_000 }, async () => {
+  // The leaked locks this guards against were never a crash: remote.sh's own
+  // "stop the old engine" path sends SIGTERM first (scripts/remote.sh), and a
+  // handler-less Node process drops a pending `finally` on SIGTERM exactly as
+  // it does on SIGKILL (measured separately, not assumed) -- so an ordinary
+  // stop mid-critical-section is exactly as lock-leak-prone as a hard kill.
+  // Real process, real signal: a handler installed on THIS test's process
+  // would answer a different question.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-lock-sigterm-"));
+  const lockDir = join(root, "teams", "demo", ".config.lock");
+  const holderPath = `${lockDir}.holder`;
+  const scriptPath = join(root, "hold-lock.mjs");
+  const modulePath = fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url));
+  await mkdir(dirname(lockDir), { recursive: true });
+  await writeFile(scriptPath,
+    `import { withTeamConfigLock } from ${JSON.stringify(modulePath)};\n` +
+    // A bare never-resolving promise has no libuv handle behind it, so it
+    // would not keep this process alive at all -- it would just run to
+    // completion and exit 0 with the lock still held, never reaching SIGTERM.
+    // The real held-lock window (an in-flight capabilities request, or the
+    // engine's own loop) always has one; this stands in for it.
+    "setInterval(() => {}, 1_000_000);\n" +
+    "withTeamConfigLock(\"demo\", () => new Promise(() => {})).catch(() => {});\n");
+  const child = spawn(process.execPath, [scriptPath],
+    { env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root }, stdio: "ignore" });
+  try {
+    // Bounded: taking the lock is this child's first async step.
+    for (let attempt = 0; attempt < 200 && !existsSync(lockDir); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(existsSync(lockDir), "child never took the team config lock");
+    assert.ok(existsSync(holderPath), "child never wrote its holder");
+    child.kill("SIGTERM");
+    await once(child, "exit");
+    assert.ok(!existsSync(lockDir), "SIGTERM left the lock directory behind");
+    assert.ok(!existsSync(holderPath), "SIGTERM left the holder file behind");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await rm(root, { recursive: true });
+  }
+});
+
+test("the storage driver that stops reading its input fails through its exit code, not the broken write",
   { timeout: 30_000 }, async (t) => {
-  // Unchanged behaviour, kept under its own test so that it stays unchanged.
+  // The storage driver keeps its pipe: after evaluatePull() its input is
+  // decrypted message content, on E2EE teams as much as plain ones, and a pipe
+  // is what keeps that off disk. So a large page can lose its reader when the
+  // driver exits before the whole page is written -- a busy `apply` waits out
+  // its timeout and exits 11 while the parent is still writing -- and the write
+  // comes back EPIPE (macOS: ENOTCONN or EPIPE, the errno set is not closed).
   //
-  // The storage driver takes no registry lock, so nothing about it needs the
-  // staged file the roster driver gets, and giving it one would cost it both an
-  // input that never touches disk -- after evaluatePull() these records are
-  // decrypted message content, on E2EE teams as much as plain ones -- and the
-  // bounded failure it has here. A driver handed a file is waited for; a driver
-  // that stops reading a pipe fails at once.
+  // That EPIPE is a symptom of the exit, not a verdict on the call. Concluding
+  // "stdin-write failed" on it, ahead of the exit, is what masked a retryable
+  // busy 11 as an unrecoverable error and ended #910's reprocess. So the call
+  // must report the CHILD'S EXIT CODE: here a plain non-zero (7), asserted to
+  // arrive as `driverExitCode` with no `driverFailurePhase` verdict in front of
+  // it -- which is exactly what lets `driver` see an 11 and retry it. The busy
+  // 11 -> retry path itself is covered by "driver() waits out a busy store".
   //
-  // So this is the original EPIPE test, scoped to the caller it was always
-  // about: the write loses its reader, the failure arrives on the stdin stream,
-  // and the driver does not survive the call. Flip `holdsRegistryLock` on for
-  // the storage driver and this test says so.
+  // The trade this makes explicit: a driver that stops reading AND never exits
+  // is no longer failed at once -- the call waits for its exit, the same trade
+  // the roster (staged) path already makes above. Bounding a driver that hangs
+  // without exiting is separate work, not done here; this driver exits.
   const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-epipe-"));
   const script = (pidFile, helperFile) => `#!/usr/bin/env bash
 echo $$ > ${JSON.stringify(pidFile)}
 sleep 300 &
 echo $! > ${JSON.stringify(helperFile)}
 exec 0<&-
-exec sleep 300
+exit 7
 `;
   const wide = "x".repeat(4096);
   const input = Array.from({ length: 512 }, (_, index) => ({ type: "probe", index, wide }));
@@ -1989,14 +2280,111 @@ exec sleep 300
     ]);
 
   for (const { promise, childPid } of started) {
-    // On the marker the stdin handler sets, not on the errno: macOS answers
-    // ENOTCONN or EPIPE from the same event, and the set of spellings is not
-    // closed. The set of places that set this marker is -- there is one.
+    // The exit code won, and the EPIPE marker did not get in front of it. Both
+    // are asserted: a rejection still carrying `stdin-write` would mean the old
+    // premature verdict came back, and that marker is set in exactly one place,
+    // so it cannot be satisfied by accident.
+    await assert.rejects(() => promise,
+      (error) => error.driverFailurePhase === undefined &&
+        error.driverExitCode === 7 && /exit 7/u.test(String(error.message)));
+    // The call settles only after the driver has exited, so by this line it is
+    // already gone -- and it was NOT killed to get there.
+    assert.ok(gone(childPid), "the failed driver was left running");
+  }
+});
+
+test("a clean exit after a broken write is not a truncated success", { timeout: 30_000 }, async (t) => {
+  // The order-independent half of the fix. A driver that reads a little of a
+  // large page and then exits 0 leaves the parent's write without a reader --
+  // EPIPE -- while the child's status is a success. The call must NOT report
+  // that as a synced page: the child never received the rest. Whichever of
+  // 'exit' (code 0) and the stdin error is seen first, the write error is what
+  // settles it. Without the close-handler's fail-closed check this rejects only
+  // when the exit is seen after the error, and passes as an empty success when
+  // the clean exit is seen first -- so this pins the case that used to slip.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-trunc-"));
+  const script = (pidFile, helperFile) => `#!/usr/bin/env bash
+echo $$ > ${JSON.stringify(pidFile)}
+sleep 300 &
+echo $! > ${JSON.stringify(helperFile)}
+head -c 50 >/dev/null
+exit 0
+`;
+  const wide = "x".repeat(4096);
+  const input = Array.from({ length: 512 }, (_, index) => ({ type: "probe", index, wide }));
+  const { started } = await withDriverEnvironment(t, root, script,
+    (mock, config) => [
+      () => driver("prepare", config, input, ["1"]),
+    ]);
+  for (const { promise } of started) {
     await assert.rejects(() => promise,
       (error) => error.driverFailurePhase === "stdin-write");
-    // No poll and no grace period. The call settles only after the driver has
-    // exited, so by this line it is already gone.
-    assert.ok(gone(childPid), "the failed driver was left running");
+  }
+});
+
+test("the storage driver exit grace is bounded above so a huge busy timeout cannot overflow the timer", () => {
+  // setTimeout clamps a delay past its 32-bit millisecond limit to 1 ms, which
+  // would kill a busy child almost at once -- so a safe integer past that limit
+  // must not pass through. The env carries the storage busy timeout; the grace
+  // is it plus slack, or the default when it is unusable.
+  const TIMER_MAX = 2 ** 31 - 1;
+  assert.equal(storageDriverExitGraceMs(undefined), 10000);           // default 5 s + slack
+  // Empty means the same 5 s default the child reads from ${...:-5000}, NOT
+  // Number("") === 0 -- otherwise the grace would equal the child's busy timeout
+  // and the kill would race a busy exit 11.
+  assert.equal(storageDriverExitGraceMs(""), 10000);
+  assert.equal(storageDriverExitGraceMs("500"), 5500);                // the test value used below
+  assert.equal(storageDriverExitGraceMs("5000"), 10000);              // default busy timeout
+  for (const unusable of ["oops", "-1", "1.5", "9007199254740991", String(TIMER_MAX)]) {
+    const grace = storageDriverExitGraceMs(unusable);
+    assert.equal(grace, 10000, `${unusable} did not fall back to the default`);
+    assert.ok(grace < TIMER_MAX, "grace must stay under the timer limit");
+  }
+  // The largest accepted busy timeout (one hour) is still well under the limit.
+  assert.equal(storageDriverExitGraceMs("3600000"), 3605000);
+  assert.ok(storageDriverExitGraceMs("3600000") < TIMER_MAX);
+  assert.equal(storageDriverExitGraceMs("3600001"), 10000);           // over the cap -> default
+});
+
+test("the storage driver that stops reading AND never exits is still bounded and killed",
+  { timeout: 30_000 }, async (t) => {
+  // The other side of deferring to the exit code: a driver that loses the write
+  // AND does not exit must not hang the call forever. The pipe path keeps its
+  // SIGKILL bound for exactly this -- a timer past the busy timeout gives a real
+  // (busy) child every chance to exit on its own, and only a child that takes
+  // neither route is killed. Its failure carries the stdin-write marker, since
+  // that is the only thing this child ever told us.
+  //
+  // AGMSG_BUSY_TIMEOUT is set low so the grace (timeout + slack) is a few
+  // seconds, not the default ten: this is the one child the timer is allowed to
+  // wait for, and there is no reason to make the suite wait the whole default.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-hang-"));
+  const script = (pidFile, helperFile) => `#!/usr/bin/env bash
+echo $$ > ${JSON.stringify(pidFile)}
+sleep 300 &
+echo $! > ${JSON.stringify(helperFile)}
+exec 0<&-
+exec sleep 300
+`;
+  const wide = "x".repeat(4096);
+  const input = Array.from({ length: 512 }, (_, index) => ({ type: "probe", index, wide }));
+  const previousBusy = process.env.AGMSG_BUSY_TIMEOUT;
+  process.env.AGMSG_BUSY_TIMEOUT = "500";
+  t.after(() => {
+    if (previousBusy === undefined) delete process.env.AGMSG_BUSY_TIMEOUT;
+    else process.env.AGMSG_BUSY_TIMEOUT = previousBusy;
+  });
+  const { started, gone } = await withDriverEnvironment(t, root, script,
+    (mock, config) => [
+      () => driver("prepare", config, input, ["1"]),
+    ]);
+
+  for (const { promise, childPid } of started) {
+    // The bound fired: the marker is the child's only signal, and the driver was
+    // killed rather than waited for without end.
+    await assert.rejects(() => promise,
+      (error) => error.driverFailurePhase === "stdin-write");
+    assert.ok(gone(childPid), "the hung driver was left running past the bound");
   }
 });
 
@@ -2054,6 +2442,10 @@ test("a staged input leaves nothing behind, whether the call succeeds or fails",
   const before = await residue();
 
   const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-residue-"));
+  t.after(async () => {
+    if (!root.startsWith(tmpdir())) throw new Error("unsafe test root");
+    await rm(root, { recursive: true, force: true });
+  });
   const input = Array.from({ length: 8 }, (_, index) => ({ type: "probe", index }));
 
   const ok = (pidFile, helperFile) => `#!/usr/bin/env bash
@@ -2343,7 +2735,12 @@ async function withDriverEnvironment(t, root, script, buildCalls) {
 test("storage driver subprocess cannot observe HTTP or age identity secrets", async () => {
   const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-env-"));
   const mock = join(root, "driver.sh");
+  // Same EPIPE race as the two stubs #759 fixed for #755: this one prints and
+  // exits without reading stdin, so a parent write/end that lands after exit
+  // hits a closed pipe and is reported as a driver failure. `cat` drains stdin
+  // first so the child stays alive until the parent has finished writing.
   await writeFile(mock, `#!/usr/bin/env bash
+cat >/dev/null
 [ -z "\${AGMSG_SYNC_TOKEN:-}" ] || exit 99
 [ -z "\${AGMSG_SYNC_TRUST_DIR:-}" ] || exit 95
 [ -z "\${AGMSG_AGE_IDENTITY:-}" ] || exit 98
@@ -2856,12 +3253,148 @@ test("configured native identity must belong to its epoch recipient manifest", a
 
 // ---- adaptive sync catch-up (adaptive-sync-catchup design) ----
 
+test("runLoop: an install update stands the engine down before any cycle, naming the update and the restart (#963)", async () => {
+  const events = [];
+  let cycles = 0;
+  // Resolves -- a stand-down is a deliberate return, not a thrown failure.
+  await runLoop(config, {}, {
+    collectInstallBaselineCall: async () => new Map([["/skill/scripts/a.sh", 111]]),
+    installChangedCall: async () => "/skill/scripts/drivers/storage/sqlite-sync.sh",
+    cycleCall: async () => { cycles += 1; return {}; },
+    sleepCall: async () => {},
+    eventCall: async (name, fields) => { events.push({ name, ...fields }); },
+  });
+  // Detected at the loop boundary: no driver was ever spawned.
+  assert.equal(cycles, 0);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].name, "stand-down");
+  assert.equal(events[0].reason, "install-updated");
+  assert.equal(events[0].changed_path, "/skill/scripts/drivers/storage/sqlite-sync.sh");
+  // The message names the update, not a parse error, and the restart names the team.
+  assert.match(events[0].message, /installation was updated/u);
+  assert.equal(events[0].restart, "remote.sh sync start demo");
+});
+
+test("runLoop: a failure to OBSERVE the install is not evidence -- the engine keeps running (#963)", async () => {
+  let cycles = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => new Map(),
+    installChangedCall: async () => { throw new Error("EACCES: scripts unreadable"); },
+    cycleCall: async () => {
+      cycles += 1;
+      if (cycles >= 2) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      return {};
+    },
+    sleepCall: async () => {},
+    isRetryableCall: () => false,
+    eventCall: async () => {},
+  }), /stop/);
+  // The check threw on every iteration and the loop cycled anyway.
+  assert.equal(cycles, 2);
+});
+
+test("runLoop: an incomplete baseline disarms the detector entirely -- the check never runs (#963)", async () => {
+  let cycles = 0;
+  let checks = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // one unreadable entry at start
+    installChangedCall: async () => { checks += 1; return "/would-be-proof"; },
+    cycleCall: async () => {
+      cycles += 1;
+      const stop = new Error("stop"); stop.retryable = false; throw stop;
+    },
+    sleepCall: async () => {},
+    isRetryableCall: () => false,
+    eventCall: async () => {},
+  }), /stop/);
+  // Partially armed detectors recreate the false positive; disarmed means today's behavior.
+  assert.equal(checks, 0);
+  assert.equal(cycles, 1);
+});
+
+test("install baseline: a pre-existing FUTURE mtime is what the tree looked like, not an update (#963)", async () => {
+  // The first review counterexample against comparing mtimes to the
+  // engine's start clock: a file that already carried a future mtime at
+  // start (clock skew, an archive with preserved timestamps) must not
+  // stand every fresh engine down. Against the baseline it is unchanged.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-963-"));
+  try {
+    await mkdir(join(root, "internal"), { recursive: true });
+    const future = new Date(Date.now() + 3600_000);
+    await writeFile(join(root, "internal", "from-the-future.sh"), "echo hi\n");
+    await utimes(join(root, "internal", "from-the-future.sh"), future, future);
+    const baseline = await collectInstallBaseline(root);
+    assert.ok(baseline instanceof Map);
+    assert.equal(await installChangedAgainst(root, baseline), null);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("install baseline: an mtime change with UNCHANGED content is a touch, not an update (#963)", async () => {
+  // The second review counterexample: mtime change does not prove content
+  // change, and a false stand-down is a stopped sync engine. A touch, a
+  // metadata-only correction, a same-content re-copy must all keep the
+  // engine running; only different bytes are proof.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-963t-"));
+  try {
+    await mkdir(join(root, "internal"), { recursive: true });
+    const file = join(root, "internal", "driver.sh");
+    await writeFile(file, "echo stable\n");
+    const baseline = await collectInstallBaseline(root);
+    // touch: same bytes, new mtime
+    const later = new Date(Date.now() + 60_000);
+    await utimes(file, later, later);
+    assert.equal(await installChangedAgainst(root, baseline), null);
+    // The benign touch is remembered: the next sweep takes the cheap path
+    // and does not re-read the file.
+    let reads = 0;
+    const countingRead = async (path) => { reads += 1; return readFile(path); };
+    assert.equal(await installChangedAgainst(root, baseline, { readFileCall: countingRead }), null);
+    assert.equal(reads, 0);
+    // A rewrite with DIFFERENT bytes (and a new mtime) is proof.
+    const evenLater = new Date(Date.now() + 120_000);
+    await writeFile(file, "echo rewritten\n");
+    await utimes(file, evenLater, evenLater);
+    assert.equal(await installChangedAgainst(root, baseline), file);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("install baseline: a file appearing after start is proof; missing roots observe nothing (#963)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-963b-"));
+  try {
+    await mkdir(join(root, "internal"), { recursive: true });
+    await writeFile(join(root, "internal", "old.sh"), "echo old\n");
+    const baseline = await collectInstallBaseline(root);
+    assert.equal(await installChangedAgainst(root, baseline), null);
+    await writeFile(join(root, "internal", "added-by-update.sh"), "echo new\n");
+    assert.equal(await installChangedAgainst(root, baseline),
+      join(root, "internal", "added-by-update.sh"));
+    // A root that cannot be read at baseline time disables the detector (null)...
+    assert.equal(await collectInstallBaseline(join(root, "no-such-dir")), null);
+    // ...and one that cannot be read at check time yields no evidence.
+    assert.equal(await installChangedAgainst(join(root, "no-such-dir"), baseline), null);
+    // A file whose bytes cannot be re-read after an mtime change proves nothing.
+    await unlink(join(root, "internal", "added-by-update.sh")); // clear the standing proof first
+    const target = join(root, "internal", "old.sh");
+    const later = new Date(Date.now() + 60_000);
+    await utimes(target, later, later);
+    const failingRead = async () => { throw new Error("EACCES"); };
+    assert.equal(await installChangedAgainst(root, baseline, { readFileCall: failingRead }), null);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
 test("runLoop: push saturation drives catch-up (no wait), a drained cycle returns to the steady interval", async () => {
   const sleeps = [];
   const limitsSeen = [];
   const saturationScript = [true, true, false]; // two catch-up cycles, then drained
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async (_config, limits) => {
       limitsSeen.push(limits);
       if (i >= saturationScript.length) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -2886,6 +3419,7 @@ test("runLoop: a retryable failure always backs off exponentially, even after en
   const sleeps = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       i += 1;
       if (i === 1) return { pushSaturated: true }; // enter catch-up (would otherwise skip the wait)
@@ -2903,6 +3437,7 @@ test("runLoop: a retryable failure always backs off exponentially, even after en
 test("runLoop: an explicit --limit caps both push and pull page sizes, even in catch-up", async () => {
   const limitsSeen = [];
   await assert.rejects(() => runLoop(config, { limit: 50 }, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async (_config, limits) => {
       limitsSeen.push(limits);
       if (limitsSeen.length === 1) return { pushSaturated: true }; // would jump to 1000 without a ceiling
@@ -2929,6 +3464,7 @@ test("runLoop: an explicit --limit caps both push and pull page sizes, even in c
 const cycleErrorFor = async (error) => {
   const logged = [];
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => { throw error; },
     sleepCall: async () => {},
     isRetryableCall: () => false, // one iteration, then out
@@ -2944,6 +3480,7 @@ const cycleRecordRun = async (script) => {
   const recorded = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       const step = script[i++];
       if (step === undefined) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -2976,6 +3513,7 @@ test("runLoop: bookkeeping that throws does not take down a working cycle", asyn
   // claiming a success that did not.
   let cycles = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       cycles += 1;
       if (cycles > 2) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -3718,6 +4256,69 @@ function ackAllFrom(counter) {
   });
 }
 
+test("push.posted marks the end of the POST, before the acks are written", async () => {
+  // push.ack and push.reconciled are both emitted after recordAcks, so a
+  // reader of the log saw the POST and the reconcile as one span between
+  // push.prepared and push.ack (#913). push.posted is the boundary: it carries
+  // the ack count, and it arrives after the last POST answered and before the
+  // reconcile driver is asked to write anything.
+  const candidates = Array.from({ length: 3 }, (_unused, index) =>
+    bulkyCandidate(index, 100));
+  const ack = ackAllFrom({ value: 0 });
+  const sequence = [];
+  const harness = pushHarness(candidates, (messages) => {
+    sequence.push(`POST ${messages.length}`);
+    return ack(messages);
+  });
+  await cycle(config, { pushLimit: 100, pullLimit: 1000 }, {
+    ...harness,
+    eventCall: async (name, payload) => {
+      if (name.startsWith("push.")) sequence.push(`${name} ${payload?.count ?? payload?.acks?.length ?? ""}`.trim());
+    },
+    driverCall: async (operation, driverConfig, input) => {
+      if (operation === "reconcile") {
+        sequence.push(`reconcile ${input.length}`);
+        return [{ type: "sync_reconcile_result", count: input.length }];
+      }
+      return harness.driverCall(operation, driverConfig, input);
+    },
+  });
+  assert.deepEqual(sequence, [
+    "push.prepared 3",
+    "POST 3",
+    "push.posted 3",
+    "reconcile 3",
+    "push.ack 3",
+    "push.reconciled",
+  ]);
+});
+
+test("push.posted cannot cost the durable write: an unwritable log still reconciles", async () => {
+  // The event sits between the acks and recordAcks. Emitted bare, a log
+  // failure there would throw before the write and the acks would be lost to
+  // this cycle; the next one would resend what the server already holds. So
+  // it goes through note(): the write happens, and the failure is the log's.
+  const candidates = Array.from({ length: 2 }, (_unused, index) =>
+    bulkyCandidate(index, 100));
+  const ack = ackAllFrom({ value: 0 });
+  const reconciled = [];
+  const harness = pushHarness(candidates, (messages) => ack(messages));
+  await cycle(config, { pushLimit: 100, pullLimit: 1000 }, {
+    ...harness,
+    eventCall: async (name) => {
+      if (name === "push.posted") throw new Error("event log is unwritable");
+    },
+    driverCall: async (operation, driverConfig, input) => {
+      if (operation === "reconcile") {
+        reconciled.push(...input.map((record) => record.id));
+        return [{ type: "sync_reconcile_result", count: input.length }];
+      }
+      return harness.driverCall(operation, driverConfig, input);
+    },
+  });
+  assert.deepEqual(reconciled, candidates.map((candidate) => candidate.id));
+});
+
 test("push splits a page by BYTES, not by message count", async () => {
   // The count limit was 1000, so a thousand small messages and a thousand large
   // ones were the same batch and only the second kind was ever refused. Twelve
@@ -4019,6 +4620,7 @@ test("runLoop: a refusal is recorded and does NOT leave the loop", async () => {
   // reached, and a fixture without one would let the assertion pass on null.
   const refusedConfig = { ...config, endpoint: "https://sync.example.test" };
   await assert.rejects(() => runLoop(refusedConfig, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       i += 1;
       if (i <= 2) { const refused = new Error("HTTP 402 payment_required"); refused.status = 402; refused.code = "payment_required"; throw refused; }
@@ -4055,6 +4657,7 @@ test("runLoop: a successful cycle clears a refusal that is no longer true", asyn
   const cleared = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       i += 1;
       if (i === 1) { const refused = new Error("refused"); refused.status = 402; throw refused; }
@@ -4078,10 +4681,220 @@ test("runLoop: a non-retryable error that is NOT a refusal still ends the loop",
   // config into an engine that spins forever saying nothing useful — exiting
   // is right for that, and the refusal case is the exception, not the rule.
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => { const bad = new Error("config is unreadable"); throw bad; },
     isRetryableCall: () => false,
     isRefusalCall: () => false,
     sleepCall: async () => {},
     eventCall: async () => {},
   }), /config is unreadable/);
+});
+
+test("pull bootstrap reports progress on stderr and leaves stdout as the result channel", async () => {
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  // Both streams are captured, not just the one under test. `cmd_pull` reads
+  // this process's stdout as the result -- result="$(... pull-bootstrap ...)"
+  // then greps it for pull_bootstrap_result -- so a progress line landing there
+  // is the regression this case exists to catch, and it is invisible unless
+  // stdout is measured too.
+  const out = [];
+  const err = [];
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = (chunk) => { out.push(String(chunk)); return true; };
+  process.stderr.write = (chunk) => { err.push(String(chunk)); return true; };
+  try {
+    await pullBootstrap({
+      team: "clone", "team-id": teamId,
+      // The shape a hosted endpoint really has: the path IS the capability.
+      endpoint: "https://user:pa55word@sync.example.test:8443/t/agsy_SECRETCAP123?q=1#f",
+    }, {
+      publicSnapshotCall: async () => ({
+        server_instance_id: serverId, team_id: teamId, team_name: "source",
+        min_available_seq: "0",
+      }),
+      requestPublicCall: async () => ({
+        messages: [{ id: "01", seq: "1", envelope: { v: 1, cipher: "plain", blob: "x" } }],
+        next_after: "1", has_more: false,
+      }),
+      evaluateCall: async () => ({
+        status: "importable", policy_revision: "0", local_security_revision: "0",
+      }),
+      driverCall: async () => [{ type: "sync_apply_result", transport_cursor: "1", corrupt_count: 0 }],
+      rosterDriverCall: async () => [],
+      eventCall: async () => {},
+    });
+  } finally {
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+  }
+
+  // stdout: exactly the result, still parseable as one JSON line.
+  // Judged by CONTENT, not by a raw line count. Under `node --test` the test
+  // runner itself transports its results over this same stdout, and its
+  // serialized test:complete frame for the PREVIOUS test can flush into the
+  // patched window on a slow machine -- observed on CI as a 2!==1 count with
+  // the second "line" being the runner's frame, which no real consumer of
+  // pullBootstrap ever sees (in production this code does not run under the
+  // test runner). What this case actually protects: exactly one result line
+  // lands on stdout, and no progress line does.
+  const stdoutText = out.join("");
+  const resultLines = stdoutText.split("\n").filter((line) =>
+    line.startsWith('{"type":"pull_bootstrap_result"'));
+  assert.equal(resultLines.length, 1, `stdout carried: ${JSON.stringify(out)}`);
+  assert.equal(JSON.parse(resultLines[0]).type, "pull_bootstrap_result");
+  assert.ok(!stdoutText.includes("agmsg: ["), "a progress line leaked onto stdout");
+
+  // stderr: the operator can see it start, and can see it move. Both halves are
+  // named, because when this stops moving the line it stopped on says whether
+  // to look at the network or at the driver's child process.
+  const stderrText = err.join("");
+  assert.match(stderrText, /agmsg: \[\d+s\] pulling clone from sync\.example\.test:8443 /);
+  // WHAT MUST NOT BE THERE, named one piece at a time. This is the line a person
+  // pastes into an issue when a pull is taking too long, so the capability in
+  // the path, the credential before the host, and the query and fragment beside
+  // them all have to be absent -- and asserting the host is present does not say
+  // that any of them are gone.
+  for (const secret of ["agsy_SECRETCAP123", "pa55word", "/t/", "q=1", "#f"]) {
+    assert.ok(!stderrText.includes(secret), `stderr must not carry ${secret}`);
+  }
+  assert.ok(!out.join("").includes("agsy_SECRETCAP123"), "stdout must not carry it either");
+  assert.match(stderrText, /agmsg: \[\d+s\] fetching messages after /);
+  assert.match(stderrText, /agmsg: \[\d+s\] applying 1 messages/);
+});
+
+test("pull bootstrap prints a server cursor only when it is a canonical sequence", async () => {
+  // WHERE A MALFORMED CURSOR ACTUALLY COMES FROM. The first cursor is not ours:
+  // it is `teamSnapshot.min_available_seq`, and `publicSnapshot` checks only the
+  // team id and the server instance id -- the sequence is never validated, so a
+  // server's value reaches the first progress line exactly as it was sent.
+  //
+  // The second page cannot be the case this pins, even though it looks like the
+  // better one. A malformed `next_after` would have to survive the driver first,
+  // and the real sqlite driver refuses a non-numeric `sync_pull_cursor`
+  // (sqlite-sync.sh:891-897, `return 13`) before the loop comes round again. A
+  // fixture built there is testing a path only a stubbed driver allows.
+  //
+  // The line matters because it is the one people paste when a pull is slow: an
+  // escape sequence in a pasted log is a terminal doing what the server's
+  // operator told it.
+  const ESC = String.fromCharCode(27);
+  const evil = `${ESC}[2Jwiped`;
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+
+  const run = async (minAvailableSeq) => {
+    const err = [];
+    const realErr = process.stderr.write.bind(process.stderr);
+    const realOut = process.stdout.write.bind(process.stdout);
+    process.stderr.write = (chunk) => { err.push(String(chunk)); return true; };
+    process.stdout.write = () => true;
+    try {
+      await pullBootstrap({
+        team: "clone", "team-id": teamId, endpoint: "https://sync.example.test/t/agsy_X",
+      }, {
+        publicSnapshotCall: async () => ({
+          server_instance_id: "018f3f7e-0000-7000-8000-000000000002",
+          team_id: teamId, team_name: "source", min_available_seq: minAvailableSeq,
+        }),
+        requestPublicCall: async () => ({ messages: [], next_after: "9", has_more: false }),
+        evaluateCall: async () => ({ status: "importable" }),
+        driverCall: async () => [{ type: "sync_apply_result", transport_cursor: "9", corrupt_count: 0 }],
+        rosterDriverCall: async () => [],
+        eventCall: async () => {},
+      });
+    } finally {
+      process.stderr.write = realErr;
+      process.stdout.write = realOut;
+    }
+    return err.join("");
+  };
+
+  const bad = await run(evil);
+  assert.match(bad, /fetching messages after an unreadable cursor /);
+  assert.ok(!bad.includes(ESC), "no escape byte reaches stderr");
+  assert.ok(!bad.includes("wiped"), "and nothing that rode with it");
+
+  // The control on the replacement: a sequence prints as itself. Without this a
+  // guard that had decayed into printing the placeholder for everything would
+  // satisfy every assertion above -- redacting and erasing are not the same act.
+  const good = await run("41");
+  assert.match(good, /fetching messages after 41 /);
+  assert.ok(!good.includes("an unreadable cursor"), "a real sequence is not replaced");
+});
+
+test("driver() waits out a busy store and retries; anything else is asked once", async (t) => {
+  // #910: the storage adapter exits STORAGE_BUSY_EXIT when another writer held
+  // the store past the busy timeout. That is a fact about the moment, so the
+  // call is repeated with a growing wait, within a budget; every other non-zero
+  // exit is a decision and is not asked again.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-busy-"));
+  const previousDriver = process.env.AGMSG_SYNC_DRIVER;
+  t.after(async () => {
+    if (previousDriver === undefined) delete process.env.AGMSG_SYNC_DRIVER;
+    else process.env.AGMSG_SYNC_DRIVER = previousDriver;
+    if (!root.startsWith(tmpdir())) throw new Error("unsafe test root");
+    await rm(root, { recursive: true, force: true });
+  });
+  const config = {
+    local_team: "t", server_instance_id: "018f3f7e-0000-7000-8000-000000000001",
+    remote_team_id: "018f3f7e-0000-7000-8000-000000000002", protocol_version: 1,
+  };
+  const counter = join(root, "calls");
+  // A driver that is busy for its first `busyFor` calls and answers after that.
+  const useDriver = async (name, busyFor, exitWith = STORAGE_BUSY_EXIT) => {
+    const script = join(root, name);
+    await writeFile(script, [
+      "#!/usr/bin/env bash",
+      "cat > /dev/null",
+      `n=$(( $(cat ${shellQuote(counter)} 2>/dev/null || echo 0) + 1 ))`,
+      `printf %s "$n" > ${shellQuote(counter)}`,
+      `if [ "$n" -le ${busyFor} ]; then`,
+      "  echo 'agmsg: sqlite-sync: prepare: the store is busy -- another writer held it' >&2",
+      `  exit ${exitWith}`,
+      "fi",
+      "printf '%s\\n' '{\"type\":\"sync_state\",\"transport_cursor\":\"0\"}'",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    await writeFile(counter, "0");
+    process.env.AGMSG_SYNC_DRIVER = script;
+  };
+  const waits = [];
+  const events = [];
+  const dependencies = {
+    sleepCall: async (ms) => { waits.push(ms); },
+    eventCall: async (name, fields) => { events.push({ name, ...fields }); },
+  };
+
+  // Busy twice, then answered: two waits, doubling, and the answer comes back.
+  await useDriver("busy-twice.sh", 2);
+  const result = await driver("prepare", config, [], [], dependencies);
+  assert.deepEqual(result, [{ type: "sync_state", transport_cursor: "0" }]);
+  assert.equal(await readFile(counter, "utf8"), "3");
+  assert.deepEqual(waits, [1000, 2000]);
+  assert.deepEqual(events.map((e) => [e.name, e.operation, e.attempt, e.wait_ms, e.waited_ms]),
+    [["driver.busy", "prepare", 1, 1000, 0], ["driver.busy", "prepare", 2, 2000, 1000]]);
+
+  // Busy past the budget: the driver's own sentence comes back, marked
+  // retryable and named, with how long this waited. The budget is a constant
+  // (5 min) and the sleep is injected, so the whole ladder runs in no time:
+  // 1+2+4+8+16 s, then 30 s steps, and the 14th attempt would need 301 s.
+  await useDriver("busy-always.sh", 1000);
+  waits.length = 0;
+  await assert.rejects(() => driver("prepare", config, [], [], dependencies), (error) =>
+    error.code === "storage-busy" && isRetryable(error) &&
+    error.driverExitCode === STORAGE_BUSY_EXIT &&
+    /storage sync prepare failed for team 't' \(exit 11\): agmsg: sqlite-sync: prepare: the store is busy/u.test(error.message) &&
+    /waited 271 s for the store to come free \(the 300 s budget\) and it did not/u.test(error.message));
+  assert.deepEqual(waits, [1000, 2000, 4000, 8000, 16000, ...Array(8).fill(30000)]);
+  assert.equal(await readFile(counter, "utf8"), "14");
+  assert.equal(waits.reduce((sum, ms) => sum + ms, 0), 271000);
+
+  // A failed check (13) is a decision: asked once, not retried, not retryable.
+  await useDriver("refuses.sh", 1000, 13);
+  waits.length = 0;
+  await assert.rejects(() => driver("prepare", config, [], [], dependencies), (error) =>
+    error.driverExitCode === 13 && !isRetryable(error) && error.code === undefined);
+  assert.equal(await readFile(counter, "utf8"), "1");
+  assert.deepEqual(waits, []);
 });

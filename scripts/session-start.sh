@@ -35,6 +35,8 @@ RUN_DIR="$SKILL_DIR/run"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/registry-lock.sh"  # publish cc-instance only after a complete write
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/node.sh"
@@ -50,6 +52,8 @@ source "$SCRIPT_DIR/lib/role-session.sh"  # role->session reverse lookup (#339)
 # plug calls it inside a subshell around its own long-lived spawn, so this
 # shell's descriptors are untouched. See lib/close-fds.sh.
 source "$SCRIPT_DIR/lib/close-fds.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/terminal-context-line.sh"
 
 # Identity sanity check — no point launching a watcher with an empty pair set.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
@@ -89,6 +93,23 @@ fi
 [ -z "$SESSION_ID" ] && SESSION_ID="${GROK_SESSION_ID:-}"
 # Fallback so the instruction is still actionable even outside a hook flow.
 [ -z "$SESSION_ID" ] && SESSION_ID="unknown-$$"
+
+# One where.sh call, rendered once, reused by every text-emitting exit below —
+# so a session always learns its own terminal driver and capabilities as the
+# FIRST thing in its context, before any Monitor-tool instruction, rather than
+# having to guess from env vars/grep the way #1171's incident agent did.
+TERMINAL_LINE="$(agmsg_terminal_context_line "$SESSION_ID" "$SKILL_DIR" 2>/dev/null || true)"
+[ -n "$TERMINAL_LINE" ] || TERMINAL_LINE="AGMSG terminal: could not be determined (agmsg_terminal_context_line produced no output)"
+
+# Companion to TERMINAL_LINE: that line is this session's OWN placement;
+# teammates' placement is team.sh's question, not this hook's to compute and
+# print stale — a teammate can move between this session start and the moment
+# the reader acts on it. So this points at the live command rather than a
+# snapshotted answer. Deliberately does not claim team.sh's output already
+# states per-teammate peek/poke/arrange reachability -- as of this line, it
+# does not (that display is tracked separately); wording this makes true only
+# what team.sh actually shows today.
+TEAM_LINE="AGMSG team.sh <team>: shows every teammate's placement and status. To act on one, run peek.sh/poke.sh/arrange.sh <team> <name> directly — its exit code says whether it worked and why not (see each driver's own SKILL.md), so there is no need to guess reachability first."
 
 # --- Skip spawned worktree sub-sessions (.claude/worktrees checkouts). ---
 # Claude Code's background-task feature runs a short-lived sub-session in an
@@ -218,8 +239,15 @@ AGENT_PID=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
 # collect.
 for f in "$RUN_DIR"/ready.*; do
   [ -f "$f" ] || continue
-  rd_sid=$(cat "$f" 2>/dev/null || true)
-  { [ -n "$rd_sid" ] && actas_lock_sid_alive "$rd_sid"; } || rm -f "$f"
+  # Deleting a ready sentinel needs a positive reason. `|| true` on the read and a
+  # boolean liveness meant "could not read it" and "could not tell" both arrived
+  # as "its owner is gone", and this line then removed a LIVE watcher's sentinel.
+  # Remove only on a read that worked plus a positive dead. (#983)
+  _rd_rc=0; rd_sid=$(cat "$f" 2>/dev/null) || _rd_rc=$?
+  _rd_alive=0; actas_lock_sid_alive "$rd_sid" || _rd_alive=$?
+  if [ "$_rd_rc" -eq 0 ] && [ -n "$rd_sid" ] && [ "$_rd_alive" -eq 1 ]; then
+    rm -f "$f"
+  fi
 done
 
 
@@ -241,7 +269,10 @@ if [ -n "$CC_PID" ]; then
       fi
     fi
   fi
-  printf '%s\n' "$INSTANCE_ID" > "$STATE"
+  if ! agmsg_write_atomic "$STATE" "$INSTANCE_ID"; then
+    printf 'agmsg: could not publish the complete instance marker: %s\n' "$STATE" >&2
+    exit 1
+  fi
 fi
 
 # --- Start the engine for a connected team that has none (#761, #774). ---
@@ -303,6 +334,8 @@ if [ -f "$WATCHER_PIDFILE" ]; then
   existing=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
   if [ -n "$existing" ] && _agmsg_pid_alive_local "$existing"; then
     cat <<EOF
+$TERMINAL_LINE
+$TEAM_LINE
 AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
 No action needed — the existing watcher is the active one.
 EOF
@@ -316,9 +349,12 @@ fi
 # ROLE-FILTERED directive instead of the generic unfiltered one: watch.sh with a
 # 4th <agent> arg restricts receive to that role AND re-claims its exclusivity
 # lock. This covers a manual `claude --resume <uuid>` that bypasses spawn's actas
-# boot prompt -- the resumed session re-arms as its role automatically. Fail-open:
-# no record, no project match, or an unreadable record => generic directive.
-ROLE_NAME=""; ROLE_TEAM=""
+# boot prompt -- the resumed session re-arms as its role automatically. When no
+# record matches, narrowing (#982) tries the actas lock this sid owns; if the
+# seat still cannot be established the fallback is fail-CLOSED, not the generic
+# unfiltered watcher (which would consume other seats' unread) -- see the two
+# blocks below.
+ROLE_NAME=""; ROLE_TEAM=""; ROLE_BASIS=""
 _bare_sid="$(agmsg_instance_bare_sid "$SESSION_ID" 2>/dev/null || printf '%s' "$SESSION_ID")"
 _rec="$(agmsg_role_session_lookup_by_sid "$_bare_sid" 2>/dev/null || true)"
 if [ -n "$_rec" ]; then
@@ -328,31 +364,145 @@ if [ -n "$_rec" ]; then
   # (team, agent) is actually one of this project's registered pairs.
   if [ -n "$_r_agent" ] && [ -n "$_r_team" ] \
      && printf '%s\n' "$PAIRS" | grep -Fxq "$(printf '%s\t%s' "$_r_team" "$_r_agent")"; then
-    ROLE_NAME="$_r_agent"; ROLE_TEAM="$_r_team"
+    ROLE_NAME="$_r_agent"; ROLE_TEAM="$_r_team"; ROLE_BASIS=record
+  fi
+fi
+
+# --- Narrowing when the role-session record is missing (#982). ---
+# The record above is advisory and can be absent even for a session that IS a
+# seat (a resume that bypassed actas-claim, an unreadable record). The same fact
+# it would carry may still be on disk: an actas.<team>__<agent>.session lock this
+# very sid owns. Match the lock owner's BARE sid (stable across resume; the pid
+# half changes) against ours, iterating THIS project's registered pairs rather
+# than raw lock filenames (those are percent-encoded, and iterating PAIRS keeps
+# us to locks that are actually registered here). Exactly one match re-seats us;
+# zero leaves ROLE_NAME empty for the fail-closed decision below, and an ambiguous
+# 2+ deliberately does the same — an unfiltered watcher is the one thing we must
+# not fall back to (it consumes other seats' unread; see the block after the
+# role-filtered emit).
+if [ -z "$ROLE_NAME" ]; then
+  _narrow_n=0; _narrow_agent=""; _narrow_team=""
+  _tab="$(printf '\t')"
+  while IFS="$_tab" read -r _p_team _p_agent; do
+    [ -n "$_p_team" ] && [ -n "$_p_agent" ] || continue
+    # A lock we could not READ is not a lock that isn't ours. Counting it as
+    # "not ours" can leave _narrow_n at exactly 1 from some other pair and
+    # re-seat this session onto the wrong role. Treating the whole narrowing as
+    # ambiguous is the fail-closed direction and costs an unfiltered-watcher
+    # refusal, which is the outcome this block already has for 2+. (#983)
+    _own_r="$(actas_lock_read "$_p_team" "$_p_agent" 2>/dev/null)" || _own_r="unreadable$_tab"
+    case "${_own_r%%"$_tab"*}" in
+      ok)         _owner="${_own_r#*"$_tab"}" ;;
+      absent)     continue ;;
+      *)          _narrow_n=2; break ;;
+    esac
+    [ -n "$_owner" ] || continue
+    _owner_bare="$(agmsg_instance_bare_sid "$_owner" 2>/dev/null || printf '%s' "$_owner")"
+    if [ "$_owner_bare" = "$_bare_sid" ]; then
+      _narrow_n=$((_narrow_n + 1)); _narrow_agent="$_p_agent"; _narrow_team="$_p_team"
+    fi
+  done <<EOF
+$PAIRS
+EOF
+  if [ "$_narrow_n" -eq 1 ]; then
+    ROLE_NAME="$_narrow_agent"; ROLE_TEAM="$_narrow_team"; ROLE_BASIS=actas
+  fi
+fi
+
+# Re-apply this pane's name for the seat we just re-established. herdr DROPS an
+# agent's name when the agent exits, so join and actas alone leave a resumed
+# session nameless — and a nameless pane is invisible to peek/poke. This is the
+# third caller of the naming step for exactly that reason (v1 scope, item 4).
+#
+# Only when the seat is KNOWN: an empty ROLE_NAME here is the ambiguous case the
+# block above deliberately refuses to guess at, and naming a pane for the wrong
+# seat is worse than leaving it unnamed. The bare session id is what herdr's
+# `agent list` carries (not the composite INSTANCE_ID).
+#
+# The registry is sourced with the errexit lift: on bash 3.2 a failure inside a
+# sourced file fires THIS script's `set -e`, so a plain `. x || true` would take
+# SessionStart down rather than skip the naming.
+if [ -n "$ROLE_NAME" ] && [ -n "$ROLE_TEAM" ]; then
+  _agmsg_tr_rc=0; _agmsg_tr_e=0
+  case $- in *e*) _agmsg_tr_e=1 ;; esac
+  set +e
+  # shellcheck disable=SC1091
+  [ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+  _agmsg_tr_rc=$?
+  [ "$_agmsg_tr_e" = 1 ] && set -e
+  if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+    agmsg_terminal_name_self_safe "$SESSION_ID" "$ROLE_TEAM" "$ROLE_NAME" "$PROJECT" "$TYPE" record || true
   fi
 fi
 
 WATCH="$SKILL_DIR/scripts/watch.sh"
+# AGMSG_CC_MONITOR_KEEP_ALIVE, default OFF: timeout_ms: 1800000 always stays
+# in both directives below (the Monitor tool caps every watch there
+# regardless), but the prose explaining the expiry and asking the agent to
+# re-arm on it is opt-in. Off by default because most Claude Code seats do
+# not need a standing watch kept alive across its own natural expiry; the
+# claude-code type's own template (#1321) covers the seats that do, via
+# poke rather than a dedicated command.
+REARM_NOTE=""
+if [ -n "${AGMSG_CC_MONITOR_KEEP_ALIVE:-}" ]; then
+  REARM_NOTE="
+This watch expires after at most 30 minutes; when the expiry notice arrives,
+immediately re-arm it by invoking Monitor again with this exact command and
+description — delivery depends on it, since nothing else keeps the stream
+running. Re-arm it silently: no message to the user, no \"re-armed\", no
+acknowledgement, no summary — just invoke Monitor again and continue,
+since announcing it every 30 minutes wastes tokens for no benefit."
+fi
 # Shell-quote each argv so the host can paste the command into Monitor and run
 # it verbatim. A plain '...' wrap breaks on paths with an apostrophe
 # (/Users/o'brien/...); printf %q escapes spaces, quotes and other metacharacters
 # safely for shell re-execution (#188). A resumed role adds the 4th <agent> arg.
 if [ -n "$ROLE_NAME" ]; then
   WATCH_COMMAND="$(printf '%q %q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE" "$ROLE_NAME")"
+  # State the seat's basis honestly: the reader launches a watcher on the strength
+  # of this sentence, so a recorded seat and an inferred one must not read alike
+  # (#982/#993). The record path has an explicit role-session record; the narrowing
+  # path has only the actas lock this sid still owns — say which, and why it stands
+  # in for the record, so the reader can weigh "what if the lock is stale?".
+  if [ "$ROLE_BASIS" = record ]; then
+    SEAT_CLAIM="this session was recorded as that role's seat"
+  else
+    SEAT_CLAIM="no role record was found for this session, but it still owns that role's actas exclusivity lock — claimed by this seat and carried across the resume — which is taken to stand in for the record (so if that lock were stale, this seating would be too)"
+  fi
   cat <<EOF
-AGMSG monitor mode (resumed role \`$ROLE_NAME\` in team \`$ROLE_TEAM\`): this
-session was recorded as that role's seat, so invoke the Monitor tool now with the
-following parameters, before any other action in this session.
+$TERMINAL_LINE
+$TEAM_LINE
+AGMSG monitor mode (resumed role \`$ROLE_NAME\` in team \`$ROLE_TEAM\`):
+$SEAT_CLAIM, so invoke the Monitor tool now with the following parameters, before
+any other action in this session.
 
   command: $WATCH_COMMAND
   description: agmsg inbox stream (acting as $ROLE_NAME)
   persistent: true
+  timeout_ms: 1800000
+$REARM_NOTE
 
 The 4th argument restricts receive to \`$ROLE_NAME\` only and re-claims its actas
 exclusivity lock — a resume restores context but not runtime state, so this
 re-establishes the role. Send with \`send.sh ... $ROLE_NAME ...\` (this session's
 active FROM is \`$ROLE_NAME\`). Each output line is one message:
 \`<ts> | <team> | <from> → <to> | <body>\`. React as they arrive.
+
+Use Claude Code's generic Monitor tool only. First confirm ToolSearch
+select:Monitor finds that generic tool; Azure Monitor, MCP monitor, or other
+monitor-branded tools are not valid for agmsg delivery. Do not start watch.sh
+with Bash/background/nohup or a shell task. Success is:
+
+  - Monitor(agmsg inbox stream (acting as $ROLE_NAME)) starts
+  - TaskList shows a task whose description begins with "agmsg inbox
+    stream (acting as $ROLE_NAME)" for this session (the reliable check;
+    the background-task footer is not)
+  - the transcript later contains Monitor event: "agmsg inbox stream
+    (acting as $ROLE_NAME)"
+
+If the generic Monitor tool is unavailable, do not treat a background shell
+watcher as success. Switch to turn delivery or run manual inbox checks instead;
+those fallbacks are not real-time monitor delivery.
 
 Note: On a /clear or --continue/--resume re-fire, you may shortly see a
 "Monitor … stopped" notification for an earlier 'agmsg inbox stream'
@@ -362,19 +512,51 @@ EOF
   exit 0
 fi
 
-WATCH_COMMAND="$(printf '%q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE")"
-
-cat <<EOF
+# --- Fail-closed fallback (#982). ---
+# No seat was established (no role-session record, and no single actas lock this
+# sid owns). Emitting the generic, unfiltered watch.sh here is NOT a "receive a
+# bit more" degradation: on a project with several registered pairs it subscribes
+# to ALL of them, and watch.sh stamps read_at + advances every pair's read_cursor
+# to the tip as it delivers — so it CONSUMES other seats' unread mail, silently,
+# and irreversibly short of hand-editing the store. That is the expensive
+# direction to default to. So reserve the generic watcher for a single-pair
+# project, where there is no one else's mail to take; with more than one pair,
+# stand down and say why (a silent no-watcher is indistinguishable from "no
+# messages arriving"), naming `/agmsg actas <name>` so the seat can be set
+# explicitly — which re-fires this hook down the role-filtered path above.
+_pair_count="$(printf '%s\n' "$PAIRS" | grep -c '.' || true)"
+if [ "${_pair_count:-0}" -le 1 ]; then
+  WATCH_COMMAND="$(printf '%q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE")"
+  cat <<EOF
+$TERMINAL_LINE
+$TEAM_LINE
 AGMSG monitor mode: invoke the Monitor tool now with the following parameters,
 before any other action in this session.
 
   command: $WATCH_COMMAND
   description: agmsg inbox stream
   persistent: true
+  timeout_ms: 1800000
+$REARM_NOTE
 
 This streams incoming agmsg messages into the session in real time. Each
 output line is one message: \`<ts> | <team> | <from> → <to> | <body>\`.
 React to messages as they arrive; reply with \`send.sh\`.
+
+Use Claude Code's generic Monitor tool only. First confirm ToolSearch
+select:Monitor finds that generic tool; Azure Monitor, MCP monitor, or other
+monitor-branded tools are not valid for agmsg delivery. Do not start watch.sh
+with Bash/background/nohup or a shell task. Success is:
+
+  - Monitor(agmsg inbox stream) starts
+  - TaskList shows a task whose description begins with "agmsg inbox
+    stream" for this session (the reliable check; the background-task
+    footer is not)
+  - the transcript later contains Monitor event: "agmsg inbox stream"
+
+If the generic Monitor tool is unavailable, do not treat a background shell
+watcher as success. Switch to turn delivery or run manual inbox checks instead;
+those fallbacks are not real-time monitor delivery.
 
 Note: On a /clear or --continue/--resume re-fire, you may shortly see a
 "Monitor … stopped" notification for an earlier 'agmsg inbox stream'
@@ -382,3 +564,33 @@ task. That is the previous watcher being cleaned up to avoid duplicates
 — it is expected. Do NOT relaunch it; the Monitor you invoke from this
 directive replaces it.
 EOF
+  exit 0
+fi
+
+# Multiple registered seats here and none identified as this session: stand down.
+# Emit NO watch.sh directive — there is nothing for the host to launch, so no
+# other seat's mail can be consumed — and explain the state so it is not mistaken
+# for silence.
+_seat_list="$(printf '%s\n' "$PAIRS" | awk -F'\t' 'NF>=2 && $2!="" {print "  - /agmsg actas "$2}')"
+cat <<EOF
+$TERMINAL_LINE
+$TEAM_LINE
+AGMSG monitor mode: standing down — no inbox watcher was started for this session.
+
+This resumed session could not be matched to a seat (no role-session record, and
+no actas lock it owns), and this project has more than one registered seat. An
+unfiltered watcher would subscribe to every seat here and mark THEIR unread
+messages read as it delivered them — consuming mail addressed to other sessions.
+So no watcher is started rather than the wrong one.
+
+No messages are lost: they remain in the store (\`history.sh <team> <agent>\`
+returns them). What is paused is live delivery into THIS session.
+
+To start receiving as your seat, claim it explicitly — this re-fires the monitor
+directive on the role-filtered path:
+
+$_seat_list
+
+If you are not any of these seats, no watcher is the correct state.
+EOF
+exit 0

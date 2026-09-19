@@ -5,6 +5,7 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
 import { sealEnvelope } from "./sync-cipher.mjs";
+import { ROSTER_KINDS } from "./wire-kinds.mjs";
 
 const [operation, configPath, serverId, remoteTeamId, protocolText, limitText] =
   process.argv.slice(2);
@@ -138,7 +139,7 @@ function prepare() {
     record.server_instance_id === serverId &&
     record.remote_team_id === remoteTeamId).map((record) => record.mutation_id));
   const mutations = records.filter((record) =>
-    ["member_joined", "member_left", "member_renamed", "key_rotated"].includes(record.type) &&
+    ROSTER_KINDS.includes(record.type) &&
     !synced.has(record.id) &&
     (request.allow_new || target.reservations[record.id])).slice(0, limit);
 
@@ -215,7 +216,7 @@ function apply() {
   const state = readState();
   const target = binding(state);
   const mutations = new Map(records.filter((record) =>
-    ["member_joined", "member_left", "member_renamed", "key_rotated"].includes(record.type))
+    ROSTER_KINDS.includes(record.type))
     .map((record) => [record.id, record]));
   const synced = new Set(records.filter((record) =>
     record.type === "roster_synced" &&
@@ -227,8 +228,7 @@ function apply() {
       continue;
     }
     if (item.type !== "sync_pull_message" || item.status !== "importable" ||
-        !["member_joined", "member_left", "member_renamed", "key_rotated"]
-          .includes(item.projection?.kind)) {
+        !ROSTER_KINDS.includes(item.projection?.kind)) {
       throw new Error("roster pull input is invalid");
     }
     const incoming = mutation(item.projection);
