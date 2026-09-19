@@ -3,22 +3,33 @@ set -euo pipefail
 
 # Usage:
 #   ext-tool.sh setup <team> <name> <tool> status
-#   ext-tool.sh setup <team> <name> <tool> check <item>
-#   ext-tool.sh setup <team> <name> <tool> save
+#   ext-tool.sh setup <team> <name> <tool> check <item> [args...]
+#   ext-tool.sh setup <team> <name> <tool> save [args...]
 #   ext-tool.sh setup <team> <name> <tool> test
 #   ext-tool.sh secret <team> <name>
+#   ext-tool.sh secret <team> <name> --from-clipboard
 #
 # Common entry point for configuring an ext-tool member
 # (scripts/drivers/ext-tools/README.md has the full contract). `setup`
 # forwards status/check/save/test to the named tool's own non-interactive
-# `setup` executable, resolving <team>/<name>'s config path first — the
-# conversation with the user happens at the calling seat, which reads the
-# tool's SETUP.md and calls these one at a time; nothing here holds a
-# conversation of its own. `secret` reads one value from the terminal without
-# echoing it, writes it to a 0600 file, and reports only that it was saved —
-# never the value, and never through any channel other than the terminal it
-# was typed into (refused when not run on one, same as `key.sh show
-# --reveal-secret`).
+# `setup` executable, resolving <team>/<name>'s config path first. `save`
+# gets config_path plus whatever [args...] the caller gave, forwarded
+# verbatim, in order -- a tool's own save may need more than config_path
+# (e.g. a key file path, a channel id) and this entry point does not know or
+# care what those are. `check <item>` gets [args...] the same way but WITHOUT
+# config_path -- it verifies a raw, not-yet-saved value, so a tool's own
+# check never expects one. The conversation with the user happens at the
+# calling seat, which reads the tool's SETUP.md and calls these one at a
+# time; nothing here holds a conversation of its own. `secret` reads one
+# value without echoing it,
+# writes it to a 0600 file, and reports only that it was saved — never the
+# value. Its plain form reads from THIS terminal only (refused when not run
+# on one, same as `key.sh show --reveal-secret`); `--from-clipboard` reads
+# the system clipboard instead, so a user calling through an agent's `!`
+# (which has no real TTY of its own) can still do this without opening a
+# separate terminal -- `! bash .../ext-tool.sh secret <team> <name>
+# --from-clipboard` after copying the value. The clipboard is left alone
+# after reading (it is the user's, not this script's, to clear).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -90,8 +101,13 @@ cmd_setup() {
 
   case "$sub" in
     save)
-      [ "$#" -eq 0 ] || { echo "Usage: ext-tool.sh setup <team> <name> <tool> save" >&2; exit 1; }
-      "$dir/setup" save "$config_path"
+      # Whatever extra arguments the caller gave (e.g. a key file path, a
+      # channel id) are forwarded verbatim after config_path -- this entry
+      # point does not know or care what a given tool's own setup needs
+      # beyond config_path itself (dogfood finding: this used to drop them
+      # entirely, so a tool whose save needs more than config_path had no
+      # way to receive it through here at all).
+      "$dir/setup" save "$config_path" "$@"
       local rc=$?
       # send.sh's dispatch reads config_path's own `tool=` key to know which
       # handle to run; a tool's own `setup save` naming itself is the
@@ -108,8 +124,15 @@ cmd_setup() {
       exec "$dir/setup" "$sub" "$config_path"
       ;;
     check)
-      local item="${1:?Usage: ext-tool.sh setup <team> <name> <tool> check <item>}"
-      exec "$dir/setup" check "$item" "$config_path"
+      # config_path is NOT forwarded here (unlike save/status/test): `check`
+      # exists to verify a raw, not-yet-saved value (a key file, a channel
+      # id) before anything is written, so it takes exactly what the caller
+      # passes after <item> -- same dogfood finding as save, just the
+      # opposite direction (this used to inject config_path where a tool's
+      # own check never asked for it).
+      local item="${1:?Usage: ext-tool.sh setup <team> <name> <tool> check <item> [args...]}"
+      shift
+      exec "$dir/setup" check "$item" "$@"
       ;;
     *)
       echo "Usage: ext-tool.sh setup <team> <name> <tool> status|check|save|test [args...]" >&2
@@ -118,24 +141,61 @@ cmd_setup() {
   esac
 }
 
+# Echoes the system clipboard's text, or returns non-zero if no known reader
+# is on PATH. Tries each candidate in order rather than picking one from
+# uname, so a platform with more than one option (Linux: Wayland vs X11)
+# still works, and a test can put a fake ahead of the real ones on PATH.
+_ext_tool_read_clipboard() {
+  if command -v pbpaste >/dev/null 2>&1; then
+    pbpaste
+  elif command -v wl-paste >/dev/null 2>&1; then
+    wl-paste
+  elif command -v xclip >/dev/null 2>&1; then
+    xclip -selection clipboard -o
+  elif command -v xsel >/dev/null 2>&1; then
+    xsel --clipboard --output
+  elif command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile -Command Get-Clipboard
+  elif command -v powershell >/dev/null 2>&1; then
+    powershell -NoProfile -Command Get-Clipboard
+  else
+    return 1
+  fi
+}
+
 cmd_secret() {
-  local team="${1:?Usage: ext-tool.sh secret <team> <name>}"
+  local team="${1:?Usage: ext-tool.sh secret <team> <name> [--from-clipboard]}"
   local name="${2:?Missing name}"
+  local from_clipboard=0
+  case "${3:-}" in
+    --from-clipboard) from_clipboard=1 ;;
+    "") ;;
+    *) echo "Usage: ext-tool.sh secret <team> <name> [--from-clipboard]" >&2; exit 1 ;;
+  esac
   agmsg_validate_team_name "$team" || exit 1
   agmsg_validate_agent_name "$name" || exit 1
 
-  # A secret typed here never reaches an agent: read/written directly from
-  # THIS terminal only, the same guard and wording key.sh show --reveal-secret
-  # already uses for the same reason.
-  if [ ! -t 0 ] || [ ! -t 1 ]; then
-    echo "agmsg: ext-tool secret requires an interactive terminal and is refused in agent mode." >&2
-    exit 1
-  fi
-
   local value dest
-  read -rsp "Secret value for '$name' in team '$team': " value
-  echo >&2
-  [ -n "$value" ] || { echo "agmsg: empty value; nothing saved." >&2; exit 1; }
+  if [ "$from_clipboard" -eq 1 ]; then
+    value="$(_ext_tool_read_clipboard)" || {
+      echo "agmsg: no clipboard reader found on this platform (tried pbpaste, wl-paste, xclip, xsel, powershell Get-Clipboard)." >&2
+      exit 1
+    }
+    [ -n "$value" ] || { echo "agmsg: clipboard is empty; nothing saved." >&2; exit 1; }
+  else
+    # A secret typed here never reaches an agent: read/written directly from
+    # THIS terminal only, the same guard and wording key.sh show
+    # --reveal-secret already uses for the same reason. --from-clipboard,
+    # above, is the alternative for a caller with no real TTY (an agent's
+    # `!`), so this guard does not need to bend to accommodate that case.
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+      echo "agmsg: ext-tool secret requires an interactive terminal (or --from-clipboard) and is refused in agent mode." >&2
+      exit 1
+    fi
+    read -rsp "Secret value for '$name' in team '$team': " value
+    echo >&2
+    [ -n "$value" ] || { echo "agmsg: empty value; nothing saved." >&2; exit 1; }
+  fi
   dest="$SKILL_DIR/ext-tools/$team/$name.secret"
   _ext_tool_write_atomic "$dest" "$value"
   unset value

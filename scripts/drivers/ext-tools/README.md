@@ -6,7 +6,7 @@ member. Adding one is dropping a directory here:
 ```
 scripts/drivers/ext-tools/<tool>/tool.conf   # name, required config keys, default timeout
 scripts/drivers/ext-tools/<tool>/SETUP.md    # for the LLM at the joining seat: what to ask, in what order, common failures
-scripts/drivers/ext-tools/<tool>/setup       # non-interactive: status | check <item> | save | test
+scripts/drivers/ext-tools/<tool>/setup       # non-interactive: status | check <item> [args...] | save [args...] | test
 scripts/drivers/ext-tools/<tool>/handle      # processes one message
 ```
 
@@ -29,19 +29,27 @@ question. The conversation happens at the LLM seat that reads `SETUP.md` and
 calls `setup` once per step:
 
 ```
-setup status <config_path>                # -> JSON: what's still missing
-setup check <item> <config_path>           # -> confirm one thing works (a token is valid, a channel exists, ...)
-setup save <config_path>                   # -> write the member's config (0600); reads any needed values from its own env/args, never prompts
-setup test <config_path>                   # -> actually try sending one message end to end
+setup status <config_path>                     # -> JSON: what's still missing
+setup check <item> [args...]                   # -> confirm one raw, not-yet-saved value works (a token is valid, a channel exists, ...)
+setup save <config_path> [args...]             # -> write the member's config (0600)
+setup test <config_path>                       # -> actually try sending one message end to end
 ```
 
 `<config_path>` is the member's own config file
 (`~/.agents/skills/agmsg/ext-tools/<team>/<name>.conf`); `scripts/ext-tool.sh
 setup` is what a seat actually runs, and it resolves this path before calling
-into the tool's own `setup`. A tool that needs a secret value never reads it
-itself — the human runs `scripts/ext-tool.sh secret <team> <name>` directly in
-their own terminal, and the tool's config only ever names *where* that secret
-was written (e.g. `key_file=...`), never the value.
+into the tool's own `setup`, for `status`/`save`/`test`. `check` does NOT get
+`<config_path>` — it exists to verify a value before anything is saved (a key
+file path, a channel id), so it only ever gets `<item>` plus whatever
+`[args...]` the caller passed after it. `save`'s own `[args...]` (anything a
+tool needs beyond `<config_path>`, such as a key file path or a channel id)
+are forwarded verbatim, in the order the caller gave them; `scripts/ext-tool.sh
+setup ... save <args...>` is exactly what a seat runs to pass them through.
+A tool that needs a secret value never reads it itself — the human runs
+`scripts/ext-tool.sh secret <team> <name>` (or `... --from-clipboard`, for a
+caller with no real TTY of its own, such as an agent's `!`) directly, and the
+tool's config only ever names *where* that secret was written (e.g.
+`key_file=...`), never the value.
 
 Exit 0 on success; non-zero on failure, with one line of reason on stderr.
 

@@ -87,6 +87,25 @@ setup() {
     printf '%s\n' 'wait'
   } > "$SLOWTOOL_DIR/handle"
   chmod +x "$SLOWTOOL_DIR/handle"
+
+  # A third tool whose setup echoes back exactly the arguments it received,
+  # for the argument-forwarding regression below (dogfood finding: `setup
+  # ... save`/`check` used to drop or wrongly inject config_path).
+  ARGTOOL_DIR="$SCRIPTS/drivers/ext-tools/argtool"
+  mkdir -p "$ARGTOOL_DIR"
+  printf '%s\n' 'name=argtool' > "$ARGTOOL_DIR/tool.conf"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf '%s\n' 'case "${1:-}" in'
+    printf '%s\n' '  save) shift; printf "save:%s\n" "$*" ;;'
+    printf '%s\n' '  check) shift; printf "check:%s\n" "$*" ;;'
+    printf '%s\n' '  status) echo "{\"missing\":[]}" ;;'
+    printf '%s\n' '  test) exit 0 ;;'
+    printf '%s\n' '  *) exit 1 ;;'
+    printf '%s\n' 'esac'
+  } > "$ARGTOOL_DIR/setup"
+  chmod +x "$ARGTOOL_DIR/setup"
 }
 
 teardown() { teardown_test_env; }
@@ -217,4 +236,41 @@ teardown() { teardown_test_env; }
   # Positive evidence, not just an inference from the test having passed:
   # the fake `timeout` was genuinely never invoked.
   [ ! -f "$fake_bin/timeout.invoked" ]
+
+  # (vi) `secret --from-clipboard` reads the system clipboard instead of a
+  # TTY (dogfood finding: `secret`'s plain form refuses under an agent's `!`,
+  # which has no real TTY). A fake pbpaste ahead of the real one on PATH
+  # proves the value flows through without ever appearing in this command's
+  # own output.
+  local clip_bin="$BATS_TEST_TMPDIR/fake-bin"
+  mkdir -p "$clip_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf %s "clip-secret-1284"' > "$clip_bin/pbpaste"
+  chmod +x "$clip_bin/pbpaste"
+  run env PATH="$clip_bin:$PATH" bash "$SCRIPTS/ext-tool.sh" secret et-team bot --from-clipboard
+  [ "$status" -eq 0 ]
+  grep -qF "Saved." <<<"$output"
+  refute grep -qF "clip-secret-1284" <<<"$output"
+  local secret_file="$TEST_SKILL_DIR/ext-tools/et-team/bot.secret"
+  [ -f "$secret_file" ]
+  [ "$(stat -c '%a' "$secret_file" 2>/dev/null || stat -f '%Lp' "$secret_file")" = "600" ]
+  grep -qF "clip-secret-1284" "$secret_file"
+}
+
+@test "ext-tool: setup save forwards extra args after config_path, check forwards them WITHOUT config_path" {
+  # Expected, written before running: a real adapter's own save may need
+  # more than config_path (a key file path, a channel id), and its own
+  # check verifies a raw, not-yet-saved value, so it must never receive
+  # config_path at all. This was reported against a real Slack adapter that
+  # bypassed this entry point entirely because save silently dropped its
+  # extra arguments and check silently injected one it never asked for.
+  local config_path="$TEST_SKILL_DIR/ext-tools/argteam/argbot.conf"
+
+  run bash "$SCRIPTS/ext-tool.sh" setup argteam argbot argtool save /path/key_file C0CHANNEL
+  [ "$status" -eq 0 ]
+  grep -qF "save:$config_path /path/key_file C0CHANNEL" <<<"$output"
+
+  run bash "$SCRIPTS/ext-tool.sh" setup argteam argbot argtool check channel /path/key_file C0CHANNEL
+  [ "$status" -eq 0 ]
+  grep -qF "check:channel /path/key_file C0CHANNEL" <<<"$output"
+  refute grep -qF "$config_path" <<<"$output"
 }
