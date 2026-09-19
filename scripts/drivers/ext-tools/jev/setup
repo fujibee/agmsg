@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# setup — non-conversational setup commands for the Jev ext-tool, driven by
+# the seat LLM per SETUP.md (design note §5b). Every subcommand takes
+# explicit paths/values as arguments rather than assuming a config file
+# already exists -- `save` is what creates the member config, so nothing
+# before it can read one.
+#
+# Usage:
+#   setup status <config_path>
+#   setup check key <key_file>
+#   setup save <config_path> <key_file>
+#   setup test <config_path>
+#
+# `check key` only confirms the file EXISTS and is READABLE at that
+# location, per the maintainer's instruction -- it does not call the real
+# API (that is `test`'s job, and only a human runs that, with a real key).
+# Never prints the key itself.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/_lib.sh"
+
+die() { echo "setup: $*" >&2; exit 1; }
+
+cmd="${1:?Usage: setup status|check|save|test ...}"
+shift
+
+cmd_status() {
+  local config_path="${1:?Usage: setup status <config_path>}" required key
+  required="$(_jev_conf_get "$SCRIPT_DIR/tool.conf" required_config 2>/dev/null || true)"
+  [ -n "$required" ] || required="key_file"
+  local items="" sep=""
+  for key in $required; do
+    if [ -z "$(_jev_conf_get "$config_path" "$key")" ]; then
+      items="${items}${sep}\"$key\""
+      sep=","
+    fi
+  done
+  printf '{"missing":[%s]}\n' "$items"
+}
+
+cmd_check_key() {
+  local key_file="${1:?Usage: setup check key <key_file>}"
+  if [ ! -f "$key_file" ]; then
+    jq -cn --arg err "key file not found: $key_file" '{ok: false, error: $err}'
+    return 1
+  fi
+  if [ ! -r "$key_file" ]; then
+    jq -cn --arg err "key file not readable: $key_file" '{ok: false, error: $err}'
+    return 1
+  fi
+  _jev_read_key "$key_file" || {
+    jq -cn --arg err "$_JEV_KEY_ERROR" '{ok: false, error: $err}'
+    return 1
+  }
+  jq -cn '{ok: true}'
+}
+
+cmd_save() {
+  local config_path="${1:?Usage: setup save <config_path> <key_file>}" \
+    key_file="${2:?Usage: setup save <config_path> <key_file>}"
+  [ -r "$key_file" ] || die "key file not readable: $key_file"
+  mkdir -p "$(dirname "$config_path")"
+  umask 077
+  printf 'key_file=%s\n' "$key_file" > "$config_path"
+  chmod 600 "$config_path"
+  printf '{"ok":true,"config_path":"%s"}\n' "$config_path"
+}
+
+# setup test calls the REAL OpenRouter once (never in CI -- design note §5b:
+# only a human, locally, with a real key) and shows the actual answer and
+# cost, so a person can confirm the whole path works end to end.
+cmd_test() {
+  local config_path="${1:?Usage: setup test <config_path>}" \
+    key_file key questions_json state_json request_json out_file
+  key_file="$(_jev_conf_get "$config_path" key_file)"
+  if [ -z "$key_file" ]; then
+    jq -cn '{ok: false, error: "member config is missing key_file"}'
+    return 1
+  fi
+  _jev_read_key "$key_file" || {
+    jq -cn --arg err "$_JEV_KEY_ERROR" '{ok: false, error: $err}'
+    return 1
+  }
+  key="$_JEV_KEY"
+
+  questions_json="$(jq -c '.' "$SCRIPT_DIR/examples/route.json")"
+  state_json='"agmsg jev setup test: fix a one-line typo in a README."'
+  request_json="$(jq -cn --arg model "typesafe/jev-1.13" --argjson state "$state_json" \
+    --argjson questions "$questions_json" '{model: $model, state: $state, questions: $questions}')"
+
+  out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-jev-setup.XXXXXX")"
+  if ! _jev_api_call "$key" "$request_json" "$out_file"; then
+    jq -cn --arg err "$_JEV_CURL_DIAG" '{ok: false, error: ("request failed: " + $err)}'
+    rm -f "$out_file"
+    return 1
+  fi
+  case "$_JEV_HTTP_CODE" in
+    401) jq -cn '{ok: false, error: "invalid API key (HTTP 401)"}'; rm -f "$out_file"; return 1 ;;
+    429) jq -cn '{ok: false, error: "rate limited (HTTP 429)"}'; rm -f "$out_file"; return 1 ;;
+    2??) : ;;
+    *) jq -cn --arg c "$_JEV_HTTP_CODE" '{ok: false, error: ("unexpected HTTP " + $c)}'; rm -f "$out_file"; return 1 ;;
+  esac
+  cat "$out_file"
+  rm -f "$out_file"
+}
+
+case "$cmd" in
+  status) cmd_status "$@" ;;
+  check)
+    sub="${1:?Usage: setup check key ...}"; shift
+    case "$sub" in
+      key) cmd_check_key "$@" ;;
+      *) die "unknown check: $sub (expected key)" ;;
+    esac
+    ;;
+  save) cmd_save "$@" ;;
+  test) cmd_test "$@" ;;
+  *) die "unknown command: $cmd (expected status, check, save, or test)" ;;
+esac

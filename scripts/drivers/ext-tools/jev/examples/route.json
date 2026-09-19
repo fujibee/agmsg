@@ -1,0 +1,21 @@
+{
+  "model": {
+    "type": "choice",
+    "instructions": "Pick the Claude model to route this coding task to.",
+    "criteria": {
+      "haiku": "fastest and cheapest; trivial, fully specified edits",
+      "sonnet": "ordinary implementation work with some investigation",
+      "opus": "hard work whose scope is already decided: a known fix or a specified change, however intricate",
+      "fable": "long autonomous work with no settled scope: the model must make the design decisions itself, including one-way choices it cannot take back, and keep going for hours without a human in the loop"
+    }
+  },
+  "effort": {
+    "type": "choice",
+    "instructions": "Pick the reasoning effort for this task.",
+    "criteria": {
+      "low": "mechanical, no investigation",
+      "medium": "some reasoning and reading",
+      "high": "deep investigation across files"
+    }
+  }
+}
