@@ -307,30 +307,38 @@ agmsg_lock_release
 # The source carries the errexit lift: on bash 3.2 a failure inside a sourced
 # file fires THIS script's `set -e`, so a plain `. x || true` would take the join
 # down instead of skipping the naming. Nothing here may fail a join.
-_agmsg_tr_rc=0; _agmsg_tr_e=0
-case $- in *e*) _agmsg_tr_e=1 ;; esac
-set +e
-# shellcheck disable=SC1091
-[ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
-_agmsg_tr_rc=$?
-[ "$_agmsg_tr_e" = 1 ] && set -e
-if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
-  _agmsg_session_id=""
-  _agmsg_session_env="$(agmsg_type_get "$AGENT_TYPE" session_env)"
-  if [ -n "$_agmsg_session_env" ]; then
-    case "$_agmsg_session_env" in
-      [A-Za-z_]*)
-        case "$_agmsg_session_env" in
-          *[!A-Za-z0-9_]*)
-            printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
-              "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
-          *) _agmsg_session_id="${!_agmsg_session_env:-}" ;;
-        esac ;;
-      *) printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
-           "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
-    esac
+#
+# Skipped entirely for ext-tool: it is a program, not a terminal session, so
+# there is no pane of its own to resolve or name -- attempting it anyway
+# resolved THIS SEAT's own pane instead and printed a confusing "already
+# recorded as ..." warning (harmless, but misleading; a maintainer dogfood
+# finding). Every other type's behavior here is unchanged.
+if [ -z "$EXT_TOOL_NAME" ]; then
+  _agmsg_tr_rc=0; _agmsg_tr_e=0
+  case $- in *e*) _agmsg_tr_e=1 ;; esac
+  set +e
+  # shellcheck disable=SC1091
+  [ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+  _agmsg_tr_rc=$?
+  [ "$_agmsg_tr_e" = 1 ] && set -e
+  if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+    _agmsg_session_id=""
+    _agmsg_session_env="$(agmsg_type_get "$AGENT_TYPE" session_env)"
+    if [ -n "$_agmsg_session_env" ]; then
+      case "$_agmsg_session_env" in
+        [A-Za-z_]*)
+          case "$_agmsg_session_env" in
+            *[!A-Za-z0-9_]*)
+              printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
+                "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
+            *) _agmsg_session_id="${!_agmsg_session_env:-}" ;;
+          esac ;;
+        *) printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
+             "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
+      esac
+    fi
+    agmsg_terminal_name_self_safe "$_agmsg_session_id" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" || true
   fi
-  agmsg_terminal_name_self_safe "$_agmsg_session_id" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" || true
 fi
 
 echo "Joined team $TEAM as $AGENT_ID"

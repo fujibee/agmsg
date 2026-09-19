@@ -147,6 +147,24 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 0 ]
   grep -qF "Joined team et-team as bot" <<<"$output"
 
+  # ext-tool has no pane of its own, so join must not even ATTEMPT to resolve
+  # or record one (dogfood finding: it did, and under a real terminal this
+  # printed a confusing "already recorded as ..." warning -- harmless, but
+  # misleading). Re-run the same join under a fake, real-looking terminal:
+  # the terminal must never be touched at all, not just avoid that specific
+  # message. AGMSG_SELF_NAME is unset here (the harness defaults it to off
+  # for every test) so this actually exercises the naming code path instead
+  # of being trivially satisfied by the harness's own default.
+  local pane_fakebin="$BATS_TEST_TMPDIR/pane-fakebin"
+  local pane_argv_log="$BATS_TEST_TMPDIR/pane-argv.log"
+  mkdir -p "$pane_fakebin"
+  : > "$pane_argv_log"
+  FAKEBIN="$pane_fakebin" ARGV_LOG="$pane_argv_log" agmsg_install_fake_tmux
+  run env -u AGMSG_SELF_NAME TMUX="/tmp/sock,1,0" TMUX_PANE="%9" PATH="$pane_fakebin:$PATH" \
+    bash "$SCRIPTS/join.sh" et-team bot ext-tool --tool faketool
+  [ "$status" -eq 0 ]
+  [ ! -s "$pane_argv_log" ]
+
   run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" et-team sender claude-code /tmp/et-team-proj
   [ "$status" -eq 0 ]
 
