@@ -3747,7 +3747,12 @@ export async function reprocessCycle(config, limit, dependencies = {}, scope = "
   if (scope) {
     let pendingAfter = null;
     let pendingCount = 0;
+    let pendingPageCount = 0n;
     for (;;) {
+      pendingPageCount += 1n;
+      if (pendingPageCount > authenticatedSequenceSpace + 1n) {
+        throw new Error("driver reprocess pending count walk exceeds authenticated sequence space");
+      }
       const pendingExtra = [String(limit), pendingAfter ?? "", scope];
       const pendingPage = await driverCall("reprocess", config, [], pendingExtra);
       const { candidates, page } = validateReprocessDriverPage(pendingPage, limit, pendingAfter);

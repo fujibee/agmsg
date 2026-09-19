@@ -1221,6 +1221,51 @@ test("explicit reprocess rejects an unbounded walk through duplicate server sequ
   }), /one server sequence to multiple wire ids/u);
 });
 
+test("scoped reprocess rejects an unbounded pending-count walk before applying anything (#1323 review)", async () => {
+  // The pending-count walk (scope set) runs BEFORE the bounded processing walk
+  // below it and shares its authenticatedSequenceSpace bound, but had no page
+  // limit of its own -- a driver that keeps answering has_more:true with a
+  // fabricated, ever-advancing server_seq/next_after would spin here forever,
+  // before the processing walk's own guard is ever reached. Each page here
+  // returns a new, validly-shaped, strictly-advancing candidate and never sets
+  // has_more:false, so the only thing that can stop this walk is its own
+  // bound.
+  const capabilities = {
+    protocol_version: 1, server_instance_id: config.server_instance_id,
+    team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
+    current_seq: "2", next_sequence_boundary: "3", accepted_envelope_versions: [1],
+    write_allowed_ciphers: ["none"], policy_revision: "0", effective_from_seq: "1",
+    max_blob_bytes: "1048576", policy_history: [{ policy_revision: "0",
+      effective_from_seq: "1", accepted_envelope_versions: [1],
+      write_allowed_ciphers: ["none"] }],
+  };
+  let pageIndex = 0;
+  await assert.rejects(() => reprocessCycle(config, 1, {
+    healthCall: async () => ({ server_instance_id: config.server_instance_id, team_id: config.remote_team_id }),
+    requestCall: async () => capabilities,
+    driverCall: async () => {
+      pageIndex += 1;
+      // Hex, not decimal, padded to fill the full 12-char segment: a decimal
+      // counter would grow past 4 digits eventually and break UUID_V4's fixed
+      // width, which would stop this fixture's loop for an unrelated reason
+      // (an invalid id) rather than by the bound this test exists to prove.
+      const id = `550e8400-e29b-41d4-a716-${pageIndex.toString(16).padStart(12, "0")}`;
+      return [
+        { type: "sync_state", driver_generation: "018f3f7e-0000-7000-8000-000000000099",
+          transport_cursor: "2" },
+        { type: "sync_reprocess_candidate", server_seq: String(pageIndex), id,
+          server_received_at: "2026-07-22T11:00:00.000000Z",
+          envelope: { v: 1, cipher: "none", key_id: null, blob: "e30=" },
+          prior_status: "authentication_failed" },
+        { type: "sync_reprocess_page", next_after: `${pageIndex}:${id}`, has_more: true },
+      ];
+    },
+    evaluateCall: async () => ({ status: "authentication_failed", reason: "still blocked",
+      policy_revision: "0", local_security_revision: "0" }),
+    eventCall: async () => {}, logApplyCall: async () => {},
+  }, "malformed"), /pending count walk exceeds authenticated sequence space/u);
+});
+
 test("Stage-2 roster, update batches, and response pages are canonical", () => {
   const members = [{ member_id: "018f3f7e-0000-7000-8000-000000000010", name: "worker-1" }];
   assert.deepEqual(validateMembers(config, {
