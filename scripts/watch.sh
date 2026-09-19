@@ -1184,19 +1184,19 @@ while true; do
   fi
   while IFS=$'\t' read -r pair_team pair_agent; do
     [ -z "$pair_team" ] && continue
-    # Warm the per-process caches as PLAIN STATEMENTS, never via $(...): a
+    # Warm the actas-lock path cache as a PLAIN STATEMENT, never via $(...): a
     # command substitution forks a subshell, and a cache array populated
     # inside one is discarded the instant that subshell exits (the exact
     # hazard role-session.sh's own _agmsg_role_session_path_into documents,
-    # #466). Every consumer below (actas_lock_observe_cached,
-    # _pair_unchanged_since_read's actas_lock_read_cached, and every
-    # storage_* call that resolves this team's partition driver) reaches
-    # its own cache through a $(...) of its own, so warming it here, in this
-    # loop's own top-level (non-subshell) frame, is what makes the warmth
-    # actually survive to the NEXT cycle instead of being rebuilt from
-    # scratch every single call (#1321 first-stage follow-up).
+    # #466). Both consumers below (actas_lock_observe_cached and
+    # _pair_unchanged_since_read's actas_lock_read_cached) reach this cache
+    # through a $(...) of their own, so warming it here, in this loop's own
+    # top-level (non-subshell) frame, is what makes the warmth actually
+    # survive to the NEXT cycle instead of being rebuilt from scratch every
+    # single call (#1321 first-stage follow-up). Storage's own partition
+    # driver is deliberately NOT cached this way — see
+    # _agmsg_partition_load's comment in lib/storage.sh (#1329 round 2).
     _actas_lock_primitives_into "$pair_team" "$pair_agent"
-    _agmsg_partition_load "$pair_team" >/dev/null 2>&1
     # Ownership is re-read every cycle, because it can change under a running
     # watcher and nothing else notices. The subscription set and the startup
     # lock check both happen once, above; a session that claims this role

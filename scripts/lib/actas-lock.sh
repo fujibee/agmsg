@@ -231,7 +231,15 @@ _actas_lock_primitives_into() {
   _AGMSG_ALP_ENC_AGENT="$(_actas_lock_encode "$agent")"
   _AGMSG_ALP_ID_KEY_RC=0
   _AGMSG_ALP_ID_KEY="$(_agmsg_id_key_or_legacy "$team" "$agent")" || _AGMSG_ALP_ID_KEY_RC=$?
-  if [ "$n" -lt "$_AGMSG_ALP_MAX" ]; then
+  # Cache a SUCCESSFUL resolution only (review, #1329 round 2). rc 1 ("no id")
+  # and rc 2 ("could not even try") both cover a config.json or roster read
+  # that did not go through -- which can be transient (the file mid-rewrite,
+  # a momentary permission issue) as easily as a genuine decided absence, and
+  # this function cannot tell the two apart. Caching either would make a
+  # watcher that warmed at the wrong instant repeat the same failure for the
+  # rest of its life even after the read would plainly succeed again; retrying
+  # every call until one actually succeeds is what makes that self-correcting.
+  if [ "$_AGMSG_ALP_ID_KEY_RC" -eq 0 ] && [ "$n" -lt "$_AGMSG_ALP_MAX" ]; then
     _AGMSG_ALP_KEYS[$n]="$cachekey"
     _AGMSG_ALP_ENC_T[$n]="$_AGMSG_ALP_ENC_TEAM"
     _AGMSG_ALP_ENC_A[$n]="$_AGMSG_ALP_ENC_AGENT"

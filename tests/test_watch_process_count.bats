@@ -3,13 +3,15 @@
 # One test, capping how many external commands a watch.sh poll cycle forks
 # while genuinely idle (a store that exists and is already caught up, not the
 # "no store yet" short-circuit) -- the case the fleet spends nearly all of its
-# time in, and the one #1321's first stage targets: skip the mktemp +
+# time in, and the one #1330's first stage targets: skip the mktemp +
 # `sqlite3 :memory:` json_each/json_extract reformat pass when there is no
 # real new message_sent row (a cursor-only page was still paying for it every
-# cycle), and cache the per-(team,agent)/per-team primitives behind the actas
-# lock path and the storage partition driver (team_id, member_id, the two
-# name-encodings, which driver a team uses) instead of recomputing them via a
-# fresh sqlite3/tr fork on every single cycle.
+# cycle), and cache the per-(team,agent) primitives behind the actas lock path
+# (team_id, member_id, the two name-encodings) instead of recomputing them via
+# a fresh sqlite3/tr fork on every single cycle. A team's own storage
+# partition driver is deliberately NOT cached this way -- see
+# _agmsg_partition_load's comment in lib/storage.sh for why (review, #1329
+# round 2: caching it missed a real migrate-team-store.sh scenario).
 
 load test_helper
 
@@ -65,13 +67,10 @@ teardown() {
   [ "$cycles" -ge 2 ]
   local per_cycle=$((total / cycles))
   echo "per cycle: $per_cycle" >&3
-  # Measured (this change, isolated bats env): ~44/cycle after the first-stage
-  # fixes below, against ~83/cycle on the unmodified code (skip the mktemp +
-  # `sqlite3 :memory:` json_each/json_extract reformat pass when there is no
-  # real new message_sent row, and cache team_id/member_id/name-encodings/
-  # which partition driver a team uses instead of re-deriving them via a
-  # fresh sqlite3/tr fork on every single cycle). Capped with headroom above
-  # the optimized figure for ordinary variance, and well under the old
-  # baseline so a regression back to it still fails this.
-  [ "$per_cycle" -le 65 ]
+  # Measured (this change, isolated bats env, several runs): roughly
+  # 60-75/cycle after the first-stage fixes above, against roughly 85-95/cycle
+  # on the unmodified code. Capped with headroom above the optimized figure
+  # for ordinary variance, and well under the old baseline so a regression
+  # back to it still fails this.
+  [ "$per_cycle" -le 80 ]
 }
