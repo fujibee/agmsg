@@ -1591,10 +1591,22 @@ JSON
   # The watcher seeds its cursor from the storage tip at startup, so prior
   # messages aren't replayed. Send NEW messages through the facade (storage_send
   # writes the event log the watcher now streams) and wait for several polls.
-  wait_for_file "$TEST_SKILL_DIR/run/watch.t-sid.pid"
+  #
+  # Wait for the readiness sentinel, not the pidfile: watch.sh writes its
+  # pidfile (~line 520) well before it resolves PAIRS (~line 677), and this
+  # is an ACTIVE_NAME watcher, so the sentinel is written only once PAIRS is
+  # resolved (#108) -- the pidfile alone would let `send.sh` race ahead of
+  # subscription resolution (review on #1327).
+  wait_for_file "$(_ready_path myteam bob)"
   bash "$SCRIPTS/send.sh" myteam system alice "new-for-alice" --force >/dev/null
   bash "$SCRIPTS/send.sh" myteam system bob "new-for-bob" --force >/dev/null
-  wait_for_file_contains /tmp/agmsg-as-bob "new-for-bob"
+  # A flat wait, deliberately: this observes that "new-for-alice" is ABSENT
+  # (checked below), and polling for the one message that IS allowed to
+  # arrive would let the watcher be killed the instant it appears -- before a
+  # buggy watcher that wrote the allowed line and was ABOUT to write the
+  # forbidden one gets the chance to (review on #1327). Nothing here is a
+  # condition to poll for.
+  sleep 3
   kill -TERM "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null || true
 
@@ -1691,7 +1703,14 @@ JSON
   # is resolved at launch and not re-evaluated each poll.
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-static "$TEST_PROJECT" claude-code > /tmp/agmsg-static 2>&1 3>&- &
   local pid=$!
-  wait_for_file "$TEST_SKILL_DIR/run/watch.t-static.pid"
+  # A flat wait, deliberately: watch.sh's readiness sentinel is written only
+  # for an ACTIVE_NAME (actas) watcher (#108), and this one has none -- it is
+  # exactly the "default, broad subscription" shape this test is about -- so
+  # there is no file this watcher writes AFTER resolving PAIRS (~line 677)
+  # that a plain watcher's own pidfile write (~line 520) could be swapped
+  # for. Polling the pidfile would let `join.sh bob` below race ahead of the
+  # subscription snapshot this test's premise depends on (review on #1327).
+  sleep 1
 
   # Join `bob` to the same (project, type) after the watcher is running.
   bash "$SCRIPTS/join.sh" myteam bob claude-code "$TEST_PROJECT"
@@ -1701,7 +1720,13 @@ JSON
   bash "$SCRIPTS/send.sh" myteam sys alice "for-alice-static" --force >/dev/null
   bash "$SCRIPTS/send.sh" myteam sys bob   "for-bob-static" --force >/dev/null
 
-  wait_for_file_contains /tmp/agmsg-static "for-alice-static"
+  # A flat wait, deliberately: this observes that "for-bob-static" is ABSENT
+  # (checked below), and polling for the one message that IS allowed to
+  # arrive would let the watcher be killed the instant it appears -- before a
+  # buggy watcher that wrote the allowed line and was ABOUT to write the
+  # forbidden one gets the chance to (review on #1327). Nothing here is a
+  # condition to poll for.
+  sleep 3
   kill -TERM "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null || true
 
