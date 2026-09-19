@@ -50,6 +50,31 @@ setup() {
     printf '%s\n' 'echo "faketool reply: $body"'
   } > "$FAKETOOL_DIR/handle"
   chmod +x "$FAKETOOL_DIR/handle"
+
+  # A second tool whose handle never returns, to exercise the timeout path
+  # (a 1s tool.conf timeout keeps the test fast). setup/SETUP.md are unused by
+  # this scenario but the driver dir needs a valid tool.conf to be joinable.
+  SLOWTOOL_DIR="$SCRIPTS/drivers/ext-tools/slowtool"
+  mkdir -p "$SLOWTOOL_DIR"
+  printf '%s\n' \
+    'name=slowtool' \
+    'timeout=1' \
+    > "$SLOWTOOL_DIR/tool.conf"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf '%s\n' 'case "${1:-}" in'
+    printf '%s\n' '  save) printf "tool=slowtool\n" > "${2:?}"; chmod 600 "${2:?}" ;;'
+    printf '%s\n' '  *) exit 0 ;;'
+    printf '%s\n' 'esac'
+  } > "$SLOWTOOL_DIR/setup"
+  chmod +x "$SLOWTOOL_DIR/setup"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'cat >/dev/null'
+    printf '%s\n' 'sleep 30'
+  } > "$SLOWTOOL_DIR/handle"
+  chmod +x "$SLOWTOOL_DIR/handle"
 }
 
 teardown() { teardown_test_env; }
@@ -105,4 +130,35 @@ teardown() { teardown_test_env; }
 
   # The reply is FROM bot, TO sender — a normal message, not a special channel.
   bash "$SCRIPTS/history.sh" et-team sender | grep -qF "bot → sender: faketool reply: ping-et-1284"
+
+  # (v) A handle that never returns times out on tool.conf's own timeout=,
+  # and the sender gets a named failure reply instead of waiting forever or
+  # getting nothing. Run with NO `timeout` command on PATH at all — the
+  # dispatch script's own watchdog is pure bash and must not depend on it
+  # (review finding).
+  local no_timeout_path="" dir
+  IFS=':' read -ra _path_dirs <<<"$PATH"
+  for dir in "${_path_dirs[@]}"; do
+    [ -x "$dir/timeout" ] && continue
+    no_timeout_path="${no_timeout_path:+$no_timeout_path:}$dir"
+  done
+
+  run bash "$SCRIPTS/ext-tool.sh" setup et-team slowbot slowtool save
+  [ "$status" -eq 0 ]
+
+  run bash "$SCRIPTS/join.sh" et-team slowbot ext-tool --tool slowtool
+  [ "$status" -eq 0 ]
+
+  run env PATH="$no_timeout_path" bash "$SCRIPTS/send.sh" et-team sender slowbot "ping-et-1284-slow"
+  [ "$status" -eq 0 ]
+
+  local j timeout_seen=""
+  for j in $(seq 1 $_WAIT_TICKS); do
+    if bash "$SCRIPTS/history.sh" et-team sender 2>/dev/null | grep -qF "slowbot → sender: slowbot: processing failed (timed out after 1s)"; then
+      timeout_seen=1
+      break
+    fi
+    sleep $_WAIT_INTERVAL
+  done
+  [ -n "$timeout_seen" ]
 }

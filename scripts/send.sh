@@ -163,23 +163,55 @@ if [ -n "${MSG_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
     END;
   " 2>/dev/null)"
   if [ "$TO_TYPE" = ext-tool ]; then
+    # Every branch below that cannot dispatch reports a named failure back to
+    # the sender instead of silently doing nothing: a message to an ext-tool
+    # member that is unconfigured, misconfigured, or names an unknown tool
+    # must not just vanish with the send still reporting success (review
+    # finding).
+    EXT_TOOL_FAIL_REASON=""
+    EXT_TOOL_NAME=""
     EXT_TOOL_CONFIG="$SCRIPT_DIR/../ext-tools/$TEAM/$TO.conf"
-    if [ -f "$EXT_TOOL_CONFIG" ]; then
+    if [ ! -f "$EXT_TOOL_CONFIG" ]; then
+      EXT_TOOL_FAIL_REASON="not configured on this machine"
+    else
       # Same defensive key=value read as ext-tool-dispatch.sh's own timeout=
       # read: never sourced, first match, empty on any miss.
       EXT_TOOL_LINE="$( { grep -E '^[[:space:]]*tool[[:space:]]*=' "$EXT_TOOL_CONFIG" 2>/dev/null || true; } | head -1)"
       EXT_TOOL_NAME="${EXT_TOOL_LINE#*=}"
       EXT_TOOL_NAME="${EXT_TOOL_NAME#"${EXT_TOOL_NAME%%[![:space:]]*}"}"
       EXT_TOOL_NAME="${EXT_TOOL_NAME%"${EXT_TOOL_NAME##*[![:space:]]}"}"
-      if [ -n "$EXT_TOOL_NAME" ]; then
-        mkdir -p "$SCRIPT_DIR/../run"
-        EXT_TOOL_BODY_FILE="$(mktemp)"
-        printf '%s' "$BODY" > "$EXT_TOOL_BODY_FILE"
-        nohup bash "$SCRIPT_DIR/internal/ext-tool-dispatch.sh" \
-          "$TEAM" "$FROM" "$TO" "$EXT_TOOL_NAME" "$MSG_ID" "$EXT_TOOL_BODY_FILE" \
-          >>"$SCRIPT_DIR/../run/ext-tool-dispatch.$TEAM.$TO.log" 2>&1 3>&- 4>&- &
-        disown 2>/dev/null || true
+      if [ -z "$EXT_TOOL_NAME" ]; then
+        EXT_TOOL_FAIL_REASON="its config names no tool"
+      else
+        # tool='s value flows straight into a path
+        # (drivers/ext-tools/$EXT_TOOL_NAME/handle). Unlike a --tool argument
+        # at join time -- which never gets this far unless the directory it
+        # names already existed -- this comes from a file that could have
+        # been hand-edited or corrupted, so it gets its own character-class
+        # check here, not just the existence check below.
+        case "$EXT_TOOL_NAME" in
+          ''|*[!A-Za-z0-9_-]*)
+            EXT_TOOL_FAIL_REASON="its config names an invalid tool '$EXT_TOOL_NAME'"
+            ;;
+          *)
+            if [ ! -x "$SCRIPT_DIR/drivers/ext-tools/$EXT_TOOL_NAME/handle" ]; then
+              EXT_TOOL_FAIL_REASON="unknown tool '$EXT_TOOL_NAME'"
+            fi
+            ;;
+        esac
       fi
+    fi
+
+    if [ -n "$EXT_TOOL_FAIL_REASON" ]; then
+      storage_send "$TEAM" "$TO" "$FROM" "$TO: processing failed ($EXT_TOOL_FAIL_REASON)" >/dev/null 2>&1 || true
+    else
+      mkdir -p "$SCRIPT_DIR/../run"
+      EXT_TOOL_BODY_FILE="$(mktemp)"
+      printf '%s' "$BODY" > "$EXT_TOOL_BODY_FILE"
+      nohup bash "$SCRIPT_DIR/internal/ext-tool-dispatch.sh" \
+        "$TEAM" "$FROM" "$TO" "$EXT_TOOL_NAME" "$MSG_ID" "$EXT_TOOL_BODY_FILE" \
+        >>"$SCRIPT_DIR/../run/ext-tool-dispatch.$TEAM.$TO.log" 2>&1 3>&- 4>&- &
+      disown 2>/dev/null || true
     fi
   fi
 fi

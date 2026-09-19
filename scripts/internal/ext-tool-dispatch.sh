@@ -76,19 +76,39 @@ fi
 
 STDOUT_FILE="$(mktemp)"
 STDERR_FILE="$(mktemp)"
-trap 'rm -f "$STDOUT_FILE" "$STDERR_FILE"' EXIT INT TERM
+PAYLOAD_FILE="$(mktemp)"
+trap 'rm -f "$STDOUT_FILE" "$STDERR_FILE" "$PAYLOAD_FILE"' EXIT INT TERM
+printf '%s' "$PAYLOAD" > "$PAYLOAD_FILE"
 
+# No external `timeout` dependency: coreutils' timeout is commonly absent on
+# macOS, and running handle without any bound at all on that path silently
+# dropped tool.conf's timeout= entirely -- a hung handle then leaked a
+# process forever and the sender never heard back, either (review finding).
+# Pure bash instead: run handle in the background, poll for it, TERM then
+# KILL it if it is still alive once TIMEOUT seconds have passed.
+"$HANDLE" <"$PAYLOAD_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE" &
+HPID=$!
+TIMED_OUT=0
+WAITED=0
+while kill -0 "$HPID" 2>/dev/null; do
+  if [ "$WAITED" -ge "$TIMEOUT" ]; then
+    TIMED_OUT=1
+    kill -TERM "$HPID" 2>/dev/null || true
+    sleep 0.2
+    if kill -0 "$HPID" 2>/dev/null; then
+      kill -KILL "$HPID" 2>/dev/null || true
+    fi
+    break
+  fi
+  sleep 1
+  WAITED=$((WAITED + 1))
+done
 RC=0
-if command -v timeout >/dev/null 2>&1; then
-  printf '%s' "$PAYLOAD" | timeout "${TIMEOUT}s" "$HANDLE" >"$STDOUT_FILE" 2>"$STDERR_FILE" || RC=$?
-else
-  # No coreutils `timeout` (older macOS without it on PATH): run without one
-  # rather than fail every call — a hung handle then costs this one dispatch,
-  # not correctness, and it never blocks the sender either way (#4 above).
-  printf '%s' "$PAYLOAD" | "$HANDLE" >"$STDOUT_FILE" 2>"$STDERR_FILE" || RC=$?
-fi
+wait "$HPID" 2>/dev/null || RC=$?
 
-if [ "$RC" -ne 0 ]; then
+if [ "$TIMED_OUT" -eq 1 ]; then
+  _reply "$TO: processing failed (timed out after ${TIMEOUT}s)"
+elif [ "$RC" -ne 0 ]; then
   REASON="$(head -1 "$STDERR_FILE" 2>/dev/null)"
   [ -n "$REASON" ] || REASON="exit $RC"
   _reply "$TO: processing failed ($REASON)"
