@@ -287,32 +287,52 @@ teardown() { teardown_test_env; }
   [ "$(stat -c '%a' "$secret_file" 2>/dev/null || stat -f '%Lp' "$secret_file")" = "600" ]
   grep -qF "clip-secret-1284" "$secret_file"
 
-  # When EVERY candidate found on PATH fails, the caller must be told "found
-  # but failed", not "nothing found" -- these were being conflated (review
-  # finding): the function signaled "at least one was tried" through a plain
-  # variable assignment made from inside a `value="$(...)"` command
-  # substitution, which runs in a subshell, so the caller's own copy of that
-  # variable never actually changed. A separate PATH with ONLY the failing
-  # fake pbpaste (no wl-paste fallback this time) reproduces it.
+  # This second scenario checks the OTHER half of the same function: when
+  # NO candidate on PATH works, the caller must be told "found but failed",
+  # not "nothing found" -- these were being conflated (review finding): the
+  # function signaled "at least one was tried" through a plain variable
+  # assignment made from inside a `value="$(...)"` command substitution,
+  # which runs in a subshell, so the caller's own copy of that variable
+  # never actually changed. The "found and it WORKS" half is the scenario
+  # just above (fake pbpaste fails, fake wl-paste succeeds, the secret gets
+  # saved) -- that one is untouched here and must keep passing on its own;
+  # shadowing every candidate below is only about making THIS scenario
+  # (all-fail) reliable, not about changing what counts as success.
   local fail_only_bin="$BATS_TEST_TMPDIR/fail-only-bin"
   mkdir -p "$fail_only_bin"
-  cp "$clip_bin/pbpaste" "$fail_only_bin/pbpaste"
-  # `cp` does not guarantee the source's executable bit survives onto the
-  # copy on every platform/umask combination -- explicit, not inherited from
-  # the source this time (review finding, #1339).
-  chmod +x "$fail_only_bin/pbpaste"
-  # Pin PATH resolution BEFORE running the real command: a fake here that
+  # EVERY candidate _ext_tool_read_clipboard tries (pbpaste wl-paste xclip
+  # xsel powershell.exe powershell) is shadowed here, all failing the same
+  # way -- not just pbpaste. A single fake pbpaste ahead of the REAL $PATH
+  # tail relies on none of the other five names resolving to something that
+  # actually WORKS on whatever machine runs this; on a macos-latest CI
+  # runner one of them apparently does, which silently turned this "found
+  # but every candidate failed" scenario into "clipboard is empty" instead
+  # (review finding, #1339 x2: this recurred even after pbpaste's own
+  # executable bit was fixed, which is what pointed at a DIFFERENT
+  # candidate being the real leak, not pbpaste itself). Shadowing the whole
+  # list removes the guess entirely: whichever name the real environment
+  # would otherwise have answered, this one now answers first, and fails.
+  local bin
+  for bin in pbpaste wl-paste xclip xsel powershell.exe powershell; do
+    cp "$clip_bin/pbpaste" "$fail_only_bin/$bin"
+    # `cp` does not guarantee the source's executable bit survives onto the
+    # copy on every platform/umask combination -- explicit, not inherited
+    # from the source this time (review finding, #1339).
+    chmod +x "$fail_only_bin/$bin"
+  done
+  # Pin PATH resolution BEFORE running the real command: any of these that
   # `command -v` cannot see (not executable, or shadowed for any other
-  # reason) is silently skipped in favor of the REAL system pbpaste, which
-  # then succeeds against the actual clipboard (typically empty on a CI
-  # runner) instead of failing -- turning this into "clipboard is empty"
-  # rather than the "found but failed" case this scenario exists to prove.
-  # This assertion is what pins that down to a clear failure at THIS line,
-  # instead of a confusing one three lines later (review finding, #1339: a
-  # macos-latest CI run hit exactly that confusing failure once).
-  local resolved_pbpaste
-  resolved_pbpaste="$(PATH="$fail_only_bin:$PATH" command -v pbpaste)"
-  [ "$resolved_pbpaste" = "$fail_only_bin/pbpaste" ]
+  # reason) is silently skipped in favor of whatever answers further down
+  # $PATH -- which then succeeds against the actual clipboard (typically
+  # empty on a CI runner) instead of failing, turning this into "clipboard
+  # is empty" rather than the "found but failed" case this scenario exists
+  # to prove. This loop is what pins that down to a clear failure at THIS
+  # point, instead of a confusing one a few lines later.
+  local resolved
+  for bin in pbpaste wl-paste xclip xsel powershell.exe powershell; do
+    resolved="$(PATH="$fail_only_bin:$PATH" command -v "$bin" 2>/dev/null || true)"
+    [ "$resolved" = "$fail_only_bin/$bin" ]
+  done
   run env PATH="$fail_only_bin:$PATH" bash "$SCRIPTS/ext-tool.sh" secret et-team bot2 --from-clipboard
   [ "$status" -eq 1 ]
   [ "$output" = "agmsg: found a clipboard reader on PATH but it failed to read the clipboard." ]
