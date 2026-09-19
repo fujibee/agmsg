@@ -9,16 +9,16 @@ it, read its JSON, and decide what to say next.
 An install named anything other than `agmsg` (e.g. `agmsg-ext`) puts
 everything under that other name instead. You are reading this exact file
 from a real path already — it is `<skill-root>/scripts/drivers/ext-tools/slack/SETUP.md`
-— so derive `<skill-root>` from wherever you actually found it. `<config_path>`
-below is likewise whatever `join` told you it needs, in the message that sent
-you here, never a path you compute from a guessed skill name.
+— so derive `<skill-root>` from wherever you actually found it. `ext-tool.sh`
+below (also under `<skill-root>/scripts/`) resolves and passes the member
+config path itself for every command that needs one; you never compute or
+type that path.
 
 Never ask the user to paste their bot token into the chat, and never run
-`setup save` with a token value you were given directly. The token goes in
-through `bash <skill-root>/scripts/ext-tool.sh secret <team> <name>` (not
-`agmsg ext-tool secret` — there is no such command), which reads it without
-echoing and writes it to a file only you get the *path* to — you only ever
-handle that path.
+`ext-tool.sh setup ... save` with a token value you were given directly.
+The token goes in through `ext-tool.sh secret` (there is no `agmsg ext-tool
+secret` command), which reads it without echoing and writes it to a file
+only you get the *path* to — you only ever handle that path.
 
 ## The five steps
 
@@ -34,21 +34,30 @@ handle that path.
    starting with `xoxb-`.
 
 3. **Save the bot token as a secret.**
-   `secret` reads the token from a real terminal without echoing it, which
-   needs a TTY this session does not have when it is running inside Claude
-   Code's own `!` passthrough. Tell the user to open a separate terminal
-   (not through you) and run:
+   Ask the user to copy the `xoxb-…` token to their system clipboard (from
+   Slack's Install App page), then run this YOURSELF:
+   ```
+   bash <skill-root>/scripts/ext-tool.sh secret <team> <name> --from-clipboard
+   ```
+   This reads `pbpaste`/`wl-paste`/`xclip`/`xsel`/PowerShell's
+   `Get-Clipboard` (whichever exists) and saves the value straight to a
+   0600 file, answering only "Saved. (The value itself is not shown or
+   logged.)" — you never see the token. If there is no clipboard access
+   (a headless environment, or the read fails), fall back to asking the
+   user to run it in a real terminal themselves instead, without
+   `--from-clipboard`:
    ```
    bash <skill-root>/scripts/ext-tool.sh secret <team> <name>
    ```
-   and paste the `xoxb-…` token when prompted. This does not echo the token
-   and does not go through you. It reports a file path back to the user —
-   ask them for that path, and use it as `<key_file>` below. **Never accept
-   a pasted token value here.**
+   which prompts and reads the token without echoing it — this form needs
+   a real TTY, which is why it cannot run through you inside Claude Code's
+   own `!` passthrough. Either way, the command reports a file path back —
+   ask the user for it if they ran the fallback themselves, and use it as
+   `<key_file>` below. **Never accept a pasted token value in chat.**
 
 4. **Verify the token, then pick and verify a channel.**
    ```
-   <skill-root>/scripts/drivers/ext-tools/slack/setup check token <key_file>
+   bash <skill-root>/scripts/ext-tool.sh setup <team> <name> slack check token <key_file>
    ```
    - `{"ok":true,...}` → token works, continue.
    - `{"ok":false,"error":"invalid_auth"}` → the token is wrong or was
@@ -65,7 +74,7 @@ handle that path.
    panel that opens shows the Channel ID at the very bottom (or: right-click
    the channel in the sidebar → "View channel details" → same place). Then:
    ```
-   <skill-root>/scripts/drivers/ext-tools/slack/setup check channel <key_file> <channel_id>
+   bash <skill-root>/scripts/ext-tool.sh setup <team> <name> slack check channel <key_file> <channel_id>
    ```
    - `{"ok":true,"exists":true,"bot_member":true}` → ready.
    - `{"ok":true,"exists":true,"bot_member":false}` → channel is real but the
@@ -78,14 +87,14 @@ handle that path.
 
 5. **Save, then send a real test message.**
    ```
-   <skill-root>/scripts/drivers/ext-tools/slack/setup save <config_path> <key_file> <channel_id>
-   <skill-root>/scripts/drivers/ext-tools/slack/setup test <config_path>
+   bash <skill-root>/scripts/ext-tool.sh setup <team> <name> slack save <key_file> <channel_id>
+   bash <skill-root>/scripts/ext-tool.sh setup <team> <name> slack test
    ```
-   `<config_path>` is whatever `join` told you it needs for this member — do
-   not compute it from a guessed skill root; a differently-named install
-   puts it somewhere else. `test` posts one real message
-   ("agmsg: Slack setup test message.") and reports `{"ok":true}`,
-   `{"ok":true,"permalink":"https://..."}`, or `{"ok":false,"error":"..."}`.
+   `ext-tool.sh` resolves and passes the member config path itself for both
+   of these — you only ever supply `<key_file>` and `<channel_id>`. `test`
+   posts one real message ("agmsg: Slack setup test message.") and reports
+   `{"ok":true}`, `{"ok":true,"permalink":"https://..."}`, or
+   `{"ok":false,"error":"..."}`.
    When a `permalink` comes back, share that link with the user directly
    rather than asking "did it show up?" — it is only there for `setup test`;
    an ordinary send through `handle` stays silent on purpose (a reply would
