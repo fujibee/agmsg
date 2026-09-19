@@ -789,13 +789,13 @@ _seed_role_record() {
 JSON
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-test "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.stop-test.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.stop-test.pid" ]
   run bash "$SCRIPTS/delivery.sh" stop
   [[ "$output" =~ "Killed 1 watch" ]]
   [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
   [ ! -f "$TEST_SKILL_DIR/run/watch.stop-test.pid" ]
-  sleep 1
+  wait_for_pid_exit "$watch_pid"
   ! kill -0 "$watch_pid" 2>/dev/null
 }
 
@@ -842,7 +842,7 @@ JSON
   # A live claude-code watcher for this project.
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" cc-sess "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.cc-sess.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.cc-sess.pid" ]
   # Switching a DIFFERENT type's delivery in the SAME project must not touch it.
   run bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT"
@@ -860,12 +860,12 @@ JSON
 JSON
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" cc-sess2 "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.cc-sess2.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.cc-sess2.pid" ]
   run bash "$SCRIPTS/delivery.sh" set off claude-code "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [ ! -f "$TEST_SKILL_DIR/run/watch.cc-sess2.pid" ]
-  sleep 1
+  wait_for_pid_exit "$watch_pid"
   ! kill -0 "$watch_pid" 2>/dev/null
 }
 
@@ -882,7 +882,7 @@ JSON
 JSON
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sp-sess "$sp" claude-code 3>&- &
   local watch_pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.sp-sess.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.sp-sess.pid" ]
   # Another type's set turn in the SAME space-containing project: must NOT kill it.
   run bash "$SCRIPTS/delivery.sh" set turn copilot "$sp"
@@ -893,7 +893,7 @@ JSON
   run bash "$SCRIPTS/delivery.sh" set off claude-code "$sp"
   [ "$status" -eq 0 ]
   [ ! -f "$TEST_SKILL_DIR/run/watch.sp-sess.pid" ]
-  sleep 1
+  wait_for_pid_exit "$watch_pid"
   ! kill -0 "$watch_pid" 2>/dev/null
 }
 
@@ -908,10 +908,10 @@ JSON
 
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sigterm-test "$TEST_PROJECT" claude-code 3>&- &
   local pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.sigterm-test.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.sigterm-test.pid" ]
   kill -TERM "$pid"
-  sleep 1
+  wait_for_pid_exit "$pid"
   refute kill -0 "$pid" 2>/dev/null
   [ ! -f "$TEST_SKILL_DIR/run/watch.sigterm-test.pid" ]
 }
@@ -991,7 +991,7 @@ JSON
   [ -f "$pidfile" ]
   prev_p=$(cat "$pidfile")
   kill "$prev_p"
-  sleep 1
+  wait_for_pid_exit "$prev_p"
   ! kill -0 "$prev_p" 2>/dev/null
 }
 
@@ -1128,7 +1128,7 @@ has_session_end() {
     || { echo "the decoy does not look like this install's watch.sh" >&2; return 1; }
   echo "$target_pid" > "$TEST_SKILL_DIR/run/watch.sess-A.pid"
   echo '{"session_id":"sess-A"}' | bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT"
-  sleep 1
+  wait_for_pid_exit "$target_pid"
   refute kill -0 "$target_pid" 2>/dev/null
   [ ! -f "$TEST_SKILL_DIR/run/watch.sess-A.pid" ]
 }
@@ -1591,10 +1591,10 @@ JSON
   # The watcher seeds its cursor from the storage tip at startup, so prior
   # messages aren't replayed. Send NEW messages through the facade (storage_send
   # writes the event log the watcher now streams) and wait for several polls.
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.t-sid.pid"
   bash "$SCRIPTS/send.sh" myteam system alice "new-for-alice" --force >/dev/null
   bash "$SCRIPTS/send.sh" myteam system bob "new-for-bob" --force >/dev/null
-  sleep 3
+  wait_for_file_contains /tmp/agmsg-as-bob "new-for-bob"
   kill -TERM "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null || true
 
@@ -1691,7 +1691,7 @@ JSON
   # is resolved at launch and not re-evaluated each poll.
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-static "$TEST_PROJECT" claude-code > /tmp/agmsg-static 2>&1 3>&- &
   local pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.t-static.pid"
 
   # Join `bob` to the same (project, type) after the watcher is running.
   bash "$SCRIPTS/join.sh" myteam bob claude-code "$TEST_PROJECT"
@@ -1701,7 +1701,7 @@ JSON
   bash "$SCRIPTS/send.sh" myteam sys alice "for-alice-static" --force >/dev/null
   bash "$SCRIPTS/send.sh" myteam sys bob   "for-bob-static" --force >/dev/null
 
-  sleep 3
+  wait_for_file_contains /tmp/agmsg-static "for-alice-static"
   kill -TERM "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null || true
 
@@ -1730,13 +1730,14 @@ JSON
   local pid_a=$!
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sid-b "$proj_b" claude-code 3>&- &
   local pid_b=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.sid-a.pid"
+  wait_for_file "$TEST_SKILL_DIR/run/watch.sid-b.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.sid-a.pid" ]
   [ -f "$TEST_SKILL_DIR/run/watch.sid-b.pid" ]
 
   run bash "$SCRIPTS/delivery.sh" set turn claude-code "$proj_a"
   [ "$status" -eq 0 ]
-  sleep 1
+  wait_for_pid_exit "$pid_a"
 
   # Target project A: watcher killed, pidfile removed.
   refute kill -0 "$pid_a" 2>/dev/null
@@ -1768,11 +1769,12 @@ JSON
   local pid_a=$!
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" off-b "$proj_b" claude-code 3>&- &
   local pid_b=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.off-a.pid"
+  wait_for_file "$TEST_SKILL_DIR/run/watch.off-b.pid"
 
   run bash "$SCRIPTS/delivery.sh" set off claude-code "$proj_a"
   [ "$status" -eq 0 ]
-  sleep 1
+  wait_for_pid_exit "$pid_a"
 
   refute kill -0 "$pid_a" 2>/dev/null
   [ ! -f "$TEST_SKILL_DIR/run/watch.off-a.pid" ]
@@ -1800,11 +1802,13 @@ JSON
   local pid_a=$!
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-b "$proj_b" claude-code 3>&- &
   local pid_b=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.stop-a.pid"
+  wait_for_file "$TEST_SKILL_DIR/run/watch.stop-b.pid"
 
   run bash "$SCRIPTS/delivery.sh" stop
   [[ "$output" =~ "Killed 2 watch" ]]
-  sleep 1
+  wait_for_pid_exit "$pid_a"
+  wait_for_pid_exit "$pid_b"
   refute kill -0 "$pid_a" 2>/dev/null
   refute kill -0 "$pid_b" 2>/dev/null
 
@@ -3256,7 +3260,7 @@ EOF
 JSON
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" hermes-preserve-test "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.hermes-preserve-test.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.hermes-preserve-test.pid" ]
 
   run bash "$SCRIPTS/delivery.sh" set off hermes "$TEST_PROJECT"
