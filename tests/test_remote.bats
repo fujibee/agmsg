@@ -1024,7 +1024,7 @@ _capability_endpoint() {
 
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$public_endpoint" --e2ee testteam
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Connected: team 'testteam' (age-v1 encrypted)."* ]]
+  grep -qF "Connected: team 'testteam' (age-v1 encrypted)." <<<"$output"
 
   # connect waits only for the engine's capabilities marker. The cycle stamp
   # is stronger evidence: it is written only after a complete health,
