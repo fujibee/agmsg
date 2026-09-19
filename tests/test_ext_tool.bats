@@ -122,7 +122,7 @@ teardown() { teardown_test_env; }
   grep -qF 'tool=faketool' "$member_config"
   # 0600, and the secret path stays untouched by `save` (no secret asked for
   # by this fake tool).
-  [ "$(stat -f '%Lp' "$member_config" 2>/dev/null || stat -c '%a' "$member_config")" = "600" ]
+  [ "$(stat -c '%a' "$member_config" 2>/dev/null || stat -f '%Lp' "$member_config")" = "600" ]
 
   run bash "$SCRIPTS/join.sh" et-team bot ext-tool --tool faketool
   [ "$status" -eq 0 ]

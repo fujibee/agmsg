@@ -148,7 +148,12 @@ echo "Sent to $TO in team $TEAM"
 # failure below is reported but never turns a successful send into a failed
 # one -- the message is already saved by this point.
 if [ -n "${MSG_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
-  TO_SQL=${TO//\'/\'\'}
+  # Quote held in a variable, not written inline in the pattern (#897): a
+  # literal \' replacement disagrees between bash 3.2 (keeps the backslash,
+  # doubling into \'\') and bash 4+ (doubles into ''), and this scope has no
+  # $q from _agmsg_roster_check's own local above to reuse.
+  q="'"
+  TO_SQL=${TO//$q/$q$q}
   TO_TYPE="$(agmsg_sqlite_mem "
     WITH raw(json) AS (SELECT CAST(readfile('$(agmsg_sql_readfile_path "$TEAM_CONFIG")') AS TEXT)),
     cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),

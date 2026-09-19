@@ -143,7 +143,7 @@ printf '%s' "$PAYLOAD" > "$PAYLOAD_FILE"
 # finding: this actually happened, on every fast call, not a theoretical
 # race).
 set -m
-"$HANDLE" <"$PAYLOAD_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE" &
+"$HANDLE" <"$PAYLOAD_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE" 3>&- 4>&- &
 HPID=$!
 set +m
 
@@ -155,7 +155,7 @@ set +m
     sleep 0.2
     kill -KILL -- "-$HPID" 2>/dev/null || true
   fi
-) &
+) 3>&- 4>&- &
 KILLER_PID=$!
 
 RC=0
