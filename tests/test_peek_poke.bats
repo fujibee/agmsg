@@ -77,6 +77,45 @@ EOF
   export PATH="$FAKEBIN:$PATH"
 }
 
+# #1321: poke's own input-box check now peeks before typing. These delivery
+# tests are about the SUBMISSION mechanism (argv shape, body escaping), not
+# about the box-emptiness check itself (that has its own dedicated test
+# below) -- so their fake terminals must present a genuinely empty Claude
+# Code box (the same measured shape: a rule line, "❯", a rule line), or the
+# check correctly refuses generic placeholder text it was never designed to
+# read. Loosening the check to accept arbitrary fake output would be the
+# wrong fix (review, #1321) -- these fixtures are shaped to the real box
+# instead.
+_install_fake_tmux_empty_box() {
+  local rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''tmux'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf 'case "$1" in\n'
+    printf "  capture-pane) printf '%%s\\\\n' '%s testteam-alice ─' '❯' '%s' ;;\n" "$rule" "$rule"
+    printf 'esac\n'
+    printf 'exit 0\n'
+  } > "$FAKEBIN/tmux"
+  chmod +x "$FAKEBIN/tmux"
+  export PATH="$FAKEBIN:$PATH"
+}
+
+_install_fake_herdr_empty_box() {
+  local rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
+    printf "  printf '%%s\\\\n' '%s testteam-alice ─' '❯' '%s'\n" "$rule" "$rule"
+    printf 'fi\n'
+    printf 'exit 0\n'
+  } > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 _install_fake_osascript() {
   cat > "$FAKEBIN/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -270,17 +309,21 @@ EOF
 # --- poke ----------------------------------------------------------------
 
 @test "poke: tmux text and Enter arrive in SEPARATE bursts, arrow in the second (#619)" {
-  _install_fake_tmux
+  _install_fake_tmux_empty_box
   _write_record "tmux:%5"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello there"
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via tmux"
-  # Exactly TWO tmux invocations: a merged single burst (the #619 regression)
-  # or a third stray call both change this count.
-  [ "$(grep -c '^tmux ' "$ARGV_LOG")" -eq 2 ]
-  local first second
-  first="$(sed -n '1p' "$ARGV_LOG")"
-  second="$(sed -n '2p' "$ARGV_LOG")"
+  # Exactly THREE tmux invocations: the #1321 input-box peek (capture-pane),
+  # then the #619 two-burst submission. A merged single send-keys burst (the
+  # #619 regression), a missing peek, or a fourth stray call all change this
+  # count.
+  [ "$(grep -c '^tmux ' "$ARGV_LOG")" -eq 3 ]
+  local peek first second
+  peek="$(sed -n '1p' "$ARGV_LOG")"
+  first="$(sed -n '2p' "$ARGV_LOG")"
+  second="$(sed -n '3p' "$ARGV_LOG")"
+  [ "$peek" = 'tmux [capture-pane] [-p] [-t] [%5]' ]
   # Burst 1 is the literal text and carries NO Enter — the equality is what
   # goes red if the Enter ever rejoins the text burst (an Enter appended to
   # this line makes the string differ).
@@ -290,12 +333,15 @@ EOF
 }
 
 @test "poke: herdr submits in ONE call (agent prompt) with no Enter dance" {
-  _install_fake_herdr
+  _install_fake_herdr_empty_box
   _write_record "herdr:wC:p4"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via herdr"
-  [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 1 ]
+  # Two herdr invocations: the #1321 input-box peek (pane read), then the
+  # single agent-prompt submission call.
+  [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 2 ]
+  grep -q '^herdr \[pane\] \[read\] \[wC:p4\] \[--source\] \[visible\]$' "$ARGV_LOG"
   # The inner ':' of the herdr pane id must survive the record round-trip.
   grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
   # No synthesized keystrokes: submission is agent prompt's own.
@@ -330,7 +376,7 @@ EOF
 }
 
 @test "poke: --body-file delivers a shell-hostile body verbatim (#507's class)" {
-  _install_fake_herdr
+  _install_fake_herdr_empty_box
   _write_record "herdr:wC:p4"
   # Backtick, $( ), quotes, $VAR — none of it may execute or change: the body
   # never crosses the caller's shell. Equality against the argv line is the
@@ -339,12 +385,13 @@ EOF
   run bash "$SCRIPTS/poke.sh" testteam alice --body-file "$TEST_SKILL_DIR/body.txt"
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via herdr"
-  [ "$(sed -n '1p' "$ARGV_LOG")" = 'herdr [agent] [prompt] [wC:p4] [check `whoami` and $(hostname) plus "quotes" and $HOME here]' ]
-  [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 1 ]
+  # Line 1 is the #1321 input-box peek; the submission is line 2.
+  [ "$(sed -n '2p' "$ARGV_LOG")" = 'herdr [agent] [prompt] [wC:p4] [check `whoami` and $(hostname) plus "quotes" and $HOME here]' ]
+  [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 2 ]
 }
 
 @test "poke: --body - reads stdin; a missing file and an empty body refuse before any terminal runs" {
-  _install_fake_tmux
+  _install_fake_tmux_empty_box
   _write_record "tmux:%5"
   printf 'from stdin' | { run bash "$SCRIPTS/poke.sh" testteam alice --body -; \
     [ "$status" -eq 0 ]; }
