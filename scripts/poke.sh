@@ -163,19 +163,36 @@ ATTEMPT=0
 while :; do
   RC=0
   if [ -n "$INPUT_MARKER" ]; then
-    SCREEN=""
-    if SCREEN="$(terminal_peek "$BARE_ID" 2>/dev/null)"; then
+    SCREEN="" PEEK_RC=0
+    # No 2>/dev/null here (unlike before): on failure this is terminal_peek's
+    # own diagnosis, not an "input in progress" refusal, and it must reach
+    # the operator verbatim -- the same message terminal_poke would have
+    # printed for the same underlying cause (#1321 review round 2).
+    SCREEN="$(terminal_peek "$BARE_ID")" || PEEK_RC=$?
+    if [ "$PEEK_RC" -ne 0 ]; then
+      # The read itself failed for a driver-level reason (unreachable,
+      # confirmed gone, unsupported, ...). Return it unchanged instead of
+      # collapsing every peek failure into 14.
+      RC="$PEEK_RC"
+    elif [ -n "$SCREEN" ]; then
       agmsg_input_box_empty "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN" || RC=14
-    else
-      # Could not even read the screen -- fail toward NOT typing rather than
-      # invent a second refusal reason nothing asked for; see input-box.sh.
-      RC=14
     fi
+    # else: the read succeeded but the screen was empty -- there is no live
+    # agent UI on screen to hold a draft (a real live pane always draws
+    # something), so this check has nothing to protect. Fall through and let
+    # terminal_poke's own attempt (and its own exit code, e.g. 12 for "no
+    # live agent to receive") decide, rather than mask it behind 14 (the
+    # documented peek/poke asymmetry: reading a pane can succeed where
+    # submitting to it cannot).
   fi
   if [ "$RC" -eq 0 ]; then
     terminal_poke "$BARE_ID" "$TEXT" >/dev/null || RC=$?
     break
   fi
+  # Retries exist to wait out a draft being typed (RC=14) — a driver-level
+  # failure propagated above, or from terminal_poke's own attempt, would not
+  # be fixed by waiting and must not be retried.
+  [ "$RC" -eq 14 ] || break
   [ "$ATTEMPT" -lt "$RETRIES" ] || break
   ATTEMPT=$((ATTEMPT + 1))
   if [ "$BACKOFF" = exponential ]; then
