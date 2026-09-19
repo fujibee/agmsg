@@ -63,10 +63,11 @@ _slack_call_failure_json() {   # [<extra-object-json>]
 
 cmd_check_token() {
   local key_file="${1:?Usage: setup check token <key_file>}" token out_file ok
-  token="$(_slack_read_token "$key_file")" || {
-    printf '{"ok":false,"error":"key file not readable or empty: %s"}\n' "$key_file"
+  _slack_read_token "$key_file" || {
+    jq -cn --arg err "$_SLACK_TOKEN_ERROR" '{ok: false, error: $err}'
     return 1
   }
+  token="$_SLACK_TOKEN"
   out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-setup.XXXXXX")"
   if ! _slack_api_call "$token" POST auth.test "$out_file" '{}'; then
     _slack_call_failure_json
@@ -93,10 +94,11 @@ cmd_check_token() {
 cmd_check_channel() {
   local key_file="${1:?Usage: setup check channel <key_file> <channel_id>}" \
     channel="${2:?Usage: setup check channel <key_file> <channel_id>}" token out_file ok
-  token="$(_slack_read_token "$key_file")" || {
-    printf '{"ok":false,"error":"key file not readable or empty: %s"}\n' "$key_file"
+  _slack_read_token "$key_file" || {
+    jq -cn --arg err "$_SLACK_TOKEN_ERROR" '{ok: false, error: $err}'
     return 1
   }
+  token="$_SLACK_TOKEN"
   out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-setup.XXXXXX")"
   if ! _slack_api_call "$token" GET "conversations.info?channel=$(_slack_urlenc "$channel")" "$out_file"; then
     _slack_call_failure_json '{"exists":false}'

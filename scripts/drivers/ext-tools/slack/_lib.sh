@@ -2,9 +2,9 @@
 # Shared helpers for handle and setup. Sourced, not executed; no shebang exec bit.
 #
 # Nothing here prints or logs a token. _slack_read_token is the only function
-# that ever holds one in a variable, and its one caller passes it straight to
-# curl's Authorization header -- never to echo, never to a file this library
-# writes.
+# that ever holds one in a variable ($_SLACK_TOKEN); every caller passes it
+# straight to _slack_api_call's Authorization header -- never to echo, never
+# to a file this library writes.
 
 # Read a single key from a member config file (the same key=value shape as
 # type.conf, read the same way: never sourced, so a config file cannot run
@@ -24,24 +24,68 @@ _slack_api_base() {
   printf '%s' "${AGMSG_SLACK_API_BASE:-https://slack.com/api}"
 }
 
-# Read the bot token from <key_file>. Never echoed by any caller; a missing or
-# unreadable file, or one that is empty after trimming, is reported by NAME
-# ("key file ... not readable") rather than by printing what was in it.
+# A real Slack bot token is one line, starts with xoxb-, and after that uses
+# only [A-Za-z0-9-] (dash-separated numeric/base62 segments). Checked before
+# a token is ever embedded in a curl -K config line, because a config file
+# is LINE-based: an embedded newline ends a `header = "..."` line right
+# there regardless of quoting, and everything after it is read as a FURTHER
+# config directive -- a corrupt or multi-line key_file could otherwise make
+# this process's own curl call do something other than what this file wrote.
+# _slack_curl_quote (below) closes the quoting half of that (a literal " or
+# \); this closes the half quoting cannot touch.
+_slack_token_looks_valid() {   # <token>
+  case "$1" in
+    *$'\n'*) return 1 ;;
+  esac
+  case "$1" in
+    xoxb-*) : ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Read the bot token from <key_file> into $_SLACK_TOKEN -- NOT printed to
+# stdout, on purpose: a caller that captured it via `x="$(_slack_read_token
+# ...)"` would run this in a command-substitution SUBSHELL, where an error
+# side-channel like $_SLACK_TOKEN_ERROR set inside it never reaches the
+# caller's own shell (measured: `set -u` then reports it unbound). Call this
+# as a plain statement and read $_SLACK_TOKEN/$_SLACK_TOKEN_ERROR after, the
+# same shape _slack_api_call's $_SLACK_HTTP_CODE/$_SLACK_CURL_DIAG use.
+#
+# On any failure -- missing/unreadable file, empty content, or a value that
+# does not pass _slack_token_looks_valid -- sets $_SLACK_TOKEN_ERROR to one
+# line naming WHY (never the token itself) and returns non-zero.
 _slack_read_token() {   # <key_file>
   local key_file="$1" token
-  [ -n "$key_file" ] || return 1
-  [ -r "$key_file" ] || return 1
-  token="$(cat "$key_file" 2>/dev/null)" || return 1
-  token="${token%$'\n'}"
-  [ -n "$token" ] || return 1
-  printf '%s' "$token"
+  _SLACK_TOKEN=""
+  _SLACK_TOKEN_ERROR=""
+  if [ -z "$key_file" ] || [ ! -r "$key_file" ]; then
+    _SLACK_TOKEN_ERROR="key file not readable: $key_file"
+    return 1
+  fi
+  token="$(cat "$key_file" 2>/dev/null)" || {
+    _SLACK_TOKEN_ERROR="key file not readable: $key_file"
+    return 1
+  }
+  if [ -z "$token" ]; then
+    _SLACK_TOKEN_ERROR="key file is empty: $key_file"
+    return 1
+  fi
+  if ! _slack_token_looks_valid "$token"; then
+    _SLACK_TOKEN_ERROR="key file does not hold a single-line Slack bot token (expected xoxb-...): $key_file"
+    return 1
+  fi
+  _SLACK_TOKEN="$token"
 }
 
 # Escape \ and " for embedding inside a curl -K config's double-quoted value
-# (mirrors scripts/remote.sh's _remote_curl_quote, same reason: an unescaped
-# " in a token or channel value this file does not control could close the
-# quoted value early and let the rest of the line be read as a further
-# config directive).
+# (mirrors scripts/remote.sh's _remote_curl_quote). Handles the QUOTING half
+# of keeping a value from escaping its config line; a literal newline is the
+# other half, and that is _slack_token_looks_valid's job (above) -- this
+# function alone does not make an arbitrary value safe to embed.
 _slack_curl_quote() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
