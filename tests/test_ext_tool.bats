@@ -172,15 +172,21 @@ teardown() { teardown_test_env; }
 
   # (v) A handle that never returns times out on tool.conf's own timeout=,
   # and the sender gets a named failure reply instead of waiting forever or
-  # getting nothing. Run with NO `timeout` command on PATH at all — the
-  # dispatch script's own watchdog is pure bash and must not depend on it
-  # (review finding).
-  local no_timeout_path="" dir
-  IFS=':' read -ra _path_dirs <<<"$PATH"
-  for dir in "${_path_dirs[@]}"; do
-    [ -x "$dir/timeout" ] && continue
-    no_timeout_path="${no_timeout_path:+$no_timeout_path:}$dir"
-  done
+  # getting nothing. The dispatch script's own watchdog is pure bash and
+  # must not depend on the `timeout` command at all. A fake `timeout` ahead
+  # of the real one on PATH, that fails loudly (and leaves a mark) if ever
+  # actually invoked, proves this directly -- stripping timeout's WHOLE
+  # PATH directory (an earlier version did this) removed bash itself too on
+  # Ubuntu, where /usr/bin holds both (review finding: "env: 'bash': No such
+  # file or directory").
+  local fake_bin="$BATS_TEST_TMPDIR/no-timeout-bin"
+  mkdir -p "$fake_bin"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' "touch '$fake_bin/timeout.invoked'"
+    printf '%s\n' 'exit 1'
+  } > "$fake_bin/timeout"
+  chmod +x "$fake_bin/timeout"
 
   run bash "$SCRIPTS/ext-tool.sh" setup et-team slowbot slowtool save
   [ "$status" -eq 0 ]
@@ -188,7 +194,7 @@ teardown() { teardown_test_env; }
   run bash "$SCRIPTS/join.sh" et-team slowbot ext-tool --tool slowtool
   [ "$status" -eq 0 ]
 
-  run env PATH="$no_timeout_path" bash "$SCRIPTS/send.sh" et-team sender slowbot "ping-et-1284-slow"
+  run env PATH="$fake_bin:$PATH" bash "$SCRIPTS/send.sh" et-team sender slowbot "ping-et-1284-slow"
   [ "$status" -eq 0 ]
 
   local j timeout_seen=""
@@ -206,5 +212,9 @@ teardown() { teardown_test_env; }
   # the immediate pid orphaned this kind of descendant).
   run cat "$SLOWTOOL_DIR/sleep.pid"
   [ "$status" -eq 0 ]
-  ! kill -0 "$output" 2>/dev/null
+  refute kill -0 "$output" 2>/dev/null
+
+  # Positive evidence, not just an inference from the test having passed:
+  # the fake `timeout` was genuinely never invoked.
+  [ ! -f "$fake_bin/timeout.invoked" ]
 }
