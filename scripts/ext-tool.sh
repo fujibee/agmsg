@@ -237,7 +237,11 @@ cmd_secret() {
   dest="$SKILL_DIR/ext-tools/$team/$name.secret"
   _ext_tool_write_atomic "$dest" "$value"
   unset value
-  echo "Saved. (The value itself is not shown or logged.)"
+  # The path is not a secret; the LLM at the calling seat needs it verbatim
+  # as the key_file argument to the next setup check/save step, and SETUP.md
+  # tells it not to construct that path itself (dogfood finding: the plain
+  # "Saved." left it with no way to know the path at all).
+  echo "Saved to $dest. (The value itself is not shown or logged.)"
 }
 
 case "${1:-}" in

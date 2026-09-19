@@ -256,14 +256,15 @@ teardown() { teardown_test_env; }
   chmod +x "$clip_bin/pbpaste"
   printf '%s\n' '#!/usr/bin/env bash' 'printf %s "clip-secret-1284"' > "$clip_bin/wl-paste"
   chmod +x "$clip_bin/wl-paste"
+  local secret_file="$TEST_SKILL_DIR/ext-tools/et-team/bot.secret"
   run env PATH="$clip_bin:$PATH" bash "$SCRIPTS/ext-tool.sh" secret et-team bot --from-clipboard
   [ "$status" -eq 0 ]
   # Exact match, not just a substring grep: pins the ENTIRE output to this
   # one line, so a leaked stderr fragment from a failed candidate (or
   # anything else unexpected) would fail this assertion, not just get missed
-  # by a loose grep.
-  [ "$output" = "Saved. (The value itself is not shown or logged.)" ]
-  local secret_file="$TEST_SKILL_DIR/ext-tools/et-team/bot.secret"
+  # by a loose grep. The path is expected in the line (dogfood finding: the
+  # calling LLM needs it verbatim as the next step's key_file argument).
+  [ "$output" = "Saved to $secret_file. (The value itself is not shown or logged.)" ]
   [ -f "$secret_file" ]
   [ "$(stat -c '%a' "$secret_file" 2>/dev/null || stat -f '%Lp' "$secret_file")" = "600" ]
   grep -qF "clip-secret-1284" "$secret_file"
@@ -277,7 +278,7 @@ teardown() { teardown_test_env; }
   # fake pbpaste (no wl-paste fallback this time) reproduces it.
   local fail_only_bin="$BATS_TEST_TMPDIR/fail-only-bin"
   mkdir -p "$fail_only_bin"
-  cp "$fake_bin/pbpaste" "$fail_only_bin/pbpaste"
+  cp "$clip_bin/pbpaste" "$fail_only_bin/pbpaste"
   run env PATH="$fail_only_bin:$PATH" bash "$SCRIPTS/ext-tool.sh" secret et-team bot2 --from-clipboard
   [ "$status" -eq 1 ]
   [ "$output" = "agmsg: found a clipboard reader on PATH but it failed to read the clipboard." ]
