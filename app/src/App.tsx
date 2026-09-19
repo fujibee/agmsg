@@ -184,7 +184,7 @@ export function joinDroppedPaths(paths: string[]): string | null {
 // Which pane, if any, a dropped file should land in when it didn't land on
 // any specific pane cell (dropped on the sidebar, tab bar, Team Room, ...)
 // — the active tab's actually-focused pane if it has one, else its first
-// pane, per the spec ("特定できない場合はactiveへ" — a follow-up
+// pane, per the spec ("when it cannot be determined, fall back to active" — a follow-up
 // live-testing feedback: prefer the focused pane specifically, not just
 // whichever leaf happens to be first in the tree). A pane found directly
 // under the cursor is always already in the active window (inactive

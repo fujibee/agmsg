@@ -591,7 +591,12 @@ prepare_push() {
 # failure mode is silent (zero candidates, no error), so it is pinned here.
 _seed_legacy_history() {
   local db; db=$(agmsg_db_path demo)
+  # An old store also predates the schema-revision stamp (#1001): reset it,
+  # or the simulated pre-cursor store would fast-path around the adoption
+  # this seeder exists to exercise. No product path deletes the marker; only
+  # this simulation does.
   agmsg_sqlite "$db" "
+    PRAGMA user_version=0;
     DELETE FROM storage_metadata WHERE key='read_cursor_v1';
     INSERT INTO messages(team,from_agent,to_agent,body,created_at) VALUES
       ('demo','alice','bob','legacy one','2026-01-01T00:00:00Z'),
@@ -1264,4 +1269,252 @@ _longest_argv() {
   sqlite3 "$db" "DROP INDEX sync_messages_server_seq;"
   prepare_push >/dev/null
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='sync_messages_server_seq';" | tr -d '\r')" -eq 1 ]
+}
+
+# Piped `agmsg_sqlite` sites under <root>/scripts with no warm within the two
+# lines above the pipe, one "file:line" per line. Comment lines are not sites:
+# the rule is about processes, and a comment starts none. A whole file is never
+# excluded -- a real pipeline added to any file must be seen (review finding on
+# #904: the earlier file-level skip would have hidden one).
+_462_unwarmed_under() {
+  local root="$1" file n line stripped prev
+  while IFS=: read -r file n line; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    case "$stripped" in \#*) continue ;; esac
+    prev="$(sed -n "$((n > 2 ? n - 2 : 1)),$((n))p" "$root/$file")"
+    case "$prev" in *agmsg_sqlite_warm*) continue ;; esac
+    printf '%s:%s\n' "$file" "$n"
+  done < <(cd "$root" && grep -rn '| agmsg_sqlite' scripts/)
+}
+
+# Executable (non-comment) piped sites under <root>/scripts: the population
+# the scan judges, counted the same way the scan reads them.
+_462_piped_sites_under() {
+  local root="$1" file n line stripped count=0
+  while IFS=: read -r file n line; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    case "$stripped" in \#*) continue ;; esac
+    count=$((count + 1))
+  done < <(cd "$root" && grep -rn '| agmsg_sqlite' scripts/)
+  printf '%s\n' "$count"
+}
+
+@test "storage: every piped agmsg_sqlite warms the escape probe first (#462)" {
+  # THE SET IS DERIVED, NOT LISTED. `agmsg_sqlite` memoises the escape probe so
+  # it costs one sqlite3 process per shell rather than one per call, and the
+  # right-hand side of a pipeline is a subshell: it inherits a memo but cannot
+  # leave one behind. A process whose first database access is piped therefore
+  # probes on every call, forever -- the cost #462 removed. A redirection
+  # (`agmsg_sqlite db < file`) runs in the current shell and is fine.
+  #
+  # Written as a scan rather than as one case per site because the sites move:
+  # three were added the day this was found, by a change that was reviewed and
+  # cleared without anyone noticing the shell rule underneath it. A statement
+  # inside a helper that warms is reached through the helper, so the scan looks
+  # two lines up rather than one.
+  local root unwarmed
+  root="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  unwarmed="$(_462_unwarmed_under "$root")"
+  [ -z "$unwarmed" ] || {
+    printf 'piped agmsg_sqlite with no warm above it:\n%s\n' "$unwarmed"
+    false
+  }
+  # The scan can see something: a positive control on the instrument itself,
+  # counting only executable sites (a comment mentioning the pipe is not one).
+  [ "$(_462_piped_sites_under "$root")" -ge 8 ]
+}
+
+@test "storage: the #462 scan goes red when a helper loses its warm (mutation control)" {
+  # A guard that stays green under the break it exists for is not a guard.
+  # Copy the tree, delete the warm from the stdin helper -- the central path
+  # every driver batch goes through -- and the scan must name that pipe.
+  local root copy target
+  root="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  copy="$BATS_TEST_TMPDIR/scan-mutant"
+  mkdir -p "$copy"
+  cp -R "$root/scripts" "$copy/scripts"
+  target="$copy/scripts/drivers/storage/sqlite.sh"
+  grep -q 'agmsg_sqlite_warm' "$target"
+  # Remove exactly the warm line inside _sqlite_exec_stdin.
+  awk 'BEGIN{inside=0} /^_sqlite_exec_stdin\(\) \{/{inside=1} inside && /agmsg_sqlite_warm/{inside=0; next} /^}/{inside=0} {print}' "$target" > "$target.mutant"
+  mv "$target.mutant" "$target"
+  # The mutation took: one fewer warm in the file.
+  [ "$(grep -c 'agmsg_sqlite_warm' "$target")" -eq "$(( $(grep -c 'agmsg_sqlite_warm' "$root/scripts/drivers/storage/sqlite.sh") - 1 ))" ]
+  local unwarmed
+  unwarmed="$(_462_unwarmed_under "$copy")"
+  printf '%s\n' "$unwarmed" | grep -q '^scripts/drivers/storage/sqlite.sh:[0-9][0-9]*$'
+  # And ONLY that site: the mutant differs from the tree in one place.
+  [ "$(printf '%s\n' "$unwarmed" | grep -c .)" -eq 1 ]
+}
+
+# ---- #968: roster sequences and the read frontier ----
+
+_968_apply_messages() {
+  # Apply messages to bob at the given server sequences and mark them all read.
+  local page="" i=0 seq last
+  for seq in "$@"; do
+    i=$((i+1))
+    page="${page}$(jq -nc --arg s "$seq" --arg n "$i" '
+      {type:"sync_pull_message",server_seq:$s,
+       id:("550e8400-e29b-41d4-a716-4466554409"+(if ($n|length)==1 then "0"+$n else $n end)),
+       server_received_at:"2026-07-21T06:00:00.000000Z",
+       envelope:{v:1,cipher:"none",key_id:null,blob:"e30="},status:"importable",
+       policy_revision:"0",local_security_revision:"0",
+       projection:{body:("msg "+$n),created_at:"2026-07-21T06:00:00.000000Z",
+                   from_agent:"alice",to_agent:"bob"}}')
+"
+  done
+  last="${!#}"
+  page="${page}{\"type\":\"sync_pull_cursor\",\"next_after\":\"$last\"}"
+  printf '%s\n' "$page" | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  local id
+  for id in $(storage_history demo | jq -r 'select(.to=="bob")|.id'); do
+    storage_read_cursor_consume demo bob "$(storage_watch_tip demo:bob)" "$id" >/dev/null
+  done
+}
+
+_968_prepare() {
+  # $1 = current_seq, $2 = roster_seqs as a JSON array, or the word none.
+  local roster="$2" context
+  context=$(jq -nc --arg cur "$1" --arg roster "$roster" '
+    {type:"sync_read_context",min_available_seq:"0",current_seq:$cur,local_agents:["bob"],
+     members:[{member_id:"018f3f7e-0000-7000-8000-000000000010",name:"bob"}]}
+    + (if $roster=="none" then {} else {roster_seqs:($roster|fromjson)} end)')
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1
+}
+
+_968_frontier() { printf '%s\n' "$1" | jq -r 'select(.type=="sync_read_frontier")|.server_seq'; }
+_968_exact_count() { printf '%s\n' "$1" | jq -r 'select(.type=="sync_read_exact")|.wire_id' | grep -c . || true; }
+
+@test "read-state: a frontier advances across roster sequences the engine names, and stays pinned when it does not (#968)" {
+  # The reported shape: seq 1 and 2 were member_joined (never messages), the
+  # messages start at 3. Everything is imported and read.
+  _968_apply_messages 3 4 5 6
+  local prepared
+  prepared=$(_968_prepare 6 '["1","2"]')
+  [ "$(_968_frontier "$prepared")" = 6 ]
+  [ "$(_968_exact_count "$prepared")" -eq 0 ]
+  # Without the roster list the check has no evidence for seq 1 and 2, and a
+  # frontier is never advanced on evidence that was not supplied: this is the
+  # pre-#968 behavior, pinned at 0 with every read message shipped as an
+  # exception. Kept as the documented fail-safe direction.
+  prepared=$(_968_prepare 6 none)
+  [ "$(_968_frontier "$prepared")" = 0 ]
+  [ "$(_968_exact_count "$prepared")" -eq 4 ]
+}
+
+@test "read-state: a lost MESSAGE still pins the frontier; the roster list exempts only its own sequences (#968)" {
+  # Seq 4 is a message that never arrived. The roster list says 1 and 2 only.
+  _968_apply_messages 3 5 6
+  local prepared
+  prepared=$(_968_prepare 6 '["1","2"]')
+  [ "$(_968_frontier "$prepared")" = 3 ]
+  # The two read messages past the hole travel as exact exceptions, as before.
+  [ "$(_968_exact_count "$prepared")" -eq 2 ]
+  # The one way this check goes green while something is wrong, named: a
+  # roster list that claims a sequence which was really a message. The journal
+  # is written from the same records the server labelled as roster mutations,
+  # so this needs the label to be wrong first; it is recorded here as the
+  # residual, not hidden.
+  prepared=$(_968_prepare 6 '["1","2","4"]')
+  [ "$(_968_frontier "$prepared")" = 6 ]
+}
+
+@test "read-state: a roster row that IS in quarantine (bootstrap path) is exempt only when the roster list names it (#968)" {
+  # The bootstrap path quarantines roster records and marks them imported
+  # without a message mapping. Imported-and-unmapped is NOT by itself the
+  # exemption: only the roster list is, so a message row that somehow lost its
+  # mapping still reads as a hole.
+  local wire=550e8400-e29b-41d4-a716-446655440921 roster
+  roster=$(jq -nc --arg id "$wire" '
+    {type:"sync_pull_message",server_seq:"1",id:$id,
+     server_received_at:"2026-07-21T05:59:00.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:"e30="},status:"importable",
+     policy_revision:"0",local_security_revision:"0",
+     projection:{kind:"member_joined",mutation_id:"019fb4bb-7948-7520-8c16-ab64753e2012",
+       member_id:"019fb4bb-7948-7ce9-8e4f-61229dc726cf",name:"dana",occurred_at:"2026-07-21T05:59:00.000000Z"}}')
+  printf '%s\n%s\n' "$roster" '{"type":"sync_pull_cursor","next_after":"1"}' |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  local db
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT status FROM sync_quarantine WHERE wire_id='$wire';" | tr -d '\r')" = imported ]
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_messages WHERE wire_id='$wire';" | tr -d '\r')" -eq 0 ]
+  _968_apply_messages 2 3
+  local prepared
+  prepared=$(_968_prepare 3 '["1"]')
+  [ "$(_968_frontier "$prepared")" = 3 ]
+  [ "$(_968_exact_count "$prepared")" -eq 0 ]
+  prepared=$(_968_prepare 3 '[]')
+  [ "$(_968_frontier "$prepared")" = 0 ]
+}
+
+@test "read-state: a malformed roster list is refused, not partially trusted (#968)" {
+  _968_apply_messages 1 2
+  run _968_prepare 2 '["1","x"]'
+  [ "$status" -eq 13 ]
+  run _968_prepare 2 '[1]'
+  [ "$status" -eq 13 ]
+  run _968_prepare 2 '"1"'
+  [ "$status" -eq 13 ]
+}
+
+@test "read-state: the roster list bound is swept on both sides -- 10,000 pass and advance the frontier, 10,001 are refused and it does not move (#968)" {
+  # Messages sit past ten thousand roster sequences; all are read.
+  _968_apply_messages 10001 10002 10003 10004
+  local ten_k prepared db
+  ten_k=$(jq -nc '[range(1;10001) | tostring]')
+  prepared=$(_968_prepare 10004 "$ten_k")
+  # Passing is not the claim -- the frontier landing on the right value is.
+  [ "$(_968_frontier "$prepared")" = 10004 ]
+  [ "$(_968_exact_count "$prepared")" -eq 0 ]
+  # One past the bound: refused, and told apart from every other context
+  # refusal by its own message (the #911 line number would differ as well).
+  run _968_prepare 10004 "$(jq -nc '[range(1;10002) | tostring]')"
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -Fq "roster_seqs is not a list of at most 10000"
+  # And nothing moved: the frontier recorded by the accepted call is still
+  # the one on disk, not a partially trusted one.
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT server_seq FROM sync_read_prepared;" | tr -d '\r')" = 10004 ]
+}
+
+@test "read-state: a roster sequence is validated against the sequence DOMAIN, not just its shape (#968)" {
+  # 9223372036854775808 through 9999999999999999999 are canonical-looking
+  # 19-digit decimals past MAX_SEQUENCE. Handed to the INTEGER PRIMARY KEY
+  # temp table they are refused with a datatype mismatch that takes the whole
+  # read-prepare transaction down -- no 13, no reason (measured in review).
+  # MAX itself is a legal sequence.
+  _968_apply_messages 1 2
+  local prepared
+  prepared=$(_968_prepare 2 '["9223372036854775807"]')
+  [ "$(_968_frontier "$prepared")" = 2 ]
+  run _968_prepare 2 '["9223372036854775808"]'
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -Fq "not a canonical sequence"
+  run _968_prepare 2 '["9999999999999999999"]'
+  [ "$status" -eq 13 ]
+}
+
+@test "read-state: a roster entry with a trailing newline is refused at the shape check, and the frontier does not move (#968)" {
+  # jq's regex engine lets $ match before one trailing newline, so an entry
+  # of "1\n" passed a ^..$ shape test; the line-framed per-entry loop then
+  # validated "1" and the SQL received (1\n), which SQLite accepts as 1 -- a
+  # malformed entry exempting a real sequence (review finding, measured).
+  # The shape test is anchored \A..\z now. Each control proves the frontier
+  # did not move, because the danger here is advancing, not failing.
+  _968_apply_messages 3 4
+  local prepared db
+  prepared=$(_968_prepare 4 '["1","2"]')
+  [ "$(_968_frontier "$prepared")" = 4 ]
+  db=$(agmsg_db_path demo)
+  run _968_prepare 4 "$(jq -nc '["1\n","2"]')"
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -Fq "canonical sequences"
+  [ "$(agmsg_sqlite "$db" "SELECT server_seq FROM sync_read_prepared;" | tr -d '\r')" = 4 ]
+  run _968_prepare 4 "$(jq -nc '["1\n2"]')"
+  [ "$status" -eq 13 ]
+  [ "$(agmsg_sqlite "$db" "SELECT server_seq FROM sync_read_prepared;" | tr -d '\r')" = 4 ]
+  run _968_prepare 4 '[""]'
+  [ "$status" -eq 13 ]
+  [ "$(agmsg_sqlite "$db" "SELECT server_seq FROM sync_read_prepared;" | tr -d '\r')" = 4 ]
 }

@@ -94,15 +94,24 @@ agmsg_codex_shim_path_note() {
 # WebSocket would stall on each one. The timeouts are deliberately far below the
 # bridge's own defaults -- this is a status line, not a delivery path, and a slow
 # answer here is worth less than a prompt one.
+# #1254: a project can now have several live app-servers, one per seat.
+# Enumerate every seat record for THIS project (matched by the record's own
+# project= field, not by any path derived from the project) and probe each
+# live one, aggregating the loaded-thread ids across all of them -- a thread
+# still belongs to at most one seat's server, so the union is the same
+# "what's loaded for this project" answer the old single-server probe gave.
 agmsg_codex_probe_loaded_count() {
-  local project="$1" port_file port node_bin
+  local project="$1" project_hash node_bin
   [ -n "${_AGMSG_CODEX_LOADED_PROBED:-}" ] && return 0
   _AGMSG_CODEX_LOADED_PROBED=1
   _AGMSG_CODEX_LOADED_COUNT=""
   _AGMSG_CODEX_LOADED_LIST=""
-  port_file="$RUN_DIR/codex-app-server.$(printf '%s' "$project" | agmsg_sha1 2>/dev/null).port"
-  port="$(cat "$port_file" 2>/dev/null || true)"
-  [ -n "$port" ] || return 0
+  if ! command -v _agmsg_codex_seat_record_read >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/drivers/types/codex/_seat-key.sh"
+  fi
+  project_hash="$(printf '%s' "$project" | agmsg_sha1 2>/dev/null)"
+  [ -n "$project_hash" ] || return 0
   node_bin="$(agmsg_resolve_node 2>/dev/null || true)"
   [ -n "$node_bin" ] || return 0
   { command -v "$node_bin" >/dev/null 2>&1 || [ -x "$node_bin" ]; } || return 0
@@ -110,10 +119,22 @@ agmsg_codex_probe_loaded_count() {
   # telling a missing seat apart from someone else's seat needs the ids
   # themselves, and re-asking would cost a second connect and could disagree
   # with the first.
-  _AGMSG_CODEX_LOADED_LIST="$("$node_bin" "$SCRIPT_DIR/drivers/types/codex/codex-bridge.js" \
-    --app-server "ws://127.0.0.1:$port" --print-loaded-threads \
-    --connect-timeout-ms "${AGMSG_CODEX_STATUS_PROBE_TIMEOUT_MS:-1500}" \
-    --request-timeout-ms "${AGMSG_CODEX_STATUS_PROBE_TIMEOUT_MS:-1500}" 2>/dev/null | grep . || true)"
+  local rec any=0 aggregated="" this_list
+  for rec in "$RUN_DIR"/codex-app-server.*.record; do
+    [ -f "$rec" ] || continue
+    _agmsg_codex_seat_record_read "$rec" || continue
+    [ "$SEAT_REC_PROJECT" = "$project_hash" ] || continue
+    _agmsg_pid_alive_local "$SEAT_REC_PID" 2>/dev/null || continue
+    any=1
+    this_list="$("$node_bin" "$SCRIPT_DIR/drivers/types/codex/codex-bridge.js" \
+      --app-server "ws://127.0.0.1:$SEAT_REC_PORT" --print-loaded-threads \
+      --connect-timeout-ms "${AGMSG_CODEX_STATUS_PROBE_TIMEOUT_MS:-1500}" \
+      --request-timeout-ms "${AGMSG_CODEX_STATUS_PROBE_TIMEOUT_MS:-1500}" 2>/dev/null | grep . || true)"
+    aggregated="$aggregated$this_list
+"
+  done
+  [ "$any" -eq 1 ] || return 0
+  _AGMSG_CODEX_LOADED_LIST="$(printf '%s' "$aggregated" | grep . | sort -u || true)"
   _AGMSG_CODEX_LOADED_COUNT="$(printf '%s' "$_AGMSG_CODEX_LOADED_LIST" | grep -c . || true)"
   return 0
 }

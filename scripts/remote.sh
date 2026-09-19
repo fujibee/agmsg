@@ -22,6 +22,7 @@ set -euo pipefail
 #     onboarding and the courier `fetch` path use --bundle/--confirm-digest.
 #   remote.sh status [<team>] [--json]
 #   remote.sh sync start <team>
+#   remote.sh sync restart <team>
 #   remote.sh disconnect <team>
 #   remote.sh forget [--yes] <team>
 #
@@ -424,6 +425,72 @@ cmd_doctor() {
 
 # --- shared HTTP helpers (B1: never put secrets in curl's own argv/ps) ---
 
+# Same rule remote-sync.mjs's clientVersion() applies, so the two report the
+# same value from the same install: line 1 of SKILL_DIR/VERSION, printable
+# ASCII only, capped at 64 characters, "unknown" when it cannot be produced.
+# Computed once per process and cached -- pull calls through here twice in one
+# run (capabilities, then members). tr under LC_ALL=C strips on raw byte
+# value, not a locale-dependent character class, for the same reason
+# cmd_sync_start's digit-by-digit check avoids a bracket expression elsewhere
+# in this file.
+_REMOTE_CLIENT_VERSION=""
+_remote_client_version() {
+  if [ -n "$_REMOTE_CLIENT_VERSION" ]; then
+    printf '%s' "$_REMOTE_CLIENT_VERSION"
+    return
+  fi
+  local line="" sanitized=""
+  if [ -f "$SKILL_DIR/VERSION" ]; then
+    # read's own exit status is not the signal here: it returns 1 whenever the
+    # line it read had no trailing newline (a file written without one is
+    # still one readable line), and by then it has already set $line -- so
+    # `|| line=""` would discard a good read on exactly that shape. `|| true`
+    # only stops that nonzero status from tripping this file's `set -e`; it
+    # does not touch $line. Only the variable's own default ("", from the
+    # local above) speaks for a read that genuinely produced nothing, e.g.
+    # the file could not be opened.
+    IFS= read -r line < "$SKILL_DIR/VERSION" 2>/dev/null || true
+  fi
+  # sed, not tr: this function's dependency footprint is curated (see this
+  # file's own test sandboxes), and sed is already a dependency of the curl
+  # helpers below (_remote_curl_quote) -- no reason to add a second tool for
+  # the same class of job. LC_ALL=C is set on BOTH commands, not just the
+  # first: an env-var prefix binds to the one command it precedes, so
+  # `LC_ALL=C printf ... | sed ...` left sed running in the caller's own
+  # locale. Under a UTF-8 locale, an invalid byte in VERSION (this line is
+  # read from a file this process does not control) can then make a
+  # multibyte-aware sed treat the bracket expression as a character class
+  # instead of a byte range and fail outright ("illegal byte sequence") with
+  # output on stderr, rather than simply not matching that byte -- the
+  # opposite of "drop what does not belong in a header value". Under
+  # LC_ALL=C on both, matching is byte-oriented and that failure mode does
+  # not arise; stderr is also discarded regardless, so a version string
+  # stays silent on this path the same way the JS side's try/catch is.
+  # `|| sanitized=""`, not left unguarded: the substitution runs inside a
+  # command substitution, which does not inherit this file's errexit on its
+  # own, so a nonzero sed here would otherwise leave whatever partial output
+  # it printed before failing sitting in $sanitized -- truncated to 64
+  # characters and sent as though it were a complete, validated value. Any
+  # failure of the pipeline now discards that partial output outright and
+  # falls through to the "unknown" fallback below instead.
+  sanitized="$(LC_ALL=C printf '%s' "$line" | LC_ALL=C sed 's/[^ -~]//g' 2>/dev/null)" || sanitized=""
+  sanitized="${sanitized:0:64}"
+  sanitized="${sanitized#"${sanitized%%[![:space:]]*}"}"
+  sanitized="${sanitized%"${sanitized##*[![:space:]]}"}"
+  _REMOTE_CLIENT_VERSION="${sanitized:-unknown}"
+  printf '%s' "$_REMOTE_CLIENT_VERSION"
+}
+
+# Escapes \ and " for embedding inside a curl -K config's double-quoted
+# value. "printable ASCII" above still admits both characters, and curl's
+# config parser treats a backslash as an escape there (see _remote_curl_path
+# below) -- so an unescaped " in a value that ultimately comes from a file
+# outside this script's control (VERSION) could close the quoted value early
+# and let the rest of the line be read as a further config directive.
+_remote_curl_quote() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
 # _remote_curl_path <path> — render <path> for embedding INSIDE a curl -K config
 # file. On Windows/Git Bash, MSYS translates POSIX paths to Windows form only for
 # a native binary's argv, NOT for paths read from a config file's contents, so an
@@ -515,6 +582,7 @@ _remote_http_post_json() {
     printf 'request = "POST"\n'
     printf 'header = "Content-Type: application/json"\n'
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
+    printf 'header = "Agmsg-Client-Version: %s"\n' "$(_remote_curl_quote "$(_remote_client_version)")"
     printf 'dump-header = "%s"\n' "$(_remote_curl_path "$header_fifo")"
     printf 'connect-timeout = "10"\n'
     printf 'max-time = "15"\n'
@@ -587,6 +655,7 @@ _remote_http_get_json() {
     printf 'url = "%s"\n' "$url"
     printf 'request = "GET"\n'
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
+    printf 'header = "Agmsg-Client-Version: %s"\n' "$(_remote_curl_quote "$(_remote_client_version)")"
     printf 'header = "Agmsg-Team-ID: %s"\n' "$team_id"
     printf 'connect-timeout = "10"\n'
     printf 'max-time = "15"\n'
@@ -1081,9 +1150,16 @@ _remote_resolve_team_id() {
   # malformed candidate -- and it needs to reach the operator, not get
   # replaced by a single line that names two different causes at once and
   # lets the reader guess which one happened.
+  # The status is captured ON the assignment, not read bare on the next line:
+  # under errexit a bare failing assignment ends the shell before either the
+  # `status=$?` or the message below it (#1025). Today's sole caller happens to
+  # suppress that (its `|| exit 1` disables errexit inside the substitution —
+  # measured on bash 5.3 and 3.2), but a bare call dies silently on both, and
+  # this function should not depend on how it is invoked for its own error
+  # report to exist.
+  status=0
   out="$("$SCRIPT_DIR/remote-sync.sh" resolve-team \
-    --endpoint "$endpoint" --name "$name")"
-  status=$?
+    --endpoint "$endpoint" --name "$name")" || status=$?
   if [ "$status" -ne 0 ]; then
     echo "agmsg: could not look up '$name'" >&2
     return 1
@@ -1952,7 +2028,7 @@ _remote_sync_engine_start_locked() {
   # Stop only an engine whose argv proves that it owns this team. A stale
   # pidfile may point at a recycled, unrelated process and must never authorize
   # signalling that process.
-  IFS=$'\t' read -r old_state old_pid < <(_remote_sync_engine_status "$team")
+  IFS=$'\t' read -r old_state old_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   if [ "$old_state" = "running" ]; then
     kill "$old_pid" 2>/dev/null || true
   fi
@@ -2019,7 +2095,7 @@ _remote_sync_engine_stop() {
   local team="$1" pidfile pid state
   pidfile="$(_remote_sync_engine_pidfile "$team")"
   [ -f "$pidfile" ] || return 0
-  IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team")
+  IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   if [ "$state" = "running" ]; then
     if ! _remote_sync_engine_reap_owned "$team" "$pid"; then
       echo "agmsg: sync engine pid $pid did not stop" >&2
@@ -2041,11 +2117,84 @@ _remote_sync_engine_stop() {
   rm -f "$(_remote_sync_engine_cycle_stamp "$team")" 2>/dev/null || true
 }
 
+# Return the systemd user-unit state as "state<TAB>pid".
+#
+# A unit that is not installed is not a systemd-managed team here, so callers
+# retain the pidfile behavior. An existing unit is different: an active unit
+# whose MainPID cannot be authenticated is UNKNOWN and must not be shadowed by
+# a new unmanaged engine. The command can be replaced in tests; no host
+# systemd query is needed there.
+_remote_systemd_engine_status() {
+  local team="$1" unit show load active sub pid command systemctl_bin
+  unit="agmsg-remote-sync-$team.service"
+  systemctl_bin="${AGMSG_SYSTEMCTL:-systemctl}"
+  command -v "$systemctl_bin" >/dev/null 2>&1 || { printf 'unavailable\t\n'; return; }
+  show="$($systemctl_bin --user show "$unit" -p LoadState -p ActiveState -p SubState -p MainPID 2>/dev/null)" || {
+    printf 'absent\t\n'
+    return
+  }
+  load="$(printf '%s\n' "$show" | sed -n 's/^LoadState=//p')"
+  active="$(printf '%s\n' "$show" | sed -n 's/^ActiveState=//p')"
+  sub="$(printf '%s\n' "$show" | sed -n 's/^SubState=//p')"
+  pid="$(printf '%s\n' "$show" | sed -n 's/^MainPID=//p')"
+  [ "$load" = "not-found" ] && { printf 'absent\t\n'; return; }
+  case "$active:$sub" in
+    active:running)
+      if _agmsg_pid_valid "$pid" && _agmsg_pid_alive_local "$pid"; then
+        command="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+        if agmsg_cmdline_names_path "$command" "$SCRIPT_DIR/internal/remote-sync.mjs" &&
+           case "$command" in *" run --team $team") true ;; *) false ;; esac; then
+          printf 'running\t%s\n' "$pid"
+        else
+          printf 'unknown\t%s\n' "$pid"
+        fi
+      else
+        printf 'unknown\t%s\n' "$pid"
+      fi
+      ;;
+    active:starting|active:reloading|active:auto-restart|activating:*|deactivating:*)
+      printf 'starting\t%s\n' "$pid"
+      ;;
+    inactive:*|failed:*)
+      printf 'inactive\t%s\n' "$pid"
+      ;;
+    *)
+      printf 'unknown\t%s\n' "$pid"
+      ;;
+  esac
+}
+
 # Print "<state>\t<pid>", where pid is empty when no valid pid is available.
 # A live PID is not enough: PID reuse can make an unrelated process pass
 # kill -0, so running requires the exact engine script/team suffix in argv.
+# The optional --pidfile-only mode is internal: lifecycle operations use it
+# when they must inspect only the unmanaged engine represented by this
+# command's pidfile. Human/JSON status and sync-start admission deliberately
+# omit it so an exported environment value cannot hide a systemd-owned engine.
 _remote_sync_engine_status() {
-  local team="$1" pidfile pid command expected
+  local team="$1" mode="${2:-}" pidfile pid command expected systemd_state systemd_pid
+  case "$mode" in
+    ""|--pidfile-only) ;;
+    *)
+      echo "agmsg: internal error: unknown sync engine status mode '$mode'" >&2
+      return 2
+      ;;
+  esac
+  REMOTE_SYNC_ENGINE_SUPERVISOR=""
+  REMOTE_SYNC_ENGINE_SUPERVISOR_PID=""
+  if [ "$mode" != --pidfile-only ]; then
+    IFS=$'\t' read -r systemd_state systemd_pid < <(_remote_systemd_engine_status "$team")
+  else
+    systemd_state=absent
+  fi
+  case "$systemd_state" in
+    running|starting|inactive|unknown)
+      REMOTE_SYNC_ENGINE_SUPERVISOR="systemd"
+      REMOTE_SYNC_ENGINE_SUPERVISOR_PID="$systemd_pid"
+      printf '%s\t%s\n' "$systemd_state" "$systemd_pid"
+      return
+      ;;
+  esac
   pidfile="$(_remote_sync_engine_pidfile "$team")"
   if [ ! -f "$pidfile" ]; then
     printf 'stopped\t\n'
@@ -2077,7 +2226,7 @@ _remote_sync_engine_status() {
 _remote_sync_engine_reap_owned() {
   local team="$1" owned_pid="$2" state pid signal attempts
   for signal in TERM KILL; do
-    IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team")
+    IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team" --pidfile-only)
     if ! _agmsg_pid_alive_local "$owned_pid"; then return 0; fi
     [ "$state" = "running" ] && [ "$pid" = "$owned_pid" ] || return 1
     kill "-$signal" "$owned_pid" 2>/dev/null || true
@@ -2489,6 +2638,12 @@ _remote_status_one() {
   case "$engine_state" in
     running)
       echo "$team	connected (engine running, pid $engine_pid) since $connected_at" ;;
+    starting)
+      echo "$team	connected (engine starting under systemd, pid $engine_pid; do not run sync start) since $connected_at" ;;
+    inactive)
+      echo "$team	connected (engine inactive under systemd; run: systemctl --user restart agmsg-remote-sync-$team.service) since $connected_at" ;;
+    unknown)
+      echo "$team	connected (engine state unknown under systemd; do not run sync start; inspect systemctl --user status agmsg-remote-sync-$team.service) since $connected_at" ;;
     stopped)
       echo "$team	connected (engine stopped — run: bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") sync start $(agmsg_shq "$team")) since $connected_at" ;;
     stale)
@@ -2792,10 +2947,55 @@ cmd_status() {
 
 # --- sync lifecycle --------------------------------------------------------
 
+# Literal, char-by-char digit check -- not a `case ... [0-9]*)` bracket
+# expression. A bracket expression's character class is the CALLER's locale,
+# not this file's, and some locales widen it past ASCII (full-width digits
+# among them); `test =` against an explicit alphabet is locale- and
+# nocasematch-proof on both interpreters, the same reasoning
+# self-identity.sh's _agmsg_self_chars_in_set documents (kept local here
+# rather than sourcing that file, since nothing else in this script needs
+# it).
+_remote_ceiling_is_plain_digits() {   # <string>
+  # n=${#s} is its own statement, not part of the `local` line above it: under
+  # `set -u`, a later name in one `local ... =` list that reads an earlier
+  # one's value sees it as still-unbound (measured), the same reason
+  # self-identity.sh's _agmsg_self_chars_in_set splits them too.
+  local s="${1-}" alphabet="0123456789" m=10 i=0 j c found n
+  n=${#s}
+  [ "$n" -gt 0 ] || return 1
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    found=""
+    j=0
+    while [ "$j" -lt "$m" ]; do
+      [ "$c" = "${alphabet:$j:1}" ] && { found=1; break; }
+      j=$((j + 1))
+    done
+    [ -n "$found" ] || return 1
+    i=$((i + 1))
+  done
+  return 0
+}
+
 cmd_sync_start() {
   local team="${1:?Usage: remote.sh sync start <team>}" cfg connected_at disconnected_at \
     engine_state engine_pid started_pid ready_pid startup_nonce ready=0 i=0 \
     logfile log_offset=1
+  # Test-only override of the readiness-wait ceiling below, default unchanged
+  # (1600). Exists so a test that drives the engine into never becoming
+  # ready does not have to spend this command's real production wait
+  # (measured ~1min+: the ceiling is counted in iterations, not time (#779),
+  # and each turn spawns several processes) to prove the timeout path.
+  #
+  # Anything but a plain positive integer falls back to the production
+  # default rather than being trusted -- in particular an empty or zero
+  # value must NOT make the `while` below skip straight to "not ready": that
+  # would silently change this command's real behavior on a malformed
+  # environment, not just its test-only timing (the same reasoning that kept
+  # an env-var knob out of herdr's boot wait previously).
+  local ready_ceiling="${AGMSG_TEST_SYNC_START_READY_CEILING:-1600}"
+  _remote_ceiling_is_plain_digits "$ready_ceiling" || ready_ceiling=1600
+  [ "$ready_ceiling" -gt 0 ] || ready_ceiling=1600
   [ $# -eq 1 ] || { echo "Usage: remote.sh sync start <team>" >&2; exit 1; }
   agmsg_validate_team_name "$team" || exit 1
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
@@ -2818,11 +3018,18 @@ cmd_sync_start() {
   fi
 
   IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team")
-  if [ "$engine_state" = "running" ]; then
-    echo "Sync engine already running (pid $engine_pid)."
-    agmsg_lock_release
-    return
-  fi
+  case "$engine_state" in
+    running)
+      echo "Sync engine already running (pid $engine_pid)."
+      agmsg_lock_release
+      return
+      ;;
+    starting|inactive|unknown)
+      echo "agmsg: systemd owns team '$team' in state '$engine_state'; inspect or restart the user unit instead of sync start" >&2
+      agmsg_lock_release
+      return 1
+      ;;
+  esac
 
   logfile="$CONNECTION_ROOT/run/remote-sync.$team.log"
   [ -f "$logfile" ] && log_offset=$(( $(wc -c < "$logfile" | tr -d ' ') + 1 ))
@@ -2871,8 +3078,8 @@ cmd_sync_start() {
   # that is late or missing for ANY reason costs this caller its own wait and
   # not the rest of the machine.
   agmsg_lock_release
-  while [ "$i" -lt 1600 ]; do
-    IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team")
+  while [ "$i" -lt "$ready_ceiling" ]; do
+    IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
     if [ "$engine_state" = "running" ] && [ "$ready_pid" = "$started_pid" ] &&
        tail -c "+$log_offset" "$logfile" 2>/dev/null |
          awk -v nonce="\"startup_nonce\":\"$startup_nonce\"" '
@@ -2972,11 +3179,53 @@ cmd_sync_start() {
     echo "Sync engine started for '$team' (pid $started_pid)."
 }
 
+# Stop a running, unmanaged engine and start a fresh one on whatever code is
+# on disk right now (#963). A systemd-owned unit is left alone entirely --
+# not just refused past the admission check inside cmd_sync_start, but never
+# signalled here either, since systemd's own restart policy is that team's
+# supervisor, not this command. A team with no engine running is simply
+# started, same as `sync start` would do.
+cmd_sync_restart() {
+  local team="${1:?Usage: remote.sh sync restart <team>}" systemd_state systemd_pid \
+    engine_state engine_pid
+  [ $# -eq 1 ] || { echo "Usage: remote.sh sync restart <team>" >&2; exit 1; }
+  agmsg_validate_team_name "$team" || exit 1
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
+  # Asked directly, and BEFORE the pidfile-only status read below: a
+  # systemd-owned unit is refused unconditionally, in every one of its own
+  # states, not just the ones cmd_sync_start's admission check already
+  # refuses (starting/inactive/unknown) -- a systemd-owned engine that
+  # happens to be running right now must not be touched here either, since
+  # systemd's own restart policy is that team's supervisor, not this command.
+  IFS=$'\t' read -r systemd_state systemd_pid < <(_remote_systemd_engine_status "$team")
+  case "$systemd_state" in
+    running|starting|inactive|unknown)
+      echo "agmsg: systemd owns team '$team'; inspect or restart the user unit instead of sync restart" >&2
+      agmsg_lock_release
+      return 1
+      ;;
+  esac
+  IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
+  if [ "$engine_state" = "running" ]; then
+    if ! _remote_sync_engine_stop "$team"; then
+      echo "agmsg: sync engine pid $engine_pid for '$team' did not stop; not starting a new one" >&2
+      agmsg_lock_release
+      return 1
+    fi
+  fi
+  # Released before delegating: cmd_sync_start takes this same lock itself,
+  # and mkdir-based locking is not reentrant within one process (a second
+  # acquire here would spin against itself for the full budget, then fail).
+  agmsg_lock_release
+  cmd_sync_start "$team"
+}
+
 cmd_sync() {
   local action="${1:-}"
   case "$action" in
     start) shift; cmd_sync_start "$@" ;;
-    *) echo "Usage: remote.sh sync start <team>" >&2; exit 1 ;;
+    restart) shift; cmd_sync_restart "$@" ;;
+    *) echo "Usage: remote.sh sync start|restart <team>" >&2; exit 1 ;;
   esac
 }
 
@@ -3367,7 +3616,7 @@ cmd_set_endpoint() {
     done
   fi
 
-  IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team")
+  IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   [ "$engine_state" = "running" ] && was_running=1
   _remote_sync_engine_stop "$team" || {
     echo "agmsg: the sync engine did not stop; refusing to move the endpoint under it" >&2
@@ -3398,7 +3647,7 @@ cmd_set_endpoint() {
   # command ran is restarted too (never silently left stopped, and a restart
   # is what hands it the moved address -- a running engine keeps its old
   # config in memory). _remote_sync_engine_start kills a live engine first.
-  IFS=$'\t' read -r end_state end_pid < <(_remote_sync_engine_status "$team")
+  IFS=$'\t' read -r end_state end_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   if [ "$was_running" -eq 1 ] || [ "$end_state" = "running" ]; then
     # Same rule as cmd_pull and cmd_connect: the move is this command's purpose
     # and it is done by here, so a start failure reports rather than fails --

@@ -51,7 +51,7 @@ fake_session() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ "status=ok" ]]
   [[ "$output" =~ "team=T" ]]
-  [ "$(actas_lock_owner T alice)" = "sid-me" ]
+  [ "$(_owner_only T alice)" = "sid-me" ]
 }
 
 @test "actas-claim: status=held when role is held by another live session" {
@@ -65,7 +65,7 @@ fake_session() {
   [[ "$output" =~ "status=held" ]]
   [[ "$output" =~ "team=T" ]]
   [[ "$output" =~ "owner=sid-owner" ]]
-  [ "$(actas_lock_owner T alice)" = "sid-owner" ]   # not stolen
+  [ "$(_owner_only T alice)" = "sid-owner" ]   # not stolen
 }
 
 @test "actas-claim: status=not_registered when name is unknown" {
@@ -96,7 +96,7 @@ fake_session() {
   bash "$SKILL_DIR/scripts/reset.sh" /tmp/p1 claude-code alice >/dev/null
 
   [ -f "$(actas_lock_path T alice)" ]
-  [ "$(actas_lock_owner T alice)" = "sid-me" ]
+  [ "$(_owner_only T alice)" = "sid-me" ]
 }
 
 # --- session-end.sh releases all locks owned by the exiting session ---
@@ -147,13 +147,21 @@ fake_session() {
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-mine" /tmp/p1 claude-code \
     >/dev/null 2> "$BATS_TEST_TMPDIR/watch.err" 3>&- &
   local wpid=$!
-  # Give it just enough time to resolve subscription and print stderr.
-  sleep 1
+  # #1023 widened this margin: actas_lock_path now resolves ids through
+  # roster-journal.sh when a team has them (two sqlite3 calls), measured at
+  # ~40ms/call on this machine -- enough, under host load, to occasionally
+  # still be resolving a pair's lock when the old 1s window fired the kill
+  # (measured: 1 flake in 3 runs at 1s, 0 in several at 2s).
+  sleep 2
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
 
+  # The header no longer says "held by other sessions": the same list also
+  # carries pairs whose lock could not be READ, and those have no holder to name
+  # (#983). `grep -q` rather than a non-final `[[ ]]`, which cannot fail a test
+  # on the bash 3.2 CI runs on (#670).
+  grep -q 'not serving these pairs' "$BATS_TEST_TMPDIR/watch.err"
   run cat "$BATS_TEST_TMPDIR/watch.err"
-  [[ "$output" =~ "skipping pairs held by other sessions" ]]
   [[ "$output" =~ "T/alice" ]]
 }
 
@@ -168,7 +176,7 @@ fake_session() {
   [[ "$output" =~ "cannot claim" ]]
   [[ "$output" =~ "T/alice" ]]
   # Lock was not stolen.
-  [ "$(actas_lock_owner T alice)" = "sid-other" ]
+  [ "$(_owner_only T alice)" = "sid-other" ]
 }
 
 @test "watch: with active_name on a free pair, claims and continues" {
@@ -178,10 +186,10 @@ fake_session() {
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-me" /tmp/p1 claude-code alice \
     >/dev/null 2> "$BATS_TEST_TMPDIR/watch.err" 3>&- &
   local wpid=$!
-  sleep 1
+  sleep 2
 
   # Should now own the lock.
-  [ "$(actas_lock_owner T alice)" = "sid-me" ]
+  [ "$(_owner_only T alice)" = "sid-me" ]
 
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
@@ -189,18 +197,28 @@ fake_session() {
 
 # --- watch.sh releasing a pair it no longer owns (#983) ---
 
-# The subscription set and the lock check both happen once, before the polling
-# loop (watch.sh 159-211 vs the loop at 274). So a watcher that is already
-# running never notices that another session took its role: it keeps polling the
-# same pair, and because the read cursor is one per (team, agent) and
-# storage_watch_after excludes rows already read, WHOEVER POLLS FIRST takes the
-# row and the other sees nothing.
+# A watcher that is already running would otherwise never notice that another
+# session took its role: it keeps polling the same pair, and because the read
+# cursor is one per (team, agent) and storage_watch_after excludes rows already
+# read, WHOEVER POLLS FIRST takes the row and the other sees nothing. When the
+# one that takes it is the older process its printf succeeds, the id is marked
+# read, and the message is gone. So the loop re-reads the lock each cycle and
+# releases the pair.
 #
-# When the one that takes it is the older process, its printf succeeds -- its
-# stdout is still an open pipe to a live session -- so the id is appended to
-# DELIVERED_IDS and the message is marked read. Nothing surfaces it. That is the
-# reported symptom: consumed, marked read, and never delivered.
-@test "watch: a pair claimed by another session is released, not consumed (#983)" {
+# What this test states is the released case: once the release is OBSERVABLE --
+# the reason on stderr, the process gone -- the old watcher takes nothing.
+#
+# What it deliberately does not state is the handover instant itself. The lock
+# is read once per cycle and the rows are read after it, so a message that
+# arrives between those two points can still be taken by the departing watcher.
+# The implementation does not make that atomic and does not claim to. An earlier
+# version of this test sent the message immediately after the claim and slept
+# four poll intervals, which asserted the atomic version by accident: it passed
+# or failed on whichever interleaving occurred, so a red did not identify a
+# defect and a green did not establish the property. If the atomic guarantee is
+# ever wanted, it needs the lock re-read moved next to the mark-read, and a test
+# that forces the interleaving rather than sampling it.
+@test "watch: a pair claimed by another session releases it and says why (#983)" {
   skip_on_windows "actas watcher process mgmt under Git Bash (#182)"
   fake_register T alice
   fake_register T bob
@@ -210,10 +228,10 @@ fake_session() {
   local old=$!
   local i
   for i in $(seq 1 50); do
-    [ "$(actas_lock_owner T alice)" = "sid-old" ] && break
+    [ "$(_owner_only T alice)" = "sid-old" ] && break
     sleep 0.1
   done
-  [ "$(actas_lock_owner T alice)" = "sid-old" ]
+  [ "$(_owner_only T alice)" = "sid-old" ]
 
   # A second session takes the role — what `/agmsg actas` does from a new
   # session. It needs to look ALIVE, or the lock reads as stale and free.
@@ -222,37 +240,49 @@ fake_session() {
   echo "sid-new" > "$RUN_DIR/cc-instance.$newpid"
   echo "sid-new" > "$(actas_lock_path T alice)"
 
-  bash "$SKILL_DIR/scripts/send.sh" T bob alice "after the handover" >/dev/null
+  # Gate on the watcher having OBSERVED the claim, not on elapsed time. The
+  # previous version slept four poll intervals and then asserted; that samples
+  # whichever interleaving happened to occur rather than establishing that the
+  # release took place, so a green said nothing and a red did not say what broke.
+  for i in $(seq 1 200); do
+    grep -q "no longer owns that role" "$BATS_TEST_TMPDIR/old.err" && break
+    sleep 0.1
+  done
+  # Assert the observation itself. The loop above cannot fail: exhausted and
+  # satisfied leave identical state.
+  run cat "$BATS_TEST_TMPDIR/old.err"
+  [[ "$output" == *"T/alice"* ]] || return 1
+  [[ "$output" == *"sid-new"* ]] || return 1
+  [[ "$output" == *"no longer owns that role"* ]] || return 1
 
-  # Several poll cycles at the 1s interval set above.
-  sleep 4
-  kill "$newpid" 2>/dev/null || true
-
-  # It must not have taken a message addressed to a role it no longer owns.
-  run cat "$BATS_TEST_TMPDIR/old.out"
-  [[ "$output" != *"after the handover"* ]]
-
-  # It must have stopped. A watcher that keeps running is what consumes the
-  # next message too.
+  # And it must actually stop. A watcher that logs the reason and keeps running
+  # is what consumes the next message.
+  for i in $(seq 1 200); do
+    kill -0 "$old" 2>/dev/null || break
+    sleep 0.1
+  done
   refute kill -0 "$old" 2>/dev/null
 
-  # And it must say why. Exiting silently is the same defect class -- this
-  # watcher's stderr is the only place a reason can survive.
-  run cat "$BATS_TEST_TMPDIR/old.err"
-  [[ "$output" == *"T/alice"* ]]
-  [[ "$output" == *"sid-new"* ]]
+  # Only NOW is a message sent. Every assertion below is about a watcher that
+  # has already released the role, which is the property this file can state:
+  # once the release is observable, the old watcher takes nothing.
+  bash "$SKILL_DIR/scripts/send.sh" T bob alice "after the handover" >/dev/null
 
-  # The message is still unread, so the session that now owns the role is
-  # offered it. Without this, "did not print it" would also pass for a watcher
-  # that consumed the row and threw it away.
+  run cat "$BATS_TEST_TMPDIR/old.out"
+  [[ "$output" != *"after the handover"* ]] || return 1
+
+  # Still unread, so the session that now owns the role is offered it. Without
+  # this, "did not print it" would also pass for a watcher that consumed the row
+  # and threw it away.
   local left
   left="$(bash -c '
     source "'"$SKILL_DIR"'/scripts/lib/storage.sh"
     agmsg_storage_load
     storage_list_unread T alice
-  ' | grep -c .)"
+  ' | grep -c . || true)"
   [ "$left" -eq 1 ]
 
+  kill "$newpid" 2>/dev/null || true
   kill "$old" 2>/dev/null || true
   wait "$old" 2>/dev/null || true
 }
@@ -271,7 +301,7 @@ fake_session() {
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-broad" /tmp/p1 claude-code \
     > "$BATS_TEST_TMPDIR/broad.out" 2> "$BATS_TEST_TMPDIR/broad.err" 3>&- &
   local broad=$!
-  sleep 1
+  sleep 2
 
   sleep 60 &
   local newpid=$!
@@ -312,7 +342,7 @@ fake_session() {
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-broad" /tmp/p1 claude-code \
     > "$BATS_TEST_TMPDIR/broad.out" 2> "$BATS_TEST_TMPDIR/broad.err" 3>&- &
   local broad=$!
-  sleep 1
+  sleep 2
 
   sleep 60 &
   local newpid=$!
@@ -375,7 +405,7 @@ fake_session() {
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-broad" /tmp/p1 claude-code \
     > "$BATS_TEST_TMPDIR/n.out" 2> "$BATS_TEST_TMPDIR/n.err" 3>&- &
   local broad=$!
-  sleep 1
+  sleep 2
 
   sleep 60 &
   local newpid=$!
@@ -403,4 +433,15 @@ fake_session() {
 
   kill "$broad" 2>/dev/null || true
   wait "$broad" 2>/dev/null || true
+}
+
+# The tree deliberately has no owner-only reader any more (#983): every lock read
+# reports its own outcome next to the owner, so that no caller can mistake "could
+# not read it" for "nobody holds it". These assertions want the owner alone and
+# each compares it against a specific sid, so a read that failed shows up as a
+# failed assertion rather than as a passing empty string.
+_owner_only() {   # <team> <agent>
+  local _r; _r="$(actas_lock_read "$1" "$2")"
+  [ "${_r%%$'\t'*}" = "ok" ] || return 1
+  printf '%s' "${_r#*$'\t'}"
 }

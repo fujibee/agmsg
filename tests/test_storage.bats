@@ -393,8 +393,149 @@ _use_per_team() {
   # The lookup the sync import makes per imported message (FROM events
   # WHERE id=...) is a search now -- not a scan of every message body.
   sqlite3 "$db" "EXPLAIN QUERY PLAN SELECT seq FROM events WHERE id = 'x';" | grep -q 'USING COVERING INDEX events_id\|USING INDEX events_id'
-  # A store from before this index existed picks it up on the next init.
-  sqlite3 "$db" "DROP INDEX events_id;"
+  # A store from before this index existed picks it up on the next init. Such
+  # a store also predates the schema-revision stamp (#1001), so the
+  # simulation regresses both together -- a current stamp over a missing
+  # index is a state no product path produces, and the fast path would
+  # (correctly, per its contract) not heal it.
+  sqlite3 "$db" "DROP INDEX events_id; PRAGMA user_version=0;"
   storage_init demo >/dev/null
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='events_id';" | tr -d '\r')" -eq 1 ]
+}
+
+# ---- #1001: storage_init fast path and the busy note ----
+
+@test "storage: a store at the current schema revision skips init's write batch -- even while a writer holds the store (#1001)" {
+  source "$SCRIPTS/lib/storage.sh"
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  export AGMSG_STORAGE_DRIVER=sqlite
+  agmsg_storage_load
+  storage_init demo >/dev/null
+  local db; db=$(agmsg_db_path demo)
+  # The stamp landed.
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 1 ]
+  # Under a held write lock, the old init re-ran its write batch, waited the
+  # full busy timeout and failed; the fast path READS the revision (WAL serves
+  # reads beside a writer) and returns ok without touching the lock.
+  ( printf 'BEGIN IMMEDIATE;\nSELECT 1;\n'; sleep 3; printf 'COMMIT;\n' ) | sqlite3 "$db" >/dev/null &
+  local holder=$!
+  sleep 0.5
+  export AGMSG_BUSY_TIMEOUT=200
+  run storage_init demo
+  unset AGMSG_BUSY_TIMEOUT
+  wait "$holder"
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+}
+
+@test "storage: a revision mismatch runs the real init, and the stamp follows the schema (#1001)" {
+  # The gate must swing BOTH ways: matching skips (above), and NOT matching
+  # actually initializes -- the danger of a fast path is an old schema waved
+  # through as new.
+  source "$SCRIPTS/lib/storage.sh"
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  export AGMSG_STORAGE_DRIVER=sqlite
+  agmsg_storage_load
+  storage_init demo >/dev/null
+  local db; db=$(agmsg_db_path demo)
+  # Regress the store: drop a piece of schema and the stamp together.
+  sqlite3 "$db" "DROP INDEX events_id; PRAGMA user_version=0;"
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE name='events_id';" | tr -d ' \r')" = 0 ]
+  run storage_init demo
+  [ "$status" -eq 0 ]
+  # The batch really ran: the schema piece is back, and so is the stamp.
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE name='events_id';" | tr -d ' \r')" = 1 ]
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 1 ]
+}
+
+@test "storage: a failing init batch leaves the OLD revision, never a new stamp over a broken schema (#1001)" {
+  # The stamp is the last statement of the same -bail transaction as the
+  # schema. If anything before it fails, the transaction rolls back and the
+  # store still says the old revision -- the fast path can then never treat
+  # the broken store as current. Forced here with a trigger that aborts the
+  # read-cursor adoption insert.
+  source "$SCRIPTS/lib/storage.sh"
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  export AGMSG_STORAGE_DRIVER=sqlite
+  agmsg_storage_load
+  mkdir -p "$AGMSG_STORAGE_PATH"
+  local db; db=$(agmsg_db_path demo)
+  sqlite3 "$db" "
+    CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL,
+      id TEXT NOT NULL, team TEXT, from_agent TEXT, to_agent TEXT, body TEXT,
+      msg_id TEXT, agent TEXT, at TEXT NOT NULL, legacy_id INTEGER);
+    CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, team TEXT NOT NULL,
+      from_agent TEXT NOT NULL, to_agent TEXT NOT NULL, body TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), read_at TEXT);
+    INSERT INTO messages(team,from_agent,to_agent,body) VALUES('demo','a','b','legacy row');
+    CREATE TRIGGER boom BEFORE INSERT ON events WHEN NEW.type='message_read'
+      BEGIN SELECT RAISE(ABORT,'forced mid-batch failure'); END;"
+  run storage_init demo
+  [ "$status" -eq 13 ]
+  [ "$output" = runtime_error ]
+  # No stamp: the store still says revision 0, so the next init tries again.
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 0 ]
+}
+
+@test "storage: a call that gives up after the busy timeout says so on stderr, and a quiet store says nothing (#1001)" {
+  source "$SCRIPTS/lib/storage.sh"
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  export AGMSG_STORAGE_DRIVER=sqlite
+  agmsg_storage_load
+  storage_init demo >/dev/null
+  local db; db=$(agmsg_db_path demo)
+  # Quiet store: a write emits nothing.
+  run --separate-stderr agmsg_sqlite "$db" "INSERT INTO storage_metadata(key,value) VALUES('t1','1');"
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+  # Contended store: the write waits the timeout, fails with SQLITE_BUSY, and
+  # SAYS so -- "hung" becomes "waited and gave up".
+  ( printf 'BEGIN IMMEDIATE;\nSELECT 1;\n'; sleep 3; printf 'COMMIT;\n' ) | sqlite3 "$db" >/dev/null &
+  local holder=$!
+  sleep 0.5
+  export AGMSG_BUSY_TIMEOUT=200
+  run --separate-stderr agmsg_sqlite "$db" "INSERT INTO storage_metadata(key,value) VALUES('t2','1');"
+  unset AGMSG_BUSY_TIMEOUT
+  wait "$holder"
+  [ "$status" -eq 5 ]
+  grep -Fq "the message store is busy" <<<"$stderr"
+  grep -Fq "waited 200ms" <<<"$stderr"
+}
+
+@test "storage: init stamps only a store that is really in WAL -- a busy journal switch stops before the stamp (#1001)" {
+  # The fast path's whole premise is WAL serving reads beside a writer. If
+  # the journal-mode switch alone lost to a transient writer while the schema
+  # transaction then succeeded, a rollback-journal store would be stamped
+  # current and the fast path would never retry the switch -- minute-long
+  # waits would return with a stamp saying all is well (review finding). So
+  # init checks what the pragma ANSWERS and refuses to proceed on anything
+  # but "wal".
+  source "$SCRIPTS/lib/storage.sh"
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  export AGMSG_STORAGE_DRIVER=sqlite
+  agmsg_storage_load
+  mkdir -p "$AGMSG_STORAGE_PATH"
+  local db; db=$(agmsg_db_path demo)
+  # A rollback-journal store, not yet initialized.
+  sqlite3 "$db" "PRAGMA journal_mode=DELETE; CREATE TABLE seedmark(x);" >/dev/null
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 0 ]
+  # A writer holds the store: the journal switch comes back busy, and init
+  # must stop THERE -- old stamp, old journal mode, an error worth seeing.
+  ( printf 'BEGIN IMMEDIATE;\nSELECT 1;\n'; sleep 3; printf 'COMMIT;\n' ) | sqlite3 "$db" >/dev/null &
+  local holder=$!
+  sleep 0.5
+  export AGMSG_BUSY_TIMEOUT=200
+  run storage_init demo
+  unset AGMSG_BUSY_TIMEOUT
+  [ "$status" -eq 13 ]
+  [ "$output" = runtime_error ]
+  wait "$holder"
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 0 ]
+  [ "$(sqlite3 "$db" "PRAGMA journal_mode;" | tr -d ' \r')" = delete ]
+  # The writer gone, the same init switches to WAL, initializes, and stamps.
+  run storage_init demo
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  [ "$(sqlite3 "$db" "PRAGMA journal_mode;" | tr -d ' \r')" = wal ]
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 1 ]
 }

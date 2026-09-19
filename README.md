@@ -123,13 +123,17 @@ The **command name** determines:
 
 After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity / OpenCode) so it picks up the new skill.
 
-### Windows: Git Bash & Codex
+### Windows: Git Bash
 
 agmsg's implementation is the Bash script set under `scripts/`, so on Windows the
 scripts run through **Git Bash** (Git for Windows, with `sqlite3` available on the
 Git Bash PATH). There is no PowerShell reimplementation.
 
-- In Windows environments, Claude Code naturally works with Bash/Git Bash for
+- In Windows environments, Claude Code monitor delivery is verified through
+  Git Bash. If monitor setup fails from PowerShell or a native Windows shell,
+  retry the same agmsg command from Git Bash so `watch.sh` runs in the expected
+  Bash environment.
+- Claude Code normally works with Bash/Git Bash for
   these script calls, but native Windows Codex commands and hooks often start
   from PowerShell. Keep the actual agmsg execution path pinned to Git Bash so
   all agents share the same `$HOME` and SQLite database.
@@ -211,7 +215,7 @@ codex:
   --dangerously-skip-permissions: false  # a `false` value suppresses the flag entirely
 ```
 
-Eight of the nine agent types are spawnable — `claude-code`, `codex`, `grok-build`, `cursor`, `gemini`, `antigravity`, `copilot`, `opencode`. `hermes` is not: its CLI has no mode that starts an interactive session pre-seeded with an initial prompt (#279). macOS is the primary target; Linux and Windows are best-effort (please open an issue/PR if your terminal isn't handled). Headless environments — no tmux **and** no usable terminal — error out, since the agent CLIs need an interactive terminal.
+Eight of the ten agent types are spawnable — `claude-code`, `codex`, `grok-build`, `cursor`, `gemini`, `antigravity`, `copilot`, `opencode`. `hermes` is not spawnable because its CLI has no known mode that starts an interactive session pre-seeded with an initial prompt (#279). `devin` is currently not marked spawnable because an equivalent interactive boot mode has not yet been verified. macOS is the primary target; Linux and Windows are best-effort (please open an issue/PR if your terminal isn't handled). Headless environments — no tmux **and** no usable terminal — error out, since the agent CLIs need an interactive terminal.
 
 ### Tear down a spawned agent (`despawn`)
 
@@ -265,6 +269,26 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 Settings are per-project. Each `<project>/.claude/settings.local.json` gets exactly the hooks the chosen mode needs — repeated `set` calls are idempotent.
 
 **Monitor priming**: in `monitor` mode, the receiving agent doesn't react to its first inbound message until it has taken at least one turn this session. If you've just started a fresh session and a teammate has already sent something, nudge the agent with any short message ("hi") to prime it — subsequent messages stream in real time.
+
+### Claude Code monitor verification
+
+`delivery.sh status claude-code <project>` showing `mode: monitor` means the project is configured for monitor delivery. It does **not** prove that Claude Code has started the runtime Monitor task in the current session.
+
+For real-time delivery, verify the Claude Code runtime state:
+
+1. `ToolSearch select:Monitor` finds Claude Code's generic `Monitor` tool.
+2. The session starts `Monitor(agmsg inbox stream)` with the `watch.sh ... claude-code` command from the `AGMSG-DIRECTIVE` (or, after `actas <name>`, `Monitor(agmsg inbox stream (acting as <name>))`).
+3. `TaskList` shows a task whose description begins with `agmsg inbox stream` for this session.
+4. The transcript contains a `Monitor event: "agmsg inbox stream"` (or `"agmsg inbox stream (acting as <name>)"`) notification when messages arrive.
+
+These are failure states, even if `delivery.sh status` says `mode: monitor`:
+
+- `TaskList` shows no task whose description begins with `agmsg inbox stream` for this session.
+- `watch.sh` is running only as a Bash/background/nohup shell process, not through the Monitor tool.
+- Tool search finds Azure Monitor, an MCP monitor, or any other monitor-branded tool instead of Claude Code's generic `Monitor` tool.
+- `ToolSearch select:Monitor` cannot find a generic `Monitor` tool.
+
+The background-task footer is not a reliable signal either way — it does not consistently reflect whether a Monitor is really streaming for this session, so check `TaskList` instead. If the Monitor tool is unavailable, use `turn` delivery or manual `/agmsg` inbox checks as a fallback. Those modes still deliver queued messages, but they are not real-time monitor delivery.
 
 ### Migrating from legacy `hook on/off`
 
@@ -334,12 +358,19 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>" [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
-~/.agents/skills/<cmd>/scripts/team.sh <team>
+~/.agents/skills/<cmd>/scripts/team.sh <team> [--json | --fix | --fix-pane-names | --rename-sessions]
+~/.agents/skills/<cmd>/scripts/placement-collisions.sh
 ~/.agents/skills/<cmd>/scripts/whoami.sh <project_path> <type>
 ~/.agents/skills/<cmd>/scripts/delivery.sh set <mode> <type> <project_path>
 ~/.agents/skills/<cmd>/scripts/delivery.sh status [<type> <project_path>]
 ~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
+
+`team.sh` combines the roster with terminal placement, activity, delivery mode, and identity consistency. Verified identity is collapsed to `identity=ok`; mismatches and values that could not be observed are expanded with their evidence. `--json` emits every field for every registration. The repair flags report each action per identity cell as `changed`, `skipped`, `failed`, or (for a session name that could not be read back) `poked_unverified`. They are two different kinds of act: `--fix-pane-names` repairs the pane label and agent key through the terminal's own API and never types into a session; `--rename-sessions` repairs the CLI session name by typing the type's rename command (`/rename <team>-<agent>` for Claude Code, whatever the type's manifest declares otherwise) into the pane, and only after positively identifying a ready process there. `--fix` does both, unconditionally, including the keystroke. Pane liveness will join this view when the pane-state contract lands; until then the unavailable column is omitted rather than filled with `unknown`.
+
+`placement-collisions.sh` is a separate, read-only installation-wide report. It never repairs or removes a record; keeping this fleet observation outside `team.sh` prevents an operator-level scan from becoming part of a seat's repair path. Today it reports only the record-only layer: two DIFFERENT seats' records resolved to the same canonical (kind, instance, pane) locator, entirely from records on disk — no terminal is ever asked anything. A ref with no instance component to resolve (every herdr ref today; a legacy bare tmux `%N`/`@N`) is not joined by raw string equality; it is listed under `unscoped_records` instead, since record-only evidence cannot tell such refs apart across terminal instances. `collisions: none` means the walk completed and found nothing; `collisions: none_observed` paired with `coverage: partial` means something along the way (a team config, a placement record, an empty ref) could not be read, so the empty answer is not a proven one; `collisions: not_attempted` means there was no `teams/` directory to walk at all. An actual-location layer — matching a seat's own record against where a live census actually observes it — is designed but not yet wired here; see the script's header.
+
+Terminal identity has a different number of observable names on each backend. Herdr exposes three independent values: the visible pane label, its internal agent key, and the CLI session name. tmux exposes two: the `@agmsg_agent` pane option is the internal key, while the CLI owns `pane_title`, so there is no independent pane-label field after the CLI starts. `team.sh` reports that tmux field as `n/a` rather than treating an unavailable concept as a mismatch.
 
 `send.sh` takes four positional arguments — `<team> <from> <to> "<message>"` — plus an optional trailing `--force`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
 

@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { appendFile, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
-import { closeSync, mkdtempSync, openSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ageExecutableVersion, CipherStateError, openEnvelope,
@@ -24,6 +24,37 @@ const MAX_CONNECTION_CONFIG_BYTES = 2 * 1024 * 1024;
 // answer: a bound a server can raise by saying so is not a bound. If the two
 // ever disagree, the client refuses rather than accepts the larger list.
 const MAX_TEAMS_PER_NAME = 16;
+const MAX_CLIENT_VERSION_LENGTH = 64;
+
+// Read once, on first use, and cached for the life of the process -- SKILL_DIR
+// (the install this process was launched from) does not change underneath a
+// running engine. "unknown" whenever the value cannot be produced (no
+// SKILL_DIR, no VERSION file, or a read failure): never empty and never
+// omitted, so a server can tell "announced, but unreadable" apart from "an
+// older client that never announces a version at all" (see the client version
+// header section of server/spec/v1.md). Only printable ASCII belongs in a
+// header value, so anything else -- a stray control byte or
+// non-ASCII character from a corrupted or hand-edited VERSION file -- is
+// dropped rather than sent raw, and the result is capped well past any real
+// git-describe string but bounded regardless of what actually landed in the
+// file.
+let cachedClientVersion;
+function clientVersion() {
+  if (cachedClientVersion !== undefined) return cachedClientVersion;
+  const skillDir = process.env.SKILL_DIR;
+  let firstLine = "";
+  if (skillDir) {
+    try {
+      firstLine = readFileSync(join(skillDir, "VERSION"), "utf8").split(/\r?\n/u)[0] ?? "";
+    } catch {
+      firstLine = "";
+    }
+  }
+  const sanitized = [...firstLine].filter((ch) => ch >= " " && ch <= "~").join("")
+    .slice(0, MAX_CLIENT_VERSION_LENGTH).trim();
+  cachedClientVersion = sanitized || "unknown";
+  return cachedClientVersion;
+}
 
 function usage() {
   return `usage:
@@ -1473,6 +1504,7 @@ async function send(config, path, init, authHeaders) {
   const headers = {
     ...init.headers,
     "Agmsg-Protocol-Version": PROTOCOL,
+    "Agmsg-Client-Version": clientVersion(),
     "Agmsg-Team-ID": config.remote_team_id,
     ...authHeaders,
   };
@@ -1595,7 +1627,7 @@ async function health(serverUrl, teamId) {
   let response;
   try {
     response = await fetch(endpoint(serverUrl, "/v1/health"), {
-      headers: { "Agmsg-Team-ID": teamId },
+      headers: { "Agmsg-Team-ID": teamId, "Agmsg-Client-Version": clientVersion() },
       redirect: "error", signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
@@ -2820,11 +2852,90 @@ export async function configure(args) {
     remote_team_id: config.remote_team_id });
 }
 
+// The server sequences this client holds as ROSTER mutations rather than as
+// messages (#968). The roster driver journals one `roster_synced` record per
+// applied mutation -- on the engine pull path and on the bootstrap path alike,
+// and since the same commit that put roster mutations on the transport -- so
+// the journal is the complete list of sequences that will never have a
+// message mapping. The read-state frontier check needs that list: without it
+// every roster sequence reads as a hole, and the first hole is seq 1 (the
+// founding member_joined) on every team.
+//
+// Failure direction: a journal that cannot be read, or a line that cannot be
+// parsed, yields NO sequences, which leaves the frontier check exactly as it
+// was -- pinned. A frontier is never advanced on evidence that was not read.
+// And it SAYS so: a pinned frontier is also what #968 looked like before this
+// change, so a silent fallback here would be indistinguishable from the bug it
+// fixes. The event names the file and, for a torn journal, the line. A journal
+// that does not exist yet is not an anomaly (a team has no roster before its
+// first pull) and is the one case that stays quiet.
+//
+// The whole journal is read on every read-state cycle. It holds one record
+// per roster mutation the team ever applied (30 on a 21,505-message team),
+// so it grows with membership events, not with traffic; the storage driver
+// bounds the list it will accept at 10,000 and refuses beyond that. Cutting
+// it at the members' read floor would need that floor here, and it lives in
+// storage (sync_read_members.remote_server_seq) -- a new driver op, if the
+// list ever grows enough to matter.
+export async function rosterSequencesFor(config, dependencies = {}) {
+  const readFileCall = dependencies.readFileCall ?? readFile;
+  const eventCall = dependencies.eventCall ?? event;
+  const rosterFile = dependencies.rosterFile ?? rosterFileFor(config.local_team);
+  if (!rosterFile) return [];
+  const journalPath = join(dirname(rosterFile), "roster.jsonl");
+  let text;
+  try { text = await readFileCall(journalPath, "utf8"); }
+  catch (error) {
+    if (error?.code !== "ENOENT") {
+      try {
+        await eventCall("read-state.roster-journal-unreadable", { path: journalPath,
+          reason: error?.code ?? error?.message ?? String(error) });
+      } catch { /* logging is best-effort */ }
+    }
+    return [];
+  }
+  const sequences = new Set();
+  const lines = text.split(/\r?\n/u);
+  for (const [index, line] of lines.entries()) {
+    if (!line) continue;
+    let record;
+    try { record = JSON.parse(line); }
+    catch (error) { // a torn journal is no evidence -- and is named, with its line
+      try {
+        await eventCall("read-state.roster-journal-unreadable", { path: journalPath,
+          line: index + 1, reason: error?.message ?? String(error) });
+      } catch { /* logging is best-effort */ }
+      return [];
+    }
+    if (record?.type !== "roster_synced" ||
+        record.server_instance_id !== config.server_instance_id ||
+        record.remote_team_id !== config.remote_team_id) continue;
+    // The sequence DOMAIN, through the one validator the rest of this file
+    // uses. Shape alone let 9223372036854775808..9999999999999999999 through
+    // (review finding); on the driver side the temp table's INTEGER PRIMARY
+    // KEY refuses such a value outright, so the whole read-prepare
+    // transaction died with a datatype mismatch -- neither a 13 nor "no
+    // evidence" (measured in review). A record outside the domain is corrupt
+    // evidence, treated like a torn line: named, and the whole list withheld.
+    try { sequence(record.server_seq, "roster journal server_seq"); }
+    catch (error) {
+      try {
+        await eventCall("read-state.roster-journal-unreadable", { path: journalPath,
+          line: index + 1, reason: error?.message ?? String(error) });
+      } catch { /* logging is best-effort */ }
+      return [];
+    }
+    sequences.add(record.server_seq);
+  }
+  return [...sequences].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : 1);
+}
+
 export async function readStateCycle(config, limit, dependencies = {}) {
   const driverCall = dependencies.driverCall ?? driver;
   const requestCall = dependencies.requestCall ?? request;
   const eventCall = dependencies.eventCall ?? event;
   const localAgentsCall = dependencies.localAgentsCall ?? localAgentRoster;
+  const rosterSequencesCall = dependencies.rosterSequencesCall ?? rosterSequencesFor;
   const driverCapabilities = await driverCall("capabilities", config, []);
   if (!stage2ReadStateSupported(driverCapabilities)) {
     await eventCall("read-state.skipped", { reason: "driver-capability-not-advertised" });
@@ -2865,9 +2976,10 @@ export async function readStateCycle(config, limit, dependencies = {}) {
       missing: unmaterialised,
     });
   }
+  const rosterSeqs = await rosterSequencesCall(config, dependencies);
   const prepared = await driverCall("read-prepare", config, [{ type: "sync_read_context",
     min_available_seq: capabilities.min_available_seq, current_seq: capabilities.current_seq,
-    members, local_agents: localAgents }]);
+    members, local_agents: localAgents, roster_seqs: rosterSeqs }]);
   const batches = readStateUpdateBatches(members, prepared);
   const pageLimit = Math.min(limit, 1000);
   let page;
@@ -3977,7 +4089,7 @@ async function publicGet(serverUrl, path) {
   let response;
   try {
     response = await fetch(endpoint(serverUrl, path), {
-      headers: { "Agmsg-Protocol-Version": PROTOCOL },
+      headers: { "Agmsg-Protocol-Version": PROTOCOL, "Agmsg-Client-Version": clientVersion() },
       redirect: "error", signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {

@@ -201,7 +201,27 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   run curl -sS "$ENDPOINT/_test/rotate-server-id"
   [ "$status" -eq 0 ]
 
+  # #1176: this assertion goes red on CI roughly 3 times in 16 runs and has
+  # never once reproduced locally (15 isolated repeats, a whole-file run, a
+  # deliberate 6s delay here to give the background sync engine's poll a
+  # chance to fire, and the exact 4-file combination the age-v1-contract leg
+  # runs -- all green). Whatever the CI-only condition is, the state that
+  # would show it is gone the moment teardown() runs rm -rf on
+  # $TEST_SKILL_DIR. Dump it into the test's own output NOW, unconditionally
+  # -- bats only surfaces this stream when the test actually fails, so it
+  # costs nothing on the green runs and is exactly what the next red one is
+  # missing today.
+  echo "DIAG(#1176) pre-reconnect: date=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ 2>/dev/null || date -u)"
+  echo "DIAG(#1176) pre-reconnect: live server /v1/health = $(curl -sS "$ENDPOINT/v1/health" 2>&1)"
+  echo "DIAG(#1176) pre-reconnect: anchored=$anchored"
+  echo "DIAG(#1176) pre-reconnect: server.log tail:"
+  { tail -n 20 "$TEST_SKILL_DIR/server.log" 2>&1 | sed 's/^/DIAG(#1176)   /'; } || true
+  echo "DIAG(#1176) pre-reconnect: sync engine pidfile: $(cat "$TEST_SKILL_DIR/run/remote-sync.testteam.pid" 2>&1 || true)"
+  echo "DIAG(#1176) pre-reconnect: sync engine log tail:"
+  { tail -n 20 "$TEST_SKILL_DIR/run/remote-sync.testteam.log" 2>&1 | sed 's/^/DIAG(#1176)   /'; } || true
+
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  echo "DIAG(#1176) reconnect: status=$status output=$output"
   [ "$status" -ne 0 ]
   [[ "$output" == *"Refusing to re-anchor"* ]]
   # The binding still points at the server it was made against.
@@ -1607,6 +1627,67 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   fi
 }
 
+# #963's sibling: the client announces its own version on every request, so a
+# server can eventually tell an unannounced (pre-1.3.1) client apart from one
+# that announced and could not read VERSION. Covers both call surfaces that
+# reach the agmsg server -- remote-sync.mjs's fetch() (through pull, which
+# also exercises the engine's own requests) and remote.sh's own curl helpers
+# (through connect's POST /v1/connect and pull's GET /v1/capabilities +
+# /v1/members) -- and both directions: VERSION present names its value,
+# VERSION absent still sends the fixed "unknown" string rather than an empty
+# value or no header at all.
+@test "remote pull and connect: announce the client version, and 'unknown' when VERSION cannot be read" {
+  MOCK_TEAM_CIPHER_PROFILE=none
+  restart_mock_server
+
+  printf 'v1.3.1-test\n' > "$TEST_SKILL_DIR/VERSION"
+  # connect: both curl helpers in one call -- _remote_http_post_json for
+  # POST /v1/connect itself, then _remote_http_get_json (via
+  # _remote_adopt_registration) for the capabilities/members follow-up. pull
+  # does NOT go through either: it reaches the server through
+  # remote-sync.sh pull-bootstrap, i.e. remote-sync.mjs's fetch() path only
+  # -- confirmed by grepping cmd_pull for both curl helper names and finding
+  # neither. testteam already exists locally (setup()) and was minted with
+  # this mock server's team_id, so this is the cheapest way to reach it.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1-test" ]
+  # connect started a background engine that keeps polling with the version it
+  # read at spawn time, cached for its own process life -- left running, its
+  # next cycle would overwrite the check below with this stale value. Same
+  # reason every step below also disconnects before the next check.
+  bash "$SCRIPTS/remote.sh" disconnect testteam
+
+  # pull: remote-sync.mjs's fetch() path only (see above).
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" versioned1
+  [ "$status" -eq 0 ]
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1-test" ]
+  bash "$SCRIPTS/remote.sh" disconnect versioned1
+
+  rm -f "$TEST_SKILL_DIR/VERSION"
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" versioned2
+  [ "$status" -eq 0 ]
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "unknown" ]
+  bash "$SCRIPTS/remote.sh" disconnect versioned2
+
+  # An invalid byte in VERSION, under a UTF-8 locale, through connect again --
+  # a pull here would not exercise the bug this covers, per the note above.
+  # The curl helpers' sanitize step is a two-command pipeline (printf | sed),
+  # and LC_ALL=C binding to only the first of the two left sed running in the
+  # caller's own locale, where an invalid multibyte byte can make it fail
+  # outright ("illegal byte sequence" on stderr) instead of just not matching
+  # it (#1290 review). Forcing the locale here reproduces that even when the
+  # suite's own environment happens to be C already. testteam was
+  # disconnected, not forgotten, so it can be connected again.
+  printf 'v1.3.1-\xc3-bad\n' > "$TEST_SKILL_DIR/VERSION"
+  run env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+    bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  refute grep -qF -- "illegal byte sequence" <<<"$output"
+  refute grep -qF -- "sed:" <<<"$output"
+  [ "$(curl -sS "$ENDPOINT/_test/last-client-version" | jq -r '.value')" = "v1.3.1--bad" ]
+}
+
 # The three callers changed by #730, each with a start refusal injected.
 #
 # The refusal itself is covered in tests/test_remote_engine_start_refusal.bats,
@@ -2138,7 +2219,7 @@ PY_BIND
   [ "$status" -ne 0 ]
 }
 
-# unlock, with a start refusal injected (#730). advisor ruled this had to be
+# unlock, with a start refusal injected (#730). Review ruled this had to be
 # pinned rather than described: unlock is the only caller that discards the
 # helper's status with `|| true` and converts it, through
 # REMOTE_SYNC_ENGINE_PID and the readiness loop, into its own failure. A

@@ -45,6 +45,12 @@ CONNECT_SERVER_ID = "018f3f7e-3333-7000-8000-000000000001"
 # which is what a per-team edge does; a test sets it via /_test/health-team= to
 # make the server disagree with the client's binding.
 HEALTH_TEAM_ID = os.environ.get("MOCK_HEALTH_TEAM_ID", "")
+# The Agmsg-Client-Version header of the most recently received request, of
+# any method or route. None (not the string "unknown") when a request never
+# arrived, or arrived with no such header at all -- distinct from the client
+# sending the literal value "unknown", which a test needs to tell apart.
+# Read back via GET /_test/last-client-version.
+LAST_CLIENT_VERSION = None
 REGISTERED_TEAM_IDS = set()
 # team_id -> {"team_name": str, "members": [...]}, what /v1/connect was sent.
 REGISTERED_TEAMS = {}
@@ -264,7 +270,14 @@ class Handler(BaseHTTPRequestHandler):
         # Declared for the whole method: /_test/health-team assigns it, and
         # Python requires the declaration to precede the first mention anywhere
         # in the function — including the read in the /v1/health branch below.
-        global HEALTH_TEAM_ID, CONNECT_SERVER_ID, DROP_NEXT_CONNECT, FAIL_NEXT
+        global HEALTH_TEAM_ID, CONNECT_SERVER_ID, DROP_NEXT_CONNECT, FAIL_NEXT, LAST_CLIENT_VERSION
+        # Read before write, and only for a route under test: the inspection
+        # route itself is a request too, and capturing unconditionally would
+        # have it overwrite the very value it was asked to report.
+        if self.path == "/_test/last-client-version":
+            self._send_json(200, {"value": LAST_CLIENT_VERSION})
+            return
+        LAST_CLIENT_VERSION = self.headers.get("Agmsg-Client-Version")
         if self.path == "/v1/health":
             # Echo the team the caller asked about, the way a real per-team edge
             # answers. MOCK_HEALTH_TEAM_ID overrides it so a test can make the
@@ -584,6 +597,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._strip_capability_prefix()
+        global LAST_CLIENT_VERSION
+        LAST_CLIENT_VERSION = self.headers.get("Agmsg-Client-Version")
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b""
 
@@ -742,7 +757,57 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
 
+def _close_inherited_fds():
+    # #1107: this mock outlives the command that starts it -- every test backgrounds
+    # it and it runs until killed -- so every descriptor it inherits it holds for
+    # as long as it runs. Under a parallel bats run that inheritance included the
+    # harness's own high-numbered pipes (measured: fd 143 and 146), and bats then
+    # waited forever for an EOF this process was keeping from arriving, hanging the
+    # whole shard even though every test had already reported ok. The start sites
+    # close fd 3 by name (`3>&-`), which never reaches 143/146.
+    #
+    # The fix mirrors scripts/lib/close-fds.sh for the sync engine: close every
+    # descriptor at or above 3 that we inherited, BEFORE the listen socket is
+    # opened so it gets a fresh, un-closed fd. 0/1/2 are kept -- stdin is
+    # /dev/null, the port is printed on stdout, and stderr carries the log.
+    # Enumerate /dev/fd when present (exact, and reaches the high fds a fixed
+    # range would still cover but is cheaper than sweeping to the rlimit); fall
+    # back to a bounded range otherwise. Closing an already-closed fd is ignored.
+    keep = (0, 1, 2)
+    try:
+        fds = [int(e) for e in os.listdir("/dev/fd") if e.isdigit()]
+    except OSError:
+        fds = list(range(3, 256))
+    for fd in fds:
+        if fd in keep:
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _report_open_fds(path):
+    # Test-only (#1107). After the close above, write this process's open
+    # descriptors so a test can prove nothing the harness opened survived. It is
+    # read against a BASELINE (this same report with nothing extra inherited),
+    # the way test_engine_inherited_fds.bats does for the engine: the descriptor
+    # the listing itself opens appears in both and cancels, so only a leaked
+    # inherited fd shows as a difference. The list is taken before this file is
+    # opened, so the report's own fd is not counted.
+    try:
+        entries = sorted(int(e) for e in os.listdir("/dev/fd") if e.isdigit())
+    except OSError:
+        entries = []
+    with open(path, "w") as fh:
+        fh.write("".join("%d\n" % fd for fd in entries))
+
+
 def main():
+    _close_inherited_fds()
+    report = os.environ.get("MOCK_FD_REPORT", "")
+    if report:
+        _report_open_fds(report)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     server = LoopbackHTTPServer(("127.0.0.1", port), Handler)
     print(server.server_port, flush=True)

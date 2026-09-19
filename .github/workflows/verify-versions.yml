@@ -6,18 +6,26 @@
 
 name: verify-versions
 
-# `integration/remote` is here because releases are cut from it. Every
-# prerelease so far -- 1.2.0-rc.1 through rc.3 -- was cut from that branch, so
-# its release PR targeted `integration/remote` and this check never ran on any
-# of them. `release.yml` runs the same `--check` at tag time and would have
-# stopped a bad tag, so nothing shipped out of sync; the cost was that the
-# failure would have surfaced at publish instead of at review, on a branch
-# nobody could see it coming from (#679).
+# Integration branches are here because releases are cut from them. Every
+# prerelease through 1.2.0-rc.3 was cut from `integration/remote`, so its
+# release PR targeted that branch and this check never ran on any of them.
+# `release.yml` runs the same `--check` at tag time and would have stopped a
+# bad tag, so nothing shipped out of sync; the cost was that the failure would
+# have surfaced at publish instead of at review, on a branch nobody could see
+# it coming from (#679).
+#
+# The filter is `integration/**`, not one branch name, because naming them one
+# at a time is a gate that goes quiet exactly when a new one appears: a PR onto
+# an unlisted base reports `mergeStateStatus: CLEAN`, which means "nothing to
+# check", not "everything checked". The PR's summary status alone does not
+# separate those two (measured 2026-08-31 on a PR retargeted onto a fresh
+# integration branch); the detail views do, which is the reason a merge is
+# gated on a run whose headSha matches the head rather than on that status.
 on:
   push:
-    branches: [main, integration/remote]
+    branches: [main, 'integration/**']
   pull_request:
-    branches: [main, integration/remote]
+    branches: [main, 'integration/**']
 
 jobs:
   check:
