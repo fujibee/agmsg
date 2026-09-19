@@ -87,6 +87,10 @@ DB="$(agmsg_db_path "$TEAM")"
 # command; the message write itself goes through the storage facade below.
 [ -f "$DB" ] || bash "$SCRIPT_DIR/internal/init-db.sh" >/dev/null
 
+# Unconditional (moved ahead of the --force gate below): the ext-tool
+# dispatch check after storage_send needs this path regardless of --force.
+TEAM_CONFIG="$SCRIPT_DIR/../teams/$TEAM/config.json"
+
 # #355: reject a from/to that isn't registered in <team> — an unnoticed typo
 # (e.g. a stray send to "dummy") used to insert successfully with exit 0,
 # landing an undeliverable message and polluting history. Validation lives
@@ -94,8 +98,6 @@ DB="$(agmsg_db_path "$TEAM")"
 # can keep their own policy. --force bypasses this for intentional
 # pre-registration sends (e.g. notifying a role before its own join.sh runs).
 if [ "$FORCE" -ne 1 ]; then
-  TEAM_CONFIG="$SCRIPT_DIR/../teams/$TEAM/config.json"
-
   _agmsg_roster_check() {
     local role="$1" name="$2"
     if [ ! -f "$TEAM_CONFIG" ]; then
@@ -133,7 +135,51 @@ fi
 # the message log (an append-only message_sent event), not a direct INSERT.
 # storage_send re-inits its schema idempotently before writing, which subsumes the
 # #114 concurrent first-write race the old path retried around (a process seeing
-# the DB file before the table exists just creates it). The new id is not surfaced.
-storage_send "$TEAM" "$FROM" "$TO" "$BODY" >/dev/null
+# the DB file before the table exists just creates it).
+MSG_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY")"
 
 echo "Sent to $TO in team $TEAM"
+
+# ext-tool dispatch (see scripts/drivers/ext-tools/README.md): fires
+# only when $TO is registered as ext-tool AND joined ON THIS MACHINE (its
+# member config exists locally) -- a message that only arrived here through
+# remote sync is explicitly out of scope for v1 (the tool never ran anything
+# for it on the machine it was actually addressed to). Best-effort: any
+# failure below is reported but never turns a successful send into a failed
+# one -- the message is already saved by this point.
+if [ -n "${MSG_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
+  TO_SQL=${TO//\'/\'\'}
+  TO_TYPE="$(agmsg_sqlite_mem "
+    WITH raw(json) AS (SELECT CAST(readfile('$(agmsg_sql_readfile_path "$TEAM_CONFIG")') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
+    agent(a) AS (SELECT value FROM cfg, json_each(json_extract(cfg.json, '\$.agents')) WHERE key = '$TO_SQL')
+    SELECT CASE
+      WHEN EXISTS(
+        SELECT 1 FROM agent, json_each(json_extract(agent.a, '\$.registrations'))
+        WHERE json_extract(value, '\$.type') = 'ext-tool'
+      ) THEN 'ext-tool'
+      WHEN (SELECT json_extract(agent.a, '\$.type') FROM agent) = 'ext-tool' THEN 'ext-tool'
+      ELSE ''
+    END;
+  " 2>/dev/null)"
+  if [ "$TO_TYPE" = ext-tool ]; then
+    EXT_TOOL_CONFIG="$SCRIPT_DIR/../ext-tools/$TEAM/$TO.conf"
+    if [ -f "$EXT_TOOL_CONFIG" ]; then
+      # Same defensive key=value read as ext-tool-dispatch.sh's own timeout=
+      # read: never sourced, first match, empty on any miss.
+      EXT_TOOL_LINE="$( { grep -E '^[[:space:]]*tool[[:space:]]*=' "$EXT_TOOL_CONFIG" 2>/dev/null || true; } | head -1)"
+      EXT_TOOL_NAME="${EXT_TOOL_LINE#*=}"
+      EXT_TOOL_NAME="${EXT_TOOL_NAME#"${EXT_TOOL_NAME%%[![:space:]]*}"}"
+      EXT_TOOL_NAME="${EXT_TOOL_NAME%"${EXT_TOOL_NAME##*[![:space:]]}"}"
+      if [ -n "$EXT_TOOL_NAME" ]; then
+        mkdir -p "$SCRIPT_DIR/../run"
+        EXT_TOOL_BODY_FILE="$(mktemp)"
+        printf '%s' "$BODY" > "$EXT_TOOL_BODY_FILE"
+        nohup bash "$SCRIPT_DIR/internal/ext-tool-dispatch.sh" \
+          "$TEAM" "$FROM" "$TO" "$EXT_TOOL_NAME" "$MSG_ID" "$EXT_TOOL_BODY_FILE" \
+          >>"$SCRIPT_DIR/../run/ext-tool-dispatch.$TEAM.$TO.log" 2>&1 3>&- 4>&- &
+        disown 2>/dev/null || true
+      fi
+    fi
+  fi
+fi

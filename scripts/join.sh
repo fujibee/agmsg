@@ -8,11 +8,6 @@ set -euo pipefail
 TEAM="${1:?Usage: join.sh <team> <agent_id> <type> <project_path> [--force]}"
 AGENT_ID="${2:?Missing agent_id}"
 AGENT_TYPE="${3:?Missing type (a registered type under scripts/drivers/types/<name>/)}"
-PROJECT_PATH="${4:?Missing project_path}"
-FORCE=0
-if [ "${5:-}" = "--force" ]; then
-  FORCE=1
-fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
@@ -31,10 +26,64 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
 
 # Reject team names that would escape teams/ as a path segment (#140).
+# Moved ahead of the ext-tool block below (it used to run further down):
+# $TEAM becomes a path segment in an ext-tool config path before any of the
+# rest of this script runs, so it must be validated before that, not after.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
 agmsg_validate_team_name "$TEAM" || exit 1
 agmsg_validate_agent_name "$AGENT_ID" || exit 1
+
+# ext-tool takes `--tool <tool>` in place of a project path: it is a program,
+# not a session tied to a filesystem project the way every other type is.
+# join refuses outright
+# (writes no registration) when the tool doesn't exist or the member has no
+# config yet -- an unconfigured ext-tool member would otherwise join fine and
+# then fail every send in silence.
+EXT_TOOL_NAME=""
+if [ "$AGENT_TYPE" = ext-tool ]; then
+  if [ "${4:-}" != "--tool" ] || [ -z "${5:-}" ]; then
+    echo "Usage: join.sh <team> <agent_id> ext-tool --tool <tool> [--force]" >&2
+    exit 1
+  fi
+  EXT_TOOL_NAME="$5"
+  # A human-readable placeholder, not a real path: ext-tool has no project.
+  # The registration still carries a `project` field (every other type's
+  # does) so downstream JSON readers never have to special-case ext-tool for
+  # ITS ABSENCE; they just never resolve it to anything on disk.
+  PROJECT_PATH="(ext-tool:$EXT_TOOL_NAME)"
+  FORCE=0
+  if [ "${6:-}" = "--force" ]; then
+    FORCE=1
+  fi
+
+  EXT_TOOL_DRIVER_DIR="$SCRIPT_DIR/drivers/ext-tools/$EXT_TOOL_NAME"
+  if [ ! -f "$EXT_TOOL_DRIVER_DIR/tool.conf" ]; then
+    AVAILABLE=""
+    for _agmsg_et_dir in "$SCRIPT_DIR"/drivers/ext-tools/*/; do
+      [ -f "${_agmsg_et_dir}tool.conf" ] || continue
+      AVAILABLE="${AVAILABLE:+$AVAILABLE, }$(basename "$_agmsg_et_dir")"
+    done
+    unset _agmsg_et_dir
+    echo "Unknown ext-tool: '$EXT_TOOL_NAME' (available: ${AVAILABLE:-none})" >&2
+    exit 1
+  fi
+
+  EXT_TOOL_CONFIG="$SKILL_DIR/ext-tools/$TEAM/$AGENT_ID.conf"
+  if [ ! -f "$EXT_TOOL_CONFIG" ]; then
+    {
+      echo "agmsg: '$EXT_TOOL_NAME' is not configured for '$AGENT_ID' in team '$TEAM' yet."
+      echo "  Follow $EXT_TOOL_DRIVER_DIR/SETUP.md to configure it, then join again."
+    } >&2
+    exit 1
+  fi
+else
+  PROJECT_PATH="${4:?Missing project_path}"
+  FORCE=0
+  if [ "${5:-}" = "--force" ]; then
+    FORCE=1
+  fi
+fi
 
 # Resolve the session's real project root from the passed pwd (see #92), so an
 # agent-driven join from a subdir/worktree registers under the project the
@@ -56,8 +105,14 @@ source "$SCRIPT_DIR/lib/roster-journal.sh"
 # legitimate use case. The #357 protection is on the resolution side: the
 # ancestor walk never LANDS on $HOME/`/`, so such a registration only ever
 # matches its exact path and cannot silently vacuum up sessions beneath it.
-PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE" "$TEAM")"
-PROJECT_PATH="$(agmsg_normalize_project_path "$PROJECT_PATH")"
+# Skipped for ext-tool: PROJECT_PATH there is already the synthetic
+# "(ext-tool:<tool>)" placeholder set above, not a real filesystem path, and
+# resolve/normalize's session-marker and ancestor-directory lookups would
+# have nothing meaningful to match it against.
+if [ -z "$EXT_TOOL_NAME" ]; then
+  PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE" "$TEAM")"
+  PROJECT_PATH="$(agmsg_normalize_project_path "$PROJECT_PATH")"
+fi
 
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
 
