@@ -20,7 +20,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/_lib.sh"
 
-fail() { printf '%s\n' "$*" >&2; exit 1; }
+# Not a trap: _slack_api_call sets and clears its OWN EXIT/INT/TERM trap
+# around its temp work_dir (traps are process-global, so a trap set here
+# would be silently overwritten -- or cleared -- by that inner call). Cheap
+# enough to remove explicitly on every path instead, and $out_file never
+# holds anything more sensitive than Slack's own JSON response.
+fail() {
+  printf '%s\n' "$*" >&2
+  [ -n "${out_file:-}" ] && rm -f "$out_file"
+  exit 1
+}
 
 input="$(cat)"
 config_path="$(printf '%s' "$input" | jq -r '.config_path // empty' 2>/dev/null)" ||
@@ -37,15 +46,23 @@ channel="$(_slack_conf_get "$config_path" channel)"
 
 token="$(_slack_read_token "$key_file")" || fail "key file not readable or empty: $key_file"
 
-response="$(_slack_api_post "$token" chat.postMessage \
-  "$(jq -cn --arg channel "$channel" --arg text "$body" '{channel: $channel, text: $text}')")" ||
-  fail "chat.postMessage request failed (network error)"
+out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-handle.XXXXXX")"
 
-ok="$(printf '%s' "$response" | jq -r '.ok // false' 2>/dev/null || echo false)"
-if [ "$ok" != "true" ]; then
-  error="$(printf '%s' "$response" | jq -r '.error // "unknown_error"' 2>/dev/null || echo unknown_error)"
-  fail "chat.postMessage failed: $error"
-fi
+_slack_api_call "$token" POST chat.postMessage "$out_file" \
+  "$(jq -cn --arg channel "$channel" --arg text "$body" '{channel: $channel, text: $text}')" ||
+  fail "chat.postMessage request failed: $_SLACK_CURL_DIAG"
+
+case "$_SLACK_HTTP_CODE" in
+  429) fail "chat.postMessage rate limited (HTTP 429)" ;;
+  2??) : ;;
+  *) fail "chat.postMessage returned unexpected HTTP $_SLACK_HTTP_CODE" ;;
+esac
+
+ok="$(jq -r '.ok // false' "$out_file" 2>/dev/null || echo false)"
+error=""
+[ "$ok" = "true" ] || error="$(jq -r '.error // "unknown_error"' "$out_file" 2>/dev/null || echo unknown_error)"
+rm -f "$out_file"
+[ "$ok" = "true" ] || fail "chat.postMessage failed: $error"
 
 # Fire-and-forget by default (design note §6): no reply body. A future
 # revision that wants the permalink back would call chat.getPermalink here

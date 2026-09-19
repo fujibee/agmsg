@@ -46,22 +46,27 @@ to a file only you get the *path* to — you only ever handle that path.
      them add `chat:write` and `channels:read` under OAuth & Permissions,
      reinstall the app, and get a fresh token.
 
-   Ask the user which channel to post to (name or ID), then:
+   Ask the user which channel to post to, **by channel ID, not name** —
+   `check channel` calls Slack's `conversations.info`, which only accepts an
+   ID (`C…`), never a `#name`. If the user gives a name, tell them how to get
+   the ID: in Slack, click the channel name at the top of the channel → the
+   panel that opens shows the Channel ID at the very bottom (or: right-click
+   the channel in the sidebar → "View channel details" → same place). Then:
    ```
-   scripts/drivers/ext-tools/slack/setup check channel <key_file> <channel>
+   scripts/drivers/ext-tools/slack/setup check channel <key_file> <channel_id>
    ```
    - `{"ok":true,"exists":true,"bot_member":true}` → ready.
    - `{"ok":true,"exists":true,"bot_member":false}` → channel is real but the
      bot isn't in it. Tell the user to run `/invite @<the app's name>` in
      that channel (the name they gave the app in step 1), then check again.
-   - `{"ok":false,"error":"channel_not_found"}` → the channel doesn't exist
-     or the bot can't see it (a private channel needs the invite too, and
-     `channels:read` alone only sees public channels — add `groups:read` and
-     reinstall if the target is private).
+   - `{"ok":false,"error":"channel_not_found"}` → the ID is wrong, or it's a
+     private channel and the bot lacks `groups:read` (public channels only
+     need `channels:read`) — add `groups:read` and reinstall if the target
+     is private.
 
 5. **Save, then send a real test message.**
    ```
-   scripts/drivers/ext-tools/slack/setup save <config_path> <key_file> <channel>
+   scripts/drivers/ext-tools/slack/setup save <config_path> <key_file> <channel_id>
    scripts/drivers/ext-tools/slack/setup test <config_path>
    ```
    `<config_path>` is `~/.agents/skills/agmsg/ext-tools/<team>/<name>.conf`.
@@ -76,12 +81,8 @@ to a file only you get the *path* to — you only ever handle that path.
 |---|---|---|
 | `invalid_auth` | token is wrong, revoked, or from the wrong workspace | re-copy the token from step 2, re-save via `secret` |
 | `not_in_channel` | bot has a valid token but isn't a member of the channel | `/invite @<bot>` in that channel |
-| `channel_not_found` | channel name/ID is wrong, or it's private and the bot lacks `groups:read` | confirm the channel exists; add `groups:read` + reinstall for a private channel |
+| `channel_not_found` | channel ID is wrong, or it's private and the bot lacks `groups:read` | confirm the ID; add `groups:read` + reinstall for a private channel |
 | `missing_scope` | the installed app doesn't have `chat:write` (or `channels:read` for `check channel`) | add the scope in OAuth & Permissions, reinstall, get a new token |
 | `account_inactive` / `token_revoked` | the token was revoked (app uninstalled, token rotated) | reinstall the app, save the new token |
-
-If `setup` itself reports a network error (no `error` field, just a
-generic failure), check `AGMSG_SLACK_API_BASE` is unset in the real
-environment — it exists only so the test suite can point at a fake server,
-and a value left set from testing would silently redirect real messages
-nowhere.
+| rate limited (HTTP 429) | too many requests too fast | wait a few seconds and retry; not a configuration problem |
+| a one-line message naming `curl`, a host, or a timeout | `handle`/`setup` couldn't reach the API at all (DNS, network, TLS) | check the machine's network; if `AGMSG_SLACK_API_BASE` is set in the real environment (it should only be set by the test suite), unset it — a value left over from testing silently redirects real messages nowhere |
