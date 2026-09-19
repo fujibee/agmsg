@@ -130,11 +130,18 @@ printf '%s' "$PAYLOAD" > "$PAYLOAD_FILE"
 # bug this whole rewrite exists to close, just moved one level up). Instead:
 # this script creates DONE_FILE the moment wait returns, and the killer
 # checks for DONE_FILE BEFORE doing anything, not after -- if handle already
-# finished, the killer sees DONE_FILE and does nothing at all, and simply
-# runs to completion (and exit) on its own once its own sleep ends. It is
-# never left as a standing process: at worst it keeps existing, asleep, for
-# up to TIMEOUT more seconds after handle already finished, then exits by
-# itself with nothing left to reap it explicitly.
+# finished, the killer sees DONE_FILE and does nothing at all.
+#
+# This script itself then `wait`s for the killer (see below, after the
+# reply is already sent) rather than exiting right away. It is never a
+# standing process even so: it always exits once the killer does, which is
+# at most TIMEOUT seconds away, not indefinitely. Exiting immediately after
+# the reply, instead, let the EXIT trap delete DONE_FILE while the killer
+# was still asleep -- on every ordinary fast-finishing call, not just the
+# narrow boundary case below, the killer would then wake up, find no
+# DONE_FILE, and wrongly signal a group that had already finished (review
+# finding: this actually happened, on every fast call, not a theoretical
+# race).
 set -m
 "$HANDLE" <"$PAYLOAD_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE" &
 HPID=$!
@@ -149,6 +156,7 @@ set +m
     kill -KILL -- "-$HPID" 2>/dev/null || true
   fi
 ) &
+KILLER_PID=$!
 
 RC=0
 wait "$HPID" 2>/dev/null || RC=$?
@@ -184,3 +192,16 @@ elif [ "$RC" -ne 0 ]; then
 else
   _reply "$(cat "$STDOUT_FILE")"
 fi
+
+# Wait for the killer to finish on its own -- it will see DONE_FILE, already
+# written above, and do nothing -- BEFORE this script's own EXIT trap
+# removes DONE_FILE. Sending the reply first and returning immediately used
+# to let the trap delete DONE_FILE while the killer was still asleep: on
+# every ordinary fast-finishing call (not just the narrow boundary case
+# above), the killer would then wake up, find no DONE_FILE, and wrongly
+# TERM/KILL a group that had already finished (review finding: this was not
+# theoretical, it happened on every fast call). dispatch already runs
+# detached in the background -- send.sh never waits on it, the reply is
+# already sent above -- so lingering here for up to TIMEOUT more seconds
+# costs nothing.
+wait "$KILLER_PID" 2>/dev/null || true

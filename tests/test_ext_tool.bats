@@ -7,9 +7,14 @@ setup() {
   FAKETOOL_DIR="$SCRIPTS/drivers/ext-tools/faketool"
   mkdir -p "$FAKETOOL_DIR"
 
+  # A few seconds, not the default 30s, so the fast-completion scenario below
+  # (checking dispatch is still alive, still waiting on its killer, shortly
+  # after the reply lands) does not have to wait long -- but long enough to
+  # comfortably outlast the handful of subprocess-spawning assertions
+  # between the reply landing and that check.
   printf '%s\n' \
     'name=faketool' \
-    'timeout=10' \
+    'timeout=4' \
     > "$FAKETOOL_DIR/tool.conf"
 
   printf '%s\n' \
@@ -142,6 +147,28 @@ teardown() { teardown_test_env; }
 
   # The reply is FROM bot, TO sender — a normal message, not a special channel.
   bash "$SCRIPTS/history.sh" et-team sender | grep -qF "bot → sender: faketool reply: ping-et-1284"
+
+  # After a handle that already finished fast, dispatch must stay running
+  # (waiting on the killer subshell) rather than exit right after sending
+  # the reply -- an earlier version exited immediately, which let its own
+  # EXIT trap delete DONE_FILE before the killer, still asleep, ever got to
+  # check it; the killer would then always conclude handle had NOT finished
+  # and fire a stale TERM/KILL a full timeout= later, on every single fast
+  # call, not just some rare boundary case. Checked shortly after the reply
+  # already landed, well before tool.conf's own timeout= elapses -- a fixed
+  # dispatch is still there; a buggy, already-exited one is not.
+  # Two processes share this exact command line while both are alive: the
+  # main dispatch script (blocked in `wait "$HPID"`, then `wait
+  # "$KILLER_PID"`) and the killer subshell itself (`ps` shows a subshell
+  # under the same argv as its parent, since it never execs a new program).
+  # Checking for "at least one" would pass even with the bug reintroduced --
+  # the orphaned killer alone still matches. Only the count distinguishes
+  # them: a dispatch that exited early leaves exactly one (the killer,
+  # still asleep); the fix keeps both alive together until the killer
+  # itself wakes and finds DONE_FILE.
+  local dispatch_procs
+  dispatch_procs="$(pgrep -f "ext-tool-dispatch\.sh et-team sender bot faketool" | wc -l | tr -d ' ')"
+  [ "$dispatch_procs" -ge 2 ]
 
   # (v) A handle that never returns times out on tool.conf's own timeout=,
   # and the sender gets a named failure reply instead of waiting forever or
