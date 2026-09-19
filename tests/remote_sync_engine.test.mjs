@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
   utimes, writeFile } from "node:fs/promises";
@@ -58,6 +59,7 @@ import {
   validateMembers,
   validateReadStatePage,
   validateResyncResult,
+  withTeamConfigLock,
   validateResyncStatus,
   verifyAgeSnapshot,
   verifyAgeHandoff,
@@ -2195,6 +2197,49 @@ exit 7
     // The property this test exists for.
     assert.ok(!existsSync(lockFor(join(root, `child-${index}.pid`))),
       "the driver was killed before its trap could release the lock");
+  }
+});
+
+test("SIGTERM while this process holds the team config lock releases it before exit",
+  { timeout: 30_000 }, async () => {
+  // The leaked locks this guards against were never a crash: remote.sh's own
+  // "stop the old engine" path sends SIGTERM first (scripts/remote.sh), and a
+  // handler-less Node process drops a pending `finally` on SIGTERM exactly as
+  // it does on SIGKILL (measured separately, not assumed) -- so an ordinary
+  // stop mid-critical-section is exactly as lock-leak-prone as a hard kill.
+  // Real process, real signal: a handler installed on THIS test's process
+  // would answer a different question.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-lock-sigterm-"));
+  const lockDir = join(root, "teams", "demo", ".config.lock");
+  const holderPath = `${lockDir}.holder`;
+  const scriptPath = join(root, "hold-lock.mjs");
+  const modulePath = fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url));
+  await mkdir(dirname(lockDir), { recursive: true });
+  await writeFile(scriptPath,
+    `import { withTeamConfigLock } from ${JSON.stringify(modulePath)};\n` +
+    // A bare never-resolving promise has no libuv handle behind it, so it
+    // would not keep this process alive at all -- it would just run to
+    // completion and exit 0 with the lock still held, never reaching SIGTERM.
+    // The real held-lock window (an in-flight capabilities request, or the
+    // engine's own loop) always has one; this stands in for it.
+    "setInterval(() => {}, 1_000_000);\n" +
+    "withTeamConfigLock(\"demo\", () => new Promise(() => {})).catch(() => {});\n");
+  const child = spawn(process.execPath, [scriptPath],
+    { env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root }, stdio: "ignore" });
+  try {
+    // Bounded: taking the lock is this child's first async step.
+    for (let attempt = 0; attempt < 200 && !existsSync(lockDir); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(existsSync(lockDir), "child never took the team config lock");
+    assert.ok(existsSync(holderPath), "child never wrote its holder");
+    child.kill("SIGTERM");
+    await once(child, "exit");
+    assert.ok(!existsSync(lockDir), "SIGTERM left the lock directory behind");
+    assert.ok(!existsSync(holderPath), "SIGTERM left the holder file behind");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await rm(root, { recursive: true });
   }
 });
 
