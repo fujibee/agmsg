@@ -72,6 +72,15 @@ _wait_for() {
     "$SCRIPTS/watch.sh" > "$SCRIPTS/watch.sh.new"
   chmod +x "$SCRIPTS/watch.sh.new"
   mv "$SCRIPTS/watch.sh.new" "$SCRIPTS/watch.sh"
+
+  # A real install's own scripts/ writes and its VERSION write are separate
+  # steps too, so a poll landing between them is not a rare accident -- it is
+  # the normal case. This sleep, longer than AGMSG_WATCH_INTERVAL above,
+  # guarantees at least one poll lands in that gap here, so a regression in
+  # _handle_install_changed's wait-for-ready behavior fails this test every
+  # time rather than one time in several (#684 review round 4 -- reproduced
+  # under bash 3.2 at roughly a coin flip before this fix).
+  sleep 2
   printf '0.0.0-test\n' > "$TEST_SKILL_DIR/VERSION"
 
   bash "$SCRIPTS/send.sh" team bob alice "after-the-update" >/dev/null
@@ -92,7 +101,12 @@ _wait_for() {
 @test "watch: a scripts change with no completed VERSION keeps the original exit, never execs a half-finished install (#684)" {
   local out="$BATS_TEST_TMPDIR/out3.txt"
   : > "$out"
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" sid-684c "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  # Real installs finish within a couple of seconds at most; the incomplete-
+  # generation timeout is a production safety net measured in tens of
+  # seconds, not something this test should sit through at full length just
+  # to observe the fallback. Shortened here only.
+  AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=2 \
+    bash "$SCRIPTS/watch.sh" sid-684c "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
   local pid=$!
 
   bash "$SCRIPTS/send.sh" team bob alice "before-half-update" >/dev/null
@@ -102,7 +116,9 @@ _wait_for() {
   # A change under scripts/ with no matching VERSION write -- what install.sh's
   # own rewrite window looks like mid-copy (#963): some files already
   # rewritten, the completion marker not yet published. Must not be exec'd as
-  # a finished generation.
+  # a finished generation, and must fall back to the original exit only once
+  # the (shortened, above) incomplete-generation timeout elapses -- not
+  # immediately, since a real install may still be about to finish.
   touch "$SCRIPTS/config.sh"
 
   # Same load-bearing `|| true` as the exit-path tests: a timeout here must
@@ -126,7 +142,8 @@ _wait_for() {
   # finished the moment its first scripts write lands.
   local out2="$BATS_TEST_TMPDIR/out4.txt"
   : > "$out2"
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" sid-684d "$PROJ" claude-code >"$out2" 2>/dev/null 3>&- 4>&- &
+  AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=2 \
+    bash "$SCRIPTS/watch.sh" sid-684d "$PROJ" claude-code >"$out2" 2>/dev/null 3>&- 4>&- &
   local pid2=$!
 
   bash "$SCRIPTS/send.sh" team bob alice "before-tie-update" >/dev/null

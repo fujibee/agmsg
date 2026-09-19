@@ -714,6 +714,38 @@ _install_complete() {
   [ "$version_file" -nt "$INSTALL_STAMP" ]
 }
 
+# True once BOTH a complete generation and an executable watch.sh are in
+# place -- the two conditions a restart actually needs. Split out so the main
+# handler below can ask "can I go now?" without repeating both checks.
+_install_ready() {
+  _install_complete && [ -x "$SCRIPT_DIR/watch.sh" ]
+}
+
+# How long an install that has started (changed files exist) but not yet
+# finished (not _install_ready) is tolerated before falling back to the
+# visible exit (review finding, round 4, #684 follow-up). install.sh writes
+# scripts/ over many separate file operations before its own last write
+# (VERSION); a watcher's poll can land in that window on essentially any real
+# install, not just a rare half-written one, so committing to the visible
+# exit the FIRST time this is observed was giving up too early.
+#
+# Time-based, not a poll count (#779's own reasoning applies here too): the
+# poll interval is itself configurable, so a count-based bound would silently
+# change how long this actually waits whenever the interval changes.
+# Overridable via the environment for tests, unlike the restart cap above --
+# this value is never carried across an exec or inherited from a different
+# process, so it carries none of that cap's forgeable/inherited-chain risk.
+AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT="${AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT:-60}"
+case "$AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT" in
+  ''|*[!0-9]*) AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=60 ;;
+esac
+
+# Wall-clock time this cycle first observed "changed but not ready" -- empty
+# means either nothing has changed yet, or it already resolved (readied and
+# restarted, which never returns here to clear it -- exec starts a fresh
+# process with this unset again -- so no explicit reset is needed there).
+_INSTALL_INCOMPLETE_SINCE=""
+
 # Fixed, internal, non-negotiable (review finding: an env-supplied limit can
 # be forged or inherited from an unrelated process). Tagged with this exact
 # (session id, pid) chain so a restart count inherited from a DIFFERENT
@@ -775,15 +807,19 @@ _install_restart_count_reset() {
 # self-restart path must not be used for that release -- it falls back to
 # today's stop-and-manually-rearm behavior instead, same as before this PR.
 #
-# Falls back to the ORIGINAL exit (unchanged message) if the install has not
-# (yet, or ever) published a complete generation, or if the installed
-# watch.sh cannot be found executable -- an interrupted or partial install
-# looks like either -- so a still-changing or broken install still produces
-# the same clear stop it always has, rather than risking a mixed generation.
-_install_restart_or_exit() {
-  local new_watch="$SCRIPT_DIR/watch.sh" restarts
+# Not ready yet is NOT an immediate exit (review finding, round 4): it just
+# returns, leaving the rest of this cycle's loop body -- the liveness guard,
+# message delivery, the sleep -- to run exactly as it would have if nothing
+# had changed. Delivery keeps working while an install is still in flight;
+# only once _WATCH_INSTALL_INCOMPLETE_TIMEOUT seconds have passed without
+# ever becoming ready does this fall back to the ORIGINAL, unchanged exit --
+# a still-changing-past-the-timeout or genuinely broken install still
+# produces the same clear stop it always has, rather than an indefinite wait.
+_handle_install_changed() {
+  local new_watch="$SCRIPT_DIR/watch.sh" restarts now
 
-  if _install_complete && [ -x "$new_watch" ]; then
+  if _install_ready; then
+    _INSTALL_INCOMPLETE_SINCE=""
     restarts="$(_install_restart_count)"
     if [ "$restarts" -lt "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
       watch_log "the agmsg installation was updated while this watcher was running; restarting on the new code (same process, same subscription)."
@@ -801,6 +837,16 @@ _install_restart_or_exit() {
     fi
     watch_report "the agmsg installation kept changing across $restarts restart(s) in a row; exiting rather than looping. Restart this session (or run /agmsg actas <name>) to resume delivery."
     exit 0
+  fi
+
+  now="$(date +%s)"
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -z "$_INSTALL_INCOMPLETE_SINCE" ]; then
+    _INSTALL_INCOMPLETE_SINCE="$now"
+    return 0
+  fi
+  if [ "$((now - _INSTALL_INCOMPLETE_SINCE))" -lt "$AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT" ]; then
+    return 0
   fi
 
   watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. Exiting rather than appearing to work. Restart this session (or run /agmsg actas <name>) to resume delivery."
@@ -1062,19 +1108,27 @@ STUCK_MAP=""
 source "$SCRIPT_DIR/lib/watch-stuck-map.sh"
 
 while true; do
-  # The installation changed under us (#684). _install_restart_or_exit execs
-  # the new watch.sh in place when it can, so the stream never visibly stops;
-  # its own exit paths still report on STDOUT (watch_report, not watch_log --
-  # every launcher we ship sends this watcher's stderr to /dev/null) so "the
-  # monitor stopped" is what the session sees, instead of a live process
-  # silently delivering nothing.
+  # The installation changed under us (#684). _handle_install_changed execs
+  # the new watch.sh in place once it can prove the generation is finished,
+  # so the stream never visibly stops; its own exit paths still report on
+  # STDOUT (watch_report, not watch_log -- every launcher we ship sends this
+  # watcher's stderr to /dev/null) so "the monitor stopped" is what the
+  # session sees, instead of a live process silently delivering nothing.
+  # Not-yet-ready is handled by returning rather than exiting, so this falls
+  # through to the rest of the loop body below on a cycle spent waiting --
+  # delivery is not paused while an install is still in flight.
   if _install_changed; then
-    _install_restart_or_exit
+    _handle_install_changed
+  else
+    # Reaching here means this cycle saw no change at all -- the "one clean
+    # cycle" that ends a run of consecutive restarts (see
+    # _install_restart_count above). A no-op on a watcher that never
+    # restarted. Deliberately NOT run on a cycle spent waiting for
+    # completion (the `if` branch above): the change is still pending, so
+    # resetting the consecutive-restart count here would let a rapid
+    # restart-wait-restart cycle dodge the cap it exists to enforce.
+    _install_restart_count_reset
   fi
-  # Reaching here means this cycle saw no change -- the "one clean cycle"
-  # that ends a run of consecutive restarts (see _install_restart_count
-  # above). A no-op on a watcher that never restarted.
-  _install_restart_count_reset
   # Liveness guard (#67): exit promptly once the originating agent session is
   # gone. A plain pipe gives no portable way to notice a *downstream* consumer
   # that closed silently — printf '' raises no EPIPE, and macOS buffers a final
