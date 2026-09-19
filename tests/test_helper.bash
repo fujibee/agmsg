@@ -390,14 +390,23 @@ wait_for_file_contains() {
 # loop is scheduled, and a loaded CI runner is exactly where that gap widens
 # (review finding, #1339: this is what made the slack/jev mock-server tests
 # flake on a busy macos-latest runner while ubuntu/windows stayed green).
-# Polls a real TCP connect via bash's own /dev/tcp, bounded by the same
-# ceiling every other wait_for_* helper here uses. On timeout, prints
+# Polls a real TCP connect via bash's own /dev/tcp. On timeout, prints
 # exactly what it was waiting for (the port file's path and, if it got that
 # far, the port itself) instead of leaving the caller's own assertion to
 # report a bare failure with no context.
+#
+# Uses its OWN, longer ceiling (30s, not the shared 10s _WAIT_TICKS every
+# other wait_for_* helper here uses): this waits on a fresh python3
+# subprocess actually being scheduled and finishing its own startup/import
+# work, not an in-process condition -- a real fork+exec, which a saturated
+# CI runner can push past 10s on its own even when nothing is actually
+# broken (review finding, #1339 round 2: this recurred on a LATER macos CI
+# run, that time never even reaching the port-file-written stage within the
+# old 10s bound).
+_MOCK_SERVER_WAIT_TICKS=300   # x 0.1s = 30s ceiling
 wait_for_mock_server_port() {   # <port_file> -> prints the port on stdout
   local port_file="$1" i port=""
-  for i in $(seq 1 $_WAIT_TICKS); do
+  for i in $(seq 1 $_MOCK_SERVER_WAIT_TICKS); do
     if [ -z "$port" ] && [ -f "$port_file" ]; then
       port="$(cat "$port_file" 2>/dev/null)"
       case "$port" in ''|*[!0-9]*) port="" ;; esac
