@@ -89,52 +89,73 @@ fi
 STDOUT_FILE="$(mktemp)"
 STDERR_FILE="$(mktemp)"
 PAYLOAD_FILE="$(mktemp)"
-trap 'rm -f "$STDOUT_FILE" "$STDERR_FILE" "$PAYLOAD_FILE"' EXIT INT TERM
+TIMED_OUT_FILE="$(mktemp)"
+rm -f "$TIMED_OUT_FILE"  # existence, not content, is the signal below
+trap 'rm -f "$STDOUT_FILE" "$STDERR_FILE" "$PAYLOAD_FILE" "$TIMED_OUT_FILE"' EXIT INT TERM
 printf '%s' "$PAYLOAD" > "$PAYLOAD_FILE"
 
 # No external `timeout` dependency: coreutils' timeout is commonly absent on
 # macOS, and running handle without any bound at all on that path silently
 # dropped tool.conf's timeout= entirely -- a hung handle then leaked a
 # process forever and the sender never heard back, either (review finding).
-# Pure bash instead: run handle in the background, poll for it, TERM then
-# KILL it if it is still alive once TIMEOUT seconds have passed.
 #
 # `set -m` gives the backgrounded job its OWN process group (pgid == the
-# leader's own pid), instead of inheriting this script's. handle is often a
-# small wrapper shell that itself backgrounds further work (a real adapter
-# calling out to a long-running command); killing only $HPID left such
-# grandchildren running as orphans after a timeout (review finding). Killing
-# the whole group with `kill -- -PGID` (the leading '-' addresses the group,
-# not the single process) reaches the entire tree at once. `set +m`
-# immediately after is just returning to this script's own default mode --
-# it does not affect the job's group once created.
+# leader's own pid), instead of inheriting this script's, so a TERM/KILL
+# addressed to the group (`kill -- -PGID`, the leading '-' means "the group",
+# not "the single process") reaches handle's own grandchildren too -- a
+# handle that is itself a wrapper backgrounding further work used to leave
+# that work orphaned when only its own pid was signaled. `set +m` right
+# after is just this script returning to its own default mode.
+#
+# This does NOT poll $HPID with kill -0 (an earlier version of this script
+# did, and that was wrong): bash can reap a background child via its SIGCHLD
+# handler before this script ever calls `wait`, at which point the kernel is
+# free to hand the same pid to an unrelated process -- a poll loop watching
+# $HPID across multiple `sleep`s can end up signaling that unrelated process
+# instead. Two independent things happen concurrently instead: a "killer"
+# subshell that unconditionally sends TERM then KILL to the group once
+# TIMEOUT elapses (never checking whether the group is still $HPID's -- see
+# the note below), and this script's own `wait "$HPID"`, which bash tracks
+# correctly for its own direct child regardless of reap timing. The killer
+# is started AFTER $HPID is assigned -- it is a subshell forked from this
+# script's own state, so it must see the real value, not an empty one from
+# before handle was launched.
 set -m
 "$HANDLE" <"$PAYLOAD_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE" &
 HPID=$!
 set +m
-TIMED_OUT=0
-WAITED=0
-while kill -0 "$HPID" 2>/dev/null; do
-  if [ "$WAITED" -ge "$TIMEOUT" ]; then
-    TIMED_OUT=1
-    kill -TERM -- "-$HPID" 2>/dev/null || true
-    sleep 0.2
-    if kill -0 "$HPID" 2>/dev/null; then
-      kill -KILL -- "-$HPID" 2>/dev/null || true
-    fi
-    break
-  fi
-  sleep 1
-  WAITED=$((WAITED + 1))
-done
-# Safe against PID reuse: this script is $HPID's direct parent and nothing
-# above calls `wait` on it before this point, so the kernel holds $HPID for
-# this process alone (running, or a zombie awaiting reap) for the entire
-# loop above -- kill -0/-TERM/-KILL can only ever land on this script's own
-# not-yet-reaped child, never on an unrelated process that reused the pid.
-# This ordering (wait only after the loop ends) must not change.
+
+(
+  sleep "$TIMEOUT"
+  : > "$TIMED_OUT_FILE"
+  kill -TERM -- "-$HPID" 2>/dev/null || true
+  sleep 0.2
+  kill -KILL -- "-$HPID" 2>/dev/null || true
+) &
+KILLER_PID=$!
+
 RC=0
 wait "$HPID" 2>/dev/null || RC=$?
+
+# handle is done (on its own, or because the killer above already fired) --
+# stop the killer if it hasn't fired yet, then send one unconditional sweep
+# to the group in case handle left grandchildren behind on its own group
+# even without timing out.
+kill "$KILLER_PID" 2>/dev/null || true
+wait "$KILLER_PID" 2>/dev/null || true
+kill -KILL -- "-$HPID" 2>/dev/null || true
+
+# NOT claimed safe against pid reuse: the one remaining gap is the instant
+# right after $HPID's process group becomes completely empty and before the
+# OS reuses that same pgid number for something unrelated -- a kill in that
+# exact instant could reach the wrong group. This is a real, accepted gap,
+# not a solved one; it is narrow (the group has to empty out AND get reused
+# inside a few milliseconds) but it exists.
+if [ -f "$TIMED_OUT_FILE" ]; then
+  TIMED_OUT=1
+else
+  TIMED_OUT=0
+fi
 
 if [ "$TIMED_OUT" -eq 1 ]; then
   _reply "$TO: processing failed (timed out after ${TIMEOUT}s)"

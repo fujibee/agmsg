@@ -69,15 +69,15 @@ setup() {
     printf '%s\n' 'esac'
   } > "$SLOWTOOL_DIR/setup"
   chmod +x "$SLOWTOOL_DIR/setup"
-  # handle backgrounds its own grandchild (sleep), the way a real adapter
-  # shelling out to a long-running command would -- killing only handle's own
-  # pid on timeout must not leave this sleep running as an orphan.
+  # handle backgrounds its own grandchild, which ignores TERM (the way a
+  # stubborn real command might) -- proving the watchdog's KILL escalation
+  # actually runs, not just that a TERM-obedient child happens to die.
   {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -euo pipefail'
     printf '%s\n' 'cat >/dev/null'
     printf '%s\n' 'dir="$(cd "$(dirname "$0")" && pwd)"'
-    printf '%s\n' 'sleep 30 &'
+    printf '%s\n' "(trap '' TERM; exec sleep 30) &"
     printf '%s\n' 'echo "$!" > "$dir/sleep.pid"'
     printf '%s\n' 'wait'
   } > "$SLOWTOOL_DIR/handle"
