@@ -495,14 +495,14 @@ _REAP_WAIT_TICKS=50
 #            binaries introduces no such divergence.
 #
 # The Windows branch is taken INSTEAD of the /proc branch, not merely before it:
-# MSYS/Cygwin do expose a working /proc, but it is keyed by the emulation layer's
+# MSYS does expose a working /proc, but it is keyed by the emulation layer's
 # own pid space while a lease records the Windows pid codex-bridge.js sees as
 # process.pid. Letting /proc win would return the start time of whatever
 # unrelated MSYS process sits at that number -- the recycled-pid confusion this
 # token exists to prevent, with nothing to signal it.
 _agmsg_is_windows() {
-  case "${_AGMSG_UNAME_S:=$(uname -s 2>/dev/null || echo unknown)}" in
-    MINGW*|MSYS*|CYGWIN*|CLANGARM*) return 0 ;;
+  case "${MSYSTEM:-}" in
+    MINGW*|MSYS*|CLANGARM*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -710,6 +710,123 @@ appserver_file="$RUN_DIR/codex-bridge.$bridge_key.appserver"
 # appears for a bridge first launched on "loaded", it is torn down and relaunched
 # on the recorded thread instead of clinging to the ambiguous "loaded" one.
 thread_file="$RUN_DIR/codex-bridge.$bridge_key.thread"
+retire_fence="$RUN_DIR/codex-bridge-retire.$PROJECT_HASH.$BRIDGE_PAIRS_HASH"
+
+# Windows never receives an external kill from this launcher.  A retire record
+# survives pidfile/meta cleanup and launcher restarts; the bridge acknowledges
+# the identically-shaped request and shuts itself down.  An acknowledgement is
+# only receipt, never exit proof.
+_read_stop_record() {
+  local file="$1" line k v n=0
+  local sv=0 sp=0 spa=0 sh=0 spi=0 ss=0 sss=0 sn=0 se=0
+  rv=""; rproject=""; rpairs=""; rhost=""; rpid=""; rstart=""; rstartsrc=""; rnonce=""; rexpires=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1)); case "$line" in *=*) ;; *) return 1 ;; esac
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      v) sv=$((sv + 1)); rv="$v" ;;
+      project) sp=$((sp + 1)); rproject="$v" ;;
+      pairs) spa=$((spa + 1)); rpairs="$v" ;;
+      host) sh=$((sh + 1)); rhost="$v" ;;
+      pid) spi=$((spi + 1)); rpid="$v" ;;
+      start) ss=$((ss + 1)); rstart="$v" ;;
+      startsrc) sss=$((sss + 1)); rstartsrc="$v" ;;
+      nonce) sn=$((sn + 1)); rnonce="$v" ;;
+      expires) se=$((se + 1)); rexpires="$v" ;;
+      *) return 1 ;;
+    esac
+  done < "$file"
+  [ "$n" -eq 9 ] && [ "$sv$sp$spa$sh$spi$ss$sss$sn$se" = 111111111 ] || return 1
+  [ "$rv" = 1 ] && [ "$rstartsrc" = pwsh ] && [ -n "$rhost" ] || return 1
+  case "$rproject" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#rproject}" -eq 40 ] || return 1
+  case "$rpairs" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#rpairs}" -eq 40 ] || return 1
+  case "$rnonce" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#rnonce}" -eq 40 ] || return 1
+  case "$rpid$rstart$rexpires" in *[!0-9]*) return 1 ;; esac
+  [ -n "$rpid" ] && [ -n "$rstart" ] && [ -n "$rexpires" ]
+}
+
+_write_stop_record() {
+  local file="$1" pid="$2" start="$3" nonce="$4" expires="$5" host="$6"
+  local tmp="$file.tmp.$$.$RANDOM"
+  ( umask 077; printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=pwsh\nnonce=%s\nexpires=%s\n' \
+      "$PROJECT_HASH" "$BRIDGE_PAIRS_HASH" "$host" "$pid" "$start" "$nonce" "$expires" > "$tmp" ) || return 1
+  mv -f "$tmp" "$file"
+}
+
+# Prints LIVE<TAB><ticks>, ABSENT, or UNKNOWN.  Only ABSENT and a changed live
+# token prove that the retired process is gone.
+_windows_process_state() {
+  local pid="$1" bin out
+  for bin in powershell.exe pwsh; do
+    out="$("$bin" -NoProfile -NonInteractive -Command \
+      "try { \$p=Get-Process -Id $pid -ErrorAction Stop; Write-Output ('LIVE' + [char]9 + \$p.StartTime.Ticks) } catch [Microsoft.PowerShell.Commands.ProcessCommandException] { Write-Output 'ABSENT' } catch { exit 3 }" \
+      2>/dev/null | tr -d '\r' | head -n 1)" || continue
+    case "$out" in
+      ABSENT) printf '%s' ABSENT; return 0 ;;
+      "LIVE$TAB"*) case "${out#"LIVE$TAB"}" in ''|*[!0-9]*) ;; *) printf '%s' "$out"; return 0 ;; esac ;;
+    esac
+  done
+  printf '%s' UNKNOWN
+  return 1
+}
+
+_windows_stop_request_from_fence() {
+  _read_stop_record "$retire_fence" || return 1
+  [ "$rproject" = "$PROJECT_HASH" ] && [ "$rpairs" = "$BRIDGE_PAIRS_HASH" ] || return 1
+  local now nonce expires request="$RUN_DIR/codex-bridge-stop.$rpid"
+  now="$(date +%s)"; case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$rexpires" -lt "$now" ]; then
+    nonce="$(printf '%s' "$$:$RANDOM:$RANDOM:$now:$rpid:$rstart" | agmsg_sha1)"
+    expires=$((now + 10))
+    _write_stop_record "$retire_fence" "$rpid" "$rstart" "$nonce" "$expires" "$rhost" || return 1
+    _read_stop_record "$retire_fence" || return 1
+  fi
+  _write_stop_record "$request" "$rpid" "$rstart" "$rnonce" "$rexpires" "$rhost"
+}
+
+_windows_begin_retire() {
+  local pid="$1" token="$2" host lease nonce now expires
+  [ -f "$retire_fence" ] && return 0
+  case "$token" in "pwsh$TAB"*) ;; *) return 1 ;; esac
+  host="$(hostname 2>/dev/null)"; [ -n "$host" ] || return 1
+  lease="$RUN_DIR/codex-bridge-lease.$pid"
+  _read_lease "$lease" || return 1
+  [ "$lproj" = "$PROJECT_HASH" ] && [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] \
+    && [ "$lhost" = "$host" ] && [ "$lpid" = "$pid" ] \
+    && [ "$lstartsrc$TAB$lstart" = "$token" ] || return 1
+  now="$(date +%s)"; case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  expires=$((now + 10)); nonce="$(printf '%s' "$$:$RANDOM:$RANDOM:$now:$pid:$lstart" | agmsg_sha1)"
+  _write_stop_record "$retire_fence" "$pid" "$lstart" "$nonce" "$expires" "$host" || return 1
+  _windows_stop_request_from_fence
+}
+
+_windows_wait_exit_proof() {
+  _read_stop_record "$retire_fence" || return 1
+  local old_pid="$rpid" old_start="$rstart" state waited=0
+  _windows_stop_request_from_fence || return 1
+  while [ "$waited" -lt "$_REAP_WAIT_TICKS" ]; do
+    state="$(_windows_process_state "$old_pid" 2>/dev/null || true)"
+    case "$state" in
+      ABSENT) return 0 ;;
+      "LIVE$TAB"*) [ "${state#"LIVE$TAB"}" != "$old_start" ] && return 0 ;;
+    esac
+    sleep 0.1; waited=$((waited + 1))
+  done
+  return 1
+}
+
+_windows_current_bridge_valid() {
+  local pid="$1" want_url="$2" want_thread="$3" state token lease="$RUN_DIR/codex-bridge-lease.$1"
+  state="$(_windows_process_state "$pid" 2>/dev/null || true)"
+  case "$state" in "LIVE$TAB"*) token="${state#"LIVE$TAB"}" ;; *) return 1 ;; esac
+  _read_lease "$lease" || return 1
+  [ "$lproj" = "$PROJECT_HASH" ] && [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] \
+    && [ "$lpid" = "$pid" ] && [ "$lstartsrc" = pwsh ] && [ "$lstart" = "$token" ] || return 1
+  local got_url="" got_thread=""
+  IFS= read -r got_url < "$appserver_file" 2>/dev/null || true
+  IFS= read -r got_thread < "$thread_file" 2>/dev/null || true
+  [ "$got_url" = "$want_url" ] && [ "$got_thread" = "$want_thread" ]
+}
 # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
 # wrappers) — run it as-is. Only the default codex-bridge.js is launched through
 # a resolved Node, since its env-node shebang fails where a version-manager Node
@@ -728,7 +845,11 @@ retire_recorded_bridge() {
   local lproj lpairs lhost lpid lstart lstartsrc
   [ -f "$pidfile" ] || return 0
   IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-  _agmsg_pid_valid "$old_pid" || return 0
+  if ! _agmsg_is_windows; then
+    _agmsg_pid_valid "$old_pid" || return 0
+  else
+    case "$old_pid" in ''|*[!0-9]*) return 0 ;; esac
+  fi
   lease="$RUN_DIR/codex-bridge-lease.$old_pid"
   [ -f "$lease" ] || return 0
   _read_lease "$lease" || return 0
@@ -737,6 +858,11 @@ retire_recorded_bridge() {
   [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] || return 0
   token="$(_start_token "$old_pid" 2>/dev/null || true)"
   [ -n "$token" ] && [ "$token" = "$lstartsrc	$lstart" ] || return 0
+  if _agmsg_is_windows; then
+    _windows_begin_retire "$old_pid" "$token" || return 1
+    _windows_wait_exit_proof || return 1
+    return 0
+  fi
   kill "$old_pid" 2>/dev/null || true
 }
 
@@ -758,7 +884,10 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   if [ -z "$current_ids" ]; then
     deregistered_ticks=$((deregistered_ticks + 1))
     if [ "$deregistered_ticks" -ge 2 ]; then
-      retire_recorded_bridge
+      if ! retire_recorded_bridge; then
+        sleep 0.3
+        continue
+      fi
       exit 0
     fi
     sleep 0.3
@@ -792,7 +921,10 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # so the new role is actually subscribed instead of being stranded.
   build_safety_state "$current_ids"
   if [ "$SAFETY_STATE" != "$safety_state" ]; then
-    retire_recorded_bridge
+    if ! retire_recorded_bridge; then
+      poll_sleep
+      continue
+    fi
     exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
   fi
   # Resolve the thread this iteration would launch against. A request file may
@@ -829,6 +961,38 @@ EOF
     continue
   fi
   thread_id="$rec_thread"
+
+  # Recover a retire operation before consulting the pidfile. cleanupMeta() may
+  # have removed that pidfile already; the independent fence remains authoritative.
+  windows_exit_proven=0
+  retired_request_pid=""
+  if _agmsg_is_windows && [ -f "$retire_fence" ]; then
+    if ! _read_stop_record "$retire_fence" \
+      || [ "$rproject" != "$PROJECT_HASH" ] || [ "$rpairs" != "$BRIDGE_PAIRS_HASH" ]; then
+      poll_sleep
+      continue
+    fi
+    retired_request_pid="$rpid"
+    if ! _windows_wait_exit_proof; then
+      poll_sleep
+      continue
+    fi
+    windows_exit_proven=1
+    current_pid=""
+    IFS= read -r current_pid < "$pidfile" 2>/dev/null || true
+    if [ -n "$current_pid" ] && [ "$current_pid" != "$retired_request_pid" ]; then
+      if _windows_current_bridge_valid "$current_pid" "$req_app_server" "$thread_id"; then
+        rm -f "$retire_fence" "$RUN_DIR/codex-bridge-stop.$retired_request_pid" \
+          "$RUN_DIR/codex-bridge-stop.$retired_request_pid.ack"
+        poll_sleep
+        continue
+      fi
+      # A different live-but-unverified pid may be a bridge spawned just before
+      # a launcher crash. Never start beside it.
+      state="$(_windows_process_state "$current_pid" 2>/dev/null || true)"
+      case "$state" in "LIVE$TAB"*) poll_sleep; continue ;; esac
+    fi
+  fi
 
   # The role-session record is the sole thread authority (#150 phase 2/#350).
 
@@ -900,10 +1064,20 @@ EOF
   # at the top of the loop. A lease-less bridge that never dies simply lingers
   # (orphan survival is acceptable; a wrong-kill or a double-start is not).
   if [ -n "$need_kill" ]; then
+    if _agmsg_is_windows; then
+      if ! _windows_begin_retire "$need_kill" "$need_kill_token" \
+        || ! _windows_wait_exit_proof; then
+        poll_sleep
+        continue
+      fi
+      windows_exit_proven=1
+      retired_request_pid="$need_kill"
+    else
     _nk_now="$(_start_token "$need_kill" 2>/dev/null || true)"
     if [ -z "$need_kill_token" ] || [ -z "$_nk_now" ] || [ "$_nk_now" = "$need_kill_token" ]; then
       poll_sleep
       continue
+    fi
     fi
   fi
   # Committed to spawning now: clear the stale records immediately before writing
@@ -959,6 +1133,22 @@ EOF
   # Record what this bridge is bound to so a later launcher can detect staleness.
   printf '%s' "$req_app_server" > "$appserver_file"
   printf '%s' "$thread_id" > "$thread_file"
+  if _agmsg_is_windows && [ "$windows_exit_proven" = 1 ] && [ -f "$retire_fence" ]; then
+    verified=0
+    _verify_tick=0
+    while [ "$_verify_tick" -lt "$_REAP_WAIT_TICKS" ]; do
+      if _windows_current_bridge_valid "$launched_pid" "$req_app_server" "$thread_id"; then
+        verified=1
+        break
+      fi
+      sleep 0.1
+      _verify_tick=$((_verify_tick + 1))
+    done
+    if [ "$verified" = 1 ]; then
+      rm -f "$retire_fence" "$RUN_DIR/codex-bridge-stop.$retired_request_pid" \
+        "$RUN_DIR/codex-bridge-stop.$retired_request_pid.ack"
+    fi
+  fi
   poll_reset
   sleep 1
 done
