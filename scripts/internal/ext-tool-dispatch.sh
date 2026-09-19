@@ -20,17 +20,29 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/validate.sh"
 agmsg_storage_load
-
-HANDLE="$SCRIPT_DIR/drivers/ext-tools/$TOOL/handle"
-TOOL_CONF="$SCRIPT_DIR/drivers/ext-tools/$TOOL/tool.conf"
-CONFIG_PATH="$SKILL_DIR/ext-tools/$TEAM/$TO.conf"
 
 _reply() {
   local body="$1"
   [ -n "$body" ] || return 0
   storage_send "$TEAM" "$TO" "$FROM" "$body" >/dev/null 2>&1 || true
 }
+
+# Last gate before $TOOL becomes a path (drivers/ext-tools/$TOOL/...): send.sh
+# and join.sh already validate any tool name that reaches them, but this
+# script is also invoked directly with args it does not otherwise control, so
+# it checks again rather than trusting its caller.
+if ! agmsg_validate_tool_name "$TOOL" >/dev/null 2>&1; then
+  _reply "$TO: processing failed (invalid tool name '$TOOL')"
+  rm -f "$BODY_FILE"
+  exit 0
+fi
+
+HANDLE="$SCRIPT_DIR/drivers/ext-tools/$TOOL/handle"
+TOOL_CONF="$SCRIPT_DIR/drivers/ext-tools/$TOOL/tool.conf"
+CONFIG_PATH="$SKILL_DIR/ext-tools/$TEAM/$TO.conf"
 
 if [ ! -x "$HANDLE" ]; then
   _reply "$TO: processing failed (no handle for '$TOOL')"
@@ -86,23 +98,41 @@ printf '%s' "$PAYLOAD" > "$PAYLOAD_FILE"
 # process forever and the sender never heard back, either (review finding).
 # Pure bash instead: run handle in the background, poll for it, TERM then
 # KILL it if it is still alive once TIMEOUT seconds have passed.
+#
+# `set -m` gives the backgrounded job its OWN process group (pgid == the
+# leader's own pid), instead of inheriting this script's. handle is often a
+# small wrapper shell that itself backgrounds further work (a real adapter
+# calling out to a long-running command); killing only $HPID left such
+# grandchildren running as orphans after a timeout (review finding). Killing
+# the whole group with `kill -- -PGID` (the leading '-' addresses the group,
+# not the single process) reaches the entire tree at once. `set +m`
+# immediately after is just returning to this script's own default mode --
+# it does not affect the job's group once created.
+set -m
 "$HANDLE" <"$PAYLOAD_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE" &
 HPID=$!
+set +m
 TIMED_OUT=0
 WAITED=0
 while kill -0 "$HPID" 2>/dev/null; do
   if [ "$WAITED" -ge "$TIMEOUT" ]; then
     TIMED_OUT=1
-    kill -TERM "$HPID" 2>/dev/null || true
+    kill -TERM -- "-$HPID" 2>/dev/null || true
     sleep 0.2
     if kill -0 "$HPID" 2>/dev/null; then
-      kill -KILL "$HPID" 2>/dev/null || true
+      kill -KILL -- "-$HPID" 2>/dev/null || true
     fi
     break
   fi
   sleep 1
   WAITED=$((WAITED + 1))
 done
+# Safe against PID reuse: this script is $HPID's direct parent and nothing
+# above calls `wait` on it before this point, so the kernel holds $HPID for
+# this process alone (running, or a zombie awaiting reap) for the entire
+# loop above -- kill -0/-TERM/-KILL can only ever land on this script's own
+# not-yet-reaped child, never on an unrelated process that reused the pid.
+# This ordering (wait only after the loop ends) must not change.
 RC=0
 wait "$HPID" 2>/dev/null || RC=$?
 

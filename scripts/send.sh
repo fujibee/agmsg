@@ -187,18 +187,14 @@ if [ -n "${MSG_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
         # (drivers/ext-tools/$EXT_TOOL_NAME/handle). Unlike a --tool argument
         # at join time -- which never gets this far unless the directory it
         # names already existed -- this comes from a file that could have
-        # been hand-edited or corrupted, so it gets its own character-class
-        # check here, not just the existence check below.
-        case "$EXT_TOOL_NAME" in
-          ''|*[!A-Za-z0-9_-]*)
-            EXT_TOOL_FAIL_REASON="its config names an invalid tool '$EXT_TOOL_NAME'"
-            ;;
-          *)
-            if [ ! -x "$SCRIPT_DIR/drivers/ext-tools/$EXT_TOOL_NAME/handle" ]; then
-              EXT_TOOL_FAIL_REASON="unknown tool '$EXT_TOOL_NAME'"
-            fi
-            ;;
-        esac
+        # been hand-edited or corrupted, so it gets the same shared
+        # character-class check as every other path built from a tool name
+        # (lib/validate.sh), not just the existence check below.
+        if ! agmsg_validate_tool_name "$EXT_TOOL_NAME" >/dev/null 2>&1; then
+          EXT_TOOL_FAIL_REASON="its config names an invalid tool '$EXT_TOOL_NAME'"
+        elif [ ! -x "$SCRIPT_DIR/drivers/ext-tools/$EXT_TOOL_NAME/handle" ]; then
+          EXT_TOOL_FAIL_REASON="unknown tool '$EXT_TOOL_NAME'"
+        fi
       fi
     fi
 

@@ -38,6 +38,7 @@ _ext_tool_available() {
 # Echoes the tool's driver directory, or refuses and exits.
 _ext_tool_dir() {
   local tool="$1" dir
+  agmsg_validate_tool_name "$tool" || exit 1
   dir="$SCRIPT_DIR/drivers/ext-tools/$tool"
   if [ ! -f "$dir/tool.conf" ]; then
     echo "Unknown ext-tool: '$tool' (available: $(_ext_tool_available))" >&2

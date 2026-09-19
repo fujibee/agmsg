@@ -47,6 +47,10 @@ if [ "$AGENT_TYPE" = ext-tool ]; then
     exit 1
   fi
   EXT_TOOL_NAME="$5"
+  # $EXT_TOOL_NAME becomes a path segment (drivers/ext-tools/$EXT_TOOL_NAME/)
+  # below; validate before that, not after (same allow-list send.sh and
+  # ext-tool-dispatch.sh use for the same reason).
+  agmsg_validate_tool_name "$EXT_TOOL_NAME" || exit 1
   # A human-readable placeholder, not a real path: ext-tool has no project.
   # The registration still carries a `project` field (every other type's
   # does) so downstream JSON readers never have to special-case ext-tool for

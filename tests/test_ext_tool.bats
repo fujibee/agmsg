@@ -69,10 +69,17 @@ setup() {
     printf '%s\n' 'esac'
   } > "$SLOWTOOL_DIR/setup"
   chmod +x "$SLOWTOOL_DIR/setup"
+  # handle backgrounds its own grandchild (sleep), the way a real adapter
+  # shelling out to a long-running command would -- killing only handle's own
+  # pid on timeout must not leave this sleep running as an orphan.
   {
     printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
     printf '%s\n' 'cat >/dev/null'
-    printf '%s\n' 'sleep 30'
+    printf '%s\n' 'dir="$(cd "$(dirname "$0")" && pwd)"'
+    printf '%s\n' 'sleep 30 &'
+    printf '%s\n' 'echo "$!" > "$dir/sleep.pid"'
+    printf '%s\n' 'wait'
   } > "$SLOWTOOL_DIR/handle"
   chmod +x "$SLOWTOOL_DIR/handle"
 }
@@ -89,6 +96,11 @@ teardown() { teardown_test_env; }
   # (the sender is never made to wait) and, once the backgrounded dispatch
   # runs, the fake handle's reply lands as an ordinary message back to the
   # original sender, quoting the body it was actually given.
+
+  # A tool name that tries to escape drivers/ext-tools/ is refused before it
+  # ever becomes a path (review finding).
+  run bash "$SCRIPTS/join.sh" et-team bot ext-tool --tool "../faketool"
+  [ "$status" -eq 1 ]
 
   run bash "$SCRIPTS/join.sh" et-team bot ext-tool --tool faketool
   [ "$status" -eq 1 ]
@@ -161,4 +173,11 @@ teardown() { teardown_test_env; }
     sleep $_WAIT_INTERVAL
   done
   [ -n "$timeout_seen" ]
+
+  # The timed-out handle's own grandchild (the sleep it backgrounded) must be
+  # gone too, not just the handle shell itself (review finding: killing only
+  # the immediate pid orphaned this kind of descendant).
+  run cat "$SLOWTOOL_DIR/sleep.pid"
+  [ "$status" -eq 0 ]
+  ! kill -0 "$output" 2>/dev/null
 }
