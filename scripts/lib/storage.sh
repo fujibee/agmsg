@@ -101,6 +101,19 @@ agmsg_db_path() {
 # one process costs nothing. Re-sources when a caller moves between teams on
 # different partitions — watch.sh loops over a subscription that can contain both.
 _AGMSG_PARTITION_LOADED=""
+# Per-TEAM cache of agmsg_driver_for_team's own answer (which partition driver
+# a team uses), on top of the single-slot _AGMSG_PARTITION_LOADED above: that
+# slot only skips re-SOURCING a driver already loaded, so a broad watcher
+# alternating between several teams on the same driver (the common case, most
+# teams never leaving "shared") still forked sqlite3+tr for this team's
+# config.json on every single call. A team's own driver choice cannot change
+# without an explicit migration (rename-team.sh / migrate-team-store.sh) —
+# an out-of-band admin action a long-running poller has no way to observe
+# mid-run regardless of caching, same as the other invariants cached here.
+# Parallel arrays (bash 3.2 has no associative arrays), capped growth.
+_AGMSG_PARTITION_TEAM_KEYS=()
+_AGMSG_PARTITION_TEAM_VALS=()
+_AGMSG_PARTITION_TEAM_MAX=64
 _agmsg_partition_load() {
   # The registry may not be sourced yet — agmsg_db_path is reachable without
   # going through agmsg_storage_load. Same guarded pull-in that uses.
@@ -110,8 +123,22 @@ _agmsg_partition_load() {
     # shellcheck disable=SC1091
     [ -n "$_lib" ] && . "$_lib/driver-registry.sh"
   fi
-  local name
-  name="$(agmsg_driver_for_team partition "$1" shared)"
+  local name team="$1" _i _n
+  _n=${#_AGMSG_PARTITION_TEAM_KEYS[@]}
+  name=""
+  for ((_i = 0; _i < _n; _i++)); do
+    if [ "${_AGMSG_PARTITION_TEAM_KEYS[$_i]}" = "$team" ]; then
+      name="${_AGMSG_PARTITION_TEAM_VALS[$_i]}"
+      break
+    fi
+  done
+  if [ -z "$name" ]; then
+    name="$(agmsg_driver_for_team partition "$team" shared)"
+    if [ "$_n" -lt "$_AGMSG_PARTITION_TEAM_MAX" ]; then
+      _AGMSG_PARTITION_TEAM_KEYS[$_n]="$team"
+      _AGMSG_PARTITION_TEAM_VALS[$_n]="$name"
+    fi
+  fi
   [ "$name" = "$_AGMSG_PARTITION_LOADED" ] && return 0
   local base kind file found=""
   while IFS="$(printf '\t')" read -r kind base; do

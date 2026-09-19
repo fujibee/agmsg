@@ -318,7 +318,13 @@ _pair_unchanged_since_read() {   # <team> <agent> <owner-as-read-this-turn>
   # both, so a run directory that became unsearchable mid-turn matched the free
   # baseline exactly and the guard waved the act through (review).
   local _r _rd _now
-  _r="$(actas_lock_read "$1" "$2")" || return 2
+  # Cached path resolution (actas_lock_read_cached): this guard runs several
+  # times per cycle for the same pair, and the path it resolves cannot change
+  # for the life of this process's PAIRS subscription -- see
+  # actas_lock_path_cached's own comment for exactly what is and is not
+  # memoized. The LOCK CONTENTS are still read fresh every call; only the
+  # path computation is skipped on a repeat.
+  _r="$(actas_lock_read_cached "$1" "$2")" || return 2
   _rd="${_r%%$'\t'*}"
   case "$_rd" in
     ok)     _now="${_r#*$'\t'}" ;;
@@ -1178,6 +1184,19 @@ while true; do
   fi
   while IFS=$'\t' read -r pair_team pair_agent; do
     [ -z "$pair_team" ] && continue
+    # Warm the per-process caches as PLAIN STATEMENTS, never via $(...): a
+    # command substitution forks a subshell, and a cache array populated
+    # inside one is discarded the instant that subshell exits (the exact
+    # hazard role-session.sh's own _agmsg_role_session_path_into documents,
+    # #466). Every consumer below (actas_lock_observe_cached,
+    # _pair_unchanged_since_read's actas_lock_read_cached, and every
+    # storage_* call that resolves this team's partition driver) reaches
+    # its own cache through a $(...) of its own, so warming it here, in this
+    # loop's own top-level (non-subshell) frame, is what makes the warmth
+    # actually survive to the NEXT cycle instead of being rebuilt from
+    # scratch every single call (#1321 first-stage follow-up).
+    _actas_lock_primitives_into "$pair_team" "$pair_agent"
+    _agmsg_partition_load "$pair_team" >/dev/null 2>&1
     # Ownership is re-read every cycle, because it can change under a running
     # watcher and nothing else notices. The subscription set and the startup
     # lock check both happen once, above; a session that claims this role
@@ -1201,8 +1220,12 @@ while true; do
     # compared new-to-new and said unchanged), and the pair was served for a role
     # someone else held. Found in review; the fix belongs in the library, so every
     # caller that needs both gets them from one observation. (#983)
+    # actas_lock_observe_cached: same read-and-verdict rule as
+    # actas_lock_observe, only the path resolution behind it is memoized
+    # per (team, agent) for the life of this process (#1321 first-stage
+    # follow-up) -- see actas_lock_path_cached's comment in actas-lock.sh.
     IFS="$(printf '\t')" read -r pair_state pair_owner <<EOF
-$(actas_lock_observe "$pair_team" "$pair_agent" "$SESSION_ID")
+$(actas_lock_observe_cached "$pair_team" "$pair_agent" "$SESSION_ID")
 EOF
     # Test seam: a two-file barrier that parks the watcher immediately AFTER the
     # lock read, so the race regression test can land a claim inside the window
@@ -1334,8 +1357,14 @@ EOF
     # waiting the pair is caught up, so drop its tracker and a future backlog starts
     # a fresh count.
     _agmsg_pair_key="$pair_team:$pair_agent"
+    # _agmsg_has_new_message, set here alongside the stuck-tracker's own read
+    # of the same fact, gates the formatting pass below (#1321 first-stage
+    # follow-up: watch.sh process-count reduction) -- one case statement,
+    # reused, rather than testing the same glob against $OUT twice.
+    _agmsg_has_new_message=0
     case "$OUT" in
       *'"type":"message_sent"'*)
+        _agmsg_has_new_message=1
         IFS=$'\x1f' read -r _agmsg_prev_c _agmsg_prev_n <<< "$(_stuck_get "$_agmsg_pair_key")"
         [ -n "$_agmsg_prev_n" ] || _agmsg_prev_n=0
         if [ "$_agmsg_prev_c" = "$READ_CURSOR" ]; then
@@ -1356,7 +1385,7 @@ EOF
         _stuck_drop "$_agmsg_pair_key"
         ;;
     esac
-    if [ -n "$OUT" ]; then
+    if [ "$_agmsg_has_new_message" -eq 1 ]; then
     # The quote is held in a variable, never written as \' in the pattern: bash 3.2
     # (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the inline form
     # doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
@@ -1542,6 +1571,44 @@ EOF
       fi
       exit 0
     fi
+    elif [ -n "$OUT" ]; then
+      # No new message for THIS pair, but storage_watch_after's trailing
+      # "cursor" line (present on every call, caught-up pair or not, because
+      # the team's sequence advances whenever ANY pair receives a message)
+      # moved. Advance our own frontier to it without the mktemp + `sqlite3
+      # :memory:` json_each/json_extract pass above: that pass exists to turn
+      # message ROWS into shell-safe delimited text (escaping newlines in a
+      # body, etc.), and a cursor-only page carries no message body needing
+      # that treatment -- so paying for it here forked sqlite3+mktemp on
+      # EVERY poll cycle a pair was simply idle, which is most of them
+      # (#1321 first-stage follow-up: watch.sh process-count reduction).
+      #
+      # The cursor line's own shape is controlled (storage_watch_after's own
+      # `json_object('type','cursor','cursor', CAST(... AS TEXT))`, always
+      # emitted last in the batch), so parameter-expansion pattern removal in
+      # pure bash is exactly equivalent to the sqlite3 json_extract this
+      # replaces for this one field, with no forks at all.
+      _agmsg_cursor_line="${OUT##*$'\n'}"
+      FINAL_CURSOR=""
+      case "$_agmsg_cursor_line" in
+        *'"cursor":"'*)
+          FINAL_CURSOR="${_agmsg_cursor_line#*'"cursor":"'}"
+          FINAL_CURSOR="${FINAL_CURSOR%%'"'*}"
+          ;;
+      esac
+      if [ -n "$FINAL_CURSOR" ]; then
+        # Consume (#983): the same re-verification the heavy path above does
+        # immediately before advancing the read frontier — a pair that
+        # changed hands is left entirely alone, cursor included, so the
+        # session that now owns it still sees everything from where it was.
+        _pair_verdict=0
+        _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || _pair_verdict=$?
+        if [ "$_pair_verdict" -ne 0 ]; then
+          _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "marking them read"
+        else
+          storage_read_cursor_consume "$pair_team" "$pair_agent" "$FINAL_CURSOR" >/dev/null 2>&1 || true
+        fi
+      fi
     fi
   done <<< "$PAIRS"
 
