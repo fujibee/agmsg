@@ -44,7 +44,8 @@ channel="$(_slack_conf_get "$config_path" channel)"
 [ -n "$key_file" ] || fail "member config is missing key_file: $config_path"
 [ -n "$channel" ] || fail "member config is missing channel: $config_path"
 
-token="$(_slack_read_token "$key_file")" || fail "key file not readable or empty: $key_file"
+_slack_read_token "$key_file" || fail "$_SLACK_TOKEN_ERROR"
+token="$_SLACK_TOKEN"
 
 out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-handle.XXXXXX")"
 

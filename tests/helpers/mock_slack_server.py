@@ -11,6 +11,7 @@ handle sent the right thing, without ever touching a real workspace.
 import json
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Slack's own error code for this response. Empty means answer {"ok": true,
@@ -23,6 +24,11 @@ REQUEST_LOG = os.environ.get("MOCK_SLACK_REQUEST_LOG", "")
 # status (429) instead of a 200 {"ok": false, ...} envelope -- everything
 # else, including every other error, is a plain 200.
 MOCK_SLACK_HTTP_STATUS = int(os.environ.get("MOCK_SLACK_HTTP_STATUS", "200"))
+# Held before answering, so a test can inspect the CALLER's own process
+# table (ps) while a request is genuinely in flight -- proving curl's argv
+# never carries the token or the body, not just that the final result
+# happens not to show them.
+MOCK_SLACK_DELAY_SECONDS = float(os.environ.get("MOCK_SLACK_DELAY_SECONDS", "0"))
 
 
 class LoopbackHTTPServer(HTTPServer):
@@ -36,6 +42,8 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw = self.rfile.read(length) if length else b""
+        if MOCK_SLACK_DELAY_SECONDS > 0:
+            time.sleep(MOCK_SLACK_DELAY_SECONDS)
         if REQUEST_LOG:
             try:
                 parsed_body = json.loads(raw.decode("utf-8")) if raw else None

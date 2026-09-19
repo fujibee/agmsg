@@ -51,6 +51,14 @@ _start_mock_slack() {
 }
 
 @test "slack handle: posts the configured channel/text, and turns every failure into one line" {
+  # No agmsg-slack-curl.* work_dir survives ANY of this test's calls, success
+  # or failure -- a before/after snapshot of the whole run rather than one
+  # call, since that is the property that matters: _slack_api_call's trap
+  # covers EXIT/INT/TERM, but only running it is evidence, not reading the
+  # code.
+  local tmp_root="${TMPDIR:-/tmp}" leftover_before leftover_after
+  leftover_before="$(find "$tmp_root" -maxdepth 1 -name 'agmsg-slack-curl.*' 2>/dev/null | sort)"
+
   local request_log="$TEST_SKILL_DIR/slack-request.json"
   _start_mock_slack MOCK_SLACK_ERROR="not_in_channel" MOCK_SLACK_REQUEST_LOG="$request_log"
 
@@ -116,4 +124,68 @@ _start_mock_slack() {
     *$'\n'*) echo "[transport] handle printed more than one line: $output" >&2; return 1 ;;
   esac
   refute grep -qF "xoxb-test-token-do-not-print" <<<"$output"
+
+  # A corrupt/multi-line key file is refused BEFORE curl is ever invoked:
+  # an unescaped embedded newline could otherwise end the `header = "..."`
+  # config line early and let the rest of the token be read as a further
+  # curl -K directive. Point at a real, logging fixture: if curl ran at
+  # all, the log would exist.
+  local bad_key_file="$TEST_SKILL_DIR/slack-bot-multiline.token" \
+    bad_config="$TEST_SKILL_DIR/ext-tools-slack-member-bad.conf" \
+    bad_request_log="$TEST_SKILL_DIR/slack-request-bad.json"
+  printf 'xoxb-test-token-do-not-print\nSecond-Line-Injected\n' > "$bad_key_file"
+  chmod 600 "$bad_key_file"
+  {
+    printf 'key_file=%s\n' "$bad_key_file"
+    printf 'channel=%s\n' "C0DEPLOYS"
+  } > "$bad_config"
+  _start_mock_slack MOCK_SLACK_ERROR="" MOCK_SLACK_REQUEST_LOG="$bad_request_log"
+  local bad_input
+  bad_input="$(jq -cn --arg cp "$bad_config" \
+    '{team: "ops", from: "alice", to: "slack-ops", body: "x", message_id: "m", config_path: $cp}')"
+  run env AGMSG_SLACK_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/slack/handle" <<<"$bad_input"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *$'\n'*) echo "[bad token] handle printed more than one line: $output" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$output" | grep -qiF "single-line"
+  refute grep -qF "Second-Line-Injected" <<<"$output"
+  [ ! -e "$bad_request_log" ]
+
+  # curl's OWN argv, inspected while a request is genuinely in flight: a
+  # slow fixture holds the connection open long enough to read /bin/ps for
+  # the curl child handle spawned, proving neither the token nor the body
+  # ever appear there -- not just that the final result happens not to
+  # show them.
+  #
+  # `pgrep -x curl` (exact comm match), not a full-command PATTERN search:
+  # this test file's own source contains the literal text being searched
+  # for, and a pattern search (`pgrep -f`/`ps -ef | grep`) over the whole
+  # process table matches THAT -- the classic "grep finds grep" trap, just
+  # one layer removed. Matching curl by name and then reading each
+  # candidate's OWN argv (filtered by this call's unique temp-dir marker,
+  # since a busy shared machine may run an unrelated curl at the same
+  # moment) cannot self-match.
+  _start_mock_slack MOCK_SLACK_ERROR="" MOCK_SLACK_DELAY_SECONDS=3
+  AGMSG_SLACK_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/slack/handle" <<<"$INPUT" &
+  local handle_pid=$!
+  local curl_argv="" curl_pid attempt
+  for attempt in $(seq 1 20); do
+    for curl_pid in $(pgrep -x curl 2>/dev/null || true); do
+      curl_argv="$(ps -o command= -p "$curl_pid" 2>/dev/null || true)"
+      case "$curl_argv" in *agmsg-slack-curl*) break 2 ;; esac
+      curl_argv=""
+    done
+    [ -n "$curl_argv" ] && break
+    sleep 0.2
+  done
+  wait "$handle_pid" || true
+  [ -n "$curl_argv" ]
+  refute grep -qF "xoxb-test-token-do-not-print" <<<"$curl_argv"
+  refute grep -qF "deploy complete" <<<"$curl_argv"
+
+  leftover_after="$(find "$tmp_root" -maxdepth 1 -name 'agmsg-slack-curl.*' 2>/dev/null | sort)"
+  [ "$leftover_before" = "$leftover_after" ]
 }
