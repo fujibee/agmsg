@@ -489,16 +489,24 @@ eperm_pid() {
   # of AGMSG_CC_MONITOR_KEEP_ALIVE below.
   grep -q 'timeout_ms: 1800000' <<<"$output"
   # AGMSG_CC_MONITOR_KEEP_ALIVE, default OFF: with it unset (the run above),
-  # the directive must NOT carry the re-arm wording -- most seats have
-  # nothing asking them to keep a watch alive across its own expiry, and
-  # rearm.sh covers the ones that do.
+  # the directive must carry the CONDITIONAL re-arm wording -- a plain word
+  # match on "no events" in Claude Code's own expiry notification, never a
+  # count to parse (the notification's exact phrasing may drift; #1270's
+  # count only ever appears as Claude Code's own text, agmsg does not count
+  # it). The unconditional wording ("immediately re-arm it") is reserved for
+  # KEEP_ALIVE, checked below.
   refute grep -q 'immediately re-arm it by invoking Monitor again' <<<"$output"
-  refute grep -q 'Re-arm it silently' <<<"$output"
+  grep -q 'says it delivered no events, do not re-arm it' <<<"$output"
+  grep -q 'Otherwise (it says it delivered something), re-arm it' <<<"$output"
+  grep -q 'Re-arm it silently' <<<"$output"
 
   run env AGMSG_CC_MONITOR_KEEP_ALIVE=1 bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   grep -q 'timeout_ms: 1800000' <<<"$output"
   grep -q 'immediately re-arm it by invoking Monitor again' <<<"$output"
+  # KEEP_ALIVE re-arms unconditionally, regardless of what the expiry
+  # notification says -- the conditional wording above must not appear here.
+  refute grep -q 'says it delivered no events, do not re-arm it' <<<"$output"
   # The maintainer's follow-up to #1270: an agent that announces every silent
   # re-arm ("re-armed", an acknowledgement, a summary) burns tokens every 30
   # minutes for no reader benefit, so the directive must say to do it quietly.

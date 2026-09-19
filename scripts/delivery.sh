@@ -483,14 +483,15 @@ EOF
   local watch_command
   watch_command="$(printf '%q %q %q %q' "$watch" "$session_id" "$project" "$type")"
   # AGMSG_CC_MONITOR_KEEP_ALIVE, default OFF: timeout_ms: 1800000 always
-  # stays (the Monitor tool caps every watch there regardless), but the
-  # prose explaining the expiry and asking the agent to re-arm on it is
-  # opt-in. Off by default because most Claude Code seats do not need a
-  # standing watch kept alive across its own natural expiry; #1313 added a
-  # way to cover the seats that do, since replaced (#1321) by the
-  # claude-code type's own template procedure (poke, not a dedicated
-  # command).
-  local rearm_note=""
+  # stays (the Monitor tool caps every watch there regardless). What differs
+  # is whether re-arming on expiry is UNCONDITIONAL or read off the expiry
+  # notification itself. Claude Code counts the events on its own side and
+  # names that count in the notification -- agmsg never counts it -- so the
+  # default case below is worded as a plain word match on that notification
+  # ("no events" present or not), never as reading a number: the exact
+  # phrasing may drift, and a seat that has to parse a count is a seat this
+  # can break by rewording the notification later.
+  local rearm_note
   if [ -n "${AGMSG_CC_MONITOR_KEEP_ALIVE:-}" ]; then
     rearm_note=" This watch expires after at most 30 minutes; when the expiry
 notice arrives, immediately re-arm it by invoking Monitor again with this
@@ -498,6 +499,13 @@ exact command and description — delivery depends on it, since nothing else
 keeps the stream running. Re-arm it silently: no message to the user, no
 \"re-armed\", no acknowledgement, no summary — just invoke Monitor again and
 continue, since announcing it every 30 minutes wastes tokens for no benefit."
+  else
+    rearm_note=" This watch expires after at most 30 minutes.
+If the expiry notification says it delivered no events, do not re-arm it.
+Otherwise (it says it delivered something), re-arm it by invoking Monitor again with this exact command and description.
+Re-arm it silently, when you do: no message to the user, no \"re-armed\", no
+acknowledgement, no summary — just invoke Monitor again and continue, since
+announcing it every 30 minutes wastes tokens for no benefit."
   fi
   cat <<EOF
 
