@@ -51,6 +51,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
+# Warm agmsg_storage_dir's own process-lifetime cache as a PLAIN STATEMENT,
+# not via $(...): every real caller (agmsg_db_path -> ... -> _agmsg_db_file)
+# reaches it through at least one command substitution of its own, and a
+# subshell forked from a still-cold top level can never leave the cache warm
+# for the NEXT such call -- each one forks fresh from this same cold state.
+# Doing it once here, before any subshell exists, is what lets every later
+# call (however many $(...) layers deep) inherit the already-resolved value
+# instead of re-deriving it (a `dirname`/`cd`+`pwd` resolution) on every single
+# poll cycle for a value that cannot change for the life of this process.
+agmsg_storage_dir >/dev/null
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
@@ -1134,6 +1144,14 @@ STUCK_MAP=""
 source "$SCRIPT_DIR/lib/watch-stuck-map.sh"
 
 while true; do
+  # Advance the per-cycle cache epoch as a PLAIN STATEMENT (never via $(...) —
+  # see the actas-lock cache warming below for why): this is what lets
+  # _agmsg_partition_load's per-team driver cache (lib/storage.sh) reuse one
+  # cycle's answer across that cycle's several independent callers while
+  # still forcing a fresh read at the start of THIS new one, so a team
+  # migrated mid-run (internal/migrate-team-store.sh) is noticed within one
+  # extra cycle instead of never (#1330 second stage).
+  _AGMSG_POLL_CYCLE_EPOCH=$((_AGMSG_POLL_CYCLE_EPOCH + 1))
   # The installation changed under us (#684). _handle_install_changed execs
   # the new watch.sh in place once it can prove the generation is finished,
   # so the stream never visibly stops; its own exit paths still report on
@@ -1184,19 +1202,30 @@ while true; do
   fi
   while IFS=$'\t' read -r pair_team pair_agent; do
     [ -z "$pair_team" ] && continue
-    # Warm the actas-lock path cache as a PLAIN STATEMENT, never via $(...): a
+    # Warm both per-cycle caches as PLAIN STATEMENTS, never via $(...): a
     # command substitution forks a subshell, and a cache array populated
     # inside one is discarded the instant that subshell exits (the exact
     # hazard role-session.sh's own _agmsg_role_session_path_into documents,
-    # #466). Both consumers below (actas_lock_observe_cached and
-    # _pair_unchanged_since_read's actas_lock_read_cached) reach this cache
-    # through a $(...) of their own, so warming it here, in this loop's own
-    # top-level (non-subshell) frame, is what makes the warmth actually
-    # survive to the NEXT cycle instead of being rebuilt from scratch every
-    # single call (#1321 first-stage follow-up). Storage's own partition
-    # driver is deliberately NOT cached this way — see
-    # _agmsg_partition_load's comment in lib/storage.sh (#1329 round 2).
+    # #466). Every real consumer below (actas_lock_observe_cached,
+    # _pair_unchanged_since_read's actas_lock_read_cached, and every
+    # storage_* call this cycle that resolves this team's partition driver)
+    # reaches its own cache through a $(...) of its own, so warming both
+    # here, in this loop's own top-level (non-subshell) frame, is what makes
+    # the warmth actually survive WITHIN this cycle instead of being rebuilt
+    # from scratch on every single call (#1321 first stage; #1330 second
+    # stage for the partition-driver cache, scoped to
+    # _AGMSG_POLL_CYCLE_EPOCH rather than the process lifetime — see its own
+    # comment in lib/storage.sh for why). storage_init's OWN schema check
+    # is deliberately NOT cached this way: unlike the driver cache, its
+    # existing callers include tests and one-shot scripts that call it
+    # directly, more than once, without ever advancing the epoch -- an
+    # epoch-scoped cache there could not tell that repeat apart from a
+    # genuine same-cycle repeat, and would revive the #1001 regression this
+    # function's own fast path exists to avoid (verified: it broke "a
+    # revision mismatch runs the real init, and the stamp follows the
+    # schema").
     _actas_lock_primitives_into "$pair_team" "$pair_agent"
+    _agmsg_partition_load "$pair_team" >/dev/null 2>&1
     # Ownership is re-read every cycle, because it can change under a running
     # watcher and nothing else notices. The subscription set and the startup
     # lock check both happen once, above; a session that claims this role

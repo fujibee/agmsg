@@ -15,6 +15,21 @@
 # full order is env > config > default. Keep that logic here so call sites
 # stay unchanged.
 
+# Guard against double-source. This used to be genuinely harmless to skip
+# (every top-level assignment below was a pure function definition, so
+# re-running them just redefined the same functions) -- resolve-project.sh's
+# own comment on its unconditional ". storage.sh" says so explicitly. That
+# stopped being true once this file gained STATEFUL per-process caches
+# (agmsg_storage_dir, _agmsg_partition_load): re-sourcing reset them to their
+# initial empty state, silently discarding whatever a caller had already
+# warmed (measured: watch.sh's own top-level warm of agmsg_storage_dir was
+# being wiped by resolve-project.sh's re-source moments later, #1330 second
+# stage). Every existing caller already tolerates a no-op re-source (that
+# was the whole premise); this guard just makes that no-op literal instead
+# of a same-effect-so-far redefinition that quietly stopped being one.
+[ -n "${_AGMSG_STORAGE_SH:-}" ] && return 0
+_AGMSG_STORAGE_SH=1
+
 # agmsg_db_path turns the team selector into a path segment, so it cannot do its
 # job without the shared name validator. Sourced here rather than left to each
 # caller: watch.sh already reached the store without validate.sh in scope, and a
@@ -47,11 +62,26 @@ if ! declare -F compat_uuid7 >/dev/null 2>&1; then
 fi
 
 # Echo the directory that holds (or will hold) the message store.
+#
+# Memoized for the life of the process (_AGMSG_STORAGE_DIR_CACHE): every
+# input this depends on -- AGMSG_STORAGE_PATH, this script's own on-disk
+# location -- is fixed for as long as the process runs, unlike a team's
+# storage driver choice (see _agmsg_partition_load's own comment for that
+# distinction). A caller that overrides AGMSG_STORAGE_PATH mid-process
+# (tests do, between cases) is expected to unset this cache too — see
+# test_helper.bash's teardown, which starts each test in a fresh process
+# anyway, so no test needs to.
+_AGMSG_STORAGE_DIR_CACHE=""
 agmsg_storage_dir() {
+  if [ -n "$_AGMSG_STORAGE_DIR_CACHE" ]; then
+    printf '%s\n' "$_AGMSG_STORAGE_DIR_CACHE"
+    return 0
+  fi
   if [ -n "${AGMSG_STORAGE_PATH:-}" ]; then
     # Strip a single trailing slash for a stable join with the filename.
-    printf '%s\n' "${AGMSG_STORAGE_PATH%/}"
-    return
+    _AGMSG_STORAGE_DIR_CACHE="${AGMSG_STORAGE_PATH%/}"
+    printf '%s\n' "$_AGMSG_STORAGE_DIR_CACHE"
+    return 0
   fi
   local lib_dir skill_dir
   if [ -n "${BASH_SOURCE[0]:-}" ]; then
@@ -66,7 +96,8 @@ agmsg_storage_dir() {
     echo "Error: cannot resolve storage dir (BASH_SOURCE and SKILL_DIR both empty)" >&2
     return 1
   fi
-  printf '%s\n' "$skill_dir/db"
+  _AGMSG_STORAGE_DIR_CACHE="$skill_dir/db"
+  printf '%s\n' "$_AGMSG_STORAGE_DIR_CACHE"
 }
 
 # Echo the full path to a team's message store, in a form sqlite3 can open.
@@ -97,21 +128,39 @@ agmsg_db_path() {
   _agmsg_db_file "$(partition_store_relpath "$team")"
 }
 
+# Bumped by watch.sh's poll loop ONCE per cycle, as a PLAIN STATEMENT (see
+# that loop's own comment) — never via $(...), the same subshell hazard
+# documented on the actas-lock cache in lib/actas-lock.sh. A caller that
+# never bumps this (every one-shot script: spawn/despawn/send/inbox/etc.,
+# and any test that calls a cached function directly without going through
+# watch.sh's loop) stays at epoch 0 forever, which is exactly the "always
+# re-check" behavior those callers already had — the epoch only starts
+# distinguishing "cycle N" from "cycle N+1" for a caller that advances it.
+_AGMSG_POLL_CYCLE_EPOCH=0
+
 # Source the partition driver this team uses, memoized so repeated resolution in
 # one process costs nothing. Re-sources when a caller moves between teams on
 # different partitions — watch.sh loops over a subscription that can contain both.
 #
-# Deliberately NOT caching agmsg_driver_for_team's own answer (which driver a
-# team uses) per team, on top of this: a team's partition CAN change under a
+# agmsg_driver_for_team's own answer (which driver a team uses) is cached per
+# team, but ONLY for the current poll cycle (_AGMSG_POLL_CYCLE_EPOCH above),
+# not for the life of the process: a team's partition CAN change under a
 # running watcher, via an ordinary operation (internal/migrate-team-store.sh,
 # reached mid remote-connect) that flips a team from shared to per-team and
-# then removes its row from the shared store. A watcher that had cached
-# "shared" would keep reading the now-stale shared store forever, silently
-# never delivering anything the migrated store receives. The un-cached read
-# below is what notices the switch, exactly as it always has (review, #1329
-# round 2: a first attempt at this cache shipped the exact regression this
-# comment describes).
+# then removes its row from the shared store. Caching this for the whole
+# process life shipped exactly that regression (review, #1329 round 2) — a
+# watcher that had cached "shared" kept reading the now-stale shared store
+# forever. Scoping the cache to one cycle keeps the redundant re-read within
+# a single cycle (the same pair's storage_init/read_cursor_get/watch_after/
+# read_cursor_consume each resolving it independently) from forking
+# sqlite3+tr several times over, while still re-reading fresh at the start of
+# the NEXT cycle — so a migration is noticed on the very next poll, same as
+# an uncached read always noticed it, just not mid-cycle.
 _AGMSG_PARTITION_LOADED=""
+_AGMSG_PARTITION_TEAM_KEYS=()
+_AGMSG_PARTITION_TEAM_VALS=()
+_AGMSG_PARTITION_TEAM_EPOCH=()
+_AGMSG_PARTITION_TEAM_MAX=64
 _agmsg_partition_load() {
   # The registry may not be sourced yet — agmsg_db_path is reachable without
   # going through agmsg_storage_load. Same guarded pull-in that uses.
@@ -121,8 +170,29 @@ _agmsg_partition_load() {
     # shellcheck disable=SC1091
     [ -n "$_lib" ] && . "$_lib/driver-registry.sh"
   fi
-  local name
-  name="$(agmsg_driver_for_team partition "$1" shared)"
+  local name team="$1" _i _n _slot=-1
+  _n=${#_AGMSG_PARTITION_TEAM_KEYS[@]}
+  name=""
+  for ((_i = 0; _i < _n; _i++)); do
+    if [ "${_AGMSG_PARTITION_TEAM_KEYS[$_i]}" = "$team" ]; then
+      _slot=$_i
+      if [ "${_AGMSG_PARTITION_TEAM_EPOCH[$_i]}" = "$_AGMSG_POLL_CYCLE_EPOCH" ]; then
+        name="${_AGMSG_PARTITION_TEAM_VALS[$_i]}"
+      fi
+      break
+    fi
+  done
+  if [ -z "$name" ]; then
+    name="$(agmsg_driver_for_team partition "$team" shared)"
+    if [ "$_slot" -ge 0 ]; then
+      _AGMSG_PARTITION_TEAM_VALS[$_slot]="$name"
+      _AGMSG_PARTITION_TEAM_EPOCH[$_slot]="$_AGMSG_POLL_CYCLE_EPOCH"
+    elif [ "$_n" -lt "$_AGMSG_PARTITION_TEAM_MAX" ]; then
+      _AGMSG_PARTITION_TEAM_KEYS[$_n]="$team"
+      _AGMSG_PARTITION_TEAM_VALS[$_n]="$name"
+      _AGMSG_PARTITION_TEAM_EPOCH[$_n]="$_AGMSG_POLL_CYCLE_EPOCH"
+    fi
+  fi
   [ "$name" = "$_AGMSG_PARTITION_LOADED" ] && return 0
   local base kind file found=""
   while IFS="$(printf '\t')" read -r kind base; do
