@@ -3,6 +3,12 @@
     "name": "agmsg",
     "description": "Posts agmsg team messages into Slack."
   },
+  "features": {
+    "bot_user": {
+      "display_name": "agmsg",
+      "always_online": false
+    }
+  },
   "oauth_config": {
     "scopes": {
       "bot": [
