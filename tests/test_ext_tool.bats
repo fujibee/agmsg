@@ -297,6 +297,22 @@ teardown() { teardown_test_env; }
   local fail_only_bin="$BATS_TEST_TMPDIR/fail-only-bin"
   mkdir -p "$fail_only_bin"
   cp "$clip_bin/pbpaste" "$fail_only_bin/pbpaste"
+  # `cp` does not guarantee the source's executable bit survives onto the
+  # copy on every platform/umask combination -- explicit, not inherited from
+  # the source this time (review finding, #1339).
+  chmod +x "$fail_only_bin/pbpaste"
+  # Pin PATH resolution BEFORE running the real command: a fake here that
+  # `command -v` cannot see (not executable, or shadowed for any other
+  # reason) is silently skipped in favor of the REAL system pbpaste, which
+  # then succeeds against the actual clipboard (typically empty on a CI
+  # runner) instead of failing -- turning this into "clipboard is empty"
+  # rather than the "found but failed" case this scenario exists to prove.
+  # This assertion is what pins that down to a clear failure at THIS line,
+  # instead of a confusing one three lines later (review finding, #1339: a
+  # macos-latest CI run hit exactly that confusing failure once).
+  local resolved_pbpaste
+  resolved_pbpaste="$(PATH="$fail_only_bin:$PATH" command -v pbpaste)"
+  [ "$resolved_pbpaste" = "$fail_only_bin/pbpaste" ]
   run env PATH="$fail_only_bin:$PATH" bash "$SCRIPTS/ext-tool.sh" secret et-team bot2 --from-clipboard
   [ "$status" -eq 1 ]
   [ "$output" = "agmsg: found a clipboard reader on PATH but it failed to read the clipboard." ]

@@ -384,6 +384,41 @@ wait_for_file_contains() {
   return 1
 }
 
+# Waits for a mock HTTP fixture (mock_slack_server.py, mock_openrouter_server.py,
+# ...) to actually be ready to accept connections, not just for it to have
+# PRINTED its port -- a process can write that line before its own accept
+# loop is scheduled, and a loaded CI runner is exactly where that gap widens
+# (review finding, #1339: this is what made the slack/jev mock-server tests
+# flake on a busy macos-latest runner while ubuntu/windows stayed green).
+# Polls a real TCP connect via bash's own /dev/tcp, bounded by the same
+# ceiling every other wait_for_* helper here uses. On timeout, prints
+# exactly what it was waiting for (the port file's path and, if it got that
+# far, the port itself) instead of leaving the caller's own assertion to
+# report a bare failure with no context.
+wait_for_mock_server_port() {   # <port_file> -> prints the port on stdout
+  local port_file="$1" i port=""
+  for i in $(seq 1 $_WAIT_TICKS); do
+    if [ -z "$port" ] && [ -f "$port_file" ]; then
+      port="$(cat "$port_file" 2>/dev/null)"
+      case "$port" in ''|*[!0-9]*) port="" ;; esac
+    fi
+    if [ -n "$port" ]; then
+      if { exec 3<>"/dev/tcp/127.0.0.1/$port"; } 2>/dev/null; then
+        exec 3<&- 3>&-
+        printf '%s' "$port"
+        return 0
+      fi
+    fi
+    sleep $_WAIT_INTERVAL
+  done
+  if [ -z "$port" ]; then
+    echo "wait_for_mock_server_port: timed out waiting for $port_file to name a port" >&2
+  else
+    echo "wait_for_mock_server_port: timed out waiting for 127.0.0.1:$port (from $port_file) to accept a connection" >&2
+  fi
+  return 1
+}
+
 # Positive evidence that a pid is gone. NOT `kill -0 || gone`.
 #
 # A failed `kill -0` is ESRCH (dead) or EPERM (alive, but not signalable by us —

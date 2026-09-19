@@ -45,8 +45,7 @@ _start_mock_openrouter() {
   env "$@" "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_openrouter_server.py" 0 \
     </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
   MOCK_SERVER_PID=$!
-  wait_for_file_contains "$TEST_SKILL_DIR/server.port" '^[0-9][0-9]*$'
-  MOCK_PORT="$(cat "$TEST_SKILL_DIR/server.port")"
+  MOCK_PORT="$(wait_for_mock_server_port "$TEST_SKILL_DIR/server.port")" || return 1
 }
 
 @test "jev handle: sends the right request, replies with one line, and turns every failure into one line" {
