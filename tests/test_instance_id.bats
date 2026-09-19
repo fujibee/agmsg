@@ -243,6 +243,26 @@ gone_pid() {
   [ "$status" -ne 0 ] || { echo "an answered ps that omits the target did not read dead"; false; }
 }
 
+@test "pid_alive_local: a tab-only caller IFS does not break canary parsing (#970)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # cmd_sync_start reads its engine-status check via `IFS=$'\t' read ...
+  # < <(...)`, and that IFS leaks into everything run inside the process
+  # substitution -- this function's own read of the ps snapshot included.
+  # Same fixture shape as the #954 "canary present, target absent -> proof
+  # of death" test above (ps lists only $$, a complete and otherwise-valid
+  # snapshot), but read under a tab-only ambient IFS. Space cannot split a
+  # tab-only IFS field, so `$_p` parses as the WHOLE unsplit line and
+  # matches neither `$$` nor the target: the canary line fails to register
+  # even though ps answered correctly, canary stays 0, and a genuinely-dead
+  # pid reads alive through the #954 UNKNOWN fallback -- for a reason that
+  # has nothing to do with the snapshot itself being incomplete.
+  kill() { echo "bash: kill: - No such process" >&2; return 1; }
+  ps() { printf '%s S\n' "$$"; }   # only the canary, never the queried target
+  IFS=$'\t'
+  run _agmsg_pid_alive_local 424242
+  [ "$status" -ne 0 ] || { echo "a tab-only caller IFS broke ps-output parsing and read a dead pid as alive"; false; }
+}
+
 @test "pid_alive: a snapshot with output but WITHOUT the canary is UNKNOWN, not death (#954)" {
   skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
   # The subtle leak: ps returns SOME lines but not our own $$ (a partial or garbage

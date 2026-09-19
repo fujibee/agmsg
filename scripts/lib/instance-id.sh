@@ -154,7 +154,17 @@ _agmsg_pid_alive_local() {
   rc=0
   probe="$(ps -Ao pid=,stat= 2>/dev/null)" || rc=$?
   canary=0; tstat=""
-  while read -r _p _s _rest; do
+  # IFS=$' \t' on the read, not inherited from the caller: this function is
+  # called from inside `IFS=$'\t' read ... < <(...)` (cmd_sync_start's own
+  # engine-status read), and that IFS leaks into the process substitution's
+  # subshell -- everything run inside it, this loop included, otherwise reads
+  # under a tab-only IFS. A tab-only IFS cannot split ps's space-separated
+  # `pid= stat=` columns, so every line (including our own canary line) fails
+  # to parse, canary stays 0 even in a complete listing, and the UNKNOWN path
+  # below reads that as alive -- a genuinely dead engine then reports as
+  # running (#970). The read that decides liveness must not depend on
+  # whatever IFS happened to be in scope when it was called.
+  while IFS=$' \t' read -r _p _s _rest; do
     if [ "$_p" = "$$" ]; then canary=1; fi
     if [ "$_p" = "$pid" ]; then tstat="${_s:-?}"; fi
   done <<PROBE
