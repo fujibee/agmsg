@@ -90,8 +90,9 @@ STDOUT_FILE="$(mktemp)"
 STDERR_FILE="$(mktemp)"
 PAYLOAD_FILE="$(mktemp)"
 TIMED_OUT_FILE="$(mktemp)"
-rm -f "$TIMED_OUT_FILE"  # existence, not content, is the signal below
-trap 'rm -f "$STDOUT_FILE" "$STDERR_FILE" "$PAYLOAD_FILE" "$TIMED_OUT_FILE"' EXIT INT TERM
+DONE_FILE="$(mktemp)"
+rm -f "$TIMED_OUT_FILE" "$DONE_FILE"  # existence, not content, is the signal below
+trap 'rm -f "$STDOUT_FILE" "$STDERR_FILE" "$PAYLOAD_FILE" "$TIMED_OUT_FILE" "$DONE_FILE"' EXIT INT TERM
 printf '%s' "$PAYLOAD" > "$PAYLOAD_FILE"
 
 # No external `timeout` dependency: coreutils' timeout is commonly absent on
@@ -113,13 +114,27 @@ printf '%s' "$PAYLOAD" > "$PAYLOAD_FILE"
 # free to hand the same pid to an unrelated process -- a poll loop watching
 # $HPID across multiple `sleep`s can end up signaling that unrelated process
 # instead. Two independent things happen concurrently instead: a "killer"
-# subshell that unconditionally sends TERM then KILL to the group once
-# TIMEOUT elapses (never checking whether the group is still $HPID's -- see
-# the note below), and this script's own `wait "$HPID"`, which bash tracks
-# correctly for its own direct child regardless of reap timing. The killer
-# is started AFTER $HPID is assigned -- it is a subshell forked from this
-# script's own state, so it must see the real value, not an empty one from
-# before handle was launched.
+# subshell that, once TIMEOUT elapses, sends TERM then KILL to the group
+# UNLESS handle already finished (see DONE_FILE below), and this script's own
+# `wait "$HPID"`, which bash tracks correctly for its own direct child
+# regardless of reap timing. The killer is started AFTER $HPID is assigned --
+# it is a subshell forked from this script's own state, so it must see the
+# real value, not an empty one from before handle was launched.
+#
+# The killer is deliberately never stopped by pid. An earlier version of
+# this script called `kill "$KILLER_PID"` once wait returned, to cancel the
+# killer if it hadn't fired yet -- but on the timeout path the killer
+# finishes (TERM, then KILL, then exit) and gets reaped well before this
+# script gets back around to that `kill`, so that `kill "$KILLER_PID"` could
+# land on an unrelated process that reused the same pid (the same class of
+# bug this whole rewrite exists to close, just moved one level up). Instead:
+# this script creates DONE_FILE the moment wait returns, and the killer
+# checks for DONE_FILE BEFORE doing anything, not after -- if handle already
+# finished, the killer sees DONE_FILE and does nothing at all, and simply
+# runs to completion (and exit) on its own once its own sleep ends. It is
+# never left as a standing process: at worst it keeps existing, asleep, for
+# up to TIMEOUT more seconds after handle already finished, then exits by
+# itself with nothing left to reap it explicitly.
 set -m
 "$HANDLE" <"$PAYLOAD_FILE" >"$STDOUT_FILE" 2>"$STDERR_FILE" &
 HPID=$!
@@ -127,30 +142,33 @@ set +m
 
 (
   sleep "$TIMEOUT"
-  : > "$TIMED_OUT_FILE"
-  kill -TERM -- "-$HPID" 2>/dev/null || true
-  sleep 0.2
-  kill -KILL -- "-$HPID" 2>/dev/null || true
+  if [ ! -f "$DONE_FILE" ]; then
+    : > "$TIMED_OUT_FILE"
+    kill -TERM -- "-$HPID" 2>/dev/null || true
+    sleep 0.2
+    kill -KILL -- "-$HPID" 2>/dev/null || true
+  fi
 ) &
-KILLER_PID=$!
 
 RC=0
 wait "$HPID" 2>/dev/null || RC=$?
+: > "$DONE_FILE"
 
-# handle is done (on its own, or because the killer above already fired) --
-# stop the killer if it hasn't fired yet, then send one unconditional sweep
-# to the group in case handle left grandchildren behind on its own group
-# even without timing out.
-kill "$KILLER_PID" 2>/dev/null || true
-wait "$KILLER_PID" 2>/dev/null || true
+# One more unconditional sweep of the group in case handle exited on its own
+# (without timing out) but left grandchildren behind in its own group.
 kill -KILL -- "-$HPID" 2>/dev/null || true
 
-# NOT claimed safe against pid reuse: the one remaining gap is the instant
-# right after $HPID's process group becomes completely empty and before the
-# OS reuses that same pgid number for something unrelated -- a kill in that
-# exact instant could reach the wrong group. This is a real, accepted gap,
-# not a solved one; it is narrow (the group has to empty out AND get reused
-# inside a few milliseconds) but it exists.
+# NOT claimed safe against pid reuse. Two real, accepted gaps, neither
+# solved, both narrow:
+# - This sweep, and the killer's own TERM/KILL, run after handle's group is
+#   already known to be ending (wait returned here; the killer's own sleep
+#   elapsed there) -- in the instant right after the group empties and
+#   before the OS reuses that same pgid number, a kill can land on the
+#   wrong group.
+# - The killer's DONE_FILE check can itself lose the race: if handle
+#   finishes right at the timeout boundary, the killer may check DONE_FILE
+#   a moment before this script writes it, and proceed to act on a group
+#   that is already empty (or, rarer, already reused).
 if [ -f "$TIMED_OUT_FILE" ]; then
   TIMED_OUT=1
 else
