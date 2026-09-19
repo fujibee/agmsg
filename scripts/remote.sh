@@ -2991,13 +2991,15 @@ _remote_ceiling_is_plain_digits() {   # <string>
 # could not run are different facts, and collapsing them into one "nothing to
 # do" used to let an unreadable local state skip reprocessing in silence.
 #   0  confirmed rows pending.
-#   1  confirmed nothing pending: no store file, or the table was never
-#      created -- both mean quarantine was never written, not that reading it
-#      failed. A store that plainly does not exist is a fact this can read,
-#      not a read that failed, so it is 1 (confirmed), not 2.
+#   1  confirmed nothing pending: no store path exists at all, or the table
+#      was never created -- both mean quarantine was never written, not that
+#      reading it failed. Nothing existing at the path is a fact this can
+#      read, not a read that failed, so it is 1 (confirmed), not 2.
 #   2  could not determine (a non-sqlite driver, for which this pre-check has
-#      no way to read local state, or a query against an existing store/table
-#      that itself failed). Names what could not be read on stderr, together
+#      no way to read local state; something at the store path that is not a
+#      plain, readable file -- a directory, a FIFO, a permissions problem;
+#      or a query against an existing store/table that itself failed). Names
+#      what could not be read on stderr, together
 #      with the command to check by hand. The caller does NOT fall through to
 #      the real reprocess here: that reopened the exact hang this local check
 #      exists to avoid (a test double with no server behind it), so 2 skips
@@ -3024,11 +3026,18 @@ _remote_quarantine_has_malformed() {
     return 2
   fi
   store_path="$store_path/teams/$team/messages.db"
-  # No store file at all is a fact, not an unreadable one: a team with no
+  # Nothing AT ALL there is a fact, not an unreadable one: a team with no
   # local store has no rows of any kind, quarantine included, so "nothing
   # pending" is simply true here, the same as a store whose sync_quarantine
-  # table was never created below.
-  [ -f "$store_path" ] || return 1
+  # table was never created below. Something at that path that is not a
+  # plain, readable file (a directory, a FIFO, a permissions problem) is a
+  # DIFFERENT fact -- this cannot say there is nothing there, only that it
+  # cannot read what there is -- so that case is 2, named, not a silent 1.
+  [ -e "$store_path" ] || return 1
+  if [ ! -f "$store_path" ] || [ ! -r "$store_path" ]; then
+    echo "agmsg: local store '$store_path' for '$team' is not a readable regular file; $fix_hint" >&2
+    return 2
+  fi
   count="$(agmsg_sqlite "$store_path" \
     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_quarantine';" \
     2>/dev/null | tr -d '\r')" || count=""
