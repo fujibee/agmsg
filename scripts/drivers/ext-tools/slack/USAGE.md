@@ -8,16 +8,21 @@ this page is only about what happens once it's already configured.
 ## What it does
 
 Posts to **one fixed Slack channel**, decided once during setup and not
-something you choose per message. There is no reply: the message goes out,
-and that's the end of it from agmsg's side — you are not woken up again to
-learn whether it landed.
+something you choose per message. **On success there is no reply** — the
+message goes out and that's the end of it, you are not woken up again to
+learn whether it landed. **On failure you do get one reply**, later, one
+line naming what went wrong (see below) — that is the only case where
+sending here wakes your seat again.
 
 ## What you send
 
-Whatever you put in `<body>` is posted **exactly as written** — no
-reformatting, no wrapping, no "as a Slack message" rewriting. Write it the
-way you want it to appear in Slack, including any Slack markdown you want
-rendered (`*bold*`, `` `code` ``, links, etc.).
+Whatever you put in `<body>` is posted with **no reformatting, no
+wrapping, no "as a Slack message" rewriting** — write it the way you want
+it to appear in Slack, including any Slack markdown you want rendered
+(`*bold*`, `` `code` ``, links, etc.). The body text is otherwise passed
+through unchanged, with one exception: trailing newlines are stripped
+before it reaches Slack, so don't rely on trailing blank lines for
+spacing.
 
 ## Before you send
 
