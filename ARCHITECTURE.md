@@ -10,17 +10,20 @@ A cross-agent messaging primitive that works between any combination of Claude C
 
 The default install must work with **bash + sqlite3 only**. Any feature beyond that is opt-in and may require additional dependencies that the user agrees to install.
 
-## The 3-axis driver model
+## The 4-axis driver model
 
-agmsg is built around three orthogonal axes, each of which has exactly one **driver** active at a time. A driver is a swappable implementation behind a fixed protocol.
+agmsg is built around four orthogonal axes, each of which has exactly one **driver** active at a time (per member, for terminal — see below). A driver is a swappable implementation behind a fixed protocol.
 
 | Axis | What it abstracts | Bundled drivers |
 |---|---|---|
 | **storage** | Where messages and team state live, and how they are queried | `sqlite` (default), `jsonl-duckdb` |
 | **agent** | Per-runtime differences (hook formats, settings file locations, monitor tool availability) | `claude-code`, `codex`, `gemini`, `antigravity`, `copilot` |
 | **delivery** | How a recipient is notified that a message arrived | `monitor`, `turn`, `both`, `off` |
+| **terminal** | The pane, window, or process a member's host-agent CLI runs under, and how to create, read, and signal it | `herdr`, `tmux`, `plain` |
 
-The three axes are independent: any storage driver can be paired with any agent driver and any delivery mode. They share a common discovery/config/dependency-check protocol (see the spec) but expose axis-specific operations.
+The three configuration axes are independent: any storage driver can be paired with any agent driver and any delivery mode. They share a common discovery/config/dependency-check protocol (see the spec) but expose axis-specific operations.
+
+**terminal is detected, not configured** — a session determines which terminal driver it is running under (or falls back to `plain`, the driver of last resort, if none matches) rather than being told. It is otherwise the same kind of driver: a fixed protocol (`terminal_*` functions, see [`docs/spec/driver-interface.md`](docs/spec/driver-interface.md) §6) behind which `herdr`, `tmux`, and a plain OS terminal are interchangeable, and it shares the same discovery/trust protocol as the other three. Unlike them, a member can function with no terminal capability at all — `plain` degrades to "no addressable pane," and messaging keeps working; terminal only adds the ability to locate, read, or type into another member's pane.
 
 ## Driver vs plugin
 
@@ -73,6 +76,7 @@ Message identifiers are **UUIDv7** strings. The interface treats them as opaque 
 | **AGMSG-DIRECTIVE** | A JSON line emitted on stdout instructing the host agent to take a specific action |
 | **host agent** | The runtime invoking agmsg scripts (Claude Code, Codex, Gemini CLI, Antigravity, …) |
 | **event log** | The append-only record of message lifecycle events that bundled storage drivers project queries over |
+| **placement** | A `<terminal>:<id>` reference to one member's pane/window (e.g. `tmux:/path/to/socket:%3`) |
 
 ## See also
 

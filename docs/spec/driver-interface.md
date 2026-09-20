@@ -3,7 +3,7 @@
 *[日本語](driver-interface.ja.md)*
 
 **Status:** draft (epic [#51](https://github.com/fujibee/agmsg/issues/51))
-**Scope:** axis A — storage. The common protocol sections also apply to axes B (agent) and C (delivery) but their axis-specific functions are out of scope here.
+**Scope:** axis A — storage, plus the terminal axis (§6). The common protocol sections also apply to axes B (agent) and C (delivery) but their axis-specific functions are out of scope here.
 
 This document defines the contract between agmsg core and a storage driver. It is the authoritative source for what any new driver must implement.
 
@@ -412,3 +412,106 @@ Active driver per axis is recorded in `~/.agents/agmsg/config.json`:
 - **Per-project active driver override** — v1 is machine-wide; future enhancement.
 - **Subcommand + JSONL-pipe driver protocol** (language-independent drivers) — deferred until a non-bash driver is actually wanted.
 - **Cross-machine storage drivers** (postgres, s3-jsonl) — not blocked by this spec; can be added under the same protocol when needed.
+
+## 6. Terminal driver
+
+The terminal axis abstracts the pane, window, or process a team member's
+host-agent CLI runs under — the placement that lets another member, or a
+person, find it, read its visible output, or type into it. It is orthogonal
+to storage/agent/delivery: terminal identifies *where* a member's process
+lives, not how its messages are stored, how its runtime differs, or how it
+is notified of new mail. See [`ARCHITECTURE.md`](../../ARCHITECTURE.md) for
+how the axis fits alongside the other three.
+
+### 6.1 Driver location and manifest
+
+Bundled terminal drivers live at `scripts/drivers/terminals/<name>/`,
+mirroring the `types` (agent) axis layout: `terminal.conf` (read-only
+key=value manifest, never sourced) plus `ops.sh` (sourced bash exposing
+`terminal_*` functions — the axis prefix from §1.2). Shipped drivers:
+`herdr`, `tmux`, `plain`.
+
+`terminal.conf` fields:
+
+| Field | Meaning |
+|---|---|
+| `name` | Driver name |
+| `priority` | Lower numeric value is tried first during self-detection (§6.3) |
+| `backend` | One-line human description of what is being addressed |
+| `capabilities` | Space-separated list of operations this driver advertises as functional |
+
+Example (`tmux/terminal.conf`):
+
+```
+name=tmux
+priority=20
+backend=tmux pane/window
+capabilities=spawn despawn peek poke where arrange name
+```
+
+### 6.2 Required and optional functions
+
+Beyond the common `<axis>_check` / `<axis>_describe` pair (§1.3, spelled
+`terminal_check` / `terminal_describe` here), every terminal driver's
+`ops.sh` implements:
+
+| Function | Purpose |
+|---|---|
+| `terminal_detect <session_id>` | record op: prints this session's own terminal id and exits 0 **iff** the caller is running under this terminal right now; exits non-zero (no stdout) otherwise |
+| `terminal_spawn <name> <project> <target> <boot...>` | record op: creates a pane/window, launches `boot`, prints the new addressable id |
+| `terminal_despawn <id>` | control op: closes the pane/window named by `id` |
+| `terminal_peek <id> [--lines N]` | record op: prints the pane's visible text verbatim (never parsed) |
+| `terminal_poke <id> <text>` | control op: types `text` into the pane and submits it |
+| `terminal_pane_state <id>` | read op: `gone` / `present` / `unknown` for `id` |
+| `terminal_where <id>` | read op: the id's container (e.g. a tmux window, a herdr tab) |
+| `terminal_arrange <source-id> <intent> <target-id>` | control op: place `source` below/right of `target`, or swap them |
+| `terminal_name <id> <team> <name> [mode]` | control op: label the pane and set the key the terminal itself uses to address the member; idempotent |
+
+One optional function narrows what a driver advertises in its manifest down
+to what one specific runtime instance can actually do:
+
+| Function | Purpose |
+|---|---|
+| `terminal_capability <capability> [id]` | `0` supported / `1` unsupported / `2` unknown for this one `id` — never wider than the manifest's `capabilities` |
+
+`plain` is the only shipped driver that implements it: its manifest lists
+`peek poke` because *some* plain placements can reach them (through a
+recognized terminal emulator's own adapter — the shipped implementation
+calls out to `osascript` on macOS), but a placement with no known
+emulator/tty narrows both to `unsupported` for that one instance before
+either operation is attempted, and each operation's own `terminal_peek` /
+`terminal_poke` consults it internally. `tmux` and `herdr` do not implement
+it: their manifest ceiling holds uniformly for every instance.
+
+### 6.3 Identification and placement
+
+A terminal id is driver-specific; the placement reference every caller
+outside the driver actually uses is `<terminal-name>:<id>` (e.g.
+`tmux:/path/to/socket:%3`, `herdr:<socket>:<pane>`, `plain:<emulator>:<tty>`,
+or the unaddressable `plain:-`).
+
+Which driver a session is running under is not configured, it is detected:
+candidate drivers are tried in ascending `priority` order (lower first),
+each candidate's `ops.sh` sourced in a subshell so a failed candidate's
+`terminal_*` definitions never leak into the next attempt. The first
+candidate whose `terminal_detect` confirms "yes, I am this terminal, here is
+my id" wins, and only that driver is sourced into the caller. `plain`
+(`priority=100`, tried last) is the universal fallback: it always succeeds
+detection, representing an OS terminal window opened without any
+addressable multiplexer.
+
+### 6.4 CLI mapping
+
+| User command | Driver function(s) |
+|---|---|
+| `spawn.sh` | `terminal_spawn`, then `terminal_name` |
+| `despawn.sh` | `terminal_despawn` |
+| `peek.sh` | `terminal_peek` |
+| `poke.sh` | `terminal_peek` (pre-check for a live draft, when the target agent type declares an input-box marker and the terminal is not `plain`), then `terminal_poke` |
+| `where.sh` | self-`terminal_detect` across candidates; reports the winning driver's `capabilities` |
+| `arrange.sh` | `terminal_arrange` |
+| `join.sh`, `session-start.sh`, `watch.sh`, actas flows | `terminal_name`, keeping the pane's label and key current on every action |
+
+Driver discovery and trust (bundled drivers are always trusted; externally
+supplied ones opt in) are shared with every other axis — see
+[ADR 0002](../adr/0002-driver-discovery-and-plugin-opt-in.md).
