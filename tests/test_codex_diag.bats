@@ -7,7 +7,7 @@ setup() {
   export PROJ="$TEST_SKILL_DIR/proj"
   mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
-  export DIAG="$TYPES/codex/codex-diagnose.sh"
+  export DIAG="$TYPES/codex/codex-diag.sh"
 }
 
 teardown() { teardown_test_env; }
@@ -56,10 +56,9 @@ teardown() { teardown_test_env; }
   ! grep -q 'ps -eo.*MSYSTEM' "$TYPES/codex/codex-diag.sh"
 }
 
-@test "codex-diagnose wrapper delegates to canonical command" {
-  run bash "$DIAG" --help
-  expected="$output"
-  run bash "$TYPES/codex/codex-diag.sh" --help
+@test "codex-diagnose keeps opt-in self-delivery options" {
+  run bash "$TYPES/codex/codex-diagnose.sh" --help
   [ "$status" -eq 0 ]
-  [ "$output" = "$expected" ]
+  [[ "$output" == *"--self-test"* ]]
+  [[ "$output" == *"--confirm"* ]]
 }
