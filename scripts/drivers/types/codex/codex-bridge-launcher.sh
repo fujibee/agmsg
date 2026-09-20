@@ -300,7 +300,7 @@ build_safety_state() {
   while IFS="$TAB" read -r team name; do
     [ -n "$team" ] || continue
     agmsg_role_session_load "$team" "$name" 2>/dev/null || true
-    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER$TAB$AGMSG_ROLE_SESSION_CODEX_HOME"
+    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER$TAB${AGMSG_ROLE_SESSION_CODEX_HOME:-}"
   done <<< "$identity"
 }
 
@@ -416,7 +416,7 @@ while IFS="$TAB" read -r candidate_team candidate_name; do
   candidate_thread="$AGMSG_ROLE_SESSION_UUID"
   if [ -n "$candidate_thread" ]; then
     candidate_project="$AGMSG_ROLE_SESSION_PROJECT"
-    candidate_home="$AGMSG_ROLE_SESSION_CODEX_HOME"
+    candidate_home="${AGMSG_ROLE_SESSION_CODEX_HOME:-}"
     candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
     # A record for another project proves this role's current seat is elsewhere:
     # never consume its unread rows from this project. A lone same-project role keeps #350's legacy recorded-thread affinity even
@@ -954,7 +954,7 @@ EOF
   rec_thread="$AGMSG_ROLE_SESSION_UUID"
   rec_project="$AGMSG_ROLE_SESSION_PROJECT"
   rec_owner="$AGMSG_ROLE_SESSION_OWNER"
-  rec_home="$AGMSG_ROLE_SESSION_CODEX_HOME"
+  rec_home="${AGMSG_ROLE_SESSION_CODEX_HOME:-}"
   rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
   if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ] \
     || ! agmsg_codex_role_home_matches "$rec_home" \
