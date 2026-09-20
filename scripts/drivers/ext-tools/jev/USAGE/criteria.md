@@ -37,10 +37,19 @@ Nothing else about the question changed.
 
 Result: `fable` 1.00 (cost: $0.000023) — decisively selected.
 
-## Takeaway
+## Takeaway (scoped to these four runs)
 
-Language matters as much as content — write in English (runs 1 vs 2).
-Vague criteria (heavy/light, hard/easy) collapse toward whichever choice
-sounds most default; criteria that name the actual decision boundary
-produce decisive, well-separated probabilities (runs 3 vs 4). See
-`../USAGE.md` for how to apply this when writing a `questions` object.
+This is what was observed in these four calls, for this one reported task
+and this one `model` question — not a general claim about every question
+or every task, since each condition was run only once and the exact
+`state` text was not recorded:
+
+- In these measured runs, the same question in Japanese produced a split
+  (`sonnet` 0.50 / `opus` 0.45); the same question in English converged
+  on one answer (0.96) (runs 1 vs 2).
+- In these measured runs, criteria worded around how much work the task
+  involved left `fable` buried (0.22); criteria naming the actual
+  decision boundary instead made it decisive (1.00) (runs 3 vs 4).
+
+See `../USAGE.md`'s tips for how these two observations are applied
+there.
