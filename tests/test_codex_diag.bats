@@ -17,7 +17,7 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 0 ]
   grep -qF -- "read-only" <<<"$output"
   grep -qF -- "exit 1 means mismatch or unknown" <<<"$output"
-  ! grep -qF -- "self-test" <<<"$output"
+  refute grep -qF -- "self-test" <<<"$output"
 }
 
 @test "codex diagnose: legacy invocation is unknown and non-match" {
