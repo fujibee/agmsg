@@ -475,14 +475,14 @@ simply absent from that driver's `ops.sh`.
 | Function | Purpose |
 |---|---|
 | `terminal_capability <capability> [id]` | narrow the manifest's advertised `capabilities` to what this one `id` can actually do: `0` supported / `1` unsupported / `2` unknown — never wider than the manifest |
-| `terminal_team_observe <id>` | read back the label/status facts one pane carries, so `team --fix` can verify or repair a member's own recorded identity |
-| `terminal_team_input_ready <id> <expected>` | confirm the pane's foreground process is actually the expected CLI (not, say, a bare shell prompt), so `team --fix` does not trust a re-read too early |
+| `terminal_team_observe <id>` | read back the activity/label/key/title facts one pane carries; `self-write.sh` uses it to verify or repair its own naming, `team-status.sh` uses it read-only for display, and `spawn.sh` uses it to read back the key it just wrote rather than trusting the write's own exit status |
+| `terminal_team_input_ready <id> <expected>` | confirm the pane's foreground process is actually `<expected>` (not, say, a bare shell prompt); `self-write.sh`'s self-repair gates a rename attempt on this before typing into the pane |
 | `terminal_find_by_label <label>` | search every reachable pane for the one(s) carrying agmsg label `<label>`, printing their ids |
 | `terminal_label_of <id>` | read back the agmsg label carried by one specific pane — `find_by_label`'s confirming re-check through a second, narrower query |
 | `terminal_id_ok <id>` | validate that a string has the *shape* of an id this driver could have produced, without asking whether a pane with it still exists |
-| `terminal_pane_process_observe <id>` | read the pid of the OS process actually running in the pane |
+| `terminal_pane_process_observe <id>` | print candidate pids for the process(es) running in the pane — tmux prints the single `pane_pid`; herdr prints a deduplicated set (shell pid, foreground process-group id, and each foreground process), since more than one can be live at once — for `self-proof.sh` to cross-check against the owner process's own ancestry walk |
 | `terminal_enumerate_panes` | list every pane this driver can see across every reachable server/session, one line per pane, naming (not dropping) any server it could not read |
-| `terminal_fence <id> [<seat-pid>]` | print a (server-generation, pane-generation) token pair so a caller can detect that `id` now names a different underlying pane or server generation than an earlier read — `self-write.sh`'s own verification is the shipped caller |
+| `terminal_fence <id> [<seat-pid>]` | print an (instance, reuse-sensitive anchor) pair a caller can compare across two reads to tell whether `id` still names the same underlying session — herdr: socket + herdr's own `terminal_id`; tmux: socket + `pane_pid`; plain: emulator + tty/pid/start-time (needs the caller-supplied `<seat-pid>`) — `self-write.sh`'s own verification is the shipped caller |
 
 `plain` implements `terminal_capability`; `tmux` and `herdr` do not (their
 manifest ceiling holds uniformly for every instance of theirs). `plain`'s
@@ -529,9 +529,13 @@ and only the eventually-chosen driver is sourced into the caller. There are
   / `join.sh` / actas: which terminal, and which id, names *this session's
   own* pane?) tries **every** candidate, not just the first present one,
   because a candidate can be present without being able to produce a
-  nameable id (e.g. a herdr session nested inside tmux answers "present"
-  from inherited environment even when tmux is the real terminal). A
-  candidate that **produces an id** wins immediately, even if a
+  nameable id: herdr's presence is `HERDR_ENV=1` alone, and it produces an
+  id straight from the environment when `HERDR_PANE_ID` is set and
+  well-formed — but if `HERDR_PANE_ID` is absent or malformed *and* the
+  session-id fallback (a live `agent list` lookup) cannot resolve this
+  session either, herdr is present-but-unresolved rather than absent, and a
+  genuinely-live tmux underneath still gets to win. A candidate that
+  **produces an id** wins immediately, even if a
   higher-priority candidate was present earlier but produced none. A
   candidate that is present but produces no id is remembered and the search
   continues. Once every candidate has been tried: if *any* non-`plain`
