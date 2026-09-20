@@ -25,6 +25,12 @@ setup() {
     '  bash scripts/ext-tool.sh setup <team> <name> faketool save' \
     > "$FAKETOOL_DIR/SETUP.md"
 
+  printf '%s\n' \
+    '# faketool usage' \
+    '' \
+    'Send it anything; it echoes the body back.' \
+    > "$FAKETOOL_DIR/USAGE.md"
+
   # A fake, non-interactive setup: save writes the member config directly
   # (the real contract — drivers/ext-tools/README.md), status/check/test are
   # no-ops that just prove the dispatch reaches them.
@@ -130,6 +136,7 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 1 ]
   grep -qF "SETUP.md" <<<"$output"
   grep -qF "not configured for 'bot'" <<<"$output"
+  grep -qF "ext-tool.sh\" usage faketool" <<<"$output"
   # Refused, not partially joined: no registration was written.
   [ ! -f "$TEST_SKILL_DIR/teams/et-team/config.json" ] || \
     refute grep -qF '"bot"' "$TEST_SKILL_DIR/teams/et-team/config.json"
@@ -146,6 +153,22 @@ teardown() { teardown_test_env; }
   run bash "$SCRIPTS/join.sh" et-team bot ext-tool --tool faketool
   [ "$status" -eq 0 ]
   grep -qF "Joined team et-team as bot" <<<"$output"
+
+  # `ext-tool.sh usage` prints a tool's USAGE.md, in both forms: the raw
+  # tool name (readable before ever joining) and the now-joined member's
+  # team/name (resolved through its own saved config, not re-typed).
+  run bash "$SCRIPTS/ext-tool.sh" usage faketool
+  [ "$status" -eq 0 ]
+  grep -qF "Send it anything" <<<"$output"
+
+  run bash "$SCRIPTS/ext-tool.sh" usage et-team bot
+  [ "$status" -eq 0 ]
+  grep -qF "Send it anything" <<<"$output"
+
+  # A tool with no USAGE.md yet says so honestly, not something made up.
+  run bash "$SCRIPTS/ext-tool.sh" usage slowtool
+  [ "$status" -eq 1 ]
+  grep -qF "has no USAGE.md yet" <<<"$output"
 
   # ext-tool has no pane of its own, so join must not even ATTEMPT to resolve
   # or record one (dogfood finding: it did, and under a real terminal this

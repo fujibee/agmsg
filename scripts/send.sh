@@ -59,6 +59,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/type-registry.sh"
 
 # #414: TEAM becomes a path segment (teams/$TEAM/config.json) below whether or
 # not --force is given, so validate it unconditionally, before any config-path
@@ -87,8 +89,9 @@ DB="$(agmsg_db_path "$TEAM")"
 # command; the message write itself goes through the storage facade below.
 [ -f "$DB" ] || bash "$SCRIPT_DIR/internal/init-db.sh" >/dev/null
 
-# Unconditional (moved ahead of the --force gate below): the ext-tool
-# dispatch check after storage_send needs this path regardless of --force.
+# Unconditional (moved ahead of the --force gate below): the generic
+# per-type message plug after storage_send needs this path regardless of
+# --force.
 TEAM_CONFIG="$SCRIPT_DIR/../teams/$TEAM/config.json"
 
 # #355: reject a from/to that isn't registered in <team> — an unnoticed typo
@@ -140,13 +143,13 @@ MSG_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY")"
 
 echo "Sent to $TO in team $TEAM"
 
-# ext-tool dispatch (see scripts/drivers/ext-tools/README.md): fires
-# only when $TO is registered as ext-tool AND joined ON THIS MACHINE (its
-# member config exists locally) -- a message that only arrived here through
-# remote sync is explicitly out of scope for v1 (the tool never ran anything
-# for it on the machine it was actually addressed to). Best-effort: any
-# failure below is reported but never turns a successful send into a failed
-# one -- the message is already saved by this point.
+# Generic per-type "message arrived" plug (scripts/drivers/types/<type>/_message.sh):
+# lets a type react to a message just sent to one of its own members, without
+# this script knowing any type's name (ext-tool's dispatch launch is the
+# first and, so far, only example -- see scripts/drivers/ext-tools/README.md
+# for its own adapter contract). Best-effort: any failure a hook reports must
+# never turn a successful send into a failed one -- the message is already
+# saved by this point. A hook may not call exit.
 if [ -n "${MSG_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
   # Quote held in a variable, not written inline in the pattern (#897): a
   # literal \' replacement disagrees between bash 3.2 (keeps the backslash,
@@ -154,65 +157,38 @@ if [ -n "${MSG_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
   # $q from _agmsg_roster_check's own local above to reuse.
   q="'"
   TO_SQL=${TO//$q/$q$q}
-  TO_TYPE="$(agmsg_sqlite_mem "
+  # Every distinct type $TO is registered as, from its registrations array
+  # (every other type's shape) or its bare top-level type (the shape a team
+  # with no id-bearing roster still has) -- an agent registered under more
+  # than one type gets the hook called once per type that defines one.
+  TO_TYPES="$(agmsg_sqlite_mem "
     WITH raw(json) AS (SELECT CAST(readfile('$(agmsg_sql_readfile_path "$TEAM_CONFIG")') AS TEXT)),
     cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
     agent(a) AS (SELECT value FROM cfg, json_each(json_extract(cfg.json, '\$.agents')) WHERE key = '$TO_SQL')
-    SELECT CASE
-      WHEN EXISTS(
-        SELECT 1 FROM agent, json_each(json_extract(agent.a, '\$.registrations'))
-        WHERE json_extract(value, '\$.type') = 'ext-tool'
-      ) THEN 'ext-tool'
-      WHEN (SELECT json_extract(agent.a, '\$.type') FROM agent) = 'ext-tool' THEN 'ext-tool'
-      ELSE ''
-    END;
+    SELECT group_concat(DISTINCT t) FROM (
+      SELECT json_extract(value, '\$.type') AS t
+      FROM agent, json_each(json_extract(agent.a, '\$.registrations'))
+      WHERE json_extract(value, '\$.type') IS NOT NULL
+      UNION
+      SELECT json_extract(agent.a, '\$.type') AS t
+      FROM agent
+      WHERE json_extract(agent.a, '\$.type') IS NOT NULL
+    );
   " 2>/dev/null)"
-  if [ "$TO_TYPE" = ext-tool ]; then
-    # Every branch below that cannot dispatch reports a named failure back to
-    # the sender instead of silently doing nothing: a message to an ext-tool
-    # member that is unconfigured, misconfigured, or names an unknown tool
-    # must not just vanish with the send still reporting success (review
-    # finding).
-    EXT_TOOL_FAIL_REASON=""
-    EXT_TOOL_NAME=""
-    EXT_TOOL_CONFIG="$SCRIPT_DIR/../ext-tools/$TEAM/$TO.conf"
-    if [ ! -f "$EXT_TOOL_CONFIG" ]; then
-      EXT_TOOL_FAIL_REASON="not configured on this machine"
-    else
-      # Same defensive key=value read as ext-tool-dispatch.sh's own timeout=
-      # read: never sourced, first match, empty on any miss.
-      EXT_TOOL_LINE="$( { grep -E '^[[:space:]]*tool[[:space:]]*=' "$EXT_TOOL_CONFIG" 2>/dev/null || true; } | head -1)"
-      EXT_TOOL_NAME="${EXT_TOOL_LINE#*=}"
-      EXT_TOOL_NAME="${EXT_TOOL_NAME#"${EXT_TOOL_NAME%%[![:space:]]*}"}"
-      EXT_TOOL_NAME="${EXT_TOOL_NAME%"${EXT_TOOL_NAME##*[![:space:]]}"}"
-      if [ -z "$EXT_TOOL_NAME" ]; then
-        EXT_TOOL_FAIL_REASON="its config names no tool"
-      else
-        # tool='s value flows straight into a path
-        # (drivers/ext-tools/$EXT_TOOL_NAME/handle). Unlike a --tool argument
-        # at join time -- which never gets this far unless the directory it
-        # names already existed -- this comes from a file that could have
-        # been hand-edited or corrupted, so it gets the same shared
-        # character-class check as every other path built from a tool name
-        # (lib/validate.sh), not just the existence check below.
-        if ! agmsg_validate_tool_name "$EXT_TOOL_NAME" >/dev/null 2>&1; then
-          EXT_TOOL_FAIL_REASON="its config names an invalid tool '$EXT_TOOL_NAME'"
-        elif [ ! -x "$SCRIPT_DIR/drivers/ext-tools/$EXT_TOOL_NAME/handle" ]; then
-          EXT_TOOL_FAIL_REASON="unknown tool '$EXT_TOOL_NAME'"
+  if [ -n "$TO_TYPES" ]; then
+    IFS=',' read -ra _AGMSG_TO_TYPES <<<"$TO_TYPES"
+    for _agmsg_to_type in "${_AGMSG_TO_TYPES[@]}"; do
+      _agmsg_msg_type_dir="$(agmsg_type_dir "$_agmsg_to_type" 2>/dev/null || true)"
+      if [ -n "$_agmsg_msg_type_dir" ] && [ -f "$_agmsg_msg_type_dir/_message.sh" ]; then
+        # shellcheck disable=SC1090
+        . "$_agmsg_msg_type_dir/_message.sh"
+        if declare -F agmsg_type_on_message >/dev/null 2>&1; then
+          _AGMSG_MSG_BODY_FILE="$(mktemp)"
+          printf '%s' "$BODY" > "$_AGMSG_MSG_BODY_FILE"
+          agmsg_type_on_message "$TEAM" "$FROM" "$TO" "$MSG_ID" "$_AGMSG_MSG_BODY_FILE"
+          rm -f "$_AGMSG_MSG_BODY_FILE"
         fi
       fi
-    fi
-
-    if [ -n "$EXT_TOOL_FAIL_REASON" ]; then
-      storage_send "$TEAM" "$TO" "$FROM" "$TO: processing failed ($EXT_TOOL_FAIL_REASON)" >/dev/null 2>&1 || true
-    else
-      mkdir -p "$SCRIPT_DIR/../run"
-      EXT_TOOL_BODY_FILE="$(mktemp)"
-      printf '%s' "$BODY" > "$EXT_TOOL_BODY_FILE"
-      nohup bash "$SCRIPT_DIR/internal/ext-tool-dispatch.sh" \
-        "$TEAM" "$FROM" "$TO" "$EXT_TOOL_NAME" "$MSG_ID" "$EXT_TOOL_BODY_FILE" \
-        >>"$SCRIPT_DIR/../run/ext-tool-dispatch.$TEAM.$TO.log" 2>&1 3>&- 4>&- &
-      disown 2>/dev/null || true
-    fi
+    done
   fi
 fi

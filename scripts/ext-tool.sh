@@ -8,6 +8,14 @@ set -euo pipefail
 #   ext-tool.sh setup <team> <name> <tool> test
 #   ext-tool.sh secret <team> <name>
 #   ext-tool.sh secret <team> <name> --from-clipboard
+#   ext-tool.sh usage <team> <name>
+#   ext-tool.sh usage <tool>
+#
+# `usage` prints a tool's USAGE.md (how to ask it for things, once it's
+# joined) -- the <team> <name> form resolves the tool from that member's own
+# saved config; the single-<tool> form reads it directly, for looking it up
+# before ever joining. A tool with no USAGE.md yet says so in one line
+# rather than making one up.
 #
 # Common entry point for configuring an ext-tool member
 # (scripts/drivers/ext-tools/README.md has the full contract). `setup`
@@ -244,11 +252,51 @@ cmd_secret() {
   echo "Saved to $dest. (The value itself is not shown or logged.)"
 }
 
+cmd_usage() {
+  local arg1="${1:?Usage: ext-tool.sh usage <team> <name>|<tool>}"
+  local tool
+
+  if [ -n "${2:-}" ]; then
+    # <team> <name> form: resolve the tool from that member's own saved
+    # config, the same key=value read every other ext-tool entry point uses.
+    local team="$arg1" name="$2" config_path line
+    agmsg_validate_team_name "$team" || exit 1
+    agmsg_validate_agent_name "$name" || exit 1
+    config_path="$(_ext_tool_config_path "$team" "$name")"
+    if [ ! -f "$config_path" ]; then
+      echo "agmsg: '$name' is not configured for ext-tool in team '$team' yet; there is no tool to resolve. Pass a tool name directly: ext-tool.sh usage <tool>" >&2
+      exit 1
+    fi
+    line="$( { grep -E '^[[:space:]]*tool[[:space:]]*=' "$config_path" 2>/dev/null || true; } | head -1)"
+    tool="${line#*=}"
+    tool="${tool#"${tool%%[![:space:]]*}"}"
+    tool="${tool%"${tool##*[![:space:]]}"}"
+    if [ -z "$tool" ] || ! agmsg_validate_tool_name "$tool" >/dev/null 2>&1; then
+      echo "agmsg: '$name' in team '$team' has no valid tool= in its config." >&2
+      exit 1
+    fi
+  else
+    # Single-<tool> form: read directly, for looking a tool up before ever
+    # joining it.
+    tool="$arg1"
+    agmsg_validate_tool_name "$tool" || exit 1
+  fi
+
+  local dir
+  dir="$(_ext_tool_dir "$tool")"
+  if [ ! -f "$dir/USAGE.md" ]; then
+    echo "agmsg: '$tool' has no USAGE.md yet." >&2
+    exit 1
+  fi
+  cat "$dir/USAGE.md"
+}
+
 case "${1:-}" in
   setup) shift; cmd_setup "$@" ;;
   secret) shift; cmd_secret "$@" ;;
+  usage) shift; cmd_usage "$@" ;;
   *)
-    echo "Usage: ext-tool.sh <setup <team> <name> <tool> status|check|save|test|secret <team> <name>>" >&2
+    echo "Usage: ext-tool.sh <setup <team> <name> <tool> status|check|save|test|secret <team> <name>|usage <team> <name>|<tool>>" >&2
     exit 1
     ;;
 esac
