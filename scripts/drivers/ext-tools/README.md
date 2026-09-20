@@ -6,9 +6,15 @@ member. Adding one is dropping a directory here:
 ```
 scripts/drivers/ext-tools/<tool>/tool.conf   # name, required config keys, default timeout
 scripts/drivers/ext-tools/<tool>/SETUP.md    # for the LLM at the joining seat: what to ask, in what order, common failures
+scripts/drivers/ext-tools/<tool>/USAGE.md    # optional: how to ask it for things, once joined -- ext-tool.sh usage prints it
 scripts/drivers/ext-tools/<tool>/setup       # non-interactive: status | check <item> [args...] | save [args...] | test
 scripts/drivers/ext-tools/<tool>/handle      # processes one message
 ```
+
+`USAGE.md` is optional. `ext-tool.sh usage <team> <name>` (once joined) or
+`ext-tool.sh usage <tool>` (before joining) prints it verbatim; a tool
+without one gets a plain one-line "has no USAGE.md yet" instead of anything
+made up.
 
 An adapter can be written in any language; agmsg only talks to it over
 argv/stdin/stdout/exit-code.

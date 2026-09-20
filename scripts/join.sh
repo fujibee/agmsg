@@ -26,61 +26,29 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
 
 # Reject team names that would escape teams/ as a path segment (#140).
-# Moved ahead of the ext-tool block below (it used to run further down):
-# $TEAM becomes a path segment in an ext-tool config path before any of the
-# rest of this script runs, so it must be validated before that, not after.
+# Ahead of the per-type join plug below: a type's own parse_args hook (e.g.
+# ext-tool's) may turn $TEAM into a path segment of its own before the rest
+# of this script runs, so it must be validated before that, not after.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
 agmsg_validate_team_name "$TEAM" || exit 1
 agmsg_validate_agent_name "$AGENT_ID" || exit 1
 
-# ext-tool takes `--tool <tool>` in place of a project path: it is a program,
-# not a session tied to a filesystem project the way every other type is.
-# join refuses outright
-# (writes no registration) when the tool doesn't exist or the member has no
-# config yet -- an unconfigured ext-tool member would otherwise join fine and
-# then fail every send in silence.
-EXT_TOOL_NAME=""
-if [ "$AGENT_TYPE" = ext-tool ]; then
-  if [ "${4:-}" != "--tool" ] || [ -z "${5:-}" ]; then
-    echo "Usage: join.sh <team> <agent_id> ext-tool --tool <tool> [--force]" >&2
-    exit 1
-  fi
-  EXT_TOOL_NAME="$5"
-  # $EXT_TOOL_NAME becomes a path segment (drivers/ext-tools/$EXT_TOOL_NAME/)
-  # below; validate before that, not after (same allow-list send.sh and
-  # ext-tool-dispatch.sh use for the same reason).
-  agmsg_validate_tool_name "$EXT_TOOL_NAME" || exit 1
-  # A human-readable placeholder, not a real path: ext-tool has no project.
-  # The registration still carries a `project` field (every other type's
-  # does) so downstream JSON readers never have to special-case ext-tool for
-  # ITS ABSENCE; they just never resolve it to anything on disk.
-  PROJECT_PATH="(ext-tool:$EXT_TOOL_NAME)"
-  FORCE=0
-  if [ "${6:-}" = "--force" ]; then
-    FORCE=1
-  fi
+# Generic per-type join plug (scripts/drivers/types/<type>/_join.sh): lets a
+# type parse its own trailing arguments (they need not look like <project_path>
+# [--force] at all -- ext-tool's shape is `--tool <tool> [--force]`) and
+# control the resolve/pane steps below, all without this script knowing any
+# type's name. Neither hook function may call exit -- this script decides
+# what a non-zero return means. A type without a _join.sh (or without one of
+# the two functions) gets the unchanged generic behavior.
+_AGMSG_JOIN_TYPE_DIR="$(agmsg_type_dir "$AGENT_TYPE" 2>/dev/null || true)"
+if [ -n "$_AGMSG_JOIN_TYPE_DIR" ] && [ -f "$_AGMSG_JOIN_TYPE_DIR/_join.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$_AGMSG_JOIN_TYPE_DIR/_join.sh"
+fi
 
-  EXT_TOOL_DRIVER_DIR="$SCRIPT_DIR/drivers/ext-tools/$EXT_TOOL_NAME"
-  if [ ! -f "$EXT_TOOL_DRIVER_DIR/tool.conf" ]; then
-    AVAILABLE=""
-    for _agmsg_et_dir in "$SCRIPT_DIR"/drivers/ext-tools/*/; do
-      [ -f "${_agmsg_et_dir}tool.conf" ] || continue
-      AVAILABLE="${AVAILABLE:+$AVAILABLE, }$(basename "$_agmsg_et_dir")"
-    done
-    unset _agmsg_et_dir
-    echo "Unknown ext-tool: '$EXT_TOOL_NAME' (available: ${AVAILABLE:-none})" >&2
-    exit 1
-  fi
-
-  EXT_TOOL_CONFIG="$SKILL_DIR/ext-tools/$TEAM/$AGENT_ID.conf"
-  if [ ! -f "$EXT_TOOL_CONFIG" ]; then
-    {
-      echo "agmsg: '$EXT_TOOL_NAME' is not configured for '$AGENT_ID' in team '$TEAM' yet."
-      echo "  Follow $EXT_TOOL_DRIVER_DIR/SETUP.md to configure it, then join again."
-    } >&2
-    exit 1
-  fi
+if declare -F agmsg_join_type_parse_args >/dev/null 2>&1; then
+  agmsg_join_type_parse_args "${@:4}" || exit 1
 else
   PROJECT_PATH="${4:?Missing project_path}"
   FORCE=0
@@ -109,11 +77,19 @@ source "$SCRIPT_DIR/lib/roster-journal.sh"
 # legitimate use case. The #357 protection is on the resolution side: the
 # ancestor walk never LANDS on $HOME/`/`, so such a registration only ever
 # matches its exact path and cannot silently vacuum up sessions beneath it.
-# Skipped for ext-tool: PROJECT_PATH there is already the synthetic
-# "(ext-tool:<tool>)" placeholder set above, not a real filesystem path, and
-# resolve/normalize's session-marker and ancestor-directory lookups would
-# have nothing meaningful to match it against.
-if [ -z "$EXT_TOOL_NAME" ]; then
+#
+# A type's _join.sh may say (via agmsg_join_type_skip_resolve) that its
+# PROJECT_PATH is not a real filesystem path at all -- ext-tool's is the
+# synthetic "(ext-tool:<tool>)" placeholder set above, which resolve/
+# normalize's session-marker and ancestor-directory lookups would have
+# nothing meaningful to match against. This same flag also governs the pane
+# resolution/recording step further down (one shared check for both).
+_AGMSG_JOIN_SKIP_RESOLVE=0
+if declare -F agmsg_join_type_skip_resolve >/dev/null 2>&1 && agmsg_join_type_skip_resolve; then
+  _AGMSG_JOIN_SKIP_RESOLVE=1
+fi
+
+if [ "$_AGMSG_JOIN_SKIP_RESOLVE" -eq 0 ]; then
   PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE" "$TEAM")"
   PROJECT_PATH="$(agmsg_normalize_project_path "$PROJECT_PATH")"
 fi
@@ -308,12 +284,13 @@ agmsg_lock_release
 # file fires THIS script's `set -e`, so a plain `. x || true` would take the join
 # down instead of skipping the naming. Nothing here may fail a join.
 #
-# Skipped entirely for ext-tool: it is a program, not a terminal session, so
-# there is no pane of its own to resolve or name -- attempting it anyway
-# resolved THIS SEAT's own pane instead and printed a confusing "already
-# recorded as ..." warning (harmless, but misleading; a maintainer dogfood
-# finding). Every other type's behavior here is unchanged.
-if [ -z "$EXT_TOOL_NAME" ]; then
+# Skipped when the type's own _join.sh asked to (agmsg_join_type_skip_resolve,
+# same flag as the resolve-project step above) -- a type with no pane of its
+# own has nothing here to resolve or name. Attempting it anyway for ext-tool
+# used to resolve THIS SEAT's own pane instead and print a confusing
+# "already recorded as ..." warning (harmless, but misleading; a maintainer
+# dogfood finding). Every other type's behavior here is unchanged.
+if [ "$_AGMSG_JOIN_SKIP_RESOLVE" -eq 0 ]; then
   _agmsg_tr_rc=0; _agmsg_tr_e=0
   case $- in *e*) _agmsg_tr_e=1 ;; esac
   set +e

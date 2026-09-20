@@ -69,40 +69,6 @@ _agmsg_pl_rc=$?
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/team-status.sh"
 
-# ext-tool's own registration (see join.sh) stores a synthetic placeholder in
-# place of a real project path: "(ext-tool:<tool>)" -- it has no filesystem
-# project the way every other type does. This is the ONE place that parses
-# it, so every reader of a tool name (human display, --json's new "tool"
-# field) agrees on the same rule. Echoes the tool name and returns 0 on a
-# clean match; returns 1 (echoing nothing) on anything else, including an
-# empty or malformed name -- never guessed at, so a project string that
-# merely happens to start the same way is never mistaken for one.
-#
-# The candidate between the parens is also run through
-# agmsg_validate_tool_name (review finding) -- the SAME validator join.sh
-# itself gates a --tool argument through before it ever becomes a path
-# (drivers/ext-tools/<tool>/). Stripping the parens alone would display
-# whatever a corrupted or hand-edited registration happened to carry between
-# them, including something like "../slack" or "foo bar", as if it were a
-# real tool name; its own stderr is discarded here since this is a display
-# path, not the point the name is actually used as one.
-_ext_tool_name() {
-  local project="$1" name
-  case "$project" in
-    '(ext-tool:'*')')
-      name="${project#(ext-tool:}"
-      name="${name%)}"
-      case "$name" in
-        ''|*'('*|*')'*) return 1 ;;
-      esac
-      agmsg_validate_tool_name "$name" 2>/dev/null || return 1
-      printf '%s' "$name"
-      return 0
-      ;;
-    *) return 1 ;;
-  esac
-}
-
 # Delivery belongs to a registration (type + project), not merely a member.
 _member_delivery() {
   local type="$1" project="$2" out first rc=0
@@ -116,10 +82,12 @@ _member_delivery() {
 }
 
 JSON_FIRST=1
-# A trailing, optional 21st argument: the ext-tool name (see _ext_tool_name),
-# empty for every other type. team.sh --json's shape does not change for any
-# existing field -- this is carried through as ONE new field ("tool") added
-# to the JSON object, and used only for the human table's type column.
+# A trailing, optional 21st argument: a type's own extra tool-like label
+# (see scripts/drivers/types/ext-tool/_row.sh's _ext_tool_name for the one
+# current producer), empty for any type that has none. team.sh --json's
+# shape does not change for any existing field -- this is carried through as
+# ONE new field ("tool") added to the JSON object, and used only for the
+# human table's type column.
 _emit_row() {
   local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
   local container="$6" activity="$7" delivery="$8"
@@ -172,37 +140,24 @@ _member_status() {
       cannot remote_registration
     return 0
   fi
-  # ext-tool is a program, not a session: no terminal, pane, or screen was
-  # ever going to exist for it (scripts/drivers/types/ext-tool/type.conf
-  # declares spawnable=no, readiness_sentinel=no). Every other type's row
-  # gets here by trying to resolve a placement record and reporting exactly
-  # how that failed; doing the same for ext-tool would report a string of
-  # "unknown:no_placement_record"-shaped cells for a member that was never
-  # going to have one, reading as broken when it is working as designed. "-"
-  # in place of those fields, not a reused n/a:<reason> string, is what
-  # makes that visible at a glance instead of needing an explanation.
-  if [ "$type" = ext-tool ]; then
-    local tool=""
-    tool="$(_ext_tool_name "$project")" || tool=""
-    # Not _member_delivery: that reads a per-project settings-hooks file,
-    # which does not and cannot exist for ext-tool's synthetic project
-    # placeholder, and reports "unknown:delivery_status_rc_N" -- itself
-    # another error-shaped string for a thing that isn't broken. Read the
-    # type's own manifest instead (agmsg_type_get, from lib/type-registry.sh,
-    # already sourced above) rather than assuming delivery_modes=off: a
-    # missing or unreadable manifest returns empty here (its own documented
-    # behavior, indistinguishable from a genuinely absent key), and that case
-    # must not be reported as the deliberate "off" a readable manifest would
-    # actually say -- review finding.
-    delivery="$(agmsg_type_get "$type" delivery_modes)"
-    [ -n "$delivery" ] || delivery="unknown:type_manifest_unreadable"
-    _emit_row "$agent" "$type" "$project" - - - \
-      - "$delivery" \
-      n/a:not_applicable n/a:not_applicable n/a:not_applicable \
-      n/a:not_applicable n/a:not_applicable n/a:not_applicable \
-      n/a:not_applicable n/a:not_applicable n/a:not_applicable \
-      n/a cannot no_terminal "$tool"
-    return 0
+  # Generic per-type row plug (scripts/drivers/types/<type>/_row.sh): lets a
+  # type fully replace the placement-based row below with its own (ext-tool
+  # is the first and, so far, only example -- a program has no terminal,
+  # pane, or screen to resolve a placement record for, so the generic flow's
+  # "unknown:no_placement_record"-shaped cells would read as broken for a
+  # member that was never going to have one). Returns 0 having emitted the
+  # row itself; returns 1 with NO output at all when it declines, so the
+  # generic flow below can pick the row up cleanly. This hook may not call
+  # exit.
+  local _agmsg_row_type_dir
+  _agmsg_row_type_dir="$(agmsg_type_dir "$type" 2>/dev/null || true)"
+  if [ -n "$_agmsg_row_type_dir" ] && [ -f "$_agmsg_row_type_dir/_row.sh" ]; then
+    # shellcheck disable=SC1090
+    . "$_agmsg_row_type_dir/_row.sh"
+    if declare -F agmsg_team_row_override >/dev/null 2>&1 \
+      && agmsg_team_row_override "$team" "$agent" "$type" "$project"; then
+      return 0
+    fi
   fi
   delivery="$(_member_delivery "$type" "$project")"
   if [ "$_agmsg_pl_rc" -ne 0 ] || ! declare -F agmsg_spawn_path >/dev/null 2>&1; then
