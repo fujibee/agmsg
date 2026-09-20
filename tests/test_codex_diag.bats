@@ -51,6 +51,22 @@ teardown() {
   [[ "$output" == *"diagnosis_id=$diagnosis_id reason=existing-pending"* ]]
 }
 
+@test "codex diagnose: effective home prefers AGMSG_CODEX_HOME" {
+  local isolated="$TEST_SKILL_DIR/orca-codex-home"
+  mkdir -p "$isolated"
+  export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
+  export AGMSG_CODEX_HOME="$isolated"
+  export CODEX_HOME="$TEST_SKILL_DIR/default-codex-home"
+
+  run bash "$DIAG" "$PROJ" team alice --self-test
+  [ "$status" -eq 3 ]
+  diagnosis_id="$(printf '%s\n' "$output" | sed -n 's/.*diagnosis_id=\([^ ]*\).*/\1/p' | tail -n 1)"
+  [ -n "$diagnosis_id" ]
+
+  expected_hash="$(printf '%s' "$isolated" | sha1sum | awk '{print $1}')"
+  state_file="$TEST_SKILL_DIR/run/codex-self-test.$diagnosis_id.json"
+  [ "$(node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(o.codex_home_hash)' "$state_file")" = "$expected_hash" ]
+}
 @test "codex diagnose: received marker records only THREAD_CONFIRMED and requires screen observation" {
   export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
   run bash "$DIAG" "$PROJ" team alice --self-test
