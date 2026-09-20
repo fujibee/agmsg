@@ -185,7 +185,17 @@ if [ -n "${MSG_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
         if declare -F agmsg_type_on_message >/dev/null 2>&1; then
           _AGMSG_MSG_BODY_FILE="$(mktemp)"
           printf '%s' "$BODY" > "$_AGMSG_MSG_BODY_FILE"
-          agmsg_type_on_message "$TEAM" "$FROM" "$TO" "$MSG_ID" "$_AGMSG_MSG_BODY_FILE"
+          # The `|| true` is load-bearing, not style: this script runs under
+          # `set -e`, and this hook is SOURCED into it, so `set -e` is still
+          # active inside it -- any command failing partway through the
+          # hook (not just an explicit non-zero return) would otherwise trip
+          # errexit right here and kill send.sh itself, after the message
+          # was already saved and "Sent to ..." already printed, skipping
+          # the cleanup below too (review finding). The hook's own contract
+          # is "a failure never turns a successful send into a failed one,
+          # and the caller decides how this ends" -- shielding the call is
+          # what keeps that true regardless of what happens inside the hook.
+          agmsg_type_on_message "$TEAM" "$FROM" "$TO" "$MSG_ID" "$_AGMSG_MSG_BODY_FILE" || true
           rm -f "$_AGMSG_MSG_BODY_FILE"
         fi
       fi
