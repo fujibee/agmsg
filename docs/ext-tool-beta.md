@@ -125,8 +125,11 @@ probabilities toward 0.5 — is in the adapter's `USAGE.md`.
 - **The adapter runs on the sender's machine**, not on the machine where the
   member was joined. For a tool that only talks to a remote service this is
   invisible; for one that touches local state it is not.
-- **One machine per tool member.** Joining the same tool member on two
-  machines would run it twice. There is no claim yet that picks one.
+- **One installation per tool member — by convention, not by enforcement.**
+  Joining the same tool name from two installations delivers to both, and both
+  run it. Nothing prevents that today and the daemon will not either: separate
+  installations are separate worlds. Keep a tool joined in one place; an
+  exclusivity service is a later question, not a v1 promise.
 - **A tool cannot speak first.** Adapters answer; they do not start a
   conversation. Carrying Slack replies back into a team needs that.
 - **No retries and no ordering guarantees.** A failed call is reported, not
@@ -140,8 +143,10 @@ When `agmsgd` owns delivery, invoking an adapter becomes one more way to
 deliver a message to a member — the same layer that streams to a Claude Code
 seat or pokes a terminal. Everything in the list above is then a property of
 delivery rather than a special case: a message that arrives by sync is
-delivered like any other, one deliverer per member is the existing claim, and
-retries, ordering, and bounded failure belong to the loop.
+delivered like any other, the same message is not run twice within an
+installation, and retries, ordering, and bounded failure belong to the loop.
+What it will not do is reconcile two installations that joined the same tool —
+that stays a matter of how you set the team up.
 
 **The adapter contract above is meant to survive that move.** The invoker
 changes; stdin, stdout, the exit status, and the timeout do not.
