@@ -2032,8 +2032,6 @@ module.exports = {
   toPosixPath,
   writeErr,
   logLine,
-  parseSelfTestMarker,
-  shellQuote,
   isMsysWindows,
   parseBridgeStopRecord,
   bridgeStopRequestMatches,
