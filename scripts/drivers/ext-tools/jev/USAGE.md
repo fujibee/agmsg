@@ -4,8 +4,8 @@
 
 Does not write prose, plans, or explanations. It answers one or more typed
 questions about a `state` you give it, each with a probability and a
-confidence — a decision aid, not a chat partner. One call is fast (~0.3s)
-and cheap (~$0.00002). No memory across calls, no side effects.
+confidence — a decision aid, not a chat partner. One call is fast (0.2–0.3s)
+and cheap (about $0.00002 per call). No memory across calls, no side effects.
 
 ## What to send
 
