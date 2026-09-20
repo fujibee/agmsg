@@ -93,8 +93,11 @@ process_state="UNKNOWN"
 if [ -n "$TUI_PIDS" ]; then process_state="MATCH"; process_reason="observed-matching-tui"
 elif [ "$probe_ok" -eq 0 ]; then process_reason="process-observation-failed"; fi
 app_state="UNKNOWN"
-if [ -n "$PORT" ] && [ "$BRIDGE_APP" = "ws://127.0.0.1:$PORT" ] && [ -n "$SERVER_PID" ]; then app_state="MATCH"
-elif [ -n "$BRIDGE_APP" ] || [ -n "$PORT" ]; then app_state="MISMATCH"; fi
+if [ -n "$PORT" ] && [ -n "$BRIDGE_APP" ] && [ "$BRIDGE_APP" = "ws://127.0.0.1:$PORT" ] && [ -n "$SERVER_PID" ]; then
+  app_state="MATCH"
+elif [ -n "$PORT" ] && [ -n "$BRIDGE_APP" ]; then
+  app_state="MISMATCH"
+fi
 thread_state="UNKNOWN"; thread_reason="no-unique-current-thread"
 if [ "$loaded_count" -eq 1 ] && [ "$BRIDGE_THREAD" = "$loaded_only" ] && [ "$SEAT_THREAD" = "$BRIDGE_THREAD" ]; then
   thread_state="MATCH"; thread_reason="single-loaded-thread-and-seat-bridge-match"
