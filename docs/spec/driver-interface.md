@@ -467,21 +467,43 @@ Beyond the common `<axis>_check` / `<axis>_describe` pair (§1.3, spelled
 | `terminal_arrange <source-id> <intent> <target-id>` | control op: place `source` below/right of `target`, or swap them |
 | `terminal_name <id> <team> <name> [mode]` | control op: label the pane and set the key the terminal itself uses to address the member; idempotent |
 
-One optional function narrows what a driver advertises in its manifest down
-to what one specific runtime instance can actually do:
+Beyond those, the registry (`_AGMSG_TERMINAL_OPTIONAL` in
+`scripts/lib/terminal-registry.sh`) recognizes nine further, optional
+functions. A driver may implement any subset; an unimplemented one is
+simply absent from that driver's `ops.sh`.
 
 | Function | Purpose |
 |---|---|
-| `terminal_capability <capability> [id]` | `0` supported / `1` unsupported / `2` unknown for this one `id` — never wider than the manifest's `capabilities` |
+| `terminal_capability <capability> [id]` | narrow the manifest's advertised `capabilities` to what this one `id` can actually do: `0` supported / `1` unsupported / `2` unknown — never wider than the manifest |
+| `terminal_team_observe <id>` | read back the label/status facts one pane carries, so `team --fix` can verify or repair a member's own recorded identity |
+| `terminal_team_input_ready <id> <expected>` | confirm the pane's foreground process is actually the expected CLI (not, say, a bare shell prompt), so `team --fix` does not trust a re-read too early |
+| `terminal_find_by_label <label>` | search every reachable pane for the one(s) carrying agmsg label `<label>`, printing their ids |
+| `terminal_label_of <id>` | read back the agmsg label carried by one specific pane — `find_by_label`'s confirming re-check through a second, narrower query |
+| `terminal_id_ok <id>` | validate that a string has the *shape* of an id this driver could have produced, without asking whether a pane with it still exists |
+| `terminal_pane_process_observe <id>` | read the pid of the OS process actually running in the pane |
+| `terminal_enumerate_panes` | list every pane this driver can see across every reachable server/session, one line per pane, naming (not dropping) any server it could not read |
+| `terminal_fence <id> [<seat-pid>]` | print a (server-generation, pane-generation) token pair so a caller can detect that `id` now names a different underlying pane or server generation than an earlier read — `self-write.sh`'s own verification is the shipped caller |
 
-`plain` is the only shipped driver that implements it: its manifest lists
-`peek poke` because *some* plain placements can reach them (through a
-recognized terminal emulator's own adapter — the shipped implementation
-calls out to `osascript` on macOS), but a placement with no known
-emulator/tty narrows both to `unsupported` for that one instance before
-either operation is attempted, and each operation's own `terminal_peek` /
-`terminal_poke` consults it internally. `tmux` and `herdr` do not implement
-it: their manifest ceiling holds uniformly for every instance.
+`plain` implements `terminal_capability`; `tmux` and `herdr` do not (their
+manifest ceiling holds uniformly for every instance of theirs). `plain`'s
+manifest lists `peek poke` because *some* plain placements can reach them
+(through a recognized terminal emulator's own adapter — the shipped
+implementation calls out to `osascript` on macOS), but a placement with no
+known emulator/tty narrows both to `unsupported` for that one instance
+before either operation is attempted, and each operation's own
+`terminal_peek` / `terminal_poke` consults it internally.
+
+One more function, `terminal_id_split <id>`, is implemented by all three
+shipped drivers but is **not** part of the registry's required or optional
+list. It splits a placement id into its structural parts (e.g. tmux's
+server socket and its bare pane/window id) — each driver holds its own id
+grammar once, here. The registry calls it through its own wrapper
+(`_agmsg_terminal_id_split <kind> <id>`, loading the named kind's driver in
+a subshell when it is not the one already loaded) wherever code outside the
+driver — collision detection (`placement-collisions.sh`, telling two
+different-looking ids that actually name the same pane apart from two that
+genuinely differ) and locator compose/parse — needs the same split without
+hard-coding any one driver's grammar.
 
 ### 6.3 Identification and placement
 
@@ -490,15 +512,37 @@ outside the driver actually uses is `<terminal-name>:<id>` (e.g.
 `tmux:/path/to/socket:%3`, `herdr:<socket>:<pane>`, `plain:<emulator>:<tty>`,
 or the unaddressable `plain:-`).
 
-Which driver a session is running under is not configured, it is detected:
-candidate drivers are tried in ascending `priority` order (lower first),
-each candidate's `ops.sh` sourced in a subshell so a failed candidate's
-`terminal_*` definitions never leak into the next attempt. The first
-candidate whose `terminal_detect` confirms "yes, I am this terminal, here is
-my id" wins, and only that driver is sourced into the caller. `plain`
-(`priority=100`, tried last) is the universal fallback: it always succeeds
-detection, representing an OS terminal window opened without any
-addressable multiplexer.
+Which driver a session is running under is not configured, it is detected.
+Every candidate's `ops.sh` is sourced in its own subshell for the probe, so
+one candidate's `terminal_*` definitions never leak into the next attempt,
+and only the eventually-chosen driver is sourced into the caller. There are
+**two different resolvers, for two different questions**, both in
+`scripts/lib/terminal-registry.sh`, and they do not use the same rule:
+
+- **`agmsg_terminal_resolve_placement`** (`spawn.sh`: which terminal should
+  a brand-new pane be created under?) needs only *presence*, not an id — the
+  pane it will address is the one `terminal_spawn` is about to create, not
+  the caller's own. Candidates are tried in ascending `priority` order
+  (lower first); the **first** one whose `terminal_detect` exits 0 at all
+  wins, whether or not it produced an id.
+- **`agmsg_terminal_resolve_name`** (`terminal_name`, and so `SessionStart`
+  / `join.sh` / actas: which terminal, and which id, names *this session's
+  own* pane?) tries **every** candidate, not just the first present one,
+  because a candidate can be present without being able to produce a
+  nameable id (e.g. a herdr session nested inside tmux answers "present"
+  from inherited environment even when tmux is the real terminal). A
+  candidate that **produces an id** wins immediately, even if a
+  higher-priority candidate was present earlier but produced none. A
+  candidate that is present but produces no id is remembered and the search
+  continues. Once every candidate has been tried: if *any* non-`plain`
+  candidate was present-but-unresolved, resolution **fails loudly** with
+  every such reason (never silently falls back to `plain` and masks a
+  broken herdr/tmux); only when nothing was present-but-unresolved does a
+  matched `plain` (the addressless `-` sentinel) win.
+
+`plain` (`priority=100`) is the lowest-priority, last-tried candidate in
+both resolvers, and the only one guaranteed to match when nothing else does
+— an OS terminal window opened without any addressable multiplexer.
 
 ### 6.4 CLI mapping
 
@@ -508,7 +552,7 @@ addressable multiplexer.
 | `despawn.sh` | `terminal_despawn` |
 | `peek.sh` | `terminal_peek` |
 | `poke.sh` | `terminal_peek` (pre-check for a live draft, when the target agent type declares an input-box marker and the terminal is not `plain`), then `terminal_poke` |
-| `where.sh` | self-`terminal_detect` across candidates; reports the winning driver's `capabilities` |
+| `where.sh` | `agmsg_terminal_resolve_name` (§6.3); reports the winning driver's `capabilities` |
 | `arrange.sh` | `terminal_arrange` |
 | `join.sh`, `session-start.sh`, `watch.sh`, actas flows | `terminal_name`, keeping the pane's label and key current on every action |
 
