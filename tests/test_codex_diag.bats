@@ -59,6 +59,6 @@ teardown() { teardown_test_env; }
 @test "codex-diagnose keeps opt-in self-delivery options" {
   run bash "$TYPES/codex/codex-diagnose.sh" --help
   [ "$status" -eq 0 ]
-  [[ "$output" == *"--self-test"* ]]
-  [[ "$output" == *"--confirm"* ]]
+  grep -qF -- "--self-test" <<<"$output"
+  grep -qF -- "--confirm" <<<"$output"
 }

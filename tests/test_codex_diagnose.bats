@@ -17,21 +17,21 @@ teardown() {
 @test "codex diagnose: help separates thread confirmation from TUI visibility" {
   run bash "$DIAG" --help
   [ "$status" -eq 0 ]
-  [[ "$output" == *"THREAD_CONFIRMED"* ]]
-  [[ "$output" == *"visibly"* ]]
+  grep -qF -- "THREAD_CONFIRMED" <<<"$output"
+  grep -qF -- "visibly" <<<"$output"
 }
 
 @test "codex diagnose: legacy invocation keeps the binary non-match exit contract" {
   run bash "$DIAG" "$PROJ" team alice
   [ "$status" -eq 1 ]
-  [[ "$output" == *"codex diagnosis: UNKNOWN"* ]]
+  grep -qF -- "codex diagnosis: UNKNOWN" <<<"$output"
 }
 
 @test "codex diagnose: self-test requires the initiating Codex thread" {
   unset CODEX_THREAD_ID
   run bash "$DIAG" "$PROJ" team alice --self-test
   [ "$status" -eq 2 ]
-  [[ "$output" == *"self-delivery: UNKNOWN reason=missing-or-invalid-CODEX_THREAD_ID"* ]]
+  grep -qF -- "self-delivery: UNKNOWN reason=missing-or-invalid-CODEX_THREAD_ID" <<<"$output"
   [ ! -d "$TEST_SKILL_DIR/run" ] || [ -z "$(find "$TEST_SKILL_DIR/run" -name 'codex-self-test.*.json' -print)" ]
 }
 
@@ -39,16 +39,16 @@ teardown() {
   export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
   run bash "$DIAG" "$PROJ" team alice --self-test
   [ "$status" -eq 3 ]
-  [[ "$output" == *"self-delivery: PENDING"* ]]
+  grep -qF -- "self-delivery: PENDING" <<<"$output"
   diagnosis_id="$(printf '%s\n' "$output" | sed -n 's/.*diagnosis_id=\([^ ]*\).*/\1/p' | tail -n 1)"
   [ -n "$diagnosis_id" ]
   run bash "$DIAG" "$PROJ" team alice --status "$diagnosis_id"
   [ "$status" -eq 3 ]
-  [[ "$output" == *"self-delivery: PENDING diagnosis_id=$diagnosis_id"* ]]
+  grep -qF -- "self-delivery: PENDING diagnosis_id=$diagnosis_id" <<<"$output"
 
   run bash "$DIAG" "$PROJ" team alice --self-test
   [ "$status" -eq 3 ]
-  [[ "$output" == *"diagnosis_id=$diagnosis_id reason=existing-pending"* ]]
+  grep -qF -- "diagnosis_id=$diagnosis_id reason=existing-pending" <<<"$output"
 }
 
 @test "codex diagnose: received marker records only THREAD_CONFIRMED and requires screen observation" {
@@ -63,31 +63,31 @@ teardown() {
   message_id="${values#* }"
   run bash "$DIAG" "$PROJ" team alice --confirm "$nonce" "$message_id"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"self-delivery: THREAD_CONFIRMED diagnosis_id=$diagnosis_id"* ]]
-  [[ "$output" == *"tui-visible: REQUIRES_CURRENT_SCREEN_OBSERVATION"* ]]
+  grep -qF -- "self-delivery: THREAD_CONFIRMED diagnosis_id=$diagnosis_id" <<<"$output"
+  grep -qF -- "tui-visible: REQUIRES_CURRENT_SCREEN_OBSERVATION" <<<"$output"
 
   run bash "$DIAG" "$PROJ" team alice --status "$diagnosis_id"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"self-delivery: THREAD_CONFIRMED"* ]]
-  [[ "$output" != *"self-delivery: CONFIRMED"* ]]
+  grep -qF -- "self-delivery: THREAD_CONFIRMED" <<<"$output"
+  ! grep -qF -- "self-delivery: CONFIRMED" <<<"$output"
 }
 
 @test "codex diagnose: malformed confirm values fail closed" {
   run bash "$DIAG" "$PROJ" team alice --confirm not-a-hex-nonce message-id
   [ "$status" -eq 2 ]
-  [[ "$output" == *"self-delivery: UNKNOWN reason=invalid-nonce"* ]]
+  grep -qF -- "self-delivery: UNKNOWN reason=invalid-nonce" <<<"$output"
 }
 
 @test "send: print-id is opt-in and returns the stored opaque id" {
   run bash "$SCRIPTS/send.sh" team alice alice hello
   [ "$status" -eq 0 ]
-  [[ "$output" != *"message_id="* ]]
+  ! grep -qF -- "message_id=" <<<"$output"
 
   run bash "$SCRIPTS/send.sh" team alice alice hello-again --print-id
   [ "$status" -eq 0 ]
-  [[ "$output" == *"message_id="* ]]
+  grep -qF -- "message_id=" <<<"$output"
   id="$(printf '%s\n' "$output" | sed -n 's/^message_id=//p')"
-  [[ "$id" =~ ^[A-Za-z0-9-]+$ ]]
+  grep -Eq '^[A-Za-z0-9-]+$' <<<"$id"
 }
 
 @test "bridge marker parser requires exact self sender and full structured body" {
@@ -118,5 +118,5 @@ NODE
   [ "${#lines[@]}" -eq 1 ]
   run bash "$SCRIPTS/inbox.sh" team alice --quiet
   [ "$status" -eq 0 ]
-  [[ "$output" == *"second"* ]]
+  grep -qF -- "second" <<<"$output"
 }
