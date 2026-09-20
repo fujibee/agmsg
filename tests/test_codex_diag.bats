@@ -15,16 +15,16 @@ teardown() { teardown_test_env; }
 @test "codex diagnose: help documents read-only exit contract" {
   run bash "$DIAG" --help
   [ "$status" -eq 0 ]
-  [[ "$output" == *"read-only"* ]]
-  [[ "$output" == *"exit 1 means mismatch or unknown"* ]]
-  [[ "$output" != *"self-test"* ]]
+  grep -qF -- "read-only" <<<"$output"
+  grep -qF -- "exit 1 means mismatch or unknown" <<<"$output"
+  ! grep -qF -- "self-test" <<<"$output"
 }
 
 @test "codex diagnose: legacy invocation is unknown and non-match" {
   run bash "$DIAG" "$PROJ" team alice
   [ "$status" -eq 1 ]
-  [[ "$output" == *"codex diagnosis: UNKNOWN"* ]]
-  [[ "$output" == *"thread-evidence: current_count="* ]]
+  grep -qF -- "codex diagnosis: UNKNOWN" <<<"$output"
+  grep -qF -- "thread-evidence: current_count=" <<<"$output"
 }
 
 @test "codex diagnose: invalid options are usage errors" {
@@ -36,8 +36,8 @@ teardown() { teardown_test_env; }
   export AGMSG_CODEX_SEAT_KEY="team/alice"
   run bash "$DIAG" "$PROJ" team alice
   [ "$status" -eq 1 ]
-  [[ "$output" == *"app-server: UNKNOWN"* ]]
-  [[ "$output" == *"thread: UNKNOWN"* ]]
+  grep -qF -- "app-server: UNKNOWN" <<<"$output"
+  grep -qF -- "thread: UNKNOWN" <<<"$output"
 }
 
 @test "codex diagnose: effective home is resolved through shared helper" {
@@ -47,7 +47,7 @@ teardown() { teardown_test_env; }
   export CODEX_HOME="$TEST_SKILL_DIR/default-codex-home"
   run bash "$DIAG" "$PROJ" team alice
   [ "$status" -eq 1 ]
-  [[ "$output" == *"codex diagnosis: UNKNOWN"* ]]
+  grep -qF -- "codex diagnosis: UNKNOWN" <<<"$output"
 }
 
 @test "codex diagnose: Windows uses PowerShell probe and does not mix MSYS pids" {
