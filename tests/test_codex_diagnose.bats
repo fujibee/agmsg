@@ -69,7 +69,7 @@ teardown() {
   run bash "$DIAG" "$PROJ" team alice --status "$diagnosis_id"
   [ "$status" -eq 0 ]
   grep -qF -- "self-delivery: THREAD_CONFIRMED" <<<"$output"
-  ! grep -qF -- "self-delivery: CONFIRMED" <<<"$output"
+  refute grep -qF -- "self-delivery: CONFIRMED" <<<"$output"
 }
 
 @test "codex diagnose: malformed confirm values fail closed" {
@@ -81,7 +81,7 @@ teardown() {
 @test "send: print-id is opt-in and returns the stored opaque id" {
   run bash "$SCRIPTS/send.sh" team alice alice hello
   [ "$status" -eq 0 ]
-  ! grep -qF -- "message_id=" <<<"$output"
+  refute grep -qF -- "message_id=" <<<"$output"
 
   run bash "$SCRIPTS/send.sh" team alice alice hello-again --print-id
   [ "$status" -eq 0 ]
