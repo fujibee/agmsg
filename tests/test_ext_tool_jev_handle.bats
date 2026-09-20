@@ -14,10 +14,16 @@ setup() {
   CONFIG_PATH="$TEST_SKILL_DIR/ext-tools-jev-member.conf"
   printf 'key_file=%s\n' "$KEY_FILE" > "$CONFIG_PATH"
 
-  # Shape (b): plain-text body, default bundled question type ("route").
-  INPUT="$(jq -cn --arg cp "$CONFIG_PATH" '{
-    team: "ops", from: "alice", to: "jev-bot",
-    body: "Investigate and fix a flaky CI job across two files.",
+  # The one accepted shape: JSON with state + questions, built by the
+  # calling agent itself (request=strict, tool.conf -- no bundled question
+  # catalog, see USAGE.md).
+  local body
+  body="$(jq -cn '{
+    state: "Pick a color.",
+    questions: {color: {type: "choice", instructions: "Pick one.", criteria: {red: "warm", blue: "cool"}}}
+  }')"
+  INPUT="$(jq -cn --arg cp "$CONFIG_PATH" --arg body "$body" '{
+    team: "ops", from: "alice", to: "jev-bot", body: $body,
     message_id: "018f0000-0000-7000-8000-000000000002",
     config_path: $cp
   }')"
@@ -57,7 +63,8 @@ _start_mock_openrouter() {
   local tmp_root="${TMPDIR:-/tmp}" leftover_before leftover_after
   leftover_before="$(find "$tmp_root" -maxdepth 1 -name 'agmsg-jev-curl.*' 2>/dev/null | sort)"
 
-  # --- success, shape (b): plain text -> bundled examples/route.json ---
+  # --- success: JSON body with state + questions, passed through close to
+  # unchanged (the only accepted shape) ---
   local request_log="$TEST_SKILL_DIR/jev-request.json"
   _start_mock_openrouter MOCK_OPENROUTER_REQUEST_LOG="$request_log"
 
@@ -68,19 +75,22 @@ _start_mock_openrouter() {
   case "$output" in
     *$'\n'*) echo "handle printed more than one line: $output" >&2; return 1 ;;
   esac
-  # p and confidence are the product across both bundled questions (0.80 *
-  # 0.80 = 0.64, 0.90 * 0.70 = 0.63), cost is the call's own usage.cost
-  # rounded to 6 places -- see the mock fixture's fixed response.
-  [ "$output" = "route: sonnet / high (choice p=0.64, confidence=0.63, cost \$0.000019)" ]
+  # p and confidence are the product across both of the mock fixture's own
+  # fixed answers (0.80 * 0.80 = 0.64, 0.90 * 0.70 = 0.63) -- the mock's
+  # response never actually depends on what questions were asked, only the
+  # REQUEST assertions below prove those were sent correctly. cost is the
+  # call's own usage.cost, rounded to 6 places. The label is always "jev"
+  # now -- there is no more named/bundled question type to label it with.
+  [ "$output" = "jev: sonnet / high (choice p=0.64, confidence=0.63, cost \$0.000019)" ]
 
   wait_for_file_contains "$request_log" '"path"'
   [ "$(jq -r '.path' "$request_log")" = "/api/alpha/decisions" ]
   [ "$(jq -r '.authorization' "$request_log")" = "Bearer or-test-key-do-not-print" ]
   [ "$(jq -r '.body.model' "$request_log")" = "typesafe/jev-1.13" ]
-  [ "$(jq -r '.body.state' "$request_log")" = "Investigate and fix a flaky CI job across two files." ]
-  [ "$(jq -r '.body.questions.model.type' "$request_log")" = "choice" ]
-  [ "$(jq -r '.body.questions.model.criteria.sonnet' "$request_log")" = "ordinary implementation work with some investigation" ]
-  [ "$(jq -r '.body.questions.effort.criteria.high' "$request_log")" = "deep investigation across files" ]
+  [ "$(jq -r '.body.state' "$request_log")" = "Pick a color." ]
+  [ "$(jq -r '.body.questions.color.type' "$request_log")" = "choice" ]
+  [ "$(jq -r '.body.questions.color.criteria.red' "$request_log")" = "warm" ]
+  [ "$(jq -r '.body.questions.color.criteria.blue' "$request_log")" = "cool" ]
 
   # --- contrast: a hostile ~/.curlrc must be ignored (review finding, #1339) ---
   # Without curl's -q as its FIRST argument, curl reads this user's curlrc,
@@ -113,28 +123,30 @@ _start_mock_openrouter() {
   printf '%s\n' "$output" | grep -qF "invalid API base"
   refute grep -qF "or-test-key-do-not-print" <<<"$output"
 
-  # --- success, shape (a): body carries its own ad-hoc questions verbatim ---
-  local adhoc_log="$TEST_SKILL_DIR/jev-request-adhoc.json"
-  _start_mock_openrouter MOCK_OPENROUTER_REQUEST_LOG="$adhoc_log"
-  local adhoc_body adhoc_input
-  adhoc_body="$(jq -cn '{
-    state: "Pick a color.",
-    questions: {color: {type: "choice", instructions: "Pick one.", criteria: {red: "warm", blue: "cool"}}}
-  }')"
-  adhoc_input="$(jq -cn --arg cp "$CONFIG_PATH" --arg body "$adhoc_body" '{
-    team: "ops", from: "alice", to: "jev-bot", body: $body,
-    message_id: "018f0000-0000-7000-8000-000000000003", config_path: $cp
+  # --- failure: plain text (or any JSON without a "questions" key) is
+  # refused, naming USAGE.md -- the bundled question-type mechanism this
+  # used to fall back to (--question, tool.conf's default_question,
+  # examples/) is gone; there is exactly one accepted shape now
+  # (request=strict, tool.conf) ---
+  local plain_input
+  plain_input="$(jq -cn --arg cp "$CONFIG_PATH" '{
+    team: "ops", from: "alice", to: "jev-bot",
+    body: "Investigate and fix a flaky CI job across two files.",
+    message_id: "m", config_path: $cp
   }')"
   run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
-    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$adhoc_input"
-  [ "$status" -eq 0 ]
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$plain_input"
+  [ "$status" -ne 0 ]
   case "$output" in
-    jev:\ *) : ;;
-    *) echo "ad-hoc reply did not use the 'jev:' label: $output" >&2; return 1 ;;
+    *$'\n'*) echo "[plain text] more than one line: $output" >&2; return 1 ;;
   esac
-  wait_for_file_contains "$adhoc_log" '"path"'
-  [ "$(jq -r '.body.questions.color.criteria.red' "$adhoc_log")" = "warm" ]
-  [ "$(jq -r '.body.state' "$adhoc_log")" = "Pick a color." ]
+  printf '%s\n' "$output" | grep -qF "USAGE.md"
+  printf '%s\n' "$output" | grep -qF '"questions"'
+  # Distinct from the "questions present but malformed" failure just below
+  # -- both mention USAGE.md and "questions" (the hint is shared text), so
+  # this pins down that it is genuinely the FIRST fail() (body isn't even
+  # JSON-with-a-questions-key), not a fall-through to the second one.
+  refute grep -qF "questions must be a JSON object" <<<"$output"
 
   # --- failure: malformed ad-hoc questions (not an object) ---
   local bad_adhoc_input
@@ -271,7 +283,7 @@ _start_mock_openrouter() {
   wait "$handle_pid" || true
   [ -n "$curl_argv" ]
   refute grep -qF "or-test-key-do-not-print" <<<"$curl_argv"
-  refute grep -qF "flaky CI" <<<"$curl_argv"
+  refute grep -qF "Pick a color" <<<"$curl_argv"
 
   leftover_after="$(find "$tmp_root" -maxdepth 1 -name 'agmsg-jev-curl.*' 2>/dev/null | sort)"
   [ "$leftover_before" = "$leftover_after" ]

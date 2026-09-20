@@ -5,7 +5,7 @@ set -euo pipefail
 # agmsg message it receives, and reply with the answer.
 #
 # Contract (design note §3): stdin is one JSON object
-#   {team, from, to, body, subject?, question?, message_id, config_path}
+#   {team, from, to, body, subject?, message_id, config_path}
 # stdout is the reply body -- always exactly one line on success here (Jev is
 # used with `ask`-style waiting, design note §6, not fire-and-forget like
 # Slack). Exit 0 is success; non-zero is failure, and on failure this prints
@@ -13,18 +13,19 @@ set -euo pipefail
 # "<name>: 処理に失敗しました (<reason>)" itself, so this never fabricates that
 # sentence or prints more than the one line.
 #
-# Two input shapes for `body` (maintainer decision, 2026-09-19):
-#   (a) JSON with a "questions" key: {"state": ..., "questions": {...}} is
-#       passed to OpenRouter close to unchanged -- the calling agent built
-#       its own questions. Only checked here: body parses as JSON, and
-#       .questions is an object. The internal shape of each question is NOT
-#       validated; a malformed body still produces a one-line Jev-side error
-#       (from OpenRouter's own 400, not from this script guessing what is
-#       wrong).
-#   (b) Plain text: the whole body becomes "state"; the bundled example
-#       question type (examples/<name>.json) is used, named by .question in
-#       the input or tool.conf's default_question when absent. examples/ is
-#       a working sample, not a fixed catalog (design note §6).
+# ONE accepted shape for `body` (maintainer decision, 2026-09-20 -- this
+# replaces the earlier two-shape design, which also accepted plain text
+# against a bundled example question type; that bundled-type mechanism
+# (--question, tool.conf's default_question, examples/) is gone. See
+# tool.conf's request=strict): JSON carrying "state" and "questions",
+# {"state": ..., "questions": {...}} -- passed to OpenRouter close to
+# unchanged, the calling agent builds its own questions. Only checked here:
+# body parses as JSON, and .questions is an object. The internal shape of
+# each question is NOT validated; a malformed body still produces a
+# one-line Jev-side error (from OpenRouter's own 400, not from this script
+# guessing what is wrong). Anything else -- plain text, JSON without a
+# "questions" key -- is refused, naming USAGE.md as where to read the
+# accepted shape (see fail() calls below).
 #
 # The member config only ever names WHERE the key lives (key_file=...); the
 # key itself is read once, held in a shell variable, and handed straight to
@@ -50,7 +51,6 @@ input="$(cat)"
 config_path="$(printf '%s' "$input" | jq -r '.config_path // empty' 2>/dev/null)" ||
   fail "jev: request is not valid JSON"
 body="$(printf '%s' "$input" | jq -r '.body // empty')"
-question_arg="$(printf '%s' "$input" | jq -r '.question // empty')"
 
 [ -n "$config_path" ] || fail "jev: request carries no config_path"
 [ -f "$config_path" ] || fail "jev: member config not found: $config_path"
@@ -61,31 +61,20 @@ key_file="$(_jev_conf_get "$config_path" key_file)"
 _jev_read_key "$key_file" || fail "jev: $_JEV_KEY_ERROR"
 key="$_JEV_KEY"
 
-# Shape detection: body must both parse as JSON *and* carry a "questions"
-# key to take shape (a). Plain text, or JSON without that key (e.g. a body
-# that just happens to be a quoted string), falls through to shape (b).
+# The one accepted shape: body must parse as JSON AND carry a "questions"
+# key. Anything else -- plain text, JSON without that key -- is refused
+# here, naming the usage doc rather than guessing what the caller meant.
+USAGE_HINT="send {\"state\": ..., \"questions\": {...}} as the body -- see drivers/ext-tools/jev/USAGE.md"
 body_json=""
-if body_json="$(printf '%s' "$body" | jq -e -c '.' 2>/dev/null)" &&
-    printf '%s' "$body_json" | jq -e 'type == "object" and has("questions")' >/dev/null 2>&1; then
-  questions_json="$(printf '%s' "$body_json" | jq -c '.questions')"
-  printf '%s' "$questions_json" | jq -e 'type == "object"' >/dev/null 2>&1 ||
-    fail "jev: questions must be a JSON object"
-  state_json="$(printf '%s' "$body_json" | jq -c '.state // ""')"
-  label="jev"
-else
-  question_name="$question_arg"
-  [ -n "$question_name" ] || question_name="$(_jev_conf_get "$SCRIPT_DIR/tool.conf" default_question)"
-  [ -n "$question_name" ] || question_name="route"
-  case "$question_name" in
-    *[!A-Za-z0-9_-]*|'') fail "jev: invalid question name '$question_name'" ;;
-  esac
-  question_file="$SCRIPT_DIR/examples/$question_name.json"
-  [ -f "$question_file" ] || fail "jev: unknown question type '$question_name'"
-  questions_json="$(jq -c '.' "$question_file" 2>/dev/null)" ||
-    fail "jev: question file is not valid JSON: $question_name"
-  state_json="$(jq -n --arg s "$body" '$s')"
-  label="$question_name"
+if ! body_json="$(printf '%s' "$body" | jq -e -c '.' 2>/dev/null)" ||
+    ! printf '%s' "$body_json" | jq -e 'type == "object" and has("questions")' >/dev/null 2>&1; then
+  fail "jev: $USAGE_HINT"
 fi
+
+questions_json="$(printf '%s' "$body_json" | jq -c '.questions')"
+printf '%s' "$questions_json" | jq -e 'type == "object"' >/dev/null 2>&1 ||
+  fail "jev: questions must be a JSON object -- $USAGE_HINT"
+state_json="$(printf '%s' "$body_json" | jq -c '.state // ""')"
 
 request_json="$(jq -cn --arg model "typesafe/jev-1.13" --argjson state "$state_json" \
   --argjson questions "$questions_json" '{model: $model, state: $state, questions: $questions}')"
@@ -129,5 +118,5 @@ rm -f "$out_file"
 [ -n "$line" ] || fail "jev: unexpected response shape"
 
 IFS=$'\t' read -r choices p_val c_val cost_val <<<"$line"
-printf '%s: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)\n' \
-  "$label" "$choices" "$p_val" "$c_val" "$cost_val"
+printf 'jev: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)\n' \
+  "$choices" "$p_val" "$c_val" "$cost_val"
