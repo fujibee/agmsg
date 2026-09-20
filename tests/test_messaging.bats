@@ -249,6 +249,35 @@ line"
   [[ "$output" =~ "msg2" ]]
 }
 
+@test "history: uses batch mode for redirected sqlite input on Windows" {
+  bash "$SCRIPTS/send.sh" testteam alice bob "batch-required"
+
+  # Reproduce the Windows sqlite3.exe behavior: redirected stdin without
+  # -batch exits successfully without evaluating the SQL. Other invocations
+  # are delegated to the real sqlite3 binary.
+  local real_stub="$BATS_TEST_TMPDIR/sqlite3"
+  local real_sqlite; real_sqlite="$(command -v sqlite3)"
+  cat >"$real_stub" <<EOF
+#!/usr/bin/env bash
+has_batch=0
+has_sql_arg=0
+for arg in "\$@"; do
+  [ "\$arg" = -batch ] && has_batch=1
+  case "\$arg" in *SELECT*|*PRAGMA*|*INSERT*|*CREATE*) has_sql_arg=1 ;; esac
+done
+if [ "\$has_batch" -eq 0 ] && [ "\$has_sql_arg" -eq 0 ] && [ ! -t 0 ]; then
+  exit 0
+fi
+exec "$real_sqlite" "\$@"
+EOF
+  chmod +x "$real_stub"
+  PATH="$BATS_TEST_TMPDIR:$PATH"
+
+  run bash "$SCRIPTS/history.sh" testteam
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"batch-required"* ]]
+}
+
 @test "history: filters by agent" {
   bash "$SCRIPTS/send.sh" testteam alice bob "for bob"
   bash "$SCRIPTS/send.sh" testteam bob alice "for alice"
