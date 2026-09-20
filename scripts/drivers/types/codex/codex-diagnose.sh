@@ -38,10 +38,14 @@ RUN_DIR="$SKILL_DIR/run"
 source "$SCRIPT_DIR/../../../lib/hash.sh"
 source "$SCRIPT_DIR/../../../lib/role-session.sh"
 source "$SCRIPT_DIR/../../../lib/node.sh"
+source "$SCRIPT_DIR/_home.sh"
 
 PROJECT="$(cd "$PROJECT" && pwd)"
+if [ "$ACTION" = "diagnose" ]; then
+  exec "$SCRIPT_DIR/codex-diag.sh" "$PROJECT" "$TEAM" "$AGENT"
+fi
 HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
-CODEX_HOME_VALUE="${CODEX_HOME:-${AGMSG_CODEX_HOME:-$HOME/.codex}}"
+CODEX_HOME_VALUE="$(agmsg_codex_effective_home)"
 CODEX_HOME_HASH="$(printf '%s' "$CODEX_HOME_VALUE" | agmsg_sha1)"
 SELF_TEST_PREFIX="agmsg-codex-self-test:v1"
 
