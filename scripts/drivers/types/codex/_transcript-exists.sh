@@ -17,7 +17,7 @@
 # Defines: agmsg_transcript_exists <uuid> <project> -> 0 if a rollout exists.
 
 # shellcheck source=_home.sh
-source "$SKILL_DIR/scripts/drivers/types/codex/_home.sh"
+source "${SKILL_DIR:?_transcript-exists.sh requires SKILL_DIR}/scripts/drivers/types/codex/_home.sh"
 
 agmsg_transcript_exists() {
   local uuid="$1" sessions_dir

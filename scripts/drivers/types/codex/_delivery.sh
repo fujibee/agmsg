@@ -10,7 +10,7 @@
 # Args (both hooks): on_enable <mode> <type> <project>; on_disable <type> <project>.
 
 # shellcheck source=_home.sh
-. "$SKILL_DIR/scripts/drivers/types/codex/_home.sh"
+. "${SKILL_DIR:?_delivery.sh requires SKILL_DIR}/scripts/drivers/types/codex/_home.sh"
 
 agmsg_delivery_on_enable() {
   echo "Codex monitor is enabled."

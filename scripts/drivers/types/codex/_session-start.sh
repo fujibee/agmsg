@@ -15,7 +15,7 @@
 # socket from inside the Codex sandbox (#41).
 
 # shellcheck source=_home.sh
-source "$SKILL_DIR/scripts/drivers/types/codex/_home.sh"
+source "${SKILL_DIR:?_session-start.sh requires SKILL_DIR}/scripts/drivers/types/codex/_home.sh"
 
 # Newest-N rollout files under $sessions_dir, sorted by mtime descending.
 # `ls -t "$dir"/*/*/*/rollout-*.jsonl` is unreliable on Windows/Git Bash --
