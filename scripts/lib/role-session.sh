@@ -166,7 +166,7 @@ agmsg_role_session_record() {
   tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   if [ "$type" = "codex" ] && [ -z "$codex_home" ]; then
-    codex_home="${CODEX_HOME:-${HOME:+$HOME/.codex}}"
+    codex_home="${AGMSG_CODEX_HOME:-${CODEX_HOME:-${HOME:+$HOME/.codex}}}"
   fi
   {
     printf 'session=%s\n' "$bare_sid"
