@@ -135,7 +135,7 @@ Inbound Slack replies are not carried back into agmsg yet.
 **`jev`** asks one or more typed questions and answers in one line, for example:
 
 ```
-jev: model=fable (p=0.96, confidence=0.94) / effort=high (p=1.00, confidence=0.99) (cost $0.000021)
+jev: model=sonnet (p=0.92, confidence=0.89) / effort=medium (p=0.85, confidence=0.79) (cost $0.000022)
 ```
 
 That line is the OpenRouter form. Reached through TypeSafe's own API the

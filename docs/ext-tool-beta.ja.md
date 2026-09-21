@@ -127,7 +127,7 @@ bash <skill-root>/scripts/ext-tool.sh usage <team> <name>
 **`jev`** は、型のついた質問を1つ以上投げて、1行で答える。例:
 
 ```
-jev: model=fable (p=0.96, confidence=0.94) / effort=high (p=1.00, confidence=0.99) (cost $0.000021)
+jev: model=sonnet (p=0.92, confidence=0.89) / effort=medium (p=0.85, confidence=0.79) (cost $0.000022)
 ```
 
 この行は OpenRouter 経由のときの形。TypeSafe 自身の API 経由だと、答えは同じでも
