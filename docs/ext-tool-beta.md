@@ -78,12 +78,35 @@ bash <skill-root>/scripts/ext-tool.sh usage <team> <name>
 
 A refusal points at the same document — today by path, `drivers/ext-tools/<tool>/USAGE.md` — so a badly shaped request corrects itself in one round trip.
 
-Adapters declare how strict they are, in `tool.conf`:
+### Two separate axes
+
+**How the request is shaped** is declared by the adapter in `tool.conf`:
 
 - `request=strict` — the body must already be the call. The adapter does not
   interpret; it refuses and points at `USAGE.md`. `jev` is strict, because
-  being fast and cheap is the point.
-- `request=loose` — a plainly worded request is acceptable. `slack` is loose.
+  being fast and cheap is the point, and interpreting would spend more than the
+  call itself.
+- `request=loose` — a plainly worded request is acceptable, and the adapter may
+  map it onto the real call. `slack` is loose.
+
+**When the answer arrives** is a different question, and today it has one
+answer for every tool: asynchronously, as a message. Send, and the reply
+arrives later like any other message — which wakes the sender's seat for a
+turn.
+
+The two axes are not the same, but they do correlate. A strict tool is usually
+one worth waiting for in line: `jev` answers a typed question in 0.2–0.3s for
+about $0.00002, so the natural pairing is **strict and synchronous** — ask, get
+the answer in the same breath, keep going. A loose tool is usually one where
+waiting buys nothing: a Slack post is done when it is done, so **loose and
+asynchronous** fits.
+
+Today's mismatch is `jev`: it is strict but still answers asynchronously,
+because no synchronous entry point exists yet. That costs the sender an extra
+turn per decision, which matters most for the use that motivated the tool —
+agmsg itself asking a question before it delivers or spawns, where there is no
+seat to wake at all. A synchronous form is the obvious next step, and it is not
+built.
 
 ## The adapter contract
 
