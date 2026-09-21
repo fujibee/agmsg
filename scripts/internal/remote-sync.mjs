@@ -2046,6 +2046,14 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     // without this it would arm a fresh timer past the cleared one.
     child.stdin?.on("error", (error) => {
       if (settled) return;
+      // Ending an empty input after a fast successful driver has already
+      // closed stdin can race into EPIPE, but no record was left unwritten.
+      // Let the child's exit and stdout decide this zero-record call; the
+      // truncation guard below remains mandatory whenever input has content.
+      if (input.length === 0) {
+        child.stdin.destroy();
+        return;
+      }
       error.driverFailurePhase = "stdin-write";
       lastStdinError = error;
       child.stdin.destroy();
