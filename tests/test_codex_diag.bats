@@ -59,7 +59,7 @@ teardown() { teardown_test_env; }
 @test "codex self-delivery reuses canonical Windows diagnosis" {
   grep -qF -- '"$SCRIPT_DIR/codex-diag.sh" "$PROJECT" "$TEAM" "$AGENT"' "$TYPES/codex/codex-diagnose.sh"
   grep -qF -- 'DIAG_OUTPUT=' "$TYPES/codex/codex-diagnose.sh"
-  ! grep -qF -- 'ps -eo' "$TYPES/codex/codex-diagnose.sh"
+  refute grep -Eq '^[[:space:]]*[^#[:space:]].*ps -eo' "$TYPES/codex/codex-diagnose.sh"
   grep -q 'MINGW\*|MSYS\*|CLANGARM\*' "$TYPES/codex/codex-diag.sh"
 }
 @test "codex-diagnose keeps opt-in self-delivery options" {
