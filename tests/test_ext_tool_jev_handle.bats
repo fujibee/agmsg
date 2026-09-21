@@ -149,23 +149,28 @@ _start_mock_openrouter() {
     "$SCRIPTS/drivers/ext-tools/jev/setup" test "$bad_provider_config"
   [ "$status" -ne 0 ]
   jq -e '.ok == false and (.error | contains("unknown provider"))' <<<"$output" >/dev/null
+  [ ! -e "$bad_provider_test_log" ]
 
-  # --- contrast: a choice name containing a literal U+001F cannot shift
-  # p/confidence/cost/tokens (review finding, #1364 round 2). `choice`
-  # comes from whatever `questions` the CALLER built and is echoed straight
-  # back by the API -- handle never validates its content -- so response
-  # parsing must not use a delimiter the data could itself contain. Same
-  # numeric fixture values as the plain success case above (0.80 * 0.80 =
-  # 0.64, 0.90 * 0.70 = 0.63): if parsing were shifting on an embedded
-  # separator instead of decoding each field as its own JSON value, these
-  # would come out wrong (or the call would fail) rather than matching.
-  local weird_choice=$'sonnet\x1ffake-injected-field'
+  # --- contrast: a choice name is whatever the CALLER put in `questions`
+  # and is echoed straight back by the API -- handle never validates its
+  # content -- so a successful reply must stay exactly one line, and its
+  # other values must stay correct, NO MATTER what that name contains.
+  # One adversarial name mixing every control character rounds 2-4 each
+  # found a fresh way to break, rather than one test per character (review
+  # finding, #1364, rounds 2-4): U+001F (could shift p/confidence/cost/
+  # tokens if response parsing used it as an internal delimiter -- round
+  # 2), a newline and a CR (could turn the ONE-LINE reply into several --
+  # round 3, the actual property to hold; see _jev_one_line in _lib.sh,
+  # the single choke point both this line and fail()'s route through).
+  local weird_choice=$'sonnet\x1ffake-injected-field\nwith a newline\rand a CR'
   _start_mock_openrouter MOCK_OPENROUTER_CHOICE="$weird_choice"
   run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
     "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
   [ "$status" -eq 0 ]
-  [ "$output" = "jev: ${weird_choice} / high (choice p=0.64, confidence=0.63, cost \$0.000019)" ]
-  [ ! -e "$bad_provider_test_log" ]
+  case "$output" in
+    *$'\n'*) echo "[weird choice] more than one line: $output" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$output" | grep -qF 'p=0.64, confidence=0.63, cost $0.000019'
 
   # --- contrast: a hostile ~/.curlrc must be ignored (review finding, #1339) ---
   # Without curl's -q as its FIRST argument, curl reads this user's curlrc,

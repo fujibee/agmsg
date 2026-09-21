@@ -22,6 +22,18 @@ set -euo pipefail
 # "<name>: 処理に失敗しました (<reason>)" itself, so this never fabricates that
 # sentence or prints more than the one line.
 #
+# This one-line property holds NO MATTER WHAT the sender wrote in the
+# message body -- a question's `choice` name is never validated (see
+# below) and is echoed straight back by the endpoint, so it can carry
+# anything, including an embedded newline. Every line this script ever
+# prints, on either stream, is built into a variable and passed through
+# _lib.sh's _jev_one_line as the last step before printing (see fail()
+# and the reply construction at the bottom) -- that is the ONE place this
+# property is enforced, not something re-derived per field or per call
+# site (review finding, #1364, rounds 2-4: this used to get fixed one
+# control character at a time, at the point each field was EXTRACTED,
+# which just meant the next character reappeared at the same place).
+#
 # ONE accepted shape for `body` (maintainer decision, 2026-09-20 -- this
 # replaces the earlier two-shape design, which also accepted plain text
 # against a bundled example question type; that bundled-type mechanism
@@ -51,7 +63,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # remove explicitly on every path instead, and $out_file never holds
 # anything more sensitive than OpenRouter's own JSON response.
 fail() {
-  printf '%s\n' "$*" >&2
+  printf '%s\n' "$(_jev_one_line "$*")" >&2
   [ -n "${out_file:-}" ] && rm -f "$out_file"
   exit 1
 }
@@ -118,22 +130,17 @@ esac
 # only the tokens (no cost key at all), and which one the reply line shows
 # is decided below by provider, not by whether cost happened to be present.
 #
-# Stays a JSON object all the way to the last moment, rather than flattening
-# these fields into one delimited string: a `choice` name comes from
-# whatever `questions` the CALLER built (this script never validates it,
-# by design -- see the shape check above) and is echoed straight back by
-# the API, so it can contain any byte at all, including whatever delimiter
-# a flattened-string scheme picked. An earlier version here joined fields
-# with a literal tab (via jq's @tsv, which DOES escape control characters
-# within a field -- safe on that axis, but IFS=tab is whitespace and
-# collapses/loses genuinely empty fields, which is what TypeSafe's missing
-# cost tripped over) and then, fixing that, switched to an unescaped
-# \u001f-joined string -- which closed the empty-field bug but reopened
-# the escaping one: a choice name containing a literal U+001F would inject
-# a fake field boundary and shift every value after it (review finding,
-# #1364, round 2). Reading each field with its own `jq -r` call instead
-# means jq's own JSON decoder draws each value's boundaries, never bash
-# word-splitting on a delimiter that the data could itself contain.
+# Stays a JSON object all the way to the last moment, reading each field
+# with its own `jq -r` call below, rather than flattening these fields into
+# one delimited string first: a `choice` name comes from whatever
+# `questions` the CALLER built and is echoed straight back by the API, so
+# it can contain any byte a chosen delimiter might also use, corrupting
+# which value ends up in which variable (review finding, #1364, round 2).
+# jq's own JSON decoder draws each value's boundary here instead, so there
+# is no delimiter for that data to collide with. (Line-safety -- keeping a
+# `choice` name from breaking the ONE-LINE reply via an embedded newline --
+# is a separate concern from this, and is _jev_one_line's job below, not
+# this step's.)
 result_json="$(jq -c '
   (.answers // {}) as $a
   | ($a | keys_unsorted) as $ks
@@ -165,10 +172,11 @@ in_tokens="$(jq -r '.input_tokens // empty' <<<"$result_json")"
 out_tokens="$(jq -r '.output_tokens // empty' <<<"$result_json")"
 if [ "$provider" = "typesafe" ]; then
   [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
-  printf 'jev: %s (choice p=%.2f, confidence=%.2f, tokens %s in / %s out)\n' \
+  printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, tokens %s in / %s out)' \
     "$choices" "$p_val" "$c_val" "$in_tokens" "$out_tokens"
 else
   [ -n "$cost_val" ] || fail "jev: unexpected response shape"
-  printf 'jev: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)\n' \
+  printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)' \
     "$choices" "$p_val" "$c_val" "$cost_val"
 fi
+printf '%s\n' "$(_jev_one_line "$reply_line")"

@@ -6,6 +6,26 @@
 # it straight to _jev_api_call's Authorization header -- never to echo, never
 # to a file this library writes.
 
+# handle's promise: a successful reply is EXACTLY one line, and whatever
+# the sender wrote in the message body cannot break that -- a question's
+# `choice` name (never validated, by design: see handle's own shape check)
+# is echoed straight back by the endpoint and lands directly in that line.
+# This is the ONE place that promise is kept: EVERY line handle sends
+# anywhere -- the success reply on stdout, and the one-line failure reason
+# on stderr that agmsg wraps into the sender's own reply -- is built into a
+# variable and passed through here as the literal last step before it is
+# ever printed, so nothing reaches either stream without going through it
+# (review finding, #1364, rounds 2-3: fixing one control character at the
+# CHOICE-EXTRACTION site just meant the next one reappeared at the same
+# place -- the property to hold is about every line handle ever emits, not
+# about guessing every input byte a caller-controlled string could carry).
+_jev_one_line() {   # <text>
+  local text="$1"
+  text="${text//$'\r'/\\r}"
+  text="${text//$'\n'/\\n}"
+  printf '%s' "$text"
+}
+
 # Read a single key from a member config file, or from a tool.conf-shaped
 # manifest (same key=value shape, read the same way: never sourced, so a
 # config file cannot run arbitrary shell just by being loaded). Returns empty
