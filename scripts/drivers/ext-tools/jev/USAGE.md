@@ -30,6 +30,25 @@ Measured once (2026-09-21, via OpenRouter) — not a guaranteed number:
 40 is the most anyone has actually sent — not a known ceiling. Don't assume
 a much larger batch behaves the same; this wasn't tried.
 
+## How to send it
+
+Send through `send.sh`, addressed to this member — one message, not by
+calling `handle` directly as a subprocess. `handle` is the entry point
+*agmsg itself* invokes when a message actually arrives; calling it
+directly still gets a real answer (it has no way to tell it's being run
+outside agmsg), but two things don't happen: neither the request nor the
+reply lands in the team's history, and `tool.conf`'s timeout is never
+enforced (that's the dispatcher's job, not `handle`'s).
+
+There's a real reason this is tempting: agmsg has no synchronous way yet
+to get the answer back inside the same script that sent it — a reply
+arrives later, as its own message, which a script can't collect in place.
+That gap is real and already documented elsewhere as something not built
+yet; it's not this driver pretending the problem doesn't exist. But
+routing around it with a direct `handle` call is what loses the record
+above — the decision still happens, it just never shows up anywhere a
+seat looking at the team's history would find it.
+
 ## What to send
 
 Body must be JSON with `state` and `questions`. Anything else — plain

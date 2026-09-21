@@ -82,3 +82,9 @@ No ext-tool adapter runs as a standing process. `handle` starts, does its one
 job, and exits — matching every other channel here, delivery to an ext-tool
 member happens only through a `send`/`sync` this machine already made,
 never through anything the tool itself initiates.
+
+`handle` is the entry point agmsg itself invokes on delivery, not something
+a seat calls directly. It has no way to tell it's being run outside agmsg,
+so a direct call still performs the real action — but neither the request
+nor the reply lands in team history that way, and `timeout=` above is never
+enforced (that's the dispatcher's job).
