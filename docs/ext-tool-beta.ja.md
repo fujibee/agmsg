@@ -124,10 +124,10 @@ bash <skill-root>/scripts/ext-tool.sh usage <team> <name>
 `setup test` は本物のメッセージを1通投稿して、その投稿へのリンクを返す。Slack 側の
 返信を agmsg に戻すことは、まだできない。
 
-**`jev`** は、型のついた質問を投げて、1行で答える。例:
+**`jev`** は、型のついた質問を1つ以上投げて、1行で答える。例:
 
 ```
-jev: sonnet / high (choice p=0.96, confidence=0.94, cost $0.000021)
+jev: model=fable (p=0.96, confidence=0.94) / effort=high (p=1.00, confidence=0.99) (cost $0.000021)
 ```
 
 この行は OpenRouter 経由のときの形。TypeSafe 自身の API 経由だと、答えは同じでも
