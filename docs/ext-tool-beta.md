@@ -89,24 +89,26 @@ A refusal points at the same document — today by path, `drivers/ext-tools/<too
 - `request=loose` — a plainly worded request is acceptable, and the adapter may
   map it onto the real call. `slack` is loose.
 
-**When the answer arrives** is a different question, and today it has one
-answer for every tool: asynchronously, as a message. Send, and the reply
-arrives later like any other message — which wakes the sender's seat for a
-turn.
+**When the answer arrives** is not a per-tool choice at all — the framework
+fixes it, in two halves:
 
-The two axes are not the same, but they do correlate. A strict tool is usually
-one worth waiting for in line: `jev` answers a typed question in 0.2–0.3s for
-about $0.00002, so the natural pairing is **strict and synchronous** — ask, get
-the answer in the same breath, keep going. A loose tool is usually one where
-waiting buys nothing: a Slack post is done when it is done, so **loose and
-asynchronous** fits.
+- **The adapter call itself is synchronous, always.** The dispatcher runs the
+  adapter, waits for it to finish inside `tool.conf`'s timeout, and turns its
+  stdout into the reply. `jev` and `slack` are alike here: one message in, one
+  process, one result. Nothing is queued or backgrounded inside the adapter.
+- **The sender's receipt of that answer is asynchronous, always.** The reply is
+  an ordinary message, so it reaches the sender later and wakes its seat for a
+  turn. There is no call that hands the answer back inside the same command.
 
-Today's mismatch is `jev`: it is strict but still answers asynchronously,
-because no synchronous entry point exists yet. That costs the sender an extra
-turn per decision, which matters most for the use that motivated the tool —
-agmsg itself asking a question before it delivers or spawns, where there is no
-seat to wake at all. A synchronous form is the obvious next step, and it is not
-built.
+What varies per tool is only the request shape above, and whether a reply is
+produced at all: `jev` answers, `slack` posts and stays silent.
+
+The gap worth naming is the second half. A tool that answers in 0.2–0.3s for
+about $0.00002 is fast enough to wait for in line, and paying a whole turn to
+collect that answer is the expensive part of using it. It matters most for the
+use that motivated the tool — agmsg itself asking a question before it delivers
+or spawns, where there is no seat to wake at all. A synchronous entry point is
+the obvious next step, and it is not built.
 
 ## The adapter contract
 
