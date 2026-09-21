@@ -2124,7 +2124,7 @@ test("capability policy history must be canonical and match current policy", () 
 // needs it most, and 300-second sleeps outlive the runner. (Observed, not
 // predicted: an earlier version of this file left six of them behind.)
 async function driverLifecycleFixture(t, { script, calls, root }) {
-  const reap = [];
+  const reap = new Set();
   // t.after rather than try/finally: it still runs when the test is aborted on
   // its timeout, which is precisely the failing case that leaves processes.
   t.after(() => {
@@ -2171,8 +2171,17 @@ async function driverLifecycleFixture(t, { script, calls, root }) {
     // the reap list is the one thing here that must not depend on the fixture
     // being correct.
     const childPid = await awaitPid(pidFile);
-    reap.push(childPid);
-    reap.push(await awaitPid(helperFile));
+    reap.add(childPid);
+    reap.add(await awaitPid(helperFile));
+    // The promise settles on the driver's exit, not on stdio close.  Once it
+    // has settled this pid is no longer ours to signal: on Windows the shell's
+    // MSYS pid is not a stable native-process identity, and an unconditional
+    // cleanup kill can hit an unrelated process after the number is reused.
+    // A distinct background helper remains in the set and is still reaped.
+    promise.then(
+      () => { reap.delete(childPid); },
+      () => { reap.delete(childPid); },
+    );
     started.push({ promise, childPid });
   }
   return { started, gone };
