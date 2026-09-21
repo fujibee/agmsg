@@ -1,5 +1,7 @@
 # ext-tool — an external program as a team member
 
+*[日本語](ext-tool-beta.ja.md)*
+
 `ext-tool` is an agent type whose member is a program rather than a CLI agent.
 It joins a team like anyone else, and a message addressed to it *is* the call:
 the team's messages are the interface.
