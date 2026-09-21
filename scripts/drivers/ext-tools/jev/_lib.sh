@@ -17,11 +17,42 @@ _jev_conf_get() {   # <config_path> <key>
   printf '%s' "${line#*=}"
 }
 
-# OpenRouter's own base URL. Overridable so tests point this at a loopback
+# The three things that vary by provider (maintainer decision, 2026-09-21):
+# the base URL, the decision-endpoint path, and the default model name.
+# Auth (Authorization: Bearer <key>) and the request/response shape are the
+# same for both. An unrecognized provider falls back to openrouter's
+# values here -- callers are expected to have already validated the
+# provider string and failed on anything else; these are just table
+# lookups, not where that validation happens.
+_jev_provider_default_base() {   # <provider>
+  case "$1" in
+    typesafe) printf '%s' "https://api.typesafe.ai" ;;
+    *) printf '%s' "https://openrouter.ai" ;;
+  esac
+}
+
+_jev_provider_path() {   # <provider>
+  case "$1" in
+    typesafe) printf '%s' "/v1/systemone" ;;
+    *) printf '%s' "/api/alpha/decisions" ;;
+  esac
+}
+
+_jev_provider_default_model() {   # <provider>
+  case "$1" in
+    typesafe) printf '%s' "jev-latest" ;;
+    *) printf '%s' "typesafe/jev-1.13" ;;
+  esac
+}
+
+# The provider's base URL. Overridable so tests point this at a loopback
 # fixture instead of the real API (design note §5b: real API never called in
-# CI); production leaves it unset and gets the real one.
-_jev_api_base() {
-  printf '%s' "${AGMSG_JEV_API_BASE:-https://openrouter.ai}"
+# CI); production leaves it unset and gets the provider's real one. The SAME
+# override variable covers both providers -- a test picks which provider's
+# defaults it's overriding by which provider it passes to handle/setup, not
+# by a separate env var per provider.
+_jev_api_base() {   # <provider>
+  printf '%s' "${AGMSG_JEV_API_BASE:-$(_jev_provider_default_base "$1")}"
 }
 
 # A usable key is one line (no embedded newline) with no whitespace anywhere.
@@ -86,7 +117,12 @@ _jev_curl_quote() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-# _jev_api_call <key> <json-body> <out_body_file>
+# _jev_api_call <key> <json-body> <out_body_file> <url>
+#
+# <url> is the FULL request URL, already assembled by the caller from
+# _jev_api_base/_jev_provider_path for whichever provider it's calling --
+# this function itself no longer decides which provider's endpoint to hit,
+# only how to call one safely.
 #
 # Never puts the key, or the request body, in this process's own argv --
 # both go through a 0600 curl -K config file (the key as a header line, the
@@ -105,8 +141,24 @@ _jev_curl_quote() {
 # never echo a header's VALUE, so this is safe to fold into handle's single
 # failure line without re-deriving that guarantee per caller.
 _jev_api_call() {
-  local key="$1" json="$2" out_file="$3" \
+  local key="$1" json="$2" out_file="$3" url="$4" \
     work_dir cfg curl_err rc=0
+
+  # <url> is production-reachable code even though only tests actually
+  # override the base it's built from (review finding, #1339): a curl -K
+  # config file is LINE-based, so an embedded newline in this value could
+  # inject a further directive (e.g. a second `header = "Authorization:
+  # ..."` line aimed at a different host) regardless of quoting -- the same
+  # class of risk _jev_key_looks_valid guards for the key itself. Reject it
+  # here, covering BOTH providers' URLs the same way, rather than trust the
+  # source.
+  case "$url" in
+    *$'\n'*)
+      _JEV_CURL_DIAG="invalid API base (embedded newline)"
+      return 1
+      ;;
+  esac
+
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-jev-curl.XXXXXX")" || {
     _JEV_CURL_DIAG="could not create a temp dir for the request"
     return 1
@@ -120,25 +172,8 @@ _jev_api_call() {
   cfg="$work_dir/config"
   curl_err="$work_dir/stderr"
 
-  # AGMSG_JEV_API_BASE is production-reachable code even though only tests
-  # set it (review finding, #1339): a curl -K config file is LINE-based, so an
-  # embedded newline in this value could inject a further directive (e.g. a
-  # second `header = "Authorization: ..."` line aimed at a different host)
-  # regardless of quoting -- the same class of risk _jev_key_looks_valid
-  # guards for the key itself. Reject it here rather than trust the source.
-  local api_base
-  api_base="$(_jev_api_base)"
-  case "$api_base" in
-    *$'\n'*)
-      _JEV_CURL_DIAG="invalid API base (embedded newline)"
-      rm -rf "$work_dir"
-      trap - EXIT INT TERM
-      return 1
-      ;;
-  esac
-
   {
-    printf 'url = "%s/api/alpha/decisions"\n' "$(_jev_curl_quote "$api_base")"
+    printf 'url = "%s"\n' "$(_jev_curl_quote "$url")"
     printf 'request = "POST"\n'
     printf 'header = "Authorization: Bearer %s"\n' "$(_jev_curl_quote "$key")"
     printf 'header = "Content-Type: application/json; charset=utf-8"\n'

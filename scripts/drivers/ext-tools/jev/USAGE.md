@@ -39,6 +39,13 @@ outright: `expected record, received array`).
 
 The reply is one line: `jev: sonnet / high (choice p=0.72, confidence=0.61, cost $0.000016)`
 
+This member may be connected through OpenRouter or TypeSafe's own native
+API (a setup-time choice, invisible to what you send — the request/reply
+shape is identical either way except for one thing): TypeSafe's real
+response carries no cost figure at all, so a member connected that way
+ends its reply with `tokens 296 in / 20 out` instead of a `cost` — never a
+self-calculated dollar estimate standing in for one it never measured.
+
 ## When it refuses, and before acting on an answer
 
 Refusal is always one fixed line: no key configured, an invalid key, rate

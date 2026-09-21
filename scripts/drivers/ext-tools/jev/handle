@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# handle — ask OpenRouter's Jev decision endpoint one question about the
-# agmsg message it receives, and reply with the answer.
+# handle — ask a Jev decision endpoint one question about the agmsg
+# message it receives, and reply with the answer. Two providers
+# (maintainer decision, 2026-09-21): OpenRouter (the default, for
+# existing members whose config carries no provider= line) and
+# typesafe (TypeSafe's own native API). Auth and the request/response
+# shape are the same for both; only the URL and the default model
+# differ (see _lib.sh's _jev_provider_* helpers) -- and TypeSafe's own
+# response carries no cost figure, so the reply line reports token
+# counts there instead of a cost this script would otherwise have to
+# derive itself from a published rate (never actually billed, so never
+# shown next to a genuinely measured OpenRouter cost as if it were one).
 #
 # Contract (design note §3): stdin is one JSON object
 #   {team, from, to, body, subject?, message_id, config_path}
@@ -61,6 +70,15 @@ key_file="$(_jev_conf_get "$config_path" key_file)"
 _jev_read_key "$key_file" || fail "jev: $_JEV_KEY_ERROR"
 key="$_JEV_KEY"
 
+# provider= is optional; an absent line means openrouter (existing configs
+# predate this key entirely and must keep working unchanged).
+provider="$(_jev_conf_get "$config_path" provider)"
+[ -n "$provider" ] || provider="openrouter"
+case "$provider" in
+  openrouter|typesafe) : ;;
+  *) fail "jev: member config has an unknown provider '$provider' (expected openrouter or typesafe)" ;;
+esac
+
 # The one accepted shape: body must parse as JSON AND carry a "questions"
 # key. Anything else -- plain text, JSON without that key -- is refused
 # here, naming the usage doc rather than guessing what the caller meant.
@@ -76,12 +94,14 @@ printf '%s' "$questions_json" | jq -e 'type == "object"' >/dev/null 2>&1 ||
   fail "jev: questions must be a JSON object -- $USAGE_HINT"
 state_json="$(printf '%s' "$body_json" | jq -c '.state // ""')"
 
-request_json="$(jq -cn --arg model "typesafe/jev-1.13" --argjson state "$state_json" \
+model="$(_jev_provider_default_model "$provider")"
+request_json="$(jq -cn --arg model "$model" --argjson state "$state_json" \
   --argjson questions "$questions_json" '{model: $model, state: $state, questions: $questions}')"
 
+url="$(_jev_api_base "$provider")$(_jev_provider_path "$provider")"
 out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-jev-handle.XXXXXX")"
 
-_jev_api_call "$key" "$request_json" "$out_file" ||
+_jev_api_call "$key" "$request_json" "$out_file" "$url" ||
   fail "jev: request failed ($_JEV_CURL_DIAG)"
 
 case "$_JEV_HTTP_CODE" in
@@ -92,10 +112,11 @@ case "$_JEV_HTTP_CODE" in
 esac
 
 # Combine every answered question into one line: choices joined in the order
-# OpenRouter returned them, p/confidence as the product across questions
-# (their joint, independence-assumed probability), cost as the whole call's
-# own usage.cost (never per-question -- OpenRouter bills the call, not each
-# question in it).
+# the endpoint returned them, p/confidence as the product across questions
+# (their joint, independence-assumed probability). Also pulls token counts
+# alongside cost -- OpenRouter's response carries both, TypeSafe's carries
+# only the tokens (no cost key at all), and which one the reply line shows
+# is decided below by provider, not by whether cost happened to be present.
 line="$(jq -r '
   (.answers // {}) as $a
   | ($a | keys_unsorted) as $ks
@@ -108,7 +129,9 @@ line="$(jq -r '
             ($choices | join(" / ")),
             ($probs | reduce .[] as $x (1; . * $x) | tostring),
             ($confs | reduce .[] as $x (1; . * $x) | tostring),
-            ((.usage.cost // 0) | tostring)
+            ((.usage.cost // "") | tostring),
+            ((.usage.input_tokens // "") | tostring),
+            ((.usage.output_tokens // "") | tostring)
           ] | @tsv
         end
     end
@@ -117,6 +140,13 @@ rm -f "$out_file"
 
 [ -n "$line" ] || fail "jev: unexpected response shape"
 
-IFS=$'\t' read -r choices p_val c_val cost_val <<<"$line"
-printf 'jev: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)\n' \
-  "$choices" "$p_val" "$c_val" "$cost_val"
+IFS=$'\t' read -r choices p_val c_val cost_val in_tokens out_tokens <<<"$line"
+if [ "$provider" = "typesafe" ]; then
+  [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
+  printf 'jev: %s (choice p=%.2f, confidence=%.2f, tokens %s in / %s out)\n' \
+    "$choices" "$p_val" "$c_val" "$in_tokens" "$out_tokens"
+else
+  [ -n "$cost_val" ] || fail "jev: unexpected response shape"
+  printf 'jev: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)\n' \
+    "$choices" "$p_val" "$c_val" "$cost_val"
+fi

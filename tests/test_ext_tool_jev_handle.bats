@@ -91,6 +91,35 @@ _start_mock_openrouter() {
   [ "$(jq -r '.body.questions.color.criteria.red' "$request_log")" = "warm" ]
   [ "$(jq -r '.body.questions.color.criteria.blue' "$request_log")" = "cool" ]
 
+  # --- provider=typesafe: hits TypeSafe's own URL/model, reports tokens
+  # instead of cost (maintainer decision, 2026-09-21 -- TypeSafe's real
+  # response carries no cost figure at all, measured directly against
+  # production, so this is never shown as if it were one) ---
+  local typesafe_log="$TEST_SKILL_DIR/jev-request-typesafe.json"
+  _start_mock_openrouter MOCK_OPENROUTER_REQUEST_LOG="$typesafe_log"
+  local typesafe_config typesafe_input default_body
+  typesafe_config="$TEST_SKILL_DIR/ext-tools-jev-member-typesafe.conf"
+  {
+    printf 'key_file=%s\n' "$KEY_FILE"
+    printf 'provider=typesafe\n'
+  } > "$typesafe_config"
+  default_body="$(jq -r '.body' <<<"$INPUT")"
+  typesafe_input="$(jq -cn --arg cp "$typesafe_config" --arg body "$default_body" '{
+    team: "ops", from: "alice", to: "jev-bot", body: $body,
+    message_id: "m", config_path: $cp
+  }')"
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$typesafe_input"
+  [ "$status" -eq 0 ]
+  case "$output" in
+    *$'\n'*) echo "[typesafe] more than one line: $output" >&2; return 1 ;;
+  esac
+  [ "$output" = "jev: sonnet / high (choice p=0.64, confidence=0.63, tokens 441 in / 85 out)" ]
+  refute grep -qF 'cost' <<<"$output"
+  wait_for_file_contains "$typesafe_log" '"path"'
+  [ "$(jq -r '.path' "$typesafe_log")" = "/v1/systemone" ]
+  [ "$(jq -r '.body.model' "$typesafe_log")" = "jev-latest" ]
+
   # --- contrast: a hostile ~/.curlrc must be ignored (review finding, #1339) ---
   # Without curl's -q as its FIRST argument, curl reads this user's curlrc,
   # and a curlrc enabling verbose/trace can print the Authorization header
