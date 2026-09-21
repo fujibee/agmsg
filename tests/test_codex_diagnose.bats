@@ -120,3 +120,21 @@ NODE
   [ "$status" -eq 0 ]
   grep -qF -- "second" <<<"$output"
 }
+
+@test "codex diagnose: Windows project path spellings share the canonical context" {
+  command -v cygpath >/dev/null 2>&1 || skip "requires Windows Git Bash cygpath"
+  export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
+  run bash "$DIAG" "$PROJ" team alice --self-test
+  [ "$status" -eq 3 ]
+  diagnosis_id="$(printf '%s\n' "$output" | sed -n 's/.*diagnosis_id=\([^ ]*\).*/\1/p' | tail -n 1)"
+  marker_json="$(bash "$TYPES/codex/codex-self-test-inbox.sh" peek team alice)"
+  values="$(printf '%s' "$marker_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const o=JSON.parse(s);const m=o.body.match(/^agmsg-codex-self-test:v1:[^:]+:([a-f0-9]+)$/);if(!m)process.exit(1);process.stdout.write(`${m[1]} ${o.id}`)})')"
+  nonce="${values%% *}"; message_id="${values#* }"; win_proj="$(cygpath -m "$PROJ")"
+  run bash "$DIAG" "$win_proj" team alice --confirm "$nonce" "$message_id"
+  [ "$status" -eq 2 ]
+  grep -qF -- "self-delivery: THREAD_CONFIRMED diagnosis_id=$diagnosis_id" <<<"$output"
+  run bash "$DIAG" "$win_proj" team alice --status "$diagnosis_id"
+  [ "$status" -eq 0 ]
+  run bash "$TYPES/codex/codex-self-test-inbox.sh" ack team alice "$message_id"
+  [ "$status" -eq 0 ]
+}

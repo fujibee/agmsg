@@ -38,9 +38,10 @@ RUN_DIR="$SKILL_DIR/run"
 source "$SCRIPT_DIR/../../../lib/hash.sh"
 source "$SCRIPT_DIR/../../../lib/role-session.sh"
 source "$SCRIPT_DIR/../../../lib/node.sh"
+source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 source "$SCRIPT_DIR/_home.sh"
 
-PROJECT="$(cd "$PROJECT" && pwd)"
+PROJECT="$(agmsg_normalize_project_path "$PROJECT")"
 if [ "$ACTION" = "diagnose" ]; then
   exec "$SCRIPT_DIR/codex-diag.sh" "$PROJECT" "$TEAM" "$AGENT"
 fi
