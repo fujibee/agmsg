@@ -35,6 +35,13 @@ MOCK_OPENROUTER_DELAY_SECONDS = float(os.environ.get("MOCK_OPENROUTER_DELAY_SECO
 # once cost was genuinely empty) pass review-findings-free the first time
 # (review finding, #1364).
 MOCK_OPENROUTER_NO_COST = os.environ.get("MOCK_OPENROUTER_NO_COST", "")
+# Overrides the "model" answer's choice name (and its probability entry).
+# Lets a test simulate an adversarial/unusual choice name -- e.g. one
+# containing a literal control character -- without handle ever having
+# validated `questions` itself (that shape is caller-controlled, echoed
+# straight back by the API; see handle's own comment, review finding
+# #1364 round 2).
+MOCK_OPENROUTER_CHOICE = os.environ.get("MOCK_OPENROUTER_CHOICE", "")
 
 
 class LoopbackHTTPServer(HTTPServer):
@@ -94,6 +101,9 @@ class Handler(BaseHTTPRequestHandler):
             }
             if not MOCK_OPENROUTER_NO_COST:
                 payload["usage"]["cost"] = 0.000018522
+            if MOCK_OPENROUTER_CHOICE:
+                payload["answers"]["model"]["choice"] = MOCK_OPENROUTER_CHOICE
+                payload["answers"]["model"]["probabilities"] = {MOCK_OPENROUTER_CHOICE: 0.80}
         body = json.dumps(payload).encode("utf-8")
         self.send_response(MOCK_OPENROUTER_HTTP_STATUS)
         self.send_header("Content-Type", "application/json")

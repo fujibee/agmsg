@@ -117,7 +117,24 @@ esac
 # alongside cost -- OpenRouter's response carries both, TypeSafe's carries
 # only the tokens (no cost key at all), and which one the reply line shows
 # is decided below by provider, not by whether cost happened to be present.
-line="$(jq -r '
+#
+# Stays a JSON object all the way to the last moment, rather than flattening
+# these fields into one delimited string: a `choice` name comes from
+# whatever `questions` the CALLER built (this script never validates it,
+# by design -- see the shape check above) and is echoed straight back by
+# the API, so it can contain any byte at all, including whatever delimiter
+# a flattened-string scheme picked. An earlier version here joined fields
+# with a literal tab (via jq's @tsv, which DOES escape control characters
+# within a field -- safe on that axis, but IFS=tab is whitespace and
+# collapses/loses genuinely empty fields, which is what TypeSafe's missing
+# cost tripped over) and then, fixing that, switched to an unescaped
+# \u001f-joined string -- which closed the empty-field bug but reopened
+# the escaping one: a choice name containing a literal U+001F would inject
+# a fake field boundary and shift every value after it (review finding,
+# #1364, round 2). Reading each field with its own `jq -r` call instead
+# means jq's own JSON decoder draws each value's boundaries, never bash
+# word-splitting on a delimiter that the data could itself contain.
+result_json="$(jq -c '
   (.answers // {}) as $a
   | ($a | keys_unsorted) as $ks
   | if ($a | type) != "object" or ($ks | length) == 0 then empty else
@@ -125,29 +142,27 @@ line="$(jq -r '
       | ( [$ks[] | ($a[.].probabilities[$a[.].choice] // null)] ) as $probs
       | ( [$ks[] | ($a[.].confidence // null)] ) as $confs
       | if ($choices | any(. == null)) or ($probs | any(. == null)) or ($confs | any(. == null)) then empty else
-          [
-            ($choices | join(" / ")),
-            ($probs | reduce .[] as $x (1; . * $x) | tostring),
-            ($confs | reduce .[] as $x (1; . * $x) | tostring),
-            ((.usage.cost // "") | tostring),
-            ((.usage.input_tokens // "") | tostring),
-            ((.usage.output_tokens // "") | tostring)
-          ] | join("\u001f")
+          {
+            choices: ($choices | join(" / ")),
+            p: ($probs | reduce .[] as $x (1; . * $x)),
+            confidence: ($confs | reduce .[] as $x (1; . * $x)),
+            cost: (.usage.cost // null),
+            input_tokens: (.usage.input_tokens // null),
+            output_tokens: (.usage.output_tokens // null)
+          }
         end
     end
 ' "$out_file" 2>/dev/null)"
 rm -f "$out_file"
 
-[ -n "$line" ] || fail "jev: unexpected response shape"
+[ -n "$result_json" ] || fail "jev: unexpected response shape"
 
-# \x1f (unit separator), NOT a tab: IFS treats a whitespace character (tab
-# included) as a run of delimiters, collapsing consecutive/empty fields
-# instead of preserving them (review finding, #1364) -- TypeSafe's response
-# genuinely has no cost, so that field is empty here, and a whitespace IFS
-# would silently shift input_tokens into $cost_val and output_tokens into
-# $in_tokens, leaving $out_tokens empty. A non-whitespace IFS character
-# splits on exact occurrences and keeps empty fields as empty.
-IFS=$'\x1f' read -r choices p_val c_val cost_val in_tokens out_tokens <<<"$line"
+choices="$(jq -r '.choices' <<<"$result_json")"
+p_val="$(jq -r '.p' <<<"$result_json")"
+c_val="$(jq -r '.confidence' <<<"$result_json")"
+cost_val="$(jq -r '.cost // empty' <<<"$result_json")"
+in_tokens="$(jq -r '.input_tokens // empty' <<<"$result_json")"
+out_tokens="$(jq -r '.output_tokens // empty' <<<"$result_json")"
 if [ "$provider" = "typesafe" ]; then
   [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
   printf 'jev: %s (choice p=%.2f, confidence=%.2f, tokens %s in / %s out)\n' \
