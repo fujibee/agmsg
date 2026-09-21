@@ -36,8 +36,13 @@ runtime. A member is addressable:
 ## Joining a tool
 
 ```bash
-agmsg join <team> <name> ext-tool --tool <tool>
+bash <skill-root>/scripts/join.sh <team> <name> ext-tool --tool <tool>
 ```
+
+`<skill-root>` is where agmsg installed itself — `~/.agents/skills/agmsg/` by
+default, or `~/.agents/skills/<name>/` when the install chose another command
+name. There is no `agmsg` on PATH yet (#1353), so every command on this page
+names the script.
 
 Adapters ship under `scripts/drivers/ext-tools/<tool>/`. Two are bundled:
 `slack` (post to one channel) and `jev` (ask TypeSafe's Jev decision model,
@@ -50,8 +55,8 @@ and running a live check, one step at a time. The setup commands themselves
 never prompt, so the same path works by hand or in CI:
 
 ```bash
-agmsg ext-tool setup  <team> <name> <tool> status|check <item>|save|test
-agmsg ext-tool secret <team> <name> [--from-clipboard]
+bash <skill-root>/scripts/ext-tool.sh setup  <team> <name> <tool> status|check <item>|save|test
+bash <skill-root>/scripts/ext-tool.sh secret <team> <name> [--from-clipboard]
 ```
 
 `secret` reads the value from a terminal, or from the clipboard when the agent
@@ -66,7 +71,7 @@ knowledge that makes an answer better rather than merely valid. Read it before
 the first message:
 
 ```bash
-agmsg ext-tool usage <team> <name>
+bash <skill-root>/scripts/ext-tool.sh usage <team> <name>
 ```
 
 A refusal always names that command, so a badly shaped request corrects itself
@@ -86,7 +91,7 @@ the exit status:
 
 | | |
 |---|---|
-| stdin | one JSON object: `team`, `from`, `to`, `body`, `question?`, `message_id`, `config_path` |
+| stdin | one JSON object: `team`, `from`, `to`, `body`, `message_id`, `config_path` |
 | stdout | the reply body. Empty means "send no reply" |
 | exit 0 | success |
 | exit non-zero | failure; agmsg sends one named line back to the sender |
@@ -126,10 +131,12 @@ probabilities toward 0.5 — is in the adapter's `USAGE.md`.
   member was joined. For a tool that only talks to a remote service this is
   invisible; for one that touches local state it is not.
 - **One installation per tool member — by convention, not by enforcement.**
-  Joining the same tool name from two installations delivers to both, and both
-  run it. Nothing prevents that today and the daemon will not either: separate
-  installations are separate worlds. Keep a tool joined in one place; an
-  exclusivity service is a later question, not a v1 promise.
+  Today only the sending installation runs the adapter, so a message sent from
+  one machine runs there and nowhere else. Once delivery moves into the daemon,
+  a tool joined from two installations will run in both, because separate
+  installations are separate worlds and nothing reconciles them. Keep a tool
+  joined in one place; an exclusivity service is a later question, not a v1
+  promise.
 - **A tool cannot speak first.** Adapters answer; they do not start a
   conversation. Carrying Slack replies back into a team needs that.
 - **No retries and no ordering guarantees.** A failed call is reported, not
