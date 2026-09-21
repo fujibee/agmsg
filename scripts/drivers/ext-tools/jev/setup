@@ -110,6 +110,18 @@ cmd_test() {
 
   provider="$(_jev_conf_get "$config_path" provider)"
   [ -n "$provider" ] || provider="openrouter"
+  case "$provider" in
+    openrouter|typesafe) : ;;
+    *)
+      # Without this, an unrecognized value would silently fall through
+      # _jev_provider_*'s wildcard case to openrouter's URL/model and send
+      # this member's real key there regardless of what was actually
+      # configured (review finding, #1364) -- reject it here, before any
+      # URL is built, the same way handle does.
+      jq -cn --arg p "$provider" '{ok: false, error: ("unknown provider in member config: " + $p + " (expected openrouter or typesafe)")}'
+      return 1
+      ;;
+  esac
 
   # A minimal, self-contained question -- there is no bundled example
   # question file to read anymore; this is only exercised here, as a

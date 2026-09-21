@@ -27,6 +27,14 @@ MOCK_OPENROUTER_MALFORMED = os.environ.get("MOCK_OPENROUTER_MALFORMED", "")
 # never carries the key or the body, not just that the final result happens
 # not to show them.
 MOCK_OPENROUTER_DELAY_SECONDS = float(os.environ.get("MOCK_OPENROUTER_DELAY_SECONDS", "0"))
+# When set, "usage" has no "cost" key at all -- matching TypeSafe's real
+# response (confirmed against two live production calls, including
+# headers: no cost anywhere). Without this, every scenario got OpenRouter's
+# cost field even when testing the TypeSafe path, which is exactly what let
+# a real bug (handle's tab-delimited field parsing silently misaligning
+# once cost was genuinely empty) pass review-findings-free the first time
+# (review finding, #1364).
+MOCK_OPENROUTER_NO_COST = os.environ.get("MOCK_OPENROUTER_NO_COST", "")
 
 
 class LoopbackHTTPServer(HTTPServer):
@@ -80,10 +88,12 @@ class Handler(BaseHTTPRequestHandler):
                         "confidence": 0.70,
                     },
                 },
-                "usage": {"input_tokens": 441, "output_tokens": 85, "cost": 0.000018522},
+                "usage": {"input_tokens": 441, "output_tokens": 85},
                 "id": "gen-dec-test",
                 "provider": "TypeSafe",
             }
+            if not MOCK_OPENROUTER_NO_COST:
+                payload["usage"]["cost"] = 0.000018522
         body = json.dumps(payload).encode("utf-8")
         self.send_response(MOCK_OPENROUTER_HTTP_STATUS)
         self.send_header("Content-Type", "application/json")

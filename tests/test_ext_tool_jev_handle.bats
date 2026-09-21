@@ -96,7 +96,7 @@ _start_mock_openrouter() {
   # response carries no cost figure at all, measured directly against
   # production, so this is never shown as if it were one) ---
   local typesafe_log="$TEST_SKILL_DIR/jev-request-typesafe.json"
-  _start_mock_openrouter MOCK_OPENROUTER_REQUEST_LOG="$typesafe_log"
+  _start_mock_openrouter MOCK_OPENROUTER_REQUEST_LOG="$typesafe_log" MOCK_OPENROUTER_NO_COST=1
   local typesafe_config typesafe_input default_body
   typesafe_config="$TEST_SKILL_DIR/ext-tools-jev-member-typesafe.conf"
   {
@@ -119,6 +119,37 @@ _start_mock_openrouter() {
   wait_for_file_contains "$typesafe_log" '"path"'
   [ "$(jq -r '.path' "$typesafe_log")" = "/v1/systemone" ]
   [ "$(jq -r '.body.model' "$typesafe_log")" = "jev-latest" ]
+
+  # --- failure: an unrecognized provider is refused BEFORE any URL is
+  # built or key sent -- both handle and setup test validate this (review
+  # finding, #1364: setup test originally read provider without checking
+  # it, so a typo would silently fall through to openrouter's URL/model
+  # and send that member's real key there instead).
+  local bad_provider_config bad_provider_input
+  bad_provider_config="$TEST_SKILL_DIR/ext-tools-jev-member-badprovider.conf"
+  {
+    printf 'key_file=%s\n' "$KEY_FILE"
+    printf 'provider=bogus\n'
+  } > "$bad_provider_config"
+  bad_provider_input="$(jq -cn --arg cp "$bad_provider_config" --arg body "$default_body" '{
+    team: "ops", from: "alice", to: "jev-bot", body: $body,
+    message_id: "m", config_path: $cp
+  }')"
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$bad_provider_input"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *$'\n'*) echo "[bad provider] more than one line: $output" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$output" | grep -qF "unknown provider"
+
+  local bad_provider_test_log="$TEST_SKILL_DIR/jev-request-badprovider-test.json"
+  _start_mock_openrouter MOCK_OPENROUTER_REQUEST_LOG="$bad_provider_test_log"
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/setup" test "$bad_provider_config"
+  [ "$status" -ne 0 ]
+  jq -e '.ok == false and (.error | contains("unknown provider"))' <<<"$output" >/dev/null
+  [ ! -e "$bad_provider_test_log" ]
 
   # --- contrast: a hostile ~/.curlrc must be ignored (review finding, #1339) ---
   # Without curl's -q as its FIRST argument, curl reads this user's curlrc,

@@ -132,7 +132,7 @@ line="$(jq -r '
             ((.usage.cost // "") | tostring),
             ((.usage.input_tokens // "") | tostring),
             ((.usage.output_tokens // "") | tostring)
-          ] | @tsv
+          ] | join("\u001f")
         end
     end
 ' "$out_file" 2>/dev/null)"
@@ -140,7 +140,14 @@ rm -f "$out_file"
 
 [ -n "$line" ] || fail "jev: unexpected response shape"
 
-IFS=$'\t' read -r choices p_val c_val cost_val in_tokens out_tokens <<<"$line"
+# \x1f (unit separator), NOT a tab: IFS treats a whitespace character (tab
+# included) as a run of delimiters, collapsing consecutive/empty fields
+# instead of preserving them (review finding, #1364) -- TypeSafe's response
+# genuinely has no cost, so that field is empty here, and a whitespace IFS
+# would silently shift input_tokens into $cost_val and output_tokens into
+# $in_tokens, leaving $out_tokens empty. A non-whitespace IFS character
+# splits on exact occurrences and keeps empty fields as empty.
+IFS=$'\x1f' read -r choices p_val c_val cost_val in_tokens out_tokens <<<"$line"
 if [ "$provider" = "typesafe" ]; then
   [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
   printf 'jev: %s (choice p=%.2f, confidence=%.2f, tokens %s in / %s out)\n' \
