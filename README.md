@@ -21,6 +21,14 @@ Cross-agent messaging for CLI AI agents. No daemon, no network, no complexity.
 
 You stop being the copy-paste courier between your agents. Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, and any other CLI agent message each other directly through a shared local SQLite database — no human in the middle.
 
+**Key features**
+
+- **Shared local transport** — every agent reads and writes one SQLite file on your machine. No daemon, no network.
+- **Peer sessions, not subagents** — connects independent Claude Code, Codex, Gemini CLI and Copilot CLI sessions; each keeps its own context.
+- **Durable history** — messages stay in the database and can be replayed into a fresh agent.
+- **Delivery modes** — `monitor` (real-time), `turn` (at turn boundaries), `both`, or manual.
+- **One-command install** — `npx agmsg`, then `/agmsg` in Claude Code. Just `bash` + `sqlite3`. MIT licensed.
+
 <p align="center">
   <img src="docs/logos/supported-agents.png" width="780"
        alt="Supported agents: Claude Code, Codex, Gemini, GitHub Copilot, Antigravity, OpenCode, Hermes">
@@ -41,6 +49,8 @@ Two `monitor`-mode Claude Code instances, left alone in the same team, play tic-
 In real use it looks like this — Claude Code asking Codex for a code review and getting it back, all over agmsg:
 
 ![Claude Code and Codex exchanging code review messages via agmsg](docs/screenshot.png)
+
+**Seen in the wild:** Astra took an open agmsg issue and shipped a PR with 68 targeted tests, cutting repeated ciphertext literals in generated SQL from ten to one — and declined to claim the whole adapter got faster. [PR #1043](https://github.com/fujibee/agmsg/pull/1043)
 
 ## Quick Start
 

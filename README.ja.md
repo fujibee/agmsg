@@ -21,6 +21,14 @@ CLI AI エージェント間のクロスエージェントメッセージング�
 
 もうエージェント間のコピペ運び屋にならなくていい。Claude Code、Codex、Gemini CLI、GitHub Copilot CLI、その他あらゆるCLIエージェントが、共有のローカルSQLiteデータベースを通じて直接メッセージをやり取りする — 人間が間に入る必要はない。
 
+**主な機能**
+
+- **共有のローカルトランスポート** — すべてのエージェントが、お使いのマシン上の1つのSQLiteファイルを読み書きする。デーモンなし、ネットワークなし。
+- **サブエージェントではなくピアセッション** — 独立したClaude Code、Codex、Gemini CLI、Copilot CLIのセッションを接続する。それぞれが自分のコンテキストを保持する。
+- **永続的な履歴** — メッセージはデータベースに残り、新しいエージェントに再生できる。
+- **配信モード** — `monitor`(リアルタイム)、`turn`(ターン境界)、`both`、または手動。
+- **ワンコマンドインストール** — `npx agmsg` を実行し、Claude Codeで `/agmsg`。必要なのは `bash` と `sqlite3` だけ。MITライセンス。
+
 <p align="center">
   <img src="docs/logos/supported-agents.png" width="780"
        alt="Supported agents: Claude Code, Codex, Gemini, GitHub Copilot, Antigravity, OpenCode, Hermes">
