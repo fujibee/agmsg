@@ -63,6 +63,19 @@ on:
     branches: [main, 'integration/**']
   pull_request:
     branches: [main, 'integration/**']
+    # Default types are [opened, synchronize, reopened]; closed is added on
+    # top of that default, not instead of it (#1304). A merged/closed PR
+    # keeps its now-pointless in-flight run alive today -- it holds a macOS
+    # slot until it finishes on its own, since nothing re-triggers the
+    # concurrency group once the PR itself stops changing. Adding `closed`
+    # gives that PR one more, near-instant run in the SAME concurrency group
+    # (`pr-<number>`, see the concurrency block below): the group's existing
+    # cancel-in-progress then cancels the still-running run for this PR the
+    # moment this new one starts, exactly the way a new push already cancels
+    # the push before it -- this just adds one more event that can do that
+    # cancelling. See the `changes` job below for why the closed-triggered
+    # run itself does no real work.
+    types: [opened, synchronize, reopened, closed]
 
 permissions:
   contents: read
@@ -76,6 +89,21 @@ permissions:
 # an integration branch, which is only ever dogfooded at its tip. A push to main
 # is the one case that is never cancelled: its group is its own run id, and that
 # run is what a release reads (#848). The block below spells out all three.
+#
+# The `pull_request` case above ALSO now fires on `closed` (merged or just
+# closed, #1304), which is what finally cancels the in-flight run for a PR
+# that gets merged/closed without a further push -- until this, that run had
+# no way to be superseded and just ran to completion on its own, burning a
+# macOS slot for a PR that was already resolved. This is safe against the
+# hazard that matters here -- cancelling a run whose result some OTHER run
+# still needs -- for two reasons specific to this group: (1) the group key is
+# `pr-<number>`, so a closed event for PR N can only ever cancel something
+# already in PR N's own group; it can never reach a different PR's group or
+# main's (main pushes group by run id, never cancelled, and closing a PR
+# never fires a push event on main). (2) `closed` only fires once PR N itself
+# is already merged or abandoned, i.e. after whatever gated on PR N's own
+# checks has already been decided -- there is nothing left downstream that
+# still needs the in-flight run's verdict once its own PR has closed.
 concurrency:
   # Three cases, and they want different things.
   #
@@ -161,6 +189,7 @@ jobs:
       - id: detect
         env:
           EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -172,6 +201,22 @@ jobs:
             echo "server_changed=true" >> "$GITHUB_OUTPUT"
             echo "sync_changed=true" >> "$GITHUB_OUTPUT"
             echo "contracts_needed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$ACTION" = "closed" ]; then
+            # This run's only job is to exist in this PR's concurrency group
+            # (`pr-<number>`) so cancel-in-progress cancels whatever was still
+            # running for this PR when it closed/merged (#1304, see the
+            # concurrency block's own comment for why that's safe). Nothing
+            # downstream needs a verdict from a PR that has already closed,
+            # so every heavy job below is skipped the same way a docs-only
+            # diff skips them.
+            echo "PR closed (merge or close, head may already be gone) — skipping the suite; this run exists only to cancel its own PR's prior in-flight run."
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "app_changed=false" >> "$GITHUB_OUTPUT"
+            echo "server_changed=false" >> "$GITHUB_OUTPUT"
+            echo "sync_changed=false" >> "$GITHUB_OUTPUT"
+            echo "contracts_needed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")

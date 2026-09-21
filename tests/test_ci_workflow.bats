@@ -110,3 +110,22 @@
   run grep -F "format('push-{0}', github.ref)" "$workflow"
   [ "$status" -eq 0 ]
 }
+
+# #1304: a merged/closed PR used to keep its own in-flight run alive with
+# nothing left to cancel it (only a further push to the same PR ever
+# re-triggered the pr-<number> concurrency group). Pins both halves of the
+# fix: the trigger fires on close, and the run it produces does no real work
+# -- it exists only to land in the group and let cancel-in-progress cancel
+# whatever was still running for this PR.
+@test "a closed PR triggers a run that skips the suite instead of running it (#1304)" {
+  local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
+
+  run grep -F 'types: [opened, synchronize, reopened, closed]' "$workflow"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'if [ "$ACTION" = "closed" ]; then' "$workflow"
+  [ "$status" -eq 0 ]
+  run bash -c "grep -A14 'if \[ \"\$ACTION\" = \"closed\" \]; then' '$workflow' | grep -c 'GITHUB_OUTPUT'"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 5 ]
+}
