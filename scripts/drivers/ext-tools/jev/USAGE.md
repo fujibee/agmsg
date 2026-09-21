@@ -8,10 +8,11 @@ decision aid, not a chat partner. No memory across calls, no side effects.
 
 **If you have more than one decision to make, ask them all in one call.**
 Every question in `questions` comes back in the same response, keyed by
-its own question name in `answers` — bundling is cheaper and barely
-slower than asking one at a time, since `state` and every criterion's
-description are paid for once, not once per question (whether the
-endpoint answers them in parallel internally isn't something this has
+its own question name in `answers`. In that one measurement (below),
+bundling 40 questions into one call was cheaper and barely slower than
+asking one at a time, since `state` and every criterion's description are
+paid for once in the request, not once per question (whether the endpoint
+also answers them in parallel internally isn't something this has
 measured — TypeSafe's own docs describe it that way, see below). TypeSafe
 calls this **speculative fan-out**: include questions you're not even
 sure are relevant, and let your own code decide afterward which answers
