@@ -47,8 +47,11 @@ name. There is no `agmsg` on PATH yet (#1353), so every command on this page
 names the script.
 
 Adapters ship under `scripts/drivers/ext-tools/<tool>/`. Two are bundled:
-`slack` (post to one channel) and `jev` (ask TypeSafe's Jev decision model,
-through OpenRouter, for a typed decision).
+`slack` (post to one channel) and `jev` (ask TypeSafe's Jev decision model
+for a typed decision, reached either through OpenRouter or through
+TypeSafe's own API — the member's own config picks which, OpenRouter by
+default, so a member configured before the second one existed keeps
+working).
 
 If the member has no configuration yet, `join` refuses and points at the
 adapter's `SETUP.md`. That file is written for the agent at the keyboard: it
@@ -134,6 +137,13 @@ Inbound Slack replies are not carried back into agmsg yet.
 ```
 jev: sonnet / high (choice p=0.96, confidence=0.94, cost $0.000021)
 ```
+
+That line is the OpenRouter form. Reached through TypeSafe's own API the
+answer is the same but the tail is not: that response carries no cost at
+all — neither in its body nor in a header — so the line reports the token
+counts it does carry instead. The figure is not recomputed from published
+prices, because a number we multiplied out ourselves would sit in the same
+place as one the provider measured.
 
 The question travels with the message: a body that is JSON carrying a
 `questions` object is passed through, so the agent composes the decision it
