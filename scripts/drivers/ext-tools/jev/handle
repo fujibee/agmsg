@@ -123,36 +123,41 @@ case "$_JEV_HTTP_CODE" in
   *) fail "jev: unexpected HTTP $_JEV_HTTP_CODE" ;;
 esac
 
-# Combine every answered question into one line: choices joined in the order
-# the endpoint returned them, p/confidence as the product across questions
-# (their joint, independence-assumed probability). Also pulls token counts
-# alongside cost -- OpenRouter's response carries both, TypeSafe's carries
-# only the tokens (no cost key at all), and which one the reply line shows
-# is decided below by provider, not by whether cost happened to be present.
+# Build one row per answered question -- name, choice, its OWN probability,
+# its OWN confidence -- rather than one number for the whole call. An
+# earlier version multiplied every question's probability (and confidence)
+# together into a single joint figure; that is a reasonable reading for a
+# SMALL bundle of tightly related questions (model+effort, below), but for
+# many independent questions in one call (design note §6/USAGE.md's own
+# fan-out guidance) the product of, say, 30 probabilities rounds to 0.00 --
+# not a bug in extracting the numbers, but the wrong number to compute at
+# all: USAGE.md tells the caller to withhold action below confidence
+# 0.5-0.7, and a manufactured 0.00 silently defeats that check for every
+# multi-question call (review finding, #1367 follow-up: hit for real,
+# against production, the day after multi-question calls were documented).
 #
-# Stays a JSON object all the way to the last moment, reading each field
-# with its own `jq -r` call below, rather than flattening these fields into
-# one delimited string first: a `choice` name comes from whatever
-# `questions` the CALLER built and is echoed straight back by the API, so
-# it can contain any byte a chosen delimiter might also use, corrupting
-# which value ends up in which variable (review finding, #1364, round 2).
-# jq's own JSON decoder draws each value's boundary here instead, so there
-# is no delimiter for that data to collide with. (Line-safety -- keeping a
-# `choice` name from breaking the ONE-LINE reply via an embedded newline --
-# is a separate concern from this, and is _jev_one_line's job below, not
-# this step's.)
+# Stays a JSON object all the way to the last moment, reading each row
+# (and each row's own fields) with jq, rather than flattening into one
+# delimited string first: a `choice` name comes from whatever `questions`
+# the CALLER built and is echoed straight back by the API, so it can
+# contain any byte a chosen delimiter might also use, corrupting which
+# value ends up where (review finding, #1364, round 2). `jq -c '.rows[]'`
+# emits one COMPLETE, self-escaped JSON object per line -- jq's own
+# compact encoding never puts a raw newline inside one value, so reading
+# it one line at a time is safe without needing a delimiter of our own.
 result_json="$(jq -c '
   (.answers // {}) as $a
   | ($a | keys_unsorted) as $ks
   | if ($a | type) != "object" or ($ks | length) == 0 then empty else
-      ( [$ks[] | $a[.].choice] ) as $choices
-      | ( [$ks[] | ($a[.].probabilities[$a[.].choice] // null)] ) as $probs
-      | ( [$ks[] | ($a[.].confidence // null)] ) as $confs
-      | if ($choices | any(. == null)) or ($probs | any(. == null)) or ($confs | any(. == null)) then empty else
+      ( [$ks[] as $k | {
+          name: $k,
+          choice: $a[$k].choice,
+          p: ($a[$k].probabilities[$a[$k].choice] // null),
+          confidence: ($a[$k].confidence // null)
+        }] ) as $rows
+      | if ($rows | any(.choice == null or .p == null or .confidence == null)) then empty else
           {
-            choices: ($choices | join(" / ")),
-            p: ($probs | reduce .[] as $x (1; . * $x)),
-            confidence: ($confs | reduce .[] as $x (1; . * $x)),
+            rows: $rows,
             cost: (.usage.cost // null),
             input_tokens: (.usage.input_tokens // null),
             output_tokens: (.usage.output_tokens // null)
@@ -164,19 +169,50 @@ rm -f "$out_file"
 
 [ -n "$result_json" ] || fail "jev: unexpected response shape"
 
-choices="$(jq -r '.choices' <<<"$result_json")"
-p_val="$(jq -r '.p' <<<"$result_json")"
-c_val="$(jq -r '.confidence' <<<"$result_json")"
+row_count="$(jq -r '.rows | length' <<<"$result_json")"
 cost_val="$(jq -r '.cost // empty' <<<"$result_json")"
 in_tokens="$(jq -r '.input_tokens // empty' <<<"$result_json")"
 out_tokens="$(jq -r '.output_tokens // empty' <<<"$result_json")"
-if [ "$provider" = "typesafe" ]; then
-  [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
-  printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, tokens %s in / %s out)' \
-    "$choices" "$p_val" "$c_val" "$in_tokens" "$out_tokens"
+
+# Exactly one question: same rendering as always (a joint figure over one
+# term IS that term, so this is not a special case mathematically -- it is
+# spelled out anyway so "the one-question reply never changes" is
+# something this script visibly does, not an emergent property to trust).
+if [ "$row_count" -eq 1 ]; then
+  choices="$(jq -r '.rows[0].choice' <<<"$result_json")"
+  p_val="$(jq -r '.rows[0].p' <<<"$result_json")"
+  c_val="$(jq -r '.rows[0].confidence' <<<"$result_json")"
+  if [ "$provider" = "typesafe" ]; then
+    [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
+    printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, tokens %s in / %s out)' \
+      "$choices" "$p_val" "$c_val" "$in_tokens" "$out_tokens"
+  else
+    [ -n "$cost_val" ] || fail "jev: unexpected response shape"
+    printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)' \
+      "$choices" "$p_val" "$c_val" "$cost_val"
+  fi
 else
-  [ -n "$cost_val" ] || fail "jev: unexpected response shape"
-  printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)' \
-    "$choices" "$p_val" "$c_val" "$cost_val"
+  # Two or more: each question's own name=choice (p=.., confidence=..),
+  # addressable by NAME (the sender's own `questions` key) rather than by
+  # position -- position silently breaks the moment the endpoint (or a
+  # future request) reorders answers; a name cannot.
+  segments=()
+  while IFS= read -r row; do
+    seg_name="$(jq -r '.name' <<<"$row")"
+    seg_choice="$(jq -r '.choice' <<<"$row")"
+    seg_p="$(jq -r '.p' <<<"$row")"
+    seg_c="$(jq -r '.confidence' <<<"$row")"
+    printf -v seg '%s=%s (p=%.2f, confidence=%.2f)' "$seg_name" "$seg_choice" "$seg_p" "$seg_c"
+    segments+=("$seg")
+  done < <(jq -c '.rows[]' <<<"$result_json")
+  joined="$(printf '%s / ' "${segments[@]}")"
+  joined="${joined% / }"
+  if [ "$provider" = "typesafe" ]; then
+    [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
+    printf -v reply_line 'jev: %s (tokens %s in / %s out)' "$joined" "$in_tokens" "$out_tokens"
+  else
+    [ -n "$cost_val" ] || fail "jev: unexpected response shape"
+    printf -v reply_line 'jev: %s (cost $%.6f)' "$joined" "$cost_val"
+  fi
 fi
 printf '%s\n' "$(_jev_one_line "$reply_line")"

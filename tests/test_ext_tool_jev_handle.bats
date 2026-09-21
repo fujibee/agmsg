@@ -74,13 +74,17 @@ _start_mock_openrouter() {
   case "$output" in
     *$'\n'*) echo "handle printed more than one line: $output" >&2; return 1 ;;
   esac
-  # p and confidence are the product across both of the mock fixture's own
-  # fixed answers (0.80 * 0.80 = 0.64, 0.90 * 0.70 = 0.63) -- the mock's
-  # response never actually depends on what questions were asked, only the
-  # REQUEST assertions below prove those were sent correctly. cost is the
-  # call's own usage.cost, rounded to 6 places. The label is always "jev"
-  # now -- there is no more named/bundled question type to label it with.
-  [ "$output" = "jev: sonnet / high (choice p=0.64, confidence=0.63, cost \$0.000019)" ]
+  # Two questions (model, effort) -- each carries its OWN p/confidence from
+  # the mock fixture's fixed answers, addressable by name, not one number
+  # multiplied across both (review finding, #1367 follow-up: multiplying
+  # rounds to 0.00 once there are enough questions, silently defeating
+  # USAGE.md's own "don't act below 0.5-0.7 confidence" guidance). The
+  # mock's response never actually depends on what questions were asked,
+  # only the REQUEST assertions below prove those were sent correctly.
+  # cost is the call's own usage.cost, rounded to 6 places. The label is
+  # always "jev" now -- there is no more named/bundled question type to
+  # label it with.
+  [ "$output" = "jev: model=sonnet (p=0.80, confidence=0.90) / effort=high (p=0.80, confidence=0.70) (cost \$0.000019)" ]
 
   wait_for_file_contains "$request_log" '"path"'
   [ "$(jq -r '.path' "$request_log")" = "/api/alpha/decisions" ]
@@ -114,7 +118,7 @@ _start_mock_openrouter() {
   case "$output" in
     *$'\n'*) echo "[typesafe] more than one line: $output" >&2; return 1 ;;
   esac
-  [ "$output" = "jev: sonnet / high (choice p=0.64, confidence=0.63, tokens 441 in / 85 out)" ]
+  [ "$output" = "jev: model=sonnet (p=0.80, confidence=0.90) / effort=high (p=0.80, confidence=0.70) (tokens 441 in / 85 out)" ]
   refute grep -qF 'cost' <<<"$output"
   wait_for_file_contains "$typesafe_log" '"path"'
   [ "$(jq -r '.path' "$typesafe_log")" = "/v1/systemone" ]
@@ -170,7 +174,14 @@ _start_mock_openrouter() {
   case "$output" in
     *$'\n'*) echo "[weird choice] more than one line: $output" >&2; return 1 ;;
   esac
-  printf '%s\n' "$output" | grep -qF 'p=0.64, confidence=0.63, cost $0.000019'
+  # $output holds the ESCAPED form (_jev_one_line turns a real newline/CR
+  # into the two-character \n / \r, not a raw byte) -- build the same
+  # escaped text here to check against, rather than the raw $weird_choice.
+  local escaped_choice="${weird_choice//$'\r'/\\r}"
+  escaped_choice="${escaped_choice//$'\n'/\\n}"
+  printf '%s\n' "$output" | grep -qF "model=${escaped_choice} (p=0.80, confidence=0.90)"
+  printf '%s\n' "$output" | grep -qF 'effort=high (p=0.80, confidence=0.70)'
+  printf '%s\n' "$output" | grep -qF 'cost $0.000019'
 
   # --- contrast: a hostile ~/.curlrc must be ignored (review finding, #1339) ---
   # Without curl's -q as its FIRST argument, curl reads this user's curlrc,

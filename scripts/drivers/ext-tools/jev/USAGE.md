@@ -83,7 +83,17 @@ in a single call too, per the fan-out note above.
 }
 ```
 
-The reply is one line: `jev: sonnet / high (choice p=0.72, confidence=0.61, cost $0.000016)`
+The reply is one line. With more than one question (like the example
+above), each comes back addressable by its own question name, with its
+OWN probability and confidence — not one number averaged or multiplied
+across all of them:
+
+`jev: model=sonnet (p=0.72, confidence=0.61) / effort=high (p=0.85, confidence=0.79) (cost $0.000016)`
+
+With exactly one question, the reply keeps the older, simpler shape (no
+name prefix, since there's nothing to disambiguate):
+
+`jev: sonnet (choice p=0.72, confidence=0.61, cost $0.000016)`
 
 This member may be connected through OpenRouter or TypeSafe's own native
 API (a setup-time choice, invisible to what you send — the request/reply
@@ -96,9 +106,11 @@ self-calculated dollar estimate standing in for one it never measured.
 
 Refusal is always one fixed line: no key configured, an invalid key, rate
 limiting, a network failure, an unexpected response shape, or a body not
-shaped as above. Separately: if confidence is below 0.5–0.7, do not act on
-the answer automatically — hand the decision to a human or an ordinary
-model instead.
+shaped as above. Separately: check confidence PER QUESTION, not once for
+the whole reply — with several questions in one call, each one's own
+confidence can differ. If a given question's confidence is below 0.5–0.7,
+do not act on that answer automatically — hand that one decision to a
+human or an ordinary model instead.
 
 ## Tips for asking well
 
