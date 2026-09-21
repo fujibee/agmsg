@@ -26,6 +26,12 @@ AGENTS_DIR="$HOME/.agents"
 # helpers; safe to source.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/type-registry.sh"
+# type-registry.sh no longer computes $AGMSG_RENDERABLE_SKILL_TYPES at source
+# time (it is also sourced from resolve-project.sh, on a hot path that never
+# needs this list -- #631); install.sh runs once per invocation, so loading
+# it eagerly here, right after sourcing, costs nothing and keeps every read
+# below unchanged.
+agmsg_load_renderable_skill_types
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/skill-render.sh"
 

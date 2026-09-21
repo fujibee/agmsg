@@ -201,6 +201,7 @@ agmsg_renderable_types() {
   (
     # shellcheck disable=SC1091
     source "$root/scripts/lib/type-registry.sh"
+    agmsg_load_renderable_skill_types
     printf '%s\n' $AGMSG_RENDERABLE_SKILL_TYPES
   )
 }
