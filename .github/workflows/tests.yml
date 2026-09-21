@@ -611,18 +611,28 @@ jobs:
   # is covered by the `bats` job above). This catches silent rot in jsonl as the
   # contract evolves. Not a required check yet (promote once stable). duckdb is an
   # opt-in accelerator, absent on the runner, so the jq path is exercised here.
+  #
+  # ubuntu only (#1304): this used to also run on macos-latest, justified by a
+  # comment claiming the jsonl driver "shells out to jq/sed/sort/cksum/paste,
+  # whose behaviour differs between GNU (Linux) and BSD (macOS)". Checked
+  # before removing it, per #1304's own instruction to verify rather than
+  # assume: `git log -S` on scripts/drivers/storage/jsonl.sh finds zero
+  # commits ever adding or removing cksum or paste -- neither one has ever
+  # been in this file, on any commit, since it was introduced (#207, the
+  # same PR that added this comment). What the driver actually shells out to
+  # is awk/date/grep/head/mktemp/sed/tr/wc, every call in a portable POSIX
+  # form with no GNU- or BSD-only flag (mktemp is always given an explicit
+  # "$path.XXXXXX" template, the one form that behaves the same on both);
+  # jq's own behavior does not depend on the host OS either. Ran the full
+  # suite locally against this driver on real macOS (34/34 green) to
+  # confirm empirically, not just from reading the code. The comment's
+  # claim does not hold for the code as it actually is.
   storage-jsonl:
-    name: storage contract (jsonl, ${{ matrix.os }})
+    name: storage contract (jsonl)
     needs: changes
     if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      # Both userlands — the jsonl driver shells out to jq/sed/sort/cksum/paste,
-      # whose behaviour differs between GNU (Linux) and BSD (macOS).
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -630,8 +640,8 @@ jobs:
         if: needs.changes.outputs.contracts_needed == 'false'
         run: echo "Diff does not touch anything the jsonl storage contract reads; skipping."
 
-      - name: Ensure jq + sqlite3 (Linux)
-        if: runner.os == 'Linux' && needs.changes.outputs.contracts_needed != 'false'
+      - name: Ensure jq + sqlite3
+        if: needs.changes.outputs.contracts_needed != 'false'
         run: |
           jq --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
           sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
