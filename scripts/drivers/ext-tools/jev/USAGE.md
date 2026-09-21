@@ -3,9 +3,28 @@
 ## What it does
 
 Does not write prose, plans, or explanations. It answers one or more typed
-questions about a `state` you give it, each with a probability and a
-confidence — a decision aid, not a chat partner. One call is fast (0.2–0.3s)
-and cheap (about $0.00002 per call). No memory across calls, no side effects.
+questions about a `state`, each with a probability and a confidence — a
+decision aid, not a chat partner. No memory across calls, no side effects.
+
+**If you have more than one decision to make, ask them all in one call.**
+Every question in `questions` is answered in parallel and comes back keyed
+by its own question name in `answers` — bundling is cheaper and barely
+slower than asking one at a time, since `state` and every criterion's
+description are paid for once, not once per question. TypeSafe calls this
+**speculative fan-out**: include questions you're not even sure are
+relevant, and let your own code decide afterward which answers to use
+(<https://docs.typesafe.ai/patterns/fan-out.md>).
+
+Measured once (2026-09-21, via OpenRouter) — not a guaranteed number:
+
+| questions in one call | latency | cost |
+|---|---|---|
+| 1 | 0.333s | $0.000021 |
+| 40 | 0.461s | $0.000460 |
+| 40, sent one at a time instead | ~12s | ~$0.00084 |
+
+40 is the most anyone has actually sent — not a known ceiling. Don't assume
+a much larger batch behaves the same; this wasn't tried.
 
 ## What to send
 
@@ -13,6 +32,10 @@ Body must be JSON with `state` and `questions`. Anything else — plain
 text, JSON without a `questions` key — is refused. `criteria` is an
 OBJECT (choice → description), never an array (an array is rejected
 outright: `expected record, received array`).
+
+The example below bundles two related questions (which model, how much
+effort) into one call — the same shape works for many unrelated questions
+in a single call too, per the fan-out note above.
 
 ```json
 {
