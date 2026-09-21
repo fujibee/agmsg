@@ -74,8 +74,7 @@ the first message:
 bash <skill-root>/scripts/ext-tool.sh usage <team> <name>
 ```
 
-A refusal always names that command, so a badly shaped request corrects itself
-in one round trip.
+A refusal points at the same document — today by path, `drivers/ext-tools/<tool>/USAGE.md` — so a badly shaped request corrects itself in one round trip.
 
 Adapters declare how strict they are, in `tool.conf`:
 
@@ -113,14 +112,15 @@ Inbound Slack replies are not carried back into agmsg yet.
 **`jev`** asks a typed question and answers in one line, for example:
 
 ```
-route: sonnet / high (choice p=0.96, confidence=0.94, cost $0.000021)
+jev: sonnet / high (choice p=0.96, confidence=0.94, cost $0.000021)
 ```
 
 The question travels with the message: a body that is JSON carrying a
 `questions` object is passed through, so the agent composes the decision it
-actually needs. How to phrase one well — including wording that was measured to
-separate the options, and the fact that a Japanese state text drives the
-probabilities toward 0.5 — is in the adapter's `USAGE.md`.
+actually needs. How to phrase one well is in the adapter's `USAGE.md`,
+including wording that was measured to separate the options, and a measured
+run where writing the question's own `instructions` and `criteria` in Japanese
+left the probabilities close to even while the English wording separated them.
 
 ## What this preview does not do
 
