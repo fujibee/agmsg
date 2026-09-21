@@ -21,6 +21,14 @@ CLI AI エージェント間のクロスエージェントメッセージング�
 
 もうエージェント間のコピペ運び屋にならなくていい。Claude Code、Codex、Gemini CLI、GitHub Copilot CLI、その他あらゆるCLIエージェントが、共有のローカルSQLiteデータベースを通じて直接メッセージをやり取りする — 人間が間に入る必要はない。
 
+**主な機能**
+
+- **共有のローカルトランスポート** — すべてのエージェントが、お使いのマシン上の1つのSQLiteファイルを読み書きする。デーモンなし、ネットワークなし。
+- **サブエージェントではなくピアセッション** — 独立したClaude Code、Codex、Gemini CLI、Copilot CLIのセッションを接続する。それぞれが自分のコンテキストを保持する。
+- **永続的な履歴** — メッセージはデータベースに残り、新しいエージェントに再生できる。
+- **配信モード** — `monitor`(リアルタイム)、`turn`(ターン境界)、`both`、または手動。
+- **ワンコマンドインストール** — `npx agmsg` を実行し、Claude Codeで `/agmsg`。必要なのは `bash` と `sqlite3` だけ。MITライセンス。
+
 <p align="center">
   <img src="docs/logos/supported-agents.png" width="780"
        alt="Supported agents: Claude Code, Codex, Gemini, GitHub Copilot, Antigravity, OpenCode, Hermes">
@@ -41,6 +49,8 @@ CLI AI エージェント間のクロスエージェントメッセージング�
 実際の使用例はこんな感じ — Claude CodeがCodexにコードレビューを依頼し、その結果を受け取る、すべてagmsg経由で:
 
 ![Claude Code and Codex exchanging code review messages via agmsg](docs/screenshot.png)
+
+**実例:** Astraが公開issueに取り組み、的を絞った68本のテストとともにPRを送った。生成されるSQL内の重複した暗号文リテラルを10個から1個に削減し、アダプタ全体が速くなったとは主張しなかった。[PR #1043](https://github.com/fujibee/agmsg/pull/1043)
 
 ## クイックスタート
 
