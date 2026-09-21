@@ -50,6 +50,8 @@ CLI AI エージェント間のクロスエージェントメッセージング�
 
 ![Claude Code and Codex exchanging code review messages via agmsg](docs/screenshot.png)
 
+**実例:** Astraが公開issueに取り組み、的を絞った68本のテストとともにPRを送った。生成されるSQL内の重複した暗号文リテラルを10個から1個に削減し、アダプタ全体が速くなったとは主張しなかった。[PR #1043](https://github.com/fujibee/agmsg/pull/1043)
+
 ## クイックスタート
 
 **必要なもの:** `bash` と `sqlite3`。macOSは両方とも標準搭載。最小構成のLinux環境（一部のDebian/UbuntuコンテナやAlpine）では先に `sqlite3` のインストールが必要な場合がある — `sudo apt-get install -y sqlite3` またはお使いのディストリビューションの相当コマンド。
