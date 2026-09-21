@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.4.0] - 2026-09-21
 
 ### Added
+- Add TypeSafe as a second provider alongside OpenRouter (#1364)
 - Accept only the strict JSON-with-questions shape, and document how to ask (#1358)
 - Jev adapter — route a task to a model and effort (#1339)
 - Show ext-tool members as ext-tool (<tool>) without error-looking cells (#1337)
@@ -16,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reprocess quarantine rows a newer parser can now understand (#1323)
 
 ### Fixed
+- Report each question's own confidence, not one joint figure (#1369)
 - Skip pane placement for ext-tool members (#1340)
 - Forward setup args and read the secret from the clipboard (#1335)
 - Bound the scoped reprocess pending-count walk (#1332)
@@ -34,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 - Preview page — what it is, what it does not do yet, where invocation goes (#1355)
+- Jev, ext-tool README: state that handle is not a direct entry point (#1368)
+- Promote batching multiple questions into one call in USAGE.md (#1367)
+- Fix tool.conf comments that still named only OpenRouter (#1365)
 - Add USAGE.md for the sending seat, declare request=loose (#1356)
 - Point the three stale source comments at #983 (#989)
 - Document the terminal axis and the terminal driver interface (#1357)
