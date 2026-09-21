@@ -15,8 +15,7 @@ setup() {
   printf 'key_file=%s\n' "$KEY_FILE" > "$CONFIG_PATH"
 
   # The one accepted shape: JSON with state + questions, built by the
-  # calling agent itself (request=strict, tool.conf -- no bundled question
-  # catalog, see USAGE.md).
+  # calling agent itself -- no bundled question catalog, see USAGE.md.
   local body
   body="$(jq -cn '{
     state: "Pick a color.",
@@ -92,6 +91,87 @@ _start_mock_openrouter() {
   [ "$(jq -r '.body.questions.color.criteria.red' "$request_log")" = "warm" ]
   [ "$(jq -r '.body.questions.color.criteria.blue' "$request_log")" = "cool" ]
 
+  # --- provider=typesafe: hits TypeSafe's own URL/model, reports tokens
+  # instead of cost (maintainer decision, 2026-09-21 -- TypeSafe's real
+  # response carries no cost figure at all, measured directly against
+  # production, so this is never shown as if it were one) ---
+  local typesafe_log="$TEST_SKILL_DIR/jev-request-typesafe.json"
+  _start_mock_openrouter MOCK_OPENROUTER_REQUEST_LOG="$typesafe_log" MOCK_OPENROUTER_NO_COST=1
+  local typesafe_config typesafe_input default_body
+  typesafe_config="$TEST_SKILL_DIR/ext-tools-jev-member-typesafe.conf"
+  {
+    printf 'key_file=%s\n' "$KEY_FILE"
+    printf 'provider=typesafe\n'
+  } > "$typesafe_config"
+  default_body="$(jq -r '.body' <<<"$INPUT")"
+  typesafe_input="$(jq -cn --arg cp "$typesafe_config" --arg body "$default_body" '{
+    team: "ops", from: "alice", to: "jev-bot", body: $body,
+    message_id: "m", config_path: $cp
+  }')"
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$typesafe_input"
+  [ "$status" -eq 0 ]
+  case "$output" in
+    *$'\n'*) echo "[typesafe] more than one line: $output" >&2; return 1 ;;
+  esac
+  [ "$output" = "jev: sonnet / high (choice p=0.64, confidence=0.63, tokens 441 in / 85 out)" ]
+  refute grep -qF 'cost' <<<"$output"
+  wait_for_file_contains "$typesafe_log" '"path"'
+  [ "$(jq -r '.path' "$typesafe_log")" = "/v1/systemone" ]
+  [ "$(jq -r '.body.model' "$typesafe_log")" = "jev-latest" ]
+
+  # --- failure: an unrecognized provider is refused BEFORE any URL is
+  # built or key sent -- both handle and setup test validate this (review
+  # finding, #1364: setup test originally read provider without checking
+  # it, so a typo would silently fall through to openrouter's URL/model
+  # and send that member's real key there instead).
+  local bad_provider_config bad_provider_input
+  bad_provider_config="$TEST_SKILL_DIR/ext-tools-jev-member-badprovider.conf"
+  {
+    printf 'key_file=%s\n' "$KEY_FILE"
+    printf 'provider=bogus\n'
+  } > "$bad_provider_config"
+  bad_provider_input="$(jq -cn --arg cp "$bad_provider_config" --arg body "$default_body" '{
+    team: "ops", from: "alice", to: "jev-bot", body: $body,
+    message_id: "m", config_path: $cp
+  }')"
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$bad_provider_input"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *$'\n'*) echo "[bad provider] more than one line: $output" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$output" | grep -qF "unknown provider"
+
+  local bad_provider_test_log="$TEST_SKILL_DIR/jev-request-badprovider-test.json"
+  _start_mock_openrouter MOCK_OPENROUTER_REQUEST_LOG="$bad_provider_test_log"
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/setup" test "$bad_provider_config"
+  [ "$status" -ne 0 ]
+  jq -e '.ok == false and (.error | contains("unknown provider"))' <<<"$output" >/dev/null
+  [ ! -e "$bad_provider_test_log" ]
+
+  # --- contrast: a choice name is whatever the CALLER put in `questions`
+  # and is echoed straight back by the API -- handle never validates its
+  # content -- so a successful reply must stay exactly one line, and its
+  # other values must stay correct, NO MATTER what that name contains.
+  # One adversarial name mixing every control character rounds 2-4 each
+  # found a fresh way to break, rather than one test per character (review
+  # finding, #1364, rounds 2-4): U+001F (could shift p/confidence/cost/
+  # tokens if response parsing used it as an internal delimiter -- round
+  # 2), a newline and a CR (could turn the ONE-LINE reply into several --
+  # round 3, the actual property to hold; see _jev_one_line in _lib.sh,
+  # the single choke point both this line and fail()'s route through).
+  local weird_choice=$'sonnet\x1ffake-injected-field\nwith a newline\rand a CR'
+  _start_mock_openrouter MOCK_OPENROUTER_CHOICE="$weird_choice"
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -eq 0 ]
+  case "$output" in
+    *$'\n'*) echo "[weird choice] more than one line: $output" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$output" | grep -qF 'p=0.64, confidence=0.63, cost $0.000019'
+
   # --- contrast: a hostile ~/.curlrc must be ignored (review finding, #1339) ---
   # Without curl's -q as its FIRST argument, curl reads this user's curlrc,
   # and a curlrc enabling verbose/trace can print the Authorization header
@@ -126,8 +206,7 @@ _start_mock_openrouter() {
   # --- failure: plain text (or any JSON without a "questions" key) is
   # refused, naming USAGE.md -- the bundled question-type mechanism this
   # used to fall back to (--question, tool.conf's default_question,
-  # examples/) is gone; there is exactly one accepted shape now
-  # (request=strict, tool.conf) ---
+  # examples/) is gone; there is exactly one accepted shape now ---
   local plain_input
   plain_input="$(jq -cn --arg cp "$CONFIG_PATH" '{
     team: "ops", from: "alice", to: "jev-bot",
