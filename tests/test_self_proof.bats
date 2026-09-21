@@ -545,7 +545,14 @@ w1:pX	$PANE_PID"
 @test "an owner whose process is gone is undetermined, not a proof about it (#1152)" {
   # A lock outlives the process that wrote it. Parsing a pid out of the file says
   # the file holds a number, not that the number is still this session.
-  sleep 60 >/dev/null 2>&1 3>&- & local dead=$!
+  local dead spawn_status
+  set +e
+  sleep 60 >/dev/null 2>&1 3>&- & dead=$!
+  spawn_status=$?
+  set -e
+  if [ "$spawn_status" -ne 0 ] || [ -z "$dead" ]; then
+    skip "could not start the dead-pid fixture (status $spawn_status)"
+  fi
   # `|| true` on BOTH calls, not just wait's: bats runs test bodies under
   # errexit by default, and kill returns non-zero (ESRCH) if $dead has
   # already exited on its own by the time this runs. Left bare, that aborts
