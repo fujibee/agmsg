@@ -78,30 +78,23 @@ bash <skill-root>/scripts/ext-tool.sh usage <team> <name>
 
 A refusal points at the same document — today by path, `drivers/ext-tools/<tool>/USAGE.md` — so a badly shaped request corrects itself in one round trip.
 
-### Two separate axes
+### What varies, and what does not
 
-**How the request is shaped** is declared by the adapter in `tool.conf`:
+What varies per tool is what the adapter accepts and whether it answers at all.
+`jev` takes only a body that is already the call — JSON carrying a `questions`
+object — and refuses anything else, because interpreting a request would cost
+more than the call itself. `slack` takes whatever body it is given and posts
+it, and stays silent. Each adapter's `USAGE.md` states which it is; nothing in
+the framework declares it.
 
-- `request=strict` — the body must already be the call. The adapter does not
-  interpret; it refuses and points at `USAGE.md`. `jev` is strict, because
-  being fast and cheap is the point, and interpreting would spend more than the
-  call itself.
-- `request=loose` — a plainly worded request is acceptable, and the adapter may
-  map it onto the real call. `slack` is loose.
-
-**When the answer arrives** is not a per-tool choice at all — the framework
-fixes it, in two halves:
+What does not vary is the timing, in two halves:
 
 - **The adapter call itself is synchronous, always.** The dispatcher runs the
   adapter, waits for it to finish inside `tool.conf`'s timeout, and turns its
-  stdout into the reply. `jev` and `slack` are alike here: one message in, one
-  process, one result. Nothing is queued or backgrounded inside the adapter.
+  stdout into the reply. Nothing is queued or backgrounded inside the adapter.
 - **The sender's receipt of that answer is asynchronous, always.** The reply is
   an ordinary message, so it reaches the sender later and wakes its seat for a
   turn. There is no call that hands the answer back inside the same command.
-
-What varies per tool is only the request shape above, and whether a reply is
-produced at all: `jev` answers, `slack` posts and stays silent.
 
 The gap worth naming is the second half. A tool that answers in 0.2–0.3s for
 about $0.00002 is fast enough to wait for in line, and paying a whole turn to
