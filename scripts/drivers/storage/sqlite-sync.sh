@@ -584,6 +584,14 @@ _sqlite_sync_project_legacy() {
   local team="$1" db tl done_marker max_id
   db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
 
+  # Called from every storage_sync_prepare_push (one push-sync setup call per
+  # cycle), so this done_marker read and the projection INSERT further below
+  # are two separate round trips -- concurrent callers can both read the
+  # marker unset. Safe anyway: the INSERT is `INSERT ... SELECT ... WHERE NOT
+  # EXISTS(...)`, one atomic statement that re-checks existence itself, so
+  # both callers converge on the same rows rather than duplicating them. Keep
+  # that INSERT...SELECT...WHERE NOT EXISTS shape if this is ever rewritten --
+  # a plain unconditional INSERT here would reintroduce the race for real.
   done_marker=$(agmsg_sqlite "$db" "SELECT value FROM storage_metadata
     WHERE key='legacy_push_projected_v1';" 2>/dev/null | tr -d '\r')
   [ -z "$done_marker" ] || return 0
