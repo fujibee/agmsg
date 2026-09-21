@@ -125,7 +125,23 @@
 
   run grep -F 'if [ "$ACTION" = "closed" ]; then' "$workflow"
   [ "$status" -eq 0 ]
-  run bash -c "grep -A14 'if \[ \"\$ACTION\" = \"closed\" \]; then' '$workflow' | grep -c 'GITHUB_OUTPUT'"
+  run bash -c "grep -A25 'if \[ \"\$ACTION\" = \"closed\" \]; then' '$workflow' | grep -c 'GITHUB_OUTPUT'"
   [ "$status" -eq 0 ]
   [ "$output" -eq 5 ]
+
+  # Every heavy job must skip at the JOB level on a closed event, not merely
+  # skip its own steps -- a job-level `if:` that still evaluates true lets
+  # the matrix expand and each leg claim a runner for a no-op checkout, which
+  # defeats the point of freeing macOS slots on close (review finding). Pins
+  # both that the guarded form is present the expected number of times AND
+  # that the old, unguarded form is gone everywhere -- a partial fix (some
+  # jobs updated, one missed) would otherwise still pass a "present somewhere"
+  # check.
+  run bash -c "grep -c 'if: \${{ !cancelled() && github.event.action != .closed. }}' '$workflow'"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 8 ]
+  # grep -c exits 1 on a zero count, which is the expected/wanted outcome
+  # here, so only $output (not $status) is asserted on this one.
+  run bash -c "grep -c 'if: \${{ !cancelled() }}\$' '$workflow'"
+  [ "$output" -eq 0 ]
 }

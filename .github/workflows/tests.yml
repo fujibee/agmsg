@@ -207,10 +207,17 @@ jobs:
             # This run's only job is to exist in this PR's concurrency group
             # (`pr-<number>`) so cancel-in-progress cancels whatever was still
             # running for this PR when it closed/merged (#1304, see the
-            # concurrency block's own comment for why that's safe). Nothing
-            # downstream needs a verdict from a PR that has already closed,
-            # so every heavy job below is skipped the same way a docs-only
-            # diff skips them.
+            # concurrency block's own comment for why that's safe). Every
+            # heavy job below carries its own `github.event.action != 'closed'`
+            # job-level `if:`, so on this event they are skipped ENTIRELY (no
+            # runner claimed at all) rather than merely skipping their steps
+            # the way a docs-only diff does -- a docs-only diff still needs
+            # each required job to start and report green, but a closed PR
+            # does not, so there is nothing here for these outputs to gate
+            # once that job-level condition already stopped the job. They are
+            # still set to their safe values below only as a defensive
+            # fallback, in case a future job reads them without also adding
+            # its own closed check.
             echo "PR closed (merge or close, head may already be gone) — skipping the suite; this run exists only to cancel its own PR's prior in-flight run."
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
             echo "app_changed=false" >> "$GITHUB_OUTPUT"
@@ -317,7 +324,12 @@ jobs:
     # Run even if `changes` somehow failed/was skipped — fail open to the full
     # suite rather than leaving this REQUIRED check unreported (which would
     # block the PR). When changes failed, docs_only is empty → heavy steps run.
-    if: ${{ !cancelled() }}
+    # The one exception is action == 'closed' (#1304, see the concurrency
+    # block above): that run's own PR is already resolved, nothing needs a
+    # required-check verdict from it, so this and every other heavy job below
+    # skip at the JOB level (not just their steps) rather than each still
+    # claiming a runner to run a no-op checkout+skip.
+    if: ${{ !cancelled() && github.event.action != 'closed' }}
     runs-on: ${{ matrix.os }}
     # NOT "a timeout is a genuine hang" (#848): a cancellation here is a wall-
     # clock cap being reached, and a shard that is still passing tests right up
@@ -524,7 +536,7 @@ jobs:
   bats:
     name: bats
     needs: [changes, bats-shard]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event.action != 'closed' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -585,7 +597,7 @@ jobs:
   age-v1-contract:
     name: age-v1 contract
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event.action != 'closed' }}
     runs-on: ubuntu-latest
     # Was 10, sized for the vectors and one filtered test. This job now runs
     # every age-gated test -- about a hundred, across two files -- on top of a
@@ -659,7 +671,7 @@ jobs:
   storage-jsonl:
     name: storage contract (jsonl, ${{ matrix.os }})
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event.action != 'closed' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -716,7 +728,7 @@ jobs:
   bats-windows:
     name: bats (windows-latest, ${{ matrix.leg }})
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event.action != 'closed' }}
     runs-on: windows-latest
     # Bound the job so an unexpected hang can't pin a runner. The focused leg is
     # fast and green today; this is just a safety net.
@@ -925,7 +937,7 @@ jobs:
   app-check:
     name: app typecheck
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event.action != 'closed' }}
     # macOS: Tauri's crates (wry etc.) compile against system frameworks that
     # are already on the runner — ubuntu would need the webkit2gtk/gtk dev
     # stack installed first. Also matches the release build environment.
@@ -991,7 +1003,7 @@ jobs:
   server-check:
     name: remote server
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event.action != 'closed' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -1131,7 +1143,7 @@ jobs:
   app-test-windows:
     name: app test (windows-latest)
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event.action != 'closed' }}
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
