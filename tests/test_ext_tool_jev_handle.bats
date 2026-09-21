@@ -15,8 +15,7 @@ setup() {
   printf 'key_file=%s\n' "$KEY_FILE" > "$CONFIG_PATH"
 
   # The one accepted shape: JSON with state + questions, built by the
-  # calling agent itself (request=strict, tool.conf -- no bundled question
-  # catalog, see USAGE.md).
+  # calling agent itself -- no bundled question catalog, see USAGE.md.
   local body
   body="$(jq -cn '{
     state: "Pick a color.",
@@ -126,8 +125,7 @@ _start_mock_openrouter() {
   # --- failure: plain text (or any JSON without a "questions" key) is
   # refused, naming USAGE.md -- the bundled question-type mechanism this
   # used to fall back to (--question, tool.conf's default_question,
-  # examples/) is gone; there is exactly one accepted shape now
-  # (request=strict, tool.conf) ---
+  # examples/) is gone; there is exactly one accepted shape now ---
   local plain_input
   plain_input="$(jq -cn --arg cp "$CONFIG_PATH" '{
     team: "ops", from: "alice", to: "jev-bot",

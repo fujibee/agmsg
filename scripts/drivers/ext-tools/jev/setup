@@ -87,8 +87,8 @@ cmd_test() {
   key="$_JEV_KEY"
 
   # A minimal, self-contained question -- there is no bundled example
-  # question file to read anymore (request=strict, tool.conf); this is
-  # only exercised here, as a connectivity check, never by handle.
+  # question file to read anymore; this is only exercised here, as a
+  # connectivity check, never by handle.
   questions_json='{"size":{"type":"choice","instructions":"Pick the size of this change.","criteria":{"small":"a one-line, fully specified edit","large":"work spanning multiple files or decisions"}}}'
   state_json='"agmsg jev setup test: fix a one-line typo in a README."'
   request_json="$(jq -cn --arg model "typesafe/jev-1.13" --argjson state "$state_json" \

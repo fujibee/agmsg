@@ -16,10 +16,10 @@ set -euo pipefail
 # ONE accepted shape for `body` (maintainer decision, 2026-09-20 -- this
 # replaces the earlier two-shape design, which also accepted plain text
 # against a bundled example question type; that bundled-type mechanism
-# (--question, tool.conf's default_question, examples/) is gone. See
-# tool.conf's request=strict): JSON carrying "state" and "questions",
-# {"state": ..., "questions": {...}} -- passed to OpenRouter close to
-# unchanged, the calling agent builds its own questions. Only checked here:
+# (--question, tool.conf's default_question, examples/) is gone): JSON
+# carrying "state" and "questions", {"state": ..., "questions": {...}} --
+# passed to OpenRouter close to unchanged, the calling agent builds its
+# own questions. Only checked here:
 # body parses as JSON, and .questions is an object. The internal shape of
 # each question is NOT validated; a malformed body still produces a
 # one-line Jev-side error (from OpenRouter's own 400, not from this script
