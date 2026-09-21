@@ -56,7 +56,14 @@ setup_test_env() {
 
   # Copy all scripts to isolated skill dir. Recursive so nested helper dirs
   # (scripts/lib/) come along without enumerating files.
-  cp -R "$BATS_TEST_DIRNAME"/../scripts/. "$TEST_SKILL_DIR/scripts/"
+  # macOS runner で cp -R が fixture のコピー中に停止した実測がある。
+  # macOS 標準の ditto はディレクトリ内容の複製を専用に扱うため、そこで
+  # だけ使う。Linux/Windows では従来の cp 経路を維持する。
+  if [ "$(uname -s 2>/dev/null || true)" = Darwin ] && command -v ditto >/dev/null 2>&1; then
+    ditto "$BATS_TEST_DIRNAME"/../scripts/. "$TEST_SKILL_DIR/scripts/"
+  else
+    cp -R "$BATS_TEST_DIRNAME"/../scripts/. "$TEST_SKILL_DIR/scripts/"
+  fi
   chmod +x "$TEST_SKILL_DIR/scripts/"*.sh
   chmod +x "$TEST_SKILL_DIR/scripts/"*.js 2>/dev/null || true
 
