@@ -330,6 +330,17 @@ gone_pid() {
   ps() { return 1; }
   run _agmsg_pid_alive_local "$gone"
   [ "$status" -eq 0 ] || { echo "MSYS: a failed ps -l -p was read as proof of death"; false; }
+
+  # 4) (review) ps prints a RECOGNIZABLE header -- so the pid_col_seen check
+  # alone is satisfied -- and THEN fails (truncated mid-read, same shape a
+  # real MSYS ps cut off partway could produce), never reaching a data row
+  # for this pid. A header appearing is not the same claim as the
+  # observation COMPLETING (rc=0) -- the POSIX snapshot above requires
+  # exactly that already; this path must require it too, or a partial read
+  # that merely LOOKS like "ran fine, found nothing" reads as death.
+  ps() { printf 'S UID PID PPID TIME CMD\n'; return 1; }
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "MSYS: a ps that printed a header then failed was read as proof of death"; false; }
 }
 
 @test "pid_alive: a failing ps under set -e does not terminate a non-conditional caller (#954)" {

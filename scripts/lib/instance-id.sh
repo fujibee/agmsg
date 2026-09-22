@@ -233,12 +233,20 @@ PROBE
 # 0-means-alive convention, which is why the caller above branches on it
 # explicitly instead of returning it straight through.
 _agmsg_pid_gone_msys() {
-  local pid="$1" out pid_col_seen match_stat
-  out="$(ps -l -p "$pid" 2>/dev/null)"
+  local pid="$1" out rc=0 pid_col_seen match_stat
+  # `|| rc=$?` keeps the assignment out of set -e's reach (same reason the
+  # POSIX snapshot below does this) -- but MORE importantly here, this
+  # catches what review found: a header can print and THEN ps fails or is
+  # cut off, and without checking rc that partial, truncated observation
+  # read exactly like a complete one that legitimately found no row. #954's
+  # rule is "observation COMPLETED (rc=0)", not "a header appeared" -- the
+  # POSIX path already enforces the former explicitly; this path silently
+  # dropped it by never capturing ps's own exit status at all.
+  out="$(ps -l -p "$pid" 2>/dev/null)" || rc=$?
   pid_col_seen="$(printf '%s\n' "$out" | awk '
     NR==1 { for (i = 1; i <= NF; i++) if ($i == "PID") { print "1"; exit } }
   ')"
-  [ "$pid_col_seen" = "1" ] || return 1   # ps failed/unrecognized -> unknown -> not gone
+  [ "$rc" -eq 0 ] && [ "$pid_col_seen" = "1" ] || return 1   # ps failed, was cut off, or answered unrecognized -> unknown -> not gone
   match_stat="$(printf '%s\n' "$out" | awk -v want="$pid" '
     NR==1 {
       for (i = 1; i <= NF; i++) { if ($i == "PID") pc = i; if ($i == "S") sc = i }
