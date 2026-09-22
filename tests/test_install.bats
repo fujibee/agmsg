@@ -44,7 +44,13 @@ _agmsg_watch_pid() {
 }
 
 # Signal <pid> and CONFIRM it is actually gone before returning, rather than
-# firing the signal and trusting `wait`.
+# firing a signal and moving on. Escalates TERM -> KILL -> loud failure,
+# confirming after EACH signal rather than assuming the stronger one landed
+# just because it was sent (review finding, #1390: the first version of this
+# fired kill -9 as a fallback but never re-checked afterward, reintroducing
+# exactly the "signalled, not confirmed" gap this function exists to close
+# -- a KILL can still race a not-yet-scheduled process, or, in a sandboxed
+# CI runner, be denied outright).
 #
 # `wait "$pid"` is not proof of anything for a pid like these: each was
 # started via nohup from a subshell (`run env ... bash .../remote.sh sync
@@ -53,20 +59,26 @@ _agmsg_watch_pid() {
 # `wait` fails immediately ("not a child of this shell") rather than
 # blocking. `wait "$pid" 2>/dev/null || true` swallowed that error silently
 # and returned instantly regardless of whether the process had actually
-# exited. The TERM trap the fake engines set can take longer than that gap
-# to actually run, so a caller trusting `wait` moved on before the process
-# was really gone (#1387: this is how a leftover of these tests was found
-# still running days later -- not a missed kill, an unconfirmed one).
-# wait_for_pid_exit actually polls; SIGKILL is the fallback if the trap
-# never runs at all.
+# exited (#1387: this is how a leftover of these tests was found still
+# running days later -- not a missed kill, an unconfirmed one).
+# wait_for_pid_exit actually polls, up to its own 10s ceiling.
+#
+# Returns 1 (and prints the pid) if the process is STILL alive after both
+# signals and both confirmations -- teardown propagates that as a failed
+# test rather than silently leaving an engine behind for a human to find
+# days later, which is what happened before this existed.
 _agmsg_kill_confirmed() {
   local pid="$1"
   kill "$pid" 2>/dev/null
-  wait_for_pid_exit "$pid" || kill -9 "$pid" 2>/dev/null
+  wait_for_pid_exit "$pid" && return 0
+  kill -9 "$pid" 2>/dev/null
+  wait_for_pid_exit "$pid" && return 0
+  echo "_agmsg_kill_confirmed: pid $pid still alive after TERM and KILL" >&2
+  return 1
 }
 
 teardown() {
-  local pid expect cmd
+  local pid expect cmd rc=0
   while IFS=$'\t' read -r pid expect; do
     [ -n "$pid" ] || continue
     # A pid recorded from a pidfile only says where the number came from, not
@@ -81,10 +93,11 @@ teardown() {
     kill -0 "$pid" 2>/dev/null || continue
     cmd="$(/bin/ps -p "$pid" -o args= 2>/dev/null)"
     case "$cmd" in
-      *"$expect"*) _agmsg_kill_confirmed "$pid" ;;
+      *"$expect"*) _agmsg_kill_confirmed "$pid" || rc=1 ;;
     esac
   done <<< "$WATCHED_PIDS"
   rm -rf "$FAKE_HOME"
+  return "$rc"
 }
 
 @test "install: fresh install ships scripts/lib and the commands actually run" {
