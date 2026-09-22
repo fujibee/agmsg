@@ -109,10 +109,10 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # both call sites below) only ever adds or overwrites -- it never deletes a
 # file whose release predecessor is gone, so every prior release that
 # dropped a file needed its own one-off `rm -f` here (rearm.sh in 1.3.2/
-# #1321, the Antigravity resume helper's move). #1378 found this is a real
-# hazard, not a cosmetic one: 18 files from pre-1.4.0 releases were still
-# sitting in a live install, and one of them (rearm.sh) was run and behaved
-# like the retired tool it used to be, not like the current procedure.
+# #1321, the Antigravity resume helper's move). This is a real hazard, not a
+# cosmetic one: 18 files from pre-1.4.0 releases were still sitting in a
+# live install, and one of them (rearm.sh) was run and behaved like the
+# retired tool it used to be, not like the current procedure.
 #
 # Scoped to exclude scripts/drivers/ entirely: that tree is the driver
 # discovery surface (ADR 0002, scripts/lib/driver-registry.sh), and #1249
@@ -122,20 +122,51 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # not deleted). Nothing else under scripts/ has a comparable drop-in
 # contract, so everywhere else is safe to prune against the release's own
 # file list.
+#
+# NUL-delimited throughout, not newline-delimited: a `find | while read`
+# split on newline lets an embedded newline in a filename forge a second,
+# fake "line". A file at scripts/<name-containing-LF>../ext-tools/<team>/
+# <name>.secret would, read back newline-split, produce a second entry that
+# reads as the literal relative path ../ext-tools/<team>/<name>.secret --
+# which resolves OUTSIDE scripts/, onto a real secret this function must
+# never touch. Same shape as the jev adapter's curl-config parser fixed the
+# same night: a line-delimited format fed a value from outside the format
+# can smuggle an extra line. `-print0` / `read -d ''` keeps one filesystem
+# entry as one value, embedded newline and all, so it can never be split.
+# NUL-safety on its own is still only a delimiter fix, not a check on what
+# the delimiter protects, so `$rel` is also validated immediately before the
+# `rm -f` that acts on it -- not merely before the membership compare -- and
+# anything with `..`, a leading `/`, or an embedded newline is left alone
+# and named on stderr instead of being deleted.
 agmsg_prune_removed_scripts() {
   local src="$1" dest="$2"
-  local manifest rel
-  manifest="$(mktemp)"
-  (cd "$src" && find . -type f) | sed 's|^\./||' > "$manifest"
-  while IFS= read -r rel; do
+  local entry rel s found
+  local -a shipped=()
+  while IFS= read -r -d '' entry; do
+    shipped+=("${entry#./}")
+  done < <(cd "$src" && find . -type f -print0)
+  while IFS= read -r -d '' entry; do
+    rel="${entry#./}"
     [ -n "$rel" ] || continue
     case "$rel" in drivers/*) continue ;; esac
-    if ! grep -qxF "$rel" "$manifest"; then
+    case "$rel" in
+      *$'\n'*|..|../*|*/../*|*/..|/*)
+        echo "    ! not removing -- suspicious scripts/ entry: $rel" >&2
+        continue
+        ;;
+    esac
+    found=""
+    for s in "${shipped[@]}"; do
+      if [ "$s" = "$rel" ]; then
+        found=1
+        break
+      fi
+    done
+    if [ -z "$found" ]; then
       echo "    - removing (no longer shipped): scripts/$rel"
       rm -f "$dest/$rel"
     fi
-  done < <((cd "$dest" && find . -type f) | sed 's|^\./||')
-  rm -f "$manifest"
+  done < <(cd "$dest" && find . -type f -print0)
 }
 
 # Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by

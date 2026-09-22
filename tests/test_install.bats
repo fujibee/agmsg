@@ -1284,19 +1284,19 @@ EOF
   [ -f "$current" ]
 }
 
-# #1378: install.sh's `cp -R` never removed a file dropped by an earlier
-# release, so a retired tool (most recently rearm.sh, run by hand after it
-# had already been deleted from the shipped release) stayed live in the
-# install and behaved like the thing it used to be. Same fixture, two
-# outcomes in the same run: a stale file under scripts/ with no current
-# equivalent must go, AND a stale file that collides by exact relative path
-# with a file this release DOES ship (the real shape of the bug -- e.g.
-# init-db.sh's pre-1.3.0 top-level location versus its current
-# scripts/internal/ home) must not take the current file down with it. A
-# removal test without a real keep-set in the same run would pass a
-# delete-everything implementation just as well, so this also plants marker
-# files in the three locations #1378 named as never-touch (ext-tools config
-# + secret, db/, teams/) and confirms --update leaves them byte-for-byte.
+# install.sh's `cp -R` never removed a file dropped by an earlier release,
+# so a retired tool (most recently rearm.sh, run by hand after it had
+# already been deleted from the shipped release) stayed live in the install
+# and behaved like the thing it used to be. Same fixture, two outcomes in
+# the same run: a stale file under scripts/ with no current equivalent must
+# go, AND a stale file that collides by exact relative path with a file this
+# release DOES ship (the real shape of the bug -- e.g. init-db.sh's
+# pre-1.3.0 top-level location versus its current scripts/internal/ home)
+# must not take the current file down with it. A removal test without a
+# real keep-set in the same run would pass a delete-everything
+# implementation just as well, so this also plants marker files in the
+# three locations named as never-touch (ext-tools config + secret, db/,
+# teams/) and confirms --update leaves them byte-for-byte.
 @test "install --update: prunes scripts/ files this release no longer ships, without touching user data" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
 
@@ -1329,6 +1329,35 @@ EOF
   [ "$(cat "$SK/ext-tools/myteam/mytool.secret")" = "tool secret" ]
   [ "$(cat "$SK/teams/myteam/config.json")" = "team config" ]
   [ "$(cat "$SK/db/agmsg.sqlite3")" = "sqlite bytes, not really" ]
+}
+
+# co1 review of the prune above: reading `find`'s output newline-delimited
+# lets an embedded newline in a filename forge a fake second line. A real
+# filesystem entry at scripts/<LF>.. /ext-tools/myteam/mytool.secret (one
+# directory whose name is the four bytes `x`, LF, `.`, `.`) prints, one
+# real find record, as two apparent lines: `x` and
+# `../ext-tools/myteam/mytool.secret` -- the second of which is a real
+# relative path that escapes scripts/ and lands on the actual protected
+# secret. This attempts that escape for real, not just asserts the file
+# survives: the crafted entry is built to resolve to the exact real secret
+# path if the split (or the missing pre-delete validation) regresses.
+@test "install --update: a newline-embedded scripts/ filename cannot escape to delete ext-tools/<team>/<name>.secret" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  mkdir -p "$SK/ext-tools/myteam"
+  printf '%s\n' 'real secret, must survive' > "$SK/ext-tools/myteam/mytool.secret"
+
+  local evil_name
+  evil_name=$'x\n..'
+  mkdir -p "$SK/scripts/$evil_name/ext-tools/myteam"
+  printf '%s\n' 'decoy -- reading this back would mean the escape worked' \
+    > "$SK/scripts/$evil_name/ext-tools/myteam/mytool.secret"
+
+  HOME="$FAKE_HOME" run bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  [ -f "$SK/ext-tools/myteam/mytool.secret" ]
+  [ "$(cat "$SK/ext-tools/myteam/mytool.secret")" = "real secret, must survive" ]
 }
 
 @test "uninstall: removes the Antigravity skill" {
