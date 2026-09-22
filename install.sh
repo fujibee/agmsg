@@ -105,14 +105,53 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # It is shared by fresh install, --update selection, and --update re-detection;
 # adding a templated type therefore cannot silently fall back to the wrong flavor.
 
-# Remove any file under $dest that $src no longer ships. `cp -R` (used at
-# both call sites below) only ever adds or overwrites -- it never deletes a
-# file whose release predecessor is gone, so every prior release that
-# dropped a file needed its own one-off `rm -f` here (rearm.sh in 1.3.2/
-# #1321, the Antigravity resume helper's move). This is a real hazard, not a
-# cosmetic one: 18 files from pre-1.4.0 releases were still sitting in a
-# live install, and one of them (rearm.sh) was run and behaved like the
-# retired tool it used to be, not like the current procedure.
+# A relative scripts/ path is safe to use as a trash destination component
+# only if it cannot resolve outside the tree it was found in: no embedded
+# newline (see the NUL-delimited note below), no ".." component anywhere,
+# no leading "/". Shared by both functions below -- the same escape a mv
+# target is exposed to is the one an rm target was.
+agmsg_scripts_rel_is_safe() {
+  case "$1" in
+    ""|*$'\n'*|..|../*|*/../*|*/..|/*) return 1 ;;
+  esac
+  return 0
+}
+
+# Before `cp -R` (used at both call sites below) overwrites $dest with
+# $src, back up any file it is about to change -- i.e. present in both
+# trees with DIFFERENT content -- into $trash_root, keyed by its relative
+# path. `cp -R` only ever adds or overwrites; a file a user (or their
+# agent) had edited in place under scripts/ was overwritten with no record
+# of what was there before, silently, mid-upgrade, with nobody reading the
+# output. This runs against the WHOLE src tree, drivers/ included: backing
+# a file up never removes it or changes whether it loads, so #1249's
+# contract (a user-added driver directory must survive an update) is
+# untouched by this step -- that contract is only about the prune below.
+# Identical content is skipped so an ordinary upgrade doesn't fill .trash/
+# with copies of files nobody touched.
+agmsg_stage_overwrite_backups() {
+  local src="$1" dest="$2" trash_root="$3"
+  local entry rel
+  while IFS= read -r -d '' entry; do
+    rel="${entry#./}"
+    agmsg_scripts_rel_is_safe "$rel" || continue
+    [ -f "$dest/$rel" ] || continue
+    cmp -s "$src/$rel" "$dest/$rel" && continue
+    mkdir -p "$(dirname "$trash_root/$rel")"
+    cp -p "$dest/$rel" "$trash_root/$rel"
+    AGMSG_TRASH_COUNT=$((AGMSG_TRASH_COUNT + 1))
+  done < <(cd "$src" && find . -type f -print0)
+}
+
+# After `cp -R`: move any file under $dest that $src does not ship into
+# $trash_root instead of deleting it, so a wrong "not shipped anymore"
+# judgment (this function's own past mistake, or a future one) is a mv, not
+# data loss. Every prior release that dropped a file needed its own
+# one-off `rm -f` here (rearm.sh in 1.3.2/#1321, the Antigravity resume
+# helper's move) -- that hand-maintenance is what this generalizes. One of
+# those leftovers (rearm.sh) was run by hand after it had already been
+# removed from the release and behaved like the retired tool it used to
+# be, not like the current procedure.
 #
 # Scoped to exclude scripts/drivers/ entirely: that tree is the driver
 # discovery surface (ADR 0002, scripts/lib/driver-registry.sh), and #1249
@@ -120,8 +159,9 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # there must survive an update even though it ships nothing this release
 # knows about (it stays untrusted/unloaded until the user opts in, but it is
 # not deleted). Nothing else under scripts/ has a comparable drop-in
-# contract, so everywhere else is safe to prune against the release's own
-# file list.
+# contract, so everywhere else is safe to move against the release's own
+# file list. (The backup step above still covers drivers/'s own shipped
+# files -- only the "not shipped anymore" judgment excludes that tree.)
 #
 # NUL-delimited throughout, not newline-delimited: a `find | while read`
 # split on newline lets an embedded newline in a filename forge a second,
@@ -135,11 +175,11 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # entry as one value, embedded newline and all, so it can never be split.
 # NUL-safety on its own is still only a delimiter fix, not a check on what
 # the delimiter protects, so `$rel` is also validated immediately before the
-# `rm -f` that acts on it -- not merely before the membership compare -- and
+# `mv` that acts on it -- not merely before the membership compare -- and
 # anything with `..`, a leading `/`, or an embedded newline is left alone
-# and named on stderr instead of being deleted.
+# and named on stderr instead of being moved.
 agmsg_prune_removed_scripts() {
-  local src="$1" dest="$2"
+  local src="$1" dest="$2" trash_root="$3"
   local entry rel s found
   local -a shipped=()
   while IFS= read -r -d '' entry; do
@@ -149,12 +189,10 @@ agmsg_prune_removed_scripts() {
     rel="${entry#./}"
     [ -n "$rel" ] || continue
     case "$rel" in drivers/*) continue ;; esac
-    case "$rel" in
-      *$'\n'*|..|../*|*/../*|*/..|/*)
-        echo "    ! not removing -- suspicious scripts/ entry: $rel" >&2
-        continue
-        ;;
-    esac
+    if ! agmsg_scripts_rel_is_safe "$rel"; then
+      echo "    ! not moving -- suspicious scripts/ entry: $rel" >&2
+      continue
+    fi
     found=""
     for s in "${shipped[@]}"; do
       if [ "$s" = "$rel" ]; then
@@ -163,10 +201,23 @@ agmsg_prune_removed_scripts() {
       fi
     done
     if [ -z "$found" ]; then
-      echo "    - removing (no longer shipped): scripts/$rel"
-      rm -f "$dest/$rel"
+      echo "    - moving to .trash/ (no longer shipped): scripts/$rel"
+      mkdir -p "$(dirname "$trash_root/$rel")"
+      mv "$dest/$rel" "$trash_root/$rel"
+      AGMSG_TRASH_COUNT=$((AGMSG_TRASH_COUNT + 1))
     fi
   done < <(cd "$dest" && find . -type f -print0)
+}
+
+# One generation of .trash/ -- cleared at the start of the update/install
+# that is about to populate it, so a mistake from two upgrades ago cannot
+# still be sitting there when this one is trying to be readable. $trash_root
+# must be a sibling of scripts/ (as both call sites pass it), never inside
+# it -- a .trash/ nested under scripts/ would have its OWN prior contents
+# picked up by the very next prune as "not shipped".
+agmsg_reset_trash() {
+  rm -rf "$1"
+  mkdir -p "$1"
 }
 
 # Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by
@@ -500,11 +551,16 @@ $_agmsg_running_team"
     *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
   esac
   agmsg_render_skill "$TPL_TYPE" "$SKILL_NAME" "$SKILL_DIR/SKILL.md"
+  TRASH_DIR="$SKILL_DIR/.trash"
+  AGMSG_TRASH_COUNT=0
+  agmsg_reset_trash "$TRASH_DIR"
+  agmsg_stage_overwrite_backups "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
   # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/)
   # ship without enumerating files. The agent-type manifests and per-type runtimes
   # live under scripts/drivers/types/ now, so this single copy carries them too.
   cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
-  agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts"
+  agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
+  echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
   # #1249: drivers/terminals/{herdr,plain,tmux}/SKILL.md used to name each
   # driver's own doc file, and a directory-scanning skill loader (e.g.
   # codex's) treated it as a standalone skill missing YAML frontmatter,
@@ -746,11 +802,16 @@ case " $AGMSG_RENDERABLE_SKILL_TYPES " in
   *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
 esac
 agmsg_render_skill "$TPL_TYPE" "$CMD_NAME" "$SKILL_DIR/SKILL.md"
+TRASH_DIR="$SKILL_DIR/.trash"
+AGMSG_TRASH_COUNT=0
+agmsg_reset_trash "$TRASH_DIR"
+agmsg_stage_overwrite_backups "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
 # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/) ship
 # without enumerating files. The agent-type manifests and per-type runtimes live
 # under scripts/drivers/types/ now, so this single copy carries them too.
 cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
-agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts"
+agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
+echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
 # Ship the external-plugin drop-in dir (just its README) so the location exists
 # post-install. A plain cp — not cp -R --delete — preserves any plugins the user
 # dropped in and their db/trusted-plugins opt-ins.
