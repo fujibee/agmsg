@@ -138,8 +138,36 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 # claimed set to match exactly -- neither a code the function cannot return,
 # nor a missing one it does.
 
-# Every distinct `return N` inside <fn>()'s own body in <ops.sh>, N != 0.
+# Every distinct `return N` inside <fn>()'s own body in <ops.sh>, N != 0,
+# plus those of any `_*_impl` helper the body delegates to (herdr's
+# terminal_peek hands its whole read to _herdr_peek_impl, which it shares
+# with terminal_peek_styled).
 _returns_in_function() {   # <ops.sh path> <function name>
+  local impl
+  {
+    _returns_in_function_body "$1" "$2"
+    for impl in $(_impls_called_by "$1" "$2"); do
+      _returns_in_function_body "$1" "$impl"
+    done
+  } | sort -un
+}
+
+# Names of `_*_impl` functions called inside <fn>()'s own body.
+_impls_called_by() {   # <ops.sh path> <function name>
+  awk -v fn="$2" '
+    $0 ~ "^" fn "\\(\\) \\{" { infn=1; next }
+    infn && /^}/ { infn=0 }
+    infn {
+      line=$0
+      while (match(line, /_[a-z_]+_impl/)) {
+        print substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART+RLENGTH)
+      }
+    }
+  ' "$1" | sort -u
+}
+
+_returns_in_function_body() {   # <ops.sh path> <function name>
   awk -v fn="$2" '
     $0 ~ "^" fn "\\(\\) \\{" { infn=1; next }
     infn && /^}/ { infn=0 }

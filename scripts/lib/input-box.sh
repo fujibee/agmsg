@@ -68,6 +68,12 @@ _AGMSG_ESC="$(printf '\033')"
 # never collide with real pane content.
 _AGMSG_DIM_START="$(printf '\001')"
 _AGMSG_DIM_END="$(printf '\002')"
+# U+00A0 NO-BREAK SPACE as raw UTF-8 bytes. Claude Code puts one between its
+# marker and the box text. Whether `[[:space:]]` matches it depends on the
+# caller's locale (measured on CI: under the C/POSIX locale it does not, so a
+# box holding only dim candidate text read as a real draft), so the dim walk
+# below turns it into an ASCII space first.
+_AGMSG_NBSP="$(printf '\302\240')"
 
 # Strip every `ESC[...m` (SGR) sequence from <text> outright (unlike the
 # Braille stripper below, which replaces — this one is used only to derive a
@@ -284,6 +290,7 @@ agmsg_input_box_is_real_draft() {
     -e "s/${_AGMSG_ESC}\[2m/${_AGMSG_DIM_START}/g" \
     -e "s/${_AGMSG_ESC}\[(0|22)?m/${_AGMSG_DIM_END}/g" \
     -e "s/${_AGMSG_ESC}\[[0-9;]*m//g" \
+    -e "s/${_AGMSG_NBSP}/ /g" \
     <<<"$nobraille")"
 
   local s="$sentinel" dim=0 saw_nondim=0 chunk seg_to_start seg_to_end
