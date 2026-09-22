@@ -46,12 +46,17 @@
 # shellcheck disable=SC1091
 . "$SKILL_DIR/scripts/lib/instance-id.sh"
 
-# agmsg_type_get: _agmsg_agent_binaries below reads each type's detect_proc from
-# its manifest rather than a hardcoded list. type-registry.sh resolves its own
-# lib dir and pulls in driver-registry.sh; neither sources this file, so there is
-# no cycle. Double-source guarded.
-# shellcheck disable=SC1091
-. "$SKILL_DIR/scripts/lib/type-registry.sh"
+# _agmsg_agent_binaries below reads each type's detect_proc from its manifest
+# rather than a hardcoded list, but deliberately does NOT source
+# type-registry.sh here at module scope: this file sits on watch.sh's startup
+# path, and type-registry.sh's own top-level work (every known type scanned,
+# piped through `paste`) is unconditional at source time on a branch/main that
+# predates its #1366 fix -- and unconditional forever for the *built-in* case
+# even after that fix, since sourcing itself still pulls in driver-registry.sh.
+# _agmsg_type_detect_proc below reads a single manifest key directly for the
+# common (built-in type) case, and only falls back to sourcing type-registry.sh
+# -- lazily, guarded, right there -- for a type that isn't built in (an
+# external/plugin type, where the trust-aware lookup is genuinely needed).
 
 _agmsg_run_dir() { printf '%s/run' "$SKILL_DIR"; }
 
@@ -234,6 +239,39 @@ agmsg_find_registered_project_variant() {
   return 1
 }
 
+# Read a single type's detect_proc manifest key, without sourcing
+# type-registry.sh for the common case. Built-in types (drivers/types/<name>/
+# type.conf, always trusted) are read directly here -- same shape
+# type-registry.sh's own agmsg_type_get uses (grep the key line, take the
+# first match, trim/unquote), so behavior matches exactly for every type this
+# is actually tested against. A type not found among the built-ins falls back
+# to the full, trust-aware registry lookup (needed for an external/plugin
+# type, since accepting its detect_proc without a trust check would let an
+# untrusted drop-in claim a process name to attach itself to) -- sourced
+# lazily, right here, only on that fallback path, so a plugin-free install
+# never pays type-registry.sh's own source-time cost at all.
+_agmsg_type_detect_proc() {
+  local type="$1" dir line val
+  [ -n "${SKILL_DIR:-}" ] || return 1
+  dir="$SKILL_DIR/scripts/drivers/types/$type"
+  if [ -f "$dir/type.conf" ]; then
+    line="$( { grep -E '^[[:space:]]*detect_proc[[:space:]]*=' "$dir/type.conf" 2>/dev/null || true; } | head -1)"
+    if [ -n "$line" ]; then
+      val="${line#*=}"
+      val="${val#"${val%%[![:space:]]*}"}"
+      val="${val%"${val##*[![:space:]]}"}"
+      case "$val" in \"*\") val="${val#\"}"; val="${val%\"}" ;; esac
+      printf '%s' "$val"
+      return 0
+    fi
+  fi
+  if ! declare -F agmsg_type_get >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/lib/type-registry.sh"
+  fi
+  agmsg_type_get "$type" detect_proc ""
+}
+
 # Map an agent type to the binary basename(s) its process may carry.
 #
 # Process names that identify an agent of <type>, taken from the type manifest's
@@ -242,7 +280,7 @@ agmsg_find_registered_project_variant() {
 # the matcher below already tries "<bin>-*" for every entry it is given.
 #
 # The case arms are the fallback for a type whose manifest carries no detect_proc
-# (antigravity, copilot, hermes) or when type-registry.sh has not been sourced.
+# (antigravity, copilot, hermes) or whose manifest cannot be found at all.
 # Reaching them used to be routine rather than exceptional: every type without
 # an arm — cursor, grok-build, hermes — matched against "claude codex gemini",
 # so agmsg_pid_is_agent accepted an enclosing Claude Code process as, say, a
@@ -265,13 +303,11 @@ _agmsg_agent_binaries() {
   cache_var="_AGMSG_AGENT_BINS_$(printf '%s' "$type" | tr -c '[:alnum:]' '_')"
   if [ -n "${!cache_var:-}" ]; then printf '%s\n' "${!cache_var}"; return 0; fi
 
-  if declare -F agmsg_type_get >/dev/null 2>&1; then
-    procs="$(agmsg_type_get "$type" detect_proc "" 2>/dev/null || true)"
-    for tok in $procs; do
-      case "$tok" in *'*'*) continue ;; esac
-      out="${out:+$out }$tok"
-    done
-  fi
+  procs="$(_agmsg_type_detect_proc "$type" 2>/dev/null || true)"
+  for tok in $procs; do
+    case "$tok" in *'*'*) continue ;; esac
+    out="${out:+$out }$tok"
+  done
   if [ -z "$out" ]; then
     case "$type" in
       claude-code) out="claude" ;;
