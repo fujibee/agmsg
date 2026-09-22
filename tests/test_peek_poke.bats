@@ -324,8 +324,13 @@ EOF
   peek2="$(sed -n '2p' "$ARGV_LOG")"
   first="$(sed -n '3p' "$ARGV_LOG")"
   second="$(sed -n '4p' "$ARGV_LOG")"
-  [ "$peek1" = 'tmux [capture-pane] [-p] [-t] [%5]' ]
-  [ "$peek2" = 'tmux [capture-pane] [-p] [-t] [%5]' ]
+  # -e, not plain: tmux now offers terminal_peek_styled (#1389), so poke.sh's
+  # own STYLED dispatch (declare -F terminal_peek_styled) picks it for BOTH
+  # snapshots here, the same as it already did for herdr -- tmux pokes get
+  # the #1322 round-2 real-draft protection too, not just the round-1
+  # two-snapshot check this test originally pinned before that existed.
+  [ "$peek1" = 'tmux [capture-pane] [-e] [-p] [-t] [%5]' ]
+  [ "$peek2" = 'tmux [capture-pane] [-e] [-p] [-t] [%5]' ]
   # Burst 1 is the literal text and carries NO Enter — the equality is what
   # goes red if the Enter ever rejoins the text burst (an Enter appended to
   # this line makes the string differ).
