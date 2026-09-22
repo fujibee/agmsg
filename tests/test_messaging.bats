@@ -275,7 +275,13 @@ EOF
 
   run bash "$SCRIPTS/history.sh" testteam
   [ "$status" -eq 0 ]
-  [[ "$output" == *"batch-required"* ]]
+  # The body comes from the ROWS query's own -batch (first site); the ●
+  # (unread) marker comes from the SEPARATE ids=$(...) query a few lines
+  # below in history.sh (second site) -- dropping -batch from THAT query
+  # alone still lets ROWS through untouched, so body-only used to stay
+  # green while every message silently read back as ○ (review finding:
+  # the first version of this test covered only the first site).
+  [[ "$output" == *"● "*"batch-required"* ]]
 }
 
 @test "history: filters by agent" {
