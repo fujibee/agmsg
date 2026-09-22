@@ -330,3 +330,65 @@ agmsg_input_box_normalize() {
   stripped="$(_agmsg_strip_ansi_sgr "$(_agmsg_strip_decorative_braille "$1")")"
   printf '%s' "${stripped%"${stripped##*[![:space:]]}"}"
 }
+
+# agmsg_input_box_draft_text <marker> <boxed:yes|""> <ansi_region>
+# Echoes the PLAIN semantic text of a real draft located by
+# agmsg_input_box_locate — ANSI/braille stripped, and the type's own prompt
+# decoration removed — so the result is what a caller would need to TYPE
+# BACK (via a driver's literal-text send, e.g. herdr's terminal_input_type,
+# #1384) to reproduce the draft, not what the screen shows. Never used to
+# CLASSIFY a box (agmsg_input_box_is_real_draft, above, does that) — only to
+# preserve one that classification already confirmed is real.
+#
+# Decoration removed, both measured live (2026-09-22, real Claude Code and
+# Codex panes, `herdr pane send-text` then `--format text` read back):
+#   - the marker itself, plus the ONE separator character each type draws
+#     between it and the first line of text — Claude Code's is U+00A0
+#     NO-BREAK SPACE (_AGMSG_NBSP above; folded to an ASCII space first, same
+#     reason that fold already exists in this file), Codex's is a plain
+#     ASCII space. Stripped from the FIRST line only, by prefix.
+#   - boxed style only (Claude Code's multi-line drafts): every line AFTER
+#     the first carries a fixed 2-space continuation indent, matching the
+#     marker's own on-screen width. Stripped by prefix, capped at 2, so a
+#     line whose real content happens to start with its own leading spaces
+#     keeps whatever is left over 2. Flat style (Codex) never reaches this:
+#     agmsg_input_box_locate's flat reader (above) only ever returns the one
+#     marker line.
+#
+# ACCEPTED RESIDUAL RISK: a single logical line long enough to SOFT-wrap
+# across more than one screen row (no explicit newline, just terminal
+# width) reads back here as several separate lines — nothing in the
+# rendered screen distinguishes a wrapped continuation from a newline the
+# person actually pressed. Retyping the result would then not reproduce the
+# original byte-for-byte. This is why the restore step that uses this
+# (#1384) compares before/after and reports the saved file on a mismatch
+# instead of trusting the retype — a wrong reconstruction here degrades to
+# "here is your draft, please restore it by hand," never to silent loss.
+agmsg_input_box_draft_text() {
+  local marker="$1" boxed="$2" region="$3"
+  local plain
+  plain="$(_agmsg_strip_ansi_sgr "$(_agmsg_strip_decorative_braille "$region")")"
+  plain="${plain//"$_AGMSG_NBSP"/ }"
+
+  local -a lines=()
+  local line n=0
+  while IFS= read -r line; do
+    lines[n]="$line"
+    n=$((n + 1))
+  done <<<"$plain"
+  [ "$n" -gt 0 ] || return 0
+
+  local first="${lines[0]#"$marker"}"
+  first="${first# }"
+  printf '%s' "$first"
+
+  local i=1 cont
+  while [ "$i" -lt "$n" ]; do
+    cont="${lines[$i]}"
+    if [ "$boxed" = yes ]; then
+      case "$cont" in '  '*) cont="${cont#  }" ;; esac
+    fi
+    printf '\n%s' "$cont"
+    i=$((i + 1))
+  done
+}

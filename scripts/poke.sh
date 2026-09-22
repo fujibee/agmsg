@@ -42,6 +42,7 @@ set -euo pipefail
 # ever type over someone still typing".
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC2034  # used by actas-lock.sh and safe-poke.sh's #1384 draft file, both sourced below
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"          # agmsg_spawn_path
@@ -54,7 +55,7 @@ source "$SCRIPT_DIR/lib/compat.sh"              # required by detect-cli-type.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/detect-cli-type.sh"     # agmsg_detect_cli_type (#1229 plain fallback)
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/input-box.sh"           # agmsg_input_box_locate/is_real_draft/normalize (#1321, #1322)
+source "$SCRIPT_DIR/lib/safe-poke.sh"           # agmsg_safe_poke -- also sources input-box.sh
 
 die() { echo "poke: $*" >&2; exit 1; }
 
@@ -144,152 +145,27 @@ agmsg_terminal_load "$TERMINAL" \
 # driver's exit status (plain's unsupported 13 included), and put a one-line
 # human answer on each side.
 #
-# Input-box check (#1321), immediately before EVERY attempt including
-# retries — never once up front, since the box's own state is exactly what
-# each retry exists to wait out. INPUT_MARKER empty (this type set none in
-# its manifest) skips the check entirely: unconditional single terminal_poke
-# call, the same as before this existed.
+# The input-box safety check (#1321/#1322) and the #1384 herdr
+# save/clear/poke/restore recovery both live in scripts/lib/safe-poke.sh
+# now — the ONE shared implementation self-rename.sh and self-write.sh also
+# route their own self-pokes through (typing into this session's own pane
+# carries the same "someone might already be using it" risk poke.sh already
+# guarded against). Moved there verbatim; poke.sh's own behavior is
+# unchanged from before that move.
 #
-# Also skipped outright for the plain terminal (review): plain has no
-# addressable screen to read at all (terminal_peek always fails there, by
-# contract), so treating that failure as "could not confirm empty" would
-# refuse EVERY plain poke with exit 14 and never reach the existing
-# plain-specific fallback below (an agmsg message, when the caller can
-# resolve one) — a real regression, not a safety win, since plain never had
-# a screen for a draft to corrupt in the first place.
+# INPUT_MARKER empty (this type set none in its manifest, OR the target
+# terminal is plain -- plain has no addressable screen to read at all, so
+# treating that failure as "could not confirm empty" would refuse EVERY
+# plain poke with exit 14 and never reach the plain-specific fallback below)
+# skips the check entirely inside agmsg_safe_poke: one unconditional
+# terminal_poke call, the same as before any of this existed.
 INPUT_MARKER="$(agmsg_type_get "$TYPE" input_prompt_marker)"
 INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
 [ "$TERMINAL" = plain ] && INPUT_MARKER=""
 
-# #1322 round 2: round 1 (compare two snapshots ~1s apart, refuse only if
-# they differ) correctly let Claude Code's candidate text and Codex's
-# placeholder through, but a REAL, STALLED draft (someone typed something
-# and paused) is just as stationary as those, so it also let poke type over
-# a real draft -- measured live, 2026-09-22: a maintainer's stalled draft
-# and a poke's own body landed as one submitted message, no separator.
-#
-# Fix: a real draft's characters are NOT drawn dim; Claude Code's candidate
-# text and Codex's placeholder both ARE (SGR faint, code 2 -- measured live
-# on all three, 2026-09-21/22). _poke_read_input_box below reads styled
-# (ANSI) when the driver offers one and refuses outright on ANY visible
-# non-dim content, before ever reaching the two-snapshot comparison -- see
-# scripts/lib/input-box.sh's own comment for the full reasoning, including
-# why Codex's decorative Braille animation has to be stripped first (it is
-# drawn in a plain color, not dim, so left in place it reads as a real
-# draft and defeats this exactly the way it defeated round 1's plain-text
-# comparison).
-#
-# The two-snapshot check itself is KEPT, not replaced: style classification
-# alone cannot catch someone who starts typing in the window between the
-# two reads -- that is what comparing them still does.
-#
-# The interval is fixed, not a flag: making it configurable would leave
-# "how long is long enough" an open question nobody has actually measured,
-# with the value drifting per caller. 1 second was chosen because ordinary
-# interactive typing — including a Japanese IME updating its pre-conversion
-# buffer per kana — changes the box well under a second between keystrokes,
-# so a 1s window reliably catches an in-progress edit; measured (2026-09-21,
-# read-only) against three real idle panes over a full 8s span (five reads,
-# 2s apart), the STATIONARY case — Claude Code candidate text on two panes,
-# Codex's placeholder (with its own decorative Braille animation, see
-# scripts/lib/input-box.sh) on a third — never changed at all, so 1s carries
-# no false-positive risk against exactly the content this fix exists for.
-AGMSG_POKE_INPUT_BOX_SETTLE_SECONDS=1
-
-# Reads the pane once and classifies its input box, setting the caller's
-# own _POKE_IB_RC / _POKE_IB_SNAPSHOT (plain-statement call, never
-# `x="$(...)"`  -- a command substitution runs in a subshell, and these are
-# side-channel globals, the same reason _slack_read_token's own comment
-# documents in the Slack ext-tool adapter).
-#   _POKE_IB_RC        0 = box confirmed & safe to compare; 14 = a real
-#                       draft (styled read only) or the box's own structure
-#                       could not be confirmed; anything else = a
-#                       driver-level terminal_peek failure, propagate as-is
-#   _POKE_IB_SNAPSHOT  normalized comparison key, meaningful only when
-#                       _POKE_IB_RC = 0
-#
-# <styled> is 1 when the driver offers terminal_peek_styled (checked once,
-# outside this function, via `declare -F`) -- a driver without it only gets
-# round 1's protection (narrower: won't catch a STALLED real draft), never
-# a regression from what 1.4.1 shipped, since that is exactly what shipped.
-_poke_read_input_box() {
-  local styled="$1" screen="" peek_rc=0 region="" region_rc=0
-  if [ "$styled" -eq 1 ]; then
-    # No 2>/dev/null here (unlike before): on failure this is
-    # terminal_peek_styled's own diagnosis, not an "input in progress"
-    # refusal, and it must reach the operator verbatim -- the same message
-    # terminal_poke would have printed for the same underlying cause (#1321
-    # review round 2).
-    screen="$(terminal_peek_styled "$BARE_ID")" || peek_rc=$?
-  else
-    screen="$(terminal_peek "$BARE_ID")" || peek_rc=$?
-  fi
-  if [ "$peek_rc" -ne 0 ]; then
-    _POKE_IB_RC="$peek_rc"
-    return 0
-  fi
-  region="$(agmsg_input_box_locate "$INPUT_MARKER" "$INPUT_BOXED" "$screen")" || region_rc=$?
-  if [ "$region_rc" -ne 0 ]; then
-    # Cannot confirm where the box even is (transient redraw, alternate
-    # screen) -- fails toward refusing, never toward typing (unchanged bias
-    # from #1321).
-    _POKE_IB_RC=14
-    return 0
-  fi
-  if [ "$styled" -eq 1 ] && agmsg_input_box_is_real_draft "$INPUT_MARKER" "$region"; then
-    _POKE_IB_RC=14
-    return 0
-  fi
-  _POKE_IB_RC=0
-  _POKE_IB_SNAPSHOT="$(agmsg_input_box_normalize "$region")"
-}
-
 RC=0
-ATTEMPT=0
-while :; do
-  RC=0
-  if [ -n "$INPUT_MARKER" ]; then
-    STYLED=0
-    declare -F terminal_peek_styled >/dev/null 2>&1 && STYLED=1
-
-    _POKE_IB_RC=0 _POKE_IB_SNAPSHOT=""
-    _poke_read_input_box "$STYLED"
-    if [ "$_POKE_IB_RC" -ne 0 ]; then
-      RC="$_POKE_IB_RC"
-    else
-      SNAP1="$_POKE_IB_SNAPSHOT"
-      sleep "$AGMSG_POKE_INPUT_BOX_SETTLE_SECONDS"
-      _POKE_IB_RC=0 _POKE_IB_SNAPSHOT=""
-      _poke_read_input_box "$STYLED"
-      if [ "$_POKE_IB_RC" -ne 0 ]; then
-        RC="$_POKE_IB_RC"
-      else
-        SNAP2="$_POKE_IB_SNAPSHOT"
-        [ "$SNAP1" = "$SNAP2" ] || RC=14
-      fi
-    fi
-  fi
-  if [ "$RC" -eq 0 ]; then
-    terminal_poke "$BARE_ID" "$TEXT" >/dev/null || RC=$?
-    break
-  fi
-  # Retries exist to wait out someone still actively typing (RC=14) — a
-  # driver-level failure propagated above, or from terminal_poke's own
-  # attempt, would not be fixed by waiting and must not be retried. Each
-  # retry re-runs the full two-snapshot comparison above (its own internal
-  # ~1s wait is separate from, and in addition to, --retry-delay's wait
-  # between attempts).
-  [ "$RC" -eq 14 ] || break
-  [ "$ATTEMPT" -lt "$RETRIES" ] || break
-  ATTEMPT=$((ATTEMPT + 1))
-  if [ "$BACKOFF" = exponential ]; then
-    WAIT=$((RETRY_DELAY * (1 << (ATTEMPT - 1))))
-    [ "$WAIT" -le 60 ] || WAIT=60
-  else
-    WAIT="$RETRY_DELAY"
-  fi
-  sleep "$WAIT"
-done
+agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME" \
+  --retries "$RETRIES" --retry-delay "$RETRY_DELAY" --backoff "$BACKOFF" || RC=$?
 
 if [ "$RC" -eq 14 ]; then
   echo "poke: '$TEAM/$NAME' has a changing input box — refusing to type over it (input in progress)" >&2

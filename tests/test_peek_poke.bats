@@ -116,6 +116,33 @@ _install_fake_herdr_empty_box() {
   export PATH="$FAKEBIN:$PATH"
 }
 
+# #1384 (herdr only): a real, stalled draft with NOBODY focused on the pane
+# -- `pane list` answers focused=false unconditionally (one pane, asked
+# about twice: once before clearing, once right after -- #1384's own two
+# re-reads), and `pane read --format ansi` answers a real, non-dim draft
+# ("hello draft") so `agmsg_input_box_is_real_draft` reads it as real on
+# the very FIRST snapshot -- no second styled read is needed to reach
+# RC=14, the style check alone already trips it.
+_install_fake_herdr_real_draft_unfocused() {
+  local rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
+    printf "  printf '%%s\\\\n' '%s testteam-alice ─' '❯ hello draft' '%s'\n" "$rule" "$rule"
+    printf '  exit 0\n'
+    printf 'fi\n'
+    printf 'if [ "$1" = pane ] && [ "$2" = list ]; then\n'
+    printf '  printf '\''{"result":{"panes":[{"pane_id":"wC:p4","focused":false}]}}\\n'\''\n'
+    printf '  exit 0\n'
+    printf 'fi\n'
+    printf 'exit 0\n'
+  } > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 _install_fake_osascript() {
   cat > "$FAKEBIN/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -349,6 +376,30 @@ EOF
   grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
   # No synthesized keystrokes: submission is agent prompt's own.
   [ "$(grep -ci 'enter' "$ARGV_LOG" || true)" -eq 0 ]
+}
+
+@test "poke: herdr, unfocused real draft -- clears, pokes, then restores the draft, in that order (#1384)" {
+  _install_fake_herdr_real_draft_unfocused
+  _write_record "herdr:wC:p4"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -eq 0 ]
+  _out_has "poked 'testteam/alice' via herdr"
+
+  local clear_line poke_line restore_line
+  clear_line="$(grep -n '^herdr \[agent\] \[send-keys\] \[wC:p4\]' "$ARGV_LOG" | head -1 | cut -d: -f1)"
+  poke_line="$(grep -n '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG" | head -1 | cut -d: -f1)"
+  restore_line="$(grep -n '^herdr \[pane\] \[send-text\] \[wC:p4\] \[hello draft\]$' "$ARGV_LOG" | head -1 | cut -d: -f1)"
+  [ -n "$clear_line" ]
+  [ -n "$poke_line" ]
+  [ -n "$restore_line" ]
+  [ "$clear_line" -lt "$poke_line" ]
+  [ "$poke_line" -lt "$restore_line" ]
+
+  # The draft was saved under run/ with 600, then removed once the restore
+  # verified byte-for-byte against the original -- a removal test without a
+  # keep-set proves nothing, but here the survive/remove question is the
+  # test itself: none should remain after a clean run.
+  [ -z "$(find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' 2>/dev/null)" ]
 }
 
 @test "poke: a plain record is unsupported as a TERMINAL answer, and points at the type's native channel (peek deliberately does not — no CLI read path)" {

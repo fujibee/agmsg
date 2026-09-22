@@ -1036,6 +1036,107 @@ terminal_poke() {
   return 0
 }
 
+# Optional driver capability (#1384, herdr only — tmux has no equivalent
+# signal, per the issue's own scope note). Prints "yes" or "no" and returns 0
+# when herdr's OWN pane list answers definitively; returns 10 with nothing
+# printed when herdr is unreachable, the listing is not valid JSON, or this
+# pane's entry cannot be found in it — never guessed as either yes or no. A
+# caller checks `declare -F terminal_pane_focused` before relying on it,
+# since not every terminal driver offers a focus signal.
+#
+# `herdr pane list`'s own per-pane `focused` field (measured live,
+# 2026-09-22: exactly one pane in the whole fleet reads focused=true at a
+# time, and moving real OS focus with `herdr agent focus` immediately flips
+# which one) is real OS-level input focus, not an agmsg notion of it — #1384
+# uses it to tell "someone is looking at this pane right now" apart from "a
+# draft was left behind and nobody is watching."
+terminal_pane_focused() {   # <id>
+  local id="$1" json esc bare besc val vrc=0
+  command -v herdr >/dev/null 2>&1 || return 10
+  bare="$(_herdr_bare_of "$id")"
+  json="$(_herdr_cli "$id" pane list 2>/dev/null)" || return 10
+  [ -n "$json" ] || return 10
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  local valid
+  valid="$(sqlite3 :memory: "SELECT json_valid('$esc')" 2>/dev/null)" || vrc=$?
+  [ "$vrc" -eq 0 ] && [ "$valid" = 1 ] || return 10
+  besc="$(printf '%s' "$bare" | sed "s/'/''/g")"
+  val="$(sqlite3 :memory: "
+    SELECT json_extract(value,'\$.focused') FROM json_each('$esc','\$.result.panes')
+    WHERE json_extract(value,'\$.pane_id') = '$besc' LIMIT 1" 2>/dev/null)"
+  case "$val" in
+    1) echo yes; return 0 ;;
+    0) echo no; return 0 ;;
+    *) return 10 ;;
+  esac
+}
+
+# Optional driver capability (#1384, herdr only). Best-effort empties a
+# pane's input box via `agent send-keys`, without submitting anything: move
+# the cursor past the end of whatever is there (`down`, repeated — a no-op
+# once the cursor is already on the last line, measured live on both Claude
+# Code and Codex), then repeatedly kill from the cursor to the start of the
+# current line (`ctrl+u`, also a no-op once the box is empty — measured live
+# checking a paste-then-clear round trip leaves nothing behind on either
+# CLI). The repeat count (40 of each) is a fixed safety margin over every
+# draft measured during #1384 (at most 5 lines) — generous for anything a
+# person actually types into a chat box, not a claim that a genuinely
+# larger draft is guaranteed to clear.
+#
+# Prints "ok"/"runtime_error" and returns 0/10/12, same control-op
+# convention as terminal_poke. This does NOT confirm the box actually ended
+# up empty — that needs the TYPE's own marker/boxed knowledge (input-box.sh),
+# which this driver has no part in; the caller re-reads and re-classifies
+# the box afterward the same way it does before any other poke.
+terminal_input_clear() {   # <id>
+  local id="$1" bare body rc=0
+  command -v herdr >/dev/null 2>&1 \
+    || { echo runtime_error; echo "herdr: not on PATH — cannot reach the terminal to clear pane '$id'" >&2; return 10; }
+  bare="$(_herdr_bare_of "$id")"
+  local -a keys=()
+  local i=0
+  while [ "$i" -lt 40 ]; do keys+=(down); i=$((i + 1)); done
+  i=0
+  while [ "$i" -lt 40 ]; do keys+=(ctrl+u); i=$((i + 1)); done
+  body="$(_herdr_cli "$id" agent send-keys "$bare" "${keys[@]}" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo runtime_error
+    [ -n "$body" ] && printf '%s\n' "$body" >&2
+    echo "herdr: could not clear pane '$id' — it may be gone, or have no live agent to receive keys" >&2
+    return 12
+  fi
+  echo ok
+  return 0
+}
+
+# Optional driver capability (#1384, herdr only). Types literal text into a
+# pane's input box WITHOUT submitting — `herdr pane send-text`, a distinct
+# primitive from `agent prompt` above (terminal_poke's own submission
+# mechanism): `agent prompt` "sends text followed by encoded Enter as one
+# ordered submission" (herdr's own skill doc), so it cannot be used to
+# retype a draft that must stay a draft. `pane send-text` has no such Enter
+# ("next: herdr pane run ... sends text and Enter in one call", herdr's own
+# --help for it) — measured live, 2026-09-22: multi-line and Japanese/emoji
+# text both round-trip through it exactly, on both Claude Code and Codex.
+#
+# Prints "ok"/"runtime_error" and returns 0/10/12, same convention as
+# terminal_poke and terminal_input_clear.
+terminal_input_type() {   # <id> <text>
+  local id="$1" text="$2" bare body rc=0
+  command -v herdr >/dev/null 2>&1 \
+    || { echo runtime_error; echo "herdr: not on PATH — cannot reach the terminal to type into pane '$id'" >&2; return 10; }
+  bare="$(_herdr_bare_of "$id")"
+  body="$(_herdr_cli "$id" pane send-text "$bare" "$text" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo runtime_error
+    [ -n "$body" ] && printf '%s\n' "$body" >&2
+    echo "herdr: could not type into pane '$id' — it may be gone" >&2
+    return 12
+  fi
+  echo ok
+  return 0
+}
+
 # Derive herdr's INTERNAL resolvable agent-name key from (team, agent): a
 # COLLISION-RESISTANT 96-bit key (NOT injective — see below).
 #

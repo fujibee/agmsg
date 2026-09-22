@@ -468,7 +468,7 @@ Beyond the common `<axis>_check` / `<axis>_describe` pair (§1.3, spelled
 | `terminal_name <id> <team> <name> [mode]` | control op: label the pane and set the key the terminal itself uses to address the member; idempotent |
 
 Beyond those, the registry (`_AGMSG_TERMINAL_OPTIONAL` in
-`scripts/lib/terminal-registry.sh`) recognizes nine further, optional
+`scripts/lib/terminal-registry.sh`) recognizes twelve further, optional
 functions. A driver may implement any subset; an unimplemented one is
 simply absent from that driver's `ops.sh`.
 
@@ -483,6 +483,9 @@ simply absent from that driver's `ops.sh`.
 | `terminal_pane_process_observe <id>` | print candidate pids for the process(es) running in the pane — tmux prints the single `pane_pid`; herdr prints a deduplicated set (shell pid, foreground process-group id, and each foreground process), since more than one can be live at once — for `self-proof.sh` to cross-check against the owner process's own ancestry walk |
 | `terminal_enumerate_panes` | list every pane this driver can see across every reachable server/session, one line per pane, naming (not dropping) any server it could not read |
 | `terminal_fence <id> [<seat-pid>]` | print an (instance, reuse-sensitive anchor) pair a caller can compare across two reads to tell whether `id` still names the same underlying session — herdr: socket + herdr's own `terminal_id`; tmux: socket + `pane_pid`; plain: emulator + tty/pid/start-time (needs the caller-supplied `<seat-pid>`) — `self-write.sh`'s own verification is the shipped caller |
+| `terminal_pane_focused <id>` | prints `yes`/`no` for whether `id` currently holds real OS-level input focus, or fails (nothing printed) when the driver cannot decide — herdr only (#1384); `scripts/lib/safe-poke.sh`'s abandoned-draft recovery uses it to tell "someone is typing right now" apart from "a draft was left behind and nobody is watching" |
+| `terminal_input_clear <id>` | best-effort empties `id`'s input box without submitting anything — herdr only (#1384); `safe-poke.sh` calls it only after confirming `id` is unfocused, right before typing past an abandoned draft |
+| `terminal_input_type <id> <text>` | types `text` into `id`'s input box WITHOUT submitting (unlike `terminal_poke`) — herdr only (#1384); `safe-poke.sh` uses it both to retype a saved draft after clearing and to put a draft back unchanged when a recovery attempt must abort |
 
 `plain` implements `terminal_capability`; `tmux` and `herdr` do not (their
 manifest ceiling holds uniformly for every instance of theirs). `plain`'s
