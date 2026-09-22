@@ -96,17 +96,30 @@
 # main runs begin cancelling each other -- and a cancelled main run leaves the
 # commit a release ships with no verdict at all (#848). So the main arm is
 # asserted by name, not inferred from the group.
-@test "only main is exempt from cancellation" {
+# #1304: main pushes used to be the one case exempt from cancellation (their
+# own group was a unique run id, so nothing could ever supersede one), on the
+# theory that a release reads a specific main-push run and losing it would
+# leave that commit with no verdict. Checking the actual release path found
+# nothing depends on that: a release always tags main's CURRENT tip right
+# after merging, and neither release.yml nor cut-release.sh look up a
+# tests.yml run at all (release.yml is self-contained and tag-triggered, a
+# different event). Three main-push runs queuing back to back on
+# 2026-09-22, two of them already superseded before their macOS jobs even
+# started, is what made this worth fixing rather than leaving as-is. Pins
+# that main now shares the SAME cancel-on-newer-push behavior every other
+# push branch already had, with no special case left for it.
+@test "main pushes are cancelled by a newer push, the same as any other push branch" {
   local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
 
-  run grep -F "cancel-in-progress: \${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}" "$workflow"
+  run grep -F 'cancel-in-progress: true' "$workflow"
   [ "$status" -eq 0 ]
 
-  # main pushes group by run id, so nothing can ever supersede them.
+  # No more special-cased run-id grouping for main.
   run grep -F "github.ref == 'refs/heads/main' && github.run_id" "$workflow"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
 
-  # Every other push groups by ref, so a later merge supersedes an earlier one.
+  # main and every other push branch (only integration/** in practice) share
+  # the same by-ref group, so a later push supersedes an earlier one on both.
   run grep -F "format('push-{0}', github.ref)" "$workflow"
   [ "$status" -eq 0 ]
 }
