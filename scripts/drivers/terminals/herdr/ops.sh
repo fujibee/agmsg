@@ -813,6 +813,38 @@ terminal_peek() {
     esac
   done
   case "$lines" in ''|*[!0-9]*) lines="" ;; esac
+  _herdr_peek_impl "$id" "$src" "$lines" ""
+}
+
+# Same read as terminal_peek, but with ANSI styling preserved (herdr's
+# `--format ansi`, in place of the default `--format text` terminal_peek
+# implicitly gets). NOT a display-safe read: its stdout carries raw escape
+# sequences, so it exists only for a caller that needs to tell STYLED text
+# (dim/faint) apart from plain text -- poke.sh's real-draft check (#1322
+# round 2), never for anything shown to a human or written to a log. Same
+# args, same exit taxonomy, same argv shape as terminal_peek otherwise (one
+# extra `--format ansi` pair). Optional driver capability: a caller checks
+# `declare -F terminal_peek_styled` before relying on it, since not every
+# terminal driver offers a styled read.
+terminal_peek_styled() {
+  local id="$1"; shift
+  local src=visible lines=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lines) src=recent; lines="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$lines" in ''|*[!0-9]*) lines="" ;; esac
+  _herdr_peek_impl "$id" "$src" "$lines" ansi
+}
+
+# Shared body for terminal_peek / terminal_peek_styled. <format> is "" (herdr
+# defaults to --format text, and this omits the flag entirely so
+# terminal_peek's own argv is byte-identical to before this split existed --
+# tests assert it exactly) or "ansi" (adds --format ansi to the herdr call).
+_herdr_peek_impl() {
+  local id="$1" src="$2" lines="$3" format="$4"
   # peek is a READ op: only the pane CONTENT may reach stdout. herdr writes an error
   # JSON to STDOUT on failure (e.g. {"error":{"code":"pane_not_found",...}}), which the
   # caller would otherwise read as the pane's content — "read" and "could-not-read"
@@ -846,10 +878,16 @@ terminal_peek() {
   # `PermissionDenied (Operation not permitted)` from a sandbox that denies
   # socket operations — never reaches herdr's JSON reply at all, so dropping
   # stderr left nothing to report except a guess.
+  # bash 3.2 (macOS's /bin/bash) treats "${arr[@]}" on an EMPTY array as an
+  # unbound variable under `set -u`; the `+` form is the guard this codebase
+  # uses everywhere else an optional argument list can be empty (see
+  # poke.sh's own "${_REMAINING[@]+...}").
+  local -a _fmt_args=()
+  [ "$format" = ansi ] && _fmt_args=(--format ansi)
   if [ -n "$lines" ]; then
-    stderr_body="$(_herdr_cli "$id" pane read "$(_herdr_bare_of "$id")" --source "$src" --lines "$lines" 2>&1 1>"$tmp")" || rc=$?
+    stderr_body="$(_herdr_cli "$id" pane read "$(_herdr_bare_of "$id")" --source "$src" --lines "$lines" "${_fmt_args[@]+"${_fmt_args[@]}"}" 2>&1 1>"$tmp")" || rc=$?
   else
-    stderr_body="$(_herdr_cli "$id" pane read "$(_herdr_bare_of "$id")" --source "$src" 2>&1 1>"$tmp")" || rc=$?
+    stderr_body="$(_herdr_cli "$id" pane read "$(_herdr_bare_of "$id")" --source "$src" "${_fmt_args[@]+"${_fmt_args[@]}"}" 2>&1 1>"$tmp")" || rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     local stdout_body=""

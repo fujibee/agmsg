@@ -1,31 +1,41 @@
 #!/usr/bin/env bash
-# input-box.sh — read a pane's input box content, for comparing it against
-# itself a moment later (poke.sh's "is someone typing right now" check).
+# input-box.sh — locate a pane's input box and tell a real, stalled draft
+# apart from decorative or placeholder text, for poke.sh's "is it safe to
+# type here" check.
 #
-# poke.sh types into a live pane and submits it. Before this existed, herdr's
-# `agent prompt` (poke's own submission mechanism) had no way to know the
-# caller was about to type over a person's own half-typed draft, and rearm.sh
-# poking every seat at once did exactly that to a live pane once.
+# poke.sh types into a live pane and submits it. Before any of this existed,
+# herdr's `agent prompt` (poke's own submission mechanism) had no way to know
+# the caller was about to type over a person's own half-typed draft, and
+# rearm.sh poking every seat at once did exactly that to a live pane once.
 #
-# This used to try to recognize "empty" by CONTENT (a marker line with
-# nothing after it). That broke on two shapes that are not a person's draft
-# at all, but were read as one: Claude Code's own candidate/suggestion text
-# left sitting in the box, and Codex's "Ask Codex to do anything" placeholder
-# — both real, non-blank characters in the box that a content-pattern check
-# has no way to tell apart from someone's actual half-typed message (#1322).
-# Blocking on EITHER of those, not just a real draft, made poke refuse
-# almost every idle seat once 1.4.0 shipped.
-#
-# The maintainer's call: what this guard must protect against is someone
-# ACTIVELY TYPING, not stale or system-drawn text sitting in the box. That is
-# a question about CHANGE OVER TIME, not content — so this file's job
-# shrank to "hand back a comparable snapshot of the box", and poke.sh takes
-# two of them, ~1s apart (see poke.sh's own comment for why ~1s), and only
-# refuses when they differ. Content-blind on purpose: a snapshot function
-# never has to know what "empty" looks like for a given CLI, only where its
-# input box IS -- the recognizing-the-box part (marker, boxed structure) is
-# unavoidably type-specific and stays below; JUDGING what's in it no longer
-# is.
+# This has gone through two designs already (#1321, #1322) and this is the
+# third:
+#   1. (#1321) Judge by CONTENT: a marker line with anything after it is a
+#      draft, refuse. Broke on Claude Code's own candidate/suggestion text
+#      and Codex's "Ask Codex to do anything" placeholder — both non-blank,
+#      so content alone can't tell them from a real draft — and poke refused
+#      almost every idle seat once 1.4.0 shipped.
+#   2. (#1322 round 1) Judge by CHANGE: take two snapshots ~1s apart, refuse
+#      only if they differ. Content-blind, so it correctly let candidate
+#      text and placeholders through — but a REAL, stalled draft (someone
+#      typed something and paused) is JUST AS STATIONARY as those, so this
+#      let poke type over a real draft too, concatenated with no separator
+#      (measured live, 2026-09-22: a maintainer's stalled draft and a poke's
+#      own body landed as one submitted message).
+#   3. (#1322 round 2, this file) Judge by STYLE, on top of change-detection:
+#      Claude Code's candidate text and Codex's placeholder are both drawn
+#      DIM (SGR faint, code 2); a person's own typed characters are not
+#      (measured live on all three, 2026-09-21/22). herdr's `pane read
+#      --format ansi` exposes this; the plain `--format text` read #1322
+#      round 1 used discards it entirely. So: read styled, strip Codex's own
+#      decorative Braille-block animation FIRST (it is drawn in a plain
+#      foreground color, not dim -- left unstripped it reads as "real,
+#      non-dim" content and defeats this check exactly the way it defeated
+#      round 1's plain-text comparison), then check whether anything VISIBLE
+#      remains outside a dim span. Anything does -> a real draft, refuse
+#      outright. Nothing does -> round 1's two-snapshot change check decides
+#      (kept, unmodified in spirit: it is what catches someone starting to
+#      type in the window between reads).
 #
 # Recognizing WHERE the box is remains a TYPE-specific question — each CLI's
 # TUI draws its own prompt differently — so that recognition RULE lives as
@@ -33,8 +43,8 @@
 # type.conf), never as per-type code: manifests are read-only key=value data
 # and are never sourced (the types-axis contract), so a type cannot ship its
 # own check function. What lives here is the one shared INTERPRETATION of
-# that data, common to every type that opts in by setting
-# input_prompt_marker.
+# that data. Everything past locating the box (dim-or-not, braille-or-not) is
+# ONE rule applied to every runtime unconditionally, never a per-type branch.
 #
 # Matching below is done with `case`/parameter-expansion, never `[[ x == y ]]`
 # or `[[ x =~ y ]]`: both are widened by a caller's `shopt -s nocasematch`,
@@ -52,6 +62,22 @@ _AGMSG_INPUT_BOX_SH=1
 # rule run 80+ long, so 20 never reaches into the label.
 _AGMSG_INPUT_BOX_RULE20="────────────────────"
 
+_AGMSG_ESC="$(printf '\033')"
+# Sentinels for _agmsg_input_box_is_real_draft's dim-tracking below. Bytes
+# 0x01/0x02 (never valid mid-character UTF-8, never printable) so they can
+# never collide with real pane content.
+_AGMSG_DIM_START="$(printf '\001')"
+_AGMSG_DIM_END="$(printf '\002')"
+
+# Strip every `ESC[...m` (SGR) sequence from <text> outright (unlike the
+# Braille stripper below, which replaces — this one is used only to derive a
+# STYLE-BLIND view for locating structural landmarks and for the final
+# plain-text comparison key, where exact column alignment no longer matters
+# once styling is gone entirely).
+_agmsg_strip_ansi_sgr() {
+  LC_ALL=C sed -E "s/${_AGMSG_ESC}\[[0-9;]*m//g" <<<"$1"
+}
+
 # Strip Braille Patterns (U+2800–U+28FF) from <text>, each replaced with a
 # single space (never deleted outright — deleting would shift everything
 # after it, so two reads that differ only in WHERE a decoration glyph
@@ -60,16 +86,18 @@ _AGMSG_INPUT_BOX_RULE20="──────────────────�
 # and leading spacing is left alone, since that IS meaningful content for a
 # real draft.
 #
-# WHY THIS EXISTS: measured live (2026-09-21) on a Codex pane (`advisor`)
+# WHY THIS EXISTS: measured live (2026-09-21) on a real Codex pane
 # stuck refusing poke — its input box was genuinely empty (Codex's own "Ask
 # Codex to do anything" placeholder), but Codex draws a decorative animation
-# of Braille dots moving across that placeholder on every redraw. Two reads
-# of the SAME, untouched, empty box a second apart came back byte-different
-# every time because of it — exactly the failure this guard exists to avoid
-# ("changed" forever, poke permanently refused, worse than 1.3.1 which typed
-# blind). Claude Code's boxed input has no such decoration; stripping this
-# block is a no-op there (measured: no Braille codepoints appear in a
-# Claude Code read at all).
+# of Braille dots moving across that placeholder, AND across the row a
+# structural check needs blank to confirm the live widget (see
+# _agmsg_input_box_raw_flat below), on every redraw. Left unstripped, two
+# reads of the SAME untouched box never agreed, and (round 2) the dots read
+# as real, non-dim content since Codex draws them in a plain foreground
+# color, not dim — either way, poke stayed permanently refused. Claude
+# Code's boxed input has no such decoration; stripping this block is a no-op
+# there (measured: no Braille codepoints appear in a Claude Code read at
+# all).
 #
 # ONE rule, applied to every type unconditionally — not a per-type branch.
 # A branch here would need a maintained table of which type needs which
@@ -89,11 +117,11 @@ _AGMSG_INPUT_BOX_RULE20="──────────────────�
 #
 # ACCEPTED RESIDUAL RISK: if a person's real, in-progress draft consisted
 # ENTIRELY of Braille Patterns characters, this strips it down to blank
-# spaces, and two reads of a genuinely-changing Braille-only draft could
-# still compare equal. Judged not to happen in practice — no observed
-# workflow types Braille directly into an agmsg member's input box — and
-# accepted rather than narrowing the strip further (which would risk missing
-# some other decoration Codex or a future CLI draws the same way).
+# spaces, and it would misread as safe to type over. Judged not to happen in
+# practice — no observed workflow types Braille directly into an agmsg
+# member's input box — and accepted rather than narrowing the strip further
+# (which would risk missing some other decoration Codex or a future CLI
+# draws the same way).
 _agmsg_strip_decorative_braille() {
   local text="$1" stripped
   stripped="$(LC_ALL=C sed -E \
@@ -102,45 +130,47 @@ _agmsg_strip_decorative_braille() {
   printf '%s' "${stripped%"${stripped##*[![:space:]]}"}"
 }
 
-# agmsg_input_box_snapshot <marker> <boxed:yes|""> <screen_text>
-# Echoes a normalized snapshot of <screen_text>'s input box on success (rc
-# 0). Returns 1, echoing nothing meaningful, when <screen_text> does not
-# carry enough structure to confirm where the box even is — the caller
-# (poke.sh) treats that exactly like "changed" (refuse), the same
-# fail-toward-refusing bias the old content check used for "cannot tell".
+# agmsg_input_box_locate <marker> <boxed:yes|""> <ansi_screen>
+# Echoes the input box's region, STYLING PRESERVED (raw ANSI escapes intact
+# — never for display to a human or a log), on success (rc 0). Returns 1,
+# echoing nothing meaningful, when <ansi_screen> does not carry enough
+# structure to confirm where the box even is — treated by every caller
+# exactly like "this is a real draft" (fail toward refusing, never toward
+# typing — unchanged bias from #1321/#1322 round 1).
 #
-# Deliberately says nothing about whether the box is empty, a draft, a
-# suggestion, or a placeholder — poke.sh calls this twice, ~1s apart, and
-# refuses only if the two snapshots differ. See poke.sh's own comment for
-# why that replaced a content judgment (#1322).
-agmsg_input_box_snapshot() {
-  local marker="$1" boxed="$2" screen="$3" raw
+# Locates on a STYLE-STRIPPED derived copy (rule/marker lines can carry
+# leading color codes — measured live on Codex — so a literal-prefix match
+# against the raw styled line would miss them), then echoes the ORIGINAL,
+# styled line(s) at the same positions: stripping never changes line count
+# or order (no SGR sequence contains a newline), so the two stay aligned.
+agmsg_input_box_locate() {
+  local marker="$1" boxed="$2" screen="$3"
   [ -n "$marker" ] || return 1
   if [ "$boxed" = yes ]; then
-    raw="$(_agmsg_input_box_raw_boxed "$marker" "$screen")" || return 1
+    _agmsg_input_box_raw_boxed "$marker" "$screen"
   else
-    raw="$(_agmsg_input_box_raw_flat "$marker" "$screen")" || return 1
+    _agmsg_input_box_raw_flat "$marker" "$screen"
   fi
-  _agmsg_strip_decorative_braille "$raw"
 }
 
 # Boxed style (Claude Code): the input sits between the LAST two lines whose
-# content starts with a run of 20+ "─" — the top rule also carries the
-# pane's own label after its run, the bottom rule is unbroken. Echoes every
-# line strictly between that pair (the box's full content, marker line
-# included, multi-line drafts and all) verbatim, one per output line.
+# STYLE-STRIPPED content starts with a run of 20+ "─" — the top rule also
+# carries the pane's own label after its run, the bottom rule is unbroken.
+# Echoes every line strictly between that pair, styling intact (the box's
+# full content, marker line included, multi-line drafts and all).
 _agmsg_input_box_raw_boxed() {
   local marker="$1" screen="$2" rule="$_AGMSG_INPUT_BOX_RULE20"
-  local -a lines=()
+  local -a lines=() plain=()
   local line n=0
   while IFS= read -r line; do
     lines[n]="$line"
+    plain[n]="$(_agmsg_strip_ansi_sgr "$line")"
     n=$((n + 1))
   done <<<"$screen"
 
   local top=-1 bottom=-1 i=0
   while [ "$i" -lt "$n" ]; do
-    case "${lines[$i]}" in
+    case "${plain[$i]}" in
       "$rule"*) top="$bottom"; bottom="$i" ;;
     esac
     i=$((i + 1))
@@ -151,7 +181,7 @@ _agmsg_input_box_raw_boxed() {
   local marker_seen=0
   i=$((top + 1))
   while [ "$i" -lt "$bottom" ]; do
-    case "${lines[$i]}" in "$marker"*) marker_seen=1 ;; esac
+    case "${plain[$i]}" in "$marker"*) marker_seen=1 ;; esac
     printf '%s\n' "${lines[$i]}"
     i=$((i + 1))
   done
@@ -175,23 +205,24 @@ _agmsg_input_box_raw_boxed() {
 #   › Ask Codex to do anything
 #
 #     gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task
-# That triplet is required to confirm this is the LIVE box at all; without
-# it, refuse. Echoes the marker line's own raw content (single line) once
-# confirmed — including Codex's own decorative Braille animation over it,
-# which the caller strips (see _agmsg_strip_decorative_braille above).
+# That triplet is required to confirm this is the LIVE box at all (located
+# on the STYLE-STRIPPED derived copy, same reason as the boxed check above);
+# without it, refuse. Echoes the marker line's own raw content (single
+# line), styling intact.
 _agmsg_input_box_raw_flat() {
   local marker="$1" screen="$2"
-  local -a lines=()
+  local -a lines=() plain=()
   local line n=0
   while IFS= read -r line; do
     lines[n]="$line"
+    plain[n]="$(_agmsg_strip_ansi_sgr "$line")"
     n=$((n + 1))
   done <<<"$screen"
   [ "$n" -gt 0 ] || return 1
 
   local marker_idx=-1 i=0
   while [ "$i" -lt "$n" ]; do
-    case "${lines[$i]}" in
+    case "${plain[$i]}" in
       "$marker"*) marker_idx="$i" ;;
     esac
     i=$((i + 1))
@@ -206,11 +237,89 @@ _agmsg_input_box_raw_flat() {
   # line -- an un-stripped check here would fail to confirm the live widget
   # at all on a genuinely-idle Codex pane, refusing every poke to it exactly
   # like the bug this file exists to fix.
-  case "$(_agmsg_strip_decorative_braille "${lines[$((marker_idx + 1))]}")" in
+  case "$(_agmsg_strip_decorative_braille "${plain[$((marker_idx + 1))]}")" in
     *[![:space:]]*) return 1 ;;
   esac
-  case "${lines[$footer_idx]}" in *·*) ;; *) return 1 ;; esac
+  case "${plain[$footer_idx]}" in *·*) ;; *) return 1 ;; esac
 
   printf '%s\n' "${lines[$marker_idx]}"
   return 0
+}
+
+# agmsg_input_box_is_real_draft <marker> <ansi_region>
+# 0 (true) if <ansi_region> — as returned by agmsg_input_box_locate, styling
+# intact — carries any VISIBLE character outside a dim (SGR faint, code 2)
+# span once <marker> and Codex's own decorative Braille animation are both
+# removed first. 1 (false) otherwise: blank, or everything visible is dim
+# (Claude Code's candidate text, Codex's own placeholder — both measured
+# dim, live, 2026-09-21/22).
+#
+# <marker> is removed by SUBSTRING match, not prefix: measured live on
+# Codex, the marker glyph itself can sit after leading style codes (bold +
+# background), so it is not always the first thing in the line.
+#
+# Dim tracking: SGR code 2 (exact `ESC[2m`) starts a dim span; `ESC[0m`
+# (reset) or `ESC[22m` (explicitly un-bold/un-dim) ends one — matched by
+# EXACT bracket content, not "does the params list contain token 2/0/22
+# anywhere": a compound sequence like `ESC[48;2;65;65;65m` (24-bit
+# background color) also contains a bare "2" token as part of an unrelated
+# color spec, and a substring/token search would misread it as dim.
+# Measured (2026-09-21/22, live, both Claude Code and Codex): every dim
+# start/end observed is its OWN separate escape with nothing else in it, so
+# an exact match on the whole bracket is correct for real data, not just
+# simpler.
+#
+# Implemented via three `sed` passes reducing the ANSI text to two 1-byte
+# sentinels (dim-start/dim-end, chosen from the 0x01/0x02 range — never
+# valid mid-character UTF-8, never printable, so they cannot collide with
+# real content) plus literal text, then a single bash pass over that walks
+# sentinel-delimited chunks via prefix removal — no `${s:i:1}` character
+# slicing, so this is immune to the same ambient-locale multibyte trap
+# _agmsg_strip_decorative_braille's own comment documents.
+agmsg_input_box_is_real_draft() {
+  local marker="$1" region="$2" tail nobraille sentinel
+  tail="${region/"$marker"/}"
+  nobraille="$(_agmsg_strip_decorative_braille "$tail")"
+  sentinel="$(LC_ALL=C sed -E \
+    -e "s/${_AGMSG_ESC}\[2m/${_AGMSG_DIM_START}/g" \
+    -e "s/${_AGMSG_ESC}\[(0|22)?m/${_AGMSG_DIM_END}/g" \
+    -e "s/${_AGMSG_ESC}\[[0-9;]*m//g" \
+    <<<"$nobraille")"
+
+  local s="$sentinel" dim=0 saw_nondim=0 chunk seg_to_start seg_to_end
+  while [ -n "$s" ]; do
+    case "$s" in
+      "$_AGMSG_DIM_START"*) dim=1; s="${s#"$_AGMSG_DIM_START"}" ;;
+      "$_AGMSG_DIM_END"*) dim=0; s="${s#"$_AGMSG_DIM_END"}" ;;
+      *)
+        seg_to_start="${s%%"$_AGMSG_DIM_START"*}"
+        seg_to_end="${s%%"$_AGMSG_DIM_END"*}"
+        if [ "${#seg_to_start}" -le "${#seg_to_end}" ]; then
+          chunk="$seg_to_start"
+        else
+          chunk="$seg_to_end"
+        fi
+        s="${s#"$chunk"}"
+        if [ "$dim" -eq 0 ]; then
+          case "$chunk" in *[![:space:]]*) saw_nondim=1 ;; esac
+        fi
+        ;;
+    esac
+  done
+  [ "$saw_nondim" -eq 1 ]
+}
+
+# agmsg_input_box_normalize <ansi_region>
+# Echoes <ansi_region> reduced to a plain-text comparison key: Braille
+# stripped, then every SGR escape stripped outright (unlike
+# _agmsg_input_box_is_real_draft, exact column alignment no longer matters
+# once nothing is being classified by style — only compared for equality
+# against a second read), then trailing whitespace trimmed. Used by poke.sh
+# for the ~1s two-snapshot "did anything change" check (#1322 round 1),
+# which this file keeps: it is what catches someone starting to type in the
+# window between reads, which a single style classification cannot.
+agmsg_input_box_normalize() {
+  local stripped
+  stripped="$(_agmsg_strip_ansi_sgr "$(_agmsg_strip_decorative_braille "$1")")"
+  printf '%s' "${stripped%"${stripped##*[![:space:]]}"}"
 }

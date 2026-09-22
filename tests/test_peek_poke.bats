@@ -341,9 +341,10 @@ EOF
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via herdr"
   # Three herdr invocations: the #1322 two-snapshot input-box check (pane
-  # read, pane read), then the single agent-prompt submission call.
+  # read, pane read -- styled, since terminal_peek_styled exists for herdr),
+  # then the single agent-prompt submission call.
   [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 3 ]
-  [ "$(grep -c '^herdr \[pane\] \[read\] \[wC:p4\] \[--source\] \[visible\]$' "$ARGV_LOG")" -eq 2 ]
+  [ "$(grep -c '^herdr \[pane\] \[read\] \[wC:p4\] \[--source\] \[visible\] \[--format\] \[ansi\]$' "$ARGV_LOG")" -eq 2 ]
   # The inner ':' of the herdr pane id must survive the record round-trip.
   grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
   # No synthesized keystrokes: submission is agent prompt's own.
@@ -993,10 +994,22 @@ _write_codex_record() {
 # line's own <tail>, bottom rule. Mirrors a real pane's shape (measured live
 # 2026-09-18). RULE60 is built, not hand-typed, so its length (60 >= the
 # 20-character run the checker requires) is provable, not eyeballed.
+#
+# <dim> (yes|"") wraps <tail> in SGR faint (ESC[2m...ESC[0m) or leaves it
+# plain -- matches how Claude Code actually draws candidate/suggestion text
+# (dim) versus a person's own typed characters (not dim), measured live
+# 2026-09-21/22 (#1322 round 2). The marker itself and the space after it
+# are never dim, same as every real capture.
 _boxed_screen() {
-  local tail="$1" rule
+  local tail="$1" dim="$2" rule esc
   rule="$(printf '─%.0s' $(seq 1 60))"
-  printf '%s testteam-alice ─\n❯%s\n%s\n' "$rule" "${tail:+ $tail}" "$rule"
+  esc="$(printf '\033')"
+  if [ "$dim" = yes ]; then
+    printf '%s testteam-alice ─\n❯ %s[0m%s[2m%s%s[0m\n%s\n' \
+      "$rule" "$esc" "$esc" "$tail" "$esc" "$rule"
+  else
+    printf '%s testteam-alice ─\n❯%s\n%s\n' "$rule" "${tail:+ $tail}" "$rule"
+  fi
 }
 
 # Builds one flat-shape (Codex) screen: marker line's own <tail>, one
@@ -1006,55 +1019,80 @@ _boxed_screen() {
 # judging it blank, or every read of a genuinely idle Codex pane fails to
 # confirm the live widget at all), a status footer containing "·" -- the
 # live-widget triplet #1321 requires to confirm this is the real box.
+#
+# <dim>, same meaning as _boxed_screen's -- matches Codex's own placeholder
+# (dim) versus a real typed draft (not dim), measured live 2026-09-22.
 _flat_screen() {
-  local tail="$1"
-  printf 'some transcript line\n›%s\n    ⠈   ⠁  ⠐    ⠄\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' "${tail:+ $tail}"
+  local tail="$1" dim="$2" esc
+  esc="$(printf '\033')"
+  if [ "$dim" = yes ]; then
+    printf 'some transcript line\n›%s[0m%s[2m%s%s[0m\n    ⠈   ⠁  ⠐    ⠄\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' \
+      "$esc" "$esc" "$tail" "$esc"
+  else
+    printf 'some transcript line\n›%s\n    ⠈   ⠁  ⠐    ⠄\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' "${tail:+ $tail}"
+  fi
 }
 
-@test "poke.sh types when the input box is unchanged across two reads (empty, candidate text, or a Codex placeholder alike), and refuses only when it changes (#1321, #1322)" {
+@test "poke.sh types over empty/candidate/placeholder input boxes but refuses a real draft, styled or not, stalled or actively typed (#1321, #1322)" {
   # Claude Code, genuinely empty, unchanged across both reads.
-  _install_fake_herdr_screen_sequence "$(_boxed_screen '')"
+  _install_fake_herdr_screen_sequence "$(_boxed_screen '' '')"
   _write_record "herdr:w1:p5"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via herdr"
 
-  # Claude Code, Claude's OWN candidate/suggestion text sitting in the box,
-  # unchanged across both reads — #1322's own motivating case. A
-  # content-pattern check would have refused this (non-blank marker line);
-  # the two-read comparison correctly lets it through since it never moves.
+  # Claude Code, Claude's OWN candidate/suggestion text sitting in the box
+  # (drawn dim, matching a real measured capture), unchanged across both
+  # reads — #1322 round 1's own motivating case. A content-pattern check
+  # would have refused this (non-blank marker line); dim styling plus an
+  # unchanged read both agree it is safe.
   : > "$ARGV_LOG"
-  _install_fake_herdr_screen_sequence "$(_boxed_screen 'suggested next step')"
+  _install_fake_herdr_screen_sequence "$(_boxed_screen 'suggested next step' yes)"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 0 ]
   grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
 
-  # Claude Code, someone actively typing: the second read shows one more
-  # character than the first — refuses, and never reaches the submission
-  # call.
+  # Claude Code, a REAL draft sitting STALLED (not dim -- matches a real
+  # captured draft, unlike candidate text) but otherwise unchanged across
+  # both reads: #1322 round 1 alone would have let this through (nothing
+  # changed); round 2's style classification refuses it on the very FIRST
+  # read, before a second read is even taken.
   : > "$ARGV_LOG"
-  _install_fake_herdr_screen_sequence "$(_boxed_screen 'half-typed')" "$(_boxed_screen 'half-typed draft')"
+  _install_fake_herdr_screen_sequence "$(_boxed_screen 'a real stalled draft' '')"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 14 ]
   _out_has "input in progress"
+  [ "$(grep -c '^herdr \[pane\] \[read\]' "$ARGV_LOG")" -eq 1 ]
   [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
 
-  # Codex, genuinely empty (its own placeholder), unchanged across both
-  # reads. Real Codex panes draw a decorative Braille animation OVER this
-  # exact placeholder that changes on every redraw even though nothing was
-  # typed (measured live, 2026-09-21, see scripts/lib/input-box.sh) — using
-  # the identical screen for both reads here is deliberate: that decoration
-  # is covered by the dedicated normalization test below, not this one.
+  # Claude Code, someone STARTS typing between the two reads: the first read
+  # shows dim candidate text (safe on its own), the second shows real,
+  # non-dim characters -- refused by the SECOND read's own classification,
+  # not by a content diff.
   : > "$ARGV_LOG"
-  _install_fake_herdr_screen_sequence "$(_flat_screen 'Ask Codex to do anything')"
+  _install_fake_herdr_screen_sequence "$(_boxed_screen 'suggested next step' yes)" "$(_boxed_screen 'h' '')"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -eq 14 ]
+  [ "$(grep -c '^herdr \[pane\] \[read\]' "$ARGV_LOG")" -eq 2 ]
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
+
+  # Codex, genuinely empty (its own placeholder, drawn dim -- matches a real
+  # measured capture), unchanged across both reads. Real Codex panes draw a
+  # decorative Braille animation OVER this exact placeholder that changes on
+  # every redraw even though nothing was typed and it is never dim itself
+  # (measured live, 2026-09-21/22, see scripts/lib/input-box.sh) — using the
+  # identical screen for both reads here is deliberate: that decoration is
+  # covered by the dedicated normalization test below, not this one.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_screen_sequence "$(_flat_screen 'Ask Codex to do anything' yes)"
   _write_codex_record codex1 "herdr:w1:p6"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
   [ "$status" -eq 0 ]
   grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
 
-  # Codex, someone actively typing a real draft: refuses.
+  # Codex, a real draft (not dim), refused on the first read alone.
   : > "$ARGV_LOG"
-  _install_fake_herdr_screen_sequence "$(_flat_screen 'half typed')" "$(_flat_screen 'half typed draft')"
+  _install_fake_herdr_screen_sequence "$(_flat_screen 'a real draft' '')"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
   [ "$status" -eq 14 ]
   [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
@@ -1086,8 +1124,8 @@ _flat_screen() {
   # shellcheck disable=SC1091
   source "$SCRIPTS/lib/input-box.sh"
 
-  # Two REAL raw lines captured live from a stuck Codex pane (`advisor`,
-  # 2026-09-21) 2 seconds apart, showing its idle "Ask Codex to do anything"
+  # Two REAL raw lines captured live from a stuck Codex pane
+  # (2026-09-21) 2 seconds apart, showing its idle "Ask Codex to do anything"
   # placeholder -- unchanged in substance, but Codex's own decorative
   # Braille animation (U+2800-U+28FF) drew differently across the two
   # reads. A naive raw-text comparison would see these as different forever
@@ -1105,4 +1143,41 @@ _flat_screen() {
   local ja_a='❯ こんにちは、これは'
   local ja_b='❯ こんにちは、これは書きかけ'
   [ "$(_agmsg_strip_decorative_braille "$ja_a")" != "$(_agmsg_strip_decorative_braille "$ja_b")" ]
+}
+
+@test "input-box: a real (unstyled) draft is a real draft; dim candidate text and Codex's placeholder are not (#1322 round 2)" {
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/input-box.sh"
+  local esc; esc="$(printf '\033')"
+
+  # Claude Code candidate/suggestion text, captured live from a real pane
+  # (2026-09-22): marker, a non-breaking space, then the suggestion
+  # wrapped in SGR faint (dim, code 2). Must NOT read as a real draft.
+  local cc_marker cc_ghost
+  cc_marker='❯'
+  cc_ghost="${cc_marker}$(printf '\xc2\xa0')${esc}[0m${esc}[2m承認する${esc}[0m"
+  refute agmsg_input_box_is_real_draft "$cc_marker" "$cc_ghost"
+
+  # Claude Code, a genuinely real draft, captured live from a real pane
+  # (2026-09-21): marker, a non-breaking space, then plain
+  # unstyled text -- no SGR at all. MUST read as a real draft; this is the
+  # exact shape #1322 round 1 alone let poke type over (measured live: a
+  # maintainer's stalled draft and a poke's own body landed as one
+  # submitted message).
+  local cc_real
+  cc_real="${cc_marker}$(printf '\xc2\xa0')実際の入力文字"
+  agmsg_input_box_is_real_draft "$cc_marker" "$cc_real"
+
+  # Codex's own "Ask Codex to do anything" placeholder, captured live from a
+  # real pane (2026-09-21): bold + background codes, THEN the
+  # placeholder text wrapped in dim, THEN Codex's own decorative Braille
+  # animation drawn in a plain foreground color (not dim) -- the exact shape
+  # that would misread as a real draft if Braille weren't stripped BEFORE
+  # the dim check (the animation is not dim itself, so left in place it
+  # counts as real, non-dim, visible content). Must NOT read as a real
+  # draft.
+  local codex_marker codex_placeholder
+  codex_marker='›'
+  codex_placeholder="${esc}[0m${esc}[1m${esc}[48;2;65;65;65m$(printf '\xe2\xa2\x80')${esc}[0m${esc}[48;2;65;65;65m ${esc}[0m${esc}[2m${esc}[48;2;65;65;65mAsk Codex to do anything${esc}[0m${esc}[48;2;65;65;65m                                 ${esc}[0m"
+  refute agmsg_input_box_is_real_draft "$codex_marker" "$codex_placeholder"
 }

@@ -54,7 +54,7 @@ source "$SCRIPT_DIR/lib/compat.sh"              # required by detect-cli-type.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/detect-cli-type.sh"     # agmsg_detect_cli_type (#1229 plain fallback)
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/input-box.sh"           # agmsg_input_box_snapshot (#1321, #1322)
+source "$SCRIPT_DIR/lib/input-box.sh"           # agmsg_input_box_locate/is_real_draft/normalize (#1321, #1322)
 
 die() { echo "poke: $*" >&2; exit 1; }
 
@@ -161,15 +161,27 @@ INPUT_MARKER="$(agmsg_type_get "$TYPE" input_prompt_marker)"
 INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
 [ "$TERMINAL" = plain ] && INPUT_MARKER=""
 
-# #1322: a content-pattern check here refused two shapes that are not a
-# person's draft at all — Claude Code's own candidate/suggestion text left
-# in the box, and Codex's "Ask Codex to do anything" placeholder — because
-# both are non-blank characters, same as a real draft, and content alone
-# cannot tell them apart. What actually distinguishes a real draft is that
-# it CHANGES: someone actively typing produces a visibly different box a
-# moment later; a suggestion, a placeholder, or an abandoned draft sits
-# still. So the check below takes two snapshots of the box, AGMSG_POKE_
-# INPUT_BOX_SETTLE_SECONDS apart, and refuses only when they differ.
+# #1322 round 2: round 1 (compare two snapshots ~1s apart, refuse only if
+# they differ) correctly let Claude Code's candidate text and Codex's
+# placeholder through, but a REAL, STALLED draft (someone typed something
+# and paused) is just as stationary as those, so it also let poke type over
+# a real draft -- measured live, 2026-09-22: a maintainer's stalled draft
+# and a poke's own body landed as one submitted message, no separator.
+#
+# Fix: a real draft's characters are NOT drawn dim; Claude Code's candidate
+# text and Codex's placeholder both ARE (SGR faint, code 2 -- measured live
+# on all three, 2026-09-21/22). _poke_read_input_box below reads styled
+# (ANSI) when the driver offers one and refuses outright on ANY visible
+# non-dim content, before ever reaching the two-snapshot comparison -- see
+# scripts/lib/input-box.sh's own comment for the full reasoning, including
+# why Codex's decorative Braille animation has to be stripped first (it is
+# drawn in a plain color, not dim, so left in place it reads as a real
+# draft and defeats this exactly the way it defeated round 1's plain-text
+# comparison).
+#
+# The two-snapshot check itself is KEPT, not replaced: style classification
+# alone cannot catch someone who starts typing in the window between the
+# two reads -- that is what comparing them still does.
 #
 # The interval is fixed, not a flag: making it configurable would leave
 # "how long is long enough" an open question nobody has actually measured,
@@ -184,41 +196,76 @@ INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
 # no false-positive risk against exactly the content this fix exists for.
 AGMSG_POKE_INPUT_BOX_SETTLE_SECONDS=1
 
+# Reads the pane once and classifies its input box, setting the caller's
+# own _POKE_IB_RC / _POKE_IB_SNAPSHOT (plain-statement call, never
+# `x="$(...)"`  -- a command substitution runs in a subshell, and these are
+# side-channel globals, the same reason _slack_read_token's own comment
+# documents in the Slack ext-tool adapter).
+#   _POKE_IB_RC        0 = box confirmed & safe to compare; 14 = a real
+#                       draft (styled read only) or the box's own structure
+#                       could not be confirmed; anything else = a
+#                       driver-level terminal_peek failure, propagate as-is
+#   _POKE_IB_SNAPSHOT  normalized comparison key, meaningful only when
+#                       _POKE_IB_RC = 0
+#
+# <styled> is 1 when the driver offers terminal_peek_styled (checked once,
+# outside this function, via `declare -F`) -- a driver without it only gets
+# round 1's protection (narrower: won't catch a STALLED real draft), never
+# a regression from what 1.4.1 shipped, since that is exactly what shipped.
+_poke_read_input_box() {
+  local styled="$1" screen="" peek_rc=0 region="" region_rc=0
+  if [ "$styled" -eq 1 ]; then
+    # No 2>/dev/null here (unlike before): on failure this is
+    # terminal_peek_styled's own diagnosis, not an "input in progress"
+    # refusal, and it must reach the operator verbatim -- the same message
+    # terminal_poke would have printed for the same underlying cause (#1321
+    # review round 2).
+    screen="$(terminal_peek_styled "$BARE_ID")" || peek_rc=$?
+  else
+    screen="$(terminal_peek "$BARE_ID")" || peek_rc=$?
+  fi
+  if [ "$peek_rc" -ne 0 ]; then
+    _POKE_IB_RC="$peek_rc"
+    return 0
+  fi
+  region="$(agmsg_input_box_locate "$INPUT_MARKER" "$INPUT_BOXED" "$screen")" || region_rc=$?
+  if [ "$region_rc" -ne 0 ]; then
+    # Cannot confirm where the box even is (transient redraw, alternate
+    # screen) -- fails toward refusing, never toward typing (unchanged bias
+    # from #1321).
+    _POKE_IB_RC=14
+    return 0
+  fi
+  if [ "$styled" -eq 1 ] && agmsg_input_box_is_real_draft "$INPUT_MARKER" "$region"; then
+    _POKE_IB_RC=14
+    return 0
+  fi
+  _POKE_IB_RC=0
+  _POKE_IB_SNAPSHOT="$(agmsg_input_box_normalize "$region")"
+}
+
 RC=0
 ATTEMPT=0
 while :; do
   RC=0
   if [ -n "$INPUT_MARKER" ]; then
-    SCREEN="" PEEK_RC=0
-    # No 2>/dev/null here (unlike before): on failure this is terminal_peek's
-    # own diagnosis, not an "input in progress" refusal, and it must reach
-    # the operator verbatim -- the same message terminal_poke would have
-    # printed for the same underlying cause (#1321 review round 2).
-    SCREEN="$(terminal_peek "$BARE_ID")" || PEEK_RC=$?
-    if [ "$PEEK_RC" -ne 0 ]; then
-      # The read itself failed for a driver-level reason (unreachable,
-      # confirmed gone, unsupported, ...). Return it unchanged instead of
-      # collapsing every peek failure into 14.
-      RC="$PEEK_RC"
+    STYLED=0
+    declare -F terminal_peek_styled >/dev/null 2>&1 && STYLED=1
+
+    _POKE_IB_RC=0 _POKE_IB_SNAPSHOT=""
+    _poke_read_input_box "$STYLED"
+    if [ "$_POKE_IB_RC" -ne 0 ]; then
+      RC="$_POKE_IB_RC"
     else
-      SNAP1="" SNAP1_RC=0
-      SNAP1="$(agmsg_input_box_snapshot "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN")" || SNAP1_RC=$?
+      SNAP1="$_POKE_IB_SNAPSHOT"
       sleep "$AGMSG_POKE_INPUT_BOX_SETTLE_SECONDS"
-      SCREEN="" PEEK_RC=0
-      SCREEN="$(terminal_peek "$BARE_ID")" || PEEK_RC=$?
-      if [ "$PEEK_RC" -ne 0 ]; then
-        RC="$PEEK_RC"
+      _POKE_IB_RC=0 _POKE_IB_SNAPSHOT=""
+      _poke_read_input_box "$STYLED"
+      if [ "$_POKE_IB_RC" -ne 0 ]; then
+        RC="$_POKE_IB_RC"
       else
-        SNAP2="" SNAP2_RC=0
-        SNAP2="$(agmsg_input_box_snapshot "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN")" || SNAP2_RC=$?
-        # Either snapshot failing to confirm where the box even is (a
-        # transient redraw, an alternate-screen switch) is treated the same
-        # as the two snapshots differing outright -- "cannot tell" still
-        # fails toward refusing, never toward typing (unchanged bias from
-        # #1321).
-        if [ "$SNAP1_RC" -ne 0 ] || [ "$SNAP2_RC" -ne 0 ] || [ "$SNAP1" != "$SNAP2" ]; then
-          RC=14
-        fi
+        SNAP2="$_POKE_IB_SNAPSHOT"
+        [ "$SNAP1" = "$SNAP2" ] || RC=14
       fi
     fi
   fi

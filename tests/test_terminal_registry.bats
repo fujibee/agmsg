@@ -2175,7 +2175,13 @@ _fake_herdr_list_anchored_plus() {
 # server's own socket and emits every row socket-qualified -- and that is checked
 # where it belongs, in test_sweep_enumeration.bats, against a fake tmux whose
 # per-socket answers the test writes.
-_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes"
+# terminal_peek_styled (#1322 round 2): tmux does not implement it. poke.sh's
+# real-draft check is written to work without it (round 1's plain-text
+# change-only check, unchanged from before this op existed) -- a driver
+# without it is narrower protection, not a regression. Unmeasured whether
+# tmux's own `capture-pane -e` would give the same dim-attribute signal
+# herdr's `pane read --format ansi` does; left for whoever measures it.
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes terminal_peek_styled"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
 _tmux_op_args() {
