@@ -540,14 +540,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Record which files this shard ran
-        if: needs.changes.outputs.docs_only != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: bats-manifest-${{ matrix.os }}-${{ matrix.shard }}
-          path: shard-files.txt
-          retention-days: 1
-
   # Keep the required check name stable even if the shard count changes.
   bats:
     name: bats
@@ -581,31 +573,37 @@ jobs:
           echo "::notice title=bats::docs-only diff — the bats suite did not run on any shard; this green satisfies the required check and measures nothing (#798)"
           printf '%s\n' "## bats: docs-only, suite skipped" "" "The diff was documentation-only, so no shard ran the bats suite. This green satisfies the required check; it is not evidence that the suite passes (#798)." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Download shard manifests
+      - name: Verify the shard partition covers the whole suite
         if: needs.changes.outputs.docs_only != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          pattern: bats-manifest-*
-          path: manifests
-
-      - name: Verify the shards covered the whole suite
-        if: needs.changes.outputs.docs_only != 'true'
+        # Recomputes the partition instead of collecting each shard's own
+        # record of what it ran (a bats-manifest-* artifact, downloaded and
+        # unioned here). That depended on every shard from THIS run having
+        # uploaded one -- true for an ordinary run, false for `gh run rerun
+        # --failed`, which only re-executes the shards that failed and
+        # leaves the rest without a fresh artifact (measured, #1057: `cat:
+        # manifests/bats-manifest-macos-latest-*/shard-files.txt: No such
+        # file`), so a --failed rerun went red here even when every shard
+        # had actually passed. shard-tests.sh's partition is a pure function
+        # of the tree and $SHARD_TOTAL -- no OS parameter, see its own
+        # header -- so recomputing it here needs nothing any shard produced,
+        # and is the same union on every run regardless of which shards (if
+        # any) were actually re-executed.
         run: |
           set -euo pipefail
           expected="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort)"
-          status=0
-          for os in ubuntu-latest macos-latest; do
-            actual="$(cat manifests/bats-manifest-"$os"-*/shard-files.txt | LC_ALL=C sort)"
-            if [ "$actual" != "$expected" ]; then
-              echo "::error::$os shards do not exactly cover tests/*.bats"
-              status=1
-            fi
-          done
+          actual="$(
+            for shard in $(seq 1 "$SHARD_TOTAL"); do
+              .github/scripts/shard-tests.sh "$shard" "$SHARD_TOTAL"
+            done | LC_ALL=C sort
+          )"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::shards 1..$SHARD_TOTAL do not exactly cover tests/*.bats"
+            exit 1
+          fi
           # The other green, named the same way (#798): how many files the
           # shards ran, so a full pass and a skip never read alike.
           count="$(printf '%s\n' "$expected" | grep -c .)"
-          printf '%s\n' "## bats: suite ran" "" "The shards ran $count test files on ubuntu-latest and macos-latest and every shard passed." >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+          printf '%s\n' "## bats: suite ran" "" "The shard partition covers $count test files across $SHARD_TOTAL shards, and every shard passed." >> "$GITHUB_STEP_SUMMARY"
 
   # The age-v1 vectors are shared normative fixtures. Exercise them with the
   # pinned standard age implementation instead of accepting only mock crypto

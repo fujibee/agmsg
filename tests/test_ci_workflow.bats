@@ -60,9 +60,23 @@
   grep -Fq '::notice title=bats::docs-only diff — the bats suite did not run on any shard' "$workflow"
   grep -Fq '"## bats: docs-only, suite skipped"' "$workflow"
   grep -Fq '"## bats: suite ran"' "$workflow"
-  grep -Fq 'The shards ran $count test files' "$workflow"
+  grep -Fq 'The shard partition covers $count test files' "$workflow"
   # 4. And on the shard itself, so the checks tab shows it per job.
   grep -Fq '::notice title=bats shard skipped::docs-only diff — this shard ran 0 test files' "$workflow"
+  # 5. #1057 (measured): `gh run rerun --failed` only re-executes the shards
+  #    that failed, so a shard from the ORIGINAL run had no fresh
+  #    bats-manifest-* artifact in the rerun -- the aggregate's manifest
+  #    download came up empty for it (`cat: manifests/bats-manifest-macos-
+  #    latest-*/shard-files.txt: No such file`) and the required check went
+  #    red even though every shard had actually passed. The aggregate no
+  #    longer depends on any artifact a shard uploaded: it recomputes the
+  #    same partition itself, via shard-tests.sh for every shard
+  #    1..SHARD_TOTAL, which needs nothing from this run's own shards to
+  #    have produced anything.
+  if grep -Fq 'Download shard manifests' "$workflow"; then false; fi
+  if grep -Fq 'name: bats-manifest-' "$workflow"; then false; fi
+  grep -Fq 'for shard in $(seq 1 "$SHARD_TOTAL")' "$workflow"
+  grep -Fq '.github/scripts/shard-tests.sh "$shard" "$SHARD_TOTAL"' "$workflow"
 }
 
 @test "CI: the #798 pins go red when the marker is taken back out (mutation control)" {
