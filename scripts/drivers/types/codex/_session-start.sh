@@ -14,6 +14,9 @@
 # launcher start the bridge — a hook-launched bridge cannot connect to the unix
 # socket from inside the Codex sandbox (#41).
 
+# shellcheck source=_home.sh
+source "${SKILL_DIR:?_session-start.sh requires SKILL_DIR}/scripts/drivers/types/codex/_home.sh"
+
 # Newest-N rollout files under $sessions_dir, sorted by mtime descending.
 # `ls -t "$dir"/*/*/*/rollout-*.jsonl` is unreliable on Windows/Git Bash --
 # reported to intermittently return an empty/truncated list with no
@@ -68,7 +71,8 @@ agmsg_resolve_codex_thread() {
     printf '%s' "$CODEX_THREAD_ID"
     return 0
   fi
-  local sessions_dir="$HOME/.codex/sessions"
+  local sessions_dir
+  sessions_dir="$(agmsg_codex_sessions_dir)"
   [ -d "$sessions_dir" ] || return 0
   # Compare PHYSICAL paths. agmsg may open the project via a symlinked/logical
   # path (e.g. a workspace under a symlinked home) while Codex records the
@@ -117,8 +121,11 @@ agmsg_session_start() {
     candidate_thread="$(agmsg_role_session_uuid "$candidate_team" "$candidate_name" 2>/dev/null || true)"
     if [ -n "$candidate_thread" ]; then
       candidate_project="$(agmsg_role_session_get "$candidate_team" "$candidate_name" project 2>/dev/null || true)"
+      candidate_home="$(agmsg_role_session_get "$candidate_team" "$candidate_name" codex_home 2>/dev/null || true)"
       candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
-      { [ "$candidate_project_phys" = "$project_phys" ] && [ "$candidate_thread" = "$thread_id" ]; } || continue
+      { [ "$candidate_project_phys" = "$project_phys" ] \
+        && [ "$candidate_thread" = "$thread_id" ] \
+        && agmsg_codex_role_home_matches "$candidate_home"; } || continue
     else
       # No recorded seat means no live TUI for this role; leave its inbox unread.
       continue

@@ -3176,6 +3176,7 @@ EOF
   echo 2147483647 > "$TEST_SKILL_DIR/run/codex-app-server.$h.pid"
   : > "$TEST_SKILL_DIR/run/codex-app-server.$h.port"
   : > "$TEST_SKILL_DIR/run/codex-app-server.$h.version"
+  : > "$TEST_SKILL_DIR/run/codex-app-server.$h.home"
 
   run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
@@ -3188,6 +3189,7 @@ EOF
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.pid" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.port" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.version" ]
+  [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.home" ]
   kill "$bpid" 2>/dev/null || true
 
   # #1254 review: a legacy pidfile that cannot be read or is malformed must
@@ -3439,6 +3441,19 @@ JSON
   # printed so the reader can tell the two states apart at a glance.
   [[ "$output" == *"Codex bridge: team/alice not running (seat recorded: seat-uuid-1)"* ]]
   [[ "$output" != *"has no session recorded"* ]]
+}
+
+@test "delivery status (codex): reports a seat from another CODEX_HOME" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_record team alice seat-default "$2" codex "$HOME/.codex"
+  ' _ "$SCRIPTS" "$TEST_PROJECT"
+
+  run env AGMSG_CODEX_HOME="$TEST_SKILL_DIR/isolated-home" \
+    bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"seat belongs to another CODEX_HOME"* ]]
 }
 
 @test "delivery status (codex): a port that accepts but never answers does not stall status (#579)" {
