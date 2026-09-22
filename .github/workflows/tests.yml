@@ -378,12 +378,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: TEMPORARY — deliberate first-attempt failure for the #1057 --failed demo
-        if: matrix.os == 'ubuntu-latest' && matrix.shard == 2 && github.run_attempt == '1'
-        run: |
-          echo "::error::deliberate failure, run attempt 1 only (#1057 gh run rerun --failed demo)"
-          exit 1
-
       - name: Docs-only change — skipping suite
         if: needs.changes.outputs.docs_only == 'true'
         run: |
