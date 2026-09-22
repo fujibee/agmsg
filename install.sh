@@ -105,6 +105,39 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # It is shared by fresh install, --update selection, and --update re-detection;
 # adding a templated type therefore cannot silently fall back to the wrong flavor.
 
+# Remove any file under $dest that $src no longer ships. `cp -R` (used at
+# both call sites below) only ever adds or overwrites -- it never deletes a
+# file whose release predecessor is gone, so every prior release that
+# dropped a file needed its own one-off `rm -f` here (rearm.sh in 1.3.2/
+# #1321, the Antigravity resume helper's move). #1378 found this is a real
+# hazard, not a cosmetic one: 18 files from pre-1.4.0 releases were still
+# sitting in a live install, and one of them (rearm.sh) was run and behaved
+# like the retired tool it used to be, not like the current procedure.
+#
+# Scoped to exclude scripts/drivers/ entirely: that tree is the driver
+# discovery surface (ADR 0002, scripts/lib/driver-registry.sh), and #1249
+# already established -- with a test -- that a user-added driver directory
+# there must survive an update even though it ships nothing this release
+# knows about (it stays untrusted/unloaded until the user opts in, but it is
+# not deleted). Nothing else under scripts/ has a comparable drop-in
+# contract, so everywhere else is safe to prune against the release's own
+# file list.
+agmsg_prune_removed_scripts() {
+  local src="$1" dest="$2"
+  local manifest rel
+  manifest="$(mktemp)"
+  (cd "$src" && find . -type f) | sed 's|^\./||' > "$manifest"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    case "$rel" in drivers/*) continue ;; esac
+    if ! grep -qxF "$rel" "$manifest"; then
+      echo "    - removing (no longer shipped): scripts/$rel"
+      rm -f "$dest/$rel"
+    fi
+  done < <((cd "$dest" && find . -type f) | sed 's|^\./||')
+  rm -f "$manifest"
+}
+
 # Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by
 # <dest>, so the fix's scope matches the defect's (#747):
 #   - regular <dest>: `mv` — an atomic rename, so an interrupted install leaves
@@ -440,6 +473,7 @@ $_agmsg_running_team"
   # ship without enumerating files. The agent-type manifests and per-type runtimes
   # live under scripts/drivers/types/ now, so this single copy carries them too.
   cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
+  agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts"
   # #1249: drivers/terminals/{herdr,plain,tmux}/SKILL.md used to name each
   # driver's own doc file, and a directory-scanning skill loader (e.g.
   # codex's) treated it as a standalone skill missing YAML frontmatter,
@@ -456,16 +490,6 @@ $_agmsg_running_team"
     rm -f "$SKILL_DIR/scripts/drivers/terminals/$_agmsg_builtin_driver/SKILL.md"
   done
   unset _agmsg_builtin_driver
-  # The Antigravity resume helper moved under its type directory. A plain
-  # recursive copy cannot remove the old top-level file, so delete this one
-  # known agmsg-owned path during --update; do not sweep user scripts.
-  rm -f "$SKILL_DIR/scripts/antigravity-resume.sh"
-  # rearm.sh shipped in 1.3.1 and is removed again in 1.3.2 (#1321): a
-  # dedicated re-arm command is gone in favor of the same procedure done
-  # through poke.sh, described in natural language in each type's own
-  # template. A plain cp -R never deletes a file absent from the source
-  # tree, so an --update from 1.3.1 would otherwise keep this one forever.
-  rm -f "$SKILL_DIR/scripts/rearm.sh"
   # Ship the external-plugin drop-in dir (just its README) so the location exists
   # post-install. A plain cp — not cp -R --delete — preserves any plugins the
   # user dropped in and their db/trusted-plugins opt-ins.
@@ -695,6 +719,7 @@ agmsg_render_skill "$TPL_TYPE" "$CMD_NAME" "$SKILL_DIR/SKILL.md"
 # without enumerating files. The agent-type manifests and per-type runtimes live
 # under scripts/drivers/types/ now, so this single copy carries them too.
 cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
+agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts"
 # Ship the external-plugin drop-in dir (just its README) so the location exists
 # post-install. A plain cp — not cp -R --delete — preserves any plugins the user
 # dropped in and their db/trusted-plugins opt-ins.

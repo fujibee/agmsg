@@ -1284,6 +1284,53 @@ EOF
   [ -f "$current" ]
 }
 
+# #1378: install.sh's `cp -R` never removed a file dropped by an earlier
+# release, so a retired tool (most recently rearm.sh, run by hand after it
+# had already been deleted from the shipped release) stayed live in the
+# install and behaved like the thing it used to be. Same fixture, two
+# outcomes in the same run: a stale file under scripts/ with no current
+# equivalent must go, AND a stale file that collides by exact relative path
+# with a file this release DOES ship (the real shape of the bug -- e.g.
+# init-db.sh's pre-1.3.0 top-level location versus its current
+# scripts/internal/ home) must not take the current file down with it. A
+# removal test without a real keep-set in the same run would pass a
+# delete-everything implementation just as well, so this also plants marker
+# files in the three locations #1378 named as never-touch (ext-tools config
+# + secret, db/, teams/) and confirms --update leaves them byte-for-byte.
+@test "install --update: prunes scripts/ files this release no longer ships, without touching user data" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  local pure_leftover="$SK/scripts/hook.sh"
+  local colliding_old="$SK/scripts/init-db.sh"
+  local colliding_current="$SK/scripts/internal/init-db.sh"
+  [ ! -e "$pure_leftover" ]
+  [ ! -e "$colliding_old" ]
+  [ -f "$colliding_current" ]
+  printf '%s\n' 'pre-1.4.0 leftover, no successor anywhere' > "$pure_leftover"
+  printf '%s\n' 'pre-1.3.0 top-level init-db.sh' > "$colliding_old"
+  local current_contents
+  current_contents="$(cat "$colliding_current")"
+
+  mkdir -p "$SK/ext-tools/myteam"
+  printf '%s\n' 'tool config' > "$SK/ext-tools/myteam/mytool.conf"
+  printf '%s\n' 'tool secret' > "$SK/ext-tools/myteam/mytool.secret"
+  mkdir -p "$SK/teams/myteam"
+  printf '%s\n' 'team config' > "$SK/teams/myteam/config.json"
+  printf '%s\n' 'sqlite bytes, not really' > "$SK/db/agmsg.sqlite3"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+
+  [ ! -e "$pure_leftover" ]
+  [ ! -e "$colliding_old" ]
+  [ -f "$colliding_current" ]
+  [ "$(cat "$colliding_current")" = "$current_contents" ]
+
+  [ "$(cat "$SK/ext-tools/myteam/mytool.conf")" = "tool config" ]
+  [ "$(cat "$SK/ext-tools/myteam/mytool.secret")" = "tool secret" ]
+  [ "$(cat "$SK/teams/myteam/config.json")" = "team config" ]
+  [ "$(cat "$SK/db/agmsg.sqlite3")" = "sqlite bytes, not really" ]
+}
+
 @test "uninstall: removes the Antigravity skill" {
   mkdir -p "$FAKE_HOME/.gemini/config"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
