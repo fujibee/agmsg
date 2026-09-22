@@ -298,10 +298,26 @@ _agmsg_type_detect_proc() {
 #
 # Memoized per type: agmsg_pid_is_agent runs inside agmsg_agent_pid's ppid walk
 # (up to 20 hops), and a manifest read per hop is a filesystem scan per hop.
+#
+# Also sets _AGMSG_AGENT_BINARIES_OUT (in addition to printing, which the bats
+# suite's `run`/`$( )` call sites still rely on) so a caller that is NOT
+# itself inside a command substitution can read the result as a plain
+# statement. agmsg_pid_is_agent below used to call this via
+# `binaries=$(_agmsg_agent_binaries "$type")` -- that `$( )` forks a subshell
+# for the WHOLE function body, so the cache write a few lines below
+# (`printf -v "$cache_var" ...`) landed in that subshell's memory and was
+# gone the moment it exited. Every single call re-ran the grep+head below:
+# measured, 5 calls for the same type cost 5 greps and 5 heads, not 1 (the
+# memoization existed in source but did nothing). See memory's "a cache array
+# populated inside $(...) is discarded" for the same shape elsewhere.
 _agmsg_agent_binaries() {
   local type="$1" cache_var procs tok out=""
   cache_var="_AGMSG_AGENT_BINS_$(printf '%s' "$type" | tr -c '[:alnum:]' '_')"
-  if [ -n "${!cache_var:-}" ]; then printf '%s\n' "${!cache_var}"; return 0; fi
+  if [ -n "${!cache_var:-}" ]; then
+    _AGMSG_AGENT_BINARIES_OUT="${!cache_var}"
+    printf '%s\n' "$_AGMSG_AGENT_BINARIES_OUT"
+    return 0
+  fi
 
   procs="$(_agmsg_type_detect_proc "$type" 2>/dev/null || true)"
   for tok in $procs; do
@@ -321,6 +337,7 @@ _agmsg_agent_binaries() {
     esac
   fi
   printf -v "$cache_var" '%s' "$out"
+  _AGMSG_AGENT_BINARIES_OUT="$out"
   printf '%s\n' "$out"
 }
 
@@ -345,7 +362,8 @@ agmsg_pid_is_agent() {
   [ -n "$pid" ] || return 1
   _agmsg_pid_alive "$pid" || return 1
   local binaries comm cmdline first base bin
-  binaries=$(_agmsg_agent_binaries "$type")
+  _agmsg_agent_binaries "$type" >/dev/null
+  binaries="$_AGMSG_AGENT_BINARIES_OUT"
   comm=$(compat_get_comm "$pid" 2>/dev/null || true)
   cmdline=$(compat_get_cmdline "$pid" 2>/dev/null || true)
   case "$cmdline" in
