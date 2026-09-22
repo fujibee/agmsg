@@ -86,48 +86,64 @@ permissions:
 # 35 runs that day, 140 macOS jobs, queue waits of 0-50 min, one PR's shard
 # waiting 50 min behind runs whose heads had already been replaced). So a new
 # run for the same PR cancels the one before it. The same reasoning applies to
-# an integration branch, which is only ever dogfooded at its tip. A push to main
-# is the one case that is never cancelled: its group is its own run id, and that
-# run is what a release reads (#848). The block below spells out all three.
+# an integration branch, which is only ever dogfooded at its tip.
 #
-# The `pull_request` case above ALSO now fires on `closed` (merged or just
-# closed, #1304), which is what finally cancels the in-flight run for a PR
-# that gets merged/closed without a further push -- until this, that run had
-# no way to be superseded and just ran to completion on its own, burning a
-# macOS slot for a PR that was already resolved. This is safe against the
-# hazard that matters here -- cancelling a run whose result some OTHER run
-# still needs -- for two reasons specific to this group: (1) the group key is
-# `pr-<number>`, so a closed event for PR N can only ever cancel something
-# already in PR N's own group; it can never reach a different PR's group or
-# main's (main pushes group by run id, never cancelled, and closing a PR
-# never fires a push event on main). (2) `closed` only fires once PR N itself
-# is already merged or abandoned, i.e. after whatever gated on PR N's own
-# checks has already been decided -- there is nothing left downstream that
-# still needs the in-flight run's verdict once its own PR has closed.
+# A push to main used to be the one case that was never cancelled -- its group
+# was its own run id -- on the theory that a release reads the run for the
+# commit it ships, and a main run that another main run cancelled would leave
+# that commit with no verdict at all (#848). That theory does not survive
+# checking the actual release path (#1304): cutting a release tags whatever is
+# CURRENTLY at the tip of main right after merging the release PR (see
+# RELEASING.md), and neither release.yml nor cut-release.sh look up a tests.yml
+# run by run id or SHA -- release.yml is self-contained (its own checkout,
+# verify, publish) and is triggered by a TAG push, a different event tests.yml
+# does not even listen for. Branch protection's required checks (`bats`, `bats
+# (windows-latest, install helpers)`) are satisfied on the PR's own head-SHA
+# run before merge is even allowed -- a main-push run has never gated a merge.
+# So nothing anywhere reads an intermediate main commit's own run once a newer
+# commit has landed on top of it; the newer run's tree already contains
+# whatever the intermediate commit changed, so it verifies that too. Without
+# cancellation this pattern showed up for real on 2026-09-22: three main-push
+# runs queued back to back, the two older ones already superseded by a newer
+# commit before they'd even started their macOS jobs, each still holding
+# scarce macOS slots until it finished on its own.
+#
+# So push to main now groups the same way push to an integration branch
+# already did: by ref, cancelled on a newer push. The `pull_request` case
+# ALSO now fires on `closed` (merged or just closed, #1304), which is what
+# finally cancels the in-flight run for a PR that gets merged/closed without a
+# further push -- until this, that run had no way to be superseded and just
+# ran to completion on its own, burning a macOS slot for a PR that was already
+# resolved. This is safe against the hazard that matters here -- cancelling a
+# run whose result some OTHER run still needs -- for two reasons specific to
+# this group: (1) the group key is `pr-<number>`, so a closed event for PR N
+# can only ever cancel something already in PR N's own group; it can never
+# reach a different PR's group or a push group. (2) `closed` only fires once
+# PR N itself is already merged or abandoned, i.e. after whatever gated on PR
+# N's own checks has already been decided -- there is nothing left downstream
+# that still needs the in-flight run's verdict once its own PR has closed.
 concurrency:
-  # Three cases, and they want different things.
+  # Two cases now, and they want the same thing.
   #
-  #   pull_request        -- group by PR. A head that has moved makes the run
-  #                          worthless, so cancel the one before it.
-  #   push to main        -- group by run id, i.e. never cancel. A release reads
-  #                          the run for the commit it ships (#848); a main run
-  #                          that another main run cancelled would leave that
-  #                          commit with no verdict at all.
-  #   push to integration -- group by ref, and cancel. An integration branch
-  #                          collects several PRs one after another, and it is
-  #                          only ever dogfooded at its tip. Without this the
-  #                          five merges of one release queue five full suites
-  #                          that all compete for the same five macOS slots
-  #                          (the header above measured 0-50 min queue waits at
-  #                          that contention), and four of the five verdicts are
-  #                          about a tip that no longer exists by the time they
-  #                          land.
+  #   pull_request -- group by PR. A head that has moved makes the run
+  #                   worthless, so cancel the one before it.
+  #   push         -- group by ref (main and integration/** alike, the only
+  #                   two `on.push.branches` this workflow listens for). A
+  #                   branch is only ever dogfooded/released at its tip, so an
+  #                   older push's run is worthless the moment a newer one
+  #                   lands -- see the header above for why that now also
+  #                   holds for main. Without this, several pushes in a row
+  #                   queue that many full suites competing for the same five
+  #                   macOS slots (the header above measured exactly this
+  #                   happening on main on 2026-09-22, and #933 measured the
+  #                   same shape on integration branches earlier), and all but
+  #                   the last verdict are about a tip that no longer exists
+  #                   by the time they land.
   group: >-
     tests-${{ github.event_name == 'pull_request'
     && format('pr-{0}', github.event.pull_request.number)
-    || (github.ref == 'refs/heads/main' && github.run_id
-    || format('push-{0}', github.ref)) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
+    || format('push-{0}', github.ref) }}
+  cancel-in-progress: true
 
 env:
   # Number of parallel bats shards per OS. The matrix and the shard helper must
