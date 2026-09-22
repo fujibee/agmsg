@@ -11,6 +11,14 @@ setup() {
   export FAKE_HOME="$(mktemp -d)"
   export REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   export SK="$FAKE_HOME/.agents/skills/agmsg"
+  # install.sh's Codex sandbox config now also writes to $CODEX_HOME/config.toml
+  # when CODEX_HOME is set and differs from the default. A developer machine
+  # running Codex under a profile (CODEX_HOME set in the ambient shell) would
+  # otherwise leak every `install.sh --cmd agmsg` run below straight into that
+  # REAL file — caught in review by finding this suite's own tmp-dir paths
+  # accumulated inside a real ~/.codex_profiles/*/config.toml. Only the test
+  # that exercises CODEX_HOME itself sets it, scoped to that one invocation.
+  unset CODEX_HOME
   # Pin bare instance-id keying (#93) so the watcher self-clean smoke test keys
   # its pidfile on the raw session_id it passes — deterministic in CI and when
   # the suite runs under an agent process.
@@ -845,6 +853,30 @@ EOF
   # under db/teams/run — measured directly against a real seat
   # (`codex exec -s workspace-write`) before this entry existed:
   # `mkdir: .../ext-tools/<team>: Operation not permitted`.
+  grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "install: honors CODEX_HOME, and also configures the plain ~/.codex default when it differs" {
+  # A machine running more than one Codex identity points CODEX_HOME at a
+  # per-profile dir; that is the file the seat actually reads, not
+  # ~/.codex/config.toml — measured directly: a seat running under such a
+  # profile still got `mkdir: .../ext-tools/<team>: Operation not permitted`
+  # after install.sh reported success, because it had edited a file nothing
+  # read. The Codex desktop app, on the same machine, uses the plain
+  # ~/.codex default regardless of a shell's CODEX_HOME, so both need it
+  # when CODEX_HOME points elsewhere.
+  local profile_home="$FAKE_HOME/.codex_profiles/work"
+  mkdir -p "$FAKE_HOME/.codex" "$profile_home"
+  cat > "$FAKE_HOME/.codex/config.toml" <<'EOF'
+model = "gpt-test"
+EOF
+  cat > "$profile_home/config.toml" <<'EOF'
+model = "gpt-test"
+EOF
+
+  CODEX_HOME="$profile_home" HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  grep -q "$SK/ext-tools" "$profile_home/config.toml"
   grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
 }
 

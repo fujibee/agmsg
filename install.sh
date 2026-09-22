@@ -240,36 +240,18 @@ move_into_place() {
   fi
 }
 
-configure_codex_sandbox() {
-  # --- Configure Codex sandbox (if Codex is installed) ---
-  # The Codex bridge writes pidfiles/sockets/request files under the
-  # skill's db/, teams/, run/ dirs; Codex's sandbox blocks those writes unless
-  # they are listed as writable_roots. See docs/codex-monitor-beta.md.
-  #
-  # ext-tools/ is here for the same reason: an ext-tool member's `setup`
-  # (secret and save) writes its config/key under the skill's ext-tools/
-  # dir, and a sandboxed Codex seat could not write there without this --
-  # measured directly against a real seat (`codex exec -s workspace-write`,
-  # not the `codex sandbox` debug subcommand, which does not apply
-  # config.toml's writable_roots at all and rejects every write regardless),
-  # which failed with `mkdir: .../ext-tools/<team>: Operation not permitted`
-  # before this entry existed, and succeeded once it was added.
-  local code_config="$HOME/.codex/config.toml"
+# Adds this install's writable_paths (below) to ONE Codex config.toml.
+# Split out of configure_codex_sandbox() because that function now targets
+# more than one file (see there) and every one of them gets the identical
+# missing-detection/backup/insert treatment.
+_configure_codex_sandbox_file() {
+  local code_config="$1"
+  shift
+  local writable_paths=("$@")
   if [ ! -f "$code_config" ]; then
     return 0
   fi
 
-  local writable_paths=("$SKILL_DIR/db" "$SKILL_DIR/teams" "$SKILL_DIR/run" "$SKILL_DIR/ext-tools")
-  # On Windows (MSYS2/Git Bash), $SKILL_DIR is in MSYS form (/c/Users/...).
-  # Codex is a native Windows binary whose Rust path resolution cannot parse
-  # MSYS paths — /c/Users/... is resolved to C:\c\Users\... (a phantom path).
-  # Convert to the mixed C:/Users/... form that both the shell and Codex accept.
-  if command -v cygpath >/dev/null 2>&1; then
-    local i
-    for i in "${!writable_paths[@]}"; do
-      writable_paths[$i]="$(cygpath -m "${writable_paths[$i]}" 2>/dev/null || printf '%s' "${writable_paths[$i]}")"
-    done
-  fi
   local missing=()
   local p
   for p in "${writable_paths[@]}"; do
@@ -279,7 +261,7 @@ configure_codex_sandbox() {
   done
 
   if [ ${#missing[@]} -eq 0 ]; then
-    echo "  ~ Codex writable_roots already configured"
+    echo "  ~ Codex writable_roots already configured ($code_config)"
     return 0
   fi
 
@@ -313,7 +295,58 @@ configure_codex_sandbox() {
     # No section at all
     printf '\n[sandbox_workspace_write]\nwritable_roots = [%s]\n' "$entries" >> "$code_config"
   fi
-  echo "  + added Codex writable_roots for db/, teams/, run/, and ext-tools/"
+  echo "  + added Codex writable_roots for db/, teams/, run/, and ext-tools/ ($code_config)"
+}
+
+configure_codex_sandbox() {
+  # --- Configure Codex sandbox (if Codex is installed) ---
+  # The Codex bridge writes pidfiles/sockets/request files under the
+  # skill's db/, teams/, run/ dirs; Codex's sandbox blocks those writes unless
+  # they are listed as writable_roots. See docs/codex-monitor-beta.md.
+  #
+  # ext-tools/ is here for the same reason: an ext-tool member's `setup`
+  # (secret and save) writes its config/key under the skill's ext-tools/
+  # dir, and a sandboxed Codex seat could not write there without this --
+  # measured directly against a real seat (`codex exec -s workspace-write`,
+  # not the `codex sandbox` debug subcommand, which does not apply
+  # config.toml's writable_roots at all and rejects every write regardless),
+  # which failed with `mkdir: .../ext-tools/<team>: Operation not permitted`
+  # before this entry existed, and succeeded once it was added.
+  #
+  # Codex resolves its own config against $CODEX_HOME (default ~/.codex), not
+  # always ~/.codex -- a machine running more than one Codex identity/account
+  # sets CODEX_HOME per profile, and this function used to only ever write
+  # ~/.codex/config.toml, so a seat actually running under a CODEX_HOME
+  # profile never got these entries at all (measured: `mkdir: .../ext-tools/
+  # <team>: Operation not permitted` persisted for that seat even after this
+  # function reported success, because it had edited a file nothing read).
+  # The reverse also happens on the same machine: the Codex desktop app
+  # (codex-app) uses the plain ~/.codex default regardless of a shell's
+  # CODEX_HOME. Writing to only one when they differ silently breaks
+  # whichever surface wasn't written, so when CODEX_HOME is set and does not
+  # already point at ~/.codex, this configures BOTH.
+  local default_config="$HOME/.codex/config.toml"
+  local codex_configs=("$default_config")
+  if [ -n "${CODEX_HOME:-}" ] && [ "$CODEX_HOME/config.toml" != "$default_config" ]; then
+    codex_configs+=("$CODEX_HOME/config.toml")
+  fi
+
+  local writable_paths=("$SKILL_DIR/db" "$SKILL_DIR/teams" "$SKILL_DIR/run" "$SKILL_DIR/ext-tools")
+  # On Windows (MSYS2/Git Bash), $SKILL_DIR is in MSYS form (/c/Users/...).
+  # Codex is a native Windows binary whose Rust path resolution cannot parse
+  # MSYS paths — /c/Users/... is resolved to C:\c\Users\... (a phantom path).
+  # Convert to the mixed C:/Users/... form that both the shell and Codex accept.
+  if command -v cygpath >/dev/null 2>&1; then
+    local i
+    for i in "${!writable_paths[@]}"; do
+      writable_paths[$i]="$(cygpath -m "${writable_paths[$i]}" 2>/dev/null || printf '%s' "${writable_paths[$i]}")"
+    done
+  fi
+
+  local cfg
+  for cfg in "${codex_configs[@]}"; do
+    _configure_codex_sandbox_file "$cfg" "${writable_paths[@]}"
+  done
 }
 
 is_windows_host() {
