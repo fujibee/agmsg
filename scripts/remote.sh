@@ -2340,7 +2340,14 @@ cmd_connect() {
     esac
   done
   : "${endpoint:?Usage: remote.sh connect --endpoint <url> [--e2ee] <team>}"
-  _remote_validate_endpoint "$endpoint" || exit 1
+  # The plaintext-address rule protects message bodies that would otherwise
+  # cross the network unencrypted. Under --e2ee those bodies are sealed before
+  # they ever reach this check, so the rule has nothing left to protect here --
+  # skip it, exactly as the refusal text itself promises ("connect with --e2ee
+  # so the contents are sealed before they leave this machine").
+  if [ "$e2ee" -eq 0 ]; then
+    _remote_validate_endpoint "$endpoint" || exit 1
+  fi
   endpoint="${endpoint%/}"
   team="${positional[0]:-}"
   [ -n "$team" ] || { echo "agmsg: connect requires a team: remote.sh connect --endpoint <url> [--e2ee] <team>" >&2; exit 1; }
@@ -3104,7 +3111,7 @@ _remote_reprocess_team() {
 cmd_sync_start() {
   local team="${1:?Usage: remote.sh sync start <team>}" cfg connected_at disconnected_at \
     engine_state engine_pid started_pid ready_pid startup_nonce ready=0 i=0 \
-    logfile log_offset=1
+    logfile log_offset=1 readiness_started readiness_elapsed
   # Test-only override of the readiness-wait ceiling below, default unchanged
   # (1600). Exists so a test that drives the engine into never becoming
   # ready does not have to spend this command's real production wait
@@ -3120,6 +3127,26 @@ cmd_sync_start() {
   local ready_ceiling="${AGMSG_TEST_SYNC_START_READY_CEILING:-1600}"
   _remote_ceiling_is_plain_digits "$ready_ceiling" || ready_ceiling=1600
   [ "$ready_ceiling" -gt 0 ] || ready_ceiling=1600
+  # BUDGETED IN TIME, NOT ONLY ITERATIONS (#779). The attempt ceiling above
+  # was documented as roughly sixteen seconds at its default, but every turn
+  # also starts the status probe, tail, awk and sleep -- that arithmetic
+  # holds only where they are free. Keep the attempt ceiling as a safety cap,
+  # but also bound the real wait by the wall clock: whichever arrives first
+  # ends readiness polling. Sixteen seconds, unconditionally, in production.
+  #
+  # Test-only override of the budget above, same shape and same reason as
+  # AGMSG_TEST_SYNC_START_READY_CEILING just above: a test that drives the
+  # engine into never becoming ready does not have to spend this command's
+  # real sixteen-second production wait to prove the timeout path. Not a
+  # user-facing setting -- there is no supported way to change the
+  # production default.
+  #
+  # Anything but a plain positive integer falls back to the production
+  # default rather than being trusted, for the same reason as the ceiling
+  # above.
+  local readiness_budget="${AGMSG_TEST_SYNC_START_READY_SECONDS:-16}"
+  _remote_ceiling_is_plain_digits "$readiness_budget" || readiness_budget=16
+  [ "$readiness_budget" -gt 0 ] || readiness_budget=16
   [ $# -eq 1 ] || { echo "Usage: remote.sh sync start <team>" >&2; exit 1; }
   agmsg_validate_team_name "$team" || exit 1
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
@@ -3201,6 +3228,10 @@ cmd_sync_start() {
   # deciding whether to start and starting, and nothing after -- so that a marker
   # that is late or missing for ANY reason costs this caller its own wait and
   # not the rest of the machine.
+  #
+  # readiness_budget (declared above) starts counting here, right before the
+  # loop that spends it.
+  readiness_started="$(date +%s)"
   agmsg_lock_release
   while [ "$i" -lt "$ready_ceiling" ]; do
     IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
@@ -3214,6 +3245,8 @@ cmd_sync_start() {
       break
     fi
     i=$((i + 1))
+    readiness_elapsed=$(( $(date +%s) - readiness_started ))
+    [ "$readiness_elapsed" -ge "$readiness_budget" ] && break
     sleep 0.01
   done
   if [ "$ready" -ne 1 ]; then

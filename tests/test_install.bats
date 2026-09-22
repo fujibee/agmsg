@@ -1284,6 +1284,110 @@ EOF
   [ -f "$current" ]
 }
 
+# install.sh's `cp -R` never removed a file dropped by an earlier release
+# and never backed up one it was about to overwrite, so a retired tool
+# (most recently rearm.sh, run by hand after it had already been deleted
+# from the shipped release) stayed live in the install and behaved like
+# the thing it used to be, and a local edit under scripts/ could vanish
+# mid-upgrade with nobody reading the output. The maintainer's call after
+# review: stop trying to judge "safe to delete" perfectly and make the
+# outcome recoverable instead -- move rather than delete, keep exactly one
+# generation, say what moved.
+#
+# One test, everything in the same run per the maintainer's list: a stale
+# file with no current successor is moved (not deleted) into .trash/; a
+# stale file that collides by exact relative path with a file this release
+# DOES ship (init-db.sh's pre-1.3.0 top-level location vs. its current
+# scripts/internal/ home -- the real shape of the original bug) moves
+# without taking the current file down with it; a file the release still
+# ships, but whose installed copy a user (or their agent) had edited, is
+# backed up with THAT edited content before being overwritten; user data
+# (ext-tools config + secret, db/, teams/) survives byte-for-byte; the
+# newline-in-filename escape onto a real ext-tools secret (co1's review of
+# the first version of this prune) stays closed; and a second --update
+# clears the first generation's .trash/ before writing its own.
+@test "install --update: moves removed/overwritten scripts/ files to .trash/ (one generation), never touches user data, and closes the newline escape" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local trash="$SK/.trash"
+
+  local pure_leftover="$SK/scripts/hook.sh"
+  local colliding_old="$SK/scripts/init-db.sh"
+  local colliding_current="$SK/scripts/internal/init-db.sh"
+  [ ! -e "$pure_leftover" ]
+  [ ! -e "$colliding_old" ]
+  [ -f "$colliding_current" ]
+  printf '%s\n' 'pre-1.4.0 leftover, no successor anywhere' > "$pure_leftover"
+  printf '%s\n' 'pre-1.3.0 top-level init-db.sh' > "$colliding_old"
+  local shipped_contents
+  shipped_contents="$(cat "$colliding_current")"
+
+  local edited="$SK/scripts/send.sh"
+  printf '\n# local edit, about to be overwritten\n' >> "$edited"
+  local edited_contents
+  edited_contents="$(cat "$edited")"
+
+  mkdir -p "$SK/ext-tools/myteam"
+  printf '%s\n' 'tool config' > "$SK/ext-tools/myteam/mytool.conf"
+  printf '%s\n' 'tool secret' > "$SK/ext-tools/myteam/mytool.secret"
+  mkdir -p "$SK/teams/myteam"
+  printf '%s\n' 'team config' > "$SK/teams/myteam/config.json"
+  printf '%s\n' 'sqlite bytes, not really' > "$SK/db/agmsg.sqlite3"
+
+  # co1's finding on the first version: `find | while read` split on
+  # newline lets an embedded newline forge a fake second "line". A real
+  # entry at scripts/<LF>../ext-tools/myteam/mytool.secret (one directory
+  # named the four bytes x, LF, ., .) prints as one find record but reads
+  # back, newline-split, as two: `x` and the real relative path
+  # `../ext-tools/myteam/mytool.secret` -- landing on the real secret
+  # below. This constructs that escape for real, not just against a
+  # survives-or-not assertion.
+  local evil_name
+  evil_name=$'x\n..'
+  mkdir -p "$SK/scripts/$evil_name/ext-tools/myteam"
+  printf '%s\n' 'decoy -- reading this back would mean the escape worked' \
+    > "$SK/scripts/$evil_name/ext-tools/myteam/mytool.secret"
+
+  HOME="$FAKE_HOME" run bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  # moved, not deleted; the shipped collision is untouched
+  [ ! -e "$pure_leftover" ]
+  [ ! -e "$colliding_old" ]
+  [ -f "$colliding_current" ]
+  [ "$(cat "$colliding_current")" = "$shipped_contents" ]
+  [ "$(cat "$trash/hook.sh")" = "pre-1.4.0 leftover, no successor anywhere" ]
+  [ "$(cat "$trash/init-db.sh")" = "pre-1.3.0 top-level init-db.sh" ]
+
+  # the overwritten local edit is backed up with what was really there
+  [ "$(cat "$trash/send.sh")" = "$edited_contents" ]
+  run grep -q "local edit, about to be overwritten" "$edited"
+  [ "$status" -ne 0 ]
+
+  # user data untouched, byte-for-byte
+  [ "$(cat "$SK/ext-tools/myteam/mytool.conf")" = "tool config" ]
+  [ "$(cat "$SK/ext-tools/myteam/mytool.secret")" = "tool secret" ]
+  [ "$(cat "$SK/teams/myteam/config.json")" = "team config" ]
+  [ "$(cat "$SK/db/agmsg.sqlite3")" = "sqlite bytes, not really" ]
+
+  # the newline escape never reached the real secret, even as a mv
+  [ -f "$SK/ext-tools/myteam/mytool.secret" ]
+  [ "$(cat "$SK/ext-tools/myteam/mytool.secret")" = "tool secret" ]
+
+  # a second --update starts its own generation: gen 1 is gone, gen 2's own
+  # leftover is there in its place
+  local gen2_leftover="$SK/scripts/hook-on.sh"
+  [ ! -e "$gen2_leftover" ]
+  printf '%s\n' 'gen-2 leftover' > "$gen2_leftover"
+
+  HOME="$FAKE_HOME" run bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  [ ! -e "$trash/hook.sh" ]
+  [ ! -e "$trash/init-db.sh" ]
+  [ ! -e "$trash/send.sh" ]
+  [ "$(cat "$trash/hook-on.sh")" = "gen-2 leftover" ]
+}
+
 @test "uninstall: removes the Antigravity skill" {
   mkdir -p "$FAKE_HOME/.gemini/config"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg

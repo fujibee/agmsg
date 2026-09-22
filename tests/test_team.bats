@@ -186,12 +186,37 @@ EOF
 @test "team: shows team members with types" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
   bash "$SCRIPTS/join.sh" myteam bob codex /tmp/proj-b
+  # An ext-tool member has no terminal, pane, or session at all by design
+  # (type.conf: spawnable=no, readiness_sentinel=no) -- the human table must
+  # show that as "ext-tool (faketool)" and plain "-" placeholders, not a
+  # string of n/a:<reason>/unknown:<reason> cells that read as broken.
+  local faketool_dir="$SCRIPTS/drivers/ext-tools/faketool"
+  mkdir -p "$faketool_dir"
+  printf 'name=faketool\ntimeout=4\n' > "$faketool_dir/tool.conf"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf '%s\n' 'case "${1:-}" in'
+    printf '%s\n' '  save) printf "tool=faketool\n" > "${2:?}"; chmod 600 "${2:?}" ;;'
+    printf '%s\n' '  *) exit 0 ;;'
+    printf '%s\n' 'esac'
+  } > "$faketool_dir/setup"
+  chmod +x "$faketool_dir/setup"
+  bash "$SCRIPTS/ext-tool.sh" setup myteam carol faketool save
+  bash "$SCRIPTS/join.sh" myteam carol ext-tool --tool faketool
   run bash "$SCRIPTS/team.sh" myteam
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "alice" ]]
-  [[ "$output" =~ "claude-code" ]]
-  [[ "$output" =~ "bob" ]]
-  [[ "$output" =~ "codex" ]]
+  # grep -q, not [[ =~ ]]: none of these is the test body's last statement
+  # any more now that more assertions follow, and a non-last [[ ]] does not
+  # trip errexit on bash 3.2 (this file's own enforced-assertions idiom).
+  grep -q "alice" <<<"$output"
+  grep -q "claude-code" <<<"$output"
+  grep -q "bob" <<<"$output"
+  grep -q "codex" <<<"$output"
+  grep -qF "ext-tool (faketool)" <<<"$output"
+  local carol_line
+  carol_line="$(grep 'carol' <<<"$output")"
+  refute grep -qE 'n/a:|unknown:' <<<"$carol_line"
 }
 
 @test "team: an agent name containing a single quote doesn't break the underlying SQL statement (#87-class)" {

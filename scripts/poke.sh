@@ -31,13 +31,15 @@ set -euo pipefail
 # with "unsupported: <why>" on stderr, non-zero — never a silent 0.
 #
 # Before typing, a type that opted in (input_prompt_marker set in its
-# manifest) has its input box checked for a draft — see
-# scripts/lib/input-box.sh. That check narrows the window a poke can
+# manifest) has its input box checked for someone actively typing — see
+# scripts/lib/input-box.sh and the comment above the check below (#1322):
+# two snapshots ~1s apart, refusing only if they differ, not by judging
+# whatever the box currently holds. That check narrows the window a poke can
 # corrupt a draft; it does NOT close it: a person can start typing in the
-# instant between the check and the actual keystroke below, and that
-# keystroke can still land mixed with theirs (maintainer-accepted residual
-# risk, #1321 review). "poke checked the box first" is not "poke cannot
-# ever type into a non-empty box".
+# instant between the second snapshot and the actual keystroke below, and
+# that keystroke can still land mixed with theirs (maintainer-accepted
+# residual risk, #1321 review). "poke checked first" is not "poke cannot
+# ever type over someone still typing".
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
@@ -52,7 +54,7 @@ source "$SCRIPT_DIR/lib/compat.sh"              # required by detect-cli-type.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/detect-cli-type.sh"     # agmsg_detect_cli_type (#1229 plain fallback)
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/input-box.sh"           # agmsg_input_box_empty (#1321)
+source "$SCRIPT_DIR/lib/input-box.sh"           # agmsg_input_box_snapshot (#1321, #1322)
 
 die() { echo "poke: $*" >&2; exit 1; }
 
@@ -65,9 +67,10 @@ shift 2
 # this script runs exactly once, same as before this existed). Pulled out
 # of the remaining args first, in any position, so they never disturb the
 # body-spec parsing below. Retries exist only for the input-box refusal
-# (#1321) — a transient condition (the person finishes typing) — never for
-# a driver-level failure (unreachable pane, no placement record, and so
-# on), which retrying would not fix.
+# (#1321) — a transient condition (someone is actively typing right now,
+# per #1322's two-snapshot comparison, and may finish) — never for a
+# driver-level failure (unreachable pane, no placement record, and so on),
+# which retrying would not fix.
 RETRIES=0
 RETRY_DELAY=2
 BACKOFF=exponential
@@ -158,6 +161,29 @@ INPUT_MARKER="$(agmsg_type_get "$TYPE" input_prompt_marker)"
 INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
 [ "$TERMINAL" = plain ] && INPUT_MARKER=""
 
+# #1322: a content-pattern check here refused two shapes that are not a
+# person's draft at all — Claude Code's own candidate/suggestion text left
+# in the box, and Codex's "Ask Codex to do anything" placeholder — because
+# both are non-blank characters, same as a real draft, and content alone
+# cannot tell them apart. What actually distinguishes a real draft is that
+# it CHANGES: someone actively typing produces a visibly different box a
+# moment later; a suggestion, a placeholder, or an abandoned draft sits
+# still. So the check below takes two snapshots of the box, AGMSG_POKE_
+# INPUT_BOX_SETTLE_SECONDS apart, and refuses only when they differ.
+#
+# The interval is fixed, not a flag: making it configurable would leave
+# "how long is long enough" an open question nobody has actually measured,
+# with the value drifting per caller. 1 second was chosen because ordinary
+# interactive typing — including a Japanese IME updating its pre-conversion
+# buffer per kana — changes the box well under a second between keystrokes,
+# so a 1s window reliably catches an in-progress edit; measured (2026-09-21,
+# read-only) against three real idle panes over a full 8s span (five reads,
+# 2s apart), the STATIONARY case — Claude Code candidate text on two panes,
+# Codex's placeholder (with its own decorative Braille animation, see
+# scripts/lib/input-box.sh) on a third — never changed at all, so 1s carries
+# no false-positive risk against exactly the content this fix exists for.
+AGMSG_POKE_INPUT_BOX_SETTLE_SECONDS=1
+
 RC=0
 ATTEMPT=0
 while :; do
@@ -175,23 +201,37 @@ while :; do
       # collapsing every peek failure into 14.
       RC="$PEEK_RC"
     else
-      # A successful-but-EMPTY read is NOT proof the box is empty: a real
-      # pane can transiently show nothing during a screen redraw or a
-      # switch to an alternate screen, and typing there would still land on
-      # top of a real draft. Refuse (14) the same as any other
-      # not-confirmed-empty screen; do not special-case empty content
-      # (#1321 review round 3 — reverts round 2's peek/poke-asymmetry
-      # shortcut).
-      agmsg_input_box_empty "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN" || RC=14
+      SNAP1="" SNAP1_RC=0
+      SNAP1="$(agmsg_input_box_snapshot "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN")" || SNAP1_RC=$?
+      sleep "$AGMSG_POKE_INPUT_BOX_SETTLE_SECONDS"
+      SCREEN="" PEEK_RC=0
+      SCREEN="$(terminal_peek "$BARE_ID")" || PEEK_RC=$?
+      if [ "$PEEK_RC" -ne 0 ]; then
+        RC="$PEEK_RC"
+      else
+        SNAP2="" SNAP2_RC=0
+        SNAP2="$(agmsg_input_box_snapshot "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN")" || SNAP2_RC=$?
+        # Either snapshot failing to confirm where the box even is (a
+        # transient redraw, an alternate-screen switch) is treated the same
+        # as the two snapshots differing outright -- "cannot tell" still
+        # fails toward refusing, never toward typing (unchanged bias from
+        # #1321).
+        if [ "$SNAP1_RC" -ne 0 ] || [ "$SNAP2_RC" -ne 0 ] || [ "$SNAP1" != "$SNAP2" ]; then
+          RC=14
+        fi
+      fi
     fi
   fi
   if [ "$RC" -eq 0 ]; then
     terminal_poke "$BARE_ID" "$TEXT" >/dev/null || RC=$?
     break
   fi
-  # Retries exist to wait out a draft being typed (RC=14) — a driver-level
-  # failure propagated above, or from terminal_poke's own attempt, would not
-  # be fixed by waiting and must not be retried.
+  # Retries exist to wait out someone still actively typing (RC=14) — a
+  # driver-level failure propagated above, or from terminal_poke's own
+  # attempt, would not be fixed by waiting and must not be retried. Each
+  # retry re-runs the full two-snapshot comparison above (its own internal
+  # ~1s wait is separate from, and in addition to, --retry-delay's wait
+  # between attempts).
   [ "$RC" -eq 14 ] || break
   [ "$ATTEMPT" -lt "$RETRIES" ] || break
   ATTEMPT=$((ATTEMPT + 1))
@@ -205,7 +245,7 @@ while :; do
 done
 
 if [ "$RC" -eq 14 ]; then
-  echo "poke: '$TEAM/$NAME' has a draft in its input box — refusing to type over it (input in progress)" >&2
+  echo "poke: '$TEAM/$NAME' has a changing input box — refusing to type over it (input in progress)" >&2
   exit 14
 fi
 

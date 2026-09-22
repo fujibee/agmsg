@@ -64,6 +64,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/type-registry.sh"
 
 # #414: TEAM becomes a path segment (teams/$TEAM/config.json) below whether or
 # not --force is given, so validate it unconditionally, before any config-path
@@ -92,6 +94,11 @@ DB="$(agmsg_db_path "$TEAM")"
 # command; the message write itself goes through the storage facade below.
 [ -f "$DB" ] || bash "$SCRIPT_DIR/internal/init-db.sh" >/dev/null
 
+# Unconditional (moved ahead of the --force gate below): the generic
+# per-type message plug after storage_send needs this path regardless of
+# --force.
+TEAM_CONFIG="$SCRIPT_DIR/../teams/$TEAM/config.json"
+
 # #355: reject a from/to that isn't registered in <team> — an unnoticed typo
 # (e.g. a stray send to "dummy") used to insert successfully with exit 0,
 # landing an undeliverable message and polluting history. Validation lives
@@ -99,8 +106,6 @@ DB="$(agmsg_db_path "$TEAM")"
 # can keep their own policy. --force bypasses this for intentional
 # pre-registration sends (e.g. notifying a role before its own join.sh runs).
 if [ "$FORCE" -ne 1 ]; then
-  TEAM_CONFIG="$SCRIPT_DIR/../teams/$TEAM/config.json"
-
   _agmsg_roster_check() {
     local role="$1" name="$2"
     if [ ! -f "$TEAM_CONFIG" ]; then
@@ -138,9 +143,69 @@ fi
 # the message log (an append-only message_sent event), not a direct INSERT.
 # storage_send re-inits its schema idempotently before writing, which subsumes the
 # #114 concurrent first-write race the old path retried around (a process seeing
-# the DB file before the table exists just creates it). The id is surfaced only
-# for the explicit --print-id machine contract.
-MESSAGE_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY")"
+# the DB file before the table exists just creates it). The id is surfaced for
+# the explicit --print-id machine contract and reused below for the per-type hook.
+MSG_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY")"
 
 echo "Sent to $TO in team $TEAM"
-[ "$PRINT_ID" -eq 0 ] || echo "message_id=$MESSAGE_ID"
+[ "$PRINT_ID" -eq 0 ] || echo "message_id=$MSG_ID"
+
+# Generic per-type "message arrived" plug (scripts/drivers/types/<type>/_message.sh):
+# lets a type react to a message just sent to one of its own members, without
+# this script knowing any type's name (ext-tool's dispatch launch is the
+# first and, so far, only example -- see scripts/drivers/ext-tools/README.md
+# for its own adapter contract). Best-effort: any failure a hook reports must
+# never turn a successful send into a failed one -- the message is already
+# saved by this point. A hook may not call exit.
+if [ -n "${MSG_ID:-}" ] && [ -f "$TEAM_CONFIG" ]; then
+  # Quote held in a variable, not written inline in the pattern (#897): a
+  # literal \' replacement disagrees between bash 3.2 (keeps the backslash,
+  # doubling into \'\') and bash 4+ (doubles into ''), and this scope has no
+  # $q from _agmsg_roster_check's own local above to reuse.
+  q="'"
+  TO_SQL=${TO//$q/$q$q}
+  # Every distinct type $TO is registered as, from its registrations array
+  # (every other type's shape) or its bare top-level type (the shape a team
+  # with no id-bearing roster still has) -- an agent registered under more
+  # than one type gets the hook called once per type that defines one.
+  TO_TYPES="$(agmsg_sqlite_mem "
+    WITH raw(json) AS (SELECT CAST(readfile('$(agmsg_sql_readfile_path "$TEAM_CONFIG")') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
+    agent(a) AS (SELECT value FROM cfg, json_each(json_extract(cfg.json, '\$.agents')) WHERE key = '$TO_SQL')
+    SELECT group_concat(DISTINCT t) FROM (
+      SELECT json_extract(value, '\$.type') AS t
+      FROM agent, json_each(json_extract(agent.a, '\$.registrations'))
+      WHERE json_extract(value, '\$.type') IS NOT NULL
+      UNION
+      SELECT json_extract(agent.a, '\$.type') AS t
+      FROM agent
+      WHERE json_extract(agent.a, '\$.type') IS NOT NULL
+    );
+  " 2>/dev/null)"
+  if [ -n "$TO_TYPES" ]; then
+    IFS=',' read -ra _AGMSG_TO_TYPES <<<"$TO_TYPES"
+    for _agmsg_to_type in "${_AGMSG_TO_TYPES[@]}"; do
+      _agmsg_msg_type_dir="$(agmsg_type_dir "$_agmsg_to_type" 2>/dev/null || true)"
+      if [ -n "$_agmsg_msg_type_dir" ] && [ -f "$_agmsg_msg_type_dir/_message.sh" ]; then
+        # shellcheck disable=SC1090
+        . "$_agmsg_msg_type_dir/_message.sh"
+        if declare -F agmsg_type_on_message >/dev/null 2>&1; then
+          _AGMSG_MSG_BODY_FILE="$(mktemp)"
+          printf '%s' "$BODY" > "$_AGMSG_MSG_BODY_FILE"
+          # The `|| true` is load-bearing, not style: this script runs under
+          # `set -e`, and this hook is SOURCED into it, so `set -e` is still
+          # active inside it -- any command failing partway through the
+          # hook (not just an explicit non-zero return) would otherwise trip
+          # errexit right here and kill send.sh itself, after the message
+          # was already saved and "Sent to ..." already printed, skipping
+          # the cleanup below too (review finding). The hook's own contract
+          # is "a failure never turns a successful send into a failed one,
+          # and the caller decides how this ends" -- shielding the call is
+          # what keeps that true regardless of what happens inside the hook.
+          agmsg_type_on_message "$TEAM" "$FROM" "$TO" "$MSG_ID" "$_AGMSG_MSG_BODY_FILE" || true
+          rm -f "$_AGMSG_MSG_BODY_FILE"
+        fi
+      fi
+    done
+  fi
+fi

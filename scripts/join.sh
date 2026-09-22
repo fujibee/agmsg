@@ -8,11 +8,6 @@ set -euo pipefail
 TEAM="${1:?Usage: join.sh <team> <agent_id> <type> <project_path> [--force]}"
 AGENT_ID="${2:?Missing agent_id}"
 AGENT_TYPE="${3:?Missing type (a registered type under scripts/drivers/types/<name>/)}"
-PROJECT_PATH="${4:?Missing project_path}"
-FORCE=0
-if [ "${5:-}" = "--force" ]; then
-  FORCE=1
-fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
@@ -31,10 +26,36 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
 
 # Reject team names that would escape teams/ as a path segment (#140).
+# Ahead of the per-type join plug below: a type's own parse_args hook (e.g.
+# ext-tool's) may turn $TEAM into a path segment of its own before the rest
+# of this script runs, so it must be validated before that, not after.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
 agmsg_validate_team_name "$TEAM" || exit 1
 agmsg_validate_agent_name "$AGENT_ID" || exit 1
+
+# Generic per-type join plug (scripts/drivers/types/<type>/_join.sh): lets a
+# type parse its own trailing arguments (they need not look like <project_path>
+# [--force] at all -- ext-tool's shape is `--tool <tool> [--force]`) and
+# control the resolve/pane steps below, all without this script knowing any
+# type's name. Neither hook function may call exit -- this script decides
+# what a non-zero return means. A type without a _join.sh (or without one of
+# the two functions) gets the unchanged generic behavior.
+_AGMSG_JOIN_TYPE_DIR="$(agmsg_type_dir "$AGENT_TYPE" 2>/dev/null || true)"
+if [ -n "$_AGMSG_JOIN_TYPE_DIR" ] && [ -f "$_AGMSG_JOIN_TYPE_DIR/_join.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$_AGMSG_JOIN_TYPE_DIR/_join.sh"
+fi
+
+if declare -F agmsg_join_type_parse_args >/dev/null 2>&1; then
+  agmsg_join_type_parse_args "${@:4}" || exit 1
+else
+  PROJECT_PATH="${4:?Missing project_path}"
+  FORCE=0
+  if [ "${5:-}" = "--force" ]; then
+    FORCE=1
+  fi
+fi
 
 # Resolve the session's real project root from the passed pwd (see #92), so an
 # agent-driven join from a subdir/worktree registers under the project the
@@ -56,8 +77,22 @@ source "$SCRIPT_DIR/lib/roster-journal.sh"
 # legitimate use case. The #357 protection is on the resolution side: the
 # ancestor walk never LANDS on $HOME/`/`, so such a registration only ever
 # matches its exact path and cannot silently vacuum up sessions beneath it.
-PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE" "$TEAM")"
-PROJECT_PATH="$(agmsg_normalize_project_path "$PROJECT_PATH")"
+#
+# A type's _join.sh may say (via agmsg_join_type_skip_resolve) that its
+# PROJECT_PATH is not a real filesystem path at all -- ext-tool's is the
+# synthetic "(ext-tool:<tool>)" placeholder set above, which resolve/
+# normalize's session-marker and ancestor-directory lookups would have
+# nothing meaningful to match against. This same flag also governs the pane
+# resolution/recording step further down (one shared check for both).
+_AGMSG_JOIN_SKIP_RESOLVE=0
+if declare -F agmsg_join_type_skip_resolve >/dev/null 2>&1 && agmsg_join_type_skip_resolve; then
+  _AGMSG_JOIN_SKIP_RESOLVE=1
+fi
+
+if [ "$_AGMSG_JOIN_SKIP_RESOLVE" -eq 0 ]; then
+  PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE" "$TEAM")"
+  PROJECT_PATH="$(agmsg_normalize_project_path "$PROJECT_PATH")"
+fi
 
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
 
@@ -248,30 +283,39 @@ agmsg_lock_release
 # The source carries the errexit lift: on bash 3.2 a failure inside a sourced
 # file fires THIS script's `set -e`, so a plain `. x || true` would take the join
 # down instead of skipping the naming. Nothing here may fail a join.
-_agmsg_tr_rc=0; _agmsg_tr_e=0
-case $- in *e*) _agmsg_tr_e=1 ;; esac
-set +e
-# shellcheck disable=SC1091
-[ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
-_agmsg_tr_rc=$?
-[ "$_agmsg_tr_e" = 1 ] && set -e
-if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
-  _agmsg_session_id=""
-  _agmsg_session_env="$(agmsg_type_get "$AGENT_TYPE" session_env)"
-  if [ -n "$_agmsg_session_env" ]; then
-    case "$_agmsg_session_env" in
-      [A-Za-z_]*)
-        case "$_agmsg_session_env" in
-          *[!A-Za-z0-9_]*)
-            printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
-              "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
-          *) _agmsg_session_id="${!_agmsg_session_env:-}" ;;
-        esac ;;
-      *) printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
-           "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
-    esac
+#
+# Skipped when the type's own _join.sh asked to (agmsg_join_type_skip_resolve,
+# same flag as the resolve-project step above) -- a type with no pane of its
+# own has nothing here to resolve or name. Attempting it anyway for ext-tool
+# used to resolve THIS SEAT's own pane instead and print a confusing
+# "already recorded as ..." warning (harmless, but misleading; a maintainer
+# dogfood finding). Every other type's behavior here is unchanged.
+if [ "$_AGMSG_JOIN_SKIP_RESOLVE" -eq 0 ]; then
+  _agmsg_tr_rc=0; _agmsg_tr_e=0
+  case $- in *e*) _agmsg_tr_e=1 ;; esac
+  set +e
+  # shellcheck disable=SC1091
+  [ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+  _agmsg_tr_rc=$?
+  [ "$_agmsg_tr_e" = 1 ] && set -e
+  if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+    _agmsg_session_id=""
+    _agmsg_session_env="$(agmsg_type_get "$AGENT_TYPE" session_env)"
+    if [ -n "$_agmsg_session_env" ]; then
+      case "$_agmsg_session_env" in
+        [A-Za-z_]*)
+          case "$_agmsg_session_env" in
+            *[!A-Za-z0-9_]*)
+              printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
+                "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
+            *) _agmsg_session_id="${!_agmsg_session_env:-}" ;;
+          esac ;;
+        *) printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
+             "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
+      esac
+    fi
+    agmsg_terminal_name_self_safe "$_agmsg_session_id" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" || true
   fi
-  agmsg_terminal_name_self_safe "$_agmsg_session_id" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" || true
 fi
 
 echo "Joined team $TEAM as $AGENT_ID"

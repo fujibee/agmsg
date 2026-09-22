@@ -82,6 +82,12 @@ _member_delivery() {
 }
 
 JSON_FIRST=1
+# A trailing, optional 21st argument: a type's own extra tool-like label
+# (see scripts/drivers/types/ext-tool/_row.sh's _ext_tool_name for the one
+# current producer), empty for any type that has none. team.sh --json's
+# shape does not change for any existing field -- this is carried through as
+# ONE new field ("tool") added to the JSON object, and used only for the
+# human table's type column.
 _emit_row() {
   local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
   local container="$6" activity="$7" delivery="$8"
@@ -90,7 +96,7 @@ _emit_row() {
   local key_cell="$4" key_expected="$5" key_actual="$6"
   local session_cell="$7" session_expected="$8" session_actual="$9"
   shift 9
-  local consistency="$1" reach_status="$2" reach_detail="$3"
+  local consistency="$1" reach_status="$2" reach_detail="$3" tool="${4:-}"
   if [ "$OUTPUT_MODE" = json ]; then
     [ "$JSON_FIRST" -eq 1 ] || printf ',\n'
     JSON_FIRST=0
@@ -99,12 +105,12 @@ _emit_row() {
       "$label_cell" "$label_expected" "$label_actual" \
       "$key_cell" "$key_expected" "$key_actual" \
       "$session_cell" "$session_expected" "$session_actual" "$consistency" \
-      "$reach_status" "$reach_detail"
+      "$reach_status" "$reach_detail" "$tool"
   else
     agmsg_team_render_human_row "$member" "$type" "$project" "$terminal" "$pane" \
       "$container" "$activity" "$delivery" \
       "$label_cell" "$key_cell" "$session_cell" "$consistency" \
-      "$reach_status" "$reach_detail"
+      "$reach_status" "$reach_detail" "$tool"
   fi
 }
 
@@ -133,6 +139,25 @@ _member_status() {
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration n/a \
       cannot remote_registration
     return 0
+  fi
+  # Generic per-type row plug (scripts/drivers/types/<type>/_row.sh): lets a
+  # type fully replace the placement-based row below with its own (ext-tool
+  # is the first and, so far, only example -- a program has no terminal,
+  # pane, or screen to resolve a placement record for, so the generic flow's
+  # "unknown:no_placement_record"-shaped cells would read as broken for a
+  # member that was never going to have one). Returns 0 having emitted the
+  # row itself; returns 1 with NO output at all when it declines, so the
+  # generic flow below can pick the row up cleanly. This hook may not call
+  # exit.
+  local _agmsg_row_type_dir
+  _agmsg_row_type_dir="$(agmsg_type_dir "$type" 2>/dev/null || true)"
+  if [ -n "$_agmsg_row_type_dir" ] && [ -f "$_agmsg_row_type_dir/_row.sh" ]; then
+    # shellcheck disable=SC1090
+    . "$_agmsg_row_type_dir/_row.sh"
+    if declare -F agmsg_team_row_override >/dev/null 2>&1 \
+      && agmsg_team_row_override "$team" "$agent" "$type" "$project"; then
+      return 0
+    fi
   fi
   delivery="$(_member_delivery "$type" "$project")"
   if [ "$_agmsg_pl_rc" -ne 0 ] || ! declare -F agmsg_spawn_path >/dev/null 2>&1; then

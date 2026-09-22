@@ -314,16 +314,18 @@ EOF
   run bash "$SCRIPTS/poke.sh" testteam alice "hello there"
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via tmux"
-  # Exactly THREE tmux invocations: the #1321 input-box peek (capture-pane),
-  # then the #619 two-burst submission. A merged single send-keys burst (the
-  # #619 regression), a missing peek, or a fourth stray call all change this
-  # count.
-  [ "$(grep -c '^tmux ' "$ARGV_LOG")" -eq 3 ]
-  local peek first second
-  peek="$(sed -n '1p' "$ARGV_LOG")"
-  first="$(sed -n '2p' "$ARGV_LOG")"
-  second="$(sed -n '3p' "$ARGV_LOG")"
-  [ "$peek" = 'tmux [capture-pane] [-p] [-t] [%5]' ]
+  # Exactly FOUR tmux invocations: the #1322 two-snapshot input-box check
+  # (capture-pane, capture-pane), then the #619 two-burst submission. A
+  # merged single send-keys burst (the #619 regression), a missing peek, or
+  # a fifth stray call all change this count.
+  [ "$(grep -c '^tmux ' "$ARGV_LOG")" -eq 4 ]
+  local peek1 peek2 first second
+  peek1="$(sed -n '1p' "$ARGV_LOG")"
+  peek2="$(sed -n '2p' "$ARGV_LOG")"
+  first="$(sed -n '3p' "$ARGV_LOG")"
+  second="$(sed -n '4p' "$ARGV_LOG")"
+  [ "$peek1" = 'tmux [capture-pane] [-p] [-t] [%5]' ]
+  [ "$peek2" = 'tmux [capture-pane] [-p] [-t] [%5]' ]
   # Burst 1 is the literal text and carries NO Enter — the equality is what
   # goes red if the Enter ever rejoins the text burst (an Enter appended to
   # this line makes the string differ).
@@ -338,10 +340,10 @@ EOF
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via herdr"
-  # Two herdr invocations: the #1321 input-box peek (pane read), then the
-  # single agent-prompt submission call.
-  [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 2 ]
-  grep -q '^herdr \[pane\] \[read\] \[wC:p4\] \[--source\] \[visible\]$' "$ARGV_LOG"
+  # Three herdr invocations: the #1322 two-snapshot input-box check (pane
+  # read, pane read), then the single agent-prompt submission call.
+  [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 3 ]
+  [ "$(grep -c '^herdr \[pane\] \[read\] \[wC:p4\] \[--source\] \[visible\]$' "$ARGV_LOG")" -eq 2 ]
   # The inner ':' of the herdr pane id must survive the record round-trip.
   grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
   # No synthesized keystrokes: submission is agent prompt's own.
@@ -385,9 +387,9 @@ EOF
   run bash "$SCRIPTS/poke.sh" testteam alice --body-file "$TEST_SKILL_DIR/body.txt"
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via herdr"
-  # Line 1 is the #1321 input-box peek; the submission is line 2.
-  [ "$(sed -n '2p' "$ARGV_LOG")" = 'herdr [agent] [prompt] [wC:p4] [check `whoami` and $(hostname) plus "quotes" and $HOME here]' ]
-  [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 2 ]
+  # Lines 1-2 are the #1322 two-snapshot input-box check; the submission is line 3.
+  [ "$(sed -n '3p' "$ARGV_LOG")" = 'herdr [agent] [prompt] [wC:p4] [check `whoami` and $(hostname) plus "quotes" and $HOME here]' ]
+  [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 3 ]
 }
 
 @test "poke: --body - reads stdin; a missing file and an empty body refuse before any terminal runs" {
@@ -944,26 +946,35 @@ EOF
   grep -q '^tmux \[swap-pane\] \[-s\] \[%1\] \[-t\] \[%2\]$' "$ARGV_LOG"
 }
 
-# #1321: poke.sh must not type over a person's own half-typed draft. The two
-# canned screens below mirror a real Claude Code pane's own shape (measured
-# live 2026-09-18): a top rule carrying the pane's label, the ❯ prompt line,
-# a bottom rule -- the exact structure scripts/lib/input-box.sh's "boxed"
-# check scopes its search to. RULE60 is built, not hand-typed, so its length
-# (60 >= the 20-character run the checker requires) is provable, not eyeballed.
-_install_fake_herdr_input_box() {
-  local shape="$1" rule
-  rule="$(printf '─%.0s' $(seq 1 60))"
+# #1321/#1322: poke.sh must not type over someone actively typing, but must
+# NOT refuse just because the box holds non-blank text that isn't a draft at
+# all (Claude Code's own candidate/suggestion text, or Codex's "Ask Codex to
+# do anything" placeholder — #1322). The check now takes two snapshots ~1s
+# apart and refuses only when they differ, so every fixture below must
+# answer TWO "pane read" calls per poke.sh attempt, not one.
+#
+# _install_fake_herdr_screen_sequence <screen1> [<screen2> ...]: each "pane
+# read" call consumes the next screen in order; a call past the last one
+# given keeps repeating the LAST screen (so a caller that wants "both reads
+# identical" only has to pass one). State lives in a file, not a subshell
+# variable, since each herdr invocation below is a genuinely separate
+# process.
+_install_fake_herdr_screen_sequence() {
+  local state="$BATS_TEST_TMPDIR/screen-seq-idx" i=0 s
+  printf '0' > "$state"
+  for s in "$@"; do
+    printf '%s' "$s" > "$BATS_TEST_TMPDIR/screen-seq-$i.txt"
+    i=$((i + 1))
+  done
+  local last=$((i - 1))
   {
     printf '#!/usr/bin/env bash\n'
     printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
     printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
-    printf "  printf '%%s\\\\n' '%s testteam-alice ─'\n" "$rule"
-    if [ "$shape" = draft ]; then
-      printf "  printf '%%s\\\\n' '❯ half-typed draft'\n"
-    else
-      printf "  printf '%%s\\\\n' '❯'\n"
-    fi
-    printf "  printf '%%s\\\\n' '%s'\n" "$rule"
+    printf '  idx="$(cat "%s")"\n' "$state"
+    printf '  [ "$idx" -le %d ] || idx=%d\n' "$last" "$last"
+    printf '  cat "%s/screen-seq-$idx.txt"\n' "$BATS_TEST_TMPDIR"
+    printf '  printf "%%s" "$((idx + 1))" > "%s"\n' "$state"
     printf 'fi\n'
     printf 'exit 0\n'
   } > "$FAKEBIN/herdr"
@@ -978,81 +989,84 @@ _write_codex_record() {
   printf '%s\t/tmp/project-a\tcodex' "$ref" > "$path"
 }
 
-# Fake herdr for the flat (Codex) shape: one canned "pane read" screen per
-# call, taken in order, so ONE fake covers a multi-call scenario without a
-# stateful counter.
-_install_fake_herdr_flat_screens() {
-  local out="$FAKEBIN/herdr" i=0
-  {
-    printf '#!/usr/bin/env bash\n'
-    printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
-    printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
-    printf '  case "$AGMSG_TEST_FLAT_SCREEN_FILE" in *) :;; esac\n'
-    printf '  cat "$AGMSG_TEST_FLAT_SCREEN_FILE"\n'
-    printf 'fi\n'
-    printf 'exit 0\n'
-  } > "$out"
-  chmod +x "$out"
-  export PATH="$FAKEBIN:$PATH"
+# Builds one boxed-shape (Claude Code) screen: top rule + label, the marker
+# line's own <tail>, bottom rule. Mirrors a real pane's shape (measured live
+# 2026-09-18). RULE60 is built, not hand-typed, so its length (60 >= the
+# 20-character run the checker requires) is provable, not eyeballed.
+_boxed_screen() {
+  local tail="$1" rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  printf '%s testteam-alice ─\n❯%s\n%s\n' "$rule" "${tail:+ $tail}" "$rule"
 }
 
-@test "poke.sh refuses a Claude Code seat with a draft in its input box, and types once the box is empty" {
-  _install_fake_herdr_input_box draft
+# Builds one flat-shape (Codex) screen: marker line's own <tail>, one
+# "blank" line (carrying Codex's own decorative Braille noise, measured live
+# on a real stuck pane 2026-09-21 -- it draws there too, not just on the
+# marker line, so the structural check must braille-strip THIS line before
+# judging it blank, or every read of a genuinely idle Codex pane fails to
+# confirm the live widget at all), a status footer containing "·" -- the
+# live-widget triplet #1321 requires to confirm this is the real box.
+_flat_screen() {
+  local tail="$1"
+  printf 'some transcript line\n›%s\n    ⠈   ⠁  ⠐    ⠄\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' "${tail:+ $tail}"
+}
+
+@test "poke.sh types when the input box is unchanged across two reads (empty, candidate text, or a Codex placeholder alike), and refuses only when it changes (#1321, #1322)" {
+  # Claude Code, genuinely empty, unchanged across both reads.
+  _install_fake_herdr_screen_sequence "$(_boxed_screen '')"
   _write_record "herdr:w1:p5"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -eq 0 ]
+  _out_has "poked 'testteam/alice' via herdr"
+
+  # Claude Code, Claude's OWN candidate/suggestion text sitting in the box,
+  # unchanged across both reads — #1322's own motivating case. A
+  # content-pattern check would have refused this (non-blank marker line);
+  # the two-read comparison correctly lets it through since it never moves.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_screen_sequence "$(_boxed_screen 'suggested next step')"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -eq 0 ]
+  grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+
+  # Claude Code, someone actively typing: the second read shows one more
+  # character than the first — refuses, and never reaches the submission
+  # call.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_screen_sequence "$(_boxed_screen 'half-typed')" "$(_boxed_screen 'half-typed draft')"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 14 ]
   _out_has "input in progress"
   [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
 
+  # Codex, genuinely empty (its own placeholder), unchanged across both
+  # reads. Real Codex panes draw a decorative Braille animation OVER this
+  # exact placeholder that changes on every redraw even though nothing was
+  # typed (measured live, 2026-09-21, see scripts/lib/input-box.sh) — using
+  # the identical screen for both reads here is deliberate: that decoration
+  # is covered by the dedicated normalization test below, not this one.
   : > "$ARGV_LOG"
-  _install_fake_herdr_input_box empty
-  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
-  [ "$status" -eq 0 ]
-  _out_has "poked 'testteam/alice' via herdr"
-  grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
-
-  # Codex, genuinely empty (#1321 review): the exact shape measured live on
-  # 5 real Codex panes (2026-09-18) -- marker line carrying Codex's own
-  # placeholder text, one blank line, a status footer containing "·".
-  # Still delivers.
-  : > "$ARGV_LOG"
-  _install_fake_herdr_flat_screens
-  export AGMSG_TEST_FLAT_SCREEN_FILE="$TEST_SKILL_DIR/flat-screen.txt"
-  printf 'some transcript line\n› Ask Codex to do anything\n\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' \
-    > "$AGMSG_TEST_FLAT_SCREEN_FILE"
+  _install_fake_herdr_screen_sequence "$(_flat_screen 'Ask Codex to do anything')"
   _write_codex_record codex1 "herdr:w1:p6"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
   [ "$status" -eq 0 ]
   grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
 
-  # Codex, real single-line draft in the same measured shape -- the
-  # marker's own tail is neither blank nor the placeholder, so it refuses
-  # even with a valid footer witness right below it.
+  # Codex, someone actively typing a real draft: refuses.
   : > "$ARGV_LOG"
-  printf 'some transcript line\n› half typed draft\n\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' \
-    > "$AGMSG_TEST_FLAT_SCREEN_FILE"
+  _install_fake_herdr_screen_sequence "$(_flat_screen 'half typed')" "$(_flat_screen 'half typed draft')"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
   [ "$status" -eq 14 ]
   [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
 
-  # Codex, multi-line draft: the marker line's OWN tail looks blank, but a
-  # continuation line sits where the footer witness must be -- refuses,
-  # because the blank-line-then-footer structure is broken, not because the
-  # continuation text itself was read.
+  # Codex, stale/off-screen marker on BOTH reads: a blank "›" with blank
+  # lines after it and NO footer at all -- the exact shape the previous
+  # "near the bottom" guess accepted as empty, because proximity alone
+  # cannot tell a live box from a leftover one. Neither read can confirm
+  # this is the live widget, so it refuses even though the two reads are
+  # identical -- "cannot tell" still fails toward refusing (#1321).
   : > "$ARGV_LOG"
-  printf 'some transcript line\n› \nhalf-typed continuation\n\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' \
-    > "$AGMSG_TEST_FLAT_SCREEN_FILE"
-  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
-  [ "$status" -eq 14 ]
-  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
-
-  # Codex, stale/off-screen marker: a blank "›" with blank lines after it
-  # and NO footer at all -- the exact shape the previous "near the bottom"
-  # guess accepted as empty (confirmed against that implementation before
-  # this fix), because proximity alone cannot tell a live box from a
-  # leftover one. The footer-witness requirement refuses it.
-  : > "$ARGV_LOG"
-  printf '›\n\n\n' > "$AGMSG_TEST_FLAT_SCREEN_FILE"
+  _install_fake_herdr_screen_sequence "$(printf '›\n\n\n')"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
   [ "$status" -eq 14 ]
   [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
@@ -1066,4 +1080,29 @@ _install_fake_herdr_flat_screens() {
   _write_named_record plaintarget 'plain:-'
   run bash "$SCRIPTS/poke.sh" testteam plaintarget "hello"
   [ "$status" -ne 14 ]
+}
+
+@test "input-box: Codex's own decorative Braille animation is stripped before comparing, but a real (Japanese) edit still shows as changed" {
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/input-box.sh"
+
+  # Two REAL raw lines captured live from a stuck Codex pane (`advisor`,
+  # 2026-09-21) 2 seconds apart, showing its idle "Ask Codex to do anything"
+  # placeholder -- unchanged in substance, but Codex's own decorative
+  # Braille animation (U+2800-U+28FF) drew differently across the two
+  # reads. A naive raw-text comparison would see these as different forever
+  # and never let a poke through to any idle Codex pane.
+  local codex_a codex_b
+  codex_a='›⠁Ask Codex to do anything⡀        ⠈ ⠂  ⠁ ⠁                  ⠈             ⠂         ⠐  ⠈'
+  codex_b='› Ask Codex to do anything   ⠈            ⠁                           ⠄             ⠁  ⠁        ⠁'
+  [ "$(_agmsg_strip_decorative_braille "$codex_a")" = "$(_agmsg_strip_decorative_braille "$codex_b")" ]
+
+  # A real edit -- two Japanese lines that differ only in real (non-Braille)
+  # characters -- must still compare as different. Without this half, an
+  # implementation that stripped ALL non-ASCII (not just the Braille block)
+  # would also pass the assertion above, but would blind the guard to
+  # someone typing in Japanese entirely (rejected on review, #1322).
+  local ja_a='❯ こんにちは、これは'
+  local ja_b='❯ こんにちは、これは書きかけ'
+  [ "$(_agmsg_strip_decorative_braille "$ja_a")" != "$(_agmsg_strip_decorative_braille "$ja_b")" ]
 }

@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# handle — post one agmsg message to Slack via chat.postMessage.
+#
+# Contract (design note §3): stdin is one JSON object
+#   {team, from, to, body, subject?, question?, message_id, config_path}
+# stdout is the reply body (empty means "no reply" -- Slack posting is
+# fire-and-forget by default, design note §6). Exit 0 is success; non-zero is
+# failure, and on failure this prints EXACTLY ONE line to stderr naming the
+# reason -- agmsg wraps that into "<name>: 処理に失敗しました (<reason>)" itself,
+# so this never fabricates that sentence or prints more than the one line.
+#
+# The member config only ever names WHERE the token lives (key_file=...);
+# the token itself is read once, held in a shell variable, and handed
+# straight to curl's Authorization header. It is never echoed, logged, or
+# included in the failure line.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/_lib.sh"
+
+# Not a trap: _slack_api_call sets and clears its OWN EXIT/INT/TERM trap
+# around its temp work_dir (traps are process-global, so a trap set here
+# would be silently overwritten -- or cleared -- by that inner call). Cheap
+# enough to remove explicitly on every path instead, and $out_file never
+# holds anything more sensitive than Slack's own JSON response.
+fail() {
+  printf '%s\n' "$*" >&2
+  [ -n "${out_file:-}" ] && rm -f "$out_file"
+  exit 1
+}
+
+input="$(cat)"
+config_path="$(printf '%s' "$input" | jq -r '.config_path // empty' 2>/dev/null)" ||
+  fail "request is not valid JSON"
+body="$(printf '%s' "$input" | jq -r '.body // empty')"
+
+[ -n "$config_path" ] || fail "request carries no config_path"
+[ -f "$config_path" ] || fail "member config not found: $config_path"
+
+key_file="$(_slack_conf_get "$config_path" key_file)"
+channel="$(_slack_conf_get "$config_path" channel)"
+[ -n "$key_file" ] || fail "member config is missing key_file: $config_path"
+[ -n "$channel" ] || fail "member config is missing channel: $config_path"
+
+_slack_read_token "$key_file" || fail "$_SLACK_TOKEN_ERROR"
+token="$_SLACK_TOKEN"
+
+out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-handle.XXXXXX")"
+
+_slack_api_call "$token" POST chat.postMessage "$out_file" \
+  "$(jq -cn --arg channel "$channel" --arg text "$body" '{channel: $channel, text: $text}')" ||
+  fail "chat.postMessage request failed: $_SLACK_CURL_DIAG"
+
+case "$_SLACK_HTTP_CODE" in
+  429) fail "chat.postMessage rate limited (HTTP 429)" ;;
+  2??) : ;;
+  *) fail "chat.postMessage returned unexpected HTTP $_SLACK_HTTP_CODE" ;;
+esac
+
+ok="$(jq -r '.ok // false' "$out_file" 2>/dev/null || echo false)"
+error=""
+[ "$ok" = "true" ] || error="$(jq -r '.error // "unknown_error"' "$out_file" 2>/dev/null || echo unknown_error)"
+rm -f "$out_file"
+[ "$ok" = "true" ] || fail "chat.postMessage failed: $error"
+
+# Fire-and-forget by default (design note §6): no reply body. A future
+# revision that wants the permalink back would call chat.getPermalink here
+# and print one line; nothing about this contract requires it yet.
+exit 0

@@ -43,11 +43,52 @@ write_node_launcher_fixtures() {
   printf '// stub node launcher fixture\n' > "$nd/nodetype-launcher.mjs"
 }
 
-@test "type-registry: known_types lists the eleven built-ins" {
+@test "type-registry: known_types lists the twelve built-ins" {
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; agmsg_known_types | sort -u | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "agmsg-app,antigravity,claude-code,codex,copilot,cursor,devin,gemini,grok-build,hermes,opencode" ]
+  [ "$output" = "agmsg-app,antigravity,claude-code,codex,copilot,cursor,devin,ext-tool,gemini,grok-build,hermes,opencode" ]
+}
+
+@test "type-registry: sourcing alone does not compute the renderable-types list (#631)" {
+  # This file is also sourced from resolve-project.sh, on a path resolve-project.sh
+  # re-enters every watch.sh poll cycle -- a caller wanting only agmsg_type_get/
+  # agmsg_type_dir must not pay for a walk over every known type ending in `paste`
+  # just because the file was sourced. Only calling agmsg_load_renderable_skill_types
+  # may do that work.
+  local shimbin="$BATS_TEST_TMPDIR/shim-bin" callog="$BATS_TEST_TMPDIR/calls.log"
+  mkdir -p "$shimbin"
+  : > "$callog"
+  local cmd real
+  for cmd in paste head; do
+    real="$(command -v "$cmd")"
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf "printf '%%s\\\\n' '%s' >> '%s'\n" "$cmd" "$callog"
+      printf "exec '%s' \"\$@\"\n" "$real"
+    } > "$shimbin/$cmd"
+    chmod +x "$shimbin/$cmd"
+  done
+
+  run env -i PATH="$shimbin:$PATH" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; :"
+  [ "$status" -eq 0 ]
+  [ ! -s "$callog" ]   # sourcing alone: neither shim ran
+
+  run env -i PATH="$shimbin:$PATH" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'
+     agmsg_load_renderable_skill_types
+     printf '%s\n' \"\$AGMSG_RENDERABLE_SKILL_TYPES\"
+     # A second call must not recompute (no second 'paste' line below).
+     agmsg_load_renderable_skill_types
+     printf '%s\n' \"\$AGMSG_RENDERABLE_SKILL_TYPES\""
+  [ "$status" -eq 0 ]
+  local first second
+  first="$(sed -n '1p' <<<"$output")"
+  second="$(sed -n '2p' <<<"$output")"
+  [ -n "$first" ]
+  [ "$first" = "$second" ]
+  [ "$(grep -c '^paste$' "$callog")" -eq 1 ]   # computed once, not twice
 }
 
 @test "type-registry: is_known_type accepts a built-in and rejects a bogus type" {
