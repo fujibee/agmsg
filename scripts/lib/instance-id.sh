@@ -33,6 +33,14 @@
 [ -n "${_AGMSG_INSTANCE_ID_SH:-}" ] && return 0
 _AGMSG_INSTANCE_ID_SH=1
 
+# For _agmsg_detect_platform / _agmsg_platform, used below by
+# _agmsg_pid_alive_local's MSYS branch. compat.sh has no include guard of its
+# own (several other libs already source it unconditionally the same way;
+# re-sourcing only resets the cheap, deterministic platform detection, not
+# any state that matters).
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/compat.sh"
+
 # Cross-platform pid liveness check, and the ONLY one any shipped script should
 # use. A bare `kill -0 "$pid" 2>/dev/null` is not a liveness check: it answers
 # "can I signal this", and the two differ exactly where it matters.
@@ -134,11 +142,27 @@ _agmsg_pid_alive_local() {
   # into "not running" (#505). But an EMPTY ps result is NOT proof of death: a
   # transient ps failure and a truly-absent pid both produce nothing, and reading
   # that as "gone" is #954 -- callers delete files, release locks, and respawn on
-  # it. Distinguish "proof of absence" from "absence of proof" by co-observing a
-  # known-live pid -- our own $$ -- in the SAME observation. Take a FULL snapshot
-  # (no -p filter, so the target pid is never handed to ps and cannot poison the
-  # query, e.g. macOS "process id too large"), parsed with builtins so only ps is
-  # external and a stripped PATH cannot itself become the failed observation:
+  # it. Distinguish "proof of absence" from "absence of proof". Which technique
+  # does that split by platform (#970 Windows follow-up): MSYS ps has no -o, so
+  # the whole-table-snapshot-plus-canary approach below cannot run there at all;
+  # _agmsg_detect_platform reads real uname(1) output, not the spoofable
+  # MSYSTEM env var, so this only takes the MSYS branch on an actual MSYS host.
+  _agmsg_detect_platform
+  # shellcheck disable=SC2154  # set by compat.sh's _agmsg_detect_platform, sourced above
+  case "$_agmsg_platform" in
+    msys)
+      # _agmsg_pid_gone_msys's own convention (0 = yes, gone) is the
+      # inverse of this function's (0 = alive) -- branch explicitly rather
+      # than propagating $? and hoping the two conventions happen to
+      # cancel out.
+      if _agmsg_pid_gone_msys "$pid"; then return 1; else return 0; fi
+      ;;
+  esac
+  # Co-observe a known-live pid -- our own $$ -- in the SAME observation. Take
+  # a FULL snapshot (no -p filter, so the target pid is never handed to ps and
+  # cannot poison the query, e.g. macOS "process id too large"), parsed with
+  # builtins so only ps is external and a stripped PATH cannot itself become
+  # the failed observation:
   #   - $$ absent from the snapshot => ps produced nothing usable => UNKNOWN =>
   #     assume alive, exactly as the EPERM branch above. A failed observation is
   #     not proof of absence.
@@ -183,6 +207,51 @@ PROBE
   # where "ps -Ao" is unsupported (it exits non-zero rather than lying "gone").
   if [ "$rc" -eq 0 ] && [ "$canary" = 1 ]; then return 1; fi
   return 0
+}
+
+# MSYS counterpart of the POSIX whole-table-snapshot-plus-canary technique
+# above, for _agmsg_pid_alive_local only. `ps -Ao pid=,stat=` is not available
+# under MSYS2's ps (no -o support, scripts/lib/compat.sh's own header
+# comment); `ps -l -p PID` is (compat_get_ppid, _compat_get_winpid already
+# rely on it), and it is inherently filtered to the one pid asked about, so
+# there is no truncated-listing risk to canary against the way the POSIX
+# snapshot has. The risk here instead is that ps fails to run, or answers in
+# a shape this parser does not recognize -- and only the header (proving ps
+# ran and understood -l -p at all, not merely what it says about this pid)
+# tells which happened:
+#   - no PID column on the header line => ps failed, or this MSYS ps build's
+#     -l shape isn't the one this parser knows => UNKNOWN => caller reads
+#     this as alive (#954's rule applies here exactly as it does above).
+#   - PID column present, no data row naming this exact pid => ps ran,
+#     understood the query, and the target is not in the process table =>
+#     positive proof of death.
+#   - PID column present, data row naming this pid => target present =>
+#     alive, unless its state is a zombie.
+# A normal shell predicate: returns 0 (success) when the pid is proven gone,
+# 1 otherwise (alive or unknown) -- `if _agmsg_pid_gone_msys ...; then` reads
+# naturally. This is the OPPOSITE sense of _agmsg_pid_alive_local's own
+# 0-means-alive convention, which is why the caller above branches on it
+# explicitly instead of returning it straight through.
+_agmsg_pid_gone_msys() {
+  local pid="$1" out pid_col_seen match_stat
+  out="$(ps -l -p "$pid" 2>/dev/null)"
+  pid_col_seen="$(printf '%s\n' "$out" | awk '
+    NR==1 { for (i = 1; i <= NF; i++) if ($i == "PID") { print "1"; exit } }
+  ')"
+  [ "$pid_col_seen" = "1" ] || return 1   # ps failed/unrecognized -> unknown -> not gone
+  match_stat="$(printf '%s\n' "$out" | awk -v want="$pid" '
+    NR==1 {
+      for (i = 1; i <= NF; i++) { if ($i == "PID") pc = i; if ($i == "S") sc = i }
+      next
+    }
+    NR==2 && pc && $pc == want { print (sc ? $sc : "?"); found = 1 }
+    END { if (!found) print "__absent__" }
+  ')"
+  case "$match_stat" in
+    __absent__) return 0 ;;   # ps ran, understood the query, target not listed -> gone
+    Z*)         return 0 ;;   # zombie: exited, not yet reaped -> gone
+    *)          return 1 ;;   # target present -> not gone
+  esac
 }
 
 # Liveness for a pid that came from OUTSIDE these shells -- reached by walking

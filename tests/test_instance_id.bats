@@ -295,6 +295,43 @@ gone_pid() {
   [ -e "$marker" ] || { echo "cleanup fired on a failed (truncated) ps snapshot"; false; }
 }
 
+@test "pid_alive_local: MSYS corroborates via ps -l -p where -Ao is unsupported, without turning unknown into dead (#970 Windows)" {
+  skip_on_windows "stubs uname/kill/ps; the real ones are authoritative on Windows"
+  # _agmsg_pid_alive_local's POSIX corroboration (above) takes a whole-table
+  # `ps -Ao pid=,stat=` snapshot, which MSYS2's ps does not support (no -o).
+  # On an actual MSYS/MINGW host (real uname, not just MSYSTEM set -- the
+  # #970 Windows CI hang was this exact branch always falling through to
+  # the unsupported -Ao call and reading every result as UNKNOWN => alive,
+  # so codex-bridge-launcher.sh's wait loop never saw its parent as gone),
+  # the corroboration must instead go through `ps -l -p PID`, the same
+  # query compat_get_ppid/_compat_get_winpid already rely on.
+  uname() { printf 'MINGW64_NT-10.0-26100\n'; }
+
+  # A genuinely dead pid: kill(2) reports ESRCH regardless of platform.
+  sh -c 'exit 0' & local gone=$!; wait "$gone" 2>/dev/null
+
+  # 1) ps ran, understood -l -p (header has a PID column), and printed no
+  # data row for this pid -> positive proof of death. This is the case the
+  # Windows hang needed and never got.
+  ps() { printf 'S UID PID PPID TIME CMD\n'; }
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -ne 0 ] || { echo "MSYS: an answered ps -l -p that omitted the target did not read dead"; false; }
+
+  # 2) ps ran and DID list a row for this pid -> alive, whatever kill(1)
+  # claimed to reach this branch at all (the row is direct evidence; #954's
+  # rule is that a positive sighting always outranks kill's say-so).
+  ps() { printf 'S UID PID PPID TIME CMD\n'; printf 'S 0 %s 1 0:00 something\n' "$gone"; }
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "MSYS: a pid ps -l -p actually listed did not read alive"; false; }
+
+  # 3) ps failed, or answered in a shape with no recognizable PID column at
+  # all -> UNKNOWN. #954's rule holds here exactly as it does on POSIX:
+  # a failed observation must never be read as proof of death.
+  ps() { return 1; }
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "MSYS: a failed ps -l -p was read as proof of death"; false; }
+}
+
 @test "pid_alive: a failing ps under set -e does not terminate a non-conditional caller (#954)" {
   skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
   # The leaf helper's contract must not depend on caller syntax. Called as a bare
