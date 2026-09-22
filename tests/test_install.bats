@@ -43,6 +43,28 @@ _agmsg_watch_pid() {
   WATCHED_PIDS="${WATCHED_PIDS}${WATCHED_PIDS:+$'\n'}${pid}"$'\t'"${expect}"
 }
 
+# Signal <pid> and CONFIRM it is actually gone before returning, rather than
+# firing the signal and trusting `wait`.
+#
+# `wait "$pid"` is not proof of anything for a pid like these: each was
+# started via nohup from a subshell (`run env ... bash .../remote.sh sync
+# start ...`) that has long since exited, so by the time this runs the pid
+# has been reparented to init and is not a child of THIS shell -- bash's
+# `wait` fails immediately ("not a child of this shell") rather than
+# blocking. `wait "$pid" 2>/dev/null || true` swallowed that error silently
+# and returned instantly regardless of whether the process had actually
+# exited. The TERM trap the fake engines set can take longer than that gap
+# to actually run, so a caller trusting `wait` moved on before the process
+# was really gone (#1387: this is how a leftover of these tests was found
+# still running days later -- not a missed kill, an unconfirmed one).
+# wait_for_pid_exit actually polls; SIGKILL is the fallback if the trap
+# never runs at all.
+_agmsg_kill_confirmed() {
+  local pid="$1"
+  kill "$pid" 2>/dev/null
+  wait_for_pid_exit "$pid" || kill -9 "$pid" 2>/dev/null
+}
+
 teardown() {
   local pid expect cmd
   while IFS=$'\t' read -r pid expect; do
@@ -59,7 +81,7 @@ teardown() {
     kill -0 "$pid" 2>/dev/null || continue
     cmd="$(/bin/ps -p "$pid" -o args= 2>/dev/null)"
     case "$cmd" in
-      *"$expect"*) kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true ;;
+      *"$expect"*) _agmsg_kill_confirmed "$pid" ;;
     esac
   done <<< "$WATCHED_PIDS"
   rm -rf "$FAKE_HOME"
@@ -418,6 +440,35 @@ teardown() {
   run env PATH="$fake_bin:$PATH" bash "$SK/scripts/remote.sh" status testteam
   [ "$status" -eq 0 ]
   [[ "$output" == *"connected (engine running, pid $new_pid)"* ]]
+}
+
+# #1387: reproduces the exact shape that leaked a real fake-node engine for
+# days on a shared machine -- a pid reparented to init (nohup'd from a
+# subshell that has already exited), so `wait "$pid"` cannot block on it and
+# silently lies about the process being gone. This is the fixed mechanism
+# itself, isolated from the rest of the #963 test above: a background process
+# whose TERM trap deliberately takes a moment to run (0.3s) before exiting,
+# so a caller that does not actually wait for it would still see it alive
+# immediately afterward.
+@test "_agmsg_kill_confirmed waits out a reparented process's TERM trap instead of trusting wait (#1387)" {
+  local marker="$BATS_TEST_TMPDIR/reparented.pid"
+  ( nohup bash -c '
+      trap "sleep 0.3; exit 0" TERM INT
+      echo "$$" > "'"$marker"'"
+      while :; do sleep 1; done
+    ' >/dev/null 2>&1 & )
+  wait_for_file "$marker"
+  local pid
+  pid="$(cat "$marker")"
+  kill -0 "$pid"   # sanity: it really is running before the call under test
+
+  _agmsg_kill_confirmed "$pid"
+
+  # No sleep, no retry here -- if _agmsg_kill_confirmed returned, the process
+  # must already be gone. A version that only fires `kill` and trusts `wait`
+  # would still see this process alive at this exact line (mutation-checked).
+  run kill -0 "$pid"
+  [ "$status" -ne 0 ]
 }
 
 @test "install: AGMSG_STORAGE_PATH override works against the installed skill" {
