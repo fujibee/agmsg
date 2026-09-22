@@ -245,12 +245,21 @@ configure_codex_sandbox() {
   # The Codex bridge writes pidfiles/sockets/request files under the
   # skill's db/, teams/, run/ dirs; Codex's sandbox blocks those writes unless
   # they are listed as writable_roots. See docs/codex-monitor-beta.md.
+  #
+  # ext-tools/ is here for the same reason: an ext-tool member's `setup`
+  # (secret and save) writes its config/key under the skill's ext-tools/
+  # dir, and a sandboxed Codex seat could not write there without this --
+  # measured directly against a real seat (`codex exec -s workspace-write`,
+  # not the `codex sandbox` debug subcommand, which does not apply
+  # config.toml's writable_roots at all and rejects every write regardless),
+  # which failed with `mkdir: .../ext-tools/<team>: Operation not permitted`
+  # before this entry existed, and succeeded once it was added.
   local code_config="$HOME/.codex/config.toml"
   if [ ! -f "$code_config" ]; then
     return 0
   fi
 
-  local writable_paths=("$SKILL_DIR/db" "$SKILL_DIR/teams" "$SKILL_DIR/run")
+  local writable_paths=("$SKILL_DIR/db" "$SKILL_DIR/teams" "$SKILL_DIR/run" "$SKILL_DIR/ext-tools")
   # On Windows (MSYS2/Git Bash), $SKILL_DIR is in MSYS form (/c/Users/...).
   # Codex is a native Windows binary whose Rust path resolution cannot parse
   # MSYS paths — /c/Users/... is resolved to C:\c\Users\... (a phantom path).
@@ -304,7 +313,7 @@ configure_codex_sandbox() {
     # No section at all
     printf '\n[sandbox_workspace_write]\nwritable_roots = [%s]\n' "$entries" >> "$code_config"
   fi
-  echo "  + added Codex writable_roots for db/, teams/, and run/"
+  echo "  + added Codex writable_roots for db/, teams/, run/, and ext-tools/"
 }
 
 is_windows_host() {

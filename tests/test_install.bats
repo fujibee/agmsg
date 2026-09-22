@@ -829,7 +829,7 @@ PS1
 }
 
 # --- Codex sandbox writable_roots (#41) ---
-@test "install: configures Codex writable_roots for db teams and run" {
+@test "install: configures Codex writable_roots for db teams run and ext-tools" {
   mkdir -p "$FAKE_HOME/.codex"
   cat > "$FAKE_HOME/.codex/config.toml" <<'EOF'
 model = "gpt-test"
@@ -840,6 +840,12 @@ EOF
   grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
   grep -q "$SK/teams" "$FAKE_HOME/.codex/config.toml"
   grep -q "$SK/run" "$FAKE_HOME/.codex/config.toml"
+  # A sandboxed Codex seat runs an ext-tool member's `setup` (secret and
+  # save) too, which writes under ext-tools/ the same way the bridge writes
+  # under db/teams/run — measured directly against a real seat
+  # (`codex exec -s workspace-write`) before this entry existed:
+  # `mkdir: .../ext-tools/<team>: Operation not permitted`.
+  grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
 }
 
 @test "install --update: adds missing Codex run writable_root for existing installs" {
