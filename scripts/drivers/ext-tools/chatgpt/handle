@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# handle — deliver one agmsg message to a ChatGPT conversation living in an
+# Orca built-in browser tab, and (in sync-wait mode) relay its reply back.
+#
+# Contract (scripts/drivers/ext-tools/README.md §3): stdin is one JSON
+# object {team, from, to, body, subject?, message_id, config_path}; stdout
+# is the reply body (empty stdout = fire-and-forget); non-zero exit + one
+# stderr line = failure, which agmsg reports as
+# "<name>: processing failed (<reason>)".
+#
+# There is no standing process -- this one invocation IS the watchdog for
+# its own message: classify -> recover -> inject -> confirm -> wait-reply,
+# all bounded by one internal deadline below tool.conf's timeout so a clean
+# reason line can still be printed instead of being killed mid-flight.
+#
+# Recovery inherits the fleet watchdog's proven rules: never touch the page
+# while GENERATING, retry/stop are matched on real <button> elements only
+# (conversation text quoting them caused false positives), page-level error
+# text is believed only when no composer is visible, a frozen GENERATING
+# (transcript signature unchanged past a threshold) earns ONE reload, and
+# reloads are capped.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/_lib.sh"
+
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+
+input="$(cat)"
+config_path="$(printf '%s' "$input" | jq -r '.config_path // empty' 2>/dev/null)" ||
+  fail "chatgpt: request is not valid JSON"
+body="$(printf '%s' "$input" | jq -r '.body // empty')"
+from_agent="$(printf '%s' "$input" | jq -r '.from // empty' 2>/dev/null)"
+to_agent="$(printf '%s' "$input" | jq -r '.to // empty' 2>/dev/null)"
+[ -n "$config_path" ] || fail "chatgpt: request carries no config_path"
+[ -f "$config_path" ] || fail "chatgpt: member config not found: $config_path"
+[ -n "$body" ] || fail "chatgpt: empty message body"
+
+worktree="$(_cg_conf_get "$config_path" worktree)"
+url_regex="$(_cg_conf_get "$config_path" url_regex)"; [ -n "$url_regex" ] || url_regex='chatgpt\.com'
+mode="$(_cg_conf_get "$config_path" mode)";           [ -n "$mode" ]       || mode="sync-wait"
+judge_member="$(_cg_conf_get "$config_path" judge_member)"
+human_relay_to="$(_cg_conf_get "$config_path" human_relay_to)"
+watch_pref="$(_cg_conf_get "$config_path" watch)"
+page_pin="$(_cg_conf_get "$config_path" page)"
+[ -n "$worktree" ] || fail "chatgpt: member config is missing worktree: $config_path"
+
+# The transcript watcher is a plain process with no supervisor; each
+# delivery re-ensures it, so a crash self-heals on the next message.
+# Needed for inject-only members (replies would otherwise be lost) and for
+# human_relay_to (human tab input would be invisible). watch=no opts out.
+if [ "$watch_pref" != "no" ] && { [ "$mode" = "inject-only" ] || [ -n "$human_relay_to" ]; }; then
+  _cg_watch_ensure "$config_path"
+fi
+
+# One line per event into <config>.log -- the experiment's observation
+# surface (health transitions, inject latency, reply latency, failures).
+LOG_FILE="$config_path.log"
+log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG_FILE" 2>/dev/null || true; }
+
+if [ "$mode" = "inject-only" ]; then
+  # Fully decoupled delivery: agmsg already recorded the message, so there
+  # is nothing to wait for synchronously. Enqueue and return; the watcher
+  # drains the queue whenever the tab is idle (and owns error recovery,
+  # reload-on-silence, and reply relay). No timeout ceiling at all.
+  qdir="$config_path.queue.d"
+  mkdir -p "$qdir" 2>/dev/null
+  mid="agm-$(date +%s)-$RANDOM"
+  jq -cn --arg f "${from_agent:-unknown}" --arg m "$mid" --arg b "$body" \
+    '{from:$f,mid:$m,body:$b}' > "$qdir/$mid.json.tmp" &&
+    mv "$qdir/$mid.json.tmp" "$qdir/$mid.json"
+  log "queued mid=$mid from=${from_agent:-unknown}"
+  exit 0
+fi
+
+# Internal budget: finish below the dispatcher's timeout so failure reasons
+# still get printed. tool.conf is read-only data; grep it like member conf.
+tool_timeout="$(_cg_conf_get "$SCRIPT_DIR/tool.conf" timeout)"; [ -n "$tool_timeout" ] || tool_timeout=300
+DEADLINE=$(( $(date +%s) + tool_timeout - 15 ))
+CONFIRM_BUDGET=45        # send-confirmation window
+STUCK_GENERATING=90      # transcript frozen this long while "generating" -> reload
+MAX_RELOADS=2
+LOCK_BUDGET=45
+
+left() { echo $(( DEADLINE - $(date +%s) )); }
+
+# Serialize tab access per TAB, not per member: two members (e.g. a
+# sync-wait one and an inject-only one) can share one conversation, and two
+# deliveries must still never interleave on one composer. A holder that
+# died mid-run is reclaimed after its worst-case lifetime.
+tab_key="$(printf '%s|%s' "$worktree" "$url_regex" | shasum | cut -c1-16)"
+lock_dir="$(dirname "$config_path")/.tablock-$tab_key.d"
+_cg_lock_acquire "$lock_dir" $((tool_timeout + 120)) "$LOCK_BUDGET" ||
+  fail "chatgpt: another delivery is in flight (lock held >${LOCK_BUDGET}s)"
+trap '_cg_lock_release "$lock_dir"' EXIT
+
+config_dir="$(dirname "$config_path")"
+reloads=0
+last_reload=0
+unknown_streak=0
+
+# --- phase 1: reach an injectable state -----------------------------------
+
+page=""
+health=""
+while :; do
+  [ "$(left)" -gt 20 ] || fail "chatgpt: timed out before reaching an idle composer"
+  page="$(_cg_find_page "$worktree" "$url_regex" "$page_pin" 2>/dev/null || true)"
+  if [ -z "$page" ]; then
+    fail "chatgpt: no tab matching '$url_regex' in worktree $worktree"
+  fi
+  cls="$(_cg_classify "$page" 2>/dev/null || true)"
+  [ -n "$cls" ] || { log "classify empty (page=$page)"; sleep 2; continue; }
+  health="$(_cg_health "$cls")"
+  log "health=$health page=$page"
+
+  case "$health" in
+    HEALTHY_IDLE)
+      [ "$(printf '%s' "$cls" | jq -r '.composerEmpty')" = "true" ] || {
+        # A human's unfinished draft must never be clobbered: wait rather
+        # than inject over it.
+        sleep 5; continue
+      }
+      break ;;
+    GENERATING)
+      sleep 4; continue ;;   # never touch the page; it may be answering someone else
+    ERROR_RETRYABLE)
+      _cg_click_retry "$page"; sleep 6; continue ;;
+    ERROR_PAGE|UNKNOWN)
+      unknown_streak=$((unknown_streak + 1))
+      if [ "$health" = "UNKNOWN" ] && [ "$unknown_streak" -lt 3 ]; then
+        sleep 3; continue
+      fi
+      # Optional arbitration before a reload: is this really a dead page?
+      if [ -n "$judge_member" ] && [ "$reloads" -eq 0 ]; then
+        verdict="$(_cg_judge "$config_dir" "$judge_member" \
+          "$(jq -cn --arg u "$(printf '%s' "$cls" | jq -r '.url // ""')" \
+            '{state:("ChatGPT tab shows neither a composer nor a retry button and no generation indicator. url="+$u),"questions":{action:{type:"choice",instructions:"What should the driver do?",criteria:{reload:"the page is crashed or stuck; reloading is the fastest path to a usable composer",wait:"the page may be mid-load; give it a few more seconds"}}}}')" 2>/dev/null || true)"
+        case "$verdict" in
+          # jev replies carry no question-name prefix for a single
+          # question ("jev: wait (choice ...)"), only for 2+ ("action=wait").
+          *"action=wait"*|*"jev: wait "*) sleep 5; continue ;;
+        esac
+      fi
+      now=$(date +%s)
+      if [ "$reloads" -lt "$MAX_RELOADS" ] && [ $((now - last_reload)) -gt 30 ]; then
+        _cg_reload "$page" || true
+        reloads=$((reloads + 1)); last_reload=$now; unknown_streak=0
+        sleep 5; continue
+      fi
+      fail "chatgpt: tab unrecoverable (health=$health, reloads=$reloads)" ;;
+  esac
+done
+
+# --- phase 2: inject ------------------------------------------------------
+
+# Marker carried by every injected user message: [agm <member>:<from>:<mid>].
+# send-confirmation still matches on the bare mid substring; the full marker
+# lets a transcript watcher route the reply back to the original sender and
+# tell injected traffic apart from text a human typed straight into the tab.
+mid="agm-$(date +%s)-$RANDOM"
+inject_text="$body
+
+[agm ${to_agent:-chatgpt}:${from_agent:-unknown}:$mid]"
+inj="$(_cg_inject "$page" "$inject_text" 2>/dev/null || true)"
+log "inject mid=$mid result=${inj:-EMPTY}"
+[ "$(printf '%s' "$inj" | jq -r '.ok // false' 2>/dev/null)" = "true" ] ||
+  fail "chatgpt: inject failed ($(printf '%s' "$inj" | jq -r '.err // "eval error"' 2>/dev/null || echo 'eval error'))"
+
+# --- phase 3: confirm the send landed in the transcript -------------------
+
+confirmed=0
+t0=$(date +%s)
+while [ $(( $(date +%s) - t0 )) -lt "$CONFIRM_BUDGET" ]; do
+  if [ "$(_cg_send_confirmed "$page" "$mid")" = "true" ]; then confirmed=1; break; fi
+  sleep 2
+done
+log "send_confirmed=$confirmed mid=$mid"
+[ "$confirmed" = "1" ] || fail "chatgpt: send not confirmed in transcript within ${CONFIRM_BUDGET}s"
+
+# inject-only mode: message delivered, reply is not this driver's business.
+if [ "$mode" = "inject-only" ]; then
+  exit 0
+fi
+
+# --- phase 4: wait for the reply -------------------------------------------
+
+last_reply=""
+stable=0
+gen_sig=""
+gen_last_change=$(date +%s)
+judge_done=0   # judge runs at most once per message
+while :; do
+  [ "$(left)" -gt 10 ] || fail "chatgpt: reply did not complete before timeout"
+  st="$(_cg_reply_state "$page" "$mid" 2>/dev/null || true)"
+  [ -n "$st" ] || { sleep 3; continue; }
+  generating="$(printf '%s' "$st" | jq -r '.generating')"
+  reply="$(printf '%s' "$st" | jq -r '.reply // ""')"
+  found="$(printf '%s' "$st" | jq -r '.found')"
+
+  if [ "$generating" = "true" ]; then
+    sig="$(printf '%s' "$reply" | shasum | cut -c1-16)"
+    if [ "$sig" != "$gen_sig" ]; then gen_sig="$sig"; gen_last_change=$(date +%s); fi
+    now=$(date +%s)
+    # Frozen stream (rate-limit death leaves the stop button up forever):
+    # one reload is worth it; the transcript survives reloads.
+    if [ $((now - gen_last_change)) -gt "$STUCK_GENERATING" ] && [ "$reloads" -lt "$MAX_RELOADS" ]; then
+      _cg_reload "$page" || true
+      reloads=$((reloads + 1)); gen_last_change=$now; sleep 5
+    fi
+    stable=0; sleep 3; continue
+  fi
+
+  # Not generating.
+  cls="$(_cg_classify "$page" 2>/dev/null || true)"
+  h="$(_cg_health "$cls")"
+  if [ "$h" = "ERROR_RETRYABLE" ]; then _cg_click_retry "$page"; sleep 6; stable=0; continue; fi
+
+  if [ "$found" = "true" ]; then
+    if [ "$reply" = "$last_reply" ] && [ -n "$reply" ]; then
+      stable=$((stable + 1))
+    else
+      stable=0; last_reply="$reply"
+    fi
+    if [ "$stable" -ge 2 ]; then
+      # Optional completeness arbitration: a stream that died mid-reply can
+      # leave a stable-but-truncated answer. One judge call per message max;
+      # a "truncated" verdict earns the text ONE more stability cycle to
+      # grow -- if it doesn't, we ship what we have rather than loop on the
+      # same verdict forever (observed: jev calls a terse complete reply
+      # "truncated" and would otherwise veto it repeatedly until timeout).
+      if [ -n "$judge_member" ] && [ "$judge_done" = "0" ]; then
+        judge_done=1
+        tail_txt="$(printf '%s' "$reply" | tail -c 1500)"
+        verdict="$(_cg_judge "$config_dir" "$judge_member" \
+          "$(jq -cn --arg t "$tail_txt" \
+            '{state:("Streaming stopped and this ChatGPT reply text was captured. Tail: "+$t),"questions":{shape:{type:"choice",instructions:"Is the reply complete or truncated?",criteria:{complete:"ends at a natural stopping point",truncated:"cut off mid-sentence, mid-list, or ends with an obvious error stub"}}}}')" 2>/dev/null || true)"
+        log "judge verdict=${verdict:-none}"
+        case "$verdict" in
+          # Only act on a confident truncation call (single-question replies
+          # have no "shape=" prefix -- see above).
+          *"truncated"*"confidence=0."[7-9]*|*"truncated"*"confidence=1"*)
+            stable=0; continue ;;
+        esac
+      fi
+      log "reply ok mid=$mid len=${#reply}"
+      printf '%s\n' "$reply"
+      exit 0
+    fi
+  fi
+  sleep 3
+done

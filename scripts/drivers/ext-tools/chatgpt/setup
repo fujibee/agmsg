@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# setup — non-conversational setup commands for the ChatGPT ext-tool, driven
+# by the seat LLM per SETUP.md. Same contract as every ext-tool: status /
+# check / save / test, explicit args, JSON answers, no questions of its own.
+#
+# Usage:
+#   setup status <config_path>
+#   setup check tab <worktree> [url_regex]
+#   setup save <config_path> <worktree> [url_regex] [mode]
+#   setup test <config_path>
+#
+# `test` performs ONE real end-to-end round trip through the live tab
+# (inject a trivial prompt, await the reply) -- it exists to prove the path
+# works and only runs when a human asked for it here.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/_lib.sh"
+
+die() { echo "setup: $*" >&2; exit 1; }
+
+cmd="${1:?Usage: setup status|check|save|test ...}"
+shift
+
+cmd_status() {
+  local config_path="${1:?Usage: setup status <config_path>}" required key
+  required="$(_cg_conf_get "$SCRIPT_DIR/tool.conf" required_config 2>/dev/null || true)"
+  [ -n "$required" ] || required="worktree"
+  local items="" sep=""
+  for key in $required; do
+    if [ -z "$(_cg_conf_get "$config_path" "$key")" ]; then
+      items="${items}${sep}\"$key\""
+      sep=","
+    fi
+  done
+  # Watcher + queue state, so one command answers "is this member's async
+  # half alive": watch_alive comes from the singleton lock's owner pid.
+  local lock="$config_path.watchrun.lock.d" wpid="" walive=false
+  wpid="$(awk '{print $1}' "$lock/owner" 2>/dev/null || true)"
+  if [ -n "$wpid" ] && kill -0 "$wpid" 2>/dev/null; then walive=true; fi
+  local qdepth mode
+  qdepth="$(find "$config_path.queue.d" -name '*.json' 2>/dev/null | wc -l | tr -d ' ' || true)"
+  mode="$(_cg_conf_get "$config_path" mode)"; [ -n "$mode" ] || mode="sync-wait"
+  jq -cn --argjson missing "[$items]" --arg mode "$mode" \
+     --argjson watch_alive "$walive" --arg watch_pid "${wpid:-null}" \
+     --argjson queue_depth "${qdepth:-0}" \
+     '{missing:$missing, mode:$mode, watch_alive:$watch_alive, watch_pid:($watch_pid|tonumber? // null), queue_depth:$queue_depth}'
+}
+
+cmd_check_tab() {
+  local worktree="${1:?Usage: setup check tab <worktree> [url_regex]}" \
+    url_regex="${2:-chatgpt\.com}" tabs count page title
+  if ! tabs="$(_cg_orca tab list --worktree "path:$worktree" 2>/dev/null)"; then
+    jq -cn --arg err "orca tab list failed for worktree $worktree (is Orca running? is the path a registered worktree?)" \
+      '{ok: false, error: $err}'
+    return 1
+  fi
+  count="$(printf '%s' "$tabs" | jq -r --arg re "$url_regex" '[.tabs[]? | select(.url | test($re))] | length')"
+  if [ "$count" = "0" ]; then
+    jq -cn --arg err "no tab matching '$url_regex' in worktree $worktree" '{ok: false, error: $err}'
+    return 1
+  fi
+  page="$(printf '%s' "$tabs" | jq -r --arg re "$url_regex" '[.tabs[]? | select(.url | test($re))][0].browserPageId')"
+  title="$(printf '%s' "$tabs" | jq -r --arg re "$url_regex" '[.tabs[]? | select(.url | test($re))][0].title // ""')"
+  jq -cn --argjson count "$count" --arg page "$page" --arg title "$title" \
+    '{ok: true, tabs: $count, page: $page, title: $title}'
+}
+
+cmd_save() {
+  local config_path="${1:?Usage: setup save <config_path> <worktree> [url_regex] [mode]}" \
+    worktree="${2:?Usage: setup save <config_path> <worktree> [url_regex] [mode]}" \
+    url_regex="${3:-chatgpt\.com}" mode="${4:-sync-wait}"
+  case "$mode" in
+    sync-wait|inject-only) : ;;
+    *) die "mode must be sync-wait or inject-only, got: $mode" ;;
+  esac
+  mkdir -p "$(dirname "$config_path")"
+  umask 077
+  {
+    printf 'worktree=%s\n' "$worktree"
+    printf 'url_regex=%s\n' "$url_regex"
+    printf 'mode=%s\n' "$mode"
+  } > "$config_path"
+  chmod 600 "$config_path"
+  printf '{"ok":true,"config_path":"%s"}\n' "$config_path"
+}
+
+cmd_test() {
+  local config_path="${1:?Usage: setup test <config_path>}" \
+    worktree url_regex page cls health
+  worktree="$(_cg_conf_get "$config_path" worktree)"
+  url_regex="$(_cg_conf_get "$config_path" url_regex)"; [ -n "$url_regex" ] || url_regex='chatgpt\.com'
+  [ -n "$worktree" ] || { jq -cn '{ok:false,error:"member config is missing worktree"}'; return 1; }
+
+  page="$(_cg_find_page "$worktree" "$url_regex" 2>/dev/null || true)"
+  [ -n "$page" ] || { jq -cn '{ok:false,error:"no matching tab"}'; return 1; }
+  cls="$(_cg_classify "$page" 2>/dev/null || true)"
+  health="$(_cg_health "$cls")"
+  [ "$health" = "HEALTHY_IDLE" ] || {
+    jq -cn --arg h "$health" '{ok:false,error:("tab not idle: "+$h)}'; return 1; }
+
+  local mid t0 inj st reply waited
+  mid="agm-test-$(date +%s)"
+  inj="$(_cg_inject "$page" "agmsg ext-tool connectivity check. Reply with exactly: ok
+
+[$mid]" 2>/dev/null || true)"
+  [ "$(printf '%s' "$inj" | jq -r '.ok // false' 2>/dev/null)" = "true" ] || {
+    jq -cn --arg e "$(printf '%s' "$inj" | jq -r '.err // "eval error"' 2>/dev/null)" \
+      '{ok:false,error:("inject failed: "+$e)}'; return 1; }
+
+  t0=$(date +%s)
+  reply=""
+  while [ $(( $(date +%s) - t0 )) -lt 120 ]; do
+    st="$(_cg_reply_state "$page" "$mid" 2>/dev/null || true)"
+    if [ "$(printf '%s' "$st" | jq -r '.found // false' 2>/dev/null)" = "true" ] \
+       && [ "$(printf '%s' "$st" | jq -r '.generating // false' 2>/dev/null)" = "false" ]; then
+      reply="$(printf '%s' "$st" | jq -r '.reply // ""')"
+      sleep 3
+      st="$(_cg_reply_state "$page" "$mid" 2>/dev/null || true)"
+      [ "$(printf '%s' "$st" | jq -r '.reply // ""')" = "$reply" ] && break
+    fi
+    sleep 3
+  done
+  waited=$(( $(date +%s) - t0 ))
+  [ -n "$reply" ] || { jq -cn '{ok:false,error:"no reply within 120s"}'; return 1; }
+  jq -cn --argjson waited "$waited" --arg r "$(printf '%s' "$reply" | head -c 200)" \
+    '{ok:true, latency_s:$waited, reply_head:$r}'
+}
+
+case "$cmd" in
+  status) cmd_status "$@" ;;
+  check)
+    sub="${1:?Usage: setup check tab ...}"; shift
+    case "$sub" in
+      tab) cmd_check_tab "$@" ;;
+      *) die "unknown check: $sub (expected tab)" ;;
+    esac
+    ;;
+  save) cmd_save "$@" ;;
+  test) cmd_test "$@" ;;
+  *) die "unknown command: $cmd (expected status, check, save, or test)" ;;
+esac
