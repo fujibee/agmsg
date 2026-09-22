@@ -17,15 +17,23 @@
 # 839s (#1304 CI-capacity work: the shard split itself was fine, this table
 # had just gone stale -- see that run's own per-file numbers for detail).
 # The suite's total real time also fell in this window (old table sum
-# 6249s over the files common to both tables vs 4173s now), driven by a
-# few specific files dropping sharply (test_remote_engine_start_refusal.bats
-# 660s->43s, test_watch.bats 317s->2s, test_remote_status_liveness.bats
-# 346s->80s) rather than by broad, even drift -- most other files moved by
-# single-digit seconds either way. One data point can't separate "this
-# always happens" from "this week had targeted perf fixes"; the direction
-# argues for the latter, so update-on-notice (not a scheduled/automated
-# refresh) stays the right call until a second stale-run measurement shows
-# whether this repeats.
+# 6249s over the files common to both tables vs 4173s now), and that fall
+# is two real perf fixes, not broad drift: test_remote_engine_start_refusal.bats
+# 660s->43s and test_remote_status_liveness.bats 346s->80s are both #1252
+# (shortened the two slowest tests' production-readiness wait). A third
+# file, test_watch.bats, measured 317s->2s in this same run, but that 2s is
+# NOT a speedup -- the file is quarantined as a whole for #1262 (setup()
+# skips every test unconditionally, see below), so 2s is "did not run",
+# not "got faster". Its row below is pinned to 317s, its last real
+# pre-quarantine measurement, rather than the misleading 2s (see that row's
+# own comment). Every other file moved by single-digit seconds either way.
+# So this window's imbalance was not organic, even drift -- it was two real
+# fixes plus one quarantine not being reflected in the table, and none of
+# those is the kind of thing that keeps happening on a schedule; each only
+# moves this table when something specific (a perf fix, a quarantine, an
+# un-quarantine) actually happens to a file. Update-on-notice, prompted by
+# exactly that kind of change, stays the right call -- no scheduled or
+# automated refresh needed.
 #
 # A file with no row here (renamed, or added after this measurement) is
 # estimated at this table's own average seconds/file by shard-tests.sh,
@@ -155,7 +163,14 @@ test_transcript_exists.bats	2
 test_type_registry.bats	35
 test_unguarded_env_reads.bats	2
 test_wait_helpers.bats	41
-test_watch.bats	2
+# Pinned to 317s, the last real pre-quarantine measurement (run 34845597032,
+# 2026-09-14), NOT this run's 2s -- the whole file is quarantined for #1262
+# (setup() skips every test unconditionally, tracked by #1318), so 2s means
+# "did not run", not "got faster". Update this back to a real measurement
+# once #1318 un-quarantines the file; until then a refresh against a run
+# where it's still quarantined must keep reusing 317, not overwrite it with
+# whatever near-zero number that run measures.
+test_watch.bats	317
 test_watch_install_changed.bats	34
 test_watch_once.bats	53
 test_watch_process_count.bats	18
