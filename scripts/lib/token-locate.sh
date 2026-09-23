@@ -133,8 +133,15 @@ _agmsg_token_locate_path() {   # <team> <agent> -- prints the record path
 # TIME (absent, unreadable, corrupt/future timestamp, or past TTL) -- never
 # merely because THIS caller's witness didn't match (below): a caller that
 # is not the record's rightful owner gets treated like "no pending token
-# for me", not a license to destroy a still-live record someone else
-# legitimately emitted and has not had its own chance to observe yet.
+# for me", not a license to itself delete a still-live record someone
+# else legitimately emitted. This does NOT make that record durable,
+# though (review, #1397): in the ordinary `fix` flow, a caller that finds
+# no match here calls agmsg_token_locate_emit next, which mv -f's a fresh
+# record over this exact same path (keyed only on team/agent, not on
+# owner) -- so the rightful owner's record is still overwritten moments
+# later by the mismatched caller's own emit. What this function's own
+# restraint buys is narrower: it is never the READ itself that destroys a
+# live record it does not own.
 #
 # <owner> is the CALLER's own current actas-lock owner token for this role
 # (review, #1397) -- the pending record is only reused when it matches
@@ -271,10 +278,11 @@ agmsg_token_locate_observe() {   # <team> <agent> <owner>
   # consumed now that this caller's own witness-matching token was read.
   # _agmsg_token_locate_read already removes a genuinely stale-by-time
   # record on its own; a live record that did not match THIS caller's
-  # witness is left untouched here too (#1397), same reasoning as
-  # there -- an observe called (directly, bypassing the pending precheck)
-  # by whoever does not own it must not destroy a still-live record its
-  # rightful owner has not had a chance to observe yet.
+  # witness is left untouched here too (#1397), same restraint and same
+  # caveat as _agmsg_token_locate_read's own header (an emit that follows
+  # a mismatch here still overwrites it moments later) -- an observe
+  # called directly, bypassing the pending precheck, by whoever does not
+  # own the record must at least not be the thing that destroys it.
   if token="$(_agmsg_token_locate_read "$team" "$agent" "$owner")"; then
     rm -f "$path" 2>/dev/null || true
   fi

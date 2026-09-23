@@ -130,6 +130,21 @@ _seed_token() {   # <team> <agent> <token> [witness] [emitted_at]
   [ ! -e "$path" ]
 }
 
+# #1397: `date -u +%s` failing outright (now empty) against a real,
+# well-formed emitted_at must not read as live either -- the same
+# age-must-be->=-0 guard the future-timestamp test above pins would
+# otherwise be bypassed by an empty `now` producing the same kind of
+# nonsensical negative age this whole check exists to reject.
+@test "observe: no_pending_token when the clock itself cannot be read (#1397)" {
+  local path; path="$(_agmsg_token_locate_path myteam alice)"
+  _seed_token myteam alice fixed-test-token "$OWNER" "$(date -u +%s)"
+  date() { return 1; }
+  run agmsg_token_locate_observe myteam alice "$OWNER"
+  [ "$status" -eq 2 ]
+  [ "$output" = "$(printf 'undetermined\tno_pending_token')" ]
+  [ ! -e "$path" ]
+}
+
 # #1397: the role this token was emitted for can be restarted, resumed,
 # or handed to a different session inside the TTL window. A bare (team,
 # agent) key cannot tell that seat's own fresh call apart from a claim that
