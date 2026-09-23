@@ -203,19 +203,53 @@ teardown() {
   [ ! -e "$shim" ]
 }
 
-@test "uninstall: removes only the targeted install, leaving a second install's command and the shared shim in place (#1400)" {
+@test "uninstall: removes only the targeted install, leaving a second install's command, project hooks/commands, and writable_roots in place (#1400)" {
   # Ran uninstall.sh removed EVERY ~/.agents/skills/*/ install on the machine,
   # not just its own -- a throwaway --cmd install's uninstall wiped every
   # other real one, including machine-wide shared pieces like this shim.
-  mkdir -p "$FAKE_HOME/.claude"
+  #
+  # "agmsg" and "agmsg-second" (review): a plain substring/prefix match on
+  # the shorter name or its bare SKILL_DIR, with no boundary, ALSO matches
+  # the longer install's own name/path/hooks/commands -- "agmsg" is a
+  # literal substring of "agmsg-second", and "$SK" (no trailing slash) is a
+  # literal prefix of "$SK-second". Uninstalling the shorter one must not
+  # touch the longer one's own registrations.
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex"
+  printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  local sk_second="$FAKE_HOME/.agents/skills/agmsg-second"
+
+  local project="$FAKE_HOME/project"
+  mkdir -p "$project"
+  bash "$SK/scripts/join.sh" myteam alice claude-code "$project" >/dev/null
+  bash "$sk_second/scripts/join.sh" myteam bob claude-code "$project" >/dev/null
+  # turn mode is what installs the Stop/PostToolUse hooks uninstall.sh
+  # cleans up; monitor mode uses no settings.json hooks at all.
+  HOME="$FAKE_HOME" bash "$SK/scripts/delivery.sh" set turn claude-code "$project" >/dev/null
+  HOME="$FAKE_HOME" bash "$sk_second/scripts/delivery.sh" set turn claude-code "$project" >/dev/null
+  # Nothing currently writes a per-PROJECT command file (only the global
+  # ~/.claude/commands/<name>.md below) -- this loop is legacy cleanup with
+  # no live writer, but the review finding is about its MATCH condition, so
+  # exercise it directly with a hand-built fixture per install.
+  mkdir -p "$project/.claude/commands"
+  printf 'Run `%s/scripts/whoami.sh`.\n' "$SK" > "$project/.claude/commands/agmsg-project.md"
+  printf 'Run `%s/scripts/whoami.sh`.\n' "$sk_second" > "$project/.claude/commands/agmsg-second-project.md"
 
   local cmd_first="$FAKE_HOME/.claude/commands/agmsg.md"
   local cmd_second="$FAKE_HOME/.claude/commands/agmsg-second.md"
+  local proj_cmd_first="$project/.claude/commands/agmsg-project.md"
+  local proj_cmd_second="$project/.claude/commands/agmsg-second-project.md"
+  local settings="$project/.claude/settings.local.json"
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   [ -f "$cmd_first" ]
   [ -f "$cmd_second" ]
+  [ -f "$proj_cmd_first" ]
+  [ -f "$proj_cmd_second" ]
+  grep -qF "$SK/" "$settings"
+  grep -qF "$sk_second/" "$settings"
+  grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
   [ -f "$shim" ]
 
   # Run the COPY inside the "agmsg" install itself (the normal way a real
@@ -225,9 +259,16 @@ teardown() {
 
   [ ! -e "$SK" ]
   [ ! -f "$cmd_first" ]
-  # The untouched install and the machine-wide shim it still needs.
-  [ -d "$FAKE_HOME/.agents/skills/agmsg-second" ]
+  [ ! -f "$proj_cmd_first" ]
+  refute grep -qF "$SK/" "$settings"
+  refute grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
+  # The untouched install: global command, project hook and command file,
+  # writable_roots entry, and the machine-wide shim it still needs.
+  [ -d "$sk_second" ]
   [ -f "$cmd_second" ]
+  [ -f "$proj_cmd_second" ]
+  grep -qF "$sk_second/" "$settings"
+  grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
   [ -f "$shim" ]
 }
 

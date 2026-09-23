@@ -59,6 +59,16 @@ REMOVED=false
 _uninstall_one() {
   local SKILL_DIR="$1"
   local SKILL_NAME; SKILL_NAME="$(basename "$SKILL_DIR")"
+  # This install's own path with its trailing slash (review): matching on
+  # SKILL_NAME or a bare SKILL_DIR prefix is not a boundary -- "agmsg" is a
+  # literal substring of "agmsg-second", and "$SKILL_DIR" (no trailing
+  # slash) is a literal PREFIX of "$SKILL_DIR-second", so either one also
+  # matches a sibling install's own path/hooks/commands. The trailing "/"
+  # is what "agmsg-second"/"$SKILL_DIR-second" can never contain right after
+  # this install's own name/path. Rendered content embeds the real absolute
+  # path (e.g. hook commands, scripts/delivery.sh), never a "~"-shortened
+  # one, so matching the expanded SKILL_DIR is correct here.
+  local SKILL_DIR_SLASH="$SKILL_DIR/"
 
   # --- Remove slash commands and hooks from joined projects ---
   local TEAMS_DIR="$SKILL_DIR/teams"
@@ -68,10 +78,25 @@ _uninstall_one() {
     for config in "$TEAMS_DIR"/*/config.json; do
       [ -f "$config" ] || continue
 
+      # A member's registrations moved into a '$.registrations' array (to
+      # support more than one project per agent) some time after this query
+      # was written; it kept reading '$.type'/'$.project' straight off the
+      # agent, which that array shape never has -- so it matched nothing,
+      # ever, against a config.json in the current shape, and this whole
+      # project-cleanup pass was silently a no-op. Falls back to reading
+      # them straight off the agent for a not-yet-migrated record, the same
+      # two-shape handling agmsg_registered_type (resolve-project.sh) uses.
       local projects
       projects=$(sqlite3 -separator '	' :memory: \
         ".param set :json '$(sed "s/'/''/g" "$config")'" \
-        "SELECT json_extract(value, '$.project') FROM json_each(json_extract(:json, '$.agents'))
+        "WITH agent AS (
+           SELECT CASE
+             WHEN json_type(json_extract(value, '$.registrations')) = 'array' THEN json_extract(value, '$.registrations')
+             ELSE json_array(json_object('type', json_extract(value, '$.type'), 'project', json_extract(value, '$.project')))
+           END AS registrations
+           FROM json_each(json_extract(:json, '$.agents'))
+         )
+         SELECT json_extract(value, '$.project') FROM agent, json_each(agent.registrations)
          WHERE json_extract(value, '$.type') = 'claude-code'
            AND json_extract(value, '$.project') IS NOT NULL;" 2>/dev/null || true)
 
@@ -79,12 +104,16 @@ _uninstall_one() {
       while IFS= read -r project; do
         [ -n "$project" ] || continue
 
-        # Remove command files that reference agmsg scripts
+        # Remove command files that reference THIS install's own scripts
+        # (review: a bare "mentions any agmsg script name" match, with no
+        # install identity in it at all, removed every install's command
+        # file from a project more than one had joined -- not just a
+        # same-prefix collision).
         if [ -d "$project/.claude/commands" ]; then
           local cmd_file
           for cmd_file in "$project/.claude/commands"/*.md; do
             [ -f "$cmd_file" ] || continue
-            if grep -q "scripts/whoami.sh\|scripts/inbox.sh\|scripts/send.sh" "$cmd_file" 2>/dev/null; then
+            if grep -qF "$SKILL_DIR_SLASH" "$cmd_file" 2>/dev/null; then
               local cmd_name; cmd_name=$(basename "$cmd_file" .md)
               rm "$cmd_file"
               echo "  - removed /$cmd_name command from $project"
@@ -93,10 +122,11 @@ _uninstall_one() {
           done
         fi
 
-        # Remove only agmsg hook entries from settings files (preserve other hooks)
+        # Remove only THIS install's own hook entries from settings files
+        # (preserve other hooks, and another install's own -- review).
         local settings_file
         for settings_file in "$project/.claude/settings.json" "$project/.claude/settings.local.json"; do
-          if [ -f "$settings_file" ] && grep -q "$SKILL_NAME" "$settings_file" 2>/dev/null; then
+          if [ -f "$settings_file" ] && grep -qF "$SKILL_DIR_SLASH" "$settings_file" 2>/dev/null; then
             local SETTINGS_ESC UPDATED
             SETTINGS_ESC=$(sed "s/'/''/g" "$settings_file")
             UPDATED=$(sqlite3 :memory: "
@@ -107,7 +137,7 @@ _uninstall_one() {
                 ) WHERE NOT EXISTS (
                   SELECT 1 FROM hook_types, json_each(json_extract('$SETTINGS_ESC', '\$.hooks.' || ht)) AS e,
                     json_each(json_extract(e.value, '\$.hooks')) AS h
-                  WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+                  WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_DIR_SLASH') > 0
                 )),
                 (SELECT CASE
                   WHEN (SELECT count(*) FROM json_each(json_extract(filtered, '\$.hooks'))
@@ -122,14 +152,14 @@ _uninstall_one() {
                       FROM json_each(json_extract('$SETTINGS_ESC', '\$.hooks.Stop')) AS e
                       WHERE NOT EXISTS (
                         SELECT 1 FROM json_each(json_extract(e.value, '\$.hooks')) AS h
-                        WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+                        WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_DIR_SLASH') > 0
                       )), json('[]'))),
                     '\$.hooks.PostToolUse',
                     COALESCE((SELECT json_group_array(json(e.value))
                       FROM json_each(json_extract('$SETTINGS_ESC', '\$.hooks.PostToolUse')) AS e
                       WHERE NOT EXISTS (
                         SELECT 1 FROM json_each(json_extract(e.value, '\$.hooks')) AS h
-                        WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+                        WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_DIR_SLASH') > 0
                       )), json('[]'))) AS filtered
                 ))
               );
@@ -144,17 +174,25 @@ _uninstall_one() {
       done <<< "$projects"
 
       # --- Copilot CLI project-scoped hook file cleanup ---
+      # Same two-shape registrations handling as the claude-code query above.
       local copilot_projects
       copilot_projects=$(sqlite3 -separator '	' :memory: \
         ".param set :json '$(sed "s/'/''/g" "$config")'" \
-        "SELECT json_extract(value, '$.project') FROM json_each(json_extract(:json, '$.agents'))
+        "WITH agent AS (
+           SELECT CASE
+             WHEN json_type(json_extract(value, '$.registrations')) = 'array' THEN json_extract(value, '$.registrations')
+             ELSE json_array(json_object('type', json_extract(value, '$.type'), 'project', json_extract(value, '$.project')))
+           END AS registrations
+           FROM json_each(json_extract(:json, '$.agents'))
+         )
+         SELECT json_extract(value, '$.project') FROM agent, json_each(agent.registrations)
          WHERE json_extract(value, '$.type') = 'copilot'
            AND json_extract(value, '$.project') IS NOT NULL;" 2>/dev/null || true)
 
       while IFS= read -r project; do
         [ -n "$project" ] || continue
         local copilot_hook="$project/.github/hooks/agmsg.json"
-        if [ -f "$copilot_hook" ] && grep -q "$SKILL_NAME" "$copilot_hook" 2>/dev/null; then
+        if [ -f "$copilot_hook" ] && grep -qF "$SKILL_DIR_SLASH" "$copilot_hook" 2>/dev/null; then
           rm "$copilot_hook"
           echo "  - removed agmsg Copilot hook from $project"
           REMOVED=true
@@ -216,21 +254,34 @@ _uninstall_one() {
   fi
 
   # --- Clean up Codex writable_roots (this install's own path only) ---
+  # review: the old pattern ("$SKILL_DIR followed by any characters up to
+  # the closing quote") had no boundary at all, so it also matched a
+  # sibling install whose own path this one's is a literal prefix of (e.g.
+  # SKILL_DIR "agmsg" matching a "agmsg-second" entry too). Below, an entry
+  # is removed only when it IS exactly SKILL_DIR, or starts with SKILL_DIR
+  # followed by "/" -- and SKILL_DIR is regex-escaped first (it can contain
+  # ".", which is otherwise "any character" in the pattern awk builds).
   local CODEX_CONFIG="$HOME/.codex/config.toml"
-  if [ -f "$CODEX_CONFIG" ] && grep -q "$SKILL_DIR" "$CODEX_CONFIG" 2>/dev/null; then
+  if [ -f "$CODEX_CONFIG" ] && grep -qF "$SKILL_DIR" "$CODEX_CONFIG" 2>/dev/null; then
     cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
-    local skill_pattern="$SKILL_DIR"
 
     # Remove matching entries from writable_roots (handles multiline arrays)
-    awk -v pattern="$skill_pattern" '
+    awk -v pattern="$SKILL_DIR" '
+      function ere_escape(s,    i, c, out, special) {
+        special = "\\.[]()*+?{}|^$"
+        out = ""
+        for (i = 1; i <= length(s); i++) {
+          c = substr(s, i, 1)
+          if (index(special, c) > 0) out = out "\\" c
+          else out = out c
+        }
+        return out
+      }
+      BEGIN { esc = ere_escape(pattern) }
       /writable_roots/ { in_roots=1; buf="" }
       in_roots { buf = buf $0 "\n" }
       in_roots && /\]/ {
-        # Remove entries matching skill dirs
-        n = split(pattern, pats, "|")
-        for (i = 1; i <= n; i++) {
-          gsub("\"" pats[i] "[^\"]*\"[, ]*", "", buf)
-        }
+        gsub("\"" esc "(/[^\"]*)?\"[, ]*", "", buf)
         # Clean up trailing/leading commas
         gsub(/,[ \t]*\]/, "]", buf)
         gsub(/\[[ \t]*,/, "[", buf)
@@ -291,6 +342,22 @@ _uninstall_shared_pieces() {
   fi
 }
 
+# True (0) iff no ~/.agents/skills/*/ carries the .agmsg marker any more.
+# Scanned FRESH, after the removal(s) above ran -- never decided from a
+# count taken before them (review): a KEEP_DATA run (--keep-data, or "n" to
+# the interactive "remove DB and teams too?") never deletes the marker
+# file, on purpose, so that install still counts as present, and the
+# machine-wide shared pieces below must stay in that case even though this
+# run's own OTHER_SKILL_DIRS/ALL_SKILL_DIRS count (taken before removal)
+# said otherwise.
+_uninstall_none_remain() {
+  local d
+  for d in "$AGENTS_DIR"/skills/*/; do
+    [ -f "${d}.agmsg" ] && return 1
+  done
+  return 0
+}
+
 if [ "$REMOVE_ALL" = true ]; then
   # --- --all: every agmsg install on the machine (#1400 follow-up) ---
   # The pre-fix behavior, restored, but only when explicitly asked for --
@@ -343,7 +410,9 @@ if [ "$REMOVE_ALL" = true ]; then
   done
 
   echo ""
-  _uninstall_shared_pieces
+  if _uninstall_none_remain; then
+    _uninstall_shared_pieces
+  fi
 
 else
   # --- This install only (#1400) ---
@@ -409,7 +478,7 @@ else
 
   _uninstall_one "$SELF_SKILL_DIR"
 
-  if [ ${#OTHER_SKILL_DIRS[@]} -eq 0 ]; then
+  if _uninstall_none_remain; then
     _uninstall_shared_pieces
   fi
 fi
