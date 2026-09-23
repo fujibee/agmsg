@@ -49,19 +49,50 @@ terminal_describe() {
   printf 'syntax_help=orca terminal --help\n'
 }
 
+# ABI hook: is <id> an orca handle in THIS driver's grammar? Every measured
+# handle (memory/design/2026-09-20-orca-terminal-driver-feasibility.md) is
+# `term_` followed by a UUID's five hyphen-separated hex groups
+# (`term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba`). Checked here so `terminal_id_ok`
+# and `terminal_detect` share ONE authority (review, #1439): without a
+# `terminal_id_ok`, the registry's fallback for "driver has no hook" is to
+# ACCEPT any value, and `terminal_detect` printing $ORCA_TERMINAL_HANDLE on
+# mere non-emptiness would let a tab/newline/control byte in that env var
+# reach a tab-separated placement record and corrupt its framing. Every
+# character class below already excludes those bytes, so this doubles as the
+# framing guard the record format needs.
+terminal_id_ok() {   # <id>
+  local id="$1" rest
+  rest="${id#term_}"
+  [ "$rest" != "$id" ] || return 1
+  # No byte outside hex digits and '-' anywhere. This is the check that
+  # actually blocks a tab/newline/space/control byte: a glob `*` placed right
+  # after a character class (e.g. `[0-9a-fA-F]*`) only anchors the FIRST
+  # character to that class and lets `*` swallow anything unconstrained after
+  # it — measured while writing this test, a first draft of this grammar
+  # accepted a tab-injected string for exactly that reason.
+  case "$rest" in *[!0-9a-fA-F-]*) return 1 ;; esac
+  # Exactly five hyphen-separated non-empty groups — the UUID shape every
+  # measured handle has: no leading/trailing hyphen, no empty group (adjacent
+  # hyphens), and exactly four hyphens total.
+  case "$rest" in -*|*-|*--*) return 1 ;; esac
+  local hyphens="${rest//[^-]/}"
+  [ "${#hyphens}" -eq 4 ]
+}
+
 # record op: report TWO facts and decide nothing, same shape as tmux/herdr
 # (2026-08-31). PRESENCE is the exit code: 0 iff this process is running inside
 # an Orca-hosted pane (TERM_PROGRAM=Orca), whether or not the handle itself is
-# readable. SELF-ID is stdout: $ORCA_TERMINAL_HANDLE, which may be EMPTY — that
-# is "present but could not resolve", not "not orca"; the reason goes to
-# stderr. The session-id argument is unused — orca reports via the environment,
-# like tmux, not via a session-id lookup like herdr.
+# readable. SELF-ID is stdout: $ORCA_TERMINAL_HANDLE, printed only when it
+# matches terminal_id_ok's own grammar — an unset OR malformed value is
+# "present but could not resolve", not "not orca"; the reason goes to stderr.
+# The session-id argument is unused — orca reports via the environment, like
+# tmux, not via a session-id lookup like herdr.
 terminal_detect() {
   [ "${TERM_PROGRAM:-}" = Orca ] || return 1
-  if [ -n "${ORCA_TERMINAL_HANDLE:-}" ]; then
+  if [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && terminal_id_ok "$ORCA_TERMINAL_HANDLE"; then
     printf '%s\n' "$ORCA_TERMINAL_HANDLE"
   else
-    echo "orca: \$ORCA_TERMINAL_HANDLE is unset — cannot identify this pane" >&2
+    echo "orca: \$ORCA_TERMINAL_HANDLE is unset or malformed — cannot identify this pane" >&2
   fi
   return 0
 }
@@ -223,9 +254,23 @@ terminal_peek() {
     echo "orca: could not read terminal '$id' (it may no longer exist)" >&2
     return 12
   fi
-  local esc
+  # ok:true alone is not proof `tail` is the array of lines this function
+  # promises to emit (review, #1439): missing/null would otherwise iterate to
+  # ZERO rows — indistinguishable from a genuinely empty pane — and a scalar
+  # would iterate to ONE row holding that whole scalar as if it were a line of
+  # pane content. Require json_type = array FIRST; only a confirmed array
+  # (including a correctly empty one) reaches json_each.
+  local esc tail_type
   esc="$(printf '%s' "$json" | sed "s/'/''/g")"
-  sqlite3 :memory: "SELECT value FROM json_each('$esc','\$.result.terminal.tail')" 2>/dev/null
+  tail_type="$(sqlite3 :memory: "SELECT json_type('$esc','\$.result.terminal.tail')" 2>/dev/null)"
+  [ "$tail_type" = array ] || {
+    echo "orca: read for terminal '$id' did not return an array of lines (got: ${tail_type:-missing})" >&2
+    return 12
+  }
+  sqlite3 :memory: "SELECT value FROM json_each('$esc','\$.result.terminal.tail')" 2>/dev/null || {
+    echo "orca: could not enumerate terminal '$id''s rendered lines" >&2
+    return 12
+  }
   return 0
 }
 

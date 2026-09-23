@@ -220,6 +220,13 @@ _fake_herdr_list_scalar_session() {
 #            survives (measured 2026-09-23, feasibility doc Fourth pass (g)):
 #            every call still EXITS 0, but answers ok:false with this error
 #            code — the whole runtime is unreachable, not this one terminal.
+#   tail_empty/tail_missing/tail_null/tail_object/tail_scalar  read answers
+#            ok:true but `$.result.terminal.tail` is, respectively, a
+#            genuinely empty array (the only one of these that must SUCCEED,
+#            with empty stdout), absent, JSON null, an object, or a scalar
+#            string — review (#1439): ok:true alone does not prove tail is the
+#            array terminal_peek promises to emit; every non-array shape here
+#            must be rejected before json_each ever sees it.
 _install_fake_orca() {
   local mode="${1:-present}" show_json show_rc=0 read_json read_rc=0
   case "$mode" in
@@ -245,6 +252,26 @@ _install_fake_orca() {
     badjson)
       show_json='not json at all'
       read_json='not json at all'
+      ;;
+    tail_empty)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":[]}}}'
+      ;;
+    tail_missing)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{}}}'
+      ;;
+    tail_null)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":null}}}'
+      ;;
+    tail_object)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":{}}}}'
+      ;;
+    tail_scalar)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":"not an array"}}}'
       ;;
   esac
   cat > "$FAKEBIN/orca" <<EOF
@@ -1179,10 +1206,40 @@ _last_agent_rename_key() {
   run terminal_detect ""
   [ "$status" -eq 1 ]
 
-  export TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE=term_abc123
+  export TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE='term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
   run terminal_detect ""
   [ "$status" -eq 0 ]
-  [ "$output" = term_abc123 ]
+  [ "$output" = 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba' ]
+}
+
+@test "orca: terminal_id_ok accepts only the measured term_<uuid> grammar" {
+  agmsg_terminal_load orca
+  terminal_id_ok 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
+  ! terminal_id_ok 'term_abc123'
+  ! terminal_id_ok ''
+  ! terminal_id_ok 'not-a-handle'
+  # Control/whitespace bytes that would corrupt a tab-separated placement
+  # record (review, #1439) — every one must be refused, not just "no id at
+  # all".
+  ! terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tinjected')"
+  ! terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\ninjected')"
+  ! terminal_id_ok 'term_ea11f227 ca2c-44b0-a3e6-75c62b9f20ba'
+}
+
+@test "orca: detect refuses a malformed ORCA_TERMINAL_HANDLE — a tab/newline never reaches stdout" {
+  # Same authority as terminal_id_ok (review, #1439): without this, the
+  # registry's own "driver has no terminal_id_ok" fallback ACCEPTS any value,
+  # and a tab or newline smuggled into the env var would corrupt the
+  # tab-separated placement record terminal_detect's result gets written into.
+  agmsg_terminal_load orca
+  export TERM_PROGRAM=Orca
+  export ORCA_TERMINAL_HANDLE
+  ORCA_TERMINAL_HANDLE="$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tinjected')"
+  run terminal_detect ""
+  [ "$status" -eq 0 ]
+  local stdout_only
+  stdout_only="$(terminal_detect "" 2>/dev/null)"
+  [ -z "$stdout_only" ]
 }
 
 @test "orca: detect is present-but-unresolved when TERM_PROGRAM=Orca but the handle is unset" {
@@ -1270,6 +1327,35 @@ _last_agent_rename_key() {
   run terminal_peek term_abc123 --lines 50
   [ "$status" -eq 0 ]
   grep -qF -- '[--limit] [50]' "$ARGV_LOG"
+}
+
+@test "orca: peek accepts a genuinely empty tail array as success, empty stdout" {
+  _install_fake_orca tail_empty
+  agmsg_terminal_load orca
+  run terminal_peek term_abc123
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "orca: peek is 12, never a false success, when tail is missing/null/object/scalar (#1439 review)" {
+  # ok:true alone does not prove `tail` is the array terminal_peek promises to
+  # emit. Missing/null would otherwise iterate to ZERO rows (indistinguishable
+  # from tail_empty's GENUINE empty pane, tested above); a scalar would
+  # iterate to ONE row holding that whole scalar as if it were real pane
+  # content. All four must be rejected with 12, and — checked on stdout ALONE,
+  # since `run`'s $output merges the expected stderr reason in — never emit
+  # anything on stdout, especially not the scalar's own text as if it were
+  # real pane content.
+  agmsg_terminal_load orca
+  local mode stdout_only rc
+
+  for mode in tail_missing tail_null tail_object tail_scalar; do
+    _install_fake_orca "$mode"
+    rc=0
+    stdout_only="$(terminal_peek term_abc123 2>/dev/null)" || rc=$?
+    [ "$rc" -eq 12 ]
+    [ -z "$stdout_only" ]
+  done
 }
 
 @test "orca: peek is 10 when unreachable, 12 when answered but failed, never 13" {

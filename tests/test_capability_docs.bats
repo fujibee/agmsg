@@ -124,7 +124,7 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   grep -qF "capabilities=$tmux_caps" <<<"$output"
 
   run env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH \
-    -u AGMSG_TERMINAL_DRIVER TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE=term_deadbeef \
+    -u AGMSG_TERMINAL_DRIVER TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE=term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba \
     bash "$ROOT/scripts/where.sh"
   [ "$status" -eq 0 ]
   local orca_caps
@@ -141,7 +141,7 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   # outright.
   run env -u TMUX -u TMUX_PANE -u AGMSG_TERMINAL_DRIVER \
     HERDR_ENV=1 HERDR_PANE_ID=w1:p4 HERDR_SOCKET_PATH="$BATS_TEST_TMPDIR/herdr.sock" \
-    TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE=term_deadbeef \
+    TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE=term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba \
     bash "$ROOT/scripts/where.sh"
   [ "$status" -eq 0 ]
   grep -qF "terminal=orca" <<<"$output"
