@@ -1486,14 +1486,15 @@ _last_agent_rename_key() {
   [ "$status" -eq 10 ]
 }
 
-@test "orca: poke/arrange report unsupported (13) — not implemented this release" {
+@test "orca: arrange (and poke) stay unsupported (13) — orca's CLI has no reordering verb at all" {
   _install_fake_orca present
   agmsg_terminal_load orca
-  run terminal_poke term_abc123 hello
-  [ "$status" -eq 13 ]
   run terminal_arrange term_abc123 place_below term_def456
   [ "$status" -eq 13 ]
-  # Neither ever touched the fake orca binary.
+  grep -q 'unsupported' <<<"$output"
+  run terminal_poke term_abc123 hello
+  [ "$status" -eq 13 ]
+  # Neither ever touched the fake orca binary — there is no call to make.
   refute grep -q '\[send\]' "$ARGV_LOG"
   refute grep -q '\[rename\]' "$ARGV_LOG"
 }
@@ -1575,7 +1576,7 @@ _last_agent_rename_key() {
   [ "$output" = "$(printf 'unsupported\tdriver_no_process_binding')" ]
 }
 
-@test "orca: spawn creates via worktree path, launches boot as the initial command, prints the handle" {
+@test "orca: spawn creates via worktree path with boot as the initial command, and fails closed on every bad input" {
   _install_fake_orca present
   agmsg_terminal_load orca
   run terminal_spawn alice /proj pane-v bash -lc boot
@@ -1585,19 +1586,14 @@ _last_agent_rename_key() {
   grep -qF -- '[--worktree] [path:/proj]' "$ARGV_LOG"
   grep -qF -- '[--title] [alice]' "$ARGV_LOG"
   grep -qF -- '[--command] [bash -lc boot]' "$ARGV_LOG"
-}
 
-@test "orca: spawn rejects an unknown target instead of defaulting, same as tmux/herdr" {
-  _install_fake_orca present
-  agmsg_terminal_load orca
+  # An unknown target must fail, not silently default (same rule as tmux/herdr).
   run terminal_spawn alice /proj bogus-target boot
   [ "$status" -eq 13 ]
   grep -q 'unsupported' <<<"$output"
-  refute grep -q '\[create\]' "$ARGV_LOG"
-}
 
-@test "orca: spawn is 13 when orca is not on PATH, when create fails, and when it answers ok with no handle" {
-  agmsg_terminal_load orca
+  # Unreachable, a failed create, and an ok:true create with no handle all
+  # fail the same way: 13, nothing to print.
   local empty_path="$BATS_TEST_TMPDIR/empty-path-spawn"
   mkdir -p "$empty_path"
   PATH="$empty_path" run terminal_spawn alice /proj window boot
@@ -1612,7 +1608,7 @@ _last_agent_rename_key() {
   [ "$status" -eq 13 ]
 }
 
-@test "orca: despawn closes then confirms gone via show, never trusts close's own return" {
+@test "orca: despawn closes then confirms gone via show — never trusts close's own return" {
   # MEASURED (Third pass (d)): close's own success/error shape for an
   # already-closed handle differs across orca versions — this is exactly why
   # despawn is built to re-check through pane_state/show instead.
@@ -1623,20 +1619,14 @@ _last_agent_rename_key() {
   [ "$output" = ok ]
   grep -qF -- '[close]' "$ARGV_LOG"
   grep -qF -- '[show]' "$ARGV_LOG"
-}
 
-@test "orca: despawn is 13 when show still shows connected after close" {
   # close reports success (ptyKilled:true in the default 'present' fixture)
   # but the pane is still connected:true — despawn must not trust close alone.
   _install_fake_orca present
-  agmsg_terminal_load orca
   run terminal_despawn term_abc123
   [ "$status" -eq 13 ]
   printf '%s\n' "$output" | grep -q '^runtime_error'
-}
 
-@test "orca: despawn is 13 when orca is not on PATH" {
-  agmsg_terminal_load orca
   local empty_path="$BATS_TEST_TMPDIR/empty-path-despawn"
   mkdir -p "$empty_path"
   PATH="$empty_path" run terminal_despawn term_abc123
@@ -1644,7 +1634,10 @@ _last_agent_rename_key() {
   printf '%s\n' "$output" | grep -q '^runtime_error'
 }
 
-@test "orca: name renames via the tab title (team:name), mode makes no difference (single-name driver)" {
+@test "orca: name renames via the tab title (team:name), mode makes no difference, and fails closed" {
+  # Single-name driver (only the TAB title `rename` controls, see README) —
+  # `mode` (key-only vs both) has nothing separate to skip, so both must
+  # produce the identical --title argument.
   _install_fake_orca present
   agmsg_terminal_load orca
   run terminal_name term_abc123 team alice
@@ -1658,11 +1651,8 @@ _last_agent_rename_key() {
   [ "$status" -eq 0 ]
   [ "$output" = ok ]
   grep -qF -- '[--title] [team:alice]' "$ARGV_LOG"
-}
 
-@test "orca: name is 13 when rename fails or orca is not on PATH" {
   _install_fake_orca rename_fails
-  agmsg_terminal_load orca
   run terminal_name term_abc123 team alice
   [ "$status" -eq 13 ]
   printf '%s\n' "$output" | grep -q '^runtime_error'
