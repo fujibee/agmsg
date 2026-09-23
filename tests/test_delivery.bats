@@ -98,9 +98,9 @@ settings_file() {
   run bash "$SCRIPTS/delivery.sh" set monitor codex "$weird_project"
   chmod 755 "$weird_project/.codex"   # teardown's rm -rf must not trip over this
   [ "$status" -ne 0 ]
-  [[ "$output" == *"could not write $weird_project/.codex/hooks.json"* ]]
-  [[ "$output" == *"delivery for codex was NOT set up"* ]]
-  [[ "$output" == *"run this same command from a normal, unsandboxed shell"* ]]
+  printf '%s\n' "$output" | grep -q -F -- "could not write $weird_project/.codex/hooks.json"
+  printf '%s\n' "$output" | grep -q -F -- "delivery for codex was NOT set up"
+  printf '%s\n' "$output" | grep -q -F -- "run this same command from a normal, unsandboxed shell"
   case "$output" in *"Delivery mode set to"*) return 1 ;; esac
   [ ! -f "$weird_project/.codex/hooks.json" ]
 
