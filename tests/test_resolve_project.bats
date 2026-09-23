@@ -489,3 +489,35 @@ setup_git_repo() {
   # literal (non-glob) tokens, and both now come from the manifest (#626/#631).
   [ "$(_agmsg_agent_binaries claude-code)" = "claude claude-code" ]
 }
+
+@test "agent-binaries: an external plugin overrides a same-named builtin only once trusted (#631)" {
+  # _agmsg_type_detect_proc's fast path (reading the builtin manifest
+  # directly, to avoid sourcing type-registry.sh for every call) must never
+  # mistake a plugin dir merely being PRESENT for a trust decision -- the
+  # fast path's own existence check must not be, and must not skip, the
+  # registry's real trust check (driver-registry.sh's agmsg_driver_is_trusted).
+  # One property, both directions: untrusted resolves to the builtin exactly
+  # as agmsg_type_get itself would, and the SAME location, once opted in,
+  # overrides it -- checked in that order, on the same plugin dir, so the
+  # only thing that changes between the two calls is the trust state.
+  local plugdir="$ROOT/plugins"
+  mkdir -p "$plugdir/types/claude-code"
+  printf 'detect_proc=totally-different-binary\n' > "$plugdir/types/claude-code/type.conf"
+
+  # Not yet trusted: falls back to the builtin.
+  run env AGMSG_PLUGIN_DIRS="$plugdir" bash -c \
+    'SKILL_DIR="$1"; . "$SKILL_DIR/scripts/lib/resolve-project.sh"; _agmsg_agent_binaries claude-code' \
+    _ "$SKILL_DIR"
+  [ "$output" = "claude claude-code" ]
+
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/driver-registry.sh"
+  agmsg_driver_trust types claude-code "$plugdir/types/claude-code"
+
+  # Trusted now: a separate `bash -c` process, so no cache from the call
+  # above could carry the old answer forward even by accident.
+  run env AGMSG_PLUGIN_DIRS="$plugdir" bash -c \
+    'SKILL_DIR="$1"; . "$SKILL_DIR/scripts/lib/resolve-project.sh"; _agmsg_agent_binaries claude-code' \
+    _ "$SKILL_DIR"
+  [ "$output" = "totally-different-binary" ]
+}

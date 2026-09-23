@@ -244,27 +244,54 @@ agmsg_find_registered_project_variant() {
 # type.conf, always trusted) are read directly here -- same shape
 # type-registry.sh's own agmsg_type_get uses (grep the key line, take the
 # first match, trim/unquote), so behavior matches exactly for every type this
-# is actually tested against. A type not found among the built-ins falls back
-# to the full, trust-aware registry lookup (needed for an external/plugin
-# type, since accepting its detect_proc without a trust check would let an
-# untrusted drop-in claim a process name to attach itself to) -- sourced
-# lazily, right here, only on that fallback path, so a plugin-free install
-# never pays type-registry.sh's own source-time cost at all.
+# is actually tested against.
+#
+# That fast path is taken ONLY when no external base could possibly override
+# this type (review, #631 round 3 -- the first version of this function
+# always preferred the builtin, silently skipping the registry's own "a
+# trusted external plugin shadows a same-named builtin" contract, which is
+# exactly the #626/#631 bug class in a new place). Bases and their order come
+# straight from driver-registry.sh's own agmsg_driver_bases -- verified
+# against that file directly, not from memory (2026-09-22): builtin
+# ($root/scripts/drivers, always eligible), then $root/plugins, then each
+# $AGMSG_PLUGIN_DIRS entry (both external, opt-in). The two checks below are
+# existence only -- NOT a trust check: if either external location merely
+# HAS a types/<type>/type.conf, this defers to the full, trust-aware lookup,
+# whether or not that candidate turns out trusted. Deciding trust here too
+# would risk drifting from the real policy (driver-registry.sh's
+# agmsg_driver_is_trusted) instead of reusing it, and a duplicate that drifts
+# is worse than no duplicate. Sourced lazily, only on that fallback (an
+# external candidate exists, or the builtin has none), so a plugin-free
+# install -- the case every current test exercises -- never pays
+# type-registry.sh's own source-time cost.
 _agmsg_type_detect_proc() {
-  local type="$1" dir line val
+  local type="$1" root dir line val d external=0
   [ -n "${SKILL_DIR:-}" ] || return 1
-  dir="$SKILL_DIR/scripts/drivers/types/$type"
-  if [ -f "$dir/type.conf" ]; then
-    line="$( { grep -E '^[[:space:]]*detect_proc[[:space:]]*=' "$dir/type.conf" 2>/dev/null || true; } | head -1)"
-    if [ -n "$line" ]; then
-      val="${line#*=}"
-      val="${val#"${val%%[![:space:]]*}"}"
-      val="${val%"${val##*[![:space:]]}"}"
-      case "$val" in \"*\") val="${val#\"}"; val="${val%\"}" ;; esac
-      printf '%s' "$val"
-      return 0
+  root="$SKILL_DIR"
+
+  [ -f "$root/plugins/types/$type/type.conf" ] && external=1
+  if [ "$external" -eq 0 ]; then
+    local IFS=:
+    for d in ${AGMSG_PLUGIN_DIRS:-}; do
+      [ -n "$d" ] && [ -f "$d/types/$type/type.conf" ] && { external=1; break; }
+    done
+  fi
+
+  if [ "$external" -eq 0 ]; then
+    dir="$root/scripts/drivers/types/$type"
+    if [ -f "$dir/type.conf" ]; then
+      line="$( { grep -E '^[[:space:]]*detect_proc[[:space:]]*=' "$dir/type.conf" 2>/dev/null || true; } | head -1)"
+      if [ -n "$line" ]; then
+        val="${line#*=}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%"${val##*[![:space:]]}"}"
+        case "$val" in \"*\") val="${val#\"}"; val="${val%\"}" ;; esac
+        printf '%s' "$val"
+        return 0
+      fi
     fi
   fi
+
   if ! declare -F agmsg_type_get >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     . "$SKILL_DIR/scripts/lib/type-registry.sh"
@@ -311,8 +338,19 @@ _agmsg_type_detect_proc() {
 # memoization existed in source but did nothing). See memory's "a cache array
 # populated inside $(...) is discarded" for the same shape elsewhere.
 _agmsg_agent_binaries() {
-  local type="$1" cache_var procs tok out=""
-  cache_var="_AGMSG_AGENT_BINS_$(printf '%s' "$type" | tr -c '[:alnum:]' '_')"
+  local type="$1" cache_var procs tok out="" _plugin_dirs
+  # The key includes AGMSG_PLUGIN_DIRS (review, #631 round 3):
+  # _agmsg_type_detect_proc's override-existence check depends on it, so a
+  # value that changes within one process (a test fixture switching plugin
+  # dirs mid-run; the only realistic case, but a real one) must not read
+  # back a result cached under a DIFFERENT AGMSG_PLUGIN_DIRS. Pure bash
+  # pattern substitution, not `tr` -- no fork, and it also drops the two
+  # per-distinct-type forks the old `tr`-based sanitizing cost on every
+  # cache miss. The `:-` default is required under `set -u` when the
+  # variable is unset, not merely a style choice -- measured, a bare
+  # `${AGMSG_PLUGIN_DIRS//...}` throws "unbound variable" there.
+  _plugin_dirs="${AGMSG_PLUGIN_DIRS:-}"
+  cache_var="_AGMSG_AGENT_BINS_${type//[^A-Za-z0-9]/_}_${_plugin_dirs//[^A-Za-z0-9]/_}"
   if [ -n "${!cache_var:-}" ]; then
     _AGMSG_AGENT_BINARIES_OUT="${!cache_var}"
     printf '%s\n' "$_AGMSG_AGENT_BINARIES_OUT"
