@@ -99,10 +99,15 @@ agmsg_token_locate_classify() {   # <token> <locator1> <text1> [...]
 # doesn't re-run it.
 : "${SKILL_DIR:?token-locate.sh requires SKILL_DIR}"
 if ! command -v _actas_lock_encode >/dev/null 2>&1; then
+  # The :- here is redundant with the :? guard just above (SKILL_DIR is
+  # already guaranteed set by the time this line runs) -- present only so a
+  # bare $SKILL_DIR read a few lines after its own :? check is not ALSO
+  # flagged as a second, separate unguarded read (.github/scripts/check-
+  # unguarded-env-reads.sh does not track that connection across lines).
   # shellcheck disable=SC1091
-  . "$SKILL_DIR/scripts/lib/instance-id.sh"
+  . "${SKILL_DIR:-}/scripts/lib/instance-id.sh"
   # shellcheck disable=SC1091
-  . "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  . "${SKILL_DIR:-}/scripts/lib/actas-lock.sh"
 fi
 
 # 120s: long enough that a genuinely separate follow-up call (a human typing
