@@ -119,10 +119,24 @@ _install_fake_herdr_empty_box() {
 # #1384 (herdr only): a real, stalled draft with NOBODY focused on the pane
 # -- `pane list` answers focused=false unconditionally (one pane, asked
 # about twice: once before clearing, once right after -- #1384's own two
-# re-reads), and `pane read --format ansi` answers a real, non-dim draft
-# ("hello draft") so `agmsg_input_box_is_real_draft` reads it as real on
-# the very FIRST snapshot -- no second styled read is needed to reach
-# RC=14, the style check alone already trips it.
+# re-reads), and `pane read --format ansi` answers STATEFULLY, by counting
+# this SAME fake's own prior calls in $ARGV_LOG (review: the first version
+# of this fixture answered the identical draft no matter what happened,
+# which could not tell a clear that actually worked apart from one that
+# did not, or a restore that landed apart from one that failed):
+#   - no `agent send-keys` (clear) logged yet -> the real, non-dim draft
+#     ("hello draft"), so `agmsg_input_box_is_real_draft` reads it as real
+#     on the very first snapshot.
+#   - a clear IS logged, and $FAKEBIN/.clear_empties exists -> empty box.
+#   - a clear is logged but $FAKEBIN/.clear_empties does NOT exist -> still
+#     the draft (simulates a clear that sent keys but did not actually
+#     empty the box -- too long a draft, a key that did not land).
+#   - a `pane send-text` (restore) is ALSO logged -> the draft again
+#     (retyped successfully), UNLESS $FAKEBIN/.restore_fails exists, in
+#     which case `pane send-text` itself exits 1 and the box stays empty.
+# Each test controls behavior by touching/removing those two files before
+# each `run`, and truncating $ARGV_LOG between scenarios so the call
+# counts this fake reads are scoped to that one scenario.
 _install_fake_herdr_real_draft_unfocused() {
   local rule
   rule="$(printf '─%.0s' $(seq 1 60))"
@@ -130,7 +144,24 @@ _install_fake_herdr_real_draft_unfocused() {
     printf '#!/usr/bin/env bash\n'
     printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
     printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
-    printf "  printf '%%s\\\\n' '%s testteam-alice ─' '❯ hello draft' '%s'\n" "$rule" "$rule"
+    printf '  sends=$(grep -c '\''^herdr \\[pane\\] \\[send-text\\]'\'' "%s" 2>/dev/null)\n' "$ARGV_LOG"
+    printf '  clears=$(grep -c '\''^herdr \\[agent\\] \\[send-keys\\]'\'' "%s" 2>/dev/null)\n' "$ARGV_LOG"
+    printf '  if [ "$sends" -gt 0 ]; then\n'
+    printf '    if [ -f "%s/.restore_fails" ]; then draft=0; else draft=1; fi\n' "$FAKEBIN"
+    printf '  elif [ "$clears" -gt 0 ]; then\n'
+    printf '    if [ -f "%s/.clear_empties" ]; then draft=0; else draft=1; fi\n' "$FAKEBIN"
+    printf '  else\n'
+    printf '    draft=1\n'
+    printf '  fi\n'
+    printf '  if [ "$draft" = 1 ]; then\n'
+    printf "    printf '%%s\\\\n' '%s testteam-alice ─' '❯ hello draft' '%s'\n" "$rule" "$rule"
+    printf '  else\n'
+    printf "    printf '%%s\\\\n' '%s' '❯' '%s'\n" "$rule" "$rule"
+    printf '  fi\n'
+    printf '  exit 0\n'
+    printf 'fi\n'
+    printf 'if [ "$1" = pane ] && [ "$2" = send-text ]; then\n'
+    printf '  [ -f "%s/.restore_fails" ] && exit 1\n' "$FAKEBIN"
     printf '  exit 0\n'
     printf 'fi\n'
     printf 'if [ "$1" = pane ] && [ "$2" = list ]; then\n'
@@ -381,6 +412,12 @@ EOF
 @test "poke: herdr, unfocused real draft -- clears, pokes, then restores the draft, in that order (#1384)" {
   _install_fake_herdr_real_draft_unfocused
   _write_record "herdr:wC:p4"
+
+  # --- 1) happy path: clear actually empties the box, restore actually
+  # lands -- clears, pokes, then restores, in that order, and the saved
+  # draft file is removed once the restore verifies byte-for-byte.
+  : > "$FAKEBIN/.clear_empties"
+  rm -f "$FAKEBIN/.restore_fails"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 0 ]
   _out_has "poked 'testteam/alice' via herdr"
@@ -394,12 +431,37 @@ EOF
   [ -n "$restore_line" ]
   [ "$clear_line" -lt "$poke_line" ]
   [ "$poke_line" -lt "$restore_line" ]
-
   # The draft was saved under run/ with 600, then removed once the restore
   # verified byte-for-byte against the original -- a removal test without a
   # keep-set proves nothing, but here the survive/remove question is the
   # test itself: none should remain after a clean run.
   [ -z "$(find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' 2>/dev/null)" ]
+
+  # --- 2) clear sends the keys but the box reads back with
+  # the draft STILL there (too long a draft, a key that did not land) --
+  # must not type the poke's own text over it. No `agent prompt` call may
+  # appear at all, and the saved draft must survive, not be silently
+  # dropped as though nothing had been saved.
+  : > "$ARGV_LOG"
+  rm -f "$FAKEBIN/.clear_empties"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -ne 0 ]
+  refute grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+  [ -n "$(find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' 2>/dev/null)" ]
+  find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' -delete
+
+  # --- 3) clear DOES empty the box and the poke DOES land,
+  # but the retype back fails (`pane send-text` itself errors) -- the
+  # message still delivered (this is not a poke failure), but the saved
+  # draft file must NOT be deleted just because terminal_input_type was
+  # merely CALLED; only a verified, matching restore may remove it.
+  : > "$ARGV_LOG"
+  : > "$FAKEBIN/.clear_empties"
+  : > "$FAKEBIN/.restore_fails"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -eq 0 ]
+  grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
+  [ -n "$(find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' 2>/dev/null)" ]
 }
 
 @test "poke: a plain record is unsupported as a TERMINAL answer, and points at the type's native channel (peek deliberately does not — no CLI read path)" {

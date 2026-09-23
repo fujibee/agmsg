@@ -102,6 +102,54 @@ _agmsg_safe_poke_read_box() {
 #       caller's normal driver-failure handling handles it. The draft file,
 #       if one was written, is left in place on every path except a
 #       confirmed 0-with-verified-match.
+# Re-reads <id>'s box and says whether it is now SAFE to type over: located,
+# and (when a styled read is available) not classified as a real draft.
+# Shared by the post-clear check and the final restore verification below --
+# review found both were missing before this existed: the post-clear check
+# was skipped outright (terminal_input_clear's own contract guarantees only
+# that the keys were SENT, never that the box ended up empty -- a draft
+# longer than the fixed key-repeat margin, or a key that did not land,
+# both leave content that must be caught, not assumed away), and the
+# restore verification existed only on the success path, not on the
+# gained-focus-mid-clear abort path, which trusted terminal_input_type's
+# restore without checking its own result at all.
+_agmsg_safe_poke_box_is_empty() {
+  local id="$1" marker="$2" boxed="$3" styled="$4"
+  local screen="" rc=0
+  if [ "$styled" -eq 1 ]; then
+    screen="$(terminal_peek_styled "$id")" || rc=$?
+  else
+    screen="$(terminal_peek "$id")" || rc=$?
+  fi
+  [ "$rc" -eq 0 ] || return 1
+  local region="" region_rc=0
+  region="$(agmsg_input_box_locate "$marker" "$boxed" "$screen")" || region_rc=$?
+  [ "$region_rc" -eq 0 ] || return 1
+  [ "$styled" -eq 1 ] || return 0
+  agmsg_input_box_is_real_draft "$marker" "$region" && return 1
+  return 0
+}
+
+# Re-reads <id>'s box and says whether it matches <expect_region> exactly
+# (normalized, styling-blind) -- the retype verification, factored out so
+# both places that retype a draft (the gained-focus-mid-clear abort, and
+# the normal end of a successful poke) use the SAME "restored, confirmed"
+# bar rather than one of them trusting terminal_input_type's own rc alone.
+_agmsg_safe_poke_box_matches() {
+  local id="$1" marker="$2" boxed="$3" styled="$4" expect_region="$5"
+  local screen="" rc=0
+  if [ "$styled" -eq 1 ]; then
+    screen="$(terminal_peek_styled "$id")" || rc=$?
+  else
+    screen="$(terminal_peek "$id")" || rc=$?
+  fi
+  [ "$rc" -eq 0 ] || return 1
+  local region="" region_rc=0
+  region="$(agmsg_input_box_locate "$marker" "$boxed" "$screen")" || region_rc=$?
+  [ "$region_rc" -eq 0 ] || return 1
+  [ "$(agmsg_input_box_normalize "$region")" = "$(agmsg_input_box_normalize "$expect_region")" ]
+}
+
 _agmsg_safe_poke_recover() {
   local id="$1" text="$2" team="$3" name="$4" marker="$5" boxed="$6" styled="$7" region="$8"
   local draft
@@ -129,52 +177,54 @@ _agmsg_safe_poke_recover() {
   # Focus re-read #2: right after clearing, before either restoring outright
   # or going on to poke. Landing here means someone is now plausibly at the
   # keyboard -- put the draft straight back and refuse, never type the
-  # poke's own text into a box someone just started using.
+  # poke's own text into a box someone just started using. The restore
+  # itself is verified (below) exactly like the end-of-success path is --
+  # its OWN rc is not trusted as proof, and the draft file is kept, not
+  # removed, unless the box reads back matching.
   local focus2=""
   focus2="$(terminal_pane_focused "$id" 2>/dev/null)" || focus2=""
   if [ "$focus2" != no ]; then
     terminal_input_type "$id" "$draft" >/dev/null 2>&1
-    rm -f "$draft_file"
-    echo "poke: pane '$id' gained focus while its draft was being cleared -- restored it and refusing to type over it (input in progress)" >&2
+    if _agmsg_safe_poke_box_matches "$id" "$marker" "$boxed" "$styled" "$region"; then
+      rm -f "$draft_file"
+      echo "poke: pane '$id' gained focus while its draft was being cleared -- restored it and refusing to type over it (input in progress)" >&2
+    else
+      echo "poke: pane '$id' gained focus while its draft was being cleared, and restoring it could not be confirmed -- the draft is saved at $draft_file; refusing to type over the pane (input in progress)" >&2
+    fi
     return 14
+  fi
+
+  # Proof the clear actually worked, not just that the keys were sent
+  # (review): a draft longer than the fixed key-repeat margin, or a key
+  # that did not land, both leave content here that must be caught before
+  # the poke's own text is typed on top of it.
+  if ! _agmsg_safe_poke_box_is_empty "$id" "$marker" "$boxed" "$styled"; then
+    echo "poke: pane '$id' did not read back empty after clearing its input box -- not typing over it; the draft is saved at $draft_file" >&2
+    return 12
   fi
 
   rc=0
   terminal_poke "$id" "$text" >/dev/null || rc=$?
   if [ "$rc" -ne 0 ]; then
     # The message never went in. Best effort: put the draft back rather
-    # than leave the box empty because a poke attempt failed.
+    # than leave the box empty because a poke attempt failed -- verified
+    # the same way as every other retype here, and the file kept if it
+    # cannot be confirmed.
     terminal_input_type "$id" "$draft" >/dev/null 2>&1
-    echo "poke: could not deliver to pane '$id' past its draft -- attempted to restore the draft; a saved copy also remains at $draft_file" >&2
+    if _agmsg_safe_poke_box_matches "$id" "$marker" "$boxed" "$styled" "$region"; then
+      echo "poke: could not deliver to pane '$id' past its draft -- restored the draft; a saved copy also remains at $draft_file" >&2
+    else
+      echo "poke: could not deliver to pane '$id' past its draft, and restoring it could not be confirmed -- the draft is saved at $draft_file" >&2
+    fi
     return "$rc"
   fi
 
-  rc=0
-  terminal_input_type "$id" "$draft" >/dev/null || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "poke: delivered to pane '$id', but could not retype its draft afterward -- the draft is saved at $draft_file" >&2
-    return 0
-  fi
-
+  terminal_input_type "$id" "$draft" >/dev/null 2>&1
   # Verify in code, never by eye: compare the SAME normalized form used
   # everywhere else in this file, so the comparison is blind to styling
   # either read might carry, against the ORIGINAL region this function was
   # handed -- not a fresh classification, a byte-for-byte content check.
-  local after_screen="" after_rc=0 restored_ok=0
-  if [ "$styled" -eq 1 ]; then
-    after_screen="$(terminal_peek_styled "$id")" || after_rc=$?
-  else
-    after_screen="$(terminal_peek "$id")" || after_rc=$?
-  fi
-  if [ "$after_rc" -eq 0 ]; then
-    local after_region="" after_region_rc=0
-    after_region="$(agmsg_input_box_locate "$marker" "$boxed" "$after_screen")" || after_region_rc=$?
-    if [ "$after_region_rc" -eq 0 ] \
-      && [ "$(agmsg_input_box_normalize "$after_region")" = "$(agmsg_input_box_normalize "$region")" ]; then
-      restored_ok=1
-    fi
-  fi
-  if [ "$restored_ok" -eq 1 ]; then
+  if _agmsg_safe_poke_box_matches "$id" "$marker" "$boxed" "$styled" "$region"; then
     rm -f "$draft_file"
   else
     echo "poke: delivered to pane '$id', but its retyped draft does not match what was there before -- the original is saved at $draft_file" >&2
