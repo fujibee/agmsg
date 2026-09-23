@@ -56,6 +56,8 @@ source "$SCRIPT_DIR/lib/compat.sh"              # required by detect-cli-type.sh
 source "$SCRIPT_DIR/lib/detect-cli-type.sh"     # agmsg_detect_cli_type (#1229 plain fallback)
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/safe-poke.sh"           # agmsg_safe_poke -- also sources input-box.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"     # agmsg_registered_type (#1391)
 
 die() { echo "poke: $*" >&2; exit 1; }
 
@@ -126,6 +128,19 @@ REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 IFS=$'\t' read -r REF _PROJ TYPE _FENCE < "$REC" || true
 [ -n "$REF" ] || die "placement record for '$TEAM/$NAME' has no pane id — a record with no id is not a placement (a bug in whatever wrote it)"
 
+# #1391: the record's own type field can be stale or wrong (a hand-started
+# seat's self-naming hook used to fall back to a guessed default, which
+# silently wrote 'claude-code' for a seat of any other type it could not
+# identify). The roster (join.sh's own registration in this team's
+# config.json) is authoritative for what this seat actually joined as, so it
+# wins on a mismatch -- and the mismatch is reported, not silently corrected,
+# because a corrected-every-time record never gets noticed as corrupt.
+ROSTER_TYPE="$(agmsg_registered_type "$TEAM" "$NAME" 2>/dev/null || true)"
+if [ -n "$ROSTER_TYPE" ] && [ "$ROSTER_TYPE" != "$TYPE" ]; then
+  echo "poke: '$TEAM/$NAME' placement record says type '$TYPE' but the roster says '$ROSTER_TYPE' — using '$ROSTER_TYPE' (#1391)" >&2
+  TYPE="$ROSTER_TYPE"
+fi
+
 # The ref parser fails CLOSED (non-zero) on a corrupt/unknown-scheme ref. Under
 # `set -e` a bare `VAR="$(...)"` would take the shell down AT the assignment, so
 # the die below — the contract for an unresolvable ref — is never reached. Guard
@@ -170,6 +185,11 @@ agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME
 if [ "$RC" -eq 14 ]; then
   echo "poke: '$TEAM/$NAME' has a changing input box — refusing to type over it (input in progress)" >&2
   exit 14
+fi
+
+if [ "$RC" -eq 15 ]; then
+  echo "poke: '$TEAM/$NAME' input box could not be located — refusing to type over it (cannot confirm this is safe, #1391)" >&2
+  exit 15
 fi
 
 # #1229: a bare plain:- target (id '-') has no pane at all — not a

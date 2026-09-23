@@ -1247,11 +1247,13 @@ _flat_screen() {
   # "near the bottom" guess accepted as empty, because proximity alone
   # cannot tell a live box from a leftover one. Neither read can confirm
   # this is the live widget, so it refuses even though the two reads are
-  # identical -- "cannot tell" still fails toward refusing (#1321).
+  # identical -- "cannot tell" still fails toward refusing (#1321), and as
+  # its own code, 15, not 14: this is "could not locate the box", not
+  # "found it and it looks occupied" (#1391/#1402).
   : > "$ARGV_LOG"
   _install_fake_herdr_screen_sequence "$(printf '›\n\n\n')"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
-  [ "$status" -eq 14 ]
+  [ "$status" -eq 15 ]
   [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
 
   # plain (#1321 review): the input-box check must not block plain's

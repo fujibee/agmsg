@@ -31,10 +31,16 @@ _AGMSG_SAFE_POKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # see poke.sh's original comment on this, unchanged in spirit: a command
 # substitution runs in a subshell, and these are side-channel globals).
 #   _AGMSG_SAFE_POKE_IB_RC        0 = box confirmed & safe to compare; 14 =
-#                                  a real draft (styled read only) or the
+#                                  a real draft (styled read only); 15 = the
 #                                  box's own structure could not be
-#                                  confirmed; anything else = a driver-level
-#                                  terminal_peek failure, propagate as-is
+#                                  confirmed (#1391/#1402: distinct from 14 --
+#                                  "cannot tell where the box is" is not the
+#                                  same finding as "found it, and it looks
+#                                  like someone is typing", and conflating
+#                                  them into one code and message hid which
+#                                  one actually happened); anything else = a
+#                                  driver-level terminal_peek failure,
+#                                  propagate as-is
 #   _AGMSG_SAFE_POKE_IB_SNAPSHOT  normalized comparison key, meaningful only
 #                                  when _AGMSG_SAFE_POKE_IB_RC = 0
 #   _AGMSG_SAFE_POKE_IB_REGION    the located STYLED region, set whenever
@@ -60,8 +66,12 @@ _agmsg_safe_poke_read_box() {
   region="$(agmsg_input_box_locate "$marker" "$boxed" "$screen")" || region_rc=$?
   if [ "$region_rc" -ne 0 ]; then
     # Cannot confirm where the box even is (transient redraw, alternate
-    # screen) -- fails toward refusing, never toward typing.
-    _AGMSG_SAFE_POKE_IB_RC=14
+    # screen) -- fails toward refusing, never toward typing (unchanged bias
+    # from #1321), but as its own code (#1391/#1402): this is "could not
+    # locate", not "found it and it looks occupied". No region to hand to
+    # the #1384 recovery path below either -- the caller's own check on
+    # ib_region being non-empty already keeps this branch out of it.
+    _AGMSG_SAFE_POKE_IB_RC=15
     return 0
   fi
   # Stashed regardless of the real-draft verdict below (#1384): the recovery
@@ -292,11 +302,15 @@ _agmsg_safe_poke_recover() {
 # diagnostic messages; a caller with no natural (team, name) pair may pass
 # empty strings for both.
 #
-# Return value is terminal_poke's OWN convention: 0 delivered, 14 refused
-# (a real draft with no safe way through), anything else the driver's own
-# failure code. Every existing caller already checks against exactly this
-# taxonomy (`rc=$?` against terminal_poke), so this is a drop-in
-# replacement, not a new contract to teach.
+# Return value is terminal_poke's OWN convention, extended by two codes this
+# file's own input-box check owns: 0 delivered, 14 refused (a real draft with
+# no safe way through), 15 refused (the box's own structure could not be
+# confirmed on this read -- #1391/#1402, distinct from 14: "could not
+# locate" is not "found it and it looks occupied"), anything else the
+# driver's own failure code. self-rename.sh and self-write.sh only ever
+# check for overall success/failure (`>/dev/null 2>&1`, `rc=$?` with no
+# branch on a specific code), so 15 is a drop-in there too; poke.sh is the
+# one caller that reports 14 and 15 differently to the operator.
 agmsg_safe_poke() {
   local id="$1" text="$2" marker="$3" boxed="$4" team="$5" name="$6"
   shift 6
@@ -368,10 +382,12 @@ agmsg_safe_poke() {
       terminal_poke "$id" "$text" >/dev/null || rc=$?
       return "$rc"
     fi
-    # Retries exist to wait out someone still actively typing (RC=14) -- a
+    # Retries exist to wait out a transient input-box condition -- someone
+    # still actively typing (RC=14), or the box's structure not confirmable
+    # on one read (RC=15, #1391/#1402: e.g. mid-redraw) -- never a
     # driver-level failure propagated above, or from terminal_poke's own
-    # attempt, would not be fixed by waiting and must not be retried.
-    [ "$rc" -eq 14 ] || return "$rc"
+    # attempt, which waiting does not fix.
+    [ "$rc" -eq 14 ] || [ "$rc" -eq 15 ] || return "$rc"
     [ "$attempt" -lt "$retries" ] || return "$rc"
     attempt=$((attempt + 1))
     local wait

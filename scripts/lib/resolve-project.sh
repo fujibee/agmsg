@@ -397,6 +397,49 @@ agmsg_registered_projects() {
   done
 }
 
+# Echo the single type registered for <agent> in <team>'s config.json (rc 0),
+# or nothing (rc 1) when the agent has no registration there, or more than one
+# DISTINCT type across its registrations — an ambiguity this function refuses
+# to arbitrate rather than guess at.
+#
+# Used by self-name.sh (#1391): a hand-started seat's placement-record write
+# used to fill in a missing type by guessing (agmsg_detect_cli_type), and that
+# guess's own last-resort default silently produced 'claude-code' for a seat
+# of any other type whose process tree the guesser could not identify. join.sh
+# already recorded the real type when the seat joined; reading THAT back is
+# not a guess.
+agmsg_registered_type() {
+  local team="$1" agent="$2" config_file cfg_sql agent_sql out n
+  # A separate assignment, not folded into the `local` line above: `$team`
+  # there would be expanded before that line's own `team=` takes effect (a
+  # `local a=$1 b=...$a...` measured, live, to see $a as still UNSET under
+  # `set -u` -- every name in one `local` command is expanded against the
+  # PRE-command state, not against sibling names assigned earlier in the
+  # same command).
+  config_file="${SKILL_DIR:-}/teams/$team/config.json"
+  [ -n "$team" ] && [ -n "$agent" ] && [ -f "$config_file" ] || return 1
+  agent_sql=$(printf '%s' "$agent" | sed "s/'/''/g")
+  cfg_sql=$(agmsg_sql_readfile_path "$config_file")
+  out="$(sqlite3 :memory: "
+    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
+    agent AS (
+      SELECT CASE
+        WHEN json_type(json_extract(value, '\$.registrations')) = 'array' THEN json_extract(value, '\$.registrations')
+        ELSE json_array(json_object('type', json_extract(value, '\$.type'), 'project', json_extract(value, '\$.project')))
+      END AS registrations
+      FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
+      WHERE key = '$agent_sql'
+    )
+    SELECT DISTINCT json_extract(r.value, '\$.type')
+    FROM agent, json_each(agent.registrations) AS r
+    WHERE json_extract(r.value, '\$.type') IS NOT NULL;
+  " 2>/dev/null | tr -d '\r')"
+  n=$(printf '%s\n' "$out" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+  [ "$n" -eq 1 ] || return 1
+  printf '%s\n' "$out"
+}
+
 # Echo the main-checkout root of <start>'s git repo, but only when it is a
 # registered project for <type>. This recovers a SIBLING git worktree back to
 # the registered main checkout — a case the ancestor walk cannot reach because

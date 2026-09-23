@@ -161,16 +161,44 @@ agmsg_self_name_on_action() {
     # Best-effort, matching every other lazy source in this function: a
     # failure here must not block the naming this hook exists to do, so a
     # record written with what could be resolved is better than none, and
-    # the record's own project/type stay only as good as this detection is.
+    # the record's own project/type stay only as good as this resolution is.
     if [ -z "$type" ]; then
       # shellcheck disable=SC1091
-      . "${SKILL_DIR:-}/scripts/lib/type-registry.sh" 2>/dev/null || true
-      # shellcheck disable=SC1091
-      . "${SKILL_DIR:-}/scripts/lib/compat.sh" 2>/dev/null || true
-      # shellcheck disable=SC1091
-      if . "${SKILL_DIR:-}/scripts/lib/detect-cli-type.sh" 2>/dev/null \
-        && declare -F agmsg_detect_cli_type >/dev/null 2>&1; then
-        type="$(agmsg_detect_cli_type 2>/dev/null || true)"
+      if . "${SKILL_DIR:-}/scripts/lib/resolve-project.sh" 2>/dev/null \
+        && declare -F agmsg_registered_type >/dev/null 2>&1; then
+        # join.sh already recorded the real type when this (team, agent) was
+        # registered -- reading it back is not a guess, unlike everything
+        # below (#1391: a guess's own last-resort default silently wrote
+        # 'claude-code' into a codex seat's placement record).
+        type="$(agmsg_registered_type "$team" "$agent" 2>/dev/null || true)"
+      fi
+      if [ -z "$type" ]; then
+        # shellcheck disable=SC1091
+        . "${SKILL_DIR:-}/scripts/lib/type-registry.sh" 2>/dev/null || true
+        # shellcheck disable=SC1091
+        . "${SKILL_DIR:-}/scripts/lib/compat.sh" 2>/dev/null || true
+        # shellcheck disable=SC1091
+        if . "${SKILL_DIR:-}/scripts/lib/detect-cli-type.sh" 2>/dev/null \
+          && declare -F agmsg_detect_cli_type >/dev/null 2>&1; then
+          # Plain-statement call, never `x=$(...)` (#1402 review): the
+          # function's return value and stdout stay exactly what every OTHER
+          # caller (whoami.sh, poke.sh, windows/dispatch.sh) still relies on
+          # via command substitution under `set -e` -- always 0, always
+          # something on stdout. Whether THIS answer came from real evidence
+          # or the function's own hardcoded last-resort default is instead
+          # read from its side channel (_AGMSG_DETECT_CLI_TYPE_DEFAULTED /
+          # _AGMSG_DETECT_CLI_TYPE_OUT), which a `$( )` call would discard
+          # (it runs in a subshell) — the same reason poke.sh's own
+          # _poke_read_input_box is called as a plain statement.
+          _AGMSG_DETECT_CLI_TYPE_DEFAULTED=0
+          _AGMSG_DETECT_CLI_TYPE_OUT=""
+          agmsg_detect_cli_type >/dev/null 2>&1
+          # A guess with no real evidence behind it (#1391) is discarded
+          # rather than trusted into a placement record. No registration and
+          # no real evidence means this hook writes no type at all, not a
+          # wrong one.
+          [ "$_AGMSG_DETECT_CLI_TYPE_DEFAULTED" -eq 0 ] && type="$_AGMSG_DETECT_CLI_TYPE_OUT"
+        fi
       fi
     fi
     if [ -z "$project" ]; then
@@ -189,6 +217,16 @@ agmsg_self_name_on_action() {
   # five args and only relabels. It leaves the mark on success. An empty session
   # id is right here: both drivers identify the pane from the environment now, and
   # the acting commands have no session id at hand.
-  agmsg_terminal_name_self_safe "" "$team" "$agent" "$project" "$type" record || true
+  #
+  # `record` is passed only when a type was actually resolved (registration or
+  # real detection): the record's type field is read back by poke/despawn to
+  # find the pane at all, so an unknown type has no business being recorded as
+  # a wrong one (#1391) -- the pane still gets named/relabeled either way, just
+  # not claimed as this seat's placement until a real type is known.
+  if [ -n "$type" ]; then
+    agmsg_terminal_name_self_safe "" "$team" "$agent" "$project" "$type" record || true
+  else
+    agmsg_terminal_name_self_safe "" "$team" "$agent" "$project" "" || true
+  fi
   return 0
 }

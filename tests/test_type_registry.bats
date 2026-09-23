@@ -375,6 +375,48 @@ EOF
   [ "$(detect)" = claude-code ]
 }
 
+@test "type-registry: agmsg_detect_cli_type's default fallback still returns 0, and signals the fallback on a side channel only (#1402 review)" {
+  # #1402 review: an earlier version of this change made the default
+  # branch `return 1` to distinguish it from a real detection, reasoning
+  # that no existing caller checked the status. True, but irrelevant --
+  # whoami.sh's `AGENT_TYPE="${2:-$(agmsg_detect_cli_type)}"` and
+  # windows/dispatch.sh's `AGENT_TYPE="$(agmsg_detect_cli_type)"` are plain
+  # assignments under `set -e`, and a FAILING command substitution inside
+  # one of those aborts the script right there, before the assignment (and
+  # its fallback value) ever lands -- a live regression on a path every
+  # existing seat with no strong evidence went through daily. The function's
+  # own return value and stdout must stay exactly what they always were;
+  # only the side channel added for self-name.sh (#1391) may say "this was
+  # a guess, not evidence".
+  run env -i PATH="$PATH" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; agmsg_detect_cli_type; echo rc=\$?"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'claude-code\nrc=0')" ]
+
+  # The exact regression shape: a `set -e` script assigning the call's
+  # output directly must not abort when detection falls all the way through
+  # to the default.
+  run env -i PATH="$PATH" bash -c \
+    "set -euo pipefail; source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; AGENT_TYPE=\"\$(agmsg_detect_cli_type)\"; echo \"AGENT_TYPE=\$AGENT_TYPE\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "AGENT_TYPE=claude-code" ]
+
+  # The side channel itself: 0/real-value on a real detection, 1/default on
+  # the fallback -- read via a plain-statement call, the shape self-name.sh
+  # actually uses (a command-substitution call discards it, same reason
+  # _AGMSG_AGENT_BINARIES_OUT is read the same way elsewhere in this file's
+  # sibling resolve-project.sh).
+  run env -i PATH="$PATH" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; agmsg_detect_cli_type >/dev/null; echo \"defaulted=\$_AGMSG_DETECT_CLI_TYPE_DEFAULTED out=\$_AGMSG_DETECT_CLI_TYPE_OUT\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "defaulted=1 out=claude-code" ]
+
+  run env -i PATH="$PATH" CODEX_THREAD_ID=x bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; agmsg_detect_cli_type >/dev/null; echo \"defaulted=\$_AGMSG_DETECT_CLI_TYPE_DEFAULTED out=\$_AGMSG_DETECT_CLI_TYPE_OUT\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "defaulted=0 out=codex" ]
+}
+
 @test "type-registry: a process marker beats a shared Gemini credential" {
   run env -i PATH="$PATH" GEMINI_API_KEY=x bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { echo opencode; }; compat_get_ppid() { echo 1; }; agmsg_detect_cli_type"
