@@ -4,23 +4,48 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      all:
+        patterns:
+          - "*"
 
   - package-ecosystem: npm
     directory: /app
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      all:
+        patterns:
+          - "*"
 
   - package-ecosystem: npm
     directory: /server
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      all:
+        patterns:
+          - "*"
 
   - package-ecosystem: npm
     directory: /site
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      all:
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      all:
+        patterns:
+          - "*"
