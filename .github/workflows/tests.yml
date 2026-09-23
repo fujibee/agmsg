@@ -199,7 +199,7 @@ jobs:
       sync_changed: ${{ steps.detect.outputs.sync_changed }}
       contracts_needed: ${{ steps.detect.outputs.contracts_needed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # need base + head history to diff the PR range
       - id: detect
@@ -376,7 +376,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         shard: [1, 2, 3, 4, 5]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Docs-only change — skipping suite
         if: needs.changes.outputs.docs_only == 'true'
@@ -548,7 +548,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check shard results
         env:
@@ -619,7 +619,7 @@ jobs:
     # cancellation rather than a result.
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Docs-only change — skipping contract
         if: needs.changes.outputs.contracts_needed == 'false'
@@ -695,7 +695,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Docs-only change — skipping
         if: needs.changes.outputs.contracts_needed == 'false'
@@ -808,7 +808,7 @@ jobs:
         # environment native Windows users run agmsg under.
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Docs-only change — skipping suite
         if: needs.changes.outputs.docs_only == 'true'
@@ -961,7 +961,7 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: No app changes — skipping typecheck
         if: needs.changes.outputs.app_changed == 'false'
@@ -1038,7 +1038,7 @@ jobs:
       run:
         working-directory: server
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: No server or sync changes — skipping checks
         if: needs.changes.outputs.server_changed == 'false' && needs.changes.outputs.sync_changed == 'false'
@@ -1164,7 +1164,7 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: No app changes — skipping app tests
         if: needs.changes.outputs.app_changed == 'false'
@@ -1219,7 +1219,7 @@ jobs:
     # `tests/*.bats`, so it is cheap enough to run unconditionally rather than
     # to gate.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # No bats, no bash 3.2, no runners: this is a static read of the test
       # sources. The BEHAVIOUR it encodes was measured on both shells (#670);
@@ -1235,7 +1235,7 @@ jobs:
     # that skips on some diffs is a required context that can sit pending. It
     # is a static read of `scripts/**/*.sh`.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Ubuntu's bash is 5.x, and one of the three shapes this looks for is
       # fatal ONLY on bash 3.2 (macOS /bin/bash). That is why the check is
@@ -1253,7 +1253,7 @@ jobs:
     # diffs is a required context that can sit pending. It is a static read of
     # `scripts/**/*.sh`.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The suite cannot do this one. Every entry point that reaches those
       # files runs `set -euo pipefail`; tests/test_helper.bash sets no shell
@@ -1270,7 +1270,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
