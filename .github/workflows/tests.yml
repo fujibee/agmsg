@@ -523,7 +523,7 @@ jobs:
       - name: Upload hang samples
         if: always() && needs.changes.outputs.docs_only != 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hang-samples-${{ matrix.os }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/hang-samples.txt
@@ -533,7 +533,7 @@ jobs:
       - name: Upload bats timings
         if: always() && needs.changes.outputs.docs_only != 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bats-timings-${{ matrix.os }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/bats-timings.tsv
