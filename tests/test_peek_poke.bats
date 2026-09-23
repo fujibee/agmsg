@@ -116,6 +116,24 @@ _install_fake_herdr_empty_box() {
   export PATH="$FAKEBIN:$PATH"
 }
 
+# Codex's flat (unboxed) empty box: marker line, exactly one blank line, then
+# a footer line containing "·" -- agmsg_input_box_raw_flat's own required
+# triplet (scripts/lib/input-box.sh). Never contains claude-code's "❯"/boxed
+# rule shape, so a caller still classifying by claude-code's contract cannot
+# locate a box here at all.
+_install_fake_herdr_codex_empty_box() {
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf 'if [ "$1" = pane ] && [ "$2" = read ]; then\n'
+    printf "  printf '%%s\\\\n' '›' '' 'gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task'\n"
+    printf 'fi\n'
+    printf 'exit 0\n'
+  } > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 # #1384 (herdr only): a real, stalled draft with NOBODY focused on the pane
 # -- `pane list` answers focused=false unconditionally (one pane, asked
 # about twice: once before clearing, once right after -- #1384's own two
@@ -419,6 +437,28 @@ EOF
   grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
   # No synthesized keystrokes: submission is agent prompt's own.
   [ "$(grep -ci 'enter' "$ARGV_LOG" || true)" -eq 0 ]
+}
+
+@test "poke: a stale claude-code placement record is overridden by the roster's codex, reported, and actually used to classify the box (#1391)" {
+  # _write_record always writes 'claude-code' as the record's own type field
+  # (a hand-started seat's self-naming hook used to fall back to a guessed
+  # default that could be wrong). Register the SAME (team, name) in the
+  # roster as codex instead -- the roster is authoritative on a mismatch.
+  _install_fake_herdr_codex_empty_box
+  _write_record "herdr:wC:p4"
+  bash "$SCRIPTS/join.sh" testteam alice codex /tmp/project-a >/dev/null
+
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  # The fake screen contains ONLY codex's marker/footer shape (›, one blank
+  # line, a footer with ·) -- never claude-code's boxed ❯ rule. A caller
+  # still trusting the record's claude-code type would search for ❯, fail to
+  # locate the box at all, and refuse (exit 15) rather than deliver. Success
+  # here is itself proof the roster's codex contract -- not the record's
+  # stale claude-code one -- was what classified the box.
+  [ "$status" -eq 0 ] || { echo "expected poke to succeed via the roster's codex contract; got status=$status output=$output"; false; }
+  _out_has "poked 'testteam/alice' via herdr"
+  _out_has "placement record says type 'claude-code' but the roster says 'codex' — using 'codex' (#1391)"
+  grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
 }
 
 @test "poke: herdr, unfocused real draft -- clears, pokes, then restores the draft, in that order (#1384)" {
