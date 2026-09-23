@@ -335,6 +335,32 @@ terminal_despawn() {
 # record op: print the visible pane buffer verbatim (NOT parsed). --lines N
 # starts N lines back into the scrollback (default: just the visible screen).
 terminal_peek() {
+  _tmux_peek_impl "" "$@"
+}
+
+# Styled counterpart of terminal_peek (#1389): same read, `-e` added to
+# capture-pane so SGR escapes survive (color, and specifically the faint/dim
+# code 2 poke.sh's real-draft check keys on -- see scripts/lib/input-box.sh).
+# Not every terminal driver offers this; poke.sh checks `declare -F
+# terminal_peek_styled` before relying on it, the same way it checks for
+# herdr's.
+#
+# Measured directly (#1389, real `claude` and real `codex` booted in a
+# throwaway tmux session, captured with `tmux capture-pane -e -p`, never a
+# production seat): Claude Code's own candidate/suggestion text and Codex's
+# "Ask Codex to do anything" placeholder both come through wrapped in
+# `ESC[2m ... ESC[0m`, the same SGR-faint form herdr's own `--format ansi`
+# read already produces and scripts/lib/input-box.sh's dim-tracking already
+# expects -- no format difference to account for.
+terminal_peek_styled() {
+  _tmux_peek_impl -e "$@"
+}
+
+# Shared body for terminal_peek / terminal_peek_styled. <flag> is "" (plain
+# text, terminal_peek's argv stays byte-identical to before this split
+# existed) or "-e" (keep SGR escapes).
+_tmux_peek_impl() {
+  local flag="$1"; shift
   local id="$1"; shift
   local lines=""
   while [ $# -gt 0 ]; do
@@ -353,11 +379,19 @@ terminal_peek() {
   # stdout stays content-only (capture-pane streams straight through, no rewrapping).
   command -v tmux >/dev/null 2>&1 \
     || { echo "tmux: not on PATH — cannot reach the terminal to peek pane '$id'" >&2; return 10; }
+  # bash 3.2 (macOS's /bin/bash) treats "${arr[@]}" on an empty array as an
+  # unbound variable under `set -u` -- the `+` form is the guard this codebase
+  # uses everywhere else an optional flag is spliced into an argv (see e.g.
+  # herdr/ops.sh's own peek). Never `[ -n "$flag" ] && set -- -e` here: that
+  # would still leave capture-pane's OWN required `-p`/`-t` args to splice
+  # around, so the flag is threaded as its own optional array element instead.
+  local -a fmt_args=()
+  [ -n "$flag" ] && fmt_args=("$flag")
   if [ -n "$lines" ]; then
-    _tmux_do "$id" capture-pane -p -t "$(_tmux_bare_of "$id")" -S "-$lines" \
+    _tmux_do "$id" capture-pane "${fmt_args[@]+"${fmt_args[@]}"}" -p -t "$(_tmux_bare_of "$id")" -S "-$lines" \
       || { echo "tmux: could not capture pane '$id' (it may no longer exist)" >&2; return 12; }
   else
-    _tmux_do "$id" capture-pane -p -t "$(_tmux_bare_of "$id")" \
+    _tmux_do "$id" capture-pane "${fmt_args[@]+"${fmt_args[@]}"}" -p -t "$(_tmux_bare_of "$id")" \
       || { echo "tmux: could not capture pane '$id' (it may no longer exist)" >&2; return 12; }
   fi
   return 0

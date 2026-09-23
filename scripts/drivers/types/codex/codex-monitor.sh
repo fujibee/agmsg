@@ -10,6 +10,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
+# Always RUN_DIR in production. The override exists only so a test can make
+# JUST the resume-request write below fail (an unwritable directory) without
+# also breaking this launch's seat log/record writes, which share RUN_DIR
+# and must keep succeeding so Codex still starts (#1401 review).
+RESUME_REQUEST_DIR="${AGMSG_CODEX_TEST_RESUME_REQUEST_DIR:-$RUN_DIR}"
 # This starts the codex app-server and the bridge launcher, both of which
 # outlive it. The `3>&- 4>&-` on those spawn lines closes the two descriptors
 # we can name; the harness's is not one of them. See lib/close-fds.sh.
@@ -26,6 +31,18 @@ source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 # _agmsg_codex_seat_key_new / _agmsg_codex_seat_record_write and friends.
 # shellcheck source=./_seat-key.sh
 source "$SCRIPT_DIR/_seat-key.sh"
+# agmsg_canonical_path, for matching a resume thread's project against role-
+# session records in the SAME canonical form they were recorded in (#1401).
+# shellcheck source=../../../lib/resolve-project.sh
+source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
+# agmsg_role_session_match_unique, for the resume-arms-itself check below.
+# shellcheck source=../../../lib/role-session.sh
+source "$SCRIPT_DIR/../../../lib/role-session.sh"
+# agmsg_shq, to safely quote the manual-fallback command in the loud-failure
+# diagnostic below (#1401 review: the same naive-interpolation hazard #1392
+# already fixed once for a different recovery line).
+# shellcheck source=../../../lib/shquote.sh
+source "$SCRIPT_DIR/../../../lib/shquote.sh"
 
 PROJECT="$(pwd)"
 SOCKET_PATH=""
@@ -222,6 +239,60 @@ export AGMSG_CODEX_BRIDGE=1
 export AGMSG_CODEX_BRIDGE_APP_SERVER="$SOCKET_URL"
 export AGMSG_CODEX_BRIDGE_LAUNCHER=1
 export AGMSG_CODEX_SEAT_KEY="$SEAT_KEY"
+
+# #1401: a resumed seat used to have no bridge until either its own
+# SessionStart hook eventually ran (observed taking minutes, and in at least
+# one case never, before a person or the model manually re-ran
+# codex-record-session.sh) or someone did that by hand. Neither is automatic.
+# But the thread being resumed is already known HERE, in $CODEX_ARGS, before
+# codex itself has even started -- codex-shim.sh forwards a `codex resume
+# <thread>` invocation's arguments through unchanged past the literal "resume"
+# token. If that thread is recorded as belonging to EXACTLY ONE (team, agent)
+# role in THIS project, arm the bridge request immediately, the same shape
+# codex-record-session.sh itself writes -- no need to wait on the hook or a
+# human at all in the one case this can be decided without guessing.
+#
+# Deliberately narrow: only a single bare positional argument (no leading
+# '-') is treated as a thread id -- `codex resume` with no argument opens
+# Codex's own interactive picker, which is not one specific thread this
+# script could commit to yet, and a flag is not a thread id. Zero or more
+# than one matching role is silence, exactly like every other inference in
+# this family (agmsg_role_session_match_unique's own header, and
+# codex-record-session.sh's rollout-scan fallback) -- guessing which role
+# owns a resumed thread is worse than leaving it to arm the way it does today.
+if [ "$CODEX_COMMAND" = resume ] && [ "${#CODEX_ARGS[@]}" -eq 1 ]; then
+  case "${CODEX_ARGS[0]}" in
+    -*) : ;;
+    *)
+      _resume_thread="${CODEX_ARGS[0]}"
+      _resume_match=""
+      _resume_match="$(agmsg_role_session_match_unique codex "$(agmsg_canonical_path "$PROJECT")" "$_resume_thread" 2>/dev/null || true)"
+      if [ -n "$_resume_match" ]; then
+        _resume_team="${_resume_match%%$'\t'*}"
+        _resume_agent="${_resume_match#*$'\t'}"
+        _resume_request_file="$RESUME_REQUEST_DIR/codex-bridge-request.$SEAT_KEY"
+        _resume_request_tmp="$_resume_request_file.$$"
+        _resume_fail_stage=""
+        if ! mkdir -p "$RESUME_REQUEST_DIR" 2>/dev/null; then
+          _resume_fail_stage="mkdir $RESUME_REQUEST_DIR"
+        elif ! printf 'codex\t%s\t%s\t%s\t%s\n' "$_resume_thread" "$SOCKET_URL" "$_resume_team" "$_resume_agent" > "$_resume_request_tmp" 2>/dev/null; then
+          _resume_fail_stage="write $_resume_request_tmp"
+        elif ! mv "$_resume_request_tmp" "$_resume_request_file" 2>/dev/null; then
+          _resume_fail_stage="rename $_resume_request_tmp -> $_resume_request_file"
+          rm -f "$_resume_request_tmp" 2>/dev/null || true
+        fi
+        # Loud, not fatal (#1401 review): the role match already told us who
+        # owns this thread, so a failed write here silently reproduces the
+        # exact "resume never gets a bridge" symptom this fix exists to close
+        # -- via a different cause. Codex still launches either way; only the
+        # diagnostic (and the manual fallback it points at) changes.
+        if [ -n "$_resume_fail_stage" ]; then
+          echo "codex-monitor: could not arm the bridge request for $_resume_team/$_resume_agent ($_resume_fail_stage failed) -- Codex will still start without the bridge. Run this by hand once Codex is up to bring it: bash $(agmsg_shq "$SCRIPT_DIR/codex-record-session.sh") $(agmsg_shq "$_resume_team") $(agmsg_shq "$_resume_agent") $(agmsg_shq "$PROJECT")" >&2
+        fi
+      fi
+      ;;
+  esac
+fi
 
 launcher_cmd="${AGMSG_CODEX_BRIDGE_LAUNCHER_CMD:-$SCRIPT_DIR/codex-bridge-launcher.sh}"
 # Same guard: the launcher is detached on purpose and outlives this script, so

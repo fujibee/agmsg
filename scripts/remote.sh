@@ -23,6 +23,7 @@ set -euo pipefail
 #   remote.sh status [<team>] [--json]
 #   remote.sh sync start <team>
 #   remote.sh sync restart <team>
+#   remote.sh reprocess <team>
 #   remote.sh disconnect <team>
 #   remote.sh forget [--yes] <team>
 #
@@ -2339,7 +2340,14 @@ cmd_connect() {
     esac
   done
   : "${endpoint:?Usage: remote.sh connect --endpoint <url> [--e2ee] <team>}"
-  _remote_validate_endpoint "$endpoint" || exit 1
+  # The plaintext-address rule protects message bodies that would otherwise
+  # cross the network unencrypted. Under --e2ee those bodies are sealed before
+  # they ever reach this check, so the rule has nothing left to protect here --
+  # skip it, exactly as the refusal text itself promises ("connect with --e2ee
+  # so the contents are sealed before they leave this machine").
+  if [ "$e2ee" -eq 0 ]; then
+    _remote_validate_endpoint "$endpoint" || exit 1
+  fi
   endpoint="${endpoint%/}"
   team="${positional[0]:-}"
   [ -n "$team" ] || { echo "agmsg: connect requires a team: remote.sh connect --endpoint <url> [--e2ee] <team>" >&2; exit 1; }
@@ -2977,10 +2985,133 @@ _remote_ceiling_is_plain_digits() {   # <string>
   return 0
 }
 
+# A local, read-only peek at whether this team has anything #1284's reprocess
+# would attempt -- no network. cmd_sync_start's automatic call (below) uses
+# this to skip the health check and capabilities fetch reprocessCycle always
+# opens with, on the overwhelmingly common case of nothing pending, rather
+# than pay a round trip against the server on every single engine start --
+# including a start driven by a test double that answers nothing. An
+# unconditional call here hung the fake-node engine-start suite, which never
+# expects sync start to make a network call at all.
+#
+# Three outcomes, not two: a confirmed zero and a check that
+# could not run are different facts, and collapsing them into one "nothing to
+# do" used to let an unreadable local state skip reprocessing in silence.
+#   0  confirmed rows pending.
+#   1  confirmed nothing pending: no store path exists at all, or the table
+#      was never created -- both mean quarantine was never written, not that
+#      reading it failed. Nothing existing at the path is a fact this can
+#      read, not a read that failed, so it is 1 (confirmed), not 2.
+#   2  could not determine (a non-sqlite driver, for which this pre-check has
+#      no way to read local state; something at the store path that is not a
+#      plain, readable file -- a directory, a FIFO, a permissions problem;
+#      or a query against an existing store/table that itself failed). Names
+#      what could not be read on stderr, together
+#      with the command to check by hand. The caller does NOT fall through to
+#      the real reprocess here: that reopened the exact hang this local check
+#      exists to avoid (a test double with no server behind it), so 2 skips
+#      the automatic reprocess the same as 1 -- the difference is only that 2
+#      says so, on stderr, rather than passing in silence.
+_remote_quarantine_has_malformed() {
+  local team="$1" store_path="" count="" team_lit driver="" fix_hint
+  fix_hint="run it by hand: bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") reprocess $(agmsg_shq "$team")"
+  # Every reassignment below is guarded with `|| name=""`: this runs under
+  # `set -e`, and a PLAIN reassignment of an already-`local`-declared name
+  # (unlike `local name=$(...)`) DOES trip errexit on a failing command
+  # substitution -- measured directly; without the guard, a genuinely
+  # unreadable store did not reach any of the `case` branches below at all,
+  # it took the whole sourcing script down with sqlite3's own exit code.
+  driver="$(agmsg_storage_driver 2>/dev/null)" || driver="unknown"
+  [ -n "$driver" ] || driver="unknown"
+  if [ "$driver" != sqlite ]; then
+    echo "agmsg: local quarantine pre-check does not support storage driver '$driver' for '$team'; $fix_hint" >&2
+    return 2
+  fi
+  store_path="$(agmsg_storage_dir 2>/dev/null)" || store_path=""
+  if [ -z "$store_path" ]; then
+    echo "agmsg: cannot resolve the local store directory for '$team'; $fix_hint" >&2
+    return 2
+  fi
+  store_path="$store_path/teams/$team/messages.db"
+  # Nothing AT ALL there is a fact, not an unreadable one: a team with no
+  # local store has no rows of any kind, quarantine included, so "nothing
+  # pending" is simply true here, the same as a store whose sync_quarantine
+  # table was never created below. Something at that path that is not a
+  # plain, readable file (a directory, a FIFO, a permissions problem) is a
+  # DIFFERENT fact -- this cannot say there is nothing there, only that it
+  # cannot read what there is -- so that case is 2, named, not a silent 1.
+  [ -e "$store_path" ] || return 1
+  if [ ! -f "$store_path" ] || [ ! -r "$store_path" ]; then
+    echo "agmsg: local store '$store_path' for '$team' is not a readable regular file; $fix_hint" >&2
+    return 2
+  fi
+  count="$(agmsg_sqlite "$store_path" \
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_quarantine';" \
+    2>/dev/null | tr -d '\r')" || count=""
+  case "$count" in
+    1) ;;
+    0) return 1 ;;
+    *)
+      echo "agmsg: cannot inspect local store '$store_path' for '$team'; $fix_hint" >&2
+      return 2
+      ;;
+  esac
+  team_lit="'$(printf '%s' "$team" | sed "s/'/''/g")'"
+  count="$(agmsg_sqlite "$store_path" \
+    "SELECT COUNT(*) FROM sync_quarantine WHERE local_team=$team_lit AND status='malformed';" \
+    2>/dev/null | tr -d '\r')" || count=""
+  case "$count" in
+    ''|*[!0-9]*)
+      echo "agmsg: cannot read quarantine state from local store '$store_path' for '$team'; $fix_hint" >&2
+      return 2
+      ;;
+    0) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Re-evaluates quarantine rows this client's own earlier parser could not
+# understand (unknown kind, invalid roster mutation, ...) against the CURRENT
+# parser (#1284). A parser only gets newer through an update, and an update
+# always restarts the engine (#963), so this is called from cmd_sync_start on
+# every path that is about to (re)start it; it is also available by hand,
+# without restarting anything, as `remote.sh reprocess <team>`. Idempotent:
+# nothing pending is a normal, cheap 0-row outcome, not an error, and this
+# never touches the transport cursor or read frontier (storage_sync_reprocess
+# does not either) -- an imported row lands as unread through the ordinary
+# oracle, same as any other pull.
+_remote_reprocess_team() {
+  local team="$1" out pending pending_count result reprocessed imported unrecoverable
+  out="$(bash "$SCRIPT_DIR/remote-sync.sh" reprocess --team "$team" --scope malformed 2>&1)" || {
+    printf '%s\n' "$out" >&2
+    echo "agmsg: reprocess failed for '$team'" >&2
+    return 1
+  }
+  pending="$(printf '%s\n' "$out" | grep '"event":"reprocess.pending"' | tail -1)"
+  if [ -n "$pending" ]; then
+    pending_count="$(_remote_json_field "$pending" '$.count')"
+    case "$pending_count" in
+      ''|0) ;;
+      *) echo "agmsg: $pending_count quarantined row(s) will come back as unread" ;;
+    esac
+  fi
+  result="$(printf '%s\n' "$out" | grep '"event":"reprocess.complete"' | tail -1)"
+  [ -n "$result" ] || {
+    echo "agmsg: reprocess produced no completion result for '$team'" >&2
+    return 1
+  }
+  reprocessed="$(_remote_json_field "$result" '$.count')"
+  imported="$(_remote_json_field "$result" '$.imported_count')"
+  case "$reprocessed" in ''|*[!0-9]*) reprocessed=0 ;; esac
+  case "$imported" in ''|*[!0-9]*) imported=0 ;; esac
+  unrecoverable=$((reprocessed - imported))
+  echo "quarantine: reprocessed=$reprocessed imported=$imported unrecoverable=$unrecoverable pending=$unrecoverable"
+}
+
 cmd_sync_start() {
   local team="${1:?Usage: remote.sh sync start <team>}" cfg connected_at disconnected_at \
     engine_state engine_pid started_pid ready_pid startup_nonce ready=0 i=0 \
-    logfile log_offset=1
+    logfile log_offset=1 readiness_started readiness_elapsed
   # Test-only override of the readiness-wait ceiling below, default unchanged
   # (1600). Exists so a test that drives the engine into never becoming
   # ready does not have to spend this command's real production wait
@@ -2996,6 +3127,26 @@ cmd_sync_start() {
   local ready_ceiling="${AGMSG_TEST_SYNC_START_READY_CEILING:-1600}"
   _remote_ceiling_is_plain_digits "$ready_ceiling" || ready_ceiling=1600
   [ "$ready_ceiling" -gt 0 ] || ready_ceiling=1600
+  # BUDGETED IN TIME, NOT ONLY ITERATIONS (#779). The attempt ceiling above
+  # was documented as roughly sixteen seconds at its default, but every turn
+  # also starts the status probe, tail, awk and sleep -- that arithmetic
+  # holds only where they are free. Keep the attempt ceiling as a safety cap,
+  # but also bound the real wait by the wall clock: whichever arrives first
+  # ends readiness polling. Sixteen seconds, unconditionally, in production.
+  #
+  # Test-only override of the budget above, same shape and same reason as
+  # AGMSG_TEST_SYNC_START_READY_CEILING just above: a test that drives the
+  # engine into never becoming ready does not have to spend this command's
+  # real sixteen-second production wait to prove the timeout path. Not a
+  # user-facing setting -- there is no supported way to change the
+  # production default.
+  #
+  # Anything but a plain positive integer falls back to the production
+  # default rather than being trusted, for the same reason as the ceiling
+  # above.
+  local readiness_budget="${AGMSG_TEST_SYNC_START_READY_SECONDS:-16}"
+  _remote_ceiling_is_plain_digits "$readiness_budget" || readiness_budget=16
+  [ "$readiness_budget" -gt 0 ] || readiness_budget=16
   [ $# -eq 1 ] || { echo "Usage: remote.sh sync start <team>" >&2; exit 1; }
   agmsg_validate_team_name "$team" || exit 1
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
@@ -3077,6 +3228,10 @@ cmd_sync_start() {
   # deciding whether to start and starting, and nothing after -- so that a marker
   # that is late or missing for ANY reason costs this caller its own wait and
   # not the rest of the machine.
+  #
+  # readiness_budget (declared above) starts counting here, right before the
+  # loop that spends it.
+  readiness_started="$(date +%s)"
   agmsg_lock_release
   while [ "$i" -lt "$ready_ceiling" ]; do
     IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
@@ -3090,6 +3245,8 @@ cmd_sync_start() {
       break
     fi
     i=$((i + 1))
+    readiness_elapsed=$(( $(date +%s) - readiness_started ))
+    [ "$readiness_elapsed" -ge "$readiness_budget" ] && break
     sleep 0.01
   done
   if [ "$ready" -ne 1 ]; then
@@ -3177,6 +3334,23 @@ cmd_sync_start() {
     return 1
   fi
     echo "Sync engine started for '$team' (pid $started_pid)."
+  # Best-effort and after the engine is already up: a stale parser's leftover
+  # quarantine is a backlog to catch up on, not a reason to delay or refuse
+  # this start, and network trouble here must not read as "sync did not
+  # start" when it did. Gated on the local peek above: the real,
+  # authoritative reprocess runs ONLY on a CONFIRMED pending count (0). An
+  # undetermined local state (2, already named on stderr by the peek itself,
+  # with the command to check by hand) is left for the operator, not
+  # attempted here -- an automatic call on that path is exactly what reopened
+  # the hang against a test double with no server behind it; 1 (confirmed
+  # zero) has nothing to do either, silently.
+  local pending_rc=0
+  _remote_quarantine_has_malformed "$team" || pending_rc=$?
+  case "$pending_rc" in
+    0)
+      _remote_reprocess_team "$team" || echo "agmsg: quarantine reprocess did not complete for '$team'; sync start still succeeded" >&2
+      ;;
+  esac
 }
 
 # Stop a running, unmanaged engine and start a fresh one on whatever code is
@@ -3227,6 +3401,29 @@ cmd_sync() {
     restart) shift; cmd_sync_restart "$@" ;;
     *) echo "Usage: remote.sh sync start|restart <team>" >&2; exit 1 ;;
   esac
+}
+
+# The explicit form of the same catch-up cmd_sync_start already runs
+# automatically (#1284): reprocesses quarantine rows this client's own
+# earlier parser could not understand, against the parser on disk right now,
+# without starting or restarting anything.
+cmd_reprocess() {
+  local team="${1:?Usage: remote.sh reprocess <team>}"
+  [ $# -eq 1 ] || { echo "Usage: remote.sh reprocess <team>" >&2; exit 1; }
+  agmsg_validate_team_name "$team" || exit 1
+  local cfg connected_at disconnected_at
+  cfg="$(_remote_team_config "$team")"
+  connected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.connected_at')"
+  disconnected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.disconnected_at')"
+  if [ -z "$connected_at" ] || [ "$connected_at" = "null" ]; then
+    echo "agmsg: team '$team' has no active remote binding; connect or pull it first" >&2
+    exit 1
+  fi
+  if [ -n "$disconnected_at" ] && [ "$disconnected_at" != "null" ]; then
+    echo "agmsg: team '$team' is disconnected; connect or pull it before reprocessing" >&2
+    exit 1
+  fi
+  _remote_reprocess_team "$team" || exit 1
 }
 
 # --- disconnect ------------------------------------------------------------
@@ -3677,12 +3874,13 @@ case "${1:-}" in
   unlock) shift; agmsg_require_python3 "remote unlock" || exit 1; cmd_unlock "$@" ;;
   status) shift; agmsg_require_python3 "remote status" || exit 1; cmd_status "$@" ;;
   sync) shift; cmd_sync "$@" ;;
+  reprocess) shift; cmd_reprocess "$@" ;;
   disconnect) shift; agmsg_require_python3 "remote disconnect" || exit 1; cmd_disconnect "$@" ;;
   set-endpoint) shift; agmsg_require_python3 "remote set-endpoint" || exit 1; cmd_set_endpoint "$@" ;;
   forget) shift; agmsg_require_python3 "remote forget" || exit 1; cmd_forget "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   *)
-    echo "Usage: remote.sh <connect|pull|unlock|status|sync|set-endpoint|disconnect|forget|doctor> ..." >&2
+    echo "Usage: remote.sh <connect|pull|unlock|status|sync|reprocess|set-endpoint|disconnect|forget|doctor> ..." >&2
     exit 1 ;;
 esac
 fi

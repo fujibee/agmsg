@@ -29,8 +29,20 @@ set -euo pipefail
 # and the Enter becomes a newline instead of submitting (#619). herdr's
 # `agent prompt` submits by itself and needs no Enter dance. plain refuses
 # with "unsupported: <why>" on stderr, non-zero — never a silent 0.
+#
+# Before typing, a type that opted in (input_prompt_marker set in its
+# manifest) has its input box checked for someone actively typing — see
+# scripts/lib/input-box.sh and the comment above the check below (#1322):
+# two snapshots ~1s apart, refusing only if they differ, not by judging
+# whatever the box currently holds. That check narrows the window a poke can
+# corrupt a draft; it does NOT close it: a person can start typing in the
+# instant between the second snapshot and the actual keystroke below, and
+# that keystroke can still land mixed with theirs (maintainer-accepted
+# residual risk, #1321 review). "poke checked first" is not "poke cannot
+# ever type over someone still typing".
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC2034  # used by actas-lock.sh and safe-poke.sh's #1384 draft file, both sourced below
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"          # agmsg_spawn_path
@@ -42,13 +54,51 @@ source "$SCRIPT_DIR/lib/type-registry.sh"       # required by detect-cli-type.sh
 source "$SCRIPT_DIR/lib/compat.sh"              # required by detect-cli-type.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/detect-cli-type.sh"     # agmsg_detect_cli_type (#1229 plain fallback)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/safe-poke.sh"           # agmsg_safe_poke -- also sources input-box.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"     # agmsg_registered_type (#1391)
 
 die() { echo "poke: $*" >&2; exit 1; }
 
 TEAM="${1:-}"; NAME="${2:-}"
-USAGE="Usage: poke.sh <team> <name> --body-file <path> | --body - | <text>"
+USAGE="Usage: poke.sh <team> <name> [--retries N] [--retry-delay SECONDS] [--backoff fixed|exponential] --body-file <path> | --body - | <text>"
 [ -n "$TEAM" ] && [ -n "$NAME" ] || die "$USAGE"
 shift 2
+
+# Retry options, default off (RETRIES=0 means the loop near the bottom of
+# this script runs exactly once, same as before this existed). Pulled out
+# of the remaining args first, in any position, so they never disturb the
+# body-spec parsing below. Retries exist only for the input-box refusal
+# (#1321) — a transient condition (someone is actively typing right now,
+# per #1322's two-snapshot comparison, and may finish) — never for a
+# driver-level failure (unreachable pane, no placement record, and so on),
+# which retrying would not fix.
+RETRIES=0
+RETRY_DELAY=2
+BACKOFF=exponential
+_REMAINING=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --retries)
+      [ $# -ge 2 ] || die "--retries needs a number"
+      case "$2" in ''|*[!0-9]*) die "--retries must be a non-negative integer, got: $2" ;; esac
+      RETRIES="$2"; shift 2 ;;
+    --retry-delay)
+      [ $# -ge 2 ] || die "--retry-delay needs a number of seconds"
+      case "$2" in ''|*[!0-9]*) die "--retry-delay must be a non-negative integer, got: $2" ;; esac
+      RETRY_DELAY="$2"; shift 2 ;;
+    --backoff)
+      [ $# -ge 2 ] || die "--backoff must be 'fixed' or 'exponential'"
+      case "$2" in
+        fixed|exponential) BACKOFF="$2" ;;
+        *) die "--backoff must be 'fixed' or 'exponential', got: $2" ;;
+      esac
+      shift 2 ;;
+    *) _REMAINING+=("$1"); shift ;;
+  esac
+done
+set -- "${_REMAINING[@]+"${_REMAINING[@]}"}"
 
 TEXT=""
 case "${1:-}" in
@@ -78,6 +128,19 @@ REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 IFS=$'\t' read -r REF _PROJ TYPE _FENCE < "$REC" || true
 [ -n "$REF" ] || die "placement record for '$TEAM/$NAME' has no pane id — a record with no id is not a placement (a bug in whatever wrote it)"
 
+# #1391: the record's own type field can be stale or wrong (a hand-started
+# seat's self-naming hook used to fall back to a guessed default, which
+# silently wrote 'claude-code' for a seat of any other type it could not
+# identify). The roster (join.sh's own registration in this team's
+# config.json) is authoritative for what this seat actually joined as, so it
+# wins on a mismatch -- and the mismatch is reported, not silently corrected,
+# because a corrected-every-time record never gets noticed as corrupt.
+ROSTER_TYPE="$(agmsg_registered_type "$TEAM" "$NAME" 2>/dev/null || true)"
+if [ -n "$ROSTER_TYPE" ] && [ "$ROSTER_TYPE" != "$TYPE" ]; then
+  echo "poke: '$TEAM/$NAME' placement record says type '$TYPE' but the roster says '$ROSTER_TYPE' — using '$ROSTER_TYPE' (#1391)" >&2
+  TYPE="$ROSTER_TYPE"
+fi
+
 # The ref parser fails CLOSED (non-zero) on a corrupt/unknown-scheme ref. Under
 # `set -e` a bare `VAR="$(...)"` would take the shell down AT the assignment, so
 # the die below — the contract for an unresolvable ref — is never reached. Guard
@@ -96,8 +159,38 @@ agmsg_terminal_load "$TERMINAL" \
 # driver's stdout is protocol, not for the operator — swallow it, keep the
 # driver's exit status (plain's unsupported 13 included), and put a one-line
 # human answer on each side.
+#
+# The input-box safety check (#1321/#1322) and the #1384 herdr
+# save/clear/poke/restore recovery both live in scripts/lib/safe-poke.sh
+# now — the ONE shared implementation self-rename.sh and self-write.sh also
+# route their own self-pokes through (typing into this session's own pane
+# carries the same "someone might already be using it" risk poke.sh already
+# guarded against). Moved there verbatim; poke.sh's own behavior is
+# unchanged from before that move.
+#
+# INPUT_MARKER empty (this type set none in its manifest, OR the target
+# terminal is plain -- plain has no addressable screen to read at all, so
+# treating that failure as "could not confirm empty" would refuse EVERY
+# plain poke with exit 14 and never reach the plain-specific fallback below)
+# skips the check entirely inside agmsg_safe_poke: one unconditional
+# terminal_poke call, the same as before any of this existed.
+INPUT_MARKER="$(agmsg_type_get "$TYPE" input_prompt_marker)"
+INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
+[ "$TERMINAL" = plain ] && INPUT_MARKER=""
+
 RC=0
-terminal_poke "$BARE_ID" "$TEXT" >/dev/null || RC=$?
+agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME" \
+  --retries "$RETRIES" --retry-delay "$RETRY_DELAY" --backoff "$BACKOFF" || RC=$?
+
+if [ "$RC" -eq 14 ]; then
+  echo "poke: '$TEAM/$NAME' has a changing input box — refusing to type over it (input in progress)" >&2
+  exit 14
+fi
+
+if [ "$RC" -eq 15 ]; then
+  echo "poke: '$TEAM/$NAME' input box could not be located — refusing to type over it (cannot confirm this is safe, #1391)" >&2
+  exit 15
+fi
 
 # #1229: a bare plain:- target (id '-') has no pane at all — not a
 # reachability failure worth retrying, a structural absence. See

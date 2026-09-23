@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
   utimes, writeFile } from "node:fs/promises";
@@ -58,6 +59,7 @@ import {
   validateMembers,
   validateReadStatePage,
   validateResyncResult,
+  withTeamConfigLock,
   validateResyncStatus,
   verifyAgeSnapshot,
   verifyAgeHandoff,
@@ -1219,6 +1221,51 @@ test("explicit reprocess rejects an unbounded walk through duplicate server sequ
   }), /one server sequence to multiple wire ids/u);
 });
 
+test("scoped reprocess rejects an unbounded pending-count walk before applying anything (#1323 review)", async () => {
+  // The pending-count walk (scope set) runs BEFORE the bounded processing walk
+  // below it and shares its authenticatedSequenceSpace bound, but had no page
+  // limit of its own -- a driver that keeps answering has_more:true with a
+  // fabricated, ever-advancing server_seq/next_after would spin here forever,
+  // before the processing walk's own guard is ever reached. Each page here
+  // returns a new, validly-shaped, strictly-advancing candidate and never sets
+  // has_more:false, so the only thing that can stop this walk is its own
+  // bound.
+  const capabilities = {
+    protocol_version: 1, server_instance_id: config.server_instance_id,
+    team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
+    current_seq: "2", next_sequence_boundary: "3", accepted_envelope_versions: [1],
+    write_allowed_ciphers: ["none"], policy_revision: "0", effective_from_seq: "1",
+    max_blob_bytes: "1048576", policy_history: [{ policy_revision: "0",
+      effective_from_seq: "1", accepted_envelope_versions: [1],
+      write_allowed_ciphers: ["none"] }],
+  };
+  let pageIndex = 0;
+  await assert.rejects(() => reprocessCycle(config, 1, {
+    healthCall: async () => ({ server_instance_id: config.server_instance_id, team_id: config.remote_team_id }),
+    requestCall: async () => capabilities,
+    driverCall: async () => {
+      pageIndex += 1;
+      // Hex, not decimal, padded to fill the full 12-char segment: a decimal
+      // counter would grow past 4 digits eventually and break UUID_V4's fixed
+      // width, which would stop this fixture's loop for an unrelated reason
+      // (an invalid id) rather than by the bound this test exists to prove.
+      const id = `550e8400-e29b-41d4-a716-${pageIndex.toString(16).padStart(12, "0")}`;
+      return [
+        { type: "sync_state", driver_generation: "018f3f7e-0000-7000-8000-000000000099",
+          transport_cursor: "2" },
+        { type: "sync_reprocess_candidate", server_seq: String(pageIndex), id,
+          server_received_at: "2026-07-22T11:00:00.000000Z",
+          envelope: { v: 1, cipher: "none", key_id: null, blob: "e30=" },
+          prior_status: "authentication_failed" },
+        { type: "sync_reprocess_page", next_after: `${pageIndex}:${id}`, has_more: true },
+      ];
+    },
+    evaluateCall: async () => ({ status: "authentication_failed", reason: "still blocked",
+      policy_revision: "0", local_security_revision: "0" }),
+    eventCall: async () => {}, logApplyCall: async () => {},
+  }, "malformed"), /pending count walk exceeds authenticated sequence space/u);
+});
+
 test("Stage-2 roster, update batches, and response pages are canonical", () => {
   const members = [{ member_id: "018f3f7e-0000-7000-8000-000000000010", name: "worker-1" }];
   assert.deepEqual(validateMembers(config, {
@@ -2195,6 +2242,49 @@ exit 7
     // The property this test exists for.
     assert.ok(!existsSync(lockFor(join(root, `child-${index}.pid`))),
       "the driver was killed before its trap could release the lock");
+  }
+});
+
+test("SIGTERM while this process holds the team config lock releases it before exit",
+  { timeout: 30_000 }, async () => {
+  // The leaked locks this guards against were never a crash: remote.sh's own
+  // "stop the old engine" path sends SIGTERM first (scripts/remote.sh), and a
+  // handler-less Node process drops a pending `finally` on SIGTERM exactly as
+  // it does on SIGKILL (measured separately, not assumed) -- so an ordinary
+  // stop mid-critical-section is exactly as lock-leak-prone as a hard kill.
+  // Real process, real signal: a handler installed on THIS test's process
+  // would answer a different question.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-lock-sigterm-"));
+  const lockDir = join(root, "teams", "demo", ".config.lock");
+  const holderPath = `${lockDir}.holder`;
+  const scriptPath = join(root, "hold-lock.mjs");
+  const modulePath = fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url));
+  await mkdir(dirname(lockDir), { recursive: true });
+  await writeFile(scriptPath,
+    `import { withTeamConfigLock } from ${JSON.stringify(modulePath)};\n` +
+    // A bare never-resolving promise has no libuv handle behind it, so it
+    // would not keep this process alive at all -- it would just run to
+    // completion and exit 0 with the lock still held, never reaching SIGTERM.
+    // The real held-lock window (an in-flight capabilities request, or the
+    // engine's own loop) always has one; this stands in for it.
+    "setInterval(() => {}, 1_000_000);\n" +
+    "withTeamConfigLock(\"demo\", () => new Promise(() => {})).catch(() => {});\n");
+  const child = spawn(process.execPath, [scriptPath],
+    { env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root }, stdio: "ignore" });
+  try {
+    // Bounded: taking the lock is this child's first async step.
+    for (let attempt = 0; attempt < 200 && !existsSync(lockDir); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(existsSync(lockDir), "child never took the team config lock");
+    assert.ok(existsSync(holderPath), "child never wrote its holder");
+    child.kill("SIGTERM");
+    await once(child, "exit");
+    assert.ok(!existsSync(lockDir), "SIGTERM left the lock directory behind");
+    assert.ok(!existsSync(holderPath), "SIGTERM left the holder file behind");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await rm(root, { recursive: true });
   }
 });
 

@@ -252,8 +252,19 @@ agmsg_self_rename_on_action() {
       fi
       # Readable, wrong, and proved for exactly this pane: type the rename
       # ONCE, and mark "attempted" so the next action confirms instead of
-      # poking again.
-      if terminal_poke "$id" "$rename_cmd $expected" >/dev/null 2>&1; then
+      # poking again. Routed through agmsg_safe_poke (#1384 follow-up:
+      # typing into THIS session's own pane carries the same "someone might
+      # already be using it" risk poke.sh already guarded against) -- same
+      # call shape as the bare terminal_poke this replaces (one `if` on its
+      # exit status), so the two-branch record below is unchanged.
+      # shellcheck disable=SC1091
+      . "$SKILL_DIR/scripts/lib/safe-poke.sh" 2>/dev/null || true
+      local _marker _boxed
+      _marker="$(agmsg_type_get "$type" input_prompt_marker 2>/dev/null || true)"
+      _boxed="$(agmsg_type_get "$type" input_prompt_boxed 2>/dev/null || true)"
+      [ "$terminal" = plain ] && _marker=""
+      if declare -F agmsg_safe_poke >/dev/null 2>&1 \
+        && agmsg_safe_poke "$id" "$rename_cmd $expected" "$_marker" "$_boxed" "$team" "$agent" >/dev/null 2>&1; then
         _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" attempted "$type"
       else
         _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "failed:poke" "$type"

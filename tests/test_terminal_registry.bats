@@ -579,6 +579,29 @@ EOF
   grep -q '\[-S\] \[-50\]' "$ARGV_LOG"
 }
 
+# #1389: terminal_peek_styled now exists (previously tmux's own comment said
+# "unmeasured whether capture-pane -e would give the same dim-attribute
+# signal herdr's ansi read does" -- measured directly against real `claude`
+# and real `codex` in a throwaway tmux session: both come through with the
+# same ESC[2m...ESC[0m form). Pins the one thing that distinguishes it from
+# plain terminal_peek at the tmux-argv level -- the `-e` flag -- the same way
+# the test above pins terminal_peek's own argv shape. The #1051 ABI sweep
+# below (now that terminal_peek_styled is out of _TMUX_NO_ID_OPS) already
+# covers that it exists and honours the socket/bare-ref rules the same as
+# every other id-taking op; this test covers the one thing that sweep does
+# not: which flag actually reaches tmux.
+@test "tmux: peek_styled captures the pane WITH -e, unlike plain peek" {
+  _install_fake_tmux
+  agmsg_terminal_load tmux
+  run terminal_peek_styled '%9'
+  [ "$status" -eq 0 ]
+  grep -q 'line one' <<<"$output"
+  grep -q '\[capture-pane\] \[-e\] \[-p\] \[-t\] \[%9\]' "$ARGV_LOG"
+  : > "$ARGV_LOG"
+  terminal_peek_styled '%9' --lines 50 >/dev/null
+  grep -q '\[-S\] \[-50\]' "$ARGV_LOG"
+}
+
 @test "tmux: poke sends text and the Enter in SEPARATE bursts with an arrow between (#619)" {
   _install_fake_tmux
   agmsg_terminal_load tmux
@@ -2175,6 +2198,11 @@ _fake_herdr_list_anchored_plus() {
 # server's own socket and emits every row socket-qualified -- and that is checked
 # where it belongs, in test_sweep_enumeration.bats, against a fake tmux whose
 # per-socket answers the test writes.
+# terminal_peek_styled (#1389): tmux implements it now (`capture-pane -e`,
+# measured live against real `claude` and real `codex` to give the same SGR
+# dim signal herdr's `pane read --format ansi` does), so it is an ordinary
+# id-taking op and belongs in the sweep below like terminal_peek, not in
+# this exclusion list -- removed from here on purpose.
 _TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.

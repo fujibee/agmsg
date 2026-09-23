@@ -11,6 +11,14 @@ setup() {
   export FAKE_HOME="$(mktemp -d)"
   export REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   export SK="$FAKE_HOME/.agents/skills/agmsg"
+  # install.sh's Codex sandbox config now also writes to $CODEX_HOME/config.toml
+  # when CODEX_HOME is set and differs from the default. A developer machine
+  # running Codex under a profile (CODEX_HOME set in the ambient shell) would
+  # otherwise leak every `install.sh --cmd agmsg` run below straight into that
+  # REAL file — caught in review by finding this suite's own tmp-dir paths
+  # accumulated inside a real ~/.codex_profiles/*/config.toml. Only the test
+  # that exercises CODEX_HOME itself sets it, scoped to that one invocation.
+  unset CODEX_HOME
   # Pin bare instance-id keying (#93) so the watcher self-clean smoke test keys
   # its pidfile on the raw session_id it passes — deterministic in CI and when
   # the suite runs under an agent process.
@@ -35,8 +43,42 @@ _agmsg_watch_pid() {
   WATCHED_PIDS="${WATCHED_PIDS}${WATCHED_PIDS:+$'\n'}${pid}"$'\t'"${expect}"
 }
 
+# Signal <pid> and CONFIRM it is actually gone before returning, rather than
+# firing a signal and moving on. Escalates TERM -> KILL -> loud failure,
+# confirming after EACH signal rather than assuming the stronger one landed
+# just because it was sent (review finding, #1390: the first version of this
+# fired kill -9 as a fallback but never re-checked afterward, reintroducing
+# exactly the "signalled, not confirmed" gap this function exists to close
+# -- a KILL can still race a not-yet-scheduled process, or, in a sandboxed
+# CI runner, be denied outright).
+#
+# `wait "$pid"` is not proof of anything for a pid like these: each was
+# started via nohup from a subshell (`run env ... bash .../remote.sh sync
+# start ...`) that has long since exited, so by the time this runs the pid
+# has been reparented to init and is not a child of THIS shell -- bash's
+# `wait` fails immediately ("not a child of this shell") rather than
+# blocking. `wait "$pid" 2>/dev/null || true` swallowed that error silently
+# and returned instantly regardless of whether the process had actually
+# exited (#1387: this is how a leftover of these tests was found still
+# running days later -- not a missed kill, an unconfirmed one).
+# wait_for_pid_exit actually polls, up to its own 10s ceiling.
+#
+# Returns 1 (and prints the pid) if the process is STILL alive after both
+# signals and both confirmations -- teardown propagates that as a failed
+# test rather than silently leaving an engine behind for a human to find
+# days later, which is what happened before this existed.
+_agmsg_kill_confirmed() {
+  local pid="$1"
+  kill "$pid" 2>/dev/null
+  wait_for_pid_exit "$pid" && return 0
+  kill -9 "$pid" 2>/dev/null
+  wait_for_pid_exit "$pid" && return 0
+  echo "_agmsg_kill_confirmed: pid $pid still alive after TERM and KILL" >&2
+  return 1
+}
+
 teardown() {
-  local pid expect cmd
+  local pid expect cmd rc=0
   while IFS=$'\t' read -r pid expect; do
     [ -n "$pid" ] || continue
     # A pid recorded from a pidfile only says where the number came from, not
@@ -51,10 +93,11 @@ teardown() {
     kill -0 "$pid" 2>/dev/null || continue
     cmd="$(/bin/ps -p "$pid" -o args= 2>/dev/null)"
     case "$cmd" in
-      *"$expect"*) kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true ;;
+      *"$expect"*) _agmsg_kill_confirmed "$pid" || rc=1 ;;
     esac
   done <<< "$WATCHED_PIDS"
   rm -rf "$FAKE_HOME"
+  return "$rc"
 }
 
 @test "install: fresh install ships scripts/lib and the commands actually run" {
@@ -410,6 +453,35 @@ teardown() {
   run env PATH="$fake_bin:$PATH" bash "$SK/scripts/remote.sh" status testteam
   [ "$status" -eq 0 ]
   [[ "$output" == *"connected (engine running, pid $new_pid)"* ]]
+}
+
+# #1387: reproduces the exact shape that leaked a real fake-node engine for
+# days on a shared machine -- a pid reparented to init (nohup'd from a
+# subshell that has already exited), so `wait "$pid"` cannot block on it and
+# silently lies about the process being gone. This is the fixed mechanism
+# itself, isolated from the rest of the #963 test above: a background process
+# whose TERM trap deliberately takes a moment to run (0.3s) before exiting,
+# so a caller that does not actually wait for it would still see it alive
+# immediately afterward.
+@test "_agmsg_kill_confirmed waits out a reparented process's TERM trap instead of trusting wait (#1387)" {
+  local marker="$BATS_TEST_TMPDIR/reparented.pid"
+  ( nohup bash -c '
+      trap "sleep 0.3; exit 0" TERM INT
+      echo "$$" > "'"$marker"'"
+      while :; do sleep 1; done
+    ' >/dev/null 2>&1 & )
+  wait_for_file "$marker"
+  local pid
+  pid="$(cat "$marker")"
+  kill -0 "$pid"   # sanity: it really is running before the call under test
+
+  _agmsg_kill_confirmed "$pid"
+
+  # No sleep, no retry here -- if _agmsg_kill_confirmed returned, the process
+  # must already be gone. A version that only fires `kill` and trusts `wait`
+  # would still see this process alive at this exact line (mutation-checked).
+  run kill -0 "$pid"
+  [ "$status" -ne 0 ]
 }
 
 @test "install: AGMSG_STORAGE_PATH override works against the installed skill" {
@@ -829,7 +901,7 @@ PS1
 }
 
 # --- Codex sandbox writable_roots (#41) ---
-@test "install: configures Codex writable_roots for db teams and run" {
+@test "install: configures Codex writable_roots for db teams run and ext-tools" {
   mkdir -p "$FAKE_HOME/.codex"
   cat > "$FAKE_HOME/.codex/config.toml" <<'EOF'
 model = "gpt-test"
@@ -840,6 +912,36 @@ EOF
   grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
   grep -q "$SK/teams" "$FAKE_HOME/.codex/config.toml"
   grep -q "$SK/run" "$FAKE_HOME/.codex/config.toml"
+  # A sandboxed Codex seat runs an ext-tool member's `setup` (secret and
+  # save) too, which writes under ext-tools/ the same way the bridge writes
+  # under db/teams/run — measured directly against a real seat
+  # (`codex exec -s workspace-write`) before this entry existed:
+  # `mkdir: .../ext-tools/<team>: Operation not permitted`.
+  grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "install: honors CODEX_HOME, and also configures the plain ~/.codex default when it differs" {
+  # A machine running more than one Codex identity points CODEX_HOME at a
+  # per-profile dir; that is the file the seat actually reads, not
+  # ~/.codex/config.toml — measured directly: a seat running under such a
+  # profile still got `mkdir: .../ext-tools/<team>: Operation not permitted`
+  # after install.sh reported success, because it had edited a file nothing
+  # read. The Codex desktop app, on the same machine, uses the plain
+  # ~/.codex default regardless of a shell's CODEX_HOME, so both need it
+  # when CODEX_HOME points elsewhere.
+  local profile_home="$FAKE_HOME/.codex_profiles/work"
+  mkdir -p "$FAKE_HOME/.codex" "$profile_home"
+  cat > "$FAKE_HOME/.codex/config.toml" <<'EOF'
+model = "gpt-test"
+EOF
+  cat > "$profile_home/config.toml" <<'EOF'
+model = "gpt-test"
+EOF
+
+  CODEX_HOME="$profile_home" HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  grep -q "$SK/ext-tools" "$profile_home/config.toml"
+  grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
 }
 
 @test "install --update: adds missing Codex run writable_root for existing installs" {
@@ -1282,6 +1384,110 @@ EOF
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
   [ ! -e "$old" ]
   [ -f "$current" ]
+}
+
+# install.sh's `cp -R` never removed a file dropped by an earlier release
+# and never backed up one it was about to overwrite, so a retired tool
+# (most recently rearm.sh, run by hand after it had already been deleted
+# from the shipped release) stayed live in the install and behaved like
+# the thing it used to be, and a local edit under scripts/ could vanish
+# mid-upgrade with nobody reading the output. The maintainer's call after
+# review: stop trying to judge "safe to delete" perfectly and make the
+# outcome recoverable instead -- move rather than delete, keep exactly one
+# generation, say what moved.
+#
+# One test, everything in the same run per the maintainer's list: a stale
+# file with no current successor is moved (not deleted) into .trash/; a
+# stale file that collides by exact relative path with a file this release
+# DOES ship (init-db.sh's pre-1.3.0 top-level location vs. its current
+# scripts/internal/ home -- the real shape of the original bug) moves
+# without taking the current file down with it; a file the release still
+# ships, but whose installed copy a user (or their agent) had edited, is
+# backed up with THAT edited content before being overwritten; user data
+# (ext-tools config + secret, db/, teams/) survives byte-for-byte; the
+# newline-in-filename escape onto a real ext-tools secret (co1's review of
+# the first version of this prune) stays closed; and a second --update
+# clears the first generation's .trash/ before writing its own.
+@test "install --update: moves removed/overwritten scripts/ files to .trash/ (one generation), never touches user data, and closes the newline escape" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local trash="$SK/.trash"
+
+  local pure_leftover="$SK/scripts/hook.sh"
+  local colliding_old="$SK/scripts/init-db.sh"
+  local colliding_current="$SK/scripts/internal/init-db.sh"
+  [ ! -e "$pure_leftover" ]
+  [ ! -e "$colliding_old" ]
+  [ -f "$colliding_current" ]
+  printf '%s\n' 'pre-1.4.0 leftover, no successor anywhere' > "$pure_leftover"
+  printf '%s\n' 'pre-1.3.0 top-level init-db.sh' > "$colliding_old"
+  local shipped_contents
+  shipped_contents="$(cat "$colliding_current")"
+
+  local edited="$SK/scripts/send.sh"
+  printf '\n# local edit, about to be overwritten\n' >> "$edited"
+  local edited_contents
+  edited_contents="$(cat "$edited")"
+
+  mkdir -p "$SK/ext-tools/myteam"
+  printf '%s\n' 'tool config' > "$SK/ext-tools/myteam/mytool.conf"
+  printf '%s\n' 'tool secret' > "$SK/ext-tools/myteam/mytool.secret"
+  mkdir -p "$SK/teams/myteam"
+  printf '%s\n' 'team config' > "$SK/teams/myteam/config.json"
+  printf '%s\n' 'sqlite bytes, not really' > "$SK/db/agmsg.sqlite3"
+
+  # co1's finding on the first version: `find | while read` split on
+  # newline lets an embedded newline forge a fake second "line". A real
+  # entry at scripts/<LF>../ext-tools/myteam/mytool.secret (one directory
+  # named the four bytes x, LF, ., .) prints as one find record but reads
+  # back, newline-split, as two: `x` and the real relative path
+  # `../ext-tools/myteam/mytool.secret` -- landing on the real secret
+  # below. This constructs that escape for real, not just against a
+  # survives-or-not assertion.
+  local evil_name
+  evil_name=$'x\n..'
+  mkdir -p "$SK/scripts/$evil_name/ext-tools/myteam"
+  printf '%s\n' 'decoy -- reading this back would mean the escape worked' \
+    > "$SK/scripts/$evil_name/ext-tools/myteam/mytool.secret"
+
+  HOME="$FAKE_HOME" run bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  # moved, not deleted; the shipped collision is untouched
+  [ ! -e "$pure_leftover" ]
+  [ ! -e "$colliding_old" ]
+  [ -f "$colliding_current" ]
+  [ "$(cat "$colliding_current")" = "$shipped_contents" ]
+  [ "$(cat "$trash/hook.sh")" = "pre-1.4.0 leftover, no successor anywhere" ]
+  [ "$(cat "$trash/init-db.sh")" = "pre-1.3.0 top-level init-db.sh" ]
+
+  # the overwritten local edit is backed up with what was really there
+  [ "$(cat "$trash/send.sh")" = "$edited_contents" ]
+  run grep -q "local edit, about to be overwritten" "$edited"
+  [ "$status" -ne 0 ]
+
+  # user data untouched, byte-for-byte
+  [ "$(cat "$SK/ext-tools/myteam/mytool.conf")" = "tool config" ]
+  [ "$(cat "$SK/ext-tools/myteam/mytool.secret")" = "tool secret" ]
+  [ "$(cat "$SK/teams/myteam/config.json")" = "team config" ]
+  [ "$(cat "$SK/db/agmsg.sqlite3")" = "sqlite bytes, not really" ]
+
+  # the newline escape never reached the real secret, even as a mv
+  [ -f "$SK/ext-tools/myteam/mytool.secret" ]
+  [ "$(cat "$SK/ext-tools/myteam/mytool.secret")" = "tool secret" ]
+
+  # a second --update starts its own generation: gen 1 is gone, gen 2's own
+  # leftover is there in its place
+  local gen2_leftover="$SK/scripts/hook-on.sh"
+  [ ! -e "$gen2_leftover" ]
+  printf '%s\n' 'gen-2 leftover' > "$gen2_leftover"
+
+  HOME="$FAKE_HOME" run bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  [ ! -e "$trash/hook.sh" ]
+  [ ! -e "$trash/init-db.sh" ]
+  [ ! -e "$trash/send.sh" ]
+  [ "$(cat "$trash/hook-on.sh")" = "gen-2 leftover" ]
 }
 
 @test "uninstall: removes the Antigravity skill" {

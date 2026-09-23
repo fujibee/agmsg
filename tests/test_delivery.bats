@@ -73,6 +73,50 @@ settings_file() {
   ! has_check_inbox "$(settings_file)"
 }
 
+# #1392: a refused hooks_file write used to be silent in effect -- exit
+# non-zero via `set -e` alone (no test pinned that), but with only a bare
+# `mv: ... Permission denied` and no agmsg context, easy to miss and no next
+# step. Reproduces the real shape (Codex's workspace-write sandbox keeps
+# .codex/ read-only even inside an otherwise-writable project, confirmed
+# live, #1392) with a read-only .codex/ rather than mocking mv, so this
+# catches a regression in the real mv call, not in a stand-in for it.
+#
+# The project path itself carries a space, a literal $, and a single quote
+# (review finding: the recovery line's command used to be built with naive
+# `'$var'` interpolation, which a quote in the path broke outright -- the
+# header comment right above _agmsg_shq's own definition already says why
+# that pattern is never enough on its own). The line-content checks below
+# only prove the path appears as a SUBSTRING, which broken quoting could
+# still satisfy, so the final assertion goes further: feeds the PRINTED line
+# back to a real bash and asserts the argv it produces is byte-identical to
+# the original project path, including the literal (never-expanded) '$HOME'
+# and the embedded quotes.
+@test "delivery set: a refused hooks_file write fails loudly, names the file, and the recovery line survives a quoted/spaced/\$-bearing project path" {
+  local weird_project="$TEST_PROJECT/proj \$HOME 'quoted'"
+  mkdir -p "$weird_project/.codex"
+  chmod 555 "$weird_project/.codex"
+  run bash "$SCRIPTS/delivery.sh" set monitor codex "$weird_project"
+  chmod 755 "$weird_project/.codex"   # teardown's rm -rf must not trip over this
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "could not write $weird_project/.codex/hooks.json"
+  printf '%s\n' "$output" | grep -q -F -- "delivery for codex was NOT set up"
+  printf '%s\n' "$output" | grep -q -F -- "run this same command from a normal, unsandboxed shell"
+  case "$output" in *"Delivery mode set to"*) return 1 ;; esac
+  [ ! -f "$weird_project/.codex/hooks.json" ]
+
+  local recovery_line
+  recovery_line="$(printf '%s\n' "$output" | grep '^  bash ')"
+  [ -n "$recovery_line" ]
+
+  local -a argv=()
+  eval "argv=(${recovery_line#  bash })"
+  # Indexed via count-1, not a negative subscript -- bash 3.2 (macOS's
+  # /bin/bash, and this suite's own house rule) does not support negative
+  # array indices.
+  local last_idx=$((${#argv[@]} - 1))
+  [ "${argv[$last_idx]}" = "$weird_project" ]
+}
+
 # --- idempotency ---
 
 @test "delivery set monitor: idempotent" {
@@ -489,16 +533,24 @@ eperm_pid() {
   # of AGMSG_CC_MONITOR_KEEP_ALIVE below.
   grep -q 'timeout_ms: 1800000' <<<"$output"
   # AGMSG_CC_MONITOR_KEEP_ALIVE, default OFF: with it unset (the run above),
-  # the directive must NOT carry the re-arm wording -- most seats have
-  # nothing asking them to keep a watch alive across its own expiry, and
-  # rearm.sh covers the ones that do.
+  # the directive must carry the CONDITIONAL re-arm wording -- a plain word
+  # match on "no events" in Claude Code's own expiry notification, never a
+  # count to parse (the notification's exact phrasing may drift; #1270's
+  # count only ever appears as Claude Code's own text, agmsg does not count
+  # it). The unconditional wording ("immediately re-arm it") is reserved for
+  # KEEP_ALIVE, checked below.
   refute grep -q 'immediately re-arm it by invoking Monitor again' <<<"$output"
-  refute grep -q 'Re-arm it silently' <<<"$output"
+  grep -q 'says it delivered no events, do not re-arm it' <<<"$output"
+  grep -q 'Otherwise (it says it delivered something), re-arm it' <<<"$output"
+  grep -q 'Re-arm it silently' <<<"$output"
 
   run env AGMSG_CC_MONITOR_KEEP_ALIVE=1 bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   grep -q 'timeout_ms: 1800000' <<<"$output"
   grep -q 'immediately re-arm it by invoking Monitor again' <<<"$output"
+  # KEEP_ALIVE re-arms unconditionally, regardless of what the expiry
+  # notification says -- the conditional wording above must not appear here.
+  refute grep -q 'says it delivered no events, do not re-arm it' <<<"$output"
   # The maintainer's follow-up to #1270: an agent that announces every silent
   # re-arm ("re-armed", an acknowledgement, a summary) burns tokens every 30
   # minutes for no reader benefit, so the directive must say to do it quietly.
@@ -789,13 +841,13 @@ _seed_role_record() {
 JSON
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-test "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.stop-test.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.stop-test.pid" ]
   run bash "$SCRIPTS/delivery.sh" stop
   [[ "$output" =~ "Killed 1 watch" ]]
   [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
   [ ! -f "$TEST_SKILL_DIR/run/watch.stop-test.pid" ]
-  sleep 1
+  wait_for_pid_exit "$watch_pid"
   ! kill -0 "$watch_pid" 2>/dev/null
 }
 
@@ -842,7 +894,7 @@ JSON
   # A live claude-code watcher for this project.
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" cc-sess "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.cc-sess.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.cc-sess.pid" ]
   # Switching a DIFFERENT type's delivery in the SAME project must not touch it.
   run bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT"
@@ -860,12 +912,12 @@ JSON
 JSON
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" cc-sess2 "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.cc-sess2.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.cc-sess2.pid" ]
   run bash "$SCRIPTS/delivery.sh" set off claude-code "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [ ! -f "$TEST_SKILL_DIR/run/watch.cc-sess2.pid" ]
-  sleep 1
+  wait_for_pid_exit "$watch_pid"
   ! kill -0 "$watch_pid" 2>/dev/null
 }
 
@@ -882,7 +934,7 @@ JSON
 JSON
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sp-sess "$sp" claude-code 3>&- &
   local watch_pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.sp-sess.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.sp-sess.pid" ]
   # Another type's set turn in the SAME space-containing project: must NOT kill it.
   run bash "$SCRIPTS/delivery.sh" set turn copilot "$sp"
@@ -893,7 +945,7 @@ JSON
   run bash "$SCRIPTS/delivery.sh" set off claude-code "$sp"
   [ "$status" -eq 0 ]
   [ ! -f "$TEST_SKILL_DIR/run/watch.sp-sess.pid" ]
-  sleep 1
+  wait_for_pid_exit "$watch_pid"
   ! kill -0 "$watch_pid" 2>/dev/null
 }
 
@@ -908,10 +960,10 @@ JSON
 
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sigterm-test "$TEST_PROJECT" claude-code 3>&- &
   local pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.sigterm-test.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.sigterm-test.pid" ]
   kill -TERM "$pid"
-  sleep 1
+  wait_for_pid_exit "$pid"
   refute kill -0 "$pid" 2>/dev/null
   [ ! -f "$TEST_SKILL_DIR/run/watch.sigterm-test.pid" ]
 }
@@ -991,7 +1043,7 @@ JSON
   [ -f "$pidfile" ]
   prev_p=$(cat "$pidfile")
   kill "$prev_p"
-  sleep 1
+  wait_for_pid_exit "$prev_p"
   ! kill -0 "$prev_p" 2>/dev/null
 }
 
@@ -1128,7 +1180,7 @@ has_session_end() {
     || { echo "the decoy does not look like this install's watch.sh" >&2; return 1; }
   echo "$target_pid" > "$TEST_SKILL_DIR/run/watch.sess-A.pid"
   echo '{"session_id":"sess-A"}' | bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT"
-  sleep 1
+  wait_for_pid_exit "$target_pid"
   refute kill -0 "$target_pid" 2>/dev/null
   [ ! -f "$TEST_SKILL_DIR/run/watch.sess-A.pid" ]
 }
@@ -1591,9 +1643,21 @@ JSON
   # The watcher seeds its cursor from the storage tip at startup, so prior
   # messages aren't replayed. Send NEW messages through the facade (storage_send
   # writes the event log the watcher now streams) and wait for several polls.
-  sleep 1
+  #
+  # Wait for the readiness sentinel, not the pidfile: watch.sh writes its
+  # pidfile (~line 520) well before it resolves PAIRS (~line 677), and this
+  # is an ACTIVE_NAME watcher, so the sentinel is written only once PAIRS is
+  # resolved (#108) -- the pidfile alone would let `send.sh` race ahead of
+  # subscription resolution (review on #1327).
+  wait_for_file "$(_ready_path myteam bob)"
   bash "$SCRIPTS/send.sh" myteam system alice "new-for-alice" --force >/dev/null
   bash "$SCRIPTS/send.sh" myteam system bob "new-for-bob" --force >/dev/null
+  # A flat wait, deliberately: this observes that "new-for-alice" is ABSENT
+  # (checked below), and polling for the one message that IS allowed to
+  # arrive would let the watcher be killed the instant it appears -- before a
+  # buggy watcher that wrote the allowed line and was ABOUT to write the
+  # forbidden one gets the chance to (review on #1327). Nothing here is a
+  # condition to poll for.
   sleep 3
   kill -TERM "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null || true
@@ -1691,6 +1755,13 @@ JSON
   # is resolved at launch and not re-evaluated each poll.
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-static "$TEST_PROJECT" claude-code > /tmp/agmsg-static 2>&1 3>&- &
   local pid=$!
+  # A flat wait, deliberately: watch.sh's readiness sentinel is written only
+  # for an ACTIVE_NAME (actas) watcher (#108), and this one has none -- it is
+  # exactly the "default, broad subscription" shape this test is about -- so
+  # there is no file this watcher writes AFTER resolving PAIRS (~line 677)
+  # that a plain watcher's own pidfile write (~line 520) could be swapped
+  # for. Polling the pidfile would let `join.sh bob` below race ahead of the
+  # subscription snapshot this test's premise depends on (review on #1327).
   sleep 1
 
   # Join `bob` to the same (project, type) after the watcher is running.
@@ -1701,6 +1772,12 @@ JSON
   bash "$SCRIPTS/send.sh" myteam sys alice "for-alice-static" --force >/dev/null
   bash "$SCRIPTS/send.sh" myteam sys bob   "for-bob-static" --force >/dev/null
 
+  # A flat wait, deliberately: this observes that "for-bob-static" is ABSENT
+  # (checked below), and polling for the one message that IS allowed to
+  # arrive would let the watcher be killed the instant it appears -- before a
+  # buggy watcher that wrote the allowed line and was ABOUT to write the
+  # forbidden one gets the chance to (review on #1327). Nothing here is a
+  # condition to poll for.
   sleep 3
   kill -TERM "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null || true
@@ -1730,13 +1807,14 @@ JSON
   local pid_a=$!
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sid-b "$proj_b" claude-code 3>&- &
   local pid_b=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.sid-a.pid"
+  wait_for_file "$TEST_SKILL_DIR/run/watch.sid-b.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.sid-a.pid" ]
   [ -f "$TEST_SKILL_DIR/run/watch.sid-b.pid" ]
 
   run bash "$SCRIPTS/delivery.sh" set turn claude-code "$proj_a"
   [ "$status" -eq 0 ]
-  sleep 1
+  wait_for_pid_exit "$pid_a"
 
   # Target project A: watcher killed, pidfile removed.
   refute kill -0 "$pid_a" 2>/dev/null
@@ -1768,11 +1846,12 @@ JSON
   local pid_a=$!
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" off-b "$proj_b" claude-code 3>&- &
   local pid_b=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.off-a.pid"
+  wait_for_file "$TEST_SKILL_DIR/run/watch.off-b.pid"
 
   run bash "$SCRIPTS/delivery.sh" set off claude-code "$proj_a"
   [ "$status" -eq 0 ]
-  sleep 1
+  wait_for_pid_exit "$pid_a"
 
   refute kill -0 "$pid_a" 2>/dev/null
   [ ! -f "$TEST_SKILL_DIR/run/watch.off-a.pid" ]
@@ -1800,11 +1879,13 @@ JSON
   local pid_a=$!
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-b "$proj_b" claude-code 3>&- &
   local pid_b=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.stop-a.pid"
+  wait_for_file "$TEST_SKILL_DIR/run/watch.stop-b.pid"
 
   run bash "$SCRIPTS/delivery.sh" stop
   [[ "$output" =~ "Killed 2 watch" ]]
-  sleep 1
+  wait_for_pid_exit "$pid_a"
+  wait_for_pid_exit "$pid_b"
   refute kill -0 "$pid_a" 2>/dev/null
   refute kill -0 "$pid_b" 2>/dev/null
 
@@ -3256,7 +3337,7 @@ EOF
 JSON
   AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" hermes-preserve-test "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
-  sleep 1
+  wait_for_file "$TEST_SKILL_DIR/run/watch.hermes-preserve-test.pid"
   [ -f "$TEST_SKILL_DIR/run/watch.hermes-preserve-test.pid" ]
 
   run bash "$SCRIPTS/delivery.sh" set off hermes "$TEST_PROJECT"

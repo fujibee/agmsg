@@ -363,6 +363,168 @@ prepare_push() {
     jq -s '[.[]|select(.type=="sync_reprocess_candidate")]|length')" -eq 0 ]
 }
 
+@test "sync contract: reprocess scope=malformed recovers only receiver-misunderstanding rows, and every kind check reads the one definition (#1284)" {
+  local malformed_wire=550e8400-e29b-41d4-a716-446655440030
+  local auth_wire=550e8400-e29b-41d4-a716-446655440031
+  local malformed_row auth_row page reevaluated result db stray
+
+  # Seeded the way #1284's automatic (cmd_sync_start) and explicit
+  # (remote.sh reprocess) paths find it: a row THIS client's own earlier
+  # parser rejected while parsing (status=malformed), stored intact.
+  malformed_row=$(jq -nc --arg id "$malformed_wire" '
+    {type:"sync_pull_message",server_seq:"1",id:$id,
+     server_received_at:"2026-07-20T13:05:00.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:"ZmlndHVyZQ=="},
+     status:"malformed",reason:"roster mutation projection is invalid",
+     policy_revision:"0",local_security_revision:"0"}')
+  # A row a NEWER PARSER cannot fix -- authentication failed, not parsing --
+  # so scope=malformed must never return it as a candidate.
+  auth_row=$(jq -nc --arg id "$auth_wire" '
+    {type:"sync_pull_message",server_seq:"2",id:$id,
+     server_received_at:"2026-07-20T13:05:01.000000Z",
+     envelope:{v:1,cipher:"age-v1",key_id:"epoch-1",blob:"YWdl"},
+     status:"authentication_failed",reason:"age authentication failed",
+     policy_revision:"0",local_security_revision:"0"}')
+  page=$(printf '%s\n%s\n%s\n' "$malformed_row" "$auth_row" \
+    '{"type":"sync_pull_cursor","next_after":"2"}')
+  printf '%s\n' "$page" | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+
+  # scope=malformed: only the malformed row is a candidate.
+  [ "$(storage_sync_reprocess demo "$SERVER_ID" "$TEAM_ID" 1 100 "" malformed |
+    jq -sc '[.[]|select(.type=="sync_reprocess_candidate")|.id]')" \
+    = "$(jq -nc --arg id "$malformed_wire" '[$id]')" ]
+
+  # cmd_unlock's own scope is unchanged: the default (no scope argument)
+  # still reprocesses both statuses.
+  [ "$(storage_sync_reprocess demo "$SERVER_ID" "$TEAM_ID" 1 100 |
+    jq -s '[.[]|select(.type=="sync_reprocess_candidate")]|length')" -eq 2 ]
+
+  # An unrecognized scope is refused, never silently treated as the default.
+  run storage_sync_reprocess demo "$SERVER_ID" "$TEAM_ID" 1 100 "" bogus
+  [ "$status" -eq 13 ]
+
+  # The current parser now understands the row (the shape an update ships):
+  # reprocess re-applies it through the real open/parse/apply path, and it
+  # becomes imported and unread -- the authentication_failed row is
+  # untouched, proving scope actually excluded it rather than the row
+  # merely not coming up first.
+  reevaluated=$(printf '%s\n' "$malformed_row" | jq -c '
+    .status="importable" | .reason="" |
+    .projection={body:"recovered by the newer parser",
+      created_at:"2026-07-20T13:05:00.000000Z",from_agent:"alice",to_agent:"bob"}')
+  result=$(printf '%s\n%s\n' "$reevaluated" '{"type":"sync_pull_cursor","next_after":"2"}' |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$result" | jq -sr '.[0].transport_cursor')" = 2 ]
+  [ "$(storage_history demo |
+    jq -s '[.[]|select(.body=="recovered by the newer parser")]|length')" -eq 1 ]
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT status FROM sync_quarantine WHERE wire_id='$malformed_wire';" | tr -d '\r')" = imported ]
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT status FROM sync_quarantine WHERE wire_id='$auth_wire';" | tr -d '\r')" = authentication_failed ]
+
+  # cmd_sync_start's local, network-free pre-check (_remote_quarantine_has_malformed)
+  # must tell "confirmed nothing pending" apart from "could not determine",
+  # never collapsing an unreadable local state into a silent skip. Exercised
+  # directly, the way test_remote_status_liveness.bats already reaches other
+  # cmd_sync_start internals (#762: sourcing is what makes them testable at
+  # all).
+  run bash -c 'source "$1/remote.sh"; AGMSG_STORAGE_DRIVER=jsonl _remote_quarantine_has_malformed demo' \
+    _ "$SCRIPTS"
+  [ "$status" -eq 2 ]
+  grep -qF "does not support storage driver 'jsonl'" <<<"$output"
+
+  local empty_store_path="$BATS_TEST_TMPDIR/no-such-team-store"
+  run bash -c 'source "$1/remote.sh"; AGMSG_STORAGE_PATH="$2" _remote_quarantine_has_malformed noteam' \
+    _ "$SCRIPTS" "$empty_store_path"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+
+  local corrupt_dir="$BATS_TEST_TMPDIR/corrupt-store/teams/corruptteam"
+  mkdir -p "$corrupt_dir"
+  printf 'not a sqlite database' > "$corrupt_dir/messages.db"
+  run bash -c 'source "$1/remote.sh"; AGMSG_STORAGE_PATH="$2" _remote_quarantine_has_malformed corruptteam' \
+    _ "$SCRIPTS" "$BATS_TEST_TMPDIR/corrupt-store"
+  [ "$status" -eq 2 ]
+  grep -qF "cannot inspect local store" <<<"$output"
+
+  # An undetermined local state (2) must not reach the real reprocess from
+  # cmd_sync_start: that path reopened the exact hang a test double with no
+  # server behind it used to cause. Driven through the real command, with a
+  # fake node/ps pair, the same fixture shape test_install.bats's #963 test
+  # uses, and AGMSG_STORAGE_DRIVER=jsonl to force 2 without touching a file.
+  local sync_home="$BATS_TEST_TMPDIR/sync-start-rc2" cfg escaped updated \
+    fake_node fake_bin reprocess_marker
+  mkdir -p "$sync_home/scripts" "$sync_home/teams" "$sync_home/run" "$sync_home/db"
+  cp -R "$SCRIPTS/." "$sync_home/scripts/"
+  bash "$sync_home/scripts/join.sh" synctestteam alice claude-code /tmp/sync-start-rc2-proj \
+    >/dev/null
+  cfg="$sync_home/teams/synctestteam/config.json"
+  escaped="$(sed "s/'/''/g" "$cfg")"
+  updated="$(agmsg_sqlite_mem "
+    SELECT json_set('$escaped', '\$.remote_binding', json_object(
+      'endpoint', 'https://remote.example',
+      'server_instance_id', '018f0000-0000-7000-8000-000000000001',
+      'remote_team_id', '018f0000-0000-7000-8000-000000000002',
+      'protocol_version', 1,
+      'capabilities', json_object('write_allowed_ciphers', json_array('none')),
+      'connected_at', '2026-07-20T00:00:00Z',
+      'disconnected_at', null
+    ));")"
+  printf '%s\n' "$updated" > "$cfg"
+
+  reprocess_marker="$sync_home/reprocess-was-called"
+  fake_node="$sync_home/fake-node"
+  fake_bin="$sync_home/fake-node-bin"
+  # argv here is node's own: $1 is the script path remote.sh hands it (or
+  # "--version" for the plain version probe), $2 is remote-sync.mjs's own
+  # subcommand ("run" for the engine, "reprocess" for the call this test
+  # must never see).
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'if [ "${1:-}" = "--version" ]; then echo v23.0.0; exit 0; fi'
+    printf 'if [ "${2:-}" = "reprocess" ]; then : > %q; exit 0; fi\n' "$reprocess_marker"
+    printf '%s\n' 'echo "{\"event\":\"capabilities\",\"startup_nonce\":\"${AGMSG_SYNC_START_NONCE:-}\"}"'
+    printf '%s\n' 'trap "exit 0" TERM INT'
+    printf '%s\n' 'while :; do sleep 1; done'
+  } > "$fake_node"
+  chmod +x "$fake_node"
+  mkdir -p "$fake_bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'args=0' \
+    'case " $* " in *" -o args= "*) args=1 ;; esac' \
+    '[ "$args" = 1 ] || exec /bin/ps "$@"' \
+    "printf '%s\\n' 'bash $sync_home/scripts/internal/remote-sync.mjs run --team synctestteam'" \
+    > "$fake_bin/ps"
+  chmod +x "$fake_bin/ps"
+
+  run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" SKILL_DIR="$sync_home" \
+    AGMSG_STORAGE_DRIVER=jsonl AGMSG_TEST_SYNC_START_READY_CEILING=400 \
+    bash "$sync_home/scripts/remote.sh" sync start synctestteam
+  local start_pid
+  start_pid="$(cat "$sync_home/run/remote-sync.synctestteam.pid" 2>/dev/null || true)"
+  # Registered for teardown's reaper immediately, before the assertions below
+  # can end the test (#1288/#1292 lesson): teardown_test_env's rm -rf on
+  # $TEST_SKILL_DIR does not reach $sync_home, a separate directory, so this
+  # engine needs its own stop.
+  if [ -n "$start_pid" ] && kill -0 "$start_pid" 2>/dev/null; then
+    kill "$start_pid" 2>/dev/null || true
+  fi
+  [ "$status" -eq 0 ]
+  grep -qF "does not support storage driver 'jsonl'" <<<"$output"
+  grep -qF "reprocess 'synctestteam'" <<<"$output"
+  [ ! -e "$reprocess_marker" ]
+  rm -rf "$sync_home" 2>/dev/null || true
+
+  # KIND-S: the accepted roster-mutation kinds live in exactly one place
+  # (scripts/internal/wire-kinds.mjs). Mutation (run by hand, not
+  # committed): putting a literal kind list back at any of the ten former
+  # sites turns this from empty to non-empty.
+  stray="$(grep -rn '"member_joined"' "$SCRIPTS"/internal/*.mjs "$SCRIPTS"/drivers/storage/*.sh 2>/dev/null |
+    grep -v '/wire-kinds\.mjs:')" || true
+  [ -z "$stray" ]
+}
+
 @test "sync contract: reprocess candidate body and trailer share one keyset page" {
   local records="" page first token second index wire
   for index in 1 2 3; do

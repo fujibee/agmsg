@@ -189,7 +189,7 @@ If argument starts with "poke" (e.g. "poke reviewer status?"):
    `send.sh` has no such path yet (#1032), so a body given to `send` must still
    be single-quoted — the two surfaces differ today, and this is why.
 3. `poke` TYPES INTO another agent's session and submits it, as if a person had typed it there. Use it to reach a member whose watcher is not delivering (that is what it is for); use `send` for ordinary messages, which the member reads on its own terms.
-4. Exit codes split what "could not poke" means — see the shape and the pointer to the driver-specific file in point 4 of the "where" section above. **13** specifically means: do not fall back to `send` silently; the two are not the same act, say which one you did.
+4. Exit codes split what "could not poke" means — see the shape and the pointer to the driver-specific file in point 4 of the "where" section above. **13** specifically means: do not fall back to `send` silently; the two are not the same act, say which one you did. Two more codes are `poke.sh`'s own, the same across every driver (not in the per-driver files, which only cover the driver's own layer below this one): **14** means it found the input box and it looks like someone is actively typing there right now — a transient condition `--retries` waits out. **15** means it could not even confirm where the input box is on this read (e.g. a mid-redraw screen) — a different finding from 14, not a typing detection, though it is also transient and also covered by `--retries`.
 
 <!-- agmsg:slot mode -->
 <!-- /agmsg:slot mode -->

@@ -13,6 +13,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Worker, isMainThread, parentPort, threadId, workerData } from "node:worker_threads";
 import { parseStrictJson } from "./strict-jsonl.mjs";
+import { ROSTER_KINDS } from "./wire-kinds.mjs";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -111,7 +112,7 @@ function canonicalMessage(projection) {
 
 function canonicalRosterMutation(projection) {
   if (!projection || Array.isArray(projection) || typeof projection !== "object" ||
-      !["member_joined", "member_left", "member_renamed", "key_rotated"].includes(projection.kind) ||
+      !ROSTER_KINDS.includes(projection.kind) ||
       !UUID_V7.test(projection.mutation_id ?? "") ||
       typeof projection.occurred_at !== "string" ||
       !TIMESTAMP.test(projection.occurred_at) || !validTimestamp(projection.occurred_at)) {

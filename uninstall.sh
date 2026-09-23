@@ -245,7 +245,7 @@ for SKILL_DIR in "${SKILL_DIRS[@]}"; do
   if [ "$KEEP_DATA" = true ]; then
     echo ""
     echo "  Removing $SKILL_NAME skill (keeping DB and teams)..."
-    rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents"
+    rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash"
     rm -f "$SKILL_DIR/SKILL.md"
     echo "  - removed scripts, templates, SKILL.md"
     echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/"

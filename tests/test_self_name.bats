@@ -31,6 +31,31 @@ setup() {
   FAKEBIN="$BATS_TEST_TMPDIR/bin"; mkdir -p "$FAKEBIN"
   ARGV_LOG="$BATS_TEST_TMPDIR/argv.log"; : > "$ARGV_LOG"
   export FAKEBIN ARGV_LOG
+  # #1137's project/type auto-detect (self-name.sh) calls agmsg_detect_cli_type,
+  # which walks up to 10 ancestor processes and shells out to a real `ps` at
+  # EVERY level (compat_get_comm and compat_get_ppid, scripts/lib/compat.sh) --
+  # up to ~40 forks per call. None of bats' own ancestors match a known CLI
+  # type, so the walk always runs the full 10 levels. compat.sh is re-sourced
+  # fresh inside self-name.sh on every slow-half call with no re-source guard,
+  # so a bash-function override of compat_get_ppid/compat_get_comm would not
+  # stick past the first call; stand a fake `ps` in front of the real one
+  # instead, for exactly the two invocation shapes compat_get_* uses. Both
+  # return nothing, so the walk's own loop condition (a non-empty next pid)
+  # ends it after one hop -- the same as a real, unmatched ancestor chain
+  # falling through to detect-cli-type.sh's documented "claude-code" default,
+  # just without the other nine forks per call. What is under test here is
+  # naming behaviour, not which real process happens to be bats' grandparent,
+  # so this does not change what any assertion in this file checks: #1137's
+  # tests still see project/type resolve non-empty, from the same default.
+  _real_ps="$(command -v ps)"
+  cat > "$FAKEBIN/ps" <<EOF
+#!/usr/bin/env bash
+case "\${1:-} \${2:-} \${3:-}" in
+  '-o ppid= -p'|'-o comm= -p') exit 0 ;;
+esac
+exec "$_real_ps" "\$@"
+EOF
+  chmod +x "$FAKEBIN/ps"
   # No terminal by default: each test sets the environment it wants.
   unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH
   # This file's whole subject is the naming primitive itself, against fakes
@@ -174,6 +199,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   # "No calls at all" is therefore gone. What must still hold -- what the old
   # assertion was protecting -- is that a settled seat does no WORK: it does not
   # relabel, rekey or rewrite anything, and it does not go listing panes.
+  _join_unnamed team alice   # registered, so #1391's type-resolution refuses nothing here
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   agmsg_self_name_on_action team alice
   : > "$ARGV_LOG"
@@ -213,6 +239,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   # could not know, and the case was left to `team --fix` / `rename`. The #1130
   # read closes it for free: the pane is asked, and the pane says it carries no
   # agmsg label.
+  _join_unnamed team alice   # registered, so #1391's type-resolution refuses nothing here
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   agmsg_self_name_on_action team alice
   [ "$(_name_calls)" -eq 1 ]
@@ -245,6 +272,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   # message says who holds the pane and how to release it (drop or despawn).
   # The guard is kept alongside #1112's label-first resolution; this test goes
   # only if the guard does, as a separate decision, and the old one returns.
+  _join_unnamed team alice   # registered, so #1391's type-resolution refuses nothing here
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   agmsg_self_name_on_action team alice
   [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
@@ -255,7 +283,12 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   refute grep -q '\[team:bob\]' "$ARGV_LOG"
   [ -z "$(_mark team bob)" ]
   [ -z "$(_placement team bob)" ]
-  grep -q 'already recorded as team__alice' <<<"$output"
+  # The claimant is named by whatever id/path scheme this pair currently
+  # resolves through (legacy team__agent or, once registered like this
+  # fixture now is via _join_unnamed, an id-keyed UUID pair) -- not this
+  # test's concern, so it checks the message says SOMEONE already holds it
+  # and how to release them, not which literal spelling names them.
+  grep -q 'already recorded as' <<<"$output"
   grep -q 'drop or despawn' <<<"$output"
   # alice keeps everything.
   [ "$(_mark team alice)" = $'tmux:/tmp/s:%3\tpid=4242' ]
@@ -301,6 +334,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
 # --- #1109: the action records placement, so a hand-started seat is reachable -------
 
 @test "a hand-started seat: the action RECORDS its placement, not only the label (#1109)" {
+  _join_unnamed team alice   # registered, so #1391's type-resolution refuses nothing here
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   # No prior naming and no record -- a seat someone started by hand that has just
   # sent its first message.
@@ -314,6 +348,12 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
 }
 
 @test "a hand-started seat's record carries project and type, not the two empty fields arrange.sh refuses (#1137)" {
+  # Registered first (join.sh, no terminal in the environment yet -- its own
+  # naming attempt has nothing to resolve and leaves no mark), so the type
+  # this test's action fills in is READ from that registration (#1391), not
+  # guessed: this is the common, correct case #1137 exists to cover, not the
+  # unregistered/undetectable one (see the dedicated #1391 test below).
+  _join_unnamed team alice
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   # None of send.sh/inbox.sh/history.sh pass project or type -- this call
   # shape (2 args) is exactly what they do.
@@ -327,7 +367,22 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   IFS=$'\t' read -r ref project type < "$rec"
   [ "$ref" = 'tmux:/tmp/s:%3' ]
   [ -n "$project" ]
-  [ -n "$type" ]
+  [ "$type" = claude-code ]
+}
+
+@test "a hand-started, UNREGISTERED seat whose type cannot be detected either: no record, not a wrong one (#1391)" {
+  # No _join_unnamed here -- this (team, agent) has no registration at all,
+  # and setup()'s fake ps makes the process-tree guess fall through to
+  # detect-cli-type.sh's own hardcoded default every time. Before #1391 this
+  # wrote a placement record with type=claude-code regardless of the seat's
+  # real type; now it writes no record at all, since a record poke/despawn
+  # will trust is worse wrong than absent.
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  [ -z "$(_placement team alice)" ]
+  agmsg_self_name_on_action team alice
+  [ -z "$(_placement team alice)" ]
+  # The pane is still named/labeled -- only the placement claim is withheld.
+  [ "$(_name_calls)" -eq 1 ]
 }
 
 @test "a caller that already supplies project and type is never second-guessed (#1137)" {
@@ -343,6 +398,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
 }
 
 @test "named once but never recorded: the next action writes the missing record (#1109)" {
+  _join_unnamed team alice   # registered, so #1391's type-resolution refuses nothing here
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   # A mark-only prior naming (watch.sh names with five args, no record): the mark
   # matches this pane, but no placement record exists. The old fast half trusted
@@ -386,6 +442,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
 }
 
 @test "herdr: mark matching -> no call; socket recreated (server restart) -> named again" {
+  _join_unnamed team alice   # registered, so #1391's type-resolution refuses nothing here
   _install_fake_herdr; _under_herdr w1:pB
   agmsg_self_name_on_action team alice
   : > "$ARGV_LOG"
@@ -572,6 +629,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   #
   # Every existing test here starts from a CORRECT seat and asks that it stays
   # correct. All of them were green while this shipped. This one starts broken.
+  _join_unnamed team alice   # registered, so #1391's type-resolution refuses nothing here
   _install_fake_herdr; _under_herdr w1:pDAEMON
 
   # Act once under the wrong environment: this is how the bad state was made.
@@ -603,6 +661,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   # The partner. "Never short-circuit" also passes the test above, and it would
   # cost every seat a full re-resolution on every action; this is what stops that
   # from being the fix.
+  _join_unnamed team alice   # registered, so #1391's type-resolution refuses nothing here
   _install_fake_herdr; _under_herdr w1:pB
   agmsg_self_name_on_action team alice
   [ "$(_placement team alice)" = "herdr:$HERDR_SOCKET_PATH:w1:pB" ]

@@ -3,6 +3,12 @@ set -u
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 
+# Captured before anything below parses or resolves them, so a self-restart
+# (see _install_changed's handling in the main loop) can exec the installed
+# watch.sh with the exact argv this process was launched with, rather than
+# replaying already-resolved values through resolution logic a second time.
+ORIG_ARGS=("$@")
+
 # Stream new agmsg messages for the current session as they arrive.
 #
 # Intended to be launched by Claude Code's Monitor tool from the SessionStart
@@ -45,6 +51,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
+# Warm agmsg_storage_dir's own process-lifetime cache as a PLAIN STATEMENT,
+# not via $(...): every real caller (agmsg_db_path -> ... -> _agmsg_db_file)
+# reaches it through at least one command substitution of its own, and a
+# subshell forked from a still-cold top level can never leave the cache warm
+# for the NEXT such call -- each one forks fresh from this same cold state.
+# Doing it once here, before any subshell exists, is what lets every later
+# call (however many $(...) layers deep) inherit the already-resolved value
+# instead of re-deriving it (a `dirname`/`cd`+`pwd` resolution) on every single
+# poll cycle for a value that cannot change for the life of this process.
+agmsg_storage_dir >/dev/null
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
@@ -312,7 +328,13 @@ _pair_unchanged_since_read() {   # <team> <agent> <owner-as-read-this-turn>
   # both, so a run directory that became unsearchable mid-turn matched the free
   # baseline exactly and the guard waved the act through (review).
   local _r _rd _now
-  _r="$(actas_lock_read "$1" "$2")" || return 2
+  # Cached path resolution (actas_lock_read_cached): this guard runs several
+  # times per cycle for the same pair, and the path it resolves cannot change
+  # for the life of this process's PAIRS subscription -- see
+  # actas_lock_path_cached's own comment for exactly what is and is not
+  # memoized. The LOCK CONTENTS are still read fresh every call; only the
+  # path computation is skipped on a repeat.
+  _r="$(actas_lock_read_cached "$1" "$2")" || return 2
   _rd="${_r%%$'\t'*}"
   case "$_rd" in
     ok)     _now="${_r#*$'\t'}" ;;
@@ -526,7 +548,7 @@ if [ -n "$PREV_PID_TO_DISPLACE" ]; then
   kill "$PREV_PID_TO_DISPLACE" 2>/dev/null || true
 fi
 
-# --- Say when this watcher is sharing an inbox with another (#683). ---
+# --- Say when this watcher is sharing an inbox with another. ---
 #
 # A watcher started WITHOUT an active name subscribes to every (team, agent)
 # registered for this project that nobody else has claimed. The read cursor is
@@ -677,6 +699,194 @@ INSTALL_STAMP="$RUN_DIR/.watch-start.$SESSION_ID.$$"
 _install_changed() {
   [ -f "$INSTALL_STAMP" ] || return 1
   [ -n "$(find "$SCRIPT_DIR" -newer "$INSTALL_STAMP" -print -quit 2>/dev/null)" ]
+}
+
+# True only once the install that touched scripts/ has FINISHED, not merely
+# started (review finding: install.sh rewrites the tree over a window, #963,
+# so watch.sh itself can already be executable while a sibling file it
+# sources is still old, missing, or half-written -- _install_changed alone
+# cannot tell "one file so far" from "the whole generation").
+#
+# VERSION is install.sh's own last write that touches anything under
+# scripts/ (cp -R scripts/, then chmod, THEN VERSION -- confirmed by reading
+# both its --update and fresh-install paths). No new marker to invent: an
+# install that has finished leaves VERSION newer than everything it just
+# copied, and one still mid-copy has not written it yet, or has not written
+# it again since this watcher's own start.
+#
+# STRICTLY newer, not "at least as new as" (review finding, round 3): a
+# non-strict comparison lets an OLD, unrelated VERSION whose timestamp
+# happens to TIE with this watcher's own start -- a real possibility on a
+# coarse-timestamp filesystem -- pass as "complete" the moment a later
+# install's scripts write lands, before that install has written its OWN
+# VERSION. A tie proves nothing either way, so it is treated as NOT
+# complete: the one cost is that a genuinely-finished install landing in the
+# very same clock tick as this watcher's own start falls back to today's
+# visible exit instead of restarting -- rare, and no worse than before this
+# PR, never a mixed-generation exec.
+_install_complete() {
+  local version_file="$SKILL_DIR/VERSION"
+  [ -f "$version_file" ] || return 1
+  [ "$version_file" -nt "$INSTALL_STAMP" ]
+}
+
+# True once BOTH a complete generation and an executable watch.sh are in
+# place -- the two conditions a restart actually needs. Split out so the main
+# handler below can ask "can I go now?" without repeating both checks.
+_install_ready() {
+  _install_complete && [ -x "$SCRIPT_DIR/watch.sh" ]
+}
+
+# How long an install that has started (changed files exist) but not yet
+# finished (not _install_ready) is tolerated before falling back to the
+# visible exit (review finding, round 4, #684 follow-up). install.sh writes
+# scripts/ over many separate file operations before its own last write
+# (VERSION); a watcher's poll can land in that window on essentially any real
+# install, not just a rare half-written one, so committing to the visible
+# exit the FIRST time this is observed was giving up too early.
+#
+# Time-based, not a poll count (#779's own reasoning applies here too): the
+# poll interval is itself configurable, so a count-based bound would silently
+# change how long this actually waits whenever the interval changes.
+#
+# Fixed production ceiling of 60s. The environment may only LOWER it, to an
+# integer from 1 to 60 inclusive (review finding, round 5): anything else --
+# non-numeric, zero, or above 60 -- is rejected back to 60, so an inherited or
+# forged value can never raise or remove the bound. 3-or-more-digit input is
+# rejected by pattern alone, before any numeric comparison, specifically so a
+# very long digit string is never handed to `[ -gt ]`/`-lt` at all -- some
+# shells' arithmetic evaluation is not guaranteed well-defined for arbitrarily
+# large integers, and this avoids relying on it being.
+AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT="${AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT:-60}"
+case "$AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT" in
+  [1-9]|[1-5][0-9]|60) ;;
+  *) AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=60 ;;
+esac
+
+# Time this cycle first observed "changed but not ready" -- empty means
+# either nothing has changed yet, or it already resolved (readied and
+# restarted, which never returns here to clear it -- exec starts a fresh
+# process with this unset again -- so no explicit reset is needed there).
+#
+# Measured with $SECONDS, not `date +%s`: it needs no external command (so it
+# has no failure mode to handle), but it is NOT a monotonic clock -- per
+# bash's own manual, both the value recorded at shell startup and each later
+# reference are obtained by querying the system clock, so an administrative
+# clock change moves it exactly as it would move `date +%s`. The negative-
+# elapsed handling below stays in place because of this, not despite it.
+_INSTALL_INCOMPLETE_SINCE=""
+
+# Fixed, internal, non-negotiable (review finding: an env-supplied limit can
+# be forged or inherited from an unrelated process). Tagged with this exact
+# (session id, pid) chain so a restart count inherited from a DIFFERENT
+# watcher's chain -- e.g. a stray leaked environment variable -- is never
+# mistaken for this one's own; exec preserves both session id and pid, so
+# this chain's own count always matches itself across every restart in it.
+_WATCH_INSTALL_RESTART_LIMIT=5
+_WATCH_INSTALL_RESTART_CHAIN="$SESSION_ID.$$"
+
+# Counts only CONSECUTIVE restarts: reset to zero the first time a cycle
+# passes with nothing changed (see the main loop below), so an ordinary,
+# well-spaced-out install is never more than one restart closer to the cap,
+# no matter how many separate installs this watcher has already lived
+# through.
+_install_restart_count() {
+  if [ "${AGMSG_WATCH_RESTART_CHAIN:-}" = "$_WATCH_INSTALL_RESTART_CHAIN" ]; then
+    case "${AGMSG_WATCH_RESTART_COUNT:-}" in
+      ''|*[!0-9]*) printf '0' ;;
+      *) printf '%s' "$AGMSG_WATCH_RESTART_COUNT" ;;
+    esac
+  else
+    printf '0'
+  fi
+}
+
+_install_restart_count_reset() {
+  [ -z "${AGMSG_WATCH_RESTART_COUNT:-}" ] && [ -z "${AGMSG_WATCH_RESTART_CHAIN:-}" ] && return 0
+  unset AGMSG_WATCH_RESTART_COUNT AGMSG_WATCH_RESTART_CHAIN
+}
+
+# Restart on the new code in place of exiting (#684 follow-up). `exec` replaces
+# this process image without forking, so there is never a moment with two
+# watchers polling the same subscription, and the read cursor lives in the
+# storage driver, not in this process, so a restart resumes from consumed
+# state and delivers nothing twice, exactly as a manual restart already does
+# today.
+#
+# `cleanup` (the EXIT trap's own function) runs BEFORE exec, releasing
+# $PIDFILE/$FILTERFILE/$READY_FILES under THIS image's own naming -- exec
+# skips the EXIT trap, so without this a future release that ever changes one
+# of those paths or formats would orphan the old-named file forever, nobody
+# left holding its name to clean it up. The new image re-creates all three
+# fresh under whichever naming its own code uses, exactly as a freshly
+# launched watcher would.
+#
+# The actas lock is deliberately NOT released here. Its lock file names this
+# session's own owner token ($SESSION_ID), and exec changes neither that nor
+# the pid, so the file stays continuously correct across the swap -- there is
+# no window where it reads as free. The new image's own startup still calls
+# actas_lock_claim for each pair it owns; since the recorded owner already
+# equals its own sid, that call is a no-op self-confirmation (see
+# _actas_lock_try_claim's existing==sid branch), never a fresh claim that
+# could race a peer.
+#
+# This is scoped to today's lock ABI, unlike $PIDFILE/$FILTERFILE/$READY_FILES
+# above: cleanup does not touch the lock at all, so nothing here migrates it.
+# If a future release ever changes the lock's own path or format, the new
+# image's claim can no longer be counted on to see existing==sid, and this
+# self-restart path must not be used for that release -- it falls back to
+# today's stop-and-manually-rearm behavior instead, same as before this PR.
+#
+# Not ready yet is NOT an immediate exit (review finding, round 4): it just
+# returns, leaving the rest of this cycle's loop body -- the liveness guard,
+# message delivery, the sleep -- to run exactly as it would have if nothing
+# had changed. Delivery keeps working while an install is still in flight;
+# only once AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT seconds have passed
+# without ever becoming ready does this fall back to the ORIGINAL, unchanged
+# exit -- a still-changing-past-the-timeout or genuinely broken install still
+# produces the same clear stop it always has, rather than an indefinite wait.
+#
+# A negative elapsed reading (round 5: only possible if the system clock was
+# moved backward mid-wait, since $SECONDS is wall-clock-based, not monotonic
+# -- confirmed against bash's own manual) is treated the same as "timeout
+# elapsed", not as "keep waiting": an elapsed time that cannot be trusted is
+# exactly the case the visible exit exists for, the same reasoning as an
+# install that is taking implausibly long.
+_handle_install_changed() {
+  local new_watch="$SCRIPT_DIR/watch.sh" restarts elapsed
+
+  if _install_ready; then
+    _INSTALL_INCOMPLETE_SINCE=""
+    restarts="$(_install_restart_count)"
+    if [ "$restarts" -lt "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
+      watch_log "the agmsg installation was updated while this watcher was running; restarting on the new code (same process, same subscription)."
+      cleanup
+      AGMSG_WATCH_RESTART_COUNT=$((restarts + 1))
+      AGMSG_WATCH_RESTART_CHAIN="$_WATCH_INSTALL_RESTART_CHAIN"
+      export AGMSG_WATCH_RESTART_COUNT AGMSG_WATCH_RESTART_CHAIN
+      # The watch_report call below is reached only if exec itself fails to
+      # replace the process image (e.g. an interpreter it can no longer
+      # exec); it is the fallback for that failure, not dead code.
+      # shellcheck disable=SC2093
+      exec "$new_watch" "${ORIG_ARGS[@]}"
+      watch_report "exec of the updated watch.sh failed; exiting instead of running stale code."
+      exit 1
+    fi
+    watch_report "the agmsg installation kept changing across $restarts restart(s) in a row; exiting rather than looping. Restart this session (or run /agmsg actas <name>) to resume delivery."
+    exit 0
+  fi
+
+  if [ -z "$_INSTALL_INCOMPLETE_SINCE" ]; then
+    _INSTALL_INCOMPLETE_SINCE="$SECONDS"
+    return 0
+  fi
+  elapsed=$((SECONDS - _INSTALL_INCOMPLETE_SINCE))
+  if [ "$elapsed" -ge 0 ] && [ "$elapsed" -lt "$AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT" ]; then
+    return 0
+  fi
+
+  watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. Exiting rather than appearing to work. Restart this session (or run /agmsg actas <name>) to resume delivery."
+  exit 0
 }
 
 # Resolve subscription set.
@@ -860,7 +1070,7 @@ fi
 
 # Pairs another session currently holds, so each departure and each return is
 # announced once instead of every cycle. Membership is not a decision -- the
-# lock is -- it only records what has already been said (#683).
+# lock is -- it only records what has already been said.
 #
 # Held as newline-separated entries and compared as EXACT strings, never as
 # patterns. A team name is arbitrary UTF-8 minus a path deny-list and an agent
@@ -934,14 +1144,34 @@ STUCK_MAP=""
 source "$SCRIPT_DIR/lib/watch-stuck-map.sh"
 
 while true; do
-  # The installation changed under us (#684). Say it on STDOUT, not stderr:
-  # stdout is the delivery channel the session is reading, and this watcher's
-  # stderr goes to /dev/null in every launcher we ship, which is why the
-  # original failure was silent for hours. Then exit, so "the monitor stopped"
-  # is what the session sees instead of a live process delivering nothing.
+  # Advance the per-cycle cache epoch as a PLAIN STATEMENT (never via $(...) —
+  # see the actas-lock cache warming below for why): this is what lets
+  # _agmsg_partition_load's per-team driver cache (lib/storage.sh) reuse one
+  # cycle's answer across that cycle's several independent callers while
+  # still forcing a fresh read at the start of THIS new one, so a team
+  # migrated mid-run (internal/migrate-team-store.sh) is noticed within one
+  # extra cycle instead of never (#1330 second stage).
+  _AGMSG_POLL_CYCLE_EPOCH=$((_AGMSG_POLL_CYCLE_EPOCH + 1))
+  # The installation changed under us (#684). _handle_install_changed execs
+  # the new watch.sh in place once it can prove the generation is finished,
+  # so the stream never visibly stops; its own exit paths still report on
+  # STDOUT (watch_report, not watch_log -- every launcher we ship sends this
+  # watcher's stderr to /dev/null) so "the monitor stopped" is what the
+  # session sees, instead of a live process silently delivering nothing.
+  # Not-yet-ready is handled by returning rather than exiting, so this falls
+  # through to the rest of the loop body below on a cycle spent waiting --
+  # delivery is not paused while an install is still in flight.
   if _install_changed; then
-    printf 'agmsg watch: the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. Exiting rather than appearing to work. Restart this session (or run /agmsg actas <name>) to resume delivery.\n'
-    exit 0
+    _handle_install_changed
+  else
+    # Reaching here means this cycle saw no change at all -- the "one clean
+    # cycle" that ends a run of consecutive restarts (see
+    # _install_restart_count above). A no-op on a watcher that never
+    # restarted. Deliberately NOT run on a cycle spent waiting for
+    # completion (the `if` branch above): the change is still pending, so
+    # resetting the consecutive-restart count here would let a rapid
+    # restart-wait-restart cycle dodge the cap it exists to enforce.
+    _install_restart_count_reset
   fi
   # Liveness guard (#67): exit promptly once the originating agent session is
   # gone. A plain pipe gives no portable way to notice a *downstream* consumer
@@ -972,6 +1202,30 @@ while true; do
   fi
   while IFS=$'\t' read -r pair_team pair_agent; do
     [ -z "$pair_team" ] && continue
+    # Warm both per-cycle caches as PLAIN STATEMENTS, never via $(...): a
+    # command substitution forks a subshell, and a cache array populated
+    # inside one is discarded the instant that subshell exits (the exact
+    # hazard role-session.sh's own _agmsg_role_session_path_into documents,
+    # #466). Every real consumer below (actas_lock_observe_cached,
+    # _pair_unchanged_since_read's actas_lock_read_cached, and every
+    # storage_* call this cycle that resolves this team's partition driver)
+    # reaches its own cache through a $(...) of its own, so warming both
+    # here, in this loop's own top-level (non-subshell) frame, is what makes
+    # the warmth actually survive WITHIN this cycle instead of being rebuilt
+    # from scratch on every single call (#1321 first stage; #1330 second
+    # stage for the partition-driver cache, scoped to
+    # _AGMSG_POLL_CYCLE_EPOCH rather than the process lifetime — see its own
+    # comment in lib/storage.sh for why). storage_init's OWN schema check
+    # is deliberately NOT cached this way: unlike the driver cache, its
+    # existing callers include tests and one-shot scripts that call it
+    # directly, more than once, without ever advancing the epoch -- an
+    # epoch-scoped cache there could not tell that repeat apart from a
+    # genuine same-cycle repeat, and would revive the #1001 regression this
+    # function's own fast path exists to avoid (verified: it broke "a
+    # revision mismatch runs the real init, and the stamp follows the
+    # schema").
+    _actas_lock_primitives_into "$pair_team" "$pair_agent"
+    _agmsg_partition_load "$pair_team" >/dev/null 2>&1
     # Ownership is re-read every cycle, because it can change under a running
     # watcher and nothing else notices. The subscription set and the startup
     # lock check both happen once, above; a session that claims this role
@@ -983,7 +1237,7 @@ while true; do
     # whoever polls first TAKES the row and the other sees nothing. When the
     # one that takes it is this stale process, its printf succeeds -- stdout is
     # still an open pipe to a live session -- so the id is marked read and the
-    # message is gone, delivered to a stream nobody is reading (#683).
+    # message is gone, delivered to a stream nobody is reading (#983).
     #
     # Only the lock file is read here, not the whole subscription set: losing a
     # pair is the half a running process can detect for the price of a file
@@ -995,8 +1249,12 @@ while true; do
     # compared new-to-new and said unchanged), and the pair was served for a role
     # someone else held. Found in review; the fix belongs in the library, so every
     # caller that needs both gets them from one observation. (#983)
+    # actas_lock_observe_cached: same read-and-verdict rule as
+    # actas_lock_observe, only the path resolution behind it is memoized
+    # per (team, agent) for the life of this process (#1321 first-stage
+    # follow-up) -- see actas_lock_path_cached's comment in actas-lock.sh.
     IFS="$(printf '\t')" read -r pair_state pair_owner <<EOF
-$(actas_lock_observe "$pair_team" "$pair_agent" "$SESSION_ID")
+$(actas_lock_observe_cached "$pair_team" "$pair_agent" "$SESSION_ID")
 EOF
     # Test seam: a two-file barrier that parks the watcher immediately AFTER the
     # lock read, so the race regression test can land a claim inside the window
@@ -1128,8 +1386,14 @@ EOF
     # waiting the pair is caught up, so drop its tracker and a future backlog starts
     # a fresh count.
     _agmsg_pair_key="$pair_team:$pair_agent"
+    # _agmsg_has_new_message, set here alongside the stuck-tracker's own read
+    # of the same fact, gates the formatting pass below (#1321 first-stage
+    # follow-up: watch.sh process-count reduction) -- one case statement,
+    # reused, rather than testing the same glob against $OUT twice.
+    _agmsg_has_new_message=0
     case "$OUT" in
       *'"type":"message_sent"'*)
+        _agmsg_has_new_message=1
         IFS=$'\x1f' read -r _agmsg_prev_c _agmsg_prev_n <<< "$(_stuck_get "$_agmsg_pair_key")"
         [ -n "$_agmsg_prev_n" ] || _agmsg_prev_n=0
         if [ "$_agmsg_prev_c" = "$READ_CURSOR" ]; then
@@ -1150,7 +1414,7 @@ EOF
         _stuck_drop "$_agmsg_pair_key"
         ;;
     esac
-    if [ -n "$OUT" ]; then
+    if [ "$_agmsg_has_new_message" -eq 1 ]; then
     # The quote is held in a variable, never written as \' in the pattern: bash 3.2
     # (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the inline form
     # doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
@@ -1336,6 +1600,44 @@ EOF
       fi
       exit 0
     fi
+    elif [ -n "$OUT" ]; then
+      # No new message for THIS pair, but storage_watch_after's trailing
+      # "cursor" line (present on every call, caught-up pair or not, because
+      # the team's sequence advances whenever ANY pair receives a message)
+      # moved. Advance our own frontier to it without the mktemp + `sqlite3
+      # :memory:` json_each/json_extract pass above: that pass exists to turn
+      # message ROWS into shell-safe delimited text (escaping newlines in a
+      # body, etc.), and a cursor-only page carries no message body needing
+      # that treatment -- so paying for it here forked sqlite3+mktemp on
+      # EVERY poll cycle a pair was simply idle, which is most of them
+      # (#1321 first-stage follow-up: watch.sh process-count reduction).
+      #
+      # The cursor line's own shape is controlled (storage_watch_after's own
+      # `json_object('type','cursor','cursor', CAST(... AS TEXT))`, always
+      # emitted last in the batch), so parameter-expansion pattern removal in
+      # pure bash is exactly equivalent to the sqlite3 json_extract this
+      # replaces for this one field, with no forks at all.
+      _agmsg_cursor_line="${OUT##*$'\n'}"
+      FINAL_CURSOR=""
+      case "$_agmsg_cursor_line" in
+        *'"cursor":"'*)
+          FINAL_CURSOR="${_agmsg_cursor_line#*'"cursor":"'}"
+          FINAL_CURSOR="${FINAL_CURSOR%%'"'*}"
+          ;;
+      esac
+      if [ -n "$FINAL_CURSOR" ]; then
+        # Consume (#983): the same re-verification the heavy path above does
+        # immediately before advancing the read frontier — a pair that
+        # changed hands is left entirely alone, cursor included, so the
+        # session that now owns it still sees everything from where it was.
+        _pair_verdict=0
+        _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || _pair_verdict=$?
+        if [ "$_pair_verdict" -ne 0 ]; then
+          _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "marking them read"
+        else
+          storage_read_cursor_consume "$pair_team" "$pair_agent" "$FINAL_CURSOR" >/dev/null 2>&1 || true
+        fi
+      fi
     fi
   done <<< "$PAIRS"
 

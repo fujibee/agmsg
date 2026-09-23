@@ -45,24 +45,32 @@ setup() {
 teardown() { teardown_test_env; }
 
 # A fake tmux that logs argv, answers the title query with $FAKE_TITLE, and takes
-# send-keys (the poke) as a logged no-op.
+# send-keys (the poke) as a logged no-op. capture-pane answers a genuinely
+# EMPTY Claude Code input box (#1384: agmsg_safe_poke's own input-box check
+# now runs ahead of every poke here too, same shape as
+# test_peek_poke.bats's _install_fake_tmux_empty_box -- without it, the box
+# cannot be located at all and every poke in this file refuses).
 _install_fake_tmux() {
-  cat > "$FAKEBIN/tmux" <<EOF
-#!/usr/bin/env bash
-{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
-# real tmux takes an optional leading -S <socket>, so the subcommand is NOT
-# always \$1: scan the args for it and for the pane after -t.
-prev=""; pane=""; is_dm=0
-for a in "\$@"; do
-  [ "\$prev" = "-t" ] && pane="\$a"
-  [ "\$a" = display-message ] && is_dm=1
-  prev="\$a"
-done
-# display-message answers "<pane_id>|<title>"; terminal_team_observe co-observes
-# the id, so it must echo the queried pane back verbatim.
-[ "\$is_dm" = 1 ] && printf '%s|%s\n' "\$pane" "\${FAKE_TITLE:-unknown}"
-exit 0
-EOF
+  local rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''tmux'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf '# real tmux takes an optional leading -S <socket>, so the subcommand is NOT\n'
+    printf '# always $1: scan the args for it and for the pane after -t.\n'
+    printf 'prev=""; pane=""; is_dm=0; is_cap=0\n'
+    printf 'for a in "$@"; do\n'
+    printf '  [ "$prev" = "-t" ] && pane="$a"\n'
+    printf '  [ "$a" = display-message ] && is_dm=1\n'
+    printf '  [ "$a" = capture-pane ] && is_cap=1\n'
+    printf '  prev="$a"\n'
+    printf 'done\n'
+    printf '# display-message answers "<pane_id>|<title>"; terminal_team_observe co-observes\n'
+    printf '# the id, so it must echo the queried pane back verbatim.\n'
+    printf '[ "$is_dm" = 1 ] && printf '\''%%s|%%s\\n'\'' "$pane" "${FAKE_TITLE:-unknown}"\n'
+    printf "[ \"\$is_cap\" = 1 ] && printf '%%s\\\\n' '%s testteam-alice ─' '❯' '%s'\n" "$rule" "$rule"
+    printf 'exit 0\n'
+  } > "$FAKEBIN/tmux"
   chmod +x "$FAKEBIN/tmux"; export PATH="$FAKEBIN:$PATH"
 }
 

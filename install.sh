@@ -26,6 +26,12 @@ AGENTS_DIR="$HOME/.agents"
 # helpers; safe to source.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/type-registry.sh"
+# type-registry.sh no longer computes $AGMSG_RENDERABLE_SKILL_TYPES at source
+# time (it is also sourced from resolve-project.sh, on a hot path that never
+# needs this list -- #631); install.sh runs once per invocation, so loading
+# it eagerly here, right after sourcing, costs nothing and keeps every read
+# below unchanged.
+agmsg_load_renderable_skill_types
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/skill-render.sh"
 
@@ -99,6 +105,121 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # It is shared by fresh install, --update selection, and --update re-detection;
 # adding a templated type therefore cannot silently fall back to the wrong flavor.
 
+# A relative scripts/ path is safe to use as a trash destination component
+# only if it cannot resolve outside the tree it was found in: no embedded
+# newline (see the NUL-delimited note below), no ".." component anywhere,
+# no leading "/". Shared by both functions below -- the same escape a mv
+# target is exposed to is the one an rm target was.
+agmsg_scripts_rel_is_safe() {
+  case "$1" in
+    ""|*$'\n'*|..|../*|*/../*|*/..|/*) return 1 ;;
+  esac
+  return 0
+}
+
+# Before `cp -R` (used at both call sites below) overwrites $dest with
+# $src, back up any file it is about to change -- i.e. present in both
+# trees with DIFFERENT content -- into $trash_root, keyed by its relative
+# path. `cp -R` only ever adds or overwrites; a file a user (or their
+# agent) had edited in place under scripts/ was overwritten with no record
+# of what was there before, silently, mid-upgrade, with nobody reading the
+# output. This runs against the WHOLE src tree, drivers/ included: backing
+# a file up never removes it or changes whether it loads, so #1249's
+# contract (a user-added driver directory must survive an update) is
+# untouched by this step -- that contract is only about the prune below.
+# Identical content is skipped so an ordinary upgrade doesn't fill .trash/
+# with copies of files nobody touched.
+agmsg_stage_overwrite_backups() {
+  local src="$1" dest="$2" trash_root="$3"
+  local entry rel
+  while IFS= read -r -d '' entry; do
+    rel="${entry#./}"
+    agmsg_scripts_rel_is_safe "$rel" || continue
+    [ -f "$dest/$rel" ] || continue
+    cmp -s "$src/$rel" "$dest/$rel" && continue
+    mkdir -p "$(dirname "$trash_root/$rel")"
+    cp -p "$dest/$rel" "$trash_root/$rel"
+    AGMSG_TRASH_COUNT=$((AGMSG_TRASH_COUNT + 1))
+  done < <(cd "$src" && find . -type f -print0)
+}
+
+# After `cp -R`: move any file under $dest that $src does not ship into
+# $trash_root instead of deleting it, so a wrong "not shipped anymore"
+# judgment (this function's own past mistake, or a future one) is a mv, not
+# data loss. Every prior release that dropped a file needed its own
+# one-off `rm -f` here (rearm.sh in 1.3.2/#1321, the Antigravity resume
+# helper's move) -- that hand-maintenance is what this generalizes. One of
+# those leftovers (rearm.sh) was run by hand after it had already been
+# removed from the release and behaved like the retired tool it used to
+# be, not like the current procedure.
+#
+# Scoped to exclude scripts/drivers/ entirely: that tree is the driver
+# discovery surface (ADR 0002, scripts/lib/driver-registry.sh), and #1249
+# already established -- with a test -- that a user-added driver directory
+# there must survive an update even though it ships nothing this release
+# knows about (it stays untrusted/unloaded until the user opts in, but it is
+# not deleted). Nothing else under scripts/ has a comparable drop-in
+# contract, so everywhere else is safe to move against the release's own
+# file list. (The backup step above still covers drivers/'s own shipped
+# files -- only the "not shipped anymore" judgment excludes that tree.)
+#
+# NUL-delimited throughout, not newline-delimited: a `find | while read`
+# split on newline lets an embedded newline in a filename forge a second,
+# fake "line". A file at scripts/<name-containing-LF>../ext-tools/<team>/
+# <name>.secret would, read back newline-split, produce a second entry that
+# reads as the literal relative path ../ext-tools/<team>/<name>.secret --
+# which resolves OUTSIDE scripts/, onto a real secret this function must
+# never touch. Same shape as the jev adapter's curl-config parser fixed the
+# same night: a line-delimited format fed a value from outside the format
+# can smuggle an extra line. `-print0` / `read -d ''` keeps one filesystem
+# entry as one value, embedded newline and all, so it can never be split.
+# NUL-safety on its own is still only a delimiter fix, not a check on what
+# the delimiter protects, so `$rel` is also validated immediately before the
+# `mv` that acts on it -- not merely before the membership compare -- and
+# anything with `..`, a leading `/`, or an embedded newline is left alone
+# and named on stderr instead of being moved.
+agmsg_prune_removed_scripts() {
+  local src="$1" dest="$2" trash_root="$3"
+  local entry rel s found
+  local -a shipped=()
+  while IFS= read -r -d '' entry; do
+    shipped+=("${entry#./}")
+  done < <(cd "$src" && find . -type f -print0)
+  while IFS= read -r -d '' entry; do
+    rel="${entry#./}"
+    [ -n "$rel" ] || continue
+    case "$rel" in drivers/*) continue ;; esac
+    if ! agmsg_scripts_rel_is_safe "$rel"; then
+      echo "    ! not moving -- suspicious scripts/ entry: $rel" >&2
+      continue
+    fi
+    found=""
+    for s in "${shipped[@]}"; do
+      if [ "$s" = "$rel" ]; then
+        found=1
+        break
+      fi
+    done
+    if [ -z "$found" ]; then
+      echo "    - moving to .trash/ (no longer shipped): scripts/$rel"
+      mkdir -p "$(dirname "$trash_root/$rel")"
+      mv "$dest/$rel" "$trash_root/$rel"
+      AGMSG_TRASH_COUNT=$((AGMSG_TRASH_COUNT + 1))
+    fi
+  done < <(cd "$dest" && find . -type f -print0)
+}
+
+# One generation of .trash/ -- cleared at the start of the update/install
+# that is about to populate it, so a mistake from two upgrades ago cannot
+# still be sitting there when this one is trying to be readable. $trash_root
+# must be a sibling of scripts/ (as both call sites pass it), never inside
+# it -- a .trash/ nested under scripts/ would have its OWN prior contents
+# picked up by the very next prune as "not shipped".
+agmsg_reset_trash() {
+  rm -rf "$1"
+  mkdir -p "$1"
+}
+
 # Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by
 # <dest>, so the fix's scope matches the defect's (#747):
 #   - regular <dest>: `mv` — an atomic rename, so an interrupted install leaves
@@ -119,27 +240,18 @@ move_into_place() {
   fi
 }
 
-configure_codex_sandbox() {
-  # --- Configure Codex sandbox (if Codex is installed) ---
-  # The Codex bridge writes pidfiles/sockets/request files under the
-  # skill's db/, teams/, run/ dirs; Codex's sandbox blocks those writes unless
-  # they are listed as writable_roots. See docs/codex-monitor-beta.md.
-  local code_config="$HOME/.codex/config.toml"
+# Adds this install's writable_paths (below) to ONE Codex config.toml.
+# Split out of configure_codex_sandbox() because that function now targets
+# more than one file (see there) and every one of them gets the identical
+# missing-detection/backup/insert treatment.
+_configure_codex_sandbox_file() {
+  local code_config="$1"
+  shift
+  local writable_paths=("$@")
   if [ ! -f "$code_config" ]; then
     return 0
   fi
 
-  local writable_paths=("$SKILL_DIR/db" "$SKILL_DIR/teams" "$SKILL_DIR/run")
-  # On Windows (MSYS2/Git Bash), $SKILL_DIR is in MSYS form (/c/Users/...).
-  # Codex is a native Windows binary whose Rust path resolution cannot parse
-  # MSYS paths — /c/Users/... is resolved to C:\c\Users\... (a phantom path).
-  # Convert to the mixed C:/Users/... form that both the shell and Codex accept.
-  if command -v cygpath >/dev/null 2>&1; then
-    local i
-    for i in "${!writable_paths[@]}"; do
-      writable_paths[$i]="$(cygpath -m "${writable_paths[$i]}" 2>/dev/null || printf '%s' "${writable_paths[$i]}")"
-    done
-  fi
   local missing=()
   local p
   for p in "${writable_paths[@]}"; do
@@ -149,7 +261,7 @@ configure_codex_sandbox() {
   done
 
   if [ ${#missing[@]} -eq 0 ]; then
-    echo "  ~ Codex writable_roots already configured"
+    echo "  ~ Codex writable_roots already configured ($code_config)"
     return 0
   fi
 
@@ -183,7 +295,58 @@ configure_codex_sandbox() {
     # No section at all
     printf '\n[sandbox_workspace_write]\nwritable_roots = [%s]\n' "$entries" >> "$code_config"
   fi
-  echo "  + added Codex writable_roots for db/, teams/, and run/"
+  echo "  + added Codex writable_roots for db/, teams/, run/, and ext-tools/ ($code_config)"
+}
+
+configure_codex_sandbox() {
+  # --- Configure Codex sandbox (if Codex is installed) ---
+  # The Codex bridge writes pidfiles/sockets/request files under the
+  # skill's db/, teams/, run/ dirs; Codex's sandbox blocks those writes unless
+  # they are listed as writable_roots. See docs/codex-monitor-beta.md.
+  #
+  # ext-tools/ is here for the same reason: an ext-tool member's `setup`
+  # (secret and save) writes its config/key under the skill's ext-tools/
+  # dir, and a sandboxed Codex seat could not write there without this --
+  # measured directly against a real seat (`codex exec -s workspace-write`,
+  # not the `codex sandbox` debug subcommand, which does not apply
+  # config.toml's writable_roots at all and rejects every write regardless),
+  # which failed with `mkdir: .../ext-tools/<team>: Operation not permitted`
+  # before this entry existed, and succeeded once it was added.
+  #
+  # Codex resolves its own config against $CODEX_HOME (default ~/.codex), not
+  # always ~/.codex -- a machine running more than one Codex identity/account
+  # sets CODEX_HOME per profile, and this function used to only ever write
+  # ~/.codex/config.toml, so a seat actually running under a CODEX_HOME
+  # profile never got these entries at all (measured: `mkdir: .../ext-tools/
+  # <team>: Operation not permitted` persisted for that seat even after this
+  # function reported success, because it had edited a file nothing read).
+  # The reverse also happens on the same machine: the Codex desktop app
+  # (codex-app) uses the plain ~/.codex default regardless of a shell's
+  # CODEX_HOME. Writing to only one when they differ silently breaks
+  # whichever surface wasn't written, so when CODEX_HOME is set and does not
+  # already point at ~/.codex, this configures BOTH.
+  local default_config="$HOME/.codex/config.toml"
+  local codex_configs=("$default_config")
+  if [ -n "${CODEX_HOME:-}" ] && [ "$CODEX_HOME/config.toml" != "$default_config" ]; then
+    codex_configs+=("$CODEX_HOME/config.toml")
+  fi
+
+  local writable_paths=("$SKILL_DIR/db" "$SKILL_DIR/teams" "$SKILL_DIR/run" "$SKILL_DIR/ext-tools")
+  # On Windows (MSYS2/Git Bash), $SKILL_DIR is in MSYS form (/c/Users/...).
+  # Codex is a native Windows binary whose Rust path resolution cannot parse
+  # MSYS paths — /c/Users/... is resolved to C:\c\Users\... (a phantom path).
+  # Convert to the mixed C:/Users/... form that both the shell and Codex accept.
+  if command -v cygpath >/dev/null 2>&1; then
+    local i
+    for i in "${!writable_paths[@]}"; do
+      writable_paths[$i]="$(cygpath -m "${writable_paths[$i]}" 2>/dev/null || printf '%s' "${writable_paths[$i]}")"
+    done
+  fi
+
+  local cfg
+  for cfg in "${codex_configs[@]}"; do
+    _configure_codex_sandbox_file "$cfg" "${writable_paths[@]}"
+  done
 }
 
 is_windows_host() {
@@ -430,10 +593,16 @@ $_agmsg_running_team"
     *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
   esac
   agmsg_render_skill "$TPL_TYPE" "$SKILL_NAME" "$SKILL_DIR/SKILL.md"
+  TRASH_DIR="$SKILL_DIR/.trash"
+  AGMSG_TRASH_COUNT=0
+  agmsg_reset_trash "$TRASH_DIR"
+  agmsg_stage_overwrite_backups "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
   # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/)
   # ship without enumerating files. The agent-type manifests and per-type runtimes
   # live under scripts/drivers/types/ now, so this single copy carries them too.
   cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
+  agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
+  echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
   # #1249: drivers/terminals/{herdr,plain,tmux}/SKILL.md used to name each
   # driver's own doc file, and a directory-scanning skill loader (e.g.
   # codex's) treated it as a standalone skill missing YAML frontmatter,
@@ -450,10 +619,6 @@ $_agmsg_running_team"
     rm -f "$SKILL_DIR/scripts/drivers/terminals/$_agmsg_builtin_driver/SKILL.md"
   done
   unset _agmsg_builtin_driver
-  # The Antigravity resume helper moved under its type directory. A plain
-  # recursive copy cannot remove the old top-level file, so delete this one
-  # known agmsg-owned path during --update; do not sweep user scripts.
-  rm -f "$SKILL_DIR/scripts/antigravity-resume.sh"
   # Ship the external-plugin drop-in dir (just its README) so the location exists
   # post-install. A plain cp — not cp -R --delete — preserves any plugins the
   # user dropped in and their db/trusted-plugins opt-ins.
@@ -679,10 +844,16 @@ case " $AGMSG_RENDERABLE_SKILL_TYPES " in
   *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
 esac
 agmsg_render_skill "$TPL_TYPE" "$CMD_NAME" "$SKILL_DIR/SKILL.md"
+TRASH_DIR="$SKILL_DIR/.trash"
+AGMSG_TRASH_COUNT=0
+agmsg_reset_trash "$TRASH_DIR"
+agmsg_stage_overwrite_backups "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
 # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/) ship
 # without enumerating files. The agent-type manifests and per-type runtimes live
 # under scripts/drivers/types/ now, so this single copy carries them too.
 cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
+agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
+echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
 # Ship the external-plugin drop-in dir (just its README) so the location exists
 # post-install. A plain cp — not cp -R --delete — preserves any plugins the user
 # dropped in and their db/trusted-plugins opt-ins.

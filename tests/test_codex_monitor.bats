@@ -358,3 +358,102 @@ EOF
   [ "$status" -eq 0 ]
   grep -qx 'plain-codex <--foo>' "$CALL_LOG"
 }
+
+# --- #1401: a resumed seat arms its own bridge request when it can (without guessing) ---
+#
+# A restarted Codex seat used to have no bridge until either its SessionStart
+# hook eventually ran (observed taking minutes, and in at least one real case
+# never, until someone manually re-ran codex-record-session.sh) or a person did
+# that by hand -- neither automatic. The thread being resumed is already known
+# in argv, before codex itself starts, so codex-monitor.sh now arms the
+# request itself when that thread matches exactly one role's record for this
+# project.
+@test "codex-monitor: resume arms the bridge request when the thread matches exactly one role's record, and does not otherwise" {
+  local SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  # codex-record-session.sh always records the CANONICAL (symlink-resolved)
+  # project, and codex-monitor.sh's own lookup canonicalizes the same way
+  # before matching -- macOS's mktemp -d hands back a path through /var/
+  # folders, itself a symlink to /private/var/folders, so recording the raw
+  # $TEST_PROJECT here would silently never match. Match reality, not a
+  # convenient shortcut.
+  local canon_project; canon_project="$(cd "$TEST_PROJECT" && pwd -P)"
+
+  # No matching record at all: nothing armed, and the launch still proceeds
+  # (the request stays the SessionStart hook's / a manual re-run's job, exactly
+  # as before this existed).
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume -- thread-unrecorded
+  [ "$status" -eq 0 ]
+  [ -z "$(ls "$TEST_SKILL_DIR"/run/codex-bridge-request.* 2>/dev/null)" ]
+
+  # Exactly one matching role: armed immediately, with that role's identity and
+  # this launch's own socket URL, in the same tab-separated shape
+  # codex-record-session.sh itself writes.
+  agmsg_role_session_record team alice thread-A "$canon_project" codex
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume -- thread-A
+  [ "$status" -eq 0 ]
+  local req; req="$(ls "$TEST_SKILL_DIR"/run/codex-bridge-request.* 2>/dev/null)"
+  [ -n "$req" ]
+  local line; line="$(sed -n '1p' "$req")"
+  [ "$(printf '%s' "$line" | cut -f1)" = codex ]
+  [ "$(printf '%s' "$line" | cut -f2)" = thread-A ]
+  [ "$(printf '%s' "$line" | cut -f3)" != "" ]   # the socket URL, generated per launch
+  [ "$(printf '%s' "$line" | cut -f4)" = team ]
+  [ "$(printf '%s' "$line" | cut -f5)" = alice ]
+  rm -f "$req"
+
+  # Two roles recorded against the SAME thread: ambiguous, nothing armed --
+  # guessing which role owns a resumed thread is worse than leaving it unarmed.
+  agmsg_role_session_record team bob thread-A "$canon_project" codex
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume -- thread-A
+  [ "$status" -eq 0 ]
+  [ -z "$(ls "$TEST_SKILL_DIR"/run/codex-bridge-request.* 2>/dev/null)" ]
+
+  # A unique match, but the write itself fails (review finding: this used to
+  # be silent, reproducing the exact "resume never gets a bridge" symptom
+  # under a different cause). Codex must still launch, and the failure must
+  # be named on stderr rather than swallowed. A fresh thread id: thread-A is
+  # now ambiguous (alice AND bob) from the case above, so it would never
+  # reach the write at all.
+  agmsg_role_session_record team bob thread-B "$canon_project" codex
+  local unwritable_dir="$TEST_PROJECT/unwritable-run"
+  mkdir -p "$unwritable_dir"
+  chmod 555 "$unwritable_dir"
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    AGMSG_CODEX_TEST_RESUME_REQUEST_DIR="$unwritable_dir" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume -- thread-B
+  chmod 755 "$unwritable_dir"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F "could not arm the bridge request for team/bob"
+  [ -z "$(ls "$unwritable_dir"/codex-bridge-request.* 2>/dev/null)" ]
+  [ -z "$(find "$unwritable_dir" -name '*.tmp' -o -name '*.[0-9]*' 2>/dev/null)" ]
+  [ -n "$(ls "$TEST_SKILL_DIR"/run/codex-app-server.*.record 2>/dev/null)" ]
+
+  # The printed fallback is meant to be pasted into an ordinary shell and run
+  # (review finding: "codex-record-session.sh <args>" alone is not a PATH
+  # command and would fail as command-not-found; it must be a full `bash
+  # <script path> <args>` line). Confirm it by actually running it -- not by
+  # grepping a substring, which the earlier, broken form would also match --
+  # and checking it reaches the real script, as bash, with the exact
+  # team/agent/project this failure was for.
+  local record_script="$TYPES/codex/codex-record-session.sh"
+  local record_spy_out="$TEST_PROJECT/record-spy.out"
+  cp "$record_script" "$record_script.orig"
+  cat > "$record_script" <<SPYEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$0" "\$1" "\$2" "\$3" > "$record_spy_out"
+SPYEOF
+  local fallback_line
+  fallback_line="$(printf '%s\n' "$output" | grep -F 'Run this by hand')"
+  fallback_line="${fallback_line#*bring it: }"
+  bash -c "$fallback_line"
+  mv "$record_script.orig" "$record_script"
+  [ "$(sed -n '1p' "$record_spy_out")" = "$record_script" ]
+  [ "$(sed -n '2p' "$record_spy_out")" = team ]
+  [ "$(sed -n '3p' "$record_spy_out")" = bob ]
+  [ "$(sed -n '4p' "$record_spy_out")" = "$TEST_PROJECT" ]
+}

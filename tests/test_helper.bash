@@ -201,6 +201,7 @@ agmsg_renderable_types() {
   (
     # shellcheck disable=SC1091
     source "$root/scripts/lib/type-registry.sh"
+    agmsg_load_renderable_skill_types
     printf '%s\n' $AGMSG_RENDERABLE_SKILL_TYPES
   )
 }
@@ -381,6 +382,59 @@ wait_for_file_contains() {
     [ -f "$file" ] && grep -q "$needle" "$file" && return 0
     sleep $_WAIT_INTERVAL
   done
+  return 1
+}
+
+# Waits for a mock HTTP fixture (mock_slack_server.py, mock_openrouter_server.py,
+# ...) to actually be ready to accept connections, not just for it to have
+# PRINTED its port -- a process can write that line before its own accept
+# loop is scheduled, and a loaded CI runner is exactly where that gap widens
+# (review finding, #1339: this is what made the slack/jev mock-server tests
+# flake on a busy macos-latest runner while ubuntu/windows stayed green).
+# Polls a real TCP connect via bash's own /dev/tcp. On timeout, prints
+# exactly what it was waiting for (the port file's path and, if it got that
+# far, the port itself) instead of leaving the caller's own assertion to
+# report a bare failure with no context.
+#
+# Uses its OWN, longer ceiling (30s, not the shared 10s _WAIT_TICKS every
+# other wait_for_* helper here uses): this waits on a fresh python3
+# subprocess actually being scheduled and finishing its own startup/import
+# work, not an in-process condition -- a real fork+exec, which a saturated
+# CI runner can push past 10s on its own even when nothing is actually
+# broken (review finding, #1339 round 2: this recurred on a LATER macos CI
+# run, that time never even reaching the port-file-written stage within the
+# old 10s bound).
+_MOCK_SERVER_WAIT_TICKS=300   # x 0.1s = 30s ceiling
+wait_for_mock_server_port() {   # <port_file> -> prints the port on stdout
+  local port_file="$1" i port=""
+  for i in $(seq 1 $_MOCK_SERVER_WAIT_TICKS); do
+    if [ -z "$port" ] && [ -f "$port_file" ]; then
+      port="$(cat "$port_file" 2>/dev/null)"
+      case "$port" in ''|*[!0-9]*) port="" ;; esac
+    fi
+    if [ -n "$port" ]; then
+      if { exec 3<>"/dev/tcp/127.0.0.1/$port"; } 2>/dev/null; then
+        exec 3<&- 3>&-
+        printf '%s' "$port"
+        return 0
+      fi
+    fi
+    sleep $_WAIT_INTERVAL
+  done
+  # Names what it was waiting for AND how long -- a bare "timed out" was
+  # exactly what forced guessing at the cause the first two times this
+  # flaked (review finding, #1341: the maintainer asked for this explicitly,
+  # so a next occurrence does not start the same investigation from zero).
+  # Each tick is 0.1s, so ticks/10 and ticks%10 give exact whole and tenths
+  # digits without floating-point arithmetic (bash has none) -- accurate at
+  # both the real 30s ceiling and a test's much shorter override, rather
+  # than integer-dividing away the fraction and printing a misleading "0s".
+  local waited_s="$((_MOCK_SERVER_WAIT_TICKS / 10)).$((_MOCK_SERVER_WAIT_TICKS % 10))"
+  if [ -z "$port" ]; then
+    echo "wait_for_mock_server_port: timed out after ${waited_s}s waiting for $port_file to name a port" >&2
+  else
+    echo "wait_for_mock_server_port: timed out after ${waited_s}s waiting for 127.0.0.1:$port (from $port_file) to accept a connection" >&2
+  fi
   return 1
 }
 
