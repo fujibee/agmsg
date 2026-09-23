@@ -450,7 +450,8 @@ works the same way when there's exactly one install on the machine. With more
 than one, it refuses rather than guess which one you mean — run the
 `uninstall.sh` inside the one you want, or pass `--all` to remove every
 install on the machine (with one combined confirmation unless `--yes` is
-also given).
+also given, plus a separate one for whether to remove each install's DB and
+teams too).
 
 ## Configuration
 

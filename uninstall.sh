@@ -321,9 +321,18 @@ if [ "$REMOVE_ALL" = true ]; then
       echo ""
       exit 0
     fi
-    # One combined confirmation covers the whole run: the per-install "keep
-    # DB and teams?" prompt inside _uninstall_one must not ask again, once
-    # per install, for a question this already answered.
+    # A SEPARATE question (review): saying yes to removing every INSTALL is
+    # not the same claim as saying yes to erasing every install's DB
+    # (message history) and teams too -- the first question never says
+    # that, and answering it must not be read as having answered this one.
+    # Answered once here, applied to every install below via KEEP_DATA, not
+    # re-asked per install. Skipped when --keep-data already said no.
+    if [ "$KEEP_DATA" != true ] && ! confirm "Also remove each install's DB (message history) and teams?"; then
+      KEEP_DATA=true
+    fi
+    # Both questions above stand in for the per-install "keep DB and teams?"
+    # prompt inside _uninstall_one, which must not ask again, once per
+    # install, for what this run already answered.
     AUTO_YES=true
   fi
 
