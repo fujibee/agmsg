@@ -383,6 +383,15 @@ terminal_enumerate_panes() {
   n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.terminals') WHERE json_type(value,'\$.handle')='text'" 2>/dev/null)"
   case "$n_ok" in ''|*[!0-9]*) printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0 ;; esac
   [ "$n_ok" -eq "$n_all" ] || { printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0; }
+  # A genuinely empty terminal list is a real, valid answer -- empty stdout,
+  # rc 0 -- and must be told apart from the named `!` hole an unreadable
+  # runtime gets (review): with $n_ok=0, `$handles` is the empty string, but
+  # `while ... done <<EOF` still supplies exactly ONE empty line to the loop
+  # below regardless (a heredoc's content is never truly zero lines), which
+  # would otherwise read as one malformed candidate and wrongly fail the
+  # whole (actually-fine, actually-empty) enumeration. Handled before the
+  # loop is ever entered, not inside it.
+  if [ "$n_ok" -eq 0 ]; then return 0; fi
   # Every row is emitted with a leading '=' marker, not bare (review, own
   # finding while testing this fix): `$(...)` strips ALL trailing newlines,
   # so a genuinely empty LAST handle -- its row is just an empty line --

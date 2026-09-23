@@ -1503,6 +1503,17 @@ _last_agent_rename_key() {
   run terminal_enumerate_panes
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf '!\tlocal')" ]
+
+  # A genuinely empty terminal list is a real, valid answer -- empty stdout,
+  # rc 0 -- not the same as the named `!` hole an unreadable runtime gets
+  # (review: the validation loop's own heredoc supplies one empty line even
+  # when there is nothing to validate, and reading that as one malformed
+  # candidate wrongly turned a fine empty list into a false hole).
+  # `present`'s own default list_json is already `{"terminals":[]}`.
+  _install_fake_orca present
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "orca: pane_process_observe is not defined, and self-proof reports unsupported/driver_no_process_binding — never undetermined/pane_process_unreadable (#1441 review)" {
