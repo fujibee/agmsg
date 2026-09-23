@@ -203,6 +203,34 @@ teardown() {
   [ ! -e "$shim" ]
 }
 
+@test "uninstall: removes only the targeted install, leaving a second install's command and the shared shim in place (#1400)" {
+  # Ran uninstall.sh removed EVERY ~/.agents/skills/*/ install on the machine,
+  # not just its own -- a throwaway --cmd install's uninstall wiped every
+  # other real one, including machine-wide shared pieces like this shim.
+  mkdir -p "$FAKE_HOME/.claude"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+
+  local cmd_first="$FAKE_HOME/.claude/commands/agmsg.md"
+  local cmd_second="$FAKE_HOME/.claude/commands/agmsg-second.md"
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -f "$cmd_first" ]
+  [ -f "$cmd_second" ]
+  [ -f "$shim" ]
+
+  # Run the COPY inside the "agmsg" install itself (the normal way a real
+  # user uninstalls one) -- $0's own directory is what identifies which one
+  # install this run is about (#1400).
+  HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+
+  [ ! -e "$SK" ]
+  [ ! -f "$cmd_first" ]
+  # The untouched install and the machine-wide shim it still needs.
+  [ -d "$FAKE_HOME/.agents/skills/agmsg-second" ]
+  [ -f "$cmd_second" ]
+  [ -f "$shim" ]
+}
+
 @test "install: Codex skill documents safe Git Bash quoting for Windows PowerShell" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
 

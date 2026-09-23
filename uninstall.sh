@@ -2,28 +2,36 @@
 set -euo pipefail
 
 # agmsg — Agent Messaging uninstaller
-# Removes messaging skill, commands, hooks, and optionally DB/teams.
+# Removes ONE install's own messaging skill, commands, and hooks (#1400: this
+# used to remove every agmsg install found on the machine).
 #
 # Usage:
 #   ./uninstall.sh                    # Interactive (confirms each step)
 #   ./uninstall.sh --yes              # Remove all without confirmation
 #   ./uninstall.sh --keep-data        # Remove skill but keep DB and teams
+#   ./uninstall.sh --cmd <name>       # Target a specific install by name,
+#                                     # same flag install.sh --update uses
 
 AGENTS_DIR="$HOME/.agents"
 
 AUTO_YES=false
 KEEP_DATA=false
+CMD_NAME=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes|-y)       AUTO_YES=true;  shift ;;
     --keep-data)    KEEP_DATA=true; shift ;;
+    --cmd)
+      [ $# -ge 2 ] || { echo "--cmd needs a name" >&2; exit 1; }
+      CMD_NAME="$2"; shift 2 ;;
     -h|--help)
       echo "Usage: ./uninstall.sh [options]"
       echo ""
       echo "Options:"
       echo "  --yes, -y       Remove all without confirmation"
       echo "  --keep-data     Remove skill but keep DB and team configs"
+      echo "  --cmd <name>    Target a specific install (when more than one exists)"
       exit 0
       ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -42,33 +50,82 @@ confirm() {
   [ "${input:-n}" = "y" ] || [ "${input:-n}" = "Y" ]
 }
 
-# --- Find installed skill directories ---
-SKILL_DIRS=()
-for d in "$AGENTS_DIR"/skills/*/; do
-  if [ -f "${d}.agmsg" ]; then
-    SKILL_DIRS+=("${d%/}")
+# --- This install only (#1400) ---
+#
+# Earlier this iterated every ~/.agents/skills/*/ carrying an `.agmsg`
+# marker -- every OTHER install on the machine, not just this one -- and
+# removed all of their commands, skills, hooks and writable_roots entries:
+# uninstalling one throwaway --cmd install wiped every install on the
+# machine. Deciding which ONE install this run is about, in order:
+#   1. --cmd <name>, same flag install.sh --update already uses to pick one.
+#   2. uninstall.sh ships INSIDE each install (copied there by install.sh)
+#      and is normally run from there, so when $0's own directory carries
+#      the marker, that unambiguously IS this run's install.
+#   3. Neither of the above identifies one (e.g. run from a kept git
+#      checkout, the way this project's own tests do): fall back to
+#      install.sh --update's own #599 rule -- a single install on the
+#      machine is unambiguous and still "just works"; more than one is a
+#      silent coin flip and refuses, the same way --update already does.
+if [ -n "$CMD_NAME" ]; then
+  SELF_SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
+  if [ ! -f "$SELF_SKILL_DIR/.agmsg" ]; then
+    echo "  ! Not installed: ~/.agents/skills/$CMD_NAME" >&2
+    exit 1
   fi
-done
-
-if [ ${#SKILL_DIRS[@]} -eq 0 ]; then
-  echo "  Nothing to remove (not installed?)"
-  echo ""
-  exit 0
+else
+  SELF_SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
+  if [ ! -f "$SELF_SKILL_DIR/.agmsg" ]; then
+    candidates=()
+    for d in "$AGENTS_DIR"/skills/*/; do
+      d="${d%/}"
+      [ -f "$d/.agmsg" ] && candidates+=("$d")
+    done
+    case "${#candidates[@]}" in
+      0)
+        echo "  Nothing to remove (not installed?)"
+        echo ""
+        exit 0
+        ;;
+      1) SELF_SKILL_DIR="${candidates[0]}" ;;
+      *)
+        echo "  ! Several agmsg installs found:" >&2
+        for d in "${candidates[@]}"; do
+          echo "      $(basename "$d")" >&2
+        done
+        echo "  ! Cannot tell which one to uninstall. Pass --cmd <name> to pick one." >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
-echo "  Found installation(s):"
-for sd in "${SKILL_DIRS[@]}"; do
-  echo "    $(basename "$sd") → $sd"
+# Other installs, purely to decide whether machine-wide shared pieces (the
+# sqlite shim, the Antigravity TUI shim) are still needed below -- never
+# touched otherwise. Two installs can legitimately coexist (different --cmd
+# names), and one going away must not disturb the others.
+OTHER_SKILL_DIRS=()
+for d in "$AGENTS_DIR"/skills/*/; do
+  [ -f "${d}.agmsg" ] || continue
+  [ "${d%/}" = "$SELF_SKILL_DIR" ] && continue
+  OTHER_SKILL_DIRS+=("${d%/}")
 done
+
+echo "  Removing installation:"
+echo "    $(basename "$SELF_SKILL_DIR") → $SELF_SKILL_DIR"
+if [ ${#OTHER_SKILL_DIRS[@]} -gt 0 ]; then
+  echo "  Other installation(s) found, left untouched:"
+  for sd in "${OTHER_SKILL_DIRS[@]}"; do
+    echo "    $(basename "$sd") → $sd"
+  done
+fi
 echo ""
 
 REMOVED=false
 
 # --- 1. Remove slash commands and hooks from joined projects ---
-for SKILL_DIR in "${SKILL_DIRS[@]}"; do
-  TEAMS_DIR="$SKILL_DIR/teams"
-  [ -d "$TEAMS_DIR" ] || continue
-
+SKILL_DIR="$SELF_SKILL_DIR"
+TEAMS_DIR="$SKILL_DIR/teams"
+if [ -d "$TEAMS_DIR" ]; then
   echo "  Scanning joined projects for commands and hooks..."
   for config in "$TEAMS_DIR"/*/config.json; do
     [ -f "$config" ] || continue
@@ -161,159 +218,135 @@ for SKILL_DIR in "${SKILL_DIRS[@]}"; do
       fi
     done <<< "$copilot_projects"
   done
-done
+fi
+
+SKILL_NAME="$(basename "$SELF_SKILL_DIR")"
 
 # --- 2. Remove Claude Code global command ---
-for SKILL_DIR in "${SKILL_DIRS[@]}"; do
-  SKILL_NAME="$(basename "$SKILL_DIR")"
-  CC_CMD="$HOME/.claude/commands/$SKILL_NAME.md"
-  if [ -f "$CC_CMD" ]; then
-    rm "$CC_CMD"
-    echo "  - removed /$SKILL_NAME from ~/.claude/commands/"
-    REMOVED=true
-  fi
-done
+CC_CMD="$HOME/.claude/commands/$SKILL_NAME.md"
+if [ -f "$CC_CMD" ]; then
+  rm "$CC_CMD"
+  echo "  - removed /$SKILL_NAME from ~/.claude/commands/"
+  REMOVED=true
+fi
 
 # --- 2b. Remove Copilot CLI skill ---
-for SKILL_DIR in "${SKILL_DIRS[@]}"; do
-  SKILL_NAME="$(basename "$SKILL_DIR")"
-  COPILOT_SKILL="$HOME/.copilot/skills/$SKILL_NAME"
-  if [ -d "$COPILOT_SKILL" ]; then
-    rm -rf "$COPILOT_SKILL"
-    echo "  - removed /$SKILL_NAME skill from ~/.copilot/skills/"
-    REMOVED=true
-  fi
-done
+COPILOT_SKILL="$HOME/.copilot/skills/$SKILL_NAME"
+if [ -d "$COPILOT_SKILL" ]; then
+  rm -rf "$COPILOT_SKILL"
+  echo "  - removed /$SKILL_NAME skill from ~/.copilot/skills/"
+  REMOVED=true
+fi
 
 # --- 2c. Remove Antigravity skill ---
-for SKILL_DIR in "${SKILL_DIRS[@]}"; do
-  SKILL_NAME="$(basename "$SKILL_DIR")"
-  ANTIGRAVITY_SKILL="$HOME/.gemini/config/skills/$SKILL_NAME"
-  if [ -d "$ANTIGRAVITY_SKILL" ]; then
-    rm -rf "$ANTIGRAVITY_SKILL"
-    echo "  - removed /$SKILL_NAME skill from ~/.gemini/config/skills/"
-    REMOVED=true
-  fi
-done
+ANTIGRAVITY_SKILL="$HOME/.gemini/config/skills/$SKILL_NAME"
+if [ -d "$ANTIGRAVITY_SKILL" ]; then
+  rm -rf "$ANTIGRAVITY_SKILL"
+  echo "  - removed /$SKILL_NAME skill from ~/.gemini/config/skills/"
+  REMOVED=true
+fi
 
 # --- 2d. Remove native Windows helpers ---
-for SKILL_DIR in "${SKILL_DIRS[@]}"; do
-  SKILL_NAME="$(basename "$SKILL_DIR")"
-  for helper in "$AGENTS_DIR/$SKILL_NAME.ps1" "$AGENTS_DIR/$SKILL_NAME-run.sh"; do
-    if [ -f "$helper" ]; then
-      rm "$helper"
-      echo "  - removed $helper"
-      REMOVED=true
-    fi
-  done
-done
-
-SQLITE_SHIM="$AGENTS_DIR/bin/sqlite3"
-REMOVED_SQLITE_SHIM=false
-if [ -f "$SQLITE_SHIM" ] && grep -q "sqlite3 compatibility shim for agmsg" "$SQLITE_SHIM" 2>/dev/null; then
-  rm "$SQLITE_SHIM"
-  echo "  - removed $SQLITE_SHIM"
-  REMOVED=true
-  REMOVED_SQLITE_SHIM=true
-fi
-
-SQLITE_SHIM_CACHE="$AGENTS_DIR/run/sqlite3-shim.cache"
-if [ "$REMOVED_SQLITE_SHIM" = true ] && [ -f "$SQLITE_SHIM_CACHE" ]; then
-  rm "$SQLITE_SHIM_CACHE"
-  echo "  - removed $SQLITE_SHIM_CACHE"
-  REMOVED=true
-fi
-
-# Remove the Antigravity launcher only when it belongs to an installation
-# selected above. A same-named user file or another install's shim is retained.
-ANTIGRAVITY_TUI_SHIM="$AGENTS_DIR/bin/agy-tui"
-if [ -f "$ANTIGRAVITY_TUI_SHIM" ]; then
-  for SKILL_DIR in "${SKILL_DIRS[@]}"; do
-    owner="# agmsg-shim-owner: $SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
-    if grep -Fxq "$owner" "$ANTIGRAVITY_TUI_SHIM" 2>/dev/null; then
-      rm "$ANTIGRAVITY_TUI_SHIM"
-      echo "  - removed $ANTIGRAVITY_TUI_SHIM"
-      REMOVED=true
-      break
-    fi
-  done
-fi
-
-# --- 3. Remove skill directories ---
-for SKILL_DIR in "${SKILL_DIRS[@]}"; do
-  SKILL_NAME="$(basename "$SKILL_DIR")"
-  if [ "$KEEP_DATA" = true ]; then
-    echo ""
-    echo "  Removing $SKILL_NAME skill (keeping DB and teams)..."
-    rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash"
-    rm -f "$SKILL_DIR/SKILL.md"
-    echo "  - removed scripts, templates, SKILL.md"
-    echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/"
+for helper in "$AGENTS_DIR/$SKILL_NAME.ps1" "$AGENTS_DIR/$SKILL_NAME-run.sh"; do
+  if [ -f "$helper" ]; then
+    rm "$helper"
+    echo "  - removed $helper"
     REMOVED=true
-  else
-    echo ""
-    if confirm "Remove $SKILL_NAME (including DB and teams)?"; then
-      rm -rf "$SKILL_DIR"
-      echo "  - removed $SKILL_DIR"
-      REMOVED=true
-    fi
   fi
 done
 
-# --- 4. Clean up Codex writable_roots ---
+# Machine-wide pieces (#1400): shared by every install on the machine, not
+# owned by this one, so removing them here would break any install left
+# behind. Only touched when this is the LAST install going away.
+if [ ${#OTHER_SKILL_DIRS[@]} -eq 0 ]; then
+  SQLITE_SHIM="$AGENTS_DIR/bin/sqlite3"
+  REMOVED_SQLITE_SHIM=false
+  if [ -f "$SQLITE_SHIM" ] && grep -q "sqlite3 compatibility shim for agmsg" "$SQLITE_SHIM" 2>/dev/null; then
+    rm "$SQLITE_SHIM"
+    echo "  - removed $SQLITE_SHIM"
+    REMOVED=true
+    REMOVED_SQLITE_SHIM=true
+  fi
+
+  SQLITE_SHIM_CACHE="$AGENTS_DIR/run/sqlite3-shim.cache"
+  if [ "$REMOVED_SQLITE_SHIM" = true ] && [ -f "$SQLITE_SHIM_CACHE" ]; then
+    rm "$SQLITE_SHIM_CACHE"
+    echo "  - removed $SQLITE_SHIM_CACHE"
+    REMOVED=true
+  fi
+
+  # A same-named non-agmsg file is left alone -- the owner-comment signature
+  # is what confirms this is genuinely an agmsg-written shim, not who wrote
+  # it: with no other install left, whichever one wrote it no longer matters.
+  ANTIGRAVITY_TUI_SHIM="$AGENTS_DIR/bin/agy-tui"
+  if [ -f "$ANTIGRAVITY_TUI_SHIM" ] && grep -q "^# agmsg-shim-owner: " "$ANTIGRAVITY_TUI_SHIM" 2>/dev/null; then
+    rm "$ANTIGRAVITY_TUI_SHIM"
+    echo "  - removed $ANTIGRAVITY_TUI_SHIM"
+    REMOVED=true
+  fi
+fi
+
+# --- 3. Remove skill directory ---
+SKILL_DIR="$SELF_SKILL_DIR"
+if [ "$KEEP_DATA" = true ]; then
+  echo ""
+  echo "  Removing $SKILL_NAME skill (keeping DB and teams)..."
+  rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash"
+  rm -f "$SKILL_DIR/SKILL.md"
+  echo "  - removed scripts, templates, SKILL.md"
+  echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/"
+  REMOVED=true
+else
+  echo ""
+  if confirm "Remove $SKILL_NAME (including DB and teams)?"; then
+    rm -rf "$SKILL_DIR"
+    echo "  - removed $SKILL_DIR"
+    REMOVED=true
+  fi
+fi
+
+# --- 4. Clean up Codex writable_roots (this install's own path only) ---
 CODEX_CONFIG="$HOME/.codex/config.toml"
-if [ -f "$CODEX_CONFIG" ]; then
-  needs_cleanup=false
-  for SKILL_DIR in "${SKILL_DIRS[@]}"; do
-    if grep -q "$SKILL_DIR" "$CODEX_CONFIG" 2>/dev/null; then
-      needs_cleanup=true
-      break
-    fi
-  done
+if [ -f "$CODEX_CONFIG" ] && grep -q "$SELF_SKILL_DIR" "$CODEX_CONFIG" 2>/dev/null; then
+  cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
+  skill_pattern="$SELF_SKILL_DIR"
 
-  if [ "$needs_cleanup" = true ]; then
-    cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
-    # Build pattern of skill dirs to remove
-    skill_pattern=$(printf '|%s' "${SKILL_DIRS[@]}")
-    skill_pattern="${skill_pattern:1}"  # remove leading |
-
-    # Remove matching entries from writable_roots (handles multiline arrays)
-    awk -v pattern="$skill_pattern" '
-      /writable_roots/ { in_roots=1; buf="" }
-      in_roots { buf = buf $0 "\n" }
-      in_roots && /\]/ {
-        # Remove entries matching skill dirs
-        n = split(pattern, pats, "|")
-        for (i = 1; i <= n; i++) {
-          gsub("\"" pats[i] "[^\"]*\"[, ]*", "", buf)
-        }
-        # Clean up trailing/leading commas
-        gsub(/,[ \t]*\]/, "]", buf)
-        gsub(/\[[ \t]*,/, "[", buf)
-        gsub(/,[ \t]*,/, ",", buf)
-        # Check if empty
-        if (buf ~ /writable_roots[^[]*\[\s*\]/) {
-          in_roots=0; next
-        }
-        printf "%s", buf
+  # Remove matching entries from writable_roots (handles multiline arrays)
+  awk -v pattern="$skill_pattern" '
+    /writable_roots/ { in_roots=1; buf="" }
+    in_roots { buf = buf $0 "\n" }
+    in_roots && /\]/ {
+      # Remove entries matching skill dirs
+      n = split(pattern, pats, "|")
+      for (i = 1; i <= n; i++) {
+        gsub("\"" pats[i] "[^\"]*\"[, ]*", "", buf)
+      }
+      # Clean up trailing/leading commas
+      gsub(/,[ \t]*\]/, "]", buf)
+      gsub(/\[[ \t]*,/, "[", buf)
+      gsub(/,[ \t]*,/, ",", buf)
+      # Check if empty
+      if (buf ~ /writable_roots[^[]*\[\s*\]/) {
         in_roots=0; next
       }
-      !in_roots { print }
-    ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
-    # Remove empty [sandbox_workspace_write] section
-    awk '
-      /^\[sandbox_workspace_write\]/ {
-        header=$0
-        if (getline nextline <= 0) next
-        if (nextline ~ /^\[/ || nextline == "") { print nextline; next }
-        print header
-        print nextline
-        next
-      }
-      { print }
-    ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
-    echo "  - cleaned Codex writable_roots (backup: config.toml.bak)"
-  fi
+      printf "%s", buf
+      in_roots=0; next
+    }
+    !in_roots { print }
+  ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+  # Remove empty [sandbox_workspace_write] section
+  awk '
+    /^\[sandbox_workspace_write\]/ {
+      header=$0
+      if (getline nextline <= 0) next
+      if (nextline ~ /^\[/ || nextline == "") { print nextline; next }
+      print header
+      print nextline
+      next
+    }
+    { print }
+  ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+  echo "  - cleaned Codex writable_roots (backup: config.toml.bak)"
 fi
 
 # --- 5. Clean up empty ~/.agents/ ---
