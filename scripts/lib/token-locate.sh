@@ -128,36 +128,63 @@ _agmsg_token_locate_path() {   # <team> <agent> -- prints the record path
 # there is exactly one place that decides whether a record is live -- a
 # second, separately-maintained copy of the same TTL check is how the two
 # would quietly drift (observe honoring a record pending already expired,
-# or the reverse). Prints the token on success (exit 0); prints nothing and
-# removes the record on any failure (absent, unreadable, or expired) so an
-# emit right after does not also have to clean up the old one.
-_agmsg_token_locate_read() {   # <team> <agent>
-  local path token="" emitted_at="" now
+# or the reverse). Prints the token on success (exit 0) and returns 1 on
+# any other outcome. Removes the record ONLY when it is genuinely stale by
+# TIME (absent, unreadable, corrupt/future timestamp, or past TTL) -- never
+# merely because THIS caller's witness didn't match (below): a caller that
+# is not the record's rightful owner gets treated like "no pending token
+# for me", not a license to destroy a still-live record someone else
+# legitimately emitted and has not had its own chance to observe yet.
+#
+# <owner> is the CALLER's own current actas-lock owner token for this role
+# (review, #1397) -- the pending record is only reused when it matches
+# the witness the record was written with, so a role restarted, resumed,
+# or handed off to a different session inside the TTL window cannot have
+# its fresh `fix` call observe a token an earlier, now-superseded claim
+# emitted. An empty owner (a caller that has none to give) never matches
+# anything, including a record whose own witness is also empty -- there is
+# no case where "neither side can name a witness" should read as a match.
+_agmsg_token_locate_read() {   # <team> <agent> <owner>
+  local path token="" emitted_at="" witness="" now age
   path="$(_agmsg_token_locate_path "$1" "$2")"
   if [ -f "$path" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
         token=*) token="${line#token=}" ;;
         emitted_at=*) emitted_at="${line#emitted_at=}" ;;
+        witness=*) witness="${line#witness=}" ;;
       esac
     done < "$path" 2>/dev/null
   fi
-  now="$(date -u +%s 2>/dev/null || echo 0)"
-  case "$emitted_at" in ''|*[!0-9]*) emitted_at=0 ;; esac
-  if [ -n "$token" ] && [ $((now - emitted_at)) -lt "$_AGMSG_TOKEN_LOCATE_TTL" ]; then
-    printf '%s\n' "$token"
-    return 0
+  now="$(date -u +%s 2>/dev/null)"
+  case "$now" in ''|*[!0-9]*) now="" ;; esac
+  case "$emitted_at" in ''|*[!0-9]*) emitted_at="" ;; esac
+
+  if [ -z "$token" ] || [ -z "$now" ] || [ -z "$emitted_at" ]; then
+    rm -f "$path" 2>/dev/null || true
+    return 1
   fi
-  rm -f "$path" 2>/dev/null || true
-  return 1
+  age=$((now - emitted_at))
+  # >= 0, not just < TTL: a clock that read a value BEFORE emitted_at (a
+  # bogus future emitted_at, or the wall clock stepping backward) must
+  # never read as "live" -- age negative would otherwise pass "< TTL"
+  # forever.
+  if [ "$age" -lt 0 ] || [ "$age" -ge "$_AGMSG_TOKEN_LOCATE_TTL" ]; then
+    rm -f "$path" 2>/dev/null || true
+    return 1
+  fi
+
+  [ -n "$witness" ] && [ -n "$3" ] && [ "$witness" = "$3" ] || return 1
+  printf '%s\n' "$token"
+  return 0
 }
 
-# Whether a live (unexpired) pending token exists for (team, agent). Exit 0
-# and nothing on stdout when yes; exit 1 when no -- a caller does not need
-# to tell absent/unreadable/expired apart, only whether to call emit or
-# observe next.
-agmsg_token_locate_pending() {   # <team> <agent>
-  _agmsg_token_locate_read "$1" "$2" >/dev/null
+# Whether a live (unexpired), witness-matching pending token exists for
+# (team, agent, owner). Exit 0 and nothing on stdout when yes; exit 1 when
+# no -- a caller does not need to tell absent/unreadable/expired/wrong-
+# witness apart, only whether to call emit or observe next.
+agmsg_token_locate_pending() {   # <team> <agent> <owner>
+  _agmsg_token_locate_read "$1" "$2" "$3" >/dev/null
 }
 
 # EMIT half: generate a token, print it where the seat's own pane will show
@@ -180,8 +207,11 @@ agmsg_token_locate_pending() {   # <team> <agent>
 #     invocation writes anywhere keeps it the first line on screen, which
 #     matters because a long tool call's output is often folded to its
 #     first few lines by the CLI showing it.
-agmsg_token_locate_emit() {   # <team> <agent>
-  local team="$1" agent="$2" path dir tmp token ts
+# <owner>, stored as the record's witness, is the CALLER's own current
+# actas-lock owner token for this role -- see _agmsg_token_locate_read's
+# header for why a bare (team, agent) key is not enough on its own.
+agmsg_token_locate_emit() {   # <team> <agent> <owner>
+  local team="$1" agent="$2" owner="$3" path dir tmp token ts
   token="$(agmsg_token_locate_generate)"
   printf 'AGMSG_LOCATE_TOKEN(%s/%s): %s\n' "$team" "$agent" "$token" >&2
   path="$(_agmsg_token_locate_path "$team" "$agent")"
@@ -192,6 +222,7 @@ agmsg_token_locate_emit() {   # <team> <agent>
   {
     printf 'token=%s\n' "$token"
     printf 'emitted_at=%s\n' "$ts"
+    printf 'witness=%s\n' "$owner"
   } > "$tmp" 2>/dev/null && mv -f "$tmp" "$path" 2>/dev/null
   rm -f "$tmp" 2>/dev/null
   return 0
@@ -233,11 +264,20 @@ agmsg_token_locate_emit() {   # <team> <agent>
 # previously-emitted token -- never targeted by name, never written to. One
 # pass, no polling: called once, synchronous, costs one terminal_peek per
 # live pane the census reports.
-agmsg_token_locate_observe() {   # <team> <agent>
-  local team="$1" agent="$2" path token=""
+agmsg_token_locate_observe() {   # <team> <agent> <owner>
+  local team="$1" agent="$2" owner="$3" path token=""
   path="$(_agmsg_token_locate_path "$team" "$agent")"
-  token="$(_agmsg_token_locate_read "$team" "$agent")" || :
-  rm -f "$path" 2>/dev/null || true   # single-use, regardless of outcome below (_agmsg_token_locate_read already removed an expired one; harmless to repeat on a live one)
+  # Only remove the record ourselves on a SUCCESSFUL read -- single-use,
+  # consumed now that this caller's own witness-matching token was read.
+  # _agmsg_token_locate_read already removes a genuinely stale-by-time
+  # record on its own; a live record that did not match THIS caller's
+  # witness is left untouched here too (#1397), same reasoning as
+  # there -- an observe called (directly, bypassing the pending precheck)
+  # by whoever does not own it must not destroy a still-live record its
+  # rightful owner has not had a chance to observe yet.
+  if token="$(_agmsg_token_locate_read "$team" "$agent" "$owner")"; then
+    rm -f "$path" 2>/dev/null || true
+  fi
   [ -n "$token" ] || { printf 'undetermined\tno_pending_token\n'; return 2; }
 
   declare -F agmsg_terminal_enumerate >/dev/null 2>&1 \

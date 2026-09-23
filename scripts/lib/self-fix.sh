@@ -86,8 +86,8 @@ _fix_locator_of_proof() {   # <canonical-ref>
 }
 
 # Prove one seat's location. Prints "<state>\t<payload>\t<via>"; rc as the proof's.
-_fix_locate() {   # <team> <agent>
-  local team="$1" agent="$2" env kind cand out rc=0 st
+_fix_locate() {   # <team> <agent> <owner>
+  local team="$1" agent="$2" owner="$3" env kind cand out rc=0 st
   env="$(agmsg_terminal_self_env 2>/dev/null)"
   if [ -n "$env" ]; then
     kind="${env%%$'\t'*}"
@@ -115,10 +115,23 @@ _fix_locate() {   # <team> <agent>
   # after the call returns -- so this call either observes a token a PRIOR
   # call already emitted (and had rendered), or emits one now for a LATER
   # call to observe, never both in the same pass.
+  #
+  # $owner (the actas lock's own owner token for this role, from
+  # agmsg_fix_run's caller) is threaded through as the pending record's
+  # witness (review, #1397): the role this token was emitted for can be
+  # restarted, resumed, or handed off to a different session inside the TTL
+  # window, and a bare (team, agent) key alone cannot tell that seat's own
+  # fresh `fix` call apart from one left over from before the change --
+  # observing a stale record then would hand this seat a location the OLD
+  # occupant's pane produced, not its own, exactly the outside-supplied
+  # location #1152 exists to refuse. Every actas re-claim (restart, resume,
+  # handoff) mints a new owner token, so requiring it to match is what makes
+  # a stale record from a superseded claim unusable rather than merely
+  # unlikely to collide.
   if declare -F agmsg_token_locate_pending >/dev/null 2>&1; then
-    if agmsg_token_locate_pending "$team" "$agent"; then
+    if agmsg_token_locate_pending "$team" "$agent" "$owner"; then
       local fo frc=0
-      fo="$(agmsg_token_locate_observe "$team" "$agent")" || frc=$?
+      fo="$(agmsg_token_locate_observe "$team" "$agent" "$owner")" || frc=$?
       case "$frc:${fo%%$'\t'*}" in
         0:proved) printf 'proved\t%s\temit_observe\n' "${fo#*$'\t'}"; return 0 ;;
         *) printf '%s\t%s\temit_observe\n' "${fo%%$'\t'*}" "${fo#*$'\t'}"; return "${frc:-2}" ;;
@@ -128,7 +141,7 @@ _fix_locate() {   # <team> <agent>
     # returns) and tell the caller to run `fix` again -- one line a human
     # and a seat both read the same way, not a state this contract already
     # has a name for.
-    agmsg_token_locate_emit "$team" "$agent"
+    agmsg_token_locate_emit "$team" "$agent" "$owner"
     printf 'undetermined\tlocate_token_emitted_call_fix_again\temit_observe\n'
     return 2
   fi
@@ -150,7 +163,7 @@ agmsg_fix_run() {
   while IFS=$'\t' read -r team agent owner; do
     [ -n "$team" ] || continue
     any=1
-    loc="$(_fix_locate "$team" "$agent")" || true
+    loc="$(_fix_locate "$team" "$agent" "$owner")" || true
     st="${loc%%$'\t'*}"; payload="${loc#*$'\t'}"; via="${payload##*$'\t'}"; payload="${payload%$'\t'*}"
     if [ "$st" = proved ]; then
       printf 'fix seat=%s/%s state=proved locator=%s via=%s\n' "$team" "$agent" "$payload" "$via"

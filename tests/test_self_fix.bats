@@ -123,7 +123,7 @@ _proof_says() {   # <rc> <state> <payload>
   [ "$(printf '%s\n' "$output" | tail -1)" = "fix seat=T/alice state=undetermined reason=locate_token_emitted_call_fix_again via=emit_observe (written nothing)" ]
   refute grep -q '^search must not run' "$SPY"
   refute grep -q '^write' "$SPY"
-  run agmsg_token_locate_pending T alice
+  run agmsg_token_locate_pending T alice "$ME"
   [ "$status" -eq 0 ]
 
   # Second, separate call: a token is now pending, so this one observes
@@ -136,8 +136,27 @@ _proof_says() {   # <rc> <state> <payload>
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/alice state=proved locator=herdr:sockA:w1:p9 via=emit_observe" ]
   grep -Fqx "write T alice herdr:sockA:w1:p9 $ME" "$SPY"
-  run agmsg_token_locate_pending T alice
+  run agmsg_token_locate_pending T alice "$ME"
   [ "$status" -eq 1 ]
+
+  # #1397: re-claim the SAME role under a DIFFERENT owner TOKEN --
+  # same bare session id (so this test's own session, "sid-me", still owns
+  # the seat and `fix` still acts on it -- the point here is the WITNESS,
+  # not seat ownership), but a different composite owner, the same way an
+  # actas restart/resume/handoff mints a fresh owner without necessarily
+  # changing the underlying session identity. A fresh pending record from
+  # the OLD owner is left in place, still inside the TTL. The new owner's
+  # own call must not observe it -- it emits its own token instead, exactly
+  # like the very first call above.
+  _own_seat alice "${ME%.*}.99999"
+  agmsg_token_locate_generate() { printf 'stale-owner-token\n'; }
+  agmsg_token_locate_emit T alice "$ME" 2>/dev/null   # a leftover from the old owner, still inside the TTL
+  agmsg_token_locate_generate() { printf 'fresh-fix-token\n'; }
+  agmsg_terminal_enumerate() { echo "search must not run when the pending record belongs to a superseded owner" >> "$SPY"; }
+  run agmsg_fix_run
+  [ "$status" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "AGMSG_LOCATE_TOKEN(T/alice): fresh-fix-token" ]
+  refute grep -q '^search must not run' "$SPY"
 }
 
 @test "fix: no candidate in the environment -> the proof is not even asked; fallback if present, else no_candidate_in_env" {
