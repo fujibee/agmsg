@@ -233,6 +233,9 @@ _fake_herdr_list_scalar_session() {
 _install_fake_orca() {
   local mode="${1:-present}" show_json show_rc=0 read_json read_rc=0 \
     list_json='{"ok":true,"result":{"terminals":[]}}' list_rc=0
+  local create_json='{"ok":true,"result":{"terminal":{"handle":"term_11111111-2222-3333-4444-555555555555"}}}' create_rc=0
+  local close_json='{"ok":true,"result":{"close":{"handle":"term_abc123","ptyKilled":true}}}' close_rc=0
+  local rename_json='{"ok":true,"result":{}}' rename_rc=0
   case "$mode" in
     present)
       show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
@@ -299,6 +302,41 @@ _install_fake_orca() {
     list_unreachable)
       list_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
       ;;
+    # Write-op modes below reuse `present`'s show/read (mostly irrelevant to
+    # what they test) and vary only the one JSON their own test cares about.
+    create_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":false,"error":{"code":"worktree_not_found"}}'
+      ;;
+    create_no_handle)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":true,"result":{"terminal":{}}}'
+      ;;
+    create_bad_handle)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":true,"result":{"terminal":{"handle":"term_bad\u0007handle"}}}'
+      ;;
+    create_proc_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":false,"error":{"code":"internal_error"}}'
+      create_rc=1
+      ;;
+    rename_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      rename_json='{"ok":false,"error":{"code":"terminal_handle_stale"}}'
+      ;;
+    rename_proc_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      rename_json='{"ok":false,"error":{"code":"internal_error"}}'
+      rename_rc=1
+      ;;
+    close_proc_fails_but_gone)
+      # The design point being pinned: close's own exit status must NOT
+      # matter — despawn always proceeds to check pane_state afterward.
+      show_json='{"ok":true,"result":{"terminal":{"connected":false,"writable":false,"orphaned":true,"tabId":"tab-1","exitCause":{"kind":"operator_close"}}}}'
+      close_json='{"ok":false,"error":{"code":"internal_error"}}'
+      close_rc=1
+      ;;
   esac
   cat > "$FAKEBIN/orca" <<EOF
 #!/usr/bin/env bash
@@ -312,6 +350,15 @@ elif [ "\$1" = terminal ] && [ "\$2" = read ]; then
 elif [ "\$1" = terminal ] && [ "\$2" = list ]; then
   echo '$list_json'
   exit $list_rc
+elif [ "\$1" = terminal ] && [ "\$2" = create ]; then
+  echo '$create_json'
+  exit $create_rc
+elif [ "\$1" = terminal ] && [ "\$2" = close ]; then
+  echo '$close_json'
+  exit $close_rc
+elif [ "\$1" = terminal ] && [ "\$2" = rename ]; then
+  echo '$rename_json'
+  exit $rename_rc
 fi
 exit 0
 EOF
@@ -1229,7 +1276,7 @@ _last_agent_rename_key() {
   # bash 3.2, and consistently avoiding it here means a later edit adding a
   # line after these can't silently reintroduce that same class of bug.
   grep -qF -- 'name=orca' <<< "$output"
-  grep -qF -- 'capabilities=peek where' <<< "$output"
+  grep -qF -- 'capabilities=peek where spawn despawn name' <<< "$output"
 }
 
 @test "orca: detect requires TERM_PROGRAM=Orca, prints the handle from the env" {
@@ -1439,22 +1486,14 @@ _last_agent_rename_key() {
   [ "$status" -eq 10 ]
 }
 
-@test "orca: spawn/despawn/poke/name/arrange all report unsupported (13) — read-only this release" {
+@test "orca: poke/arrange report unsupported (13) — not implemented this release" {
   _install_fake_orca present
   agmsg_terminal_load orca
-  run terminal_spawn alice /proj pane-v bash -lc boot
-  [ "$status" -eq 13 ]
-  run terminal_despawn term_abc123
-  [ "$status" -eq 13 ]
   run terminal_poke term_abc123 hello
-  [ "$status" -eq 13 ]
-  run terminal_name term_abc123 team alice
   [ "$status" -eq 13 ]
   run terminal_arrange term_abc123 place_below term_def456
   [ "$status" -eq 13 ]
-  # None of these ever touched the fake orca binary.
-  refute grep -q '\[create\]' "$ARGV_LOG"
-  refute grep -q '\[close\]' "$ARGV_LOG"
+  # Neither ever touched the fake orca binary.
   refute grep -q '\[send\]' "$ARGV_LOG"
   refute grep -q '\[rename\]' "$ARGV_LOG"
 }
@@ -1534,6 +1573,105 @@ _last_agent_rename_key() {
   run agmsg_self_proof testteam alice term_11111111-1111-1111-1111-111111111111
   [ "$status" -eq 3 ]
   [ "$output" = "$(printf 'unsupported\tdriver_no_process_binding')" ]
+}
+
+@test "orca: spawn creates via worktree path, launches boot as the initial command, prints the handle" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_spawn alice /proj pane-v bash -lc boot
+  [ "$status" -eq 0 ]
+  [ "$output" = term_new123 ]
+  grep -qF -- '[create]' "$ARGV_LOG"
+  grep -qF -- '[--worktree] [path:/proj]' "$ARGV_LOG"
+  grep -qF -- '[--title] [alice]' "$ARGV_LOG"
+  grep -qF -- '[--command] [bash -lc boot]' "$ARGV_LOG"
+}
+
+@test "orca: spawn rejects an unknown target instead of defaulting, same as tmux/herdr" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_spawn alice /proj bogus-target boot
+  [ "$status" -eq 13 ]
+  grep -q 'unsupported' <<<"$output"
+  refute grep -q '\[create\]' "$ARGV_LOG"
+}
+
+@test "orca: spawn is 13 when orca is not on PATH, when create fails, and when it answers ok with no handle" {
+  agmsg_terminal_load orca
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-spawn"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  _install_fake_orca create_fails
+  run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  _install_fake_orca create_no_handle
+  run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+}
+
+@test "orca: despawn closes then confirms gone via show, never trusts close's own return" {
+  # MEASURED (Third pass (d)): close's own success/error shape for an
+  # already-closed handle differs across orca versions — this is exactly why
+  # despawn is built to re-check through pane_state/show instead.
+  _install_fake_orca gone
+  agmsg_terminal_load orca
+  run terminal_despawn term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  grep -qF -- '[close]' "$ARGV_LOG"
+  grep -qF -- '[show]' "$ARGV_LOG"
+}
+
+@test "orca: despawn is 13 when show still shows connected after close" {
+  # close reports success (ptyKilled:true in the default 'present' fixture)
+  # but the pane is still connected:true — despawn must not trust close alone.
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_despawn term_abc123
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+}
+
+@test "orca: despawn is 13 when orca is not on PATH" {
+  agmsg_terminal_load orca
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-despawn"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_despawn term_abc123
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+}
+
+@test "orca: name renames via the tab title (team:name), mode makes no difference (single-name driver)" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_name term_abc123 team alice
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  grep -qF -- '[rename]' "$ARGV_LOG"
+  grep -qF -- '[--title] [team:alice]' "$ARGV_LOG"
+
+  : > "$ARGV_LOG"
+  run terminal_name term_abc123 team alice key
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  grep -qF -- '[--title] [team:alice]' "$ARGV_LOG"
+}
+
+@test "orca: name is 13 when rename fails or orca is not on PATH" {
+  _install_fake_orca rename_fails
+  agmsg_terminal_load orca
+  run terminal_name term_abc123 team alice
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-name"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_name term_abc123 team alice
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
 }
 
 # --- ABI completeness + structural clobber-proofing (#1014 review) -------
