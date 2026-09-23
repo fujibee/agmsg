@@ -112,7 +112,7 @@ jobs:
       # the CHANGELOG.md format. `--latest` emits only the newest release's
       # section; `--strip header` drops the file preamble.
       - name: Generate release notes
-        uses: orhun/git-cliff-action@v4.8.0
+        uses: orhun/git-cliff-action@v4.9.1
         id: cliff
         with:
           config: cliff.toml
