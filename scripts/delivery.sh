@@ -299,19 +299,88 @@ agmsg_delivery_apply_default() {
 
   prune_empty_hooks_file "$tmp_state"
 
-  # Same reasoning as the mkdir -p guard above (#1392): a refused rename here
-  # is the more common failure shape in practice (the directory usually
-  # already exists; it is the file WITHIN it a sandbox keeps read-only), so
-  # this is the one that actually bit a real Codex seat. Named explicitly
-  # rather than left to `set -e` alone, and the temp file is cleaned up on
-  # this path too -- a caller retrying after fixing permissions must not
-  # trip over a stale mktemp file accumulating in $TMPDIR.
-  if ! mv "$tmp_state" "$hooks_file"; then
-    rm -f "$tmp_state"
-    echo "agmsg: could not write $hooks_file — delivery for $type was NOT set up." >&2
+  _agmsg_hooks_file_finish_write "$hooks_file" "$tmp_state" "$mode" "$type" "$project"
+}
+
+# Replaces <path> with <tmp>'s content, but only when <path> already exists
+# AND the content actually differs (#1429: a hooks_file that is git-tracked
+# and shared -- e.g. a team's own .codex/hooks.json -- must not get a
+# permanent diff, a lost chmod-a-w protection, and a changed hash from a
+# `set` call that changes nothing). <path> not existing yet is the plain
+# first-ever write, unchanged from before this existed: no content to
+# compare against and no existing format or permission mode to preserve.
+#
+# When <path> DOES exist: compared by JSON CONTENT (_agmsg_json_content_equal,
+# hooks-json.sh -- sqlite's json(), not raw bytes), not by formatting. <path>
+# may be hand-formatted in a way this codebase never writes (different
+# whitespace, key order via json_object's own ordering, array layout) and
+# still hold the exact same registration -- a byte comparison would call that
+# "different" and trigger one spurious rewrite even though nothing agmsg
+# owns actually changed (review finding on the first cut of this fix, which
+# reformatted <tmp> to <path>'s indentation and compared bytes UNCONDITIONALLY,
+# so a hand-formatted <path> never matched on the first post-fix `set`).
+#
+# <tmp> is reformatted to match <path>'s own detected indentation
+# (_agmsg_json_detect_indent / _agmsg_json_reindent -- a no-op when no
+# indent is detected, e.g. <path> is itself already compact) ONLY once a
+# real content change is confirmed -- formatting an unwritable, unchanged
+# <tmp> just to throw it away is wasted work, and would have to be undone
+# if a byte-level artifact of reindenting ever disagreed with the content
+# check above.
+#
+# A genuine content change on a <path> with no owner write bit refuses
+# loudly (same #1392 recovery message a failed mkdir/mv already uses)
+# rather than silently overwriting a file a human protected on purpose, or
+# silently restoring read-only after writing through it -- either would
+# defeat the protection without saying so. On a real, permitted replace,
+# <path>'s own permission mode is restored afterward (mv from a mktemp file
+# would otherwise leave it at mktemp's mode, not <path>'s original one).
+_agmsg_hooks_file_finish_write() {
+  local path="$1" tmp="$2" mode="$3" type="$4" project="$5"
+  # Same reasoning as the mkdir -p guard above (#1392): a refused rename is
+  # the more common failure shape in practice (the directory usually already
+  # exists; it is the file WITHIN it a sandbox keeps read-only). Named
+  # explicitly rather than left to `set -e` alone, and the temp file is
+  # cleaned up on this path too -- a caller retrying after fixing
+  # permissions must not trip over a stale mktemp file accumulating in
+  # $TMPDIR.
+  if [ ! -f "$path" ]; then
+    if ! mv "$tmp" "$path"; then
+      rm -f "$tmp"
+      echo "agmsg: could not write $path — delivery for $type was NOT set up." >&2
+      _agmsg_print_delivery_recovery "$mode" "$type" "$project"
+      return 1
+    fi
+    return 0
+  fi
+
+  if _agmsg_json_content_equal "$path" "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  local indent
+  if indent="$(_agmsg_json_detect_indent "$path")"; then
+    _agmsg_json_reindent "$tmp" "$indent"
+  fi
+
+  if [ ! -w "$path" ]; then
+    rm -f "$tmp"
+    echo "agmsg: $path needs to change for delivery mode '$mode' but is not writable — leaving it untouched rather than overwrite a file that looks intentionally protected (e.g. chmod a-w)." >&2
     _agmsg_print_delivery_recovery "$mode" "$type" "$project"
     return 1
   fi
+
+  local orig_mode
+  orig_mode="$(compat_file_mode "$path" 2>/dev/null || true)"
+  if ! mv "$tmp" "$path"; then
+    rm -f "$tmp"
+    echo "agmsg: could not write $path — delivery for $type was NOT set up." >&2
+    _agmsg_print_delivery_recovery "$mode" "$type" "$project"
+    return 1
+  fi
+  [ -n "$orig_mode" ] && chmod "$orig_mode" "$path" 2>/dev/null || true
+  return 0
 }
 
 # Default delivery entry points (Template Method). A type's plug

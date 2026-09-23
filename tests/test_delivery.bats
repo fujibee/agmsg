@@ -138,6 +138,51 @@ settings_file() {
   [ "$t" = "1" ]
 }
 
+# #1429: a shared, git-tracked hooks_file (e.g. a team's own .codex/hooks.json)
+# used to get an unconditional rewrite on every `set` call even when the
+# registration content was already unchanged -- a new temp file, minified to
+# one line, replacing the original via mv regardless of whether anything
+# differed. That defeated a chmod-a-w protection the file's owner set up on
+# purpose, and forced Codex to re-ask for hook-trust review on every call
+# because the file's hash kept changing.
+#
+# The file on disk is reformatted BY HAND (jq's own 4-space style, never what
+# this codebase writes on its own) before the second `set` call, holding the
+# exact same registration under different bytes -- this is the shape that
+# broke an earlier cut of this fix, which compared the two states by
+# reindenting the new content to match the old one and then diffing raw
+# bytes: a hand-formatted file that never matches json_pretty's own layout
+# never compared equal, so it got rewritten once regardless of content
+# (review finding). The comparison has to be by JSON CONTENT, not bytes --
+# `set` must leave a content-identical file completely untouched, bytes AND
+# permission mode, no matter how it happens to be formatted on disk.
+@test "delivery set monitor (codex): a hand-formatted hooks_file with the same registration already present is left untouched (#1429)" {
+  local hooks_file="$TEST_PROJECT/.codex/hooks.json"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  [ -f "$hooks_file" ]
+
+  # Blank lines top and bottom are legal JSON whitespace, but not a shape
+  # any indent-matching reindent step of THIS content would ever produce on
+  # its own -- so no reindent-then-diff can mistake this for the original
+  # layout, only a real content comparison can call it unchanged.
+  { echo; jq --indent 4 '.' "$hooks_file"; echo; } > "$hooks_file.tmp"
+  mv "$hooks_file.tmp" "$hooks_file"
+  chmod 644 "$hooks_file"
+
+  local before_bytes before_mode
+  before_bytes="$(cat "$hooks_file")"
+  before_mode="$(file_mode "$hooks_file")"
+
+  run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+
+  local after_bytes after_mode
+  after_bytes="$(cat "$hooks_file")"
+  after_mode="$(file_mode "$hooks_file")"
+  [ "$before_bytes" = "$after_bytes" ]
+  [ "$before_mode" = "$after_mode" ]
+}
+
 # --- mode transitions ---
 
 @test "delivery: turn -> monitor swaps hooks cleanly" {

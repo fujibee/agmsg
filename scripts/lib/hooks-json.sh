@@ -197,6 +197,99 @@ add_event_entry_file() {
   mv "$tmp" "$path"
 }
 
+# Detect the indent unit an existing pretty-printed JSON file uses, taken
+# from its own SECOND line: the first line of anything this codebase or a
+# human writes by hand is the opening brace alone, so the second line's
+# leading whitespace run (if any) IS the indent unit, verbatim -- a file
+# indented with tabs is matched with tabs, not assumed to be spaces. Prints
+# nothing and returns 1 when <path> does not exist, has fewer than two
+# lines, or its second line has no leading whitespace (already
+# minified/compact) -- callers treat "no indent detected" as "leave the
+# content exactly as this function's caller already built it" (#1429).
+_agmsg_json_detect_indent() {
+  local path="$1" line2
+  [ -f "$path" ] || return 1
+  line2=$(sed -n '2p' "$path" 2>/dev/null)
+  [ -n "$line2" ] || return 1
+  case "$line2" in
+    [\ $'\t']*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "${line2%%[!\ $'\t']*}"
+}
+
+# Do <a> and <b> hold the same JSON content, ignoring formatting (key/array
+# layout, whitespace, indentation)? Compares each file's sqlite json()
+# (compact, canonical) rendering as a string, not raw bytes -- an existing
+# hooks_file a human hand-formatted differently from what this codebase
+# writes (or pretty-printed some other way) must still compare equal to an
+# unchanged registration, or the very first `set` after adopting this
+# comparison would trigger one spurious rewrite (#1429 review). `json()` has
+# been part of every SQLite build with the json1 extension since its
+# original release (3.9.0) -- well below json_pretty's 3.46.0 floor -- so
+# unlike _agmsg_json_pretty_supported below, this needs no availability
+# probe or degrade path: the extension is already a hard dependency of this
+# file's other functions.
+#
+# Any sqlite error (e.g. either file holds invalid JSON) is treated as "not
+# equal" -- falls through to the normal write path, the same behavior this
+# codebase had before this comparison existed.
+_agmsg_json_content_equal() {
+  local a="$1" b="$2"
+  local a_sql b_sql result
+  a_sql=$(agmsg_sql_readfile_path "$a")
+  b_sql=$(agmsg_sql_readfile_path "$b")
+  result=$(agmsg_sqlite_mem "
+    SELECT CASE WHEN json(readfile('$a_sql')) = json(readfile('$b_sql'))
+           THEN 1 ELSE 0 END;
+  ") || return 1
+  [ "$result" = "1" ]
+}
+
+# 0 iff this sqlite3 build's json1 extension has json_pretty (added in
+# SQLite 3.46.0; this project's own floor is unversioned -- see README,
+# "requires sqlite3" with no minimum stated). Probed once per process and
+# cached: calling the function and checking whether it errors answers
+# exactly the question that matters here, without parsing a version string
+# that describes the CLI, not necessarily the linked json1 build.
+_agmsg_json_pretty_supported() {
+  if [ -z "${_AGMSG_JSON_PRETTY_SUPPORTED:-}" ]; then
+    if agmsg_sqlite_mem "SELECT json_pretty('{}');" >/dev/null 2>&1; then
+      _AGMSG_JSON_PRETTY_SUPPORTED=yes
+    else
+      _AGMSG_JSON_PRETTY_SUPPORTED=no
+    fi
+  fi
+  [ "$_AGMSG_JSON_PRETTY_SUPPORTED" = yes ]
+}
+
+# Rewrite <tmp> IN PLACE (same path) to json_pretty-format its content with
+# <indent> as the indent unit. A no-op, successfully, when json_pretty is
+# not supported (_agmsg_json_pretty_supported) -- a caller that always
+# calls this and then compares bytes against the original gets today's
+# plain/compact behavior on a build without json_pretty, not an error, and
+# not a behavior this project's stated floor ("requires sqlite3", no
+# version pinned) does not actually guarantee.
+_agmsg_json_reindent() {
+  local tmp="$1" indent="$2"
+  _agmsg_json_pretty_supported || return 0
+  local tmp2 tmp2_sql tmp_sql wrote indent_sql
+  tmp_sql=$(agmsg_sql_readfile_path "$tmp")
+  tmp2=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
+  tmp2_sql=$(agmsg_sql_readfile_path "$tmp2")
+  indent_sql=$(printf '%s' "$indent" | sed "s/'/''/g")
+  wrote=$(agmsg_sqlite_mem "
+    WITH src AS (SELECT json_pretty(readfile('$tmp_sql'), '$indent_sql') AS blob)
+    SELECT writefile('$tmp2_sql', blob) = length(CAST(blob AS BLOB)) FROM src;
+  ") || wrote=""
+  if [ "$wrote" = "1" ]; then
+    mv "$tmp2" "$tmp"
+  else
+    rm -f "$tmp2"
+  fi
+  return 0
+}
+
 # Drop the entire .hooks object if it ended up empty after stripping. Reads
 # and writes <path> via readfile() — see strip_agmsg_event_file for the
 # rationale (#95).
