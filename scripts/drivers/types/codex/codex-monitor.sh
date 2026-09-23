@@ -26,6 +26,13 @@ source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 # _agmsg_codex_seat_key_new / _agmsg_codex_seat_record_write and friends.
 # shellcheck source=./_seat-key.sh
 source "$SCRIPT_DIR/_seat-key.sh"
+# agmsg_canonical_path, for matching a resume thread's project against role-
+# session records in the SAME canonical form they were recorded in (#1401).
+# shellcheck source=../../../lib/resolve-project.sh
+source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
+# agmsg_role_session_match_unique, for the resume-arms-itself check below.
+# shellcheck source=../../../lib/role-session.sh
+source "$SCRIPT_DIR/../../../lib/role-session.sh"
 
 PROJECT="$(pwd)"
 SOCKET_PATH=""
@@ -222,6 +229,46 @@ export AGMSG_CODEX_BRIDGE=1
 export AGMSG_CODEX_BRIDGE_APP_SERVER="$SOCKET_URL"
 export AGMSG_CODEX_BRIDGE_LAUNCHER=1
 export AGMSG_CODEX_SEAT_KEY="$SEAT_KEY"
+
+# #1401: a resumed seat used to have no bridge until either its own
+# SessionStart hook eventually ran (observed taking minutes, and in at least
+# one case never, before a person or the model manually re-ran
+# codex-record-session.sh) or someone did that by hand. Neither is automatic.
+# But the thread being resumed is already known HERE, in $CODEX_ARGS, before
+# codex itself has even started -- codex-shim.sh forwards a `codex resume
+# <thread>` invocation's arguments through unchanged past the literal "resume"
+# token. If that thread is recorded as belonging to EXACTLY ONE (team, agent)
+# role in THIS project, arm the bridge request immediately, the same shape
+# codex-record-session.sh itself writes -- no need to wait on the hook or a
+# human at all in the one case this can be decided without guessing.
+#
+# Deliberately narrow: only a single bare positional argument (no leading
+# '-') is treated as a thread id -- `codex resume` with no argument opens
+# Codex's own interactive picker, which is not one specific thread this
+# script could commit to yet, and a flag is not a thread id. Zero or more
+# than one matching role is silence, exactly like every other inference in
+# this family (agmsg_role_session_match_unique's own header, and
+# codex-record-session.sh's rollout-scan fallback) -- guessing which role
+# owns a resumed thread is worse than leaving it to arm the way it does today.
+if [ "$CODEX_COMMAND" = resume ] && [ "${#CODEX_ARGS[@]}" -eq 1 ]; then
+  case "${CODEX_ARGS[0]}" in
+    -*) : ;;
+    *)
+      _resume_thread="${CODEX_ARGS[0]}"
+      _resume_match=""
+      _resume_match="$(agmsg_role_session_match_unique codex "$(agmsg_canonical_path "$PROJECT")" "$_resume_thread" 2>/dev/null || true)"
+      if [ -n "$_resume_match" ]; then
+        _resume_team="${_resume_match%%$'\t'*}"
+        _resume_agent="${_resume_match#*$'\t'}"
+        _resume_request_file="$RUN_DIR/codex-bridge-request.$SEAT_KEY"
+        _resume_request_tmp="$_resume_request_file.$$"
+        mkdir -p "$RUN_DIR" 2>/dev/null || true
+        printf 'codex\t%s\t%s\t%s\t%s\n' "$_resume_thread" "$SOCKET_URL" "$_resume_team" "$_resume_agent" > "$_resume_request_tmp" 2>/dev/null \
+          && mv "$_resume_request_tmp" "$_resume_request_file" 2>/dev/null
+      fi
+      ;;
+  esac
+fi
 
 launcher_cmd="${AGMSG_CODEX_BRIDGE_LAUNCHER_CMD:-$SCRIPT_DIR/codex-bridge-launcher.sh}"
 # Same guard: the launcher is detached on purpose and outlives this script, so

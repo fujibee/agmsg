@@ -361,3 +361,41 @@ agmsg_role_session_lookup_by_sid() {
   done
   return 0
 }
+
+# Print "<team>\t<agent>" for the ONE role whose record has type=<type>,
+# session=<sid> and project=<project_physical>, or nothing (and return 1) when
+# zero or several such records exist. <project_physical> must already be in
+# the same canonical (symlink-resolved) form agmsg_role_session_record itself
+# stores -- pass it through agmsg_canonical_path first, the same way
+# codex-record-session.sh does before recording.
+#
+# Same "exactly one or nothing" bias as every other inference in this family
+# (agmsg_role_session_recorded_uuids's subtraction in codex-record-session.sh,
+# the rollout-scan fallback there): guessing which role to hand a resumed
+# thread to is worse than not handing it to one, so an ambiguous or absent
+# answer is silence, never a pick among candidates (#1401).
+agmsg_role_session_match_unique() {
+  local type="$1" project_physical="$2" sid="$3" dir f t p v team agent match=""
+  [ -n "$type" ] && [ -n "$project_physical" ] && [ -n "$sid" ] || return 1
+  dir="$(_actas_lock_dir)"
+  [ -d "$dir" ] || return 1
+  for f in "$dir"/role-session.*; do
+    [ -f "$f" ] || continue
+    t="$(_agmsg_role_session_field "$f" type)"
+    [ "$t" = "$type" ] || continue
+    v="$(_agmsg_role_session_field "$f" session)"
+    [ "$v" = "$sid" ] || continue
+    p="$(_agmsg_role_session_field "$f" project)"
+    [ "$p" = "$project_physical" ] || continue
+    # A second qualifying record makes the answer ambiguous; give up rather
+    # than pick the first one found (readdir order is not meaningful).
+    [ -n "$match" ] && return 1
+    team="$(_agmsg_role_session_field "$f" team)"
+    agent="$(_agmsg_role_session_field "$f" agent)"
+    [ -n "$team" ] && [ -n "$agent" ] || continue
+    match="$team"$'\t'"$agent"
+  done
+  [ -n "$match" ] || return 1
+  printf '%s\n' "$match"
+  return 0
+}
