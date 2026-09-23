@@ -90,6 +90,14 @@ commit_parsers = [
   { message = "^jev: promote batching multiple questions", group = "<!-- 4 -->Documentation" },
   { message = "^jev: fix tool.conf comments", group = "<!-- 4 -->Documentation" },
   { message = "^jev, ext-tool README", group = "<!-- 4 -->Documentation" },
+  # 1.4.1's squash subjects that don't start with a type this file already
+  # recognizes: "install:" and "poke(herdr):" aren't Conventional Commits
+  # types, and "Add SECURITY.md..." carries no prefix at all. Same remedy as
+  # the community-PR and jev lines above.
+  { message = "^Add SECURITY.md and Dependabot config", group = "<!-- 0 -->Added" },
+  { message = "^poke\\(herdr\\): use focus to deliver past an abandoned draft", group = "<!-- 1 -->Fixed" },
+  { message = "^install: add ext-tools/ to Codex sandbox writable_roots", group = "<!-- 1 -->Fixed" },
+  { message = "^install: prune scripts/ files a prior release no longer ships", group = "<!-- 1 -->Fixed" },
   # Everything else (merges, initial commit, misc) is intentionally dropped.
   { message = ".*", skip = true },
 ]
