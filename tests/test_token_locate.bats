@@ -131,10 +131,13 @@ _seed_token() {   # <team> <agent> <token> [witness] [emitted_at]
 }
 
 # #1397: `date -u +%s` failing outright (now empty) against a real,
-# well-formed emitted_at must not read as live either -- the same
-# age-must-be->=-0 guard the future-timestamp test above pins would
-# otherwise be bypassed by an empty `now` producing the same kind of
-# nonsensical negative age this whole check exists to reject.
+# well-formed emitted_at must not read as live either. A DIFFERENT guard
+# from the future-timestamp test above: that one relies on age >= 0
+# rejecting a negative age once the arithmetic runs; this one never
+# reaches the arithmetic at all -- an empty `now` is caught by
+# _agmsg_token_locate_read's own non-empty check first. Pinned
+# separately because either guard could regress without the other
+# catching it.
 @test "observe: no_pending_token when the clock itself cannot be read (#1397)" {
   local path; path="$(_agmsg_token_locate_path myteam alice)"
   _seed_token myteam alice fixed-test-token "$OWNER" "$(date -u +%s)"
