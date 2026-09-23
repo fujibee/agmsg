@@ -150,6 +150,39 @@ _agmsg_safe_poke_box_matches() {
   [ "$(agmsg_input_box_normalize "$region")" = "$(agmsg_input_box_normalize "$expect_region")" ]
 }
 
+# Retypes <draft> into <id>'s box, but ONLY if the box first reads back
+# empty -- never blind. Review, second round: the gained-focus-mid-clear
+# abort typed the draft straight back without confirming the box was
+# actually empty first -- a clear that only partially worked would then
+# get the WHOLE draft appended on top of whatever was left, doubling or
+# corrupting it, a write that catching the mismatch afterward cannot undo.
+# This is now the ONLY way anything in this file retypes a draft, at every
+# one of the three sites that do -- not just the one review found.
+#
+# Echoes exactly one word and returns 0 in every case (the caller decides
+# what to report; this never types unconfirmed and never fails the caller
+# by its own exit status):
+#   matched    the box read back empty, the draft was typed, and the box
+#              now matches <expect_region> byte-for-byte (normalized).
+#   mismatch   the box read back empty and the draft was typed, but the
+#              box does not match afterward -- typed, not confirmed.
+#   refused    the box did NOT read back empty (or could not be confirmed)
+#              -- NOTHING was typed; the pane is exactly as found.
+_agmsg_safe_poke_retype_if_empty() {
+  local id="$1" marker="$2" boxed="$3" styled="$4" draft="$5" expect_region="$6"
+  if ! _agmsg_safe_poke_box_is_empty "$id" "$marker" "$boxed" "$styled"; then
+    echo refused
+    return 0
+  fi
+  terminal_input_type "$id" "$draft" >/dev/null 2>&1
+  if _agmsg_safe_poke_box_matches "$id" "$marker" "$boxed" "$styled" "$expect_region"; then
+    echo matched
+  else
+    echo mismatch
+  fi
+  return 0
+}
+
 _agmsg_safe_poke_recover() {
   local id="$1" text="$2" team="$3" name="$4" marker="$5" boxed="$6" styled="$7" region="$8"
   local draft
@@ -176,21 +209,26 @@ _agmsg_safe_poke_recover() {
 
   # Focus re-read #2: right after clearing, before either restoring outright
   # or going on to poke. Landing here means someone is now plausibly at the
-  # keyboard -- put the draft straight back and refuse, never type the
-  # poke's own text into a box someone just started using. The restore
-  # itself is verified (below) exactly like the end-of-success path is --
-  # its OWN rc is not trusted as proof, and the draft file is kept, not
-  # removed, unless the box reads back matching.
+  # keyboard -- retype ONLY if the box is confirmed empty first (review,
+  # second round), and refuse to touch the pane at all otherwise, rather
+  # than typing over whatever a partial clear left behind.
   local focus2=""
   focus2="$(terminal_pane_focused "$id" 2>/dev/null)" || focus2=""
   if [ "$focus2" != no ]; then
-    terminal_input_type "$id" "$draft" >/dev/null 2>&1
-    if _agmsg_safe_poke_box_matches "$id" "$marker" "$boxed" "$styled" "$region"; then
-      rm -f "$draft_file"
-      echo "poke: pane '$id' gained focus while its draft was being cleared -- restored it and refusing to type over it (input in progress)" >&2
-    else
-      echo "poke: pane '$id' gained focus while its draft was being cleared, and restoring it could not be confirmed -- the draft is saved at $draft_file; refusing to type over the pane (input in progress)" >&2
-    fi
+    local retyped
+    retyped="$(_agmsg_safe_poke_retype_if_empty "$id" "$marker" "$boxed" "$styled" "$draft" "$region")"
+    case "$retyped" in
+      matched)
+        rm -f "$draft_file"
+        echo "poke: pane '$id' gained focus while its draft was being cleared -- restored it and refusing to type over it (input in progress)" >&2
+        ;;
+      mismatch)
+        echo "poke: pane '$id' gained focus while its draft was being cleared, and restoring it could not be confirmed -- the draft is saved at $draft_file; refusing to type over the pane (input in progress)" >&2
+        ;;
+      *)
+        echo "poke: pane '$id' gained focus while its draft was being cleared, and its box did not read back empty -- left it untouched rather than risk doubling its contents; the draft is saved at $draft_file; refusing to type over the pane (input in progress)" >&2
+        ;;
+    esac
     return 14
   fi
 
@@ -206,29 +244,30 @@ _agmsg_safe_poke_recover() {
   rc=0
   terminal_poke "$id" "$text" >/dev/null || rc=$?
   if [ "$rc" -ne 0 ]; then
-    # The message never went in. Best effort: put the draft back rather
-    # than leave the box empty because a poke attempt failed -- verified
-    # the same way as every other retype here, and the file kept if it
-    # cannot be confirmed.
-    terminal_input_type "$id" "$draft" >/dev/null 2>&1
-    if _agmsg_safe_poke_box_matches "$id" "$marker" "$boxed" "$styled" "$region"; then
-      echo "poke: could not deliver to pane '$id' past its draft -- restored the draft; a saved copy also remains at $draft_file" >&2
-    else
-      echo "poke: could not deliver to pane '$id' past its draft, and restoring it could not be confirmed -- the draft is saved at $draft_file" >&2
-    fi
+    # The message never went in. Best effort: put the draft back, but --
+    # same discipline as every retype in this file -- only if the box is
+    # confirmed empty first.
+    local retyped
+    retyped="$(_agmsg_safe_poke_retype_if_empty "$id" "$marker" "$boxed" "$styled" "$draft" "$region")"
+    case "$retyped" in
+      matched) echo "poke: could not deliver to pane '$id' past its draft -- restored the draft; a saved copy also remains at $draft_file" >&2 ;;
+      mismatch) echo "poke: could not deliver to pane '$id' past its draft, and restoring it could not be confirmed -- the draft is saved at $draft_file" >&2 ;;
+      *) echo "poke: could not deliver to pane '$id' past its draft, and its box did not read back empty afterward -- left it untouched rather than risk doubling its contents; the draft is saved at $draft_file" >&2 ;;
+    esac
     return "$rc"
   fi
 
-  terminal_input_type "$id" "$draft" >/dev/null 2>&1
   # Verify in code, never by eye: compare the SAME normalized form used
   # everywhere else in this file, so the comparison is blind to styling
   # either read might carry, against the ORIGINAL region this function was
   # handed -- not a fresh classification, a byte-for-byte content check.
-  if _agmsg_safe_poke_box_matches "$id" "$marker" "$boxed" "$styled" "$region"; then
-    rm -f "$draft_file"
-  else
-    echo "poke: delivered to pane '$id', but its retyped draft does not match what was there before -- the original is saved at $draft_file" >&2
-  fi
+  local retyped
+  retyped="$(_agmsg_safe_poke_retype_if_empty "$id" "$marker" "$boxed" "$styled" "$draft" "$region")"
+  case "$retyped" in
+    matched) rm -f "$draft_file" ;;
+    mismatch) echo "poke: delivered to pane '$id', but its retyped draft does not match what was there before -- the original is saved at $draft_file" >&2 ;;
+    *) echo "poke: delivered to pane '$id', but its box did not read back empty afterward -- left the draft untyped rather than risk doubling its contents; the original is saved at $draft_file" >&2 ;;
+  esac
   return 0
 }
 

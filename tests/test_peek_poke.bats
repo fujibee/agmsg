@@ -165,6 +165,13 @@ _install_fake_herdr_real_draft_unfocused() {
     printf '  exit 0\n'
     printf 'fi\n'
     printf 'if [ "$1" = pane ] && [ "$2" = list ]; then\n'
+    printf '  if [ -f "%s/.focus_on_second_check" ]; then\n' "$FAKEBIN"
+    printf '    lists=$(grep -c '\''^herdr \\[pane\\] \\[list\\]'\'' "%s" 2>/dev/null)\n' "$ARGV_LOG"
+    printf '    if [ "$lists" -ge 2 ]; then\n'
+    printf '      printf '\''{"result":{"panes":[{"pane_id":"wC:p4","focused":true}]}}\\n'\''\n'
+    printf '      exit 0\n'
+    printf '    fi\n'
+    printf '  fi\n'
     printf '  printf '\''{"result":{"panes":[{"pane_id":"wC:p4","focused":false}]}}\\n'\''\n'
     printf '  exit 0\n'
     printf 'fi\n'
@@ -462,6 +469,26 @@ EOF
   [ "$status" -eq 0 ]
   grep -q '^herdr \[agent\] \[prompt\] \[wC:p4\] \[hello\]$' "$ARGV_LOG"
   [ -n "$(find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' 2>/dev/null)" ]
+  find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' -delete
+
+  # --- 4) (review, round 2) the FIRST focus check (before
+  # recovery starts) reads unfocused, clearing sends the keys but the draft
+  # is STILL there afterward, and the SECOND focus check (right after
+  # clearing) now reads focused -- someone arrived mid-clear. The abort
+  # branch must confirm the box is empty BEFORE ever retyping the draft
+  # back; here it never is, so `pane send-text` must not be called at all,
+  # not even the restore -- a partial clear plus a blind restore would
+  # append the whole draft on top of whatever the clear left behind.
+  : > "$ARGV_LOG"
+  rm -f "$FAKEBIN/.clear_empties" "$FAKEBIN/.restore_fails"
+  : > "$FAKEBIN/.focus_on_second_check"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hello"
+  [ "$status" -ne 0 ]
+  refute grep -q '^herdr \[pane\] \[send-text\]' "$ARGV_LOG"
+  refute grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
+  [ -n "$(find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' 2>/dev/null)" ]
+  find "$TEST_SKILL_DIR/run" -name 'poke-draft.*' -delete
+  rm -f "$FAKEBIN/.focus_on_second_check"
 }
 
 @test "poke: a plain record is unsupported as a TERMINAL answer, and points at the type's native channel (peek deliberately does not — no CLI read path)" {
