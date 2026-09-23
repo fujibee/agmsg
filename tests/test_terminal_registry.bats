@@ -204,6 +204,99 @@ _fake_herdr_list_scalar_session() {
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
 
+# A fake `orca` that logs argv and returns canned JSON for `terminal show` and
+# `terminal read`, shaped like the real 1.4.206 responses measured in
+# memory/design/2026-09-20-orca-terminal-driver-feasibility.md (Third pass).
+#   present  a live, connected terminal
+#   gone     a terminal that existed and was closed (positively confirmed:
+#            connected:false, orphaned:true, exitCause present)
+#   stale    a handle orca does not recognize at all — show/read answer
+#            ok:false, error code terminal_handle_stale, exit 1 (measured:
+#            this is the SAME shape orca gives for "never existed" as for
+#            "already closed" in the version measured, which is exactly why
+#            pane_state must never read this as `gone`)
+#   badjson  the CLI printed something that is not JSON at all
+#   runtime_unavailable  the Orca APP process is dead but its terminal daemon
+#            survives (measured 2026-09-23, feasibility doc Fourth pass (g)):
+#            every call still EXITS 0, but answers ok:false with this error
+#            code — the whole runtime is unreachable, not this one terminal.
+#   tail_empty/tail_missing/tail_null/tail_object/tail_scalar  read answers
+#            ok:true but `$.result.terminal.tail` is, respectively, a
+#            genuinely empty array (the only one of these that must SUCCEED,
+#            with empty stdout), absent, JSON null, an object, or a scalar
+#            string — review (#1439): ok:true alone does not prove tail is the
+#            array terminal_peek promises to emit; every non-array shape here
+#            must be rejected before json_each ever sees it.
+#   tail_bad_element  tail IS an array, but its second element is an object,
+#            not a string — review (#1439): json_type=array on the outer
+#            value does not prove every ELEMENT is a line of text.
+_install_fake_orca() {
+  local mode="${1:-present}" show_json show_rc=0 read_json read_rc=0
+  case "$mode" in
+    present)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["orca visible line one","orca visible line two"]}}}'
+      ;;
+    gone)
+      show_json='{"ok":true,"result":{"terminal":{"connected":false,"writable":false,"orphaned":true,"tabId":"tab-1","exitCause":{"kind":"operator_close"}}}}'
+      read_json='{"ok":false,"error":{"code":"terminal_not_writable"}}'
+      read_rc=1
+      ;;
+    stale)
+      show_json='{"ok":false,"error":{"code":"terminal_handle_stale"}}'
+      show_rc=1
+      read_json='{"ok":false,"error":{"code":"terminal_handle_stale"}}'
+      read_rc=1
+      ;;
+    runtime_unavailable)
+      show_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
+      read_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
+      ;;
+    badjson)
+      show_json='not json at all'
+      read_json='not json at all'
+      ;;
+    tail_empty)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":[]}}}'
+      ;;
+    tail_missing)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{}}}'
+      ;;
+    tail_null)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":null}}}'
+      ;;
+    tail_object)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":{}}}}'
+      ;;
+    tail_scalar)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":"not an array"}}}'
+      ;;
+    tail_bad_element)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["a real line",{"x":1}]}}}'
+      ;;
+  esac
+  cat > "$FAKEBIN/orca" <<EOF
+#!/usr/bin/env bash
+{ printf 'orca'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = terminal ] && [ "\$2" = show ]; then
+  echo '$show_json'
+  exit $show_rc
+elif [ "\$1" = terminal ] && [ "\$2" = read ]; then
+  echo '$read_json'
+  exit $read_rc
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/orca"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 # --- resolution -------------------------------------------------------------
 
 @test "resolve: falls back to plain when neither tmux nor herdr is present" {
@@ -247,7 +340,7 @@ _fake_herdr_list_scalar_session() {
   _install_external_terminal
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%4"
 
-  [ "$(agmsg_terminal_candidates)" = "$(printf 'herdr\nprobe\ntmux\nplain')" ]
+  [ "$(agmsg_terminal_candidates)" = "$(printf 'orca\nherdr\nprobe\ntmux\nplain')" ]
   [ "$(agmsg_terminal_resolve_placement sess-x)" = "probe" ]
   [ "$(agmsg_terminal_resolve_name sess-x)" = "$(printf 'probe\tprobe-pane')" ]
   [ "$(_agmsg_terminal_resolve_by_label testteam alice)" = "$(printf 'probe\tprobe-pane')" ]
@@ -1086,6 +1179,264 @@ _last_agent_rename_key() {
   [ "$k3" != "$k4" ]
 }
 
+# --- orca driver ops (fake orca argv; read-only in this release) ------------
+
+@test "orca: check ok when the orca binary is on PATH, missing_deps otherwise" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_check
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+
+  # A dedicated EMPTY directory, not "$PATH minus \$FAKEBIN": a real dev
+  # machine plausibly has orca on PATH somewhere else too, so removing only
+  # $FAKEBIN does not reliably reproduce "not found" (measured — it did not,
+  # on this machine).
+  local empty_path="$BATS_TEST_TMPDIR/empty-path"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_check
+  [ "$status" -eq 10 ]
+  [ "$output" = "$(printf 'AGMSG-DIRECTIVE: {"type":"install_deps","driver":"terminals/orca","reason":"orca not found"}\nmissing_deps')" ]
+}
+
+@test "orca: describe advertises exactly its read-only ceiling" {
+  agmsg_terminal_load orca
+  run terminal_describe
+  [ "$status" -eq 0 ]
+  # grep, not `[[ ]]` (#670): a non-last one cannot fail a bats test on macOS
+  # bash 3.2, and consistently avoiding it here means a later edit adding a
+  # line after these can't silently reintroduce that same class of bug.
+  grep -qF -- 'name=orca' <<< "$output"
+  grep -qF -- 'capabilities=peek where' <<< "$output"
+}
+
+@test "orca: detect requires TERM_PROGRAM=Orca, prints the handle from the env" {
+  agmsg_terminal_load orca
+  unset TERM_PROGRAM ORCA_TERMINAL_HANDLE
+  run terminal_detect ""
+  [ "$status" -eq 1 ]
+
+  export TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE='term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
+  run terminal_detect ""
+  [ "$status" -eq 0 ]
+  [ "$output" = 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba' ]
+}
+
+@test "orca: terminal_id_ok accepts only the measured term_<uuid> grammar" {
+  # `refute`, not `! terminal_id_ok ...` (#670): a non-last `! cmd` cannot
+  # fail a bats test on any bash, and this file's own enforceable-assertions
+  # CI check caught exactly that here — every one of these would have stayed
+  # green even if terminal_id_ok wrongly accepted the bad input.
+  agmsg_terminal_load orca
+  terminal_id_ok 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
+  refute terminal_id_ok 'term_abc123'
+  refute terminal_id_ok ''
+  refute terminal_id_ok 'not-a-handle'
+  # Control/whitespace bytes that would corrupt a tab-separated placement
+  # record (review, #1439) — every one must be refused, not just "no id at
+  # all".
+  refute terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tinjected')"
+  refute terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\ninjected')"
+  refute terminal_id_ok 'term_ea11f227 ca2c-44b0-a3e6-75c62b9f20ba'
+  # Five non-empty hex groups is not enough on its own (review, #1439): a
+  # UUID's groups are fixed at 8-4-4-4-12, and without checking each group's
+  # own length this shape — five groups, wrong lengths — passed.
+  refute terminal_id_ok 'term_a-b-c-d-e'
+}
+
+@test "orca: detect refuses a malformed ORCA_TERMINAL_HANDLE — a tab/newline never reaches stdout" {
+  # Same authority as terminal_id_ok (review, #1439): without this, the
+  # registry's own "driver has no terminal_id_ok" fallback ACCEPTS any value,
+  # and a tab or newline smuggled into the env var would corrupt the
+  # tab-separated placement record terminal_detect's result gets written into.
+  agmsg_terminal_load orca
+  export TERM_PROGRAM=Orca
+  export ORCA_TERMINAL_HANDLE
+  ORCA_TERMINAL_HANDLE="$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tinjected')"
+  run terminal_detect ""
+  [ "$status" -eq 0 ]
+  local stdout_only
+  stdout_only="$(terminal_detect "" 2>/dev/null)"
+  [ -z "$stdout_only" ]
+}
+
+@test "orca: detect is present-but-unresolved when TERM_PROGRAM=Orca but the handle is unset" {
+  agmsg_terminal_load orca
+  export TERM_PROGRAM=Orca
+  unset ORCA_TERMINAL_HANDLE
+  # `run` merges stdout+stderr into $output (bats default), so the assertion
+  # is on the REASON reaching the caller, not on emptiness — stdout itself
+  # (checked separately, since terminal_detect's real contract is "empty
+  # stdout, reason on stderr") is confirmed via the stdout-only capture below.
+  run terminal_detect ""
+  [ "$status" -eq 0 ]
+  # grep, not a non-last `[[ ]]` (#670): the latter cannot fail a bats test
+  # on macOS bash 3.2 when it is not the test's own final statement.
+  grep -qF -- 'ORCA_TERMINAL_HANDLE is unset' <<< "$output"
+  local stdout_only
+  stdout_only="$(terminal_detect "" 2>/dev/null)"
+  [ -z "$stdout_only" ]
+}
+
+@test "orca: pane_state present/gone come from show's connected field, never from close" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_pane_state term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = present ]
+
+  _install_fake_orca gone
+  run terminal_pane_state term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = gone ]
+}
+
+@test "orca: pane_state on a stale/unrecognized handle is unknown, never gone (#1051-shaped)" {
+  # Measured (Third pass, 2026-09-23): orca 1.4.206 gives the SAME
+  # terminal_handle_stale shape for a handle that never existed as it once did
+  # (1.4.198) for one that was merely closed. A caller that read this as `gone`
+  # would delete a placement record on an ambiguous signal — exactly what the
+  # driver must not do.
+  _install_fake_orca stale
+  agmsg_terminal_load orca
+  run terminal_pane_state term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+}
+
+@test "orca: pane_state is unknown when orca is not on PATH or answers unparsable JSON" {
+  agmsg_terminal_load orca
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-pane-state"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_pane_state term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+
+  _install_fake_orca badjson
+  run terminal_pane_state term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+}
+
+@test "orca: where prints the tab id from show; unresolved is unknown, never a claim of gone" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_where term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = tab-1 ]
+
+  _install_fake_orca stale
+  run terminal_where term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+}
+
+@test "orca: peek reads via --screen and prints the rendered tail verbatim" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_peek term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'orca visible line one\norca visible line two')" ]
+  grep -qF -- '--screen' "$ARGV_LOG"
+  grep -qF -- '[term_abc123]' "$ARGV_LOG"
+}
+
+@test "orca: peek --lines maps to --limit, passed through unchanged" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_peek term_abc123 --lines 50
+  [ "$status" -eq 0 ]
+  grep -qF -- '[--limit] [50]' "$ARGV_LOG"
+}
+
+@test "orca: peek accepts a genuinely empty tail array as success, empty stdout" {
+  _install_fake_orca tail_empty
+  agmsg_terminal_load orca
+  run terminal_peek term_abc123
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "orca: peek is 12, never a false success, when tail is missing/null/object/scalar, or has a non-text element (#1439 review)" {
+  # ok:true alone does not prove `tail` is the array terminal_peek promises to
+  # emit. Missing/null would otherwise iterate to ZERO rows (indistinguishable
+  # from tail_empty's GENUINE empty pane, tested above); a scalar would
+  # iterate to ONE row holding that whole scalar as if it were real pane
+  # content; and json_type=array on the OUTER value does not prove every
+  # ELEMENT is text either — tail_bad_element is a real array whose second
+  # element is an object. All five must be rejected with 12, and — checked on
+  # stdout ALONE, since `run`'s $output merges the expected stderr reason in —
+  # never emit anything on stdout, especially not a non-text element's own
+  # JSON as if it were real pane content.
+  agmsg_terminal_load orca
+  local mode stdout_only rc
+
+  for mode in tail_missing tail_null tail_object tail_scalar tail_bad_element; do
+    _install_fake_orca "$mode"
+    rc=0
+    stdout_only="$(terminal_peek term_abc123 2>/dev/null)" || rc=$?
+    [ "$rc" -eq 12 ]
+    [ -z "$stdout_only" ]
+  done
+}
+
+@test "orca: peek is 10 when unreachable, 12 when answered but failed, never 13" {
+  agmsg_terminal_load orca
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-peek"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_peek term_abc123
+  [ "$status" -eq 10 ]
+
+  _install_fake_orca stale
+  run terminal_peek term_abc123
+  [ "$status" -eq 12 ]
+
+  _install_fake_orca badjson
+  run terminal_peek term_abc123
+  [ "$status" -eq 12 ]
+}
+
+@test "orca: runtime_unavailable (app dead, daemon alive) is 10 everywhere, not 12, not gone" {
+  # Measured 2026-09-23: killing the Orca APP while its terminal daemon
+  # survives leaves every `orca` call exiting 0 but answering ok:false
+  # with this code. Exit code alone is not evidence of success, and this
+  # specific code means the whole runtime is unreachable — not this one
+  # terminal being gone — so it must land on the SAME code as "not on PATH",
+  # never on gone/12.
+  _install_fake_orca runtime_unavailable
+  agmsg_terminal_load orca
+  run terminal_pane_state term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+
+  run terminal_where term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+
+  run terminal_peek term_abc123
+  [ "$status" -eq 10 ]
+}
+
+@test "orca: spawn/despawn/poke/name/arrange all report unsupported (13) — read-only this release" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_spawn alice /proj pane-v bash -lc boot
+  [ "$status" -eq 13 ]
+  run terminal_despawn term_abc123
+  [ "$status" -eq 13 ]
+  run terminal_poke term_abc123 hello
+  [ "$status" -eq 13 ]
+  run terminal_name term_abc123 team alice
+  [ "$status" -eq 13 ]
+  run terminal_arrange term_abc123 place_below term_def456
+  [ "$status" -eq 13 ]
+  # None of these ever touched the fake orca binary.
+  refute grep -q '\[create\]' "$ARGV_LOG"
+  refute grep -q '\[close\]' "$ARGV_LOG"
+  refute grep -q '\[send\]' "$ARGV_LOG"
+  refute grep -q '\[rename\]' "$ARGV_LOG"
+}
+
 # --- ABI completeness + structural clobber-proofing (#1014 review) -------
 
 @test "abi: every driver defines every required terminal_* function" {
@@ -1096,11 +1447,12 @@ _last_agent_rename_key() {
   agmsg_terminal_load plain
   agmsg_terminal_load tmux
   agmsg_terminal_load herdr
+  agmsg_terminal_load orca
 }
 
 @test "abi: capabilities= verbs are actually implemented by each driver" {
   local d cap fn
-  for d in plain tmux herdr; do
+  for d in plain tmux herdr orca; do
     ( agmsg_terminal_load "$d"
       for cap in $(agmsg_terminal_get "$d" capabilities); do
         fn="terminal_$cap"
