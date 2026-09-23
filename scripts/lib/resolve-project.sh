@@ -239,6 +239,28 @@ agmsg_find_registered_project_variant() {
   return 1
 }
 
+# Does an external base (an opt-in plugin dir) even HAVE a
+# types/<type>/type.conf -- existence only, never a trust decision
+# (driver-registry.sh's agmsg_driver_is_trusted owns that). Deliberately
+# never cached: both AGMSG_PLUGIN_DIRS and trust state (agmsg_driver_trust /
+# agmsg_driver_untrust) can change within one long-lived process (watch.sh),
+# and this costs nothing worth caching anyway -- `[ -f ]` tests only, no
+# external command, no fork. Bases and their order come straight from
+# driver-registry.sh's own agmsg_driver_bases -- verified against that file
+# directly, not from memory (2026-09-22): builtin ($root/scripts/drivers,
+# always eligible, not checked here since it is never itself an override
+# source), then $root/plugins, then each $AGMSG_PLUGIN_DIRS entry.
+_agmsg_type_external_candidate() {
+  local type="$1" root="${SKILL_DIR:-}" d
+  [ -n "$root" ] || return 1
+  [ -f "$root/plugins/types/$type/type.conf" ] && return 0
+  local IFS=:
+  for d in ${AGMSG_PLUGIN_DIRS:-}; do
+    [ -n "$d" ] && [ -f "$d/types/$type/type.conf" ] && return 0
+  done
+  return 1
+}
+
 # Read a single type's detect_proc manifest key, without sourcing
 # type-registry.sh for the common case. Built-in types (drivers/types/<name>/
 # type.conf, always trusted) are read directly here -- same shape
@@ -246,38 +268,24 @@ agmsg_find_registered_project_variant() {
 # first match, trim/unquote), so behavior matches exactly for every type this
 # is actually tested against.
 #
-# That fast path is taken ONLY when no external base could possibly override
-# this type (review, #631 round 3 -- the first version of this function
-# always preferred the builtin, silently skipping the registry's own "a
-# trusted external plugin shadows a same-named builtin" contract, which is
-# exactly the #626/#631 bug class in a new place). Bases and their order come
-# straight from driver-registry.sh's own agmsg_driver_bases -- verified
-# against that file directly, not from memory (2026-09-22): builtin
-# ($root/scripts/drivers, always eligible), then $root/plugins, then each
-# $AGMSG_PLUGIN_DIRS entry (both external, opt-in). The two checks below are
-# existence only -- NOT a trust check: if either external location merely
-# HAS a types/<type>/type.conf, this defers to the full, trust-aware lookup,
-# whether or not that candidate turns out trusted. Deciding trust here too
-# would risk drifting from the real policy (driver-registry.sh's
-# agmsg_driver_is_trusted) instead of reusing it, and a duplicate that drifts
-# is worse than no duplicate. Sourced lazily, only on that fallback (an
-# external candidate exists, or the builtin has none), so a plugin-free
-# install -- the case every current test exercises -- never pays
-# type-registry.sh's own source-time cost.
+# That fast path is taken ONLY when _agmsg_type_external_candidate says no
+# external base could possibly override this type (review, #631 -- the
+# first version of this function always preferred the builtin, silently
+# skipping the registry's own "a trusted external plugin shadows a
+# same-named builtin" contract, which is exactly the #626/#631 bug class in
+# a new place). Whenever a candidate exists, this defers to the full,
+# trust-aware lookup, whether or not that candidate turns out trusted --
+# deciding trust here too would risk drifting from the real policy
+# (driver-registry.sh's agmsg_driver_is_trusted) instead of reusing it.
+# Sourced lazily, only on that fallback, so a plugin-free install -- the
+# case every current test exercises -- never pays type-registry.sh's own
+# source-time cost.
 _agmsg_type_detect_proc() {
-  local type="$1" root dir line val d external=0
+  local type="$1" root dir line val
   [ -n "${SKILL_DIR:-}" ] || return 1
   root="$SKILL_DIR"
 
-  [ -f "$root/plugins/types/$type/type.conf" ] && external=1
-  if [ "$external" -eq 0 ]; then
-    local IFS=:
-    for d in ${AGMSG_PLUGIN_DIRS:-}; do
-      [ -n "$d" ] && [ -f "$d/types/$type/type.conf" ] && { external=1; break; }
-    done
-  fi
-
-  if [ "$external" -eq 0 ]; then
+  if ! _agmsg_type_external_candidate "$type"; then
     dir="$root/scripts/drivers/types/$type"
     if [ -f "$dir/type.conf" ]; then
       line="$( { grep -E '^[[:space:]]*detect_proc[[:space:]]*=' "$dir/type.conf" 2>/dev/null || true; } | head -1)"
@@ -338,23 +346,44 @@ _agmsg_type_detect_proc() {
 # memoization existed in source but did nothing). See memory's "a cache array
 # populated inside $(...) is discarded" for the same shape elsewhere.
 _agmsg_agent_binaries() {
-  local type="$1" cache_var procs tok out="" _plugin_dirs
-  # The key includes AGMSG_PLUGIN_DIRS (review, #631 round 3):
-  # _agmsg_type_detect_proc's override-existence check depends on it, so a
-  # value that changes within one process (a test fixture switching plugin
-  # dirs mid-run; the only realistic case, but a real one) must not read
-  # back a result cached under a DIFFERENT AGMSG_PLUGIN_DIRS. Pure bash
-  # pattern substitution, not `tr` -- no fork, and it also drops the two
-  # per-distinct-type forks the old `tr`-based sanitizing cost on every
-  # cache miss. The `:-` default is required under `set -u` when the
-  # variable is unset, not merely a style choice -- measured, a bare
-  # `${AGMSG_PLUGIN_DIRS//...}` throws "unbound variable" there.
-  _plugin_dirs="${AGMSG_PLUGIN_DIRS:-}"
-  cache_var="_AGMSG_AGENT_BINS_${type//[^A-Za-z0-9]/_}_${_plugin_dirs//[^A-Za-z0-9]/_}"
-  if [ -n "${!cache_var:-}" ]; then
-    _AGMSG_AGENT_BINARIES_OUT="${!cache_var}"
-    printf '%s\n' "$_AGMSG_AGENT_BINARIES_OUT"
-    return 0
+  local type="$1" cache_var procs tok out="" cacheable=1
+  # Only the "no external candidate, read the builtin" answer is cached
+  # (review): an external candidate's own detect_proc can only be read
+  # correctly by re-checking trust every time -- agmsg_driver_trust /
+  # agmsg_driver_untrust can flip WITHIN one long-lived process (watch.sh),
+  # so a cached "not yet trusted, use the builtin" answer would keep
+  # returning the builtin forever after a later `agmsg plugin trust`
+  # (measured: caching that path made exactly this happen, in one process,
+  # across two calls). That path is already uncached lower down, in
+  # _agmsg_type_detect_proc's own fallback to type-registry.sh; skipping
+  # the cache here for it costs nothing the hot path's own fork budget
+  # cares about, since it is only reached by an install that actually has a
+  # plugin dir for this type.
+  _agmsg_type_external_candidate "$type" && cacheable=0
+
+  if [ "$cacheable" -eq 1 ]; then
+    # Reversible, collision-free (review): '_' -> '_5f' first, THEN
+    # '-' -> '_2d', in that order, so the '_' a '-' escape introduces is
+    # never re-escaped as if it were an original one. The previous version
+    # sanitized with `${type//[^A-Za-z0-9]/_}`, which is lossy and NOT
+    # collision-free ('foo-bar' and 'foo_bar' produced the same key) --
+    # measured. Every existing and plausible type name is [a-z0-9-]
+    # (claude-code, grok-build, agmsg-app, ...); nothing in this tree
+    # validates or rejects any other character in a type name, but nothing
+    # uses one either, so there is no third character to give the same
+    # treatment. AGMSG_PLUGIN_DIRS no longer participates in this key at
+    # all -- dropping it removes the OTHER collision this same review found
+    # ('/tmp/a-b' and '/tmp/a/b' both sanitizing to 'tmp_a_b') by removing
+    # the input, not by trying to encode it safely; the existence check
+    # above already re-reads it on every call regardless.
+    cache_var="${type//_/_5f}"
+    cache_var="${cache_var//-/_2d}"
+    cache_var="_AGMSG_AGENT_BINS_$cache_var"
+    if [ -n "${!cache_var:-}" ]; then
+      _AGMSG_AGENT_BINARIES_OUT="${!cache_var}"
+      printf '%s\n' "$_AGMSG_AGENT_BINARIES_OUT"
+      return 0
+    fi
   fi
 
   procs="$(_agmsg_type_detect_proc "$type" 2>/dev/null || true)"
@@ -374,7 +403,7 @@ _agmsg_agent_binaries() {
       *)           out="claude codex gemini" ;;
     esac
   fi
-  printf -v "$cache_var" '%s' "$out"
+  [ "$cacheable" -eq 1 ] && printf -v "$cache_var" '%s' "$out"
   _AGMSG_AGENT_BINARIES_OUT="$out"
   printf '%s\n' "$out"
 }

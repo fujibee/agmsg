@@ -496,28 +496,38 @@ setup_git_repo() {
   # mistake a plugin dir merely being PRESENT for a trust decision -- the
   # fast path's own existence check must not be, and must not skip, the
   # registry's real trust check (driver-registry.sh's agmsg_driver_is_trusted).
-  # One property, both directions: untrusted resolves to the builtin exactly
-  # as agmsg_type_get itself would, and the SAME location, once opted in,
-  # overrides it -- checked in that order, on the same plugin dir, so the
-  # only thing that changes between the two calls is the trust state.
+  # One property, both directions, checked in the SAME process (review):
+  # a version that cached the builtin answer the first time this type was
+  # looked up -- before agmsg_driver_trust ran, in the SAME shell -- kept
+  # returning the builtin forever after, since nothing invalidated it. Two
+  # separate `bash -c` calls could not catch that (a fresh process has no
+  # stale cache to return); this exercises it directly, matching the shape
+  # a real long-lived process (watch.sh) actually has.
   local plugdir="$ROOT/plugins"
   mkdir -p "$plugdir/types/claude-code"
   printf 'detect_proc=totally-different-binary\n' > "$plugdir/types/claude-code/type.conf"
 
-  # Not yet trusted: falls back to the builtin.
-  run env AGMSG_PLUGIN_DIRS="$plugdir" bash -c \
-    'SKILL_DIR="$1"; . "$SKILL_DIR/scripts/lib/resolve-project.sh"; _agmsg_agent_binaries claude-code' \
-    _ "$SKILL_DIR"
-  [ "$output" = "claude claude-code" ]
-
-  # shellcheck disable=SC1090
-  source "$SKILL_DIR/scripts/lib/driver-registry.sh"
-  agmsg_driver_trust types claude-code "$plugdir/types/claude-code"
-
-  # Trusted now: a separate `bash -c` process, so no cache from the call
-  # above could carry the old answer forward even by accident.
-  run env AGMSG_PLUGIN_DIRS="$plugdir" bash -c \
-    'SKILL_DIR="$1"; . "$SKILL_DIR/scripts/lib/resolve-project.sh"; _agmsg_agent_binaries claude-code' \
-    _ "$SKILL_DIR"
-  [ "$output" = "totally-different-binary" ]
+  # Both calls below are PLAIN STATEMENTS, never `x=$(_agmsg_agent_binaries
+  # ...)`: a command substitution runs the call in a subshell, and the
+  # cache write (`printf -v "$cache_var" ...`) is a global -- one made
+  # inside that subshell never reaches the parent shell, so a `$( )`-based
+  # version of this test would never exercise stale-cache reuse at all,
+  # on ANY implementation (measured: it stayed green against the very
+  # version this test exists to catch). Reading the result from
+  # _AGMSG_AGENT_BINARIES_OUT (the side channel _agmsg_agent_binaries
+  # already sets for exactly this reason) is what makes the cache real.
+  run env AGMSG_PLUGIN_DIRS="$plugdir" bash -c '
+    SKILL_DIR="$1"
+    . "$SKILL_DIR/scripts/lib/resolve-project.sh"
+    # Not yet trusted: falls back to the builtin.
+    _agmsg_agent_binaries claude-code >/dev/null
+    echo "before=$_AGMSG_AGENT_BINARIES_OUT"
+    . "$SKILL_DIR/scripts/lib/driver-registry.sh"
+    agmsg_driver_trust types claude-code "$2"
+    # Trusted now, same process, same cache: must re-check, not reuse the
+    # answer from before trust was granted.
+    _agmsg_agent_binaries claude-code >/dev/null
+    echo "after=$_AGMSG_AGENT_BINARIES_OUT"
+  ' _ "$SKILL_DIR" "$plugdir/types/claude-code"
+  [ "$output" = "$(printf 'before=claude claude-code\nafter=totally-different-binary')" ]
 }
