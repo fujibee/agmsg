@@ -429,8 +429,31 @@ EOF
   chmod 755 "$unwritable_dir"
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -q -F "could not arm the bridge request for team/bob"
-  printf '%s\n' "$output" | grep -q -F "codex-record-session.sh"
   [ -z "$(ls "$unwritable_dir"/codex-bridge-request.* 2>/dev/null)" ]
   [ -z "$(find "$unwritable_dir" -name '*.tmp' -o -name '*.[0-9]*' 2>/dev/null)" ]
   [ -n "$(ls "$TEST_SKILL_DIR"/run/codex-app-server.*.record 2>/dev/null)" ]
+
+  # The printed fallback is meant to be pasted into an ordinary shell and run
+  # (review finding: "codex-record-session.sh <args>" alone is not a PATH
+  # command and would fail as command-not-found; it must be a full `bash
+  # <script path> <args>` line). Confirm it by actually running it -- not by
+  # grepping a substring, which the earlier, broken form would also match --
+  # and checking it reaches the real script, as bash, with the exact
+  # team/agent/project this failure was for.
+  local record_script="$TYPES/codex/codex-record-session.sh"
+  local record_spy_out="$TEST_PROJECT/record-spy.out"
+  cp "$record_script" "$record_script.orig"
+  cat > "$record_script" <<SPYEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$0" "\$1" "\$2" "\$3" > "$record_spy_out"
+SPYEOF
+  local fallback_line
+  fallback_line="$(printf '%s\n' "$output" | grep -F 'Run this by hand')"
+  fallback_line="${fallback_line#*bring it: }"
+  bash -c "$fallback_line"
+  mv "$record_script.orig" "$record_script"
+  [ "$(sed -n '1p' "$record_spy_out")" = "$record_script" ]
+  [ "$(sed -n '2p' "$record_spy_out")" = team ]
+  [ "$(sed -n '3p' "$record_spy_out")" = bob ]
+  [ "$(sed -n '4p' "$record_spy_out")" = "$TEST_PROJECT" ]
 }

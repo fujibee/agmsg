@@ -287,7 +287,7 @@ if [ "$CODEX_COMMAND" = resume ] && [ "${#CODEX_ARGS[@]}" -eq 1 ]; then
         # -- via a different cause. Codex still launches either way; only the
         # diagnostic (and the manual fallback it points at) changes.
         if [ -n "$_resume_fail_stage" ]; then
-          echo "codex-monitor: could not arm the bridge request for $_resume_team/$_resume_agent ($_resume_fail_stage failed) -- Codex will still start without the bridge. Run this by hand once Codex is up to bring it: codex-record-session.sh $(agmsg_shq "$_resume_team") $(agmsg_shq "$_resume_agent") $(agmsg_shq "$PROJECT")" >&2
+          echo "codex-monitor: could not arm the bridge request for $_resume_team/$_resume_agent ($_resume_fail_stage failed) -- Codex will still start without the bridge. Run this by hand once Codex is up to bring it: bash $(agmsg_shq "$SCRIPT_DIR/codex-record-session.sh") $(agmsg_shq "$_resume_team") $(agmsg_shq "$_resume_agent") $(agmsg_shq "$PROJECT")" >&2
         fi
       fi
       ;;
