@@ -1203,8 +1203,11 @@ _last_agent_rename_key() {
   agmsg_terminal_load orca
   run terminal_describe
   [ "$status" -eq 0 ]
-  [[ "$output" == *"name=orca"* ]]
-  [[ "$output" == *"capabilities=peek where"* ]]
+  # grep, not `[[ ]]` (#670): a non-last one cannot fail a bats test on macOS
+  # bash 3.2, and consistently avoiding it here means a later edit adding a
+  # line after these can't silently reintroduce that same class of bug.
+  grep -qF -- 'name=orca' <<< "$output"
+  grep -qF -- 'capabilities=peek where' <<< "$output"
 }
 
 @test "orca: detect requires TERM_PROGRAM=Orca, prints the handle from the env" {
@@ -1220,21 +1223,25 @@ _last_agent_rename_key() {
 }
 
 @test "orca: terminal_id_ok accepts only the measured term_<uuid> grammar" {
+  # `refute`, not `! terminal_id_ok ...` (#670): a non-last `! cmd` cannot
+  # fail a bats test on any bash, and this file's own enforceable-assertions
+  # CI check caught exactly that here — every one of these would have stayed
+  # green even if terminal_id_ok wrongly accepted the bad input.
   agmsg_terminal_load orca
   terminal_id_ok 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
-  ! terminal_id_ok 'term_abc123'
-  ! terminal_id_ok ''
-  ! terminal_id_ok 'not-a-handle'
+  refute terminal_id_ok 'term_abc123'
+  refute terminal_id_ok ''
+  refute terminal_id_ok 'not-a-handle'
   # Control/whitespace bytes that would corrupt a tab-separated placement
   # record (review, #1439) — every one must be refused, not just "no id at
   # all".
-  ! terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tinjected')"
-  ! terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\ninjected')"
-  ! terminal_id_ok 'term_ea11f227 ca2c-44b0-a3e6-75c62b9f20ba'
+  refute terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tinjected')"
+  refute terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\ninjected')"
+  refute terminal_id_ok 'term_ea11f227 ca2c-44b0-a3e6-75c62b9f20ba'
   # Five non-empty hex groups is not enough on its own (review, #1439): a
   # UUID's groups are fixed at 8-4-4-4-12, and without checking each group's
   # own length this shape — five groups, wrong lengths — passed.
-  ! terminal_id_ok 'term_a-b-c-d-e'
+  refute terminal_id_ok 'term_a-b-c-d-e'
 }
 
 @test "orca: detect refuses a malformed ORCA_TERMINAL_HANDLE — a tab/newline never reaches stdout" {
@@ -1263,7 +1270,9 @@ _last_agent_rename_key() {
   # stdout, reason on stderr") is confirmed via the stdout-only capture below.
   run terminal_detect ""
   [ "$status" -eq 0 ]
-  [[ "$output" == *'ORCA_TERMINAL_HANDLE is unset'* ]]
+  # grep, not a non-last `[[ ]]` (#670): the latter cannot fail a bats test
+  # on macOS bash 3.2 when it is not the test's own final statement.
+  grep -qF -- 'ORCA_TERMINAL_HANDLE is unset' <<< "$output"
   local stdout_only
   stdout_only="$(terminal_detect "" 2>/dev/null)"
   [ -z "$stdout_only" ]
