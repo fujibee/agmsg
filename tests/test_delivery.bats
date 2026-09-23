@@ -73,6 +73,26 @@ settings_file() {
   ! has_check_inbox "$(settings_file)"
 }
 
+# #1392: a refused hooks_file write used to be silent in effect -- exit
+# non-zero via `set -e` alone (no test pinned that), but with only a bare
+# `mv: ... Permission denied` and no agmsg context, easy to miss and no next
+# step. Reproduces the real shape (Codex's workspace-write sandbox keeps
+# .codex/ read-only even inside an otherwise-writable project, confirmed
+# live, #1392) with a read-only .codex/ rather than mocking mv, so this
+# catches a regression in the real mv call, not in a stand-in for it.
+@test "delivery set: a refused hooks_file write fails loudly and names the file" {
+  mkdir -p "$TEST_PROJECT/.codex"
+  chmod 555 "$TEST_PROJECT/.codex"
+  run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  chmod 755 "$TEST_PROJECT/.codex"   # teardown's rm -rf must not trip over this
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not write $TEST_PROJECT/.codex/hooks.json"* ]]
+  [[ "$output" == *"delivery for codex was NOT set up"* ]]
+  [[ "$output" == *"run this same command from a normal, unsandboxed shell"* ]]
+  case "$output" in *"Delivery mode set to"*) return 1 ;; esac
+  [ ! -f "$TEST_PROJECT/.codex/hooks.json" ]
+}
+
 # --- idempotency ---
 
 @test "delivery set monitor: idempotent" {

@@ -143,7 +143,22 @@ agmsg_delivery_apply_default() {
 
   local hooks_file
   hooks_file=$(resolve_hooks_file "$type" "$project")
-  mkdir -p "$(dirname "$hooks_file")"
+  # A refused write here used to be silent in effect even though `set -e`
+  # (line 2) happened to make the SCRIPT exit non-zero: the failure was a bare
+  # `mkdir: ... Permission denied` with no agmsg context, easy to miss in a
+  # long transcript and giving no next step -- and a caller wrapping this call
+  # in its own `|| true`/subshell would lose even that (#1392, confirmed live:
+  # Codex's workspace-write sandbox keeps .codex/ read-only even inside an
+  # otherwise-writable project, so a re-setup from inside a sandboxed seat hit
+  # exactly this and the seat went deaf with nothing telling anyone). Named
+  # explicitly and unconditionally here rather than left to `set -e` alone, so
+  # this stays loud even from a caller that does not propagate exit codes.
+  mkdir -p "$(dirname "$hooks_file")" || {
+    echo "agmsg: could not create $(dirname "$hooks_file") to write $hooks_file — delivery for $type was NOT set up." >&2
+    echo "agmsg: if this seat is running in a restricted sandbox (e.g. Codex's workspace-write mode keeps .codex/ read-only), run this same command from a normal, unsandboxed shell instead:" >&2
+    echo "  bash '$0' set $mode $type '$project'" >&2
+    return 1
+  }
 
   # Whether hook entries also need a Windows-native "commandWindows" variant is
   # a per-type manifest fact (hook_windows_wrap=yes). Resolve it here — the layer
@@ -269,7 +284,20 @@ agmsg_delivery_apply_default() {
 
   prune_empty_hooks_file "$tmp_state"
 
-  mv "$tmp_state" "$hooks_file"
+  # Same reasoning as the mkdir -p guard above (#1392): a refused rename here
+  # is the more common failure shape in practice (the directory usually
+  # already exists; it is the file WITHIN it a sandbox keeps read-only), so
+  # this is the one that actually bit a real Codex seat. Named explicitly
+  # rather than left to `set -e` alone, and the temp file is cleaned up on
+  # this path too -- a caller retrying after fixing permissions must not
+  # trip over a stale mktemp file accumulating in $TMPDIR.
+  if ! mv "$tmp_state" "$hooks_file"; then
+    rm -f "$tmp_state"
+    echo "agmsg: could not write $hooks_file — delivery for $type was NOT set up." >&2
+    echo "agmsg: if this seat is running in a restricted sandbox (e.g. Codex's workspace-write mode keeps .codex/ read-only), run this same command from a normal, unsandboxed shell instead:" >&2
+    echo "  bash '$0' set $mode $type '$project'" >&2
+    return 1
+  fi
 }
 
 # Default delivery entry points (Template Method). A type's plug
