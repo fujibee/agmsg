@@ -15,8 +15,12 @@
 #   3. proof     -- agmsg_self_proof (#1154): the pane's process is in the
 #                   owner's complete ancestry, or it is not, or we cannot tell
 #   4. fallback  -- when the proof does not say proved and #1188's emit-and-
-#                   observe is present (agmsg_token_locate_self), that runs, in
-#                   the same four-state contract
+#                   observe is present (agmsg_token_locate_pending / _emit /
+#                   _observe, #1386), that runs, in the same four-state
+#                   contract -- across two SEPARATE calls to this whole
+#                   script, since a token this call both emits and searches
+#                   for in the same breath is never actually on screen yet
+#                   to find (see token-locate.sh)
 #   5. write     -- ONLY on proved: the record and decorations through
 #                   agmsg_self_write, under the seat-local lock. Anything else
 #                   is reported by name and NOTHING is written.
@@ -39,10 +43,11 @@
 . "${SKILL_DIR:?}/scripts/lib/self-proof.sh"
 # shellcheck disable=SC1091
 . "${SKILL_DIR:?}/scripts/lib/self-write.sh"
-# _fix_locate's emit-and-observe fallback (#1188) calls agmsg_token_locate_self
-# behind a declare -F check; nothing sourced this function in production, so
-# the check was always false and the fallback never ran. This file is what
-# depends on it, so this file sources it.
+# _fix_locate's emit-and-observe fallback (#1188) calls
+# agmsg_token_locate_pending/_emit/_observe behind a declare -F check;
+# nothing sourced these functions in production, so the check was always
+# false and the fallback never ran. This file is what depends on it, so
+# this file sources it.
 # shellcheck disable=SC1091
 . "${SKILL_DIR:?}/scripts/lib/token-locate.sh"
 
@@ -103,14 +108,29 @@ _fix_locate() {   # <team> <agent>
   else
     out="undetermined"$'\t'"no_candidate_in_env"; rc=2
   fi
-  # not proved: the emit-and-observe fallback (#1188), when it is present
-  if declare -F agmsg_token_locate_self >/dev/null 2>&1; then
-    local fo frc=0
-    fo="$(agmsg_token_locate_self "$team" "$agent")" || frc=$?
-    case "$frc:${fo%%$'\t'*}" in
-      0:proved) printf 'proved\t%s\temit_observe\n' "${fo#*$'\t'}"; return 0 ;;
-      *) printf '%s\t%s\temit_observe\n' "${fo%%$'\t'*}" "${fo#*$'\t'}"; return "${frc:-2}" ;;
-    esac
+  # not proved: the emit-and-observe fallback (#1188), when it is present.
+  # Split across two SEPARATE calls to this whole script (#1386): a caller
+  # that emits and observes within the same call never sees its own token,
+  # because the CLI running this renders one call's output as a block, only
+  # after the call returns -- so this call either observes a token a PRIOR
+  # call already emitted (and had rendered), or emits one now for a LATER
+  # call to observe, never both in the same pass.
+  if declare -F agmsg_token_locate_pending >/dev/null 2>&1; then
+    if agmsg_token_locate_pending "$team" "$agent"; then
+      local fo frc=0
+      fo="$(agmsg_token_locate_observe "$team" "$agent")" || frc=$?
+      case "$frc:${fo%%$'\t'*}" in
+        0:proved) printf 'proved\t%s\temit_observe\n' "${fo#*$'\t'}"; return 0 ;;
+        *) printf '%s\t%s\temit_observe\n' "${fo%%$'\t'*}" "${fo#*$'\t'}"; return "${frc:-2}" ;;
+      esac
+    fi
+    # No pending token: emit one now (visible on screen once THIS call
+    # returns) and tell the caller to run `fix` again -- one line a human
+    # and a seat both read the same way, not a state this contract already
+    # has a name for.
+    agmsg_token_locate_emit "$team" "$agent"
+    printf 'undetermined\tlocate_token_emitted_call_fix_again\temit_observe\n'
+    return 2
   fi
   printf '%s\t%s\tproof\n' "${out%%$'\t'*}" "${out#*$'\t'}"
   return "$rc"

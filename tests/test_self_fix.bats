@@ -59,7 +59,7 @@ _proof_says() {   # <rc> <state> <payload>
   _own_seat alice "$ME"; _proof_says 1 disproved pane_process_not_ancestor
   # This test is about the primary proof's own report, not the fallback -- see
   # the "NO fallback present" test below for why this line is here.
-  unset -f agmsg_token_locate_self 2>/dev/null || true
+  unset -f agmsg_token_locate_pending 2>/dev/null || true
   run agmsg_fix_run
   [ "$status" -eq 2 ]
   [ "$output" = "fix seat=T/alice state=disproved reason=pane_process_not_ancestor via=proof (written nothing)" ]
@@ -68,37 +68,82 @@ _proof_says() {   # <rc> <state> <payload>
 
 @test "fix: undetermined with NO fallback present -> nothing written, the proof's reason named" {
   _own_seat alice "$ME"; _proof_says 2 undetermined owner_marker_absent
-  unset -f agmsg_token_locate_self 2>/dev/null || true
+  unset -f agmsg_token_locate_pending 2>/dev/null || true
   run agmsg_fix_run
   [ "$status" -eq 2 ]
   [ "$output" = "fix seat=T/alice state=undetermined reason=owner_marker_absent via=proof (written nothing)" ]
   refute grep -q '^write' "$SPY"
 }
 
-@test "fix: undetermined, then the emit-and-observe fallback says proved -> written with ITS locator, via=emit_observe" {
+@test "fix: undetermined, a pending token already observes proved -> written with ITS locator, via=emit_observe" {
   _own_seat alice "$ME"; _proof_says 2 undetermined invocation_not_bound_to_owner
-  agmsg_token_locate_self() { printf 'fallback %s %s\n' "$1" "$2" >> "$SPY"; printf 'proved\therdr:/tmp/herdr/sessions/a/herdr.sock:w1:p7\n'; return 0; }
+  agmsg_token_locate_pending() { printf 'pending %s %s\n' "$1" "$2" >> "$SPY"; return 0; }
+  agmsg_token_locate_observe() { printf 'observe %s %s\n' "$1" "$2" >> "$SPY"; printf 'proved\therdr:/tmp/herdr/sessions/a/herdr.sock:w1:p7\n'; return 0; }
+  agmsg_token_locate_emit() { echo "emit must not run when a token is already pending" >> "$SPY"; }
   run agmsg_fix_run
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/alice state=proved locator=herdr:/tmp/herdr/sessions/a/herdr.sock:w1:p7 via=emit_observe" ]
-  grep -Fqx "fallback T alice" "$SPY"
+  grep -Fqx "pending T alice" "$SPY"
+  grep -Fqx "observe T alice" "$SPY"
   grep -Fqx "write T alice herdr:/tmp/herdr/sessions/a/herdr.sock:w1:p7 $ME" "$SPY"
   [ "$(grep -c '^write' "$SPY")" -eq 1 ]
+  refute grep -q '^emit must not run' "$SPY"
 }
 
 @test "fix: the fallback's own undetermined (ambiguous) -> nothing written, named, via=emit_observe" {
   _own_seat alice "$ME"; _proof_says 2 undetermined owner_marker_absent
-  agmsg_token_locate_self() { printf 'undetermined\tambiguous\n'; return 2; }
+  agmsg_token_locate_pending() { return 0; }
+  agmsg_token_locate_observe() { printf 'undetermined\tambiguous\n'; return 2; }
   run agmsg_fix_run
   [ "$status" -eq 2 ]
   [ "$output" = "fix seat=T/alice state=undetermined reason=ambiguous via=emit_observe (written nothing)" ]
   refute grep -q '^write' "$SPY"
 }
 
+# #1386: emit and observe now happen on two SEPARATE calls to `fix` -- a
+# single call that emitted a token and immediately searched for it never saw
+# it (measured: the CLI running `fix` renders a tool call's output as a
+# block, only after the call returns, so a peek taken before that return
+# always reads a screen the token has not reached yet). Runs the REAL
+# emit/observe (only self_proof and self_write are the spies here, per this
+# file's own header), across two genuinely separate agmsg_fix_run calls, so
+# what this pins is the actual sequence, not just which function names get
+# called.
+@test "fix: no pending token -> emits only, says try again; a second call observes and consumes it (#1386)" {
+  _own_seat alice "$ME"; _proof_says 2 undetermined invocation_not_bound_to_owner
+  agmsg_token_locate_generate() { printf 'fixed-fix-token\n'; }
+  agmsg_terminal_enumerate() { echo "search must not run on the first call" >> "$SPY"; }
+
+  run agmsg_fix_run
+  [ "$status" -eq 2 ]
+  # The token line (this test's own #1386 point: it must be FIRST, so a CLI
+  # that folds a long call's output to its first few lines still shows it)
+  # and the status line both land in $output -- `run` merges stdout+stderr.
+  [ "$(printf '%s\n' "$output" | head -1)" = "AGMSG_LOCATE_TOKEN(T/alice): fixed-fix-token" ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "fix seat=T/alice state=undetermined reason=locate_token_emitted_call_fix_again via=emit_observe (written nothing)" ]
+  refute grep -q '^search must not run' "$SPY"
+  refute grep -q '^write' "$SPY"
+  run agmsg_token_locate_pending T alice
+  [ "$status" -eq 0 ]
+
+  # Second, separate call: a token is now pending, so this one observes
+  # instead of emitting again -- no second AGMSG_LOCATE_TOKEN line.
+  agmsg_terminal_enumerate() { printf 'herdr\tsockA\tw1:p9\n'; }
+  agmsg_terminal_load() { :; }
+  terminal_peek() { printf 'prompt\nfixed-fix-token\nmore\n'; }
+  agmsg_locator_compose() { printf '%s:%s:%s\n' "$1" "$2" "$3"; }
+  run agmsg_fix_run
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/alice state=proved locator=herdr:sockA:w1:p9 via=emit_observe" ]
+  grep -Fqx "write T alice herdr:sockA:w1:p9 $ME" "$SPY"
+  run agmsg_token_locate_pending T alice
+  [ "$status" -eq 1 ]
+}
+
 @test "fix: no candidate in the environment -> the proof is not even asked; fallback if present, else no_candidate_in_env" {
   _own_seat alice "$ME"; _proof_says 0 proved herdr:w1:pB
   unset HERDR_ENV HERDR_PANE_ID
-  unset -f agmsg_token_locate_self 2>/dev/null || true
+  unset -f agmsg_token_locate_pending 2>/dev/null || true
   run agmsg_fix_run
   [ "$status" -eq 2 ]
   [ "$output" = "fix seat=T/alice state=undetermined reason=no_candidate_in_env via=proof (written nothing)" ]
@@ -130,7 +175,7 @@ _proof_says() {   # <rc> <state> <payload>
   unset HERDR_SOCKET_PATH
   # This test is about no_candidate_in_env, not the fallback -- see the "NO
   # fallback present" test above for why this line is here.
-  unset -f agmsg_token_locate_self 2>/dev/null || true
+  unset -f agmsg_token_locate_pending 2>/dev/null || true
   run agmsg_fix_run
   [ "$status" -eq 2 ]
   [ "$output" = "fix seat=T/alice state=undetermined reason=no_candidate_in_env via=proof (written nothing)" ]

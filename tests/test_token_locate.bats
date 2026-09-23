@@ -9,6 +9,8 @@ load test_helper
 
 setup() {
   setup_test_env
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  export RUN_DIR="$SKILL_DIR/run"; mkdir -p "$RUN_DIR"
   # shellcheck disable=SC1090
   . "$SCRIPTS/lib/token-locate.sh"
 }
@@ -74,55 +76,85 @@ teardown() { teardown_test_env; }
   [ "$t1" != "$t2" ]
 }
 
-# --- agmsg_token_locate_self: the #1157 fallback wiring ---------------------
+# --- agmsg_token_locate_emit / agmsg_token_locate_observe: the #1157
+# fallback wiring, split into two calls (#1386) ------------------------------
 #
 # Fakes stand in for terminal-registry.sh (agmsg_terminal_enumerate /
-# agmsg_terminal_load / terminal_peek / agmsg_locator_compose) and for
-# agmsg_token_locate_generate itself, so each test controls exactly what the
-# "pane text" says without touching a real terminal. This is the same
-# fixture style #1155's own tests use for agmsg_terminal_enumerate's row
-# shapes.
+# agmsg_terminal_load / terminal_peek / agmsg_locator_compose), so each test
+# controls exactly what the "pane text" says without touching a real
+# terminal. This is the same fixture style #1155's own tests use for
+# agmsg_terminal_enumerate's row shapes.
+#
+# observe reads a token a PRIOR, separate emit call already persisted -- these
+# tests seed that record directly (the same fixture style test_self_fix.bats
+# uses for actas locks) rather than calling emit first, since emit's own
+# behavior (the token line, the persisted record, no observing) is covered
+# separately below by its own tests.
+_seed_token() {   # <team> <agent> <token>
+  local path; path="$(_agmsg_token_locate_path "$1" "$2")"
+  mkdir -p "$(dirname "$path")"
+  { printf 'token=%s\n' "$3"; printf 'emitted_at=%s\n' "$(date -u +%s)"; } > "$path"
+}
 
-_fixed_token() { agmsg_token_locate_generate() { printf 'fixed-test-token\n'; }; }
+@test "observe: no_pending_token when nothing was emitted for this seat (#1386)" {
+  run agmsg_token_locate_observe myteam alice
+  [ "$status" -eq 2 ]
+  [ "$output" = "$(printf 'undetermined\tno_pending_token')" ]
+}
 
-@test "self: unsupported when there is no census primitive at all (#1124)" {
-  run agmsg_token_locate_self myteam alice
+@test "observe: no_pending_token when the record is older than the TTL, and it is removed (#1386)" {
+  local path; path="$(_agmsg_token_locate_path myteam alice)"
+  mkdir -p "$(dirname "$path")"
+  { printf 'token=stale-token\n'; printf 'emitted_at=%s\n' "$(($(date -u +%s) - _AGMSG_TOKEN_LOCATE_TTL - 5))"; } > "$path"
+  run agmsg_token_locate_observe myteam alice
+  [ "$status" -eq 2 ]
+  [ "$output" = "$(printf 'undetermined\tno_pending_token')" ]
+  [ ! -e "$path" ]
+}
+
+@test "observe: unsupported when there is no census primitive at all (#1124)" {
+  _seed_token myteam alice fixed-test-token
+  run agmsg_token_locate_observe myteam alice
   [ "$status" -eq 3 ]
   [ "$output" = "$(printf 'unsupported\tcensus_primitive_unavailable')" ]
 }
 
-@test "self: undetermined when the census enumeration itself fails (#1124)" {
+@test "observe: undetermined when the census enumeration itself fails (#1124)" {
+  _seed_token myteam alice fixed-test-token
   agmsg_terminal_enumerate() { return 1; }
-  run agmsg_token_locate_self myteam alice
+  run agmsg_token_locate_observe myteam alice
   [ "$status" -eq 2 ]
   [[ "$output" == *"undetermined	census_enumerate_failed"* ]]
 }
 
-@test "self: undetermined when the census observed nothing at all (#1124)" {
+@test "observe: undetermined when the census observed nothing at all (#1124)" {
+  _seed_token myteam alice fixed-test-token
   agmsg_terminal_enumerate() { :; }
-  run agmsg_token_locate_self myteam alice
+  run agmsg_token_locate_observe myteam alice
   [ "$status" -eq 2 ]
   [[ "$output" == *"undetermined	no_panes_observed"* ]]
 }
 
-@test "self: undetermined when every row is unreadable, never read as none observed (#1124)" {
+@test "observe: undetermined when every row is unreadable, never read as none observed (#1124)" {
+  _seed_token myteam alice fixed-test-token
   agmsg_terminal_enumerate() { printf '!\therdr\tsockA\n!!\ttmux\n?\tplain\n'; }
-  run agmsg_token_locate_self myteam alice
+  run agmsg_token_locate_observe myteam alice
   [ "$status" -eq 2 ]
   [[ "$output" == *"undetermined	no_panes_readable"* ]]
 }
 
-@test "self: undetermined when panes are enumerated but none are peekable (#1124)" {
+@test "observe: undetermined when panes are enumerated but none are peekable (#1124)" {
+  _seed_token myteam alice fixed-test-token
   agmsg_terminal_enumerate() { printf 'herdr\tsockA\tw1:p1\n'; }
   agmsg_terminal_load() { :; }
   terminal_peek() { return 12; }
-  run agmsg_token_locate_self myteam alice
+  run agmsg_token_locate_observe myteam alice
   [ "$status" -eq 2 ]
   [[ "$output" == *"undetermined	no_panes_readable"* ]]
 }
 
-@test "self: proved when the emitted token matches exactly one peeked pane (#1124)" {
-  _fixed_token
+@test "observe: proved when the persisted token matches exactly one peeked pane, and the record is consumed (#1124, #1386)" {
+  _seed_token myteam alice fixed-test-token
   agmsg_terminal_enumerate() { printf 'herdr\tsockA\tw1:p1\nherdr\tsockA\tw1:p2\n'; }
   agmsg_terminal_load() { :; }
   terminal_peek() {
@@ -132,33 +164,69 @@ _fixed_token() { agmsg_token_locate_generate() { printf 'fixed-test-token\n'; };
     esac
   }
   agmsg_locator_compose() { printf '%s:%s:%s\n' "$1" "$2" "$3"; }
-  run agmsg_token_locate_self myteam alice
+  run agmsg_token_locate_observe myteam alice
   [ "$status" -eq 0 ]
-  grep -Fq "$(printf 'proved\therdr:sockA:w1:p2')" <<< "$output"
-  # The token is emitted to this process's own stdout, not silently generated.
-  grep -Fq "fixed-test-token" <<< "$output"
+  [ "$output" = "$(printf 'proved\therdr:sockA:w1:p2')" ]
+  # Single-use: consumed whether found or not (this one WAS found).
+  [ ! -e "$(_agmsg_token_locate_path myteam alice)" ]
 }
 
-@test "self: undetermined (ambiguous), never proved, when two panes match (#1124)" {
-  _fixed_token
+@test "observe: undetermined (ambiguous), never proved, when two panes match (#1124)" {
+  _seed_token myteam alice fixed-test-token
   agmsg_terminal_enumerate() { printf 'herdr\tsockA\tw1:p1\nherdr\tsockA\tw1:p2\n'; }
   agmsg_terminal_load() { :; }
   terminal_peek() { printf 'fixed-test-token\n'; }
   agmsg_locator_compose() { printf '%s:%s:%s\n' "$1" "$2" "$3"; }
-  run agmsg_token_locate_self myteam alice
+  run agmsg_token_locate_observe myteam alice
   [ "$status" -eq 2 ]
-  grep -Fq "$(printf 'undetermined\tambiguous')" <<< "$output"
-  refute grep -Fq "proved" <<< "$output"
+  [ "$output" = "$(printf 'undetermined\tambiguous')" ]
 }
 
-@test "self: never emits disproved: not_found is undetermined instead (#1124)" {
-  _fixed_token
+@test "observe: never emits disproved: not_found is undetermined instead, and the record is consumed (#1124, #1386)" {
+  _seed_token myteam alice fixed-test-token
   agmsg_terminal_enumerate() { printf 'herdr\tsockA\tw1:p1\n'; }
   agmsg_terminal_load() { :; }
   terminal_peek() { printf 'nothing at all here\n'; }
   agmsg_locator_compose() { printf '%s:%s:%s\n' "$1" "$2" "$3"; }
-  run agmsg_token_locate_self myteam alice
+  run agmsg_token_locate_observe myteam alice
   [ "$status" -eq 2 ]
-  grep -Fq "$(printf 'undetermined\tnot_found')" <<< "$output"
-  refute grep -Fq disproved <<< "$output"
+  [ "$output" = "$(printf 'undetermined\tnot_found')" ]
+  [ ! -e "$(_agmsg_token_locate_path myteam alice)" ]
+}
+
+# --- agmsg_token_locate_emit / agmsg_token_locate_pending (#1386) -----------
+
+@test "emit: prints the token on its own line, to stderr, and persists a pending record; observe then finds it" {
+  local out; out="$(agmsg_token_locate_emit myteam alice 2>&1 1>/dev/null)"
+  case "$out" in
+    "AGMSG_LOCATE_TOKEN(myteam/alice): "*) ;;
+    *) false ;;
+  esac
+  run agmsg_token_locate_pending myteam alice
+  [ "$status" -eq 0 ]
+  agmsg_terminal_enumerate() { printf 'herdr\tsockA\tw1:p1\n'; }
+  agmsg_terminal_load() { :; }
+  local token="${out#AGMSG_LOCATE_TOKEN(myteam/alice): }"
+  terminal_peek() { printf 'prompt\n%s\nmore\n' "$token"; }
+  agmsg_locator_compose() { printf '%s:%s:%s\n' "$1" "$2" "$3"; }
+  run agmsg_token_locate_observe myteam alice
+  [ "$status" -eq 0 ]
+  [[ "$output" == proved* ]]
+}
+
+@test "emit writes NOTHING to stdout: the token line cannot be captured by a caller's \$(...) and lost before it reaches the screen (#1386)" {
+  local out; out="$(agmsg_token_locate_emit myteam alice 2>/dev/null)"
+  [ -z "$out" ]
+}
+
+@test "pending: false with no record, true right after emit, false again after observe consumes it (#1386)" {
+  run agmsg_token_locate_pending myteam alice
+  [ "$status" -eq 1 ]
+  agmsg_token_locate_emit myteam alice 2>/dev/null
+  run agmsg_token_locate_pending myteam alice
+  [ "$status" -eq 0 ]
+  agmsg_terminal_enumerate() { :; }   # any observe outcome consumes the record
+  agmsg_token_locate_observe myteam alice >/dev/null || true
+  run agmsg_token_locate_pending myteam alice
+  [ "$status" -eq 1 ]
 }
