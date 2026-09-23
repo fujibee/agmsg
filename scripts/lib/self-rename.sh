@@ -87,6 +87,46 @@ _agmsg_self_rename_locator_of_proof() {   # <canonical-ref, e.g. "tmux:%3">
   agmsg_locator_compose "$kind" "$inst" "$pane" 2>/dev/null || printf '%s\n' "$ref"
 }
 
+# Observe THIS seat's own session name. Deliberately separate from
+# agmsg_cli_session_observed (team-status.sh), which team.sh's OUTSIDE
+# observation of another seat's pane also calls: a type whose name can only
+# be recovered from something only the process ITSELF holds (an env var
+# keying a runtime index file, not the pane) declares session_name_self_source
+# instead of/alongside session_name_source, and only this self-observation
+# path reads it -- an outside caller has no business reading its OWN copy of
+# that env var and calling it the target seat's. team.sh's own path is
+# unchanged and keeps using session_name_source (#1386 continuation).
+#   session_index:<ENV-VAR-NAME> -> that env var holds a thread id; look it up
+#     via agmsg_codex_session_index_name. Unset env var, unreadable index
+#     file, or no matching line is unknown -- never guessed, never falls
+#     back to session_name_source for the same type.
+#   (session_name_self_source absent) -> the existing session_name_source path.
+_agmsg_self_rename_observed() {   # <type> <title> <pane>
+  local type="$1" title="$2" pane="$3" self_src envname tid
+  self_src="$(agmsg_type_get "$type" session_name_self_source 2>/dev/null || true)"
+  case "$self_src" in
+    session_index:*)
+      envname="${self_src#session_index:}"
+      # A shell-identifier check BEFORE the indirect expansion below (review):
+      # ${!envname} on a name outside identifier grammar is "bad substitution",
+      # not a namespaced unknown -- the manifest datum is data, not something
+      # this function should let crash the caller.
+      case "$envname" in
+        ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*)
+          printf 'unknown:session_name_self_source_malformed\n'; return 0 ;;
+      esac
+      tid="${!envname:-}"
+      if declare -F agmsg_codex_session_index_name >/dev/null 2>&1; then
+        agmsg_codex_session_index_name "$tid"
+      else
+        printf 'unknown:session_index_reader_unavailable\n'
+      fi
+      return 0
+      ;;
+  esac
+  agmsg_cli_session_observed "$type" "$title" "$pane"
+}
+
 agmsg_self_rename_on_action() {
   local team="${1:-}" agent="${2:-}" type="${3:-}"
   [ -n "$team" ] && [ -n "$agent" ] || return 0
@@ -99,6 +139,8 @@ agmsg_self_rename_on_action() {
   . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || return 0
   # shellcheck disable=SC1091
   . "$SKILL_DIR/scripts/lib/team-status.sh" 2>/dev/null || return 0
+  # shellcheck disable=SC1091
+  . "$SKILL_DIR/scripts/lib/codex-session-index.sh" 2>/dev/null || true
 
   # The acting commands (send/inbox/history) do not carry the seat's CLI type, so
   # resolve it from the role-session record the join/actas flow already wrote. No
@@ -177,7 +219,7 @@ agmsg_self_rename_on_action() {
   local expected="$team-$agent" raw title observed
   raw="$(agmsg_team_observe_loaded "$id" 2>/dev/null)"
   title="$(printf '%s' "$raw" | awk -F '\t' 'NR==1{print $4}')"
-  observed="$(agmsg_cli_session_observed "$type" "$title" "$id" 2>/dev/null)"
+  observed="$(_agmsg_self_rename_observed "$type" "$title" "$id" 2>/dev/null)"
 
   if [ "$phase" = confirm ]; then
     # The rename has had a turn to land. Judge, but never call a screen we could

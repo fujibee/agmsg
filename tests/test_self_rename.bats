@@ -211,6 +211,33 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   [ "$(agmsg_cli_session_observed codex '' wA:p1)" = 'unknown:name_malformed' ]
 }
 
+# --- codex self-observation: session_index.jsonl, not the screen (#1386 continuation)
+# self-rename.sh's OWN observation of itself no longer depends on the "Thread
+# name:" header (which scrolls away for any established session, per every
+# "unknown" case above) -- it reads $CODEX_THREAD_ID and looks it up in
+# session_index.jsonl instead, via session_name_self_source. terminal_peek is
+# deliberately given no usable header at all here: if the dispatcher fell
+# through to the screen path this would read as unknown:name_not_visible,
+# same as the tests above, so a name coming back at all proves it never
+# touched the screen. The two valid entries sharing one id cover
+# session_index's own append-only shape (the newer updated_at line must win),
+# and the malformed line between them (review) covers a write caught
+# mid-append: it must be skipped, not abort the lookup before the correct
+# newest line is even reached.
+@test "codex self-observation reads the current name from session_index.jsonl via CODEX_THREAD_ID, not the screen (#1386)" {
+  source "$SKILL_DIR/scripts/lib/codex-session-index.sh"
+  export CODEX_THREAD_ID='01a0test-thread-id-0001'
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codexhome"
+  mkdir -p "$CODEX_HOME"
+  {
+    printf '{"id":"%s","thread_name":"old-name","updated_at":"2026-01-01T00:00:00.000000Z"}\n' "$CODEX_THREAD_ID"
+    printf '{"id":"%s","thread_name":"truncated-mid-writ\n' "$CODEX_THREAD_ID"
+    printf '{"id":"%s","thread_name":"team-alice","updated_at":"2026-01-02T00:00:00.000000Z"}\n' "$CODEX_THREAD_ID"
+  } > "$CODEX_HOME/session_index.jsonl"
+  terminal_peek() { printf 'no header of any kind here\n'; }
+  [ "$(_agmsg_self_rename_observed codex '' wA:p1)" = 'team-alice' ]
+}
+
 @test "the pane the environment names may belong to ANOTHER seat's placement record -- never poke it, never mark it (#1112)" {
   # Measured live (#1112): a seat whose own label was broken resolved, through
   # the same inherited environment every codex seat under a shared app-server
