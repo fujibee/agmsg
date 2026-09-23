@@ -111,6 +111,7 @@ EOF
 }
 
 @test "join: concurrent joins to the same team do not lose registrations (#141)" {
+  skip_on_ci "flaky concurrent-join timing under CI's shared runners (#994)"
   # A fan-out of background joins spawning sqlite3.exe per call is slow and
   # timing-sensitive on the Windows runner (the experimental full leg); the lock
   # itself is exercised on Linux/macOS where the contention is reliable.

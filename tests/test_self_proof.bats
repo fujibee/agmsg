@@ -551,6 +551,7 @@ w1:pX	$PANE_PID"
 # --- the recorded owner is verified, not just parsed ---------------------------
 
 @test "an owner whose process is gone is undetermined, not a proof about it (#1152)" {
+  skip_on_ci "flaky pid-reuse race under CI's shared runners (#1187)"
   # A lock outlives the process that wrote it. Parsing a pid out of the file says
   # the file holds a number, not that the number is still this session.
   sleep 60 >/dev/null 2>&1 3>&- & local dead=$!

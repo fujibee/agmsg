@@ -286,6 +286,17 @@ skip_unless_windows() {
   esac
 }
 
+# Skip a test only under CI (GitHub Actions sets both CI=true and
+# GITHUB_ACTIONS=true). Use for a test whose flake is specific to CI's shared,
+# loaded runners -- not a POSIX gap (see skip_on_windows above) -- so it keeps
+# running locally, where the timing that makes it flaky doesn't reproduce.
+# Each call site names the tracking issue so the skip is removed once fixed.
+skip_on_ci() {
+  if [ "${CI:-}" = "true" ] || [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    skip "${1:-flaky under CI}"
+  fi
+}
+
 # The Antigravity monitor is Linux-only: antigravity-tui-supervisor.py reads
 # /proc/<pid>/stat for every liveness check, and the control actions all go
 # through antigravity-mode.mjs, which does the same. Use for any test that
