@@ -10,6 +10,17 @@
 # unsupported (13) uniformly, the same convention `plain` uses for a capability
 # its manifest does not advertise. A later PR adds them.
 #
+# PR4 SCOPE: adds terminal_enumerate_panes, one of the two OPTIONAL
+# sweep/self-proof ops — read-only, nothing written. terminal_pane_process_
+# observe, the other one, is DELIBERATELY NOT DEFINED: confirmed live, one
+# throwaway pane, before writing anything (the two other, real, pre-existing
+# terminals untouched throughout), that `orca terminal show`'s JSON has no
+# field carrying an OS process id anywhere (handle/ptyId/incarnationId/
+# tabId/leafId/connected/writable/preview/paneRuntimeId/rendererGraphEpoch —
+# checked `--help` too, no flag surfaces one either). See the comment where
+# that op would otherwise live, further down, for why "define it and always
+# fail" is the wrong answer to a permanent gap, not just a smaller one.
+#
 # MEASURED (memory/design/2026-09-20-orca-terminal-driver-feasibility.md,
 # orca 1.4.198 and 1.4.206; not asserted):
 #   - `ORCA_TERMINAL_HANDLE` is set, inside an Orca-hosted pane, to the exact
@@ -308,6 +319,121 @@ terminal_peek() {
   }
   return 0
 }
+
+# The one INSTANCE value every orca row is qualified with (herdr/tmux qualify
+# with a socket path because they can have several live servers on one
+# machine; orca has exactly one reachable runtime per machine, so there is
+# nothing to disambiguate). MEASURED, not invented: every terminal's own JSON
+# (`show`, `list`) already carries `executionHostId`, and it read "local" on
+# every terminal checked (this driver's own probe, and independently PR1's
+# own measurement passes) — no remote execution host exists in any
+# environment measured so far. Defined ONCE here so a later PR that needs an
+# orca instance value (PR1 itself has no such call site today) uses this
+# constant rather than a second literal drifting from it.
+_ORCA_INSTANCE=local
+
+# OPTIONAL OP. Every pane this terminal can see. Contract: see the tmux/herdr
+# drivers' own copies and scripts/lib/self-proof.sh. Orca has one runtime, so
+# there is only ever one instance row-set (or one `!` row when it cannot be
+# read) — never several, unlike herdr/tmux's per-socket sweep.
+#
+# stdout, one line:
+#   <instance><TAB><pane>   for each live terminal `orca terminal list` shows
+#   !<TAB><instance>        the runtime could not be read at all
+#
+# AN ENTRY WE DO NOT UNDERSTAND FAILS THE WHOLE ENUMERATION (same discipline
+# as terminal_peek's own tail-array validation above and tmux/herdr's own
+# copies of this op): `$.result.terminals` must be a JSON array, and every
+# element's `$.handle` must be JSON text; the count of elements is compared
+# against the count of ones with a valid handle, and any mismatch means this
+# driver does not understand the payload well enough to say what is really
+# out there, rather than silently reporting fewer panes than exist.
+#
+# "JSON text" alone is not "a real orca id" (review, #1441): a handle of ""
+# or one carrying a control byte, or one that is text but not this driver's
+# own term_<uuid> grammar (a foreign or corrupted value), all passed the
+# json_type check but were then either silently DROPPED at print time (an
+# undercount masquerading as a complete list — exactly the failure this
+# whole discipline exists to prevent) or printed through unvalidated as a
+# pane id the rest of this driver would refuse if asked about it directly.
+# Every extracted handle is now run through terminal_id_ok -- the SAME
+# authority terminal_detect and every other op in this file already answer
+# to -- and one failure anywhere aborts the whole enumeration rather than
+# quietly narrowing it. Duplicate handles get the same treatment: a payload
+# is not "a set of distinct live panes" once a handle repeats, so the whole
+# read is nothing this op understands well enough to report, rather than a
+# false confirmation that one pane is reachable through two different rows.
+terminal_enumerate_panes() {
+  command -v orca >/dev/null 2>&1 || return 10
+  command -v sqlite3 >/dev/null 2>&1 || return 10
+  local json
+  json="$(orca terminal list --json 2>/dev/null)"
+  if [ -z "$json" ]; then printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0; fi
+  _orca_json_valid "$json" || { printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0; }
+  local ok
+  ok="$(_orca_json_bool "$json" '$.ok')"
+  if [ "$ok" != 1 ]; then
+    printf '!\t%s\n' "$_ORCA_INSTANCE"
+    return 0
+  fi
+  local esc n_all n_ok
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$esc','\$.result.terminals')='array' THEN json_array_length('$esc','\$.result.terminals') ELSE -1 END" 2>/dev/null)"
+  case "$n_all" in ''|*[!0-9]*) printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0 ;; esac
+  n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.terminals') WHERE json_type(value,'\$.handle')='text'" 2>/dev/null)"
+  case "$n_ok" in ''|*[!0-9]*) printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0 ;; esac
+  [ "$n_ok" -eq "$n_all" ] || { printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0; }
+  # Every row is emitted with a leading '=' marker, not bare (review, own
+  # finding while testing this fix): `$(...)` strips ALL trailing newlines,
+  # so a genuinely empty LAST handle -- its row is just an empty line --
+  # would otherwise vanish from $handles entirely rather than surviving as
+  # a blank line, silently dropping n_ok's own count out of sync with what
+  # the loop below actually sees. The marker makes every row non-empty text
+  # regardless of the handle's own content, so nothing is lost to that
+  # stripping; '=' is stripped back off per line before use.
+  local handles h raw seen="" n_seen=0
+  handles="$(sqlite3 :memory: "SELECT '=' || json_extract(value,'\$.handle') FROM json_each('$esc','\$.result.terminals') WHERE json_type(value,'\$.handle')='text'" 2>/dev/null)"
+  while IFS= read -r raw; do
+    [ -n "$raw" ] || { printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0; }
+    h="${raw#=}"
+    terminal_id_ok "$h" || { printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0; }
+    case "$seen" in *"	$h	"*) printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0 ;; esac
+    seen="$seen	$h	"
+    n_seen=$((n_seen + 1))
+  done <<EOF
+$handles
+EOF
+  # The loop's own row count must match n_ok too: `$(...)` swallowing a
+  # trailing blank line (see the comment above) would otherwise make this
+  # loop silently see FEWER rows than the driver believes it validated,
+  # passing every per-row check while still under-reporting the total.
+  [ "$n_seen" -eq "$n_ok" ] || { printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0; }
+  while IFS= read -r raw; do
+    [ -n "$raw" ] || continue
+    printf '%s\t%s\n' "$_ORCA_INSTANCE" "${raw#=}"
+  done <<EOF
+$handles
+EOF
+  return 0
+}
+
+# terminal_pane_process_observe is DELIBERATELY NOT DEFINED (review, #1441).
+# MEASURED, not assumed (one throwaway pane, before this PR wrote anything):
+# `orca terminal show`'s JSON has no field anywhere that carries an OS
+# process id, and no `--help` flag surfaces one either — this op could never
+# actually succeed for orca, on any candidate, ever. self-proof.sh's own
+# contract treats the two shapes of "no answer" differently and on purpose:
+# the function being UNDEFINED reports unsupported/driver_no_process_binding
+# (rc 3) and the caller stops asking; the function being defined but
+# returning a non-{0,13} code every time reports undetermined/
+# pane_process_unreadable (rc 2) instead — a TEMPORARY failure a caller
+# retries. Orca's gap is permanent, not temporary, so defining this op just
+# to always fail would misreport which kind of "no" self-proof is getting.
+# `plain`'s own driver already omits this exact op for the same reason (its
+# own file has no process-binding primitive at all) — this is that same
+# precedent, not a new one. Self-proof for orca seats does not need this op
+# regardless: they identify themselves directly through $ORCA_TERMINAL_HANDLE
+# (see the file header), which never needed a process/pid binding.
 
 # Every write-shaped verb is unimplemented in this PR — reported uniformly as
 # `unsupported`, the same word `plain` uses for a capability its manifest does
