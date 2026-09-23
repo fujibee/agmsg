@@ -650,9 +650,10 @@ EOF
       if [ "$legacy_rc" -ne 0 ]; then
         echo "codex: this project's legacy app-server pidfile could not be read or is malformed -- leaving its records" >&2
       elif ! _agmsg_pid_alive_local "$legacy_pid"; then
-        rm -f "$RUN_DIR/codex-app-server.$project_hash.pid" \
+              rm -f "$RUN_DIR/codex-app-server.$project_hash.pid" \
               "$RUN_DIR/codex-app-server.$project_hash.port" \
               "$RUN_DIR/codex-app-server.$project_hash.version" \
+              "$RUN_DIR/codex-app-server.$project_hash.home" \
               "$RUN_DIR/codex-app-server.$project_hash.log"
       fi
     fi

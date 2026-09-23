@@ -56,6 +56,28 @@ Restart the shell, then launch Codex normally:
 codex
 ```
 
+## Codex Desktopとの状態分離
+
+Codex Desktopのremote controlとmonitor modeを同じ`~/.codex`で動かすと、
+両方のapp-serverが同じremote-control登録と状態DBを使用して競合しうる。
+monitor側だけを分離する場合は、専用の絶対パスを全monitor起動で指定する。
+
+```bash
+export AGMSG_CODEX_HOME="$HOME/.codex-agmsg"
+CODEX_HOME="$AGMSG_CODEX_HOME" codex login
+codex
+```
+
+monitorはこの値を`CODEX_HOME`としてapp-server、bridge launcher、hook、
+remote TUIへ引き継ぐ。同じprojectで別のhomeを使っていたagmsg管理serverは
+再利用せず作り直す。Desktopの状態DB、sessions、logsは専用homeへコピーしない。
+認証は専用homeで改めて行い、必要なconfig、plugins、skillsだけを明示的に設定する。
+
+`AGMSG_CODEX_HOME`は絶対パスでなければならない。既存のrole記録は元のhomeに
+属するため、専用homeで開始した新しいCodex thread内で`$agmsg actas <role>`を
+再実行してseatを更新する。以後、`delivery.sh status`、`mode off`、resumeを含む
+monitor関連操作でも同じ環境変数を設定する。
+
 In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
 

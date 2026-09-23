@@ -88,6 +88,13 @@ fake_session() {
   grep -q "^type=$" "$f"
 }
 
+@test "record: codex seat records its state root without affecting other types" {
+  CODEX_HOME="/tmp/codex-isolated" agmsg_role_session_record T alice "sid-codex" /tmp/proj codex
+  [ "$(agmsg_role_session_get T alice codex_home)" = "/tmp/codex-isolated" ]
+  agmsg_role_session_record T alice "sid-claude" /tmp/proj claude-code
+  [ -z "$(agmsg_role_session_get T alice codex_home)" ]
+}
+
 @test "get: reads back an arbitrary field (type)" {
   agmsg_role_session_record T alice "sid-abc" /tmp/proj claude-code
   [ "$(agmsg_role_session_get T alice type)" = "claude-code" ]
