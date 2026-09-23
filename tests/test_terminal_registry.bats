@@ -205,8 +205,8 @@ _fake_herdr_list_scalar_session() {
 }
 
 # A fake `orca` that logs argv and returns canned JSON for `terminal show` and
-# `terminal read`, shaped like the real 1.4.206 responses measured in
-# memory/design/2026-09-20-orca-terminal-driver-feasibility.md (Third pass).
+# `terminal read`, shaped like the real 1.4.206 responses measured directly
+# against real orca instances.
 #   present  a live, connected terminal
 #   gone     a terminal that existed and was closed (positively confirmed:
 #            connected:false, orphaned:true, exitCause present)

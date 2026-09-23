@@ -7,7 +7,7 @@ orca's own CLI has no reordering/move/swap verb for a terminal or its tab.
 
 Detection is env-only: `TERM_PROGRAM=Orca` plus `$ORCA_TERMINAL_HANDLE`, the
 opaque handle every `orca terminal <verb> --terminal <handle>` call addresses
-this pane by (measured, memory/design/2026-09-20-orca-terminal-driver-feasibility.md).
+this pane by (measured directly against real orca instances).
 When both herdr and orca could claim the same environment, orca's lower
 manifest `priority` means its own env var wins.
 

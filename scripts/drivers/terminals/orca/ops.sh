@@ -22,8 +22,8 @@
 # that op would otherwise live, further down, for why "define it and always
 # fail" is the wrong answer to a permanent gap, not just a smaller one.
 #
-# MEASURED (memory/design/2026-09-20-orca-terminal-driver-feasibility.md,
-# orca 1.4.198 and 1.4.206; not asserted):
+# MEASURED (directly against real orca instances, orca 1.4.198 and 1.4.206;
+# not asserted):
 #   - `ORCA_TERMINAL_HANDLE` is set, inside an Orca-hosted pane, to the exact
 #     handle every `orca terminal <verb> --terminal <handle>` call addresses
 #     that pane by — no PID/TTY witness-matching needed, unlike `plain`.
@@ -61,9 +61,9 @@ terminal_describe() {
   printf 'syntax_help=orca terminal --help\n'
 }
 
-# ABI hook: is <id> an orca handle in THIS driver's grammar? Every measured
-# handle (memory/design/2026-09-20-orca-terminal-driver-feasibility.md) is
-# `term_` followed by a UUID's five hyphen-separated hex groups
+# ABI hook: is <id> an orca handle in THIS driver's grammar? Every handle
+# measured against real orca instances is `term_` followed by a UUID's five
+# hyphen-separated hex groups
 # (`term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba`). Checked here so `terminal_id_ok`
 # and `terminal_detect` share ONE authority (review, #1439): without a
 # `terminal_id_ok`, the registry's fallback for "driver has no hook" is to
@@ -227,9 +227,9 @@ terminal_where() {
 }
 
 # record op: print the rendered pane content verbatim (NOT parsed) — always
-# via `read --screen`: measured, it never carries ANSI/color/SGR information
-# in either read mode (memory/design/2026-09-20-orca-terminal-driver-feasibility.md,
-# Third pass, (a)), so there is nothing --screen costs against the default and
+# via `read --screen`: measured directly against real orca instances, it
+# never carries ANSI/color/SGR information in either read mode, so there is
+# nothing --screen costs against the default and
 # it is the one that answers "what does the pane actually show" rather than an
 # accumulated, possibly-stale-repaint stream. --lines maps to --limit, passed
 # through unchanged to the backend (same contract as tmux/herdr's --lines).
