@@ -4,6 +4,34 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-09-23
+
+### Added
+- Add terminal_peek_styled so poke's real-draft check covers tmux (#1393)
+- poke on herdr: use pane focus to deliver past an abandoned draft, not just refuse (#1384) (#1395)
+- Add SECURITY.md and Dependabot configuration (#1404)
+
+### Fixed
+- install: add ext-tools/ to Codex sandbox writable_roots (#1380)
+- Arm the bridge request on resume when the thread has an exact role match (#1401) (#1405)
+- Stop guessing a seat's type into its placement record (#1402)
+- Distinguish a failed ps observation from proof of death (#970)
+- Fail loudly when a hooks_file write is refused (#1396)
+- Split the emit-and-observe fallback across two calls (#1386) (#1397)
+- Protect a real, stalled draft the two-snapshot check let through (#1378)
+- Use sqlite batch mode for redirected queries (#1343)
+- Refuse only when the input box actually changes (#1322) (#1376)
+- Let an e2ee team use an address the plaintext check refuses (#1019)
+- Bound the sync readiness wait by wall clock, not attempts alone (#839)
+
+### Changed
+- install: prune scripts/ files a prior release no longer ships (#1375)
+
+### Documentation
+- The JA preview page said the send waits for the adapter; it does not (#1377)
+
+[1.4.1]: https://github.com/fujibee/agmsg/compare/v1.4.0...v1.4.1
+
 ## [1.4.0] - 2026-09-21
 
 ### Added
