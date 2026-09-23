@@ -257,14 +257,22 @@ _uninstall_one() {
   # review: the old pattern ("$SKILL_DIR followed by any characters up to
   # the closing quote") had no boundary at all, so it also matched a
   # sibling install whose own path this one's is a literal prefix of (e.g.
-  # SKILL_DIR "agmsg" matching a "agmsg-second" entry too). Below, an entry
-  # is removed only when it IS exactly SKILL_DIR, or starts with SKILL_DIR
+  # SKILL_DIR "agmsg" matching a "agmsg-second" entry too). An entry is
+  # removed only when it IS exactly SKILL_DIR, or starts with SKILL_DIR
   # followed by "/" -- and SKILL_DIR is regex-escaped first (it can contain
   # ".", which is otherwise "any character" in the pattern awk builds).
+  #
+  # review, round 2: a loose pre-check here (even a boundary-correct one)
+  # is still a claim about what the file contains, and "do we write, back
+  # up, and report changed" deserves better than trusting that claim.
+  # Transform into a candidate file first and compare it against the
+  # original; back up and replace only when they actually differ. A
+  # config that only mentions a SIBLING install's own root now never gets
+  # touched, backed up, or reported "cleaned" at all -- not because the
+  # entry check happened to be narrow enough, but because nothing about it
+  # would actually change.
   local CODEX_CONFIG="$HOME/.codex/config.toml"
-  if [ -f "$CODEX_CONFIG" ] && grep -qF "$SKILL_DIR" "$CODEX_CONFIG" 2>/dev/null; then
-    cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
-
+  if [ -f "$CODEX_CONFIG" ]; then
     # Remove matching entries from writable_roots (handles multiline arrays)
     awk -v pattern="$SKILL_DIR" '
       function ere_escape(s,    i, c, out, special) {
@@ -294,7 +302,7 @@ _uninstall_one() {
         in_roots=0; next
       }
       !in_roots { print }
-    ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+    ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp"
     # Remove empty [sandbox_workspace_write] section
     awk '
       /^\[sandbox_workspace_write\]/ {
@@ -306,8 +314,14 @@ _uninstall_one() {
         next
       }
       { print }
-    ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
-    echo "  - cleaned Codex writable_roots (backup: config.toml.bak)"
+    ' "$CODEX_CONFIG.tmp" > "$CODEX_CONFIG.tmp2" && mv "$CODEX_CONFIG.tmp2" "$CODEX_CONFIG.tmp"
+    if cmp -s "$CODEX_CONFIG" "$CODEX_CONFIG.tmp"; then
+      rm -f "$CODEX_CONFIG.tmp"
+    else
+      cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
+      mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+      echo "  - cleaned Codex writable_roots (backup: config.toml.bak)"
+    fi
   fi
 }
 

@@ -270,6 +270,38 @@ teardown() {
   grep -qF "$sk_second/" "$settings"
   grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
   [ -f "$shim" ]
+
+  # (review, round 2) The target install has NO writable_roots entry of
+  # its own -- only a same-prefix sibling's ("third" / "third-second") --
+  # so uninstalling it must not touch config.toml at all: not rewrite it
+  # to the same content, and critically, not even create a .bak. A loose
+  # entry pre-check (even a boundary-correct one) would still enter the
+  # block and do both merely because the FILE mentions "third" somewhere,
+  # despite nothing in it actually needing to change.
+  #
+  # The earlier uninstall above already left its own config.toml.bak from
+  # its own (real) rewrite -- remove it first so its mere presence here
+  # cannot be mistaken for one this second uninstall created.
+  rm -f "$FAKE_HOME/.codex/config.toml.bak"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd third
+  local sk_third="$FAKE_HOME/.agents/skills/third"
+  # ~/.codex/config.toml does not exist until here, so "third" never gets
+  # a root of its own -- install.sh only adds one when the file is
+  # already there when it runs.
+  printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd third-second
+  local sk_third_second="$FAKE_HOME/.agents/skills/third-second"
+  grep -qF "$sk_third_second/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "$sk_third/" "$FAKE_HOME/.codex/config.toml"
+
+  # install.sh's own codex-config step makes its own .bak when it added
+  # third-second's entry above -- clear it too, so the check below is only
+  # about what THIS uninstall did.
+  rm -f "$FAKE_HOME/.codex/config.toml.bak"
+  local codex_before; codex_before="$(cat "$FAKE_HOME/.codex/config.toml")"
+  HOME="$FAKE_HOME" bash "$sk_third/uninstall.sh" --yes
+  [ "$(cat "$FAKE_HOME/.codex/config.toml")" = "$codex_before" ]
+  [ ! -e "$FAKE_HOME/.codex/config.toml.bak" ]
 }
 
 @test "uninstall --all --yes: removes every install and the shared shim (#1400)" {
