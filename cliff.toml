@@ -93,11 +93,22 @@ commit_parsers = [
   # 1.4.1's squash subjects that don't start with a type this file already
   # recognizes: "install:" and "poke(herdr):" aren't Conventional Commits
   # types, and "Add SECURITY.md..." carries no prefix at all. Same remedy as
-  # the community-PR and jev lines above.
+  # the community-PR and jev lines above. Grouped to match the classification
+  # already published in the real 1.4.1 CHANGELOG.md.
   { message = "^Add SECURITY.md and Dependabot config", group = "<!-- 0 -->Added" },
-  { message = "^poke\\(herdr\\): use focus to deliver past an abandoned draft", group = "<!-- 1 -->Fixed" },
+  { message = "^poke\\(herdr\\): use focus to deliver past an abandoned draft", group = "<!-- 0 -->Added" },
   { message = "^install: add ext-tools/ to Codex sandbox writable_roots", group = "<!-- 1 -->Fixed" },
-  { message = "^install: prune scripts/ files a prior release no longer ships", group = "<!-- 1 -->Fixed" },
+  { message = "^install: prune scripts/ files a prior release no longer ships", group = "<!-- 3 -->Changed" },
+  # General fallback for the NEXT install:/poke:-prefixed commit this file
+  # hasn't seen yet -- otherwise it silently drops again, same failure mode
+  # as today. Placed below the individual overrides above so a future commit
+  # matching one of those exact subjects still gets its specific group; only
+  # an unmatched install:/poke: subject falls through to here. No fallback
+  # for a headerless subject like "Add SECURITY.md..." -- that shape is too
+  # generic to default anywhere without curating it by hand, same reasoning
+  # the file already applies to the community-PR and jev lines above.
+  { message = "^install(\\(.*\\))?:", group = "<!-- 3 -->Changed" },
+  { message = "^poke(\\(.*\\))?:", group = "<!-- 3 -->Changed" },
   # Everything else (merges, initial commit, misc) is intentionally dropped.
   { message = ".*", skip = true },
 ]
