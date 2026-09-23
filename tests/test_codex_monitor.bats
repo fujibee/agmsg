@@ -412,4 +412,25 @@ EOF
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume -- thread-A
   [ "$status" -eq 0 ]
   [ -z "$(ls "$TEST_SKILL_DIR"/run/codex-bridge-request.* 2>/dev/null)" ]
+
+  # A unique match, but the write itself fails (review finding: this used to
+  # be silent, reproducing the exact "resume never gets a bridge" symptom
+  # under a different cause). Codex must still launch, and the failure must
+  # be named on stderr rather than swallowed. A fresh thread id: thread-A is
+  # now ambiguous (alice AND bob) from the case above, so it would never
+  # reach the write at all.
+  agmsg_role_session_record team bob thread-B "$canon_project" codex
+  local unwritable_dir="$TEST_PROJECT/unwritable-run"
+  mkdir -p "$unwritable_dir"
+  chmod 555 "$unwritable_dir"
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    AGMSG_CODEX_TEST_RESUME_REQUEST_DIR="$unwritable_dir" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume -- thread-B
+  chmod 755 "$unwritable_dir"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F "could not arm the bridge request for team/bob"
+  printf '%s\n' "$output" | grep -q -F "codex-record-session.sh"
+  [ -z "$(ls "$unwritable_dir"/codex-bridge-request.* 2>/dev/null)" ]
+  [ -z "$(find "$unwritable_dir" -name '*.tmp' -o -name '*.[0-9]*' 2>/dev/null)" ]
+  [ -n "$(ls "$TEST_SKILL_DIR"/run/codex-app-server.*.record 2>/dev/null)" ]
 }
