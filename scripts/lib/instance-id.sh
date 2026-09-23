@@ -212,54 +212,59 @@ PROBE
 # MSYS counterpart of the POSIX whole-table-snapshot-plus-canary technique
 # above, for _agmsg_pid_alive_local only. `ps -Ao pid=,stat=` is not available
 # under MSYS2's ps (no -o support, scripts/lib/compat.sh's own header
-# comment); `ps -l -p PID` is (compat_get_ppid, _compat_get_winpid already
-# rely on it), and it is inherently filtered to the one pid asked about, so
-# there is no truncated-listing risk to canary against the way the POSIX
-# snapshot has. The risk here instead is that ps fails to run, or answers in
-# a shape this parser does not recognize -- and only the header (proving ps
-# ran and understood -l -p at all, not merely what it says about this pid)
-# tells which happened:
-#   - no PID column on the header line => ps failed, or this MSYS ps build's
-#     -l shape isn't the one this parser knows => UNKNOWN => caller reads
-#     this as alive (#954's rule applies here exactly as it does above).
-#   - PID column present, no data row naming this exact pid => ps ran,
-#     understood the query, and the target is not in the process table =>
-#     positive proof of death.
-#   - PID column present, data row naming this pid => target present =>
-#     alive, unless its state is a zombie.
+# comment).
+#
+# #970's first attempt at this queried `ps -l -p PID` (pid-filtered) instead
+# -- the same primitive compat_get_ppid/_compat_get_winpid already use for a
+# LIVE pid, but never measured against a DEAD one before this. Measured live
+# on real Windows Git Bash (2026-09-23): a dead pid makes `ps -l -p` exit 1,
+# header line and all -- so requiring rc=0 before trusting absence (#954's
+# own rule, correctly applied) made the dead case UNREACHABLE, permanently.
+# The Windows CI hang this was meant to close never actually closed, because
+# the query could never satisfy its own proof condition.
+#
+# The fix is the query, not the rule. `ps -l` with NO -p filter behaves like
+# the POSIX `ps -Ao` snapshot: it exits 0 and lists every process, including
+# our own -- so the SAME canary technique applies. Measured header (real
+# Windows Git Bash, 2026-09-23): `PID PPID PGID WINPID TTY UID STIME
+# COMMAND` -- PID is always the list's own first column; WINPID is a
+# different number (the native Windows pid) and must never be read here. No
+# process-state column exists in this shape, so unlike the POSIX branch
+# above, a zombie cannot be told apart from a live process here -- out of
+# scope for what #970 needs (a genuinely-exited pid, which the CI hang could
+# never detect at all).
+#
+#   - ps fails (rc != 0)                => UNKNOWN => caller reads as alive.
+#   - rc = 0, but no row's first column is our own $$ => the listing cannot
+#     be trusted as complete (same canary logic as the POSIX branch) =>
+#     UNKNOWN => alive.
+#   - rc = 0, our own row present, target's row absent => positive proof of
+#     death.
+#   - rc = 0, our own row present, target's row also present => alive.
 # A normal shell predicate: returns 0 (success) when the pid is proven gone,
 # 1 otherwise (alive or unknown) -- `if _agmsg_pid_gone_msys ...; then` reads
 # naturally. This is the OPPOSITE sense of _agmsg_pid_alive_local's own
 # 0-means-alive convention, which is why the caller above branches on it
 # explicitly instead of returning it straight through.
 _agmsg_pid_gone_msys() {
-  local pid="$1" out rc=0 pid_col_seen match_stat
-  # `|| rc=$?` keeps the assignment out of set -e's reach (same reason the
-  # POSIX snapshot below does this) -- but MORE importantly here, this
-  # catches what review found: a header can print and THEN ps fails or is
-  # cut off, and without checking rc that partial, truncated observation
-  # read exactly like a complete one that legitimately found no row. #954's
-  # rule is "observation COMPLETED (rc=0)", not "a header appeared" -- the
-  # POSIX path already enforces the former explicitly; this path silently
-  # dropped it by never capturing ps's own exit status at all.
-  out="$(ps -l -p "$pid" 2>/dev/null)" || rc=$?
-  pid_col_seen="$(printf '%s\n' "$out" | awk '
-    NR==1 { for (i = 1; i <= NF; i++) if ($i == "PID") { print "1"; exit } }
-  ')"
-  [ "$rc" -eq 0 ] && [ "$pid_col_seen" = "1" ] || return 1   # ps failed, was cut off, or answered unrecognized -> unknown -> not gone
-  match_stat="$(printf '%s\n' "$out" | awk -v want="$pid" '
-    NR==1 {
-      for (i = 1; i <= NF; i++) { if ($i == "PID") pc = i; if ($i == "S") sc = i }
-      next
+  local pid="$1" out rc=0 verdict
+  # `|| rc=$?` keeps the assignment out of set -e's reach, same reason the
+  # POSIX snapshot above does this.
+  out="$(ps -l 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  # awk's own field splitting, not the caller's IFS -- #970's original bug
+  # was exactly a parse that silently inherited an ambient IFS it was never
+  # written to expect; this reads column 1 of every non-header row itself,
+  # with nothing shell-side to leak into.
+  verdict="$(printf '%s\n' "$out" | awk -v self="$$" -v want="$pid" '
+    NR == 1 { next }
+    { if ($1 == self) canary = 1; if ($1 == want) found = 1 }
+    END {
+      if (!canary) { print "unknown"; exit }
+      print (found ? "alive" : "gone")
     }
-    NR==2 && pc && $pc == want { print (sc ? $sc : "?"); found = 1 }
-    END { if (!found) print "__absent__" }
   ')"
-  case "$match_stat" in
-    __absent__) return 0 ;;   # ps ran, understood the query, target not listed -> gone
-    Z*)         return 0 ;;   # zombie: exited, not yet reaped -> gone
-    *)          return 1 ;;   # target present -> not gone
-  esac
+  [ "$verdict" = gone ]
 }
 
 # Liveness for a pid that came from OUTSIDE these shells -- reached by walking

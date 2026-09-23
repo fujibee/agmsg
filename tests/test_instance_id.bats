@@ -295,52 +295,66 @@ gone_pid() {
   [ -e "$marker" ] || { echo "cleanup fired on a failed (truncated) ps snapshot"; false; }
 }
 
-@test "pid_alive_local: MSYS corroborates via ps -l -p where -Ao is unsupported, without turning unknown into dead (#970 Windows)" {
+@test "pid_alive_local: MSYS corroborates via a canaried ps -l listing, without turning unknown into dead (#970 Windows)" {
   skip_on_windows "stubs uname/kill/ps; the real ones are authoritative on Windows"
   # _agmsg_pid_alive_local's POSIX corroboration (above) takes a whole-table
   # `ps -Ao pid=,stat=` snapshot, which MSYS2's ps does not support (no -o).
-  # On an actual MSYS/MINGW host (real uname, not just MSYSTEM set -- the
-  # #970 Windows CI hang was this exact branch always falling through to
-  # the unsupported -Ao call and reading every result as UNKNOWN => alive,
-  # so codex-bridge-launcher.sh's wait loop never saw its parent as gone),
-  # the corroboration must instead go through `ps -l -p PID`, the same
-  # query compat_get_ppid/_compat_get_winpid already rely on.
+  # #970's first MSYS attempt queried `ps -l -p PID` (pid-filtered) instead --
+  # measured live on real Windows Git Bash (2026-09-23): a DEAD pid makes
+  # `ps -l -p` exit 1, header line and all, so requiring rc=0 (correctly, per
+  # #954's own rule) made the dead case UNREACHABLE, forever -- the Windows
+  # CI hang this was meant to fix never actually closed. The fix is the
+  # query, not the rule: an UNFILTERED `ps -l` behaves like the POSIX
+  # `ps -Ao` snapshot (exits 0, lists everything including our own row), so
+  # the same canary technique applies -- a positive sighting of our own $$
+  # proves the listing completed, and the target's absence from THAT
+  # listing is what proves death.
   uname() { printf 'MINGW64_NT-10.0-26100\n'; }
 
   # A genuinely dead pid: kill(2) reports ESRCH regardless of platform.
   sh -c 'exit 0' & local gone=$!; wait "$gone" 2>/dev/null
 
-  # 1) ps ran, understood -l -p (header has a PID column), and printed no
-  # data row for this pid -> positive proof of death. This is the case the
-  # Windows hang needed and never got.
-  ps() { printf 'S UID PID PPID TIME CMD\n'; }
+  # 1) self and target both listed -> alive.
+  ps() {
+    printf 'PID PPID PGID WINPID TTY UID STIME COMMAND\n'
+    printf '%s 1 1 999 ? 0 0 sh\n' "$$"
+    printf '%s 1 1 998 ? 0 0 sh\n' "$gone"
+  }
   run _agmsg_pid_alive_local "$gone"
-  [ "$status" -ne 0 ] || { echo "MSYS: an answered ps -l -p that omitted the target did not read dead"; false; }
+  [ "$status" -eq 0 ] || { echo "MSYS: a pid ps -l actually listed did not read alive"; false; }
 
-  # 2) ps ran and DID list a row for this pid -> alive, whatever kill(1)
-  # claimed to reach this branch at all (the row is direct evidence; #954's
-  # rule is that a positive sighting always outranks kill's say-so).
-  ps() { printf 'S UID PID PPID TIME CMD\n'; printf 'S 0 %s 1 0:00 something\n' "$gone"; }
+  # 2) self listed, target absent -> positive proof of death. This is the
+  # case the Windows hang needed and never got from the -p-filtered query.
+  ps() {
+    printf 'PID PPID PGID WINPID TTY UID STIME COMMAND\n'
+    printf '%s 1 1 999 ? 0 0 sh\n' "$$"
+  }
   run _agmsg_pid_alive_local "$gone"
-  [ "$status" -eq 0 ] || { echo "MSYS: a pid ps -l -p actually listed did not read alive"; false; }
+  [ "$status" -ne 0 ] || { echo "MSYS: a ps -l listing self but omitting the target did not read dead"; false; }
 
-  # 3) ps failed, or answered in a shape with no recognizable PID column at
-  # all -> UNKNOWN. #954's rule holds here exactly as it does on POSIX:
-  # a failed observation must never be read as proof of death.
+  # 3) ps fails outright -> UNKNOWN. #954's rule holds here exactly as it
+  # does on POSIX: a failed observation must never be read as proof of death.
   ps() { return 1; }
   run _agmsg_pid_alive_local "$gone"
-  [ "$status" -eq 0 ] || { echo "MSYS: a failed ps -l -p was read as proof of death"; false; }
+  [ "$status" -eq 0 ] || { echo "MSYS: a failed ps -l was read as proof of death"; false; }
 
-  # 4) (review) ps prints a RECOGNIZABLE header -- so the pid_col_seen check
-  # alone is satisfied -- and THEN fails (truncated mid-read, same shape a
-  # real MSYS ps cut off partway could produce), never reaching a data row
-  # for this pid. A header appearing is not the same claim as the
-  # observation COMPLETING (rc=0) -- the POSIX snapshot above requires
-  # exactly that already; this path must require it too, or a partial read
-  # that merely LOOKS like "ran fine, found nothing" reads as death.
-  ps() { printf 'S UID PID PPID TIME CMD\n'; return 1; }
+  # 4) ps succeeds (rc=0) but the listing carries no row for our own $$ --
+  # canary absent, so the listing cannot be trusted as complete -> UNKNOWN,
+  # exactly the POSIX branch's own truncated-snapshot rule.
+  ps() {
+    printf 'PID PPID PGID WINPID TTY UID STIME COMMAND\n'
+    printf '999999 1 1 999 ? 0 0 sh\n'
+  }
   run _agmsg_pid_alive_local "$gone"
-  [ "$status" -eq 0 ] || { echo "MSYS: a ps that printed a header then failed was read as proof of death"; false; }
+  [ "$status" -eq 0 ] || { echo "MSYS: a ps -l listing with no canary row was read as proof of death"; false; }
+
+  # 5) Regression pin for the exact shape measured live on real Windows Git
+  # Bash from the OLD -p-filtered query on a dead pid: header only, rc=1.
+  # Kept so an accidental return to a -p-filtered query is caught here,
+  # never again only on a live CI runner.
+  ps() { printf 'PID PPID PGID WINPID TTY UID STIME COMMAND\n'; return 1; }
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "MSYS: the real dead-pid ps -l -p shape (header only, rc=1) was read as proof of death"; false; }
 }
 
 @test "pid_alive: a failing ps under set -e does not terminate a non-conditional caller (#954)" {
