@@ -80,6 +80,22 @@ RUN_DIR="$SKILL_DIR/run"
 . "$SCRIPT_DIR/lib/terminal-registry.sh"
 _agmsg_shq() { agmsg_shq "$1"; }
 
+# Prints the "run this from a normal shell instead" recovery line for a
+# refused hooks_file write (#1392), to stderr.
+#
+# Every argument goes through _agmsg_shq -- the same helper this file already
+# uses for every other command line it prints (see its own comment above) --
+# rather than the naive `'$var'` this replaced (review finding, #1392: a
+# project path containing a single quote broke the quoting outright, and a
+# copy-pasted broken quote is a write-the-wrong-thing hazard, not just a
+# cosmetic one). $0 is included for the same reason: nothing about this
+# script's own invocation path is guaranteed quote-free either.
+_agmsg_print_delivery_recovery() {
+  local mode="$1" type="$2" project="$3"
+  echo "agmsg: if this seat is running in a restricted sandbox (e.g. Codex's workspace-write mode keeps .codex/ read-only), run this same command from a normal, unsandboxed shell instead:" >&2
+  echo "  bash $(_agmsg_shq "$0") set $(_agmsg_shq "$mode") $(_agmsg_shq "$type") $(_agmsg_shq "$project")" >&2
+}
+
 # True (0) iff <cli>'s reported version is >= <min>, compared as MAJOR.MINOR.PATCH.
 # FAIL-CLOSED: returns non-zero when the cli is not on PATH, `--version` fails, or
 # neither the output nor <min> yields a dotted-numeric version — an unknown
@@ -155,8 +171,7 @@ agmsg_delivery_apply_default() {
   # this stays loud even from a caller that does not propagate exit codes.
   mkdir -p "$(dirname "$hooks_file")" || {
     echo "agmsg: could not create $(dirname "$hooks_file") to write $hooks_file — delivery for $type was NOT set up." >&2
-    echo "agmsg: if this seat is running in a restricted sandbox (e.g. Codex's workspace-write mode keeps .codex/ read-only), run this same command from a normal, unsandboxed shell instead:" >&2
-    echo "  bash '$0' set $mode $type '$project'" >&2
+    _agmsg_print_delivery_recovery "$mode" "$type" "$project"
     return 1
   }
 
@@ -294,8 +309,7 @@ agmsg_delivery_apply_default() {
   if ! mv "$tmp_state" "$hooks_file"; then
     rm -f "$tmp_state"
     echo "agmsg: could not write $hooks_file — delivery for $type was NOT set up." >&2
-    echo "agmsg: if this seat is running in a restricted sandbox (e.g. Codex's workspace-write mode keeps .codex/ read-only), run this same command from a normal, unsandboxed shell instead:" >&2
-    echo "  bash '$0' set $mode $type '$project'" >&2
+    _agmsg_print_delivery_recovery "$mode" "$type" "$project"
     return 1
   fi
 }

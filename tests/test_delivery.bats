@@ -80,17 +80,41 @@ settings_file() {
 # .codex/ read-only even inside an otherwise-writable project, confirmed
 # live, #1392) with a read-only .codex/ rather than mocking mv, so this
 # catches a regression in the real mv call, not in a stand-in for it.
-@test "delivery set: a refused hooks_file write fails loudly and names the file" {
-  mkdir -p "$TEST_PROJECT/.codex"
-  chmod 555 "$TEST_PROJECT/.codex"
-  run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
-  chmod 755 "$TEST_PROJECT/.codex"   # teardown's rm -rf must not trip over this
+#
+# The project path itself carries a space, a literal $, and a single quote
+# (review finding: the recovery line's command used to be built with naive
+# `'$var'` interpolation, which a quote in the path broke outright -- the
+# header comment right above _agmsg_shq's own definition already says why
+# that pattern is never enough on its own). The line-content checks below
+# only prove the path appears as a SUBSTRING, which broken quoting could
+# still satisfy, so the final assertion goes further: feeds the PRINTED line
+# back to a real bash and asserts the argv it produces is byte-identical to
+# the original project path, including the literal (never-expanded) '$HOME'
+# and the embedded quotes.
+@test "delivery set: a refused hooks_file write fails loudly, names the file, and the recovery line survives a quoted/spaced/\$-bearing project path" {
+  local weird_project="$TEST_PROJECT/proj \$HOME 'quoted'"
+  mkdir -p "$weird_project/.codex"
+  chmod 555 "$weird_project/.codex"
+  run bash "$SCRIPTS/delivery.sh" set monitor codex "$weird_project"
+  chmod 755 "$weird_project/.codex"   # teardown's rm -rf must not trip over this
   [ "$status" -ne 0 ]
-  [[ "$output" == *"could not write $TEST_PROJECT/.codex/hooks.json"* ]]
+  [[ "$output" == *"could not write $weird_project/.codex/hooks.json"* ]]
   [[ "$output" == *"delivery for codex was NOT set up"* ]]
   [[ "$output" == *"run this same command from a normal, unsandboxed shell"* ]]
   case "$output" in *"Delivery mode set to"*) return 1 ;; esac
-  [ ! -f "$TEST_PROJECT/.codex/hooks.json" ]
+  [ ! -f "$weird_project/.codex/hooks.json" ]
+
+  local recovery_line
+  recovery_line="$(printf '%s\n' "$output" | grep '^  bash ')"
+  [ -n "$recovery_line" ]
+
+  local -a argv=()
+  eval "argv=(${recovery_line#  bash })"
+  # Indexed via count-1, not a negative subscript -- bash 3.2 (macOS's
+  # /bin/bash, and this suite's own house rule) does not support negative
+  # array indices.
+  local last_idx=$((${#argv[@]} - 1))
+  [ "${argv[$last_idx]}" = "$weird_project" ]
 }
 
 # --- idempotency ---
