@@ -360,16 +360,27 @@ gone_pid() {
   # (S/I/O) on SOME rows, not reflected in the header and not present on
   # every row -- pushing that row's PID to the second field. Self's row is
   # unflagged (the canary still succeeds by column 1 alone), but the
-  # TARGET's row -- alive -- carries a flag. Column-1-only reading would
-  # miss the target's real pid entirely and misreport a live process as
-  # dead; this is the exact hole review found and #954's own failure shape.
+  # TARGET's row -- STOPPED (SIGSTOP), which is alive, not dead -- carries
+  # a flag. Column-1-only reading would miss the target's real pid entirely
+  # and misreport a live-but-stopped process as dead; this is the exact
+  # hole review found and #954's own failure shape.
+  #
+  # The flagged row is verbatim what review measured live (MINGW64, a bash
+  # stopped with `kill -STOP`; only the pid substitutes this test's own
+  # target) -- column widths, leading space, and the STIME shape included,
+  # a stronger fixture than a hand-written one. The SAME pid resumed (`kill
+  # -CONT`) was also measured, flag gone and PID back in column 1 -- i.e.
+  # the flag is this process's transient stopped state, not a property of
+  # the pid. I and O were not reached live in that measurement; the regex
+  # below still matches them on Cygwin's own documented flag set, but only
+  # S has real hardware behind it here.
   ps() {
     printf 'PID PPID PGID WINPID TTY UID STIME COMMAND\n'
     printf '%s 1 1 999 ? 0 0 sh\n' "$$"
-    printf 'S %s 1 1 998 ? 0 0 sh\n' "$gone"
+    printf 'S %s 3967149 3967078    1026648  ?         197609 23:30:42 /usr/bin/bash\n' "$gone"
   }
   run _agmsg_pid_alive_local "$gone"
-  [ "$status" -eq 0 ] || { echo "MSYS: a live target whose ps -l row carried a leading state flag was read as dead"; false; }
+  [ "$status" -eq 0 ] || { echo "MSYS: a stopped-but-alive target whose ps -l row carried a leading state flag was read as dead"; false; }
 }
 
 @test "pid_alive: a failing ps under set -e does not terminate a non-conditional caller (#954)" {
