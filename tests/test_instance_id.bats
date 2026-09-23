@@ -355,6 +355,21 @@ gone_pid() {
   ps() { printf 'PID PPID PGID WINPID TTY UID STIME COMMAND\n'; return 1; }
   run _agmsg_pid_alive_local "$gone"
   [ "$status" -eq 0 ] || { echo "MSYS: the real dead-pid ps -l -p shape (header only, rc=1) was read as proof of death"; false; }
+
+  # 6) (review) Cygwin/MSYS ps -l documents an optional leading state flag
+  # (S/I/O) on SOME rows, not reflected in the header and not present on
+  # every row -- pushing that row's PID to the second field. Self's row is
+  # unflagged (the canary still succeeds by column 1 alone), but the
+  # TARGET's row -- alive -- carries a flag. Column-1-only reading would
+  # miss the target's real pid entirely and misreport a live process as
+  # dead; this is the exact hole review found and #954's own failure shape.
+  ps() {
+    printf 'PID PPID PGID WINPID TTY UID STIME COMMAND\n'
+    printf '%s 1 1 999 ? 0 0 sh\n' "$$"
+    printf 'S %s 1 1 998 ? 0 0 sh\n' "$gone"
+  }
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "MSYS: a live target whose ps -l row carried a leading state flag was read as dead"; false; }
 }
 
 @test "pid_alive: a failing ps under set -e does not terminate a non-conditional caller (#954)" {

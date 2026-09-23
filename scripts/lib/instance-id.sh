@@ -227,16 +227,28 @@ PROBE
 # the POSIX `ps -Ao` snapshot: it exits 0 and lists every process, including
 # our own -- so the SAME canary technique applies. Measured header (real
 # Windows Git Bash, 2026-09-23): `PID PPID PGID WINPID TTY UID STIME
-# COMMAND` -- PID is always the list's own first column; WINPID is a
+# COMMAND` -- PID is the list's own first column ordinarily; WINPID is a
 # different number (the native Windows pid) and must never be read here. No
 # process-state column exists in this shape, so unlike the POSIX branch
 # above, a zombie cannot be told apart from a live process here -- out of
 # scope for what #970 needs (a genuinely-exited pid, which the CI hang could
 # never detect at all).
 #
+# review: Cygwin/MSYS `ps -l` documents an optional single-character state
+# flag (S/I/O) that some rows -- not all, and not reflected in the header at
+# all -- get PREPENDED as an extra leading field, pushing PID to the second
+# column on exactly those rows. Reading column 1 unconditionally means a
+# flagged row's real PID is never matched: an unflagged self row still
+# proves the canary, so a flagged but genuinely LIVE target row reads as
+# "absent" -- a live process misread as dead, #954's own failure shape.
+# Fixed-width reading was considered and rejected: the flag is not a
+# declared column at all, so there is no header position to key a fixed
+# width on; detecting the flag value itself is the only thing that is
+# actually documented.
+#
 #   - ps fails (rc != 0)                => UNKNOWN => caller reads as alive.
-#   - rc = 0, but no row's first column is our own $$ => the listing cannot
-#     be trusted as complete (same canary logic as the POSIX branch) =>
+#   - rc = 0, but no row's PID field is our own $$ => the listing cannot be
+#     trusted as complete (same canary logic as the POSIX branch) =>
 #     UNKNOWN => alive.
 #   - rc = 0, our own row present, target's row absent => positive proof of
 #     death.
@@ -254,11 +266,18 @@ _agmsg_pid_gone_msys() {
   [ "$rc" -eq 0 ] || return 1
   # awk's own field splitting, not the caller's IFS -- #970's original bug
   # was exactly a parse that silently inherited an ambient IFS it was never
-  # written to expect; this reads column 1 of every non-header row itself,
-  # with nothing shell-side to leak into.
+  # written to expect; this reads each non-header row itself, with nothing
+  # shell-side to leak into.
   verdict="$(printf '%s\n' "$out" | awk -v self="$$" -v want="$pid" '
     NR == 1 { next }
-    { if ($1 == self) canary = 1; if ($1 == want) found = 1 }
+    {
+      # A row whose first field is exactly one documented flag letter has
+      # PID pushed to the next field -- a real pid is always numeric, so
+      # this never misreads an actual pid value as the flag.
+      p = ($1 ~ /^[SIO]$/) ? $2 : $1
+      if (p == self) canary = 1
+      if (p == want) found = 1
+    }
     END {
       if (!canary) { print "unknown"; exit }
       print (found ? "alive" : "gone")
