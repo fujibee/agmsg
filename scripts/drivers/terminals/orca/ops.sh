@@ -544,8 +544,13 @@ terminal_despawn() {
   # pane_state re-check below ever runs (review, #1440), defeating the whole
   # point of not trusting close in the first place.
   orca terminal close --terminal "$id" --json >/dev/null 2>&1 || true
+  # Same errexit hazard as `close` above, on the very next line: pane_state's
+  # own documented contract returns non-zero (10) for unknown, so this
+  # assignment's status would abort a set -e caller before the runtime_error
+  # output and 13 below ever run (review, #1440) -- silently violating
+  # despawn's own "anything else is 13" contract instead of honoring it.
   local state
-  state="$(terminal_pane_state "$id")"
+  state="$(terminal_pane_state "$id")" || true
   if [ "$state" = gone ]; then
     echo ok
     return 0

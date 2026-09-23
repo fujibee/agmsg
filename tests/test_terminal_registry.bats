@@ -1659,6 +1659,17 @@ _last_agent_rename_key() {
   run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_despawn term_abc123'
   [ "$status" -eq 0 ]
   [ "$output" = ok ]
+
+  # pane_state itself returns non-zero (10) for unknown -- the SAME errexit
+  # hazard on the very next line (review, #1440): `state="$(terminal_pane_state
+  # ...)"` must not abort the caller either, or despawn's own "anything else
+  # is 13" contract silently breaks for exactly the unknown case it names.
+  # 'stale' makes show answer ok:false, so pane_state is unknown/10.
+  _install_fake_orca stale
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_despawn term_abc123; echo UNREACHABLE'
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+  refute grep -q UNREACHABLE <<<"$output"
 }
 
 @test "orca: name renames via the tab title (team:name), mode makes no difference, and fails closed" {
