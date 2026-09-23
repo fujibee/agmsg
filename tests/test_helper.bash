@@ -26,6 +26,8 @@ unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID 
 # sandboxed HOME assumes that IS the resolved root. Left ambient, those tests
 # would silently resolve against the real profile dir instead of the fixture.
 unset CLAUDE_CONFIG_DIR
+# Keep Codex fixture state isolated from the invoking agent's effective home.
+unset AGMSG_CODEX_HOME CODEX_HOME
 # #1229: poke.sh's plain-no-pane fallback resolves ITS OWN caller identity
 # from AGMSG_SESSION_ID/CLAUDE_CODE_SESSION_ID/CODEX_THREAD_ID (the same
 # chain fix.sh uses). Left ambient, a suite run from inside a real
@@ -47,13 +49,21 @@ setup_test_env() {
   unset TMUX TMUX_PANE TMUX_TMPDIR
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
   unset CLAUDE_CONFIG_DIR
+  unset AGMSG_CODEX_HOME CODEX_HOME
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
   export TEST_SKILL_DIR="$(mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
   # Copy all scripts to isolated skill dir. Recursive so nested helper dirs
   # (scripts/lib/) come along without enumerating files.
-  cp -R "$BATS_TEST_DIRNAME"/../scripts/. "$TEST_SKILL_DIR/scripts/"
+  # A macOS runner was observed to stop while cp -R copied the fixture.
+  # Use macOS's directory-copy tool there; keep the existing cp path on
+  # Linux/Windows and on macOS hosts without ditto.
+  if [ "$(uname -s 2>/dev/null || true)" = Darwin ] && command -v ditto >/dev/null 2>&1; then
+    ditto "$BATS_TEST_DIRNAME"/../scripts/. "$TEST_SKILL_DIR/scripts/"
+  else
+    cp -R "$BATS_TEST_DIRNAME"/../scripts/. "$TEST_SKILL_DIR/scripts/"
+  fi
   chmod +x "$TEST_SKILL_DIR/scripts/"*.sh
   chmod +x "$TEST_SKILL_DIR/scripts/"*.js 2>/dev/null || true
 

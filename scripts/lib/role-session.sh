@@ -87,19 +87,25 @@ _agmsg_role_session_path_into() {
   return 0
 }
 
+# stdout form, for callers that are not in a hot loop.
+_agmsg_role_session_path() {
+  _agmsg_role_session_path_into "$1" "$2"
+  printf '%s' "$_AGMSG_ROLE_SESSION_PATH"
+}
+
 # Read the fields the codex bridge launcher needs in ONE pass, into the caller's
-# shell: AGMSG_ROLE_SESSION_UUID, AGMSG_ROLE_SESSION_PROJECT, and
-# AGMSG_ROLE_SESSION_OWNER. All are empty when the record or field is absent.
-# This exists so the poll path
+# shell. All are empty when the record or field is absent. This exists so the
+# poll path can resolve a role without repeated file reads.
 # can resolve a role without a single command substitution -- the getters below
 # are fine one-shot, but each one costs a subshell and its own read of the same
 # file, and the launcher wants both fields for the same pair several times a
 # second. First match wins per field, matching the getters exactly.
 agmsg_role_session_load() {
-  local team="$1" agent="$2" line path have_uuid=0 have_project=0
+  local team="$1" agent="$2" line path have_uuid=0 have_project=0 have_codex_home=0
   AGMSG_ROLE_SESSION_UUID=""
   AGMSG_ROLE_SESSION_PROJECT=""
   AGMSG_ROLE_SESSION_OWNER=""
+  AGMSG_ROLE_SESSION_CODEX_HOME=""
   _agmsg_role_session_path_into "$team" "$agent"
   path="$_AGMSG_ROLE_SESSION_PATH"
   [ -f "$path" ] || return 0
@@ -113,6 +119,9 @@ agmsg_role_session_load() {
         ;;
       owner=*)
         [ -n "$AGMSG_ROLE_SESSION_OWNER" ] || AGMSG_ROLE_SESSION_OWNER="${line#owner=}"
+        ;;
+      codex_home=*)
+        [ "$have_codex_home" = "1" ] || { AGMSG_ROLE_SESSION_CODEX_HOME="${line#codex_home=}"; have_codex_home=1; }
         ;;
     esac
   done < "$path" 2>/dev/null
@@ -137,9 +146,10 @@ agmsg_role_session_load() {
 #                          from the type manifest. Empty when unknown.
 #   project=<project>      the resolved project root
 #   owner=<instance_id>    the actas owner token written by actas-claim
+#   codex_home=<path>      Codex state root; empty for non-Codex agent types
 #   updated_at=<iso8601>   best-effort timestamp (empty if date(1) unavailable)
 agmsg_role_session_record() {
-  local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}" owner="${6:-}"
+  local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}" owner="${6:-}" codex_home="${7:-}"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$bare_sid" ] || return 0
   local path dir tmp ts named_ref="" named_epoch="" named_at=""
   _agmsg_role_session_path_into "$team" "$agent"
@@ -155,6 +165,9 @@ agmsg_role_session_record() {
   mkdir -p "$dir" 2>/dev/null || true
   tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  if [ "$type" = "codex" ] && [ -z "$codex_home" ]; then
+    codex_home="${AGMSG_CODEX_HOME:-${CODEX_HOME:-${HOME:+$HOME/.codex}}}"
+  fi
   {
     printf 'session=%s\n' "$bare_sid"
     printf 'name=%s-%s\n' "$team" "$agent"
@@ -163,6 +176,7 @@ agmsg_role_session_record() {
     printf 'type=%s\n' "$type"
     printf 'project=%s\n' "$project"
     [ -z "$owner" ] || printf 'owner=%s\n' "$owner"
+    printf 'codex_home=%s\n' "$codex_home"
     printf 'updated_at=%s\n' "$ts"
     [ -z "$named_ref" ] || printf 'named_ref=%s\n' "$named_ref"
     [ -z "$named_ref" ] || printf 'named_epoch=%s\n' "$named_epoch"

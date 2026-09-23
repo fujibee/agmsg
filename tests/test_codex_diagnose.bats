@@ -1,0 +1,140 @@
+#!/usr/bin/env bats
+
+load test_helper
+
+setup() {
+  setup_test_env
+  export PROJ="$TEST_SKILL_DIR/proj"
+  mkdir -p "$PROJ"
+  bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
+  export DIAG="$TYPES/codex/codex-diagnose.sh"
+}
+
+teardown() {
+  teardown_test_env
+}
+
+@test "codex diagnose: help separates thread confirmation from TUI visibility" {
+  run bash "$DIAG" --help
+  [ "$status" -eq 0 ]
+  grep -qF -- "THREAD_CONFIRMED" <<<"$output"
+  grep -qF -- "visibly" <<<"$output"
+}
+
+@test "codex diagnose: legacy invocation keeps the binary non-match exit contract" {
+  run bash "$DIAG" "$PROJ" team alice
+  [ "$status" -eq 1 ]
+  grep -qF -- "codex diagnosis: UNKNOWN" <<<"$output"
+}
+
+@test "codex diagnose: self-test requires the initiating Codex thread" {
+  unset CODEX_THREAD_ID
+  run bash "$DIAG" "$PROJ" team alice --self-test
+  [ "$status" -eq 2 ]
+  grep -qF -- "self-delivery: UNKNOWN reason=missing-or-invalid-CODEX_THREAD_ID" <<<"$output"
+  [ ! -d "$TEST_SKILL_DIR/run" ] || [ -z "$(find "$TEST_SKILL_DIR/run" -name 'codex-self-test.*.json' -print)" ]
+}
+
+@test "codex diagnose: sent record is exposed as PENDING with exit 3" {
+  export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
+  run bash "$DIAG" "$PROJ" team alice --self-test
+  [ "$status" -eq 3 ]
+  grep -qF -- "self-delivery: PENDING" <<<"$output"
+  diagnosis_id="$(printf '%s\n' "$output" | sed -n 's/.*diagnosis_id=\([^ ]*\).*/\1/p' | tail -n 1)"
+  [ -n "$diagnosis_id" ]
+  run bash "$DIAG" "$PROJ" team alice --status "$diagnosis_id"
+  [ "$status" -eq 3 ]
+  grep -qF -- "self-delivery: PENDING diagnosis_id=$diagnosis_id" <<<"$output"
+
+  run bash "$DIAG" "$PROJ" team alice --self-test
+  [ "$status" -eq 3 ]
+  grep -qF -- "diagnosis_id=$diagnosis_id reason=existing-pending" <<<"$output"
+}
+
+@test "codex diagnose: received marker records only THREAD_CONFIRMED and requires screen observation" {
+  export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
+  run bash "$DIAG" "$PROJ" team alice --self-test
+  [ "$status" -eq 3 ]
+  diagnosis_id="$(printf '%s\n' "$output" | sed -n 's/.*diagnosis_id=\([^ ]*\).*/\1/p' | tail -n 1)"
+
+  marker_json="$(bash "$TYPES/codex/codex-self-test-inbox.sh" peek team alice)"
+  values="$(printf '%s' "$marker_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const o=JSON.parse(s);const m=o.body.match(/^agmsg-codex-self-test:v1:[^:]+:([a-f0-9]+)$/);if(!m)process.exit(1);process.stdout.write(`${m[1]} ${o.id}`)})')"
+  nonce="${values%% *}"
+  message_id="${values#* }"
+  run bash "$DIAG" "$PROJ" team alice --confirm "$nonce" "$message_id"
+  [ "$status" -eq 2 ]
+  grep -qF -- "self-delivery: THREAD_CONFIRMED diagnosis_id=$diagnosis_id" <<<"$output"
+  grep -qF -- "tui-visible: REQUIRES_CURRENT_SCREEN_OBSERVATION" <<<"$output"
+
+  run bash "$DIAG" "$PROJ" team alice --status "$diagnosis_id"
+  [ "$status" -eq 0 ]
+  grep -qF -- "self-delivery: THREAD_CONFIRMED" <<<"$output"
+  refute grep -qF -- "self-delivery: CONFIRMED" <<<"$output"
+}
+
+@test "codex diagnose: malformed confirm values fail closed" {
+  run bash "$DIAG" "$PROJ" team alice --confirm not-a-hex-nonce message-id
+  [ "$status" -eq 2 ]
+  grep -qF -- "self-delivery: UNKNOWN reason=invalid-nonce" <<<"$output"
+}
+
+@test "send: print-id is opt-in and returns the stored opaque id" {
+  run bash "$SCRIPTS/send.sh" team alice alice hello
+  [ "$status" -eq 0 ]
+  refute grep -qF -- "message_id=" <<<"$output"
+
+  run bash "$SCRIPTS/send.sh" team alice alice hello-again --print-id
+  [ "$status" -eq 0 ]
+  grep -qF -- "message_id=" <<<"$output"
+  id="$(printf '%s\n' "$output" | sed -n 's/^message_id=//p')"
+  grep -Eq '^[A-Za-z0-9-]+$' <<<"$id"
+}
+
+@test "bridge marker parser requires exact self sender and full structured body" {
+  run node - "$TYPES/codex/codex-bridge.js" <<'NODE'
+const { parseSelfTestMarker } = require(process.argv[2]);
+const nonce = "a".repeat(48);
+const pair = { team: "team", name: "alice" };
+const good = { type: "message_sent", from: "alice", to: "alice", body: `agmsg-codex-self-test:v1:diag-1:${nonce}` };
+if (!parseSelfTestMarker(good, pair)) process.exit(1);
+if (parseSelfTestMarker({ ...good, from: "bob" }, pair)) process.exit(2);
+if (parseSelfTestMarker({ ...good, body: `${good.body}:extra` }, pair)) process.exit(3);
+NODE
+  [ "$status" -eq 0 ]
+}
+
+@test "bridge inbox transport peeks exact ids and acknowledges only explicit rows" {
+  bash "$SCRIPTS/send.sh" team alice alice first >/dev/null
+  bash "$SCRIPTS/send.sh" team alice alice second >/dev/null
+  run bash "$TYPES/codex/codex-self-test-inbox.sh" peek team alice
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 2 ]
+  printf '%s\n' "$output" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{for(const l of s.trim().split(/\n/)){const o=JSON.parse(l);if(!o.id||o.type!=="message_sent")process.exit(1)}})'
+  first_id="$(printf '%s\n' "${lines[0]}" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(String(JSON.parse(s).id)))')"
+  run bash "$TYPES/codex/codex-self-test-inbox.sh" ack team alice "$first_id"
+  [ "$status" -eq 0 ]
+  run bash "$TYPES/codex/codex-self-test-inbox.sh" peek team alice
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 1 ]
+  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  [ "$status" -eq 0 ]
+  grep -qF -- "second" <<<"$output"
+}
+
+@test "codex diagnose: Windows project path spellings share the canonical context" {
+  command -v cygpath >/dev/null 2>&1 || skip "requires Windows Git Bash cygpath"
+  export CODEX_THREAD_ID="018f3f7e-0000-7000-8000-000000000099"
+  run bash "$DIAG" "$PROJ" team alice --self-test
+  [ "$status" -eq 3 ]
+  diagnosis_id="$(printf '%s\n' "$output" | sed -n 's/.*diagnosis_id=\([^ ]*\).*/\1/p' | tail -n 1)"
+  marker_json="$(bash "$TYPES/codex/codex-self-test-inbox.sh" peek team alice)"
+  values="$(printf '%s' "$marker_json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const o=JSON.parse(s);const m=o.body.match(/^agmsg-codex-self-test:v1:[^:]+:([a-f0-9]+)$/);if(!m)process.exit(1);process.stdout.write(`${m[1]} ${o.id}`)})')"
+  nonce="${values%% *}"; message_id="${values#* }"; win_proj="$(cygpath -m "$PROJ")"
+  run bash "$DIAG" "$win_proj" team alice --confirm "$nonce" "$message_id"
+  [ "$status" -eq 2 ]
+  grep -qF -- "self-delivery: THREAD_CONFIRMED diagnosis_id=$diagnosis_id" <<<"$output"
+  run bash "$DIAG" "$win_proj" team alice --status "$diagnosis_id"
+  [ "$status" -eq 0 ]
+  run bash "$TYPES/codex/codex-self-test-inbox.sh" ack team alice "$message_id"
+  [ "$status" -eq 0 ]
+}

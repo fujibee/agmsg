@@ -151,7 +151,7 @@ teardown() {
 # Write a role-session record (team, agent) -> thread for a project.
 put_record() {
   SKILL_DIR="$TEST_SKILL_DIR" bash -c \
-    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6"' \
+    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" "$6" "${7:-}"' \
     _ "$SCRIPTS" "$@"
   request_file="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
   request_pair=""
@@ -247,6 +247,12 @@ run_launcher() {
 @test "launcher: leaves a role with a foreign-project record unsubscribed (#150)" {
   put_record team alice other-thread "/some/other/project" codex
   run_launcher
+  [ ! -f "$CAPTURE" ]
+}
+
+@test "launcher: leaves a role recorded in another CODEX_HOME unsubscribed" {
+  put_record team alice other-home-thread "$PROJ" codex "$HOME/.codex"
+  AGMSG_CODEX_HOME="$TEST_SKILL_DIR/isolated-home" run_launcher
   [ ! -f "$CAPTURE" ]
 }
 
@@ -950,14 +956,13 @@ _run_start_token() { # <pid> -> runs _start_token in a subshell
   [ -n "${output#*"$tab"}" ]
 }
 
-@test "launcher: CLANGARM uname selects the Windows start token path" {
+@test "launcher: CLANGARM MSYSTEM selects the Windows start token path" {
   local stubdir="$TEST_SKILL_DIR/clangarm-bin"
   mkdir -p "$stubdir"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" CLANGARM64_NT-10.0' > "$stubdir/uname"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" 639231441791462826' > "$stubdir/powershell.exe"
-  chmod +x "$stubdir/uname" "$stubdir/powershell.exe"
+  chmod +x "$stubdir/powershell.exe"
 
-  PATH="$stubdir:$PATH" _run_start_token 123
+  MSYSTEM=CLANGARM64 PATH="$stubdir:$PATH" _run_start_token 123
   [ "$status" -eq 0 ]
   [ "$output" = $'pwsh\t639231441791462826' ]
 }
@@ -976,4 +981,106 @@ _run_start_token() { # <pid> -> runs _start_token in a subshell
   [ "${output%%"$tab"*}" = pwsh ]
   local tok="${output#*"$tab"}"
   case "$tok" in ''|*[!0-9]*) false ;; esac
+}
+
+_load_safe_stop_functions() {
+  local pattern
+  source "$SCRIPTS/lib/hash.sh"
+  pattern='/^_read_lease() {/,/^}/p;/^_read_stop_record() {/,/^}/p;/^_write_stop_record() {/,/^}/p;/^_windows_process_state() {/,/^}/p;/^_windows_stop_request_from_fence() {/,/^}/p;/^_windows_begin_retire() {/,/^}/p;/^_windows_wait_exit_proof() {/,/^}/p;/^_windows_current_bridge_valid() {/,/^}/p'
+  eval "$(sed -n "$pattern" "$LAUNCHER")"
+  TAB=$'\t'
+  PROJECT_HASH="$(printf '%s' "$PROJ" | agmsg_sha1)"
+  BRIDGE_PAIRS_HASH="$(printf '%s' pair-set | agmsg_sha1)"
+  retire_fence="$RUN_DIR/codex-bridge-retire.$PROJECT_HASH.$BRIDGE_PAIRS_HASH"
+  appserver_file="$RUN_DIR/current.appserver"
+  thread_file="$RUN_DIR/current.thread"
+  _REAP_WAIT_TICKS=1
+}
+
+_safe_stop_probe_stub() {
+  local stubdir="$TEST_SKILL_DIR/safe-stop-bin"
+  mkdir -p "$stubdir"
+  cat > "$stubdir/powershell.exe" <<'EOF'
+#!/usr/bin/env bash
+case "${POWERSHELL_RESULT:-UNKNOWN}" in
+  UNKNOWN) exit 3 ;;
+  *) printf '%s\n' "$POWERSHELL_RESULT" ;;
+esac
+EOF
+  chmod +x "$stubdir/powershell.exe"
+  ln -s powershell.exe "$stubdir/pwsh"
+  export PATH="$stubdir:$PATH"
+}
+
+@test "launcher safe-stop: PowerShell ABSENT and PID reuse are exit proof; UNKNOWN is not" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  POWERSHELL_RESULT=ABSENT run _windows_process_state 123
+  [ "$status" -eq 0 ] && [ "$output" = ABSENT ]
+  POWERSHELL_RESULT=$'LIVE\t222' run _windows_process_state 123
+  [ "$status" -eq 0 ] && [ "$output" = $'LIVE\t222' ]
+  POWERSHELL_RESULT=UNKNOWN run _windows_process_state 123
+  [ "$status" -ne 0 ] && [ "$output" = UNKNOWN ]
+}
+
+@test "launcher safe-stop: an exact lease creates durable fence and atomic request" {
+  _load_safe_stop_functions
+  local pid=123 start=638622100000000000 host
+  host="$(hostname)"
+  printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=pwsh\n' \
+    "$PROJECT_HASH" "$BRIDGE_PAIRS_HASH" "$host" "$pid" "$start" > "$RUN_DIR/codex-bridge-lease.$pid"
+  _windows_begin_retire "$pid" $'pwsh\t638622100000000000'
+  [ -f "$retire_fence" ]
+  [ -f "$RUN_DIR/codex-bridge-stop.$pid" ]
+  cmp -s "$retire_fence" "$RUN_DIR/codex-bridge-stop.$pid"
+  _read_stop_record "$retire_fence"
+  [ "$rpid" = "$pid" ] && [ "$rstart" = "$start" ]
+  [ "$rexpires" -le "$(( $(date +%s) + 10 ))" ]
+  ! compgen -G "$retire_fence.tmp.*" >/dev/null
+}
+
+@test "launcher safe-stop: malformed schema fails closed and preserves the fence" {
+  _load_safe_stop_functions
+  printf 'v=1\nproject=%s\nunknown=x\n' "$PROJECT_HASH" > "$retire_fence"
+  run _windows_stop_request_from_fence
+  [ "$status" -ne 0 ]
+  [ -f "$retire_fence" ]
+  ! compgen -G "$RUN_DIR/codex-bridge-stop.*" >/dev/null
+}
+
+@test "launcher safe-stop: UNKNOWN timeout keeps fence and does not manufacture exit proof" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  local now=$(( $(date +%s) + 10 ))
+  _write_stop_record "$retire_fence" 123 638622100000000000 "$(printf nonce | agmsg_sha1)" "$now" "$(hostname)"
+  POWERSHELL_RESULT=UNKNOWN run _windows_wait_exit_proof
+  [ "$status" -ne 0 ]
+  [ -f "$retire_fence" ]
+}
+
+@test "launcher safe-stop: changed StartTime.Ticks proves PID reuse without ack" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  local now=$(( $(date +%s) + 10 ))
+  _write_stop_record "$retire_fence" 123 638622100000000000 "$(printf nonce | agmsg_sha1)" "$now" "$(hostname)"
+  POWERSHELL_RESULT=$'LIVE\t638622100000000001' run _windows_wait_exit_proof
+  [ "$status" -eq 0 ]
+  [ ! -f "$RUN_DIR/codex-bridge-stop.123.ack" ]
+}
+
+@test "launcher safe-stop: replacement is accepted only with live token, lease, app-server, and thread match" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  local pid=456 token=638622100000000222 host
+  host="$(hostname)"
+  printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=pwsh\n' \
+    "$PROJECT_HASH" "$BRIDGE_PAIRS_HASH" "$host" "$pid" "$token" > "$RUN_DIR/codex-bridge-lease.$pid"
+  printf '%s' ws://127.0.0.1:1 > "$appserver_file"
+  printf '%s' thread-new > "$thread_file"
+  POWERSHELL_RESULT=$'LIVE\t638622100000000222' run _windows_current_bridge_valid "$pid" ws://127.0.0.1:1 thread-new
+  [ "$status" -eq 0 ]
+  POWERSHELL_RESULT=$'LIVE\t638622100000000223' run _windows_current_bridge_valid "$pid" ws://127.0.0.1:1 thread-new
+  [ "$status" -ne 0 ]
+  POWERSHELL_RESULT=$'LIVE\t638622100000000222' run _windows_current_bridge_valid "$pid" ws://127.0.0.1:1 wrong-thread
+  [ "$status" -ne 0 ]
 }

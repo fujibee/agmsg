@@ -259,8 +259,12 @@ test("driver stderr is forwarded to the operator, not only quoted on failure", a
   process.stderr.write = (chunk) => { captured.push(String(chunk)); return true; };
   process.env.AGMSG_SYNC_DRIVER = script;
   try {
-    await driver("prepare", { local_team: "demo", server_instance_id: "s",
-      remote_team_id: "r", protocol_version: 1 }, [], ["10"]);
+    // A zero-record page has no payload to truncate. Exercise enough
+    // fast-exiting drivers concurrently to make a lost empty stdin race
+    // observable instead of depending on one scheduler interleaving.
+    await Promise.all(Array.from({ length: 32 }, () =>
+      driver("prepare", { local_team: "demo", server_instance_id: "s",
+        remote_team_id: "r", protocol_version: 1 }, [], ["10"])));
   } finally {
     process.stderr.write = realWrite;
     delete process.env.AGMSG_SYNC_DRIVER;

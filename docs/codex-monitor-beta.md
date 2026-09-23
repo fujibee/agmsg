@@ -56,6 +56,28 @@ Restart the shell, then launch Codex normally:
 codex
 ```
 
+## Codex Desktopとの状態分離
+
+Codex Desktopのremote controlとmonitor modeを同じ`~/.codex`で動かすと、
+両方のapp-serverが同じremote-control登録と状態DBを使用して競合しうる。
+monitor側だけを分離する場合は、専用の絶対パスを全monitor起動で指定する。
+
+```bash
+export AGMSG_CODEX_HOME="$HOME/.codex-agmsg"
+CODEX_HOME="$AGMSG_CODEX_HOME" codex login
+codex
+```
+
+monitorはこの値を`CODEX_HOME`としてapp-server、bridge launcher、hook、
+remote TUIへ引き継ぐ。同じprojectで別のhomeを使っていたagmsg管理serverは
+再利用せず作り直す。Desktopの状態DB、sessions、logsは専用homeへコピーしない。
+認証は専用homeで改めて行い、必要なconfig、plugins、skillsだけを明示的に設定する。
+
+`AGMSG_CODEX_HOME`は絶対パスでなければならない。既存のrole記録は元のhomeに
+属するため、専用homeで開始した新しいCodex thread内で`$agmsg actas <role>`を
+再実行してseatを更新する。以後、`delivery.sh status`、`mode off`、resumeを含む
+monitor関連操作でも同じ環境変数を設定する。
+
 In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
 
@@ -178,6 +200,33 @@ flowchart TD
   tui --> ended["turn ends: completed / idle / watchdog"]
   ended --> watch
 ```
+
+## End-to-end self-delivery diagnosis
+
+The fork-only `codex-diagnose.sh` keeps its optionless read-only three-layer
+diagnosis and adds an explicit two-turn test:
+
+```bash
+scripts/drivers/types/codex/codex-diagnose.sh <project> <team> <agent> --self-test
+```
+
+The start command sends one structured marker and returns `PENDING` with exit
+3. The marker-derived bridge turn runs `--confirm`; a matching project, Codex
+home, message id, nonce digest, and thread records `THREAD_CONFIRMED`.
+
+`THREAD_CONFIRMED` deliberately means no more than its name. Codex does not
+publish a stable TUI-instance id distinct from its thread id, so two TUI
+instances displaying the same thread cannot be distinguished by this script.
+The end-to-end result is complete only when the marker-derived turn is also
+visibly observed on the user's current TUI (`TUI_VISIBLE`). Do not substitute
+`inbox.sh`, `history.sh`, the local database, send success, cursor movement, or
+turn completion for that screen observation. The nonce challenge relies on
+that operational rule; nonce non-disclosure alone is not a technical proof.
+
+Internal record state `SENT` is displayed as `PENDING`. `SEND_FAILED`, an
+incomplete `PREPARED` record, or insufficient evidence exits 2; a confirmed
+mismatch or expiry exits 1. State files are retained under the run directory
+for diagnosis and are not an automatic repair mechanism.
 
 ## Worker Guardrails
 
