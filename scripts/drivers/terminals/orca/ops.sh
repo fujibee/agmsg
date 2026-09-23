@@ -76,7 +76,15 @@ terminal_id_ok() {   # <id>
   # hyphens), and exactly four hyphens total.
   case "$rest" in -*|*-|*--*) return 1 ;; esac
   local hyphens="${rest//[^-]/}"
-  [ "${#hyphens}" -eq 4 ]
+  [ "${#hyphens}" -eq 4 ] || return 1
+  # The groups' own lengths, not just "5 non-empty hex groups in some shape"
+  # (review, #1439): a UUID's five groups are fixed at 8-4-4-4-12, and without
+  # this check something like `term_a-b-c-d-e` — five non-empty hex groups,
+  # just not UUID-shaped — passed.
+  local g1 g2 g3 g4 g5
+  IFS='-' read -r g1 g2 g3 g4 g5 <<< "$rest"
+  [ "${#g1}" -eq 8 ] && [ "${#g2}" -eq 4 ] && [ "${#g3}" -eq 4 ] \
+    && [ "${#g4}" -eq 4 ] && [ "${#g5}" -eq 12 ]
 }
 
 # record op: report TWO facts and decide nothing, same shape as tmux/herdr
@@ -265,6 +273,33 @@ terminal_peek() {
   tail_type="$(sqlite3 :memory: "SELECT json_type('$esc','\$.result.terminal.tail')" 2>/dev/null)"
   [ "$tail_type" = array ] || {
     echo "orca: read for terminal '$id' did not return an array of lines (got: ${tail_type:-missing})" >&2
+    return 12
+  }
+  # "array" alone does not prove every ELEMENT is a line of text (review,
+  # #1439): `[{"x":1}]` or `[null]` is still json_type=array, and json_each
+  # would hand either straight through as if it were real pane content. Count
+  # elements against count-of-text-elements in one query; any mismatch (a
+  # single non-string element is enough) rejects the whole read rather than
+  # silently passing through the ones that were fine. A genuinely empty array
+  # has 0 of both, so it still succeeds.
+  #
+  # Uses json_each's OWN `type` column, not `json_type(value)` — measured:
+  # json_each's `value` column already comes out UNWRAPPED to a native SQLite
+  # value for a scalar element (a bare TEXT `a`, not the JSON-quoted `"a"`),
+  # and re-parsing that bare text as JSON via a second `json_type(value)` call
+  # fails outright ("malformed JSON") the moment a text element is reached —
+  # it happened to work for the integer elements in the same test array only
+  # because a bare integer's text form is coincidentally also valid JSON.
+  # json_each's own `type` column needs no such re-parse.
+  local counts total non_text
+  counts="$(sqlite3 :memory: "
+    SELECT COUNT(*),
+           SUM(CASE WHEN type != 'text' THEN 1 ELSE 0 END)
+    FROM json_each('$esc','\$.result.terminal.tail')" 2>/dev/null)" \
+    || { echo "orca: could not enumerate terminal '$id''s rendered lines" >&2; return 12; }
+  IFS='|' read -r total non_text <<< "$counts"
+  [ "${non_text:-0}" -eq 0 ] || {
+    echo "orca: read for terminal '$id' returned a non-text line (${non_text} of ${total} elements were not strings)" >&2
     return 12
   }
   sqlite3 :memory: "SELECT value FROM json_each('$esc','\$.result.terminal.tail')" 2>/dev/null || {

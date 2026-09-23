@@ -227,6 +227,9 @@ _fake_herdr_list_scalar_session() {
 #            string — review (#1439): ok:true alone does not prove tail is the
 #            array terminal_peek promises to emit; every non-array shape here
 #            must be rejected before json_each ever sees it.
+#   tail_bad_element  tail IS an array, but its second element is an object,
+#            not a string — review (#1439): json_type=array on the outer
+#            value does not prove every ELEMENT is a line of text.
 _install_fake_orca() {
   local mode="${1:-present}" show_json show_rc=0 read_json read_rc=0
   case "$mode" in
@@ -272,6 +275,10 @@ _install_fake_orca() {
     tail_scalar)
       show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
       read_json='{"ok":true,"result":{"terminal":{"tail":"not an array"}}}'
+      ;;
+    tail_bad_element)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["a real line",{"x":1}]}}}'
       ;;
   esac
   cat > "$FAKEBIN/orca" <<EOF
@@ -1224,6 +1231,10 @@ _last_agent_rename_key() {
   ! terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tinjected')"
   ! terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\ninjected')"
   ! terminal_id_ok 'term_ea11f227 ca2c-44b0-a3e6-75c62b9f20ba'
+  # Five non-empty hex groups is not enough on its own (review, #1439): a
+  # UUID's groups are fixed at 8-4-4-4-12, and without checking each group's
+  # own length this shape — five groups, wrong lengths — passed.
+  ! terminal_id_ok 'term_a-b-c-d-e'
 }
 
 @test "orca: detect refuses a malformed ORCA_TERMINAL_HANDLE — a tab/newline never reaches stdout" {
@@ -1337,19 +1348,21 @@ _last_agent_rename_key() {
   [ -z "$output" ]
 }
 
-@test "orca: peek is 12, never a false success, when tail is missing/null/object/scalar (#1439 review)" {
+@test "orca: peek is 12, never a false success, when tail is missing/null/object/scalar, or has a non-text element (#1439 review)" {
   # ok:true alone does not prove `tail` is the array terminal_peek promises to
   # emit. Missing/null would otherwise iterate to ZERO rows (indistinguishable
   # from tail_empty's GENUINE empty pane, tested above); a scalar would
   # iterate to ONE row holding that whole scalar as if it were real pane
-  # content. All four must be rejected with 12, and — checked on stdout ALONE,
-  # since `run`'s $output merges the expected stderr reason in — never emit
-  # anything on stdout, especially not the scalar's own text as if it were
-  # real pane content.
+  # content; and json_type=array on the OUTER value does not prove every
+  # ELEMENT is text either — tail_bad_element is a real array whose second
+  # element is an object. All five must be rejected with 12, and — checked on
+  # stdout ALONE, since `run`'s $output merges the expected stderr reason in —
+  # never emit anything on stdout, especially not a non-text element's own
+  # JSON as if it were real pane content.
   agmsg_terminal_load orca
   local mode stdout_only rc
 
-  for mode in tail_missing tail_null tail_object tail_scalar; do
+  for mode in tail_missing tail_null tail_object tail_scalar tail_bad_element; do
     _install_fake_orca "$mode"
     rc=0
     stdout_only="$(terminal_peek term_abc123 2>/dev/null)" || rc=$?
