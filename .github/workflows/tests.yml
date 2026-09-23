@@ -967,7 +967,7 @@ jobs:
         if: needs.changes.outputs.app_changed == 'false'
         run: echo "Diff does not touch app/ — reporting green without running the typecheck."
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         if: needs.changes.outputs.app_changed != 'false'
         with:
           version: 10
