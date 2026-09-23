@@ -285,7 +285,7 @@ _sw_cell_session() {   # <id> <team> <agent> <type>
   # needed here, the _SW_KIND check above already returned before this
   # point for a plain-recorded seat.
   # shellcheck disable=SC1091
-  . "$SKILL_DIR/scripts/lib/safe-poke.sh" 2>/dev/null || true
+  . "${SKILL_DIR:?self-write.sh requires SKILL_DIR}/scripts/lib/safe-poke.sh" 2>/dev/null || true
   marker="$(agmsg_type_get "$type" input_prompt_marker 2>/dev/null || true)"
   boxed="$(agmsg_type_get "$type" input_prompt_boxed 2>/dev/null || true)"
 

@@ -192,7 +192,7 @@ _agmsg_safe_poke_recover() {
   # not a log -- the same directory tree pidfiles and locks already live
   # under, never scripts/ or anywhere shipped.
   local run_dir draft_file
-  run_dir="$SKILL_DIR/run"
+  run_dir="${SKILL_DIR:?safe-poke.sh requires SKILL_DIR}/run"
   mkdir -p "$run_dir" 2>/dev/null
   draft_file="$(mktemp "$run_dir/poke-draft.${team:-noteam}.${name:-noname}.XXXXXX" 2>/dev/null)" \
     || { echo "poke: could not create a file under '$run_dir' to save pane '$id''s draft -- refusing rather than risk it (input in progress)" >&2; return 14; }
