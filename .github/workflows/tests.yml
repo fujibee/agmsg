@@ -844,7 +844,7 @@ jobs:
       - name: Restore sqlite3 (cache)
         if: needs.changes.outputs.docs_only != 'true' && matrix.sqlite
         id: sqlite-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: C:\sqlite-tools
           key: sqlite3-${{ runner.os }}-sqliteorg-${{ env.WINDOWS_SQLITE_VERSION }}
