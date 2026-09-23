@@ -9,29 +9,22 @@ set -euo pipefail
 #   ./uninstall.sh                    # Interactive (confirms each step)
 #   ./uninstall.sh --yes              # Remove all without confirmation
 #   ./uninstall.sh --keep-data        # Remove skill but keep DB and teams
-#   ./uninstall.sh --cmd <name>       # Target a specific install by name,
-#                                     # same flag install.sh --update uses
 
 AGENTS_DIR="$HOME/.agents"
 
 AUTO_YES=false
 KEEP_DATA=false
-CMD_NAME=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes|-y)       AUTO_YES=true;  shift ;;
     --keep-data)    KEEP_DATA=true; shift ;;
-    --cmd)
-      [ $# -ge 2 ] || { echo "--cmd needs a name" >&2; exit 1; }
-      CMD_NAME="$2"; shift 2 ;;
     -h|--help)
       echo "Usage: ./uninstall.sh [options]"
       echo ""
       echo "Options:"
       echo "  --yes, -y       Remove all without confirmation"
       echo "  --keep-data     Remove skill but keep DB and team configs"
-      echo "  --cmd <name>    Target a specific install (when more than one exists)"
       exit 0
       ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -55,48 +48,40 @@ confirm() {
 # Earlier this iterated every ~/.agents/skills/*/ carrying an `.agmsg`
 # marker -- every OTHER install on the machine, not just this one -- and
 # removed all of their commands, skills, hooks and writable_roots entries:
-# uninstalling one throwaway --cmd install wiped every install on the
-# machine. Deciding which ONE install this run is about, in order:
-#   1. --cmd <name>, same flag install.sh --update already uses to pick one.
-#   2. uninstall.sh ships INSIDE each install (copied there by install.sh)
+# uninstalling one throwaway install wiped every install on the machine.
+# Deciding which ONE install this run is about, in order:
+#   1. uninstall.sh ships INSIDE each install (copied there by install.sh)
 #      and is normally run from there, so when $0's own directory carries
 #      the marker, that unambiguously IS this run's install.
-#   3. Neither of the above identifies one (e.g. run from a kept git
-#      checkout, the way this project's own tests do): fall back to
-#      install.sh --update's own #599 rule -- a single install on the
-#      machine is unambiguous and still "just works"; more than one is a
-#      silent coin flip and refuses, the same way --update already does.
-if [ -n "$CMD_NAME" ]; then
-  SELF_SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
-  if [ ! -f "$SELF_SKILL_DIR/.agmsg" ]; then
-    echo "  ! Not installed: ~/.agents/skills/$CMD_NAME" >&2
-    exit 1
-  fi
-else
-  SELF_SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
-  if [ ! -f "$SELF_SKILL_DIR/.agmsg" ]; then
-    candidates=()
-    for d in "$AGENTS_DIR"/skills/*/; do
-      d="${d%/}"
-      [ -f "$d/.agmsg" ] && candidates+=("$d")
-    done
-    case "${#candidates[@]}" in
-      0)
-        echo "  Nothing to remove (not installed?)"
-        echo ""
-        exit 0
-        ;;
-      1) SELF_SKILL_DIR="${candidates[0]}" ;;
-      *)
-        echo "  ! Several agmsg installs found:" >&2
-        for d in "${candidates[@]}"; do
-          echo "      $(basename "$d")" >&2
-        done
-        echo "  ! Cannot tell which one to uninstall. Pass --cmd <name> to pick one." >&2
-        exit 1
-        ;;
-    esac
-  fi
+#   2. $0 does not identify one (e.g. run from a kept git checkout, the way
+#      this project's own tests do): a single install on the machine is
+#      still unambiguous. More than one refuses rather than guess --
+#      pointing at each one's own uninstall.sh, the actual way to pick one,
+#      instead of inventing a new selection flag this bug fix has no
+#      business deciding.
+SELF_SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ ! -f "$SELF_SKILL_DIR/.agmsg" ]; then
+  candidates=()
+  for d in "$AGENTS_DIR"/skills/*/; do
+    d="${d%/}"
+    [ -f "$d/.agmsg" ] && candidates+=("$d")
+  done
+  case "${#candidates[@]}" in
+    0)
+      echo "  Nothing to remove (not installed?)"
+      echo ""
+      exit 0
+      ;;
+    1) SELF_SKILL_DIR="${candidates[0]}" ;;
+    *)
+      echo "  ! Several agmsg installs found:" >&2
+      for d in "${candidates[@]}"; do
+        echo "      $d/uninstall.sh" >&2
+      done
+      echo "  ! Cannot tell which one to uninstall. Run the uninstall.sh inside the one you want to remove." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # Other installs, purely to decide whether machine-wide shared pieces (the
