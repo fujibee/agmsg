@@ -496,8 +496,14 @@ terminal_spawn() {
   esac
   command -v orca >/dev/null 2>&1 \
     || { printf 'orca: not on PATH — cannot spawn a terminal in %s\n' "$project" >&2; return 13; }
+  # `json="$(cmd)"` (not combined with `local`) propagates a non-zero cmd
+  # exit to THIS assignment statement's own status -- under a caller's set -e
+  # that aborts right here, before any of the ok/13 handling below ever runs
+  # (review, #1440). `|| true` on the assignment itself neutralizes it; the
+  # emptiness/validity checks immediately after already treat a failed call
+  # the same as an empty or unparsable one.
   local json ok id
-  json="$(orca terminal create --worktree "path:$project" --title "$name" --command "$boot" --json 2>/dev/null)"
+  json="$(orca terminal create --worktree "path:$project" --title "$name" --command "$boot" --json 2>/dev/null)" || true
   [ -n "$json" ] || { printf 'orca: terminal create for %s produced no output\n' "$project" >&2; return 13; }
   _orca_json_valid "$json" \
     || { printf 'orca: terminal create for %s returned unparsable output\n' "$project" >&2; return 13; }
@@ -508,6 +514,11 @@ terminal_spawn() {
   fi
   id="$(_orca_json_field "$json" '$.result.terminal.handle' text)"
   [ -n "$id" ] || { printf 'orca: terminal create for %s answered ok with no handle\n' "$project" >&2; return 13; }
+  # Same boundary #1439 already closed for terminal_detect: an ok:true
+  # response is not proof the handle is well-formed. A malformed handle
+  # (control byte, wrong grammar) must never reach a placement record.
+  terminal_id_ok "$id" \
+    || { printf 'orca: terminal create for %s answered ok with a malformed handle\n' "$project" >&2; return 13; }
   printf '%s\n' "$id"
   return 0
 }
@@ -527,7 +538,12 @@ terminal_despawn() {
   local id="$1"
   command -v orca >/dev/null 2>&1 \
     || { echo runtime_error; echo "orca: not on PATH — cannot despawn terminal '$id'" >&2; return 13; }
-  orca terminal close --terminal "$id" --json >/dev/null 2>&1
+  # `close`'s own exit status is deliberately never inspected (see the header
+  # comment above) -- `|| true` makes that literal: a bare failing command
+  # here would otherwise abort under a caller's set -e before the
+  # pane_state re-check below ever runs (review, #1440), defeating the whole
+  # point of not trusting close in the first place.
+  orca terminal close --terminal "$id" --json >/dev/null 2>&1 || true
   local state
   state="$(terminal_pane_state "$id")"
   if [ "$state" = gone ]; then
@@ -554,8 +570,9 @@ terminal_name() {
   label="$team:$name"
   command -v orca >/dev/null 2>&1 \
     || { echo runtime_error; echo "orca: not on PATH — cannot rename terminal '$id'" >&2; return 13; }
+  # Same errexit hazard as terminal_spawn's create call, same fix (#1440).
   local json ok
-  json="$(orca terminal rename --terminal "$id" --title "$label" --json 2>/dev/null)"
+  json="$(orca terminal rename --terminal "$id" --title "$label" --json 2>/dev/null)" || true
   [ -n "$json" ] || { echo runtime_error; echo "orca: rename for '$id' produced no output" >&2; return 13; }
   _orca_json_valid "$json" \
     || { echo runtime_error; echo "orca: rename for '$id' returned unparsable output" >&2; return 13; }

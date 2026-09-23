@@ -1581,7 +1581,7 @@ _last_agent_rename_key() {
   agmsg_terminal_load orca
   run terminal_spawn alice /proj pane-v bash -lc boot
   [ "$status" -eq 0 ]
-  [ "$output" = term_new123 ]
+  [ "$output" = term_11111111-2222-3333-4444-555555555555 ]
   grep -qF -- '[create]' "$ARGV_LOG"
   grep -qF -- '[--worktree] [path:/proj]' "$ARGV_LOG"
   grep -qF -- '[--title] [alice]' "$ARGV_LOG"
@@ -1606,6 +1606,24 @@ _last_agent_rename_key() {
   _install_fake_orca create_no_handle
   run terminal_spawn alice /proj window boot
   [ "$status" -eq 13 ]
+
+  # An ok:true response with a malformed handle (here: an embedded control
+  # byte) must not reach a placement record -- the same boundary #1439
+  # already closed for terminal_detect (review, #1440).
+  _install_fake_orca create_bad_handle
+  run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  # The orca PROCESS itself exiting non-zero (not merely an ok:false JSON
+  # body) must still land on the named 13 failure, not abort the caller out
+  # from under a NON-conditional set -e (review, #1440: `json="$(orca ...)"`
+  # propagates a non-zero orca exit to this assignment's own status). Same
+  # proof shape as the herdr set -e test above: source ops.sh directly and
+  # call the function bare, not inside `$(...)` where errexit is masked.
+  _install_fake_orca create_proc_fails
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_spawn alice /proj window boot; echo UNREACHABLE'
+  [ "$status" -eq 13 ]
+  refute grep -q UNREACHABLE <<<"$output"
 }
 
 @test "orca: despawn closes then confirms gone via show — never trusts close's own return" {
@@ -1632,6 +1650,15 @@ _last_agent_rename_key() {
   PATH="$empty_path" run terminal_despawn term_abc123
   [ "$status" -eq 13 ]
   printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  # The design point itself, proven under a NON-conditional set -e: close's
+  # own exit status (non-zero here) must not matter at all -- despawn always
+  # reaches the pane_state re-check afterward and reports success once THAT
+  # confirms gone (review, #1440).
+  _install_fake_orca close_proc_fails_but_gone
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_despawn term_abc123'
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
 }
 
 @test "orca: name renames via the tab title (team:name), mode makes no difference, and fails closed" {
@@ -1662,6 +1689,14 @@ _last_agent_rename_key() {
   PATH="$empty_path" run terminal_name term_abc123 team alice
   [ "$status" -eq 13 ]
   printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  # Same errexit hazard and proof shape as terminal_spawn's create call
+  # above (review, #1440): the orca PROCESS exiting non-zero must land on
+  # the named 13, not abort the caller out from under set -e.
+  _install_fake_orca rename_proc_fails
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_name term_abc123 team alice; echo UNREACHABLE'
+  [ "$status" -eq 13 ]
+  refute grep -q UNREACHABLE <<<"$output"
 }
 
 # --- ABI completeness + structural clobber-proofing (#1014 review) -------
