@@ -530,4 +530,23 @@ setup_git_repo() {
     echo "after=$_AGMSG_AGENT_BINARIES_OUT"
   ' _ "$SKILL_DIR" "$plugdir/types/claude-code"
   [ "$output" = "$(printf 'before=claude claude-code\nafter=totally-different-binary')" ]
+
+  # A type name outside [A-Za-z0-9_-] (review): the two-character escape
+  # above only maps '_' and '-', so an unescaped third character landing
+  # straight into $cache_var would make it an invalid bash variable name --
+  # not merely a fresh collision risk, an error on every call. Called
+  # twice, same shell, same (unknown) type: must not error either time, and
+  # must answer identically both times (whether or not this specific
+  # answer is cached is not the point here -- not erroring, and not
+  # depending on which call number it is, is).
+  run bash -c '
+    SKILL_DIR="$1"
+    . "$SKILL_DIR/scripts/lib/resolve-project.sh"
+    _agmsg_agent_binaries "foo.bar" >/dev/null
+    echo "first=$_AGMSG_AGENT_BINARIES_OUT"
+    _agmsg_agent_binaries "foo.bar" >/dev/null
+    echo "second=$_AGMSG_AGENT_BINARIES_OUT"
+  ' _ "$SKILL_DIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'first=claude codex gemini\nsecond=claude codex gemini')" ]
 }

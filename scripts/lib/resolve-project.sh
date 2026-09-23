@@ -360,6 +360,16 @@ _agmsg_agent_binaries() {
   # cares about, since it is only reached by an install that actually has a
   # plugin dir for this type.
   _agmsg_type_external_candidate "$type" && cacheable=0
+  # A type name outside [A-Za-z0-9_-] is also never cached (review): the
+  # registry does not reject any character in a type name (nothing here
+  # validates one either), and the two-character escape below only defines
+  # a mapping for '_' and '-' -- an unescaped third character (e.g. a
+  # literal '.') would land straight into $cache_var and make it an
+  # invalid bash variable name, not merely a collision risk. Every real
+  # type name on the hot path (claude-code, codex, ...) is already
+  # [a-z0-9-] and stays cached; only a name this tree has never produced,
+  # and cannot validate away, computes fresh on every call instead.
+  case "$type" in *[!A-Za-z0-9_-]*) cacheable=0 ;; esac
 
   if [ "$cacheable" -eq 1 ]; then
     # Reversible, collision-free (review): '_' -> '_5f' first, THEN
