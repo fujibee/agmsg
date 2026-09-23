@@ -231,6 +231,31 @@ teardown() {
   [ -f "$shim" ]
 }
 
+@test "uninstall --all --yes: removes every install and the shared shim (#1400)" {
+  mkdir -p "$FAKE_HOME/.claude"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+
+  local cmd_first="$FAKE_HOME/.claude/commands/agmsg.md"
+  local cmd_second="$FAKE_HOME/.claude/commands/agmsg-second.md"
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -f "$cmd_first" ]
+  [ -f "$cmd_second" ]
+  [ -f "$shim" ]
+
+  # Run from a kept checkout ($REPO_ROOT/uninstall.sh, not either install's
+  # own copy) -- --all must work the same regardless of where it is run
+  # from, unlike the no-args form, which without it would refuse here with
+  # two installs present and no single one identified.
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --all --yes
+
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg" ]
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg-second" ]
+  [ ! -f "$cmd_first" ]
+  [ ! -f "$cmd_second" ]
+  [ ! -e "$shim" ]
+}
+
 @test "install: Codex skill documents safe Git Bash quoting for Windows PowerShell" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
 
