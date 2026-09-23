@@ -146,28 +146,45 @@ settings_file() {
 # purpose, and forced Codex to re-ask for hook-trust review on every call
 # because the file's hash kept changing.
 #
-# The file on disk is reformatted BY HAND (jq's own 4-space style, never what
-# this codebase writes on its own) before the second `set` call, holding the
-# exact same registration under different bytes -- this is the shape that
-# broke an earlier cut of this fix, which compared the two states by
-# reindenting the new content to match the old one and then diffing raw
-# bytes: a hand-formatted file that never matches json_pretty's own layout
-# never compared equal, so it got rewritten once regardless of content
-# (review finding). The comparison has to be by JSON CONTENT, not bytes --
+# The file on disk is reformatted BY HAND before the second `set` call,
+# holding the exact same registration under different bytes AND different
+# object key order (`jq -S`, plus blank lines top/bottom no reindent step
+# would reproduce). Two things broke on earlier cuts of this fix, both
+# review findings, both covered here:
+#   - comparing by reindenting <tmp> to <path>'s indentation and then
+#     diffing raw bytes: a hand-formatted file that never matches
+#     json_pretty's own layout never compared equal, so it got rewritten
+#     once regardless of content (review round 1).
+#   - comparing via sqlite's plain json(): a compact rendering, but NOT
+#     canonical on object key order -- `json('{"a":1,"b":2}')` and
+#     `json('{"b":2,"a":1}')` are unequal strings in sqlite -- so a
+#     key-reordered file (e.g. hand-edited through `jq -S`) still compared
+#     "different" even though its content was identical (review round 2).
 # `set` must leave a content-identical file completely untouched, bytes AND
-# permission mode, no matter how it happens to be formatted on disk.
-@test "delivery set monitor (codex): a hand-formatted hooks_file with the same registration already present is left untouched (#1429)" {
+# permission mode, no matter how it is formatted or how its keys are
+# ordered on disk.
+#
+# The same test then goes on to force a GENUINE content change (`set off`,
+# which strips the registration this fixture has none of otherwise) and
+# confirms the opposite: the file DOES get rewritten, and its permission
+# mode (640, set on the hand-formatted file above) survives that real
+# rewrite -- review round 2 also found the mode-restore step silently
+# swallowed a failed read of the original mode and a failed chmod after the
+# write, either of which could leave a real rewrite at the wrong mode with
+# exit 0.
+@test "delivery set monitor (codex): a hand-formatted, key-reordered hooks_file with the same registration already present is left untouched, and a genuine change still preserves its mode (#1429)" {
   local hooks_file="$TEST_PROJECT/.codex/hooks.json"
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ -f "$hooks_file" ]
 
-  # Blank lines top and bottom are legal JSON whitespace, but not a shape
-  # any indent-matching reindent step of THIS content would ever produce on
-  # its own -- so no reindent-then-diff can mistake this for the original
-  # layout, only a real content comparison can call it unchanged.
-  { echo; jq --indent 4 '.' "$hooks_file"; echo; } > "$hooks_file.tmp"
+  # jq -S sorts every object's keys (matcher/hooks, inner type/command...)
+  # into an order strip->add never rebuilds; --indent 4 plus blank lines
+  # top/bottom is a layout no indent-matching reindent step could
+  # reproduce either -- same content, different bytes and different key
+  # order.
+  { echo; jq -S --indent 4 '.' "$hooks_file"; echo; } > "$hooks_file.tmp"
   mv "$hooks_file.tmp" "$hooks_file"
-  chmod 644 "$hooks_file"
+  chmod 640 "$hooks_file"
 
   local before_bytes before_mode
   before_bytes="$(cat "$hooks_file")"
@@ -181,6 +198,17 @@ settings_file() {
   after_mode="$(file_mode "$hooks_file")"
   [ "$before_bytes" = "$after_bytes" ]
   [ "$before_mode" = "$after_mode" ]
+
+  # Now force a genuine content change and confirm the rewrite happens
+  # (content differs) but the file's permission mode is still the one set
+  # above, not mktemp's.
+  run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local changed_bytes changed_mode
+  changed_bytes="$(cat "$hooks_file")"
+  changed_mode="$(file_mode "$hooks_file")"
+  [ "$changed_bytes" != "$after_bytes" ]
+  [ "$changed_mode" = "640" ]
 }
 
 # --- mode transitions ---

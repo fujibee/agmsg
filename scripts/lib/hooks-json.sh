@@ -218,18 +218,28 @@ _agmsg_json_detect_indent() {
   printf '%s' "${line2%%[!\ $'\t']*}"
 }
 
-# Do <a> and <b> hold the same JSON content, ignoring formatting (key/array
-# layout, whitespace, indentation)? Compares each file's sqlite json()
-# (compact, canonical) rendering as a string, not raw bytes -- an existing
-# hooks_file a human hand-formatted differently from what this codebase
-# writes (or pretty-printed some other way) must still compare equal to an
-# unchanged registration, or the very first `set` after adopting this
-# comparison would trigger one spurious rewrite (#1429 review). `json()` has
-# been part of every SQLite build with the json1 extension since its
-# original release (3.9.0) -- well below json_pretty's 3.46.0 floor -- so
-# unlike _agmsg_json_pretty_supported below, this needs no availability
-# probe or degrade path: the extension is already a hard dependency of this
-# file's other functions.
+# Do <a> and <b> hold the same JSON content, ignoring formatting (whitespace,
+# indentation) AND object key order, while still treating array element
+# order as significant? Compares each file as a canonical, order-independent
+# signature: every (fullkey, type, atom) row from sqlite's json_tree(),
+# SORTED BY fullkey, concatenated into one string.
+#
+# Sorting by fullkey -- not json_tree's own traversal order -- is what makes
+# this key-order independent: fullkey spells out an OBJECT member as
+# ...".matcher" / ...".hooks" by NAME, so two objects with the same members
+# in a different source order (e.g. one hand-edited through `jq -S`, which
+# sorts keys) produce the exact same set of (fullkey, type, atom) rows and
+# therefore the same sorted signature. This was review-round-1's actual bug:
+# comparing via plain json() instead (a canonical *compact* rendering, but
+# NOT canonical on key order -- json('{"a":1,"b":2}') != json('{"b":2,"a":1}')
+# in sqlite) called a same-content, key-reordered hooks_file "different" and
+# triggered exactly the spurious rewrite (or read-only refusal) this
+# comparison exists to prevent (#1429 review round 2). An ARRAY member's
+# fullkey embeds its numeric index (e.g. "$.hooks[0]"), so array order still
+# participates in the sort and is not collapsed away.
+#
+# json_tree, like json() above, is core json1 (SQLite 3.9.0) -- no
+# availability probe needed, unlike _agmsg_json_pretty_supported below.
 #
 # Any sqlite error (e.g. either file holds invalid JSON) is treated as "not
 # equal" -- falls through to the normal write path, the same behavior this
@@ -240,8 +250,21 @@ _agmsg_json_content_equal() {
   a_sql=$(agmsg_sql_readfile_path "$a")
   b_sql=$(agmsg_sql_readfile_path "$b")
   result=$(agmsg_sqlite_mem "
-    SELECT CASE WHEN json(readfile('$a_sql')) = json(readfile('$b_sql'))
-           THEN 1 ELSE 0 END;
+    WITH a_rows AS (
+      SELECT fullkey, type, atom FROM json_tree(readfile('$a_sql')) ORDER BY fullkey
+    ),
+    b_rows AS (
+      SELECT fullkey, type, atom FROM json_tree(readfile('$b_sql')) ORDER BY fullkey
+    ),
+    a_sig AS (
+      SELECT group_concat(fullkey || char(31) || type || char(31) || quote(atom), char(30)) AS sig
+      FROM a_rows
+    ),
+    b_sig AS (
+      SELECT group_concat(fullkey || char(31) || type || char(31) || quote(atom), char(30)) AS sig
+      FROM b_rows
+    )
+    SELECT CASE WHEN a_sig.sig IS b_sig.sig THEN 1 ELSE 0 END FROM a_sig, b_sig;
   ") || return 1
   [ "$result" = "1" ]
 }
