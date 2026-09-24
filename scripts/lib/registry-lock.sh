@@ -262,57 +262,61 @@ _agmsg_lock_drop() {
     fi
     return 0
   fi
-  # The holder is READ before it is removed, and restored byte for byte if the
-  # directory will not go.
+  # The holder is a sibling of the lock directory, not inside it (so the
+  # directory can be rmdir'd without needing it gone first — no `rm` is
+  # needed on the path that just removes an EMPTY directory). That used to
+  # mean removing it only AFTER rmdir succeeded: read nothing, rmdir, then
+  # best-effort `rm -f` the now-orphaned holder file.
   #
-  # Restoring only the token was the first attempt and it defeated the change:
-  # pid, command and host are what "a leaked lock says who left it" MEANS, and
-  # a stuck removal is exactly the moment an operator needs them. The one
-  # failure this file is about would have been the one failure with no
-  # diagnosis (raised in review).
+  # #994: that order raced. Once rmdir succeeds, this process no longer
+  # holds the lock — the path is open, and another process's mkdir can
+  # win it and write ITS OWN holder file before this process reaches its
+  # own `rm -f "$l.holder"`. That call has no way to tell "the stale file
+  # I just orphaned" from "a brand-new holder's file", so it deletes
+  # whichever is there — the new lock survives, with no holder anyone can
+  # ever identify or reclaim, i.e. exactly the leak this file exists to
+  # prevent. Measured live under load (#994): a `rmdir` that returned 0
+  # with no error, immediately followed by a DIFFERENT process's lock
+  # directory sitting there with no `.holder` file next to it at all.
   #
-  # Removing the holder first is unavoidable — a directory with a file in it
-  # cannot be rmdir'd — so the ordering is: read, remove, try, restore on
-  # failure.
-  # The holder lives BESIDE the lock, not inside it. A lock directory has to be
-  # empty to be removed, and `rm` is not available on every path that takes this
-  # lock — `test_local_team_ids.bats` runs the core join with an allow-listed
-  # PATH that has no `rm`. A holder written inside the directory made the lock
-  # unremovable there, so the one path promising to work without python3 leaked
-  # a lock on every call. CI reported it first, but it is reproducible here:
-  # build a directory of symlinks to the tools that test allow-lists, point
-  # PATH at it, and the pre-fix library leaks while this one releases. Nothing
-  # about it needs CI — the local suite simply runs with a full PATH by
-  # default, which is a habit rather than a limit.
+  # Fixed by reversing the order: remove OUR OWN holder file FIRST, while
+  # the directory (and so the exclusion) is still ours — no other process
+  # can succeed at mkdir until AFTER the rmdir below, so there is no
+  # window left in which a stranger's holder file could exist for this
+  # step to hit. The content is saved first and restored byte for byte if
+  # rmdir then fails, so the "could not release" message below still shows
+  # who was holding it, same guarantee the old order gave for free by
+  # simply never having touched the file yet.
   #
-  # Outside, `rmdir` succeeds and the holder is a stale file next to nothing —
-  # tidied when it can be, harmless when it cannot.
+  # `rm` is not on every allow-listed PATH that takes this lock —
+  # `test_local_team_ids.bats` runs the core join with one that has no
+  # `rm` at all, which is exactly why the holder lives beside the
+  # directory rather than inside it (a holder INSIDE would make the
+  # directory unremovable there, leaking a lock on every call — the
+  # earlier bug this design already fixed). Without `rm`, removing the
+  # holder first is not possible; falling back to the pre-#994 order
+  # there (rmdir, then best-effort cleanup) keeps that environment
+  # working, at the cost of reopening this same race — but only there,
+  # never under the concurrent-load conditions #994 was actually about.
+  local saved_holder="" have_rm=false
+  if command -v rm >/dev/null 2>&1; then
+    have_rm=true
+    saved_holder="$(cat "$l.holder" 2>/dev/null || true)"
+    rm -f "$l.holder" 2>/dev/null || true
+  fi
+  # have_rm=false means the holder above was never touched (no `rm` to do
+  # it with) and rmdir here leaves it stale beside no lock -- inert, and
+  # tidied whenever a later release on this same path does have `rm`.
   if err="$(rmdir "$l" 2>&1)"; then
-    # The holder is a sibling, so removing the directory does not remove it.
-    # Left behind it is a stale file in the team directory, and `rename-team`
-    # ends with `rmdir "$OLD_DIR"` — which then fails, and the rename leaves the
-    # old directory standing. Measured: that is what broke the quoted-team-name
-    # test, on a path with no lock message anywhere in it.
-    #
-    # Best-effort: `rm` is not on every allow-listed PATH that takes this lock,
-    # and a leftover holder beside no lock is inert. The lock itself is gone,
-    # which is the part that had to succeed.
-    if command -v rm >/dev/null 2>&1; then
-      rm -f "$l.holder" 2>/dev/null || true
-    fi
     return 0
   fi
-  # NOTHING TO RESTORE. The holder is a sibling, so the rmdir above never
-  # touched it — it is still on disk, with the pid, command and host intact,
-  # which is what the operator reading the message below needs.
-  #
-  # An earlier version of this file wrote the holder INSIDE the lock, had to
-  # remove it before rmdir, and restored it on failure. That restore survived
-  # the move to a sibling as dead code referencing an unset `saved`: harmless
-  # where `set -u` is off, an unbound-variable error where it is on, and in
-  # neither case doing anything. Raised in review.
-  # Still here. Say which lock, say why, and say what it costs — the next
-  # acquire on this team will wait for a holder that is not coming back.
+  # rmdir failed: put back exactly what was read, so the message below can
+  # still name who was holding it. Skipped when there was no `rm` to
+  # remove it in the first place — the file was never touched, and is
+  # already there with the original content intact.
+  if [ "$have_rm" = true ] && [ -n "$saved_holder" ]; then
+    printf '%s\n' "$saved_holder" > "$l.holder" 2>/dev/null || true
+  fi
   echo "agmsg: could not release the registry lock at $l" >&2
   echo "agmsg: rmdir: $err" >&2
   echo "agmsg: until this directory is removed, commands for this team will wait" >&2

@@ -111,7 +111,12 @@ EOF
 }
 
 @test "join: concurrent joins to the same team do not lose registrations (#141)" {
-  skip_on_ci "flaky concurrent-join timing under CI's shared runners (#994)"
+  # #994: the flake this was quarantined for was not test timing -- it was
+  # _agmsg_lock_drop leaking the registry lock under load (rmdir-then-remove
+  # raced a new acquirer's own holder write; fixed by reversing the order).
+  # The default AGMSG_LOCK_SECONDS budget is enough once the lock itself is
+  # released correctly, so this runs unquarantined at the default.
+  #
   # A fan-out of background joins spawning sqlite3.exe per call is slow and
   # timing-sensitive on the Windows runner (the experimental full leg); the lock
   # itself is exercised on Linux/macOS where the contention is reliable.
