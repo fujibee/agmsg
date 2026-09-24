@@ -195,12 +195,14 @@ _agmsg_safe_poke_retype_if_empty() {
 
 # The existing two-snapshot screen check (styled real-draft classification,
 # or a plain unstyled change comparison), factored out of agmsg_safe_poke
-# unchanged in substance (#1443 continuation) so the SAME code path serves
-# both its original caller (no terminal_input_draft at all) and the new
-# terminal_input_draft fallback below when that hook itself answers
-# "cannot tell" -- one function, not two copies that could drift apart.
-# Sets the caller's own _AGMSG_SAFE_POKE_IB_RC / _AGMSG_SAFE_POKE_IB_REGION,
-# exactly as _agmsg_safe_poke_read_box already documents.
+# unchanged in substance (#1443 continuation) -- used only by a driver with
+# no terminal_input_draft at all (herdr's styled path, tmux's plain unstyled
+# one). A driver-capable rc 10 ("cannot tell") does NOT fall back here
+# (review, #1446: an earlier draft of this file did, and for a driver whose
+# screen never shows real draft content, "unchanged" would prove nothing --
+# see agmsg_safe_poke below). Sets the caller's own _AGMSG_SAFE_POKE_IB_RC /
+# _AGMSG_SAFE_POKE_IB_REGION, exactly as _agmsg_safe_poke_read_box already
+# documents.
 _agmsg_safe_poke_screen_check() {
   local id="$1" marker="$2" boxed="$3" styled="$4" settle_seconds="$5"
   local ib_rc=0
@@ -224,7 +226,19 @@ _agmsg_safe_poke_screen_check() {
   # and restores whatever region this function hands it, and restoring
   # STALE content instead of what is actually in the box now would be the
   # regression #1384 exists to prevent, reintroduced by this refactor).
-  [ "$snap1" != "$_AGMSG_SAFE_POKE_IB_SNAPSHOT" ] && _AGMSG_SAFE_POKE_IB_RC=14
+  #
+  # An `if`, not a bare `[ ... ] && ...` (review, #1446 round 2): the bare
+  # form's own exit status IS the test's, so on the ordinary unchanged case
+  # (the ordinary safe path) it returns 1 -- and since this is the LAST
+  # command in the function, the function itself would return 1 right along
+  # with it. agmsg_safe_poke calls this as a bare statement, so under the
+  # set -e every caller of this file runs under, THAT would abort the whole
+  # shell before the next line ever reads _AGMSG_SAFE_POKE_IB_RC, on the
+  # single most common case there is. An `if` with no `else` is always 0
+  # regardless of which branch it takes.
+  if [ "$snap1" != "$_AGMSG_SAFE_POKE_IB_SNAPSHOT" ]; then
+    _AGMSG_SAFE_POKE_IB_RC=14
+  fi
 }
 
 # Reads <id>'s draft via the driver's OWN terminal_input_draft (priority 1
@@ -236,9 +250,11 @@ _agmsg_safe_poke_screen_check() {
 #       agmsg_safe_poke below never compare content across reads, because
 #       ANY content at EITHER read is already enough to refuse
 #   10  the driver could not tell for this pane (no agent identity
-#       recognized, or unreachable) -- the caller falls back to the
-#       existing screen-based check entirely, never reads this as "empty"
-#       (#1443's own contract)
+#       recognized, or unreachable) -- never read as "empty" (#1443's own
+#       contract), and never falls back to the screen either (review,
+#       #1446: a driver whose screen never shows real draft content would
+#       make "unchanged" meaningless as safety evidence) -- the caller
+#       propagates this as the poke attempt's own failure instead
 #   other  a genuine driver-level failure (e.g. identity confirmed but the
 #          read itself failed), propagated as this poke attempt's own rc
 _agmsg_safe_poke_draft_read() {
