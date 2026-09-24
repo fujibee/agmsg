@@ -357,6 +357,29 @@ agmsg_terminal_resolve_placement() {
   return 1
 }
 
+# resolve-for-CAPABILITY (spawn's launcher→driver reroute, #1447): the first
+# candidate (priority order) that is BOTH present in this environment (its own
+# terminal_detect succeeds) AND declares <capability> in its manifest's
+# capabilities= — skipping every name in <exclude> (space-separated) entirely,
+# without even loading it. Distinct from agmsg_terminal_resolve_placement
+# above: that one answers "whichever driver is here at all" (unfiltered,
+# every candidate a real answer); this one answers "is there some OTHER
+# driver here that can do X", for a caller (like spawn.sh) that already has
+# its own hand-written path for one or more specific drivers and only wants
+# this for whatever driver isn't one of those. A driver a caller special-cases
+# belongs in <exclude>, not left for this to find and hand back redundantly.
+agmsg_terminal_resolve_by_capability() {   # <capability> [exclude, space-separated]
+  local capability="$1" exclude="${2:-}" name
+  for name in $(agmsg_terminal_candidates); do
+    case " $exclude " in *" $name "*) continue ;; esac
+    agmsg_terminal_has "$name" capabilities "$capability" || continue
+    _agmsg_terminal_detect_one "$name" "" >/dev/null 2>&1 || continue
+    printf '%s\n' "$name"
+    return 0
+  done
+  return 1
+}
+
 # resolve-for-NAME (terminal_name / SessionStart): prints "<terminal>\t<self-id>"
 # and exit 0. ORDER (2026-09-01, from the nested-herdr measurement): prefer a
 # candidate that PRODUCED A PANE ID over one that only claimed PRESENCE; the
