@@ -830,6 +830,22 @@ EOF
   fi
   thread_id="$rec_thread"
 
+  # A rejected turn/start proves this saved thread cannot receive a prompt.
+  # Keep its inbox unread and wait for codex-record-session to seat a new
+  # thread instead of repeatedly launching a bridge for the same bad UUID.
+  delivery_file="$RUN_DIR/codex-bridge.$team.$name.delivery"
+  if [ -f "$delivery_file" ]; then
+    delivery_thread="$(awk -F= '/^thread=/{sub(/^thread=/, ""); print; exit}' "$delivery_file" 2>/dev/null || true)"
+    delivery_state="$(awk -F= '/^state=/{sub(/^state=/, ""); print; exit}' "$delivery_file" 2>/dev/null || true)"
+    delivery_project="$(awk -F= '/^project=/{sub(/^project=/, ""); print; exit}' "$delivery_file" 2>/dev/null || true)"
+    delivery_project_phys="$(agmsg_canonical_path "$delivery_project" 2>/dev/null || true)"
+    if [ "$delivery_thread" = "$thread_id" ] && [ "$delivery_project_phys" = "$PROJECT_PHYS" ] \
+      && [ "$delivery_state" = "UNBOUND" ]; then
+      poll_sleep
+      continue
+    fi
+  fi
+
   # The role-session record is the sole thread authority (#150 phase 2/#350).
 
   # Reset each tick: a mismatched-live bridge (bound to a stale thread/app-server)

@@ -1562,8 +1562,10 @@ class CodexBridge {
 
   async tryStartTurn() {
     if (!this.pendingWake || this.turnActive || !this.threadIdle) return;
+    let inboxBatch = null;
     if (this.opts.inlineInbox) {
-      this.inlineInboxText = this.readInboxForPrompt();
+      inboxBatch = this.readInboxForPrompt();
+      this.inlineInboxText = inboxBatch.text;
       if (!this.inlineInboxText.trim()) {
         console.error("codex-bridge: pending wake had no inbox output; re-arming");
         this.pendingWake = false;
@@ -1577,9 +1579,8 @@ class CodexBridge {
     // Claim the wake BEFORE the request goes out, not after it succeeds. With
     // the claim left set across the await, a turn-end signal arriving mid-
     // request re-entered this method with the same wake and started a second
-    // turn. The claim is restored on failure so the wake fires again (the
-    // inline inbox rows are already marked read by then, so the retry
-    // re-delivers the wake, not the payload — unchanged from before).
+    // turn. The claim is restored on failure so the wake fires again; inline
+    // inbox rows remain unread until turn/start accepts the prompt.
     this.pendingWake = false;
     this.startInFlight = true;
     this.inFlightTurnId = null;
@@ -1592,11 +1593,16 @@ class CodexBridge {
         runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
+      for (const pair of this.identities) this.clearDeliveryState(pair);
+      if (inboxBatch) this.ackInboxBatches(inboxBatch.batches);
       // Bound how long we treat the turn as active. The real app-server may
       // never send turn/completed; the watchdog (and thread/status idle) drive
       // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
       this.startTurnWatchdog();
     } catch (error) {
+      if (/thread not found/iu.test(error && error.message ? error.message : "")) {
+        for (const pair of this.identities) this.writeDeliveryState(pair, "UNBOUND");
+      }
       this.pendingWake = true;
       this.turnActive = false;
       this.threadIdle = true;
@@ -1715,20 +1721,73 @@ class CodexBridge {
     const eligible = spawnSync(BASH_BIN, eligibleArgs, { cwd: this.opts.project, encoding: "utf8" });
     if (eligible.error || eligible.status !== 0) {
       console.error("codex-bridge: could not resolve eligible identities before reading inbox");
-      return "";
+      return { text: "", batches: [] };
     }
     const allowed = new Set((eligible.stdout || "").split(/\r?\n/).filter(Boolean));
     const sections = [];
+    const batches = [];
     for (const pair of this.identities) {
       if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
-      // --quiet: an empty inbox must read back as EMPTY. The human-facing
-      // "No new messages." line is non-blank, passed tryStartTurn's emptiness
-      // check, and became the entire prompt of an injected turn.
-      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--quiet"], { cwd: this.opts.project, encoding: "utf8" });
-      if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
-      if ((result.stdout || "").trim()) sections.push(result.stdout.trim());
+      const transport = path.join(SCRIPT_DIR, "inbox-transport.sh");
+      const result = spawnSync(BASH_BIN, [transport, "peek", pair.team, pair.name], { cwd: this.opts.project, encoding: "utf8" });
+      if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox peek failed for ${pair.team}/${pair.name}`); continue; }
+      const rows = (result.stdout || "").split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+      if (!rows.length) continue;
+      const ids = [];
+      const lines = [];
+      for (const row of rows) {
+        if (![row.id, row.from, row.body, row.at].every(value => typeof value === "string")) {
+          throw new Error(`inbox peek returned an invalid message for ${pair.team}/${pair.name}`);
+        }
+        ids.push(row.id);
+        lines.push(`  [${row.at}] ${row.from}: ${row.body.replace(/\n/g, "\\n").replace(/\t/g, "\\t")}`);
+      }
+      sections.push(`${rows.length} new message(s):\n\n${lines.join("\n")}`);
+      batches.push({ pair, ids });
     }
-    return sections.join("\n\n");
+    return { text: sections.join("\n\n"), batches };
+  }
+
+  ackInboxBatches(batches) {
+    const transport = path.join(SCRIPT_DIR, "inbox-transport.sh");
+    for (const { pair, ids } of batches) {
+      const result = spawnSync(BASH_BIN, [transport, "ack", pair.team, pair.name], {
+        cwd: this.opts.project, encoding: "utf8", input: JSON.stringify(ids),
+      });
+      if (result.error || result.status !== 0) {
+        console.error(`codex-bridge: read-state ack failed for ${pair.team}/${pair.name}; messages may be delivered again`);
+        this.writeDeliveryState(pair, "ACK_FAILED");
+      }
+    }
+  }
+
+  deliveryStatePath(pair) {
+    return path.join(RUN_DIR, `codex-bridge.${pair.team}.${pair.name}.delivery`);
+  }
+
+  writeDeliveryState(pair, state) {
+    const target = this.deliveryStatePath(pair);
+    const temporary = `${target}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(temporary,
+        `thread=${this.threadId}\nproject=${this.opts.project}\nstate=${state}\npid=${process.pid}\nat=${new Date().toISOString()}\n`,
+        { mode: 0o600 });
+      fs.renameSync(temporary, target);
+    } catch (error) {
+      try { fs.unlinkSync(temporary); } catch (_) { /* no temporary file */ }
+      console.error(`codex-bridge: could not record ${state} for ${pair.team}/${pair.name}: ${error.message}`);
+    }
+  }
+
+  clearDeliveryState(pair) {
+    const target = this.deliveryStatePath(pair);
+    try {
+      const contents = fs.readFileSync(target, "utf8");
+      if (!contents.includes(`thread=${this.threadId}\n`) || !contents.includes(`project=${this.opts.project}\n`)) return;
+      fs.unlinkSync(target);
+    } catch (error) {
+      if (error.code !== "ENOENT") console.error(`codex-bridge: could not clear delivery state for ${pair.team}/${pair.name}: ${error.message}`);
+    }
   }
 
   async shutdown() {

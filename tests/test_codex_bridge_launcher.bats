@@ -221,6 +221,30 @@ run_launcher() {
   ! grep -q -- "--thread loaded" "$CAPTURE"
 }
 
+@test "launcher: waits after an unbound turn and resumes only after a new seat is recorded" {
+  put_record team alice stale-thread "$PROJ" codex
+  printf 'thread=stale-thread\nproject=%s\nstate=UNBOUND\npid=1\nat=2026-01-01T00:00:00Z\n' "$PROJ" \
+    > "$RUN_DIR/codex-bridge.team.alice.delivery"
+  sleep 30 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  local dispatcher=$!
+  sleep 3
+  [ ! -f "$CAPTURE" ]
+
+  put_record team alice fresh-thread "$PROJ" codex
+  local i seen=0
+  for i in {1..200}; do
+    if [ -f "$CAPTURE" ]; then seen=1; break; fi
+    sleep 0.1
+  done
+  kill "$parent" 2>/dev/null || true
+  wait "$parent" 2>/dev/null || true
+  wait "$dispatcher" 2>/dev/null || true
+  [ "$seen" -eq 1 ]
+  grep -q -- '--thread fresh-thread' "$CAPTURE"
+  ! grep -q -- '--thread stale-thread' "$CAPTURE"
+}
+
 @test "launcher: passes the actas owner recorded by the claim" {
   setup_live_owner "$RUN_DIR" owner-session
   export AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:1"

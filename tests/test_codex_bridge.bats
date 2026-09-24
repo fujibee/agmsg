@@ -841,6 +841,130 @@ EOF
   [[ "$output" =~ "started turn" ]]
 }
 
+@test "codex-bridge: turn/start rejection leaves inline inbox message unread" {
+  local fake="$TEST_SKILL_DIR/fake-app-server-reject-turn.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-reject-turn.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const log = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    send({ jsonrpc: "2.0", id: message.id, error: { message: "no rollout for this thread" } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => send({ jsonrpc: "2.0", method: "process/exited", params: {
+      processHandle: message.params.processHandle, exitCode: 0,
+      stdout: "status=pending count=1 max_id=1\n", stderr: "",
+    } }), 10);
+  } else if (message.method === "turn/start") {
+    fs.writeFileSync(log, message.params.input[0].text);
+    if (process.env.AGMSG_TEST_ACCEPT_TURN === "1") {
+      send({ jsonrpc: "2.0", id: message.id, result: {} });
+      setTimeout(() => send({ jsonrpc: "2.0", method: "turn/completed", params: {
+        threadId: message.params.threadId, turn: { id: "turn-1" },
+      } }), 10);
+    } else {
+      send({ jsonrpc: "2.0", id: message.id, error: { message: "thread not found: stale-thread" } });
+    }
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+  bash "$SCRIPTS/send.sh" team bob alice 'probe survives failed turn' >/dev/null
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread stale-thread \
+    --inline-inbox --timeout 1 --interval 1 --max-wakes 1
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"thread not found"* ]]
+  grep -q 'probe survives failed turn' "$log"
+  run bash "$TYPES/codex/inbox-transport.sh" peek team alice
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"probe survives failed turn"* ]]
+  run bash "$SCRIPTS/delivery.sh" status codex "$PROJ"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex delivery: team/alice UNBOUND"* ]]
+  [[ "${lines[0]}" == mode:* ]]
+  [[ "$output" == *"Codex bridge: team/alice"* ]]
+
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c \
+    'source "$1/lib/role-session.sh"; agmsg_role_session_record team alice fresh-thread "$2" codex' \
+    _ "$SCRIPTS" "$PROJ"
+  run bash "$SCRIPTS/delivery.sh" status codex "$PROJ"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Codex delivery: team/alice UNBOUND"* ]]
+
+  AGMSG_TEST_ACCEPT_TURN=1 AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" \
+    run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread fresh-thread \
+    --inline-inbox --timeout 1 --interval 1 --max-wakes 1
+  [ "$status" -eq 0 ]
+  grep -q 'probe survives failed turn' "$log"
+  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "codex-bridge: ack failure leaves the accepted prompt unread and reports redelivery" {
+  local transport="$SCRIPTS/drivers/types/codex/inbox-transport.sh"
+  cp "$transport" "$transport.real"
+  cat >"$transport" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "ack" ]; then exit 42; fi
+exec bash "$0.real" "$@"
+EOF
+  bash "$SCRIPTS/send.sh" team bob alice 'retry this accepted prompt' >/dev/null
+
+  local fake="$TEST_SKILL_DIR/fake-app-server-ack-fails.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: message.params.threadId, status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => send({ jsonrpc: "2.0", method: "process/exited", params: {
+      processHandle: message.params.processHandle, exitCode: 0,
+      stdout: "status=pending count=1 max_id=1\n", stderr: "",
+    } }), 10);
+  } else if (message.method === "turn/start") {
+    if (!message.params.input[0].text.includes("retry this accepted prompt")) process.exit(8);
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => send({ jsonrpc: "2.0", method: "turn/completed", params: {
+      threadId: message.params.threadId, turn: { id: "turn-1" },
+    } }), 10);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread live-thread \
+    --inline-inbox --timeout 1 --interval 1 --max-wakes 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"read-state ack failed"* ]]
+  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"retry this accepted prompt"* ]]
+  run bash "$SCRIPTS/delivery.sh" status codex "$PROJ"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex delivery: team/alice ACK_FAILED"* ]]
+}
+
 @test "codex-bridge: still dies when thread/resume succeeds but returns the wrong thread id (#276)" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
@@ -1011,6 +1135,7 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: message.id, error: { message: "wrong runtime workspace roots" } });
       return;
     }
+    require("child_process").spawnSync("bash", [process.env.SCRIPTS + "/send.sh", "team", "bob", "alice", "arrived after peek"], { encoding: "utf8" });
     send({ jsonrpc: "2.0", id: message.id, result: {} });
     setTimeout(() => {
       send({
@@ -1035,6 +1160,10 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" =~ "started turn" ]]
+  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"arrived after peek"* ]]
+  [[ "$output" != *"inline body reaches prompt"* ]]
 }
 
 @test "codex-bridge: stops instead of looping on the same unread max_id" {

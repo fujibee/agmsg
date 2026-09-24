@@ -278,6 +278,31 @@ agmsg_delivery_runtime_status() {
     fi
   done <<< "$pairs"
 
+  # Keep every existing Codex bridge line in place. Delivery evidence follows
+  # as an additive contract; process liveness alone does not prove reachability.
+  local delivery_thread delivery_state delivery_project delivery_file rec_project_phys want_project_phys marker_project_phys
+  want_project_phys="$(agmsg_canonical_path "$project" 2>/dev/null || true)"
+  # shellcheck disable=SC1091
+  . "$SKILL_DIR/scripts/lib/role-session.sh"
+  while IFS=$'\t' read -r team name _rest; do
+    [ -n "$team" ] && [ -n "$name" ] || continue
+    delivery_file="$RUN_DIR/codex-bridge.$team.$name.delivery"
+    [ -f "$delivery_file" ] || continue
+    delivery_thread="$(awk -F= '/^thread=/{sub(/^thread=/, ""); print; exit}' "$delivery_file" 2>/dev/null || true)"
+    delivery_state="$(awk -F= '/^state=/{sub(/^state=/, ""); print; exit}' "$delivery_file" 2>/dev/null || true)"
+    delivery_project="$(awk -F= '/^project=/{sub(/^project=/, ""); print; exit}' "$delivery_file" 2>/dev/null || true)"
+    agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+    rec_project_phys="$(agmsg_canonical_path "$AGMSG_ROLE_SESSION_PROJECT" 2>/dev/null || true)"
+    marker_project_phys="$(agmsg_canonical_path "$delivery_project" 2>/dev/null || true)"
+    if [ -n "$delivery_thread" ] && [ "$marker_project_phys" = "$want_project_phys" ] \
+      && { [ -z "$AGMSG_ROLE_SESSION_UUID" ] || { [ "$delivery_thread" = "$AGMSG_ROLE_SESSION_UUID" ] \
+        && [ "$rec_project_phys" = "$want_project_phys" ]; }; }; then
+      case "$delivery_state" in
+        UNBOUND|ACK_FAILED) echo "Codex delivery: $team/$name $delivery_state (thread $delivery_thread)" ;;
+      esac
+    fi
+  done <<< "$pairs"
+
   if [ "$found" -eq 0 ]; then
     echo "Codex bridge: no identities registered for this project"
   fi
