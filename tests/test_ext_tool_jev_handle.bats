@@ -53,7 +53,7 @@ _start_mock_openrouter() {
   MOCK_PORT="$(wait_for_mock_server_port "$TEST_SKILL_DIR/server.port")" || return 1
 }
 
-@test "jev handle: sends the right request, replies with one line, and turns every failure into one line" {
+@test "jev handle: sends the right request, replies one line per question with 2+, and turns every failure into one line" {
   # No agmsg-jev-curl.* work_dir survives ANY of this test's calls, success
   # or failure -- a before/after snapshot of the whole run rather than one
   # call, since that is the property that matters: _jev_api_call's trap
@@ -71,9 +71,6 @@ _start_mock_openrouter() {
     "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
 
   [ "$status" -eq 0 ]
-  case "$output" in
-    *$'\n'*) echo "handle printed more than one line: $output" >&2; return 1 ;;
-  esac
   # Two questions (model, effort) -- each carries its OWN p/confidence from
   # the mock fixture's fixed answers, addressable by name, not one number
   # multiplied across both (review finding, #1367 follow-up: multiplying
@@ -81,10 +78,16 @@ _start_mock_openrouter() {
   # USAGE.md's own "don't act below 0.5-0.7 confidence" guidance). The
   # mock's response never actually depends on what questions were asked,
   # only the REQUEST assertions below prove those were sent correctly.
-  # cost is the call's own usage.cost, rounded to 6 places. The label is
-  # always "jev" now -- there is no more named/bundled question type to
-  # label it with.
-  [ "$output" = "jev: model=sonnet (p=0.80, confidence=0.90) / effort=high (p=0.80, confidence=0.70) (cost \$0.000019)" ]
+  # cost is the call's own usage.cost, rounded to 6 places.
+  #
+  # ONE LINE PER QUESTION with 2+ questions (this is the one case a
+  # successful reply is not a single line -- exactly one question, and
+  # every failure, still are; see the case checks elsewhere in this test).
+  # The call's own aggregate cost is appended to the LAST line, since it
+  # describes the whole call, not any single question.
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | sed -n 1p)" = "jev: model=sonnet (p=0.80, confidence=0.90)" ]
+  [ "$(printf '%s\n' "$output" | sed -n 2p)" = "effort=high (p=0.80, confidence=0.70) (cost \$0.000019)" ]
 
   wait_for_file_contains "$request_log" '"path"'
   [ "$(jq -r '.path' "$request_log")" = "/api/alpha/decisions" ]
@@ -115,14 +118,57 @@ _start_mock_openrouter() {
   run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
     "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$typesafe_input"
   [ "$status" -eq 0 ]
-  case "$output" in
-    *$'\n'*) echo "[typesafe] more than one line: $output" >&2; return 1 ;;
-  esac
-  [ "$output" = "jev: model=sonnet (p=0.80, confidence=0.90) / effort=high (p=0.80, confidence=0.70) (tokens 441 in / 85 out)" ]
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | sed -n 1p)" = "jev: model=sonnet (p=0.80, confidence=0.90)" ]
+  [ "$(printf '%s\n' "$output" | sed -n 2p)" = "effort=high (p=0.80, confidence=0.70) (tokens 441 in / 85 out)" ]
   refute grep -qF 'cost' <<<"$output"
   wait_for_file_contains "$typesafe_log" '"path"'
   [ "$(jq -r '.path' "$typesafe_log")" = "/v1/systemone" ]
   [ "$(jq -r '.body.model' "$typesafe_log")" = "jev-latest" ]
+
+  # --- contrast: one malformed row among several does not fail the whole
+  # call -- the fixture drops "effort"'s own choice, so its answer cannot
+  # be rendered, but "model"'s real answer still has to come back. Failing
+  # the entire batch over one bad row would throw away every other
+  # question's genuine answer along with it. ---
+  _start_mock_openrouter MOCK_OPENROUTER_BAD_ROW=1
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | sed -n 1p)" = "jev: model=sonnet (p=0.80, confidence=0.90)" ]
+  [ "$(printf '%s\n' "$output" | sed -n 2p)" = "effort=error (malformed answer) (cost \$0.000019)" ]
+
+  # --- contrast: one row whose answer VALUE is not an object at all (a
+  # bare string, "oops") -- stricter than the missing-field case above,
+  # since every field access on it, not just .choice, is a jq type error.
+  # Unguarded, this fails the whole jq CALL and, under set -e, silently
+  # ends the script with nothing on either stream -- "good"'s genuine
+  # answer never comes back and no diagnosis is printed either (review
+  # round 4). Same contract as the missing-field case: the other
+  # question's real answer still has to come back, and this row renders
+  # as its own error line. ---
+  _start_mock_openrouter MOCK_OPENROUTER_BAD_ROW_STRING=1
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | sed -n 1p)" = "jev: model=sonnet (p=0.80, confidence=0.90)" ]
+  [ "$(printf '%s\n' "$output" | sed -n 2p)" = "effort=error (malformed answer) (cost \$0.000019)" ]
+
+  # --- contrast: a choice that is the literal STRING "null" is a genuine
+  # answer, not a missing one -- `jq -r` turns a real JSON null and the
+  # two-character string "null" into the identical output text, so a
+  # downstream check comparing that text could not tell them apart (review
+  # round 2: this exact confusion once made a valid answer render as
+  # malformed). Exactly one question, so this also exercises the "row_count
+  # == 1" reply path, which nothing else in this test reaches -- the
+  # fixture's answer set is otherwise always two. ---
+  _start_mock_openrouter MOCK_OPENROUTER_SINGLE_ANSWER=1 MOCK_OPENROUTER_CHOICE=null
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -eq 0 ]
+  [ "$output" = 'jev: null (choice p=0.80, confidence=0.90, cost $0.000019)' ]
 
   # --- failure: an unrecognized provider is refused BEFORE any URL is
   # built or key sent -- both handle and setup test validate this (review
@@ -157,31 +203,43 @@ _start_mock_openrouter() {
 
   # --- contrast: a choice name is whatever the CALLER put in `questions`
   # and is echoed straight back by the API -- handle never validates its
-  # content -- so a successful reply must stay exactly one line, and its
-  # other values must stay correct, NO MATTER what that name contains.
-  # One adversarial name mixing every control character rounds 2-4 each
-  # found a fresh way to break, rather than one test per character (review
-  # finding, #1364, rounds 2-4): U+001F (could shift p/confidence/cost/
-  # tokens if response parsing used it as an internal delimiter -- round
-  # 2), a newline and a CR (could turn the ONE-LINE reply into several --
-  # round 3, the actual property to hold; see _jev_one_line in _lib.sh,
-  # the single choke point both this line and fail()'s route through).
-  local weird_choice=$'sonnet\x1ffake-injected-field\nwith a newline\rand a CR'
+  # content -- so each answer's OWN line must stay exactly one line, and
+  # its other values must stay correct, NO MATTER what that name contains.
+  # (With 2 questions the reply itself is legitimately 2 lines now -- see
+  # above -- so the property to hold here is "one line PER answer, never
+  # more", not "the whole reply is one line".) One adversarial name mixing
+  # every control character rounds 2-4 each found a fresh way to break,
+  # rather than one test per character (review finding, #1364, rounds
+  # 2-4): U+001F (could shift p/confidence/cost/tokens if response parsing
+  # used it as an internal delimiter -- round 2), a newline and a CR
+  # (could turn one answer's line into several -- round 3), ESC and TAB
+  # (round 2 on the batch reply: _jev_one_line only escaped CR/LF, so any
+  # OTHER C0 control character still reached the printed line raw -- the
+  # actual property to hold; see _jev_one_line in _lib.sh, the single
+  # choke point both this line and fail()'s route through).
+  local weird_choice=$'sonnet\x1ffake-injected-field\nwith a newline\rand a CR\x1bESC\tTAB'
   _start_mock_openrouter MOCK_OPENROUTER_CHOICE="$weird_choice"
   run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
     "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
   [ "$status" -eq 0 ]
+  # Exactly 2 lines (one per question) -- if the embedded newline/CR ever
+  # leaked through unescaped, this would be 3+.
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
+  # No raw C0 control byte (or DEL) anywhere in the output -- checked
+  # directly, not by rebuilding the expected string, since that is the
+  # actual property round 2 found missing.
   case "$output" in
-    *$'\n'*) echo "[weird choice] more than one line: $output" >&2; return 1 ;;
+    *$'\x1f'*|*$'\x1b'*|*$'\t'*) echo "[weird choice] a raw control byte reached the output: $output" >&2; return 1 ;;
   esac
   # $output holds the ESCAPED form (_jev_one_line turns a real newline/CR
-  # into the two-character \n / \r, not a raw byte) -- build the same
+  # into the two-character \n / \r, and every OTHER C0 control character --
+  # and DEL -- into a single space, not a raw byte) -- build the same
   # escaped text here to check against, rather than the raw $weird_choice.
   local escaped_choice="${weird_choice//$'\r'/\\r}"
   escaped_choice="${escaped_choice//$'\n'/\\n}"
-  printf '%s\n' "$output" | grep -qF "model=${escaped_choice} (p=0.80, confidence=0.90)"
-  printf '%s\n' "$output" | grep -qF 'effort=high (p=0.80, confidence=0.70)'
-  printf '%s\n' "$output" | grep -qF 'cost $0.000019'
+  escaped_choice="$(printf '%s' "$escaped_choice" | tr '\000-\037\177' ' ')"
+  [ "$(printf '%s\n' "$output" | sed -n 1p)" = "jev: model=${escaped_choice} (p=0.80, confidence=0.90)" ]
+  [ "$(printf '%s\n' "$output" | sed -n 2p)" = "effort=high (p=0.80, confidence=0.70) (cost \$0.000019)" ]
 
   # --- contrast: a hostile ~/.curlrc must be ignored (review finding, #1339) ---
   # Without curl's -q as its FIRST argument, curl reads this user's curlrc,
@@ -284,6 +342,50 @@ _start_mock_openrouter() {
     *$'\n'*) echo "[missing key file] more than one line: $output" >&2; return 1 ;;
   esac
   printf '%s\n' "$output" | grep -qF "key file not found or not readable"
+
+  # --- failure: HTTP 400, request too large for one call -- named on its
+  # own rather than falling into the generic "unexpected HTTP 400" line,
+  # so the caller knows to split the batch instead of retrying as-is. This
+  # is OpenRouter's REAL body shape (the default provider, and the
+  # fixture's default 400 payload): detail.error_type wrapped as a STRING
+  # inside error.message, not at the top level -- an earlier version of
+  # this check only looked at the top level and missed every one of these
+  # in production (a live Banking77 call at 100 questions fell through to
+  # the generic line below instead; confirmed against the real API,
+  # 2026-09-24, a 400 carries no charge). ---
+  _start_mock_openrouter MOCK_OPENROUTER_HTTP_STATUS=400
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *$'\n'*) echo "[400] more than one line: $output" >&2; return 1 ;;
+  esac
+  [ "$output" = "jev: request too large for one call (max_tokens_exceeded) -- split the questions into smaller batches" ]
+
+  # --- contrast: the OTHER shape that reaches the same message -- a
+  # DIRECT call's flat, top-level detail.error_type (TypeSafe's own native
+  # API returns it exactly like this, never wrapped) -- still recognized ---
+  _start_mock_openrouter MOCK_OPENROUTER_HTTP_STATUS=400 MOCK_OPENROUTER_400_FLAT_SHAPE=1
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *$'\n'*) echo "[400 flat shape] more than one line: $output" >&2; return 1 ;;
+  esac
+  [ "$output" = "jev: request too large for one call (max_tokens_exceeded) -- split the questions into smaller batches" ]
+
+  # --- contrast: a 400 whose detail.error_type is something else, and
+  # only mentions "max_tokens_exceeded" in unrelated free text, must NOT
+  # get the specific line above -- a substring match anywhere in the body
+  # would misdiagnose this as the wrong failure (review round 2) ---
+  _start_mock_openrouter MOCK_OPENROUTER_HTTP_STATUS=400 MOCK_OPENROUTER_400_CODE_MISMATCH=1
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *$'\n'*) echo "[400 code mismatch] more than one line: $output" >&2; return 1 ;;
+  esac
+  [ "$output" = "jev: unexpected HTTP 400" ]
 
   # --- failure: HTTP 401 ---
   _start_mock_openrouter MOCK_OPENROUTER_HTTP_STATUS=401

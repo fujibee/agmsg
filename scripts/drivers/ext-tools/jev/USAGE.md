@@ -27,8 +27,25 @@ Measured once (2026-09-21, via OpenRouter) — not a guaranteed number:
 | 40 | 0.461s | $0.000460 |
 | 40, sent one at a time instead | ~12s | ~$0.00084 |
 
-40 is the most anyone has actually sent — not a known ceiling. Don't assume
-a much larger batch behaves the same; this wasn't tried.
+**The real ceiling on a batch is total input tokens, not how many questions
+or lines you send** (measured 2026-09-24). Time is not a concern either
+way — even the slowest successful call measured was 2.42s, well under this
+member's 10s timeout. `state` plus every question's
+own `criteria` descriptions all count toward the same per-call input total,
+and `criteria` is repeated in full for EVERY question that uses it — so how
+many questions fit in one call depends heavily on how many choices each one
+has, not just their count:
+
+- A 2-choice question (e.g. yes/no): 100+ in one call, comfortably.
+- A 77-choice question: about 40 in one call — the same request shape hit
+  the limit at 46.
+
+Sending too much in one call does not hang or get billed: the provider
+rejects it immediately with HTTP 400 (`max_tokens_exceeded`), and this
+member reports that as one line — `jev: request too large for one call
+(max_tokens_exceeded) -- split the questions into smaller batches` — costing
+nothing. If you hit it, split the batch and send the remainder as a further
+call.
 
 ## How to send it
 
@@ -83,17 +100,30 @@ in a single call too, per the fan-out note above.
 }
 ```
 
-The reply is one line. With more than one question (like the example
-above), each comes back addressable by its own question name, with its
-OWN probability and confidence — not one number averaged or multiplied
-across all of them:
-
-`jev: model=sonnet (p=0.72, confidence=0.61) / effort=high (p=0.85, confidence=0.79) (cost $0.000016)`
-
-With exactly one question, the reply keeps the older, simpler shape (no
-name prefix, since there's nothing to disambiguate):
+With exactly one question, the reply is one line (no name prefix, since
+there's nothing to disambiguate):
 
 `jev: sonnet (choice p=0.72, confidence=0.61, cost $0.000016)`
+
+**With two or more questions (like the example above), the reply is one
+LINE PER QUESTION** — `name=choice (p=…, confidence=…)`, addressable by its
+own question name rather than by position, since position silently breaks
+if the endpoint (or a future request) ever reorders answers. The call's own
+aggregate cost is appended to the LAST line, since it describes the whole
+call, not any single question:
+
+```
+jev: model=sonnet (p=0.72, confidence=0.61)
+effort=high (p=0.85, confidence=0.79) (cost $0.000016)
+```
+
+If one question's own answer comes back malformed (missing a choice, or a
+choice absent from its own probabilities), that question alone renders as
+`name=error (malformed answer)` on its own line — every other question's
+real answer still comes back. This only applies with 2+ questions; with
+exactly one, a malformed answer fails the whole call the same as any other
+unexpected response shape (there is nothing else in the reply to salvage
+it with).
 
 This member may be connected through OpenRouter or TypeSafe's own native
 API (a setup-time choice, invisible to what you send — the request/reply
@@ -104,13 +134,15 @@ self-calculated dollar estimate standing in for one it never measured.
 
 ## When it refuses, and before acting on an answer
 
-Refusal is always one fixed line: no key configured, an invalid key, rate
-limiting, a network failure, an unexpected response shape, or a body not
-shaped as above. Separately: check confidence PER QUESTION, not once for
-the whole reply — with several questions in one call, each one's own
-confidence can differ. If a given question's confidence is below 0.5–0.7,
-do not act on that answer automatically — hand that one decision to a
-human or an ordinary model instead.
+A refused call is always one fixed line: no key configured, an invalid
+key, rate limiting, a network failure, an unexpected response shape, a
+body not shaped as above, or the batch was too large for one call (see
+above — split it and send the remainder separately). Separately: check
+confidence PER QUESTION, not once for the whole reply — with several
+questions in one call, each one's own confidence can differ. If a given
+question's confidence is below 0.5–0.7, do not act on that answer
+automatically — hand that one decision to a human or an ordinary model
+instead.
 
 ## Tips for asking well
 

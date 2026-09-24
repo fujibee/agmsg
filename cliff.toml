@@ -91,6 +91,7 @@ commit_parsers = [
   { message = "^jev: fix tool.conf comments", group = "<!-- 4 -->Documentation" },
   { message = "^jev, ext-tool README", group = "<!-- 4 -->Documentation" },
   # Everything else (merges, initial commit, misc) is intentionally dropped.
+  { message = "^codex: read the session name from session_index.jsonl", group = "<!-- 1 -->Fixed" },
   { message = ".*", skip = true },
 ]
 protect_breaking_commits = true

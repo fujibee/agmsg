@@ -22,6 +22,15 @@ MOCK_OPENROUTER_HTTP_STATUS = int(os.environ.get("MOCK_OPENROUTER_HTTP_STATUS", 
 # When set, the 200 response body is malformed on purpose (missing
 # "answers") to exercise handle's "unexpected response shape" failure.
 MOCK_OPENROUTER_MALFORMED = os.environ.get("MOCK_OPENROUTER_MALFORMED", "")
+# When set, a 400 response's detail.error_type is something ELSE, and only
+# mentions "max_tokens_exceeded" in unrelated free text -- proves handle's
+# 400 handling checks that field specifically, not a substring anywhere in
+# the body.
+MOCK_OPENROUTER_400_CODE_MISMATCH = os.environ.get("MOCK_OPENROUTER_400_CODE_MISMATCH", "")
+# When set, a 400 response uses the flat, top-level detail.error_type shape
+# (a direct call, never wrapped) instead of the default's OpenRouter-real
+# wrapped one -- see MOCK_OPENROUTER_HTTP_STATUS's own 400 branch below.
+MOCK_OPENROUTER_400_FLAT_SHAPE = os.environ.get("MOCK_OPENROUTER_400_FLAT_SHAPE", "")
 # Held before answering, so a test can inspect the CALLER's own process
 # table (ps) while a request is genuinely in flight -- proving curl's argv
 # never carries the key or the body, not just that the final result happens
@@ -42,6 +51,19 @@ MOCK_OPENROUTER_NO_COST = os.environ.get("MOCK_OPENROUTER_NO_COST", "")
 # straight back by the API; see handle's own comment, review finding
 # #1364 round 2).
 MOCK_OPENROUTER_CHOICE = os.environ.get("MOCK_OPENROUTER_CHOICE", "")
+# When set, the "effort" answer in a multi-question response is malformed
+# (its "choice" key is dropped entirely) so a test can exercise handle's
+# per-row degrade: the OTHER question's real answer still comes back, and
+# this one renders as its own error line instead of failing the whole call.
+MOCK_OPENROUTER_BAD_ROW = os.environ.get("MOCK_OPENROUTER_BAD_ROW", "")
+# When set, the "effort" answer is not an object at all (a bare string) --
+# a stricter malformation than a missing field: every field access on it
+# (not just .choice) is a jq type error, not a missing-value one.
+MOCK_OPENROUTER_BAD_ROW_STRING = os.environ.get("MOCK_OPENROUTER_BAD_ROW_STRING", "")
+# When set, "effort" is dropped entirely, leaving exactly one answer --
+# the mock's fixed answer set is otherwise always two, so this is the only
+# way a test reaches handle's "exactly one question" reply path.
+MOCK_OPENROUTER_SINGLE_ANSWER = os.environ.get("MOCK_OPENROUTER_SINGLE_ANSWER", "")
 
 
 class LoopbackHTTPServer(HTTPServer):
@@ -72,7 +94,30 @@ class Handler(BaseHTTPRequestHandler):
                     "body": parsed_body,
                 }, fh)
 
-        if MOCK_OPENROUTER_HTTP_STATUS == 401:
+        if MOCK_OPENROUTER_HTTP_STATUS == 400:
+            if MOCK_OPENROUTER_400_CODE_MISMATCH:
+                # detail.error_type is something ELSE, with the phrase only
+                # appearing in unrelated free text -- proves handle checks
+                # that field specifically, not a substring anywhere in the
+                # body.
+                payload = {"detail": {"error_type": "invalid_request", "note": "max_tokens_exceeded is one possible error_type"}}
+            elif MOCK_OPENROUTER_400_FLAT_SHAPE:
+                # The flat, top-level shape a DIRECT call (never through
+                # OpenRouter's own wrapping) carries -- kept as its own
+                # scenario since handle checks for this shape too
+                # (TypeSafe's own native API returns it exactly like this).
+                payload = {"detail": {"error_type": "max_tokens_exceeded"}}
+            else:
+                # OpenRouter's real shape (the default provider), confirmed
+                # directly against the live API, 2026-09-24 (a 400 carries
+                # no charge): it does NOT return detail.error_type at the
+                # top level. It wraps that exact JSON as a STRING inside
+                # its own error.message, prefixed with the HTTP status.
+                # Measured live on a Banking77 call at 100 questions, where
+                # a top-level-only check missed it and fell through to the
+                # generic "unexpected HTTP 400" line instead.
+                payload = {"error": {"message": "HTTP 400: " + json.dumps({"detail": {"error_type": "max_tokens_exceeded"}}), "code": 400}}
+        elif MOCK_OPENROUTER_HTTP_STATUS == 401:
             payload = {"error": {"message": "invalid API key"}}
         elif MOCK_OPENROUTER_HTTP_STATUS == 429:
             payload = {"error": {"message": "rate limited"}}
@@ -104,6 +149,14 @@ class Handler(BaseHTTPRequestHandler):
             if MOCK_OPENROUTER_CHOICE:
                 payload["answers"]["model"]["choice"] = MOCK_OPENROUTER_CHOICE
                 payload["answers"]["model"]["probabilities"] = {MOCK_OPENROUTER_CHOICE: 0.80}
+            if MOCK_OPENROUTER_BAD_ROW:
+                del payload["answers"]["effort"]["choice"]
+            if MOCK_OPENROUTER_BAD_ROW_STRING:
+                # Not just missing a field -- the whole answer VALUE is not
+                # an object at all, so nothing inside it can be indexed.
+                payload["answers"]["effort"] = "oops"
+            if MOCK_OPENROUTER_SINGLE_ANSWER:
+                del payload["answers"]["effort"]
         body = json.dumps(payload).encode("utf-8")
         self.send_response(MOCK_OPENROUTER_HTTP_STATUS)
         self.send_header("Content-Type", "application/json")

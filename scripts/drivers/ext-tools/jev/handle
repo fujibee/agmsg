@@ -117,6 +117,60 @@ _jev_api_call "$key" "$request_json" "$out_file" "$url" ||
   fail "jev: request failed ($_JEV_CURL_DIAG)"
 
 case "$_JEV_HTTP_CODE" in
+  400)
+    # The one 400 cause worth naming on its own: the request's total input
+    # (state + every question's own criteria, repeated per question) went
+    # over the provider's own limit. Checked against the error's own
+    # `detail.error_type` field specifically, not a substring anywhere in
+    # the body -- a substring match also fires on an unrelated 400 whose
+    # free-text mentions this phrase without it being the actual cause
+    # (review round 2). No partial match either way: both branches below
+    # parse a complete, well-formed structure or produce false, never a
+    # guess from whatever text happens to be present.
+    #
+    # TWO shapes reach that field, not one. `{"detail":{"error_type":
+    # "max_tokens_exceeded"}}` at the TOP LEVEL is what a direct call
+    # (TypeSafe's own API) returns. OpenRouter (the default provider) does
+    # not: it wraps that exact same JSON as a STRING inside its own
+    # error.message, prefixed with the HTTP status --
+    #   {"error":{"message":"HTTP 400: {\"detail\":{\"error_type\":
+    #   \"max_tokens_exceeded\"}}","code":400}}
+    # -- confirmed directly against the real OpenRouter API, 2026-09-24
+    # (a 400 carries no charge). The earlier top-level-only check missed
+    # every OpenRouter over-limit 400 for exactly this reason (a Banking77
+    # call at 100 questions fell through to the generic line below
+    # instead). Both shapes are checked; anything that fails to parse as
+    # either -- including a message that merely mentions the phrase
+    # without carrying this exact structure -- is `false`, not a guess.
+    #
+    # NEITHER comparison below uses `// empty` before `==` (the shape the
+    # round-2 review version had): in jq, `(X // empty) == Y` produces NO
+    # OUTPUT AT ALL when X is null/false, not `false` -- `empty` is a
+    # zero-output generator, and comparing against zero outputs yields
+    # zero outputs, which `jq -e` treats the same as any other non-true
+    # result but which silently skipped this whole branch's `if` even for
+    # the flat TypeSafe shape whenever "detail" was absent (measured while
+    # fixing this: the previously-shipped filter produced nothing, not
+    # false, for exactly the OpenRouter body this fix is for). Comparing
+    # directly with `==` already treats a missing/null field as `false`
+    # correctly, no default needed. The nested capture below has the same
+    # class of gap for a NON-matching regex -- capture on no match yields
+    # no output rather than raising a catchable error, so `try/catch`
+    # alone does not stand in for it -- caught instead with `// {j: null}`
+    # before anything tries to parse `$cap.j`.
+    if jq -e '
+      def flat: (.detail.error_type == "max_tokens_exceeded");
+      if flat then true else
+        (((.error.message // "") | capture("^HTTP 400: (?<j>.*)$")) // {j: null}) as $cap
+        | if ($cap.j == null) then false
+          else try (($cap.j | fromjson).detail.error_type == "max_tokens_exceeded") catch false
+          end
+      end
+    ' "$out_file" >/dev/null 2>&1; then
+      fail "jev: request too large for one call (max_tokens_exceeded) -- split the questions into smaller batches"
+    fi
+    fail "jev: unexpected HTTP 400"
+    ;;
   401) fail "jev: invalid API key (HTTP 401)" ;;
   429) fail "jev: rate limited (HTTP 429)" ;;
   2??) : ;;
@@ -149,24 +203,61 @@ result_json="$(jq -c '
   (.answers // {}) as $a
   | ($a | keys_unsorted) as $ks
   | if ($a | type) != "object" or ($ks | length) == 0 then empty else
-      ( [$ks[] as $k | {
-          name: $k,
-          choice: $a[$k].choice,
-          p: ($a[$k].probabilities[$a[$k].choice] // null),
-          confidence: ($a[$k].confidence // null)
-        }] ) as $rows
-      | if ($rows | any(.choice == null or .p == null or .confidence == null)) then empty else
-          {
-            rows: $rows,
-            cost: (.usage.cost // null),
-            input_tokens: (.usage.input_tokens // null),
-            output_tokens: (.usage.output_tokens // null)
-          }
-        end
+      ( [$ks[] as $k |
+          # An answer that is not itself an object (e.g. a provider
+          # returning a bare string for one question) makes EVERY field
+          # access below -- $a[$k].choice included -- a jq RUNTIME error,
+          # not a missing-value one: indexing a string or number with a
+          # field name fails the whole expression, which failed the whole
+          # jq CALL (review round 4: one such row took down every other
+          # genuine answer along with it, silently, under set -e).
+          # Checked before any field on it is ever touched.
+          if ($a[$k] | type) != "object" then
+            { name: $k, choice: null, p: null, confidence: null, ok: false }
+          else
+            ($a[$k].choice // null) as $choice |
+            ($a[$k].confidence // null) as $conf |
+            # A missing choice (deliberately dropped by an upstream bug, or
+            # a provider quirk) makes $choice null -- indexing an object
+            # with a null key is ALSO a jq runtime error, not a
+            # missing-value one, so `// null` alone does not save it.
+            # try/catch turns that into the same null this row already
+            # renders as "malformed" from.
+            (try $a[$k].probabilities[$choice] catch null) as $p | {
+            name: $k,
+            choice: $choice,
+            p: $p,
+            confidence: $conf,
+            # Decided by TYPE, not by comparing the extracted VALUE to the
+            # text "null" downstream: a `choice` answer can legitimately BE
+            # the string "null" (a caller naming that choice in `criteria`),
+            # and `jq -r` turns both a genuine JSON null and the
+            # two-character string "null" into the identical output text --
+            # a downstream `[ "$x" = "null" ]` cannot tell them apart
+            # (review round 2). The type check runs here, on the real JSON
+            # value, before anything is ever stringified.
+            ok: (($choice | type) == "string" and ($p | type) == "number" and ($conf | type) == "number")
+          } end
+        ] ) as $rows
+      | {
+          rows: $rows,
+          cost: (.usage.cost // null),
+          input_tokens: (.usage.input_tokens // null),
+          output_tokens: (.usage.output_tokens // null)
+        }
     end
-' "$out_file" 2>/dev/null)"
+' "$out_file" 2>/dev/null)" || fail "jev: unexpected response shape"
 rm -f "$out_file"
 
+# The check above catches jq itself failing (a nonzero exit -- this
+# assignment's own exit status, per bash's ordinary $(...) semantics); this
+# one catches jq SUCCEEDING with nothing to print (an empty answers object,
+# or one with no keys at all). Both are "unexpected response shape" to the
+# caller, but only the first is reachable without this explicit `|| fail`:
+# left as a bare assignment, a failing jq inside `$(...)` would otherwise
+# just set $result_json to whatever partial/empty output it managed and let
+# `set -e` end the process right there, with no diagnostic on either stream
+# (review round 4).
 [ -n "$result_json" ] || fail "jev: unexpected response shape"
 
 row_count="$(jq -r '.rows | length' <<<"$result_json")"
@@ -178,7 +269,11 @@ out_tokens="$(jq -r '.output_tokens // empty' <<<"$result_json")"
 # term IS that term, so this is not a special case mathematically -- it is
 # spelled out anyway so "the one-question reply never changes" is
 # something this script visibly does, not an emergent property to trust).
+# A malformed sole answer still fails the whole call -- there is nothing
+# else in the reply to salvage it with, unlike the 2+ case below.
 if [ "$row_count" -eq 1 ]; then
+  ok_val="$(jq -r '.rows[0].ok' <<<"$result_json")"
+  [ "$ok_val" = "true" ] || fail "jev: unexpected response shape"
   choices="$(jq -r '.rows[0].choice' <<<"$result_json")"
   p_val="$(jq -r '.rows[0].p' <<<"$result_json")"
   c_val="$(jq -r '.rows[0].confidence' <<<"$result_json")"
@@ -191,28 +286,52 @@ if [ "$row_count" -eq 1 ]; then
     printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)' \
       "$choices" "$p_val" "$c_val" "$cost_val"
   fi
+  printf '%s\n' "$(_jev_one_line "$reply_line")"
 else
-  # Two or more: each question's own name=choice (p=.., confidence=..),
+  # Two or more: one LINE per question, `name=choice (p=.., confidence=..)`,
   # addressable by NAME (the sender's own `questions` key) rather than by
   # position -- position silently breaks the moment the endpoint (or a
-  # future request) reorders answers; a name cannot.
-  segments=()
+  # future request) reorders answers; a name cannot. Each line goes through
+  # _jev_one_line on its own, same as every other line this script ever
+  # prints, so one answer's caller-controlled choice name cannot inject a
+  # line break that reads as a further (fake) answer.
+  #
+  # A single malformed row -- missing choice, or a choice absent from its
+  # own probabilities -- no longer fails the WHOLE call: it renders as its
+  # own `name=error (malformed answer)` line, and every other question's
+  # real answer still comes back. Failing the entire batch over one bad
+  # row would throw away N-1 good answers along with it, and the caller
+  # already has to read each row's own name regardless.
+  lines=()
   while IFS= read -r row; do
     seg_name="$(jq -r '.name' <<<"$row")"
-    seg_choice="$(jq -r '.choice' <<<"$row")"
-    seg_p="$(jq -r '.p' <<<"$row")"
-    seg_c="$(jq -r '.confidence' <<<"$row")"
-    printf -v seg '%s=%s (p=%.2f, confidence=%.2f)' "$seg_name" "$seg_choice" "$seg_p" "$seg_c"
-    segments+=("$seg")
+    seg_ok="$(jq -r '.ok' <<<"$row")"
+    if [ "$seg_ok" != "true" ]; then
+      printf -v line '%s=error (malformed answer)' "$seg_name"
+    else
+      seg_choice="$(jq -r '.choice' <<<"$row")"
+      seg_p="$(jq -r '.p' <<<"$row")"
+      seg_c="$(jq -r '.confidence' <<<"$row")"
+      printf -v line '%s=%s (p=%.2f, confidence=%.2f)' "$seg_name" "$seg_choice" "$seg_p" "$seg_c"
+    fi
+    lines+=("$(_jev_one_line "$line")")
   done < <(jq -c '.rows[]' <<<"$result_json")
-  joined="$(printf '%s / ' "${segments[@]}")"
-  joined="${joined% / }"
+
+  # The call's own aggregate cost/tokens, same figure as before -- appended
+  # to the LAST line rather than repeated on every one, since it describes
+  # the whole call, not any single question.
   if [ "$provider" = "typesafe" ]; then
     [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
-    printf -v reply_line 'jev: %s (tokens %s in / %s out)' "$joined" "$in_tokens" "$out_tokens"
+    printf -v suffix ' (tokens %s in / %s out)' "$in_tokens" "$out_tokens"
   else
     [ -n "$cost_val" ] || fail "jev: unexpected response shape"
-    printf -v reply_line 'jev: %s (cost $%.6f)' "$joined" "$cost_val"
+    printf -v suffix ' (cost $%.6f)' "$cost_val"
   fi
+  last=$(( ${#lines[@]} - 1 ))
+  lines[last]="${lines[last]}$suffix"
+
+  printf 'jev: %s\n' "${lines[0]}"
+  for ((idx = 1; idx < ${#lines[@]}; idx++)); do
+    printf '%s\n' "${lines[$idx]}"
+  done
 fi
-printf '%s\n' "$(_jev_one_line "$reply_line")"
