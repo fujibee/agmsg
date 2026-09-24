@@ -34,23 +34,59 @@ setup() {
 # argv-scoped reap has nothing to match it on. Tracking the pid directly
 # closes that gap regardless of what the backgrounded command's own argv
 # does or does not contain (review finding, #1451).
+#
+# Records $BASHPID alongside <pid> -- the pid of THIS exact process, captured
+# at the moment of the call, which is unambiguously the backgrounded job's
+# real parent (a plain function call forks nothing, so _bg_track always runs
+# in the same process that just executed the `&` immediately before it).
+# teardown re-checks this recorded parent against the pid's CURRENT actual
+# parent before ever touching it (see _bg_reap_tracked) -- many tests already
+# kill+wait their own pid inside the test body before reaching teardown, and
+# once `wait` reaps a pid the OS is free to recycle that number for an
+# unrelated process, possibly another test's or a real seat's. A bare `kill`
+# cannot tell a live-but-reassigned pid from the one this test actually
+# started, so recording (and later re-verifying) the parent is what makes it
+# safe to kill by pid at all (review finding, #1451).
 _bg_track() {   # <pid>
   [ -n "${TEST_SKILL_DIR:-}" ] || return 0
-  echo "$1" >> "$TEST_SKILL_DIR/.bg-pids"
+  echo "$1 $BASHPID" >> "$TEST_SKILL_DIR/.bg-pids"
 }
 
-# Kill+wait every pid _bg_track recorded for this test. A no-op when nothing
-# was tracked, and harmless on a pid that already exited on its own (both
-# kill and wait simply fail for it -- there is nothing left to clean up).
+# Kill+wait every pid _bg_track recorded for this test that is STILL ALIVE
+# AND still parented by the exact shell that started it -- skipped entirely
+# otherwise (already dead, or its pid number now belongs to something this
+# test did not start; see _bg_track's header for why both checks are
+# required, not just "is it alive"). A no-op when nothing was tracked.
 _bg_reap_tracked() {
   [ -n "${TEST_SKILL_DIR:-}" ] || return 0
-  local f="$TEST_SKILL_DIR/.bg-pids" p
+  local f="$TEST_SKILL_DIR/.bg-pids"
   [ -f "$f" ] || return 0
-  while IFS= read -r p; do
+  local p parent live_ppid
+  while IFS=' ' read -r p parent; do
     [ -n "$p" ] || continue
-    kill "$p" 2>/dev/null || true
-    wait "$p" 2>/dev/null || true
+    live_ppid="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    [ -n "$live_ppid" ] || continue           # not alive -- nothing to do
+    [ "$live_ppid" = "$parent" ] || continue  # alive, but not this test's
+    _bg_kill_bounded "$p"
   done < "$f"
+}
+
+# TERM <pid>, poll for exit up to ~3s, escalate to KILL if it is still alive,
+# then wait (harmless no-op if <pid> is not this shell's own child -- reap
+# can run in a different bats phase than the spawn). Bounded so a watcher
+# that never responds to TERM cannot stall teardown indefinitely: a hang
+# HERE would stop the following _reap_test_skill_dir_procs from ever running
+# too, recreating the exact #1262 shape one layer up (review finding, #1451).
+_bg_kill_bounded() {   # <pid>
+  local p="$1" tries=0
+  kill "$p" 2>/dev/null || return 0
+  while kill -0 "$p" 2>/dev/null; do
+    tries=$((tries + 1))
+    [ "$tries" -ge 30 ] && break   # ~3s at 0.1s per try
+    sleep 0.1 2>/dev/null || true
+  done
+  kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
+  wait "$p" 2>/dev/null || true
 }
 
 teardown() {
