@@ -231,7 +231,8 @@ _fake_herdr_list_scalar_session() {
 #            not a string — review (#1439): json_type=array on the outer
 #            value does not prove every ELEMENT is a line of text.
 _install_fake_orca() {
-  local mode="${1:-present}" show_json show_rc=0 read_json read_rc=0
+  local mode="${1:-present}" show_json show_rc=0 read_json read_rc=0 \
+    list_json='{"ok":true,"result":{"terminals":[]}}' list_rc=0
   case "$mode" in
     present)
       show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
@@ -280,6 +281,24 @@ _install_fake_orca() {
       show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
       read_json='{"ok":true,"result":{"terminal":{"tail":["a real line",{"x":1}]}}}'
       ;;
+    list_two)
+      list_json='{"ok":true,"result":{"terminals":[{"handle":"term_11111111-1111-1111-1111-111111111111","executionHostId":"local"},{"handle":"term_22222222-2222-2222-2222-222222222222","executionHostId":"local"}]}}'
+      ;;
+    list_bad_element)
+      list_json='{"ok":true,"result":{"terminals":[{"handle":"term_11111111-1111-1111-1111-111111111111"},{"nope":true}]}}'
+      ;;
+    list_malformed_handle)
+      list_json='{"ok":true,"result":{"terminals":[{"handle":"term_11111111-1111-1111-1111-111111111111"},{"handle":"not-a-uuid"}]}}'
+      ;;
+    list_empty_handle)
+      list_json='{"ok":true,"result":{"terminals":[{"handle":"term_11111111-1111-1111-1111-111111111111"},{"handle":""}]}}'
+      ;;
+    list_dup_handle)
+      list_json='{"ok":true,"result":{"terminals":[{"handle":"term_11111111-1111-1111-1111-111111111111"},{"handle":"term_11111111-1111-1111-1111-111111111111"}]}}'
+      ;;
+    list_unreachable)
+      list_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
+      ;;
   esac
   cat > "$FAKEBIN/orca" <<EOF
 #!/usr/bin/env bash
@@ -290,6 +309,9 @@ if [ "\$1" = terminal ] && [ "\$2" = show ]; then
 elif [ "\$1" = terminal ] && [ "\$2" = read ]; then
   echo '$read_json'
   exit $read_rc
+elif [ "\$1" = terminal ] && [ "\$2" = list ]; then
+  echo '$list_json'
+  exit $list_rc
 fi
 exit 0
 EOF
@@ -1435,6 +1457,83 @@ _last_agent_rename_key() {
   refute grep -q '\[close\]' "$ARGV_LOG"
   refute grep -q '\[send\]' "$ARGV_LOG"
   refute grep -q '\[rename\]' "$ARGV_LOG"
+}
+
+@test "orca: enumerate_panes lists every live handle under the one measured instance, and a payload it cannot parse is a named hole" {
+  _install_fake_orca list_two
+  agmsg_terminal_load orca
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'local\tterm_11111111-1111-1111-1111-111111111111\nlocal\tterm_22222222-2222-2222-2222-222222222222')" ]
+
+  # An entry missing its handle field fails the WHOLE enumeration, same
+  # discipline as terminal_peek's own tail-array validation: a driver that
+  # does not fully understand the payload must not silently report fewer
+  # panes than are really there.
+  _install_fake_orca list_bad_element
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '!\tlocal')" ]
+
+  # The runtime itself unreachable is the same named hole, not a crash.
+  _install_fake_orca list_unreachable
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '!\tlocal')" ]
+
+  # JSON TEXT IS NOT ENOUGH (#1441 review): a handle that is a text value but
+  # not this driver's own term_<uuid> grammar must fail the whole
+  # enumeration, not be printed through as a pane id or silently dropped
+  # while the other, real handle is reported as if the list were complete.
+  _install_fake_orca list_malformed_handle
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '!\tlocal')" ]
+
+  # An empty-string handle is JSON text too, and must fail the same way —
+  # not be silently skipped while the real handle beside it is reported.
+  _install_fake_orca list_empty_handle
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '!\tlocal')" ]
+
+  # The same handle listed twice is not a set of distinct live panes; this
+  # op must not report one pane as reachable through two different rows.
+  _install_fake_orca list_dup_handle
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '!\tlocal')" ]
+
+  # A genuinely empty terminal list is a real, valid answer -- empty stdout,
+  # rc 0 -- not the same as the named `!` hole an unreadable runtime gets
+  # (review: the validation loop's own heredoc supplies one empty line even
+  # when there is nothing to validate, and reading that as one malformed
+  # candidate wrongly turned a fine empty list into a false hole).
+  # `present`'s own default list_json is already `{"terminals":[]}`.
+  _install_fake_orca present
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "orca: pane_process_observe is not defined, and self-proof reports unsupported/driver_no_process_binding — never undetermined/pane_process_unreadable (#1441 review)" {
+  # orca's real show output never carries a pid field (measured live, the
+  # comment where this op would otherwise live) -- so defining it and always
+  # answering 12 would tell self-proof.sh the wrong kind of "no": 12 reads as
+  # undetermined/pane_process_unreadable, a TEMPORARY failure the caller
+  # keeps retrying. Leaving the op undefined instead reads as unsupported/
+  # driver_no_process_binding (rc 3), which self-proof.sh's own contract
+  # says stops the caller asking again -- the correct answer for a gap that
+  # is permanent, not transient.
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  refute declare -F terminal_pane_process_observe
+
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/lib/self-proof.sh"
+  run agmsg_self_proof testteam alice term_11111111-1111-1111-1111-111111111111
+  [ "$status" -eq 3 ]
+  [ "$output" = "$(printf 'unsupported\tdriver_no_process_binding')" ]
 }
 
 # --- ABI completeness + structural clobber-proofing (#1014 review) -------
