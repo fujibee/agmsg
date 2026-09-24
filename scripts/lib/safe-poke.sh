@@ -193,6 +193,58 @@ _agmsg_safe_poke_retype_if_empty() {
   return 0
 }
 
+# The existing two-snapshot screen check (styled real-draft classification,
+# or a plain unstyled change comparison), factored out of agmsg_safe_poke
+# unchanged in substance (#1443 continuation) so the SAME code path serves
+# both its original caller (no terminal_input_draft at all) and the new
+# terminal_input_draft fallback below when that hook itself answers
+# "cannot tell" -- one function, not two copies that could drift apart.
+# Sets the caller's own _AGMSG_SAFE_POKE_IB_RC / _AGMSG_SAFE_POKE_IB_REGION,
+# exactly as _agmsg_safe_poke_read_box already documents.
+_agmsg_safe_poke_screen_check() {
+  local id="$1" marker="$2" boxed="$3" styled="$4" settle_seconds="$5"
+  local ib_rc=0
+  _AGMSG_SAFE_POKE_IB_RC=0 _AGMSG_SAFE_POKE_IB_SNAPSHOT="" _AGMSG_SAFE_POKE_IB_REGION=""
+  _agmsg_safe_poke_read_box "$id" "$marker" "$boxed" "$styled"
+  ib_rc="$_AGMSG_SAFE_POKE_IB_RC"
+  [ "$ib_rc" -eq 0 ] || return 0
+  local snap1="$_AGMSG_SAFE_POKE_IB_SNAPSHOT" region1="$_AGMSG_SAFE_POKE_IB_REGION"
+  sleep "$settle_seconds"
+  _AGMSG_SAFE_POKE_IB_RC=0 _AGMSG_SAFE_POKE_IB_SNAPSHOT="" _AGMSG_SAFE_POKE_IB_REGION=""
+  _agmsg_safe_poke_read_box "$id" "$marker" "$boxed" "$styled"
+  ib_rc="$_AGMSG_SAFE_POKE_IB_RC"
+  if [ "$ib_rc" -ne 0 ]; then
+    return 0
+  fi
+  if [ "$snap1" != "$_AGMSG_SAFE_POKE_IB_SNAPSHOT" ]; then
+    _AGMSG_SAFE_POKE_IB_RC=14
+    _AGMSG_SAFE_POKE_IB_REGION="$region1"
+  fi
+}
+
+# Reads <id>'s draft via the driver's OWN terminal_input_draft (priority 1
+# over the screen -- #1443 continuation): base64-decoded, ONE call, no
+# region/styling concept at all. Sets the caller's own
+# _AGMSG_SAFE_POKE_DRAFT_RC:
+#   0   this read saw nothing typed
+#   14  this read saw real content -- whatever it is; the two calls in
+#       agmsg_safe_poke below never compare content across reads, because
+#       ANY content at EITHER read is already enough to refuse
+#   10  the driver could not tell for this pane (no agent identity
+#       recognized, or unreachable) -- the caller falls back to the
+#       existing screen-based check entirely, never reads this as "empty"
+#       (#1443's own contract)
+#   other  a genuine driver-level failure (e.g. identity confirmed but the
+#          read itself failed), propagated as this poke attempt's own rc
+_agmsg_safe_poke_draft_read() {
+  local id="$1" b64="" rc=0
+  b64="$(terminal_input_draft "$id" 2>/dev/null)" || rc=$?
+  _AGMSG_SAFE_POKE_DRAFT_RC="$rc"
+  if [ "$rc" -eq 0 ] && [ -n "$b64" ]; then
+    _AGMSG_SAFE_POKE_DRAFT_RC=14
+  fi
+}
+
 _agmsg_safe_poke_recover() {
   local id="$1" text="$2" team="$3" name="$4" marker="$5" boxed="$6" styled="$7" region="$8"
   local draft
@@ -324,8 +376,17 @@ agmsg_safe_poke() {
     esac
   done
 
-  local styled=0
-  declare -F terminal_peek_styled >/dev/null 2>&1 && styled=1
+  # The verb decides the method, never the terminal's name (#1443
+  # continuation): a driver offering terminal_input_draft
+  # reads the composer directly and never touches the screen at all -- the
+  # most accurate method, checked FIRST. Only when that hook is absent does
+  # this fall back to today's screen-based choice between styled (herdr/
+  # tmux) and the narrower plain two-read comparison.
+  local draft_capable=0 styled=0
+  declare -F terminal_input_draft >/dev/null 2>&1 && draft_capable=1
+  if [ "$draft_capable" -eq 0 ]; then
+    declare -F terminal_peek_styled >/dev/null 2>&1 && styled=1
+  fi
 
   # The interval is fixed, not a flag: making it configurable would leave
   # "how long is long enough" an open question nobody has actually
@@ -341,25 +402,52 @@ agmsg_safe_poke() {
   while :; do
     rc=0
     if [ -n "$marker" ]; then
-      local ib_rc=0 ib_region=""
-      _AGMSG_SAFE_POKE_IB_RC=0 _AGMSG_SAFE_POKE_IB_SNAPSHOT="" _AGMSG_SAFE_POKE_IB_REGION=""
-      _agmsg_safe_poke_read_box "$id" "$marker" "$boxed" "$styled"
-      ib_rc="$_AGMSG_SAFE_POKE_IB_RC"
-      if [ "$ib_rc" -ne 0 ]; then
-        rc="$ib_rc"
-      else
-        local snap1="$_AGMSG_SAFE_POKE_IB_SNAPSHOT"
-        sleep "$settle_seconds"
-        _AGMSG_SAFE_POKE_IB_RC=0 _AGMSG_SAFE_POKE_IB_SNAPSHOT="" _AGMSG_SAFE_POKE_IB_REGION=""
-        _agmsg_safe_poke_read_box "$id" "$marker" "$boxed" "$styled"
-        ib_rc="$_AGMSG_SAFE_POKE_IB_RC"
-        if [ "$ib_rc" -ne 0 ]; then
-          rc="$ib_rc"
+      local ib_region=""
+      if [ "$draft_capable" -eq 1 ]; then
+        # Two reads, 1s apart, same as the screen-based method -- NOT
+        # because the hook itself is imprecise (a single call is already
+        # authoritative for that instant), but because a single check still
+        # misses someone who starts typing in the instant right after it
+        # (review): read1 empty does not mean the box STAYS empty long
+        # enough to poke safely over. The two reads' CONTENT is never
+        # compared against each other -- content at either one is already
+        # enough to refuse, so there is nothing to compare.
+        _agmsg_safe_poke_draft_read "$id"
+        local d_rc="$_AGMSG_SAFE_POKE_DRAFT_RC"
+        if [ "$d_rc" -eq 10 ]; then
+          # Cannot tell via the hook for this pane -- fall back to the
+          # screen entirely, unstyled (a draft-capable driver needed this
+          # hook precisely because it has no styled read to fall back on;
+          # see the file/driver README for what this fallback can and
+          # cannot actually protect).
+          _agmsg_safe_poke_screen_check "$id" "$marker" "$boxed" 0 "$settle_seconds"
+          rc="$_AGMSG_SAFE_POKE_IB_RC"
+          ib_region="$_AGMSG_SAFE_POKE_IB_REGION"
+        elif [ "$d_rc" -ne 0 ]; then
+          rc="$d_rc"
         else
-          [ "$snap1" = "$_AGMSG_SAFE_POKE_IB_SNAPSHOT" ] || rc=14
+          sleep "$settle_seconds"
+          _agmsg_safe_poke_draft_read "$id"
+          d_rc="$_AGMSG_SAFE_POKE_DRAFT_RC"
+          case "$d_rc" in
+            0) rc=0 ;;
+            # A second read landing on "unknown" (identity lost mid-check)
+            # is treated the same as content, not folded into a fresh
+            # fallback attempt mid-poke: never read "cannot tell" as safe.
+            10) rc=14 ;;
+            *) rc="$d_rc" ;;
+          esac
         fi
+        # No #1384/#1395 recovery for a draft-capable-only driver (#1443
+        # continuation): that recovery needs terminal_peek_styled, a located
+        # styled region, terminal_input_clear, and terminal_input_type --
+        # orca has none of them today. rc=14 here just refuses, same as any
+        # other driver with no focus signal at all.
+      else
+        _agmsg_safe_poke_screen_check "$id" "$marker" "$boxed" "$styled" "$settle_seconds"
+        rc="$_AGMSG_SAFE_POKE_IB_RC"
+        ib_region="$_AGMSG_SAFE_POKE_IB_REGION"
       fi
-      ib_region="$_AGMSG_SAFE_POKE_IB_REGION"
 
       # #1384: a real-draft refusal with a located region to preserve, on a
       # driver that offers focus (herdr), with that pane confirmed NOT
