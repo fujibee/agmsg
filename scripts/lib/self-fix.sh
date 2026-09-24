@@ -51,20 +51,107 @@
 # shellcheck disable=SC1091
 . "${SKILL_DIR:?}/scripts/lib/token-locate.sh"
 
-# The seats whose actas lock this session OWNS: "<team>\t<agent>\t<owner>" per line.
-# <bare-sid> is the caller's session id; a lock is ours when its owner's bare sid
-# equals it. Unreadable locks are skipped, not guessed.
+# The seats whose actas lock this session OWNS, one line per seat:
+#   ok\t<team>\t<agent>\t<owner>            resolved -- safe to use
+#   unresolved\t<owner>\t<raw-name>          could not be resolved by name
+# The leading word is its own field, never a stand-in written into team or
+# agent: `?` is a NAME `agmsg_validate_team_name`/`agmsg_validate_agent_name`
+# both allow, so a sentinel written into either of those fields cannot be
+# told apart from a genuinely `?`-named seat's own real name -- a mistake
+# review caught once already (#1457 round 3).
+#
+# THE DIRECTION IS INVERTED (#1457 review round 4). Three rounds running,
+# guessing "is this lock's FILENAME an id or a name" from the filename
+# alone kept finding one more edge case to close -- a legacy name shaped
+# like two UUIDv7s, a round trip that also happens to match a real,
+# separately registered legacy pair, and so on. Walking every REGISTERED
+# seat instead and asking where ITS OWN lock would be makes the question
+# moot: actas_lock_path already knows, for a given (team, agent) NAME
+# pair, whether that seat's lock is id-keyed or legacy -- the same
+# id-or-legacy resolution every other reader of a role already uses, not
+# a guess made from a filename. Nothing here ever parses a filename back
+# into a name; the names are already in hand from config.json, and the
+# path built from them is what gets checked against disk. A team's seat
+# count is small (tens at most), so walking every one costs nothing
+# worth avoiding.
 _fix_seats_of() {   # <bare-sid>
-  local sid="$1" f name team agent rd kind owner
+  local sid="$1" team_dir cfg team agent agents p rd kind owner
+  local matched=() cand_path=() cand_team=() cand_agent=() cand_owner=()
+  if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "$SKILL_DIR/scripts/lib/sqlpath.sh"
+  fi
+  for team_dir in "$SKILL_DIR"/teams/*/; do
+    [ -d "$team_dir" ] || continue
+    cfg="${team_dir}config.json"
+    [ -f "$cfg" ] || continue
+    team="${team_dir%/}"; team="${team##*/}"
+    # .agents is a JSON OBJECT keyed by agent name in every team format
+    # this codebase carries (confirmed against resolve-project.sh's own
+    # two-shape handling of what each agent's VALUE looks like -- only
+    # the value's inner shape varies by vintage, never the outer keying).
+    agents="$(sqlite3 :memory: "
+      SELECT key FROM json_each(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$cfg")') AS TEXT), '\$.agents'));
+    " 2>/dev/null | tr -d '\r')"
+    [ -n "$agents" ] || continue
+    while IFS= read -r agent; do
+      [ -n "$agent" ] || continue
+      p="$(actas_lock_path "$team" "$agent" 2>/dev/null)" || continue
+      [ -e "$p" ] || continue
+      matched+=("$p")
+      rd="$(_actas_lock_read_path "$p")"; kind="${rd%%$'\t'*}"; owner="${rd#*$'\t'}"
+      [ "$kind" = ok ] && [ -n "$owner" ] || continue
+      [ "$(agmsg_instance_bare_sid "$owner")" = "$sid" ] || continue
+      # Not printed yet -- collected, so a path that ANOTHER registered
+      # seat also computes to (below) can still downgrade this one.
+      cand_path+=("$p"); cand_team+=("$team"); cand_agent+=("$agent"); cand_owner+=("$owner")
+    done <<< "$agents"
+  done
+
+  # Two or more registered seats computing to the SAME lock path is a
+  # genuine ambiguity (#1457 review round 4): a legacy team/seat pair's
+  # own literal name can coincide with another team's real ids (or vice
+  # versa) -- not a parsing mistake to fix, since nothing here ever reads
+  # the path back into a name, but a fact about the two REGISTRATIONS
+  # this owner cannot be split between. Counted on the candidates already
+  # gathered above; reported unresolved on every one that shares a path,
+  # the same safe default as any other lock nothing here could name.
+  local i j count n="${#cand_path[@]}" rawname
+  for ((i = 0; i < n; i++)); do
+    count=0
+    for ((j = 0; j < n; j++)); do
+      [ "${cand_path[j]}" = "${cand_path[i]}" ] && count=$((count + 1))
+    done
+    if [ "$count" -gt 1 ]; then
+      rawname="${cand_path[i]##*/actas.}"; rawname="${rawname%.session}"
+      printf 'unresolved\t%s\t%s\n' "${cand_owner[i]}" "$rawname"
+    else
+      printf 'ok\t%s\t%s\t%s\n' "${cand_team[i]}" "${cand_agent[i]}" "${cand_owner[i]}"
+    fi
+  done
+
+  # Any lock this session owns that did not match any registered seat's
+  # own computed path above -- reported unresolved, not silently dropped,
+  # so the caller still learns something is stuck rather than seeing
+  # nothing at all (the missing_fields shape #1457 measured started
+  # exactly this way: a real lock, owned by this session, that nothing
+  # could name).
+  local f name t2 already m
   for f in "$(_actas_lock_dir)"/actas.*.session; do
     [ -e "$f" ] || continue
+    already=0
+    for m in ${matched[@]+"${matched[@]}"}; do
+      [ "$m" = "$f" ] || continue
+      already=1; break
+    done
+    [ "$already" -eq 0 ] || continue
     name="${f##*/actas.}"; name="${name%.session}"
-    team="${name%%__*}"; agent="${name#*__}"
-    [ "$team" != "$name" ] || continue
+    t2="${name%%__*}"
+    [ "$t2" != "$name" ] || continue
     rd="$(_actas_lock_read_path "$f")"; kind="${rd%%$'\t'*}"; owner="${rd#*$'\t'}"
     [ "$kind" = ok ] && [ -n "$owner" ] || continue
     [ "$(agmsg_instance_bare_sid "$owner")" = "$sid" ] || continue
-    printf '%s\t%s\t%s\n' "$team" "$agent" "$owner"
+    printf 'unresolved\t%s\t%s\n' "$owner" "$name"
   done
 }
 
@@ -150,14 +237,25 @@ agmsg_fix_run() {
     echo "fix none:arguments_refused (fix takes no arguments: a location handed from outside is the accident this exists to remove)" >&2
     return 1
   fi
-  local sid seats line team agent owner loc st payload via rc=0 any=0 failed=0
+  local sid seats line status a b c team agent owner loc st payload via rc=0 any=0 failed=0
   sid="$(agmsg_instance_bare_sid "${AGMSG_SESSION_ID:-}" 2>/dev/null)"
   [ -n "$sid" ] || { echo "fix none:no_session_id" >&2; return 1; }
   seats="$(_fix_seats_of "$sid")"
   [ -n "$seats" ] || { echo "fix none:no_seat_for_this_session" >&2; return 1; }
-  while IFS=$'\t' read -r team agent owner; do
-    [ -n "$team" ] || continue
+  while IFS=$'\t' read -r status a b c; do
+    [ -n "$status" ] || continue
     any=1
+    if [ "$status" = unresolved ]; then
+      # a=owner, b=raw lock name -- see _fix_seats_of's own header for why
+      # the state lives in its own leading field rather than a sentinel
+      # written into team/agent (#1457 round 3: `?` is a NAME the roster
+      # allows, so a `?`-named seat's own real name could not have been
+      # told apart from that sentinel).
+      printf 'fix seat=<%s> state=unresolved reason=could_not_resolve_by_name via=n/a (written nothing)\n' "$b"
+      failed=1
+      continue
+    fi
+    team="$a"; agent="$b"; owner="$c"
     loc="$(_fix_locate "$team" "$agent" "$owner")" || true
     st="${loc%%$'\t'*}"; payload="${loc#*$'\t'}"; via="${payload##*$'\t'}"; payload="${payload%$'\t'*}"
     if [ "$st" = proved ]; then

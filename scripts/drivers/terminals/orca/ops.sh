@@ -884,3 +884,70 @@ terminal_name() {
 terminal_expected_label() {   # <team> <agent>
   printf '%s:%s\n' "$1" "$2"
 }
+
+# Optional team.sh observation extension (#1082's four-field contract:
+# activity, pane label, terminal agent key, CLI terminal title — see herdr's
+# and tmux's own copies of this function). Orca has exactly one readable
+# name, the tab title `terminal_name` writes (see `terminal_expected_label`
+# above) — reported here as pane_label, per team.sh's own reporting contract.
+# Every other field is a concept orca has no independent value for, so each
+# reports `n/a`, the same way tmux's pane_label does for the field IT lacks:
+# an unavailable concept, not a failed read.
+#
+# MEASURED, and the reason this isn't just `_orca_show_json`'s own
+# `$.result.terminal.title`: that per-pane field looks like the obvious
+# target but is NOT what `terminal_name`'s rename actually controls — it
+# auto-reverts to Orca's own generated value (derived from cwd) near-
+# instantly, same finding as `terminal_name`'s own comment above. The durable
+# value lives one level up: `orca terminal list --include-visual-layouts`'s
+# `$.result.visualLayouts[].root.tabs[].title`, keyed by `tabId` (a tab may
+# hold more than one pane; every pane in it shares one tab-level title).
+# Confirmed live: renaming a throwaway pane's tab and re-reading this field
+# round-tripped the exact string, while that same pane's `show`/`list`
+# per-pane `.title` stayed at its auto-generated value throughout.
+terminal_team_observe() {
+  local id="$1" bare json ok esc tabid wtid wesc lidx tabtype tesc tidx titlepath hascontrol title
+  command -v orca >/dev/null 2>&1 || return 10
+  command -v sqlite3 >/dev/null 2>&1 || return 10
+  bare="$(_orca_bare_of "$id")" || return 13
+  _orca_handle_ok "$bare" || return 13
+  json="$(orca terminal list --include-visual-layouts --json 2>/dev/null)"
+  [ -n "$json" ] || return 10
+  _orca_json_valid "$json" || return 10
+  ok="$(_orca_json_bool "$json" '$.ok')"
+  [ "$ok" = 1 ] || return 10
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  # tabid/wtid are opaque, orca-generated UUIDs (never typed text a rename
+  # can put a control character into), used here only as WHERE-clause join
+  # keys -- unlike title below, there is no untrusted-content path into them,
+  # so the same trailing-newline hazard does not apply.
+  tabid="$(sqlite3 :memory: "SELECT json_extract(value,'\$.tabId') FROM json_each('$esc','\$.result.terminals') WHERE json_extract(value,'\$.handle')='$bare' LIMIT 1" 2>/dev/null)"
+  wtid="$(sqlite3 :memory: "SELECT json_extract(value,'\$.worktreeId') FROM json_each('$esc','\$.result.terminals') WHERE json_extract(value,'\$.handle')='$bare' LIMIT 1" 2>/dev/null)"
+  [ -n "$tabid" ] && [ -n "$wtid" ] || return 10
+  wesc="$(printf '%s' "$wtid" | sed "s/'/''/g")"
+  lidx="$(sqlite3 :memory: "SELECT key FROM json_each('$esc','\$.result.visualLayouts') WHERE json_extract(value,'\$.worktreeId')='$wesc' LIMIT 1" 2>/dev/null)"
+  [ -n "$lidx" ] || return 10
+  case "$lidx" in *[!0-9]*) return 10 ;; esac
+  tabtype="$(sqlite3 :memory: "SELECT json_type('$esc','\$.result.visualLayouts[$lidx].root.tabs')" 2>/dev/null)"
+  [ "$tabtype" = array ] || return 10
+  tesc="$(printf '%s' "$tabid" | sed "s/'/''/g")"
+  tidx="$(sqlite3 :memory: "SELECT key FROM json_each('$esc','\$.result.visualLayouts[$lidx].root.tabs') WHERE json_extract(value,'\$.tabId')='$tesc' LIMIT 1" 2>/dev/null)"
+  [ -n "$tidx" ] || return 10
+  case "$tidx" in *[!0-9]*) return 10 ;; esac
+  # title IS untrusted, agmsg-written free text (whatever terminal_name's
+  # rename set) that gets compared against an EXPECTED identity string
+  # upstream -- a false match here is a false positive on identity, not just
+  # a cosmetic wrong label. Command substitution unconditionally strips every
+  # trailing newline, so checking the ALREADY-EXTRACTED bash variable for a
+  # tab/newline/CR (as this driver's other observe-style reads do) would miss
+  # a title whose JSON value legitimately ends in one or more \n — it would
+  # come back looking identical to the same title without them, a silent
+  # false match review (#1467) actually caught. So the check runs on the JSON
+  # value itself, via sqlite, BEFORE any command substitution touches it.
+  titlepath="\$.result.visualLayouts[$lidx].root.tabs[$tidx].title"
+  hascontrol="$(sqlite3 :memory: "SELECT CASE WHEN instr(json_extract('$esc','$titlepath'),char(9))>0 OR instr(json_extract('$esc','$titlepath'),char(10))>0 OR instr(json_extract('$esc','$titlepath'),char(13))>0 THEN 1 ELSE 0 END" 2>/dev/null)"
+  [ "$hascontrol" = 0 ] || return 10
+  title="$(_orca_json_field "$json" "$titlepath" text)"
+  [ -n "$title" ] || title="unknown:title_missing"
+  printf 'n/a:no_activity_concept\t%s\tn/a:no_independent_key\tn/a:no_independent_title\n' "$title"
+}
