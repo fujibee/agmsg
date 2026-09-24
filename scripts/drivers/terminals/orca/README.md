@@ -114,19 +114,18 @@ since content at either one is already reason enough to refuse.
 
 **When `terminal_input_draft` answers rc 10 ("cannot tell" — no
 `agentIdentity` recognized for this pane, or orca unreachable), safe-poke
-falls back to the ordinary screen-based two-read comparison, unstyled — and
-for orca specifically, this fallback cannot actually protect a real draft.**
-`terminal_peek`'s own screen never shows the input box's typed content at all
-(measured: the rendered `tail` always shows the prompt marker alone, empty,
-regardless of whether a real draft, a candidate suggestion, or nothing at all
-is in the box — see the terminal-driver feasibility notes this hook's own PR
-was measured against). So the unstyled two-read comparison in this fallback
-case is comparing two screens that already look identical to whatever is
-really being typed; it functions only as today's narrow, pre-existing
-"nothing detectably changed" check, not real draft protection. This is a real
-gap in the rc-10 case, not a bug introduced here — it is the SAME gap this
-whole hook exists to close for the ordinary (identity-recognized) case, left
-open specifically where the hook itself cannot answer.
+stops without writing at all** — it never falls back to a screen-based check
+for this driver. `terminal_peek`'s own screen never shows the input box's
+typed content at all (measured: the rendered `tail` always shows the prompt
+marker alone, empty, regardless of whether a real draft, a candidate
+suggestion, or nothing at all is in the box — see the terminal-driver
+feasibility notes this hook's own PR was measured against), so "the screen
+looks unchanged" would not be evidence of anything here — it would fold a
+genuine unknown into a poke with nothing actually having been checked.
+Documenting that gap does not close it, so the rc-10 case is simply
+propagated as this poke attempt's own failure (or a second-read rc 10 is
+treated as a safe refusal, same as real content) rather than risking a write
+on it.
 
 No #1384-style stash/clear/retype recovery is attempted for a pane reached
 only through `terminal_input_draft`: that recovery needs

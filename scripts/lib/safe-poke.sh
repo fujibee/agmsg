@@ -208,7 +208,7 @@ _agmsg_safe_poke_screen_check() {
   _agmsg_safe_poke_read_box "$id" "$marker" "$boxed" "$styled"
   ib_rc="$_AGMSG_SAFE_POKE_IB_RC"
   [ "$ib_rc" -eq 0 ] || return 0
-  local snap1="$_AGMSG_SAFE_POKE_IB_SNAPSHOT" region1="$_AGMSG_SAFE_POKE_IB_REGION"
+  local snap1="$_AGMSG_SAFE_POKE_IB_SNAPSHOT"
   sleep "$settle_seconds"
   _AGMSG_SAFE_POKE_IB_RC=0 _AGMSG_SAFE_POKE_IB_SNAPSHOT="" _AGMSG_SAFE_POKE_IB_REGION=""
   _agmsg_safe_poke_read_box "$id" "$marker" "$boxed" "$styled"
@@ -216,10 +216,15 @@ _agmsg_safe_poke_screen_check() {
   if [ "$ib_rc" -ne 0 ]; then
     return 0
   fi
-  if [ "$snap1" != "$_AGMSG_SAFE_POKE_IB_SNAPSHOT" ]; then
-    _AGMSG_SAFE_POKE_IB_RC=14
-    _AGMSG_SAFE_POKE_IB_REGION="$region1"
-  fi
+  # _AGMSG_SAFE_POKE_IB_REGION already holds the SECOND read's region from
+  # the call just above -- left as-is, never reset to the first read's
+  # (review, #1446: an earlier draft of this extraction explicitly
+  # reassigned it back to the first read's region here, which is exactly
+  # the one case a changed box matters most: the recovery path below saves
+  # and restores whatever region this function hands it, and restoring
+  # STALE content instead of what is actually in the box now would be the
+  # regression #1384 exists to prevent, reintroduced by this refactor).
+  [ "$snap1" != "$_AGMSG_SAFE_POKE_IB_SNAPSHOT" ] && _AGMSG_SAFE_POKE_IB_RC=14
 }
 
 # Reads <id>'s draft via the driver's OWN terminal_input_draft (priority 1
@@ -414,16 +419,19 @@ agmsg_safe_poke() {
         # enough to refuse, so there is nothing to compare.
         _agmsg_safe_poke_draft_read "$id"
         local d_rc="$_AGMSG_SAFE_POKE_DRAFT_RC"
-        if [ "$d_rc" -eq 10 ]; then
-          # Cannot tell via the hook for this pane -- fall back to the
-          # screen entirely, unstyled (a draft-capable driver needed this
-          # hook precisely because it has no styled read to fall back on;
-          # see the file/driver README for what this fallback can and
-          # cannot actually protect).
-          _agmsg_safe_poke_screen_check "$id" "$marker" "$boxed" 0 "$settle_seconds"
-          rc="$_AGMSG_SAFE_POKE_IB_RC"
-          ib_region="$_AGMSG_SAFE_POKE_IB_REGION"
-        elif [ "$d_rc" -ne 0 ]; then
+        if [ "$d_rc" -ne 0 ]; then
+          # Includes rc 10 ("cannot tell" -- no recognized agent identity,
+          # or unreachable): propagated as-is, NEVER a fall-through to the
+          # screen (review, #1446: an earlier version of this fell back to
+          # the ordinary unstyled two-read screen comparison here, and for
+          # a driver whose screen never shows the box's content at all --
+          # orca's own -- "the screen looks unchanged" is not evidence of
+          # anything; it would have folded a genuine unknown into a
+          # confirmed-safe write with nothing actually having been checked.
+          # Documenting that gap in the README does not close it -- only
+          # refusing to write on it does). A caller sees this exactly like
+          # any other driver-level failure: not retried (only 14/15 are),
+          # reported as-is.
           rc="$d_rc"
         else
           sleep "$settle_seconds"

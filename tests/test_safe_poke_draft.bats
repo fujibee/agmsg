@@ -35,19 +35,64 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 0 ]
   [ "$(cat "$POKE_LOG")" = "pane-1 text" ]
 
-  # (c) The hook cannot tell (rc 10) -> falls back to the screen entirely,
-  # unstyled (this driver has no terminal_peek_styled in this scenario
-  # either -- matching orca, which needed the hook precisely because it has
-  # no styled read to fall back on). The fake screen is a genuine flat-style
-  # box (marker line, a blank line, a footer with a middle dot --
-  # agmsg_input_box_locate's own required shape) and identical on both
-  # reads -> unchanged -> safe: the fallback's own unstyled two-read
-  # comparison, not the draft hook, decided this.
+  # (c) The hook cannot tell (rc 10, no agentIdentity) -> stops without
+  # writing at all, even if the screen looks completely unchanged across
+  # both reads. A driver whose screen never shows real draft content would
+  # make "unchanged" meaningless as safety evidence, so this must never be
+  # folded into a poke -- rc 10 propagates as the poke's own failure,
+  # terminal_poke is never called.
   : > "$POKE_LOG"
   terminal_input_draft() { return 10; }
   terminal_peek() { printf '> \n\ngpt-5 \xc2\xb7 idle\n'; }
   unset -f terminal_peek_styled
   run agmsg_safe_poke pane-1 "text" '>' no testteam alice
-  [ "$status" -eq 0 ]
-  [ "$(cat "$POKE_LOG")" = "pane-1 text" ]
+  [ "$status" -eq 10 ]
+  [ ! -s "$POKE_LOG" ]
+
+  # (d) A SECOND read landing on "unknown" (identity lost mid-check) is
+  # treated as a safe refusal (14), same as real content -- never a fresh
+  # fallback attempt mid-poke. terminal_input_draft is invoked via command
+  # substitution (a subshell), so a plain variable it sets would never be
+  # seen by the next call -- a file-backed counter survives across calls.
+  : > "$POKE_LOG"
+  local cnt_file="$TEST_SKILL_DIR/draft-call-count"
+  : > "$cnt_file"
+  terminal_input_draft() {
+    local c
+    c="$(cat "$cnt_file")"; c=$((c + 1)); printf '%s' "$c" > "$cnt_file"
+    [ "$c" -eq 1 ] && { printf '\n'; return 0; }
+    return 10
+  }
+  run agmsg_safe_poke pane-1 "text" '>' no testteam alice
+  [ "$status" -eq 14 ]
+  [ ! -s "$POKE_LOG" ]
+}
+
+@test "safe-poke: the screen-check helper's located region is the SECOND read's, not the first, when the two differ (#1446 review)" {
+  # Direct unit test of _agmsg_safe_poke_screen_check itself (unstyled path,
+  # real agmsg_input_box_locate -- no fabricated region format): the two
+  # terminal_peek reads return flat, structurally-valid boxes whose marker
+  # line differs, so the change-detection branch fires (rc 14) and the
+  # question is which read's region survives into
+  # _AGMSG_SAFE_POKE_IB_REGION. The earlier version of this refactor
+  # reassigned it back to the FIRST read's region right here; fixed to leave
+  # the second read's value (already set by the second
+  # _agmsg_safe_poke_read_box call) untouched. terminal_peek is invoked via
+  # command substitution (a subshell), so a plain variable it sets would
+  # never be seen by the next call -- a file-backed counter survives across
+  # calls.
+  local cnt_file="$TEST_SKILL_DIR/peek-call-count"
+  : > "$cnt_file"
+  terminal_peek() {
+    local c
+    c="$(cat "$cnt_file")"; c=$((c + 1)); printf '%s' "$c" > "$cnt_file"
+    if [ "$c" -eq 1 ]; then
+      printf '> draft-one\n\ngpt-5 \xc2\xb7 idle\n'
+    else
+      printf '> draft-two\n\ngpt-5 \xc2\xb7 idle\n'
+    fi
+  }
+  _agmsg_safe_poke_screen_check pane-1 '>' no 0 0
+  [ "$_AGMSG_SAFE_POKE_IB_RC" -eq 14 ]
+  [ "$_AGMSG_SAFE_POKE_IB_REGION" = "> draft-two" ]
 }
