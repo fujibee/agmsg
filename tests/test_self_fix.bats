@@ -24,7 +24,22 @@ setup() {
 }
 teardown() { teardown_test_env; }
 
-_own_seat() { printf '%s\n' "$2" > "$(actas_lock_path T "$1")"; }
+_own_seat() {   # <agent> <owner>
+  # _fix_seats_of now walks every REGISTERED seat and computes where ITS
+  # OWN lock would be (#1457 round 4), rather than parsing a lock's
+  # filename back into a name -- so a lock this helper places has to sit
+  # behind a config.json that actually names the agent, the same as a
+  # real actas-claim.sh always would have arranged first. A team with no
+  # team_id (the shape every other test in this file already assumes)
+  # keeps actas_lock_path on the legacy, name-keyed path.
+  local team_dir="$SKILL_DIR/teams/T" cfg tmp
+  mkdir -p "$team_dir"
+  cfg="$team_dir/config.json"
+  [ -f "$cfg" ] || printf '{"name":"T","agents":{}}' > "$cfg"
+  tmp="$BATS_TEST_TMPDIR/own-seat-cfg.json"
+  jq --arg a "$1" '.agents[$a] //= {}' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+  printf '%s\n' "$2" > "$(actas_lock_path T "$1")"
+}
 _proof_says() {   # <rc> <state> <payload>
   local rc="$1" st="$2" pl="$3"
   eval "agmsg_self_proof() { printf 'proof %s %s %s\\n' \"\$1\" \"\$2\" \"\$3\" >> \"\$SPY\"; printf '%s\\t%s\\n' '$st' '$pl'; return $rc; }"
@@ -300,17 +315,22 @@ PROBE
   refute grep -qF "$ghost_member_id/" <<<"$output"
 }
 
-@test "fix: a legacy name whose two halves merely LOOK like UUIDv7s is not misread as id-keyed (#1457 round 2)" {
-  # Team/agent naming rules do not forbid this shape. The round trip
-  # through actas_lock_path (not the shape alone) is what tells a genuine
-  # id-keyed lock apart from a legacy name that happens to look like one:
-  # neither of these strings is any real team's team_id, so
-  # _agmsg_team_name_for_id finds nothing and this falls through to being
-  # used as a literal name pair, exactly as split from the filename.
+@test "fix: a legacy team with no journal at all, literally named after a UUID, still resolves by name (#1457 round 4)" {
+  # A team that has NEVER been through the id-minting
+  # join flow -- config.json only, no roster journal, no team_id -- whose
+  # literal NAME happens to look like a UUIDv7 (team/agent naming rules do
+  # not forbid it). _fix_seats_of never parses this team's own lock
+  # FILENAME at all now; it reads this team's config.json, sees "agent"
+  # registered, and asks actas_lock_path where THAT seat's lock is --
+  # which, with no team_id anywhere in this team's config, is the legacy
+  # path, unconditionally. Nothing about a UUID shape ever enters the
+  # decision.
   local uuid_team="018f0000-0000-7000-8000-0000000000aa"
-  local uuid_agent="018f0000-0000-7000-8000-0000000000bb"
-  printf '%s\n' "$ME" > "$(actas_lock_path "$uuid_team" "$uuid_agent")"
-  agmsg_role_session_record "$uuid_team" "$uuid_agent" "$ME" "$SKILL_DIR/proj" codex "$ME"
+  mkdir -p "$SKILL_DIR/teams/$uuid_team"
+  printf '{"name":"%s","agents":{"agent":{}}}' "$uuid_team" \
+    > "$SKILL_DIR/teams/$uuid_team/config.json"
+  printf '%s\n' "$ME" > "$(actas_lock_path "$uuid_team" agent)"
+  agmsg_role_session_record "$uuid_team" agent "$ME" "$SKILL_DIR/proj" codex "$ME"
   _proof_says 0 proved herdr:w1:pB
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/self-write.sh"
@@ -318,7 +338,7 @@ PROBE
   terminal_fence() { printf 'inst1\tt1\n'; return 0; }
   run agmsg_fix_run
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=$uuid_team/$uuid_agent state=proved locator=herdr:w1:pB via=proof" ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=$uuid_team/agent state=proved locator=herdr:w1:pB via=proof" ]
   refute grep -qF "state=unresolved" <<<"$output"
   grep -qF "record attempt=ok" <<<"$output"
 }
@@ -348,25 +368,32 @@ PROBE
   refute grep -qF "state=unresolved" <<<"$output"
 }
 
-@test "fix: an id-keyed lock whose raw ids ALSO match a real, separately-named legacy pair is unresolved (#1457 round 3)" {
-  # Vanishingly unlikely on its own -- it needs a team literally named
-  # after ANOTHER team's own team_id, with a member literally named after
-  # that member's own member_id -- but when it happens, this lock's
-  # filename is genuinely ambiguous: it round-trips as team A's real
-  # id-keyed lock, AND the raw strings are a real, independently
-  # registered legacy team/seat pair. Nothing here can say which one this
-  # lock actually means, so neither guess is taken.
+@test "fix: two registered seats computing to the SAME lock path are both unresolved, never one guessed (#1457 round 4)" {
+  # Measured directly: this is the one residual shape the inverted walk
+  # (above) does not close by itself. Team A really has these ids; a
+  # SEPARATE, journal-less team is registered under A's team_id/member_id
+  # taken LITERALLY as its own name. Both registrations compute to the
+  # exact same actas_lock_path -- team A's genuinely, the other team's
+  # legacy path coincidentally landing on the identical string. Neither
+  # is a filename being misread; both are real, independently registered
+  # seats whose own computed paths happen to collide. This owner cannot
+  # be split between them, so both are reported unresolved rather than
+  # guessing which one the lock means.
   bash "$SCRIPTS/join.sh" A agentA codex "$SKILL_DIR/projA" >/dev/null
   local cfg_a="$SKILL_DIR/teams/A/config.json" team_id_a member_id_a
   team_id_a="$(sqlite3 :memory: "SELECT json_extract(CAST(readfile('$(rf "$cfg_a")') AS TEXT), '\$.team_id');")"
   member_id_a="$(sqlite3 :memory: "SELECT json_extract(CAST(readfile('$(rf "$cfg_a")') AS TEXT), '\$.agents.agentA.member_id');")"
 
-  # A SEPARATE, legacy team literally named after A's own ids.
-  bash "$SCRIPTS/join.sh" "$team_id_a" "$member_id_a" codex "$SKILL_DIR/projB" >/dev/null
+  mkdir -p "$SKILL_DIR/teams/$team_id_a"
+  printf '{"name":"%s","agents":{"%s":{}}}' "$team_id_a" "$member_id_a" \
+    > "$SKILL_DIR/teams/$team_id_a/config.json"
 
+  local sid_a="sidA.$$"
+  printf '%s\n' "$sid_a" > "$(actas_lock_path A agentA)"
+
+  run _fix_seats_of "$(agmsg_instance_bare_sid "$sid_a")"
+  [ "$status" -eq 0 ]
   local raw="${team_id_a}__${member_id_a}"
-  printf '%s\n' "$ME" > "$(_actas_lock_dir)/actas.${raw}.session"
-  run agmsg_fix_run
-  [ "$status" -eq 2 ]
-  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=<$raw> state=unresolved reason=could_not_resolve_by_name via=n/a (written nothing)" ]
+  [ "$(printf '%s\n' "$output" | grep -c "^unresolved	${sid_a}	${raw}\$")" -eq 2 ]
+  refute grep -qF "^ok" <<<"$output"
 }
