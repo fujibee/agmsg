@@ -362,6 +362,32 @@ _herdr_observe_stub() {   # <entries-json>
   [ "$(printf '%s' "$output" | cut -f3)" = 'team:alice' ]
 }
 
+# --- orca observation: the tab-level title, not the per-pane one ----------------
+#
+# Orca's own `terminal show`/`list` per-pane `.title` auto-reverts to a
+# generated value and is NOT what `terminal_name`'s rename controls (measured
+# live against a real orca instance, see the driver's own comment). The
+# durable value is one level up, in `--include-visual-layouts`'s
+# visualLayouts[].root.tabs[].title, keyed by tabId. The fixture's per-pane
+# title deliberately differs from the tab-level one, so a regression back to
+# reading the wrong field fails this test rather than passing by coincidence.
+@test "orca observation: pane_label reads the tab-level title, not the per-pane one" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/orca/ops.sh"
+  orca() {
+    case "$1 $2" in
+      'terminal list') printf '%s\n' '{"ok":true,"result":{"terminals":[{"handle":"term_00000000-0000-0000-0000-000000000001","tabId":"tab-1","worktreeId":"wt-1","title":"STALE_PER_PANE_TITLE"}],"visualLayouts":[{"worktreeId":"wt-1","root":{"tabs":[{"tabId":"tab-1","activeLeafId":"leaf-1","title":"team:alice"}]}}]}}' ;;
+      'terminal show') printf 'ERROR: orca terminal show must not be called for team_observe\n' >&2; return 1 ;;
+    esac
+  }
+  run terminal_team_observe 'term_00000000-0000-0000-0000-000000000001'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f1)" = 'n/a:no_activity_concept' ]
+  [ "$(printf '%s' "$output" | cut -f2)" = 'team:alice' ]
+  [ "$(printf '%s' "$output" | cut -f3)" = 'n/a:no_independent_key' ]
+  [ "$(printf '%s' "$output" | cut -f4)" = 'n/a:no_independent_title' ]
+}
+
 # --- the decided absence must reach --fix, and the undecided one must not -------
 
 @test "a decided absence becomes a mismatch cell, an undecided one does not" {
