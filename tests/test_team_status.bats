@@ -376,7 +376,7 @@ _herdr_observe_stub() {   # <entries-json>
   source "$SCRIPTS/drivers/terminals/orca/ops.sh"
   orca() {
     case "$1 $2" in
-      'terminal list') printf '%s\n' '{"ok":true,"result":{"terminals":[{"handle":"term_00000000-0000-0000-0000-000000000001","tabId":"tab-1","worktreeId":"wt-1","title":"STALE_PER_PANE_TITLE"}],"visualLayouts":[{"worktreeId":"wt-1","root":{"tabs":[{"tabId":"tab-1","activeLeafId":"leaf-1","title":"team:alice"}]}}]}}' ;;
+      'terminal list') printf '%s\n' '{"ok":true,"result":{"terminals":[{"handle":"term_00000000-0000-0000-0000-000000000001","tabId":"tab-1","worktreeId":"wt-1","title":"STALE_PER_PANE_TITLE"},{"handle":"term_00000000-0000-0000-0000-000000000002","tabId":"tab-2","worktreeId":"wt-1","title":"STALE_PER_PANE_TITLE"}],"visualLayouts":[{"worktreeId":"wt-1","root":{"tabs":[{"tabId":"tab-1","activeLeafId":"leaf-1","title":"team:alice"},{"tabId":"tab-2","activeLeafId":"leaf-2","title":"team:alice\n"}]}}]}}' ;;
       'terminal show') printf 'ERROR: orca terminal show must not be called for team_observe\n' >&2; return 1 ;;
     esac
   }
@@ -386,6 +386,16 @@ _herdr_observe_stub() {   # <entries-json>
   [ "$(printf '%s' "$output" | cut -f2)" = 'team:alice' ]
   [ "$(printf '%s' "$output" | cut -f3)" = 'n/a:no_independent_key' ]
   [ "$(printf '%s' "$output" | cut -f4)" = 'n/a:no_independent_title' ]
+
+  # A title ending in a real newline ("team:alice\n") must NOT come back
+  # indistinguishable from "team:alice": command substitution strips every
+  # trailing newline unconditionally, so checking the already-extracted bash
+  # variable for one (as this driver's other observe-style reads do) would
+  # miss it and report a false pane_label match. This is refused (10), not
+  # silently truncated to a value that then compares equal to the expected
+  # identity.
+  run terminal_team_observe 'term_00000000-0000-0000-0000-000000000002'
+  [ "$status" -eq 10 ]
 }
 
 # --- the decided absence must reach --fix, and the undecided one must not -------
