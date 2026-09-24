@@ -230,6 +230,22 @@ _seed_token() {   # <team> <agent> <token> [witness] [emitted_at]
   [[ "$output" == *"undetermined	no_panes_readable_sandbox_permission"* ]]
 }
 
+@test "observe: a permission denial on one pane and an unrelated failure on another stays the generic reason (#1457 round 2)" {
+  # One pane denied by the sandbox, a second failing for an unrelated
+  # reason (here, its driver cannot even be loaded) -- the second must not
+  # be silently absorbed into "the sandbox", which is what counting only
+  # ATTEMPTED peeks (and not every other skip in the loop) would do
+  # (review, #1457 round 2).
+  _seed_token myteam alice fixed-test-token
+  agmsg_terminal_enumerate() { printf 'herdr\tsockA\tw1:p1\nplain\tsockB\tw1:p2\n'; }
+  agmsg_terminal_load() { [ "$1" = herdr ]; }
+  terminal_peek() { echo "herdr: PermissionDenied (Operation not permitted)" >&2; return 11; }
+  run agmsg_token_locate_observe myteam alice "$OWNER"
+  [ "$status" -eq 2 ]
+  refute grep -qF "no_panes_readable_sandbox_permission" <<<"$output"
+  grep -qF "undetermined	no_panes_readable" <<<"$output"
+}
+
 @test "observe: proved when the persisted token matches exactly one peeked pane, and the record is consumed (#1124, #1386)" {
   _seed_token myteam alice fixed-test-token
   agmsg_terminal_enumerate() { printf 'herdr\tsockA\tw1:p1\nherdr\tsockA\tw1:p2\n'; }

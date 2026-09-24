@@ -311,11 +311,24 @@ agmsg_token_locate_observe() {   # <team> <agent> <owner>
   peek_err_tmp="$(mktemp 2>/dev/null)" || peek_err_tmp=""
   while IFS="$(printf '\t')" read -r a b c; do
     case "$a" in
-      '?'|'!!'|'!') continue ;;   # that kind/instance could not be read at all
+      # That kind/instance could not be read at all -- a failure of its
+      # own, never the sandbox's permission specifically, so it counts
+      # against the strict "every failure was permission" requirement
+      # below the same way a mixed non-permission peek failure does
+      # (review, #1457 round 2: one pane denied by the sandbox and another
+      # failing for an unrelated reason must not still read as "the
+      # sandbox").
+      '?'|'!!'|'!') any_non_permission_fail=1; continue ;;
       *) kind="$a"; inst="$b"; pane="$c" ;;
     esac
-    [ -n "$kind" ] && [ -n "$inst" ] && [ -n "$pane" ] || continue
-    agmsg_terminal_load "$kind" >/dev/null 2>&1 || continue
+    if [ -z "$kind" ] || [ -z "$inst" ] || [ -z "$pane" ]; then
+      any_non_permission_fail=1
+      continue
+    fi
+    if ! agmsg_terminal_load "$kind" >/dev/null 2>&1; then
+      any_non_permission_fail=1
+      continue
+    fi
     id="$inst:$pane"
     # 200 lines: this seat's own token is somewhere in the pane's recent
     # scrollback (the emitting call already returned and was rendered before

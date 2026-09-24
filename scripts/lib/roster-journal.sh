@@ -141,6 +141,12 @@ agmsg_roster_name_owner() {
 # caller resolving an id back to a name needs who it is today (#1457, for
 # self-fix.sh's own id-keyed lock resolution). The most recent join-or-rename
 # binding for this member_id, or empty if the journal never minted one.
+#
+# Empty too when the member's MOST RECENT event is member_left (#1457
+# review round 2): a departed member is not "who it is today", and a
+# caller resolving an id-keyed lock back to a name must not walk a gone
+# member's role into a live, named one just because the journal still
+# remembers the name they left under.
 agmsg_roster_owner_name() {
   local team_dir="$1" member_id="$2" journal journal_sql id_sql
   journal="$(agmsg_roster_journal_path "$team_dir")"
@@ -157,15 +163,18 @@ agmsg_roster_owner_name() {
       SELECT CAST(key AS INTEGER),value FROM source,json_each(source.doc)
     ),
     bindings AS (
-      SELECT ord,json_extract(event,'\$.member_id') AS member_id,
+      SELECT ord,
+             json_extract(event,'\$.member_id') AS member_id,
+             json_extract(event,'\$.type') AS type,
              CASE json_extract(event,'\$.type')
                WHEN 'member_joined' THEN json_extract(event,'\$.name')
                WHEN 'member_renamed' THEN json_extract(event,'\$.to')
              END AS name
         FROM records
-       WHERE json_extract(event,'\$.type') IN ('member_joined','member_renamed')
+       WHERE json_extract(event,'\$.type') IN ('member_joined','member_renamed','member_left')
     )
-    SELECT name FROM bindings
+    SELECT CASE type WHEN 'member_left' THEN NULL ELSE name END
+      FROM bindings
      WHERE member_id='$id_sql' ORDER BY ord DESC LIMIT 1;" 2>/dev/null | tr -d '\r'
 }
 

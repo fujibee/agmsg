@@ -58,7 +58,11 @@ _fix_seats_of() {   # <bare-sid>
   local sid="$1" f name team agent rd kind owner
   # A UUIDv7, the shape _agmsg_id_key_for (actas-lock.sh) mints both halves
   # of an id-keyed lock name from -- see test_local_team_ids.bats' own
-  # UUID7_RE, the one other place this exact shape is checked.
+  # UUID7_RE, the one other place this exact shape is checked. Necessary,
+  # but NOT sufficient on its own (review, #1457 round 2): naming rules for
+  # a team or a seat do not forbid a legacy name that happens to look like
+  # two UUIDv7s, so this shape alone is a candidate to verify, not a
+  # verdict -- see the round-trip check below.
   local uuid7_re='^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
   for f in "$(_actas_lock_dir)"/actas.*.session; do
     [ -e "$f" ] || continue
@@ -74,23 +78,45 @@ _fix_seats_of() {   # <bare-sid>
     # agmsg_role_session_get, and agmsg_spawn_path's own name-keyed callers)
     # is keyed by NAME, never by this pair directly -- passing the ids on as
     # though they were names is the defect #1457 traced the record's own
-    # missing_fields failure to. Decided by SHAPE (both halves a UUIDv7),
-    # not by whether a team directory happens to exist for the raw "$team"
-    # half -- a team with no directory yet (never joined, or a fixture that
-    # places a lock directly) would otherwise misread as id-keyed too.
+    # missing_fields failure to. Not decided by whether a team directory
+    # happens to exist for the raw "$team" half either -- a team with no
+    # directory yet (never joined, or a fixture that places a lock
+    # directly) would otherwise misread as id-keyed too.
     if [[ "$team" =~ $uuid7_re ]] && [[ "$agent" =~ $uuid7_re ]]; then
-      local resolved=""
-      if resolved="$(_agmsg_id_key_to_names "$team" "$agent")"; then
-        team="${resolved%%$'\t'*}"; agent="${resolved#*$'\t'}"
-      else
-        # Could not resolve by name -- refuse rather than hand the raw ids
-        # to a writer that would silently miss the real record (the
-        # missing_fields shape #1457 measured). Reported, not dropped:
-        # team/agent empty marks this row as unresolved, and $name (the
-        # lock file's own name) is carried as the 4th field so the caller
-        # can say what it could not resolve.
-        printf '\t\t%s\t%s\n' "$owner" "$name"
-        continue
+      local id_team_name=""
+      id_team_name="$(_agmsg_team_name_for_id "$team" 2>/dev/null)" || id_team_name=""
+      # The team half decides which of the two remaining cases this is.
+      # Naming rules do not forbid a legacy team/agent pair that merely
+      # LOOKS like two UUIDv7s, so the shape match above is a candidate,
+      # not a verdict: if no team's config.json actually carries "$team"
+      # as its team_id, this is that legacy case, and team/agent stay
+      # exactly as split from the filename (fall through, unchanged).
+      if [ -n "$id_team_name" ]; then
+        # The team half IS a real team_id -- this lock genuinely is
+        # id-keyed. Resolve the member half too, and confirm the whole
+        # round trip before accepting it: the id-or-legacy path for the
+        # resolved NAMES has to be this same file, not just some path.
+        local resolved="" r_team="" r_agent="" round_trip=""
+        if resolved="$(_agmsg_id_key_to_names "$team" "$agent")"; then
+          r_team="${resolved%%$'\t'*}"; r_agent="${resolved#*$'\t'}"
+          round_trip="$(actas_lock_path "$r_team" "$r_agent" 2>/dev/null)" || round_trip=""
+        fi
+        if [ -n "$r_team" ] && [ "$round_trip" = "$f" ]; then
+          team="$r_team"; agent="$r_agent"
+        else
+          # A confirmed id-keyed lock that still could not be fully
+          # resolved (member half unreadable, or the round trip lands on
+          # a different file) -- refuse rather than hand the raw ids to a
+          # writer that would silently miss the real record (the
+          # missing_fields shape #1457 measured), and rather than treat
+          # two UUIDs as a literal name pair nobody chose. Reported, not
+          # dropped: `?` marks the row as unresolved without relying on an
+          # EMPTY field surviving `read` (IFS treats tab as whitespace, so
+          # a genuinely empty field between two tabs is collapsed away
+          # rather than read back as empty -- #1457 review).
+          printf '?\t?\t%s\t%s\n' "$owner" "$name"
+          continue
+        fi
       fi
     fi
     printf '%s\t%s\t%s\n' "$team" "$agent" "$owner"
@@ -192,7 +218,7 @@ agmsg_fix_run() {
   while IFS=$'\t' read -r team agent owner raw; do
     [ -n "$owner" ] || continue
     any=1
-    if [ -z "$team" ] || [ -z "$agent" ]; then
+    if [ "$team" = '?' ] || [ "$agent" = '?' ]; then
       printf 'fix seat=<%s> state=unresolved reason=could_not_resolve_by_name via=n/a (written nothing)\n' "$raw"
       failed=1
       continue

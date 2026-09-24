@@ -278,3 +278,47 @@ PROBE
   refute grep -qF "missing_fields" <<<"$output"
   grep -qF "record attempt=ok" <<<"$output"
 }
+
+@test "fix: an id-keyed lock whose member half cannot be resolved is reported unresolved, not the raw ids (#1457 round 2)" {
+  # The team half IS a real team_id here (confirming this genuinely is an
+  # id-keyed lock), but the member half was never minted for anyone -- a
+  # ghost id, standing in for whatever left the journal unable to answer
+  # it in the real incident. Before this fix, the empty team/agent fields
+  # this row prints did not survive `read` at all (IFS treats tab as
+  # whitespace, so two adjacent tabs collapse rather than reading back as
+  # an empty field) -- the row silently vanished and `fix` reported
+  # nothing, rc=1, never the intended state=unresolved.
+  bash "$SCRIPTS/join.sh" T alice codex "$SKILL_DIR/proj" >/dev/null
+  local cfg="$SKILL_DIR/teams/T/config.json" team_id
+  team_id="$(sqlite3 :memory: "SELECT json_extract(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.team_id');")"
+  local ghost_member_id="018f0000-0000-7000-8000-0000000000fe"
+  local raw="${team_id}__${ghost_member_id}"
+  printf '%s\n' "$ME" > "$(_actas_lock_dir)/actas.${raw}.session"
+  run agmsg_fix_run
+  [ "$status" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=<$raw> state=unresolved reason=could_not_resolve_by_name via=n/a (written nothing)" ]
+  refute grep -qF "$ghost_member_id/" <<<"$output"
+}
+
+@test "fix: a legacy name whose two halves merely LOOK like UUIDv7s is not misread as id-keyed (#1457 round 2)" {
+  # Team/agent naming rules do not forbid this shape. The round trip
+  # through actas_lock_path (not the shape alone) is what tells a genuine
+  # id-keyed lock apart from a legacy name that happens to look like one:
+  # neither of these strings is any real team's team_id, so
+  # _agmsg_team_name_for_id finds nothing and this falls through to being
+  # used as a literal name pair, exactly as split from the filename.
+  local uuid_team="018f0000-0000-7000-8000-0000000000aa"
+  local uuid_agent="018f0000-0000-7000-8000-0000000000bb"
+  printf '%s\n' "$ME" > "$(actas_lock_path "$uuid_team" "$uuid_agent")"
+  agmsg_role_session_record "$uuid_team" "$uuid_agent" "$ME" "$SKILL_DIR/proj" codex "$ME"
+  _proof_says 0 proved herdr:w1:pB
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/self-write.sh"
+  agmsg_terminal_load() { :; }
+  terminal_fence() { printf 'inst1\tt1\n'; return 0; }
+  run agmsg_fix_run
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=$uuid_team/$uuid_agent state=proved locator=herdr:w1:pB via=proof" ]
+  refute grep -qF "state=unresolved" <<<"$output"
+  grep -qF "record attempt=ok" <<<"$output"
+}
