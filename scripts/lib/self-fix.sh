@@ -51,9 +51,16 @@
 # shellcheck disable=SC1091
 . "${SKILL_DIR:?}/scripts/lib/token-locate.sh"
 
-# The seats whose actas lock this session OWNS: "<team>\t<agent>\t<owner>" per line.
-# <bare-sid> is the caller's session id; a lock is ours when its owner's bare sid
-# equals it. Unreadable locks are skipped, not guessed.
+# The seats whose actas lock this session OWNS, one line per seat:
+#   ok\t<team>\t<agent>\t<owner>            resolved -- safe to use
+#   unresolved\t<owner>\t<raw-name>          could not be resolved by name
+# The leading word is its own field, never a stand-in written into team or
+# agent: `?` is a NAME `agmsg_validate_team_name`/`agmsg_validate_agent_name`
+# both allow, so a sentinel written into either of those fields cannot be
+# told apart from a genuinely `?`-named seat's own real name -- a mistake
+# review caught once already (#1457 round 3). <bare-sid> is the caller's
+# session id; a lock is ours when its owner's bare sid equals it. Unreadable
+# locks are skipped, not guessed.
 _fix_seats_of() {   # <bare-sid>
   local sid="$1" f name team agent rd kind owner
   # A UUIDv7, the shape _agmsg_id_key_for (actas-lock.sh) mints both halves
@@ -92,7 +99,7 @@ _fix_seats_of() {   # <bare-sid>
       # as its team_id, this is that legacy case, and team/agent stay
       # exactly as split from the filename (fall through, unchanged).
       if [ -n "$id_team_name" ]; then
-        # The team half IS a real team_id -- this lock genuinely is
+        # The team half IS a real team_id -- this lock genuinely COULD be
         # id-keyed. Resolve the member half too, and confirm the whole
         # round trip before accepting it: the id-or-legacy path for the
         # resolved NAMES has to be this same file, not just some path.
@@ -101,25 +108,39 @@ _fix_seats_of() {   # <bare-sid>
           r_team="${resolved%%$'\t'*}"; r_agent="${resolved#*$'\t'}"
           round_trip="$(actas_lock_path "$r_team" "$r_agent" 2>/dev/null)" || round_trip=""
         fi
-        if [ -n "$r_team" ] && [ "$round_trip" = "$f" ]; then
-          team="$r_team"; agent="$r_agent"
-        else
+        if [ -z "$r_team" ] || [ "$round_trip" != "$f" ]; then
           # A confirmed id-keyed lock that still could not be fully
           # resolved (member half unreadable, or the round trip lands on
           # a different file) -- refuse rather than hand the raw ids to a
           # writer that would silently miss the real record (the
           # missing_fields shape #1457 measured), and rather than treat
-          # two UUIDs as a literal name pair nobody chose. Reported, not
-          # dropped: `?` marks the row as unresolved without relying on an
-          # EMPTY field surviving `read` (IFS treats tab as whitespace, so
-          # a genuinely empty field between two tabs is collapsed away
-          # rather than read back as empty -- #1457 review).
-          printf '?\t?\t%s\t%s\n' "$owner" "$name"
+          # two UUIDs as a literal name pair nobody chose.
+          printf 'unresolved\t%s\t%s\n' "$owner" "$name"
           continue
         fi
+        # BOTH readings can be valid at once (#1457 round 3): the raw
+        # $team/$agent strings might ALSO be a real, separately registered
+        # legacy team/seat pair -- vanishingly unlikely (it needs a team
+        # literally named after another team's team_id, with a member
+        # literally named after that member's own member_id), but nothing
+        # here could then say which reading this lock actually means.
+        # Ambiguous is unresolved, not a guess in either direction.
+        if [ -d "$SKILL_DIR/teams/$team" ]; then
+          if ! declare -F agmsg_roster_name_owner >/dev/null 2>&1; then
+            # shellcheck disable=SC1091
+            source "$SKILL_DIR/scripts/lib/roster-journal.sh"
+          fi
+          local legacy_owner=""
+          legacy_owner="$(agmsg_roster_name_owner "$SKILL_DIR/teams/$team" "$agent" 2>/dev/null)" || legacy_owner=""
+          if [ -n "$legacy_owner" ]; then
+            printf 'unresolved\t%s\t%s\n' "$owner" "$name"
+            continue
+          fi
+        fi
+        team="$r_team"; agent="$r_agent"
       fi
     fi
-    printf '%s\t%s\t%s\n' "$team" "$agent" "$owner"
+    printf 'ok\t%s\t%s\t%s\n' "$team" "$agent" "$owner"
   done
 }
 
@@ -210,19 +231,25 @@ agmsg_fix_run() {
     echo "fix none:arguments_refused (fix takes no arguments: a location handed from outside is the accident this exists to remove)" >&2
     return 1
   fi
-  local sid seats line team agent owner raw loc st payload via rc=0 any=0 failed=0
+  local sid seats line status team agent owner raw loc st payload via rc=0 any=0 failed=0
   sid="$(agmsg_instance_bare_sid "${AGMSG_SESSION_ID:-}" 2>/dev/null)"
   [ -n "$sid" ] || { echo "fix none:no_session_id" >&2; return 1; }
   seats="$(_fix_seats_of "$sid")"
   [ -n "$seats" ] || { echo "fix none:no_seat_for_this_session" >&2; return 1; }
-  while IFS=$'\t' read -r team agent owner raw; do
-    [ -n "$owner" ] || continue
+  while IFS=$'\t' read -r status a b c; do
+    [ -n "$status" ] || continue
     any=1
-    if [ "$team" = '?' ] || [ "$agent" = '?' ]; then
-      printf 'fix seat=<%s> state=unresolved reason=could_not_resolve_by_name via=n/a (written nothing)\n' "$raw"
+    if [ "$status" = unresolved ]; then
+      # a=owner, b=raw lock name -- see _fix_seats_of's own header for why
+      # the state lives in its own leading field rather than a sentinel
+      # written into team/agent (#1457 round 3: `?` is a NAME the roster
+      # allows, so a `?`-named seat's own real name could not have been
+      # told apart from that sentinel).
+      printf 'fix seat=<%s> state=unresolved reason=could_not_resolve_by_name via=n/a (written nothing)\n' "$b"
       failed=1
       continue
     fi
+    team="$a"; agent="$b"; owner="$c"
     loc="$(_fix_locate "$team" "$agent" "$owner")" || true
     st="${loc%%$'\t'*}"; payload="${loc#*$'\t'}"; via="${payload##*$'\t'}"; payload="${payload%$'\t'*}"
     if [ "$st" = proved ]; then

@@ -322,3 +322,51 @@ PROBE
   refute grep -qF "state=unresolved" <<<"$output"
   grep -qF "record attempt=ok" <<<"$output"
 }
+
+@test "fix: a seat literally named ? is not mistaken for the unresolved sentinel (#1457 round 3)" {
+  # agmsg_validate_agent_name allows "?" as a real name. Reached through
+  # the id-keyed path (a real join mints team_id/member_id, both UUIDs --
+  # the lock's own FILENAME never needs to encode "?" at all here, unlike
+  # a literal legacy name would need _actas_lock_encode's percent-encoding
+  # decoded back, which this file has never done), so this exercises the
+  # exact path _agmsg_id_key_to_names resolves a name through. State has
+  # to live in its own leading field, never a sentinel value written into
+  # team/agent -- overloading `?` into those fields (the round-2 shape)
+  # could not tell a genuinely unresolved row apart from a seat that is
+  # really named "?".
+  bash "$SCRIPTS/join.sh" T '?' codex "$SKILL_DIR/proj" >/dev/null
+  printf '%s\n' "$ME" > "$(actas_lock_path T '?')"
+  agmsg_role_session_record T '?' "$ME" "$SKILL_DIR/proj" codex "$ME"
+  _proof_says 0 proved herdr:w1:pB
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/self-write.sh"
+  agmsg_terminal_load() { :; }
+  terminal_fence() { printf 'inst1\tt1\n'; return 0; }
+  run agmsg_fix_run
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/? state=proved locator=herdr:w1:pB via=proof" ]
+  refute grep -qF "state=unresolved" <<<"$output"
+}
+
+@test "fix: an id-keyed lock whose raw ids ALSO match a real, separately-named legacy pair is unresolved (#1457 round 3)" {
+  # Vanishingly unlikely on its own -- it needs a team literally named
+  # after ANOTHER team's own team_id, with a member literally named after
+  # that member's own member_id -- but when it happens, this lock's
+  # filename is genuinely ambiguous: it round-trips as team A's real
+  # id-keyed lock, AND the raw strings are a real, independently
+  # registered legacy team/seat pair. Nothing here can say which one this
+  # lock actually means, so neither guess is taken.
+  bash "$SCRIPTS/join.sh" A agentA codex "$SKILL_DIR/projA" >/dev/null
+  local cfg_a="$SKILL_DIR/teams/A/config.json" team_id_a member_id_a
+  team_id_a="$(sqlite3 :memory: "SELECT json_extract(CAST(readfile('$(rf "$cfg_a")') AS TEXT), '\$.team_id');")"
+  member_id_a="$(sqlite3 :memory: "SELECT json_extract(CAST(readfile('$(rf "$cfg_a")') AS TEXT), '\$.agents.agentA.member_id');")"
+
+  # A SEPARATE, legacy team literally named after A's own ids.
+  bash "$SCRIPTS/join.sh" "$team_id_a" "$member_id_a" codex "$SKILL_DIR/projB" >/dev/null
+
+  local raw="${team_id_a}__${member_id_a}"
+  printf '%s\n' "$ME" > "$(_actas_lock_dir)/actas.${raw}.session"
+  run agmsg_fix_run
+  [ "$status" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=<$raw> state=unresolved reason=could_not_resolve_by_name via=n/a (written nothing)" ]
+}
