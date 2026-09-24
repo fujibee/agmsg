@@ -310,11 +310,15 @@ jobs:
               # all write their own into a throwaway fixture; a grep hit is not
               # a read.
               #
-              # This list is not maintained by hand. `cut-release.sh` declares
-              # the set it commits in its own FILES variable, and
-              # tests/test_release_ci_skip.bats fails if the two disagree — so
-              # adding a file there without adding it here is caught, rather
-              # than silently skipping the suite for a file nobody measured.
+              # This list is `cut-release.sh`'s FILES plus one deliberate,
+              # hand-maintained exception: cliff.toml. `cut-release.sh`
+              # declares the set it commits in its own FILES variable and
+              # never writes cliff.toml; a cliff.toml change on a release
+              # branch is a mapping added by hand (#875).
+              # tests/test_release_ci_skip.bats fails unless this list equals
+              # FILES plus cliff.toml — so adding a file to FILES without
+              # adding it here is caught, rather than silently skipping the
+              # suite for a file nobody measured.
               #
               # cliff.toml joined this arm because a release PR sometimes
               # carries a hand-edited cliff.toml line (catching a commit
