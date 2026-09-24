@@ -1,9 +1,9 @@
 This driver's own capability notes (#1082) — read only after `where.sh` names
 this session's terminal as `orca`. Its manifest ceiling (`terminal.conf`):
-`peek where spawn despawn name`. `poke` and `arrange` are not implemented and
-are not in that ceiling — do not attempt them; each reports `unsupported`
-(13) if called anyway. `arrange` has no path forward on this backend at all:
-orca's own CLI has no reordering/move/swap verb for a terminal or its tab.
+`peek where spawn despawn name poke`. `arrange` is not implemented and is not
+in that ceiling — do not attempt it; it reports `unsupported` (13) if called
+anyway, and has no path forward on this backend at all: orca's own CLI has no
+reordering/move/swap verb for a terminal or its tab.
 
 Detection is env-only: `TERM_PROGRAM=Orca` plus `$ORCA_TERMINAL_HANDLE`, the
 opaque handle every `orca terminal <verb> --terminal <handle>` call addresses
@@ -27,11 +27,46 @@ always has one once its CLI is on PATH.)
 
 ## poke exit codes
 
-`terminal_poke` is not implemented. It always returns **13** (`unsupported`)
-— the same code `plain` uses for a capability outside its own manifest
-ceiling. `terminal_arrange` returns the same **13** and, unlike `poke`, has
-no path forward on this backend at all: orca's own CLI has no
-reordering/move/swap verb for a terminal or its tab, checked against 1.4.206.
+`terminal_poke` sends `<text>` followed by Enter via
+`orca terminal send --text ... --enter`. Same taxonomy as peek: **10** = orca
+unreachable (not on PATH, or `orca terminal send` answered ok:false with error
+code `runtime_unavailable`); **12** = `orca terminal send` answered ok:false
+for any other reason, unparsable JSON, nothing at all, OR answered ok:true but
+`result.send.accepted` was not the JSON boolean `true` (false, missing, or any
+non-boolean shape) — `ok:true` is only the envelope succeeding, not proof the
+bytes were actually delivered to the pane. (13 is not one of these — reserved
+for a driver with no poke path at all, which orca is not. `terminal_arrange`
+returns that code unconditionally instead, and unlike `poke`, has no path
+forward on this backend at all: orca's own CLI has no reordering/move/swap
+verb for a terminal or its tab, checked against 1.4.206.)
+
+## terminal_input_draft (optional hook)
+
+`terminal_input_draft <id>` reports the pane's composer draft, gated on
+whether orca recognizes an agent integration for that pane at all. **stdout on
+success (0) is `base64(draft)`, not raw text** — command substitution strips
+every trailing newline unconditionally, so raw text cannot carry a trailing
+newline or reliably round-trip Shift+Enter multi-line content; decode with
+`base64 -d`. Empty stdout (nothing to decode) means an empty draft.
+
+- **0** — `show` reports an `agentIdentity` for this pane, and `read`'s
+  `draft` field is either a JSON string (stdout is its base64-encoded exact
+  bytes) or absent (empty stdout — a real "nothing typed", not an unknown).
+- **10** — could not be determined: orca unreachable, `show`'s JSON did not
+  parse or answered ok:false, OR `show` succeeded but reports no
+  `agentIdentity` at all for this pane (no agent integration to read a draft
+  from — the case a bare "empty string" would misreport as a checked fact).
+  stdout carries `unknown:orca_unreachable` or `unknown:no_agent_identity`.
+- **12** — `agentIdentity` WAS confirmed present, but either the subsequent
+  `read` call itself failed (unparsable JSON, ok:false, or no output), or
+  `draft` was present with a non-string JSON type (null, object, array,
+  number, boolean) — a malformed response, not a confirmed empty box. Both
+  are a different failure than "no identity", kept out of 10's unknown
+  sentinel on purpose.
+
+Not in `capabilities=`: optional ABI hooks are never listed there (matches
+`terminal_id_ok`/`terminal_peek_styled` on every driver) — a caller checks for
+this one with `declare -F terminal_input_draft` after loading the driver.
 
 ## spawn
 

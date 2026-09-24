@@ -6,10 +6,9 @@
 # no set -e/-u.
 #
 # PR3 SCOPE (builds on PR1's read-only set): spawn/despawn/name are now real.
-# poke/arrange remain unimplemented and report unsupported (13) uniformly, the
-# same convention `plain` uses for a capability its manifest does not
-# advertise — arrange because orca's own CLI has no reordering verb at all
-# (checked against 1.4.206), poke because it is a later PR's scope.
+# arrange remains unimplemented and reports unsupported (13), the same
+# convention `plain` uses for a capability its manifest does not advertise —
+# orca's own CLI has no reordering verb at all (checked against 1.4.206).
 #
 # PR4 SCOPE: adds terminal_enumerate_panes, one of the two OPTIONAL
 # sweep/self-proof ops — read-only, nothing written. terminal_pane_process_
@@ -21,6 +20,10 @@
 # checked `--help` too, no flag surfaces one either). See the comment where
 # that op would otherwise live, further down, for why "define it and always
 # fail" is the wrong answer to a permanent gap, not just a smaller one.
+#
+# PR2 SCOPE: terminal_poke is now real, and adds the optional
+# terminal_input_draft hook (composer-draft read, gated on show's
+# agentIdentity field).
 #
 # MEASURED (directly against real orca instances, orca 1.4.198 and 1.4.206;
 # not asserted):
@@ -57,7 +60,7 @@ terminal_check() {
 terminal_describe() {
   printf 'name=orca\n'
   printf 'backend=orca terminal pane\n'
-  printf 'capabilities=peek where spawn despawn name\n'
+  printf 'capabilities=peek where spawn despawn name poke\n'
   printf 'syntax_help=orca terminal --help\n'
 }
 
@@ -321,6 +324,210 @@ terminal_peek() {
   return 0
 }
 
+# WRITE op: deliver <text> into the pane, followed by Enter, via
+# `orca terminal send --text ... --enter`. Same exit taxonomy as
+# terminal_peek, so the same numbers mean the same thing across every
+# poke-capable driver: orca unreachable — not on PATH, OR answered ok:false
+# with error.code=runtime_unavailable (the whole runtime is down, not this one
+# terminal) — is 10; an answered-but-failed send for any OTHER reason
+# (ok:false with a different code, unparsable JSON, or no output at all) is
+# 12. `ok:true` is only the ENVELOPE succeeding — orca accepted and processed
+# the command — it is NOT proof the bytes were actually delivered (review,
+# #1443): `result.send.accepted` is the real receipt, and only a JSON boolean
+# `true` there counts. `accepted:false`, a missing key, or any non-boolean
+# shape must all fail closed (12), never report `ok` — an envelope success
+# with a rejected/absent/malformed `accepted` is a write that did NOT reach
+# the pane, and reporting it as delivered would silently drop the caller's
+# text.
+terminal_poke() {   # <id> <text>
+  local id="$1" text="$2"
+  command -v orca >/dev/null 2>&1 \
+    || { echo runtime_error; echo "orca: not on PATH — cannot reach the terminal to poke pane '$id'" >&2; return 10; }
+  local json
+  json="$(orca terminal send --terminal "$id" --text "$text" --enter --json 2>/dev/null)"
+  [ -n "$json" ] || { echo runtime_error; echo "orca: could not send to terminal '$id' (it may no longer exist)" >&2; return 12; }
+  _orca_json_valid "$json" \
+    || { echo runtime_error; echo "orca: send to terminal '$id' returned unparsable output" >&2; return 12; }
+  local ok
+  ok="$(_orca_json_bool "$json" '$.ok')"
+  if [ "$ok" != 1 ]; then
+    if [ "$(_orca_error_code "$json")" = runtime_unavailable ]; then
+      echo runtime_error
+      echo "orca: the Orca runtime is unavailable — cannot reach the terminal to poke pane '$id'" >&2
+      return 10
+    fi
+    echo runtime_error
+    echo "orca: could not send to terminal '$id' (it may no longer exist)" >&2
+    return 12
+  fi
+  local accepted
+  accepted="$(_orca_json_bool "$json" '$.result.send.accepted')"
+  if [ "$accepted" != 1 ]; then
+    echo runtime_error
+    echo "orca: send to terminal '$id' was not accepted (accepted=${accepted:-missing or not a boolean})" >&2
+    return 12
+  fi
+  echo ok
+  return 0
+}
+
+# OPTIONAL op: report <id>'s composer draft, but only when `show` says an
+# agent integration is actually present. MEASURED (throwaway terminal, this
+# PR, Claude Code v2.1.281 on orca, via `read --screen`): the JSON carries a
+# `draft` field at `$.result.terminal.draft`, sibling to `tail`, holding the
+# box's real typed text — present once real characters have been typed,
+# ABSENT both when the box is truly empty and when it only shows a dim
+# candidate suggestion (e.g. `Try "fix typecheck errors"`). That absence is
+# exactly the ambiguity this op exists to resolve: on a pane with no agent CLI
+# running at all, `draft` is equally absent, and reporting that as "empty
+# draft" would be a false claim of a real, checked fact. `show`'s own
+# `agentIdentity` field (`$.result.terminal.agentIdentity`, e.g. "claude") is
+# present iff orca has recognized an agent integration for this pane,
+# independent of `draft` — so it is the gate: identity absent means "cannot
+# tell", identity present means an absent `draft` really is a decided,
+# checked "nothing typed". Always reads via `--screen`, matching terminal_peek
+# (measured: `draft` was observed alongside --screen's own `tail`; there is no
+# separate measurement of the non-screen mode carrying it, so this driver only
+# claims the mode it actually checked).
+#
+#   0    identity present; stdout is base64(draft), empty stdout when the key
+#        itself is absent (a real "nothing to preserve", not an unknown).
+#        Base64, not raw text (review, #1443): exact text — including a
+#        trailing newline, or Shift+Enter multi-line content — cannot survive
+#        raw stdout + command substitution, which strips every trailing
+#        newline unconditionally; "x" and "x\n" would otherwise be
+#        indistinguishable to any caller capturing this op's output. Embedded
+#        newlines from base64's own optional line-wrapping (GNU wraps at 76
+#        cols by default, BSD/macOS does not) are stripped in pure bash after
+#        capture, so the encoded form is always exactly one line regardless of
+#        implementation.
+#   10   could not be determined at all: orca unreachable (not on PATH, or
+#        answered ok:false with error.code=runtime_unavailable), the show
+#        call's JSON did not parse or answered ok:false for any other reason,
+#        OR the call succeeded but no agentIdentity is reported for this pane
+#   12   identity WAS confirmed present, but any of: the subsequent draft read
+#        itself failed (unparsable JSON, ok:false, no output); `draft` was
+#        present but its JSON type was something other than a string (null,
+#        object, array, number, boolean — review, #1443: folding every
+#        non-text shape to "" via _orca_json_field would report a broken
+#        response as a confirmed, decided empty box, rather than the
+#        malformed answer it actually is); the extraction's own sqlite3 call
+#        exited non-zero (review, #1443 round 2: `"$(cmd; printf x)"` always
+#        exits 0 regardless of `cmd`'s own status, so a real extraction
+#        failure would otherwise silently become a confirmed-empty 0 — `&&`
+#        instead of `;` before the sentinel is what makes this failure visible
+#        at all); or base64-encoding itself failed. All distinct from 10 on
+#        purpose: none of these is "no identity", so none is folded into its
+#        unknown sentinel.
+#
+# stdout carries an `unknown:<reason>` sentinel on every 10 path (the
+# codebase's own non-value-observation convention), so a caller can log why
+# without parsing stderr.
+terminal_input_draft() {   # <id>
+  local id="$1" json ok identity
+  command -v orca >/dev/null 2>&1 \
+    || { echo "unknown:orca_unreachable"; echo "orca: not on PATH — cannot reach the terminal to read pane '$id''s draft" >&2; return 10; }
+  json="$(_orca_show_json "$id")"
+  if [ -z "$json" ] || ! _orca_json_valid "$json"; then
+    echo "unknown:orca_unreachable"
+    echo "orca: could not read terminal '$id' to check its agent identity" >&2
+    return 10
+  fi
+  ok="$(_orca_json_bool "$json" '$.ok')"
+  if [ "$ok" != 1 ]; then
+    if [ "$(_orca_error_code "$json")" = runtime_unavailable ]; then
+      echo "unknown:orca_unreachable"
+      echo "orca: the Orca runtime is unavailable — cannot reach the terminal to read pane '$id''s draft" >&2
+      return 10
+    fi
+    echo "unknown:orca_unreachable"
+    echo "orca: could not read terminal '$id' to check its agent identity ($(_orca_error_code "$json"))" >&2
+    return 10
+  fi
+  identity="$(_orca_json_field "$json" '$.result.terminal.agentIdentity' text)"
+  if [ -z "$identity" ]; then
+    echo "unknown:no_agent_identity"
+    return 10
+  fi
+  local read_json read_ok
+  read_json="$(orca terminal read --terminal "$id" --screen --json 2>/dev/null)"
+  if [ -z "$read_json" ] || ! _orca_json_valid "$read_json"; then
+    echo "orca: could not read terminal '$id''s draft" >&2
+    return 12
+  fi
+  read_ok="$(_orca_json_bool "$read_json" '$.ok')"
+  if [ "$read_ok" != 1 ]; then
+    echo "orca: could not read terminal '$id''s draft ($(_orca_error_code "$read_json"))" >&2
+    return 12
+  fi
+  local esc draft_type draft extract_rc encoded b64_rc _restore_e
+  esc="$(printf '%s' "$read_json" | sed "s/'/''/g")"
+  draft_type="$(sqlite3 :memory: "SELECT json_type('$esc','\$.result.terminal.draft')" 2>/dev/null)"
+  case "$draft_type" in
+    '')
+      return 0
+      ;;
+    text)
+      # NOT `_orca_json_field` (review, #1443): that helper's own
+      # `"$(sqlite3 ...)"` capture strips every trailing newline, which would
+      # silently truncate a draft ending in one before this function even gets
+      # to base64-encode it — one layer too early for the fix above to help.
+      # sqlite3's list-mode output also unconditionally appends its OWN
+      # row-terminator newline after the value, on top of whatever the value
+      # itself ends with. So: capture with `&&` and a non-newline sentinel
+      # (`&&`, not `;` — review, #1443 round 2: `; printf x` always succeeds,
+      # so a real sqlite3 failure would otherwise vanish into the command
+      # substitution's own always-0 exit status and this whole case would
+      # report a broken read as a confirmed empty draft). The sentinel only
+      # ever appears when sqlite3 itself exited 0, which is also what protects
+      # the payload's own trailing newline(s) from $(...)'s stripping; drop
+      # the sentinel, then drop exactly the ONE row-terminator newline sqlite3
+      # always adds, leaving the payload's own trailing newline(s) untouched.
+      #
+      # Both assignments below read `$?`/exit status right after a bare
+      # `x=$(cmd)` (CI: check-errexit-status-reads.sh) — under an inherited
+      # `set -e` a failing command substitution kills the shell AT the
+      # assignment, so the status read never runs and the rc12 handling below
+      # would never fire. `&&` inside the substitution does not protect the
+      # OUTER assignment statement itself. Lifted with the codebase's own
+      # two-line pattern (`agmsg_terminal_load`, terminal-registry.sh) around
+      # both, restored once after.
+      _restore_e=0
+      case $- in *e*) _restore_e=1 ;; esac
+      set +e
+      draft="$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.terminal.draft')" 2>/dev/null && printf x)"
+      extract_rc=$?
+      if [ "$extract_rc" -eq 0 ]; then
+        draft="${draft%x}"
+        draft="${draft%$'\n'}"
+        # A 2-stage pipe's own exit status (no `set -o pipefail` in this file)
+        # is the LAST command's — base64's — so this needs no PIPESTATUS
+        # gymnastics; a separate `tr -d '\n'` stage would (PIPESTATUS does not
+        # survive a "$(...)" boundary), so base64's own line-wrapping (GNU
+        # wraps at 76 cols by default, BSD/macOS does not) is stripped in pure
+        # bash instead, on the OUTER shell's already-captured value.
+        encoded="$(printf '%s' "$draft" | base64)"
+        b64_rc=$?
+      fi
+      [ "$_restore_e" = 1 ] && set -e
+      if [ "$extract_rc" -ne 0 ]; then
+        echo "orca: could not extract terminal '$id''s draft (sqlite3 exited $extract_rc)" >&2
+        return 12
+      fi
+      if [ "$b64_rc" -ne 0 ]; then
+        echo "orca: could not base64-encode terminal '$id''s draft" >&2
+        return 12
+      fi
+      printf '%s\n' "${encoded//$'\n'/}"
+      return 0
+      ;;
+    *)
+      echo "orca: terminal '$id''s draft field was not text (got: $draft_type)" >&2
+      return 12
+      ;;
+  esac
+}
+
 # The one INSTANCE value every orca row is qualified with (herdr/tmux qualify
 # with a socket path because they can have several live servers on one
 # machine; orca has exactly one reachable runtime per machine, so there is
@@ -445,17 +652,15 @@ EOF
 # regardless: they identify themselves directly through $ORCA_TERMINAL_HANDLE
 # (see the file header), which never needed a process/pid binding.
 
-# `arrange` and `poke` are unimplemented — reported uniformly as `unsupported`,
-# the same word `plain` uses for a capability its manifest does not advertise
-# (13). Neither is in this driver's terminal.conf `capabilities=` line, so a
-# caller checking the manifest first should never reach either at all; they
-# exist because the terminal ABI requires every driver to define every
-# required function (the loader verifies it — see
-# scripts/lib/terminal-registry.sh's _AGMSG_TERMINAL_REQUIRED).
-#
-# `arrange` specifically: orca's own `--help` has no reordering/move/swap verb
-# for a terminal or its tab (checked against 1.4.206's CLI surface) — nothing
-# for this driver to call, not a choice not to wire one up.
+# `arrange` is unimplemented — reported as `unsupported`, the same word
+# `plain` uses for a capability its manifest does not advertise (13). It is
+# not in this driver's terminal.conf `capabilities=` line, so a caller
+# checking the manifest first should never reach it at all; it exists because
+# the terminal ABI requires every driver to define every required function
+# (the loader verifies it — see scripts/lib/terminal-registry.sh's
+# _AGMSG_TERMINAL_REQUIRED). Orca's own `--help` has no reordering/move/swap
+# verb for a terminal or its tab (checked against 1.4.206's CLI surface) —
+# nothing for this driver to call, not a choice not to wire one up.
 _orca_unsupported() {   # <verb>
   printf 'unsupported: orca terminal driver does not implement %s yet (read-only in this release)\n' "$1" >&2
   return 13
@@ -589,15 +794,4 @@ terminal_name() {
   fi
   echo ok
   return 0
-}
-
-# `terminal_poke`'s own `return 13` is written INLINE (not delegated to
-# `_orca_unsupported`) so `test_capability_docs.bats`'s exit-code cross-check —
-# which scans each driver's `terminal_peek`/`terminal_poke` bodies for their
-# own literal `return N` statements — can see it and confirm README.md's
-# claimed poke exit codes against this function's real behavior, the same as
-# tmux/herdr.
-terminal_poke() {
-  printf 'unsupported: orca terminal driver does not implement poke yet (read-only in this release)\n' >&2
-  return 13
 }
