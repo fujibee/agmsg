@@ -3459,7 +3459,7 @@ _tmux_op_args() {
   # pins them together on the bare legacy id, the scheme without a socket, the
   # full tmux form, and herdr (whose ids contain a colon that is NOT a socket).
   local ref term id sock
-  for ref in '%7' '@3' 'tmux:%7' 'tmux:/tmp/s:%7' 'tmux:/tmp/with:colon:%7' 'herdr:w1:pB' 'plain:-'; do
+  for ref in '%7' '@3' 'tmux:%7' 'tmux:/tmp/s:%7' 'tmux:/tmp/with:colon:%7' 'herdr:w1:pB' 'herdr:v2:/run/a%3Ab.sock:w1:pB' 'plain:-' 'orca:term_11111111-2222-3333-4444-555555555555'; do
     _agmsg_placement_split "$ref" || { echo "FAIL: split refused $ref"; return 1; }
     term="$(agmsg_terminal_ref_terminal "$ref")" || { echo "FAIL: registry refused $ref"; return 1; }
     id="$(agmsg_terminal_ref_id "$ref")"
@@ -3471,9 +3471,13 @@ _tmux_op_args() {
     esac
     [ "$_AGMSG_PS_ID" = "$id" ] || { echo "FAIL: $ref id $_AGMSG_PS_ID vs $id"; return 1; }
   done
-  # And an unknown scheme is refused by both.
+  # And an unknown scheme is refused by all three readers.
   refute _agmsg_placement_split 'bogus:thing'
   refute agmsg_terminal_ref_terminal 'bogus:thing'
+  refute agmsg_terminal_ref_id 'bogus:thing'
+  # A registered generic driver still owns its id grammar; this malformed
+  # handle must not become a target just because the scheme is recognized.
+  refute agmsg_terminal_ref_terminal 'orca:term_not-a-uuid'
 }
 
 # --- #1114 follow-up (review): "this seat" is exact, and unreadable is a claim ------

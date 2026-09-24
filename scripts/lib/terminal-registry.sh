@@ -591,44 +591,65 @@ _agmsg_terminal_id_ok() {   # <terminal> <id>
   )
 }
 
-agmsg_terminal_ref_terminal() {
-  local ref="$1" term id
-  case "$ref" in
-    tmux:*)  term=tmux;  id="${ref#tmux:}" ;;
-    herdr:*) term=herdr; id="${ref#herdr:}" ;;
-    plain:*) term=plain; id="${ref#plain:}" ;;
-    %*|@*)   term=tmux;  id="$ref" ;;    # legacy pre-axis bare tmux id
-    *)       return 1 ;;                 # unknown scheme -> no terminal
-  esac
-  # A KNOWN scheme is not enough: the id after it is still handed to the terminal as a
-  # TARGET, so a corrupt id (tmux:%9;kill, tmux:alice, herdr:<newline>, plain:any)
-  # must not fall through. Validate it against the terminal's grammar; fail closed
-  # otherwise (the container is not the contents).
-  _agmsg_terminal_id_ok "$term" "$id" || return 1
-  printf '%s\n' "$term"
-}
-
-# Print the bare id of a record ref (stdout) — the scheme prefix stripped, or the
-# whole value for a legacy bare id. Uses first-colon split so a herdr id that
-# itself contains ':' (e.g. wC:pN) survives.
-agmsg_terminal_ref_id() {
+_agmsg_terminal_ref_parse() {   # <ref> [validate-id], sets _AGMSG_REF_TERM / _ID / _PANE_ID / _SOCK
   local ref="$1" term id halves instance pane
+  _AGMSG_REF_TERM=""; _AGMSG_REF_ID=""; _AGMSG_REF_PANE_ID=""; _AGMSG_REF_SOCK=""
   case "$ref" in
-    tmux:*)  printf '%s\n' "${ref#tmux:}" ;;
-    herdr:*)
-      id="${ref#herdr:}"
+    %*|@*) term=tmux; id="$ref" ;;             # legacy pre-axis bare tmux id
+    *:*)   term="${ref%%:*}"; id="${ref#*:}" ;;
+    *)     return 1 ;;
+  esac
+  # A scheme is accepted only when it names a registered, trusted driver. Keep
+  # this generic: adding a driver must not require another hard-coded case here.
+  # The terminal-returning reader also asks the driver to validate the raw id;
+  # that is the target-safety check, and must happen before v2 ids are decoded.
+  if [ "${2:-}" = validate-id ]; then
+    _agmsg_terminal_id_ok "$term" "$id" || return 1
+  else
+    _agmsg_locator_kind_ok "$term" || return 1
+  fi
+  [ -n "$id" ] || return 1
+
+  local driver_id="$id" pane_id="$id" sock=""
+  case "$term" in
+    tmux)
+      # The final colon separates the pane sigil from the socket. Socket paths
+      # may themselves contain colons; legacy %N/@N has no socket component.
+      case "$id" in
+        *:*) sock="${id%:*}"; pane_id="${id##*:}" ;;
+      esac
+      ;;
+    herdr)
+      # Herdr v2 encodes a colon-bearing socket before its wN:pX pane id.
+      # Decode to the same public id used by v1 readers and the collision scan.
       case "$id" in
         v2:*:*:*)
           halves="$(_agmsg_terminal_id_split herdr "$id")" || return 1
           instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
-          printf '%s:%s\n' "$instance" "$pane"
+          driver_id="$instance:$pane"; pane_id="$driver_id"
           ;;
-        *) printf '%s\n' "$id" ;;
+        *:*:*)
+          halves="$(_agmsg_terminal_id_split herdr "$id")" || return 1
+          instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+          driver_id="$instance:$pane"; pane_id="$driver_id"
+          ;;
       esac
       ;;
-    plain:*) printf '%s\n' "${ref#plain:}" ;;
-    *)       printf '%s\n' "$ref" ;;         # legacy bare id
   esac
+  _AGMSG_REF_TERM="$term"; _AGMSG_REF_ID="$driver_id"
+  _AGMSG_REF_PANE_ID="$pane_id"; _AGMSG_REF_SOCK="$sock"
+}
+
+agmsg_terminal_ref_terminal() {
+  _agmsg_terminal_ref_parse "$1" validate-id || return 1
+  printf '%s\n' "$_AGMSG_REF_TERM"
+}
+
+# Print the driver id of a record ref (stdout). Legacy bare %N/@N remains tmux;
+# herdr v2 is decoded to the same instance:pane form used by v1 readers.
+agmsg_terminal_ref_id() {
+  _agmsg_terminal_ref_parse "$1" || return 1
+  printf '%s\n' "$_AGMSG_REF_ID"
 }
 
 # --- name THIS pane, and record where it is ---------------------------------
@@ -730,35 +751,14 @@ agmsg_terminal_ref_id() {
 # the write through for exactly the records most likely to be OLD, which are the
 # ones most likely to belong to somebody else.
 #
-# The scheme table below mirrors agmsg_terminal_ref_terminal / agmsg_terminal_ref_id
-# (inline, so the scan forks nothing per record); a test pins that the two agree
-# on every form the record format accepts.
+# The shared parser below feeds all three public answers, so a new registered
+# driver scheme cannot be accepted by one reader and rejected by another.
 _agmsg_placement_split() {   # <ref>
-  local ref="$1" term id halves instance pane
+  local ref="$1"
   _AGMSG_PS_TERM=""; _AGMSG_PS_ID=""; _AGMSG_PS_SOCK=""
-  case "$ref" in
-    tmux:*)  term=tmux;  id="${ref#tmux:}" ;;
-    herdr:*) term=herdr; id="${ref#herdr:}" ;;
-    plain:*) term=plain; id="${ref#plain:}" ;;
-    %*|@*)   term=tmux;  id="$ref" ;;        # legacy pre-axis bare tmux id
-    *)       return 1 ;;
-  esac
-  if [ "$term" = tmux ]; then
-    case "$id" in
-      *:*) _AGMSG_PS_SOCK="${id%:*}"; id="${id##*:}" ;;   # split on the LAST colon
-    esac
-  fi
-  if [ "$term" = herdr ]; then
-    case "$id" in
-      *:*:*)
-        halves="$(_agmsg_terminal_id_split herdr "$id")" || return 1
-        instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
-        id="$instance:$pane"
-        ;;
-    esac
-  fi
-  [ -n "$id" ] || return 1
-  _AGMSG_PS_TERM="$term"; _AGMSG_PS_ID="$id"
+  _agmsg_terminal_ref_parse "$ref" || return 1
+  _AGMSG_PS_TERM="$_AGMSG_REF_TERM"; _AGMSG_PS_ID="$_AGMSG_REF_PANE_ID"
+  _AGMSG_PS_SOCK="$_AGMSG_REF_SOCK"
   return 0
 }
 
