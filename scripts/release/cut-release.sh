@@ -105,6 +105,12 @@ if [ "$PRERELEASE" -eq 0 ]; then
   git-cliff --tag "$TAG" -o CHANGELOG.md
   FILES="$FILES CHANGELOG.md"
 fi
+# cliff.toml is not touched by this script -- it only joins the commit when
+# something upstream of this run left it with an actual diff. Unchanged is
+# the common case, and stays out of the commit exactly as before.
+if ! git diff --quiet -- cliff.toml; then
+  FILES="$FILES cliff.toml"
+fi
 
 # 3. commit + push the release PR
 # shellcheck disable=SC2086

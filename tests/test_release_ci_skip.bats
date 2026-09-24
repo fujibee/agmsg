@@ -53,7 +53,7 @@ detect() {
 @test "release-ci: the release arm names these files and no others (#875)" {
   local arm expected
   arm=$(grep -oE '^ +VERSION\|[^)]*\) ;;' "$WORKFLOW" | sed 's/) ;;$//; s/^ *//' | tr '|' '\n' | sort)
-  expected=$(printf '%s\n' VERSION package.json .claude-plugin/plugin.json | sort)
+  expected=$(printf '%s\n' VERSION package.json .claude-plugin/plugin.json cliff.toml | sort)
   # The premise: the grep found the arm at all. An empty match would make the
   # comparison below a comparison of two things that are not there.
   [ -n "$arm" ]
@@ -100,7 +100,7 @@ detect() {
 
 @test "release-ci: anything riding along with the bump forces the full matrix (#875)" {
   local extra
-  for extra in scripts/lib/storage.sh tests/test_remote.bats SKILL.md cliff.toml; do
+  for extra in scripts/lib/storage.sh tests/test_remote.bats SKILL.md; do
     run detect "$BUMP"$'\n'"$extra"
     # `grep`, not `[[ ]]`: a non-last `[[ ]]` cannot fail under errexit on bash
     # 3.2, and this one is inside a loop.

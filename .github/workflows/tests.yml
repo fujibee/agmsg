@@ -315,7 +315,18 @@ jobs:
               # tests/test_release_ci_skip.bats fails if the two disagree — so
               # adding a file there without adding it here is caught, rather
               # than silently skipping the suite for a file nobody measured.
-              VERSION|package.json|.claude-plugin/plugin.json) ;;
+              #
+              # cliff.toml joined this arm because a release PR sometimes
+              # carries a hand-edited cliff.toml line (catching a commit
+              # subject the changelog generator would otherwise drop — #1084,
+              # #1428, and the 1.4.2 release PR all did this), and until now
+              # that rode outside the set and forced the full matrix. Also
+              # measured, not grepped: corrupting cliff.toml left
+              # test_cut_release.bats and test_release_ci_skip.bats green
+              # (git-cliff is a recorder stub in those tests, so its contents
+              # is never read), and a control (a deliberate `exit 42` appended
+              # to cut-release.sh) reddened three of them.
+              VERSION|package.json|.claude-plugin/plugin.json|cliff.toml) ;;
               # NOTE: SKILL.md is intentionally not here — the suite tests it.
               *) docs_only=false; contracts_needed=true ;;
             esac
