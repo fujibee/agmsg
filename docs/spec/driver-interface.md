@@ -429,7 +429,7 @@ Bundled terminal drivers live at `scripts/drivers/terminals/<name>/`,
 mirroring the `types` (agent) axis layout: `terminal.conf` (read-only
 key=value manifest, never sourced) plus `ops.sh` (sourced bash exposing
 `terminal_*` functions — the axis prefix from §1.2). Shipped drivers:
-`herdr`, `tmux`, `plain`.
+`herdr`, `tmux`, `plain`, `orca`.
 
 `terminal.conf` fields:
 
