@@ -300,6 +300,15 @@ agmsg_token_locate_observe() {   # <team> <agent> <owner>
   local was="${_AGMSG_TERMINAL_LOADED:-}"
   local a b c kind inst pane id text locator saw_pane=0
   local pane_args=()
+  # Every peek's stderr is inspected, not discarded, so a sandbox that denies
+  # socket access can be told apart from an ordinary "no panes exist" --
+  # herdr's own driver already forwards the OS-level diagnostic verbatim
+  # (drivers/terminals/herdr/ops.sh, "PermissionDenied (Operation not
+  # permitted)" from a sandbox that denies socket operations, #1158) but this
+  # loop used to throw it away with `2>/dev/null`, collapsing every distinct
+  # cause into the same generic reason below (review, #1457).
+  local peek_err_tmp any_peek_attempted=0 any_non_permission_fail=0 peek_rc peek_err
+  peek_err_tmp="$(mktemp 2>/dev/null)" || peek_err_tmp=""
   while IFS="$(printf '\t')" read -r a b c; do
     case "$a" in
       '?'|'!!'|'!') continue ;;   # that kind/instance could not be read at all
@@ -314,13 +323,28 @@ agmsg_token_locate_observe() {   # <team> <agent> <owner>
     # and other seats' panes need only enough depth to plausibly still hold
     # their own recent output -- an arbitrary, stated bound (#1124 left the
     # general case open), not a claim that it is always enough.
-    if text="$(terminal_peek "$id" --lines 200 2>/dev/null)"; then
+    peek_rc=0
+    if [ -n "$peek_err_tmp" ]; then
+      text="$(terminal_peek "$id" --lines 200 2>"$peek_err_tmp")" || peek_rc=$?
+    else
+      text="$(terminal_peek "$id" --lines 200 2>/dev/null)" || peek_rc=$?
+    fi
+    if [ "$peek_rc" -eq 0 ]; then
       if locator="$(agmsg_locator_compose "$kind" "$inst" "$pane" 2>/dev/null)"; then
         saw_pane=1
         pane_args+=("$locator" "$text")
       fi
+    else
+      any_peek_attempted=1
+      peek_err=""
+      [ -n "$peek_err_tmp" ] && peek_err="$(cat "$peek_err_tmp" 2>/dev/null)"
+      case "$peek_err" in
+        *[Pp]ermission*[Dd]enied*|*[Oo]peration*not*permitted*) : ;;
+        *) any_non_permission_fail=1 ;;
+      esac
     fi
   done <<< "$census"
+  [ -n "$peek_err_tmp" ] && rm -f "$peek_err_tmp"
   if [ -n "$was" ]; then
     agmsg_terminal_load "$was" >/dev/null 2>&1 || true
   elif declare -F _agmsg_terminal_unset_ops >/dev/null 2>&1; then
@@ -328,7 +352,12 @@ agmsg_token_locate_observe() {   # <team> <agent> <owner>
     _AGMSG_TERMINAL_LOADED=""
   fi
 
-  [ "$saw_pane" -eq 1 ] || { printf 'undetermined\tno_panes_readable\n'; return 2; }
+  if [ "$saw_pane" -ne 1 ]; then
+    if [ "$any_peek_attempted" -eq 1 ] && [ "$any_non_permission_fail" -eq 0 ]; then
+      printf 'undetermined\tno_panes_readable_sandbox_permission\n'; return 2
+    fi
+    printf 'undetermined\tno_panes_readable\n'; return 2
+  fi
 
   local result
   result="$(agmsg_token_locate_classify "$token" "${pane_args[@]}")"
