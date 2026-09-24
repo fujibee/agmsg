@@ -120,11 +120,15 @@ case "$_JEV_HTTP_CODE" in
   400)
     # The one 400 cause worth naming on its own: the request's total input
     # (state + every question's own criteria, repeated per question) went
-    # over the provider's own limit. Detected by substring on the raw body
-    # rather than a fixed JSON path -- the exact error shape is the
-    # provider's own and not worth pinning down further here; any other
-    # 400 still falls through to the generic line below.
-    if grep -qF "max_tokens_exceeded" "$out_file" 2>/dev/null; then
+    # over the provider's own limit. Checked against the error's own `code`
+    # field specifically, not a substring anywhere in the body -- a
+    # substring match also fires on an unrelated 400 whose free-text
+    # `message` happens to mention this phrase (review round 2: e.g. a
+    # message listing it as one of several possible codes), which would
+    # print a wrong, specific-sounding diagnosis for a different failure.
+    # Any other 400, including one this jq expression cannot parse, falls
+    # through to the generic line below.
+    if jq -e '(.error.code // empty) == "max_tokens_exceeded"' "$out_file" >/dev/null 2>&1; then
       fail "jev: request too large for one call (max_tokens_exceeded) -- split the questions into smaller batches"
     fi
     fail "jev: unexpected HTTP 400"
@@ -161,16 +165,27 @@ result_json="$(jq -c '
   (.answers // {}) as $a
   | ($a | keys_unsorted) as $ks
   | if ($a | type) != "object" or ($ks | length) == 0 then empty else
-      ( [$ks[] as $k | ($a[$k].choice // null) as $choice | {
-          name: $k,
-          choice: $choice,
+      ( [$ks[] as $k | ($a[$k].choice // null) as $choice |
+          ($a[$k].confidence // null) as $conf |
           # A missing choice (deliberately dropped by an upstream bug, or a
           # provider quirk) makes $choice null -- indexing an object with a
           # null key is a jq RUNTIME error, not a missing-value one, so
           # `// null` alone does not save it. try/catch turns that into the
           # same null this row already renders as "malformed" from.
-          p: (try $a[$k].probabilities[$choice] catch null),
-          confidence: ($a[$k].confidence // null)
+          (try $a[$k].probabilities[$choice] catch null) as $p | {
+          name: $k,
+          choice: $choice,
+          p: $p,
+          confidence: $conf,
+          # Decided by TYPE, not by comparing the extracted VALUE to the
+          # text "null" downstream: a `choice` answer can legitimately BE
+          # the string "null" (a caller naming that choice in `criteria`),
+          # and `jq -r` turns both a genuine JSON null and the two-character
+          # string "null" into the identical output text -- a downstream
+          # `[ "$x" = "null" ]` cannot tell them apart (review round 2). The
+          # type check runs here, on the real JSON value, before anything is
+          # ever stringified.
+          ok: (($choice | type) == "string" and ($p | type) == "number" and ($conf | type) == "number")
         }] ) as $rows
       | {
           rows: $rows,
@@ -196,12 +211,11 @@ out_tokens="$(jq -r '.output_tokens // empty' <<<"$result_json")"
 # A malformed sole answer still fails the whole call -- there is nothing
 # else in the reply to salvage it with, unlike the 2+ case below.
 if [ "$row_count" -eq 1 ]; then
+  ok_val="$(jq -r '.rows[0].ok' <<<"$result_json")"
+  [ "$ok_val" = "true" ] || fail "jev: unexpected response shape"
   choices="$(jq -r '.rows[0].choice' <<<"$result_json")"
   p_val="$(jq -r '.rows[0].p' <<<"$result_json")"
   c_val="$(jq -r '.rows[0].confidence' <<<"$result_json")"
-  if [ "$choices" = "null" ] || [ "$p_val" = "null" ] || [ "$c_val" = "null" ]; then
-    fail "jev: unexpected response shape"
-  fi
   if [ "$provider" = "typesafe" ]; then
     [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
     printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, tokens %s in / %s out)' \
@@ -230,12 +244,13 @@ else
   lines=()
   while IFS= read -r row; do
     seg_name="$(jq -r '.name' <<<"$row")"
-    seg_choice="$(jq -r '.choice' <<<"$row")"
-    seg_p="$(jq -r '.p' <<<"$row")"
-    seg_c="$(jq -r '.confidence' <<<"$row")"
-    if [ "$seg_choice" = "null" ] || [ "$seg_p" = "null" ] || [ "$seg_c" = "null" ]; then
+    seg_ok="$(jq -r '.ok' <<<"$row")"
+    if [ "$seg_ok" != "true" ]; then
       printf -v line '%s=error (malformed answer)' "$seg_name"
     else
+      seg_choice="$(jq -r '.choice' <<<"$row")"
+      seg_p="$(jq -r '.p' <<<"$row")"
+      seg_c="$(jq -r '.confidence' <<<"$row")"
       printf -v line '%s=%s (p=%.2f, confidence=%.2f)' "$seg_name" "$seg_choice" "$seg_p" "$seg_c"
     fi
     lines+=("$(_jev_one_line "$line")")

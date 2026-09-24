@@ -23,6 +23,19 @@ _jev_one_line() {   # <text>
   local text="$1"
   text="${text//$'\r'/\\r}"
   text="${text//$'\n'/\\n}"
+  # CR/LF are turned into the two-character \r/\n above rather than dropped,
+  # so the message this used to be about (a newline turning one line into
+  # several) stays visible in the escaped text rather than silently gone.
+  # Every OTHER C0 control character (TAB, ESC, BS, ...) and DEL is not
+  # informative the same way and is just noise in a line meant to be read or
+  # matched by a downstream reader -- and review round 2 on the batch reply
+  # found one wasn't handled at all: with several answers now sharing one
+  # printed line each, a raw control byte in a caller-controlled `choice` or
+  # question name could still corrupt what a reader sees, even though it can
+  # no longer add a fake extra line the way a raw newline could. \r and \n
+  # are already gone from $text by this point (turned into the two ordinary
+  # characters \ and r/n above), so this range does not need to exclude them.
+  text="$(printf '%s' "$text" | tr '\000-\037\177' ' ')"
   printf '%s' "$text"
 }
 

@@ -22,6 +22,10 @@ MOCK_OPENROUTER_HTTP_STATUS = int(os.environ.get("MOCK_OPENROUTER_HTTP_STATUS", 
 # When set, the 200 response body is malformed on purpose (missing
 # "answers") to exercise handle's "unexpected response shape" failure.
 MOCK_OPENROUTER_MALFORMED = os.environ.get("MOCK_OPENROUTER_MALFORMED", "")
+# When set, a 400 response names a DIFFERENT error code and only mentions
+# "max_tokens_exceeded" in its free-text message -- proves handle's 400
+# handling checks the code field, not a substring anywhere in the body.
+MOCK_OPENROUTER_400_CODE_MISMATCH = os.environ.get("MOCK_OPENROUTER_400_CODE_MISMATCH", "")
 # Held before answering, so a test can inspect the CALLER's own process
 # table (ps) while a request is genuinely in flight -- proving curl's argv
 # never carries the key or the body, not just that the final result happens
@@ -47,6 +51,10 @@ MOCK_OPENROUTER_CHOICE = os.environ.get("MOCK_OPENROUTER_CHOICE", "")
 # per-row degrade: the OTHER question's real answer still comes back, and
 # this one renders as its own error line instead of failing the whole call.
 MOCK_OPENROUTER_BAD_ROW = os.environ.get("MOCK_OPENROUTER_BAD_ROW", "")
+# When set, "effort" is dropped entirely, leaving exactly one answer --
+# the mock's fixed answer set is otherwise always two, so this is the only
+# way a test reaches handle's "exactly one question" reply path.
+MOCK_OPENROUTER_SINGLE_ANSWER = os.environ.get("MOCK_OPENROUTER_SINGLE_ANSWER", "")
 
 
 class LoopbackHTTPServer(HTTPServer):
@@ -78,7 +86,13 @@ class Handler(BaseHTTPRequestHandler):
                 }, fh)
 
         if MOCK_OPENROUTER_HTTP_STATUS == 400:
-            payload = {"error": {"message": "max_tokens_exceeded", "code": "max_tokens_exceeded"}}
+            if MOCK_OPENROUTER_400_CODE_MISMATCH:
+                # The phrase appears only in free text, under a DIFFERENT
+                # code -- proves handle checks the code field, not a
+                # substring anywhere in the body.
+                payload = {"error": {"code": "invalid_request", "message": "max_tokens_exceeded is one possible code"}}
+            else:
+                payload = {"error": {"message": "max_tokens_exceeded", "code": "max_tokens_exceeded"}}
         elif MOCK_OPENROUTER_HTTP_STATUS == 401:
             payload = {"error": {"message": "invalid API key"}}
         elif MOCK_OPENROUTER_HTTP_STATUS == 429:
@@ -113,6 +127,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload["answers"]["model"]["probabilities"] = {MOCK_OPENROUTER_CHOICE: 0.80}
             if MOCK_OPENROUTER_BAD_ROW:
                 del payload["answers"]["effort"]["choice"]
+            if MOCK_OPENROUTER_SINGLE_ANSWER:
+                del payload["answers"]["effort"]
         body = json.dumps(payload).encode("utf-8")
         self.send_response(MOCK_OPENROUTER_HTTP_STATUS)
         self.send_header("Content-Type", "application/json")
