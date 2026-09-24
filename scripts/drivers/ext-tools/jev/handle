@@ -120,15 +120,16 @@ case "$_JEV_HTTP_CODE" in
   400)
     # The one 400 cause worth naming on its own: the request's total input
     # (state + every question's own criteria, repeated per question) went
-    # over the provider's own limit. Checked against the error's own `code`
-    # field specifically, not a substring anywhere in the body -- a
-    # substring match also fires on an unrelated 400 whose free-text
-    # `message` happens to mention this phrase (review round 2: e.g. a
-    # message listing it as one of several possible codes), which would
-    # print a wrong, specific-sounding diagnosis for a different failure.
-    # Any other 400, including one this jq expression cannot parse, falls
-    # through to the generic line below.
-    if jq -e '(.error.code // empty) == "max_tokens_exceeded"' "$out_file" >/dev/null 2>&1; then
+    # over the provider's own limit. Checked against the error's own
+    # `detail.error_type` field specifically, not a substring anywhere in
+    # the body -- a substring match also fires on an unrelated 400 whose
+    # free-text mentions this phrase without it being the actual cause
+    # (review round 2). Body shape measured directly (2026-09-24, Banking77
+    # at 46+ questions in one call): every over-limit 400 came back as
+    # exactly `{"detail":{"error_type":"max_tokens_exceeded"}}`, nothing
+    # else in "detail" varying. Any other 400, including one this jq
+    # expression cannot parse, falls through to the generic line below.
+    if jq -e '(.detail.error_type // empty) == "max_tokens_exceeded"' "$out_file" >/dev/null 2>&1; then
       fail "jev: request too large for one call (max_tokens_exceeded) -- split the questions into smaller batches"
     fi
     fail "jev: unexpected HTTP 400"

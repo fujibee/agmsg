@@ -338,10 +338,10 @@ _start_mock_openrouter() {
   esac
   [ "$output" = "jev: request too large for one call (max_tokens_exceeded) -- split the questions into smaller batches" ]
 
-  # --- contrast: a 400 whose error CODE is something else, and only
-  # mentions "max_tokens_exceeded" in its free-text message, must NOT get
-  # the specific line above -- a substring match anywhere in the body would
-  # misdiagnose this as the wrong failure (review round 2) ---
+  # --- contrast: a 400 whose detail.error_type is something else, and
+  # only mentions "max_tokens_exceeded" in unrelated free text, must NOT
+  # get the specific line above -- a substring match anywhere in the body
+  # would misdiagnose this as the wrong failure (review round 2) ---
   _start_mock_openrouter MOCK_OPENROUTER_HTTP_STATUS=400 MOCK_OPENROUTER_400_CODE_MISMATCH=1
   run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
     "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"

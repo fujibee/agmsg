@@ -22,9 +22,10 @@ MOCK_OPENROUTER_HTTP_STATUS = int(os.environ.get("MOCK_OPENROUTER_HTTP_STATUS", 
 # When set, the 200 response body is malformed on purpose (missing
 # "answers") to exercise handle's "unexpected response shape" failure.
 MOCK_OPENROUTER_MALFORMED = os.environ.get("MOCK_OPENROUTER_MALFORMED", "")
-# When set, a 400 response names a DIFFERENT error code and only mentions
-# "max_tokens_exceeded" in its free-text message -- proves handle's 400
-# handling checks the code field, not a substring anywhere in the body.
+# When set, a 400 response's detail.error_type is something ELSE, and only
+# mentions "max_tokens_exceeded" in unrelated free text -- proves handle's
+# 400 handling checks that field specifically, not a substring anywhere in
+# the body.
 MOCK_OPENROUTER_400_CODE_MISMATCH = os.environ.get("MOCK_OPENROUTER_400_CODE_MISMATCH", "")
 # Held before answering, so a test can inspect the CALLER's own process
 # table (ps) while a request is genuinely in flight -- proving curl's argv
@@ -87,12 +88,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if MOCK_OPENROUTER_HTTP_STATUS == 400:
             if MOCK_OPENROUTER_400_CODE_MISMATCH:
-                # The phrase appears only in free text, under a DIFFERENT
-                # code -- proves handle checks the code field, not a
-                # substring anywhere in the body.
-                payload = {"error": {"code": "invalid_request", "message": "max_tokens_exceeded is one possible code"}}
+                # detail.error_type is something ELSE, with the phrase only
+                # appearing in unrelated free text -- proves handle checks
+                # that field specifically, not a substring anywhere in the
+                # body.
+                payload = {"detail": {"error_type": "invalid_request", "note": "max_tokens_exceeded is one possible error_type"}}
             else:
-                payload = {"error": {"message": "max_tokens_exceeded", "code": "max_tokens_exceeded"}}
+                # The real shape, measured directly (2026-09-24, Banking77
+                # at 46+ questions in one call): every over-limit 400 from
+                # OpenRouter came back as exactly this body.
+                payload = {"detail": {"error_type": "max_tokens_exceeded"}}
         elif MOCK_OPENROUTER_HTTP_STATUS == 401:
             payload = {"error": {"message": "invalid API key"}}
         elif MOCK_OPENROUTER_HTTP_STATUS == 429:
