@@ -203,6 +203,132 @@ teardown() {
   [ ! -e "$shim" ]
 }
 
+@test "uninstall: removes only the targeted install, leaving a second install's command, project hooks/commands, and writable_roots in place (#1400)" {
+  # Ran uninstall.sh removed EVERY ~/.agents/skills/*/ install on the machine,
+  # not just its own -- a throwaway --cmd install's uninstall wiped every
+  # other real one, including machine-wide shared pieces like this shim.
+  #
+  # "agmsg" and "agmsg-second" (review): a plain substring/prefix match on
+  # the shorter name or its bare SKILL_DIR, with no boundary, ALSO matches
+  # the longer install's own name/path/hooks/commands -- "agmsg" is a
+  # literal substring of "agmsg-second", and "$SK" (no trailing slash) is a
+  # literal prefix of "$SK-second". Uninstalling the shorter one must not
+  # touch the longer one's own registrations.
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex"
+  printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  local sk_second="$FAKE_HOME/.agents/skills/agmsg-second"
+
+  local project="$FAKE_HOME/project"
+  mkdir -p "$project"
+  bash "$SK/scripts/join.sh" myteam alice claude-code "$project" >/dev/null
+  bash "$sk_second/scripts/join.sh" myteam bob claude-code "$project" >/dev/null
+  # turn mode is what installs the Stop/PostToolUse hooks uninstall.sh
+  # cleans up; monitor mode uses no settings.json hooks at all.
+  HOME="$FAKE_HOME" bash "$SK/scripts/delivery.sh" set turn claude-code "$project" >/dev/null
+  HOME="$FAKE_HOME" bash "$sk_second/scripts/delivery.sh" set turn claude-code "$project" >/dev/null
+  # Nothing currently writes a per-PROJECT command file (only the global
+  # ~/.claude/commands/<name>.md below) -- this loop is legacy cleanup with
+  # no live writer, but the review finding is about its MATCH condition, so
+  # exercise it directly with a hand-built fixture per install.
+  mkdir -p "$project/.claude/commands"
+  printf 'Run `%s/scripts/whoami.sh`.\n' "$SK" > "$project/.claude/commands/agmsg-project.md"
+  printf 'Run `%s/scripts/whoami.sh`.\n' "$sk_second" > "$project/.claude/commands/agmsg-second-project.md"
+
+  local cmd_first="$FAKE_HOME/.claude/commands/agmsg.md"
+  local cmd_second="$FAKE_HOME/.claude/commands/agmsg-second.md"
+  local proj_cmd_first="$project/.claude/commands/agmsg-project.md"
+  local proj_cmd_second="$project/.claude/commands/agmsg-second-project.md"
+  local settings="$project/.claude/settings.local.json"
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -f "$cmd_first" ]
+  [ -f "$cmd_second" ]
+  [ -f "$proj_cmd_first" ]
+  [ -f "$proj_cmd_second" ]
+  grep -qF "$SK/" "$settings"
+  grep -qF "$sk_second/" "$settings"
+  grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
+  [ -f "$shim" ]
+
+  # Run the COPY inside the "agmsg" install itself (the normal way a real
+  # user uninstalls one) -- $0's own directory is what identifies which one
+  # install this run is about (#1400).
+  HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+
+  [ ! -e "$SK" ]
+  [ ! -f "$cmd_first" ]
+  [ ! -f "$proj_cmd_first" ]
+  refute grep -qF "$SK/" "$settings"
+  refute grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
+  # The untouched install: global command, project hook and command file,
+  # writable_roots entry, and the machine-wide shim it still needs.
+  [ -d "$sk_second" ]
+  [ -f "$cmd_second" ]
+  [ -f "$proj_cmd_second" ]
+  grep -qF "$sk_second/" "$settings"
+  grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
+  [ -f "$shim" ]
+
+  # (review, round 2) The target install has NO writable_roots entry of
+  # its own -- only a same-prefix sibling's ("third" / "third-second") --
+  # so uninstalling it must not touch config.toml at all: not rewrite it
+  # to the same content, and critically, not even create a .bak. A loose
+  # entry pre-check (even a boundary-correct one) would still enter the
+  # block and do both merely because the FILE mentions "third" somewhere,
+  # despite nothing in it actually needing to change.
+  #
+  # The earlier uninstall above already left its own config.toml.bak from
+  # its own (real) rewrite -- remove it first so its mere presence here
+  # cannot be mistaken for one this second uninstall created.
+  rm -f "$FAKE_HOME/.codex/config.toml.bak"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd third
+  local sk_third="$FAKE_HOME/.agents/skills/third"
+  # ~/.codex/config.toml does not exist until here, so "third" never gets
+  # a root of its own -- install.sh only adds one when the file is
+  # already there when it runs.
+  printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd third-second
+  local sk_third_second="$FAKE_HOME/.agents/skills/third-second"
+  grep -qF "$sk_third_second/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "$sk_third/" "$FAKE_HOME/.codex/config.toml"
+
+  # install.sh's own codex-config step makes its own .bak when it added
+  # third-second's entry above -- clear it too, so the check below is only
+  # about what THIS uninstall did.
+  rm -f "$FAKE_HOME/.codex/config.toml.bak"
+  local codex_before; codex_before="$(cat "$FAKE_HOME/.codex/config.toml")"
+  HOME="$FAKE_HOME" bash "$sk_third/uninstall.sh" --yes
+  [ "$(cat "$FAKE_HOME/.codex/config.toml")" = "$codex_before" ]
+  [ ! -e "$FAKE_HOME/.codex/config.toml.bak" ]
+}
+
+@test "uninstall --all --yes: removes every install and the shared shim (#1400)" {
+  mkdir -p "$FAKE_HOME/.claude"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+
+  local cmd_first="$FAKE_HOME/.claude/commands/agmsg.md"
+  local cmd_second="$FAKE_HOME/.claude/commands/agmsg-second.md"
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -f "$cmd_first" ]
+  [ -f "$cmd_second" ]
+  [ -f "$shim" ]
+
+  # Run from a kept checkout ($REPO_ROOT/uninstall.sh, not either install's
+  # own copy) -- --all must work the same regardless of where it is run
+  # from, unlike the no-args form, which without it would refuse here with
+  # two installs present and no single one identified.
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --all --yes
+
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg" ]
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg-second" ]
+  [ ! -f "$cmd_first" ]
+  [ ! -f "$cmd_second" ]
+  [ ! -e "$shim" ]
+}
+
 @test "install: Codex skill documents safe Git Bash quoting for Windows PowerShell" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
 

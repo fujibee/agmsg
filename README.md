@@ -436,14 +436,22 @@ An `uninstall.sh` copy ships inside every install, so this works whether you
 installed via `git clone`, `npx agmsg`, or the curl one-liner:
 
 ```bash
-~/.agents/skills/agmsg/uninstall.sh              # Interactive (confirms each step)
-~/.agents/skills/agmsg/uninstall.sh --yes        # Remove everything
+~/.agents/skills/agmsg/uninstall.sh              # This install only (confirms each step)
+~/.agents/skills/agmsg/uninstall.sh --yes        # This install only, no confirmation
 ~/.agents/skills/agmsg/uninstall.sh --keep-data  # Remove skill but keep DB and teams
+~/.agents/skills/agmsg/uninstall.sh --all        # Every agmsg install on this machine
 ```
 
-(If you have a `git clone` checkout handy, `./uninstall.sh` from the repo root works the same way.)
+With no `--all`, it removes exactly one install — the one it's running from.
+Cleans up: skill files, slash commands, hooks, AGENTS.md sections, and team configs.
 
-Auto-detects installed skill directories and cleans up: skill files, slash commands, hooks, AGENTS.md sections, and team configs.
+If you have a `git clone` checkout handy, `./uninstall.sh` from the repo root
+works the same way when there's exactly one install on the machine. With more
+than one, it refuses rather than guess which one you mean — run the
+`uninstall.sh` inside the one you want, or pass `--all` to remove every
+install on the machine (with one combined confirmation unless `--yes` is
+also given, plus a separate one for whether to remove each install's DB and
+teams too).
 
 ## Configuration
 
