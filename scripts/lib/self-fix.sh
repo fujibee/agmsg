@@ -56,6 +56,10 @@
 # equals it. Unreadable locks are skipped, not guessed.
 _fix_seats_of() {   # <bare-sid>
   local sid="$1" f name team agent rd kind owner
+  # A UUIDv7, the shape _agmsg_id_key_for (actas-lock.sh) mints both halves
+  # of an id-keyed lock name from -- see test_local_team_ids.bats' own
+  # UUID7_RE, the one other place this exact shape is checked.
+  local uuid7_re='^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
   for f in "$(_actas_lock_dir)"/actas.*.session; do
     [ -e "$f" ] || continue
     name="${f##*/actas.}"; name="${name%.session}"
@@ -64,6 +68,31 @@ _fix_seats_of() {   # <bare-sid>
     rd="$(_actas_lock_read_path "$f")"; kind="${rd%%$'\t'*}"; owner="${rd#*$'\t'}"
     [ "$kind" = ok ] && [ -n "$owner" ] || continue
     [ "$(agmsg_instance_bare_sid "$owner")" = "$sid" ] || continue
+    # The lock's own filename may be ID-keyed
+    # (actas.<team_id>__<member_id>.session, #1240): $team/$agent above are
+    # then the IDS, not names. Every OTHER reader of a role (role-session.sh,
+    # agmsg_role_session_get, and agmsg_spawn_path's own name-keyed callers)
+    # is keyed by NAME, never by this pair directly -- passing the ids on as
+    # though they were names is the defect #1457 traced the record's own
+    # missing_fields failure to. Decided by SHAPE (both halves a UUIDv7),
+    # not by whether a team directory happens to exist for the raw "$team"
+    # half -- a team with no directory yet (never joined, or a fixture that
+    # places a lock directly) would otherwise misread as id-keyed too.
+    if [[ "$team" =~ $uuid7_re ]] && [[ "$agent" =~ $uuid7_re ]]; then
+      local resolved=""
+      if resolved="$(_agmsg_id_key_to_names "$team" "$agent")"; then
+        team="${resolved%%$'\t'*}"; agent="${resolved#*$'\t'}"
+      else
+        # Could not resolve by name -- refuse rather than hand the raw ids
+        # to a writer that would silently miss the real record (the
+        # missing_fields shape #1457 measured). Reported, not dropped:
+        # team/agent empty marks this row as unresolved, and $name (the
+        # lock file's own name) is carried as the 4th field so the caller
+        # can say what it could not resolve.
+        printf '\t\t%s\t%s\n' "$owner" "$name"
+        continue
+      fi
+    fi
     printf '%s\t%s\t%s\n' "$team" "$agent" "$owner"
   done
 }
@@ -155,14 +184,19 @@ agmsg_fix_run() {
     echo "fix none:arguments_refused (fix takes no arguments: a location handed from outside is the accident this exists to remove)" >&2
     return 1
   fi
-  local sid seats line team agent owner loc st payload via rc=0 any=0 failed=0
+  local sid seats line team agent owner raw loc st payload via rc=0 any=0 failed=0
   sid="$(agmsg_instance_bare_sid "${AGMSG_SESSION_ID:-}" 2>/dev/null)"
   [ -n "$sid" ] || { echo "fix none:no_session_id" >&2; return 1; }
   seats="$(_fix_seats_of "$sid")"
   [ -n "$seats" ] || { echo "fix none:no_seat_for_this_session" >&2; return 1; }
-  while IFS=$'\t' read -r team agent owner; do
-    [ -n "$team" ] || continue
+  while IFS=$'\t' read -r team agent owner raw; do
+    [ -n "$owner" ] || continue
     any=1
+    if [ -z "$team" ] || [ -z "$agent" ]; then
+      printf 'fix seat=<%s> state=unresolved reason=could_not_resolve_by_name via=n/a (written nothing)\n' "$raw"
+      failed=1
+      continue
+    fi
     loc="$(_fix_locate "$team" "$agent" "$owner")" || true
     st="${loc%%$'\t'*}"; payload="${loc#*$'\t'}"; via="${payload##*$'\t'}"; payload="${payload%$'\t'*}"
     if [ "$st" = proved ]; then

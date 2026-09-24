@@ -234,3 +234,47 @@ PROBE
   grep -Fqx "write T alice tmux:%5 $ME" "$SPY"
   refute grep -q 'state= ' <<< "$output"
 }
+
+@test "fix: an ID-keyed lock (team_id/member_id, #1240) resolves the real role-session by NAME, not missing_fields (#1457)" {
+  # Every join now mints a team_id/member_id (#1240), so the actas lock this
+  # session owns is actas.<team_id>__<member_id>.session, not
+  # actas.T__alice.session -- _own_seat below goes through actas_lock_path,
+  # the same id-or-legacy resolution the real claim flow uses, so it lands
+  # there too. _fix_seats_of used to split that FILENAME into team/agent,
+  # handing the two ids on as though they were names; every OTHER reader of
+  # a role (agmsg_role_session_get, inside the REAL self-write.sh below) is
+  # keyed by name, so the ids found nothing and the record cell failed as
+  # missing_fields -- reproduced live, before this fix, with this exact
+  # setup. This pins the fixed shape: the ids resolve back to "T"/"alice"
+  # and the record is written under the name the real role-session.sh
+  # record already exists under.
+  #
+  # The REAL writer, not this file's default spy (setup(), line 23) -- the
+  # defect only shows up once role-session.sh's own name-keyed lookup
+  # actually runs against it.
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/self-write.sh"
+  # No real herdr socket in this fixture: keep the driver from loading (it
+  # would overwrite these with its own real ops), and stand in for the one
+  # capability self-write.sh actually needs past the fence step. Every
+  # OTHER decoration (label/key/session) is optional by self-write.sh's own
+  # design and skips cleanly with no driver loaded.
+  agmsg_terminal_load() { :; }
+  terminal_fence() { printf 'inst1\tt1\n'; return 0; }
+
+  bash "$SCRIPTS/join.sh" T alice codex "$SKILL_DIR/proj" >/dev/null
+  _own_seat alice "$ME"
+  # The role-session record a real actas-claim.sh writes (role-session.sh's
+  # own agmsg_role_session_record) -- _own_seat above only places the lock,
+  # the same shortcut every other test in this file uses; this is the ONE
+  # test that also needs the record self-write.sh's real
+  # agmsg_role_session_get reads project/type from.
+  agmsg_role_session_record T alice "$ME" "$SKILL_DIR/proj" codex "$ME"
+  _proof_says 0 proved herdr:w1:pB
+
+  run agmsg_fix_run
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/alice state=proved locator=herdr:w1:pB via=proof" ]
+  refute grep -qF "missing_fields" <<<"$output"
+  grep -qF "record attempt=ok" <<<"$output"
+}
