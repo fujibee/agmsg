@@ -42,6 +42,11 @@ MOCK_OPENROUTER_NO_COST = os.environ.get("MOCK_OPENROUTER_NO_COST", "")
 # straight back by the API; see handle's own comment, review finding
 # #1364 round 2).
 MOCK_OPENROUTER_CHOICE = os.environ.get("MOCK_OPENROUTER_CHOICE", "")
+# When set, the "effort" answer in a multi-question response is malformed
+# (its "choice" key is dropped entirely) so a test can exercise handle's
+# per-row degrade: the OTHER question's real answer still comes back, and
+# this one renders as its own error line instead of failing the whole call.
+MOCK_OPENROUTER_BAD_ROW = os.environ.get("MOCK_OPENROUTER_BAD_ROW", "")
 
 
 class LoopbackHTTPServer(HTTPServer):
@@ -72,7 +77,9 @@ class Handler(BaseHTTPRequestHandler):
                     "body": parsed_body,
                 }, fh)
 
-        if MOCK_OPENROUTER_HTTP_STATUS == 401:
+        if MOCK_OPENROUTER_HTTP_STATUS == 400:
+            payload = {"error": {"message": "max_tokens_exceeded", "code": "max_tokens_exceeded"}}
+        elif MOCK_OPENROUTER_HTTP_STATUS == 401:
             payload = {"error": {"message": "invalid API key"}}
         elif MOCK_OPENROUTER_HTTP_STATUS == 429:
             payload = {"error": {"message": "rate limited"}}
@@ -104,6 +111,8 @@ class Handler(BaseHTTPRequestHandler):
             if MOCK_OPENROUTER_CHOICE:
                 payload["answers"]["model"]["choice"] = MOCK_OPENROUTER_CHOICE
                 payload["answers"]["model"]["probabilities"] = {MOCK_OPENROUTER_CHOICE: 0.80}
+            if MOCK_OPENROUTER_BAD_ROW:
+                del payload["answers"]["effort"]["choice"]
         body = json.dumps(payload).encode("utf-8")
         self.send_response(MOCK_OPENROUTER_HTTP_STATUS)
         self.send_header("Content-Type", "application/json")

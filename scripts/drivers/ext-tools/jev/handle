@@ -117,6 +117,18 @@ _jev_api_call "$key" "$request_json" "$out_file" "$url" ||
   fail "jev: request failed ($_JEV_CURL_DIAG)"
 
 case "$_JEV_HTTP_CODE" in
+  400)
+    # The one 400 cause worth naming on its own: the request's total input
+    # (state + every question's own criteria, repeated per question) went
+    # over the provider's own limit. Detected by substring on the raw body
+    # rather than a fixed JSON path -- the exact error shape is the
+    # provider's own and not worth pinning down further here; any other
+    # 400 still falls through to the generic line below.
+    if grep -qF "max_tokens_exceeded" "$out_file" 2>/dev/null; then
+      fail "jev: request too large for one call (max_tokens_exceeded) -- split the questions into smaller batches"
+    fi
+    fail "jev: unexpected HTTP 400"
+    ;;
   401) fail "jev: invalid API key (HTTP 401)" ;;
   429) fail "jev: rate limited (HTTP 429)" ;;
   2??) : ;;
@@ -149,20 +161,23 @@ result_json="$(jq -c '
   (.answers // {}) as $a
   | ($a | keys_unsorted) as $ks
   | if ($a | type) != "object" or ($ks | length) == 0 then empty else
-      ( [$ks[] as $k | {
+      ( [$ks[] as $k | ($a[$k].choice // null) as $choice | {
           name: $k,
-          choice: $a[$k].choice,
-          p: ($a[$k].probabilities[$a[$k].choice] // null),
+          choice: $choice,
+          # A missing choice (deliberately dropped by an upstream bug, or a
+          # provider quirk) makes $choice null -- indexing an object with a
+          # null key is a jq RUNTIME error, not a missing-value one, so
+          # `// null` alone does not save it. try/catch turns that into the
+          # same null this row already renders as "malformed" from.
+          p: (try $a[$k].probabilities[$choice] catch null),
           confidence: ($a[$k].confidence // null)
         }] ) as $rows
-      | if ($rows | any(.choice == null or .p == null or .confidence == null)) then empty else
-          {
-            rows: $rows,
-            cost: (.usage.cost // null),
-            input_tokens: (.usage.input_tokens // null),
-            output_tokens: (.usage.output_tokens // null)
-          }
-        end
+      | {
+          rows: $rows,
+          cost: (.usage.cost // null),
+          input_tokens: (.usage.input_tokens // null),
+          output_tokens: (.usage.output_tokens // null)
+        }
     end
 ' "$out_file" 2>/dev/null)"
 rm -f "$out_file"
@@ -178,10 +193,15 @@ out_tokens="$(jq -r '.output_tokens // empty' <<<"$result_json")"
 # term IS that term, so this is not a special case mathematically -- it is
 # spelled out anyway so "the one-question reply never changes" is
 # something this script visibly does, not an emergent property to trust).
+# A malformed sole answer still fails the whole call -- there is nothing
+# else in the reply to salvage it with, unlike the 2+ case below.
 if [ "$row_count" -eq 1 ]; then
   choices="$(jq -r '.rows[0].choice' <<<"$result_json")"
   p_val="$(jq -r '.rows[0].p' <<<"$result_json")"
   c_val="$(jq -r '.rows[0].confidence' <<<"$result_json")"
+  if [ "$choices" = "null" ] || [ "$p_val" = "null" ] || [ "$c_val" = "null" ]; then
+    fail "jev: unexpected response shape"
+  fi
   if [ "$provider" = "typesafe" ]; then
     [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
     printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, tokens %s in / %s out)' \
@@ -191,28 +211,51 @@ if [ "$row_count" -eq 1 ]; then
     printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)' \
       "$choices" "$p_val" "$c_val" "$cost_val"
   fi
+  printf '%s\n' "$(_jev_one_line "$reply_line")"
 else
-  # Two or more: each question's own name=choice (p=.., confidence=..),
+  # Two or more: one LINE per question, `name=choice (p=.., confidence=..)`,
   # addressable by NAME (the sender's own `questions` key) rather than by
   # position -- position silently breaks the moment the endpoint (or a
-  # future request) reorders answers; a name cannot.
-  segments=()
+  # future request) reorders answers; a name cannot. Each line goes through
+  # _jev_one_line on its own, same as every other line this script ever
+  # prints, so one answer's caller-controlled choice name cannot inject a
+  # line break that reads as a further (fake) answer.
+  #
+  # A single malformed row -- missing choice, or a choice absent from its
+  # own probabilities -- no longer fails the WHOLE call: it renders as its
+  # own `name=error (malformed answer)` line, and every other question's
+  # real answer still comes back. Failing the entire batch over one bad
+  # row would throw away N-1 good answers along with it, and the caller
+  # already has to read each row's own name regardless.
+  lines=()
   while IFS= read -r row; do
     seg_name="$(jq -r '.name' <<<"$row")"
     seg_choice="$(jq -r '.choice' <<<"$row")"
     seg_p="$(jq -r '.p' <<<"$row")"
     seg_c="$(jq -r '.confidence' <<<"$row")"
-    printf -v seg '%s=%s (p=%.2f, confidence=%.2f)' "$seg_name" "$seg_choice" "$seg_p" "$seg_c"
-    segments+=("$seg")
+    if [ "$seg_choice" = "null" ] || [ "$seg_p" = "null" ] || [ "$seg_c" = "null" ]; then
+      printf -v line '%s=error (malformed answer)' "$seg_name"
+    else
+      printf -v line '%s=%s (p=%.2f, confidence=%.2f)' "$seg_name" "$seg_choice" "$seg_p" "$seg_c"
+    fi
+    lines+=("$(_jev_one_line "$line")")
   done < <(jq -c '.rows[]' <<<"$result_json")
-  joined="$(printf '%s / ' "${segments[@]}")"
-  joined="${joined% / }"
+
+  # The call's own aggregate cost/tokens, same figure as before -- appended
+  # to the LAST line rather than repeated on every one, since it describes
+  # the whole call, not any single question.
   if [ "$provider" = "typesafe" ]; then
     [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
-    printf -v reply_line 'jev: %s (tokens %s in / %s out)' "$joined" "$in_tokens" "$out_tokens"
+    printf -v suffix ' (tokens %s in / %s out)' "$in_tokens" "$out_tokens"
   else
     [ -n "$cost_val" ] || fail "jev: unexpected response shape"
-    printf -v reply_line 'jev: %s (cost $%.6f)' "$joined" "$cost_val"
+    printf -v suffix ' (cost $%.6f)' "$cost_val"
   fi
+  last=$(( ${#lines[@]} - 1 ))
+  lines[last]="${lines[last]}$suffix"
+
+  printf 'jev: %s\n' "${lines[0]}"
+  for ((idx = 1; idx < ${#lines[@]}; idx++)); do
+    printf '%s\n' "${lines[$idx]}"
+  done
 fi
-printf '%s\n' "$(_jev_one_line "$reply_line")"
