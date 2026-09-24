@@ -139,6 +139,23 @@ _start_mock_openrouter() {
   [ "$(printf '%s\n' "$output" | sed -n 1p)" = "jev: model=sonnet (p=0.80, confidence=0.90)" ]
   [ "$(printf '%s\n' "$output" | sed -n 2p)" = "effort=error (malformed answer) (cost \$0.000019)" ]
 
+  # --- contrast: one row whose answer VALUE is not an object at all (a
+  # bare string, "oops") -- stricter than the missing-field case above,
+  # since every field access on it, not just .choice, is a jq type error.
+  # Unguarded, this fails the whole jq CALL and, under set -e, silently
+  # ends the script with nothing on either stream -- "good"'s genuine
+  # answer never comes back and no diagnosis is printed either (review
+  # round 4). Same contract as the missing-field case: the other
+  # question's real answer still has to come back, and this row renders
+  # as its own error line. ---
+  _start_mock_openrouter MOCK_OPENROUTER_BAD_ROW_STRING=1
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | sed -n 1p)" = "jev: model=sonnet (p=0.80, confidence=0.90)" ]
+  [ "$(printf '%s\n' "$output" | sed -n 2p)" = "effort=error (malformed answer) (cost \$0.000019)" ]
+
   # --- contrast: a choice that is the literal STRING "null" is a genuine
   # answer, not a missing one -- `jq -r` turns a real JSON null and the
   # two-character string "null" into the identical output text, so a

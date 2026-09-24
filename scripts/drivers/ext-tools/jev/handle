@@ -166,28 +166,42 @@ result_json="$(jq -c '
   (.answers // {}) as $a
   | ($a | keys_unsorted) as $ks
   | if ($a | type) != "object" or ($ks | length) == 0 then empty else
-      ( [$ks[] as $k | ($a[$k].choice // null) as $choice |
-          ($a[$k].confidence // null) as $conf |
-          # A missing choice (deliberately dropped by an upstream bug, or a
-          # provider quirk) makes $choice null -- indexing an object with a
-          # null key is a jq RUNTIME error, not a missing-value one, so
-          # `// null` alone does not save it. try/catch turns that into the
-          # same null this row already renders as "malformed" from.
-          (try $a[$k].probabilities[$choice] catch null) as $p | {
-          name: $k,
-          choice: $choice,
-          p: $p,
-          confidence: $conf,
-          # Decided by TYPE, not by comparing the extracted VALUE to the
-          # text "null" downstream: a `choice` answer can legitimately BE
-          # the string "null" (a caller naming that choice in `criteria`),
-          # and `jq -r` turns both a genuine JSON null and the two-character
-          # string "null" into the identical output text -- a downstream
-          # `[ "$x" = "null" ]` cannot tell them apart (review round 2). The
-          # type check runs here, on the real JSON value, before anything is
-          # ever stringified.
-          ok: (($choice | type) == "string" and ($p | type) == "number" and ($conf | type) == "number")
-        }] ) as $rows
+      ( [$ks[] as $k |
+          # An answer that is not itself an object (e.g. a provider
+          # returning a bare string for one question) makes EVERY field
+          # access below -- $a[$k].choice included -- a jq RUNTIME error,
+          # not a missing-value one: indexing a string or number with a
+          # field name fails the whole expression, which failed the whole
+          # jq CALL (review round 4: one such row took down every other
+          # genuine answer along with it, silently, under set -e).
+          # Checked before any field on it is ever touched.
+          if ($a[$k] | type) != "object" then
+            { name: $k, choice: null, p: null, confidence: null, ok: false }
+          else
+            ($a[$k].choice // null) as $choice |
+            ($a[$k].confidence // null) as $conf |
+            # A missing choice (deliberately dropped by an upstream bug, or
+            # a provider quirk) makes $choice null -- indexing an object
+            # with a null key is ALSO a jq runtime error, not a
+            # missing-value one, so `// null` alone does not save it.
+            # try/catch turns that into the same null this row already
+            # renders as "malformed" from.
+            (try $a[$k].probabilities[$choice] catch null) as $p | {
+            name: $k,
+            choice: $choice,
+            p: $p,
+            confidence: $conf,
+            # Decided by TYPE, not by comparing the extracted VALUE to the
+            # text "null" downstream: a `choice` answer can legitimately BE
+            # the string "null" (a caller naming that choice in `criteria`),
+            # and `jq -r` turns both a genuine JSON null and the
+            # two-character string "null" into the identical output text --
+            # a downstream `[ "$x" = "null" ]` cannot tell them apart
+            # (review round 2). The type check runs here, on the real JSON
+            # value, before anything is ever stringified.
+            ok: (($choice | type) == "string" and ($p | type) == "number" and ($conf | type) == "number")
+          } end
+        ] ) as $rows
       | {
           rows: $rows,
           cost: (.usage.cost // null),
@@ -195,9 +209,18 @@ result_json="$(jq -c '
           output_tokens: (.usage.output_tokens // null)
         }
     end
-' "$out_file" 2>/dev/null)"
+' "$out_file" 2>/dev/null)" || fail "jev: unexpected response shape"
 rm -f "$out_file"
 
+# The check above catches jq itself failing (a nonzero exit -- this
+# assignment's own exit status, per bash's ordinary $(...) semantics); this
+# one catches jq SUCCEEDING with nothing to print (an empty answers object,
+# or one with no keys at all). Both are "unexpected response shape" to the
+# caller, but only the first is reachable without this explicit `|| fail`:
+# left as a bare assignment, a failing jq inside `$(...)` would otherwise
+# just set $result_json to whatever partial/empty output it managed and let
+# `set -e` end the process right there, with no diagnostic on either stream
+# (review round 4).
 [ -n "$result_json" ] || fail "jev: unexpected response shape"
 
 row_count="$(jq -r '.rows | length' <<<"$result_json")"
