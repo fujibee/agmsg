@@ -200,15 +200,15 @@ _proof_says() {   # <rc> <state> <payload>
   case "$output" in "fix none:arguments_refused"*) : ;; *) echo "$output" >&2; return 1 ;; esac
 }
 
-@test "fix: herdr with no socket in the environment -> no candidate is available, so nothing is written" {
+@test "fix: herdr with no socket in the environment -> preserves the unavailable reason" {
   _own_seat alice "$ME"; _proof_says 0 proved herdr:w1:pB
   unset HERDR_SOCKET_PATH
-  # This test is about no_candidate_in_env, not the fallback -- see the "NO
-  # fallback present" test above for why this line is here.
+  # The candidate is present but cannot be observed without its socket, so
+  # preserve that failure reason instead of reporting no_candidate_in_env.
   unset -f agmsg_token_locate_pending 2>/dev/null || true
   run agmsg_fix_run
   [ "$status" -eq 2 ]
-  [ "$output" = "fix seat=T/alice state=undetermined reason=no_candidate_in_env via=proof (written nothing)" ]
+  [ "$output" = "fix seat=T/alice state=undetermined reason=herdr:herdr_socket_unavailable via=proof (written nothing)" ]
   refute grep -q '^write' "$SPY"
 }
 
