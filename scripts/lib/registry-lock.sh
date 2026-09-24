@@ -321,9 +321,16 @@ _agmsg_lock_drop() {
   fi
   if err="$(rmdir "$l" 2>&1)"; then
     # Best-effort: nothing but this staged copy is left to clean up, and
-    # leaving it behind (no `rm` on this PATH) is inert — the same
-    # tolerance the old code gave the holder file itself.
-    command -v rm >/dev/null 2>&1 && rm -f "$staged" 2>/dev/null
+    # leaving it behind (no `rm`, or a failed `rm`) is inert — it sits
+    # under a name no acquirer ever looks for, so it is not this process's
+    # exit status to carry. `|| :` matters here specifically: callers run
+    # under `set -e`, and this line is the whole statement, not an `if`
+    # condition — an unguarded failing `rm` after a SUCCESSFUL release
+    # would abort the caller right after the lock was correctly let go
+    # (raised in review).
+    if command -v rm >/dev/null 2>&1; then
+      rm -f "$staged" 2>/dev/null || :
+    fi
     return 0
   fi
   # rmdir failed: move the staged copy back — one atomic rename, same
