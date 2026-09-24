@@ -64,27 +64,11 @@ _agmsg_self_rename_record() {   # <team> <agent> <ref> <epoch> <result> <type>
   agmsg_role_session_mark_renamed "$1" "$2" "$3" "$4" "$5" "" "$6" 2>/dev/null || true
 }
 
-# agmsg_self_proof's own returned ref is the DRIVER's canonical id for the pane
-# it re-observed -- NOT the caller's candidate echoed back, and for tmux that
-# canonical id is deliberately bare (terminal_pane_process_observe strips the
-# instance before returning it; see the driver's own ops.sh). $ref elsewhere in
-# this file is composed from agmsg_terminal_self_env's id, which for tmux DOES
-# carry the instance ("<socket>:<pane>"). The two are honestly different
-# strings for the exact same pane, so comparing them as-is would refuse every
-# real tmux poke -- the same shape self-fix.sh's own _fix_locator_of_proof
-# exists to close (#1152); this is that same reattachment, kept local to this
-# file rather than shared, so a proof that DOES already carry its own instance
-# (a future driver, or herdr's HERDR_SOCKET_PATH) is left alone.
+# Qualify a proof result through the same driver-owned instance contract used
+# for the environment ref. This keeps comparison and the recorded mark on one
+# canonical locator without terminal-name-specific environment rules.
 _agmsg_self_rename_locator_of_proof() {   # <canonical-ref, e.g. "tmux:%3">
-  local ref="$1" kind pane inst=""
-  kind="${ref%%:*}"; pane="${ref#*:}"
-  case "$kind" in
-    herdr) inst="${HERDR_SOCKET_PATH:-}" ;;
-    tmux)  case "$pane" in *:*) inst="${pane%:*}"; pane="${pane##*:}" ;; *) inst="${TMUX:-}"; inst="${inst%%,*}" ;; esac ;;
-    plain) case "$pane" in *:*) inst="${pane%%:*}"; pane="${pane#*:}" ;; esac ;;
-  esac
-  [ -n "$inst" ] || { printf '%s\n' "$ref"; return 0; }   # bare: ambient instance
-  agmsg_locator_compose "$kind" "$inst" "$pane" 2>/dev/null || printf '%s\n' "$ref"
+  agmsg_terminal_ref_qualify "$1"
 }
 
 # Observe THIS seat's own session name. Deliberately separate from
@@ -161,6 +145,10 @@ agmsg_self_rename_on_action() {
   terminal="${here%%	*}"; here="${here#*	}"
   id="${here%%	*}"; epoch="${here#*	}"
   ref="$(agmsg_terminal_ref "$terminal" "$id")"
+  agmsg_terminal_load "$terminal" 2>/dev/null || return 0
+  local qualified_ref
+  qualified_ref="$(agmsg_terminal_ref_qualify "$ref")" || return 0
+  ref="$qualified_ref"
 
   # PLACEMENT GUARD (#1112, same rule as terminal-registry.sh's #1114 guard on
   # the naming/marking/record path -- this is the SECOND call site that turns
@@ -213,9 +201,9 @@ agmsg_self_rename_on_action() {
     return 0
   fi
 
-  # Observe my own session name. Loading the driver + one observation is the cost;
-  # it happens at most twice ever (the two phases), then the mark ends it.
-  agmsg_terminal_load "$terminal" 2>/dev/null || return 0
+  # Observe my own session name. The driver was already loaded to qualify the
+  # ref; the observation happens at most twice ever (the two phases), then the
+  # mark ends it.
   local expected="$team-$agent" raw title observed
   raw="$(agmsg_team_observe_loaded "$id" 2>/dev/null)"
   title="$(printf '%s' "$raw" | awk -F '\t' 'NR==1{print $4}')"
@@ -287,7 +275,10 @@ agmsg_self_rename_on_action() {
       # an EXACT match between what was proved and what is about to be poked
       # authorizes the keystroke.
       local _proof_locator
-      _proof_locator="$(_agmsg_self_rename_locator_of_proof "${_proof_out#*	}")"
+      _proof_locator="$(_agmsg_self_rename_locator_of_proof "${_proof_out#*	}")" || {
+        _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "skipped:unproved:instance_unresolved" "$type"
+        return 0
+      }
       if [ "$_proof_locator" != "$ref" ]; then
         _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "skipped:unproved:locator_mismatch" "$type"
         return 0

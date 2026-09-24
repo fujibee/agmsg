@@ -38,6 +38,18 @@ terminal_id_split() {   # <id>
   printf '%s\t%s\n' "$_PLAIN_EMULATOR" "$_PLAIN_TTY"
 }
 
+# Plain's id already contains its emulator instance; the legacy '-' sentinel
+# names no addressable terminal and stays unqualified.
+terminal_instance_for_ref() {   # <canonical-ref>
+  local ref="$1" halves
+  _agmsg_terminal_ref_parse "$ref" || { printf 'unknown:invalid_locator\n'; return 0; }
+  [ "$_AGMSG_REF_TERM" = plain ] || { printf 'unknown:wrong_terminal\n'; return 0; }
+  [ "$_AGMSG_REF_ID" != '-' ] || { printf 'n/a:bare\n'; return 0; }
+  halves="$(terminal_id_split "$_AGMSG_REF_ID")" \
+    || { printf 'unknown:invalid_plain_id\n'; return 0; }
+  printf '%s\n' "$halves"
+}
+
 terminal_describe() {
   printf 'name=plain\n'
   printf 'backend=emulator-backed OS terminal\n'
@@ -391,6 +403,9 @@ terminal_poke() {
 terminal_find_by_label() { _plain_unsupported "find_by_label"; }
 terminal_label_of() { _plain_unsupported "label_of"; }
 terminal_name() { _plain_unsupported "name"; }
+
+# Plain terminals have no independent agent key to compare.
+terminal_expected_label() { printf 'n/a:no_addressable_pane\n'; }
 
 # Fence for a self-write (#1152, #1149). A plain seat is record-only: it can
 # write the placement record for the locator it was handed, and nothing else

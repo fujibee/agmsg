@@ -468,7 +468,7 @@ Beyond the common `<axis>_check` / `<axis>_describe` pair (§1.3, spelled
 | `terminal_name <id> <team> <name> [mode]` | control op: label the pane and set the key the terminal itself uses to address the member; idempotent |
 
 Beyond those, the registry (`_AGMSG_TERMINAL_OPTIONAL` in
-`scripts/lib/terminal-registry.sh`) recognizes twelve further, optional
+`scripts/lib/terminal-registry.sh`) recognizes fifteen further, optional
 functions. A driver may implement any subset; an unimplemented one is
 simply absent from that driver's `ops.sh`.
 
@@ -486,6 +486,9 @@ simply absent from that driver's `ops.sh`.
 | `terminal_pane_focused <id>` | prints `yes`/`no` for whether `id` currently holds real OS-level input focus, or fails (nothing printed) when the driver cannot decide — herdr only (#1384); `scripts/lib/safe-poke.sh`'s abandoned-draft recovery uses it to tell "someone is typing right now" apart from "a draft was left behind and nobody is watching" |
 | `terminal_input_clear <id>` | best-effort empties `id`'s input box without submitting anything — herdr only (#1384); `safe-poke.sh` calls it only after confirming `id` is unfocused, right before typing past an abandoned draft |
 | `terminal_input_type <id> <text>` | types `text` into `id`'s input box WITHOUT submitting (unlike `terminal_poke`) — herdr only (#1384); `safe-poke.sh` uses it both to retype a saved draft after clearing and to put a draft back unchanged when a recovery attempt must abort |
+| `terminal_expected_label <team> <agent>` | reports the terminal identity value `terminal_name` writes for this registration, or a named `n/a:` / `unknown:` result when it has no such value or cannot derive it |
+| `terminal_instance_for_ref <ref>` | resolves a canonical ref to `<instance><TAB><normalized-pane>`, `n/a:bare`, or `unknown:<reason>` without guessing an instance outside the driver's own rules |
+| `terminal_id_split <id>` | splits a driver id into `<instance><TAB><pane>`; used by locator composition/parsing and collision detection so each driver owns its id grammar |
 
 `plain` implements `terminal_capability`; `tmux` and `herdr` do not (their
 manifest ceiling holds uniformly for every instance of theirs). `plain`'s
@@ -496,11 +499,10 @@ known emulator/tty narrows both to `unsupported` for that one instance
 before either operation is attempted, and each operation's own
 `terminal_peek` / `terminal_poke` consults it internally.
 
-One more function, `terminal_id_split <id>`, is implemented by all three
-shipped drivers but is **not** part of the registry's required or optional
-list. It splits a placement id into its structural parts (e.g. tmux's
-server socket and its bare pane/window id) — each driver holds its own id
-grammar once, here. The registry calls it through its own wrapper
+`terminal_id_split <id>` is a structural optional op implemented by all four
+shipped drivers. It splits a placement id into its structural parts (e.g.
+tmux's server socket and its bare pane/window id) — each driver holds its own
+id grammar once, here. The registry calls it through its own wrapper
 (`_agmsg_terminal_id_split <kind> <id>`, loading the named kind's driver in
 a subshell when it is not the one already loaded) wherever code outside the
 driver — collision detection (`placement-collisions.sh`, telling two
@@ -513,7 +515,9 @@ hard-coding any one driver's grammar.
 A terminal id is driver-specific; the placement reference every caller
 outside the driver actually uses is `<terminal-name>:<id>` (e.g.
 `tmux:/path/to/socket:%3`, `herdr:<socket>:<pane>`, `plain:<emulator>:<tty>`,
-or the unaddressable `plain:-`).
+`orca:<handle>`, or the unaddressable `plain:-`). A locator may additionally
+qualify an id with the driver's instance (e.g. `orca:local:<handle>`); Orca
+has one local runtime, so its bare and `local:` forms identify the same handle.
 
 Which driver a session is running under is not configured, it is detected.
 Every candidate's `ops.sh` is sourced in its own subshell for the probe, so

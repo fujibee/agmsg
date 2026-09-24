@@ -25,6 +25,8 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 0 ]; [ "$output" = "tmux:/tmp/server with space:%4" ]
   run agmsg_locator_compose plain iterm /dev/ttys040
   [ "$status" -eq 0 ]; [ "$output" = "plain:iterm:/dev/ttys040" ]
+  run agmsg_locator_compose orca local term_11111111-2222-3333-4444-555555555555
+  [ "$status" -eq 0 ]; [ "$output" = "orca:local:term_11111111-2222-3333-4444-555555555555" ]
 }
 
 @test "compose: encodes a colon-bearing herdr instance; other malformed inputs stay named" {

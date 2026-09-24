@@ -75,7 +75,7 @@ terminal_describe() {
 # reach a tab-separated placement record and corrupt its framing. Every
 # character class below already excludes those bytes, so this doubles as the
 # framing guard the record format needs.
-terminal_id_ok() {   # <id>
+_orca_handle_ok() {   # <bare handle>
   local id="$1" rest
   rest="${id#term_}"
   [ "$rest" != "$id" ] || return 1
@@ -102,17 +102,35 @@ terminal_id_ok() {   # <id>
     && [ "${#g4}" -eq 4 ] && [ "${#g5}" -eq 12 ]
 }
 
+# Accept the bare placement ref and the instance-qualified locator form. Orca
+# has one local runtime; a different explicit instance is malformed, not a
+# reason to target whichever runtime happens to be available.
+_orca_bare_of() {   # <id>
+  local id="$1"
+  case "$id" in
+    local:*) id="${id#local:}" ;;
+    *:*) return 1 ;;
+  esac
+  printf '%s\n' "$id"
+}
+
+terminal_id_ok() {   # <id>
+  local bare
+  bare="$(_orca_bare_of "$1")" || return 1
+  _orca_handle_ok "$bare"
+}
+
 # record op: report TWO facts and decide nothing, same shape as tmux/herdr
 # (2026-08-31). PRESENCE is the exit code: 0 iff this process is running inside
 # an Orca-hosted pane (TERM_PROGRAM=Orca), whether or not the handle itself is
 # readable. SELF-ID is stdout: $ORCA_TERMINAL_HANDLE, printed only when it
-# matches terminal_id_ok's own grammar — an unset OR malformed value is
+# matches the bare-handle grammar — an unset OR malformed value is
 # "present but could not resolve", not "not orca"; the reason goes to stderr.
 # The session-id argument is unused — orca reports via the environment, like
 # tmux, not via a session-id lookup like herdr.
 terminal_detect() {
   [ "${TERM_PROGRAM:-}" = Orca ] || return 1
-  if [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && terminal_id_ok "$ORCA_TERMINAL_HANDLE"; then
+  if [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && _orca_handle_ok "$ORCA_TERMINAL_HANDLE"; then
     printf '%s\n' "$ORCA_TERMINAL_HANDLE"
   else
     echo "orca: \$ORCA_TERMINAL_HANDLE is unset or malformed — cannot identify this pane" >&2
@@ -123,7 +141,9 @@ terminal_detect() {
 # Run `orca terminal show` for <id> and print its JSON on stdout. Callers check
 # their own $? and stdout emptiness; this only centralizes the invocation.
 _orca_show_json() {   # <id>
-  orca terminal show --terminal "$1" --json 2>/dev/null
+  local bare
+  bare="$(_orca_bare_of "$1")" || return 1
+  orca terminal show --terminal "$bare" --json 2>/dev/null
 }
 
 # 0 when <json> is a valid JSON document; non-zero otherwise. Uses sqlite3's
@@ -256,13 +276,16 @@ terminal_peek() {
     esac
   done
   case "$lines" in ''|*[!0-9]*) lines="" ;; esac
+  local target
+  target="$(_orca_bare_of "$id")" \
+    || { echo "orca: malformed terminal locator '$id'" >&2; return 12; }
   command -v orca >/dev/null 2>&1 \
     || { echo "orca: not on PATH — cannot reach the terminal to peek pane '$id'" >&2; return 10; }
   local json
   if [ -n "$lines" ]; then
-    json="$(orca terminal read --terminal "$id" --screen --limit "$lines" --json 2>/dev/null)"
+    json="$(orca terminal read --terminal "$target" --screen --limit "$lines" --json 2>/dev/null)"
   else
-    json="$(orca terminal read --terminal "$id" --screen --json 2>/dev/null)"
+    json="$(orca terminal read --terminal "$target" --screen --json 2>/dev/null)"
   fi
   [ -n "$json" ] || { echo "orca: could not read terminal '$id' (it may no longer exist)" >&2; return 12; }
   _orca_json_valid "$json" \
@@ -341,10 +364,13 @@ terminal_peek() {
 # text.
 terminal_poke() {   # <id> <text>
   local id="$1" text="$2"
+  local target
+  target="$(_orca_bare_of "$id")" \
+    || { echo runtime_error; echo "orca: malformed terminal locator '$id'" >&2; return 12; }
   command -v orca >/dev/null 2>&1 \
     || { echo runtime_error; echo "orca: not on PATH — cannot reach the terminal to poke pane '$id'" >&2; return 10; }
   local json
-  json="$(orca terminal send --terminal "$id" --text "$text" --enter --json 2>/dev/null)"
+  json="$(orca terminal send --terminal "$target" --text "$text" --enter --json 2>/dev/null)"
   [ -n "$json" ] || { echo runtime_error; echo "orca: could not send to terminal '$id' (it may no longer exist)" >&2; return 12; }
   _orca_json_valid "$json" \
     || { echo runtime_error; echo "orca: send to terminal '$id' returned unparsable output" >&2; return 12; }
@@ -424,7 +450,9 @@ terminal_poke() {   # <id> <text>
 # codebase's own non-value-observation convention), so a caller can log why
 # without parsing stderr.
 terminal_input_draft() {   # <id>
-  local id="$1" json ok identity
+  local id="$1" json ok identity target
+  target="$(_orca_bare_of "$id")" \
+    || { echo 'unknown:invalid_locator'; echo "orca: malformed terminal locator '$id'" >&2; return 10; }
   command -v orca >/dev/null 2>&1 \
     || { echo "unknown:orca_unreachable"; echo "orca: not on PATH — cannot reach the terminal to read pane '$id''s draft" >&2; return 10; }
   json="$(_orca_show_json "$id")"
@@ -450,7 +478,7 @@ terminal_input_draft() {   # <id>
     return 10
   fi
   local read_json read_ok
-  read_json="$(orca terminal read --terminal "$id" --screen --json 2>/dev/null)"
+  read_json="$(orca terminal read --terminal "$target" --screen --json 2>/dev/null)"
   if [ -z "$read_json" ] || ! _orca_json_valid "$read_json"; then
     echo "orca: could not read terminal '$id''s draft" >&2
     return 12
@@ -540,6 +568,27 @@ terminal_input_draft() {   # <id>
 # constant rather than a second literal drifting from it.
 _ORCA_INSTANCE=local
 
+# Split both the placement's bare handle and a qualified locator id into the
+# same instance/handle pair used by enumeration and locator composition.
+terminal_id_split() {   # <id>
+  local bare
+  bare="$(_orca_bare_of "$1")" || return 1
+  _orca_handle_ok "$bare" || return 1
+  printf '%s\t%s\n' "$_ORCA_INSTANCE" "$bare"
+}
+
+# Resolve the instance carried by a canonical locator without consulting the
+# environment or Orca's CLI. A validated Orca handle belongs to the one local
+# runtime represented by _ORCA_INSTANCE.
+terminal_instance_for_ref() {   # <canonical-ref>
+  local ref="$1" halves
+  _agmsg_terminal_ref_parse "$ref" || { printf 'unknown:invalid_locator\n'; return 0; }
+  [ "$_AGMSG_REF_TERM" = orca ] || { printf 'unknown:wrong_terminal\n'; return 0; }
+  halves="$(terminal_id_split "$_AGMSG_REF_ID")" \
+    || { printf 'unknown:invalid_orca_id\n'; return 0; }
+  printf '%s\n' "$halves"
+}
+
 # OPTIONAL OP. Every pane this terminal can see. Contract: see the tmux/herdr
 # drivers' own copies and scripts/lib/self-proof.sh. Orca has one runtime, so
 # there is only ever one instance row-set (or one `!` row when it cannot be
@@ -613,7 +662,7 @@ terminal_enumerate_panes() {
   while IFS= read -r raw; do
     [ -n "$raw" ] || { printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0; }
     h="${raw#=}"
-    terminal_id_ok "$h" || { printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0; }
+    _orca_handle_ok "$h" || { printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0; }
     case "$seen" in *"	$h	"*) printf '!\t%s\n' "$_ORCA_INSTANCE"; return 0 ;; esac
     seen="$seen	$h	"
     n_seen=$((n_seen + 1))
@@ -722,7 +771,7 @@ terminal_spawn() {
   # Same boundary #1439 already closed for terminal_detect: an ok:true
   # response is not proof the handle is well-formed. A malformed handle
   # (control byte, wrong grammar) must never reach a placement record.
-  terminal_id_ok "$id" \
+  _orca_handle_ok "$id" \
     || { printf 'orca: terminal create for %s answered ok with a malformed handle\n' "$project" >&2; return 13; }
   printf '%s\n' "$id"
   return 0
@@ -741,6 +790,9 @@ terminal_spawn() {
 # confirmed connected:false, never merely because `close` claimed success).
 terminal_despawn() {
   local id="$1"
+  local target
+  target="$(_orca_bare_of "$id")" \
+    || { echo runtime_error; echo "orca: malformed terminal locator '$id'" >&2; return 13; }
   command -v orca >/dev/null 2>&1 \
     || { echo runtime_error; echo "orca: not on PATH — cannot despawn terminal '$id'" >&2; return 13; }
   # `close`'s own exit status is deliberately never inspected (see the header
@@ -748,7 +800,7 @@ terminal_despawn() {
   # here would otherwise abort under a caller's set -e before the
   # pane_state re-check below ever runs (review, #1440), defeating the whole
   # point of not trusting close in the first place.
-  orca terminal close --terminal "$id" --json >/dev/null 2>&1 || true
+  orca terminal close --terminal "$target" --json >/dev/null 2>&1 || true
   # Same errexit hazard as `close` above, on the very next line: pane_state's
   # own documented contract returns non-zero (10) for unknown, so this
   # assignment's status would abort a set -e caller before the runtime_error
@@ -777,12 +829,15 @@ terminal_despawn() {
 # no separate internal-key mechanism to skip.
 terminal_name() {
   local id="$1" team="$2" name="$3" label
+  local target
+  target="$(_orca_bare_of "$id")" \
+    || { echo runtime_error; echo "orca: malformed terminal locator '$id'" >&2; return 13; }
   label="$team:$name"
   command -v orca >/dev/null 2>&1 \
     || { echo runtime_error; echo "orca: not on PATH — cannot rename terminal '$id'" >&2; return 13; }
   # Same errexit hazard as terminal_spawn's create call, same fix (#1440).
   local json ok
-  json="$(orca terminal rename --terminal "$id" --title "$label" --json 2>/dev/null)" || true
+  json="$(orca terminal rename --terminal "$target" --title "$label" --json 2>/dev/null)" || true
   [ -n "$json" ] || { echo runtime_error; echo "orca: rename for '$id' produced no output" >&2; return 13; }
   _orca_json_valid "$json" \
     || { echo runtime_error; echo "orca: rename for '$id' returned unparsable output" >&2; return 13; }
@@ -794,4 +849,10 @@ terminal_name() {
   fi
   echo ok
   return 0
+}
+
+# Orca has one name: terminal_name writes the visible tab title, which is also
+# the only identity key this driver can read back.
+terminal_expected_label() {   # <team> <agent>
+  printf '%s:%s\n' "$1" "$2"
 }

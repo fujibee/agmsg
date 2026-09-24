@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 
-# Terminal driver axis (v1) — registry resolution, record scheme, and the three
+# Terminal driver axis (v1) — registry resolution, record scheme, and the four
 # drivers' ops, exercised against fake `tmux`/`herdr` binaries on PATH that
 # record their argv. No real tmux server is started and no real herdr pane is
 # touched (frame: the machine's tmux server must not start; live-CLI argv for
@@ -1368,13 +1368,45 @@ _last_agent_rename_key() {
   [ "$output" = 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba' ]
 }
 
-@test "orca: terminal_id_ok accepts only the measured term_<uuid> grammar" {
+@test "orca: bare refs and local locators split to the same handle and CLI target" {
   # `refute`, not `! terminal_id_ok ...` (#670): a non-last `! cmd` cannot
   # fail a bats test on any bash, and this file's own enforceable-assertions
   # CI check caught exactly that here — every one of these would have stayed
   # green even if terminal_id_ok wrongly accepted the bad input.
   agmsg_terminal_load orca
-  terminal_id_ok 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
+  local handle='term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba' halves
+  terminal_id_ok "$handle"
+  terminal_id_ok "local:$handle"
+  [ "$(agmsg_terminal_ref_qualify "orca:$handle")" = "orca:local:$handle" ]
+  [ "$(agmsg_terminal_ref_qualify "orca:local:$handle")" = "orca:local:$handle" ]
+  halves="$(terminal_id_split "$handle")"
+  [ "$halves" = "$(printf 'local\t%s' "$handle")" ]
+  halves="$(terminal_id_split "local:$handle")"
+  [ "$halves" = "$(printf 'local\t%s' "$handle")" ]
+  _agmsg_placement_split "orca:$handle"
+  [ "$_AGMSG_PS_TERM" = orca ]
+  [ "$_AGMSG_PS_ID" = "local:$handle" ]
+  _agmsg_placement_split "orca:local:$handle"
+  [ "$_AGMSG_PS_TERM" = orca ]
+  [ "$_AGMSG_PS_ID" = "local:$handle" ]
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  mkdir -p "$SKILL_DIR/teams/seatteam"
+  mkdir -p "$SKILL_DIR/run"
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  printf 'orca:local:%s\t/proj/PEER\tcodex\n' "$handle" > "$peer"
+  local claimant
+  claimant="$(_agmsg_placement_claimed_by "orca:$handle" seatteam mine)"
+  [ "$claimant" = seatteam__peer ]
+  printf 'orca:%s\t/proj/PEER\tcodex\n' "$handle" > "$peer"
+  claimant="$(_agmsg_placement_claimed_by "orca:local:$handle" seatteam mine)"
+  [ "$claimant" = seatteam__peer ]
+  _install_fake_orca present
+  run terminal_where "local:$handle"
+  [ "$status" -eq 0 ]
+  [ "$output" = tab-1 ]
+  grep -Fqx "orca [terminal] [show] [--terminal] [$handle] [--json]" "$ARGV_LOG"
+  refute grep -Fq "[--terminal] [local:$handle]" "$ARGV_LOG"
+  refute terminal_id_ok "remote:$handle"
   refute terminal_id_ok 'term_abc123'
   refute terminal_id_ok ''
   refute terminal_id_ok 'not-a-handle'
@@ -3094,7 +3126,7 @@ _fake_herdr_list_anchored_plus() {
 # So it is excluded here not because it has no id/server, but because tmux
 # genuinely does not implement it, by design, this release; wiring it in is a
 # separate, later decision, not an oversight this sweep should flag.
-_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes terminal_input_draft"
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
 _tmux_op_args() {
@@ -3458,7 +3490,7 @@ _tmux_op_args() {
   # inline (no fork per scanned record). Two grammars for one format drift; this
   # pins them together on the bare legacy id, the scheme without a socket, the
   # full tmux form, and herdr (whose ids contain a colon that is NOT a socket).
-  local ref term id sock
+  local ref term id sock halves instance pane
   for ref in '%7' '@3' 'tmux:%7' 'tmux:/tmp/s:%7' 'tmux:/tmp/with:colon:%7' 'herdr:w1:pB' 'herdr:v2:/run/a%3Ab.sock:w1:pB' 'plain:-' 'orca:term_11111111-2222-3333-4444-555555555555'; do
     _agmsg_placement_split "$ref" || { echo "FAIL: split refused $ref"; return 1; }
     term="$(agmsg_terminal_ref_terminal "$ref")" || { echo "FAIL: registry refused $ref"; return 1; }
@@ -3467,8 +3499,12 @@ _tmux_op_args() {
     case "$term" in
       tmux) sock="${id%:*}"; [ "$sock" = "$id" ] && sock=""; id="${id##*:}"
             [ "$_AGMSG_PS_SOCK" = "$sock" ] || { echo "FAIL: $ref sock $_AGMSG_PS_SOCK vs $sock"; return 1; } ;;
-      *)    [ -z "$_AGMSG_PS_SOCK" ] || { echo "FAIL: $ref has a socket on $term"; return 1; } ;;
+      *)    [ -z "$_AGMSG_PS_SOCK" ] || { echo "FAIL: $ref has a socket on $term"; return 1; }; sock="" ;;
     esac
+    if halves="$(_agmsg_terminal_id_split "$term" "$id")"; then
+      instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+      if [ -z "$sock" ] && [ "$id" = "$pane" ]; then id="$instance:$pane"; fi
+    fi
     [ "$_AGMSG_PS_ID" = "$id" ] || { echo "FAIL: $ref id $_AGMSG_PS_ID vs $id"; return 1; }
   done
   # And an unknown scheme is refused by all three readers.
