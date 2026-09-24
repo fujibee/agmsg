@@ -230,9 +230,39 @@ _fake_herdr_list_scalar_session() {
 #   tail_bad_element  tail IS an array, but its second element is an object,
 #            not a string — review (#1439): json_type=array on the outer
 #            value does not prove every ELEMENT is a line of text.
+#   send_ok  `terminal send` answers ok:true AND result.send.accepted:true
+#            (poke success)
+#   send_fail  `terminal send` answers ok:false with an unrelated error code
+#            (poke's answered-but-failed path, distinct from runtime_unavailable)
+#   send_badjson  `terminal send` prints something that is not JSON at all
+#   send_accepted_false  ok:true but result.send.accepted:false — review
+#            (#1443): ok:true is only the envelope succeeding, not proof the
+#            bytes reached the pane; this must fail closed, not report ok
+#   send_accepted_missing  ok:true but result.send has no accepted key at all
+#            — same failure as send_accepted_false, different shape
+#   identity_present_draft_present  show has agentIdentity:"claude"; read has
+#            draft:"hello draft" — terminal_input_draft's success path
+#   identity_present_draft_absent  show has agentIdentity:"claude"; read's
+#            JSON has no draft key at all (idle or candidate-suggestion state)
+#   identity_present_draft_multiline  draft is "line one\nline two\n" (embeds
+#            a newline AND ends in one) — review (#1443): raw stdout +
+#            command substitution strips every trailing newline, so this
+#            exact value must survive only through base64 encoding
+#   identity_present_draft_null/object/number  draft IS present but its JSON
+#            type is not a string — review (#1443): _orca_json_field alone
+#            folds all of these to "", which would report a malformed
+#            response as a confirmed, decided empty box
+#   identity_absent  show answers ok:true but reports no agentIdentity field —
+#            terminal_input_draft must not call `read` at all in this case
+#   list_two/list_bad_element/list_malformed_handle/list_empty_handle/
+#   list_dup_handle/list_unreachable  terminal_enumerate_panes fixtures (#1441)
+#   create_fails/create_no_handle/create_bad_handle/create_proc_fails
+#   rename_fails/rename_proc_fails  terminal_spawn/terminal_name fixtures (#1440)
+#   close_proc_fails_but_gone  terminal_despawn fixture (#1440)
 _install_fake_orca() {
   local mode="${1:-present}" show_json show_rc=0 read_json read_rc=0 \
-    list_json='{"ok":true,"result":{"terminals":[]}}' list_rc=0
+    list_json='{"ok":true,"result":{"terminals":[]}}' list_rc=0 \
+    send_json='{"ok":true,"result":{"send":{"accepted":true}}}' send_rc=0
   local create_json='{"ok":true,"result":{"terminal":{"handle":"term_11111111-2222-3333-4444-555555555555"}}}' create_rc=0
   local close_json='{"ok":true,"result":{"close":{"handle":"term_abc123","ptyKilled":true}}}' close_rc=0
   local rename_json='{"ok":true,"result":{}}' rename_rc=0
@@ -255,6 +285,7 @@ _install_fake_orca() {
     runtime_unavailable)
       show_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
       read_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
+      send_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
       ;;
     badjson)
       show_json='not json at all'
@@ -337,6 +368,49 @@ _install_fake_orca() {
       close_json='{"ok":false,"error":{"code":"internal_error"}}'
       close_rc=1
       ;;
+    send_ok)
+      send_json='{"ok":true,"result":{"send":{"accepted":true,"bytesWritten":5}}}'
+      ;;
+    send_fail)
+      send_json='{"ok":false,"error":{"code":"terminal_not_writable"}}'
+      ;;
+    send_badjson)
+      send_json='not json at all'
+      ;;
+    send_accepted_false)
+      send_json='{"ok":true,"result":{"send":{"accepted":false,"bytesWritten":0}}}'
+      ;;
+    send_accepted_missing)
+      send_json='{"ok":true,"result":{"send":{"bytesWritten":0}}}'
+      ;;
+    identity_present_draft_present)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":"hello draft"}}}'
+      ;;
+    identity_present_draft_absent)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯ Try \"fix lint errors\""]}}}'
+      ;;
+    identity_present_draft_multiline)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":"line one\nline two\n"}}}'
+      ;;
+    identity_present_draft_null)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":null}}}'
+      ;;
+    identity_present_draft_object)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":{}}}}'
+      ;;
+    identity_present_draft_number)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":42}}}'
+      ;;
+    identity_absent)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["should never be read"],"draft":"should never be seen"}}}'
+      ;;
   esac
   cat > "$FAKEBIN/orca" <<EOF
 #!/usr/bin/env bash
@@ -359,6 +433,9 @@ elif [ "\$1" = terminal ] && [ "\$2" = close ]; then
 elif [ "\$1" = terminal ] && [ "\$2" = rename ]; then
   echo '$rename_json'
   exit $rename_rc
+elif [ "\$1" = terminal ] && [ "\$2" = send ]; then
+  echo '$send_json'
+  exit $send_rc
 fi
 exit 0
 EOF
@@ -1484,18 +1561,22 @@ _last_agent_rename_key() {
 
   run terminal_peek term_abc123
   [ "$status" -eq 10 ]
+
+  run terminal_poke term_abc123 hello
+  [ "$status" -eq 10 ]
+
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 10 ]
+  grep -q '^unknown:orca_unreachable$' <<<"$output"
 }
 
-@test "orca: arrange (and poke) stay unsupported (13) — orca's CLI has no reordering verb at all" {
+@test "orca: arrange stays unsupported (13) — orca's CLI has no reordering verb at all" {
   _install_fake_orca present
   agmsg_terminal_load orca
   run terminal_arrange term_abc123 place_below term_def456
   [ "$status" -eq 13 ]
   grep -q 'unsupported' <<<"$output"
-  run terminal_poke term_abc123 hello
-  [ "$status" -eq 13 ]
-  # Neither ever touched the fake orca binary — there is no call to make.
-  refute grep -q '\[send\]' "$ARGV_LOG"
+  # Never touched the fake orca binary — there is no call to make.
   refute grep -q '\[rename\]' "$ARGV_LOG"
 }
 
@@ -1708,6 +1789,183 @@ _last_agent_rename_key() {
   run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_name term_abc123 team alice; echo UNREACHABLE'
   [ "$status" -eq 13 ]
   refute grep -q UNREACHABLE <<<"$output"
+}
+
+@test "orca: poke sends text and Enter via terminal send, argv shaped correctly" {
+  _install_fake_orca send_ok
+  agmsg_terminal_load orca
+  run terminal_poke term_abc123 "hello world"
+  [ "$status" -eq 0 ]
+  grep -q '^ok$' <<<"$output"
+  grep -qF -- '[terminal] [send] [--terminal] [term_abc123] [--text] [hello world] [--enter] [--json]' "$ARGV_LOG"
+}
+
+@test "orca: poke is 10 when unreachable (not on PATH, or runtime_unavailable), 12 when answered but failed, never 13" {
+  agmsg_terminal_load orca
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-poke"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_poke term_abc123 hi
+  [ "$status" -eq 10 ]
+  grep -q '^runtime_error$' <<<"$output"
+
+  _install_fake_orca runtime_unavailable
+  run terminal_poke term_abc123 hi
+  [ "$status" -eq 10 ]
+  grep -q '^runtime_error$' <<<"$output"
+
+  _install_fake_orca send_fail
+  run terminal_poke term_abc123 hi
+  [ "$status" -eq 12 ]
+  grep -q '^runtime_error$' <<<"$output"
+
+  _install_fake_orca send_badjson
+  run terminal_poke term_abc123 hi
+  [ "$status" -eq 12 ]
+  grep -q '^runtime_error$' <<<"$output"
+}
+
+@test "orca: poke is 12, never ok, when ok:true but result.send.accepted is false or missing (#1443 review)" {
+  agmsg_terminal_load orca
+  _install_fake_orca send_accepted_false
+  run terminal_poke term_abc123 hi
+  [ "$status" -eq 12 ]
+  grep -q '^runtime_error$' <<<"$output"
+
+  _install_fake_orca send_accepted_missing
+  run terminal_poke term_abc123 hi
+  [ "$status" -eq 12 ]
+  grep -q '^runtime_error$' <<<"$output"
+}
+
+@test "orca: input_draft is unknown/10 when show reports no agentIdentity, and never calls read" {
+  _install_fake_orca identity_absent
+  agmsg_terminal_load orca
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = "unknown:no_agent_identity" ]
+  refute grep -q '\[read\]' "$ARGV_LOG"
+}
+
+@test "orca: input_draft returns the exact draft text, base64-encoded, when agentIdentity is present" {
+  _install_fake_orca identity_present_draft_present
+  agmsg_terminal_load orca
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 0 ]
+  [ "$(base64 -d <<<"$output")" = "hello draft" ]
+}
+
+@test "orca: input_draft returns empty stdout (not unknown) when agentIdentity is present but draft's key is absent" {
+  _install_fake_orca identity_present_draft_absent
+  agmsg_terminal_load orca
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}
+
+@test "orca: input_draft preserves a trailing newline and embedded newlines exactly (#1443 review)" {
+  # Review (#1443): raw stdout + command substitution strips every trailing
+  # newline, so "line one\nline two\n" and "line one\nline two" would be
+  # indistinguishable without base64 -- this is the ONE contrast that would
+  # fail if the encoding were dropped.
+  _install_fake_orca identity_present_draft_multiline
+  agmsg_terminal_load orca
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 0 ]
+  local decoded
+  decoded="$(base64 -d <<<"$output"; printf x)"
+  [ "$decoded" = "$(printf 'line one\nline two\n'; printf x)" ]
+}
+
+@test "orca: input_draft is 12, never a confirmed-empty 0, when draft is present but not a string (#1443 review)" {
+  local mode
+  for mode in identity_present_draft_null identity_present_draft_object identity_present_draft_number; do
+    _install_fake_orca "$mode"
+    agmsg_terminal_load orca
+    run terminal_input_draft term_abc123
+    [ "$status" -eq 12 ] || { echo "$mode: status=$status output=$output"; return 1; }
+    grep -q 'was not text' <<<"$output" || { echo "$mode: expected a reason naming the bad type, got: $output"; return 1; }
+  done
+}
+
+@test "orca: input_draft is 12, never a leaked partial draft, when the extraction's own sqlite3 call fails (#1443 review round 2)" {
+  # Review round 2: "$(sqlite3 ...; printf x)" always exits 0 regardless of
+  # sqlite3's own status, so a real extraction failure would otherwise
+  # silently become a confirmed-empty 0. This fake sqlite3 passes every OTHER
+  # call through to the real binary (json_valid/json_bool/json_type checks
+  # earlier in the same function must keep working) and only fails, after
+  # emitting partial garbage, the one json_extract(...,draft) call.
+  _install_fake_orca identity_present_draft_present
+  agmsg_terminal_load orca
+  local real_sqlite3
+  real_sqlite3="$(command -v sqlite3)"
+  cat > "$FAKEBIN/sqlite3" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *json_extract*result.terminal.draft*)
+      printf 'PARTIAL-GARBAGE-MUST-NOT-LEAK'
+      exit 1
+      ;;
+  esac
+done
+exec "$real_sqlite3" "\$@"
+EOF
+  chmod +x "$FAKEBIN/sqlite3"
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 12 ]
+  refute grep -q 'PARTIAL-GARBAGE-MUST-NOT-LEAK' <<<"$output"
+}
+
+@test "orca: input_draft is 12, never a leaked draft, when base64-encoding itself fails (#1443 review round 2)" {
+  _install_fake_orca identity_present_draft_present
+  agmsg_terminal_load orca
+  cat > "$FAKEBIN/base64" <<'EOF'
+#!/usr/bin/env bash
+echo "fake base64: simulated failure" >&2
+exit 1
+EOF
+  chmod +x "$FAKEBIN/base64"
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 12 ]
+  refute grep -qi 'hello draft' <<<"$output"
+}
+
+@test "orca: input_draft is unknown/10 when show itself cannot be reached or answers ok:false" {
+  agmsg_terminal_load orca
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-draft"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_input_draft term_abc123
+  [ "$status" -eq 10 ]
+  grep -q '^unknown:orca_unreachable$' <<<"$output"
+
+  _install_fake_orca stale
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 10 ]
+  grep -q '^unknown:orca_unreachable$' <<<"$output"
+}
+
+@test "orca: input_draft is 12, distinct from 10, when identity is confirmed but the draft read itself fails" {
+  _install_fake_orca identity_absent
+  agmsg_terminal_load orca
+  # Reuse identity_absent's show (has no agentIdentity) is the wrong fixture for
+  # this case; build a targeted one: agentIdentity present, but `read` itself
+  # is broken.
+  cat > "$FAKEBIN/orca" <<EOF
+#!/usr/bin/env bash
+{ printf 'orca'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = terminal ] && [ "\$2" = show ]; then
+  echo '{"ok":true,"result":{"terminal":{"connected":true,"agentIdentity":"claude"}}}'
+  exit 0
+elif [ "\$1" = terminal ] && [ "\$2" = read ]; then
+  echo 'not json at all'
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/orca"
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 12 ]
+  refute grep -q "unknown:" <<< "$output"
 }
 
 # --- ABI completeness + structural clobber-proofing (#1014 review) -------
@@ -2828,7 +3086,15 @@ _fake_herdr_list_anchored_plus() {
 # dim signal herdr's `pane read --format ansi` does), so it is an ordinary
 # id-taking op and belongs in the sweep below like terminal_peek, not in
 # this exclusion list -- removed from here on purpose.
-_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes"
+# terminal_input_draft is different in kind from the rest of this list: it DOES
+# take a pane id and DOES address a server, but tmux/herdr solve "is there a
+# real draft in the box" a different way already (peek_styled + a two-snapshot
+# screen diff, in scripts/lib/safe-poke.sh) and are staying on that method —
+# this hook exists only because orca has no styled-screen read to build that on.
+# So it is excluded here not because it has no id/server, but because tmux
+# genuinely does not implement it, by design, this release; wiring it in is a
+# separate, later decision, not an oversight this sweep should flag.
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes terminal_input_draft"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
 _tmux_op_args() {
