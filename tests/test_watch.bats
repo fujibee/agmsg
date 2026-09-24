@@ -7,7 +7,6 @@
 load test_helper
 
 setup() {
-  skip "quarantined for 1.3.1: #1262"
   setup_test_env
   # On MSYS2, the compat shim makes the ppid walk succeed; _iid() (bats
   # subshell) and watch.sh (standalone bash) have different process trees, so
@@ -22,7 +21,31 @@ setup() {
 teardown() {
   # Nothing to clean when setup() skipped before creating the sandbox (the 1.3.1 quarantine, #1262).
   [ -n "${TEST_SKILL_DIR:-}" ] || return 0
-  teardown_test_env
+  # #1262/#1318: several tests below start a watch.sh in the background, then
+  # assert on its output/effects, then kill it. bats aborts a test's body at
+  # its first failing command -- so whenever one of those assertions fails,
+  # the kill/wait written after it never runs, and the watcher is orphaned
+  # (reproduced directly: forcing one such assertion to fail left its watcher
+  # running past the test's own end, every time, before this teardown hook
+  # existed). Reordering each such test to kill before asserting would only
+  # fix today's sites and leave the same gap for the next test that
+  # backgrounds a watcher. Reaping HERE instead closes it for every test in
+  # this file, present or future, whether or not its own body ever reaches
+  # its own kill/wait -- an in-body kill/wait some tests still do is
+  # harmless, ordinary idempotent cleanup once this also runs.
+  #
+  # _reap_test_skill_dir_procs (test_helper.bash, shared with every other
+  # suite) is scoped to processes whose argv names THIS test's own
+  # TEST_SKILL_DIR -- a unique mktemp path -- so it can only ever reach a
+  # process this test itself started; it cannot reach another test's watcher
+  # or a real seat's (see its own header for why this scoping is safe). Its
+  # own status is propagated (not swallowed) so a process that somehow
+  # survives even its SIGKILL escalation fails the test loudly instead of
+  # silently leaking, same as a real seat's monitor never should.
+  local _reap_status=0 _teardown_status=0
+  _reap_test_skill_dir_procs || _reap_status=$?
+  teardown_test_env || _teardown_status=$?
+  [ "$_reap_status" -eq 0 ] && [ "$_teardown_status" -eq 0 ]
 }
 
 # Run watch.sh in the background for <secs> seconds, capturing stdout to <out>.
