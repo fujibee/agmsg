@@ -417,13 +417,19 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
 
 @test "no pane in the environment: nothing is recorded, so an un-named seat stays unreachable (#1109)" {
   _install_fake_tmux                                                # a tmux binary exists, but
-  unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH    # no pane in the environment
+  unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH TERM_PROGRAM ORCA_TERMINAL_HANDLE
   agmsg_self_name_on_action team seat1
   # self_env resolves nothing -> no name, no record. This is the contrast case: a
   # real seat that never named itself (neither a naming record nor a placement one)
   # must keep reading as unreachable, not be made falsely addressable. Making
   # everything reachable would turn "cannot reach" into "said it could and could
   # not", which is worse.
+  [ "$(_terminal_calls)" -eq 0 ]
+  [ -z "$(_placement team seat1)" ]
+
+  # A present but unidentifiable driver environment is also not a pane to name.
+  export TERM_PROGRAM=Orca
+  agmsg_self_name_on_action team seat1
   [ "$(_terminal_calls)" -eq 0 ]
   [ -z "$(_placement team seat1)" ]
 }

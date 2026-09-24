@@ -78,14 +78,12 @@ _fix_locator_of_proof() {   # <canonical-ref>
 _fix_locate() {   # <team> <agent> <owner>
   local team="$1" agent="$2" owner="$3" env kind cand out rc=0 st
   env="$(agmsg_terminal_self_env 2>/dev/null)"
+  case "$env" in unknown:*) env="" ;; esac
   if [ -n "$env" ]; then
     kind="${env%%$'\t'*}"
     cand="$(printf '%s' "$env" | cut -f2)"
-    # agmsg_terminal_self_env is deliberately driver-free (its own header: "no
-    # driver loaded, no terminal called"). Nothing else in this call path loads
-    # one either, so terminal_pane_process_observe was never defined here and
-    # the proof always answered unsupported:driver_no_process_binding -- proved
-    # was unreachable for every terminal, not just the ones without the hook.
+    # The environment-only driver query does not alter this shell's loaded
+    # driver. Load the selected driver here so process observation uses its ABI.
     # Best-effort: a load failure still reaches the proof, whose own
     # declare -F guard reports the right unsupported reason.
     agmsg_terminal_load "$kind" 2>/dev/null || true

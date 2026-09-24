@@ -141,6 +141,7 @@ agmsg_self_rename_on_action() {
   # Where am I -- environment only, no terminal call yet.
   local here terminal id epoch ref
   here="$(agmsg_terminal_self_env)"
+  case "$here" in unknown:*) return 0 ;; esac
   [ -n "$here" ] || return 0                 # plain, or no terminal: no pane
   terminal="${here%%	*}"; here="${here#*	}"
   id="${here%%	*}"; epoch="${here#*	}"

@@ -126,6 +126,7 @@ agmsg_self_name_on_action() {
   # Fast half: where am I (environment only), and does my mark say so?
   local here terminal id epoch have ref
   here="$(agmsg_terminal_self_env)"
+  case "$here" in unknown:*) return 0 ;; esac
   [ -n "$here" ] || return 0                 # no pane to name (plain, or no terminal)
   terminal="${here%%	*}"; here="${here#*	}"
   id="${here%%	*}"; epoch="${here#*	}"

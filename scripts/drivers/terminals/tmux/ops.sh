@@ -134,6 +134,47 @@ terminal_detect() {
   return 0
 }
 
+# Optional environment-only self identity. Distinguish a missing tmux
+# environment from a partial or malformed one so the registry never mistakes
+# an unreadable pane for an outer terminal's pane.
+terminal_self_env() {
+  local sock rest pid session
+  if [ -z "${TMUX:-}" ] && [ -z "${TMUX_PANE:-}" ]; then
+    printf 'n/a:not_in_terminal\n'
+    return 0
+  fi
+  [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || {
+    printf 'unknown:tmux_environment_incomplete\n'
+    return 0
+  }
+  case "$TMUX" in *,*,*) ;; *) printf 'unknown:tmux_marker_malformed\n'; return 0 ;; esac
+  sock="${TMUX%%,*}"; rest="${TMUX#*,}"; pid="${rest%%,*}"; session="${rest#*,}"
+  case "$pid" in ''|*[!0-9]*) printf 'unknown:tmux_pid_malformed\n'; return 0 ;; esac
+  [ -n "$sock" ] && [ -n "$session" ] || {
+    printf 'unknown:tmux_marker_malformed\n'
+    return 0
+  }
+  case "$session" in *,*) printf 'unknown:tmux_marker_malformed\n'; return 0 ;; esac
+  local id="$sock:$TMUX_PANE"
+  if ! terminal_id_ok "$id"; then
+    printf 'unknown:tmux_pane_malformed\n'
+    return 0
+  fi
+  printf '%s\n' "$id"
+}
+
+# The tmux server pid is the generation witness carried in TMUX.
+terminal_epoch() {
+  local rest pid session
+  [ -n "${TMUX:-}" ] || { printf 'n/a:not_in_terminal\n'; return 0; }
+  case "$TMUX" in *,*,*) ;; *) printf 'unknown:tmux_marker_malformed\n'; return 0 ;; esac
+  rest="${TMUX#*,}"; pid="${rest%%,*}"; session="${rest#*,}"
+  case "$pid" in ''|*[!0-9]*) printf 'unknown:tmux_pid_malformed\n'; return 0 ;; esac
+  [ -n "$session" ] || { printf 'unknown:tmux_marker_malformed\n'; return 0; }
+  case "$session" in *,*) printf 'unknown:tmux_marker_malformed\n'; return 0 ;; esac
+  printf 'pid=%s\n' "$pid"
+}
+
 # A tmux id may carry the SERVER it belongs to: `<socket-path>:%1`, or a bare
 # `%1` for a record written before this existed.
 #
