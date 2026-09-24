@@ -96,3 +96,40 @@ title looks like the obvious target but auto-reverts to Orca's own generated
 value near-instantly and is not controlled by `rename` at all). Orca has only
 one name, so the `mode` argument (key-only vs both) makes no difference here.
 Failure is always **13**.
+
+## safe-poke.sh: how a poke into an orca pane decides whether it is safe
+
+`scripts/lib/safe-poke.sh`'s shared guard picks its method by which verb a
+driver has, never by the driver's name: `terminal_input_draft`, when present,
+is checked FIRST and ahead of the screen-based (styled/unstyled) choice, since
+it reads the composer directly and never touches the screen at all — orca has
+no styled read to fall back on (no ANSI/SGR in any `orca terminal read` mode,
+see the peek section above), which is exactly why this hook exists.
+
+Two calls, one second apart, exactly like the screen-based method (a single
+call is already authoritative for that instant, but still misses someone who
+starts typing right after it) — an id is refused (rc 14) if EITHER call
+reports real content; their content is never compared against each other,
+since content at either one is already reason enough to refuse.
+
+**When `terminal_input_draft` answers rc 10 ("cannot tell" — no
+`agentIdentity` recognized for this pane, or orca unreachable), safe-poke
+stops without writing at all** — it never falls back to a screen-based check
+for this driver. `terminal_peek`'s own screen never shows the input box's
+typed content at all (measured: the rendered `tail` always shows the prompt
+marker alone, empty, regardless of whether a real draft, a candidate
+suggestion, or nothing at all is in the box — see the terminal-driver
+feasibility notes this hook's own PR was measured against), so "the screen
+looks unchanged" would not be evidence of anything here — it would fold a
+genuine unknown into a poke with nothing actually having been checked.
+Documenting that gap does not close it, so the rc-10 case is simply
+propagated as this poke attempt's own failure (or a second-read rc 10 is
+treated as a safe refusal, same as real content) rather than risking a write
+on it.
+
+No #1384-style stash/clear/retype recovery is attempted for a pane reached
+only through `terminal_input_draft`: that recovery needs
+`terminal_peek_styled`, a located styled region, `terminal_input_clear`, and
+`terminal_input_type` — orca has none of the last three today. A real draft
+here is simply refused (rc 14, retried by the caller's own backoff), the same
+outcome any other driver with no focus signal gets.
