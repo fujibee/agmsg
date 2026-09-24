@@ -19,11 +19,11 @@ agmsg is built around four orthogonal axes, each of which has exactly one **driv
 | **storage** | Where messages and team state live, and how they are queried | `sqlite` (default), `jsonl-duckdb` |
 | **agent** | Per-runtime differences (hook formats, settings file locations, monitor tool availability) | `claude-code`, `codex`, `gemini`, `antigravity`, `copilot` |
 | **delivery** | How a recipient is notified that a message arrived | `monitor`, `turn`, `both`, `off` |
-| **terminal** | The pane, window, or process a member's host-agent CLI runs under, and how to create, read, and signal it | `herdr`, `tmux`, `plain` |
+| **terminal** | The pane, window, or process a member's host-agent CLI runs under, and how to create, read, and signal it | `herdr`, `tmux`, `plain`, `orca` |
 
 The three configuration axes are independent: any storage driver can be paired with any agent driver and any delivery mode. They share a common discovery/config/dependency-check protocol (see the spec) but expose axis-specific operations.
 
-**terminal is detected, not configured** — a session determines which terminal driver it is running under (or falls back to `plain`, the driver of last resort, if none matches) rather than being told. It is otherwise the same kind of driver: a fixed protocol (`terminal_*` functions, see [`docs/spec/driver-interface.md`](docs/spec/driver-interface.md) §6) behind which `herdr`, `tmux`, and a plain OS terminal are interchangeable, and it shares the same discovery/trust protocol as the other three. Unlike them, a member can function with no terminal capability at all — `plain` degrades to "no addressable pane," and messaging keeps working; terminal only adds the ability to locate, read, or type into another member's pane.
+**terminal is detected, not configured** — a session determines which terminal driver it is running under (or falls back to `plain`, the driver of last resort, if none matches) rather than being told. It is otherwise the same kind of driver: a fixed protocol (`terminal_*` functions, see [`docs/spec/driver-interface.md`](docs/spec/driver-interface.md) §6) behind which `herdr`, `tmux`, `orca`, and a plain OS terminal are interchangeable, and it shares the same discovery/trust protocol as the other three. Unlike them, a member can function with no terminal capability at all — `plain` degrades to "no addressable pane," and messaging keeps working; terminal only adds the ability to locate, read, or type into another member's pane.
 
 ## Driver vs plugin
 
