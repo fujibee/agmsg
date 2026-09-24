@@ -261,18 +261,26 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   # The moment the diagnosis is needed is the moment the removal fails. An
   # earlier version restored only the token line, so pid, command and host —
   # the whole point of writing a holder — disappeared exactly then.
+  #
+  # #994 review round 2: the holder is staged aside with `mv` before `rmdir`
+  # and moved back with `mv` on failure, not read-then-rewritten — so this
+  # also has to confirm nothing is left behind at the staged name, not just
+  # that the original name reads back correctly.
   run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
     . "$LOCKLIB"
     agmsg_lock_acquire "$TEAM_DIR" || exit 1
     printf "x\n" > "$TEAM_DIR/.config.lock/stray"
     agmsg_lock_release >/dev/null 2>&1
     cat "$TEAM_DIR/.config.lock.holder"
+    echo "---staged---"
+    ls "$TEAM_DIR"/.config.lock.holder.releasing.* 2>/dev/null | wc -l
   '
   [ "$status" -eq 0 ]
   grep -qE "^token " <<<"$output"
   grep -qE "^pid [0-9]+$" <<<"$output"
   grep -q "^command " <<<"$output"
   grep -q "^host " <<<"$output"
+  [ "$(grep -A1 '^---staged---$' <<<"$output" | tail -1 | tr -d '[:space:]')" = "0" ]
 }
 
 @test "lock: two locks taken in the same second by the same pid differ (#778)" {
@@ -338,4 +346,37 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   # review). The comparison is against a copy taken while the lock was held.
   run diff "$BATS_TEST_TMPDIR/holder.before" "$TEAM_DIR/.config.lock.holder"
   [ "$status" -eq 0 ]
+}
+
+@test "lock: a successful release does not abort the caller when tidying the staged holder fails (#994)" {
+  # #994 review round 3: after a SUCCESSFUL rmdir, the staged holder copy is
+  # best-effort cleaned up — its own comment says a failure there is
+  # harmless, since nothing looks for a holder under that name again. But an
+  # unguarded `command -v rm && rm -f "$staged"` on its own line fails the
+  # whole statement when `rm` exists and only the removal itself fails, and
+  # under a caller's `set -e` that aborts the process right after the lock
+  # was correctly released.
+  #
+  # Called directly, not through agmsg_lock_release/agmsg_lock_release_one:
+  # both of those already wrap the call in `|| true`, and bash suspends
+  # `set -e` for the whole duration of a function call made in a
+  # non-final position of an AND-OR list — so going through either one
+  # would pass regardless of whether this line is guarded, and prove
+  # nothing. `_agmsg_lock_drop` has to be safe on its own, not merely safe
+  # because its only two callers today happen to shield it.
+  #
+  # `rm` is overridden as a shell function here (found by `command -v` the
+  # same as a real binary) so the failure is exercised without needing an
+  # unremovable file.
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    set -e
+    . "$LOCKLIB"
+    rm() { return 1; }
+    agmsg_lock_acquire "$TEAM_DIR" || exit 1
+    _agmsg_lock_drop "$TEAM_DIR/.config.lock"
+    echo survived
+  '
+  [ "$status" -eq 0 ]
+  grep -q "^survived$" <<<"$output"
+  [ ! -d "$TEAM_DIR/.config.lock" ]
 }

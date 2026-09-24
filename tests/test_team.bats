@@ -111,7 +111,31 @@ EOF
 }
 
 @test "join: concurrent joins to the same team do not lose registrations (#141)" {
-  skip_on_ci "flaky concurrent-join timing under CI's shared runners (#994)"
+  # #994: the flake this was quarantined for was not test timing -- it was
+  # _agmsg_lock_drop leaking the registry lock under load (rmdir-then-remove
+  # raced a new acquirer's own holder write; fixed by reversing the order).
+  # What this test checks is that a fan-out of concurrent joins does not
+  # LOSE a registration, never that any one of them finishes within
+  # AGMSG_LOCK_SECONDS' default 10s budget -- widening it here is for
+  # genuine contention under a loaded CI runner (twelve joins still take
+  # the lock one at a time), not for the leak. A leaked lock is still
+  # caught regardless of how wide the budget is: nothing ever holds it
+  # again, so every later join waits out the full budget and fails the
+  # same way a real timeout would, just later.
+  #
+  # AGMSG_LOCK_TRIES has to widen alongside AGMSG_LOCK_SECONDS, or it
+  # silently becomes the real ceiling: the wait ends at whichever of the
+  # two bounds it hits first, and the default 1000 tries can still run out
+  # well under a widened time budget once each mkdir attempt itself gets
+  # slower under load, not just the sleep between them.
+  #
+  # Measured (this session, three copies of this test at once, 30 rounds):
+  # even with the #994 leak fixed, the unwidened default failed under that
+  # load (real contention, not a leak -- confirmed by polling the lock and
+  # its holder file during the failures: always a live process, never an
+  # unrecorded/stuck one). 60s / 20000 tries passed 0/90 the same way.
+  export AGMSG_LOCK_SECONDS=60
+  export AGMSG_LOCK_TRIES=20000
   # A fan-out of background joins spawning sqlite3.exe per call is slow and
   # timing-sensitive on the Windows runner (the experimental full leg); the lock
   # itself is exercised on Linux/macOS where the contention is reliable.
