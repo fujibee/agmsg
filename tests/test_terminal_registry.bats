@@ -481,6 +481,65 @@ EOF
   [ "$output" = "$(printf 'herdr\t%s:wC:p4' "$HERDR_SOCKET_PATH")" ]
 }
 
+@test "self env asks registered drivers in nesting order and keeps unknown distinct from n/a" {
+  unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH TERM_PROGRAM ORCA_TERMINAL_HANDLE
+  [ -z "$(agmsg_terminal_self_env)" ] || return 1
+
+  export TERM_PROGRAM=Apple_Terminal
+  [ -z "$(agmsg_terminal_self_env)" ] || return 1
+
+  # Self-env order is independent of the resolver's global priorities (orca,
+  # herdr, tmux). A nested tmux environment remains the legacy first answer.
+  touch "$TEST_SKILL_DIR/herdr.sock"
+  export TMUX="/tmp/tmux-self,321,0" TMUX_PANE='%4'
+  export HERDR_ENV=1 HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock" HERDR_PANE_ID='w1:p2'
+  export TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE='term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "$(printf 'tmux\t/tmp/tmux-self:%%4\tpid=321')" ] || return 1
+
+  export TMUX='/tmp/tmux-self,not-a-pid,0'
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = 'unknown:tmux:tmux_pid_malformed' ] || return 1
+
+  unset TMUX TMUX_PANE
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:p2"$'\t'sock=*) ;; *) return 1 ;; esac
+
+  unset HERDR_PANE_ID
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = 'unknown:herdr:herdr_pane_id_unset' ] || return 1
+  export HERDR_PANE_ID='w1:p2'
+
+  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "$(printf 'orca\tterm_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tn/a:no_generation')" ] || return 1
+
+  # A trusted external hook with no self_env_order defaults last, even when
+  # its ordinary detection priority would put it first.
+  _install_external_terminal
+  local probe_dir="$SKILL_DIR/plugins/terminals/probe"
+  cat > "$probe_dir/terminal.conf" <<'EOF'
+name=probe
+priority=1
+backend=test probe
+capabilities=name
+EOF
+  printf 'terminal_self_env() { printf "probe-pane\\n"; }\n' >> "$probe_dir/ops.sh"
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "$(printf 'orca\tterm_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tn/a:no_generation')" ] || return 1
+
+  unset ORCA_TERMINAL_HANDLE
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = 'unknown:orca:orca_handle_unset_or_malformed' ]
+}
+
 @test "resolve: a trusted external manifest participates in every chooser (#1133)" {
   _install_fake_tmux
   _install_external_terminal
@@ -3126,7 +3185,7 @@ _fake_herdr_list_anchored_plus() {
 # So it is excluded here not because it has no id/server, but because tmux
 # genuinely does not implement it, by design, this release; wiring it in is a
 # separate, later decision, not an oversight this sweep should flag.
-_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split"
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split terminal_self_env terminal_epoch"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
 _tmux_op_args() {

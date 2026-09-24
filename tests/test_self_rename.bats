@@ -316,6 +316,15 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   agmsg_self_rename_on_action team alice claude-code
   refute grep -q '\[send-keys\]' "$ARGV_LOG"
   [ "$(_mark team alice | cut -f3)" = skipped:unproved:unsupported ]
+
+  # The driver reports an unidentifiable Orca environment as unknown. That is
+  # not a pane candidate, so it cannot reach a poke even when proof is absent.
+  : > "$ARGV_LOG"
+  unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH ORCA_TERMINAL_HANDLE
+  export TERM_PROGRAM=Orca
+  agmsg_self_rename_on_action team alice claude-code
+  refute grep -q '\[send-keys\]' "$ARGV_LOG"
+  [ "$(_mark team alice | cut -f3)" = skipped:unproved:unsupported ]
 }
 
 @test "the proof says proved -- pokes exactly as before the gate existed (#1206 control)" {
@@ -355,4 +364,3 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   refute grep -q '\[send-keys\]' "$ARGV_LOG"
   [ "$(_mark team alice | cut -f3)" = skipped:unproved:locator_mismatch ]
 }
-

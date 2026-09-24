@@ -2,7 +2,7 @@
 # Terminal registry — the "terminals" driver axis facade.
 #
 # A terminal driver abstracts the ONE terminal multiplexer a member's CLI runs
-# under: tmux, herdr, or plain (no addressable pane). It absorbs the terminal
+# under: tmux, herdr, orca, or plain (no addressable pane). It absorbs the terminal
 # operations that were scattered as inline `$TMUX`/`HERDR_*` branches across
 # spawn.sh / despawn.sh / watch.sh, behind one contract, and adds peek/poke.
 #
@@ -65,12 +65,16 @@
 #                                       ceiling for one runtime instance: 0
 #                                       supported, 1 unsupported, 2 unknown.
 #                                       It cannot grant an unadvertised verb.
+#   terminal_self_env                    optional, no args: <id>, n/a:<reason>,
+#                                       or unknown:<reason>; environment only
+#   terminal_epoch                       optional, no args: generation value,
+#                                       n/a:<reason>, or unknown:<reason>
 #
-# Detection is a driver FUNCTION (not a manifest datum like the types axis's
-# detect=) because herdr's "which pane am I" is logic, not a set of env vars. The
-# resolver sources each candidate's ops.sh in a SUBSHELL so its terminal_*
-# definitions never leak or clobber across candidates; only the resolved driver
-# is sourced into the caller.
+# Terminal identity is a driver FUNCTION (not a manifest datum like the types
+# axis's detect=) because a driver's environment contract is logic, not just a
+# list of env vars. Resolver queries source each candidate's ops.sh in a
+# SUBSHELL so terminal_* definitions never leak or clobber across candidates;
+# only the selected driver is sourced into the caller.
 
 # Source-time lib dir (robust to later subshell/relative cwd).
 _AGMSG_TERMINAL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
@@ -200,7 +204,7 @@ EOF
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe terminal_enumerate_panes terminal_fence terminal_peek_styled terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split"
+_AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe terminal_enumerate_panes terminal_fence terminal_peek_styled terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split terminal_self_env terminal_epoch"
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because
 # two sides need the same list and neither owns it: the drivers emit them, and
@@ -479,58 +483,143 @@ agmsg_terminal_ref() {
   printf '%s:%s\n' "$1" "$2"
 }
 
-# The terminal server's generation, as the ENVIRONMENT shows it -- no call to
-# the terminal. This is what lets a naming mark (role-session named_epoch)
-# notice that the server it was made against has been restarted, the case in
-# which the pane reference can survive unchanged while the name it carried is
-# gone. Empty when the terminal offers nothing of the kind.
-#
-#   tmux   the server pid, the middle field of $TMUX ("socket,pid,index")
-#   herdr  inode and ctime of the socket at $HERDR_SOCKET_PATH: the server
-#          creates that file when it starts (measured: its ctime is the last
-#          server start), so a restart recreates it. stat's flags differ
-#          between BSD and GNU; both are tried, and no stat at all is "".
-#          Resolution is one second, and a filesystem may hand the freed
-#          inode straight back (ext4 does; measured on a Linux runner), so a
-#          recreation inside the same second is not visible -- a real restart
-#          takes longer than that, and the case falls into the stated blind
-#          spot rather than into a false detection.
-#   plain  nothing to observe
-agmsg_terminal_epoch() {   # <terminal>
-  case "$1" in
-    tmux)
-      [ -n "${TMUX:-}" ] || return 0
-      local rest="${TMUX#*,}"
-      printf 'pid=%s\n' "${rest%%,*}" ;;
-    herdr)
-      [ -n "${HERDR_SOCKET_PATH:-}" ] || return 0
-      local s=""
-      s="$(stat -f '%i:%c' "$HERDR_SOCKET_PATH" 2>/dev/null)" \
-        || s="$(stat -c '%i:%Z' "$HERDR_SOCKET_PATH" 2>/dev/null)" \
-        || s=""
-      [ -z "$s" ] || printf 'sock=%s\n' "$s" ;;
-  esac
-  return 0
+# The terminal server's generation is another driver observation, queried
+# without addressing the terminal. Values and non-value reasons stay distinct
+# until consumers decide whether a generation can be cached.
+_agmsg_terminal_self_env_one() {   # <terminal>
+  local name="$1" dir
+  dir="$(agmsg_terminal_dir "$name")" || return 126
+  [ -f "$dir/ops.sh" ] || return 126
+  (
+    local id epoch rc=0 epoch_rc=0
+    _agmsg_terminal_unset_ops
+    # shellcheck disable=SC1090,SC1091
+    . "$dir/ops.sh" || exit 126
+    declare -F terminal_self_env >/dev/null 2>&1 || exit 125
+    id="$(terminal_self_env)" || rc=$?
+    if [ "$rc" -ne 0 ] || [[ "$id" == *[$'\t\r\n']* ]]; then
+      printf 'unknown:environment_observation_failed\n'
+      exit 0
+    fi
+    case "$id" in
+      n/a:*|unknown:*) printf '%s\n' "$id"; exit 0 ;;
+      '') printf 'unknown:empty_observation\n'; exit 0 ;;
+    esac
+    if ! declare -F terminal_id_ok >/dev/null 2>&1 || ! terminal_id_ok "$id"; then
+      printf 'unknown:id_malformed\n'
+      exit 0
+    fi
+    epoch=""
+    if declare -F terminal_epoch >/dev/null 2>&1; then
+      epoch="$(terminal_epoch)" || epoch_rc=$?
+      if [ "$epoch_rc" -ne 0 ] || [[ "$epoch" == *[$'\t\r\n']* ]]; then
+        epoch='unknown:epoch_observation_failed'
+      fi
+    fi
+    case "$epoch" in unknown:*) epoch="" ;; esac
+    printf 'value\t%s\t%s\n' "$id" "$epoch"
+  )
 }
 
-# The pane this process is in, from the ENVIRONMENT alone: no driver loaded, no
-# terminal called. Prints "<terminal>\t<id>\t<epoch>" or nothing. This is the
-# fast half of self-naming on action: a seat that finds its mark equal to this
-# never touches the terminal (measured 0.22 ms for the file read). It answers
-# the same question as agmsg_terminal_resolve_name("") for tmux and herdr --
-# tmux from $TMUX/$TMUX_PANE (the driver's terminal_detect reads exactly those),
-# herdr from HERDR_PANE_ID (the driver's terminal_detect now prefers it too).
-# Under neither, nothing: plain has no pane to name.
+_agmsg_terminal_epoch_one() {   # <terminal>
+  local name="$1" dir
+  dir="$(agmsg_terminal_dir "$name")" || return 126
+  [ -f "$dir/ops.sh" ] || return 126
+  (
+    _agmsg_terminal_unset_ops
+    # shellcheck disable=SC1090,SC1091
+    . "$dir/ops.sh" || exit 126
+    declare -F terminal_epoch >/dev/null 2>&1 || exit 125
+    terminal_epoch
+  )
+}
+
+# Order environment self-identification by nesting, independently of the
+# global detection priority used by spawn/where. A missing or invalid order is
+# last; driver names break ties deterministically.
+agmsg_terminal_self_env_candidates() {
+  local kind base dir name line order names=() orders=() i found count=0
+  while IFS=$'\t' read -r kind base; do
+    for dir in "$base"/terminals/*; do
+      [ -d "$dir" ] && [ -f "$dir/terminal.conf" ] || continue
+      name="${dir##*/}"
+      case "$name" in ''|*[!a-zA-Z0-9_-]*) continue ;; esac
+      if [ "$kind" != builtin ] && ! agmsg_driver_is_trusted terminals "$name" "$dir"; then
+        continue
+      fi
+      order=""
+      while IFS= read -r line; do
+        case "$line" in self_env_order=*|self_env_order[[:space:]]*=*)
+          order="${line#*=}"
+          order="${order#\"}"; order="${order%\"}"
+          order="${order#\'}"; order="${order%\'}"
+          order="${order#"${order%%[![:space:]]*}"}"
+          order="${order%"${order##*[![:space:]]}"}"
+          break
+          ;;
+        esac
+      done < "$dir/terminal.conf"
+      case "$order" in ''|*[!0-9]*) order=999999 ;; esac
+      found=-1
+      for ((i = 0; i < count; i++)); do
+        if [ "${names[$i]}" = "$name" ]; then found=$i; break; fi
+      done
+      if [ "$found" -ge 0 ]; then
+        orders[found]="$order"   # later eligible base wins, as in agmsg_terminal_dir
+      else
+        names[count]="$name"
+        orders[count]="$order"
+        count=$((count + 1))
+      fi
+    done
+  done <<EOF
+$(agmsg_driver_bases)
+EOF
+  for ((i = 0; i < count; i++)); do
+    printf '%s\t%s\n' "${orders[$i]}" "${names[$i]}"
+  done | sort -n -k1,1 -k2,2 | cut -f2
+}
+
+# A driver's epoch hook reports a value, n/a:<reason>, or unknown:<reason>.
+# Drivers without the optional hook retain the old empty-epoch behavior.
+agmsg_terminal_epoch() {   # <terminal>
+  local name="$1" out="" rc=0
+  out="$(_agmsg_terminal_epoch_one "$name")" || rc=$?
+  [ "$rc" -eq 125 ] && return 0
+  if [ "$rc" -ne 0 ] || [[ "$out" == *[$'\t\r\n']* ]]; then
+    printf 'unknown:epoch_observation_failed\n'
+    return 0
+  fi
+  printf '%s\n' "$out"
+}
+
+# The pane this process is in, from registered drivers' environment-only hooks:
+# no terminal command is called. Prints "<terminal>\t<id>\t<epoch>", an
+# unknown:<terminal>:<reason> field, or nothing. The self_env_order manifest
+# key controls nesting precedence without changing the resolver's global order.
+# This is the fast half of self-naming on action: a matching mark avoids a
+# terminal round trip. Drivers without this optional hook are skipped.
 agmsg_terminal_self_env() {
-  if [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
-    printf 'tmux\t%s:%s\t%s\n' "${TMUX%%,*}" "$TMUX_PANE" "$(agmsg_terminal_epoch tmux)"
+  local name out rc id epoch
+  for name in $(agmsg_terminal_self_env_candidates); do
+    rc=0; out="$(_agmsg_terminal_self_env_one "$name")" || rc=$?
+    [ "$rc" -eq 125 ] && continue
+    if [ "$rc" -ne 0 ] || [[ "$out" == *[$'\r\n']* ]]; then
+      printf 'unknown:%s:environment_observation_failed\n' "$name"
+      return 0
+    fi
+    case "$out" in
+      n/a:*) continue ;;
+      unknown:*) printf 'unknown:%s:%s\n' "$name" "${out#unknown:}"; return 0 ;;
+      '') printf 'unknown:%s:empty_observation\n' "$name"; return 0 ;;
+    esac
+    case "$out" in value$'\t'*) ;; *) printf 'unknown:%s:malformed_observation\n' "$name"; return 0 ;; esac
+    out="${out#*$'\t'}"
+    id="${out%%$'\t'*}"
+    epoch="${out#*$'\t'}"
+    printf '%s\t%s\t%s\n' "$name" "$id" "$epoch"
     return 0
-  fi
-  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] \
-    && _agmsg_locator_instance_ok "${HERDR_SOCKET_PATH:-}"; then
-    printf 'herdr\t%s:%s\t%s\n' "${HERDR_SOCKET_PATH:-}" "$HERDR_PANE_ID" "$(agmsg_terminal_epoch herdr)"
-    return 0
-  fi
+  done
   return 0
 }
 

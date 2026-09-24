@@ -281,6 +281,47 @@ terminal_detect() {
   return 0
 }
 
+# Optional environment-only self identity. HERDR_ENV is the presence marker;
+# socket and pane fields without it are not trusted as a herdr placement.
+terminal_self_env() {
+  local sock id
+  if [ -z "${HERDR_ENV:-}" ] && [ -z "${HERDR_PANE_ID:-}" ] \
+    && [ -z "${HERDR_SOCKET_PATH:-}" ]; then
+    printf 'n/a:not_in_terminal\n'
+    return 0
+  fi
+  [ "${HERDR_ENV:-}" = 1 ] || {
+    printf 'unknown:herdr_presence_marker_invalid\n'
+    return 0
+  }
+  sock="$(_herdr_env_socket 2>/dev/null)" || {
+    printf 'unknown:herdr_socket_unavailable\n'
+    return 0
+  }
+  [ -n "${HERDR_PANE_ID:-}" ] || {
+    printf 'unknown:herdr_pane_id_unset\n'
+    return 0
+  }
+  id="$sock:$HERDR_PANE_ID"
+  if ! terminal_id_ok "$id"; then
+    printf 'unknown:herdr_pane_id_malformed\n'
+    return 0
+  fi
+  printf '%s\n' "$id"
+}
+
+# Socket inode/ctime distinguishes a restarted herdr server for naming marks.
+terminal_epoch() {
+  local s=""
+  [ "${HERDR_ENV:-}" = 1 ] || { printf 'n/a:not_in_terminal\n'; return 0; }
+  [ -n "${HERDR_SOCKET_PATH:-}" ] || { printf 'unknown:herdr_socket_path_unset\n'; return 0; }
+  s="$(stat -f '%i:%c' "$HERDR_SOCKET_PATH" 2>/dev/null)" \
+    || s="$(stat -c '%i:%Z' "$HERDR_SOCKET_PATH" 2>/dev/null)" \
+    || s=""
+  [ -n "$s" ] || { printf 'unknown:herdr_socket_stat_failed\n'; return 0; }
+  printf 'sock=%s\n' "$s"
+}
+
 # Read the new pane id from a herdr JSON result at one of the known paths.
 # The measured herdr pane-id grammar as ONE shell authority (the resolver and
 # the spawn side must not implement the predicate twice and drift). w + >=1 alnum,

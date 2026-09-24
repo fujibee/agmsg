@@ -138,6 +138,34 @@ terminal_detect() {
   return 0
 }
 
+# Optional environment-only self identity. A handle without Orca's terminal
+# marker is ambiguous, and a marked terminal without a valid handle is unknown.
+terminal_self_env() {
+  local handle="${ORCA_TERMINAL_HANDLE:-}"
+  if [ "${TERM_PROGRAM:-}" != Orca ]; then
+    if [ -z "$handle" ]; then
+      printf 'n/a:not_in_terminal\n'
+      return 0
+    fi
+    printf 'unknown:orca_presence_marker_missing\n'
+    return 0
+  fi
+  if [ -z "$handle" ]; then
+    printf 'unknown:orca_handle_unset_or_malformed\n'
+    return 0
+  fi
+  if ! _orca_handle_ok "$handle"; then
+    printf 'unknown:orca_handle_unset_or_malformed\n'
+    return 0
+  fi
+  printf '%s\n' "$handle"
+}
+
+# Orca exposes no environment generation witness.
+terminal_epoch() {
+  printf 'n/a:no_generation\n'
+}
+
 # Run `orca terminal show` for <id> and print its JSON on stdout. Callers check
 # their own $? and stdout emptiness; this only centralizes the invocation.
 _orca_show_json() {   # <id>
