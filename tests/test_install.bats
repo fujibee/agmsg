@@ -1214,12 +1214,28 @@ EOF
   ! grep -q "__SKILL_NAME__" "$hermes_skill"
 }
 
-@test "install: --agent-type hermes makes shared SKILL.md Hermes-typed" {
+@test "install: --agent-type hermes gets its own dedicated file, shared SKILL.md stays codex (#1449)" {
+  mkdir -p "$FAKE_HOME/.hermes"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type hermes
-  grep -q "whoami.sh \"\$(pwd)\" hermes" "$SK/SKILL.md"
-  refute grep -q "whoami.sh \"\$(pwd)\" codex" "$SK/SKILL.md"
-  refute grep -q "whoami.sh \"\$(pwd)\" gemini" "$SK/SKILL.md"
-  ! grep -q "whoami.sh \"\$(pwd)\" antigravity" "$SK/SKILL.md"
+  # Hermes has its own dedicated file (HERMES_SKILL_DIR) -- that one gets
+  # the hermes overlay regardless of --agent-type, same as always.
+  local hermes_skill="$FAKE_HOME/.hermes/skills/agmsg/SKILL.md"
+  [ -f "$hermes_skill" ]
+  grep -q "whoami.sh \"\$(pwd)\" hermes" "$hermes_skill"
+  # The SHARED SKILL.md -- the file Codex itself reads, with no dedicated
+  # file of its own -- must NOT be retyped away from codex just because
+  # --agent-type asked for a type that already gets its own file elsewhere.
+  # Before #1449's fix, this call retyped the shared file to hermes too,
+  # which would have broken a Codex session reading the same shared file
+  # under this install.
+  grep -q "whoami.sh \"\$(pwd)\" codex" "$SK/SKILL.md"
+  refute grep -q "whoami.sh \"\$(pwd)\" hermes" "$SK/SKILL.md"
+
+  # A type with no dedicated file of its own (e.g. gemini) still retypes the
+  # shared SKILL.md as before -- unaffected by the rule above, since the
+  # shared file IS that type's only instructions.
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd geminicmd --agent-type gemini
+  grep -q "whoami.sh \"\$(pwd)\" gemini" "$FAKE_HOME/.agents/skills/geminicmd/SKILL.md"
 }
 
 @test "install: --agent-type cursor makes shared SKILL.md Cursor-typed (#131)" {
@@ -1624,10 +1640,18 @@ EOF
   [ ! -e "$FAKE_HOME/.gemini/config/skills/agmsg" ]
 }
 
-@test "install: --agent-type grok-build makes shared SKILL.md Grok-typed" {
+@test "install: --agent-type grok-build gets its own dedicated file, shared SKILL.md stays codex (#1449)" {
+  mkdir -p "$FAKE_HOME/.grok"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type grok-build
-  grep -q "whoami.sh \"\$(pwd)\" grok-build" "$SK/SKILL.md"
-  ! grep -q "whoami.sh \"\$(pwd)\" codex" "$SK/SKILL.md"
+  # grok-build has its own dedicated file (GROK_SKILL_DIR) -- that one gets
+  # the grok-build overlay regardless of --agent-type, same as always.
+  local grok_skill="$FAKE_HOME/.grok/skills/agmsg/SKILL.md"
+  [ -f "$grok_skill" ]
+  grep -q "whoami.sh \"\$(pwd)\" grok-build" "$grok_skill"
+  # The shared SKILL.md must not be retyped away from codex for a type that
+  # already gets its own file elsewhere (#1449).
+  grep -q "whoami.sh \"\$(pwd)\" codex" "$SK/SKILL.md"
+  ! grep -q "whoami.sh \"\$(pwd)\" grok-build" "$SK/SKILL.md"
 }
 
 # Positive control for #846 (A), covering every type the installer can render a
@@ -1639,16 +1663,29 @@ EOF
 # codex template, i.e. the installer clobbering what it had itself just
 # written. codex itself is included as the baseline case (it was never
 # grepped for and was never broken -- it IS the fallback).
-@test "install: bare --update preserves every renderable type's SKILL.md flavor (#846)" {
-  local t
+#
+# #1449 split what "the type" means here for this file specifically: a type
+# with its OWN dedicated file (claude-code, copilot, opencode, hermes,
+# grok-build, antigravity -- AGMSG_TYPES_WITH_OWN_SKILL_FILE in install.sh,
+# kept in sync with the list below) never retypes the SHARED SKILL.md away
+# from codex in the first place, so the expectation for those is codex, not
+# $t. Staying codex across the bare --update is still exactly what #846
+# guards for them too: the shared file must not drift to something else on a
+# later run either.
+@test "install: bare --update preserves every renderable type's SKILL.md flavor (#846, #1449)" {
+  local t dedicated expect
+  dedicated=" claude-code copilot opencode hermes grok-build antigravity "
   while IFS= read -r t; do
     local cmd="agmsg-$t"
+    expect="$t"
+    case "$dedicated" in *" $t "*) expect="codex" ;; esac
+
     HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd "$cmd" --agent-type "$t"
     local skill_md="$FAKE_HOME/.agents/skills/$cmd/SKILL.md"
-    grep -q "whoami.sh \"\$(pwd)\" $t" "$skill_md"
+    grep -q "whoami.sh \"\$(pwd)\" $expect" "$skill_md"
 
     HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update --cmd "$cmd"
-    grep -q "whoami.sh \"\$(pwd)\" $t" "$skill_md"
+    grep -q "whoami.sh \"\$(pwd)\" $expect" "$skill_md"
   done < <(agmsg_renderable_types "$REPO_ROOT")
 }
 

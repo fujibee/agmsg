@@ -35,6 +35,32 @@ agmsg_load_renderable_skill_types
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/skill-render.sh"
 
+# Types that already get their OWN dedicated skill file, written elsewhere in
+# this script -- always in that type's own format, unconditionally, gated
+# only on whether that CLI's own directory exists, never on --agent-type:
+#   claude-code  -> ~/.claude/commands/<cmd>.md
+#   copilot      -> ~/.copilot/skills/<cmd>/SKILL.md
+#   opencode     -> $OPENCODE_SKILL_DIR/SKILL.md
+#   hermes       -> $HERMES_SKILL_DIR/SKILL.md
+#   grok-build   -> $GROK_SKILL_DIR/SKILL.md
+#   antigravity  -> ~/.gemini/config/skills/<cmd>/SKILL.md (install_antigravity_skill)
+#
+# The shared ~/.agents/skills/<cmd>/SKILL.md can hold only ONE type's
+# instructions at a time, and it is what any type NOT in this list reads as
+# its ONLY instructions (today: codex, gemini, cursor, devin -- Codex in
+# particular has no dedicated file of its own). So --agent-type may retype
+# the shared file ONLY for a type not in this list; for a type that IS in
+# this list, the shared file must stay at whatever it already is, since that
+# type gets its own correctly-typed file regardless of what the shared file
+# says (#1449 -- an --agent-type other than codex used to silently retype
+# the shared file too, breaking Codex specifically, since Codex has no file
+# of its own to fall back to).
+#
+# Adding a new type's OWN dedicated file at a new site below means adding
+# that type here too, or it will keep silently retyping the shared file the
+# way #1449 describes.
+AGMSG_TYPES_WITH_OWN_SKILL_FILE="claude-code copilot opencode hermes grok-build antigravity"
+
 # Resolve a provenance version for the source being installed, so an installed
 # copy is uniquely identifiable even between tagged releases (the canonical
 # VERSION only bumps at release). From a git checkout: `git describe` — tag +
@@ -570,28 +596,48 @@ $_agmsg_running_team"
     done < <("$SKILL_DIR/scripts/remote.sh" status --json 2>/dev/null || true)
   fi
   unset _agmsg_status_line _agmsg_running_team
-  if [ -z "$AGENT_TYPE" ]; then
-    # Re-detect the type this install's shared SKILL.md was last rendered for,
-    # from the whoami.sh line its own template prints (#846) -- every
-    # renderable type's line is unambiguous against every other's; see the
-    # cross-grep this list is built from, noted alongside
-    # AGMSG_RENDERABLE_SKILL_TYPES above. codex remains the fallback when an
-    # older or hand-written SKILL.md has no recognizable whoami line.
-    AGENT_TYPE="codex"
-    for _agmsg_t in $AGMSG_RENDERABLE_SKILL_TYPES; do
-      if grep -q "whoami.sh.*$_agmsg_t" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
-        AGENT_TYPE="$_agmsg_t"
-        break
-      fi
-    done
-    unset _agmsg_t
-  fi
-  # The shared SKILL.md is rendered for the detected type; codex is the safe
-  # default for an older install that cannot be identified.
-  TPL_TYPE="codex"
-  case " $AGMSG_RENDERABLE_SKILL_TYPES " in
-    *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
+  # Captured before the auto-detect below can fill AGENT_TYPE in for other
+  # reasons: an EXPLICIT --agent-type is what #1449's rule below cares about,
+  # not whatever AGENT_TYPE ends up holding once auto-detected too.
+  _agmsg_explicit_agent_type="$AGENT_TYPE"
+  # Re-detect the type this install's shared SKILL.md is CURRENTLY rendered
+  # for, from the whoami.sh line its own template prints (#846) -- every
+  # renderable type's line is unambiguous against every other's; see the
+  # cross-grep this list is built from, noted alongside
+  # AGMSG_RENDERABLE_SKILL_TYPES above. codex remains the fallback when an
+  # older or hand-written SKILL.md has no recognizable whoami line.
+  #
+  # Always run, even when --agent-type was given explicitly: #1449's rule
+  # below needs this as the shared file's fallback type precisely when an
+  # explicit --agent-type asks for a type that must not retype it.
+  _agmsg_detected_type="codex"
+  for _agmsg_t in $AGMSG_RENDERABLE_SKILL_TYPES; do
+    if grep -q "whoami.sh.*$_agmsg_t" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
+      _agmsg_detected_type="$_agmsg_t"
+      break
+    fi
+  done
+  unset _agmsg_t
+  [ -z "$AGENT_TYPE" ] && AGENT_TYPE="$_agmsg_detected_type"
+  # The shared SKILL.md can hold only ONE type's instructions at a time (see
+  # AGMSG_TYPES_WITH_OWN_SKILL_FILE near the top). An EXPLICIT --agent-type
+  # for a type that already gets its own dedicated file elsewhere in this
+  # script must not retype the shared file too -- it stays at the type just
+  # detected above instead. An --agent-type for a type with no file of its
+  # own (today: codex, gemini, cursor, devin) still renders the shared file
+  # as that type, same as before #1449.
+  TPL_TYPE="$_agmsg_detected_type"
+  case " $AGMSG_TYPES_WITH_OWN_SKILL_FILE " in
+    *" $_agmsg_explicit_agent_type "*)
+      echo "  shared SKILL.md stays $_agmsg_detected_type: $_agmsg_explicit_agent_type has its own skill file"
+      ;;
+    *)
+      case " $AGMSG_RENDERABLE_SKILL_TYPES " in
+        *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
+      esac
+      ;;
   esac
+  unset _agmsg_explicit_agent_type _agmsg_detected_type
   agmsg_render_skill "$TPL_TYPE" "$SKILL_NAME" "$SKILL_DIR/SKILL.md"
   TRASH_DIR="$SKILL_DIR/.trash"
   AGMSG_TRASH_COUNT=0
@@ -839,9 +885,24 @@ mkdir -p "$SKILL_DIR"/{scripts,types,db,agents}
 
 # SKILL.md is composed from the shared root and the agent-specific overlay
 # resolved from the type manifest (scripts/drivers/types/<type>/template.md).
+#
+# The shared SKILL.md can hold only ONE type's instructions at a time (see
+# AGMSG_TYPES_WITH_OWN_SKILL_FILE near the top). --agent-type for a type
+# that already gets its own dedicated file elsewhere in this script must not
+# retype the shared file too -- a fresh install has no existing file to fall
+# back to, so it stays at the plain codex default. --agent-type for a type
+# with no file of its own (today: codex, gemini, cursor, devin) still
+# renders the shared file as that type, same as before #1449.
 TPL_TYPE="codex"
-case " $AGMSG_RENDERABLE_SKILL_TYPES " in
-  *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
+case " $AGMSG_TYPES_WITH_OWN_SKILL_FILE " in
+  *" $AGENT_TYPE "*)
+    echo "  shared SKILL.md stays codex: $AGENT_TYPE has its own skill file"
+    ;;
+  *)
+    case " $AGMSG_RENDERABLE_SKILL_TYPES " in
+      *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
+    esac
+    ;;
 esac
 agmsg_render_skill "$TPL_TYPE" "$CMD_NAME" "$SKILL_DIR/SKILL.md"
 TRASH_DIR="$SKILL_DIR/.trash"
