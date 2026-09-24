@@ -261,18 +261,26 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   # The moment the diagnosis is needed is the moment the removal fails. An
   # earlier version restored only the token line, so pid, command and host —
   # the whole point of writing a holder — disappeared exactly then.
+  #
+  # #994 review round 2: the holder is staged aside with `mv` before `rmdir`
+  # and moved back with `mv` on failure, not read-then-rewritten — so this
+  # also has to confirm nothing is left behind at the staged name, not just
+  # that the original name reads back correctly.
   run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
     . "$LOCKLIB"
     agmsg_lock_acquire "$TEAM_DIR" || exit 1
     printf "x\n" > "$TEAM_DIR/.config.lock/stray"
     agmsg_lock_release >/dev/null 2>&1
     cat "$TEAM_DIR/.config.lock.holder"
+    echo "---staged---"
+    ls "$TEAM_DIR"/.config.lock.holder.releasing.* 2>/dev/null | wc -l
   '
   [ "$status" -eq 0 ]
   grep -qE "^token " <<<"$output"
   grep -qE "^pid [0-9]+$" <<<"$output"
   grep -q "^command " <<<"$output"
   grep -q "^host " <<<"$output"
+  [ "$(grep -A1 '^---staged---$' <<<"$output" | tail -1 | tr -d '[:space:]')" = "0" ]
 }
 
 @test "lock: two locks taken in the same second by the same pid differ (#778)" {

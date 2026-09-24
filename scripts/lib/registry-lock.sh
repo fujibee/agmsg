@@ -279,43 +279,68 @@ _agmsg_lock_drop() {
   # with no error, immediately followed by a DIFFERENT process's lock
   # directory sitting there with no `.holder` file next to it at all.
   #
-  # Fixed by reversing the order: remove OUR OWN holder file FIRST, while
-  # the directory (and so the exclusion) is still ours — no other process
-  # can succeed at mkdir until AFTER the rmdir below, so there is no
-  # window left in which a stranger's holder file could exist for this
-  # step to hit. The content is saved first and restored byte for byte if
-  # rmdir then fails, so the "could not release" message below still shows
-  # who was holding it, same guarantee the old order gave for free by
-  # simply never having touched the file yet.
+  # Fixed by moving OUR OWN holder file out of the way FIRST, while the
+  # directory (and so the exclusion) is still ours — no other process can
+  # succeed at mkdir until AFTER the rmdir below, so there is no window
+  # left in which a stranger's holder file could exist for this step to
+  # hit.
   #
-  # `rm` is not on every allow-listed PATH that takes this lock —
-  # `test_local_team_ids.bats` runs the core join with one that has no
-  # `rm` at all, which is exactly why the holder lives beside the
-  # directory rather than inside it (a holder INSIDE would make the
-  # directory unremovable there, leaking a lock on every call — the
-  # earlier bug this design already fixed). Without `rm`, removing the
-  # holder first is not possible; falling back to the pre-#994 order
-  # there (rmdir, then best-effort cleanup) keeps that environment
-  # working, at the cost of reopening this same race — but only there,
-  # never under the concurrent-load conditions #994 was actually about.
-  local saved_holder="" have_rm=false
-  if command -v rm >/dev/null 2>&1; then
-    have_rm=true
-    saved_holder="$(cat "$l.holder" 2>/dev/null || true)"
-    rm -f "$l.holder" 2>/dev/null || true
+  # Staged with `mv`, not read-then-remove-then-restore (review round 2 on
+  # #994): a rename either lands whole or not at all, so there is no step
+  # where the holder is simply gone with nothing recorded to put back if
+  # the next step fails. The read/remove/restore version had exactly that
+  # gap on both ends — a remove that failed but let `rmdir` proceed anyway,
+  # and a restore that failed after `rmdir` itself failed — each reaching
+  # "directory present, holder missing" by a different path than the
+  # original bug. Folding the failure of the initial move into the same
+  # "could not release" report closes both at once: neither one is a
+  # silent `|| true` any more.
+  #
+  # `mv` needs no fallback here the way `rm` did before it: this file's own
+  # minimal-PATH contract (see agmsg_write_atomic above) already requires
+  # `mv` unconditionally — `test_local_team_ids.bats` runs the core join on
+  # a PATH with `mv` but no `rm` at all, which is exactly why the holder
+  # lives beside the directory rather than inside it (a holder INSIDE would
+  # make the directory unremovable there, leaking a lock on every call —
+  # the earlier bug this design already fixed). `rm` is used only for the
+  # final, optional tidy-up of the staged file after a successful release;
+  # its absence there is harmless, not a fallback path.
+  local staged="$l.holder.releasing.$$"
+  local q
+  q="$(printf "'%s'" "$(printf '%s' "$l" | sed "s/'/'\\''/g")")"
+  if ! mv "$l.holder" "$staged" 2>/dev/null; then
+    echo "agmsg: could not release the registry lock at $l" >&2
+    echo "agmsg: could not move $l.holder aside to release it" >&2
+    echo "agmsg: until this directory is removed, commands for this team will wait" >&2
+    echo "agmsg: for a lock nothing holds." >&2
+    echo "agmsg: look at what is in it, then remove the directory:" >&2
+    echo "agmsg:   ls -la $q" >&2
+    echo "agmsg:   rm -r $q" >&2
+    echo "agmsg: nothing but this lock lives in there — it holds no team data." >&2
+    return 1
   fi
-  # have_rm=false means the holder above was never touched (no `rm` to do
-  # it with) and rmdir here leaves it stale beside no lock -- inert, and
-  # tidied whenever a later release on this same path does have `rm`.
   if err="$(rmdir "$l" 2>&1)"; then
+    # Best-effort: nothing but this staged copy is left to clean up, and
+    # leaving it behind (no `rm` on this PATH) is inert — the same
+    # tolerance the old code gave the holder file itself.
+    command -v rm >/dev/null 2>&1 && rm -f "$staged" 2>/dev/null
     return 0
   fi
-  # rmdir failed: put back exactly what was read, so the message below can
-  # still name who was holding it. Skipped when there was no `rm` to
-  # remove it in the first place — the file was never touched, and is
-  # already there with the original content intact.
-  if [ "$have_rm" = true ] && [ -n "$saved_holder" ]; then
-    printf '%s\n' "$saved_holder" > "$l.holder" 2>/dev/null || true
+  # rmdir failed: move the staged copy back — one atomic rename, same
+  # guarantee as the stage above — so the message below can still name who
+  # was holding it.
+  if ! mv "$staged" "$l.holder" 2>/dev/null; then
+    echo "agmsg: could not release the registry lock at $l" >&2
+    echo "agmsg: rmdir: $err" >&2
+    echo "agmsg: additionally, could not move the holder back from $staged" >&2
+    echo "agmsg: its content may still be readable there — check before removing the lock." >&2
+    echo "agmsg: until this directory is removed, commands for this team will wait" >&2
+    echo "agmsg: for a lock nothing holds." >&2
+    echo "agmsg: look at what is in it, then remove the directory:" >&2
+    echo "agmsg:   ls -la $q" >&2
+    echo "agmsg:   rm -r $q" >&2
+    echo "agmsg: nothing but this lock lives in there — it holds no team data." >&2
+    return 1
   fi
   echo "agmsg: could not release the registry lock at $l" >&2
   echo "agmsg: rmdir: $err" >&2
@@ -332,8 +357,6 @@ _agmsg_lock_drop() {
   # arguments, and `rm -r` then removes something the operator did not read
   # about (raised in review). Same scheme as lib/shquote.sh, inline rather than
   # sourced so this library keeps its single-file contract.
-  local q
-  q="$(printf "'%s'" "$(printf '%s' "$l" | sed "s/'/'\\''/g")")"
   echo "agmsg: look at what is in it, then remove the directory:" >&2
   echo "agmsg:   ls -la $q" >&2
   echo "agmsg:   rm -r $q" >&2
