@@ -27,6 +27,10 @@ MOCK_OPENROUTER_MALFORMED = os.environ.get("MOCK_OPENROUTER_MALFORMED", "")
 # 400 handling checks that field specifically, not a substring anywhere in
 # the body.
 MOCK_OPENROUTER_400_CODE_MISMATCH = os.environ.get("MOCK_OPENROUTER_400_CODE_MISMATCH", "")
+# When set, a 400 response uses the flat, top-level detail.error_type shape
+# (a direct call, never wrapped) instead of the default's OpenRouter-real
+# wrapped one -- see MOCK_OPENROUTER_HTTP_STATUS's own 400 branch below.
+MOCK_OPENROUTER_400_FLAT_SHAPE = os.environ.get("MOCK_OPENROUTER_400_FLAT_SHAPE", "")
 # Held before answering, so a test can inspect the CALLER's own process
 # table (ps) while a request is genuinely in flight -- proving curl's argv
 # never carries the key or the body, not just that the final result happens
@@ -97,11 +101,22 @@ class Handler(BaseHTTPRequestHandler):
                 # that field specifically, not a substring anywhere in the
                 # body.
                 payload = {"detail": {"error_type": "invalid_request", "note": "max_tokens_exceeded is one possible error_type"}}
-            else:
-                # The real shape, measured directly (2026-09-24, Banking77
-                # at 46+ questions in one call): every over-limit 400 from
-                # OpenRouter came back as exactly this body.
+            elif MOCK_OPENROUTER_400_FLAT_SHAPE:
+                # The flat, top-level shape a DIRECT call (never through
+                # OpenRouter's own wrapping) carries -- kept as its own
+                # scenario since handle checks for this shape too
+                # (TypeSafe's own native API returns it exactly like this).
                 payload = {"detail": {"error_type": "max_tokens_exceeded"}}
+            else:
+                # OpenRouter's real shape (the default provider), confirmed
+                # directly against the live API, 2026-09-24 (a 400 carries
+                # no charge): it does NOT return detail.error_type at the
+                # top level. It wraps that exact JSON as a STRING inside
+                # its own error.message, prefixed with the HTTP status.
+                # Measured live on a Banking77 call at 100 questions, where
+                # a top-level-only check missed it and fell through to the
+                # generic "unexpected HTTP 400" line instead.
+                payload = {"error": {"message": "HTTP 400: " + json.dumps({"detail": {"error_type": "max_tokens_exceeded"}}), "code": 400}}
         elif MOCK_OPENROUTER_HTTP_STATUS == 401:
             payload = {"error": {"message": "invalid API key"}}
         elif MOCK_OPENROUTER_HTTP_STATUS == 429:

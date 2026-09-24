@@ -345,13 +345,32 @@ _start_mock_openrouter() {
 
   # --- failure: HTTP 400, request too large for one call -- named on its
   # own rather than falling into the generic "unexpected HTTP 400" line,
-  # so the caller knows to split the batch instead of retrying as-is ---
+  # so the caller knows to split the batch instead of retrying as-is. This
+  # is OpenRouter's REAL body shape (the default provider, and the
+  # fixture's default 400 payload): detail.error_type wrapped as a STRING
+  # inside error.message, not at the top level -- an earlier version of
+  # this check only looked at the top level and missed every one of these
+  # in production (a live Banking77 call at 100 questions fell through to
+  # the generic line below instead; confirmed against the real API,
+  # 2026-09-24, a 400 carries no charge). ---
   _start_mock_openrouter MOCK_OPENROUTER_HTTP_STATUS=400
   run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
     "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
   [ "$status" -ne 0 ]
   case "$output" in
     *$'\n'*) echo "[400] more than one line: $output" >&2; return 1 ;;
+  esac
+  [ "$output" = "jev: request too large for one call (max_tokens_exceeded) -- split the questions into smaller batches" ]
+
+  # --- contrast: the OTHER shape that reaches the same message -- a
+  # DIRECT call's flat, top-level detail.error_type (TypeSafe's own native
+  # API returns it exactly like this, never wrapped) -- still recognized ---
+  _start_mock_openrouter MOCK_OPENROUTER_HTTP_STATUS=400 MOCK_OPENROUTER_400_FLAT_SHAPE=1
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *$'\n'*) echo "[400 flat shape] more than one line: $output" >&2; return 1 ;;
   esac
   [ "$output" = "jev: request too large for one call (max_tokens_exceeded) -- split the questions into smaller batches" ]
 

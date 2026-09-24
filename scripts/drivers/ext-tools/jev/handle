@@ -124,12 +124,49 @@ case "$_JEV_HTTP_CODE" in
     # `detail.error_type` field specifically, not a substring anywhere in
     # the body -- a substring match also fires on an unrelated 400 whose
     # free-text mentions this phrase without it being the actual cause
-    # (review round 2). Body shape measured directly (2026-09-24, Banking77
-    # at 46+ questions in one call): every over-limit 400 came back as
-    # exactly `{"detail":{"error_type":"max_tokens_exceeded"}}`, nothing
-    # else in "detail" varying. Any other 400, including one this jq
-    # expression cannot parse, falls through to the generic line below.
-    if jq -e '(.detail.error_type // empty) == "max_tokens_exceeded"' "$out_file" >/dev/null 2>&1; then
+    # (review round 2). No partial match either way: both branches below
+    # parse a complete, well-formed structure or produce false, never a
+    # guess from whatever text happens to be present.
+    #
+    # TWO shapes reach that field, not one. `{"detail":{"error_type":
+    # "max_tokens_exceeded"}}` at the TOP LEVEL is what a direct call
+    # (TypeSafe's own API) returns. OpenRouter (the default provider) does
+    # not: it wraps that exact same JSON as a STRING inside its own
+    # error.message, prefixed with the HTTP status --
+    #   {"error":{"message":"HTTP 400: {\"detail\":{\"error_type\":
+    #   \"max_tokens_exceeded\"}}","code":400}}
+    # -- confirmed directly against the real OpenRouter API, 2026-09-24
+    # (a 400 carries no charge). The earlier top-level-only check missed
+    # every OpenRouter over-limit 400 for exactly this reason (a Banking77
+    # call at 100 questions fell through to the generic line below
+    # instead). Both shapes are checked; anything that fails to parse as
+    # either -- including a message that merely mentions the phrase
+    # without carrying this exact structure -- is `false`, not a guess.
+    #
+    # NEITHER comparison below uses `// empty` before `==` (the shape the
+    # round-2 review version had): in jq, `(X // empty) == Y` produces NO
+    # OUTPUT AT ALL when X is null/false, not `false` -- `empty` is a
+    # zero-output generator, and comparing against zero outputs yields
+    # zero outputs, which `jq -e` treats the same as any other non-true
+    # result but which silently skipped this whole branch's `if` even for
+    # the flat TypeSafe shape whenever "detail" was absent (measured while
+    # fixing this: the previously-shipped filter produced nothing, not
+    # false, for exactly the OpenRouter body this fix is for). Comparing
+    # directly with `==` already treats a missing/null field as `false`
+    # correctly, no default needed. The nested capture below has the same
+    # class of gap for a NON-matching regex -- capture on no match yields
+    # no output rather than raising a catchable error, so `try/catch`
+    # alone does not stand in for it -- caught instead with `// {j: null}`
+    # before anything tries to parse `$cap.j`.
+    if jq -e '
+      def flat: (.detail.error_type == "max_tokens_exceeded");
+      if flat then true else
+        (((.error.message // "") | capture("^HTTP 400: (?<j>.*)$")) // {j: null}) as $cap
+        | if ($cap.j == null) then false
+          else try (($cap.j | fromjson).detail.error_type == "max_tokens_exceeded") catch false
+          end
+      end
+    ' "$out_file" >/dev/null 2>&1; then
       fail "jev: request too large for one call (max_tokens_exceeded) -- split the questions into smaller batches"
     fi
     fail "jev: unexpected HTTP 400"
