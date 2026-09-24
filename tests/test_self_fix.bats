@@ -44,6 +44,29 @@ _proof_says() {   # <rc> <state> <payload>
   local rc="$1" st="$2" pl="$3"
   eval "agmsg_self_proof() { printf 'proof %s %s %s\\n' \"\$1\" \"\$2\" \"\$3\" >> \"\$SPY\"; printf '%s\\t%s\\n' '$st' '$pl'; return $rc; }"
 }
+_fake_herdr_driver_hooks() {
+  # No herdr CLI is run: these hooks model only the id, instance and fence
+  # answers needed to carry the fake pane through locator validation/write.
+  agmsg_terminal_load() { :; }
+  terminal_fence() { printf '%s\tt1\n' "$HERDR_SOCKET_PATH"; return 0; }
+  terminal_id_ok() {
+    case "$1" in
+      w1:pB|"$HERDR_SOCKET_PATH:w1:pB") return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  terminal_id_split() {
+    terminal_id_ok "$1" || return 1
+    case "$1" in
+      "$HERDR_SOCKET_PATH:"*) printf '%s\t%s\n' "$HERDR_SOCKET_PATH" "${1#"$HERDR_SOCKET_PATH:"}" ;;
+      *) return 1 ;;
+    esac
+  }
+  terminal_instance_for_ref() {
+    [ "$1" = herdr:w1:pB ] || return 1
+    printf '%s\tw1:pB\n' "$HERDR_SOCKET_PATH"
+  }
+}
 
 @test "fix: any argument is refused by name, and nothing runs" {
   _own_seat alice "$ME"; _proof_says 0 proved herdr:w1:pB
@@ -65,7 +88,7 @@ _proof_says() {   # <rc> <state> <payload>
   _own_seat alice "$ME"; _proof_says 0 proved herdr:w1:pB
   run agmsg_fix_run
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/alice state=proved locator=herdr:/tmp/herdr/sessions/a/herdr.sock:w1:pB via=proof" ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/alice state=proved locator=herdr:$HERDR_SOCKET_PATH:w1:pB via=proof" ]
   grep -Fqx "proof T alice /tmp/herdr/sessions/a/herdr.sock:w1:pB" "$SPY"  # qualified env pane reached the PROOF as a candidate
   grep -Fqx "write T alice herdr:/tmp/herdr/sessions/a/herdr.sock:w1:pB $ME" "$SPY"
 }
@@ -281,12 +304,9 @@ PROBE
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/self-write.sh"
   # No real herdr socket in this fixture: keep the driver from loading (it
-  # would overwrite these with its own real ops), and stand in for the one
-  # capability self-write.sh actually needs past the fence step. Every
-  # OTHER decoration (label/key/session) is optional by self-write.sh's own
-  # design and skips cleanly with no driver loaded.
-  agmsg_terminal_load() { :; }
-  terminal_fence() { printf 'inst1\tt1\n'; return 0; }
+  # would overwrite these fake answers). The fake hooks model the qualified
+  # locator and fence; every other decoration is optional and can skip.
+  _fake_herdr_driver_hooks
 
   bash "$SCRIPTS/join.sh" T alice codex "$SKILL_DIR/proj" >/dev/null
   _own_seat alice "$ME"
@@ -300,7 +320,7 @@ PROBE
 
   run agmsg_fix_run
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/alice state=proved locator=herdr:w1:pB via=proof" ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/alice state=proved locator=herdr:/tmp/herdr/sessions/a/herdr.sock:w1:pB via=proof" ]
   refute grep -qF "missing_fields" <<<"$output"
   grep -qF "record attempt=ok" <<<"$output"
 }
@@ -345,11 +365,10 @@ PROBE
   _proof_says 0 proved herdr:w1:pB
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/self-write.sh"
-  agmsg_terminal_load() { :; }
-  terminal_fence() { printf 'inst1\tt1\n'; return 0; }
+  _fake_herdr_driver_hooks
   run agmsg_fix_run
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=$uuid_team/agent state=proved locator=herdr:w1:pB via=proof" ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=$uuid_team/agent state=proved locator=herdr:$HERDR_SOCKET_PATH:w1:pB via=proof" ]
   refute grep -qF "state=unresolved" <<<"$output"
   grep -qF "record attempt=ok" <<<"$output"
 }
@@ -371,11 +390,10 @@ PROBE
   _proof_says 0 proved herdr:w1:pB
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/self-write.sh"
-  agmsg_terminal_load() { :; }
-  terminal_fence() { printf 'inst1\tt1\n'; return 0; }
+  _fake_herdr_driver_hooks
   run agmsg_fix_run
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/? state=proved locator=herdr:w1:pB via=proof" ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/? state=proved locator=herdr:$HERDR_SOCKET_PATH:w1:pB via=proof" ]
   refute grep -qF "state=unresolved" <<<"$output"
 }
 
