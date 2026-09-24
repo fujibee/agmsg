@@ -121,6 +121,59 @@ _agmsg_id_key_for() {   # <team> <agent>
   printf '%s__%s' "$team_id" "$member_id"
 }
 
+# The team half of the reverse of _agmsg_id_key_for: given a team_id, the
+# team NAME (its directory's own basename) whose config.json currently
+# carries it. A team dir is never itself named as its own team_id, so this
+# is a scan, not a lookup -- there is no other index from id back to name.
+# Prints nothing and returns 1 if no team dir carries this team_id, or if
+# SKILL_DIR is unset.
+_agmsg_team_name_for_id() {   # <team_id>
+  local want="${1-}" d config tid
+  [ -n "$want" ] || return 1
+  [ -n "${SKILL_DIR:-}" ] || return 1
+  [ -d "$SKILL_DIR/teams" ] || return 1
+  if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "$SKILL_DIR/scripts/lib/sqlpath.sh"
+  fi
+  for d in "$SKILL_DIR"/teams/*/; do
+    [ -d "$d" ] || continue
+    config="${d}config.json"
+    [ -f "$config" ] || continue
+    tid="$(sqlite3 :memory: \
+      "SELECT COALESCE(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$config")') AS TEXT), '\$.team_id'),'');" \
+      2>/dev/null | tr -d '\r')" || continue
+    if [ -n "$tid" ] && [ "$tid" = "$want" ]; then
+      d="${d%/}"
+      printf '%s\n' "${d##*/}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The reverse of _agmsg_id_key_for as a whole: given an id-keyed lock's
+# <team_id>__<member_id> pair, the (team, agent) NAMES every other reader of
+# a role actually keys by (#1457: self-fix.sh's own seat resolution treated
+# this pair AS the names, which is where that defect lived). Prints
+# "<team>\t<agent>" and returns 0 only when BOTH halves resolve; prints
+# nothing and returns 1 otherwise -- a caller must refuse on that, not fall
+# back to the raw ids, which is the exact failure this exists to close.
+_agmsg_id_key_to_names() {   # <team_id> <member_id>
+  local team_id="${1-}" member_id="${2-}" team agent
+  [ -n "$team_id" ] && [ -n "$member_id" ] || return 1
+  [ -n "${SKILL_DIR:-}" ] || return 1
+  team="$(_agmsg_team_name_for_id "$team_id")" || return 1
+  [ -n "$team" ] || return 1
+  if ! declare -F agmsg_roster_owner_name >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "$SKILL_DIR/scripts/lib/roster-journal.sh"
+  fi
+  agent="$(agmsg_roster_owner_name "$SKILL_DIR/teams/$team" "$member_id" 2>/dev/null)" || return 1
+  [ -n "$agent" ] || return 1
+  printf '%s\t%s\n' "$team" "$agent"
+}
+
 # Which of <id-path> or <legacy-path> to actually use: the id-keyed one if a
 # file already lives there, else the legacy one if a file already lives
 # there, else the id-keyed one (nothing exists yet -- the next write starts
