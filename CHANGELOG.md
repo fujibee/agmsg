@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-09-24
+
+### Added
+- One line per question in a batch, tolerate a malformed row, name max_tokens_exceeded (#1454)
+
+### Fixed
+- Recognize OpenRouter's wrapped max_tokens_exceeded 400 (#1460)
+- Stage the holder before rmdir so a release cannot delete the next owner's (#1445)
+- Skip a no-op hooks_file rewrite, preserve format and mode (#1442)
+- Remove only the install being uninstalled, add --all for every install (#1438)
+- Read the session name from session_index.jsonl (#1437)
+- Restore <team> <name> in the actas record step, and say so when they are missing (#1398)
+- Detect a type's agent process from its manifest, not a fixed list (#631)
+
+[1.4.2]: https://github.com/fujibee/agmsg/compare/v1.4.1...v1.4.2
+
 ## [1.4.1] - 2026-09-23
 
 ### Added
