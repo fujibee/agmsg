@@ -200,7 +200,7 @@ EOF
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe terminal_enumerate_panes terminal_fence terminal_peek_styled terminal_input_draft"
+_AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe terminal_enumerate_panes terminal_fence terminal_peek_styled terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split"
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because
 # two sides need the same list and neither owns it: the drivers emit them, and
@@ -772,11 +772,23 @@ agmsg_terminal_ref_id() {
 # The shared parser below feeds all three public answers, so a new registered
 # driver scheme cannot be accepted by one reader and rejected by another.
 _agmsg_placement_split() {   # <ref>
-  local ref="$1"
+  local ref="$1" halves instance pane id
   _AGMSG_PS_TERM=""; _AGMSG_PS_ID=""; _AGMSG_PS_SOCK=""
   _agmsg_terminal_ref_parse "$ref" || return 1
-  _AGMSG_PS_TERM="$_AGMSG_REF_TERM"; _AGMSG_PS_ID="$_AGMSG_REF_PANE_ID"
+  id="$_AGMSG_REF_PANE_ID"
   _AGMSG_PS_SOCK="$_AGMSG_REF_SOCK"
+  # Some drivers have one local instance even when the legacy placement ref
+  # spells only a bare pane id. Normalize that spelling through the driver's
+  # own splitter so a bare ref and its qualified locator compare as one pane.
+  # Keep the existing socket wildcard rule for tmux: an unqualified legacy
+  # pane still cannot be shown to belong to a different server.
+  if halves="$(_agmsg_terminal_id_split "$_AGMSG_REF_TERM" "$_AGMSG_REF_ID")"; then
+    instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+    if [ -z "$_AGMSG_REF_SOCK" ] && [ "$id" = "$pane" ]; then
+      id="$instance:$pane"
+    fi
+  fi
+  _AGMSG_PS_TERM="$_AGMSG_REF_TERM"; _AGMSG_PS_ID="$id"
   return 0
 }
 
@@ -1186,10 +1198,11 @@ agmsg_terminal_name_self_safe() {
 # ---------------------------------------------------------------------------
 # Locators: the one grammar for "a pane, in an instance, of a kind" (#1055, #1152).
 #
-#   <kind>:<driver id>, where every driver's id is itself <instance>:<pane>:
+#   <kind>:<driver id>, where a qualified driver's id is <instance>:<pane>:
 #     herdr:/run/jugemu.sock:w1:p7      instance = the server's socket path
 #     tmux:/tmp/tmux-501/default:%4     instance = the socket path
 #     plain:iterm:/dev/ttys040          instance = the emulator adapter name
+#     orca:local:term_<uuid>             instance = Orca's one local runtime
 #
 # Pane ids repeat across instances (two herdr sessions both own a w1:p2; tmux
 # has one id space per socket), so a pane id alone can name a live pane in
@@ -1200,9 +1213,9 @@ agmsg_terminal_name_self_safe() {
 # check): one grammar per kind, held once, in the driver that owns it.
 #
 # The registry owns the outer shape (kind + id) and asks the KIND's driver for
-# the boundary inside its id (`terminal_id_split`): where a herdr id ends in
-# two colon fields and a tmux or plain id in one is the driver's grammar, held
-# once, in the driver. An instance may contain spaces. Herdr instances
+# the boundary inside its id (`terminal_id_split`): how an id separates its
+# instance from its pane is the driver's grammar, held once, in the driver.
+# An instance may contain spaces. Herdr instances
 # containing a colon use the registry's versioned encoding (`v2:` plus percent
 # escapes), so an older reader sees an invalid qualified id and refuses it
 # rather than routing to a different socket. Control characters remain rejected.
@@ -1362,6 +1375,40 @@ agmsg_locator_compose() {   # <kind> <instance> <pane>
   [ "$(_agmsg_terminal_id_split "$kind" "$id")" = "$(printf '%s\t%s' "$instance" "$pane")" ] \
     || { echo "agmsg: locator: pane_malformed" >&2; return 2; }
   printf '%s:%s:%s\n' "$kind" "$encoded" "$pane"
+}
+
+# Qualify a canonical ref using the owning driver's own instance rules. A bare
+# result is retained only when the driver explicitly says it has no instance;
+# an unknown or malformed answer is a refusal, not permission to guess.
+agmsg_terminal_ref_qualify() {   # <canonical-ref>
+  local ref="$1" kind parts instance pane
+  _agmsg_terminal_ref_parse "$ref" || return 1
+  kind="$_AGMSG_REF_TERM"
+  agmsg_terminal_load "$kind" >/dev/null 2>&1 || return 1
+  declare -F terminal_instance_for_ref >/dev/null 2>&1 || {
+    echo "agmsg: $kind driver cannot resolve a locator instance" >&2
+    return 2
+  }
+  parts="$(terminal_instance_for_ref "$ref")" || return 1
+  case "$parts" in
+    n/a:bare) printf '%s\n' "$ref"; return 0 ;;
+    n/a:*) echo "agmsg: $kind driver returned an unsupported locator instance result" >&2; return 2 ;;
+    unknown:*) echo "agmsg: $kind driver could not resolve locator instance (${parts#unknown:})" >&2; return 2 ;;
+  esac
+  case "$parts" in
+    *$'\t'*) ;;
+    *) echo "agmsg: $kind driver returned a malformed locator instance" >&2; return 2 ;;
+  esac
+  instance="${parts%%$'\t'*}"; pane="${parts#*$'\t'}"
+  [ -n "$instance" ] && [ -n "$pane" ] || {
+    echo "agmsg: $kind driver returned a malformed locator instance" >&2
+    return 2
+  }
+  case "$instance$pane" in *$'\t'*)
+    echo "agmsg: $kind driver returned a malformed locator instance" >&2
+    return 2 ;;
+  esac
+  agmsg_locator_compose "$kind" "$instance" "$pane"
 }
 
 

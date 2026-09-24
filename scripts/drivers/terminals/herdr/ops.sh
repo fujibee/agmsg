@@ -367,6 +367,22 @@ terminal_id_split() {   # <id>
   [ -n "$sock" ] || return 1
   printf '%s\t%s\n' "$sock" "$(_herdr_bare_of "$1")"
 }
+
+# Resolve the socket and pane from a canonical ref, using the ambient socket
+# only for a bare pane id as the legacy self-fix/self-rename paths did.
+terminal_instance_for_ref() {   # <canonical-ref>
+  local ref="$1" halves instance pane
+  _agmsg_terminal_ref_parse "$ref" || { printf 'unknown:invalid_locator\n'; return 0; }
+  [ "$_AGMSG_REF_TERM" = herdr ] || { printf 'unknown:wrong_terminal\n'; return 0; }
+  if halves="$(terminal_id_split "$_AGMSG_REF_ID")"; then
+    instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+  else
+    instance="${HERDR_SOCKET_PATH:-}"; pane="$_AGMSG_REF_ID"
+  fi
+  [ -n "$instance" ] || { printf 'n/a:bare\n'; return 0; }
+  _agmsg_locator_instance_ok "$instance" || { printf 'unknown:instance_malformed\n'; return 0; }
+  printf '%s\t%s\n' "$instance" "$pane"
+}
 # Run one herdr CLI call ABOUT <id>: a qualified id reaches its own instance
 # through HERDR_SOCKET_PATH; a bare id keeps the ambient one. The bare pane id
 # is what the CLI is given (via the caller's arguments), never the qualified one.
@@ -1326,6 +1342,11 @@ terminal_name() {
   fi
   echo ok
   return 0
+}
+
+# The value terminal_name stores as herdr's internal agent key.
+terminal_expected_label() {   # <team> <agent>
+  _herdr_internal_key "$1" "$2"
 }
 
 # OPTIONAL OP. Observe ONE candidate pane's process facts, as a strict record.

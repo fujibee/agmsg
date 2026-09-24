@@ -68,21 +68,10 @@ _fix_seats_of() {   # <bare-sid>
   done
 }
 
-# The locator a proof established. The proof's canonical ref names the kind
-# and the pane; the INSTANCE is the one the proof's observation went through --
-# the socket the driver was talking to while it observed the pane's processes.
-# That is the name of the observation's path, not the environment as an
-# authority: if the proof did not say proved, this is never consulted.
+# The locator a proof established. Ask the registered driver for its instance;
+# do not maintain a second terminal-name-to-environment table here.
 _fix_locator_of_proof() {   # <canonical-ref>
-  local ref="$1" kind pane inst=""
-  kind="${ref%%:*}"; pane="${ref#*:}"
-  case "$kind" in
-    herdr) inst="${HERDR_SOCKET_PATH:-}" ;;
-    tmux)  case "$pane" in *:*) inst="${pane%:*}"; pane="${pane##*:}" ;; *) inst="${TMUX:-}"; inst="${inst%%,*}" ;; esac ;;
-    plain) case "$pane" in *:*) inst="${pane%%:*}"; pane="${pane#*:}" ;; esac ;;
-  esac
-  [ -n "$inst" ] || { printf '%s\n' "$ref"; return 0; }   # bare: ambient instance
-  agmsg_locator_compose "$kind" "$inst" "$pane" 2>/dev/null || printf '%s\n' "$ref"
+  agmsg_terminal_ref_qualify "$1"
 }
 
 # Prove one seat's location. Prints "<state>\t<payload>\t<via>"; rc as the proof's.
@@ -103,7 +92,14 @@ _fix_locate() {   # <team> <agent> <owner>
     out="$(agmsg_self_proof "$team" "$agent" "$cand")" || rc=$?
     st="${out%%$'\t'*}"
     if [ "$rc" -eq 0 ] && [ "$st" = proved ]; then
-      printf 'proved\t%s\tproof\n' "$(_fix_locator_of_proof "${out#*$'\t'}")"; return 0
+      local qualified proof_ref
+      proof_ref="${out#*$'\t'}"
+      if qualified="$(_fix_locator_of_proof "$proof_ref")"; then
+        printf 'proved\t%s\tproof\n' "$qualified"
+        return 0
+      fi
+      printf 'undetermined\tterminal_instance_unresolved\tproof\n'
+      return 2
     fi
   else
     out="undetermined"$'\t'"no_candidate_in_env"; rc=2

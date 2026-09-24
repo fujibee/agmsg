@@ -196,6 +196,19 @@ terminal_id_split() {   # <id>
   [ -n "$sock" ] || return 1
   printf '%s\t%s\n' "$sock" "$(_tmux_bare_of "$1")"
 }
+
+# Resolve the socket and pane from a canonical ref, falling back to the same
+# ambient socket used by the legacy self-fix/self-rename paths.
+terminal_instance_for_ref() {   # <canonical-ref>
+  local ref="$1" instance pane ambient_tmux="${TMUX:-}"
+  _agmsg_terminal_ref_parse "$ref" || { printf 'unknown:invalid_locator\n'; return 0; }
+  [ "$_AGMSG_REF_TERM" = tmux ] || { printf 'unknown:wrong_terminal\n'; return 0; }
+  instance="${_AGMSG_REF_SOCK:-${ambient_tmux%%,*}}"
+  pane="$_AGMSG_REF_PANE_ID"
+  [ -n "$instance" ] || { printf 'n/a:bare\n'; return 0; }
+  _agmsg_locator_instance_ok "$instance" || { printf 'unknown:instance_malformed\n'; return 0; }
+  printf '%s\t%s\n' "$instance" "$pane"
+}
 _tmux_do() {   # <id> <tmux args...>
   local id="$1"; shift
   local sock; sock="$(_tmux_sock_of "$id")"
@@ -651,6 +664,11 @@ terminal_name() {
   esac
   echo ok
   return 0
+}
+
+# The value terminal_name stores in tmux's pane identity option.
+terminal_expected_label() {   # <team> <agent>
+  printf '%s:%s\n' "$1" "$2"
 }
 
 # OPTIONAL OP. Observe ONE candidate pane's process facts, as a strict record.

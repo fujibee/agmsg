@@ -182,19 +182,15 @@ agmsg_team_identity_loaded() {
 $raw
 EOF
   expected_label="$team:$agent"
-  case "$terminal" in
-    herdr)
-      if declare -F _herdr_internal_key >/dev/null 2>&1; then
-        expected_key="$(_herdr_internal_key "$team" "$agent" 2>/dev/null)" \
-          || expected_key=unknown:key_derivation_failed
-      else
-        expected_key=unknown:key_derivation_unavailable
-      fi
-      ;;
-    tmux) expected_key="$expected_label" ;;
-    plain) expected_key=n/a:no_addressable_pane ;;
-    *) expected_key=unknown:terminal_key_contract_unknown ;;
-  esac
+  if declare -F terminal_expected_label >/dev/null 2>&1; then
+    expected_key="$(terminal_expected_label "$team" "$agent" 2>/dev/null)" \
+      || expected_key=unknown:expected_label_failed
+    case "$expected_key" in
+      ''|*$'\t'*|*$'\n'*|*$'\r'*) expected_key=unknown:expected_label_malformed ;;
+    esac
+  else
+    expected_key=unknown:expected_label_unsupported
+  fi
   if [ "${AGMSG_TERMINAL_NAMING:-}" = off ]; then
     actual_label=n/a:disabled_by_policy
     pane_cell=n/a:disabled_by_policy

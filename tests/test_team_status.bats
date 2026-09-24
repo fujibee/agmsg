@@ -109,6 +109,7 @@ EOF
   terminal_team_observe() {
     printf 'n/a:unsupported\tn/a:no_independent_field\tteam:alice\t✳ team-alice\n'
   }
+  terminal_expected_label() { printf '%s:%s\n' "$1" "$2"; }
   agmsg_type_get() { [ "$2" = name_arg ] && printf '%s\n' -n; }
   run agmsg_team_identity_loaded team alice claude-code tmux '%3'
   [ "$status" -eq 0 ]
@@ -120,10 +121,22 @@ EOF
     printf 'idle\tteam:alice\ta123\ttransient title\n'
   }
   _herdr_internal_key() { printf 'a123\n'; }
+  terminal_expected_label() { _herdr_internal_key "$@"; }
   agmsg_type_get() { return 0; }
   run agmsg_team_identity_loaded team alice codex herdr w2:p3
   [ "$status" -eq 0 ]
   [ "$output" = $'idle\tteam:alice\tteam:alice\ta123\ta123\tn/a:no_session_name\tn/a:no_session_name\tok(actual=team:alice)\tok(actual=a123)\tn/a:no_session_name\tok' ]
+}
+
+@test "orca team identity expects the tab label written by its terminal driver" {
+  source "$SCRIPTS/drivers/terminals/orca/ops.sh"
+  terminal_team_observe() {
+    printf 'idle\tteam:alice\tteam:alice\t◐ team-alice\n'
+  }
+  agmsg_type_get() { return 0; }
+  run agmsg_team_identity_loaded team alice codex orca term_11111111-2222-3333-4444-555555555555
+  [ "$status" -eq 0 ]
+  [ "$output" = $'idle\tteam:alice\tteam:alice\tteam:alice\tteam:alice\tn/a:no_session_name\tn/a:no_session_name\tok(actual=team:alice)\tok(actual=team:alice)\tn/a:no_session_name\tok' ]
 }
 
 @test "visible pane naming off is expected n/a while the key remains checked" {
@@ -131,6 +144,7 @@ EOF
     printf 'idle\tunknown:pane_label_missing\ta123\t✳ team-alice\n'
   }
   _herdr_internal_key() { printf 'a123\n'; }
+  terminal_expected_label() { _herdr_internal_key "$@"; }
   agmsg_type_get() { [ "$2" = name_arg ] && printf '%s\n' -n; }
   AGMSG_TERMINAL_NAMING=off run agmsg_team_identity_loaded team alice claude-code herdr w2:p3
   [ "$status" -eq 0 ]
