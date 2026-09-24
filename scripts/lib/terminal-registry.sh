@@ -591,7 +591,7 @@ _agmsg_terminal_id_ok() {   # <terminal> <id>
   )
 }
 
-_agmsg_terminal_ref_parse() {   # <ref> [validate-id], sets _AGMSG_REF_TERM / _ID / _PANE_ID / _SOCK
+_agmsg_terminal_ref_parse() {   # <ref>, sets _AGMSG_REF_TERM / _ID / _PANE_ID / _SOCK
   local ref="$1" term id halves instance pane
   _AGMSG_REF_TERM=""; _AGMSG_REF_ID=""; _AGMSG_REF_PANE_ID=""; _AGMSG_REF_SOCK=""
   case "$ref" in
@@ -599,16 +599,11 @@ _agmsg_terminal_ref_parse() {   # <ref> [validate-id], sets _AGMSG_REF_TERM / _I
     *:*)   term="${ref%%:*}"; id="${ref#*:}" ;;
     *)     return 1 ;;
   esac
-  # A scheme is accepted only when it names a registered, trusted driver. Keep
-  # this generic: adding a driver must not require another hard-coded case here.
-  # The terminal-returning reader also asks the driver to validate the raw id;
-  # that is the target-safety check, and must happen before v2 ids are decoded.
-  if [ "${2:-}" = validate-id ]; then
-    _agmsg_terminal_id_ok "$term" "$id" || return 1
-  else
-    _agmsg_locator_kind_ok "$term" || return 1
-  fi
-  [ -n "$id" ] || return 1
+  # A ref is readable only when its registered, trusted driver accepts the raw
+  # id. Keep this generic: adding a driver must not require another hard-coded
+  # case here. Validate before v2 ids are decoded so every reader, including the
+  # placement-claim scan, rejects malformed handles the same way.
+  _agmsg_terminal_id_ok "$term" "$id" || return 1
 
   local driver_id="$id" pane_id="$id" sock=""
   case "$term" in
@@ -641,7 +636,7 @@ _agmsg_terminal_ref_parse() {   # <ref> [validate-id], sets _AGMSG_REF_TERM / _I
 }
 
 agmsg_terminal_ref_terminal() {
-  _agmsg_terminal_ref_parse "$1" validate-id || return 1
+  _agmsg_terminal_ref_parse "$1" || return 1
   printf '%s\n' "$_AGMSG_REF_TERM"
 }
 

@@ -3322,7 +3322,7 @@ _tmux_op_args() {
   # also shows the scan distinguishes panes rather than merely finding files.
   local peer; peer="$(agmsg_spawn_path seatteam elsewhere)"
   mkdir -p "$(dirname "$peer")"
-  printf 'tmux:/tmp/fake:%%OTHER\t/proj/PEER\tclaude-code\n' > "$peer"
+  printf 'tmux:/tmp/fake:%%2\t/proj/PEER\tclaude-code\n' > "$peer"
 
   local mine; mine="$(agmsg_spawn_path seatteam writer)"
   run agmsg_terminal_name_self "" seatteam writer /proj/MINE claude-code record
@@ -3476,8 +3476,10 @@ _tmux_op_args() {
   refute agmsg_terminal_ref_terminal 'bogus:thing'
   refute agmsg_terminal_ref_id 'bogus:thing'
   # A registered generic driver still owns its id grammar; this malformed
-  # handle must not become a target just because the scheme is recognized.
+  # handle must not become readable just because the scheme is recognized.
   refute agmsg_terminal_ref_terminal 'orca:term_not-a-uuid'
+  refute agmsg_terminal_ref_id 'orca:term_not-a-uuid'
+  refute _agmsg_placement_split 'orca:term_not-a-uuid'
 }
 
 # --- #1114 follow-up (review): "this seat" is exact, and unreadable is a claim ------
@@ -3544,6 +3546,17 @@ _tmux_op_args() {
   [ "$status" -eq 0 ]
   grep -q 'seatteam__blank' <<<"$output"
   refute test -e "$mine"
+
+  # A registered driver with a malformed id is still unreadable, not a
+  # different pane. Otherwise a valid self ref could pass the guard beside a
+  # peer record that claims an unparseable handle.
+  rm -f "$peer"
+  peer="$(agmsg_spawn_path seatteam invalidorca)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'orca:term_not-a-uuid\t/proj/PEER\tclaude-code\n' > "$peer"
+  run _agmsg_placement_claimed_by 'orca:term_11111111-2222-3333-4444-555555555555' seatteam careful
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = 'seatteam__invalidorca' ]
 }
 
 @test "placement guard: this seat's OWN ref unreadable as a pane is undecidable -> neither named nor recorded (#1114 review)" {
