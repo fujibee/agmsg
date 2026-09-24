@@ -56,37 +56,70 @@ _bg_track() {   # <pid>
 # AND still parented by the exact shell that started it -- skipped entirely
 # otherwise (already dead, or its pid number now belongs to something this
 # test did not start; see _bg_track's header for why both checks are
-# required, not just "is it alive"). A no-op when nothing was tracked.
+# required, not just "is it alive"). This check narrows the pid-recycling
+# window as far as a single ps call can, but does not close it -- see
+# _bg_kill_bounded, which re-checks the same condition again immediately
+# before actually sending KILL. A no-op when nothing was tracked; fails
+# (propagates _bg_kill_bounded's status) when a process this test started
+# survives even that.
 _bg_reap_tracked() {
   [ -n "${TEST_SKILL_DIR:-}" ] || return 0
   local f="$TEST_SKILL_DIR/.bg-pids"
   [ -f "$f" ] || return 0
-  local p parent live_ppid
+  local p parent live_ppid status=0
   while IFS=' ' read -r p parent; do
     [ -n "$p" ] || continue
     live_ppid="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
     [ -n "$live_ppid" ] || continue           # not alive -- nothing to do
     [ "$live_ppid" = "$parent" ] || continue  # alive, but not this test's
-    _bg_kill_bounded "$p"
+    _bg_kill_bounded "$p" "$parent" || status=1
   done < "$f"
+  return "$status"
 }
 
-# TERM <pid>, poll for exit up to ~3s, escalate to KILL if it is still alive,
-# then wait (harmless no-op if <pid> is not this shell's own child -- reap
-# can run in a different bats phase than the spawn). Bounded so a watcher
-# that never responds to TERM cannot stall teardown indefinitely: a hang
-# HERE would stop the following _reap_test_skill_dir_procs from ever running
-# too, recreating the exact #1262 shape one layer up (review finding, #1451).
-_bg_kill_bounded() {   # <pid>
-  local p="$1" tries=0
+# TERM <pid>, poll for exit up to ~3s, then re-verify it is STILL alive and
+# STILL parented by <parent> -- the same two conditions _bg_reap_tracked just
+# checked -- immediately before sending KILL. That re-check narrows, but
+# cannot fully close, the window between the first check and the kill
+# syscall: <pid> could still exit and its number be recycled inside this
+# function's own TERM-wait loop. If the re-check finds it already gone, or
+# now parented by something else, this stops without sending KILL, correctly
+# leaving that other process alone.
+#
+# After KILL, confirms (bounded, ~1-2s) that <pid> actually exited rather
+# than assuming SIGKILL worked -- a caller checking status must be able to
+# tell "actually reaped" from "we gave up and moved on". A failure here is
+# reported loudly, naming the pid and its command line, and fails the
+# caller: a process that survives even SIGKILL must not be silently reported
+# as cleaned up (review finding, #1451).
+#
+# Bounded throughout so a watcher that never responds to TERM cannot stall
+# teardown indefinitely: a hang HERE would stop the following
+# _reap_test_skill_dir_procs from ever running too, recreating the exact
+# #1262 shape one layer up.
+_bg_kill_bounded() {   # <pid> <parent>
+  local p="$1" parent="$2" tries=0 live_ppid
   kill "$p" 2>/dev/null || return 0
   while kill -0 "$p" 2>/dev/null; do
     tries=$((tries + 1))
     [ "$tries" -ge 30 ] && break   # ~3s at 0.1s per try
     sleep 0.1 2>/dev/null || true
   done
-  kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
+  live_ppid="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+  if [ -n "$live_ppid" ] && [ "$live_ppid" = "$parent" ]; then
+    kill -KILL "$p" 2>/dev/null
+    tries=0
+    while kill -0 "$p" 2>/dev/null; do
+      tries=$((tries + 1))
+      if [ "$tries" -ge 15 ]; then   # ~1.5s at 0.1s per try
+        echo "agmsg-test: #1451 -- pid $p ($(ps -o args= -p "$p" 2>/dev/null)) did not exit even after SIGKILL" >&2
+        return 1
+      fi
+      sleep 0.1 2>/dev/null || true
+    done
+  fi
   wait "$p" 2>/dev/null || true
+  return 0
 }
 
 teardown() {
@@ -117,14 +150,14 @@ teardown() {
   #     watcher or a real seat's (see its own header for why this scoping is
   #     safe). Kept as a backstop for anything a future test backgrounds
   #     without going through _bg_track.
-  # Both statuses are propagated (not swallowed) so a process that somehow
-  # survives even SIGKILL escalation fails the test loudly instead of
-  # silently leaking, same as a real seat's monitor never should.
-  _bg_reap_tracked
-  local _reap_status=0 _teardown_status=0
+  # All three statuses are propagated (not swallowed) so a process that
+  # somehow survives even SIGKILL escalation fails the test loudly instead
+  # of silently leaking, same as a real seat's monitor never should.
+  local _bg_status=0 _reap_status=0 _teardown_status=0
+  _bg_reap_tracked || _bg_status=$?
   _reap_test_skill_dir_procs || _reap_status=$?
   teardown_test_env || _teardown_status=$?
-  [ "$_reap_status" -eq 0 ] && [ "$_teardown_status" -eq 0 ]
+  [ "$_bg_status" -eq 0 ] && [ "$_reap_status" -eq 0 ] && [ "$_teardown_status" -eq 0 ]
 }
 
 # Run watch.sh in the background for <secs> seconds, capturing stdout to <out>.
