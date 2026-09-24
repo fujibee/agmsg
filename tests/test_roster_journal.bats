@@ -1562,3 +1562,20 @@ _roster_state_digest() {
   [ -d "$team_dir/.config.lock" ]
   rmdir "$team_dir/.config.lock"
 }
+
+@test "agmsg_roster_owner_name: a departed member's id does not resolve back to their old name (#1457)" {
+  # The reverse of agmsg_roster_name_owner, and the exact function
+  # self-fix.sh's own id-keyed lock resolution uses. A departed member is
+  # not "who it is today" -- a caller resolving an id back to a name must
+  # not walk a gone member's role into a live, named one just because the
+  # journal still remembers the name they left under.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local config="$team_dir/config.json"
+  local member_id
+  member_id="$(config_field "$config" '$.agents.alice.member_id')"
+  source "$SCRIPTS/lib/roster-journal.sh"
+  [ "$(agmsg_roster_owner_name "$team_dir" "$member_id")" = "alice" ]
+  agmsg_roster_append_left "$team_dir" "$member_id" alice "2026-01-01T00:00:00Z"
+  [ -z "$(agmsg_roster_owner_name "$team_dir" "$member_id")" ]
+}
