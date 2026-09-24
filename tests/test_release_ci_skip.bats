@@ -50,6 +50,16 @@ detect() {
 # A widening is what actually hurts: it skips the suite for a file nobody
 # measured. So the arm's contents are pinned literally. Anything added has to be
 # added here too, which is where someone reads why the set is what it is.
+#
+# The arm is NOT the same set as cut-release.sh's own FILES variable (#875).
+# It is that set plus cliff.toml, which cut-release.sh never writes: after the
+# clean-tree check at the start of that script, the only files it changes are
+# VERSION, the two JSON files sync-version.sh derives from it, and (for a
+# stable version) CHANGELOG.md via git-cliff. cliff.toml itself is a file a
+# person edits by hand on the release branch, to catch a commit subject the
+# changelog generator would otherwise drop (the 1.4.2 release PR did this,
+# and so did #1084 and #1428) -- so it belongs in the arm without ever
+# belonging in cut-release.sh's FILES.
 @test "release-ci: the release arm names these files and no others (#875)" {
   local arm expected
   arm=$(grep -oE '^ +VERSION\|[^)]*\) ;;' "$WORKFLOW" | sed 's/) ;;$//; s/^ *//' | tr '|' '\n' | sort)
