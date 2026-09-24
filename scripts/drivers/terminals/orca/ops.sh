@@ -5,10 +5,11 @@
 # Sourced by the terminals registry into the caller's context. terminal_* only,
 # no set -e/-u.
 #
-# PR1 SCOPE: read-only. detect/check/describe/where/pane_state/peek are real;
-# spawn/despawn/poke/name/arrange are not implemented yet and report
-# unsupported (13) uniformly, the same convention `plain` uses for a capability
-# its manifest does not advertise. A later PR adds them.
+# PR3 SCOPE (builds on PR1's read-only set): spawn/despawn/name are now real.
+# poke/arrange remain unimplemented and report unsupported (13) uniformly, the
+# same convention `plain` uses for a capability its manifest does not
+# advertise — arrange because orca's own CLI has no reordering verb at all
+# (checked against 1.4.206), poke because it is a later PR's scope.
 #
 # PR4 SCOPE: adds terminal_enumerate_panes, one of the two OPTIONAL
 # sweep/self-proof ops — read-only, nothing written. terminal_pane_process_
@@ -21,8 +22,8 @@
 # that op would otherwise live, further down, for why "define it and always
 # fail" is the wrong answer to a permanent gap, not just a smaller one.
 #
-# MEASURED (memory/design/2026-09-20-orca-terminal-driver-feasibility.md,
-# orca 1.4.198 and 1.4.206; not asserted):
+# MEASURED (directly against real orca instances, orca 1.4.198 and 1.4.206;
+# not asserted):
 #   - `ORCA_TERMINAL_HANDLE` is set, inside an Orca-hosted pane, to the exact
 #     handle every `orca terminal <verb> --terminal <handle>` call addresses
 #     that pane by — no PID/TTY witness-matching needed, unlike `plain`.
@@ -56,13 +57,13 @@ terminal_check() {
 terminal_describe() {
   printf 'name=orca\n'
   printf 'backend=orca terminal pane\n'
-  printf 'capabilities=peek where\n'
+  printf 'capabilities=peek where spawn despawn name\n'
   printf 'syntax_help=orca terminal --help\n'
 }
 
-# ABI hook: is <id> an orca handle in THIS driver's grammar? Every measured
-# handle (memory/design/2026-09-20-orca-terminal-driver-feasibility.md) is
-# `term_` followed by a UUID's five hyphen-separated hex groups
+# ABI hook: is <id> an orca handle in THIS driver's grammar? Every handle
+# measured against real orca instances is `term_` followed by a UUID's five
+# hyphen-separated hex groups
 # (`term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba`). Checked here so `terminal_id_ok`
 # and `terminal_detect` share ONE authority (review, #1439): without a
 # `terminal_id_ok`, the registry's fallback for "driver has no hook" is to
@@ -226,9 +227,9 @@ terminal_where() {
 }
 
 # record op: print the rendered pane content verbatim (NOT parsed) — always
-# via `read --screen`: measured, it never carries ANSI/color/SGR information
-# in either read mode (memory/design/2026-09-20-orca-terminal-driver-feasibility.md,
-# Third pass, (a)), so there is nothing --screen costs against the default and
+# via `read --screen`: measured directly against real orca instances, it
+# never carries ANSI/color/SGR information in either read mode, so there is
+# nothing --screen costs against the default and
 # it is the one that answers "what does the pane actually show" rather than an
 # accumulated, possibly-stale-repaint stream. --lines maps to --limit, passed
 # through unchanged to the backend (same contract as tmux/herdr's --lines).
@@ -444,21 +445,151 @@ EOF
 # regardless: they identify themselves directly through $ORCA_TERMINAL_HANDLE
 # (see the file header), which never needed a process/pid binding.
 
-# Every write-shaped verb is unimplemented in this PR — reported uniformly as
-# `unsupported`, the same word `plain` uses for a capability its manifest does
-# not advertise (13). None of these are in this driver's terminal.conf
-# `capabilities=` line, so a caller checking the manifest first should never
-# reach these at all; they exist because the terminal ABI requires every
-# driver to define every required function (the loader verifies it — see
+# `arrange` and `poke` are unimplemented — reported uniformly as `unsupported`,
+# the same word `plain` uses for a capability its manifest does not advertise
+# (13). Neither is in this driver's terminal.conf `capabilities=` line, so a
+# caller checking the manifest first should never reach either at all; they
+# exist because the terminal ABI requires every driver to define every
+# required function (the loader verifies it — see
 # scripts/lib/terminal-registry.sh's _AGMSG_TERMINAL_REQUIRED).
+#
+# `arrange` specifically: orca's own `--help` has no reordering/move/swap verb
+# for a terminal or its tab (checked against 1.4.206's CLI surface) — nothing
+# for this driver to call, not a choice not to wire one up.
 _orca_unsupported() {   # <verb>
   printf 'unsupported: orca terminal driver does not implement %s yet (read-only in this release)\n' "$1" >&2
   return 13
 }
-terminal_spawn()   { _orca_unsupported "spawn"; }
-terminal_despawn() { _orca_unsupported "despawn"; }
-terminal_name()    { _orca_unsupported "name"; }
 terminal_arrange() { _orca_unsupported "arrange"; }
+
+# RECORD op: create a new terminal in <project>'s worktree, launch <boot> as
+# its initial command, print the new terminal's handle. Unlike tmux/herdr,
+# there is no separate "wait for the shell prompt, then type the boot command"
+# step here and therefore none of their lost-keystroke race: `orca terminal
+# create --command` launches the boot text AS the pane's own initial process
+# (measured, Third pass (c)) — the command is argv, not typed input, so there
+# is nothing to type before the shell is ready because there is no separate
+# typing step at all.
+#
+# <target> (window|pane-h|pane-v) is validated the same as tmux/herdr — a typo
+# must fail, not silently spawn — but orca's `create` has no window/split
+# distinction of its own (every call just adds one more terminal to the
+# worktree), so all three valid values behave identically here.
+#
+# --title is set at creation as a best-effort courtesy (matching tmux's own
+# -n/-T at creation), NOT the naming contract itself — measured (Third pass
+# (b)), a terminal's `show`-visible title reverts to Orca's own auto-generated
+# value almost immediately regardless of how it was set, so the caller's own
+# later `terminal_name` call (against the TAB title via `rename`, which does
+# hold) is what actually names this pane.
+#
+# UNMEASURED: whether `--worktree "path:<project>"` for a path Orca has never
+# opened as a worktree before fails cleanly or does something unexpected —
+# every measurement so far used a worktree already open in the app. Surfaces
+# as an ordinary create failure (13) either way; not specifically verified.
+terminal_spawn() {
+  local name="$1" project="$2" target="$3"; shift 3
+  local boot="$*"
+  case "$target" in
+    window|pane-h|pane-v) : ;;
+    *) printf 'unsupported: unknown target: %s (window|pane-h|pane-v)\n' "$target" >&2; return 13 ;;
+  esac
+  command -v orca >/dev/null 2>&1 \
+    || { printf 'orca: not on PATH — cannot spawn a terminal in %s\n' "$project" >&2; return 13; }
+  # `json="$(cmd)"` (not combined with `local`) propagates a non-zero cmd
+  # exit to THIS assignment statement's own status -- under a caller's set -e
+  # that aborts right here, before any of the ok/13 handling below ever runs
+  # (review, #1440). `|| true` on the assignment itself neutralizes it; the
+  # emptiness/validity checks immediately after already treat a failed call
+  # the same as an empty or unparsable one.
+  local json ok id
+  json="$(orca terminal create --worktree "path:$project" --title "$name" --command "$boot" --json 2>/dev/null)" || true
+  [ -n "$json" ] || { printf 'orca: terminal create for %s produced no output\n' "$project" >&2; return 13; }
+  _orca_json_valid "$json" \
+    || { printf 'orca: terminal create for %s returned unparsable output\n' "$project" >&2; return 13; }
+  ok="$(_orca_json_bool "$json" '$.ok')"
+  if [ "$ok" != 1 ]; then
+    printf 'orca: terminal create for %s failed (%s)\n' "$project" "$(_orca_error_code "$json")" >&2
+    return 13
+  fi
+  id="$(_orca_json_field "$json" '$.result.terminal.handle' text)"
+  [ -n "$id" ] || { printf 'orca: terminal create for %s answered ok with no handle\n' "$project" >&2; return 13; }
+  # Same boundary #1439 already closed for terminal_detect: an ok:true
+  # response is not proof the handle is well-formed. A malformed handle
+  # (control byte, wrong grammar) must never reach a placement record.
+  terminal_id_ok "$id" \
+    || { printf 'orca: terminal create for %s answered ok with a malformed handle\n' "$project" >&2; return 13; }
+  printf '%s\n' "$id"
+  return 0
+}
+
+# control op: close <id>, then CONFIRM it through `show`'s own `connected`
+# field — never through `close`'s own return. MEASURED (Third pass (d)):
+# `close` on an already-closed handle changed behaviour between the two orca
+# versions checked three days apart (1.4.198 errored with
+# terminal_handle_stale; 1.4.206 returns ok:true, ptyKilled:false) — the exact
+# instability `terminal_pane_state`'s own header already documents as the
+# reason it is built on `show` alone. `terminal_despawn` reuses that same
+# function rather than re-deriving the same fact a second way: after issuing
+# the close, the only question left is "is this pane now gone", which
+# `terminal_pane_state` already answers honestly (gone only on a positively
+# confirmed connected:false, never merely because `close` claimed success).
+terminal_despawn() {
+  local id="$1"
+  command -v orca >/dev/null 2>&1 \
+    || { echo runtime_error; echo "orca: not on PATH — cannot despawn terminal '$id'" >&2; return 13; }
+  # `close`'s own exit status is deliberately never inspected (see the header
+  # comment above) -- `|| true` makes that literal: a bare failing command
+  # here would otherwise abort under a caller's set -e before the
+  # pane_state re-check below ever runs (review, #1440), defeating the whole
+  # point of not trusting close in the first place.
+  orca terminal close --terminal "$id" --json >/dev/null 2>&1 || true
+  # Same errexit hazard as `close` above, on the very next line: pane_state's
+  # own documented contract returns non-zero (10) for unknown, so this
+  # assignment's status would abort a set -e caller before the runtime_error
+  # output and 13 below ever run (review, #1440) -- silently violating
+  # despawn's own "anything else is 13" contract instead of honoring it.
+  local state
+  state="$(terminal_pane_state "$id")" || true
+  if [ "$state" = gone ]; then
+    echo ok
+    return 0
+  fi
+  echo runtime_error
+  echo "orca: terminal '$id' was not confirmed gone after close (pane_state: ${state:-unknown})" >&2
+  return 13
+}
+
+# control op: set <id>'s visible name. Orca has exactly ONE name — the TAB
+# title `orca terminal rename --title` actually controls (MEASURED, Third
+# pass (b): a per-terminal `show.title` looks like the obvious target but
+# auto-reverts to Orca's own generated value near-instantly and is NOT what
+# rename controls; the tab title exposed by `list --include-visual-layouts`
+# is the field that holds). Per this driver ABI's own contract comment
+# (scripts/lib/terminal-registry.sh, terminal_name's doc): "a driver that has
+# only one name treats it as the key" — so <mode> (key vs default/both) is
+# accepted for signature compatibility but makes no difference here; there is
+# no separate internal-key mechanism to skip.
+terminal_name() {
+  local id="$1" team="$2" name="$3" label
+  label="$team:$name"
+  command -v orca >/dev/null 2>&1 \
+    || { echo runtime_error; echo "orca: not on PATH — cannot rename terminal '$id'" >&2; return 13; }
+  # Same errexit hazard as terminal_spawn's create call, same fix (#1440).
+  local json ok
+  json="$(orca terminal rename --terminal "$id" --title "$label" --json 2>/dev/null)" || true
+  [ -n "$json" ] || { echo runtime_error; echo "orca: rename for '$id' produced no output" >&2; return 13; }
+  _orca_json_valid "$json" \
+    || { echo runtime_error; echo "orca: rename for '$id' returned unparsable output" >&2; return 13; }
+  ok="$(_orca_json_bool "$json" '$.ok')"
+  if [ "$ok" != 1 ]; then
+    echo runtime_error
+    echo "orca: rename for '$id' failed ($(_orca_error_code "$json"))" >&2
+    return 13
+  fi
+  echo ok
+  return 0
+}
 
 # `terminal_poke`'s own `return 13` is written INLINE (not delegated to
 # `_orca_unsupported`) so `test_capability_docs.bats`'s exit-code cross-check —

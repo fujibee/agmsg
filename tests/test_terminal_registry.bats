@@ -205,8 +205,8 @@ _fake_herdr_list_scalar_session() {
 }
 
 # A fake `orca` that logs argv and returns canned JSON for `terminal show` and
-# `terminal read`, shaped like the real 1.4.206 responses measured in
-# memory/design/2026-09-20-orca-terminal-driver-feasibility.md (Third pass).
+# `terminal read`, shaped like the real 1.4.206 responses measured directly
+# against real orca instances.
 #   present  a live, connected terminal
 #   gone     a terminal that existed and was closed (positively confirmed:
 #            connected:false, orphaned:true, exitCause present)
@@ -233,6 +233,9 @@ _fake_herdr_list_scalar_session() {
 _install_fake_orca() {
   local mode="${1:-present}" show_json show_rc=0 read_json read_rc=0 \
     list_json='{"ok":true,"result":{"terminals":[]}}' list_rc=0
+  local create_json='{"ok":true,"result":{"terminal":{"handle":"term_11111111-2222-3333-4444-555555555555"}}}' create_rc=0
+  local close_json='{"ok":true,"result":{"close":{"handle":"term_abc123","ptyKilled":true}}}' close_rc=0
+  local rename_json='{"ok":true,"result":{}}' rename_rc=0
   case "$mode" in
     present)
       show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
@@ -299,6 +302,41 @@ _install_fake_orca() {
     list_unreachable)
       list_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
       ;;
+    # Write-op modes below reuse `present`'s show/read (mostly irrelevant to
+    # what they test) and vary only the one JSON their own test cares about.
+    create_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":false,"error":{"code":"worktree_not_found"}}'
+      ;;
+    create_no_handle)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":true,"result":{"terminal":{}}}'
+      ;;
+    create_bad_handle)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":true,"result":{"terminal":{"handle":"term_bad\u0007handle"}}}'
+      ;;
+    create_proc_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":false,"error":{"code":"internal_error"}}'
+      create_rc=1
+      ;;
+    rename_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      rename_json='{"ok":false,"error":{"code":"terminal_handle_stale"}}'
+      ;;
+    rename_proc_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      rename_json='{"ok":false,"error":{"code":"internal_error"}}'
+      rename_rc=1
+      ;;
+    close_proc_fails_but_gone)
+      # The design point being pinned: close's own exit status must NOT
+      # matter — despawn always proceeds to check pane_state afterward.
+      show_json='{"ok":true,"result":{"terminal":{"connected":false,"writable":false,"orphaned":true,"tabId":"tab-1","exitCause":{"kind":"operator_close"}}}}'
+      close_json='{"ok":false,"error":{"code":"internal_error"}}'
+      close_rc=1
+      ;;
   esac
   cat > "$FAKEBIN/orca" <<EOF
 #!/usr/bin/env bash
@@ -312,6 +350,15 @@ elif [ "\$1" = terminal ] && [ "\$2" = read ]; then
 elif [ "\$1" = terminal ] && [ "\$2" = list ]; then
   echo '$list_json'
   exit $list_rc
+elif [ "\$1" = terminal ] && [ "\$2" = create ]; then
+  echo '$create_json'
+  exit $create_rc
+elif [ "\$1" = terminal ] && [ "\$2" = close ]; then
+  echo '$close_json'
+  exit $close_rc
+elif [ "\$1" = terminal ] && [ "\$2" = rename ]; then
+  echo '$rename_json'
+  exit $rename_rc
 fi
 exit 0
 EOF
@@ -1229,7 +1276,7 @@ _last_agent_rename_key() {
   # bash 3.2, and consistently avoiding it here means a later edit adding a
   # line after these can't silently reintroduce that same class of bug.
   grep -qF -- 'name=orca' <<< "$output"
-  grep -qF -- 'capabilities=peek where' <<< "$output"
+  grep -qF -- 'capabilities=peek where spawn despawn name' <<< "$output"
 }
 
 @test "orca: detect requires TERM_PROGRAM=Orca, prints the handle from the env" {
@@ -1439,22 +1486,15 @@ _last_agent_rename_key() {
   [ "$status" -eq 10 ]
 }
 
-@test "orca: spawn/despawn/poke/name/arrange all report unsupported (13) — read-only this release" {
+@test "orca: arrange (and poke) stay unsupported (13) — orca's CLI has no reordering verb at all" {
   _install_fake_orca present
   agmsg_terminal_load orca
-  run terminal_spawn alice /proj pane-v bash -lc boot
-  [ "$status" -eq 13 ]
-  run terminal_despawn term_abc123
-  [ "$status" -eq 13 ]
-  run terminal_poke term_abc123 hello
-  [ "$status" -eq 13 ]
-  run terminal_name term_abc123 team alice
-  [ "$status" -eq 13 ]
   run terminal_arrange term_abc123 place_below term_def456
   [ "$status" -eq 13 ]
-  # None of these ever touched the fake orca binary.
-  refute grep -q '\[create\]' "$ARGV_LOG"
-  refute grep -q '\[close\]' "$ARGV_LOG"
+  grep -q 'unsupported' <<<"$output"
+  run terminal_poke term_abc123 hello
+  [ "$status" -eq 13 ]
+  # Neither ever touched the fake orca binary — there is no call to make.
   refute grep -q '\[send\]' "$ARGV_LOG"
   refute grep -q '\[rename\]' "$ARGV_LOG"
 }
@@ -1534,6 +1574,140 @@ _last_agent_rename_key() {
   run agmsg_self_proof testteam alice term_11111111-1111-1111-1111-111111111111
   [ "$status" -eq 3 ]
   [ "$output" = "$(printf 'unsupported\tdriver_no_process_binding')" ]
+}
+
+@test "orca: spawn creates via worktree path with boot as the initial command, and fails closed on every bad input" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_spawn alice /proj pane-v bash -lc boot
+  [ "$status" -eq 0 ]
+  [ "$output" = term_11111111-2222-3333-4444-555555555555 ]
+  grep -qF -- '[create]' "$ARGV_LOG"
+  grep -qF -- '[--worktree] [path:/proj]' "$ARGV_LOG"
+  grep -qF -- '[--title] [alice]' "$ARGV_LOG"
+  grep -qF -- '[--command] [bash -lc boot]' "$ARGV_LOG"
+
+  # An unknown target must fail, not silently default (same rule as tmux/herdr).
+  run terminal_spawn alice /proj bogus-target boot
+  [ "$status" -eq 13 ]
+  grep -q 'unsupported' <<<"$output"
+
+  # Unreachable, a failed create, and an ok:true create with no handle all
+  # fail the same way: 13, nothing to print.
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-spawn"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  _install_fake_orca create_fails
+  run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  _install_fake_orca create_no_handle
+  run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  # An ok:true response with a malformed handle (here: an embedded control
+  # byte) must not reach a placement record -- the same boundary #1439
+  # already closed for terminal_detect (review, #1440).
+  _install_fake_orca create_bad_handle
+  run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  # The orca PROCESS itself exiting non-zero (not merely an ok:false JSON
+  # body) must still land on the named 13 failure, not abort the caller out
+  # from under a NON-conditional set -e (review, #1440: `json="$(orca ...)"`
+  # propagates a non-zero orca exit to this assignment's own status). Same
+  # proof shape as the herdr set -e test above: source ops.sh directly and
+  # call the function bare, not inside `$(...)` where errexit is masked.
+  _install_fake_orca create_proc_fails
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_spawn alice /proj window boot; echo UNREACHABLE'
+  [ "$status" -eq 13 ]
+  refute grep -q UNREACHABLE <<<"$output"
+}
+
+@test "orca: despawn closes then confirms gone via show — never trusts close's own return" {
+  # MEASURED (Third pass (d)): close's own success/error shape for an
+  # already-closed handle differs across orca versions — this is exactly why
+  # despawn is built to re-check through pane_state/show instead.
+  _install_fake_orca gone
+  agmsg_terminal_load orca
+  run terminal_despawn term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  grep -qF -- '[close]' "$ARGV_LOG"
+  grep -qF -- '[show]' "$ARGV_LOG"
+
+  # close reports success (ptyKilled:true in the default 'present' fixture)
+  # but the pane is still connected:true — despawn must not trust close alone.
+  _install_fake_orca present
+  run terminal_despawn term_abc123
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-despawn"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_despawn term_abc123
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  # The design point itself, proven under a NON-conditional set -e: close's
+  # own exit status (non-zero here) must not matter at all -- despawn always
+  # reaches the pane_state re-check afterward and reports success once THAT
+  # confirms gone (review, #1440).
+  _install_fake_orca close_proc_fails_but_gone
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_despawn term_abc123'
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+
+  # pane_state itself returns non-zero (10) for unknown -- the SAME errexit
+  # hazard on the very next line (review, #1440): `state="$(terminal_pane_state
+  # ...)"` must not abort the caller either, or despawn's own "anything else
+  # is 13" contract silently breaks for exactly the unknown case it names.
+  # 'stale' makes show answer ok:false, so pane_state is unknown/10.
+  _install_fake_orca stale
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_despawn term_abc123; echo UNREACHABLE'
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+  refute grep -q UNREACHABLE <<<"$output"
+}
+
+@test "orca: name renames via the tab title (team:name), mode makes no difference, and fails closed" {
+  # Single-name driver (only the TAB title `rename` controls, see README) —
+  # `mode` (key-only vs both) has nothing separate to skip, so both must
+  # produce the identical --title argument.
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_name term_abc123 team alice
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  grep -qF -- '[rename]' "$ARGV_LOG"
+  grep -qF -- '[--title] [team:alice]' "$ARGV_LOG"
+
+  : > "$ARGV_LOG"
+  run terminal_name term_abc123 team alice key
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  grep -qF -- '[--title] [team:alice]' "$ARGV_LOG"
+
+  _install_fake_orca rename_fails
+  run terminal_name term_abc123 team alice
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-name"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_name term_abc123 team alice
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  # Same errexit hazard and proof shape as terminal_spawn's create call
+  # above (review, #1440): the orca PROCESS exiting non-zero must land on
+  # the named 13, not abort the caller out from under set -e.
+  _install_fake_orca rename_proc_fails
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_name term_abc123 team alice; echo UNREACHABLE'
+  [ "$status" -eq 13 ]
+  refute grep -q UNREACHABLE <<<"$output"
 }
 
 # --- ABI completeness + structural clobber-proofing (#1014 review) -------
