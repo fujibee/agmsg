@@ -161,7 +161,7 @@ _proof_says() {   # <rc> <state> <payload>
 
 @test "fix: no candidate in the environment -> the proof is not even asked; fallback if present, else no_candidate_in_env" {
   _own_seat alice "$ME"; _proof_says 0 proved herdr:w1:pB
-  unset HERDR_ENV HERDR_PANE_ID TERM_PROGRAM ORCA_TERMINAL_HANDLE
+  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH TERM_PROGRAM ORCA_TERMINAL_HANDLE
   unset -f agmsg_token_locate_pending 2>/dev/null || true
   run agmsg_fix_run
   [ "$status" -eq 2 ]
@@ -176,7 +176,7 @@ _proof_says() {   # <rc> <state> <payload>
   : > "$SPY"
   run agmsg_fix_run
   [ "$status" -eq 2 ] || return 1
-  [ "$output" = "fix seat=T/alice state=undetermined reason=no_candidate_in_env via=proof (written nothing)" ] || return 1
+  [ "$output" = "fix seat=T/alice state=undetermined reason=orca:orca_handle_unset_or_malformed via=proof (written nothing)" ] || return 1
   refute grep -q '^proof' "$SPY"
   refute grep -q '^write' "$SPY"
 }
