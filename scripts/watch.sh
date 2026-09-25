@@ -992,7 +992,9 @@ if [ -z "$PAIRS" ]; then
   else
     echo "agmsg watch: no available identities (all held by other sessions, or none joined); nothing to do"
   fi
-  exit 0
+  # Non-zero so a caller (Monitor, a supervisor, a script) can tell "watching
+  # nothing" apart from a watcher that started and later ended cleanly.
+  exit 3
 fi
 
 # The read frontier lives in the storage driver, once per (team,agent). Core

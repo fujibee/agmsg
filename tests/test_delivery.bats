@@ -1747,6 +1747,7 @@ JSON
 JSON
   run bash "$SCRIPTS/watch.sh" t-sid "$TEST_PROJECT" claude-code nobody
   [[ "$output" =~ "no registration for agent 'nobody'" ]]
+  [ "$status" -eq 3 ]
 }
 
 # --- session-start.sh orphan watcher cleanup ---
