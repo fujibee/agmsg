@@ -214,10 +214,21 @@ teardown() {
   # literal substring of "agmsg-second", and "$SK" (no trailing slash) is a
   # literal prefix of "$SK-second". Uninstalling the shorter one must not
   # touch the longer one's own registrations.
-  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex"
+  #
+  # #1469: also covers what install.sh writes but uninstall.sh used to leave
+  # behind -- the CODEX_HOME-side Codex config (a second, DIFFERENT throwaway
+  # config dir here, standing in for a real Codex profile), and the OpenCode/
+  # Hermes/Grok Build dedicated skill files. install.sh only ever writes to a
+  # Codex config.toml that already exists (never creates one), so both are
+  # pre-seeded just like the default one already was above.
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex" \
+    "$FAKE_HOME/.config/opencode" "$FAKE_HOME/.hermes" "$FAKE_HOME/.grok"
   printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  local codex_home2="$FAKE_HOME/.codex-profile2"
+  mkdir -p "$codex_home2"
+  printf 'model = "gpt-test"\n' > "$codex_home2/config.toml"
+  HOME="$FAKE_HOME" CODEX_HOME="$codex_home2" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" CODEX_HOME="$codex_home2" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
   local sk_second="$FAKE_HOME/.agents/skills/agmsg-second"
 
   local project="$FAKE_HOME/project"
@@ -236,12 +247,34 @@ teardown() {
   printf 'Run `%s/scripts/whoami.sh`.\n' "$SK" > "$project/.claude/commands/agmsg-project.md"
   printf 'Run `%s/scripts/whoami.sh`.\n' "$sk_second" > "$project/.claude/commands/agmsg-second-project.md"
 
+  # Grok Build's own hooks_file (.grok/rules/agmsg.md) is project-relative
+  # and NOT templated on the skill name (scripts/drivers/types/grok-build/
+  # type.conf) -- two installs registering it for the SAME project would
+  # overwrite each other's rule file, a pre-existing limitation outside this
+  # fix's scope. Two separate projects sidesteps it and still proves the
+  # per-install boundary.
+  local grok_project="$FAKE_HOME/grok-project"
+  local grok_project_second="$FAKE_HOME/grok-project-second"
+  mkdir -p "$grok_project" "$grok_project_second"
+  bash "$SK/scripts/join.sh" grokteam grokalice grok-build "$grok_project" >/dev/null
+  bash "$sk_second/scripts/join.sh" grokteam grokbob grok-build "$grok_project_second" >/dev/null
+  HOME="$FAKE_HOME" bash "$SK/scripts/delivery.sh" set turn grok-build "$grok_project" >/dev/null
+  HOME="$FAKE_HOME" bash "$sk_second/scripts/delivery.sh" set turn grok-build "$grok_project_second" >/dev/null
+
   local cmd_first="$FAKE_HOME/.claude/commands/agmsg.md"
   local cmd_second="$FAKE_HOME/.claude/commands/agmsg-second.md"
   local proj_cmd_first="$project/.claude/commands/agmsg-project.md"
   local proj_cmd_second="$project/.claude/commands/agmsg-second-project.md"
   local settings="$project/.claude/settings.local.json"
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  local opencode_first="$FAKE_HOME/.config/opencode/skills/agmsg/SKILL.md"
+  local opencode_second="$FAKE_HOME/.config/opencode/skills/agmsg-second/SKILL.md"
+  local hermes_first="$FAKE_HOME/.hermes/skills/agmsg/SKILL.md"
+  local hermes_second="$FAKE_HOME/.hermes/skills/agmsg-second/SKILL.md"
+  local grok_first="$FAKE_HOME/.grok/skills/agmsg/SKILL.md"
+  local grok_second="$FAKE_HOME/.grok/skills/agmsg-second/SKILL.md"
+  local grok_rule_first="$grok_project/.grok/rules/agmsg.md"
+  local grok_rule_second="$grok_project_second/.grok/rules/agmsg.md"
   [ -f "$cmd_first" ]
   [ -f "$cmd_second" ]
   [ -f "$proj_cmd_first" ]
@@ -250,25 +283,46 @@ teardown() {
   grep -qF "$sk_second/" "$settings"
   grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
   grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "$SK/" "$codex_home2/config.toml"
+  grep -qF "$sk_second/" "$codex_home2/config.toml"
+  [ -f "$opencode_first" ]
+  [ -f "$opencode_second" ]
+  [ -f "$hermes_first" ]
+  [ -f "$hermes_second" ]
+  [ -f "$grok_first" ]
+  [ -f "$grok_second" ]
+  grep -qF "$SK/" "$grok_rule_first"
+  grep -qF "$sk_second/" "$grok_rule_second"
   [ -f "$shim" ]
 
   # Run the COPY inside the "agmsg" install itself (the normal way a real
   # user uninstalls one) -- $0's own directory is what identifies which one
   # install this run is about (#1400).
-  HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  HOME="$FAKE_HOME" CODEX_HOME="$codex_home2" bash "$SK/uninstall.sh" --yes
 
   [ ! -e "$SK" ]
   [ ! -f "$cmd_first" ]
   [ ! -f "$proj_cmd_first" ]
   refute grep -qF "$SK/" "$settings"
   refute grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "$SK/" "$codex_home2/config.toml"
+  [ ! -e "$opencode_first" ]
+  [ ! -e "$hermes_first" ]
+  [ ! -e "$grok_first" ]
+  [ ! -f "$grok_rule_first" ]
   # The untouched install: global command, project hook and command file,
-  # writable_roots entry, and the machine-wide shim it still needs.
+  # writable_roots entry in BOTH Codex configs, its three dedicated skill
+  # files, its Grok rule, and the machine-wide shim it still needs.
   [ -d "$sk_second" ]
   [ -f "$cmd_second" ]
   [ -f "$proj_cmd_second" ]
   grep -qF "$sk_second/" "$settings"
   grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
+  grep -qF "$sk_second/" "$codex_home2/config.toml"
+  [ -f "$opencode_second" ]
+  [ -f "$hermes_second" ]
+  [ -f "$grok_second" ]
+  grep -qF "$sk_second/" "$grok_rule_second"
   [ -f "$shim" ]
 
   # (review, round 2) The target install has NO writable_roots entry of

@@ -15,6 +15,9 @@ set -euo pipefail
 #                                     # (one combined confirmation, unless --yes)
 
 AGENTS_DIR="$HOME/.agents"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/codex-config.sh"
 
 AUTO_YES=false
 KEEP_DATA=false
@@ -51,6 +54,84 @@ confirm() {
 }
 
 REMOVED=false
+
+# Removes this install's own writable_roots entries (SKILL_DIR's db/,
+# teams/, run/, ext-tools/) from ONE Codex config.toml, if it exists and
+# actually mentions them. Split out of _uninstall_one so it can be applied
+# to every path agmsg_codex_config_paths names (#1469), not just the plain
+# ~/.codex/config.toml default -- the logic itself is unchanged from before
+# that split.
+#
+# review: the old entry-match pattern ("$SKILL_DIR followed by any
+# characters up to the closing quote") had no boundary at all, so it also
+# matched a sibling install whose own path this one's is a literal prefix of
+# (e.g. SKILL_DIR "agmsg" matching a "agmsg-second" entry too). An entry is
+# removed only when it IS exactly SKILL_DIR, or starts with SKILL_DIR
+# followed by "/" -- and SKILL_DIR is regex-escaped first (it can contain
+# ".", which is otherwise "any character" in the pattern awk builds).
+#
+# review, round 2: a loose pre-check here (even a boundary-correct one) is
+# still a claim about what the file contains, and "do we write, back up,
+# and report changed" deserves better than trusting that claim. Transform
+# into a candidate file first and compare it against the original; back up
+# and replace only when they actually differ. A config that only mentions a
+# SIBLING install's own root now never gets touched, backed up, or reported
+# "cleaned" at all -- not because the entry check happened to be narrow
+# enough, but because nothing about it would actually change.
+_uninstall_clean_codex_config() {
+  local CODEX_CONFIG="$1" SKILL_DIR="$2"
+  [ -f "$CODEX_CONFIG" ] || return 0
+  # Remove matching entries from writable_roots (handles multiline arrays)
+  awk -v pattern="$SKILL_DIR" '
+    function ere_escape(s,    i, c, out, special) {
+      special = "\\.[]()*+?{}|^$"
+      out = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (index(special, c) > 0) out = out "\\" c
+        else out = out c
+      }
+      return out
+    }
+    BEGIN { esc = ere_escape(pattern) }
+    /writable_roots/ { in_roots=1; buf="" }
+    in_roots { buf = buf $0 "\n" }
+    in_roots && /\]/ {
+      gsub("\"" esc "(/[^\"]*)?\"[, ]*", "", buf)
+      # Clean up trailing/leading commas
+      gsub(/,[ \t]*\]/, "]", buf)
+      gsub(/\[[ \t]*,/, "[", buf)
+      gsub(/,[ \t]*,/, ",", buf)
+      # Check if empty
+      if (buf ~ /writable_roots[^[]*\[\s*\]/) {
+        in_roots=0; next
+      }
+      printf "%s", buf
+      in_roots=0; next
+    }
+    !in_roots { print }
+  ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp"
+  # Remove empty [sandbox_workspace_write] section
+  awk '
+    /^\[sandbox_workspace_write\]/ {
+      header=$0
+      if (getline nextline <= 0) next
+      if (nextline ~ /^\[/ || nextline == "") { print nextline; next }
+      print header
+      print nextline
+      next
+    }
+    { print }
+  ' "$CODEX_CONFIG.tmp" > "$CODEX_CONFIG.tmp2" && mv "$CODEX_CONFIG.tmp2" "$CODEX_CONFIG.tmp"
+  if cmp -s "$CODEX_CONFIG" "$CODEX_CONFIG.tmp"; then
+    rm -f "$CODEX_CONFIG.tmp"
+  else
+    cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
+    mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+    echo "  - cleaned Codex writable_roots in $CODEX_CONFIG (backup: $(basename "$CODEX_CONFIG").bak)"
+    REMOVED=true
+  fi
+}
 
 # Removes ONE install's own commands, hooks, skill files, and Codex
 # writable_roots entries -- everything except the machine-wide shared
@@ -198,6 +279,39 @@ _uninstall_one() {
           REMOVED=true
         fi
       done <<< "$copilot_projects"
+
+      # --- Grok Build CLI project-scoped rule file cleanup ---
+      # Same two-shape registrations handling as the claude-code query above.
+      # #1469: install.sh's own comment describes this as a hook under
+      # ~/.grok/hooks/, but that path is written nowhere in this codebase --
+      # scripts/drivers/types/grok-build/type.conf's actual hooks_file is
+      # .grok/rules/agmsg.md, project-relative, written by
+      # grok-build/_delivery.sh's own agmsg_delivery_apply (turn/monitor
+      # mode). That install.sh comment is stale; this cleans the file that
+      # is actually written, the same way the Copilot hook above is cleaned.
+      local grok_projects
+      grok_projects=$(sqlite3 -separator '	' :memory: \
+        ".param set :json '$(sed "s/'/''/g" "$config")'" \
+        "WITH agent AS (
+           SELECT CASE
+             WHEN json_type(json_extract(value, '$.registrations')) = 'array' THEN json_extract(value, '$.registrations')
+             ELSE json_array(json_object('type', json_extract(value, '$.type'), 'project', json_extract(value, '$.project')))
+           END AS registrations
+           FROM json_each(json_extract(:json, '$.agents'))
+         )
+         SELECT json_extract(value, '$.project') FROM agent, json_each(agent.registrations)
+         WHERE json_extract(value, '$.type') = 'grok-build'
+           AND json_extract(value, '$.project') IS NOT NULL;" 2>/dev/null || true)
+
+      while IFS= read -r project; do
+        [ -n "$project" ] || continue
+        local grok_rule="$project/.grok/rules/agmsg.md"
+        if [ -f "$grok_rule" ] && grep -qF "$SKILL_DIR_SLASH" "$grok_rule" 2>/dev/null; then
+          rm "$grok_rule"
+          echo "  - removed agmsg Grok Build rule from $project"
+          REMOVED=true
+        fi
+      done <<< "$grok_projects"
     done
   fi
 
@@ -254,75 +368,44 @@ _uninstall_one() {
   fi
 
   # --- Clean up Codex writable_roots (this install's own path only) ---
-  # review: the old pattern ("$SKILL_DIR followed by any characters up to
-  # the closing quote") had no boundary at all, so it also matched a
-  # sibling install whose own path this one's is a literal prefix of (e.g.
-  # SKILL_DIR "agmsg" matching a "agmsg-second" entry too). An entry is
-  # removed only when it IS exactly SKILL_DIR, or starts with SKILL_DIR
-  # followed by "/" -- and SKILL_DIR is regex-escaped first (it can contain
-  # ".", which is otherwise "any character" in the pattern awk builds).
-  #
-  # review, round 2: a loose pre-check here (even a boundary-correct one)
-  # is still a claim about what the file contains, and "do we write, back
-  # up, and report changed" deserves better than trusting that claim.
-  # Transform into a candidate file first and compare it against the
-  # original; back up and replace only when they actually differ. A
-  # config that only mentions a SIBLING install's own root now never gets
-  # touched, backed up, or reported "cleaned" at all -- not because the
-  # entry check happened to be narrow enough, but because nothing about it
-  # would actually change.
-  local CODEX_CONFIG="$HOME/.codex/config.toml"
-  if [ -f "$CODEX_CONFIG" ]; then
-    # Remove matching entries from writable_roots (handles multiline arrays)
-    awk -v pattern="$SKILL_DIR" '
-      function ere_escape(s,    i, c, out, special) {
-        special = "\\.[]()*+?{}|^$"
-        out = ""
-        for (i = 1; i <= length(s); i++) {
-          c = substr(s, i, 1)
-          if (index(special, c) > 0) out = out "\\" c
-          else out = out c
-        }
-        return out
-      }
-      BEGIN { esc = ere_escape(pattern) }
-      /writable_roots/ { in_roots=1; buf="" }
-      in_roots { buf = buf $0 "\n" }
-      in_roots && /\]/ {
-        gsub("\"" esc "(/[^\"]*)?\"[, ]*", "", buf)
-        # Clean up trailing/leading commas
-        gsub(/,[ \t]*\]/, "]", buf)
-        gsub(/\[[ \t]*,/, "[", buf)
-        gsub(/,[ \t]*,/, ",", buf)
-        # Check if empty
-        if (buf ~ /writable_roots[^[]*\[\s*\]/) {
-          in_roots=0; next
-        }
-        printf "%s", buf
-        in_roots=0; next
-      }
-      !in_roots { print }
-    ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp"
-    # Remove empty [sandbox_workspace_write] section
-    awk '
-      /^\[sandbox_workspace_write\]/ {
-        header=$0
-        if (getline nextline <= 0) next
-        if (nextline ~ /^\[/ || nextline == "") { print nextline; next }
-        print header
-        print nextline
-        next
-      }
-      { print }
-    ' "$CODEX_CONFIG.tmp" > "$CODEX_CONFIG.tmp2" && mv "$CODEX_CONFIG.tmp2" "$CODEX_CONFIG.tmp"
-    if cmp -s "$CODEX_CONFIG" "$CODEX_CONFIG.tmp"; then
-      rm -f "$CODEX_CONFIG.tmp"
-    else
-      cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
-      mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
-      echo "  - cleaned Codex writable_roots (backup: config.toml.bak)"
+  # Every config install.sh could have written to (#1469: install.sh writes
+  # to both the plain ~/.codex/config.toml default and $CODEX_HOME's own
+  # config.toml when CODEX_HOME is set and different -- this used to clean
+  # only the first, one canonical list shared with install.sh via
+  # agmsg_codex_config_paths, scripts/lib/codex-config.sh).
+  local _codex_cfg
+  while IFS= read -r _codex_cfg; do
+    _uninstall_clean_codex_config "$_codex_cfg" "$SKILL_DIR"
+  done < <(agmsg_codex_config_paths)
+
+  # --- Remove OpenCode, Hermes, and Grok Build skill files ---
+  # Each mirrors install.sh's own SKILL_DIR construction and gating
+  # (scripts/drivers/types/{opencode,hermes,grok-build}, install.sh) --
+  # these three were the ones #1469 found install.sh writes but uninstall.sh
+  # never removed. Deletes the exact file this install wrote, by name, then
+  # rmdir (never rm -rf): rmdir only succeeds on an EMPTY directory, so
+  # anything unexpected sharing that directory is left alone and reported,
+  # rather than pulled in by a recursive delete that cannot tell the
+  # difference (review).
+  local _dedicated_dir_label _dedicated_dir _dedicated_label
+  for _dedicated_dir_label in \
+    "$HOME/.config/opencode/skills/$SKILL_NAME|OpenCode" \
+    "$HOME/.hermes/skills/$SKILL_NAME|Hermes" \
+    "$HOME/.grok/skills/$SKILL_NAME|Grok Build"
+  do
+    _dedicated_dir="${_dedicated_dir_label%%|*}"
+    _dedicated_label="${_dedicated_dir_label#*|}"
+    if [ -f "$_dedicated_dir/SKILL.md" ]; then
+      rm -f "$_dedicated_dir/SKILL.md"
+      if rmdir "$_dedicated_dir" 2>/dev/null; then
+        echo "  - removed /$SKILL_NAME $_dedicated_label skill"
+      else
+        echo "  - removed /$SKILL_NAME $_dedicated_label skill (SKILL.md only; $_dedicated_dir left in place, not empty)"
+      fi
+      REMOVED=true
     fi
-  fi
+  done
+  unset _dedicated_dir_label _dedicated_dir _dedicated_label
 }
 
 # Machine-wide pieces, shared by every install: only safe to remove once NO
