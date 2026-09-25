@@ -693,3 +693,49 @@ FAKEEOF
   [ "$status" -eq 2 ]
   [ "$output" = "fix seat=T/cx state=partial reason=bridge_thread_still_old (lock already ours; fix again once the bridge catches up)" ]
 }
+
+@test "fix: the launcher's always-per-role bridge_key is checked too, not just the direct path's multi-pair hash (#1470 review round 6)" {
+  # Two roles in the same project both recorded on the SAME current thread
+  # -- a real, if narrow, shape. The direct path would bundle them into one
+  # bridge under the HASHED safe-set key; the out-of-sandbox launcher's
+  # dispatcher instead starts one CHILD PER ROLE PAIR, so its bridge for
+  # T/cx is always keyed "T.cx", never the hash, even though both roles
+  # share a thread. Only a stale thread file at the single-pair key exists
+  # here -- nothing at all under the hashed key -- so a check that trusted
+  # only the hashed form would see "no file, nothing to compare" and
+  # wrongly call this proved.
+  local project="$BATS_TEST_TMPDIR/proj5"
+  mkdir -p "$project"
+  local team_dir="$SKILL_DIR/teams/T"
+  mkdir -p "$team_dir"
+  printf '{"name":"T","agents":{"cx":{"type":"codex","project":"%s"},"cy":{"type":"codex","project":"%s"}}}' \
+    "$project" "$project" > "$team_dir/config.json"
+  agmsg_role_session_record T cx new-thread-888 "$project" codex owner.1
+  agmsg_role_session_record T cy new-thread-888 "$project" codex owner.2
+
+  printf '%s' "old-thread-stale" > "$RUN_DIR/codex-bridge.T.cx.thread"
+  # Deliberately nothing at all under the hashed multi-pair key.
+
+  export AGMSG_SESSION_ID=new-thread-888
+  export CODEX_THREAD_ID=new-thread-888
+  printf 'new-thread-888.%s\n' "$$" > "$(actas_lock_path T cx)"
+  printf '%s\n' "new-thread-888.$$" > "$RUN_DIR/cc-instance.$$"
+  export AGMSG_AGENT_PID="$$"
+  _proof_says 0 proved herdr:w1:pB
+
+  cat > "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" <<'FAKEEOF'
+#!/usr/bin/env bash
+true
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh"
+  cat > "$SKILL_DIR/scripts/session-start.sh" <<'FAKEEOF'
+#!/usr/bin/env bash
+true
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/session-start.sh"
+
+  cd "$project"
+  run agmsg_fix_run
+  [ "$status" -eq 2 ]
+  [ "$output" = "fix seat=T/cx state=partial reason=bridge_thread_still_old (lock already ours; fix again once the bridge catches up)" ]
+}

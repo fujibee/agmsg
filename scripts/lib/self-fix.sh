@@ -245,6 +245,34 @@ _fix_locate() {   # <team> <agent> <owner>
   return "$rc"
 }
 
+# The bridge state at ONE candidate bridge_key: nothing wrong there (rc 0,
+# no output) when its thread file matches CODEX_THREAD_ID, or there is no
+# file AND no live pidfile at that key (nothing running there to
+# contradict); a one-word reason (rc 1) when the thread file names a
+# different thread, or a live pidfile exists with no thread file next to it
+# (#1470 review round 5 finding 1 -- an install/upgrade boundary, or a
+# bridge that is simply still starting; "no file" must not be read as
+# "nothing to compare" when something is plainly running).
+_fix_codex_bridge_key_state() {   # <bridge_key>
+  local key="$1" thread_file thread_now pidfile bridge_pid
+  [ -n "$key" ] || return 0
+  thread_file="$(_actas_lock_dir)/codex-bridge.$key.thread"
+  if [ -f "$thread_file" ]; then
+    thread_now="$(cat "$thread_file" 2>/dev/null || true)"
+    [ "$thread_now" = "$CODEX_THREAD_ID" ] || { printf 'bridge_thread_still_old\n'; return 1; }
+    return 0
+  fi
+  pidfile="$(_actas_lock_dir)/codex-bridge.$key.pid"
+  if [ -f "$pidfile" ]; then
+    bridge_pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
+      printf 'bridge_thread_unknown\n'
+      return 1
+    fi
+  fi
+  return 0
+}
+
 # Whether (team, agent)'s codex thread state matches CODEX_THREAD_ID, by
 # READING THE RESULT rather than trusting an exit code (#1470 review round
 # 4 finding 3): codex-record-session.sh routinely exits 0 having recorded
@@ -254,30 +282,28 @@ _fix_locate() {   # <team> <agent> <owner>
 # are evidence the state this function cares about actually changed.
 #
 # Checks the role-session record first, then the bridge's own recorded
-# thread, at bridge_key = agmsg_codex_bridge_key(project, CODEX_THREAD_ID)
-# -- the SAME derivation the direct session-start.sh path (and the
-# out-of-sandbox launcher) use to name their own thread file, computed
-# through the identical shared function rather than re-derived here (#1470
-# review round 5 finding 2: a project with more than one registered codex
-# seat makes "count every registered pair" and "count only the ones whose
-# own record already matches" two DIFFERENT sets, and therefore two
-# different keys, if this function re-derived it independently).
+# thread -- at BOTH candidate bridge_keys (#1470 review round 6), because
+# the two writer architectures do not agree on which one a role actually
+# uses. The out-of-sandbox launcher's dispatcher spawns one CHILD PER ROLE
+# PAIR, so its bridge_key is always the single-pair "team.agent" form, even
+# when two roles share the same thread. The direct session-start.sh path
+# instead bundles every "safe" pair (every registered pair whose OWN record
+# already names this project+thread) into ONE bridge process, so its key
+# can be the multi-pair hash form -- agmsg_codex_bridge_key(project,
+# CODEX_THREAD_ID), the exact derivation that path uses, computed through
+# the shared function rather than re-derived here (round 5 finding 2: two
+# independent re-derivations is how a reader and a writer land on
+# different keys in the first place). Nothing here tells which
+# architecture actually wrote a given seat's bridge, so both keys are
+# checked; a project with only one seat on this thread has them coincide
+# (checked once, not twice). Either key reporting a problem is enough.
 #
-# No bridge_key at all (agmsg_codex_bridge_key found no safe pair yet) is
-# not a failure -- a seat whose record was JUST updated and has never had a
-# bridge has nothing to contradict. But a LIVE pidfile at that key with no
-# thread file next to it is different (#1470 review round 5 finding 1): the
-# direct path leaves exactly that shape behind for a bridge that predates
-# this tracking (an install/upgrade boundary) or one that is simply still
-# starting, and "no file" must not be read as "nothing to compare" when
-# there is plainly something running that has never proven which thread it
-# serves. That is UNDETERMINED, not synced.
-#
-# Prints nothing and returns 0 when synced; prints a one-word reason and
-# returns 1 otherwise (still-stale or undetermined alike -- the caller does
-# not need to tell them apart, only never call either "proved").
+# Prints nothing and returns 0 when synced (including "no bridge_key at
+# all" -- a seat whose record was just updated and has never had a bridge
+# has nothing to contradict, at either key); prints a one-word reason and
+# returns 1 otherwise.
 _fix_codex_thread_synced() {   # <team> <agent> <project>
-  local team="$1" agent="$2" project="$3" rec_thread bridge_key thread_file thread_now pidfile bridge_pid
+  local team="$1" agent="$2" project="$3" rec_thread single_key safe_key reason
   rec_thread="$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)"
   [ "$rec_thread" = "$CODEX_THREAD_ID" ] || { printf 'role_session_record_still_old\n'; return 1; }
 
@@ -285,23 +311,12 @@ _fix_codex_thread_synced() {   # <team> <agent> <project>
     # shellcheck disable=SC1091
     . "$SKILL_DIR/scripts/drivers/types/codex/_bridge-key.sh"
   fi
-  bridge_key="$(agmsg_codex_bridge_key "$project" "$CODEX_THREAD_ID" 2>/dev/null || true)"
-  [ -n "$bridge_key" ] || return 0
+  single_key="$team.$agent"
+  safe_key="$(agmsg_codex_bridge_key "$project" "$CODEX_THREAD_ID" 2>/dev/null || true)"
 
-  thread_file="$(_actas_lock_dir)/codex-bridge.$bridge_key.thread"
-  if [ -f "$thread_file" ]; then
-    thread_now="$(cat "$thread_file" 2>/dev/null || true)"
-    [ "$thread_now" = "$CODEX_THREAD_ID" ] || { printf 'bridge_thread_still_old\n'; return 1; }
-    return 0
-  fi
-
-  pidfile="$(_actas_lock_dir)/codex-bridge.$bridge_key.pid"
-  if [ -f "$pidfile" ]; then
-    bridge_pid="$(cat "$pidfile" 2>/dev/null || true)"
-    if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
-      printf 'bridge_thread_unknown\n'
-      return 1
-    fi
+  reason="$(_fix_codex_bridge_key_state "$single_key")" || { printf '%s\n' "$reason"; return 1; }
+  if [ -n "$safe_key" ] && [ "$safe_key" != "$single_key" ]; then
+    reason="$(_fix_codex_bridge_key_state "$safe_key")" || { printf '%s\n' "$reason"; return 1; }
   fi
   return 0
 }
