@@ -34,6 +34,11 @@ AGENTS_DIR="$HOME/.agents"
 agmsg_load_renderable_skill_types
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/skill-render.sh"
+# agmsg_codex_config_paths — the Codex config.toml paths this install writes
+# writable_roots entries to. Shared with uninstall.sh's own cleanup (#1469)
+# so the two cannot silently disagree about which files exist again.
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/codex-config.sh"
 
 # Types that already get their OWN dedicated skill file, written elsewhere in
 # this script -- always in that type's own format, unconditionally, gated
@@ -350,12 +355,17 @@ configure_codex_sandbox() {
   # (codex-app) uses the plain ~/.codex default regardless of a shell's
   # CODEX_HOME. Writing to only one when they differ silently breaks
   # whichever surface wasn't written, so when CODEX_HOME is set and does not
-  # already point at ~/.codex, this configures BOTH.
-  local default_config="$HOME/.codex/config.toml"
-  local codex_configs=("$default_config")
-  if [ -n "${CODEX_HOME:-}" ] && [ "$CODEX_HOME/config.toml" != "$default_config" ]; then
-    codex_configs+=("$CODEX_HOME/config.toml")
-  fi
+  # already point at ~/.codex, this configures BOTH -- via
+  # agmsg_codex_config_paths (scripts/lib/codex-config.sh), the one place
+  # this list is computed, shared with uninstall.sh's own cleanup (#1469: the
+  # two used to compute it separately, and drifted apart when only this
+  # function's copy was updated).
+  local codex_configs=()
+  local _cfg
+  while IFS= read -r _cfg; do
+    codex_configs+=("$_cfg")
+  done < <(agmsg_codex_config_paths)
+  unset _cfg
 
   local writable_paths=("$SKILL_DIR/db" "$SKILL_DIR/teams" "$SKILL_DIR/run" "$SKILL_DIR/ext-tools")
   # On Windows (MSYS2/Git Bash), $SKILL_DIR is in MSYS form (/c/Users/...).
@@ -1026,8 +1036,10 @@ fi
 # Grok Build reads skills from ~/.grok/skills/<name>/SKILL.md (it also accepts
 # the cross-vendor ~/.agents/skills/ fallback, but the shared SKILL.md is
 # Codex-typed and would mis-identify a Grok session — keep the Grok copy
-# separate, same pattern as Copilot). Delivery (turn) registers a Stop hook under
-# ~/.grok/hooks/ via `delivery.sh set` per project.
+# separate, same pattern as Copilot). Delivery (turn/monitor) writes a
+# project-relative rule file, <project>/.grok/rules/agmsg.md, via
+# `delivery.sh set` per project (scripts/drivers/types/grok-build/type.conf's
+# hooks_file; see grok-build/_delivery.sh).
 GROK_SKILL_DIR="$HOME/.grok/skills/$CMD_NAME"
 if [ -d "$HOME/.grok" ]; then
   mkdir -p "$GROK_SKILL_DIR"
