@@ -55,8 +55,8 @@
 # instance-id.sh already, but nothing before this reached resolve-project.sh.
 # shellcheck disable=SC1091
 . "${SKILL_DIR:?}/scripts/lib/resolve-project.sh"
-# agmsg_sha1, for _fix_codex_thread_synced's multi-pair bridge_key -- the
-# same derivation session-start.sh uses, so both land on the same file.
+# agmsg_sha1, needed by _bridge-key.sh's agmsg_codex_bridge_key (sourced
+# lazily from _fix_codex_thread_synced) for its own multi-pair hash.
 # shellcheck disable=SC1091
 . "${SKILL_DIR:?}/scripts/lib/hash.sh"
 
@@ -253,31 +253,55 @@ _fix_locate() {   # <team> <agent> <owner>
 # (no app-server yet, no seat key, an already-live bridge) -- none of those
 # are evidence the state this function cares about actually changed.
 #
-# Checks the role-session record first, then -- only if a bridge has ever
-# bound a thread for this project's pair set -- the bridge's own recorded
-# thread, at the SAME path session-start.sh's direct path and the
-# out-of-sandbox launcher both already write to (codex-bridge.<key>.thread),
-# so this one check covers either architecture. No file there yet is not a
-# failure: a seat that has never had a bridge has nothing to contradict.
+# Checks the role-session record first, then the bridge's own recorded
+# thread, at bridge_key = agmsg_codex_bridge_key(project, CODEX_THREAD_ID)
+# -- the SAME derivation the direct session-start.sh path (and the
+# out-of-sandbox launcher) use to name their own thread file, computed
+# through the identical shared function rather than re-derived here (#1470
+# review round 5 finding 2: a project with more than one registered codex
+# seat makes "count every registered pair" and "count only the ones whose
+# own record already matches" two DIFFERENT sets, and therefore two
+# different keys, if this function re-derived it independently).
+#
+# No bridge_key at all (agmsg_codex_bridge_key found no safe pair yet) is
+# not a failure -- a seat whose record was JUST updated and has never had a
+# bridge has nothing to contradict. But a LIVE pidfile at that key with no
+# thread file next to it is different (#1470 review round 5 finding 1): the
+# direct path leaves exactly that shape behind for a bridge that predates
+# this tracking (an install/upgrade boundary) or one that is simply still
+# starting, and "no file" must not be read as "nothing to compare" when
+# there is plainly something running that has never proven which thread it
+# serves. That is UNDETERMINED, not synced.
 #
 # Prints nothing and returns 0 when synced; prints a one-word reason and
-# returns 1 otherwise.
+# returns 1 otherwise (still-stale or undetermined alike -- the caller does
+# not need to tell them apart, only never call either "proved").
 _fix_codex_thread_synced() {   # <team> <agent> <project>
-  local team="$1" agent="$2" project="$3" rec_thread pairs pair_n bridge_key thread_file thread_now
+  local team="$1" agent="$2" project="$3" rec_thread bridge_key thread_file thread_now pidfile bridge_pid
   rec_thread="$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)"
   [ "$rec_thread" = "$CODEX_THREAD_ID" ] || { printf 'role_session_record_still_old\n'; return 1; }
 
-  pairs="$("$SKILL_DIR/scripts/identities.sh" "$project" codex 2>/dev/null || true)"
-  pair_n="$(printf '%s\n' "$pairs" | grep -c . || true)"
-  if [ "${pair_n:-0}" -eq 1 ]; then
-    bridge_key="$team.$agent"
-  else
-    bridge_key="$(printf '%s' "$pairs" | agmsg_sha1)"
+  if ! declare -F agmsg_codex_bridge_key >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/drivers/types/codex/_bridge-key.sh"
   fi
+  bridge_key="$(agmsg_codex_bridge_key "$project" "$CODEX_THREAD_ID" 2>/dev/null || true)"
+  [ -n "$bridge_key" ] || return 0
+
   thread_file="$(_actas_lock_dir)/codex-bridge.$bridge_key.thread"
   if [ -f "$thread_file" ]; then
     thread_now="$(cat "$thread_file" 2>/dev/null || true)"
     [ "$thread_now" = "$CODEX_THREAD_ID" ] || { printf 'bridge_thread_still_old\n'; return 1; }
+    return 0
+  fi
+
+  pidfile="$(_actas_lock_dir)/codex-bridge.$bridge_key.pid"
+  if [ -f "$pidfile" ]; then
+    bridge_pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
+      printf 'bridge_thread_unknown\n'
+      return 1
+    fi
   fi
   return 0
 }

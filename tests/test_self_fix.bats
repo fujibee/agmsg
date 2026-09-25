@@ -600,3 +600,96 @@ FAKEEOF
   # from a seat that was never bridged at all.
   [ "$thread_now" = "old-thread-888" ]
 }
+
+@test "fix: a live direct-path bridge with no thread record yet is undetermined, not silently proved (#1470 review round 5 finding 1)" {
+  # The shape right at an install/upgrade boundary, or a bridge that is
+  # simply still starting: alive, but it has never written the thread file
+  # this whole mechanism relies on to say which thread it actually serves.
+  # "no file" must not read as "nothing to compare" when something is
+  # plainly running and has proven nothing about which thread it is on.
+  local project="$BATS_TEST_TMPDIR/proj3"
+  mkdir -p "$project"
+  local team_dir="$SKILL_DIR/teams/T"
+  mkdir -p "$team_dir"
+  printf '{"name":"T","agents":{"cx":{"type":"codex","project":"%s"}}}' "$project" \
+    > "$team_dir/config.json"
+  agmsg_role_session_record T cx old-thread-111 "$project" codex old-owner.1
+  printf 'old-thread-111.%s\n' "$$" > "$(actas_lock_path T cx)"
+  printf '%s\n' "old-thread-111.$$" > "$RUN_DIR/cc-instance.$$"
+  export AGMSG_AGENT_PID="$$"
+  export CODEX_THREAD_ID=new-thread-555
+  _proof_says 0 proved herdr:w1:pB
+
+  # record-session.sh's fake genuinely updates the record (state-based
+  # check); session-start.sh's fake is a true no-op -- the point of this
+  # test is a bridge that is ALREADY running and was never told to restart.
+  cat > "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" <<FAKEEOF
+#!/usr/bin/env bash
+source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+source "$SKILL_DIR/scripts/lib/role-session.sh"
+agmsg_role_session_record "\$1" "\$2" "\$CODEX_THREAD_ID" "\$3" codex ""
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh"
+  cat > "$SKILL_DIR/scripts/session-start.sh" <<'FAKEEOF'
+#!/usr/bin/env bash
+true
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/session-start.sh"
+
+  sleep 100 &
+  local bridge_pid=$!
+  printf '%s\n' "$bridge_pid" > "$RUN_DIR/codex-bridge.T.cx.pid"
+  # Deliberately no codex-bridge.T.cx.thread file.
+
+  cd "$project"
+  run agmsg_fix_run
+  kill "$bridge_pid" 2>/dev/null || true
+  wait "$bridge_pid" 2>/dev/null || true
+
+  [ "$status" -eq 2 ]
+  [ "$output" = 'fix seat=T/cx state=partial reason=bridge_thread_unknown (lock reclaimed under new-thread-555.'"$$"'; fix again once the bridge catches up)' ]
+}
+
+@test "fix: bridge_key is derived from the SAFE pairs, not every registered codex seat (#1470 review round 5 finding 2)" {
+  # A second registered codex seat in the same project used to make the
+  # reader (self-fix.sh) hash a DIFFERENT key than a real bridge for T/cx
+  # ever used: the writer (session-start.sh's direct path) already filters
+  # to the pairs whose OWN record matches this project+thread before
+  # deriving a key, while the reader used to count every registered pair
+  # regardless. T/cy is registered but has never been claimed (no
+  # role-session record at all), so it must NOT enter the safe set -- the
+  # key for T/cx has to stay the single-pair "T.cx" form.
+  local project="$BATS_TEST_TMPDIR/proj4"
+  mkdir -p "$project"
+  local team_dir="$SKILL_DIR/teams/T"
+  mkdir -p "$team_dir"
+  printf '{"name":"T","agents":{"cx":{"type":"codex","project":"%s"},"cy":{"type":"codex","project":"%s"}}}' \
+    "$project" "$project" > "$team_dir/config.json"
+  agmsg_role_session_record T cx new-thread-666 "$project" codex owner.1
+  # T/cy: registered, never claimed -- deliberately no record for it.
+
+  printf '%s' "old-thread-stale" > "$RUN_DIR/codex-bridge.T.cx.thread"
+
+  export AGMSG_SESSION_ID=new-thread-666
+  export CODEX_THREAD_ID=new-thread-666
+  printf 'new-thread-666.%s\n' "$$" > "$(actas_lock_path T cx)"
+  printf '%s\n' "new-thread-666.$$" > "$RUN_DIR/cc-instance.$$"
+  export AGMSG_AGENT_PID="$$"
+  _proof_says 0 proved herdr:w1:pB
+
+  cat > "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" <<'FAKEEOF'
+#!/usr/bin/env bash
+true
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh"
+  cat > "$SKILL_DIR/scripts/session-start.sh" <<'FAKEEOF'
+#!/usr/bin/env bash
+true
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/session-start.sh"
+
+  cd "$project"
+  run agmsg_fix_run
+  [ "$status" -eq 2 ]
+  [ "$output" = "fix seat=T/cx state=partial reason=bridge_thread_still_old (lock already ours; fix again once the bridge catches up)" ]
+}

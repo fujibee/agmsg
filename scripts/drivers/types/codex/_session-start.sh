@@ -206,14 +206,17 @@ EOF
   [ -n "$app_server" ] || exit 0
 
   mkdir -p "$RUN_DIR" 2>/dev/null || true
-  if [ "$pair_count" = "1" ]; then
-    IFS=$'\t' read -r key_team key_name <<EOF
-$PAIRS
-EOF
-    bridge_key="$key_team.$key_name"
-  else
-    bridge_key=$(printf '%s' "$PAIRS" | agmsg_sha1)
+  # #1470 review round 5: derived through the one shared function
+  # (agmsg_codex_bridge_key), not recomputed here from $PAIRS/$pair_count --
+  # self-fix.sh's own state check calls the SAME function for the SAME
+  # (project, thread_id), so the two can never land on different keys the
+  # way two independent re-derivations of "the safe set" eventually would.
+  if ! declare -F agmsg_codex_bridge_key >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/drivers/types/codex/_bridge-key.sh"
   fi
+  bridge_key="$(agmsg_codex_bridge_key "$PROJECT" "$thread_id")"
+  [ -n "$bridge_key" ] || exit 0
   bridge_pairs=()
   while IFS=$'\t' read -r candidate_team candidate_name; do
     bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")
