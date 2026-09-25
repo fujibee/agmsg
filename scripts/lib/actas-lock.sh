@@ -716,11 +716,24 @@ actas_lock_reclaim_same_process() {   # <team> <agent> <new-owner>
     *)         printf 'unknown:reclaim_mutex_unclassified\n'; return 1 ;;
   esac
 
-  # DELETES, so it needs the same three facts the ordinary stale-reclaim
-  # above requires -- the read SUCCEEDED, an owner is actually there, and
-  # this time the positive fact is "same pid, positively alive" rather than
-  # "positively dead". Anything short of that (unreadable, empty, a
-  # different pid, dead, or undecidable) leaves the lock exactly as found.
+  # REPLACES, so it needs the same three facts the ordinary stale-reclaim
+  # above requires before it deletes -- the read SUCCEEDED, an owner is
+  # actually there, and this time the positive fact is "same pid, positively
+  # alive" rather than "positively dead". Anything short of that
+  # (unreadable, empty, a different pid, dead, or undecidable) leaves the
+  # lock exactly as found.
+  #
+  # NEVER delete-then-claim (#1470 review, the #1445/#994 race again in a
+  # new spot): a plain claim elsewhere takes no mutex at all, so a lock path
+  # left empty even briefly -- released here, filled by an ordinary `ln`
+  # later -- is a window an unrelated claimant can win, and this reclaim
+  # would then either silently lose its own race or, worse, report success
+  # about a lock it no longer owns. So the move is ONE filesystem op:
+  # write the new owner to a fresh name beside the lock, verify the write
+  # landed, and `mv` it directly over the existing (still-occupied) path --
+  # same directory, so the rename is atomic and there is no instant where
+  # the path reads as absent.
+  local result="unknown:not_same_process" rc=1
   local rd owner_now old_pid alive_rc
   rd="$(_actas_lock_read_path "$lock_path")"
   if [ "${rd%%$'\t'*}" = "ok" ] && [ -n "${rd#*$'\t'}" ]; then
@@ -729,15 +742,42 @@ actas_lock_reclaim_same_process() {   # <team> <agent> <new-owner>
     alive_rc=0
     agmsg_instance_alive "$owner_now" || alive_rc=$?
     if [ "$old_pid" = "$new_pid" ] && [ "$alive_rc" -eq 0 ]; then
-      rm -f "$lock_path"
+      local dir tmp w
+      dir="${lock_path%/*}"
+      if tmp="$(mktemp "$dir/.actas-reclaim.XXXXXX" 2>/dev/null)"; then
+        if printf '%s\n' "$new_owner" > "$tmp" 2>/dev/null; then
+          w="$(_actas_lock_read_path "$tmp")"
+          if [ "${w%%$'\t'*}" = "ok" ] && [ "${w#*$'\t'}" = "$new_owner" ]; then
+            if mv "$tmp" "$lock_path" 2>/dev/null; then
+              result="ok"; rc=0
+            else
+              result="unknown:reclaim_rename_failed"
+            fi
+          else
+            result="unknown:reclaim_write_unverified"
+          fi
+        else
+          result="unknown:reclaim_write_failed"
+        fi
+        rm -f "$tmp" 2>/dev/null
+      else
+        result="unknown:reclaim_write_failed"
+      fi
     fi
   fi
   agmsg_lock_release_at "$mutex" "$new_owner"
 
-  # Whatever happened above, let the ordinary claim path decide and report
-  # from a fresh read -- it already knows every verdict this function must
-  # be able to say: ok if the lock is now gone and nobody raced in first,
-  # held:<owner> if the pid did not match or someone else holds it now.
+  if [ "$rc" -eq 0 ]; then
+    echo "ok"
+    return 0
+  fi
+  if [ "$result" != "unknown:not_same_process" ]; then
+    printf '%s\n' "$result"
+    return 1
+  fi
+  # Not our case to touch at all (a different pid, or nothing readable to
+  # compare against) -- the lock is untouched, so the ordinary claim path
+  # decides and reports from its own fresh read.
   agmsg_lock_claim_at "$lock_path" "$new_owner"
 }
 

@@ -479,5 +479,90 @@ FAKEEOF
   refute grep -q '^record-session' "$SPY"
   refute grep -q '^session-start' "$SPY"
   refute grep -q '^write' "$SPY"
+
+  # Condition met, but the bridge handoff itself fails: session-start.sh
+  # exits non-zero. #1470 review: the previous version of this function
+  # swallowed that failure (`|| true`) and still reported proved -- the
+  # lock had genuinely moved, but the bridge could be left on the old
+  # thread with nothing saying so. fix must report a failure, not proved,
+  # while leaving the lock move in place (undoing a real reclaim is not
+  # safer than a session that has to run `fix` again).
+  : > "$SPY"
+  printf 'old-thread-111.%s\n' "$$" > "$(actas_lock_path T cx)"
+  export CODEX_THREAD_ID=new-thread-444
+  cat > "$SKILL_DIR/scripts/session-start.sh" <<'FAKEEOF'
+#!/usr/bin/env bash
+printf 'session-start %s %s\n' "$1" "$2" >> "$SPY"
+exit 1
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/session-start.sh"
+  run agmsg_fix_run
+  [ "$status" -eq 2 ]
+  [ "$output" = 'fix seat=T/cx state=partial reason=codex_thread_reassign_incomplete detail="lock=ok record_session=ok session_start=failed" (lock reclaimed under new-thread-444.'"$$"'; not all of it ran)' ]
+  grep -Fq "record-session T cx $project CODEX_THREAD_ID=new-thread-444" "$SPY"
+  grep -Fq "session-start codex $project" "$SPY"
+  refute grep -q '^write' "$SPY"
+  [ "$(cat "$(actas_lock_path T cx)")" = "new-thread-444.$$" ]
 }
 
+
+@test "codex session-start (direct bridge path): a live bridge bound to a stale thread is retired and relaunched on the current one (#1468)" {
+  # This is #1470 review finding (2): only the out-of-sandbox launcher path
+  # (AGMSG_CODEX_BRIDGE_LAUNCHER=1) self-heals a thread change by polling.
+  # The direct path -- session-start.sh launching codex-bridge.js itself,
+  # taken when the launcher is not in play -- used to check only "is the
+  # pidfile's pid alive", never which thread it is bound to, so a bridge
+  # surviving a /clear kept serving the old thread forever even after the
+  # role-session record was already correct.
+  local project="$BATS_TEST_TMPDIR/proj2"
+  mkdir -p "$project"
+  local team_dir="$SKILL_DIR/teams/T"
+  mkdir -p "$team_dir"
+  printf '{"name":"T","agents":{"cx":{"type":"codex","project":"%s"}}}' "$project" \
+    > "$team_dir/config.json"
+  # The record is already correct (this test is not about the record --
+  # #1468's other fix covers that); only the running bridge is stale.
+  agmsg_role_session_record T cx new-thread-999 "$project" codex owner.1
+
+  local bridge_key="T.cx"
+  local pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
+  local thread_file="$RUN_DIR/codex-bridge.$bridge_key.thread"
+  sleep 100 &
+  local old_bridge_pid=$!
+  printf '%s\n' "$old_bridge_pid" > "$pidfile"
+  printf '%s' "old-thread-888" > "$thread_file"
+
+  local bridge_cmd="$BATS_TEST_TMPDIR/fake-bridge.sh"
+  cat > "$bridge_cmd" <<FAKEEOF
+#!/usr/bin/env bash
+printf 'bridge-launched %s\n' "\$*" >> "$SPY"
+FAKEEOF
+  chmod +x "$bridge_cmd"
+
+  export CODEX_THREAD_ID=new-thread-999
+  export AGMSG_CODEX_BRIDGE_APP_SERVER="unix:///tmp/fake-app-server.sock"
+  export AGMSG_CODEX_BRIDGE_CMD="$bridge_cmd"
+  unset AGMSG_CODEX_BRIDGE_LAUNCHER
+
+  run bash "$SKILL_DIR/scripts/session-start.sh" codex "$project" < /dev/null
+
+  # Observe everything BEFORE any assertion, and kill the old sleep
+  # unconditionally right after -- a failed `[ ]` below ends this test on
+  # the spot (bats runs under errexit), and a cleanup placed after the
+  # assertions would never run on a RED result, leaking the process.
+  local old_alive=1
+  kill -0 "$old_bridge_pid" 2>/dev/null || old_alive=0
+  local waited=0
+  while [ ! -s "$SPY" ] && [ "$waited" -lt 20 ]; do sleep 0.1; waited=$((waited + 1)); done
+  local bridge_launched=0
+  grep -q '^bridge-launched' "$SPY" && bridge_launched=1
+  local thread_now
+  thread_now="$(cat "$thread_file" 2>/dev/null || true)"
+  kill "$old_bridge_pid" 2>/dev/null || true
+
+  # The old bridge was retired, not left running against the wrong thread.
+  [ "$old_alive" -eq 0 ]
+  # A fresh bridge was launched, and the thread record now matches.
+  [ "$bridge_launched" -eq 1 ]
+  [ "$thread_now" = "new-thread-999" ]
+}

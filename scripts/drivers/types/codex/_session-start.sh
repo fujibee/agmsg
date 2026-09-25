@@ -219,10 +219,24 @@ EOF
     bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")
   done <<< "$PAIRS"
   pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
+  # Same name the out-of-sandbox launcher uses for its own per-bridge thread
+  # record (codex-bridge-launcher.sh's thread_file) -- not shared machinery,
+  # just the same convention, so a reader who knows one knows the other.
+  thread_file="$RUN_DIR/codex-bridge.$bridge_key.thread"
   if [ -f "$pidfile" ]; then
     bridge_pid=$(cat "$pidfile" 2>/dev/null || true)
     if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
-      exit 0
+      bound_thread=""
+      [ -f "$thread_file" ] && bound_thread=$(cat "$thread_file" 2>/dev/null || true)
+      if [ "$bound_thread" = "$thread_id" ]; then
+        exit 0
+      fi
+      # Bound to a thread this session no longer resolves to (#1468) -- a
+      # bridge left over from before /clear. This path (unlike the launcher)
+      # has no lease/start-token reaper, so the kill is a plain liveness-then-
+      # signal, the same pattern this script already uses to retire a prior
+      # watcher above; fall through to relaunch bound to the CURRENT thread.
+      kill "$bridge_pid" 2>/dev/null || true
     fi
   fi
 
@@ -266,5 +280,6 @@ EOF
       --inline-inbox \
       >>"$log" 2>&1 3>&- 4>&- &
   )
+  printf '%s' "$thread_id" > "$thread_file" 2>/dev/null || true
   exit 0
 }

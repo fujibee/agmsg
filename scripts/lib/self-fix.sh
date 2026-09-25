@@ -324,8 +324,24 @@ _fix_codex_thread_reassign() {
   claim_out="$(actas_lock_reclaim_same_process "$proved_team" "$proved_agent" "$new_owner" 2>/dev/null)" || claim_rc=$?
   [ "$claim_rc" -eq 0 ] && [ "$claim_out" = ok ] || { printf 'actas_lock_reclaim_failed\n'; return 1; }
 
-  "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" "$proved_team" "$proved_agent" "$project" || true
-  "$SKILL_DIR/scripts/session-start.sh" codex "$project" </dev/null >/dev/null 2>&1 || true
+  # The lock move above is the one step this function is willing to leave in
+  # place on a downstream failure (rolling it back would only trade "seat
+  # right here, bridge on the old thread" for "seat nowhere at all" -- worse,
+  # not safer). But a caller must be told which of the next two actually
+  # ran: silently reporting proved when either failed is exactly what #1470
+  # review caught here -- the lock moves, the bridge does not, and nothing
+  # said so.
+  local record_rc=0 session_rc=0
+  "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" "$proved_team" "$proved_agent" "$project" || record_rc=$?
+  "$SKILL_DIR/scripts/session-start.sh" codex "$project" </dev/null >/dev/null 2>&1 || session_rc=$?
+
+  if [ "$record_rc" -ne 0 ] || [ "$session_rc" -ne 0 ]; then
+    printf 'partial\t%s\t%s\t%s\tlock=ok record_session=%s session_start=%s\n' \
+      "$proved_team" "$proved_agent" "$new_owner" \
+      "$([ "$record_rc" -eq 0 ] && echo ok || echo failed)" \
+      "$([ "$session_rc" -eq 0 ] && echo ok || echo failed)"
+    return 2
+  fi
 
   printf 'ok\t%s\t%s\t%s\n' "$proved_team" "$proved_agent" "$new_owner"
   return 0
@@ -349,6 +365,17 @@ agmsg_fix_run() {
     reassign_line="$(_fix_codex_thread_reassign)"; rc=$?
     if [ "$rc" -eq 0 ]; then
       seats="$reassign_line"
+    elif [ "$rc" -eq 2 ]; then
+      # The actas lock moved, but codex-record-session.sh and/or
+      # session-start.sh failed -- the seat is not fully repaired (the
+      # bridge may still be on the old thread), so this is reported as a
+      # failure by name, never as proved. The lock move is left in place
+      # (see _fix_codex_thread_reassign's own comment for why undoing it
+      # is not safer).
+      IFS=$'\t' read -r _ team agent owner detail <<<"$reassign_line"
+      printf 'fix seat=%s/%s state=partial reason=codex_thread_reassign_incomplete detail="%s" (lock reclaimed under %s; not all of it ran)\n' \
+        "$team" "$agent" "$detail" "$owner"
+      return 2
     else
       reassign_reason="$reassign_line"
       echo "fix none:no_seat_for_this_session reason=${reassign_reason:-not_a_codex_seat}" >&2
