@@ -55,6 +55,10 @@
 # instance-id.sh already, but nothing before this reached resolve-project.sh.
 # shellcheck disable=SC1091
 . "${SKILL_DIR:?}/scripts/lib/resolve-project.sh"
+# agmsg_sha1, for _fix_codex_thread_synced's multi-pair bridge_key -- the
+# same derivation session-start.sh uses, so both land on the same file.
+# shellcheck disable=SC1091
+. "${SKILL_DIR:?}/scripts/lib/hash.sh"
 
 # The seats whose actas lock this session OWNS, one line per seat:
 #   ok\t<team>\t<agent>\t<owner>            resolved -- safe to use
@@ -241,6 +245,61 @@ _fix_locate() {   # <team> <agent> <owner>
   return "$rc"
 }
 
+# Whether (team, agent)'s codex thread state matches CODEX_THREAD_ID, by
+# READING THE RESULT rather than trusting an exit code (#1470 review round
+# 4 finding 3): codex-record-session.sh routinely exits 0 having recorded
+# nothing (its own "poison-record guard" -- a thread it cannot resolve is a
+# no-op, not a failure), and session-start.sh exits 0 on every early return
+# (no app-server yet, no seat key, an already-live bridge) -- none of those
+# are evidence the state this function cares about actually changed.
+#
+# Checks the role-session record first, then -- only if a bridge has ever
+# bound a thread for this project's pair set -- the bridge's own recorded
+# thread, at the SAME path session-start.sh's direct path and the
+# out-of-sandbox launcher both already write to (codex-bridge.<key>.thread),
+# so this one check covers either architecture. No file there yet is not a
+# failure: a seat that has never had a bridge has nothing to contradict.
+#
+# Prints nothing and returns 0 when synced; prints a one-word reason and
+# returns 1 otherwise.
+_fix_codex_thread_synced() {   # <team> <agent> <project>
+  local team="$1" agent="$2" project="$3" rec_thread pairs pair_n bridge_key thread_file thread_now
+  rec_thread="$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)"
+  [ "$rec_thread" = "$CODEX_THREAD_ID" ] || { printf 'role_session_record_still_old\n'; return 1; }
+
+  pairs="$("$SKILL_DIR/scripts/identities.sh" "$project" codex 2>/dev/null || true)"
+  pair_n="$(printf '%s\n' "$pairs" | grep -c . || true)"
+  if [ "${pair_n:-0}" -eq 1 ]; then
+    bridge_key="$team.$agent"
+  else
+    bridge_key="$(printf '%s' "$pairs" | agmsg_sha1)"
+  fi
+  thread_file="$(_actas_lock_dir)/codex-bridge.$bridge_key.thread"
+  if [ -f "$thread_file" ]; then
+    thread_now="$(cat "$thread_file" 2>/dev/null || true)"
+    [ "$thread_now" = "$CODEX_THREAD_ID" ] || { printf 'bridge_thread_still_old\n'; return 1; }
+  fi
+  return 0
+}
+
+# Run the two existing recovery commands -- codex-record-session.sh, then
+# session-start.sh codex <project>, the same order and the same two
+# commands a seat has always run by hand -- and re-check by STATE, never by
+# their exit codes (see _fix_codex_thread_synced). Already-synced short-
+# circuits without running either (idempotent either way, but no reason to
+# shell out twice on every `fix` once a seat has caught up). Prints nothing
+# and returns 0 when synced afterward; prints the still-stale reason and
+# returns 1 otherwise.
+_fix_codex_thread_sync() {   # <team> <agent> <project>
+  local team="$1" agent="$2" project="$3" reason
+  reason="$(_fix_codex_thread_synced "$team" "$agent" "$project")" && return 0
+  "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" "$team" "$agent" "$project" >/dev/null 2>&1 || true
+  "$SKILL_DIR/scripts/session-start.sh" codex "$project" </dev/null >/dev/null 2>&1 || true
+  reason="$(_fix_codex_thread_synced "$team" "$agent" "$project")" && return 0
+  printf '%s\n' "$reason"
+  return 1
+}
+
 # codex's `/clear` mints a new CODEX_THREAD_ID inside the same TUI process
 # (#1468). The actas lock this seat claimed under the OLD thread id is now
 # owned by a sid this session's AGMSG_SESSION_ID (= the new CODEX_THREAD_ID,
@@ -327,19 +386,15 @@ _fix_codex_thread_reassign() {
   # The lock move above is the one step this function is willing to leave in
   # place on a downstream failure (rolling it back would only trade "seat
   # right here, bridge on the old thread" for "seat nowhere at all" -- worse,
-  # not safer). But a caller must be told which of the next two actually
-  # ran: silently reporting proved when either failed is exactly what #1470
-  # review caught here -- the lock moves, the bridge does not, and nothing
-  # said so.
-  local record_rc=0 session_rc=0
-  "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" "$proved_team" "$proved_agent" "$project" || record_rc=$?
-  "$SKILL_DIR/scripts/session-start.sh" codex "$project" </dev/null >/dev/null 2>&1 || session_rc=$?
-
-  if [ "$record_rc" -ne 0 ] || [ "$session_rc" -ne 0 ]; then
-    printf 'partial\t%s\t%s\t%s\tlock=ok record_session=%s session_start=%s\n' \
-      "$proved_team" "$proved_agent" "$new_owner" \
-      "$([ "$record_rc" -eq 0 ] && echo ok || echo failed)" \
-      "$([ "$session_rc" -eq 0 ] && echo ok || echo failed)"
+  # not safer). A caller must still be told when the rest did not actually
+  # converge: silently reporting proved when it did not is exactly what
+  # #1470 review caught. Checked by STATE (_fix_codex_thread_sync), not by
+  # the two commands' exit codes -- both routinely exit 0 without having
+  # changed anything.
+  local sync_reason sync_rc=0
+  sync_reason="$(_fix_codex_thread_sync "$proved_team" "$proved_agent" "$project")" || sync_rc=$?
+  if [ "$sync_rc" -ne 0 ]; then
+    printf 'partial\t%s\t%s\t%s\t%s\n' "$proved_team" "$proved_agent" "$new_owner" "$sync_reason"
     return 2
   fi
 
@@ -366,14 +421,15 @@ agmsg_fix_run() {
     if [ "$rc" -eq 0 ]; then
       seats="$reassign_line"
     elif [ "$rc" -eq 2 ]; then
-      # The actas lock moved, but codex-record-session.sh and/or
-      # session-start.sh failed -- the seat is not fully repaired (the
-      # bridge may still be on the old thread), so this is reported as a
-      # failure by name, never as proved. The lock move is left in place
-      # (see _fix_codex_thread_reassign's own comment for why undoing it
-      # is not safer).
+      # The actas lock moved, but the role-session record and/or bridge did
+      # not converge -- the seat is not fully repaired, so this is reported
+      # as a failure by name, never as proved. The lock move is left in
+      # place (see _fix_codex_thread_reassign's own comment for why undoing
+      # it is not safer): running `fix` again from here re-enters through
+      # the seats-found branch below, which now also re-checks and retries
+      # the sync for exactly this reason (#1470 review round 4 finding 2).
       IFS=$'\t' read -r _ team agent owner detail <<<"$reassign_line"
-      printf 'fix seat=%s/%s state=partial reason=codex_thread_reassign_incomplete detail="%s" (lock reclaimed under %s; not all of it ran)\n' \
+      printf 'fix seat=%s/%s state=partial reason=%s (lock reclaimed under %s; fix again once the bridge catches up)\n' \
         "$team" "$agent" "$detail" "$owner"
       return 2
     else
@@ -396,6 +452,26 @@ agmsg_fix_run() {
       continue
     fi
     team="$a"; agent="$b"; owner="$c"
+    # #1470 review round 4 finding 2: a seat _fix_seats_of already found
+    # normally (its actas lock is correctly ours) can still be a codex seat
+    # whose role-session record or bridge is stale relative to THIS
+    # session's current thread -- exactly the state a prior `partial` left
+    # behind. Without this, running `fix` again after a partial would find
+    # the seat via the ordinary path above, report proved (the lock and
+    # pane genuinely ARE fine), and never retry the two recovery commands --
+    # "fix again" would not actually converge. Only runs at all when
+    # CODEX_THREAD_ID is in this shell; a non-codex seat has no such
+    # variable to compare against, so this is a no-op for it.
+    if [ -n "${CODEX_THREAD_ID:-}" ]; then
+      local sync_reason sync_rc=0
+      sync_reason="$(_fix_codex_thread_sync "$team" "$agent" "$PWD")" || sync_rc=$?
+      if [ "$sync_rc" -ne 0 ]; then
+        printf 'fix seat=%s/%s state=partial reason=%s (lock already ours; fix again once the bridge catches up)\n' \
+          "$team" "$agent" "$sync_reason"
+        failed=1
+        continue
+      fi
+    fi
     loc="$(_fix_locate "$team" "$agent" "$owner")" || true
     st="${loc%%$'\t'*}"; payload="${loc#*$'\t'}"; via="${payload##*$'\t'}"; payload="${payload%$'\t'*}"
     if [ "$st" = proved ]; then

@@ -221,24 +221,29 @@ EOF
   pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
   # Same name the out-of-sandbox launcher uses for its own per-bridge thread
   # record (codex-bridge-launcher.sh's thread_file) -- not shared machinery,
-  # just the same convention, so a reader who knows one knows the other.
-  thread_file="$RUN_DIR/codex-bridge.$bridge_key.thread"
+  # just the same convention, so a reader who knows one knows the other, and
+  # so self-fix.sh's own state check (#1470 review) can read the truth for
+  # either architecture from one place.
+  #
+  # A live pidfile here is left ALONE even when its bound thread is stale
+  # (#1470 review round 4): "alive" only proves a pid is running, never that
+  # it is THIS bridge -- a reused pid could belong to something else
+  # entirely -- and this path, unlike the launcher, has no lease/start-token
+  # reaper to prove the old writer is actually gone before a replacement is
+  # spawned beside it (#935's hazard). Production arms the launcher
+  # (codex-monitor.sh sets AGMSG_CODEX_BRIDGE_LAUNCHER=1), which DOES have
+  # that reaper and already self-heals a thread change on its own polling
+  # cadence; this direct path's job is only to stand down safely, not to
+  # retry. self-fix.sh reads the stale thread_file it leaves behind and
+  # reports the seat as needing another pass, rather than this hook
+  # guessing at a repair it cannot safely make.
   if [ -f "$pidfile" ]; then
     bridge_pid=$(cat "$pidfile" 2>/dev/null || true)
     if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
-      bound_thread=""
-      [ -f "$thread_file" ] && bound_thread=$(cat "$thread_file" 2>/dev/null || true)
-      if [ "$bound_thread" = "$thread_id" ]; then
-        exit 0
-      fi
-      # Bound to a thread this session no longer resolves to (#1468) -- a
-      # bridge left over from before /clear. This path (unlike the launcher)
-      # has no lease/start-token reaper, so the kill is a plain liveness-then-
-      # signal, the same pattern this script already uses to retire a prior
-      # watcher above; fall through to relaunch bound to the CURRENT thread.
-      kill "$bridge_pid" 2>/dev/null || true
+      exit 0
     fi
   fi
+  thread_file="$RUN_DIR/codex-bridge.$bridge_key.thread"
 
   log="$RUN_DIR/codex-bridge.$bridge_key.log"
   # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
