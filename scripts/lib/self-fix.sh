@@ -273,7 +273,7 @@ _fix_codex_bridge_key_state() {   # <bridge_key>
   thread_file="$(_actas_lock_dir)/codex-bridge.$key.thread"
   if [ -f "$thread_file" ]; then
     thread_now="$(cat "$thread_file" 2>/dev/null || true)"
-    [ "$thread_now" = "$CODEX_THREAD_ID" ] || { printf 'bridge_thread_still_old\n'; return 1; }
+    [ "$thread_now" = "${CODEX_THREAD_ID:-}" ] || { printf 'bridge_thread_still_old\n'; return 1; }
     return 0
   fi
   printf 'bridge_thread_unknown\n'
@@ -312,14 +312,14 @@ _fix_codex_bridge_key_state() {   # <bridge_key>
 _fix_codex_thread_synced() {   # <team> <agent> <project>
   local team="$1" agent="$2" project="$3" rec_thread single_key safe_key reason
   rec_thread="$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)"
-  [ "$rec_thread" = "$CODEX_THREAD_ID" ] || { printf 'role_session_record_still_old\n'; return 1; }
+  [ "$rec_thread" = "${CODEX_THREAD_ID:-}" ] || { printf 'role_session_record_still_old\n'; return 1; }
 
   if ! declare -F agmsg_codex_bridge_key >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     . "$SKILL_DIR/scripts/drivers/types/codex/_bridge-key.sh"
   fi
   single_key="$team.$agent"
-  safe_key="$(agmsg_codex_bridge_key "$project" "$CODEX_THREAD_ID" 2>/dev/null || true)"
+  safe_key="$(agmsg_codex_bridge_key "$project" "${CODEX_THREAD_ID:-}" 2>/dev/null || true)"
 
   reason="$(_fix_codex_bridge_key_state "$single_key")" || { printf '%s\n' "$reason"; return 1; }
   if [ -n "$safe_key" ] && [ "$safe_key" != "$single_key" ]; then
@@ -463,7 +463,17 @@ agmsg_fix_run() {
     # #1468: this session's own seat may be a codex seat stranded by /clear
     # rather than one that never existed -- see _fix_codex_thread_reassign's
     # own header for the exact conditions and why they are safe.
-    reassign_line="$(_fix_codex_thread_reassign)"; rc=$?
+    #
+    # Lifted errexit, as terminal-registry.sh's own sourcing does: a bare
+    # assignment from a failing command substitution kills the shell right
+    # there under `set -e`, before the `rc=$?` on the next line ever runs
+    # (bash 3.2 dies here even behind `|| rc=$?`; check-errexit-status-reads.sh).
+    local _rl_restore_e=0
+    case $- in *e*) _rl_restore_e=1 ;; esac
+    set +e
+    reassign_line="$(_fix_codex_thread_reassign)"
+    rc=$?
+    [ "$_rl_restore_e" = 1 ] && set -e
     if [ "$rc" -eq 0 ]; then
       seats="$reassign_line"
     elif [ "$rc" -eq 2 ]; then

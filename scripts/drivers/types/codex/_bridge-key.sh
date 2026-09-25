@@ -21,6 +21,8 @@
 [ -n "${_AGMSG_CODEX_BRIDGE_KEY_SH:-}" ] && return 0
 _AGMSG_CODEX_BRIDGE_KEY_SH=1
 
+: "${SKILL_DIR:?_bridge-key.sh requires SKILL_DIR}"
+
 # Prints the bridge_key this (project, thread) combination uses; empty
 # (rc 0, no output) when no registered codex pair is safe for it -- that is
 # "no bridge_key to check", never a key of its own.
