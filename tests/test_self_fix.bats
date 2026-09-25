@@ -494,10 +494,17 @@ FAKEEOF
   # repair). #1470 review round 4 finding 3: checked by re-reading that
   # record, which a prior real launch left pointing at the OLD thread, not
   # by the fake's exit status.
+  # #1470 review round 7: a thread file only counts when its OWN pidfile's
+  # pid is alive -- a bare file with no live process behind it is a
+  # leftover, not a fact -- so this scenario needs a genuinely live bridge
+  # process behind the stale file, not just the file by itself.
   : > "$SPY"
   printf 'old-thread-111.%s\n' "$$" > "$(actas_lock_path T cx)"
   agmsg_role_session_record T cx old-thread-111 "$project" codex old-owner.1
   printf '%s' "old-thread-111" > "$RUN_DIR/codex-bridge.T.cx.thread"
+  sleep 100 &
+  local stale_bridge_pid=$!
+  printf '%s\n' "$stale_bridge_pid" > "$RUN_DIR/codex-bridge.T.cx.pid"
   export CODEX_THREAD_ID=new-thread-444
   cat > "$SKILL_DIR/scripts/session-start.sh" <<FAKEEOF
 #!/usr/bin/env bash
@@ -530,11 +537,16 @@ printf '%s' "\$CODEX_THREAD_ID" > "$RUN_DIR/codex-bridge.T.cx.thread"
 FAKEEOF
   chmod +x "$SKILL_DIR/scripts/session-start.sh"
   run agmsg_fix_run
+  local thread_now
+  thread_now="$(cat "$RUN_DIR/codex-bridge.T.cx.thread" 2>/dev/null || true)"
+  # The stale-bridge process from the scenario above must not outlive this
+  # test -- killed here, before any assertion below can end the test early.
+  kill "$stale_bridge_pid" 2>/dev/null || true
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/cx state=proved locator=herdr:/tmp/herdr/sessions/a/herdr.sock:w1:pB via=proof" ]
   grep -Fq "session-start codex $project" "$SPY"
   grep -q '^write T cx' "$SPY"
-  [ "$(cat "$RUN_DIR/codex-bridge.T.cx.thread")" = "new-thread-444" ]
+  [ "$thread_now" = "new-thread-444" ]
 }
 
 
@@ -668,7 +680,13 @@ FAKEEOF
   agmsg_role_session_record T cx new-thread-666 "$project" codex owner.1
   # T/cy: registered, never claimed -- deliberately no record for it.
 
+  # #1470 review round 7: a thread file only counts when its own pidfile's
+  # pid is alive, so this needs a genuinely live process behind the stale
+  # file, not the file alone.
   printf '%s' "old-thread-stale" > "$RUN_DIR/codex-bridge.T.cx.thread"
+  sleep 100 &
+  local stale_bridge_pid=$!
+  printf '%s\n' "$stale_bridge_pid" > "$RUN_DIR/codex-bridge.T.cx.pid"
 
   export AGMSG_SESSION_ID=new-thread-666
   export CODEX_THREAD_ID=new-thread-666
@@ -690,6 +708,7 @@ FAKEEOF
 
   cd "$project"
   run agmsg_fix_run
+  kill "$stale_bridge_pid" 2>/dev/null || true
   [ "$status" -eq 2 ]
   [ "$output" = "fix seat=T/cx state=partial reason=bridge_thread_still_old (lock already ours; fix again once the bridge catches up)" ]
 }
@@ -713,7 +732,13 @@ FAKEEOF
   agmsg_role_session_record T cx new-thread-888 "$project" codex owner.1
   agmsg_role_session_record T cy new-thread-888 "$project" codex owner.2
 
+  # #1470 review round 7: a thread file only counts when its own pidfile's
+  # pid is alive, so this needs a genuinely live process behind the stale
+  # single-pair file, not the file alone.
   printf '%s' "old-thread-stale" > "$RUN_DIR/codex-bridge.T.cx.thread"
+  sleep 100 &
+  local stale_bridge_pid=$!
+  printf '%s\n' "$stale_bridge_pid" > "$RUN_DIR/codex-bridge.T.cx.pid"
   # Deliberately nothing at all under the hashed multi-pair key.
 
   export AGMSG_SESSION_ID=new-thread-888
@@ -736,6 +761,66 @@ FAKEEOF
 
   cd "$project"
   run agmsg_fix_run
+  kill "$stale_bridge_pid" 2>/dev/null || true
   [ "$status" -eq 2 ]
   [ "$output" = "fix seat=T/cx state=partial reason=bridge_thread_still_old (lock already ours; fix again once the bridge catches up)" ]
+}
+
+@test "fix: a stale thread file with no live pidfile behind it is ignored, not read as still-old (#1470 review round 7)" {
+  # The reverse of the round 6 shape, on purpose: the single-pair key
+  # ("T.cx") has a genuinely stale .thread file, but nothing is running
+  # there anymore (the round 6 hazard's own remedy -- once fix repairs a
+  # seat, the OLD key's file is never cleaned up, so it must not go on
+  # being read as evidence forever). The safe-set (hashed) key, meanwhile,
+  # has a REAL live bridge correctly bound to the CURRENT thread. Only the
+  # live key may speak; the dead one must be silent, and the seat as a
+  # whole is synced.
+  local project="$BATS_TEST_TMPDIR/proj6"
+  mkdir -p "$project"
+  local team_dir="$SKILL_DIR/teams/T"
+  mkdir -p "$team_dir"
+  printf '{"name":"T","agents":{"cx":{"type":"codex","project":"%s"},"cy":{"type":"codex","project":"%s"}}}' \
+    "$project" "$project" > "$team_dir/config.json"
+  agmsg_role_session_record T cx new-thread-999 "$project" codex owner.1
+  agmsg_role_session_record T cy new-thread-999 "$project" codex owner.2
+
+  # T/cx's own single-pair key: a stale file, but no live process -- must
+  # be ignored.
+  printf '%s' "old-thread-dead" > "$RUN_DIR/codex-bridge.T.cx.thread"
+  # No codex-bridge.T.cx.pid at all (never ran, or already exited and its
+  # pidfile was cleaned up -- either way, nothing alive at this key).
+
+  # The safe-set (multi-pair, hashed) key: a real, live, correctly-bound
+  # bridge.
+  local pairs safe_key
+  pairs="$(printf 'T\tcx\nT\tcy\n')"
+  safe_key="$(printf '%s' "$pairs" | agmsg_sha1)"
+  sleep 100 &
+  local live_bridge_pid=$!
+  printf '%s\n' "$live_bridge_pid" > "$RUN_DIR/codex-bridge.$safe_key.pid"
+  printf '%s' "new-thread-999" > "$RUN_DIR/codex-bridge.$safe_key.thread"
+
+  export AGMSG_SESSION_ID=new-thread-999
+  export CODEX_THREAD_ID=new-thread-999
+  printf 'new-thread-999.%s\n' "$$" > "$(actas_lock_path T cx)"
+  printf '%s\n' "new-thread-999.$$" > "$RUN_DIR/cc-instance.$$"
+  export AGMSG_AGENT_PID="$$"
+  _proof_says 0 proved herdr:w1:pB
+
+  cat > "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" <<'FAKEEOF'
+#!/usr/bin/env bash
+true
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh"
+  cat > "$SKILL_DIR/scripts/session-start.sh" <<'FAKEEOF'
+#!/usr/bin/env bash
+true
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/session-start.sh"
+
+  cd "$project"
+  run agmsg_fix_run
+  kill "$live_bridge_pid" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/cx state=proved locator=herdr:/tmp/herdr/sessions/a/herdr.sock:w1:pB via=proof" ]
 }

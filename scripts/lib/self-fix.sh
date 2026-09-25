@@ -246,31 +246,38 @@ _fix_locate() {   # <team> <agent> <owner>
 }
 
 # The bridge state at ONE candidate bridge_key: nothing wrong there (rc 0,
-# no output) when its thread file matches CODEX_THREAD_ID, or there is no
-# file AND no live pidfile at that key (nothing running there to
-# contradict); a one-word reason (rc 1) when the thread file names a
-# different thread, or a live pidfile exists with no thread file next to it
-# (#1470 review round 5 finding 1 -- an install/upgrade boundary, or a
-# bridge that is simply still starting; "no file" must not be read as
-# "nothing to compare" when something is plainly running).
+# no output) when there is no LIVE pidfile at this key at all -- a thread
+# file is only ever consulted when its own pidfile's pid is alive (#1470
+# review round 7). A thread file does not disappear when its bridge dies,
+# and a role's safe set can move it from the single-pair key to the
+# multi-pair key (or back) without either key's old file being cleaned up
+# -- so a stale, ownerless thread file must never be read as "still on the
+# old thread": that reads a leftover as a live fact and can never clear
+# (session-start.sh has nothing to make it go away, and deleting a file
+# this function does not own would need an ownership check beyond this
+# round's scope). Only once the pidfile at this SAME key proves something
+# is actually running here does its thread file get to speak: matches
+# CODEX_THREAD_ID (rc 0), names a different thread (rc 1,
+# bridge_thread_still_old), or is simply absent while the pid is alive (rc
+# 1, bridge_thread_unknown -- round 5 finding 1, an install/upgrade
+# boundary or a bridge still starting; "no file" is not "nothing to
+# compare" when something is plainly running).
 _fix_codex_bridge_key_state() {   # <bridge_key>
-  local key="$1" thread_file thread_now pidfile bridge_pid
+  local key="$1" pidfile bridge_pid thread_file thread_now
   [ -n "$key" ] || return 0
+  pidfile="$(_actas_lock_dir)/codex-bridge.$key.pid"
+  [ -f "$pidfile" ] || return 0
+  bridge_pid="$(cat "$pidfile" 2>/dev/null || true)"
+  [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid" || return 0
+
   thread_file="$(_actas_lock_dir)/codex-bridge.$key.thread"
   if [ -f "$thread_file" ]; then
     thread_now="$(cat "$thread_file" 2>/dev/null || true)"
     [ "$thread_now" = "$CODEX_THREAD_ID" ] || { printf 'bridge_thread_still_old\n'; return 1; }
     return 0
   fi
-  pidfile="$(_actas_lock_dir)/codex-bridge.$key.pid"
-  if [ -f "$pidfile" ]; then
-    bridge_pid="$(cat "$pidfile" 2>/dev/null || true)"
-    if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
-      printf 'bridge_thread_unknown\n'
-      return 1
-    fi
-  fi
-  return 0
+  printf 'bridge_thread_unknown\n'
+  return 1
 }
 
 # Whether (team, agent)'s codex thread state matches CODEX_THREAD_ID, by
