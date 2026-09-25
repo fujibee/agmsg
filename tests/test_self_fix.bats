@@ -403,10 +403,15 @@ PROBE
 }
 
 @test "fix: a codex /clear -stranded seat is reassigned and the bridge is restarted through the existing recovery commands (#1468)" {
-  # No lock this session owns (the /clear symptom: a new CODEX_THREAD_ID
-  # means _fix_seats_of finds nothing), but a registered codex seat for
-  # this project proves for this pane and its role-session record still
-  # names the thread from before /clear.
+  # No lock this session owns THROUGH THE ORDINARY SID MATCH (the /clear
+  # symptom: a new CODEX_THREAD_ID means _fix_seats_of's owner comparison
+  # never matches), but a registered codex seat for this project proves for
+  # this pane. The REAL shape, measured against a genuine lock: the actas lock this seat
+  # already holds is owned by a pid that is genuinely alive -- THIS TEST
+  # SHELL's own pid, standing in for the same os process /clear leaves
+  # running -- never an absent or already-dead lock. A plain actas_lock_claim
+  # would report held:<old-owner> forever against a lock like this; only the
+  # narrow same-process reclaim may move it.
   local project="$BATS_TEST_TMPDIR/proj"
   mkdir -p "$project"
   local team_dir="$SKILL_DIR/teams/T"
@@ -414,6 +419,20 @@ PROBE
   printf '{"name":"T","agents":{"cx":{"type":"codex","project":"%s"}}}' "$project" \
     > "$team_dir/config.json"
   agmsg_role_session_record T cx old-thread-111 "$project" codex old-owner.1
+  printf 'old-thread-111.%s\n' "$$" > "$(actas_lock_path T cx)"
+  # setup() already wrote cc-instance.$$ = $ME for the OTHER tests in this
+  # file; agmsg_instance_alive requires that marker to match the EXACT
+  # token it is asked about, so it has to agree with the owner this test
+  # just placed, or the pid would read as dead by marker mismatch rather
+  # than the genuinely-alive case this test means to exercise.
+  printf '%s\n' "old-thread-111.$$" > "$RUN_DIR/cc-instance.$$"
+  # agmsg_normalize_instance_id's composite upgrade goes through
+  # agmsg_agent_pid, which walks $$'s ancestry for a codex process -- there
+  # is none inside bats, so without this override the new owner token would
+  # come back bare (no .pid) and never same-pid-match the lock above. This
+  # is the SAME override test_delivery.bats already uses for the identical
+  # reason.
+  export AGMSG_AGENT_PID="$$"
   export CODEX_THREAD_ID=new-thread-222
   _proof_says 0 proved herdr:w1:pB
 
@@ -439,16 +458,26 @@ FAKEEOF
   grep -Fq "record-session T cx $project CODEX_THREAD_ID=new-thread-222" "$SPY"
   grep -Fq "session-start codex $project" "$SPY"
   grep -q '^write T cx' "$SPY"
+  [ "$(cat "$(actas_lock_path T cx)")" = "new-thread-222.$$" ]
 
-  # Condition missing: the recorded project is a DIFFERENT one. Same seat,
-  # same pane proof, same new thread -- fix must not reassign, and must
+  # Condition missing: a DIFFERENT, still-alive pid holds the old lock -- a
+  # genuinely separate live process, not this session's own. This is exactly
+  # the case the narrow reclaim must never touch: same-pid is its whole
+  # license, and there is no pid match here. fix must not steal it, and must
   # say why instead of repeating the generic no-seat message.
   : > "$SPY"
-  agmsg_role_session_record T cx old-thread-111 "$BATS_TEST_TMPDIR/other-project" codex old-owner.1
+  sleep 100 &
+  local other_pid=$!
+  printf 'old-thread-111.%s\n' "$other_pid" > "$(actas_lock_path T cx)"
+  export CODEX_THREAD_ID=new-thread-333
   run agmsg_fix_run
+  kill "$other_pid" 2>/dev/null || true
+  wait "$other_pid" 2>/dev/null || true
   [ "$status" -eq 1 ]
-  [ "$output" = "fix none:no_seat_for_this_session reason=recorded_project_mismatch" ]
+  [ "$output" = "fix none:no_seat_for_this_session reason=actas_lock_reclaim_failed" ]
+  [ "$(cat "$(actas_lock_path T cx)")" = "old-thread-111.$other_pid" ]
   refute grep -q '^record-session' "$SPY"
   refute grep -q '^session-start' "$SPY"
   refute grep -q '^write' "$SPY"
 }
+

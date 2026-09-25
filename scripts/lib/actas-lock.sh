@@ -686,6 +686,61 @@ agmsg_lock_claim_at() {   # <lock-path> <owner>
   return 1
 }
 
+# A narrow same-process handoff (#1468). codex's `/clear` mints a new thread
+# id inside the SAME os process, so the current holder's embedded pid stays
+# genuinely alive -- the ordinary reclaim path above (positively-dead only)
+# correctly refuses to touch it, and that refusal must not be weakened. This
+# is the one case that IS still safe to move a lock without the owner ever
+# having died: a NEW owner token whose embedded pid -- derived the identical
+# way every owner token is, via agmsg_instance_id's ancestor walk -- equals
+# the CURRENT holder's embedded pid. Nothing else may pass this check: a
+# different live pid holding the role legitimately keeps it, and an
+# unreadable or empty lock is left for the normal claim path to name.
+#
+# Same vocabulary and exit codes as actas_lock_claim: "ok" (0, moved or
+# already ours), "held:<owner>" / "unknown:<reason>" (1, untouched).
+actas_lock_reclaim_same_process() {   # <team> <agent> <new-owner>
+  local team="$1" agent="$2" new_owner="$3" lock_path new_pid
+  lock_path="$(actas_lock_path "$team" "$agent")" || { echo "unknown:lock_ambiguous"; return 1; }
+  new_pid="${new_owner##*.}"
+  [ "$new_pid" != "$new_owner" ] || { echo "unknown:owner_not_composite"; return 1; }
+  case "$new_pid" in ''|*[!0-9]*) echo "unknown:owner_pid_invalid"; return 1 ;; esac
+
+  local mutex mres
+  mutex="$(_agmsg_lock_mutex_path "$lock_path")"
+  mres="$(_agmsg_lock_mutex_take "$mutex" "$new_owner")"
+  case "$mres" in
+    ok) ;;
+    held:*)    printf 'unknown:reclaim_contended\n'; return 1 ;;
+    unknown:*) printf 'unknown:reclaim_mutex:%s\n' "${mres#unknown:}"; return 1 ;;
+    *)         printf 'unknown:reclaim_mutex_unclassified\n'; return 1 ;;
+  esac
+
+  # DELETES, so it needs the same three facts the ordinary stale-reclaim
+  # above requires -- the read SUCCEEDED, an owner is actually there, and
+  # this time the positive fact is "same pid, positively alive" rather than
+  # "positively dead". Anything short of that (unreadable, empty, a
+  # different pid, dead, or undecidable) leaves the lock exactly as found.
+  local rd owner_now old_pid alive_rc
+  rd="$(_actas_lock_read_path "$lock_path")"
+  if [ "${rd%%$'\t'*}" = "ok" ] && [ -n "${rd#*$'\t'}" ]; then
+    owner_now="${rd#*$'\t'}"
+    old_pid="${owner_now##*.}"
+    alive_rc=0
+    agmsg_instance_alive "$owner_now" || alive_rc=$?
+    if [ "$old_pid" = "$new_pid" ] && [ "$alive_rc" -eq 0 ]; then
+      rm -f "$lock_path"
+    fi
+  fi
+  agmsg_lock_release_at "$mutex" "$new_owner"
+
+  # Whatever happened above, let the ordinary claim path decide and report
+  # from a fresh read -- it already knows every verdict this function must
+  # be able to say: ok if the lock is now gone and nobody raced in first,
+  # held:<owner> if the pid did not match or someone else holds it now.
+  agmsg_lock_claim_at "$lock_path" "$new_owner"
+}
+
 # Where the reclaim mutex for a lock lives: beside it, one file.
 _agmsg_lock_mutex_path() {   # <lock-path>
   printf '%s.reclaim' "$1"

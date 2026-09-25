@@ -316,7 +316,12 @@ _fix_codex_thread_reassign() {
   # below should see this session, not the dead one.
   new_owner="$(agmsg_normalize_instance_id "$CODEX_THREAD_ID" codex 2>/dev/null)"
   [ -n "$new_owner" ] || { printf 'owner_token_unresolvable\n'; return 1; }
-  claim_out="$(actas_lock_claim "$proved_team" "$proved_agent" "$new_owner" 2>/dev/null)" || claim_rc=$?
+  # Not a plain actas_lock_claim: the old owner's pid is the SAME os process
+  # (only its codex thread id changed), so it is genuinely alive and a plain
+  # claim would report held:<old-owner> forever. actas_lock_reclaim_same_process
+  # is the one lock write allowed to move a live-owned lock, and only when the
+  # new owner's pid -- derived the identical way -- matches the current one.
+  claim_out="$(actas_lock_reclaim_same_process "$proved_team" "$proved_agent" "$new_owner" 2>/dev/null)" || claim_rc=$?
   [ "$claim_rc" -eq 0 ] && [ "$claim_out" = ok ] || { printf 'actas_lock_reclaim_failed\n'; return 1; }
 
   "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" "$proved_team" "$proved_agent" "$project" || true
