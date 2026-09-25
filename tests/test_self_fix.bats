@@ -57,7 +57,11 @@ _proof_says() {   # <rc> <state> <payload>
   _proof_says 0 proved herdr:w1:pB
   run agmsg_fix_run
   [ "$status" -eq 1 ]
-  [ "$output" = "fix none:no_seat_for_this_session" ]
+  # #1468: the empty-seats path also tries a codex /clear thread reassign
+  # before giving up; with no CODEX_THREAD_ID in this shell (test_helper
+  # unsets it) that attempt fails on its very first condition, and the
+  # reason rides along on the same line rather than the plain message.
+  [ "$output" = "fix none:no_seat_for_this_session reason=codex_thread_id_not_set" ]
   [ ! -s "$SPY" ]
 }
 
@@ -396,4 +400,55 @@ PROBE
   local raw="${team_id_a}__${member_id_a}"
   [ "$(printf '%s\n' "$output" | grep -c "^unresolved	${sid_a}	${raw}\$")" -eq 2 ]
   refute grep -qF "^ok" <<<"$output"
+}
+
+@test "fix: a codex /clear -stranded seat is reassigned and the bridge is restarted through the existing recovery commands (#1468)" {
+  # No lock this session owns (the /clear symptom: a new CODEX_THREAD_ID
+  # means _fix_seats_of finds nothing), but a registered codex seat for
+  # this project proves for this pane and its role-session record still
+  # names the thread from before /clear.
+  local project="$BATS_TEST_TMPDIR/proj"
+  mkdir -p "$project"
+  local team_dir="$SKILL_DIR/teams/T"
+  mkdir -p "$team_dir"
+  printf '{"name":"T","agents":{"cx":{"type":"codex","project":"%s"}}}' "$project" \
+    > "$team_dir/config.json"
+  agmsg_role_session_record T cx old-thread-111 "$project" codex old-owner.1
+  export CODEX_THREAD_ID=new-thread-222
+  _proof_says 0 proved herdr:w1:pB
+
+  # Fake the two commands a seat has always run by hand to recover from
+  # this (codex-record-session.sh, session-start.sh) as spies -- this test
+  # pins that `fix` calls them, with the right arguments, not what a real
+  # bridge process does afterward.
+  cat > "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" <<'FAKEEOF'
+#!/usr/bin/env bash
+printf 'record-session %s %s %s CODEX_THREAD_ID=%s\n' "$1" "$2" "$3" "${CODEX_THREAD_ID:-}" >> "$SPY"
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh"
+  cat > "$SKILL_DIR/scripts/session-start.sh" <<'FAKEEOF'
+#!/usr/bin/env bash
+printf 'session-start %s %s\n' "$1" "$2" >> "$SPY"
+FAKEEOF
+  chmod +x "$SKILL_DIR/scripts/session-start.sh"
+
+  cd "$project"
+  run agmsg_fix_run
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/cx state=proved locator=herdr:/tmp/herdr/sessions/a/herdr.sock:w1:pB via=proof" ]
+  grep -Fq "record-session T cx $project CODEX_THREAD_ID=new-thread-222" "$SPY"
+  grep -Fq "session-start codex $project" "$SPY"
+  grep -q '^write T cx' "$SPY"
+
+  # Condition missing: the recorded project is a DIFFERENT one. Same seat,
+  # same pane proof, same new thread -- fix must not reassign, and must
+  # say why instead of repeating the generic no-seat message.
+  : > "$SPY"
+  agmsg_role_session_record T cx old-thread-111 "$BATS_TEST_TMPDIR/other-project" codex old-owner.1
+  run agmsg_fix_run
+  [ "$status" -eq 1 ]
+  [ "$output" = "fix none:no_seat_for_this_session reason=recorded_project_mismatch" ]
+  refute grep -q '^record-session' "$SPY"
+  refute grep -q '^session-start' "$SPY"
+  refute grep -q '^write' "$SPY"
 }

@@ -50,6 +50,11 @@
 # this file sources it.
 # shellcheck disable=SC1091
 . "${SKILL_DIR:?}/scripts/lib/token-locate.sh"
+# agmsg_canonical_path, for _fix_codex_thread_reassign's project comparison
+# (#1468) -- actas-lock.sh/self-write.sh pull in role-session.sh and
+# instance-id.sh already, but nothing before this reached resolve-project.sh.
+# shellcheck disable=SC1091
+. "${SKILL_DIR:?}/scripts/lib/resolve-project.sh"
 
 # The seats whose actas lock this session OWNS, one line per seat:
 #   ok\t<team>\t<agent>\t<owner>            resolved -- safe to use
@@ -236,6 +241,91 @@ _fix_locate() {   # <team> <agent> <owner>
   return "$rc"
 }
 
+# codex's `/clear` mints a new CODEX_THREAD_ID inside the same TUI process
+# (#1468). The actas lock this seat claimed under the OLD thread id is now
+# owned by a sid this session's AGMSG_SESSION_ID (= the new CODEX_THREAD_ID,
+# see fix.sh) can never match, so _fix_seats_of finds nothing and a plain
+# `fix` reports no_seat_for_this_session even though the seat is still right
+# here, in the same pane, under the same OS process. This reassigns it --
+# but ONLY when every one of the following holds, checked in order, the
+# first miss reported and nothing guessed past it:
+#
+#   1. CODEX_THREAD_ID is set (this really is a codex session, and we know
+#      its current, trustworthy thread id).
+#   2. Exactly ONE registered codex seat for the current project PROVES for
+#      this pane (agmsg_self_proof, the same proof `fix` always uses --
+#      proof is about OS process ancestry, which /clear never changes, so a
+#      seat whose actas lock is stale by SID still proves here).
+#   3. That seat's role-session record's project matches this one, and its
+#      recorded thread is a DIFFERENT thread than CODEX_THREAD_ID (there is
+#      actually something stale to fix).
+#
+# On success: re-claim the actas lock under the NEW sid, then run the exact
+# two commands a seat has always run by hand to recover from this (#1468) --
+# codex-record-session.sh to move the role-session record onto the current
+# thread, then session-start.sh codex <project> to hand the bridge off
+# again. No new bridge-restart machinery: the out-of-sandbox launcher
+# (codex-bridge-launcher.sh, the path codex-monitor.sh actually arms) already
+# polls the role-session record and its own request file and retires+
+# respawns a bridge bound to the wrong thread on its own -- confirmed by
+# reading its child loop, not assumed. Prints the reassigned seat in the same
+# `ok\t<team>\t<agent>\t<owner>` shape _fix_seats_of emits, so the normal
+# proved/write loop below picks it up unchanged; prints nothing and returns
+# 1 when any condition is not met (the caller reports the skip by name).
+_fix_codex_thread_reassign() {
+  local project env kind cand pairs team agent
+  local proof_out proof_rc proof_state proved_team="" proved_agent="" proved_n=0
+  local rec_thread rec_project rec_project_phys project_phys new_owner claim_out claim_rc=0
+
+  [ -n "${CODEX_THREAD_ID:-}" ] || { printf 'codex_thread_id_not_set\n'; return 1; }
+
+  project="$PWD"
+  env="$(agmsg_terminal_self_env 2>/dev/null)"
+  [ -n "$env" ] || { printf 'no_candidate_in_env\n'; return 1; }
+  kind="${env%%$'\t'*}"
+  cand="$(printf '%s' "$env" | cut -f2)"
+  agmsg_terminal_load "$kind" 2>/dev/null || true
+
+  pairs="$("$SKILL_DIR/scripts/identities.sh" "$project" codex 2>/dev/null || true)"
+  [ -n "$pairs" ] || { printf 'no_registered_codex_seat_for_project\n'; return 1; }
+
+  while IFS=$'\t' read -r team agent; do
+    [ -n "$team" ] && [ -n "$agent" ] || continue
+    proof_rc=0
+    proof_out="$(agmsg_self_proof "$team" "$agent" "$cand" 2>/dev/null)" || proof_rc=$?
+    proof_state="${proof_out%%$'\t'*}"
+    if [ "$proof_rc" -eq 0 ] && [ "$proof_state" = proved ]; then
+      proved_n=$((proved_n + 1))
+      proved_team="$team"; proved_agent="$agent"
+    fi
+  done <<< "$pairs"
+
+  [ "$proved_n" -ge 1 ] || { printf 'no_proved_codex_seat_in_this_pane\n'; return 1; }
+  [ "$proved_n" -eq 1 ] || { printf 'multiple_proved_codex_seats_in_this_pane\n'; return 1; }
+
+  rec_thread="$(agmsg_role_session_uuid "$proved_team" "$proved_agent" 2>/dev/null || true)"
+  [ -n "$rec_thread" ] || { printf 'no_role_session_record\n'; return 1; }
+  rec_project="$(agmsg_role_session_get "$proved_team" "$proved_agent" project 2>/dev/null || true)"
+  rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
+  project_phys="$(agmsg_canonical_path "$project" 2>/dev/null || printf '%s' "$project")"
+  [ "$rec_project_phys" = "$project_phys" ] || { printf 'recorded_project_mismatch\n'; return 1; }
+  [ "$rec_thread" != "$CODEX_THREAD_ID" ] || { printf 'record_already_on_current_thread\n'; return 1; }
+
+  # Eligible. Re-claim first -- proof and record are about to change under
+  # it, and a caller reading the lock between here and the record rewrite
+  # below should see this session, not the dead one.
+  new_owner="$(agmsg_normalize_instance_id "$CODEX_THREAD_ID" codex 2>/dev/null)"
+  [ -n "$new_owner" ] || { printf 'owner_token_unresolvable\n'; return 1; }
+  claim_out="$(actas_lock_claim "$proved_team" "$proved_agent" "$new_owner" 2>/dev/null)" || claim_rc=$?
+  [ "$claim_rc" -eq 0 ] && [ "$claim_out" = ok ] || { printf 'actas_lock_reclaim_failed\n'; return 1; }
+
+  "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" "$proved_team" "$proved_agent" "$project" || true
+  "$SKILL_DIR/scripts/session-start.sh" codex "$project" </dev/null >/dev/null 2>&1 || true
+
+  printf 'ok\t%s\t%s\t%s\n' "$proved_team" "$proved_agent" "$new_owner"
+  return 0
+}
+
 # The entry. Refuses any argument by name.
 agmsg_fix_run() {
   if [ "$#" -ne 0 ]; then
@@ -243,10 +333,23 @@ agmsg_fix_run() {
     return 1
   fi
   local sid seats line status a b c team agent owner loc st payload via rc=0 any=0 failed=0
+  local reassign_line reassign_reason
   sid="$(agmsg_instance_bare_sid "${AGMSG_SESSION_ID:-}" 2>/dev/null)"
   [ -n "$sid" ] || { echo "fix none:no_session_id" >&2; return 1; }
   seats="$(_fix_seats_of "$sid")"
-  [ -n "$seats" ] || { echo "fix none:no_seat_for_this_session" >&2; return 1; }
+  if [ -z "$seats" ]; then
+    # #1468: this session's own seat may be a codex seat stranded by /clear
+    # rather than one that never existed -- see _fix_codex_thread_reassign's
+    # own header for the exact conditions and why they are safe.
+    reassign_line="$(_fix_codex_thread_reassign)"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+      seats="$reassign_line"
+    else
+      reassign_reason="$reassign_line"
+      echo "fix none:no_seat_for_this_session reason=${reassign_reason:-not_a_codex_seat}" >&2
+      return 1
+    fi
+  fi
   while IFS=$'\t' read -r status a b c; do
     [ -n "$status" ] || continue
     any=1
