@@ -2686,6 +2686,28 @@ M
   [ "$status" -eq 0 ]
   [ -f "$rec" ]
   grep -q 'tmux:/tmp/fake:%1' "$rec"
+
+  # #1476: a team or agent that looks like a path or a UUIDv7 id is not a
+  # registered name -- neither the pane nor a role-session record for it may
+  # be written, whichever slot a caller's mistake put the bad value in.
+  # Snapshotting ARGV_LOG and the run/ tree (rather than re-deriving a
+  # record path from the bad value itself) proves BOTH "the pane was not
+  # renamed" and "nothing was recorded", without assuming what a path- or
+  # id-shaped value would even resolve to as a record path.
+  local run_dir="$SKILL_DIR/run"
+  local before_log before_run
+  before_log="$(cat "$ARGV_LOG")"
+  before_run="$(find "$run_dir" 2>/dev/null | sort)"
+
+  run agmsg_terminal_name_self "" "/proj/path-shaped" bob /proj/B claude-code record
+  [ "$status" -ne 0 ]
+  [ "$(cat "$ARGV_LOG")" = "$before_log" ]
+  [ "$(find "$run_dir" 2>/dev/null | sort)" = "$before_run" ]
+
+  run agmsg_terminal_name_self "" seatteam "018f0000-0000-7000-8000-0000000000aa" /proj/B claude-code record
+  [ "$status" -ne 0 ]
+  [ "$(cat "$ARGV_LOG")" = "$before_log" ]
+  [ "$(find "$run_dir" 2>/dev/null | sort)" = "$before_run" ]
 }
 
 @test "terminal_name_self: a failed record re-write leaves the EXISTING correct record intact (atomic)" {

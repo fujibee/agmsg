@@ -1053,12 +1053,58 @@ EOF
   return 0
 }
 
+# Does <name> look like a registered team/agent name at all, rather than a
+# value some caller passed by mistake? Two shapes, both observed in the wild
+# (#1476): a path (a project path handed in through the team slot instead of
+# a team name -- agmsg_validate_team_name already rejects '/' in a name that
+# reaches IT, but nothing here called that validator, so a caller's own bug
+# upstream of it reached this function unchecked) and a raw id (an actas
+# lock's team_id/member_id, read as if they were the registered name --
+# #1461 fixed the ONE place that misread a lock's filename this way, but the
+# labels/records that misread already wrote are still there, and nothing
+# stopped a DIFFERENT caller from making the same mistake again).
+#
+# Deliberately narrower than agmsg_validate_team_name/agmsg_validate_agent_name
+# (validate.sh): those reject '.', '..', a leading '-', and several other
+# path-hazard shapes that are NOT what #1476 is about, and calling them here
+# would refuse names this guard has no reason to touch. This checks only the
+# two shapes the issue names, on both team and agent, so any value one of
+# them holds is caught regardless of which slot a caller confused.
+_agmsg_terminal_name_looks_unregistered() {   # <value>
+  local v="$1"
+  case "$v" in
+    */*) return 0 ;;
+  esac
+  # UUIDv7 shape: 8-4-4-4-12 hex, version nibble 7, RFC 4122 variant nibble
+  # (8/9/a/b) -- the shape compat_uuid7 (compat.sh) generates, matched
+  # case-insensitively since an id can arrive either case.
+  case "$v" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-7[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[89abAB][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])
+      return 0 ;;
+  esac
+  return 1
+}
+
 agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
   local write_record="${6:-}"
   [ -n "$team" ] && [ -n "$agent" ] || {
     echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
   }
+
+  # Refuse BEFORE naming or recording (#1476): a path or an id in the team or
+  # agent slot is not a registered name, whichever caller's mistake put it
+  # there. Neither the pane nor the role-session record is touched --
+  # existing bad labels/records from before this guard existed are left for
+  # a re-run of join/actas/fix to overwrite, not rewritten here.
+  if _agmsg_terminal_name_looks_unregistered "$team"; then
+    echo "agmsg: did not name or record this pane: team '$team' looks like a path or id, not a registered team name" >&2
+    return 1
+  fi
+  if _agmsg_terminal_name_looks_unregistered "$agent"; then
+    echo "agmsg: did not name or record this pane: agent '$agent' looks like a path or id, not a registered agent name" >&2
+    return 1
+  fi
 
   # AGMSG_SELF_NAME=off: this process must NOT name its pane, whatever pair it
   # is handed. Checked HERE, in the one function every self-naming path ends in
