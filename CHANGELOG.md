@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-09-25
+
+### Added
+- Orca terminal driver (1.5.0) (#1453)
+
+### Fixed
+- Re-bind a codex seat stranded on its pre-/clear thread (#1470)
+- Clean the CODEX_HOME Codex config and the OpenCode/Hermes/Grok files (#1471)
+- Don't retype the shared SKILL.md for a type with its own file (#1464)
+- Find a seat's actas lock from its registration, and name a sandbox refusal (#1461)
+
+[1.5.0]: https://github.com/fujibee/agmsg/compare/v1.4.2...v1.5.0
+
 ## [1.4.2] - 2026-09-24
 
 ### Added
