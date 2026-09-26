@@ -941,6 +941,87 @@ _agmsg_placement_claimed_by() {
   return 0
 }
 
+# <ref> -> the BARE pane id (no socket/instance prefix), via
+# _agmsg_placement_split followed by the driver's own id splitter. Not just
+# _AGMSG_PS_ID: for a driver that folds the socket INTO the id rather than
+# carrying it separately in _AGMSG_PS_SOCK (herdr does, so two panes on
+# different servers are not confused by a bare pane id alone -- #1051), that
+# field IS the qualified form, and terminal_session_live answers with the
+# driver's bare pane_id -- comparing the two directly always mismatches.
+# Empty (rc 1) when the ref cannot be parsed at either layer.
+_agmsg_placement_bare_pane_id() {   # <ref>
+  local ref="$1" halves
+  _agmsg_placement_split "$ref" || return 1
+  halves="$(_agmsg_terminal_id_split "$_AGMSG_PS_TERM" "$_AGMSG_PS_ID" 2>/dev/null)" || return 1
+  printf '%s' "${halves#*$'\t'}"
+}
+
+# <rival-spawn-record-path> <this-seat's-own-claim-ref>
+#   Is the session that record's role-session file names as its `session=`
+#   the one actually sitting in the CLAIMED pane right now (#1485)? The pane
+#   is the caller's own resolved ref (agmsg_terminal_ref's output, e.g.
+#   "herdr:<socket>:<pane>") -- both sides of the comparison are normalized to
+#   the same BARE pane id via _agmsg_placement_bare_pane_id, rather than
+#   comparing a socket-qualified ref against terminal_session_live's bare
+#   answer directly (which never matches for herdr -- see that function).
+#
+#   Prints "here" (still genuinely claimed -- refuse as before), "not_here"
+#   (confirmed dead, or confirmed alive somewhere else -- the claim is stale),
+#   or "unknown" (cannot tell). "unknown" is the answer every caller already
+#   treated as a claim before this function existed, so nothing here may ever
+#   turn "unknown" into anything but "still refuse".
+#
+# The record's session id comes from role-session.sh's file for the SAME
+# (team, agent) -- found by substituting "spawn." for "role-session." in the
+# spawn path, never by decoding team/agent out of it. _agmsg_placement_claimed_by's
+# own comment above already covers why: "__" is legal inside a name, so a name
+# cannot be split out of the encoded file name. Both families are written by
+# the same encoder into the same directory (role-session.sh's own header
+# comment), so the substitution lands on the record for every claim this can
+# still help with: a legacy/name-keyed one. An id-keyed spawn record (#1240)
+# has no same-named role-session file -- role-session.sh only ever encodes
+# names, never ids -- so this reads empty there and answers "unknown", exactly
+# today's behavior for that case; teaching role-session.sh to read id-keyed
+# pairs is #1457 item 1, a separate, larger change.
+#
+# Liveness itself is asked of the terminal driver already loaded for THIS
+# seat's own pane (terminal_session_live, herdr only for now -- #1485's own
+# reproduction is herdr-specific, and so is every existing mechanism this
+# reuses rather than inventing a new one; a driver without the op answers
+# "unknown" via the declare -F check below, so a non-herdr pane refuses
+# exactly as it always has). Single-server only:
+# like the rest of this file's herdr ops, it asks whichever socket this
+# process's own herdr CLI resolves to, and does not attempt to prove the
+# claim's socket is the same server (#1051's cross-server pane-id collision
+# risk, not newly introduced here, just not newly closed either).
+_agmsg_placement_claimant_here_now() {   # <rival-spawn-record-path> <claim-ref>
+  local spawn_path="$1" claim_ref="$2" want_id dir suffix role_path claimant_sid
+  local live_out live_pane
+  want_id="$(_agmsg_placement_bare_pane_id "$claim_ref")" || { echo unknown; return 0; }
+  dir="${spawn_path%/*}"; suffix="${spawn_path##*/spawn.}"
+  [ "$suffix" != "$spawn_path" ] && [ -n "$suffix" ] || { echo unknown; return 0; }
+  role_path="$dir/role-session.$suffix"
+  if ! declare -F _agmsg_role_session_field >/dev/null 2>&1; then
+    if [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ]; then
+      # shellcheck disable=SC1090,SC1091
+      . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || true
+    fi
+  fi
+  declare -F _agmsg_role_session_field >/dev/null 2>&1 || { echo unknown; return 0; }
+  claimant_sid="$(_agmsg_role_session_field "$role_path" session)"
+  [ -n "$claimant_sid" ] || { echo unknown; return 0; }
+  declare -F terminal_session_live >/dev/null 2>&1 || { echo unknown; return 0; }
+  live_out="$(terminal_session_live "$claimant_sid" 2>/dev/null)" || { echo unknown; return 0; }
+  case "$live_out" in
+    dead) echo not_here; return 0 ;;
+    live"$(printf '\t')"*)
+      live_pane="${live_out#live"$(printf '\t')"}"
+      if [ "$live_pane" = "$want_id" ]; then echo here; else echo not_here; fi
+      return 0 ;;
+    *) echo unknown; return 0 ;;
+  esac
+}
+
 # Resolve this seat's pane by its LABEL, when the label answers unambiguously.
 # Prints "<terminal>\t<id>" and returns 0; returns 1 for "the label did not
 # settle it", which is not a failure -- the caller falls through to the paths
@@ -1155,16 +1236,65 @@ agmsg_terminal_name_self() {
       return 0
     fi
     if [ -n "$_claimed_by" ]; then
-      # A claimant whose name ends in THIS seat's name may be this seat under a
-      # team no longer on disk (the exact rule cannot tell, and stays closed);
-      # the way out is then the file, not a seat.
-      local _self_hint=""
-      case "$_claimed_by" in
-        *"__$(_actas_lock_encode "$agent")")
-          _self_hint=" If '$_claimed_by' is this seat under a team that no longer exists, remove run/spawn.$_claimed_by." ;;
-      esac
-      echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again.$_self_hint (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
-      return 0
+      # DEAD-CLAIMANT TAKEOVER (#1485): the claim above is otherwise
+      # unconditional -- first-writer-wins, forever -- even once the claimant's
+      # own session is long gone. Take the pane over ONLY when BOTH halves of
+      # the stale-record condition are confirmed: the claimant's own last
+      # recorded session is confirmably NOT the one sitting in this pane now,
+      # AND this seat's OWN session IS. Both halves need a session id to ask
+      # with; a caller with none (every action-hook caller routed through
+      # self-name.sh) cannot ask either question and keeps refusing exactly as
+      # every caller did before this existed.
+      local _took_over=0 _rival_spawn="" _role_path=""
+      local _want_id=""
+      _want_id="$(_agmsg_placement_bare_pane_id "$_claim_ref" 2>/dev/null)" || _want_id=""
+      if [ -n "$sid" ] && [ -n "$_want_id" ]; then
+        local _mine_spawn="" _claimant_here="unknown"
+        _mine_spawn="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || _mine_spawn=""
+        if [ -n "$_mine_spawn" ]; then
+          _rival_spawn="$(dirname "$_mine_spawn")/spawn.$_claimed_by"
+          _claimant_here="$(_agmsg_placement_claimant_here_now "$_rival_spawn" "$_claim_ref" 2>/dev/null)" || _claimant_here="unknown"
+          if [ "$_claimant_here" = not_here ] && declare -F terminal_session_live >/dev/null 2>&1; then
+            local _mine_live="" _tab
+            _tab="$(printf '\t')"
+            _mine_live="$(terminal_session_live "$sid" 2>/dev/null)" || _mine_live=""
+            case "$_mine_live" in
+              "live${_tab}"*)
+                [ "${_mine_live#"live${_tab}"}" = "$_want_id" ] && _took_over=1 ;;
+            esac
+          fi
+        fi
+      fi
+      if [ "$_took_over" -eq 1 ]; then
+        # The claimant's role stays registered -- every other field of its
+        # record is untouched -- only the naming mark it can no longer back up
+        # is dropped, so a later reader does not find it still asserting this
+        # pane (role-session.sh's own agmsg_role_session_record already
+        # preserves named_ref across an unrelated re-record, so leaving a stale
+        # one here would otherwise survive indefinitely). Best-effort, like
+        # every other write in this family: nothing here may fail the naming
+        # this seat is about to do.
+        _role_path="$(dirname "$_rival_spawn")/role-session.${_rival_spawn##*/spawn.}"
+        if ! declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
+           && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ]; then
+          # shellcheck disable=SC1090,SC1091
+          . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || true
+        fi
+        declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
+          && agmsg_role_session_clear_named_at "$_role_path" 2>/dev/null
+        # Fall through: this pane is this seat's to name/mark/record now.
+      else
+        # A claimant whose name ends in THIS seat's name may be this seat under a
+        # team no longer on disk (the exact rule cannot tell, and stays closed);
+        # the way out is then the file, not a seat.
+        local _self_hint=""
+        case "$_claimed_by" in
+          *"__$(_actas_lock_encode "$agent")")
+            _self_hint=" If '$_claimed_by' is this seat under a team that no longer exists, remove run/spawn.$_claimed_by." ;;
+        esac
+        echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again.$_self_hint (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
+        return 0
+      fi
     fi
   fi
 

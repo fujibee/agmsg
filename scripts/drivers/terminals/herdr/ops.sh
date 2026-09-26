@@ -228,6 +228,27 @@ _herdr_pane_for_session() {
   return 2   # no candidate array path (unknown schema) -> could not answer
 }
 
+# terminal_session_live <sid> -- is <sid> among the LIVE agents right now, and
+# where (#1485)? Unlike terminal_detect, this never reads this process's OWN
+# environment: a caller asking about an ARBITRARY session (a stale placement
+# record's claimant, not itself) must not get this process's own pane back
+# just because it happens to be running under herdr too. It is the direct,
+# unconditional round trip _herdr_pane_for_session already makes; terminal_detect
+# only reaches that round trip when the environment has no pane id of its own.
+#
+# Prints "live\t<bare-pane-id>" (rc 0) when <sid> is a live agent right now,
+# "dead" (rc 0) when herdr answered and <sid> is not among them, or "unknown"
+# (rc 1) when it could not be asked at all (no sid, herdr absent/errored) --
+# the caller's existing fail-closed answer for everything it cannot decide.
+terminal_session_live() {   # <sid>
+  local sid="$1" pane hrc=0
+  [ -n "$sid" ] || { echo unknown; return 1; }
+  pane="$(_herdr_pane_for_session "$sid")" || hrc=$?
+  [ "$hrc" -eq 0 ] || { echo unknown; return 1; }
+  if [ -n "$pane" ]; then printf 'live\t%s\n' "$pane"; else echo dead; fi
+  return 0
+}
+
 # record op: we are under herdr iff HERDR_ENV=1. Resolve THIS pane from the
 # environment first: herdr sets HERDR_PANE_ID in every pane's process tree, and
 # it is the pane the process is actually in -- MEASURED 2026-09-08 on the live
