@@ -355,7 +355,7 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ### Shell (any agent)
 
 ```bash
-~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>" [--force]
+~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> --stdin [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
 ~/.agents/skills/<cmd>/scripts/team.sh <team> [--json | --fix | --fix-pane-names | --rename-sessions]
@@ -372,7 +372,17 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 
 Terminal identity has a different number of observable names on each backend. Herdr exposes three independent values: the visible pane label, its internal agent key, and the CLI session name. tmux exposes two: the `@agmsg_agent` pane option is the internal key, while the CLI owns `pane_title`, so there is no independent pane-label field after the CLI starts. `team.sh` reports that tmux field as `n/a` rather than treating an unavailable concept as a mismatch. Orca exposes exactly one: `terminal_name` writes the tab title, and `team.sh` reads it back as `pane_label` (the durable value lives in the tab itself, not in any one pane within it — a tab can hold more than one pane, split). There is no separate `@agmsg_agent`-style key, so `agent_key` reports `n/a` unconditionally, the same way tmux's `pane_label` does for the field it lacks. `cli_session` is not: it follows the AGENT type's own `session_name_source`, same as on every driver — a `title`-sourced type (Claude Code) gets `n/a` too, since orca's own observation has no independent title field either; a `screen`-sourced type (Codex, whose session name comes from a `Thread name:` line) is read straight off the pane's screen, independent of orca's own observe extension, and reports `unknown:name_not_visible` when that line isn't found there.
 
-`send.sh` takes four positional arguments — `<team> <from> <to> "<message>"` — plus an optional trailing `--force`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
+`send.sh` takes `<team> <from> <to>`, then the message, then an optional trailing `--force`. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
+
+Give the message via `--stdin`. It reads the body verbatim from a file descriptor, so it never passes through your shell and never becomes an argv entry. Pick a heredoc delimiter the body cannot contain on a line by itself — a body with a bare `AGMSG_BODY` line would end the heredoc early and the rest would run as shell commands.
+
+```bash
+~/.agents/skills/<cmd>/scripts/send.sh myteam alice bob --stdin <<'AGMSG_BODY'
+whatever you write here arrives byte-for-byte — backticks, $(...), quotes and all
+AGMSG_BODY
+```
+
+The older positional form — `send.sh <team> <from> <to> "<message>"` — still works, but it is **deprecated** (#378). Your shell parses that message before agmsg ever sees it, so backticks or `$(...)` in the body can be evaluated there, and on Windows a long body is silently truncated at 8186 bytes by MSYS's argv conversion. A message composed by an agent **must not** use it. If your body happens to be literally `--`, `--stdin`, or `--force`, put `--` in front of it: `send.sh <team> <from> <to> -- --stdin` — and for a body of `--`, that is `-- --`.
 
 ## FAQ / Design notes
 
@@ -466,7 +476,7 @@ The message store path resolves as **`AGMSG_STORAGE_PATH` (env) > built-in defau
 
 ```bash
 # Run against an isolated store
-AGMSG_STORAGE_PATH=/tmp/agmsg-sandbox ./scripts/send.sh myteam alice bob "hi"
+printf 'hi' | AGMSG_STORAGE_PATH=/tmp/agmsg-sandbox ./scripts/send.sh myteam alice bob --stdin
 ```
 
 ### Sandbox compatibility (Claude Code)

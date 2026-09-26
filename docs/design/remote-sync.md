@@ -47,7 +47,9 @@ bash install.sh --cmd <B> --agent-type claude-code
 ~/.agents/skills/<B>/scripts/remote.sh pull --endpoint http://127.0.0.1:8787 myteam
 
 # 5. Send from either side; it reaches the other.
-~/.agents/skills/<A>/scripts/send.sh myteam alice bob "hello from machine one"
+~/.agents/skills/<A>/scripts/send.sh myteam alice bob --stdin <<'AGMSG_BODY'
+hello from machine one
+AGMSG_BODY
 ```
 
 Two things are worth confirming yourself, because they are the whole point: a

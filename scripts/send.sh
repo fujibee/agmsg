@@ -2,9 +2,11 @@
 set -euo pipefail
 
 # Usage:
-#   send.sh <team> <from> <to> <message> [--force]              # body as ONE quoted arg
+#   send.sh <team> <from> <to> --stdin [--force]                # exact body from stdin
 #   send.sh <team> <from> <to> --body-file <path> [--force]     # body read from a file
 #   send.sh <team> <from> <to> --body - [--force]               # body read from stdin
+#   send.sh <team> <from> <to> <message> [--force]              # deprecated positional body
+#   send.sh <team> <from> <to> -- <option-like-body> [--force]  # literal option-like body
 #
 # --body-file matches poke.sh, for the same reason (#507) AND to close #1101: a caller
 # who learned --body-file from poke used to have send take the literal string
@@ -13,47 +15,78 @@ set -euo pipefail
 # where a backtick or $( ) executes and its span silently vanishes; send bodies are longer
 # and likelier to contain them. So a message that is a bare unconsumed flag (starts with
 # --, and is not --body-file/--body) is now REFUSED rather than sent, and a mistyped flag
-# never lands as content. Trailing newlines are stripped from a file/stdin body, as in
-# poke (command-substitution semantics).
+# never lands as content. The upstream --body-file / --body - modes keep their existing
+# command-substitution semantics; --stdin is the #378 exact-byte path and preserves
+# trailing newlines.
 
 die() { echo "send.sh: $*" >&2; exit 1; }
 
-TEAM="${1:?Usage: send.sh <team> <from> <to> <message|--body-file PATH|--body -> [--force]}"
+TEAM="${1:?Usage: send.sh <team> <from> <to> <message|--stdin|--body-file PATH|--body -> [--force]}"
 FROM="${2:?Missing from agent}"
 TO="${3:?Missing to agent}"
 shift 3
 
-# --force is historically the trailing flag AFTER the body; recognize it only as the
-# last argument, so a --body-file body whose text happens to be "--force" is unaffected.
+# -- separates an option-like literal body from the flags, preserving the
+# explicit escape added for #378. A trailing --force after that body remains
+# available when there are at least two arguments after the separator.
 FORCE=0
-if [ "$#" -gt 0 ] && [ "${!#}" = "--force" ]; then
+MODE="positional"
+BODY=""
+if [ "${1:-}" = "--" ]; then
+  shift
+  [ "$#" -gt 0 ] || die "missing message body after --"
+  if [ "$#" -ge 2 ] && [ "${!#}" = "--force" ]; then
+    FORCE=1
+    set -- "${@:1:$#-1}"
+  fi
+  [ "$#" -eq 1 ] || die "got extra arguments after --"
+  BODY="$1"
+elif [ "$#" -gt 0 ] && [ "${!#}" = "--force" ]; then
   FORCE=1
   set -- "${@:1:$#-1}"
 fi
 
-case "${1:-}" in
-  --body-file)
-    [ "$#" -eq 2 ] || die "--body-file takes exactly one path"
-    [ -r "${2:-}" ] || die "cannot read body file: ${2:-<missing>}"
-    BODY="$(cat -- "$2")"
-    ;;
-  --body)
-    { [ "$#" -eq 2 ] && [ "${2:-}" = "-" ]; } \
-      || die "--body accepts only '-' (read stdin); for a file use --body-file <path>"
-    BODY="$(cat)"
-    ;;
-  '')
-    die "Missing message body"
-    ;;
-  --*)
-    die "unrecognized option '${1}' — a message that starts with '-' must go through --body-file <path> or --body - (a bare flag is refused so a mistyped one is never sent as the message, #1101)"
-    ;;
-  *)
-    [ "$#" -eq 1 ] || die "got extra arguments — quote the message as ONE argument, or use --body-file <path>"
-    BODY="$1"
-    ;;
-esac
-[ -n "$BODY" ] || die "the message body is empty — nothing to send"
+if [ -z "$BODY" ]; then
+  case "${1:-}" in
+    --stdin)
+      [ "$#" -eq 1 ] || die "--stdin cannot be combined with another body input"
+      MODE="stdin"
+      ;;
+    --body-file)
+      [ "$#" -eq 2 ] || die "--body-file takes exactly one path"
+      [ -r "${2:-}" ] || die "cannot read body file: ${2:-<missing>}"
+      BODY="$(cat -- "$2")"
+      ;;
+    --body)
+      { [ "$#" -eq 2 ] && [ "${2:-}" = "-" ]; } \
+        || die "--body accepts only '-' (read stdin); for a file use --body-file <path>"
+      BODY="$(cat)"
+      ;;
+    '')
+      die "Missing message body"
+      ;;
+    --*)
+      die "unrecognized option '${1}' — option-like body: use -- separator"
+      ;;
+    *)
+      if [ "$#" -gt 1 ] && [ "${2:-}" = "--stdin" ]; then
+        die "the message body was already given (positional argument) — cannot also pass --stdin. Provide the body exactly one way."
+      fi
+      [ "$#" -eq 1 ] || die "unexpected extra argument(s) after the message: ${*:2}"
+      BODY="$1"
+      ;;
+  esac
+fi
+[ "$MODE" = "stdin" ] || [ -n "$BODY" ] || die "the message body is empty — nothing to send"
+
+# --stdin preserves the exact byte stream, including trailing newlines. Bash
+# strings cannot hold NUL, so detect and reject one instead of sending a prefix.
+if [ "$MODE" = "stdin" ]; then
+  if IFS= read -r -d '' BODY; then
+    die "--stdin input contains a NUL byte; nothing was sent"
+  fi
+  [ -n "$BODY" ] || die "--stdin was given but no data was read from standard input"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"

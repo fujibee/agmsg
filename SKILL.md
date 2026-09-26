@@ -21,7 +21,7 @@ with no message behind it. The native channel stays fine for anything outside
 the team — a subagent you spawned for your own task, or a session that has not
 joined.
 
-**Shell requirement:** All agmsg scripts are Bash scripts. Always execute them via `bash`, never via PowerShell or cmd directly. If your default shell is not Bash (e.g. PowerShell on Windows), wrap every command with `bash -lc '...'`. Example: `bash -lc '~/.agents/skills/__SKILL_NAME__/scripts/send.sh myteam alice bob "hello"'`. Do NOT construct DB paths manually — the scripts handle path resolution internally. If you need to redirect storage, use `AGMSG_STORAGE_PATH` (the supported override).
+**Shell requirement:** All agmsg scripts are Bash scripts. Always execute them via `bash`, never via PowerShell or cmd directly. If your default shell is not Bash (e.g. PowerShell on Windows), wrap every command with `bash -lc '...'`. Example: `bash -lc '~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh myteam alice'`. Do NOT construct DB paths manually — the scripts handle path resolution internally. If you need to redirect storage, use `AGMSG_STORAGE_PATH` (the supported override).
 
 <!-- agmsg:slot shell-extra -->
 <!-- /agmsg:slot shell-extra -->
@@ -90,8 +90,15 @@ Asked about a *teammate's* placement or status, or what can be done to one, that
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
 2. Do NOT ask the user what to do — just run the inbox check.
-3. If there are messages, read and respond appropriately. To reply:
-   `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
+3. If there are messages, read and respond appropriately. To reply, pass the body via stdin:
+
+```bash
+~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> --stdin <<'AGMSG_BODY'
+<message>
+AGMSG_BODY
+```
+
+Pick a heredoc delimiter the body cannot contain on a line by itself. A body with a bare `AGMSG_BODY` line would end the heredoc early and the rest would run as shell commands. The older positional form — `send.sh <team> <from> <to> "<message>"` — still works but is **deprecated** (#378): the caller's shell parses the message before agmsg receives it, and Windows/MSYS silently truncates long positional bodies at 8186 bytes. A message you compose **must not** use the positional form. To send a body literally equal to `--`, `--stdin`, or `--force`, put `--` before it (for example, `send.sh <team> <from> <to> -- --stdin`; for `--`, use `-- --`).
 
 <!-- agmsg:slot execute-extra -->
 <!-- /agmsg:slot execute-extra -->
@@ -109,8 +116,13 @@ If argument is "team" or "team --json":
 
 If argument starts with "send" (e.g. "send misaki check the server"):
 1. Parse target agent and message from the arguments
-2. Determine which team the target agent belongs to, then run:
-   `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
+2. Determine which team the target agent belongs to, then pass the message via stdin:
+
+```bash
+~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> --stdin <<'AGMSG_BODY'
+<message>
+AGMSG_BODY
+```
 
 If argument is "config":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh show`
