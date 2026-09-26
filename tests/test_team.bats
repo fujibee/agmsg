@@ -1119,6 +1119,25 @@ STUB
   [ ! -f "$TEST_SKILL_DIR/run/role-session.myteam__alice" ]
   [ -d "$TEST_SKILL_DIR/teams/otherteam" ]
   [ -f "$TEST_SKILL_DIR/run/actas.otherteam__carol.session" ]
+
+  # #1023 collision: team "a__b" agent "c" and team "a" agent "b__c" encode to
+  # the exact same legacy run/ paths (see actas-lock.sh's own #1023 comment).
+  # A legacy-form record at that shared path must survive deleting EITHER
+  # team, since ownership cannot be attributed to one over the other.
+  bash "$SCRIPTS/join.sh" "a__b" c claude-code /tmp/proj-collide-1
+  bash "$SCRIPTS/join.sh" a "b__c" claude-code /tmp/proj-collide-2
+  bash "$SCRIPTS/leave.sh" "a__b" c
+  local collide_actas="$TEST_SKILL_DIR/run/actas.a__b__c.session"
+  local collide_role="$TEST_SKILL_DIR/run/role-session.a__b__c"
+  echo "shared-owner" > "$collide_actas"
+  printf 'sid\t/tmp/proj-collide\tclaude-code\n' > "$collide_role"
+
+  run bash "$SCRIPTS/team.sh" "a__b" --delete --yes
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_SKILL_DIR/teams/a__b" ]
+  [ -f "$collide_actas" ]
+  [ -f "$collide_role" ]
+  [ -d "$TEST_SKILL_DIR/teams/a" ]
 }
 
 @test "team: --purge-messages removes only that team's message rows, leaves everything else" {

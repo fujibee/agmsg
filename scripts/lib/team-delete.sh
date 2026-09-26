@@ -56,18 +56,38 @@ _agmsg_team_delete_all_names() {
   printf '%s\n' "$names"
 }
 
-# Removes both the legacy name-keyed file and, when id-resolution succeeds,
-# the id-keyed one (#1023 dual-keying) for one (team, name, prefix, suffix)
-# state-file family. rm_reclaim also removes the reclaim mutex and any of
-# its tombstones beside whichever path(s) existed -- see actas-lock.sh's
+# True IFF <encoded_team>__<encoded_name> has exactly one possible split back
+# into (team, name) -- i.e. neither half itself contains "__". actas-lock.sh's
+# own #1023 comment gives the failing case: team "a__b" agent "c" and team "a"
+# agent "b__c" both encode to the same legacy path, since "__" is a plain,
+# unescaped separator and either name may legally contain it. Only when this
+# returns true is the legacy path provably this (team, name) pair's alone; a
+# name that fails this check is left untouched rather than guessed at, the
+# same "check, don't guess" rule actas-lock.sh already applies to the lock's
+# own three-valued read.
+_agmsg_team_delete_legacy_unambiguous() {   # <encoded_team> <encoded_name>
+  case "$1" in *__*) return 1 ;; esac
+  case "$2" in *__*) return 1 ;; esac
+  return 0
+}
+
+# Removes the id-keyed file when id-resolution succeeds (its key is
+# <team_id>__<member_id>, both fixed-alphabet UUIDs that can never contain
+# "__" themselves, so it never suffers the collision above) and, only when
+# _agmsg_team_delete_legacy_unambiguous allows it, the legacy name-keyed file
+# too (#1023 dual-keying) for one (team, name, prefix, suffix) state-file
+# family. rm_reclaim also removes the reclaim mutex and any of its tombstones
+# beside whichever path(s) were actually removed -- see actas-lock.sh's
 # _agmsg_lock_mutex_path / _agmsg_lock_mutex_take.
 _agmsg_team_delete_rm_family() {   # <team> <name> <prefix> <suffix> [rm_reclaim]
   local team="$1" name="$2" prefix="$3" suffix="$4" rm_reclaim="${5:-0}"
   local t a legacy key krc=0 idpath
   t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$name")"
-  legacy="$(printf '%s/%s.%s__%s%s' "$(_actas_lock_dir)" "$prefix" "$t" "$a" "$suffix")"
-  rm -f "$legacy" 2>/dev/null || true
-  [ "$rm_reclaim" = 1 ] && rm -f "$legacy.reclaim" "$legacy.reclaim".dead.* 2>/dev/null || true
+  if _agmsg_team_delete_legacy_unambiguous "$t" "$a"; then
+    legacy="$(printf '%s/%s.%s__%s%s' "$(_actas_lock_dir)" "$prefix" "$t" "$a" "$suffix")"
+    rm -f "$legacy" 2>/dev/null || true
+    [ "$rm_reclaim" = 1 ] && rm -f "$legacy.reclaim" "$legacy.reclaim".dead.* 2>/dev/null || true
+  fi
   key="$(_agmsg_id_key_or_legacy "$team" "$name" 2>/dev/null)" && krc=0 || krc=$?
   if [ "$krc" -eq 0 ] && [ -n "$key" ]; then
     idpath="$(printf '%s/%s.%s%s' "$(_actas_lock_dir)" "$prefix" "$key" "$suffix")"
@@ -96,7 +116,12 @@ agmsg_team_delete_run_records() {
     _agmsg_team_delete_rm_family "$team" "$name" ready "" 0
     _agmsg_team_delete_rm_family "$team" "$name" spawn "" 0
     t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$name")"
-    rm -f "$(printf '%s/role-session.%s__%s' "$(_actas_lock_dir)" "$t" "$a")" 2>/dev/null || true
+    # role-session.sh has no id-keyed form at all (see its own header) -- the
+    # unambiguous check is this record's ONLY protection against the #1023
+    # collision, not a belt-and-suspenders on top of an id fallback.
+    if _agmsg_team_delete_legacy_unambiguous "$t" "$a"; then
+      rm -f "$(printf '%s/role-session.%s__%s' "$(_actas_lock_dir)" "$t" "$a")" 2>/dev/null || true
+    fi
     # Single-pair codex bridge key (see drivers/types/codex/_bridge-key.sh);
     # the rarer multi-pair hashed-key form needs the set of still-registered
     # codex pairs to re-derive and is not attempted here.
