@@ -98,6 +98,16 @@
       "body": "这将把 {{name}} 从 {{team}} 中移除，并关闭其正在运行的面板（如果有）。此操作无法在此处撤销。",
       "confirmLabel": "离开"
     },
+    "deleteTeam": {
+      "title": "删除 {{team}}？",
+      "body": "这将永久删除 {{team}} 的成员名单和身份历史记录，且无法撤销。如果 {{team}} 已连接到远程服务器，之后重新连接可以将其恢复。",
+      "confirmLabel": "删除团队"
+    },
+    "purgeMessages": {
+      "title": "删除 {{team}} 中的所有消息？",
+      "body": "这将永久删除 {{team}} 的所有消息以及已读/游标记录。团队及其成员将保留。此操作无法撤销。",
+      "confirmLabel": "删除消息"
+    },
     "newTeam": {
       "titleFirstRun": "欢迎 — 创建你的第一个团队",
       "title": "新建团队",
@@ -147,6 +157,11 @@
       "existingTabsDivider": "— 现有标签页 —",
       "rename": "重命名…",
       "leave": "离开"
+    },
+    "team": {
+      "rename": "重命名…",
+      "delete": "删除团队…",
+      "deleteMessages": "删除消息…"
     },
     "pane": {
       "close": "关闭",

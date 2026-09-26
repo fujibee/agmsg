@@ -98,6 +98,16 @@
       "body": "Esto quita a {{name}} de {{team}} y cierra su panel si está en ejecución. Esta acción no se puede deshacer desde aquí.",
       "confirmLabel": "Quitar"
     },
+    "deleteTeam": {
+      "title": "¿Eliminar {{team}}?",
+      "body": "Esto elimina permanentemente la lista de miembros y el historial de identidad de {{team}} y no se puede deshacer. Si {{team}} está conectado a un remoto, volver a conectarlo más tarde puede restaurarlo.",
+      "confirmLabel": "Eliminar equipo"
+    },
+    "purgeMessages": {
+      "title": "¿Eliminar todos los mensajes de {{team}}?",
+      "body": "Esto elimina permanentemente todos los mensajes y los registros de lectura/cursor de {{team}}. El equipo y sus miembros permanecen. Esta acción no se puede deshacer.",
+      "confirmLabel": "Eliminar mensajes"
+    },
     "newTeam": {
       "titleFirstRun": "Bienvenido — cree su primer equipo",
       "title": "Nuevo equipo",
@@ -147,6 +157,11 @@
       "existingTabsDivider": "— pestañas existentes —",
       "rename": "Renombrar…",
       "leave": "Quitar"
+    },
+    "team": {
+      "rename": "Renombrar…",
+      "delete": "Eliminar equipo…",
+      "deleteMessages": "Eliminar mensajes…"
     },
     "pane": {
       "close": "Cerrar",

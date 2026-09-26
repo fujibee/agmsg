@@ -98,6 +98,16 @@
       "body": "Isso remove {{name}} de {{team}} e fecha seu painel, caso esteja em execução. Essa ação não pode ser desfeita por aqui.",
       "confirmLabel": "Sair"
     },
+    "deleteTeam": {
+      "title": "Excluir {{team}}?",
+      "body": "Isso exclui permanentemente a lista de membros e o histórico de identidade de {{team}} e não pode ser desfeito. Se {{team}} estiver conectada a um remoto, reconectar depois pode restaurá-la.",
+      "confirmLabel": "Excluir equipe"
+    },
+    "purgeMessages": {
+      "title": "Excluir todas as mensagens em {{team}}?",
+      "body": "Isso exclui permanentemente todas as mensagens e os registros de leitura/cursor de {{team}}. A equipe e seus membros permanecem. Essa ação não pode ser desfeita.",
+      "confirmLabel": "Excluir mensagens"
+    },
     "newTeam": {
       "titleFirstRun": "Bem-vindo — crie sua primeira equipe",
       "title": "Nova equipe",
@@ -147,6 +157,11 @@
       "existingTabsDivider": "— abas existentes —",
       "rename": "Renomear…",
       "leave": "Sair"
+    },
+    "team": {
+      "rename": "Renomear…",
+      "delete": "Excluir equipe…",
+      "deleteMessages": "Excluir mensagens…"
     },
     "pane": {
       "close": "Fechar",

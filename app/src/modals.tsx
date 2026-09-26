@@ -367,13 +367,27 @@ export function ConfirmModal(props: {
   body: string;
   confirmLabel?: string;
   danger?: boolean;
-  onConfirm: () => void;
+  // May reject (e.g. a CLI script refusing the action) — the rejection's
+  // message is shown inline and the modal stays open, same as RenameModal's
+  // err handling above. A plain synchronous onConfirm still works: awaiting
+  // a non-promise resolves immediately.
+  onConfirm: () => void | Promise<void>;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  const [err, setErr] = useState("");
+  const submit = async () => {
+    try {
+      await props.onConfirm();
+      props.onClose();
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
   return (
     <Modal title={props.title} onClose={props.onClose}>
       <p className="modal-note">{props.body}</p>
+      {err && <div className="modal-err">{err}</div>}
       <div className="modal-actions">
         <button type="button" onClick={props.onClose}>
           {t("common.cancel")}
@@ -381,10 +395,7 @@ export function ConfirmModal(props: {
         <button
           type="button"
           className={props.danger ? "primary danger" : "primary"}
-          onClick={() => {
-            props.onConfirm();
-            props.onClose();
-          }}
+          onClick={submit}
         >
           {props.confirmLabel ?? t("modal.confirm.defaultLabel")}
         </button>
