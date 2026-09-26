@@ -491,6 +491,12 @@ body.resizing-row {
   background: var(--panel);
   display: flex;
   flex-direction: column;
+  /* Without this, a flex column child (like .team-status-rail before its own
+     bound) that wants more height than available makes THIS refuse to
+     shrink below its content, growing past .body's height and turning into
+     a page-level scroll instead of staying inside the window (#1478). */
+  min-height: 0;
+  overflow: hidden;
 }
 /* Collapsed to an icon-only rail (issue #317 backlog) so panes get
    more width; a fixed width overrides the draggable one from full size.
@@ -635,12 +641,21 @@ body.resizing-row {
 .sidebar-head select {
   width: 100%;
 }
+/* Bounded so a long team list scrolls within itself instead of pushing the
+   AGENTS section (and everything below it) out of the window — the same
+   rule covers the collapsed rail's icon-only list too, since it reuses this
+   class (see .collapsed-team-status below, applied together on one
+   element). overflow other than visible also drops the flex item's implicit
+   min-height:auto floor, so this can shrink below its own content height in
+   a short window instead of refusing to and forcing a page-level scroll. */
 .team-status-rail {
   display: flex;
   flex-direction: column;
   gap: 3px;
   border-bottom: 1px solid var(--border);
   padding: 3px 6px;
+  max-height: 35vh;
+  overflow-y: auto;
 }
 .team-status-row {
   display: flex;
