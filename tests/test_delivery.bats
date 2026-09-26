@@ -2921,7 +2921,7 @@ EOF
   run env CODEX_THREAD_ID="thread-notice-green" \
     bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  ! grep -qF "agmsg: Codex cannot write agmsg's data yet" <<< "$output"
+  refute grep -qF "agmsg: Codex cannot write agmsg's data yet" <<< "$output"
 
   # WINDOWS: install.sh's configure_codex_sandbox converts each writable path
   # through `cygpath -m` (MSYS /c/... -> native C:/...) before writing it, so
@@ -2974,7 +2974,7 @@ EOF
   run env CODEX_THREAD_ID="thread-notice-windows" PATH="$stubdir:$PATH" \
     bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  ! grep -qF "agmsg: Codex cannot write agmsg's data yet" <<< "$output"
+  refute grep -qF "agmsg: Codex cannot write agmsg's data yet" <<< "$output"
 }
 
 
