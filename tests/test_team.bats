@@ -1099,3 +1099,71 @@ STUB
   [ "$status" -eq 0 ]
   [ ! -e "$NRT_REC" ]                       # a read-only status never creates a record
 }
+
+# --- team.sh --delete / --purge-messages (#1475) ---
+
+@test "team: --delete removes an empty team's folder and run/ records, leaves another team untouched" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" otherteam carol claude-code /tmp/proj-c
+  mkdir -p "$TEST_SKILL_DIR/run"
+  echo "some-owner" > "$TEST_SKILL_DIR/run/actas.myteam__alice.session"
+  printf 'sid\t/tmp/proj-a\tclaude-code\n' > "$TEST_SKILL_DIR/run/role-session.myteam__alice"
+  echo "some-owner" > "$TEST_SKILL_DIR/run/actas.otherteam__carol.session"
+  bash "$SCRIPTS/leave.sh" myteam alice
+
+  run bash "$SCRIPTS/team.sh" myteam --delete --yes
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "Deleted team 'myteam'"
+  [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
+  [ ! -f "$TEST_SKILL_DIR/run/actas.myteam__alice.session" ]
+  [ ! -f "$TEST_SKILL_DIR/run/role-session.myteam__alice" ]
+  [ -d "$TEST_SKILL_DIR/teams/otherteam" ]
+  [ -f "$TEST_SKILL_DIR/run/actas.otherteam__carol.session" ]
+}
+
+@test "team: --purge-messages removes only that team's message rows, leaves everything else" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam bob claude-code /tmp/proj-b
+  bash "$SCRIPTS/join.sh" otherteam carol claude-code /tmp/proj-c
+  bash "$SCRIPTS/join.sh" otherteam dave claude-code /tmp/proj-d
+  bash "$SCRIPTS/send.sh" myteam alice bob "secret"
+  bash "$SCRIPTS/send.sh" otherteam carol dave "keep me"
+
+  run bash "$SCRIPTS/team.sh" myteam --purge-messages --yes
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "Purged message history for team 'myteam'"
+
+  run bash "$SCRIPTS/history.sh" myteam alice
+  printf '%s\n' "$output" | grep -qF "No message history"
+  run bash "$SCRIPTS/history.sh" otherteam carol
+  printf '%s\n' "$output" | grep -qF "keep me"
+
+  # the team and its roster survive --purge-messages alone
+  [ -d "$TEST_SKILL_DIR/teams/myteam" ]
+  run bash "$SCRIPTS/team.sh" myteam
+  printf '%s\n' "$output" | grep -qF "alice"
+}
+
+@test "team: --delete refuses when members remain or the team is actively synced" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+
+  run bash "$SCRIPTS/team.sh" myteam --delete --yes
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "still has"
+  [ -d "$TEST_SKILL_DIR/teams/myteam" ]
+
+  bash "$SCRIPTS/leave.sh" myteam alice
+  local cfg="$TEST_SKILL_DIR/teams/myteam/config.json" escaped updated
+  escaped="$(sed "s/'/''/g" "$cfg")"
+  updated="$(sqlite_mem "
+    SELECT json_set('$escaped', '\$.remote_binding', json_object(
+      'connected_at', '2026-09-01T00:00:00Z',
+      'remote_team_id', '018f0000-0000-7000-8000-000000000002'
+    ));")"
+  printf '%s\n' "$updated" > "$cfg"
+
+  run bash "$SCRIPTS/team.sh" myteam --delete --yes
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "actively synced"
+  [ -d "$TEST_SKILL_DIR/teams/myteam" ]
+}
