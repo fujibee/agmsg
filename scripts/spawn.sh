@@ -53,7 +53,8 @@ set -euo pipefail
 #   --no-wait          don't block on the readiness handshake; return as soon
 #                      as the agent is launched (fire-and-forget)
 #   --ready-timeout N  seconds to wait for readiness before giving up
-#                      (default 90; on timeout, prints status=timeout, exit 3)
+#                      (default 90; handshake=actas types use a 300s minimum;
+#                      on timeout, prints status=timeout, exit 3)
 #   --model <id>       launch the agent on a specific model. The id is passed
 #                      through to the CLI unchecked (the CLI rejects unknown
 #                      ids); the flag spelling comes from the type's manifest
@@ -71,10 +72,10 @@ set -euo pipefail
 # ~/.agmsg/config/spawn_options.yaml. Optional; a missing file/section is a
 # no-op.
 #
-# Readiness: by default spawn blocks until the new agent's watcher attaches and
-# is receiving (it prints `status=ready ...`), so a leader can safely send work
-# right after spawn returns without racing the agent's cold start. Codex has no
-# Monitor, so the wait is skipped for codex.
+# Readiness: watcher-capable types block until their watcher attaches. Types
+# declaring `handshake=actas` instead block until the agent explicitly marks its
+# one-shot bootstrap complete. Other types return immediately. `--no-wait`
+# always opts out.
 #
 # Scope note: spawnable types are those whose manifest declares `spawnable=yes`;
 # macOS is the primary target, Linux and
@@ -391,6 +392,14 @@ if [ -z "$TEAM" ]; then
   fi
 fi
 
+# actas-handshake nonce (#338 Gap 2): compute this after TEAM is final so it
+# can be exported into the boot script and echoed by the spawned template.
+HANDSHAKE="$(agmsg_type_get "$AGENT_TYPE" handshake)"
+ACTAS_NONCE=""
+if [ "$WAIT_READY" = "1" ] && [ "$HANDSHAKE" = "actas" ]; then
+  ACTAS_NONCE="$$.${TEAM}.${NAME}"
+fi
+
 # Role's session display name (#339): now that TEAM is final, join it to the
 # agent name. Emitted into the boot script when the type declares name_arg.
 SESSION_NAME="${TEAM}-${NAME}"
@@ -525,6 +534,12 @@ PLAIN_WITNESS="${BOOT}.plain-witness"
   # actas flow knows the session is already named <team>-<agent> (name_arg) and
   # suppresses the "rename this session" tip meant for hand-started sessions.
   echo 'export AGMSG_SPAWNED=1'
+  # Bind the actas readiness mark to this team and this launch. The boot prompt
+  # names only the agent, which may be registered under more than one team.
+  if [ -n "$ACTAS_NONCE" ]; then
+    printf 'export AGMSG_SPAWN_TEAM=%q\n' "$TEAM"
+    printf 'export AGMSG_SPAWN_NONCE=%q\n' "$ACTAS_NONCE"
+  fi
   # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
   # An entry ending in `*` is a NAMESPACE: every exported variable whose name
   # starts with that prefix is unset, enumerated from `env` at boot time, so a
@@ -958,20 +973,31 @@ place_and_launch() {
 READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" readiness_sentinel 2>/dev/null || true)"
 [ -n "$READINESS_SENTINEL" ] || READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" monitor 2>/dev/null || true)"
 
-# #1023 review: agmsg_ready_path fails (empty, rc 1) when both an id-keyed
-# and a legacy ready sentinel exist for this pair. Checked explicitly here,
-# not left to an empty READY_PATH falling into the wait loop below and
-# reporting a plain status=timeout -- true, but for a reason that timeout
-# does not name (the loop below can never see a sentinel land at "").
-READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")" \
-  || die "'$NAME' in team '$TEAM': readiness sentinel path is ambiguous (both an id-keyed and a legacy sentinel exist); not spawning until the stale one is removed"
 SKIPPED_READINESS_BY_TYPE=0
 SKIPPED_READINESS_BY_MODE=0
 DELIVERY_MODE=""
-if [ "$READINESS_SENTINEL" = "no" ] && [ "$WAIT_READY" = "1" ]; then
-  WAIT_READY=0
-  SKIPPED_READINESS_BY_TYPE=1
-  echo "spawn: '$AGENT_TYPE' has no spawn readiness handshake — skipping readiness wait (--no-wait implied)" >&2
+READY_KIND=""
+READY_PATH=""
+if [ "$WAIT_READY" = "1" ]; then
+  if [ "$HANDSHAKE" = "actas" ]; then
+    READY_KIND=actas
+    if [ "$READY_TIMEOUT" -lt 300 ]; then
+      echo "spawn: '$AGENT_TYPE' actas handshake uses a 300s minimum readiness timeout (requested ${READY_TIMEOUT}s)" >&2
+      READY_TIMEOUT=300
+    fi
+  else
+    READY_KIND=watcher
+    # #1023 review: fail explicitly when both an id-keyed and a legacy ready
+    # sentinel exist. An empty path would make the wait loop time out forever.
+    READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")" \
+      || die "'$NAME' in team '$TEAM': readiness sentinel path is ambiguous (both an id-keyed and a legacy sentinel exist); not spawning until the stale one is removed"
+    if [ "$READINESS_SENTINEL" = "no" ]; then
+      WAIT_READY=0
+      READY_KIND=""
+      SKIPPED_READINESS_BY_TYPE=1
+      echo "spawn: '$AGENT_TYPE' has no spawn readiness handshake — skipping readiness wait (--no-wait implied)" >&2
+    fi
+  fi
 fi
 
 # A readiness sentinel is written by the project's monitor delivery watcher, not
@@ -980,7 +1006,7 @@ fi
 # the per-project mode and skip the impossible wait, preserving the distinction
 # from a type that has no handshake at all. If status cannot be read or its output
 # is not recognized, keep waiting: unreadable state is not evidence of mode=off.
-if [ "$WAIT_READY" = "1" ] && [ "$SKIPPED_READINESS_BY_TYPE" = "0" ]; then
+if [ "$WAIT_READY" = "1" ] && [ "$SKIPPED_READINESS_BY_TYPE" = "0" ] && [ "$HANDSHAKE" != "actas" ]; then
   _delivery_mode_line=""
   _delivery_status=0
   if ! _delivery_mode_line="$("$SCRIPT_DIR/delivery.sh" status "$AGENT_TYPE" "$PROJECT" 2>/dev/null)"; then
@@ -1015,7 +1041,13 @@ fi
 
 # Clear any stale sentinel before launching so we only observe THIS spawn's
 # watcher attaching.
-[ "$WAIT_READY" = "1" ] && rm -f "$READY_PATH" 2>/dev/null || true
+if [ "$WAIT_READY" = "1" ]; then
+  if [ "$READY_KIND" = "actas" ]; then
+    "$SCRIPT_DIR/ready.sh" clear "$TEAM" "$NAME"
+  else
+    rm -f "$READY_PATH" 2>/dev/null || true
+  fi
+fi
 
 place_and_launch
 
@@ -1057,7 +1089,12 @@ _emit_spawned_but_unnamed() {
 
 if [ "$WAIT_READY" = "1" ]; then
   waited=0
-  while [ ! -e "$READY_PATH" ]; do
+  while true; do
+    if [ "$READY_KIND" = "actas" ]; then
+      "$SCRIPT_DIR/ready.sh" check "$TEAM" "$NAME" "$ACTAS_NONCE" && break
+    elif [ -e "$READY_PATH" ]; then
+      break
+    fi
     if [ "$waited" -ge "$READY_TIMEOUT" ]; then
       echo "status=timeout name=${NAME} team=${TEAM} after=${READY_TIMEOUT}s"
       echo "spawn: '${NAME}' did not signal ready within ${READY_TIMEOUT}s — it may still be booting; re-spawn or raise --ready-timeout" >&2
@@ -1066,6 +1103,9 @@ if [ "$WAIT_READY" = "1" ]; then
     sleep 1
     waited=$((waited + 1))
   done
+  # Actas completion is an edge, not liveness. Consume it immediately so a
+  # later spawn cannot mistake this bootstrap for its own.
+  [ "$READY_KIND" = "actas" ] && "$SCRIPT_DIR/ready.sh" clear "$TEAM" "$NAME"
   # Ready confirmed. Now report the naming result — the two are independent, so a
   # seat that IS receiving but could not be named reports spawned-but-unnamed, not ready.
   [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed "after=${waited}s"

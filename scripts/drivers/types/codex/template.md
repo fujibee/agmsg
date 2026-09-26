@@ -20,6 +20,12 @@ If argument starts with "actas" followed by an agent name:
 1. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" __AGENT_TYPE__`. If `<name>` is not listed, join with `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> __AGENT_TYPE__ "$(pwd)"`.
 2. Record the Codex thread so a later spawn can resume it: `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name>`. Both arguments are required; `<team>` is the team `<name>` belongs to (from step 1). Without them nothing is recorded and the monitor cannot deliver to this thread.
 3. Use the role as the active FROM; monitor delivery is routed only to its recorded thread.
+
+After the identity claim is complete and, in monitor mode, the monitor tool has confirmed that the watcher is running and streaming, signal one-shot spawn readiness exactly once. If this session was launched by `spawn` — the environment variables `AGMSG_SPAWN_TEAM` and `AGMSG_SPAWN_NONCE` are set — use those exactly, quoted, rather than the team resolved above: they identify which team and which specific launch spawn is waiting on (the boot prompt only names the agent, and the same name can be registered under more than one team; the nonce stops a stale mark from an earlier abandoned or timed-out launch from satisfying this launch's wait):
+   `~/.agents/skills/__SKILL_NAME__/scripts/ready.sh mark "$AGMSG_SPAWN_TEAM" '<name>' "$AGMSG_SPAWN_NONCE"`
+Otherwise (a manual `/__SKILL_NAME__ actas`, not from spawn) use the team resolved above, quoted, with no nonce:
+   `~/.agents/skills/__SKILL_NAME__/scripts/ready.sh mark '<team>' '<name>'`
+This mark says only that actas bootstrap completed; it is not a watcher-liveness signal.
 <!-- /agmsg:slot actas -->
 
 <!-- agmsg:slot drop -->
