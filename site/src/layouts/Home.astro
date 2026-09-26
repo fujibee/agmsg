@@ -2,7 +2,6 @@
 import "../styles/global.css";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { defaultLang, languages, localizedPath, useTranslations } from "../i18n/utils.js";
 
 interface Props {
@@ -12,7 +11,13 @@ const { lang } = Astro.props;
 const t = useTranslations(lang);
 
 // --- Agent Types gallery: data-driven from scripts/drivers/types/*/type.conf ---
-const typesDir = fileURLToPath(new URL("../../../scripts/drivers/types", import.meta.url));
+// __PROJECT_ROOT__ (defined in astro.config.mjs) rather than import.meta.url:
+// Astro 7's prerender bundling relocates this file's on-disk position relative
+// to the source tree, breaking a fixed "../../../"-style walk. It also beats
+// process.cwd(), which is only site/ because CI/local scripts happen to invoke
+// astro from there — not guaranteed if invoked with an explicit --root elsewhere.
+declare const __PROJECT_ROOT__: string;
+const typesDir = path.join(__PROJECT_ROOT__, "..", "scripts", "drivers", "types");
 
 function parseConf(file) {
   const out = {};
