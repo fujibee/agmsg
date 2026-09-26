@@ -225,6 +225,31 @@ agmsg_role_session_mark_named() {
   return 0
 }
 
+# Drop the naming mark without touching any other field (#1485): a pane taken
+# over from a dead session's record must stop asserting that OLD (team, agent)
+# still holds it, while the role itself (every other line in the file) stays
+# registered exactly as it was. No-op, successfully, when there is no record or
+# no mark -- this is cleanup, never something a caller needs to react to.
+#
+# BY PATH, unlike every other public function here: the one caller (the
+# placement guard's dead-claimant takeover) finds the record from a spawn
+# record's file NAME, and #1114's own comment already covers why team/agent
+# cannot be decoded back out of that name ("__" is legal inside a name). This
+# takes the same role-session PATH the guard already computed by substituting
+# "spawn." for "role-session." in that file name, rather than asking every
+# caller to re-derive team/agent just to hand them back in for re-encoding.
+agmsg_role_session_clear_named_at() {   # <role-session-record-path>
+  local path="$1" dir tmp line
+  [ -n "$path" ] && [ -f "$path" ] || return 0
+  dir="$(_actas_lock_dir)"
+  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in named_ref=*|named_epoch=*|named_at=*) ;; *) printf '%s\n' "$line" ;; esac
+  done < "$path" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # The mark as "<ref>\t<epoch>", or empty when there is none. Two reads of one
 # small file, no process; this is the common-case cost of "am I named?"
 # (measured 0.22 ms), which is what lets a seat ask on every action.

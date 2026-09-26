@@ -203,6 +203,23 @@ _fake_herdr_list_scalar_session() {
   printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent_session":"%s","pane_id":"wC:p4"}]}}'\''; exit 0; }\nexit 0\n' "$sid" > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
+# A herdr whose `agent list` has TWO well-formed entries (#1485): lets a test
+# put two DIFFERENT sessions on the map at once, each at its own pane, so a
+# claimant's session can be shown live at ONE specific pane while a different
+# seat's own session is live at another (or the same). Pass "" as a sid to
+# omit that entry entirely (session not among the live agents at all).
+_fake_herdr_list_two_sessions() {   # <sid1> <pane1> <sid2> <pane2>
+  local sid1="$1" pane1="$2" sid2="$3" pane2="$4" entries="" sep=""
+  if [ -n "$sid1" ]; then
+    entries="{\"agent\":\"a\",\"agent_session\":{\"agent\":\"a\",\"kind\":\"id\",\"source\":\"herdr:a\",\"value\":\"$sid1\"},\"pane_id\":\"$pane1\"}"
+    sep=","
+  fi
+  if [ -n "$sid2" ]; then
+    entries="$entries$sep{\"agent\":\"b\",\"agent_session\":{\"agent\":\"b\",\"kind\":\"id\",\"source\":\"herdr:b\",\"value\":\"$sid2\"},\"pane_id\":\"$pane2\"}"
+  fi
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[%s]}}'\''; exit 0; }\nexit 0\n' "$entries" > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
 
 # A fake `orca` that logs argv and returns canned JSON for `terminal show` and
 # `terminal read`, shaped like the real 1.4.206 responses measured directly
@@ -3710,6 +3727,69 @@ _tmux_op_args() {
   run agmsg_terminal_name_self "" seatteam alice /proj/MINE claude-code record
   grep -q "recorded as seatteam__bob's" <<<"$output"
   refute grep -q 'remove run/spawn' <<<"$output"
+}
+
+@test "placement guard: a claimant whose session is confirmed gone lets a live seat take the pane; a claimant still there still refuses (#1485)" {
+  # elder's Codex session ended; resumer's fresh session now sits in the same
+  # herdr pane. elder's spawn record still claims it (first-writer-wins,
+  # #1114), but elder's own role-session record names the session that used
+  # to hold it.
+  export HERDR_ENV=1 HERDR_PANE_ID='wC:p4'
+  unset TMUX TMUX_PANE
+  export AGMSG_TERMINAL_DRIVER=herdr
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+
+  local rival; rival="$(agmsg_spawn_path seatteam elder)"
+  mkdir -p "$(dirname "$rival")"
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tcodex\n' "$HERDR_SOCKET_PATH" > "$rival"
+  agmsg_role_session_record seatteam elder old-sid /proj/OLD codex
+  agmsg_role_session_mark_named seatteam elder "herdr:$HERDR_SOCKET_PATH:wC:p4" 1
+
+  local mine; mine="$(agmsg_spawn_path seatteam resumer)"
+
+  # CONTROL: elder's session is confirmed STILL live in this exact pane ->
+  # refuse, exactly as before this existed. named_ref is untouched.
+  _fake_herdr_list_two_sessions old-sid wC:p4 my-sid wC:p4
+  run agmsg_terminal_name_self "my-sid" seatteam resumer /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  grep -q "recorded as seatteam__elder's" <<<"$output"
+  refute test -e "$mine"
+  [ "$(agmsg_role_session_named seatteam elder)" = "$(printf 'herdr:%s:wC:p4\t1' "$HERDR_SOCKET_PATH")" ]
+
+  # TAKEOVER: elder's session is gone (not among the live agents at all); this
+  # seat's OWN session is confirmed live in the disputed pane -> take it over,
+  # and drop elder's now-unbacked naming mark. elder's OTHER fields (its own
+  # registration) are untouched.
+  _fake_herdr_list_two_sessions "" "" my-sid wC:p4
+  run agmsg_terminal_name_self "my-sid" seatteam resumer /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  refute grep -q 'did not name or record' <<<"$output"
+  grep -q "^herdr:$HERDR_SOCKET_PATH:wC:p4	/proj/MINE	codex" "$mine"
+  [ -z "$(agmsg_role_session_named seatteam elder)" ]
+  [ "$(agmsg_role_session_get seatteam elder session)" = old-sid ]
+
+  # COLLIDING PAIR (#1023/#1482 review): team "a__b" agent "c" and team "a"
+  # agent "b__c" both spell the legacy suffix "a__b__c" -- neither name can be
+  # split out of it. A rival record under that suffix must refuse even though
+  # its (unrelated) role-session file at the SAME suffix names a session that
+  # is, in fact, gone: reading it anyway would be reading (and clearing the
+  # named_ref of) a THIRD pair's record, chosen by a guess, not a decided pane.
+  # elder's own (already-stale) record is removed first so it is not the one
+  # the claim scan happens to find at this same pane.
+  rm -f "$rival"
+  local ambiguous; ambiguous="$(agmsg_spawn_path a__b c)"
+  [ "$ambiguous" = "$(agmsg_spawn_path a b__c)" ]   # the collision itself, pinned
+  mkdir -p "$(dirname "$ambiguous")"
+  printf 'herdr:%s:wC:p4\t/proj/GHOST\tcodex\n' "$HERDR_SOCKET_PATH" > "$ambiguous"
+  local ghost_role; ghost_role="$(dirname "$ambiguous")/role-session.${ambiguous##*/spawn.}"
+  printf 'session=ghost-sid\nname=x\nteam=x\nagent=x\ntype=codex\nproject=/proj/GHOST\n' > "$ghost_role"
+
+  _fake_herdr_list_two_sessions "" "" my-sid wC:p4   # ghost-sid: gone; my-sid: here
+  run agmsg_terminal_name_self "my-sid" seatteam resumer /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  grep -q "recorded as a__b__c's" <<<"$output"
+  cmp -s "$ghost_role" <(printf 'session=ghost-sid\nname=x\nteam=x\nagent=x\ntype=codex\nproject=/proj/GHOST\n')
 }
 
 # --- #1112: a seat identifies its own pane by its LABEL ------------------------
