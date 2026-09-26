@@ -1849,13 +1849,15 @@ _remote_sync_engine_log() { printf '%s' "$CONNECTION_ROOT/run/remote-sync.$1.log
 # Scoped to the current run, not the whole log: the log is append-only across
 # restarts (`>> "$logfile"` at every start), so a run that failed once, was
 # restarted, and has since stopped normally must not have that old fatal
-# reported as why it is stopped NOW (review). `event()` writes a
-# `capabilities` line as the first thing each run does once it reaches the
-# server -- the closest thing this log has to a start marker -- so a `fatal`
-# only counts while no LATER `capabilities` line has appeared since it; awk
-# resets the captured fatal every time it passes one.
+# reported as why it is stopped NOW (review). `_remote_sync_engine_start_locked`
+# writes an `engine.start` line as the very first thing every start does,
+# before the engine process even exists -- NOT `capabilities`, which only
+# appears once a run has reached the server and so never appears at all for a
+# run killed before that (a SIGTERM during startup; review round 2). A
+# `fatal` only counts while no LATER `engine.start` line has appeared since
+# it; awk resets the captured fatal every time it passes one.
 #
-# Matching on the literal `"event":"fatal"`/`"event":"capabilities"`
+# Matching on the literal `"event":"fatal"`/`"event":"engine.start"`
 # substrings is enough to tell these apart from the plain-text stderr lines
 # also written to this fd (see `_remote_sync_engine_log` above) -- none of
 # those ever contain either exact substring.
@@ -1864,7 +1866,7 @@ _remote_last_fatal_message() {
   log="$(_remote_sync_engine_log "$team")"
   [ -f "$log" ] || return 0
   line="$(awk '
-    /"event":"capabilities"/ { fatal = "" }
+    /"event":"engine\.start"/ { fatal = "" }
     /"event":"fatal"/ { fatal = $0 }
     END { print fatal }
   ' "$log" 2>/dev/null)"
@@ -2116,6 +2118,15 @@ _remote_sync_engine_start_locked() {
       "its pidfile could not be written"
     return 1
   fi
+  # An unconditional start marker, written by THIS process before the engine
+  # exists at all -- unlike `capabilities`, which only appears once the engine
+  # has reached the server, and so never appears at all for a run killed
+  # before that (a SIGTERM during startup, review round on #1487).
+  # `_remote_last_fatal_message` scopes a fatal to the run that logged it by
+  # this line, not by `capabilities`, precisely so every run has a boundary to
+  # scope to, whatever happens to it after this line is written.
+  printf '{"at":"%s","event":"engine.start","startup_nonce":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$startup_nonce" >> "$logfile"
   # nohup so the engine outlives this connect; remote-sync.sh execs node, so $!
   # stays the engine's own pid and is exactly what _remote_sync_engine_stop signals.
   # fds 3 and 4 are closed explicitly: under bats, fd 3 is the TAP pipe, and a
