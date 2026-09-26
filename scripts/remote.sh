@@ -1832,6 +1832,34 @@ _remote_sync_engine_refusal_current() {
   cat "$file" 2>/dev/null || true
 }
 
+# The team's run log -- a mix of JSON `event()` lines and the plain stderr
+# text scripts like sqlite-sync.sh write to the same fd (see the engine
+# start's `>> "$logfile" 2>&1` redirection). Same directory, same derivation
+# as the pidfile/cycle-stamp/refusal files above.
+_remote_sync_engine_log() { printf '%s' "$CONNECTION_ROOT/run/remote-sync.$1.log"; }
+
+# The `message` of the LAST `fatal` event in that log, or nothing. `event()`
+# writes one `fatal` line whenever the engine's main loop throws uncaught
+# (remote-sync.mjs's top-level catch) -- a LOCAL failure (e.g. a missing
+# `age` binary) as much as a server-side one, unlike `_remote_sync_engine_refusal`
+# above, which only ever holds a 4xx the server sent. `status` never surfaced
+# this: an engine that died at its first push read as merely "stale", with the
+# reason sitting unread in the log (#1487).
+#
+# `grep -F` on the literal `"event":"fatal"` matches only JSON lines `event()`
+# itself wrote -- a plain-text stderr line naming a status never contains that
+# exact substring -- so this does not need to tell the two kinds of line apart
+# itself.
+_remote_last_fatal_message() {
+  local team="$1" log line escaped
+  log="$(_remote_sync_engine_log "$team")"
+  [ -f "$log" ] || return 0
+  line="$(grep -F '"event":"fatal"' "$log" 2>/dev/null | tail -n 1)"
+  [ -n "$line" ] || return 0
+  escaped=$(printf '%s' "$line" | sed "s/'/''/g")
+  agmsg_sqlite_mem "SELECT json_extract('$escaped', '\$.message');" 2>/dev/null
+}
+
 # _remote_holds_current_key <team> -> 0 when this machine holds the identity
 # for the team's CURRENT epoch, 1 otherwise.
 #
@@ -2667,6 +2695,15 @@ _remote_status_one() {
       fi
       ;;
   esac
+  # Not running, and the server was never asked -- this is the engine's OWN
+  # last word on why, read from the run log rather than left silent (#1487).
+  if [ "$engine_state" != running ]; then
+    local fatal_msg
+    fatal_msg="$(_remote_last_fatal_message "$team")"
+    if [ -n "$fatal_msg" ] && [ "$fatal_msg" != "null" ]; then
+      echo "		last fatal: $fatal_msg"
+    fi
+  fi
   # Connected, and unable to name anybody.
   #
   # `status` could say "engine running" indefinitely while `team.sh` said

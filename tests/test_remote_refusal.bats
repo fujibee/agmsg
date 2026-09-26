@@ -168,3 +168,25 @@ write_cycle_stamp() {
   run bash "$SCRIPTS/remote.sh" status testteam
   printf '%s' "$output" | grep -q 'refused: the server answered 402'
 }
+
+# What the engine writes to the run log when its main loop throws uncaught
+# (remote-sync.mjs's `event("fatal", ...)`) -- a LOCAL failure (a missing
+# `age` binary, say) as much as a server-side one, unlike write_refusal above
+# which only ever models a 4xx the server sent. Written here rather than by
+# running the engine, for the same reason write_refusal is: this is about what
+# READS it (#1487).
+write_fatal() {
+  printf '{"at":"2026-08-14T00:00:00Z","event":"fatal","message":"%s"}\n' "$1" \
+    >> "$TEST_SKILL_DIR/run/remote-sync.testteam.log"
+}
+
+@test "status names the engine's own last fatal reason while it is not running" {
+  # Before #1487, an engine that died at its first push (e.g. a missing `age`)
+  # read as merely "engine stopped" -- true, but silent about why, with the
+  # reason sitting unread in this same log.
+  write_fatal 'age executable not found on PATH'
+  run bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -q 'engine stopped'
+  printf '%s' "$output" | grep -q 'last fatal: age executable not found on PATH'
+}

@@ -761,11 +761,15 @@ storage_sync_prepare_push() {
     # arrive in COMPLETION order (each carries its request index) and are
     # committed in groups as they land, so an interrupted run keeps every group
     # it had already committed and the next prepare re-seals only what is left.
-    while IFS=$'\t' read -r idx status blob; do
+    while IFS=$'\t' read -r idx status blob reason; do
       case "$idx" in ''|*[!0-9]*) continue ;; esac
       [ "$idx" -lt "$prepared" ] || continue
       if [ "$status" != ok ] || [ -z "$blob" ]; then
-        printf 'agmsg: cipher helper did not seal message %s (%s)\n' "$idx" "$status" >&2
+        if [ -n "$reason" ]; then
+          printf 'agmsg: cipher helper did not seal message %s (%s: %s)\n' "$idx" "$status" "$reason" >&2
+        else
+          printf 'agmsg: cipher helper did not seal message %s (%s)\n' "$idx" "$status" >&2
+        fi
         continue
       fi
       if [ "${AGMSG_SYNC_TEST_ABORT_AFTER_SEAL:-}" = 1 ]; then
@@ -824,7 +828,8 @@ storage_sync_prepare_push() {
                  and .envelope.key_id==$key and (.envelope.blob|type)=="string"
                  and (.envelope.blob|length)>0
                then "ok" else (.state // .status // "invalid") end),
-             (.envelope.blob // "")] | @tsv')
+             (.envelope.blob // ""),
+             (.message // "")] | @tsv')
     # The loop body runs in THIS shell (process substitution, not a pipeline),
     # so the trailing partial chunk is still here to commit.
     if [ "$chunk_count" -gt 0 ]; then
