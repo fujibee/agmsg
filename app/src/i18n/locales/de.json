@@ -98,6 +98,16 @@
       "body": "Dies entfernt {{name}} aus {{team}} und schließt seinen Bereich, falls er läuft. Dies kann hier nicht rückgängig gemacht werden.",
       "confirmLabel": "Verlassen"
     },
+    "deleteTeam": {
+      "title": "{{team}} löschen?",
+      "body": "Dies löscht dauerhaft die Mitgliederliste und den Identitätsverlauf von {{team}} und kann nicht rückgängig gemacht werden. Ist {{team}} mit einem Remote verbunden, kann eine spätere erneute Verbindung es wiederherstellen.",
+      "confirmLabel": "Team löschen"
+    },
+    "purgeMessages": {
+      "title": "Alle Nachrichten in {{team}} löschen?",
+      "body": "Dies löscht dauerhaft jede Nachricht sowie die Lese-/Cursor-Daten von {{team}}. Das Team und seine Mitglieder bleiben erhalten. Dies kann nicht rückgängig gemacht werden.",
+      "confirmLabel": "Nachrichten löschen"
+    },
     "newTeam": {
       "titleFirstRun": "Willkommen — erstelle dein erstes Team",
       "title": "Neues Team",
@@ -147,6 +157,11 @@
       "existingTabsDivider": "— vorhandene Tabs —",
       "rename": "Umbenennen…",
       "leave": "Verlassen"
+    },
+    "team": {
+      "rename": "Umbenennen…",
+      "delete": "Team löschen…",
+      "deleteMessages": "Nachrichten löschen…"
     },
     "pane": {
       "close": "Schließen",

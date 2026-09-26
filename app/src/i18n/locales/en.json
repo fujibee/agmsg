@@ -108,6 +108,16 @@
       "body": "This removes {{name}} from {{team}} and closes its pane if it's running. This can't be undone from here.",
       "confirmLabel": "Leave"
     },
+    "deleteTeam": {
+      "title": "Delete {{team}}?",
+      "body": "This permanently deletes {{team}}'s roster and identity history and cannot be undone. If {{team}} is connected to a remote, reconnecting later can bring it back.",
+      "confirmLabel": "Delete team"
+    },
+    "purgeMessages": {
+      "title": "Delete all messages in {{team}}?",
+      "body": "This permanently deletes every message and read/cursor record for {{team}}. The team and its members stay. This cannot be undone.",
+      "confirmLabel": "Delete messages"
+    },
     "newTeam": {
       "titleFirstRun": "Welcome — create your first team",
       "title": "New team",
@@ -157,6 +167,11 @@
       "existingTabsDivider": "— existing tabs —",
       "rename": "Rename…",
       "leave": "Leave"
+    },
+    "team": {
+      "rename": "Rename…",
+      "delete": "Delete team…",
+      "deleteMessages": "Delete messages…"
     },
     "pane": {
       "close": "Close",
