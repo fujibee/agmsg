@@ -1050,7 +1050,7 @@ JSON
   # `refute`, not `! cmd`: a negated command cannot fail a bats test anywhere
   # (#670), so `! grep -q` here would have asserted nothing at all.
   refute grep -q 'line [0-9]*: 1:' <<<"$output"
-  [[ "$output" == "Usage: team.sh <team> [--json]" ]]
+  [[ "$output" == "Usage: team.sh <team> [--json] [--delete] [--purge-messages] [--yes]" ]]
 }
 
 # --- #1140/#1152: team never creates a placement record --------------------------
