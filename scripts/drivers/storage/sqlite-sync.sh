@@ -761,7 +761,15 @@ storage_sync_prepare_push() {
     # arrive in COMPLETION order (each carries its request index) and are
     # committed in groups as they land, so an interrupted run keeps every group
     # it had already committed and the next prepare re-seals only what is left.
-    while IFS=$'\t' read -r idx status blob reason; do
+    # \x1f (unit separator), not a tab: IFS whitespace characters (space, tab,
+    # newline) collapse RUNS of themselves into one delimiter, so a tab-joined
+    # row with an empty field next to a non-empty one -- exactly the failure
+    # row below, where blob is empty and reason is not -- loses the empty
+    # field and reads its neighbor's content into the wrong variable instead
+    # (review, #1487). \x1f collapses nothing; the reason column is sanitized
+    # of control characters below for the same reason (a literal \x1f or
+    # newline inside it would misalign or truncate this read).
+    while IFS=$'\x1f' read -r idx status blob reason; do
       case "$idx" in ''|*[!0-9]*) continue ;; esac
       [ "$idx" -lt "$prepared" ] || continue
       if [ "$status" != ok ] || [ -z "$blob" ]; then
@@ -829,7 +837,11 @@ storage_sync_prepare_push() {
                  and (.envelope.blob|length)>0
                then "ok" else (.state // .status // "invalid") end),
              (.envelope.blob // ""),
-             (.message // "")] | @tsv')
+             # Folded to one line and stripped of anything that could be
+             # mistaken for the \x1f join below: a multi-line or control-
+             # character-bearing message would otherwise truncate or misalign
+             # the bash read on the other end (#1487 review).
+             (.message // "" | gsub("[\u0000-\u001f\u007f]"; " "))] | join("\u001f")')
     # The loop body runs in THIS shell (process substitution, not a pipeline),
     # so the trailing partial chunk is still here to commit.
     if [ "$chunk_count" -gt 0 ]; then

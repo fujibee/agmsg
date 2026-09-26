@@ -72,6 +72,28 @@ bulk_store() {
   [ "$(cat "$AGMSG_SYNC_TEST_INVOCATION_LOG")" = "seal-batch 60" ]
 }
 
+@test "a real failure row's reason reaches the seal helper's stderr line" {
+  # Before the #1487 review round, this row's reason was lost: the tab-joined
+  # row for a failed message has an EMPTY blob column right next to the
+  # reason column, and IFS=$'\t' collapses that run of tabs into one
+  # delimiter, shifting the reason into blob's slot and leaving reason empty.
+  # A nonexistent AGMSG_AGE_BIN reproduces exactly that shape end to end,
+  # through the real helper and the real bash read, not a fixture standing in
+  # for either.
+  local prepare server_instance remote_team
+  bulk_store 1
+  export AGMSG_SYNC_CIPHER_HELPER="$SCRIPTS/internal/sync-cipher.mjs"
+  export AGMSG_AGE_BIN="$BATS_TEST_TMPDIR/nonexistent-age"
+  # A page that seals nothing is a failure return (13), same as any other
+  # unmet precondition below `_sqlite_sync_why` -- expected here, not the
+  # thing under test.
+  printf '%s\n' "$prepare" | storage_sync_prepare_push demo \
+    "$server_instance" "$remote_team" 1 100 \
+    >/dev/null 2>"$BATS_TEST_TMPDIR/prepare.err" || true
+  grep -qF 'did not seal message 0 (unsupported_cipher: ' "$BATS_TEST_TMPDIR/prepare.err"
+  grep -qF "$AGMSG_AGE_BIN" "$BATS_TEST_TMPDIR/prepare.err"
+}
+
 @test "a batched page carries awkward and large bodies through byte for byte" {
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
   export AGMSG_STORAGE_DRIVER=sqlite

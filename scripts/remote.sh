@@ -1838,26 +1838,44 @@ _remote_sync_engine_refusal_current() {
 # as the pidfile/cycle-stamp/refusal files above.
 _remote_sync_engine_log() { printf '%s' "$CONNECTION_ROOT/run/remote-sync.$1.log"; }
 
-# The `message` of the LAST `fatal` event in that log, or nothing. `event()`
-# writes one `fatal` line whenever the engine's main loop throws uncaught
-# (remote-sync.mjs's top-level catch) -- a LOCAL failure (e.g. a missing
-# `age` binary) as much as a server-side one, unlike `_remote_sync_engine_refusal`
-# above, which only ever holds a 4xx the server sent. `status` never surfaced
-# this: an engine that died at its first push read as merely "stale", with the
-# reason sitting unread in the log (#1487).
+# The `message` of the LAST `fatal` event since the CURRENT run started, or
+# nothing. `event()` writes one `fatal` line whenever the engine's main loop
+# throws uncaught (remote-sync.mjs's top-level catch) -- a LOCAL failure (e.g.
+# a missing `age` binary) as much as a server-side one, unlike
+# `_remote_sync_engine_refusal` above, which only ever holds a 4xx the server
+# sent. `status` never surfaced this: an engine that died at its first push
+# read as merely "stale", with the reason sitting unread in the log (#1487).
 #
-# `grep -F` on the literal `"event":"fatal"` matches only JSON lines `event()`
-# itself wrote -- a plain-text stderr line naming a status never contains that
-# exact substring -- so this does not need to tell the two kinds of line apart
-# itself.
+# Scoped to the current run, not the whole log: the log is append-only across
+# restarts (`>> "$logfile"` at every start), so a run that failed once, was
+# restarted, and has since stopped normally must not have that old fatal
+# reported as why it is stopped NOW (review). `event()` writes a
+# `capabilities` line as the first thing each run does once it reaches the
+# server -- the closest thing this log has to a start marker -- so a `fatal`
+# only counts while no LATER `capabilities` line has appeared since it; awk
+# resets the captured fatal every time it passes one.
+#
+# Matching on the literal `"event":"fatal"`/`"event":"capabilities"`
+# substrings is enough to tell these apart from the plain-text stderr lines
+# also written to this fd (see `_remote_sync_engine_log` above) -- none of
+# those ever contain either exact substring.
 _remote_last_fatal_message() {
   local team="$1" log line escaped
   log="$(_remote_sync_engine_log "$team")"
   [ -f "$log" ] || return 0
-  line="$(grep -F '"event":"fatal"' "$log" 2>/dev/null | tail -n 1)"
+  line="$(awk '
+    /"event":"capabilities"/ { fatal = "" }
+    /"event":"fatal"/ { fatal = $0 }
+    END { print fatal }
+  ' "$log" 2>/dev/null)"
   [ -n "$line" ] || return 0
   escaped=$(printf '%s' "$line" | sed "s/'/''/g")
-  agmsg_sqlite_mem "SELECT json_extract('$escaped', '\$.message');" 2>/dev/null
+  # Folded to one line: the caller prints this as a single status row, and an
+  # error message carrying a literal newline or other control character (a
+  # stack-trace-shaped message, say) would otherwise break that (review,
+  # #1487).
+  agmsg_sqlite_mem "SELECT json_extract('$escaped', '\$.message');" 2>/dev/null \
+    | tr '\n\r\t\v\f' '     '
 }
 
 # _remote_holds_current_key <team> -> 0 when this machine holds the identity
