@@ -978,11 +978,14 @@ _agmsg_placement_bare_pane_id() {   # <ref>
 # cannot be split out of the encoded file name. Both families are written by
 # the same encoder into the same directory (role-session.sh's own header
 # comment), so the substitution lands on the record for every claim this can
-# still help with: a legacy/name-keyed one. An id-keyed spawn record (#1240)
-# has no same-named role-session file -- role-session.sh only ever encodes
-# names, never ids -- so this reads empty there and answers "unknown", exactly
-# today's behavior for that case; teaching role-session.sh to read id-keyed
-# pairs is #1457 item 1, a separate, larger change.
+# still help with: a legacy/name-keyed one whose suffix is also PROVABLY one
+# pair's alone (see the "__" collision check below, #1023/#1482) -- a
+# colliding suffix reads as "unknown" too, exactly as an id-keyed one does. An
+# id-keyed spawn record (#1240) has no same-named role-session file --
+# role-session.sh only ever encodes names, never ids -- so this reads empty
+# there and answers "unknown", exactly today's behavior for that case;
+# teaching role-session.sh to read id-keyed pairs is #1457 item 1, a separate,
+# larger change.
 #
 # Liveness itself is asked of the terminal driver already loaded for THIS
 # seat's own pane (terminal_session_live, herdr only for now -- #1485's own
@@ -1000,6 +1003,22 @@ _agmsg_placement_claimant_here_now() {   # <rival-spawn-record-path> <claim-ref>
   want_id="$(_agmsg_placement_bare_pane_id "$claim_ref")" || { echo unknown; return 0; }
   dir="${spawn_path%/*}"; suffix="${spawn_path##*/spawn.}"
   [ "$suffix" != "$spawn_path" ] && [ -n "$suffix" ] || { echo unknown; return 0; }
+  # #1023/#1482 review: this suffix is "<enc_team>__<enc_agent>" with no
+  # separator escaping, so it is only PROVABLY one pair's when neither name
+  # itself contains "__" -- team "a__b" agent "c" and team "a" agent "b__c"
+  # both spell "a__b__c" (actas-lock.sh's own #1023 comment). Guessing which
+  # split is real would risk reading (or clearing the named_ref of) a THIRD
+  # pair's role-session file. _agmsg_team_delete_legacy_unambiguous solves the
+  # identical question from separate team/agent strings; this suffix arrives
+  # already joined (a rival record's bare file name, never decoded -- the
+  # comment on _agmsg_placement_claimed_by above covers why that cannot be
+  # done safely either), so the check works the other direction: strip up to
+  # the FIRST "__" and look for a SECOND one in what is left. A name
+  # containing "__" leaves one there regardless of which half it was in, so
+  # any second occurrence means the split is not unique and this suffix must
+  # not be trusted to name any one (team, agent) pair.
+  case "$suffix" in *__*) : ;; *) echo unknown; return 0 ;; esac
+  case "${suffix#*__}" in *__*) echo unknown; return 0 ;; esac
   role_path="$dir/role-session.$suffix"
   if ! declare -F _agmsg_role_session_field >/dev/null 2>&1; then
     if [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ]; then

@@ -3768,6 +3768,28 @@ _tmux_op_args() {
   grep -q "^herdr:$HERDR_SOCKET_PATH:wC:p4	/proj/MINE	codex" "$mine"
   [ -z "$(agmsg_role_session_named seatteam elder)" ]
   [ "$(agmsg_role_session_get seatteam elder session)" = old-sid ]
+
+  # COLLIDING PAIR (#1023/#1482 review): team "a__b" agent "c" and team "a"
+  # agent "b__c" both spell the legacy suffix "a__b__c" -- neither name can be
+  # split out of it. A rival record under that suffix must refuse even though
+  # its (unrelated) role-session file at the SAME suffix names a session that
+  # is, in fact, gone: reading it anyway would be reading (and clearing the
+  # named_ref of) a THIRD pair's record, chosen by a guess, not a decided pane.
+  # elder's own (already-stale) record is removed first so it is not the one
+  # the claim scan happens to find at this same pane.
+  rm -f "$rival"
+  local ambiguous; ambiguous="$(agmsg_spawn_path a__b c)"
+  [ "$ambiguous" = "$(agmsg_spawn_path a b__c)" ]   # the collision itself, pinned
+  mkdir -p "$(dirname "$ambiguous")"
+  printf 'herdr:%s:wC:p4\t/proj/GHOST\tcodex\n' "$HERDR_SOCKET_PATH" > "$ambiguous"
+  local ghost_role; ghost_role="$(dirname "$ambiguous")/role-session.${ambiguous##*/spawn.}"
+  printf 'session=ghost-sid\nname=x\nteam=x\nagent=x\ntype=codex\nproject=/proj/GHOST\n' > "$ghost_role"
+
+  _fake_herdr_list_two_sessions "" "" my-sid wC:p4   # ghost-sid: gone; my-sid: here
+  run agmsg_terminal_name_self "my-sid" seatteam resumer /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  grep -q "recorded as a__b__c's" <<<"$output"
+  cmp -s "$ghost_role" <(printf 'session=ghost-sid\nname=x\nteam=x\nagent=x\ntype=codex\nproject=/proj/GHOST\n')
 }
 
 # --- #1112: a seat identifies its own pane by its LABEL ------------------------
