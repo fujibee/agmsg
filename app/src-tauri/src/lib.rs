@@ -524,10 +524,30 @@ pub fn run() {
         // new one, so quitting/relaunching from the Dock or a second
         // double-click doesn't spawn duplicate instances each with their
         // own PTYs and agmsg DB watcher.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
                 let _ = window.unminimize();
+            }
+            // External-spawn entry point. A second launch of the shape
+            //   agmsg-app[.exe] spawn <team> <role>
+            // asks the already-running instance to open a pane for <role>
+            // in <team> — the missing "launch a member from outside the GUI"
+            // capability (scripts, an orchestrator agent, a shell alias).
+            // args[0] is the executable path; the verb + operands follow.
+            //
+            // The Rust side only recognizes the single "spawn" verb and does
+            // NOT exec anything from these args itself: it forwards the raw
+            // (team, role) strings to the frontend, which validates them
+            // against the live member registry before calling spawnMember.
+            // That keeps the trust boundary at the same place a GUI click is.
+            if args.len() >= 4 && args[1] == "spawn" {
+                let team = args[2].clone();
+                let role = args[3].clone();
+                if !team.is_empty() && !role.is_empty() {
+                    // Vec<String> payload → the frontend reads [team, role].
+                    let _ = app.emit("external-spawn", vec![team, role]);
+                }
             }
         }))
         .plugin(tauri_plugin_opener::init())
