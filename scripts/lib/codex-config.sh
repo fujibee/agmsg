@@ -27,6 +27,30 @@ agmsg_codex_config_paths() {
   fi
 }
 
+# Prints one writable_roots path per line for <skill_dir>: db/, teams/, run/,
+# ext-tools/ under it, in the SAME form install.sh's configure_codex_sandbox
+# writes into Codex's config.toml. On Windows (MSYS2/Git Bash), $skill_dir is
+# in MSYS form (/c/Users/...); Codex is a native Windows binary whose Rust
+# path resolution cannot parse that (it resolves to a phantom C:\c\Users\...),
+# so when cygpath is on PATH each path is converted to the mixed C:/Users/...
+# form both the shell and Codex accept, before anything writes or greps for
+# it. Kept in one place, alongside agmsg_codex_config_paths, so the writer
+# (install.sh) and the reader (agmsg_codex_writable_roots_notice below) can
+# never disagree about which form a path is in -- disagreeing here is exactly
+# what made the notice fire "missing" forever on Windows even right after a
+# correct `install --update` (#1483 review).
+agmsg_codex_writable_paths() {
+  local skill_dir="$1"
+  local paths=("$skill_dir/db" "$skill_dir/teams" "$skill_dir/run" "$skill_dir/ext-tools")
+  if command -v cygpath >/dev/null 2>&1; then
+    local i
+    for i in "${!paths[@]}"; do
+      paths[$i]="$(cygpath -m "${paths[$i]}" 2>/dev/null || printf '%s' "${paths[$i]}")"
+    done
+  fi
+  printf '%s\n' "${paths[@]}"
+}
+
 # agmsg_codex_writable_roots_notice <skill_dir>
 #
 # Prints ONE line to stdout when a Codex config this install would write to
@@ -55,7 +79,12 @@ agmsg_codex_config_paths() {
 # (matches configure_codex_sandbox's own `[ -f "$code_config" ] || return 0`).
 agmsg_codex_writable_roots_notice() {
   local skill_dir="$1"
-  local writable_paths=("$skill_dir/db" "$skill_dir/teams" "$skill_dir/run" "$skill_dir/ext-tools")
+  local writable_paths=()
+  local _wp
+  while IFS= read -r _wp; do
+    writable_paths+=("$_wp")
+  done < <(agmsg_codex_writable_paths "$skill_dir")
+  unset _wp
   local cfg p incomplete
   while IFS= read -r cfg; do
     [ -f "$cfg" ] || continue
