@@ -189,6 +189,122 @@ teardown() {
   [[ "$output" == *"export AGMSG_SPAWNED=1"* ]]
 }
 
+@test "spawn: boot script records and clears a boot-pid presence sentinel" {
+  # This sentinel proves only that the boot process is present. It does not
+  # claim that the agent is ready or responsive.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  source "$SCRIPTS/lib/actas-lock.sh"
+  local pid_path; pid_path="$(agmsg_boot_pid_path myteam alice)"
+  bash "$SCRIPTS/join.sh" myteam bob claude-code "$PROJ"
+  [ "$pid_path" != "$(agmsg_boot_pid_path myteam bob)" ]
+
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # The path and PID/start-time record are assigned once, then reused for
+  # atomic publication and owner-checked cleanup.
+  grep -Fq "AGMSG_BOOT_PID_PATH=$pid_path" <<<"$output"
+  grep -Fq 'AGMSG_BOOT_PID_RECORD="$$' <<<"$output"
+  grep -Fq 'mv -f "$AGMSG_BOOT_PID_TMP" "$AGMSG_BOOT_PID_PATH"' <<<"$output"
+  grep -Fq 'trap _agmsg_boot_pid_cleanup EXIT' <<<"$output"
+  grep -Fq "trap 'exit 129' HUP" <<<"$output"
+  grep -Fq "trap 'exit 130' INT" <<<"$output"
+  grep -Fq "trap 'exit 143' TERM" <<<"$output"
+  grep -Fq 'AGMSG_BOOT_PID_START="$(ps -o lstart=' <<<"$output"
+  # Published before the CLI starts.
+  # (The CLI invocation is asserted-between, not line-anchored, since it may be
+  # prefixed by MSYS2_ARG_CONV_EXCL=... even on macOS/Linux -- inert there, but
+  # it means the line doesn't start with the bare cli name.)
+  local write_line cli_line
+  write_line="$(grep -n 'AGMSG_BOOT_PID_RECORD=' "$boot" | head -1 | cut -d: -f1)"
+  cli_line="$(grep -n 'actas' "$boot" | tail -1 | cut -d: -f1)"
+  [ -n "$write_line" ]
+  [ -n "$cli_line" ]
+  [ "$write_line" -lt "$cli_line" ]
+  grep -Fq "actas" <<<"$output"
+  grep -Fq "alice" <<<"$output"
+}
+
+@test "spawn: boot-pid liveness rejects a reused PID by start witness" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  source "$SCRIPTS/lib/actas-lock.sh"
+  local path start
+  path="$(agmsg_boot_pid_path myteam alice)"
+  mkdir -p "${path%/*}"
+  start="$(ps -o lstart= -p "$$" 2>/dev/null | sed 's/^ *//; s/ *$//' | tr ' ' '_')"
+  [ -n "$start" ]
+  printf '%s\t%s\n' "$$" "$start" > "$path"
+  run agmsg_boot_pid_alive myteam alice
+  [ "$status" -eq 0 ]
+  printf '%s\t%s\n' "$$" "different-process-start" > "$path"
+  run agmsg_boot_pid_alive myteam alice
+  [ "$status" -ne 0 ]
+  # A SIGKILL leaves its record behind. Once that PID is gone, the next check
+  # must classify it stale rather than treating file presence as liveness.
+  printf '%s\t%s\n' 2147483647 "stale-after-sigkill" > "$path"
+  run agmsg_boot_pid_alive myteam alice
+  [ "$status" -ne 0 ]
+}
+
+@test "spawn: grok-build keeps a boot witness when its first turn fails before watcher registration" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  bash "$SCRIPTS/join.sh" myteam alice grok-build "$PROJ"
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  source "$SCRIPTS/lib/actas-lock.sh"
+  local boot pid_path ready_path model_called out
+  pid_path="$(agmsg_boot_pid_path myteam alice)"
+  ready_path="$(agmsg_ready_path myteam alice)"
+  model_called="$TEST_SKILL_DIR/grok-first-turn-called"
+  out="$TEST_SKILL_DIR/grok-boot.out"
+  printf '#!/usr/bin/env bash\ntouch %q\nsleep 1\nexit 1\n' "$model_called" > "$STUB_BIN/grok"
+  chmod +x "$STUB_BIN/grok"
+  run bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+
+  env SKILL_DIR="$TEST_SKILL_DIR" SHELL=/bin/false bash "$boot" > "$out" 2>&1 &
+  local boot_shell=$! tries=0
+  while [ ! -f "$model_called" ] && [ "$tries" -lt 50 ]; do
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ -f "$model_called" ]
+  [ -s "$pid_path" ]
+  [ ! -e "$ready_path" ]
+  run agmsg_boot_pid_alive myteam alice
+  [ "$status" -eq 0 ]
+  wait "$boot_shell" || true
+  [ ! -e "$pid_path" ]
+}
+
+@test "spawn: TERM exits the boot shell and removes only its own sentinel" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  bash "$SCRIPTS/join.sh" myteam alice grok-build "$PROJ"
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  source "$SCRIPTS/lib/actas-lock.sh"
+  local boot pid_path signal_sent out
+  pid_path="$(agmsg_boot_pid_path myteam alice)"
+  signal_sent="$TEST_SKILL_DIR/grok-term-sent"
+  out="$TEST_SKILL_DIR/grok-term.out"
+  printf '#!/usr/bin/env bash\ntouch %q\nkill -TERM "$PPID"\nsleep 0.1\n' "$signal_sent" > "$STUB_BIN/grok"
+  chmod +x "$STUB_BIN/grok"
+  run bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  env SKILL_DIR="$TEST_SKILL_DIR" SHELL=/bin/false bash "$boot" > "$out" 2>&1 &
+  local boot_shell=$! tries=0
+  while [ ! -f "$signal_sent" ] && [ "$tries" -lt 50 ]; do
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ -f "$signal_sent" ]
+  wait "$boot_shell" || true
+  [ ! -e "$pid_path" ]
+}
+
 @test "spawn: a type without name_arg emits no name flag (#339)" {
   # gemini's manifest has no name_arg=, so the boot script must not name the
   # session -- no bare `-n` token, unchanged from pre-#339 behavior.
