@@ -320,7 +320,7 @@ $agmsg
 ~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>" [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
-~/.agents/skills/<cmd>/scripts/team.sh <team>
+~/.agents/skills/<cmd>/scripts/team.sh <team> [--json] [--delete] [--purge-messages] [--yes]
 ~/.agents/skills/<cmd>/scripts/whoami.sh <project_path> <type>
 ~/.agents/skills/<cmd>/scripts/delivery.sh set <mode> <type> <project_path>
 ~/.agents/skills/<cmd>/scripts/delivery.sh status [<type> <project_path>]

@@ -4,7 +4,7 @@ set -euo pipefail
 # Usage: team.sh <team>
 # Shows team members.
 
-USAGE='Usage: team.sh <team> [--json]'
+USAGE='Usage: team.sh <team> [--json] [--delete] [--purge-messages] [--yes]'
 # Printed, not passed to ${1:?...}: the shell prefixes that form with its own
 # "line N: 1:" and mangles it. Kept even now that the message is one line --
 # the property being guarded is "no shell-diagnostic corruption", not "multiple
@@ -24,9 +24,15 @@ OUTPUT_MODE=human
 # agmsg_team_rename_session_loaded, agmsg_team_verify_placement,
 # agmsg_team_create_placement_from_label, all four defined in team-status.sh)
 # are gone with them, not replaced by a softer version of the same authority.
+DELETE=false
+PURGE_MESSAGES=false
+AUTO_YES=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) OUTPUT_MODE=json ;;
+    --delete) DELETE=true ;;
+    --purge-messages) PURGE_MESSAGES=true ;;
+    --yes) AUTO_YES=true ;;
     *) echo "$USAGE" >&2; exit 2 ;;
   esac
   shift
@@ -44,6 +50,119 @@ CONFIG="$SCRIPT_DIR/../teams/$TEAM/config.json"
 if [ ! -f "$CONFIG" ]; then
   echo "Team not found: $TEAM"
   exit 1
+fi
+
+# --delete / --purge-messages (#1475): a separate, self-contained branch that
+# exits before the read-only roster listing below. Kept out of that listing's
+# own (best-effort, errexit-lifted) placement sourcing -- these two need
+# storage.sh/registry-lock.sh/roster-journal.sh/actas-lock.sh to actually load,
+# not to degrade gracefully, since a destructive operation that silently
+# skipped part of its own cleanup would be worse than one that fails loudly.
+if [ "$DELETE" = true ] || [ "$PURGE_MESSAGES" = true ]; then
+  SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+  TEAM_DIR="$SCRIPT_DIR/../teams/$TEAM"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/storage.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/registry-lock.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/roster-journal.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/actas-lock.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/team-delete.sh"
+
+  DELETE_CONFIG_ESCAPED="$(sed "s/'/''/g" "$CONFIG")"
+
+  # Same three-way classification team-list.py's _team_row uses: "none" when
+  # there is no connected_at, "disconnected" when disconnected_at is also
+  # set, "active" otherwise (#1475). Refusing only on "active" -- a live sync
+  # would keep re-materializing what this just deleted; a disconnected
+  # binding gets an extra warning line instead of a refusal.
+  BINDING_STATE="$(agmsg_sqlite_mem \
+    "SELECT CASE
+       WHEN COALESCE(json_extract('$DELETE_CONFIG_ESCAPED', '\$.remote_binding.connected_at'), '') = '' THEN 'none'
+       WHEN COALESCE(json_extract('$DELETE_CONFIG_ESCAPED', '\$.remote_binding.disconnected_at'), '') != '' THEN 'disconnected'
+       ELSE 'active'
+     END;")"
+
+  if [ "$BINDING_STATE" = active ]; then
+    echo "Team '$TEAM' is actively synced; refusing to delete or purge its data." >&2
+    echo "Disconnect the sync binding first." >&2
+    exit 1
+  fi
+
+  if [ "$DELETE" = true ]; then
+    DELETE_AGENT_COUNT="$(agmsg_sqlite_mem \
+      "SELECT count(*) FROM json_each(json_extract('$DELETE_CONFIG_ESCAPED', '\$.agents'));")"
+    if [ "${DELETE_AGENT_COUNT:-0}" -ne 0 ]; then
+      echo "Team '$TEAM' still has $DELETE_AGENT_COUNT member(s); refusing --delete." >&2
+      echo "Run leave.sh for each remaining member first." >&2
+      exit 1
+    fi
+  fi
+
+  if [ "$PURGE_MESSAGES" = true ] && [ "$(agmsg_storage_driver)" = jsonl ]; then
+    echo "Team '$TEAM' uses the jsonl storage driver; --purge-messages is not" >&2
+    echo "supported yet for jsonl." >&2
+    exit 1
+  fi
+
+  echo ""
+  echo "  agmsg team $TEAM"
+  echo "  ──────────────────"
+  echo ""
+  if [ "$DELETE" = true ]; then
+    echo "  This permanently deletes team '$TEAM': its configuration, roster,"
+    echo "  identity history, and per-agent runtime records. This cannot be undone."
+  fi
+  if [ "$PURGE_MESSAGES" = true ]; then
+    echo "  This permanently deletes all message history for team '$TEAM'; it"
+    echo "  cannot be restored."
+  fi
+  if [ "$BINDING_STATE" = disconnected ]; then
+    echo "  This team was once synced; reconnecting later may bring it back from"
+    echo "  the server."
+  fi
+  echo ""
+
+  # Same shape as uninstall.sh's confirm(): default-no, one question.
+  confirm() {
+    if [ "$AUTO_YES" = true ]; then return 0; fi
+    printf "  %s (y/n) [n]: " "$1"
+    read -r input
+    [ "${input:-n}" = "y" ] || [ "${input:-n}" = "Y" ]
+  }
+
+  PROMPT="Delete team '$TEAM'?"
+  if [ "$DELETE" = true ] && [ "$PURGE_MESSAGES" = true ]; then
+    PROMPT="Delete team '$TEAM' and purge its message history?"
+  elif [ "$PURGE_MESSAGES" = true ]; then
+    PROMPT="Purge message history for team '$TEAM'?"
+  fi
+  if ! confirm "$PROMPT"; then
+    echo "Aborted."
+    exit 1
+  fi
+
+  agmsg_lock_acquire "$TEAM_DIR" || exit 1
+
+  if [ "$PURGE_MESSAGES" = true ]; then
+    agmsg_team_purge_messages "$TEAM"
+    echo "Purged message history for team '$TEAM'."
+  fi
+
+  if [ "$DELETE" = true ]; then
+    agmsg_team_delete_run_records "$TEAM" "$TEAM_DIR" "$CONFIG"
+    rm -f "$TEAM_DIR/config.json" "$TEAM_DIR/roster.jsonl" "$TEAM_DIR/roster-sync.json"
+    agmsg_lock_release
+    rmdir "$TEAM_DIR" 2>/dev/null || true
+    echo "Deleted team '$TEAM'."
+  else
+    agmsg_lock_release
+  fi
+
+  exit 0
 fi
 
 # Placement starts from the recorded terminal and pane that peek/poke resolve.

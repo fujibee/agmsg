@@ -1050,7 +1050,7 @@ JSON
   # `refute`, not `! cmd`: a negated command cannot fail a bats test anywhere
   # (#670), so `! grep -q` here would have asserted nothing at all.
   refute grep -q 'line [0-9]*: 1:' <<<"$output"
-  [[ "$output" == "Usage: team.sh <team> [--json]" ]]
+  [[ "$output" == "Usage: team.sh <team> [--json] [--delete] [--purge-messages] [--yes]" ]]
 }
 
 # --- #1140/#1152: team never creates a placement record --------------------------
@@ -1098,4 +1098,91 @@ STUB
   run bash "$SCRIPTS/team.sh" fixteam
   [ "$status" -eq 0 ]
   [ ! -e "$NRT_REC" ]                       # a read-only status never creates a record
+}
+
+# --- team.sh --delete / --purge-messages (#1475) ---
+
+@test "team: --delete removes an empty team's folder and run/ records, leaves another team untouched" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" otherteam carol claude-code /tmp/proj-c
+  mkdir -p "$TEST_SKILL_DIR/run"
+  echo "some-owner" > "$TEST_SKILL_DIR/run/actas.myteam__alice.session"
+  printf 'sid\t/tmp/proj-a\tclaude-code\n' > "$TEST_SKILL_DIR/run/role-session.myteam__alice"
+  echo "some-owner" > "$TEST_SKILL_DIR/run/actas.otherteam__carol.session"
+  bash "$SCRIPTS/leave.sh" myteam alice
+
+  run bash "$SCRIPTS/team.sh" myteam --delete --yes
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "Deleted team 'myteam'"
+  [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
+  [ ! -f "$TEST_SKILL_DIR/run/actas.myteam__alice.session" ]
+  [ ! -f "$TEST_SKILL_DIR/run/role-session.myteam__alice" ]
+  [ -d "$TEST_SKILL_DIR/teams/otherteam" ]
+  [ -f "$TEST_SKILL_DIR/run/actas.otherteam__carol.session" ]
+
+  # #1023 collision: team "a__b" agent "c" and team "a" agent "b__c" encode to
+  # the exact same legacy run/ paths (see actas-lock.sh's own #1023 comment).
+  # A legacy-form record at that shared path must survive deleting EITHER
+  # team, since ownership cannot be attributed to one over the other.
+  bash "$SCRIPTS/join.sh" "a__b" c claude-code /tmp/proj-collide-1
+  bash "$SCRIPTS/join.sh" a "b__c" claude-code /tmp/proj-collide-2
+  bash "$SCRIPTS/leave.sh" "a__b" c
+  local collide_actas="$TEST_SKILL_DIR/run/actas.a__b__c.session"
+  local collide_role="$TEST_SKILL_DIR/run/role-session.a__b__c"
+  echo "shared-owner" > "$collide_actas"
+  printf 'sid\t/tmp/proj-collide\tclaude-code\n' > "$collide_role"
+
+  run bash "$SCRIPTS/team.sh" "a__b" --delete --yes
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_SKILL_DIR/teams/a__b" ]
+  [ -f "$collide_actas" ]
+  [ -f "$collide_role" ]
+  [ -d "$TEST_SKILL_DIR/teams/a" ]
+}
+
+@test "team: --purge-messages removes only that team's message rows, leaves everything else" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam bob claude-code /tmp/proj-b
+  bash "$SCRIPTS/join.sh" otherteam carol claude-code /tmp/proj-c
+  bash "$SCRIPTS/join.sh" otherteam dave claude-code /tmp/proj-d
+  bash "$SCRIPTS/send.sh" myteam alice bob "secret"
+  bash "$SCRIPTS/send.sh" otherteam carol dave "keep me"
+
+  run bash "$SCRIPTS/team.sh" myteam --purge-messages --yes
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "Purged message history for team 'myteam'"
+
+  run bash "$SCRIPTS/history.sh" myteam alice
+  printf '%s\n' "$output" | grep -qF "No message history"
+  run bash "$SCRIPTS/history.sh" otherteam carol
+  printf '%s\n' "$output" | grep -qF "keep me"
+
+  # the team and its roster survive --purge-messages alone
+  [ -d "$TEST_SKILL_DIR/teams/myteam" ]
+  run bash "$SCRIPTS/team.sh" myteam
+  printf '%s\n' "$output" | grep -qF "alice"
+}
+
+@test "team: --delete refuses when members remain or the team is actively synced" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+
+  run bash "$SCRIPTS/team.sh" myteam --delete --yes
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "still has"
+  [ -d "$TEST_SKILL_DIR/teams/myteam" ]
+
+  bash "$SCRIPTS/leave.sh" myteam alice
+  local cfg="$TEST_SKILL_DIR/teams/myteam/config.json" escaped updated
+  escaped="$(sed "s/'/''/g" "$cfg")"
+  updated="$(sqlite_mem "
+    SELECT json_set('$escaped', '\$.remote_binding', json_object(
+      'connected_at', '2026-09-01T00:00:00Z',
+      'remote_team_id', '018f0000-0000-7000-8000-000000000002'
+    ));")"
+  printf '%s\n' "$updated" > "$cfg"
+
+  run bash "$SCRIPTS/team.sh" myteam --delete --yes
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "actively synced"
+  [ -d "$TEST_SKILL_DIR/teams/myteam" ]
 }
