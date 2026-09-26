@@ -1832,6 +1832,54 @@ _remote_sync_engine_refusal_current() {
   cat "$file" 2>/dev/null || true
 }
 
+# The team's run log -- a mix of JSON `event()` lines and the plain stderr
+# text scripts like sqlite-sync.sh write to the same fd (see the engine
+# start's `>> "$logfile" 2>&1` redirection). Same directory, same derivation
+# as the pidfile/cycle-stamp/refusal files above.
+_remote_sync_engine_log() { printf '%s' "$CONNECTION_ROOT/run/remote-sync.$1.log"; }
+
+# The `message` of the LAST `fatal` event since the CURRENT run started, or
+# nothing. `event()` writes one `fatal` line whenever the engine's main loop
+# throws uncaught (remote-sync.mjs's top-level catch) -- a LOCAL failure (e.g.
+# a missing `age` binary) as much as a server-side one, unlike
+# `_remote_sync_engine_refusal` above, which only ever holds a 4xx the server
+# sent. `status` never surfaced this: an engine that died at its first push
+# read as merely "stale", with the reason sitting unread in the log (#1487).
+#
+# Scoped to the current run, not the whole log: the log is append-only across
+# restarts (`>> "$logfile"` at every start), so a run that failed once, was
+# restarted, and has since stopped normally must not have that old fatal
+# reported as why it is stopped NOW (review). `_remote_sync_engine_start_locked`
+# writes an `engine.start` line as the very first thing every start does,
+# before the engine process even exists -- NOT `capabilities`, which only
+# appears once a run has reached the server and so never appears at all for a
+# run killed before that (a SIGTERM during startup; review round 2). A
+# `fatal` only counts while no LATER `engine.start` line has appeared since
+# it; awk resets the captured fatal every time it passes one.
+#
+# Matching on the literal `"event":"fatal"`/`"event":"engine.start"`
+# substrings is enough to tell these apart from the plain-text stderr lines
+# also written to this fd (see `_remote_sync_engine_log` above) -- none of
+# those ever contain either exact substring.
+_remote_last_fatal_message() {
+  local team="$1" log line escaped
+  log="$(_remote_sync_engine_log "$team")"
+  [ -f "$log" ] || return 0
+  line="$(awk '
+    /"event":"engine\.start"/ { fatal = "" }
+    /"event":"fatal"/ { fatal = $0 }
+    END { print fatal }
+  ' "$log" 2>/dev/null)"
+  [ -n "$line" ] || return 0
+  escaped=$(printf '%s' "$line" | sed "s/'/''/g")
+  # Folded to one line: the caller prints this as a single status row, and an
+  # error message carrying a literal newline or other control character (a
+  # stack-trace-shaped message, say) would otherwise break that (review,
+  # #1487).
+  agmsg_sqlite_mem "SELECT json_extract('$escaped', '\$.message');" 2>/dev/null \
+    | tr '\n\r\t\v\f' '     '
+}
+
 # _remote_holds_current_key <team> -> 0 when this machine holds the identity
 # for the team's CURRENT epoch, 1 otherwise.
 #
@@ -2068,6 +2116,25 @@ _remote_sync_engine_start_locked() {
   if ! : > "$pidfile" 2>/dev/null; then
     _remote_sync_engine_start_refused "$team" "$pidfile" \
       "its pidfile could not be written"
+    return 1
+  fi
+  # An unconditional start marker, written by THIS process before the engine
+  # exists at all -- unlike `capabilities`, which only appears once the engine
+  # has reached the server, and so never appears at all for a run killed
+  # before that (a SIGTERM during startup, review round on #1487).
+  # `_remote_last_fatal_message` scopes a fatal to the run that logged it by
+  # this line, not by `capabilities`, precisely so every run has a boundary to
+  # scope to, whatever happens to it after this line is written.
+  #
+  # Checked, not fired-and-forgotten: the caller is `_remote_sync_engine_start`
+  # via `_remote_sync_engine_start_locked "$@" || rc=$?`, which suspends `set
+  # -e` for this whole function, so a failed write here would otherwise go
+  # unnoticed and this proceeds to spawn the engine with no marker at all --
+  # exactly the unguarded gap this line exists to close (review round 3).
+  if ! printf '{"at":"%s","event":"engine.start","startup_nonce":"%s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$startup_nonce" >> "$logfile"; then
+    _remote_sync_engine_start_refused "$team" "$logfile" \
+      "its start marker could not be written"
     return 1
   fi
   # nohup so the engine outlives this connect; remote-sync.sh execs node, so $!
@@ -2667,6 +2734,15 @@ _remote_status_one() {
       fi
       ;;
   esac
+  # Not running, and the server was never asked -- this is the engine's OWN
+  # last word on why, read from the run log rather than left silent (#1487).
+  if [ "$engine_state" != running ]; then
+    local fatal_msg
+    fatal_msg="$(_remote_last_fatal_message "$team")"
+    if [ -n "$fatal_msg" ] && [ "$fatal_msg" != "null" ]; then
+      echo "		last fatal: $fatal_msg"
+    fi
+  fi
   # Connected, and unable to name anybody.
   #
   # `status` could say "engine running" indefinitely while `team.sh` said
