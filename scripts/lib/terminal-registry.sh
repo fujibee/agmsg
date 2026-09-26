@@ -1092,6 +1092,22 @@ agmsg_terminal_name_self() {
     echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
   }
 
+  # AGMSG_SELF_NAME=off: this process must NOT name its pane, whatever pair it
+  # is handed. Checked HERE, in the one function every self-naming path ends in
+  # (join at boot, actas, the action hook), not only in the action hook -- a
+  # switch honoured by one path out of several is not a switch. The case that
+  # needs it (#1096): spawn runs join.sh in the CALLER's process on behalf of
+  # the new member; "self" below resolves through the caller's environment
+  # (HERDR_PANE_ID, $TMUX/$TMUX_PANE), so without this the caller's pane is
+  # renamed to the new member's label and key. spawn sets it on that one
+  # subprocess; a seat joining by hand keeps naming itself.
+  #
+  # Checked BEFORE the #1476 guard below on purpose: "whatever pair it is
+  # handed" means off stays a silent no-op regardless of team/agent shape,
+  # not a path where a bad-shaped value now also prints a refusal reason
+  # nobody asked for because naming was never going to happen anyway.
+  [ "${AGMSG_SELF_NAME:-on}" != off ] || return 0
+
   # Refuse BEFORE naming or recording (#1476): a path or an id in the team or
   # agent slot is not a registered name, whichever caller's mistake put it
   # there. Neither the pane nor the role-session record is touched --
@@ -1105,17 +1121,6 @@ agmsg_terminal_name_self() {
     echo "agmsg: did not name or record this pane: agent '$agent' looks like a path or id, not a registered agent name" >&2
     return 1
   fi
-
-  # AGMSG_SELF_NAME=off: this process must NOT name its pane, whatever pair it
-  # is handed. Checked HERE, in the one function every self-naming path ends in
-  # (join at boot, actas, the action hook), not only in the action hook -- a
-  # switch honoured by one path out of several is not a switch. The case that
-  # needs it (#1096): spawn runs join.sh in the CALLER's process on behalf of
-  # the new member; "self" below resolves through the caller's environment
-  # (HERDR_PANE_ID, $TMUX/$TMUX_PANE), so without this the caller's pane is
-  # renamed to the new member's label and key. spawn sets it on that one
-  # subprocess; a seat joining by hand keeps naming itself.
-  [ "${AGMSG_SELF_NAME:-on}" != off ] || return 0
 
   # The BARE sid, whatever the caller had. A terminal knows the id the CLI
   # published; the composite "<sid>.<pid>" exists only inside agmsg, and handing
