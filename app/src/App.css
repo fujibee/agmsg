@@ -494,9 +494,15 @@ body.resizing-row {
   /* Without this, a flex column child (like .team-status-rail before its own
      bound) that wants more height than available makes THIS refuse to
      shrink below its content, growing past .body's height and turning into
-     a page-level scroll instead of staying inside the window (#1478). */
+     a page-level scroll instead of staying inside the window (#1478).
+     Deliberately NOT overflow:hidden here (tried, reverted): the collapsed
+     rail's popups (.new-menu.rail-popup, .ctx-menu.rail-popup) are
+     position:absolute; left:100% children that escape this box on purpose,
+     and clipping at this level cuts them off. The overflow that actually
+     needed containing is .team-status-rail's own (bounded below) and
+     .members' (already flex:1 + overflow-y:auto) — .sidebar itself no
+     longer has anything unbounded left to clip once those two are capped. */
   min-height: 0;
-  overflow: hidden;
 }
 /* Collapsed to an icon-only rail (issue #317 backlog) so panes get
    more width; a fixed width overrides the draggable one from full size.

@@ -859,12 +859,15 @@ export default function App() {
   // land on a row currently scrolled out of view. Only one .team-status-row
   // is ever active at a time (collapsed and expanded rails aren't both in
   // the DOM together), so a single querySelector is unambiguous.
+  // sidebarCollapsed is also a dep: toggling collapsed/expanded swaps in a
+  // DIFFERENT .team-status-rail (a fresh, unscrolled one) without `team`
+  // changing at all, and that one needs the same treatment.
   useEffect(() => {
     if (!team) return;
     document
       .querySelector(".team-status-rail .team-status-row.active")
       ?.scrollIntoView({ block: "nearest" });
-  }, [team]);
+  }, [team, sidebarCollapsed]);
 
   // On team change: load members + the most recent history page. Prompt to
   // add an app-user if missing.
