@@ -98,6 +98,16 @@
       "body": "Cela retire {{name}} de {{team}} et ferme son panneau s'il est en cours d'exécution. Cette action est irréversible depuis ici.",
       "confirmLabel": "Quitter"
     },
+    "deleteTeam": {
+      "title": "Supprimer {{team}} ?",
+      "body": "Cela supprime définitivement la liste des membres et l'historique d'identité de {{team}} et ne peut pas être annulé. Si {{team}} est connectée à un serveur distant, une reconnexion ultérieure peut la restaurer.",
+      "confirmLabel": "Supprimer l'équipe"
+    },
+    "purgeMessages": {
+      "title": "Supprimer tous les messages de {{team}} ?",
+      "body": "Cela supprime définitivement tous les messages et les données de lecture/curseur de {{team}}. L'équipe et ses membres restent. Cette action est irréversible.",
+      "confirmLabel": "Supprimer les messages"
+    },
     "newTeam": {
       "titleFirstRun": "Bienvenue — créez votre première équipe",
       "title": "Nouvelle équipe",
@@ -147,6 +157,11 @@
       "existingTabsDivider": "— onglets existants —",
       "rename": "Renommer…",
       "leave": "Quitter"
+    },
+    "team": {
+      "rename": "Renommer…",
+      "delete": "Supprimer l'équipe…",
+      "deleteMessages": "Supprimer les messages…"
     },
     "pane": {
       "close": "Fermer",

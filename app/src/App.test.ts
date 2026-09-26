@@ -8,6 +8,7 @@ import {
   shellTabStillValid,
   shouldShowOutdatedBanner,
   shouldSuppressClickAfterDrag,
+  teamActionInvocation,
   type LoginShellInfo,
 } from "./App";
 
@@ -223,5 +224,31 @@ describe("resolveFileDropTarget", () => {
   it("returns null when there's no active window to fall back to", () => {
     // e.g. Team Room is showing (active === "room"), no panes at all.
     expect(resolveFileDropTarget(null, windows, "room", null)).toBeNull();
+  });
+});
+
+describe("teamActionInvocation", () => {
+  // #1479: the sidebar's team context menu (Rename/Delete team/Delete
+  // messages) must call the right agmsg command with the right args — a
+  // wrong mapping here would silently run the wrong destructive action.
+  it("maps rename to agmsg_rename_team with the old and new team names", () => {
+    expect(teamActionInvocation("renameTeam", "old-team", "new-team")).toEqual({
+      command: "agmsg_rename_team",
+      args: { oldTeam: "old-team", newTeam: "new-team" },
+    });
+  });
+
+  it("maps delete team to agmsg_delete_team with just the team", () => {
+    expect(teamActionInvocation("deleteTeam", "my-team")).toEqual({
+      command: "agmsg_delete_team",
+      args: { team: "my-team" },
+    });
+  });
+
+  it("maps delete messages to agmsg_purge_team_messages, not agmsg_delete_team", () => {
+    expect(teamActionInvocation("purgeMessages", "my-team")).toEqual({
+      command: "agmsg_purge_team_messages",
+      args: { team: "my-team" },
+    });
   });
 });

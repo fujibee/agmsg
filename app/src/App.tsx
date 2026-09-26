@@ -228,6 +228,9 @@ type Modal =
   | { kind: "appuser"; auto: boolean }
   | { kind: "rename"; current: string }
   | { kind: "leave"; name: string }
+  | { kind: "renameTeam"; current: string }
+  | { kind: "deleteTeam"; name: string }
+  | { kind: "purgeMessages"; name: string }
   | { kind: "settings" }
   | { kind: "closeWindow"; windowId: string }
   | { kind: "closePane"; paneId: string }
@@ -305,6 +308,27 @@ export function shouldShowOutdatedBanner<T>(
   dismissed: boolean,
 ): coreOutdated is NonNullable<T> {
   return coreOutdated != null && !updatingCore && !dismissed;
+}
+
+// Which agmsg script the sidebar's team context menu (#1479) runs for each
+// action, and with what arguments — extracted as a pure function so the
+// menu-to-command wiring is unit-testable without mounting the app or a real
+// Tauri backend. Argument keys are camelCase to match how Tauri maps them
+// onto each command's snake_case Rust parameters.
+export type TeamMenuAction = "renameTeam" | "deleteTeam" | "purgeMessages";
+export function teamActionInvocation(
+  action: TeamMenuAction,
+  team: string,
+  nextName?: string,
+): { command: string; args: Record<string, string> } {
+  switch (action) {
+    case "renameTeam":
+      return { command: "agmsg_rename_team", args: { oldTeam: team, newTeam: nextName ?? "" } };
+    case "deleteTeam":
+      return { command: "agmsg_delete_team", args: { team } };
+    case "purgeMessages":
+      return { command: "agmsg_purge_team_messages", args: { team } };
+  }
 }
 
 export default function App() {
@@ -445,6 +469,9 @@ export default function App() {
   const [roomMenu, setRoomMenu] = useState<{ x: number; y: number } | null>(null);
   // Same idea, over the app-user chat pane's own header: { x, y }.
   const [chatMenu, setChatMenu] = useState<{ x: number; y: number } | null>(null);
+  // Right-click context menu over a sidebar team row: { name, x, y }. `name`
+  // is whichever team was right-clicked, not necessarily the active `team`.
+  const [teamMenu, setTeamMenu] = useState<{ name: string; x: number; y: number } | null>(null);
 
   // Closes every context/dropdown menu (opening a second one while a
   // first is still open used to stack both — right-clicking a different
@@ -459,6 +486,7 @@ export default function App() {
     setWindowMenu(null);
     setRoomMenu(null);
     setChatMenu(null);
+    setTeamMenu(null);
     setRailTeamMenu(false);
   }, []);
   // The two menus opened by clicking a trigger button (rather than
@@ -854,19 +882,26 @@ export default function App() {
     if (team) localStorage.setItem(LAST_TEAM_KEY, team);
   }, [team]);
 
-  // On team change: load members + the most recent history page. Prompt to
-  // add an app-user if missing.
-  useEffect(() => {
-    if (!team) return;
-    setDeselected(new Set()); // reset the room filter when switching teams
+  // The most recent history page for `t`, replacing whatever's currently
+  // shown — used both on team switch and after purging a team's messages
+  // (the same reset a stale page would otherwise leave behind).
+  const loadRoomMessages = useCallback((t: string) => {
     setMessages([]);
     setHasMoreHistory(true);
-    invoke<Message[]>("agmsg_messages", { team, limit: ROOM_PAGE_SIZE })
+    return invoke<Message[]>("agmsg_messages", { team: t, limit: ROOM_PAGE_SIZE })
       .then((msgs) => {
         setMessages(msgs);
         setHasMoreHistory(msgs.length >= ROOM_PAGE_SIZE);
       })
       .catch(console.error);
+  }, []);
+
+  // On team change: load members + the most recent history page. Prompt to
+  // add an app-user if missing.
+  useEffect(() => {
+    if (!team) return;
+    setDeselected(new Set()); // reset the room filter when switching teams
+    loadRoomMessages(team);
     loadMembers(team)
       .then((m) => {
         if (
@@ -877,7 +912,7 @@ export default function App() {
         }
       })
       .catch(console.error);
-  }, [team, loadMembers]);
+  }, [team, loadMembers, loadRoomMessages]);
 
   // Live team-room updates; inject into a matching pane.
   useEffect(() => {
@@ -1654,6 +1689,59 @@ export default function App() {
     [team, loadMembers, detachPane],
   );
 
+  // Where to land when the currently active team disappears from `teams`
+  // (deleted, or renamed out from under itself): the same fallback the boot
+  // effect above uses — the localStorage-remembered team if it still
+  // exists, else the first remaining team, else back to the first-run
+  // "create a team" flow if none are left at all.
+  const settleActiveTeam = useCallback(
+    (loadedTeams: string[], removedName: string) => {
+      if (team !== removedName) return;
+      if (loadedTeams.length === 0) {
+        setTeam("");
+        setModal({ kind: "team", firstRun: true });
+        return;
+      }
+      const lastTeam = localStorage.getItem(LAST_TEAM_KEY);
+      setTeam(lastTeam && loadedTeams.includes(lastTeam) ? lastTeam : loadedTeams[0]);
+    },
+    [team],
+  );
+
+  const onRenameTeam = useCallback(
+    async (current: string, next: string) => {
+      const { command, args } = teamActionInvocation("renameTeam", current, next);
+      await invoke(command, args);
+      await loadTeams();
+      if (team === current) setTeam(next);
+      setModal(null);
+    },
+    [team, loadTeams],
+  );
+
+  // Delete/purge confirmation already happened in the UI (ConfirmModal); the
+  // CLI's own refusal reason (members remain, an active remote binding, the
+  // jsonl storage driver) comes back as run_script's Err and is shown as-is
+  // by ConfirmModal's err state.
+  const onDeleteTeam = useCallback(
+    async (name: string) => {
+      const { command, args } = teamActionInvocation("deleteTeam", name);
+      await invoke(command, args);
+      const loadedTeams = await loadTeams();
+      settleActiveTeam(loadedTeams, name);
+    },
+    [loadTeams, settleActiveTeam],
+  );
+
+  const onPurgeMessages = useCallback(
+    async (name: string) => {
+      const { command, args } = teamActionInvocation("purgeMessages", name);
+      await invoke(command, args);
+      if (name === team) await loadRoomMessages(team);
+    },
+    [team, loadRoomMessages],
+  );
+
   const browseDir = useCallback(async (current: string): Promise<string | null> => {
     const picked = await openDialog({ directory: true, defaultPath: current || undefined });
     return typeof picked === "string" ? picked : null;
@@ -1969,6 +2057,12 @@ export default function App() {
                       className={teamName === team ? "team-status-row active" : "team-status-row"}
                       title={`${teamName}: ${status} (open panes)`}
                       onClick={() => setTeam(teamName)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        closeAllMenus();
+                        setTeamMenu({ name: teamName, x: e.clientX, y: e.clientY });
+                      }}
                     >
                       <span className={`team-status-dot status-${status}`} />
                     </button>
@@ -2026,6 +2120,12 @@ export default function App() {
                       className={teamName === team ? "team-status-row active" : "team-status-row"}
                       title={`${teamName}: ${status} (open panes)`}
                       onClick={() => setTeam(teamName)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        closeAllMenus();
+                        setTeamMenu({ name: teamName, x: e.clientX, y: e.clientY });
+                      }}
                     >
                       <span className="team-status-slot">
                         <span className={`team-status-dot status-${status}`} />
@@ -2586,6 +2686,29 @@ export default function App() {
           onClose={() => setModal(null)}
         />
       )}
+      {modal?.kind === "renameTeam" && (
+        <RenameModal current={modal.current} onRename={onRenameTeam} onClose={() => setModal(null)} />
+      )}
+      {modal?.kind === "deleteTeam" && (
+        <ConfirmModal
+          title={t("modal.deleteTeam.title", { team: modal.name })}
+          body={t("modal.deleteTeam.body", { team: modal.name })}
+          confirmLabel={t("modal.deleteTeam.confirmLabel")}
+          danger
+          onConfirm={() => onDeleteTeam(modal.name)}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal?.kind === "purgeMessages" && (
+        <ConfirmModal
+          title={t("modal.purgeMessages.title", { team: modal.name })}
+          body={t("modal.purgeMessages.body", { team: modal.name })}
+          confirmLabel={t("modal.purgeMessages.confirmLabel")}
+          danger
+          onConfirm={() => onPurgeMessages(modal.name)}
+          onClose={() => setModal(null)}
+        />
+      )}
       {modal?.kind === "settings" && (
         <SettingsModal
           onClose={() => setModal(null)}
@@ -2690,6 +2813,41 @@ export default function App() {
             </div>
           );
         })()}
+
+      {teamMenu && (
+        <div
+          className="ctx-menu"
+          style={{ left: teamMenu.x, top: teamMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              setModal({ kind: "renameTeam", current: teamMenu.name });
+              setTeamMenu(null);
+            }}
+          >
+            {t("ctxMenu.team.rename")}
+          </button>
+          <button
+            className="danger"
+            onClick={() => {
+              setModal({ kind: "deleteTeam", name: teamMenu.name });
+              setTeamMenu(null);
+            }}
+          >
+            {t("ctxMenu.team.delete")}
+          </button>
+          <button
+            className="danger"
+            onClick={() => {
+              setModal({ kind: "purgeMessages", name: teamMenu.name });
+              setTeamMenu(null);
+            }}
+          >
+            {t("ctxMenu.team.deleteMessages")}
+          </button>
+        </div>
+      )}
 
       {paneMenu &&
         (() => {
