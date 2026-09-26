@@ -2125,8 +2125,18 @@ _remote_sync_engine_start_locked() {
   # `_remote_last_fatal_message` scopes a fatal to the run that logged it by
   # this line, not by `capabilities`, precisely so every run has a boundary to
   # scope to, whatever happens to it after this line is written.
-  printf '{"at":"%s","event":"engine.start","startup_nonce":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$startup_nonce" >> "$logfile"
+  #
+  # Checked, not fired-and-forgotten: the caller is `_remote_sync_engine_start`
+  # via `_remote_sync_engine_start_locked "$@" || rc=$?`, which suspends `set
+  # -e` for this whole function, so a failed write here would otherwise go
+  # unnoticed and this proceeds to spawn the engine with no marker at all --
+  # exactly the unguarded gap this line exists to close (review round 3).
+  if ! printf '{"at":"%s","event":"engine.start","startup_nonce":"%s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$startup_nonce" >> "$logfile"; then
+    _remote_sync_engine_start_refused "$team" "$logfile" \
+      "its start marker could not be written"
+    return 1
+  fi
   # nohup so the engine outlives this connect; remote-sync.sh execs node, so $!
   # stays the engine's own pid and is exactly what _remote_sync_engine_stop signals.
   # fds 3 and 4 are closed explicitly: under bats, fd 3 is the TAP pipe, and a
