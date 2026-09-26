@@ -103,6 +103,17 @@ INNER_EOF
 }
 
 agmsg_session_start() {
+  # #1477: report, once, if this profile's Codex config is missing this
+  # install's writable_roots (Codex installed after agmsg, so
+  # configure_codex_sandbox never saw a config to write into). Read-only,
+  # and unconditional — runs before every other branch below, several of
+  # which `exit 0` early, so the notice would otherwise never be reached on
+  # a fresh/no-bridge-needed session.
+  if ! declare -F agmsg_codex_writable_roots_notice >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/lib/codex-config.sh"
+  fi
+  agmsg_codex_writable_roots_notice "$SKILL_DIR"
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
   [ -n "$thread_id" ] || exit 0
   # A recorded role belongs to its recorded Codex thread. The in-sandbox

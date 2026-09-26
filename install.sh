@@ -367,17 +367,15 @@ configure_codex_sandbox() {
   done < <(agmsg_codex_config_paths)
   unset _cfg
 
-  local writable_paths=("$SKILL_DIR/db" "$SKILL_DIR/teams" "$SKILL_DIR/run" "$SKILL_DIR/ext-tools")
-  # On Windows (MSYS2/Git Bash), $SKILL_DIR is in MSYS form (/c/Users/...).
-  # Codex is a native Windows binary whose Rust path resolution cannot parse
-  # MSYS paths — /c/Users/... is resolved to C:\c\Users\... (a phantom path).
-  # Convert to the mixed C:/Users/... form that both the shell and Codex accept.
-  if command -v cygpath >/dev/null 2>&1; then
-    local i
-    for i in "${!writable_paths[@]}"; do
-      writable_paths[$i]="$(cygpath -m "${writable_paths[$i]}" 2>/dev/null || printf '%s' "${writable_paths[$i]}")"
-    done
-  fi
+  # agmsg_codex_writable_paths (scripts/lib/codex-config.sh) computes the
+  # list, including the Windows cygpath conversion, so this can never
+  # disagree with what the session-start notice checks for (#1483 review).
+  local writable_paths=()
+  local _wp
+  while IFS= read -r _wp; do
+    writable_paths+=("$_wp")
+  done < <(agmsg_codex_writable_paths "$SKILL_DIR")
+  unset _wp
 
   local cfg
   for cfg in "${codex_configs[@]}"; do

@@ -2887,6 +2887,97 @@ EOF
   [ ! -f "$log" ]
 }
 
+# #1477: Codex installed after agmsg never gets this install's writable_roots
+# (configure_codex_sandbox only writes them into a Codex config that already
+# existed at install time), and nothing later says so. session-start.sh's
+# codex plug now reports it, once, read-only, before any of the bridge
+# branches below it (several of which exit 0 early and would otherwise never
+# reach a check placed after them).
+@test "session-start.sh for codex reports missing writable_roots, once, and stays silent once they are present" {
+  # A CODEX_HOME inherited from the real environment (this repo's own .envrc
+  # pins one) would make agmsg_codex_config_paths also check that SECOND,
+  # real profile's config.toml -- unset it so this test's only config is the
+  # throwaway $HOME/.codex/config.toml below, never the developer's own.
+  unset CODEX_HOME
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$HOME/.codex"
+  local code_config="$HOME/.codex/config.toml"
+
+  # RED: a config with NONE of this install's writable_roots.
+  cat > "$code_config" <<'EOF'
+[sandbox_workspace_write]
+writable_roots = ["/some/other/path"]
+EOF
+  run env CODEX_THREAD_ID="thread-notice-red" \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -qF "agmsg: Codex cannot write agmsg's data yet -- run 'npx agmsg install --update' once" <<< "$output"
+
+  # GREEN: the same config, now carrying every root this install needs.
+  cat > "$code_config" <<EOF
+[sandbox_workspace_write]
+writable_roots = ["$TEST_SKILL_DIR/db", "$TEST_SKILL_DIR/teams", "$TEST_SKILL_DIR/run", "$TEST_SKILL_DIR/ext-tools"]
+EOF
+  run env CODEX_THREAD_ID="thread-notice-green" \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  refute grep -qF "agmsg: Codex cannot write agmsg's data yet" <<< "$output"
+
+  # WINDOWS: install.sh's configure_codex_sandbox converts each writable path
+  # through `cygpath -m` (MSYS /c/... -> native C:/...) before writing it, so
+  # a real Windows config.toml carries the CONVERTED form. A fake cygpath
+  # models that conversion here; the notice must check the same converted
+  # form, or it would report "missing" forever even right after a correct
+  # install --update (#1483 review).
+  # This test's own paths are not in MSYS /c/... form (it runs on macOS/Linux),
+  # so the fake unconditionally prefixes "C:" rather than modeling the real
+  # /c/foo -> C:/foo rewrite -- what matters here is that BOTH the config this
+  # test writes and agmsg_codex_writable_paths route through the identical
+  # fake, proving they agree, not reproducing the exact Windows string shape.
+  # `command -v cygpath` on PATH is also what sqlpath.sh's agmsg_sql_readfile_path
+  # gates on -- identities.sh (which session-start.sh calls on its way to the
+  # codex driver) reads every team's config.json through it. A fake that
+  # converts EVERY path it sees, real cygpath -w included, hands sqlite a
+  # bogus string for config.json on this (non-Windows) test box, sqlite's
+  # readfile() returns NULL, identities.sh finds no pairs, and session-start.sh
+  # exits before ever reaching the notice -- a false green having nothing to
+  # do with the fix. Converting ONLY this install's four writable_paths, and
+  # passing every other path through unchanged, keeps every other cygpath
+  # caller in the sourced scripts working against a real, readable path, the
+  # way a real Windows cygpath would (it converts a config.json path into a
+  # native one that the real sqlite3.exe there CAN open, just not into one
+  # this Unix sqlite3 can).
+  local stubdir="$TEST_SKILL_DIR/stub-bin"
+  mkdir -p "$stubdir"
+  cat > "$stubdir/cygpath" <<EOF
+#!/usr/bin/env bash
+# Strips the leading path component the way real cygpath -m strips the MSYS
+# drive segment (/c/Users/foo -> C:/Users/foo): the raw path must NOT survive
+# as a substring of the converted one, or a test built on this fake could
+# pass by accident even without the real fix.
+shift
+case "\$1" in
+  "$TEST_SKILL_DIR/db"|"$TEST_SKILL_DIR/teams"|"$TEST_SKILL_DIR/run"|"$TEST_SKILL_DIR/ext-tools")
+    printf 'C:%s\n' "\${1#/*/}"
+    ;;
+  *)
+    printf '%s\n' "\$1"
+    ;;
+esac
+EOF
+  chmod +x "$stubdir/cygpath"
+
+  cat > "$code_config" <<EOF
+[sandbox_workspace_write]
+writable_roots = ["$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/db")", "$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/teams")", "$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/run")", "$(PATH="$stubdir:$PATH" cygpath -m "$TEST_SKILL_DIR/ext-tools")"]
+EOF
+  run env CODEX_THREAD_ID="thread-notice-windows" PATH="$stubdir:$PATH" \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  refute grep -qF "agmsg: Codex cannot write agmsg's data yet" <<< "$output"
+}
+
+
 @test "delivery set monitor (codex): installs SessionStart and prints Codex shell function" {
   run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
