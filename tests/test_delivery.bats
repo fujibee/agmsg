@@ -2887,6 +2887,43 @@ EOF
   [ ! -f "$log" ]
 }
 
+# #1477: Codex installed after agmsg never gets this install's writable_roots
+# (configure_codex_sandbox only writes them into a Codex config that already
+# existed at install time), and nothing later says so. session-start.sh's
+# codex plug now reports it, once, read-only, before any of the bridge
+# branches below it (several of which exit 0 early and would otherwise never
+# reach a check placed after them).
+@test "session-start.sh for codex reports missing writable_roots, once, and stays silent once they are present" {
+  # A CODEX_HOME inherited from the real environment (this repo's own .envrc
+  # pins one) would make agmsg_codex_config_paths also check that SECOND,
+  # real profile's config.toml -- unset it so this test's only config is the
+  # throwaway $HOME/.codex/config.toml below, never the developer's own.
+  unset CODEX_HOME
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$HOME/.codex"
+  local code_config="$HOME/.codex/config.toml"
+
+  # RED: a config with NONE of this install's writable_roots.
+  cat > "$code_config" <<'EOF'
+[sandbox_workspace_write]
+writable_roots = ["/some/other/path"]
+EOF
+  run env CODEX_THREAD_ID="thread-notice-red" \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -qF "agmsg: Codex cannot write agmsg's data yet -- run 'npx agmsg install --update' once" <<< "$output"
+
+  # GREEN: the same config, now carrying every root this install needs.
+  cat > "$code_config" <<EOF
+[sandbox_workspace_write]
+writable_roots = ["$TEST_SKILL_DIR/db", "$TEST_SKILL_DIR/teams", "$TEST_SKILL_DIR/run", "$TEST_SKILL_DIR/ext-tools"]
+EOF
+  run env CODEX_THREAD_ID="thread-notice-green" \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  ! grep -qF "agmsg: Codex cannot write agmsg's data yet" <<< "$output"
+}
+
 @test "delivery set monitor (codex): installs SessionStart and prints Codex shell function" {
   run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
