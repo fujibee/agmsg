@@ -89,14 +89,15 @@ sed -i '' \
 
 # The dmg is universal (both arches) as of the app's universal-apple-darwin
 # build — an arm64-only `depends_on` would keep telling Homebrew to refuse
-# the cask on Intel Macs the dmg now actually supports. Drop the stanza and
-# the blank line right after it, once, if still present (a tap already
-# updated by hand is a no-op here, not a failure — unlike the four
-# rewrites above, there is nothing to verify was written, only something
-# to confirm is gone). `{N;d}` only touches this one pair of lines, unlike
-# a whole-file blank-line squeeze, which would also flatten any blank runs
-# a maintainer put elsewhere in the cask on purpose.
-sed -i '' '/^  depends_on arch: :arm64$/{N;d;}' "$CASK"
+# the cask on Intel Macs the dmg now actually supports. Drop just that one
+# stanza line, if still present (a tap already updated by hand is a no-op
+# here, not a failure — unlike the four rewrites above, there is nothing
+# to verify was written, only something to confirm is gone). Deliberately
+# NOT also dropping whatever line follows it (e.g. via sed's N;d) -- that
+# assumes it's always the blank line seen today, and a future tap format
+# change putting a real stanza there instead would delete that stanza
+# too, silently. A leftover blank line is cosmetic; a deleted stanza is not.
+sed -i '' '/^  depends_on arch: :arm64$/d' "$CASK"
 
 # Every rewritten line gets a post-edit guard — a cask format drift must
 # fail here, never half-update and push.
