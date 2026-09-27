@@ -109,13 +109,13 @@
       "confirmLabel": "Leave"
     },
     "deleteTeam": {
-      "title": "Delete {{team}}?",
-      "body": "This permanently deletes {{team}}'s roster and identity history and cannot be undone. If {{team}} is connected to a remote, reconnecting later can bring it back.",
+      "title": "Delete team '{{team}}'?",
+      "body": "This permanently deletes team '{{team}}': its configuration, roster, identity history, and per-agent runtime records. This cannot be undone.",
       "confirmLabel": "Delete team"
     },
     "purgeMessages": {
-      "title": "Delete all messages in {{team}}?",
-      "body": "This permanently deletes every message and read/cursor record for {{team}}. The team and its members stay. This cannot be undone.",
+      "title": "Purge message history for team '{{team}}'?",
+      "body": "This permanently deletes all message history for team '{{team}}'; it cannot be restored.",
       "confirmLabel": "Delete messages"
     },
     "newTeam": {

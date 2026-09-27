@@ -99,13 +99,13 @@
       "confirmLabel": "Sair"
     },
     "deleteTeam": {
-      "title": "Excluir {{team}}?",
-      "body": "Isso exclui permanentemente a lista de membros e o histórico de identidade de {{team}} e não pode ser desfeito. Se {{team}} estiver conectada a um remoto, reconectar depois pode restaurá-la.",
+      "title": "Excluir a equipe '{{team}}'?",
+      "body": "Isso exclui permanentemente a equipe '{{team}}': sua configuração, lista de membros, histórico de identidade e os registros de execução de cada agente. Essa ação não pode ser desfeita.",
       "confirmLabel": "Excluir equipe"
     },
     "purgeMessages": {
-      "title": "Excluir todas as mensagens em {{team}}?",
-      "body": "Isso exclui permanentemente todas as mensagens e os registros de leitura/cursor de {{team}}. A equipe e seus membros permanecem. Essa ação não pode ser desfeita.",
+      "title": "Limpar o histórico de mensagens da equipe '{{team}}'?",
+      "body": "Isso exclui permanentemente todo o histórico de mensagens da equipe '{{team}}'; não pode ser restaurado.",
       "confirmLabel": "Excluir mensagens"
     },
     "newTeam": {

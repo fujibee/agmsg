@@ -99,13 +99,13 @@
       "confirmLabel": "Quitter"
     },
     "deleteTeam": {
-      "title": "Supprimer {{team}} ?",
-      "body": "Cela supprime définitivement la liste des membres et l'historique d'identité de {{team}} et ne peut pas être annulé. Si {{team}} est connectée à un serveur distant, une reconnexion ultérieure peut la restaurer.",
+      "title": "Supprimer l'équipe « {{team}} » ?",
+      "body": "Cela supprime définitivement l'équipe « {{team}} » : sa configuration, sa liste de membres, son historique d'identité et les enregistrements d'exécution de chaque agent. Cette action est irréversible.",
       "confirmLabel": "Supprimer l'équipe"
     },
     "purgeMessages": {
-      "title": "Supprimer tous les messages de {{team}} ?",
-      "body": "Cela supprime définitivement tous les messages et les données de lecture/curseur de {{team}}. L'équipe et ses membres restent. Cette action est irréversible.",
+      "title": "Purger l'historique des messages de l'équipe « {{team}} » ?",
+      "body": "Cela supprime définitivement tout l'historique des messages de l'équipe « {{team}} » ; il ne peut pas être restauré.",
       "confirmLabel": "Supprimer les messages"
     },
     "newTeam": {
