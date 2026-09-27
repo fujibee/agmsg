@@ -100,7 +100,7 @@
     },
     "deleteTeam": {
       "title": "Team „{{team}}“ löschen?",
-      "body": "Dies löscht dauerhaft das Team „{{team}}“: seine Konfiguration, Mitgliederliste, den Identitätsverlauf und die Laufzeitdatensätze der einzelnen Agenten. Dies kann nicht rückgängig gemacht werden.",
+      "body": "Dies löscht dauerhaft das Team „{{team}}“: seine Konfiguration, Mitgliederliste, den Identitätsverlauf und die Laufzeitdatensätze der einzelnen Agenten. Dies kann nicht rückgängig gemacht werden. War es mit einem Remote verbunden, kann eine spätere erneute Verbindung es wiederherstellen.",
       "confirmLabel": "Team löschen"
     },
     "purgeMessages": {

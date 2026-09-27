@@ -100,7 +100,7 @@
     },
     "deleteTeam": {
       "title": "Supprimer l'équipe « {{team}} » ?",
-      "body": "Cela supprime définitivement l'équipe « {{team}} » : sa configuration, sa liste de membres, son historique d'identité et les enregistrements d'exécution de chaque agent. Cette action est irréversible.",
+      "body": "Cela supprime définitivement l'équipe « {{team}} » : sa configuration, sa liste de membres, son historique d'identité et les enregistrements d'exécution de chaque agent. Cette action est irréversible. Si elle était connectée à un serveur distant, une reconnexion ultérieure peut la restaurer.",
       "confirmLabel": "Supprimer l'équipe"
     },
     "purgeMessages": {

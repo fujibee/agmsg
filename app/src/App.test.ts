@@ -9,6 +9,7 @@ import {
   shellTabStillValid,
   shouldShowOutdatedBanner,
   shouldSuppressClickAfterDrag,
+  shouldClearModalOnClose,
   teamActionInvocation,
   type LoginShellInfo,
 } from "./App";
@@ -265,5 +266,24 @@ describe("teamActionInvocation", () => {
       command: "agmsg_purge_team_messages",
       args: { team: "my-team" },
     });
+  });
+});
+
+describe("shouldClearModalOnClose", () => {
+  it("clears when the modal is still the one that opened the confirm", () => {
+    expect(shouldClearModalOnClose({ kind: "deleteTeam" }, "deleteTeam")).toBe(true);
+  });
+
+  it("does not clear when onConfirm already swapped in a different modal", () => {
+    // Regression (#1484 review): deleting the LAST team reopens the
+    // first-run "create a team" modal from inside onDeleteTeam via
+    // settleActiveTeam. ConfirmModal's own onClose fires right after and,
+    // without this guard, would stomp the new modal back to null.
+    const reopenedModal: { kind: string; firstRun: boolean } = { kind: "team", firstRun: true };
+    expect(shouldClearModalOnClose(reopenedModal, "deleteTeam")).toBe(false);
+  });
+
+  it("is a no-op against an already-null modal", () => {
+    expect(shouldClearModalOnClose(null, "deleteTeam")).toBe(false);
   });
 });

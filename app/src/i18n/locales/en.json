@@ -110,7 +110,7 @@
     },
     "deleteTeam": {
       "title": "Delete team '{{team}}'?",
-      "body": "This permanently deletes team '{{team}}': its configuration, roster, identity history, and per-agent runtime records. This cannot be undone.",
+      "body": "This permanently deletes team '{{team}}': its configuration, roster, identity history, and per-agent runtime records. This cannot be undone. If it was connected to a remote, reconnecting later can bring it back.",
       "confirmLabel": "Delete team"
     },
     "purgeMessages": {

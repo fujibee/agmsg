@@ -100,7 +100,7 @@
     },
     "deleteTeam": {
       "title": "Excluir a equipe '{{team}}'?",
-      "body": "Isso exclui permanentemente a equipe '{{team}}': sua configuração, lista de membros, histórico de identidade e os registros de execução de cada agente. Essa ação não pode ser desfeita.",
+      "body": "Isso exclui permanentemente a equipe '{{team}}': sua configuração, lista de membros, histórico de identidade e os registros de execução de cada agente. Essa ação não pode ser desfeita. Se estava conectada a um remoto, reconectar depois pode restaurá-la.",
       "confirmLabel": "Excluir equipe"
     },
     "purgeMessages": {

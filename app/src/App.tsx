@@ -358,6 +358,18 @@ export function teamActionInvocation(
   }
 }
 
+// Whether a ConfirmModal's onClose, firing right after a successful
+// onConfirm, should actually null out the modal — false when onConfirm's own
+// side effect already swapped in a DIFFERENT modal while it was in flight
+// (deleting the last team reopens the first-run "create a team" modal from
+// inside onDeleteTeam/settleActiveTeam) and this stale close would otherwise
+// clobber it (#1484 review). `current` is read as the latest pending
+// state via a functional setModal updater, not a stale closure, so this
+// correctly sees whatever onConfirm just set.
+export function shouldClearModalOnClose(current: { kind: string } | null, ownKind: string): boolean {
+  return current?.kind === ownKind;
+}
+
 export default function App() {
   const { t } = useTranslation();
   // Set when a startup call that the whole app depends on (loading teams)
@@ -2743,7 +2755,7 @@ export default function App() {
           confirmLabel={t("modal.deleteTeam.confirmLabel")}
           danger
           onConfirm={() => onDeleteTeam(modal.name)}
-          onClose={() => setModal(null)}
+          onClose={() => setModal((cur) => (shouldClearModalOnClose(cur, "deleteTeam") ? null : cur))}
         />
       )}
       {modal?.kind === "purgeMessages" && (

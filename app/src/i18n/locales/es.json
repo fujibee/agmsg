@@ -100,7 +100,7 @@
     },
     "deleteTeam": {
       "title": "¿Eliminar el equipo «{{team}}»?",
-      "body": "Esto elimina permanentemente el equipo «{{team}}»: su configuración, lista de miembros, historial de identidad y los registros de ejecución de cada agente. Esta acción no se puede deshacer.",
+      "body": "Esto elimina permanentemente el equipo «{{team}}»: su configuración, lista de miembros, historial de identidad y los registros de ejecución de cada agente. Esta acción no se puede deshacer. Si estaba conectado a un remoto, volver a conectarlo más tarde puede restaurarlo.",
       "confirmLabel": "Eliminar equipo"
     },
     "purgeMessages": {
