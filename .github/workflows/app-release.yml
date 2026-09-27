@@ -101,6 +101,14 @@ jobs:
           cache-dependency-path: app/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Universal build: link an x86_64 slice and an arm64 slice into one
+          # binary (Tauri's `--target universal-apple-darwin`, below) rather
+          # than shipping an Apple-Silicon-only artifact. Both targets must
+          # be installed on this single macos-latest (arm64) runner — Cargo
+          # cross-compiles the x86_64 slice, it doesn't need a separate
+          # x86_64 runner.
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -139,15 +147,15 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build
+        run: pnpm tauri build --target universal-apple-darwin
 
       - uses: actions/upload-artifact@v4
         with:
           name: agmsg-app-macos
           path: |
-            app/src-tauri/target/release/bundle/macos/*.app.tar.gz
-            app/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
-            app/src-tauri/target/release/bundle/dmg/*.dmg
+            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: warn
 
   build-windows:
