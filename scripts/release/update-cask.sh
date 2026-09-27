@@ -89,13 +89,14 @@ sed -i '' \
 
 # The dmg is universal (both arches) as of the app's universal-apple-darwin
 # build — an arm64-only `depends_on` would keep telling Homebrew to refuse
-# the cask on Intel Macs the dmg now actually supports. Drop the stanza,
-# once, if still present (a tap already updated by hand is a no-op here,
-# not a failure — unlike the four rewrites above, there is nothing to
-# verify was written, only something to confirm is gone), then squeeze the
-# blank line it leaves behind back down to one.
-sed -i '' '/^  depends_on arch: :arm64$/d' "$CASK"
-cat -s "$CASK" > "$CASK.tmp" && mv "$CASK.tmp" "$CASK"
+# the cask on Intel Macs the dmg now actually supports. Drop the stanza and
+# the blank line right after it, once, if still present (a tap already
+# updated by hand is a no-op here, not a failure — unlike the four
+# rewrites above, there is nothing to verify was written, only something
+# to confirm is gone). `{N;d}` only touches this one pair of lines, unlike
+# a whole-file blank-line squeeze, which would also flatten any blank runs
+# a maintainer put elsewhere in the cask on purpose.
+sed -i '' '/^  depends_on arch: :arm64$/{N;d;}' "$CASK"
 
 # Every rewritten line gets a post-edit guard — a cask format drift must
 # fail here, never half-update and push.
