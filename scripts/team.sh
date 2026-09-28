@@ -96,12 +96,16 @@ if [ "$DELETE" = true ] || [ "$PURGE_MESSAGES" = true ]; then
 
   # --force (#1493): a team the desktop app created always has at least one
   # member (its own app-user registration), so a plain --delete could never
-  # remove an app-created team. --force removes every remaining member first,
-  # with the same effect as running leave.sh for each -- captured as a name
-  # list BEFORE any of them actually leave, both for the confirmation text
-  # and for the run/ sweep below (leave.sh's own last-member cleanup can
-  # already remove config.json for a non-journaled team, at which point
-  # nothing on disk still names its departed members).
+  # remove an app-created team. --force does NOT call leave.sh per member --
+  # the whole team folder is coming down anyway, and leave.sh's own
+  # last-member cleanup can delete config.json (and the team dir, if it ends
+  # up empty) for a non-journaled team, which would make the agmsg_lock_acquire
+  # below fail to create .config.lock and abort with the team half-deleted
+  # (review finding). leave.sh only ever touches config.json/roster.jsonl --
+  # it does nothing to actas locks, role-session records, or any other run/
+  # state -- so skipping it changes nothing the run/ sweep below wasn't
+  # already going to remove on its own. DELETE_FORCE_NAMES here is only for
+  # the confirmation text; the delete below still reads the untouched config.
   DELETE_FORCE_NAMES=""
   if [ "$DELETE" = true ]; then
     DELETE_AGENT_COUNT="$(agmsg_sqlite_mem \
@@ -168,15 +172,6 @@ if [ "$DELETE" = true ] || [ "$PURGE_MESSAGES" = true ]; then
     exit 1
   fi
 
-  if [ -n "$DELETE_FORCE_NAMES" ]; then
-    while IFS= read -r _force_member; do
-      [ -n "$_force_member" ] || continue
-      bash "$SCRIPT_DIR/leave.sh" "$TEAM" "$_force_member" >/dev/null
-    done <<EOF
-$DELETE_FORCE_NAMES
-EOF
-  fi
-
   agmsg_lock_acquire "$TEAM_DIR" || exit 1
 
   if [ "$PURGE_MESSAGES" = true ]; then
@@ -185,7 +180,7 @@ EOF
   fi
 
   if [ "$DELETE" = true ]; then
-    agmsg_team_delete_run_records "$TEAM" "$TEAM_DIR" "$CONFIG" "$DELETE_FORCE_NAMES"
+    agmsg_team_delete_run_records "$TEAM" "$TEAM_DIR" "$CONFIG"
     rm -f "$TEAM_DIR/config.json" "$TEAM_DIR/roster.jsonl" "$TEAM_DIR/roster-sync.json"
     agmsg_lock_release
     rmdir "$TEAM_DIR" 2>/dev/null || true
