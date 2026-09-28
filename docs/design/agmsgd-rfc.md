@@ -2,7 +2,7 @@
 
 This is an RFC: a request for comments on a design, not a decision record. Decisions land as ADRs as usual once settled — this is published first, so the shape can change while changing it is still cheap.
 
-> **Status (2026-09-22).** The direction described here has been approved, and this note now matches it. What changed since the first version is listed in [Changes since the first version](#changes-since-the-first-version). Next comes the architecture design (how each part is built); implementation follows after that, one small release at a time. Every release has to be something that can be stopped, and none is built all at once. Thank you to everyone who answered the open questions in the discussion — the answers are reflected below.
+> **Status (2026-09-28).** The direction described here has been approved, and this note now matches it. What changed since the first version is listed in [Changes since the first version](#changes-since-the-first-version). The architecture design (how each part works) is done and published next to this note as [agmsgd-architecture.md](agmsgd-architecture.md). Next is the technical design (where the source lives, how it is built and shipped); implementation follows after that. Every release has to be something that can be stopped, and none is built all at once. Thank you to everyone who answered the open questions in the discussion — the answers are reflected below.
 
 It assumes the terminal driver released in 1.3.0. What that release added underneath — and what this builds on — is **identity at the terminal layer**: a pane knows which agent occupies it, the same way under tmux and under herdr, and that binding is recorded, checkable and repairable. `peek`, `poke` and `arrange` are conveniences built on the same naming. They are not what a delivery daemon needs; what it needs is to resolve an addressee to a place, and that is what 1.3.0 made possible.
 
@@ -42,16 +42,17 @@ The trigger is concrete bugs. Several problems users actually hit came from mana
 - **Codex**: no more launch wrapper (details in the Codex section).
 - **Sending**: unchanged. `send` writes straight to the message database, daemon or no daemon. Without the daemon you lose automatic delivery, not messaging.
 
-It ships in pieces, in this order, each one usable on its own:
+It ships in this order:
 
 1. **1.3.1** — clients skip message fields they do not know yet (released).
 2. **Re-reading what an older client set aside** — after an upgrade, the client re-reads the stored originals it could not understand before (released).
-3. **A shared id, subject and summary on every new message.**
-4. **Groundwork** — the records for which session holds which name, and the check at send time.
-5. **The new store** — per-recipient receipts, tags, and the one step in this whole design that cannot be undone (see [Compatibility and migration](#compatibility-and-migration)).
-6. **The daemon.**
+3. **A shared id, subject and summary on every new message** (1.x).
+4. **Groundwork** (1.x) — the records for which session holds which name, the check at send time, a migration check (`agmsg migrate --check`) you can run as often as you like, and a warning at join when a name already exists elsewhere.
+5. **2.0.0** — everything that is not backward compatible, together: the new store (per-recipient receipts, tags, and the one step in this whole design that cannot be undone; see [Compatibility and migration](#compatibility-and-migration)), delivery by the daemon, sync moved into the daemon, and the join / drop / leave vocabulary. Release candidates (2.0.0-rc) come first, to check it on real machines.
 
-Two unrelated pieces come before step 3: external-tool invocation (released in 1.4.0, which also carries step 2) and a terminal driver for Orca.
+Steps 1 to 4 are each usable on their own. The new store and the daemon ship together on purpose: the store switch alone would bring the break without the benefit.
+
+Two unrelated pieces came before step 3: external-tool invocation (released in 1.4.0, which also carries step 2) and a terminal driver for Orca (released in 1.5.0).
 
 If you use agmsg daily — especially monitor mode, multi-machine teams, or Codex — your comments now are worth more than your bug reports later.
 
@@ -140,7 +141,7 @@ Choosing *not* to fetch immediately is only viable if finding things later is ch
 
 For each delivery the daemon picks exactly one way to reach the recipient. It decides **per registration**, from whether the terminal driver could resolve that session's pane — not from whether some pane manager happens to be running on the machine:
 
-1. **The pane resolved** (tmux, herdr, Orca once its driver lands, or the agmsg desktop app)? The daemon **writes the notification into that pane**, through the same terminal driver that knows which agent occupies which pane. One mechanism, identical for every agent type. This is not the `poke` command: that one is a convenience for an agent deliberately typing into another agent's pane, and the daemon is not an agent — it is delivering a message to its addressee, which happens to travel the same way.
+1. **The pane resolved** (tmux, herdr, Orca, or the agmsg desktop app)? The daemon **writes the notification into that pane**, through the same terminal driver that knows which agent occupies which pane. One mechanism, identical for every agent type. This is not the `poke` command: that one is a convenience for an agent deliberately typing into another agent's pane, and the daemon is not an agent — it is delivering a message to its addressee, which happens to travel the same way.
 2. **Confirmed that there is no pane?** Fall back to what the tool itself offers: Claude Code receives through the process a Monitor runs for the session (its standard output); Codex takes deliveries at its hook points (see the Codex section).
 3. **Cannot tell?** The daemon does not guess. It does not deliver to that session, and says why in its status.
 
@@ -192,7 +193,7 @@ The commands keep the meaning they have today. `join`, `actas` and `drop` bind a
 
 Two changes you will notice directly, enabled by one storage change each:
 
-**Your agent is (team, name), nothing more.** Today the store keys a registration by (team, name, *tool type*), so "the same agent" on Claude Code and on Codex are two different registrations. That is the root cause of duplicate-registration confusion users have reported, and the reason ownership checks on leave / despawn are hard to add. After the change, `bob` is `bob` — whichever tool it happens to be running on today — and "who may remove bob" finally has a single answer to attach rules to. Folding the old keys together is part of the store switch: where two registrations would become one name, the migration finds that and asks you which to keep, instead of silently picking one.
+**Your agent is (team, name), nothing more.** Today the store keys a registration by (team, name, *tool type*), so "the same agent" on Claude Code and on Codex are two different registrations. That is the root cause of duplicate-registration confusion users have reported, and the reason ownership checks on leave / despawn are hard to add. After the change, `bob` is `bob` — whichever tool it happens to be running on today — and "who may remove bob" finally has a single answer to attach rules to. Folding the old keys together is part of the store switch. Several registrations under one name (say `bob` on Claude Code and `bob` on Codex) are fine: both stay, and as today only one session can hold the name at a time. The switch stops and asks you to choose only when the fold would be ambiguous: the same name carries two different member ids, or two live owners claim it. It never silently picks one.
 
 **Messages to groups, with per-recipient tracking.** A message can address a tag — say `#devs` — and every member holding that tag gets its own notification and its own noticed/read state. Concretely, the delivery marks move off the message row into one row per (message, recipient). Illustratively (the actual tables are settled in the architecture design):
 
@@ -321,8 +322,9 @@ Migration facts:
 - **Upgrade every machine to 1.3.1 or later before the release that adds the shared id.** Versions 1.3.0 and earlier are not supported with it: they do not stop, but they set each new message aside one by one without telling anyone. Upgrading brings those messages back (for encrypted teams, as long as the key they were sealed with is still there).
 - **Encrypted teams: upgrade before rotating keys.** A row set aside and sealed with a key that is gone afterwards cannot be recovered. Such rows are counted and shown as unrecoverable, never dropped silently.
 - **The switch to the new store cannot be undone.** Back up first. It is the one step in the whole design that cannot be reversed, and it ships as a major version (2.0.0). Everything else can be stopped: the new message fields only add, the re-read is idempotent, and the groundwork and the daemon can be turned off.
-- Existing read state is copied into the new receipts. Existing unread messages stay unread; after the switch, the first notification is a single line — "N unread from before the migration" — and that line does not mark anything read.
-- Where two old registrations fold into one name, the migration asks you which to keep (see above).
+- Existing read state carries over. Existing unread messages stay unread; after the switch, the first notification is a single line — "N unread from before the migration" — and that line does not mark anything read.
+- Before 2.0.0, `agmsg migrate --check` runs the exact 2.0.0 switch on a consistent copy of your store and reports what it would do (lost or duplicated messages, read counts, name folds that need your choice, rows it cannot take in, time taken). It never touches the real store. Where a name fold is ambiguous, the switch waits for your choice (see above).
+- Nothing is double-written to new tables during 1.x: the switch reads the current tables directly.
 - The bash + sqlite dependency line for plain messaging is kept on purpose: a machine that cannot run Node can still send and read.
 - The Codex bridge is not deleted on day one: it becomes opt-in, off by default, for the one uncovered case (a Codex session with no pane, sitting idle).
 
@@ -338,6 +340,8 @@ Migration facts:
 - **Despawn** by the daemon is graceful only; queued requests expire.
 - **Without the daemon**, Claude Code keeps a thin automatic delivery; the first version said none.
 - **The Codex desktop app** is out of the first version.
+- **Release order:** the new store and the daemon ship together as 2.0.0, validated with release candidates, instead of the store first and the daemon later. 1.x gains `agmsg migrate --check` and a warning at join.
+- **Name folding** stops only on real ambiguity (two ids, or two live owners for one name); several registrations under one name are fine.
 - **New sections:** external tools, and seeing what the daemon is doing.
 
 ## Open questions (where comments help most)
