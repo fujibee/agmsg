@@ -1881,22 +1881,48 @@ export default function App() {
     async (current: string, next: string) => {
       const { command, args } = teamActionInvocation("renameTeam", current, { nextName: next });
       await invoke(command, args);
-      await loadTeams();
-      if (team === current) setTeam(next);
-      // A window's `team` and lastActiveTabByTeam's keys are otherwise
-      // untouched by rename-team.sh (it only repoints the core's own
-      // records) — without this, every tab spawned under the old name
-      // stays tagged with it, and the sidebar (which only ever renders
-      // `w.team === team` for the current, now-renamed team) hides them:
-      // PTYs stay alive, tabs just vanish (found in live testing).
+
+      // Everything from here on assumes the rename itself already
+      // succeeded — never move this above the invoke, or into a
+      // try/finally that would also run when the core refused it (#1500
+      // review, round 2). A window's `team` and lastActiveTabByTeam's keys
+      // are otherwise untouched by rename-team.sh (it only repoints the
+      // core's own records) — without this, every tab spawned under the
+      // old name stays tagged with it, and the sidebar (which only ever
+      // renders `w.team === team` for the current, now-renamed team) hides
+      // them: PTYs stay alive, tabs just vanish (found in live testing).
+      // Done before loadTeams(), not after: if that read then fails, the
+      // app must not still be pointing at a name that no longer exists on
+      // disk (a retry with the old name would fail confusingly).
       setWindows((prev) => renameTeamInWindows(prev, current, next));
       lastActiveTabByTeam.current = renameTeamKey(lastActiveTabByTeam.current, current, next);
+      if (team === current) {
+        // The team-change layout effect below writes
+        // lastActiveTabByTeam[prevTeamRef.current] = active on every
+        // `team` change, BEFORE updating prevTeamRef itself — if it still
+        // held the old name when setTeam(next) triggers that effect, its
+        // own write would resurrect the very key just removed above.
+        // Setting it here, in the same step as setTeam, means that write
+        // lands on the new key instead (an idempotent no-op).
+        prevTeamRef.current = next;
+        setTeam(next);
+      }
       // Guarded the same way as deleteTeam's onClose: closing the modal
       // early (while this is still in flight, #1484 review round 2) and
       // opening a different one before this resolves must not have this
       // stale completion clobber it back to null.
       setModal((cur) => (shouldClearModalOnClose(cur, "renameTeam") ? null : cur));
       pushCompletionNotice("success", renameTeamToast(current, next));
+
+      // The rename already succeeded — a failure here just means the
+      // sidebar's team list is stale until the next refresh, not that the
+      // rename failed, so it gets its own notice rather than surfacing as
+      // if renaming itself had been refused.
+      try {
+        await loadTeams();
+      } catch (e) {
+        pushCompletionNotice("error", actionFailedToast(String(e)));
+      }
     },
     [team, loadTeams, pushCompletionNotice],
   );

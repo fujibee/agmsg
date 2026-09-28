@@ -405,4 +405,18 @@ describe("renameTeamKey", () => {
     const byTeam = { "other-team": "w-3" };
     expect(renameTeamKey(byTeam, "old-team", "new-team")).toBe(byTeam);
   });
+
+  it("leaves only the new team's key once prevTeamRef is also updated (#1500 review, round 2)", () => {
+    // Renaming the CURRENTLY active team also triggers the team-change
+    // layout effect (setTeam(next) changes `team`), which writes
+    // lastActiveTabByTeam[prevTeamRef.current] = active on every team
+    // change — BEFORE updating prevTeamRef itself. onRenameTeam sets
+    // prevTeamRef.current = next in the same step as setTeam(next), so
+    // that write lands on the already-renamed key (idempotent) instead of
+    // resurrecting the old one this rekey just removed.
+    let byTeam = renameTeamKey({ "old-team": "w-1" }, "old-team", "new-team");
+    const prevTeamRefAfterFix = "new-team";
+    byTeam = { ...byTeam, [prevTeamRefAfterFix]: "w-1" };
+    expect(Object.keys(byTeam)).toEqual(["new-team"]);
+  });
 });
