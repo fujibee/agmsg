@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-09-28
+
+### Added
+- Add --delete and --purge-messages to team.sh (#1475) (#1482)
+- Add --force to team.sh --delete for teams with members (#1493) (#1494)
+- Report when a Codex config is missing this install's writable_roots, with the command that fixes it (#1477) (#1483)
+
+### Fixed
+- Let a live seat take a pane a dead session's record still claims (#1485) (#1486)
+- Name a missing age binary, and surface the last fatal on status (#1487) (#1488)
+
+### Documentation
+- Update the RFC to the approved design and add the architecture design (#1492)
+
+[1.5.1]: https://github.com/fujibee/agmsg/compare/v1.5.0...v1.5.1
+
 ## [1.5.0] - 2026-09-25
 
 ### Added
