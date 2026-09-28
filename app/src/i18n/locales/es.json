@@ -102,8 +102,9 @@
       "title": "¿Eliminar el equipo «{{team}}»?",
       "body": "Esto elimina permanentemente el equipo «{{team}}»: su configuración, lista de miembros, historial de identidad y los registros de ejecución de cada agente. Esta acción no se puede deshacer. Si estaba conectado a un remoto, volver a conectarlo más tarde puede restaurarlo.",
       "confirmLabel": "Eliminar equipo",
-      "forceLabel": "Eliminar de todos modos (quitar a todos los miembros)",
-      "purgeMessagesToo": "Eliminar también el historial de mensajes"
+      "forceLabel": "Eliminar con los miembros",
+      "purgeMessagesToo": "Eliminar también el historial de mensajes",
+      "membersRemainBody": "Este equipo tiene {{count}} miembro(s). ¿Quitarlos a todos del equipo y eliminarlo?"
     },
     "purgeMessages": {
       "title": "¿Purgar el historial de mensajes del equipo «{{team}}»?",
@@ -153,6 +154,13 @@
       "body": "Esto detendrá {{name}}. No se puede deshacer.",
       "confirmLabel": "Cerrar panel"
     }
+  },
+  "toast": {
+    "renameTeam": "Equipo «{{from}}» renombrado a «{{to}}».",
+    "deleteTeam": "Equipo «{{team}}» eliminado.",
+    "deleteTeamForce": "Equipo «{{team}}» eliminado (se quitaron {{count}} miembro(s)).",
+    "purgeMessages": "Mensajes del equipo «{{team}}» eliminados.",
+    "actionFailed": "Error: {{reason}}"
   },
   "ctxMenu": {
     "member": {

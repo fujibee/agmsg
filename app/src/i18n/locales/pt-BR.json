@@ -102,8 +102,9 @@
       "title": "Excluir a equipe '{{team}}'?",
       "body": "Isso exclui permanentemente a equipe '{{team}}': sua configuração, lista de membros, histórico de identidade e os registros de execução de cada agente. Essa ação não pode ser desfeita. Se estava conectada a um remoto, reconectar depois pode restaurá-la.",
       "confirmLabel": "Excluir equipe",
-      "forceLabel": "Excluir mesmo assim (remover todos os membros)",
-      "purgeMessagesToo": "Excluir também o histórico de mensagens"
+      "forceLabel": "Excluir com os membros",
+      "purgeMessagesToo": "Excluir também o histórico de mensagens",
+      "membersRemainBody": "Esta equipe tem {{count}} membro(s). Removê-los todos da equipe e excluí-la?"
     },
     "purgeMessages": {
       "title": "Limpar o histórico de mensagens da equipe '{{team}}'?",
@@ -153,6 +154,13 @@
       "body": "Isso vai parar {{name}}. Isso não pode ser desfeito.",
       "confirmLabel": "Fechar painel"
     }
+  },
+  "toast": {
+    "renameTeam": "Equipe '{{from}}' renomeada para '{{to}}'.",
+    "deleteTeam": "Equipe '{{team}}' excluída.",
+    "deleteTeamForce": "Equipe '{{team}}' excluída (removidos {{count}} membro(s)).",
+    "purgeMessages": "Mensagens da equipe '{{team}}' excluídas.",
+    "actionFailed": "Falhou: {{reason}}"
   },
   "ctxMenu": {
     "member": {

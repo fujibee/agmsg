@@ -102,8 +102,9 @@
       "title": "チーム「{{team}}」を削除しますか？",
       "body": "これによりチーム「{{team}}」の設定・名簿・識別情報の履歴・各エージェントの実行記録が完全に削除されます。この操作は元に戻せません。リモートに接続されていた場合、後で再接続すると復元できることがあります。",
       "confirmLabel": "チームを削除",
-      "forceLabel": "それでも消す（メンバーを全員外す）",
-      "purgeMessagesToo": "メッセージ履歴も削除する"
+      "forceLabel": "メンバーごと削除",
+      "purgeMessagesToo": "メッセージ履歴も削除する",
+      "membersRemainBody": "このチームにはメンバーが{{count}}人います。全員をチームから外して、チームを削除しますか？"
     },
     "purgeMessages": {
       "title": "チーム「{{team}}」のメッセージ履歴を消去しますか？",
@@ -153,6 +154,13 @@
       "body": "{{name}} が停止します。元に戻せません。",
       "confirmLabel": "ペインを閉じる"
     }
+  },
+  "toast": {
+    "renameTeam": "チーム「{{from}}」の名前を「{{to}}」に変えました。",
+    "deleteTeam": "チーム「{{team}}」を削除しました。",
+    "deleteTeamForce": "チーム「{{team}}」を削除しました（メンバー{{count}}人を外しました）。",
+    "purgeMessages": "チーム「{{team}}」のメッセージを削除しました。",
+    "actionFailed": "失敗しました: {{reason}}"
   },
   "ctxMenu": {
     "member": {

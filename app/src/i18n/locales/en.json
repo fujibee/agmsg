@@ -112,8 +112,9 @@
       "title": "Delete team '{{team}}'?",
       "body": "This permanently deletes team '{{team}}': its configuration, roster, identity history, and per-agent runtime records. This cannot be undone. If it was connected to a remote, reconnecting later can bring it back.",
       "confirmLabel": "Delete team",
-      "forceLabel": "Delete anyway (remove all members)",
-      "purgeMessagesToo": "Also delete message history"
+      "forceLabel": "Delete with members",
+      "purgeMessagesToo": "Also delete message history",
+      "membersRemainBody": "This team has {{count}} member(s). Remove them all from the team and delete it?"
     },
     "purgeMessages": {
       "title": "Purge message history for team '{{team}}'?",
@@ -163,6 +164,13 @@
       "body": "This stops {{name}}. This can't be undone.",
       "confirmLabel": "Close pane"
     }
+  },
+  "toast": {
+    "renameTeam": "Renamed team '{{from}}' to '{{to}}'.",
+    "deleteTeam": "Deleted team '{{team}}'.",
+    "deleteTeamForce": "Deleted team '{{team}}' (removed {{count}} member(s)).",
+    "purgeMessages": "Deleted messages for team '{{team}}'.",
+    "actionFailed": "Failed: {{reason}}"
   },
   "ctxMenu": {
     "member": {

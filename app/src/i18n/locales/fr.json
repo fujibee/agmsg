@@ -102,8 +102,9 @@
       "title": "Supprimer l'équipe « {{team}} » ?",
       "body": "Cela supprime définitivement l'équipe « {{team}} » : sa configuration, sa liste de membres, son historique d'identité et les enregistrements d'exécution de chaque agent. Cette action est irréversible. Si elle était connectée à un serveur distant, une reconnexion ultérieure peut la restaurer.",
       "confirmLabel": "Supprimer l'équipe",
-      "forceLabel": "Supprimer quand même (retirer tous les membres)",
-      "purgeMessagesToo": "Supprimer aussi l'historique des messages"
+      "forceLabel": "Supprimer avec les membres",
+      "purgeMessagesToo": "Supprimer aussi l'historique des messages",
+      "membersRemainBody": "Cette équipe compte {{count}} membre(s). Les retirer tous de l'équipe et la supprimer ?"
     },
     "purgeMessages": {
       "title": "Purger l'historique des messages de l'équipe « {{team}} » ?",
@@ -153,6 +154,13 @@
       "body": "Cela arrêtera {{name}}. Cette action est irréversible.",
       "confirmLabel": "Fermer le panneau"
     }
+  },
+  "toast": {
+    "renameTeam": "Équipe « {{from}} » renommée en « {{to}} ».",
+    "deleteTeam": "Équipe « {{team}} » supprimée.",
+    "deleteTeamForce": "Équipe « {{team}} » supprimée ({{count}} membre(s) retiré(s)).",
+    "purgeMessages": "Messages de l'équipe « {{team}} » supprimés.",
+    "actionFailed": "Échec : {{reason}}"
   },
   "ctxMenu": {
     "member": {

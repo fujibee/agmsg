@@ -378,6 +378,11 @@ select:focus {
   border-radius: 6px;
   padding: 7px 14px;
   cursor: pointer;
+  /* A long label ("Delete anyway...", or a longer translation of it) must
+     not wrap onto a second line inside the button — flex-end + no wrapping
+     keeps every modal's action row a single right-aligned line, each
+     button sized to its own text (#1484 review, round 3). */
+  white-space: nowrap;
 }
 .modal-actions button.primary {
   background: var(--accent);
@@ -401,8 +406,14 @@ select:focus {
 .modal.busy input {
   cursor: wait;
 }
-.modal-checkbox {
+/* `.modal label` above (column, for a text-input's label-above-field
+   layout) has the same specificity as a bare `.modal-checkbox` rule and
+   wins on source order, forcing the checkbox onto its own centered line
+   with the text below it — `.modal label.modal-checkbox` is one class more
+   specific, so this reliably wins instead (#1484 review, round 3). */
+.modal label.modal-checkbox {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 6px;
   font-size: 12px;
@@ -411,6 +422,27 @@ select:focus {
 }
 .modal-checkbox input {
   margin: 0;
+}
+/* Bottom-of-screen completion toast (#1484 review, round 3: rename/delete-
+   team/delete-messages had no feedback at all once their modal was
+   closed). Above modal-backdrop's z-index so it stays visible even if a
+   different modal opened in the meantime. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: 80vw;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  white-space: pre-wrap;
 }
 
 .link {

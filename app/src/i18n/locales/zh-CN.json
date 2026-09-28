@@ -102,8 +102,9 @@
       "title": "删除团队“{{team}}”？",
       "body": "这将永久删除团队“{{team}}”：其配置、成员名单、身份历史记录以及各代理的运行记录。此操作无法撤销。如果它曾连接到远程服务器，之后重新连接可以将其恢复。",
       "confirmLabel": "删除团队",
-      "forceLabel": "仍然删除（移除所有成员）",
-      "purgeMessagesToo": "同时删除消息记录"
+      "forceLabel": "连同成员一起删除",
+      "purgeMessagesToo": "同时删除消息记录",
+      "membersRemainBody": "该团队还有 {{count}} 名成员。要将他们全部移出团队并删除该团队吗？"
     },
     "purgeMessages": {
       "title": "清除团队“{{team}}”的消息记录？",
@@ -153,6 +154,13 @@
       "body": "这将停止 {{name}}。此操作无法撤销。",
       "confirmLabel": "关闭面板"
     }
+  },
+  "toast": {
+    "renameTeam": "已将团队“{{from}}”重命名为“{{to}}”。",
+    "deleteTeam": "已删除团队“{{team}}”。",
+    "deleteTeamForce": "已删除团队“{{team}}”（已移除 {{count}} 名成员）。",
+    "purgeMessages": "已删除团队“{{team}}”的消息。",
+    "actionFailed": "失败：{{reason}}"
   },
   "ctxMenu": {
     "member": {

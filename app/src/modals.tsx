@@ -332,11 +332,23 @@ export function RenameModal(props: {
   current: string;
   onRename: (current: string, next: string) => Promise<void>;
   onClose: () => void;
+  // Called instead of the inline error when this modal was already closed
+  // (the user dismissed it while the rename was still running — closing no
+  // longer waits for it, #1484 review round 2) by the time onRename
+  // rejects: there's no dialog left to show the reason in, so the caller
+  // surfaces it another way (a toast, #1484 review round 3). Optional —
+  // callers that don't need this (the pre-existing member-rename flow)
+  // simply omit it and keep today's silent-on-close-then-fail behavior.
+  onDismissedFailure?: (message: string) => void;
 }) {
   const { t } = useTranslation();
   const [next, setNext] = useState(props.current);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
   const submit = async () => {
     if (!next.trim() || next.trim() === props.current) return;
     setErr("");
@@ -344,7 +356,9 @@ export function RenameModal(props: {
     try {
       await props.onRename(props.current, next.trim());
     } catch (e) {
-      setErr(String(e));
+      const message = String(e);
+      if (mountedRef.current) setErr(message);
+      else props.onDismissedFailure?.(message);
     } finally {
       setBusy(false);
     }
@@ -390,10 +404,16 @@ export function ConfirmModal(props: {
   // a non-promise resolves immediately.
   onConfirm: () => void | Promise<void>;
   onClose: () => void;
+  // See RenameModal's own doc for this — same reasoning, same optionality.
+  onDismissedFailure?: (message: string) => void;
 }) {
   const { t } = useTranslation();
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
   const submit = async () => {
     setErr("");
     setBusy(true);
@@ -401,7 +421,9 @@ export function ConfirmModal(props: {
       await props.onConfirm();
       props.onClose();
     } catch (e) {
-      setErr(String(e));
+      const message = String(e);
+      if (mountedRef.current) setErr(message);
+      else props.onDismissedFailure?.(message);
     } finally {
       setBusy(false);
     }
@@ -428,47 +450,58 @@ export function ConfirmModal(props: {
 }
 
 /**
- * Whether a message from run_script's Err is team.sh's specific "members
- * still present" refusal for --delete (#1493): "Team '<team>' still has N
- * member(s); refusing --delete." Matched by the "still has N member(s);
- * refusing --delete" shape rather than a bare "refusing --delete" substring
- * (#1484 review, round 2) — a team name can contain spaces and hyphens, so
- * a team literally named e.g. "refusing --delete" would make an UNRELATED
- * refusal (the active-remote-binding one, which says "refusing to delete")
- * spuriously match a plain substring check purely because the name itself
- * got interpolated into that other message. The count-and-phrase shape
- * anchors on text team.sh always emits itself, never on the team name.
- * Exported as a pure predicate so DeleteTeamModal's escalation-to-force
- * logic is unit-testable without mounting it or a real Tauri backend.
+ * The member count from team.sh's specific "members still present" refusal
+ * for --delete (#1493): "Team '<team>' still has N member(s); refusing
+ * --delete." — null for every other message. Matched by the "still has N
+ * member(s); refusing --delete" shape rather than a bare "refusing
+ * --delete" substring (#1484 review, round 2) — a team name can contain
+ * spaces and hyphens, so a team literally named e.g. "refusing --delete"
+ * would make an UNRELATED refusal (the active-remote-binding one, which
+ * says "refusing to delete") spuriously match a plain substring check
+ * purely because the name itself got interpolated into that other message.
+ * The count-and-phrase shape anchors on text team.sh always emits itself,
+ * never on the team name. Exported as a pure function so
+ * DeleteTeamModal's escalation-to-force switch is unit-testable without
+ * mounting it or a real Tauri backend.
  */
-export function isMembersRemainError(message: string): boolean {
-  return /still has \d+ member\(s\); refusing --delete/.test(message);
+export function membersRemainCount(message: string): number | null {
+  const match = message.match(/still has (\d+) member\(s\); refusing --delete/);
+  return match ? Number(match[1]) : null;
 }
 
 /**
  * The team-delete confirmation (#1479/#1484). Unlike the generic
- * ConfirmModal, this one can escalate in place: an app-created team always
- * has an app-user member, so a plain --delete is refused with
- * isMembersRemainError's text (#1493) — once that happens, a second,
- * more destructive "delete anyway" action appears (team.sh --delete
- * --force, not yet on main as of this writing; core work in progress),
- * alongside an opt-in checkbox to also purge message history in the same
- * call. The plain delete button stays available too, in case the refusal
- * was transient (e.g. a member left in the meantime).
+ * ConfirmModal, this one can switch views in place: an app-created team
+ * always has an app-user member, so a plain --delete is refused with
+ * membersRemainCount's text (#1493) — once that happens, the plain confirm
+ * is replaced by a "remove every member, then delete" confirm (team.sh
+ * --delete --force, not yet on main as of this writing; core work in
+ * progress), with the CLI's own English refusal text swapped for a
+ * translated one naming the member count, plus an opt-in checkbox to also
+ * purge message history in the same call (#1484 review, round 3 — live
+ * testing found the plain force+checkbox layout confusing). A refusal for any
+ * OTHER reason (active remote binding, jsonl) stays on the plain confirm
+ * and still shows that reason as-is, unchanged.
  */
 export function DeleteTeamModal(props: {
   title: string;
   body: string;
   confirmLabel: string;
   onConfirm: () => Promise<void>;
-  onConfirmForce: (purgeMessages: boolean) => Promise<void>;
+  onConfirmForce: (purgeMessages: boolean, memberCount: number) => Promise<void>;
   onClose: () => void;
+  // See RenameModal's own doc for this — same reasoning.
+  onDismissedFailure?: (message: string) => void;
 }) {
   const { t } = useTranslation();
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [membersRemain, setMembersRemain] = useState(false);
+  const [memberCount, setMemberCount] = useState<number | null>(null);
   const [purgeMessages, setPurgeMessages] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
 
   const attempt = async (run: () => Promise<void>) => {
     setErr("");
@@ -478,8 +511,13 @@ export function DeleteTeamModal(props: {
       props.onClose();
     } catch (e) {
       const message = String(e);
-      setErr(message);
-      if (isMembersRemainError(message)) setMembersRemain(true);
+      if (!mountedRef.current) {
+        props.onDismissedFailure?.(message);
+        return;
+      }
+      const count = membersRemainCount(message);
+      if (count !== null) setMemberCount(count);
+      else setErr(message);
     } finally {
       setBusy(false);
     }
@@ -487,9 +525,11 @@ export function DeleteTeamModal(props: {
 
   return (
     <Modal title={props.title} onClose={props.onClose} busy={busy}>
-      <p className="modal-note">{props.body}</p>
+      <p className="modal-note">
+        {memberCount !== null ? t("modal.deleteTeam.membersRemainBody", { count: memberCount }) : props.body}
+      </p>
       {err && <div className="modal-err">{err}</div>}
-      {membersRemain && (
+      {memberCount !== null && (
         <label className="modal-checkbox">
           <input
             type="checkbox"
@@ -504,24 +544,20 @@ export function DeleteTeamModal(props: {
         <button type="button" onClick={props.onClose}>
           {t("common.cancel")}
         </button>
-        {membersRemain && (
+        {memberCount !== null ? (
           <button
             type="button"
             className="primary danger"
-            onClick={() => attempt(() => props.onConfirmForce(purgeMessages))}
+            onClick={() => attempt(() => props.onConfirmForce(purgeMessages, memberCount))}
             disabled={busy}
           >
             {busy ? t("modal.confirm.workingLabel") : t("modal.deleteTeam.forceLabel")}
           </button>
+        ) : (
+          <button type="button" className="primary danger" onClick={() => attempt(props.onConfirm)} disabled={busy}>
+            {busy ? t("modal.confirm.workingLabel") : props.confirmLabel}
+          </button>
         )}
-        <button
-          type="button"
-          className="primary danger"
-          onClick={() => attempt(props.onConfirm)}
-          disabled={busy}
-        >
-          {busy ? t("modal.confirm.workingLabel") : props.confirmLabel}
-        </button>
       </div>
     </Modal>
   );

@@ -386,6 +386,29 @@ export function shouldClearModalOnClose(current: { kind: string } | null, ownKin
   return current?.kind === ownKind;
 }
 
+// A completion toast (#1484 review, round 3: rename/delete-team/delete-
+// messages gave no feedback at all once their modal had already closed).
+// Each builder returns the i18n key + interpolation vars rather than a
+// rendered string, so the wording itself stays in the i18n files and this
+// stays testable without a translation context. `pushToast` (below, inside
+// App) does the actual t() call at push time.
+export type ToastSpec = { key: string; vars?: Record<string, string | number> };
+export function renameTeamToast(from: string, to: string): ToastSpec {
+  return { key: "toast.renameTeam", vars: { from, to } };
+}
+export function deleteTeamToast(team: string): ToastSpec {
+  return { key: "toast.deleteTeam", vars: { team } };
+}
+export function deleteTeamForceToast(team: string, removedCount: number): ToastSpec {
+  return { key: "toast.deleteTeamForce", vars: { team, count: removedCount } };
+}
+export function purgeMessagesToast(team: string): ToastSpec {
+  return { key: "toast.purgeMessages", vars: { team } };
+}
+export function actionFailedToast(reason: string): ToastSpec {
+  return { key: "toast.actionFailed", vars: { reason } };
+}
+
 export default function App() {
   const { t } = useTranslation();
   // Set when a startup call that the whole app depends on (loading teams)
@@ -431,6 +454,25 @@ export default function App() {
   const [target, setTarget] = useState<string>("");
   const [draft, setDraft] = useState<string>("");
   const [modal, setModal] = useState<Modal>(null);
+  // Bottom-of-screen completion toast (#1484 review, round 3). `id`
+  // disambiguates its own auto-dismiss timer from a NEWER toast that has
+  // already replaced it by the time that timer fires.
+  const [toast, setToast] = useState<{ id: number; message: string } | null>(null);
+  const toastIdRef = useRef(0);
+  const pushToast = useCallback(
+    (spec: ToastSpec) => {
+      const id = ++toastIdRef.current;
+      setToast({ id, message: t(spec.key, spec.vars) });
+    },
+    [t],
+  );
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => {
+      setToast((cur) => (cur?.id === toast.id ? null : cur));
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
   const [newMenu, setNewMenu] = useState(false);
   const [cmdName, setCmdName] = useState("agmsg");
   const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
@@ -1794,8 +1836,9 @@ export default function App() {
       // opening a different one before this resolves must not have this
       // stale completion clobber it back to null.
       setModal((cur) => (shouldClearModalOnClose(cur, "renameTeam") ? null : cur));
+      pushToast(renameTeamToast(current, next));
     },
-    [team, loadTeams],
+    [team, loadTeams, pushToast],
   );
 
   // Delete/purge confirmation already happened in the UI (DeleteTeamModal /
@@ -1808,21 +1851,24 @@ export default function App() {
       await invoke(command, args);
       const loadedTeams = await loadTeams();
       settleActiveTeam(loadedTeams, name);
+      pushToast(deleteTeamToast(name));
     },
-    [loadTeams, settleActiveTeam],
+    [loadTeams, settleActiveTeam, pushToast],
   );
 
   // #1493 escalation: only reachable after onDeleteTeam above has already
-  // failed with isMembersRemainError (DeleteTeamModal gates showing the
-  // "delete anyway" button on that).
+  // failed with membersRemainCount (DeleteTeamModal gates showing the
+  // "delete with members" button on that, and hands back the count it
+  // already extracted from that refusal for the toast below).
   const onDeleteTeamForce = useCallback(
-    async (name: string, purgeMessages: boolean) => {
+    async (name: string, purgeMessages: boolean, memberCount: number) => {
       const { command, args } = teamActionInvocation("deleteTeamForce", name, { purgeMessages });
       await invoke(command, args);
       const loadedTeams = await loadTeams();
       settleActiveTeam(loadedTeams, name);
+      pushToast(deleteTeamForceToast(name, memberCount));
     },
-    [loadTeams, settleActiveTeam],
+    [loadTeams, settleActiveTeam, pushToast],
   );
 
   const onPurgeMessages = useCallback(
@@ -1830,8 +1876,19 @@ export default function App() {
       const { command, args } = teamActionInvocation("purgeMessages", name);
       await invoke(command, args);
       if (name === team) await loadRoomMessages(team);
+      pushToast(purgeMessagesToast(name));
     },
-    [team, loadRoomMessages],
+    [team, loadRoomMessages, pushToast],
+  );
+
+  // Only reachable when a rename/delete-team/delete-messages modal was
+  // already dismissed (closed while busy) by the time its action rejects —
+  // there's no dialog left to show the reason in, so it surfaces as a toast
+  // instead (#1484 review, round 3). A refusal the dialog is still open to
+  // show (e.g. members remain) never reaches this.
+  const onTeamActionDismissedFailure = useCallback(
+    (message: string) => pushToast(actionFailedToast(message)),
+    [pushToast],
   );
 
   const browseDir = useCallback(async (current: string): Promise<string | null> => {
@@ -2783,6 +2840,7 @@ export default function App() {
           current={modal.current}
           onRename={onRenameTeam}
           onClose={() => setModal((cur) => (shouldClearModalOnClose(cur, "renameTeam") ? null : cur))}
+          onDismissedFailure={onTeamActionDismissedFailure}
         />
       )}
       {modal?.kind === "deleteTeam" && (
@@ -2791,8 +2849,9 @@ export default function App() {
           body={t("modal.deleteTeam.body", { team: modal.name })}
           confirmLabel={t("modal.deleteTeam.confirmLabel")}
           onConfirm={() => onDeleteTeam(modal.name)}
-          onConfirmForce={(purgeMessages) => onDeleteTeamForce(modal.name, purgeMessages)}
+          onConfirmForce={(purgeMessages, memberCount) => onDeleteTeamForce(modal.name, purgeMessages, memberCount)}
           onClose={() => setModal((cur) => (shouldClearModalOnClose(cur, "deleteTeam") ? null : cur))}
+          onDismissedFailure={onTeamActionDismissedFailure}
         />
       )}
       {modal?.kind === "purgeMessages" && (
@@ -2803,6 +2862,7 @@ export default function App() {
           danger
           onConfirm={() => onPurgeMessages(modal.name)}
           onClose={() => setModal((cur) => (shouldClearModalOnClose(cur, "purgeMessages") ? null : cur))}
+          onDismissedFailure={onTeamActionDismissedFailure}
         />
       )}
       {modal?.kind === "settings" && (
@@ -3118,6 +3178,12 @@ export default function App() {
             </div>
           );
         })()}
+
+      {toast && (
+        <div className="toast" onClick={() => setToast(null)}>
+          {toast.message}
+        </div>
+      )}
     </div>
   );
 }

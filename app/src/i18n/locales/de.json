@@ -102,8 +102,9 @@
       "title": "Team „{{team}}“ löschen?",
       "body": "Dies löscht dauerhaft das Team „{{team}}“: seine Konfiguration, Mitgliederliste, den Identitätsverlauf und die Laufzeitdatensätze der einzelnen Agenten. Dies kann nicht rückgängig gemacht werden. War es mit einem Remote verbunden, kann eine spätere erneute Verbindung es wiederherstellen.",
       "confirmLabel": "Team löschen",
-      "forceLabel": "Trotzdem löschen (alle Mitglieder entfernen)",
-      "purgeMessagesToo": "Nachrichtenverlauf ebenfalls löschen"
+      "forceLabel": "Mit Mitgliedern löschen",
+      "purgeMessagesToo": "Nachrichtenverlauf ebenfalls löschen",
+      "membersRemainBody": "Dieses Team hat {{count}} Mitglied(er). Alle aus dem Team entfernen und es löschen?"
     },
     "purgeMessages": {
       "title": "Nachrichtenverlauf für Team „{{team}}“ löschen?",
@@ -153,6 +154,13 @@
       "body": "Dadurch wird {{name}} gestoppt. Dies kann nicht rückgängig gemacht werden.",
       "confirmLabel": "Panel schließen"
     }
+  },
+  "toast": {
+    "renameTeam": "Team „{{from}}“ in „{{to}}“ umbenannt.",
+    "deleteTeam": "Team „{{team}}“ gelöscht.",
+    "deleteTeamForce": "Team „{{team}}“ gelöscht ({{count}} Mitglied(er) entfernt).",
+    "purgeMessages": "Nachrichten für Team „{{team}}“ gelöscht.",
+    "actionFailed": "Fehlgeschlagen: {{reason}}"
   },
   "ctxMenu": {
     "member": {
