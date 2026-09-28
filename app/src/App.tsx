@@ -154,6 +154,36 @@ export function shellSplitStillValid(
   return windows.some((w) => w.id === windowId && w.team === requestedTeam);
 }
 
+// A window's `team` never changes after creation (see Window's own doc) —
+// EXCEPT that renaming the team itself must repoint every one of its
+// existing tabs at the new name, or the sidebar (which only ever renders
+// `w.team === team` for the CURRENT, now-renamed team) hides them: the PTYs
+// stay alive, but their tabs vanish from the tab bar with no way back to
+// them short of a restart. Pure so onRenameTeam's rekeying is
+// unit-testable without mounting the app or a real Tauri backend.
+export function renameTeamInWindows<T extends Pick<Window, "team">>(
+  windows: readonly T[],
+  oldTeam: string,
+  newTeam: string,
+): T[] {
+  return windows.map((w) => (w.team === oldTeam ? { ...w, team: newTeam } : w));
+}
+
+// Moves one team-keyed entry to its new key, leaving every other entry
+// untouched — used for lastActiveTabByTeam (below) and any other bit of
+// state keyed by team name a rename needs to follow. A no-op (same
+// reference back) when oldTeam never had an entry, so callers can apply it
+// unconditionally without a guard of their own.
+export function renameTeamKey<T>(
+  byTeam: Readonly<Record<string, T>>,
+  oldTeam: string,
+  newTeam: string,
+): Record<string, T> {
+  if (!(oldTeam in byTeam)) return byTeam;
+  const { [oldTeam]: value, ...rest } = byTeam;
+  return { ...rest, [newTeam]: value as T };
+}
+
 // C0 control characters (\u0000-\u001f) and DEL (\u007f) — legal in a
 // macOS/Linux filename, but this string is about to be written straight
 // into a PTY as literal input. A newline in a filename would submit
@@ -1853,6 +1883,14 @@ export default function App() {
       await invoke(command, args);
       await loadTeams();
       if (team === current) setTeam(next);
+      // A window's `team` and lastActiveTabByTeam's keys are otherwise
+      // untouched by rename-team.sh (it only repoints the core's own
+      // records) — without this, every tab spawned under the old name
+      // stays tagged with it, and the sidebar (which only ever renders
+      // `w.team === team` for the current, now-renamed team) hides them:
+      // PTYs stay alive, tabs just vanish (found in live testing).
+      setWindows((prev) => renameTeamInWindows(prev, current, next));
+      lastActiveTabByTeam.current = renameTeamKey(lastActiveTabByTeam.current, current, next);
       // Guarded the same way as deleteTeam's onClose: closing the modal
       // early (while this is still in flight, #1484 review round 2) and
       // opening a different one before this resolves must not have this

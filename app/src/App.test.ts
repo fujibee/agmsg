@@ -7,6 +7,8 @@ import {
   hasUnsafeDropPath,
   joinDroppedPaths,
   purgeMessagesToast,
+  renameTeamInWindows,
+  renameTeamKey,
   renameTeamToast,
   resolveFileDropTarget,
   shellPaneFrom,
@@ -359,5 +361,48 @@ describe("spawnTargetWindowId", () => {
 
   it("viewing a pane tab that belongs to another team -> a new tab (undefined)", () => {
     expect(spawnTargetWindowId(windows, "w-other-team", "alpha")).toBeUndefined();
+  });
+});
+
+describe("renameTeamInWindows", () => {
+  // Regression: a tab spawned under a team stayed tagged with that team's
+  // OLD name after a rename, and the sidebar only ever renders
+  // `w.team === team` for the current (now-renamed) team — so the tab's
+  // PTY kept running but its tab vanished from the tab bar entirely.
+  const windows = [
+    { id: "w-1", team: "old-team" },
+    { id: "w-2", team: "old-team" },
+    { id: "w-3", team: "other-team" },
+  ];
+
+  it("repoints every window tagged with the old team name to the new one", () => {
+    const result = renameTeamInWindows(windows, "old-team", "new-team");
+    expect(result.filter((w) => w.team === "new-team").map((w) => w.id)).toEqual(["w-1", "w-2"]);
+  });
+
+  it("leaves windows belonging to a different team untouched", () => {
+    const result = renameTeamInWindows(windows, "old-team", "new-team");
+    expect(result.find((w) => w.id === "w-3")).toEqual({ id: "w-3", team: "other-team" });
+  });
+
+  it("is a no-op when no window belongs to the renamed team", () => {
+    expect(renameTeamInWindows(windows, "nonexistent-team", "new-team")).toEqual(windows);
+  });
+});
+
+describe("renameTeamKey", () => {
+  // lastActiveTabByTeam (the other team-keyed state a rename must follow,
+  // same regression) is a Record<string, string>, but this is generic —
+  // any future team-keyed state can reuse it.
+  it("moves the old team's entry to the new key", () => {
+    expect(renameTeamKey({ "old-team": "w-1", "other-team": "w-3" }, "old-team", "new-team")).toEqual({
+      "other-team": "w-3",
+      "new-team": "w-1",
+    });
+  });
+
+  it("is a no-op (same reference) when the old team has no entry", () => {
+    const byTeam = { "other-team": "w-3" };
+    expect(renameTeamKey(byTeam, "old-team", "new-team")).toBe(byTeam);
   });
 });
