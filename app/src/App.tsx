@@ -369,14 +369,19 @@ export function teamActionInvocation(
   }
 }
 
-// Whether a ConfirmModal's onClose, firing right after a successful
-// onConfirm, should actually null out the modal — false when onConfirm's own
-// side effect already swapped in a DIFFERENT modal while it was in flight
-// (deleting the last team reopens the first-run "create a team" modal from
-// inside onDeleteTeam/settleActiveTeam) and this stale close would otherwise
-// clobber it (#1484 review). `current` is read as the latest pending
-// state via a functional setModal updater, not a stale closure, so this
-// correctly sees whatever onConfirm just set.
+// Whether a modal-closing call that fires after its own async action
+// settles should actually null out the modal slot — false when something
+// else already put a DIFFERENT modal there in the meantime. Two ways that
+// happens: (a) the action's own side effect swaps modals while still in
+// flight (deleting the last team reopens the first-run "create a team"
+// modal from inside onDeleteTeam/settleActiveTeam), or (b) the user closes
+// this modal early — closing no longer waits for the action to finish
+// (#1484 review, round 2: run_script has no timeout) — and opens an
+// unrelated one before the original action's own completion handler runs.
+// Either way, a stale, unconditional close would clobber whatever is
+// showing now. `current` is read as the latest pending state via a
+// functional setModal updater, not a stale closure, so this always sees
+// what's actually there.
 export function shouldClearModalOnClose(current: { kind: string } | null, ownKind: string): boolean {
   return current?.kind === ownKind;
 }
@@ -1784,7 +1789,11 @@ export default function App() {
       await invoke(command, args);
       await loadTeams();
       if (team === current) setTeam(next);
-      setModal(null);
+      // Guarded the same way as deleteTeam's onClose: closing the modal
+      // early (while this is still in flight, #1484 review round 2) and
+      // opening a different one before this resolves must not have this
+      // stale completion clobber it back to null.
+      setModal((cur) => (shouldClearModalOnClose(cur, "renameTeam") ? null : cur));
     },
     [team, loadTeams],
   );
@@ -2770,7 +2779,11 @@ export default function App() {
         />
       )}
       {modal?.kind === "renameTeam" && (
-        <RenameModal current={modal.current} onRename={onRenameTeam} onClose={() => setModal(null)} />
+        <RenameModal
+          current={modal.current}
+          onRename={onRenameTeam}
+          onClose={() => setModal((cur) => (shouldClearModalOnClose(cur, "renameTeam") ? null : cur))}
+        />
       )}
       {modal?.kind === "deleteTeam" && (
         <DeleteTeamModal
@@ -2789,7 +2802,7 @@ export default function App() {
           confirmLabel={t("modal.purgeMessages.confirmLabel")}
           danger
           onConfirm={() => onPurgeMessages(modal.name)}
-          onClose={() => setModal(null)}
+          onClose={() => setModal((cur) => (shouldClearModalOnClose(cur, "purgeMessages") ? null : cur))}
         />
       )}
       {modal?.kind === "settings" && (

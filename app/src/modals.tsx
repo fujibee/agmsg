@@ -26,10 +26,15 @@ export function shouldCloseOnEscape(e: Pick<KeyboardEvent, "key" | "isComposing"
 
 /**
  * Modal chrome: dimmed backdrop + centered card. `busy` (an action in
- * flight — a rename, a delete, ...) disables Escape/backdrop-click closing
- * and switches the cursor to "wait" over the whole card, so a long-running
- * agmsg script no longer just looks like the app hung (#1484 feedback: no
- * visible feedback while running).
+ * flight — a rename, a delete, ...) switches the cursor to "wait" over the
+ * whole card, so a long-running agmsg script no longer just looks like the
+ * app hung (#1484 feedback: no visible feedback while running). Closing
+ * (Escape, backdrop click, the Cancel button) stays available even while
+ * busy: run_script has no timeout, so if closing were blocked too, a script
+ * that never returns would wall off the whole app permanently instead of
+ * just leaving that one command running in the background (#1484 review,
+ * round 2) — closing here only dismisses the dialog, not the invoke() call
+ * already in flight.
  */
 function Modal(props: {
   title: string;
@@ -37,19 +42,19 @@ function Modal(props: {
   onClose?: () => void;
   busy?: boolean;
 }) {
-  const { onClose, busy } = props;
+  const { onClose } = props;
   useEffect(() => {
-    if (!onClose || busy) return;
+    if (!onClose) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (shouldCloseOnEscape(e)) onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, busy]);
+  }, [onClose]);
 
   return (
-    <div className="modal-backdrop" onClick={busy ? undefined : props.onClose}>
-      <div className={busy ? "modal busy" : "modal"} onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div className={props.busy ? "modal busy" : "modal"} onClick={(e) => e.stopPropagation()}>
         <div className="modal-title">{props.title}</div>
         {props.children}
       </div>
@@ -358,7 +363,7 @@ export function RenameModal(props: {
         </label>
         {err && <div className="modal-err">{err}</div>}
         <div className="modal-actions">
-          <button type="button" onClick={props.onClose} disabled={busy}>
+          <button type="button" onClick={props.onClose}>
             {t("common.cancel")}
           </button>
           <button
@@ -406,7 +411,7 @@ export function ConfirmModal(props: {
       <p className="modal-note">{props.body}</p>
       {err && <div className="modal-err">{err}</div>}
       <div className="modal-actions">
-        <button type="button" onClick={props.onClose} disabled={busy}>
+        <button type="button" onClick={props.onClose}>
           {t("common.cancel")}
         </button>
         <button
@@ -424,15 +429,20 @@ export function ConfirmModal(props: {
 
 /**
  * Whether a message from run_script's Err is team.sh's specific "members
- * still present" refusal for --delete (#1493) — its exact text
- * ("Team '<team>' still has N member(s); refusing --delete.") is matched by
- * the stable "refusing --delete" substring rather than the full sentence, so
- * this survives the team name or member count varying. Exported as a pure
- * predicate so DeleteTeamModal's escalation-to-force logic is unit-testable
- * without mounting it or a real Tauri backend.
+ * still present" refusal for --delete (#1493): "Team '<team>' still has N
+ * member(s); refusing --delete." Matched by the "still has N member(s);
+ * refusing --delete" shape rather than a bare "refusing --delete" substring
+ * (#1484 review, round 2) — a team name can contain spaces and hyphens, so
+ * a team literally named e.g. "refusing --delete" would make an UNRELATED
+ * refusal (the active-remote-binding one, which says "refusing to delete")
+ * spuriously match a plain substring check purely because the name itself
+ * got interpolated into that other message. The count-and-phrase shape
+ * anchors on text team.sh always emits itself, never on the team name.
+ * Exported as a pure predicate so DeleteTeamModal's escalation-to-force
+ * logic is unit-testable without mounting it or a real Tauri backend.
  */
 export function isMembersRemainError(message: string): boolean {
-  return message.includes("refusing --delete");
+  return /still has \d+ member\(s\); refusing --delete/.test(message);
 }
 
 /**
@@ -491,7 +501,7 @@ export function DeleteTeamModal(props: {
         </label>
       )}
       <div className="modal-actions">
-        <button type="button" onClick={props.onClose} disabled={busy}>
+        <button type="button" onClick={props.onClose}>
           {t("common.cancel")}
         </button>
         {membersRemain && (

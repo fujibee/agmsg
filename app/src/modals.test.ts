@@ -127,4 +127,18 @@ describe("isMembersRemainError", () => {
       ),
     ).toBe(false);
   });
+
+  it("does not misfire on an active-remote refusal just because the team NAME contains the substring 'refusing --delete'", () => {
+    // Regression (#1484 review, round 2): team names can contain spaces and
+    // hyphens, so a bare `message.includes("refusing --delete")` check
+    // would trivially match here too — the team's own name, not anything
+    // team.sh actually decided, is what put that text in the message. The
+    // active-binding refusal always says "refusing to delete", never
+    // "refusing --delete", so this must stay false regardless of the name.
+    expect(
+      isMembersRemainError(
+        "Team 'refusing --delete' is actively synced; refusing to delete or purge its data.\nDisconnect the sync binding first.",
+      ),
+    ).toBe(false);
+  });
 });
