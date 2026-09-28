@@ -474,6 +474,18 @@ pub struct AgentType {
     /// position `agmsg spawn` uses, so a pane spawned from the app gets the
     /// same extra flags a CLI-driven spawn would.
     pub options: Vec<String>,
+    /// This type's actas-prompt prefix (manifest `cmd_prefix=`), e.g. "$" for
+    /// opencode/codex/gemini/antigravity. None when the manifest omits it,
+    /// which means "/" — the same default scripts/lib/boot-command.sh's
+    /// agmsg_actas_prompt applies (#1007/#346: the frontend used to hardcode
+    /// "/" for every type instead of reading this).
+    pub cmd_prefix: Option<String>,
+    /// A flag whose VALUE must carry the actas prompt, for a CLI that
+    /// rejects it as a bare positional (manifest `prompt_arg=`), e.g.
+    /// opencode's `--prompt` or copilot's `--interactive`. None when the
+    /// prompt is passed positionally (claude-code). Mirrors the prompt half
+    /// of scripts/lib/boot-command.sh's agmsg_role_cli_args.
+    pub prompt_arg: Option<String>,
 }
 
 /// Read one key from a type.conf manifest (read-only key=value data, never
@@ -573,7 +585,9 @@ pub fn agmsg_spawnable_types() -> Result<Vec<AgentType>, String> {
             .unwrap_or_default();
         if !name.is_empty() {
             let options = spawn_options_tokens(&name);
-            types.push(AgentType { name, cli, options });
+            let cmd_prefix = manifest_get(&conf, "cmd_prefix");
+            let prompt_arg = manifest_get(&conf, "prompt_arg");
+            types.push(AgentType { name, cli, options, cmd_prefix, prompt_arg });
         }
     }
     types.sort_by(|a, b| a.name.cmp(&b.name));

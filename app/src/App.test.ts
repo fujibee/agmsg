@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  actasSpawnArgs,
   hasUnsafeDropPath,
   joinDroppedPaths,
   resolveFileDropTarget,
@@ -10,6 +11,20 @@ import {
   shouldSuppressClickAfterDrag,
   type LoginShellInfo,
 } from "./App";
+
+describe("actasSpawnArgs", () => {
+  it("claude-code: no cmd_prefix/prompt_arg -> bare '/<cmd> actas <name>' (unchanged)", () => {
+    expect(actasSpawnArgs("agmsg", "alice", null, null)).toEqual(["/agmsg actas alice"]);
+  });
+
+  it("opencode: cmd_prefix '$' and prompt_arg '--prompt' -> ['--prompt', '$<cmd> actas <name>']", () => {
+    expect(actasSpawnArgs("agmsg", "OC", "$", "--prompt")).toEqual(["--prompt", "$agmsg actas OC"]);
+  });
+
+  it("copilot: no cmd_prefix (defaults to '/') with prompt_arg '--interactive'", () => {
+    expect(actasSpawnArgs("agmsg", "X", null, "--interactive")).toEqual(["--interactive", "/agmsg actas X"]);
+  });
+});
 
 describe("shouldShowOutdatedBanner", () => {
   it("shows when outdated, not updating, and not dismissed", () => {

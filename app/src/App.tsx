@@ -292,7 +292,34 @@ export function shouldSuppressClickAfterDrag(dragFinish: DragFinishInfo, paneId:
   return dragFinish !== null && dragFinish.paneId === paneId && now - dragFinish.finishedAt < CLICK_SUPPRESS_WINDOW_MS;
 }
 // A spawnable agent type discovered from agmsg's type registry.
-export type AgentType = { name: string; cli: string; options: string[] };
+export type AgentType = {
+  name: string;
+  cli: string;
+  options: string[];
+  cmd_prefix: string | null;
+  prompt_arg: string | null;
+};
+
+// The trailing spawn args that hand a freshly launched CLI its identity:
+// the actas prompt (`<cmd_prefix><cmdName> actas <name>`, cmd_prefix
+// defaulting to "/"), wrapped for a type that requires it as a named flag's
+// VALUE rather than a bare positional (`prompt_arg`) — e.g. opencode needs
+// `--prompt '$agmsg actas NAME'`, copilot needs `--interactive "/agmsg actas
+// NAME"`. Mirrors scripts/lib/boot-command.sh's agmsg_actas_prompt plus the
+// prompt half of agmsg_role_cli_args exactly, which spawn.sh already uses —
+// this used to hardcode "/<cmdName> actas <name>" for every type regardless
+// of its manifest, so opencode/antigravity/codex/gemini (cmd_prefix "$") and
+// copilot/opencode/antigravity (prompt_arg) all launched with the wrong
+// shape (#1007, #346).
+export function actasSpawnArgs(
+  cmdName: string,
+  name: string,
+  cmdPrefix?: string | null,
+  promptArg?: string | null,
+): string[] {
+  const prompt = `${cmdPrefix || "/"}${cmdName} actas ${name}`;
+  return promptArg ? [promptArg, prompt] : [prompt];
+}
 
 // Whether the outdated-CLI banner should render. A pure function (rather
 // than an inline JSX condition) purely so it's unit-testable — pinning down
@@ -1018,11 +1045,15 @@ export default function App() {
       const types = await invoke<AgentType[]>("agmsg_spawnable_types").catch(() => spawnTypes);
       const freshCliFor = new Map(types.map((t) => [t.name, t.cli]));
       const freshOptionsFor = new Map(types.map((t) => [t.name, t.options]));
+      const freshCmdPrefixFor = new Map(types.map((t) => [t.name, t.cmd_prefix]));
+      const freshPromptArgFor = new Map(types.map((t) => [t.name, t.prompt_arg]));
       setSpawnTypes(types);
 
       const type = m.types.find((t) => freshCliFor.has(t));
       const cli = type ? freshCliFor.get(type)! : undefined;
       const options = type ? (freshOptionsFor.get(type) ?? []) : [];
+      const cmdPrefix = type ? freshCmdPrefixFor.get(type) : undefined;
+      const promptArg = type ? freshPromptArgFor.get(type) : undefined;
       // `native` = "this (type, project) actually self-delivers agmsg
       // messages" — asked from agmsg's own delivery.sh status (mode derived
       // from the project's real hooks file), NOT a static type.conf flag.
@@ -1042,16 +1073,17 @@ export default function App() {
       }
       const id = `${m.name}-${seq.current++}`;
       // Mirror agmsg spawn.sh: launch the CLI with any per-type spawn-options
-      // flags, then `/<cmd> actas <name>` as the final arg — same relative
-      // order spawn.sh splices them in — so the agent comes up as the real
-      // member (can send as itself, and self-delivers if its type monitors).
-      // Types with no spawnable CLI fall back to a shell.
+      // flags, then the actas prompt (shaped for this type — see
+      // actasSpawnArgs) as the final arg(s) — same relative order spawn.sh
+      // splices them in — so the agent comes up as the real member (can send
+      // as itself, and self-delivers if its type monitors). Types with no
+      // spawnable CLI fall back to a shell.
       const pane: Pane = cli
         ? {
             id,
             label: m.name,
             cmd: cli,
-            args: [...options, `/${cmdName} actas ${m.name}`],
+            args: [...options, ...actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg)],
             cwd: m.project || undefined,
             native: monitors,
           }
