@@ -116,7 +116,7 @@
       "title": "Nova equipe",
       "note": "Cria a equipe e adiciona você como app-user dela (o dono da caixa de chat inferior).",
       "teamNameLabel": "Nome da equipe",
-      "teamNamePlaceholder": "minha-equipe",
+      "teamNamePlaceholder": "ex.: minha-equipe",
       "appUserLabel": "Seu nome (app-user)",
       "create": "Criar"
     },
@@ -128,7 +128,7 @@
     "agent": {
       "title": "Adicionar agente",
       "typeLabel": "Tipo",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "ex.: alice",
       "addAndSpawn": "Adicionar e iniciar"
     },
     "rename": {

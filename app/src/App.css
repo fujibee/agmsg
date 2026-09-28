@@ -18,6 +18,22 @@
   box-sizing: border-box;
 }
 
+/* Every `input`/`textarea` here sets `color: var(--fg)` explicitly (the
+   normal, readable text color), which some engines then also apply to the
+   placeholder unless it's overridden separately — a real value and the
+   example text end up the same color, so a still-empty field (e.g. the "add
+   agent" name field, its placeholder "alice") reads as already filled in.
+   `opacity: 1` is deliberate too: without it a browser's own default
+   placeholder dimming stacks with this color, landing somewhere between
+   --muted and --fg rather than reliably at --muted everywhere the app runs.
+   One rule for every input in the app, not per-field, so every placeholder
+   stays visually distinct from typed text the same way. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
 html,
 body,
 #root {

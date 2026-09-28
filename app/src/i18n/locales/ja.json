@@ -116,7 +116,7 @@
       "title": "新しいチーム",
       "note": "チームを作成し、あなたをapp-user（下部チャットボックスの所有者）として追加します。",
       "teamNameLabel": "チーム名",
-      "teamNamePlaceholder": "my-team",
+      "teamNamePlaceholder": "例: my-team",
       "appUserLabel": "あなたの名前（app-user）",
       "create": "作成"
     },
@@ -128,7 +128,7 @@
     "agent": {
       "title": "エージェントを追加",
       "typeLabel": "タイプ",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "例: alice",
       "addAndSpawn": "追加して起動"
     },
     "rename": {

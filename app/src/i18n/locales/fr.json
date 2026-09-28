@@ -116,7 +116,7 @@
       "title": "Nouvelle équipe",
       "note": "Crée l'équipe et vous ajoute comme son app-user (le propriétaire de la zone de discussion en bas).",
       "teamNameLabel": "Nom de l'équipe",
-      "teamNamePlaceholder": "mon-equipe",
+      "teamNamePlaceholder": "p. ex. mon-equipe",
       "appUserLabel": "Votre nom (app-user)",
       "create": "Créer"
     },
@@ -128,7 +128,7 @@
     "agent": {
       "title": "Ajouter un agent",
       "typeLabel": "Type",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "p. ex. alice",
       "addAndSpawn": "Ajouter et démarrer"
     },
     "rename": {

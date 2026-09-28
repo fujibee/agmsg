@@ -116,7 +116,7 @@
       "title": "新建团队",
       "note": "创建团队，并将你添加为该团队的 app-user（底部聊天框的所有者）。",
       "teamNameLabel": "团队名称",
-      "teamNamePlaceholder": "my-team",
+      "teamNamePlaceholder": "例如：my-team",
       "appUserLabel": "你的名字（app-user）",
       "create": "创建"
     },
@@ -128,7 +128,7 @@
     "agent": {
       "title": "添加智能体",
       "typeLabel": "类型",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "例如：alice",
       "addAndSpawn": "添加并启动"
     },
     "rename": {

@@ -116,7 +116,7 @@
       "title": "새 팀",
       "note": "팀을 만들고 본인을 app-user(하단 채팅창의 소유자)로 추가합니다.",
       "teamNameLabel": "팀 이름",
-      "teamNamePlaceholder": "my-team",
+      "teamNamePlaceholder": "예: my-team",
       "appUserLabel": "본인 이름 (app-user)",
       "create": "만들기"
     },
@@ -128,7 +128,7 @@
     "agent": {
       "title": "에이전트 추가",
       "typeLabel": "유형",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "예: alice",
       "addAndSpawn": "추가 후 실행"
     },
     "rename": {
