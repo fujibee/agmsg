@@ -132,6 +132,17 @@ jobs:
           security create-keychain -p "" "$KEYCHAIN"
           security default-keychain -s "$KEYCHAIN"
           security unlock-keychain -p "" "$KEYCHAIN"
+          # The default keychain auto-relocks after 5 minutes of inactivity.
+          # That was never a problem for an arm64-only build (compile + sign
+          # finished in ~3m total), but the universal build's two-target
+          # compile alone now runs ~9m, so by the time codesign ran the
+          # keychain had already relocked and it hung waiting on a password
+          # prompt nothing could answer (observed: run 36388025421, "Import
+          # Developer ID certificate"/codesign stuck ~90m before cancellation
+          # — #1491 review). Raise the timeout-lock interval (-u -t) to 6h
+          # instead of the 5m default; -l (lock on sleep) is a no-op here,
+          # a CI runner never sleeps.
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
           echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > cert.p12
           security import cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN"
