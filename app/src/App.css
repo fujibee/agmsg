@@ -36,26 +36,38 @@ body,
 
 /* These sit at the very top of the window, same row as the overlaid macOS
    traffic lights (titleBarStyle: Overlay) — left padding clears them
-   horizontally, same idea as .sidebar-head's top padding does vertically. */
-.startup-error-banner {
+   horizontally, same idea as .sidebar-head's top padding does vertically.
+   Shared by the startup notices (install/update outcomes) and the team
+   action completion notice (#1484 review, round 6 — one consistent notice
+   style instead of the separate bottom toast this replaced) — .success/
+   .error only change color; layout is identical. */
+.notice-banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 8px 14px 8px 80px;
-  background: #4a1f1f;
-  color: #ffd7d7;
   font-size: 12px;
-  border-bottom: 1px solid #6b2b2b;
+  border-bottom: 1px solid;
 }
-.startup-error-banner button {
+.notice-banner button {
   background: transparent;
-  border: 1px solid #ffd7d7;
-  color: #ffd7d7;
+  border: 1px solid currentColor;
+  color: inherit;
   border-radius: 4px;
   padding: 2px 8px;
   cursor: pointer;
   flex-shrink: 0;
+}
+.notice-banner.error {
+  background: #4a1f1f;
+  color: #ffd7d7;
+  border-bottom-color: #6b2b2b;
+}
+.notice-banner.success {
+  background: #1f4a2c;
+  color: #c8f7d4;
+  border-bottom-color: #2b6b41;
 }
 
 .startup-installing-banner {
@@ -107,27 +119,6 @@ body,
 }
 .startup-outdated-banner .startup-outdated-banner-dismiss:hover {
   opacity: 1;
-}
-
-.startup-success-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 14px 8px 80px;
-  background: #1f4a2c;
-  color: #c8f7d4;
-  font-size: 12px;
-  border-bottom: 1px solid #2b6b41;
-}
-.startup-success-banner button {
-  background: transparent;
-  border: 1px solid #c8f7d4;
-  color: #c8f7d4;
-  border-radius: 4px;
-  padding: 2px 8px;
-  cursor: pointer;
-  flex-shrink: 0;
 }
 
 /* Top bar */
@@ -422,27 +413,6 @@ select:focus {
 }
 .modal-checkbox input {
   margin: 0;
-}
-/* Bottom-of-screen completion toast (#1484 review, round 3: rename/delete-
-   team/delete-messages had no feedback at all once their modal was
-   closed). Above modal-backdrop's z-index so it stays visible even if a
-   different modal opened in the meantime. */
-.toast {
-  position: fixed;
-  left: 50%;
-  bottom: 24px;
-  transform: translateX(-50%);
-  z-index: 60;
-  max-width: 80vw;
-  background: var(--panel);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 16px;
-  font-size: 13px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  cursor: pointer;
-  white-space: pre-wrap;
 }
 
 .link {

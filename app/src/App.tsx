@@ -386,12 +386,14 @@ export function shouldClearModalOnClose(current: { kind: string } | null, ownKin
   return current?.kind === ownKind;
 }
 
-// A completion toast (#1484 review, round 3: rename/delete-team/delete-
-// messages gave no feedback at all once their modal had already closed).
-// Each builder returns the i18n key + interpolation vars rather than a
-// rendered string, so the wording itself stays in the i18n files and this
-// stays testable without a translation context. `pushToast` (below, inside
-// App) does the actual t() call at push time.
+// A completion notice (#1484 review, round 3: rename/delete-team/delete-
+// messages gave no feedback at all once their modal had already closed;
+// round 6: shares the same top-of-window .notice-banner the startup
+// install/update notices use, not a separate floating toast). Each builder
+// returns the i18n key + interpolation vars rather than a rendered string,
+// so the wording itself stays in the i18n files and this stays testable
+// without a translation context. `pushCompletionNotice` (below, inside App)
+// does the actual t() call at push time.
 export type ToastSpec = { key: string; vars?: Record<string, string | number> };
 export function renameTeamToast(from: string, to: string): ToastSpec {
   return { key: "toast.renameTeam", vars: { from, to } };
@@ -454,25 +456,34 @@ export default function App() {
   const [target, setTarget] = useState<string>("");
   const [draft, setDraft] = useState<string>("");
   const [modal, setModal] = useState<Modal>(null);
-  // Bottom-of-screen completion toast (#1484 review, round 3). `id`
-  // disambiguates its own auto-dismiss timer from a NEWER toast that has
-  // already replaced it by the time that timer fires.
-  const [toast, setToast] = useState<{ id: number; message: string } | null>(null);
-  const toastIdRef = useRef(0);
-  const pushToast = useCallback(
-    (spec: ToastSpec) => {
-      const id = ++toastIdRef.current;
-      setToast({ id, message: t(spec.key, spec.vars) });
+  // Rename/delete-team/delete-messages completion notice — same
+  // .notice-banner the startup install/update notices use (#1484 review,
+  // round 6), not a separate floating toast. `success` auto-dismisses after
+  // a few seconds (still closeable early); `error` (only ever pushed when
+  // the dialog reporting it was already closed — see onTeamActionDismissedFailure
+  // below) stays until closed by hand. `id` disambiguates its own
+  // auto-dismiss timer from a NEWER notice that has already replaced it by
+  // the time that timer fires.
+  const [completionNotice, setCompletionNotice] = useState<{
+    id: number;
+    message: string;
+    kind: "success" | "error";
+  } | null>(null);
+  const completionNoticeIdRef = useRef(0);
+  const pushCompletionNotice = useCallback(
+    (kind: "success" | "error", spec: ToastSpec) => {
+      const id = ++completionNoticeIdRef.current;
+      setCompletionNotice({ id, message: t(spec.key, spec.vars), kind });
     },
     [t],
   );
   useEffect(() => {
-    if (!toast) return;
+    if (!completionNotice || completionNotice.kind !== "success") return;
     const timer = window.setTimeout(() => {
-      setToast((cur) => (cur?.id === toast.id ? null : cur));
+      setCompletionNotice((cur) => (cur?.id === completionNotice.id ? null : cur));
     }, 3000);
     return () => window.clearTimeout(timer);
-  }, [toast]);
+  }, [completionNotice]);
   const [newMenu, setNewMenu] = useState(false);
   const [cmdName, setCmdName] = useState("agmsg");
   const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
@@ -1836,9 +1847,9 @@ export default function App() {
       // opening a different one before this resolves must not have this
       // stale completion clobber it back to null.
       setModal((cur) => (shouldClearModalOnClose(cur, "renameTeam") ? null : cur));
-      pushToast(renameTeamToast(current, next));
+      pushCompletionNotice("success", renameTeamToast(current, next));
     },
-    [team, loadTeams, pushToast],
+    [team, loadTeams, pushCompletionNotice],
   );
 
   // Delete/purge confirmation already happened in the UI (DeleteTeamModal /
@@ -1851,24 +1862,24 @@ export default function App() {
       await invoke(command, args);
       const loadedTeams = await loadTeams();
       settleActiveTeam(loadedTeams, name);
-      pushToast(deleteTeamToast(name));
+      pushCompletionNotice("success", deleteTeamToast(name));
     },
-    [loadTeams, settleActiveTeam, pushToast],
+    [loadTeams, settleActiveTeam, pushCompletionNotice],
   );
 
   // #1493 escalation: only reachable after onDeleteTeam above has already
   // failed with membersRemainCount (DeleteTeamModal gates showing the
   // "delete with members" button on that, and hands back the count it
-  // already extracted from that refusal for the toast below).
+  // already extracted from that refusal for the notice below).
   const onDeleteTeamForce = useCallback(
     async (name: string, purgeMessages: boolean, memberCount: number) => {
       const { command, args } = teamActionInvocation("deleteTeamForce", name, { purgeMessages });
       await invoke(command, args);
       const loadedTeams = await loadTeams();
       settleActiveTeam(loadedTeams, name);
-      pushToast(deleteTeamForceToast(name, memberCount));
+      pushCompletionNotice("success", deleteTeamForceToast(name, memberCount));
     },
-    [loadTeams, settleActiveTeam, pushToast],
+    [loadTeams, settleActiveTeam, pushCompletionNotice],
   );
 
   const onPurgeMessages = useCallback(
@@ -1876,19 +1887,20 @@ export default function App() {
       const { command, args } = teamActionInvocation("purgeMessages", name);
       await invoke(command, args);
       if (name === team) await loadRoomMessages(team);
-      pushToast(purgeMessagesToast(name));
+      pushCompletionNotice("success", purgeMessagesToast(name));
     },
-    [team, loadRoomMessages, pushToast],
+    [team, loadRoomMessages, pushCompletionNotice],
   );
 
   // Only reachable when a rename/delete-team/delete-messages modal was
   // already dismissed (closed while busy) by the time its action rejects —
-  // there's no dialog left to show the reason in, so it surfaces as a toast
-  // instead (#1484 review, round 3). A refusal the dialog is still open to
-  // show (e.g. members remain) never reaches this.
+  // there's no dialog left to show the reason in, so it surfaces as a
+  // (sticky, hand-dismissed) error notice instead (#1484 review, round 3).
+  // A refusal the dialog is still open to show (e.g. members remain) never
+  // reaches this.
   const onTeamActionDismissedFailure = useCallback(
-    (message: string) => pushToast(actionFailedToast(message)),
-    [pushToast],
+    (message: string) => pushCompletionNotice("error", actionFailedToast(message)),
+    [pushCompletionNotice],
   );
 
   const browseDir = useCallback(async (current: string): Promise<string | null> => {
@@ -2092,15 +2104,21 @@ export default function App() {
         </div>
       )}
       {coreUpdateSucceeded && (
-        <div className="startup-success-banner">
+        <div className="notice-banner success">
           <span>{t("startupError.updateSucceeded", { version: coreUpdateSucceeded })}</span>
           <button onClick={() => setCoreUpdateSucceeded(null)}>{t("startupError.dismiss")}</button>
         </div>
       )}
       {startupError && (
-        <div className="startup-error-banner">
+        <div className="notice-banner error">
           <span>{startupError}</span>
           <button onClick={() => setStartupError(null)}>{t("startupError.dismiss")}</button>
+        </div>
+      )}
+      {completionNotice && (
+        <div className={`notice-banner ${completionNotice.kind}`}>
+          <span>{completionNotice.message}</span>
+          <button onClick={() => setCompletionNotice(null)}>{t("startupError.dismiss")}</button>
         </div>
       )}
       <div className="body">
@@ -3178,12 +3196,6 @@ export default function App() {
             </div>
           );
         })()}
-
-      {toast && (
-        <div className="toast" onClick={() => setToast(null)}>
-          {toast.message}
-        </div>
-      )}
     </div>
   );
 }
