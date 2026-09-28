@@ -698,6 +698,27 @@ pub struct CoreVersionStatus {
     outdated: bool,
 }
 
+/// The installed agmsg's own VERSION file, trimmed — None if it can't be
+/// read (not installed yet, or the file is empty). Shared by
+/// `agmsg_core_version_status` and `running_core_version` below so there is
+/// exactly one place that reads it.
+fn read_installed_core_version() -> Option<String> {
+    std::fs::read_to_string(agmsg_base().join("VERSION"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The core this app is actually driving right now (installed at
+/// `agmsg_base()`), for display -- as opposed to `pinned_core_version`, the
+/// ref this build happened to bundle at compile time. Falls back to the
+/// pinned version when the installed one can't be read, so the About line
+/// (see `make_menu` in lib.rs) always has something reasonable to show
+/// rather than going blank (#976).
+pub(crate) fn running_core_version() -> String {
+    read_installed_core_version().unwrap_or_else(pinned_core_version)
+}
+
 /// Compares the installed agmsg's VERSION file against the version bundled
 /// into this app build. An existing install doesn't go through agmsg_install
 /// (that only fires when nothing is installed at all), so an installed
@@ -708,10 +729,7 @@ pub struct CoreVersionStatus {
 #[tauri::command]
 pub fn agmsg_core_version_status() -> CoreVersionStatus {
     let pinned = pinned_core_version();
-    let installed = std::fs::read_to_string(agmsg_base().join("VERSION"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let installed = read_installed_core_version();
 
     let outdated = match (&installed, parse_semver(&pinned)) {
         (Some(v), Some(pinned_v)) => match parse_semver(v) {
@@ -1003,7 +1021,10 @@ pub fn start_watcher(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{agmsg_base, msys_to_native, parse_semver, run_script, to_bash_slashes};
+    use super::{
+        agmsg_base, msys_to_native, parse_semver, pinned_core_version, run_script,
+        running_core_version, to_bash_slashes,
+    };
     use serial_test::serial;
     use std::io::Write;
 
@@ -1179,6 +1200,25 @@ mod tests {
     fn agmsg_base_falls_back_when_override_is_empty() {
         let _env = EnvGuard::set("AGMSG_APP_BASE", "");
         assert!(agmsg_base().ends_with(".agents/skills/agmsg"));
+    }
+
+    #[test]
+    #[serial]
+    fn running_core_version_reads_installed_or_falls_back_to_pinned() {
+        // Before #976, the About line always read the bundled AGMSG_CORE_REF
+        // (pinned_core_version) — the version this build happened to bundle,
+        // not the one actually driving every agmsg operation.
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+
+        // No VERSION file yet: falls back to the bundled ref rather than
+        // going blank.
+        assert_eq!(running_core_version(), pinned_core_version());
+
+        // An installed VERSION file wins over the bundled ref — the number a
+        // user would actually act on.
+        std::fs::write(dir.path().join("VERSION"), "9.9.9\n").unwrap();
+        assert_eq!(running_core_version(), "9.9.9");
     }
 
     #[test]
