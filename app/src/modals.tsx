@@ -24,25 +24,32 @@ export function shouldCloseOnEscape(e: Pick<KeyboardEvent, "key" | "isComposing"
   return true;
 }
 
-/** Modal chrome: dimmed backdrop + centered card. */
+/**
+ * Modal chrome: dimmed backdrop + centered card. `busy` (an action in
+ * flight — a rename, a delete, ...) disables Escape/backdrop-click closing
+ * and switches the cursor to "wait" over the whole card, so a long-running
+ * agmsg script no longer just looks like the app hung (#1484 feedback: no
+ * visible feedback while running).
+ */
 function Modal(props: {
   title: string;
   children: React.ReactNode;
   onClose?: () => void;
+  busy?: boolean;
 }) {
-  const { onClose } = props;
+  const { onClose, busy } = props;
   useEffect(() => {
-    if (!onClose) return;
+    if (!onClose || busy) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (shouldCloseOnEscape(e)) onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  }, [onClose, busy]);
 
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop" onClick={busy ? undefined : props.onClose}>
+      <div className={busy ? "modal busy" : "modal"} onClick={(e) => e.stopPropagation()}>
         <div className="modal-title">{props.title}</div>
         {props.children}
       </div>
@@ -324,16 +331,21 @@ export function RenameModal(props: {
   const { t } = useTranslation();
   const [next, setNext] = useState(props.current);
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
   const submit = async () => {
     if (!next.trim() || next.trim() === props.current) return;
+    setErr("");
+    setBusy(true);
     try {
       await props.onRename(props.current, next.trim());
     } catch (e) {
       setErr(String(e));
+    } finally {
+      setBusy(false);
     }
   };
   return (
-    <Modal title={t("modal.rename.title", { current: props.current })} onClose={props.onClose}>
+    <Modal title={t("modal.rename.title", { current: props.current })} onClose={props.onClose} busy={busy}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -342,19 +354,19 @@ export function RenameModal(props: {
       >
         <label>
           {t("modal.rename.newNameLabel")}
-          <input autoFocus value={next} onChange={(e) => setNext(e.target.value)} />
+          <input autoFocus value={next} onChange={(e) => setNext(e.target.value)} disabled={busy} />
         </label>
         {err && <div className="modal-err">{err}</div>}
         <div className="modal-actions">
-          <button type="button" onClick={props.onClose}>
+          <button type="button" onClick={props.onClose} disabled={busy}>
             {t("common.cancel")}
           </button>
           <button
             type="submit"
             className="primary"
-            disabled={!next.trim() || next.trim() === props.current}
+            disabled={!next.trim() || next.trim() === props.current || busy}
           >
-            {t("modal.rename.confirmButton")}
+            {busy ? t("modal.rename.confirmButtonBusy") : t("modal.rename.confirmButton")}
           </button>
         </div>
       </form>
@@ -376,28 +388,129 @@ export function ConfirmModal(props: {
 }) {
   const { t } = useTranslation();
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
   const submit = async () => {
+    setErr("");
+    setBusy(true);
     try {
       await props.onConfirm();
       props.onClose();
     } catch (e) {
       setErr(String(e));
+    } finally {
+      setBusy(false);
     }
   };
   return (
-    <Modal title={props.title} onClose={props.onClose}>
+    <Modal title={props.title} onClose={props.onClose} busy={busy}>
       <p className="modal-note">{props.body}</p>
       {err && <div className="modal-err">{err}</div>}
       <div className="modal-actions">
-        <button type="button" onClick={props.onClose}>
+        <button type="button" onClick={props.onClose} disabled={busy}>
           {t("common.cancel")}
         </button>
         <button
           type="button"
           className={props.danger ? "primary danger" : "primary"}
           onClick={submit}
+          disabled={busy}
         >
-          {props.confirmLabel ?? t("modal.confirm.defaultLabel")}
+          {busy ? t("modal.confirm.workingLabel") : (props.confirmLabel ?? t("modal.confirm.defaultLabel"))}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Whether a message from run_script's Err is team.sh's specific "members
+ * still present" refusal for --delete (#1493) — its exact text
+ * ("Team '<team>' still has N member(s); refusing --delete.") is matched by
+ * the stable "refusing --delete" substring rather than the full sentence, so
+ * this survives the team name or member count varying. Exported as a pure
+ * predicate so DeleteTeamModal's escalation-to-force logic is unit-testable
+ * without mounting it or a real Tauri backend.
+ */
+export function isMembersRemainError(message: string): boolean {
+  return message.includes("refusing --delete");
+}
+
+/**
+ * The team-delete confirmation (#1479/#1484). Unlike the generic
+ * ConfirmModal, this one can escalate in place: an app-created team always
+ * has an app-user member, so a plain --delete is refused with
+ * isMembersRemainError's text (#1493) — once that happens, a second,
+ * more destructive "delete anyway" action appears (team.sh --delete
+ * --force, not yet on main as of this writing; core work in progress),
+ * alongside an opt-in checkbox to also purge message history in the same
+ * call. The plain delete button stays available too, in case the refusal
+ * was transient (e.g. a member left in the meantime).
+ */
+export function DeleteTeamModal(props: {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  onConfirm: () => Promise<void>;
+  onConfirmForce: (purgeMessages: boolean) => Promise<void>;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [membersRemain, setMembersRemain] = useState(false);
+  const [purgeMessages, setPurgeMessages] = useState(false);
+
+  const attempt = async (run: () => Promise<void>) => {
+    setErr("");
+    setBusy(true);
+    try {
+      await run();
+      props.onClose();
+    } catch (e) {
+      const message = String(e);
+      setErr(message);
+      if (isMembersRemainError(message)) setMembersRemain(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={props.title} onClose={props.onClose} busy={busy}>
+      <p className="modal-note">{props.body}</p>
+      {err && <div className="modal-err">{err}</div>}
+      {membersRemain && (
+        <label className="modal-checkbox">
+          <input
+            type="checkbox"
+            checked={purgeMessages}
+            onChange={(e) => setPurgeMessages(e.target.checked)}
+            disabled={busy}
+          />
+          {t("modal.deleteTeam.purgeMessagesToo")}
+        </label>
+      )}
+      <div className="modal-actions">
+        <button type="button" onClick={props.onClose} disabled={busy}>
+          {t("common.cancel")}
+        </button>
+        {membersRemain && (
+          <button
+            type="button"
+            className="primary danger"
+            onClick={() => attempt(() => props.onConfirmForce(purgeMessages))}
+            disabled={busy}
+          >
+            {busy ? t("modal.confirm.workingLabel") : t("modal.deleteTeam.forceLabel")}
+          </button>
+        )}
+        <button
+          type="button"
+          className="primary danger"
+          onClick={() => attempt(props.onConfirm)}
+          disabled={busy}
+        >
+          {busy ? t("modal.confirm.workingLabel") : props.confirmLabel}
         </button>
       </div>
     </Modal>

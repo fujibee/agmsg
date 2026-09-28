@@ -101,7 +101,9 @@
     "deleteTeam": {
       "title": "删除团队“{{team}}”？",
       "body": "这将永久删除团队“{{team}}”：其配置、成员名单、身份历史记录以及各代理的运行记录。此操作无法撤销。如果它曾连接到远程服务器，之后重新连接可以将其恢复。",
-      "confirmLabel": "删除团队"
+      "confirmLabel": "删除团队",
+      "forceLabel": "仍然删除（移除所有成员）",
+      "purgeMessagesToo": "同时删除消息记录"
     },
     "purgeMessages": {
       "title": "清除团队“{{team}}”的消息记录？",
@@ -131,10 +133,12 @@
     "rename": {
       "title": "重命名 {{current}}",
       "newNameLabel": "新名称",
-      "confirmButton": "重命名"
+      "confirmButton": "重命名",
+      "confirmButtonBusy": "重命名中…"
     },
     "confirm": {
-      "defaultLabel": "确认"
+      "defaultLabel": "确认",
+      "workingLabel": "处理中…"
     },
     "settings": {
       "title": "设置"

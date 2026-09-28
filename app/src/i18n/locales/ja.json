@@ -101,7 +101,9 @@
     "deleteTeam": {
       "title": "チーム「{{team}}」を削除しますか？",
       "body": "これによりチーム「{{team}}」の設定・名簿・識別情報の履歴・各エージェントの実行記録が完全に削除されます。この操作は元に戻せません。リモートに接続されていた場合、後で再接続すると復元できることがあります。",
-      "confirmLabel": "チームを削除"
+      "confirmLabel": "チームを削除",
+      "forceLabel": "それでも消す（メンバーを全員外す）",
+      "purgeMessagesToo": "メッセージ履歴も削除する"
     },
     "purgeMessages": {
       "title": "チーム「{{team}}」のメッセージ履歴を消去しますか？",
@@ -131,10 +133,12 @@
     "rename": {
       "title": "{{current}} の名前を変更",
       "newNameLabel": "新しい名前",
-      "confirmButton": "名前を変更"
+      "confirmButton": "名前を変更",
+      "confirmButtonBusy": "名前を変更中…"
     },
     "confirm": {
-      "defaultLabel": "確認"
+      "defaultLabel": "確認",
+      "workingLabel": "処理中…"
     },
     "settings": {
       "title": "設定"

@@ -101,7 +101,9 @@
     "deleteTeam": {
       "title": "Excluir a equipe '{{team}}'?",
       "body": "Isso exclui permanentemente a equipe '{{team}}': sua configuração, lista de membros, histórico de identidade e os registros de execução de cada agente. Essa ação não pode ser desfeita. Se estava conectada a um remoto, reconectar depois pode restaurá-la.",
-      "confirmLabel": "Excluir equipe"
+      "confirmLabel": "Excluir equipe",
+      "forceLabel": "Excluir mesmo assim (remover todos os membros)",
+      "purgeMessagesToo": "Excluir também o histórico de mensagens"
     },
     "purgeMessages": {
       "title": "Limpar o histórico de mensagens da equipe '{{team}}'?",
@@ -131,10 +133,12 @@
     "rename": {
       "title": "Renomear {{current}}",
       "newNameLabel": "Novo nome",
-      "confirmButton": "Renomear"
+      "confirmButton": "Renomear",
+      "confirmButtonBusy": "Renomeando…"
     },
     "confirm": {
-      "defaultLabel": "Confirmar"
+      "defaultLabel": "Confirmar",
+      "workingLabel": "Processando…"
     },
     "settings": {
       "title": "Configurações"

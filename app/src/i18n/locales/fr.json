@@ -101,7 +101,9 @@
     "deleteTeam": {
       "title": "Supprimer l'équipe « {{team}} » ?",
       "body": "Cela supprime définitivement l'équipe « {{team}} » : sa configuration, sa liste de membres, son historique d'identité et les enregistrements d'exécution de chaque agent. Cette action est irréversible. Si elle était connectée à un serveur distant, une reconnexion ultérieure peut la restaurer.",
-      "confirmLabel": "Supprimer l'équipe"
+      "confirmLabel": "Supprimer l'équipe",
+      "forceLabel": "Supprimer quand même (retirer tous les membres)",
+      "purgeMessagesToo": "Supprimer aussi l'historique des messages"
     },
     "purgeMessages": {
       "title": "Purger l'historique des messages de l'équipe « {{team}} » ?",
@@ -131,10 +133,12 @@
     "rename": {
       "title": "Renommer {{current}}",
       "newNameLabel": "Nouveau nom",
-      "confirmButton": "Renommer"
+      "confirmButton": "Renommer",
+      "confirmButtonBusy": "Renommage…"
     },
     "confirm": {
-      "defaultLabel": "Confirmer"
+      "defaultLabel": "Confirmer",
+      "workingLabel": "En cours…"
     },
     "settings": {
       "title": "Paramètres"

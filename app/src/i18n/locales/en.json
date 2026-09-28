@@ -111,7 +111,9 @@
     "deleteTeam": {
       "title": "Delete team '{{team}}'?",
       "body": "This permanently deletes team '{{team}}': its configuration, roster, identity history, and per-agent runtime records. This cannot be undone. If it was connected to a remote, reconnecting later can bring it back.",
-      "confirmLabel": "Delete team"
+      "confirmLabel": "Delete team",
+      "forceLabel": "Delete anyway (remove all members)",
+      "purgeMessagesToo": "Also delete message history"
     },
     "purgeMessages": {
       "title": "Purge message history for team '{{team}}'?",
@@ -141,10 +143,12 @@
     "rename": {
       "title": "Rename {{current}}",
       "newNameLabel": "New name",
-      "confirmButton": "Rename"
+      "confirmButton": "Rename",
+      "confirmButtonBusy": "Renaming…"
     },
     "confirm": {
-      "defaultLabel": "Confirm"
+      "defaultLabel": "Confirm",
+      "workingLabel": "Working…"
     },
     "settings": {
       "title": "Settings"

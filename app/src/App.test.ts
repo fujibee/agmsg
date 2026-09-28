@@ -248,7 +248,7 @@ describe("teamActionInvocation", () => {
   // messages) must call the right agmsg command with the right args — a
   // wrong mapping here would silently run the wrong destructive action.
   it("maps rename to agmsg_rename_team with the old and new team names", () => {
-    expect(teamActionInvocation("renameTeam", "old-team", "new-team")).toEqual({
+    expect(teamActionInvocation("renameTeam", "old-team", { nextName: "new-team" })).toEqual({
       command: "agmsg_rename_team",
       args: { oldTeam: "old-team", newTeam: "new-team" },
     });
@@ -265,6 +265,22 @@ describe("teamActionInvocation", () => {
     expect(teamActionInvocation("purgeMessages", "my-team")).toEqual({
       command: "agmsg_purge_team_messages",
       args: { team: "my-team" },
+    });
+  });
+
+  // #1493: escalating a refused --delete must add --force AND keep
+  // --purge-messages independently opt-in, never on by default.
+  it("maps the force-delete escalation to agmsg_delete_team_force with purgeMessages defaulting to false", () => {
+    expect(teamActionInvocation("deleteTeamForce", "my-team")).toEqual({
+      command: "agmsg_delete_team_force",
+      args: { team: "my-team", purgeMessages: false },
+    });
+  });
+
+  it("maps the force-delete escalation with the purge-messages checkbox checked", () => {
+    expect(teamActionInvocation("deleteTeamForce", "my-team", { purgeMessages: true })).toEqual({
+      command: "agmsg_delete_team_force",
+      args: { team: "my-team", purgeMessages: true },
     });
   });
 });

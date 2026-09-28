@@ -392,6 +392,26 @@ select:focus {
   opacity: 0.4;
   cursor: default;
 }
+/* An action is in flight (a rename, a delete, ...) — placed after the
+   :disabled rule above so its same-specificity `cursor` wins by source
+   order, showing "wait" instead of the disabled default everywhere over
+   the card, not just its buttons. */
+.modal.busy,
+.modal.busy button,
+.modal.busy input {
+  cursor: wait;
+}
+.modal-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg);
+  margin: 0 0 12px;
+}
+.modal-checkbox input {
+  margin: 0;
+}
 
 .link {
   background: none;

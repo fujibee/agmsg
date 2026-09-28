@@ -21,6 +21,7 @@ import {
   AgentModal,
   AppUserModal,
   ConfirmModal,
+  DeleteTeamModal,
   MAX_TERMINAL_FONT_SIZE,
   MIN_TERMINAL_FONT_SIZE,
   NewTeamModal,
@@ -342,17 +343,27 @@ export function shouldShowOutdatedBanner<T>(
 // menu-to-command wiring is unit-testable without mounting the app or a real
 // Tauri backend. Argument keys are camelCase to match how Tauri maps them
 // onto each command's snake_case Rust parameters.
-export type TeamMenuAction = "renameTeam" | "deleteTeam" | "purgeMessages";
+export type TeamMenuAction = "renameTeam" | "deleteTeam" | "deleteTeamForce" | "purgeMessages";
 export function teamActionInvocation(
   action: TeamMenuAction,
   team: string,
-  nextName?: string,
-): { command: string; args: Record<string, string> } {
+  opts?: { nextName?: string; purgeMessages?: boolean },
+): { command: string; args: Record<string, string | boolean> } {
   switch (action) {
     case "renameTeam":
-      return { command: "agmsg_rename_team", args: { oldTeam: team, newTeam: nextName ?? "" } };
+      return { command: "agmsg_rename_team", args: { oldTeam: team, newTeam: opts?.nextName ?? "" } };
     case "deleteTeam":
       return { command: "agmsg_delete_team", args: { team } };
+    // #1493: force-removes remaining members (an app-created team always has
+    // at least its app-user) before deleting. Not yet on main as of this
+    // writing (core branch fix-1493-delete-force, pending final review) —
+    // the calling shape follows the confirmed core design and needs no further
+    // reconciling once it lands.
+    case "deleteTeamForce":
+      return {
+        command: "agmsg_delete_team_force",
+        args: { team, purgeMessages: opts?.purgeMessages ?? false },
+      };
     case "purgeMessages":
       return { command: "agmsg_purge_team_messages", args: { team } };
   }
@@ -1769,7 +1780,7 @@ export default function App() {
 
   const onRenameTeam = useCallback(
     async (current: string, next: string) => {
-      const { command, args } = teamActionInvocation("renameTeam", current, next);
+      const { command, args } = teamActionInvocation("renameTeam", current, { nextName: next });
       await invoke(command, args);
       await loadTeams();
       if (team === current) setTeam(next);
@@ -1778,13 +1789,26 @@ export default function App() {
     [team, loadTeams],
   );
 
-  // Delete/purge confirmation already happened in the UI (ConfirmModal); the
-  // CLI's own refusal reason (members remain, an active remote binding, the
-  // jsonl storage driver) comes back as run_script's Err and is shown as-is
-  // by ConfirmModal's err state.
+  // Delete/purge confirmation already happened in the UI (DeleteTeamModal /
+  // ConfirmModal); the CLI's own refusal reason (members remain, an active
+  // remote binding, the jsonl storage driver) comes back as run_script's Err
+  // and is shown as-is by the modal's err state.
   const onDeleteTeam = useCallback(
     async (name: string) => {
       const { command, args } = teamActionInvocation("deleteTeam", name);
+      await invoke(command, args);
+      const loadedTeams = await loadTeams();
+      settleActiveTeam(loadedTeams, name);
+    },
+    [loadTeams, settleActiveTeam],
+  );
+
+  // #1493 escalation: only reachable after onDeleteTeam above has already
+  // failed with isMembersRemainError (DeleteTeamModal gates showing the
+  // "delete anyway" button on that).
+  const onDeleteTeamForce = useCallback(
+    async (name: string, purgeMessages: boolean) => {
+      const { command, args } = teamActionInvocation("deleteTeamForce", name, { purgeMessages });
       await invoke(command, args);
       const loadedTeams = await loadTeams();
       settleActiveTeam(loadedTeams, name);
@@ -2749,12 +2773,12 @@ export default function App() {
         <RenameModal current={modal.current} onRename={onRenameTeam} onClose={() => setModal(null)} />
       )}
       {modal?.kind === "deleteTeam" && (
-        <ConfirmModal
+        <DeleteTeamModal
           title={t("modal.deleteTeam.title", { team: modal.name })}
           body={t("modal.deleteTeam.body", { team: modal.name })}
           confirmLabel={t("modal.deleteTeam.confirmLabel")}
-          danger
           onConfirm={() => onDeleteTeam(modal.name)}
+          onConfirmForce={(purgeMessages) => onDeleteTeamForce(modal.name, purgeMessages)}
           onClose={() => setModal((cur) => (shouldClearModalOnClose(cur, "deleteTeam") ? null : cur))}
         />
       )}

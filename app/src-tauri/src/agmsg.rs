@@ -959,6 +959,21 @@ pub fn agmsg_purge_team_messages(team: String) -> Result<(), String> {
     run_script("team.sh", &[&team, "--purge-messages", "--yes"]).map(|_| ())
 }
 
+/// Delete a team even though members remain, removing them all first
+/// (team.sh --delete --force --yes, #1493; --purge-messages stays an
+/// independent flag). Confirmed core CLI shape as of this writing (branch
+/// fix-1493-delete-force, not yet merged pending final review). Only
+/// reachable in the UI after a plain agmsg_delete_team has already failed
+/// with the members-remain refusal.
+#[tauri::command]
+pub fn agmsg_delete_team_force(team: String, purge_messages: bool) -> Result<(), String> {
+    let mut args = vec![team.as_str(), "--delete", "--force", "--yes"];
+    if purge_messages {
+        args.push("--purge-messages");
+    }
+    run_script("team.sh", &args).map(|_| ())
+}
+
 /// The actual delivery mode for (agent_type, project): "monitor", "turn",
 /// "both", or "off". Shells out to `delivery.sh status` — agmsg's own
 /// source of truth (it derives the mode from the project's hooks file,

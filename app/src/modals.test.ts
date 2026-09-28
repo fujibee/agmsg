@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeNumberDraft, shouldCloseOnEscape, stepFontSize } from "./modals";
+import { isMembersRemainError, sanitizeNumberDraft, shouldCloseOnEscape, stepFontSize } from "./modals";
 
 function esc(overrides: Partial<{ isComposing: boolean; keyCode: number; defaultPrevented: boolean }> = {}) {
   return {
@@ -97,5 +97,34 @@ describe("stepFontSize", () => {
 
   it("steps from a decimal draft and can land on a non-integer", () => {
     expect(stepFontSize("12.5", 12.5, 1, 8, 24)).toBe(13.5);
+  });
+});
+
+describe("isMembersRemainError", () => {
+  // #1493: an app-created team always has an app-user member, so a plain
+  // --delete on it always fails this way — DeleteTeamModal's escalation
+  // (the "delete anyway" button) hinges on recognizing exactly this refusal.
+  it("recognizes team.sh's members-remain refusal for --delete", () => {
+    expect(
+      isMembersRemainError(
+        "Team 'my-team' still has 1 member(s); refusing --delete.\nRun leave.sh for each remaining member first, or pass --force to remove them and delete the team in one step.",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not misfire on an unrelated refusal (active remote binding)", () => {
+    expect(
+      isMembersRemainError(
+        "Team 'my-team' is actively synced; refusing to delete or purge its data.\nDisconnect the sync binding first.",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not misfire on the jsonl-storage refusal", () => {
+    expect(
+      isMembersRemainError(
+        "Team 'my-team' uses the jsonl storage driver; --purge-messages is not\nsupported yet for jsonl.",
+      ),
+    ).toBe(false);
   });
 });

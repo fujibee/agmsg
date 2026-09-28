@@ -664,6 +664,7 @@ pub fn run() {
             agmsg::agmsg_leave,
             agmsg::agmsg_rename_team,
             agmsg::agmsg_delete_team,
+            agmsg::agmsg_delete_team_force,
             agmsg::agmsg_purge_team_messages,
             agmsg::agmsg_delivery_mode,
             agmsg::agmsg_default_project,

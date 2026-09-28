@@ -101,7 +101,9 @@
     "deleteTeam": {
       "title": "Team „{{team}}“ löschen?",
       "body": "Dies löscht dauerhaft das Team „{{team}}“: seine Konfiguration, Mitgliederliste, den Identitätsverlauf und die Laufzeitdatensätze der einzelnen Agenten. Dies kann nicht rückgängig gemacht werden. War es mit einem Remote verbunden, kann eine spätere erneute Verbindung es wiederherstellen.",
-      "confirmLabel": "Team löschen"
+      "confirmLabel": "Team löschen",
+      "forceLabel": "Trotzdem löschen (alle Mitglieder entfernen)",
+      "purgeMessagesToo": "Nachrichtenverlauf ebenfalls löschen"
     },
     "purgeMessages": {
       "title": "Nachrichtenverlauf für Team „{{team}}“ löschen?",
@@ -131,10 +133,12 @@
     "rename": {
       "title": "{{current}} umbenennen",
       "newNameLabel": "Neuer Name",
-      "confirmButton": "Umbenennen"
+      "confirmButton": "Umbenennen",
+      "confirmButtonBusy": "Wird umbenannt…"
     },
     "confirm": {
-      "defaultLabel": "Bestätigen"
+      "defaultLabel": "Bestätigen",
+      "workingLabel": "Wird ausgeführt…"
     },
     "settings": {
       "title": "Einstellungen"
