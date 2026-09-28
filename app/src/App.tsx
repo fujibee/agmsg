@@ -1795,7 +1795,11 @@ export default function App() {
       await invoke("agmsg_join", { team, name, agentType: type, project });
       const m = await loadMembers(team);
       const added = m.find((x) => x.name === name);
-      if (added) spawnMember(added);
+      // Same tab-choice as a sidebar click (spawnTargetWindowId): split
+      // into the tab being viewed when it's this team's, a new tab
+      // otherwise. Refs (not `windows`/`active` state) so this callback
+      // doesn't need to be recreated on every tab switch.
+      if (added) spawnMember(added, spawnTargetWindowId(windowsRef.current, activeRef.current, team));
       setModal(null);
     },
     [team, loadMembers, spawnMember],
