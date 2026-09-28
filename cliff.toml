@@ -59,9 +59,15 @@ commit_parsers = [
   { message = "^Merge", skip = true },
   { message = "^release", skip = true },
   { message = "^(chore|ci|build|test|style)", skip = true },
-  # App-only changes ship in the desktop app's own releases (app-v*), not in
-  # the npm package this changelog describes.
-  { message = "^(feat|fix|refactor|perf)\\(app\\)", skip = true },
+  # App-only changes after 1.5.0 ship in the desktop app release (app 0.5.0),
+  # not in the npm package. Named one by one: older app-scoped entries already
+  # in the changelog must keep appearing if the file is ever regenerated.
+  { message = "^fix\\(app\\): bound the sidebar's team list so it scrolls", skip = true },
+  { message = "^feat\\(app\\): allow Option-drag native text selection", skip = true },
+  { message = "^fix\\(app\\): About shows the core actually running", skip = true },
+  { message = "^fix\\(app\\): build the spawn prompt from each type's own", skip = true },
+  { message = "^fix\\(app\\): open a clicked agent in the tab being viewed", skip = true },
+  { message = "^fix\\(app\\): keep a renamed team's open tabs", skip = true },
   { message = "^feat", group = "<!-- 0 -->Added" },
   { message = "^fix", group = "<!-- 1 -->Fixed" },
   { message = "^perf", group = "<!-- 2 -->Performance" },
