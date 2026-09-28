@@ -216,10 +216,10 @@ If argument starts with "rename-team":
 
 If argument starts with "delete-team" or asks to delete/remove a team's data:
 1. Accept only an explicit user request — never delete a team on an inference alone.
-2. Parse the team name and which of `--delete` (the team itself: config, roster, identity history, per-agent runtime state) and `--purge-messages` (only its message history) the user wants — they can be combined.
-3. Run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` first and show the roster. `--delete` refuses unless every member has already left (run `leave.sh` for each remaining one first) and the team is not actively synced.
-4. Repeat back exactly what will be lost — identity history for `--delete`, message history for `--purge-messages` — and wait for the user's explicit confirmation before running anything.
-5. Run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team> [--delete] [--purge-messages] --yes` — pass `--yes` since the confirmation already happened in chat; the script's own interactive prompt would otherwise block waiting for input this agent can't supply.
+2. Parse the team name and which of `--delete` (the team itself: config, roster, identity history, per-agent runtime state), `--force` (with `--delete`: also remove every remaining member first, the same effect as `leave.sh` for each), and `--purge-messages` (only its message history) the user wants — they can be combined.
+3. Run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` first and show the roster. `--delete` refuses unless every member has already left (run `leave.sh` for each remaining one first, or use `--force`) and the team is not actively synced.
+4. Repeat back exactly what will be lost — identity history for `--delete` (and, with `--force`, which members will be removed first), message history for `--purge-messages` — and wait for the user's explicit confirmation before running anything.
+5. Run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team> [--delete] [--force] [--purge-messages] --yes` — pass `--yes` since the confirmation already happened in chat; the script's own interactive prompt would otherwise block waiting for input this agent can't supply.
 6. Show the result.
 
 If argument starts with "remote connect":

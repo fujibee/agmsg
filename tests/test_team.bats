@@ -1050,7 +1050,7 @@ JSON
   # `refute`, not `! cmd`: a negated command cannot fail a bats test anywhere
   # (#670), so `! grep -q` here would have asserted nothing at all.
   refute grep -q 'line [0-9]*: 1:' <<<"$output"
-  [[ "$output" == "Usage: team.sh <team> [--json] [--delete] [--purge-messages] [--yes]" ]]
+  [[ "$output" == "Usage: team.sh <team> [--json] [--delete] [--force] [--purge-messages] [--yes]" ]]
 }
 
 # --- #1140/#1152: team never creates a placement record --------------------------
@@ -1185,4 +1185,19 @@ STUB
   [ "$status" -ne 0 ]
   printf '%s\n' "$output" | grep -qF "actively synced"
   [ -d "$TEST_SKILL_DIR/teams/myteam" ]
+
+  # #1493: --force removes every remaining member (the same effect as
+  # leave.sh for each) and then deletes the team -- an app-created team
+  # always has at least its app-user member, so plain --delete could never
+  # remove one.
+  bash "$SCRIPTS/join.sh" forceteam dave claude-code /tmp/proj-force
+  bash "$SCRIPTS/join.sh" forceteam-other erin claude-code /tmp/proj-force-other
+
+  run bash "$SCRIPTS/team.sh" forceteam --delete --force --yes
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "Deleted team 'forceteam'"
+  [ ! -d "$TEST_SKILL_DIR/teams/forceteam" ]
+  [ -d "$TEST_SKILL_DIR/teams/forceteam-other" ]
+  run bash "$SCRIPTS/team.sh" forceteam-other
+  printf '%s\n' "$output" | grep -qF "erin"
 }

@@ -108,8 +108,15 @@ _agmsg_team_delete_rm_family() {   # <team> <name> <prefix> <suffix> [rm_reclaim
 # it is not addressable here -- and killing a LIVE watcher's pidfile out
 # from under it is exactly the class of danger #1470 ruled unsafe. A stale
 # watcher for a deleted team finds nothing on its next poll and is harmless.
+#
+# extra_names (#1493, optional): a newline-separated name list the caller
+# already resolved itself -- team.sh --delete --force passes the members it
+# is about to remove, captured BEFORE removing them. Needed because
+# leave.sh's own last-member cleanup can delete config.json outright for a
+# NON-journaled team, at which point _agmsg_team_delete_all_names finds no
+# config and no journal to recover those names from on its own.
 agmsg_team_delete_run_records() {
-  local team="$1" team_dir="$2" config="$3" name t a
+  local team="$1" team_dir="$2" config="$3" extra_names="${4:-}" name t a
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     _agmsg_team_delete_rm_family "$team" "$name" actas .session 1
@@ -127,7 +134,7 @@ agmsg_team_delete_run_records() {
     # codex pairs to re-derive and is not attempted here.
     rm -f "$(_actas_lock_dir)/codex-bridge.$team.$name."* 2>/dev/null || true
   done <<EOF
-$(_agmsg_team_delete_all_names "$team_dir" "$config")
+$(printf '%s\n%s\n' "$(_agmsg_team_delete_all_names "$team_dir" "$config")" "$extra_names" | sed '/^$/d' | LC_ALL=C sort -u)
 EOF
 }
 
