@@ -15,6 +15,7 @@ import {
   shouldShowOutdatedBanner,
   shouldSuppressClickAfterDrag,
   shouldClearModalOnClose,
+  spawnTargetWindowId,
   teamActionInvocation,
   type LoginShellInfo,
 } from "./App";
@@ -339,5 +340,24 @@ describe("completion toast builders", () => {
       key: "toast.actionFailed",
       vars: { reason: "Team 'my-team' is actively synced; refusing to delete or purge its data." },
     });
+  });
+});
+
+describe("spawnTargetWindowId", () => {
+  const windows = [
+    { id: "w-mine", team: "alpha" },
+    { id: "w-other-team", team: "beta" },
+  ];
+
+  it("viewing a pane tab of the current team -> that tab", () => {
+    expect(spawnTargetWindowId(windows, "w-mine", "alpha")).toBe("w-mine");
+  });
+
+  it("viewing the team room -> a new tab (undefined)", () => {
+    expect(spawnTargetWindowId(windows, "room", "alpha")).toBeUndefined();
+  });
+
+  it("viewing a pane tab that belongs to another team -> a new tab (undefined)", () => {
+    expect(spawnTargetWindowId(windows, "w-other-team", "alpha")).toBeUndefined();
   });
 });

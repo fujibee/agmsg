@@ -211,6 +211,24 @@ export function resolveFileDropTarget(
   return activeLeaves[0] ?? null;
 }
 
+// Which tab a sidebar agent click should spawn into: the tab being viewed
+// right now, as an extra column added to its right edge (same
+// insertAsNewLeaf a spawnMember targetWindowId already does, same as the
+// right-click "Open in existing tab" path) — but ONLY when that tab is a
+// pane tab belonging to the CURRENT team. Anything else — the team room
+// (`active === "room"`, the one non-window sentinel `active` holds), a chat
+// view, or a pane tab left open under another team — opens a new tab
+// instead, same as before. Returns the targetWindowId to pass straight to
+// spawnMember (undefined = new tab).
+export function spawnTargetWindowId(
+  windows: ReadonlyArray<Pick<Window, "id" | "team">>,
+  activeWindowId: string,
+  currentTeam: string,
+): string | undefined {
+  const activeWindow = windows.find((w) => w.id === activeWindowId);
+  return activeWindow && activeWindow.team === currentTeam ? activeWindowId : undefined;
+}
+
 // The pane cell (if any) at a given viewport point — shared by the internal
 // pointer-drag hit-test and the external file-drop handler. Not unit-
 // testable in isolation (elementFromPoint needs real layout, which jsdom
@@ -1398,8 +1416,8 @@ export default function App() {
   }, [buildShellPane, team]);
 
   // A tab's "Open shell" context-menu item — splits a shell pane in beside
-  // whatever's already in that tab. The symmetric counterpart of spawning an
-  // agent beside an open shell pane (see windowHasShellPane/spawnMember
+  // whatever's already in that tab, the same way a sidebar click splits an
+  // agent into the tab being viewed (see spawnTargetWindowId/spawnMember
   // below): either direction, shell and agent end up split in the same tab.
   // Same stale-context concern as openShellTab, in two shapes: the target
   // tab can be closed while getLoginShell's await is in flight (orphaned
@@ -1420,17 +1438,6 @@ export default function App() {
     },
     [buildShellPane, team],
   );
-
-  // True when `windowId`'s tab currently has a free-shell pane in it — the
-  // signal spawnMember's sidebar-click site uses to decide "spawn this agent
-  // beside the shell in the same tab" (design B) instead of the
-  // default "open a new tab".
-  const windowHasShellPane = useCallback((windowId: string) => {
-    const w = windowsRef.current.find((w) => w.id === windowId);
-    if (!w) return false;
-    const ids = leaves(w.root);
-    return panesRef.current.some((p) => ids.includes(p.id) && p.shell);
-  }, []);
 
   // Swap two panes' positions within the same window (tree shape unchanged
   // — no DOM remount, same as every other pane move in this file).
@@ -2374,7 +2381,7 @@ export default function App() {
                       )}
                       <button
                         className="member"
-                        onClick={() => spawnMember(m, windowHasShellPane(active) ? active : undefined)}
+                        onClick={() => spawnMember(m, spawnTargetWindowId(windows, active, team))}
                         title={
                           pane
                             ? t("sidebar.member.titleRunning")
