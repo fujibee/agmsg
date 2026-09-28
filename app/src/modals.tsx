@@ -346,8 +346,17 @@ export function RenameModal(props: {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const mountedRef = useRef(true);
-  useEffect(() => () => {
-    mountedRef.current = false;
+  useEffect(() => {
+    // StrictMode's dev-only mount→unmount→remount means the cleanup below
+    // can already have fired once before this effect re-runs — reset to
+    // true on setup too, not just at useRef's initializer (#1484 review,
+    // round 5), or the ref stays permanently false after that first
+    // synthetic cycle and every later failure is wrongly treated as
+    // "dialog already closed."
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
   const submit = async () => {
     if (!next.trim() || next.trim() === props.current) return;
@@ -411,8 +420,17 @@ export function ConfirmModal(props: {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const mountedRef = useRef(true);
-  useEffect(() => () => {
-    mountedRef.current = false;
+  useEffect(() => {
+    // StrictMode's dev-only mount→unmount→remount means the cleanup below
+    // can already have fired once before this effect re-runs — reset to
+    // true on setup too, not just at useRef's initializer (#1484 review,
+    // round 5), or the ref stays permanently false after that first
+    // synthetic cycle and every later failure is wrongly treated as
+    // "dialog already closed."
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
   const submit = async () => {
     setErr("");
@@ -499,8 +517,17 @@ export function DeleteTeamModal(props: {
   const [memberCount, setMemberCount] = useState<number | null>(null);
   const [purgeMessages, setPurgeMessages] = useState(false);
   const mountedRef = useRef(true);
-  useEffect(() => () => {
-    mountedRef.current = false;
+  useEffect(() => {
+    // StrictMode's dev-only mount→unmount→remount means the cleanup below
+    // can already have fired once before this effect re-runs — reset to
+    // true on setup too, not just at useRef's initializer (#1484 review,
+    // round 5), or the ref stays permanently false after that first
+    // synthetic cycle and every later failure is wrongly treated as
+    // "dialog already closed."
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   const attempt = async (run: () => Promise<void>) => {
