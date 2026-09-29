@@ -65,7 +65,7 @@ agmsg_launcher_classify() {
 # real terminal. Always returns 0: not placing a launcher is never an install
 # failure.
 agmsg_launcher_install() {
-  local skill_dir="$1" target tmp resolved
+  local skill_dir="$1" target tmp resolved old
   AGMSG_LAUNCHER_REASON=""
   if ! agmsg_launcher_pick_dir; then
     echo "  ~ agmsg command: not placed ($AGMSG_LAUNCHER_REASON)"
@@ -110,11 +110,15 @@ agmsg_launcher_install() {
   resolved="$(command -v agmsg 2>/dev/null || true)"
   if [ -n "$resolved" ] && [ "$resolved" != "$target" ]; then
     echo "    note: 'agmsg' currently resolves to $resolved, which comes first on PATH"
-    if agmsg_launcher_is_old_npm_entry "$resolved"; then
-      echo "    that is an older npm agmsg (1.5.1 or earlier): it does not know 'agmsg daemon'."
-      echo "    update it with: npm i -g agmsg@latest   (or put $AGMSG_LAUNCHER_DIR before it on PATH)"
-      return 0
-    fi
+  fi
+  # Every PATH entry ahead of the launcher's directory is checked, not just the
+  # first hit: during `npx agmsg install` a temporary entry sits first and an
+  # older global one can sit behind it.
+  if old="$(agmsg_launcher_find_old_npm_entry "$AGMSG_LAUNCHER_DIR")"; then
+    echo "    $old is an older npm agmsg (1.5.1 or earlier) that comes before the launcher on PATH;"
+    echo "    it does not know 'agmsg daemon'. Update it with: npm i -g agmsg@latest"
+    echo "    (or put $AGMSG_LAUNCHER_DIR before it on PATH)"
+    return 0
   fi
   echo "    on your own terminal: not checked here; open a new terminal and run: command -v agmsg"
   echo "    if that prints nothing, add this line to your shell startup file yourself:"
@@ -126,6 +130,23 @@ agmsg_launcher_install() {
 agmsg_launcher_is_old_npm_entry() {
   [ -f "$1" ] || return 1
   head -c 4096 "$1" 2>/dev/null | grep -q 'agmsg npm bootstrapper'
+}
+
+# Prints the first older npm agmsg found on PATH ahead of directory $1 (or
+# anywhere on PATH when $1 is not on it) and returns 0; returns 1 when none.
+agmsg_launcher_find_old_npm_entry() {
+  local stop="$1" dir rest="$PATH:"
+  while [ -n "$rest" ]; do
+    dir="${rest%%:*}"
+    rest="${rest#*:}"
+    [ -n "$dir" ] || continue
+    [ "$dir" = "$stop" ] && return 1
+    if agmsg_launcher_is_old_npm_entry "$dir/agmsg"; then
+      printf '%s\n' "$dir/agmsg"
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Remembers where the launcher went so uninstall can find it under a custom

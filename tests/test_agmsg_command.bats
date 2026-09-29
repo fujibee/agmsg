@@ -130,7 +130,13 @@ teardown() {
   mkdir -p "$old"
   printf '#!/usr/bin/env node\n// agmsg npm bootstrapper.\n' > "$old/agmsg"
   chmod +x "$old/agmsg"
-  run env PATH="$old:$PATH" bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
+  # A newer entry sits first on PATH (as during an npx install); the older
+  # global one behind it must still be found.
+  local newer="$BATS_TEST_TMPDIR/newerbin"
+  mkdir -p "$newer"
+  printf '#!/usr/bin/env node\n// agmsg npm entry.\n' > "$newer/agmsg"
+  chmod +x "$newer/agmsg"
+  run env PATH="$newer:$old:$PATH" bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
   [[ "$output" == *"older npm agmsg"* ]]
   [[ "$output" == *"npm i -g agmsg@latest"* ]]
   # It is only reported; nothing of the old entry is touched.
