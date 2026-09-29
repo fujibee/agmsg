@@ -95,14 +95,14 @@ _agmsg_codex_request_parse() {   # <line>
 # (a seat with no witness on record is simply never stopped automatically --
 # left running, reported); only ever consulted before a kill.
 #   Linux -> /proc/<pid>/stat field 22 (starttime, clock ticks): lossless.
-#   Windows (MSYS/MINGW/CYGWIN) -> PowerShell (Get-Process -Id
+#   Windows (MSYS/MINGW/CLANGARM) -> PowerShell (Get-Process -Id
 #     <pid>).StartTime.Ticks -- taken INSTEAD of /proc, not merely before it:
 #     MSYS exposes a working /proc, but keyed by the emulation layer's own pid
 #     space, not the Windows pid a cmdline match is about.
 #   else -> `ps -o lstart=`, second precision.
 _agmsg_codex_is_windows() {
-  case "${_AGMSG_CODEX_UNAME_S:=$(uname -s 2>/dev/null || echo unknown)}" in
-    MINGW*|MSYS*|CYGWIN*|CLANGARM*) return 0 ;;
+  case "${MSYSTEM:-}" in
+    MINGW*|MSYS*|CLANGARM*) return 0 ;;
     *) return 1 ;;
   esac
 }
