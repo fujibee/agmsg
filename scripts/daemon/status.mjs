@@ -19,6 +19,7 @@
 //     observe. Prints one JSON line to stdout; exit code follows the
 //     table's own exit column.
 
+import { existsSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,12 +161,35 @@ async function main() {
 
   // The node:sqlite experimental-feature warning is surfaced here, always
   // -- not hidden, not treated as a failure (arch-11 §4 #7).
+  //
+  // `process.exitCode = ...` and returning, NOT `process.exit(...)`: when
+  // stdout is a pipe rather than a TTY (exactly what capturing this
+  // command's output does -- a test runner, `agmsg daemon status |
+  // ...`), the write above is buffered, and `process.exit()` tears the
+  // process down before that buffer flushes -- observed directly: this
+  // printed nothing and still exited 0 under bats, where stdout is
+  // captured through a pipe, while running the identical command directly
+  // in an interactive terminal (a TTY, where the same write is
+  // unbuffered) looked completely fine. Setting exitCode and letting the
+  // event loop drain naturally waits for the flush first.
   process.stdout.write(
     `${JSON.stringify({ ...result, node_sqlite_experimental: true, node_version: process.version })}\n`,
   );
-  process.exit(result.exitCode);
+  process.exitCode = result.exitCode;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// `fileURLToPath(import.meta.url)` is realpath'd by Node's own module
+// loader (symlinks resolved); `process.argv[1]` is whatever the caller
+// passed literally and is NOT realpath'd by Node. On any system where the
+// temp/working directory itself sits behind a symlink -- macOS's
+// /var -> /private/var is the common case -- a bare `===` between the two
+// never matches, so this "am I the CLI entry" guard silently fails and
+// main() never runs: the process still exits 0 (nothing here throws), but
+// prints nothing beyond node:sqlite's own top-level-import warning.
+// Observed exactly this way (bats invokes this file through a path under
+// /var/folders while import.meta.url resolves through /private/var).
+// realpathSync both sides so the comparison is meaningful regardless of
+// which one the caller happened to pass.
+if (existsSync(process.argv[1] ?? "") && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main();
 }
