@@ -23,26 +23,39 @@ import { classify } from "./status.mjs";
 export const POLL_INTERVAL_MS = 5000;
 
 // Takes ownership and binds the control socket. Returns
-// {ok: true, gen, controlHandle} or {ok: false, reason} -- a refusal from
-// takeOwnership OR a bind failure, both reported the same shape so the
-// caller (main()) can log+exit either without a separate branch. A bind
-// failure additionally reverts daemon_owner back to 'none' (the
-// step-2 failure path) before returning.
-export async function startup(db, { installRoot, expectedDesired, expectedOpGen, version, handlers }) {
-  const owned = takeOwnership(db, { installRoot, expectedDesired, expectedOpGen, version });
-  if (!owned.ok) return owned;
-
-  let controlHandle;
+// {ok: true, gen, controlHandle, db} or {ok: false, reason, db} -- a
+// refusal from takeOwnership OR a bind failure, both reported the same
+// shape so the caller (main()) can log+exit either without a separate
+// branch. A bind failure additionally reverts daemon_owner back to 'none'.
+// When supplied, prepareClaim rechecks the install while holding its lock
+// and returns the database plus a release callback; that lock stays held
+// through ownership claim and socket readiness.
+export async function startup(db, { installRoot, expectedDesired, expectedOpGen, version, handlers, prepareClaim }) {
+  let releaseInstallLock = () => {};
   try {
-    controlHandle = await createControlServer(owned.socket, handlers);
-  } catch (error) {
-    revertToNone(db, owned.gen, "bind_failed");
-    logLine(installRoot, `startup: bind failed for gen ${owned.gen}: ${error.message}`);
-    return { ok: false, reason: `bind failed: ${error.message}` };
+    if (prepareClaim) {
+      const prepared = await prepareClaim();
+      db = prepared.db;
+      releaseInstallLock = prepared.release;
+    }
+
+    const owned = takeOwnership(db, { installRoot, expectedDesired, expectedOpGen, version });
+    if (!owned.ok) return { ...owned, db };
+
+    let controlHandle;
+    try {
+      controlHandle = await createControlServer(owned.socket, handlers);
+    } catch (error) {
+      revertToNone(db, owned.gen, "bind_failed");
+      logLine(installRoot, `startup: bind failed for gen ${owned.gen}: ${error.message}`);
+      return { ok: false, reason: `bind failed: ${error.message}`, db };
+    }
+    markReady(db, owned.gen);
+    logLine(installRoot, `startup: gen ${owned.gen} ready at ${owned.socket}`);
+    return { ok: true, gen: owned.gen, controlHandle, db };
+  } finally {
+    releaseInstallLock();
   }
-  markReady(db, owned.gen);
-  logLine(installRoot, `startup: gen ${owned.gen} ready at ${owned.socket}`);
-  return { ok: true, gen: owned.gen, controlHandle };
 }
 
 // One poll cycle. Returns
@@ -90,7 +103,7 @@ export async function gracefulStop(db, installRoot, gen, controlHandle, channelH
 // already verified. Exit codes: 0 for a declined
 // start or a normal/SIGTERM stop, 75 for stepping aside for an update, 1
 // for a bind failure or any other unexpected error.
-export async function main(db, { installRoot, manifest, manifestText, expectedDesired, expectedOpGen, version }) {
+export async function main(db, { installRoot, manifest, manifestText, expectedDesired, expectedOpGen, version, prepareClaim }) {
   const channelHooks = []; // beta's Codex-queue channel plugs in here, separately.
   let controlHandle;
   let gen;
@@ -109,6 +122,11 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
     expectedDesired,
     expectedOpGen,
     version,
+    prepareClaim: prepareClaim ? async () => {
+      const prepared = await prepareClaim();
+      db = prepared.db;
+      return prepared;
+    } : undefined,
     handlers: {
       onStop: async () => {
         // Fires from inside a control-socket request; the response itself
@@ -120,6 +138,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
       onStatus: async () => classify({ owner: { gen, state: "ready", version }, intent: {}, alive: true, reachable: true }),
     },
   });
+  db = started.db ?? db;
   if (!started.ok) {
     logLine(installRoot, `startup declined: ${started.reason}`);
     db.prepare("INSERT INTO daemon_start_attempts (at, reason, executor_pid) VALUES (?, ?, ?)").run(
