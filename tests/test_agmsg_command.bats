@@ -24,42 +24,42 @@ teardown() {
 @test "agmsg: unknown verb exits 2 with the location, reserved verb says not yet, daemon reaches daemon.sh" {
   run bash "$AGMSG" storage list
   [ "$status" -eq 2 ]
-  [[ "$output" == *"is not an agmsg command"* ]]
-  [[ "$output" == *"$TEST_SKILL_DIR/scripts"* ]]
+  grep -Fq -- "is not an agmsg command" <<<"$output"
+  grep -Fq -- "$TEST_SKILL_DIR/scripts" <<<"$output"
 
   run bash "$AGMSG" doctor
   [ "$status" -eq 2 ]
-  [[ "$output" == *"reserved"* ]]
+  grep -Fq -- "reserved" <<<"$output"
 
   # A published-elsewhere verb is not passed through to its script.
   run bash "$AGMSG" send x y z
   [ "$status" -eq 2 ]
-  [[ "$output" == *"is not an agmsg command"* ]]
+  grep -Fq -- "is not an agmsg command" <<<"$output"
 
   # daemon reaches daemon.sh with the arguments unchanged (its own usage text).
   run bash "$AGMSG" daemon bogus
-  [[ "$output" == *"agmsg daemon start|stop|status|enable|disable"* ]]
+  grep -Fq -- "agmsg daemon start|stop|status|enable|disable" <<<"$output"
 }
 
 @test "launcher: placed into the chosen dir, reaches the runtime, and uninstall removes only that" {
   run bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"placed $BIN_DIR/agmsg"* ]]
-  [[ "$output" == *"visible in this environment: no"* ]]
+  grep -Fq -- "placed $BIN_DIR/agmsg" <<<"$output"
+  grep -Fq -- "visible in this environment: no" <<<"$output"
   [ -x "$BIN_DIR/agmsg" ]
 
   # The launcher, not a symlink, and it lands on the real scripts/agmsg.
   [ ! -L "$BIN_DIR/agmsg" ]
   run "$BIN_DIR/agmsg" doctor
   [ "$status" -eq 2 ]
-  [[ "$output" == *"reserved"* ]]
+  grep -Fq -- "reserved" <<<"$output"
 
   # Second run is a no-op.
   run bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
-  [[ "$output" == *"already in place"* ]]
+  grep -Fq -- "already in place" <<<"$output"
 
   run bash -c 'source "$1"; agmsg_launcher_uninstall "$2"' _ "$LIB" "$TEST_SKILL_DIR"
-  [[ "$output" == *"removed agmsg command"* ]]
+  grep -Fq -- "removed agmsg command" <<<"$output"
   [ ! -e "$BIN_DIR/agmsg" ]
   [ -d "$BIN_DIR" ]
 }
@@ -72,7 +72,8 @@ teardown() {
 
   ln -s "$elsewhere" "$BIN_DIR/agmsg"
   run bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
-  [[ "$output" == *"not placed"* && "$output" == *"symlink"* ]]
+  grep -Fq -- "not placed" <<<"$output"
+  grep -Fq -- "symlink" <<<"$output"
   [ -L "$BIN_DIR/agmsg" ]
   [ "$(cat "$elsewhere")" = "original" ]
   run bash -c 'source "$1"; agmsg_launcher_uninstall "$2"' _ "$LIB" "$TEST_SKILL_DIR"
@@ -81,20 +82,20 @@ teardown() {
   rm -f "$BIN_DIR/agmsg"
   ln -s "$BATS_TEST_TMPDIR/does-not-exist" "$BIN_DIR/agmsg"
   run bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
-  [[ "$output" == *"symlink"* ]]
+  grep -Fq -- "symlink" <<<"$output"
   [ -L "$BIN_DIR/agmsg" ]
   [ ! -e "$BATS_TEST_TMPDIR/does-not-exist" ]
 
   rm -f "$BIN_DIR/agmsg"
   mkdir "$BIN_DIR/agmsg"
   run bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
-  [[ "$output" == *"not an agmsg launcher"* ]]
+  grep -Fq -- "not an agmsg launcher" <<<"$output"
   [ -d "$BIN_DIR/agmsg" ]
 
   rmdir "$BIN_DIR/agmsg"
   printf '#!/bin/sh\necho mine\n' > "$BIN_DIR/agmsg"
   run bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
-  [[ "$output" == *"not an agmsg launcher"* ]]
+  grep -Fq -- "not an agmsg launcher" <<<"$output"
   [ "$(sed -n 2p "$BIN_DIR/agmsg")" = "echo mine" ]
 }
 
@@ -103,7 +104,7 @@ teardown() {
   mkdir -p "$other/scripts"
   bash -c 'source "$1"; agmsg_launcher_render "$2" > "$3"' _ "$LIB" "$other" "$BIN_DIR/agmsg"
   run bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
-  [[ "$output" == *"belongs to the install at $other"* ]]
+  grep -Fq -- "belongs to the install at $other" <<<"$output"
   grep -q "$other" "$BIN_DIR/agmsg"
   # This install's uninstall must not remove the other install's launcher.
   run bash -c 'source "$1"; agmsg_launcher_uninstall "$2"' _ "$LIB" "$TEST_SKILL_DIR"
@@ -113,7 +114,7 @@ teardown() {
   bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR" >/dev/null
   printf '# edited\n' >> "$BIN_DIR/agmsg"
   run bash -c 'source "$1"; agmsg_launcher_uninstall "$2"' _ "$LIB" "$TEST_SKILL_DIR"
-  [[ "$output" == *"edited"* ]]
+  grep -Fq -- "edited" <<<"$output"
   [ -f "$BIN_DIR/agmsg" ]
 }
 
@@ -121,7 +122,7 @@ teardown() {
   cd "$BATS_TEST_TMPDIR"
   run env AGMSG_BIN_DIR=relative/bin bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"not an absolute path"* ]]
+  grep -Fq -- "not an absolute path" <<<"$output"
   [ ! -e "$BATS_TEST_TMPDIR/relative" ]
 }
 
@@ -137,8 +138,8 @@ teardown() {
   printf '#!/usr/bin/env node\n// agmsg npm entry.\n' > "$newer/agmsg"
   chmod +x "$newer/agmsg"
   run env PATH="$newer:$old:$BIN_DIR:$PATH" bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
-  [[ "$output" == *"older npm agmsg"* ]]
-  [[ "$output" == *"npm i -g agmsg@latest"* ]]
+  grep -Fq -- "older npm agmsg" <<<"$output"
+  grep -Fq -- "npm i -g agmsg@latest" <<<"$output"
   # It is only reported; nothing of the old entry is touched.
   grep -q 'agmsg npm bootstrapper' "$old/agmsg"
 }
@@ -159,5 +160,5 @@ teardown() {
   printf '#!/bin/sh\nexec node "$basedir/node_modules/agmsg/bin/agmsg.js" "$@"\n' > "$wrap/agmsg"
   chmod +x "$wrap/agmsg"
   run env PATH="$wrap:$BIN_DIR:$PATH" bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
-  [[ "$output" == *"older npm agmsg"* ]]
+  grep -Fq -- "older npm agmsg" <<<"$output"
 }
