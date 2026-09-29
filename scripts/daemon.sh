@@ -281,7 +281,8 @@ _start_registered_service() {
 }
 
 _start_unregistered_launcher() {
-  bash "$LAUNCHER" </dev/null >/dev/null 2>&1 3>&- 4>&- &
+  local stderr_log="${AGMSGD_TEST_LAUNCH_STDERR_LOG:-/dev/null}"
+  bash "$LAUNCHER" </dev/null >/dev/null 2>"$stderr_log" 3>&- 4>&- &
   disown 2>/dev/null || true
 }
 
