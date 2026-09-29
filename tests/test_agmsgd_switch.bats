@@ -1,5 +1,15 @@
 #!/usr/bin/env bats
 # Isolated scripts and data, without replacing HOME or touching real services.
+assert_contains() {
+  case "$output" in *"$1"*) return 0 ;; *) printf 'Missing: %s\nOutput: %s\n' "$1" "$output" >&2; return 1 ;; esac
+}
+assert_lacks() {
+  case "$output" in *"$1"*) printf 'Unexpected: %s\n' "$1" >&2; return 1 ;; *) return 0 ;; esac
+}
+refute() {
+  if "$@"; then return 1; fi
+  return 0
+}
 setup() {
   export TEST_SKILL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agmsgd-switch.XXXXXX")"
   TEST_SKILL_DIR="$(cd "$TEST_SKILL_DIR" && pwd -P)"
@@ -30,11 +40,11 @@ setup() {
 @test "enabled shim passes arguments unchanged and launches no monitor even when daemon is stopped" {
   run bash "$SCRIPTS/drivers/types/codex/codex-shim.sh" -C "$TEST_SKILL_DIR/project" resume --last
   [ "$status" -eq 0 ]
-  [[ "$output" == *'without a bridge'* ]]
-  [[ "$output" == *'agmsg daemon start'* ]]
-  [[ "$output" == *"$SCRIPTS/agmsg"* ]]
+  assert_contains 'without a bridge'
+  assert_contains 'agmsg daemon start'
+  assert_contains "$SCRIPTS/agmsg"
   grep -Fq "plain -C $TEST_SKILL_DIR/project resume --last" "$CALL_LOG"
-  ! grep -q '^monitor' "$CALL_LOG"
+  refute grep -q '^monitor' "$CALL_LOG"
 }
 
 @test "off, missing and unreadable install records retain the existing monitor route" {
@@ -48,7 +58,7 @@ setup() {
     run bash "$SCRIPTS/drivers/types/codex/codex-shim.sh" -C "$TEST_SKILL_DIR/project" resume --last
     [ "$status" -eq 0 ]
     grep -q '^monitor' "$CALL_LOG"
-    [[ "$output" != *'agmsgd handles'* ]]
+    assert_lacks 'agmsgd handles'
   done
 }
 
@@ -59,8 +69,8 @@ setup() {
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
   local files
   files="$(printf '%s\n' "$TEST_SKILL_DIR/run/"*)"
-  [[ "$files" != *codex-seat* ]]
-  [[ "$files" != *codex-bridge-request* ]]
+  [ "${files#*codex-seat}" = "$files" ]
+  [ "${files#*codex-bridge-request}" = "$files" ]
 }
 
 @test "ordinary operations warn once per install without Node and keep stdout clean" {
@@ -70,12 +80,12 @@ setup() {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
   PATH="$TEST_SKILL_DIR/no-node:$PATH" run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
   [ "$status" -eq 0 ]
-  [[ "$output" == *'Node >= 22.13.0'* ]]
-  [[ "$output" == *'agmsg daemon enable'* ]]
-  [[ "$output" == *alice* ]]
+  assert_contains 'Node >= 22.13.0'
+  assert_contains 'agmsg daemon enable'
+  assert_contains alice
   PATH="$TEST_SKILL_DIR/no-node:$PATH" run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
   [ "$status" -eq 0 ]
-  [[ "$output" != *'stopped while enabled'* ]]
+  assert_lacks 'stopped while enabled'
   [ -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
   [ ! -f "$CALL_LOG" ]
 }
@@ -85,11 +95,11 @@ setup() {
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$TEST_NOW"\n' > "$TEST_SKILL_DIR/clock/date"
   chmod +x "$TEST_SKILL_DIR/clock/date"
   PATH="$TEST_SKILL_DIR/clock:$PATH" TEST_NOW=1199 run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
-  [[ "$output" == *'stopped while enabled'* ]]
+  assert_contains 'stopped while enabled'
   PATH="$TEST_SKILL_DIR/clock:$PATH" TEST_NOW=1201 run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
-  [[ "$output" != *'stopped while enabled'* ]]
+  assert_lacks 'stopped while enabled'
   PATH="$TEST_SKILL_DIR/clock:$PATH" TEST_NOW=1799 run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
-  [[ "$output" == *'stopped while enabled'* ]]
+  assert_contains 'stopped while enabled'
 }
 
 @test "status and doctor report enabled failure even without usable Node" {
@@ -99,13 +109,13 @@ setup() {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
   PATH="$TEST_SKILL_DIR/no-node:$PATH" run bash "$SCRIPTS/daemon.sh" status
   [ "$status" -eq 1 ]
-  [[ "$output" == *'no usable Node recorded'* ]]
-  [[ "$output" == *'agmsg daemon enable'* ]]
+  assert_contains 'no usable Node recorded'
+  assert_contains 'agmsg daemon enable'
   PATH="$TEST_SKILL_DIR/no-node:$PATH" run bash "$SCRIPTS/doctor.sh" --team demo --type codex --redacted
   [ "$status" -eq 1 ]
-  [[ "$output" == *'Codex notices'* ]]
-  [[ "$output" == *'agmsg daemon start'* ]]
-  [[ "$output" != *demo/alice* ]]
+  assert_contains 'Codex notices'
+  assert_contains 'agmsg daemon start'
+  assert_lacks demo/alice
 }
 
 @test "concurrent ordinary operations claim only one warning" {
@@ -116,16 +126,16 @@ setup() {
   wait "$one"
   wait "$two"
   [ "$(cat "$TEST_SKILL_DIR/one.err" "$TEST_SKILL_DIR/two.err" | grep -c 'stopped while enabled')" -eq 1 ]
-  ! grep -q agmsgd "$TEST_SKILL_DIR/one.out"
-  ! grep -q agmsgd "$TEST_SKILL_DIR/two.out"
+  refute grep -q agmsgd "$TEST_SKILL_DIR/one.out"
+  refute grep -q agmsgd "$TEST_SKILL_DIR/two.out"
 }
 
 @test "status on a never-started enabled install fails with recovery and missing destinations" {
   run bash "$SCRIPTS/daemon.sh" status
   [ "$status" -eq 1 ]
-  [[ "$output" == *'agmsg daemon start'* ]]
-  [[ "$output" == *'no destination record'* ]]
-  [[ "$output" == *'demo/alice'* ]]
+  assert_contains 'agmsg daemon start'
+  assert_contains 'no destination record'
+  assert_contains 'demo/alice'
 }
 
 @test "executor evidence recognizes a live ready owner and rejects a changed boot" {
@@ -149,9 +159,9 @@ setup() {
     sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','$reason',0);"
     run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
     [ "$status" -eq 0 ]
-    [[ "$output" == *"$reason"* ]]
-    [[ "$output" == *'agmsg daemon start'* ]]
-    [[ "$output" == *'Unread messages are preserved'* ]]
+    assert_contains "$reason"
+    assert_contains 'agmsg daemon start'
+    assert_contains 'Unread messages are preserved'
     [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
   done
 }
@@ -166,9 +176,9 @@ setup() {
   chmod +x "$TEST_SKILL_DIR/fake-bin/uname"
   PATH="$TEST_SKILL_DIR/fake-bin:$PATH" run bash "$SCRIPTS/daemon.sh" disable
   [ "$status" -eq 0 ]
-  [[ "$output" == *'demo/alice: already using a bridge; no restart needed'* ]]
-  [[ "$output" == *'demo/bob: no bridge attached; restart Codex'* ]]
-  [[ "$output" == *'JSONL'* ]]
-  [[ "$output" == *'Unread'* || "$output" == *'unread messages are preserved'* ]]
+  assert_contains 'demo/alice: already using a bridge; no restart needed'
+  assert_contains 'demo/bob: no bridge attached; restart Codex'
+  assert_contains 'JSONL'
+  assert_contains 'unread messages are preserved'
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = off ]
 }

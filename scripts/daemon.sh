@@ -481,10 +481,10 @@ cmd_status() {
   _require_install_db
   agmsg_daemon_read_state
   local health_rc=0
-  if [ "$AGMSGD_DESIRED" = on ] && [ "$AGMSGD_HEALTH" != ready ]; then
+  if [ "${AGMSGD_DESIRED:-unknown}" = on ] && [ "${AGMSGD_HEALTH:-unknown}" != ready ]; then
     agmsg_daemon_recovery_text
     health_rc=1
-  elif [ "$AGMSGD_HEALTH" = unknown ]; then
+  elif [ "${AGMSGD_HEALTH:-unknown}" = unknown ]; then
     echo 'agmsg daemon status: install record could not be read; health is unknown'
     health_rc=1
   fi

@@ -108,7 +108,7 @@ PROJECT="$(cd "$PROJECT" && pwd)"
 # shellcheck source=../../../lib/daemon-state.sh
 source "$SCRIPT_DIR/../../../lib/daemon-state.sh"
 agmsg_daemon_read_state
-if [ "$AGMSGD_DESIRED" = on ]; then
+if [ "${AGMSGD_DESIRED:-unknown}" = on ]; then
   echo 'agmsgd handles Codex notices; starting plain Codex without a bridge.' >&2
   agmsg_daemon_warn_if_stopped always
   cd "$PROJECT"
