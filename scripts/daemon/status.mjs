@@ -100,11 +100,21 @@ export function readOwnerAndIntentReadOnly(installRoot) {
   try {
     const owner = db.prepare("SELECT * FROM daemon_owner").get();
     const intent = db.prepare("SELECT * FROM daemon_intent").get();
+    let codexSeats;
+    try {
+      codexSeats = {
+        state: "ok",
+        seats: db.prepare("SELECT seat, thread, codex_home, state, reason, checked_at FROM beta_codex_seat ORDER BY seat").all(),
+      };
+    } catch (error) {
+      if (!String(error?.message ?? "").includes("no such table")) throw error;
+      codexSeats = { state: "unavailable", reason: "channel_not_initialized", seats: [] };
+    }
     const alive =
       owner.state === "none" || owner.executor_pid == null
         ? null
         : isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id });
-    return { owner, intent, alive };
+    return { owner, intent, alive, codexSeats };
   } finally {
     db.close();
   }
@@ -145,9 +155,9 @@ async function main() {
     process.stderr.write("usage: status.mjs <installRoot>\n");
     process.exit(2);
   }
-  let owner, intent, alive;
+  let owner, intent, alive, codexSeats;
   try {
-    ({ owner, intent, alive } = readOwnerAndIntentReadOnly(installRoot));
+    ({ owner, intent, alive, codexSeats } = readOwnerAndIntentReadOnly(installRoot));
   } catch (error) {
     // An input that can be detected as an error is reported at
     // that entry point, with a nonzero exit -- not a raw stack trace, and
@@ -172,7 +182,7 @@ async function main() {
   // unbuffered) looked completely fine. Setting exitCode and letting the
   // event loop drain naturally waits for the flush first.
   process.stdout.write(
-    `${JSON.stringify({ ...result, node_sqlite_experimental: true, node_version: process.version })}\n`,
+    `${JSON.stringify({ ...result, codex_seats: codexSeats, node_sqlite_experimental: true, node_version: process.version })}\n`,
   );
   process.exitCode = result.exitCode;
 }

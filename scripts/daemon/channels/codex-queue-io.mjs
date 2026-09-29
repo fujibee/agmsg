@@ -53,6 +53,8 @@ export async function runCodexQueue({
   thread,
   message,
   timeoutMs,
+  signal,
+  onChildStart,
   spawnProcess = spawn,
 }) {
   if (typeof executable !== "string" || executable.length === 0) throw new TypeError("missing Codex executable");
@@ -60,6 +62,7 @@ export async function runCodexQueue({
   if (!UUID.test(thread ?? "")) throw new TypeError("thread must be a Codex UUID");
   if (typeof message !== "string" || !message) throw new TypeError("message must not be empty");
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("timeoutMs must be a positive integer");
+  if (signal?.aborted) return { kind: "cancelled", reason: "daemon_stopping" };
 
   const args = ["queue", "--thread", thread, "--message", message];
   let child;
@@ -91,6 +94,15 @@ export async function runCodexQueue({
   });
 
   let timedOut = false;
+  let aborted = false;
+  const killTimers = [];
+  const onAbort = () => {
+    aborted = true;
+    signalProcessGroup(child, "SIGTERM");
+    killTimers.push(setTimeout(() => signalProcessGroup(child, "SIGKILL"), 1000));
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
   const timer = setTimeout(() => {
     timedOut = true;
     signalProcessGroup(child, "SIGTERM");
@@ -98,10 +110,24 @@ export async function runCodexQueue({
   const hardKill = setTimeout(() => {
     if (timedOut) signalProcessGroup(child, "SIGKILL");
   }, timeoutMs + 1000);
+  let childRecordFailed = false;
+  if (onChildStart) {
+    try {
+      onChildStart(child.pid);
+    } catch {
+      childRecordFailed = true;
+      signalProcessGroup(child, "SIGTERM");
+      killTimers.push(setTimeout(() => signalProcessGroup(child, "SIGKILL"), 1000));
+    }
+  }
   const result = await closed;
   clearTimeout(timer);
   clearTimeout(hardKill);
+  for (const killTimer of killTimers) clearTimeout(killTimer);
+  signal?.removeEventListener("abort", onAbort);
 
+  if (childRecordFailed) return { kind: "failed", reason: "child_record_failed", stdout, stderr };
+  if (aborted) return { kind: "cancelled", reason: "daemon_stopping", stdout, stderr };
   if (timedOut) return { kind: "timeout", stdout, stderr };
   if (result.error) return { kind: "failed", reason: `spawn_failed: ${result.error.message}`, stdout, stderr };
   const combined = `${stdout}\n${stderr}`;
