@@ -120,7 +120,7 @@ _run_with_deadline() {
   local outfile exitfile
   outfile="$(mktemp)"
   exitfile="$(mktemp)"
-  ("$@" > "$outfile" 2>&1; echo "$?" > "$exitfile") &
+  (if "$@" > "$outfile" 2>&1; then echo 0 > "$exitfile"; else echo "$?" > "$exitfile"; fi) &
   local pid=$!
   local waited=0
   while kill -0 "$pid" 2>/dev/null; do
@@ -176,16 +176,27 @@ _run_with_deadline() {
 @test "daemon.sh stop: stops a real running daemon, and a second stop is a no-op" {
   _seed_install_db
   _write_completion_record
-  _run_with_deadline 15 bash "$DAEMON" start
-  [ "$status" -eq 0 ]
+  local iteration
+  for iteration in 1 2 3; do
+    _run_with_deadline 15 bash "$DAEMON" start
+    [ "$status" -eq 0 ]
 
-  _run_with_deadline 15 bash "$DAEMON" stop
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"stopped"* ]]
+    _run_with_deadline 10 bash "$DAEMON" status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"running"* ]] || [[ "$output" == *'"exitCode":0'* ]]
 
-  _run_with_deadline 10 bash "$DAEMON" stop
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"already stopped"* ]]
+    _run_with_deadline 10 bash "$DAEMON" start
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already running"* ]]
+
+    _run_with_deadline 15 bash "$DAEMON" stop
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"stopped"* ]]
+
+    _run_with_deadline 10 bash "$DAEMON" stop
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already stopped"* ]]
+  done
 }
 
 # A fake launchctl, never the real one (T6 #3): a bats run
@@ -201,25 +212,65 @@ _fake_launchctl() {
 #!/usr/bin/env bash
 # Records enough for the test to tell load/bootstrap from unload/bootout
 # apart, against a marker file instead of the real launchd.
+if [ -n "${AGMSGD_FAKE_OP_LOCK_DB:-}" ]; then
+  if ! sqlite3 -cmd 'PRAGMA busy_timeout=0;' "$AGMSGD_FAKE_OP_LOCK_DB" 'BEGIN EXCLUSIVE; ROLLBACK;' >/dev/null 2>&1; then
+    printf 'locked %s\n' "$1" >> "${AGMSGD_FAKE_LAUNCHD_EVENTS:?}"
+  else
+    printf 'unlocked %s\n' "$1" >> "${AGMSGD_FAKE_LAUNCHD_EVENTS:?}"
+  fi
+fi
+printf 'call %s\n' "$*" >> "${AGMSGD_FAKE_LAUNCHD_EVENTS:-/dev/null}"
 case "$1" in
   bootstrap|load) touch "${AGMSGD_FAKE_LAUNCHD_MARKER:?}" ;;
-  bootout|unload) rm -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}" ;;
+  bootout|unload)
+    [ "${AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER:-0}" != 1 ] || exit 1
+    rm -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}"
+    ;;
   list) [ -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}" ] ;;
+  kickstart)
+    printf '%s\n' "$*" >> "${AGMSGD_FAKE_LAUNCHD_EVENTS:?}"
+    if [ "${AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER:-0}" = 1 ]; then exit 1; fi
+    bash "${AGMSGD_TEST_LAUNCHER:?}" </dev/null >/dev/null 2>&1 3>&- &
+    ;;
 esac
 EOF
   chmod +x "$TEST_SKILL_DIR/fake-launchd/launchctl"
   echo "$TEST_SKILL_DIR/fake-launchd/launchctl"
 }
 
+_fake_windows_manager() {
+  mkdir -p "$TEST_SKILL_DIR/fake-windows"
+  cat > "$TEST_SKILL_DIR/fake-windows/uname" <<'EOF'
+#!/usr/bin/env bash
+echo MINGW64_NT-10.0
+EOF
+  cat > "$TEST_SKILL_DIR/fake-windows/schtasks" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  /Create)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = /XML ]; then cp "$2" "${AGMSGD_FAKE_TASK_XML:?}"; fi
+      shift
+    done
+    touch "${AGMSGD_FAKE_TASK_MARKER:?}"
+    ;;
+  /Run) bash "${AGMSGD_TEST_LAUNCHER:?}" </dev/null >/dev/null 2>&1 3>&- & ;;
+  /Delete) rm -f "${AGMSGD_FAKE_TASK_MARKER:?}" ;;
+esac
+EOF
+  chmod +x "$TEST_SKILL_DIR/fake-windows/uname" "$TEST_SKILL_DIR/fake-windows/schtasks"
+}
+
 @test "daemon.sh enable/disable: registers a resident unit (via a fake launchctl on macOS) and cleans it up" {
   [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
   _seed_install_db
   _write_completion_record
-  local fake_launchctl marker
+  local fake_launchctl marker events
   fake_launchctl="$(_fake_launchctl)"
   marker="$TEST_SKILL_DIR/fake-launchd/registered"
+  events="$TEST_SKILL_DIR/fake-launchd/events"
 
-  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" \
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
     run bash "$DAEMON" enable
   [ "$status" -eq 0 ]
 
@@ -231,9 +282,85 @@ EOF
   [ -f "$plist" ]
   [ -f "$marker" ]
 
-  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" \
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" \
     run bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ ! -f "$plist" ]
   [ ! -f "$marker" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;")" = "none" ]
+  grep -q '^locked bootstrap$' "$events"
+  grep -q '^locked bootout$' "$events"
+}
+
+@test "daemon.sh start: stale ready state asks the registered manager to start the service" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  local fake_launchctl marker events install_id unit_id label plist
+  fake_launchctl="$(_fake_launchctl)"
+  marker="$TEST_SKILL_DIR/fake-launchd/registered"
+  events="$TEST_SKILL_DIR/fake-launchd/events"
+  install_id="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT install_id FROM meta;")"
+  unit_id="$(printf '%s:%s' "$TEST_SKILL_DIR" "$install_id" | shasum -a 256 | cut -c1-12)"
+  label="cc.agmsg.agmsgd.$unit_id"
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  mkdir -p "$(dirname "$plist")"
+  : > "$plist"
+  touch "$marker"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on'; UPDATE daemon_owner SET state='ready', gen=1, executor_pid=99999999, executor_boot_id='stale', socket='$TEST_SKILL_DIR/run/missing.sock';"
+
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+    run bash "$DAEMON" start
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"running"* ]]
+  grep -q 'kickstart gui/' "$events"
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh disable: unregister failure is reported and preserves registration" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  local fake_launchctl marker events install_id unit_id label plist
+  fake_launchctl="$(_fake_launchctl)"
+  marker="$TEST_SKILL_DIR/fake-launchd/registered"
+  events="$TEST_SKILL_DIR/fake-launchd/events"
+  install_id="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT install_id FROM meta;")"
+  unit_id="$(printf '%s:%s' "$TEST_SKILL_DIR" "$install_id" | shasum -a 256 | cut -c1-12)"
+  label="cc.agmsg.agmsgd.$unit_id"
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  mkdir -p "$(dirname "$plist")"
+  : > "$plist"
+  touch "$marker"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
+
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER=1 \
+    run bash "$DAEMON" disable
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not unregister launchd service"* ]]
+  [ -f "$plist" ]
+  [ -f "$marker" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT desired FROM daemon_intent;")" = "on" ]
+  grep -q '^locked bootout$' "$events"
+}
+
+@test "daemon.sh Windows registration writes the declared UTF-16 task XML" {
+  _seed_install_db
+  _write_completion_record
+  _fake_windows_manager
+  local capture marker
+  capture="$TEST_SKILL_DIR/fake-windows/captured.xml"
+  marker="$TEST_SKILL_DIR/fake-windows/registered"
+
+  PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+    _run_with_deadline 15 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  [ "$(od -An -tx1 -N2 "$capture" | tr -d ' \n')" = "fffe" ]
+  iconv -f UTF-16LE -t UTF-8 "$capture" | grep -q 'encoding="UTF-16"'
+
+  PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_MARKER="$marker" \
+    _run_with_deadline 15 bash "$DAEMON" disable
+  [ "$status" -eq 0 ]
+  [ ! -f "$marker" ]
+  [ ! -f "$TEST_SKILL_DIR/run/agmsgd-$(_unit_id).xml" ]
 }

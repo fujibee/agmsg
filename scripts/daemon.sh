@@ -43,10 +43,9 @@ _require_install_db() {
 }
 
 # Runs $1 (one or more SQL statements against install.db's tables,
-# unqualified names -- see below) inside the operation lock (T3 "持つ範
-# 囲": start/enable/disable/uninstall take it for the whole operation;
-# this helper is for the WRITE itself, callers still do their own pre/post
-# work like waiting for ready outside it).
+# unqualified names -- see below) inside the operation lock. Optional
+# remaining arguments name one resident-manager action that must share the
+# same lock (enable/register or disable/unregister).
 #
 # The EXCLUSIVE lock belongs to $LOCK_DB (an empty file, PR 2's own
 # design -- the lock IS the file, nothing is ever written into it
@@ -58,8 +57,91 @@ _require_install_db() {
 # though install.db plainly has the table). ATTACH keeps the lock where
 # PR 2 says it lives while still writing to the file that actually holds
 # the data, in one real cross-file transaction.
+_install_generation() {
+  local install_id manifest_path_sql manifest_id manifest_gen
+  install_id="$(sqlite3 "$INSTALL_DB" "SELECT install_id FROM meta;" 2>/dev/null)" || return 1
+  manifest_path_sql="$(printf '%s' "$SKILL_DIR/run/install-manifest.json" | sed "s/'/''/g")"
+  IFS='|' read -r manifest_id manifest_gen < <(sqlite3 :memory: "SELECT json_extract(CAST(readfile('$manifest_path_sql') AS TEXT), '\$.install_id') || '|' || json_extract(CAST(readfile('$manifest_path_sql') AS TEXT), '\$.gen');" 2>/dev/null) || return 1
+  [ -n "$install_id" ] && [ "$manifest_id" = "$install_id" ] && [ -n "$manifest_gen" ] || return 1
+  printf '%s:%s' "$install_id" "$manifest_gen"
+}
+
+# Hold the SQLite installation lock across the database change and the
+# resident-manager operation. The install generation is captured before
+# acquisition and rechecked while the lock is held, so an upgrade between
+# those points cannot register an obsolete launcher.
 _with_op_lock() {
-  sqlite3 "$LOCK_DB" "ATTACH DATABASE '$(printf '%s' "$INSTALL_DB" | sed "s/'/''/g")' AS installdb; BEGIN EXCLUSIVE; $1 COMMIT;"
+  local statements="$1" expected_generation current_generation ready applied lock_pid attach_path lock_dir
+  local AGMSGD_LOCK_INSTALL_ID
+  shift
+  expected_generation="$(_install_generation)" || {
+    echo "agmsg daemon: cannot read a complete install generation" >&2
+    return 1
+  }
+  AGMSGD_LOCK_INSTALL_ID="${expected_generation%%:*}"
+  lock_dir="$(mktemp -d "$SKILL_DIR/run/daemon-op-lock.XXXXXX")" || return 1
+  mkfifo "$lock_dir/in" "$lock_dir/out"
+  sqlite3 -batch "$LOCK_DB" < "$lock_dir/in" > "$lock_dir/out" &
+  lock_pid=$!
+  exec 8> "$lock_dir/in"
+  exec 9< "$lock_dir/out"
+  attach_path="$(printf '%s' "$INSTALL_DB" | sed "s/'/''/g")"
+  printf '%s\n' '.bail on' "ATTACH DATABASE '$attach_path' AS installdb;" 'BEGIN EXCLUSIVE;' '.print LOCKED' >&8
+  if ! IFS= read -r -t 10 ready <&9 || [ "$ready" != "LOCKED" ]; then
+    printf 'ROLLBACK;\n.quit\n' >&8 2>/dev/null || true
+    exec 8>&-
+    exec 9<&-
+    wait "$lock_pid" 2>/dev/null || true
+    rm -f "$lock_dir/in" "$lock_dir/out"
+    rmdir "$lock_dir"
+    echo "agmsg daemon: could not acquire the install operation lock" >&2
+    return 1
+  fi
+  local generation_row generation_marker manifest_sql
+  manifest_sql="$(printf '%s' "$SKILL_DIR/run/install-manifest.json" | sed "s/'/''/g")"
+  printf '%s\n' "SELECT CASE WHEN json_extract(CAST(readfile('$manifest_sql') AS TEXT), '\$.install_id') = (SELECT install_id FROM installdb.meta) THEN (SELECT install_id FROM installdb.meta) || ':' || json_extract(CAST(readfile('$manifest_sql') AS TEXT), '\$.gen') ELSE '' END;" '.print GENERATION_END' >&8
+  IFS= read -r -t 10 generation_row <&9 || generation_row=""
+  IFS= read -r -t 10 generation_marker <&9 || generation_marker=""
+  current_generation="$generation_row"
+  if [ "$generation_marker" != "GENERATION_END" ] || [ "$current_generation" != "$expected_generation" ]; then
+    printf 'ROLLBACK;\n.quit\n' >&8
+    exec 8>&-
+    exec 9<&-
+    wait "$lock_pid" 2>/dev/null || true
+    rm -f "$lock_dir/in" "$lock_dir/out"
+    rmdir "$lock_dir"
+    echo "agmsg daemon: install generation changed while acquiring the operation lock; try again" >&2
+    return 1
+  fi
+  if [ -n "$statements" ]; then
+    printf '%s\n.print APPLIED\n' "$statements" >&8
+    if ! IFS= read -r -t 10 applied <&9 || [ "$applied" != "APPLIED" ]; then
+      printf 'ROLLBACK;\n.quit\n' >&8 2>/dev/null || true
+      exec 8>&-
+      exec 9<&-
+      wait "$lock_pid" 2>/dev/null || true
+      rm -f "$lock_dir/in" "$lock_dir/out"
+      rmdir "$lock_dir"
+      echo "agmsg daemon: install database update failed" >&2
+      return 1
+    fi
+  fi
+  local action_status=0
+  if [ "$#" -gt 0 ]; then
+    "$@" || action_status=$?
+  fi
+  if [ "$action_status" -eq 0 ]; then
+    printf 'COMMIT;\n.quit\n' >&8
+  else
+    printf 'ROLLBACK;\n.quit\n' >&8
+  fi
+  printf '.quit\n' >&8
+  exec 8>&-
+  exec 9<&-
+  wait "$lock_pid" || action_status=1
+  rm -f "$lock_dir/in" "$lock_dir/out"
+  rmdir "$lock_dir"
+  return "$action_status"
 }
 
 # A short, stable id for this install's resident-manager unit name,
@@ -69,8 +151,10 @@ _with_op_lock() {
 # already implied by being run/install.db under this same root, so it is
 # not a third independent input here.
 _unit_id() {
-  local install_id
-  install_id="$(sqlite3 "$INSTALL_DB" "SELECT install_id FROM meta;" 2>/dev/null)"
+  local install_id="${AGMSGD_LOCK_INSTALL_ID:-}"
+  if [ -z "$install_id" ]; then
+    install_id="$(sqlite3 "$INSTALL_DB" "SELECT install_id FROM meta;" 2>/dev/null)"
+  fi
   printf '%s:%s' "$SKILL_DIR" "$install_id" | shasum -a 256 | cut -c1-12
 }
 
@@ -110,7 +194,7 @@ _register_darwin() {
   <array>
     <string>$LAUNCHER</string>
   </array>
-  <key>RunAtLoad</key><true/>
+  <key>RunAtLoad</key><false/>
   <key>KeepAlive</key>
   <dict>
     <key>SuccessfulExit</key><false/>
@@ -128,7 +212,10 @@ _unregister_darwin() {
   label="$(_launchd_label)"
   plist="$(_launchd_plist_path)"
   if [ -f "$plist" ]; then
-    "$AGMSGD_LAUNCHCTL" bootout "gui/$(id -u)/$label" 2>/dev/null || "$AGMSGD_LAUNCHCTL" unload "$plist" 2>/dev/null || true
+    if ! "$AGMSGD_LAUNCHCTL" bootout "gui/$(id -u)/$label" 2>/dev/null && ! "$AGMSGD_LAUNCHCTL" unload "$plist" 2>/dev/null; then
+      echo "agmsg daemon: could not unregister launchd service $label" >&2
+      return 1
+    fi
     rm -f "$plist"
   fi
 }
@@ -158,7 +245,7 @@ StartLimitBurst=5
 WantedBy=default.target
 EOF
   "$AGMSGD_SYSTEMCTL" --user daemon-reload
-  "$AGMSGD_SYSTEMCTL" --user enable --now "$unit_name"
+  "$AGMSGD_SYSTEMCTL" --user enable "$unit_name"
 }
 
 _unregister_linux() {
@@ -166,13 +253,39 @@ _unregister_linux() {
   unit_path="$(_systemd_unit_path)"
   unit_name="$(basename "$unit_path")"
   if [ -f "$unit_path" ]; then
-    "$AGMSGD_SYSTEMCTL" --user disable --now "$unit_name" 2>/dev/null || true
+    if ! "$AGMSGD_SYSTEMCTL" --user disable --now "$unit_name"; then
+      echo "agmsg daemon: could not disable systemd user service $unit_name" >&2
+      return 1
+    fi
     rm -f "$unit_path"
     "$AGMSGD_SYSTEMCTL" --user daemon-reload
   fi
 }
 
 _schtasks_name() { printf 'agmsgd-%s' "$(_unit_id)"; }
+
+_service_registered() {
+  case "$(_os)" in
+    darwin) [ -f "$(_launchd_plist_path)" ] ;;
+    linux) [ -f "$(_systemd_unit_path)" ] ;;
+    windows) [ -f "$SKILL_DIR/run/$(_schtasks_name).xml" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+_start_registered_service() {
+  case "$(_os)" in
+    darwin) "$AGMSGD_LAUNCHCTL" kickstart "gui/$(id -u)/$(_launchd_label)" ;;
+    linux) "$AGMSGD_SYSTEMCTL" --user start "$(basename "$(_systemd_unit_path)")" ;;
+    windows) "$AGMSGD_SCHTASKS" /Run /TN "$(_schtasks_name)" ;;
+    *) echo "agmsg daemon start: unsupported resident manager" >&2; return 1 ;;
+  esac
+}
+
+_start_unregistered_launcher() {
+  bash "$LAUNCHER" </dev/null >/dev/null 2>&1 3>&- &
+  disown 2>/dev/null || true
+}
 
 # NOT YET RUN ON WINDOWS in this environment -- written to T2's own
 # win-test findings (LogonTrigger + RestartOnFailure via XML, since plain
@@ -183,7 +296,8 @@ _register_windows() {
   xml="$SKILL_DIR/run/${name}.xml"
   local native_launcher
   native_launcher="$(cygpath -w "$LAUNCHER" 2>/dev/null || printf '%s' "$LAUNCHER")"
-  cat > "$xml" <<EOF
+  local xml_utf8="$xml.utf8"
+  cat > "$xml_utf8" <<EOF
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
@@ -203,13 +317,23 @@ _register_windows() {
   </Settings>
 </Task>
 EOF
+  { printf '\xff\xfe'; iconv -f UTF-8 -t UTF-16LE "$xml_utf8"; } > "$xml"
+  rm -f "$xml_utf8"
   "$AGMSGD_SCHTASKS" /Create /TN "$name" /XML "$xml" /F
 }
 
 _unregister_windows() {
-  local name
+  local name xml
   name="$(_schtasks_name)"
-  "$AGMSGD_SCHTASKS" /Delete /TN "$name" /F 2>/dev/null || true
+  xml="$SKILL_DIR/run/$name.xml"
+  if [ ! -f "$xml" ]; then
+    return 0
+  fi
+  if ! "$AGMSGD_SCHTASKS" /Delete /TN "$name" /F; then
+    echo "agmsg daemon: could not delete scheduled task $name" >&2
+    return 1
+  fi
+  rm -f "$xml"
 }
 
 _register() {
@@ -265,25 +389,9 @@ _wait_for_ready() {
 
 cmd_start() {
   _require_install_db
-  # T3: "すでにdesired=onで、持ち主がreadyかつ実行者が生きているなら、何
-  # も変えずに「もう動いている」で成功(op_genを上げない)". Reaching this
-  # state at all REQUIRES desired to already have been 'on' (daemon_owner
-  # only reaches 'ready' via the launcher, which refuses to start unless
-  # desired is already 'on') -- so checking state=ready is sufficient on
-  # its own; a separate desired=on check would only be re-confirming
-  # something the state itself already implies.
-  # This is an optimistic pre-check, not the authoritative one: it does
-  # not itself verify the recorded executor is alive (that needs the pid +
-  # boot-id comparison executor.mjs does, and duplicating that in bash is
-  # not worth it here). If the record is stale (crashed, still says
-  # 'ready'), this reports "already running" instead of starting a new
-  # one -- a UX miss, not a safety one, because owner.mjs's own CAS inside
-  # the launcher it would otherwise invoke is what actually protects
-  # against two real owners; that CAS runs regardless of what this
-  # pre-check decided.
   local state
   state="$(sqlite3 "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
-  if [ "$state" = "ready" ]; then
+  if [ "$state" = "ready" ] && node "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
     echo "agmsg daemon start: already running"
     return 0
   fi
@@ -291,8 +399,14 @@ cmd_start() {
   local new_op_gen
   _with_op_lock "UPDATE daemon_intent SET desired = 'on', op_gen = op_gen + 1, set_by = 'start', set_at = strftime('%Y-%m-%dT%H:%M:%fZ','now');"
   new_op_gen="$(sqlite3 "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;")"
-  bash "$LAUNCHER" &
-  disown 2>/dev/null || true
+  if _service_registered; then
+    if ! _start_registered_service; then
+      echo "agmsg daemon start: the registered service manager could not start agmsgd" >&2
+      return 1
+    fi
+  else
+    _start_unregistered_launcher
+  fi
   if _wait_for_ready "$new_op_gen"; then
     echo "agmsg daemon start: running"
   else
@@ -378,18 +492,32 @@ cmd_enable() {
   _with_op_lock "
     UPDATE meta SET node_path = '$(printf '%s' "$node_path" | sed "s/'/''/g")', node_version = '$node_version';
     UPDATE daemon_intent SET desired = 'on';
-  "
-  _register "$node_path"
+  " _register "$node_path" || {
+    if ! _with_op_lock "" _unregister; then
+      echo "agmsg daemon enable: could not clean up the partially registered service" >&2
+    fi
+    return 1
+  }
   cmd_start
 }
 
 cmd_disable() {
   _require_install_db
-  _with_op_lock "UPDATE daemon_intent SET desired = 'off', op_gen = op_gen + 1, set_by = 'disable', set_at = strftime('%Y-%m-%dT%H:%M:%fZ','now');"
-  _unregister
+  _with_op_lock "UPDATE daemon_intent SET desired = 'off', op_gen = op_gen + 1, set_by = 'disable', set_at = strftime('%Y-%m-%dT%H:%M:%fZ','now');" _unregister
   local socket
   socket="$(sqlite3 "$INSTALL_DB" "SELECT socket FROM daemon_owner WHERE state = 'ready';" 2>/dev/null || true)"
   _request_stop_over_socket "$socket"
+  local waited=0 state
+  while [ "$waited" -lt 100 ]; do
+    state="$(sqlite3 "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+    [ "$state" = "none" ] && break
+    waited=$((waited + 1))
+    sleep 0.1
+  done
+  if [ "$state" != "none" ]; then
+    echo "agmsg daemon disable: service was unregistered but agmsgd has not confirmed stopping -- check 'agmsg daemon status'" >&2
+    return 1
+  fi
   echo "agmsg daemon disable: agmsgd turned off. Codex messages will go through the existing bridge again."
   echo "agmsg daemon disable: any Codex session started while agmsgd was in use needs to be restarted to get its bridge back."
 }
