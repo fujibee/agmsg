@@ -17,7 +17,8 @@
 # `enable`/`disable`.
 #
 # Required caller-set variable: none. Sources scripts/lib/compat.sh (for
-# compat_uuid7) if not already loaded.
+# compat_uuid7) and scripts/lib/sqlite-output.sh (for normalized query output)
+# if not already loaded.
 
 [ -n "${_AGMSG_INSTALL_DB_SH:-}" ] && return 0
 _AGMSG_INSTALL_DB_SH=1
@@ -25,6 +26,12 @@ _AGMSG_INSTALL_DB_SH=1
 if ! declare -F compat_uuid7 >/dev/null 2>&1; then
   # shellcheck disable=SC1091
   . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/compat.sh"
+fi
+if ! declare -F agmsg_sqlite_capture >/dev/null 2>&1; then
+  _agmsg_install_db_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  # shellcheck disable=SC1091
+  . "$_agmsg_install_db_dir/sqlite-output.sh"
+  unset _agmsg_install_db_dir
 fi
 
 # Ensures install.db exists with its meta row: creates the table if absent,
@@ -41,7 +48,7 @@ agmsg_install_db_ensure_meta() {   # <install_db_path>
     2>/dev/null; then
     return 1
   fi
-  id="$(sqlite3 "$db" "SELECT install_id FROM meta LIMIT 1;" 2>/dev/null | tr -d '\r')"
+  id="$(agmsg_sqlite_capture "$db" "SELECT install_id FROM meta LIMIT 1;")" || return 1
   if [ -z "$id" ]; then
     id="$(compat_uuid7)"
     if ! sqlite3 "$db" \

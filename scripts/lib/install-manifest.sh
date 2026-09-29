@@ -10,9 +10,9 @@
 # install_id itself is NOT this file's concern -- see install-db.sh.
 #
 # Required caller-set variable: none. Sources scripts/lib/sqlpath.sh (for
-# agmsg_sql_readfile_path) and scripts/lib/hash.sh (for agmsg_sha256) if not
-# already loaded; both are small, dependency-light files, not the whole of
-# storage.sh.
+# agmsg_sql_readfile_path), scripts/lib/sqlite-output.sh (for normalized
+# sqlite3 output), and scripts/lib/hash.sh (for agmsg_sha256) if not already
+# loaded; all are small, dependency-light files, not the whole of storage.sh.
 
 [ -n "${_AGMSG_INSTALL_MANIFEST_SH:-}" ] && return 0
 _AGMSG_INSTALL_MANIFEST_SH=1
@@ -21,6 +21,10 @@ _agmsg_install_manifest_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
   # shellcheck disable=SC1091
   . "$_agmsg_install_manifest_dir/sqlpath.sh"
+fi
+if ! declare -F agmsg_sqlite_capture >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  . "$_agmsg_install_manifest_dir/sqlite-output.sh"
 fi
 if ! declare -F agmsg_sha256 >/dev/null 2>&1; then
   # shellcheck disable=SC1091
@@ -50,10 +54,7 @@ _agmsg_install_manifest_read_gen() {   # <manifest_path>
   local path="${1:-}" sqlpath gen
   [ -f "$path" ] || return 1
   sqlpath="$(agmsg_sql_readfile_path "$path")" || return 1
-  gen="$(sqlite3 :memory: \
-    "SELECT json_extract(CAST(readfile('$sqlpath') AS TEXT), '\$.gen');" \
-    2>/dev/null)" || return 1
-  gen="${gen//$'\r'/}"
+  gen="$(agmsg_sqlite_capture :memory: "SELECT json_extract(CAST(readfile('$sqlpath') AS TEXT), '\$.gen');")" || return 1
   case "$gen" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -179,7 +180,7 @@ agmsg_install_manifest_write() {   # <scripts_dir> <manifest_path> <version> <in
     fi
   done < <(cd "$scripts_dir" && find . -type f -print0)
 
-  json="$(sqlite3 "$db" "
+  json="$(agmsg_sqlite_capture "$db" "
     SELECT json_object(
       'install_id', '$(_agmsg_install_manifest_sqlesc "$install_id")',
       'gen', $gen,
@@ -189,7 +190,7 @@ agmsg_install_manifest_write() {   # <scripts_dir> <manifest_path> <version> <in
       'digest_algo', 'sha256',
       'files', (SELECT json_group_array(json_object('path', path, 'digest', digest))
                   FROM (SELECT path, digest FROM files ORDER BY path))
-    );" 2>/dev/null)"
+    );")"
   rm -f "$db"
   [ -n "$json" ] || return 1
 

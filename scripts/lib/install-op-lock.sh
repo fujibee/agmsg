@@ -29,11 +29,22 @@
 # team-store lock today, so this is a constraint on future callers, not a
 # thing this file enforces itself.
 #
-# Required caller-set variable: none. Sources scripts/lib/hash.sh is NOT
-# required by this file.
+# Required caller-set variables: none. Sources sqlpath.sh for native-path
+# conversion and sqlite-output.sh for CRLF-safe captured output.
 
 [ -n "${_AGMSG_INSTALL_OP_LOCK_SH:-}" ] && return 0
 _AGMSG_INSTALL_OP_LOCK_SH=1
+
+_agmsg_install_op_lock_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  . "$_agmsg_install_op_lock_dir/sqlpath.sh"
+fi
+if ! declare -F agmsg_sqlite_capture >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  . "$_agmsg_install_op_lock_dir/sqlite-output.sh"
+fi
+unset _agmsg_install_op_lock_dir
 
 # A write to a pipe whose reader has already died raises SIGPIPE. Received by
 # the shell's OWN write (a builtin `printf` redirected to that fd runs IN
@@ -215,10 +226,9 @@ _agmsg_install_op_pending_field() {
     operation_id|operation|mode|install_path|install_id|actor_pid|started_at|state) ;;
     *) return 1 ;;
   esac
-  path_sql="$(_agmsg_install_op_sql_quote "$path")" || return 1
-  sqlite3 :memory: \
-    "SELECT json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$field');" \
-    2>/dev/null
+  path_sql="$(agmsg_sql_readfile_path "$path")" || return 1
+  agmsg_sqlite_capture :memory: \
+    "SELECT json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$field');"
 }
 
 agmsg_install_op_pending_validate() {
@@ -289,7 +299,7 @@ agmsg_install_op_pending_begin() {
     echo "  ! an incomplete-operation record already exists at $path" >&2
     return 1
   fi
-  op_id="$(sqlite3 :memory: "SELECT lower(hex(randomblob(16)));" 2>/dev/null)" || return 1
+  op_id="$(agmsg_sqlite_capture :memory: 'SELECT lower(hex(randomblob(16)));')" || return 1
   case "$op_id" in ''|*[!0-9a-f]*) return 1 ;; esac
   [ "${#op_id}" -eq 32 ] || return 1
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
@@ -299,7 +309,7 @@ agmsg_install_op_pending_begin() {
   id_sql="$(_agmsg_install_op_sql_quote "$op_id")" || return 1
   started_sql="$(_agmsg_install_op_sql_quote "$started_at")" || return 1
   install_id_sql="$(_agmsg_install_op_sql_quote "$install_id")" || return 1
-  json="$(sqlite3 :memory: "SELECT json_object('operation_id','$id_sql','operation','$kind_sql','mode','$mode_sql','install_path','$path_sql','install_id','$install_id_sql','actor_pid',$$,'started_at','$started_sql','state','in_progress');" 2>/dev/null)" || return 1
+  json="$(agmsg_sqlite_capture :memory: "SELECT json_object('operation_id','$id_sql','operation','$kind_sql','mode','$mode_sql','install_path','$path_sql','install_id','$install_id_sql','actor_pid',$$,'started_at','$started_sql','state','in_progress');")" || return 1
   [ -n "$json" ] || return 1
   tmp="$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")" || return 1
   if ! printf '%s\n' "$json" > "$tmp"; then
@@ -325,10 +335,10 @@ agmsg_install_op_pending_set_state() {
   agmsg_install_op_pending_validate "$path" || return 1
   current_id="$AGMSG_INSTALL_OP_PENDING_ID"
   [ "$current_id" = "$op_id" ] || return 1
-  path_sql="$(_agmsg_install_op_sql_quote "$path")" || return 1
+  path_sql="$(agmsg_sql_readfile_path "$path")" || return 1
   op_id="$(_agmsg_install_op_sql_quote "$op_id")" || return 1
   state="$(_agmsg_install_op_sql_quote "$state")" || return 1
-  json="$(sqlite3 :memory: "SELECT json_set(CAST(readfile('$path_sql') AS TEXT), '\$.state', '$state') WHERE json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.operation_id') = '$op_id';" 2>/dev/null)" || return 1
+  json="$(agmsg_sqlite_capture :memory: "SELECT json_set(CAST(readfile('$path_sql') AS TEXT), '\$.state', '$state') WHERE json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.operation_id') = '$op_id';")" || return 1
   [ -n "$json" ] || return 1
   tmp="$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")" || return 1
   if ! printf '%s\n' "$json" > "$tmp"; then

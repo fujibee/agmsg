@@ -886,6 +886,45 @@ SH
   grep -Fq -- "lock acquired" <<<"$output"
 }
 
+@test "install SQLite readers convert readfile paths and normalize CRLF output" {
+  local fake_bin="$FAKE_HOME/bin" record="$FAKE_HOME/record.json" manifest="$FAKE_HOME/manifest.json"
+  mkdir -p "$fake_bin"
+  printf '{}\n' > "$record"
+  printf '{"gen":1}\n' > "$manifest"
+  cat > "$fake_bin/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf 'C:/converted\n'
+SH
+  cat > "$fake_bin/sqlite3" <<'SH'
+#!/usr/bin/env bash
+query=
+for arg do query="$arg"; done
+case "$query" in
+  *"readfile('/"*) printf 'SQLite received an unconverted path\n' >&2; exit 20 ;;
+  *"readfile('C:/converted')"*'$.operation_id'*) printf 'op-id\r\n' ;;
+  *"readfile('C:/converted')"*'$.gen'*) printf '7\r\n' ;;
+  *"SELECT install_id FROM meta LIMIT 1;"*) printf 'install-id\r\n' ;;
+  *"CREATE TABLE IF NOT EXISTS meta"*) exit 0 ;;
+  *) printf 'unexpected SQL: %s\n' "$query" >&2; exit 21 ;;
+esac
+SH
+  chmod +x "$fake_bin/cygpath" "$fake_bin/sqlite3"
+
+  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" \
+    bash -c '
+      lib="$1"
+      . "$lib/install-op-lock.sh"
+      . "$lib/install-db.sh"
+      . "$lib/install-manifest.sh"
+      op_id="$(_agmsg_install_op_pending_field "$2" operation_id)" || exit 10
+      gen="$(_agmsg_install_manifest_read_gen "$3")" || exit 11
+      install_id="$(agmsg_install_db_ensure_meta "$4")" || exit 12
+      printf "%s|%s|%s\n" "$op_id" "$gen" "$install_id"
+    ' _ "$REPO_ROOT/scripts/lib" "$record" "$manifest" "$FAKE_HOME/install.db"
+  [ "$status" -eq 0 ]
+  [ "$output" = 'op-id|7|install-id' ]
+}
+
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {
   # Simulate the post-plugin-install state: no ~/.agents/skills/agmsg yet, but
   # the plugin marketplace flow has populated the cache dir with a copy of the
