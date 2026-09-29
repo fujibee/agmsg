@@ -23,6 +23,7 @@ load test_helper
 
 setup() {
   setup_test_env
+  TEST_LIFETIME_PIDS=""
   export SKILL_DIR="$TEST_SKILL_DIR"
   export RUN_DIR="$SKILL_DIR/run"; mkdir -p "$RUN_DIR"
   # #1254: the launcher now requires AGMSG_CODEX_SEAT_KEY (inherited from
@@ -138,6 +139,12 @@ _launcher_bridge_pids() {
 # $TEST_SKILL_DIR (#595/#615).
 teardown() {
   local pid pids
+  for pid in ${TEST_LIFETIME_PIDS:-}; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in ${TEST_LIFETIME_PIDS:-}; do
+    wait "$pid" 2>/dev/null || true
+  done
   pids="$(_launcher_child_pids; _launcher_bridge_pids)"
   for pid in $pids; do
     kill "$pid" 2>/dev/null || true
@@ -431,16 +438,43 @@ wait_for_child_count() {
   count_child_launchers
 }
 
+wait_for_stable_child_count() {
+  local want="$1" needed=5 stable=0 i count
+  for i in {1..100}; do
+    count="$(count_child_launchers)"
+    if [ "$count" -eq "$want" ]; then
+      stable=$((stable + 1))
+      [ "$stable" -ge "$needed" ] && { printf '%s\n' "$count"; return 0; }
+    else
+      stable=0
+    fi
+    sleep 0.1
+  done
+  printf '%s\n' "$count"
+  return 1
+}
+
+wait_for_bridge_capture() {
+  local i
+  for i in {1..100}; do
+    grep -Fq -- '--pair team' "$CAPTURE" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 @test "launcher: a replacement dispatcher does not double the role children (#485)" {
   put_record team alice thread-alice "$PROJ" codex
-  export MOCK_BRIDGE_SLEEP=12
-  sleep 14 3>&- & local parent_a=$!
-  sleep 14 3>&- & local parent_b=$!
+  export MOCK_BRIDGE_SLEEP=60
+  sleep 60 3>&- & local parent_a=$!
+  sleep 60 3>&- & local parent_b=$!
+  TEST_LIFETIME_PIDS="$parent_a $parent_b"
 
   # Dispatcher A spawns the role child, which is nohup'd and outlives A.
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_a" >/dev/null 2>&1 3>&- &
   local dispatcher_a=$!
   [ "$(wait_for_child_count 1)" -eq 1 ]
+  wait_for_bridge_capture
 
   # SIGKILL is what a pane teardown effectively does to a dispatcher that never
   # trapped the signal: the EXIT trap does not run, so the lock row is left
@@ -449,22 +483,38 @@ wait_for_child_count() {
   wait "$dispatcher_a" 2>/dev/null || true
   [ "$(wait_for_child_count 1)" -eq 1 ]
 
-  # Dispatcher B reclaims the stale lock and, with an empty known_pairs, spawns
-  # a second child for the SAME pair. Without the per-role lock that child would
-  # live on and poll forever alongside the first.
-  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_b" >/dev/null 2>&1 3>&- &
+  # Observe B reaching the child-launch call, and wait for that child attempt to
+  # return before checking the steady state. The wrapper keeps the attempt
+  # observable without adding a fixed delay.
+  local real_nohup duplicate_done="$TEST_SKILL_DIR/duplicate-child-done"
+  local fake_bin="$TEST_SKILL_DIR/fake-bin"
+  real_nohup="$(command -v nohup)"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/nohup" <<'EOF'
+#!/usr/bin/env bash
+"$REAL_NOHUP" "$@" &
+child=$!
+wait "$child"
+: > "$DUPLICATE_CHILD_DONE"
+EOF
+  chmod +x "$fake_bin/nohup"
+  REAL_NOHUP="$real_nohup" DUPLICATE_CHILD_DONE="$duplicate_done" \
+    PATH="$fake_bin:$PATH" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_b" >/dev/null 2>&1 3>&- &
   local dispatcher_b=$!
-  # The duplicate is spawned and then has to lose the lock race; settle on the
-  # steady state rather than on whichever side of that transition we land.
-  [ "$(wait_for_child_count 1)" -eq 1 ]
-  sleep 1
-  [ "$(count_child_launchers)" -eq 1 ]
+  local duplicate_returned=0 i
+  for i in {1..100}; do
+    [ -f "$duplicate_done" ] && { duplicate_returned=1; break; }
+    sleep 0.1
+  done
+  [ "$duplicate_returned" -eq 1 ]
+  [ "$(wait_for_stable_child_count 1)" -eq 1 ]
 
   kill "$dispatcher_b" 2>/dev/null || true
   wait "$dispatcher_b" 2>/dev/null || true
   kill "$parent_a" "$parent_b" 2>/dev/null || true
   wait "$parent_a" 2>/dev/null || true
   wait "$parent_b" 2>/dev/null || true
+  TEST_LIFETIME_PIDS=""
 }
 
 @test "launcher: a re-registered role gets a fresh child after deregistration (#485)" {
