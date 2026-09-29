@@ -131,9 +131,9 @@ _with_op_lock() {
     "$@" || action_status=$?
   fi
   if [ "$action_status" -eq 0 ]; then
-    printf 'COMMIT;\n.quit\n' >&8
+    printf 'COMMIT;\n' >&8
   else
-    printf 'ROLLBACK;\n.quit\n' >&8
+    printf 'ROLLBACK;\n' >&8
   fi
   printf '.quit\n' >&8
   exec 8>&-
