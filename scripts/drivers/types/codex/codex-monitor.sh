@@ -163,6 +163,7 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
 # whole point -- no ancestry walk is needed anywhere downstream to find a
 # seat's own server (design review, replacing an earlier ancestry-walk design).
 AGMSG_CODEX_SEAT_KEY="$SEAT_KEY" \
+  AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
   "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SEAT_LOG" 2>&1 3>&- 4>&- &
 server_bg="$!"
 

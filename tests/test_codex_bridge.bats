@@ -157,6 +157,24 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "codex-bridge: native Windows project hash matches the Git Bash project hash" {
+  skip_unless_windows "the fixture needs native Windows path.resolve and Git Bash cygpath"
+  local project native posix expected actual other
+  # /tmp is a Git Bash alias for a physical Windows path, so use this worktree.
+  project="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
+  native="$(cygpath -am "$project")"
+  posix="$project"
+  expected="$(printf '%s' "$posix" | sha1sum | cut -c1-40)"
+  actual="$(node -e 'const c=require("crypto"),p=require("path"),{toPosixPath}=require(process.argv[1]); process.stdout.write(c.createHash("sha1").update(toPosixPath(p.resolve(process.argv[2]))).digest("hex"))' "$TYPES/codex/codex-bridge.js" "$native")"
+  if [ "$actual" != "$expected" ]; then
+    printf 'project=%s native=%s actual=%s expected=%s\n' "$posix" "$native" "$actual" "$expected"
+    false
+  fi
+  other="$(node -e 'const c=require("crypto"),p=require("path"),{toPosixPath}=require(process.argv[1]); process.stdout.write(c.createHash("sha1").update(toPosixPath(p.resolve(process.argv[2]))).digest("hex"))' "$TYPES/codex/codex-bridge.js" "${native}-other")"
+  [ "$other" != "$expected" ]
+  grep -Fq 'update(toPosixPath(this.opts.project)).digest("hex")' "$TYPES/codex/codex-bridge.js"
+}
+
 @test "codex-bridge: toPosixPath leaves POSIX paths unchanged" {
   run node -e 'const { toPosixPath } = require(process.argv[1]); if (toPosixPath("/c/Users/me/OneDrive/codex-work") !== "/c/Users/me/OneDrive/codex-work") process.exit(1); if (toPosixPath("/home/me/x") !== "/home/me/x") process.exit(1);' "$TYPES/codex/codex-bridge.js"
   [ "$status" -eq 0 ]

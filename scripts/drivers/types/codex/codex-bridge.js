@@ -1045,7 +1045,7 @@ class CodexBridge {
     this.leasefile = path.join(RUN_DIR, `codex-bridge-lease.${process.pid}`);
     this.leaseStart = "";
     this.leaseStartSrc = "";
-    this.projectHash = crypto.createHash("sha1").update(this.opts.project).digest("hex");
+    this.projectHash = crypto.createHash("sha1").update(toPosixPath(this.opts.project)).digest("hex");
     this.pairsHash = crypto.createHash("sha1")
       .update(
         this.identities
