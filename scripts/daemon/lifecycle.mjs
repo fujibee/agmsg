@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { collectInstallBaseline, installChangedAgainst } from "../internal/install-baseline.mjs";
 
 const MANIFEST_NAME = "install-manifest.json";
 const LOCK_NAME = "install-op.lock.db";
@@ -138,18 +139,50 @@ export function verifyDigest(installRoot, manifest) {
   return { ok: true };
 }
 
-// The running daemon's cheap per-cycle re-check (T3 "動いているagmsgd"):
-// has the completion record stopped being 'complete' since the last check
-// (i.e. an install/uninstall started)? This is deliberately NOT the deeper
-// #963-style in-place-edit detection (VERSION/digest changed without the
-// manifest itself moving) -- that reuses install-baseline.mjs once it is
-// extracted from remote-sync.mjs (T5 #3, a separate PR); until then, an
-// in-place edit to scripts/ that never goes through install.sh is not
-// caught by this function -- a known gap, not yet closed.
-//
-// Returns true iff the completion record is no longer 'complete' (the
-// caller should step aside).
-export function completionRecordChanged(installRoot, lastKnownManifestText) {
+// Returns true iff the completion record is no longer 'complete' since
+// `lastKnownManifestText` was captured (an install/uninstall started).
+function completionRecordChanged(installRoot, lastKnownManifestText) {
   const now = readCompletionState(installRoot);
   return now.state !== "complete" || now.manifestText !== lastKnownManifestText;
+}
+
+// Captured once, right after a successful startup verification, and handed
+// to watchForDrift() every cycle thereafter (T3 "動いているagmsgd").
+// `scriptsBaseline` is null when collectInstallBaseline itself could not
+// observe the tree (see that function's own doc) -- watchForDrift treats a
+// null baseline the same way collectInstallBaseline's own caller always
+// has: the digest half of the check is simply off, not a false positive.
+export async function captureWatchState(installRoot, manifest, manifestText) {
+  return {
+    manifestText,
+    version: manifest.version,
+    scriptsBaseline: await collectInstallBaseline(join(installRoot, "scripts")),
+  };
+}
+
+// The running daemon's per-cycle re-check (T3 "動いているagmsgd"): stand
+// aside if EITHER (a) the completion record stopped being 'complete' (an
+// install/uninstall started), OR (b) the VERSION string or any file under
+// scripts/ changed IN PLACE without the manifest moving at all -- the #963
+// case, detected via install-baseline.mjs against the baseline
+// captureWatchState took at startup. Returns {changed: false} or
+// {changed: true, reason}.
+export async function watchForDrift(installRoot, watchState) {
+  if (completionRecordChanged(installRoot, watchState.manifestText)) {
+    return { changed: true, reason: "completion record is no longer complete" };
+  }
+  let currentVersion;
+  try {
+    currentVersion = readFileSync(join(installRoot, "VERSION"), "utf8").trim();
+  } catch {
+    return { changed: true, reason: "VERSION file could not be read" };
+  }
+  if (currentVersion !== watchState.version) {
+    return { changed: true, reason: `VERSION changed: ${watchState.version} -> ${currentVersion}` };
+  }
+  if (watchState.scriptsBaseline) {
+    const changedPath = await installChangedAgainst(join(installRoot, "scripts"), watchState.scriptsBaseline);
+    if (changedPath) return { changed: true, reason: `scripts/ changed in place: ${changedPath}` };
+  }
+  return { changed: false };
 }

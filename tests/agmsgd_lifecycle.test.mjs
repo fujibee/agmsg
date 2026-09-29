@@ -14,10 +14,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
-  completionRecordChanged,
+  captureWatchState,
   readCompletionState,
   verifyDigest,
   verifyInstallId,
+  watchForDrift,
 } from "../scripts/daemon/lifecycle.mjs";
 import { openInstallDb } from "../scripts/daemon/db.mjs";
 
@@ -44,6 +45,7 @@ function makeInstall() {
     files,
   };
   writeFileSync(join(root, "run", "install-manifest.json"), JSON.stringify(manifest));
+  writeFileSync(join(root, "VERSION"), `${manifest.version}\n`);
   return { root, manifest };
 }
 
@@ -136,18 +138,39 @@ test("verifyInstallId: matches, mismatches, and a never-set install.db all repor
   }
 });
 
-test("completionRecordChanged: false while the manifest is untouched, true once it moves", () => {
-  const { root } = makeInstall();
+test("watchForDrift: quiet when nothing changed; catches a moved manifest, a VERSION bump, and an in-place edit", async () => {
+  const { root, manifest } = makeInstall();
   try {
     const first = readCompletionState(root);
-    assert.equal(completionRecordChanged(root, first.manifestText), false);
+    const state = await captureWatchState(root, manifest, first.manifestText);
+    assert.deepEqual(await watchForDrift(root, state), { changed: false });
 
-    
+    // Case 1: an install/uninstall starts (manifest moved to .prev).
     renameSync(
       join(root, "run", "install-manifest.json"),
       join(root, "run", "install-manifest.json.prev"),
     );
-    assert.equal(completionRecordChanged(root, first.manifestText), true);
+    let r = await watchForDrift(root, state);
+    assert.equal(r.changed, true);
+    assert.match(r.reason, /completion record/);
+    renameSync(
+      join(root, "run", "install-manifest.json.prev"),
+      join(root, "run", "install-manifest.json"),
+    );
+
+    // Case 2: VERSION changed without the manifest moving at all.
+    writeFileSync(join(root, "VERSION"), "0.0.1-different\n");
+    r = await watchForDrift(root, state);
+    assert.equal(r.changed, true);
+    assert.match(r.reason, /VERSION/);
+    writeFileSync(join(root, "VERSION"), `${manifest.version}\n`);
+
+    // Case 3: a file under scripts/ edited in place -- the #963 case --
+    // with neither the manifest nor VERSION touched.
+    writeFileSync(join(root, "scripts", "team.sh"), "tampered in place\n");
+    r = await watchForDrift(root, state);
+    assert.equal(r.changed, true);
+    assert.match(r.reason, /scripts\/ changed in place/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
