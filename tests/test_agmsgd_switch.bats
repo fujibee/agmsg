@@ -102,6 +102,19 @@ setup() {
   assert_contains 'stopped while enabled'
 }
 
+@test "warning cleanup removes only past slots and preserves current and newer claims" {
+  mkdir -p "$TEST_SKILL_DIR/clock" "$TEST_SKILL_DIR/run/agmsgd-warning-slot.0" "$TEST_SKILL_DIR/run/agmsgd-warning-slot.2" "$TEST_SKILL_DIR/run/agmsgd-warning-slot.unknown"
+  printf '#!/usr/bin/env bash\nprintf "1199\\n"\n' > "$TEST_SKILL_DIR/clock/date"
+  chmod +x "$TEST_SKILL_DIR/clock/date"
+  PATH="$TEST_SKILL_DIR/clock:$PATH" run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
+  [ "$status" -eq 0 ]
+  assert_contains 'stopped while enabled'
+  [ ! -d "$TEST_SKILL_DIR/run/agmsgd-warning-slot.0" ]
+  [ -d "$TEST_SKILL_DIR/run/agmsgd-warning-slot.1" ]
+  [ -d "$TEST_SKILL_DIR/run/agmsgd-warning-slot.2" ]
+  [ -d "$TEST_SKILL_DIR/run/agmsgd-warning-slot.unknown" ]
+}
+
 @test "status and doctor report enabled failure even without usable Node" {
   mkdir -p "$TEST_SKILL_DIR/no-node"
   printf '#!/usr/bin/env bash\nexit 1\n' > "$TEST_SKILL_DIR/no-node/node"

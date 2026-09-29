@@ -104,9 +104,12 @@ agmsg_daemon_warn_if_stopped() (
   fi
   # The claimed window remains as an empty directory. Only past windows are
   # removed; none of them can grant a fresh claim in the current window.
-  local old
+  local old old_window
   for old in "$_AGMSG_DAEMON_ROOT/run/"agmsgd-warning-slot.*; do
-    [ -d "$old" ] && [ "$old" != "$slot" ] && rmdir "$old" 2>/dev/null || true
+    [ -d "$old" ] || continue
+    old_window="${old##*.}"
+    case "$old_window" in ''|*[!0-9]*) continue ;; esac
+    [ "$old_window" -lt "$((now / 600))" ] && rmdir "$old" 2>/dev/null || true
   done
   return 0
 )
