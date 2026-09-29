@@ -291,30 +291,37 @@ export function createCodexQueueChannel({
     const pending = readPending(db, seat);
     if (pending) {
       const observation = await pendingObservation(pending, now, observeGroup);
+      if (observation.childrenUnresolved && pending.codex_home) blockedCodexHomes.add(pending.codex_home);
+      if (!registered) {
+        if (observation.state === "confirmed") setQueueState(db, pending.id, "confirmed");
+        else if (observation.state === "expired") setQueueState(db, pending.id, "expired");
+        saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "unaddressable", reason: "seat_registration_missing" }, now);
+        return;
+      }
+      if (hostPlatform === "win32") {
+        if (observation.state === "confirmed") setQueueState(db, pending.id, "confirmed");
+        else if (observation.state === "expired") setQueueState(db, pending.id, "expired");
+        const reason = observation.state === "pending"
+          ? `windows_live_delivery_unverified;pending:${observation.reason}`
+          : "windows_live_delivery_unverified";
+        saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "blocked", reason }, now);
+        return;
+      }
       if (observation.state === "confirmed") {
         setQueueState(db, pending.id, "confirmed");
-        if (!registered) {
-          saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "unaddressable", reason: "seat_registration_missing" }, now);
-          return;
-        }
         const knownBridge = bridge === "stopped" || bridge === "running";
         saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: !knownBridge ? "blocked" : bridge === "running" ? "bridged" : "addressable", reason: !knownBridge ? "bridge_state_unknown" : bridge === "running" ? "bridge_running" : "" }, now);
         return;
       } else if (observation.state === "expired") {
         setQueueState(db, pending.id, "expired");
-        if (!registered) {
-          saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "unaddressable", reason: "seat_registration_missing" }, now);
-          return;
-        }
       } else {
-        if (observation.childrenUnresolved && pending.codex_home) blockedCodexHomes.add(pending.codex_home);
         const knownBridge = bridge === "stopped" || bridge === "running";
         saveSeat(db, {
           seat,
           thread: pending.thread,
           codexHome: pending.codex_home,
-          state: !registered ? "unaddressable" : !knownBridge ? "blocked" : bridge === "running" ? "bridged" : "addressable",
-          reason: !registered ? `seat_registration_missing;pending:${observation.reason}` : !knownBridge ? `bridge_state_unknown;pending:${observation.reason}` : bridge === "running" ? `bridge_running;pending:${observation.reason}` : observation.reason,
+          state: !knownBridge ? "blocked" : bridge === "running" ? "bridged" : "addressable",
+          reason: !knownBridge ? `bridge_state_unknown;pending:${observation.reason}` : bridge === "running" ? `bridge_running;pending:${observation.reason}` : observation.reason,
         }, now);
         return;
       }
@@ -471,9 +478,17 @@ export function createCodexQueueChannel({
       const blockedCodexHomes = new Set();
       const seats = [...roster.seats];
       const registeredKeys = new Set(seats.map(({ team, agent }) => seatKey(team, agent)));
-      for (const { team, agent } of pendingSeats(db)) {
+      const unsettledSeats = pendingSeats(db);
+      const pendingKeys = new Set(unsettledSeats.map(({ team, agent }) => seatKey(team, agent)));
+      for (const { team, agent } of unsettledSeats) {
         const key = seatKey(team, agent);
         if (!registeredKeys.has(key)) seats.push({ team, agent, teamConfig: null, registered: false });
+      }
+      const knownKeys = new Set([...registeredKeys, ...pendingKeys]);
+      for (const row of db.prepare("SELECT seat FROM beta_codex_seat").all()) {
+        if (!knownKeys.has(row.seat)) {
+          saveSeat(db, { seat: row.seat, state: "unaddressable", reason: "seat_registration_missing" }, now);
+        }
       }
       // Sequential processing also serializes codex queue writes that share a
       // CODEX_HOME, avoiding Codex's measured concurrent-write loss.

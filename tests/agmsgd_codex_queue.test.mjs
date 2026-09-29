@@ -34,6 +34,7 @@ import { processStartWitness } from '../scripts/daemon/channels/process-group.mj
 
 const thread = '01a0ea97-c011-73f3-8470-fd59db15adba';
 const itemId = '01a0ea98-2235-7f02-b477-7c130e602fcd';
+const notYetVisibleItemId = '01a0ea99-3509-7d03-a588-8d241f7130de';
 
 function temporaryDirectory(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-codex-queue-'));
@@ -345,13 +346,33 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
     hostPlatform: 'win32',
     queue: async () => { throw new Error('Windows queue must stay closed until live delivery is verified'); },
   });
+  installDb.prepare(`
+    INSERT INTO beta_codex_queue (seat, codex_home, thread, up_to, nonce, queue_item_id, state, children, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+  `).run(JSON.stringify(['alpha', 'alice']), codexHome, thread, JSON.stringify({ eventSeq: 1, legacyId: 0 }), 'windows-pending-nonce', notYetVisibleItemId, JSON.stringify({ state: 'absent' }), new Date().toISOString());
   await windowsChannel.pollOnce();
   const windowsSeat = installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
   assert.equal(windowsSeat.state, 'blocked');
-  assert.equal(windowsSeat.reason, 'windows_live_delivery_unverified');
+  assert.equal(windowsSeat.reason, 'windows_live_delivery_unverified;pending:awaiting_confirmation');
+  assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ? ORDER BY id DESC LIMIT 1").get(JSON.stringify(['alpha', 'alice'])).state, 'pending');
+  const windowsQueueDb = new DatabaseSync(path.join(codexHome, 'queue_1.sqlite'));
+  windowsQueueDb.prepare('INSERT INTO queued_items VALUES (?, ?, ?)').run(notYetVisibleItemId, thread, '{}');
+  windowsQueueDb.close();
+  await windowsChannel.pollOnce();
+  const confirmedWindowsSeat = installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
+  assert.equal(confirmedWindowsSeat.state, 'blocked');
+  assert.equal(confirmedWindowsSeat.reason, 'windows_live_delivery_unverified');
+  assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ? ORDER BY id DESC LIMIT 1").get(JSON.stringify(['alpha', 'alice'])).state, 'confirmed');
   await windowsChannel.stop();
 
   writeFileSync(path.join(teamsDir, 'alpha', 'config.json'), JSON.stringify({ agents: {} }));
+  const missingSeatChannel = createCodexQueueChannel({ db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: storageDir } });
+  await missingSeatChannel.pollOnce();
+  const missingSeat = installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
+  assert.equal(missingSeat.state, 'unaddressable');
+  assert.equal(missingSeat.reason, 'seat_registration_missing');
+  await missingSeatChannel.stop();
+
   installDb.prepare(`
     INSERT INTO beta_codex_queue (seat, codex_home, thread, up_to, nonce, queue_item_id, state, children, created_at)
     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
