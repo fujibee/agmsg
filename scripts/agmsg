@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# The runtime `agmsg` command. Deliberately a small dispatcher: it names the
+# few verbs that are public in this version and hands each one to the script
+# that implements it. It does NOT forward arbitrary verbs to scripts/<verb>.sh;
+# names such as send / inbox / history are not published here yet.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+_usage() {
+  cat <<'USAGE'
+usage: agmsg <command> [args]
+
+commands:
+  daemon start|stop|status|enable|disable   manage the agmsgd beta daemon
+  --version                                 print the installed version
+  help                                      show this message
+
+Everything else is still run as scripts in this install's scripts/ directory.
+USAGE
+}
+
+case "${1:-}" in
+  daemon)
+    shift
+    exec bash "$SCRIPT_DIR/daemon.sh" "$@"
+    ;;
+  --version|-v)
+    printf 'agmsg %s (install: %s)\n' "$(bash "$SCRIPT_DIR/version.sh")" "$(cd "$SCRIPT_DIR/.." && pwd)"
+    ;;
+  help|--help|-h)
+    _usage
+    ;;
+  install)
+    cat >&2 <<'MSG'
+agmsg: this agmsg is already installed; `agmsg install` does not run from here.
+To install or update, run one of:
+  npx agmsg install
+  bash <path to a checkout>/install.sh
+MSG
+    exit 2
+    ;;
+  doctor|sync|activate|deactivate|despawn|migrate)
+    echo "agmsg: '$1' is reserved and is not available in this version yet." >&2
+    exit 2
+    ;;
+  "")
+    _usage >&2
+    exit 2
+    ;;
+  *)
+    echo "agmsg: '$1' is not an agmsg command." >&2
+    echo "Scripts for this install live in: $SCRIPT_DIR" >&2
+    exit 2
+    ;;
+esac

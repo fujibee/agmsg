@@ -30,6 +30,8 @@ AGENTS_DIR="$HOME/.agents"
 . "$SCRIPT_DIR/scripts/lib/install-db.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/install-manifest.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/agmsg-launcher.sh"
 
 # Type registry — resolve each type's SKILL command template from its manifest
 # (scripts/drivers/types/<name>/template.md) instead of a hardcoded templates/ path. Read-only
@@ -1127,6 +1129,8 @@ $_agmsg_running_team"
     unset -f agmsg_shq
   fi
   chmod +x "$SKILL_DIR/scripts/"*.sh || exit 1
+  # Extensionless entry points the *.sh glob does not reach.
+  chmod +x "$SKILL_DIR/scripts/agmsg" "$SKILL_DIR/scripts/daemon/agmsgd" 2>/dev/null || true
   agmsg_install_optional_codex_chmod
   install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh" || exit 1
   # Refresh the Codex monitor shim (~/.agents/bin/codex) if it's ours. --update
@@ -1175,6 +1179,7 @@ $_agmsg_running_team"
   fi
   install_windows_helpers || exit 1
   agmsg_install_op_phase_end || exit 1
+  agmsg_install_op_run_phase agmsg_launcher_install "$SKILL_DIR" || exit 1
   agmsg_install_op_run_phase agmsg_install_write_version || exit 1
   echo "  + updated scripts, templates, and SKILL.md (version $INSTALLED_VERSION)"
   echo "  ~ DB and team configs preserved"
@@ -1280,6 +1285,8 @@ agmsg_install_optional_uninstaller_copy
 
 agmsg_install_optional_copy "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml"
 chmod +x "$SKILL_DIR/scripts/"*.sh || exit 1
+# Extensionless entry points the *.sh glob does not reach.
+chmod +x "$SKILL_DIR/scripts/agmsg" "$SKILL_DIR/scripts/daemon/agmsgd" 2>/dev/null || true
 agmsg_install_optional_codex_chmod
 install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh" || exit 1
 # Re-point an existing Codex monitor shim at the new path on a reinstall over an
@@ -1306,6 +1313,9 @@ if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
 fi
 install_windows_helpers || exit 1
 agmsg_install_op_phase_end || exit 1
+
+# The `agmsg` command launcher (never touches shell rc files or PATH).
+agmsg_install_op_run_phase agmsg_launcher_install "$SKILL_DIR" || exit 1
 
 # Marker file for uninstall detection and source provenance version are one
 # protected phase so neither write can occur after a lost-lock boundary.
