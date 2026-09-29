@@ -5,8 +5,9 @@
 # otherwise send-side only and never runs actas-claim, so without this a codex
 # role would have no role-session record and could never be resumed (spawn would
 # always boot it fresh). This is the codex-side equivalent: the codex actas flow
-# calls it, and it writes the record so a later spawn/resume brings the role back
-# into its thread.
+# calls it, and it writes the thread plus the effective CODEX_HOME so a later
+# spawn/resume brings the role back into its thread and profile. The /clear
+# recovery in self-fix.sh calls this same script after #1470 rebinds the seat.
 #
 # Usage: codex-record-session.sh <team> <agent> [project]
 #
@@ -208,11 +209,31 @@ if [ -z "$thread" ]; then
 fi
 
 [ -n "$thread" ] || exit 0
+# Record the profile directory this thread actually uses. Codex defaults to
+# $HOME/.codex when CODEX_HOME is unset; resolve either spelling to a physical
+# absolute path so a later reader does not have to infer the profile from its
+# own environment. A missing or malformed directory is not safe to publish as
+# a delivery destination, so leave the previous record untouched.
+codex_home="${CODEX_HOME:-}"
+if [ -z "$codex_home" ]; then
+  [ -n "${HOME:-}" ] || exit 0
+  codex_home="$HOME/.codex"
+fi
+case "$codex_home" in *[[:cntrl:]]*) exit 0 ;; esac
+[ -d "$codex_home" ] || exit 0
+codex_home="$(agmsg_canonical_path "$codex_home")"
+# Keep the absolute path in the cross-platform form used by Node consumers;
+# Git Bash's physical /c/... spelling is normalized to C:/... on Windows.
+codex_home="$(agmsg_normalize_project_path "$codex_home")"
+case "$codex_home" in
+  /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
+  *) exit 0 ;;
+esac
 # codex thread ids are already bare UUIDs (no composite pid form), so record
 # as-is. The project is recorded in its canonical (physical) form so records
 # carry one path spelling regardless of how the caller spelled the argument.
 agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
-agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" || true
+agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" "$codex_home" || true
 
 # The Codex actas flow reaches this script instead of actas-claim.sh. Publish
 # the same seat request here so a resumed seat's dispatcher has an authority

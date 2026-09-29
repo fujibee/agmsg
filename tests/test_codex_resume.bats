@@ -14,6 +14,8 @@ setup() {
   export RUN_DIR="$SKILL_DIR/run"
   mkdir -p "$RUN_DIR"
   export CODEX_SESSIONS="$HOME/.codex/sessions"
+  export CODEX_HOME="$HOME/.codex"
+  mkdir -p "$CODEX_HOME"
 }
 
 teardown() { teardown_test_env; }
@@ -68,14 +70,25 @@ recorded_uuid() {
   agmsg_role_session_uuid "$1" "$2"
 }
 
-@test "codex record: prefers CODEX_THREAD_ID (unambiguous env path)" {
-  local proj; proj="$(mktemp -d)"
-  CODEX_THREAD_ID="env-thread-1" \
+@test "codex record: stores the thread and effective profile path" {
+  local proj explicit_home expected_home; proj="$(mktemp -d)"
+  explicit_home="$TEST_SKILL_DIR/codex profile"
+  mkdir -p "$explicit_home" "$HOME/.codex"
+  CODEX_HOME="$explicit_home" CODEX_THREAD_ID="env-thread-1" \
     bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
   [ "$(recorded_uuid team alice)" = "env-thread-1" ]
-  # type is recorded as codex.
   source "$SKILL_DIR/scripts/lib/role-session.sh"
   [ "$(agmsg_role_session_get team alice type)" = "codex" ]
+  expected_home="$(cd "$explicit_home" && pwd -P)"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
+
+  # Unset CODEX_HOME uses the same default Codex uses, recorded as an absolute
+  # path rather than leaving a later reader to infer it from its own HOME.
+  env -u CODEX_HOME CODEX_THREAD_ID="env-thread-2" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "env-thread-2" ]
+  expected_home="$(cd "$HOME/.codex" && pwd -P)"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
 @test "codex record: falls back to the unique matching-cwd rollout when env is unset" {
