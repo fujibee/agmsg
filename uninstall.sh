@@ -16,18 +16,64 @@ set -euo pipefail
 
 AGENTS_DIR="$HOME/.agents"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/scripts/lib/codex-config.sh"
+AGMSG_INSTALL_OP_RECOVERY_SOURCE=""
+if [ -e "$SCRIPT_DIR/run/install-op-incomplete.json" ] || [ -L "$SCRIPT_DIR/run/install-op-incomplete.json" ]; then
+  if [ -r "$SCRIPT_DIR/run/install-op-recovery.sh" ]; then
+    AGMSG_INSTALL_OP_RECOVERY_SOURCE="$SCRIPT_DIR/run/install-op-recovery.sh"
+  else
+    for _agmsg_recovery_candidate in "$SCRIPT_DIR"/run/.install-op-recovery-retired.*; do
+      [ -r "$_agmsg_recovery_candidate" ] || continue
+      AGMSG_INSTALL_OP_RECOVERY_SOURCE="$_agmsg_recovery_candidate"
+      break
+    done
+    unset _agmsg_recovery_candidate
+  fi
+fi
+if [ -n "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" ]; then
+  # Prefer the atomically-published recovery code while an operation record
+  # exists; scripts/ may be incomplete after an interrupted update.
+  # shellcheck disable=SC1090
+  . "$AGMSG_INSTALL_OP_RECOVERY_SOURCE"
+elif [ -r "$SCRIPT_DIR/scripts/lib/codex-config.sh" ] && [ -r "$SCRIPT_DIR/scripts/lib/install-op-lock.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/scripts/lib/codex-config.sh"
+  # The same operation lock install.sh takes (agmsgd beta).
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/scripts/lib/install-op-lock.sh"
+else
+  AGMSG_INSTALL_OP_RECOVERY_SOURCE="$SCRIPT_DIR/run/install-op-recovery.sh"
+  if [ ! -r "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" ]; then
+    for _agmsg_recovery_candidate in "$SCRIPT_DIR"/run/.install-op-recovery-retired.*; do
+      [ -r "$_agmsg_recovery_candidate" ] || continue
+      AGMSG_INSTALL_OP_RECOVERY_SOURCE="$_agmsg_recovery_candidate"
+      break
+    done
+    unset _agmsg_recovery_candidate
+  fi
+  if [ ! -r "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" ]; then
+    echo "  ! uninstall support files are missing; restore the install before continuing" >&2
+    exit 1
+  fi
+  # This fallback remains under run/ while an uninstall is incomplete, so an
+  # installed copy can recover after --keep-data removed scripts/.
+  # shellcheck disable=SC1090
+  . "$AGMSG_INSTALL_OP_RECOVERY_SOURCE"
+fi
 
 AUTO_YES=false
 KEEP_DATA=false
 REMOVE_ALL=false
+CMD_NAME=""
+RECOVER_ID=""
+AGMSG_INSTALL_OP_ACTIVE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes|-y)       AUTO_YES=true;  shift ;;
     --keep-data)    KEEP_DATA=true; shift ;;
     --all)          REMOVE_ALL=true; shift ;;
+    --cmd)          CMD_NAME="$2"; shift 2 ;;
+    --recover)      RECOVER_ID="$2"; shift 2 ;;
     -h|--help)
       echo "Usage: ./uninstall.sh [options]"
       echo ""
@@ -35,11 +81,18 @@ while [[ $# -gt 0 ]]; do
       echo "  --yes, -y       Remove without confirmation"
       echo "  --keep-data     Remove skill but keep DB and team configs"
       echo "  --all           Remove every agmsg install on the machine"
+      echo "  --cmd <name>    Select one installation under ~/.agents/skills"
+      echo "  --recover <id>  Clear a verified incomplete operation, then continue uninstall"
       exit 0
       ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
+
+if [ -n "$RECOVER_ID" ] && { [ -z "$CMD_NAME" ] || [ "$REMOVE_ALL" = true ]; }; then
+  echo "  ! --recover requires --cmd <name> and cannot be combined with --all" >&2
+  exit 1
+fi
 
 echo ""
 echo "  agmsg — Uninstall"
@@ -54,6 +107,33 @@ confirm() {
 }
 
 REMOVED=false
+
+_uninstall_operation_exit() {
+  if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ]; then
+    agmsg_install_op_unlock
+    AGMSG_INSTALL_OP_ACTIVE=false
+  fi
+}
+trap '_uninstall_operation_exit' EXIT
+trap 'agmsg_install_op_handle_signal INT' INT
+trap 'agmsg_install_op_handle_signal TERM' TERM
+
+_uninstall_operation_require() {
+  if agmsg_install_op_require; then
+    return 0
+  fi
+  agmsg_install_op_unlock
+  return 1
+}
+
+_uninstall_checked_rm() {
+  _uninstall_operation_require || return 1
+  if ! agmsg_install_op_run_writer rm "$@"; then
+    agmsg_install_op_unlock
+    return 1
+  fi
+  _uninstall_operation_require
+}
 
 # Removes this install's own writable_roots entries (SKILL_DIR's db/,
 # teams/, run/, ext-tools/) from ONE Codex config.toml, if it exists and
@@ -126,8 +206,11 @@ _uninstall_clean_codex_config() {
   if cmp -s "$CODEX_CONFIG" "$CODEX_CONFIG.tmp"; then
     rm -f "$CODEX_CONFIG.tmp"
   else
+    _uninstall_operation_require || return 1
     cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
+    _uninstall_operation_require || return 1
     mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+    _uninstall_operation_require || return 1
     echo "  - cleaned Codex writable_roots in $CODEX_CONFIG (backup: $(basename "$CODEX_CONFIG").bak)"
     REMOVED=true
   fi
@@ -140,6 +223,55 @@ _uninstall_clean_codex_config() {
 _uninstall_one() {
   local SKILL_DIR="$1"
   local SKILL_NAME; SKILL_NAME="$(basename "$SKILL_DIR")"
+
+  # Operation lock (agmsgd beta): held for the whole of this function,
+  # the same lock install.sh takes for the same
+  # SKILL_DIR. A failure here means another install/uninstall/enable/
+  # disable is already in progress against this exact install -- refuse
+  # rather than race it. No trap releases this on an unexpected abort: the
+  # OS drops the file lock the moment this process dies; there is no
+  # stale-lock recovery step, so an uninstall
+  # that crashes mid-way is the same "held until the holder dies" state a
+  # crashed install.sh already leaves.
+  if ! agmsg_install_op_lock "$SKILL_DIR/run/install-op.lock.db"; then
+    echo "  ! could not take the install operation lock for $SKILL_DIR: ${AGMSG_INSTALL_OP_LOCK_FAILURE_REASON:-unknown lock handshake failure}" >&2
+    return 1
+  fi
+  AGMSG_INSTALL_OP_ACTIVE=true
+  _uninstall_operation_require || return 1
+
+  local pending="$SKILL_DIR/run/install-op-incomplete.json"
+  local recovery_prefix recovery_entrypoint="$SKILL_DIR/uninstall.sh" running_entrypoint="" operation_mode=remove-data recovery_helper="$SKILL_DIR/run/install-op-recovery.sh" recovery_retired="" uninstaller_retired=""
+  if [ "$SCRIPT_DIR" = "$SKILL_DIR" ]; then
+    case "$(basename "$0")" in
+    .install-op-uninstaller-retired.*) running_entrypoint="$SKILL_DIR/$(basename "$0")" ;;
+    esac
+  fi
+  if [ ! -f "$recovery_entrypoint" ]; then
+    if [ -f "$pending" ] && agmsg_install_op_pending_validate "$pending"; then
+      local _recovery_entrypoint_candidate="$SKILL_DIR/.install-op-uninstaller-retired.$AGMSG_INSTALL_OP_PENDING_ID"
+      [ -f "$_recovery_entrypoint_candidate" ] && recovery_entrypoint="$_recovery_entrypoint_candidate"
+      unset _recovery_entrypoint_candidate
+    fi
+  fi
+  [ "$KEEP_DATA" = true ] && operation_mode=keep-data
+  recovery_prefix="bash $(printf '%q' "$recovery_entrypoint") --cmd $(printf '%q' "$(basename "$SKILL_DIR")")"
+  [ "$KEEP_DATA" = true ] && recovery_prefix="$recovery_prefix --keep-data"
+  [ "$AUTO_YES" = true ] && recovery_prefix="$recovery_prefix --yes"
+  recovery_prefix="$recovery_prefix --recover"
+  if [ -n "$RECOVER_ID" ]; then
+    agmsg_install_op_pending_recover "$pending" "$RECOVER_ID" uninstall "$operation_mode" || return 1
+    RECOVER_ID=""
+  elif [ -e "$pending" ] || [ -L "$pending" ]; then
+    agmsg_install_op_pending_refuse "$pending" "$recovery_prefix" uninstall "$operation_mode"
+    return 1
+  fi
+  AGMSG_INSTALL_OP_MARKER="$pending"
+  agmsg_install_op_pending_begin "$pending" uninstall "$SKILL_DIR" "" "$operation_mode" || return 1
+  uninstaller_retired="$SKILL_DIR/.install-op-uninstaller-retired.$AGMSG_INSTALL_OP_ID"
+  if [ -n "$running_entrypoint" ] && [ ! -f "$SKILL_DIR/uninstall.sh" ]; then
+    uninstaller_retired="$running_entrypoint"
+  fi
   # This install's own path with its trailing slash (review): matching on
   # SKILL_NAME or a bare SKILL_DIR prefix is not a boundary -- "agmsg" is a
   # literal substring of "agmsg-second", and "$SKILL_DIR" (no trailing
@@ -196,7 +328,7 @@ _uninstall_one() {
             [ -f "$cmd_file" ] || continue
             if grep -qF "$SKILL_DIR_SLASH" "$cmd_file" 2>/dev/null; then
               local cmd_name; cmd_name=$(basename "$cmd_file" .md)
-              rm "$cmd_file"
+              _uninstall_checked_rm "$cmd_file" || return 1
               echo "  - removed /$cmd_name command from $project"
               REMOVED=true
             fi
@@ -246,7 +378,9 @@ _uninstall_one() {
               );
             " 2>/dev/null) || true
             if [ -n "$UPDATED" ] && [ "$UPDATED" != "$SETTINGS_ESC" ]; then
+              _uninstall_operation_require || return 1
               echo "$UPDATED" > "$settings_file"
+              _uninstall_operation_require || return 1
               echo "  - removed agmsg hook from $settings_file"
               REMOVED=true
             fi
@@ -274,7 +408,7 @@ _uninstall_one() {
         [ -n "$project" ] || continue
         local copilot_hook="$project/.github/hooks/agmsg.json"
         if [ -f "$copilot_hook" ] && grep -qF "$SKILL_DIR_SLASH" "$copilot_hook" 2>/dev/null; then
-          rm "$copilot_hook"
+          _uninstall_checked_rm "$copilot_hook" || return 1
           echo "  - removed agmsg Copilot hook from $project"
           REMOVED=true
         fi
@@ -307,7 +441,7 @@ _uninstall_one() {
         [ -n "$project" ] || continue
         local grok_rule="$project/.grok/rules/agmsg.md"
         if [ -f "$grok_rule" ] && grep -qF "$SKILL_DIR_SLASH" "$grok_rule" 2>/dev/null; then
-          rm "$grok_rule"
+          _uninstall_checked_rm "$grok_rule" || return 1
           echo "  - removed agmsg Grok Build rule from $project"
           REMOVED=true
         fi
@@ -318,7 +452,7 @@ _uninstall_one() {
   # --- Remove Claude Code global command ---
   local CC_CMD="$HOME/.claude/commands/$SKILL_NAME.md"
   if [ -f "$CC_CMD" ]; then
-    rm "$CC_CMD"
+    _uninstall_checked_rm "$CC_CMD" || return 1
     echo "  - removed /$SKILL_NAME from ~/.claude/commands/"
     REMOVED=true
   fi
@@ -326,7 +460,7 @@ _uninstall_one() {
   # --- Remove Copilot CLI skill ---
   local COPILOT_SKILL="$HOME/.copilot/skills/$SKILL_NAME"
   if [ -d "$COPILOT_SKILL" ]; then
-    rm -rf "$COPILOT_SKILL"
+    _uninstall_checked_rm -rf "$COPILOT_SKILL" || return 1
     echo "  - removed /$SKILL_NAME skill from ~/.copilot/skills/"
     REMOVED=true
   fi
@@ -334,7 +468,7 @@ _uninstall_one() {
   # --- Remove Antigravity skill ---
   local ANTIGRAVITY_SKILL="$HOME/.gemini/config/skills/$SKILL_NAME"
   if [ -d "$ANTIGRAVITY_SKILL" ]; then
-    rm -rf "$ANTIGRAVITY_SKILL"
+    _uninstall_checked_rm -rf "$ANTIGRAVITY_SKILL" || return 1
     echo "  - removed /$SKILL_NAME skill from ~/.gemini/config/skills/"
     REMOVED=true
   fi
@@ -343,7 +477,7 @@ _uninstall_one() {
   local helper
   for helper in "$AGENTS_DIR/$SKILL_NAME.ps1" "$AGENTS_DIR/$SKILL_NAME-run.sh"; do
     if [ -f "$helper" ]; then
-      rm "$helper"
+      _uninstall_checked_rm "$helper" || return 1
       echo "  - removed $helper"
       REMOVED=true
     fi
@@ -353,16 +487,48 @@ _uninstall_one() {
   if [ "$KEEP_DATA" = true ]; then
     echo ""
     echo "  Removing $SKILL_NAME skill (keeping DB and teams)..."
-    rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash"
-    rm -f "$SKILL_DIR/SKILL.md"
+    _uninstall_checked_rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash" || return 1
+    _uninstall_checked_rm -f "$SKILL_DIR/SKILL.md" || return 1
     echo "  - removed scripts, templates, SKILL.md"
     echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/"
     REMOVED=true
   else
     echo ""
     if confirm "Remove $SKILL_NAME (including DB and teams)?"; then
-      rm -rf "$SKILL_DIR"
-      echo "  - removed $SKILL_DIR"
+      # run/install-op.lock.db is NEVER deleted, even here (agmsgd beta):
+      # removing a DB a waiter still has open makes a
+      # freshly recreated file of the same name a DIFFERENT lock than the
+      # one the waiter holds a reference to -- see install-op-lock.sh's own
+      # header). Remove every top-level entry EXCEPT run/ by name, then
+      # inside run/ remove everything except install-op.lock.db by name --
+      # never a single recursive rm -rf "$SKILL_DIR" that cannot make this
+      # one exception. rmdir (not rm -rf) on SKILL_DIR itself: it correctly
+      # fails and is left in place, since run/install-op.lock.db means it
+      # is never truly empty after this.
+      local _entry _run_entry
+      for _entry in "$SKILL_DIR"/* "$SKILL_DIR"/.[!.]*; do
+        [ -e "$_entry" ] || continue
+        # Keep the installed recovery entrypoint available until the
+        # incomplete-operation record is cleared below.
+        case "$(basename "$_entry")" in
+        uninstall.sh|.install-op-uninstaller-retired.*) continue ;;
+        esac
+        if [ "$(basename "$_entry")" = "run" ]; then
+          for _run_entry in "$_entry"/*; do
+            [ -e "$_run_entry" ] || continue
+            case "$(basename "$_run_entry")" in
+            install-op.lock.db|install-op-incomplete.json|install-op-recovery.sh|.install-op-recovery-retired.*) continue ;;
+            esac
+            _uninstall_checked_rm -rf "$_run_entry" || return 1
+          done
+        else
+          _uninstall_checked_rm -rf "$_entry" || return 1
+        fi
+      done
+      unset _entry _run_entry
+      _uninstall_operation_require || return 1
+      rmdir "$SKILL_DIR" 2>/dev/null || true
+      echo "  - removed $SKILL_DIR (kept run/install-op.lock.db and the active operation record)"
       REMOVED=true
     fi
   fi
@@ -375,7 +541,7 @@ _uninstall_one() {
   # agmsg_codex_config_paths, scripts/lib/codex-config.sh).
   local _codex_cfg
   while IFS= read -r _codex_cfg; do
-    _uninstall_clean_codex_config "$_codex_cfg" "$SKILL_DIR"
+    _uninstall_clean_codex_config "$_codex_cfg" "$SKILL_DIR" || return 1
   done < <(agmsg_codex_config_paths)
 
   # --- Remove OpenCode, Hermes, and Grok Build skill files ---
@@ -396,7 +562,7 @@ _uninstall_one() {
     _dedicated_dir="${_dedicated_dir_label%%|*}"
     _dedicated_label="${_dedicated_dir_label#*|}"
     if [ -f "$_dedicated_dir/SKILL.md" ]; then
-      rm -f "$_dedicated_dir/SKILL.md"
+      _uninstall_checked_rm -f "$_dedicated_dir/SKILL.md" || return 1
       if rmdir "$_dedicated_dir" 2>/dev/null; then
         echo "  - removed /$SKILL_NAME $_dedicated_label skill"
       else
@@ -406,6 +572,47 @@ _uninstall_one() {
     fi
   done
   unset _dedicated_dir_label _dedicated_dir _dedicated_label
+
+  if [ -f "$recovery_helper" ]; then
+    recovery_retired="$SKILL_DIR/run/.install-op-recovery-retired.$AGMSG_INSTALL_OP_ID"
+    _uninstall_operation_require || return 1
+    mv "$recovery_helper" "$recovery_retired" || return 1
+    _uninstall_operation_require || return 1
+  elif [ -n "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" ] && [ -f "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" ]; then
+    recovery_retired="$SKILL_DIR/run/.install-op-recovery-retired.$AGMSG_INSTALL_OP_ID"
+    _uninstall_operation_require || return 1
+    mv "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" "$recovery_retired" || return 1
+    _uninstall_operation_require || return 1
+  fi
+  if [ "$KEEP_DATA" = false ] && [ -f "$SKILL_DIR/uninstall.sh" ]; then
+    _uninstall_operation_require || return 1
+    if ! agmsg_install_op_run_writer mv "$SKILL_DIR/uninstall.sh" "$uninstaller_retired"; then
+      echo "  ! could not preserve the installed recovery entrypoint: $SKILL_DIR/uninstall.sh" >&2
+      return 1
+    fi
+    _uninstall_operation_require || return 1
+  fi
+  agmsg_install_op_pending_complete "$AGMSG_INSTALL_OP_MARKER" "$AGMSG_INSTALL_OP_ID" || {
+    echo "  ! could not clear the completed-operation record; later changes are blocked pending recovery" >&2
+    return 1
+  }
+  if [ -n "$uninstaller_retired" ] && [ -e "$uninstaller_retired" ]; then
+    # Remove only this generation's retired path after the record is cleared;
+    # a later install writes uninstall.sh and cannot be removed by this cleanup.
+    rm -f "$uninstaller_retired" || {
+      echo "  ! uninstall completed but could not remove its retired entrypoint: $uninstaller_retired" >&2
+      return 1
+    }
+  fi
+  if [ -n "$recovery_retired" ]; then
+    rm -f "$recovery_retired" || {
+      echo "  ! uninstall completed but could not remove its temporary recovery helper: $recovery_retired" >&2
+      return 1
+    }
+  fi
+  agmsg_install_op_unlock
+  AGMSG_INSTALL_OP_ACTIVE=false
+  unset AGMSG_INSTALL_OP_ID AGMSG_INSTALL_OP_MARKER
 }
 
 # Machine-wide pieces, shared by every install: only safe to remove once NO
@@ -528,7 +735,13 @@ else
   #      pointing at each one's own uninstall.sh, or --all to remove every
   #      install on the machine at once.
   SELF_SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
-  if [ ! -f "$SELF_SKILL_DIR/.agmsg" ]; then
+  if [ -n "$CMD_NAME" ]; then
+    SELF_SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
+    if [ ! -d "$SELF_SKILL_DIR" ]; then
+      echo "  ! selected installation does not exist: $SELF_SKILL_DIR" >&2
+      exit 1
+    fi
+  elif [ ! -f "$SELF_SKILL_DIR/.agmsg" ]; then
     candidates=()
     for d in "$AGENTS_DIR"/skills/*/; do
       d="${d%/}"

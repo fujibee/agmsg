@@ -114,3 +114,13 @@ _write_completion_record() {
   final_state="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;")"
   [ "$final_state" = "none" ]
 }
+
+@test "agmsgd refuses to start while an incomplete install operation is recorded" {
+  _write_completion_record
+  printf '%s\n' '{"operation_id":"0123456789abcdef0123456789abcdef"}' \
+    > "$TEST_SKILL_DIR/run/install-op-incomplete.json"
+
+  run node "$SCRIPTS/daemon/agmsgd" "$TEST_SKILL_DIR" on 0
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"operation is incomplete"* ]]
+}

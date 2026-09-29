@@ -300,7 +300,12 @@ teardown() {
   # install this run is about (#1400).
   HOME="$FAKE_HOME" CODEX_HOME="$codex_home2" bash "$SK/uninstall.sh" --yes
 
-  [ ! -e "$SK" ]
+  # $SK itself is no longer fully gone: run/install-op.lock.db
+  # is kept on purpose, so a residual $SK/run/ survives. Its substantive
+  # content is what must be gone -- covered in full by its own test
+  # ("uninstall keeps run/install-op.lock.db while removing everything else").
+  [ ! -e "$SK/scripts" ]
+  [ ! -e "$SK/SKILL.md" ]
   [ ! -f "$cmd_first" ]
   [ ! -f "$proj_cmd_first" ]
   refute grep -qF "$SK/" "$settings"
@@ -376,8 +381,10 @@ teardown() {
   # two installs present and no single one identified.
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --all --yes
 
-  [ ! -e "$FAKE_HOME/.agents/skills/agmsg" ]
-  [ ! -e "$FAKE_HOME/.agents/skills/agmsg-second" ]
+  # Neither install is fully gone: run/install-op.lock.db
+  # is kept on purpose for each. Substantive content is what must be gone.
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg/scripts" ]
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg-second/scripts" ]
   [ ! -f "$cmd_first" ]
   [ ! -f "$cmd_second" ]
   [ ! -e "$shim" ]
@@ -843,6 +850,92 @@ PS1
   [ -f "$SK/scripts/windows/dispatch.sh" ]
   [ ! -f "$SK/scripts/windows/agmsg-run.sh" ]
   [ ! -f "$SK/scripts/windows/sqlite3-shim.sh" ]
+}
+
+@test "install reports the lock handshake stage and a bounded SQLite response" {
+  local fake_bin="$FAKE_HOME/bin" banner expected
+  mkdir -p "$fake_bin"
+  banner="SQLite version $(printf '%100s' '' | tr ' ' X)"
+  cat > "$fake_bin/sqlite3" <<'SH'
+#!/usr/bin/env bash
+if [ "${SQLITE_MODE:-}" = crlf-canary ]; then
+  while IFS= read -r statement; do
+    if [ "$statement" = "SELECT 'agmsg-lock-ok';" ]; then
+      printf 'agmsg-lock-ok\r\n'
+    fi
+  done
+  exit 0
+fi
+printf '%s\n' "${SQLITE_BANNER:-unexpected sqlite output}"
+SH
+  chmod +x "$fake_bin/sqlite3"
+
+  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" SQLITE_BANNER="$banner" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -ne 0 ]
+  printf -v expected '%q' "$banner"
+  expected="${expected:0:80}"
+  grep -Fq -- "could not take the install operation lock: unexpected lock confirmation from sqlite3: $expected" <<<"$output"
+  [ "${#expected}" -eq 80 ]
+  refute grep -Fq -- "another install/uninstall in progress?" <<<"$output"
+
+  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" SQLITE_MODE=crlf-canary \
+    bash -c 'source "$1"; agmsg_install_op_lock "$2" 1000 || exit 1; agmsg_install_op_confirm || exit 2; printf "lock acquired\\n"; agmsg_install_op_unlock' \
+    _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$FAKE_HOME/run/install-op.lock.db"
+  [ "$status" -eq 0 ]
+  grep -Fq -- "lock acquired" <<<"$output"
+}
+
+@test "install SQLite readers batch pending fields, convert paths, and normalize CRLF" {
+  local fake_bin="$FAKE_HOME/bin" record="$FAKE_HOME/record.json" manifest="$FAKE_HOME/manifest.json" calls="$FAKE_HOME/sqlite-calls"
+  mkdir -p "$fake_bin"
+  printf '{}\n' > "$record"
+  printf '{"gen":1}\n' > "$manifest"
+  cat > "$fake_bin/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf 'C:/converted\n'
+SH
+  cat > "$fake_bin/sqlite3" <<'SH'
+#!/usr/bin/env bash
+query=
+for arg do query="$arg"; done
+printf 'call\n' >> "$SQLITE_CALLS"
+case "$query" in
+  *"readfile('/"*) printf 'SQLite received an unconverted path\n' >&2; exit 20 ;;
+  *"readfile('C:/converted')"*'$.operation_id'*)
+    printf '%s\r\n' \
+      '3031323334353637383961626364656630313233343536373839616263646566:696e7374616c6c::433a2f636f6e766572746564:3132333435:78:696e5f70726f6772657373'
+    ;;
+  *"readfile('C:/converted')"*'$.gen'*) printf '7\r\n' ;;
+  *"SELECT install_id FROM meta LIMIT 1;"*) printf 'install-id\r\n' ;;
+  *"CREATE TABLE IF NOT EXISTS meta"*) exit 0 ;;
+  *) printf 'unexpected SQL: %s\n' "$query" >&2; exit 21 ;;
+esac
+SH
+  chmod +x "$fake_bin/cygpath" "$fake_bin/sqlite3"
+
+  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" \
+    SQLITE_CALLS="$calls" bash -c '
+      lib="$1"
+      . "$lib/install-op-lock.sh"
+      . "$lib/install-db.sh"
+      . "$lib/install-manifest.sh"
+      agmsg_install_op_pending_validate "$2" || exit 10
+      [ "$AGMSG_INSTALL_OP_PENDING_ID" = "0123456789abcdef0123456789abcdef" ] || exit 13
+      [ "$AGMSG_INSTALL_OP_PENDING_KIND" = "install" ] || exit 14
+      [ "$AGMSG_INSTALL_OP_PENDING_MODE" = "legacy" ] || exit 15
+      [ "$AGMSG_INSTALL_OP_PENDING_PATH" = "C:/converted" ] || exit 16
+      [ "$AGMSG_INSTALL_OP_PENDING_PID" = "12345" ] || exit 17
+      [ "$AGMSG_INSTALL_OP_PENDING_STARTED" = "x" ] || exit 18
+      [ "$AGMSG_INSTALL_OP_PENDING_STATE" = "in_progress" ] || exit 19
+      [ "$(wc -l < "$SQLITE_CALLS" | tr -d " ")" = 1 ] || exit 20
+      op_id="$AGMSG_INSTALL_OP_PENDING_ID"
+      gen="$(_agmsg_install_manifest_read_gen "$3")" || exit 11
+      install_id="$(agmsg_install_db_ensure_meta "$4")" || exit 12
+      printf "%s|%s|%s\n" "$op_id" "$gen" "$install_id"
+    ' _ "$REPO_ROOT/scripts/lib" "$record" "$manifest" "$FAKE_HOME/install.db"
+  [ "$status" -eq 0 ]
+  [ "$output" = '0123456789abcdef0123456789abcdef|7|install-id' ]
 }
 
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {
@@ -2054,6 +2147,564 @@ CYG
     [ "$status" -eq 0 ]
     grep -Fq "There is NO register.sh" "$rendered"
   done < <(agmsg_renderable_types "$BATS_TEST_DIRNAME/..")
+}
+
+@test "install writes a completion manifest, --update carries install_id and bumps gen" {
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local manifest="$SK/run/install-manifest.json"
+  [ -f "$manifest" ]
+  # The operation lock DB must exist, never be empty-deleted by install
+  # itself, and never appear in the manifest's own file listing (it lives
+  # under run/, not scripts/).
+  [ -f "$SK/run/install-op.lock.db" ]
+
+  local id1 gen1
+  id1="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.install_id');")"
+  gen1="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.gen');")"
+  [ -n "$id1" ]
+  [ "$gen1" = "1" ]
+  local manifest_version
+  manifest_version="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.version');")"
+  [ "$manifest_version" = "$(cat "$SK/VERSION")" ]
+
+  # bootstrap_version: a fixed constant embedded in
+  # both agmsgd and agmsgd-launch.sh, distinct from the overall install
+  # version/gen, and copied into the manifest for the real entrypoint (a
+  # later PR) to check against under the operation lock.
+  local bv
+  bv="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.bootstrap_version');")"
+  [ "$bv" = "1" ]
+
+  # install_id's one source of truth is install.db's meta row; the manifest
+  # only carries a copy of it.
+  local db_id
+  db_id="$(sqlite3 "$SK/run/install.db" "SELECT install_id FROM meta LIMIT 1;")"
+  [ "$db_id" = "$id1" ]
+
+  # The lock DB holds no tables of its own -- it exists only to be BEGIN
+  # EXCLUSIVE'd.
+  local lock_tables
+  lock_tables="$(sqlite3 "$SK/run/install-op.lock.db" "SELECT count(*) FROM sqlite_master WHERE type='table';")"
+  [ "$lock_tables" = "0" ]
+
+  # The two daemon bootstrap files were placed (not left out by the bulk
+  # copy's own exclusion) and are executable, and their digests are in the
+  # manifest under their scripts/-relative path.
+  [ -x "$SK/scripts/daemon/agmsgd" ]
+  [ -x "$SK/scripts/daemon/agmsgd-launch.sh" ]
+  local listed
+  listed="$(sqlite3 :memory: "SELECT count(*) FROM json_each(json_extract(readfile('$(rf "$manifest")'), '\$.files')) WHERE json_extract(value,'\$.path') IN ('scripts/daemon/agmsgd','scripts/daemon/agmsgd-launch.sh');")"
+  [ "$listed" = "2" ]
+
+  # A real file's manifest digest matches an independent sha256 of it right
+  # now -- not just "a digest is present for it".
+  local recorded_digest actual_digest
+  recorded_digest="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.files[0].digest');")"
+  local first_path
+  first_path="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.files[0].path');")"
+  actual_digest="$(bash -c 'source "$1/scripts/lib/hash.sh"; agmsg_sha256 < "$2"' _ "$REPO_ROOT" "$SK/$first_path")"
+  [ -n "$actual_digest" ]
+  [ "$recorded_digest" = "$actual_digest" ]
+
+  mkdir -p "$SK/scripts/drivers/terminals/herdr"
+  printf 'stale\n' > "$SK/scripts/drivers/terminals/herdr/SKILL.md"
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --update
+  [ -f "$manifest" ]
+  [ -f "$manifest.prev" ]
+  [ ! -e "$SK/scripts/drivers/terminals/herdr/SKILL.md" ]
+  local id2 gen2
+  id2="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.install_id');")"
+  gen2="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.gen');")"
+  [ "$id2" = "$id1" ]
+  [ "$gen2" = "2" ]
+  manifest_version="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.version');")"
+  [ "$manifest_version" = "$(cat "$SK/VERSION")" ]
+  local stale_listed
+  stale_listed="$(sqlite3 :memory: "SELECT count(*) FROM json_each(json_extract(readfile('$(rf "$manifest")'), '\$.files')) WHERE json_extract(value,'\$.path')='scripts/drivers/terminals/herdr/SKILL.md';")"
+  [ "$stale_listed" = "0" ]
+  db_id="$(sqlite3 "$SK/run/install.db" "SELECT install_id FROM meta LIMIT 1;")"
+  [ "$db_id" = "$id1" ]
+
+  # A readable previous generation can recover a damaged current manifest.
+  printf 'not json\n' > "$manifest"
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --update
+  gen2="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.gen');")"
+  [ "$gen2" = "2" ]
+
+  # With neither record readable, update must stop before touching VERSION or
+  # the installed scripts instead of silently reusing generation 1.
+  printf 'not json\n' > "$manifest"
+  printf 'not json\n' > "$manifest.prev"
+  local unchanged_digest before_version
+  before_version="$(cat "$SK/VERSION")"
+  unchanged_digest="$(shasum -a 256 "$SK/scripts/team.sh" | awk '{print $1}')"
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -ne 0 ]
+  grep -qF -- "manifest and its previous copy are unreadable" <<<"$output"
+  [ "$(cat "$SK/VERSION")" = "$before_version" ]
+  [ "$(shasum -a 256 "$SK/scripts/team.sh" | awk '{print $1}')" = "$unchanged_digest" ]
+}
+
+@test "install manifest batches safe names and checks its probe before publishing" {
+  local scripts="$FAKE_HOME/manifest-scripts" safe_scripts="$FAKE_HOME/safe-manifest-scripts"
+  local manifest="$FAKE_HOME/manifest.json"
+  local bad_manifest="$FAKE_HOME/bad-manifest.json" fake_bin="$FAKE_HOME/fake-bin"
+  mkdir -p "$scripts" "$fake_bin"
+  printf 'safe file\n' > "$scripts/safe.sh"
+  printf 'space file\n' > "$scripts/with space.sh"
+
+  run bash -c '. "$1/scripts/lib/install-manifest.sh"; agmsg_install_manifest_write "$2" "$3" 1.5.1 test-install 1 1' \
+    _ "$REPO_ROOT" "$scripts" "$manifest"
+  [ "$status" -eq 0 ]
+  local recorded_digest actual_digest
+  recorded_digest="$(sqlite3 :memory: "SELECT json_extract(value, '\$.digest') FROM json_each(json_extract(readfile('$(rf "$manifest")'), '\$.files')) WHERE json_extract(value, '\$.path')='scripts/with space.sh';")"
+  actual_digest="$(bash -c 'source "$1/scripts/lib/hash.sh"; agmsg_sha256 < "$2"' _ "$REPO_ROOT" "$scripts/with space.sh")"
+  [ "$recorded_digest" = "$actual_digest" ]
+
+  mkdir -p "$safe_scripts"
+  printf 'safe file\n' > "$safe_scripts/safe.sh"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [ "${1:-}" = "-a" ]; then shift 2; fi' \
+    'for path do printf "%064d  %s\\n" 0 "$path"; done' > "$fake_bin/shasum"
+  chmod +x "$fake_bin/shasum"
+  run env PATH="$fake_bin:$PATH" bash -c '. "$1/scripts/lib/install-manifest.sh"; agmsg_install_manifest_write "$2" "$3" 1.5.1 test-install 1 1' \
+    _ "$REPO_ROOT" "$safe_scripts" "$bad_manifest"
+  [ "$status" -ne 0 ]
+  grep -qF -- 'returned the wrong digest for the install-manifest probe' <<<"$output"
+  [ ! -e "$bad_manifest" ]
+}
+
+@test "install holds the operation lock while rendering the shared skill" {
+  local bin="$FAKE_HOME/bin" entered="$FAKE_HOME/render-entered" release="$FAKE_HOME/render-release"
+  local awk_real install_pid install_rc blocked=0 i
+  awk_real="$(command -v awk)"
+  mkdir -p "$bin"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'for arg do case "$arg" in fragment=*) touch "$AGMSG_TEST_RENDER_ENTERED"; while [ ! -e "$AGMSG_TEST_RENDER_RELEASE" ]; do sleep 0.02; done ;; esac; done' \
+    'exec "$AGMSG_TEST_REAL_AWK" "$@"' > "$bin/awk"
+  chmod +x "$bin/awk"
+
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_RENDER_ENTERED="$entered" AGMSG_TEST_RENDER_RELEASE="$release" \
+    AGMSG_TEST_REAL_AWK="$awk_real" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg > "$FAKE_HOME/install.out" 2>&1 &
+  install_pid=$!
+  _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --cmd agmsg"
+
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$entered" ] && break
+    kill -0 "$install_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ -e "$entered" ]; then
+    if bash -c 'source "$1"; if agmsg_install_op_lock "$2" 300; then agmsg_install_op_unlock; exit 3; else exit 0; fi' \
+        _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$SK/run/install-op.lock.db"; then
+      blocked=1
+    fi
+  fi
+  touch "$release"
+  if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
+
+  [ -e "$entered" ]
+  [ "$blocked" -eq 1 ]
+  [ "$install_rc" -eq 0 ]
+  [ -f "$SK/run/install-manifest.json" ]
+}
+
+@test "install stops before pruning when the lock child dies during scripts copy" {
+  local bin="$FAKE_HOME/bin" inject_dir="$FAKE_HOME/lock-loss"
+  local sqlite_real cp_real sqlite_q cp_q lock_pid lock_cmd install_pid install_rc=0
+  local before_version manifest="$SK/run/install-manifest.json" op_id i
+  sqlite_real="$(command -v sqlite3)"
+  cp_real="$(command -v cp)"
+  sqlite_q="$(printf '%q' "$sqlite_real")"
+  cp_q="$(printf '%q' "$cp_real")"
+  mkdir -p "$bin" "$inject_dir"
+
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  printf 'retired test file\n' > "$SK/scripts/retired-test-file"
+  before_version="$(cat "$SK/VERSION")"
+  [ -s "$manifest" ]
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
+    "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
+  chmod +x "$bin/sqlite3"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'target="$test_home/.agents/skills/agmsg/scripts/"' \
+    'dest=""; for arg do dest="$arg"; done' \
+    'if [ "$dest" = "$target" ] && [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ]; then' \
+    '  lock_pid="$(cat "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid" 2>/dev/null)"' \
+    '  case "$lock_pid" in ""|*[!0-9]*) lock_pid="" ;; esac' \
+    '  if [ -n "$lock_pid" ]; then' \
+    '    lock_cmd="$(/bin/ps -p "$lock_pid" -o args= 2>/dev/null)"' \
+    '    case "$lock_cmd" in *"$lock_db"*) kill -9 "$lock_pid" 2>/dev/null && touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ;; esac' \
+    '  fi' \
+    '  touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/copy-entered"' \
+    '  while [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/copy-release" ]; do sleep 0.02; done' \
+    'fi' \
+    "exec $cp_q \"\$@\"" > "$bin/cp"
+  chmod +x "$bin/cp"
+
+  env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
+    bash "$REPO_ROOT/install.sh" --update > "$inject_dir/install.out" 2>&1 &
+  install_pid=$!
+  _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --update"
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$inject_dir/copy-entered" ] && break
+    kill -0 "$install_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ -e "$inject_dir/copy-entered" ]
+  [ -e "$inject_dir/fired" ]
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --keep-data --yes
+  [ "$status" -ne 0 ]
+  grep -qF -- "earlier install operation (update) is incomplete; uninstall (keep-data) will not start" <<<"$output"
+  grep -qF -- "--recover $op_id" <<<"$output"
+  touch "$inject_dir/copy-release"
+  if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
+  [ "$install_rc" -ne 0 ]
+  grep -qF "install lock was lost partway through" "$inject_dir/install.out"
+  [ -f "$SK/scripts/retired-test-file" ]
+  [ "$(cat "$SK/VERSION")" = "$before_version" ]
+  [ ! -e "$manifest" ]
+  [ -s "$manifest.prev" ]
+
+  run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --keep-data --yes --recover "$op_id"
+  [ "$status" -eq 0 ]
+  grep -qF -- "Recorded operation: install (update)" <<<"$output"
+  grep -qF -- "Continuing requested operation: uninstall (keep-data)" <<<"$output"
+  [ ! -e "$SK/run/install-op-incomplete.json" ]
+  [ ! -e "$SK/scripts" ]
+  [ ! -e "$SK/SKILL.md" ]
+  [ ! -e "$SK/run/install-op-recovery.sh" ]
+}
+
+@test "install cancellation waits for the active writer before clearing its operation record" {
+  local bin="$FAKE_HOME/bin" inject_dir="$FAKE_HOME/cancel-writer"
+  local cp_real cp_q sqlite_real sqlite_q install_pid writer_pid lock_pid install_rc=0 i op_id stage_source stage_dir tmp_root
+  cp_real="$(command -v cp)"
+  cp_q="$(printf '%q' "$cp_real")"
+  sqlite_real="$(command -v sqlite3)"
+  sqlite_q="$(printf '%q' "$sqlite_real")"
+  mkdir -p "$bin" "$inject_dir"
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/cancel-writer}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
+    "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
+  chmod +x "$bin/sqlite3"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/cancel-writer}"' \
+    'target="$test_home/.agents/skills/agmsg/scripts/"' \
+    'dest=""; for arg do dest="$arg"; done' \
+    'if [ "$dest" = "$target" ]; then exec 8>&- 9>&-; printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/writer.pid"; touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/writer-entered"; if [ -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/hard-kill-mode" ]; then printf "%s\\n" "$2" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/stage-source"; while [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/hard-release" ]; do sleep 0.02; done; exit 0; fi; while :; do sleep 1; done; fi' \
+    "exec $cp_q \"\$@\"" > "$bin/cp"
+  chmod +x "$bin/cp"
+
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
+    bash "$REPO_ROOT/install.sh" --update > "$inject_dir/install.out" 2>&1 &
+  install_pid=$!
+  _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --update"
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$inject_dir/writer-entered" ] && break
+    kill -0 "$install_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ -e "$inject_dir/writer-entered" ]
+  writer_pid="$(cat "$inject_dir/writer.pid")"
+  _agmsg_watch_pid "$writer_pid" "$bin/cp"
+  [ -e "$SK/run/install-op-incomplete.json" ]
+
+  kill -TERM "$install_pid"
+  if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
+  [ "$install_rc" -eq 143 ]
+  refute kill -0 "$writer_pid" 2>/dev/null
+  [ ! -e "$SK/run/install-op-incomplete.json" ]
+  [ -f "$SK/run/install-manifest.json.prev" ]
+
+  touch "$inject_dir/hard-kill-mode"
+  rm -f "$inject_dir/writer-entered" "$inject_dir/hard-release"
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
+    bash "$REPO_ROOT/install.sh" --update > "$inject_dir/hard-kill-install.out" 2>&1 &
+  install_pid=$!
+  _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --update"
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$inject_dir/writer-entered" ] && break
+    kill -0 "$install_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ -e "$inject_dir/writer-entered" ]
+  writer_pid="$(cat "$inject_dir/writer.pid")"
+  lock_pid="$(cat "$inject_dir/lock.pid")"
+  _agmsg_watch_pid "$writer_pid" "$bin/cp"
+  op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
+  kill -KILL "$install_pid"
+  if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
+  [ "$install_rc" -eq 137 ]
+  kill -0 "$writer_pid" 2>/dev/null
+  wait_for_pid_exit "$lock_pid"
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --keep-data --yes
+  [ "$status" -ne 0 ]
+  grep -qF -- "earlier install operation (update) is incomplete" <<<"$output"
+  kill -0 "$writer_pid" 2>/dev/null
+  stage_source="$(cat "$inject_dir/stage-source")"
+  case "$stage_source" in */.) stage_dir="${stage_source%/.}" ;; *) return 1 ;; esac
+  touch "$inject_dir/hard-release"
+  wait_for_pid_exit "$writer_pid"
+  tmp_root="${TMPDIR:-/tmp}"
+  tmp_root="${tmp_root%/}"
+  case "$stage_dir" in "$tmp_root"/tmp.*) rm -rf "$stage_dir" ;; *) return 1 ;; esac
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg --update --recover "$op_id"
+  [ "$status" -eq 0 ]
+  [ ! -e "$SK/run/install-op-incomplete.json" ]
+}
+
+@test "install cancellation before writer pid publication keeps the incomplete-operation record" {
+  local bin="$FAKE_HOME/bin" inject_dir="$FAKE_HOME/pid-publication"
+  local cp_real cp_q install_pid writer_pid install_rc=0 i op_id
+  cp_real="$(command -v cp)"
+  cp_q="$(printf '%q' "$cp_real")"
+  mkdir -p "$bin" "$inject_dir"
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'dest=""; for arg do dest="$arg"; done' \
+    'if [ "$dest" = "'"$SK"'/scripts/" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_WRITER_GATE_DIR/writer.pid"; touch "$AGMSG_TEST_INSTALL_WRITER_GATE_DIR/writer-entered"; while [ ! -e "$AGMSG_TEST_INSTALL_WRITER_GATE_DIR/writer-release" ]; do sleep 0.02; done; fi' \
+    "exec $cp_q \"\$@\"" > "$bin/cp"
+  chmod +x "$bin/cp"
+
+  env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_WRITER_GATE_DIR="$inject_dir" \
+    AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE="$inject_dir/publish" \
+    bash "$REPO_ROOT/install.sh" --update > "$inject_dir/install.out" 2>&1 &
+  install_pid=$!
+  _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --update"
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$inject_dir/publish.pid" ] && [ -e "$inject_dir/writer-entered" ] && break
+    kill -0 "$install_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ -e "$inject_dir/publish.pid" ]
+  [ -e "$inject_dir/writer-entered" ]
+  writer_pid="$(cat "$inject_dir/writer.pid")"
+  _agmsg_watch_pid "$writer_pid" "$bin/cp"
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
+
+  kill -TERM "$install_pid"
+  if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
+  [ "$install_rc" -eq 143 ]
+  kill -0 "$writer_pid" 2>/dev/null
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -ne 0 ]
+  grep -qF -- "earlier install operation (update) is incomplete" <<<"$output"
+  grep -qF -- "--recover $op_id" <<<"$output"
+
+  touch "$inject_dir/writer-release"
+  wait_for_pid_exit "$writer_pid"
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg --update --recover "$op_id"
+  [ "$status" -eq 0 ]
+  [ ! -e "$SK/run/install-op-incomplete.json" ]
+}
+
+@test "uninstall keeps run/install-op.lock.db while removing everything else" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -f "$SK/run/install-op.lock.db" ]
+  [ -f "$SK/run/install.db" ]
+  [ -f "$SK/scripts/team.sh" ]
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
+
+  [ -f "$SK/run/install-op.lock.db" ]
+  [ ! -e "$SK/run/install.db" ]
+  [ ! -e "$SK/run/install-manifest.json" ]
+  [ ! -e "$SK/scripts" ]
+  [ ! -e "$SK/SKILL.md" ]
+}
+
+@test "uninstall preserves recovery through removal and cannot delete a later install entrypoint" {
+  local bin="$FAKE_HOME/bin" inject_dir="$FAKE_HOME/lock-loss"
+  local sqlite_real rm_real mv_real sqlite_q rm_q mv_q uninstall_pid uninstall_rc=0 lock_pid lock_cmd op_id moved_op_id i retired_entrypoint candidate
+  sqlite_real="$(command -v sqlite3)"
+  rm_real="$(command -v rm)"
+  mv_real="$(command -v mv)"
+  sqlite_q="$(printf '%q' "$sqlite_real")"
+  rm_q="$(printf '%q' "$rm_real")"
+  mv_q="$(printf '%q' "$mv_real")"
+  mkdir -p "$bin" "$inject_dir"
+
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -f "$SK/SKILL.md" ]
+  [ -d "$SK/scripts" ]
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
+    "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
+  chmod +x "$bin/sqlite3"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'target="$test_home/.agents/skills/agmsg/scripts"' \
+    'final_root="$test_home/.agents/skills/agmsg/uninstall.sh"' \
+    'final_retired="$test_home/.agents/skills/agmsg/.install-op-uninstaller-retired."' \
+    'has_target=false; has_final=false; for arg do [ "$arg" = "$target" ] && has_target=true; case "$arg" in "$final_root"|"$final_retired"*) has_final=true ;; esac; done' \
+    'if [ "$has_target" = true ] && [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ]; then' \
+    '  lock_pid="$(cat "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid" 2>/dev/null)"' \
+    '  case "$lock_pid" in ""|*[!0-9]*) lock_pid="" ;; esac' \
+    '  if [ -n "$lock_pid" ]; then' \
+    '    lock_cmd="$(/bin/ps -p "$lock_pid" -o args= 2>/dev/null)"' \
+    '    case "$lock_cmd" in *"$lock_db"*) kill -9 "$lock_pid" 2>/dev/null && touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ;; esac' \
+    '  fi' \
+    '  touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/rm-entered"' \
+    '  while [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/rm-release" ]; do sleep 0.02; done' \
+    'fi' \
+    'if [ "$has_final" = true ] && [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/final-fired" ]; then' \
+    '  lock_pid="$(cat "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid" 2>/dev/null)"' \
+    '  case "$lock_pid" in ""|*[!0-9]*) lock_pid="" ;; esac' \
+    '  if [ -n "$lock_pid" ]; then' \
+    '    lock_cmd="$(/bin/ps -p "$lock_pid" -o args= 2>/dev/null)"' \
+    '    case "$lock_cmd" in *"$lock_db"*) kill -9 "$lock_pid" 2>/dev/null && touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/final-fired" ;; esac' \
+    '  fi' \
+    '  touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/final-rm-entered"' \
+    '  while [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/final-rm-release" ]; do sleep 0.02; done' \
+    'fi' \
+    "exec $rm_q \"\$@\"" > "$bin/rm"
+  chmod +x "$bin/rm"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'source_path="$1"; dest_path="$2"' \
+    'case "$source_path:$dest_path" in "$test_home/.agents/skills/agmsg/uninstall.sh:$test_home/.agents/skills/agmsg/.install-op-uninstaller-retired."*)' \
+    '  if [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/move-fired" ]; then' \
+    '    lock_pid="$(cat "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid" 2>/dev/null)"' \
+    '    case "$lock_pid" in ""|*[!0-9]*) lock_pid="" ;; esac' \
+    '    if [ -n "$lock_pid" ]; then' \
+    '      lock_cmd="$(/bin/ps -p "$lock_pid" -o args= 2>/dev/null)"' \
+    '      case "$lock_cmd" in *"$lock_db"*) kill -9 "$lock_pid" 2>/dev/null && touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/move-fired" ;; esac' \
+    '    fi' \
+    '  fi ;;' \
+    'esac' \
+    "exec $mv_q \"\$@\"" > "$bin/mv"
+  chmod +x "$bin/mv"
+
+  env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
+    bash "$SK/uninstall.sh" --yes > "$inject_dir/uninstall.out" 2>&1 &
+  uninstall_pid=$!
+  _agmsg_watch_pid "$uninstall_pid" "$SK/uninstall.sh --yes"
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$inject_dir/rm-entered" ] && break
+    kill -0 "$uninstall_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ -e "$inject_dir/rm-entered" ]
+  [ -e "$inject_dir/fired" ]
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
+  [ -x "$SK/uninstall.sh" ]
+  [ -r "$SK/run/install-op-recovery.sh" ]
+  run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -ne 0 ]
+  grep -qF -- "earlier uninstall operation (remove-data) is incomplete; install (update) will not start" <<<"$output"
+  grep -qF -- "--recover $op_id" <<<"$output"
+  touch "$inject_dir/rm-release"
+  if wait "$uninstall_pid"; then uninstall_rc=0; else uninstall_rc=$?; fi
+  [ "$uninstall_rc" -ne 0 ]
+  grep -qF "install lock was lost partway through" "$inject_dir/uninstall.out"
+  # The full uninstall walks top-level entries in locale-dependent glob
+  # order. This injection stops immediately after removing scripts, so other
+  # entries may legitimately remain if they sort after scripts.
+  [ ! -e "$SK/scripts" ]
+  [ -f "$SK/run/install-op.lock.db" ]
+  [ -x "$SK/uninstall.sh" ]
+  [ -r "$SK/run/install-op-recovery.sh" ]
+
+  env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
+    bash "$SK/uninstall.sh" --cmd agmsg --yes --recover "$op_id" > "$inject_dir/recovery.out" 2>&1 &
+  uninstall_pid=$!
+  _agmsg_watch_pid "$uninstall_pid" "$SK/uninstall.sh --cmd agmsg --yes --recover $op_id"
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$inject_dir/move-fired" ] && break
+    kill -0 "$uninstall_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ -e "$inject_dir/move-fired" ]
+  if wait "$uninstall_pid"; then uninstall_rc=0; else uninstall_rc=$?; fi
+  [ "$uninstall_rc" -ne 0 ]
+  grep -qF "install lock was lost partway through" "$inject_dir/recovery.out"
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  moved_op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
+  retired_entrypoint=""
+  for candidate in "$SK"/.install-op-uninstaller-retired.*; do
+    [ -e "$candidate" ] || continue
+    retired_entrypoint="$candidate"
+    break
+  done
+  [ -f "$retired_entrypoint" ]
+  [ ! -e "$SK/uninstall.sh" ]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --yes
+  [ "$status" -ne 0 ]
+  grep -qF -- "operation: uninstall" <<<"$output"
+  grep -qF -- "mode: remove-data" <<<"$output"
+  grep -qF -- "Recovery command: bash $retired_entrypoint --cmd agmsg --yes --recover $moved_op_id" <<<"$output"
+  env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
+    bash "$retired_entrypoint" --cmd agmsg --yes --recover "$moved_op_id" > "$inject_dir/final-recovery.out" 2>&1 &
+  uninstall_pid=$!
+  _agmsg_watch_pid "$uninstall_pid" "$retired_entrypoint --cmd agmsg --yes --recover $moved_op_id"
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$inject_dir/final-rm-entered" ] && break
+    kill -0 "$uninstall_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ -e "$inject_dir/final-rm-entered" ]
+  [ -e "$inject_dir/final-fired" ]
+  [ ! -e "$SK/run/install-op-incomplete.json" ]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  [ -x "$SK/uninstall.sh" ]
+  [ -f "$SK/run/install-op-recovery.sh" ]
+  touch "$inject_dir/final-rm-release"
+  wait_for_pid_exit "$uninstall_pid"
+  diff "$REPO_ROOT/uninstall.sh" "$SK/uninstall.sh"
+  [ -f "$SK/run/install-op-recovery.sh" ]
 }
 
 @test "no rendered skill of any type still carries the unwired 'supplied by the type overlay' comment" {

@@ -58,6 +58,7 @@ async function main() {
   const expectedOpGen = Number(opGenStr);
 
   const lockPath = join(installRoot, "run", "install-op.lock.db");
+  const incompleteOperationPath = join(installRoot, "run", "install-op-incomplete.json");
   const manifestPath = join(installRoot, "run", "install-manifest.json");
   const dbPath = join(installRoot, "run", "install.db");
 
@@ -66,6 +67,10 @@ async function main() {
   let manifest;
   let mainModule;
   try {
+    if (existsSync(incompleteOperationPath)) {
+      fail(75, "an install or uninstall operation is incomplete; recover it before starting agmsgd");
+    }
+
     // 1. An install generation exists at all.
     if (!existsSync(manifestPath)) {
       fail(0, "no completion record -- install.sh needs to run again");
