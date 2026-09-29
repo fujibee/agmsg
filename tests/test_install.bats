@@ -848,20 +848,25 @@ PS1
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {
   # Simulate the post-plugin-install state: no ~/.agents/skills/agmsg yet, but
   # the plugin marketplace flow has populated the cache dir with a copy of the
-  # repo. Then run the Step 0 bootstrap snippet from SKILL.md and assert the
-  # canonical install location exists.
+  # repo. Then run the Step 0 bootstrap snippet FROM the repo-root SKILL.md and
+  # assert the canonical install location exists.
   local plugin_dir="$FAKE_HOME/.claude/plugins/cache/fujibee-agmsg/agmsg/1.0.0"
   mkdir -p "$plugin_dir"
   cp -R "$REPO_ROOT/." "$plugin_dir/"
   [ ! -d "$SK" ]  # canonical agmsg location absent
 
-  # Run the same shell snippet our SKILL.md prescribes as Step 0.
-  HOME="$FAKE_HOME" bash -c '
-    if [ ! -d ~/.agents/skills/agmsg ]; then
-      installer=$(ls ~/.claude/plugins/cache/fujibee-agmsg/agmsg/*/install.sh 2>/dev/null | head -1)
-      [ -n "$installer" ] && bash "$installer" --cmd agmsg
-    fi
-  '
+  # The snippet is read out of the shipped file, not retyped here: a copy kept
+  # in the test stayed green after the real step was deleted from SKILL.md
+  # (#1286), which is what let a plugin install ship without any bootstrap.
+  local snippet
+  snippet="$(awk '/^## Step 0/ { in_step = 1; next }
+                  in_step && /^## / { exit }
+                  in_step && /^```bash$/ { in_fence = 1; next }
+                  in_fence && /^```$/ { exit }
+                  in_fence { print }' "$REPO_ROOT/SKILL.md")"
+  [ -n "$snippet" ]
+
+  HOME="$FAKE_HOME" bash -c "$snippet"
 
   [ -d "$SK" ]
   [ -f "$SK/db/messages.db" ]
@@ -871,9 +876,29 @@ PS1
   ! grep -q "__SKILL_NAME__" "$SK/SKILL.md"
 }
 
-# The root file is now a source template, so placeholders are expected there.
-# The renderer is the boundary that must remove them from every generated
-# artifact.
+# The template is scripts/skill-base.md, so placeholders are expected there. The
+# renderer is the boundary that must remove them from every generated artifact
+# -- and the repo-root SKILL.md is one of those artifacts: the plugin marketplace
+# copies the repo tree verbatim and never runs the renderer (#1286), so the file
+# has to be committed already rendered. Testing the renderer's temp output alone
+# is what let an unrendered root file ship in 1.3.0.
+@test "plugin SKILL.md: the repo-root file is rendered and matches a fresh render" {
+  # No template placeholder or slot marker may survive in the shipped file...
+  run grep -nE '__SKILL_NAME__|__AGENT_TYPE__|__CMD_PREFIX__|<!-- /?agmsg:slot' "$REPO_ROOT/SKILL.md"
+  [ "$status" -eq 1 ]
+
+  # ...and it must be exactly what the generator produces from the current
+  # base + claude-code overlay, so editing either without regenerating fails.
+  local fresh="$FAKE_HOME/plugin-SKILL.md"
+  run bash "$REPO_ROOT/scripts/release/render-plugin-skill.sh" "$fresh"
+  [ "$status" -eq 0 ]
+  if ! diff -u "$REPO_ROOT/SKILL.md" "$fresh" >&2; then
+    echo "The repo-root SKILL.md is stale (the Claude Code plugin ships it as-is)." >&2
+    echo "Regenerate and commit it:  bash scripts/release/render-plugin-skill.sh" >&2
+    return 1
+  fi
+}
+
 @test "skill renderer substitutes every install-time placeholder" {
   local rendered="$FAKE_HOME/rendered-codex.md"
   run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill codex agmsg "$2"' _ "$REPO_ROOT" "$rendered"

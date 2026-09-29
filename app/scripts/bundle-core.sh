@@ -36,11 +36,15 @@ echo "bundle-core: fetching tag $REF..."
 git fetch origin tag "$REF" --no-tags
 
 # Everything install.sh / uninstall.sh / scripts/lib read relative to the
-# installer's own directory ($SCRIPT_DIR/...). SKILL.md is not optional: the
-# installer renders every installed skill file from it, and a pack without it
-# fails the app's "Update agmsg" with "shared SKILL.md is missing" (#1503's
-# 0.5.0 build shipped exactly that -- v1.5.1 needs it, v1.1.12 did not, so
-# nothing complained while the pin was old). plugins/README.md and openai.yaml
+# installer's own directory ($SCRIPT_DIR/...). SKILL.md is not optional for a
+# pin that renders from it: up to v1.5.1 the installer renders every installed
+# skill file from the repo-root SKILL.md, and a pack without it fails the app's
+# "Update agmsg" with "shared SKILL.md is missing" (#1503's 0.5.0 build shipped
+# exactly that -- v1.5.1 needs it, v1.1.12 did not, so nothing complained while
+# the pin was old). Later pins render from scripts/skill-base.md instead (#1286;
+# already inside scripts/ above) and keep SKILL.md only as the plugin's
+# rendered copy -- still listed here because an older pin needs it, and harmless
+# for a newer one. plugins/README.md and openai.yaml
 # are copied with `|| true`, so leaving them out never fails -- it just makes
 # the app's install silently differ from a normal one, which is why they are
 # listed here rather than left to that fallback.

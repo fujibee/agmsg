@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 
-# Compose the shared SKILL.md body with an agent-type fragment. The root file
-# owns the command ordering and common safety guidance; type templates contain
-# only the sections whose behavior is specific to that CLI.
+# Compose the shared SKILL.md body with an agent-type fragment. The base file
+# (scripts/skill-base.md) owns the command ordering and common safety guidance;
+# type templates contain only the sections whose behavior is specific to that
+# CLI. The base lives under scripts/, not at the repo root, because the repo-root
+# SKILL.md is a shipped artifact of its own -- the Claude Code plugin marketplace
+# copies the repo tree verbatim and never runs this renderer (#1286) -- so it
+# holds a rendered claude-code copy, and the template must not share its name.
 
 agmsg_render_skill() {
   local agent_type="${1:?agent type required}"
   local skill_name="${2:?skill name required}"
   local output="${3:?output path required}"
-  local root="${SCRIPT_DIR:-}/SKILL.md"
+  local root="${SCRIPT_DIR:-}/scripts/skill-base.md"
   local fragment
   local cmd_prefix
   local temp
@@ -18,7 +22,7 @@ agmsg_render_skill() {
 
   fragment="$(agmsg_type_template_path "$agent_type")" || return 1
   if [ ! -f "$root" ] || [ ! -r "$root" ] || [ ! -s "$root" ]; then
-    echo "agmsg: shared SKILL.md is missing, unreadable, or empty: $root" >&2
+    echo "agmsg: shared SKILL.md base is missing, unreadable, or empty: $root" >&2
     return 1
   fi
   if [ ! -f "$fragment" ] || [ ! -r "$fragment" ] || [ ! -s "$fragment" ]; then
@@ -26,7 +30,7 @@ agmsg_render_skill() {
     return 1
   fi
   if ! grep -Fq "$root_marker" "$root"; then
-    echo "agmsg: shared SKILL.md render marker is missing: $root" >&2
+    echo "agmsg: shared SKILL.md base render marker is missing: $root" >&2
     return 1
   fi
   if ! grep -Fq "$overlay_marker" "$fragment"; then
