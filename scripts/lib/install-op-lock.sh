@@ -84,7 +84,7 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
   fi
 
   read_timeout=$((timeout_ms / 1000 + 5))
-  if ! read -t "$read_timeout" -u 8 line; then
+  if ! read -r -t "$read_timeout" -u 8 line; then
     agmsg_install_op_unlock
     return 1
   fi
@@ -107,8 +107,19 @@ agmsg_install_op_confirm() {
   [ -n "${_AGMSG_LOCK_PID:-}" ] || return 1
   kill -0 "$_AGMSG_LOCK_PID" 2>/dev/null || return 1
   printf "SELECT 'agmsg-lock-ok';\n" >&9 || return 1
-  read -t 5 -u 8 line || return 1
+  read -r -t 5 -u 8 line || return 1
   [ "$line" = "agmsg-lock-ok" ]
+}
+
+# Refuse the next protected write unless the SQLite child still proves the
+# transaction is held. Call before and after each potentially multi-file
+# install step: the first check gates entry, while the second prevents a
+# child-only death during that step from allowing later writes to continue.
+agmsg_install_op_require() {
+  if ! agmsg_install_op_confirm; then
+    echo "  ! the install lock was lost partway through; stopping before the next write (see .prev)" >&2
+    return 1
+  fi
 }
 
 # Releases the lock and cleans up every resource agmsg_install_op_lock
@@ -153,10 +164,20 @@ agmsg_install_op_unlock() {
 # codebase's macOS/BSD chmod does not have.
 agmsg_atomic_place_file() {   # <src> <dest>
   local src="$1" dest="$2" tmp
+  if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ]; then
+    agmsg_install_op_require || return 1
+  fi
   tmp="$(mktemp "$(dirname "$dest")/.$(basename "$dest").XXXXXX")" || return 1
   if ! cp "$src" "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null
     return 1
   fi
+  if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ] && ! agmsg_install_op_require; then
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  fi
   mv "$tmp" "$dest"
+  if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ]; then
+    agmsg_install_op_require || return 1
+  fi
 }

@@ -2197,6 +2197,71 @@ CYG
   [ -f "$SK/run/install-manifest.json" ]
 }
 
+@test "install stops after the lock child dies during scripts copy" {
+  local bin="$FAKE_HOME/bin" sqlite_real cp_real lock_pid_file copy_entered copy_release
+  local install_pid install_rc=0 lock_pid lock_cmd found=0 i
+  sqlite_real="$(command -v sqlite3)"
+  cp_real="$(command -v cp)"
+  lock_pid_file="$FAKE_HOME/lock.pid"
+  copy_entered="$FAKE_HOME/scripts-copy-entered"
+  copy_release="$FAKE_HOME/scripts-copy-release"
+  mkdir -p "$bin"
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [ "${1:-}" = "$AGMSG_TEST_LOCK_DB" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_LOCK_PID_FILE"; fi' \
+    'exec "$AGMSG_TEST_REAL_SQLITE3" "$@"' > "$bin/sqlite3"
+  chmod +x "$bin/sqlite3"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'dest=""; for arg do dest="$arg"; done' \
+    'if [ "$dest" = "$AGMSG_TEST_SCRIPTS/" ] && [ ! -e "$AGMSG_TEST_COPY_ENTERED" ]; then' \
+    '  touch "$AGMSG_TEST_COPY_ENTERED"' \
+    '  while [ ! -e "$AGMSG_TEST_COPY_RELEASE" ]; do sleep 0.02; done' \
+    'fi' \
+    'exec "$AGMSG_TEST_REAL_CP" "$@"' > "$bin/cp"
+  chmod +x "$bin/cp"
+
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_LOCK_DB="$SK/run/install-op.lock.db" \
+    AGMSG_TEST_LOCK_PID_FILE="$lock_pid_file" \
+    AGMSG_TEST_REAL_SQLITE3="$sqlite_real" \
+    AGMSG_TEST_SCRIPTS="$SK/scripts" \
+    AGMSG_TEST_COPY_ENTERED="$copy_entered" \
+    AGMSG_TEST_COPY_RELEASE="$copy_release" \
+    AGMSG_TEST_REAL_CP="$cp_real" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg > "$FAKE_HOME/install.out" 2>&1 &
+  install_pid=$!
+  _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --cmd agmsg"
+
+  for ((i = 0; i < 500; i++)); do
+    [ -e "$copy_entered" ] && { found=1; break; }
+    kill -0 "$install_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ "$found" -eq 1 ] && [ -s "$lock_pid_file" ]; then
+    lock_pid="$(<"$lock_pid_file")"
+    case "$lock_pid" in ''|*[!0-9]*) lock_pid="" ;; esac
+    if [ -n "$lock_pid" ]; then
+      lock_cmd="$(/bin/ps -p "$lock_pid" -o args= 2>/dev/null)"
+      case "$lock_cmd" in
+        *"$SK/run/install-op.lock.db"*) kill -9 "$lock_pid" 2>/dev/null || true ;;
+        *) lock_pid="" ;;
+      esac
+    fi
+  fi
+  touch "$copy_release"
+  if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
+
+  [ "$found" -eq 1 ]
+  [ -n "$lock_pid" ]
+  [ "$install_rc" -ne 0 ]
+  grep -Fq 'install lock was lost partway through' "$FAKE_HOME/install.out"
+  [ ! -e "$SK/scripts/team.sh" ]
+  [ ! -e "$SK/VERSION" ]
+  [ ! -e "$SK/run/install-manifest.json" ]
+}
+
 @test "uninstall keeps run/install-op.lock.db while removing everything else (agmsgd beta, T3)" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ -f "$SK/run/install-op.lock.db" ]

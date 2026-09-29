@@ -200,8 +200,15 @@ agmsg_install_manifest_write() {   # <scripts_dir> <manifest_path> <version> <in
   rm -f "$db"
   [ -n "$json" ] || return 1
 
+  if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ] && ! agmsg_install_op_require; then
+    return 1
+  fi
   tmp="$(mktemp "$(dirname "$manifest_path")/.$(basename "$manifest_path").XXXXXX")" || return 1
   if ! printf '%s\n' "$json" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ] && ! agmsg_install_op_require; then
     rm -f "$tmp"
     return 1
   fi
