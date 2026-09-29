@@ -145,7 +145,7 @@ _run_with_deadline() {
   _write_completion_record
   _run_with_deadline 15 bash "$DAEMON" start
   [ "$status" -eq 0 ]
-  [[ "$output" == *"running"* ]]
+  printf '%s\n' "$output" | grep -Fq 'running'
   bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 
@@ -169,7 +169,7 @@ _run_with_deadline() {
 
   _run_with_deadline 10 bash "$DAEMON" start
   [ "$status" -eq 0 ]
-  [[ "$output" == *"already running"* ]]
+  printf '%s\n' "$output" | grep -Fq 'already running'
   bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 
@@ -312,7 +312,7 @@ EOF
   AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
     run bash "$DAEMON" start
   [ "$status" -eq 0 ]
-  [[ "$output" == *"running"* ]]
+  printf '%s\n' "$output" | grep -Fq 'running'
   grep -q 'kickstart gui/' "$events"
   bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
@@ -337,7 +337,7 @@ EOF
   AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER=1 \
     run bash "$DAEMON" disable
   [ "$status" -ne 0 ]
-  [[ "$output" == *"could not unregister launchd service"* ]]
+  printf '%s\n' "$output" | grep -Fq 'could not unregister launchd service'
   [ -f "$plist" ]
   [ -f "$marker" ]
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT desired FROM daemon_intent;")" = "on" ]

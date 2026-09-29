@@ -43,7 +43,7 @@ setup_install_db() {
   sqlite3 "$SKILLDIR_INSTALL_DB" "UPDATE daemon_intent SET desired = 'on';"
   run bash "$LAUNCH"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"install.sh needs to run again"* ]]
+  printf '%s\n' "$output" | grep -Fq 'install.sh needs to run again'
   count="$(sqlite3 "$SKILLDIR_INSTALL_DB" "SELECT count(*) FROM daemon_start_attempts;")"
   [ "$count" -eq 1 ]
 }

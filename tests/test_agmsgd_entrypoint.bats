@@ -92,8 +92,8 @@ _write_completion_record() {
     s.on('error', (e) => { console.error(e.message); process.exit(1); });
   " "$socket"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"type":"hello_ok"'* ]]
-  [[ "$output" == *'"type":"status"'* ]]
+  printf '%s\n' "$output" | grep -Fq '"type":"hello_ok"'
+  printf '%s\n' "$output" | grep -Fq '"type":"status"'
 
   run node -e "
     const net = require('node:net');
