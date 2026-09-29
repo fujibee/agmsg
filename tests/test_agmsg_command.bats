@@ -136,7 +136,7 @@ teardown() {
   mkdir -p "$newer"
   printf '#!/usr/bin/env node\n// agmsg npm entry.\n' > "$newer/agmsg"
   chmod +x "$newer/agmsg"
-  run env PATH="$newer:$old:$PATH" bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
+  run env PATH="$newer:$old:$BIN_DIR:$PATH" bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
   [[ "$output" == *"older npm agmsg"* ]]
   [[ "$output" == *"npm i -g agmsg@latest"* ]]
   # It is only reported; nothing of the old entry is touched.

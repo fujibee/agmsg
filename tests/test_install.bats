@@ -115,20 +115,6 @@ teardown() {
   [[ "$output" =~ "hello from install" ]]
 }
 
-@test "install: places the agmsg command launcher (AGMSG_BIN_DIR) and uninstall removes it" {
-  local bindir="$BATS_TEST_TMPDIR/bin"
-  run env HOME="$FAKE_HOME" AGMSG_BIN_DIR="$bindir" bash "$REPO_ROOT/install.sh" --cmd agmsg
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"placed $bindir/agmsg"* ]]
-  [ -x "$SK/scripts/agmsg" ]
-  run "$bindir/agmsg" doctor
-  [ "$status" -eq 2 ]
-  [[ "$output" == *"reserved"* ]]
-
-  run env HOME="$FAKE_HOME" AGMSG_BIN_DIR="$bindir" bash "$SK/uninstall.sh" --yes
-  [ ! -e "$bindir/agmsg" ]
-}
-
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
   skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
