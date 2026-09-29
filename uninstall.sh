@@ -58,6 +58,23 @@ confirm() {
 
 REMOVED=false
 
+_uninstall_operation_require() {
+  if agmsg_install_op_require; then
+    return 0
+  fi
+  agmsg_install_op_unlock
+  return 1
+}
+
+_uninstall_checked_rm() {
+  _uninstall_operation_require || return 1
+  if ! rm "$@"; then
+    agmsg_install_op_unlock
+    return 1
+  fi
+  _uninstall_operation_require
+}
+
 # Removes this install's own writable_roots entries (SKILL_DIR's db/,
 # teams/, run/, ext-tools/) from ONE Codex config.toml, if it exists and
 # actually mentions them. Split out of _uninstall_one so it can be applied
@@ -129,8 +146,11 @@ _uninstall_clean_codex_config() {
   if cmp -s "$CODEX_CONFIG" "$CODEX_CONFIG.tmp"; then
     rm -f "$CODEX_CONFIG.tmp"
   else
+    _uninstall_operation_require || return 1
     cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
+    _uninstall_operation_require || return 1
     mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+    _uninstall_operation_require || return 1
     echo "  - cleaned Codex writable_roots in $CODEX_CONFIG (backup: $(basename "$CODEX_CONFIG").bak)"
     REMOVED=true
   fi
@@ -149,8 +169,8 @@ _uninstall_one() {
   # SKILL_DIR. A failure here means another install/uninstall/enable/
   # disable is already in progress against this exact install -- refuse
   # rather than race it. No trap releases this on an unexpected abort: the
-  # OS drops the file lock the moment this process dies, by design (T3 --
-  # there is deliberately no stale-lock recovery step), so an uninstall
+  # OS drops the file lock the moment this process dies; there is no
+  # stale-lock recovery step, so an uninstall
   # that crashes mid-way is the same "held until the holder dies" state a
   # crashed install.sh already leaves.
   if ! agmsg_install_op_lock "$SKILL_DIR/run/install-op.lock.db"; then
@@ -158,6 +178,7 @@ _uninstall_one() {
     echo "    (another install/uninstall/enable/disable already in progress?)" >&2
     return 1
   fi
+  _uninstall_operation_require || return 1
   # This install's own path with its trailing slash (review): matching on
   # SKILL_NAME or a bare SKILL_DIR prefix is not a boundary -- "agmsg" is a
   # literal substring of "agmsg-second", and "$SKILL_DIR" (no trailing
@@ -214,7 +235,7 @@ _uninstall_one() {
             [ -f "$cmd_file" ] || continue
             if grep -qF "$SKILL_DIR_SLASH" "$cmd_file" 2>/dev/null; then
               local cmd_name; cmd_name=$(basename "$cmd_file" .md)
-              rm "$cmd_file"
+              _uninstall_checked_rm "$cmd_file" || return 1
               echo "  - removed /$cmd_name command from $project"
               REMOVED=true
             fi
@@ -264,7 +285,9 @@ _uninstall_one() {
               );
             " 2>/dev/null) || true
             if [ -n "$UPDATED" ] && [ "$UPDATED" != "$SETTINGS_ESC" ]; then
+              _uninstall_operation_require || return 1
               echo "$UPDATED" > "$settings_file"
+              _uninstall_operation_require || return 1
               echo "  - removed agmsg hook from $settings_file"
               REMOVED=true
             fi
@@ -292,7 +315,7 @@ _uninstall_one() {
         [ -n "$project" ] || continue
         local copilot_hook="$project/.github/hooks/agmsg.json"
         if [ -f "$copilot_hook" ] && grep -qF "$SKILL_DIR_SLASH" "$copilot_hook" 2>/dev/null; then
-          rm "$copilot_hook"
+          _uninstall_checked_rm "$copilot_hook" || return 1
           echo "  - removed agmsg Copilot hook from $project"
           REMOVED=true
         fi
@@ -325,7 +348,7 @@ _uninstall_one() {
         [ -n "$project" ] || continue
         local grok_rule="$project/.grok/rules/agmsg.md"
         if [ -f "$grok_rule" ] && grep -qF "$SKILL_DIR_SLASH" "$grok_rule" 2>/dev/null; then
-          rm "$grok_rule"
+          _uninstall_checked_rm "$grok_rule" || return 1
           echo "  - removed agmsg Grok Build rule from $project"
           REMOVED=true
         fi
@@ -336,7 +359,7 @@ _uninstall_one() {
   # --- Remove Claude Code global command ---
   local CC_CMD="$HOME/.claude/commands/$SKILL_NAME.md"
   if [ -f "$CC_CMD" ]; then
-    rm "$CC_CMD"
+    _uninstall_checked_rm "$CC_CMD" || return 1
     echo "  - removed /$SKILL_NAME from ~/.claude/commands/"
     REMOVED=true
   fi
@@ -344,7 +367,7 @@ _uninstall_one() {
   # --- Remove Copilot CLI skill ---
   local COPILOT_SKILL="$HOME/.copilot/skills/$SKILL_NAME"
   if [ -d "$COPILOT_SKILL" ]; then
-    rm -rf "$COPILOT_SKILL"
+    _uninstall_checked_rm -rf "$COPILOT_SKILL" || return 1
     echo "  - removed /$SKILL_NAME skill from ~/.copilot/skills/"
     REMOVED=true
   fi
@@ -352,7 +375,7 @@ _uninstall_one() {
   # --- Remove Antigravity skill ---
   local ANTIGRAVITY_SKILL="$HOME/.gemini/config/skills/$SKILL_NAME"
   if [ -d "$ANTIGRAVITY_SKILL" ]; then
-    rm -rf "$ANTIGRAVITY_SKILL"
+    _uninstall_checked_rm -rf "$ANTIGRAVITY_SKILL" || return 1
     echo "  - removed /$SKILL_NAME skill from ~/.gemini/config/skills/"
     REMOVED=true
   fi
@@ -361,7 +384,7 @@ _uninstall_one() {
   local helper
   for helper in "$AGENTS_DIR/$SKILL_NAME.ps1" "$AGENTS_DIR/$SKILL_NAME-run.sh"; do
     if [ -f "$helper" ]; then
-      rm "$helper"
+      _uninstall_checked_rm "$helper" || return 1
       echo "  - removed $helper"
       REMOVED=true
     fi
@@ -371,8 +394,8 @@ _uninstall_one() {
   if [ "$KEEP_DATA" = true ]; then
     echo ""
     echo "  Removing $SKILL_NAME skill (keeping DB and teams)..."
-    rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash"
-    rm -f "$SKILL_DIR/SKILL.md"
+    _uninstall_checked_rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash" || return 1
+    _uninstall_checked_rm -f "$SKILL_DIR/SKILL.md" || return 1
     echo "  - removed scripts, templates, SKILL.md"
     echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/"
     REMOVED=true
@@ -396,13 +419,14 @@ _uninstall_one() {
           for _run_entry in "$_entry"/*; do
             [ -e "$_run_entry" ] || continue
             [ "$(basename "$_run_entry")" = "install-op.lock.db" ] && continue
-            rm -rf "$_run_entry"
+            _uninstall_checked_rm -rf "$_run_entry" || return 1
           done
         else
-          rm -rf "$_entry"
+          _uninstall_checked_rm -rf "$_entry" || return 1
         fi
       done
       unset _entry _run_entry
+      _uninstall_operation_require || return 1
       rmdir "$SKILL_DIR" 2>/dev/null || true
       echo "  - removed $SKILL_DIR (kept run/install-op.lock.db)"
       REMOVED=true
@@ -417,7 +441,7 @@ _uninstall_one() {
   # agmsg_codex_config_paths, scripts/lib/codex-config.sh).
   local _codex_cfg
   while IFS= read -r _codex_cfg; do
-    _uninstall_clean_codex_config "$_codex_cfg" "$SKILL_DIR"
+    _uninstall_clean_codex_config "$_codex_cfg" "$SKILL_DIR" || return 1
   done < <(agmsg_codex_config_paths)
 
   # --- Remove OpenCode, Hermes, and Grok Build skill files ---
@@ -438,7 +462,7 @@ _uninstall_one() {
     _dedicated_dir="${_dedicated_dir_label%%|*}"
     _dedicated_label="${_dedicated_dir_label#*|}"
     if [ -f "$_dedicated_dir/SKILL.md" ]; then
-      rm -f "$_dedicated_dir/SKILL.md"
+      _uninstall_checked_rm -f "$_dedicated_dir/SKILL.md" || return 1
       if rmdir "$_dedicated_dir" 2>/dev/null; then
         echo "  - removed /$SKILL_NAME $_dedicated_label skill"
       else

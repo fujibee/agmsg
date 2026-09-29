@@ -2264,6 +2264,56 @@ CYG
   [ ! -e "$SK/SKILL.md" ]
 }
 
+@test "uninstall stops before the next removal when its lock child dies" {
+  local bin="$FAKE_HOME/bin" inject_dir="$FAKE_HOME/lock-loss"
+  local sqlite_real rm_real sqlite_q rm_q
+  sqlite_real="$(command -v sqlite3)"
+  rm_real="$(command -v rm)"
+  sqlite_q="$(printf '%q' "$sqlite_real")"
+  rm_q="$(printf '%q' "$rm_real")"
+  mkdir -p "$bin" "$inject_dir"
+
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -f "$SK/SKILL.md" ]
+  [ -d "$SK/scripts" ]
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
+    "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
+  chmod +x "$bin/sqlite3"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'target="$test_home/.agents/skills/agmsg/scripts"' \
+    'has_target=false; for arg do [ "$arg" = "$target" ] && has_target=true; done' \
+    "$rm_q \"\$@\"; rm_rc=\$?" \
+    'if [ "$has_target" = true ] && [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ]; then' \
+    '  lock_pid="$(cat "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid" 2>/dev/null)"' \
+    '  case "$lock_pid" in ""|*[!0-9]*) lock_pid="" ;; esac' \
+    '  if [ -n "$lock_pid" ]; then' \
+    '    lock_cmd="$(/bin/ps -p "$lock_pid" -o args= 2>/dev/null)"' \
+    '    case "$lock_cmd" in *"$lock_db"*) kill -9 "$lock_pid" 2>/dev/null && touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ;; esac' \
+    '  fi' \
+    'fi' \
+    'exit "$rm_rc"' > "$bin/rm"
+  chmod +x "$bin/rm"
+
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
+    bash "$REPO_ROOT/uninstall.sh" --keep-data
+  [ "$status" -ne 0 ]
+  [ -e "$inject_dir/fired" ]
+  [[ "$output" == *"install lock was lost partway through"* ]]
+  [ ! -e "$SK/scripts" ]
+  [ -f "$SK/SKILL.md" ]
+  [ -f "$SK/run/install.db" ]
+  [ -f "$SK/run/install-op.lock.db" ]
+}
+
 @test "no rendered skill of any type still carries the unwired 'supplied by the type overlay' comment" {
   # The shared root SKILL.md used to carry two lines that read like slot
   # markers right after the spawn slot -- "shared actas/drop guidance is
