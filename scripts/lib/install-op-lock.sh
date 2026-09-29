@@ -5,8 +5,9 @@
 # the `enable` / `disable` / `start` CLI operations. Mechanism: SQLite's own
 # BEGIN EXCLUSIVE on run/install-op.lock.db -- a SEPARATE file from
 # install.db, held by a single long-running sqlite3 process bash keeps alive
-# for the whole operation, fed through a pair of named pipes so bash can keep
-# doing work (the copy, the manifest write) while the transaction stays open.
+# for the whole operation. Bash 4+ feeds it through a coprocess; Bash 3.2 uses
+# a pair of named pipes so bash can keep working while the transaction stays
+# open.
 # The OS releases the file lock the moment that sqlite3 process dies, for
 # any reason -- there is no stale-lock recovery step.
 #
@@ -44,10 +45,10 @@ _AGMSG_INSTALL_OP_LOCK_SH=1
 trap '' PIPE
 
 # Globals set by agmsg_install_op_lock on success, cleared by
-# agmsg_install_op_unlock: _AGMSG_LOCK_PID (the sqlite3 coprocess), fd 9
-# (write into it) and fd 8 (read its output), _AGMSG_LOCK_TMPDIR (the fifos'
-# directory). Fixed fd numbers, not `exec {fd}>`: that form needs bash 4.1+,
-# and this file runs under macOS's /bin/bash 3.2.
+# agmsg_install_op_unlock: _AGMSG_LOCK_PID (the sqlite3 process), fd 9 (write
+# into it) and fd 8 (read its output), and optionally _AGMSG_LOCK_TMPDIR (the
+# Bash 3.2 FIFOs' directory). Fixed fd numbers, not `exec {fd}>`: that form
+# needs bash 4.1+, and this file runs under macOS's /bin/bash 3.2.
 
 # Acquires the lock. Prints nothing; returns 0 once BEGIN EXCLUSIVE is
 # CONFIRMED open (a canary SELECT read back over the same pipe -- not merely
@@ -56,23 +57,51 @@ trap '' PIPE
 # Leaves no fd/process/tmpdir behind on failure.
 agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
   local db="$1" timeout_ms="${2:-30000}"
-  local dir in_fifo out_fifo line read_timeout
+  local dir="" in_fifo="" out_fifo="" line read_timeout read_fd write_fd coproc_prefix
+  coproc_prefix=AGMSG_INSTALL_OP_SQLITE
+  _AGMSG_INSTALL_OP_USE_COPROC=false
+  _AGMSG_LOCK_CHANNELS_READY=false
   mkdir -p "$(dirname "$db")" 2>/dev/null || true
-  dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-install-lock.XXXXXX")" || return 1
-  in_fifo="$dir/in"; out_fifo="$dir/out"
-  if ! mkfifo "$in_fifo" "$out_fifo" 2>/dev/null; then
-    rm -rf "$dir" 2>/dev/null
-    return 1
-  fi
+  if [ "${BASH_VERSINFO[0]:-3}" -ge 4 ]; then
+    # `coproc` is syntax unknown to Bash 3.2, so keep it in an eval string
+    # that is evaluated only on Bash 4+. Redirections close Bats' inherited
+    # TAP descriptors in the coprocess command.
+    unset AGMSG_INSTALL_OP_SQLITE AGMSG_INSTALL_OP_SQLITE_PID
+    if ! eval 'coproc AGMSG_INSTALL_OP_SQLITE { exec sqlite3 "$db" 2>&1; } 3>&- 4>&-'; then
+      return 1
+    fi
+    _AGMSG_INSTALL_OP_USE_COPROC=true
+    _AGMSG_LOCK_PID="${AGMSG_INSTALL_OP_SQLITE_PID:-}"
+    eval "read_fd=\${${coproc_prefix}[0]:-}"
+    eval "write_fd=\${${coproc_prefix}[1]:-}"
+    case "$_AGMSG_LOCK_PID" in ''|*[!0-9]*) _AGMSG_LOCK_PID=""; agmsg_install_op_unlock; return 1 ;; esac
+    case "$read_fd" in ''|*[!0-9]*) agmsg_install_op_unlock; return 1 ;; esac
+    case "$write_fd" in ''|*[!0-9]*) agmsg_install_op_unlock; return 1 ;; esac
+    if ! eval "exec 8<&${read_fd} 9>&${write_fd}"; then
+      agmsg_install_op_unlock
+      return 1
+    fi
+    eval "exec ${read_fd}<&- ${write_fd}>&-"
+    _AGMSG_LOCK_CHANNELS_READY=true
+    unset AGMSG_INSTALL_OP_SQLITE AGMSG_INSTALL_OP_SQLITE_PID
+  else
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-install-lock.XXXXXX")" || return 1
+    in_fifo="$dir/in"; out_fifo="$dir/out"
+    if ! mkfifo "$in_fifo" "$out_fifo" 2>/dev/null; then
+      rm -rf "$dir" 2>/dev/null
+      return 1
+    fi
 
-  # 2>&1 into the SAME out fifo: a busy/failed BEGIN EXCLUSIVE prints its
-  # error there instead of the canary line, which is exactly how failure is
-  # told apart from success below -- one stream, read for one exact literal.
-  sqlite3 "$db" < "$in_fifo" > "$out_fifo" 2>&1 3>&- 4>&- &
-  _AGMSG_LOCK_PID=$!
-  exec 9> "$in_fifo"
-  exec 8< "$out_fifo"
-  _AGMSG_LOCK_TMPDIR="$dir"
+    # 2>&1 into the SAME out fifo: a busy/failed BEGIN EXCLUSIVE prints its
+    # error there instead of the canary line, which is exactly how failure is
+    # told apart from success below -- one stream, read for one exact literal.
+    sqlite3 "$db" < "$in_fifo" > "$out_fifo" 2>&1 3>&- 4>&- &
+    _AGMSG_LOCK_PID=$!
+    exec 9> "$in_fifo"
+    exec 8< "$out_fifo"
+    _AGMSG_LOCK_TMPDIR="$dir"
+    _AGMSG_LOCK_CHANNELS_READY=true
+  fi
 
   # `.timeout` (a dot-command), not `PRAGMA busy_timeout=N;`: a PRAGMA that
   # returns a value is echoed back on the out fifo like a query result, which
@@ -362,7 +391,10 @@ agmsg_install_op_handle_signal() {
 # already died released the OS lock by dying; there is nothing left to
 # commit, and this function's job is cleanup, not re-detecting that.
 agmsg_install_op_unlock() {
-  if [ -n "${_AGMSG_LOCK_PID:-}" ]; then
+  local coproc_read_fd="" coproc_write_fd="" coproc_prefix=AGMSG_INSTALL_OP_SQLITE
+  eval "coproc_read_fd=\${${coproc_prefix}[0]:-}"
+  eval "coproc_write_fd=\${${coproc_prefix}[1]:-}"
+  if [ "${_AGMSG_LOCK_CHANNELS_READY:-false}" = true ] && [ -n "${_AGMSG_LOCK_PID:-}" ]; then
     printf 'COMMIT;\n' >&9 2>/dev/null || true
   fi
   # `exec` with no command applies its redirections to the CURRENT SHELL,
@@ -376,12 +408,17 @@ agmsg_install_op_unlock() {
   # braces, and is itself restored once the group ends.
   { exec 9>&-; } 2>/dev/null || true
   { exec 8<&-; } 2>/dev/null || true
+  if [ "${_AGMSG_INSTALL_OP_USE_COPROC:-false}" = true ]; then
+    case "$coproc_read_fd" in ''|*[!0-9]*) ;; *) eval "exec ${coproc_read_fd}<&-" 2>/dev/null || true ;; esac
+    case "$coproc_write_fd" in ''|*[!0-9]*) ;; *) eval "exec ${coproc_write_fd}>&-" 2>/dev/null || true ;; esac
+  fi
   if [ -n "${_AGMSG_LOCK_PID:-}" ]; then
     kill "$_AGMSG_LOCK_PID" 2>/dev/null || true
     wait "$_AGMSG_LOCK_PID" 2>/dev/null || true
   fi
   [ -n "${_AGMSG_LOCK_TMPDIR:-}" ] && rm -rf "$_AGMSG_LOCK_TMPDIR" 2>/dev/null
-  unset _AGMSG_LOCK_PID _AGMSG_LOCK_TMPDIR
+  unset _AGMSG_LOCK_PID _AGMSG_LOCK_TMPDIR _AGMSG_INSTALL_OP_USE_COPROC _AGMSG_LOCK_CHANNELS_READY
+  unset AGMSG_INSTALL_OP_SQLITE AGMSG_INSTALL_OP_SQLITE_PID
 }
 
 # Places <src>'s CONTENT at <dest> atomically: a reader of <dest> sees either
