@@ -18,6 +18,17 @@ INSTALL_DB="$SKILL_DIR/run/install.db"
 LOCK_DB="$SKILL_DIR/run/install-op.lock.db"
 LAUNCHER="$SCRIPT_DIR/daemon/agmsgd-launch.sh"
 
+# Overridable so tests never register anything into the REAL resident
+# manager (the real gui launchd domain, the real systemd --user, the real
+# Task Scheduler) -- a test that killed a hung process outright, bypassing
+# its own teardown, left exactly one real launchd unit behind on this
+# machine (found the hard way, cleaned up by hand). Tests point these at a
+# fake stand-in; real registration is exercised only by hand, and always
+# torn down right after (T6 #3).
+AGMSGD_LAUNCHCTL="${AGMSGD_LAUNCHCTL:-launchctl}"
+AGMSGD_SYSTEMCTL="${AGMSGD_SYSTEMCTL:-systemctl}"
+AGMSGD_SCHTASKS="${AGMSGD_SCHTASKS:-schtasks}"
+
 _usage() {
   cat >&2 <<'EOF'
 usage: agmsg daemon start|stop|status|enable|disable
@@ -109,7 +120,7 @@ _register_darwin() {
 </dict>
 </plist>
 EOF
-  launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || launchctl load "$plist"
+  "$AGMSGD_LAUNCHCTL" bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || "$AGMSGD_LAUNCHCTL" load "$plist"
 }
 
 _unregister_darwin() {
@@ -117,7 +128,7 @@ _unregister_darwin() {
   label="$(_launchd_label)"
   plist="$(_launchd_plist_path)"
   if [ -f "$plist" ]; then
-    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || launchctl unload "$plist" 2>/dev/null || true
+    "$AGMSGD_LAUNCHCTL" bootout "gui/$(id -u)/$label" 2>/dev/null || "$AGMSGD_LAUNCHCTL" unload "$plist" 2>/dev/null || true
     rm -f "$plist"
   fi
 }
@@ -146,8 +157,8 @@ StartLimitBurst=5
 [Install]
 WantedBy=default.target
 EOF
-  systemctl --user daemon-reload
-  systemctl --user enable --now "$unit_name"
+  "$AGMSGD_SYSTEMCTL" --user daemon-reload
+  "$AGMSGD_SYSTEMCTL" --user enable --now "$unit_name"
 }
 
 _unregister_linux() {
@@ -155,9 +166,9 @@ _unregister_linux() {
   unit_path="$(_systemd_unit_path)"
   unit_name="$(basename "$unit_path")"
   if [ -f "$unit_path" ]; then
-    systemctl --user disable --now "$unit_name" 2>/dev/null || true
+    "$AGMSGD_SYSTEMCTL" --user disable --now "$unit_name" 2>/dev/null || true
     rm -f "$unit_path"
-    systemctl --user daemon-reload
+    "$AGMSGD_SYSTEMCTL" --user daemon-reload
   fi
 }
 
@@ -192,13 +203,13 @@ _register_windows() {
   </Settings>
 </Task>
 EOF
-  schtasks /Create /TN "$name" /XML "$xml" /F
+  "$AGMSGD_SCHTASKS" /Create /TN "$name" /XML "$xml" /F
 }
 
 _unregister_windows() {
   local name
   name="$(_schtasks_name)"
-  schtasks /Delete /TN "$name" /F 2>/dev/null || true
+  "$AGMSGD_SCHTASKS" /Delete /TN "$name" /F 2>/dev/null || true
 }
 
 _register() {

@@ -10,11 +10,22 @@ setup() {
 
 teardown() {
   # Safety net: recompute this test's own unit id/plist path the same way
-  # daemon.sh does and remove it by that exact, deterministic path -- never
-  # a glob or a freshly-recomputed variable standing in for "whatever is
+  # daemon.sh does and remove that exact, deterministic file -- never a
+  # glob or a freshly-recomputed variable standing in for "whatever is
   # there now" (the anti-pattern is a rm target built from something that
   # could resolve to someone else's entry; this is the same install
   # re-deriving its own single, fixed name).
+  #
+  # Deliberately does NOT call the real launchctl here, even as a
+  # last-resort cleanup: `launchctl bootstrap "gui/$(id -u)" <plist>`
+  # registers into the REAL, system-wide launchd session for this real
+  # user regardless of $HOME -- sandboxing $HOME only moves where the
+  # PLIST FILE lives, it does nothing to where the registration itself
+  # goes (found the hard way: a real unit leaked into the real
+  # ~/Library/LaunchAgents even though every path in this file's own
+  # $TEST_SKILL_DIR/$HOME was already sandboxed). Tests now only ever
+  # drive a fake launchctl (_fake_launchctl, below), so there is nothing
+  # real for this teardown to unregister; only the file needs removing.
   if [ -n "${TEST_SKILL_DIR:-}" ] && [ -f "$TEST_SKILL_DIR/run/install.db" ]; then
     local install_id label plist
     install_id="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT install_id FROM meta;" 2>/dev/null || true)"
@@ -23,10 +34,7 @@ teardown() {
       unit_id="$(printf '%s:%s' "$TEST_SKILL_DIR" "$install_id" | shasum -a 256 | cut -c1-12)"
       label="cc.agmsg.agmsgd.$unit_id"
       plist="$HOME/Library/LaunchAgents/$label.plist"
-      if [ -f "$plist" ]; then
-        launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || launchctl unload "$plist" 2>/dev/null || true
-        rm -f "$plist"
-      fi
+      rm -f "$plist"
     fi
   fi
   teardown_test_env
@@ -180,12 +188,39 @@ _run_with_deadline() {
   [[ "$output" == *"already stopped"* ]]
 }
 
-@test "daemon.sh enable/disable: registers a real launchd unit and cleans it up (macOS only)" {
-  [ "$(uname -s)" = "Darwin" ] || skip "this test only runs launchd for real on macOS"
+# A fake launchctl, never the real one (T6 #3): a bats run
+# that gets killed externally mid-test skips its own teardown, and the
+# real gui launchd domain is not this test's to leave litter in even when
+# nothing goes wrong -- exactly this happened once already while writing
+# this file (a real unit left behind after a hung test was killed by
+# hand, cleaned up manually). Real registration is exercised only by hand
+# (T6 #3), never from an automated run, on any platform.
+_fake_launchctl() {
+  mkdir -p "$TEST_SKILL_DIR/fake-launchd"
+  cat > "$TEST_SKILL_DIR/fake-launchd/launchctl" <<'EOF'
+#!/usr/bin/env bash
+# Records enough for the test to tell load/bootstrap from unload/bootout
+# apart, against a marker file instead of the real launchd.
+case "$1" in
+  bootstrap|load) touch "${AGMSGD_FAKE_LAUNCHD_MARKER:?}" ;;
+  bootout|unload) rm -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}" ;;
+  list) [ -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}" ] ;;
+esac
+EOF
+  chmod +x "$TEST_SKILL_DIR/fake-launchd/launchctl"
+  echo "$TEST_SKILL_DIR/fake-launchd/launchctl"
+}
+
+@test "daemon.sh enable/disable: registers a resident unit (via a fake launchctl on macOS) and cleans it up" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
   _seed_install_db
   _write_completion_record
+  local fake_launchctl marker
+  fake_launchctl="$(_fake_launchctl)"
+  marker="$TEST_SKILL_DIR/fake-launchd/registered"
 
-  run bash "$DAEMON" enable
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" \
+    run bash "$DAEMON" enable
   [ "$status" -eq 0 ]
 
   local install_id unit_id label plist
@@ -194,10 +229,11 @@ _run_with_deadline() {
   label="cc.agmsg.agmsgd.$unit_id"
   plist="$HOME/Library/LaunchAgents/$label.plist"
   [ -f "$plist" ]
-  launchctl list "$label" >/dev/null 2>&1
+  [ -f "$marker" ]
 
-  run bash "$DAEMON" disable
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" \
+    run bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ ! -f "$plist" ]
-  ! launchctl list "$label" >/dev/null 2>&1
+  [ ! -f "$marker" ]
 }
