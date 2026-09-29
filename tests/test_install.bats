@@ -2645,9 +2645,10 @@ CYG
   if wait "$uninstall_pid"; then uninstall_rc=0; else uninstall_rc=$?; fi
   [ "$uninstall_rc" -ne 0 ]
   grep -qF "install lock was lost partway through" "$inject_dir/uninstall.out"
+  # The full uninstall walks top-level entries in locale-dependent glob
+  # order. This injection stops immediately after removing scripts, so other
+  # entries may legitimately remain if they sort after scripts.
   [ ! -e "$SK/scripts" ]
-  [ ! -e "$SK/SKILL.md" ]
-  [ ! -e "$SK/run/install.db" ]
   [ -f "$SK/run/install-op.lock.db" ]
   [ -x "$SK/uninstall.sh" ]
   [ -r "$SK/run/install-op-recovery.sh" ]
