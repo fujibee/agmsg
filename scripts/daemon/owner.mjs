@@ -1,4 +1,4 @@
-// daemon_owner CAS lifecycle (arch-7 §1/§2, T3 "意図と操作の世代").
+// daemon_owner compare-and-swap lifecycle.
 //
 // daemon_intent itself is written only by scripts/daemon.sh (the explicit
 // CLI operations, directly via sqlite3 -- bash cannot call into this file),
@@ -6,10 +6,10 @@
 // ownership on it still matching what the launcher observed.
 //
 // The install-op lock (run/install-op.lock.db, PR 2) is a SEPARATE
-// mechanism the entrypoint holds only while loading code (T3 "入口の組み立
-// て"); by the time takeOwnership() runs, that lock has already been
+// mechanism the entrypoint holds only while loading code; by the time
+// takeOwnership() runs, that lock has already been
 // released. daemon_owner's own gen-conditioned CAS is self-contained and
-// needs no external lock -- that is the whole point of arch-7 §1.
+// needs no external lock.
 
 import { join } from "node:path";
 import { currentExecutor, isAlive } from "./executor.mjs";
@@ -27,7 +27,7 @@ function socketPath(installRoot, gen) {
   return join(installRoot, "run", `agmsgd.${gen}.sock`);
 }
 
-// Step 1-2 of arch-7 §1: read daemon_owner, and if the current owner is
+// Read daemon_owner, and if the current owner is
 // state='none' or confirmed dead, take the next gen and move to
 // 'starting' -- ALSO requiring, in the same read, that daemon_intent still
 // matches what the caller (the launcher) already observed. Returns
@@ -37,7 +37,7 @@ function socketPath(installRoot, gen) {
 // function only decides, it does not log.
 //
 // `version` is this process's own build/version string, recorded in
-// daemon_owner.version once ownership is taken (arch-11 §7).
+// daemon_owner.version once ownership is taken.
 export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen, version }) {
   return withImmediateTransaction(db, () => {
     const intent = readIntent(db);
@@ -75,7 +75,7 @@ export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen,
 }
 
 // Step 3: bind succeeded -- move 'starting' -> 'ready', conditioned on gen
-// (arch-7 §1). A no-op-safe false return (rather than throwing) if some
+// A no-op-safe false return (rather than throwing) if some
 // other actor already moved this gen off 'starting' -- that should not
 // happen in beta (single-threaded event loop, nothing else CASes this gen),
 // but the condition costs nothing and documents the invariant.
@@ -86,10 +86,9 @@ export function markReady(db, gen) {
   return result.changes > 0;
 }
 
-// Bind failed (arch-7 §1's step-2 failure path): move back to 'none',
+// Bind failed: move back to 'none',
 // conditioned on gen, and record why via last_end (this IS this gen's own
-// CAS back to none, so last_end is the right place per T3 "止まったことの
-//確定").
+// CAS back to none, so last_end is the right place to record completion).
 export function revertToNone(db, gen, reason) {
   const at = new Date().toISOString();
   const result = db
@@ -102,7 +101,7 @@ export function revertToNone(db, gen, reason) {
   return result.changes > 0;
 }
 
-// Normal stop (arch-7 §2's "終了の段" / T3 "普通の停止"): this gen's own
+// Normal stop: this gen's own
 // CAS from any running state to 'none', with last_end. Callers (main.mjs)
 // must have already stopped accepting control requests, closed the
 // listening socket, and confirmed their own child process group is empty

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// agmsgd's entrypoint (T3 "入口の組み立て"). What agmsgd-launch.sh execs.
+// agmsgd's entrypoint, executed by agmsgd-launch.sh.
 //
 // FIXED BOOTSTRAP, on purpose, same reasoning as agmsgd-launch.sh: this
 // file does NOT import any other scripts/daemon/*.mjs module until AFTER
@@ -81,8 +81,7 @@ async function main() {
       fail(75, "this file's own digest does not match the completion record");
     }
 
-    // 3. Bootstrap version matches (checked by the launcher too, T3
-    // "両方でやる").
+    // 3. Bootstrap version matches; the launcher checks its own version too.
     if (manifest.bootstrap_version !== BOOTSTRAP_VERSION) {
       fail(75, `bootstrap version mismatch: this file is ${BOOTSTRAP_VERSION}, record has ${manifest.bootstrap_version}`);
     }
@@ -100,8 +99,8 @@ async function main() {
       fail(75, `install_id mismatch: install.db has ${recordedInstallId ?? "(none)"}, manifest has ${manifest.install_id}`);
     }
 
-    // 5. Full digest verification (T3 起動側 "照合は#963の限定を持たない"):
-    // every file the manifest lists, no extras, no missing, no symlinks.
+    // 5. Full digest verification: every file the manifest lists, no extras,
+    // no missing files, and no symlinks.
     if (manifest.digest_algo !== "sha256") {
       fail(75, `unsupported digest_algo: ${manifest.digest_algo}`);
     }
@@ -125,8 +124,8 @@ async function main() {
 
     // All checks passed -- now, and only now, import the rest of this
     // component. main.mjs's own module graph (owner/control/lifecycle/
-    // log/status) is loaded here, still under the lock, matching T3's
-    // "全部の部品を読み込み終えたらlockを離す".
+    // log/status) is loaded here, still under the lock; release it only
+    // after the component is fully loaded.
     mainModule = await import("./main.mjs");
   } finally {
     lockDb.exec("COMMIT;");

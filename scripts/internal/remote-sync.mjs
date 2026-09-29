@@ -3428,7 +3428,7 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
 // capped), so a machine that can't reach the server never hot-loops even while
 // catch-up would otherwise skip the wait.
 // The #963 install-changed detector now lives in install-baseline.mjs
-// (T5 #3, agmsgd beta design) -- re-exported here, unchanged, so this
+// re-exported here, unchanged, so this
 // file's own runLoop below keeps working exactly as it did.
 //
 // `export { X } from "mod"` alone does NOT bind X as a local name in THIS

@@ -96,6 +96,6 @@ test("none + intent on + normal stop -> exit 1, distinct from no-recorded-intent
   assert.equal(r.exitCode, 1);
   assert.match(r.text, /No intent/);
 
-  // Never collapse a real problem into exit 0 -- arch-11 §5's own point.
+  // Never collapse a real problem into exit 0.
   assert.notEqual(r.exitCode, 0);
 });

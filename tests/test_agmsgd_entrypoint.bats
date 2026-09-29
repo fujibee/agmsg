@@ -17,7 +17,7 @@ teardown() {
 # agmsgd's own self-verification, not a synthetic one.
 _write_completion_record() {
   # watchForDrift() compares the live VERSION file against the manifest's
-  # copy of it every poll cycle (T3); without a matching VERSION file,
+  # copy of it every poll cycle; without a matching VERSION file,
   # this test only avoids that drift by finishing inside the 5s poll
   # interval -- fragile on a slower machine. Write it for real.
   echo "test" > "$TEST_SKILL_DIR/VERSION"

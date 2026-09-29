@@ -39,7 +39,7 @@ import { join } from "node:path";
 //     is the safe side. A file DELETED by an update is deliberately not
 //     proof on its own; a real update always rewrites something.
 //
-// Extracted from remote-sync.mjs (T5 #3, agmsgd beta design): this file is
+// Extracted from remote-sync.mjs: this file is
 // the one place the #963 detector lives now. remote-sync.mjs re-exports
 // these two names unchanged, so `runLoop`'s own behavior there is
 // untouched, and agmsgd's lifecycle.mjs imports the same two functions

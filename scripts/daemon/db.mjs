@@ -25,8 +25,8 @@ export function openInstallDb(path, { readonly = false } = {}) {
 
 // Runs `fn(db)` inside a single BEGIN IMMEDIATE transaction, committing on
 // return and rolling back on throw. BEGIN IMMEDIATE (not the default
-// deferred BEGIN) takes the write lock up front, matching T3's "書く txn は
-// BEGIN IMMEDIATE" -- a deferred transaction that starts with a read and
+// deferred BEGIN) takes the write lock up front. A deferred transaction
+// that starts with a read and
 // upgrades to a write partway through can hit SQLITE_BUSY at the upgrade
 // point instead of at the start, which is a worse failure to reason about
 // under contention.

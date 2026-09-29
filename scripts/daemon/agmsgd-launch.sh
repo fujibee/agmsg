@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# agmsgd's launcher (T3 "入口の組み立て"). What the resident manager
+# agmsgd's launcher. This is what the resident manager
 # (launchd / systemd --user / Task Scheduler) actually starts.
 #
 # FIXED BOOTSTRAP, on purpose: this file's own bytes are checked against
-# the completion record the same way scripts/daemon/agmsgd's are (T3's
-# "入口の一貫性"), so it must never drift version to version except by an
+# the completion record the same way scripts/daemon/agmsgd's are, so it
+# must never drift version to version except by an
 # explicit bootstrap-version bump recorded there. It therefore does NOT
 # source scripts/lib/*.sh (those can and do change release to release) --
 # only external tools (sqlite3) and bash builtins.
@@ -24,9 +24,8 @@ INSTALL_DB="$SKILL_DIR/run/install.db"
 MANIFEST="$SKILL_DIR/run/install-manifest.json"
 LOCK_DB="$SKILL_DIR/run/install-op.lock.db"
 
-# Records a start attempt (T3: "起動役は持ち主にならない。書くのは
-# daemon_start_attemptsだけ"). Best-effort: if install.db cannot be
-# written either, the reason still reaches stderr.
+# Records a start attempt without claiming ownership. Best-effort: if the
+# reason cannot be stored in install.db, it still reaches stderr.
 _agmsgd_launch_record_attempt() {
   local reason="$1"
   if [ -f "$INSTALL_DB" ]; then
@@ -48,7 +47,7 @@ _agmsgd_launch_lock_held() {
 }
 
 # Reads the completion record's bootstrap_version and compares it against
-# this file's own $BOOTSTRAP_VERSION (T3 "入口の一貫性": both the launcher
+# this file's own $BOOTSTRAP_VERSION: both the launcher
 # and the Node entrypoint check their own compiled-in constant against the
 # SAME recorded value under the operation lock). Uses json_extract over
 # readfile() -- the same idiom scripts/identities.sh already uses for team
@@ -64,7 +63,7 @@ _agmsgd_launch_check_bootstrap_version() {
   [ "$recorded" = "$BOOTSTRAP_VERSION" ]
 }
 
-# 1. install.db must be readable, or we must not assume `on` (T3 step 1).
+# 1. install.db must be readable, or we must not assume `on`.
 if [ ! -f "$INSTALL_DB" ]; then
   echo "agmsgd-launch: run/install.db does not exist -- nothing to start" >&2
   exit 0
@@ -74,13 +73,13 @@ DESIRED="$(sqlite3 "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/nul
   exit 0
 }
 
-# 2. Not `on` -> nothing to do, silently (T3 step 2).
+# 2. Not `on` -> nothing to do, silently.
 if [ "$DESIRED" != "on" ]; then
   exit 0
 fi
 OP_GEN="$(sqlite3 "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;" 2>/dev/null)"
 
-# 3. Completion record state (T3 step 3 / "更新").
+# 3. Completion record state.
 if [ -f "$MANIFEST" ]; then
   : # complete -- proceed
 elif [ -f "$MANIFEST.prev" ]; then
@@ -100,7 +99,7 @@ _agmsgd_launch_check_bootstrap_version "$MANIFEST" || {
   exit 75
 }
 
-# 4. Node: resolve, then ACTUALLY RUN it -- T2 #3: found is confirmed by
+# 4. Node: resolve, then ACTUALLY RUN it; availability is confirmed by
 # execution (version + node:sqlite loads), not by trusting the recorded
 # path/version strings.
 NODE_PATH="$(sqlite3 "$INSTALL_DB" "SELECT node_path FROM meta;" 2>/dev/null)"
@@ -119,5 +118,5 @@ NODE_CHECK_OUTPUT="$("$NODE_PATH" -e '
 }
 
 # 5. Hand off. `exec -a agmsgd` reads the entrypoint file exactly once,
-# here (T3: "execの時点で入口のファイルを1回だけ読む").
+# here, reading the entrypoint file only once.
 exec -a agmsgd "$NODE_PATH" "$SCRIPT_DIR/agmsgd" "$SKILL_DIR" "$DESIRED" "$OP_GEN"

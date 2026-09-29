@@ -1,9 +1,8 @@
-// arch-11 §5's decision table ("デーモンの状態と、利用の意図"), scoped to
-// beta's install.db (meta / daemon_owner / daemon_intent /
-// daemon_start_attempts only -- no seat_route, sync_status, stuck,
-// ctrl_state, invokes: those are 2.0.0-only and are reported as "ベータで
-// は受け持たない" wherever a caller lists all 8 arch-11 categories, not as
-// "0 rows").
+// The daemon status decision table is scoped to beta's install.db
+// (meta / daemon_owner / daemon_intent / daemon_start_attempts only).
+// seat_route, sync_status, stuck, and ctrl_state belong to a later release
+// and are reported as unsupported wherever a caller lists all categories,
+// not as "0 rows".
 //
 // Callable two ways:
 //   - as a library: classify({owner, intent, alive}) -- the pure decision,
@@ -13,8 +12,8 @@
 //     read-only, checks the recorded executor's liveness itself (works
 //     whether or not the daemon is actually running), and additionally
 //     tries the control socket if the record says 'ready' -- a record
-//     that says ready but a socket that refuses the connection is exactly
-//     arch-11 §5's "ready, but does not connect" row, which only an
+//     that says ready but a socket that refuses the connection is the
+//     "ready, but does not connect" case, which only an
 //     external prober (not the daemon answering about itself) can ever
 //     observe. Prints one JSON line to stdout; exit code follows the
 //     table's own exit column.
@@ -29,7 +28,7 @@ import { PROTOCOL_VERSION } from "./control.mjs";
 
 const STARTING_STOPPING_GRACE_MS = 30_000;
 
-// The pure decision (arch-11 §5's table). `now` is injectable for tests.
+// The pure decision. `now` is injectable for tests.
 export function classify({ owner, intent, alive, reachable }, now = Date.now()) {
   const desired = intent?.desired ?? null;
 
@@ -150,7 +149,7 @@ async function main() {
   try {
     ({ owner, intent, alive } = readOwnerAndIntentReadOnly(installRoot));
   } catch (error) {
-    // arch-11 §3c: an input that can be detected as an error is reported at
+    // An input that can be detected as an error is reported at
     // that entry point, with a nonzero exit -- not a raw stack trace, and
     // not folded into "never started" (which is itself a legitimate 0).
     process.stderr.write(`agmsgd status: could not read install.db: ${error.message}\n`);
@@ -160,7 +159,7 @@ async function main() {
   const result = classify({ owner, intent, alive, reachable });
 
   // The node:sqlite experimental-feature warning is surfaced here, always
-  // -- not hidden, not treated as a failure (arch-11 §4 #7).
+  // -- not hidden, not treated as a failure.
   //
   // `process.exitCode = ...` and returning, NOT `process.exit(...)`: when
   // stdout is a pipe rather than a TTY (exactly what capturing this

@@ -1,9 +1,9 @@
-// Starts, runs, and stops one agmsgd process (arch-7 §2, T3). Ties
+// Starts, runs, and stops one agmsgd process. Ties
 // owner.mjs / control.mjs / lifecycle.mjs / log.mjs / status.mjs together;
 // none of the actual CAS/socket/verification logic lives here.
 //
-// Split into separately-callable pieces on purpose (T4's own note: "止め
-// る合図を1か所で受け、T3の順で止める" -- ONE place, in a known order):
+// Split into separately-callable pieces on purpose: shutdown is handled
+// in one place and in a known order.
 // startup() / pollOnce() / gracefulStop() are each independently testable
 // without wiring real signal handlers or a real interval timer, which
 // main() (the actual CLI entrypoint) only assembles.
@@ -26,7 +26,7 @@ export const POLL_INTERVAL_MS = 5000;
 // {ok: true, gen, controlHandle} or {ok: false, reason} -- a refusal from
 // takeOwnership OR a bind failure, both reported the same shape so the
 // caller (main()) can log+exit either without a separate branch. A bind
-// failure additionally reverts daemon_owner back to 'none' (arch-7 §1's
+// failure additionally reverts daemon_owner back to 'none' (the
 // step-2 failure path) before returning.
 export async function startup(db, { installRoot, expectedDesired, expectedOpGen, version, handlers }) {
   const owned = takeOwnership(db, { installRoot, expectedDesired, expectedOpGen, version });
@@ -45,7 +45,7 @@ export async function startup(db, { installRoot, expectedDesired, expectedOpGen,
   return { ok: true, gen: owned.gen, controlHandle };
 }
 
-// One poll cycle (T3 "動いているagmsgd" / "op_genの見張り"). Returns
+// One poll cycle. Returns
 // {action: "continue"} | {action: "step_aside", reason} |
 // {action: "stop", reason} -- callers act on the verdict; this function
 // itself performs no shutdown steps.
@@ -56,8 +56,7 @@ export async function pollOnce(db, installRoot, { gen, expectedOpGen, watchState
   }
   const intent = db.prepare("SELECT op_gen FROM daemon_intent").get();
   if (intent.op_gen !== expectedOpGen) {
-    // T3: "自分が起動したときの値と違えば(desiredがonに戻っていても)係を
-    // 退役させて普通の停止に入る" -- an explicit operation happened since
+    // An explicit operation happened since
     // this process started; step aside regardless of what desired says
     // now, so an old process from an off->on->off sequence never keeps
     // running just because desired flipped back to on again later.
@@ -66,7 +65,7 @@ export async function pollOnce(db, installRoot, { gen, expectedOpGen, watchState
   return { action: "continue" };
 }
 
-// The one place shutdown happens, in T3's order: mark stopping -> stop
+// The one place shutdown happens: mark stopping -> stop
 // every registered channel -> close the control socket -> record the
 // normal stop. `reason` becomes daemon_owner.last_end_reason (status.mjs
 // pattern-matches "stepped_aside_for_update" specifically; anything else
@@ -88,9 +87,9 @@ export async function gracefulStop(db, installRoot, gen, controlHandle, channelH
 // The actual CLI entrypoint: wires startup(), a real interval timer for
 // pollOnce(), real SIGTERM handling, and control.mjs's stop/status
 // handlers, onto db/manifest values the caller (agmsgd's bootstrap) has
-// already verified. Exit codes match T3's own table: 0 for a declined
+// already verified. Exit codes: 0 for a declined
 // start or a normal/SIGTERM stop, 75 for stepping aside for an update, 1
-// for a bind failure or any other unexpected error (the "起こし直す" row).
+// for a bind failure or any other unexpected error.
 export async function main(db, { installRoot, manifest, manifestText, expectedDesired, expectedOpGen, version }) {
   const channelHooks = []; // beta's Codex-queue channel plugs in here, separately.
   let controlHandle;

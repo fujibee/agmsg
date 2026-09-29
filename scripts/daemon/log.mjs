@@ -1,5 +1,5 @@
 // run/agmsgd.log, rotated at 1 MiB, one prior generation kept
-// (run/agmsgd.log.1). T3 "ほか": startup/stop/step-aside reasons and
+// (run/agmsgd.log.1). Records startup/stop/step-aside reasons and
 // channel counts/failures ONLY -- never message bodies.
 
 import { appendFileSync, existsSync, renameSync, statSync } from "node:fs";

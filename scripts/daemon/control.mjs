@@ -1,9 +1,9 @@
-// The UNIX control socket (arch-6 §1, §8b), narrowed to beta's own two
+// The UNIX control socket, narrowed to beta's own two
 // requests: `stop` and `status`. Beta has no seat registration, no notice
 // stream, no hook `turn` -- every connection is one-shot: connect, `hello`,
 // exactly one request, exactly one response, close.
 //
-// Framing (arch-6 §1): one line, one JSON object. 1 MiB ceiling counted in
+// Framing: one line, one JSON object. 1 MiB ceiling counted in
 // BYTES from the first byte of the connection, checked before a newline
 // ever arrives -- not after decoding to a string, since a byte count and a
 // JS string's UTF-16 code-unit count are not the same number for non-ASCII
@@ -22,7 +22,7 @@ function writeLine(socket, obj) {
   const line = `${JSON.stringify(obj)}\n`;
   if (Buffer.byteLength(line, "utf8") > MAX_FRAME_BYTES) {
     // Cannot happen for beta's tiny fixed responses; guarded anyway so a
-    // future response shape cannot silently violate arch-6's own ceiling
+    // future response shape cannot silently violate the ceiling
     // on what THIS daemon sends, not just what it accepts.
     socket.destroy();
     return;
@@ -145,7 +145,7 @@ export function createControlServer(socketPath, handlers) {
       },
       () => {
         closing = true;
-        socket.destroy(); // frame too large -- cut the connection, per arch-6 §1
+        socket.destroy(); // frame too large -- cut the connection
       },
     );
     socket.on("data", reader);

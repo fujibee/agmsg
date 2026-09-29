@@ -1,4 +1,4 @@
-// Completion-record verification and update detection (T3 "更新").
+// Completion-record verification and update detection.
 //
 // The manifest itself (run/install-manifest.json, its .prev, and the
 // install-op lock at run/install-op.lock.db) is PR 2's own format -- this
@@ -38,8 +38,8 @@ function isInstallLockHeld(installRoot) {
   }
 }
 
-// Reads the completion record and classifies it into the 3 states T3
-// distinguishes: 'complete' (manifest present -- carries it), 'updating'
+// Reads the completion record and distinguishes three states: 'complete'
+// (manifest present -- carries it), 'updating'
 // (no manifest, .prev present, lock held), 'crashed' (no manifest, .prev
 // present, lock free -- an update that died mid-way), 'missing' (neither
 // file -- installed by an install.sh old enough to never have written one).
@@ -62,8 +62,7 @@ export function readCompletionState(installRoot) {
 // Enumerates every regular file under <installRoot>/scripts, sorted by
 // path relative to installRoot (matching the manifest's own path form and
 // sort order). A symlink ANYWHERE under scripts/ is a verification
-// failure, not a skip -- T3 "symlinkは記録に入れず、scripts/の下に
-// symlinkがあれば照合の失敗として扱う".
+// failure, not a skip.
 function collectScriptFiles(installRoot) {
   const files = [];
   const root = join(installRoot, "scripts");
@@ -106,7 +105,7 @@ export function verifyInstallId(db, manifest) {
   return { ok: true };
 }
 
-// Full startup verification (T3 "起動側"): every file the manifest lists
+// Full startup verification: every file the manifest lists
 // must exist with a matching digest, no extra files, no missing files, no
 // symlinks. Returns {ok: true} or {ok: false, reason}. Never throws for an
 // ordinary mismatch -- only collectScriptFiles's symlink case surfaces as
@@ -147,7 +146,7 @@ function completionRecordChanged(installRoot, lastKnownManifestText) {
 }
 
 // Captured once, right after a successful startup verification, and handed
-// to watchForDrift() every cycle thereafter (T3 "動いているagmsgd").
+// to watchForDrift() every cycle thereafter.
 // `scriptsBaseline` is null when collectInstallBaseline itself could not
 // observe the tree (see that function's own doc) -- watchForDrift treats a
 // null baseline the same way collectInstallBaseline's own caller always
@@ -160,7 +159,7 @@ export async function captureWatchState(installRoot, manifest, manifestText) {
   };
 }
 
-// The running daemon's per-cycle re-check (T3 "動いているagmsgd"): stand
+// The running daemon's per-cycle re-check: stand
 // aside if EITHER (a) the completion record stopped being 'complete' (an
 // install/uninstall started), OR (b) the VERSION string or any file under
 // scripts/ changed IN PLACE without the manifest moving at all -- the #963

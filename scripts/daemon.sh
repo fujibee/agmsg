@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# agmsgd's CLI (T4's diagram: "agmsg daemon start|stop|status|enable|
-# disable"). Written to take the subcommand as its own first argument so
+# agmsgd's CLI ("agmsg daemon start|stop|status|enable|disable").
+# Written to take the subcommand as its own first argument so
 # the future `agmsg` dispatcher (a separate PR/design, decided 2026-09-29)
 # can wrap this file directly without restructuring it. Every message this
 # file prints therefore already says `agmsg daemon ...`, the form users
 # will actually type once that dispatcher exists.
 #
-# No Node required for `status` on the fast path (T2 #6, K14): it reads
+# No Node is required for `status` on the fast path: it reads
 # install.db directly with sqlite3 first, and only shells out to Node
 # (status.mjs) for the fuller decision text when Node is available and
 # the record even suggests it's worth asking.
@@ -22,9 +22,8 @@ LAUNCHER="$SCRIPT_DIR/daemon/agmsgd-launch.sh"
 # manager (the real gui launchd domain, the real systemd --user, the real
 # Task Scheduler) -- a test that killed a hung process outright, bypassing
 # its own teardown, left exactly one real launchd unit behind on this
-# machine (found the hard way, cleaned up by hand). Tests point these at a
-# fake stand-in; real registration is exercised only by hand, and always
-# torn down right after (T6 #3).
+# machine. Tests point these at fake stand-ins; real registration is
+# exercised only by hand and always torn down right after.
 AGMSGD_LAUNCHCTL="${AGMSGD_LAUNCHCTL:-launchctl}"
 AGMSGD_SYSTEMCTL="${AGMSGD_SYSTEMCTL:-systemctl}"
 AGMSGD_SCHTASKS="${AGMSGD_SCHTASKS:-schtasks}"
@@ -145,8 +144,7 @@ _with_op_lock() {
 }
 
 # A short, stable id for this install's resident-manager unit name,
-# derived from the install anchor (realpath + install_id) -- T3 "常駐の登
-# 録": "単位の名前の短いidはinstallの錨の3つの組から作る". Beta uses two
+# derived from the install anchor (realpath + install_id). Beta uses two
 # of the three (root path, install_id); the record DB's own path is
 # already implied by being run/install.db under this same root, so it is
 # not a third independent input here.
@@ -168,12 +166,12 @@ _os() {
 }
 
 # ---------------------------------------------------------------------------
-# Resident registration (T3 "常駐の登録"). One function per OS; enable/
+# Resident registration. One function per OS; enable/
 # disable call whichever applies. Only the darwin path has been run for
 # real in this environment -- linux (systemd --user) and windows (Task
-# Scheduler) are written to the same contract and shellchecked, but need
-# their own hands-on confirmation on those platforms (T6 #3: "CIではなく
-# 手で"), flagged in the PR rather than claimed here.
+# Scheduler) use the same contract and are shellchecked, but need
+# their own hands-on confirmation on those platforms, flagged in the PR
+# rather than claimed here.
 # ---------------------------------------------------------------------------
 
 _launchd_label() { printf 'cc.agmsg.agmsgd.%s' "$(_unit_id)"; }
@@ -222,7 +220,7 @@ _unregister_darwin() {
 
 _systemd_unit_path() { printf '%s/.config/systemd/user/agmsgd-%s.service' "$HOME" "$(_unit_id)"; }
 
-# NOT YET RUN ON LINUX in this environment -- written to T3's own table
+# NOT YET RUN ON LINUX in this environment -- configured with
 # (Restart=on-failure, RestartSec=30s, StartLimitIntervalSec=600,
 # StartLimitBurst=5) and shellchecked only.
 _register_linux() {
@@ -287,8 +285,8 @@ _start_unregistered_launcher() {
   disown 2>/dev/null || true
 }
 
-# NOT YET RUN ON WINDOWS in this environment -- written to T2's own
-# win-test findings (LogonTrigger + RestartOnFailure via XML, since plain
+# NOT YET RUN ON WINDOWS in this environment -- written to the Windows
+# Task Scheduler contract (LogonTrigger + RestartOnFailure via XML, since plain
 # `/Create` flags do not set restart-on-failure) and shellchecked only.
 _register_windows() {
   local node_path="$1" name xml
@@ -358,7 +356,7 @@ _unregister() {
 # Subcommands
 # ---------------------------------------------------------------------------
 
-# Confirms Node by actually running it (T2 #3), the same check
+# Confirms Node by actually running it, the same check
 # agmsgd-launch.sh itself does -- enable/start both need this before
 # recording node_path/node_version.
 _resolve_node() {
@@ -441,7 +439,7 @@ _request_stop_over_socket() {
 
 cmd_stop() {
   _require_install_db
-  # T3: stop takes NO lock.
+  # Stop takes no operation lock.
   local desired
   desired="$(sqlite3 "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
   if [ "$desired" != "on" ]; then

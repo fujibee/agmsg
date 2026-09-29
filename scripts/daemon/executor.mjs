@@ -1,13 +1,11 @@
 // The (pid, start-time evidence, boot id) triple that stands in for "this
-// process, and not some later process that reused its pid" -- referenced
-// throughout the design as "実行者 = (pid, 開始の証拠, boot id)". Shared
+// process, and not some later process that reused its pid." Shared
 // between owner.mjs (which records the triple when it takes ownership) and
 // status.mjs (which reads it back to answer "living / confirmed dead /
 // cannot tell").
 //
-// Not in T4's named component list -- it is small, cross-cutting plumbing
-// both of those files need, the same role install-baseline.mjs plays for
-// #963's detection.
+// This small, cross-cutting helper is shared by both files, just as
+// install-baseline.mjs is shared by the startup verifier and daemon.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -15,7 +13,7 @@ import { platform, uptime } from "node:os";
 
 // A boot-scoped id: the same value for every process on this machine
 // started since the current boot, and a DIFFERENT value after a reboot --
-// the property arch-7 needs to tell "this executor" from "a later process
+// the property needed to tell "this executor" from "a later process
 // that reused the same pid" across a restart. It is a boot EPOCH TIMESTAMP
 // (seconds), not the UUID form some platforms also expose; either serves
 // the same comparison purpose.

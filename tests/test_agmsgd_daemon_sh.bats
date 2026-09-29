@@ -43,7 +43,7 @@ teardown() {
 _seed_install_db() {
   mkdir -p "$TEST_SKILL_DIR/run"
   sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
-  # node_path is normally recorded by `enable` (T3 "常駐の登録") -- seeded
+  # node_path is normally recorded by `enable` -- seeded
   # here directly for tests that exercise `start` on its own, without
   # going through `enable` first.
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET install_id = 'daemon-sh-test', node_path = '$(command -v node)';"
@@ -51,7 +51,7 @@ _seed_install_db() {
 
 _write_completion_record() {
   # watchForDrift() compares the live VERSION file against the manifest's
-  # own copy of it every poll cycle (T3); a manifest that names a version
+  # own copy of it every poll cycle; a manifest that names a version
   # with no matching VERSION file on disk is drift on the very first
   # cycle, indistinguishable from a real one.
   echo "test" > "$TEST_SKILL_DIR/VERSION"
@@ -199,13 +199,12 @@ _run_with_deadline() {
   done
 }
 
-# A fake launchctl, never the real one (T6 #3): a bats run
-# that gets killed externally mid-test skips its own teardown, and the
+# A fake launchctl, never the real one: if a bats run is killed externally
+# mid-test, it skips its own teardown, and the
 # real gui launchd domain is not this test's to leave litter in even when
 # nothing goes wrong -- exactly this happened once already while writing
-# this file (a real unit left behind after a hung test was killed by
-# hand, cleaned up manually). Real registration is exercised only by hand
-# (T6 #3), never from an automated run, on any platform.
+# this file. Real registration is exercised only by hand, never from an
+# automated run on any platform.
 _fake_launchctl() {
   mkdir -p "$TEST_SKILL_DIR/fake-launchd"
   cat > "$TEST_SKILL_DIR/fake-launchd/launchctl" <<'EOF'

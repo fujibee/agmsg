@@ -22,7 +22,7 @@ test("logLine appends and rotates at 1 MiB, keeping exactly one prior generation
     assert.ok(statSync(`${path}.1`).size >= 1024 * 1024);
 
     // A second rotation must not accumulate a .2 -- exactly one prior
-    // generation is kept, per T3 "ほか".
+    // generation is kept.
     writeFileSync(path, "y".repeat(1024 * 1024 + 1));
     logLine(root, "second rotation");
     assert.equal(existsSync(`${path}.2`), false);

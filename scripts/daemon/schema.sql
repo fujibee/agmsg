@@ -6,16 +6,16 @@
 -- Every statement is idempotent: safe to re-run on every invocation, by
 -- either side, in any order.
 --
--- These are the ONLY 4 of the design's 6 beta tables this component (PR 3,
--- "agmsgd skeleton") owns. beta_codex_queue and beta_codex_seat belong to the
--- Codex channel/係 (a separate PR) and are created there, not here.
+-- These are the only four of the six beta tables this component owns.
+-- beta_codex_queue and beta_codex_seat belong to the separate Codex channel
+-- component and are created there, not here.
 --
 -- meta: one row. install_id is the SOURCE OF TRUTH for this install's id
 -- (written by install.sh, PR 2); run/install-manifest.json carries only a
 -- COPY of it, and the entrypoint's startup verification confirms the two
 -- still agree. schema_version is written by
 -- install/agmsgd; node_path and node_version are written ONLY by the
--- enable/disable CLI (never by agmsgd itself), per T3 "常駐の登録".
+-- enable/disable CLI (never by agmsgd itself).
 CREATE TABLE IF NOT EXISTS meta (
   schema_version INTEGER NOT NULL,
   install_id TEXT,
@@ -51,7 +51,7 @@ INSERT INTO daemon_owner (gen, state)
   SELECT 0, 'none' WHERE NOT EXISTS (SELECT 1 FROM daemon_owner);
 
 -- daemon_intent: always exactly one row. desired starts NULL ("intent
--- unconfirmed" -- arch-11 §5, a row that was never written) and is
+-- unconfirmed", a row that was never written) and is
 -- changed ONLY by an explicit operation (start/stop/enable/disable/
 -- uninstall) to the literal 'on' or 'off' -- never by a SIGTERM or an
 -- OS/resident-manager restart, and never defaulted to 'off' at schema
@@ -59,7 +59,7 @@ INSERT INTO daemon_owner (gen, state)
 -- from one somebody deliberately disabled (status.mjs's classify() tells
 -- them apart, but only if this row does not pre-decide it). op_gen
 -- increases by 1 on every explicit operation (inside the operation lock
--- for start/enable/disable/uninstall; without the lock for stop, per T3).
+-- for start/enable/disable/uninstall; without the lock for stop).
 CREATE TABLE IF NOT EXISTS daemon_intent (
   desired TEXT,
   set_by TEXT,
