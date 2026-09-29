@@ -2295,7 +2295,7 @@ CYG
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/cancel-writer}"' \
     'target="$test_home/.agents/skills/agmsg/scripts/"' \
     'dest=""; for arg do dest="$arg"; done' \
-    'if [ "$dest" = "$target" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/writer.pid"; touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/writer-entered"; if [ -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/hard-kill-mode" ]; then printf "%s\\n" "$2" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/stage-source"; while [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/hard-release" ]; do sleep 0.02; done; exit 0; fi; while :; do sleep 1; done; fi' \
+    'if [ "$dest" = "$target" ]; then exec 8>&- 9>&-; printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/writer.pid"; touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/writer-entered"; if [ -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/hard-kill-mode" ]; then printf "%s\\n" "$2" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/stage-source"; while [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/hard-release" ]; do sleep 0.02; done; exit 0; fi; while :; do sleep 1; done; fi' \
     "exec $cp_q \"\$@\"" > "$bin/cp"
   chmod +x "$bin/cp"
 
@@ -2342,11 +2342,7 @@ CYG
   if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
   [ "$install_rc" -eq 137 ]
   kill -0 "$writer_pid" 2>/dev/null
-  for ((i = 0; i < 250; i++)); do
-    kill -0 "$lock_pid" 2>/dev/null || break
-    sleep 0.02
-  done
-  refute kill -0 "$lock_pid" 2>/dev/null
+  wait_for_pid_exit "$lock_pid"
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
     bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --keep-data --yes
   [ "$status" -ne 0 ]
@@ -2437,7 +2433,7 @@ CYG
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
     bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   [ "$status" -ne 0 ]
-  grep -qF -- "earlier uninstall operation is incomplete" <<<"$output"
+  grep -qF -- "earlier install operation is incomplete" <<<"$output"
   grep -qF -- "--recover $op_id" <<<"$output"
   touch "$inject_dir/rm-release"
   if wait "$uninstall_pid"; then uninstall_rc=0; else uninstall_rc=$?; fi
