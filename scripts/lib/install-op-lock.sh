@@ -148,12 +148,13 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
   return 0
 }
 
-# Preserve a short, printable first response so a caller can explain which
+# Preserve a short, shell-escaped first response so a caller can explain which
 # handshake stage failed without allowing control characters into terminal output.
 _agmsg_install_op_lock_set_failure() {
   local reason="${1:-lock handshake failed}" detail="${2:-}"
   if [ -n "$detail" ]; then
-    detail="$(printf '%s' "$detail" | LC_ALL=C tr -cd '[:print:]' | cut -c 1-80)"
+    printf -v detail '%q' "$detail"
+    detail="${detail:0:80}"
     if [ -n "$detail" ]; then
       reason="$reason: $detail"
     fi

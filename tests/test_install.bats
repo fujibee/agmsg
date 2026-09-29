@@ -853,7 +853,7 @@ PS1
 }
 
 @test "install reports the lock handshake stage and a bounded SQLite response" {
-  local fake_bin="$FAKE_HOME/bin" banner expected
+  local fake_bin="$FAKE_HOME/bin" banner expected response
   mkdir -p "$fake_bin"
   banner="SQLite version $(printf '%100s' '' | tr ' ' X)"
   expected="${banner:0:80}"
@@ -866,9 +866,18 @@ SH
   run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" SQLITE_BANNER="$banner" \
     bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ "$status" -ne 0 ]
+  printf -v expected '%q' "$banner"
+  expected="${expected:0:80}"
   grep -Fq -- "could not take the install operation lock: unexpected lock confirmation from sqlite3: $expected" <<<"$output"
-  refute grep -Fq -- "${banner:0:81}" <<<"$output"
+  [ "${#expected}" -eq 80 ]
   refute grep -Fq -- "another install/uninstall in progress?" <<<"$output"
+
+  response=$'agmsg-lock-ok\r'
+  printf -v expected '%q' "$response"
+  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" SQLITE_BANNER="$response" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -ne 0 ]
+  grep -Fq -- "could not take the install operation lock: unexpected lock confirmation from sqlite3: $expected" <<<"$output"
 }
 
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {
