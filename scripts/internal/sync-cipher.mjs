@@ -486,7 +486,8 @@ function runAge(args, input) {
   const age = process.env.AGMSG_AGE_BIN || "age";
   const result = spawnSync(age, args, { input, maxBuffer: 4 * 1024 * 1024 });
   if (result.error?.code === "ENOENT") {
-    throw new CipherStateError("unsupported_cipher", "age executable is unavailable");
+    throw new CipherStateError("unsupported_cipher",
+      `age executable "${age}" was not found on PATH (set AGMSG_AGE_BIN to its path)`);
   }
   if (result.error) throw result.error;
   return result;

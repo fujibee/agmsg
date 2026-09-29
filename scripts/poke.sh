@@ -31,15 +31,18 @@ set -euo pipefail
 # with "unsupported: <why>" on stderr, non-zero — never a silent 0.
 #
 # Before typing, a type that opted in (input_prompt_marker set in its
-# manifest) has its input box checked for a draft — see
-# scripts/lib/input-box.sh. That check narrows the window a poke can
+# manifest) has its input box checked for someone actively typing — see
+# scripts/lib/input-box.sh and the comment above the check below (#1322):
+# two snapshots ~1s apart, refusing only if they differ, not by judging
+# whatever the box currently holds. That check narrows the window a poke can
 # corrupt a draft; it does NOT close it: a person can start typing in the
-# instant between the check and the actual keystroke below, and that
-# keystroke can still land mixed with theirs (maintainer-accepted residual
-# risk, #1321 review). "poke checked the box first" is not "poke cannot
-# ever type into a non-empty box".
+# instant between the second snapshot and the actual keystroke below, and
+# that keystroke can still land mixed with theirs (maintainer-accepted
+# residual risk, #1321 review). "poke checked first" is not "poke cannot
+# ever type over someone still typing".
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC2034  # used by actas-lock.sh and safe-poke.sh's #1384 draft file, both sourced below
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"          # agmsg_spawn_path
@@ -52,7 +55,9 @@ source "$SCRIPT_DIR/lib/compat.sh"              # required by detect-cli-type.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/detect-cli-type.sh"     # agmsg_detect_cli_type (#1229 plain fallback)
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/input-box.sh"           # agmsg_input_box_empty (#1321)
+source "$SCRIPT_DIR/lib/safe-poke.sh"           # agmsg_safe_poke -- also sources input-box.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"     # agmsg_registered_type (#1391)
 
 die() { echo "poke: $*" >&2; exit 1; }
 
@@ -65,9 +70,10 @@ shift 2
 # this script runs exactly once, same as before this existed). Pulled out
 # of the remaining args first, in any position, so they never disturb the
 # body-spec parsing below. Retries exist only for the input-box refusal
-# (#1321) — a transient condition (the person finishes typing) — never for
-# a driver-level failure (unreachable pane, no placement record, and so
-# on), which retrying would not fix.
+# (#1321) — a transient condition (someone is actively typing right now,
+# per #1322's two-snapshot comparison, and may finish) — never for a
+# driver-level failure (unreachable pane, no placement record, and so on),
+# which retrying would not fix.
 RETRIES=0
 RETRY_DELAY=2
 BACKOFF=exponential
@@ -122,6 +128,19 @@ REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 IFS=$'\t' read -r REF _PROJ TYPE _FENCE < "$REC" || true
 [ -n "$REF" ] || die "placement record for '$TEAM/$NAME' has no pane id — a record with no id is not a placement (a bug in whatever wrote it)"
 
+# #1391: the record's own type field can be stale or wrong (a hand-started
+# seat's self-naming hook used to fall back to a guessed default, which
+# silently wrote 'claude-code' for a seat of any other type it could not
+# identify). The roster (join.sh's own registration in this team's
+# config.json) is authoritative for what this seat actually joined as, so it
+# wins on a mismatch -- and the mismatch is reported, not silently corrected,
+# because a corrected-every-time record never gets noticed as corrupt.
+ROSTER_TYPE="$(agmsg_registered_type "$TEAM" "$NAME" 2>/dev/null || true)"
+if [ -n "$ROSTER_TYPE" ] && [ "$ROSTER_TYPE" != "$TYPE" ]; then
+  echo "poke: '$TEAM/$NAME' placement record says type '$TYPE' but the roster says '$ROSTER_TYPE' — using '$ROSTER_TYPE' (#1391)" >&2
+  TYPE="$ROSTER_TYPE"
+fi
+
 # The ref parser fails CLOSED (non-zero) on a corrupt/unknown-scheme ref. Under
 # `set -e` a bare `VAR="$(...)"` would take the shell down AT the assignment, so
 # the die below — the contract for an unresolvable ref — is never reached. Guard
@@ -141,72 +160,36 @@ agmsg_terminal_load "$TERMINAL" \
 # driver's exit status (plain's unsupported 13 included), and put a one-line
 # human answer on each side.
 #
-# Input-box check (#1321), immediately before EVERY attempt including
-# retries — never once up front, since the box's own state is exactly what
-# each retry exists to wait out. INPUT_MARKER empty (this type set none in
-# its manifest) skips the check entirely: unconditional single terminal_poke
-# call, the same as before this existed.
+# The input-box safety check (#1321/#1322) and the #1384 herdr
+# save/clear/poke/restore recovery both live in scripts/lib/safe-poke.sh
+# now — the ONE shared implementation self-rename.sh and self-write.sh also
+# route their own self-pokes through (typing into this session's own pane
+# carries the same "someone might already be using it" risk poke.sh already
+# guarded against). Moved there verbatim; poke.sh's own behavior is
+# unchanged from before that move.
 #
-# Also skipped outright for the plain terminal (review): plain has no
-# addressable screen to read at all (terminal_peek always fails there, by
-# contract), so treating that failure as "could not confirm empty" would
-# refuse EVERY plain poke with exit 14 and never reach the existing
-# plain-specific fallback below (an agmsg message, when the caller can
-# resolve one) — a real regression, not a safety win, since plain never had
-# a screen for a draft to corrupt in the first place.
+# INPUT_MARKER empty (this type set none in its manifest, OR the target
+# terminal is plain -- plain has no addressable screen to read at all, so
+# treating that failure as "could not confirm empty" would refuse EVERY
+# plain poke with exit 14 and never reach the plain-specific fallback below)
+# skips the check entirely inside agmsg_safe_poke: one unconditional
+# terminal_poke call, the same as before any of this existed.
 INPUT_MARKER="$(agmsg_type_get "$TYPE" input_prompt_marker)"
 INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
 [ "$TERMINAL" = plain ] && INPUT_MARKER=""
 
 RC=0
-ATTEMPT=0
-while :; do
-  RC=0
-  if [ -n "$INPUT_MARKER" ]; then
-    SCREEN="" PEEK_RC=0
-    # No 2>/dev/null here (unlike before): on failure this is terminal_peek's
-    # own diagnosis, not an "input in progress" refusal, and it must reach
-    # the operator verbatim -- the same message terminal_poke would have
-    # printed for the same underlying cause (#1321 review round 2).
-    SCREEN="$(terminal_peek "$BARE_ID")" || PEEK_RC=$?
-    if [ "$PEEK_RC" -ne 0 ]; then
-      # The read itself failed for a driver-level reason (unreachable,
-      # confirmed gone, unsupported, ...). Return it unchanged instead of
-      # collapsing every peek failure into 14.
-      RC="$PEEK_RC"
-    else
-      # A successful-but-EMPTY read is NOT proof the box is empty: a real
-      # pane can transiently show nothing during a screen redraw or a
-      # switch to an alternate screen, and typing there would still land on
-      # top of a real draft. Refuse (14) the same as any other
-      # not-confirmed-empty screen; do not special-case empty content
-      # (#1321 review round 3 — reverts round 2's peek/poke-asymmetry
-      # shortcut).
-      agmsg_input_box_empty "$INPUT_MARKER" "$INPUT_BOXED" "$SCREEN" || RC=14
-    fi
-  fi
-  if [ "$RC" -eq 0 ]; then
-    terminal_poke "$BARE_ID" "$TEXT" >/dev/null || RC=$?
-    break
-  fi
-  # Retries exist to wait out a draft being typed (RC=14) — a driver-level
-  # failure propagated above, or from terminal_poke's own attempt, would not
-  # be fixed by waiting and must not be retried.
-  [ "$RC" -eq 14 ] || break
-  [ "$ATTEMPT" -lt "$RETRIES" ] || break
-  ATTEMPT=$((ATTEMPT + 1))
-  if [ "$BACKOFF" = exponential ]; then
-    WAIT=$((RETRY_DELAY * (1 << (ATTEMPT - 1))))
-    [ "$WAIT" -le 60 ] || WAIT=60
-  else
-    WAIT="$RETRY_DELAY"
-  fi
-  sleep "$WAIT"
-done
+agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME" \
+  --retries "$RETRIES" --retry-delay "$RETRY_DELAY" --backoff "$BACKOFF" || RC=$?
 
 if [ "$RC" -eq 14 ]; then
-  echo "poke: '$TEAM/$NAME' has a draft in its input box — refusing to type over it (input in progress)" >&2
+  echo "poke: '$TEAM/$NAME' has a changing input box — refusing to type over it (input in progress)" >&2
   exit 14
+fi
+
+if [ "$RC" -eq 15 ]; then
+  echo "poke: '$TEAM/$NAME' input box could not be located — refusing to type over it (cannot confirm this is safe, #1391)" >&2
+  exit 15
 fi
 
 # #1229: a bare plain:- target (id '-') has no pane at all — not a

@@ -75,6 +75,25 @@ elif [ "$1" = agent ] && [ "$2" = prompt ]; then
   esac
   exit 0
 elif [ "$1" = pane ] && [ "$2" = read ]; then
+  # #1384: agmsg_safe_poke's own input-box check now runs a STYLED
+  # (--format ansi) read before every keystroke here too. Answered as a
+  # genuinely empty box -- bare marker, nothing visible after it, same
+  # shape as test_peek_poke.bats's _install_fake_herdr_empty_box -- kept
+  # SEPARATE from SCREEN_FILE, which stays the PLAIN read
+  # _sw_rename_confirm_count (and this file's own exact-content assertions
+  # on SCREEN_FILE) depend on holding only the rename keystroke's own
+  # output, nothing else.
+  is_ansi=0
+  for a in "$@"; do [ "$a" = ansi ] && is_ansi=1; done
+  if [ "$is_ansi" = 1 ]; then
+    if [ "$(fx kind)" = codex ]; then
+      printf '%s\n' '›' '' 'gpt sol · /proj/alice · task'
+    else
+      rule="$(printf '─%.0s' $(seq 1 60))"
+      printf '%s\n' "$rule testteam-alice ─" '❯' "$rule"
+    fi
+    exit 0
+  fi
   cat "$SCREEN_FILE" 2>/dev/null
   exit 0
 fi

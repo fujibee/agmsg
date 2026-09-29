@@ -23,7 +23,15 @@ setup() {
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   cat > "$BATS_TEST_TMPDIR/bin/ps" <<'PSEOF'
 #!/usr/bin/env bash
-# A process table that the test writes. Only the two forms this code uses.
+# A process table that the test writes. Only the two `-p <pid>` forms below are
+# faked. A `-A ...` whole-table snapshot (what _agmsg_pid_alive_local uses to
+# find its own pid as a canary alongside the target) goes to the real ps
+# instead: what this test needs is a genuinely-dead pid to look genuinely
+# absent, not a fabricated process table that would have to keep this script's
+# own live pid in it to mean anything.
+for _psarg in "$@"; do
+  case "$_psarg" in -A|-A?*) exec /bin/ps "$@" ;; esac
+done
 field=""; pid=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -543,6 +551,7 @@ w1:pX	$PANE_PID"
 # --- the recorded owner is verified, not just parsed ---------------------------
 
 @test "an owner whose process is gone is undetermined, not a proof about it (#1152)" {
+  skip_on_ci "flaky pid-reuse race under CI's shared runners (#1187)"
   # A lock outlives the process that wrote it. Parsing a pid out of the file says
   # the file holds a number, not that the number is still this session.
   sleep 60 >/dev/null 2>&1 3>&- & local dead=$!

@@ -43,11 +43,52 @@ write_node_launcher_fixtures() {
   printf '// stub node launcher fixture\n' > "$nd/nodetype-launcher.mjs"
 }
 
-@test "type-registry: known_types lists the eleven built-ins" {
+@test "type-registry: known_types lists the twelve built-ins" {
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; agmsg_known_types | sort -u | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "agmsg-app,antigravity,claude-code,codex,copilot,cursor,devin,gemini,grok-build,hermes,opencode" ]
+  [ "$output" = "agmsg-app,antigravity,claude-code,codex,copilot,cursor,devin,ext-tool,gemini,grok-build,hermes,opencode" ]
+}
+
+@test "type-registry: sourcing alone does not compute the renderable-types list (#631)" {
+  # This file is also sourced from resolve-project.sh, on a path resolve-project.sh
+  # re-enters every watch.sh poll cycle -- a caller wanting only agmsg_type_get/
+  # agmsg_type_dir must not pay for a walk over every known type ending in `paste`
+  # just because the file was sourced. Only calling agmsg_load_renderable_skill_types
+  # may do that work.
+  local shimbin="$BATS_TEST_TMPDIR/shim-bin" callog="$BATS_TEST_TMPDIR/calls.log"
+  mkdir -p "$shimbin"
+  : > "$callog"
+  local cmd real
+  for cmd in paste head; do
+    real="$(command -v "$cmd")"
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf "printf '%%s\\\\n' '%s' >> '%s'\n" "$cmd" "$callog"
+      printf "exec '%s' \"\$@\"\n" "$real"
+    } > "$shimbin/$cmd"
+    chmod +x "$shimbin/$cmd"
+  done
+
+  run env -i PATH="$shimbin:$PATH" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; :"
+  [ "$status" -eq 0 ]
+  [ ! -s "$callog" ]   # sourcing alone: neither shim ran
+
+  run env -i PATH="$shimbin:$PATH" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'
+     agmsg_load_renderable_skill_types
+     printf '%s\n' \"\$AGMSG_RENDERABLE_SKILL_TYPES\"
+     # A second call must not recompute (no second 'paste' line below).
+     agmsg_load_renderable_skill_types
+     printf '%s\n' \"\$AGMSG_RENDERABLE_SKILL_TYPES\""
+  [ "$status" -eq 0 ]
+  local first second
+  first="$(sed -n '1p' <<<"$output")"
+  second="$(sed -n '2p' <<<"$output")"
+  [ -n "$first" ]
+  [ "$first" = "$second" ]
+  [ "$(grep -c '^paste$' "$callog")" -eq 1 ]   # computed once, not twice
 }
 
 @test "type-registry: is_known_type accepts a built-in and rejects a bogus type" {
@@ -332,6 +373,48 @@ EOF
   [ "$(detect GEMINI_API_KEY=x)" = gemini ]
   [ "$(detect CLAUDE_CODE_SESSION_ID=x CODEX_THREAD_ID=y)" = claude-code ]
   [ "$(detect)" = claude-code ]
+}
+
+@test "type-registry: agmsg_detect_cli_type's default fallback still returns 0, and signals the fallback on a side channel only (#1402 review)" {
+  # #1402 review: an earlier version of this change made the default
+  # branch `return 1` to distinguish it from a real detection, reasoning
+  # that no existing caller checked the status. True, but irrelevant --
+  # whoami.sh's `AGENT_TYPE="${2:-$(agmsg_detect_cli_type)}"` and
+  # windows/dispatch.sh's `AGENT_TYPE="$(agmsg_detect_cli_type)"` are plain
+  # assignments under `set -e`, and a FAILING command substitution inside
+  # one of those aborts the script right there, before the assignment (and
+  # its fallback value) ever lands -- a live regression on a path every
+  # existing seat with no strong evidence went through daily. The function's
+  # own return value and stdout must stay exactly what they always were;
+  # only the side channel added for self-name.sh (#1391) may say "this was
+  # a guess, not evidence".
+  run env -i PATH="$PATH" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; agmsg_detect_cli_type; echo rc=\$?"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'claude-code\nrc=0')" ]
+
+  # The exact regression shape: a `set -e` script assigning the call's
+  # output directly must not abort when detection falls all the way through
+  # to the default.
+  run env -i PATH="$PATH" bash -c \
+    "set -euo pipefail; source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; AGENT_TYPE=\"\$(agmsg_detect_cli_type)\"; echo \"AGENT_TYPE=\$AGENT_TYPE\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "AGENT_TYPE=claude-code" ]
+
+  # The side channel itself: 0/real-value on a real detection, 1/default on
+  # the fallback -- read via a plain-statement call, the shape self-name.sh
+  # actually uses (a command-substitution call discards it, same reason
+  # _AGMSG_AGENT_BINARIES_OUT is read the same way elsewhere in this file's
+  # sibling resolve-project.sh).
+  run env -i PATH="$PATH" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; agmsg_detect_cli_type >/dev/null; echo \"defaulted=\$_AGMSG_DETECT_CLI_TYPE_DEFAULTED out=\$_AGMSG_DETECT_CLI_TYPE_OUT\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "defaulted=1 out=claude-code" ]
+
+  run env -i PATH="$PATH" CODEX_THREAD_ID=x bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; agmsg_detect_cli_type >/dev/null; echo \"defaulted=\$_AGMSG_DETECT_CLI_TYPE_DEFAULTED out=\$_AGMSG_DETECT_CLI_TYPE_OUT\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "defaulted=0 out=codex" ]
 }
 
 @test "type-registry: a process marker beats a shared Gemini credential" {

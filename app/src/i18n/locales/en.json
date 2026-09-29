@@ -108,12 +108,25 @@
       "body": "This removes {{name}} from {{team}} and closes its pane if it's running. This can't be undone from here.",
       "confirmLabel": "Leave"
     },
+    "deleteTeam": {
+      "title": "Delete team '{{team}}'?",
+      "body": "This permanently deletes team '{{team}}': its configuration, roster, identity history, and per-agent runtime records. This cannot be undone. If it was connected to a remote, reconnecting later can bring it back.",
+      "confirmLabel": "Delete team",
+      "forceLabel": "Delete with members",
+      "purgeMessagesToo": "Also delete message history",
+      "membersRemainBody": "This team has {{count}} member(s). Remove them all from the team and delete it?"
+    },
+    "purgeMessages": {
+      "title": "Purge message history for team '{{team}}'?",
+      "body": "This permanently deletes all message history for team '{{team}}'; it cannot be restored.",
+      "confirmLabel": "Delete messages"
+    },
     "newTeam": {
       "titleFirstRun": "Welcome — create your first team",
       "title": "New team",
       "note": "Creates the team and adds you as its app-user (the bottom chat box owner).",
       "teamNameLabel": "Team name",
-      "teamNamePlaceholder": "my-team",
+      "teamNamePlaceholder": "e.g. my-team",
       "appUserLabel": "Your name (app-user)",
       "create": "Create"
     },
@@ -125,16 +138,18 @@
     "agent": {
       "title": "Add agent",
       "typeLabel": "Type",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "e.g. alice",
       "addAndSpawn": "Add & spawn"
     },
     "rename": {
       "title": "Rename {{current}}",
       "newNameLabel": "New name",
-      "confirmButton": "Rename"
+      "confirmButton": "Rename",
+      "confirmButtonBusy": "Renaming…"
     },
     "confirm": {
-      "defaultLabel": "Confirm"
+      "defaultLabel": "Confirm",
+      "workingLabel": "Working…"
     },
     "settings": {
       "title": "Settings"
@@ -150,6 +165,13 @@
       "confirmLabel": "Close pane"
     }
   },
+  "toast": {
+    "renameTeam": "Renamed team '{{from}}' to '{{to}}'.",
+    "deleteTeam": "Deleted team '{{team}}'.",
+    "deleteTeamForce": "Deleted team '{{team}}' (removed {{count}} member(s)).",
+    "purgeMessages": "Deleted messages for team '{{team}}'.",
+    "actionFailed": "Failed: {{reason}}"
+  },
   "ctxMenu": {
     "member": {
       "spawnTo": "Spawn to ▸",
@@ -157,6 +179,11 @@
       "existingTabsDivider": "— existing tabs —",
       "rename": "Rename…",
       "leave": "Leave"
+    },
+    "team": {
+      "rename": "Rename…",
+      "delete": "Delete team…",
+      "deleteMessages": "Delete messages…"
     },
     "pane": {
       "close": "Close",

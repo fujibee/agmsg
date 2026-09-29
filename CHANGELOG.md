@@ -4,6 +4,120 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-09-28
+
+### Added
+- Add --delete and --purge-messages to team.sh (#1475) (#1482)
+- Add --force to team.sh --delete for teams with members (#1493) (#1494)
+- Report when a Codex config is missing this install's writable_roots, with the command that fixes it (#1477) (#1483)
+
+### Fixed
+- Let a live seat take a pane a dead session's record still claims (#1485) (#1486)
+- Name a missing age binary, and surface the last fatal on status (#1487) (#1488)
+
+### Documentation
+- Update the RFC to the approved design and add the architecture design (#1492)
+
+[1.5.1]: https://github.com/fujibee/agmsg/compare/v1.5.0...v1.5.1
+
+## [1.5.0] - 2026-09-25
+
+### Added
+- Orca terminal driver (1.5.0) (#1453)
+
+### Fixed
+- Re-bind a codex seat stranded on its pre-/clear thread (#1470)
+- Clean the CODEX_HOME Codex config and the OpenCode/Hermes/Grok files (#1471)
+- Don't retype the shared SKILL.md for a type with its own file (#1464)
+- Find a seat's actas lock from its registration, and name a sandbox refusal (#1461)
+
+[1.5.0]: https://github.com/fujibee/agmsg/compare/v1.4.2...v1.5.0
+
+## [1.4.2] - 2026-09-24
+
+### Added
+- One line per question in a batch, tolerate a malformed row, name max_tokens_exceeded (#1454)
+
+### Fixed
+- Recognize OpenRouter's wrapped max_tokens_exceeded 400 (#1460)
+- Stage the holder before rmdir so a release cannot delete the next owner's (#1445)
+- Skip a no-op hooks_file rewrite, preserve format and mode (#1442)
+- Remove only the install being uninstalled, add --all for every install (#1438)
+- Read the session name from session_index.jsonl (#1437)
+- Restore <team> <name> in the actas record step, and say so when they are missing (#1398)
+- Detect a type's agent process from its manifest, not a fixed list (#631)
+
+[1.4.2]: https://github.com/fujibee/agmsg/compare/v1.4.1...v1.4.2
+
+## [1.4.1] - 2026-09-23
+
+### Added
+- Add terminal_peek_styled so poke's real-draft check covers tmux (#1393)
+- poke on herdr: use pane focus to deliver past an abandoned draft, not just refuse (#1384) (#1395)
+- Add SECURITY.md and Dependabot configuration (#1404)
+
+### Fixed
+- install: add ext-tools/ to Codex sandbox writable_roots (#1380)
+- Arm the bridge request on resume when the thread has an exact role match (#1401) (#1405)
+- Stop guessing a seat's type into its placement record (#1402)
+- Distinguish a failed ps observation from proof of death (#970)
+- Fail loudly when a hooks_file write is refused (#1396)
+- Split the emit-and-observe fallback across two calls (#1386) (#1397)
+- Protect a real, stalled draft the two-snapshot check let through (#1378)
+- Use sqlite batch mode for redirected queries (#1343)
+- Refuse only when the input box actually changes (#1322) (#1376)
+- Let an e2ee team use an address the plaintext check refuses (#1019)
+- Bound the sync readiness wait by wall clock, not attempts alone (#839)
+
+### Changed
+- install: prune scripts/ files a prior release no longer ships (#1375)
+
+### Documentation
+- The JA preview page said the send waits for the adapter; it does not (#1377)
+
+[1.4.1]: https://github.com/fujibee/agmsg/compare/v1.4.0...v1.4.1
+
+## [1.4.0] - 2026-09-21
+
+### Added
+- Add TypeSafe as a second provider alongside OpenRouter (#1364)
+- Accept only the strict JSON-with-questions shape, and document how to ask (#1358)
+- Jev adapter — route a task to a model and effort (#1339)
+- Show ext-tool members as ext-tool (<tool>) without error-looking cells (#1337)
+- Slack adapter (#1336)
+- An external program as a team member, foundation (#1331)
+- Re-arm the Claude Code Monitor by default when its expiry notice shows it delivered something (#1328)
+- Reprocess quarantine rows a newer parser can now understand (#1323)
+
+### Fixed
+- Report each question's own confidence, not one joint figure (#1369)
+- Skip pane placement for ext-tool members (#1340)
+- Forward setup args and read the secret from the clipboard (#1335)
+- Bound the scoped reprocess pending-count walk (#1332)
+- Refuse to type over a live draft, and drop rearm.sh for a template procedure (#1322)
+- Restart on the new code when the installation changes (#1320)
+- Release the team config lock on SIGTERM/SIGINT (#1325)
+
+### Performance
+- Defer the renderable-types scan out of source time (#1366)
+- Cache a team's storage driver per cycle and the storage dir per process (#1333)
+- Cache lock-path invariants and skip idle-cycle reformatting (#1329)
+
+### Changed
+- Drop the request= key nothing reads (#1362)
+- Move join, delivery and row rendering behind per-type hooks (#1359)
+
+### Documentation
+- Preview page — what it is, what it does not do yet, where invocation goes (#1355)
+- Jev, ext-tool README: state that handle is not a direct entry point (#1368)
+- Promote batching multiple questions into one call in USAGE.md (#1367)
+- Fix tool.conf comments that still named only OpenRouter (#1365)
+- Add USAGE.md for the sending seat, declare request=loose (#1356)
+- Point the three stale source comments at #983 (#989)
+- Document the terminal axis and the terminal driver interface (#1357)
+
+[1.4.0]: https://github.com/fujibee/agmsg/compare/v1.3.1...v1.4.0
+
 ## [1.3.1] - 2026-09-17
 
 Teams that use remote sync should update every machine to 1.3.1 or later. From this release the client reports its version to the server, so older clients can be told apart.

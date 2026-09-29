@@ -228,11 +228,22 @@ union_of_shards() {
   # Not a correctness property — a balance smoke test. Greedy LPT should never
   # put the two largest files together while lighter shards exist; if it does,
   # the weighting has broken and CI is slower than it looks.
+  #
+  # "Heaviest" must be measured the same way shard-tests.sh itself weights a
+  # file -- real seconds from SECONDS_TABLE, matching shard_seconds()'s own
+  # source above -- not by @test count. The two are different rulers: LPT
+  # packs by seconds, so a file that is huge in seconds but unremarkable in
+  # @test count (waiting, not volume, #1243) can be the real heaviest while
+  # sitting nowhere near the top of a count-sorted list. Using count here
+  # asserted a property LPT never promised, and broke (independent of any
+  # real balance regression) the moment updating this table to a real
+  # measurement (#1304, test_watch.bats's quarantine weight) moved a file's
+  # rank by seconds without moving its rank by count.
   local heaviest second
-  heaviest="$(cd "$REPO_ROOT" && grep -c '^[[:space:]]*@test' tests/*.bats \
-    | sort -t: -k2 -rn | sed -n '1s/:.*//p')"
-  second="$(cd "$REPO_ROOT" && grep -c '^[[:space:]]*@test' tests/*.bats \
-    | sort -t: -k2 -rn | sed -n '2s/:.*//p')"
+  heaviest="$(awk -F'\t' '$0 !~ /^#/ && NF == 2' "$SECONDS_TABLE" \
+    | sort -t$'\t' -k2,2nr | sed -n '1p' | cut -f1)"
+  second="$(awk -F'\t' '$0 !~ /^#/ && NF == 2' "$SECONDS_TABLE" \
+    | sort -t$'\t' -k2,2nr | sed -n '2p' | cut -f1)"
   local i shard_files
   for i in 1 2 3 4; do
     shard_files="$(cd "$REPO_ROOT" && bash "$SHARD" "$i" 4)"

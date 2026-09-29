@@ -30,11 +30,18 @@
 #      ONLY when that match is UNIQUE among recent rollouts. If two or more recent
 #      rollouts share this cwd (concurrent codex sessions in the same directory),
 #      we cannot tell which is ours -> record nothing.
-# Always best-effort: every failure path is a silent no-op (exit 0).
+# Always best-effort: every failure path is a no-op (exit 0), and all but one are
+# silent. The exception is a missing <team>/<agent>: that is a caller mistake, not
+# an ambiguous environment, and a silent exit let an agent that dropped the
+# arguments report the seat as recorded while nothing was written. It still
+# exits 0, but says so on stderr.
 set -uo pipefail
 
 TEAM="${1:-}"; AGENT="${2:-}"; PROJECT="${3:-}"
-[ -n "$TEAM" ] && [ -n "$AGENT" ] || exit 0
+if [ -z "$TEAM" ] || [ -z "$AGENT" ]; then
+  echo "codex-record-session: nothing recorded -- usage: codex-record-session.sh <team> <agent> [project]" >&2
+  exit 0
+fi
 # No <project> argument -> this script's own $PWD (see header: deterministic
 # under bash even when the caller's shell is PowerShell).
 [ -n "$PROJECT" ] || PROJECT="$PWD"

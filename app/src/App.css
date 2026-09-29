@@ -18,6 +18,22 @@
   box-sizing: border-box;
 }
 
+/* Every `input`/`textarea` here sets `color: var(--fg)` explicitly (the
+   normal, readable text color), which some engines then also apply to the
+   placeholder unless it's overridden separately — a real value and the
+   example text end up the same color, so a still-empty field (e.g. the "add
+   agent" name field, its placeholder "alice") reads as already filled in.
+   `opacity: 1` is deliberate too: without it a browser's own default
+   placeholder dimming stacks with this color, landing somewhere between
+   --muted and --fg rather than reliably at --muted everywhere the app runs.
+   One rule for every input in the app, not per-field, so every placeholder
+   stays visually distinct from typed text the same way. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
 html,
 body,
 #root {
@@ -36,26 +52,38 @@ body,
 
 /* These sit at the very top of the window, same row as the overlaid macOS
    traffic lights (titleBarStyle: Overlay) — left padding clears them
-   horizontally, same idea as .sidebar-head's top padding does vertically. */
-.startup-error-banner {
+   horizontally, same idea as .sidebar-head's top padding does vertically.
+   Shared by the startup notices (install/update outcomes) and the team
+   action completion notice (#1484 review, round 6 — one consistent notice
+   style instead of the separate bottom toast this replaced) — .success/
+   .error only change color; layout is identical. */
+.notice-banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 8px 14px 8px 80px;
-  background: #4a1f1f;
-  color: #ffd7d7;
   font-size: 12px;
-  border-bottom: 1px solid #6b2b2b;
+  border-bottom: 1px solid;
 }
-.startup-error-banner button {
+.notice-banner button {
   background: transparent;
-  border: 1px solid #ffd7d7;
-  color: #ffd7d7;
+  border: 1px solid currentColor;
+  color: inherit;
   border-radius: 4px;
   padding: 2px 8px;
   cursor: pointer;
   flex-shrink: 0;
+}
+.notice-banner.error {
+  background: #4a1f1f;
+  color: #ffd7d7;
+  border-bottom-color: #6b2b2b;
+}
+.notice-banner.success {
+  background: #1f4a2c;
+  color: #c8f7d4;
+  border-bottom-color: #2b6b41;
 }
 
 .startup-installing-banner {
@@ -107,27 +135,6 @@ body,
 }
 .startup-outdated-banner .startup-outdated-banner-dismiss:hover {
   opacity: 1;
-}
-
-.startup-success-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 14px 8px 80px;
-  background: #1f4a2c;
-  color: #c8f7d4;
-  font-size: 12px;
-  border-bottom: 1px solid #2b6b41;
-}
-.startup-success-banner button {
-  background: transparent;
-  border: 1px solid #c8f7d4;
-  color: #c8f7d4;
-  border-radius: 4px;
-  padding: 2px 8px;
-  cursor: pointer;
-  flex-shrink: 0;
 }
 
 /* Top bar */
@@ -378,6 +385,11 @@ select:focus {
   border-radius: 6px;
   padding: 7px 14px;
   cursor: pointer;
+  /* A long label ("Delete anyway...", or a longer translation of it) must
+     not wrap onto a second line inside the button — flex-end + no wrapping
+     keeps every modal's action row a single right-aligned line, each
+     button sized to its own text (#1484 review, round 3). */
+  white-space: nowrap;
 }
 .modal-actions button.primary {
   background: var(--accent);
@@ -391,6 +403,32 @@ select:focus {
 .modal-actions button:disabled {
   opacity: 0.4;
   cursor: default;
+}
+/* An action is in flight (a rename, a delete, ...) — placed after the
+   :disabled rule above so its same-specificity `cursor` wins by source
+   order, showing "wait" instead of the disabled default everywhere over
+   the card, not just its buttons. */
+.modal.busy,
+.modal.busy button,
+.modal.busy input {
+  cursor: wait;
+}
+/* `.modal label` above (column, for a text-input's label-above-field
+   layout) has the same specificity as a bare `.modal-checkbox` rule and
+   wins on source order, forcing the checkbox onto its own centered line
+   with the text below it — `.modal label.modal-checkbox` is one class more
+   specific, so this reliably wins instead (#1484 review, round 3). */
+.modal label.modal-checkbox {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg);
+  margin: 0 0 12px;
+}
+.modal-checkbox input {
+  margin: 0;
 }
 
 .link {
@@ -491,6 +529,18 @@ body.resizing-row {
   background: var(--panel);
   display: flex;
   flex-direction: column;
+  /* Without this, a flex column child (like .team-status-rail before its own
+     bound) that wants more height than available makes THIS refuse to
+     shrink below its content, growing past .body's height and turning into
+     a page-level scroll instead of staying inside the window (#1478).
+     Deliberately NOT overflow:hidden here (tried, reverted): the collapsed
+     rail's popups (.new-menu.rail-popup, .ctx-menu.rail-popup) are
+     position:absolute; left:100% children that escape this box on purpose,
+     and clipping at this level cuts them off. The overflow that actually
+     needed containing is .team-status-rail's own (bounded below) and
+     .members' (already flex:1 + overflow-y:auto) — .sidebar itself no
+     longer has anything unbounded left to clip once those two are capped. */
+  min-height: 0;
 }
 /* Collapsed to an icon-only rail (issue #317 backlog) so panes get
    more width; a fixed width overrides the draggable one from full size.
@@ -635,12 +685,21 @@ body.resizing-row {
 .sidebar-head select {
   width: 100%;
 }
+/* Bounded so a long team list scrolls within itself instead of pushing the
+   AGENTS section (and everything below it) out of the window — the same
+   rule covers the collapsed rail's icon-only list too, since it reuses this
+   class (see .collapsed-team-status below, applied together on one
+   element). overflow other than visible also drops the flex item's implicit
+   min-height:auto floor, so this can shrink below its own content height in
+   a short window instead of refusing to and forcing a page-level scroll. */
 .team-status-rail {
   display: flex;
   flex-direction: column;
   gap: 3px;
   border-bottom: 1px solid var(--border);
   padding: 3px 6px;
+  max-height: 35vh;
+  overflow-y: auto;
 }
 .team-status-row {
   display: flex;

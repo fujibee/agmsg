@@ -59,27 +59,14 @@ source "$SCRIPT_DIR/lib/terminal-context-line.sh"
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
 [ -n "$PAIRS" ] || exit 0
 
-# Type-specific SessionStart behaviour (Template Method). A type may ship
-# scripts/drivers/types/<type>/_session-start.sh defining agmsg_session_start to override the
-# default no-op — codex uses it to hand the session off to the bridge. The plug
-# is sourced in this script's context so it sees PROJECT / RUN_DIR / SKILL_DIR /
-# PAIRS and the helpers sourced above; it may exit 0 (codex does, having no
-# Monitor tool) to skip the Monitor-directive path below.
-agmsg_session_start_default() { :; }
-
-_tdir="$(agmsg_type_dir "$TYPE" 2>/dev/null || true)"
-if [ -n "$_tdir" ] && [ -f "$_tdir/_session-start.sh" ]; then
-  # shellcheck disable=SC1090
-  . "$_tdir/_session-start.sh"
-  agmsg_session_start
-else
-  agmsg_session_start_default
-fi
-
-# Read hook input JSON from stdin. The session id field name differs by vendor:
-# Claude Code emits snake_case "session_id"; Grok Build (and Cursor) emit
-# camelCase "sessionId". Try snake first (claude-code unaffected), then camel,
-# then the GROK_SESSION_ID env Grok injects into every hook.
+# Read hook input JSON from stdin BEFORE the type plug below runs (#1468):
+# stdin can only be read once, and a plug that needs a hook input field (e.g.
+# codex reading `source` to tell startup/resume/clear apart) has to see it
+# while it is still there. No plug reads it yet, so this move is order-only —
+# nothing downstream changes behavior. The session id field name differs by
+# vendor: Claude Code emits snake_case "session_id"; Grok Build (and Cursor)
+# emit camelCase "sessionId". Try snake first (claude-code unaffected), then
+# camel, then the GROK_SESSION_ID env Grok injects into every hook.
 INPUT=$(cat 2>/dev/null || true)
 SESSION_ID=""
 if [ -n "$INPUT" ]; then
@@ -93,6 +80,23 @@ fi
 [ -z "$SESSION_ID" ] && SESSION_ID="${GROK_SESSION_ID:-}"
 # Fallback so the instruction is still actionable even outside a hook flow.
 [ -z "$SESSION_ID" ] && SESSION_ID="unknown-$$"
+
+# Type-specific SessionStart behaviour (Template Method). A type may ship
+# scripts/drivers/types/<type>/_session-start.sh defining agmsg_session_start to override the
+# default no-op — codex uses it to hand the session off to the bridge. The plug
+# is sourced in this script's context so it sees PROJECT / RUN_DIR / SKILL_DIR /
+# PAIRS / INPUT / SESSION_ID and the helpers sourced above; it may exit 0
+# (codex does, having no Monitor tool) to skip the Monitor-directive path below.
+agmsg_session_start_default() { :; }
+
+_tdir="$(agmsg_type_dir "$TYPE" 2>/dev/null || true)"
+if [ -n "$_tdir" ] && [ -f "$_tdir/_session-start.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$_tdir/_session-start.sh"
+  agmsg_session_start
+else
+  agmsg_session_start_default
+fi
 
 # One where.sh call, rendered once, reused by every text-emitting exit below —
 # so a session always learns its own terminal driver and capabilities as the

@@ -139,6 +139,22 @@ gh release create app-vX.Y.Z --repo fujibee/agmsg --title "agmsg vX.Y.Z" \
 gh release upload app-latest --repo fujibee/agmsg --clobber \
   <same artifacts> latest.json
 ```
+The macOS build is universal (one `agmsg.app.tar.gz` for both Intel and Apple
+Silicon, since `build-macos` builds `--target universal-apple-darwin`), but
+`tauri-plugin-updater` looks up the *running* machine's own `platforms` key —
+`darwin-aarch64` on Apple Silicon, `darwin-x86_64` on Intel — and an Intel Mac
+with no `darwin-x86_64` entry silently never sees an update. `latest.json`
+must therefore carry **both** `darwin-aarch64` and `darwin-x86_64` keys,
+pointed at the exact same `url` and the exact same `signature` (copy the
+`darwin-aarch64` entry verbatim into `darwin-x86_64`, don't re-derive
+either value) — it's the same universal binary either way, so one signature
+covers both keys:
+```json
+"platforms": {
+  "darwin-aarch64": { "signature": "...", "url": ".../agmsg.app.tar.gz" },
+  "darwin-x86_64":  { "signature": "...", "url": ".../agmsg.app.tar.gz" }
+}
+```
 Once artifacts are up, update the Homebrew cask (`fujibee/homebrew-agmsg`):
 ```sh
 scripts/release/update-cask.sh X.Y.Z   # finds the .dmg on the release,

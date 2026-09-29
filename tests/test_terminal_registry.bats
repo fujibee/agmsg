@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 
-# Terminal driver axis (v1) — registry resolution, record scheme, and the three
+# Terminal driver axis (v1) — registry resolution, record scheme, and the four
 # drivers' ops, exercised against fake `tmux`/`herdr` binaries on PATH that
 # record their argv. No real tmux server is started and no real herdr pane is
 # touched (frame: the machine's tmux server must not start; live-CLI argv for
@@ -203,6 +203,262 @@ _fake_herdr_list_scalar_session() {
   printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent_session":"%s","pane_id":"wC:p4"}]}}'\''; exit 0; }\nexit 0\n' "$sid" > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
+# A herdr whose `agent list` has TWO well-formed entries (#1485): lets a test
+# put two DIFFERENT sessions on the map at once, each at its own pane, so a
+# claimant's session can be shown live at ONE specific pane while a different
+# seat's own session is live at another (or the same). Pass "" as a sid to
+# omit that entry entirely (session not among the live agents at all).
+_fake_herdr_list_two_sessions() {   # <sid1> <pane1> <sid2> <pane2>
+  local sid1="$1" pane1="$2" sid2="$3" pane2="$4" entries="" sep=""
+  if [ -n "$sid1" ]; then
+    entries="{\"agent\":\"a\",\"agent_session\":{\"agent\":\"a\",\"kind\":\"id\",\"source\":\"herdr:a\",\"value\":\"$sid1\"},\"pane_id\":\"$pane1\"}"
+    sep=","
+  fi
+  if [ -n "$sid2" ]; then
+    entries="$entries$sep{\"agent\":\"b\",\"agent_session\":{\"agent\":\"b\",\"kind\":\"id\",\"source\":\"herdr:b\",\"value\":\"$sid2\"},\"pane_id\":\"$pane2\"}"
+  fi
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[%s]}}'\''; exit 0; }\nexit 0\n' "$entries" > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+# A fake `orca` that logs argv and returns canned JSON for `terminal show` and
+# `terminal read`, shaped like the real 1.4.206 responses measured directly
+# against real orca instances.
+#   present  a live, connected terminal
+#   gone     a terminal that existed and was closed (positively confirmed:
+#            connected:false, orphaned:true, exitCause present)
+#   stale    a handle orca does not recognize at all — show/read answer
+#            ok:false, error code terminal_handle_stale, exit 1 (measured:
+#            this is the SAME shape orca gives for "never existed" as for
+#            "already closed" in the version measured, which is exactly why
+#            pane_state must never read this as `gone`)
+#   badjson  the CLI printed something that is not JSON at all
+#   runtime_unavailable  the Orca APP process is dead but its terminal daemon
+#            survives (measured 2026-09-23, feasibility doc Fourth pass (g)):
+#            every call still EXITS 0, but answers ok:false with this error
+#            code — the whole runtime is unreachable, not this one terminal.
+#   tail_empty/tail_missing/tail_null/tail_object/tail_scalar  read answers
+#            ok:true but `$.result.terminal.tail` is, respectively, a
+#            genuinely empty array (the only one of these that must SUCCEED,
+#            with empty stdout), absent, JSON null, an object, or a scalar
+#            string — review (#1439): ok:true alone does not prove tail is the
+#            array terminal_peek promises to emit; every non-array shape here
+#            must be rejected before json_each ever sees it.
+#   tail_bad_element  tail IS an array, but its second element is an object,
+#            not a string — review (#1439): json_type=array on the outer
+#            value does not prove every ELEMENT is a line of text.
+#   send_ok  `terminal send` answers ok:true AND result.send.accepted:true
+#            (poke success)
+#   send_fail  `terminal send` answers ok:false with an unrelated error code
+#            (poke's answered-but-failed path, distinct from runtime_unavailable)
+#   send_badjson  `terminal send` prints something that is not JSON at all
+#   send_accepted_false  ok:true but result.send.accepted:false — review
+#            (#1443): ok:true is only the envelope succeeding, not proof the
+#            bytes reached the pane; this must fail closed, not report ok
+#   send_accepted_missing  ok:true but result.send has no accepted key at all
+#            — same failure as send_accepted_false, different shape
+#   identity_present_draft_present  show has agentIdentity:"claude"; read has
+#            draft:"hello draft" — terminal_input_draft's success path
+#   identity_present_draft_absent  show has agentIdentity:"claude"; read's
+#            JSON has no draft key at all (idle or candidate-suggestion state)
+#   identity_present_draft_multiline  draft is "line one\nline two\n" (embeds
+#            a newline AND ends in one) — review (#1443): raw stdout +
+#            command substitution strips every trailing newline, so this
+#            exact value must survive only through base64 encoding
+#   identity_present_draft_null/object/number  draft IS present but its JSON
+#            type is not a string — review (#1443): _orca_json_field alone
+#            folds all of these to "", which would report a malformed
+#            response as a confirmed, decided empty box
+#   identity_absent  show answers ok:true but reports no agentIdentity field —
+#            terminal_input_draft must not call `read` at all in this case
+#   list_two/list_bad_element/list_malformed_handle/list_empty_handle/
+#   list_dup_handle/list_unreachable  terminal_enumerate_panes fixtures (#1441)
+#   create_fails/create_no_handle/create_bad_handle/create_proc_fails
+#   rename_fails/rename_proc_fails  terminal_spawn/terminal_name fixtures (#1440)
+#   close_proc_fails_but_gone  terminal_despawn fixture (#1440)
+_install_fake_orca() {
+  local mode="${1:-present}" show_json show_rc=0 read_json read_rc=0 \
+    list_json='{"ok":true,"result":{"terminals":[]}}' list_rc=0 \
+    send_json='{"ok":true,"result":{"send":{"accepted":true}}}' send_rc=0
+  local create_json='{"ok":true,"result":{"terminal":{"handle":"term_11111111-2222-3333-4444-555555555555"}}}' create_rc=0
+  local close_json='{"ok":true,"result":{"close":{"handle":"term_abc123","ptyKilled":true}}}' close_rc=0
+  local rename_json='{"ok":true,"result":{}}' rename_rc=0
+  case "$mode" in
+    present)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["orca visible line one","orca visible line two"]}}}'
+      ;;
+    gone)
+      show_json='{"ok":true,"result":{"terminal":{"connected":false,"writable":false,"orphaned":true,"tabId":"tab-1","exitCause":{"kind":"operator_close"}}}}'
+      read_json='{"ok":false,"error":{"code":"terminal_not_writable"}}'
+      read_rc=1
+      ;;
+    stale)
+      show_json='{"ok":false,"error":{"code":"terminal_handle_stale"}}'
+      show_rc=1
+      read_json='{"ok":false,"error":{"code":"terminal_handle_stale"}}'
+      read_rc=1
+      ;;
+    runtime_unavailable)
+      show_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
+      read_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
+      send_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
+      ;;
+    badjson)
+      show_json='not json at all'
+      read_json='not json at all'
+      ;;
+    tail_empty)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":[]}}}'
+      ;;
+    tail_missing)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{}}}'
+      ;;
+    tail_null)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":null}}}'
+      ;;
+    tail_object)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":{}}}}'
+      ;;
+    tail_scalar)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":"not an array"}}}'
+      ;;
+    tail_bad_element)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["a real line",{"x":1}]}}}'
+      ;;
+    list_two)
+      list_json='{"ok":true,"result":{"terminals":[{"handle":"term_11111111-1111-1111-1111-111111111111","executionHostId":"local"},{"handle":"term_22222222-2222-2222-2222-222222222222","executionHostId":"local"}]}}'
+      ;;
+    list_bad_element)
+      list_json='{"ok":true,"result":{"terminals":[{"handle":"term_11111111-1111-1111-1111-111111111111"},{"nope":true}]}}'
+      ;;
+    list_malformed_handle)
+      list_json='{"ok":true,"result":{"terminals":[{"handle":"term_11111111-1111-1111-1111-111111111111"},{"handle":"not-a-uuid"}]}}'
+      ;;
+    list_empty_handle)
+      list_json='{"ok":true,"result":{"terminals":[{"handle":"term_11111111-1111-1111-1111-111111111111"},{"handle":""}]}}'
+      ;;
+    list_dup_handle)
+      list_json='{"ok":true,"result":{"terminals":[{"handle":"term_11111111-1111-1111-1111-111111111111"},{"handle":"term_11111111-1111-1111-1111-111111111111"}]}}'
+      ;;
+    list_unreachable)
+      list_json='{"ok":false,"error":{"code":"runtime_unavailable"}}'
+      ;;
+    # Write-op modes below reuse `present`'s show/read (mostly irrelevant to
+    # what they test) and vary only the one JSON their own test cares about.
+    create_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":false,"error":{"code":"worktree_not_found"}}'
+      ;;
+    create_no_handle)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":true,"result":{"terminal":{}}}'
+      ;;
+    create_bad_handle)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":true,"result":{"terminal":{"handle":"term_bad\u0007handle"}}}'
+      ;;
+    create_proc_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      create_json='{"ok":false,"error":{"code":"internal_error"}}'
+      create_rc=1
+      ;;
+    rename_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      rename_json='{"ok":false,"error":{"code":"terminal_handle_stale"}}'
+      ;;
+    rename_proc_fails)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"writable":true,"tabId":"tab-1"}}}'
+      rename_json='{"ok":false,"error":{"code":"internal_error"}}'
+      rename_rc=1
+      ;;
+    close_proc_fails_but_gone)
+      # The design point being pinned: close's own exit status must NOT
+      # matter — despawn always proceeds to check pane_state afterward.
+      show_json='{"ok":true,"result":{"terminal":{"connected":false,"writable":false,"orphaned":true,"tabId":"tab-1","exitCause":{"kind":"operator_close"}}}}'
+      close_json='{"ok":false,"error":{"code":"internal_error"}}'
+      close_rc=1
+      ;;
+    send_ok)
+      send_json='{"ok":true,"result":{"send":{"accepted":true,"bytesWritten":5}}}'
+      ;;
+    send_fail)
+      send_json='{"ok":false,"error":{"code":"terminal_not_writable"}}'
+      ;;
+    send_badjson)
+      send_json='not json at all'
+      ;;
+    send_accepted_false)
+      send_json='{"ok":true,"result":{"send":{"accepted":false,"bytesWritten":0}}}'
+      ;;
+    send_accepted_missing)
+      send_json='{"ok":true,"result":{"send":{"bytesWritten":0}}}'
+      ;;
+    identity_present_draft_present)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":"hello draft"}}}'
+      ;;
+    identity_present_draft_absent)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯ Try \"fix lint errors\""]}}}'
+      ;;
+    identity_present_draft_multiline)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":"line one\nline two\n"}}}'
+      ;;
+    identity_present_draft_null)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":null}}}'
+      ;;
+    identity_present_draft_object)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":{}}}}'
+      ;;
+    identity_present_draft_number)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1","agentIdentity":"claude"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["❯"],"draft":42}}}'
+      ;;
+    identity_absent)
+      show_json='{"ok":true,"result":{"terminal":{"connected":true,"tabId":"tab-1"}}}'
+      read_json='{"ok":true,"result":{"terminal":{"tail":["should never be read"],"draft":"should never be seen"}}}'
+      ;;
+  esac
+  cat > "$FAKEBIN/orca" <<EOF
+#!/usr/bin/env bash
+{ printf 'orca'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = terminal ] && [ "\$2" = show ]; then
+  echo '$show_json'
+  exit $show_rc
+elif [ "\$1" = terminal ] && [ "\$2" = read ]; then
+  echo '$read_json'
+  exit $read_rc
+elif [ "\$1" = terminal ] && [ "\$2" = list ]; then
+  echo '$list_json'
+  exit $list_rc
+elif [ "\$1" = terminal ] && [ "\$2" = create ]; then
+  echo '$create_json'
+  exit $create_rc
+elif [ "\$1" = terminal ] && [ "\$2" = close ]; then
+  echo '$close_json'
+  exit $close_rc
+elif [ "\$1" = terminal ] && [ "\$2" = rename ]; then
+  echo '$rename_json'
+  exit $rename_rc
+elif [ "\$1" = terminal ] && [ "\$2" = send ]; then
+  echo '$send_json'
+  exit $send_rc
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/orca"
+  export PATH="$FAKEBIN:$PATH"
+}
 
 # --- resolution -------------------------------------------------------------
 
@@ -242,12 +498,71 @@ _fake_herdr_list_scalar_session() {
   [ "$output" = "$(printf 'herdr\t%s:wC:p4' "$HERDR_SOCKET_PATH")" ]
 }
 
+@test "self env asks registered drivers in nesting order and keeps unknown distinct from n/a" {
+  unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH TERM_PROGRAM ORCA_TERMINAL_HANDLE
+  [ -z "$(agmsg_terminal_self_env)" ] || return 1
+
+  export TERM_PROGRAM=Apple_Terminal
+  [ -z "$(agmsg_terminal_self_env)" ] || return 1
+
+  # Self-env order is independent of the resolver's global priorities (orca,
+  # herdr, tmux). A nested tmux environment remains the legacy first answer.
+  touch "$TEST_SKILL_DIR/herdr.sock"
+  export TMUX="/tmp/tmux-self,321,0" TMUX_PANE='%4'
+  export HERDR_ENV=1 HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock" HERDR_PANE_ID='w1:p2'
+  export TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE='term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "$(printf 'tmux\t/tmp/tmux-self:%%4\tpid=321')" ] || return 1
+
+  export TMUX='/tmp/tmux-self,not-a-pid,0'
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = 'unknown:tmux:tmux_pid_malformed' ] || return 1
+
+  unset TMUX TMUX_PANE
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:p2"$'\t'sock=*) ;; *) return 1 ;; esac
+
+  unset HERDR_PANE_ID
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = 'unknown:herdr:herdr_pane_id_unset' ] || return 1
+  export HERDR_PANE_ID='w1:p2'
+
+  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "$(printf 'orca\tterm_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tn/a:no_generation')" ] || return 1
+
+  # A trusted external hook with no self_env_order defaults last, even when
+  # its ordinary detection priority would put it first.
+  _install_external_terminal
+  local probe_dir="$SKILL_DIR/plugins/terminals/probe"
+  cat > "$probe_dir/terminal.conf" <<'EOF'
+name=probe
+priority=1
+backend=test probe
+capabilities=name
+EOF
+  printf 'terminal_self_env() { printf "probe-pane\\n"; }\n' >> "$probe_dir/ops.sh"
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "$(printf 'orca\tterm_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tn/a:no_generation')" ] || return 1
+
+  unset ORCA_TERMINAL_HANDLE
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = 'unknown:orca:orca_handle_unset_or_malformed' ]
+}
+
 @test "resolve: a trusted external manifest participates in every chooser (#1133)" {
   _install_fake_tmux
   _install_external_terminal
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%4"
 
-  [ "$(agmsg_terminal_candidates)" = "$(printf 'herdr\nprobe\ntmux\nplain')" ]
+  [ "$(agmsg_terminal_candidates)" = "$(printf 'orca\nherdr\nprobe\ntmux\nplain')" ]
   [ "$(agmsg_terminal_resolve_placement sess-x)" = "probe" ]
   [ "$(agmsg_terminal_resolve_name sess-x)" = "$(printf 'probe\tprobe-pane')" ]
   [ "$(_agmsg_terminal_resolve_by_label testteam alice)" = "$(printf 'probe\tprobe-pane')" ]
@@ -576,6 +891,29 @@ EOF
   grep -q '\[capture-pane\] \[-p\] \[-t\] \[%9\]' "$ARGV_LOG"
   : > "$ARGV_LOG"
   terminal_peek '%9' --lines 50 >/dev/null
+  grep -q '\[-S\] \[-50\]' "$ARGV_LOG"
+}
+
+# #1389: terminal_peek_styled now exists (previously tmux's own comment said
+# "unmeasured whether capture-pane -e would give the same dim-attribute
+# signal herdr's ansi read does" -- measured directly against real `claude`
+# and real `codex` in a throwaway tmux session: both come through with the
+# same ESC[2m...ESC[0m form). Pins the one thing that distinguishes it from
+# plain terminal_peek at the tmux-argv level -- the `-e` flag -- the same way
+# the test above pins terminal_peek's own argv shape. The #1051 ABI sweep
+# below (now that terminal_peek_styled is out of _TMUX_NO_ID_OPS) already
+# covers that it exists and honours the socket/bare-ref rules the same as
+# every other id-taking op; this test covers the one thing that sweep does
+# not: which flag actually reaches tmux.
+@test "tmux: peek_styled captures the pane WITH -e, unlike plain peek" {
+  _install_fake_tmux
+  agmsg_terminal_load tmux
+  run terminal_peek_styled '%9'
+  [ "$status" -eq 0 ]
+  grep -q 'line one' <<<"$output"
+  grep -q '\[capture-pane\] \[-e\] \[-p\] \[-t\] \[%9\]' "$ARGV_LOG"
+  : > "$ARGV_LOG"
+  terminal_peek_styled '%9' --lines 50 >/dev/null
   grep -q '\[-S\] \[-50\]' "$ARGV_LOG"
 }
 
@@ -1063,6 +1401,681 @@ _last_agent_rename_key() {
   [ "$k3" != "$k4" ]
 }
 
+# --- orca driver ops (fake orca argv; read-only in this release) ------------
+
+@test "orca: check ok when the orca binary is on PATH, missing_deps otherwise" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_check
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+
+  # A dedicated EMPTY directory, not "$PATH minus \$FAKEBIN": a real dev
+  # machine plausibly has orca on PATH somewhere else too, so removing only
+  # $FAKEBIN does not reliably reproduce "not found" (measured — it did not,
+  # on this machine).
+  local empty_path="$BATS_TEST_TMPDIR/empty-path"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_check
+  [ "$status" -eq 10 ]
+  [ "$output" = "$(printf 'AGMSG-DIRECTIVE: {"type":"install_deps","driver":"terminals/orca","reason":"orca not found"}\nmissing_deps')" ]
+}
+
+@test "orca: describe advertises exactly its read-only ceiling" {
+  agmsg_terminal_load orca
+  run terminal_describe
+  [ "$status" -eq 0 ]
+  # grep, not `[[ ]]` (#670): a non-last one cannot fail a bats test on macOS
+  # bash 3.2, and consistently avoiding it here means a later edit adding a
+  # line after these can't silently reintroduce that same class of bug.
+  grep -qF -- 'name=orca' <<< "$output"
+  grep -qF -- 'capabilities=peek where spawn despawn name' <<< "$output"
+}
+
+@test "orca: detect requires TERM_PROGRAM=Orca, prints the handle from the env" {
+  agmsg_terminal_load orca
+  unset TERM_PROGRAM ORCA_TERMINAL_HANDLE
+  run terminal_detect ""
+  [ "$status" -eq 1 ]
+
+  export TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE='term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba'
+  run terminal_detect ""
+  [ "$status" -eq 0 ]
+  [ "$output" = 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba' ]
+}
+
+@test "orca: bare refs and local locators split to the same handle and CLI target" {
+  # `refute`, not `! terminal_id_ok ...` (#670): a non-last `! cmd` cannot
+  # fail a bats test on any bash, and this file's own enforceable-assertions
+  # CI check caught exactly that here — every one of these would have stayed
+  # green even if terminal_id_ok wrongly accepted the bad input.
+  agmsg_terminal_load orca
+  local handle='term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba' halves
+  terminal_id_ok "$handle"
+  terminal_id_ok "local:$handle"
+  [ "$(agmsg_terminal_ref_qualify "orca:$handle")" = "orca:local:$handle" ]
+  [ "$(agmsg_terminal_ref_qualify "orca:local:$handle")" = "orca:local:$handle" ]
+  halves="$(terminal_id_split "$handle")"
+  [ "$halves" = "$(printf 'local\t%s' "$handle")" ]
+  halves="$(terminal_id_split "local:$handle")"
+  [ "$halves" = "$(printf 'local\t%s' "$handle")" ]
+  _agmsg_placement_split "orca:$handle"
+  [ "$_AGMSG_PS_TERM" = orca ]
+  [ "$_AGMSG_PS_ID" = "local:$handle" ]
+  _agmsg_placement_split "orca:local:$handle"
+  [ "$_AGMSG_PS_TERM" = orca ]
+  [ "$_AGMSG_PS_ID" = "local:$handle" ]
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  mkdir -p "$SKILL_DIR/teams/seatteam"
+  mkdir -p "$SKILL_DIR/run"
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  printf 'orca:local:%s\t/proj/PEER\tcodex\n' "$handle" > "$peer"
+  local claimant
+  claimant="$(_agmsg_placement_claimed_by "orca:$handle" seatteam mine)"
+  [ "$claimant" = seatteam__peer ]
+  printf 'orca:%s\t/proj/PEER\tcodex\n' "$handle" > "$peer"
+  claimant="$(_agmsg_placement_claimed_by "orca:local:$handle" seatteam mine)"
+  [ "$claimant" = seatteam__peer ]
+  _install_fake_orca present
+  run terminal_where "local:$handle"
+  [ "$status" -eq 0 ]
+  [ "$output" = tab-1 ]
+  grep -Fqx "orca [terminal] [show] [--terminal] [$handle] [--json]" "$ARGV_LOG"
+  refute grep -Fq "[--terminal] [local:$handle]" "$ARGV_LOG"
+  refute terminal_id_ok "remote:$handle"
+  refute terminal_id_ok 'term_abc123'
+  refute terminal_id_ok ''
+  refute terminal_id_ok 'not-a-handle'
+  # Control/whitespace bytes that would corrupt a tab-separated placement
+  # record (review, #1439) — every one must be refused, not just "no id at
+  # all".
+  refute terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tinjected')"
+  refute terminal_id_ok "$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\ninjected')"
+  refute terminal_id_ok 'term_ea11f227 ca2c-44b0-a3e6-75c62b9f20ba'
+  # Five non-empty hex groups is not enough on its own (review, #1439): a
+  # UUID's groups are fixed at 8-4-4-4-12, and without checking each group's
+  # own length this shape — five groups, wrong lengths — passed.
+  refute terminal_id_ok 'term_a-b-c-d-e'
+}
+
+@test "orca: detect refuses a malformed ORCA_TERMINAL_HANDLE — a tab/newline never reaches stdout" {
+  # Same authority as terminal_id_ok (review, #1439): without this, the
+  # registry's own "driver has no terminal_id_ok" fallback ACCEPTS any value,
+  # and a tab or newline smuggled into the env var would corrupt the
+  # tab-separated placement record terminal_detect's result gets written into.
+  agmsg_terminal_load orca
+  export TERM_PROGRAM=Orca
+  export ORCA_TERMINAL_HANDLE
+  ORCA_TERMINAL_HANDLE="$(printf 'term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba\tinjected')"
+  run terminal_detect ""
+  [ "$status" -eq 0 ]
+  local stdout_only
+  stdout_only="$(terminal_detect "" 2>/dev/null)"
+  [ -z "$stdout_only" ]
+}
+
+@test "orca: detect is present-but-unresolved when TERM_PROGRAM=Orca but the handle is unset" {
+  agmsg_terminal_load orca
+  export TERM_PROGRAM=Orca
+  unset ORCA_TERMINAL_HANDLE
+  # `run` merges stdout+stderr into $output (bats default), so the assertion
+  # is on the REASON reaching the caller, not on emptiness — stdout itself
+  # (checked separately, since terminal_detect's real contract is "empty
+  # stdout, reason on stderr") is confirmed via the stdout-only capture below.
+  run terminal_detect ""
+  [ "$status" -eq 0 ]
+  # grep, not a non-last `[[ ]]` (#670): the latter cannot fail a bats test
+  # on macOS bash 3.2 when it is not the test's own final statement.
+  grep -qF -- 'ORCA_TERMINAL_HANDLE is unset' <<< "$output"
+  local stdout_only
+  stdout_only="$(terminal_detect "" 2>/dev/null)"
+  [ -z "$stdout_only" ]
+}
+
+@test "orca: pane_state present/gone come from show's connected field, never from close" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_pane_state term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = present ]
+
+  _install_fake_orca gone
+  run terminal_pane_state term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = gone ]
+}
+
+@test "orca: pane_state on a stale/unrecognized handle is unknown, never gone (#1051-shaped)" {
+  # Measured (Third pass, 2026-09-23): orca 1.4.206 gives the SAME
+  # terminal_handle_stale shape for a handle that never existed as it once did
+  # (1.4.198) for one that was merely closed. A caller that read this as `gone`
+  # would delete a placement record on an ambiguous signal — exactly what the
+  # driver must not do.
+  _install_fake_orca stale
+  agmsg_terminal_load orca
+  run terminal_pane_state term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+}
+
+@test "orca: pane_state is unknown when orca is not on PATH or answers unparsable JSON" {
+  agmsg_terminal_load orca
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-pane-state"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_pane_state term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+
+  _install_fake_orca badjson
+  run terminal_pane_state term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+}
+
+@test "orca: where prints the tab id from show; unresolved is unknown, never a claim of gone" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_where term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = tab-1 ]
+
+  _install_fake_orca stale
+  run terminal_where term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+}
+
+@test "orca: peek reads via --screen and prints the rendered tail verbatim" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_peek term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'orca visible line one\norca visible line two')" ]
+  grep -qF -- '--screen' "$ARGV_LOG"
+  grep -qF -- '[term_abc123]' "$ARGV_LOG"
+}
+
+@test "orca: peek --lines maps to --limit, passed through unchanged" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_peek term_abc123 --lines 50
+  [ "$status" -eq 0 ]
+  grep -qF -- '[--limit] [50]' "$ARGV_LOG"
+}
+
+@test "orca: peek accepts a genuinely empty tail array as success, empty stdout" {
+  _install_fake_orca tail_empty
+  agmsg_terminal_load orca
+  run terminal_peek term_abc123
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "orca: peek is 12, never a false success, when tail is missing/null/object/scalar, or has a non-text element (#1439 review)" {
+  # ok:true alone does not prove `tail` is the array terminal_peek promises to
+  # emit. Missing/null would otherwise iterate to ZERO rows (indistinguishable
+  # from tail_empty's GENUINE empty pane, tested above); a scalar would
+  # iterate to ONE row holding that whole scalar as if it were real pane
+  # content; and json_type=array on the OUTER value does not prove every
+  # ELEMENT is text either — tail_bad_element is a real array whose second
+  # element is an object. All five must be rejected with 12, and — checked on
+  # stdout ALONE, since `run`'s $output merges the expected stderr reason in —
+  # never emit anything on stdout, especially not a non-text element's own
+  # JSON as if it were real pane content.
+  agmsg_terminal_load orca
+  local mode stdout_only rc
+
+  for mode in tail_missing tail_null tail_object tail_scalar tail_bad_element; do
+    _install_fake_orca "$mode"
+    rc=0
+    stdout_only="$(terminal_peek term_abc123 2>/dev/null)" || rc=$?
+    [ "$rc" -eq 12 ]
+    [ -z "$stdout_only" ]
+  done
+}
+
+@test "orca: peek is 10 when unreachable, 12 when answered but failed, never 13" {
+  agmsg_terminal_load orca
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-peek"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_peek term_abc123
+  [ "$status" -eq 10 ]
+
+  _install_fake_orca stale
+  run terminal_peek term_abc123
+  [ "$status" -eq 12 ]
+
+  _install_fake_orca badjson
+  run terminal_peek term_abc123
+  [ "$status" -eq 12 ]
+}
+
+@test "orca: runtime_unavailable (app dead, daemon alive) is 10 everywhere, not 12, not gone" {
+  # Measured 2026-09-23: killing the Orca APP while its terminal daemon
+  # survives leaves every `orca` call exiting 0 but answering ok:false
+  # with this code. Exit code alone is not evidence of success, and this
+  # specific code means the whole runtime is unreachable — not this one
+  # terminal being gone — so it must land on the SAME code as "not on PATH",
+  # never on gone/12.
+  _install_fake_orca runtime_unavailable
+  agmsg_terminal_load orca
+  run terminal_pane_state term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+
+  run terminal_where term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+
+  run terminal_peek term_abc123
+  [ "$status" -eq 10 ]
+
+  run terminal_poke term_abc123 hello
+  [ "$status" -eq 10 ]
+
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 10 ]
+  grep -q '^unknown:orca_unreachable$' <<<"$output"
+}
+
+@test "orca: arrange stays unsupported (13) — orca's CLI has no reordering verb at all" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_arrange term_abc123 place_below term_def456
+  [ "$status" -eq 13 ]
+  grep -q 'unsupported' <<<"$output"
+  # Never touched the fake orca binary — there is no call to make.
+  refute grep -q '\[rename\]' "$ARGV_LOG"
+}
+
+@test "orca: enumerate_panes lists every live handle under the one measured instance, and a payload it cannot parse is a named hole" {
+  _install_fake_orca list_two
+  agmsg_terminal_load orca
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'local\tterm_11111111-1111-1111-1111-111111111111\nlocal\tterm_22222222-2222-2222-2222-222222222222')" ]
+
+  # An entry missing its handle field fails the WHOLE enumeration, same
+  # discipline as terminal_peek's own tail-array validation: a driver that
+  # does not fully understand the payload must not silently report fewer
+  # panes than are really there.
+  _install_fake_orca list_bad_element
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '!\tlocal')" ]
+
+  # The runtime itself unreachable is the same named hole, not a crash.
+  _install_fake_orca list_unreachable
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '!\tlocal')" ]
+
+  # JSON TEXT IS NOT ENOUGH (#1441 review): a handle that is a text value but
+  # not this driver's own term_<uuid> grammar must fail the whole
+  # enumeration, not be printed through as a pane id or silently dropped
+  # while the other, real handle is reported as if the list were complete.
+  _install_fake_orca list_malformed_handle
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '!\tlocal')" ]
+
+  # An empty-string handle is JSON text too, and must fail the same way —
+  # not be silently skipped while the real handle beside it is reported.
+  _install_fake_orca list_empty_handle
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '!\tlocal')" ]
+
+  # The same handle listed twice is not a set of distinct live panes; this
+  # op must not report one pane as reachable through two different rows.
+  _install_fake_orca list_dup_handle
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '!\tlocal')" ]
+
+  # A genuinely empty terminal list is a real, valid answer -- empty stdout,
+  # rc 0 -- not the same as the named `!` hole an unreadable runtime gets
+  # (review: the validation loop's own heredoc supplies one empty line even
+  # when there is nothing to validate, and reading that as one malformed
+  # candidate wrongly turned a fine empty list into a false hole).
+  # `present`'s own default list_json is already `{"terminals":[]}`.
+  _install_fake_orca present
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "orca: pane_process_observe is not defined, and self-proof reports unsupported/driver_no_process_binding — never undetermined/pane_process_unreadable (#1441 review)" {
+  # orca's real show output never carries a pid field (measured live, the
+  # comment where this op would otherwise live) -- so defining it and always
+  # answering 12 would tell self-proof.sh the wrong kind of "no": 12 reads as
+  # undetermined/pane_process_unreadable, a TEMPORARY failure the caller
+  # keeps retrying. Leaving the op undefined instead reads as unsupported/
+  # driver_no_process_binding (rc 3), which self-proof.sh's own contract
+  # says stops the caller asking again -- the correct answer for a gap that
+  # is permanent, not transient.
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  refute declare -F terminal_pane_process_observe
+
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/lib/self-proof.sh"
+  run agmsg_self_proof testteam alice term_11111111-1111-1111-1111-111111111111
+  [ "$status" -eq 3 ]
+  [ "$output" = "$(printf 'unsupported\tdriver_no_process_binding')" ]
+}
+
+@test "orca: spawn creates via worktree path with boot as the initial command, and fails closed on every bad input" {
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_spawn alice /proj pane-v bash -lc boot
+  [ "$status" -eq 0 ]
+  [ "$output" = term_11111111-2222-3333-4444-555555555555 ]
+  grep -qF -- '[create]' "$ARGV_LOG"
+  grep -qF -- '[--worktree] [path:/proj]' "$ARGV_LOG"
+  grep -qF -- '[--title] [alice]' "$ARGV_LOG"
+  grep -qF -- '[--command] [bash -lc boot]' "$ARGV_LOG"
+
+  # An unknown target must fail, not silently default (same rule as tmux/herdr).
+  run terminal_spawn alice /proj bogus-target boot
+  [ "$status" -eq 13 ]
+  grep -q 'unsupported' <<<"$output"
+
+  # Unreachable, a failed create, and an ok:true create with no handle all
+  # fail the same way: 13, nothing to print.
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-spawn"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  _install_fake_orca create_fails
+  run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  _install_fake_orca create_no_handle
+  run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  # An ok:true response with a malformed handle (here: an embedded control
+  # byte) must not reach a placement record -- the same boundary #1439
+  # already closed for terminal_detect (review, #1440).
+  _install_fake_orca create_bad_handle
+  run terminal_spawn alice /proj window boot
+  [ "$status" -eq 13 ]
+
+  # The orca PROCESS itself exiting non-zero (not merely an ok:false JSON
+  # body) must still land on the named 13 failure, not abort the caller out
+  # from under a NON-conditional set -e (review, #1440: `json="$(orca ...)"`
+  # propagates a non-zero orca exit to this assignment's own status). Same
+  # proof shape as the herdr set -e test above: source ops.sh directly and
+  # call the function bare, not inside `$(...)` where errexit is masked.
+  _install_fake_orca create_proc_fails
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_spawn alice /proj window boot; echo UNREACHABLE'
+  [ "$status" -eq 13 ]
+  refute grep -q UNREACHABLE <<<"$output"
+}
+
+@test "orca: despawn closes then confirms gone via show — never trusts close's own return" {
+  # MEASURED (Third pass (d)): close's own success/error shape for an
+  # already-closed handle differs across orca versions — this is exactly why
+  # despawn is built to re-check through pane_state/show instead.
+  _install_fake_orca gone
+  agmsg_terminal_load orca
+  run terminal_despawn term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  grep -qF -- '[close]' "$ARGV_LOG"
+  grep -qF -- '[show]' "$ARGV_LOG"
+
+  # close reports success (ptyKilled:true in the default 'present' fixture)
+  # but the pane is still connected:true — despawn must not trust close alone.
+  _install_fake_orca present
+  run terminal_despawn term_abc123
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-despawn"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_despawn term_abc123
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  # The design point itself, proven under a NON-conditional set -e: close's
+  # own exit status (non-zero here) must not matter at all -- despawn always
+  # reaches the pane_state re-check afterward and reports success once THAT
+  # confirms gone (review, #1440).
+  _install_fake_orca close_proc_fails_but_gone
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_despawn term_abc123'
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+
+  # pane_state itself returns non-zero (10) for unknown -- the SAME errexit
+  # hazard on the very next line (review, #1440): `state="$(terminal_pane_state
+  # ...)"` must not abort the caller either, or despawn's own "anything else
+  # is 13" contract silently breaks for exactly the unknown case it names.
+  # 'stale' makes show answer ok:false, so pane_state is unknown/10.
+  _install_fake_orca stale
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_despawn term_abc123; echo UNREACHABLE'
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+  refute grep -q UNREACHABLE <<<"$output"
+}
+
+@test "orca: name renames via the tab title (team:name), mode makes no difference, and fails closed" {
+  # Single-name driver (only the TAB title `rename` controls, see README) —
+  # `mode` (key-only vs both) has nothing separate to skip, so both must
+  # produce the identical --title argument.
+  _install_fake_orca present
+  agmsg_terminal_load orca
+  run terminal_name term_abc123 team alice
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  grep -qF -- '[rename]' "$ARGV_LOG"
+  grep -qF -- '[--title] [team:alice]' "$ARGV_LOG"
+
+  : > "$ARGV_LOG"
+  run terminal_name term_abc123 team alice key
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  grep -qF -- '[--title] [team:alice]' "$ARGV_LOG"
+
+  _install_fake_orca rename_fails
+  run terminal_name term_abc123 team alice
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-name"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_name term_abc123 team alice
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+
+  # Same errexit hazard and proof shape as terminal_spawn's create call
+  # above (review, #1440): the orca PROCESS exiting non-zero must land on
+  # the named 13, not abort the caller out from under set -e.
+  _install_fake_orca rename_proc_fails
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/orca/ops.sh"; terminal_name term_abc123 team alice; echo UNREACHABLE'
+  [ "$status" -eq 13 ]
+  refute grep -q UNREACHABLE <<<"$output"
+}
+
+@test "orca: poke sends text and Enter via terminal send, argv shaped correctly" {
+  _install_fake_orca send_ok
+  agmsg_terminal_load orca
+  run terminal_poke term_abc123 "hello world"
+  [ "$status" -eq 0 ]
+  grep -q '^ok$' <<<"$output"
+  grep -qF -- '[terminal] [send] [--terminal] [term_abc123] [--text] [hello world] [--enter] [--json]' "$ARGV_LOG"
+}
+
+@test "orca: poke is 10 when unreachable (not on PATH, or runtime_unavailable), 12 when answered but failed, never 13" {
+  agmsg_terminal_load orca
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-poke"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_poke term_abc123 hi
+  [ "$status" -eq 10 ]
+  grep -q '^runtime_error$' <<<"$output"
+
+  _install_fake_orca runtime_unavailable
+  run terminal_poke term_abc123 hi
+  [ "$status" -eq 10 ]
+  grep -q '^runtime_error$' <<<"$output"
+
+  _install_fake_orca send_fail
+  run terminal_poke term_abc123 hi
+  [ "$status" -eq 12 ]
+  grep -q '^runtime_error$' <<<"$output"
+
+  _install_fake_orca send_badjson
+  run terminal_poke term_abc123 hi
+  [ "$status" -eq 12 ]
+  grep -q '^runtime_error$' <<<"$output"
+}
+
+@test "orca: poke is 12, never ok, when ok:true but result.send.accepted is false or missing (#1443 review)" {
+  agmsg_terminal_load orca
+  _install_fake_orca send_accepted_false
+  run terminal_poke term_abc123 hi
+  [ "$status" -eq 12 ]
+  grep -q '^runtime_error$' <<<"$output"
+
+  _install_fake_orca send_accepted_missing
+  run terminal_poke term_abc123 hi
+  [ "$status" -eq 12 ]
+  grep -q '^runtime_error$' <<<"$output"
+}
+
+@test "orca: input_draft is unknown/10 when show reports no agentIdentity, and never calls read" {
+  _install_fake_orca identity_absent
+  agmsg_terminal_load orca
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 10 ]
+  [ "$output" = "unknown:no_agent_identity" ]
+  refute grep -q '\[read\]' "$ARGV_LOG"
+}
+
+@test "orca: input_draft returns the exact draft text, base64-encoded, when agentIdentity is present" {
+  _install_fake_orca identity_present_draft_present
+  agmsg_terminal_load orca
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 0 ]
+  [ "$(base64 -d <<<"$output")" = "hello draft" ]
+}
+
+@test "orca: input_draft returns empty stdout (not unknown) when agentIdentity is present but draft's key is absent" {
+  _install_fake_orca identity_present_draft_absent
+  agmsg_terminal_load orca
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}
+
+@test "orca: input_draft preserves a trailing newline and embedded newlines exactly (#1443 review)" {
+  # Review (#1443): raw stdout + command substitution strips every trailing
+  # newline, so "line one\nline two\n" and "line one\nline two" would be
+  # indistinguishable without base64 -- this is the ONE contrast that would
+  # fail if the encoding were dropped.
+  _install_fake_orca identity_present_draft_multiline
+  agmsg_terminal_load orca
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 0 ]
+  local decoded
+  decoded="$(base64 -d <<<"$output"; printf x)"
+  [ "$decoded" = "$(printf 'line one\nline two\n'; printf x)" ]
+}
+
+@test "orca: input_draft is 12, never a confirmed-empty 0, when draft is present but not a string (#1443 review)" {
+  local mode
+  for mode in identity_present_draft_null identity_present_draft_object identity_present_draft_number; do
+    _install_fake_orca "$mode"
+    agmsg_terminal_load orca
+    run terminal_input_draft term_abc123
+    [ "$status" -eq 12 ] || { echo "$mode: status=$status output=$output"; return 1; }
+    grep -q 'was not text' <<<"$output" || { echo "$mode: expected a reason naming the bad type, got: $output"; return 1; }
+  done
+}
+
+@test "orca: input_draft is 12, never a leaked partial draft, when the extraction's own sqlite3 call fails (#1443 review round 2)" {
+  # Review round 2: "$(sqlite3 ...; printf x)" always exits 0 regardless of
+  # sqlite3's own status, so a real extraction failure would otherwise
+  # silently become a confirmed-empty 0. This fake sqlite3 passes every OTHER
+  # call through to the real binary (json_valid/json_bool/json_type checks
+  # earlier in the same function must keep working) and only fails, after
+  # emitting partial garbage, the one json_extract(...,draft) call.
+  _install_fake_orca identity_present_draft_present
+  agmsg_terminal_load orca
+  local real_sqlite3
+  real_sqlite3="$(command -v sqlite3)"
+  cat > "$FAKEBIN/sqlite3" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *json_extract*result.terminal.draft*)
+      printf 'PARTIAL-GARBAGE-MUST-NOT-LEAK'
+      exit 1
+      ;;
+  esac
+done
+exec "$real_sqlite3" "\$@"
+EOF
+  chmod +x "$FAKEBIN/sqlite3"
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 12 ]
+  refute grep -q 'PARTIAL-GARBAGE-MUST-NOT-LEAK' <<<"$output"
+}
+
+@test "orca: input_draft is 12, never a leaked draft, when base64-encoding itself fails (#1443 review round 2)" {
+  _install_fake_orca identity_present_draft_present
+  agmsg_terminal_load orca
+  cat > "$FAKEBIN/base64" <<'EOF'
+#!/usr/bin/env bash
+echo "fake base64: simulated failure" >&2
+exit 1
+EOF
+  chmod +x "$FAKEBIN/base64"
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 12 ]
+  refute grep -qi 'hello draft' <<<"$output"
+}
+
+@test "orca: input_draft is unknown/10 when show itself cannot be reached or answers ok:false" {
+  agmsg_terminal_load orca
+  local empty_path="$BATS_TEST_TMPDIR/empty-path-draft"
+  mkdir -p "$empty_path"
+  PATH="$empty_path" run terminal_input_draft term_abc123
+  [ "$status" -eq 10 ]
+  grep -q '^unknown:orca_unreachable$' <<<"$output"
+
+  _install_fake_orca stale
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 10 ]
+  grep -q '^unknown:orca_unreachable$' <<<"$output"
+}
+
+@test "orca: input_draft is 12, distinct from 10, when identity is confirmed but the draft read itself fails" {
+  _install_fake_orca identity_absent
+  agmsg_terminal_load orca
+  # Reuse identity_absent's show (has no agentIdentity) is the wrong fixture for
+  # this case; build a targeted one: agentIdentity present, but `read` itself
+  # is broken.
+  cat > "$FAKEBIN/orca" <<EOF
+#!/usr/bin/env bash
+{ printf 'orca'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = terminal ] && [ "\$2" = show ]; then
+  echo '{"ok":true,"result":{"terminal":{"connected":true,"agentIdentity":"claude"}}}'
+  exit 0
+elif [ "\$1" = terminal ] && [ "\$2" = read ]; then
+  echo 'not json at all'
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/orca"
+  run terminal_input_draft term_abc123
+  [ "$status" -eq 12 ]
+  refute grep -q "unknown:" <<< "$output"
+}
+
 # --- ABI completeness + structural clobber-proofing (#1014 review) -------
 
 @test "abi: every driver defines every required terminal_* function" {
@@ -1073,11 +2086,12 @@ _last_agent_rename_key() {
   agmsg_terminal_load plain
   agmsg_terminal_load tmux
   agmsg_terminal_load herdr
+  agmsg_terminal_load orca
 }
 
 @test "abi: capabilities= verbs are actually implemented by each driver" {
   local d cap fn
-  for d in plain tmux herdr; do
+  for d in plain tmux herdr orca; do
     ( agmsg_terminal_load "$d"
       for cap in $(agmsg_terminal_get "$d" capabilities); do
         fn="terminal_$cap"
@@ -2175,7 +3189,20 @@ _fake_herdr_list_anchored_plus() {
 # server's own socket and emits every row socket-qualified -- and that is checked
 # where it belongs, in test_sweep_enumeration.bats, against a fake tmux whose
 # per-socket answers the test writes.
-_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes"
+# terminal_peek_styled (#1389): tmux implements it now (`capture-pane -e`,
+# measured live against real `claude` and real `codex` to give the same SGR
+# dim signal herdr's `pane read --format ansi` does), so it is an ordinary
+# id-taking op and belongs in the sweep below like terminal_peek, not in
+# this exclusion list -- removed from here on purpose.
+# terminal_input_draft is different in kind from the rest of this list: it DOES
+# take a pane id and DOES address a server, but tmux/herdr solve "is there a
+# real draft in the box" a different way already (peek_styled + a two-snapshot
+# screen diff, in scripts/lib/safe-poke.sh) and are staying on that method —
+# this hook exists only because orca has no styled-screen read to build that on.
+# So it is excluded here not because it has no id/server, but because tmux
+# genuinely does not implement it, by design, this release; wiring it in is a
+# separate, later decision, not an oversight this sweep should flag.
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split terminal_self_env terminal_epoch"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
 _tmux_op_args() {
@@ -2403,7 +3430,7 @@ _tmux_op_args() {
   # also shows the scan distinguishes panes rather than merely finding files.
   local peer; peer="$(agmsg_spawn_path seatteam elsewhere)"
   mkdir -p "$(dirname "$peer")"
-  printf 'tmux:/tmp/fake:%%OTHER\t/proj/PEER\tclaude-code\n' > "$peer"
+  printf 'tmux:/tmp/fake:%%2\t/proj/PEER\tclaude-code\n' > "$peer"
 
   local mine; mine="$(agmsg_spawn_path seatteam writer)"
   run agmsg_terminal_name_self "" seatteam writer /proj/MINE claude-code record
@@ -2539,8 +3566,8 @@ _tmux_op_args() {
   # inline (no fork per scanned record). Two grammars for one format drift; this
   # pins them together on the bare legacy id, the scheme without a socket, the
   # full tmux form, and herdr (whose ids contain a colon that is NOT a socket).
-  local ref term id sock
-  for ref in '%7' '@3' 'tmux:%7' 'tmux:/tmp/s:%7' 'tmux:/tmp/with:colon:%7' 'herdr:w1:pB' 'plain:-'; do
+  local ref term id sock halves instance pane
+  for ref in '%7' '@3' 'tmux:%7' 'tmux:/tmp/s:%7' 'tmux:/tmp/with:colon:%7' 'herdr:w1:pB' 'herdr:v2:/run/a%3Ab.sock:w1:pB' 'plain:-' 'orca:term_11111111-2222-3333-4444-555555555555'; do
     _agmsg_placement_split "$ref" || { echo "FAIL: split refused $ref"; return 1; }
     term="$(agmsg_terminal_ref_terminal "$ref")" || { echo "FAIL: registry refused $ref"; return 1; }
     id="$(agmsg_terminal_ref_id "$ref")"
@@ -2548,13 +3575,23 @@ _tmux_op_args() {
     case "$term" in
       tmux) sock="${id%:*}"; [ "$sock" = "$id" ] && sock=""; id="${id##*:}"
             [ "$_AGMSG_PS_SOCK" = "$sock" ] || { echo "FAIL: $ref sock $_AGMSG_PS_SOCK vs $sock"; return 1; } ;;
-      *)    [ -z "$_AGMSG_PS_SOCK" ] || { echo "FAIL: $ref has a socket on $term"; return 1; } ;;
+      *)    [ -z "$_AGMSG_PS_SOCK" ] || { echo "FAIL: $ref has a socket on $term"; return 1; }; sock="" ;;
     esac
+    if halves="$(_agmsg_terminal_id_split "$term" "$id")"; then
+      instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+      if [ -z "$sock" ] && [ "$id" = "$pane" ]; then id="$instance:$pane"; fi
+    fi
     [ "$_AGMSG_PS_ID" = "$id" ] || { echo "FAIL: $ref id $_AGMSG_PS_ID vs $id"; return 1; }
   done
-  # And an unknown scheme is refused by both.
+  # And an unknown scheme is refused by all three readers.
   refute _agmsg_placement_split 'bogus:thing'
   refute agmsg_terminal_ref_terminal 'bogus:thing'
+  refute agmsg_terminal_ref_id 'bogus:thing'
+  # A registered generic driver still owns its id grammar; this malformed
+  # handle must not become readable just because the scheme is recognized.
+  refute agmsg_terminal_ref_terminal 'orca:term_not-a-uuid'
+  refute agmsg_terminal_ref_id 'orca:term_not-a-uuid'
+  refute _agmsg_placement_split 'orca:term_not-a-uuid'
 }
 
 # --- #1114 follow-up (review): "this seat" is exact, and unreadable is a claim ------
@@ -2621,6 +3658,17 @@ _tmux_op_args() {
   [ "$status" -eq 0 ]
   grep -q 'seatteam__blank' <<<"$output"
   refute test -e "$mine"
+
+  # A registered driver with a malformed id is still unreadable, not a
+  # different pane. Otherwise a valid self ref could pass the guard beside a
+  # peer record that claims an unparseable handle.
+  rm -f "$peer"
+  peer="$(agmsg_spawn_path seatteam invalidorca)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'orca:term_not-a-uuid\t/proj/PEER\tclaude-code\n' > "$peer"
+  run _agmsg_placement_claimed_by 'orca:term_11111111-2222-3333-4444-555555555555' seatteam careful
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = 'seatteam__invalidorca' ]
 }
 
 @test "placement guard: this seat's OWN ref unreadable as a pane is undecidable -> neither named nor recorded (#1114 review)" {
@@ -2679,6 +3727,69 @@ _tmux_op_args() {
   run agmsg_terminal_name_self "" seatteam alice /proj/MINE claude-code record
   grep -q "recorded as seatteam__bob's" <<<"$output"
   refute grep -q 'remove run/spawn' <<<"$output"
+}
+
+@test "placement guard: a claimant whose session is confirmed gone lets a live seat take the pane; a claimant still there still refuses (#1485)" {
+  # elder's Codex session ended; resumer's fresh session now sits in the same
+  # herdr pane. elder's spawn record still claims it (first-writer-wins,
+  # #1114), but elder's own role-session record names the session that used
+  # to hold it.
+  export HERDR_ENV=1 HERDR_PANE_ID='wC:p4'
+  unset TMUX TMUX_PANE
+  export AGMSG_TERMINAL_DRIVER=herdr
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+
+  local rival; rival="$(agmsg_spawn_path seatteam elder)"
+  mkdir -p "$(dirname "$rival")"
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tcodex\n' "$HERDR_SOCKET_PATH" > "$rival"
+  agmsg_role_session_record seatteam elder old-sid /proj/OLD codex
+  agmsg_role_session_mark_named seatteam elder "herdr:$HERDR_SOCKET_PATH:wC:p4" 1
+
+  local mine; mine="$(agmsg_spawn_path seatteam resumer)"
+
+  # CONTROL: elder's session is confirmed STILL live in this exact pane ->
+  # refuse, exactly as before this existed. named_ref is untouched.
+  _fake_herdr_list_two_sessions old-sid wC:p4 my-sid wC:p4
+  run agmsg_terminal_name_self "my-sid" seatteam resumer /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  grep -q "recorded as seatteam__elder's" <<<"$output"
+  refute test -e "$mine"
+  [ "$(agmsg_role_session_named seatteam elder)" = "$(printf 'herdr:%s:wC:p4\t1' "$HERDR_SOCKET_PATH")" ]
+
+  # TAKEOVER: elder's session is gone (not among the live agents at all); this
+  # seat's OWN session is confirmed live in the disputed pane -> take it over,
+  # and drop elder's now-unbacked naming mark. elder's OTHER fields (its own
+  # registration) are untouched.
+  _fake_herdr_list_two_sessions "" "" my-sid wC:p4
+  run agmsg_terminal_name_self "my-sid" seatteam resumer /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  refute grep -q 'did not name or record' <<<"$output"
+  grep -q "^herdr:$HERDR_SOCKET_PATH:wC:p4	/proj/MINE	codex" "$mine"
+  [ -z "$(agmsg_role_session_named seatteam elder)" ]
+  [ "$(agmsg_role_session_get seatteam elder session)" = old-sid ]
+
+  # COLLIDING PAIR (#1023/#1482 review): team "a__b" agent "c" and team "a"
+  # agent "b__c" both spell the legacy suffix "a__b__c" -- neither name can be
+  # split out of it. A rival record under that suffix must refuse even though
+  # its (unrelated) role-session file at the SAME suffix names a session that
+  # is, in fact, gone: reading it anyway would be reading (and clearing the
+  # named_ref of) a THIRD pair's record, chosen by a guess, not a decided pane.
+  # elder's own (already-stale) record is removed first so it is not the one
+  # the claim scan happens to find at this same pane.
+  rm -f "$rival"
+  local ambiguous; ambiguous="$(agmsg_spawn_path a__b c)"
+  [ "$ambiguous" = "$(agmsg_spawn_path a b__c)" ]   # the collision itself, pinned
+  mkdir -p "$(dirname "$ambiguous")"
+  printf 'herdr:%s:wC:p4\t/proj/GHOST\tcodex\n' "$HERDR_SOCKET_PATH" > "$ambiguous"
+  local ghost_role; ghost_role="$(dirname "$ambiguous")/role-session.${ambiguous##*/spawn.}"
+  printf 'session=ghost-sid\nname=x\nteam=x\nagent=x\ntype=codex\nproject=/proj/GHOST\n' > "$ghost_role"
+
+  _fake_herdr_list_two_sessions "" "" my-sid wC:p4   # ghost-sid: gone; my-sid: here
+  run agmsg_terminal_name_self "my-sid" seatteam resumer /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  grep -q "recorded as a__b__c's" <<<"$output"
+  cmp -s "$ghost_role" <(printf 'session=ghost-sid\nname=x\nteam=x\nagent=x\ntype=codex\nproject=/proj/GHOST\n')
 }
 
 # --- #1112: a seat identifies its own pane by its LABEL ------------------------

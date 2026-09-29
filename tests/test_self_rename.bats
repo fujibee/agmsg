@@ -45,24 +45,32 @@ setup() {
 teardown() { teardown_test_env; }
 
 # A fake tmux that logs argv, answers the title query with $FAKE_TITLE, and takes
-# send-keys (the poke) as a logged no-op.
+# send-keys (the poke) as a logged no-op. capture-pane answers a genuinely
+# EMPTY Claude Code input box (#1384: agmsg_safe_poke's own input-box check
+# now runs ahead of every poke here too, same shape as
+# test_peek_poke.bats's _install_fake_tmux_empty_box -- without it, the box
+# cannot be located at all and every poke in this file refuses).
 _install_fake_tmux() {
-  cat > "$FAKEBIN/tmux" <<EOF
-#!/usr/bin/env bash
-{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
-# real tmux takes an optional leading -S <socket>, so the subcommand is NOT
-# always \$1: scan the args for it and for the pane after -t.
-prev=""; pane=""; is_dm=0
-for a in "\$@"; do
-  [ "\$prev" = "-t" ] && pane="\$a"
-  [ "\$a" = display-message ] && is_dm=1
-  prev="\$a"
-done
-# display-message answers "<pane_id>|<title>"; terminal_team_observe co-observes
-# the id, so it must echo the queried pane back verbatim.
-[ "\$is_dm" = 1 ] && printf '%s|%s\n' "\$pane" "\${FAKE_TITLE:-unknown}"
-exit 0
-EOF
+  local rule
+  rule="$(printf '─%.0s' $(seq 1 60))"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '{ printf '\''tmux'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\n' "$ARGV_LOG"
+    printf '# real tmux takes an optional leading -S <socket>, so the subcommand is NOT\n'
+    printf '# always $1: scan the args for it and for the pane after -t.\n'
+    printf 'prev=""; pane=""; is_dm=0; is_cap=0\n'
+    printf 'for a in "$@"; do\n'
+    printf '  [ "$prev" = "-t" ] && pane="$a"\n'
+    printf '  [ "$a" = display-message ] && is_dm=1\n'
+    printf '  [ "$a" = capture-pane ] && is_cap=1\n'
+    printf '  prev="$a"\n'
+    printf 'done\n'
+    printf '# display-message answers "<pane_id>|<title>"; terminal_team_observe co-observes\n'
+    printf '# the id, so it must echo the queried pane back verbatim.\n'
+    printf '[ "$is_dm" = 1 ] && printf '\''%%s|%%s\\n'\'' "$pane" "${FAKE_TITLE:-unknown}"\n'
+    printf "[ \"\$is_cap\" = 1 ] && printf '%%s\\\\n' '%s testteam-alice ─' '❯' '%s'\n" "$rule" "$rule"
+    printf 'exit 0\n'
+  } > "$FAKEBIN/tmux"
   chmod +x "$FAKEBIN/tmux"; export PATH="$FAKEBIN:$PATH"
 }
 
@@ -203,6 +211,33 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   [ "$(agmsg_cli_session_observed codex '' wA:p1)" = 'unknown:name_malformed' ]
 }
 
+# --- codex self-observation: session_index.jsonl, not the screen (#1386 continuation)
+# self-rename.sh's OWN observation of itself no longer depends on the "Thread
+# name:" header (which scrolls away for any established session, per every
+# "unknown" case above) -- it reads $CODEX_THREAD_ID and looks it up in
+# session_index.jsonl instead, via session_name_self_source. terminal_peek is
+# deliberately given no usable header at all here: if the dispatcher fell
+# through to the screen path this would read as unknown:name_not_visible,
+# same as the tests above, so a name coming back at all proves it never
+# touched the screen. The two valid entries sharing one id cover
+# session_index's own append-only shape (the newer updated_at line must win),
+# and the malformed line between them (review) covers a write caught
+# mid-append: it must be skipped, not abort the lookup before the correct
+# newest line is even reached.
+@test "codex self-observation reads the current name from session_index.jsonl via CODEX_THREAD_ID, not the screen (#1386)" {
+  source "$SKILL_DIR/scripts/lib/codex-session-index.sh"
+  export CODEX_THREAD_ID='01a0test-thread-id-0001'
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codexhome"
+  mkdir -p "$CODEX_HOME"
+  {
+    printf '{"id":"%s","thread_name":"old-name","updated_at":"2026-01-01T00:00:00.000000Z"}\n' "$CODEX_THREAD_ID"
+    printf '{"id":"%s","thread_name":"truncated-mid-writ\n' "$CODEX_THREAD_ID"
+    printf '{"id":"%s","thread_name":"team-alice","updated_at":"2026-01-02T00:00:00.000000Z"}\n' "$CODEX_THREAD_ID"
+  } > "$CODEX_HOME/session_index.jsonl"
+  terminal_peek() { printf 'no header of any kind here\n'; }
+  [ "$(_agmsg_self_rename_observed codex '' wA:p1)" = 'team-alice' ]
+}
+
 @test "the pane the environment names may belong to ANOTHER seat's placement record -- never poke it, never mark it (#1112)" {
   # Measured live (#1112): a seat whose own label was broken resolved, through
   # the same inherited environment every codex seat under a shared app-server
@@ -281,6 +316,15 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   agmsg_self_rename_on_action team alice claude-code
   refute grep -q '\[send-keys\]' "$ARGV_LOG"
   [ "$(_mark team alice | cut -f3)" = skipped:unproved:unsupported ]
+
+  # The driver reports an unidentifiable Orca environment as unknown. That is
+  # not a pane candidate, so it cannot reach a poke even when proof is absent.
+  : > "$ARGV_LOG"
+  unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH ORCA_TERMINAL_HANDLE
+  export TERM_PROGRAM=Orca
+  agmsg_self_rename_on_action team alice claude-code
+  refute grep -q '\[send-keys\]' "$ARGV_LOG"
+  [ "$(_mark team alice | cut -f3)" = skipped:unproved:unsupported ]
 }
 
 @test "the proof says proved -- pokes exactly as before the gate existed (#1206 control)" {
@@ -320,4 +364,3 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   refute grep -q '\[send-keys\]' "$ARGV_LOG"
   [ "$(_mark team alice | cut -f3)" = skipped:unproved:locator_mismatch ]
 }
-

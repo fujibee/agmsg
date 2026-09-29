@@ -21,6 +21,7 @@ import {
   AgentModal,
   AppUserModal,
   ConfirmModal,
+  DeleteTeamModal,
   MAX_TERMINAL_FONT_SIZE,
   MIN_TERMINAL_FONT_SIZE,
   NewTeamModal,
@@ -153,6 +154,36 @@ export function shellSplitStillValid(
   return windows.some((w) => w.id === windowId && w.team === requestedTeam);
 }
 
+// A window's `team` never changes after creation (see Window's own doc) —
+// EXCEPT that renaming the team itself must repoint every one of its
+// existing tabs at the new name, or the sidebar (which only ever renders
+// `w.team === team` for the CURRENT, now-renamed team) hides them: the PTYs
+// stay alive, but their tabs vanish from the tab bar with no way back to
+// them short of a restart. Pure so onRenameTeam's rekeying is
+// unit-testable without mounting the app or a real Tauri backend.
+export function renameTeamInWindows<T extends Pick<Window, "team">>(
+  windows: readonly T[],
+  oldTeam: string,
+  newTeam: string,
+): T[] {
+  return windows.map((w) => (w.team === oldTeam ? { ...w, team: newTeam } : w));
+}
+
+// Moves one team-keyed entry to its new key, leaving every other entry
+// untouched — used for lastActiveTabByTeam (below) and any other bit of
+// state keyed by team name a rename needs to follow. A no-op (same
+// reference back) when oldTeam never had an entry, so callers can apply it
+// unconditionally without a guard of their own.
+export function renameTeamKey<T>(
+  byTeam: Readonly<Record<string, T>>,
+  oldTeam: string,
+  newTeam: string,
+): Record<string, T> {
+  if (!(oldTeam in byTeam)) return byTeam;
+  const { [oldTeam]: value, ...rest } = byTeam;
+  return { ...rest, [newTeam]: value as T };
+}
+
 // C0 control characters (\u0000-\u001f) and DEL (\u007f) — legal in a
 // macOS/Linux filename, but this string is about to be written straight
 // into a PTY as literal input. A newline in a filename would submit
@@ -210,6 +241,24 @@ export function resolveFileDropTarget(
   return activeLeaves[0] ?? null;
 }
 
+// Which tab a sidebar agent click should spawn into: the tab being viewed
+// right now, as an extra column added to its right edge (same
+// insertAsNewLeaf a spawnMember targetWindowId already does, same as the
+// right-click "Open in existing tab" path) — but ONLY when that tab is a
+// pane tab belonging to the CURRENT team. Anything else — the team room
+// (`active === "room"`, the one non-window sentinel `active` holds), a chat
+// view, or a pane tab left open under another team — opens a new tab
+// instead, same as before. Returns the targetWindowId to pass straight to
+// spawnMember (undefined = new tab).
+export function spawnTargetWindowId(
+  windows: ReadonlyArray<Pick<Window, "id" | "team">>,
+  activeWindowId: string,
+  currentTeam: string,
+): string | undefined {
+  const activeWindow = windows.find((w) => w.id === activeWindowId);
+  return activeWindow && activeWindow.team === currentTeam ? activeWindowId : undefined;
+}
+
 // The pane cell (if any) at a given viewport point — shared by the internal
 // pointer-drag hit-test and the external file-drop handler. Not unit-
 // testable in isolation (elementFromPoint needs real layout, which jsdom
@@ -228,6 +277,9 @@ type Modal =
   | { kind: "appuser"; auto: boolean }
   | { kind: "rename"; current: string }
   | { kind: "leave"; name: string }
+  | { kind: "renameTeam"; current: string }
+  | { kind: "deleteTeam"; name: string }
+  | { kind: "purgeMessages"; name: string }
   | { kind: "settings" }
   | { kind: "closeWindow"; windowId: string }
   | { kind: "closePane"; paneId: string }
@@ -292,7 +344,34 @@ export function shouldSuppressClickAfterDrag(dragFinish: DragFinishInfo, paneId:
   return dragFinish !== null && dragFinish.paneId === paneId && now - dragFinish.finishedAt < CLICK_SUPPRESS_WINDOW_MS;
 }
 // A spawnable agent type discovered from agmsg's type registry.
-export type AgentType = { name: string; cli: string; options: string[] };
+export type AgentType = {
+  name: string;
+  cli: string;
+  options: string[];
+  cmd_prefix: string | null;
+  prompt_arg: string | null;
+};
+
+// The trailing spawn args that hand a freshly launched CLI its identity:
+// the actas prompt (`<cmd_prefix><cmdName> actas <name>`, cmd_prefix
+// defaulting to "/"), wrapped for a type that requires it as a named flag's
+// VALUE rather than a bare positional (`prompt_arg`) — e.g. opencode needs
+// `--prompt '$agmsg actas NAME'`, copilot needs `--interactive "/agmsg actas
+// NAME"`. Mirrors scripts/lib/boot-command.sh's agmsg_actas_prompt plus the
+// prompt half of agmsg_role_cli_args exactly, which spawn.sh already uses —
+// this used to hardcode "/<cmdName> actas <name>" for every type regardless
+// of its manifest, so opencode/antigravity/codex/gemini (cmd_prefix "$") and
+// copilot/opencode/antigravity (prompt_arg) all launched with the wrong
+// shape (#1007, #346).
+export function actasSpawnArgs(
+  cmdName: string,
+  name: string,
+  cmdPrefix?: string | null,
+  promptArg?: string | null,
+): string[] {
+  const prompt = `${cmdPrefix || "/"}${cmdName} actas ${name}`;
+  return promptArg ? [promptArg, prompt] : [prompt];
+}
 
 // Whether the outdated-CLI banner should render. A pure function (rather
 // than an inline JSX condition) purely so it's unit-testable — pinning down
@@ -305,6 +384,79 @@ export function shouldShowOutdatedBanner<T>(
   dismissed: boolean,
 ): coreOutdated is NonNullable<T> {
   return coreOutdated != null && !updatingCore && !dismissed;
+}
+
+// Which agmsg script the sidebar's team context menu (#1479) runs for each
+// action, and with what arguments — extracted as a pure function so the
+// menu-to-command wiring is unit-testable without mounting the app or a real
+// Tauri backend. Argument keys are camelCase to match how Tauri maps them
+// onto each command's snake_case Rust parameters.
+export type TeamMenuAction = "renameTeam" | "deleteTeam" | "deleteTeamForce" | "purgeMessages";
+export function teamActionInvocation(
+  action: TeamMenuAction,
+  team: string,
+  opts?: { nextName?: string; purgeMessages?: boolean },
+): { command: string; args: Record<string, string | boolean> } {
+  switch (action) {
+    case "renameTeam":
+      return { command: "agmsg_rename_team", args: { oldTeam: team, newTeam: opts?.nextName ?? "" } };
+    case "deleteTeam":
+      return { command: "agmsg_delete_team", args: { team } };
+    // #1493: force-removes remaining members (an app-created team always has
+    // at least its app-user) before deleting. Not yet on main as of this
+    // writing (core branch fix-1493-delete-force, pending final review) —
+    // the calling shape follows the confirmed core design and needs no further
+    // reconciling once it lands.
+    case "deleteTeamForce":
+      return {
+        command: "agmsg_delete_team_force",
+        args: { team, purgeMessages: opts?.purgeMessages ?? false },
+      };
+    case "purgeMessages":
+      return { command: "agmsg_purge_team_messages", args: { team } };
+  }
+}
+
+// Whether a modal-closing call that fires after its own async action
+// settles should actually null out the modal slot — false when something
+// else already put a DIFFERENT modal there in the meantime. Two ways that
+// happens: (a) the action's own side effect swaps modals while still in
+// flight (deleting the last team reopens the first-run "create a team"
+// modal from inside onDeleteTeam/settleActiveTeam), or (b) the user closes
+// this modal early — closing no longer waits for the action to finish
+// (#1484 review, round 2: run_script has no timeout) — and opens an
+// unrelated one before the original action's own completion handler runs.
+// Either way, a stale, unconditional close would clobber whatever is
+// showing now. `current` is read as the latest pending state via a
+// functional setModal updater, not a stale closure, so this always sees
+// what's actually there.
+export function shouldClearModalOnClose(current: { kind: string } | null, ownKind: string): boolean {
+  return current?.kind === ownKind;
+}
+
+// A completion notice (#1484 review, round 3: rename/delete-team/delete-
+// messages gave no feedback at all once their modal had already closed;
+// round 6: shares the same top-of-window .notice-banner the startup
+// install/update notices use, not a separate floating toast). Each builder
+// returns the i18n key + interpolation vars rather than a rendered string,
+// so the wording itself stays in the i18n files and this stays testable
+// without a translation context. `pushCompletionNotice` (below, inside App)
+// does the actual t() call at push time.
+export type ToastSpec = { key: string; vars?: Record<string, string | number> };
+export function renameTeamToast(from: string, to: string): ToastSpec {
+  return { key: "toast.renameTeam", vars: { from, to } };
+}
+export function deleteTeamToast(team: string): ToastSpec {
+  return { key: "toast.deleteTeam", vars: { team } };
+}
+export function deleteTeamForceToast(team: string, removedCount: number): ToastSpec {
+  return { key: "toast.deleteTeamForce", vars: { team, count: removedCount } };
+}
+export function purgeMessagesToast(team: string): ToastSpec {
+  return { key: "toast.purgeMessages", vars: { team } };
+}
+export function actionFailedToast(reason: string): ToastSpec {
+  return { key: "toast.actionFailed", vars: { reason } };
 }
 
 export default function App() {
@@ -352,6 +504,34 @@ export default function App() {
   const [target, setTarget] = useState<string>("");
   const [draft, setDraft] = useState<string>("");
   const [modal, setModal] = useState<Modal>(null);
+  // Rename/delete-team/delete-messages completion notice — same
+  // .notice-banner the startup install/update notices use (#1484 review,
+  // round 6), not a separate floating toast. `success` auto-dismisses after
+  // a few seconds (still closeable early); `error` (only ever pushed when
+  // the dialog reporting it was already closed — see onTeamActionDismissedFailure
+  // below) stays until closed by hand. `id` disambiguates its own
+  // auto-dismiss timer from a NEWER notice that has already replaced it by
+  // the time that timer fires.
+  const [completionNotice, setCompletionNotice] = useState<{
+    id: number;
+    message: string;
+    kind: "success" | "error";
+  } | null>(null);
+  const completionNoticeIdRef = useRef(0);
+  const pushCompletionNotice = useCallback(
+    (kind: "success" | "error", spec: ToastSpec) => {
+      const id = ++completionNoticeIdRef.current;
+      setCompletionNotice({ id, message: t(spec.key, spec.vars), kind });
+    },
+    [t],
+  );
+  useEffect(() => {
+    if (!completionNotice || completionNotice.kind !== "success") return;
+    const timer = window.setTimeout(() => {
+      setCompletionNotice((cur) => (cur?.id === completionNotice.id ? null : cur));
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [completionNotice]);
   const [newMenu, setNewMenu] = useState(false);
   const [cmdName, setCmdName] = useState("agmsg");
   const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
@@ -445,6 +625,9 @@ export default function App() {
   const [roomMenu, setRoomMenu] = useState<{ x: number; y: number } | null>(null);
   // Same idea, over the app-user chat pane's own header: { x, y }.
   const [chatMenu, setChatMenu] = useState<{ x: number; y: number } | null>(null);
+  // Right-click context menu over a sidebar team row: { name, x, y }. `name`
+  // is whichever team was right-clicked, not necessarily the active `team`.
+  const [teamMenu, setTeamMenu] = useState<{ name: string; x: number; y: number } | null>(null);
 
   // Closes every context/dropdown menu (opening a second one while a
   // first is still open used to stack both — right-clicking a different
@@ -459,6 +642,7 @@ export default function App() {
     setWindowMenu(null);
     setRoomMenu(null);
     setChatMenu(null);
+    setTeamMenu(null);
     setRailTeamMenu(false);
   }, []);
   // The two menus opened by clicking a trigger button (rather than
@@ -854,19 +1038,41 @@ export default function App() {
     if (team) localStorage.setItem(LAST_TEAM_KEY, team);
   }, [team]);
 
-  // On team change: load members + the most recent history page. Prompt to
-  // add an app-user if missing.
+  // Keep the active team visible in the (now internally-scrolling, #1478)
+  // team list — switching via the rail popup or a restored last-team can
+  // land on a row currently scrolled out of view. Only one .team-status-row
+  // is ever active at a time (collapsed and expanded rails aren't both in
+  // the DOM together), so a single querySelector is unambiguous.
+  // sidebarCollapsed is also a dep: toggling collapsed/expanded swaps in a
+  // DIFFERENT .team-status-rail (a fresh, unscrolled one) without `team`
+  // changing at all, and that one needs the same treatment.
   useEffect(() => {
     if (!team) return;
-    setDeselected(new Set()); // reset the room filter when switching teams
+    document
+      .querySelector(".team-status-rail .team-status-row.active")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [team, sidebarCollapsed]);
+
+  // The most recent history page for `t`, replacing whatever's currently
+  // shown — used both on team switch and after purging a team's messages
+  // (the same reset a stale page would otherwise leave behind).
+  const loadRoomMessages = useCallback((t: string) => {
     setMessages([]);
     setHasMoreHistory(true);
-    invoke<Message[]>("agmsg_messages", { team, limit: ROOM_PAGE_SIZE })
+    return invoke<Message[]>("agmsg_messages", { team: t, limit: ROOM_PAGE_SIZE })
       .then((msgs) => {
         setMessages(msgs);
         setHasMoreHistory(msgs.length >= ROOM_PAGE_SIZE);
       })
       .catch(console.error);
+  }, []);
+
+  // On team change: load members + the most recent history page. Prompt to
+  // add an app-user if missing.
+  useEffect(() => {
+    if (!team) return;
+    setDeselected(new Set()); // reset the room filter when switching teams
+    loadRoomMessages(team);
     loadMembers(team)
       .then((m) => {
         if (
@@ -877,7 +1083,7 @@ export default function App() {
         }
       })
       .catch(console.error);
-  }, [team, loadMembers]);
+  }, [team, loadMembers, loadRoomMessages]);
 
   // Live team-room updates; inject into a matching pane.
   useEffect(() => {
@@ -1003,11 +1209,15 @@ export default function App() {
       const types = await invoke<AgentType[]>("agmsg_spawnable_types").catch(() => spawnTypes);
       const freshCliFor = new Map(types.map((t) => [t.name, t.cli]));
       const freshOptionsFor = new Map(types.map((t) => [t.name, t.options]));
+      const freshCmdPrefixFor = new Map(types.map((t) => [t.name, t.cmd_prefix]));
+      const freshPromptArgFor = new Map(types.map((t) => [t.name, t.prompt_arg]));
       setSpawnTypes(types);
 
       const type = m.types.find((t) => freshCliFor.has(t));
       const cli = type ? freshCliFor.get(type)! : undefined;
       const options = type ? (freshOptionsFor.get(type) ?? []) : [];
+      const cmdPrefix = type ? freshCmdPrefixFor.get(type) : undefined;
+      const promptArg = type ? freshPromptArgFor.get(type) : undefined;
       // `native` = "this (type, project) actually self-delivers agmsg
       // messages" — asked from agmsg's own delivery.sh status (mode derived
       // from the project's real hooks file), NOT a static type.conf flag.
@@ -1027,16 +1237,17 @@ export default function App() {
       }
       const id = `${m.name}-${seq.current++}`;
       // Mirror agmsg spawn.sh: launch the CLI with any per-type spawn-options
-      // flags, then `/<cmd> actas <name>` as the final arg — same relative
-      // order spawn.sh splices them in — so the agent comes up as the real
-      // member (can send as itself, and self-delivers if its type monitors).
-      // Types with no spawnable CLI fall back to a shell.
+      // flags, then the actas prompt (shaped for this type — see
+      // actasSpawnArgs) as the final arg(s) — same relative order spawn.sh
+      // splices them in — so the agent comes up as the real member (can send
+      // as itself, and self-delivers if its type monitors). Types with no
+      // spawnable CLI fall back to a shell.
       const pane: Pane = cli
         ? {
             id,
             label: m.name,
             cmd: cli,
-            args: [...options, `/${cmdName} actas ${m.name}`],
+            args: [...options, ...actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg)],
             cwd: m.project || undefined,
             native: monitors,
           }
@@ -1235,8 +1446,8 @@ export default function App() {
   }, [buildShellPane, team]);
 
   // A tab's "Open shell" context-menu item — splits a shell pane in beside
-  // whatever's already in that tab. The symmetric counterpart of spawning an
-  // agent beside an open shell pane (see windowHasShellPane/spawnMember
+  // whatever's already in that tab, the same way a sidebar click splits an
+  // agent into the tab being viewed (see spawnTargetWindowId/spawnMember
   // below): either direction, shell and agent end up split in the same tab.
   // Same stale-context concern as openShellTab, in two shapes: the target
   // tab can be closed while getLoginShell's await is in flight (orphaned
@@ -1257,17 +1468,6 @@ export default function App() {
     },
     [buildShellPane, team],
   );
-
-  // True when `windowId`'s tab currently has a free-shell pane in it — the
-  // signal spawnMember's sidebar-click site uses to decide "spawn this agent
-  // beside the shell in the same tab" (design B) instead of the
-  // default "open a new tab".
-  const windowHasShellPane = useCallback((windowId: string) => {
-    const w = windowsRef.current.find((w) => w.id === windowId);
-    if (!w) return false;
-    const ids = leaves(w.root);
-    return panesRef.current.some((p) => ids.includes(p.id) && p.shell);
-  }, []);
 
   // Swap two panes' positions within the same window (tree shape unchanged
   // — no DOM remount, same as every other pane move in this file).
@@ -1625,7 +1825,11 @@ export default function App() {
       await invoke("agmsg_join", { team, name, agentType: type, project });
       const m = await loadMembers(team);
       const added = m.find((x) => x.name === name);
-      if (added) spawnMember(added);
+      // Same tab-choice as a sidebar click (spawnTargetWindowId): split
+      // into the tab being viewed when it's this team's, a new tab
+      // otherwise. Refs (not `windows`/`active` state) so this callback
+      // doesn't need to be recreated on every tab switch.
+      if (added) spawnMember(added, spawnTargetWindowId(windowsRef.current, activeRef.current, team));
       setModal(null);
     },
     [team, loadMembers, spawnMember],
@@ -1652,6 +1856,126 @@ export default function App() {
       await loadMembers(team);
     },
     [team, loadMembers, detachPane],
+  );
+
+  // Where to land when the currently active team disappears from `teams`
+  // (deleted, or renamed out from under itself): the same fallback the boot
+  // effect above uses — the localStorage-remembered team if it still
+  // exists, else the first remaining team, else back to the first-run
+  // "create a team" flow if none are left at all.
+  const settleActiveTeam = useCallback(
+    (loadedTeams: string[], removedName: string) => {
+      if (team !== removedName) return;
+      if (loadedTeams.length === 0) {
+        setTeam("");
+        setModal({ kind: "team", firstRun: true });
+        return;
+      }
+      const lastTeam = localStorage.getItem(LAST_TEAM_KEY);
+      setTeam(lastTeam && loadedTeams.includes(lastTeam) ? lastTeam : loadedTeams[0]);
+    },
+    [team],
+  );
+
+  const onRenameTeam = useCallback(
+    async (current: string, next: string) => {
+      const { command, args } = teamActionInvocation("renameTeam", current, { nextName: next });
+      await invoke(command, args);
+
+      // Everything from here on assumes the rename itself already
+      // succeeded — never move this above the invoke, or into a
+      // try/finally that would also run when the core refused it (#1500
+      // review, round 2). A window's `team` and lastActiveTabByTeam's keys
+      // are otherwise untouched by rename-team.sh (it only repoints the
+      // core's own records) — without this, every tab spawned under the
+      // old name stays tagged with it, and the sidebar (which only ever
+      // renders `w.team === team` for the current, now-renamed team) hides
+      // them: PTYs stay alive, tabs just vanish (found in live testing).
+      // Done before loadTeams(), not after: if that read then fails, the
+      // app must not still be pointing at a name that no longer exists on
+      // disk (a retry with the old name would fail confusingly).
+      setWindows((prev) => renameTeamInWindows(prev, current, next));
+      lastActiveTabByTeam.current = renameTeamKey(lastActiveTabByTeam.current, current, next);
+      if (team === current) {
+        // The team-change layout effect below writes
+        // lastActiveTabByTeam[prevTeamRef.current] = active on every
+        // `team` change, BEFORE updating prevTeamRef itself — if it still
+        // held the old name when setTeam(next) triggers that effect, its
+        // own write would resurrect the very key just removed above.
+        // Setting it here, in the same step as setTeam, means that write
+        // lands on the new key instead (an idempotent no-op).
+        prevTeamRef.current = next;
+        setTeam(next);
+      }
+      // Guarded the same way as deleteTeam's onClose: closing the modal
+      // early (while this is still in flight, #1484 review round 2) and
+      // opening a different one before this resolves must not have this
+      // stale completion clobber it back to null.
+      setModal((cur) => (shouldClearModalOnClose(cur, "renameTeam") ? null : cur));
+      pushCompletionNotice("success", renameTeamToast(current, next));
+
+      // The rename already succeeded — a failure here just means the
+      // sidebar's team list is stale until the next refresh, not that the
+      // rename failed, so it gets its own notice rather than surfacing as
+      // if renaming itself had been refused.
+      try {
+        await loadTeams();
+      } catch (e) {
+        pushCompletionNotice("error", actionFailedToast(String(e)));
+      }
+    },
+    [team, loadTeams, pushCompletionNotice],
+  );
+
+  // Delete/purge confirmation already happened in the UI (DeleteTeamModal /
+  // ConfirmModal); the CLI's own refusal reason (members remain, an active
+  // remote binding, the jsonl storage driver) comes back as run_script's Err
+  // and is shown as-is by the modal's err state.
+  const onDeleteTeam = useCallback(
+    async (name: string) => {
+      const { command, args } = teamActionInvocation("deleteTeam", name);
+      await invoke(command, args);
+      const loadedTeams = await loadTeams();
+      settleActiveTeam(loadedTeams, name);
+      pushCompletionNotice("success", deleteTeamToast(name));
+    },
+    [loadTeams, settleActiveTeam, pushCompletionNotice],
+  );
+
+  // #1493 escalation: only reachable after onDeleteTeam above has already
+  // failed with membersRemainCount (DeleteTeamModal gates showing the
+  // "delete with members" button on that, and hands back the count it
+  // already extracted from that refusal for the notice below).
+  const onDeleteTeamForce = useCallback(
+    async (name: string, purgeMessages: boolean, memberCount: number) => {
+      const { command, args } = teamActionInvocation("deleteTeamForce", name, { purgeMessages });
+      await invoke(command, args);
+      const loadedTeams = await loadTeams();
+      settleActiveTeam(loadedTeams, name);
+      pushCompletionNotice("success", deleteTeamForceToast(name, memberCount));
+    },
+    [loadTeams, settleActiveTeam, pushCompletionNotice],
+  );
+
+  const onPurgeMessages = useCallback(
+    async (name: string) => {
+      const { command, args } = teamActionInvocation("purgeMessages", name);
+      await invoke(command, args);
+      if (name === team) await loadRoomMessages(team);
+      pushCompletionNotice("success", purgeMessagesToast(name));
+    },
+    [team, loadRoomMessages, pushCompletionNotice],
+  );
+
+  // Only reachable when a rename/delete-team/delete-messages modal was
+  // already dismissed (closed while busy) by the time its action rejects —
+  // there's no dialog left to show the reason in, so it surfaces as a
+  // (sticky, hand-dismissed) error notice instead (#1484 review, round 3).
+  // A refusal the dialog is still open to show (e.g. members remain) never
+  // reaches this.
+  const onTeamActionDismissedFailure = useCallback(
+    (message: string) => pushCompletionNotice("error", actionFailedToast(message)),
+    [pushCompletionNotice],
   );
 
   const browseDir = useCallback(async (current: string): Promise<string | null> => {
@@ -1855,15 +2179,21 @@ export default function App() {
         </div>
       )}
       {coreUpdateSucceeded && (
-        <div className="startup-success-banner">
+        <div className="notice-banner success">
           <span>{t("startupError.updateSucceeded", { version: coreUpdateSucceeded })}</span>
           <button onClick={() => setCoreUpdateSucceeded(null)}>{t("startupError.dismiss")}</button>
         </div>
       )}
       {startupError && (
-        <div className="startup-error-banner">
+        <div className="notice-banner error">
           <span>{startupError}</span>
           <button onClick={() => setStartupError(null)}>{t("startupError.dismiss")}</button>
+        </div>
+      )}
+      {completionNotice && (
+        <div className={`notice-banner ${completionNotice.kind}`}>
+          <span>{completionNotice.message}</span>
+          <button onClick={() => setCompletionNotice(null)}>{t("startupError.dismiss")}</button>
         </div>
       )}
       <div className="body">
@@ -1969,6 +2299,12 @@ export default function App() {
                       className={teamName === team ? "team-status-row active" : "team-status-row"}
                       title={`${teamName}: ${status} (open panes)`}
                       onClick={() => setTeam(teamName)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        closeAllMenus();
+                        setTeamMenu({ name: teamName, x: e.clientX, y: e.clientY });
+                      }}
                     >
                       <span className={`team-status-dot status-${status}`} />
                     </button>
@@ -2026,6 +2362,12 @@ export default function App() {
                       className={teamName === team ? "team-status-row active" : "team-status-row"}
                       title={`${teamName}: ${status} (open panes)`}
                       onClick={() => setTeam(teamName)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        closeAllMenus();
+                        setTeamMenu({ name: teamName, x: e.clientX, y: e.clientY });
+                      }}
                     >
                       <span className="team-status-slot">
                         <span className={`team-status-dot status-${status}`} />
@@ -2107,7 +2449,7 @@ export default function App() {
                       )}
                       <button
                         className="member"
-                        onClick={() => spawnMember(m, windowHasShellPane(active) ? active : undefined)}
+                        onClick={() => spawnMember(m, spawnTargetWindowId(windows, active, team))}
                         title={
                           pane
                             ? t("sidebar.member.titleRunning")
@@ -2586,6 +2928,36 @@ export default function App() {
           onClose={() => setModal(null)}
         />
       )}
+      {modal?.kind === "renameTeam" && (
+        <RenameModal
+          current={modal.current}
+          onRename={onRenameTeam}
+          onClose={() => setModal((cur) => (shouldClearModalOnClose(cur, "renameTeam") ? null : cur))}
+          onDismissedFailure={onTeamActionDismissedFailure}
+        />
+      )}
+      {modal?.kind === "deleteTeam" && (
+        <DeleteTeamModal
+          title={t("modal.deleteTeam.title", { team: modal.name })}
+          body={t("modal.deleteTeam.body", { team: modal.name })}
+          confirmLabel={t("modal.deleteTeam.confirmLabel")}
+          onConfirm={() => onDeleteTeam(modal.name)}
+          onConfirmForce={(purgeMessages, memberCount) => onDeleteTeamForce(modal.name, purgeMessages, memberCount)}
+          onClose={() => setModal((cur) => (shouldClearModalOnClose(cur, "deleteTeam") ? null : cur))}
+          onDismissedFailure={onTeamActionDismissedFailure}
+        />
+      )}
+      {modal?.kind === "purgeMessages" && (
+        <ConfirmModal
+          title={t("modal.purgeMessages.title", { team: modal.name })}
+          body={t("modal.purgeMessages.body", { team: modal.name })}
+          confirmLabel={t("modal.purgeMessages.confirmLabel")}
+          danger
+          onConfirm={() => onPurgeMessages(modal.name)}
+          onClose={() => setModal((cur) => (shouldClearModalOnClose(cur, "purgeMessages") ? null : cur))}
+          onDismissedFailure={onTeamActionDismissedFailure}
+        />
+      )}
       {modal?.kind === "settings" && (
         <SettingsModal
           onClose={() => setModal(null)}
@@ -2690,6 +3062,41 @@ export default function App() {
             </div>
           );
         })()}
+
+      {teamMenu && (
+        <div
+          className="ctx-menu"
+          style={{ left: teamMenu.x, top: teamMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              setModal({ kind: "renameTeam", current: teamMenu.name });
+              setTeamMenu(null);
+            }}
+          >
+            {t("ctxMenu.team.rename")}
+          </button>
+          <button
+            className="danger"
+            onClick={() => {
+              setModal({ kind: "deleteTeam", name: teamMenu.name });
+              setTeamMenu(null);
+            }}
+          >
+            {t("ctxMenu.team.delete")}
+          </button>
+          <button
+            className="danger"
+            onClick={() => {
+              setModal({ kind: "purgeMessages", name: teamMenu.name });
+              setTeamMenu(null);
+            }}
+          >
+            {t("ctxMenu.team.deleteMessages")}
+          </button>
+        </div>
+      )}
 
       {paneMenu &&
         (() => {

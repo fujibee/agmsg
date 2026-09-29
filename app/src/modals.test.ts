@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeNumberDraft, shouldCloseOnEscape, stepFontSize } from "./modals";
+import { membersRemainCount, sanitizeNumberDraft, shouldCloseOnEscape, stepFontSize } from "./modals";
 
 function esc(overrides: Partial<{ isComposing: boolean; keyCode: number; defaultPrevented: boolean }> = {}) {
   return {
@@ -97,5 +97,51 @@ describe("stepFontSize", () => {
 
   it("steps from a decimal draft and can land on a non-integer", () => {
     expect(stepFontSize("12.5", 12.5, 1, 8, 24)).toBe(13.5);
+  });
+});
+
+describe("membersRemainCount", () => {
+  // #1493: an app-created team always has an app-user member, so a plain
+  // --delete on it always fails this way — DeleteTeamModal switches from
+  // the plain confirm to the "remove members, then delete" one based on
+  // this, and needs the count to phrase its translated body (#1484 review,
+  // round 3: don't show the CLI's raw English refusal for this one case).
+  it("recognizes team.sh's members-remain refusal for --delete and extracts the count", () => {
+    expect(
+      membersRemainCount(
+        "Team 'my-team' still has 3 member(s); refusing --delete.\nRun leave.sh for each remaining member first, or pass --force to remove them and delete the team in one step.",
+      ),
+    ).toBe(3);
+  });
+
+  it("returns null for an unrelated refusal (active remote binding)", () => {
+    expect(
+      membersRemainCount(
+        "Team 'my-team' is actively synced; refusing to delete or purge its data.\nDisconnect the sync binding first.",
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null for the jsonl-storage refusal", () => {
+    expect(
+      membersRemainCount(
+        "Team 'my-team' uses the jsonl storage driver; --purge-messages is not\nsupported yet for jsonl.",
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null for an active-remote refusal even if the team NAME contains the substring 'refusing --delete'", () => {
+    // Regression (#1484 review, round 2): team names can contain spaces and
+    // hyphens, so a bare `message.includes("refusing --delete")` check
+    // would trivially match here too — the team's own name, not anything
+    // team.sh actually decided, is what put that text in the message. The
+    // active-binding refusal always says "refusing to delete", never
+    // "still has N member(s); refusing --delete", so this must stay null
+    // regardless of the name.
+    expect(
+      membersRemainCount(
+        "Team 'refusing --delete' is actively synced; refusing to delete or purge its data.\nDisconnect the sync binding first.",
+      ),
+    ).toBeNull();
   });
 });

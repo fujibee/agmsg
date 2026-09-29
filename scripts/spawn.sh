@@ -42,11 +42,14 @@ set -euo pipefail
 #                      should run). Overrides $AGMSG_TERMINAL and config
 #                      `spawn.terminal`. This is the OS-terminal COMMAND axis.
 #   --terminal-driver <name>
-#                      force WHICH terminal axis places the member: tmux | herdr |
-#                      plain. A different axis from --terminal above: this selects
-#                      the driver, that is the OS-terminal command template. Bypasses
-#                      detection (otherwise $TMUX -> tmux -> herdr -> OS terminal).
-#                      Overrides $AGMSG_TERMINAL_DRIVER (the CLI flag wins).
+#                      force WHICH terminal axis places the member: any registered
+#                      terminal driver that declares spawn capability (tmux, herdr,
+#                      plain, orca, ...). A different axis from --terminal above:
+#                      this selects the driver, that is the OS-terminal command
+#                      template. Bypasses detection (otherwise $TMUX -> herdr ->
+#                      any other spawn-capable driver present in the environment
+#                      -> OS terminal). Overrides $AGMSG_TERMINAL_DRIVER (the CLI
+#                      flag wins).
 #   --no-wait          don't block on the readiness handshake; return as soon
 #                      as the agent is launched (fire-and-forget)
 #   --ready-timeout N  seconds to wait for readiness before giving up
@@ -146,8 +149,9 @@ TMUX_TARGET="pane"   # pane | window
 SPLIT="h"            # h | v
 TERMINAL_TMPL=""     # --terminal override (resolved below if empty)
 # --terminal-driver / AGMSG_TERMINAL_DRIVER: a NEW surface that forces WHICH terminal
-# axis places the member (tmux | herdr | plain), bypassing detection. Distinct from
-# --terminal / AGMSG_TERMINAL, which is the OS-terminal command TEMPLATE (unchanged).
+# axis places the member (any spawn-capable terminal driver), bypassing detection.
+# Distinct from --terminal / AGMSG_TERMINAL, which is the OS-terminal command
+# TEMPLATE (unchanged).
 TERMINAL_DRIVER="${AGMSG_TERMINAL_DRIVER:-}"
 WAIT_READY=1         # block until the spawned agent's watcher attaches
 READY_TIMEOUT=90     # seconds to wait for readiness before giving up
@@ -166,7 +170,7 @@ while [ $# -gt 0 ]; do
     --window)  TMUX_TARGET="window"; shift ;;
     --split)   SPLIT="${2:?--split needs h|v}"; shift 2 ;;
     --terminal) TERMINAL_TMPL="${2:?--terminal needs a template}"; shift 2 ;;
-    --terminal-driver) TERMINAL_DRIVER="${2:?--terminal-driver needs a name (tmux|herdr|plain)}"; shift 2 ;;
+    --terminal-driver) TERMINAL_DRIVER="${2:?--terminal-driver needs a driver name}"; shift 2 ;;
     --no-wait) WAIT_READY=0; shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?--ready-timeout needs seconds}"; shift 2 ;;
     --model) MODEL_ID="${2:?--model needs a model id}"; shift 2 ;;
@@ -181,16 +185,19 @@ case "$READY_TIMEOUT" in ''|*[!0-9]*) die "--ready-timeout must be a whole numbe
 # Validate the terminal-driver override HERE, before any state change: it is a
 # deterministic argument typo, so it must fail like --split does — before the role is
 # registered and a boot file is written (place_and_launch runs after both), and
-# before an unrelated "no team" error can mask it. The accepted set is EXACTLY the
-# public contract place_and_launch dispatches (tmux|herdr|plain), derived from the
-# same list — an external spawn-capable driver would pass a capability check here but
-# have no dispatch arm, so it must be rejected at parse time, not after the pre-join.
-# Generalizing to arbitrary spawn-capable drivers is the launcher→driver reroute's
-# scope. place_and_launch keeps its own guard as defence in depth.
-case "$TERMINAL_DRIVER" in
-  ''|tmux|herdr|plain) ;;
-  *) die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER); expected tmux, herdr or plain" ;;
-esac
+# before an unrelated "no team" error can mask it. Checked by CAPABILITY, not by a
+# fixed name list (#1447): a driver qualifies iff the registry knows it AND its own
+# manifest declares spawn in capabilities= — the same test place_and_launch's own
+# generic dispatch arm uses, so a driver that passes here is guaranteed to have
+# somewhere to go, without either list needing to name it. tmux/herdr/plain pass
+# this the same way any future spawn-capable driver would; place_and_launch keeps
+# its own capability check too, as defence in depth.
+if [ -n "$TERMINAL_DRIVER" ]; then
+  if ! agmsg_terminal_dir "$TERMINAL_DRIVER" >/dev/null 2>&1 \
+      || ! agmsg_terminal_has "$TERMINAL_DRIVER" capabilities spawn; then
+    die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER); must be a registered driver that declares spawn capability"
+  fi
+fi
 
 # Resolve the terminal override for the non-tmux path:
 #   --terminal  >  $AGMSG_TERMINAL  >  config spawn.terminal
@@ -841,6 +848,37 @@ _launch_os_terminal() {
   fi
 }
 
+# Generic spawn-capable-driver launcher (#1447): the same "load the driver, call
+# its real terminal_spawn, record the placement, try to name it" shape
+# launch_in_tmux/launch_in_herdr each already use, factored out for any driver
+# that is neither of those two nor plain — today only orca, but the next
+# spawn-capable driver after it needs no new branch here either, as long as its
+# own capabilities= declares spawn and its terminal_spawn/terminal_id_ok follow
+# the same ABI every driver's own tests already hold it to. tmux/herdr keep
+# their own hand-written callers (their environment preconditions — inside a
+# tmux pane, $HERDR_PANE_ID set — don't fit this generic shape); plain keeps
+# its own _launch_os_terminal (witness-file liveness proof this generic path
+# doesn't need, since a driver like orca already has a real show-based
+# terminal_pane_state).
+_launch_via_driver() {   # <driver>
+  local driver="$1" target
+  agmsg_terminal_has "$driver" capabilities spawn \
+    || die "terminal driver '$driver' cannot place a spawn (no spawn capability)"
+  agmsg_terminal_load "$driver" || die "could not load the '$driver' terminal driver"
+  if [ "$TMUX_TARGET" = "window" ]; then target=window
+  elif [ "$SPLIT" = "v" ];        then target=pane-v
+  else                                  target=pane-h
+  fi
+  local _id
+  _id="$(terminal_spawn "$NAME" "$PROJECT" "$target" "$BOOT")" \
+    || die "could not spawn via the '$driver' terminal driver (see the reason above)"
+  terminal_id_ok "$_id" \
+    || die "the '$driver' terminal driver returned an unexpected placement id ('${_id}')"
+  _record_placement "$driver" "$_id" || true
+  _name_pane "$driver" "$_id" || SPAWN_UNNAMED=1
+  echo "launched ${AGENT_TYPE} '${NAME}' via the ${driver} terminal driver (${target})"
+}
+
 place_and_launch() {
   # --terminal-driver / AGMSG_TERMINAL_DRIVER forces WHICH axis places the member,
   # bypassing detection. It is a spawn/name PREFERENCE on a NEW surface
@@ -849,12 +887,12 @@ place_and_launch() {
   # impossible force fails in the launcher with that launcher's own error.
   if [ -n "$TERMINAL_DRIVER" ]; then
     agmsg_terminal_dir "$TERMINAL_DRIVER" >/dev/null 2>&1 \
-      || die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER); expected tmux, herdr or plain"
+      || die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER)"
     case "$TERMINAL_DRIVER" in
       tmux)  launch_in_tmux;      echo "launched ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})" ;;
       herdr) launch_in_herdr;     echo "launched ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})" ;;
       plain) _launch_os_terminal ;;
-      *)     die "terminal driver '$TERMINAL_DRIVER' cannot place a spawn (no spawn capability)" ;;
+      *)     _launch_via_driver "$TERMINAL_DRIVER" ;;
     esac
     return 0
   fi
@@ -871,6 +909,24 @@ place_and_launch() {
   if is_herdr_env; then
     launch_in_herdr
     echo "launched ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})"
+    return 0
+  fi
+
+  # Any OTHER spawn-capable driver actually present in this environment (#1447):
+  # found generically, by capability + live detection, never by name — orca is
+  # found this way (via its own terminal_detect reading $ORCA_TERMINAL_HANDLE,
+  # decided 2026-09-23: judge presence from the seat's own environment) and
+  # needs no branch here, and neither will the next one. tmux/herdr are
+  # excluded because their own environment checks
+  # above already own this decision (their relative order is the established,
+  # tmux-inside-herdr backward-compat ordering — not re-derived here). plain is
+  # excluded because it is the deliberate last-resort fallback below, and its
+  # own terminal_detect always reports "present" (a '-' sentinel when
+  # unresolved) — leaving it in this sweep would make it win unconditionally
+  # and make _launch_os_terminal's own witness/fence handling unreachable.
+  local _d
+  if _d="$(agmsg_terminal_resolve_by_capability spawn "tmux herdr plain" 2>/dev/null)"; then
+    _launch_via_driver "$_d"
     return 0
   fi
 

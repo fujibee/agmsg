@@ -1523,6 +1523,33 @@ _spawn_recorded_id() {
   [ ! -f "$(_spawn_record_path myteam alice)" ]
 }
 
+@test "spawn: with no --terminal-driver override, an orca-hosted environment routes through orca's own terminal_spawn (#1447)" {
+  # The launcher->driver reroute's generic auto-detect sweep must find orca by
+  # capability + live detection (decided 2026-09-23: judge presence from the
+  # seat's own environment, ORCA_TERMINAL_HANDLE present means orca), with no
+  # name branch for it in spawn.sh itself -- this is the one behavioral proof
+  # of that. $TMUX/herdr are both unset by setup().
+  export TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE="term_11111111-2222-3333-4444-555555555555"
+  local orca_log="$TEST_SKILL_DIR/orca-argv.log"
+  cat > "$STUB_BIN/orca" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$orca_log"
+if [ "\$1" = terminal ] && [ "\$2" = create ]; then
+  echo '{"ok":true,"result":{"terminal":{"handle":"term_11111111-2222-3333-4444-555555555555"}}}'
+fi
+exit 0
+EOF
+  chmod +x "$STUB_BIN/orca"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "via the orca terminal driver" <<<"$output"
+  grep -qF -- "terminal create" "$orca_log"
+  # The OS-terminal fallback (record.sh, plain's witness) must never have been
+  # reached -- orca placed this, not a fallback to the last-resort path.
+  [ ! -s "$CAPTURE" ]
+}
+
 @test "spawn: a placement-record WRITE failure -> status=spawned-but-unrecorded, non-zero" {
   # The record is the only authority peek/poke/despawn --force have. If the write
   # fails (here: the run dir made read-only, so agmsg_write_atomic cannot even create

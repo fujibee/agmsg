@@ -68,3 +68,25 @@ agmsg_validate_agent_name() {
   esac
   return 0
 }
+
+# ext-tool tool names are used directly as a path segment under
+# scripts/drivers/ext-tools/<tool>/ (tool.conf, setup, handle). Unlike team/
+# agent names, this one is a strict ALLOW-list (alphanumeric, '-', '_' only):
+# it is read back out of a member's config file (tool=<name>), a file that can
+# be hand-edited or corrupted, not just typed as a --tool argument, so "/" and
+# ".." must never reach the path build at all. Call this at every point a tool
+# name is turned into a path: join.sh, ext-tool.sh, send.sh, and
+# ext-tool-dispatch.sh (the last one is the final gate before `handle` runs,
+# so it validates too even though its callers already did).
+agmsg_validate_tool_name() {
+  local name="$1"
+  case "$name" in
+    '')
+      echo "agmsg: invalid tool name: must not be empty" >&2
+      return 1 ;;
+    *[!A-Za-z0-9_-]*)
+      echo "agmsg: invalid tool name '$name': must contain only letters, digits, '-', or '_'" >&2
+      return 1 ;;
+  esac
+  return 0
+}

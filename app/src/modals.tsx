@@ -24,11 +24,23 @@ export function shouldCloseOnEscape(e: Pick<KeyboardEvent, "key" | "isComposing"
   return true;
 }
 
-/** Modal chrome: dimmed backdrop + centered card. */
+/**
+ * Modal chrome: dimmed backdrop + centered card. `busy` (an action in
+ * flight — a rename, a delete, ...) switches the cursor to "wait" over the
+ * whole card, so a long-running agmsg script no longer just looks like the
+ * app hung (#1484 feedback: no visible feedback while running). Closing
+ * (Escape, backdrop click, the Cancel button) stays available even while
+ * busy: run_script has no timeout, so if closing were blocked too, a script
+ * that never returns would wall off the whole app permanently instead of
+ * just leaving that one command running in the background (#1484 review,
+ * round 2) — closing here only dismisses the dialog, not the invoke() call
+ * already in flight.
+ */
 function Modal(props: {
   title: string;
   children: React.ReactNode;
   onClose?: () => void;
+  busy?: boolean;
 }) {
   const { onClose } = props;
   useEffect(() => {
@@ -42,7 +54,7 @@ function Modal(props: {
 
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className={props.busy ? "modal busy" : "modal"} onClick={(e) => e.stopPropagation()}>
         <div className="modal-title">{props.title}</div>
         {props.children}
       </div>
@@ -320,20 +332,48 @@ export function RenameModal(props: {
   current: string;
   onRename: (current: string, next: string) => Promise<void>;
   onClose: () => void;
+  // Called instead of the inline error when this modal was already closed
+  // (the user dismissed it while the rename was still running — closing no
+  // longer waits for it, #1484 review round 2) by the time onRename
+  // rejects: there's no dialog left to show the reason in, so the caller
+  // surfaces it another way (a toast, #1484 review round 3). Optional —
+  // callers that don't need this (the pre-existing member-rename flow)
+  // simply omit it and keep today's silent-on-close-then-fail behavior.
+  onDismissedFailure?: (message: string) => void;
 }) {
   const { t } = useTranslation();
   const [next, setNext] = useState(props.current);
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // StrictMode's dev-only mount→unmount→remount means the cleanup below
+    // can already have fired once before this effect re-runs — reset to
+    // true on setup too, not just at useRef's initializer (#1484 review,
+    // round 5), or the ref stays permanently false after that first
+    // synthetic cycle and every later failure is wrongly treated as
+    // "dialog already closed."
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const submit = async () => {
     if (!next.trim() || next.trim() === props.current) return;
+    setErr("");
+    setBusy(true);
     try {
       await props.onRename(props.current, next.trim());
     } catch (e) {
-      setErr(String(e));
+      const message = String(e);
+      if (mountedRef.current) setErr(message);
+      else props.onDismissedFailure?.(message);
+    } finally {
+      setBusy(false);
     }
   };
   return (
-    <Modal title={t("modal.rename.title", { current: props.current })} onClose={props.onClose}>
+    <Modal title={t("modal.rename.title", { current: props.current })} onClose={props.onClose} busy={busy}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -342,7 +382,7 @@ export function RenameModal(props: {
       >
         <label>
           {t("modal.rename.newNameLabel")}
-          <input autoFocus value={next} onChange={(e) => setNext(e.target.value)} />
+          <input autoFocus value={next} onChange={(e) => setNext(e.target.value)} disabled={busy} />
         </label>
         {err && <div className="modal-err">{err}</div>}
         <div className="modal-actions">
@@ -352,9 +392,9 @@ export function RenameModal(props: {
           <button
             type="submit"
             className="primary"
-            disabled={!next.trim() || next.trim() === props.current}
+            disabled={!next.trim() || next.trim() === props.current || busy}
           >
-            {t("modal.rename.confirmButton")}
+            {busy ? t("modal.rename.confirmButtonBusy") : t("modal.rename.confirmButton")}
           </button>
         </div>
       </form>
@@ -367,13 +407,49 @@ export function ConfirmModal(props: {
   body: string;
   confirmLabel?: string;
   danger?: boolean;
-  onConfirm: () => void;
+  // May reject (e.g. a CLI script refusing the action) — the rejection's
+  // message is shown inline and the modal stays open, same as RenameModal's
+  // err handling above. A plain synchronous onConfirm still works: awaiting
+  // a non-promise resolves immediately.
+  onConfirm: () => void | Promise<void>;
   onClose: () => void;
+  // See RenameModal's own doc for this — same reasoning, same optionality.
+  onDismissedFailure?: (message: string) => void;
 }) {
   const { t } = useTranslation();
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // StrictMode's dev-only mount→unmount→remount means the cleanup below
+    // can already have fired once before this effect re-runs — reset to
+    // true on setup too, not just at useRef's initializer (#1484 review,
+    // round 5), or the ref stays permanently false after that first
+    // synthetic cycle and every later failure is wrongly treated as
+    // "dialog already closed."
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const submit = async () => {
+    setErr("");
+    setBusy(true);
+    try {
+      await props.onConfirm();
+      props.onClose();
+    } catch (e) {
+      const message = String(e);
+      if (mountedRef.current) setErr(message);
+      else props.onDismissedFailure?.(message);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <Modal title={props.title} onClose={props.onClose}>
+    <Modal title={props.title} onClose={props.onClose} busy={busy}>
       <p className="modal-note">{props.body}</p>
+      {err && <div className="modal-err">{err}</div>}
       <div className="modal-actions">
         <button type="button" onClick={props.onClose}>
           {t("common.cancel")}
@@ -381,13 +457,134 @@ export function ConfirmModal(props: {
         <button
           type="button"
           className={props.danger ? "primary danger" : "primary"}
-          onClick={() => {
-            props.onConfirm();
-            props.onClose();
-          }}
+          onClick={submit}
+          disabled={busy}
         >
-          {props.confirmLabel ?? t("modal.confirm.defaultLabel")}
+          {busy ? t("modal.confirm.workingLabel") : (props.confirmLabel ?? t("modal.confirm.defaultLabel"))}
         </button>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * The member count from team.sh's specific "members still present" refusal
+ * for --delete (#1493): "Team '<team>' still has N member(s); refusing
+ * --delete." — null for every other message. Matched by the "still has N
+ * member(s); refusing --delete" shape rather than a bare "refusing
+ * --delete" substring (#1484 review, round 2) — a team name can contain
+ * spaces and hyphens, so a team literally named e.g. "refusing --delete"
+ * would make an UNRELATED refusal (the active-remote-binding one, which
+ * says "refusing to delete") spuriously match a plain substring check
+ * purely because the name itself got interpolated into that other message.
+ * The count-and-phrase shape anchors on text team.sh always emits itself,
+ * never on the team name. Exported as a pure function so
+ * DeleteTeamModal's escalation-to-force switch is unit-testable without
+ * mounting it or a real Tauri backend.
+ */
+export function membersRemainCount(message: string): number | null {
+  const match = message.match(/still has (\d+) member\(s\); refusing --delete/);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * The team-delete confirmation (#1479/#1484). Unlike the generic
+ * ConfirmModal, this one can switch views in place: an app-created team
+ * always has an app-user member, so a plain --delete is refused with
+ * membersRemainCount's text (#1493) — once that happens, the plain confirm
+ * is replaced by a "remove every member, then delete" confirm (team.sh
+ * --delete --force, not yet on main as of this writing; core work in
+ * progress), with the CLI's own English refusal text swapped for a
+ * translated one naming the member count, plus an opt-in checkbox to also
+ * purge message history in the same call (#1484 review, round 3 — live
+ * testing found the plain force+checkbox layout confusing). A refusal for any
+ * OTHER reason (active remote binding, jsonl) stays on the plain confirm
+ * and still shows that reason as-is, unchanged.
+ */
+export function DeleteTeamModal(props: {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  onConfirm: () => Promise<void>;
+  onConfirmForce: (purgeMessages: boolean, memberCount: number) => Promise<void>;
+  onClose: () => void;
+  // See RenameModal's own doc for this — same reasoning.
+  onDismissedFailure?: (message: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [memberCount, setMemberCount] = useState<number | null>(null);
+  const [purgeMessages, setPurgeMessages] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // StrictMode's dev-only mount→unmount→remount means the cleanup below
+    // can already have fired once before this effect re-runs — reset to
+    // true on setup too, not just at useRef's initializer (#1484 review,
+    // round 5), or the ref stays permanently false after that first
+    // synthetic cycle and every later failure is wrongly treated as
+    // "dialog already closed."
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const attempt = async (run: () => Promise<void>) => {
+    setErr("");
+    setBusy(true);
+    try {
+      await run();
+      props.onClose();
+    } catch (e) {
+      const message = String(e);
+      if (!mountedRef.current) {
+        props.onDismissedFailure?.(message);
+        return;
+      }
+      const count = membersRemainCount(message);
+      if (count !== null) setMemberCount(count);
+      else setErr(message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={props.title} onClose={props.onClose} busy={busy}>
+      <p className="modal-note">
+        {memberCount !== null ? t("modal.deleteTeam.membersRemainBody", { count: memberCount }) : props.body}
+      </p>
+      {err && <div className="modal-err">{err}</div>}
+      {memberCount !== null && (
+        <label className="modal-checkbox">
+          <input
+            type="checkbox"
+            checked={purgeMessages}
+            onChange={(e) => setPurgeMessages(e.target.checked)}
+            disabled={busy}
+          />
+          {t("modal.deleteTeam.purgeMessagesToo")}
+        </label>
+      )}
+      <div className="modal-actions">
+        <button type="button" onClick={props.onClose}>
+          {t("common.cancel")}
+        </button>
+        {memberCount !== null ? (
+          <button
+            type="button"
+            className="primary danger"
+            onClick={() => attempt(() => props.onConfirmForce(purgeMessages, memberCount))}
+            disabled={busy}
+          >
+            {busy ? t("modal.confirm.workingLabel") : t("modal.deleteTeam.forceLabel")}
+          </button>
+        ) : (
+          <button type="button" className="primary danger" onClick={() => attempt(props.onConfirm)} disabled={busy}>
+            {busy ? t("modal.confirm.workingLabel") : props.confirmLabel}
+          </button>
+        )}
       </div>
     </Modal>
   );

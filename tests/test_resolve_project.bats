@@ -330,6 +330,53 @@ JSON
   [ "$status" -ne 0 ]
 }
 
+@test "agent-binaries: process names come from the type manifest, not a hardcoded list" {
+  # cursor and grok-build have no case arm here and used to fall through to the
+  # "claude codex gemini" guess — so their detect_proc was ignored entirely.
+  run _agmsg_agent_binaries cursor
+  [ "$output" = "cursor-agent" ]
+  run _agmsg_agent_binaries grok-build
+  [ "$output" = "grok" ]
+  run _agmsg_agent_binaries codex
+  [ "$output" = "codex" ]
+}
+
+@test "pid-is-agent: a claude process is not accepted as an agent of another type" {
+  # This is what made a cursor member's project resolve to the project of
+  # whoever was asking: pid_is_agent said yes for the caller's own Claude Code
+  # process, so resolution took step 1 and read THAT session's project marker
+  # in preference to the member's own registration.
+  skip_on_windows "process argv faking via exec -a (#349)"
+  bash -c 'exec -a claude sleep 5' 3>&- &
+  local p=$!
+  sleep 0.3
+  run agmsg_pid_is_agent "$p" cursor
+  local st_cursor=$status
+  run agmsg_pid_is_agent "$p" claude-code
+  local st_cc=$status
+  kill "$p" 2>/dev/null || true
+  [ "$st_cursor" -ne 0 ]   # not a cursor agent
+  [ "$st_cc" -eq 0 ]       # still detected as its own type
+}
+
+@test "resolve: a member's project is not rewritten to the caller's by a cross-type marker" {
+  # End-to-end shape of the leak: a leader (claude-code) resolving a cursor
+  # member's path. The marker belongs to the leader's process and must not be
+  # consulted for a different type.
+  skip_on_windows "process argv faking via exec -a (#349)"
+  local member="$ROOT/sub/deep"
+  reg T cursoragent "$member" cursor
+  bash -c 'exec -a claude sleep 5' 3>&- &
+  local p=$!
+  sleep 0.3
+  agmsg_write_project_marker "$p" "/leader/project"
+  run env AGMSG_AGENT_PID="$p" bash -c \
+    'SKILL_DIR="$1"; . "$SKILL_DIR/scripts/lib/resolve-project.sh"; agmsg_resolve_project "$2" cursor' \
+    _ "$SKILL_DIR" "$member"
+  kill "$p" 2>/dev/null || true
+  [ "$output" != "/leader/project" ]
+}
+
 # --- end-to-end through entry scripts ---
 
 @test "whoami: subdir invocation resolves to the registered identity" {
@@ -438,5 +485,68 @@ setup_git_repo() {
 
 @test "agent-binaries: grok-build maps to grok (#859)" {
   [ "$(_agmsg_agent_binaries grok-build)" = "grok" ]
-  [ "$(_agmsg_agent_binaries claude-code)" = "claude" ]
+  # claude-code's own detect_proc lists both "claude" and "claude-code" as
+  # literal (non-glob) tokens, and both now come from the manifest (#626/#631).
+  [ "$(_agmsg_agent_binaries claude-code)" = "claude claude-code" ]
+}
+
+@test "agent-binaries: an external plugin overrides a same-named builtin only once trusted (#631)" {
+  # _agmsg_type_detect_proc's fast path (reading the builtin manifest
+  # directly, to avoid sourcing type-registry.sh for every call) must never
+  # mistake a plugin dir merely being PRESENT for a trust decision -- the
+  # fast path's own existence check must not be, and must not skip, the
+  # registry's real trust check (driver-registry.sh's agmsg_driver_is_trusted).
+  # One property, both directions, checked in the SAME process (review):
+  # a version that cached the builtin answer the first time this type was
+  # looked up -- before agmsg_driver_trust ran, in the SAME shell -- kept
+  # returning the builtin forever after, since nothing invalidated it. Two
+  # separate `bash -c` calls could not catch that (a fresh process has no
+  # stale cache to return); this exercises it directly, matching the shape
+  # a real long-lived process (watch.sh) actually has.
+  local plugdir="$ROOT/plugins"
+  mkdir -p "$plugdir/types/claude-code"
+  printf 'detect_proc=totally-different-binary\n' > "$plugdir/types/claude-code/type.conf"
+
+  # Both calls below are PLAIN STATEMENTS, never `x=$(_agmsg_agent_binaries
+  # ...)`: a command substitution runs the call in a subshell, and the
+  # cache write (`printf -v "$cache_var" ...`) is a global -- one made
+  # inside that subshell never reaches the parent shell, so a `$( )`-based
+  # version of this test would never exercise stale-cache reuse at all,
+  # on ANY implementation (measured: it stayed green against the very
+  # version this test exists to catch). Reading the result from
+  # _AGMSG_AGENT_BINARIES_OUT (the side channel _agmsg_agent_binaries
+  # already sets for exactly this reason) is what makes the cache real.
+  run env AGMSG_PLUGIN_DIRS="$plugdir" bash -c '
+    SKILL_DIR="$1"
+    . "$SKILL_DIR/scripts/lib/resolve-project.sh"
+    # Not yet trusted: falls back to the builtin.
+    _agmsg_agent_binaries claude-code >/dev/null
+    echo "before=$_AGMSG_AGENT_BINARIES_OUT"
+    . "$SKILL_DIR/scripts/lib/driver-registry.sh"
+    agmsg_driver_trust types claude-code "$2"
+    # Trusted now, same process, same cache: must re-check, not reuse the
+    # answer from before trust was granted.
+    _agmsg_agent_binaries claude-code >/dev/null
+    echo "after=$_AGMSG_AGENT_BINARIES_OUT"
+  ' _ "$SKILL_DIR" "$plugdir/types/claude-code"
+  [ "$output" = "$(printf 'before=claude claude-code\nafter=totally-different-binary')" ]
+
+  # A type name outside [A-Za-z0-9_-] (review): the two-character escape
+  # above only maps '_' and '-', so an unescaped third character landing
+  # straight into $cache_var would make it an invalid bash variable name --
+  # not merely a fresh collision risk, an error on every call. Called
+  # twice, same shell, same (unknown) type: must not error either time, and
+  # must answer identically both times (whether or not this specific
+  # answer is cached is not the point here -- not erroring, and not
+  # depending on which call number it is, is).
+  run bash -c '
+    SKILL_DIR="$1"
+    . "$SKILL_DIR/scripts/lib/resolve-project.sh"
+    _agmsg_agent_binaries "foo.bar" >/dev/null
+    echo "first=$_AGMSG_AGENT_BINARIES_OUT"
+    _agmsg_agent_binaries "foo.bar" >/dev/null
+    echo "second=$_AGMSG_AGENT_BINARIES_OUT"
+  ' _ "$SKILL_DIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'first=claude codex gemini\nsecond=claude codex gemini')" ]
 }

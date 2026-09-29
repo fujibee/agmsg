@@ -80,6 +80,22 @@ RUN_DIR="$SKILL_DIR/run"
 . "$SCRIPT_DIR/lib/terminal-registry.sh"
 _agmsg_shq() { agmsg_shq "$1"; }
 
+# Prints the "run this from a normal shell instead" recovery line for a
+# refused hooks_file write (#1392), to stderr.
+#
+# Every argument goes through _agmsg_shq -- the same helper this file already
+# uses for every other command line it prints (see its own comment above) --
+# rather than the naive `'$var'` this replaced (review finding, #1392: a
+# project path containing a single quote broke the quoting outright, and a
+# copy-pasted broken quote is a write-the-wrong-thing hazard, not just a
+# cosmetic one). $0 is included for the same reason: nothing about this
+# script's own invocation path is guaranteed quote-free either.
+_agmsg_print_delivery_recovery() {
+  local mode="$1" type="$2" project="$3"
+  echo "agmsg: if this seat is running in a restricted sandbox (e.g. Codex's workspace-write mode keeps .codex/ read-only), run this same command from a normal, unsandboxed shell instead:" >&2
+  echo "  bash $(_agmsg_shq "$0") set $(_agmsg_shq "$mode") $(_agmsg_shq "$type") $(_agmsg_shq "$project")" >&2
+}
+
 # True (0) iff <cli>'s reported version is >= <min>, compared as MAJOR.MINOR.PATCH.
 # FAIL-CLOSED: returns non-zero when the cli is not on PATH, `--version` fails, or
 # neither the output nor <min> yields a dotted-numeric version — an unknown
@@ -143,7 +159,21 @@ agmsg_delivery_apply_default() {
 
   local hooks_file
   hooks_file=$(resolve_hooks_file "$type" "$project")
-  mkdir -p "$(dirname "$hooks_file")"
+  # A refused write here used to be silent in effect even though `set -e`
+  # (line 2) happened to make the SCRIPT exit non-zero: the failure was a bare
+  # `mkdir: ... Permission denied` with no agmsg context, easy to miss in a
+  # long transcript and giving no next step -- and a caller wrapping this call
+  # in its own `|| true`/subshell would lose even that (#1392, confirmed live:
+  # Codex's workspace-write sandbox keeps .codex/ read-only even inside an
+  # otherwise-writable project, so a re-setup from inside a sandboxed seat hit
+  # exactly this and the seat went deaf with nothing telling anyone). Named
+  # explicitly and unconditionally here rather than left to `set -e` alone, so
+  # this stays loud even from a caller that does not propagate exit codes.
+  mkdir -p "$(dirname "$hooks_file")" || {
+    echo "agmsg: could not create $(dirname "$hooks_file") to write $hooks_file — delivery for $type was NOT set up." >&2
+    _agmsg_print_delivery_recovery "$mode" "$type" "$project"
+    return 1
+  }
 
   # Whether hook entries also need a Windows-native "commandWindows" variant is
   # a per-type manifest fact (hook_windows_wrap=yes). Resolve it here — the layer
@@ -269,7 +299,107 @@ agmsg_delivery_apply_default() {
 
   prune_empty_hooks_file "$tmp_state"
 
-  mv "$tmp_state" "$hooks_file"
+  _agmsg_hooks_file_finish_write "$hooks_file" "$tmp_state" "$mode" "$type" "$project"
+}
+
+# Replaces <path> with <tmp>'s content, but only when <path> already exists
+# AND the content actually differs (#1429: a hooks_file that is git-tracked
+# and shared -- e.g. a team's own .codex/hooks.json -- must not get a
+# permanent diff, a lost chmod-a-w protection, and a changed hash from a
+# `set` call that changes nothing). <path> not existing yet is the plain
+# first-ever write, unchanged from before this existed: no content to
+# compare against and no existing format or permission mode to preserve.
+#
+# When <path> DOES exist: compared by JSON CONTENT, order-independent on
+# object keys (_agmsg_json_content_equal, hooks-json.sh -- sqlite's
+# json_tree(), not raw bytes and not plain json()). <path> may be
+# hand-formatted in a way this codebase never writes -- different
+# whitespace, a different indent, or its object keys in a different order
+# (e.g. run through `jq -S`) -- and still hold the exact same registration.
+# A byte comparison would call that "different" and trigger one spurious
+# rewrite even though nothing agmsg owns actually changed (review round 1
+# finding, on a version of this fix that reindented <tmp> to <path>'s
+# detected indentation and then compared bytes). Plain json() is not enough
+# either: it renders compactly but does NOT reorder object keys, so
+# `json('{"a":1,"b":2}')` and `json('{"b":2,"a":1}')` still compare unequal
+# (review round 2 finding). _agmsg_json_content_equal's own header explains
+# why json_tree's fullkey ordering fixes this while still treating array
+# element order as significant.
+#
+# <tmp> is reformatted to match <path>'s own detected indentation
+# (_agmsg_json_detect_indent / _agmsg_json_reindent -- a no-op when no
+# indent is detected, e.g. <path> is itself already compact) ONLY once a
+# real content change is confirmed -- formatting an unwritable, unchanged
+# <tmp> just to throw it away is wasted work.
+#
+# A genuine content change on a <path> with no owner write bit -- OR one
+# whose current permission mode this process cannot even read -- refuses
+# loudly (same #1392 recovery message a failed mkdir/mv already uses)
+# rather than silently overwriting a file a human protected on purpose, or
+# writing through it and only THEN discovering the original mode can't be
+# restored (review round 2 finding: reading the mode was "best effort," so a
+# failed read silently produced a written file at the wrong -- mktemp's --
+# mode). On a real, permitted replace, <path>'s own permission mode is
+# restored afterward; if that chmod itself fails, this reports it loudly and
+# fails rather than leaving the file at the wrong mode with exit 0 (same
+# review finding: `chmod ... || true` used to swallow this outright).
+_agmsg_hooks_file_finish_write() {
+  local path="$1" tmp="$2" mode="$3" type="$4" project="$5"
+  # Same reasoning as the mkdir -p guard above (#1392): a refused rename is
+  # the more common failure shape in practice (the directory usually already
+  # exists; it is the file WITHIN it a sandbox keeps read-only). Named
+  # explicitly rather than left to `set -e` alone, and the temp file is
+  # cleaned up on this path too -- a caller retrying after fixing
+  # permissions must not trip over a stale mktemp file accumulating in
+  # $TMPDIR.
+  if [ ! -f "$path" ]; then
+    if ! mv "$tmp" "$path"; then
+      rm -f "$tmp"
+      echo "agmsg: could not write $path — delivery for $type was NOT set up." >&2
+      _agmsg_print_delivery_recovery "$mode" "$type" "$project"
+      return 1
+    fi
+    return 0
+  fi
+
+  if _agmsg_json_content_equal "$path" "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  local indent
+  if indent="$(_agmsg_json_detect_indent "$path")"; then
+    _agmsg_json_reindent "$tmp" "$indent"
+  fi
+
+  if [ ! -w "$path" ]; then
+    rm -f "$tmp"
+    echo "agmsg: $path needs to change for delivery mode '$mode' but is not writable — leaving it untouched rather than overwrite a file that looks intentionally protected (e.g. chmod a-w)." >&2
+    _agmsg_print_delivery_recovery "$mode" "$type" "$project"
+    return 1
+  fi
+
+  local orig_mode
+  orig_mode="$(compat_file_mode "$path" 2>/dev/null)" || orig_mode=""
+  if [ -z "$orig_mode" ]; then
+    rm -f "$tmp"
+    echo "agmsg: could not read $path's current permission mode — leaving it untouched rather than replace it and risk losing that mode." >&2
+    _agmsg_print_delivery_recovery "$mode" "$type" "$project"
+    return 1
+  fi
+
+  if ! mv "$tmp" "$path"; then
+    rm -f "$tmp"
+    echo "agmsg: could not write $path — delivery for $type was NOT set up." >&2
+    _agmsg_print_delivery_recovery "$mode" "$type" "$project"
+    return 1
+  fi
+
+  if ! chmod "$orig_mode" "$path" 2>/dev/null; then
+    echo "agmsg: wrote $path for delivery mode '$mode', but could not restore its original permission mode ($orig_mode) — check its permissions." >&2
+    return 1
+  fi
+  return 0
 }
 
 # Default delivery entry points (Template Method). A type's plug

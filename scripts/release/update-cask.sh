@@ -87,12 +87,25 @@ sed -i '' \
   -e "s|^  app \".*\"$|  app \"$APP_BUNDLE\"|" \
   "$CASK"
 
+# The dmg is universal (both arches) as of the app's universal-apple-darwin
+# build — an arm64-only `depends_on` would keep telling Homebrew to refuse
+# the cask on Intel Macs the dmg now actually supports. Drop just that one
+# stanza line, if still present (a tap already updated by hand is a no-op
+# here, not a failure — unlike the four rewrites above, there is nothing
+# to verify was written, only something to confirm is gone). Deliberately
+# NOT also dropping whatever line follows it (e.g. via sed's N;d) -- that
+# assumes it's always the blank line seen today, and a future tap format
+# change putting a real stanza there instead would delete that stanza
+# too, silently. A leftover blank line is cosmetic; a deleted stanza is not.
+sed -i '' '/^  depends_on arch: :arm64$/d' "$CASK"
+
 # Every rewritten line gets a post-edit guard — a cask format drift must
 # fail here, never half-update and push.
 grep -Fq "version \"$VERSION\"" "$CASK" || die "version rewrite failed — cask format changed?"
 grep -Fq "sha256 \"$SHA\"" "$CASK" || die "sha256 rewrite failed — cask format changed?"
 grep -Fq "url \"$URL\"" "$CASK" || die "url rewrite failed — cask format changed?"
 grep -Fq "app \"$APP_BUNDLE\"" "$CASK" || die "app stanza rewrite failed — cask format changed?"
+grep -Fq "depends_on arch: :arm64" "$CASK" && die "depends_on arch: :arm64 still present — cask format changed?"
 
 # 4. Commit + push (no-op safe: bail politely if nothing changed).
 if git -C "$TMP/tap" diff --quiet; then

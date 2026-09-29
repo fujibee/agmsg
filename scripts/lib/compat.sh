@@ -220,6 +220,19 @@ compat_file_mtime() {
   esac
 }
 
+# Get file permission mode as octal digits (e.g. "644"), suitable for a
+# direct `chmod` argument.
+# Replaces: stat -f %Lp (macOS) / stat -c %a (Linux/MSYS2)
+compat_file_mode() {
+  local file="$1"
+  [ -z "$file" ] && return 1
+  _agmsg_detect_platform
+  case "$_agmsg_platform" in
+    macos)  stat -f %Lp "$file" 2>/dev/null ;;
+    *)      stat -c %a "$file" 2>/dev/null ;;
+  esac
+}
+
 # Batch variant of compat_file_mtime: read NUL-separated paths on stdin
 # (find -print0) and emit one "<mtime><TAB><path>" line per file, spawning
 # one stat per argv batch instead of one process chain per file.

@@ -6,141 +6,179 @@
 # a file that is merely large in @test count is not necessarily slow. This
 # table sidesteps the proxy by using each file's own measured time directly.
 #
-# MEASURED AGAINST: GitHub Actions run 34845597032 (release-candidate draft
-# PR #1240, tests.yml bats job, macos-latest, 5 shards, 2026-09-14, the tree
-# after #1105/#1231/#1234/#1237/#1239/#1241/#1245 landed). Every shard in
-# that run completed (none timed out), so every file below has a real
-# file_end record -- summed from the run's 5 bats-timings-macos-latest-*
-# artifacts (file_end rows only, macOS only).
+# MEASURED AGAINST: GitHub Actions run 35563098757 (main, tests.yml bats
+# job, macos-latest, 5 shards, 2026-09-21). Every shard in that run
+# completed (none timed out), so every file below has a real file_end
+# record -- summed from the run's 5 bats-timings-macos-latest-* artifacts
+# (file_end rows only, macOS only).
+#
+# PREVIOUS MEASUREMENT: run 34845597032, 2026-09-14. Refreshing against
+# this run brought the heaviest of the current 5 shards from 1132s down to
+# 839s (#1304 CI-capacity work: the shard split itself was fine, this table
+# had just gone stale -- see that run's own per-file numbers for detail).
+# The suite's total real time also fell in this window (old table sum
+# 6249s over the files common to both tables vs 4173s now), and that fall
+# is two real perf fixes, not broad drift: test_remote_engine_start_refusal.bats
+# 660s->43s and test_remote_status_liveness.bats 346s->80s are both #1252
+# (shortened the two slowest tests' production-readiness wait). A third
+# file, test_watch.bats, measured 317s->2s in this same run -- that IS a
+# real 2s today (the file is quarantined as a whole for #1262, setup()
+# skips every test unconditionally, see that row's own comment), not a
+# stale or misleading number: this table's job is to weight the partition
+# by what a file actually costs the CURRENT run, and 2s is what it costs
+# while quarantined. (A pre-quarantine 317s was pinned here briefly and
+# reverted -- it made the on-paper balance look nicer but actively
+# unbalanced the real schedule, handing ~315s of work to a shard that
+# would not actually spend it; review finding, see the row's own comment
+# for the reasoning #1318 needs when it un-quarantines the file.) Every
+# other file moved by single-digit seconds either way. So this window's
+# imbalance was not organic, even drift -- it was two real fixes plus one
+# quarantine, and neither is the kind of thing that keeps happening on a
+# schedule; each only moves this table when something specific (a perf
+# fix, a quarantine, an un-quarantine) actually happens to a file.
+# Update-on-notice, prompted by exactly that kind of change, stays the
+# right call -- no scheduled or automated refresh needed.
 #
 # A file with no row here (renamed, or added after this measurement) is
 # estimated at this table's own average seconds/file by shard-tests.sh,
 # never treated as zero-cost or dropped from the partition -- coverage does
-# not depend on this table being current. Refresh by re-running this
-# extraction against a green run's bats-timings artifacts once the tree
-# drifts enough that the balance this buys degrades (watched by
-# tests/test_ci_sharding.bats's balance-ratio assertion, not by a schedule).
+# not depend on this table being current. tests/test_ci_sharding.bats's
+# balance-ratio assertion checks the computed partition against THIS
+# table's own numbers, not against a live run, so it cannot detect this
+# table drifting out of sync with reality -- only a human noticing a real
+# run's shard skew (as happened here) triggers a refresh. Refresh by
+# re-running this extraction against a green run's bats-timings artifacts.
 #
 # Columns: basename<TAB>seconds. Sorted by basename for a legible diff.
-test_actas_integration.bats	65
-test_actas_lock.bats	35
+test_actas_integration.bats	54
+test_actas_lock.bats	34
 test_antigravity_resume.bats	1
-test_antigravity_transport.bats	12
-test_api.bats	44
-test_app_release_signing.bats	1
-test_apply_fail_stderr.bats	0
-test_bin_agmsg.bats	2
-test_binding_mode.bats	3
-test_boot_command.bats	10
+test_antigravity_transport.bats	20
+test_api.bats	63
+test_app_release_signing.bats	0
+test_apply_fail_stderr.bats	1
+test_bin_agmsg.bats	1
+test_binding_mode.bats	4
+test_boot_command.bats	9
 test_bump_app_version.bats	0
-test_capability_docs.bats	2
-test_ci_forensics.bats	1
-test_ci_sharding.bats	69
-test_ci_workflow.bats	0
-test_claude_template.bats	1
+test_capability_docs.bats	1
+test_ci_forensics.bats	0
+test_ci_sharding.bats	77
+test_ci_workflow.bats	1
+test_claude_template.bats	2
 test_close_fds.bats	0
-test_cmdline_path_match.bats	1
-test_codex_bridge.bats	199
-test_codex_bridge_launcher.bats	281
-test_codex_monitor.bats	9
-test_codex_resume.bats	10
-test_codex_shim.bats	20
-test_compat.bats	3
-test_compat_posix.bats	1
-test_config.bats	2
-test_cut_release.bats	5
-test_delivery.bats	432
-test_despawn.bats	137
-test_dispatch.bats	75
-test_doctor.bats	97
+test_cmdline_path_match.bats	2
+test_codex_bridge.bats	153
+test_codex_bridge_launcher.bats	237
+test_codex_monitor.bats	7
+test_codex_resume.bats	9
+test_codex_shim.bats	18
+test_compat.bats	2
+test_compat_posix.bats	2
+test_config.bats	3
+test_cut_release.bats	4
+test_delivery.bats	379
+test_despawn.bats	108
+test_dispatch.bats	45
+test_doctor.bats	72
 test_endpoint_scheme.bats	1
-test_endpoint_table_node.bats	0
-test_enforced_assertions.bats	2
+test_endpoint_table_node.bats	1
+test_enforced_assertions.bats	1
 test_engine_inherited_fds.bats	21
-test_export.bats	37
+test_export.bats	30
 test_harness_self_name_off.bats	1
-test_hash.bats	4
-test_herdr_cli_routing.bats	3
+test_hash.bats	7
+test_herdr_cli_routing.bats	2
 test_identity_path_forms.bats	6
-test_inbox.bats	114
-test_install.bats	109
-test_instance_id.bats	30
-test_jsonl_remote_sync.bats	44
-test_key.bats	72
-test_legacy_mirror.bats	11
+test_inbox.bats	76
+test_install.bats	103
+test_instance_id.bats	15
+test_jsonl_remote_sync.bats	41
+test_key.bats	74
+test_legacy_mirror.bats	8
 test_local_quoting.bats	1
-test_local_team_ids.bats	11
+test_local_team_ids.bats	13
 test_locator.bats	5
-test_messaging.bats	124
-test_migrate_team_store.bats	151
+test_messaging.bats	81
+test_migrate_team_store.bats	106
 test_node_resolve.bats	1
-test_peek_poke.bats	22
-test_perf_harness.bats	12
-test_placement_actual_location.bats	2
-test_placement_collisions.bats	38
-test_plugin_registry.bats	7
-test_printed_command_paths.bats	10
-test_refute.bats	1
-test_registry_lock.bats	8
+test_peek_poke.bats	55
+test_perf_harness.bats	11
+test_placement_actual_location.bats	1
+test_placement_collisions.bats	37
+test_plugin_registry.bats	4
+test_printed_command_paths.bats	9
+test_refute.bats	0
+test_registry_lock.bats	6
 test_release_ci_skip.bats	1
 test_release_dist_tag.bats	1
-test_remote.bats	453
-test_remote_curl_config_paths.bats	5
+test_remote.bats	322
+test_remote_curl_config_paths.bats	4
 test_remote_curl_stderr.bats	3
-test_remote_curl_stderr_get.bats	6
-test_remote_engine_start_refusal.bats	660
-test_remote_forget.bats	11
-test_remote_header_sink.bats	4
-test_remote_refusal.bats	18
+test_remote_curl_stderr_get.bats	3
+test_remote_engine_start_refusal.bats	43
+test_remote_forget.bats	10
+test_remote_header_sink.bats	2
+test_remote_refusal.bats	11
 test_remote_setup_doc.bats	8
-test_remote_status_liveness.bats	346
-test_remote_sync.bats	328
-test_remote_sync_apply_blob.bats	5
-test_remote_sync_ca_bundle.bats	1
-test_remote_sync_driver_input.bats	0
-test_remote_sync_engine.bats	12
+test_remote_status_liveness.bats	80
+test_remote_sync.bats	169
+test_remote_sync_apply_blob.bats	4
+test_remote_sync_ca_bundle.bats	0
+test_remote_sync_driver_input.bats	1
+test_remote_sync_engine.bats	11
 test_remote_sync_reject_envelope.bats	5
-test_require_python3.bats	5
-test_reset_role_session.bats	13
-test_resolve_project.bats	35
-test_resume_seat_guard.bats	19
-test_resurrect_panes.bats	11
-test_role_session.bats	14
-test_roster_journal.bats	99
-test_self_fix.bats	13
+test_require_python3.bats	2
+test_reset_role_session.bats	11
+test_resolve_project.bats	33
+test_resume_seat_guard.bats	14
+test_resurrect_panes.bats	9
+test_role_session.bats	9
+test_roster_journal.bats	88
+test_self_fix.bats	9
 test_self_identity.bats	24
-test_self_name.bats	149
-test_self_proof.bats	42
-test_self_rename.bats	30
-test_self_write.bats	46
-test_self_write_lock.bats	36
+test_self_name.bats	69
+test_self_proof.bats	48
+test_self_rename.bats	34
+test_self_write.bats	42
+test_self_write_lock.bats	35
 test_session_start_terminal_line.bats	12
 test_setup.bats	1
 test_shquote.bats	1
-test_spawn.bats	477
-test_spawn_fd_guard.bats	1
+test_spawn.bats	425
+test_spawn_fd_guard.bats	0
 test_spawn_options.bats	2
-test_sqlite_crlf.bats	9
-test_sqlite_sync_jq_binary.bats	5
-test_storage.bats	37
-test_storage_contract.bats	44
+test_sqlite_crlf.bats	10
+test_sqlite_sync_jq_binary.bats	9
+test_storage.bats	30
+test_storage_contract.bats	32
 test_sweep_enumeration.bats	9
-test_sync_autostart.bats	29
-test_sync_cipher.bats	7
-test_team.bats	198
-test_team_guidance_usage.bats	1
-test_team_list.bats	28
+test_sync_autostart.bats	21
+test_sync_cipher.bats	5
+test_team.bats	185
+test_team_guidance_usage.bats	0
+test_team_list.bats	23
 test_team_status.bats	14
 test_teardown_reap.bats	3
-test_terminal_context_line.bats	2
+test_terminal_context_line.bats	1
 test_terminal_registry.bats	81
 test_token_locate.bats	3
 test_transcript_exists.bats	2
-test_type_registry.bats	36
+test_type_registry.bats	35
 test_unguarded_env_reads.bats	2
-test_wait_helpers.bats	40
-test_watch.bats	317
-test_watch_install_changed.bats	24
-test_watch_once.bats	91
-test_watch_stuck_map.bats	3
-test_where.bats	1
+test_wait_helpers.bats	41
+# 2s is real, not stale -- the whole file is quarantined for #1262
+# (setup() skips every test unconditionally, tracked by #1318), so this is
+# what it actually costs THIS run, which is what this table exists to
+# reflect (a pinned pre-quarantine value was tried and reverted: it gave a
+# nicer-looking on-paper balance but actively unbalanced the real schedule,
+# handing 315s of imaginary work to whichever shard it landed in while that
+# shard really finished ~300s early). #1318 must re-measure and update this
+# row when it un-quarantines the file -- until then, reuse 2, not a stale
+# pre-quarantine number.
+test_watch.bats	2
+test_watch_install_changed.bats	34
+test_watch_once.bats	53
+test_watch_process_count.bats	18
+test_watch_stuck_map.bats	4
+test_where.bats	2

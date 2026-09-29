@@ -320,7 +320,7 @@ $agmsg
 ~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>" [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
-~/.agents/skills/<cmd>/scripts/team.sh <team>
+~/.agents/skills/<cmd>/scripts/team.sh <team> [--json] [--delete] [--force] [--purge-messages] [--yes]
 ~/.agents/skills/<cmd>/scripts/whoami.sh <project_path> <type>
 ~/.agents/skills/<cmd>/scripts/delivery.sh set <mode> <type> <project_path>
 ~/.agents/skills/<cmd>/scripts/delivery.sh status [<type> <project_path>]
@@ -387,13 +387,18 @@ DBとチーム設定は保持される。更新されるのはスクリプトと
 
 ## アンインストール
 
+`uninstall.sh`のコピーは各installの中にも入っているので、`git clone`・`npx agmsg`・curlのワンライナー、どの方法でinstallしても以下の形で使える:
+
 ```bash
-./uninstall.sh              # インタラクティブ（各ステップを確認）
-./uninstall.sh --yes        # すべて削除
-./uninstall.sh --keep-data  # スキルは削除するがDBとチームは残す
+~/.agents/skills/agmsg/uninstall.sh              # そのinstallだけ（各ステップを確認）
+~/.agents/skills/agmsg/uninstall.sh --yes        # そのinstallだけ、確認なし
+~/.agents/skills/agmsg/uninstall.sh --keep-data  # スキルは削除するがDBとチームは残す
+~/.agents/skills/agmsg/uninstall.sh --all        # このマシン上のagmsgのinstallを全部
 ```
 
-インストール済みのスキルディレクトリを自動検出し、スキルファイル、スラッシュコマンド、フック、AGENTS.mdのセクション、チーム設定をクリーンアップする。
+`--all`が無ければ、実行した1つのinstallだけを削除する。クリーンアップされるのは: スキルファイル、スラッシュコマンド、フック、AGENTS.mdのセクション、チーム設定。
+
+`git clone`したチェックアウトが手元にあれば、リポジトリルートの`./uninstall.sh`も、このマシンにinstallが1つだけなら同じように動く。2つ以上ある場合は、どれを指しているか推測せずに断る。削除したいinstallの中にある`uninstall.sh`を実行するか、`--all`を渡してマシン上の全installを削除する(`--yes`を付けない限り、まとめて1回だけ確認し、加えて各installのDBとチームも消すかを別途1回確認する)。
 
 ## 設定
 

@@ -225,6 +225,31 @@ agmsg_role_session_mark_named() {
   return 0
 }
 
+# Drop the naming mark without touching any other field (#1485): a pane taken
+# over from a dead session's record must stop asserting that OLD (team, agent)
+# still holds it, while the role itself (every other line in the file) stays
+# registered exactly as it was. No-op, successfully, when there is no record or
+# no mark -- this is cleanup, never something a caller needs to react to.
+#
+# BY PATH, unlike every other public function here: the one caller (the
+# placement guard's dead-claimant takeover) finds the record from a spawn
+# record's file NAME, and #1114's own comment already covers why team/agent
+# cannot be decoded back out of that name ("__" is legal inside a name). This
+# takes the same role-session PATH the guard already computed by substituting
+# "spawn." for "role-session." in that file name, rather than asking every
+# caller to re-derive team/agent just to hand them back in for re-encoding.
+agmsg_role_session_clear_named_at() {   # <role-session-record-path>
+  local path="$1" dir tmp line
+  [ -n "$path" ] && [ -f "$path" ] || return 0
+  dir="$(_actas_lock_dir)"
+  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in named_ref=*|named_epoch=*|named_at=*) ;; *) printf '%s\n' "$line" ;; esac
+  done < "$path" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # The mark as "<ref>\t<epoch>", or empty when there is none. Two reads of one
 # small file, no process; this is the common-case cost of "am I named?"
 # (measured 0.22 ms), which is what lets a seat ask on every action.
@@ -359,5 +384,43 @@ agmsg_role_session_lookup_by_sid() {
       return 0
     fi
   done
+  return 0
+}
+
+# Print "<team>\t<agent>" for the ONE role whose record has type=<type>,
+# session=<sid> and project=<project_physical>, or nothing (and return 1) when
+# zero or several such records exist. <project_physical> must already be in
+# the same canonical (symlink-resolved) form agmsg_role_session_record itself
+# stores -- pass it through agmsg_canonical_path first, the same way
+# codex-record-session.sh does before recording.
+#
+# Same "exactly one or nothing" bias as every other inference in this family
+# (agmsg_role_session_recorded_uuids's subtraction in codex-record-session.sh,
+# the rollout-scan fallback there): guessing which role to hand a resumed
+# thread to is worse than not handing it to one, so an ambiguous or absent
+# answer is silence, never a pick among candidates (#1401).
+agmsg_role_session_match_unique() {
+  local type="$1" project_physical="$2" sid="$3" dir f t p v team agent match=""
+  [ -n "$type" ] && [ -n "$project_physical" ] && [ -n "$sid" ] || return 1
+  dir="$(_actas_lock_dir)"
+  [ -d "$dir" ] || return 1
+  for f in "$dir"/role-session.*; do
+    [ -f "$f" ] || continue
+    t="$(_agmsg_role_session_field "$f" type)"
+    [ "$t" = "$type" ] || continue
+    v="$(_agmsg_role_session_field "$f" session)"
+    [ "$v" = "$sid" ] || continue
+    p="$(_agmsg_role_session_field "$f" project)"
+    [ "$p" = "$project_physical" ] || continue
+    # A second qualifying record makes the answer ambiguous; give up rather
+    # than pick the first one found (readdir order is not meaningful).
+    [ -n "$match" ] && return 1
+    team="$(_agmsg_role_session_field "$f" team)"
+    agent="$(_agmsg_role_session_field "$f" agent)"
+    [ -n "$team" ] && [ -n "$agent" ] || continue
+    match="$team"$'\t'"$agent"
+  done
+  [ -n "$match" ] || return 1
+  printf '%s\n' "$match"
   return 0
 }

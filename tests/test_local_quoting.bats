@@ -60,7 +60,7 @@ reference_lit() { printf '%s' "$1" | sed "s/'/''/g"; }
 }
 
 CONVERTED=(
-  "check-inbox.sh 1" "history.sh 2" "inbox.sh 1" "send.sh 1" "watch.sh 1"
+  "check-inbox.sh 1" "history.sh 2" "inbox.sh 1" "send.sh 2" "watch.sh 1"
   "lib/sqlpath.sh 1" "drivers/storage/sqlite.sh 1"
 )
 
@@ -86,7 +86,7 @@ CONVERTED=(
     }
     total=$((total + subs))
   done
-  [ "$total" -eq 8 ] || { echo "expected 8 sites, counted $total" >&2; false; }
+  [ "$total" -eq 9 ] || { echo "expected 9 sites, counted $total" >&2; false; }
 }
 
 # The form that broke #897 on macOS: a backslashed quote as the REPLACEMENT.

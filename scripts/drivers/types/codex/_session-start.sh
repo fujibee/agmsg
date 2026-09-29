@@ -103,6 +103,17 @@ INNER_EOF
 }
 
 agmsg_session_start() {
+  # #1477: report, once, if this profile's Codex config is missing this
+  # install's writable_roots (Codex installed after agmsg, so
+  # configure_codex_sandbox never saw a config to write into). Read-only,
+  # and unconditional — runs before every other branch below, several of
+  # which `exit 0` early, so the notice would otherwise never be reached on
+  # a fresh/no-bridge-needed session.
+  if ! declare -F agmsg_codex_writable_roots_notice >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/lib/codex-config.sh"
+  fi
+  agmsg_codex_writable_roots_notice "$SKILL_DIR"
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
   [ -n "$thread_id" ] || exit 0
   # A recorded role belongs to its recorded Codex thread. The in-sandbox
@@ -206,25 +217,47 @@ EOF
   [ -n "$app_server" ] || exit 0
 
   mkdir -p "$RUN_DIR" 2>/dev/null || true
-  if [ "$pair_count" = "1" ]; then
-    IFS=$'\t' read -r key_team key_name <<EOF
-$PAIRS
-EOF
-    bridge_key="$key_team.$key_name"
-  else
-    bridge_key=$(printf '%s' "$PAIRS" | agmsg_sha1)
+  # #1470 review round 5: derived through the one shared function
+  # (agmsg_codex_bridge_key), not recomputed here from $PAIRS/$pair_count --
+  # self-fix.sh's own state check calls the SAME function for the SAME
+  # (project, thread_id), so the two can never land on different keys the
+  # way two independent re-derivations of "the safe set" eventually would.
+  if ! declare -F agmsg_codex_bridge_key >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/drivers/types/codex/_bridge-key.sh"
   fi
+  bridge_key="$(agmsg_codex_bridge_key "$PROJECT" "$thread_id")"
+  [ -n "$bridge_key" ] || exit 0
   bridge_pairs=()
   while IFS=$'\t' read -r candidate_team candidate_name; do
     bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")
   done <<< "$PAIRS"
   pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
+  # Same name the out-of-sandbox launcher uses for its own per-bridge thread
+  # record (codex-bridge-launcher.sh's thread_file) -- not shared machinery,
+  # just the same convention, so a reader who knows one knows the other, and
+  # so self-fix.sh's own state check (#1470 review) can read the truth for
+  # either architecture from one place.
+  #
+  # A live pidfile here is left ALONE even when its bound thread is stale
+  # (#1470 review round 4): "alive" only proves a pid is running, never that
+  # it is THIS bridge -- a reused pid could belong to something else
+  # entirely -- and this path, unlike the launcher, has no lease/start-token
+  # reaper to prove the old writer is actually gone before a replacement is
+  # spawned beside it (#935's hazard). Production arms the launcher
+  # (codex-monitor.sh sets AGMSG_CODEX_BRIDGE_LAUNCHER=1), which DOES have
+  # that reaper and already self-heals a thread change on its own polling
+  # cadence; this direct path's job is only to stand down safely, not to
+  # retry. self-fix.sh reads the stale thread_file it leaves behind and
+  # reports the seat as needing another pass, rather than this hook
+  # guessing at a repair it cannot safely make.
   if [ -f "$pidfile" ]; then
     bridge_pid=$(cat "$pidfile" 2>/dev/null || true)
     if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
       exit 0
     fi
   fi
+  thread_file="$RUN_DIR/codex-bridge.$bridge_key.thread"
 
   log="$RUN_DIR/codex-bridge.$bridge_key.log"
   # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
@@ -266,5 +299,6 @@ EOF
       --inline-inbox \
       >>"$log" 2>&1 3>&- 4>&- &
   )
+  printf '%s' "$thread_id" > "$thread_file" 2>/dev/null || true
   exit 0
 }

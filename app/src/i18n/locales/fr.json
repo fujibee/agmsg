@@ -98,12 +98,25 @@
       "body": "Cela retire {{name}} de {{team}} et ferme son panneau s'il est en cours d'exécution. Cette action est irréversible depuis ici.",
       "confirmLabel": "Quitter"
     },
+    "deleteTeam": {
+      "title": "Supprimer l'équipe « {{team}} » ?",
+      "body": "Cela supprime définitivement l'équipe « {{team}} » : sa configuration, sa liste de membres, son historique d'identité et les enregistrements d'exécution de chaque agent. Cette action est irréversible. Si elle était connectée à un serveur distant, une reconnexion ultérieure peut la restaurer.",
+      "confirmLabel": "Supprimer l'équipe",
+      "forceLabel": "Supprimer avec les membres",
+      "purgeMessagesToo": "Supprimer aussi l'historique des messages",
+      "membersRemainBody": "Cette équipe compte {{count}} membre(s). Les retirer tous de l'équipe et la supprimer ?"
+    },
+    "purgeMessages": {
+      "title": "Purger l'historique des messages de l'équipe « {{team}} » ?",
+      "body": "Cela supprime définitivement tout l'historique des messages de l'équipe « {{team}} » ; il ne peut pas être restauré.",
+      "confirmLabel": "Supprimer les messages"
+    },
     "newTeam": {
       "titleFirstRun": "Bienvenue — créez votre première équipe",
       "title": "Nouvelle équipe",
       "note": "Crée l'équipe et vous ajoute comme son app-user (le propriétaire de la zone de discussion en bas).",
       "teamNameLabel": "Nom de l'équipe",
-      "teamNamePlaceholder": "mon-equipe",
+      "teamNamePlaceholder": "p. ex. mon-equipe",
       "appUserLabel": "Votre nom (app-user)",
       "create": "Créer"
     },
@@ -115,16 +128,18 @@
     "agent": {
       "title": "Ajouter un agent",
       "typeLabel": "Type",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "p. ex. alice",
       "addAndSpawn": "Ajouter et démarrer"
     },
     "rename": {
       "title": "Renommer {{current}}",
       "newNameLabel": "Nouveau nom",
-      "confirmButton": "Renommer"
+      "confirmButton": "Renommer",
+      "confirmButtonBusy": "Renommage…"
     },
     "confirm": {
-      "defaultLabel": "Confirmer"
+      "defaultLabel": "Confirmer",
+      "workingLabel": "En cours…"
     },
     "settings": {
       "title": "Paramètres"
@@ -140,6 +155,13 @@
       "confirmLabel": "Fermer le panneau"
     }
   },
+  "toast": {
+    "renameTeam": "Équipe « {{from}} » renommée en « {{to}} ».",
+    "deleteTeam": "Équipe « {{team}} » supprimée.",
+    "deleteTeamForce": "Équipe « {{team}} » supprimée ({{count}} membre(s) retiré(s)).",
+    "purgeMessages": "Messages de l'équipe « {{team}} » supprimés.",
+    "actionFailed": "Échec : {{reason}}"
+  },
   "ctxMenu": {
     "member": {
       "spawnTo": "Démarrer vers ▸",
@@ -147,6 +169,11 @@
       "existingTabsDivider": "— onglets existants —",
       "rename": "Renommer…",
       "leave": "Quitter"
+    },
+    "team": {
+      "rename": "Renommer…",
+      "delete": "Supprimer l'équipe…",
+      "deleteMessages": "Supprimer les messages…"
     },
     "pane": {
       "close": "Fermer",

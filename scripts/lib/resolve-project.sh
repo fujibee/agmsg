@@ -46,6 +46,18 @@
 # shellcheck disable=SC1091
 . "$SKILL_DIR/scripts/lib/instance-id.sh"
 
+# _agmsg_agent_binaries below reads each type's detect_proc from its manifest
+# rather than a hardcoded list, but deliberately does NOT source
+# type-registry.sh here at module scope: this file sits on watch.sh's startup
+# path, and type-registry.sh's own top-level work (every known type scanned,
+# piped through `paste`) is unconditional at source time on a branch/main that
+# predates its #1366 fix -- and unconditional forever for the *built-in* case
+# even after that fix, since sourcing itself still pulls in driver-registry.sh.
+# _agmsg_type_detect_proc below reads a single manifest key directly for the
+# common (built-in type) case, and only falls back to sourcing type-registry.sh
+# -- lazily, guarded, right there -- for a type that isn't built in (an
+# external/plugin type, where the trust-aware lookup is genuinely needed).
+
 _agmsg_run_dir() { printf '%s/run' "$SKILL_DIR"; }
 
 # Canonicalize a directory path by resolving symlinks to its physical location.
@@ -227,21 +239,183 @@ agmsg_find_registered_project_variant() {
   return 1
 }
 
+# Does an external base (an opt-in plugin dir) even HAVE a
+# types/<type>/type.conf -- existence only, never a trust decision
+# (driver-registry.sh's agmsg_driver_is_trusted owns that). Deliberately
+# never cached: both AGMSG_PLUGIN_DIRS and trust state (agmsg_driver_trust /
+# agmsg_driver_untrust) can change within one long-lived process (watch.sh),
+# and this costs nothing worth caching anyway -- `[ -f ]` tests only, no
+# external command, no fork. Bases and their order come straight from
+# driver-registry.sh's own agmsg_driver_bases -- verified against that file
+# directly, not from memory (2026-09-22): builtin ($root/scripts/drivers,
+# always eligible, not checked here since it is never itself an override
+# source), then $root/plugins, then each $AGMSG_PLUGIN_DIRS entry.
+_agmsg_type_external_candidate() {
+  local type="$1" root="${SKILL_DIR:-}" d
+  [ -n "$root" ] || return 1
+  [ -f "$root/plugins/types/$type/type.conf" ] && return 0
+  local IFS=:
+  for d in ${AGMSG_PLUGIN_DIRS:-}; do
+    [ -n "$d" ] && [ -f "$d/types/$type/type.conf" ] && return 0
+  done
+  return 1
+}
+
+# Read a single type's detect_proc manifest key, without sourcing
+# type-registry.sh for the common case. Built-in types (drivers/types/<name>/
+# type.conf, always trusted) are read directly here -- same shape
+# type-registry.sh's own agmsg_type_get uses (grep the key line, take the
+# first match, trim/unquote), so behavior matches exactly for every type this
+# is actually tested against.
+#
+# That fast path is taken ONLY when _agmsg_type_external_candidate says no
+# external base could possibly override this type (review, #631 -- the
+# first version of this function always preferred the builtin, silently
+# skipping the registry's own "a trusted external plugin shadows a
+# same-named builtin" contract, which is exactly the #626/#631 bug class in
+# a new place). Whenever a candidate exists, this defers to the full,
+# trust-aware lookup, whether or not that candidate turns out trusted --
+# deciding trust here too would risk drifting from the real policy
+# (driver-registry.sh's agmsg_driver_is_trusted) instead of reusing it.
+# Sourced lazily, only on that fallback, so a plugin-free install -- the
+# case every current test exercises -- never pays type-registry.sh's own
+# source-time cost.
+_agmsg_type_detect_proc() {
+  local type="$1" root dir line val
+  [ -n "${SKILL_DIR:-}" ] || return 1
+  root="$SKILL_DIR"
+
+  if ! _agmsg_type_external_candidate "$type"; then
+    dir="$root/scripts/drivers/types/$type"
+    if [ -f "$dir/type.conf" ]; then
+      line="$( { grep -E '^[[:space:]]*detect_proc[[:space:]]*=' "$dir/type.conf" 2>/dev/null || true; } | head -1)"
+      if [ -n "$line" ]; then
+        val="${line#*=}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%"${val##*[![:space:]]}"}"
+        case "$val" in \"*\") val="${val#\"}"; val="${val%\"}" ;; esac
+        printf '%s' "$val"
+        return 0
+      fi
+    fi
+  fi
+
+  if ! declare -F agmsg_type_get >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/lib/type-registry.sh"
+  fi
+  agmsg_type_get "$type" detect_proc ""
+}
+
 # Map an agent type to the binary basename(s) its process may carry.
-# Names must be type-distinctive. Do not list `agent`: Homebrew grok-build
-# and the Cursor CLI installer both use that basename (#856). Matching it
-# would attach the wrong pid (#93). The alias is an intentional miss.
+#
+# Process names that identify an agent of <type>, taken from the type manifest's
+# detect_proc (drivers/types/<name>/type.conf) so a type added by dropping in a
+# directory is recognized here too. Glob tokens ("cursor-agent-*") are dropped:
+# the matcher below already tries "<bin>-*" for every entry it is given.
+#
+# The case arms are the fallback for a type whose manifest carries no detect_proc
+# (antigravity, copilot, hermes) or whose manifest cannot be found at all.
+# Reaching them used to be routine rather than exceptional: every type without
+# an arm — cursor, grok-build, hermes — matched against "claude codex gemini",
+# so agmsg_pid_is_agent accepted an enclosing Claude Code process as, say, a
+# cursor agent. agmsg_resolve_project step 1 then read THAT session's project
+# marker, and a cursor member's project resolved to the project of whoever was
+# asking. reset.sh, handed a correct path, looked for the registration under
+# the caller's project and reported "No registrations removed" while it sat in
+# the roster.
+#
+# Names must also be type-distinctive: do not add `agent` to any arm below.
+# Homebrew grok-build and the Cursor CLI installer both use that basename
+# (#856), and matching it would attach the wrong pid (#93) -- the alias is an
+# intentional miss, on the manifest side too (grok-build's detect_proc lists
+# `grok`, not `agent`).
+#
+# Memoized per type: agmsg_pid_is_agent runs inside agmsg_agent_pid's ppid walk
+# (up to 20 hops), and a manifest read per hop is a filesystem scan per hop.
+#
+# Also sets _AGMSG_AGENT_BINARIES_OUT (in addition to printing, which the bats
+# suite's `run`/`$( )` call sites still rely on) so a caller that is NOT
+# itself inside a command substitution can read the result as a plain
+# statement. agmsg_pid_is_agent below used to call this via
+# `binaries=$(_agmsg_agent_binaries "$type")` -- that `$( )` forks a subshell
+# for the WHOLE function body, so the cache write a few lines below
+# (`printf -v "$cache_var" ...`) landed in that subshell's memory and was
+# gone the moment it exited. Every single call re-ran the grep+head below:
+# measured, 5 calls for the same type cost 5 greps and 5 heads, not 1 (the
+# memoization existed in source but did nothing). See memory's "a cache array
+# populated inside $(...) is discarded" for the same shape elsewhere.
 _agmsg_agent_binaries() {
-  case "$1" in
-    claude-code) echo "claude" ;;
-    codex)       echo "codex" ;;
-    gemini)      echo "gemini" ;;
-    antigravity) echo "antigravity" ;;
-    copilot)     echo "copilot" ;;
-    opencode)    echo "opencode" ;;
-    grok-build)  echo "grok" ;;
-    *)           echo "claude codex gemini" ;;
-  esac
+  local type="$1" cache_var procs tok out="" cacheable=1
+  # Only the "no external candidate, read the builtin" answer is cached
+  # (review): an external candidate's own detect_proc can only be read
+  # correctly by re-checking trust every time -- agmsg_driver_trust /
+  # agmsg_driver_untrust can flip WITHIN one long-lived process (watch.sh),
+  # so a cached "not yet trusted, use the builtin" answer would keep
+  # returning the builtin forever after a later `agmsg plugin trust`
+  # (measured: caching that path made exactly this happen, in one process,
+  # across two calls). That path is already uncached lower down, in
+  # _agmsg_type_detect_proc's own fallback to type-registry.sh; skipping
+  # the cache here for it costs nothing the hot path's own fork budget
+  # cares about, since it is only reached by an install that actually has a
+  # plugin dir for this type.
+  _agmsg_type_external_candidate "$type" && cacheable=0
+  # A type name outside [A-Za-z0-9_-] is also never cached (review): the
+  # registry does not reject any character in a type name (nothing here
+  # validates one either), and the two-character escape below only defines
+  # a mapping for '_' and '-' -- an unescaped third character (e.g. a
+  # literal '.') would land straight into $cache_var and make it an
+  # invalid bash variable name, not merely a collision risk. Every real
+  # type name on the hot path (claude-code, codex, ...) is already
+  # [a-z0-9-] and stays cached; only a name this tree has never produced,
+  # and cannot validate away, computes fresh on every call instead.
+  case "$type" in *[!A-Za-z0-9_-]*) cacheable=0 ;; esac
+
+  if [ "$cacheable" -eq 1 ]; then
+    # Reversible, collision-free (review): '_' -> '_5f' first, THEN
+    # '-' -> '_2d', in that order, so the '_' a '-' escape introduces is
+    # never re-escaped as if it were an original one. The previous version
+    # sanitized with `${type//[^A-Za-z0-9]/_}`, which is lossy and NOT
+    # collision-free ('foo-bar' and 'foo_bar' produced the same key) --
+    # measured. Every existing and plausible type name is [a-z0-9-]
+    # (claude-code, grok-build, agmsg-app, ...); nothing in this tree
+    # validates or rejects any other character in a type name, but nothing
+    # uses one either, so there is no third character to give the same
+    # treatment. AGMSG_PLUGIN_DIRS no longer participates in this key at
+    # all -- dropping it removes the OTHER collision this same review found
+    # ('/tmp/a-b' and '/tmp/a/b' both sanitizing to 'tmp_a_b') by removing
+    # the input, not by trying to encode it safely; the existence check
+    # above already re-reads it on every call regardless.
+    cache_var="${type//_/_5f}"
+    cache_var="${cache_var//-/_2d}"
+    cache_var="_AGMSG_AGENT_BINS_$cache_var"
+    if [ -n "${!cache_var:-}" ]; then
+      _AGMSG_AGENT_BINARIES_OUT="${!cache_var}"
+      printf '%s\n' "$_AGMSG_AGENT_BINARIES_OUT"
+      return 0
+    fi
+  fi
+
+  procs="$(_agmsg_type_detect_proc "$type" 2>/dev/null || true)"
+  for tok in $procs; do
+    case "$tok" in *'*'*) continue ;; esac
+    out="${out:+$out }$tok"
+  done
+  if [ -z "$out" ]; then
+    case "$type" in
+      claude-code) out="claude" ;;
+      codex)       out="codex" ;;
+      gemini)      out="gemini" ;;
+      antigravity) out="antigravity" ;;
+      copilot)     out="copilot" ;;
+      opencode)    out="opencode" ;;
+      grok-build)  out="grok" ;;
+      *)           out="claude codex gemini" ;;
+    esac
+  fi
+  [ "$cacheable" -eq 1 ] && printf -v "$cache_var" '%s' "$out"
+  _AGMSG_AGENT_BINARIES_OUT="$out"
+  printf '%s\n' "$out"
 }
 
 # Does <pid> currently look like an agent process of <type>? Checks both the
@@ -265,7 +439,8 @@ agmsg_pid_is_agent() {
   [ -n "$pid" ] || return 1
   _agmsg_pid_alive "$pid" || return 1
   local binaries comm cmdline first base bin
-  binaries=$(_agmsg_agent_binaries "$type")
+  _agmsg_agent_binaries "$type" >/dev/null
+  binaries="$_AGMSG_AGENT_BINARIES_OUT"
   comm=$(compat_get_comm "$pid" 2>/dev/null || true)
   cmdline=$(compat_get_cmdline "$pid" 2>/dev/null || true)
   case "$cmdline" in
@@ -395,6 +570,49 @@ agmsg_registered_projects() {
       WHERE json_extract(r.value, '\$.type') = '$type_sql';
     " | tr -d '\r'
   done
+}
+
+# Echo the single type registered for <agent> in <team>'s config.json (rc 0),
+# or nothing (rc 1) when the agent has no registration there, or more than one
+# DISTINCT type across its registrations — an ambiguity this function refuses
+# to arbitrate rather than guess at.
+#
+# Used by self-name.sh (#1391): a hand-started seat's placement-record write
+# used to fill in a missing type by guessing (agmsg_detect_cli_type), and that
+# guess's own last-resort default silently produced 'claude-code' for a seat
+# of any other type whose process tree the guesser could not identify. join.sh
+# already recorded the real type when the seat joined; reading THAT back is
+# not a guess.
+agmsg_registered_type() {
+  local team="$1" agent="$2" config_file cfg_sql agent_sql out n
+  # A separate assignment, not folded into the `local` line above: `$team`
+  # there would be expanded before that line's own `team=` takes effect (a
+  # `local a=$1 b=...$a...` measured, live, to see $a as still UNSET under
+  # `set -u` -- every name in one `local` command is expanded against the
+  # PRE-command state, not against sibling names assigned earlier in the
+  # same command).
+  config_file="${SKILL_DIR:-}/teams/$team/config.json"
+  [ -n "$team" ] && [ -n "$agent" ] && [ -f "$config_file" ] || return 1
+  agent_sql=$(printf '%s' "$agent" | sed "s/'/''/g")
+  cfg_sql=$(agmsg_sql_readfile_path "$config_file")
+  out="$(sqlite3 :memory: "
+    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
+    agent AS (
+      SELECT CASE
+        WHEN json_type(json_extract(value, '\$.registrations')) = 'array' THEN json_extract(value, '\$.registrations')
+        ELSE json_array(json_object('type', json_extract(value, '\$.type'), 'project', json_extract(value, '\$.project')))
+      END AS registrations
+      FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
+      WHERE key = '$agent_sql'
+    )
+    SELECT DISTINCT json_extract(r.value, '\$.type')
+    FROM agent, json_each(agent.registrations) AS r
+    WHERE json_extract(r.value, '\$.type') IS NOT NULL;
+  " 2>/dev/null | tr -d '\r')"
+  n=$(printf '%s\n' "$out" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+  [ "$n" -eq 1 ] || return 1
+  printf '%s\n' "$out"
 }
 
 # Echo the main-checkout root of <start>'s git repo, but only when it is a

@@ -358,7 +358,7 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>" [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
-~/.agents/skills/<cmd>/scripts/team.sh <team> [--json | --fix | --fix-pane-names | --rename-sessions]
+~/.agents/skills/<cmd>/scripts/team.sh <team> [--json] [--delete] [--force] [--purge-messages] [--yes]
 ~/.agents/skills/<cmd>/scripts/placement-collisions.sh
 ~/.agents/skills/<cmd>/scripts/whoami.sh <project_path> <type>
 ~/.agents/skills/<cmd>/scripts/delivery.sh set <mode> <type> <project_path>
@@ -368,9 +368,11 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 
 `team.sh` combines the roster with terminal placement, activity, delivery mode, and identity consistency. Verified identity is collapsed to `identity=ok`; mismatches and values that could not be observed are expanded with their evidence. `--json` emits every field for every registration. The repair flags report each action per identity cell as `changed`, `skipped`, `failed`, or (for a session name that could not be read back) `poked_unverified`. They are two different kinds of act: `--fix-pane-names` repairs the pane label and agent key through the terminal's own API and never types into a session; `--rename-sessions` repairs the CLI session name by typing the type's rename command (`/rename <team>-<agent>` for Claude Code, whatever the type's manifest declares otherwise) into the pane, and only after positively identifying a ready process there. `--fix` does both, unconditionally, including the keystroke. Pane liveness will join this view when the pane-state contract lands; until then the unavailable column is omitted rather than filled with `unknown`.
 
-`placement-collisions.sh` is a separate, read-only installation-wide report. It never repairs or removes a record; keeping this fleet observation outside `team.sh` prevents an operator-level scan from becoming part of a seat's repair path. Today it reports only the record-only layer: two DIFFERENT seats' records resolved to the same canonical (kind, instance, pane) locator, entirely from records on disk — no terminal is ever asked anything. A ref with no instance component to resolve (every herdr ref today; a legacy bare tmux `%N`/`@N`) is not joined by raw string equality; it is listed under `unscoped_records` instead, since record-only evidence cannot tell such refs apart across terminal instances. `collisions: none` means the walk completed and found nothing; `collisions: none_observed` paired with `coverage: partial` means something along the way (a team config, a placement record, an empty ref) could not be read, so the empty answer is not a proven one; `collisions: not_attempted` means there was no `teams/` directory to walk at all. An actual-location layer — matching a seat's own record against where a live census actually observes it — is designed but not yet wired here; see the script's header.
+`--delete` removes a team once every member has left (`leave.sh` each remaining one first) and the team is not actively synced (`binding_state=active` in `team-list.sh --json` refuses; `disconnected` proceeds with an extra warning) — its config, roster, identity history, and per-agent runtime state (actas locks, role-session records, spawn/placement records), but not its message history. `--force` (combined with `--delete`) removes every remaining member first, the same effect as running `leave.sh` for each, then deletes the team as `--delete` alone does — a team the desktop app created always has its app-user as a member, so it could never be deleted from the app without this; a `--force` confirmation names the members it will remove. `--purge-messages` deletes only a team's rows from the sqlite message store (jsonl is not supported yet) and can be used standalone or together with `--delete`; other teams' data is untouched. Both prompt for confirmation, in the same style as `uninstall.sh`'s, unless `--yes` is given.
 
-Terminal identity has a different number of observable names on each backend. Herdr exposes three independent values: the visible pane label, its internal agent key, and the CLI session name. tmux exposes two: the `@agmsg_agent` pane option is the internal key, while the CLI owns `pane_title`, so there is no independent pane-label field after the CLI starts. `team.sh` reports that tmux field as `n/a` rather than treating an unavailable concept as a mismatch.
+`placement-collisions.sh` is a separate, read-only installation-wide report. It never repairs or removes a record; keeping this fleet observation outside `team.sh` prevents an operator-level scan from becoming part of a seat's repair path. Today it reports only the record-only layer: two DIFFERENT seats' records resolved to the same canonical (kind, instance, pane) locator, entirely from records on disk — no terminal is ever asked anything. A ref with no instance component to resolve (every herdr ref today; a legacy bare tmux `%N`/`@N`) is not joined by raw string equality; it is listed under `unscoped_records` instead, since record-only evidence cannot tell such refs apart across terminal instances. Orca refs are not in that bucket: `terminal_id_split` always resolves the constant `local` instance for a validated handle (Orca has exactly one local runtime today), so an orca ref reaches the real instance+pane comparison instead of `unscoped_records`. `collisions: none` means the walk completed and found nothing; `collisions: none_observed` paired with `coverage: partial` means something along the way (a team config, a placement record, an empty ref) could not be read, so the empty answer is not a proven one; `collisions: not_attempted` means there was no `teams/` directory to walk at all. An actual-location layer — matching a seat's own record against where a live census actually observes it — is designed but not yet wired here; see the script's header.
+
+Terminal identity has a different number of observable names on each backend. Herdr exposes three independent values: the visible pane label, its internal agent key, and the CLI session name. tmux exposes two: the `@agmsg_agent` pane option is the internal key, while the CLI owns `pane_title`, so there is no independent pane-label field after the CLI starts. `team.sh` reports that tmux field as `n/a` rather than treating an unavailable concept as a mismatch. Orca exposes exactly one: `terminal_name` writes the tab title, and `team.sh` reads it back as `pane_label` (the durable value lives in the tab itself, not in any one pane within it — a tab can hold more than one pane, split). There is no separate `@agmsg_agent`-style key, so `agent_key` reports `n/a` unconditionally, the same way tmux's `pane_label` does for the field it lacks. `cli_session` is not: it follows the AGENT type's own `session_name_source`, same as on every driver — a `title`-sourced type (Claude Code) gets `n/a` too, since orca's own observation has no independent title field either; a `screen`-sourced type (Codex, whose session name comes from a `Thread name:` line) is read straight off the pane's screen, independent of orca's own observe extension, and reports `unknown:name_not_visible` when that line isn't found there.
 
 `send.sh` takes four positional arguments — `<team> <from> <to> "<message>"` — plus an optional trailing `--force`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
 
@@ -436,14 +438,22 @@ An `uninstall.sh` copy ships inside every install, so this works whether you
 installed via `git clone`, `npx agmsg`, or the curl one-liner:
 
 ```bash
-~/.agents/skills/agmsg/uninstall.sh              # Interactive (confirms each step)
-~/.agents/skills/agmsg/uninstall.sh --yes        # Remove everything
+~/.agents/skills/agmsg/uninstall.sh              # This install only (confirms each step)
+~/.agents/skills/agmsg/uninstall.sh --yes        # This install only, no confirmation
 ~/.agents/skills/agmsg/uninstall.sh --keep-data  # Remove skill but keep DB and teams
+~/.agents/skills/agmsg/uninstall.sh --all        # Every agmsg install on this machine
 ```
 
-(If you have a `git clone` checkout handy, `./uninstall.sh` from the repo root works the same way.)
+With no `--all`, it removes exactly one install — the one it's running from.
+Cleans up: skill files, slash commands, hooks, AGENTS.md sections, and team configs.
 
-Auto-detects installed skill directories and cleans up: skill files, slash commands, hooks, AGENTS.md sections, and team configs.
+If you have a `git clone` checkout handy, `./uninstall.sh` from the repo root
+works the same way when there's exactly one install on the machine. With more
+than one, it refuses rather than guess which one you mean — run the
+`uninstall.sh` inside the one you want, or pass `--all` to remove every
+install on the machine (with one combined confirmation unless `--yes` is
+also given, plus a separate one for whether to remove each install's DB and
+teams too).
 
 ## Configuration
 

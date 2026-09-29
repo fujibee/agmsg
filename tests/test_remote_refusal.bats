@@ -168,3 +168,51 @@ write_cycle_stamp() {
   run bash "$SCRIPTS/remote.sh" status testteam
   printf '%s' "$output" | grep -q 'refused: the server answered 402'
 }
+
+# What the engine writes to the run log when its main loop throws uncaught
+# (remote-sync.mjs's `event("fatal", ...)`) -- a LOCAL failure (a missing
+# `age` binary, say) as much as a server-side one, unlike write_refusal above
+# which only ever models a 4xx the server sent. Written here rather than by
+# running the engine, for the same reason write_refusal is: this is about what
+# READS it (#1487).
+write_fatal() {
+  printf '{"at":"2026-08-14T00:00:00Z","event":"fatal","message":"%s"}\n' "$1" \
+    >> "$TEST_SKILL_DIR/run/remote-sync.testteam.log"
+}
+
+@test "status names the engine's own last fatal reason while it is not running" {
+  # Before #1487, an engine that died at its first push (e.g. a missing `age`)
+  # read as merely "engine stopped" -- true, but silent about why, with the
+  # reason sitting unread in this same log.
+  write_fatal 'age executable not found on PATH'
+  run bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -q 'engine stopped'
+  printf '%s' "$output" | grep -q 'last fatal: age executable not found on PATH'
+}
+
+# What `_remote_sync_engine_start_locked` writes as the very first thing
+# every start does, before the engine process even exists -- unlike
+# `capabilities`, which only appears once a run has reached the server, and
+# so never appears at all for a run killed before that (review round 2).
+write_engine_start() {
+  printf '{"at":"2026-08-14T00:05:00Z","event":"engine.start","startup_nonce":"test-nonce"}\n' \
+    >> "$TEST_SKILL_DIR/run/remote-sync.testteam.log"
+}
+
+@test "an old fatal from before the engine restarted is not reported as current" {
+  # This team failed once (write_fatal), was restarted (write_engine_start --
+  # the log is append-only across restarts, `>> "$logfile"` at every start),
+  # and that later run stopped normally -- WITHOUT ever writing `capabilities`
+  # or a `fatal` of its own (e.g. a plain SIGTERM during startup, before it
+  # reached the server). The FIRST run's fatal must not be attributed to why
+  # the team is stopped now, and `engine.start` is the boundary this survives
+  # on even though this later run logged nothing else at all (#1487 review
+  # round 2 -- `capabilities` alone left exactly this case unguarded).
+  write_fatal 'age executable not found on PATH'
+  write_engine_start
+  run bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -q 'engine stopped'
+  refute grep -q 'last fatal' <<<"$output"
+}

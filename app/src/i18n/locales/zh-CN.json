@@ -98,12 +98,25 @@
       "body": "这将把 {{name}} 从 {{team}} 中移除，并关闭其正在运行的面板（如果有）。此操作无法在此处撤销。",
       "confirmLabel": "离开"
     },
+    "deleteTeam": {
+      "title": "删除团队“{{team}}”？",
+      "body": "这将永久删除团队“{{team}}”：其配置、成员名单、身份历史记录以及各代理的运行记录。此操作无法撤销。如果它曾连接到远程服务器，之后重新连接可以将其恢复。",
+      "confirmLabel": "删除团队",
+      "forceLabel": "连同成员一起删除",
+      "purgeMessagesToo": "同时删除消息记录",
+      "membersRemainBody": "该团队还有 {{count}} 名成员。要将他们全部移出团队并删除该团队吗？"
+    },
+    "purgeMessages": {
+      "title": "清除团队“{{team}}”的消息记录？",
+      "body": "这将永久删除团队“{{team}}”的所有消息记录，且无法恢复。",
+      "confirmLabel": "删除消息"
+    },
     "newTeam": {
       "titleFirstRun": "欢迎 — 创建你的第一个团队",
       "title": "新建团队",
       "note": "创建团队，并将你添加为该团队的 app-user（底部聊天框的所有者）。",
       "teamNameLabel": "团队名称",
-      "teamNamePlaceholder": "my-team",
+      "teamNamePlaceholder": "例如：my-team",
       "appUserLabel": "你的名字（app-user）",
       "create": "创建"
     },
@@ -115,16 +128,18 @@
     "agent": {
       "title": "添加智能体",
       "typeLabel": "类型",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "例如：alice",
       "addAndSpawn": "添加并启动"
     },
     "rename": {
       "title": "重命名 {{current}}",
       "newNameLabel": "新名称",
-      "confirmButton": "重命名"
+      "confirmButton": "重命名",
+      "confirmButtonBusy": "重命名中…"
     },
     "confirm": {
-      "defaultLabel": "确认"
+      "defaultLabel": "确认",
+      "workingLabel": "处理中…"
     },
     "settings": {
       "title": "设置"
@@ -140,6 +155,13 @@
       "confirmLabel": "关闭面板"
     }
   },
+  "toast": {
+    "renameTeam": "已将团队“{{from}}”重命名为“{{to}}”。",
+    "deleteTeam": "已删除团队“{{team}}”。",
+    "deleteTeamForce": "已删除团队“{{team}}”（已移除 {{count}} 名成员）。",
+    "purgeMessages": "已删除团队“{{team}}”的消息。",
+    "actionFailed": "失败：{{reason}}"
+  },
   "ctxMenu": {
     "member": {
       "spawnTo": "启动到 ▸",
@@ -147,6 +169,11 @@
       "existingTabsDivider": "— 现有标签页 —",
       "rename": "重命名…",
       "leave": "离开"
+    },
+    "team": {
+      "rename": "重命名…",
+      "delete": "删除团队…",
+      "deleteMessages": "删除消息…"
     },
     "pane": {
       "close": "关闭",

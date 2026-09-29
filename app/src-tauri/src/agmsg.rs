@@ -474,6 +474,18 @@ pub struct AgentType {
     /// position `agmsg spawn` uses, so a pane spawned from the app gets the
     /// same extra flags a CLI-driven spawn would.
     pub options: Vec<String>,
+    /// This type's actas-prompt prefix (manifest `cmd_prefix=`), e.g. "$" for
+    /// opencode/codex/gemini/antigravity. None when the manifest omits it,
+    /// which means "/" — the same default scripts/lib/boot-command.sh's
+    /// agmsg_actas_prompt applies (#1007/#346: the frontend used to hardcode
+    /// "/" for every type instead of reading this).
+    pub cmd_prefix: Option<String>,
+    /// A flag whose VALUE must carry the actas prompt, for a CLI that
+    /// rejects it as a bare positional (manifest `prompt_arg=`), e.g.
+    /// opencode's `--prompt` or copilot's `--interactive`. None when the
+    /// prompt is passed positionally (claude-code). Mirrors the prompt half
+    /// of scripts/lib/boot-command.sh's agmsg_role_cli_args.
+    pub prompt_arg: Option<String>,
 }
 
 /// Read one key from a type.conf manifest (read-only key=value data, never
@@ -573,7 +585,9 @@ pub fn agmsg_spawnable_types() -> Result<Vec<AgentType>, String> {
             .unwrap_or_default();
         if !name.is_empty() {
             let options = spawn_options_tokens(&name);
-            types.push(AgentType { name, cli, options });
+            let cmd_prefix = manifest_get(&conf, "cmd_prefix");
+            let prompt_arg = manifest_get(&conf, "prompt_arg");
+            types.push(AgentType { name, cli, options, cmd_prefix, prompt_arg });
         }
     }
     types.sort_by(|a, b| a.name.cmp(&b.name));
@@ -698,6 +712,27 @@ pub struct CoreVersionStatus {
     outdated: bool,
 }
 
+/// The installed agmsg's own VERSION file, trimmed — None if it can't be
+/// read (not installed yet, or the file is empty). Shared by
+/// `agmsg_core_version_status` and `running_core_version` below so there is
+/// exactly one place that reads it.
+fn read_installed_core_version() -> Option<String> {
+    std::fs::read_to_string(agmsg_base().join("VERSION"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The core this app is actually driving right now (installed at
+/// `agmsg_base()`), for display -- as opposed to `pinned_core_version`, the
+/// ref this build happened to bundle at compile time. Falls back to the
+/// pinned version when the installed one can't be read, so the About line
+/// (see `make_menu` in lib.rs) always has something reasonable to show
+/// rather than going blank (#976).
+pub(crate) fn running_core_version() -> String {
+    read_installed_core_version().unwrap_or_else(pinned_core_version)
+}
+
 /// Compares the installed agmsg's VERSION file against the version bundled
 /// into this app build. An existing install doesn't go through agmsg_install
 /// (that only fires when nothing is installed at all), so an installed
@@ -708,10 +743,7 @@ pub struct CoreVersionStatus {
 #[tauri::command]
 pub fn agmsg_core_version_status() -> CoreVersionStatus {
     let pinned = pinned_core_version();
-    let installed = std::fs::read_to_string(agmsg_base().join("VERSION"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let installed = read_installed_core_version();
 
     let outdated = match (&installed, parse_semver(&pinned)) {
         (Some(v), Some(pinned_v)) => match parse_semver(v) {
@@ -903,6 +935,45 @@ pub fn agmsg_leave(team: String, name: String) -> Result<(), String> {
     run_script("leave.sh", &[&team, &name]).map(|_| ())
 }
 
+/// Rename a whole team (rename-team.sh; repoints messages, cursors and sync
+/// state at the new name).
+#[tauri::command]
+pub fn agmsg_rename_team(old_team: String, new_team: String) -> Result<(), String> {
+    run_script("rename-team.sh", &[&old_team, &new_team]).map(|_| ())
+}
+
+/// Delete a team (team.sh --delete --yes, #1475). Confirmation happens in the
+/// UI before this is called. Refuses (with the reason on stderr, surfaced as
+/// Err by run_script) when members remain, a remote binding is active, or the
+/// team uses the jsonl storage driver.
+#[tauri::command]
+pub fn agmsg_delete_team(team: String) -> Result<(), String> {
+    run_script("team.sh", &[&team, "--delete", "--yes"]).map(|_| ())
+}
+
+/// Delete a team's message history only, keeping the team and its members
+/// (team.sh --purge-messages --yes, #1475). Same refusal/error surfacing as
+/// agmsg_delete_team.
+#[tauri::command]
+pub fn agmsg_purge_team_messages(team: String) -> Result<(), String> {
+    run_script("team.sh", &[&team, "--purge-messages", "--yes"]).map(|_| ())
+}
+
+/// Delete a team even though members remain, removing them all first
+/// (team.sh --delete --force --yes, #1493; --purge-messages stays an
+/// independent flag). Confirmed core CLI shape as of this writing (branch
+/// fix-1493-delete-force, not yet merged pending final review). Only
+/// reachable in the UI after a plain agmsg_delete_team has already failed
+/// with the members-remain refusal.
+#[tauri::command]
+pub fn agmsg_delete_team_force(team: String, purge_messages: bool) -> Result<(), String> {
+    let mut args = vec![team.as_str(), "--delete", "--force", "--yes"];
+    if purge_messages {
+        args.push("--purge-messages");
+    }
+    run_script("team.sh", &args).map(|_| ())
+}
+
 /// The actual delivery mode for (agent_type, project): "monitor", "turn",
 /// "both", or "off". Shells out to `delivery.sh status` — agmsg's own
 /// source of truth (it derives the mode from the project's hooks file,
@@ -1003,7 +1074,10 @@ pub fn start_watcher(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{agmsg_base, msys_to_native, parse_semver, run_script, to_bash_slashes};
+    use super::{
+        agmsg_base, msys_to_native, parse_semver, pinned_core_version, run_script,
+        running_core_version, to_bash_slashes,
+    };
     use serial_test::serial;
     use std::io::Write;
 
@@ -1179,6 +1253,25 @@ mod tests {
     fn agmsg_base_falls_back_when_override_is_empty() {
         let _env = EnvGuard::set("AGMSG_APP_BASE", "");
         assert!(agmsg_base().ends_with(".agents/skills/agmsg"));
+    }
+
+    #[test]
+    #[serial]
+    fn running_core_version_reads_installed_or_falls_back_to_pinned() {
+        // Before #976, the About line always read the bundled AGMSG_CORE_REF
+        // (pinned_core_version) — the version this build happened to bundle,
+        // not the one actually driving every agmsg operation.
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+
+        // No VERSION file yet: falls back to the bundled ref rather than
+        // going blank.
+        assert_eq!(running_core_version(), pinned_core_version());
+
+        // An installed VERSION file wins over the bundled ref — the number a
+        // user would actually act on.
+        std::fs::write(dir.path().join("VERSION"), "9.9.9\n").unwrap();
+        assert_eq!(running_core_version(), "9.9.9");
     }
 
     #[test]

@@ -115,6 +115,22 @@ recorded_uuid() {
   [ -z "$(recorded_uuid team alice)" ]
 }
 
+@test "codex record: missing args say so on stderr instead of exiting silently" {
+  CODEX_THREAD_ID="env-thread-1" run --separate-stderr \
+    bash "$TYPES/codex/codex-record-session.sh"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  printf '%s\n' "$stderr" | grep -qF "nothing recorded"
+  printf '%s\n' "$stderr" | grep -qF "<team> <agent>"
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex template: actas step passes <team> <name> to codex-record-session.sh" {
+  local slot
+  slot="$(sed -n '/<!-- agmsg:slot actas -->/,/<!-- \/agmsg:slot actas -->/p' "$TYPES/codex/template.md")"
+  printf '%s\n' "$slot" | grep -qF "codex-record-session.sh <team> <name>"
+}
+
 # Read back the recorded project for (team, agent).
 recorded_project() {
   # shellcheck disable=SC1090

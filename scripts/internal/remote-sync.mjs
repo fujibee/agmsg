@@ -609,7 +609,11 @@ export function connectedBinding(value, team) {
       binding.capabilities.write_allowed_ciphers.some((cipher) => typeof cipher !== "string")) {
     throw new Error("connected team binding is invalid or disconnected");
   }
-  if (!validateEndpoint(binding.endpoint).ok) {
+  // Plaintext teams must stay on HTTPS or a private HTTP address. An age-v1
+  // team seals the message body before it reaches the endpoint, so applying
+  // the plaintext address rule again here would let `connect --e2ee` record a
+  // binding and then fail while building its initial snapshot.
+  if (binding.cipher_profile !== "age-v1" && !validateEndpoint(binding.endpoint).ok) {
     throw new Error(
       "connected team endpoint must use HTTPS, or HTTP to a private IP address " +
       "(10/8, 172.16/12, 192.168/16, 169.254/16, 127/8, ::1, fc00::/7)");

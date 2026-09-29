@@ -107,6 +107,31 @@ test("none and age-v1 profiles share one seal/open registry", async () => {
   }
 });
 
+test("a missing age binary is reported as missing, not as an unsupported cipher", () => {
+  // Before #1487 this threw "age executable is unavailable" -- true, but
+  // reading as "this cipher is not supported", and silent about where `age`
+  // was even looked for.
+  const base = {
+    type: "sync_seal", envelope_v: 1, cipher: "age-v1", key_id: manifest.binding.key_id,
+    max_blob_bytes: 1_048_576, wire_id: manifest.binding.wire_id,
+    team_id: manifest.binding.team_id, protocol_version: 1,
+    projection: manifest.canonical_message,
+    recipients: [manifest.recipient_sets.team_a.recipient],
+  };
+  const originalAgeBin = process.env.AGMSG_AGE_BIN;
+  const missing = "/nonexistent/agmsg-test-age-binary";
+  try {
+    process.env.AGMSG_AGE_BIN = missing;
+    assert.throws(() => sealEnvelope(base), (error) =>
+      error.state === "unsupported_cipher" &&
+      error.message.includes(missing) &&
+      /PATH|AGMSG_AGE_BIN/u.test(error.message));
+  } finally {
+    if (originalAgeBin === undefined) delete process.env.AGMSG_AGE_BIN;
+    else process.env.AGMSG_AGE_BIN = originalAgeBin;
+  }
+});
+
 test("legacy messages remain discriminator-free while roster mutations use kind", async () => {
   const base = {
     type: "sync_seal",

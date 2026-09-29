@@ -98,12 +98,25 @@
       "body": "Isso remove {{name}} de {{team}} e fecha seu painel, caso esteja em execução. Essa ação não pode ser desfeita por aqui.",
       "confirmLabel": "Sair"
     },
+    "deleteTeam": {
+      "title": "Excluir a equipe '{{team}}'?",
+      "body": "Isso exclui permanentemente a equipe '{{team}}': sua configuração, lista de membros, histórico de identidade e os registros de execução de cada agente. Essa ação não pode ser desfeita. Se estava conectada a um remoto, reconectar depois pode restaurá-la.",
+      "confirmLabel": "Excluir equipe",
+      "forceLabel": "Excluir com os membros",
+      "purgeMessagesToo": "Excluir também o histórico de mensagens",
+      "membersRemainBody": "Esta equipe tem {{count}} membro(s). Removê-los todos da equipe e excluí-la?"
+    },
+    "purgeMessages": {
+      "title": "Limpar o histórico de mensagens da equipe '{{team}}'?",
+      "body": "Isso exclui permanentemente todo o histórico de mensagens da equipe '{{team}}'; não pode ser restaurado.",
+      "confirmLabel": "Excluir mensagens"
+    },
     "newTeam": {
       "titleFirstRun": "Bem-vindo — crie sua primeira equipe",
       "title": "Nova equipe",
       "note": "Cria a equipe e adiciona você como app-user dela (o dono da caixa de chat inferior).",
       "teamNameLabel": "Nome da equipe",
-      "teamNamePlaceholder": "minha-equipe",
+      "teamNamePlaceholder": "ex.: minha-equipe",
       "appUserLabel": "Seu nome (app-user)",
       "create": "Criar"
     },
@@ -115,16 +128,18 @@
     "agent": {
       "title": "Adicionar agente",
       "typeLabel": "Tipo",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "ex.: alice",
       "addAndSpawn": "Adicionar e iniciar"
     },
     "rename": {
       "title": "Renomear {{current}}",
       "newNameLabel": "Novo nome",
-      "confirmButton": "Renomear"
+      "confirmButton": "Renomear",
+      "confirmButtonBusy": "Renomeando…"
     },
     "confirm": {
-      "defaultLabel": "Confirmar"
+      "defaultLabel": "Confirmar",
+      "workingLabel": "Processando…"
     },
     "settings": {
       "title": "Configurações"
@@ -140,6 +155,13 @@
       "confirmLabel": "Fechar painel"
     }
   },
+  "toast": {
+    "renameTeam": "Equipe '{{from}}' renomeada para '{{to}}'.",
+    "deleteTeam": "Equipe '{{team}}' excluída.",
+    "deleteTeamForce": "Equipe '{{team}}' excluída (removidos {{count}} membro(s)).",
+    "purgeMessages": "Mensagens da equipe '{{team}}' excluídas.",
+    "actionFailed": "Falhou: {{reason}}"
+  },
   "ctxMenu": {
     "member": {
       "spawnTo": "Iniciar em ▸",
@@ -147,6 +169,11 @@
       "existingTabsDivider": "— abas existentes —",
       "rename": "Renomear…",
       "leave": "Sair"
+    },
+    "team": {
+      "rename": "Renomear…",
+      "delete": "Excluir equipe…",
+      "deleteMessages": "Excluir mensagens…"
     },
     "pane": {
       "close": "Fechar",

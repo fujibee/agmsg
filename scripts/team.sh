@@ -4,7 +4,7 @@ set -euo pipefail
 # Usage: team.sh <team>
 # Shows team members.
 
-USAGE='Usage: team.sh <team> [--json]'
+USAGE='Usage: team.sh <team> [--json] [--delete] [--force] [--purge-messages] [--yes]'
 # Printed, not passed to ${1:?...}: the shell prefixes that form with its own
 # "line N: 1:" and mangles it. Kept even now that the message is one line --
 # the property being guarded is "no shell-diagnostic corruption", not "multiple
@@ -24,9 +24,17 @@ OUTPUT_MODE=human
 # agmsg_team_rename_session_loaded, agmsg_team_verify_placement,
 # agmsg_team_create_placement_from_label, all four defined in team-status.sh)
 # are gone with them, not replaced by a softer version of the same authority.
+DELETE=false
+FORCE=false
+PURGE_MESSAGES=false
+AUTO_YES=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) OUTPUT_MODE=json ;;
+    --delete) DELETE=true ;;
+    --force) FORCE=true ;;
+    --purge-messages) PURGE_MESSAGES=true ;;
+    --yes) AUTO_YES=true ;;
     *) echo "$USAGE" >&2; exit 2 ;;
   esac
   shift
@@ -44,6 +52,144 @@ CONFIG="$SCRIPT_DIR/../teams/$TEAM/config.json"
 if [ ! -f "$CONFIG" ]; then
   echo "Team not found: $TEAM"
   exit 1
+fi
+
+# --delete / --purge-messages (#1475): a separate, self-contained branch that
+# exits before the read-only roster listing below. Kept out of that listing's
+# own (best-effort, errexit-lifted) placement sourcing -- these two need
+# storage.sh/registry-lock.sh/roster-journal.sh/actas-lock.sh to actually load,
+# not to degrade gracefully, since a destructive operation that silently
+# skipped part of its own cleanup would be worse than one that fails loudly.
+if [ "$DELETE" = true ] || [ "$PURGE_MESSAGES" = true ]; then
+  SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+  TEAM_DIR="$SCRIPT_DIR/../teams/$TEAM"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/storage.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/registry-lock.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/roster-journal.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/actas-lock.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/team-delete.sh"
+
+  DELETE_CONFIG_ESCAPED="$(sed "s/'/''/g" "$CONFIG")"
+
+  # Same three-way classification team-list.py's _team_row uses: "none" when
+  # there is no connected_at, "disconnected" when disconnected_at is also
+  # set, "active" otherwise (#1475). Refusing only on "active" -- a live sync
+  # would keep re-materializing what this just deleted; a disconnected
+  # binding gets an extra warning line instead of a refusal.
+  BINDING_STATE="$(agmsg_sqlite_mem \
+    "SELECT CASE
+       WHEN COALESCE(json_extract('$DELETE_CONFIG_ESCAPED', '\$.remote_binding.connected_at'), '') = '' THEN 'none'
+       WHEN COALESCE(json_extract('$DELETE_CONFIG_ESCAPED', '\$.remote_binding.disconnected_at'), '') != '' THEN 'disconnected'
+       ELSE 'active'
+     END;")"
+
+  if [ "$BINDING_STATE" = active ]; then
+    echo "Team '$TEAM' is actively synced; refusing to delete or purge its data." >&2
+    echo "Disconnect the sync binding first." >&2
+    exit 1
+  fi
+
+  # --force (#1493): a team the desktop app created always has at least one
+  # member (its own app-user registration), so a plain --delete could never
+  # remove an app-created team. --force does NOT call leave.sh per member --
+  # the whole team folder is coming down anyway, and leave.sh's own
+  # last-member cleanup can delete config.json (and the team dir, if it ends
+  # up empty) for a non-journaled team, which would make the agmsg_lock_acquire
+  # below fail to create .config.lock and abort with the team half-deleted
+  # (review finding). leave.sh only ever touches config.json/roster.jsonl --
+  # it does nothing to actas locks, role-session records, or any other run/
+  # state -- so skipping it changes nothing the run/ sweep below wasn't
+  # already going to remove on its own. DELETE_FORCE_NAMES here is only for
+  # the confirmation text; the delete below still reads the untouched config.
+  DELETE_FORCE_NAMES=""
+  if [ "$DELETE" = true ]; then
+    DELETE_AGENT_COUNT="$(agmsg_sqlite_mem \
+      "SELECT count(*) FROM json_each(json_extract('$DELETE_CONFIG_ESCAPED', '\$.agents'));")"
+    if [ "${DELETE_AGENT_COUNT:-0}" -ne 0 ]; then
+      if [ "$FORCE" != true ]; then
+        echo "Team '$TEAM' still has $DELETE_AGENT_COUNT member(s); refusing --delete." >&2
+        echo "Run leave.sh for each remaining member first, or pass --force to remove them and delete the team in one step." >&2
+        exit 1
+      fi
+      DELETE_FORCE_NAMES="$(agmsg_sqlite_mem \
+        "SELECT key FROM json_each(json_extract('$DELETE_CONFIG_ESCAPED', '\$.agents'));")"
+      DELETE_FORCE_LIST="$(agmsg_sqlite_mem \
+        "SELECT group_concat(key, ', ') FROM json_each(json_extract('$DELETE_CONFIG_ESCAPED', '\$.agents'));")"
+    fi
+  fi
+
+  if [ "$PURGE_MESSAGES" = true ] && [ "$(agmsg_storage_driver)" = jsonl ]; then
+    echo "Team '$TEAM' uses the jsonl storage driver; --purge-messages is not" >&2
+    echo "supported yet for jsonl." >&2
+    exit 1
+  fi
+
+  echo ""
+  echo "  agmsg team $TEAM"
+  echo "  ──────────────────"
+  echo ""
+  if [ "$DELETE" = true ]; then
+    if [ -n "$DELETE_FORCE_NAMES" ]; then
+      echo "  This removes $DELETE_AGENT_COUNT member(s) ($DELETE_FORCE_LIST), then"
+      echo "  permanently deletes team '$TEAM': its configuration, roster, identity"
+      echo "  history, and per-agent runtime records. This cannot be undone."
+    else
+      echo "  This permanently deletes team '$TEAM': its configuration, roster,"
+      echo "  identity history, and per-agent runtime records. This cannot be undone."
+    fi
+  fi
+  if [ "$PURGE_MESSAGES" = true ]; then
+    echo "  This permanently deletes all message history for team '$TEAM'; it"
+    echo "  cannot be restored."
+  fi
+  if [ "$BINDING_STATE" = disconnected ]; then
+    echo "  This team was once synced; reconnecting later may bring it back from"
+    echo "  the server."
+  fi
+  echo ""
+
+  # Same shape as uninstall.sh's confirm(): default-no, one question.
+  confirm() {
+    if [ "$AUTO_YES" = true ]; then return 0; fi
+    printf "  %s (y/n) [n]: " "$1"
+    read -r input
+    [ "${input:-n}" = "y" ] || [ "${input:-n}" = "Y" ]
+  }
+
+  PROMPT="Delete team '$TEAM'?"
+  if [ "$DELETE" = true ] && [ "$PURGE_MESSAGES" = true ]; then
+    PROMPT="Delete team '$TEAM' and purge its message history?"
+  elif [ "$PURGE_MESSAGES" = true ]; then
+    PROMPT="Purge message history for team '$TEAM'?"
+  fi
+  if ! confirm "$PROMPT"; then
+    echo "Aborted."
+    exit 1
+  fi
+
+  agmsg_lock_acquire "$TEAM_DIR" || exit 1
+
+  if [ "$PURGE_MESSAGES" = true ]; then
+    agmsg_team_purge_messages "$TEAM"
+    echo "Purged message history for team '$TEAM'."
+  fi
+
+  if [ "$DELETE" = true ]; then
+    agmsg_team_delete_run_records "$TEAM" "$TEAM_DIR" "$CONFIG"
+    rm -f "$TEAM_DIR/config.json" "$TEAM_DIR/roster.jsonl" "$TEAM_DIR/roster-sync.json"
+    agmsg_lock_release
+    rmdir "$TEAM_DIR" 2>/dev/null || true
+    echo "Deleted team '$TEAM'."
+  else
+    agmsg_lock_release
+  fi
+
+  exit 0
 fi
 
 # Placement starts from the recorded terminal and pane that peek/poke resolve.
@@ -82,6 +228,12 @@ _member_delivery() {
 }
 
 JSON_FIRST=1
+# A trailing, optional 21st argument: a type's own extra tool-like label
+# (see scripts/drivers/types/ext-tool/_row.sh's _ext_tool_name for the one
+# current producer), empty for any type that has none. team.sh --json's
+# shape does not change for any existing field -- this is carried through as
+# ONE new field ("tool") added to the JSON object, and used only for the
+# human table's type column.
 _emit_row() {
   local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
   local container="$6" activity="$7" delivery="$8"
@@ -90,7 +242,7 @@ _emit_row() {
   local key_cell="$4" key_expected="$5" key_actual="$6"
   local session_cell="$7" session_expected="$8" session_actual="$9"
   shift 9
-  local consistency="$1" reach_status="$2" reach_detail="$3"
+  local consistency="$1" reach_status="$2" reach_detail="$3" tool="${4:-}"
   if [ "$OUTPUT_MODE" = json ]; then
     [ "$JSON_FIRST" -eq 1 ] || printf ',\n'
     JSON_FIRST=0
@@ -99,12 +251,12 @@ _emit_row() {
       "$label_cell" "$label_expected" "$label_actual" \
       "$key_cell" "$key_expected" "$key_actual" \
       "$session_cell" "$session_expected" "$session_actual" "$consistency" \
-      "$reach_status" "$reach_detail"
+      "$reach_status" "$reach_detail" "$tool"
   else
     agmsg_team_render_human_row "$member" "$type" "$project" "$terminal" "$pane" \
       "$container" "$activity" "$delivery" \
       "$label_cell" "$key_cell" "$session_cell" "$consistency" \
-      "$reach_status" "$reach_detail"
+      "$reach_status" "$reach_detail" "$tool"
   fi
 }
 
@@ -133,6 +285,25 @@ _member_status() {
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration n/a \
       cannot remote_registration
     return 0
+  fi
+  # Generic per-type row plug (scripts/drivers/types/<type>/_row.sh): lets a
+  # type fully replace the placement-based row below with its own (ext-tool
+  # is the first and, so far, only example -- a program has no terminal,
+  # pane, or screen to resolve a placement record for, so the generic flow's
+  # "unknown:no_placement_record"-shaped cells would read as broken for a
+  # member that was never going to have one). Returns 0 having emitted the
+  # row itself; returns 1 with NO output at all when it declines, so the
+  # generic flow below can pick the row up cleanly. This hook may not call
+  # exit.
+  local _agmsg_row_type_dir
+  _agmsg_row_type_dir="$(agmsg_type_dir "$type" 2>/dev/null || true)"
+  if [ -n "$_agmsg_row_type_dir" ] && [ -f "$_agmsg_row_type_dir/_row.sh" ]; then
+    # shellcheck disable=SC1090
+    . "$_agmsg_row_type_dir/_row.sh"
+    if declare -F agmsg_team_row_override >/dev/null 2>&1 \
+      && agmsg_team_row_override "$team" "$agent" "$type" "$project"; then
+      return 0
+    fi
   fi
   delivery="$(_member_delivery "$type" "$project")"
   if [ "$_agmsg_pl_rc" -ne 0 ] || ! declare -F agmsg_spawn_path >/dev/null 2>&1; then

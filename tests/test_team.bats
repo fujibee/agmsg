@@ -111,6 +111,31 @@ EOF
 }
 
 @test "join: concurrent joins to the same team do not lose registrations (#141)" {
+  # #994: the flake this was quarantined for was not test timing -- it was
+  # _agmsg_lock_drop leaking the registry lock under load (rmdir-then-remove
+  # raced a new acquirer's own holder write; fixed by reversing the order).
+  # What this test checks is that a fan-out of concurrent joins does not
+  # LOSE a registration, never that any one of them finishes within
+  # AGMSG_LOCK_SECONDS' default 10s budget -- widening it here is for
+  # genuine contention under a loaded CI runner (twelve joins still take
+  # the lock one at a time), not for the leak. A leaked lock is still
+  # caught regardless of how wide the budget is: nothing ever holds it
+  # again, so every later join waits out the full budget and fails the
+  # same way a real timeout would, just later.
+  #
+  # AGMSG_LOCK_TRIES has to widen alongside AGMSG_LOCK_SECONDS, or it
+  # silently becomes the real ceiling: the wait ends at whichever of the
+  # two bounds it hits first, and the default 1000 tries can still run out
+  # well under a widened time budget once each mkdir attempt itself gets
+  # slower under load, not just the sleep between them.
+  #
+  # Measured (this session, three copies of this test at once, 30 rounds):
+  # even with the #994 leak fixed, the unwidened default failed under that
+  # load (real contention, not a leak -- confirmed by polling the lock and
+  # its holder file during the failures: always a live process, never an
+  # unrecorded/stuck one). 60s / 20000 tries passed 0/90 the same way.
+  export AGMSG_LOCK_SECONDS=60
+  export AGMSG_LOCK_TRIES=20000
   # A fan-out of background joins spawning sqlite3.exe per call is slow and
   # timing-sensitive on the Windows runner (the experimental full leg); the lock
   # itself is exercised on Linux/macOS where the contention is reliable.
@@ -186,12 +211,37 @@ EOF
 @test "team: shows team members with types" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
   bash "$SCRIPTS/join.sh" myteam bob codex /tmp/proj-b
+  # An ext-tool member has no terminal, pane, or session at all by design
+  # (type.conf: spawnable=no, readiness_sentinel=no) -- the human table must
+  # show that as "ext-tool (faketool)" and plain "-" placeholders, not a
+  # string of n/a:<reason>/unknown:<reason> cells that read as broken.
+  local faketool_dir="$SCRIPTS/drivers/ext-tools/faketool"
+  mkdir -p "$faketool_dir"
+  printf 'name=faketool\ntimeout=4\n' > "$faketool_dir/tool.conf"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf '%s\n' 'case "${1:-}" in'
+    printf '%s\n' '  save) printf "tool=faketool\n" > "${2:?}"; chmod 600 "${2:?}" ;;'
+    printf '%s\n' '  *) exit 0 ;;'
+    printf '%s\n' 'esac'
+  } > "$faketool_dir/setup"
+  chmod +x "$faketool_dir/setup"
+  bash "$SCRIPTS/ext-tool.sh" setup myteam carol faketool save
+  bash "$SCRIPTS/join.sh" myteam carol ext-tool --tool faketool
   run bash "$SCRIPTS/team.sh" myteam
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "alice" ]]
-  [[ "$output" =~ "claude-code" ]]
-  [[ "$output" =~ "bob" ]]
-  [[ "$output" =~ "codex" ]]
+  # grep -q, not [[ =~ ]]: none of these is the test body's last statement
+  # any more now that more assertions follow, and a non-last [[ ]] does not
+  # trip errexit on bash 3.2 (this file's own enforced-assertions idiom).
+  grep -q "alice" <<<"$output"
+  grep -q "claude-code" <<<"$output"
+  grep -q "bob" <<<"$output"
+  grep -q "codex" <<<"$output"
+  grep -qF "ext-tool (faketool)" <<<"$output"
+  local carol_line
+  carol_line="$(grep 'carol' <<<"$output")"
+  refute grep -qE 'n/a:|unknown:' <<<"$carol_line"
 }
 
 @test "team: an agent name containing a single quote doesn't break the underlying SQL statement (#87-class)" {
@@ -1000,7 +1050,7 @@ JSON
   # `refute`, not `! cmd`: a negated command cannot fail a bats test anywhere
   # (#670), so `! grep -q` here would have asserted nothing at all.
   refute grep -q 'line [0-9]*: 1:' <<<"$output"
-  [[ "$output" == "Usage: team.sh <team> [--json]" ]]
+  [[ "$output" == "Usage: team.sh <team> [--json] [--delete] [--force] [--purge-messages] [--yes]" ]]
 }
 
 # --- #1140/#1152: team never creates a placement record --------------------------
@@ -1048,4 +1098,106 @@ STUB
   run bash "$SCRIPTS/team.sh" fixteam
   [ "$status" -eq 0 ]
   [ ! -e "$NRT_REC" ]                       # a read-only status never creates a record
+}
+
+# --- team.sh --delete / --purge-messages (#1475) ---
+
+@test "team: --delete removes an empty team's folder and run/ records, leaves another team untouched" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" otherteam carol claude-code /tmp/proj-c
+  mkdir -p "$TEST_SKILL_DIR/run"
+  echo "some-owner" > "$TEST_SKILL_DIR/run/actas.myteam__alice.session"
+  printf 'sid\t/tmp/proj-a\tclaude-code\n' > "$TEST_SKILL_DIR/run/role-session.myteam__alice"
+  echo "some-owner" > "$TEST_SKILL_DIR/run/actas.otherteam__carol.session"
+  bash "$SCRIPTS/leave.sh" myteam alice
+
+  run bash "$SCRIPTS/team.sh" myteam --delete --yes
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "Deleted team 'myteam'"
+  [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
+  [ ! -f "$TEST_SKILL_DIR/run/actas.myteam__alice.session" ]
+  [ ! -f "$TEST_SKILL_DIR/run/role-session.myteam__alice" ]
+  [ -d "$TEST_SKILL_DIR/teams/otherteam" ]
+  [ -f "$TEST_SKILL_DIR/run/actas.otherteam__carol.session" ]
+
+  # #1023 collision: team "a__b" agent "c" and team "a" agent "b__c" encode to
+  # the exact same legacy run/ paths (see actas-lock.sh's own #1023 comment).
+  # A legacy-form record at that shared path must survive deleting EITHER
+  # team, since ownership cannot be attributed to one over the other.
+  bash "$SCRIPTS/join.sh" "a__b" c claude-code /tmp/proj-collide-1
+  bash "$SCRIPTS/join.sh" a "b__c" claude-code /tmp/proj-collide-2
+  bash "$SCRIPTS/leave.sh" "a__b" c
+  local collide_actas="$TEST_SKILL_DIR/run/actas.a__b__c.session"
+  local collide_role="$TEST_SKILL_DIR/run/role-session.a__b__c"
+  echo "shared-owner" > "$collide_actas"
+  printf 'sid\t/tmp/proj-collide\tclaude-code\n' > "$collide_role"
+
+  run bash "$SCRIPTS/team.sh" "a__b" --delete --yes
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_SKILL_DIR/teams/a__b" ]
+  [ -f "$collide_actas" ]
+  [ -f "$collide_role" ]
+  [ -d "$TEST_SKILL_DIR/teams/a" ]
+}
+
+@test "team: --purge-messages removes only that team's message rows, leaves everything else" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam bob claude-code /tmp/proj-b
+  bash "$SCRIPTS/join.sh" otherteam carol claude-code /tmp/proj-c
+  bash "$SCRIPTS/join.sh" otherteam dave claude-code /tmp/proj-d
+  bash "$SCRIPTS/send.sh" myteam alice bob "secret"
+  bash "$SCRIPTS/send.sh" otherteam carol dave "keep me"
+
+  run bash "$SCRIPTS/team.sh" myteam --purge-messages --yes
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "Purged message history for team 'myteam'"
+
+  run bash "$SCRIPTS/history.sh" myteam alice
+  printf '%s\n' "$output" | grep -qF "No message history"
+  run bash "$SCRIPTS/history.sh" otherteam carol
+  printf '%s\n' "$output" | grep -qF "keep me"
+
+  # the team and its roster survive --purge-messages alone
+  [ -d "$TEST_SKILL_DIR/teams/myteam" ]
+  run bash "$SCRIPTS/team.sh" myteam
+  printf '%s\n' "$output" | grep -qF "alice"
+}
+
+@test "team: --delete refuses when members remain or the team is actively synced" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+
+  run bash "$SCRIPTS/team.sh" myteam --delete --yes
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "still has"
+  [ -d "$TEST_SKILL_DIR/teams/myteam" ]
+
+  bash "$SCRIPTS/leave.sh" myteam alice
+  local cfg="$TEST_SKILL_DIR/teams/myteam/config.json" escaped updated
+  escaped="$(sed "s/'/''/g" "$cfg")"
+  updated="$(sqlite_mem "
+    SELECT json_set('$escaped', '\$.remote_binding', json_object(
+      'connected_at', '2026-09-01T00:00:00Z',
+      'remote_team_id', '018f0000-0000-7000-8000-000000000002'
+    ));")"
+  printf '%s\n' "$updated" > "$cfg"
+
+  run bash "$SCRIPTS/team.sh" myteam --delete --yes
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "actively synced"
+  [ -d "$TEST_SKILL_DIR/teams/myteam" ]
+
+  # #1493: --force removes every remaining member (the same effect as
+  # leave.sh for each) and then deletes the team -- an app-created team
+  # always has at least its app-user member, so plain --delete could never
+  # remove one.
+  bash "$SCRIPTS/join.sh" forceteam dave claude-code /tmp/proj-force
+  bash "$SCRIPTS/join.sh" forceteam-other erin claude-code /tmp/proj-force-other
+
+  run bash "$SCRIPTS/team.sh" forceteam --delete --force --yes
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "Deleted team 'forceteam'"
+  [ ! -d "$TEST_SKILL_DIR/teams/forceteam" ]
+  [ -d "$TEST_SKILL_DIR/teams/forceteam-other" ]
+  run bash "$SCRIPTS/team.sh" forceteam-other
+  printf '%s\n' "$output" | grep -qF "erin"
 }

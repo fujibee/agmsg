@@ -101,6 +101,14 @@ jobs:
           cache-dependency-path: app/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Universal build: link an x86_64 slice and an arm64 slice into one
+          # binary (Tauri's `--target universal-apple-darwin`, below) rather
+          # than shipping an Apple-Silicon-only artifact. Both targets must
+          # be installed on this single macos-latest (arm64) runner — Cargo
+          # cross-compiles the x86_64 slice, it doesn't need a separate
+          # x86_64 runner.
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -124,6 +132,17 @@ jobs:
           security create-keychain -p "" "$KEYCHAIN"
           security default-keychain -s "$KEYCHAIN"
           security unlock-keychain -p "" "$KEYCHAIN"
+          # The universal build compiles for ~9m before codesign runs, in the
+          # later "Build (sign + notarize)" step. The keychain created above
+          # auto-locks after 5m by default, so the likely cause of run
+          # 36388025421 hanging in codesign after "replacing existing
+          # signature" was a relocked keychain waiting for a password (not
+          # confirmed: the log shows only the stall; a timestamp-server or
+          # network wait is also possible — #1491 review). Keep it unlocked
+          # for the whole build either way: raise the timeout-lock interval
+          # (-u -t) to 6h instead of the 5m default; -l (lock on sleep) is a
+          # no-op here, a CI runner never sleeps.
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
           echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > cert.p12
           security import cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN"
@@ -139,15 +158,15 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build
+        run: pnpm tauri build --target universal-apple-darwin
 
       - uses: actions/upload-artifact@v4
         with:
           name: agmsg-app-macos
           path: |
-            app/src-tauri/target/release/bundle/macos/*.app.tar.gz
-            app/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
-            app/src-tauri/target/release/bundle/dmg/*.dmg
+            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            app/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: warn
 
   build-windows:

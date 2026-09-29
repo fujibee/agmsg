@@ -78,6 +78,10 @@ export function TerminalPane({
       fontSize,
       fontFamily: "Menlo, Monaco, 'Courier New', monospace",
       cursorBlink: true,
+      // Lets Option+drag force native selection even when the child CLI has
+      // taken mouse reporting (e.g. a fullscreen TUI) — otherwise there is no
+      // way to select/copy pane output without leaving that mode first (#452).
+      macOptionClickForcesSelection: true,
       theme: { background: "#0b0e14", foreground: "#c5c8c6" },
     });
     termRef.current = term;

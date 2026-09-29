@@ -1,15 +1,40 @@
 import { describe, expect, it } from "vitest";
 import {
+  actasSpawnArgs,
+  actionFailedToast,
+  deleteTeamForceToast,
+  deleteTeamToast,
   hasUnsafeDropPath,
   joinDroppedPaths,
+  purgeMessagesToast,
+  renameTeamInWindows,
+  renameTeamKey,
+  renameTeamToast,
   resolveFileDropTarget,
   shellPaneFrom,
   shellSplitStillValid,
   shellTabStillValid,
   shouldShowOutdatedBanner,
   shouldSuppressClickAfterDrag,
+  shouldClearModalOnClose,
+  spawnTargetWindowId,
+  teamActionInvocation,
   type LoginShellInfo,
 } from "./App";
+
+describe("actasSpawnArgs", () => {
+  it("claude-code: no cmd_prefix/prompt_arg -> bare '/<cmd> actas <name>' (unchanged)", () => {
+    expect(actasSpawnArgs("agmsg", "alice", null, null)).toEqual(["/agmsg actas alice"]);
+  });
+
+  it("opencode: cmd_prefix '$' and prompt_arg '--prompt' -> ['--prompt', '$<cmd> actas <name>']", () => {
+    expect(actasSpawnArgs("agmsg", "OC", "$", "--prompt")).toEqual(["--prompt", "$agmsg actas OC"]);
+  });
+
+  it("copilot: no cmd_prefix (defaults to '/') with prompt_arg '--interactive'", () => {
+    expect(actasSpawnArgs("agmsg", "X", null, "--interactive")).toEqual(["--interactive", "/agmsg actas X"]);
+  });
+});
 
 describe("shouldShowOutdatedBanner", () => {
   it("shows when outdated, not updating, and not dismissed", () => {
@@ -223,5 +248,175 @@ describe("resolveFileDropTarget", () => {
   it("returns null when there's no active window to fall back to", () => {
     // e.g. Team Room is showing (active === "room"), no panes at all.
     expect(resolveFileDropTarget(null, windows, "room", null)).toBeNull();
+  });
+});
+
+describe("teamActionInvocation", () => {
+  // #1479: the sidebar's team context menu (Rename/Delete team/Delete
+  // messages) must call the right agmsg command with the right args — a
+  // wrong mapping here would silently run the wrong destructive action.
+  it("maps rename to agmsg_rename_team with the old and new team names", () => {
+    expect(teamActionInvocation("renameTeam", "old-team", { nextName: "new-team" })).toEqual({
+      command: "agmsg_rename_team",
+      args: { oldTeam: "old-team", newTeam: "new-team" },
+    });
+  });
+
+  it("maps delete team to agmsg_delete_team with just the team", () => {
+    expect(teamActionInvocation("deleteTeam", "my-team")).toEqual({
+      command: "agmsg_delete_team",
+      args: { team: "my-team" },
+    });
+  });
+
+  it("maps delete messages to agmsg_purge_team_messages, not agmsg_delete_team", () => {
+    expect(teamActionInvocation("purgeMessages", "my-team")).toEqual({
+      command: "agmsg_purge_team_messages",
+      args: { team: "my-team" },
+    });
+  });
+
+  // #1493: escalating a refused --delete must add --force AND keep
+  // --purge-messages independently opt-in, never on by default.
+  it("maps the force-delete escalation to agmsg_delete_team_force with purgeMessages defaulting to false", () => {
+    expect(teamActionInvocation("deleteTeamForce", "my-team")).toEqual({
+      command: "agmsg_delete_team_force",
+      args: { team: "my-team", purgeMessages: false },
+    });
+  });
+
+  it("maps the force-delete escalation with the purge-messages checkbox checked", () => {
+    expect(teamActionInvocation("deleteTeamForce", "my-team", { purgeMessages: true })).toEqual({
+      command: "agmsg_delete_team_force",
+      args: { team: "my-team", purgeMessages: true },
+    });
+  });
+});
+
+describe("shouldClearModalOnClose", () => {
+  it("clears when the modal is still the one that opened the confirm", () => {
+    expect(shouldClearModalOnClose({ kind: "deleteTeam" }, "deleteTeam")).toBe(true);
+  });
+
+  it("does not clear when onConfirm already swapped in a different modal", () => {
+    // Regression (#1484 review): deleting the LAST team reopens the
+    // first-run "create a team" modal from inside onDeleteTeam via
+    // settleActiveTeam. ConfirmModal's own onClose fires right after and,
+    // without this guard, would stomp the new modal back to null.
+    const reopenedModal: { kind: string; firstRun: boolean } = { kind: "team", firstRun: true };
+    expect(shouldClearModalOnClose(reopenedModal, "deleteTeam")).toBe(false);
+  });
+
+  it("is a no-op against an already-null modal", () => {
+    expect(shouldClearModalOnClose(null, "deleteTeam")).toBe(false);
+  });
+});
+
+describe("completion toast builders", () => {
+  // #1484 review, round 3: rename/delete-team/delete-messages had no
+  // feedback at all once their modal had already closed. Each builder
+  // returns the i18n key + vars (not a rendered string) so this stays
+  // testable without a translation context — the actual t() call happens
+  // at push time, inside the component.
+  it("builds the rename-team toast from the old and new names", () => {
+    expect(renameTeamToast("A", "B")).toEqual({ key: "toast.renameTeam", vars: { from: "A", to: "B" } });
+  });
+
+  it("builds the plain delete-team toast from just the team name", () => {
+    expect(deleteTeamToast("my-team")).toEqual({ key: "toast.deleteTeam", vars: { team: "my-team" } });
+  });
+
+  it("builds the force-delete toast with the removed member count", () => {
+    expect(deleteTeamForceToast("my-team", 3)).toEqual({
+      key: "toast.deleteTeamForce",
+      vars: { team: "my-team", count: 3 },
+    });
+  });
+
+  it("builds the purge-messages toast from the team name", () => {
+    expect(purgeMessagesToast("my-team")).toEqual({ key: "toast.purgeMessages", vars: { team: "my-team" } });
+  });
+
+  it("builds the generic failure toast from the raw reason", () => {
+    expect(actionFailedToast("Team 'my-team' is actively synced; refusing to delete or purge its data.")).toEqual({
+      key: "toast.actionFailed",
+      vars: { reason: "Team 'my-team' is actively synced; refusing to delete or purge its data." },
+    });
+  });
+});
+
+describe("spawnTargetWindowId", () => {
+  const windows = [
+    { id: "w-mine", team: "alpha" },
+    { id: "w-other-team", team: "beta" },
+  ];
+
+  it("viewing a pane tab of the current team -> that tab", () => {
+    expect(spawnTargetWindowId(windows, "w-mine", "alpha")).toBe("w-mine");
+  });
+
+  it("viewing the team room -> a new tab (undefined)", () => {
+    expect(spawnTargetWindowId(windows, "room", "alpha")).toBeUndefined();
+  });
+
+  it("viewing a pane tab that belongs to another team -> a new tab (undefined)", () => {
+    expect(spawnTargetWindowId(windows, "w-other-team", "alpha")).toBeUndefined();
+  });
+});
+
+describe("renameTeamInWindows", () => {
+  // Regression: a tab spawned under a team stayed tagged with that team's
+  // OLD name after a rename, and the sidebar only ever renders
+  // `w.team === team` for the current (now-renamed) team — so the tab's
+  // PTY kept running but its tab vanished from the tab bar entirely.
+  const windows = [
+    { id: "w-1", team: "old-team" },
+    { id: "w-2", team: "old-team" },
+    { id: "w-3", team: "other-team" },
+  ];
+
+  it("repoints every window tagged with the old team name to the new one", () => {
+    const result = renameTeamInWindows(windows, "old-team", "new-team");
+    expect(result.filter((w) => w.team === "new-team").map((w) => w.id)).toEqual(["w-1", "w-2"]);
+  });
+
+  it("leaves windows belonging to a different team untouched", () => {
+    const result = renameTeamInWindows(windows, "old-team", "new-team");
+    expect(result.find((w) => w.id === "w-3")).toEqual({ id: "w-3", team: "other-team" });
+  });
+
+  it("is a no-op when no window belongs to the renamed team", () => {
+    expect(renameTeamInWindows(windows, "nonexistent-team", "new-team")).toEqual(windows);
+  });
+});
+
+describe("renameTeamKey", () => {
+  // lastActiveTabByTeam (the other team-keyed state a rename must follow,
+  // same regression) is a Record<string, string>, but this is generic —
+  // any future team-keyed state can reuse it.
+  it("moves the old team's entry to the new key", () => {
+    expect(renameTeamKey({ "old-team": "w-1", "other-team": "w-3" }, "old-team", "new-team")).toEqual({
+      "other-team": "w-3",
+      "new-team": "w-1",
+    });
+  });
+
+  it("is a no-op (same reference) when the old team has no entry", () => {
+    const byTeam = { "other-team": "w-3" };
+    expect(renameTeamKey(byTeam, "old-team", "new-team")).toBe(byTeam);
+  });
+
+  it("leaves only the new team's key once prevTeamRef is also updated (#1500 review, round 2)", () => {
+    // Renaming the CURRENTLY active team also triggers the team-change
+    // layout effect (setTeam(next) changes `team`), which writes
+    // lastActiveTabByTeam[prevTeamRef.current] = active on every team
+    // change — BEFORE updating prevTeamRef itself. onRenameTeam sets
+    // prevTeamRef.current = next in the same step as setTeam(next), so
+    // that write lands on the already-renamed key (idempotent) instead of
+    // resurrecting the old one this rekey just removed.
+    let byTeam = renameTeamKey({ "old-team": "w-1" }, "old-team", "new-team");
+    const prevTeamRefAfterFix = "new-team";
+    byTeam = { ...byTeam, [prevTeamRefAfterFix]: "w-1" };
+    expect(Object.keys(byTeam)).toEqual(["new-team"]);
   });
 });

@@ -2,7 +2,7 @@
 # Terminal registry — the "terminals" driver axis facade.
 #
 # A terminal driver abstracts the ONE terminal multiplexer a member's CLI runs
-# under: tmux, herdr, or plain (no addressable pane). It absorbs the terminal
+# under: tmux, herdr, orca, or plain (no addressable pane). It absorbs the terminal
 # operations that were scattered as inline `$TMUX`/`HERDR_*` branches across
 # spawn.sh / despawn.sh / watch.sh, behind one contract, and adds peek/poke.
 #
@@ -65,12 +65,16 @@
 #                                       ceiling for one runtime instance: 0
 #                                       supported, 1 unsupported, 2 unknown.
 #                                       It cannot grant an unadvertised verb.
+#   terminal_self_env                    optional, no args: <id>, n/a:<reason>,
+#                                       or unknown:<reason>; environment only
+#   terminal_epoch                       optional, no args: generation value,
+#                                       n/a:<reason>, or unknown:<reason>
 #
-# Detection is a driver FUNCTION (not a manifest datum like the types axis's
-# detect=) because herdr's "which pane am I" is logic, not a set of env vars. The
-# resolver sources each candidate's ops.sh in a SUBSHELL so its terminal_*
-# definitions never leak or clobber across candidates; only the resolved driver
-# is sourced into the caller.
+# Terminal identity is a driver FUNCTION (not a manifest datum like the types
+# axis's detect=) because a driver's environment contract is logic, not just a
+# list of env vars. Resolver queries source each candidate's ops.sh in a
+# SUBSHELL so terminal_* definitions never leak or clobber across candidates;
+# only the selected driver is sourced into the caller.
 
 # Source-time lib dir (robust to later subshell/relative cwd).
 _AGMSG_TERMINAL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
@@ -200,7 +204,7 @@ EOF
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe terminal_enumerate_panes terminal_fence"
+_AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe terminal_enumerate_panes terminal_fence terminal_peek_styled terminal_input_draft terminal_expected_label terminal_instance_for_ref terminal_id_split terminal_self_env terminal_epoch"
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because
 # two sides need the same list and neither owns it: the drivers emit them, and
@@ -357,6 +361,29 @@ agmsg_terminal_resolve_placement() {
   return 1
 }
 
+# resolve-for-CAPABILITY (spawn's launcher→driver reroute, #1447): the first
+# candidate (priority order) that is BOTH present in this environment (its own
+# terminal_detect succeeds) AND declares <capability> in its manifest's
+# capabilities= — skipping every name in <exclude> (space-separated) entirely,
+# without even loading it. Distinct from agmsg_terminal_resolve_placement
+# above: that one answers "whichever driver is here at all" (unfiltered,
+# every candidate a real answer); this one answers "is there some OTHER
+# driver here that can do X", for a caller (like spawn.sh) that already has
+# its own hand-written path for one or more specific drivers and only wants
+# this for whatever driver isn't one of those. A driver a caller special-cases
+# belongs in <exclude>, not left for this to find and hand back redundantly.
+agmsg_terminal_resolve_by_capability() {   # <capability> [exclude, space-separated]
+  local capability="$1" exclude="${2:-}" name
+  for name in $(agmsg_terminal_candidates); do
+    case " $exclude " in *" $name "*) continue ;; esac
+    agmsg_terminal_has "$name" capabilities "$capability" || continue
+    _agmsg_terminal_detect_one "$name" "" >/dev/null 2>&1 || continue
+    printf '%s\n' "$name"
+    return 0
+  done
+  return 1
+}
+
 # resolve-for-NAME (terminal_name / SessionStart): prints "<terminal>\t<self-id>"
 # and exit 0. ORDER (2026-09-01, from the nested-herdr measurement): prefer a
 # candidate that PRODUCED A PANE ID over one that only claimed PRESENCE; the
@@ -456,58 +483,143 @@ agmsg_terminal_ref() {
   printf '%s:%s\n' "$1" "$2"
 }
 
-# The terminal server's generation, as the ENVIRONMENT shows it -- no call to
-# the terminal. This is what lets a naming mark (role-session named_epoch)
-# notice that the server it was made against has been restarted, the case in
-# which the pane reference can survive unchanged while the name it carried is
-# gone. Empty when the terminal offers nothing of the kind.
-#
-#   tmux   the server pid, the middle field of $TMUX ("socket,pid,index")
-#   herdr  inode and ctime of the socket at $HERDR_SOCKET_PATH: the server
-#          creates that file when it starts (measured: its ctime is the last
-#          server start), so a restart recreates it. stat's flags differ
-#          between BSD and GNU; both are tried, and no stat at all is "".
-#          Resolution is one second, and a filesystem may hand the freed
-#          inode straight back (ext4 does; measured on a Linux runner), so a
-#          recreation inside the same second is not visible -- a real restart
-#          takes longer than that, and the case falls into the stated blind
-#          spot rather than into a false detection.
-#   plain  nothing to observe
-agmsg_terminal_epoch() {   # <terminal>
-  case "$1" in
-    tmux)
-      [ -n "${TMUX:-}" ] || return 0
-      local rest="${TMUX#*,}"
-      printf 'pid=%s\n' "${rest%%,*}" ;;
-    herdr)
-      [ -n "${HERDR_SOCKET_PATH:-}" ] || return 0
-      local s=""
-      s="$(stat -f '%i:%c' "$HERDR_SOCKET_PATH" 2>/dev/null)" \
-        || s="$(stat -c '%i:%Z' "$HERDR_SOCKET_PATH" 2>/dev/null)" \
-        || s=""
-      [ -z "$s" ] || printf 'sock=%s\n' "$s" ;;
-  esac
-  return 0
+# The terminal server's generation is another driver observation, queried
+# without addressing the terminal. Values and non-value reasons stay distinct
+# until consumers decide whether a generation can be cached.
+_agmsg_terminal_self_env_one() {   # <terminal>
+  local name="$1" dir
+  dir="$(agmsg_terminal_dir "$name")" || return 126
+  [ -f "$dir/ops.sh" ] || return 126
+  (
+    local id epoch rc=0 epoch_rc=0
+    _agmsg_terminal_unset_ops
+    # shellcheck disable=SC1090,SC1091
+    . "$dir/ops.sh" || exit 126
+    declare -F terminal_self_env >/dev/null 2>&1 || exit 125
+    id="$(terminal_self_env)" || rc=$?
+    if [ "$rc" -ne 0 ] || [[ "$id" == *[$'\t\r\n']* ]]; then
+      printf 'unknown:environment_observation_failed\n'
+      exit 0
+    fi
+    case "$id" in
+      n/a:*|unknown:*) printf '%s\n' "$id"; exit 0 ;;
+      '') printf 'unknown:empty_observation\n'; exit 0 ;;
+    esac
+    if ! declare -F terminal_id_ok >/dev/null 2>&1 || ! terminal_id_ok "$id"; then
+      printf 'unknown:id_malformed\n'
+      exit 0
+    fi
+    epoch=""
+    if declare -F terminal_epoch >/dev/null 2>&1; then
+      epoch="$(terminal_epoch)" || epoch_rc=$?
+      if [ "$epoch_rc" -ne 0 ] || [[ "$epoch" == *[$'\t\r\n']* ]]; then
+        epoch='unknown:epoch_observation_failed'
+      fi
+    fi
+    case "$epoch" in unknown:*) epoch="" ;; esac
+    printf 'value\t%s\t%s\n' "$id" "$epoch"
+  )
 }
 
-# The pane this process is in, from the ENVIRONMENT alone: no driver loaded, no
-# terminal called. Prints "<terminal>\t<id>\t<epoch>" or nothing. This is the
-# fast half of self-naming on action: a seat that finds its mark equal to this
-# never touches the terminal (measured 0.22 ms for the file read). It answers
-# the same question as agmsg_terminal_resolve_name("") for tmux and herdr --
-# tmux from $TMUX/$TMUX_PANE (the driver's terminal_detect reads exactly those),
-# herdr from HERDR_PANE_ID (the driver's terminal_detect now prefers it too).
-# Under neither, nothing: plain has no pane to name.
+_agmsg_terminal_epoch_one() {   # <terminal>
+  local name="$1" dir
+  dir="$(agmsg_terminal_dir "$name")" || return 126
+  [ -f "$dir/ops.sh" ] || return 126
+  (
+    _agmsg_terminal_unset_ops
+    # shellcheck disable=SC1090,SC1091
+    . "$dir/ops.sh" || exit 126
+    declare -F terminal_epoch >/dev/null 2>&1 || exit 125
+    terminal_epoch
+  )
+}
+
+# Order environment self-identification by nesting, independently of the
+# global detection priority used by spawn/where. A missing or invalid order is
+# last; driver names break ties deterministically.
+agmsg_terminal_self_env_candidates() {
+  local kind base dir name line order names=() orders=() i found count=0
+  while IFS=$'\t' read -r kind base; do
+    for dir in "$base"/terminals/*; do
+      [ -d "$dir" ] && [ -f "$dir/terminal.conf" ] || continue
+      name="${dir##*/}"
+      case "$name" in ''|*[!a-zA-Z0-9_-]*) continue ;; esac
+      if [ "$kind" != builtin ] && ! agmsg_driver_is_trusted terminals "$name" "$dir"; then
+        continue
+      fi
+      order=""
+      while IFS= read -r line; do
+        case "$line" in self_env_order=*|self_env_order[[:space:]]*=*)
+          order="${line#*=}"
+          order="${order#\"}"; order="${order%\"}"
+          order="${order#\'}"; order="${order%\'}"
+          order="${order#"${order%%[![:space:]]*}"}"
+          order="${order%"${order##*[![:space:]]}"}"
+          break
+          ;;
+        esac
+      done < "$dir/terminal.conf"
+      case "$order" in ''|*[!0-9]*) order=999999 ;; esac
+      found=-1
+      for ((i = 0; i < count; i++)); do
+        if [ "${names[$i]}" = "$name" ]; then found=$i; break; fi
+      done
+      if [ "$found" -ge 0 ]; then
+        orders[found]="$order"   # later eligible base wins, as in agmsg_terminal_dir
+      else
+        names[count]="$name"
+        orders[count]="$order"
+        count=$((count + 1))
+      fi
+    done
+  done <<EOF
+$(agmsg_driver_bases)
+EOF
+  for ((i = 0; i < count; i++)); do
+    printf '%s\t%s\n' "${orders[$i]}" "${names[$i]}"
+  done | sort -n -k1,1 -k2,2 | cut -f2
+}
+
+# A driver's epoch hook reports a value, n/a:<reason>, or unknown:<reason>.
+# Drivers without the optional hook retain the old empty-epoch behavior.
+agmsg_terminal_epoch() {   # <terminal>
+  local name="$1" out="" rc=0
+  out="$(_agmsg_terminal_epoch_one "$name")" || rc=$?
+  [ "$rc" -eq 125 ] && return 0
+  if [ "$rc" -ne 0 ] || [[ "$out" == *[$'\t\r\n']* ]]; then
+    printf 'unknown:epoch_observation_failed\n'
+    return 0
+  fi
+  printf '%s\n' "$out"
+}
+
+# The pane this process is in, from registered drivers' environment-only hooks:
+# no terminal command is called. Prints "<terminal>\t<id>\t<epoch>", an
+# unknown:<terminal>:<reason> field, or nothing. The self_env_order manifest
+# key controls nesting precedence without changing the resolver's global order.
+# This is the fast half of self-naming on action: a matching mark avoids a
+# terminal round trip. Drivers without this optional hook are skipped.
 agmsg_terminal_self_env() {
-  if [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
-    printf 'tmux\t%s:%s\t%s\n' "${TMUX%%,*}" "$TMUX_PANE" "$(agmsg_terminal_epoch tmux)"
+  local name out rc id epoch
+  for name in $(agmsg_terminal_self_env_candidates); do
+    rc=0; out="$(_agmsg_terminal_self_env_one "$name")" || rc=$?
+    [ "$rc" -eq 125 ] && continue
+    if [ "$rc" -ne 0 ] || [[ "$out" == *[$'\r\n']* ]]; then
+      printf 'unknown:%s:environment_observation_failed\n' "$name"
+      return 0
+    fi
+    case "$out" in
+      n/a:*) continue ;;
+      unknown:*) printf 'unknown:%s:%s\n' "$name" "${out#unknown:}"; return 0 ;;
+      '') printf 'unknown:%s:empty_observation\n' "$name"; return 0 ;;
+    esac
+    case "$out" in value$'\t'*) ;; *) printf 'unknown:%s:malformed_observation\n' "$name"; return 0 ;; esac
+    out="${out#*$'\t'}"
+    id="${out%%$'\t'*}"
+    epoch="${out#*$'\t'}"
+    printf '%s\t%s\t%s\n' "$name" "$id" "$epoch"
     return 0
-  fi
-  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] \
-    && _agmsg_locator_instance_ok "${HERDR_SOCKET_PATH:-}"; then
-    printf 'herdr\t%s:%s\t%s\n' "${HERDR_SOCKET_PATH:-}" "$HERDR_PANE_ID" "$(agmsg_terminal_epoch herdr)"
-    return 0
-  fi
+  done
   return 0
 }
 
@@ -591,44 +703,60 @@ _agmsg_terminal_id_ok() {   # <terminal> <id>
   )
 }
 
-agmsg_terminal_ref_terminal() {
-  local ref="$1" term id
-  case "$ref" in
-    tmux:*)  term=tmux;  id="${ref#tmux:}" ;;
-    herdr:*) term=herdr; id="${ref#herdr:}" ;;
-    plain:*) term=plain; id="${ref#plain:}" ;;
-    %*|@*)   term=tmux;  id="$ref" ;;    # legacy pre-axis bare tmux id
-    *)       return 1 ;;                 # unknown scheme -> no terminal
-  esac
-  # A KNOWN scheme is not enough: the id after it is still handed to the terminal as a
-  # TARGET, so a corrupt id (tmux:%9;kill, tmux:alice, herdr:<newline>, plain:any)
-  # must not fall through. Validate it against the terminal's grammar; fail closed
-  # otherwise (the container is not the contents).
-  _agmsg_terminal_id_ok "$term" "$id" || return 1
-  printf '%s\n' "$term"
-}
-
-# Print the bare id of a record ref (stdout) — the scheme prefix stripped, or the
-# whole value for a legacy bare id. Uses first-colon split so a herdr id that
-# itself contains ':' (e.g. wC:pN) survives.
-agmsg_terminal_ref_id() {
+_agmsg_terminal_ref_parse() {   # <ref>, sets _AGMSG_REF_TERM / _ID / _PANE_ID / _SOCK
   local ref="$1" term id halves instance pane
+  _AGMSG_REF_TERM=""; _AGMSG_REF_ID=""; _AGMSG_REF_PANE_ID=""; _AGMSG_REF_SOCK=""
   case "$ref" in
-    tmux:*)  printf '%s\n' "${ref#tmux:}" ;;
-    herdr:*)
-      id="${ref#herdr:}"
+    %*|@*) term=tmux; id="$ref" ;;             # legacy pre-axis bare tmux id
+    *:*)   term="${ref%%:*}"; id="${ref#*:}" ;;
+    *)     return 1 ;;
+  esac
+  # A ref is readable only when its registered, trusted driver accepts the raw
+  # id. Keep this generic: adding a driver must not require another hard-coded
+  # case here. Validate before v2 ids are decoded so every reader, including the
+  # placement-claim scan, rejects malformed handles the same way.
+  _agmsg_terminal_id_ok "$term" "$id" || return 1
+
+  local driver_id="$id" pane_id="$id" sock=""
+  case "$term" in
+    tmux)
+      # The final colon separates the pane sigil from the socket. Socket paths
+      # may themselves contain colons; legacy %N/@N has no socket component.
+      case "$id" in
+        *:*) sock="${id%:*}"; pane_id="${id##*:}" ;;
+      esac
+      ;;
+    herdr)
+      # Herdr v2 encodes a colon-bearing socket before its wN:pX pane id.
+      # Decode to the same public id used by v1 readers and the collision scan.
       case "$id" in
         v2:*:*:*)
           halves="$(_agmsg_terminal_id_split herdr "$id")" || return 1
           instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
-          printf '%s:%s\n' "$instance" "$pane"
+          driver_id="$instance:$pane"; pane_id="$driver_id"
           ;;
-        *) printf '%s\n' "$id" ;;
+        *:*:*)
+          halves="$(_agmsg_terminal_id_split herdr "$id")" || return 1
+          instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+          driver_id="$instance:$pane"; pane_id="$driver_id"
+          ;;
       esac
       ;;
-    plain:*) printf '%s\n' "${ref#plain:}" ;;
-    *)       printf '%s\n' "$ref" ;;         # legacy bare id
   esac
+  _AGMSG_REF_TERM="$term"; _AGMSG_REF_ID="$driver_id"
+  _AGMSG_REF_PANE_ID="$pane_id"; _AGMSG_REF_SOCK="$sock"
+}
+
+agmsg_terminal_ref_terminal() {
+  _agmsg_terminal_ref_parse "$1" || return 1
+  printf '%s\n' "$_AGMSG_REF_TERM"
+}
+
+# Print the driver id of a record ref (stdout). Legacy bare %N/@N remains tmux;
+# herdr v2 is decoded to the same instance:pane form used by v1 readers.
+agmsg_terminal_ref_id() {
+  _agmsg_terminal_ref_parse "$1" || return 1
+  printf '%s\n' "$_AGMSG_REF_ID"
 }
 
 # --- name THIS pane, and record where it is ---------------------------------
@@ -730,35 +858,26 @@ agmsg_terminal_ref_id() {
 # the write through for exactly the records most likely to be OLD, which are the
 # ones most likely to belong to somebody else.
 #
-# The scheme table below mirrors agmsg_terminal_ref_terminal / agmsg_terminal_ref_id
-# (inline, so the scan forks nothing per record); a test pins that the two agree
-# on every form the record format accepts.
+# The shared parser below feeds all three public answers, so a new registered
+# driver scheme cannot be accepted by one reader and rejected by another.
 _agmsg_placement_split() {   # <ref>
-  local ref="$1" term id halves instance pane
+  local ref="$1" halves instance pane id
   _AGMSG_PS_TERM=""; _AGMSG_PS_ID=""; _AGMSG_PS_SOCK=""
-  case "$ref" in
-    tmux:*)  term=tmux;  id="${ref#tmux:}" ;;
-    herdr:*) term=herdr; id="${ref#herdr:}" ;;
-    plain:*) term=plain; id="${ref#plain:}" ;;
-    %*|@*)   term=tmux;  id="$ref" ;;        # legacy pre-axis bare tmux id
-    *)       return 1 ;;
-  esac
-  if [ "$term" = tmux ]; then
-    case "$id" in
-      *:*) _AGMSG_PS_SOCK="${id%:*}"; id="${id##*:}" ;;   # split on the LAST colon
-    esac
+  _agmsg_terminal_ref_parse "$ref" || return 1
+  id="$_AGMSG_REF_PANE_ID"
+  _AGMSG_PS_SOCK="$_AGMSG_REF_SOCK"
+  # Some drivers have one local instance even when the legacy placement ref
+  # spells only a bare pane id. Normalize that spelling through the driver's
+  # own splitter so a bare ref and its qualified locator compare as one pane.
+  # Keep the existing socket wildcard rule for tmux: an unqualified legacy
+  # pane still cannot be shown to belong to a different server.
+  if halves="$(_agmsg_terminal_id_split "$_AGMSG_REF_TERM" "$_AGMSG_REF_ID")"; then
+    instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+    if [ -z "$_AGMSG_REF_SOCK" ] && [ "$id" = "$pane" ]; then
+      id="$instance:$pane"
+    fi
   fi
-  if [ "$term" = herdr ]; then
-    case "$id" in
-      *:*:*)
-        halves="$(_agmsg_terminal_id_split herdr "$id")" || return 1
-        instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
-        id="$instance:$pane"
-        ;;
-    esac
-  fi
-  [ -n "$id" ] || return 1
-  _AGMSG_PS_TERM="$term"; _AGMSG_PS_ID="$id"
+  _AGMSG_PS_TERM="$_AGMSG_REF_TERM"; _AGMSG_PS_ID="$id"
   return 0
 }
 
@@ -820,6 +939,106 @@ _agmsg_placement_claimed_by() {
     return 0
   done
   return 0
+}
+
+# <ref> -> the BARE pane id (no socket/instance prefix), via
+# _agmsg_placement_split followed by the driver's own id splitter. Not just
+# _AGMSG_PS_ID: for a driver that folds the socket INTO the id rather than
+# carrying it separately in _AGMSG_PS_SOCK (herdr does, so two panes on
+# different servers are not confused by a bare pane id alone -- #1051), that
+# field IS the qualified form, and terminal_session_live answers with the
+# driver's bare pane_id -- comparing the two directly always mismatches.
+# Empty (rc 1) when the ref cannot be parsed at either layer.
+_agmsg_placement_bare_pane_id() {   # <ref>
+  local ref="$1" halves
+  _agmsg_placement_split "$ref" || return 1
+  halves="$(_agmsg_terminal_id_split "$_AGMSG_PS_TERM" "$_AGMSG_PS_ID" 2>/dev/null)" || return 1
+  printf '%s' "${halves#*$'\t'}"
+}
+
+# <rival-spawn-record-path> <this-seat's-own-claim-ref>
+#   Is the session that record's role-session file names as its `session=`
+#   the one actually sitting in the CLAIMED pane right now (#1485)? The pane
+#   is the caller's own resolved ref (agmsg_terminal_ref's output, e.g.
+#   "herdr:<socket>:<pane>") -- both sides of the comparison are normalized to
+#   the same BARE pane id via _agmsg_placement_bare_pane_id, rather than
+#   comparing a socket-qualified ref against terminal_session_live's bare
+#   answer directly (which never matches for herdr -- see that function).
+#
+#   Prints "here" (still genuinely claimed -- refuse as before), "not_here"
+#   (confirmed dead, or confirmed alive somewhere else -- the claim is stale),
+#   or "unknown" (cannot tell). "unknown" is the answer every caller already
+#   treated as a claim before this function existed, so nothing here may ever
+#   turn "unknown" into anything but "still refuse".
+#
+# The record's session id comes from role-session.sh's file for the SAME
+# (team, agent) -- found by substituting "spawn." for "role-session." in the
+# spawn path, never by decoding team/agent out of it. _agmsg_placement_claimed_by's
+# own comment above already covers why: "__" is legal inside a name, so a name
+# cannot be split out of the encoded file name. Both families are written by
+# the same encoder into the same directory (role-session.sh's own header
+# comment), so the substitution lands on the record for every claim this can
+# still help with: a legacy/name-keyed one whose suffix is also PROVABLY one
+# pair's alone (see the "__" collision check below, #1023/#1482) -- a
+# colliding suffix reads as "unknown" too, exactly as an id-keyed one does. An
+# id-keyed spawn record (#1240) has no same-named role-session file --
+# role-session.sh only ever encodes names, never ids -- so this reads empty
+# there and answers "unknown", exactly today's behavior for that case;
+# teaching role-session.sh to read id-keyed pairs is #1457 item 1, a separate,
+# larger change.
+#
+# Liveness itself is asked of the terminal driver already loaded for THIS
+# seat's own pane (terminal_session_live, herdr only for now -- #1485's own
+# reproduction is herdr-specific, and so is every existing mechanism this
+# reuses rather than inventing a new one; a driver without the op answers
+# "unknown" via the declare -F check below, so a non-herdr pane refuses
+# exactly as it always has). Single-server only:
+# like the rest of this file's herdr ops, it asks whichever socket this
+# process's own herdr CLI resolves to, and does not attempt to prove the
+# claim's socket is the same server (#1051's cross-server pane-id collision
+# risk, not newly introduced here, just not newly closed either).
+_agmsg_placement_claimant_here_now() {   # <rival-spawn-record-path> <claim-ref>
+  local spawn_path="$1" claim_ref="$2" want_id dir suffix role_path claimant_sid
+  local live_out live_pane
+  want_id="$(_agmsg_placement_bare_pane_id "$claim_ref")" || { echo unknown; return 0; }
+  dir="${spawn_path%/*}"; suffix="${spawn_path##*/spawn.}"
+  [ "$suffix" != "$spawn_path" ] && [ -n "$suffix" ] || { echo unknown; return 0; }
+  # #1023/#1482 review: this suffix is "<enc_team>__<enc_agent>" with no
+  # separator escaping, so it is only PROVABLY one pair's when neither name
+  # itself contains "__" -- team "a__b" agent "c" and team "a" agent "b__c"
+  # both spell "a__b__c" (actas-lock.sh's own #1023 comment). Guessing which
+  # split is real would risk reading (or clearing the named_ref of) a THIRD
+  # pair's role-session file. _agmsg_team_delete_legacy_unambiguous solves the
+  # identical question from separate team/agent strings; this suffix arrives
+  # already joined (a rival record's bare file name, never decoded -- the
+  # comment on _agmsg_placement_claimed_by above covers why that cannot be
+  # done safely either), so the check works the other direction: strip up to
+  # the FIRST "__" and look for a SECOND one in what is left. A name
+  # containing "__" leaves one there regardless of which half it was in, so
+  # any second occurrence means the split is not unique and this suffix must
+  # not be trusted to name any one (team, agent) pair.
+  case "$suffix" in *__*) : ;; *) echo unknown; return 0 ;; esac
+  case "${suffix#*__}" in *__*) echo unknown; return 0 ;; esac
+  role_path="$dir/role-session.$suffix"
+  if ! declare -F _agmsg_role_session_field >/dev/null 2>&1; then
+    if [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ]; then
+      # shellcheck disable=SC1090,SC1091
+      . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || true
+    fi
+  fi
+  declare -F _agmsg_role_session_field >/dev/null 2>&1 || { echo unknown; return 0; }
+  claimant_sid="$(_agmsg_role_session_field "$role_path" session)"
+  [ -n "$claimant_sid" ] || { echo unknown; return 0; }
+  declare -F terminal_session_live >/dev/null 2>&1 || { echo unknown; return 0; }
+  live_out="$(terminal_session_live "$claimant_sid" 2>/dev/null)" || { echo unknown; return 0; }
+  case "$live_out" in
+    dead) echo not_here; return 0 ;;
+    live"$(printf '\t')"*)
+      live_pane="${live_out#live"$(printf '\t')"}"
+      if [ "$live_pane" = "$want_id" ]; then echo here; else echo not_here; fi
+      return 0 ;;
+    *) echo unknown; return 0 ;;
+  esac
 }
 
 # Resolve this seat's pane by its LABEL, when the label answers unambiguously.
@@ -1036,16 +1255,65 @@ agmsg_terminal_name_self() {
       return 0
     fi
     if [ -n "$_claimed_by" ]; then
-      # A claimant whose name ends in THIS seat's name may be this seat under a
-      # team no longer on disk (the exact rule cannot tell, and stays closed);
-      # the way out is then the file, not a seat.
-      local _self_hint=""
-      case "$_claimed_by" in
-        *"__$(_actas_lock_encode "$agent")")
-          _self_hint=" If '$_claimed_by' is this seat under a team that no longer exists, remove run/spawn.$_claimed_by." ;;
-      esac
-      echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again.$_self_hint (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
-      return 0
+      # DEAD-CLAIMANT TAKEOVER (#1485): the claim above is otherwise
+      # unconditional -- first-writer-wins, forever -- even once the claimant's
+      # own session is long gone. Take the pane over ONLY when BOTH halves of
+      # the stale-record condition are confirmed: the claimant's own last
+      # recorded session is confirmably NOT the one sitting in this pane now,
+      # AND this seat's OWN session IS. Both halves need a session id to ask
+      # with; a caller with none (every action-hook caller routed through
+      # self-name.sh) cannot ask either question and keeps refusing exactly as
+      # every caller did before this existed.
+      local _took_over=0 _rival_spawn="" _role_path=""
+      local _want_id=""
+      _want_id="$(_agmsg_placement_bare_pane_id "$_claim_ref" 2>/dev/null)" || _want_id=""
+      if [ -n "$sid" ] && [ -n "$_want_id" ]; then
+        local _mine_spawn="" _claimant_here="unknown"
+        _mine_spawn="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || _mine_spawn=""
+        if [ -n "$_mine_spawn" ]; then
+          _rival_spawn="$(dirname "$_mine_spawn")/spawn.$_claimed_by"
+          _claimant_here="$(_agmsg_placement_claimant_here_now "$_rival_spawn" "$_claim_ref" 2>/dev/null)" || _claimant_here="unknown"
+          if [ "$_claimant_here" = not_here ] && declare -F terminal_session_live >/dev/null 2>&1; then
+            local _mine_live="" _tab
+            _tab="$(printf '\t')"
+            _mine_live="$(terminal_session_live "$sid" 2>/dev/null)" || _mine_live=""
+            case "$_mine_live" in
+              "live${_tab}"*)
+                [ "${_mine_live#"live${_tab}"}" = "$_want_id" ] && _took_over=1 ;;
+            esac
+          fi
+        fi
+      fi
+      if [ "$_took_over" -eq 1 ]; then
+        # The claimant's role stays registered -- every other field of its
+        # record is untouched -- only the naming mark it can no longer back up
+        # is dropped, so a later reader does not find it still asserting this
+        # pane (role-session.sh's own agmsg_role_session_record already
+        # preserves named_ref across an unrelated re-record, so leaving a stale
+        # one here would otherwise survive indefinitely). Best-effort, like
+        # every other write in this family: nothing here may fail the naming
+        # this seat is about to do.
+        _role_path="$(dirname "$_rival_spawn")/role-session.${_rival_spawn##*/spawn.}"
+        if ! declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
+           && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ]; then
+          # shellcheck disable=SC1090,SC1091
+          . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || true
+        fi
+        declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
+          && agmsg_role_session_clear_named_at "$_role_path" 2>/dev/null
+        # Fall through: this pane is this seat's to name/mark/record now.
+      else
+        # A claimant whose name ends in THIS seat's name may be this seat under a
+        # team no longer on disk (the exact rule cannot tell, and stays closed);
+        # the way out is then the file, not a seat.
+        local _self_hint=""
+        case "$_claimed_by" in
+          *"__$(_actas_lock_encode "$agent")")
+            _self_hint=" If '$_claimed_by' is this seat under a team that no longer exists, remove run/spawn.$_claimed_by." ;;
+        esac
+        echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again.$_self_hint (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
+        return 0
+      fi
     fi
   fi
 
@@ -1168,10 +1436,11 @@ agmsg_terminal_name_self_safe() {
 # ---------------------------------------------------------------------------
 # Locators: the one grammar for "a pane, in an instance, of a kind" (#1055, #1152).
 #
-#   <kind>:<driver id>, where every driver's id is itself <instance>:<pane>:
+#   <kind>:<driver id>, where a qualified driver's id is <instance>:<pane>:
 #     herdr:/run/jugemu.sock:w1:p7      instance = the server's socket path
 #     tmux:/tmp/tmux-501/default:%4     instance = the socket path
 #     plain:iterm:/dev/ttys040          instance = the emulator adapter name
+#     orca:local:term_<uuid>             instance = Orca's one local runtime
 #
 # Pane ids repeat across instances (two herdr sessions both own a w1:p2; tmux
 # has one id space per socket), so a pane id alone can name a live pane in
@@ -1182,9 +1451,9 @@ agmsg_terminal_name_self_safe() {
 # check): one grammar per kind, held once, in the driver that owns it.
 #
 # The registry owns the outer shape (kind + id) and asks the KIND's driver for
-# the boundary inside its id (`terminal_id_split`): where a herdr id ends in
-# two colon fields and a tmux or plain id in one is the driver's grammar, held
-# once, in the driver. An instance may contain spaces. Herdr instances
+# the boundary inside its id (`terminal_id_split`): how an id separates its
+# instance from its pane is the driver's grammar, held once, in the driver.
+# An instance may contain spaces. Herdr instances
 # containing a colon use the registry's versioned encoding (`v2:` plus percent
 # escapes), so an older reader sees an invalid qualified id and refuses it
 # rather than routing to a different socket. Control characters remain rejected.
@@ -1344,6 +1613,40 @@ agmsg_locator_compose() {   # <kind> <instance> <pane>
   [ "$(_agmsg_terminal_id_split "$kind" "$id")" = "$(printf '%s\t%s' "$instance" "$pane")" ] \
     || { echo "agmsg: locator: pane_malformed" >&2; return 2; }
   printf '%s:%s:%s\n' "$kind" "$encoded" "$pane"
+}
+
+# Qualify a canonical ref using the owning driver's own instance rules. A bare
+# result is retained only when the driver explicitly says it has no instance;
+# an unknown or malformed answer is a refusal, not permission to guess.
+agmsg_terminal_ref_qualify() {   # <canonical-ref>
+  local ref="$1" kind parts instance pane
+  _agmsg_terminal_ref_parse "$ref" || return 1
+  kind="$_AGMSG_REF_TERM"
+  agmsg_terminal_load "$kind" >/dev/null 2>&1 || return 1
+  declare -F terminal_instance_for_ref >/dev/null 2>&1 || {
+    echo "agmsg: $kind driver cannot resolve a locator instance" >&2
+    return 2
+  }
+  parts="$(terminal_instance_for_ref "$ref")" || return 1
+  case "$parts" in
+    n/a:bare) printf '%s\n' "$ref"; return 0 ;;
+    n/a:*) echo "agmsg: $kind driver returned an unsupported locator instance result" >&2; return 2 ;;
+    unknown:*) echo "agmsg: $kind driver could not resolve locator instance (${parts#unknown:})" >&2; return 2 ;;
+  esac
+  case "$parts" in
+    *$'\t'*) ;;
+    *) echo "agmsg: $kind driver returned a malformed locator instance" >&2; return 2 ;;
+  esac
+  instance="${parts%%$'\t'*}"; pane="${parts#*$'\t'}"
+  [ -n "$instance" ] && [ -n "$pane" ] || {
+    echo "agmsg: $kind driver returned a malformed locator instance" >&2
+    return 2
+  }
+  case "$instance$pane" in *$'\t'*)
+    echo "agmsg: $kind driver returned a malformed locator instance" >&2
+    return 2 ;;
+  esac
+  agmsg_locator_compose "$kind" "$instance" "$pane"
 }
 
 

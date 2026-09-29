@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# setup — non-conversational setup commands for the Slack ext-tool, driven by
+# the seat LLM per SETUP.md (design note §5b). Every subcommand takes explicit
+# paths/values as arguments rather than assuming a config file already exists
+# or a fixed location for the key -- `save` is what creates the member config,
+# so nothing before it can read one.
+#
+# Usage:
+#   setup status <config_path>
+#   setup check token <key_file>
+#   setup check channel <key_file> <channel_id>
+#   setup save <config_path> <key_file> <channel_id>
+#   setup test <config_path>
+#
+# Never prints a token. `check token`/`check channel` take a key_file PATH,
+# read it once into a variable, and use it only as curl's Authorization
+# header -- the same discipline handle follows (see _lib.sh).
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/_lib.sh"
+
+die() { echo "setup: $*" >&2; exit 1; }
+
+cmd="${1:?Usage: setup status|check|save|test ...}"
+shift
+
+cmd_status() {
+  local config_path="${1:?Usage: setup status <config_path>}" required key
+  required="$(_slack_conf_get "$SCRIPT_DIR/tool.conf" required_config 2>/dev/null || true)"
+  [ -n "$required" ] || required="key_file channel"
+  local items="" sep=""
+  for key in $required; do
+    if [ -z "$(_slack_conf_get "$config_path" "$key")" ]; then
+      items="${items}${sep}\"$key\""
+      sep=","
+    fi
+  done
+  printf '{"missing":[%s]}\n' "$items"
+}
+
+# Report an _slack_api_call failure (transport error or an unexpected/429
+# HTTP status) as one JSON line, the same vocabulary handle uses on its own
+# failure line, so a caller reading either surface sees consistent wording.
+# <extra> is a jq OBJECT LITERAL to merge in (e.g. '{"exists":false}'), kept
+# as one plain argument rather than extra --arg/--argjson flags -- mixing
+# this function's OWN flag names into a $ARGS.named merge previously leaked
+# them as stray fields (an "err" key alongside "error") in the output.
+_slack_call_failure_json() {   # [<extra-object-json>]
+  local extra="${1:-{\}}" err_val
+  if [ -n "${_SLACK_CURL_DIAG:-}" ]; then
+    err_val="$_SLACK_CURL_DIAG"
+  else
+    case "$_SLACK_HTTP_CODE" in
+      429) err_val="rate_limited (HTTP 429)" ;;
+      *) err_val="unexpected HTTP $_SLACK_HTTP_CODE" ;;
+    esac
+  fi
+  jq -cn --arg err "$err_val" --argjson extra "$extra" '{ok: false, error: $err} + $extra'
+}
+
+cmd_check_token() {
+  local key_file="${1:?Usage: setup check token <key_file>}" token out_file ok
+  _slack_read_token "$key_file" || {
+    jq -cn --arg err "$_SLACK_TOKEN_ERROR" '{ok: false, error: $err}'
+    return 1
+  }
+  token="$_SLACK_TOKEN"
+  out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-setup.XXXXXX")"
+  if ! _slack_api_call "$token" POST auth.test "$out_file" '{}'; then
+    _slack_call_failure_json
+    rm -f "$out_file"
+    return 1
+  fi
+  case "$_SLACK_HTTP_CODE" in
+    2??) : ;;
+    *) _slack_call_failure_json; rm -f "$out_file"; return 1 ;;
+  esac
+  ok="$(jq -r '.ok // false' "$out_file")"
+  if [ "$ok" = "true" ]; then
+    jq -cn --arg bot "$(jq -r '.user // ""' "$out_file")" \
+      --arg team "$(jq -r '.team // ""' "$out_file")" \
+      '{ok: true, bot: $bot, team: $team}'
+    rm -f "$out_file"
+    return 0
+  fi
+  jq -cn --arg err "$(jq -r '.error // "unknown_error"' "$out_file")" '{ok: false, error: $err}'
+  rm -f "$out_file"
+  return 1
+}
+
+cmd_check_channel() {
+  local key_file="${1:?Usage: setup check channel <key_file> <channel_id>}" \
+    channel="${2:?Usage: setup check channel <key_file> <channel_id>}" token out_file ok
+  _slack_read_token "$key_file" || {
+    jq -cn --arg err "$_SLACK_TOKEN_ERROR" '{ok: false, error: $err}'
+    return 1
+  }
+  token="$_SLACK_TOKEN"
+  out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-setup.XXXXXX")"
+  if ! _slack_api_call "$token" GET "conversations.info?channel=$(_slack_urlenc "$channel")" "$out_file"; then
+    _slack_call_failure_json '{"exists":false}'
+    rm -f "$out_file"
+    return 1
+  fi
+  case "$_SLACK_HTTP_CODE" in
+    2??) : ;;
+    *) _slack_call_failure_json '{"exists":false}'; rm -f "$out_file"; return 1 ;;
+  esac
+  ok="$(jq -r '.ok // false' "$out_file")"
+  if [ "$ok" != "true" ]; then
+    jq -cn --arg err "$(jq -r '.error // "unknown_error"' "$out_file")" \
+      '{ok: false, exists: false, error: $err}'
+    rm -f "$out_file"
+    return 1
+  fi
+  local is_member
+  is_member="$(jq -r 'if (.channel | type) == "object" then (.channel.is_member // false) else false end' "$out_file")"
+  rm -f "$out_file"
+  jq -cn --argjson member "$is_member" '{ok: true, exists: true, bot_member: $member}'
+  [ "$is_member" = "true" ]
+}
+
+cmd_save() {
+  local config_path="${1:?Usage: setup save <config_path> <key_file> <channel_id>}" \
+    key_file="${2:?Usage: setup save <config_path> <key_file> <channel_id>}" \
+    channel="${3:?Usage: setup save <config_path> <key_file> <channel_id>}"
+  [ -r "$key_file" ] || die "key file not readable: $key_file"
+  mkdir -p "$(dirname "$config_path")"
+  umask 077
+  {
+    printf 'key_file=%s\n' "$key_file"
+    printf 'channel=%s\n' "$channel"
+  } > "$config_path"
+  chmod 600 "$config_path"
+  printf '{"ok":true,"config_path":"%s"}\n' "$config_path"
+}
+
+# setup test posts directly rather than shelling out to handle (unlike the
+# old version of this function): it needs the posted message's channel/ts
+# back to offer a permalink, and handle's own reply must stay EMPTY for an
+# ordinary send (a non-empty reply wakes the sending seat again) -- the two
+# callers now want genuinely different things from the same API call.
+cmd_test() {
+  local config_path="${1:?Usage: setup test <config_path>}" \
+    key_file channel token out_file ok ts chan_id permalink
+  key_file="$(_slack_conf_get "$config_path" key_file)"
+  channel="$(_slack_conf_get "$config_path" channel)"
+  if [ -z "$key_file" ] || [ -z "$channel" ]; then
+    jq -cn '{ok: false, error: "member config is missing key_file or channel"}'
+    return 1
+  fi
+  _slack_read_token "$key_file" || {
+    jq -cn --arg err "$_SLACK_TOKEN_ERROR" '{ok: false, error: $err}'
+    return 1
+  }
+  token="$_SLACK_TOKEN"
+
+  out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-setup.XXXXXX")"
+  if ! _slack_api_call "$token" POST chat.postMessage "$out_file" \
+      "$(jq -cn --arg channel "$channel" --arg text "agmsg: Slack setup test message." \
+        '{channel: $channel, text: $text}')"; then
+    _slack_call_failure_json
+    rm -f "$out_file"
+    return 1
+  fi
+  case "$_SLACK_HTTP_CODE" in
+    2??) : ;;
+    *) _slack_call_failure_json; rm -f "$out_file"; return 1 ;;
+  esac
+  ok="$(jq -r '.ok // false' "$out_file")"
+  if [ "$ok" != "true" ]; then
+    jq -cn --arg err "$(jq -r '.error // "unknown_error"' "$out_file")" '{ok: false, error: $err}'
+    rm -f "$out_file"
+    return 1
+  fi
+  ts="$(jq -r '.ts // empty' "$out_file")"
+  chan_id="$(jq -r '.channel // empty' "$out_file")"
+  rm -f "$out_file"
+
+  # Best-effort: the send already succeeded by this point, so a permalink
+  # fetch failing (a missing scope, a transient error) must not turn a
+  # working test into a reported failure -- it just means no link this time.
+  permalink=""
+  if [ -n "$ts" ] && [ -n "$chan_id" ]; then
+    local perm_file
+    perm_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-slack-setup.XXXXXX")"
+    if _slack_api_call "$token" GET \
+        "chat.getPermalink?channel=$(_slack_urlenc "$chan_id")&message_ts=$(_slack_urlenc "$ts")" \
+        "$perm_file"; then
+      case "$_SLACK_HTTP_CODE" in
+        2??)
+          if [ "$(jq -r '.ok // false' "$perm_file")" = "true" ]; then
+            permalink="$(jq -r '.permalink // empty' "$perm_file")"
+          fi
+          ;;
+      esac
+    fi
+    rm -f "$perm_file"
+  fi
+  if [ -n "$permalink" ]; then
+    jq -cn --arg link "$permalink" '{ok: true, permalink: $link}'
+  else
+    jq -cn '{ok: true}'
+  fi
+}
+
+# curl handles the request line itself but not query-string encoding of an
+# arbitrary channel value (a name can carry characters a raw query string
+# cannot); percent-encode with jq's @uri rather than adding a dependency.
+_slack_urlenc() { printf '%s' "$1" | jq -rR '@uri'; }
+
+case "$cmd" in
+  status) cmd_status "$@" ;;
+  check)
+    sub="${1:?Usage: setup check token|channel ...}"; shift
+    case "$sub" in
+      token) cmd_check_token "$@" ;;
+      channel) cmd_check_channel "$@" ;;
+      *) die "unknown check: $sub (expected token or channel)" ;;
+    esac
+    ;;
+  save) cmd_save "$@" ;;
+  test) cmd_test "$@" ;;
+  *) die "unknown command: $cmd (expected status, check, save, or test)" ;;
+esac

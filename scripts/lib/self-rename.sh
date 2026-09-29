@@ -64,27 +64,51 @@ _agmsg_self_rename_record() {   # <team> <agent> <ref> <epoch> <result> <type>
   agmsg_role_session_mark_renamed "$1" "$2" "$3" "$4" "$5" "" "$6" 2>/dev/null || true
 }
 
-# agmsg_self_proof's own returned ref is the DRIVER's canonical id for the pane
-# it re-observed -- NOT the caller's candidate echoed back, and for tmux that
-# canonical id is deliberately bare (terminal_pane_process_observe strips the
-# instance before returning it; see the driver's own ops.sh). $ref elsewhere in
-# this file is composed from agmsg_terminal_self_env's id, which for tmux DOES
-# carry the instance ("<socket>:<pane>"). The two are honestly different
-# strings for the exact same pane, so comparing them as-is would refuse every
-# real tmux poke -- the same shape self-fix.sh's own _fix_locator_of_proof
-# exists to close (#1152); this is that same reattachment, kept local to this
-# file rather than shared, so a proof that DOES already carry its own instance
-# (a future driver, or herdr's HERDR_SOCKET_PATH) is left alone.
+# Qualify a proof result through the same driver-owned instance contract used
+# for the environment ref. This keeps comparison and the recorded mark on one
+# canonical locator without terminal-name-specific environment rules.
 _agmsg_self_rename_locator_of_proof() {   # <canonical-ref, e.g. "tmux:%3">
-  local ref="$1" kind pane inst=""
-  kind="${ref%%:*}"; pane="${ref#*:}"
-  case "$kind" in
-    herdr) inst="${HERDR_SOCKET_PATH:-}" ;;
-    tmux)  case "$pane" in *:*) inst="${pane%:*}"; pane="${pane##*:}" ;; *) inst="${TMUX:-}"; inst="${inst%%,*}" ;; esac ;;
-    plain) case "$pane" in *:*) inst="${pane%%:*}"; pane="${pane#*:}" ;; esac ;;
+  agmsg_terminal_ref_qualify "$1"
+}
+
+# Observe THIS seat's own session name. Deliberately separate from
+# agmsg_cli_session_observed (team-status.sh), which team.sh's OUTSIDE
+# observation of another seat's pane also calls: a type whose name can only
+# be recovered from something only the process ITSELF holds (an env var
+# keying a runtime index file, not the pane) declares session_name_self_source
+# instead of/alongside session_name_source, and only this self-observation
+# path reads it -- an outside caller has no business reading its OWN copy of
+# that env var and calling it the target seat's. team.sh's own path is
+# unchanged and keeps using session_name_source (#1386 continuation).
+#   session_index:<ENV-VAR-NAME> -> that env var holds a thread id; look it up
+#     via agmsg_codex_session_index_name. Unset env var, unreadable index
+#     file, or no matching line is unknown -- never guessed, never falls
+#     back to session_name_source for the same type.
+#   (session_name_self_source absent) -> the existing session_name_source path.
+_agmsg_self_rename_observed() {   # <type> <title> <pane>
+  local type="$1" title="$2" pane="$3" self_src envname tid
+  self_src="$(agmsg_type_get "$type" session_name_self_source 2>/dev/null || true)"
+  case "$self_src" in
+    session_index:*)
+      envname="${self_src#session_index:}"
+      # A shell-identifier check BEFORE the indirect expansion below (review):
+      # ${!envname} on a name outside identifier grammar is "bad substitution",
+      # not a namespaced unknown -- the manifest datum is data, not something
+      # this function should let crash the caller.
+      case "$envname" in
+        ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*)
+          printf 'unknown:session_name_self_source_malformed\n'; return 0 ;;
+      esac
+      tid="${!envname:-}"
+      if declare -F agmsg_codex_session_index_name >/dev/null 2>&1; then
+        agmsg_codex_session_index_name "$tid"
+      else
+        printf 'unknown:session_index_reader_unavailable\n'
+      fi
+      return 0
+      ;;
   esac
-  [ -n "$inst" ] || { printf '%s\n' "$ref"; return 0; }   # bare: ambient instance
-  agmsg_locator_compose "$kind" "$inst" "$pane" 2>/dev/null || printf '%s\n' "$ref"
+  agmsg_cli_session_observed "$type" "$title" "$pane"
 }
 
 agmsg_self_rename_on_action() {
@@ -99,6 +123,8 @@ agmsg_self_rename_on_action() {
   . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || return 0
   # shellcheck disable=SC1091
   . "$SKILL_DIR/scripts/lib/team-status.sh" 2>/dev/null || return 0
+  # shellcheck disable=SC1091
+  . "$SKILL_DIR/scripts/lib/codex-session-index.sh" 2>/dev/null || true
 
   # The acting commands (send/inbox/history) do not carry the seat's CLI type, so
   # resolve it from the role-session record the join/actas flow already wrote. No
@@ -115,10 +141,18 @@ agmsg_self_rename_on_action() {
   # Where am I -- environment only, no terminal call yet.
   local here terminal id epoch ref
   here="$(agmsg_terminal_self_env)"
+  # Action hooks are opportunistic and output-free: an unknown observation is
+  # a safe no-op, with no mark or poke. Direct callers retain the named reason
+  # from agmsg_terminal_self_env for diagnostics.
+  case "$here" in unknown:*) return 0 ;; esac
   [ -n "$here" ] || return 0                 # plain, or no terminal: no pane
   terminal="${here%%	*}"; here="${here#*	}"
   id="${here%%	*}"; epoch="${here#*	}"
   ref="$(agmsg_terminal_ref "$terminal" "$id")"
+  agmsg_terminal_load "$terminal" 2>/dev/null || return 0
+  local qualified_ref
+  qualified_ref="$(agmsg_terminal_ref_qualify "$ref")" || return 0
+  ref="$qualified_ref"
 
   # PLACEMENT GUARD (#1112, same rule as terminal-registry.sh's #1114 guard on
   # the naming/marking/record path -- this is the SECOND call site that turns
@@ -171,13 +205,13 @@ agmsg_self_rename_on_action() {
     return 0
   fi
 
-  # Observe my own session name. Loading the driver + one observation is the cost;
-  # it happens at most twice ever (the two phases), then the mark ends it.
-  agmsg_terminal_load "$terminal" 2>/dev/null || return 0
+  # Observe my own session name. The driver was already loaded to qualify the
+  # ref; the observation happens at most twice ever (the two phases), then the
+  # mark ends it.
   local expected="$team-$agent" raw title observed
   raw="$(agmsg_team_observe_loaded "$id" 2>/dev/null)"
   title="$(printf '%s' "$raw" | awk -F '\t' 'NR==1{print $4}')"
-  observed="$(agmsg_cli_session_observed "$type" "$title" "$id" 2>/dev/null)"
+  observed="$(_agmsg_self_rename_observed "$type" "$title" "$id" 2>/dev/null)"
 
   if [ "$phase" = confirm ]; then
     # The rename has had a turn to land. Judge, but never call a screen we could
@@ -245,15 +279,29 @@ agmsg_self_rename_on_action() {
       # an EXACT match between what was proved and what is about to be poked
       # authorizes the keystroke.
       local _proof_locator
-      _proof_locator="$(_agmsg_self_rename_locator_of_proof "${_proof_out#*	}")"
+      _proof_locator="$(_agmsg_self_rename_locator_of_proof "${_proof_out#*	}")" || {
+        _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "skipped:unproved:instance_unresolved" "$type"
+        return 0
+      }
       if [ "$_proof_locator" != "$ref" ]; then
         _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "skipped:unproved:locator_mismatch" "$type"
         return 0
       fi
       # Readable, wrong, and proved for exactly this pane: type the rename
       # ONCE, and mark "attempted" so the next action confirms instead of
-      # poking again.
-      if terminal_poke "$id" "$rename_cmd $expected" >/dev/null 2>&1; then
+      # poking again. Routed through agmsg_safe_poke (#1384 follow-up:
+      # typing into THIS session's own pane carries the same "someone might
+      # already be using it" risk poke.sh already guarded against) -- same
+      # call shape as the bare terminal_poke this replaces (one `if` on its
+      # exit status), so the two-branch record below is unchanged.
+      # shellcheck disable=SC1091
+      . "$SKILL_DIR/scripts/lib/safe-poke.sh" 2>/dev/null || true
+      local _marker _boxed
+      _marker="$(agmsg_type_get "$type" input_prompt_marker 2>/dev/null || true)"
+      _boxed="$(agmsg_type_get "$type" input_prompt_boxed 2>/dev/null || true)"
+      [ "$terminal" = plain ] && _marker=""
+      if declare -F agmsg_safe_poke >/dev/null 2>&1 \
+        && agmsg_safe_poke "$id" "$rename_cmd $expected" "$_marker" "$_boxed" "$team" "$agent" >/dev/null 2>&1; then
         _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" attempted "$type"
       else
         _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "failed:poke" "$type"

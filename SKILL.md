@@ -189,7 +189,7 @@ If argument starts with "poke" (e.g. "poke reviewer status?"):
    `send.sh` has no such path yet (#1032), so a body given to `send` must still
    be single-quoted — the two surfaces differ today, and this is why.
 3. `poke` TYPES INTO another agent's session and submits it, as if a person had typed it there. Use it to reach a member whose watcher is not delivering (that is what it is for); use `send` for ordinary messages, which the member reads on its own terms.
-4. Exit codes split what "could not poke" means — see the shape and the pointer to the driver-specific file in point 4 of the "where" section above. **13** specifically means: do not fall back to `send` silently; the two are not the same act, say which one you did.
+4. Exit codes split what "could not poke" means — see the shape and the pointer to the driver-specific file in point 4 of the "where" section above. **13** specifically means: do not fall back to `send` silently; the two are not the same act, say which one you did. Two more codes are `poke.sh`'s own, the same across every driver (not in the per-driver files, which only cover the driver's own layer below this one): **14** means it found the input box and it looks like someone is actively typing there right now — a transient condition `--retries` waits out. **15** means it could not even confirm where the input box is on this read (e.g. a mid-redraw screen) — a different finding from 14, not a typing detection, though it is also transient and also covered by `--retries`.
 
 <!-- agmsg:slot mode -->
 <!-- /agmsg:slot mode -->
@@ -213,6 +213,14 @@ If argument starts with "rename-team":
 2. Never invent either team name. Before execution, repeat the old and new team names and ask the user to confirm. Wait for confirmation.
 3. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/rename-team.sh <old_team> <new_team>`
 4. Show the result.
+
+If argument starts with "delete-team" or asks to delete/remove a team's data:
+1. Accept only an explicit user request — never delete a team on an inference alone.
+2. Parse the team name and which of `--delete` (the team itself: config, roster, identity history, per-agent runtime state), `--force` (with `--delete`: also remove every remaining member first, the same effect as `leave.sh` for each), and `--purge-messages` (only its message history) the user wants — they can be combined.
+3. Run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` first and show the roster. `--delete` refuses unless every member has already left (run `leave.sh` for each remaining one first, or use `--force`) and the team is not actively synced.
+4. Repeat back exactly what will be lost — identity history for `--delete` (and, with `--force`, which members will be removed first), message history for `--purge-messages` — and wait for the user's explicit confirmation before running anything.
+5. Run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team> [--delete] [--force] [--purge-messages] --yes` — pass `--yes` since the confirmation already happened in chat; the script's own interactive prompt would otherwise block waiting for input this agent can't supply.
+6. Show the result.
 
 If argument starts with "remote connect":
 1. Parse the required `--endpoint <url>` and `<team>`, plus optional `--e2ee`.

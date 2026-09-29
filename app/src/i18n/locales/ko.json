@@ -98,12 +98,25 @@
       "body": "{{team}}에서 {{name}}을(를) 제거하고, 실행 중이라면 해당 창도 닫습니다. 이 작업은 여기서 되돌릴 수 없습니다.",
       "confirmLabel": "나가기"
     },
+    "deleteTeam": {
+      "title": "'{{team}}' 팀을 삭제할까요?",
+      "body": "이렇게 하면 '{{team}}' 팀의 설정, 명단, 식별 정보 기록, 각 에이전트의 실행 기록이 영구적으로 삭제됩니다. 이 작업은 되돌릴 수 없습니다. 원격에 연결되어 있었다면, 나중에 다시 연결하면 복구될 수 있습니다.",
+      "confirmLabel": "팀 삭제",
+      "forceLabel": "멤버와 함께 삭제",
+      "purgeMessagesToo": "메시지 기록도 삭제",
+      "membersRemainBody": "이 팀에는 {{count}}명의 멤버가 있습니다. 모두 팀에서 제외하고 팀을 삭제할까요?"
+    },
+    "purgeMessages": {
+      "title": "'{{team}}' 팀의 메시지 기록을 삭제할까요?",
+      "body": "이렇게 하면 '{{team}}' 팀의 모든 메시지 기록이 영구적으로 삭제되며 복구할 수 없습니다.",
+      "confirmLabel": "메시지 삭제"
+    },
     "newTeam": {
       "titleFirstRun": "환영합니다 — 첫 팀을 만들어 보세요",
       "title": "새 팀",
       "note": "팀을 만들고 본인을 app-user(하단 채팅창의 소유자)로 추가합니다.",
       "teamNameLabel": "팀 이름",
-      "teamNamePlaceholder": "my-team",
+      "teamNamePlaceholder": "예: my-team",
       "appUserLabel": "본인 이름 (app-user)",
       "create": "만들기"
     },
@@ -115,16 +128,18 @@
     "agent": {
       "title": "에이전트 추가",
       "typeLabel": "유형",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "예: alice",
       "addAndSpawn": "추가 후 실행"
     },
     "rename": {
       "title": "{{current}} 이름 변경",
       "newNameLabel": "새 이름",
-      "confirmButton": "이름 변경"
+      "confirmButton": "이름 변경",
+      "confirmButtonBusy": "이름 변경 중…"
     },
     "confirm": {
-      "defaultLabel": "확인"
+      "defaultLabel": "확인",
+      "workingLabel": "처리 중…"
     },
     "settings": {
       "title": "설정"
@@ -140,6 +155,13 @@
       "confirmLabel": "패널 닫기"
     }
   },
+  "toast": {
+    "renameTeam": "'{{from}}' 팀 이름을 '{{to}}'(으)로 변경했습니다.",
+    "deleteTeam": "'{{team}}' 팀을 삭제했습니다.",
+    "deleteTeamForce": "'{{team}}' 팀을 삭제했습니다(멤버 {{count}}명 제외).",
+    "purgeMessages": "'{{team}}' 팀의 메시지를 삭제했습니다.",
+    "actionFailed": "실패: {{reason}}"
+  },
   "ctxMenu": {
     "member": {
       "spawnTo": "실행 위치 ▸",
@@ -147,6 +169,11 @@
       "existingTabsDivider": "— 기존 탭 —",
       "rename": "이름 변경…",
       "leave": "나가기"
+    },
+    "team": {
+      "rename": "이름 변경…",
+      "delete": "팀 삭제…",
+      "deleteMessages": "메시지 삭제…"
     },
     "pane": {
       "close": "닫기",

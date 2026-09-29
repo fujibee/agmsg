@@ -122,6 +122,29 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   local tmux_caps
   tmux_caps="$(grep '^capabilities=' "$ROOT/scripts/drivers/terminals/tmux/terminal.conf" | cut -d= -f2-)"
   grep -qF "capabilities=$tmux_caps" <<<"$output"
+
+  run env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH \
+    -u AGMSG_TERMINAL_DRIVER TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE=term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba \
+    bash "$ROOT/scripts/where.sh"
+  [ "$status" -eq 0 ]
+  local orca_caps
+  orca_caps="$(grep '^capabilities=' "$ROOT/scripts/drivers/terminals/orca/terminal.conf" | cut -d= -f2-)"
+  grep -qF "capabilities=$orca_caps" <<<"$output"
+}
+
+@test "orca's env-only detect wins over herdr when both are present, by priority (decided 2026-09-23)" {
+  # A seat's environment can carry both herdr's and orca's own signals (e.g. a
+  # herdr pane nested inside an Orca-hosted one). Decided 2026-09-23: judge
+  # presence from the seat's own environment, and ORCA_TERMINAL_HANDLE present
+  # means orca — implemented as orca's terminal.conf priority (5) being lower
+  # than herdr's (10), so orca's terminal_detect is tried first and wins
+  # outright.
+  run env -u TMUX -u TMUX_PANE -u AGMSG_TERMINAL_DRIVER \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p4 HERDR_SOCKET_PATH="$BATS_TEST_TMPDIR/herdr.sock" \
+    TERM_PROGRAM=Orca ORCA_TERMINAL_HANDLE=term_ea11f227-ca2c-44b0-a3e6-75c62b9f20ba \
+    bash "$ROOT/scripts/where.sh"
+  [ "$status" -eq 0 ]
+  grep -qF "terminal=orca" <<<"$output"
 }
 
 # Review (#1209) found that the first version of these per-driver docs claimed 13
@@ -138,8 +161,36 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 # claimed set to match exactly -- neither a code the function cannot return,
 # nor a missing one it does.
 
-# Every distinct `return N` inside <fn>()'s own body in <ops.sh>, N != 0.
+# Every distinct `return N` inside <fn>()'s own body in <ops.sh>, N != 0,
+# plus those of any `_*_impl` helper the body delegates to (herdr's
+# terminal_peek hands its whole read to _herdr_peek_impl, which it shares
+# with terminal_peek_styled).
 _returns_in_function() {   # <ops.sh path> <function name>
+  local impl
+  {
+    _returns_in_function_body "$1" "$2"
+    for impl in $(_impls_called_by "$1" "$2"); do
+      _returns_in_function_body "$1" "$impl"
+    done
+  } | sort -un
+}
+
+# Names of `_*_impl` functions called inside <fn>()'s own body.
+_impls_called_by() {   # <ops.sh path> <function name>
+  awk -v fn="$2" '
+    $0 ~ "^" fn "\\(\\) \\{" { infn=1; next }
+    infn && /^}/ { infn=0 }
+    infn {
+      line=$0
+      while (match(line, /_[a-z_]+_impl/)) {
+        print substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART+RLENGTH)
+      }
+    }
+  ' "$1" | sort -u
+}
+
+_returns_in_function_body() {   # <ops.sh path> <function name>
   awk -v fn="$2" '
     $0 ~ "^" fn "\\(\\) \\{" { infn=1; next }
     infn && /^}/ { infn=0 }
@@ -172,7 +223,7 @@ _rcs_in_doc_section() {   # <doc path> <heading text>
 
 @test "each driver's own peek/poke exit codes are exactly what terminal_peek/terminal_poke return, no more and no less (#1209 review)" {
   local driver ops doc fn heading actual claimed
-  for driver in herdr tmux plain; do
+  for driver in herdr tmux plain orca; do
     ops="$ROOT/scripts/drivers/terminals/$driver/ops.sh"
     doc="$ROOT/scripts/drivers/terminals/$driver/README.md"
     [ -s "$ops" ]; [ -s "$doc" ]

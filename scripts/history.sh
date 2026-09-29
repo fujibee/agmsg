@@ -70,7 +70,11 @@ trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
   printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
   printf "');\n"
 } > "$_agmsg_rows_sql"
-ROWS=$(agmsg_sqlite ':memory:' < "$_agmsg_rows_sql")
+# Windows sqlite3.exe may treat redirected stdin as interactive input unless
+# batch mode is explicit, returning success without evaluating the SQL. Keep
+# the stdin path (it avoids command-line length limits) and make the mode
+# explicit on every platform.
+ROWS=$(agmsg_sqlite -batch ':memory:' < "$_agmsg_rows_sql")
 rm -f "$_agmsg_rows_sql"
 trap - EXIT HUP INT TERM
 
@@ -109,7 +113,7 @@ while IFS= read -r r; do
     printf '%s' "${uarr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
     printf "');\n"
   } > "$_agmsg_unread_sql"
-  ids=$(agmsg_sqlite ':memory:' < "$_agmsg_unread_sql")
+  ids=$(agmsg_sqlite -batch ':memory:' < "$_agmsg_unread_sql")
   rm -f "$_agmsg_unread_sql"
   trap - EXIT HUP INT TERM
   UNREAD_IDS+="$ids"$'\n'

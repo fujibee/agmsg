@@ -263,11 +263,27 @@ fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<(Menu<Wry>, CheckMenu
     // About-panel slots on macOS vs. a parenthetical suffix on Windows) so
     // both platforms show the exact same text verbatim: "0.1.4 (core
     // 1.1.6)". CARGO_PKG_VERSION is Cargo.toml's own version, always kept
-    // in sync with tauri.conf.json/package.json at release time; the core
-    // version is whatever AGMSG_CORE_REF this build bundled (agmsg::
-    // pinned_core_version — the same source agmsg_core_version_status's
-    // "pinned" field reads, so the two can never disagree).
-    let version = format!("{} (core {})", env!("CARGO_PKG_VERSION"), agmsg::pinned_core_version());
+    // in sync with tauri.conf.json/package.json at release time.
+    //
+    // The core number is the one actually running (agmsg::
+    // running_core_version, reading the installed VERSION under
+    // agmsg_base()) rather than AGMSG_CORE_REF, the ref this build happened
+    // to bundle -- every agmsg operation goes through the INSTALLED core, so
+    // that is the number a user would act on. Once the installed core has
+    // moved past what this build bundled, agmsg_core_version_status's
+    // outdated banner has already stopped explaining the gap (installed <
+    // pinned goes false), so the bundled ref is appended in parens instead
+    // of dropped outright -- silently identical numbers stay a single
+    // reading, and a real mismatch is still visible rather than replaced by
+    // a number the app isn't using (#976).
+    let running_core = agmsg::running_core_version();
+    let pinned_core = agmsg::pinned_core_version();
+    let core_label = if running_core == pinned_core {
+        running_core
+    } else {
+        format!("{running_core} (bundled {pinned_core})")
+    };
+    let version = format!("{} (core {})", env!("CARGO_PKG_VERSION"), core_label);
     let about = PredefinedMenuItem::about(
         app,
         Some(&m_name("about")),
@@ -646,6 +662,10 @@ pub fn run() {
             agmsg::agmsg_join,
             agmsg::agmsg_rename,
             agmsg::agmsg_leave,
+            agmsg::agmsg_rename_team,
+            agmsg::agmsg_delete_team,
+            agmsg::agmsg_delete_team_force,
+            agmsg::agmsg_purge_team_messages,
             agmsg::agmsg_delivery_mode,
             agmsg::agmsg_default_project,
             agmsg::agmsg_command_name,

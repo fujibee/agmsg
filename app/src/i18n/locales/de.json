@@ -98,12 +98,25 @@
       "body": "Dies entfernt {{name}} aus {{team}} und schließt seinen Bereich, falls er läuft. Dies kann hier nicht rückgängig gemacht werden.",
       "confirmLabel": "Verlassen"
     },
+    "deleteTeam": {
+      "title": "Team „{{team}}“ löschen?",
+      "body": "Dies löscht dauerhaft das Team „{{team}}“: seine Konfiguration, Mitgliederliste, den Identitätsverlauf und die Laufzeitdatensätze der einzelnen Agenten. Dies kann nicht rückgängig gemacht werden. War es mit einem Remote verbunden, kann eine spätere erneute Verbindung es wiederherstellen.",
+      "confirmLabel": "Team löschen",
+      "forceLabel": "Mit Mitgliedern löschen",
+      "purgeMessagesToo": "Nachrichtenverlauf ebenfalls löschen",
+      "membersRemainBody": "Dieses Team hat {{count}} Mitglied(er). Alle aus dem Team entfernen und es löschen?"
+    },
+    "purgeMessages": {
+      "title": "Nachrichtenverlauf für Team „{{team}}“ löschen?",
+      "body": "Dies löscht dauerhaft den gesamten Nachrichtenverlauf für Team „{{team}}“; er kann nicht wiederhergestellt werden.",
+      "confirmLabel": "Nachrichten löschen"
+    },
     "newTeam": {
       "titleFirstRun": "Willkommen — erstelle dein erstes Team",
       "title": "Neues Team",
       "note": "Erstellt das Team und fügt dich als App-User hinzu (Besitzer der unteren Chatbox).",
       "teamNameLabel": "Teamname",
-      "teamNamePlaceholder": "mein-team",
+      "teamNamePlaceholder": "z. B. mein-team",
       "appUserLabel": "Dein Name (App-User)",
       "create": "Erstellen"
     },
@@ -115,16 +128,18 @@
     "agent": {
       "title": "Agent hinzufügen",
       "typeLabel": "Typ",
-      "namePlaceholder": "alice",
+      "namePlaceholder": "z. B. alice",
       "addAndSpawn": "Hinzufügen & starten"
     },
     "rename": {
       "title": "{{current}} umbenennen",
       "newNameLabel": "Neuer Name",
-      "confirmButton": "Umbenennen"
+      "confirmButton": "Umbenennen",
+      "confirmButtonBusy": "Wird umbenannt…"
     },
     "confirm": {
-      "defaultLabel": "Bestätigen"
+      "defaultLabel": "Bestätigen",
+      "workingLabel": "Wird ausgeführt…"
     },
     "settings": {
       "title": "Einstellungen"
@@ -140,6 +155,13 @@
       "confirmLabel": "Panel schließen"
     }
   },
+  "toast": {
+    "renameTeam": "Team „{{from}}“ in „{{to}}“ umbenannt.",
+    "deleteTeam": "Team „{{team}}“ gelöscht.",
+    "deleteTeamForce": "Team „{{team}}“ gelöscht ({{count}} Mitglied(er) entfernt).",
+    "purgeMessages": "Nachrichten für Team „{{team}}“ gelöscht.",
+    "actionFailed": "Fehlgeschlagen: {{reason}}"
+  },
   "ctxMenu": {
     "member": {
       "spawnTo": "Starten in ▸",
@@ -147,6 +169,11 @@
       "existingTabsDivider": "— vorhandene Tabs —",
       "rename": "Umbenennen…",
       "leave": "Verlassen"
+    },
+    "team": {
+      "rename": "Umbenennen…",
+      "delete": "Team löschen…",
+      "deleteMessages": "Nachrichten löschen…"
     },
     "pane": {
       "close": "Schließen",
