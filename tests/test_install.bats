@@ -886,8 +886,8 @@ SH
   grep -Fq -- "lock acquired" <<<"$output"
 }
 
-@test "install SQLite readers convert readfile paths and normalize CRLF output" {
-  local fake_bin="$FAKE_HOME/bin" record="$FAKE_HOME/record.json" manifest="$FAKE_HOME/manifest.json"
+@test "install SQLite readers batch pending fields, convert paths, and normalize CRLF" {
+  local fake_bin="$FAKE_HOME/bin" record="$FAKE_HOME/record.json" manifest="$FAKE_HOME/manifest.json" calls="$FAKE_HOME/sqlite-calls"
   mkdir -p "$fake_bin"
   printf '{}\n' > "$record"
   printf '{"gen":1}\n' > "$manifest"
@@ -899,9 +899,13 @@ SH
 #!/usr/bin/env bash
 query=
 for arg do query="$arg"; done
+printf 'call\n' >> "$SQLITE_CALLS"
 case "$query" in
   *"readfile('/"*) printf 'SQLite received an unconverted path\n' >&2; exit 20 ;;
-  *"readfile('C:/converted')"*'$.operation_id'*) printf 'op-id\r\n' ;;
+  *"readfile('C:/converted')"*'$.operation_id'*)
+    printf '%s\r\n' \
+      '3031323334353637383961626364656630313233343536373839616263646566:696e7374616c6c:757064617465:433a2f636f6e766572746564:3132333435:78:696e5f70726f6772657373'
+    ;;
   *"readfile('C:/converted')"*'$.gen'*) printf '7\r\n' ;;
   *"SELECT install_id FROM meta LIMIT 1;"*) printf 'install-id\r\n' ;;
   *"CREATE TABLE IF NOT EXISTS meta"*) exit 0 ;;
@@ -911,18 +915,27 @@ SH
   chmod +x "$fake_bin/cygpath" "$fake_bin/sqlite3"
 
   run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" \
-    bash -c '
+    SQLITE_CALLS="$calls" bash -c '
       lib="$1"
       . "$lib/install-op-lock.sh"
       . "$lib/install-db.sh"
       . "$lib/install-manifest.sh"
-      op_id="$(_agmsg_install_op_pending_field "$2" operation_id)" || exit 10
+      agmsg_install_op_pending_validate "$2" || exit 10
+      [ "$AGMSG_INSTALL_OP_PENDING_ID" = "0123456789abcdef0123456789abcdef" ] || exit 13
+      [ "$AGMSG_INSTALL_OP_PENDING_KIND" = "install" ] || exit 14
+      [ "$AGMSG_INSTALL_OP_PENDING_MODE" = "update" ] || exit 15
+      [ "$AGMSG_INSTALL_OP_PENDING_PATH" = "C:/converted" ] || exit 16
+      [ "$AGMSG_INSTALL_OP_PENDING_PID" = "12345" ] || exit 17
+      [ "$AGMSG_INSTALL_OP_PENDING_STARTED" = "x" ] || exit 18
+      [ "$AGMSG_INSTALL_OP_PENDING_STATE" = "in_progress" ] || exit 19
+      [ "$(wc -l < "$SQLITE_CALLS" | tr -d " ")" = 1 ] || exit 20
+      op_id="$AGMSG_INSTALL_OP_PENDING_ID"
       gen="$(_agmsg_install_manifest_read_gen "$3")" || exit 11
       install_id="$(agmsg_install_db_ensure_meta "$4")" || exit 12
       printf "%s|%s|%s\n" "$op_id" "$gen" "$install_id"
     ' _ "$REPO_ROOT/scripts/lib" "$record" "$manifest" "$FAKE_HOME/install.db"
   [ "$status" -eq 0 ]
-  [ "$output" = 'op-id|7|install-id' ]
+  [ "$output" = '0123456789abcdef0123456789abcdef|7|install-id' ]
 }
 
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {

@@ -248,27 +248,52 @@ _agmsg_install_op_sql_quote() {
   printf '%s' "$1" | sed "s/'/''/g"
 }
 
-_agmsg_install_op_pending_field() {
-  local path="$1" field="$2" path_sql
-  case "$field" in
-    operation_id|operation|mode|install_path|install_id|actor_pid|started_at|state) ;;
-    *) return 1 ;;
-  esac
+_agmsg_install_op_pending_fields() {
+  local path="$1" path_sql
   path_sql="$(agmsg_sql_readfile_path "$path")" || return 1
+  # Hex fields make the colon separator unambiguous even when a path contains
+  # tabs, quotes, or newlines, while keeping all seven reads in one sqlite3.
   agmsg_sqlite_capture :memory: \
-    "SELECT json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$field');"
+    "WITH record AS (SELECT CAST(readfile('$path_sql') AS TEXT) AS json) SELECT lower(hex(CAST(COALESCE(json_extract(json, '\$.operation_id'), '') AS BLOB))) || ':' || lower(hex(CAST(COALESCE(json_extract(json, '\$.operation'), '') AS BLOB))) || ':' || lower(hex(CAST(COALESCE(json_extract(json, '\$.mode'), '') AS BLOB))) || ':' || lower(hex(CAST(COALESCE(json_extract(json, '\$.install_path'), '') AS BLOB))) || ':' || lower(hex(CAST(COALESCE(json_extract(json, '\$.actor_pid'), '') AS BLOB))) || ':' || lower(hex(CAST(COALESCE(json_extract(json, '\$.started_at'), '') AS BLOB))) || ':' || lower(hex(CAST(COALESCE(json_extract(json, '\$.state'), '') AS BLOB))) FROM record;"
+}
+
+_agmsg_install_op_hex_decode() {
+  local hex="$1" decoded="" byte char
+  case "$hex" in *[!0123456789abcdefABCDEF]*) return 1 ;; esac
+  [ $(( ${#hex} % 2 )) -eq 0 ] || return 1
+  # Bash variables cannot represent NUL, and no valid path or record field
+  # needs one. Reject it rather than silently changing the decoded value.
+  case "$hex" in *00*) return 1 ;; esac
+  while [ -n "$hex" ]; do
+    byte="${hex:0:2}"
+    hex="${hex:2}"
+    printf -v char '%b' "\\x$byte" || return 1
+    decoded="${decoded}${char}"
+  done
+  AGMSG_INSTALL_OP_DECODED="$decoded"
 }
 
 agmsg_install_op_pending_validate() {
-  local path="$1"
+  local path="$1" encoded id_hex kind_hex mode_hex install_path_hex pid_hex started_hex state_hex extra
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  AGMSG_INSTALL_OP_PENDING_ID="$(_agmsg_install_op_pending_field "$path" operation_id)" || return 1
-  AGMSG_INSTALL_OP_PENDING_KIND="$(_agmsg_install_op_pending_field "$path" operation)" || return 1
-  AGMSG_INSTALL_OP_PENDING_MODE="$(_agmsg_install_op_pending_field "$path" mode)" || return 1
+  encoded="$(_agmsg_install_op_pending_fields "$path")" || return 1
+  IFS=: read -r id_hex kind_hex mode_hex install_path_hex pid_hex started_hex state_hex extra <<< "$encoded"
+  [ -z "$extra" ] || return 1
+  _agmsg_install_op_hex_decode "$id_hex" || return 1
+  AGMSG_INSTALL_OP_PENDING_ID="$AGMSG_INSTALL_OP_DECODED"
+  _agmsg_install_op_hex_decode "$kind_hex" || return 1
+  AGMSG_INSTALL_OP_PENDING_KIND="$AGMSG_INSTALL_OP_DECODED"
+  _agmsg_install_op_hex_decode "$mode_hex" || return 1
+  AGMSG_INSTALL_OP_PENDING_MODE="$AGMSG_INSTALL_OP_DECODED"
   [ -n "$AGMSG_INSTALL_OP_PENDING_MODE" ] || AGMSG_INSTALL_OP_PENDING_MODE=legacy
-  AGMSG_INSTALL_OP_PENDING_PATH="$(_agmsg_install_op_pending_field "$path" install_path)" || return 1
-  AGMSG_INSTALL_OP_PENDING_PID="$(_agmsg_install_op_pending_field "$path" actor_pid)" || return 1
-  AGMSG_INSTALL_OP_PENDING_STARTED="$(_agmsg_install_op_pending_field "$path" started_at)" || return 1
+  _agmsg_install_op_hex_decode "$install_path_hex" || return 1
+  AGMSG_INSTALL_OP_PENDING_PATH="$AGMSG_INSTALL_OP_DECODED"
+  _agmsg_install_op_hex_decode "$pid_hex" || return 1
+  AGMSG_INSTALL_OP_PENDING_PID="$AGMSG_INSTALL_OP_DECODED"
+  _agmsg_install_op_hex_decode "$started_hex" || return 1
+  AGMSG_INSTALL_OP_PENDING_STARTED="$AGMSG_INSTALL_OP_DECODED"
+  _agmsg_install_op_hex_decode "$state_hex" || return 1
+  AGMSG_INSTALL_OP_PENDING_STATE="$AGMSG_INSTALL_OP_DECODED"
   case "$AGMSG_INSTALL_OP_PENDING_ID" in
     ''|*[!0-9a-f]*) return 1 ;;
   esac
@@ -282,7 +307,7 @@ agmsg_install_op_pending_validate() {
   case "$AGMSG_INSTALL_OP_PENDING_PID" in ''|*[!0-9]*) return 1 ;; esac
   [ "${#AGMSG_INSTALL_OP_PENDING_PID}" -le 10 ] || return 1
   [ "$AGMSG_INSTALL_OP_PENDING_PID" -gt 0 ] || return 1
-  case "$(_agmsg_install_op_pending_field "$path" state)" in
+  case "$AGMSG_INSTALL_OP_PENDING_STATE" in
     in_progress|interrupted_complete|completed) ;;
     *) return 1 ;;
   esac
