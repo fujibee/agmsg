@@ -453,25 +453,19 @@ agmsg_install_copy_scripts() {
   done
 
   local copy_rc=0
-  agmsg_install_op_require || copy_rc=1
+  # Backups and the staged copy are one scripts-copy phase. The following
+  # prune phase rechecks the lock before it can remove anything from the target.
+  agmsg_install_op_phase_begin || copy_rc=1
   if [ "$copy_rc" -eq 0 ]; then
     agmsg_stage_overwrite_backups "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR" || copy_rc=1
-    agmsg_install_op_require || copy_rc=1
   fi
   if [ "$copy_rc" -eq 0 ]; then
-    if agmsg_install_op_require; then
-      agmsg_install_op_run_writer cp -R "$stage_dir/." "$SKILL_DIR/scripts/" || copy_rc=1
-      agmsg_install_op_require || copy_rc=1
-    else
-      copy_rc=1
-    fi
+    agmsg_install_op_run_writer cp -R "$stage_dir/." "$SKILL_DIR/scripts/" || copy_rc=1
   fi
+  agmsg_install_op_phase_end
   if [ "$copy_rc" -eq 0 ]; then
-    agmsg_install_op_require || copy_rc=1
-    if [ "$copy_rc" -eq 0 ]; then
-      agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR" || copy_rc=1
-      agmsg_install_op_require || copy_rc=1
-    fi
+    agmsg_install_op_run_phase agmsg_prune_removed_scripts \
+      "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR" || copy_rc=1
   fi
   rm -rf "$stage_dir" 2>/dev/null
 
@@ -480,16 +474,16 @@ agmsg_install_copy_scripts() {
     return 1
   fi
 
-  agmsg_install_op_require || return 1
-  mkdir -p "$SKILL_DIR/scripts/daemon"
-  agmsg_install_op_require || return 1
+  agmsg_install_op_phase_begin || return 1
+  mkdir -p "$SKILL_DIR/scripts/daemon" || return 1
   for f in $daemon_files; do
-    if ! agmsg_atomic_place_file "$SCRIPT_DIR/scripts/daemon/$f" "$SKILL_DIR/scripts/daemon/$f"; then
+    if ! agmsg_install_place_daemon_file \
+        "$SCRIPT_DIR/scripts/daemon/$f" "$SKILL_DIR/scripts/daemon/$f"; then
       echo "  ! could not place scripts/daemon/$f; the previous install stays in place (see .prev)" >&2
       return 1
     fi
-    chmod +x "$SKILL_DIR/scripts/daemon/$f" 2>/dev/null || true
   done
+  agmsg_install_op_phase_end
 
   # agmsgd and agmsgd-launch.sh are a fixed-shape pair that must carry the
   # SAME bootstrap version (agmsgd beta) -- a mismatch
@@ -506,6 +500,44 @@ agmsg_install_copy_scripts() {
   fi
   AGMSG_INSTALL_BOOTSTRAP_VERSION="$launch_bv"
   return 0
+}
+
+agmsg_install_optional_copy() {
+  cp "$@" 2>/dev/null || true
+}
+
+agmsg_install_optional_uninstaller_copy() {
+  cp "$SCRIPT_DIR/uninstall.sh" "$SKILL_DIR/uninstall.sh" 2>/dev/null && \
+    chmod +x "$SKILL_DIR/uninstall.sh" 2>/dev/null || true
+}
+
+agmsg_install_optional_codex_chmod() {
+  chmod +x "$SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
+}
+
+agmsg_install_refresh_codex_shim() {
+  AGMSG_CODEX_SHIM_REFRESHED=false
+  if env AGMSG_CODEX_SHIM_INSTALL_QUIET=1 AGMSG_CODEX_SHIM_FORCE="${CODEX_SHIM_FORCE:-}" \
+      "$CODEX_SHIM" install >/dev/null; then
+    AGMSG_CODEX_SHIM_REFRESHED=true
+  fi
+  return 0
+}
+
+agmsg_install_write_version() {
+  printf '%s\n' "$INSTALLED_VERSION" > "$SKILL_DIR/VERSION"
+}
+
+agmsg_remove_retired_terminal_skills() {
+  local driver
+  for driver in herdr plain tmux; do
+    rm -f "$SKILL_DIR/scripts/drivers/terminals/$driver/SKILL.md"
+  done
+}
+
+agmsg_install_place_daemon_file() {
+  agmsg_atomic_place_file "$1" "$2" || return 1
+  chmod +x "$2" 2>/dev/null || true
 }
 
 # Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by
@@ -873,7 +905,7 @@ if [ "$UPDATE_ONLY" = true ]; then
   echo "  Updating $SKILL_NAME..."
   INSTALLED_VERSION="$(agmsg_source_version)"
   agmsg_install_operation_begin || exit 1
-  agmsg_install_write_recovery_helper || exit 1
+  agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
   # #963: a sync engine that is running when the write below starts either
   # survives on the code it already loaded (silent -- `remote.sh status` still
   # reports it as running, and nothing about the new scripts takes effect) or
@@ -945,10 +977,10 @@ $_agmsg_running_team"
       ;;
   esac
   unset _agmsg_explicit_agent_type _agmsg_detected_type
-  agmsg_render_skill "$TPL_TYPE" "$SKILL_NAME" "$SKILL_DIR/SKILL.md"
+  agmsg_install_op_run_phase agmsg_render_skill "$TPL_TYPE" "$SKILL_NAME" "$SKILL_DIR/SKILL.md" || exit 1
   TRASH_DIR="$SKILL_DIR/.trash"
   AGMSG_TRASH_COUNT=0
-  agmsg_reset_trash "$TRASH_DIR"
+  agmsg_install_op_run_phase agmsg_reset_trash "$TRASH_DIR" || exit 1
   # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/)
   # ship without enumerating files. The agent-type manifests and per-type runtimes
   # live under scripts/drivers/types/ now, so this single copy carries them too.
@@ -968,31 +1000,24 @@ $_agmsg_running_team"
   # scripts/drivers/terminals/ (nothing about that path is exclusive to
   # agmsg's own three); a glob there would delete a file this install
   # does not own (#1249 review).
-  for _agmsg_builtin_driver in herdr plain tmux; do
-    agmsg_install_op_require || exit 1
-    rm -f "$SKILL_DIR/scripts/drivers/terminals/$_agmsg_builtin_driver/SKILL.md"
-    agmsg_install_op_require || exit 1
-  done
-  unset _agmsg_builtin_driver
+  agmsg_install_op_run_phase agmsg_remove_retired_terminal_skills || exit 1
   # Ship the external-plugin drop-in dir (just its README) so the location exists
   # post-install. A plain cp — not cp -R --delete — preserves any plugins the
   # user dropped in and their db/trusted-plugins opt-ins.
-  agmsg_install_op_require || exit 1
-  mkdir -p "$SKILL_DIR/plugins"
-  agmsg_install_op_require || exit 1
-  cp "$SCRIPT_DIR/plugins/README.md" "$SKILL_DIR/plugins/README.md" 2>/dev/null || true
-  agmsg_install_op_require || exit 1
+  agmsg_install_op_phase_begin || exit 1
+  mkdir -p "$SKILL_DIR/plugins" || exit 1
+  agmsg_install_optional_copy "$SCRIPT_DIR/plugins/README.md" "$SKILL_DIR/plugins/README.md"
   # Ship uninstall.sh alongside the skill itself — npx/curl installs fetch a
   # temp checkout that gets deleted right after install, so without this copy
   # those users would have no local uninstaller to run later (only a manual
   # `git clone` checkout would). See the README's Uninstall section.
-  agmsg_install_op_require || exit 1
-  cp "$SCRIPT_DIR/uninstall.sh" "$SKILL_DIR/uninstall.sh" 2>/dev/null && chmod +x "$SKILL_DIR/uninstall.sh" || true
-  agmsg_install_op_require || exit 1
+  agmsg_install_optional_uninstaller_copy
+  agmsg_install_op_phase_end || exit 1
   # Refresh the Claude Code slash command file (was missed in earlier --update flows).
+  agmsg_install_op_phase_begin || exit 1
   CC_COMMANDS_DIR="$HOME/.claude/commands"
   if [ -d "$CC_COMMANDS_DIR" ] && [ -f "$CC_COMMANDS_DIR/$SKILL_NAME.md" ]; then
-    agmsg_render_skill claude-code "$SKILL_NAME" "$CC_COMMANDS_DIR/$SKILL_NAME.md"
+    agmsg_render_skill claude-code "$SKILL_NAME" "$CC_COMMANDS_DIR/$SKILL_NAME.md" || exit 1
   fi
   # Refresh / install the Copilot CLI skill (Copilot reads SKILL.md from its
   # own skills dir; the shared ~/.agents/skills/<name>/SKILL.md is
@@ -1001,40 +1026,31 @@ $_agmsg_running_team"
   # from a pre-Copilot release via --update also gain the skill.
   COPILOT_SKILL_DIR="$HOME/.copilot/skills/$SKILL_NAME"
   if [ -d "$HOME/.copilot" ]; then
-    agmsg_install_op_require || exit 1
-    mkdir -p "$COPILOT_SKILL_DIR"
-    agmsg_install_op_require || exit 1
-    agmsg_render_skill copilot "$SKILL_NAME" "$COPILOT_SKILL_DIR/SKILL.md"
+    mkdir -p "$COPILOT_SKILL_DIR" || exit 1
+    agmsg_render_skill copilot "$SKILL_NAME" "$COPILOT_SKILL_DIR/SKILL.md" || exit 1
   fi
   # Refresh / install the OpenCode skill (same reasoning as Copilot above).
   OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills/$SKILL_NAME"
   if [ -d "$HOME/.config/opencode" ]; then
-    agmsg_install_op_require || exit 1
-    mkdir -p "$OPENCODE_SKILL_DIR"
-    agmsg_install_op_require || exit 1
-    agmsg_render_skill opencode "$SKILL_NAME" "$OPENCODE_SKILL_DIR/SKILL.md"
+    mkdir -p "$OPENCODE_SKILL_DIR" || exit 1
+    agmsg_render_skill opencode "$SKILL_NAME" "$OPENCODE_SKILL_DIR/SKILL.md" || exit 1
   fi
   # Refresh / install the Hermes Agent skill (same reasoning as Copilot above).
   HERMES_SKILL_DIR="$HOME/.hermes/skills/$SKILL_NAME"
   if [ -d "$HOME/.hermes" ]; then
-    agmsg_install_op_require || exit 1
-    mkdir -p "$HERMES_SKILL_DIR"
-    agmsg_install_op_require || exit 1
-    agmsg_render_skill hermes "$SKILL_NAME" "$HERMES_SKILL_DIR/SKILL.md"
+    mkdir -p "$HERMES_SKILL_DIR" || exit 1
+    agmsg_render_skill hermes "$SKILL_NAME" "$HERMES_SKILL_DIR/SKILL.md" || exit 1
   fi
   # Refresh / install the Grok Build skill (same reasoning as Copilot above).
   GROK_SKILL_DIR="$HOME/.grok/skills/$SKILL_NAME"
   if [ -d "$HOME/.grok" ]; then
-    agmsg_install_op_require || exit 1
-    mkdir -p "$GROK_SKILL_DIR"
-    agmsg_install_op_require || exit 1
-    agmsg_render_skill grok-build "$SKILL_NAME" "$GROK_SKILL_DIR/SKILL.md"
+    mkdir -p "$GROK_SKILL_DIR" || exit 1
+    agmsg_render_skill grok-build "$SKILL_NAME" "$GROK_SKILL_DIR/SKILL.md" || exit 1
   fi
-  agmsg_install_op_require || exit 1
-  install_antigravity_skill
-  agmsg_install_op_require || exit 1
-  cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
-  agmsg_install_op_require || exit 1
+  install_antigravity_skill || exit 1
+  agmsg_install_op_phase_end || exit 1
+  agmsg_install_op_phase_begin || exit 1
+  agmsg_install_optional_copy "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml"
   # A team config written by an older release can be group- or world-writable,
   # and the sync engine refuses to read one that is (#804). Upgrading does not
   # rewrite files that already exist, so without this the release we are asking
@@ -1105,9 +1121,9 @@ $_agmsg_running_team"
       done || true
     unset -f agmsg_shq
   fi
-  chmod +x "$SKILL_DIR/scripts/"*.sh
-  chmod +x "$SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
-  install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
+  chmod +x "$SKILL_DIR/scripts/"*.sh || exit 1
+  agmsg_install_optional_codex_chmod
+  install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh" || exit 1
   # Refresh the Codex monitor shim (~/.agents/bin/codex) if it's ours. --update
   # cp's the new codex-shim-install.sh but does not re-run it, so a shim from an
   # older install keeps its stale baked exec path after the
@@ -1147,22 +1163,17 @@ $_agmsg_running_team"
   if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
     CODEX_SHIM_FORCE=""
     [ "$CMD_WAS_EXPLICIT" = true ] && CODEX_SHIM_FORCE=1
-    agmsg_install_op_require || exit 1
-    if AGMSG_CODEX_SHIM_INSTALL_QUIET=1 AGMSG_CODEX_SHIM_FORCE="$CODEX_SHIM_FORCE" "$CODEX_SHIM" install >/dev/null; then
+    agmsg_install_refresh_codex_shim || exit 1
+    if [ "$AGMSG_CODEX_SHIM_REFRESHED" = true ]; then
       echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
     fi
-    agmsg_install_op_require || exit 1
   fi
-  agmsg_install_op_require || exit 1
-  install_windows_helpers
-  agmsg_install_op_require || exit 1
-  printf '%s\n' "$INSTALLED_VERSION" > "$SKILL_DIR/VERSION"
-  agmsg_install_op_require || exit 1
+  install_windows_helpers || exit 1
+  agmsg_install_op_phase_end || exit 1
+  agmsg_install_op_run_phase agmsg_install_write_version || exit 1
   echo "  + updated scripts, templates, and SKILL.md (version $INSTALLED_VERSION)"
   echo "  ~ DB and team configs preserved"
-  agmsg_install_op_require || exit 1
-  configure_codex_sandbox
-  agmsg_install_op_require || exit 1
+  agmsg_install_op_run_phase configure_codex_sandbox || exit 1
   echo ""
   echo "  ! Restart any running agent sessions to pick up the updated scripts."
   echo "    In-flight watch.sh processes detect this and stand down on their own;"
@@ -1173,12 +1184,10 @@ $_agmsg_running_team"
   if [ -n "$AGMSG_RUNNING_TEAMS" ]; then
     while IFS= read -r _agmsg_team; do
       [ -n "$_agmsg_team" ] || continue
-      agmsg_install_op_require || exit 1
-      if ! "$SKILL_DIR/scripts/remote.sh" sync restart "$_agmsg_team"; then
+      if ! agmsg_install_op_run_phase "$SKILL_DIR/scripts/remote.sh" sync restart "$_agmsg_team"; then
         echo "  ! could not restart the sync engine for '$_agmsg_team'; run:" >&2
         echo "      bash $SKILL_DIR/scripts/remote.sh sync restart $_agmsg_team" >&2
       fi
-      agmsg_install_op_require || exit 1
     done <<< "$AGMSG_RUNNING_TEAMS"
     unset _agmsg_team
   else
@@ -1214,13 +1223,11 @@ CMD_NAME="${CMD_NAME:-agmsg}"
 SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
 INSTALLED_VERSION="$(agmsg_source_version)"
 agmsg_install_operation_begin || exit 1
-agmsg_install_write_recovery_helper || exit 1
+agmsg_install_op_run_phase agmsg_install_write_recovery_helper || exit 1
 
 # --- Install skill ---
 echo "  Installing to ~/.agents/skills/$CMD_NAME/ ..."
-agmsg_install_op_require || exit 1
-mkdir -p "$SKILL_DIR"/{scripts,types,db,agents}
-agmsg_install_op_require || exit 1
+agmsg_install_op_run_phase mkdir -p "$SKILL_DIR"/{scripts,types,db,agents} || exit 1
 
 # SKILL.md is composed from the shared root and the agent-specific overlay
 # resolved from the type manifest (scripts/drivers/types/<type>/template.md).
@@ -1243,10 +1250,10 @@ case " $AGMSG_TYPES_WITH_OWN_SKILL_FILE " in
     esac
     ;;
 esac
-agmsg_render_skill "$TPL_TYPE" "$CMD_NAME" "$SKILL_DIR/SKILL.md"
+agmsg_install_op_run_phase agmsg_render_skill "$TPL_TYPE" "$CMD_NAME" "$SKILL_DIR/SKILL.md" || exit 1
 TRASH_DIR="$SKILL_DIR/.trash"
 AGMSG_TRASH_COUNT=0
-agmsg_reset_trash "$TRASH_DIR"
+agmsg_install_op_run_phase agmsg_reset_trash "$TRASH_DIR" || exit 1
 # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/) ship
 # without enumerating files. The agent-type manifests and per-type runtimes live
 # under scripts/drivers/types/ now, so this single copy carries them too.
@@ -1257,27 +1264,19 @@ echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgra
 # Ship the external-plugin drop-in dir (just its README) so the location exists
 # post-install. A plain cp — not cp -R --delete — preserves any plugins the user
 # dropped in and their db/trusted-plugins opt-ins.
-agmsg_install_op_require || exit 1
-mkdir -p "$SKILL_DIR/plugins"
-agmsg_install_op_require || exit 1
-cp "$SCRIPT_DIR/plugins/README.md" "$SKILL_DIR/plugins/README.md" 2>/dev/null || true
-agmsg_install_op_require || exit 1
+agmsg_install_op_phase_begin || exit 1
+mkdir -p "$SKILL_DIR/plugins" || exit 1
+agmsg_install_optional_copy "$SCRIPT_DIR/plugins/README.md" "$SKILL_DIR/plugins/README.md"
 # Ship uninstall.sh alongside the skill itself — npx/curl installs fetch a
 # temp checkout that gets deleted right after install, so without this copy
 # those users would have no local uninstaller to run later (only a manual
 # `git clone` checkout would). See the README's Uninstall section.
-agmsg_install_op_require || exit 1
-cp "$SCRIPT_DIR/uninstall.sh" "$SKILL_DIR/uninstall.sh" 2>/dev/null && chmod +x "$SKILL_DIR/uninstall.sh" || true
-agmsg_install_op_require || exit 1
+agmsg_install_optional_uninstaller_copy
 
-agmsg_install_op_require || exit 1
-cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
-agmsg_install_op_require || exit 1
-chmod +x "$SKILL_DIR/scripts/"*.sh
-chmod +x "$SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
-agmsg_install_op_require || exit 1
-install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
-agmsg_install_op_require || exit 1
+agmsg_install_optional_copy "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml"
+chmod +x "$SKILL_DIR/scripts/"*.sh || exit 1
+agmsg_install_optional_codex_chmod
+install_antigravity_tui_shim "$SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh" || exit 1
 # Re-point an existing Codex monitor shim at the new path on a reinstall over an
 # older layout (no-op when no agmsg shim is present). See the --update block
 # above. NOT forced (#553): unlike --update, a fresh install here gives no
@@ -1294,32 +1293,25 @@ if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
   # current owner and the exact consequence of forcing -- repeating a
   # shorter, separate version of that here would risk saying something
   # different from what actually happens.
-  agmsg_install_op_require || exit 1
-  if AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" install >/dev/null; then
+  CODEX_SHIM_FORCE=""
+  agmsg_install_refresh_codex_shim || exit 1
+  if [ "$AGMSG_CODEX_SHIM_REFRESHED" = true ]; then
     echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
   fi
-  agmsg_install_op_require || exit 1
 fi
-agmsg_install_op_require || exit 1
-install_windows_helpers
-agmsg_install_op_require || exit 1
+install_windows_helpers || exit 1
+agmsg_install_op_phase_end || exit 1
 
 # Marker file for uninstall detection
-agmsg_install_op_require || exit 1
-touch "$SKILL_DIR/.agmsg"
-agmsg_install_op_require || exit 1
+touch "$SKILL_DIR/.agmsg" || exit 1
 
 # Record the provenance version of the source we installed from (see #117).
 # INSTALLED_VERSION itself was already computed above, before the locked copy.
-agmsg_install_op_require || exit 1
-printf '%s\n' "$INSTALLED_VERSION" > "$SKILL_DIR/VERSION"
-agmsg_install_op_require || exit 1
+agmsg_install_op_run_phase agmsg_install_write_version || exit 1
 
 # Initialize DB
 if [ ! -f "$SKILL_DIR/db/messages.db" ]; then
-  agmsg_install_op_require || exit 1
-  bash "$SKILL_DIR/scripts/internal/init-db.sh"
-  agmsg_install_op_require || exit 1
+  agmsg_install_op_run_phase bash "$SKILL_DIR/scripts/internal/init-db.sh" || exit 1
 fi
 
 # Nothing moves stores here. Installing must not change where a team's messages
@@ -1330,19 +1322,16 @@ fi
 
 # Initialize config
 if [ ! -f "$SKILL_DIR/db/config.yaml" ]; then
-  agmsg_install_op_require || exit 1
-  bash "$SKILL_DIR/scripts/config.sh" show >/dev/null
-  agmsg_install_op_require || exit 1
+  agmsg_install_op_run_phase bash "$SKILL_DIR/scripts/config.sh" show >/dev/null || exit 1
   echo "  + created default config at db/config.yaml"
 fi
 
 # --- Install Claude Code global command ---
+agmsg_install_op_phase_begin || exit 1
 CC_COMMANDS_DIR="$HOME/.claude/commands"
 if [ -d "$HOME/.claude" ]; then
-  agmsg_install_op_require || exit 1
-  mkdir -p "$CC_COMMANDS_DIR"
-  agmsg_install_op_require || exit 1
-  agmsg_render_skill claude-code "$CMD_NAME" "$CC_COMMANDS_DIR/$CMD_NAME.md"
+  mkdir -p "$CC_COMMANDS_DIR" || exit 1
+  agmsg_render_skill claude-code "$CMD_NAME" "$CC_COMMANDS_DIR/$CMD_NAME.md" || exit 1
   echo "  + installed /$CMD_NAME command to ~/.claude/commands/"
 fi
 
@@ -1352,10 +1341,8 @@ fi
 # would mis-identify a Copilot session — keep the Copilot copy separate.
 COPILOT_SKILL_DIR="$HOME/.copilot/skills/$CMD_NAME"
 if [ -d "$HOME/.copilot" ]; then
-  agmsg_install_op_require || exit 1
-  mkdir -p "$COPILOT_SKILL_DIR"
-  agmsg_install_op_require || exit 1
-  agmsg_render_skill copilot "$CMD_NAME" "$COPILOT_SKILL_DIR/SKILL.md"
+  mkdir -p "$COPILOT_SKILL_DIR" || exit 1
+  agmsg_render_skill copilot "$CMD_NAME" "$COPILOT_SKILL_DIR/SKILL.md" || exit 1
   echo "  + installed /$CMD_NAME skill to ~/.copilot/skills/"
 fi
 
@@ -1366,10 +1353,8 @@ fi
 # copy separate, same pattern as Copilot.
 OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills/$CMD_NAME"
 if [ -d "$HOME/.config/opencode" ]; then
-  agmsg_install_op_require || exit 1
-  mkdir -p "$OPENCODE_SKILL_DIR"
-  agmsg_install_op_require || exit 1
-  agmsg_render_skill opencode "$CMD_NAME" "$OPENCODE_SKILL_DIR/SKILL.md"
+  mkdir -p "$OPENCODE_SKILL_DIR" || exit 1
+  agmsg_render_skill opencode "$CMD_NAME" "$OPENCODE_SKILL_DIR/SKILL.md" || exit 1
   echo "  + installed \$$CMD_NAME skill to ~/.config/opencode/skills/"
 fi
 
@@ -1380,10 +1365,8 @@ fi
 # (manual inbox checks only), but the skill itself installs the same way.
 HERMES_SKILL_DIR="$HOME/.hermes/skills/$CMD_NAME"
 if [ -d "$HOME/.hermes" ]; then
-  agmsg_install_op_require || exit 1
-  mkdir -p "$HERMES_SKILL_DIR"
-  agmsg_install_op_require || exit 1
-  agmsg_render_skill hermes "$CMD_NAME" "$HERMES_SKILL_DIR/SKILL.md"
+  mkdir -p "$HERMES_SKILL_DIR" || exit 1
+  agmsg_render_skill hermes "$CMD_NAME" "$HERMES_SKILL_DIR/SKILL.md" || exit 1
   echo "  + installed /$CMD_NAME skill to ~/.hermes/skills/"
 fi
 
@@ -1397,10 +1380,8 @@ fi
 # hooks_file; see grok-build/_delivery.sh).
 GROK_SKILL_DIR="$HOME/.grok/skills/$CMD_NAME"
 if [ -d "$HOME/.grok" ]; then
-  agmsg_install_op_require || exit 1
-  mkdir -p "$GROK_SKILL_DIR"
-  agmsg_install_op_require || exit 1
-  agmsg_render_skill grok-build "$CMD_NAME" "$GROK_SKILL_DIR/SKILL.md"
+  mkdir -p "$GROK_SKILL_DIR" || exit 1
+  agmsg_render_skill grok-build "$CMD_NAME" "$GROK_SKILL_DIR/SKILL.md" || exit 1
   echo "  + installed /$CMD_NAME skill to ~/.grok/skills/"
 fi
 
@@ -1408,9 +1389,8 @@ fi
 # Antigravity (agy) reads global skills from ~/.gemini/config/skills/<name>/.
 # Its CLI may create ~/.gemini/antigravity-cli before the config directory, so
 # either path is a sufficient installation signal.
-agmsg_install_op_require || exit 1
-install_antigravity_skill
-agmsg_install_op_require || exit 1
+install_antigravity_skill || exit 1
+agmsg_install_op_phase_end || exit 1
 
 # Codex sandbox writable_roots are configured by configure_codex_sandbox() at
 # the "Done" step below — the single source of truth for db/, teams/, and run/.
@@ -1418,9 +1398,9 @@ agmsg_install_op_require || exit 1
 # produced invalid TOML on a fresh install; it has been removed.)
 
 # --- Done ---
-agmsg_install_op_require || exit 1
-configure_codex_sandbox
-agmsg_install_op_require || exit 1
+agmsg_install_op_phase_begin || exit 1
+configure_codex_sandbox || exit 1
+agmsg_install_op_phase_end || exit 1
 agmsg_install_operation_finish || exit 1
 echo ""
 echo "  ✓ Installed to ~/.agents/skills/$CMD_NAME/ (version $INSTALLED_VERSION)"

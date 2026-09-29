@@ -206,14 +206,42 @@ agmsg_install_op_confirm() {
 }
 
 # Refuse the next protected write unless the SQLite child still proves the
-# transaction is held. Call before and after each potentially multi-file
-# install step: the first check gates entry, while the second prevents a
-# child-only death during that step from allowing later writes to continue.
+# transaction is held. Phase entry checks gate each group of writes; the next
+# phase or operation_finish detects a child-only death before later work starts.
 agmsg_install_op_require() {
+  # The incomplete-operation record excludes every later install/uninstall
+  # while a phase is in flight. Within that phase, the record -- not another
+  # SQLite round trip for each small write -- is what prevents overlap. The
+  # phase runner proves the lock at each phase entry so a lost lock cannot
+  # carry this operation into its next phase.
+  [ "${AGMSG_INSTALL_OP_PHASE_ACTIVE:-false}" = true ] && return 0
   if ! agmsg_install_op_confirm; then
     echo "  ! the install lock was lost partway through; stopping before the next write (see .prev)" >&2
     return 1
   fi
+}
+
+# Run one logical group of protected writes. The operation marker remains in
+# place throughout the group, so a later operation can acquire the SQLite lock
+# after a child-only failure but must still refuse to write. The next phase
+# checks the lock before it writes; operation_finish checks it after the last
+# phase. That makes each boundary one canary round-trip, not two.
+agmsg_install_op_phase_begin() {
+  agmsg_install_op_require || return 1
+  AGMSG_INSTALL_OP_PHASE_ACTIVE=true
+}
+
+agmsg_install_op_phase_end() {
+  AGMSG_INSTALL_OP_PHASE_ACTIVE=false
+  return 0
+}
+
+agmsg_install_op_run_phase() {
+  local phase_rc=0
+  agmsg_install_op_phase_begin || return 1
+  "$@" || phase_rc=$?
+  agmsg_install_op_phase_end || return 1
+  return "$phase_rc"
 }
 
 _agmsg_install_op_sql_quote() {
@@ -416,6 +444,7 @@ agmsg_install_op_handle_signal() {
   local signal="$1" exit_status=130
   [ "$signal" = TERM ] && exit_status=143
   trap - INT TERM
+  AGMSG_INSTALL_OP_PHASE_ACTIVE=false
   if [ "${AGMSG_INSTALL_OP_WRITER_STARTING:-false}" = true ] && [ -z "${AGMSG_INSTALL_OP_WRITER_PID:-}" ]; then
     echo "  ! writer launch was interrupted before its pid was published; the incomplete-operation record was kept for recovery" >&2
     agmsg_install_op_unlock
@@ -469,6 +498,7 @@ agmsg_install_op_unlock() {
   [ -n "${_AGMSG_LOCK_TMPDIR:-}" ] && rm -rf "$_AGMSG_LOCK_TMPDIR" 2>/dev/null
   unset _AGMSG_LOCK_PID _AGMSG_LOCK_TMPDIR _AGMSG_INSTALL_OP_USE_COPROC _AGMSG_LOCK_CHANNELS_READY
   unset AGMSG_INSTALL_OP_SQLITE AGMSG_INSTALL_OP_SQLITE_PID
+  AGMSG_INSTALL_OP_PHASE_ACTIVE=false
 }
 
 # Places <src>'s CONTENT at <dest> atomically: a reader of <dest> sees either

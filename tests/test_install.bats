@@ -2232,6 +2232,36 @@ CYG
   [ "$(shasum -a 256 "$SK/scripts/team.sh" | awk '{print $1}')" = "$unchanged_digest" ]
 }
 
+@test "install manifest batches safe names and checks its probe before publishing" {
+  local scripts="$FAKE_HOME/manifest-scripts" safe_scripts="$FAKE_HOME/safe-manifest-scripts"
+  local manifest="$FAKE_HOME/manifest.json"
+  local bad_manifest="$FAKE_HOME/bad-manifest.json" fake_bin="$FAKE_HOME/fake-bin"
+  mkdir -p "$scripts" "$fake_bin"
+  printf 'safe file\n' > "$scripts/safe.sh"
+  printf 'space file\n' > "$scripts/with space.sh"
+
+  run bash -c '. "$1/scripts/lib/install-manifest.sh"; agmsg_install_manifest_write "$2" "$3" 1.5.1 test-install 1 1' \
+    _ "$REPO_ROOT" "$scripts" "$manifest"
+  [ "$status" -eq 0 ]
+  local recorded_digest actual_digest
+  recorded_digest="$(sqlite3 :memory: "SELECT json_extract(value, '\$.digest') FROM json_each(json_extract(readfile('$(rf "$manifest")'), '\$.files')) WHERE json_extract(value, '\$.path')='scripts/with space.sh';")"
+  actual_digest="$(bash -c 'source "$1/scripts/lib/hash.sh"; agmsg_sha256 < "$2"' _ "$REPO_ROOT" "$scripts/with space.sh")"
+  [ "$recorded_digest" = "$actual_digest" ]
+
+  mkdir -p "$safe_scripts"
+  printf 'safe file\n' > "$safe_scripts/safe.sh"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [ "${1:-}" = "-a" ]; then shift 2; fi' \
+    'for path do printf "%064d  %s\\n" 0 "$path"; done' > "$fake_bin/shasum"
+  chmod +x "$fake_bin/shasum"
+  run env PATH="$fake_bin:$PATH" bash -c '. "$1/scripts/lib/install-manifest.sh"; agmsg_install_manifest_write "$2" "$3" 1.5.1 test-install 1 1' \
+    _ "$REPO_ROOT" "$safe_scripts" "$bad_manifest"
+  [ "$status" -ne 0 ]
+  grep -qF -- 'returned the wrong digest for the install-manifest probe' <<<"$output"
+  [ ! -e "$bad_manifest" ]
+}
+
 @test "install holds the operation lock while rendering the shared skill" {
   local bin="$FAKE_HOME/bin" entered="$FAKE_HOME/render-entered" release="$FAKE_HOME/render-release"
   local awk_real install_pid install_rc blocked=0 i
