@@ -486,22 +486,36 @@ wait_for_bridge_capture() {
   # Observe B reaching the child-launch call, and wait for that child attempt to
   # return before checking the steady state. The wrapper keeps the attempt
   # observable without adding a fixed delay.
-  local real_nohup duplicate_done="$TEST_SKILL_DIR/duplicate-child-done"
+  local real_nohup duplicate_started="$TEST_SKILL_DIR/duplicate-child-started"
+  local duplicate_release="$TEST_SKILL_DIR/duplicate-child-release"
+  local duplicate_done="$TEST_SKILL_DIR/duplicate-child-done"
   local fake_bin="$TEST_SKILL_DIR/fake-bin"
   real_nohup="$(command -v nohup)"
   mkdir -p "$fake_bin"
   cat > "$fake_bin/nohup" <<'EOF'
 #!/usr/bin/env bash
+if [ "${5:-}" = "${MOCK_DUPLICATE_PARENT_PID:-}" ] && [ -n "${MOCK_DUPLICATE_PARENT_PID:-}" ]; then
+  : > "$DUPLICATE_CHILD_STARTED"
+  while [ ! -e "$DUPLICATE_CHILD_RELEASE" ]; do sleep 0.05; done
+fi
 "$REAL_NOHUP" "$@" &
 child=$!
 wait "$child"
 : > "$DUPLICATE_CHILD_DONE"
 EOF
   chmod +x "$fake_bin/nohup"
-  REAL_NOHUP="$real_nohup" DUPLICATE_CHILD_DONE="$duplicate_done" \
+  REAL_NOHUP="$real_nohup" MOCK_DUPLICATE_PARENT_PID="$parent_b" \
+    DUPLICATE_CHILD_STARTED="$duplicate_started" DUPLICATE_CHILD_RELEASE="$duplicate_release" \
+    DUPLICATE_CHILD_DONE="$duplicate_done" \
     PATH="$fake_bin:$PATH" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_b" >/dev/null 2>&1 3>&- &
   local dispatcher_b=$!
-  local duplicate_returned=0 i
+  local duplicate_started_ok=0 duplicate_returned=0 i
+  for i in {1..100}; do
+    [ -f "$duplicate_started" ] && { duplicate_started_ok=1; break; }
+    sleep 0.1
+  done
+  [ "$duplicate_started_ok" -eq 1 ]
+  : > "$duplicate_release"
   for i in {1..100}; do
     [ -f "$duplicate_done" ] && { duplicate_returned=1; break; }
     sleep 0.1
