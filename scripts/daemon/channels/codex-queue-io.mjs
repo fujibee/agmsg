@@ -274,6 +274,38 @@ export function resolvePendingQueue({ queueObservation, rolloutObservation, ageM
   return { state: "pending", reason: "awaiting_confirmation" };
 }
 
+// Call immediately after the caller has durably stored queueItemId. Check the
+// queue first: Codex may consume the item before the rollout can be inspected.
+// A present row is already sufficient evidence, so that fast path does not
+// depend on the not-yet-measured processed-message serialization.
+export async function verifyPendingDelivery({
+  codexHome,
+  queueItemId,
+  thread,
+  nonce,
+  ageMs,
+  readQueue = readQueuedItem,
+  readRollout = readRolloutNonce,
+}) {
+  let queueObservation;
+  try {
+    queueObservation = readQueue(codexHome, queueItemId, thread);
+  } catch {
+    queueObservation = { state: "unreadable", reason: "queue_db_read_failed" };
+  }
+  if (queueObservation?.state === "present") {
+    return { state: "confirmed", reason: "queue_item_present" };
+  }
+
+  let rolloutObservation;
+  try {
+    rolloutObservation = await readRollout(codexHome, thread, nonce);
+  } catch {
+    rolloutObservation = { state: "unreadable", reason: "rollout_read_failed" };
+  }
+  return resolvePendingQueue({ queueObservation, rolloutObservation, ageMs });
+}
+
 export function classifyCodexSeat({ roleSession, bridgeState, rolloutState }) {
   if (bridgeState === "running") return { state: "bridged", reason: "bridge_running" };
   if (!roleSession || !roleSession.thread || !roleSession.codex_home) {

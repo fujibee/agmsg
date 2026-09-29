@@ -15,6 +15,7 @@ import {
   readRolloutNonce,
   resolvePendingQueue,
   runCodexQueue,
+  verifyPendingDelivery,
 } from '../scripts/daemon/channels/codex-queue-io.mjs';
 
 const thread = '01a0ea97-c011-73f3-8470-fd59db15adba';
@@ -153,6 +154,30 @@ test('pending delivery confirms on either positive witness, expires only on two 
   assert.deepEqual(resolvePendingQueue({
     queueObservation: { state: 'absent' }, rolloutObservation: { state: 'absent' }, ageMs: -1,
   }), { state: 'pending', reason: 'pending_age_unreadable' });
+});
+
+test('immediate post-receipt check confirms a still-queued item before rollout inspection', async () => {
+  const events = ['queue_item_id_persisted'];
+  const result = await verifyPendingDelivery({
+    codexHome: '/tmp/profile', queueItemId: itemId, thread, nonce: 'pending-nonce', ageMs: 5,
+    readQueue: () => {
+      events.push('queue_read');
+      return { state: 'present' };
+    },
+    readRollout: async () => {
+      events.push('rollout_read');
+      return { state: 'unreadable', reason: 'rollout_not_ready' };
+    },
+  });
+  assert.deepEqual(result, { state: 'confirmed', reason: 'queue_item_present' });
+  assert.deepEqual(events, ['queue_item_id_persisted', 'queue_read']);
+
+  const consumedEarly = await verifyPendingDelivery({
+    codexHome: '/tmp/profile', queueItemId: itemId, thread, nonce: 'pending-nonce', ageMs: 60_000,
+    readQueue: () => ({ state: 'absent' }),
+    readRollout: async () => ({ state: 'unreadable', reason: 'rollout_user_row_unrecognized' }),
+  });
+  assert.deepEqual(consumedEarly, { state: 'pending', reason: 'verification_unreadable' });
 });
 
 test('seat classification never treats an uncertain destination or bridge as addressable', () => {
