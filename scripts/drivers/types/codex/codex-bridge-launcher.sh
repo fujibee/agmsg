@@ -817,10 +817,12 @@ _windows_wait_exit_proof() {
 
 _windows_current_bridge_valid() {
   local pid="$1" want_url="$2" want_thread="$3" state token lease="$RUN_DIR/codex-bridge-lease.$1"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   state="$(_windows_process_state "$pid" 2>/dev/null || true)"
   case "$state" in "LIVE$TAB"*) token="${state#"LIVE$TAB"}" ;; *) return 1 ;; esac
   _read_lease "$lease" || return 1
   [ "$lproj" = "$PROJECT_HASH" ] && [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] \
+    && [ "$lhost" = "$(hostname 2>/dev/null)" ] \
     && [ "$lpid" = "$pid" ] && [ "$lstartsrc" = pwsh ] && [ "$lstart" = "$token" ] || return 1
   local got_url="" got_thread=""
   IFS= read -r got_url < "$appserver_file" 2>/dev/null || true
@@ -1098,7 +1100,12 @@ EOF
     --inline-inbox \
     >>"$log" 2>&1 3>&- 4>&- &
   launched_pid=$!
-  printf '%s\n' "$launched_pid" > "$pidfile"
+  # Git Bash $! is an MSYS pid, while codex-bridge.js and its lease use a
+  # Windows pid. Never publish $! as a native pid on the default Windows path.
+  # The Node bridge publishes its own native pidfile before its complete lease.
+  if ! _agmsg_is_windows || [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
+    printf '%s\n' "$launched_pid" > "$pidfile"
+  fi
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
     # A custom bridge is foregrounded by the test harness, so a plain wait
     # would hide a role change until the bridge exits on its own. Poll the
@@ -1133,11 +1140,70 @@ EOF
   # Record what this bridge is bound to so a later launcher can detect staleness.
   printf '%s' "$req_app_server" > "$appserver_file"
   printf '%s' "$thread_id" > "$thread_file"
+  if _agmsg_is_windows && [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
+    # Keep this child lock while the native Node publishes its pidfile and
+    # lease. A missing/partial lease, a changed role, or an uncertain process
+    # state must never send this launcher back to the spawn path.
+    published=0; role_gone=0; publish_tick=0
+    while [ "$publish_tick" -lt 300 ]; do
+      published_pid=""
+      if [ -f "$pidfile" ]; then
+        IFS= read -r published_pid < "$pidfile" 2>/dev/null || true
+      fi
+      if [ -n "$published_pid" ] && \
+        _windows_current_bridge_valid "$published_pid" "$req_app_server" "$thread_id"; then
+        published=1
+        break
+      fi
+      if [ $((publish_tick % 10)) -eq 0 ]; then
+        current_role="$(resolve_identity || true)"
+        if [ "$current_role" != "$ROLE_PAIR" ] || ! read_seat_request \
+          || [ "$REQUEST_PAIR" != "$ROLE_PAIR" ]; then
+          role_gone=1
+        fi
+      fi
+      sleep 0.1
+      publish_tick=$((publish_tick + 1))
+    done
+    if [ "$published" = 1 ]; then
+      current_role="$(resolve_identity || true)"
+      if [ "$role_gone" = 1 ] || [ "$current_role" != "$ROLE_PAIR" ] \
+        || ! read_seat_request || [ "$REQUEST_PAIR" != "$ROLE_PAIR" ]; then
+        retire_recorded_bridge || true
+        exit 0
+      fi
+    else
+      # A local child can outlive a failed status probe, and may publish late.
+      # Park with the child lock held instead of creating a second native Node.
+      # On role removal, retire only a later, fully verified native lease.
+      while _agmsg_pid_alive_local "$PARENT_PID"; do
+        current_role="$(resolve_identity || true)"
+        if [ "$current_role" != "$ROLE_PAIR" ] || ! read_seat_request \
+          || [ "$REQUEST_PAIR" != "$ROLE_PAIR" ]; then
+          published_pid=""
+          if [ -f "$pidfile" ]; then
+            IFS= read -r published_pid < "$pidfile" 2>/dev/null || true
+          fi
+          if [ -n "$published_pid" ] && \
+            _windows_current_bridge_valid "$published_pid" "$req_app_server" "$thread_id"; then
+            retire_recorded_bridge || true
+          fi
+          exit 0
+        fi
+        sleep 1
+      done
+      exit 1
+    fi
+  fi
+  verified_pid="$launched_pid"
+  if _agmsg_is_windows && [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ] && [ "$published" = 1 ]; then
+    verified_pid="$published_pid"
+  fi
   if _agmsg_is_windows && [ "$windows_exit_proven" = 1 ] && [ -f "$retire_fence" ]; then
     verified=0
     _verify_tick=0
     while [ "$_verify_tick" -lt "$_REAP_WAIT_TICKS" ]; do
-      if _windows_current_bridge_valid "$launched_pid" "$req_app_server" "$thread_id"; then
+      if _windows_current_bridge_valid "$verified_pid" "$req_app_server" "$thread_id"; then
         verified=1
         break
       fi
