@@ -29,11 +29,23 @@ import { PROTOCOL_VERSION } from "./control.mjs";
 const STARTING_STOPPING_GRACE_MS = 30_000;
 
 // The pure decision. `now` is injectable for tests.
-export function classify({ owner, intent, alive, reachable }, now = Date.now()) {
+export function classify({ owner, intent, alive, reachable, lastAttempt }, now = Date.now()) {
   const desired = intent?.desired ?? null;
 
+  if (desired === "on" && !(owner.state === "ready" && alive === true && reachable)) {
+    const reason = lastAttempt?.reason ?? owner.last_end_reason ??
+      (owner.state === "ready" ? "executor or control socket unavailable" : owner.state);
+    const detail = owner.last_end_reason === "bind_failed" ? "failed to start" :
+      owner.last_end_reason === "stepped_aside_for_update" ? "stopped for an update; the new version has not started yet" : "stopped";
+    return {
+      text: `agmsgd is ${detail} (intent is on; reason: ${reason}${owner.state === "ready" && !reachable ? "; does not answer on its control socket" : ""}). Run agmsg daemon start (recommended), or agmsg daemon disable and restart Codex. Unread messages are preserved.`,
+      exitCode: 1,
+      gen: owner.gen,
+    };
+  }
+
   if (owner.state === "ready") {
-    if (reachable) {
+    if (reachable && alive === true) {
       return {
         text: `agmsgd is running (gen ${owner.gen}, version ${owner.version ?? "unknown"})`,
         exitCode: 0,
@@ -100,6 +112,7 @@ export function readOwnerAndIntentReadOnly(installRoot) {
   try {
     const owner = db.prepare("SELECT * FROM daemon_owner").get();
     const intent = db.prepare("SELECT * FROM daemon_intent").get();
+    const lastAttempt = db.prepare("SELECT at, reason FROM daemon_start_attempts WHERE at > ? ORDER BY at DESC, rowid DESC LIMIT 1").get(owner.last_end_at ?? "");
     let codexSeats;
     try {
       codexSeats = {
@@ -114,7 +127,7 @@ export function readOwnerAndIntentReadOnly(installRoot) {
       owner.state === "none" || owner.executor_pid == null
         ? null
         : isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id });
-    return { owner, intent, alive, codexSeats };
+    return { owner, intent, alive, codexSeats, lastAttempt };
   } finally {
     db.close();
   }
@@ -155,9 +168,9 @@ async function main() {
     process.stderr.write("usage: status.mjs <installRoot>\n");
     process.exit(2);
   }
-  let owner, intent, alive, codexSeats;
+  let owner, intent, alive, codexSeats, lastAttempt;
   try {
-    ({ owner, intent, alive, codexSeats } = readOwnerAndIntentReadOnly(installRoot));
+    ({ owner, intent, alive, codexSeats, lastAttempt } = readOwnerAndIntentReadOnly(installRoot));
   } catch (error) {
     // An input that can be detected as an error is reported at
     // that entry point, with a nonzero exit -- not a raw stack trace, and
@@ -166,7 +179,7 @@ async function main() {
     process.exit(1);
   }
   const reachable = owner.state === "ready" && owner.socket ? await probeSocket(owner.socket) : false;
-  const result = classify({ owner, intent, alive, reachable });
+  const result = classify({ owner, intent, alive, reachable, lastAttempt });
 
   // The node:sqlite experimental-feature warning is surfaced here, always
   // -- not hidden, not treated as a failure.
