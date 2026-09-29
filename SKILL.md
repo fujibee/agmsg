@@ -11,9 +11,12 @@ agmsg keeps its SQLite database, team registry, and runtime state under `~/.agen
 
 ```bash
 if [ ! -d ~/.agents/skills/agmsg ]; then
-  # Newest cached copy of the plugin (several versions can sit side by side).
-  installer=$(ls -t ~/.claude/plugins/cache/fujibee-agmsg/agmsg/*/install.sh 2>/dev/null | head -1)
-  if [ -n "$installer" ]; then
+  # Newest cached copy of the plugin. Several versions can sit side by side, so
+  # pick by version folder name (numeric, portable -- not sort -V, not mtime).
+  cache="$HOME/.claude/plugins/cache/fujibee-agmsg/agmsg"
+  newest=$(ls "$cache" 2>/dev/null | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+  installer="$cache/$newest/install.sh"
+  if [ -n "$newest" ] && [ -f "$installer" ]; then
     bash "$installer" --cmd agmsg
   else
     echo "agmsg not installed. Either:" >&2

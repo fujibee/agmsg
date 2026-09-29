@@ -850,9 +850,16 @@ PS1
   # the plugin marketplace flow has populated the cache dir with a copy of the
   # repo. Then run the Step 0 bootstrap snippet FROM the repo-root SKILL.md and
   # assert the canonical install location exists.
-  local plugin_dir="$FAKE_HOME/.claude/plugins/cache/fujibee-agmsg/agmsg/1.0.0"
-  mkdir -p "$plugin_dir"
+  # Two cached versions, as after an upgrade: the real repo copy is the NEWER
+  # one (1.10.0 -- a plain string sort would rank 1.9.0 above it), and the older
+  # one holds an installer that must never run. The older folder is touched last,
+  # so picking by modification time would choose it too.
+  local cache="$FAKE_HOME/.claude/plugins/cache/fujibee-agmsg/agmsg"
+  local plugin_dir="$cache/1.10.0"
+  mkdir -p "$plugin_dir" "$cache/1.9.0"
   cp -R "$REPO_ROOT/." "$plugin_dir/"
+  printf '#!/usr/bin/env bash\ntouch "%s/older-installer-ran"\nexit 1\n' "$FAKE_HOME" > "$cache/1.9.0/install.sh"
+  touch "$cache/1.9.0/install.sh"
   [ ! -d "$SK" ]  # canonical agmsg location absent
 
   # The snippet is read out of the shipped file, not retyped here: a copy kept
@@ -868,6 +875,7 @@ PS1
 
   HOME="$FAKE_HOME" bash -c "$snippet"
 
+  [ ! -e "$FAKE_HOME/older-installer-ran" ]
   [ -d "$SK" ]
   [ -f "$SK/db/messages.db" ]
   [ -f "$SK/scripts/whoami.sh" ]
