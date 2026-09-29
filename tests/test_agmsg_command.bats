@@ -151,3 +151,13 @@ teardown() {
   [ -f "$BIN_DIR/agmsg" ]
   [ -f "$TEST_SKILL_DIR/run/agmsg-launcher.path" ]
 }
+
+@test "launcher: an older npm agmsg behind a Windows-style wrapper is recognised through the JS it names" {
+  local wrap="$BATS_TEST_TMPDIR/npmwrap"
+  mkdir -p "$wrap/node_modules/agmsg/bin"
+  printf '// agmsg npm bootstrapper.\n' > "$wrap/node_modules/agmsg/bin/agmsg.js"
+  printf '#!/bin/sh\nexec node "$basedir/node_modules/agmsg/bin/agmsg.js" "$@"\n' > "$wrap/agmsg"
+  chmod +x "$wrap/agmsg"
+  run env PATH="$wrap:$BIN_DIR:$PATH" bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
+  [[ "$output" == *"older npm agmsg"* ]]
+}

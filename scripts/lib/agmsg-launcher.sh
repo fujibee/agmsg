@@ -126,10 +126,20 @@ agmsg_launcher_install() {
 }
 
 # True when the file at $1 is the npm entry from before the single-command
-# release (its header names it a bootstrapper). Reads the file only.
+# release (its header names it a bootstrapper). Reads files only. On Unix npm
+# links the entry, so reading the path follows to the JS. On Windows npm writes
+# a small shell wrapper next to the entry; that wrapper names
+# node_modules/agmsg/bin/agmsg.js relative to its own directory, and that file
+# is what is read.
 agmsg_launcher_is_old_npm_entry() {
-  [ -f "$1" ] || return 1
-  head -c 4096 "$1" 2>/dev/null | grep -q 'agmsg npm bootstrapper'
+  local file="$1" js
+  [ -f "$file" ] || return 1
+  head -c 4096 "$file" 2>/dev/null | grep -q 'agmsg npm bootstrapper' && return 0
+  if head -c 4096 "$file" 2>/dev/null | grep -q 'node_modules/agmsg/bin/agmsg.js'; then
+    js="$(dirname "$file")/node_modules/agmsg/bin/agmsg.js"
+    [ -f "$js" ] && head -c 4096 "$js" 2>/dev/null | grep -q 'agmsg npm bootstrapper' && return 0
+  fi
+  return 1
 }
 
 # Prints the first older npm agmsg found on PATH ahead of directory $1 (or
