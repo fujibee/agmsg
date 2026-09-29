@@ -5,6 +5,8 @@ load test_helper
 setup() {
   setup_test_env
   DAEMON="$SCRIPTS/daemon.sh"
+  AGMSGD_TEST_LAUNCH_STDERR_LOG="$TEST_SKILL_DIR/run/agmsgd.stderr.log"
+  export AGMSGD_TEST_LAUNCH_STDERR_LOG
   chmod +x "$SCRIPTS/daemon/agmsgd" "$SCRIPTS/daemon/agmsgd-launch.sh"
 }
 
@@ -140,12 +142,31 @@ _run_with_deadline() {
   rm -f "$outfile" "$exitfile"
 }
 
+_assert_start_result() {
+  local expected="$1"
+  if [ "$status" -ne 0 ] || [[ "$output" != *"$expected"* ]]; then
+    printf '\n--- run/agmsgd.log ---\n' >&2
+    if [ -f "$TEST_SKILL_DIR/run/agmsgd.log" ]; then
+      tail -n 80 "$TEST_SKILL_DIR/run/agmsgd.log" >&2
+    else
+      printf '(not present)\n' >&2
+    fi
+    printf '\n--- run/agmsgd.stderr.log ---\n' >&2
+    if [ -f "$AGMSGD_TEST_LAUNCH_STDERR_LOG" ]; then
+      tail -n 80 "$AGMSGD_TEST_LAUNCH_STDERR_LOG" >&2
+    else
+      printf '(not present)\n' >&2
+    fi
+  fi
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$expected"* ]]
+}
+
 @test "daemon.sh start: a real run against the real entrypoint becomes ready" {
   _seed_install_db
   _write_completion_record
   _run_with_deadline 15 bash "$DAEMON" start
-  [ "$status" -eq 0 ]
-  printf '%s\n' "$output" | grep -Fq 'running'
+  _assert_start_result 'running'
   bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 
@@ -179,7 +200,7 @@ _run_with_deadline() {
   local iteration
   for iteration in 1 2 3; do
     _run_with_deadline 15 bash "$DAEMON" start
-    [ "$status" -eq 0 ]
+    _assert_start_result 'running'
 
     _run_with_deadline 10 bash "$DAEMON" status
     [ "$status" -eq 0 ]

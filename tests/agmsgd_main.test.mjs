@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { openInstallDb } from "../scripts/daemon/db.mjs";
 import { readOwner } from "../scripts/daemon/owner.mjs";
-import { gracefulStop, pollOnce, startup } from "../scripts/daemon/main.mjs";
+import { gracefulStop, pollChannelHooks, pollOnce, prepareClaimWithCodexSchema, startup } from "../scripts/daemon/main.mjs";
 import { captureWatchState } from "../scripts/daemon/lifecycle.mjs";
 import { createHash } from "node:crypto";
 
@@ -147,6 +147,32 @@ test("gracefulStop: a channel hook that throws is logged but does not stop the r
     await gracefulStop(db, root, started.gen, started.controlHandle, hooks, "normal");
     assert.equal(secondHookRan, true);
     assert.equal(readOwner(db).state, "none", "shutdown must still complete despite the throwing hook");
+    db.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("channel setup is inside the prepared install lock and channel polls stay sequential", async () => {
+  const { root } = makeInstall();
+  try {
+    const db = openInstallDb(join(root, "run", "install.db"));
+    let released = false;
+    const prepared = await prepareClaimWithCodexSchema(async () => ({
+      db,
+      release: () => { released = true; },
+    }));
+    assert.equal(released, false, "schema creation must finish before the caller releases the install lock");
+    assert.doesNotThrow(() => db.prepare("SELECT state FROM beta_codex_seat").all());
+    prepared.release();
+    assert.equal(released, true);
+
+    const order = [];
+    await pollChannelHooks([
+      { pollOnce: async () => { order.push("first:start"); await Promise.resolve(); order.push("first:end"); } },
+      { pollOnce: async () => { order.push("second"); } },
+    ]);
+    assert.deepEqual(order, ["first:start", "first:end", "second"]);
     db.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

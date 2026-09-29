@@ -8,19 +8,34 @@
 // without wiring real signal handlers or a real interval timer, which
 // main() (the actual CLI entrypoint) only assembles.
 //
-// channelHooks (an array of {stop()}) is beta's plug point for the Codex
-// queue channel -- a separate PR/component this file does not own. Empty
-// in this PR; gracefulStop() already calls stop() on every registered
-// hook, in the correct place in the shutdown order, so that PR only needs
-// to register its hook, not restructure this file.
+// channelHooks are polled from the daemon's single event loop and stopped
+// before the control socket closes.
 
 import { takeOwnership, markReady, markStopping, revertToNone, stopNormally } from "./owner.mjs";
 import { createControlServer } from "./control.mjs";
 import { captureWatchState, watchForDrift } from "./lifecycle.mjs";
 import { logLine } from "./log.mjs";
 import { classify } from "./status.mjs";
+import { createCodexQueueChannel } from "./channels/codex-queue.mjs";
+import { ensureCodexChannelSchema } from "./channels/codex-queue-store.mjs";
 
 export const POLL_INTERVAL_MS = 5000;
+
+export async function prepareClaimWithCodexSchema(prepareClaim) {
+  const prepared = await prepareClaim();
+  ensureCodexChannelSchema(prepared.db);
+  return prepared;
+}
+
+export async function pollChannelHooks(channelHooks, log = () => {}) {
+  for (const hook of channelHooks) {
+    try {
+      await hook.pollOnce();
+    } catch (error) {
+      log(`channel: poll failed: ${error.message}`);
+    }
+  }
+}
 
 // Takes ownership and binds the control socket. Returns
 // {ok: true, gen, controlHandle, db} or {ok: false, reason, db} -- a
@@ -104,7 +119,7 @@ export async function gracefulStop(db, installRoot, gen, controlHandle, channelH
 // start or a normal/SIGTERM stop, 75 for stepping aside for an update, 1
 // for a bind failure or any other unexpected error.
 export async function main(db, { installRoot, manifest, manifestText, expectedDesired, expectedOpGen, version, prepareClaim }) {
-  const channelHooks = []; // beta's Codex-queue channel plugs in here, separately.
+  const channelHooks = [];
   let controlHandle;
   let gen;
   let stopping = false;
@@ -123,7 +138,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
     expectedOpGen,
     version,
     prepareClaim: prepareClaim ? async () => {
-      const prepared = await prepareClaim();
+      const prepared = await prepareClaimWithCodexSchema(prepareClaim);
       db = prepared.db;
       return prepared;
     } : undefined,
@@ -151,13 +166,24 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
   }
   gen = started.gen;
   controlHandle = started.controlHandle;
+  channelHooks.push(createCodexQueueChannel({ db, installRoot, expectedOpGen }));
 
   process.on("SIGTERM", () => doStop("normal"));
 
   const watchState = await captureWatchState(installRoot, manifest, manifestText);
+  let polling = false;
   const timer = setInterval(async () => {
-    if (stopping) return;
-    const verdict = await pollOnce(db, installRoot, { gen, expectedOpGen, watchState });
-    if (verdict.action !== "continue") await doStop(verdict.reason);
+    if (stopping || polling) return;
+    polling = true;
+    try {
+      const verdict = await pollOnce(db, installRoot, { gen, expectedOpGen, watchState });
+      if (verdict.action !== "continue") {
+        await doStop(verdict.reason);
+        return;
+      }
+      await pollChannelHooks(channelHooks, (message) => logLine(installRoot, message));
+    } finally {
+      polling = false;
+    }
   }, POLL_INTERVAL_MS);
 }
