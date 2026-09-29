@@ -2433,7 +2433,7 @@ CYG
   writer_pid="$(cat "$inject_dir/writer.pid")"
   lock_pid="$(cat "$inject_dir/lock.pid")"
   _agmsg_watch_pid "$writer_pid" "$bin/cp"
-  _agmsg_watch_pid "$lock_pid" "$sqlite_real"
+  _agmsg_watch_pid "$lock_pid" "$SK/run/install-op.lock.db"
   [ -e "$SK/run/install-op-incomplete.json" ]
 
   kill -TERM "$install_pid"
@@ -2459,7 +2459,7 @@ CYG
   writer_pid="$(cat "$inject_dir/writer.pid")"
   lock_pid="$(cat "$inject_dir/lock.pid")"
   _agmsg_watch_pid "$writer_pid" "$bin/cp"
-  _agmsg_watch_pid "$lock_pid" "$sqlite_real"
+  _agmsg_watch_pid "$lock_pid" "$SK/run/install-op.lock.db"
   op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
   kill -KILL "$install_pid"
   if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
