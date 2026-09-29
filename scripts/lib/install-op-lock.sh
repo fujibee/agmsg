@@ -8,9 +8,9 @@
 # for the whole operation, fed through a pair of named pipes so bash can keep
 # doing work (the copy, the manifest write) while the transaction stays open.
 # The OS releases the file lock the moment that sqlite3 process dies, for
-# any reason -- there is no stale-lock recovery step, by design (T3).
+# any reason -- there is no stale-lock recovery step.
 #
-# THE LOCK FILE ITSELF IS NEVER DELETED, not even by uninstall (T3, citing
+# THE LOCK FILE ITSELF IS NEVER DELETED, not even by uninstall (citing
 # https://www.sqlite.org/howtocorrupt.html): removing a DB a waiter still has
 # open makes a fresh file recreated under the same name a DIFFERENT lock than
 # the one that waiter is holding a reference to.
@@ -97,7 +97,7 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
 
 # Re-proves the lock is still genuinely held: the coprocess pid is alive AND
 # a fresh canary round-trips. Call this right before a step the lock is
-# supposed to be protecting (T6 fault-injection: only the lock-holding
+# supposed to be protecting (fault injection: only the lock-holding
 # sqlite3 child dies, bash lives on unaware) -- a caller that only checked
 # liveness at acquire time would otherwise write past a lock it silently no
 # longer holds. Returns 1 (lock not provably held; do not proceed) without

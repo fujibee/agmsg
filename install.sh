@@ -346,33 +346,6 @@ agmsg_install_operation_finish() {
   return 0
 }
 
-# Run a potentially long mutating command while the shell periodically
-# re-proves the SQLite lock. If its lock-owning child dies during the command,
-# stop that command before any later install step can overlap another operation.
-agmsg_install_op_run_checked() {
-  local command_pid command_status=0
-  "$@" &
-  command_pid=$!
-  while kill -0 "$command_pid" 2>/dev/null; do
-    if ! agmsg_install_op_confirm; then
-      kill "$command_pid" 2>/dev/null || true
-      sleep 0.05
-      kill -0 "$command_pid" 2>/dev/null && kill -9 "$command_pid" 2>/dev/null || true
-      wait "$command_pid" 2>/dev/null || true
-      agmsg_install_op_require || true
-      return 1
-    fi
-    sleep 0.05
-  done
-  if wait "$command_pid"; then
-    :
-  else
-    command_status=$?
-    return "$command_status"
-  fi
-  agmsg_install_op_require
-}
-
 # The scripts/ copy runs inside the install transaction opened above. It does
 # not acquire or release the lock, and it does not publish the completion
 # manifest; the caller does that only after every install-side write is done.
@@ -396,9 +369,8 @@ agmsg_install_copy_scripts() {
 
   # Exclude the two rename-placed files from the bulk copy by giving cp -R a
   # PRIVATE STAGING COPY of scripts/ with those two removed, rather than
-  # temporarily removing them from $SCRIPT_DIR itself (T3 leaves the choice
-  # between these two to the implementation PR). The first version of this
-  # function did the latter -- hid them from $SCRIPT_DIR, restored them via
+  # temporarily removing them from $SCRIPT_DIR itself. The first version of
+  # this function did the latter -- hid them from $SCRIPT_DIR, restored them via
   # an EXIT trap -- and it was genuinely unsafe: $SCRIPT_DIR is the same,
   # SHARED, live checkout every install.sh invocation reads from, so a
   # second install run against it (even sequentially, one finishing before
@@ -440,14 +412,18 @@ agmsg_install_copy_scripts() {
   fi
   if [ "$copy_rc" -eq 0 ]; then
     if agmsg_install_op_require; then
-      agmsg_install_op_run_checked cp -R "$stage_dir/." "$SKILL_DIR/scripts/" || copy_rc=1
+      cp -R "$stage_dir/." "$SKILL_DIR/scripts/" || copy_rc=1
+      agmsg_install_op_require || copy_rc=1
     else
       copy_rc=1
     fi
   fi
   if [ "$copy_rc" -eq 0 ]; then
-    agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR" || copy_rc=1
     agmsg_install_op_require || copy_rc=1
+    if [ "$copy_rc" -eq 0 ]; then
+      agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR" || copy_rc=1
+      agmsg_install_op_require || copy_rc=1
+    fi
   fi
   rm -rf "$stage_dir" 2>/dev/null
 

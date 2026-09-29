@@ -300,7 +300,7 @@ teardown() {
   # install this run is about (#1400).
   HOME="$FAKE_HOME" CODEX_HOME="$codex_home2" bash "$SK/uninstall.sh" --yes
 
-  # $SK itself is no longer fully gone (agmsgd beta, T3): run/install-op.lock.db
+  # $SK itself is no longer fully gone: run/install-op.lock.db
   # is kept on purpose, so a residual $SK/run/ survives. Its substantive
   # content is what must be gone -- covered in full by its own test
   # ("uninstall keeps run/install-op.lock.db while removing everything else").
@@ -381,7 +381,7 @@ teardown() {
   # two installs present and no single one identified.
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --all --yes
 
-  # Neither install is fully gone (agmsgd beta, T3): run/install-op.lock.db
+  # Neither install is fully gone: run/install-op.lock.db
   # is kept on purpose for each. Substantive content is what must be gone.
   [ ! -e "$FAKE_HOME/.agents/skills/agmsg/scripts" ]
   [ ! -e "$FAKE_HOME/.agents/skills/agmsg-second/scripts" ]
@@ -2197,72 +2197,59 @@ CYG
   [ -f "$SK/run/install-manifest.json" ]
 }
 
-@test "install stops after the lock child dies during scripts copy" {
-  local bin="$FAKE_HOME/bin" sqlite_real cp_real lock_pid_file copy_entered copy_release
-  local install_pid install_rc=0 lock_pid lock_cmd found=0 i
+@test "install stops before pruning when the lock child dies during scripts copy" {
+  local bin="$FAKE_HOME/bin" inject_dir="$FAKE_HOME/lock-loss"
+  local sqlite_real cp_real sqlite_q cp_q lock_pid lock_cmd
+  local install_rc=0 before_version manifest="$SK/run/install-manifest.json"
   sqlite_real="$(command -v sqlite3)"
   cp_real="$(command -v cp)"
-  lock_pid_file="$FAKE_HOME/lock.pid"
-  copy_entered="$FAKE_HOME/scripts-copy-entered"
-  copy_release="$FAKE_HOME/scripts-copy-release"
-  mkdir -p "$bin"
+  sqlite_q="$(printf '%q' "$sqlite_real")"
+  cp_q="$(printf '%q' "$cp_real")"
+  mkdir -p "$bin" "$inject_dir"
+
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  printf 'retired test file\n' > "$SK/scripts/retired-test-file"
+  before_version="$(cat "$SK/VERSION")"
+  [ -s "$manifest" ]
 
   printf '%s\n' \
     '#!/usr/bin/env bash' \
-    'if [ "${1:-}" = "$AGMSG_TEST_LOCK_DB" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_LOCK_PID_FILE"; fi' \
-    'exec "$AGMSG_TEST_REAL_SQLITE3" "$@"' > "$bin/sqlite3"
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'if [ "${1:-}" = "$lock_db" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid"; fi' \
+    "exec $sqlite_q \"\$@\"" > "$bin/sqlite3"
   chmod +x "$bin/sqlite3"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'target="$test_home/.agents/skills/agmsg/scripts/"' \
     'dest=""; for arg do dest="$arg"; done' \
-    'if [ "$dest" = "$AGMSG_TEST_SCRIPTS/" ] && [ ! -e "$AGMSG_TEST_COPY_ENTERED" ]; then' \
-    '  touch "$AGMSG_TEST_COPY_ENTERED"' \
-    '  while [ ! -e "$AGMSG_TEST_COPY_RELEASE" ]; do sleep 0.02; done' \
+    "$cp_q \"\$@\"; copy_rc=\$?" \
+    'if [ "$dest" = "$target" ] && [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ]; then' \
+    '  lock_pid="$(cat "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid" 2>/dev/null)"' \
+    '  case "$lock_pid" in ""|*[!0-9]*) lock_pid="" ;; esac' \
+    '  if [ -n "$lock_pid" ]; then' \
+    '    lock_cmd="$(/bin/ps -p "$lock_pid" -o args= 2>/dev/null)"' \
+    '    case "$lock_cmd" in *"$lock_db"*) kill -9 "$lock_pid" 2>/dev/null && touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ;; esac' \
+    '  fi' \
     'fi' \
-    'exec "$AGMSG_TEST_REAL_CP" "$@"' > "$bin/cp"
+    'exit "$copy_rc"' > "$bin/cp"
   chmod +x "$bin/cp"
 
-  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
-    AGMSG_TEST_LOCK_DB="$SK/run/install-op.lock.db" \
-    AGMSG_TEST_LOCK_PID_FILE="$lock_pid_file" \
-    AGMSG_TEST_REAL_SQLITE3="$sqlite_real" \
-    AGMSG_TEST_SCRIPTS="$SK/scripts" \
-    AGMSG_TEST_COPY_ENTERED="$copy_entered" \
-    AGMSG_TEST_COPY_RELEASE="$copy_release" \
-    AGMSG_TEST_REAL_CP="$cp_real" \
-    bash "$REPO_ROOT/install.sh" --cmd agmsg > "$FAKE_HOME/install.out" 2>&1 &
-  install_pid=$!
-  _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --cmd agmsg"
-
-  for ((i = 0; i < 500; i++)); do
-    [ -e "$copy_entered" ] && { found=1; break; }
-    kill -0 "$install_pid" 2>/dev/null || break
-    sleep 0.02
-  done
-  if [ "$found" -eq 1 ] && [ -s "$lock_pid_file" ]; then
-    lock_pid="$(<"$lock_pid_file")"
-    case "$lock_pid" in ''|*[!0-9]*) lock_pid="" ;; esac
-    if [ -n "$lock_pid" ]; then
-      lock_cmd="$(/bin/ps -p "$lock_pid" -o args= 2>/dev/null)"
-      case "$lock_cmd" in
-        *"$SK/run/install-op.lock.db"*) kill -9 "$lock_pid" 2>/dev/null || true ;;
-        *) lock_pid="" ;;
-      esac
-    fi
-  fi
-  touch "$copy_release"
-  if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
-
-  [ "$found" -eq 1 ]
-  [ -n "$lock_pid" ]
-  [ "$install_rc" -ne 0 ]
-  grep -Fq 'install lock was lost partway through' "$FAKE_HOME/install.out"
-  [ ! -e "$SK/scripts/team.sh" ]
-  [ ! -e "$SK/VERSION" ]
-  [ ! -e "$SK/run/install-manifest.json" ]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
+    bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -ne 0 ]
+  [ -e "$inject_dir/fired" ]
+  [[ "$output" == *"install lock was lost partway through"* ]]
+  [ -f "$SK/scripts/retired-test-file" ]
+  [ "$(cat "$SK/VERSION")" = "$before_version" ]
+  [ ! -e "$manifest" ]
+  [ -s "$manifest.prev" ]
 }
 
-@test "uninstall keeps run/install-op.lock.db while removing everything else (agmsgd beta, T3)" {
+@test "uninstall keeps run/install-op.lock.db while removing everything else" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ -f "$SK/run/install-op.lock.db" ]
   [ -f "$SK/run/install.db" ]
