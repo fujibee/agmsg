@@ -80,7 +80,7 @@ _with_op_lock() {
   AGMSGD_LOCK_INSTALL_ID="${expected_generation%%:*}"
   lock_dir="$(mktemp -d "$SKILL_DIR/run/daemon-op-lock.XXXXXX")" || return 1
   mkfifo "$lock_dir/in" "$lock_dir/out"
-  sqlite3 -batch "$LOCK_DB" < "$lock_dir/in" > "$lock_dir/out" &
+  sqlite3 -batch "$LOCK_DB" < "$lock_dir/in" > "$lock_dir/out" 3>&- 4>&- &
   lock_pid=$!
   exec 8> "$lock_dir/in"
   exec 9< "$lock_dir/out"
@@ -281,7 +281,7 @@ _start_registered_service() {
 }
 
 _start_unregistered_launcher() {
-  bash "$LAUNCHER" </dev/null >/dev/null 2>&1 3>&- &
+  bash "$LAUNCHER" </dev/null >/dev/null 2>&1 3>&- 4>&- &
   disown 2>/dev/null || true
 }
 
