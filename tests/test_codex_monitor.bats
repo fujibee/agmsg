@@ -7,6 +7,7 @@ setup() {
   export TEST_PROJECT="$(mktemp -d)"
   export CALL_LOG="$TEST_PROJECT/calls.log"
   export APP_SERVER_ARGV_LOG="$TEST_PROJECT/app-server-argv.log"
+  export APP_SERVER_ENV_LOG="$TEST_PROJECT/app-server-env.log"
 
   # Fake codex for codex-monitor tests.
   #   --version            -> prints "codex-cli $FAKE_CODEX_VERSION"
@@ -32,6 +33,7 @@ case "${1:-}" in
   app-server)
     for a in "$@"; do printf ' <%s>' "$a" >> "$APP_SERVER_ARGV_LOG"; done
     printf '\n' >> "$APP_SERVER_ARGV_LOG"
+    printf 'flag=%s\n' "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" >> "$APP_SERVER_ENV_LOG"
     if [ "${FAKE_CODEX_MODE:-listen}" = "broken" ]; then
       echo "error: unexpected argument '--listen' found" >&2
       exit 2
@@ -124,6 +126,17 @@ teardown() {
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
   [ "$status" -eq 0 ]
   grep -q -- '<-c> <shell_environment_policy\.set\.AGMSG_CODEX_SEAT_KEY="[0-9.]\{1,\}">' "$APP_SERVER_ARGV_LOG"
+}
+
+@test "codex-monitor: the app-server inherits AGMSG_CODEX_BRIDGE_LAUNCHER=1 so SessionStart sees the launcher flag" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+
+  # 親環境のフラグを除去し、monitor 自身が付けた値だけを観測する（偽陰性防止）
+  run env -u AGMSG_CODEX_BRIDGE_LAUNCHER FAKE_CODEX_VERSION=0.142.2 AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  grep -qx 'flag=1' "$APP_SERVER_ENV_LOG"
 }
 
 # --- #1254: one app-server per seat, never reused ---
@@ -316,6 +329,9 @@ EOF
 case "${1:-}" in
   --version) echo "codex-cli 0.144.1"; exit 0 ;;
   app-server)
+    printf 'flag=%s\nseat=%s\nurl=%s\n' \
+      "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" "${AGMSG_CODEX_SEAT_KEY:-}" \
+      "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" > "$TEST_PROJECT/app-server-env"
     node - <<'JS' &
 const net = require('net');
 const s = net.createServer((c) => c.destroy());
@@ -342,6 +358,18 @@ EOF
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
   [ "$status" -eq 0 ]
   grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
+  grep -qx 'flag=1' "$TEST_PROJECT/app-server-env"
+  grep -qx 'url=' "$TEST_PROJECT/app-server-env"
+  local seat record port restored
+  seat="$(sed -n 's/^seat=//p' "$TEST_PROJECT/app-server-env")"
+  [ -n "$seat" ]
+  record="$TEST_SKILL_DIR/run/codex-app-server.$seat.record"
+  [ -f "$record" ]
+  port="$(sed -n 's/^port=//p' "$record")"
+  restored="$(SKILL_DIR="$TEST_SKILL_DIR" AGMSG_CODEX_SEAT_KEY="$seat" \
+    bash -c 'source "$1"; _agmsg_codex_app_server_url "$2"' bash \
+      "$TYPES/codex/_app-server.sh" "$TEST_PROJECT")"
+  [ "$restored" = "ws://127.0.0.1:$port" ]
   [[ "$output" != *"did not report a listening port"* ]]
 }
 

@@ -198,6 +198,7 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
 # generated internally as digits and dots only (_agmsg_codex_seat_key_new),
 # so it is always safe inside this double-quoted TOML string unescaped.
 AGMSG_CODEX_SEAT_KEY="$SEAT_KEY" \
+  AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
   "$REAL_CODEX" app-server \
     -c "shell_environment_policy.set.AGMSG_CODEX_SEAT_KEY=\"$SEAT_KEY\"" \
     --listen "ws://127.0.0.1:0" >>"$SEAT_LOG" 2>&1 3>&- 4>&- &
