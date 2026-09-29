@@ -2415,13 +2415,13 @@ CYG
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/cancel-writer}"' \
     'target="$test_home/.agents/skills/agmsg/scripts/"' \
     'dest=""; for arg do dest="$arg"; done' \
-    'if [ "$dest" = "$target" ]; then exec 8>&- 9>&-; printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/writer.pid"; touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/writer-entered"; if [ -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/hard-kill-mode" ]; then printf "%s\\n" "$2" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/stage-source"; while [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/hard-release" ]; do sleep 0.02; done; exit 0; fi; while :; do sleep 1; done; fi' \
+    'if [ "$dest" = "$target" ]; then exec 8>&- 9>&- 3>&- 4>&- </dev/null >/dev/null 2>&1; printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/writer.pid"; touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/writer-entered"; if [ -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/hard-kill-mode" ]; then printf "%s\\n" "$2" > "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/stage-source"; while [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/hard-release" ]; do sleep 0.02; done; exit 0; fi; while :; do sleep 1; done; fi' \
     "exec $cp_q \"\$@\"" > "$bin/cp"
   chmod +x "$bin/cp"
 
   HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
     AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
-    bash "$REPO_ROOT/install.sh" --update > "$inject_dir/install.out" 2>&1 &
+    bash "$REPO_ROOT/install.sh" --update </dev/null > "$inject_dir/install.out" 2>&1 3>&- 4>&- &
   install_pid=$!
   _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --update"
   for ((i = 0; i < 250; i++)); do
@@ -2431,7 +2431,9 @@ CYG
   done
   [ -e "$inject_dir/writer-entered" ]
   writer_pid="$(cat "$inject_dir/writer.pid")"
+  lock_pid="$(cat "$inject_dir/lock.pid")"
   _agmsg_watch_pid "$writer_pid" "$bin/cp"
+  _agmsg_watch_pid "$lock_pid" "$sqlite_real"
   [ -e "$SK/run/install-op-incomplete.json" ]
 
   kill -TERM "$install_pid"
@@ -2445,7 +2447,7 @@ CYG
   rm -f "$inject_dir/writer-entered" "$inject_dir/hard-release"
   HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
     AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
-    bash "$REPO_ROOT/install.sh" --update > "$inject_dir/hard-kill-install.out" 2>&1 &
+    bash "$REPO_ROOT/install.sh" --update </dev/null > "$inject_dir/hard-kill-install.out" 2>&1 3>&- 4>&- &
   install_pid=$!
   _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --update"
   for ((i = 0; i < 250; i++)); do
@@ -2457,6 +2459,7 @@ CYG
   writer_pid="$(cat "$inject_dir/writer.pid")"
   lock_pid="$(cat "$inject_dir/lock.pid")"
   _agmsg_watch_pid "$writer_pid" "$bin/cp"
+  _agmsg_watch_pid "$lock_pid" "$sqlite_real"
   op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
   kill -KILL "$install_pid"
   if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
