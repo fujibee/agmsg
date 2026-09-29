@@ -136,6 +136,7 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
     agmsg_install_op_unlock
     return 1
   fi
+  line="${line%$'\r'}"
   if [ "$line" != "agmsg-lock-ok" ]; then
     if [ -n "$line" ]; then
       _agmsg_install_op_lock_set_failure "unexpected lock confirmation from sqlite3" "$line"
@@ -189,6 +190,7 @@ agmsg_install_op_confirm() {
   fi
   printf "SELECT 'agmsg-lock-ok';\n" >&9 || return 1
   read -r -t 5 -u 8 line || return 1
+  line="${line%$'\r'}"
   [ "$line" = "agmsg-lock-ok" ]
 }
 

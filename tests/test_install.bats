@@ -853,12 +853,19 @@ PS1
 }
 
 @test "install reports the lock handshake stage and a bounded SQLite response" {
-  local fake_bin="$FAKE_HOME/bin" banner expected response
+  local fake_bin="$FAKE_HOME/bin" banner expected
   mkdir -p "$fake_bin"
   banner="SQLite version $(printf '%100s' '' | tr ' ' X)"
-  expected="${banner:0:80}"
   cat > "$fake_bin/sqlite3" <<'SH'
 #!/usr/bin/env bash
+if [ "${SQLITE_MODE:-}" = crlf-canary ]; then
+  while IFS= read -r statement; do
+    if [ "$statement" = "SELECT 'agmsg-lock-ok';" ]; then
+      printf 'agmsg-lock-ok\r\n'
+    fi
+  done
+  exit 0
+fi
 printf '%s\n' "${SQLITE_BANNER:-unexpected sqlite output}"
 SH
   chmod +x "$fake_bin/sqlite3"
@@ -872,12 +879,11 @@ SH
   [ "${#expected}" -eq 80 ]
   refute grep -Fq -- "another install/uninstall in progress?" <<<"$output"
 
-  response=$'agmsg-lock-ok\r'
-  printf -v expected '%q' "$response"
-  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" SQLITE_BANNER="$response" \
-    bash "$REPO_ROOT/install.sh" --cmd agmsg
-  [ "$status" -ne 0 ]
-  grep -Fq -- "could not take the install operation lock: unexpected lock confirmation from sqlite3: $expected" <<<"$output"
+  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" SQLITE_MODE=crlf-canary \
+    bash -c 'source "$1"; agmsg_install_op_lock "$2" 1000 || exit 1; agmsg_install_op_confirm || exit 2; printf "lock acquired\\n"; agmsg_install_op_unlock' \
+    _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$FAKE_HOME/run/install-op.lock.db"
+  [ "$status" -eq 0 ]
+  grep -Fq -- "lock acquired" <<<"$output"
 }
 
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {
