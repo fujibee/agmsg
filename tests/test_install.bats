@@ -2366,6 +2366,59 @@ CYG
   [ ! -e "$SK/run/install-op-incomplete.json" ]
 }
 
+@test "install cancellation before writer pid publication keeps the incomplete-operation record" {
+  local bin="$FAKE_HOME/bin" inject_dir="$FAKE_HOME/pid-publication"
+  local cp_real cp_q install_pid writer_pid install_rc=0 i op_id
+  cp_real="$(command -v cp)"
+  cp_q="$(printf '%q' "$cp_real")"
+  mkdir -p "$bin" "$inject_dir"
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'dest=""; for arg do dest="$arg"; done' \
+    'if [ "$dest" = "'"$SK"'/scripts/" ]; then printf "%s\\n" "$$" > "$AGMSG_TEST_INSTALL_WRITER_GATE_DIR/writer.pid"; touch "$AGMSG_TEST_INSTALL_WRITER_GATE_DIR/writer-entered"; while [ ! -e "$AGMSG_TEST_INSTALL_WRITER_GATE_DIR/writer-release" ]; do sleep 0.02; done; fi' \
+    "exec $cp_q \"\$@\"" > "$bin/cp"
+  chmod +x "$bin/cp"
+
+  env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_WRITER_GATE_DIR="$inject_dir" \
+    AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE="$inject_dir/publish" \
+    bash "$REPO_ROOT/install.sh" --update > "$inject_dir/install.out" 2>&1 &
+  install_pid=$!
+  _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --update"
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$inject_dir/publish.pid" ] && [ -e "$inject_dir/writer-entered" ] && break
+    kill -0 "$install_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ -e "$inject_dir/publish.pid" ]
+  [ -e "$inject_dir/writer-entered" ]
+  writer_pid="$(cat "$inject_dir/writer.pid")"
+  _agmsg_watch_pid "$writer_pid" "$bin/cp"
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
+
+  kill -TERM "$install_pid"
+  if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
+  [ "$install_rc" -eq 143 ]
+  kill -0 "$writer_pid" 2>/dev/null
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -ne 0 ]
+  grep -qF -- "earlier install operation (update) is incomplete" <<<"$output"
+  grep -qF -- "--recover $op_id" <<<"$output"
+
+  touch "$inject_dir/writer-release"
+  wait_for_pid_exit "$writer_pid"
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg --update --recover "$op_id"
+  [ "$status" -eq 0 ]
+  [ ! -e "$SK/run/install-op-incomplete.json" ]
+}
+
 @test "uninstall keeps run/install-op.lock.db while removing everything else" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ -f "$SK/run/install-op.lock.db" ]
@@ -2422,9 +2475,9 @@ CYG
 
   env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
     AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
-    bash "$SK/uninstall.sh" --keep-data --yes > "$inject_dir/uninstall.out" 2>&1 &
+    bash "$SK/uninstall.sh" --yes > "$inject_dir/uninstall.out" 2>&1 &
   uninstall_pid=$!
-  _agmsg_watch_pid "$uninstall_pid" "$SK/uninstall.sh --keep-data --yes"
+  _agmsg_watch_pid "$uninstall_pid" "$SK/uninstall.sh --yes"
   for ((i = 0; i < 250; i++)); do
     [ -e "$inject_dir/rm-entered" ] && break
     kill -0 "$uninstall_pid" 2>/dev/null || break
@@ -2434,33 +2487,37 @@ CYG
   [ -e "$inject_dir/fired" ]
   [ -e "$SK/run/install-op-incomplete.json" ]
   op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
+  [ -x "$SK/uninstall.sh" ]
+  [ -r "$SK/run/install-op-recovery.sh" ]
   run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
     bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   [ "$status" -ne 0 ]
-  grep -qF -- "earlier uninstall operation (keep-data) is incomplete; install (update) will not start" <<<"$output"
+  grep -qF -- "earlier uninstall operation (remove-data) is incomplete; install (update) will not start" <<<"$output"
   grep -qF -- "--recover $op_id" <<<"$output"
   touch "$inject_dir/rm-release"
   if wait "$uninstall_pid"; then uninstall_rc=0; else uninstall_rc=$?; fi
   [ "$uninstall_rc" -ne 0 ]
   grep -qF "install lock was lost partway through" "$inject_dir/uninstall.out"
   [ ! -e "$SK/scripts" ]
-  [ -f "$SK/SKILL.md" ]
-  [ -f "$SK/run/install.db" ]
+  [ ! -e "$SK/SKILL.md" ]
+  [ ! -e "$SK/run/install.db" ]
   [ -f "$SK/run/install-op.lock.db" ]
+  [ -x "$SK/uninstall.sh" ]
+  [ -r "$SK/run/install-op-recovery.sh" ]
 
   run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
-    bash "$SK/uninstall.sh" --cmd agmsg --keep-data --yes
+    bash "$SK/uninstall.sh" --cmd agmsg --yes
   [ "$status" -ne 0 ]
   grep -qF -- "operation: uninstall" <<<"$output"
-  grep -qF -- "mode: keep-data" <<<"$output"
-  grep -qF -- "Recovery command: bash $SK/uninstall.sh --cmd agmsg --keep-data --yes --recover $op_id" <<<"$output"
+  grep -qF -- "mode: remove-data" <<<"$output"
+  grep -qF -- "Recovery command: bash $SK/uninstall.sh --cmd agmsg --yes --recover $op_id" <<<"$output"
   run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
-    bash "$SK/uninstall.sh" --cmd agmsg --keep-data --yes --recover "$op_id"
+    bash "$SK/uninstall.sh" --cmd agmsg --yes --recover "$op_id"
   [ "$status" -eq 0 ]
-  grep -qF -- "Recorded operation: uninstall (keep-data)" <<<"$output"
-  grep -qF -- "Continuing requested operation: uninstall (keep-data)" <<<"$output"
+  grep -qF -- "Recorded operation: uninstall (remove-data)" <<<"$output"
+  grep -qF -- "Continuing requested operation: uninstall (remove-data)" <<<"$output"
   [ ! -e "$SK/run/install-op-incomplete.json" ]
-  [ ! -e "$SK/SKILL.md" ]
+  [ ! -e "$SK/uninstall.sh" ]
   [ ! -e "$SK/run/install-op-recovery.sh" ]
 }
 

@@ -244,7 +244,7 @@ _uninstall_one() {
   local pending="$SKILL_DIR/run/install-op-incomplete.json"
   local recovery_prefix operation_mode=remove-data recovery_helper="$SKILL_DIR/run/install-op-recovery.sh" recovery_retired=""
   [ "$KEEP_DATA" = true ] && operation_mode=keep-data
-  recovery_prefix="bash $(printf '%q' "$SCRIPT_DIR/uninstall.sh") --cmd $(printf '%q' "$(basename "$SKILL_DIR")")"
+  recovery_prefix="bash $(printf '%q' "$SKILL_DIR/uninstall.sh") --cmd $(printf '%q' "$(basename "$SKILL_DIR")")"
   [ "$KEEP_DATA" = true ] && recovery_prefix="$recovery_prefix --keep-data"
   [ "$AUTO_YES" = true ] && recovery_prefix="$recovery_prefix --yes"
   recovery_prefix="$recovery_prefix --recover"
@@ -493,6 +493,9 @@ _uninstall_one() {
       local _entry _run_entry
       for _entry in "$SKILL_DIR"/* "$SKILL_DIR"/.[!.]*; do
         [ -e "$_entry" ] || continue
+        # Keep the installed recovery entrypoint available until the
+        # incomplete-operation record is cleared below.
+        [ "$(basename "$_entry")" = uninstall.sh ] && continue
         if [ "$(basename "$_entry")" = "run" ]; then
           for _run_entry in "$_entry"/*; do
             [ -e "$_run_entry" ] || continue
@@ -568,6 +571,15 @@ _uninstall_one() {
     echo "  ! could not clear the completed-operation record; later changes are blocked pending recovery" >&2
     return 1
   }
+  if [ "$KEEP_DATA" = false ] && [ -e "$SKILL_DIR/uninstall.sh" ]; then
+    # The operation record is already gone, so no recovery command is needed
+    # after this final entrypoint removal. Keep the helper until afterward.
+    agmsg_install_op_require || return 1
+    rm -f "$SKILL_DIR/uninstall.sh" || {
+      echo "  ! uninstall completed but could not remove its installed entrypoint: $SKILL_DIR/uninstall.sh" >&2
+      return 1
+    }
+  fi
   if [ -n "$recovery_retired" ]; then
     rm -f "$recovery_retired" || {
       echo "  ! uninstall completed but could not remove its temporary recovery helper: $recovery_retired" >&2

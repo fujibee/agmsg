@@ -297,9 +297,15 @@ agmsg_install_op_pending_recover() {
 
 agmsg_install_op_run_writer() {
   local status=0 writer_pid
+  AGMSG_INSTALL_OP_WRITER_STARTING=true
   "$@" &
   writer_pid=$!
+  if [ -n "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE:-}" ]; then
+    printf '%s\n' "$writer_pid" > "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE}.pid"
+    while [ ! -e "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE}.release" ]; do sleep 0.02; done
+  fi
   AGMSG_INSTALL_OP_WRITER_PID="$writer_pid"
+  AGMSG_INSTALL_OP_WRITER_STARTING=false
   if wait "$writer_pid"; then
     status=0
   else
@@ -317,11 +323,17 @@ agmsg_install_op_handle_signal() {
   local signal="$1" exit_status=130
   [ "$signal" = TERM ] && exit_status=143
   trap - INT TERM
+  if [ "${AGMSG_INSTALL_OP_WRITER_STARTING:-false}" = true ] && [ -z "${AGMSG_INSTALL_OP_WRITER_PID:-}" ]; then
+    echo "  ! writer launch was interrupted before its pid was published; the incomplete-operation record was kept for recovery" >&2
+    agmsg_install_op_unlock
+    exit "$exit_status"
+  fi
   if [ -n "${AGMSG_INSTALL_OP_WRITER_PID:-}" ]; then
     kill -TERM "$AGMSG_INSTALL_OP_WRITER_PID" 2>/dev/null || true
     wait "$AGMSG_INSTALL_OP_WRITER_PID" 2>/dev/null || true
     AGMSG_INSTALL_OP_WRITER_PID=""
   fi
+  AGMSG_INSTALL_OP_WRITER_STARTING=false
   if [ -n "${AGMSG_INSTALL_OP_ID:-}" ] && [ -n "${AGMSG_INSTALL_OP_MARKER:-}" ] && agmsg_install_op_confirm; then
     agmsg_install_op_pending_complete "$AGMSG_INSTALL_OP_MARKER" "$AGMSG_INSTALL_OP_ID" interrupted_complete || true
   fi
