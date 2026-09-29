@@ -11,6 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_OUTPUT_CHARS = 64 * 1024;
+export const QUEUE_CONFIRMATION_TTL_MS = 60_000;
 
 export function newNonce() {
   return randomUUID();
@@ -242,6 +243,35 @@ export async function readRolloutNonce(codexHome, thread, nonce) {
   if (matches.length === 0) return { state: "unreadable", reason: "thread_rollout_missing" };
   if (matches.length !== 1) return { state: "unreadable", reason: "multiple_thread_rollouts" };
   return rolloutHasNonce(matches[0], thread, nonce);
+}
+
+// A positive observation is enough to confirm. Two readable negative
+// observations wait for the retry window, then expire. Any unreadable or
+// malformed observation remains pending; callers must surface that state
+// instead of treating it as an empty queue or an absent nonce.
+export function resolvePendingQueue({ queueObservation, rolloutObservation, ageMs }) {
+  if (queueObservation?.state === "present") {
+    return { state: "confirmed", reason: "queue_item_present" };
+  }
+  if (rolloutObservation?.state === "present") {
+    return { state: "confirmed", reason: "nonce_observed" };
+  }
+
+  const knownState = (observation) =>
+    observation?.state === "absent" || observation?.state === "unreadable";
+  if (!knownState(queueObservation) || !knownState(rolloutObservation)) {
+    return { state: "pending", reason: "verification_unreadable" };
+  }
+  if (queueObservation.state === "unreadable" || rolloutObservation.state === "unreadable") {
+    return { state: "pending", reason: "verification_unreadable" };
+  }
+  if (!Number.isSafeInteger(ageMs) || ageMs < 0) {
+    return { state: "pending", reason: "pending_age_unreadable" };
+  }
+  if (ageMs >= QUEUE_CONFIRMATION_TTL_MS) {
+    return { state: "expired", reason: "confirmation_timeout" };
+  }
+  return { state: "pending", reason: "awaiting_confirmation" };
 }
 
 export function classifyCodexSeat({ roleSession, bridgeState, rolloutState }) {

@@ -13,6 +13,7 @@ import {
   newNonce,
   readQueuedItem,
   readRolloutNonce,
+  resolvePendingQueue,
   runCodexQueue,
 } from '../scripts/daemon/channels/codex-queue-io.mjs';
 
@@ -125,6 +126,33 @@ test('queue DB and rollout observations distinguish positive, absent, and unread
 
   writeFileSync(rollout, '{malformed json}\n');
   assert.equal((await readRolloutNonce(home, thread, nonce)).state, 'unreadable');
+});
+
+test('pending delivery confirms on either positive witness, expires only on two readable absences, and otherwise stays pending', () => {
+  assert.deepEqual(resolvePendingQueue({
+    queueObservation: { state: 'present' },
+    rolloutObservation: { state: 'unreadable', reason: 'rollout_read_failed' },
+    ageMs: 100,
+  }), { state: 'confirmed', reason: 'queue_item_present' });
+  assert.deepEqual(resolvePendingQueue({
+    queueObservation: { state: 'unreadable', reason: 'queue_db_read_failed' },
+    rolloutObservation: { state: 'present' },
+    ageMs: 100,
+  }), { state: 'confirmed', reason: 'nonce_observed' });
+  assert.deepEqual(resolvePendingQueue({
+    queueObservation: { state: 'absent' }, rolloutObservation: { state: 'absent' }, ageMs: 59_999,
+  }), { state: 'pending', reason: 'awaiting_confirmation' });
+  assert.deepEqual(resolvePendingQueue({
+    queueObservation: { state: 'absent' }, rolloutObservation: { state: 'absent' }, ageMs: 60_000,
+  }), { state: 'expired', reason: 'confirmation_timeout' });
+  assert.deepEqual(resolvePendingQueue({
+    queueObservation: { state: 'absent' },
+    rolloutObservation: { state: 'unreadable', reason: 'thread_rollout_missing' },
+    ageMs: 120_000,
+  }), { state: 'pending', reason: 'verification_unreadable' });
+  assert.deepEqual(resolvePendingQueue({
+    queueObservation: { state: 'absent' }, rolloutObservation: { state: 'absent' }, ageMs: -1,
+  }), { state: 'pending', reason: 'pending_age_unreadable' });
 });
 
 test('seat classification never treats an uncertain destination or bridge as addressable', () => {
