@@ -92,10 +92,21 @@ recorded_uuid() {
 }
 
 @test "codex record: falls back to the unique matching-cwd rollout when env is unset" {
-  local proj; proj="$(mktemp -d)"
+  local proj explicit_home expected_home; proj="$(mktemp -d)"
+  explicit_home="$TEST_SKILL_DIR/profile-B"
+  mkdir -p "$explicit_home"
+  # A matching rollout in the default profile must not outrank the selected
+  # profile's own unique matching rollout.
+  CODEX_SESSIONS="$HOME/.codex/sessions"
+  make_rollout "wrong-profile-uuid" "$proj"
+  CODEX_SESSIONS="$explicit_home/sessions"
   make_rollout "fallback-uuid" "$proj"
-  ( unset CODEX_THREAD_ID; bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+  CODEX_HOME="$explicit_home" env -u CODEX_THREAD_ID \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
   [ "$(recorded_uuid team alice)" = "fallback-uuid" ]
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  expected_home="$(cd "$explicit_home" && pwd -P)"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
 @test "codex record: records NOTHING when two recent rollouts share the cwd (ambiguous)" {

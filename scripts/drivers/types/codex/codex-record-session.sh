@@ -161,6 +161,28 @@ if [ "$probe_ran" = "1" ]; then
   [ -n "$thread" ] || exit 0
 fi
 
+# Resolve the effective profile before either fallback can infer a thread. The
+# rollout index belongs to CODEX_HOME, not necessarily to the process HOME.
+# Codex defaults to $HOME/.codex when CODEX_HOME is unset; resolve either
+# spelling to a physical absolute path so discovery and the stored destination
+# use the same profile. A missing or malformed directory is not safe to publish
+# as a delivery destination, so leave the previous record untouched.
+codex_home="${CODEX_HOME:-}"
+if [ -z "$codex_home" ]; then
+  [ -n "${HOME:-}" ] || exit 0
+  codex_home="$HOME/.codex"
+fi
+case "$codex_home" in *[[:cntrl:]]*) exit 0 ;; esac
+[ -d "$codex_home" ] || exit 0
+codex_home="$(agmsg_canonical_path "$codex_home")"
+# Keep the absolute path in the cross-platform form used by Node consumers;
+# Git Bash's physical /c/... spelling is normalized to C:/... on Windows.
+codex_home="$(agmsg_normalize_project_path "$codex_home")"
+case "$codex_home" in
+  /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
+  *) exit 0 ;;
+esac
+
 if [ -z "$thread" ]; then
   # No app-server to ask, or it could not be reached -- a codex session outside
   # monitor mode, a missing Node, a server that is not answering. The rollout scan
@@ -168,10 +190,8 @@ if [ -z "$thread" ]; then
   # single-rollout case it always did, and on a project with history it records
   # nothing, which is what happens today.
   #
-  # ${HOME:-} so an unset HOME under `set -u` is a silent no-op (empty -> the
-  # dir check below fails -> fresh), not an unbound-variable abort (nit).
-  sessions_dir="${HOME:-}/.codex/sessions"
-  if [ -n "${HOME:-}" ] && [ -d "$sessions_dir" ]; then
+  sessions_dir="$codex_home/sessions"
+  if [ -d "$sessions_dir" ]; then
     # Distinct thread ids whose session_meta cwd (canonicalized -- codex records
     # the physical cwd while agmsg may hold a symlinked path, #160) matches the
     # project, among the most recent rollouts. Exactly one => unambiguously ours.
@@ -209,26 +229,6 @@ if [ -z "$thread" ]; then
 fi
 
 [ -n "$thread" ] || exit 0
-# Record the profile directory this thread actually uses. Codex defaults to
-# $HOME/.codex when CODEX_HOME is unset; resolve either spelling to a physical
-# absolute path so a later reader does not have to infer the profile from its
-# own environment. A missing or malformed directory is not safe to publish as
-# a delivery destination, so leave the previous record untouched.
-codex_home="${CODEX_HOME:-}"
-if [ -z "$codex_home" ]; then
-  [ -n "${HOME:-}" ] || exit 0
-  codex_home="$HOME/.codex"
-fi
-case "$codex_home" in *[[:cntrl:]]*) exit 0 ;; esac
-[ -d "$codex_home" ] || exit 0
-codex_home="$(agmsg_canonical_path "$codex_home")"
-# Keep the absolute path in the cross-platform form used by Node consumers;
-# Git Bash's physical /c/... spelling is normalized to C:/... on Windows.
-codex_home="$(agmsg_normalize_project_path "$codex_home")"
-case "$codex_home" in
-  /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
-  *) exit 0 ;;
-esac
 # codex thread ids are already bare UUIDs (no composite pid form), so record
 # as-is. The project is recorded in its canonical (physical) form so records
 # carry one path spelling regardless of how the caller spelled the argument.
