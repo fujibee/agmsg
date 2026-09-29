@@ -50,19 +50,24 @@ CREATE TABLE IF NOT EXISTS daemon_owner (
 INSERT INTO daemon_owner (gen, state)
   SELECT 0, 'none' WHERE NOT EXISTS (SELECT 1 FROM daemon_owner);
 
--- daemon_intent: always exactly one row. Changed ONLY by an explicit
--- operation (start/stop/enable/disable/uninstall) -- never by a SIGTERM or
--- an OS/resident-manager restart. op_gen increases by 1 on every explicit
--- operation (inside the operation lock for start/enable/disable/uninstall;
--- without the lock for stop, per T3).
+-- daemon_intent: always exactly one row. desired starts NULL ("intent
+-- unconfirmed" -- arch-11 §5, a row that was never written) and is
+-- changed ONLY by an explicit operation (start/stop/enable/disable/
+-- uninstall) to the literal 'on' or 'off' -- never by a SIGTERM or an
+-- OS/resident-manager restart, and never defaulted to 'off' at schema
+-- creation: that would make a never-touched install indistinguishable
+-- from one somebody deliberately disabled (status.mjs's classify() tells
+-- them apart, but only if this row does not pre-decide it). op_gen
+-- increases by 1 on every explicit operation (inside the operation lock
+-- for start/enable/disable/uninstall; without the lock for stop, per T3).
 CREATE TABLE IF NOT EXISTS daemon_intent (
-  desired TEXT NOT NULL,
+  desired TEXT,
   set_by TEXT,
   set_at TEXT,
   op_gen INTEGER NOT NULL
 );
 INSERT INTO daemon_intent (desired, set_by, set_at, op_gen)
-  SELECT 'off', NULL, NULL, 0 WHERE NOT EXISTS (SELECT 1 FROM daemon_intent);
+  SELECT NULL, NULL, NULL, 0 WHERE NOT EXISTS (SELECT 1 FROM daemon_intent);
 
 -- daemon_start_attempts: append-only history for display only (never a
 -- safety-critical read). Written by the launcher and by a start attempt that

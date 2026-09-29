@@ -26,7 +26,7 @@ test("takeOwnership: none -> starting -> ready is a clean run", () => {
   try {
     const r = takeOwnership(db, {
       installRoot: dir,
-      expectedDesired: "off",
+      expectedDesired: null,
       expectedOpGen: 0,
       version: "test",
     });
@@ -46,7 +46,7 @@ test("takeOwnership refuses when the current owner is alive", () => {
   try {
     const first = takeOwnership(db, {
       installRoot: dir,
-      expectedDesired: "off",
+      expectedDesired: null,
       expectedOpGen: 0,
       version: "v1",
     });
@@ -55,7 +55,7 @@ test("takeOwnership refuses when the current owner is alive", () => {
 
     const second = takeOwnership(db, {
       installRoot: dir,
-      expectedDesired: "off",
+      expectedDesired: null,
       expectedOpGen: 0,
       version: "v2",
     });
@@ -73,7 +73,7 @@ test("takeOwnership takes over when the recorded owner is confirmed dead", () =>
   try {
     const first = takeOwnership(db, {
       installRoot: dir,
-      expectedDesired: "off",
+      expectedDesired: null,
       expectedOpGen: 0,
       version: "v1",
     });
@@ -90,7 +90,7 @@ test("takeOwnership takes over when the recorded owner is confirmed dead", () =>
 
     const second = takeOwnership(db, {
       installRoot: dir,
-      expectedDesired: "off",
+      expectedDesired: null,
       expectedOpGen: 0,
       version: "v2",
     });
@@ -125,7 +125,7 @@ test("revertToNone (bind failure) and stopNormally both record last_end under th
   try {
     const r = takeOwnership(db, {
       installRoot: dir,
-      expectedDesired: "off",
+      expectedDesired: null,
       expectedOpGen: 0,
       version: "test",
     });
@@ -137,7 +137,7 @@ test("revertToNone (bind failure) and stopNormally both record last_end under th
 
     const r2 = takeOwnership(db, {
       installRoot: dir,
-      expectedDesired: "off",
+      expectedDesired: null,
       expectedOpGen: 0,
       version: "test",
     });
