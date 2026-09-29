@@ -2154,7 +2154,7 @@ CYG
   unchanged_digest="$(shasum -a 256 "$SK/scripts/team.sh" | awk '{print $1}')"
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --update
   [ "$status" -ne 0 ]
-  [[ "$output" == *"manifest and its previous copy are unreadable"* ]]
+  grep -qF -- "manifest and its previous copy are unreadable" <<<"$output"
   [ "$(cat "$SK/VERSION")" = "$before_version" ]
   [ "$(shasum -a 256 "$SK/scripts/team.sh" | awk '{print $1}')" = "$unchanged_digest" ]
 }
@@ -2255,8 +2255,8 @@ CYG
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
     bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --keep-data --yes
   [ "$status" -ne 0 ]
-  [[ "$output" == *"earlier install operation is incomplete"* ]]
-  [[ "$output" == *"--recover $op_id"* ]]
+  grep -qF -- "earlier install operation is incomplete" <<<"$output"
+  grep -qF -- "--recover $op_id" <<<"$output"
   touch "$inject_dir/copy-release"
   if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
   [ "$install_rc" -ne 0 ]
@@ -2317,7 +2317,7 @@ CYG
   kill -TERM "$install_pid"
   if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
   [ "$install_rc" -eq 143 ]
-  ! kill -0 "$writer_pid" 2>/dev/null
+  refute kill -0 "$writer_pid" 2>/dev/null
   [ ! -e "$SK/run/install-op-incomplete.json" ]
   [ -f "$SK/run/install-manifest.json.prev" ]
 
@@ -2346,11 +2346,11 @@ CYG
     kill -0 "$lock_pid" 2>/dev/null || break
     sleep 0.02
   done
-  ! kill -0 "$lock_pid" 2>/dev/null
+  refute kill -0 "$lock_pid" 2>/dev/null
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
     bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --keep-data --yes
   [ "$status" -ne 0 ]
-  [[ "$output" == *"earlier install operation is incomplete"* ]]
+  grep -qF -- "earlier install operation is incomplete" <<<"$output"
   kill -0 "$writer_pid" 2>/dev/null
   stage_source="$(cat "$inject_dir/stage-source")"
   case "$stage_source" in */.) stage_dir="${stage_source%/.}" ;; *) return 1 ;; esac
@@ -2437,8 +2437,8 @@ CYG
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
     bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   [ "$status" -ne 0 ]
-  [[ "$output" == *"earlier uninstall operation is incomplete"* ]]
-  [[ "$output" == *"--recover $op_id"* ]]
+  grep -qF -- "earlier uninstall operation is incomplete" <<<"$output"
+  grep -qF -- "--recover $op_id" <<<"$output"
   touch "$inject_dir/rm-release"
   if wait "$uninstall_pid"; then uninstall_rc=0; else uninstall_rc=$?; fi
   [ "$uninstall_rc" -ne 0 ]
