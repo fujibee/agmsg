@@ -25,12 +25,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AUTO_YES=false
 KEEP_DATA=false
 REMOVE_ALL=false
+CMD_NAME=""
+RECOVER_ID=""
+AGMSG_INSTALL_OP_ACTIVE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes|-y)       AUTO_YES=true;  shift ;;
     --keep-data)    KEEP_DATA=true; shift ;;
     --all)          REMOVE_ALL=true; shift ;;
+    --cmd)          CMD_NAME="$2"; shift 2 ;;
+    --recover)      RECOVER_ID="$2"; shift 2 ;;
     -h|--help)
       echo "Usage: ./uninstall.sh [options]"
       echo ""
@@ -38,11 +43,18 @@ while [[ $# -gt 0 ]]; do
       echo "  --yes, -y       Remove without confirmation"
       echo "  --keep-data     Remove skill but keep DB and team configs"
       echo "  --all           Remove every agmsg install on the machine"
+      echo "  --cmd <name>    Select one installation under ~/.agents/skills"
+      echo "  --recover <id>  Clear a verified incomplete operation, then continue uninstall"
       exit 0
       ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
+
+if [ -n "$RECOVER_ID" ] && { [ -z "$CMD_NAME" ] || [ "$REMOVE_ALL" = true ]; }; then
+  echo "  ! --recover requires --cmd <name> and cannot be combined with --all" >&2
+  exit 1
+fi
 
 echo ""
 echo "  agmsg — Uninstall"
@@ -58,6 +70,16 @@ confirm() {
 
 REMOVED=false
 
+_uninstall_operation_exit() {
+  if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ]; then
+    agmsg_install_op_unlock
+    AGMSG_INSTALL_OP_ACTIVE=false
+  fi
+}
+trap '_uninstall_operation_exit' EXIT
+trap 'agmsg_install_op_handle_signal INT' INT
+trap 'agmsg_install_op_handle_signal TERM' TERM
+
 _uninstall_operation_require() {
   if agmsg_install_op_require; then
     return 0
@@ -68,7 +90,7 @@ _uninstall_operation_require() {
 
 _uninstall_checked_rm() {
   _uninstall_operation_require || return 1
-  if ! rm "$@"; then
+  if ! agmsg_install_op_run_writer rm "$@"; then
     agmsg_install_op_unlock
     return 1
   fi
@@ -178,7 +200,21 @@ _uninstall_one() {
     echo "    (another install/uninstall/enable/disable already in progress?)" >&2
     return 1
   fi
+  AGMSG_INSTALL_OP_ACTIVE=true
   _uninstall_operation_require || return 1
+
+  local pending="$SKILL_DIR/run/install-op-incomplete.json"
+  local recovery_prefix
+  recovery_prefix="bash $(printf '%q' "$SCRIPT_DIR/uninstall.sh") --cmd $(printf '%q' "$(basename "$SKILL_DIR")") --recover"
+  if [ -n "$RECOVER_ID" ]; then
+    agmsg_install_op_pending_recover "$pending" "$RECOVER_ID" uninstall || return 1
+    RECOVER_ID=""
+  elif [ -e "$pending" ] || [ -L "$pending" ]; then
+    agmsg_install_op_pending_refuse "$pending" "$recovery_prefix"
+    return 1
+  fi
+  AGMSG_INSTALL_OP_MARKER="$pending"
+  agmsg_install_op_pending_begin "$pending" uninstall "$SKILL_DIR" "" || return 1
   # This install's own path with its trailing slash (review): matching on
   # SKILL_NAME or a bare SKILL_DIR prefix is not a boundary -- "agmsg" is a
   # literal substring of "agmsg-second", and "$SKILL_DIR" (no trailing
@@ -418,7 +454,9 @@ _uninstall_one() {
         if [ "$(basename "$_entry")" = "run" ]; then
           for _run_entry in "$_entry"/*; do
             [ -e "$_run_entry" ] || continue
-            [ "$(basename "$_run_entry")" = "install-op.lock.db" ] && continue
+            case "$(basename "$_run_entry")" in
+              install-op.lock.db|install-op-incomplete.json) continue ;;
+            esac
             _uninstall_checked_rm -rf "$_run_entry" || return 1
           done
         else
@@ -428,7 +466,7 @@ _uninstall_one() {
       unset _entry _run_entry
       _uninstall_operation_require || return 1
       rmdir "$SKILL_DIR" 2>/dev/null || true
-      echo "  - removed $SKILL_DIR (kept run/install-op.lock.db)"
+      echo "  - removed $SKILL_DIR (kept run/install-op.lock.db and the active operation record)"
       REMOVED=true
     fi
   fi
@@ -473,7 +511,13 @@ _uninstall_one() {
   done
   unset _dedicated_dir_label _dedicated_dir _dedicated_label
 
+  agmsg_install_op_pending_complete "$AGMSG_INSTALL_OP_MARKER" "$AGMSG_INSTALL_OP_ID" || {
+    echo "  ! could not clear the completed-operation record; later changes are blocked pending recovery" >&2
+    return 1
+  }
   agmsg_install_op_unlock
+  AGMSG_INSTALL_OP_ACTIVE=false
+  unset AGMSG_INSTALL_OP_ID AGMSG_INSTALL_OP_MARKER
 }
 
 # Machine-wide pieces, shared by every install: only safe to remove once NO
@@ -596,7 +640,13 @@ else
   #      pointing at each one's own uninstall.sh, or --all to remove every
   #      install on the machine at once.
   SELF_SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
-  if [ ! -f "$SELF_SKILL_DIR/.agmsg" ]; then
+  if [ -n "$CMD_NAME" ]; then
+    SELF_SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
+    if [ ! -d "$SELF_SKILL_DIR" ]; then
+      echo "  ! selected installation does not exist: $SELF_SKILL_DIR" >&2
+      exit 1
+    fi
+  elif [ ! -f "$SELF_SKILL_DIR/.agmsg" ]; then
     candidates=()
     for d in "$AGENTS_DIR"/skills/*/; do
       d="${d%/}"

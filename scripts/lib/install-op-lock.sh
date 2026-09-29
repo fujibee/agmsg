@@ -122,6 +122,202 @@ agmsg_install_op_require() {
   fi
 }
 
+_agmsg_install_op_sql_quote() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+_agmsg_install_op_pending_field() {
+  local path="$1" field="$2" path_sql
+  case "$field" in
+    operation_id|operation|install_path|install_id|actor_pid|started_at|state) ;;
+    *) return 1 ;;
+  esac
+  path_sql="$(_agmsg_install_op_sql_quote "$path")" || return 1
+  sqlite3 :memory: \
+    "SELECT json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$field');" \
+    2>/dev/null
+}
+
+agmsg_install_op_pending_validate() {
+  local path="$1"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  AGMSG_INSTALL_OP_PENDING_ID="$(_agmsg_install_op_pending_field "$path" operation_id)" || return 1
+  AGMSG_INSTALL_OP_PENDING_KIND="$(_agmsg_install_op_pending_field "$path" operation)" || return 1
+  AGMSG_INSTALL_OP_PENDING_PATH="$(_agmsg_install_op_pending_field "$path" install_path)" || return 1
+  AGMSG_INSTALL_OP_PENDING_PID="$(_agmsg_install_op_pending_field "$path" actor_pid)" || return 1
+  AGMSG_INSTALL_OP_PENDING_STARTED="$(_agmsg_install_op_pending_field "$path" started_at)" || return 1
+  case "$AGMSG_INSTALL_OP_PENDING_ID" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#AGMSG_INSTALL_OP_PENDING_ID}" -eq 32 ] || return 1
+  case "$AGMSG_INSTALL_OP_PENDING_KIND" in install|uninstall) ;; *) return 1 ;; esac
+  case "$AGMSG_INSTALL_OP_PENDING_PID" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#AGMSG_INSTALL_OP_PENDING_PID}" -le 10 ] || return 1
+  [ "$AGMSG_INSTALL_OP_PENDING_PID" -gt 0 ] || return 1
+  case "$(_agmsg_install_op_pending_field "$path" state)" in
+    in_progress|interrupted_complete|completed) ;;
+    *) return 1 ;;
+  esac
+  [ -n "$AGMSG_INSTALL_OP_PENDING_PATH" ] && [ -n "$AGMSG_INSTALL_OP_PENDING_STARTED" ]
+}
+
+agmsg_install_op_pending_report() {
+  local path="$1"
+  agmsg_install_op_pending_validate "$path" || return 1
+  printf '  operation_id: %s\n' "$AGMSG_INSTALL_OP_PENDING_ID" >&2
+  printf '  operation: %s\n' "$AGMSG_INSTALL_OP_PENDING_KIND" >&2
+  printf '  install: %s\n' "$AGMSG_INSTALL_OP_PENDING_PATH" >&2
+  printf '  started_at: %s\n' "$AGMSG_INSTALL_OP_PENDING_STARTED" >&2
+  printf '  actor_pid: %s (displayed only; no liveness inference)\n' "$AGMSG_INSTALL_OP_PENDING_PID" >&2
+}
+
+agmsg_install_op_pending_refuse() {
+  local path="$1" recovery_prefix="$2"
+  if [ -L "$path" ] || ! agmsg_install_op_pending_report "$path"; then
+    echo "  ! an unreadable or malformed incomplete-operation record blocks this install; inspect $path before recovery" >&2
+    return 1
+  fi
+  echo "  ! an earlier install operation is incomplete; this operation will not start" >&2
+  echo "    Verify that no writer from the recorded operation is still running before recovery." >&2
+  printf '    Recovery command: %s %s\n' "$recovery_prefix" "$AGMSG_INSTALL_OP_PENDING_ID" >&2
+  return 1
+}
+
+agmsg_install_op_pending_begin() {
+  local path="$1" kind="$2" install_path="$3" install_id="${4:-}"
+  local op_id started_at path_sql kind_sql id_sql started_sql install_id_sql json tmp
+  [ -n "$path" ] && [ -n "$kind" ] && [ -n "$install_path" ] || return 1
+  agmsg_install_op_require || return 1
+  mkdir -p "$(dirname "$path")" || return 1
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    echo "  ! an incomplete-operation record already exists at $path" >&2
+    return 1
+  fi
+  op_id="$(sqlite3 :memory: "SELECT lower(hex(randomblob(16)));" 2>/dev/null)" || return 1
+  case "$op_id" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#op_id}" -eq 32 ] || return 1
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+  path_sql="$(_agmsg_install_op_sql_quote "$install_path")" || return 1
+  kind_sql="$(_agmsg_install_op_sql_quote "$kind")" || return 1
+  id_sql="$(_agmsg_install_op_sql_quote "$op_id")" || return 1
+  started_sql="$(_agmsg_install_op_sql_quote "$started_at")" || return 1
+  install_id_sql="$(_agmsg_install_op_sql_quote "$install_id")" || return 1
+  json="$(sqlite3 :memory: "SELECT json_object('operation_id','$id_sql','operation','$kind_sql','install_path','$path_sql','install_id','$install_id_sql','actor_pid',$$,'started_at','$started_sql','state','in_progress');" 2>/dev/null)" || return 1
+  [ -n "$json" ] || return 1
+  tmp="$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")" || return 1
+  if ! printf '%s\n' "$json" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  agmsg_install_op_require || { rm -f "$tmp"; return 1; }
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  AGMSG_INSTALL_OP_ID="$op_id"
+  AGMSG_INSTALL_OP_MARKER="$path"
+  agmsg_install_op_require
+}
+
+agmsg_install_op_pending_set_state() {
+  local path="$1" op_id="$2" state="$3" current_id path_sql json tmp
+  case "$state" in completed|interrupted_complete) ;; *) return 1 ;; esac
+  agmsg_install_op_require || return 1
+  agmsg_install_op_pending_validate "$path" || return 1
+  current_id="$AGMSG_INSTALL_OP_PENDING_ID"
+  [ "$current_id" = "$op_id" ] || return 1
+  path_sql="$(_agmsg_install_op_sql_quote "$path")" || return 1
+  op_id="$(_agmsg_install_op_sql_quote "$op_id")" || return 1
+  state="$(_agmsg_install_op_sql_quote "$state")" || return 1
+  json="$(sqlite3 :memory: "SELECT json_set(CAST(readfile('$path_sql') AS TEXT), '\$.state', '$state') WHERE json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.operation_id') = '$op_id';" 2>/dev/null)" || return 1
+  [ -n "$json" ] || return 1
+  tmp="$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")" || return 1
+  if ! printf '%s\n' "$json" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  agmsg_install_op_require || { rm -f "$tmp"; return 1; }
+  agmsg_install_op_pending_validate "$path" || { rm -f "$tmp"; return 1; }
+  [ "$AGMSG_INSTALL_OP_PENDING_ID" = "$op_id" ] || { rm -f "$tmp"; return 1; }
+  if ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  agmsg_install_op_require
+}
+
+agmsg_install_op_pending_remove() {
+  local path="$1" op_id="$2"
+  agmsg_install_op_require || return 1
+  agmsg_install_op_pending_validate "$path" || return 1
+  [ "$AGMSG_INSTALL_OP_PENDING_ID" = "$op_id" ] || return 1
+  rm -f "$path" || return 1
+  agmsg_install_op_require
+}
+
+agmsg_install_op_pending_complete() {
+  local path="$1" op_id="$2" state="${3:-completed}"
+  agmsg_install_op_pending_set_state "$path" "$op_id" "$state" || return 1
+  agmsg_install_op_pending_remove "$path" "$op_id"
+}
+
+agmsg_install_op_pending_recover() {
+  local path="$1" requested_id="$2" expected_kind="$3"
+  agmsg_install_op_require || return 1
+  if ! agmsg_install_op_pending_report "$path"; then
+    echo "  ! the incomplete-operation record is missing or unreadable; it cannot be recovered automatically" >&2
+    return 1
+  fi
+  if [ "$AGMSG_INSTALL_OP_PENDING_ID" != "$requested_id" ]; then
+    echo "  ! recovery operation id does not match the current record" >&2
+    return 1
+  fi
+  if [ "$AGMSG_INSTALL_OP_PENDING_KIND" != "$expected_kind" ]; then
+    echo "  ! recovery operation type does not match the current record" >&2
+    return 1
+  fi
+  echo "  Verify that no writer from this operation can still modify the installation before continuing." >&2
+  agmsg_install_op_pending_remove "$path" "$requested_id"
+}
+
+agmsg_install_op_run_writer() {
+  local status=0 writer_pid
+  "$@" &
+  writer_pid=$!
+  AGMSG_INSTALL_OP_WRITER_PID="$writer_pid"
+  if wait "$writer_pid"; then
+    status=0
+  else
+    status=$?
+  fi
+  AGMSG_INSTALL_OP_WRITER_PID=""
+  return "$status"
+}
+
+# A caught cancellation is the only automatic path that removes an in-flight
+# record before the completion manifest is published. Stop and reap the one
+# tracked mutating child first; if the SQLite lock has already been lost, keep
+# the record so a competing operation cannot enter while that child exits.
+agmsg_install_op_handle_signal() {
+  local signal="$1" exit_status=130
+  [ "$signal" = TERM ] && exit_status=143
+  trap - INT TERM
+  if [ -n "${AGMSG_INSTALL_OP_WRITER_PID:-}" ]; then
+    kill -TERM "$AGMSG_INSTALL_OP_WRITER_PID" 2>/dev/null || true
+    wait "$AGMSG_INSTALL_OP_WRITER_PID" 2>/dev/null || true
+    AGMSG_INSTALL_OP_WRITER_PID=""
+  fi
+  if [ -n "${AGMSG_INSTALL_OP_ID:-}" ] && [ -n "${AGMSG_INSTALL_OP_MARKER:-}" ] && agmsg_install_op_confirm; then
+    agmsg_install_op_pending_complete "$AGMSG_INSTALL_OP_MARKER" "$AGMSG_INSTALL_OP_ID" interrupted_complete || true
+  fi
+  agmsg_install_op_unlock
+  exit "$exit_status"
+}
+
 # Releases the lock and cleans up every resource agmsg_install_op_lock
 # created, whether or not the lock was ever confirmed open (safe to call
 # after a failed agmsg_install_op_lock, and safe to call twice). COMMIT is

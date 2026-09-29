@@ -139,6 +139,7 @@ agmsg_source_version() {
 # --- Defaults ---
 CMD_NAME=""
 UPDATE_ONLY=false
+RECOVER_ID=""
 INTERACTIVE=true
 AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-type, or empty for auto/default
 
@@ -296,8 +297,26 @@ agmsg_install_operation_begin() {
   fi
   AGMSG_INSTALL_OP_ACTIVE=true
   trap 'agmsg_install_operation_exit' EXIT
+  trap 'agmsg_install_op_handle_signal INT' INT
+  trap 'agmsg_install_op_handle_signal TERM' TERM
 
   agmsg_install_op_require || return 1
+
+  local pending="$SKILL_DIR/run/install-op-incomplete.json"
+  local recovery_prefix
+  recovery_prefix="bash $(printf '%q' "$SCRIPT_DIR/install.sh") --cmd $(printf '%q' "$CMD_NAME")"
+  [ "$UPDATE_ONLY" = true ] && recovery_prefix="$recovery_prefix --update"
+  recovery_prefix="$recovery_prefix --recover"
+  if [ -n "$RECOVER_ID" ]; then
+    agmsg_install_op_pending_recover "$pending" "$RECOVER_ID" install || return 1
+    RECOVER_ID=""
+  elif [ -e "$pending" ] || [ -L "$pending" ]; then
+    agmsg_install_op_pending_refuse "$pending" "$recovery_prefix"
+    return 1
+  fi
+
+  AGMSG_INSTALL_OP_MARKER="$pending"
+  agmsg_install_op_pending_begin "$pending" install "$SKILL_DIR" "" || return 1
 
   if [ "${UPDATE_ONLY:-false}" = true ] && [ ! -f "$SKILL_DIR/.agmsg" ]; then
     echo "  ! the selected installation was removed before the update could acquire its lock" >&2
@@ -339,10 +358,15 @@ agmsg_install_operation_finish() {
     return 1
   fi
   agmsg_install_op_require || return 1
+  agmsg_install_op_pending_complete "$AGMSG_INSTALL_OP_MARKER" "$AGMSG_INSTALL_OP_ID" || {
+    echo "  ! could not clear the completed-operation record; later changes are blocked pending recovery" >&2
+    return 1
+  }
   trap - EXIT
+  trap - INT TERM
   agmsg_install_op_unlock
   AGMSG_INSTALL_OP_ACTIVE=false
-  unset AGMSG_INSTALL_ID AGMSG_INSTALL_GEN AGMSG_INSTALL_MANIFEST AGMSG_INSTALL_BOOTSTRAP_VERSION
+  unset AGMSG_INSTALL_ID AGMSG_INSTALL_GEN AGMSG_INSTALL_MANIFEST AGMSG_INSTALL_BOOTSTRAP_VERSION AGMSG_INSTALL_OP_ID AGMSG_INSTALL_OP_MARKER
   return 0
 }
 
@@ -412,7 +436,7 @@ agmsg_install_copy_scripts() {
   fi
   if [ "$copy_rc" -eq 0 ]; then
     if agmsg_install_op_require; then
-      cp -R "$stage_dir/." "$SKILL_DIR/scripts/" || copy_rc=1
+      agmsg_install_op_run_writer cp -R "$stage_dir/." "$SKILL_DIR/scripts/" || copy_rc=1
       agmsg_install_op_require || copy_rc=1
     else
       copy_rc=1
@@ -711,6 +735,7 @@ install_antigravity_skill() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cmd)    CMD_NAME="$2"; INTERACTIVE=false; shift 2 ;;
+    --recover) RECOVER_ID="$2"; INTERACTIVE=false; shift 2 ;;
     --agent-type) AGENT_TYPE="$2"; shift 2 ;;
     --update) UPDATE_ONLY=true; shift ;;
     -h|--help)
@@ -726,6 +751,7 @@ while [[ $# -gt 0 ]]; do
       echo "                    they have their own skill file."
       echo "                    (<t> matches the type arg passed to join.sh / whoami.sh)"
       echo "  --update          Update skill scripts only (preserve DB and teams)"
+      echo "  --recover <id>    Clear a verified incomplete operation, then continue this install"
       echo ""
       echo "After install, join a team per-project:"
       echo "  ~/.agents/skills/<cmd>/scripts/join.sh <team> <name> <type> <project>"
@@ -735,6 +761,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
+
+if [ -n "$RECOVER_ID" ] && [ -z "$CMD_NAME" ]; then
+  echo "  ! --recover requires --cmd <name> to select one installation" >&2
+  exit 1
+fi
 
 # Force non-interactive when stdin is not a terminal. Without this, the
 # command-name prompt below would call `read -r` on whatever stream is wired
