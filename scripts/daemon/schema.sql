@@ -10,16 +10,20 @@
 -- "agmsgd skeleton") owns. beta_codex_queue and beta_codex_seat belong to the
 -- Codex channel/係 (a separate PR) and are created there, not here.
 --
--- meta: one row. schema_version is written by install/agmsgd; node_path and
--- node_version are written ONLY by the enable/disable CLI (never by agmsgd
--- itself), per T3 "常駐の登録".
+-- meta: one row. install_id is the SOURCE OF TRUTH for this install's id
+-- (written by install.sh, PR 2); run/install-manifest.json carries only a
+-- COPY of it, and the entrypoint's startup verification confirms the two
+-- still agree. schema_version is written by
+-- install/agmsgd; node_path and node_version are written ONLY by the
+-- enable/disable CLI (never by agmsgd itself), per T3 "常駐の登録".
 CREATE TABLE IF NOT EXISTS meta (
   schema_version INTEGER NOT NULL,
+  install_id TEXT,
   node_path TEXT,
   node_version TEXT
 );
-INSERT INTO meta (schema_version, node_path, node_version)
-  SELECT 1, NULL, NULL WHERE NOT EXISTS (SELECT 1 FROM meta);
+INSERT INTO meta (schema_version, install_id, node_path, node_version)
+  SELECT 1, NULL, NULL, NULL WHERE NOT EXISTS (SELECT 1 FROM meta);
 
 -- daemon_owner: always exactly one row (never deleted, never a second row).
 -- gen increases monotonically and is never reused. executor_* is the
