@@ -234,8 +234,7 @@ _uninstall_one() {
   # that crashes mid-way is the same "held until the holder dies" state a
   # crashed install.sh already leaves.
   if ! agmsg_install_op_lock "$SKILL_DIR/run/install-op.lock.db"; then
-    echo "  ! could not take the install operation lock for $SKILL_DIR" >&2
-    echo "    (another install/uninstall/enable/disable already in progress?)" >&2
+    echo "  ! could not take the install operation lock for $SKILL_DIR: ${AGMSG_INSTALL_OP_LOCK_FAILURE_REASON:-unknown lock handshake failure}" >&2
     return 1
   fi
   AGMSG_INSTALL_OP_ACTIVE=true

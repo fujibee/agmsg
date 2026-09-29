@@ -312,7 +312,7 @@ agmsg_install_operation_begin() {
 
   mkdir -p "$SKILL_DIR/run"
   if ! agmsg_install_op_lock "$lock_db"; then
-    echo "  ! could not take the install operation lock (another install/uninstall in progress?)" >&2
+    echo "  ! could not take the install operation lock: ${AGMSG_INSTALL_OP_LOCK_FAILURE_REASON:-unknown lock handshake failure}" >&2
     return 1
   fi
   AGMSG_INSTALL_OP_ACTIVE=true

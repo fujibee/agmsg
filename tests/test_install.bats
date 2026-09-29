@@ -852,6 +852,25 @@ PS1
   [ ! -f "$SK/scripts/windows/sqlite3-shim.sh" ]
 }
 
+@test "install reports the lock handshake stage and a bounded SQLite response" {
+  local fake_bin="$FAKE_HOME/bin" banner expected
+  mkdir -p "$fake_bin"
+  banner="SQLite version $(printf '%100s' '' | tr ' ' X)"
+  expected="${banner:0:80}"
+  cat > "$fake_bin/sqlite3" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${SQLITE_BANNER:-unexpected sqlite output}"
+SH
+  chmod +x "$fake_bin/sqlite3"
+
+  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" SQLITE_BANNER="$banner" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -ne 0 ]
+  grep -Fq -- "could not take the install operation lock: unexpected lock confirmation from sqlite3: $expected" <<<"$output"
+  refute grep -Fq -- "${banner:0:81}" <<<"$output"
+  refute grep -Fq -- "another install/uninstall in progress?" <<<"$output"
+}
+
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {
   # Simulate the post-plugin-install state: no ~/.agents/skills/agmsg yet, but
   # the plugin marketplace flow has populated the cache dir with a copy of the

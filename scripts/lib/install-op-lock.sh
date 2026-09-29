@@ -57,27 +57,33 @@ trap '' PIPE
 # Leaves no fd/process/tmpdir behind on failure.
 agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
   local db="$1" timeout_ms="${2:-30000}"
-  local dir="" in_fifo="" out_fifo="" line read_timeout read_fd write_fd coproc_prefix
+  local dir="" in_fifo="" out_fifo="" line read_timeout read_fd write_fd coproc_prefix read_rc
+  AGMSG_INSTALL_OP_LOCK_FAILURE_REASON=""
   coproc_prefix=AGMSG_INSTALL_OP_SQLITE
   _AGMSG_INSTALL_OP_USE_COPROC=false
   _AGMSG_LOCK_CHANNELS_READY=false
-  mkdir -p "$(dirname "$db")" 2>/dev/null || true
+  if ! mkdir -p "$(dirname "$db")" 2>/dev/null; then
+    _agmsg_install_op_lock_set_failure "preparing lock database directory"
+    return 1
+  fi
   if [ "${BASH_VERSINFO[0]:-3}" -ge 4 ]; then
     # `coproc` is syntax unknown to Bash 3.2, so keep it in an eval string
     # that is evaluated only on Bash 4+. Redirections close Bats' inherited
     # TAP descriptors in the coprocess command.
     unset AGMSG_INSTALL_OP_SQLITE AGMSG_INSTALL_OP_SQLITE_PID
-    if ! eval 'coproc AGMSG_INSTALL_OP_SQLITE { exec sqlite3 "$db" 2>&1; } 3>&- 4>&-'; then
+    if ! eval 'coproc AGMSG_INSTALL_OP_SQLITE { exec sqlite3 "$db" 2>&1; } 3>&- 4>&-' 2>/dev/null; then
+      _agmsg_install_op_lock_set_failure "starting sqlite3 coprocess"
       return 1
     fi
     _AGMSG_INSTALL_OP_USE_COPROC=true
     _AGMSG_LOCK_PID="${AGMSG_INSTALL_OP_SQLITE_PID:-}"
     eval "read_fd=\${${coproc_prefix}[0]:-}"
     eval "write_fd=\${${coproc_prefix}[1]:-}"
-    case "$_AGMSG_LOCK_PID" in ''|*[!0-9]*) _AGMSG_LOCK_PID=""; agmsg_install_op_unlock; return 1 ;; esac
-    case "$read_fd" in ''|*[!0-9]*) agmsg_install_op_unlock; return 1 ;; esac
-    case "$write_fd" in ''|*[!0-9]*) agmsg_install_op_unlock; return 1 ;; esac
+    case "$_AGMSG_LOCK_PID" in ''|*[!0-9]*) _agmsg_install_op_lock_set_failure "starting sqlite3 coprocess: no valid child PID"; _AGMSG_LOCK_PID=""; agmsg_install_op_unlock; return 1 ;; esac
+    case "$read_fd" in ''|*[!0-9]*) _agmsg_install_op_lock_set_failure "connecting to sqlite3 coprocess: missing read pipe"; agmsg_install_op_unlock; return 1 ;; esac
+    case "$write_fd" in ''|*[!0-9]*) _agmsg_install_op_lock_set_failure "connecting to sqlite3 coprocess: missing write pipe"; agmsg_install_op_unlock; return 1 ;; esac
     if ! eval "exec 8<&${read_fd} 9>&${write_fd}"; then
+      _agmsg_install_op_lock_set_failure "connecting to sqlite3 coprocess: could not attach its pipes"
       agmsg_install_op_unlock
       return 1
     fi
@@ -85,9 +91,13 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
     _AGMSG_LOCK_CHANNELS_READY=true
     unset AGMSG_INSTALL_OP_SQLITE AGMSG_INSTALL_OP_SQLITE_PID
   else
-    dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-install-lock.XXXXXX")" || return 1
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-install-lock.XXXXXX")" || {
+      _agmsg_install_op_lock_set_failure "preparing SQLite lock pipes: could not create a temporary directory"
+      return 1
+    }
     in_fifo="$dir/in"; out_fifo="$dir/out"
     if ! mkfifo "$in_fifo" "$out_fifo" 2>/dev/null; then
+      _agmsg_install_op_lock_set_failure "preparing SQLite lock pipes: mkfifo failed"
       rm -rf "$dir" 2>/dev/null
       return 1
     fi
@@ -108,20 +118,47 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
   # would land as an extra line before the canary and make the read count
   # fragile. The dot-command sets the same busy handler with no echo.
   if ! printf '.timeout %s\nBEGIN EXCLUSIVE;\nSELECT '"'"'agmsg-lock-ok'"'"';\n' "$timeout_ms" >&9; then
+    _agmsg_install_op_lock_set_failure "writing the lock request to sqlite3: the pipe closed or rejected the write"
     agmsg_install_op_unlock
     return 1
   fi
 
   read_timeout=$((timeout_ms / 1000 + 5))
-  if ! read -r -t "$read_timeout" -u 8 line; then
+  if IFS= read -r -t "$read_timeout" -u 8 line; then
+    :
+  else
+    read_rc=$?
+    if [ "$read_rc" -gt 128 ]; then
+      _agmsg_install_op_lock_set_failure "waiting for lock confirmation from sqlite3: timed out after ${read_timeout}s"
+    else
+      _agmsg_install_op_lock_set_failure "waiting for lock confirmation from sqlite3: output closed before a reply"
+    fi
     agmsg_install_op_unlock
     return 1
   fi
   if [ "$line" != "agmsg-lock-ok" ]; then
+    if [ -n "$line" ]; then
+      _agmsg_install_op_lock_set_failure "unexpected lock confirmation from sqlite3" "$line"
+    else
+      _agmsg_install_op_lock_set_failure "unexpected empty lock confirmation from sqlite3"
+    fi
     agmsg_install_op_unlock
     return 1
   fi
   return 0
+}
+
+# Preserve a short, printable first response so a caller can explain which
+# handshake stage failed without allowing control characters into terminal output.
+_agmsg_install_op_lock_set_failure() {
+  local reason="${1:-lock handshake failed}" detail="${2:-}"
+  if [ -n "$detail" ]; then
+    detail="$(printf '%s' "$detail" | LC_ALL=C tr -cd '[:print:]' | cut -c 1-80)"
+    if [ -n "$detail" ]; then
+      reason="$reason: $detail"
+    fi
+  fi
+  AGMSG_INSTALL_OP_LOCK_FAILURE_REASON="$reason"
 }
 
 # Load the shared liveness check when its source file is still installed. The
