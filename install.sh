@@ -528,6 +528,11 @@ agmsg_install_write_version() {
   printf '%s\n' "$INSTALLED_VERSION" > "$SKILL_DIR/VERSION"
 }
 
+agmsg_install_touch_marker_and_write_version() {
+  touch "$SKILL_DIR/.agmsg" || return 1
+  agmsg_install_write_version
+}
+
 agmsg_remove_retired_terminal_skills() {
   local driver
   for driver in herdr plain tmux; do
@@ -1302,12 +1307,9 @@ fi
 install_windows_helpers || exit 1
 agmsg_install_op_phase_end || exit 1
 
-# Marker file for uninstall detection
-touch "$SKILL_DIR/.agmsg" || exit 1
-
-# Record the provenance version of the source we installed from (see #117).
-# INSTALLED_VERSION itself was already computed above, before the locked copy.
-agmsg_install_op_run_phase agmsg_install_write_version || exit 1
+# Marker file for uninstall detection and source provenance version are one
+# protected phase so neither write can occur after a lost-lock boundary.
+agmsg_install_op_run_phase agmsg_install_touch_marker_and_write_version || exit 1
 
 # Initialize DB
 if [ ! -f "$SKILL_DIR/db/messages.db" ]; then

@@ -904,7 +904,7 @@ case "$query" in
   *"readfile('/"*) printf 'SQLite received an unconverted path\n' >&2; exit 20 ;;
   *"readfile('C:/converted')"*'$.operation_id'*)
     printf '%s\r\n' \
-      '3031323334353637383961626364656630313233343536373839616263646566:696e7374616c6c:757064617465:433a2f636f6e766572746564:3132333435:78:696e5f70726f6772657373'
+      '3031323334353637383961626364656630313233343536373839616263646566:696e7374616c6c::433a2f636f6e766572746564:3132333435:78:696e5f70726f6772657373'
     ;;
   *"readfile('C:/converted')"*'$.gen'*) printf '7\r\n' ;;
   *"SELECT install_id FROM meta LIMIT 1;"*) printf 'install-id\r\n' ;;
@@ -923,7 +923,7 @@ SH
       agmsg_install_op_pending_validate "$2" || exit 10
       [ "$AGMSG_INSTALL_OP_PENDING_ID" = "0123456789abcdef0123456789abcdef" ] || exit 13
       [ "$AGMSG_INSTALL_OP_PENDING_KIND" = "install" ] || exit 14
-      [ "$AGMSG_INSTALL_OP_PENDING_MODE" = "update" ] || exit 15
+      [ "$AGMSG_INSTALL_OP_PENDING_MODE" = "legacy" ] || exit 15
       [ "$AGMSG_INSTALL_OP_PENDING_PATH" = "C:/converted" ] || exit 16
       [ "$AGMSG_INSTALL_OP_PENDING_PID" = "12345" ] || exit 17
       [ "$AGMSG_INSTALL_OP_PENDING_STARTED" = "x" ] || exit 18
