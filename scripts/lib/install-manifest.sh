@@ -40,19 +40,12 @@ _agmsg_install_manifest_sqlesc() {
 # write: the current manifest's gen + 1, or a valid .prev's if the current
 # manifest is absent or unreadable, or 1 only when neither file exists.
 #
-# install_id is NOT this function's concern (2026-09-29 design decision):
-# its one source of truth is install.db's meta row (install-db.sh's
-# agmsg_install_db_ensure_meta) -- the manifest only ever carries a COPY of
-# it, never determines it. An earlier version of this function read
-# install_id from the manifest/.prev too; that is retracted.
+# install_id is not this function's concern: install.db's meta row is the
+# source of truth, and the manifest only carries a copy of it.
 #
-# install.sh is NOT subject to the general "capture the generation before
-# the lock, only continue if it still matches after" rule other operations
-# follow (agmsgd tech design T3 v6): that rule is for an
-# operation acting ON an install that already exists (uninstall, start /
-# enable, the agmsgd launcher). install.sh is the operation that DEFINES the
-# next generation, so one read inside the lock -- this function -- is
-# enough; there is nothing earlier to have raced against.
+# install.sh reads the current generation after acquiring the operation
+# lock, then writes the next generation; it has no earlier observation that
+# could have become stale while waiting for the lock.
 _agmsg_install_manifest_read_gen() {   # <manifest_path>
   local path="${1:-}" sqlpath gen
   [ -f "$path" ] || return 1
@@ -131,7 +124,7 @@ agmsg_install_manifest_rotate_prev() {   # <manifest_path>
 # timestamp. Atomic (tmpfile + rename): a reader never sees a partially-
 # written manifest. Symlinks are never listed (`find -type f` only) --
 # deliberately: the startup-side reader treats ANY symlink under scripts/ as
-# a match failure on its own (T3), so a writer that skipped listing one is
+# a match failure on its own, so a writer that skipped listing one is
 # consistent with that, not a gap in it.
 agmsg_install_manifest_write() {   # <scripts_dir> <manifest_path> <version> <install_id> <gen> <bootstrap_version>
   # ${N:-}, not bare $N: this function's own caller has been seen, under

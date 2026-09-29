@@ -129,7 +129,7 @@ _agmsg_install_op_sql_quote() {
 _agmsg_install_op_pending_field() {
   local path="$1" field="$2" path_sql
   case "$field" in
-    operation_id|operation|install_path|install_id|actor_pid|started_at|state) ;;
+    operation_id|operation|mode|install_path|install_id|actor_pid|started_at|state) ;;
     *) return 1 ;;
   esac
   path_sql="$(_agmsg_install_op_sql_quote "$path")" || return 1
@@ -143,6 +143,8 @@ agmsg_install_op_pending_validate() {
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   AGMSG_INSTALL_OP_PENDING_ID="$(_agmsg_install_op_pending_field "$path" operation_id)" || return 1
   AGMSG_INSTALL_OP_PENDING_KIND="$(_agmsg_install_op_pending_field "$path" operation)" || return 1
+  AGMSG_INSTALL_OP_PENDING_MODE="$(_agmsg_install_op_pending_field "$path" mode)" || return 1
+  [ -n "$AGMSG_INSTALL_OP_PENDING_MODE" ] || AGMSG_INSTALL_OP_PENDING_MODE=legacy
   AGMSG_INSTALL_OP_PENDING_PATH="$(_agmsg_install_op_pending_field "$path" install_path)" || return 1
   AGMSG_INSTALL_OP_PENDING_PID="$(_agmsg_install_op_pending_field "$path" actor_pid)" || return 1
   AGMSG_INSTALL_OP_PENDING_STARTED="$(_agmsg_install_op_pending_field "$path" started_at)" || return 1
@@ -151,6 +153,11 @@ agmsg_install_op_pending_validate() {
   esac
   [ "${#AGMSG_INSTALL_OP_PENDING_ID}" -eq 32 ] || return 1
   case "$AGMSG_INSTALL_OP_PENDING_KIND" in install|uninstall) ;; *) return 1 ;; esac
+  case "$AGMSG_INSTALL_OP_PENDING_MODE" in install|update|keep-data|remove-data|legacy) ;; *) return 1 ;; esac
+  case "$AGMSG_INSTALL_OP_PENDING_KIND:$AGMSG_INSTALL_OP_PENDING_MODE" in
+    install:install|install:update|install:legacy|uninstall:keep-data|uninstall:remove-data|uninstall:legacy) ;;
+    *) return 1 ;;
+  esac
   case "$AGMSG_INSTALL_OP_PENDING_PID" in ''|*[!0-9]*) return 1 ;; esac
   [ "${#AGMSG_INSTALL_OP_PENDING_PID}" -le 10 ] || return 1
   [ "$AGMSG_INSTALL_OP_PENDING_PID" -gt 0 ] || return 1
@@ -166,27 +173,33 @@ agmsg_install_op_pending_report() {
   agmsg_install_op_pending_validate "$path" || return 1
   printf '  operation_id: %s\n' "$AGMSG_INSTALL_OP_PENDING_ID" >&2
   printf '  operation: %s\n' "$AGMSG_INSTALL_OP_PENDING_KIND" >&2
+  printf '  mode: %s\n' "$AGMSG_INSTALL_OP_PENDING_MODE" >&2
   printf '  install: %s\n' "$AGMSG_INSTALL_OP_PENDING_PATH" >&2
   printf '  started_at: %s\n' "$AGMSG_INSTALL_OP_PENDING_STARTED" >&2
   printf '  actor_pid: %s (displayed only; no liveness inference)\n' "$AGMSG_INSTALL_OP_PENDING_PID" >&2
 }
 
 agmsg_install_op_pending_refuse() {
-  local path="$1" recovery_prefix="$2"
+  local path="$1" recovery_prefix="$2" next_kind="$3" next_mode="$4"
   if [ -L "$path" ] || ! agmsg_install_op_pending_report "$path"; then
     echo "  ! an unreadable or malformed incomplete-operation record blocks this install; inspect $path before recovery" >&2
     return 1
   fi
-  echo "  ! an earlier install operation is incomplete; this operation will not start" >&2
+  printf '  ! an earlier %s operation (%s) is incomplete; %s (%s) will not start\n' \
+    "$AGMSG_INSTALL_OP_PENDING_KIND" "$AGMSG_INSTALL_OP_PENDING_MODE" "$next_kind" "$next_mode" >&2
   echo "    Verify that no writer from the recorded operation is still running before recovery." >&2
   printf '    Recovery command: %s %s\n' "$recovery_prefix" "$AGMSG_INSTALL_OP_PENDING_ID" >&2
   return 1
 }
 
 agmsg_install_op_pending_begin() {
-  local path="$1" kind="$2" install_path="$3" install_id="${4:-}"
-  local op_id started_at path_sql kind_sql id_sql started_sql install_id_sql json tmp
+  local path="$1" kind="$2" install_path="$3" install_id="${4:-}" mode="${5:-legacy}"
+  local op_id started_at path_sql kind_sql mode_sql id_sql started_sql install_id_sql json tmp
   [ -n "$path" ] && [ -n "$kind" ] && [ -n "$install_path" ] || return 1
+  case "$kind:$mode" in
+    install:install|install:update|uninstall:keep-data|uninstall:remove-data) ;;
+    *) return 1 ;;
+  esac
   agmsg_install_op_require || return 1
   mkdir -p "$(dirname "$path")" || return 1
   if [ -e "$path" ] || [ -L "$path" ]; then
@@ -199,10 +212,11 @@ agmsg_install_op_pending_begin() {
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
   path_sql="$(_agmsg_install_op_sql_quote "$install_path")" || return 1
   kind_sql="$(_agmsg_install_op_sql_quote "$kind")" || return 1
+  mode_sql="$(_agmsg_install_op_sql_quote "$mode")" || return 1
   id_sql="$(_agmsg_install_op_sql_quote "$op_id")" || return 1
   started_sql="$(_agmsg_install_op_sql_quote "$started_at")" || return 1
   install_id_sql="$(_agmsg_install_op_sql_quote "$install_id")" || return 1
-  json="$(sqlite3 :memory: "SELECT json_object('operation_id','$id_sql','operation','$kind_sql','install_path','$path_sql','install_id','$install_id_sql','actor_pid',$$,'started_at','$started_sql','state','in_progress');" 2>/dev/null)" || return 1
+  json="$(sqlite3 :memory: "SELECT json_object('operation_id','$id_sql','operation','$kind_sql','mode','$mode_sql','install_path','$path_sql','install_id','$install_id_sql','actor_pid',$$,'started_at','$started_sql','state','in_progress');" 2>/dev/null)" || return 1
   [ -n "$json" ] || return 1
   tmp="$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")" || return 1
   if ! printf '%s\n' "$json" > "$tmp"; then
@@ -210,14 +224,12 @@ agmsg_install_op_pending_begin() {
     return 1
   fi
   agmsg_install_op_require || { rm -f "$tmp"; return 1; }
-  if [ -e "$path" ] || [ -L "$path" ]; then
+  if ! ln "$tmp" "$path" 2>/dev/null; then
     rm -f "$tmp"
+    echo "  ! an incomplete-operation record already exists at $path" >&2
     return 1
   fi
-  if ! mv "$tmp" "$path"; then
-    rm -f "$tmp"
-    return 1
-  fi
+  rm -f "$tmp" || return 1
   AGMSG_INSTALL_OP_ID="$op_id"
   AGMSG_INSTALL_OP_MARKER="$path"
   agmsg_install_op_require
@@ -266,7 +278,7 @@ agmsg_install_op_pending_complete() {
 }
 
 agmsg_install_op_pending_recover() {
-  local path="$1" requested_id="$2" expected_kind="$3"
+  local path="$1" requested_id="$2" next_kind="$3" next_mode="$4"
   agmsg_install_op_require || return 1
   if ! agmsg_install_op_pending_report "$path"; then
     echo "  ! the incomplete-operation record is missing or unreadable; it cannot be recovered automatically" >&2
@@ -276,10 +288,9 @@ agmsg_install_op_pending_recover() {
     echo "  ! recovery operation id does not match the current record" >&2
     return 1
   fi
-  if [ "$AGMSG_INSTALL_OP_PENDING_KIND" != "$expected_kind" ]; then
-    echo "  ! recovery operation type does not match the current record" >&2
-    return 1
-  fi
+  printf '  Recorded operation: %s (%s)\n' \
+    "$AGMSG_INSTALL_OP_PENDING_KIND" "$AGMSG_INSTALL_OP_PENDING_MODE" >&2
+  printf '  Continuing requested operation: %s (%s)\n' "$next_kind" "$next_mode" >&2
   echo "  Verify that no writer from this operation can still modify the installation before continuing." >&2
   agmsg_install_op_pending_remove "$path" "$requested_id"
 }

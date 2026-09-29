@@ -16,11 +16,49 @@ set -euo pipefail
 
 AGENTS_DIR="$HOME/.agents"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/scripts/lib/codex-config.sh"
-# The same operation lock install.sh takes (agmsgd beta).
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/scripts/lib/install-op-lock.sh"
+AGMSG_INSTALL_OP_RECOVERY_SOURCE=""
+if [ -e "$SCRIPT_DIR/run/install-op-incomplete.json" ] || [ -L "$SCRIPT_DIR/run/install-op-incomplete.json" ]; then
+  if [ -r "$SCRIPT_DIR/run/install-op-recovery.sh" ]; then
+    AGMSG_INSTALL_OP_RECOVERY_SOURCE="$SCRIPT_DIR/run/install-op-recovery.sh"
+  else
+    for _agmsg_recovery_candidate in "$SCRIPT_DIR"/run/.install-op-recovery-retired.*; do
+      [ -r "$_agmsg_recovery_candidate" ] || continue
+      AGMSG_INSTALL_OP_RECOVERY_SOURCE="$_agmsg_recovery_candidate"
+      break
+    done
+    unset _agmsg_recovery_candidate
+  fi
+fi
+if [ -n "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" ]; then
+  # Prefer the atomically-published recovery code while an operation record
+  # exists; scripts/ may be incomplete after an interrupted update.
+  # shellcheck disable=SC1090
+  . "$AGMSG_INSTALL_OP_RECOVERY_SOURCE"
+elif [ -r "$SCRIPT_DIR/scripts/lib/codex-config.sh" ] && [ -r "$SCRIPT_DIR/scripts/lib/install-op-lock.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/scripts/lib/codex-config.sh"
+  # The same operation lock install.sh takes (agmsgd beta).
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/scripts/lib/install-op-lock.sh"
+else
+  AGMSG_INSTALL_OP_RECOVERY_SOURCE="$SCRIPT_DIR/run/install-op-recovery.sh"
+  if [ ! -r "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" ]; then
+    for _agmsg_recovery_candidate in "$SCRIPT_DIR"/run/.install-op-recovery-retired.*; do
+      [ -r "$_agmsg_recovery_candidate" ] || continue
+      AGMSG_INSTALL_OP_RECOVERY_SOURCE="$_agmsg_recovery_candidate"
+      break
+    done
+    unset _agmsg_recovery_candidate
+  fi
+  if [ ! -r "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" ]; then
+    echo "  ! uninstall support files are missing; restore the install before continuing" >&2
+    exit 1
+  fi
+  # This fallback remains under run/ while an uninstall is incomplete, so an
+  # installed copy can recover after --keep-data removed scripts/.
+  # shellcheck disable=SC1090
+  . "$AGMSG_INSTALL_OP_RECOVERY_SOURCE"
+fi
 
 AUTO_YES=false
 KEEP_DATA=false
@@ -204,17 +242,21 @@ _uninstall_one() {
   _uninstall_operation_require || return 1
 
   local pending="$SKILL_DIR/run/install-op-incomplete.json"
-  local recovery_prefix
-  recovery_prefix="bash $(printf '%q' "$SCRIPT_DIR/uninstall.sh") --cmd $(printf '%q' "$(basename "$SKILL_DIR")") --recover"
+  local recovery_prefix operation_mode=remove-data recovery_helper="$SKILL_DIR/run/install-op-recovery.sh" recovery_retired=""
+  [ "$KEEP_DATA" = true ] && operation_mode=keep-data
+  recovery_prefix="bash $(printf '%q' "$SCRIPT_DIR/uninstall.sh") --cmd $(printf '%q' "$(basename "$SKILL_DIR")")"
+  [ "$KEEP_DATA" = true ] && recovery_prefix="$recovery_prefix --keep-data"
+  [ "$AUTO_YES" = true ] && recovery_prefix="$recovery_prefix --yes"
+  recovery_prefix="$recovery_prefix --recover"
   if [ -n "$RECOVER_ID" ]; then
-    agmsg_install_op_pending_recover "$pending" "$RECOVER_ID" uninstall || return 1
+    agmsg_install_op_pending_recover "$pending" "$RECOVER_ID" uninstall "$operation_mode" || return 1
     RECOVER_ID=""
   elif [ -e "$pending" ] || [ -L "$pending" ]; then
-    agmsg_install_op_pending_refuse "$pending" "$recovery_prefix"
+    agmsg_install_op_pending_refuse "$pending" "$recovery_prefix" uninstall "$operation_mode"
     return 1
   fi
   AGMSG_INSTALL_OP_MARKER="$pending"
-  agmsg_install_op_pending_begin "$pending" uninstall "$SKILL_DIR" "" || return 1
+  agmsg_install_op_pending_begin "$pending" uninstall "$SKILL_DIR" "" "$operation_mode" || return 1
   # This install's own path with its trailing slash (review): matching on
   # SKILL_NAME or a bare SKILL_DIR prefix is not a boundary -- "agmsg" is a
   # literal substring of "agmsg-second", and "$SKILL_DIR" (no trailing
@@ -455,7 +497,7 @@ _uninstall_one() {
           for _run_entry in "$_entry"/*; do
             [ -e "$_run_entry" ] || continue
             case "$(basename "$_run_entry")" in
-              install-op.lock.db|install-op-incomplete.json) continue ;;
+            install-op.lock.db|install-op-incomplete.json|install-op-recovery.sh|.install-op-recovery-retired.*) continue ;;
             esac
             _uninstall_checked_rm -rf "$_run_entry" || return 1
           done
@@ -511,10 +553,27 @@ _uninstall_one() {
   done
   unset _dedicated_dir_label _dedicated_dir _dedicated_label
 
+  if [ -f "$recovery_helper" ]; then
+    recovery_retired="$SKILL_DIR/run/.install-op-recovery-retired.$AGMSG_INSTALL_OP_ID"
+    _uninstall_operation_require || return 1
+    mv "$recovery_helper" "$recovery_retired" || return 1
+    _uninstall_operation_require || return 1
+  elif [ -n "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" ] && [ -f "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" ]; then
+    recovery_retired="$SKILL_DIR/run/.install-op-recovery-retired.$AGMSG_INSTALL_OP_ID"
+    _uninstall_operation_require || return 1
+    mv "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" "$recovery_retired" || return 1
+    _uninstall_operation_require || return 1
+  fi
   agmsg_install_op_pending_complete "$AGMSG_INSTALL_OP_MARKER" "$AGMSG_INSTALL_OP_ID" || {
     echo "  ! could not clear the completed-operation record; later changes are blocked pending recovery" >&2
     return 1
   }
+  if [ -n "$recovery_retired" ]; then
+    rm -f "$recovery_retired" || {
+      echo "  ! uninstall completed but could not remove its temporary recovery helper: $recovery_retired" >&2
+      return 1
+    }
+  fi
   agmsg_install_op_unlock
   AGMSG_INSTALL_OP_ACTIVE=false
   unset AGMSG_INSTALL_OP_ID AGMSG_INSTALL_OP_MARKER

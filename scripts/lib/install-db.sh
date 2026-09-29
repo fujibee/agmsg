@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# install-db.sh — install.db's `meta` table (agmsgd beta, T3/T4).
+# install-db.sh — install.db's `meta` table.
 #
 # The single source of truth for this install's install_id: a fresh UUID,
 # minted once by install.sh the first time install.db's meta row is
 # created, and never changed afterward -- until an uninstall removes
 # install.db outright, at which point the next install starts a genuinely
-# new install_id (T3). The completion manifest (install-manifest.sh) carries
+# new install_id. The completion manifest (install-manifest.sh) carries
 # only a COPY of this value; it is never a second place that MINTS one
 # (2026-09-29 design decision -- this replaced an earlier design where the
 # manifest/.prev itself was the install_id's source).
 #
-# schema_version exists from PR2 on (value 1) so a later migration (before
-# 2.0.0) has something to gate a table-adding ALTER on. PR2 writes only
+# schema_version starts at 1 so a later migration has a value to gate a
+# table-adding ALTER on. This script initially writes only
 # `meta(schema_version, install_id)`; the Node/CLI-only columns
 # (node_path, node_version) are added by whichever PR implements
-# `enable`/`disable` (T4).
+# `enable`/`disable`.
 #
 # Required caller-set variable: none. Sources scripts/lib/compat.sh (for
 # compat_uuid7) if not already loaded.

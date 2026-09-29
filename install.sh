@@ -285,6 +285,26 @@ agmsg_install_operation_exit() {
   fi
 }
 
+agmsg_install_write_recovery_helper() {
+  local helper="$SKILL_DIR/run/install-op-recovery.sh" temp
+  agmsg_install_op_require || return 1
+  temp="$(mktemp "$SKILL_DIR/run/.install-op-recovery.XXXXXX")" || return 1
+  if ! cat "$SCRIPT_DIR/scripts/lib/codex-config.sh" "$SCRIPT_DIR/scripts/lib/install-op-lock.sh" > "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  if ! chmod 600 "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  agmsg_install_op_require || { rm -f "$temp"; return 1; }
+  if ! mv -f "$temp" "$helper"; then
+    rm -f "$temp"
+    return 1
+  fi
+  agmsg_install_op_require
+}
+
 agmsg_install_operation_begin() {
   local manifest="$SKILL_DIR/run/install-manifest.json"
   local lock_db="$SKILL_DIR/run/install-op.lock.db"
@@ -303,20 +323,23 @@ agmsg_install_operation_begin() {
   agmsg_install_op_require || return 1
 
   local pending="$SKILL_DIR/run/install-op-incomplete.json"
-  local recovery_prefix
+  local recovery_prefix operation_mode=install
   recovery_prefix="bash $(printf '%q' "$SCRIPT_DIR/install.sh") --cmd $(printf '%q' "$CMD_NAME")"
-  [ "$UPDATE_ONLY" = true ] && recovery_prefix="$recovery_prefix --update"
+  if [ "$UPDATE_ONLY" = true ]; then
+    operation_mode=update
+    recovery_prefix="$recovery_prefix --update"
+  fi
   recovery_prefix="$recovery_prefix --recover"
   if [ -n "$RECOVER_ID" ]; then
-    agmsg_install_op_pending_recover "$pending" "$RECOVER_ID" install || return 1
+    agmsg_install_op_pending_recover "$pending" "$RECOVER_ID" install "$operation_mode" || return 1
     RECOVER_ID=""
   elif [ -e "$pending" ] || [ -L "$pending" ]; then
-    agmsg_install_op_pending_refuse "$pending" "$recovery_prefix"
+    agmsg_install_op_pending_refuse "$pending" "$recovery_prefix" install "$operation_mode"
     return 1
   fi
 
   AGMSG_INSTALL_OP_MARKER="$pending"
-  agmsg_install_op_pending_begin "$pending" install "$SKILL_DIR" "" || return 1
+  agmsg_install_op_pending_begin "$pending" install "$SKILL_DIR" "" "$operation_mode" || return 1
 
   if [ "${UPDATE_ONLY:-false}" = true ] && [ ! -f "$SKILL_DIR/.agmsg" ]; then
     echo "  ! the selected installation was removed before the update could acquire its lock" >&2
@@ -849,6 +872,7 @@ if [ "$UPDATE_ONLY" = true ]; then
   echo "  Updating $SKILL_NAME..."
   INSTALLED_VERSION="$(agmsg_source_version)"
   agmsg_install_operation_begin || exit 1
+  agmsg_install_write_recovery_helper || exit 1
   # #963: a sync engine that is running when the write below starts either
   # survives on the code it already loaded (silent -- `remote.sh status` still
   # reports it as running, and nothing about the new scripts takes effect) or
@@ -1189,6 +1213,7 @@ CMD_NAME="${CMD_NAME:-agmsg}"
 SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
 INSTALLED_VERSION="$(agmsg_source_version)"
 agmsg_install_operation_begin || exit 1
+agmsg_install_write_recovery_helper || exit 1
 
 # --- Install skill ---
 echo "  Installing to ~/.agents/skills/$CMD_NAME/ ..."

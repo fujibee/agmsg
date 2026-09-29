@@ -3,10 +3,9 @@
 # The install/uninstall operation lock (agmsgd beta): a
 # single sqlite3 coprocess bash keeps alive across a whole install.sh /
 # uninstall.sh run, fed through a pair of named pipes so BEGIN EXCLUSIVE
-# stays open while bash does its own work in between. T6's fault-injection
-# list requires covering the case where only ONE of the two processes that
-# together hold the lock (the bash script itself, or the sqlite3 child it
-# is keeping alive) dies -- this file is that coverage.
+# stays open while bash does its own work in between. This file also covers
+# the case where only the sqlite3 lock-holding child dies while bash remains
+# alive and unaware.
 
 load test_helper
 
@@ -46,14 +45,14 @@ setup() {
   printf '%s\n' "$output" | grep -qF "re-acquire after unlock ok"
 }
 
-@test "install-op-lock: T6 fault injection -- only the lock-holding sqlite3 child dies" {
+@test "install-op-lock: detects when only the lock-holding sqlite3 child dies" {
   run bash -c '
     source "$1"
     agmsg_install_op_lock "$2" 3000 || { echo "acquire failed"; exit 1; }
 
     # Kill ONLY the sqlite3 coprocess -- this process (the "bash" role in
-    # T6.8.c) stays alive and unaware, same as a real crash of just that
-    # child mid-install.
+    # This process stays alive and unaware, as after a child-only crash
+    # during an install operation.
     kill -9 "$_AGMSG_LOCK_PID"
     sleep 0.3
 

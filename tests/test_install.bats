@@ -2255,7 +2255,7 @@ CYG
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
     bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --keep-data --yes
   [ "$status" -ne 0 ]
-  grep -qF -- "earlier install operation is incomplete" <<<"$output"
+  grep -qF -- "earlier install operation (update) is incomplete; uninstall (keep-data) will not start" <<<"$output"
   grep -qF -- "--recover $op_id" <<<"$output"
   touch "$inject_dir/copy-release"
   if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
@@ -2266,11 +2266,15 @@ CYG
   [ ! -e "$manifest" ]
   [ -s "$manifest.prev" ]
 
-  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
-    bash "$REPO_ROOT/install.sh" --cmd agmsg --update --recover "$op_id"
+  run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --keep-data --yes --recover "$op_id"
   [ "$status" -eq 0 ]
+  grep -qF -- "Recorded operation: install (update)" <<<"$output"
+  grep -qF -- "Continuing requested operation: uninstall (keep-data)" <<<"$output"
   [ ! -e "$SK/run/install-op-incomplete.json" ]
-  [ -s "$manifest" ]
+  [ ! -e "$SK/scripts" ]
+  [ ! -e "$SK/SKILL.md" ]
+  [ ! -e "$SK/run/install-op-recovery.sh" ]
 }
 
 @test "install cancellation waits for the active writer before clearing its operation record" {
@@ -2346,7 +2350,7 @@ CYG
   run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
     bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --keep-data --yes
   [ "$status" -ne 0 ]
-  grep -qF -- "earlier install operation is incomplete" <<<"$output"
+  grep -qF -- "earlier install operation (update) is incomplete" <<<"$output"
   kill -0 "$writer_pid" 2>/dev/null
   stage_source="$(cat "$inject_dir/stage-source")"
   case "$stage_source" in */.) stage_dir="${stage_source%/.}" ;; *) return 1 ;; esac
@@ -2418,9 +2422,9 @@ CYG
 
   env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
     AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
-    bash "$REPO_ROOT/uninstall.sh" --keep-data --yes > "$inject_dir/uninstall.out" 2>&1 &
+    bash "$SK/uninstall.sh" --keep-data --yes > "$inject_dir/uninstall.out" 2>&1 &
   uninstall_pid=$!
-  _agmsg_watch_pid "$uninstall_pid" "$REPO_ROOT/uninstall.sh --keep-data --yes"
+  _agmsg_watch_pid "$uninstall_pid" "$SK/uninstall.sh --keep-data --yes"
   for ((i = 0; i < 250; i++)); do
     [ -e "$inject_dir/rm-entered" ] && break
     kill -0 "$uninstall_pid" 2>/dev/null || break
@@ -2430,10 +2434,10 @@ CYG
   [ -e "$inject_dir/fired" ]
   [ -e "$SK/run/install-op-incomplete.json" ]
   op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
-  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+  run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
     bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   [ "$status" -ne 0 ]
-  grep -qF -- "earlier install operation is incomplete" <<<"$output"
+  grep -qF -- "earlier uninstall operation (keep-data) is incomplete; install (update) will not start" <<<"$output"
   grep -qF -- "--recover $op_id" <<<"$output"
   touch "$inject_dir/rm-release"
   if wait "$uninstall_pid"; then uninstall_rc=0; else uninstall_rc=$?; fi
@@ -2444,11 +2448,20 @@ CYG
   [ -f "$SK/run/install.db" ]
   [ -f "$SK/run/install-op.lock.db" ]
 
-  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
-    bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --keep-data --yes --recover "$op_id"
+  run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$SK/uninstall.sh" --cmd agmsg --keep-data --yes
+  [ "$status" -ne 0 ]
+  grep -qF -- "operation: uninstall" <<<"$output"
+  grep -qF -- "mode: keep-data" <<<"$output"
+  grep -qF -- "Recovery command: bash $SK/uninstall.sh --cmd agmsg --keep-data --yes --recover $op_id" <<<"$output"
+  run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$SK/uninstall.sh" --cmd agmsg --keep-data --yes --recover "$op_id"
   [ "$status" -eq 0 ]
+  grep -qF -- "Recorded operation: uninstall (keep-data)" <<<"$output"
+  grep -qF -- "Continuing requested operation: uninstall (keep-data)" <<<"$output"
   [ ! -e "$SK/run/install-op-incomplete.json" ]
   [ ! -e "$SK/SKILL.md" ]
+  [ ! -e "$SK/run/install-op-recovery.sh" ]
 }
 
 @test "no rendered skill of any type still carries the unwired 'supplied by the type overlay' comment" {
