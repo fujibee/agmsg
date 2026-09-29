@@ -60,6 +60,18 @@ _write_completion_record() {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET install_id = '$install_id', node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on', op_gen = 0;"
 }
 
+_inject_incomplete_marker_after_initial_unlock() {
+  node - "$TEST_SKILL_DIR/scripts/daemon/agmsgd" <<'NODE'
+const { readFileSync, writeFileSync } = require('node:fs');
+const scriptPath = process.argv[2];
+const source = readFileSync(scriptPath, 'utf8');
+const needle = '    let claimLock;\n    try {\n';
+if (source.split(needle).length !== 2) throw new Error('claim-lock insertion point must occur exactly once');
+const insert = '    await import("node:fs/promises").then(({ writeFile }) => writeFile(incompleteOperationPath, JSON.stringify({ operation_id: "injected-after-unlock" })));\n';
+writeFileSync(scriptPath, source.replace(needle, insert + needle));
+NODE
+}
+
 @test "agmsgd end-to-end: starts, answers status over its real control socket, and stops cleanly on request" {
   _write_completion_record
 
@@ -123,4 +135,14 @@ _write_completion_record() {
   run node "$SCRIPTS/daemon/agmsgd" "$TEST_SKILL_DIR" on 0
   [ "$status" -eq 75 ]
   [[ "$output" == *"operation is incomplete"* ]]
+}
+
+@test "agmsgd does not claim ownership when an install starts after bootstrap unlock" {
+  _inject_incomplete_marker_after_initial_unlock
+  _write_completion_record
+
+  run node "$SCRIPTS/daemon/agmsgd" "$TEST_SKILL_DIR" on 0
+  [ "$status" -eq 75 ]
+  printf '%s\n' "$output" | grep -Fq "operation is incomplete"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;")" = "none" ]
 }

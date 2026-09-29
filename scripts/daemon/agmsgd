@@ -50,6 +50,67 @@ function sha256File(installRoot, relPath) {
   return createHash("sha256").update(readFileSync(join(installRoot, relPath))).digest("hex");
 }
 
+function verifyInstallGeneration(installRoot, { incompleteOperationPath, manifestPath, dbPath, includeSchema = false }) {
+  if (existsSync(incompleteOperationPath)) {
+    fail(75, "an install or uninstall operation is incomplete; recover it before starting agmsgd");
+  }
+
+  if (!existsSync(manifestPath)) {
+    fail(0, "no completion record -- install.sh needs to run again");
+  }
+  const manifestText = readFileSync(manifestPath, "utf8");
+  const manifest = JSON.parse(manifestText);
+
+  const selfPath = "scripts/daemon/agmsgd";
+  const selfEntry = manifest.files.find((f) => f.path === selfPath);
+  if (!selfEntry) fail(75, `completion record has no entry for ${selfPath}`);
+  const selfDigest = sha256File(installRoot, selfPath);
+  if (selfDigest !== selfEntry.digest) {
+    fail(75, "this file's own digest does not match the completion record");
+  }
+
+  if (manifest.bootstrap_version !== BOOTSTRAP_VERSION) {
+    fail(75, `bootstrap version mismatch: this file is ${BOOTSTRAP_VERSION}, record has ${manifest.bootstrap_version}`);
+  }
+
+  const installDb = new DatabaseSync(dbPath, { readOnly: true });
+  let recordedInstallId;
+  try {
+    recordedInstallId = installDb.prepare("SELECT install_id FROM meta").get().install_id;
+  } finally {
+    installDb.close();
+  }
+  if (recordedInstallId !== manifest.install_id) {
+    fail(75, `install_id mismatch: install.db has ${recordedInstallId ?? "(none)"}, manifest has ${manifest.install_id}`);
+  }
+
+  if (manifest.digest_algo !== "sha256") {
+    fail(75, `unsupported digest_algo: ${manifest.digest_algo}`);
+  }
+  let onDisk;
+  try {
+    onDisk = collectScriptFiles(installRoot);
+  } catch (error) {
+    fail(75, `digest verification failed: ${error.message}`);
+  }
+  const expected = [...manifest.files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const onDiskSet = new Set(onDisk);
+  const expectedPaths = expected.map((f) => f.path);
+  const expectedSet = new Set(expectedPaths);
+  const missing = expectedPaths.filter((p) => !onDiskSet.has(p));
+  if (missing.length > 0) fail(75, `digest verification failed: missing file(s): ${missing.join(", ")}`);
+  const extra = onDisk.filter((p) => !expectedSet.has(p));
+  if (extra.length > 0) fail(75, `digest verification failed: unexpected file(s): ${extra.join(", ")}`);
+  for (const { path, digest } of expected) {
+    if (sha256File(installRoot, path) !== digest) fail(75, `digest verification failed: digest mismatch: ${path}`);
+  }
+
+  const schemaText = includeSchema
+    ? readFileSync(join(dirname(fileURLToPath(import.meta.url)), "schema.sql"), "utf8")
+    : undefined;
+  return { manifest, manifestText, schemaText };
+}
+
 async function main() {
   const [installRoot, desired, opGenStr] = process.argv.slice(2);
   if (!installRoot || !desired || !opGenStr) {
@@ -64,68 +125,10 @@ async function main() {
 
   const lockDb = new DatabaseSync(lockPath);
   lockDb.exec("BEGIN EXCLUSIVE;");
-  let manifest;
+  let verified;
   let mainModule;
   try {
-    if (existsSync(incompleteOperationPath)) {
-      fail(75, "an install or uninstall operation is incomplete; recover it before starting agmsgd");
-    }
-
-    // 1. An install generation exists at all.
-    if (!existsSync(manifestPath)) {
-      fail(0, "no completion record -- install.sh needs to run again");
-    }
-    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-
-    // 2. This file's own digest is in the record, at its own path.
-    const selfPath = "scripts/daemon/agmsgd";
-    const selfEntry = manifest.files.find((f) => f.path === selfPath);
-    if (!selfEntry) fail(75, `completion record has no entry for ${selfPath}`);
-    const selfDigest = sha256File(installRoot, selfPath);
-    if (selfDigest !== selfEntry.digest) {
-      fail(75, "this file's own digest does not match the completion record");
-    }
-
-    // 3. Bootstrap version matches; the launcher checks its own version too.
-    if (manifest.bootstrap_version !== BOOTSTRAP_VERSION) {
-      fail(75, `bootstrap version mismatch: this file is ${BOOTSTRAP_VERSION}, record has ${manifest.bootstrap_version}`);
-    }
-
-    // 4. install_id: install.db's meta is the source of truth (PR 2); the
-    // manifest carries only a copy.
-    const installDb = new DatabaseSync(dbPath, { readOnly: true });
-    let recordedInstallId;
-    try {
-      recordedInstallId = installDb.prepare("SELECT install_id FROM meta").get().install_id;
-    } finally {
-      installDb.close();
-    }
-    if (recordedInstallId !== manifest.install_id) {
-      fail(75, `install_id mismatch: install.db has ${recordedInstallId ?? "(none)"}, manifest has ${manifest.install_id}`);
-    }
-
-    // 5. Full digest verification: every file the manifest lists, no extras,
-    // no missing files, and no symlinks.
-    if (manifest.digest_algo !== "sha256") {
-      fail(75, `unsupported digest_algo: ${manifest.digest_algo}`);
-    }
-    let onDisk;
-    try {
-      onDisk = collectScriptFiles(installRoot);
-    } catch (error) {
-      fail(75, `digest verification failed: ${error.message}`);
-    }
-    const expected = [...manifest.files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-    const onDiskSet = new Set(onDisk);
-    const expectedPaths = expected.map((f) => f.path);
-    const expectedSet = new Set(expectedPaths);
-    const missing = expectedPaths.filter((p) => !onDiskSet.has(p));
-    if (missing.length > 0) fail(75, `digest verification failed: missing file(s): ${missing.join(", ")}`);
-    const extra = onDisk.filter((p) => !expectedSet.has(p));
-    if (extra.length > 0) fail(75, `digest verification failed: unexpected file(s): ${extra.join(", ")}`);
-    for (const { path, digest } of expected) {
-      if (sha256File(installRoot, path) !== digest) fail(75, `digest verification failed: digest mismatch: ${path}`);
-    }
+    verified = verifyInstallGeneration(installRoot, { incompleteOperationPath, manifestPath, dbPath, includeSchema: true });
 
     // All checks passed -- now, and only now, import the rest of this
     // component. main.mjs's own module graph (owner/control/lifecycle/
@@ -137,15 +140,48 @@ async function main() {
     lockDb.close();
   }
 
-  const db = new DatabaseSync(dbPath);
-  db.exec(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "schema.sql"), "utf8"));
-  await mainModule.main(db, {
+  async function prepareClaim() {
+    let claimLock;
+    try {
+      claimLock = new DatabaseSync(lockPath);
+      claimLock.exec("BEGIN EXCLUSIVE;");
+    } catch (error) {
+      claimLock?.close();
+      fail(75, `cannot recheck install state before daemon ownership claim: ${error.message}`);
+    }
+    let handedOff = false;
+    try {
+      const current = verifyInstallGeneration(installRoot, { incompleteOperationPath, manifestPath, dbPath });
+      if (current.manifestText !== verified.manifestText) {
+        fail(75, "install generation changed before daemon ownership claim");
+      }
+      const db = new DatabaseSync(dbPath);
+      db.exec(verified.schemaText);
+      const release = () => {
+        try {
+          claimLock.exec("COMMIT;");
+        } finally {
+          claimLock.close();
+        }
+      };
+      handedOff = true;
+      return { db, release };
+    } finally {
+      if (!handedOff) {
+        claimLock.exec("COMMIT;");
+        claimLock.close();
+      }
+    }
+  }
+
+  await mainModule.main(null, {
     installRoot,
-    manifest,
-    manifestText: readFileSync(manifestPath, "utf8"),
+    manifest: verified.manifest,
+    manifestText: verified.manifestText,
     expectedDesired: desired,
     expectedOpGen,
-    version: manifest.version,
+    version: verified.manifest.version,
+    prepareClaim,
   });
 }
 

@@ -5,11 +5,10 @@
 // never from here. This file only READS daemon_intent, to condition taking
 // ownership on it still matching what the launcher observed.
 //
-// The install-op lock (run/install-op.lock.db, PR 2) is a SEPARATE
-// mechanism the entrypoint holds only while loading code; by the time
-// takeOwnership() runs, that lock has already been
-// released. daemon_owner's own gen-conditioned CAS is self-contained and
-// needs no external lock.
+// The install-op lock (run/install-op.lock.db) is separate from the
+// daemon_owner CAS. The entrypoint holds it while revalidating the install
+// generation and through takeOwnership() plus control-socket readiness, so
+// an install cannot begin between validation and this claim.
 
 import { join } from "node:path";
 import { currentExecutor, isAlive } from "./executor.mjs";
