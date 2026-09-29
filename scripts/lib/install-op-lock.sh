@@ -68,7 +68,7 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
   # 2>&1 into the SAME out fifo: a busy/failed BEGIN EXCLUSIVE prints its
   # error there instead of the canary line, which is exactly how failure is
   # told apart from success below -- one stream, read for one exact literal.
-  sqlite3 "$db" < "$in_fifo" > "$out_fifo" 2>&1 &
+  sqlite3 "$db" < "$in_fifo" > "$out_fifo" 2>&1 3>&- 4>&- &
   _AGMSG_LOCK_PID=$!
   exec 9> "$in_fifo"
   exec 8< "$out_fifo"
@@ -95,17 +95,31 @@ agmsg_install_op_lock() {   # <lock_db_path> [timeout_ms, default 30000]
   return 0
 }
 
-# Re-proves the lock is still genuinely held: the coprocess pid is alive AND
-# a fresh canary round-trips. Call this right before a step the lock is
-# supposed to be protecting (fault injection: only the lock-holding
-# sqlite3 child dies, bash lives on unaware) -- a caller that only checked
-# liveness at acquire time would otherwise write past a lock it silently no
-# longer holds. Returns 1 (lock not provably held; do not proceed) without
-# ever killing the caller, since PIPE is trapped.
+# Load the shared liveness check when its source file is still installed. The
+# recovery helper can outlive scripts/, so its canary round-trip remains the
+# authoritative fallback when instance-id.sh is unavailable.
+_agmsg_install_op_load_pid_helper() {
+  declare -F _agmsg_pid_alive_local >/dev/null 2>&1 && return 0
+  if [ -n "${SCRIPT_DIR:-}" ] && [ -r "$SCRIPT_DIR/scripts/lib/instance-id.sh" ]; then
+    . "$SCRIPT_DIR/scripts/lib/instance-id.sh"
+  elif [ -r "$(dirname "${BASH_SOURCE[0]}")/instance-id.sh" ]; then
+    . "$(dirname "${BASH_SOURCE[0]}")/instance-id.sh"
+  fi
+  declare -F _agmsg_pid_alive_local >/dev/null 2>&1
+}
+
+# Re-proves the lock is still genuinely held: use the shared local-pid
+# liveness check when available, then require a fresh canary round-trip. The
+# canary also covers the recovery-only helper after scripts/ has been removed.
+# A caller that only checked liveness at acquire time would otherwise write
+# past a lock it silently no longer holds. Returns 1 (lock not provably held;
+# do not proceed) without ever killing the caller, since PIPE is trapped.
 agmsg_install_op_confirm() {
   local line
   [ -n "${_AGMSG_LOCK_PID:-}" ] || return 1
-  kill -0 "$_AGMSG_LOCK_PID" 2>/dev/null || return 1
+  if _agmsg_install_op_load_pid_helper; then
+    _agmsg_pid_alive_local "$_AGMSG_LOCK_PID" || return 1
+  fi
   printf "SELECT 'agmsg-lock-ok';\n" >&9 || return 1
   read -r -t 5 -u 8 line || return 1
   [ "$line" = "agmsg-lock-ok" ]
@@ -298,7 +312,7 @@ agmsg_install_op_pending_recover() {
 agmsg_install_op_run_writer() {
   local status=0 writer_pid
   AGMSG_INSTALL_OP_WRITER_STARTING=true
-  "$@" &
+  "$@" 3>&- 4>&- &
   writer_pid=$!
   if [ -n "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE:-}" ]; then
     printf '%s\n' "$writer_pid" > "${AGMSG_TEST_INSTALL_OP_WRITER_PID_PUBLISH_GATE}.pid"
