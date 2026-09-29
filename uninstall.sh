@@ -483,6 +483,19 @@ _uninstall_one() {
     fi
   done
 
+  # --- Remove the agmsg command launcher this install placed ---
+  # Only a launcher that carries our marker, names this install, and still has
+  # the content we wrote is removed. Older installs have no launcher library;
+  # there is then nothing of ours to remove.
+  local _launcher_lib
+  for _launcher_lib in "$SKILL_DIR/scripts/lib/agmsg-launcher.sh" "$SCRIPT_DIR/scripts/lib/agmsg-launcher.sh"; do
+    [ -r "$_launcher_lib" ] || continue
+    # shellcheck disable=SC1090
+    . "$_launcher_lib"
+    AGMSG_LAUNCHER_RM=_uninstall_checked_rm agmsg_launcher_uninstall "$SKILL_DIR" || return 1
+    break
+  done
+
   # --- Remove the skill directory ---
   if [ "$KEEP_DATA" = true ]; then
     echo ""
