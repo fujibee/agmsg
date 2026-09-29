@@ -242,9 +242,21 @@ _uninstall_one() {
   _uninstall_operation_require || return 1
 
   local pending="$SKILL_DIR/run/install-op-incomplete.json"
-  local recovery_prefix operation_mode=remove-data recovery_helper="$SKILL_DIR/run/install-op-recovery.sh" recovery_retired=""
+  local recovery_prefix recovery_entrypoint="$SKILL_DIR/uninstall.sh" running_entrypoint="" operation_mode=remove-data recovery_helper="$SKILL_DIR/run/install-op-recovery.sh" recovery_retired="" uninstaller_retired=""
+  if [ "$SCRIPT_DIR" = "$SKILL_DIR" ]; then
+    case "$(basename "$0")" in
+    .install-op-uninstaller-retired.*) running_entrypoint="$SKILL_DIR/$(basename "$0")" ;;
+    esac
+  fi
+  if [ ! -f "$recovery_entrypoint" ]; then
+    if [ -f "$pending" ] && agmsg_install_op_pending_validate "$pending"; then
+      local _recovery_entrypoint_candidate="$SKILL_DIR/.install-op-uninstaller-retired.$AGMSG_INSTALL_OP_PENDING_ID"
+      [ -f "$_recovery_entrypoint_candidate" ] && recovery_entrypoint="$_recovery_entrypoint_candidate"
+      unset _recovery_entrypoint_candidate
+    fi
+  fi
   [ "$KEEP_DATA" = true ] && operation_mode=keep-data
-  recovery_prefix="bash $(printf '%q' "$SKILL_DIR/uninstall.sh") --cmd $(printf '%q' "$(basename "$SKILL_DIR")")"
+  recovery_prefix="bash $(printf '%q' "$recovery_entrypoint") --cmd $(printf '%q' "$(basename "$SKILL_DIR")")"
   [ "$KEEP_DATA" = true ] && recovery_prefix="$recovery_prefix --keep-data"
   [ "$AUTO_YES" = true ] && recovery_prefix="$recovery_prefix --yes"
   recovery_prefix="$recovery_prefix --recover"
@@ -257,6 +269,10 @@ _uninstall_one() {
   fi
   AGMSG_INSTALL_OP_MARKER="$pending"
   agmsg_install_op_pending_begin "$pending" uninstall "$SKILL_DIR" "" "$operation_mode" || return 1
+  uninstaller_retired="$SKILL_DIR/.install-op-uninstaller-retired.$AGMSG_INSTALL_OP_ID"
+  if [ -n "$running_entrypoint" ] && [ ! -f "$SKILL_DIR/uninstall.sh" ]; then
+    uninstaller_retired="$running_entrypoint"
+  fi
   # This install's own path with its trailing slash (review): matching on
   # SKILL_NAME or a bare SKILL_DIR prefix is not a boundary -- "agmsg" is a
   # literal substring of "agmsg-second", and "$SKILL_DIR" (no trailing
@@ -495,7 +511,9 @@ _uninstall_one() {
         [ -e "$_entry" ] || continue
         # Keep the installed recovery entrypoint available until the
         # incomplete-operation record is cleared below.
-        [ "$(basename "$_entry")" = uninstall.sh ] && continue
+        case "$(basename "$_entry")" in
+        uninstall.sh|.install-op-uninstaller-retired.*) continue ;;
+        esac
         if [ "$(basename "$_entry")" = "run" ]; then
           for _run_entry in "$_entry"/*; do
             [ -e "$_run_entry" ] || continue
@@ -567,16 +585,23 @@ _uninstall_one() {
     mv "$AGMSG_INSTALL_OP_RECOVERY_SOURCE" "$recovery_retired" || return 1
     _uninstall_operation_require || return 1
   fi
+  if [ "$KEEP_DATA" = false ] && [ -f "$SKILL_DIR/uninstall.sh" ]; then
+    _uninstall_operation_require || return 1
+    if ! agmsg_install_op_run_writer mv "$SKILL_DIR/uninstall.sh" "$uninstaller_retired"; then
+      echo "  ! could not preserve the installed recovery entrypoint: $SKILL_DIR/uninstall.sh" >&2
+      return 1
+    fi
+    _uninstall_operation_require || return 1
+  fi
   agmsg_install_op_pending_complete "$AGMSG_INSTALL_OP_MARKER" "$AGMSG_INSTALL_OP_ID" || {
     echo "  ! could not clear the completed-operation record; later changes are blocked pending recovery" >&2
     return 1
   }
-  if [ "$KEEP_DATA" = false ] && [ -e "$SKILL_DIR/uninstall.sh" ]; then
-    # The operation record is already gone, so no recovery command is needed
-    # after this final entrypoint removal. Keep the helper until afterward.
-    agmsg_install_op_require || return 1
-    rm -f "$SKILL_DIR/uninstall.sh" || {
-      echo "  ! uninstall completed but could not remove its installed entrypoint: $SKILL_DIR/uninstall.sh" >&2
+  if [ -n "$uninstaller_retired" ] && [ -e "$uninstaller_retired" ]; then
+    # Remove only this generation's retired path after the record is cleared;
+    # a later install writes uninstall.sh and cannot be removed by this cleanup.
+    rm -f "$uninstaller_retired" || {
+      echo "  ! uninstall completed but could not remove its retired entrypoint: $uninstaller_retired" >&2
       return 1
     }
   fi

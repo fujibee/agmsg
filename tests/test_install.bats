@@ -2434,13 +2434,15 @@ CYG
   [ ! -e "$SK/SKILL.md" ]
 }
 
-@test "uninstall stops before the next removal when its lock child dies" {
+@test "uninstall preserves recovery through removal and cannot delete a later install entrypoint" {
   local bin="$FAKE_HOME/bin" inject_dir="$FAKE_HOME/lock-loss"
-  local sqlite_real rm_real sqlite_q rm_q uninstall_pid uninstall_rc=0 lock_pid lock_cmd op_id i
+  local sqlite_real rm_real mv_real sqlite_q rm_q mv_q uninstall_pid uninstall_rc=0 lock_pid lock_cmd op_id moved_op_id i retired_entrypoint candidate
   sqlite_real="$(command -v sqlite3)"
   rm_real="$(command -v rm)"
+  mv_real="$(command -v mv)"
   sqlite_q="$(printf '%q' "$sqlite_real")"
   rm_q="$(printf '%q' "$rm_real")"
+  mv_q="$(printf '%q' "$mv_real")"
   mkdir -p "$bin" "$inject_dir"
 
   HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --cmd agmsg
@@ -2459,7 +2461,9 @@ CYG
     'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
     'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
     'target="$test_home/.agents/skills/agmsg/scripts"' \
-    'has_target=false; for arg do [ "$arg" = "$target" ] && has_target=true; done' \
+    'final_root="$test_home/.agents/skills/agmsg/uninstall.sh"' \
+    'final_retired="$test_home/.agents/skills/agmsg/.install-op-uninstaller-retired."' \
+    'has_target=false; has_final=false; for arg do [ "$arg" = "$target" ] && has_target=true; case "$arg" in "$final_root"|"$final_retired"*) has_final=true ;; esac; done' \
     'if [ "$has_target" = true ] && [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/fired" ]; then' \
     '  lock_pid="$(cat "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid" 2>/dev/null)"' \
     '  case "$lock_pid" in ""|*[!0-9]*) lock_pid="" ;; esac' \
@@ -2470,8 +2474,35 @@ CYG
     '  touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/rm-entered"' \
     '  while [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/rm-release" ]; do sleep 0.02; done' \
     'fi' \
+    'if [ "$has_final" = true ] && [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/final-fired" ]; then' \
+    '  lock_pid="$(cat "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid" 2>/dev/null)"' \
+    '  case "$lock_pid" in ""|*[!0-9]*) lock_pid="" ;; esac' \
+    '  if [ -n "$lock_pid" ]; then' \
+    '    lock_cmd="$(/bin/ps -p "$lock_pid" -o args= 2>/dev/null)"' \
+    '    case "$lock_cmd" in *"$lock_db"*) kill -9 "$lock_pid" 2>/dev/null && touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/final-fired" ;; esac' \
+    '  fi' \
+    '  touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/final-rm-entered"' \
+    '  while [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/final-rm-release" ]; do sleep 0.02; done' \
+    'fi' \
     "exec $rm_q \"\$@\"" > "$bin/rm"
   chmod +x "$bin/rm"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'test_home="${AGMSG_TEST_INSTALL_LOCK_LOSS_DIR%/lock-loss}"' \
+    'lock_db="$test_home/.agents/skills/agmsg/run/install-op.lock.db"' \
+    'source_path="$1"; dest_path="$2"' \
+    'case "$source_path:$dest_path" in "$test_home/.agents/skills/agmsg/uninstall.sh:$test_home/.agents/skills/agmsg/.install-op-uninstaller-retired."*)' \
+    '  if [ ! -e "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/move-fired" ]; then' \
+    '    lock_pid="$(cat "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/lock.pid" 2>/dev/null)"' \
+    '    case "$lock_pid" in ""|*[!0-9]*) lock_pid="" ;; esac' \
+    '    if [ -n "$lock_pid" ]; then' \
+    '      lock_cmd="$(/bin/ps -p "$lock_pid" -o args= 2>/dev/null)"' \
+    '      case "$lock_cmd" in *"$lock_db"*) kill -9 "$lock_pid" 2>/dev/null && touch "$AGMSG_TEST_INSTALL_LOCK_LOSS_DIR/move-fired" ;; esac' \
+    '    fi' \
+    '  fi ;;' \
+    'esac' \
+    "exec $mv_q \"\$@\"" > "$bin/mv"
+  chmod +x "$bin/mv"
 
   env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
     AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
@@ -2505,20 +2536,58 @@ CYG
   [ -x "$SK/uninstall.sh" ]
   [ -r "$SK/run/install-op-recovery.sh" ]
 
-  run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
-    bash "$SK/uninstall.sh" --cmd agmsg --yes
+  env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
+    bash "$SK/uninstall.sh" --cmd agmsg --yes --recover "$op_id" > "$inject_dir/recovery.out" 2>&1 &
+  uninstall_pid=$!
+  _agmsg_watch_pid "$uninstall_pid" "$SK/uninstall.sh --cmd agmsg --yes --recover $op_id"
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$inject_dir/move-fired" ] && break
+    kill -0 "$uninstall_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ -e "$inject_dir/move-fired" ]
+  if wait "$uninstall_pid"; then uninstall_rc=0; else uninstall_rc=$?; fi
+  [ "$uninstall_rc" -ne 0 ]
+  grep -qF "install lock was lost partway through" "$inject_dir/recovery.out"
+  [ -e "$SK/run/install-op-incomplete.json" ]
+  moved_op_id="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$SK/run/install-op-incomplete.json")'), '\$.operation_id');")"
+  retired_entrypoint=""
+  for candidate in "$SK"/.install-op-uninstaller-retired.*; do
+    [ -e "$candidate" ] || continue
+    retired_entrypoint="$candidate"
+    break
+  done
+  [ -f "$retired_entrypoint" ]
+  [ ! -e "$SK/uninstall.sh" ]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/uninstall.sh" --cmd agmsg --yes
   [ "$status" -ne 0 ]
   grep -qF -- "operation: uninstall" <<<"$output"
   grep -qF -- "mode: remove-data" <<<"$output"
-  grep -qF -- "Recovery command: bash $SK/uninstall.sh --cmd agmsg --yes --recover $op_id" <<<"$output"
-  run bash -c 'exec "$@" 2>&1' _ env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
-    bash "$SK/uninstall.sh" --cmd agmsg --yes --recover "$op_id"
-  [ "$status" -eq 0 ]
-  grep -qF -- "Recorded operation: uninstall (remove-data)" <<<"$output"
-  grep -qF -- "Continuing requested operation: uninstall (remove-data)" <<<"$output"
+  grep -qF -- "Recovery command: bash $retired_entrypoint --cmd agmsg --yes --recover $moved_op_id" <<<"$output"
+  env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_INSTALL_LOCK_LOSS_DIR="$inject_dir" \
+    bash "$retired_entrypoint" --cmd agmsg --yes --recover "$moved_op_id" > "$inject_dir/final-recovery.out" 2>&1 &
+  uninstall_pid=$!
+  _agmsg_watch_pid "$uninstall_pid" "$retired_entrypoint --cmd agmsg --yes --recover $moved_op_id"
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$inject_dir/final-rm-entered" ] && break
+    kill -0 "$uninstall_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ -e "$inject_dir/final-rm-entered" ]
+  [ -e "$inject_dir/final-fired" ]
   [ ! -e "$SK/run/install-op-incomplete.json" ]
-  [ ! -e "$SK/uninstall.sh" ]
-  [ ! -e "$SK/run/install-op-recovery.sh" ]
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  [ -x "$SK/uninstall.sh" ]
+  [ -f "$SK/run/install-op-recovery.sh" ]
+  touch "$inject_dir/final-rm-release"
+  wait_for_pid_exit "$uninstall_pid"
+  diff "$REPO_ROOT/uninstall.sh" "$SK/uninstall.sh"
+  [ -f "$SK/run/install-op-recovery.sh" ]
 }
 
 @test "no rendered skill of any type still carries the unwired 'supplied by the type overlay' comment" {
