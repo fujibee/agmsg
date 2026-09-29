@@ -288,6 +288,11 @@ agmsg_install_operation_begin() {
   AGMSG_INSTALL_OP_ACTIVE=true
   trap 'agmsg_install_operation_exit' EXIT
 
+  if [ "${UPDATE_ONLY:-false}" = true ] && [ ! -f "$SKILL_DIR/.agmsg" ]; then
+    echo "  ! the selected installation was removed before the update could acquire its lock" >&2
+    return 1
+  fi
+
   # Validate the prior generation before making any installation change. A
   # first install is generation 1 only when neither completion file exists.
   if ! AGMSG_INSTALL_GEN="$(agmsg_install_manifest_next_gen "$manifest")"; then
@@ -755,6 +760,8 @@ if [ "$UPDATE_ONLY" = true ]; then
   SKILL_NAME="$(basename "$SKILL_DIR")"
   CMD_NAME="$SKILL_NAME"
   echo "  Updating $SKILL_NAME..."
+  INSTALLED_VERSION="$(agmsg_source_version)"
+  agmsg_install_operation_begin || exit 1
   # #963: a sync engine that is running when the write below starts either
   # survives on the code it already loaded (silent -- `remote.sh status` still
   # reports it as running, and nothing about the new scripts takes effect) or
@@ -826,8 +833,6 @@ $_agmsg_running_team"
       ;;
   esac
   unset _agmsg_explicit_agent_type _agmsg_detected_type
-  INSTALLED_VERSION="$(agmsg_source_version)"
-  agmsg_install_operation_begin || exit 1
   agmsg_render_skill "$TPL_TYPE" "$SKILL_NAME" "$SKILL_DIR/SKILL.md"
   TRASH_DIR="$SKILL_DIR/.trash"
   AGMSG_TRASH_COUNT=0
