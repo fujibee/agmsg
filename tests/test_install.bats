@@ -300,7 +300,12 @@ teardown() {
   # install this run is about (#1400).
   HOME="$FAKE_HOME" CODEX_HOME="$codex_home2" bash "$SK/uninstall.sh" --yes
 
-  [ ! -e "$SK" ]
+  # $SK itself is no longer fully gone (agmsgd beta, T3): run/install-op.lock.db
+  # is kept on purpose, so a residual $SK/run/ survives. Its substantive
+  # content is what must be gone -- covered in full by its own test
+  # ("uninstall keeps run/install-op.lock.db while removing everything else").
+  [ ! -e "$SK/scripts" ]
+  [ ! -e "$SK/SKILL.md" ]
   [ ! -f "$cmd_first" ]
   [ ! -f "$proj_cmd_first" ]
   refute grep -qF "$SK/" "$settings"
@@ -376,8 +381,10 @@ teardown() {
   # two installs present and no single one identified.
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --all --yes
 
-  [ ! -e "$FAKE_HOME/.agents/skills/agmsg" ]
-  [ ! -e "$FAKE_HOME/.agents/skills/agmsg-second" ]
+  # Neither install is fully gone (agmsgd beta, T3): run/install-op.lock.db
+  # is kept on purpose for each. Substantive content is what must be gone.
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg/scripts" ]
+  [ ! -e "$FAKE_HOME/.agents/skills/agmsg-second/scripts" ]
   [ ! -f "$cmd_first" ]
   [ ! -f "$cmd_second" ]
   [ ! -e "$shim" ]
@@ -2054,6 +2061,155 @@ CYG
     [ "$status" -eq 0 ]
     grep -Fq "There is NO register.sh" "$rendered"
   done < <(agmsg_renderable_types "$BATS_TEST_DIRNAME/..")
+}
+
+@test "install writes a completion manifest, --update carries install_id and bumps gen" {
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local manifest="$SK/run/install-manifest.json"
+  [ -f "$manifest" ]
+  # The operation lock DB must exist, never be empty-deleted by install
+  # itself, and never appear in the manifest's own file listing (it lives
+  # under run/, not scripts/).
+  [ -f "$SK/run/install-op.lock.db" ]
+
+  local id1 gen1
+  id1="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.install_id');")"
+  gen1="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.gen');")"
+  [ -n "$id1" ]
+  [ "$gen1" = "1" ]
+  local manifest_version
+  manifest_version="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.version');")"
+  [ "$manifest_version" = "$(cat "$SK/VERSION")" ]
+
+  # bootstrap_version: a fixed constant embedded in
+  # both agmsgd and agmsgd-launch.sh, distinct from the overall install
+  # version/gen, and copied into the manifest for the real entrypoint (a
+  # later PR) to check against under the operation lock.
+  local bv
+  bv="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.bootstrap_version');")"
+  [ "$bv" = "1" ]
+
+  # install_id's one source of truth is install.db's meta row; the manifest
+  # only carries a copy of it.
+  local db_id
+  db_id="$(sqlite3 "$SK/run/install.db" "SELECT install_id FROM meta LIMIT 1;")"
+  [ "$db_id" = "$id1" ]
+
+  # The lock DB holds no tables of its own -- it exists only to be BEGIN
+  # EXCLUSIVE'd.
+  local lock_tables
+  lock_tables="$(sqlite3 "$SK/run/install-op.lock.db" "SELECT count(*) FROM sqlite_master WHERE type='table';")"
+  [ "$lock_tables" = "0" ]
+
+  # The two daemon bootstrap files were placed (not left out by the bulk
+  # copy's own exclusion) and are executable, and their digests are in the
+  # manifest under their scripts/-relative path.
+  [ -x "$SK/scripts/daemon/agmsgd" ]
+  [ -x "$SK/scripts/daemon/agmsgd-launch.sh" ]
+  local listed
+  listed="$(sqlite3 :memory: "SELECT count(*) FROM json_each(json_extract(readfile('$(rf "$manifest")'), '\$.files')) WHERE json_extract(value,'\$.path') IN ('scripts/daemon/agmsgd','scripts/daemon/agmsgd-launch.sh');")"
+  [ "$listed" = "2" ]
+
+  # A real file's manifest digest matches an independent sha256 of it right
+  # now -- not just "a digest is present for it".
+  local recorded_digest actual_digest
+  recorded_digest="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.files[0].digest');")"
+  local first_path
+  first_path="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.files[0].path');")"
+  actual_digest="$(bash -c 'source "$1/scripts/lib/hash.sh"; agmsg_sha256 < "$2"' _ "$REPO_ROOT" "$SK/$first_path")"
+  [ -n "$actual_digest" ]
+  [ "$recorded_digest" = "$actual_digest" ]
+
+  mkdir -p "$SK/scripts/drivers/terminals/herdr"
+  printf 'stale\n' > "$SK/scripts/drivers/terminals/herdr/SKILL.md"
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --update
+  [ -f "$manifest" ]
+  [ -f "$manifest.prev" ]
+  [ ! -e "$SK/scripts/drivers/terminals/herdr/SKILL.md" ]
+  local id2 gen2
+  id2="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.install_id');")"
+  gen2="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.gen');")"
+  [ "$id2" = "$id1" ]
+  [ "$gen2" = "2" ]
+  manifest_version="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.version');")"
+  [ "$manifest_version" = "$(cat "$SK/VERSION")" ]
+  local stale_listed
+  stale_listed="$(sqlite3 :memory: "SELECT count(*) FROM json_each(json_extract(readfile('$(rf "$manifest")'), '\$.files')) WHERE json_extract(value,'\$.path')='scripts/drivers/terminals/herdr/SKILL.md';")"
+  [ "$stale_listed" = "0" ]
+  db_id="$(sqlite3 "$SK/run/install.db" "SELECT install_id FROM meta LIMIT 1;")"
+  [ "$db_id" = "$id1" ]
+
+  # A readable previous generation can recover a damaged current manifest.
+  printf 'not json\n' > "$manifest"
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --update
+  gen2="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.gen');")"
+  [ "$gen2" = "2" ]
+
+  # With neither record readable, update must stop before touching VERSION or
+  # the installed scripts instead of silently reusing generation 1.
+  printf 'not json\n' > "$manifest"
+  printf 'not json\n' > "$manifest.prev"
+  local unchanged_digest before_version
+  before_version="$(cat "$SK/VERSION")"
+  unchanged_digest="$(shasum -a 256 "$SK/scripts/team.sh" | awk '{print $1}')"
+  run env HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"manifest and its previous copy are unreadable"* ]]
+  [ "$(cat "$SK/VERSION")" = "$before_version" ]
+  [ "$(shasum -a 256 "$SK/scripts/team.sh" | awk '{print $1}')" = "$unchanged_digest" ]
+}
+
+@test "install holds the operation lock while rendering the shared skill" {
+  local bin="$FAKE_HOME/bin" entered="$FAKE_HOME/render-entered" release="$FAKE_HOME/render-release"
+  local awk_real install_pid install_rc blocked=0 i
+  awk_real="$(command -v awk)"
+  mkdir -p "$bin"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'for arg do case "$arg" in fragment=*) touch "$AGMSG_TEST_RENDER_ENTERED"; while [ ! -e "$AGMSG_TEST_RENDER_RELEASE" ]; do sleep 0.02; done ;; esac; done' \
+    'exec "$AGMSG_TEST_REAL_AWK" "$@"' > "$bin/awk"
+  chmod +x "$bin/awk"
+
+  HOME="$FAKE_HOME" CODEX_HOME="$FAKE_HOME/codex" PATH="$bin:$PATH" \
+    AGMSG_TEST_RENDER_ENTERED="$entered" AGMSG_TEST_RENDER_RELEASE="$release" \
+    AGMSG_TEST_REAL_AWK="$awk_real" \
+    bash "$REPO_ROOT/install.sh" --cmd agmsg > "$FAKE_HOME/install.out" 2>&1 &
+  install_pid=$!
+  _agmsg_watch_pid "$install_pid" "$REPO_ROOT/install.sh --cmd agmsg"
+
+  for ((i = 0; i < 250; i++)); do
+    [ -e "$entered" ] && break
+    kill -0 "$install_pid" 2>/dev/null || break
+    sleep 0.02
+  done
+  if [ -e "$entered" ]; then
+    if bash -c 'source "$1"; if agmsg_install_op_lock "$2" 300; then agmsg_install_op_unlock; exit 3; else exit 0; fi' \
+        _ "$REPO_ROOT/scripts/lib/install-op-lock.sh" "$SK/run/install-op.lock.db"; then
+      blocked=1
+    fi
+  fi
+  touch "$release"
+  if wait "$install_pid"; then install_rc=0; else install_rc=$?; fi
+
+  [ -e "$entered" ]
+  [ "$blocked" -eq 1 ]
+  [ "$install_rc" -eq 0 ]
+  [ -f "$SK/run/install-manifest.json" ]
+}
+
+@test "uninstall keeps run/install-op.lock.db while removing everything else (agmsgd beta, T3)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -f "$SK/run/install-op.lock.db" ]
+  [ -f "$SK/run/install.db" ]
+  [ -f "$SK/scripts/team.sh" ]
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
+
+  [ -f "$SK/run/install-op.lock.db" ]
+  [ ! -e "$SK/run/install.db" ]
+  [ ! -e "$SK/run/install-manifest.json" ]
+  [ ! -e "$SK/scripts" ]
+  [ ! -e "$SK/SKILL.md" ]
 }
 
 @test "no rendered skill of any type still carries the unwired 'supplied by the type overlay' comment" {

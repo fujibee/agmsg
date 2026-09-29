@@ -18,6 +18,9 @@ AGENTS_DIR="$HOME/.agents"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/codex-config.sh"
+# The same operation lock install.sh takes (agmsgd beta).
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/install-op-lock.sh"
 
 AUTO_YES=false
 KEEP_DATA=false
@@ -140,6 +143,21 @@ _uninstall_clean_codex_config() {
 _uninstall_one() {
   local SKILL_DIR="$1"
   local SKILL_NAME; SKILL_NAME="$(basename "$SKILL_DIR")"
+
+  # Operation lock (agmsgd beta): held for the whole of this function,
+  # the same lock install.sh takes for the same
+  # SKILL_DIR. A failure here means another install/uninstall/enable/
+  # disable is already in progress against this exact install -- refuse
+  # rather than race it. No trap releases this on an unexpected abort: the
+  # OS drops the file lock the moment this process dies, by design (T3 --
+  # there is deliberately no stale-lock recovery step), so an uninstall
+  # that crashes mid-way is the same "held until the holder dies" state a
+  # crashed install.sh already leaves.
+  if ! agmsg_install_op_lock "$SKILL_DIR/run/install-op.lock.db"; then
+    echo "  ! could not take the install operation lock for $SKILL_DIR" >&2
+    echo "    (another install/uninstall/enable/disable already in progress?)" >&2
+    return 1
+  fi
   # This install's own path with its trailing slash (review): matching on
   # SKILL_NAME or a bare SKILL_DIR prefix is not a boundary -- "agmsg" is a
   # literal substring of "agmsg-second", and "$SKILL_DIR" (no trailing
@@ -361,8 +379,32 @@ _uninstall_one() {
   else
     echo ""
     if confirm "Remove $SKILL_NAME (including DB and teams)?"; then
-      rm -rf "$SKILL_DIR"
-      echo "  - removed $SKILL_DIR"
+      # run/install-op.lock.db is NEVER deleted, even here (agmsgd beta):
+      # removing a DB a waiter still has open makes a
+      # freshly recreated file of the same name a DIFFERENT lock than the
+      # one the waiter holds a reference to -- see install-op-lock.sh's own
+      # header). Remove every top-level entry EXCEPT run/ by name, then
+      # inside run/ remove everything except install-op.lock.db by name --
+      # never a single recursive rm -rf "$SKILL_DIR" that cannot make this
+      # one exception. rmdir (not rm -rf) on SKILL_DIR itself: it correctly
+      # fails and is left in place, since run/install-op.lock.db means it
+      # is never truly empty after this.
+      local _entry _run_entry
+      for _entry in "$SKILL_DIR"/* "$SKILL_DIR"/.[!.]*; do
+        [ -e "$_entry" ] || continue
+        if [ "$(basename "$_entry")" = "run" ]; then
+          for _run_entry in "$_entry"/*; do
+            [ -e "$_run_entry" ] || continue
+            [ "$(basename "$_run_entry")" = "install-op.lock.db" ] && continue
+            rm -rf "$_run_entry"
+          done
+        else
+          rm -rf "$_entry"
+        fi
+      done
+      unset _entry _run_entry
+      rmdir "$SKILL_DIR" 2>/dev/null || true
+      echo "  - removed $SKILL_DIR (kept run/install-op.lock.db)"
       REMOVED=true
     fi
   fi
@@ -406,6 +448,8 @@ _uninstall_one() {
     fi
   done
   unset _dedicated_dir_label _dedicated_dir _dedicated_label
+
+  agmsg_install_op_unlock
 }
 
 # Machine-wide pieces, shared by every install: only safe to remove once NO

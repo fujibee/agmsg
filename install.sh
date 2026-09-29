@@ -21,6 +21,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AGENTS_DIR="$HOME/.agents"
 
+# Operation lock, install.db's meta row, and the completion manifest
+# (agmsgd beta) -- the same lock uninstall.sh takes, and the record both a
+# fresh install and an --update write around the scripts/ copy.
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/install-op-lock.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/install-db.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/install-manifest.sh"
+
 # Type registry — resolve each type's SKILL command template from its manifest
 # (scripts/drivers/types/<name>/template.md) instead of a hardcoded templates/ path. Read-only
 # helpers; safe to source.
@@ -249,6 +259,173 @@ agmsg_prune_removed_scripts() {
 agmsg_reset_trash() {
   rm -rf "$1"
   mkdir -p "$1"
+}
+
+# Begin one install transaction before its first file change. The lock stays
+# held through all rendering, script changes, VERSION writes, and setup work;
+# the completion manifest is published only by the matching finish call.
+# A crash before finish leaves .prev as the last known-good state.
+#
+# Requires (globals the caller must already have set): SCRIPT_DIR, SKILL_DIR,
+# INSTALLED_VERSION.
+agmsg_install_operation_exit() {
+  if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ]; then
+    agmsg_install_op_unlock
+    AGMSG_INSTALL_OP_ACTIVE=false
+  fi
+}
+
+agmsg_install_operation_begin() {
+  local manifest="$SKILL_DIR/run/install-manifest.json"
+  local lock_db="$SKILL_DIR/run/install-op.lock.db"
+  local install_db="$SKILL_DIR/run/install.db"
+
+  mkdir -p "$SKILL_DIR/run"
+  if ! agmsg_install_op_lock "$lock_db"; then
+    echo "  ! could not take the install operation lock (another install/uninstall in progress?)" >&2
+    return 1
+  fi
+  AGMSG_INSTALL_OP_ACTIVE=true
+  trap 'agmsg_install_operation_exit' EXIT
+
+  # Validate the prior generation before making any installation change. A
+  # first install is generation 1 only when neither completion file exists.
+  if ! AGMSG_INSTALL_GEN="$(agmsg_install_manifest_next_gen "$manifest")"; then
+    return 1
+  fi
+  AGMSG_INSTALL_ID="$(agmsg_install_db_ensure_meta "$install_db")" || return 1
+  if [ -z "$AGMSG_INSTALL_ID" ]; then
+    echo "  ! could not read or create install.db's meta row" >&2
+    return 1
+  fi
+  if ! agmsg_install_manifest_rotate_prev "$manifest"; then
+    echo "  ! could not move the previous completion record aside" >&2
+    return 1
+  fi
+  AGMSG_INSTALL_MANIFEST="$manifest"
+  return 0
+}
+
+agmsg_install_operation_finish() {
+  if [ -z "${AGMSG_INSTALL_BOOTSTRAP_VERSION:-}" ]; then
+    echo "  ! the installed bootstrap version was not verified; refusing to write a completion record" >&2
+    return 1
+  fi
+  if ! agmsg_install_op_confirm; then
+    echo "  ! the install lock was lost partway through; the previous install stays in place (see .prev)" >&2
+    return 1
+  fi
+  if ! agmsg_install_manifest_write \
+      "$SKILL_DIR/scripts" "$AGMSG_INSTALL_MANIFEST" "$INSTALLED_VERSION" \
+      "$AGMSG_INSTALL_ID" "$AGMSG_INSTALL_GEN" "$AGMSG_INSTALL_BOOTSTRAP_VERSION"; then
+    echo "  ! could not write the new completion record; the previous install stays in place (see .prev)" >&2
+    return 1
+  fi
+  trap - EXIT
+  agmsg_install_op_unlock
+  AGMSG_INSTALL_OP_ACTIVE=false
+  unset AGMSG_INSTALL_ID AGMSG_INSTALL_GEN AGMSG_INSTALL_MANIFEST AGMSG_INSTALL_BOOTSTRAP_VERSION
+  return 0
+}
+
+# The scripts/ copy runs inside the install transaction opened above. It does
+# not acquire or release the lock, and it does not publish the completion
+# manifest; the caller does that only after every install-side write is done.
+#
+# Requires (globals the caller must already have set): SCRIPT_DIR, SKILL_DIR,
+# TRASH_DIR (agmsg_reset_trash already run on it), INSTALLED_VERSION, plus an
+# active transaction from agmsg_install_operation_begin.
+# Updates AGMSG_TRASH_COUNT via the existing backup/prune helpers, same as
+# before this existed.
+#
+# Lock ordering (2026-09-29 design decision): registry lock -> this
+# install operation lock -> team store lock, never the reverse. This
+# function never acquires a registry or team-store lock itself, so it
+# cannot invert that order on its own; it is documented here as the
+# constraint any future caller that nests this inside one of those must not
+# break.
+agmsg_install_copy_scripts() {
+  local stage_dir=""
+  local daemon_files="agmsgd agmsgd-launch.sh"
+  local f
+
+  # Exclude the two rename-placed files from the bulk copy by giving cp -R a
+  # PRIVATE STAGING COPY of scripts/ with those two removed, rather than
+  # temporarily removing them from $SCRIPT_DIR itself (T3 leaves the choice
+  # between these two to the implementation PR). The first version of this
+  # function did the latter -- hid them from $SCRIPT_DIR, restored them via
+  # an EXIT trap -- and it was genuinely unsafe: $SCRIPT_DIR is the same,
+  # SHARED, live checkout every install.sh invocation reads from, so a
+  # second install run against it (even sequentially, one finishing before
+  # the next starts) could observe the files gone if anything landed between
+  # the hide and the restore. Measured: a two-install-in-a-row test hit
+  # exactly this and failed to place scripts/daemon/agmsgd. The staging copy
+  # never touches $SCRIPT_DIR at all, so there is nothing to race.
+  #
+  # agmsg_stage_overwrite_backups / agmsg_prune_removed_scripts still read
+  # the REAL $SCRIPT_DIR/scripts (not the staging copy) for "what does this
+  # release ship" -- they only ever READ that tree, never write it, and the
+  # two daemon files genuinely ARE shipped (just placed a different way), so
+  # excluding them from THAT membership list would wrongly trash a prior
+  # install's copies of them.
+  # Cleaned up explicitly at each exit point below, not via a RETURN trap:
+  # a RETURN trap set inside this function does NOT clear itself when the
+  # function returns -- it stays armed for the rest of the calling script
+  # and fires again on the NEXT function return or `source` anywhere later,
+  # by which point stage_dir (a local of THIS call) reads as empty in that
+  # unrelated context. Measured directly: a trap set this way fired a
+  # second time after an unrelated `source` command completed, well after
+  # this function had already returned.
+  stage_dir="$(mktemp -d)" || return 1
+
+  if ! cp -R "$SCRIPT_DIR/scripts/." "$stage_dir/"; then
+    rm -rf "$stage_dir" 2>/dev/null
+    echo "  ! could not stage scripts/ for copying; the previous install stays in place (see .prev)" >&2
+    return 1
+  fi
+  for f in $daemon_files; do
+    rm -f "$stage_dir/daemon/$f"
+  done
+
+  local copy_rc=0
+  agmsg_stage_overwrite_backups "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR" || copy_rc=1
+  if [ "$copy_rc" -eq 0 ]; then
+    cp -R "$stage_dir/." "$SKILL_DIR/scripts/" || copy_rc=1
+  fi
+  if [ "$copy_rc" -eq 0 ]; then
+    agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR" || copy_rc=1
+  fi
+  rm -rf "$stage_dir" 2>/dev/null
+
+  if [ "$copy_rc" -ne 0 ]; then
+    echo "  ! scripts/ copy failed; the previous install stays in place (see .prev)" >&2
+    return 1
+  fi
+
+  mkdir -p "$SKILL_DIR/scripts/daemon"
+  for f in $daemon_files; do
+    if ! agmsg_atomic_place_file "$SCRIPT_DIR/scripts/daemon/$f" "$SKILL_DIR/scripts/daemon/$f"; then
+      echo "  ! could not place scripts/daemon/$f; the previous install stays in place (see .prev)" >&2
+      return 1
+    fi
+    chmod +x "$SKILL_DIR/scripts/daemon/$f" 2>/dev/null || true
+  done
+
+  # agmsgd and agmsgd-launch.sh are a fixed-shape pair that must carry the
+  # SAME bootstrap version (agmsgd beta) -- a mismatch
+  # here means the two files this install just placed together are already
+  # inconsistent with each other, which the manifest must never assert as a
+  # single agreed value. Extracted by exact pattern from each file's own
+  # embedded constant (see their own headers for why the pattern is pinned).
+  local launch_bv entry_bv
+  launch_bv="$(grep -m1 '^BOOTSTRAP_VERSION=' "$SKILL_DIR/scripts/daemon/agmsgd-launch.sh" 2>/dev/null | cut -d= -f2)"
+  entry_bv="$(grep -m1 '^const BOOTSTRAP_VERSION = ' "$SKILL_DIR/scripts/daemon/agmsgd" 2>/dev/null | sed 's/^const BOOTSTRAP_VERSION = \([0-9]*\);*$/\1/')"
+  if [ -z "$launch_bv" ] || [ -z "$entry_bv" ] || [ "$launch_bv" != "$entry_bv" ]; then
+    echo "  ! agmsgd and agmsgd-launch.sh disagree on (or are missing) BOOTSTRAP_VERSION" >&2
+    return 1
+  fi
+  AGMSG_INSTALL_BOOTSTRAP_VERSION="$launch_bv"
+  return 0
 }
 
 # Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by
@@ -649,16 +826,18 @@ $_agmsg_running_team"
       ;;
   esac
   unset _agmsg_explicit_agent_type _agmsg_detected_type
+  INSTALLED_VERSION="$(agmsg_source_version)"
+  agmsg_install_operation_begin || exit 1
   agmsg_render_skill "$TPL_TYPE" "$SKILL_NAME" "$SKILL_DIR/SKILL.md"
   TRASH_DIR="$SKILL_DIR/.trash"
   AGMSG_TRASH_COUNT=0
   agmsg_reset_trash "$TRASH_DIR"
-  agmsg_stage_overwrite_backups "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
   # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/)
   # ship without enumerating files. The agent-type manifests and per-type runtimes
   # live under scripts/drivers/types/ now, so this single copy carries them too.
-  cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
-  agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
+  # Runs under the install operation lock. The completion manifest is written
+  # only after the remaining install updates below are complete.
+  agmsg_install_copy_scripts || exit 1
   echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
   # #1249: drivers/terminals/{herdr,plain,tmux}/SKILL.md used to name each
   # driver's own doc file, and a directory-scanning skill loader (e.g.
@@ -838,7 +1017,6 @@ $_agmsg_running_team"
     fi
   fi
   install_windows_helpers
-  INSTALLED_VERSION="$(agmsg_source_version)"
   printf '%s\n' "$INSTALLED_VERSION" > "$SKILL_DIR/VERSION"
   echo "  + updated scripts, templates, and SKILL.md (version $INSTALLED_VERSION)"
   echo "  ~ DB and team configs preserved"
@@ -872,6 +1050,7 @@ $_agmsg_running_team"
   echo "    a project's settings, silently stopping delivery until it is re-registered."
   echo "    Check with 'delivery.sh status <type> <project>'. (#133)"
   echo ""
+  agmsg_install_operation_finish || exit 1
   echo "  ✓ Update complete"
   echo ""
   exit 0
@@ -889,6 +1068,8 @@ fi
 # --- Apply defaults ---
 CMD_NAME="${CMD_NAME:-agmsg}"
 SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
+INSTALLED_VERSION="$(agmsg_source_version)"
+agmsg_install_operation_begin || exit 1
 
 # --- Install skill ---
 echo "  Installing to ~/.agents/skills/$CMD_NAME/ ..."
@@ -919,12 +1100,12 @@ agmsg_render_skill "$TPL_TYPE" "$CMD_NAME" "$SKILL_DIR/SKILL.md"
 TRASH_DIR="$SKILL_DIR/.trash"
 AGMSG_TRASH_COUNT=0
 agmsg_reset_trash "$TRASH_DIR"
-agmsg_stage_overwrite_backups "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
 # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/) ship
 # without enumerating files. The agent-type manifests and per-type runtimes live
 # under scripts/drivers/types/ now, so this single copy carries them too.
-cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
-agmsg_prune_removed_scripts "$SCRIPT_DIR/scripts" "$SKILL_DIR/scripts" "$TRASH_DIR"
+# Runs under the install operation lock. The completion manifest is written
+# only after the remaining install updates below are complete.
+agmsg_install_copy_scripts || exit 1
 echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
 # Ship the external-plugin drop-in dir (just its README) so the location exists
 # post-install. A plain cp — not cp -R --delete — preserves any plugins the user
@@ -967,7 +1148,7 @@ install_windows_helpers
 touch "$SKILL_DIR/.agmsg"
 
 # Record the provenance version of the source we installed from (see #117).
-INSTALLED_VERSION="$(agmsg_source_version)"
+# INSTALLED_VERSION itself was already computed above, before the locked copy.
 printf '%s\n' "$INSTALLED_VERSION" > "$SKILL_DIR/VERSION"
 
 # Initialize DB
@@ -1058,6 +1239,7 @@ install_antigravity_skill
 
 # --- Done ---
 configure_codex_sandbox
+agmsg_install_operation_finish || exit 1
 echo ""
 echo "  ✓ Installed to ~/.agents/skills/$CMD_NAME/ (version $INSTALLED_VERSION)"
 echo ""
