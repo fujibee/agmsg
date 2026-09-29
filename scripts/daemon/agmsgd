@@ -1,0 +1,147 @@
+#!/usr/bin/env node
+// agmsgd's entrypoint, executed by agmsgd-launch.sh.
+//
+// FIXED BOOTSTRAP, on purpose, same reasoning as agmsgd-launch.sh: this
+// file does NOT import any other scripts/daemon/*.mjs module until AFTER
+// it has, itself, under the install-op lock, confirmed (1) an install
+// generation exists, (2) ITS OWN bytes are exactly what the completion
+// record says they should be, (3) its own BOOTSTRAP_VERSION matches the
+// record, and (4) the full scripts/ tree matches the record too. Every
+// check below is therefore self-contained -- duplicated, deliberately,
+// from lifecycle.mjs's own digest logic rather than importing it, because
+// importing it would be importing "another module" before step 4 has
+// even run.
+//
+// install.sh extracts this exact line (`^const BOOTSTRAP_VERSION = `,
+// PR 2, 2026-09-29) and cross-checks it against agmsgd-launch.sh's own
+// `^BOOTSTRAP_VERSION=` line before writing either into the completion
+// record's bootstrap_version field.
+const BOOTSTRAP_VERSION = 1;
+
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
+
+function fail(code, message) {
+  process.stderr.write(`agmsgd: ${message}\n`);
+  process.exit(code);
+}
+
+function collectScriptFiles(installRoot) {
+  const files = [];
+  const root = join(installRoot, "scripts");
+  function walk(dir, relPrefix) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, entry.name);
+      const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      if (entry.isSymbolicLink()) throw new Error(`symlink under scripts/: ${rel}`);
+      if (entry.isDirectory()) walk(abs, rel);
+      else if (entry.isFile()) files.push(rel);
+    }
+  }
+  walk(root, "scripts");
+  files.sort();
+  return files;
+}
+
+function sha256File(installRoot, relPath) {
+  return createHash("sha256").update(readFileSync(join(installRoot, relPath))).digest("hex");
+}
+
+async function main() {
+  const [installRoot, desired, opGenStr] = process.argv.slice(2);
+  if (!installRoot || !desired || !opGenStr) {
+    fail(75, "usage: agmsgd <installRoot> <desired> <opGen> (only agmsgd-launch.sh should invoke this)");
+  }
+  const expectedOpGen = Number(opGenStr);
+
+  const lockPath = join(installRoot, "run", "install-op.lock.db");
+  const manifestPath = join(installRoot, "run", "install-manifest.json");
+  const dbPath = join(installRoot, "run", "install.db");
+
+  const lockDb = new DatabaseSync(lockPath);
+  lockDb.exec("BEGIN EXCLUSIVE;");
+  let manifest;
+  let mainModule;
+  try {
+    // 1. An install generation exists at all.
+    if (!existsSync(manifestPath)) {
+      fail(0, "no completion record -- install.sh needs to run again");
+    }
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+
+    // 2. This file's own digest is in the record, at its own path.
+    const selfPath = "scripts/daemon/agmsgd";
+    const selfEntry = manifest.files.find((f) => f.path === selfPath);
+    if (!selfEntry) fail(75, `completion record has no entry for ${selfPath}`);
+    const selfDigest = sha256File(installRoot, selfPath);
+    if (selfDigest !== selfEntry.digest) {
+      fail(75, "this file's own digest does not match the completion record");
+    }
+
+    // 3. Bootstrap version matches; the launcher checks its own version too.
+    if (manifest.bootstrap_version !== BOOTSTRAP_VERSION) {
+      fail(75, `bootstrap version mismatch: this file is ${BOOTSTRAP_VERSION}, record has ${manifest.bootstrap_version}`);
+    }
+
+    // 4. install_id: install.db's meta is the source of truth (PR 2); the
+    // manifest carries only a copy.
+    const installDb = new DatabaseSync(dbPath, { readOnly: true });
+    let recordedInstallId;
+    try {
+      recordedInstallId = installDb.prepare("SELECT install_id FROM meta").get().install_id;
+    } finally {
+      installDb.close();
+    }
+    if (recordedInstallId !== manifest.install_id) {
+      fail(75, `install_id mismatch: install.db has ${recordedInstallId ?? "(none)"}, manifest has ${manifest.install_id}`);
+    }
+
+    // 5. Full digest verification: every file the manifest lists, no extras,
+    // no missing files, and no symlinks.
+    if (manifest.digest_algo !== "sha256") {
+      fail(75, `unsupported digest_algo: ${manifest.digest_algo}`);
+    }
+    let onDisk;
+    try {
+      onDisk = collectScriptFiles(installRoot);
+    } catch (error) {
+      fail(75, `digest verification failed: ${error.message}`);
+    }
+    const expected = [...manifest.files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    const onDiskSet = new Set(onDisk);
+    const expectedPaths = expected.map((f) => f.path);
+    const expectedSet = new Set(expectedPaths);
+    const missing = expectedPaths.filter((p) => !onDiskSet.has(p));
+    if (missing.length > 0) fail(75, `digest verification failed: missing file(s): ${missing.join(", ")}`);
+    const extra = onDisk.filter((p) => !expectedSet.has(p));
+    if (extra.length > 0) fail(75, `digest verification failed: unexpected file(s): ${extra.join(", ")}`);
+    for (const { path, digest } of expected) {
+      if (sha256File(installRoot, path) !== digest) fail(75, `digest verification failed: digest mismatch: ${path}`);
+    }
+
+    // All checks passed -- now, and only now, import the rest of this
+    // component. main.mjs's own module graph (owner/control/lifecycle/
+    // log/status) is loaded here, still under the lock; release it only
+    // after the component is fully loaded.
+    mainModule = await import("./main.mjs");
+  } finally {
+    lockDb.exec("COMMIT;");
+    lockDb.close();
+  }
+
+  const db = new DatabaseSync(dbPath);
+  db.exec(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "schema.sql"), "utf8"));
+  await mainModule.main(db, {
+    installRoot,
+    manifest,
+    manifestText: readFileSync(manifestPath, "utf8"),
+    expectedDesired: desired,
+    expectedOpGen,
+    version: manifest.version,
+  });
+}
+
+main();
