@@ -169,6 +169,8 @@ teardown() {
 # signals a native PID through Git Bash's unrelated pid namespace.
 setup_native_bridge_fixture() {
   export NATIVE_BRIDGE_FIXTURE=1
+  : > "$RUN_DIR/native-spawns"
+  : > "$RUN_DIR/native-exits"
   export AGMSG_NODE="$(command -v node)"
   source "$SCRIPTS/lib/hash.sh"
   export NATIVE_PROJECT_HASH="$(printf '%s' "$PROJ" | agmsg_sha1)"
@@ -210,7 +212,11 @@ setTimeout(() => {
   fs.renameSync(`${lease}.tmp`, lease);
 }, Number(process.env.NATIVE_PUBLISH_DELAY_MS || 1500));
 const timer = setInterval(() => {
-  if (fs.existsSync(stop)) {
+  let stopFile = false;
+  try { stopFile = fs.statSync(stop).isFile(); } catch (_) {}
+  if (stopFile) {
+    if (process.env.NATIVE_FIXTURE_HOLD_STOP === '1' &&
+        !fs.existsSync(path.join(run, 'native-fixture-allow-stop'))) return;
     fs.copyFileSync(stop, `${stop}.ack`);
   } else if (!fs.existsSync(path.join(run, 'native-fixture-stop'))) {
     return;
@@ -224,12 +230,12 @@ const timer = setInterval(() => {
 setTimeout(() => {
   fs.appendFileSync(path.join(run, 'native-exits'), `${pid}\n`);
   process.exit(0);
-}, 45000).unref();
+}, 180000).unref();
 EOF
 }
 
 start_native_launcher() {
-  sleep 42 3>&- & NATIVE_PARENT=$!
+  sleep 180 3>&- & NATIVE_PARENT=$!
   bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:1' "$NATIVE_PARENT" >/dev/null 2>&1 3>&- &
   NATIVE_DISPATCHER=$!
 }
@@ -743,6 +749,62 @@ wait_for_child_count() {
     sleep 0.1
   done
   [ -f "$RUN_DIR/codex-bridge-stop.$native_pid.ack" ]
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
+}
+
+@test "launcher: Windows transient request read during publication does not retire" {
+  skip_unless_windows "requires a native Node lease"
+  setup_native_bridge_fixture
+  export NATIVE_PUBLISH_DELAY_MS=2500
+  put_record team alice thread-transient "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 1
+  local native_pid i request_file
+  native_pid="$(head -n 1 "$RUN_DIR/native-spawns")"
+  request_file="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  mv "$request_file" "$request_file.temporary"
+  sleep 0.5
+  mv "$request_file.temporary" "$request_file"
+  for i in {1..150}; do
+    [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ] && break
+    sleep 0.1
+  done
+  [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ]
+  sleep 2
+  [ ! -e "$RUN_DIR/codex-bridge-stop.$native_pid" ]
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
+  source "$SCRIPTS/lib/instance-id.sh"
+  _agmsg_pid_alive "$native_pid"
+}
+
+@test "launcher: Windows failed retire keeps child lock until exit is proved" {
+  skip_unless_windows "requires a native Node lease"
+  setup_native_bridge_fixture
+  export NATIVE_PUBLISH_DELAY_MS=300 NATIVE_FIXTURE_HOLD_STOP=1
+  put_record team alice thread-retire-failure "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 1
+  local native_pid i stopfile
+  native_pid="$(head -n 1 "$RUN_DIR/native-spawns")"
+  for i in {1..150}; do
+    [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ] && break
+    sleep 0.1
+  done
+  [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ]
+  stopfile="$RUN_DIR/codex-bridge-stop.$native_pid"
+  bash "$SCRIPTS/leave.sh" team alice >/dev/null
+  sleep 7
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
+  source "$SCRIPTS/lib/instance-id.sh"
+  _agmsg_pid_alive "$native_pid"
+  [ -f "$stopfile" ]
+  [ ! -f "$stopfile.ack" ]
+  : > "$RUN_DIR/native-fixture-allow-stop"
+  for i in {1..200}; do
+    [ -f "$stopfile.ack" ] && break
+    sleep 0.1
+  done
+  [ -f "$stopfile.ack" ]
   [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
 }
 

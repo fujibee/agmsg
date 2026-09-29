@@ -829,6 +829,38 @@ _windows_current_bridge_valid() {
   IFS= read -r got_thread < "$thread_file" 2>/dev/null || true
   [ "$got_url" = "$want_url" ] && [ "$got_thread" = "$want_thread" ]
 }
+
+_windows_role_changed_once() {
+  local ids
+  ids="$(resolve_identity)" || return 1
+  [ "$ids" != "$ROLE_PAIR" ] && return 0
+  read_seat_request || return 1
+  [ "$REQUEST_PAIR" != "$ROLE_PAIR" ]
+}
+
+_windows_role_change_confirmed() {
+  _windows_role_changed_once || return 1
+  sleep 0.3
+  _windows_role_changed_once
+}
+
+_windows_retire_published_bridge() {
+  local pid="$1" start="$2" want_url="$3" want_thread="$4" state
+  state="$(_windows_process_state "$pid" 2>/dev/null || true)"
+  case "$state" in
+    ABSENT) return 0 ;;
+    "LIVE$TAB"*) [ "${state#"LIVE$TAB"}" != "$start" ] && return 0 ;;
+  esac
+  _windows_current_bridge_valid "$pid" "$want_url" "$want_thread" || return 1
+  [ "$lstart" = "$start" ] || return 1
+  retire_recorded_bridge || return 1
+  state="$(_windows_process_state "$pid" 2>/dev/null || true)"
+  case "$state" in
+    ABSENT) return 0 ;;
+    "LIVE$TAB"*) [ "${state#"LIVE$TAB"}" != "$start" ] && return 0 ;;
+  esac
+  return 1
+}
 # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
 # wrappers) — run it as-is. Only the default codex-bridge.js is launched through
 # a resolved Node, since its env-node shebang fails where a version-manager Node
@@ -1144,7 +1176,7 @@ EOF
     # Keep this child lock while the native Node publishes its pidfile and
     # lease. A missing/partial lease, a changed role, or an uncertain process
     # state must never send this launcher back to the spawn path.
-    published=0; role_gone=0; publish_tick=0
+    published=0; publish_tick=0; published_start=""
     while [ "$publish_tick" -lt 300 ]; do
       published_pid=""
       if [ -f "$pidfile" ]; then
@@ -1153,42 +1185,41 @@ EOF
       if [ -n "$published_pid" ] && \
         _windows_current_bridge_valid "$published_pid" "$req_app_server" "$thread_id"; then
         published=1
+        published_start="$lstart"
         break
-      fi
-      if [ $((publish_tick % 10)) -eq 0 ]; then
-        current_role="$(resolve_identity || true)"
-        if [ "$current_role" != "$ROLE_PAIR" ] || ! read_seat_request \
-          || [ "$REQUEST_PAIR" != "$ROLE_PAIR" ]; then
-          role_gone=1
-        fi
       fi
       sleep 0.1
       publish_tick=$((publish_tick + 1))
     done
     if [ "$published" = 1 ]; then
-      current_role="$(resolve_identity || true)"
-      if [ "$role_gone" = 1 ] || [ "$current_role" != "$ROLE_PAIR" ] \
-        || ! read_seat_request || [ "$REQUEST_PAIR" != "$ROLE_PAIR" ]; then
-        retire_recorded_bridge || true
-        exit 0
+      if _windows_role_change_confirmed; then
+        while _agmsg_pid_alive_local "$PARENT_PID"; do
+          if _windows_retire_published_bridge "$published_pid" "$published_start" \
+            "$req_app_server" "$thread_id"; then
+            exit 0
+          fi
+          sleep 1
+        done
+        exit 1
       fi
     else
       # A local child can outlive a failed status probe, and may publish late.
       # Park with the child lock held instead of creating a second native Node.
       # On role removal, retire only a later, fully verified native lease.
       while _agmsg_pid_alive_local "$PARENT_PID"; do
-        current_role="$(resolve_identity || true)"
-        if [ "$current_role" != "$ROLE_PAIR" ] || ! read_seat_request \
-          || [ "$REQUEST_PAIR" != "$ROLE_PAIR" ]; then
+        if _windows_role_change_confirmed; then
           published_pid=""
           if [ -f "$pidfile" ]; then
             IFS= read -r published_pid < "$pidfile" 2>/dev/null || true
           fi
           if [ -n "$published_pid" ] && \
             _windows_current_bridge_valid "$published_pid" "$req_app_server" "$thread_id"; then
-            retire_recorded_bridge || true
+            published_start="$lstart"
+            if _windows_retire_published_bridge "$published_pid" "$published_start" \
+              "$req_app_server" "$thread_id"; then
+              exit 0
+            fi
           fi
-          exit 0
         fi
         sleep 1
       done
