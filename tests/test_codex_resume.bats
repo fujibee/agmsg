@@ -80,6 +80,10 @@ recorded_uuid() {
   source "$SKILL_DIR/scripts/lib/role-session.sh"
   [ "$(agmsg_role_session_get team alice type)" = "codex" ]
   expected_home="$(cd "$explicit_home" && pwd -P)"
+  # Match the recorder's cross-platform path spelling (not raw Git Bash /c/...).
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/resolve-project.sh"
+  expected_home="$(agmsg_normalize_project_path "$expected_home")"
   [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 
   # Unset CODEX_HOME uses the same default Codex uses, recorded as an absolute
@@ -88,6 +92,7 @@ recorded_uuid() {
     bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
   [ "$(recorded_uuid team alice)" = "env-thread-2" ]
   expected_home="$(cd "$HOME/.codex" && pwd -P)"
+  expected_home="$(agmsg_normalize_project_path "$expected_home")"
   [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
@@ -106,6 +111,9 @@ recorded_uuid() {
   [ "$(recorded_uuid team alice)" = "fallback-uuid" ]
   source "$SKILL_DIR/scripts/lib/role-session.sh"
   expected_home="$(cd "$explicit_home" && pwd -P)"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/resolve-project.sh"
+  expected_home="$(agmsg_normalize_project_path "$expected_home")"
   [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
