@@ -16,7 +16,7 @@ commands:
   --version                                 print the installed version
   help                                      show this message
 
-Everything else is still run as scripts in this install's scripts/ directory.
+Other commands are not available through `agmsg` in this version.
 USAGE
 }
 

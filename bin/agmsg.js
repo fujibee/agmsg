@@ -138,7 +138,12 @@ function printHelp() {
 // Runs the runtime with the arguments exactly as given: an absolute path, no
 // shell, inherited stdio, and the runtime's own exit status.
 function runRuntime(runtime, args) {
-  const result = spawnSync(bashCommand(), [toBashPath(runtime), ...args], { stdio: 'inherit' });
+  const bash = bashCommand();
+  if (!bash) {
+    console.error('agmsg: Git for Windows bash was not found. Install Git for Windows, then run this again.');
+    process.exit(1);
+  }
+  const result = spawnSync(bash, [toBashPath(runtime), ...args], { stdio: 'inherit' });
   if (result.error) {
     console.error('agmsg: failed to launch bash:', result.error.message);
     process.exit(1);
@@ -150,12 +155,18 @@ function runRuntime(runtime, args) {
   process.exit(result.status === null ? 1 : result.status);
 }
 
-// On Windows a bare `bash` can be the WSL launcher; prefer Git for Windows'.
+// On Windows a bare `bash` can be the WSL launcher, so only Git for Windows'
+// own bash.exe is used there; when it cannot be found this returns null
+// instead of falling back to a bare `bash`.
 function bashCommand() {
   if (process.platform === 'win32') {
-    const pf = process.env.ProgramFiles || 'C:\\Program Files';
-    const gitBash = path.join(pf, 'Git', 'bin', 'bash.exe');
-    if (exists(gitBash)) return gitBash;
+    const roots = [process.env.ProgramFiles, process.env.ProgramW6432, process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs')]
+      .filter(Boolean);
+    for (const root of roots) {
+      const gitBash = path.join(root, 'Git', 'bin', 'bash.exe');
+      if (exists(gitBash)) return gitBash;
+    }
+    return null;
   }
   return 'bash';
 }
@@ -184,6 +195,11 @@ function runInstaller(passthroughArgs) {
   // correctly here is defense-in-depth and lets future interactive prompts
   // in setup.sh keep working for real-tty users.
   const ref = installRef();
+  const bash = bashCommand();
+  if (!bash) {
+    console.error('agmsg: Git for Windows bash was not found. Install Git for Windows, then run this again.');
+    process.exit(1);
+  }
   const setupUrl = RAW_BASE + '/' + ref + '/setup.sh';
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agmsg-bootstrap-'));
   // os.tmpdir()/path.join() return backslash-separated paths on Windows.
@@ -203,7 +219,7 @@ function runInstaller(passthroughArgs) {
     }
 
     // Pin the clone inside setup.sh to the same ref we fetched it from.
-    const result = spawnSync('bash', [setupPath, ...passthroughArgs], {
+    const result = spawnSync(bash, [setupPath, ...passthroughArgs], {
       stdio: 'inherit',
       env: Object.assign({}, process.env, { AGMSG_REF: ref })
     });
@@ -233,8 +249,9 @@ function main() {
     if (found.error) {
       process.stdout.write('runtime: not available\n');
     } else {
-      const v = spawnSync(bashCommand(), [toBashPath(found.runtime), '--version'], { encoding: 'utf8' });
-      process.stdout.write('runtime: ' + (v.status === 0 ? v.stdout.trim() : 'unreadable') + '\n');
+      const bash = bashCommand();
+      const v = bash ? spawnSync(bash, [toBashPath(found.runtime), '--version'], { encoding: 'utf8' }) : null;
+      process.stdout.write('runtime: ' + (v && v.status === 0 ? v.stdout.trim() : 'unreadable') + '\n');
     }
     process.exit(0);
   } else {

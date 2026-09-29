@@ -492,7 +492,7 @@ _uninstall_one() {
     [ -r "$_launcher_lib" ] || continue
     # shellcheck disable=SC1090
     . "$_launcher_lib"
-    agmsg_launcher_uninstall "$SKILL_DIR"
+    AGMSG_LAUNCHER_RM=_uninstall_checked_rm agmsg_launcher_uninstall "$SKILL_DIR" || return 1
     break
   done
 

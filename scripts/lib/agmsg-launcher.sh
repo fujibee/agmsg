@@ -110,10 +110,22 @@ agmsg_launcher_install() {
   resolved="$(command -v agmsg 2>/dev/null || true)"
   if [ -n "$resolved" ] && [ "$resolved" != "$target" ]; then
     echo "    note: 'agmsg' currently resolves to $resolved, which comes first on PATH"
+    if agmsg_launcher_is_old_npm_entry "$resolved"; then
+      echo "    that is an older npm agmsg (1.5.1 or earlier): it does not know 'agmsg daemon'."
+      echo "    update it with: npm i -g agmsg@latest   (or put $AGMSG_LAUNCHER_DIR before it on PATH)"
+      return 0
+    fi
   fi
   echo "    on your own terminal: not checked here; open a new terminal and run: command -v agmsg"
   echo "    if that prints nothing, add this line to your shell startup file yourself:"
   echo "      export PATH=\"$AGMSG_LAUNCHER_DIR:\$PATH\""
+}
+
+# True when the file at $1 is the npm entry from before the single-command
+# release (its header names it a bootstrapper). Reads the file only.
+agmsg_launcher_is_old_npm_entry() {
+  [ -f "$1" ] || return 1
+  head -c 4096 "$1" 2>/dev/null | grep -q 'agmsg npm bootstrapper'
 }
 
 # Remembers where the launcher went so uninstall can find it under a custom
@@ -125,9 +137,13 @@ agmsg_launcher_record() {
 
 # Removes the launcher for the install at $1 only if the file carries our
 # marker, names this install, and still has exactly the content we wrote.
-# Prints one line saying what happened; always returns 0.
+# Prints one line saying what happened. Returns non-zero only when a launcher
+# that is ours could not be removed; the record is then kept. The remove
+# command defaults to rm; the uninstaller passes its lock-checked remover in
+# AGMSG_LAUNCHER_RM so a removal can never run after the lock was lost.
 agmsg_launcher_uninstall() {
   local skill_dir="$1" record="" candidate seen=""
+  local remover="${AGMSG_LAUNCHER_RM:-rm}"
   [ -f "$skill_dir/run/agmsg-launcher.path" ] && record="$(head -n1 "$skill_dir/run/agmsg-launcher.path" 2>/dev/null || true)"
   agmsg_launcher_pick_dir >/dev/null 2>&1 || true
   for candidate in "$record" "${AGMSG_LAUNCHER_DIR:+$AGMSG_LAUNCHER_DIR/agmsg}"; do
@@ -137,8 +153,12 @@ agmsg_launcher_uninstall() {
     agmsg_launcher_classify "$candidate" "$skill_dir"
     case "$AGMSG_LAUNCHER_KIND" in
       own-same)
-        rm -f "$candidate" && echo "  - removed agmsg command $candidate"
-        rm -f "$skill_dir/run/agmsg-launcher.path"
+        if ! "$remover" -f "$candidate"; then
+          echo "  ! could not remove agmsg command $candidate" >&2
+          return 1
+        fi
+        echo "  - removed agmsg command $candidate"
+        "$remover" -f "$skill_dir/run/agmsg-launcher.path" || return 1
         return 0 ;;
       own-modified)
         echo "  ~ left $candidate in place (it was edited)" ;;

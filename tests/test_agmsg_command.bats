@@ -124,3 +124,24 @@ teardown() {
   [[ "$output" == *"not an absolute path"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/relative" ]
 }
+
+@test "launcher: an older npm agmsg ahead on PATH is named and the update is offered" {
+  local old="$BATS_TEST_TMPDIR/oldbin"
+  mkdir -p "$old"
+  printf '#!/usr/bin/env node\n// agmsg npm bootstrapper.\n' > "$old/agmsg"
+  chmod +x "$old/agmsg"
+  run env PATH="$old:$PATH" bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
+  [[ "$output" == *"older npm agmsg"* ]]
+  [[ "$output" == *"npm i -g agmsg@latest"* ]]
+  # It is only reported; nothing of the old entry is touched.
+  grep -q 'agmsg npm bootstrapper' "$old/agmsg"
+}
+
+@test "launcher: a failed removal keeps the record and reports failure" {
+  bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR" >/dev/null
+  [ -f "$TEST_SKILL_DIR/run/agmsg-launcher.path" ]
+  run env AGMSG_LAUNCHER_RM=false bash -c 'source "$1"; agmsg_launcher_uninstall "$2"' _ "$LIB" "$TEST_SKILL_DIR"
+  [ "$status" -ne 0 ]
+  [ -f "$BIN_DIR/agmsg" ]
+  [ -f "$TEST_SKILL_DIR/run/agmsg-launcher.path" ]
+}
