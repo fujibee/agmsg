@@ -319,7 +319,6 @@ EOF
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
   [ "$status" -eq 0 ]
   grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
-  [[ "$output" != *"did not report a listening port"* ]]
   grep -qx 'flag=1' "$TEST_PROJECT/app-server-env"
   grep -qx 'url=' "$TEST_PROJECT/app-server-env"
   local seat record port restored
@@ -332,6 +331,7 @@ EOF
     bash -c 'source "$1"; _agmsg_codex_app_server_url "$2"' bash \
       "$TYPES/codex/_app-server.sh" "$TEST_PROJECT")"
   [ "$restored" = "ws://127.0.0.1:$port" ]
+  [[ "$output" != *"did not report a listening port"* ]]
 }
 
 @test "codex monitor: the seat record is published atomically, never written in place" {

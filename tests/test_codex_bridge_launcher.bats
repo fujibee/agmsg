@@ -690,7 +690,7 @@ wait_for_child_count() {
   [ "$local_pid" != "$native_pid" ]
   source "$SCRIPTS/lib/instance-id.sh"
   _agmsg_pid_alive_local "$local_pid"
-  ! _agmsg_pid_alive "$local_pid"
+  refute _agmsg_pid_alive "$local_pid"
   _agmsg_pid_alive "$native_pid"
   wait "$local_pid"
 }
