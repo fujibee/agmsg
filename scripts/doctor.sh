@@ -305,15 +305,25 @@ if [ "$REMOVE_ORPHANS" = 1 ]; then
     read -r _doctor_answer || _doctor_answer=""
     case "$_doctor_answer" in y|Y) ;; *) echo "Aborted; nothing removed."; exit 1 ;; esac
   fi
-  _doctor_removed=0
+  _doctor_removed=0 _doctor_skipped=0
   while IFS="$_DOCTOR_US" read -r _s _team _agent _pane _files; do
     [ -n "$_s" ] || continue
+    # The scan is older than the question above: a team of this name may have
+    # been created while it waited, and its records now belong to a live team.
+    # Checked again, right before each seat's files go.
+    _enc_team="$(_actas_lock_encode "$_team")"
+    case $'\n'"$(_doctor_existing_enc_teams)"$'\n' in
+      *$'\n'"$_enc_team"$'\n'*) _doctor_skipped=$((_doctor_skipped + 1)); continue ;;
+    esac
     for _f in $_files; do
       rm -f "$RUN_DIR/$_f"
     done
     _doctor_removed=$((_doctor_removed + 1))
   done <<< "$ORPHAN_SEATS"
   echo "removed the run/ records of $_doctor_removed seat(s)."
+  if [ "$_doctor_skipped" -gt 0 ]; then
+    echo "left $_doctor_skipped seat(s) alone: their team exists now."
+  fi
   exit 0
 fi
 
