@@ -173,6 +173,26 @@ _doctor_record_pane() {   # <suffix>
   printf '%s' "$first"
 }
 
+# The "<enc_team>__<enc_agent>" part of every per-seat record name in run/, one
+# per line (duplicates across families are fine). A function of its own rather
+# than a loop inside $(...): bash 3.2, the macOS /bin/bash, cannot parse a case
+# statement inside a command substitution.
+_doctor_run_suffixes() {
+  local f s
+  for f in "$RUN_DIR"/actas.*.session "$RUN_DIR"/ready.* "$RUN_DIR"/spawn.* "$RUN_DIR"/role-session.*; do
+    [ -f "$f" ] || continue
+    f="${f##*/}"
+    case "$f" in
+      actas.*.session) s="${f#actas.}"; s="${s%.session}" ;;
+      ready.*) s="${f#ready.}" ;;
+      spawn.*) s="${f#spawn.}" ;;
+      role-session.*) s="${f#role-session.}" ;;
+      *) continue ;;
+    esac
+    printf '%s\n' "$s"
+  done
+}
+
 # Fills ORPHAN_SEATS ("<suffix>US<team>US<agent>US<pane>US<files>" per line) and
 # ORPHAN_AMBIGUOUS ("<suffix>US<files>" per line). US (0x1f) rather than a tab:
 # an empty pane field would collapse under a whitespace IFS.
@@ -182,20 +202,7 @@ _doctor_scan_orphan_run_records() {
   ORPHAN_SEATS=""; ORPHAN_AMBIGUOUS=""
   [ -d "$RUN_DIR" ] || return 0
   existing="$(_doctor_existing_enc_teams)"
-  suffixes="$(
-    for f in "$RUN_DIR"/actas.*.session "$RUN_DIR"/ready.* "$RUN_DIR"/spawn.* "$RUN_DIR"/role-session.*; do
-      [ -f "$f" ] || continue
-      f="${f##*/}"
-      case "$f" in
-        actas.*.session) s="${f#actas.}"; s="${s%.session}" ;;
-        ready.*) s="${f#ready.}" ;;
-        spawn.*) s="${f#spawn.}" ;;
-        role-session.*) s="${f#role-session.}" ;;
-        *) continue ;;
-      esac
-      printf '%s\n' "$s"
-    done | LC_ALL=C sort -u
-  )"
+  suffixes="$(_doctor_run_suffixes | LC_ALL=C sort -u)"
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     splits="$(_doctor_splits "$s")"
@@ -275,9 +282,12 @@ _doctor_print_orphans() {
 # --- --remove-orphan-run-records: its own mode, not a flag on the report -----
 #
 # Lists what would go, asks once (--yes skips only the question), then removes
-# each seat's records through team.sh --delete's own per-seat routine, so the
-# exact-name matching and its #1023 ambiguity guard are the same code, not a
-# copy. Never removes an ambiguous record and never touches a team that exists.
+# exactly the files it listed, each by its own path. It deliberately does NOT
+# reuse team.sh --delete's sweep: that one matches by team and agent name and
+# also removes codex-bridge.<team>.<name>.*, whose dot-joined key collides
+# across teams (live team "live" / agent "part.worker" spells the same as gone
+# team "live.part" / agent "worker") -- a file this mode never showed. Never
+# removes an ambiguous record and never touches a team that exists.
 if [ "$REMOVE_ORPHANS" = 1 ]; then
   if [ -n "$FILTER_PROJECT$FILTER_TYPE$FILTER_TEAM" ] || [ "$REDACTED" = 1 ]; then
     echo "doctor: --remove-orphan-run-records takes no --project/--type/--team/--redacted" >&2
@@ -295,19 +305,12 @@ if [ "$REMOVE_ORPHANS" = 1 ]; then
     read -r _doctor_answer || _doctor_answer=""
     case "$_doctor_answer" in y|Y) ;; *) echo "Aborted; nothing removed."; exit 1 ;; esac
   fi
-  # Same libraries team.sh loads before it calls the routine below.
-  # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/lib/storage.sh"
-  # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/lib/registry-lock.sh"
-  # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/lib/roster-journal.sh"
-  # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/lib/team-delete.sh"
   _doctor_removed=0
   while IFS="$_DOCTOR_US" read -r _s _team _agent _pane _files; do
     [ -n "$_s" ] || continue
-    agmsg_team_delete_seat_run_records "$_team" "$_agent"
+    for _f in $_files; do
+      rm -f "$RUN_DIR/$_f"
+    done
     _doctor_removed=$((_doctor_removed + 1))
   done <<< "$ORPHAN_SEATS"
   echo "removed the run/ records of $_doctor_removed seat(s)."

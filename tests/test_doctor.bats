@@ -603,11 +603,19 @@ configured_off() {
   # Cannot be attributed to one seat ("x___y" cuts as x_/y and as x/_y), and an id-keyed record.
   printf 'herdr:amb:w1:p2\n' > "$run_dir/spawn.x___y"
   printf 'herdr:id:w1:p3\n' > "$run_dir/spawn.${id_team}__${id_member}"
+  # A dot-joined codex bridge key collides across teams: gone team "live" /
+  # agent "part" and live team "live.part" / agent "worker" both spell
+  # codex-bridge.live.part.worker.* -- the gone team's records are removed, the
+  # live team's bridge file (never listed) must stay.
+  bash "$SCRIPTS/join.sh" live.part worker claude-code "$PROJ" >/dev/null
+  printf 'herdr:dot:w1:p5\t/proj\tclaude-code\n' > "$run_dir/spawn.live__part"
+  printf '4242\n' > "$run_dir/codex-bridge.live.part.worker.pid"
 
   run bash "$SCRIPTS/doctor.sh"
   [ "$status" -eq 1 ]
   [[ "$output" == *"orphaned run/ records"* ]]
   [[ "$output" == *"team: /tmp/some/proj  agent: worker  pane: herdr:gone:w1:p9"* ]]
+  [[ "$output" == *"team: live  agent: part  pane: herdr:dot:w1:p5"* ]]
   [[ "$output" == *"not attributable to one seat"* ]]
   [[ "$output" != *"agent: alice"* ]]
   [[ "$output" != *"herdr:id:w1:p3"* ]]
@@ -623,6 +631,8 @@ configured_off() {
   [ ! -e "$run_dir/role-session.${gone}__worker" ]
   [ ! -e "$run_dir/actas.${gone}__worker.session" ]
   [ ! -e "$run_dir/ready.${gone}__worker" ]
+  [ ! -e "$run_dir/spawn.live__part" ]
+  [ -f "$run_dir/codex-bridge.live.part.worker.pid" ]   # not listed, so not removed
   [ -f "$run_dir/spawn.team__alice" ]
   [ -f "$run_dir/role-session.team__alice" ]
   [ -f "$run_dir/spawn.x___y" ]
