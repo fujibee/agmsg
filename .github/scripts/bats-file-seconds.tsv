@@ -6,32 +6,24 @@
 # a file that is merely large in @test count is not necessarily slow. This
 # table sidesteps the proxy by using each file's own measured time directly.
 #
-# MEASURED AGAINST: GitHub Actions run 35563098757 (main, tests.yml bats
-# job, macos-latest, 5 shards, 2026-09-21). Every shard in that run
-# completed (none timed out), so every file below has a real file_end
+# MEASURED AGAINST: GitHub Actions run 36622150859 (tests.yml bats job,
+# macos-latest, 5 shards, 2026-09-29; the full-suite PR run of #1519, whose
+# head was main plus a test-only change to test_codex_bridge_launcher.bats).
+# Every shard in that run completed, so every file below has a real file_end
 # record -- summed from the run's 5 bats-timings-macos-latest-* artifacts
-# (file_end rows only, macOS only).
+# (file_end rows only, macOS only). All 127 test files are present.
 #
-# PREVIOUS MEASUREMENT: run 34845597032, 2026-09-14. Refreshing against
-# this run brought the heaviest of the current 5 shards from 1132s down to
-# 839s (#1304 CI-capacity work: the shard split itself was fine, this table
-# had just gone stale -- see that run's own per-file numbers for detail).
-# The suite's total real time also fell in this window (old table sum
-# 6249s over the files common to both tables vs 4173s now), and that fall
-# is two real perf fixes, not broad drift: test_remote_engine_start_refusal.bats
-# 660s->43s and test_remote_status_liveness.bats 346s->80s are both #1252
-# (shortened the two slowest tests' production-readiness wait). A third
-# file, test_watch.bats, measured 317s->2s in that run because the whole
-# file was quarantined for #1262. Its setup skipped every test, so 2s was
-# the actual cost while quarantined. The targeted refresh below restores
-# its active cost after the quarantine was removed. Every
-# other file moved by single-digit seconds either way. So this window's
-# imbalance was not organic, even drift -- it was two real fixes plus one
-# quarantine, and neither is the kind of thing that keeps happening on a
-# schedule; each only moves this table when something specific (a perf
-# fix, a quarantine, an un-quarantine) actually happens to a file.
-# Update-on-notice, prompted by exactly that kind of change, stays the
-# right call -- no scheduled or automated refresh needed.
+# WHY THIS REFRESH: two rows had gone wrong in a way that broke the
+# partition. test_ext_tool_jev_handle.bats (605s, the heaviest file in the
+# suite) had no row at all and was estimated at the table average, and
+# test_watch.bats still carried its quarantined 2s although it has run for
+# real since it was unquarantined (216s now). A new test file shifted the
+# partition so that both landed on one macOS shard, which then hit the
+# 30-minute limit. test_ext_tool.bats, test_ext_tool_slack_handle.bats and
+# test_safe_poke_draft.bats had no row either and are added here.
+#
+# PREVIOUS MEASUREMENTS: run 35563098757 (2026-09-21), run 34845597032
+# (2026-09-14). See git history for the reasoning recorded with each.
 #
 # A file with no row here (renamed, or added after this measurement) is
 # estimated at this table's own average seconds/file by shard-tests.sh,
@@ -43,140 +35,132 @@
 # run's shard skew (as happened here) triggers a refresh. Refresh by
 # re-running this extraction against a green run's bats-timings artifacts.
 #
-# Targeted refresh, 2026-09-29: test_ext_tool_jev_handle.bats completed in
-# 604s in macOS job 109704655665, run 36657411860, head 4c49efe1.
-# test_watch.bats is no longer quarantined: its unchanged 40-test suite
-# completed in 215.18s locally on macOS at integration head 96b43b51.
-# test_agmsgd_switch.bats completed its 16 checks in 9.74s locally on macOS
-# after the internal-entrypoint suppression fix; rounded to 10 seconds.
-# Those two costs replace the missing-file estimate and historical 2s row.
-# Adding a test file changes the greedy partition, so stale costs can move
-# both expensive suites into a shard that exceeds the 30-minute job budget.
-#
 # Columns: basename<TAB>seconds. Sorted by basename for a legible diff.
-test_actas_integration.bats	54
-test_actas_lock.bats	34
-test_agmsgd_switch.bats	10
+test_actas_integration.bats	53
+test_actas_lock.bats	33
 test_antigravity_resume.bats	1
-test_antigravity_transport.bats	20
-test_api.bats	63
+test_antigravity_transport.bats	24
+test_api.bats	53
 test_app_release_signing.bats	0
 test_apply_fail_stderr.bats	1
 test_bin_agmsg.bats	1
-test_binding_mode.bats	4
-test_boot_command.bats	9
-test_bump_app_version.bats	0
+test_binding_mode.bats	5
+test_boot_command.bats	5
+test_bump_app_version.bats	1
 test_capability_docs.bats	1
-test_ci_forensics.bats	0
-test_ci_sharding.bats	77
+test_ci_forensics.bats	1
+test_ci_sharding.bats	112
 test_ci_workflow.bats	1
-test_claude_template.bats	2
+test_claude_template.bats	1
 test_close_fds.bats	0
-test_cmdline_path_match.bats	2
-test_codex_bridge.bats	153
-test_codex_bridge_launcher.bats	237
-test_codex_monitor.bats	7
-test_codex_resume.bats	9
-test_codex_shim.bats	18
-test_compat.bats	2
+test_cmdline_path_match.bats	1
+test_codex_bridge_launcher.bats	266
+test_codex_bridge.bats	179
+test_codex_monitor.bats	10
+test_codex_resume.bats	13
+test_codex_shim.bats	22
 test_compat_posix.bats	2
-test_config.bats	3
-test_cut_release.bats	4
-test_delivery.bats	379
-test_despawn.bats	108
-test_dispatch.bats	45
-test_doctor.bats	72
+test_compat.bats	2
+test_config.bats	2
+test_cut_release.bats	3
+test_delivery.bats	402
+test_despawn.bats	135
+test_dispatch.bats	54
+test_doctor.bats	81
 test_endpoint_scheme.bats	1
-test_endpoint_table_node.bats	1
+test_endpoint_table_node.bats	0
 test_enforced_assertions.bats	1
 test_engine_inherited_fds.bats	21
-test_export.bats	30
-test_ext_tool_jev_handle.bats	604
+test_export.bats	37
+test_ext_tool_jev_handle.bats	605
+test_ext_tool_slack_handle.bats	251
+test_ext_tool.bats	8
 test_harness_self_name_off.bats	1
-test_hash.bats	7
-test_herdr_cli_routing.bats	2
-test_identity_path_forms.bats	6
-test_inbox.bats	76
-test_install.bats	103
-test_instance_id.bats	15
-test_jsonl_remote_sync.bats	41
-test_key.bats	74
-test_legacy_mirror.bats	8
+test_hash.bats	5
+test_herdr_cli_routing.bats	3
+test_identity_path_forms.bats	5
+test_inbox.bats	74
+test_install.bats	158
+test_instance_id.bats	29
+test_jsonl_remote_sync.bats	54
+test_key.bats	71
+test_legacy_mirror.bats	10
 test_local_quoting.bats	1
-test_local_team_ids.bats	13
-test_locator.bats	5
-test_messaging.bats	81
-test_migrate_team_store.bats	106
-test_node_resolve.bats	1
-test_peek_poke.bats	55
-test_perf_harness.bats	11
-test_placement_actual_location.bats	1
-test_placement_collisions.bats	37
-test_plugin_registry.bats	4
+test_local_team_ids.bats	10
+test_locator.bats	6
+test_messaging.bats	99
+test_migrate_team_store.bats	151
+test_node_resolve.bats	0
+test_peek_poke.bats	63
+test_perf_harness.bats	14
+test_placement_actual_location.bats	2
+test_placement_collisions.bats	31
+test_plugin_registry.bats	3
 test_printed_command_paths.bats	9
 test_refute.bats	0
-test_registry_lock.bats	6
+test_registry_lock.bats	8
 test_release_ci_skip.bats	1
 test_release_dist_tag.bats	1
-test_remote.bats	322
 test_remote_curl_config_paths.bats	4
-test_remote_curl_stderr.bats	3
-test_remote_curl_stderr_get.bats	3
-test_remote_engine_start_refusal.bats	43
-test_remote_forget.bats	10
-test_remote_header_sink.bats	2
-test_remote_refusal.bats	11
-test_remote_setup_doc.bats	8
-test_remote_status_liveness.bats	80
-test_remote_sync.bats	169
-test_remote_sync_apply_blob.bats	4
-test_remote_sync_ca_bundle.bats	0
-test_remote_sync_driver_input.bats	1
-test_remote_sync_engine.bats	11
-test_remote_sync_reject_envelope.bats	5
-test_require_python3.bats	2
-test_reset_role_session.bats	11
-test_resolve_project.bats	33
-test_resume_seat_guard.bats	14
-test_resurrect_panes.bats	9
-test_role_session.bats	9
-test_roster_journal.bats	88
-test_self_fix.bats	9
-test_self_identity.bats	24
-test_self_name.bats	69
+test_remote_curl_stderr_get.bats	4
+test_remote_curl_stderr.bats	4
+test_remote_engine_start_refusal.bats	56
+test_remote_forget.bats	12
+test_remote_header_sink.bats	3
+test_remote_refusal.bats	16
+test_remote_setup_doc.bats	9
+test_remote_status_liveness.bats	87
+test_remote_sync_apply_blob.bats	5
+test_remote_sync_ca_bundle.bats	2
+test_remote_sync_driver_input.bats	0
+test_remote_sync_engine.bats	12
+test_remote_sync_reject_envelope.bats	7
+test_remote_sync.bats	236
+test_remote.bats	463
+test_require_python3.bats	3
+test_reset_role_session.bats	10
+test_resolve_project.bats	47
+test_resume_seat_guard.bats	16
+test_resurrect_panes.bats	5
+test_role_session.bats	12
+test_roster_journal.bats	98
+test_safe_poke_draft.bats	4
+test_self_fix.bats	22
+test_self_identity.bats	25
+test_self_name.bats	102
 test_self_proof.bats	48
-test_self_rename.bats	34
-test_self_write.bats	42
-test_self_write_lock.bats	35
-test_session_start_terminal_line.bats	12
+test_self_rename.bats	39
+test_self_write_lock.bats	37
+test_self_write.bats	44
+test_session_start_terminal_line.bats	13
 test_setup.bats	1
 test_shquote.bats	1
-test_spawn.bats	425
 test_spawn_fd_guard.bats	0
-test_spawn_options.bats	2
-test_sqlite_crlf.bats	10
-test_sqlite_sync_jq_binary.bats	9
-test_storage.bats	30
-test_storage_contract.bats	32
-test_sweep_enumeration.bats	9
+test_spawn_options.bats	3
+test_spawn.bats	402
+test_sqlite_crlf.bats	11
+test_sqlite_sync_jq_binary.bats	7
+test_storage_contract.bats	39
+test_storage.bats	36
+test_sweep_enumeration.bats	10
 test_sync_autostart.bats	21
-test_sync_cipher.bats	5
-test_team.bats	185
-test_team_guidance_usage.bats	0
+test_sync_cipher.bats	8
+test_team_guidance_usage.bats	1
 test_team_list.bats	23
-test_team_status.bats	14
+test_team_status.bats	11
+test_team.bats	255
 test_teardown_reap.bats	3
-test_terminal_context_line.bats	1
-test_terminal_registry.bats	81
-test_token_locate.bats	3
+test_terminal_context_line.bats	2
+test_terminal_registry.bats	115
+test_token_locate.bats	9
 test_transcript_exists.bats	2
-test_type_registry.bats	35
-test_unguarded_env_reads.bats	2
+test_type_registry.bats	31
+test_unguarded_env_reads.bats	3
 test_wait_helpers.bats	41
-# Re-measured after the whole-file quarantine was removed; see refresh above.
-test_watch.bats	215
-test_watch_install_changed.bats	34
-test_watch_once.bats	53
-test_watch_process_count.bats	18
+test_watch_install_changed.bats	36
+test_watch_once.bats	62
+test_watch_process_count.bats	17
 test_watch_stuck_map.bats	4
-test_where.bats	2
+test_watch.bats	216
+test_where.bats	3
+test_agmsgd_switch.bats	10
