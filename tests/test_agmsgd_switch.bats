@@ -22,6 +22,7 @@ setup() {
   export AGMSG_SELF_NAME=off
   unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH
   unset AGMSG_CODEX_SEAT_KEY AGMSG_CODEX_BRIDGE_APP_SERVER AGMSG_CODEX_SHIM_DISABLE AGMSG_CODEX_BRIDGE
+  unset AGMSG_DAEMON_NOTICE_SKIP
   sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET install_id='switch-test'; UPDATE daemon_intent SET desired='on';"
   printf '{"install_id":"switch-test","gen":1}\n' > "$TEST_SKILL_DIR/run/install-manifest.json"
@@ -125,6 +126,35 @@ WRAPPER
   assert_lacks 'stopped while enabled'
   [ "$(cat "$CALL_LOG")" = skip=1 ]
   [ ! -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
+}
+
+@test "hook and one-shot polling children inherit daemon notice suppression" {
+  printf '\nprintf "helper loaded\\n" >> "$CALL_LOG"\n' >> "$SCRIPTS/lib/daemon-state.sh"
+  mv "$SCRIPTS/identities.sh" "$SCRIPTS/identities-real.sh"
+  cat > "$SCRIPTS/identities.sh" <<'WRAPPER'
+#!/usr/bin/env bash
+printf 'skip=%s\n' "${AGMSG_DAEMON_NOTICE_SKIP:-0}" >> "$CALL_LOG"
+exec bash "$SCRIPTS/identities-real.sh" "$@"
+WRAPPER
+  chmod +x "$SCRIPTS/identities.sh"
+  local entry expected
+  for entry in check-inbox.sh session-start.sh drivers/types/codex/watch-once.sh; do
+    : > "$CALL_LOG"
+    expected=0
+    case "$entry" in
+      *watch-once.sh)
+        expected=2
+        run bash "$SCRIPTS/$entry" "$TEST_SKILL_DIR" codex --timeout 0 ;;
+      session-start.sh)
+        # No registration: exercise identity resolution, then stop before hooks.
+        run bash "$SCRIPTS/$entry" codex "$TEST_SKILL_DIR/unjoined" </dev/null ;;
+      *) run bash "$SCRIPTS/$entry" codex "$TEST_SKILL_DIR" </dev/null ;;
+    esac
+    [ "$status" -eq "$expected" ]
+    assert_lacks 'stopped while enabled'
+    [ "$(cat "$CALL_LOG")" = skip=1 ]
+    [ ! -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
+  done
 }
 
 @test "recent warning skips the daemon health query" {

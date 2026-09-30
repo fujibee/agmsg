@@ -47,6 +47,8 @@
 # 604s in macOS job 109704655665, run 36657411860, head 4c49efe1.
 # test_watch.bats is no longer quarantined: its unchanged 40-test suite
 # completed in 215.18s locally on macOS at integration head 96b43b51.
+# test_agmsgd_switch.bats completed its 16 checks in 9.74s locally on macOS
+# after the internal-entrypoint suppression fix; rounded to 10 seconds.
 # Those two costs replace the missing-file estimate and historical 2s row.
 # Adding a test file changes the greedy partition, so stale costs can move
 # both expensive suites into a shard that exceeds the 30-minute job budget.
@@ -54,6 +56,7 @@
 # Columns: basename<TAB>seconds. Sorted by basename for a legible diff.
 test_actas_integration.bats	54
 test_actas_lock.bats	34
+test_agmsgd_switch.bats	10
 test_antigravity_resume.bats	1
 test_antigravity_transport.bats	20
 test_api.bats	63
