@@ -87,6 +87,20 @@ teardown() {
     run bash "$TYPES/codex/codex-shim.sh" app-server --listen ws://127.0.0.1:0
   grep -qx 'real-codex <app-server> <--listen> <ws://127.0.0.1:0>' "$CALL_LOG"
 
+  # Already asking for --remote or --no-daemon: left exactly as given.
+  : > "$CALL_LOG"
+  AGMSG_WINDOWS_ELEVATED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    run bash "$TYPES/codex/codex-shim.sh" resume --remote ws://127.0.0.1:1
+  grep -qx 'real-codex <resume> <--remote> <ws://127.0.0.1:1>' "$CALL_LOG"
+  : > "$CALL_LOG"
+  AGMSG_WINDOWS_ELEVATED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    run bash "$TYPES/codex/codex-shim.sh" --remote=ws://127.0.0.1:1
+  grep -qx 'real-codex <--remote=ws://127.0.0.1:1>' "$CALL_LOG"
+  : > "$CALL_LOG"
+  AGMSG_WINDOWS_ELEVATED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    run bash "$TYPES/codex/codex-shim.sh" --no-daemon resume --last
+  grep -qx 'real-codex <--no-daemon> <resume> <--last>' "$CALL_LOG"
+
   # Not elevated: unchanged.
   : > "$CALL_LOG"
   AGMSG_WINDOWS_ELEVATED=0 AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \

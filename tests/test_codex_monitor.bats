@@ -356,6 +356,16 @@ EOF
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --foo
   [ "$status" -eq 0 ]
   grep -qx 'plain-codex <--no-daemon> <--foo>' "$CALL_LOG"
+
+  # Arguments that already carry --no-daemon or --remote are not given a second flag.
+  : > "$CALL_LOG"
+  run env FAKE_CODEX_MODE=broken AGMSG_WINDOWS_ELEVATED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --no-daemon --foo
+  grep -qx 'plain-codex <--no-daemon> <--foo>' "$CALL_LOG"
+  : > "$CALL_LOG"
+  run env FAKE_CODEX_MODE=broken AGMSG_WINDOWS_ELEVATED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --remote=ws://127.0.0.1:1
+  grep -qx 'plain-codex <--remote=ws://127.0.0.1:1>' "$CALL_LOG"
 }
 
 @test "codex-monitor: without the spawn marker the same failure still fails open (a person keeps a codex)" {

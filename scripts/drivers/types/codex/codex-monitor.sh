@@ -133,7 +133,7 @@ exec_plain_codex() {
   if [ -r "$SCRIPT_DIR/../../../lib/windows-elevation.sh" ]; then
     # shellcheck disable=SC1091
     . "$SCRIPT_DIR/../../../lib/windows-elevation.sh"
-    agmsg_windows_shell_elevated && no_daemon=(--no-daemon)
+    agmsg_codex_plain_launch_wants_no_daemon ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} && no_daemon=(--no-daemon)
   fi
   case "$CODEX_COMMAND" in
     codex)  exec "$REAL_CODEX" ${no_daemon[@]+"${no_daemon[@]}"} ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;

@@ -171,7 +171,7 @@ exec_plain_launch() {
   if [ -r "$SCRIPT_DIR/../../../lib/windows-elevation.sh" ]; then
     # shellcheck disable=SC1091
     . "$SCRIPT_DIR/../../../lib/windows-elevation.sh"
-    if agmsg_windows_shell_elevated; then
+    if agmsg_codex_plain_launch_wants_no_daemon "$@"; then
       exec "$real_codex" --no-daemon "$@"
     fi
   fi

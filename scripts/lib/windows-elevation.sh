@@ -34,3 +34,20 @@ agmsg_windows_shell_elevated() {
   [ -x "$whoami_exe" ] || return 1
   MSYS_NO_PATHCONV=1 "$whoami_exe" /groups 2>/dev/null | grep -q 'S-1-16-12288'
 }
+
+# Returns 0 when a plain Codex launch with the arguments "$@" should get
+# --no-daemon added: the shell is elevated, and the arguments neither already
+# carry --no-daemon (Codex rejects it twice) nor --remote (Codex rejects the
+# pair, and a --remote launch does not start the shared server anyway).
+# Arguments after a literal -- are prompt text and are not looked at.
+agmsg_codex_plain_launch_wants_no_daemon() {
+  agmsg_windows_shell_elevated || return 1
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --) break ;;
+      --remote|--remote=*|--no-daemon) return 1 ;;
+    esac
+  done
+  return 0
+}
