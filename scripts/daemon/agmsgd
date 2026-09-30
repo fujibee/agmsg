@@ -74,6 +74,7 @@ function verifyInstallGeneration(installRoot, { incompleteOperationPath, manifes
   }
 
   const installDb = new DatabaseSync(dbPath, { readOnly: true });
+  installDb.exec("PRAGMA busy_timeout = 5000;");
   let recordedInstallId;
   try {
     recordedInstallId = installDb.prepare("SELECT install_id FROM meta").get().install_id;
@@ -127,6 +128,7 @@ async function main() {
   lockDb.exec("BEGIN EXCLUSIVE;");
   let verified;
   let mainModule;
+  let openInstallDb;
   try {
     verified = verifyInstallGeneration(installRoot, { incompleteOperationPath, manifestPath, dbPath, includeSchema: true });
 
@@ -135,6 +137,7 @@ async function main() {
     // log/status) is loaded here, still under the lock; release it only
     // after the component is fully loaded.
     mainModule = await import("./main.mjs");
+    ({ openInstallDb } = await import("./db.mjs"));
   } finally {
     lockDb.exec("COMMIT;");
     lockDb.close();
@@ -155,8 +158,8 @@ async function main() {
       if (current.manifestText !== verified.manifestText) {
         fail(75, "install generation changed before daemon ownership claim");
       }
-      const db = new DatabaseSync(dbPath);
-      db.exec(verified.schemaText);
+      // Use the shared bounded wait for CLI readers racing owner updates.
+      const db = openInstallDb(dbPath);
       const release = () => {
         try {
           claimLock.exec("COMMIT;");

@@ -186,11 +186,10 @@ _assert_start_result() {
   _seed_install_db
   _write_completion_record
   _run_with_deadline 15 bash "$DAEMON" start
-  [ "$status" -eq 0 ]
+  _assert_start_result 'running'
 
   _run_with_deadline 10 bash "$DAEMON" start
-  [ "$status" -eq 0 ]
-  printf '%s\n' "$output" | grep -Fq 'already running'
+  _assert_start_result 'already running'
   bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 

@@ -138,6 +138,57 @@ NODE
   [[ "$output" == *"operation is incomplete"* ]]
 }
 
+@test "agmsgd entrypoint waits for a CLI read lock before marking ready" {
+  # Instrument the copied module before hashing it. Synchronize a separate
+  # reader after ownership is committed, exactly at the ready-write boundary.
+  node - "$SCRIPTS/daemon/main.mjs" <<'NODE'
+const { readFileSync, writeFileSync } = require('node:fs');
+const path = process.argv[2];
+const source = readFileSync(path, 'utf8');
+const needle = '    markReady(db, owned.gen);';
+if (source.split(needle).length !== 2) throw new Error('ready insertion point must occur exactly once');
+const insert = `
+    const { spawn } = await import("node:child_process");
+    const reader = spawn(process.execPath, ["--input-type=module", "-e", \`
+      import { DatabaseSync } from "node:sqlite";
+      const db = new DatabaseSync(process.argv[1], { readOnly: true });
+      db.exec("BEGIN; SELECT state FROM daemon_owner;");
+      console.log("locked");
+      setTimeout(() => { db.exec("ROLLBACK"); db.close(); }, 300);
+    \`, installRoot + "/run/install.db"], { stdio: ["ignore", "pipe", "inherit"] });
+    await new Promise((resolve, reject) => {
+      reader.stdout.once("data", resolve);
+      reader.once("error", reject);
+      reader.once("exit", (code) => reject(new Error("reader exited before lock: " + code)));
+    });
+`;
+writeFileSync(path, source.replace(needle, insert + needle));
+NODE
+  _write_completion_record
+  local daemon_log="$TEST_SKILL_DIR/run/contention.log"
+  node "$SCRIPTS/daemon/agmsgd" "$TEST_SKILL_DIR" on 0 > "$daemon_log" 2>&1 &
+  local daemon_pid=$! state="" waited=0
+  while [ "$waited" -lt 100 ]; do
+    state="$(sqlite3 -cmd '.timeout 5000' "$TEST_SKILL_DIR/run/install.db" 'SELECT state FROM daemon_owner;' 2>/dev/null || true)"
+    [ "$state" = ready ] && break
+    kill -0 "$daemon_pid" 2>/dev/null || break
+    waited=$((waited + 1))
+    sleep 0.05
+  done
+  if [ "$state" != ready ]; then
+    cat "$daemon_log" >&2
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    false
+  fi
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"running"* ]]
+  bash "$SCRIPTS/daemon.sh" stop
+  wait "$daemon_pid"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT state FROM daemon_owner;')" = none ]
+}
+
 @test "agmsgd does not claim ownership when an install starts after bootstrap unlock" {
   _inject_incomplete_marker_after_initial_unlock
   _write_completion_record
