@@ -207,6 +207,16 @@ done
 if [ -z "$PORT" ]; then
   echo "codex-monitor: app-server did not report a listening port; starting codex without the agmsg bridge" >&2
   echo "codex-monitor: see $SEAT_LOG" >&2
+  # Say WHY on screen: a spawned seat stops here with nobody watching the log,
+  # and "no port" alone hides a refusal that has a one-line fix.
+  if [ -s "$SEAT_LOG" ]; then
+    echo "codex-monitor: the app-server said:" >&2
+    tail -n 5 "$SEAT_LOG" | sed 's/^/codex-monitor:   /' >&2
+  fi
+  if grep -qi 'non-elevated' "$SEAT_LOG" 2>/dev/null; then
+    echo "codex-monitor: Codex refuses to start its app-server from an elevated (administrator) Windows shell." >&2
+    echo "codex-monitor: run agmsg from a non-elevated shell (over OpenSSH, log in with an account that is not in Administrators)." >&2
+  fi
   kill "$server_bg" 2>/dev/null || true
   exec_plain_codex
 fi
