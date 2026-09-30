@@ -123,6 +123,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
   let controlHandle;
   let gen;
   let stopping = false;
+  let timer;
 
   async function doStop(reason) {
     if (stopping) return;
@@ -172,7 +173,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
 
   const watchState = await captureWatchState(installRoot, manifest, manifestText);
   let polling = false;
-  const timer = setInterval(async () => {
+  timer = setInterval(async () => {
     if (stopping || polling) return;
     polling = true;
     try {
