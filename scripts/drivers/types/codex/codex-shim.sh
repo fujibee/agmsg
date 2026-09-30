@@ -159,6 +159,25 @@ fi
 project="$(project_from_args "$@")"
 command_name="$(first_non_option "$@" || true)"
 
+# agmsgd owns newly launched seats while intent is on, even when the daemon
+# is down. Do not start any app-server, dispatcher or bridge as a fallback.
+daemon_state_lib="$SCRIPT_DIR/../../../lib/daemon-state.sh"
+if [ -f "$daemon_state_lib" ]; then
+  # shellcheck disable=SC1090
+  source "$daemon_state_lib"
+  agmsg_daemon_read_state
+  if [ "${AGMSGD_DESIRED:-unknown}" = on ]; then
+    case "$command_name" in
+      app-server|exec|e|login|logout|mcp|plugin|remote-control|completion|update|doctor|cloud|exec-server|features|debug|apply|a|review|sandbox|help|--help|-h|version|--version|-V) ;;
+      *)
+        echo 'agmsgd handles Codex notices; starting plain Codex without a bridge.' >&2
+        agmsg_daemon_warn_if_stopped always
+        ;;
+    esac
+    exec "$real_codex" "$@"
+  fi
+fi
+
 if ! is_monitor_project "$project"; then
   exec "$real_codex" "$@"
 fi

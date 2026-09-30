@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # agmsgd's CLI ("agmsg daemon start|stop|status|enable|disable").
-# Written to take the subcommand as its own first argument so
-# the future `agmsg` dispatcher (a separate PR/design, decided 2026-09-29)
-# can wrap this file directly without restructuring it. Every message this
-# file prints therefore already says `agmsg daemon ...`, the form users
-# will actually type once that dispatcher exists.
+# Takes the subcommand as its first argument so the `agmsg` dispatcher
+# wraps this file directly. User-facing instructions use `agmsg daemon ...`
+# and give the installed dispatcher's absolute path when PATH is not set.
 #
 # No Node is required for `status` on the fast path: it reads
 # install.db directly with sqlite3 first, and only shells out to Node
@@ -17,6 +15,16 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DB="$SKILL_DIR/run/install.db"
 LOCK_DB="$SKILL_DIR/run/install-op.lock.db"
 LAUNCHER="$SCRIPT_DIR/daemon/agmsgd-launch.sh"
+# shellcheck source=lib/daemon-state.sh
+source "$SCRIPT_DIR/lib/daemon-state.sh"
+# shellcheck source=lib/storage.sh
+source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck source=lib/daemon-seats.sh
+source "$SCRIPT_DIR/lib/daemon-seats.sh"
+
+_path_hint() {
+  printf 'If agmsg is not found, use "%s/scripts/agmsg" daemon %s.\n' "$SKILL_DIR" "$1"
+}
 
 # Overridable so tests never register anything into the REAL resident
 # manager (the real gui launchd domain, the real systemd --user, the real
@@ -392,6 +400,8 @@ cmd_start() {
   state="$(sqlite3 "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
   if [ "$state" = "ready" ] && node "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
     echo "agmsg daemon start: already running"
+    agmsg_daemon_seat_report start
+    _path_hint status
     return 0
   fi
 
@@ -408,8 +418,12 @@ cmd_start() {
   fi
   if _wait_for_ready "$new_op_gen"; then
     echo "agmsg daemon start: running"
+    agmsg_daemon_seat_report start
+    _path_hint status
   else
     echo "agmsg daemon start: did not become ready in time -- check 'agmsg daemon status'" >&2
+    agmsg_daemon_warn_if_stopped always
+    _path_hint status >&2
     return 1
   fi
 }
@@ -465,11 +479,23 @@ cmd_stop() {
 
 cmd_status() {
   _require_install_db
+  agmsg_daemon_read_state
+  local health_rc=0
+  if [ "${AGMSGD_DESIRED:-unknown}" = on ] && [ "${AGMSGD_HEALTH:-unknown}" != ready ]; then
+    agmsg_daemon_recovery_text
+    health_rc=1
+  elif [ "${AGMSGD_HEALTH:-unknown}" = unknown ]; then
+    echo 'agmsg daemon status: install record could not be read; health is unknown'
+    health_rc=1
+  fi
   local node_path
   node_path="$(_resolve_node node 2>/dev/null || true)"
   if [ -n "$node_path" ]; then
-    "$node_path" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR"
-    return $?
+    local status_rc=0
+    "$node_path" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" || status_rc=$?
+    agmsg_daemon_seat_report status
+    [ "$health_rc" -eq 0 ] || return 1
+    return "$status_rc"
   fi
   # K14 fallback: no usable Node at all -- a minimal, honest read straight
   # from install.db rather than the fuller status.mjs decision text.
@@ -477,6 +503,9 @@ cmd_status() {
   state="$(sqlite3 "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || echo "unknown")"
   desired="$(sqlite3 "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null || echo "unknown")"
   echo "agmsg daemon status: state=$state intent=$desired (no usable Node -- a fuller check needs 'agmsg daemon enable')"
+  agmsg_daemon_seat_report status
+  _path_hint enable
+  return "$health_rc"
 }
 
 cmd_enable() {
@@ -484,6 +513,8 @@ cmd_enable() {
   local node_path
   node_path="$(_resolve_node node)" || {
     echo "agmsg daemon enable: no usable Node found (need >= 22.13.0 with node:sqlite). Install one and try again." >&2
+    echo 'Install Node from https://nodejs.org/en/download, then run agmsg daemon enable.' >&2
+    _path_hint enable >&2
     return 1
   }
   local node_version
@@ -517,8 +548,11 @@ cmd_disable() {
     echo "agmsg daemon disable: service was unregistered but agmsgd has not confirmed stopping -- check 'agmsg daemon status'" >&2
     return 1
   fi
-  echo "agmsg daemon disable: agmsgd turned off. Codex messages will go through the existing bridge again."
-  echo "agmsg daemon disable: any Codex session started while agmsgd was in use needs to be restarted to get its bridge back."
+  echo 'agmsg daemon disable: agmsgd turned off. Existing bridges continue to deliver notices; new Codex launches get a bridge.'
+  echo 'Codex sessions without a bridge must be restarted. Until then they receive no new notices; unread messages are preserved. Restart with codex resume, then enter $agmsg actas <name> in that Codex session.'
+  echo 'Notices already accepted by the Codex queue are not cancelled and may appear once more.'
+  agmsg_daemon_seat_report disable
+  _path_hint disable
 }
 
 case "${1:-}" in

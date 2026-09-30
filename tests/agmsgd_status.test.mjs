@@ -4,6 +4,17 @@ import { classify } from "../scripts/daemon/status.mjs";
 
 const baseOwner = { gen: 1, version: "1.6.0", socket: "/tmp/x.sock" };
 
+test("enabled intent never reports a never-started or dead executor as healthy", () => {
+  for (const owner of [{ ...baseOwner, gen: 0, state: "none" }, { ...baseOwner, state: "ready" }]) {
+    const result = classify({ owner, intent: { desired: "on" }, alive: false, reachable: true,
+      lastAttempt: { reason: "restart limit reached" } });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.text, /restart limit reached/);
+    assert.match(result.text, /agmsg daemon start/);
+    assert.match(result.text, /agmsg daemon disable/);
+  }
+});
+
 test("ready + reachable -> running, exit 0", () => {
   const r = classify({ owner: { ...baseOwner, state: "ready" }, intent: { desired: "on" }, alive: true, reachable: true });
   assert.equal(r.exitCode, 0);

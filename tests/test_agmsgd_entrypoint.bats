@@ -80,7 +80,8 @@ NODE
 
   local socket="" waited=0
   while [ -z "$socket" ]; do
-    socket="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT socket FROM daemon_owner WHERE state = 'ready';" 2>/dev/null)"
+    # Startup updates owner state concurrently; wait for its short DB write.
+    socket="$(sqlite3 -cmd '.timeout 5000' "$TEST_SKILL_DIR/run/install.db" "SELECT socket FROM daemon_owner WHERE state = 'ready';" 2>/dev/null)"
     [ -n "$socket" ] && break
     waited=$((waited + 1))
     if [ "$waited" -ge 100 ]; then

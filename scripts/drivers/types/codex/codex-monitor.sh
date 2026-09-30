@@ -103,6 +103,21 @@ esac
 
 PROJECT="$(cd "$PROJECT" && pwd)"
 
+# Direct monitor-wrapper users follow the same intent rule as shim users.
+# This path must run before creating the seat or any long-lived process.
+# shellcheck source=../../../lib/daemon-state.sh
+source "$SCRIPT_DIR/../../../lib/daemon-state.sh"
+agmsg_daemon_read_state
+if [ "${AGMSGD_DESIRED:-unknown}" = on ]; then
+  echo 'agmsgd handles Codex notices; starting plain Codex without a bridge.' >&2
+  agmsg_daemon_warn_if_stopped always
+  cd "$PROJECT"
+  case "$CODEX_COMMAND" in
+    codex) exec "$REAL_CODEX" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
+    resume) exec "$REAL_CODEX" resume ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
+  esac
+fi
+
 # Fail-open: never let a broken bridge block codex. If the agmsg app-server can't
 # be brought up — e.g. a codex release changes the app-server interface and the
 # launch/port detection fails — hand off to a plain codex session (no --remote

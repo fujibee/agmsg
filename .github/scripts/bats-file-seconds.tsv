@@ -21,16 +21,10 @@
 # is two real perf fixes, not broad drift: test_remote_engine_start_refusal.bats
 # 660s->43s and test_remote_status_liveness.bats 346s->80s are both #1252
 # (shortened the two slowest tests' production-readiness wait). A third
-# file, test_watch.bats, measured 317s->2s in this same run -- that IS a
-# real 2s today (the file is quarantined as a whole for #1262, setup()
-# skips every test unconditionally, see that row's own comment), not a
-# stale or misleading number: this table's job is to weight the partition
-# by what a file actually costs the CURRENT run, and 2s is what it costs
-# while quarantined. (A pre-quarantine 317s was pinned here briefly and
-# reverted -- it made the on-paper balance look nicer but actively
-# unbalanced the real schedule, handing ~315s of work to a shard that
-# would not actually spend it; review finding, see the row's own comment
-# for the reasoning #1318 needs when it un-quarantines the file.) Every
+# file, test_watch.bats, measured 317s->2s in that run because the whole
+# file was quarantined for #1262. Its setup skipped every test, so 2s was
+# the actual cost while quarantined. The targeted refresh below restores
+# its active cost after the quarantine was removed. Every
 # other file moved by single-digit seconds either way. So this window's
 # imbalance was not organic, even drift -- it was two real fixes plus one
 # quarantine, and neither is the kind of thing that keeps happening on a
@@ -49,9 +43,20 @@
 # run's shard skew (as happened here) triggers a refresh. Refresh by
 # re-running this extraction against a green run's bats-timings artifacts.
 #
+# Targeted refresh, 2026-09-29: test_ext_tool_jev_handle.bats completed in
+# 604s in macOS job 109704655665, run 36657411860, head 4c49efe1.
+# test_watch.bats is no longer quarantined: its unchanged 40-test suite
+# completed in 215.18s locally on macOS at integration head 96b43b51.
+# test_agmsgd_switch.bats completed its 16 checks in 9.74s locally on macOS
+# after the internal-entrypoint suppression fix; rounded to 10 seconds.
+# Those two costs replace the missing-file estimate and historical 2s row.
+# Adding a test file changes the greedy partition, so stale costs can move
+# both expensive suites into a shard that exceeds the 30-minute job budget.
+#
 # Columns: basename<TAB>seconds. Sorted by basename for a legible diff.
 test_actas_integration.bats	54
 test_actas_lock.bats	34
+test_agmsgd_switch.bats	10
 test_antigravity_resume.bats	1
 test_antigravity_transport.bats	20
 test_api.bats	63
@@ -86,6 +91,7 @@ test_endpoint_table_node.bats	1
 test_enforced_assertions.bats	1
 test_engine_inherited_fds.bats	21
 test_export.bats	30
+test_ext_tool_jev_handle.bats	604
 test_harness_self_name_off.bats	1
 test_hash.bats	7
 test_herdr_cli_routing.bats	2
@@ -167,16 +173,8 @@ test_transcript_exists.bats	2
 test_type_registry.bats	35
 test_unguarded_env_reads.bats	2
 test_wait_helpers.bats	41
-# 2s is real, not stale -- the whole file is quarantined for #1262
-# (setup() skips every test unconditionally, tracked by #1318), so this is
-# what it actually costs THIS run, which is what this table exists to
-# reflect (a pinned pre-quarantine value was tried and reverted: it gave a
-# nicer-looking on-paper balance but actively unbalanced the real schedule,
-# handing 315s of imaginary work to whichever shard it landed in while that
-# shard really finished ~300s early). #1318 must re-measure and update this
-# row when it un-quarantines the file -- until then, reuse 2, not a stale
-# pre-quarantine number.
-test_watch.bats	2
+# Re-measured after the whole-file quarantine was removed; see refresh above.
+test_watch.bats	215
 test_watch_install_changed.bats	34
 test_watch_once.bats	53
 test_watch_process_count.bats	18
