@@ -73,6 +73,27 @@ teardown() {
   ! grep -q "^monitor" "$CALL_LOG"
 }
 
+@test "codex shim: a non-monitor launch on an elevated Windows shell adds --no-daemon, and only for a session launch" {
+  bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+
+  AGMSG_WINDOWS_ELEVATED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    run bash "$TYPES/codex/codex-shim.sh" resume --last
+  [ "$status" -eq 0 ]
+  grep -qx 'real-codex <--no-daemon> <resume> <--last>' "$CALL_LOG"
+
+  # A subcommand that is not a session launch never gets it (app-server rejects the flag).
+  : > "$CALL_LOG"
+  AGMSG_WINDOWS_ELEVATED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    run bash "$TYPES/codex/codex-shim.sh" app-server --listen ws://127.0.0.1:0
+  grep -qx 'real-codex <app-server> <--listen> <ws://127.0.0.1:0>' "$CALL_LOG"
+
+  # Not elevated: unchanged.
+  : > "$CALL_LOG"
+  AGMSG_WINDOWS_ELEVATED=0 AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    run bash "$TYPES/codex/codex-shim.sh" resume --last
+  grep -qx 'real-codex <resume> <--last>' "$CALL_LOG"
+}
+
 @test "codex shim: noninteractive codex subcommands pass through even in monitor mode" {
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 

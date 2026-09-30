@@ -159,17 +159,34 @@ fi
 project="$(project_from_args "$@")"
 command_name="$(first_non_option "$@" || true)"
 
-if ! is_monitor_project "$project"; then
+use_monitor=1
+is_monitor_project "$project" || use_monitor=0
+
+# A top-level Codex launch that does not go through the monitor bridge runs the
+# real binary directly. On an elevated Windows shell that binary refuses to
+# start its shared background server unless told not to, so the flag Codex
+# names for the case is added there -- and only there. Subcommands that are not
+# a session launch never come through here (see the case below).
+exec_plain_launch() {
+  if [ -r "$SCRIPT_DIR/../../../lib/windows-elevation.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/../../../lib/windows-elevation.sh"
+    if agmsg_windows_shell_elevated; then
+      exec "$real_codex" --no-daemon "$@"
+    fi
+  fi
   exec "$real_codex" "$@"
-fi
+}
 
 monitor_cmd="${AGMSG_CODEX_MONITOR_CMD:-$SCRIPT_DIR/codex-monitor.sh}"
 
 case "$command_name" in
   "")
+    [ "$use_monitor" = 1 ] || exec_plain_launch "$@"
     AGMSG_REAL_CODEX="$real_codex" exec "$monitor_cmd" --project "$project" --codex-command codex -- "$@"
     ;;
   resume)
+    [ "$use_monitor" = 1 ] || exec_plain_launch "$@"
     monitor_args=()
     removed_resume=0
     for arg in "$@"; do
@@ -194,6 +211,7 @@ case "$command_name" in
     exec "$real_codex" "$@"
     ;;
   *)
+    [ "$use_monitor" = 1 ] || exec_plain_launch "$@"
     AGMSG_REAL_CODEX="$real_codex" exec "$monitor_cmd" --project "$project" --codex-command codex -- "$@"
     ;;
 esac
