@@ -138,6 +138,21 @@ _launcher_bridge_pids() {
 # teardown_test_env's rm -rf from racing a process still touching this test's
 # $TEST_SKILL_DIR (#595/#615).
 teardown() {
+  if [ "${NATIVE_BRIDGE_FIXTURE:-}" = 1 ]; then
+    : > "$RUN_DIR/native-fixture-stop"
+    local i started=0 finished=0
+    for i in {1..450}; do
+      started="$(wc -l < "$RUN_DIR/native-spawns" 2>/dev/null || echo 0)"
+      finished="$(wc -l < "$RUN_DIR/native-exits" 2>/dev/null || echo 0)"
+      [ "$finished" -ge "$started" ] && break
+      sleep 0.1
+    done
+    [ -z "${NATIVE_PARENT:-}" ] || kill "$NATIVE_PARENT" 2>/dev/null || true
+    [ -z "${NATIVE_DISPATCHER:-}" ] || wait "$NATIVE_DISPATCHER" 2>/dev/null || true
+    sleep 1
+    teardown_test_env
+    return
+  fi
   local pid pids
   for pid in ${TEST_LIFETIME_PIDS:-}; do
     kill "$pid" 2>/dev/null || true
@@ -153,6 +168,94 @@ teardown() {
     wait_for_pid_exit "$pid" || true
   done
   teardown_test_env
+}
+
+# Replace only this test's isolated mock with a native Node that publishes its
+# own pidfile and complete Windows lease after a controlled delay. It exits on a
+# fixture stop flag (or on an actual bridge stop request), so teardown never
+# signals a native PID through Git Bash's unrelated pid namespace.
+setup_native_bridge_fixture() {
+  export NATIVE_BRIDGE_FIXTURE=1
+  : > "$RUN_DIR/native-spawns"
+  : > "$RUN_DIR/native-exits"
+  export AGMSG_NODE="$(command -v node)"
+  source "$SCRIPTS/lib/hash.sh"
+  export NATIVE_PROJECT_HASH="$(printf '%s' "$PROJ" | agmsg_sha1)"
+  local pair_hash
+  pair_hash="$(printf 'team\talice' | agmsg_sha1)"
+  export NATIVE_PAIRS_HASH="$(printf '%s' "$pair_hash" | agmsg_sha1)"
+  cat > "$SCRIPTS/drivers/types/codex/codex-bridge.js" <<'EOF'
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execFileSync } = require('child_process');
+const run = path.resolve(__dirname, '../../../../run');
+const pid = process.pid;
+const args = process.argv.slice(2);
+const value = (key) => args[args.indexOf(key) + 1];
+const [team, agent] = value('--pair').split('\t');
+const pidfile = path.join(run, `codex-bridge.${team}.${agent}.pid`);
+const lease = path.join(run, `codex-bridge-lease.${pid}`);
+const stop = path.join(run, `codex-bridge-stop.${pid}`);
+fs.appendFileSync(path.join(run, 'native-spawns'), `${pid}\n`);
+setTimeout(() => {
+  if (process.env.NATIVE_FIXTURE_MODE === 'never') {
+    fs.writeFileSync(pidfile, `${pid}\n`);
+    return;
+  }
+  const start = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    `(Get-Process -Id ${pid}).StartTime.Ticks`], { encoding: 'utf8' }).trim();
+  fs.writeFileSync(pidfile, `${pid}\n`);
+  const body = [
+    'v=1',
+    `project=${process.env.NATIVE_FIXTURE_MODE === 'mismatch' ? '0'.repeat(40) : process.env.NATIVE_PROJECT_HASH}`,
+    `pairs=${process.env.NATIVE_PAIRS_HASH}`,
+    `host=${os.hostname()}`,
+    `pid=${pid}`,
+    `start=${start}`,
+    'startsrc=pwsh',
+  ].join('\n') + '\n';
+  fs.writeFileSync(`${lease}.tmp`, body);
+  fs.renameSync(`${lease}.tmp`, lease);
+}, Number(process.env.NATIVE_PUBLISH_DELAY_MS || 1500));
+const timer = setInterval(() => {
+  let stopFile = false;
+  try { stopFile = fs.statSync(stop).isFile(); } catch (_) {}
+  if (stopFile) {
+    if (process.env.NATIVE_FIXTURE_HOLD_STOP === '1' &&
+        !fs.existsSync(path.join(run, 'native-fixture-allow-stop'))) return;
+    fs.copyFileSync(stop, `${stop}.ack`);
+  } else if (!fs.existsSync(path.join(run, 'native-fixture-stop'))) {
+    return;
+  }
+  clearInterval(timer);
+  try { if (fs.readFileSync(pidfile, 'utf8').trim() === String(pid)) fs.unlinkSync(pidfile); } catch (_) {}
+  try { fs.unlinkSync(lease); } catch (_) {}
+  fs.appendFileSync(path.join(run, 'native-exits'), `${pid}\n`);
+  process.exit(0);
+}, 100);
+setTimeout(() => {
+  fs.appendFileSync(path.join(run, 'native-exits'), `${pid}\n`);
+  process.exit(0);
+}, 180000).unref();
+EOF
+}
+
+start_native_launcher() {
+  sleep 180 3>&- & NATIVE_PARENT=$!
+  bash "$LAUNCHER" codex "$PROJ" 'ws://127.0.0.1:1' "$NATIVE_PARENT" >/dev/null 2>&1 3>&- &
+  NATIVE_DISPATCHER=$!
+}
+
+wait_for_native_spawns() {
+  local want="$1" i count
+  for i in {1..200}; do
+    count=0
+    [ ! -f "$RUN_DIR/native-spawns" ] || count="$(wc -l < "$RUN_DIR/native-spawns")"
+    [ "$count" -ge "$want" ] && return 0
+    sleep 0.1
+  done
+  return 1
 }
 
 # Write a role-session record (team, agent) -> thread for a project.
@@ -638,6 +741,137 @@ EOF
   grep -q -- '--thread thread-win' "$CAPTURE"
 }
 
+@test "launcher: Windows Git Bash background pid differs from native Node pid" {
+  skip_unless_windows "requires Git Bash and a native Node"
+  node -e 'console.log(process.pid); setTimeout(() => {}, 1500)' > "$RUN_DIR/native-pid-probe" &
+  local local_pid=$! native_pid="" i
+  for i in {1..50}; do
+    [ -s "$RUN_DIR/native-pid-probe" ] && break
+    sleep 0.05
+  done
+  native_pid="$(tr -d '\r\n' < "$RUN_DIR/native-pid-probe")"
+  [ -n "$native_pid" ]
+  [ "$local_pid" != "$native_pid" ]
+  source "$SCRIPTS/lib/instance-id.sh"
+  _agmsg_pid_alive_local "$local_pid"
+  refute _agmsg_pid_alive "$local_pid"
+  _agmsg_pid_alive "$native_pid"
+  wait "$local_pid"
+}
+
+@test "launcher: Windows waits for native pidfile and lease without a second spawn" {
+  skip_unless_windows "requires a native Node lease"
+  setup_native_bridge_fixture
+  export NATIVE_PUBLISH_DELAY_MS=2500
+  put_record team alice thread-native "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 1
+  [ ! -f "$RUN_DIR/codex-bridge.team.alice.pid" ]
+  local native_pid i
+  native_pid="$(head -n 1 "$RUN_DIR/native-spawns")"
+  for i in {1..150}; do
+    [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ] && break
+    sleep 0.1
+  done
+  [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ]
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.pid")" = "$native_pid" ]
+  sleep 3
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
+}
+
+@test "launcher: Windows rejects a mismatched lease and does not respawn after timeout" {
+  skip_unless_windows "requires a native Node lease"
+  setup_native_bridge_fixture
+  export NATIVE_FIXTURE_MODE=mismatch NATIVE_PUBLISH_DELAY_MS=300
+  put_record team alice thread-mismatch "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 1
+  local native_pid i
+  native_pid="$(head -n 1 "$RUN_DIR/native-spawns")"
+  for i in {1..100}; do
+    [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ] && break
+    sleep 0.1
+  done
+  [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ]
+  grep -q "^project=$(printf '0%.0s' {1..40})$" "$RUN_DIR/codex-bridge-lease.$native_pid"
+  sleep 32
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
+}
+
+@test "launcher: Windows role removal during publication retires only a verified bridge" {
+  skip_unless_windows "requires a native Node lease"
+  setup_native_bridge_fixture
+  export NATIVE_PUBLISH_DELAY_MS=2000
+  put_record team alice thread-leave "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 1
+  bash "$SCRIPTS/leave.sh" team alice >/dev/null
+  local native_pid i
+  native_pid="$(head -n 1 "$RUN_DIR/native-spawns")"
+  for i in {1..200}; do
+    [ -f "$RUN_DIR/codex-bridge-stop.$native_pid.ack" ] && break
+    sleep 0.1
+  done
+  [ -f "$RUN_DIR/codex-bridge-stop.$native_pid.ack" ]
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
+}
+
+@test "launcher: Windows transient request read during publication does not retire" {
+  skip_unless_windows "requires a native Node lease"
+  setup_native_bridge_fixture
+  export NATIVE_PUBLISH_DELAY_MS=2500
+  put_record team alice thread-transient "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 1
+  local native_pid i request_file
+  native_pid="$(head -n 1 "$RUN_DIR/native-spawns")"
+  request_file="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  mv "$request_file" "$request_file.temporary"
+  sleep 0.5
+  mv "$request_file.temporary" "$request_file"
+  for i in {1..150}; do
+    [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ] && break
+    sleep 0.1
+  done
+  [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ]
+  sleep 2
+  [ ! -e "$RUN_DIR/codex-bridge-stop.$native_pid" ]
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
+  source "$SCRIPTS/lib/instance-id.sh"
+  _agmsg_pid_alive "$native_pid"
+}
+
+@test "launcher: Windows failed retire keeps child lock until exit is proved" {
+  skip_unless_windows "requires a native Node lease"
+  setup_native_bridge_fixture
+  export NATIVE_PUBLISH_DELAY_MS=300 NATIVE_FIXTURE_HOLD_STOP=1
+  put_record team alice thread-retire-failure "$PROJ" codex
+  start_native_launcher
+  wait_for_native_spawns 1
+  local native_pid i stopfile
+  native_pid="$(head -n 1 "$RUN_DIR/native-spawns")"
+  for i in {1..150}; do
+    [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ] && break
+    sleep 0.1
+  done
+  [ -f "$RUN_DIR/codex-bridge-lease.$native_pid" ]
+  stopfile="$RUN_DIR/codex-bridge-stop.$native_pid"
+  bash "$SCRIPTS/leave.sh" team alice >/dev/null
+  sleep 7
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
+  source "$SCRIPTS/lib/instance-id.sh"
+  _agmsg_pid_alive "$native_pid"
+  [ -f "$stopfile" ]
+  [ ! -f "$stopfile.ack" ]
+  : > "$RUN_DIR/native-fixture-allow-stop"
+  for i in {1..200}; do
+    [ -f "$stopfile.ack" ] && break
+    sleep 0.1
+  done
+  [ -f "$stopfile.ack" ]
+  [ "$(wc -l < "$RUN_DIR/native-spawns")" -eq 1 ]
+}
+
 # --- #937: reap a same-(project,role) orphan via its per-PID identity lease ---
 
 # Bridges whose pair set is EXACTLY {<name>}: one `--pair`, and that pair naming
@@ -1014,14 +1248,13 @@ _run_start_token() { # <pid> -> runs _start_token in a subshell
   [ -n "${output#*"$tab"}" ]
 }
 
-@test "launcher: CLANGARM uname selects the Windows start token path" {
+@test "launcher: CLANGARM MSYSTEM selects the Windows start token path" {
   local stubdir="$TEST_SKILL_DIR/clangarm-bin"
   mkdir -p "$stubdir"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" CLANGARM64_NT-10.0' > "$stubdir/uname"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" 639231441791462826' > "$stubdir/powershell.exe"
-  chmod +x "$stubdir/uname" "$stubdir/powershell.exe"
+  chmod +x "$stubdir/powershell.exe"
 
-  PATH="$stubdir:$PATH" _run_start_token 123
+  MSYSTEM=CLANGARM64 PATH="$stubdir:$PATH" _run_start_token 123
   [ "$status" -eq 0 ]
   [ "$output" = $'pwsh\t639231441791462826' ]
 }
@@ -1040,4 +1273,106 @@ _run_start_token() { # <pid> -> runs _start_token in a subshell
   [ "${output%%"$tab"*}" = pwsh ]
   local tok="${output#*"$tab"}"
   case "$tok" in ''|*[!0-9]*) false ;; esac
+}
+
+_load_safe_stop_functions() {
+  local pattern
+  source "$SCRIPTS/lib/hash.sh"
+  pattern='/^_read_lease() {/,/^}/p;/^_read_stop_record() {/,/^}/p;/^_write_stop_record() {/,/^}/p;/^_windows_process_state() {/,/^}/p;/^_windows_stop_request_from_fence() {/,/^}/p;/^_windows_begin_retire() {/,/^}/p;/^_windows_wait_exit_proof() {/,/^}/p;/^_windows_current_bridge_valid() {/,/^}/p'
+  eval "$(sed -n "$pattern" "$LAUNCHER")"
+  TAB=$'\t'
+  PROJECT_HASH="$(printf '%s' "$PROJ" | agmsg_sha1)"
+  BRIDGE_PAIRS_HASH="$(printf '%s' pair-set | agmsg_sha1)"
+  retire_fence="$RUN_DIR/codex-bridge-retire.$PROJECT_HASH.$BRIDGE_PAIRS_HASH"
+  appserver_file="$RUN_DIR/current.appserver"
+  thread_file="$RUN_DIR/current.thread"
+  _REAP_WAIT_TICKS=1
+}
+
+_safe_stop_probe_stub() {
+  local stubdir="$TEST_SKILL_DIR/safe-stop-bin"
+  mkdir -p "$stubdir"
+  cat > "$stubdir/powershell.exe" <<'EOF'
+#!/usr/bin/env bash
+case "${POWERSHELL_RESULT:-UNKNOWN}" in
+  UNKNOWN) exit 3 ;;
+  *) printf '%s\n' "$POWERSHELL_RESULT" ;;
+esac
+EOF
+  chmod +x "$stubdir/powershell.exe"
+  ln -s powershell.exe "$stubdir/pwsh"
+  export PATH="$stubdir:$PATH"
+}
+
+@test "launcher safe-stop: PowerShell ABSENT and PID reuse are exit proof; UNKNOWN is not" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  POWERSHELL_RESULT=ABSENT run _windows_process_state 123
+  [ "$status" -eq 0 ] && [ "$output" = ABSENT ]
+  POWERSHELL_RESULT=$'LIVE\t222' run _windows_process_state 123
+  [ "$status" -eq 0 ] && [ "$output" = $'LIVE\t222' ]
+  POWERSHELL_RESULT=UNKNOWN run _windows_process_state 123
+  [ "$status" -ne 0 ] && [ "$output" = UNKNOWN ]
+}
+
+@test "launcher safe-stop: an exact lease creates durable fence and atomic request" {
+  _load_safe_stop_functions
+  local pid=123 start=638622100000000000 host
+  host="$(hostname)"
+  printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=pwsh\n' \
+    "$PROJECT_HASH" "$BRIDGE_PAIRS_HASH" "$host" "$pid" "$start" > "$RUN_DIR/codex-bridge-lease.$pid"
+  _windows_begin_retire "$pid" $'pwsh\t638622100000000000'
+  [ -f "$retire_fence" ]
+  [ -f "$RUN_DIR/codex-bridge-stop.$pid" ]
+  cmp -s "$retire_fence" "$RUN_DIR/codex-bridge-stop.$pid"
+  _read_stop_record "$retire_fence"
+  [ "$rpid" = "$pid" ] && [ "$rstart" = "$start" ]
+  [ "$rexpires" -le "$(( $(date +%s) + 10 ))" ]
+  ! compgen -G "$retire_fence.tmp.*" >/dev/null
+}
+
+@test "launcher safe-stop: malformed schema fails closed and preserves the fence" {
+  _load_safe_stop_functions
+  printf 'v=1\nproject=%s\nunknown=x\n' "$PROJECT_HASH" > "$retire_fence"
+  run _windows_stop_request_from_fence
+  [ "$status" -ne 0 ]
+  [ -f "$retire_fence" ]
+  ! compgen -G "$RUN_DIR/codex-bridge-stop.*" >/dev/null
+}
+
+@test "launcher safe-stop: UNKNOWN timeout keeps fence and does not manufacture exit proof" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  local now=$(( $(date +%s) + 10 ))
+  _write_stop_record "$retire_fence" 123 638622100000000000 "$(printf nonce | agmsg_sha1)" "$now" "$(hostname)"
+  POWERSHELL_RESULT=UNKNOWN run _windows_wait_exit_proof
+  [ "$status" -ne 0 ]
+  [ -f "$retire_fence" ]
+}
+
+@test "launcher safe-stop: changed StartTime.Ticks proves PID reuse without ack" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  local now=$(( $(date +%s) + 10 ))
+  _write_stop_record "$retire_fence" 123 638622100000000000 "$(printf nonce | agmsg_sha1)" "$now" "$(hostname)"
+  POWERSHELL_RESULT=$'LIVE\t638622100000000001' run _windows_wait_exit_proof
+  [ "$status" -eq 0 ]
+  [ ! -f "$RUN_DIR/codex-bridge-stop.123.ack" ]
+}
+
+@test "launcher safe-stop: replacement is accepted only with live token, lease, app-server, and thread match" {
+  _load_safe_stop_functions
+  _safe_stop_probe_stub
+  local pid=456 token=638622100000000222 host
+  host="$(hostname)"
+  printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=pwsh\n' \
+    "$PROJECT_HASH" "$BRIDGE_PAIRS_HASH" "$host" "$pid" "$token" > "$RUN_DIR/codex-bridge-lease.$pid"
+  printf '%s' ws://127.0.0.1:1 > "$appserver_file"
+  printf '%s' thread-new > "$thread_file"
+  POWERSHELL_RESULT=$'LIVE\t638622100000000222' run _windows_current_bridge_valid "$pid" ws://127.0.0.1:1 thread-new
+  [ "$status" -eq 0 ]
+  POWERSHELL_RESULT=$'LIVE\t638622100000000223' run _windows_current_bridge_valid "$pid" ws://127.0.0.1:1 thread-new
+  [ "$status" -ne 0 ]
+  POWERSHELL_RESULT=$'LIVE\t638622100000000222' run _windows_current_bridge_valid "$pid" ws://127.0.0.1:1 wrong-thread
+  [ "$status" -ne 0 ]
 }

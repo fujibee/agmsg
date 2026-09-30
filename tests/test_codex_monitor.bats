@@ -290,6 +290,9 @@ EOF
 case "${1:-}" in
   --version) echo "codex-cli 0.144.1"; exit 0 ;;
   app-server)
+    printf 'flag=%s\nseat=%s\nurl=%s\n' \
+      "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" "${AGMSG_CODEX_SEAT_KEY:-}" \
+      "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" > "$TEST_PROJECT/app-server-env"
     node - <<'JS' &
 const net = require('net');
 const s = net.createServer((c) => c.destroy());
@@ -316,6 +319,18 @@ EOF
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
   [ "$status" -eq 0 ]
   grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
+  grep -qx 'flag=1' "$TEST_PROJECT/app-server-env"
+  grep -qx 'url=' "$TEST_PROJECT/app-server-env"
+  local seat record port restored
+  seat="$(sed -n 's/^seat=//p' "$TEST_PROJECT/app-server-env")"
+  [ -n "$seat" ]
+  record="$TEST_SKILL_DIR/run/codex-app-server.$seat.record"
+  [ -f "$record" ]
+  port="$(sed -n 's/^port=//p' "$record")"
+  restored="$(SKILL_DIR="$TEST_SKILL_DIR" AGMSG_CODEX_SEAT_KEY="$seat" \
+    bash -c 'source "$1"; _agmsg_codex_app_server_url "$2"' bash \
+      "$TYPES/codex/_app-server.sh" "$TEST_PROJECT")"
+  [ "$restored" = "ws://127.0.0.1:$port" ]
   [[ "$output" != *"did not report a listening port"* ]]
 }
 
