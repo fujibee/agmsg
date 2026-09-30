@@ -30,15 +30,17 @@
 [ -n "${_AGMSG_STORAGE_SH:-}" ] && return 0
 _AGMSG_STORAGE_SH=1
 
-# One shared entry check for ordinary user operations. Internal workers and
-# sourced libraries do not emit notices, and stdout remains machine-readable.
+# Ordinary operations on a non-daemon install pay only a file-existence check.
+# Watchers suppress this entry check in themselves and all child operations.
 _agmsg_entry_dir="${0%/*}"
 [ "$_agmsg_entry_dir" != "$0" ] || _agmsg_entry_dir=.
-if [ -f "$0" ] && [ -f "$_agmsg_entry_dir/lib/daemon-state.sh" ]; then
-  case "${0##*/}" in daemon.sh|doctor.sh|delivery.sh) ;; *)
-    # shellcheck disable=SC1091
-    source "$_agmsg_entry_dir/lib/daemon-state.sh"
-    agmsg_daemon_warn_if_stopped || true
+if [ "${AGMSG_DAEMON_NOTICE_SKIP:-0}" != 1 ] && [ -f "$_agmsg_entry_dir/../run/install.db" ]; then
+  case "${0##*/}" in daemon.sh|doctor.sh|delivery.sh|watch.sh|session-start.sh|session-end.sh|check-inbox.sh) ;; *)
+    if [ -f "$_agmsg_entry_dir/lib/daemon-state.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$_agmsg_entry_dir/lib/daemon-state.sh"
+      agmsg_daemon_warn_if_stopped || true
+    fi
     ;;
   esac
 fi

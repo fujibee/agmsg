@@ -102,6 +102,41 @@ setup() {
   assert_contains 'stopped while enabled'
 }
 
+@test "storage skips daemon helper loading without an install record" {
+  mv "$TEST_SKILL_DIR/run/install.db" "$TEST_SKILL_DIR/run/saved.db"
+  printf '\nprintf "helper loaded\\n" >> "$CALL_LOG"\n' >> "$SCRIPTS/lib/daemon-state.sh"
+  run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
+  [ "$status" -eq 0 ]
+  assert_contains alice
+  [ ! -f "$CALL_LOG" ]
+}
+
+@test "watch suppresses daemon helper loading in itself and child operations" {
+  printf '\nprintf "helper loaded\\n" >> "$CALL_LOG"\n' >> "$SCRIPTS/lib/daemon-state.sh"
+  mv "$SCRIPTS/identities.sh" "$SCRIPTS/identities-real.sh"
+  cat > "$SCRIPTS/identities.sh" <<'WRAPPER'
+#!/usr/bin/env bash
+printf 'skip=%s\n' "${AGMSG_DAEMON_NOTICE_SKIP:-0}" >> "$CALL_LOG"
+exec bash "$SCRIPTS/identities-real.sh" "$@"
+WRAPPER
+  chmod +x "$SCRIPTS/identities.sh"
+  AGMSG_WATCH_INTERVAL=0.1 run bash "$SCRIPTS/watch.sh" notice-test "$TEST_SKILL_DIR/unjoined" claude-code
+  [ "$status" -eq 0 ]
+  assert_lacks 'stopped while enabled'
+  [ "$(cat "$CALL_LOG")" = skip=1 ]
+  [ ! -f "$TEST_SKILL_DIR/run/agmsgd-warning-at" ]
+}
+
+@test "recent warning skips the daemon health query" {
+  run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
+  assert_contains 'stopped while enabled'
+  printf '\nagmsg_daemon_read_state() { printf "unexpected health query\\n" >> "$CALL_LOG"; }\n' >> "$SCRIPTS/lib/daemon-state.sh"
+  run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
+  [ "$status" -eq 0 ]
+  assert_lacks 'stopped while enabled'
+  [ ! -f "$CALL_LOG" ]
+}
+
 @test "warning cleanup removes only past slots and preserves current and newer claims" {
   mkdir -p "$TEST_SKILL_DIR/clock" "$TEST_SKILL_DIR/run/agmsgd-warning-slot.0" "$TEST_SKILL_DIR/run/agmsgd-warning-slot.2" "$TEST_SKILL_DIR/run/agmsgd-warning-slot.unknown"
   printf '#!/usr/bin/env bash\nprintf "1199\\n"\n' > "$TEST_SKILL_DIR/clock/date"

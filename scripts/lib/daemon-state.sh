@@ -76,22 +76,26 @@ agmsg_daemon_recovery_text() {
   printf ' If agmsg is not found, use "%s/scripts/agmsg" daemon start (replace start with disable or enable as needed).\n' "$_AGMSG_DAEMON_ROOT"
 }
 
-agmsg_daemon_warn_if_stopped() (
-  # Subshell keeps any cleanup trap and shell state out of the caller.
+agmsg_daemon_warn_if_stopped() {
+  # Keep health state local without forking a shell that inherits caller FDs.
+  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  local now last=0 marker slot
+  marker="$_AGMSG_DAEMON_ROOT/run/agmsgd-warning-at"
+  if [ "${1:-}" != always ]; then
+    now="$(date +%s)" || return 0
+    [ ! -f "$marker" ] || IFS= read -r last < "$marker" || last=0
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    # Already warned: skip SQLite and process liveness checks entirely.
+    [ "$((now - last))" -ge 600 ] || return 0
+  fi
   agmsg_daemon_read_state
   [ "$AGMSGD_DESIRED" = on ] && [ "$AGMSGD_HEALTH" != ready ] || return 0
   if [ "${1:-}" = always ]; then
     agmsg_daemon_recovery_text >&2
     return 0
   fi
-  local now last=0 marker slot
-  now="$(date +%s)" || return 0
-  marker="$_AGMSG_DAEMON_ROOT/run/agmsgd-warning-at"
-  [ ! -f "$marker" ] || IFS= read -r last < "$marker" || last=0
-  case "$last" in ''|*[!0-9]*) last=0 ;; esac
-  [ "$((now - last))" -ge 600 ] || return 0
-  # Atomic claim per time window; reread the rolling timestamp after claiming
-  # so a boundary does not produce two warnings less than ten minutes apart.
+  # Atomic claim per time window; reread the rolling timestamp after claiming.
+  # Concurrent claims across a boundary can still emit twice (beta limitation).
   # A killed claimant can suppress at most this window, never all future ones.
   slot="$_AGMSG_DAEMON_ROOT/run/agmsgd-warning-slot.$((now / 600))"
   mkdir "$slot" 2>/dev/null || return 0
@@ -112,4 +116,4 @@ agmsg_daemon_warn_if_stopped() (
     [ "$old_window" -lt "$((now / 600))" ] && rmdir "$old" 2>/dev/null || true
   done
   return 0
-)
+}
