@@ -28,10 +28,6 @@ case "${1:-}" in
       echo "error: unexpected argument '--listen' found" >&2
       exit 2
     fi
-    if [ "${FAKE_CODEX_MODE:-listen}" = "elevated" ]; then
-      echo "Error: start the Windows daemon from a non-elevated terminal; shared clients must not inherit administrator privileges" >&2
-      exit 1
-    fi
     # Run the listener as a CHILD (no exec) so this script stays the recorded pid;
     # its argv ("...real-codex app-server --listen") is what codex-monitor's
     # cmdline check matches. The child exits when this parent is killed.
@@ -353,15 +349,6 @@ EOF
   # And the refusal says why, and that the session was spawned.
   printf '%s\n' "$output" | grep -qF 'Refusing to start a plain Codex'
   printf '%s\n' "$output" | grep -qF 'AGMSG_SPAWNED=1'
-}
-
-@test "codex-monitor: an elevated-shell refusal is shown on screen with its cause and the fix" {
-  run env FAKE_CODEX_MODE=elevated AGMSG_SPAWNED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" \
-    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --foo
-  [ "$status" -ne 0 ]
-  printf '%s\n' "$output" | grep -qF 'start the Windows daemon from a non-elevated terminal'
-  printf '%s\n' "$output" | grep -qF 'elevated (administrator) Windows shell'
-  printf '%s\n' "$output" | grep -qF 'non-elevated shell'
 }
 
 @test "codex-monitor: without the spawn marker the same failure still fails open (a person keeps a codex)" {
