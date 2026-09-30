@@ -582,3 +582,49 @@ configured_off() {
   run bash "$SCRIPTS/doctor.sh" --project "$PROJ" --type claude-code
   grep -q 'lock=none' <<<"$output"
 }
+
+# #1507: per-seat run/ records outlive their team and keep claiming its pane.
+# One walk through the whole behavior, with the keep-set in the SAME run: the
+# report never deletes, the prompt defaults to no, and --yes removes exactly the
+# records whose team is provably gone -- not a live team's, not an ambiguous
+# "__" one, not an id-keyed one.
+@test "doctor: reports run/ records of a team that no longer exists, and removes only those on request (#1507)" {
+  local run_dir="$TEST_SKILL_DIR/run" gone='%2Ftmp%2Fsome%2Fproj'   # a project path used as the team name
+  local id_team='11111111-1111-1111-1111-111111111111' id_member='22222222-2222-2222-2222-222222222222'
+  mkdir -p "$run_dir"
+  # A live seat's records: must survive everything below.
+  printf 'herdr:live:w1:p1\t/proj\tclaude-code\n' > "$run_dir/spawn.team__alice"
+  printf 'name=team-alice\nteam=team\nagent=alice\n' > "$run_dir/role-session.team__alice"
+  # The orphan: all four record families, the pane claimed by spawn.
+  printf 'herdr:gone:w1:p9\t/proj\tclaude-code\n' > "$run_dir/spawn.${gone}__worker"
+  printf 'name=x\nteam=/tmp/some/proj\nagent=worker\nsession=s1\n' > "$run_dir/role-session.${gone}__worker"
+  printf 'owner\n' > "$run_dir/actas.${gone}__worker.session"
+  : > "$run_dir/ready.${gone}__worker"
+  # Cannot be attributed to one seat ("x___y" cuts as x_/y and as x/_y), and an id-keyed record.
+  printf 'herdr:amb:w1:p2\n' > "$run_dir/spawn.x___y"
+  printf 'herdr:id:w1:p3\n' > "$run_dir/spawn.${id_team}__${id_member}"
+
+  run bash "$SCRIPTS/doctor.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"orphaned run/ records"* ]]
+  [[ "$output" == *"team: /tmp/some/proj  agent: worker  pane: herdr:gone:w1:p9"* ]]
+  [[ "$output" == *"not attributable to one seat"* ]]
+  [[ "$output" != *"agent: alice"* ]]
+  [[ "$output" != *"herdr:id:w1:p3"* ]]
+  [ -f "$run_dir/spawn.${gone}__worker" ]            # reporting deletes nothing
+
+  run bash -c 'echo n | bash "$1" --remove-orphan-run-records' _ "$SCRIPTS/doctor.sh"
+  [ "$status" -eq 1 ]
+  [ -f "$run_dir/spawn.${gone}__worker" ]            # the prompt defaults to no
+
+  run bash "$SCRIPTS/doctor.sh" --remove-orphan-run-records --yes
+  [ "$status" -eq 0 ]
+  [ ! -e "$run_dir/spawn.${gone}__worker" ]
+  [ ! -e "$run_dir/role-session.${gone}__worker" ]
+  [ ! -e "$run_dir/actas.${gone}__worker.session" ]
+  [ ! -e "$run_dir/ready.${gone}__worker" ]
+  [ -f "$run_dir/spawn.team__alice" ]
+  [ -f "$run_dir/role-session.team__alice" ]
+  [ -f "$run_dir/spawn.x___y" ]
+  [ -f "$run_dir/spawn.${id_team}__${id_member}" ]
+}

@@ -112,24 +112,33 @@ _agmsg_team_delete_rm_family() {   # <team> <name> <prefix> <suffix> [rm_reclaim
 # --delete --force (#1493) does not call leave.sh per member before this
 # runs -- the config/journal this reads from is still the untouched original,
 # so no extra name list needs to be threaded in from the caller.
+# One (team, name) pair's share of the sweep below. Also what
+# `doctor.sh --remove-orphan-run-records` (#1507) calls for a seat whose team is
+# already gone, so both entry points share one definition of "this pair's
+# records" and one ambiguity guard.
+agmsg_team_delete_seat_run_records() {   # <team> <name>
+  local team="$1" name="$2" t a
+  _agmsg_team_delete_rm_family "$team" "$name" actas .session 1
+  _agmsg_team_delete_rm_family "$team" "$name" ready "" 0
+  _agmsg_team_delete_rm_family "$team" "$name" spawn "" 0
+  t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$name")"
+  # role-session.sh has no id-keyed form at all (see its own header) -- the
+  # unambiguous check is this record's ONLY protection against the #1023
+  # collision, not a belt-and-suspenders on top of an id fallback.
+  if _agmsg_team_delete_legacy_unambiguous "$t" "$a"; then
+    rm -f "$(printf '%s/role-session.%s__%s' "$(_actas_lock_dir)" "$t" "$a")" 2>/dev/null || true
+  fi
+  # Single-pair codex bridge key (see drivers/types/codex/_bridge-key.sh);
+  # the rarer multi-pair hashed-key form needs the set of still-registered
+  # codex pairs to re-derive and is not attempted here.
+  rm -f "$(_actas_lock_dir)/codex-bridge.$team.$name."* 2>/dev/null || true
+}
+
 agmsg_team_delete_run_records() {
-  local team="$1" team_dir="$2" config="$3" name t a
+  local team="$1" team_dir="$2" config="$3" name
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    _agmsg_team_delete_rm_family "$team" "$name" actas .session 1
-    _agmsg_team_delete_rm_family "$team" "$name" ready "" 0
-    _agmsg_team_delete_rm_family "$team" "$name" spawn "" 0
-    t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$name")"
-    # role-session.sh has no id-keyed form at all (see its own header) -- the
-    # unambiguous check is this record's ONLY protection against the #1023
-    # collision, not a belt-and-suspenders on top of an id fallback.
-    if _agmsg_team_delete_legacy_unambiguous "$t" "$a"; then
-      rm -f "$(printf '%s/role-session.%s__%s' "$(_actas_lock_dir)" "$t" "$a")" 2>/dev/null || true
-    fi
-    # Single-pair codex bridge key (see drivers/types/codex/_bridge-key.sh);
-    # the rarer multi-pair hashed-key form needs the set of still-registered
-    # codex pairs to re-derive and is not attempted here.
-    rm -f "$(_actas_lock_dir)/codex-bridge.$team.$name."* 2>/dev/null || true
+    agmsg_team_delete_seat_run_records "$team" "$name"
   done <<EOF
 $(_agmsg_team_delete_all_names "$team_dir" "$config")
 EOF

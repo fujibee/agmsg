@@ -4,6 +4,7 @@ set -euo pipefail
 # doctor.sh — "who holds what" in one screen. #267/#605.
 #
 # Usage: doctor.sh [--project <path>] [--type <type>] [--team <team>] [--redacted]
+#        doctor.sh --remove-orphan-run-records [--yes]
 #        doctor.sh --help
 #
 # Default (no filters): the whole installation -- every team, every project,
@@ -25,6 +26,9 @@ set -euo pipefail
 # registration. A stale lock or dead pidfile is reported, not cleaned up --
 # #605's reporter was asked not to remove a lock by hand because it erases
 # the evidence; a doctor that cleaned up would do the same thing to itself.
+# The single exception is --remove-orphan-run-records (#1507), a separate mode
+# that only ever runs when asked for by name, shows what it will remove, and
+# asks once before touching anything (--yes skips only that question).
 #
 # Data sources are the existing helpers this project already has for each
 # fact -- identities.sh for registrations, actas-lock.sh/instance-id.sh for
@@ -41,6 +45,7 @@ set -euo pipefail
 
 _usage() {
   echo "Usage: doctor.sh [--project <path>] [--type <type>] [--team <team>] [--redacted]" >&2
+  echo "       doctor.sh --remove-orphan-run-records [--yes]" >&2
   echo "       doctor.sh --help" >&2
 }
 
@@ -59,6 +64,7 @@ unset _arg
 #     a parsing-only change. No positional arguments are accepted -- any
 #     bare token is a usage error. -----------------------------------------
 REDACTED=0
+REMOVE_ORPHANS=0 ASSUME_YES=0
 FILTER_PROJECT="" FILTER_TYPE="" FILTER_TEAM=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -72,10 +78,17 @@ while [ "$#" -gt 0 ]; do
       case "${2:-}" in ''|-*) echo "doctor: --team requires a value" >&2; exit 2 ;; esac
       FILTER_TEAM="$2"; shift 2 ;;
     --redacted) REDACTED=1; shift ;;
+    --remove-orphan-run-records) REMOVE_ORPHANS=1; shift ;;
+    --yes) ASSUME_YES=1; shift ;;
     -*) echo "doctor: unknown option: $1" >&2; exit 2 ;;
     *) echo "doctor: unexpected argument: '$1' (doctor takes flags only -- see --help)" >&2; exit 2 ;;
   esac
 done
+
+if [ "$ASSUME_YES" = 1 ] && [ "$REMOVE_ORPHANS" != 1 ]; then
+  echo "doctor: --yes only applies to --remove-orphan-run-records" >&2
+  exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -88,6 +101,218 @@ RUN_DIR="$SKILL_DIR/run"
 . "$SCRIPT_DIR/lib/type-registry.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/validate.sh"
+
+# --- orphaned run/ records (#1507) -----------------------------------------
+#
+# Per-seat records in run/ (actas.<t>__<a>.session, ready.<t>__<a>,
+# spawn.<t>__<a>, role-session.<t>__<a>) outlive their team when the team is
+# renamed away, deleted, or was never a team at all (a project path passed as
+# the team name). One that claims a pane keeps refusing every live seat that
+# tries to take it, and nothing else ever looks at it again.
+#
+# The team a record belongs to is judged from the FILE NAME, never by cutting
+# it at "__" and trusting the cut: "__" is legal inside a name (#1023), so
+# "a___b" is both team "a_" / agent "b" and team "a" / agent "_b". A record is
+# an orphan only when NO possible cut names an existing team ("provably gone");
+# it is attributed to one seat only when there is exactly one possible cut and
+# decoding it and encoding it back reproduces the file name. Everything else is
+# reported as ambiguous and left alone. Id-keyed records (both halves UUIDs,
+# #1240) name a team by id, which this scan does not resolve, so it skips them.
+#
+# codex-bridge.<team>.<name>.* is not scanned: it spells raw names joined by
+# dots, so no name can be recovered from it with certainty.
+_DOCTOR_UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+_DOCTOR_US=$'\037'
+
+# One line per existing team (config.json present, the same test --team uses),
+# spelled the way it appears in a record's file name.
+_doctor_existing_enc_teams() {
+  local d name
+  for d in "$SKILL_DIR"/teams/*/; do
+    [ -f "${d}config.json" ] || continue
+    name="${d%/}"; name="${name##*/}"
+    _actas_lock_encode "$name"
+    printf '\n'
+  done
+}
+
+# Every way to cut <suffix> at a "__" (overlapping cuts included), both halves
+# non-empty: "<team half>\t<agent half>" per line.
+_doctor_splits() {   # <suffix>
+  awk -v s="$1" 'BEGIN { for (i = 2; i + 2 <= length(s); i++) if (substr(s, i, 2) == "__") print substr(s, 1, i - 1) "\t" substr(s, i + 2) }'
+}
+
+# The inverse of _actas_lock_encode (bytes as %XX). Lowercase hex is accepted
+# here and rejected by the caller's re-encode check.
+_doctor_decode_name() {
+  printf '%s' "$1" | LC_ALL=C awk '
+    BEGIN { for (n = 0; n < 256; n++) chr[sprintf("%02X", n)] = sprintf("%c", n) }
+    {
+      out = ""; i = 1; len = length($0)
+      while (i <= len) {
+        c = substr($0, i, 1)
+        h = toupper(substr($0, i + 1, 2))
+        if (c == "%" && i + 2 <= len && (h in chr)) { out = out chr[h]; i += 3 }
+        else { out = out c; i++ }
+      }
+      printf "%s", out
+    }'
+}
+
+# The pane a seat's records claim: spawn.<suffix>'s first field, else the mark
+# role-session.<suffix> keeps. Empty when neither names one.
+_doctor_record_pane() {   # <suffix>
+  local first="" f="$RUN_DIR/spawn.$1"
+  if [ -f "$f" ]; then
+    IFS=$'\t' read -r first _ < "$f" 2>/dev/null || true
+  fi
+  if [ -z "$first" ] && [ -f "$RUN_DIR/role-session.$1" ]; then
+    first="$(sed -n 's/^named_ref=//p' "$RUN_DIR/role-session.$1" 2>/dev/null | head -1)"
+  fi
+  case "$first" in *[[:cntrl:]]*) first="?" ;; esac
+  printf '%s' "$first"
+}
+
+# Fills ORPHAN_SEATS ("<suffix>US<team>US<agent>US<pane>US<files>" per line) and
+# ORPHAN_AMBIGUOUS ("<suffix>US<files>" per line). US (0x1f) rather than a tab:
+# an empty pane field would collapse under a whitespace IFS.
+ORPHAN_SEATS="" ORPHAN_AMBIGUOUS=""
+_doctor_scan_orphan_run_records() {
+  local existing suffixes f s fam files splits n live id_keyed t a st sa team agent pane
+  ORPHAN_SEATS=""; ORPHAN_AMBIGUOUS=""
+  [ -d "$RUN_DIR" ] || return 0
+  existing="$(_doctor_existing_enc_teams)"
+  suffixes="$(
+    for f in "$RUN_DIR"/actas.*.session "$RUN_DIR"/ready.* "$RUN_DIR"/spawn.* "$RUN_DIR"/role-session.*; do
+      [ -f "$f" ] || continue
+      f="${f##*/}"
+      case "$f" in
+        actas.*.session) s="${f#actas.}"; s="${s%.session}" ;;
+        ready.*) s="${f#ready.}" ;;
+        spawn.*) s="${f#spawn.}" ;;
+        role-session.*) s="${f#role-session.}" ;;
+        *) continue ;;
+      esac
+      printf '%s\n' "$s"
+    done | LC_ALL=C sort -u
+  )"
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    splits="$(_doctor_splits "$s")"
+    [ -n "$splits" ] || continue            # no "__": not a per-seat record
+    live=0; id_keyed=0; n=0
+    while IFS=$'\t' read -r t a; do
+      [ -n "$t" ] || continue
+      n=$((n + 1))
+      if [[ "$t" =~ $_DOCTOR_UUID_RE && "$a" =~ $_DOCTOR_UUID_RE ]]; then id_keyed=1; fi
+      case $'\n'"$existing"$'\n' in *$'\n'"$t"$'\n'*) live=1 ;; esac
+    done <<EOF
+$splits
+EOF
+    [ "$id_keyed" -eq 0 ] || continue
+    [ "$live" -eq 0 ] || continue           # some cut names a team that exists
+    files=""
+    for fam in actas ready spawn role-session; do
+      case "$fam" in actas) f="actas.$s.session" ;; *) f="$fam.$s" ;; esac
+      if [ -f "$RUN_DIR/$f" ]; then files="${files:+$files }$f"; fi
+    done
+    if [ "$n" -eq 1 ]; then
+      st="${splits%%$'\t'*}"; sa="${splits#*$'\t'}"
+      team="$(_doctor_decode_name "$st")"; agent="$(_doctor_decode_name "$sa")"
+      if [ -n "$team" ] && [ -n "$agent" ] \
+         && [ "$(_actas_lock_encode "$team")__$(_actas_lock_encode "$agent")" = "$s" ]; then
+        case "$team$agent" in
+          *[[:cntrl:]]*) ;;                 # cannot be shown or listed safely
+          *)
+            pane="$(_doctor_record_pane "$s")"
+            ORPHAN_SEATS="${ORPHAN_SEATS}${s}${_DOCTOR_US}${team}${_DOCTOR_US}${agent}${_DOCTOR_US}${pane}${_DOCTOR_US}${files}"$'\n'
+            continue ;;
+        esac
+      fi
+    fi
+    ORPHAN_AMBIGUOUS="${ORPHAN_AMBIGUOUS}${s}${_DOCTOR_US}${files}"$'\n'
+  done <<< "$suffixes"
+}
+
+# Under --redacted the team/agent/pane and the encoded file names (which spell
+# the team) are replaced; only record families are shown. Never used in
+# --remove-orphan-run-records mode, which is not for pasting (REDACTED is 0
+# there, so the pseudonym helpers defined further down are never reached).
+_doctor_print_orphans() {
+  local n s team agent pane files f fams
+  if [ -n "$ORPHAN_SEATS" ]; then
+    n="$(printf '%s' "$ORPHAN_SEATS" | grep -c . || true)"
+    echo "orphaned run/ records -- the team no longer exists ($n seat(s)):"
+    while IFS="$_DOCTOR_US" read -r s team agent pane files; do
+      [ -n "$s" ] || continue
+      if [ "$REDACTED" = 1 ]; then
+        _redact_team "$team"; team="$_REDACT_OUT"
+        _redact_agent "$agent"; agent="$_REDACT_OUT"
+        [ -z "$pane" ] || pane="(redacted)"
+        fams=""; for f in $files; do fams="${fams:+$fams }${f%%.*}"; done
+        files="$fams"
+      fi
+      echo "  team: $team  agent: $agent  pane: ${pane:-(none recorded)}"
+      echo "    records: $files"
+    done <<< "$ORPHAN_SEATS"
+    echo
+  fi
+  if [ -n "$ORPHAN_AMBIGUOUS" ]; then
+    n="$(printf '%s' "$ORPHAN_AMBIGUOUS" | grep -c . || true)"
+    echo "run/ records for a team that no longer exists, but not attributable to one seat (\"__\" inside a name) -- left alone ($n):"
+    while IFS="$_DOCTOR_US" read -r s files; do
+      [ -n "$s" ] || continue
+      if [ "$REDACTED" = 1 ]; then
+        fams=""; for f in $files; do fams="${fams:+$fams }${f%%.*}"; done
+        files="$fams"
+      fi
+      echo "  $files"
+    done <<< "$ORPHAN_AMBIGUOUS"
+    echo
+  fi
+}
+
+# --- --remove-orphan-run-records: its own mode, not a flag on the report -----
+#
+# Lists what would go, asks once (--yes skips only the question), then removes
+# each seat's records through team.sh --delete's own per-seat routine, so the
+# exact-name matching and its #1023 ambiguity guard are the same code, not a
+# copy. Never removes an ambiguous record and never touches a team that exists.
+if [ "$REMOVE_ORPHANS" = 1 ]; then
+  if [ -n "$FILTER_PROJECT$FILTER_TYPE$FILTER_TEAM" ] || [ "$REDACTED" = 1 ]; then
+    echo "doctor: --remove-orphan-run-records takes no --project/--type/--team/--redacted" >&2
+    exit 2
+  fi
+  _doctor_scan_orphan_run_records
+  if [ -z "$ORPHAN_SEATS" ]; then
+    echo "no orphaned run/ records to remove."
+    if [ -n "$ORPHAN_AMBIGUOUS" ]; then echo; _doctor_print_orphans; fi
+    exit 0
+  fi
+  _doctor_print_orphans
+  if [ "$ASSUME_YES" != 1 ]; then
+    printf 'Remove the records listed above? (y/n) [n]: '
+    read -r _doctor_answer || _doctor_answer=""
+    case "$_doctor_answer" in y|Y) ;; *) echo "Aborted; nothing removed."; exit 1 ;; esac
+  fi
+  # Same libraries team.sh loads before it calls the routine below.
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/storage.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/registry-lock.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/roster-journal.sh"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/team-delete.sh"
+  _doctor_removed=0
+  while IFS="$_DOCTOR_US" read -r _s _team _agent _pane _files; do
+    [ -n "$_s" ] || continue
+    agmsg_team_delete_seat_run_records "$_team" "$_agent"
+    _doctor_removed=$((_doctor_removed + 1))
+  done <<< "$ORPHAN_SEATS"
+  echo "removed the run/ records of $_doctor_removed seat(s)."
+  exit 0
+fi
 
 # --project / --type / --team all validated here, before any scope work:
 # an unknown --type or --team is a usage error (exit 2), not left to fail
@@ -682,6 +907,16 @@ if [ -n "$GLOBAL_WATCH_LINE" ]; then
     _warn "watcher pidfile present but process not running, installation-wide (see the 'watch processes' line above)"
   fi
 fi
+# Orphaned per-seat run/ records (#1507): like the watcher line above, an
+# installation-wide fact -- no --project/--type/--team narrows it. Reported and
+# counted here, never removed (see --remove-orphan-run-records).
+_doctor_scan_orphan_run_records
+if [ -n "$ORPHAN_SEATS" ]; then
+  _warn "run/ holds records of seat(s) whose team no longer exists, and they can keep claiming a pane (see 'orphaned run/ records' above); remove them with: doctor.sh --remove-orphan-run-records"
+fi
+if [ -n "$ORPHAN_AMBIGUOUS" ]; then
+  _warn "run/ holds records for a team that no longer exists that cannot be attributed to one seat (\"__\" inside a name); they are left alone, remove them by hand"
+fi
 WARN_COUNT="$(printf '%s\n' "$WARNINGS" | grep -c . || true)"
 
 echo "$TEAM_COUNT team(s), $TOTAL_PAIR_COUNT registration(s), $WARN_COUNT warning(s)"
@@ -691,6 +926,7 @@ if [ -n "$GLOBAL_WATCH_LINE" ]; then
   echo
 fi
 printf '%s' "$REPORT_BLOCKS"
+_doctor_print_orphans
 
 if [ -n "$WARNINGS" ]; then
   echo "warnings:"
