@@ -386,6 +386,25 @@ export function shouldShowOutdatedBanner<T>(
   return coreOutdated != null && !updatingCore && !dismissed;
 }
 
+// What the sidebar's bottom block shows for the current team (#1510). The
+// block also carries the settings gear, and settings are app-wide, so it is
+// never hidden -- it used to be gated on the team having an app-user, which
+// took the gear away in every team without one (a team joined through remote
+// sync, say) and left no way to reach settings from there. Only the identity
+// line varies: the app-user's name; a prompt to add one; or nothing, when no
+// team is selected at all (there is nothing to add an app-user to). A pure
+// function, like shouldShowOutdatedBanner above, so the "no app-user" case
+// is pinned by a unit test rather than by JSX nobody renders in a test.
+export type SidebarUserBlock =
+  | { kind: "user"; name: string }
+  | { kind: "none" }
+  | { kind: "no-team" };
+
+export function sidebarUserBlock(appUser: string, team: string): SidebarUserBlock {
+  if (appUser) return { kind: "user", name: appUser };
+  return team ? { kind: "none" } : { kind: "no-team" };
+}
+
 // Which agmsg script the sidebar's team context menu (#1479) runs for each
 // action, and with what arguments — extracted as a pure function so the
 // menu-to-command wiring is unit-testable without mounting the app or a real
@@ -807,6 +826,7 @@ export default function App() {
   // The app user = the member registered with the agmsg-app type (one per team).
   const appUserMember = members.find((m) => m.types.includes(APP_USER_TYPE));
   const appUser = appUserMember?.name ?? "";
+  const userBlock = sidebarUserBlock(appUser, team);
   // The team's project dir (the app-user's) — new agents default into the same place.
   const teamProject = appUserMember?.project ?? "";
   // Everyone else is a spawnable/messageable agent.
@@ -2314,15 +2334,22 @@ export default function App() {
 
               <div className="rail-spacer" />
 
-              {appUser && (
-                <button
-                  className="rail-avatar-btn"
-                  title={t("sidebar.expand")}
-                  onClick={() => setSidebarCollapsed(false)}
-                >
-                  <span className="avatar" title={t("sidebar.user.title", { team })} />
-                </button>
-              )}
+              <button
+                className="rail-avatar-btn"
+                title={t("sidebar.expand")}
+                onClick={() => setSidebarCollapsed(false)}
+              >
+                <span
+                  className="avatar"
+                  title={
+                    userBlock.kind === "user"
+                      ? t("sidebar.user.title", { team })
+                      : userBlock.kind === "none"
+                        ? t("sidebar.user.none")
+                        : undefined
+                  }
+                />
+              </button>
               <button
                 className="rail-icon-btn"
                 title={t("settings.title")}
@@ -2468,25 +2495,50 @@ export default function App() {
                   <li className="empty">{t("sidebar.member.emptyState")}</li>
                 )}
               </ul>
-              {appUser && (
-                <div className="sidebar-user" title={t("sidebar.user.title", { team })}>
-                  <span className="avatar" />
-                  <div className="su-meta">
-                    <span className="su-name">{appUser}</span>
-                    <span className="su-team">{team}</span>
-                  </div>
-                  <button
-                    className="settings-btn"
-                    title={t("settings.title")}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setModal({ kind: "settings" });
-                    }}
-                  >
-                    <Settings size={15} />
-                  </button>
-                </div>
-              )}
+              <div
+                className="sidebar-user"
+                title={
+                  userBlock.kind === "user"
+                    ? t("sidebar.user.title", { team })
+                    : userBlock.kind === "none"
+                      ? t("sidebar.user.none")
+                      : undefined
+                }
+              >
+                {userBlock.kind === "user" && (
+                  <>
+                    <span className="avatar" />
+                    <div className="su-meta">
+                      <span className="su-name">{userBlock.name}</span>
+                      <span className="su-team">{team}</span>
+                    </div>
+                  </>
+                )}
+                {userBlock.kind === "none" && (
+                  <>
+                    <span className="avatar" />
+                    <div className="su-meta">
+                      <span className="su-none">{t("sidebar.user.none")}</span>
+                      <button
+                        className="link su-add"
+                        onClick={() => setModal({ kind: "appuser", auto: false })}
+                      >
+                        {t("sidebar.user.add")}
+                      </button>
+                    </div>
+                  </>
+                )}
+                <button
+                  className="settings-btn"
+                  title={t("settings.title")}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setModal({ kind: "settings" });
+                  }}
+                >
+                  <Settings size={15} />
+                </button>
+              </div>
             </>
           )}
         </aside>

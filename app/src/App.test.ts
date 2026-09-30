@@ -11,6 +11,7 @@ import {
   renameTeamKey,
   renameTeamToast,
   resolveFileDropTarget,
+  sidebarUserBlock,
   shellPaneFrom,
   shellSplitStillValid,
   shellTabStillValid,
@@ -51,6 +52,18 @@ describe("shouldShowOutdatedBanner", () => {
 
   it("hides once dismissed, independent of updatingCore", () => {
     expect(shouldShowOutdatedBanner({ installed: "1.1.0", pinned: "1.1.8" }, false, true)).toBe(false);
+  });
+});
+
+describe("sidebarUserBlock", () => {
+  it("never drops the block: a team without an app-user gets the Add prompt, not nothing (#1510)", () => {
+    // The block carries the settings gear, which is app-wide. It used to
+    // vanish whenever the current team had no app-user.
+    expect(sidebarUserBlock("alice", "t")).toEqual({ kind: "user", name: "alice" });
+    expect(sidebarUserBlock("", "t")).toEqual({ kind: "none" });
+    // No team selected at all: nothing to add an app-user to, but the block
+    // (and the gear) is still there.
+    expect(sidebarUserBlock("", "")).toEqual({ kind: "no-team" });
   });
 });
 

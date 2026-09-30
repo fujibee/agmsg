@@ -46,7 +46,9 @@
       "emptyState": "暂无智能体。使用上方的 ＋ 按钮添加。"
     },
     "user": {
-      "title": "{{team}} 中的 app-user"
+      "title": "{{team}} 中的 app-user",
+      "none": "该团队暂无 app-user",
+      "add": "添加"
     }
   },
   "tabs": {
