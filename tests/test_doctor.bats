@@ -613,12 +613,14 @@ configured_off() {
 
   run bash "$SCRIPTS/doctor.sh"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"orphaned run/ records"* ]]
-  [[ "$output" == *"team: /tmp/some/proj  agent: worker  pane: herdr:gone:w1:p9"* ]]
-  [[ "$output" == *"team: live  agent: part  pane: herdr:dot:w1:p5"* ]]
-  [[ "$output" == *"not attributable to one seat"* ]]
-  [[ "$output" != *"agent: alice"* ]]
-  [[ "$output" != *"herdr:id:w1:p3"* ]]
+  # grep and [ ], not [[ ]]: a [[ ]] that is not the last line of a test cannot
+  # fail it on the macOS bash 3.2 CI runs (#670).
+  grep -qF 'orphaned run/ records' <<<"$output"
+  grep -qF 'team: /tmp/some/proj  agent: worker  pane: herdr:gone:w1:p9' <<<"$output"
+  grep -qF 'team: live  agent: part  pane: herdr:dot:w1:p5' <<<"$output"
+  grep -qF 'not attributable to one seat' <<<"$output"
+  [ -z "$(grep -F 'agent: alice' <<<"$output")" ]
+  [ -z "$(grep -F 'herdr:id:w1:p3' <<<"$output")" ]
   [ -f "$run_dir/spawn.${gone}__worker" ]            # reporting deletes nothing
 
   run bash -c 'echo n | bash "$1" --remove-orphan-run-records' _ "$SCRIPTS/doctor.sh"
