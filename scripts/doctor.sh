@@ -4,7 +4,7 @@ set -euo pipefail
 # doctor.sh — "who holds what" in one screen. #267/#605.
 #
 # Usage: doctor.sh [--project <path>] [--type <type>] [--team <team>] [--redacted]
-#        doctor.sh --remove-orphan-run-records [--yes]
+#        doctor.sh --fix [--yes]
 #        doctor.sh --help
 #
 # Default (no filters): the whole installation -- every team, every project,
@@ -22,13 +22,16 @@ set -euo pipefail
 # below) so that a future change to what the flags are doesn't have to touch
 # how a scope, once decided, gets turned into (project, type) pairs.
 #
-# Read-only: never claims, releases, or removes a lock, pidfile, or
-# registration. A stale lock or dead pidfile is reported, not cleaned up --
+# Read-only without --fix: never claims, releases, or removes a lock, pidfile,
+# or registration. A stale lock or dead pidfile is reported, not cleaned up --
 # #605's reporter was asked not to remove a lock by hand because it erases
-# the evidence; a doctor that cleaned up would do the same thing to itself.
-# The single exception is --remove-orphan-run-records (#1507), a separate mode
-# that only ever runs when asked for by name, shows what it will remove, and
-# asks once before touching anything (--yes skips only that question).
+# the evidence; a doctor that cleaned up on its own would do the same thing to
+# itself. --fix (#1507) is the one way it changes anything, only when asked for
+# by name: it repairs what doctor found that is safe to repair, shows what it
+# will do, and asks once before touching anything (--yes skips only that
+# question). Today that is orphaned run/ records; anything doctor learns to
+# repair later belongs behind the same flag. It is NOT scripts/fix.sh (/agmsg
+# fix), which is a seat repairing its own identity.
 #
 # Data sources are the existing helpers this project already has for each
 # fact -- identities.sh for registrations, actas-lock.sh/instance-id.sh for
@@ -45,7 +48,9 @@ set -euo pipefail
 
 _usage() {
   echo "Usage: doctor.sh [--project <path>] [--type <type>] [--team <team>] [--redacted]" >&2
-  echo "       doctor.sh --remove-orphan-run-records [--yes]" >&2
+  echo "       doctor.sh --fix [--yes]   repair what doctor found that is safe to repair" >&2
+  echo "                                 (today: orphaned run/ records). Not scripts/fix.sh," >&2
+  echo "                                 which is a seat repairing its own identity." >&2
   echo "       doctor.sh --help" >&2
 }
 
@@ -64,7 +69,7 @@ unset _arg
 #     a parsing-only change. No positional arguments are accepted -- any
 #     bare token is a usage error. -----------------------------------------
 REDACTED=0
-REMOVE_ORPHANS=0 ASSUME_YES=0
+FIX=0 ASSUME_YES=0
 FILTER_PROJECT="" FILTER_TYPE="" FILTER_TEAM=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -78,15 +83,15 @@ while [ "$#" -gt 0 ]; do
       case "${2:-}" in ''|-*) echo "doctor: --team requires a value" >&2; exit 2 ;; esac
       FILTER_TEAM="$2"; shift 2 ;;
     --redacted) REDACTED=1; shift ;;
-    --remove-orphan-run-records) REMOVE_ORPHANS=1; shift ;;
+    --fix) FIX=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
     -*) echo "doctor: unknown option: $1" >&2; exit 2 ;;
     *) echo "doctor: unexpected argument: '$1' (doctor takes flags only -- see --help)" >&2; exit 2 ;;
   esac
 done
 
-if [ "$ASSUME_YES" = 1 ] && [ "$REMOVE_ORPHANS" != 1 ]; then
-  echo "doctor: --yes only applies to --remove-orphan-run-records" >&2
+if [ "$ASSUME_YES" = 1 ] && [ "$FIX" != 1 ]; then
+  echo "doctor: --yes only applies to --fix" >&2
   exit 2
 fi
 
@@ -243,7 +248,7 @@ EOF
 
 # Under --redacted the team/agent/pane and the encoded file names (which spell
 # the team) are replaced; only record families are shown. Never used in
-# --remove-orphan-run-records mode, which is not for pasting (REDACTED is 0
+# --fix mode, which is not for pasting (REDACTED is 0
 # there, so the pseudonym helpers defined further down are never reached).
 _doctor_print_orphans() {
   local n s team agent pane files f fams
@@ -279,7 +284,7 @@ _doctor_print_orphans() {
   fi
 }
 
-# --- --remove-orphan-run-records: its own mode, not a flag on the report -----
+# --- --fix: its own mode, not a flag on the report -------------------------
 #
 # Lists what would go, asks once (--yes skips only the question), then removes
 # exactly the files it listed, each by its own path. It deliberately does NOT
@@ -288,14 +293,14 @@ _doctor_print_orphans() {
 # across teams (live team "live" / agent "part.worker" spells the same as gone
 # team "live.part" / agent "worker") -- a file this mode never showed. Never
 # removes an ambiguous record and never touches a team that exists.
-if [ "$REMOVE_ORPHANS" = 1 ]; then
+if [ "$FIX" = 1 ]; then
   if [ -n "$FILTER_PROJECT$FILTER_TYPE$FILTER_TEAM" ] || [ "$REDACTED" = 1 ]; then
-    echo "doctor: --remove-orphan-run-records takes no --project/--type/--team/--redacted" >&2
+    echo "doctor: --fix takes no --project/--type/--team/--redacted" >&2
     exit 2
   fi
   _doctor_scan_orphan_run_records
   if [ -z "$ORPHAN_SEATS" ]; then
-    echo "no orphaned run/ records to remove."
+    echo "nothing to fix: no orphaned run/ records."
     if [ -n "$ORPHAN_AMBIGUOUS" ]; then echo; _doctor_print_orphans; fi
     exit 0
   fi
@@ -922,10 +927,10 @@ if [ -n "$GLOBAL_WATCH_LINE" ]; then
 fi
 # Orphaned per-seat run/ records (#1507): like the watcher line above, an
 # installation-wide fact -- no --project/--type/--team narrows it. Reported and
-# counted here, never removed (see --remove-orphan-run-records).
+# counted here, never removed (see --fix).
 _doctor_scan_orphan_run_records
 if [ -n "$ORPHAN_SEATS" ]; then
-  _warn "run/ holds records of seat(s) whose team no longer exists, and they can keep claiming a pane (see 'orphaned run/ records' above); remove them with: doctor.sh --remove-orphan-run-records"
+  _warn "run/ holds records of seat(s) whose team no longer exists, and they can keep claiming a pane (see 'orphaned run/ records' above); fix them with: doctor.sh --fix"
 fi
 if [ -n "$ORPHAN_AMBIGUOUS" ]; then
   _warn "run/ holds records for a team that no longer exists that cannot be attributed to one seat (\"__\" inside a name); they are left alone, remove them by hand"

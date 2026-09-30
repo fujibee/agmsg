@@ -623,11 +623,11 @@ configured_off() {
   [ -z "$(grep -F 'herdr:id:w1:p3' <<<"$output")" ]
   [ -f "$run_dir/spawn.${gone}__worker" ]            # reporting deletes nothing
 
-  run bash -c 'echo n | bash "$1" --remove-orphan-run-records' _ "$SCRIPTS/doctor.sh"
+  run bash -c 'echo n | bash "$1" --fix' _ "$SCRIPTS/doctor.sh"
   [ "$status" -eq 1 ]
   [ -f "$run_dir/spawn.${gone}__worker" ]            # the prompt defaults to no
 
-  run bash "$SCRIPTS/doctor.sh" --remove-orphan-run-records --yes
+  run bash "$SCRIPTS/doctor.sh" --fix --yes
   [ "$status" -eq 0 ]
   [ ! -e "$run_dir/spawn.${gone}__worker" ]
   [ ! -e "$run_dir/role-session.${gone}__worker" ]
