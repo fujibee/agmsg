@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import {
   actasSpawnArgs,
   actionFailedToast,
@@ -21,6 +23,7 @@ import {
   teamActionInvocation,
   type LoginShellInfo,
 } from "./App";
+import { RailAvatar, SidebarUser, type Translate } from "./SidebarUser";
 
 describe("actasSpawnArgs", () => {
   it("claude-code: no cmd_prefix/prompt_arg -> bare '/<cmd> actas <name>' (unchanged)", () => {
@@ -51,6 +54,44 @@ describe("shouldShowOutdatedBanner", () => {
 
   it("hides once dismissed, independent of updatingCore", () => {
     expect(shouldShowOutdatedBanner({ installed: "1.1.0", pinned: "1.1.8" }, false, true)).toBe(false);
+  });
+});
+
+describe("SidebarUser / RailAvatar", () => {
+  it("still render the user block, its settings gear and the Add prompt in a team without an app-user (#1510)", () => {
+    // Rendered, not just decided: the block carries the app-wide settings
+    // gear, and it used to vanish whenever the current team had no app-user.
+    // `t` echoes its key, so the markup shows which string was chosen.
+    const t: Translate = (key) => key;
+    const noop = () => {};
+    const block = (appUser: string, team: string) =>
+      renderToStaticMarkup(
+        createElement(SidebarUser, { appUser, team, t, onAddUser: noop, onOpenSettings: noop }),
+      );
+    const rail = (appUser: string, team: string) =>
+      renderToStaticMarkup(createElement(RailAvatar, { appUser, team, t, onExpand: noop }));
+
+    // A team without an app-user: the block, the gear and the Add prompt.
+    const noUser = block("", "t");
+    expect(noUser).toContain('class="sidebar-user"');
+    expect(noUser).toContain('class="settings-btn"');
+    expect(noUser).toContain("sidebar.user.none");
+    expect(noUser).toContain("sidebar.user.add");
+    // ...and its collapsed-rail avatar button (which expands the sidebar).
+    expect(rail("", "t")).toContain('class="rail-avatar-btn"');
+
+    // With an app-user: the name, the gear, and no Add prompt.
+    const withUser = block("alice", "t");
+    expect(withUser).toContain('class="su-name">alice<');
+    expect(withUser).toContain('class="settings-btn"');
+    expect(withUser).not.toContain("sidebar.user.add");
+    expect(rail("alice", "t")).toContain('class="rail-avatar-btn"');
+
+    // No team selected at all: nothing to add an app-user to, but the gear stays.
+    const noTeam = block("", "");
+    expect(noTeam).toContain('class="settings-btn"');
+    expect(noTeam).not.toContain("sidebar.user.add");
+    expect(rail("", "")).toContain('class="rail-avatar-btn"');
   });
 });
 

@@ -96,9 +96,19 @@ await_barrier_reached() {
 
   # Hold the write lock until told to let go (a fifo, not a sleep, so the hold
   # cannot expire mid-test however slowly the inbox runs).
+  #
+  # The holder's own BEGIN IMMEDIATE needs a busy timeout too, not just the
+  # polling probe below: on a loaded runner the probe's first fresh sqlite3
+  # process can win the fork/exec race and be mid BEGIN-IMMEDIATE;COMMIT
+  # right when the holder (started first, but not yet scheduled) finally
+  # gets to its own BEGIN IMMEDIATE. Without a timeout that single collision
+  # fails the holder outright ("database is locked") instead of retrying,
+  # and the rest of the test never gets a lock to observe. Seen on CI as
+  # `wait "$holder"' failing with exactly that error, on both an integration
+  # branch and main (#1011 test flake, same shape as #1518).
   mkfifo "$TEST_SKILL_DIR/hold.release"
   ( printf 'BEGIN IMMEDIATE;\nSELECT 1;\n'; cat "$TEST_SKILL_DIR/hold.release"; printf 'COMMIT;\n' ) \
-    | sqlite3 "$db" >/dev/null &
+    | sqlite3 -cmd '.timeout 5000' "$db" >/dev/null &
   holder=$!
   # Proceed only once a real write attempt has failed — the backgrounded holder
   # existing is not the lock being held. No assertion may run while the holder

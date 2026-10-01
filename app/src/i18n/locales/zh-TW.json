@@ -46,7 +46,9 @@
       "emptyState": "尚無代理。請使用上方的「＋」按鈕新增。"
     },
     "user": {
-      "title": "{{team}} 的 app-user"
+      "title": "{{team}} 的 app-user",
+      "none": "此團隊尚無 app-user",
+      "add": "新增"
     }
   },
   "tabs": {

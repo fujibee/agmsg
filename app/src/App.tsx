@@ -51,6 +51,7 @@ import {
   type SplitNode,
 } from "./paneTree";
 import { PulseDot } from "./pulseSync";
+import { RailAvatar, SidebarUser } from "./SidebarUser";
 import { resolveActiveTab } from "./tabMemory";
 import "./App.css";
 
@@ -2314,15 +2315,12 @@ export default function App() {
 
               <div className="rail-spacer" />
 
-              {appUser && (
-                <button
-                  className="rail-avatar-btn"
-                  title={t("sidebar.expand")}
-                  onClick={() => setSidebarCollapsed(false)}
-                >
-                  <span className="avatar" title={t("sidebar.user.title", { team })} />
-                </button>
-              )}
+              <RailAvatar
+                appUser={appUser}
+                team={team}
+                t={t}
+                onExpand={() => setSidebarCollapsed(false)}
+              />
               <button
                 className="rail-icon-btn"
                 title={t("settings.title")}
@@ -2468,25 +2466,13 @@ export default function App() {
                   <li className="empty">{t("sidebar.member.emptyState")}</li>
                 )}
               </ul>
-              {appUser && (
-                <div className="sidebar-user" title={t("sidebar.user.title", { team })}>
-                  <span className="avatar" />
-                  <div className="su-meta">
-                    <span className="su-name">{appUser}</span>
-                    <span className="su-team">{team}</span>
-                  </div>
-                  <button
-                    className="settings-btn"
-                    title={t("settings.title")}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setModal({ kind: "settings" });
-                    }}
-                  >
-                    <Settings size={15} />
-                  </button>
-                </div>
-              )}
+              <SidebarUser
+                appUser={appUser}
+                team={team}
+                t={t}
+                onAddUser={() => setModal({ kind: "appuser", auto: false })}
+                onOpenSettings={() => setModal({ kind: "settings" })}
+              />
             </>
           )}
         </aside>

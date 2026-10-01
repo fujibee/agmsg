@@ -46,7 +46,9 @@
       "emptyState": "エージェントはまだありません。上の＋ボタンから追加してください。"
     },
     "user": {
-      "title": "{{team}} のapp-user"
+      "title": "{{team}} のapp-user",
+      "none": "このチームにapp-userがいません",
+      "add": "追加"
     }
   },
   "tabs": {
