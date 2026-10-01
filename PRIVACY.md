@@ -4,47 +4,28 @@
 
 This privacy policy describes how the open-source **agmsg** project (the CLI and desktop app at https://github.com/fujibee/agmsg, distributed via [agmsg.cc](https://agmsg.cc), the Anthropic / OpenAI / community plugin and skill marketplaces, and the `agmsg` npm package) handles user data. It does not cover any hosted service.
 
-In short: **agmsg does not collect user data and has no telemetry or analytics.** Messages, teams, and settings are stored on the user's machine, and the CLI does not contact the outside world by default.
+## The core
 
-## What data agmsg handles
+- **Data stays on the user's machine.** Teams, messages, and settings are stored locally, mostly under `~/.agents/` and in the configuration of the projects the user joins agmsg to.
+- **No data collection, no telemetry.** The agmsg project does not collect, receive, sell, or disclose user data, and sends no usage data or analytics.
+- **No agmsg accounts.** agmsg has no accounts or login.
+- **No outside communication by default.** The CLI does not contact other machines unless the user turns on a feature that does.
 
-agmsg stores the following on the user's machine:
+## Extensions and integrations
 
-- **Team and agent registry** — team names, agent names, agent type labels, and project paths. The user chooses these values when joining a team.
-- **Messages** — the message body, sender, recipient, team, and timestamp, in a local database. The user (or the agent acting for them) chooses these values when sending.
-- **Runtime coordination files** — small files such as process and session identifiers that agmsg uses to coordinate its own background work.
-- **Configuration** — agmsg's own settings, plus hook and configuration files that agmsg adds to the user's projects and to the agent tools it integrates with. These hold paths and settings, not personal data beyond filesystem paths.
+Features the user turns on, such as remote sync, external tool integrations, and plugins, communicate with the destinations the user configures for them. What is sent depends on the feature. Anything sent goes where the user pointed it, not to the agmsg project.
 
-Typical locations are listed under [Where data is stored](#where-data-is-stored).
+## Installing and updating
 
-## What agmsg does not do
+Installing agmsg downloads it from GitHub. The desktop app checks GitHub for new versions; it installs an update only after the user approves it, and verifies the update's signature.
 
-- **No telemetry or analytics.** No usage data, error reports, or counts are sent to the agmsg project.
-- **No data collection or sharing by the project.** The agmsg project does not receive, sell, or disclose user data.
-- **No agmsg accounts.** agmsg has no user accounts and no login. Services the user connects to bring their own credentials, which the user supplies.
-- **No calls to the agent tools' backends.** agmsg works alongside the AI agent CLIs the user has installed but does not call their services itself. What the user sends to those tools is governed by their own privacy policies.
+## Other tools
 
-## Network access
-
-By default the CLI does not communicate with other machines: sending, reading, and managing messages and teams happen on the local machine. agmsg communicates over the network in these situations:
-
-- **Features the user turns on.** Remote sync connects a team to a server the user specifies, and exchanges that team's data (such as messages, names, the roster, and read state) with it; end-to-end encryption is available as an option. External tool integrations contact the service the user configured for them. Each only runs for what the user has set up, and what is sent is determined by that feature or integration.
-- **Installing agmsg.** The installer downloads agmsg from GitHub.
-- **Desktop app updates.** The desktop app checks GitHub for a newer version when it starts and on request. It installs an update only after the user approves it, and verifies the update's signature.
-
-As with any network request, the server contacted can see the requesting IP address. Some of agmsg's background components talk to each other on the user's own machine; that does not leave the machine and is not counted as network access here.
-
-## Where data is stored
-
-agmsg writes to the user's local filesystem. The main places are a directory under `~/.agents/` (teams, messages, runtime files, and settings) and, for the projects and agent tools the user integrates it with, hook and configuration files in those projects and tools' own configuration locations. Some locations can be changed through environment variables. The uninstaller removes what an install added, with options to keep data; anything left can be deleted by hand.
-
-## Inter-agent messages on the same machine
-
-When agents on the same machine communicate through agmsg, messages are written to the local database by the sender and read back by the recipient. Unless the team uses a network feature described above, they stay on the user's machine. Whether the *content* of messages is sensitive is up to the user; agmsg treats message bodies as opaque text.
+agmsg works alongside the AI agent tools the user has installed, but does not call their services itself. What the user sends to those tools is governed by their own privacy policies.
 
 ## Children's privacy
 
-agmsg does not collect data from anyone, including children. The software is a developer tool intended for use by users 13 and older in accordance with the underlying agent CLIs (Claude Code, Codex, etc.) and their respective terms.
+agmsg does not collect data from anyone, including children. The software is a developer tool intended for use by users 13 and older in accordance with the underlying agent tools and their respective terms.
 
 ## Changes to this policy
 
