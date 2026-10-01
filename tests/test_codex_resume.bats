@@ -78,6 +78,46 @@ recorded_uuid() {
   [ "$(agmsg_role_session_get team alice type)" = "codex" ]
 }
 
+@test "codex record: adds the effective profile path without changing the thread" {
+  local proj explicit_home expected_home
+  proj="$(mktemp -d)"
+  explicit_home="$TEST_SKILL_DIR/codex profile"
+  mkdir -p "$explicit_home" "$HOME/.codex"
+  CODEX_HOME="$explicit_home" CODEX_THREAD_ID="profile-thread-1" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = profile-thread-1 ]
+  source "$SCRIPTS/lib/role-session.sh"
+  source "$SCRIPTS/lib/resolve-project.sh"
+  expected_home="$(cd "$explicit_home" && pwd -P)"
+  expected_home="$(agmsg_normalize_project_path "$expected_home")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
+  env -u CODEX_HOME CODEX_THREAD_ID="profile-thread-2" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = profile-thread-2 ]
+  expected_home="$(cd "$HOME/.codex" && pwd -P)"
+  expected_home="$(agmsg_normalize_project_path "$expected_home")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
+}
+
+@test "codex record: unresolved profile omits only the field and preserves legacy rollout discovery" {
+  local proj invalid_home
+  proj="$(mktemp -d)"
+  source "$SCRIPTS/lib/role-session.sh"
+  for invalid_home in "$TEST_SKILL_DIR/missing" "$TEST_SKILL_DIR/"$'bad\nprofile' .; do
+    run env CODEX_HOME="$invalid_home" CODEX_THREAD_ID=still-recorded \
+      bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+    [ "$status" -eq 0 ]
+    [ "$(recorded_uuid team alice)" = still-recorded ]
+    [ -z "$(agmsg_role_session_get team alice codex_home)" ]
+  done
+  make_rollout legacy-profile-thread "$proj"
+  run env -u CODEX_THREAD_ID CODEX_HOME="$TEST_SKILL_DIR/missing" \
+    bash "$TYPES/codex/codex-record-session.sh" team bob "$proj"
+  [ "$status" -eq 0 ]
+  [ "$(recorded_uuid team bob)" = legacy-profile-thread ]
+  [ -z "$(agmsg_role_session_get team bob codex_home)" ]
+}
+
 @test "codex record: falls back to the unique matching-cwd rollout when env is unset" {
   local proj; proj="$(mktemp -d)"
   make_rollout "fallback-uuid" "$proj"
