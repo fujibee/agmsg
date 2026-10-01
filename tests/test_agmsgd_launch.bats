@@ -85,7 +85,7 @@ setup_install_db() {
   exec 9<&-
   wait "$holder_pid"
   [ "$status" -eq 75 ]
-  [[ "$output" == *'an install/uninstall is in progress'* ]]
+  printf '%s\n' "$output" | grep -Fq 'an install/uninstall is in progress'
   [ "$(sqlite3 "$SKILLDIR_INSTALL_DB" 'SELECT count(*) FROM daemon_start_attempts;')" -eq 0 ]
 }
 
