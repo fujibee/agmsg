@@ -3901,7 +3901,18 @@ cmd_set_endpoint() {
   # and this write must refuse rather than overwrite that newer state -- the
   # adopt path rewrites the whole binding, disconnected_at:null included.
   _remote_adopt_registration "$team" "$cfg" "$endpoint" "$remote_team_id" \
-    "$binding_cipher" "$server_instance" "$binding_revision" || exit 1
+    "$binding_cipher" "$server_instance" "$binding_revision" || {
+    # A refusal writes nothing, so the binding is as it was: put the engine
+    # back rather than leave a refused move to stop sync silently (#1512).
+    if [ "$was_running" -eq 1 ]; then
+      if _remote_sync_engine_start "$team"; then
+        echo "agmsg: the binding was not changed; the sync engine was restarted." >&2
+      else
+        echo "agmsg: the binding was not changed, but the sync engine is stopped; start it with: remote.sh sync start $(agmsg_shq "$team")" >&2
+      fi
+    fi
+    exit 1
+  }
 
   # Two places pin the address: the binding (moved above) and the stored sync
   # config, whose server_url loadConfig requires to match the binding. The
