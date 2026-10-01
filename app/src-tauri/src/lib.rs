@@ -612,6 +612,7 @@ pub fn run() {
             }
         })
         .manage(PtyManager::default())
+        .manage(agmsg::MessageWatcher::default())
         .setup(|app| {
             // A Finder/LaunchServices-launched GUI app gets the OS's minimal
             // default PATH, missing anything a login shell adds (Homebrew,
