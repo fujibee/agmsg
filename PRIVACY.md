@@ -22,7 +22,7 @@ Typical locations are listed under [Where data is stored](#where-data-is-stored)
 - **No telemetry or analytics.** No usage data, error reports, or counts are sent to the agmsg project.
 - **No data collection or sharing by the project.** The agmsg project does not receive, sell, or disclose user data.
 - **No agmsg accounts.** agmsg has no user accounts and no login. Services the user connects to bring their own credentials, which the user supplies.
-- **No calls to the agent tools' backends.** agmsg works alongside the AI agent CLIs the user has installed (such as Claude Code, Codex, Gemini CLI, Copilot CLI, Antigravity, and OpenCode) but does not call their services itself. What the user sends to those tools is governed by their own privacy policies.
+- **No calls to the agent tools' backends.** agmsg works alongside the AI agent CLIs the user has installed but does not call their services itself. What the user sends to those tools is governed by their own privacy policies.
 
 ## Network access
 
@@ -36,14 +36,7 @@ As with any network request, the server contacted can see the requesting IP addr
 
 ## Where data is stored
 
-agmsg writes to the user's local filesystem. Typical locations include:
-
-- `~/.agents/skills/agmsg/` — the skill directory, including teams, messages, and runtime files
-- `~/.agents/agmsg/` — agmsg's settings
-- per-project hook and configuration directories (such as `<project>/.claude/`, `<project>/.codex/`, `<project>/.agent/`, `<project>/.github/hooks/`)
-- the configuration files of the agent tools agmsg integrates with, where the installer adds what agmsg needs
-
-Some locations can be changed through environment variables. `uninstall.sh` removes an install's skill, commands, and hooks (see its options, such as `--keep-data`); anything left can be deleted by hand.
+agmsg writes to the user's local filesystem. The main places are a directory under `~/.agents/` (teams, messages, runtime files, and settings) and, for the projects and agent tools the user integrates it with, hook and configuration files in those projects and tools' own configuration locations. Some locations can be changed through environment variables. The uninstaller removes what an install added, with options to keep data; anything left can be deleted by hand.
 
 ## Inter-agent messages on the same machine
 
