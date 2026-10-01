@@ -88,6 +88,16 @@ while IFS= read -r team; do
   case "$result" in
     ok) : ;;
     held:*)
+      # A new session id on the SAME live pid (Claude Code /clear, #1468/#1489)
+      # is still the same seat, so it may reclaim atomically here before the
+      # refusal below -- actas_lock_reclaim_same_process already refuses
+      # anything else (a different pid, a dead one, or an unreadable lock), so
+      # this cannot hand the role to a different live process.
+      handoff=$(actas_lock_reclaim_same_process "$team" "$NAME" "$SESSION_ID" 2>/dev/null || true)
+      if [ "$handoff" = "ok" ]; then
+        claimed="${claimed:+$claimed$'\n'}$team"
+        continue
+      fi
       # Roll back any partial claims so the user can retry cleanly.
       while IFS= read -r c_team; do
         [ -z "$c_team" ] && continue

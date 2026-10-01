@@ -68,6 +68,22 @@ fake_session() {
   [ "$(_owner_only T alice)" = "sid-owner" ]   # not stolen
 }
 
+@test "actas-claim: same live pid with a new session id reclaims after clear (#1489)" {
+  # Claude Code's /clear keeps the OS process (and its pid) but mints a new
+  # session id. The lock still names the pre-/clear session id, but it is
+  # the same seat, so this reclaims instead of refusing it as held.
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
+  fake_register T alice
+  export AGMSG_AGENT_PID="$$"
+  local old_owner="sid-before-clear.$$"
+  echo "$old_owner" > "$(actas_lock_path T alice)"
+
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p1 claude-code alice "sid-after-clear"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "status=ok"
+  [ "$(_owner_only T alice)" = "sid-after-clear.$$" ]
+}
+
 @test "actas-claim: status=not_registered when name is unknown" {
   fake_register T alice
   fake_session "sid-me" >/dev/null
