@@ -142,9 +142,17 @@ exec_plain_codex() {
   fi
   echo "agmsg: Codex monitor bridge unavailable - launching plain Codex. Real-time agmsg delivery is OFF this session (messages still queue; check your inbox manually). Likely cause: the Codex app-server interface changed in 0.142+. Fix in progress." >&2
   cd "$PROJECT" 2>/dev/null || true
+  # On an elevated Windows shell a plain Codex refuses to start its shared
+  # background server, so this fallback names the flag Codex asks for.
+  local no_daemon=()
+  if [ -r "$SCRIPT_DIR/../../../lib/windows-elevation.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/../../../lib/windows-elevation.sh"
+    agmsg_codex_plain_launch_wants_no_daemon ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} && no_daemon=(--no-daemon)
+  fi
   case "$CODEX_COMMAND" in
-    codex)  exec "$REAL_CODEX" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
-    resume) exec "$REAL_CODEX" resume ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
+    codex)  exec "$REAL_CODEX" ${no_daemon[@]+"${no_daemon[@]}"} ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
+    resume) exec "$REAL_CODEX" ${no_daemon[@]+"${no_daemon[@]}"} resume ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
   esac
 }
 

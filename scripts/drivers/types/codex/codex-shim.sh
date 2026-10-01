@@ -159,6 +159,25 @@ fi
 project="$(project_from_args "$@")"
 command_name="$(first_non_option "$@" || true)"
 
+use_monitor=1
+is_monitor_project "$project" || use_monitor=0
+
+# A top-level Codex launch that does not go through the monitor bridge runs the
+# real binary directly. On an elevated Windows shell that binary refuses to
+# start its shared background server unless told not to, so the flag Codex
+# names for the case is added there -- and only there. Subcommands that are not
+# a session launch never come through here (see the case below).
+exec_plain_launch() {
+  if [ -r "$SCRIPT_DIR/../../../lib/windows-elevation.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/../../../lib/windows-elevation.sh"
+    if agmsg_codex_plain_launch_wants_no_daemon "$@"; then
+      exec "$real_codex" --no-daemon "$@"
+    fi
+  fi
+  exec "$real_codex" "$@"
+}
+
 # agmsgd owns newly launched seats while intent is on, even when the daemon
 # is down. Do not start any app-server, dispatcher or bridge as a fallback.
 daemon_state_lib="$SCRIPT_DIR/../../../lib/daemon-state.sh"
@@ -168,27 +187,27 @@ if [ -f "$daemon_state_lib" ]; then
   agmsg_daemon_read_state
   if [ "${AGMSGD_DESIRED:-unknown}" = on ]; then
     case "$command_name" in
-      app-server|exec|e|login|logout|mcp|plugin|remote-control|completion|update|doctor|cloud|exec-server|features|debug|apply|a|review|sandbox|help|--help|-h|version|--version|-V) ;;
+      app-server|exec|e|login|logout|mcp|plugin|remote-control|completion|update|doctor|cloud|exec-server|features|debug|apply|a|review|sandbox|help|--help|-h|version|--version|-V)
+        exec "$real_codex" "$@"
+        ;;
       *)
         echo 'agmsgd handles Codex notices; starting plain Codex without a bridge.' >&2
         agmsg_daemon_warn_if_stopped always
+        exec_plain_launch "$@"
         ;;
     esac
-    exec "$real_codex" "$@"
   fi
-fi
-
-if ! is_monitor_project "$project"; then
-  exec "$real_codex" "$@"
 fi
 
 monitor_cmd="${AGMSG_CODEX_MONITOR_CMD:-$SCRIPT_DIR/codex-monitor.sh}"
 
 case "$command_name" in
   "")
+    [ "$use_monitor" = 1 ] || exec_plain_launch "$@"
     AGMSG_REAL_CODEX="$real_codex" exec "$monitor_cmd" --project "$project" --codex-command codex -- "$@"
     ;;
   resume)
+    [ "$use_monitor" = 1 ] || exec_plain_launch "$@"
     monitor_args=()
     removed_resume=0
     for arg in "$@"; do
@@ -213,6 +232,7 @@ case "$command_name" in
     exec "$real_codex" "$@"
     ;;
   *)
+    [ "$use_monitor" = 1 ] || exec_plain_launch "$@"
     AGMSG_REAL_CODEX="$real_codex" exec "$monitor_cmd" --project "$project" --codex-command codex -- "$@"
     ;;
 esac
