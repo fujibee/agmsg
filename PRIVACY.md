@@ -15,35 +15,33 @@ When installed, agmsg stores the following on the user's local filesystem only:
 - **Per-session runtime files** — pidfiles, last-checked markers, and the actas exclusivity lock files under `~/.agents/skills/agmsg/run/`. These reference the user's session IDs and process IDs to coordinate hooks.
 - **Hook configuration in the user's projects** — agmsg writes per-runtime hook files (e.g. `<project>/.claude/settings.local.json`, `<project>/.codex/hooks.json`, `<project>/.agent/rules/agmsg.md`, `<project>/.github/hooks/agmsg.json`) when the user picks a delivery mode. These contain absolute paths to the agmsg scripts; they do not contain personal data beyond filesystem paths.
 
-All of the above lives on the user's machine. The current version of agmsg has no resident daemon and no server that accepts connections from other machines. Some background processes may run on the user's machine: the inbox watcher (local files only); for a Codex seat, the Codex monitor, which starts `codex app-server` listening on `127.0.0.1` only, with a bridge process that connects to it; and, only for a team the user has connected to a remote server, the sync engine described under [Network access](#network-access).
+All of the above lives on the user's machine. The current version has no resident daemon and no server that accepts connections from other machines. Background processes that may run: the inbox watcher (local files only); for a Codex seat, the Codex monitor, which starts `codex app-server` listening on `127.0.0.1` only, plus a bridge that connects to it; and, for a team connected to a remote server, the sync engine (see [Network access](#network-access)).
 
-In this policy, "network access" means a connection to another machine. Connections on `127.0.0.1` (like the Codex monitor's) stay on the user's machine and are not counted.
+"Network access" in this policy means a connection to another machine. Connections on `127.0.0.1` stay on the user's machine and are not counted.
 
 ## What agmsg does not do
 
-- **No network requests by default in the CLI.** Sending messages, the inbox, history, teams, joining, and the watcher use only the local SQLite database and files. URLs that appear in the scripts are printed as text, not fetched. The cases where agmsg does use the network are listed under [Network access](#network-access).
+- **No network requests by default in the CLI.** Sending, the inbox, history, teams, joining, and the watcher use only local files and the SQLite database. The exceptions are listed under [Network access](#network-access).
 - **No telemetry or analytics.** No usage data, error reports, or counts are sent anywhere.
 - **No third-party services.** agmsg integrates with whatever CLI AI agent the user has installed (Claude Code, Codex, Gemini CLI, Copilot CLI, Antigravity, OpenCode); it does not call those agents' backends itself. Anything the user types to one of those agents is governed by that agent's own privacy policy, not by agmsg.
-- **No agmsg accounts.** agmsg itself has no user accounts and no login. Services the user chooses to connect bring their own credentials, which the user supplies: for example an ext-tool member's API key or token (the member's config names a file on the user's machine that holds it) or the server named for remote sync.
-- **No data sharing.** The agmsg project does not receive, sell, or disclose user data. Data leaves the machine only in the cases under [Network access](#network-access), and goes to a destination the user chose, or to GitHub for installing and updating.
+- **No agmsg accounts.** agmsg has no user accounts and no login. Services the user connects bring their own credentials, which the user supplies (for example an ext-tool member's API key or token, kept in a file on the user's machine that the member's config names).
+- **No data sharing.** The agmsg project does not receive, sell, or disclose user data. Data leaves the machine only in the cases under [Network access](#network-access).
 
 ## Network access
 
 agmsg uses the network only in the cases below.
 
-**Installing and updating the CLI.** `npx agmsg install` downloads the installer script from `raw.githubusercontent.com`, and the installer fetches the agmsg source from `github.com` (a `git clone`, or a tarball download if git is unavailable). This happens when the user runs the install, and only then.
+**Installing the CLI.** `npx agmsg install` downloads the installer from `raw.githubusercontent.com`, and the installer fetches the agmsg source from `github.com` (`git clone`, or a tarball if git is unavailable). This happens only when the user runs the install.
 
-**Desktop app update check.** The desktop app checks `https://github.com/fujibee/agmsg/releases/download/app-latest/latest.json` each time it starts, and when the user picks "Check for Updates" from the menu. This check runs automatically and cannot be turned off in the app today. As with any HTTPS request, GitHub can see the requesting IP address. The app installs an update only after the user approves it, and verifies the update's signature against the public key built into the app. Starting agents and sending messages from the app goes through the same CLI scripts as above, so it needs no network.
+**Desktop app update check.** The desktop app requests `https://github.com/fujibee/agmsg/releases/download/app-latest/latest.json` each time it starts, and when the user picks "Check for Updates". The startup check cannot be turned off in the app today. As with any HTTPS request, GitHub can see the requesting IP address. An update is installed only after the user approves it, and its signature is verified against the public key built into the app. Starting agents and sending messages from the app go through the same CLI scripts, so they need no network.
 
-**Remote sync (opt-in).** A team syncs with a server only after the user runs `remote.sh connect` (or `pull`) with `--endpoint <url>`; the CLI has no default server. From then on a background sync engine on the user's machine sends that team's data to the server the user named, and receives the team's data from it: messages, sender and recipient names, the team and member roster, and read state. The destination is the endpoint the user chose, and agmsg sends nothing to it for teams that are not connected. Connecting with `--e2ee` encrypts message bodies before they leave the machine. `remote.sh disconnect` stops syncing for a team.
+**Remote sync (opt-in).** A team syncs only after the user runs `remote.sh connect` (or `pull`) with `--endpoint <url>`; there is no default server. The sync engine then exchanges that team's data with the server the user named: messages, sender and recipient names, the member roster, and read state. Teams that are not connected send nothing. `--e2ee` encrypts message bodies before they leave the machine, and `remote.sh disconnect` stops syncing for a team.
 
-**External tool members (opt-in).** An ext-tool adapter is a program joined into a team as a member, and it talks to whatever it was written to reach. The adapters shipped with agmsg are `slack` (posts messages to Slack, `https://slack.com/api`) and `jev` (sends the message to a decision API at `openrouter.ai` or `api.typesafe.ai`, using the user's own API key). They run only for a team member the user has set up. Such a member contacts its service when a message is addressed to it, and also when the user sets it up or tests it (for example the Slack token check, channel lookup, and test post, and the `jev` API test). Adapters a user adds or installs are that user's own choice; what they contact is up to their code.
-
-**Not covered here.** The AI agent CLIs that agmsg works with send data to their own backends under their own privacy policies (see above).
+**External tool members (opt-in).** An ext-tool adapter is a program joined into a team as a member (for example the `slack` and `jev` adapters that ship with agmsg). It contacts the service the user configured for it when a message is addressed to it, and when the user sets it up or tests it. What it sends is up to the adapter.
 
 ## Where data is stored
 
-The data agmsg writes is on the user's local filesystem. The main default locations are:
+agmsg writes to the user's local filesystem. The main default locations are:
 
 - `~/.agents/skills/agmsg/` (the skill directory)
 - `~/.agents/agmsg/config.json` (the machine-wide settings file, for example the storage driver)
@@ -51,7 +49,7 @@ The data agmsg writes is on the user's local filesystem. The main default locati
 - `<project>/.claude/`, `<project>/.codex/`, `<project>/.agent/`, `<project>/.github/hooks/` (per-project hook configs, in the user's own project directories)
 - the Codex configuration file (`config.toml` under `CODEX_HOME`, default `~/.codex/`), where the installer adds the paths agmsg needs to write to
 
-Some of these locations can be overridden, for example the message database directory and the settings file path through environment variables. The user is solely in control: `uninstall.sh` in the repo removes an install's skill, commands, and hooks (see its options, such as `--keep-data`); it is not a guarantee that every location above is gone, so anything left can be deleted by hand.
+Some locations can be overridden through environment variables (for example the message database directory and the settings file). `uninstall.sh` removes an install's skill, commands, and hooks (see its options, such as `--keep-data`); it does not guarantee that every location above is gone, so anything left can be deleted by hand.
 
 ## Inter-agent messages on the same machine
 
