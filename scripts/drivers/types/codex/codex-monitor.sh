@@ -179,8 +179,20 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
 # under --remote) inherit THIS process's environment directly, which is the
 # whole point -- no ancestry walk is needed anywhere downstream to find a
 # seat's own server (design review, replacing an earlier ancestry-walk design).
+#
+# Also passed as a `shell_environment_policy.set` override: under a
+# `shell_environment_policy.inherit` other than the default "all" (e.g.
+# "core" or "none"), Codex 0.158+ no longer lets tool-command children see a
+# var the policy excludes, so the plain env var above stops reaching them.
+# `set` is applied after `inherit`/exclude, so this reaches the tool
+# environment regardless of `inherit`; a user's own `include_only` still
+# filters after `set` and must list the var themselves (#1537). The key is
+# generated internally as digits and dots only (_agmsg_codex_seat_key_new),
+# so it is always safe inside this double-quoted TOML string unescaped.
 AGMSG_CODEX_SEAT_KEY="$SEAT_KEY" \
-  "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SEAT_LOG" 2>&1 3>&- 4>&- &
+  "$REAL_CODEX" app-server \
+    -c "shell_environment_policy.set.AGMSG_CODEX_SEAT_KEY=\"$SEAT_KEY\"" \
+    --listen "ws://127.0.0.1:0" >>"$SEAT_LOG" 2>&1 3>&- 4>&- &
 server_bg="$!"
 
 PORT=""

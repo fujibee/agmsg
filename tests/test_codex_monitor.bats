@@ -6,13 +6,19 @@ setup() {
   setup_test_env
   export TEST_PROJECT="$(mktemp -d)"
   export CALL_LOG="$TEST_PROJECT/calls.log"
+  export APP_SERVER_ARGV_LOG="$TEST_PROJECT/app-server-argv.log"
 
   # Fake codex for codex-monitor tests.
   #   --version            -> prints "codex-cli $FAKE_CODEX_VERSION"
-  #   app-server --listen  -> FAKE_CODEX_MODE=broken: reject (emulate a release
-  #                           that can't bring the app-server up); otherwise bind
-  #                           a real loopback port, print the listening line, and
-  #                           stay alive so reuse health checks see a live server.
+  #   app-server --listen  -> logs this invocation's argv to
+  #                           APP_SERVER_ARGV_LOG (a separate file from
+  #                           CALL_LOG: some tests assert CALL_LOG does not
+  #                           exist at all, which app-server always being
+  #                           called first would break). FAKE_CODEX_MODE=broken:
+  #                           reject (emulate a release that can't bring the
+  #                           app-server up); otherwise bind a real loopback
+  #                           port, print the listening line, and stay alive
+  #                           so reuse health checks see a live server.
   #   anything else        -> log the invocation to CALL_LOG (the plain/--remote
   #                           handoff target) and exit.
   export FAKE_CODEX="$TEST_PROJECT/real-codex"
@@ -24,6 +30,8 @@ case "${1:-}" in
     exit 0
     ;;
   app-server)
+    for a in "$@"; do printf ' <%s>' "$a" >> "$APP_SERVER_ARGV_LOG"; done
+    printf '\n' >> "$APP_SERVER_ARGV_LOG"
     if [ "${FAKE_CODEX_MODE:-listen}" = "broken" ]; then
       echo "error: unexpected argument '--listen' found" >&2
       exit 2
@@ -98,6 +106,24 @@ teardown() {
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume --
   [ "$status" -eq 0 ]
   grep -qx 'plain-codex <resume>' "$CALL_LOG"
+}
+
+# --- #1537: the seat key must reach tool commands under any shell_environment_policy ---
+
+@test "codex-monitor: the app-server is launched with the seat key as a shell_environment_policy.set override (#1537)" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+
+  # A restrictive shell_environment_policy.inherit (e.g. "core" or "none") on
+  # the model's shell commands excludes a plain env var not in the policy's
+  # keep-list (Codex 0.158+, openai/codex#48099). `set` is applied after
+  # `inherit`, so the key must also be passed as a `-c
+  # shell_environment_policy.set.AGMSG_CODEX_SEAT_KEY=...` override to reach
+  # those commands regardless of the user's own inherit setting.
+  run env FAKE_CODEX_VERSION=0.142.2 AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  grep -q -- '<-c> <shell_environment_policy\.set\.AGMSG_CODEX_SEAT_KEY="[0-9.]\{1,\}">' "$APP_SERVER_ARGV_LOG"
 }
 
 # --- #1254: one app-server per seat, never reused ---
