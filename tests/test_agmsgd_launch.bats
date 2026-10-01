@@ -59,27 +59,34 @@ setup_install_db() {
   # the BEGIN EXCLUSIVE, is what actually holds it across commands, the
   # way a real in-progress install.sh would.
   local fifo="$TEST_SKILL_DIR/run/holder.fifo"
-  mkfifo "$fifo"
-  sqlite3 "$TEST_SKILL_DIR/run/install-op.lock.db" < "$fifo" &
+  local ack_fifo="$TEST_SKILL_DIR/run/holder-ack.fifo"
+  mkfifo "$fifo" "$ack_fifo"
+  sqlite3 -batch "$TEST_SKILL_DIR/run/install-op.lock.db" < "$fifo" > "$ack_fifo" &
   local holder_pid=$!
   exec 8> "$fifo"
-  echo "BEGIN EXCLUSIVE;" >&8
-  # No fixed sleep budget: poll until the lock is actually held (a second,
-  # independent probe blocks), so this test does not race the holder's
-  # own startup time.
-  local waited=0
-  while sqlite3 -cmd "PRAGMA busy_timeout=0;" "$TEST_SKILL_DIR/run/install-op.lock.db" "BEGIN EXCLUSIVE; ROLLBACK;" >/dev/null 2>&1; do
-    waited=$((waited + 1))
-    [ "$waited" -lt 100 ] || break
-    sleep 0.05
-  done
+  exec 9< "$ack_fifo"
+  # A second BEGIN EXCLUSIVE probe can win the race and make the holder's
+  # own BEGIN fail. Ask the holder itself to acknowledge acquisition, and
+  # bail on SQL errors so a failed BEGIN cannot print a false success.
+  printf '%s\n' '.bail on' 'BEGIN EXCLUSIVE;' '.print LOCKED' >&8
+  local acquired=""
+  if ! IFS= read -r -t 5 acquired <&9 || [ "$acquired" != LOCKED ]; then
+    exec 8>&-
+    exec 9<&-
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    echo 'lock holder did not acknowledge acquisition' >&2
+    false
+  fi
 
   run bash "$LAUNCH"
-  [ "$status" -eq 75 ]
-
-  echo "ROLLBACK;" >&8
+  printf '%s\n' 'ROLLBACK;' '.quit' >&8
   exec 8>&-
-  wait "$holder_pid" 2>/dev/null || true
+  exec 9<&-
+  wait "$holder_pid"
+  [ "$status" -eq 75 ]
+  printf '%s\n' "$output" | grep -Fq 'an install/uninstall is in progress'
+  [ "$(sqlite3 "$SKILLDIR_INSTALL_DB" 'SELECT count(*) FROM daemon_start_attempts;')" -eq 0 ]
 }
 
 @test "agmsgd-launch: a crashed update (.prev present, lock free) -> exits 0, records a start attempt" {
