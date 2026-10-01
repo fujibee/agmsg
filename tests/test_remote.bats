@@ -418,6 +418,9 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   # And nothing was written: the binding still names the verified address.
   [ "$(_binding_field testteam endpoint)" = "$ENDPOINT" ]
   [ "$(_binding_field testteam server_instance_id)" = "$anchored" ]
+  # A refused move leaves the engine running, as it found it (#1512).
+  grep -Fq "the sync engine was restarted" <<<"$output"
+  kill -0 "$(cat "$TEST_SKILL_DIR/run/remote-sync.testteam.pid")"
 }
 
 @test "set-endpoint: re-running from the partial state repairs the stored sync config (#739 P1-1)" {
