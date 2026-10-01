@@ -46,7 +46,9 @@
       "emptyState": "아직 에이전트가 없습니다. 위의 ＋ 버튼을 사용해 추가하세요."
     },
     "user": {
-      "title": "{{team}}의 app-user"
+      "title": "{{team}}의 app-user",
+      "none": "이 팀에는 app-user가 없습니다",
+      "add": "추가"
     }
   },
   "tabs": {

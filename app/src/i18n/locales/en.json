@@ -56,7 +56,9 @@
       "emptyState": "No agents yet. Use the + button above to add one."
     },
     "user": {
-      "title": "app-user in {{team}}"
+      "title": "app-user in {{team}}",
+      "none": "No app-user in this team",
+      "add": "Add"
     }
   },
   "tabs": {

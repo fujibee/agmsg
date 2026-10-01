@@ -936,6 +936,18 @@ body.resizing-row {
   font-size: 11px;
   color: var(--muted);
 }
+/* A team with no app-user (#1510): a short muted line plus the Add action in
+   place of the name. Unlike .su-name it may wrap -- the sidebar is narrow and
+   the sentence is longer than a name. */
+.su-none {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--muted);
+}
+.su-add {
+  align-self: flex-start;
+  font-size: 11px;
+}
 
 /* Main */
 .main {
