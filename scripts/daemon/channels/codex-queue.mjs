@@ -26,6 +26,7 @@ import {
 } from "./codex-queue-io.mjs";
 import { captureProcessGroup, observeProcessGroup } from "./process-group.mjs";
 import { processStartWitness } from "./process-group.mjs";
+import { checkWindowsCodexQueueGate } from "./windows-codex-queue.mjs";
 
 const QUEUE_TIMEOUT_MS = 10_000;
 
@@ -278,6 +279,7 @@ export function createCodexQueueChannel({
   captureGroup = captureProcessGroup,
   observeGroup = observeProcessGroup,
   hostPlatform = process.platform,
+  windowsGate = checkWindowsCodexQueueGate,
 }) {
   let stopped = false;
   let activeController = null;
@@ -299,13 +301,16 @@ export function createCodexQueueChannel({
         return;
       }
       if (hostPlatform === "win32") {
-        if (observation.state === "confirmed") setQueueState(db, pending.id, "confirmed");
-        else if (observation.state === "expired") setQueueState(db, pending.id, "expired");
-        const reason = observation.state === "pending"
-          ? `windows_live_delivery_unverified;pending:${observation.reason}`
-          : "windows_live_delivery_unverified";
-        saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "blocked", reason }, now);
-        return;
+        const gate = windowsGate({ executable, env });
+        if (gate.state !== "ok") {
+          if (observation.state === "confirmed") setQueueState(db, pending.id, "confirmed");
+          else if (observation.state === "expired") setQueueState(db, pending.id, "expired");
+          const reason = observation.state === "pending"
+            ? `${gate.reason};pending:${observation.reason}`
+            : gate.reason;
+          saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "blocked", reason }, now);
+          return;
+        }
       }
       if (observation.state === "confirmed") {
         setQueueState(db, pending.id, "confirmed");
@@ -349,9 +354,14 @@ export function createCodexQueueChannel({
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "role_session_type_mismatch" }, now);
       return;
     }
+    let queueExecutable = executable;
     if (hostPlatform === "win32") {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "windows_live_delivery_unverified" }, now);
-      return;
+      const gate = windowsGate({ executable, env });
+      if (gate.state !== "ok") {
+        saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: gate.reason }, now);
+        return;
+      }
+      queueExecutable = gate.executable;
     }
     let driver;
     try {
@@ -426,7 +436,7 @@ export function createCodexQueueChannel({
     let result;
     try {
       result = await queue({
-        executable,
+        executable: queueExecutable,
         codexHome: record.codex_home,
         thread: record.thread,
         message: inboxNudge(nonce),
