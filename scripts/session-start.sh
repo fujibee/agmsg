@@ -450,17 +450,7 @@ WATCH="$SKILL_DIR/scripts/watch.sh"
 # emit_monitor_directive and scripts/drivers/types/claude-code/template.md's
 # overlays -- the surfaces must never disagree with each other.
 REARM_NOTE="
-This watch renews itself. A little before the 30-minute cap it prints one line
-on its own and exits:
-- \"agmsg watch: re-arm - ...\": invoke the Monitor tool again with exactly the
-  command and description that line names (persistent: true, timeout_ms:
-  1800000). Re-arm it silently: no message to the user, no \"re-armed\", no
-  acknowledgement, no summary — just invoke Monitor again and continue, since
-  announcing it every 30 minutes wastes tokens for no benefit.
-- \"agmsg watch: stopping - ...\": do not re-arm it.
-If the watch is instead killed at the cap and no such line arrived (an agmsg
-install from before this), re-arm it only when the expiry notification says it
-delivered something."
+This watch renews itself. A little before the 30-minute cap it prints one line on its own and exits: on \`agmsg watch: re-arm - ...\`, invoke Monitor again with exactly the command and description that line names (persistent: true, timeout_ms: 1800000), silently — no message to the user, no \"re-armed\", no acknowledgement, no summary, since announcing it every 30 minutes wastes tokens for no benefit; on \`agmsg watch: stopping - ...\`, do not re-arm it. If the watch is instead killed at the cap and no such line arrived (an agmsg install from before this), re-arm it only when the expiry notification says it delivered something."
 # The launch commands below end with the option that turns self-management on.
 WATCH_MAX_ARG="--max-seconds=1790"
 # Shell-quote each argv so the host can paste the command into Monitor and run

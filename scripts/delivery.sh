@@ -619,17 +619,7 @@ EOF
   # watcher itself. Word-for-word identical to scripts/session-start.sh.
   local rearm_note
   rearm_note="
-This watch renews itself. A little before the 30-minute cap it prints one line
-on its own and exits:
-- \"agmsg watch: re-arm - ...\": invoke the Monitor tool again with exactly the
-  command and description that line names (persistent: true, timeout_ms:
-  1800000). Re-arm it silently: no message to the user, no \"re-armed\", no
-  acknowledgement, no summary — just invoke Monitor again and continue, since
-  announcing it every 30 minutes wastes tokens for no benefit.
-- \"agmsg watch: stopping - ...\": do not re-arm it.
-If the watch is instead killed at the cap and no such line arrived (an agmsg
-install from before this), re-arm it only when the expiry notification says it
-delivered something."
+This watch renews itself. A little before the 30-minute cap it prints one line on its own and exits: on \`agmsg watch: re-arm - ...\`, invoke Monitor again with exactly the command and description that line names (persistent: true, timeout_ms: 1800000), silently — no message to the user, no \"re-armed\", no acknowledgement, no summary, since announcing it every 30 minutes wastes tokens for no benefit; on \`agmsg watch: stopping - ...\`, do not re-arm it. If the watch is instead killed at the cap and no such line arrived (an agmsg install from before this), re-arm it only when the expiry notification says it delivered something."
   cat <<EOF
 
 AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:

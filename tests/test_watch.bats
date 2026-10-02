@@ -371,7 +371,7 @@ _wait_exit() {  # <pid> <tenths>
   bash "$SCRIPTS/join.sh" team dave claude-code "$PROJ" >/dev/null
 
   bash "$SCRIPTS/send.sh" team bob alice "renewal probe" >/dev/null
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms1 "$PROJ" claude-code alice --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms1 "$PROJ" claude-code alice --max-seconds=8 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
@@ -380,7 +380,7 @@ _wait_exit() {  # <pid> <tenths>
   grep -qF 'agmsg watch: re-arm' "$out"
   grep -qF 'description: agmsg inbox stream (acting as alice) persistent: true timeout_ms: 1800000' "$out"
   grep -qF -- 'watch.sh s-ms1' "$out"
-  grep -qF -- 'alice --max-seconds=2' "$out"
+  grep -qF -- 'alice --max-seconds=8' "$out"
 
   # Quiet run: nothing delivered -> stopping, not re-arm.
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms2 "$PROJ" claude-code carol --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &

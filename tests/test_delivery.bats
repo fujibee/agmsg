@@ -614,7 +614,7 @@ eperm_pid() {
   grep -q 'This watch renews itself' <<<"$output"
   grep -qF 'agmsg watch: re-arm - ...' <<<"$output"
   grep -qF 'agmsg watch: stopping - ...' <<<"$output"
-  grep -q 'Re-arm it silently' <<<"$output"
+  grep -qF 'no acknowledgement, no summary' <<<"$output"
   refute grep -q 'says it delivered no events, do not re-arm it' <<<"$output"
   # The maintainer's follow-up to #1270: an agent that announces every silent
   # re-arm ("re-armed", an acknowledgement, a summary) burns tokens every 30
@@ -623,7 +623,7 @@ eperm_pid() {
   [ "$status" -eq 0 ]
   grep -q 'timeout_ms: 1800000' <<<"$output"
   grep -q 'This watch renews itself' <<<"$output"
-  grep -q 'Re-arm it silently' <<<"$output"
+  grep -qF 'no acknowledgement, no summary' <<<"$output"
 }
 
 @test "delivery set both: emits AGMSG-DIRECTIVE for Monitor invocation" {
