@@ -58,12 +58,31 @@ _agmsg_lock_describe_dir() {
 # `kill -0` on its own reads EPERM as dead, which in a sandbox turns "cannot
 # signal" into "not running" — and here that would break a lock somebody is
 # holding. `_agmsg_pid_alive_local` treats EPERM as alive, a zombie as gone, and
-# cross-checks with `ps`. Sourced rather than reimplemented; guarded, so a
-# caller that already has it pays nothing.
-if ! declare -f _agmsg_pid_alive_local >/dev/null 2>&1; then
+# cross-checks with `ps`. Sourced rather than reimplemented.
+#
+# LOADED ON FIRST USE, and located with builtins only. This file is sourced on
+# PATHs that carry almost nothing (`join` is required to work on one, and a test
+# runs a write with `rm` and `dirname` missing), so loading it must not need an
+# external command, and the uncontended path -- which never asks who holds a
+# lock -- must not pay for a library it does not use. Where this file lives is
+# worked out here, at load, because a relative path is only good until the
+# caller changes directory.
+_AGMSG_LOCK_SELF="${BASH_SOURCE[0]:-$0}"
+case "$_AGMSG_LOCK_SELF" in
+  */*) _AGMSG_LOCK_SELF_DIR="$(cd "${_AGMSG_LOCK_SELF%/*}" 2>/dev/null && pwd)" || _AGMSG_LOCK_SELF_DIR="" ;;
+  *) _AGMSG_LOCK_SELF_DIR="$(pwd)" ;;
+esac
+
+# Returns 0 when the liveness helpers are available, 1 when they could not be
+# loaded -- and then nothing here can ask whether a holder is running, which is
+# "cannot tell", never "dead".
+_agmsg_lock_load_liveness() {
+  if declare -f _agmsg_pid_alive_local >/dev/null 2>&1; then return 0; fi
+  [ -n "$_AGMSG_LOCK_SELF_DIR" ] && [ -f "$_AGMSG_LOCK_SELF_DIR/instance-id.sh" ] || return 1
   # shellcheck source=instance-id.sh
-  source "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/instance-id.sh"
-fi
+  source "$_AGMSG_LOCK_SELF_DIR/instance-id.sh" 2>/dev/null || return 1
+  declare -f _agmsg_pid_alive_local >/dev/null 2>&1
+}
 
 # Was this holder record written on THIS machine?
 #
@@ -111,6 +130,7 @@ _agmsg_lock_same_host() {
 _agmsg_lock_holder_gone() {
   local lock="$1" pid host
   [ -f "$lock.holder" ] || return 1
+  _agmsg_lock_load_liveness || return 1
   pid="$(sed -n 's/^pid //p' "$lock.holder" 2>/dev/null | head -1)"
   host="$(sed -n 's/^host //p' "$lock.holder" 2>/dev/null | head -1)"
   _agmsg_pid_valid "$pid" 2147483647 || return 1
@@ -145,6 +165,7 @@ _agmsg_lock_holder_gone() {
 # cheap read filters the common case, and this is the judgement that counts.
 _agmsg_lock_break_dead() {
   local lock="$1" claimed="$1.dead.$$.${RANDOM:-0}" pid host
+  _agmsg_lock_load_liveness || return 1
   mv "$lock.holder" "$claimed" 2>/dev/null || return 1
   pid="$(sed -n 's/^pid //p' "$claimed" 2>/dev/null | head -1)"
   host="$(sed -n 's/^host //p' "$claimed" 2>/dev/null | head -1)"
@@ -244,7 +265,9 @@ agmsg_lock_acquire() {
         # review).
         tpid="$(sed -n 's/^pid //p' "$lock.holder" 2>/dev/null | head -1)"
         thost="$(sed -n 's/^host //p' "$lock.holder" 2>/dev/null | head -1)"
-        if ! _agmsg_pid_valid "$tpid" 2147483647; then
+        if ! _agmsg_lock_load_liveness; then
+          echo "agmsg: the liveness check could not be loaded, so nothing here could ask whether it is held." >&2
+        elif ! _agmsg_pid_valid "$tpid" 2147483647; then
           echo "agmsg: that record names no usable pid, so nothing here could ask whether it is held." >&2
         elif ! _agmsg_lock_same_host "$thost"; then
           echo "agmsg: that record was not written on this machine, so nothing here could ask whether it is held." >&2

@@ -405,9 +405,9 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   live=$!
   # CONTROLS: the dead pid is really not running and the live one really is.
   # Without them the "kept" cases pass whenever the number happens to be free.
-  run env PID="$gone" LOCKLIB="$LOCKLIB" bash -c '. "$LOCKLIB"; _agmsg_pid_alive_local "$PID"'
+  run env PID="$gone" LOCKLIB="$LOCKLIB" bash -c '. "$LOCKLIB"; _agmsg_lock_load_liveness; _agmsg_pid_alive_local "$PID"'
   [ "$status" -ne 0 ]
-  run env PID="$live" LOCKLIB="$LOCKLIB" bash -c '. "$LOCKLIB"; _agmsg_pid_alive_local "$PID"'
+  run env PID="$live" LOCKLIB="$LOCKLIB" bash -c '. "$LOCKLIB"; _agmsg_lock_load_liveness; _agmsg_pid_alive_local "$PID"'
   [ "$status" -eq 0 ]
 
   # A live holder on this machine: kept.
