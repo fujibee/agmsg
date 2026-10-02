@@ -104,7 +104,32 @@ case "$baseline" in
 esac
 
 if [ "$found" -gt "$baseline" ]; then
-  echo "check-enforced-assertions: $found unenforceable assertions, baseline is $baseline." >&2
+  over=$((found - baseline))
+  echo "check-enforced-assertions: $found unenforceable assertions, baseline is $baseline (+$over)." >&2
+  echo >&2
+  # Say what the list is before printing it. It is every offender in the tree,
+  # and on a typical red that is hundreds of lines around a `+1`. Four people
+  # read this output on one red and each drew a different wrong conclusion --
+  # the first file in the list taken as the cause, a hundred-line diff between
+  # two heads read as a hundred new offenders (line numbers shift below any
+  # insertion), and from that a guess that the listing must be truncated. It is
+  # not truncated; it is complete, unordered by novelty, and unlabelled.
+  #
+  # No state is added here on purpose. Storing the previous offender set beside
+  # the count would let this name the new entries directly, but it introduces a
+  # second thing to keep in sync with the first, and a listing that disagrees
+  # with the count is the same confusion wearing different clothes. The count
+  # stays the only authority; what changes is that the output stops implying
+  # otherwise. See #892.
+  if [ "$over" -eq 1 ]; then
+    echo "One assertion pushed this over. The list below is EVERY unenforceable" >&2
+  else
+    echo "$over assertions pushed this over. The list below is EVERY unenforceable" >&2
+  fi
+  echo "assertion in the tree, not the new one(s) -- nothing here marks which." >&2
+  echo "To find them: run this checker at the previous commit and compare the" >&2
+  echo "counts, bisecting until the count changes. Comparing the listings does" >&2
+  echo "not work; a line added anywhere shifts every line number below it." >&2
   echo >&2
   printf '%s\n' "$listing" | sed 's/^/  /' >&2
   echo >&2
