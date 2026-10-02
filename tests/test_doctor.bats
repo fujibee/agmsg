@@ -613,8 +613,13 @@ configured_off() {
   # Registry locks (#865): one with no holder record, which nothing else ever
   # breaks, and one that names its holder, which must stay.
   mkdir "$TEST_SKILL_DIR/teams/live.part/.config.lock"
+  touch -t 202001010000 "$TEST_SKILL_DIR/teams/live.part/.config.lock"   # older than any hold
   mkdir "$TEST_SKILL_DIR/teams/team/.config.lock"
+  touch -t 202001010000 "$TEST_SKILL_DIR/teams/team/.config.lock"
   printf 'token t\npid 1\ncommand t\nhost h\n' > "$TEST_SKILL_DIR/teams/team/.config.lock.holder"
+  # No record either, but just made: a command may be taking it right now, so
+  # it is neither listed nor removed.
+  mkdir -p "$TEST_SKILL_DIR/teams/young/.config.lock"
 
   run bash "$SCRIPTS/doctor.sh"
   [ "$status" -eq 1 ]
@@ -627,6 +632,7 @@ configured_off() {
   grep -qF 'registry locks with no holder record' <<<"$output"
   grep -qxF '  team: live.part' <<<"$output"
   [ -z "$(grep -xF '  team: team' <<<"$output")" ]
+  [ -z "$(grep -xF '  team: young' <<<"$output")" ]
   [ -z "$(grep -F 'agent: alice' <<<"$output")" ]
   [ -z "$(grep -F 'herdr:id:w1:p3' <<<"$output")" ]
   [ -f "$run_dir/spawn.${gone}__worker" ]            # reporting deletes nothing
@@ -650,5 +656,6 @@ configured_off() {
   [ -f "$run_dir/spawn.${id_team}__${id_member}" ]
   [ ! -e "$TEST_SKILL_DIR/teams/live.part/.config.lock" ]   # no record: removed
   [ -d "$TEST_SKILL_DIR/teams/team/.config.lock" ]          # names its holder: kept
+  [ -d "$TEST_SKILL_DIR/teams/young/.config.lock" ]         # too new to say: kept
   [ -f "$TEST_SKILL_DIR/teams/team/.config.lock.holder" ]
 }

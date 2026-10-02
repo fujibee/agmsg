@@ -294,16 +294,26 @@ _doctor_print_orphans() {
 # whose owner has not written the record yet, so nothing breaks it and every
 # command for that team then waits out its budget and fails. Listed here and
 # removed only by --fix. Installation-wide, like the orphaned records above.
+#
+# ONLY LOCKS OLDER THAN THE LONGEST A LOCK CAN LEGITIMATELY BE HELD. Looking
+# again just before the removal cannot make it safe: a command can take the lock
+# and write its record between that look and the `rmdir`. Age is what makes it
+# safe -- the longest hold is a roster sync, 120 s by default, so a lock with no
+# record that is older than three minutes is not a command that has only just
+# started. A younger one is neither listed nor removed.
 LOCKS_NO_RECORD=""
+_DOCTOR_LOCK_MIN_AGE_MIN=3
 
-# A record is the holder file, or the copy a killed release left behind.
+# Only the holder file is a record. The copy a killed release leaves behind
+# (`<lock>.holder.releasing.<pid>`) is not tied to the directory that is there
+# now, so it is not counted; a lock with only that is listed like any other.
 _doctor_lock_has_record() {   # <lock dir>
-  local lock="$1" f
-  if [ -f "$lock.holder" ]; then return 0; fi
-  for f in "$lock.holder.releasing."*; do
-    if [ -f "$f" ]; then return 0; fi
-  done
-  return 1
+  [ -f "$1.holder" ]
+}
+
+# True when the lock directory is older than the longest hold.
+_doctor_lock_old_enough() {   # <lock dir>
+  [ -n "$(find "$1" -maxdepth 0 -mmin "+$_DOCTOR_LOCK_MIN_AGE_MIN" 2>/dev/null)" ]
 }
 
 # Fills LOCKS_NO_RECORD with one team directory name per line. The three globs
@@ -315,6 +325,7 @@ _doctor_scan_record_less_locks() {
   for lock in "$SKILL_DIR"/teams/*/.config.lock "$SKILL_DIR"/teams/.[!.]*/.config.lock "$SKILL_DIR"/teams/..?*/.config.lock; do
     [ -d "$lock" ] || continue
     if _doctor_lock_has_record "$lock"; then continue; fi
+    if ! _doctor_lock_old_enough "$lock"; then continue; fi
     name="${lock%/.config.lock}"; name="${name##*/}"
     LOCKS_NO_RECORD="${LOCKS_NO_RECORD}${name}"$'\n'
   done
@@ -325,13 +336,13 @@ _doctor_print_locks() {
   local n name
   [ -n "$LOCKS_NO_RECORD" ] || return 0
   n="$(printf '%s' "$LOCKS_NO_RECORD" | grep -c . || true)"
-  echo "registry locks with no holder record -- nothing can tell whether they are held ($n):"
+  echo "registry locks with no holder record, older than ${_DOCTOR_LOCK_MIN_AGE_MIN} minutes -- nothing can tell whether they are held ($n):"
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     if [ "$REDACTED" = 1 ]; then _redact_team "$name"; name="$_REDACT_OUT"; fi
     echo "  team: $name"
   done <<< "$LOCKS_NO_RECORD"
-  echo "  remove them only when no agmsg command is running for these teams."
+  echo "  --fix is a repair for when no agmsg command or sync is running for these teams."
   echo
 }
 
@@ -388,9 +399,9 @@ if [ "$FIX" = 1 ]; then
       echo "left $_doctor_skipped seat(s) alone: their team exists now."
     fi
   fi
-  # Locks: `rmdir`, never `rm -r`, so only an empty directory can go. Looked at
-  # again right before each one: a command may have taken the lock and recorded
-  # itself while the question waited, and then it is not ours to remove.
+  # Locks: `rmdir`, never `rm -r`, so only an empty directory can go. The age
+  # filter in the scan is what makes this safe; the look below only skips one
+  # that has been recorded since, and is not atomic with the `rmdir`.
   _doctor_locks_removed=0 _doctor_locks_skipped=0
   while IFS= read -r _lk; do
     [ -n "$_lk" ] || continue
@@ -405,7 +416,7 @@ if [ "$FIX" = 1 ]; then
   if [ -n "$LOCKS_NO_RECORD" ]; then
     echo "removed $_doctor_locks_removed registry lock(s) with no holder record."
     if [ "$_doctor_locks_skipped" -gt 0 ]; then
-      echo "left $_doctor_locks_skipped registry lock(s) alone: they are held or recorded now."
+      echo "left $_doctor_locks_skipped registry lock(s) alone: they are recorded now or could not be removed."
     fi
   fi
   exit 0
