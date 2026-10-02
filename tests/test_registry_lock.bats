@@ -392,8 +392,9 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
 # The order inside the library is claim first, judge second (rename the record
 # away, then ask whether its process is running, and put it back if so); that
 # is what lets two breakers race without one removing the directory a new owner
-# has just taken. It is not a separate test: the wrong order only shows up as
-# lost mutual exclusion under a race, which a deterministic test cannot stage.
+# has just taken. This test does not cover that order: the wrong order only
+# shows up as a lost exclusion under one particular interleaving, which needs
+# the two processes held at specific points to reproduce.
 @test "lock: a dead holder's lock is broken; a live holder's, another machine's record and a record-less lock are kept (#865)" {
   local gone live lock="$TEAM_DIR/.config.lock" me
   me="$(uname -n)"
@@ -437,18 +438,17 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   grep -qF "rmdir" <<<"$output"
   [ -d "$lock" ]
 
-  # A release killed after moving the record aside leaves only that copy. It is
-  # believed once it has stood alone for the settle time, so the wait here has
-  # to outlast it.
+  # The copy a release leaves when it is killed after moving its record aside is
+  # not a record of THIS directory (a normal release can leave one too, and a
+  # new owner that stopped right after its mkdir would be judged by it), so it
+  # is treated like no record at all.
   printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder.releasing.$gone"
-  run env AGMSG_LOCK_SECONDS=10 LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
-    . "$LOCKLIB"
-    agmsg_lock_acquire "$TEAM_DIR"
-  '
-  [ "$status" -eq 0 ]
-  grep -qF "broke a registry lock" <<<"$output"
-  [ ! -d "$lock" ]
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  [ -d "$lock" ]
   rm -f "$lock.holder.releasing.$gone"
+  rmdir "$lock"
 
   # A dead holder on this machine: broken, and the acquire then succeeds.
   mkdir "$lock"
