@@ -350,6 +350,67 @@ _wait_for_file_contains() {
   return 1
 }
 
+# Self-managed renewal (--max-seconds, added only by the Claude Code launch
+# commands): a little before the host's cap the watcher decides for itself and
+# prints one line, then exits 0. Delivered something, or AGMSG_CC_MONITOR_KEEP_ALIVE
+# set -> "re-arm" naming the command to hand back; otherwise "stopping". Without
+# the flag it never ends on its own.
+_wait_exit() {  # <pid> <tenths>
+  local i
+  for i in $(seq 1 "$2"); do
+    kill -0 "$1" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+@test "watch: --max-seconds ends the run with a re-arm line after a delivery, a stopping line when quiet, and never without the flag" {
+  local out="$BATS_TEST_TMPDIR/ms.out" pid
+  # One role per run: a watcher that names a role claims its actas lock.
+  bash "$SCRIPTS/join.sh" team carol claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team dave claude-code "$PROJ" >/dev/null
+
+  bash "$SCRIPTS/send.sh" team bob alice "renewal probe" >/dev/null
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms1 "$PROJ" claude-code alice --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _bg_track "$pid"
+  _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
+  wait "$pid"
+  grep -qF 'renewal probe' "$out"
+  grep -qF 'agmsg watch: re-arm' "$out"
+  grep -qF 'description: agmsg inbox stream (acting as alice) persistent: true timeout_ms: 1800000' "$out"
+  grep -qF -- 'watch.sh s-ms1' "$out"
+  grep -qF -- 'alice --max-seconds=2' "$out"
+
+  # Quiet run: nothing delivered -> stopping, not re-arm.
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms2 "$PROJ" claude-code carol --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _bg_track "$pid"
+  _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
+  wait "$pid"
+  grep -qF 'agmsg watch: stopping' "$out"
+  refute grep -qF 'agmsg watch: re-arm' "$out"
+
+  # Quiet but kept alive by the environment -> re-arm anyway.
+  AGMSG_CC_MONITOR_KEEP_ALIVE=1 AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms3 "$PROJ" claude-code dave --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _bg_track "$pid"
+  _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
+  wait "$pid"
+  grep -qF 'agmsg watch: re-arm' "$out"
+
+  # No flag: it keeps running well past the same window.
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms4 "$PROJ" claude-code bob >"$out" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _bg_track "$pid"
+  if _wait_exit "$pid" 40; then
+    echo "watch.sh ended on its own without --max-seconds" >&2
+    false
+  fi
+  _stop_watcher "$pid"
+  refute grep -qF 'agmsg watch:' "$out"
+}
+
 @test "watch: restart delivers messages that arrived while the watcher was down" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local sid="sess-restart"

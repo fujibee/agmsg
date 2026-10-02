@@ -605,29 +605,25 @@ eperm_pid() {
   # the 5-minute default -- timeout_ms is unconditional, present regardless
   # of AGMSG_CC_MONITOR_KEEP_ALIVE below.
   grep -q 'timeout_ms: 1800000' <<<"$output"
-  # AGMSG_CC_MONITOR_KEEP_ALIVE, default OFF: with it unset (the run above),
-  # the directive must carry the CONDITIONAL re-arm wording -- a plain word
-  # match on "no events" in Claude Code's own expiry notification, never a
-  # count to parse (the notification's exact phrasing may drift; #1270's
-  # count only ever appears as Claude Code's own text, agmsg does not count
-  # it). The unconditional wording ("immediately re-arm it") is reserved for
-  # KEEP_ALIVE, checked below.
-  refute grep -q 'immediately re-arm it by invoking Monitor again' <<<"$output"
-  grep -q 'says it delivered no events, do not re-arm it' <<<"$output"
-  grep -q 'Otherwise (it says it delivered something), re-arm it' <<<"$output"
+  # The watch renews itself: the launch command carries --max-seconds, and the
+  # directive tells the host to follow the watcher's own last line ("re-arm" /
+  # "stopping") instead of reading Claude Code's expiry notification.
+  # AGMSG_CC_MONITOR_KEEP_ALIVE is read by the watcher, so the directive text
+  # is the same with or without it.
+  grep -q 'watch.sh .* --max-seconds=1790' <<<"$output"
+  grep -q 'This watch renews itself' <<<"$output"
+  grep -qF 'agmsg watch: re-arm - ...' <<<"$output"
+  grep -qF 'agmsg watch: stopping - ...' <<<"$output"
   grep -q 'Re-arm it silently' <<<"$output"
-
-  run env AGMSG_CC_MONITOR_KEEP_ALIVE=1 bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
-  [ "$status" -eq 0 ]
-  grep -q 'timeout_ms: 1800000' <<<"$output"
-  grep -q 'immediately re-arm it by invoking Monitor again' <<<"$output"
-  # KEEP_ALIVE re-arms unconditionally, regardless of what the expiry
-  # notification says -- the conditional wording above must not appear here.
   refute grep -q 'says it delivered no events, do not re-arm it' <<<"$output"
   # The maintainer's follow-up to #1270: an agent that announces every silent
   # re-arm ("re-armed", an acknowledgement, a summary) burns tokens every 30
   # minutes for no reader benefit, so the directive must say to do it quietly.
-  [[ "$output" =~ "Re-arm it silently" ]]
+  run env AGMSG_CC_MONITOR_KEEP_ALIVE=1 bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -q 'timeout_ms: 1800000' <<<"$output"
+  grep -q 'This watch renews itself' <<<"$output"
+  grep -q 'Re-arm it silently' <<<"$output"
 }
 
 @test "delivery set both: emits AGMSG-DIRECTIVE for Monitor invocation" {
@@ -874,7 +870,8 @@ _seed_role_record() {
   # Generic directive: watch.sh has no 4th (role) arg.
   local cmdline; cmdline=$(printf '%s\n' "$output" | sed -n 's/^[[:space:]]*command: //p')
   eval "set -- $cmdline"
-  [ "$#" -eq 4 ]
+  [ "$#" -eq 5 ]
+  [ "$5" = "--max-seconds=1790" ]
 }
 
 @test "session-start: a record for a role not registered here is ignored (#339)" {
