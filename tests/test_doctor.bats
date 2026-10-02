@@ -588,7 +588,7 @@ configured_off() {
 # report never deletes, the prompt defaults to no, and --yes removes exactly the
 # records whose team is provably gone -- not a live team's, not an ambiguous
 # "__" one, not an id-keyed one.
-@test "doctor: reports run/ records of a team that no longer exists, and removes only those on request (#1507)" {
+@test "doctor: reports orphaned run/ records and record-less registry locks, and removes only those on request (#1507, #865)" {
   local run_dir="$TEST_SKILL_DIR/run" gone='%2Ftmp%2Fsome%2Fproj'   # a project path used as the team name
   local id_team='11111111-1111-1111-1111-111111111111' id_member='22222222-2222-2222-2222-222222222222'
   mkdir -p "$run_dir"
@@ -610,6 +610,11 @@ configured_off() {
   bash "$SCRIPTS/join.sh" live.part worker claude-code "$PROJ" >/dev/null
   printf 'herdr:dot:w1:p5\t/proj\tclaude-code\n' > "$run_dir/spawn.live__part"
   printf '4242\n' > "$run_dir/codex-bridge.live.part.worker.pid"
+  # Registry locks (#865): one with no holder record, which nothing else ever
+  # breaks, and one that names its holder, which must stay.
+  mkdir "$TEST_SKILL_DIR/teams/live.part/.config.lock"
+  mkdir "$TEST_SKILL_DIR/teams/team/.config.lock"
+  printf 'token t\npid 1\ncommand t\nhost h\n' > "$TEST_SKILL_DIR/teams/team/.config.lock.holder"
 
   run bash "$SCRIPTS/doctor.sh"
   [ "$status" -eq 1 ]
@@ -619,6 +624,9 @@ configured_off() {
   grep -qF 'team: /tmp/some/proj  agent: worker  pane: herdr:gone:w1:p9' <<<"$output"
   grep -qF 'team: live  agent: part  pane: herdr:dot:w1:p5' <<<"$output"
   grep -qF 'not attributable to one seat' <<<"$output"
+  grep -qF 'registry locks with no holder record' <<<"$output"
+  grep -qxF '  team: live.part' <<<"$output"
+  [ -z "$(grep -xF '  team: team' <<<"$output")" ]
   [ -z "$(grep -F 'agent: alice' <<<"$output")" ]
   [ -z "$(grep -F 'herdr:id:w1:p3' <<<"$output")" ]
   [ -f "$run_dir/spawn.${gone}__worker" ]            # reporting deletes nothing
@@ -626,6 +634,7 @@ configured_off() {
   run bash -c 'echo n | bash "$1" --fix' _ "$SCRIPTS/doctor.sh"
   [ "$status" -eq 1 ]
   [ -f "$run_dir/spawn.${gone}__worker" ]            # the prompt defaults to no
+  [ -d "$TEST_SKILL_DIR/teams/live.part/.config.lock" ]
 
   run bash "$SCRIPTS/doctor.sh" --fix --yes
   [ "$status" -eq 0 ]
@@ -639,4 +648,7 @@ configured_off() {
   [ -f "$run_dir/role-session.team__alice" ]
   [ -f "$run_dir/spawn.x___y" ]
   [ -f "$run_dir/spawn.${id_team}__${id_member}" ]
+  [ ! -e "$TEST_SKILL_DIR/teams/live.part/.config.lock" ]   # no record: removed
+  [ -d "$TEST_SKILL_DIR/teams/team/.config.lock" ]          # names its holder: kept
+  [ -f "$TEST_SKILL_DIR/teams/team/.config.lock.holder" ]
 }

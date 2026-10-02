@@ -29,8 +29,9 @@ set -euo pipefail
 # itself. --fix (#1507) is the one way it changes anything, only when asked for
 # by name: it repairs what doctor found that is safe to repair, shows what it
 # will do, and asks once before touching anything (--yes skips only that
-# question). Today that is orphaned run/ records; anything doctor learns to
-# repair later belongs behind the same flag. It is NOT scripts/fix.sh (/agmsg
+# question). Today that is orphaned run/ records and registry locks with no
+# holder record (#865); anything doctor learns to repair later belongs behind
+# the same flag. It is NOT scripts/fix.sh (/agmsg
 # fix), which is a seat repairing its own identity.
 #
 # Data sources are the existing helpers this project already has for each
@@ -49,7 +50,8 @@ set -euo pipefail
 _usage() {
   echo "Usage: doctor.sh [--project <path>] [--type <type>] [--team <team>] [--redacted]" >&2
   echo "       doctor.sh --fix [--yes]   repair what doctor found that is safe to repair" >&2
-  echo "                                 (today: orphaned run/ records). Not scripts/fix.sh," >&2
+  echo "                                 (today: orphaned run/ records, registry locks with no" >&2
+  echo "                                 holder record). Not scripts/fix.sh," >&2
   echo "                                 which is a seat repairing its own identity." >&2
   echo "       doctor.sh --help" >&2
 }
@@ -284,6 +286,55 @@ _doctor_print_orphans() {
   fi
 }
 
+# --- registry locks with no holder record (#865) ---------------------------
+#
+# A registry lock (teams/<team>/.config.lock) names its holder in a record
+# beside it. The next command that needs the lock breaks one whose holder is
+# gone, but a lock with NO record cannot be told from one taken a moment ago
+# whose owner has not written the record yet, so nothing breaks it and every
+# command for that team then waits out its budget and fails. Listed here and
+# removed only by --fix. Installation-wide, like the orphaned records above.
+LOCKS_NO_RECORD=""
+
+# A record is the holder file, or the copy a killed release left behind.
+_doctor_lock_has_record() {   # <lock dir>
+  local lock="$1" f
+  if [ -f "$lock.holder" ]; then return 0; fi
+  for f in "$lock.holder.releasing."*; do
+    if [ -f "$f" ]; then return 0; fi
+  done
+  return 1
+}
+
+# Fills LOCKS_NO_RECORD with one team directory name per line. The three globs
+# are the ones remote.sh doctor uses: `*` skips a leading dot, so `.foo` and
+# `..foo` need their own.
+_doctor_scan_record_less_locks() {
+  local lock name
+  LOCKS_NO_RECORD=""
+  for lock in "$SKILL_DIR"/teams/*/.config.lock "$SKILL_DIR"/teams/.[!.]*/.config.lock "$SKILL_DIR"/teams/..?*/.config.lock; do
+    [ -d "$lock" ] || continue
+    if _doctor_lock_has_record "$lock"; then continue; fi
+    name="${lock%/.config.lock}"; name="${name##*/}"
+    LOCKS_NO_RECORD="${LOCKS_NO_RECORD}${name}"$'\n'
+  done
+}
+
+# Under --redacted the team name is replaced. Never used in --fix mode.
+_doctor_print_locks() {
+  local n name
+  [ -n "$LOCKS_NO_RECORD" ] || return 0
+  n="$(printf '%s' "$LOCKS_NO_RECORD" | grep -c . || true)"
+  echo "registry locks with no holder record -- nothing can tell whether they are held ($n):"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if [ "$REDACTED" = 1 ]; then _redact_team "$name"; name="$_REDACT_OUT"; fi
+    echo "  team: $name"
+  done <<< "$LOCKS_NO_RECORD"
+  echo "  remove them only when no agmsg command is running for these teams."
+  echo
+}
+
 # --- --fix: its own mode, not a flag on the report -------------------------
 #
 # Lists what would go, asks once (--yes skips only the question), then removes
@@ -299,14 +350,20 @@ if [ "$FIX" = 1 ]; then
     exit 2
   fi
   _doctor_scan_orphan_run_records
-  if [ -z "$ORPHAN_SEATS" ]; then
-    echo "nothing to fix: no orphaned run/ records."
+  _doctor_scan_record_less_locks
+  if [ -z "$ORPHAN_SEATS" ] && [ -z "$LOCKS_NO_RECORD" ]; then
+    echo "nothing to fix: no orphaned run/ records and no registry lock without a holder record."
     if [ -n "$ORPHAN_AMBIGUOUS" ]; then echo; _doctor_print_orphans; fi
     exit 0
   fi
   _doctor_print_orphans
+  _doctor_print_locks
   if [ "$ASSUME_YES" != 1 ]; then
-    printf 'Remove the records listed above? (y/n) [n]: '
+    if [ -n "$LOCKS_NO_RECORD" ]; then
+      printf 'Remove what is listed above? (y/n) [n]: '
+    else
+      printf 'Remove the records listed above? (y/n) [n]: '
+    fi
     read -r _doctor_answer || _doctor_answer=""
     case "$_doctor_answer" in y|Y) ;; *) echo "Aborted; nothing removed."; exit 1 ;; esac
   fi
@@ -325,9 +382,31 @@ if [ "$FIX" = 1 ]; then
     done
     _doctor_removed=$((_doctor_removed + 1))
   done <<< "$ORPHAN_SEATS"
-  echo "removed the run/ records of $_doctor_removed seat(s)."
-  if [ "$_doctor_skipped" -gt 0 ]; then
-    echo "left $_doctor_skipped seat(s) alone: their team exists now."
+  if [ -n "$ORPHAN_SEATS" ]; then
+    echo "removed the run/ records of $_doctor_removed seat(s)."
+    if [ "$_doctor_skipped" -gt 0 ]; then
+      echo "left $_doctor_skipped seat(s) alone: their team exists now."
+    fi
+  fi
+  # Locks: `rmdir`, never `rm -r`, so only an empty directory can go. Looked at
+  # again right before each one: a command may have taken the lock and recorded
+  # itself while the question waited, and then it is not ours to remove.
+  _doctor_locks_removed=0 _doctor_locks_skipped=0
+  while IFS= read -r _lk; do
+    [ -n "$_lk" ] || continue
+    _lockdir="$SKILL_DIR/teams/$_lk/.config.lock"
+    if [ ! -d "$_lockdir" ]; then continue; fi
+    if _doctor_lock_has_record "$_lockdir" || ! rmdir "$_lockdir" 2>/dev/null; then
+      _doctor_locks_skipped=$((_doctor_locks_skipped + 1))
+      continue
+    fi
+    _doctor_locks_removed=$((_doctor_locks_removed + 1))
+  done <<< "$LOCKS_NO_RECORD"
+  if [ -n "$LOCKS_NO_RECORD" ]; then
+    echo "removed $_doctor_locks_removed registry lock(s) with no holder record."
+    if [ "$_doctor_locks_skipped" -gt 0 ]; then
+      echo "left $_doctor_locks_skipped registry lock(s) alone: they are held or recorded now."
+    fi
   fi
   exit 0
 fi
@@ -935,6 +1014,12 @@ fi
 if [ -n "$ORPHAN_AMBIGUOUS" ]; then
   _warn "run/ holds records for a team that no longer exists that cannot be attributed to one seat (\"__\" inside a name); they are left alone, remove them by hand"
 fi
+# Registry locks with no holder record (#865): also installation-wide. Nothing
+# else ever breaks one, so a team that keeps timing out on its lock lands here.
+_doctor_scan_record_less_locks
+if [ -n "$LOCKS_NO_RECORD" ]; then
+  _warn "teams/ holds registry lock(s) with no holder record, and every command for those teams waits on them (see 'registry locks with no holder record' above); if no agmsg command is running for them, remove them with: doctor.sh --fix"
+fi
 WARN_COUNT="$(printf '%s\n' "$WARNINGS" | grep -c . || true)"
 
 echo "$TEAM_COUNT team(s), $TOTAL_PAIR_COUNT registration(s), $WARN_COUNT warning(s)"
@@ -945,6 +1030,7 @@ if [ -n "$GLOBAL_WATCH_LINE" ]; then
 fi
 printf '%s' "$REPORT_BLOCKS"
 _doctor_print_orphans
+_doctor_print_locks
 
 if [ -n "$WARNINGS" ]; then
   echo "warnings:"
