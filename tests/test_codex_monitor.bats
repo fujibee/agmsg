@@ -131,7 +131,7 @@ teardown() {
 @test "codex-monitor: the app-server inherits AGMSG_CODEX_BRIDGE_LAUNCHER=1 so SessionStart sees the launcher flag" {
   skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
 
-  # 親環境のフラグを除去し、monitor 自身が付けた値だけを観測する（偽陰性防止）
+  # Unset the parent's flag so only the value codex-monitor sets is observed (prevents a false pass from the parent environment).
   run env -u AGMSG_CODEX_BRIDGE_LAUNCHER FAKE_CODEX_VERSION=0.142.2 AGMSG_REAL_CODEX="$FAKE_CODEX" \
     AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
