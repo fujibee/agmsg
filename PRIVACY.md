@@ -1,50 +1,35 @@
 # Privacy Policy
 
-**Last updated:** 2026-06-04
+**Last updated:** 2026-10-01
 
-This privacy policy describes how the **agmsg** project (the software at https://github.com/fujibee/agmsg, distributed via [agmsg.cc](https://agmsg.cc), the Anthropic / OpenAI / community plugin and skill marketplaces, and the `agmsg` npm package) handles user data.
+This privacy policy describes how the open-source **agmsg** project (the CLI and desktop app at https://github.com/fujibee/agmsg, distributed via [agmsg.cc](https://agmsg.cc), the Anthropic / OpenAI / community plugin and skill marketplaces, and the `agmsg` npm package) handles user data. It does not cover any hosted service.
 
-In short: **agmsg does not collect, transmit, or share any user data.** Everything stays on the user's machine.
+## The core
 
-## What data agmsg handles
+- **Data stays on the user's machine.** Teams, messages, and settings are stored locally, mostly under `~/.agents/` and in the configuration of the projects the user joins agmsg to.
+- **No data collection, no telemetry.** The agmsg project does not collect, receive, sell, or disclose user data, and sends no usage data or analytics.
+- **No agmsg accounts.** agmsg has no accounts or login.
+- **No outside communication by default.** The CLI does not contact other machines unless the user turns on a feature that does.
 
-When installed, agmsg stores the following on the user's local filesystem only:
+## Extensions and integrations
 
-- **Team and agent identity registry** — JSON files under `~/.agents/skills/agmsg/teams/<team>/config.json`. Contains team names, agent names within each team, the agent type label (`claude-code`, `codex`, `gemini`, `antigravity`, `copilot`, `opencode`), and project paths the user joined from. The user explicitly chooses every value at join time.
-- **Messages sent between local agents** — rows in `~/.agents/skills/agmsg/db/messages.db`, an SQLite file. The message body, sender, recipient, team, and timestamp are stored. The user (or the agent acting on their behalf) chooses every value when invoking `send.sh`.
-- **Per-session runtime files** — pidfiles, last-checked markers, and the actas exclusivity lock files under `~/.agents/skills/agmsg/run/`. These reference the user's session IDs and process IDs to coordinate hooks.
-- **Hook configuration in the user's projects** — agmsg writes per-runtime hook files (e.g. `<project>/.claude/settings.local.json`, `<project>/.codex/hooks.json`, `<project>/.agent/rules/agmsg.md`, `<project>/.github/hooks/agmsg.json`) when the user picks a delivery mode. These contain absolute paths to the agmsg scripts; they do not contain personal data beyond filesystem paths.
+Features the user turns on, such as remote sync, external tool integrations, and plugins, communicate with the destinations the user configures for them. What is sent depends on the feature. Anything sent goes where the user pointed it, not to the agmsg project.
 
-All of the above lives on the user's machine. agmsg has no daemon, no server, and no remote endpoint.
+## Installing and updating
 
-## What agmsg does not do
+Installing agmsg downloads it from GitHub. The desktop app checks GitHub for new versions; it installs an update only after the user approves it, and verifies the update's signature.
 
-- **No network requests.** The `install.sh` step uses `curl` to fetch the installer itself, and the optional `agmsg.cc` redirect goes through GitHub. After installation, the runtime makes no outbound requests.
-- **No telemetry or analytics.** No usage data, error reports, or counts are sent anywhere.
-- **No third-party services.** agmsg integrates with whatever CLI AI agent the user has installed (Claude Code, Codex, Gemini CLI, Copilot CLI, Antigravity, OpenCode); it does not call those agents' backends itself. Anything the user types to one of those agents is governed by that agent's own privacy policy, not by agmsg.
-- **No accounts.** agmsg has no user accounts, no login, no API keys.
-- **No data sharing.** Because agmsg never receives data from a remote endpoint and never sends data to one, there is nothing to share, sell, or disclose.
+## Other tools
 
-## Where data is stored
-
-All data agmsg writes is on the user's local filesystem under:
-
-- `~/.agents/skills/agmsg/` (the skill directory)
-- `<project>/.claude/`, `<project>/.codex/`, `<project>/.agent/`, `<project>/.github/hooks/` (per-project hook configs, in the user's own project directories)
-
-The user is solely in control. To delete everything agmsg has stored, run `uninstall.sh` from the repo (which removes the skill directory and per-project hook files) and then delete `~/.agents/skills/agmsg/` if anything remains.
-
-## Inter-agent messages on the same machine
-
-When two agents on the same machine use agmsg to communicate, the message body is written to `messages.db` by the sender and read back by the recipient when their hook fires. The bytes never leave the user's filesystem. Whether the *content* of those messages is sensitive is up to the user — agmsg treats the body as opaque text.
+agmsg works alongside the AI agent tools the user has installed, but does not call their services itself. What the user sends to those tools is governed by their own privacy policies.
 
 ## Children's privacy
 
-agmsg does not collect data from anyone, including children. The software is a developer tool intended for use by users 13 and older in accordance with the underlying agent CLIs (Claude Code, Codex, etc.) and their respective terms.
+agmsg does not collect data from anyone, including children. The software is a developer tool intended for use by users 13 and older in accordance with the underlying agent tools and their respective terms.
 
 ## Changes to this policy
 
-If agmsg ever begins to collect or transmit data, this policy will be updated and the change announced in the project repository's [`CHANGELOG`](https://github.com/fujibee/agmsg/commits/main) or release notes. The current version of this policy lives at:
+If agmsg begins to collect data or to use the network in a way not described here, this policy will be updated and the change announced in the project repository's [`CHANGELOG`](https://github.com/fujibee/agmsg/commits/main) or release notes. The current version of this policy lives at:
 
 https://github.com/fujibee/agmsg/blob/main/PRIVACY.md
 

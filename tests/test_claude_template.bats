@@ -47,13 +47,13 @@ setup() {
   # way to know watch.sh must be started THROUGH Monitor rather than, say,
   # Bash. These assertions pin the specific facts that summary dropped.
   grep -Fq 'invoke a fresh Monitor' "$RENDERED"
-  grep -Fq 'command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code <name>`' "$RENDERED"
+  grep -Fq 'command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code <name> --max-seconds=1790`' "$RENDERED"
   grep -Fq 'description: `agmsg inbox stream (acting as <name>)`' "$RENDERED"
   grep -Fq 'persistent: true' "$RENDERED"
   grep -Fq 'Run TaskList. Find any task whose description begins with "agmsg inbox stream"' "$RENDERED"
   grep -Fq 'status=held team=<team> owner=<sid>' "$RENDERED"
   # drop's own re-subscribe must be equally explicit, not just actas's.
-  grep -Fq 'command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code`' "$RENDERED"
+  grep -Fq 'command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code --max-seconds=1790`' "$RENDERED"
 }
 
 @test "Claude rendered skill's actas ends by confirming the Monitor attached via TaskList, not the UI footer" {

@@ -41,6 +41,21 @@ ORIG_ARGS=("$@")
 # libs are sourced) rather than failing hard, so a runtime that cannot bake one
 # in — notably Grok Build's `monitor` tool, where "$GROK_SESSION_ID" expands to
 # empty — still starts the watcher. project_path and agent_type are required.
+# `--max-seconds=N` (a trailing option agmsg's own Claude Code launch commands
+# add) turns on self-managed renewal; see _watch_renew_or_stop below. It is
+# taken out of the positional list here so the rest of the script is unchanged,
+# and it stays in ORIG_ARGS so a self-restart and the re-arm line replay it.
+WATCH_MAX_SECONDS=""
+_wargs=()
+for _a in "$@"; do
+  case "$_a" in
+    --max-seconds=*) WATCH_MAX_SECONDS="${_a#--max-seconds=}" ;;
+    *) _wargs+=("$_a") ;;
+  esac
+done
+set -- ${_wargs[@]+"${_wargs[@]}"}
+unset _wargs _a
+
 SESSION_ID="${1:-}"
 [ "$SESSION_ID" = "-" ] && SESSION_ID="" # #477: caller sentinel for empty session id
 PROJECT_PATH="${2:?Missing project_path}"
@@ -865,7 +880,12 @@ _handle_install_changed() {
       cleanup
       AGMSG_WATCH_RESTART_COUNT=$((restarts + 1))
       AGMSG_WATCH_RESTART_CHAIN="$_WATCH_INSTALL_RESTART_CHAIN"
-      export AGMSG_WATCH_RESTART_COUNT AGMSG_WATCH_RESTART_CHAIN
+      # The renewal clock and delivery count (see _watch_renew_or_stop) belong
+      # to the whole run, not to this process image: without them an update
+      # mid-run would restart the clock past the host's own cap.
+      AGMSG_WATCH_ELAPSED_BASE=$((SECONDS + _WATCH_ELAPSED_BASE))
+      AGMSG_WATCH_DELIVERED_BASE="$_WATCH_DELIVERED"
+      export AGMSG_WATCH_RESTART_COUNT AGMSG_WATCH_RESTART_CHAIN AGMSG_WATCH_ELAPSED_BASE AGMSG_WATCH_DELIVERED_BASE
       # The watch_report call below is reached only if exec itself fails to
       # replace the process image (e.g. an interpreter it can no longer
       # exec); it is the fallback for that failure, not dead code.
@@ -1145,7 +1165,47 @@ _AGMSG_EXIT_TEARDOWN_INCOMPLETE=76
 STUCK_MAP=""
 source "$SCRIPT_DIR/lib/watch-stuck-map.sh"
 
+# Self-managed renewal, for hosts that cap how long a watch may run (Claude Code's
+# Monitor kills one at 30 minutes and leaves no completion record, which piles up
+# as "background shell command tasks did not finish" on every resume).
+# --max-seconds is added only by the launch commands agmsg writes for that host;
+# without it (every other caller) the watcher never ends on its own.
+# Shortly before the cap, at the top of a cycle (so nothing is mid-delivery and
+# the read cursor has already been consumed), the watcher decides for itself and
+# prints one line on stdout -- one notification per cycle:
+#   - it delivered something this run, or AGMSG_CC_MONITOR_KEEP_ALIVE is set:
+#     "agmsg watch: re-arm ..." naming the command and description to hand back
+#     to Monitor unchanged;
+#   - otherwise "agmsg watch: stopping ...": nothing to renew.
+# Then it exits 0. A restart resumes from the persistent read cursor, so the gap
+# before the host re-arms loses nothing.
+case "$WATCH_MAX_SECONDS" in ''|*[!0-9]*) WATCH_MAX_SECONDS="" ;; esac
+_WATCH_ELAPSED_BASE="${AGMSG_WATCH_ELAPSED_BASE:-0}"
+case "$_WATCH_ELAPSED_BASE" in ''|*[!0-9]*) _WATCH_ELAPSED_BASE=0 ;; esac
+_WATCH_DELIVERED="${AGMSG_WATCH_DELIVERED_BASE:-0}"
+case "$_WATCH_DELIVERED" in ''|*[!0-9]*) _WATCH_DELIVERED=0 ;; esac
+unset AGMSG_WATCH_ELAPSED_BASE AGMSG_WATCH_DELIVERED_BASE
+
+_watch_renew_or_stop() {
+  local elapsed=$((SECONDS + _WATCH_ELAPSED_BASE)) cmd desc arg
+  [ "$elapsed" -ge "$WATCH_MAX_SECONDS" ] || return 0
+  if [ "$_WATCH_DELIVERED" -gt 0 ] || [ -n "${AGMSG_CC_MONITOR_KEEP_ALIVE:-}" ]; then
+    cmd="$(printf '%q' "$SCRIPT_DIR/watch.sh")"
+    for arg in "${ORIG_ARGS[@]}"; do
+      cmd="$cmd $(printf '%q' "$arg")"
+    done
+    desc="agmsg inbox stream"
+    [ -n "$ACTIVE_NAME" ] && desc="$desc (acting as $ACTIVE_NAME)"
+    watch_report "re-arm - this watch is about to reach the host's time cap; invoke the Monitor tool again with command: $cmd description: $desc persistent: true timeout_ms: 1800000"
+  else
+    watch_report "stopping - no messages were delivered in the last ${elapsed}s, so this watch is not re-armed (set AGMSG_CC_MONITOR_KEEP_ALIVE to keep it running)"
+  fi
+  exit 0
+}
+
 while true; do
+  # Renewal point: see _watch_renew_or_stop above.
+  [ -n "$WATCH_MAX_SECONDS" ] && _watch_renew_or_stop
   # Advance the per-cycle cache epoch as a PLAIN STATEMENT (never via $(...) —
   # see the actas-lock cache warming below for why): this is what lets
   # _agmsg_partition_load's per-team driver cache (lib/storage.sh) reuse one
@@ -1520,6 +1580,7 @@ EOF
         cleanup
         exit 0
       fi
+      _WATCH_DELIVERED=$((_WATCH_DELIVERED + 1))
       DELIVERED_IDS+=("$id")
     done <<< "$ROWS"
     # Second test seam, parked BETWEEN delivery and consume. One barrier cannot

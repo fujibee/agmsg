@@ -2369,7 +2369,7 @@ const context = {
   __filename: filename, __dirname: path.dirname(filename),
   process, console, Buffer, setTimeout, clearTimeout, setInterval, clearInterval,
 };
-// 実際の lease 書込みを検査し、ネットワーク接続やプロセス起動は行わない。
+// Checks the real lease write; makes no network connection and starts no process.
 vm.runInNewContext(fs.readFileSync(filename, "utf8") +
   "\nmodule.exports.CodexBridge = CodexBridge;", context, { filename });
 const leasefile = path.join(process.argv[3], "project-hash-test.lease");
