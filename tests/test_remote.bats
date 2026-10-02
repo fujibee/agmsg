@@ -404,12 +404,12 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   anchored="$(_binding_field testteam server_instance_id)"
   [ -n "$anchored" ]
 
-  # Same address family, different server: registrations survive the rotation,
-  # so the recorded instance id is the only thing that can tell them apart.
-  run curl -sS "$ENDPOINT/_test/rotate-server-id"
-  [ "$status" -eq 0 ]
+  # A second, different server at the new address. The original server is left
+  # alone so the running engine keeps running up to the set-endpoint call.
+  start_second_mock_server
+  kill -0 "$(cat "$TEST_SKILL_DIR/run/remote-sync.testteam.pid")"
 
-  run bash "$SCRIPTS/remote.sh" set-endpoint --endpoint "http://localhost:$MOCK_PORT" testteam
+  run bash "$SCRIPTS/remote.sh" set-endpoint --endpoint "$ENDPOINT_B" testteam
   [ "$status" -ne 0 ]
   # What differed is SAID, both sides of it -- not a bare "refused".
   grep -Fq "is now server instance 018f3f7e-2222-7000-8000-0000000000ff" <<<"$output"
@@ -418,6 +418,9 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   # And nothing was written: the binding still names the verified address.
   [ "$(_binding_field testteam endpoint)" = "$ENDPOINT" ]
   [ "$(_binding_field testteam server_instance_id)" = "$anchored" ]
+  # A refused move leaves the engine running, as it found it (#1512).
+  grep -Fq "the sync engine was restarted" <<<"$output"
+  kill -0 "$(cat "$TEST_SKILL_DIR/run/remote-sync.testteam.pid")"
 }
 
 @test "set-endpoint: re-running from the partial state repairs the stored sync config (#739 P1-1)" {

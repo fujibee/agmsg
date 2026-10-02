@@ -68,6 +68,12 @@ commit_parsers = [
   { message = "^fix\\(app\\): build the spawn prompt from each type's own", skip = true },
   { message = "^fix\\(app\\): open a clicked agent in the tab being viewed", skip = true },
   { message = "^fix\\(app\\): keep a renamed team's open tabs", skip = true },
+  # After 1.5.1: app and site changes ship outside the npm package (the next
+  # app release and the project site), not in the CLI.
+  { message = "^fix\\(app\\): bundle SKILL.md and the other files the installer reads", skip = true },
+  { message = "^fix\\(app\\): keep the sidebar user block and settings gear", skip = true },
+  { message = "^fix\\(app\\): emit each message once when events and legacy rows", skip = true },
+  { message = "^fix\\(site\\): bump Astro for GHSA-26w7-cxv4-gfx2", skip = true },
   { message = "^feat", group = "<!-- 0 -->Added" },
   { message = "^fix", group = "<!-- 1 -->Fixed" },
   { message = "^perf", group = "<!-- 2 -->Performance" },

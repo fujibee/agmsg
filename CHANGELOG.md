@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-10-02
+
+### Added
+- Report run/ records of a team that no longer exists; remove them with --fix (#1532)
+
+### Fixed
+- The Claude Code watcher renews or stops by itself shortly before the Monitor 30-minute cap (#1553)
+- Record the Codex profile (CODEX_HOME) of a seat as optional metadata without changing delivery (#1549)
+- Pass the launcher flag to the app-server so SessionStart sees it (#1524)
+- Pass the seat key to app-server tool commands under a restricted shell environment policy (#1541)
+- Reclaim a role held by the same live process after /clear (#1540)
+- Restart the sync engine when set-endpoint is refused by the adopt check (#1539)
+- Normalize the project path before hashing the Windows bridge lease (#1522)
+- Start Codex with --no-daemon when a plain launch runs in an elevated Windows shell (#1534)
+- Ship a rendered repo-root SKILL.md with a first-run bootstrap (#1286) (#1516)
+
+### Documentation
+- State the privacy policy as principles that match current behavior (#1546)
+
+[1.5.2]: https://github.com/fujibee/agmsg/compare/v1.5.1...v1.5.2
+
 ## [1.5.1] - 2026-09-28
 
 ### Added

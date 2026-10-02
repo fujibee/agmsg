@@ -127,9 +127,17 @@ exec_plain_codex() {
   fi
   echo "agmsg: Codex monitor bridge unavailable - launching plain Codex. Real-time agmsg delivery is OFF this session (messages still queue; check your inbox manually). Likely cause: the Codex app-server interface changed in 0.142+. Fix in progress." >&2
   cd "$PROJECT" 2>/dev/null || true
+  # On an elevated Windows shell a plain Codex refuses to start its shared
+  # background server, so this fallback names the flag Codex asks for.
+  local no_daemon=()
+  if [ -r "$SCRIPT_DIR/../../../lib/windows-elevation.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/../../../lib/windows-elevation.sh"
+    agmsg_codex_plain_launch_wants_no_daemon ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} && no_daemon=(--no-daemon)
+  fi
   case "$CODEX_COMMAND" in
-    codex)  exec "$REAL_CODEX" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
-    resume) exec "$REAL_CODEX" resume ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
+    codex)  exec "$REAL_CODEX" ${no_daemon[@]+"${no_daemon[@]}"} ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
+    resume) exec "$REAL_CODEX" ${no_daemon[@]+"${no_daemon[@]}"} resume ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
   esac
 }
 
@@ -179,8 +187,21 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
 # under --remote) inherit THIS process's environment directly, which is the
 # whole point -- no ancestry walk is needed anywhere downstream to find a
 # seat's own server (design review, replacing an earlier ancestry-walk design).
+#
+# Also passed as a `shell_environment_policy.set` override: under a
+# `shell_environment_policy.inherit` other than the default "all" (e.g.
+# "core" or "none"), Codex 0.158+ no longer lets tool-command children see a
+# var the policy excludes, so the plain env var above stops reaching them.
+# `set` is applied after `inherit`/exclude, so this reaches the tool
+# environment regardless of `inherit`; a user's own `include_only` still
+# filters after `set` and must list the var themselves (#1537). The key is
+# generated internally as digits and dots only (_agmsg_codex_seat_key_new),
+# so it is always safe inside this double-quoted TOML string unescaped.
 AGMSG_CODEX_SEAT_KEY="$SEAT_KEY" \
-  "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SEAT_LOG" 2>&1 3>&- 4>&- &
+  AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+  "$REAL_CODEX" app-server \
+    -c "shell_environment_policy.set.AGMSG_CODEX_SEAT_KEY=\"$SEAT_KEY\"" \
+    --listen "ws://127.0.0.1:0" >>"$SEAT_LOG" 2>&1 3>&- 4>&- &
 server_bg="$!"
 
 PORT=""

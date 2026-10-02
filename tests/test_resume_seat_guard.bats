@@ -133,8 +133,9 @@ _run_session_start() {
   refute grep -qF "was recorded as that role's seat" <<<"$output"
   local cmd; cmd="$(_directive_command "$output")"
   eval "set -- $cmd"
-  [ "$#" -eq 5 ]
+  [ "$#" -eq 6 ]
   [ "$5" = "bob" ]
+  [ "$6" = "--max-seconds=1790" ]
 }
 
 @test "resume, role-session record present: says recorded, not the actas-lock basis" {

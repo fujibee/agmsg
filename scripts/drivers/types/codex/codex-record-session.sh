@@ -211,8 +211,28 @@ fi
 # codex thread ids are already bare UUIDs (no composite pid form), so record
 # as-is. The project is recorded in its canonical (physical) form so records
 # carry one path spelling regardless of how the caller spelled the argument.
+# Add optional destination metadata without changing thread discovery. Failure
+# to resolve a profile never prevents the existing session record or delivery.
+codex_home="${CODEX_HOME:-${HOME:+$HOME/.codex}}"
+case "$codex_home" in
+  *[[:cntrl:]]*) codex_home="" ;;
+  /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
+  *) codex_home="" ;;
+esac
+if [ -n "$codex_home" ] && [ -d "$codex_home" ]; then
+  codex_home="$(cd -- "$codex_home" 2>/dev/null && pwd -P)" || codex_home=""
+  codex_home="$(agmsg_normalize_project_path "$codex_home")" || codex_home=""
+  case "$codex_home" in
+    *[[:cntrl:]]*) codex_home="" ;;
+    /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
+    *) codex_home="" ;;
+  esac
+else
+  codex_home=""
+fi
+
 agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
-agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" || true
+agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" "$codex_home" || true
 
 # The Codex actas flow reaches this script instead of actas-claim.sh. Publish
 # the same seat request here so a resumed seat's dispatcher has an authority

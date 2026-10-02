@@ -2352,3 +2352,45 @@ EOF
   [ "$completion_line" -lt "$second_turn_line" ]
   [ "$completion_line" -lt "$gone_line" ]
 }
+
+
+@test "codex-bridge: lease project hash agrees across native Windows and Git Bash paths" {
+  run node - "$TYPES/codex/codex-bridge.js" "$TEST_SKILL_DIR" <<'NODE'
+const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const { createRequire } = require("node:module");
+const filename = path.resolve(process.argv[2]);
+const mod = { exports: {} };
+const context = {
+  require: createRequire(filename), module: mod, exports: mod.exports,
+  __filename: filename, __dirname: path.dirname(filename),
+  process, console, Buffer, setTimeout, clearTimeout, setInterval, clearInterval,
+};
+// Checks the real lease write; makes no network connection and starts no process.
+vm.runInNewContext(fs.readFileSync(filename, "utf8") +
+  "\nmodule.exports.CodexBridge = CodexBridge;", context, { filename });
+const leasefile = path.join(process.argv[3], "project-hash-test.lease");
+const hash = (p) => crypto.createHash("sha1").update(p).digest("hex");
+function leaseHash(project) {
+  mod.exports.CodexBridge.prototype.writeLease.call({
+    opts: { project }, identities: [{ team: "team", name: "alice" }], leasefile,
+    startToken: () => ({ src: "pwsh", token: "123456" }),
+  });
+  return fs.readFileSync(leasefile, "utf8").match(/^project=(.*)$/m)[1];
+}
+const expected = hash("/c/TEMP/project with spaces");
+assert.equal(leaseHash(String.raw`C:\TEMP\project with spaces`), expected);
+assert.equal(leaseHash("C:/TEMP/project with spaces"), expected);
+assert.equal(leaseHash("/c/TEMP/project with spaces"), expected);
+assert.notEqual(leaseHash("C:/TEMP/other project"), expected);
+assert.notEqual(leaseHash("C:/TEMP/Project with spaces"), expected);
+assert.equal(leaseHash(String.raw`\\host\share\project`), hash("//host/share/project"));
+assert.equal(leaseHash("/home/me/project"), hash("/home/me/project"));
+assert.equal(leaseHash(String.raw`/home/me/project\literal`), hash(String.raw`/home/me/project\literal`));
+fs.unlinkSync(leasefile);
+NODE
+  [ "$status" -eq 0 ]
+}

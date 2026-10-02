@@ -1196,7 +1196,7 @@ class CodexBridge {
     if (!token) throw new Error("cannot determine process start token for identity lease");
     const host = os.hostname();
     if (!host) throw new Error("cannot determine hostname for identity lease");
-    const projectHash = crypto.createHash("sha1").update(this.opts.project).digest("hex");
+    const projectHash = crypto.createHash("sha1").update(toPosixPath(this.opts.project)).digest("hex");
     // Canonicalize the pair SET before hashing: hash each "team\tname" pair, then
     // sort the hex hashes (pure ASCII, so a byte sort in the launcher and a JS
     // code-unit sort here agree even for non-ASCII names) and hash the joined
