@@ -135,7 +135,7 @@ _run_session_start() {
   eval "set -- $cmd"
   [ "$#" -eq 6 ]
   [ "$5" = "bob" ]
-  [ "$6" = "--max-seconds=1790" ]
+  [ "$6" = "--max-seconds=1750" ]
 }
 
 @test "resume, role-session record present: says recorded, not the actas-lock basis" {
