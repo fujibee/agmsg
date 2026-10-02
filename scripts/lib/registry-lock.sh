@@ -91,8 +91,12 @@ _agmsg_lock_same_host() {
 # whose owner has not written its record yet, or say whether a process on
 # another machine is running. Breaking on "I cannot tell" would take a live lock
 # away, which is worse than the leak. A lock with no holder file is left to the
-# operator: the timeout below says how, and `doctor.sh --fix` removes it on
-# request.
+# operator: the timeout below says how, and `doctor.sh` lists such locks.
+#
+# THE PID HAS TO BE A USABLE NUMBER BEFORE IT IS ASKED ABOUT.
+# `_agmsg_pid_alive_local` answers "not running" for a value it never put to the
+# process table at all (empty, zero, non-numeric, past the POSIX ceiling), so a
+# damaged record would read as a dead holder. Such a record is "cannot tell".
 #
 # The copy a killed release leaves behind (`<lock>.holder.releasing.<pid>`) is
 # deliberately NOT a record. Nothing ties it to the directory that is there now:
@@ -109,7 +113,7 @@ _agmsg_lock_holder_gone() {
   [ -f "$lock.holder" ] || return 1
   pid="$(sed -n 's/^pid //p' "$lock.holder" 2>/dev/null | head -1)"
   host="$(sed -n 's/^host //p' "$lock.holder" 2>/dev/null | head -1)"
-  [ -n "$pid" ] || return 1
+  _agmsg_pid_valid "$pid" 2147483647 || return 1
   _agmsg_lock_same_host "$host" || return 1
   _agmsg_pid_alive_local "$pid" && return 1
   return 0
@@ -144,7 +148,7 @@ _agmsg_lock_break_dead() {
   mv "$lock.holder" "$claimed" 2>/dev/null || return 1
   pid="$(sed -n 's/^pid //p' "$claimed" 2>/dev/null | head -1)"
   host="$(sed -n 's/^host //p' "$claimed" 2>/dev/null | head -1)"
-  if [ -z "$pid" ] || ! _agmsg_lock_same_host "$host" || _agmsg_pid_alive_local "$pid"; then
+  if ! _agmsg_pid_valid "$pid" 2147483647 || ! _agmsg_lock_same_host "$host" || _agmsg_pid_alive_local "$pid"; then
     # Alive, or nothing here can say otherwise. Put it back — the next reader
     # must still find out who the lock says is holding it.
     mv "$claimed" "$lock.holder" 2>/dev/null || true
@@ -240,8 +244,8 @@ agmsg_lock_acquire() {
         # review).
         tpid="$(sed -n 's/^pid //p' "$lock.holder" 2>/dev/null | head -1)"
         thost="$(sed -n 's/^host //p' "$lock.holder" 2>/dev/null | head -1)"
-        if [ -z "$tpid" ]; then
-          echo "agmsg: that record names no pid, so nothing here could ask whether it is held." >&2
+        if ! _agmsg_pid_valid "$tpid" 2147483647; then
+          echo "agmsg: that record names no usable pid, so nothing here could ask whether it is held." >&2
         elif ! _agmsg_lock_same_host "$thost"; then
           echo "agmsg: that record was not written on this machine, so nothing here could ask whether it is held." >&2
         elif _agmsg_pid_alive_local "$tpid"; then
@@ -257,7 +261,7 @@ agmsg_lock_acquire() {
         echo "agmsg: the lock records no holder, so nothing here could ask whether it is held." >&2
         echo "agmsg: a lock with no holder record is not broken automatically. If no agmsg command is running for this team, remove it:" >&2
         echo "agmsg:   rmdir $q" >&2
-        echo "agmsg: doctor.sh lists such locks once they are a few minutes old, and removes them with --fix." >&2
+        echo "agmsg: doctor.sh lists such locks." >&2
       fi
       # The reason travels with the timeout too. If the wait was hopeless for
       # a cause this function did not anticipate, the errno is the only thing

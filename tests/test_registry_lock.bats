@@ -438,6 +438,19 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   grep -qF "rmdir" <<<"$output"
   [ -d "$lock" ]
 
+  # A record whose pid is not a usable number (zero, text, past the ceiling) on
+  # this machine: "cannot tell", never "dead". The liveness helper answers "not
+  # running" for these without ever asking the process table.
+  local bad
+  for bad in 0 abc 99999999999; do
+    printf 'token t\npid %s\ncommand t\nhost %s\n' "$bad" "$me" > "$lock.holder"
+    acquire
+    [ "$status" -ne 0 ]
+    refute grep -qF "broke a registry lock" <<<"$output"
+    [ -d "$lock" ]
+  done
+  rm -f "$lock.holder"
+
   # The copy a release leaves when it is killed after moving its record aside is
   # not a record of THIS directory (a normal release can leave one too, and a
   # new owner that stopped right after its mkdir would be judged by it), so it
