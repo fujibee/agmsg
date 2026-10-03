@@ -489,6 +489,11 @@ if [ "$_msys_cmd_prefix" = "/" ]; then
   MSYS_GUARD="MSYS2_ARG_CONV_EXCL=/${_msys_cmd_name} "
 fi
 
+# Presence sentinel for this launch (see agmsg_boot_pid_path, lib/actas-lock.sh):
+# the boot script records its own pid here before exec'ing the CLI and clears
+# it right after, independent of whatever the CLI/model does or doesn't reach.
+BOOT_PID_PATH="$(agmsg_boot_pid_path "$TEAM" "$NAME")"
+
 BOOT_DIR="${TMPDIR:-/tmp}/agmsg-spawn"
 mkdir -p "$BOOT_DIR" 2>/dev/null || true
 # Best-effort GC of boot scripts left behind by spawns whose window was closed
@@ -525,6 +530,22 @@ PLAIN_WITNESS="${BOOT}.plain-witness"
   # actas flow knows the session is already named <team>-<agent> (name_arg) and
   # suppresses the "rename this session" tip meant for hand-started sessions.
   echo 'export AGMSG_SPAWNED=1'
+  # Record boot-process presence before the CLI runs (see agmsg_boot_pid_path):
+  # $$ is this boot shell, which owns the foreground CLI. This proves only that
+  # the boot process is present; it says nothing about agent readiness or
+  # responsiveness. Include a process-start witness so a later check can reject
+  # a reused PID. The token follows the plain-terminal witness convention.
+  printf 'mkdir -p %q 2>/dev/null || true\n' "$(_actas_lock_dir)"
+  printf 'AGMSG_BOOT_PID_PATH=%q\n' "$BOOT_PID_PATH"
+  echo 'AGMSG_BOOT_PID_START="$(ps -o lstart= -p "$$" 2>/dev/null | sed '\''s/^ *//; s/ *$//'\'' | tr '\'' '\'' '\''_'\'')"'
+  echo 'AGMSG_BOOT_PID_RECORD="$$	$AGMSG_BOOT_PID_START"'
+  echo 'AGMSG_BOOT_PID_TMP="$AGMSG_BOOT_PID_PATH.tmp.$$"'
+  echo 'printf "%s" "$AGMSG_BOOT_PID_RECORD" > "$AGMSG_BOOT_PID_TMP" 2>/dev/null && echo >> "$AGMSG_BOOT_PID_TMP" && mv -f "$AGMSG_BOOT_PID_TMP" "$AGMSG_BOOT_PID_PATH" 2>/dev/null || rm -f "$AGMSG_BOOT_PID_TMP" 2>/dev/null'
+  echo '_agmsg_boot_pid_cleanup() { if [ "$(cat "$AGMSG_BOOT_PID_PATH" 2>/dev/null)" = "$AGMSG_BOOT_PID_RECORD" ]; then rm -f "$AGMSG_BOOT_PID_PATH" 2>/dev/null || true; fi; return 0; }'
+  echo 'trap _agmsg_boot_pid_cleanup EXIT'
+  echo 'trap '\''exit 129'\'' HUP'
+  echo 'trap '\''exit 130'\'' INT'
+  echo 'trap '\''exit 143'\'' TERM'
   # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
   # An entry ending in `*` is a NAMESPACE: every exported variable whose name
   # starts with that prefix is unset, enumerated from `env` at boot time, so a
@@ -596,6 +617,7 @@ PLAIN_WITNESS="${BOOT}.plain-witness"
     agmsg_role_cli_args "$AGENT_TYPE" "$SESSION_NAME" "$ACTAS_PROMPT"
     printf '\n'
   fi
+  echo '_agmsg_boot_pid_cleanup'  # CLI returned; exec below would replace this shell without EXIT
   echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits
   echo 'exec "${SHELL:-/bin/bash}" -i'
 } > "$BOOT"
