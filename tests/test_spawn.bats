@@ -10,7 +10,7 @@ setup() {
   # a terminal. PATH is prepended so the stubs win.
   export STUB_BIN="$TEST_SKILL_DIR/stub-bin"
   mkdir -p "$STUB_BIN"
-  for bin in claude codex grok hermes cursor-agent gemini agy copilot opencode; do
+  for bin in claude codex grok hermes cursor-agent gemini agy copilot opencode devin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/$bin"
     chmod +x "$STUB_BIN/$bin"
   done
@@ -470,6 +470,30 @@ seed_resumable() {
   [ "$status" -eq 0 ]
   run grep -F "/$cmd"'\ actas' "$boot"
   [ "$status" -ne 0 ]
+}
+
+@test "spawn: devin launches devin with -- before the prompt (not a bare positional)" {
+  # devin's REPL takes the initial prompt only after a `--` end-of-options
+  # separator, so prompt_arg=-- puts it immediately before the quoted prompt.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" devin alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  local cmd; cmd="$(basename "$TEST_SKILL_DIR")"
+  # `%q` escapes the prompt's spaces ("\ "), so assert on tokens: the launch
+  # line is `devin -- /<cmd>\ actas\ alice`, never a bare `devin /<cmd> ...`.
+  grep -qF "devin -- /$cmd" "$boot"
+  refute grep -qF "devin /$cmd" "$boot"
+  grep -qF "actas" "$boot"
+}
+
+@test "spawn: devin --model lands before the -- prompt separator" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" devin alice --project "$PROJ" --model opus --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  grep -qF "devin --model opus -- /" "$boot"
+  grep -qF "actas" "$boot"
 }
 
 @test "spawn: prompt_arg lands after spawn-options, immediately before the prompt" {
