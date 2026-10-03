@@ -380,3 +380,95 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   grep -q "^survived$" <<<"$output"
   [ ! -d "$TEAM_DIR/.config.lock" ]
 }
+
+# --- breaking a lock only when its holder is known to be gone (#865) ---------
+#
+# A killed holder leaves its directory behind and nothing ever removed it, so
+# the team stayed wedged until someone deleted it by hand. The lock is now
+# broken when the record beside it names a process on THIS machine that is not
+# running. Everything else stays put, and the case that matters most is in the
+# same run: taking a lock somebody IS using is worse than the leak.
+#
+# The order inside the library is claim first, judge second (rename the record
+# away, then ask whether its process is running, and put it back if so); that
+# is what lets two breakers race without one removing the directory a new owner
+# has just taken. This test does not cover that order: the wrong order only
+# shows up as a lost exclusion under one particular interleaving, which needs
+# the two processes held at specific points to reproduce.
+@test "lock: a dead holder's lock is broken; a live holder's, another machine's record and a record-less lock are kept (#865)" {
+  local gone live lock="$TEAM_DIR/.config.lock" me
+  me="$(uname -n)"
+  sleep 0 &
+  gone=$!
+  wait "$gone" 2>/dev/null || true
+  sleep 30 &
+  live=$!
+  # CONTROLS: the dead pid is really not running and the live one really is.
+  # Without them the "kept" cases pass whenever the number happens to be free.
+  run env PID="$gone" LOCKLIB="$LOCKLIB" bash -c '. "$LOCKLIB"; _agmsg_lock_load_liveness; _agmsg_pid_alive_local "$PID"'
+  [ "$status" -ne 0 ]
+  run env PID="$live" LOCKLIB="$LOCKLIB" bash -c '. "$LOCKLIB"; _agmsg_lock_load_liveness; _agmsg_pid_alive_local "$PID"'
+  [ "$status" -eq 0 ]
+
+  # A live holder on this machine: kept.
+  mkdir "$lock"
+  printf 'token t\npid %s\ncommand t\nhost %s\n' "$live" "$me" > "$lock.holder"
+  acquire
+  [ "$status" -ne 0 ]
+  grep -qF "timed out acquiring registry lock" <<<"$output"
+  refute grep -qF "broke a registry lock" <<<"$output"
+  [ -d "$lock" ]
+  [ -f "$lock.holder" ]
+
+  # The same dead number in a record another machine wrote: that machine's
+  # table is the one that knows, so it is kept.
+  printf 'token t\npid %s\ncommand t\nhost some-other-machine\n' "$gone" > "$lock.holder"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  grep -qF "not written on this machine" <<<"$output"
+  [ -d "$lock" ]
+
+  # No record at all: kept, and the timeout says how to remove it.
+  rm -f "$lock.holder"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  grep -qF "records no holder" <<<"$output"
+  grep -qF "rmdir" <<<"$output"
+  [ -d "$lock" ]
+
+  # A record whose pid is not a usable number (zero, text, past the ceiling) on
+  # this machine: "cannot tell", never "dead". The liveness helper answers "not
+  # running" for these without ever asking the process table.
+  local bad
+  for bad in 0 abc 99999999999; do
+    printf 'token t\npid %s\ncommand t\nhost %s\n' "$bad" "$me" > "$lock.holder"
+    acquire
+    [ "$status" -ne 0 ]
+    refute grep -qF "broke a registry lock" <<<"$output"
+    [ -d "$lock" ]
+  done
+  rm -f "$lock.holder"
+
+  # The copy a release leaves when it is killed after moving its record aside is
+  # not a record of THIS directory (a normal release can leave one too, and a
+  # new owner that stopped right after its mkdir would be judged by it), so it
+  # is treated like no record at all.
+  printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder.releasing.$gone"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  [ -d "$lock" ]
+  rm -f "$lock.holder.releasing.$gone"
+  rmdir "$lock"
+
+  # A dead holder on this machine: broken, and the acquire then succeeds.
+  mkdir "$lock"
+  printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder"
+  acquire
+  [ "$status" -eq 0 ]
+  grep -qF "broke a registry lock" <<<"$output"
+
+  kill "$live" 2>/dev/null || true
+}

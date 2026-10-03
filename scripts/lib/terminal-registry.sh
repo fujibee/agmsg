@@ -443,7 +443,21 @@ agmsg_terminal_resolve_name() {
     if [ "$errf" != /dev/null ] && [ -f "$errf" ]; then
       reason="$(cat "$errf" 2>/dev/null || true)"
     fi
-    reasons="${reasons:+$reasons; }$name: ${reason:-present but could not identify this pane}"
+    reason="${reason:-present but could not identify this pane}"
+    # exclusive=1 (#1563 review): this candidate can never be NESTED under a
+    # later one the way herdr-in-tmux legitimately is, so "keep looking" is
+    # the wrong move here -- it is what let an inherited TMUX/TMUX_PANE from
+    # an unrelated earlier terminal session win the whole resolution instead
+    # of reporting the desktop session's own unresolved id (reproduced: a
+    # desktop session with no usable session id, and TMUX/TMUX_PANE leaked
+    # into its environment, resolved as a plain tmux pane). Fail loudly with
+    # ONLY this candidate's reason, immediately, rather than trying the rest.
+    if [ "$(agmsg_terminal_get "$name" exclusive 0)" = 1 ]; then
+      echo "agmsg: under $name but cannot identify this session to name it — $reason" >&2
+      [ "$errf" = /dev/null ] || rm -f "$errf"
+      return 1
+    fi
+    reasons="${reasons:+$reasons; }$name: $reason"
     saw_present_unnamed=1
   done
   [ "$errf" = /dev/null ] || rm -f "$errf"
@@ -459,6 +473,24 @@ agmsg_terminal_resolve_name() {
     printf '%s\t%s\n' "$plain_name" '-'
     return 0
   fi
+  return 1
+}
+
+# Is any exclusive=1 driver (terminal.conf — #1563) present in this
+# environment at all, regardless of whether it can resolve an id? Used by
+# agmsg_terminal_name_self to skip label-based pane lookup entirely once an
+# exclusive driver is present: that driver can never be a nested terminal
+# the way herdr-in-tmux legitimately is, so a stale team:agent label sitting
+# on some unrelated pane must never outrank it. Prints the driver's name, or
+# nothing (exit 1) when none is present.
+_agmsg_terminal_exclusive_present() {   # <session_id, may be empty>
+  local sid="${1:-}" name
+  for name in $(agmsg_terminal_candidates); do
+    [ "$(agmsg_terminal_get "$name" exclusive 0)" = 1 ] || continue
+    _agmsg_terminal_detect_one "$name" "$sid" >/dev/null 2>&1 || continue
+    printf '%s\n' "$name"
+    return 0
+  done
   return 1
 }
 
@@ -1188,10 +1220,20 @@ agmsg_terminal_name_self() {
   # substitution ends the CALLER before the status can be read -- the shape review
   # caught four times in this branch -- so every capture carries `|| rc=$?`.
   local resolved="" rc=0
+  # #1563 review: an exclusive=1 driver present in this environment (e.g.
+  # claude-desktop) skips the label lookup entirely -- it can never be a
+  # nested terminal the way herdr-in-tmux legitimately is, so a stale
+  # team:agent label written on some unrelated pane must not be allowed to
+  # outrank it (reproduced: a single old labelled pane elsewhere was picked
+  # over a live desktop session's own id).
+  local _excl=""
+  _excl="$(_agmsg_terminal_exclusive_present "$sid" 2>/dev/null)" || _excl=""
   # #1112: the label first, when it settles the question. Falls through silently
   # when it does not -- zero matches is the ordinary state before anything has
   # named this seat, and more than one means the label is not identifying here.
-  resolved="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || resolved=""
+  if [ -z "$_excl" ]; then
+    resolved="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || resolved=""
+  fi
   if [ -n "$resolved" ]; then
     :                                        # the label answered; skip the rest
   elif [ -n "$sid" ]; then
@@ -1220,9 +1262,25 @@ agmsg_terminal_name_self() {
   # Capability is DATA (terminal.conf), not a test on the driver's name: a
   # terminal that cannot name a pane is skipped without a word, and a terminal
   # that grows the ability later needs no change here.
-  local caps=""
+  #
+  # record_without_name=1 (#1563 review) is the one exception: a driver with
+  # no addressable pane to rename (claude-desktop) can still have its
+  # placement RECORDED, so team.sh reports it by name instead of
+  # unknown:no_placement_record. _no_rename skips only the terminal_name call
+  # below -- the placement guard and the record write that follow apply
+  # exactly as they do for any other driver.
+  local caps="" _no_rename=0
   caps="$(agmsg_terminal_get "$terminal" capabilities 2>/dev/null)" || caps=""
-  case " $caps " in *" name "*) ;; *) return 0 ;; esac
+  case " $caps " in
+    *" name "*) ;;
+    *)
+      if [ "$(agmsg_terminal_get "$terminal" record_without_name 0)" = 1 ]; then
+        _no_rename=1
+      else
+        return 0
+      fi
+      ;;
+  esac
 
   agmsg_terminal_load "$terminal" || return 1
 
@@ -1339,13 +1397,16 @@ agmsg_terminal_name_self() {
 
   local out=""
   rc=0
-  out="$(terminal_name "$id" "$team" "$agent" "$name_mode")" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "agmsg: could not name this $terminal pane for $team:$agent${out:+ ($out)}" >&2
-    return "$rc"
+  if [ "$_no_rename" -ne 1 ]; then
+    out="$(terminal_name "$id" "$team" "$agent" "$name_mode")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "agmsg: could not name this $terminal pane for $team:$agent${out:+ ($out)}" >&2
+      return "$rc"
+    fi
   fi
 
-  # Named. Leave the mark that says so -- "agmsg named pane <ref> of server
+  # Named (or, for a record_without_name=1 driver, resolved with nothing to
+  # rename). Leave the mark that says so -- "agmsg named pane <ref> of server
   # generation <epoch> for this seat" -- in the seat's role-session record, so
   # the next action reads one file instead of calling the terminal (see
   # agmsg_self_name_on_action). Every path that names writes the same mark
