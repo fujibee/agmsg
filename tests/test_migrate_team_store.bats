@@ -138,13 +138,10 @@ stored_types() {
   run migrate alpha
   [ "$status" -ne 0 ]
   [[ "$output" =~ "refusing to merge" ]]
-  # And it says what to do — the verification failure below already did, and a
-  # reader who hits this one first should not have to guess.
-  [[ "$output" =~ "remove" ]]
-  # With the caveat that makes the advice safe. Following it after a team is
-  # recorded as moved would destroy the live store, which is the loss this
-  # change exists to prevent.
-  [[ "$output" =~ "NOT yet" ]]
+  # The destination may belong to another operation. Do not prescribe deleting
+  # an unbound store merely because the current config still says shared.
+  [[ "$output" =~ "inspect the existing destination" ]]
+  [[ "$output" =~ "no files were removed" ]]
   # The team did not move, so its rows are still where readers expect them.
   [ "$(shared_rows alpha)" -eq 1 ]
 }
@@ -255,6 +252,33 @@ stored_types() {
   run migrate alpha
   [ "$status" -ne 0 ]
   [ "$(shared_rows alpha)" -eq 1 ]
+}
+
+@test "migrate: a containment query failure preserves source and reports the SQL error" {
+  bash "$SCRIPTS/send.sh" alpha ann bob "one" >/dev/null
+  export MIGRATE_REAL_SQLITE
+  MIGRATE_REAL_SQLITE=$(command -v sqlite3)
+  mkdir "$TEST_SKILL_DIR/query-fault-bin"
+  cat > "$TEST_SKILL_DIR/query-fault-bin/sqlite3" <<'SH'
+#!/usr/bin/env bash
+input=$(cat)
+if [[ "$input" == *EXCEPT* && "$input" == *dst.messages* ]]; then
+  echo 'fixture: containment query failed (SQLITE_BUSY)' >&2
+  exit 5
+fi
+printf '%s\n' "$input" | "$MIGRATE_REAL_SQLITE" "$@"
+SH
+  chmod +x "$TEST_SKILL_DIR/query-fault-bin/sqlite3"
+  run env PATH="$TEST_SKILL_DIR/query-fault-bin:$PATH" bash "$SCRIPTS/internal/migrate-team-store.sh" alpha
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'fixture: containment query failed (SQLITE_BUSY)'* ]] || return 1
+  [[ "$output" == *'could not verify destination containment (messages); source retained'* ]] || return 1
+  [[ "$output" != *'missing rows'* ]] || return 1
+  [ "$(shared_rows alpha)" -eq 1 ]
+  [ "$(sqlite3 "$SHARED" "SELECT count(*) FROM delivery_maintenance WHERE team='alpha';")" -eq 1 ]
+  [ -d "$TEST_SKILL_DIR/teams/alpha/.config.lock" ]
+  grep -qx 'recovery manual' "$TEST_SKILL_DIR/teams/alpha/.config.lock.holder"
+  [ "$(store_of alpha)" = "$SHARED" ]
 }
 
 # The scenario a key-only comparison waves through. After the destination is
@@ -513,7 +537,7 @@ stored_types() {
     VALUES(9001,'message_sent','leftover','alpha','ann','bob','left behind','$at');"
 
   run migrate alpha
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&3; false; }
   [[ "$output" =~ "already has its own store" ]]
   # The leftover is gone from shared, because the destination has it.
   [ "$(shared_rows alpha)" -eq 0 ]

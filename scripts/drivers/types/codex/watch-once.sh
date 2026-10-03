@@ -10,10 +10,11 @@ set -euo pipefail
 #   0  unread inbound exists for the subscription
 #   1  configuration or runtime error
 #   2  timeout with no unread inbound
+#   3  only oversized inline messages remain (once per bridge)
 #
 # This script does not maintain a watermark and never marks messages as read.
-# `inbox.sh` remains the only read cursor; watch-once simply waits until the
-# inbox cursor says there is something to handle.
+# Claim-capable stores report only deliverable rows; live claims and durable
+# role reservations do not trigger metadata wakes. This is never a receipt.
 
 # Taken before any startup work, because the deadline below has to bound this
 # process's LIFETIME, not just its polling. The bridge force-kills the child at
@@ -43,6 +44,8 @@ PAIR_FILTERS=""
 OWNER_ID="${AGMSG_CODEX_OWNER_ID:-}"
 TIMEOUT="${AGMSG_WATCH_ONCE_TIMEOUT:-300}"
 INTERVAL="${AGMSG_WATCH_ONCE_INTERVAL:-}"
+MAX_BYTES=""
+OVERSIZED_REPORTED=false
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -52,6 +55,8 @@ while [ "$#" -gt 0 ]; do
     --owner) OWNER_ID="${2:?--owner needs an owner id}"; shift 2 ;;
     --timeout) TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
     --interval) INTERVAL="${2:?--interval needs seconds}"; shift 2 ;;
+    --max-bytes) MAX_BYTES="${2:?--max-bytes needs a byte bound}"; shift 2 ;;
+    --oversized-reported) OVERSIZED_REPORTED=true; shift ;;
     -h|--help)
       echo "Usage: watch-once.sh <project_path> <agent_type> [--name <agent>] [--team <team>] [--owner <owner>] [--timeout <sec>] [--interval <sec>]"
       exit 0
@@ -66,11 +71,32 @@ if [ -z "$INTERVAL" ]; then
 fi
 case "$INTERVAL" in ''|*[!0-9]*) echo "watch-once: --interval must be a whole number of seconds" >&2; exit 1 ;; esac
 [ "$INTERVAL" -gt 0 ] || INTERVAL=1
+if [ -n "$MAX_BYTES" ]; then
+  case "$MAX_BYTES" in *[!0-9]*|????????*) echo 'watch-once: invalid --max-bytes' >&2; exit 1 ;; esac
+  [ "$MAX_BYTES" -ge 4096 ] && [ "$MAX_BYTES" -le 1048576 ] || { echo 'watch-once: invalid --max-bytes' >&2; exit 1; }
+elif [ "$OVERSIZED_REPORTED" = true ]; then
+  echo 'watch-once: --oversized-reported requires --max-bytes' >&2; exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 source "$SCRIPT_DIR/../../../lib/storage.sh"
 agmsg_storage_load
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../../../lib/delivery-claims.sh"
+CLAIMS_SUPPORTED=false
+_capability_rc=0
+agmsg_delivery_claims_supported || _capability_rc=$?
+case "$_capability_rc" in
+  0) CLAIMS_SUPPORTED=true ;;
+  1) echo "watch-once: delivery claims unavailable; using legacy unread readiness" >&2 ;;
+  *) echo "watch-once: delivery capability check failed" >&2; exit 1 ;;
+esac
+if [ -n "$MAX_BYTES" ]; then
+  [ "$CLAIMS_SUPPORTED" = true ] && agmsg_delivery_claims_bytes_supported || {
+    echo 'watch-once: inline claims require delivery-claims-bytes-v1 support' >&2; exit 1;
+  }
+fi
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../../../lib/actas-lock.sh"
 # shellcheck disable=SC1091
@@ -117,6 +143,7 @@ while true; do
     # frontier could miss a set change under a backend whose ids aren't
     # recency-ordered (jsonl); a set digest is robust on every backend.
     count=0
+    oversized=false
     all_ids=""
     while IFS=$'\t' read -r _team _agent; do
       [ -n "$_team" ] && [ -n "$_agent" ] || continue
@@ -126,40 +153,88 @@ while true; do
       # served every team — that form skipped the whole subscription as soon as
       # any store was missing. Mirrors check-inbox.sh and watch.sh.
       storage_store_exists "$_team" || continue
-      u="$(storage_list_unread "$_team" "$_agent" 2>/dev/null || true)"
+      if [ "$CLAIMS_SUPPORTED" = true ]; then
+        if [ -n "$MAX_BYTES" ]; then
+          u="$(agmsg_delivery_list_deliverable_bounded "$_team" "$_agent" 32 "$MAX_BYTES")" || {
+            echo "watch-once: deliverable read failed for $_team/$_agent" >&2; exit 1;
+          }
+          # The facade validates JSONL before emission and emits one final LF;
+          # command substitution removes that LF. Count bytes, not characters.
+          _agmsg_wo_bytes=$(LC_ALL=C printf '%s' "$u" | wc -c)
+          [ -z "$u" ] || [ $((_agmsg_wo_bytes + 1)) -le "$MAX_BYTES" ] || {
+            echo 'watch-once: bounded readiness response exceeds its byte limit' >&2; exit 1;
+          }
+        else
+          u="$(agmsg_delivery_list_deliverable "$_team" "$_agent")" || {
+          echo "watch-once: deliverable read failed for $_team/$_agent" >&2; exit 1;
+          }
+        fi
+      else
+        u="$(storage_list_unread "$_team" "$_agent")" || {
+          echo "watch-once: unread read failed for $_team/$_agent" >&2; exit 1;
+        }
+      fi
       [ -n "$u" ] || continue
       uarr="[$(printf '%s' "$u" | paste -sd, -)]"
-      # #777: this pair's unread backlog grows with every message sent to it,
-      # so interpolating it into ONE argv element eventually exceeds the OS's
-      # per-argument ceiling (Linux MAX_ARG_STRLEN=131,072 bytes; smaller
-      # still on Windows/macOS) and `agmsg_sqlite` fails with "Argument list
-      # too long" -- every single poll, since the backlog that triggered it
-      # never shrinks on its own (this script never marks anything read; see
-      # the file header). Pass the statement on stdin instead, mirroring
-      # drivers/storage/sqlite-sync.sh:1301 (`_sqlite_data_stdin`, #882) and
-      # history.sh/inbox.sh: printf is a bash builtin, so writing a large
-      # value to a temp file never execs and can hit neither that ceiling nor
-      # argv's at all. `|| continue` on mktemp failure matches the existing
-      # per-pair `continue` a few lines above: one pair's storage error must
-      # not end the whole subscription's poll.
-      _agmsg_wo_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-watchonce-ids.XXXXXX" 2>/dev/null) || continue
+      # Keep large/control-character IDs off argv and preserve their record
+      # boundaries with hex. A malformed read is an error, never an empty poll.
+      _agmsg_wo_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-watchonce-ids.XXXXXX") || exit 1
       trap 'rm -f "$_agmsg_wo_sql"' EXIT HUP INT TERM
-      printf "%s\n" "SELECT json_extract(value,'\$.id') FROM json_each('$(printf '%s' "$uarr" | sed "s/'/''/g")');" \
-        > "$_agmsg_wo_sql"
-      ids="$(agmsg_sqlite ':memory:' < "$_agmsg_wo_sql" 2>/dev/null || true)"
+      invalid_id="json_type(value,'\$.id')!='text' OR COALESCE(json_extract(value,'\$.id'),'')=''"
+      if [ -n "$MAX_BYTES" ]; then invalid_id="json_extract(value,'\$.type')!='delivery_oversized' AND ($invalid_id)"; fi
+      {
+        printf '%s\n' "CREATE TEMP TABLE unread(document TEXT CHECK(json_valid(document)));"
+        printf "INSERT INTO unread VALUES('%s');\n" "${uarr//\'/\'\'}"
+        if [ -n "$MAX_BYTES" ]; then
+          printf '%s\n' "CREATE TEMP TABLE valid_bounded(ok INTEGER CHECK(ok=1));
+            INSERT INTO valid_bounded SELECT CASE WHEN json_array_length(document)<=33
+              AND NOT EXISTS(SELECT 1 FROM json_each(document) m WHERE COALESCE(CASE
+                WHEN json_extract(m.value,'\$.type')='delivery_oversized' THEN
+                  m.key=json_array_length(document)-1 AND (SELECT count(*) FROM json_each(m.value))=1
+                ELSE json_extract(m.value,'\$.type')='message_sent'
+                  AND (SELECT count(*) FROM json_each(m.value))=7
+                  AND NOT EXISTS(SELECT 1 FROM json_each(m.value) WHERE key NOT IN ('type','id','team','from','to','body','at') OR type!='text')
+                  AND (SELECT count(*) FROM json_each(document) WHERE json_extract(value,'\$.type')='message_sent')<=32
+                END,0)=0) THEN 1 ELSE 0 END FROM unread;"
+        fi
+        printf '%s\n' "CREATE TEMP TABLE valid_read(ok INTEGER CHECK(ok=1));
+          INSERT INTO valid_read SELECT CASE WHEN json_type(document)='array'
+            AND NOT EXISTS(SELECT 1 FROM json_each(document) WHERE
+              $invalid_id)
+            THEN 1 ELSE 0 END FROM unread;
+          SELECT CASE WHEN json_extract(value,'\$.type')='delivery_oversized' AND '$MAX_BYTES'!=''
+            THEN 'oversized' ELSE hex(json_extract(value,'\$.id')) END FROM unread,json_each(document);"
+      } > "$_agmsg_wo_sql"
+      ids="$(agmsg_sqlite -bail ':memory:' < "$_agmsg_wo_sql")" || {
+        echo "watch-once: malformed unread records for $_team/$_agent" >&2; exit 1;
+      }
       rm -f "$_agmsg_wo_sql"
       trap - EXIT HUP INT TERM
-      [ -n "$ids" ] || continue
+      if [ -n "$MAX_BYTES" ]; then
+        case "$ids" in oversized|*$'\n'oversized)
+          oversized=true
+          if [ "$ids" = oversized ]; then ids=""; else ids="${ids%$'\n'oversized}"; fi
+          ;;
+        esac
+        [ -n "$ids" ] || continue
+      fi
+      [ -n "$ids" ] || { echo "watch-once: empty unread record set" >&2; exit 1; }
       count=$(( count + $(printf '%s\n' "$ids" | grep -c .) ))
-      all_ids="$all_ids$ids"$'\n'
+      all_ids="$all_ids$_team"$'\t'"$_agent"$'\n'"$ids"$'\n'
     done <<< "$PAIRS"
     if [ "$count" -gt 0 ]; then
       # cksum = POSIX (no shasum dep). Field 1 is whitespace-free for the bridge's
       # `max_id=(\S+)` parse. The bridge only compares it within one session, so the
       # checksum needn't be stable across platforms — only deterministic per run.
       max_id="$(printf '%s' "$all_ids" | sed '/^$/d' | LC_ALL=C sort | cksum | cut -d' ' -f1)"
-      printf 'status=pending count=%s max_id=%s\n' "$count" "$max_id"
+      printf 'status=pending count=%s max_id=%s' "$count" "$max_id"
+      if [ "$oversized" = true ]; then printf ' oversized=1'; fi
+      printf '\n'
       exit 0
+    fi
+    if [ "$oversized" = true ] && [ "$OVERSIZED_REPORTED" = false ]; then
+      printf 'status=oversized\n'
+      exit 3
     fi
   }
 

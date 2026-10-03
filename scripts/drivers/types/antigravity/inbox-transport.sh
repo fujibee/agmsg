@@ -22,6 +22,28 @@ _owner_check() {   # <team> <role> <owner>
   return 0
 }
 
+# A successful control operation is exactly three bytes: "ok" and LF. Read
+# through a private file so command substitution cannot erase NUL or trailing
+# newlines and turn an invalid response into apparent success.
+_capture_control() {
+  local _control_target="$1" _control_file _control_raw="" _control_ok=false
+  shift
+  _control_file="$(umask 077; mktemp)" || return 13
+  if "$@" > "$_control_file"; then
+    if IFS= read -r -d '' _control_raw < "$_control_file"; then
+      : # A NUL delimiter is never valid, even after an otherwise valid reply.
+    elif [ "$_control_raw" = $'ok\n' ]; then
+      _control_ok=true
+    fi
+  fi
+  rm -f -- "$_control_file" || return 13
+  if [ "$_control_ok" != true ]; then
+    echo 'agmsg: malformed protected control output' >&2
+    return 13
+  fi
+  printf -v "$_control_target" '%s' ok
+}
+
 case "$command" in
  paths)
    printf '%s\n' "$(actas_lock_path "$team" "$role")"
@@ -54,6 +76,58 @@ case "$_own_rc" in
   2) echo 'cannot read actas lock; ownership cannot be verified (will not proceed without verification)' >&2; exit 1 ;;
 esac
 agmsg_storage_load
+source "$SKILL_DIR/scripts/lib/delivery-claims.sh"
+source "$HERE/bridge-read-guard.sh"
+case "$command" in
+ admit|receive|renew|finish|relinquish|recover-batch)
+   IFS= read -r _AGMSG_BRIDGE_ACK_CAP <&3
+   exec 3<&-
+   request="$(node "$HERE/bridge-read-guard.mjs" request "$team" "$role" "$owner")" || exit 13
+   reservation="$(_agmsg_bridge_guard_reservation "$team" "$role")" || exit 13
+   operation="$command"
+   case "$command" in receive) operation=claim ;; finish) operation=ack ;; relinquish) operation=release ;; recover-batch) operation=recover ;; esac
+   _agmsg_antigravity_authorize "$reservation" "$operation" "$request" || exit 13
+   storage_driver="$(agmsg_storage_driver)" || exit 13
+   if [ "$storage_driver" = sqlite ]; then _sqlite_bridge_ready "$team" || exit 13; fi
+   if [ "$command" = admit ]; then
+     capability_rc=0
+     agmsg_delivery_claims_supported || capability_rc=$?
+     case "$capability_rc" in
+       0)
+         [ "$storage_driver" = sqlite ] || { echo 'agmsg: protected claims require the SQLite driver' >&2; exit 13; }
+         echo claims ;;
+       1) echo legacy ;;
+       *) exit 13 ;;
+     esac
+     exit
+   fi
+   agmsg_delivery_claims_supported || { echo 'agmsg: protected claims are unavailable' >&2; exit 13; }
+   [ "$storage_driver" = sqlite ] || { echo 'agmsg: protected claims require the SQLite driver' >&2; exit 13; }
+   fields="$(printf '%s' "$request" | node "$HERE/bridge-read-guard.mjs" fields)" || exit 13
+   claim_owner=""; token=""; protection_id=""; ids=()
+   while IFS='|' read -r key value; do
+     _agmsg_delivery_decode_hex value "$value" || exit 13
+     case "$key" in owner) claim_owner="$value" ;; token) token="$value" ;; protection_id) protection_id="$value" ;; id) ids+=("$value") ;; esac
+   done <<< "$fields"
+   case "$command" in
+     receive) _agmsg_delivery_capture result _sqlite_bridge_claim_unread "$team" "$role" "$owner" 600 || exit 13 ;;
+     renew) _capture_control result _sqlite_bridge_claim_change renew "$protection_id" "$team" "$role" "$claim_owner" "$token" 600 "${ids[@]}" || exit 13 ;;
+     finish|relinquish) _capture_control result _sqlite_bridge_claim_change "$operation" "$protection_id" "$team" "$role" "$claim_owner" "$token" "${ids[@]}" || exit 13 ;;
+     recover-batch)
+       batch="$(node "$HERE/bridge-read-guard.mjs" saved-batch "$reservation")" || exit 13
+       _agmsg_delivery_capture result _sqlite_bridge_claim_recover "$team" "$role" "$owner" 600 "$batch" || exit 13 ;;
+   esac
+   case "$command" in
+     receive|recover-batch)
+       printf '%s' "$result" | node "$HERE/bridge-read-guard.mjs" validate-output "$command" "$reservation" "$team" "$role" || exit 13 ;;
+   esac
+   _agmsg_antigravity_authorize "$reservation" "$operation" "$request" || exit 13
+   case "$command" in
+     receive|recover-batch) _agmsg_delivery_emit_records "$result" ;;
+     *) [ -z "$result" ] || printf '%s\n' "$result" ;;
+   esac
+   exit ;;
+esac
 case "$command" in
  peek)
    if [ -n "${AGMSG_TEST_PEEK_BARRIER:-}" ]; then

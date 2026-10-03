@@ -4155,11 +4155,26 @@ JSON
   # because it fails nearer the cause when the run stops before formatting.
   [ -e "$barrier.reached" ]
 
-  # And the row itself survived intact — still deliverable, with its body. This
-  # is a claim about the ROW, not about the failed run. Asserted BEFORE any
-  # `inbox.sh`: inbox displays AND consumes, so reading it first would take the
-  # row away and leave this measuring its own side effect. (Measured — that is
-  # exactly what the first draft of this test did.)
+  # The row survives unread, but an attempted write is UNKNOWN: its live
+  # reservation prevents immediate redelivery. Inspect canonical unread state
+  # before invoking another consuming reader.
+  run env SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load; storage_list_unread testteam alice
+  ' _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -Fc 'must survive an unwritable stdout')" -eq 1 ]
+  local db
+  db=$(SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load; agmsg_db_path testteam
+  ' _ "$SCRIPTS")
+  [ "$(sqlite3 "$db" "SELECT count(*) FROM delivery_claims WHERE team='testteam' AND agent='alice' AND expires_at>strftime('%s','now');")" -eq 1 ]
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' codex '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -Fc 'must survive an unwritable stdout' || true)" -eq 0 ]
+
+  # Expire only this fixture's uncertain reservation; the next accepted write
+  # can then redeliver and acknowledge the preserved body.
+  sqlite3 "$db" "UPDATE delivery_claims SET expires_at=0 WHERE team='testteam' AND agent='alice';"
   run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' codex '$TEST_PROJECT'"
   [ "$status" -eq 0 ]
   printf '%s' "$output" | grep -Fq "must survive an unwritable stdout"
