@@ -201,10 +201,12 @@ fi
 # unnamed and unaddressable. watch.sh does the same lookup and was corrected the
 # same way (watch.sh:271); this was the remaining site.
 #
-# `retire_previous` (the last argument) drops this pane's record of the name this
-# session was acting as before, which would otherwise read as another seat's and
-# refuse this one; see _agmsg_placement_retire_previous. Only this call site
-# passes it, and only here, after the claim above has won.
+# `retire_previous "$SESSION_ID"` (the last two arguments) drops this pane's
+# record of the name this session was acting as before, which would otherwise
+# read as another seat's and refuse this one; see
+# _agmsg_placement_retire_previous. The composite $SESSION_ID is what the actas
+# locks are owned by, so it is what a seat's lock is compared with. Only this
+# call site passes them, and only here, after the claim above has won.
 #
 # Once per claimed team, mirroring the role-session loop above: each (team, role)
 # gets its own record, because that pair is what peek/poke resolve by. The
@@ -213,7 +215,7 @@ fi
 if declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
   while IFS= read -r team; do
     [ -z "$team" ] && continue
-    agmsg_terminal_name_self_safe "$BARE_SID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" record retire_previous || true
+    agmsg_terminal_name_self_safe "$BARE_SID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" record retire_previous "$SESSION_ID" || true
   done <<< "$TEAMS"
 fi
 

@@ -301,6 +301,10 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   #   - alice in another team has a record for another pane: untouched
   #   - a seat that another session holds, in another pane: its record stays and
   #     it still refuses whoever acts from that pane
+  #   - a seat held by ANOTHER PROCESS OF THE SAME SESSION ID (the lock owner is
+  #     "<sid>.<pid>", and only the whole thing says whose it is): kept
+  #   - a record of ANOTHER TEAM that points at the same pane and has no lock:
+  #     kept, so the name acting from there is still refused
   _join_unnamed team bob
   _join_unnamed team2 alice
   _join_unnamed team eve
@@ -323,6 +327,29 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   grep -q 'already recorded as' <<<"$output"            # held by another session: still a rival
   [ -z "$(_placement team frank)" ]
   [ "$(_placement team eve)" = 'tmux:/tmp/s:%5' ]
+
+  # Same bare session id, another live process: the lock owner differs only in
+  # its pid, and that is enough for the seat to stay.
+  _join_unnamed team gina
+  _join_unnamed team hank
+  agmsg_write_atomic "$(agmsg_spawn_path team gina)" "$(printf 'tmux:/tmp/s:%%6\t/tmp/p\tclaude-code')"
+  printf 'sid-hank.12345\n' > "$(actas_lock_path team gina)"
+  _under_tmux /tmp/s 4242 %6
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code hank sid-hank
+  grep -q 'already recorded as' <<<"$output"
+  [ -z "$(_placement team hank)" ]
+  [ "$(_placement team gina)" = 'tmux:/tmp/s:%6' ]
+
+  # A record of another team for the same pane, no lock: not this team's, so not
+  # retired, and it still refuses.
+  _join_unnamed team jack
+  _join_unnamed team2 iris
+  agmsg_write_atomic "$(agmsg_spawn_path team2 iris)" "$(printf 'tmux:/tmp/s:%%7\t/tmp/p\tclaude-code')"
+  _under_tmux /tmp/s 4242 %7
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code jack sid-jack
+  grep -q 'already recorded as' <<<"$output"
+  [ -z "$(_placement team jack)" ]
+  [ "$(_placement team2 iris)" = 'tmux:/tmp/s:%7' ]
 }
 
 # --- order independence with the existing paths -------------------------------------

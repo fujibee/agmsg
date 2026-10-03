@@ -989,31 +989,62 @@ _agmsg_placement_claimed_by() {
 # name is neither named nor recorded, and warns on every action.
 #
 # Drops, of the records that point at THIS pane (the scan above, "all"), only
-# those whose seat has no actas lock or whose lock this session holds, together
-# with that seat's naming mark. Not touched: a record for another pane (the old
-# name's other placements), a seat another session holds (a real rival; this
-# also keeps co-located codex seats from taking each other's pane), and a lock
-# that cannot be read. The new name is only claimed once this has run, so a
-# seat held elsewhere keeps refusing it exactly as before.
+# those that belong to a seat of THIS team and whose seat has no actas lock or
+# whose lock this very process holds, together with that seat's naming mark.
 #
-#   _agmsg_placement_retire_previous <ref> <team> <agent> <bare sid>
+# THIS PROCESS, not this session id. A lock's owner is "<sid>.<pid>", and a
+# second process can carry the same sid (a resumed or forked session), so the
+# owner is compared whole against <instance>, the composite the claim itself
+# used; peeling the pid off made another live process's seat read as ours.
+# An owner that is only a bare sid cannot be shown not to be another process's,
+# so it is kept.
+#
+# THIS TEAM, decided exactly: the candidates are the record paths of the team's
+# registered members, computed through agmsg_spawn_path -- never by cutting a
+# file name, because "__" is legal inside a name. A record of another team that
+# points at this pane is kept (and still refuses the new name, which is the
+# fail-closed side).
+#
+# Not touched either: a record for another pane, a seat another session holds, a
+# lock that cannot be read, and a record whose pane cannot be read. The new
+# name is only claimed once this has run, so every one of those keeps refusing
+# it exactly as before.
+#
+#   _agmsg_placement_retire_previous <ref> <team> <agent> <instance id>
 _agmsg_placement_retire_previous() {
-  local ref="$1" team="$2" agent="$3" sid="$4" suffixes s dir mine lock lockread owner own_bare role rt ra
-  [ -n "$ref" ] && [ -n "$sid" ] || return 0
+  local ref="$1" team="$2" agent="$3" instance="$4" suffixes s dir mine lock lockread owner role rt ra
+  local cfg esc m cand="" inteam
+  [ -n "$ref" ] && [ -n "$instance" ] || return 0
   suffixes="$(_agmsg_placement_claimed_by "$ref" "$team" "$agent" all)" || return 0
   [ -n "$suffixes" ] || return 0
   mine="$(agmsg_spawn_path "$team" "$agent")" || return 0
   dir="$(dirname "$mine")"
+  cfg="$(dirname "$dir")/teams/$team/config.json"
+  [ -f "$cfg" ] || return 0
+  esc="$(sed "s/'/''/g" "$cfg" 2>/dev/null)" || return 0
+  while IFS= read -r m; do
+    [ -n "$m" ] && [ "$m" != "$agent" ] || continue
+    cand="${cand}$(agmsg_spawn_path "$team" "$m" 2>/dev/null)"$'\n'
+  done <<EOF
+$(sqlite3 :memory: "SELECT key FROM json_each(json_extract('$esc', '\$.agents'));" 2>/dev/null | tr -d '\r')
+EOF
+  [ -n "$cand" ] || return 0
   while IFS= read -r s; do
     [ -n "$s" ] || continue
+    inteam=0
+    while IFS= read -r m; do
+      if [ -n "$m" ] && [ "$m" = "$dir/spawn.$s" ]; then inteam=1; break; fi
+    done <<EOF
+$cand
+EOF
+    [ "$inteam" -eq 1 ] || continue
     lock="$dir/actas.$s.session"
     lockread="$(_actas_lock_read_path "$lock")" || continue
     case "${lockread%%$'\t'*}" in
       absent) ;;
       ok)
         owner="${lockread#*$'\t'}"
-        own_bare="$(agmsg_instance_bare_sid "$owner" 2>/dev/null)" || own_bare="$owner"
-        [ -n "$own_bare" ] && [ "$own_bare" = "$sid" ] || continue ;;
+        [ "$owner" = "$instance" ] || continue ;;
       *) continue ;;
     esac
     # The naming mark lives in the seat's role-session record, which is keyed by
@@ -1256,7 +1287,7 @@ EOF
 
 agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
-  local write_record="${6:-}" retire="${7:-}"
+  local write_record="${6:-}" retire="${7:-}" instance="${8:-}"
   [ -n "$team" ] && [ -n "$agent" ] || {
     echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
   }
@@ -1377,7 +1408,7 @@ agmsg_terminal_name_self() {
     # An actas names a seat that may have been another name in this very pane a
     # moment ago; only that caller passes the flag, and only after its claim won.
     if [ "$retire" = retire_previous ]; then
-      _agmsg_placement_retire_previous "$_claim_ref" "$team" "$agent" "$sid" || true
+      _agmsg_placement_retire_previous "$_claim_ref" "$team" "$agent" "$instance" || true
     fi
     # Undecidable (this seat's own ref cannot be parsed, or its record path
     # cannot be built) is not "unclaimed": neither name nor record then.
