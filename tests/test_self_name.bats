@@ -293,6 +293,36 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   # alice keeps everything.
   [ "$(_mark team alice)" = $'tmux:/tmp/s:%3\tpid=4242' ]
   [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+
+  # An actas is different: the session is declaring that it now acts as bob, and
+  # alice was the name it acted as in this very pane a moment ago. Her record
+  # would otherwise refuse bob forever, so the claim retires it -- but only the
+  # records that point at THIS pane and belong to no other live session.
+  #   - alice in another team has a record for another pane: untouched
+  #   - a seat that another session holds, in another pane: its record stays and
+  #     it still refuses whoever acts from that pane
+  _join_unnamed team bob
+  _join_unnamed team2 alice
+  _join_unnamed team eve
+  _join_unnamed team frank
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  agmsg_write_atomic "$(agmsg_spawn_path team2 alice)" "$(printf 'tmux:/tmp/s:%%9\t/tmp/p\tclaude-code')"
+  agmsg_write_atomic "$(agmsg_spawn_path team eve)" "$(printf 'tmux:/tmp/s:%%5\t/tmp/p\tclaude-code')"
+  printf 'other-session.99999\n' > "$(actas_lock_path team eve)"
+
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code bob sid-bob
+  [ "$status" -eq 0 ]
+  grep -q 'status=ok' <<<"$output"
+  [ "$(_placement team bob)" = 'tmux:/tmp/s:%3' ]       # bob is named and recorded here now
+  [ -z "$(_placement team alice)" ]                     # alice's record for this pane is gone
+  [ -z "$(_mark team alice)" ]                          # and so is the mark that said she was named here
+  [ "$(_placement team2 alice)" = 'tmux:/tmp/s:%9' ]    # her other placement stays
+
+  _under_tmux /tmp/s 4242 %5
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code frank sid-frank
+  grep -q 'already recorded as' <<<"$output"            # held by another session: still a rival
+  [ -z "$(_placement team frank)" ]
+  [ "$(_placement team eve)" = 'tmux:/tmp/s:%5' ]
 }
 
 # --- order independence with the existing paths -------------------------------------

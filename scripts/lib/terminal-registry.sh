@@ -913,14 +913,18 @@ _agmsg_placement_split() {   # <ref>
   return 0
 }
 
-# <ref> <team> <agent>
+# <ref> <team> <agent> [all]
 #   Prints the claimant as its record file spells it ("<team>__<agent>", encoded)
 #   when ANOTHER seat's record claims this pane; prints nothing when the pane is
 #   unclaimed. Returns 1 when this seat's OWN ref cannot be parsed: ownership is
 #   then undecidable and the caller must not name or record (fail-closed).
+#
+#   With "all" it prints EVERY record that points at this pane, one per line, and
+#   skips a record whose ref cannot be read: "it cannot be ruled out as this
+#   pane" is a reason to refuse, and not a reason to take anything away.
 _agmsg_placement_claimed_by() {
-  local ref="$1" team="$2" agent="$3" dir f first mine enc_agent t is_mine
-  local want_term want_id want_sock
+  local ref="$1" team="$2" agent="$3" mode="${4:-first}" dir f first mine enc_agent t is_mine
+  local want_term want_id want_sock out=""
   _agmsg_placement_split "$ref" || return 1          # undecidable, not "unclaimed"
   want_term="$_AGMSG_PS_TERM"; want_id="$_AGMSG_PS_ID"; want_sock="$_AGMSG_PS_SOCK"
   mine="$(agmsg_spawn_path "$team" "$agent")" || return 1
@@ -952,6 +956,7 @@ _agmsg_placement_claimed_by() {
     # it lets a person drop it; waving it through is the fail-open this guard
     # exists to close.
     if [ -z "$first" ] || ! _agmsg_placement_split "$first"; then
+      if [ "$mode" = all ]; then continue; fi
       printf '%s' "${f##*/spawn.}"
       return 0
     fi
@@ -967,9 +972,73 @@ _agmsg_placement_claimed_by() {
        && [ "$_AGMSG_PS_SOCK" != "$want_sock" ]; then
       continue                                # different servers, different panes
     fi
+    if [ "$mode" = all ]; then
+      out="${out}${f##*/spawn.}"$'\n'
+      continue
+    fi
     printf '%s' "${f##*/spawn.}"
     return 0
   done
+  if [ "$mode" = all ]; then printf '%s' "$out"; fi
+  return 0
+}
+
+# The seat this session just stopped being. A session that acts as <agent> after
+# acting as another name in the SAME pane leaves the first name's record
+# pointing at the pane, and the placement guard then reads it as a rival: the new
+# name is neither named nor recorded, and warns on every action.
+#
+# Drops, of the records that point at THIS pane (the scan above, "all"), only
+# those whose seat has no actas lock or whose lock this session holds, together
+# with that seat's naming mark. Not touched: a record for another pane (the old
+# name's other placements), a seat another session holds (a real rival; this
+# also keeps co-located codex seats from taking each other's pane), and a lock
+# that cannot be read. The new name is only claimed once this has run, so a
+# seat held elsewhere keeps refusing it exactly as before.
+#
+#   _agmsg_placement_retire_previous <ref> <team> <agent> <bare sid>
+_agmsg_placement_retire_previous() {
+  local ref="$1" team="$2" agent="$3" sid="$4" suffixes s dir mine lock lockread owner own_bare role rt ra
+  [ -n "$ref" ] && [ -n "$sid" ] || return 0
+  suffixes="$(_agmsg_placement_claimed_by "$ref" "$team" "$agent" all)" || return 0
+  [ -n "$suffixes" ] || return 0
+  mine="$(agmsg_spawn_path "$team" "$agent")" || return 0
+  dir="$(dirname "$mine")"
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    lock="$dir/actas.$s.session"
+    lockread="$(_actas_lock_read_path "$lock")" || continue
+    case "${lockread%%$'\t'*}" in
+      absent) ;;
+      ok)
+        owner="${lockread#*$'\t'}"
+        own_bare="$(agmsg_instance_bare_sid "$owner" 2>/dev/null)" || own_bare="$owner"
+        [ -n "$own_bare" ] && [ "$own_bare" = "$sid" ] || continue ;;
+      *) continue ;;
+    esac
+    # The naming mark lives in the seat's role-session record, which is keyed by
+    # NAME even where the spawn record is keyed by id, so it cannot be found from
+    # the spawn file's name. Found by what the record says it belongs to instead:
+    # the one whose team and agent resolve to this very spawn record.
+    if ! declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1 \
+       && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ]; then
+      # shellcheck disable=SC1090,SC1091
+      . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || true
+    fi
+    if declare -F agmsg_role_session_clear_named_at >/dev/null 2>&1; then
+      for role in "$dir"/role-session.*; do
+        [ -f "$role" ] || continue
+        rt="$(_agmsg_role_session_field "$role" team)"
+        ra="$(_agmsg_role_session_field "$role" agent)"
+        [ -n "$rt" ] && [ -n "$ra" ] || continue
+        [ "$(agmsg_spawn_path "$rt" "$ra" 2>/dev/null)" = "$dir/spawn.$s" ] || continue
+        agmsg_role_session_clear_named_at "$role" 2>/dev/null
+      done
+    fi
+    rm -f "$dir/spawn.$s"
+  done <<EOF
+$suffixes
+EOF
   return 0
 }
 
@@ -1187,7 +1256,7 @@ EOF
 
 agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
-  local write_record="${6:-}"
+  local write_record="${6:-}" retire="${7:-}"
   [ -n "$team" ] && [ -n "$agent" ] || {
     echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
   }
@@ -1305,6 +1374,11 @@ agmsg_terminal_name_self() {
   if declare -F agmsg_spawn_path >/dev/null 2>&1; then
     local _claim_ref="" _claimed_by="" _claim_rc=0
     _claim_ref="$(agmsg_terminal_ref "$terminal" "$id" 2>/dev/null)" || _claim_ref=""
+    # An actas names a seat that may have been another name in this very pane a
+    # moment ago; only that caller passes the flag, and only after its claim won.
+    if [ "$retire" = retire_previous ]; then
+      _agmsg_placement_retire_previous "$_claim_ref" "$team" "$agent" "$sid" || true
+    fi
     # Undecidable (this seat's own ref cannot be parsed, or its record path
     # cannot be built) is not "unclaimed": neither name nor record then.
     _claimed_by="$(_agmsg_placement_claimed_by "$_claim_ref" "$team" "$agent")" || _claim_rc=$?
