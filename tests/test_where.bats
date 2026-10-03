@@ -44,6 +44,29 @@ teardown() { teardown_test_env; }
   grep -q 'capabilities=spawn despawn peek poke where arrange name' <<<"$output"
 }
 
+@test "where: the Claude desktop app's Code tab resolves to claude-desktop by session id, never a pane" {
+  # #1559/desktop-app-terminal-drivers: CLAUDE_CODE_ENTRYPOINT=claude-desktop
+  # is the one marker (measured on a live desktop process; a terminal session
+  # carries CLAUDE_CODE_ENTRYPOINT=cli). The placement id is the Claude Code
+  # session id itself -- there is no pane to report instead.
+  export CLAUDE_CODE_ENTRYPOINT=claude-desktop CLAUDE_CODE_SESSION_ID=desktop-sid-123
+  run bash "$SCRIPTS/where.sh"
+  [ "$status" -eq 0 ]
+  grep -q '^resolved=true' <<<"$output"
+  grep -q 'placement=claude-desktop:desktop-sid-123' <<<"$output"
+  grep -q 'terminal=claude-desktop' <<<"$output"
+  # No container concept exists for a desktop session -- a decided fact, not
+  # an unresolved pane lookup.
+  grep -q 'container=n/a:no_container_concept' <<<"$output"
+  # #1082: the manifest's own ceiling -- where only, never a pane verb.
+  grep -q 'capabilities=where' <<<"$output"
+  # The one thing this answer must never look like: a pane-shaped placement
+  # from a driver that happened to have a stale env var lying around.
+  refute grep -q 'placement=herdr' <<<"$output"
+  refute grep -q 'placement=tmux' <<<"$output"
+  refute grep -q 'placement=orca' <<<"$output"
+}
+
 @test "where: tmux with a live \$TMUX_PANE resolves to that pane, terminal=tmux is explicit" {
   export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
   mkdir -p "$FAKEBIN"
