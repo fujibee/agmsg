@@ -5,8 +5,9 @@
 # otherwise send-side only and never runs actas-claim, so without this a codex
 # role would have no role-session record and could never be resumed (spawn would
 # always boot it fresh). This is the codex-side equivalent: the codex actas flow
-# calls it, and it writes the record so a later spawn/resume brings the role back
-# into its thread.
+# calls it, and it writes the thread plus the effective CODEX_HOME so a later
+# spawn/resume brings the role back into its thread and profile. The /clear
+# recovery in self-fix.sh calls this same script after #1470 rebinds the seat.
 #
 # Usage: codex-record-session.sh <team> <agent> [project]
 #
@@ -160,6 +161,34 @@ if [ "$probe_ran" = "1" ]; then
   [ -n "$thread" ] || exit 0
 fi
 
+# Resolve the effective profile before either fallback can infer a thread. The
+# rollout index belongs to CODEX_HOME, not necessarily to the process HOME.
+# Codex defaults to $HOME/.codex when CODEX_HOME is unset; resolve either
+# spelling to a physical absolute path so discovery and the stored destination
+# use the same profile. A missing or malformed directory is never published as
+# a delivery destination, but it does not prevent the session record either:
+# the record is written without the profile, and discovery falls back to
+# $HOME/.codex as before.
+codex_home="${CODEX_HOME:-${HOME:+$HOME/.codex}}"
+case "$codex_home" in
+  *[[:cntrl:]]*) codex_home="" ;;
+  /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
+  *) codex_home="" ;;
+esac
+if [ -n "$codex_home" ] && [ -d "$codex_home" ]; then
+  codex_home="$(agmsg_canonical_path "$codex_home")" || codex_home=""
+  # Keep the absolute path in the cross-platform form used by Node consumers;
+  # Git Bash's physical /c/... spelling is normalized to C:/... on Windows.
+  codex_home="$(agmsg_normalize_project_path "$codex_home")" || codex_home=""
+  case "$codex_home" in
+    *[[:cntrl:]]*) codex_home="" ;;
+    /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
+    *) codex_home="" ;;
+  esac
+else
+  codex_home=""
+fi
+
 if [ -z "$thread" ]; then
   # No app-server to ask, or it could not be reached -- a codex session outside
   # monitor mode, a missing Node, a server that is not answering. The rollout scan
@@ -167,10 +196,12 @@ if [ -z "$thread" ]; then
   # single-rollout case it always did, and on a project with history it records
   # nothing, which is what happens today.
   #
-  # ${HOME:-} so an unset HOME under `set -u` is a silent no-op (empty -> the
-  # dir check below fails -> fresh), not an unbound-variable abort (nit).
-  sessions_dir="${HOME:-}/.codex/sessions"
-  if [ -n "${HOME:-}" ] && [ -d "$sessions_dir" ]; then
+  if [ -n "$codex_home" ]; then
+    sessions_dir="$codex_home/sessions"
+  else
+    sessions_dir="${HOME:-}/.codex/sessions"
+  fi
+  if [ -n "${sessions_dir%/.codex/sessions}" ] && [ -d "$sessions_dir" ]; then
     # Distinct thread ids whose session_meta cwd (canonicalized -- codex records
     # the physical cwd while agmsg may hold a symlinked path, #160) matches the
     # project, among the most recent rollouts. Exactly one => unambiguously ours.
@@ -211,26 +242,6 @@ fi
 # codex thread ids are already bare UUIDs (no composite pid form), so record
 # as-is. The project is recorded in its canonical (physical) form so records
 # carry one path spelling regardless of how the caller spelled the argument.
-# Add optional destination metadata without changing thread discovery. Failure
-# to resolve a profile never prevents the existing session record or delivery.
-codex_home="${CODEX_HOME:-${HOME:+$HOME/.codex}}"
-case "$codex_home" in
-  *[[:cntrl:]]*) codex_home="" ;;
-  /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
-  *) codex_home="" ;;
-esac
-if [ -n "$codex_home" ] && [ -d "$codex_home" ]; then
-  codex_home="$(cd -- "$codex_home" 2>/dev/null && pwd -P)" || codex_home=""
-  codex_home="$(agmsg_normalize_project_path "$codex_home")" || codex_home=""
-  case "$codex_home" in
-    *[[:cntrl:]]*) codex_home="" ;;
-    /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
-    *) codex_home="" ;;
-  esac
-else
-  codex_home=""
-fi
-
 agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
 agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" "$codex_home" || true
 

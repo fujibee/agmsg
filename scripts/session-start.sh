@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Hooks and their child operations must not run user recovery notices.
+export AGMSG_DAEMON_NOTICE_SKIP=1
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 

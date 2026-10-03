@@ -64,6 +64,8 @@ ACTIVE_NAME="${4:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Polling and its child operations must never run the user-operation notice.
+export AGMSG_DAEMON_NOTICE_SKIP=1
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 # Warm agmsg_storage_dir's own process-lifetime cache as a PLAIN STATEMENT,

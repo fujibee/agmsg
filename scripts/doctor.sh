@@ -986,6 +986,22 @@ if [ -n "$GLOBAL_WATCH_LINE" ]; then
     _warn "watcher pidfile present but process not running, installation-wide (see the 'watch processes' line above)"
   fi
 fi
+# Daemon health is install-wide, including when Node is unavailable. Read
+# without starting, repairing or registering anything.
+if [ -f "$RUN_DIR/install.db" ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/daemon-state.sh"
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/daemon-seats.sh"
+  agmsg_daemon_read_state
+  if [ "${AGMSGD_DESIRED:-unknown}" = on ] && [ "${AGMSGD_HEALTH:-unknown}" != ready ]; then
+    _warn "$(_redact_text "$(agmsg_daemon_recovery_text)" "$SKILL_DIR")"
+  elif [ "${AGMSGD_HEALTH:-unknown}" = unknown ]; then
+    _warn 'agmsgd: install record could not be read; daemon health is unknown'
+  fi
+  REPORT_BLOCKS="${REPORT_BLOCKS}agmsgd beta: intent=${AGMSGD_DESIRED:-unknown} health=${AGMSGD_HEALTH:-unknown}"$'\n'
+  REPORT_BLOCKS="${REPORT_BLOCKS}$(agmsg_daemon_seat_report status)"$'\n\n'
+fi
 # Orphaned per-seat run/ records (#1507): like the watcher line above, an
 # installation-wide fact -- no --project/--type/--team narrows it. Reported and
 # counted here, never removed (see --fix).
