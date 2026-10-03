@@ -21,10 +21,10 @@ async function privateFile(file) {
   let metadata;
   try { metadata = await lstat(file); }
   catch (error) { if (error?.code === "ENOENT") return null; throw error; }
-  if (metadata.isSymbolicLink()) throw new Error("remote sync config must not be a symbolic link");
-  if (!metadata.isFile()) throw new Error("remote sync config must be a regular file");
+  if (metadata.isSymbolicLink()) throw new Error(`remote sync config must not be a symbolic link: ${file}`);
+  if (!metadata.isFile()) throw new Error(`remote sync config must be a regular file: ${file}`);
   if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
-    throw new Error("remote sync config must not be readable or writable by group or others");
+    throw new Error(`remote sync config must not be readable or writable by group or others: ${file}`);
   }
   return readFile(file);
 }

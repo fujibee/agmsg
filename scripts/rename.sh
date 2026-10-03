@@ -51,6 +51,10 @@ fi
 # Serialize the read-modify-write so a concurrent join/leave/reset on this team
 # can't be clobbered (#141). The team dir exists (checked above).
 if [ "$(agmsg_storage_driver)" = sqlite ]; then
+  # Check local prerequisites before acquiring a persistent recovery lock.
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/delivery-maintenance.sh"
+  agmsg_dm_load || exit 1
   agmsg_lock_acquire "$TEAMS_DIR/$TEAM" manual-recovery || exit 1
 else
   agmsg_lock_acquire "$TEAMS_DIR/$TEAM" || exit 1
@@ -181,9 +185,6 @@ fi
 
 DM_ENABLED=false
 if [ "$(agmsg_storage_driver)" = sqlite ]; then
-  # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/lib/delivery-maintenance.sh"
-  agmsg_dm_load || exit 1
   DM_ENABLED=true
   ARGUMENT=$(agmsg_sqlite_mem "SELECT json_array('$OLD_NAME_SQL','$NEW_NAME_SQL');")
   RECORD=$(agmsg_dm_get "$DB" "$TEAM")

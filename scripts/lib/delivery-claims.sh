@@ -81,13 +81,14 @@ _agmsg_delivery_json_strings_sql() {
 _agmsg_delivery_validate_request_text() (
   local document="$1" quote="'"
   set -o pipefail
+  agmsg_sqlite_warm || exit 13
   printf '%s' "$document" | _agmsg_delivery_validate_utf8 || exit 13
   {
     printf '%s\n' "CREATE TEMP TABLE records(document TEXT NOT NULL
       CHECK(json_valid(document) AND json_type(document)='object'));"
     printf "INSERT INTO records VALUES('%s');\n" "${document//$quote/$quote$quote}"
     _agmsg_delivery_json_strings_sql
-  } | agmsg_sqlite -bail -batch ':memory:' 2>/dev/null | _agmsg_delivery_validate_utf8
+  } | { agmsg_sqlite_warm || exit 13; agmsg_sqlite -bail -batch ':memory:' 2>/dev/null; } | _agmsg_delivery_validate_utf8
 )
 
 # Populate AGMSG_CLAIM_* in this shell. A misspelled fence/TTL is an error,
@@ -118,7 +119,7 @@ agmsg_delivery_parse_request() {
   esac
   local quote="'" escaped rows key value
   escaped="${document//$quote/$quote$quote}"
-  agmsg_sqlite_warm
+  agmsg_sqlite_warm || return 13
   _agmsg_delivery_validate_request_text "$document" || {
     printf 'agmsg delivery: invalid_request\n' >&2; return 13;
   }
@@ -156,7 +157,7 @@ agmsg_delivery_parse_request() {
         SELECT key||'|'||hex(CAST(value AS TEXT))
           FROM request,json_each(document) WHERE key!='ids';
         SELECT 'id|'||hex(value) FROM request,json_each(document,'$.ids');"
-    } | agmsg_sqlite -bail -batch ':memory:'
+    } | { agmsg_sqlite_warm || exit 13; agmsg_sqlite -bail -batch ':memory:'; }
   )" || { printf 'agmsg delivery: invalid_request\n' >&2; return 13; }
   AGMSG_CLAIM_TEAM=""; AGMSG_CLAIM_AGENT=""; AGMSG_CLAIM_OWNER=""
   AGMSG_CLAIM_TOKEN=""; AGMSG_CLAIM_TTL=60; AGMSG_CLAIM_LIMIT=100
@@ -223,21 +224,35 @@ _agmsg_delivery_capture() {
 
 _agmsg_delivery_validate_records() (
   [ -s "$1" ] || exit 0
-  local _record_line _record_quote="'" _record_unescaped
   set -o pipefail
-  agmsg_sqlite_warm
+  agmsg_sqlite_warm || exit 13
   _agmsg_delivery_validate_utf8 <"$1" || exit 13
   {
     printf '%s\n' "CREATE TEMP TABLE records(document TEXT NOT NULL
       CHECK(json_valid(document) AND json_type(document)='object'));"
-    while IFS= read -r _record_line || [ -n "$_record_line" ]; do
-      # JSON1 can truncate a decoded NUL before its text reaches stdout.
-      _record_unescaped="${_record_line//\\\\/}"
-      case "$_record_unescaped" in *'\u0000'*) exit 13 ;; esac
-      printf "INSERT INTO records VALUES('%s');\n" "${_record_line//$_record_quote/$_record_quote$_record_quote}"
-    done <"$1"
+    # Bash 3.2 pattern substitution repeatedly scans long matching records.
+    # Keep this pass byte-oriented and linear instead: raw UTF-8/NUL was
+    # checked above, and SQLite/decoded UTF-8 still validate the result below.
+    LC_ALL=C awk -v quote="'" '
+      {
+        # JSON1 can truncate decoded NUL. Only an odd run of backslashes
+        # before u0000 decodes to NUL; paired backslashes stay literal.
+        if (index($0, "\\u0000")) {
+          escaped=0; size=length($0)
+          for (i=1; i<=size; i++) {
+            character=substr($0,i,1)
+            if (escaped) {
+              if (character=="u" && substr($0,i+1,4)=="0000") exit 13
+              escaped=0
+            } else if (character=="\\") escaped=1
+          }
+        }
+        gsub(quote,quote quote)
+        printf "INSERT INTO records VALUES(%s%s%s);\n",quote,$0,quote
+      }
+    ' <"$1" || exit 13
     _agmsg_delivery_json_strings_sql
-  } | agmsg_sqlite -bail -batch ':memory:' 2>/dev/null | _agmsg_delivery_validate_utf8
+  } | { agmsg_sqlite_warm || exit 13; agmsg_sqlite -bail -batch ':memory:' 2>/dev/null; } | _agmsg_delivery_validate_utf8
 )
 
 _agmsg_delivery_emit_records() {

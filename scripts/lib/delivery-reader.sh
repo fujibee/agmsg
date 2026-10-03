@@ -298,11 +298,8 @@ agmsg_reader_release() {
 # dependency and no shell substitution can reinterpret message text.
 agmsg_reader_json_quote() {
   local quote="'"
-  {
-    printf "SELECT json_quote('"
-    printf '%s' "${1//$quote/$quote$quote}"
-    printf "');\n"
-  } | agmsg_sqlite -bail -batch ':memory:'
+  agmsg_sqlite_warm || return 13
+  printf "SELECT json_quote('%s');\n" "${1//$quote/$quote$quote}" | agmsg_sqlite -bail -batch ':memory:'
 }
 
 agmsg_reader_barrier() {

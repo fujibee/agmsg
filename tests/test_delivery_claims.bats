@@ -156,12 +156,24 @@ _same_id_messages() {
     CREATE TRIGGER fail_commit AFTER INSERT ON delivery_claims BEGIN
       INSERT INTO deferred_failure VALUES(1); END;"
   # Real SQLite deferred constraint fails at COMMIT, after the payload SELECT.
-  agmsg_sqlite() { command sqlite3 -cmd '.timeout 5000' -cmd 'PRAGMA foreign_keys=ON;' "$@"; }
+  # Keep the production wrapper: SQLite 3.53.4's SQL -cmd with -bail can
+  # exit successfully without reading stdin. Enable FK checks in the SQL
+  # stream instead, before BEGIN, and prove the intended failure fired.
+  eval "$(declare -f _sqlite_exec_stdin | sed '1s/_sqlite_exec_stdin/_fixture_sqlite_exec_stdin/')"
+  _sqlite_exec_stdin() {
+    local rc=0
+    _fixture_sqlite_exec_stdin "$1" "PRAGMA foreign_keys=ON; $2" || rc=$?
+    printf '%s\n' "$rc" >"$TEST_SKILL_DIR/sqlite-rc"
+    return "$rc"
+  }
   local rc=0
   storage_claim_unread claims bob owner 60 1 >"$TEST_SKILL_DIR/out" 2>"$TEST_SKILL_DIR/err" || rc=$?
+  [ "$(cat "$TEST_SKILL_DIR/sqlite-rc")" -ne 0 ]
+  grep -q 'FOREIGN KEY constraint failed' "$TEST_SKILL_DIR/err"
   [ "$rc" = 13 ]
   [ ! -s "$TEST_SKILL_DIR/out" ]
   [ "$(_sql 'SELECT COUNT(*) FROM delivery_claims;')" = 0 ]
+  [ "$(_sql 'SELECT COUNT(*) FROM deferred_failure;')" = 0 ]
 }
 
 @test "claims: failed ACK receipt write rolls back exact reads mirror frontier and claims" {
@@ -556,7 +568,7 @@ _intercept_claim_commit() {
     ('message_sent','trailing','claims','alice','bob','plain','now');"
   rows=$(storage_claim_unread claims bob "$owner" 600 1 "$id")
   token=$(_token "$rows")
-  [ "$(_sql 'SELECT hex(msg_id)||":"||hex(owner) FROM delivery_claims;')" = '747261696C696E670A:7265616465720A' ]
+  [ "$(_sql "SELECT hex(msg_id)||':'||hex(owner) FROM delivery_claims;")" = '747261696C696E670A:7265616465720A' ]
   run storage_claim_renew claims bob reader "$token" 600 "$id"
   [ "$status" = 13 ]
   run storage_claim_ack claims bob "$owner" "$token" trailing

@@ -84,7 +84,7 @@ _rename_team_sqlite() {
     fi
     config_before=$(agmsg_dm_hash "$OLD_DIR/config.json")
     updated=$(agmsg_sqlite_mem "SELECT json_set(CAST(readfile('$(agmsg_sql_readfile_path "$OLD_DIR/config.json")') AS TEXT), '\$.name', '$(agmsg_sqlesc "$NEW_TEAM")');")
-    config_after=$(printf '%s\n' "$updated" | agmsg_sha256)
+    config_after=$(agmsg_dm_hash_planned_line "$updated")
     journal_hash=$(agmsg_dm_hash "$OLD_DIR/roster.jsonl")
     roster_sync_hash=$(agmsg_dm_hash "$OLD_DIR/roster-sync.json")
     sync_before=absent; sync_after=absent
@@ -196,7 +196,7 @@ _rename_team_sqlite() {
   fi
   if [ "$(agmsg_dm_hash "$NEW_DIR/config.json")" != "$config_after" ]; then
     updated=$(agmsg_sqlite_mem "SELECT json_set(CAST(readfile('$(agmsg_sql_readfile_path "$NEW_DIR/config.json")') AS TEXT), '\$.name', '$(agmsg_sqlesc "$NEW_TEAM")');")
-    [ "$(printf '%s\n' "$updated" | agmsg_sha256)" = "$config_after" ] || return 1
+    [ "$(agmsg_dm_hash_planned_line "$updated")" = "$config_after" ] || return 1
     agmsg_write_atomic "$NEW_DIR/config.json" "$updated"
   fi
   _sqlite_exec_stdin "$selected" "BEGIN IMMEDIATE; $guard $sql $(agmsg_dm_discard_claims_sql "$OLD_TEAM" "$NEW_TEAM") COMMIT;"

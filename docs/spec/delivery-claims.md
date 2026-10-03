@@ -149,6 +149,13 @@ Every mutating maintenance transaction also checks the exact descriptor,
 token, and team membership before writing. Retired SQL cannot act on a
 replacement team after recovery finishes.
 
+Recovery fingerprints use the SQLite CLI's SHA3-256 over exact file bytes,
+with an explicit `sha3-256:` prefix. Maintenance checks a known input before
+taking a recovery lock and before hashing. A CLI without working `sha3()` is
+refused; external SHA-256 tools remain an E2EE prerequisite only. Missing,
+unreadable, and empty files are distinguished, and an unknown fingerprint
+format cannot be adopted as a recovery operation.
+
 SQLite maintenance opts into manual recovery of its registry locks. Success
 explicitly releases them. An implicit exit, INT, TERM, or killed wrapper keeps
 them: a descendant may still be writing even though the recorded parent is

@@ -6,16 +6,12 @@
 _AGMSG_DELIVERY_MAINTENANCE_SH=1
 _AGMSG_DM_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
-. "$_AGMSG_DM_LIB/hash.sh"
 . "$_AGMSG_DM_LIB/name-encode.sh"
 
 agmsg_dm_load() {
   [ "$(agmsg_storage_driver)" = sqlite ] || return 1
   agmsg_storage_load || return 1
-  if ! agmsg_sha256_usable; then
-    echo "agmsg: delivery maintenance requires a working SHA-256 tool" >&2
-    return 1
-  fi
+  agmsg_dm_hash_probe
 }
 
 agmsg_dm_error() { printf 'agmsg: delivery maintenance: %s\n' "$1" >&2; return 1; }
@@ -24,17 +20,75 @@ agmsg_dm_field() {
   agmsg_sqlite_mem "SELECT json_extract('$(agmsg_sqlesc "$1")', '$.$2');"
 }
 
-# Fingerprints are of exact bytes. No credential-bearing config contents are
-# stored in SQLite descriptors. Symlink inputs are never adopted for recovery.
+# Maintenance uses one fixed algorithm from the SQLite CLI, independently of
+# the external SHA-256 tools required by E2EE. The prefix keeps old or foreign
+# descriptor fingerprints from being mistaken for this recovery contract.
+agmsg_dm_fingerprint_valid() {
+  local digest
+  [ "$1" != absent ] || return 0
+  case "$1" in sha3-256:*) digest="${1#sha3-256:}" ;; *) return 1 ;; esac
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+agmsg_dm_hash_probe() {
+  local probe
+  probe="$(set -o pipefail; agmsg_sqlite_mem "SELECT lower(hex(sha3(X'70726f6265',256)));")" || {
+    agmsg_dm_error 'SQLite CLI SHA3-256 is unavailable'; return 1;
+  }
+  [ "$probe" = 62ee883ee174594990f5551d569e9e8a51995ea49287b3f81a030089c5ff3f4e ] || {
+    agmsg_dm_error 'SQLite CLI SHA3-256 failed its known-input check'; return 1;
+  }
+}
+
+# Fingerprints cover exact bytes, including empty files and trailing newlines.
+# No credential-bearing contents enter descriptors or process arguments.
+# Symlink inputs are never adopted for recovery. Check the digest implementation
+# on every call, rather than trusting an environment-inherited memo.
 agmsg_dm_hash() {
+  local digest path
   [ ! -L "$1" ] || { agmsg_dm_error 'symbolic-link state is not recoverable'; return 1; }
   if [ ! -e "$1" ]; then printf 'absent\n'; return 0; fi
   [ -f "$1" ] || { agmsg_dm_error 'expected a regular state file'; return 1; }
-  agmsg_sha256 < "$1"
+  agmsg_dm_hash_probe || return 1
+  path="$(agmsg_sql_readfile_path "$1")" || return 1
+  digest="$(set -o pipefail; agmsg_sqlite_mem "SELECT CASE WHEN typeof(bytes)='blob'
+    THEN lower(hex(sha3(bytes,256))) ELSE '' END
+    FROM (SELECT readfile('$path') AS bytes);")" || return 1
+  agmsg_dm_fingerprint_valid "sha3-256:$digest" || {
+    agmsg_dm_error 'state file could not be fingerprinted'; return 1;
+  }
+  printf 'sha3-256:%s\n' "$digest"
+}
+
+# Hash the exact line agmsg_write_atomic will publish. This shell-function
+# argument never becomes an external process argument; only SQL stdin carries
+# the planned contents. A BLOB literal avoids the CLI normalizing CRLF in SQL
+# text lines. No extra credential-bearing file is created.
+agmsg_dm_hash_planned_line() {
+  local digest bytes
+  agmsg_dm_hash_probe || return 1
+  bytes="$(set -o pipefail; printf '%s\n' "$1" | LC_ALL=C od -An -v -tx1 | LC_ALL=C tr -d '[:space:]')" || return 1
+  case "$bytes" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ $(( ${#bytes} % 2 )) -eq 0 ] || return 1
+  digest="$(
+    set -o pipefail
+    printf "SELECT lower(hex(sha3(X'%s',256)));\n" "$bytes" |
+      agmsg_sqlite_mem -bail -batch
+  )" || return 1
+  agmsg_dm_fingerprint_valid "sha3-256:$digest" || {
+    agmsg_dm_error 'planned state could not be fingerprinted'; return 1;
+  }
+  printf 'sha3-256:%s\n' "$digest"
 }
 
 agmsg_dm_expect() {
-  [ "$(agmsg_dm_hash "$1")" = "$2" ] || {
+  local actual
+  agmsg_dm_fingerprint_valid "$2" || {
+    agmsg_dm_error 'unsupported state fingerprint'; return 1;
+  }
+  actual="$(agmsg_dm_hash "$1")" || return 1
+  [ "$actual" = "$2" ] || {
     agmsg_dm_error 'state differs from the recorded operation; refusing recovery'; return 1;
   }
 }
@@ -117,7 +171,7 @@ agmsg_dm_begin() {
 }
 
 agmsg_dm_adopt() {
-  local db="$1" record="$2" op="$3" team="$4" arg="$5" descriptor
+  local db="$1" record="$2" op="$3" team="$4" arg="$5" descriptor fields field fingerprint
   descriptor="$(agmsg_dm_field "$record" descriptor)" || return 1
   [ "$(agmsg_dm_field "$descriptor" version)" = 1 ] &&
     [ "$(agmsg_dm_field "$descriptor" operation)" = "$op" ] &&
@@ -128,6 +182,33 @@ agmsg_dm_adopt() {
   _sqlite_delivery_token "$(agmsg_dm_field "$descriptor" nonce)" || {
     agmsg_dm_error 'invalid operation nonce'; return 1;
   }
+  case "$op" in
+    rename-agent) fields='config_before config_after journal_before journal_after' ;;
+    rename-team) fields='config_before config_after journal roster_sync' ;;
+    migrate-team-store) fields='config_before config_after' ;;
+    delete-team) fields='config journal roster_sync' ;;
+    *) agmsg_dm_error 'unsupported maintenance operation'; return 1 ;;
+  esac
+  for field in $fields; do
+    fingerprint="$(agmsg_dm_field "$descriptor" "$field")" || return 1
+    agmsg_dm_fingerprint_valid "$fingerprint" || {
+      agmsg_dm_error 'unsupported state fingerprint'; return 1;
+    }
+    case "$field" in
+      config|config_before|config_after)
+        [ "$fingerprint" != absent ] || { agmsg_dm_error 'missing config fingerprint'; return 1; } ;;
+    esac
+  done
+  # The optional Node sync-config plan has its own unchanged SHA-256 contract.
+  # Validate both ends even if its source directory has already disappeared.
+  if [ "$op" = rename-team ]; then
+    for field in sync_before sync_after; do
+      fingerprint="$(agmsg_dm_field "$descriptor" "$field")" || return 1
+      [ "$fingerprint" != absent ] || continue
+      [ "${#fingerprint}" -eq 64 ] || { agmsg_dm_error 'invalid sync fingerprint'; return 1; }
+      case "$fingerprint" in *[!0-9a-f]*) agmsg_dm_error 'invalid sync fingerprint'; return 1 ;; esac
+    done
+  fi
   AGMSG_DM_DB="$db"
   AGMSG_DM_DESCRIPTOR="$descriptor"
   AGMSG_DM_TOKEN="$(agmsg_dm_field "$record" token)"

@@ -36,11 +36,12 @@ agmsg_validate_team_name "$TEAM" || exit 1
 
 CONFIG="$CONNECTION_ROOT/teams/$TEAM/config.json"
 [ -f "$CONFIG" ] || { echo "Team not found: $TEAM" >&2; exit 1; }
-# The lock covers admission/copy/publication/deletion, not only config flip.
-agmsg_lock_acquire "$CONNECTION_ROOT/teams/$TEAM" manual-recovery || exit 1
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/delivery-maintenance.sh"
 agmsg_dm_load || exit 1
+# Refuse an unsupported SQLite CLI before leaving a manual-recovery lock.
+# The lock covers admission/copy/publication/deletion, not only config flip.
+agmsg_lock_acquire "$CONNECTION_ROOT/teams/$TEAM" manual-recovery || exit 1
 
 SHARED="$(_agmsg_runtime_db_path)"
 DEST="$(agmsg_storage_dir)/teams/$TEAM/messages.db"
@@ -231,7 +232,7 @@ if [ "${AGMSG_DM_FOUND:?maintenance result missing}" = false ]; then
   fi
   CONFIG_BEFORE=$(agmsg_dm_hash "$CONFIG")
   UPDATED=$(agmsg_sqlite_mem "SELECT json_set(CAST(readfile('$(agmsg_sql_readfile_path "$CONFIG")') AS TEXT), '\$.drivers.partition', 'per-team');")
-  CONFIG_AFTER=$(printf '%s\n' "$UPDATED" | agmsg_sha256)
+  CONFIG_AFTER=$(agmsg_dm_hash_planned_line "$UPDATED")
   DESCRIPTOR=$(agmsg_sqlite_mem "SELECT json_object(
     'version',1,'nonce',lower(hex(randomblob(32))),'operation','migrate-team-store',
     'team','$(agmsg_sqlesc "$TEAM")','argument','per-team',
@@ -406,7 +407,7 @@ incomplete=$(_missing_from_dest) || exit 1
 agmsg_dm_reservations_clear "$TEAM" || exit 1
 if [ "$(agmsg_dm_hash "$CONFIG")" != "$CONFIG_AFTER" ]; then
   UPDATED=$(agmsg_sqlite_mem "SELECT json_set(CAST(readfile('$(agmsg_sql_readfile_path "$CONFIG")') AS TEXT), '\$.drivers.partition', 'per-team');")
-  [ "$(printf '%s\n' "$UPDATED" | agmsg_sha256)" = "$CONFIG_AFTER" ] || exit 1
+  [ "$(agmsg_dm_hash_planned_line "$UPDATED")" = "$CONFIG_AFTER" ] || exit 1
   agmsg_write_atomic "$CONFIG" "$UPDATED"
 fi
 # Repeat containment immediately before deleting source rows. Ordinary sends

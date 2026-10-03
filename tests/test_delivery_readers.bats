@@ -33,6 +33,18 @@ unread() {
   bash -c '. "$1/lib/storage.sh"; agmsg_storage_load; storage_list_unread team alice' _ "$SCRIPTS"
 }
 claims() { sqlite3 "$DB" 'SELECT COUNT(*) FROM delivery_claims;'; }
+assert_no_watch_payload_diagnostics() {
+  local marker diagnostic
+  for marker in "$@"; do
+    for diagnostic in "$TEST_SKILL_DIR/err" "$TEST_SKILL_DIR"/run/watch.*.log*; do
+      [ -f "$diagnostic" ] || continue
+      if grep -qF "$marker" "$diagnostic"; then
+        printf 'message body reached watch diagnostics\n'
+        return 1
+      fi
+    done
+  done
+}
 wait_file() {
   local i
   for i in $(seq 1 300); do [ -e "$1" ] && return 0; sleep 0.05; done
@@ -532,6 +544,7 @@ SH
     >&- 2>"$TEST_SKILL_DIR/err" || rc=$?
   [ "$rc" = 0 ]
   grep -qF 'write outcome UNKNOWN' "$TEST_SKILL_DIR/err"
+  assert_no_watch_payload_diagnostics first-attempted second-attempted third-attempted
   [ "$(claims)" = 3 ]
   [ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM delivery_ack_receipts;')" = 0 ]
   [ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM events WHERE type='message_read';")" = 0 ]
@@ -544,17 +557,116 @@ SH
   send_one attempted-prefix
   send_one ctrl:despawn
   send_one untouched-tail
+  # The tail exercises both the short control ID and the >512-hex-digit
+  # decoder pipeline, preserving opaque trailing newlines exactly.
+  local tail_id tail_hex
+  printf -v tail_id '%0300d' 0
+  tail_id="$tail_id"$'\nopaque-tail\n'
+  tail_hex="$(printf '%s' "$tail_id" | od -An -v -t x1 | tr -d ' \n' | tr 'a-f' 'A-F')"
+  sqlite3 "$DB" "UPDATE events SET id=CAST(X'$tail_hex' AS TEXT)
+    WHERE type='message_sent' AND body='untouched-tail';"
+  [ "$(sqlite3 "$DB" "SELECT hex(id) FROM events WHERE type='message_sent' AND body='untouched-tail';")" = "$tail_hex" ]
   local rc=0
   AGMSG_WATCH_INTERVAL=60 bash "$SCRIPTS/watch.sh" fixture "$PROJ" claude-code alice \
     >&- 2>"$TEST_SKILL_DIR/err" || rc=$?
   [ "$rc" = 0 ]
   grep -qF 'write outcome UNKNOWN' "$TEST_SKILL_DIR/err"
-  [ "$(claims)" = 1 ]
+  assert_no_watch_payload_diagnostics attempted-prefix ctrl:despawn untouched-tail
+  local retained_count
+  retained_count="$(claims)"
+  [ "$retained_count" = 1 ] || {
+    printf 'serial UNKNOWN retained claims: expected=1 actual=%s\n' "$retained_count"
+    # Counts and known error categories only: never print message bodies,
+    # opaque IDs, tokens, or installation paths into CI failure diagnostics.
+    sqlite3 "$DB" "SELECT 'active='||COUNT(*)||',min_ttl='||COALESCE(MIN(c.expires_at-strftime('%s','now')),0)||
+      ',attempted='||COALESCE(SUM(e.body='attempted-prefix'),0)||
+      ',control='||COALESCE(SUM(e.body='ctrl:despawn'),0)||
+      ',tail='||COALESCE(SUM(e.body='untouched-tail'),0)
+      FROM delivery_claims c JOIN events e ON e.id=c.msg_id WHERE e.type='message_sent';
+      SELECT 'receipts='||COUNT(*) FROM delivery_ack_receipts;
+      SELECT 'reads='||COUNT(*) FROM events WHERE type='message_read';"
+    local reason
+    for reason in 'invalid_claim' 'invalid_arguments' 'runtime_error' 'could not release' \
+      'Bad file descriptor' 'write error' 'write outcome UNKNOWN' 'database is locked'; do
+      if grep -qF "$reason" "$TEST_SKILL_DIR/err"; then
+        printf 'stderr category: %s\n' "$reason"
+      fi
+    done
+    return 1
+  }
   [ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM delivery_ack_receipts;')" = 0 ]
+  [ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM events WHERE type='message_read';")" = 0 ]
   [ "$(sqlite3 "$DB" "SELECT e.body FROM delivery_claims c JOIN events e ON e.id=c.msg_id WHERE e.type='message_sent';")" = attempted-prefix ]
   local remaining
   remaining="$(unread)"
   [[ "$remaining" == *attempted-prefix* && "$remaining" == *ctrl:despawn* && "$remaining" == *untouched-tail* ]] || return 1
+}
+
+@test "claimed watch: failed last serial write has no tail and cannot disclose through diagnostics" {
+  source "$SCRIPTS/lib/storage.sh"; agmsg_storage_load
+  storage_init team >/dev/null
+  insert_reader_event_exact "$DB" last-serial-id team $'sender\r\nheader' alice \
+    last-serial-attempted '2026-10-03T00:00:00Z'
+  fixture_override <<'SH'
+eval "$(declare -f agmsg_reader_parse | sed '1s/agmsg_reader_parse/_serial_real_parse/')"
+agmsg_reader_parse() {
+  _serial_real_parse "$@" || return $?
+  [ "$2" != watch-group ] || printf '%s\n' "$AGMSG_READER_GROUP_KIND" > "$SKILL_DIR/prepared-kind"
+}
+SH
+  local rc=0
+  AGMSG_WATCH_INTERVAL=60 bash "$SCRIPTS/watch.sh" fixture "$PROJ" claude-code alice \
+    >&- 2>"$TEST_SKILL_DIR/err" || rc=$?
+  [ "$rc" = 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/prepared-kind")" = rows ]
+  grep -qF 'write outcome UNKNOWN' "$TEST_SKILL_DIR/err"
+  assert_no_watch_payload_diagnostics last-serial-attempted
+  [ "$(claims)" = 1 ]
+  [ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM delivery_ack_receipts;')" = 0 ]
+  [ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM events WHERE type='message_read';")" = 0 ]
+  [[ "$(unread)" == *last-serial-attempted* ]] || return 1
+}
+
+@test "claimed watch: a failed UNKNOWN buffer drain retains all leases without logging or teardown" {
+  send_one failed-drain-attempted
+  send_one ctrl:despawn
+  send_one failed-drain-tail
+  fixture_override <<'SH'
+_fixture_emit_attempted=0
+_fixture_drain_failures=0
+printf() {
+  if [ "$_fixture_emit_attempted" = 1 ] && [ "$#" = 2 ] &&
+     [ "$1" = '%s' ] && [ -z "$2" ]; then
+    _fixture_drain_failures=$((_fixture_drain_failures + 1))
+    : > "$SKILL_DIR/drain-failed-$_fixture_drain_failures"
+    return 1
+  fi
+  if [ "$#" = 2 ] && [ "$1" = '%s' ] && [[ "$2" == *' | failed-drain-attempted'* ]]; then
+    _fixture_emit_attempted=1
+  fi
+  builtin printf "$@"
+}
+agmsg_delivery_claim_release() { : > "$SKILL_DIR/release-attempted"; return 13; }
+SH
+  cat > "$SCRIPTS/reset.sh" <<'SH'
+#!/usr/bin/env bash
+: > "$(cd "$(dirname "$0")/.." && pwd)/reset-attempted"
+SH
+  local rc=0
+  AGMSG_WATCH_INTERVAL=60 bash "$SCRIPTS/watch.sh" fixture "$PROJ" claude-code alice \
+    >&- 2>"$TEST_SKILL_DIR/err" || rc=$?
+  [ "$rc" = 0 ]
+  [ -f "$TEST_SKILL_DIR/drain-failed-1" ]
+  [ ! -e "$TEST_SKILL_DIR/drain-failed-2" ]
+  [ ! -e "$TEST_SKILL_DIR/release-attempted" ]
+  [ ! -e "$TEST_SKILL_DIR/reset-attempted" ]
+  assert_no_watch_payload_diagnostics failed-drain-attempted ctrl:despawn failed-drain-tail 'write outcome UNKNOWN'
+  [ "$(claims)" = 3 ]
+  [ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM delivery_ack_receipts;')" = 0 ]
+  [ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM events WHERE type='message_read';")" = 0 ]
+  local remaining
+  remaining="$(unread)"
+  [[ "$remaining" == *failed-drain-attempted* && "$remaining" == *ctrl:despawn* && "$remaining" == *failed-drain-tail* ]] || return 1
 }
 
 @test "claimed watch: uncertain serial ACK keeps current and releases untouched tail without teardown" {

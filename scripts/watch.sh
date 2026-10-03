@@ -1270,6 +1270,12 @@ _watch_claimed_handoff() {
   fi
   printf '%s' "$payload" || emit_rc=$?
   if [ "$emit_rc" -ne 0 ]; then
+    # Darwin stdio can retain bytes after a failed write. Bash 3.2 even
+    # flushes stdout during printf -v, so drain to a private sink before
+    # decoding tail IDs or redirecting stdout into a diagnostic. Use a
+    # nonempty format: printf '' can return without flushing. If the drain
+    # itself fails, keep every lease and stop without risking another write.
+    printf '%s' '' >/dev/null || return 99
     _watch_release_unattempted "$tail"
     watch_log "$pair_team/$pair_agent: write outcome UNKNOWN; keeping the reservation until expiry. Later redelivery is possible."
     return 99

@@ -416,3 +416,85 @@ _claim_cli() { bash "$SCRIPTS/delivery-claims.sh" "$1" <"$TEST_SKILL_DIR/request
   agmsg_delivery_claim_unread alpha bob reader 60 1 >"$TEST_SKILL_DIR/out"
   [ "$(cat "$TEST_SKILL_DIR/out")" = "$record" ]
 }
+
+@test "claim facade: NUL escape parity is exact in keys values and mixed candidates" {
+  _load_claim_fixture
+  local slashes='' count field record rc
+  for count in 0 1 2 3 4 5 6 7 8; do
+    for field in key value; do
+      if [ "$field" = key ]; then
+        printf -v record '{"before":"\\\\u0000","%su0000":"ok","after":"\\\\u0000"}' "$slashes"
+      else
+        printf -v record '{"before":"\\\\u0000","body":"%su0000","after":"\\\\u0000"}' "$slashes"
+      fi
+      storage_claim_unread() { printf '%s\n' "$record"; }
+      rc=0
+      agmsg_delivery_claim_unread alpha bob reader 60 1 >"$TEST_SKILL_DIR/out" 2>"$TEST_SKILL_DIR/err" || rc=$?
+      if [ $((count % 2)) -eq 0 ]; then
+        [ "$rc" = 0 ]
+        printf '%s\n' "$record" >"$TEST_SKILL_DIR/expected"
+        cmp "$TEST_SKILL_DIR/expected" "$TEST_SKILL_DIR/out"
+      else
+        [ "$rc" = 13 ]; [ ! -s "$TEST_SKILL_DIR/out" ]
+        grep -q invalid_record_framing "$TEST_SKILL_DIR/err"
+      fi
+    done
+    slashes="$slashes\\"
+  done
+}
+
+@test "claim facade: large sparse and dense escaped records retain every byte" {
+  _load_claim_fixture
+  local shape
+  for shape in sparse dense; do
+    if [ "$shape" = sparse ]; then
+      {
+        printf 'wire payload\n\t\047\\'
+        awk 'BEGIN { for (i=0; i<150000; i++) printf "x" }'
+      } >"$TEST_SKILL_DIR/body"
+    else
+      awk 'BEGIN { for (i=0; i<15000; i++) printf "\047\\\n\t界" }' >"$TEST_SKILL_DIR/body"
+    fi
+    jq -Rsc '{id:"one",body:.,literal:"\\u0000",extra:[{key:"first"},{key:"second"}]}' \
+      <"$TEST_SKILL_DIR/body" >"$TEST_SKILL_DIR/records"
+    [ "$(wc -c <"$TEST_SKILL_DIR/records")" -gt 150000 ]
+    storage_claim_unread() { cat "$TEST_SKILL_DIR/records"; }
+    agmsg_delivery_claim_unread alpha bob reader 60 1 >"$TEST_SKILL_DIR/out"
+    cmp "$TEST_SKILL_DIR/records" "$TEST_SKILL_DIR/out"
+  done
+}
+
+@test "claim facade: invalid later record cannot disclose a valid prefix" {
+  _load_claim_fixture
+  mkdir -p "$TEST_SKILL_DIR/capture"
+  export TMPDIR="$TEST_SKILL_DIR/capture"
+  local bad rc
+  for bad in '[]' 'not-json' ' ' '{"body":"before\u0000after"}' \
+    '{"extra":{"same":1,"same":2}}' '{"body":"\ud800"}' $'{"body":"\377"}'; do
+    storage_claim_unread() { printf '%s\n' '{"body":"valid prefix"}' "$bad"; }
+    rc=0
+    agmsg_delivery_claim_unread alpha bob reader 60 1 >"$TEST_SKILL_DIR/out" 2>"$TEST_SKILL_DIR/err" || rc=$?
+    [ "$rc" = 13 ]; [ ! -s "$TEST_SKILL_DIR/out" ]
+    grep -q invalid_record_framing "$TEST_SKILL_DIR/err"
+    [ -z "$(find "$TMPDIR" -type f -print)" ]
+  done
+}
+
+@test "claim facade: SQL encoder failure cannot be masked by the validation footer" {
+  _load_claim_fixture
+  mkdir -p "$TEST_SKILL_DIR/capture"
+  export TMPDIR="$TEST_SKILL_DIR/capture"
+  storage_claim_unread() { printf '%s\n' '{"body":"private payload"}'; }
+  awk() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = "quote='" ]; then
+      command awk "$@" || return $?
+      return 13
+    fi
+    command awk "$@"
+  }
+  local rc=0
+  agmsg_delivery_claim_unread alpha bob reader 60 1 >"$TEST_SKILL_DIR/out" 2>"$TEST_SKILL_DIR/err" || rc=$?
+  [ "$rc" = 13 ]; [ ! -s "$TEST_SKILL_DIR/out" ]
+  grep -q invalid_record_framing "$TEST_SKILL_DIR/err"
+  [ -z "$(find "$TMPDIR" -type f -print)" ]
+}

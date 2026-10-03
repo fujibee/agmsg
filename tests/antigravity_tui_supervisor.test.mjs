@@ -1192,13 +1192,20 @@ sys.exit(os.waitstatus_to_exitcode(status))
 
 test('a claim refusal shows the pid of the holding supervisor and the stop command', () => {
   runPython(`
-import importlib.util, json, os, tempfile
+import importlib.util, json, os, shutil, tempfile
 from pathlib import Path
 spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 root = Path(tempfile.mkdtemp())
+# proc_start resolves its native macOS helper under ROOT; keep the real helper
+# in this disposable installation before redirecting reservation state there.
+relative_helper = Path('scripts/drivers/types/antigravity/mac-process-info.py')
+helper = module.ROOT / relative_helper
+target_helper = root / relative_helper
+target_helper.parent.mkdir(parents=True)
+shutil.copyfile(helper, target_helper)
 module.ROOT = root
 (root / 'run').mkdir()
 project = root / 'proj'

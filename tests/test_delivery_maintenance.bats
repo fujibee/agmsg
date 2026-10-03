@@ -105,6 +105,150 @@ recover_fixture_locks() {
   done
 }
 
+@test "windows-native: maintenance fingerprints preserve exact bytes without external SHA tools" {
+  local dir="$TEST_SKILL_DIR/no-digests" tool file expected actual
+  mkdir "$dir"
+  for tool in shasum sha256sum openssl; do
+    printf '#!/bin/sh\nexit 1\n' > "$dir/$tool"
+    chmod +x "$dir/$tool"
+  done
+  export PATH="$dir:$PATH"
+  source "$SCRIPTS/lib/delivery-maintenance.sh"
+  agmsg_dm_load || return 1
+  : > "$TEST_SKILL_DIR/empty"
+  printf '雪 é 🐝\r\n\000end\n\n' > "$TEST_SKILL_DIR/bytes"
+  printf 'line' > "$TEST_SKILL_DIR/no-lf"
+  printf 'line\n' > "$TEST_SKILL_DIR/lf"
+  for file in empty bytes no-lf lf; do
+    expected=$(node -e 'const fs=require("fs"),c=require("crypto");console.log("sha3-256:"+c.createHash("sha3-256").update(fs.readFileSync(process.argv[1])).digest("hex"))' "$TEST_SKILL_DIR/$file") || return 1
+    actual=$(agmsg_dm_hash "$TEST_SKILL_DIR/$file") || return 1
+    [ "$actual" = "$expected" ] || return 1
+  done
+  [ "$(agmsg_dm_hash "$TEST_SKILL_DIR/no-lf")" != "$(agmsg_dm_hash "$TEST_SKILL_DIR/lf")" ] || return 1
+  [ "$(agmsg_dm_hash "$TEST_SKILL_DIR/missing")" = absent ] || return 1
+  local planned=$'{"note":"雪\'s"}\r\n'
+  printf '%s\n' "$planned" > "$TEST_SKILL_DIR/planned"
+  [ "$(agmsg_dm_hash_planned_line "$planned")" = "$(agmsg_dm_hash "$TEST_SKILL_DIR/planned")" ]
+}
+
+@test "delivery maintenance: SHA3 probe refuses wrong output and nonzero status without pipefail" {
+  source "$SCRIPTS/lib/delivery-maintenance.sh"
+  agmsg_sqlite_mem() { printf '%s\n' "$DM_PROBE_OUTPUT"; return "$DM_PROBE_STATUS"; }
+  local mode
+  for mode in wrong empty extra failed; do
+    DM_PROBE_OUTPUT=62ee883ee174594990f5551d569e9e8a51995ea49287b3f81a030089c5ff3f4e
+    DM_PROBE_STATUS=0
+    case "$mode" in
+      wrong) DM_PROBE_OUTPUT=0000000000000000000000000000000000000000000000000000000000000000 ;;
+      empty) DM_PROBE_OUTPUT='' ;;
+      extra) DM_PROBE_OUTPUT+=$'\nextra' ;;
+      failed) DM_PROBE_STATUS=42 ;;
+    esac
+    run bash_probe_without_pipefail
+    [ "$status" -ne 0 ] || return 1
+  done
+}
+
+bash_probe_without_pipefail() { set +o pipefail; agmsg_dm_hash_probe; }
+
+@test "delivery maintenance: unreadable file or failed digest cannot emit a fingerprint" {
+  source "$SCRIPTS/lib/delivery-maintenance.sh"
+  agmsg_sqlite_mem() {
+    case "$*" in
+      *X\'70726f6265\'*) printf '%s\n' 62ee883ee174594990f5551d569e9e8a51995ea49287b3f81a030089c5ff3f4e ;;
+      *) printf '%s' "$DM_HASH_OUTPUT"; return "$DM_HASH_STATUS" ;;
+    esac
+  }
+  local kind
+  for kind in null malformed failed; do
+    DM_HASH_STATUS=0
+    DM_HASH_OUTPUT=''
+    case "$kind" in
+      malformed) DM_HASH_OUTPUT=broken ;;
+      failed) DM_HASH_OUTPUT=62ee883ee174594990f5551d569e9e8a51995ea49287b3f81a030089c5ff3f4e; DM_HASH_STATUS=42 ;;
+    esac
+    run agmsg_dm_hash "$CONFIG"
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" != *sha3-256:* ]] || return 1
+    run agmsg_dm_hash_planned_line '{"planned":true}'
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" != *sha3-256:* ]] || return 1
+  done
+}
+
+@test "delivery maintenance: planned hash rejects failed byte encoders after complete output" {
+  source "$SCRIPTS/lib/delivery-maintenance.sh"
+  # The real SQLite probe must pass before reaching the fixture's encoder.
+  agmsg_dm_hash_probe || return 1
+  od() { command od "$@"; return 42; }
+  run agmsg_dm_hash_planned_line '{"planned":true}'
+  [ "$status" -ne 0 ] || return 1
+  [ -z "$output" ] || return 1
+  unset -f od
+  tr() {
+    command tr "$@" || return 1
+    # Leave the SQLite helper's CR normalization intact; fail only the encoder.
+    [ "$*" != '-d [:space:]' ]
+  }
+  run agmsg_dm_hash_planned_line '{"planned":true}'
+  [ "$status" -ne 0 ] || return 1
+  [ -z "$output" ]
+}
+
+@test "delivery maintenance: symlink and nonregular state cannot match a file fingerprint" {
+  source "$SCRIPTS/lib/delivery-maintenance.sh"
+  local expected
+  expected=$(agmsg_dm_hash "$CONFIG") || return 1
+  ln -s "$CONFIG" "$TEST_SKILL_DIR/config-link"
+  run agmsg_dm_expect "$TEST_SKILL_DIR/config-link" "$expected"
+  [ "$status" -ne 0 ] || return 1
+  run agmsg_dm_hash "$TEST_SKILL_DIR/teams"
+  [ "$status" -ne 0 ]
+}
+
+@test "delivery maintenance: unsupported SHA3 refuses rename and migration before recovery locks" {
+  fault_sql_once 'sha3(' '' false
+  local command
+  for command in rename migrate; do
+    rm -f "$DM_FAULT_MARKER"
+    if [ "$command" = rename ]; then
+      run bash "$SCRIPTS/rename.sh" alpha ann renamed
+    else
+      run bash "$SCRIPTS/internal/migrate-team-store.sh" alpha
+    fi
+    [ "$status" -ne 0 ] || return 1
+    [ -f "$DM_FAULT_MARKER" ] || return 1
+    [ ! -e "$TEST_SKILL_DIR/teams/alpha/.config.lock" ] || return 1
+    [ ! -e "$TEST_SKILL_DIR/teams/alpha/.config.lock.holder" ] || return 1
+    [ "$(jq -r '.agents.ann.member_id' "$CONFIG")" != null ] || return 1
+    [ ! -f "$TEST_SKILL_DIR/db/teams/alpha/messages.db" ] || return 1
+  done
+}
+
+@test "delivery maintenance: foreign or absent config fingerprints cannot resume an operation" {
+  fault_config_publication
+  run bash "$SCRIPTS/rename.sh" alpha ann renamed
+  [ "$status" -ne 0 ] || return 1
+  local original candidate
+  original=$(sqlite3 "$DB" 'SELECT descriptor FROM delivery_maintenance LIMIT 1;')
+  [ -n "$original" ] || return 1
+  cp "$CONFIG" "$TEST_SKILL_DIR/config.before-retry"
+  cp "$JOURNAL" "$TEST_SKILL_DIR/journal.before-retry"
+  for candidate in absent 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef; do
+    sqlite3 "$DB" "UPDATE delivery_maintenance SET descriptor=json_set('$(agmsg_sqlesc "$original")','\$.config_after','$candidate');"
+    recover_fixture_locks || return 1
+    run bash "$SCRIPTS/rename.sh" alpha ann renamed
+    [ "$status" -ne 0 ] || return 1
+    cmp "$CONFIG" "$TEST_SKILL_DIR/config.before-retry" || return 1
+    cmp "$JOURNAL" "$TEST_SKILL_DIR/journal.before-retry" || return 1
+    [ "$(sqlite3 "$DB" 'SELECT count(*) FROM delivery_maintenance;')" = 1 ] || return 1
+  done
+  sqlite3 "$DB" "UPDATE delivery_maintenance SET descriptor='$(agmsg_sqlesc "$original")';"
+  recover_fixture_locks
+  run bash "$SCRIPTS/rename.sh" alpha ann renamed
+  [ "$status" -eq 0 ]
+}
+
 @test "delivery maintenance: agent rename refuses a live claim before registry writes" {
   claim_message
   cp "$CONFIG" "$TEST_SKILL_DIR/config.before"
@@ -415,11 +559,37 @@ SH
   recover_fixture_locks
   run bash "$SCRIPTS/internal/migrate-team-store.sh" alpha
   [ "$status" -ne 0 ]
+  [ -f "$DM_FAULT_MARKER" ] || {
+    printf 'migration failed before the staged-copy fault fired: status=%s\n' "$status"
+    return 1
+  }
   [ ! -e "$TEST_SKILL_DIR/db/teams/alpha" ]
   [ "$(sqlite3 "$DB" 'SELECT count(*) FROM delivery_maintenance;')" = 1 ]
   recover_fixture_locks
   run bash "$SCRIPTS/internal/migrate-team-store.sh" alpha
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || {
+    # Keep evidence for a non-reproducing full-suite failure without exposing
+    # paths, tokens, descriptors, config contents, or raw command output.
+    printf 'empty-stage resume failed: status=%s\n' "$status"
+    local stage entry stages=0 files=0 published=0 lock=0 holder=0 reason
+    for stage in "$TEST_SKILL_DIR/db/teams"/.delivery-migrate-*; do
+      [ -d "$stage" ] || continue
+      stages=$((stages + 1))
+      for entry in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
+        if [ -e "$entry" ] || [ -L "$entry" ]; then files=$((files + 1)); fi
+      done
+    done
+    if [ -f "$TEST_SKILL_DIR/db/teams/alpha/messages.db" ]; then published=1; fi
+    if [ -d "$TEST_SKILL_DIR/teams/alpha/.config.lock" ]; then lock=1; fi
+    if [ -f "$TEST_SKILL_DIR/teams/alpha/.config.lock.holder" ]; then holder=1; fi
+    printf 'stages=%s files=%s published=%s lock=%s holder=%s\n' "$stages" "$files" "$published" "$lock" "$holder"
+    sqlite3 "$DB" "SELECT 'source_barriers='||COUNT(*) FROM delivery_maintenance;" 2>/dev/null || true
+    for reason in 'database is locked' 'database is full' 'out of memory' 'unsupported state fingerprint' \
+      'team identity/configuration differs' 'unbound partial staged schema' 'containment query failed'; do
+      if [[ "$output" == *"$reason"* ]]; then printf 'stderr category: %s\n' "$reason"; fi
+    done
+    return 1
+  }
   [ "$(sqlite3 "$TEST_SKILL_DIR/db/teams/alpha/messages.db" 'PRAGMA journal_mode;')" = wal ]
 }
 
