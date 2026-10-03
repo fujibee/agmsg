@@ -996,8 +996,8 @@ _agmsg_placement_claimed_by() {
 # second process can carry the same sid (a resumed or forked session), so the
 # owner is compared whole against <instance>, the composite the claim itself
 # used; peeling the pid off made another live process's seat read as ours.
-# An owner that is only a bare sid cannot be shown not to be another process's,
-# so it is kept.
+# An owner, or an instance, that is only a bare sid cannot be shown not to be
+# another process's, so the record is kept.
 #
 # THIS TEAM, decided exactly: the candidates are the record paths of the team's
 # registered members, computed through agmsg_spawn_path -- never by cutting a
@@ -1044,7 +1044,11 @@ EOF
       absent) ;;
       ok)
         owner="${lockread#*$'\t'}"
-        [ "$owner" = "$instance" ] || continue ;;
+        [ "$owner" = "$instance" ] || continue
+        # A bare owner and a bare instance are equal and prove nothing: two
+        # processes with the same sid look identical. Only a composite pair
+        # says whose the lock is. (A missing check reads as "not composite".)
+        agmsg_instance_is_composite "$instance" 2>/dev/null || continue ;;
       *) continue ;;
     esac
     # The naming mark lives in the seat's role-session record, which is keyed by

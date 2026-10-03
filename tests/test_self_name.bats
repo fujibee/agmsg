@@ -350,6 +350,17 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   grep -q 'already recorded as' <<<"$output"
   [ -z "$(_placement team jack)" ]
   [ "$(_placement team2 iris)" = 'tmux:/tmp/s:%7' ]
+
+  # Owner and instance both BARE: equal, and so no proof of whose the lock is.
+  _join_unnamed team lena
+  _join_unnamed team mark
+  agmsg_write_atomic "$(agmsg_spawn_path team lena)" "$(printf 'tmux:/tmp/s:%%8\t/tmp/p\tclaude-code')"
+  printf 'shared\n' > "$(actas_lock_path team lena)"
+  _under_tmux /tmp/s 4242 %8
+  run agmsg_terminal_name_self_safe shared team mark /tmp/p claude-code record retire_previous shared
+  grep -q 'already recorded as' <<<"$output"
+  [ -z "$(_placement team mark)" ]
+  [ "$(_placement team lena)" = 'tmux:/tmp/s:%8' ]
 }
 
 # --- order independence with the existing paths -------------------------------------
