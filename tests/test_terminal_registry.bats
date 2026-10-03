@@ -562,7 +562,7 @@ EOF
   _install_external_terminal
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%4"
 
-  [ "$(agmsg_terminal_candidates)" = "$(printf 'claude-desktop\norca\nherdr\nprobe\ntmux\nplain')" ]
+  [ "$(agmsg_terminal_candidates)" = "$(printf 'claude-desktop\ncodex-app\norca\nherdr\nprobe\ntmux\nplain')" ]
   [ "$(agmsg_terminal_resolve_placement sess-x)" = "probe" ]
   [ "$(agmsg_terminal_resolve_name sess-x)" = "$(printf 'probe\tprobe-pane')" ]
   [ "$(_agmsg_terminal_resolve_by_label testteam alice)" = "$(printf 'probe\tprobe-pane')" ]
@@ -3952,6 +3952,48 @@ EOF
   grep -q '^claude-desktop:desk-sid-9	/proj/DESK	claude-code$' "$rec"
   refute grep -q 'w1:pMINE' "$rec"
   refute grep -q 'herdr' "$rec"
+}
+
+@test "codex-app: desktop thread wins over panes, records without naming, and fails closed" {
+  _fake_herdr_labels "w1:pDAEMON=agmsg:other" "w1:pMINE=deskteam:alice"
+  export HERDR_ENV=1 HERDR_PANE_ID=w1:pDAEMON
+  export CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop'
+  export CODEX_THREAD_ID=01a101a5-3599-7d62-a149-4c8182bcf007
+  unset CLAUDE_CODE_ENTRYPOINT AGMSG_TERMINAL_DRIVER
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'codex-app\t%s' "$CODEX_THREAD_ID")" ]
+  local rec
+  rec="$(agmsg_spawn_path deskteam alice)"
+  run agmsg_terminal_name_self "" deskteam alice /proj/DESK codex record
+  [ "$status" -eq 0 ]
+  [ "$(cat "$rec")" = "$(printf 'codex-app:%s\t/proj/DESK\tcodex' "$CODEX_THREAD_ID")" ]
+  refute grep -q 'herdr \[' "$ARGV_LOG"
+  agmsg_terminal_load codex-app
+  [ "$(terminal_self_env)" = "$CODEX_THREAD_ID" ]
+  [ "$(terminal_where "$CODEX_THREAD_ID")" = n/a:no_container_concept ]
+  [ "$(agmsg_terminal_get codex-app capabilities)" = where ]
+  local verb
+  for verb in spawn despawn peek poke arrange name pane_state; do
+    run "terminal_$verb" "$CODEX_THREAD_ID"
+    [ "$status" -eq 13 ]
+    printf '%s\n' "$output" | grep -Fq 'Codex desktop app'
+  done
+  refute terminal_id_ok $'bad\tthread'
+  refute terminal_id_ok $'bad\nthread'
+  refute terminal_id_ok $'bad\rthread'
+  unset CODEX_THREAD_ID
+  export CODEX_SESSION_ID=stale-session
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -Fq codex-app
+  export CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex
+  run terminal_detect "a-thread"
+  [ "$status" -eq 1 ]
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
+  run terminal_detect "a-thread"
+  [ "$status" -eq 1 ]
 }
 
 @test "self-identity: name_self actually USES the label path, not just the helper (#1112)" {
