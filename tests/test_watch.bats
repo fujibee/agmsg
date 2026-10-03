@@ -62,7 +62,7 @@ assert_unread_claim_then_expire() {
 # closes that gap regardless of what the backgrounded command's own argv
 # does or does not contain (review finding, #1451).
 #
-# Records $BASHPID alongside <pid> -- the pid of THIS exact process, captured
+# Records this shell's pid alongside <pid> -- the pid of THIS exact process, captured
 # at the moment of the call, which is unambiguously the backgrounded job's
 # real parent (a plain function call forks nothing, so _bg_track always runs
 # in the same process that just executed the `&` immediately before it).
@@ -76,7 +76,10 @@ assert_unread_claim_then_expire() {
 # safe to kill by pid at all (review finding, #1451).
 _bg_track() {   # <pid>
   [ -n "${TEST_SKILL_DIR:-}" ] || return 0
-  echo "$1 $BASHPID" >> "$TEST_SKILL_DIR/.bg-pids"
+  # Apple Bash 3.2 has no BASHPID, and $$ still names the outer shell inside
+  # a Bats subshell. A directly invoked child's PPID is the exact caller.
+  # No command substitution: that would introduce another possible parent.
+  bash -c 'printf "%s %s\n" "$1" "$PPID"' _ "$1" >> "$TEST_SKILL_DIR/.bg-pids"
 }
 
 # Kill+wait every pid _bg_track recorded for this test that is STILL ALIVE
@@ -391,6 +394,42 @@ _wait_exit() {  # <pid> <tenths>
   return 1
 }
 
+@test "watch cleanup: records the exact test parent and reaps a tracked session" {
+  skip_on_windows "watcher process ownership under Git Bash (#182)"
+  sleep 30 3>&- 4>&- &
+  local pid=$! recorded parent actual matched=0 leaked=0
+  _bg_track "$pid"
+  read -r recorded parent < "$TEST_SKILL_DIR/.bg-pids"
+  actual="$(ps -o ppid= -p "$pid" | tr -d ' ')"
+  [ "$recorded" = "$pid" ] && [ "$parent" = "$actual" ] && matched=1
+  _bg_reap_tracked
+  # Clean up before asserting, so the old broken tracker is a prompt negative
+  # control rather than another orphan that holds the suite open for 30s.
+  if kill -0 "$pid" 2>/dev/null; then
+    leaked=1
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  [ "$matched" = 1 ]; [ "$leaked" = 0 ]
+}
+
+@test "watch cleanup: a recycled PID with a different parent receives no signal" {
+  printf '123 456\n' > "$TEST_SKILL_DIR/.bg-pids"
+  ps() { printf '789\n'; }
+  kill() { printf '%s\n' "$*" >> "$TEST_SKILL_DIR/signals"; }
+  _bg_reap_tracked
+  [ ! -s "$TEST_SKILL_DIR/signals" ]
+}
+
+@test "watch cleanup: parent change after TERM prevents KILL escalation" {
+  ps() { printf '789\n'; }
+  kill() { printf '%s\n' "$*" >> "$TEST_SKILL_DIR/signals"; }
+  sleep() { :; }
+  _bg_kill_bounded 123 456
+  grep -qx '123' "$TEST_SKILL_DIR/signals"
+  refute grep -q -- '-KILL' "$TEST_SKILL_DIR/signals"
+}
+
 @test "watch: --max-seconds ends the run with a re-arm line after a delivery, a stopping line when quiet, and never without the flag" {
   local out="$BATS_TEST_TMPDIR/ms.out" pid
   # One role per run: a watcher that names a role claims its actas lock.
@@ -507,16 +546,18 @@ _wait_exit() {  # <pid> <tenths>
   local iid="sess-liveness.$sesspid"
   local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
   local out="$TEST_SKILL_DIR/liveness-delivery.log"
+  local err="$TEST_SKILL_DIR/liveness-delivery.err"
 
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$iid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$iid" "$PROJ" claude-code >"$out" 2>"$err" 3>&- 4>&- &
   local w=$!
   _bg_track "$w"
-  # There is no seed race: a pre-poll message remains unread at cursor zero.
+  # Pre-poll rows remain unread at cursor zero; first-send schema publication
+  # must also work concurrently with the watcher's initial reservation check.
   _wait_for_file "$pf"
   [ -f "$pf" ]
 
   bash "$SCRIPTS/send.sh" team bob alice "M1-delivered" >/dev/null
-  _wait_for_file_contains "$out" "M1-delivered" "$w"
+  _wait_for_file_contains "$out" "M1-delivered" "$w" || { cat "$err" >&2; return 1; }
   local first_cursor="$(_read_cursor team alice)"
 
   # Owning session dies (reap it so kill -0 reports gone, not a zombie), then a

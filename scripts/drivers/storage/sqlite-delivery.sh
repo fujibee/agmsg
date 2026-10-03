@@ -262,14 +262,19 @@ storage_delivery_maintenance_begin() {
 _sqlite_delivery_maintenance_get_db() {
   [ $# -eq 2 ] || { _sqlite_delivery_error invalid_arguments; return 13; }
   [ -f "$1" ] || return 0
-  local present revision
-  present="$(_sqlite_delivery_run_db "$1" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='delivery_maintenance';")" || return 13
-  if [ "$present" = 0 ]; then
-    revision="$(_sqlite_delivery_run_db "$1" 'PRAGMA user_version;')" || return 13
-    [ "$revision" -lt 2 ] && return 0
-    _sqlite_delivery_error corrupt_state
-    return 12
-  fi
+  # Classify both facts in one read snapshot. A concurrent first send can
+  # atomically publish the table and revision 2 between separate queries;
+  # combining an old absence with the new revision falsely reports corruption.
+  local schema_state
+  schema_state="$(_sqlite_delivery_run_db "$1" "SELECT CASE
+    WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='delivery_maintenance') THEN 'present'
+    WHEN (SELECT user_version FROM pragma_user_version)<2 THEN 'legacy'
+    ELSE 'corrupt' END;")" || return 13
+  case "$schema_state" in
+    legacy) return 0 ;;
+    present) ;;
+    *) _sqlite_delivery_error corrupt_state; return 12 ;;
+  esac
   _sqlite_delivery_run_db "$1" "SELECT json_object('type','delivery_maintenance','team',team,
     'descriptor',descriptor,'token',token,'created_at',created_at)
     FROM delivery_maintenance WHERE team=$(_sqlite_quote "$2");"

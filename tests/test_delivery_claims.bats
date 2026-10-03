@@ -442,6 +442,32 @@ _hold_delivery_transaction() {
   [[ "$(cat "$TEST_SKILL_DIR/err")" == *corrupt_state* ]] || return 1
 }
 
+@test "maintenance: first-send schema publication cannot mix absence with the new revision" {
+  # The real first send upgrades this older schema atomically. Interpose after
+  # the real presence read, before the caller can start another query: the old
+  # two-query preflight then combines absence with revision 2 and refuses it.
+  _sql 'DROP TABLE delivery_maintenance; PRAGMA user_version=1;'
+  eval "$(declare -f _sqlite_delivery_run_db | sed '1s/_sqlite_delivery_run_db/_fixture_schema_read/')"
+  _sqlite_delivery_run_db() {
+    local result
+    result="$(_fixture_schema_read "$@")" || return 13
+    case "$2" in
+      *sqlite_master*delivery_maintenance*)
+        _sqlite_init_db "$1" >/dev/null || return 13
+        : > "$TEST_SKILL_DIR/schema-published"
+        ;;
+    esac
+    [ -z "$result" ] || printf '%s\n' "$result"
+  }
+  local rc=0
+  _sqlite_delivery_maintenance_get_db "$DB" claims >"$TEST_SKILL_DIR/out" 2>"$TEST_SKILL_DIR/err" || rc=$?
+  [ -f "$TEST_SKILL_DIR/schema-published" ]
+  [ "$rc" = 0 ]; [ ! -s "$TEST_SKILL_DIR/out" ]; [ ! -s "$TEST_SKILL_DIR/err" ]
+  [ "$(_sql 'PRAGMA user_version;')" = 2 ]
+  [ "$(_sql "SELECT COUNT(*) FROM sqlite_master WHERE name='delivery_maintenance';")" = 1 ]
+  [ "$(_sql 'PRAGMA integrity_check;')" = ok ]
+}
+
 # Interpose only after the REAL committed claim, before its caller can publish
 # buffered records. This makes selector/barrier races deterministic.
 _intercept_claim_commit() {

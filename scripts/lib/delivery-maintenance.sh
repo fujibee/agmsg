@@ -238,7 +238,13 @@ agmsg_dm_guard_sql() {
         WHERE m.team=i.id AND m.descriptor=$quoted AND m.token='$token'))
     AND NOT EXISTS(SELECT 1 FROM $database.delivery_maintenance m
       WHERE (m.descriptor=$quoted OR m.token='$token')
-        AND m.team NOT IN(SELECT id FROM _delivery_transform_ids))"
+        AND m.team NOT IN(SELECT id FROM _delivery_transform_ids))" || return $?
+  # A SQLite CLI can continue later statements from the same input line
+  # even with -bail.
+  # Keep the CHECK on an earlier line than caller-appended writes/COMMIT.
+  # A no-row footer survives command substitution's trailing-LF trimming;
+  # a trailing newline alone does not. Successful guards still emit no rows.
+  printf '%s\n' 'SELECT 1 WHERE 0;'
 }
 
 agmsg_dm_discard_claims_sql() {

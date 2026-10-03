@@ -1015,6 +1015,59 @@ finish_gated_team_rename_child() {
   [ "$(sqlite3 "$dest" "SELECT count(*) FROM sqlite_master WHERE name='forbidden';")" = 0 ]
 }
 
+@test "delivery maintenance: actual source deletion refuses a retired fence without losing rows" {
+  source "$SCRIPTS/lib/delivery-maintenance.sh"
+  # Exercise the production builder, including its inline DELETE/COMMIT
+  # appends after command substitution, without running migration setup.
+  sed -n '/^_drop_from_shared()/,/^}/p' "$SCRIPTS/internal/migrate-team-store.sh" > "$TEST_SKILL_DIR/drop-from-shared.sh"
+  source "$TEST_SKILL_DIR/drop-from-shared.sh"
+  local TEAM=alpha SHARED="$DB" DESCRIPTOR='fixture source deletion'
+  local SOURCE_TOKEN other src_tables mode
+  SOURCE_TOKEN=$(printf '%064d' 1); other=$(printf '%064d' 2)
+  for mode in valid retired; do
+    storage_send alpha ann bob "source-delete-$mode" >/dev/null
+    src_tables=$(sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table';")
+    sqlite3 "$DB" "DELETE FROM delivery_maintenance;
+      INSERT INTO delivery_maintenance VALUES('alpha','$DESCRIPTOR','$SOURCE_TOKEN',1);"
+    if [ "$mode" = retired ]; then
+      sqlite3 "$DB" "UPDATE delivery_maintenance SET token='$other';"
+    fi
+    run _drop_from_shared
+    if [ "$mode" = valid ]; then
+      [ "$status" = 0 ]; [ -z "$output" ]
+      [ "$(sqlite3 "$DB" "SELECT count(*) FROM messages WHERE team='alpha';")" = 0 ]
+      [ "$(sqlite3 "$DB" "SELECT count(*) FROM events WHERE team='alpha';")" = 0 ]
+    else
+      [ "$status" -ne 0 ]; [[ "$output" == *maintenance_fence* ]] || return 1
+      [ "$(sqlite3 "$DB" "SELECT count(*) FROM messages WHERE body='source-delete-retired';")" = 1 ]
+      [ "$(sqlite3 "$DB" "SELECT count(*) FROM events WHERE type='message_sent' AND body='source-delete-retired';")" = 1 ]
+    fi
+  done
+}
+
+@test "windows-native: maintenance fence blocks inline stale writes and preserves guard failures" {
+  storage_init alpha >/dev/null
+  source "$SCRIPTS/lib/delivery-maintenance.sh"
+  local token guard rc=0
+  token=$(printf '%064d' 1)
+  sqlite3 "$DB" "CREATE TABLE fence_sentinel(value INTEGER); INSERT INTO fence_sentinel VALUES(0);
+    INSERT INTO delivery_maintenance VALUES('alpha','fixture','$token',1);"
+  guard=$(agmsg_dm_guard_sql fixture "$token" main alpha)
+  run _sqlite_exec_stdin "$DB" "BEGIN IMMEDIATE; $guard UPDATE fence_sentinel SET value=1; COMMIT;"
+  [ "$status" = 0 ]; [ -z "$output" ]
+  [ "$(agmsg_sqlite "$DB" 'SELECT value FROM fence_sentinel;')" = 1 ]
+  sqlite3 "$DB" "UPDATE delivery_maintenance SET token='$(printf '%064d' 2)';"
+  _sqlite_exec_stdin "$DB" "BEGIN IMMEDIATE; $guard UPDATE fence_sentinel SET value=2; COMMIT;" \
+    >"$TEST_SKILL_DIR/fence.out" 2>"$TEST_SKILL_DIR/fence.err" || rc=$?
+  [ "$rc" -ne 0 ]; [ ! -s "$TEST_SKILL_DIR/fence.out" ]
+  grep -q maintenance_fence "$TEST_SKILL_DIR/fence.err"
+  [ "$(agmsg_sqlite "$DB" 'SELECT value FROM fence_sentinel;')" = 1 ]
+  _sqlite_delivery_assert_sql() { return 42; }
+  run agmsg_dm_guard_sql fixture "$token" main alpha
+  [ "$status" = 42 ]
+  refute grep -q 'SELECT 1 WHERE 0;' <<< "$output"
+}
+
 @test "delivery maintenance: finalization refuses extra descriptor or token membership" {
   storage_init alpha >/dev/null
   local descriptor='fixture finish' token other mutation
