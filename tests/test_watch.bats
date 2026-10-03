@@ -18,6 +18,33 @@ setup() {
   bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null
 }
 
+# Fault seams in the old cursor/formatter pipeline must exercise that route.
+# This override affects only the test's disposable installed SQLite driver.
+use_legacy_delivery_fixture() {
+  cat >> "$SCRIPTS/drivers/storage/sqlite.sh" <<'SH'
+storage_describe() {
+  printf 'name=sqlite\ncapabilities=stage1-sync,stage1-resync,stage2-read-state\n'
+}
+SH
+}
+
+# An uncertain post-write handoff stays unread but reserved. Prove both
+# properties before simulating expiry in this test's disposable store.
+assert_unread_claim_then_expire() {
+  local body="$1" rows db="$TEST_SKILL_DIR/db/messages.db"
+  rows=$(SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/storage.sh"
+    agmsg_storage_load || exit 1
+    storage_list_unread team alice
+  ' _ "$SCRIPTS") || return 1
+  # These fixture bodies are fixed ASCII markers without JSON escapes.
+  [ "$(printf '%s\n' "$rows" | grep -Fc -- "\"body\":\"$body\"")" -eq 1 ] || return 1
+  [ "$(sqlite3 "$db" "SELECT count(*) FROM delivery_claims WHERE team='team' AND agent='alice' AND expires_at>strftime('%s','now');")" -eq 1 ] || return 1
+  run bash "$SCRIPTS/inbox.sh" team alice --quiet
+  [ "$status" -eq 0 ] && [ -z "$output" ] || return 1
+  sqlite3 "$db" "UPDATE delivery_claims SET expires_at=0 WHERE team='team' AND agent='alice';"
+}
+
 # #1262/#1318: record <pid> (a process this test just backgrounded with `&`)
 # so teardown can kill+wait it even if the test body aborts, at some later
 # assertion, before its own cleanup ever runs. Call this immediately after
@@ -545,6 +572,9 @@ _wait_exit() {  # <pid> <tenths>
   wait "$w" 2>/dev/null || true
 
   [ "$(_read_cursor team alice)" = "$initial" ]
+  # A failed attempted write is UNKNOWN. Redelivery starts after the retained
+  # lease expires, not immediately after replacing the watcher process.
+  assert_unread_claim_then_expire "M-after-closed-stdout"
 
   run_watcher_until_contains "$sid" "$TEST_SKILL_DIR/closed-redelivery.log" \
     "M-after-closed-stdout"
@@ -1342,8 +1372,9 @@ _record_handover_events() {
   grep -q "WEND${last}" "$TEST_SKILL_DIR/wbig.log"
 }
 
-@test "watch: a cursor stuck N cycles with pending rows reports on stdout and exits (#1045)" {
+@test "watch legacy: a cursor stuck N cycles with pending rows reports on stdout and exits (#1045)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
+  use_legacy_delivery_fixture
   # Force the delivery query -- the ONLY sqlite call in the loop whose last arg is
   # ':memory:' (SQL on stdin) -- to return nothing, while the store queries (a real DB
   # file as the last arg) keep working. So OUT stays non-empty, ROWS is empty, the
@@ -1379,8 +1410,9 @@ STUB
   grep -q "agmsg watch: delivery for team:alice is STUCK" "$out"
 }
 
-@test "watch: the stuck guard fires for a pair whose agent name has a space (#1045)" {
+@test "watch legacy: the stuck guard fires for a pair whose agent name has a space (#1045)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
+  use_legacy_delivery_fixture
   # End-to-end companion to test_watch_stuck_map.bats: the tracker keys on the
   # "<team>:<agent>" pair, and identities.sh emits a spaced agent as one
   # tab-separated field, so the key carries the space. The first cut framed the
@@ -1413,8 +1445,9 @@ STUB
   grep -q "agmsg watch: delivery for team:sp aced is STUCK" "$out"
 }
 
-@test "watch: an idle pair seeing only a cursor high-water is not treated as stuck (#1045)" {
+@test "watch legacy: an idle pair seeing only a cursor high-water is not treated as stuck (#1045)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
+  use_legacy_delivery_fixture
   # storage_watch_after appends a trailing "cursor" high-water line even for a
   # CAUGHT-UP pair, because the team's sequence advances whenever ANY pair in the
   # team gets a message. So OUT is non-empty for an idle pair with zero messages
@@ -1455,8 +1488,9 @@ STUB
   ! grep -q "is STUCK" "$out"
 }
 
-@test "watch: a failed pending-scan is surfaced and exits, not collapsed to caught-up (#1045)" {
+@test "watch legacy: a failed pending-scan is surfaced and exits, not collapsed to caught-up (#1045)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
+  use_legacy_delivery_fixture
   # The loop reads whether messages are waiting with storage_watch_after. If that
   # READ fails and the failure collapses to "" (the old `|| true`), the caught-up
   # arm drops the tracker and the watcher continues in silence forever -- the very
@@ -1496,6 +1530,37 @@ STUB
   [ "$st" -eq 75 ]
   # Non-delivery-shaped diagnostic (a plain "agmsg watch:" line, not "ts | team | from → to | body").
   grep -q "agmsg watch: cannot read delivery state for team:alice" "$out"
+}
+
+@test "watch: a refused claim reports failure without disclosing or consuming the body" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  bash "$SCRIPTS/send.sh" team bob alice "CLAIM-REFUSAL-BODY" >/dev/null
+  cat >> "$SCRIPTS/drivers/storage/sqlite.sh" <<'SH'
+storage_claim_unread() { return 13; }
+SH
+  local out="$TEST_SKILL_DIR/claim-failure.log" w st=0
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" \
+    sess-claim-failure "$PROJ" claude-code alice >"$out" 2>/dev/null 3>&- 4>&- &
+  w=$!
+  _bg_track "$w"
+  if ! _wait_for_file_contains "$out" "delivery reservation failed"; then
+    kill "$w" 2>/dev/null || true
+    wait "$w" 2>/dev/null || true
+    return 1
+  fi
+  local i alive=1
+  for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
+  if [ "$alive" -ne 0 ]; then kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true; return 1; fi
+  wait "$w" || st=$?
+  [ "$st" -eq 75 ]
+  [ "$(grep -c 'CLAIM-REFUSAL-BODY' "$out" || true)" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" 'SELECT count(*) FROM delivery_claims;')" -eq 0 ]
+  # Query the canonical unread view directly, independently of the failed claim.
+  run env SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/storage.sh"; agmsg_storage_load; storage_list_unread team alice
+  ' _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *CLAIM-REFUSAL-BODY* ]] || return 1
 }
 
 # --- the watcher re-asserts this pane's name (#1044) --------------------------
@@ -1731,11 +1796,12 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   sleep 1
   kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 
-  # Delivered to the old screen (already done, unavoidable) but NOT consumed:
-  # the session that now owns the role still has it.
+  # Written to the old screen but not consumed. The new owner can retry only
+  # after expiry because the previous external handoff is uncertain.
+  assert_unread_claim_then_expire 'MID-983'
   local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
   grep -q 'MID-983' <<<"$ib"
-  grep -q 'marking them read' "$out"
+  grep -q 'reservation retained until expiry' "$out"
 }
 
 @test "watch: a claim landing between consume and the fold is not obeyed (#983)" {
@@ -1814,7 +1880,8 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   chmod 644 "$lock" 2>/dev/null || true     # restore before any teardown reads it
   kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 
-  # Not consumed: the row is still there for whoever does own the role.
+  # Unread and reserved until expiry after the uncertain external write.
+  assert_unread_claim_then_expire 'UNREADABLE-983'
   local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
   grep -q 'UNREADABLE-983' <<<"$ib"
 }
@@ -1894,7 +1961,8 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 
   grep -q 'could not verify who holds this role' "$out"
-  # Not consumed: the row is still there for whoever does own the role.
+  # Unread and reserved until expiry after the uncertain external write.
+  assert_unread_claim_then_expire 'BROAD-UNREADABLE-983'
   local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
   grep -q 'BROAD-UNREADABLE-983' <<<"$ib"
 }

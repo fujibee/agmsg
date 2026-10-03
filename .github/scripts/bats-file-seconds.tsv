@@ -35,9 +35,25 @@
 # run's shard skew (as happened here) triggers a refresh. Refresh by
 # re-running this extraction against a green run's bats-timings artifacts.
 #
+# PROVISIONAL DELIVERY WEIGHTS (2026-10-03): the nine new delivery suites
+# below use isolated Linux measurements or enclosing-gate upper bounds.
+# These are scheduling estimates, NOT macOS file_end measurements. Replace
+# them with per-file values from the next completed macOS CI timing artifacts.
+# Isolated Linux seconds, rounded up: antigravity_claims 67.601,
+# delivery_claims_api 39.473, codex_delivery 55.081.
+# Conservative enclosing-gate seconds, rounded up: antigravity_claims_bytes
+# 173.256 (claims + bytes); antigravity_delivery 361.188 (Node wrapper +
+# claims + bytes); delivery_claims and delivery_readers each 278.530
+# (claims + readers); delivery_claims_bytes 135.922 (bytes + API);
+# delivery_maintenance 402.759 (maintenance + migration + registry locks).
+# This avoids assigning long new suites the unrelated table-average cost.
+#
 # Columns: basename<TAB>seconds. Sorted by basename for a legible diff.
 test_actas_integration.bats	53
 test_actas_lock.bats	33
+test_antigravity_claims.bats	68
+test_antigravity_claims_bytes.bats	174
+test_antigravity_delivery.bats	362
 test_antigravity_resume.bats	1
 test_antigravity_transport.bats	24
 test_api.bats	53
@@ -56,6 +72,7 @@ test_close_fds.bats	0
 test_cmdline_path_match.bats	1
 test_codex_bridge_launcher.bats	266
 test_codex_bridge.bats	179
+test_codex_delivery.bats	56
 test_codex_monitor.bats	10
 test_codex_resume.bats	13
 test_codex_shim.bats	22
@@ -64,6 +81,11 @@ test_compat.bats	2
 test_config.bats	2
 test_cut_release.bats	3
 test_delivery.bats	402
+test_delivery_claims.bats	279
+test_delivery_claims_api.bats	40
+test_delivery_claims_bytes.bats	136
+test_delivery_maintenance.bats	403
+test_delivery_readers.bats	279
 test_despawn.bats	135
 test_dispatch.bats	54
 test_doctor.bats	81

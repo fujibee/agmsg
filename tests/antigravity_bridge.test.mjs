@@ -12,11 +12,16 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
 // so 15 seconds can misjudge a normal NEEDS_ATTENTION arrival as a timeout.
 // Raise the limit to 60 seconds.
 async function waitFor(fn){for(let i=0;i<600;i++){if(fn())return;await delay(100);}throw Error('wait timeout');}
-function fixture(driver='sqlite',mode='success',extra={}) {
+function fixture(driver='sqlite',mode='success',extra={},prepare=()=>{}) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'agmsg-agy-test-'));
   const install=path.join(dir,'install'),project=path.join(dir,'project');
   fs.mkdirSync(install);fs.mkdirSync(project);
   fs.cpSync(path.join(repo,'scripts'),path.join(install,'scripts'),{recursive:true});
+  if(driver==='sqlite-legacy') {
+    const source=path.join(install,'scripts/drivers/storage/sqlite.sh');
+    fs.writeFileSync(source,fs.readFileSync(source,'utf8').replace(',delivery-claims-v1','').replace(',delivery-claims-bytes-v1',''));
+    driver='sqlite';
+  }
   fs.copyFileSync(path.join(repo,'tests/fixtures/fake-antigravity.mjs'),path.join(dir,'fake.mjs'));
   const fake=path.join(dir,'agy');fs.writeFileSync(fake,`#!/bin/sh\nexec '${process.execPath}' '${dir}/fake.mjs' "$@"\n`,{mode:0o700});
   const env={...process.env,AGMSG_STORAGE_DRIVER:driver,AGMSG_STORAGE_PATH:path.join(install,'db'),AGMSG_CONFIG:path.join(dir,'config.json'),FAKE_AGY_MODE:mode,FIXTURE_INSTALL:install,...extra};
@@ -24,6 +29,7 @@ function fixture(driver='sqlite',mode='success',extra={}) {
   sh('join.sh',['fixture','worker','antigravity',project]);
   sh('join.sh',['fixture','sender','codex',project]);
   sh('delivery.sh',['set','monitor','antigravity',project]);
+  prepare({install,project});
   let output='';const child=spawn('bash',[path.join(install,'scripts/drivers/types/antigravity/antigravity-monitor.sh'),'--project',project,'--team','fixture','--name','worker','--agy',fake,'--poll','100'],{env,stdio:['pipe','pipe','pipe'],detached:true});
   const children=[child];
   child.stdout.on('data',d=>output+=d);child.stderr.on('data',d=>output+=d);
@@ -36,7 +42,7 @@ function fixture(driver='sqlite',mode='success',extra={}) {
     }
   }};
 }
-for(const driver of ['sqlite','jsonl'])test(`isolated ${driver}: marks two messages read only after SUCCESS`,async()=>{
+for(const driver of ['sqlite','jsonl','sqlite-legacy'])test(`isolated ${driver}: marks two messages read only after SUCCESS`,async()=>{
   const f=fixture(driver);try {
     await waitFor(()=>f.output().includes('ready'));
     f.sh('send.sh',['fixture','sender','worker','first']);
@@ -102,7 +108,7 @@ test('refuses a duplicate launch',async()=>{
 
 test('stopping peek while idle does not transition to NEEDS_ATTENTION and releases the reservation',async()=>{
   const barrier=path.join(os.tmpdir(),`agmsg-peek-${process.pid}-${Date.now()}`);
-  const f=fixture('sqlite','success',{AGMSG_TEST_PEEK_BARRIER:barrier});
+  const f=fixture('sqlite-legacy','success',{AGMSG_TEST_PEEK_BARRIER:barrier});
   try {
     await waitFor(()=>f.output().includes('ready')&&fs.existsSync(`${barrier}.reached`));
     f.child.kill('SIGTERM');
@@ -118,7 +124,7 @@ test('stopping peek while idle does not transition to NEEDS_ATTENTION and releas
 
 test('a group stop after peek exits non-zero while idle is treated as a normal stop',async()=>{
   const failure=path.join(os.tmpdir(),`agmsg-peek-failure-${process.pid}-${Date.now()}`);
-  const f=fixture('sqlite','success',{AGMSG_TEST_PEEK_FAILURE:failure});
+  const f=fixture('sqlite-legacy','success',{AGMSG_TEST_PEEK_FAILURE:failure});
   try {
     await waitFor(()=>f.output().includes('ready'));
     await waitFor(()=>fs.existsSync(`${failure}.reached`));
@@ -135,7 +141,7 @@ test('a group stop after peek exits non-zero while idle is treated as a normal s
 
 test('a SIGTERM exit of the peek subprocess while idle is treated as a normal stop',async()=>{
   const signal=path.join(os.tmpdir(),`agmsg-peek-signal-${process.pid}-${Date.now()}`);
-  const f=fixture('sqlite','success',{AGMSG_TEST_PEEK_SIGNAL:signal});
+  const f=fixture('sqlite-legacy','success',{AGMSG_TEST_PEEK_SIGNAL:signal});
   try {
     await waitFor(()=>fs.existsSync(`${signal}.reached`));
     await waitFor(()=>f.child.exitCode!==null);
@@ -160,16 +166,24 @@ test('exceeding the body size limit stops as NEEDS_ATTENTION',async()=>{
 
 test('a SIGTERM exit of verify while idle is treated as a normal stop',async()=>{
   const signal=path.join(os.tmpdir(),`agmsg-verify-signal-${process.pid}-${Date.now()}`);
-  const f=fixture('sqlite','success',{AGMSG_TEST_VERIFY_SIGNAL:signal});
+  const f=fixture('sqlite','success',{AGMSG_TEST_VERIFY_SIGNAL:signal},({install})=>{
+    // Arm only after observing IDLE below. A count alone can reach three
+    // during initialization on a loaded runner and test a different phase.
+    const transport=path.join(install,'scripts/drivers/types/antigravity/inbox-transport.sh');
+    const source=fs.readFileSync(transport,'utf8'),hook='if [ "$_n" -ge 3 ]; then kill -TERM $$; fi';
+    assert.equal(source.split(hook).length,2,'the disposable signal seam must still exist');
+    fs.writeFileSync(transport,source.replace(hook,()=> 'if [ "$_n" -ge 3 ] && [ -e "$AGMSG_TEST_VERIFY_SIGNAL" ]; then kill -TERM $$; fi'));
+  });
   try {
     await waitFor(()=>f.output().includes('ready'));
+    fs.writeFileSync(signal,'armed\n');
     await waitFor(()=>f.child.exitCode!==null);
     assert.doesNotMatch(f.output(),/NEEDS_ATTENTION/);
     assert.match(f.output(),/stopped/);
     assert.equal(f.state().batch,null);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>(name.startsWith('read-reservation.')||name.startsWith('antigravity-reservation.'))&&name.endsWith('.json')),false);
     assert.equal(fs.readdirSync(path.join(f.install,'run')).some(name=>name.startsWith('actas.fixture__worker.')),false);
-  } finally { fs.rmSync(`${signal}.count`,{force:true}); await f.close(); }
+  } finally { fs.rmSync(signal,{force:true});fs.rmSync(`${signal}.count`,{force:true}); await f.close(); }
 });
 
 test('an explicit ack recovery of a completed batch does not re-run the model',async()=>{

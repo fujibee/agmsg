@@ -39,7 +39,6 @@ agmsg_validate_team_name "$TEAM" || exit 1
 agmsg_validate_agent_name "$OLD_NAME" || exit 1
 agmsg_validate_agent_name "$NEW_NAME" || exit 1
 TEAMS_DIR="$SCRIPT_DIR/../teams"
-DB="$(agmsg_db_path "$TEAM")"
 OLD_NAME_SQL=$(agmsg_sqlesc "$OLD_NAME")
 NEW_NAME_SQL=$(agmsg_sqlesc "$NEW_NAME")
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
@@ -51,11 +50,22 @@ fi
 
 # Serialize the read-modify-write so a concurrent join/leave/reset on this team
 # can't be clobbered (#141). The team dir exists (checked above).
-agmsg_lock_acquire "$TEAMS_DIR/$TEAM" || exit 1
+if [ "$(agmsg_storage_driver)" = sqlite ]; then
+  agmsg_lock_acquire "$TEAMS_DIR/$TEAM" manual-recovery || exit 1
+else
+  agmsg_lock_acquire "$TEAMS_DIR/$TEAM" || exit 1
+fi
+# A migration may have changed the partition while this command waited.
+DB="$(agmsg_db_path "$TEAM")"
 
+# Prepare a complete registry result away from the live team. The caller
+# publishes its journal and config separately under the maintenance barrier.
+_rename_registry() {
+  local RENAME_DIR="$1" TEAM_CONFIG="$1/config.json"
+  local CONFIG_ESCAPED OLD_VAL NEW_VAL MEMBER_ID NAME_OWNER RENAMED_AT UPDATED UPDATED_ESCAPED
 # --- Update team config ---
-agmsg_roster_ensure "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
-agmsg_roster_project_config "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
+agmsg_roster_ensure "$RENAME_DIR" "$TEAM_CONFIG"
+agmsg_roster_project_config "$RENAME_DIR" "$TEAM_CONFIG"
 CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
 # Check old exists
@@ -74,22 +84,22 @@ if [ -n "$NEW_VAL" ] && [ "$NEW_VAL" != "null" ]; then
   exit 1
 fi
 
-if agmsg_roster_has_journal "$TEAMS_DIR/$TEAM"; then
+if agmsg_roster_has_journal "$RENAME_DIR"; then
   MEMBER_ID=$(agmsg_sqlite_mem \
     "SELECT COALESCE(json_extract('$CONFIG_ESCAPED', '\$.agents.' || '$OLD_NAME_SQL' || '.member_id'),'');")
   [ -n "$MEMBER_ID" ] || {
     echo "agmsg: journaled member '$OLD_NAME' has no member_id" >&2
     exit 1
   }
-  NAME_OWNER=$(agmsg_roster_name_owner "$TEAMS_DIR/$TEAM" "$NEW_NAME")
+  NAME_OWNER=$(agmsg_roster_name_owner "$RENAME_DIR" "$NEW_NAME")
   if [ -n "$NAME_OWNER" ] && [ "$NAME_OWNER" != "$MEMBER_ID" ]; then
     echo "Agent name $NEW_NAME belongs to another identity in team $TEAM" >&2
     exit 1
   fi
   RENAMED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  agmsg_roster_append_renamed "$TEAMS_DIR/$TEAM" "$MEMBER_ID" \
+  agmsg_roster_append_renamed "$RENAME_DIR" "$MEMBER_ID" \
     "$OLD_NAME" "$NEW_NAME" "$RENAMED_AT"
-  agmsg_roster_project_config "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
+  agmsg_roster_project_config "$RENAME_DIR" "$TEAM_CONFIG"
   UPDATED=$(cat "$TEAM_CONFIG")
 else
   # Name-only legacy teams keep the pre-journal cache mutation.
@@ -118,6 +128,9 @@ UPDATED=$(agmsg_sqlite_mem \
 
 agmsg_write_atomic "$TEAM_CONFIG" "$UPDATED"
 
+}
+
+_rename_messages() {
 # --- Update messages in DB ---
 # Rewrite the agent name in BOTH stores: the event log (where storage_send now
 # writes) and the legacy messages table (pre-event-log installs). Without the
@@ -148,11 +161,134 @@ if [ -f "$DB" ]; then
         WHERE local_team='$TEAM_LIT' AND agent='$OLD_LIT';
       UPDATE sync_read_aliases SET agent='$NEW_LIT' WHERE local_team='$TEAM_LIT' AND agent='$OLD_LIT';"
   fi
-  agmsg_sqlite "$DB" "BEGIN IMMEDIATE;
+  local guard=""
+  if [ "${DM_ENABLED:-false}" = true ]; then
+    guard=$(agmsg_dm_guard_sql "${AGMSG_DM_DESCRIPTOR:?maintenance result missing}" "${AGMSG_DM_TOKEN:?maintenance result missing}" main "$TEAM") || return 1
+  fi
+  local sql="BEGIN IMMEDIATE; $guard
     UPDATE messages SET from_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND from_agent='$OLD_LIT';
     UPDATE messages SET to_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND to_agent='$OLD_LIT';
     $RENAME_SQL
-    COMMIT;"
+    ${2:-}
+    $1;"
+  if [ "${DM_ENABLED:-false}" = true ]; then
+    _sqlite_exec_stdin "$DB" "$sql"
+  else
+    agmsg_sqlite "$DB" "$sql"
+  fi
+fi
+}
+
+DM_ENABLED=false
+if [ "$(agmsg_storage_driver)" = sqlite ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/delivery-maintenance.sh"
+  agmsg_dm_load || exit 1
+  DM_ENABLED=true
+  ARGUMENT=$(agmsg_sqlite_mem "SELECT json_array('$OLD_NAME_SQL','$NEW_NAME_SQL');")
+  RECORD=$(agmsg_dm_get "$DB" "$TEAM")
+  PREPARED=""
+  if [ -n "$RECORD" ]; then
+    agmsg_dm_adopt "$DB" "$RECORD" rename-agent "$TEAM" "$ARGUMENT" || exit 1
+    [ "$(agmsg_dm_field "${AGMSG_DM_DESCRIPTOR:?maintenance result missing}" source)" = "$DB" ] || {
+      agmsg_dm_error 'selected store changed'; exit 1;
+    }
+  else
+    agmsg_dm_reservations_clear "$TEAM" || exit 1
+    ORIGINAL_CONFIG=$(agmsg_dm_hash "$TEAM_CONFIG")
+    ORIGINAL_JOURNAL=$(agmsg_dm_hash "$TEAMS_DIR/$TEAM/roster.jsonl")
+    # Keep preparation and authoritative stage on the same filesystem. A
+    # cross-filesystem mv would copy/delete and could expose a partial plan.
+    mkdir -p "$(dirname "$DB")"
+    PREPARED=$(mktemp -d "$(dirname "$DB")/.delivery-prepare.XXXXXXXX")
+    chmod 700 "$PREPARED"
+    trap 'if [ -n "${PREPARED:-}" ]; then agmsg_dm_remove_stage "$PREPARED" || true; fi; agmsg_lock_cleanup' EXIT
+    ( umask 077; cat "$TEAM_CONFIG" > "$PREPARED/config.json" )
+    if [ "$ORIGINAL_JOURNAL" != absent ]; then
+      ( umask 077; cat "$TEAMS_DIR/$TEAM/roster.jsonl" > "$PREPARED/roster.jsonl" )
+    fi
+    _rename_registry "$PREPARED"
+    FINAL_CONFIG=$(agmsg_dm_hash "$PREPARED/config.json")
+    FINAL_JOURNAL=$(agmsg_dm_hash "$PREPARED/roster.jsonl")
+    DESCRIPTOR=$(agmsg_sqlite_mem "SELECT json_object(
+      'version',1,'nonce',lower(hex(randomblob(32))),'operation','rename-agent','team','$(agmsg_sqlesc "$TEAM")',
+      'argument','$(agmsg_sqlesc "$ARGUMENT")','source','$(agmsg_sqlesc "$DB")',
+      'config_before','$ORIGINAL_CONFIG','config_after','$FINAL_CONFIG',
+      'journal_before','$ORIGINAL_JOURNAL','journal_after','$FINAL_JOURNAL');")
+    agmsg_dm_begin "$DB" "$DESCRIPTOR" "$TEAM" || exit 1
+  fi
+  STAGE="$(dirname "$DB")/.delivery-rename-${AGMSG_DM_TOKEN:?maintenance result missing}"
+  CONFIG_BEFORE=$(agmsg_dm_field "${AGMSG_DM_DESCRIPTOR:?maintenance result missing}" config_before)
+  CONFIG_AFTER=$(agmsg_dm_field "${AGMSG_DM_DESCRIPTOR:?maintenance result missing}" config_after)
+  JOURNAL_BEFORE=$(agmsg_dm_field "${AGMSG_DM_DESCRIPTOR:?maintenance result missing}" journal_before)
+  JOURNAL_AFTER=$(agmsg_dm_field "${AGMSG_DM_DESCRIPTOR:?maintenance result missing}" journal_after)
+  CONFIG_NOW=$(agmsg_dm_hash "$TEAM_CONFIG")
+  JOURNAL_NOW=$(agmsg_dm_hash "$TEAMS_DIR/$TEAM/roster.jsonl")
+  if [ "$CONFIG_NOW" != "$CONFIG_BEFORE" ] && [ "$CONFIG_NOW" != "$CONFIG_AFTER" ]; then
+    agmsg_dm_error 'configuration is not an original or planned result'; exit 1
+  fi
+  if [ "$JOURNAL_NOW" != "$JOURNAL_BEFORE" ] && [ "$JOURNAL_NOW" != "$JOURNAL_AFTER" ]; then
+    agmsg_dm_error 'journal is not the original or planned history'; exit 1
+  fi
+  if [ "$CONFIG_NOW" = "$CONFIG_AFTER" ] && [ "$JOURNAL_NOW" != "$JOURNAL_AFTER" ]; then
+    agmsg_dm_error 'registry publication order does not match this operation'; exit 1
+  fi
+  # Validate even a retained plan whose live files are already final. An
+  # unexpected staging file must fail before the message rewrite, not after.
+  if [ -e "$STAGE" ] || [ -L "$STAGE" ]; then
+    agmsg_dm_stage_files "$STAGE" || { agmsg_dm_error 'invalid rename staging files'; exit 1; }
+    agmsg_dm_expect "$STAGE/config.json" "$CONFIG_AFTER"
+    agmsg_dm_expect "$STAGE/roster.jsonl" "$JOURNAL_AFTER"
+  fi
+  agmsg_dm_reservations_clear "$TEAM" || exit 1
+  # Detect ordinary SQL constraints before the first live file mutation.
+  if ! _rename_messages ROLLBACK; then
+    if [ -n "$PREPARED" ]; then agmsg_dm_finish "$TEAM" || exit 1; fi
+    exit 1
+  fi
+  if [ -n "$PREPARED" ]; then
+    [ ! -e "$STAGE" ] && [ ! -L "$STAGE" ] || { agmsg_dm_error 'unexpected rename staging path'; exit 1; }
+    mv "$PREPARED" "$STAGE"
+    PREPARED=""
+  fi
+  if [ "$CONFIG_NOW" != "$CONFIG_AFTER" ] || [ "$JOURNAL_NOW" != "$JOURNAL_AFTER" ]; then
+    if [ ! -e "$STAGE" ] && [ ! -L "$STAGE" ] &&
+       [ "$CONFIG_NOW" = "$CONFIG_BEFORE" ] && [ "$JOURNAL_NOW" = "$JOURNAL_BEFORE" ]; then
+      # Admission committed but the private plan was never published. Nothing
+      # live changed; cancel this exact token and replan under a fresh one.
+      agmsg_dm_finish "$TEAM"
+      agmsg_lock_release
+      exec bash "$0" "$TEAM" "$OLD_NAME" "$NEW_NAME"
+    fi
+    agmsg_dm_stage_files "$STAGE" || { agmsg_dm_error 'invalid rename staging files'; exit 1; }
+    agmsg_dm_expect "$STAGE/config.json" "$CONFIG_AFTER"
+    agmsg_dm_expect "$STAGE/roster.jsonl" "$JOURNAL_AFTER"
+    agmsg_dm_reservations_clear "$TEAM" || exit 1
+    agmsg_dm_publish_file "$STAGE/roster.jsonl" "$TEAMS_DIR/$TEAM/roster.jsonl" "$JOURNAL_AFTER"
+    agmsg_dm_publish_file "$STAGE/config.json" "$TEAM_CONFIG" "$CONFIG_AFTER"
+  fi
+  _rename_messages COMMIT "$(agmsg_dm_discard_claims_sql "$TEAM")"
+  agmsg_dm_expect "$TEAM_CONFIG" "$CONFIG_AFTER"
+  agmsg_dm_expect "$TEAMS_DIR/$TEAM/roster.jsonl" "$JOURNAL_AFTER"
+  if [ -e "$STAGE" ] || [ -L "$STAGE" ]; then
+    agmsg_dm_stage_files "$STAGE" || exit 1
+    agmsg_dm_expect "$STAGE/config.json" "$CONFIG_AFTER"
+    agmsg_dm_expect "$STAGE/roster.jsonl" "$JOURNAL_AFTER"
+    # Detach the completed plan in one rename before deleting its files. A
+    # killed cleanup can leave private residue, but never a partly deleted
+    # authoritative plan that makes exact-operation recovery impossible.
+    DONE_STAGE="$STAGE.finished"
+    [ ! -e "$DONE_STAGE" ] && [ ! -L "$DONE_STAGE" ] || { agmsg_dm_error 'unexpected completed-plan path'; exit 1; }
+    mv "$STAGE" "$DONE_STAGE"
+    if ! agmsg_dm_remove_stage "$DONE_STAGE"; then
+      echo "agmsg: completed rename plan cleanup was interrupted; private residue remains" >&2
+      exit 1
+    fi
+  fi
+  agmsg_dm_finish "$TEAM"
+else
+  _rename_registry "$TEAMS_DIR/$TEAM"
+  _rename_messages COMMIT
 fi
 
 if [ "$(agmsg_storage_driver)" = jsonl ]; then

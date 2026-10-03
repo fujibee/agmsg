@@ -470,6 +470,22 @@ class Supervisor:
             if command=='claim': detail=explain_claim_refusal(detail,self.project,self.a.team,self.a.name)
             raise RuntimeError(f'{command} failed: {detail}')
         return p.stdout
+    def delivery(self, command, request=None):
+        return self.call(command,input=json.dumps(request or {}),cap=True)
+    def claim_request(self):
+        b=self.state['batch']
+        return {'owner':b['claim_owner'],'token':b['claim_token'],'protection_id':b['protection_id'],'ids':b['claim_ids']}
+    def renew(self):
+        if getattr(self,'delivery_mode','legacy')!='claims' or not self.state.get('batch'): return
+        self.delivery('renew',self.claim_request()); self.last_renew=time.monotonic()
+    def reconcile(self):
+        if getattr(self,'delivery_mode','legacy')!='claims': return
+        b=self.state['batch']
+        result=json.loads(self.delivery('recover-batch',{'batch_id':b['id'],'ids':[m['id'] for m in b['messages']]}))
+        b.update({k:result[k] for k in ('original_ids','already_read_ids','claim_ids','claim_token','claim_expires_at','protection_id')})
+        b['claim_owner']=self.owner; b['delivery_messages']=result['messages']
+        if not b['claim_ids']: self.state['batch']=None; self.state.pop('recovery',None)
+        self.save()
     def save(self): atomic(self.state_file,self.state)
     @staticmethod
     def migrate_state(state):
@@ -521,17 +537,20 @@ class Supervisor:
         if len(existing)>1: raise RuntimeError('multiple reservation formats exist')
         if existing:
             old=json.loads(existing[0].read_text())
+            if (old.get('state')!=str(self.state_file) or old.get('kind')!='tui-pty'
+                    or not isinstance(old.get('pid'),int) or old['pid']<=0
+                    or not isinstance(old.get('start'),str) or not old['start']): raise RuntimeError('reservation data is corrupt or belongs to another supervisor')
             # ValueError stays here: it is about the RECORD (a pid that is not a
             # number), not about the process. The "is it gone" question is
             # process_still's, once, and an unreadable /proc propagates out of
             # this block rather than being read as gone.
             try:
                 if process_still(int(old['pid']),old['start']): raise RuntimeError('an existing Antigravity bridge/TUI supervisor is running')
-            except (ProcessLookupError,ValueError): pass
+            except ProcessLookupError: pass
             if self.state_file.exists():
                 old_state=json.loads(self.state_file.read_text())
                 if old_state.get('batch') and old_state['batch'].get('phase')!='completed': raise RuntimeError(self.unresolved_batch_message(old_state))
-            existing[0].unlink()
+            self.previous_reservation=old
         if self.state_file.exists():
             saved=self.migrate_state(json.loads(self.state_file.read_text()))
             if any(saved.get(k)!=self.state[k] for k in ('project','team','role')): raise RuntimeError('state mismatch')
@@ -540,11 +559,18 @@ class Supervisor:
             self.human_input_restart_recovery=bool(self.state.get('humanInputActive'))
         self.claim_reservation()
     def claim_reservation(self):
-        self.call('claim'); self.state['owner']=self.owner; self.save(); self.violations.parent.mkdir(mode=0o700,exist_ok=True)
+        self.call('claim')
+        previous=getattr(self,'previous_reservation',None)
+        if self.state.get('batch') and previous:
+            self.state['recovery']={'batch_id':self.state['batch']['id'],'ids':[m['id'] for m in self.state['batch']['messages']],
+                                    'pid':previous['pid'],'start':previous['start']}
+        self.state['owner']=self.owner; self.save(); self.violations.parent.mkdir(mode=0o700,exist_ok=True)
         self.violations.touch(mode=0o600,exist_ok=True); Path(str(self.violations)+'.lock').touch(mode=0o600,exist_ok=True)
         # The bridge read guard hashes the value read from fd 3 without its newline.
         atomic(self.reservation,{'type':'antigravity','owner':self.owner,'pid':os.getpid(),'start':self.start,'state':str(self.state_file),'actas':str(self.actas),'violations':str(self.violations),'capHash':hashlib.sha256(self.cap.encode()).hexdigest(),'kind':'tui-pty'})
+        if self.legacy_reservation.exists(): self.legacy_reservation.unlink()
         self.acquired=True
+        self.delivery_mode=self.delivery('admit').strip()
     def reset_guard(self):
         if not self.state_file.exists(): raise RuntimeError('no state exists for recovery')
         state=self.migrate_state(json.loads(self.state_file.read_text()))
@@ -588,8 +614,8 @@ class Supervisor:
         self.state.update({'childPid':pid,'childStart':proc_start(pid),'supervisorPhase':'WAITING_FOR_IDLE'}); self.save()
         self.sync_winsize()
     def envelope(self, batch):
-        out=[f'[agmsg batch id={batch["id"]} count={len(batch["messages"])}]']
-        for m in batch['messages']:
+        out=[f'[agmsg batch id={batch["id"]} count={len(batch.get("delivery_messages",batch["messages"]))}]']
+        for m in batch.get('delivery_messages',batch['messages']):
             body=m['body'].replace('\x1b','\\x1b')
             out += [f'[agmsg message id={m["id"]}]',f'from: {m["from"]}',f'at: {m["at"]}','body:',body,'[/agmsg message]']
         out += ['[/agmsg batch]','After reading this delivery, first output exactly one line consisting of AGMSG_RECEIVED, an ASCII colon (U+003A), and the batch id with no spaces, then proceed normally. Do not run tools to inspect the format.']
@@ -605,13 +631,20 @@ class Supervisor:
         return any(re.search(r'(?m)^>\s*$\n\? for shortcuts\b', m.get('body','')) for m in batch.get('messages',[]))
     def inject(self):
         b=self.state['batch']; data=self.envelope(b).encode()
-        os.write(self.master,b'\x1b[200~'+data+b'\x1b[201~\r')
+        if getattr(self,'delivery_mode','legacy')=='claims':
+            self.delivery('admit'); self.renew()
         b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}'
         b['manualResumeAfterAck']=self.batch_contains_idle_signature(b)
         self.result_buffer=''
         self.permission_raw_window=''
         if getattr(self,'screen',None):self.screen.uncertain=False;self.screen.uncertain_reason=None
-        self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
+        self.state['supervisorPhase']='INJECTED'; self.save()
+        payload=b'\x1b[200~'+data+b'\x1b[201~\r'
+        try:
+            if os.write(self.master,payload)!=len(payload): raise RuntimeError('partial PTY delivery write')
+        except Exception:
+            b['phase']='uncertain'; self.state['durableAttention']=True; self.state['supervisorPhase']='NEEDS_ATTENTION'; self.save(); raise
+        self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
     @staticmethod
     def failure_signature(text):
         clean=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))','',text)
@@ -619,11 +652,13 @@ class Supervisor:
     def ack(self):
         self.check_guard()
         b=self.state['batch']; b['phase']='completed'; self.state['supervisorPhase']='ACK_PENDING'; self.save()
-        try: self.call('ack',input=json.dumps([m['id'] for m in b['messages']]),cap=True)
+        try:
+            if getattr(self,'delivery_mode','legacy')=='claims': self.delivery('finish',self.claim_request())
+            else: self.call('ack',input=json.dumps([m['id'] for m in b['messages']]),cap=True)
         except Exception:
-            b['phase']='uncertain'; self.state['durableAttention']=True; self.state['supervisorPhase']='NEEDS_ATTENTION'; self.save(); raise
+            self.state['durableAttention']=True; self.state['supervisorPhase']='ACK_PENDING'; self.save(); raise
         pause_after_ack=b.pop('manualResumeAfterAck',False)
-        self.state['batch']=None; self.state['supervisorPhase']='WAITING_FOR_IDLE'
+        self.state['batch']=None; self.state.pop('recovery',None); self.state['supervisorPhase']='WAITING_FOR_IDLE'
         if pause_after_ack:
             self.human_input_seen=True; self.state['manualResumeRequired']=True
             print('\r\n[agmsg] Stopped subsequent automatic delivery because the message body contained an idle-screen signature. Resume: $agmsg resume',file=sys.stderr)
@@ -636,7 +671,13 @@ class Supervisor:
         if self.state['batch']:
             if self.state['batch'].get('phase')=='prepared': self.inject()
             return
-        self.last_poll=time.monotonic(); rows=self.call('peek').strip()
+        self.last_poll=time.monotonic()
+        try: rows=(self.delivery('receive') if getattr(self,'delivery_mode','legacy')=='claims' else self.call('peek')).strip()
+        except RuntimeError as error:
+            if getattr(self,'delivery_mode','legacy')=='claims' and 'CHECK constraint failed: message_size_limit' in str(error):
+                raise RuntimeError('message size limit exceeded') from None
+            if getattr(self,'delivery_mode','legacy')=='claims' and 'claims_active' in str(error): return
+            raise
         if not rows:return
         msgs=[json.loads(x) for x in rows.splitlines()]; chosen=[]; size=0
         for m in msgs:
@@ -645,7 +686,13 @@ class Supervisor:
             if size+n>65536: break
             chosen.append(m);size+=n
         if not chosen:return
-        self.state['batch']={'id':str(uuid.uuid4()),'phase':'prepared','messages':chosen}; self.state['supervisorPhase']='PREPARED'; self.save()
+        self.state['batch']={'id':str(uuid.uuid4()),'phase':'prepared','messages':chosen}
+        if getattr(self,'delivery_mode','legacy')=='claims':
+            self.state['batch'].update({'claim_owner':self.owner,'original_ids':[m['id'] for m in chosen],
+                'claim_ids':[m['id'] for m in chosen],'claim_token':chosen[0]['claim_token'],
+                'protection_id':chosen[0]['protection_id'],'claim_expires_at':chosen[0]['claim_expires_at']})
+            self.state['batch']['messages']=[{k:v for k,v in m.items() if k not in ('claim_token','claim_expires_at','protection_id')} for m in chosen]
+        self.state['supervisorPhase']='PREPARED'; self.save()
         # Recheck screen transitions and human input during peek/save immediately before injection.
         if self.injection_ready(): self.inject()
     def input_ready(self):
@@ -693,6 +740,8 @@ class Supervisor:
         print('\r\n[agmsg] Resumed automatic delivery after confirming the empty input prompt',file=sys.stderr)
     def loop(self):
         while not self.stopping:
+            if (getattr(self,'delivery_mode','legacy')=='claims' and (self.state.get('batch') or {}).get('phase') in ('prepared','sent')
+                    and time.monotonic()-getattr(self,'last_renew',0)>30): self.renew()
             if self.resize_requested:
                 self.resize_requested=False; self.sync_winsize()
             if self.resume_requested:
@@ -747,7 +796,9 @@ class Supervisor:
     def run(self):
         self.acquire()
         self.print_resume_hint_if_paused()
-        if (self.state.get('batch') or {}).get('phase')=='completed': self.ack()
+        if (self.state.get('batch') or {}).get('phase')=='completed':
+            self.reconcile()
+            if self.state.get('batch'): self.ack()
         self.launch(); self.loop()
     def close(self):
         if self.old: termios.tcsetattr(sys.stdin.fileno(),termios.TCSADRAIN,self.old)
@@ -774,15 +825,21 @@ def recover(a):
     reservation_file=next((file for file in (s.reservation,s.legacy_reservation) if file.exists()),None)
     if reservation_file is None or not s.state_file.exists(): raise RuntimeError('no reservation or state exists for recovery')
     reservation=json.loads(reservation_file.read_text()); state=s.migrate_state(json.loads(s.state_file.read_text())); batch=state.get('batch')
-    try: live=process_still(int(reservation['pid']),reservation['start'])
-    except ValueError: live=False
+    if (reservation.get('state')!=str(s.state_file) or reservation.get('kind')!='tui-pty'
+            or not isinstance(reservation.get('pid'),int) or reservation['pid']<=0
+            or not isinstance(reservation.get('start'),str) or not reservation['start']
+            or any(state.get(k)!=s.state[k] for k in ('project','team','role'))): raise RuntimeError('recovery reservation or state mismatch')
+    live=process_still(int(reservation['pid']),reservation['start'])
     if live: raise RuntimeError('the recovery target supervisor is running')
     if not batch or batch.get('id')!=a.batch: raise RuntimeError('recovery batch ID does not match')
     expected=sorted(a.confirm_ids or []); actual=sorted(m['id'] for m in batch.get('messages',[]))
     if expected!=actual: raise RuntimeError('recovery batch ID set does not match')
-    s.state=state; s.state['durableAttention']=False; reservation_file.unlink(); s.violations.write_text('')
+    s.state=state; s.state['durableAttention']=False; s.previous_reservation=reservation; s.violations.write_text('')
     s.claim_reservation()
     try:
+        s.reconcile()
+        if not s.state.get('batch'):
+            print('recovery completed; all saved messages were already read'); return
         if a.action=='ack':
             s.state['batch']['phase']='completed'; s.state['supervisorPhase']='ACK_PENDING'; s.save(); s.ack()
             print('recovery ack completed')

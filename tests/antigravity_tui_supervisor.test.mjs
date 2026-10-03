@@ -18,6 +18,40 @@ function runPython(source) {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
 
+test('protected receive translates its size refusal without hiding unrelated errors', () => {
+  runPython(`
+import importlib.util
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+s = module.Supervisor.__new__(module.Supervisor)
+s.a = SimpleNamespace(poll=0)
+s.last_poll = 0
+s.check_guard = lambda: None
+s.injection_ready = lambda: True
+s.state = {'batch': None}
+size_error = 'receive failed: CHECK constraint failed: message_size_limit (19)'
+for mode, original, expected in [
+    ('claims', size_error, 'message size limit exceeded'),
+    ('claims', 'CHECK constraint failed: another_guard', 'CHECK constraint failed: another_guard'),
+    ('legacy', size_error, size_error),
+]:
+    s.delivery_mode = mode
+    def refuse(*args):
+        raise RuntimeError(original)
+    s.delivery = refuse
+    s.call = refuse
+    try:
+        s.maybe_poll()
+    except RuntimeError as error:
+        assert str(error) == expected, str(error)
+    else:
+        raise AssertionError('receive failure must remain a failure')
+    assert s.state == {'batch': None}
+`);
+});
+
 test('does not inject on a permission screen or draft; only reinjects a prepared batch into an empty input field', () => {
   runPython(`
 import importlib.util
@@ -838,6 +872,7 @@ test('launches a fake TUI on a real PTY and proceeds from post-receive receipt c
   fs.mkdirSync(install);
   fs.mkdirSync(project);
   fs.cpSync(path.join(repo, 'scripts'), path.join(install, 'scripts'), { recursive: true });
+
   const fake = path.join(dir, 'agy');
   fs.writeFileSync(path.join(dir, 'fake.mjs'), `
 process.stdin.setRawMode(true);
@@ -930,11 +965,12 @@ sys.exit(os.waitstatus_to_exitcode(status))
   child.stdout.on('data', chunk => { output += chunk.toString(); });
   child.stderr.on('data', chunk => { output += chunk.toString(); });
   const waitFor = async predicate => {
-    for (let i = 0; i < 200; i += 1) {
+    for (let i = 0; i < 1200; i += 1) {
       if (predicate()) return;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    throw new Error(`wait timeout: ${output}`);
+    const states=fs.readdirSync(path.join(install,'run')).filter(name=>name.endsWith('.state.json')).map(name=>fs.readFileSync(path.join(install,'run',name),'utf8')).join('\n');
+    throw new Error(`wait timeout: ${output}\nSTATE: ${states}`);
   };
   try {
     await waitFor(() => output.includes('? for shortcuts'));
@@ -1016,7 +1052,8 @@ sys.exit(os.waitstatus_to_exitcode(status))
     replay.stdout.on('data', chunk => { replayOutput += chunk.toString(); });
     replay.stderr.on('data', chunk => { replayOutput += chunk.toString(); });
     try {
-      await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);
+      try {await waitFor(() => JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')).batch === null);}
+      catch(error){error.message+='\nREPLAY: '+replayOutput;throw error;}
       assert.match(replayOutput, new RegExp('AGMSG_RECEIVED:' + uncertain.batch.id));
     } finally {
       spawnSync('python3', [supervisorPath, '--action', 'stop', '--project', project, '--team', 'fixture', '--name', 'worker'], { env, encoding: 'utf8' });
@@ -1188,5 +1225,29 @@ assert '--name agy' in message, 'the stop command does not point at this role'
 # dressed up as a diagnosis.
 assert module.explain_claim_refusal('unknown:claim_failed', str(project), 'demo', 'agy') == 'unknown:claim_failed'
 assert module.explain_claim_refusal('held:no-pid-here', str(project), 'demo', 'agy') == 'held:no-pid-here'
+`);
+});
+
+test('partial or failed PTY write persists attempted state first and retains uncertainty',()=>{
+  runPython(`
+import importlib.util
+spec=importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+for partial in (True,False):
+    s=m.Supervisor.__new__(m.Supervisor);s.master=99
+    s.state={'batch':{'id':'batch','phase':'prepared','messages':[{'id':'m','from':'a','at':'now','body':'body'}]},'supervisorPhase':'PREPARED'}
+    snapshots=[]
+    s.save=lambda: snapshots.append((s.state['batch']['phase'],s.state['supervisorPhase']))
+    def write(fd,data):
+        assert snapshots[-1]==('sent','INJECTED'), snapshots
+        if partial: return 1
+        raise OSError('fixture write failed')
+    m.os.write=write
+    try:
+        s.inject();raise AssertionError('failed write accepted')
+    except (OSError,RuntimeError): pass
+    assert s.state['batch']['phase']=='uncertain'
+    assert s.state['supervisorPhase']=='NEEDS_ATTENTION'
+    assert s.state['batch']['messages'][0]['id']=='m'
 `);
 });
