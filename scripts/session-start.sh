@@ -59,6 +59,26 @@ source "$SCRIPT_DIR/lib/terminal-context-line.sh"
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
 [ -n "$PAIRS" ] || exit 0
 
+# A project hook is shared by every Claude Code launch surface that reads the
+# project's settings. Allow a user to opt out of selected surfaces without
+# removing the hook for their other sessions. The list is a comma-separated
+# global config value; matching is exact and case-sensitive. Keep running the
+# hook cleanup and type-specific SessionStart behavior; suppress only the
+# Monitor directive below.
+SKIP_MONITOR_DIRECTIVE=0
+if [ "$TYPE" = "claude-code" ] && [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ]; then
+  _skip_entrypoints="$(bash "$SCRIPT_DIR/config.sh" get session_start.skip_entrypoints 2>/dev/null || true)"
+  IFS=, read -r -a _skip_entrypoint_values <<< "$_skip_entrypoints"
+  for _skip_entrypoint in "${_skip_entrypoint_values[@]}"; do
+    _skip_entrypoint="${_skip_entrypoint#"${_skip_entrypoint%%[![:space:]]*}"}"
+    _skip_entrypoint="${_skip_entrypoint%"${_skip_entrypoint##*[![:space:]]}"}"
+    if [ "$_skip_entrypoint" = "$CLAUDE_CODE_ENTRYPOINT" ]; then
+      SKIP_MONITOR_DIRECTIVE=1
+      break
+    fi
+  done
+fi
+
 # Read hook input JSON from stdin BEFORE the type plug below runs (#1468):
 # stdin can only be read once, and a plug that needs a hook input field (e.g.
 # codex reading `source` to tell startup/resume/clear apart) has to see it
@@ -255,30 +275,6 @@ for f in "$RUN_DIR"/ready.*; do
 done
 
 
-# --- Dedup against the previous watcher in this CC instance. ---
-if [ -n "$CC_PID" ]; then
-  STATE="$RUN_DIR/cc-instance.$CC_PID"
-  if [ -f "$STATE" ]; then
-    # Records the previous instance id this CC attached to. Comparing/killing
-    # by instance id (not bare session_id) keeps the prev_pidfile lookup aligned
-    # with watch.sh's pidfile key.
-    prev=$(cat "$STATE" 2>/dev/null || true)
-    if [ -n "$prev" ] && [ "$prev" != "$INSTANCE_ID" ]; then
-      prev_pidfile="$RUN_DIR/watch.$prev.pid"
-      if [ -f "$prev_pidfile" ]; then
-        prev_pid=$(cat "$prev_pidfile" 2>/dev/null || true)
-        if [ -n "$prev_pid" ] && _agmsg_pid_alive_local "$prev_pid"; then
-          kill "$prev_pid" 2>/dev/null || true
-        fi
-      fi
-    fi
-  fi
-  if ! agmsg_write_atomic "$STATE" "$INSTANCE_ID"; then
-    printf 'agmsg: could not publish the complete instance marker: %s\n' "$STATE" >&2
-    exit 1
-  fi
-fi
-
 # --- Start the engine for a connected team that has none (#761, #774). ---
 # A reboot leaves every sync engine dead and nothing restarts one: the five
 # commands that start it are all operator actions. `connected` keeps printing,
@@ -324,6 +320,37 @@ if [ -x "$SKILL_DIR/scripts/remote.sh" ] && [ -r "$SKILL_DIR/scripts/lib/sync-au
     set -- $_connected_teams
     IFS="$_old_ifs"
     agmsg_sync_autostart "$SKILL_DIR/scripts/remote.sh" "$@" || true
+  fi
+fi
+
+# Entry points opted out of Monitor still run project-marker maintenance and
+# best-effort connected-team sync recovery above. Stop before watcher-specific
+# state is published or a Monitor directive can be emitted.
+if [ "$SKIP_MONITOR_DIRECTIVE" -eq 1 ]; then
+  exit 0
+fi
+
+# --- Dedup against the previous watcher in this CC instance. ---
+if [ -n "$CC_PID" ]; then
+  STATE="$RUN_DIR/cc-instance.$CC_PID"
+  if [ -f "$STATE" ]; then
+    # Records the previous instance id this CC attached to. Comparing/killing
+    # by instance id (not bare session_id) keeps the prev_pidfile lookup aligned
+    # with watch.sh's pidfile key.
+    prev=$(cat "$STATE" 2>/dev/null || true)
+    if [ -n "$prev" ] && [ "$prev" != "$INSTANCE_ID" ]; then
+      prev_pidfile="$RUN_DIR/watch.$prev.pid"
+      if [ -f "$prev_pidfile" ]; then
+        prev_pid=$(cat "$prev_pidfile" 2>/dev/null || true)
+        if [ -n "$prev_pid" ] && _agmsg_pid_alive_local "$prev_pid"; then
+          kill "$prev_pid" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
+  if ! agmsg_write_atomic "$STATE" "$INSTANCE_ID"; then
+    printf 'agmsg: could not publish the complete instance marker: %s\n' "$STATE" >&2
+    exit 1
   fi
 fi
 
