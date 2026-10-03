@@ -14,10 +14,17 @@ entrypoint marker wins even if a pane env var leaked in from somewhere else
 ## where
 
 The placement id is the Claude Code session id — the conversation itself is
-the only handle a desktop seat has, there being no pane. `terminal_where`
-always answers `n/a:no_container_concept`: a desktop session has no window,
-tab or split to report, and that is a decided fact about this driver, not a
-failed read.
+the only handle a desktop seat has, there being no pane. **The id comes from
+`CLAUDE_CODE_HOST_SESSION_ID`, not `CLAUDE_CODE_SESSION_ID`**: measured
+2026-10-02 on a live, desktop-spawned Claude Code process, the ordinary
+`CLAUDE_CODE_SESSION_ID` a terminal session carries was absent there, while
+`CLAUDE_CODE_HOST_SESSION_ID` (shape: `local_<uuid>`) held this process's own
+identity. Both are tried, in that order, before falling back to the caller's
+own argument being empty altogether.
+
+`terminal_where` always answers `n/a:no_container_concept`: a desktop
+session has no window, tab or split to report, and that is a decided fact
+about this driver, not a failed read.
 
 ## pane_state
 

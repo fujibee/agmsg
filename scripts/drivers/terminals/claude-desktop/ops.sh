@@ -14,10 +14,13 @@
 # its own identity instead: present and addressable by session id, but with
 # no pane to peek, poke, spawn, despawn, arrange or name.
 #
-# MEASURED 2026-10-02, on a live Claude desktop app process: its environment
-# carries CLAUDE_CODE_ENTRYPOINT=claude-desktop; a plain terminal session
-# carries CLAUDE_CODE_ENTRYPOINT=cli. No other marker was checked or is relied
-# on here.
+# MEASURED 2026-10-02, on a live, desktop-spawned Claude Code process: its
+# environment carries CLAUDE_CODE_ENTRYPOINT=claude-desktop (a plain terminal
+# session carries CLAUDE_CODE_ENTRYPOINT=cli), and CLAUDE_CODE_SESSION_ID —
+# the variable a terminal session's own identity is normally read from — is
+# ABSENT. The value that IS present and carries this process's own identity
+# is CLAUDE_CODE_HOST_SESSION_ID instead (observed value shape:
+# local_<uuid>). Both variables are tried below, in that order.
 #
 # Step 1 scope (see memory/design/2026-10-02-desktop-app-terminal-drivers.md):
 # detect + where only. Waking an idle desktop session, delivery changes, and
@@ -52,19 +55,26 @@ terminal_id_ok() {   # <id>
 # record op: report TWO facts and decide nothing, same shape as orca/tmux/herdr
 # (2026-08-31). PRESENCE is the exit code: 0 iff CLAUDE_CODE_ENTRYPOINT is
 # claude-desktop, whether or not a usable session id is at hand. SELF-ID is
-# stdout: the session id, preferring the argument (the same value every other
-# driver here is handed), falling back to $CLAUDE_CODE_SESSION_ID when the
-# argument is empty — nothing else is consulted, so a present-but-unresolved
-# desktop session prints nothing and names the reason on stderr rather than
-# guessing.
+# stdout: the caller's argument if non-empty (the same value every other
+# driver here is handed), else the environment.
+#
+# MEASURED 2026-10-02 against a live desktop-spawned Claude Code process:
+# the ordinary CLAUDE_CODE_SESSION_ID a terminal session carries is ABSENT
+# there; the environment variable that is actually present and holds this
+# process's own identity is CLAUDE_CODE_HOST_SESSION_ID instead. Both are
+# tried, CLAUDE_CODE_SESSION_ID first (in case a future or differently
+# configured host sets it) — nothing else is consulted, so a
+# present-but-unresolved desktop session prints nothing and names the
+# reason on stderr rather than guessing.
 terminal_detect() {
   local sid="${1:-}"
   [ "${CLAUDE_CODE_ENTRYPOINT:-}" = claude-desktop ] || return 1
   if [ -z "$sid" ]; then sid="${CLAUDE_CODE_SESSION_ID:-}"; fi
+  if [ -z "$sid" ]; then sid="${CLAUDE_CODE_HOST_SESSION_ID:-}"; fi
   if [ -n "$sid" ] && _claude_desktop_id_ok "$sid"; then
     printf '%s\n' "$sid"
   else
-    echo "claude-desktop: no usable session id (neither the caller's argument nor the CLAUDE_CODE_SESSION_ID environment variable) — cannot identify this session" >&2
+    echo "claude-desktop: no usable session id (neither the caller's argument nor the CLAUDE_CODE_SESSION_ID or CLAUDE_CODE_HOST_SESSION_ID environment variables) — cannot identify this session" >&2
   fi
   return 0
 }
@@ -72,9 +82,12 @@ terminal_detect() {
 # Optional environment-only self identity, same contract as orca's own
 # terminal_self_env: an entrypoint marker without a usable session id is
 # ambiguous ("present but could not resolve"); a session id without the
-# marker is not this driver's concern at all.
+# marker is not this driver's concern at all. Same fallback order as
+# terminal_detect above.
 terminal_self_env() {
-  local sid="${1:-${CLAUDE_CODE_SESSION_ID:-}}"
+  local sid="${1:-}"
+  if [ -z "$sid" ]; then sid="${CLAUDE_CODE_SESSION_ID:-}"; fi
+  if [ -z "$sid" ]; then sid="${CLAUDE_CODE_HOST_SESSION_ID:-}"; fi
   if [ "${CLAUDE_CODE_ENTRYPOINT:-}" != claude-desktop ]; then
     printf 'n/a:not_in_terminal\n'
     return 0

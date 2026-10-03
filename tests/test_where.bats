@@ -48,8 +48,12 @@ teardown() { teardown_test_env; }
   # #1559/desktop-app-terminal-drivers: CLAUDE_CODE_ENTRYPOINT=claude-desktop
   # is the one marker (measured on a live desktop process; a terminal session
   # carries CLAUDE_CODE_ENTRYPOINT=cli). The placement id is the Claude Code
-  # session id itself -- there is no pane to report instead.
-  export CLAUDE_CODE_ENTRYPOINT=claude-desktop CLAUDE_CODE_SESSION_ID=desktop-sid-123
+  # session id -- there is no pane to report instead. CLAUDE_CODE_HOST_SESSION_ID,
+  # not CLAUDE_CODE_SESSION_ID, is what actually carries it: measured on a
+  # live desktop-spawned process, CLAUDE_CODE_SESSION_ID (what a terminal
+  # session carries) was absent there.
+  export CLAUDE_CODE_ENTRYPOINT=claude-desktop CLAUDE_CODE_HOST_SESSION_ID=desktop-sid-123
+  unset CLAUDE_CODE_SESSION_ID
   run bash "$SCRIPTS/where.sh"
   [ "$status" -eq 0 ]
   grep -q '^resolved=true' <<<"$output"
