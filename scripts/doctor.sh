@@ -284,6 +284,67 @@ _doctor_print_orphans() {
   fi
 }
 
+# --- registry locks with no holder record (#865) ---------------------------
+#
+# A registry lock (teams/<team>/.config.lock) names its holder in a record
+# beside it. The next command that needs the lock breaks one whose holder is
+# gone, but a lock with NO record cannot be told from one taken a moment ago
+# whose owner has not written the record yet, so nothing breaks it and every
+# command for that team then waits out its budget and fails.
+#
+# REPORTED, NEVER REMOVED, not even by --fix. Removing one safely needs the
+# acquiring side to cooperate: whatever this checks about the directory can stop
+# being true before the `rmdir` runs (the lock is released, a new owner takes
+# the same path and has not recorded itself yet), and no age or second look
+# closes that. So doctor finds them and prints the command; running it is the
+# operator's call, when every agmsg sync and seat is stopped.
+# Installation-wide, like the orphaned records above.
+LOCKS_NO_RECORD=""
+
+# Only the holder file is a record. The copy a killed release leaves behind
+# (`<lock>.holder.releasing.<pid>`) is not tied to the directory that is there
+# now, so it is not counted; a lock with only that is listed like any other.
+_doctor_lock_has_record() {   # <lock dir>
+  [ -f "$1.holder" ]
+}
+
+# Fills LOCKS_NO_RECORD with one team directory name per line. The three globs
+# are the ones remote.sh doctor uses: `*` skips a leading dot, so `.foo` and
+# `..foo` need their own.
+_doctor_scan_record_less_locks() {
+  local lock name
+  LOCKS_NO_RECORD=""
+  for lock in "$SKILL_DIR"/teams/*/.config.lock "$SKILL_DIR"/teams/.[!.]*/.config.lock "$SKILL_DIR"/teams/..?*/.config.lock; do
+    [ -d "$lock" ] || continue
+    if _doctor_lock_has_record "$lock"; then continue; fi
+    name="${lock%/.config.lock}"; name="${name##*/}"
+    LOCKS_NO_RECORD="${LOCKS_NO_RECORD}${name}"$'\n'
+  done
+}
+
+# Under --redacted the team name (and the path in the command) is replaced.
+_doctor_print_locks() {
+  local n name q
+  [ -n "$LOCKS_NO_RECORD" ] || return 0
+  n="$(printf '%s' "$LOCKS_NO_RECORD" | grep -c . || true)"
+  echo "registry locks with no holder record -- nothing can tell whether they are held ($n):"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if [ "$REDACTED" = 1 ]; then
+      _redact_team "$name"; echo "  team: $_REDACT_OUT"
+    else
+      # QUOTED, because this line is meant to be pasted: the store root and the
+      # team name can both contain a space. `rmdir`, not `rm -r`, so the paste
+      # cannot remove anything but an empty lock directory.
+      q="$(printf "'%s'" "$(printf '%s' "$SKILL_DIR/teams/$name/.config.lock" | sed "s/'/'\\\\''/g")")"
+      echo "  team: $name"
+      echo "    rmdir $q"
+    fi
+  done <<< "$LOCKS_NO_RECORD"
+  echo "  run a rmdir only when every agmsg sync and seat is stopped; a lock taken a moment ago looks the same."
+  echo
+}
+
 # --- --fix: its own mode, not a flag on the report -------------------------
 #
 # Lists what would go, asks once (--yes skips only the question), then removes
@@ -951,6 +1012,12 @@ fi
 if [ -n "$ORPHAN_AMBIGUOUS" ]; then
   _warn "run/ holds records for a team that no longer exists that cannot be attributed to one seat (\"__\" inside a name); they are left alone, remove them by hand"
 fi
+# Registry locks with no holder record (#865): also installation-wide. Nothing
+# else ever breaks one, so a team that keeps timing out on its lock lands here.
+_doctor_scan_record_less_locks
+if [ -n "$LOCKS_NO_RECORD" ]; then
+  _warn "teams/ holds registry lock(s) with no holder record, and every command for those teams waits on them (see 'registry locks with no holder record' above); the rmdir to run by hand is listed there, only when every agmsg sync and seat is stopped"
+fi
 WARN_COUNT="$(printf '%s\n' "$WARNINGS" | grep -c . || true)"
 
 echo "$TEAM_COUNT team(s), $TOTAL_PAIR_COUNT registration(s), $WARN_COUNT warning(s)"
@@ -961,6 +1028,7 @@ if [ -n "$GLOBAL_WATCH_LINE" ]; then
 fi
 printf '%s' "$REPORT_BLOCKS"
 _doctor_print_orphans
+_doctor_print_locks
 
 if [ -n "$WARNINGS" ]; then
   echo "warnings:"
