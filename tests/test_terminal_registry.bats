@@ -562,7 +562,7 @@ EOF
   _install_external_terminal
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%4"
 
-  [ "$(agmsg_terminal_candidates)" = "$(printf 'orca\nherdr\nprobe\ntmux\nplain')" ]
+  [ "$(agmsg_terminal_candidates)" = "$(printf 'claude-desktop\norca\nherdr\nprobe\ntmux\nplain')" ]
   [ "$(agmsg_terminal_resolve_placement sess-x)" = "probe" ]
   [ "$(agmsg_terminal_resolve_name sess-x)" = "$(printf 'probe\tprobe-pane')" ]
   [ "$(_agmsg_terminal_resolve_by_label testteam alice)" = "$(printf 'probe\tprobe-pane')" ]
