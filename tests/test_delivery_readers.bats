@@ -303,7 +303,17 @@ SH
 
 @test "claimed watch: ownership change after stdout retains UNKNOWN lease" {
   send_one accepted-before-move
-  local barrier="$TEST_SKILL_DIR/consume" lock
+  local barrier="$TEST_SKILL_DIR/consume" lock expected_unread
+  expected_unread="$(unread)"
+  export AGMSG_TEST_POLL_COMPLETE="$TEST_SKILL_DIR/poll-complete"
+  fixture_override <<'SH'
+sleep() {
+  if [ "$#" -eq 1 ] && [ "$1" = 60 ]; then
+    : > "$AGMSG_TEST_POLL_COMPLETE"
+  fi
+  command sleep "$@"
+}
+SH
   AGMSG_TEST_CONSUME_BARRIER="$barrier" AGMSG_WATCH_INTERVAL=60 \
     bash "$SCRIPTS/watch.sh" fixture "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out" 2>"$TEST_SKILL_DIR/err" 3>&- 4>&- &
@@ -315,8 +325,16 @@ SH
   printf 'foreign-owner\n' > "$lock"
   : > "$barrier.release"
   wait_text "$TEST_SKILL_DIR/out" 'reservation retained until expiry'
+  # The broad watcher still processes other pairs after that diagnostic.
+  # Observe at the complete poll's unchanged 60s sleep boundary,
+  # so the zero-timeout SQL oracle cannot race the next pair's transaction.
+  wait_file "$AGMSG_TEST_POLL_COMPLETE"
+  kill -0 "$WATCH_PID"
   [ "$(claims)" = 1 ]
-  [[ "$(unread)" == *accepted-before-move* ]] || return 1
+  [ "$(unread)" = "$expected_unread" ]
+  [ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM events WHERE type='message_read';")" = 0 ]
+  [ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM delivery_ack_receipts;')" = 0 ]
+  kill -0 "$WATCH_PID"
 }
 
 @test "claimed watch: control ACK failure cannot trigger teardown" {
