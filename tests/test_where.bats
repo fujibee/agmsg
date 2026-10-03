@@ -69,6 +69,33 @@ teardown() { teardown_test_env; }
   refute grep -q 'placement=herdr' <<<"$output"
   refute grep -q 'placement=tmux' <<<"$output"
   refute grep -q 'placement=orca' <<<"$output"
+
+  # #1563 review, counterexample 1: a REAL, resolvable tmux pane inherited
+  # alongside the desktop marker must still lose to it -- priority ordering
+  # alone does not guarantee this (reproduced: without exclusive=1, this
+  # exact setup resolved as the tmux pane instead). The fake tmux below
+  # genuinely answers, so this is not merely "tmux absent".
+  export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
+  mkdir -p "$FAKEBIN"
+  : > "$ARGV_LOG"
+  agmsg_install_fake_tmux
+  export TMUX="/tmp/sock,1,0" TMUX_PANE="%4"
+  run bash "$SCRIPTS/where.sh"
+  [ "$status" -eq 0 ]
+  grep -q 'placement=claude-desktop:desktop-sid-123' <<<"$output"
+  refute grep -q 'placement=tmux' <<<"$output"
+
+  # #1563 review, counterexample 2: the SAME contaminated environment, but
+  # now with no usable desktop session id at all -- this must refuse loudly,
+  # naming claude-desktop, rather than silently falling through to the real
+  # tmux pane that is still sitting right there.
+  unset CLAUDE_CODE_HOST_SESSION_ID
+  run bash "$SCRIPTS/where.sh"
+  [ "$status" -eq 1 ]
+  grep -q '^resolved=false' <<<"$output"
+  grep -q 'claude-desktop' <<<"$output"
+  refute grep -q 'placement=tmux' <<<"$output"
+  refute grep -q '^resolved=true' <<<"$output"
 }
 
 @test "where: tmux with a live \$TMUX_PANE resolves to that pane, terminal=tmux is explicit" {

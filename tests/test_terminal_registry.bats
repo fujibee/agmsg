@@ -3924,6 +3924,36 @@ EOF
   [ "$output" = "tmux$(printf '\t')/tmp/fake:%1" ]
 }
 
+@test "self-identity: an exclusive driver skips label lookup entirely and still records (#1563)" {
+  # A stale team:agent label sits on an unrelated herdr pane -- #1112's own
+  # label-first resolution would otherwise prefer it over a live desktop
+  # session's own id, exactly the failure the #1563 review found. claude-
+  # desktop's exclusive=1 manifest flag must make name_self skip the label
+  # lookup altogether once it is present, never merely lose a tiebreak to it.
+  _fake_herdr_labels "w1:pDAEMON=agmsg:other" "w1:pMINE=deskteam:alice"
+  export HERDR_ENV=1 HERDR_PANE_ID="w1:pDAEMON"
+  export CLAUDE_CODE_ENTRYPOINT=claude-desktop CLAUDE_CODE_HOST_SESSION_ID=desk-sid-9
+  unset TMUX TMUX_PANE AGMSG_TERMINAL_DRIVER
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local rec; rec="$(agmsg_spawn_path deskteam alice)"
+  run agmsg_terminal_name_self "" deskteam alice /proj/DESK claude-code record
+  [ "$status" -eq 0 ]
+
+  # record_without_name=1: no pane to rename, so herdr's own rename ops were
+  # never called at all -- the record alone is this driver's whole contract.
+  refute grep -q 'herdr \[' "$ARGV_LOG"
+
+  # The record names the live desktop session, never the stale herdr label's
+  # pane -- this is what later makes team.sh report claude-desktop instead of
+  # unknown:no_placement_record, through the same generic ref-prefix read
+  # every other driver's placement record already goes through.
+  [ -f "$rec" ]
+  grep -q '^claude-desktop:desk-sid-9	/proj/DESK	claude-code$' "$rec"
+  refute grep -q 'w1:pMINE' "$rec"
+  refute grep -q 'herdr' "$rec"
+}
+
 @test "self-identity: name_self actually USES the label path, not just the helper (#1112)" {
   # The three tests above call the resolver directly, so all of them stay green
   # with the call site deleted from agmsg_terminal_name_self -- measured: the
