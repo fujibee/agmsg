@@ -53,7 +53,8 @@ set -euo pipefail
 #   --no-wait          don't block on the readiness handshake; return as soon
 #                      as the agent is launched (fire-and-forget)
 #   --ready-timeout N  seconds to wait for readiness before giving up
-#                      (default 90; on timeout, prints status=timeout, exit 3)
+#                      (default 90; handshake=actas types use a 300s minimum;
+#                      on timeout, prints status=timeout, exit 3)
 #   --model <id>       launch the agent on a specific model. The id is passed
 #                      through to the CLI unchecked (the CLI rejects unknown
 #                      ids); the flag spelling comes from the type's manifest
@@ -71,10 +72,10 @@ set -euo pipefail
 # ~/.agmsg/config/spawn_options.yaml. Optional; a missing file/section is a
 # no-op.
 #
-# Readiness: by default spawn blocks until the new agent's watcher attaches and
-# is receiving (it prints `status=ready ...`), so a leader can safely send work
-# right after spawn returns without racing the agent's cold start. Codex has no
-# Monitor, so the wait is skipped for codex.
+# Readiness: watcher-capable types block until their watcher attaches. Types
+# declaring `handshake=actas` instead block until the agent explicitly marks its
+# one-shot bootstrap complete. Other types return immediately. `--no-wait`
+# always opts out.
 #
 # Scope note: spawnable types are those whose manifest declares `spawnable=yes`;
 # macOS is the primary target, Linux and
@@ -391,6 +392,16 @@ if [ -z "$TEAM" ]; then
   fi
 fi
 
+# actas-handshake nonce (#338 Gap 2; review finding, 2026-07-19): computed here,
+# before the boot script is assembled below, so it can be exported into it.
+# Binds the mark this spawn waits for to THIS launch specifically — see the
+# "Readiness handshakes" section further down for the full rationale.
+HANDSHAKE="$(agmsg_type_get "$AGENT_TYPE" handshake)"
+ACTAS_NONCE=""
+if [ "$WAIT_READY" = "1" ] && [ "$HANDSHAKE" = "actas" ]; then
+  ACTAS_NONCE="$$.${TEAM}.${NAME}"
+fi
+
 # Role's session display name (#339): now that TEAM is final, join it to the
 # agent name. Emitted into the boot script when the type declares name_arg.
 SESSION_NAME="${TEAM}-${NAME}"
@@ -525,6 +536,15 @@ PLAIN_WITNESS="${BOOT}.plain-witness"
   # actas flow knows the session is already named <team>-<agent> (name_arg) and
   # suppresses the "rename this session" tip meant for hand-started sessions.
   echo 'export AGMSG_SPAWNED=1'
+  # actas-handshake types (review finding, 2026-07-19): the boot prompt only
+  # names the agent, not which team spawn resolved (identities.sh can return
+  # more than one team for that name) or which launch this is. Export both so
+  # the template can mark the exact (team, nonce) this spawn is waiting on
+  # instead of guessing.
+  if [ -n "$ACTAS_NONCE" ]; then
+    printf 'export AGMSG_SPAWN_TEAM=%q\n' "$TEAM"
+    printf 'export AGMSG_SPAWN_NONCE=%q\n' "$ACTAS_NONCE"
+  fi
   # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
   # An entry ending in `*` is a NAMESPACE: every exported variable whose name
   # starts with that prefix is unset, enumerated from `env` at boot time, so a
@@ -933,45 +953,35 @@ place_and_launch() {
   _launch_os_terminal
 }
 
-# Readiness handshake (#108). The spawned agent's actas flow starts its watcher
-# in exclusive mode, which touches a ready sentinel once it's actually
-# receiving. Block until that appears so the leader doesn't send a job into the
-# cold-start window (before the watcher attaches) and lose it.
+# Readiness handshakes (#108 watcher, #338 Gap 2 actas).
 #
-# Types with `readiness_sentinel=no` do not produce a spawn-awaitable readiness
-# sentinel, so skip the wait. That covers types with no Monitor at all (codex)
-# AND types whose watcher attaches via the agent's own launch rather than a
-# spawn-time sentinel (grok-build, whose monitor mode is real but not awaitable
-# here) — receive there is poll-based or agent-launched anyway.
-#
-# NOT named `monitor=`: that name reads as a statement about delivery-mode
-# support and collided with `delivery_modes=monitor` in agents' own reports
-# (#1214) — a type can carry `delivery_modes=monitor` (a real, settable mode)
-# and `readiness_sentinel=no` (no spawn-time handshake to await) at once, and
-# `delivery_modes` alone answers "can this type be set to monitor mode".
-# Backward compat: an already-installed type.conf from before this rename
-# still carries only the bare `monitor=` key. readiness_sentinel
-# reading empty must not silently behave as "yes" (wait) for such a manifest
-# -- fall back to the legacy key so an old no-handshake manifest (codex)
-# still skips the wait instead of timing out. A manifest carrying BOTH (the
-# migration window) prefers the new key.
+# handshake=actas is an explicit driver opt-in; all other types retain the
+# current readiness_sentinel and legacy monitor compatibility behavior.
+HANDSHAKE="$(agmsg_type_get "$AGENT_TYPE" handshake 2>/dev/null || true)"
 READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" readiness_sentinel 2>/dev/null || true)"
 [ -n "$READINESS_SENTINEL" ] || READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" monitor 2>/dev/null || true)"
-
-# #1023 review: agmsg_ready_path fails (empty, rc 1) when both an id-keyed
-# and a legacy ready sentinel exist for this pair. Checked explicitly here,
-# not left to an empty READY_PATH falling into the wait loop below and
-# reporting a plain status=timeout -- true, but for a reason that timeout
-# does not name (the loop below can never see a sentinel land at "").
-READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")" \
-  || die "'$NAME' in team '$TEAM': readiness sentinel path is ambiguous (both an id-keyed and a legacy sentinel exist); not spawning until the stale one is removed"
+# HANDSHAKE/ACTAS_NONCE are computed before the boot script is assembled.
+READY_KIND=""
+READY_PATH=""
 SKIPPED_READINESS_BY_TYPE=0
 SKIPPED_READINESS_BY_MODE=0
 DELIVERY_MODE=""
-if [ "$READINESS_SENTINEL" = "no" ] && [ "$WAIT_READY" = "1" ]; then
-  WAIT_READY=0
-  SKIPPED_READINESS_BY_TYPE=1
-  echo "spawn: '$AGENT_TYPE' has no spawn readiness handshake — skipping readiness wait (--no-wait implied)" >&2
+if [ "$WAIT_READY" = "1" ]; then
+  if [ "$HANDSHAKE" = "actas" ]; then
+    READY_KIND="actas"
+    if [ "$READY_TIMEOUT" -lt 300 ]; then
+      echo "spawn: '$AGENT_TYPE' actas handshake uses a 300s minimum readiness timeout (requested ${READY_TIMEOUT}s)" >&2
+      READY_TIMEOUT=300
+    fi
+  elif [ "$READINESS_SENTINEL" = "no" ]; then
+    WAIT_READY=0
+    SKIPPED_READINESS_BY_TYPE=1
+    echo "spawn: '$AGENT_TYPE' has no spawn readiness handshake — skipping readiness wait (--no-wait implied)" >&2
+  else
+    READY_KIND="watcher"
+    READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")" \
+      || die "'$NAME' in team '$TEAM': readiness sentinel path is ambiguous (both an id-keyed and a legacy sentinel exist); not spawning until the stale one is removed"
+  fi
 fi
 
 # A readiness sentinel is written by the project's monitor delivery watcher, not
@@ -980,7 +990,7 @@ fi
 # the per-project mode and skip the impossible wait, preserving the distinction
 # from a type that has no handshake at all. If status cannot be read or its output
 # is not recognized, keep waiting: unreadable state is not evidence of mode=off.
-if [ "$WAIT_READY" = "1" ] && [ "$SKIPPED_READINESS_BY_TYPE" = "0" ]; then
+if [ "$WAIT_READY" = "1" ] && [ "$SKIPPED_READINESS_BY_TYPE" = "0" ] && [ "$READY_KIND" = "watcher" ]; then
   _delivery_mode_line=""
   _delivery_status=0
   if ! _delivery_mode_line="$("$SCRIPT_DIR/delivery.sh" status "$AGENT_TYPE" "$PROJECT" 2>/dev/null)"; then
@@ -1014,8 +1024,15 @@ if [ "$WAIT_READY" = "1" ] && [ "$SKIPPED_READINESS_BY_TYPE" = "0" ]; then
 fi
 
 # Clear any stale sentinel before launching so we only observe THIS spawn's
-# watcher attaching.
-[ "$WAIT_READY" = "1" ] && rm -f "$READY_PATH" 2>/dev/null || true
+# bootstrap. Actas readiness is cleared through its public command; watcher
+# readiness retains its existing direct-path protocol.
+if [ "$WAIT_READY" = "1" ]; then
+  if [ "$READY_KIND" = "actas" ]; then
+    "$SCRIPT_DIR/ready.sh" clear "$TEAM" "$NAME" "$ACTAS_NONCE"
+  else
+    rm -f "$READY_PATH" 2>/dev/null || true
+  fi
+fi
 
 place_and_launch
 
@@ -1057,7 +1074,12 @@ _emit_spawned_but_unnamed() {
 
 if [ "$WAIT_READY" = "1" ]; then
   waited=0
-  while [ ! -e "$READY_PATH" ]; do
+  while true; do
+    if [ "$READY_KIND" = "actas" ]; then
+      "$SCRIPT_DIR/ready.sh" check "$TEAM" "$NAME" "$ACTAS_NONCE" && break
+    elif [ -e "$READY_PATH" ]; then
+      break
+    fi
     if [ "$waited" -ge "$READY_TIMEOUT" ]; then
       echo "status=timeout name=${NAME} team=${TEAM} after=${READY_TIMEOUT}s"
       echo "spawn: '${NAME}' did not signal ready within ${READY_TIMEOUT}s — it may still be booting; re-spawn or raise --ready-timeout" >&2
@@ -1066,8 +1088,8 @@ if [ "$WAIT_READY" = "1" ]; then
     sleep 1
     waited=$((waited + 1))
   done
-  # Ready confirmed. Now report the naming result — the two are independent, so a
-  # seat that IS receiving but could not be named reports spawned-but-unnamed, not ready.
+  # Ready confirmed. Consume the one-shot actas edge, then report naming.
+  [ "$READY_KIND" = "actas" ] && "$SCRIPT_DIR/ready.sh" clear "$TEAM" "$NAME" "$ACTAS_NONCE"
   [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed "after=${waited}s"
   echo "status=ready name=${NAME} team=${TEAM} after=${waited}s"
 elif [ "$SKIPPED_READINESS_BY_MODE" = "1" ]; then
