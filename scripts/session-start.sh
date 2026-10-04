@@ -494,11 +494,10 @@ monitor-branded tools are not valid for agmsg delivery. Do not start watch.sh
 with Bash/background/nohup or a shell task. Success is:
 
   - Monitor(agmsg inbox stream (acting as $ROLE_NAME)) starts
-  - TaskList shows a task whose description begins with "agmsg inbox
-    stream (acting as $ROLE_NAME)" for this session (the reliable check;
-    the background-task footer is not)
   - the transcript later contains Monitor event: "agmsg inbox stream
     (acting as $ROLE_NAME)"
+
+TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either.
 
 If the generic Monitor tool is unavailable, do not treat a background shell
 watcher as success. Switch to turn delivery or run manual inbox checks instead;
@@ -549,10 +548,9 @@ monitor-branded tools are not valid for agmsg delivery. Do not start watch.sh
 with Bash/background/nohup or a shell task. Success is:
 
   - Monitor(agmsg inbox stream) starts
-  - TaskList shows a task whose description begins with "agmsg inbox
-    stream" for this session (the reliable check; the background-task
-    footer is not)
   - the transcript later contains Monitor event: "agmsg inbox stream"
+
+TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either.
 
 If the generic Monitor tool is unavailable, do not treat a background shell
 watcher as success. Switch to turn delivery or run manual inbox checks instead;

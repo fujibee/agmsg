@@ -318,7 +318,7 @@ settings_file() {
   # claude-code-only note points at TaskList, not the background-task footer
   # (#270).
   grep -qF -- "configured hooks only" <<<"$output"
-  [[ "$output" == *"Verify with TaskList"* ]]
+  grep -qF -- "a task missing from TaskList is not a failure" <<<"$output"
 }
 
 # A pid that exists but this user cannot signal, so `kill -0` fails with EPERM

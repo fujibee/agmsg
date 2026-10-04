@@ -56,10 +56,10 @@ setup() {
   grep -Fq 'command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code --max-seconds=1750`' "$RENDERED"
 }
 
-@test "Claude rendered skill's actas ends by confirming the Monitor attached via TaskList, not the UI footer" {
+@test "Claude rendered skill's actas ends by confirming the Monitor attached without treating TaskList as the only check" {
   grep -Fq 'Confirm the Monitor actually attached' "$RENDERED"
-  grep -Fq 'run TaskList once more and confirm a task whose description begins with `agmsg inbox stream` is present' "$RENDERED"
-  grep -Fq 'Do NOT read this off the terminal UI' "$RENDERED"
+  grep -Fq 'a task missing from TaskList is not a failure' "$RENDERED"
+  grep -Fq 'The background-task footer is not a reliable check either.' "$RENDERED"
 }
 
 @test "no rendered skill of any type still carries the unwired 'supplied by the type overlay' placeholder text" {

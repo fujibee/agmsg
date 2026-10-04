@@ -630,11 +630,10 @@ AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
 
 Pass the command above verbatim — the session_id is already filled in.
 Use Claude Code's generic Monitor tool only. Do not start this command with
-Bash/background/nohup or a shell task. Success is a TaskList entry whose
-description begins with "agmsg inbox stream" (after actas it reads
-"agmsg inbox stream (acting as <name>)") and, once messages arrive, a
-transcript event named to match. The background-task footer is not a
-reliable check either way; use TaskList. If ToolSearch cannot find the
+Bash/background/nohup or a shell task. Success is the Monitor call starting
+(description "agmsg inbox stream", after actas "agmsg inbox stream (acting as
+<name>)") and, once messages arrive, a transcript event named to match.
+TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either. If ToolSearch cannot find the
 generic Monitor tool, use turn/manual inbox as a fallback; that is not
 real-time monitor delivery.${rearm_note}
 EOF
@@ -972,8 +971,7 @@ do_status() {
 note: status reports configured hooks only. For real-time delivery, Claude Code
 must also have a generic Monitor task running in the current session whose
 description begins with "agmsg inbox stream" (after actas: "agmsg inbox
-stream (acting as <name>)"). Verify with TaskList, not the background-task
-footer — the footer is not a reliable signal either way. A watch.sh started
+stream (acting as <name>)"). TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either. A watch.sh started
 as a shell/background/nohup task instead of through the Monitor tool is not
 real-time delivery even while its process stays alive.
 EOF
