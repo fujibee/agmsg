@@ -610,7 +610,7 @@ eperm_pid() {
   # "stopping") instead of reading Claude Code's expiry notification.
   # AGMSG_CC_MONITOR_KEEP_ALIVE is read by the watcher, so the directive text
   # is the same with or without it.
-  grep -q 'watch.sh .* --max-seconds=1790' <<<"$output"
+  grep -q 'watch.sh .* --max-seconds=1750' <<<"$output"
   grep -q 'This watch renews itself' <<<"$output"
   grep -qF 'agmsg watch: re-arm - ...' <<<"$output"
   grep -qF 'agmsg watch: stopping - ...' <<<"$output"
@@ -871,7 +871,7 @@ _seed_role_record() {
   local cmdline; cmdline=$(printf '%s\n' "$output" | sed -n 's/^[[:space:]]*command: //p')
   eval "set -- $cmdline"
   [ "$#" -eq 5 ]
-  [ "$5" = "--max-seconds=1790" ]
+  [ "$5" = "--max-seconds=1750" ]
 }
 
 @test "session-start: a record for a role not registered here is ignored (#339)" {

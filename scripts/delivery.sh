@@ -611,7 +611,7 @@ EOF
   # with spaces or apostrophes intact; a plain '...' wrap breaks on /o'brien/...
   # (#188).
   local watch_command
-  watch_command="$(printf '%q %q %q %q' "$watch" "$session_id" "$project" "$type") --max-seconds=1790"
+  watch_command="$(printf '%q %q %q %q' "$watch" "$session_id" "$project" "$type") --max-seconds=1750"
   # The watch renews itself (scripts/watch.sh, _watch_renew_or_stop): launched
   # with --max-seconds it prints one "re-arm" or "stopping" line a
   # little before Claude Code's 30-minute Monitor cap and exits.
