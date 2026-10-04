@@ -35,9 +35,14 @@ app reads its DB and team config from there) — see the
 The app **owns** each spawned agent's pseudo-terminal. When a new agmsg message
 arrives for a spawned pane, the app injects a short kickoff notice
 (`[agmsg] <from>: "<preview>" — run /<cmd> to check it.`) into the agent's stdin
-immediately — no idle-wait heuristics — followed by a deliberate ~300ms gap before
-Enter (agents like Codex misread text+Enter written back-to-back as a paste and
-swallow the Enter). The agent reacts as if a human typed it. Because this happens
+immediately — no idle-wait heuristics. Submission is text → ~300ms gap → Enter.
+Codex panes get a Right-arrow before the Enter: Codex classifies fast input as
+a paste and swallows an Enter it reads in the same batch (any machine stall
+collapses the gap), and a cursor key deterministically ends that classification
+first. Only Codex — elsewhere the arrow isn't a no-op (a shell without line
+editing takes it literally; fish accepts its autosuggestion). Delivery is
+fire-and-forget after that — no re-press, since the pane state can't prove our
+text is still unsent. The agent reacts as if a human typed it. Because this happens
 at the PTY layer it is agent-agnostic — proven on both `claude` and a `python3` REPL
 with the same code (see `poc-inject/`, the original Phase 0 proof).
 
