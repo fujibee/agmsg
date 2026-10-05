@@ -160,10 +160,10 @@ agmsg_sync_autostart() {
       # `cat` -- reproduced -- raced a sleep-based cleanup into deleting
       # both out from under a start that had already succeeded. See the
       # caller's matching mkdir, right below the budget check, for the
-      # other half). ONLY this child ever creates this marker -- the
-      # caller only ever checks for or removes it, never creates its own
-      # -- which is what keeps the two sides from ever both thinking the
-      # other owns cleanup (also reproduced, a round after the first fix):
+      # other half). Either side's `mkdir` can be the one that actually
+      # creates it -- whichever gets here first -- which is why the loser
+      # of THIS mkdir, not some fixed role, is what decides ownership
+      # below (also reproduced, a round after the first fix):
       #   - this mkdir FAILS (EEXIST): the caller's own give-up branch
       #     created it first, which only happens on the path where it
       #     already gave up on its budget -- nothing else will ever read
