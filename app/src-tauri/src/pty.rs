@@ -40,6 +40,13 @@ struct PtySession {
     pid: Option<u32>,
     tail: Arc<Mutex<TailBuffer>>,
     detection: Arc<Mutex<DetectionTracker>>,
+    /// Serializes concurrent pty_inject calls into this pane: two messages
+    /// arriving close together must not interleave their text/Enter writes
+    /// (text-A text-B Enter Enter submits a mangled line, then an Enter on
+    /// an empty composer).
+    inject_lock: Arc<Mutex<()>>,
+    /// pty_inject sends codex (and only codex) a Right-arrow before Enter.
+    is_codex: bool,
 }
 
 /// All live sessions, keyed by a frontend-chosen id (e.g. "claude-1").
@@ -210,6 +217,7 @@ pub fn pty_spawn(
         .and_then(|name| name.to_str())
         .unwrap_or(&cmd)
         .to_ascii_lowercase();
+    let is_codex = agent_type == "codex";
     let detection = Arc::new(Mutex::new(DetectionTracker::new(agent_type)));
 
     // Reader thread: stream output to the webview.
@@ -238,7 +246,15 @@ pub fn pty_spawn(
 
     manager.sessions.lock().unwrap().insert(
         id,
-        PtySession { master: pair.master, writer, pid, tail, detection },
+        PtySession {
+            master: pair.master,
+            writer,
+            pid,
+            tail,
+            detection,
+            inject_lock: Arc::new(Mutex::new(())),
+            is_codex,
+        },
     );
     Ok(())
 }
@@ -296,15 +312,44 @@ pub fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String
     Ok(())
 }
 
-/// Inject `text` (then Enter) into the agent's stdin — the universal,
+/// Inject `text` (then submit) into the agent's stdin — the universal,
 /// agent-agnostic agmsg delivery. No idle wait before writing the text; see
 /// the module doc comment for why waiting for quiescence was worse than not
-/// waiting. The text and Enter are NOT written back-to-back, though: real-
-/// machine testing showed codex's TUI reads a same-burst text+Enter as a
-/// paste (the trailing newline is swallowed as pasted content rather than
-/// submitting), so the Enter is held back a beat after the text — long
-/// enough that the agent's input parser has processed the text as typed
-/// input first. Runs on a background thread so the ~300ms gap doesn't block
+/// waiting.
+///
+/// The submission is NOT a bare trailing Enter. Codex classifies fast input
+/// as a paste burst *in its own read timeline*: any event-loop stall
+/// spanning the text→Enter gap (CPU contention from agmsg's own hook
+/// subprocess storms on Windows #449, other agents, a busy machine) makes it
+/// read text+Enter in one batch, swallow the Enter as a pasted newline, and
+/// leave the message sitting unsubmitted in the composer (#619). Measured on
+/// a real Windows machine: with all cores busy, the old fixed 300ms gap
+/// failed 3/5 and a 1000ms gap failed 5/5 — no open-loop delay survives a
+/// sustained stall, and Enters that land while the burst is still live are
+/// accumulated into it rather than submitting (codex's paste_burst.rs:
+/// `append_newline_if_active`).
+///
+/// A non-char key is codex's documented way out: it force-flushes the burst
+/// buffer and clears the suppression window before handling the key
+/// (`flush_before_modified_input` + `clear_window_after_non_char`), after
+/// which Enter submits normally — even when the whole sequence arrives in
+/// one batched read. So for a codex pane the sequence is text → gap →
+/// Right-arrow → Enter: 11/11 submitted across stalled / loaded /
+/// single-batch reproductions where the old sequence went 0-for-all.
+///
+/// Codex ONLY — every other pane type keeps the previous text → gap → Enter.
+/// The arrow is not a no-op everywhere: a shell or REPL without line editing
+/// takes it as literal input (`bash --noediting` submits `PROBE\x1b[C`), and
+/// in fish a Right-arrow at end of line accepts the autosuggestion, so the
+/// Enter could run a history completion appended to the injected line. It
+/// was measured on codex and exists for codex's paste heuristic; nothing
+/// else gets it.
+///
+/// Deliberately fire-and-forget after that, same as before: there is no
+/// post-submit verification or retry. The pane state can't prove "our text
+/// is still unsent" (a person typing in the pane leaves it Idle, and several
+/// agent types never classify at all), so any later re-press could submit
+/// someone else's line. Runs on a background thread so the gap doesn't block
 /// the Tauri command handler.
 #[tauri::command]
 pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> Result<(), String> {
@@ -314,15 +359,34 @@ pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> R
     }
     let sessions = Arc::clone(&manager.sessions);
     thread::spawn(move || {
-        if let Some(s) = sessions.lock().unwrap().get_mut(&id) {
-            let _ = s.writer.write_all(text.as_bytes());
-            let _ = s.writer.flush();
-        }
+        // One injection at a time per pane; a second message must not
+        // interleave its writes with this one's text/Enter sequence
+        // (text-A text-B Enter Enter submits a mangled line). Clone the lock
+        // handle out so the sessions map isn't held across the sleeps
+        // (pty_write/pty_kill must stay responsive). Held ~350ms.
+        let Some((lock, is_codex)) = sessions
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|s| (Arc::clone(&s.inject_lock), s.is_codex))
+        else {
+            return;
+        };
+        let _guard = lock.lock().unwrap();
+
+        let write = |bytes: &[u8]| {
+            if let Some(s) = sessions.lock().unwrap().get_mut(&id) {
+                let _ = s.writer.write_all(bytes);
+                let _ = s.writer.flush();
+            }
+        };
+        write(text.as_bytes());
         thread::sleep(Duration::from_millis(300));
-        if let Some(s) = sessions.lock().unwrap().get_mut(&id) {
-            let _ = s.writer.write_all(b"\r");
-            let _ = s.writer.flush();
+        if is_codex {
+            write(b"\x1b[C");
+            thread::sleep(Duration::from_millis(50));
         }
+        write(b"\r");
     });
     Ok(())
 }
