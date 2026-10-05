@@ -152,6 +152,19 @@ agmsg_sync_autostart() {
       agmsg_close_inherited_fds
       "$remote_sh" sync start "$team" >"$tmp" 2>&1
       printf '%s\n' "$?" > "$tmp.rc"
+      # A FOLLOW-UP cleanup, detached the same way, not this subshell waiting
+      # on its own sleep before returning: whichever of the two reads $tmp.rc
+      # first wins the race to remove it, and both reads are the SAME `rm -f`
+      # (idempotent, never an error if the other already won). The poll loop
+      # below checks every 0.1s, so 2s is generous margin for it to have
+      # already read and removed both files on the fast path (by far the
+      # common one) well before this grandchild ever wakes -- this exists
+      # only for the budget-exceeded path below, where the caller gave up
+      # before $tmp.rc appeared and nothing else was ever going to remove
+      # these two files again (#1537-adjacent: the exact bare-`mktemp`-left-
+      # in-the-system-temp-directory shape #1572/#1575 cleaned up once
+      # already, for a different pair of files).
+      ( sleep 2; rm -f "$tmp" "$tmp.rc" ) </dev/null >/dev/null 2>&1 3>&- 4>&- &
     # The literal `3>&- 4>&-` as well as the call inside, because the repo-wide
     # check reads the spawn LINE (tests/test_spawn_fd_guard.bats). Belt and
     # braces is the right answer here anyway: the call closes whatever the

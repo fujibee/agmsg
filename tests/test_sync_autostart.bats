@@ -287,6 +287,11 @@ write_fake_remote() {
     case "$behaviour" in
       starts) printf '%s\n' '  echo "Sync engine started for '"'"'$3'"'"' (pid 4242)."; exit 0' ;;
       hangs)  printf '%s\n' '  while :; do sleep 1; done' ;;
+      # Finishes, unlike "hangs" -- just slower than the budget below, so the
+      # caller gives up on it (the "slow" bucket) before it writes its own
+      # $tmp/$tmp.rc, which is the one path those two files are left on disk
+      # after.
+      slow)   printf '%s\n' '  sleep 1.5; echo "Sync engine started for '"'"'$3'"'"' (pid 4242)."; exit 0' ;;
     esac
     printf '%s\n' 'fi'
     printf '%s\n' 'exit 0'
@@ -346,6 +351,61 @@ write_fake_remote() {
   # It said a start is in flight rather than pretending nothing happened.
   printf '%s' "$output" | grep -q 'still in flight'
   [ "$status" -eq 0 ]
+}
+
+@test "a start the caller gave up waiting on still removes its own two temp files once it finishes (#1575-adjacent)" {
+  local fake calls="$TEST_SKILL_DIR/calls.txt" wrap_dir real_mktemp bare_log line
+  fake="$(write_fake_remote slow)"
+  cp "$fake" "$SCRIPTS/remote.sh"
+  : > "$calls"
+  fake_register testteam alice
+  echo "sid-current" > "$RUN_DIR/cc-instance.$$"
+
+  # A `mktemp` wrapper ahead of the real one on PATH, logging only the BARE
+  # (no-template) calls -- sync-autostart.sh's own $tmp -- without changing
+  # what mktemp actually does. Needed because a bare `mktemp` ignores
+  # $TMPDIR entirely on macOS (ties to the system default instead), so
+  # scanning $TMPDIR for these would not see them there -- the same
+  # platform quirk #1575's own test worked around the same way.
+  wrap_dir="$(mktemp -d)"
+  real_mktemp="$(command -v mktemp)"
+  cat > "$wrap_dir/mktemp" <<EOF
+#!/usr/bin/env bash
+if [ "\$#" -eq 0 ]; then
+  result="\$("$real_mktemp")" || exit 1
+  printf '%s\n' "\$result" >> "$wrap_dir/bare.log"
+  printf '%s\n' "\$result"
+else
+  exec "$real_mktemp" "\$@"
+fi
+EOF
+  chmod +x "$wrap_dir/mktemp"
+  bare_log="$wrap_dir/bare.log"
+
+  run env PATH="$wrap_dir:$PATH" AGMSG_FAKE_REMOTE_CALLS="$calls" AGMSG_SYNC_AUTOSTART_TIMEOUT_S=1 bash -c \
+    'printf "{\"session_id\":\"sid-current\"}" | bash "$1" claude-code /tmp/p1' _ \
+    "$SCRIPTS/session-start.sh"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -q 'still in flight'
+  wait_for_call "$calls" testteam
+
+  # Caught in the act, right after the caller gave up (budget 1s, fake sleeps
+  # 1.5s before writing its own $tmp/$tmp.rc): the two bare-mktemp files this
+  # invocation made still exist.
+  [ -s "$bare_log" ]
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ -e "$line" ]
+  done < "$bare_log"
+
+  # And gone on their own a few seconds later -- nothing here removes them;
+  # this is only time passing while the fake's own cleanup (2s after it
+  # finishes writing $tmp.rc) does.
+  sleep 3
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ ! -e "$line" ]
+  done < "$bare_log"
 }
 
 @test "actas-claim starts the engine and still prints status=ok" {
