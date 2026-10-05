@@ -353,8 +353,8 @@ _doctor_print_locks() {
 # scripts/internal/storage-sync-driver.sh) used to go unremoved on every
 # ordinary successful "apply"/"read-apply" call before #1572, on an install
 # made before that fix. See lib/stale-outcome-files.sh for the exact match
-# criteria (location, name, content, age) that keeps this from ever touching
-# another tool's own temp file.
+# criteria (location, name, size, content, age) this only ever removes a
+# file matching all of.
 STALE_OUTCOME_FILES=""
 _doctor_scan_stale_outcome_files() {
   STALE_OUTCOME_FILES="$(agmsg_stale_outcome_candidates)"

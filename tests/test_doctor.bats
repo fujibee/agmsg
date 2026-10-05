@@ -675,6 +675,8 @@ configured_off() {
   touch -t 202001010000 "$tmp_dir/tmp.short"
   printf 'ok\n' > "$tmp_dir/sub/tmp.FFFFFFFFFF"  # right everything, wrong location (subdirectory)
   touch -t 202001010000 "$tmp_dir/sub/tmp.FFFFFFFFFF"
+  printf 'ok\n\0' > "$tmp_dir/tmp.GGGGGGGGGG"    # "ok\n" plus a trailing NUL -- 4 bytes, not 3
+  touch -t 202001010000 "$tmp_dir/tmp.GGGGGGGGGG"
 
   run env TMPDIR="$tmp_dir" bash "$SCRIPTS/doctor.sh"
   [ "$status" -eq 1 ]
@@ -687,6 +689,7 @@ configured_off() {
   [ -z "$(grep -F 'tmp.EEEEEEEEEE' <<<"$output")" ]
   [ -z "$(grep -F 'tmp.short' <<<"$output")" ]
   [ -z "$(grep -F 'tmp.FFFFFFFFFF' <<<"$output")" ]
+  [ -z "$(grep -F 'tmp.GGGGGGGGGG' <<<"$output")" ]
   [ -f "$tmp_dir/tmp.AAAAAAAAAA" ]   # reporting deletes nothing
 
   run env TMPDIR="$tmp_dir" bash "$SCRIPTS/doctor.sh" --fix --yes
@@ -698,4 +701,5 @@ configured_off() {
   [ -f "$tmp_dir/tmp.EEEEEEEEEE" ]
   [ -f "$tmp_dir/tmp.short" ]
   [ -f "$tmp_dir/sub/tmp.FFFFFFFFFF" ]
+  [ -f "$tmp_dir/tmp.GGGGGGGGGG" ]
 }
