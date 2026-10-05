@@ -407,6 +407,7 @@ EOF
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     [ ! -e "$line" ]
+    [ ! -d "$line.gaveup" ]
   done < "$bare_log"
 
   # The review counterexample (#1580): a start that FINISHES WELL inside
@@ -419,9 +420,16 @@ EOF
   : > "$bare_log"
   fake="$(write_fake_remote starts)"
   cp "$fake" "$SCRIPTS/remote.sh"
+  # No production hook for this delay: a local `cat` override, defined only
+  # inside this subshell, stands in for one -- it intercepts just the read
+  # of *.rc (the one read session-start.sh's own wait loop is blocked on)
+  # and sleeps before delegating to the real `cat`, reproducing the same gap
+  # review measured without sync-autostart.sh carrying any test-only surface.
   env PATH="$wrap_dir:$PATH" AGMSG_FAKE_REMOTE_CALLS="$calls" AGMSG_SYNC_AUTOSTART_TIMEOUT_S=5 \
-    AGMSG_SYNC_AUTOSTART_TEST_DELAY=3 bash -c \
-    'printf "{\"session_id\":\"sid-current\"}" | bash "$1" claude-code /tmp/p1 > "$2" 2>&1; echo "$?" > "$2.rc"' \
+    bash -c \
+    'cat() { case ${1:-} in *.rc) sleep 3 ;; esac; command cat "$@"; }
+     export -f cat
+     printf "{\"session_id\":\"sid-current\"}" | bash "$1" claude-code /tmp/p1 > "$2" 2>&1; echo "$?" > "$2.rc"' \
     _ "$SCRIPTS/session-start.sh" "$TEST_SKILL_DIR/delay-output.txt" &
   local bg_pid=$!
   ENGINE_PIDS="$ENGINE_PIDS $bg_pid"
@@ -449,6 +457,12 @@ EOF
   grep -qF 'started one for' "$TEST_SKILL_DIR/delay-output.txt"
   refute grep -q 'connected, but not syncing' "$TEST_SKILL_DIR/delay-output.txt"
   refute grep -q 'still in flight' "$TEST_SKILL_DIR/delay-output.txt"
+
+  # Neither scenario leaves the marker directory itself behind.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ ! -d "$line.gaveup" ]
+  done < "$bare_log"
 }
 
 @test "actas-claim starts the engine and still prints status=ok" {

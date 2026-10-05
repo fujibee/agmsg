@@ -160,19 +160,32 @@ agmsg_sync_autostart() {
       # `cat` -- reproduced -- raced a sleep-based cleanup into deleting
       # both out from under a start that had already succeeded. See the
       # caller's matching mkdir, right below the budget check, for the
-      # other half):
-      #   - this mkdir SUCCEEDS: the caller has not reached ITS OWN mkdir
-      #     yet, so it is still inside its wait loop and will read these
-      #     files itself the normal way, including removing them -- this
-      #     child does nothing further.
-      #   - this mkdir FAILS (EEXIST): the caller's OWN mkdir got there
-      #     first, which only happens on the path where it already gave up
-      #     on its budget -- nothing else will ever read these files again,
-      #     so this child removes all three names itself.
-      # mkdir is atomic -- POSIX guarantees exactly one of two concurrent
-      # calls on the same path succeeds -- so exactly one side ever takes
-      # ownership, never both and never neither.
-      if ! mkdir "$tmp.gaveup" 2>/dev/null; then
+      # other half). ONLY this child ever creates this marker -- the
+      # caller only ever checks for or removes it, never creates its own
+      # -- which is what keeps the two sides from ever both thinking the
+      # other owns cleanup (also reproduced, a round after the first fix):
+      #   - this mkdir FAILS (EEXIST): the caller's own give-up branch
+      #     created it first, which only happens on the path where it
+      #     already gave up on its budget -- nothing else will ever read
+      #     these files again, so this child removes all three names
+      #     itself.
+      #   - this mkdir SUCCEEDS: the caller has not given up (yet, or at
+      #     all). Still ambiguous, though: the caller may have already
+      #     taken its FAST path (saw $tmp.rc exist, read it, removed it)
+      #     entirely without ever touching this marker -- its fast path
+      #     only ever REMOVES this marker as a courtesy, never creates
+      #     one, so it cannot have raced us here. Re-check $tmp.rc right
+      #     now, fresh, to tell the two apart: gone already means the fast
+      #     path beat us to it and already came and went -- its own
+      #     rmdir attempt (always AFTER its rm, never before -- an
+      #     earlier order left exactly this marker stranded, reproduced)
+      #     ran before we had created anything for it to find, so nothing
+      #     is coming back for this marker and we remove it ourselves.
+      #     Still there means the fast path has not reached that point
+      #     yet, so we leave the marker for it to find and clear.
+      if mkdir "$tmp.gaveup" 2>/dev/null; then
+        [ -f "$tmp.rc" ] || rmdir "$tmp.gaveup" 2>/dev/null
+      else
         rm -f "$tmp" "$tmp.rc"
         rmdir "$tmp.gaveup" 2>/dev/null
       fi
@@ -202,16 +215,15 @@ agmsg_sync_autostart() {
       # already written $tmp.rc -- so despite the budget, this reads
       # exactly like the fast path below, just a little later.
     fi
-    # Test-only, a no-op in production (empty unless a test sets it):
-    # simulates exactly the gap review measured -- the caller sees
-    # $tmp.rc exist (right above, by either route) and is then delayed
-    # before actually reading it. The mkdir protocol above is what makes
-    # that gap safe now; before it, a fixed-sleep cleanup in the child
-    # raced into deleting both files out from under a start that had
-    # already succeeded, reproduced with exactly this delay.
-    [ -n "${AGMSG_SYNC_AUTOSTART_TEST_DELAY:-}" ] && sleep "$AGMSG_SYNC_AUTOSTART_TEST_DELAY"
     rc="$(cat "$tmp.rc" 2>/dev/null || printf '1')"
     out="$(cat "$tmp" 2>/dev/null)"
+    # Order matters here, and is NOT interchangeable with the rmdir right
+    # below: this rm must run FIRST. The child's own self-correction (see
+    # its mkdir-succeeded branch above) only removes the marker when it
+    # finds $tmp.rc already gone -- if this rm ran AFTER that rmdir instead,
+    # a child that is still between its mkdir and that re-check would see
+    # the marker gone, assume this side already finished, and never clean
+    # up $tmp/$tmp.rc itself, leaking both.
     rm -f "$tmp" "$tmp.rc"
     # Covers BOTH ways this line is reached: the budget-exceeded branch just
     # above, where the child's mkdir winning is what sent this here instead
