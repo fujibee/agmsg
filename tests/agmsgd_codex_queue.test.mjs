@@ -155,6 +155,16 @@ test('measured Windows 0.157.0 queued user response proves the rollout nonce is 
   assert.deepEqual(await readRolloutNonce(home, thread, 'NONCE'), { state: 'present' });
 });
 
+test('measured Windows 0.160.0 queued user response proves the rollout nonce is present', async (t) => {
+  const home = temporaryDirectory(t);
+  const sessions = path.join(home, 'sessions');
+  mkdirSync(sessions);
+  // Anonymized measured row; field positions and types are preserved.
+  const row = readFileSync(new URL('./fixtures/codex-windows-0.160.0-queue-response.jsonl', import.meta.url), 'utf8');
+  writeFileSync(path.join(sessions, `rollout-fixture-${thread}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: thread } }) + '\n' + row);
+  assert.deepEqual(await readRolloutNonce(home, thread, 'NONCE'), { state: 'present' });
+});
+
 test('pending delivery confirms on either positive witness, expires only on two readable absences, and otherwise stays pending', () => {
   assert.deepEqual(resolvePendingQueue({
     queueObservation: { state: 'present' },
@@ -218,7 +228,7 @@ test('seat classification never treats an uncertain destination or bridge as add
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped' }), { state: 'blocked', reason: 'thread_observation_failed' });
 });
 
-test('Windows queue requires a native executable and an exactly measured release', (t) => {
+test('Windows queue requires a native executable and a stable release at or above the measured minimum', (t) => {
   const root = temporaryDirectory(t);
   const nativeExe = path.join(root, 'codex.exe');
   writeFileSync(nativeExe, 'fixture, never executed');
@@ -241,8 +251,11 @@ test('Windows queue requires a native executable and an exactly measured release
   };
   assert.deepEqual(checkWindowsCodexQueueGate({ executable: 'codex', env, probe }), { state: 'ok', executable: nativeExe, version: '0.157.0' });
   assert.deepEqual(checkWindowsCodexQueueGate({ executable: 'codex', env: {} }), { state: 'blocked', reason: 'windows_codex_executable_unresolved' });
-  for (const version of ['0.156.0', '0.158.0']) {
-    assert.deepEqual(checkWindowsCodexQueueGate({ executable: 'codex', env, probe: () => `codex-cli ${version}\n` }), { state: 'blocked', reason: `windows_codex_version_unverified:${version}` });
+  for (const version of ['0.0.999', '0.156.999']) {
+    assert.deepEqual(checkWindowsCodexQueueGate({ executable: 'codex', env, probe: () => `codex-cli ${version}\n` }), { state: 'blocked', reason: `windows_codex_version_below_minimum:${version}` });
+  }
+  for (const version of ['0.157.0', '0.158.0', '0.160.0', '0.1000.0', '1.0.0']) {
+    assert.deepEqual(checkWindowsCodexQueueGate({ executable: 'codex', env, probe: () => `codex-cli ${version}\n` }), { state: 'ok', executable: nativeExe, version });
   }
   for (const probe of [() => 'codex-cli 0.157.0-beta\n', () => { throw new Error('timeout'); }]) {
     assert.deepEqual(checkWindowsCodexQueueGate({ executable: 'codex', env, probe }), { state: 'blocked', reason: 'windows_codex_version_unreadable' });
@@ -386,11 +399,11 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
     expectedOpGen: 4,
     env: { AGMSG_STORAGE_PATH: storageDir },
     hostPlatform: 'win32',
-    windowsGate: () => ({ state: 'blocked', reason: 'windows_codex_version_unverified:0.158.0' }),
+    windowsGate: () => ({ state: 'blocked', reason: 'windows_codex_version_below_minimum:0.156.0' }),
     queue: async () => { throw new Error('Windows queue must stay closed until live delivery is verified'); },
   });
   await windowsChannel.pollOnce();
-  assert.equal(installDb.prepare("SELECT reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice'])).reason, 'windows_codex_version_unverified:0.158.0');
+  assert.equal(installDb.prepare("SELECT reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice'])).reason, 'windows_codex_version_below_minimum:0.156.0');
   installDb.prepare(`
     INSERT INTO beta_codex_queue (seat, codex_home, thread, up_to, nonce, queue_item_id, state, children, created_at)
     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
@@ -398,7 +411,7 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
   await windowsChannel.pollOnce();
   const windowsSeat = installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
   assert.equal(windowsSeat.state, 'blocked');
-  assert.equal(windowsSeat.reason, 'windows_codex_version_unverified:0.158.0;pending:awaiting_confirmation');
+  assert.equal(windowsSeat.reason, 'windows_codex_version_below_minimum:0.156.0;pending:awaiting_confirmation');
   assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ? ORDER BY id DESC LIMIT 1").get(JSON.stringify(['alpha', 'alice'])).state, 'pending');
   const windowsQueueDb = new DatabaseSync(path.join(codexHome, 'queue_1.sqlite'));
   windowsQueueDb.prepare('INSERT INTO queued_items VALUES (?, ?, ?)').run(notYetVisibleItemId, thread, '{}');
@@ -406,7 +419,7 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
   await windowsChannel.pollOnce();
   const confirmedWindowsSeat = installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
   assert.equal(confirmedWindowsSeat.state, 'blocked');
-  assert.equal(confirmedWindowsSeat.reason, 'windows_codex_version_unverified:0.158.0');
+  assert.equal(confirmedWindowsSeat.reason, 'windows_codex_version_below_minimum:0.156.0');
   assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ? ORDER BY id DESC LIMIT 1").get(JSON.stringify(['alpha', 'alice'])).state, 'confirmed');
   await windowsChannel.stop();
 
