@@ -154,7 +154,7 @@ Git Bash PATH). There is no PowerShell reimplementation.
 
 ### agmsgd beta (1.6.0)
 
-The optional agmsgd beta sends Codex sessions a notice to check their inbox through the Codex queue. It is off by default. It reads the existing SQLite message store; it does not migrate data, deliver message bodies, replace other agents' monitors, or take over remote sync. macOS and Linux are supported. Windows delivery is unsupported until it has been measured on a real Windows session. JSONL storage is unsupported by this beta; keep using the bridge for those sessions.
+The optional agmsgd beta sends Codex sessions a notice to check their inbox through the Codex queue. It is off by default. It reads the existing SQLite message store; it does not migrate data, deliver message bodies, replace other agents' monitors, or take over remote sync. macOS, Linux, and Windows are supported. Windows requires native Codex 0.157.0 or later; earlier versions are blocked with a reason. Native queue execution and delivery to a logged-in live Windows session were measured with Codex 0.157.0 and 0.160.0. Unreadable version or delivery evidence keeps the existing conservative handling. JSONL storage is unsupported by this beta; keep using the bridge for those sessions.
 
 Requires Node >= 22.13.0 with `node:sqlite` (the experimental SQLite warning is expected). Install Node from [nodejs.org](https://nodejs.org/en/download). Enable and inspect the beta with:
 
