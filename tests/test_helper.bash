@@ -78,6 +78,18 @@ setup_test_env() {
   # export is scoped to the test and needs no restore. See #41.
   export HOME="$TEST_SKILL_DIR/home"
   mkdir -p "$HOME"
+
+  # Same reasoning as HOME above, now needed for a second path: doctor.sh's
+  # leaked-outcome-file check (#1572 cleanup) scans ${TMPDIR:-/tmp} directly,
+  # installation-wide, by design -- a bare `mktemp` always lands there
+  # regardless of SKILL_DIR. Without this, every test that does not already
+  # set its own TMPDIR would have that check see whatever is really in the
+  # developer's or CI runner's own temp directory at that moment (on a
+  # machine where the real leak this exists for is still happening, that is
+  # not empty), making unrelated tests fail for a reason that has nothing to
+  # do with what they test.
+  export TMPDIR="$TEST_SKILL_DIR/tmp"
+  mkdir -p "$TMPDIR"
 }
 
 # PIDs (one per line, this shell excluded) whose command line references <dir>.
