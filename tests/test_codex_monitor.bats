@@ -494,6 +494,14 @@ EOF
   local unwritable_dir="$TEST_PROJECT/unwritable-run"
   mkdir -p "$unwritable_dir"
   chmod 555 "$unwritable_dir"
+  # chmod 555 does not make the directory unwritable everywhere (Windows/NTFS,
+  # or a process holding CAP_DAC_OVERRIDE such as root). The write cannot be
+  # made to fail there, so skip rather than assert a failure that never occurs.
+  if touch "$unwritable_dir/.probe" 2>/dev/null; then
+    rm -f "$unwritable_dir/.probe"
+    chmod 755 "$unwritable_dir"
+    skip "chmod 555 does not make the directory unwritable here (Windows/NTFS or CAP_DAC_OVERRIDE such as root)"
+  fi
   run env AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
     AGMSG_CODEX_TEST_RESUME_REQUEST_DIR="$unwritable_dir" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume -- thread-B
