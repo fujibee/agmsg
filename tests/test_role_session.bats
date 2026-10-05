@@ -295,4 +295,11 @@ fake_session() {
   # Fields set_messaging does not touch must survive untouched.
   [ "$(agmsg_role_session_uuid T alice)" = sid-1 ]
   [ "$(agmsg_role_session_get T alice project)" = /p/q ]
+
+  # A /clear: same socket, but Claude Code hands this session a brand-new
+  # session id -- the 5th argument must replace session= too (#1577 review),
+  # since the daemon derives the transcript path from it.
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/222.sock /home/x/.claude sid-2
+  [ "$(agmsg_role_session_uuid T alice)" = sid-2 ]
+  [ "$(agmsg_role_session_get T alice project)" = /p/q ]
 }

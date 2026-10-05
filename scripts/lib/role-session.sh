@@ -212,8 +212,16 @@ agmsg_role_session_record() {
 # which mirrors codex_home's). <claude_config_dir> is CLAUDE_CONFIG_DIR, or
 # ~/.claude when unset -- the base this session's own Claude Code build
 # actually uses, never assumed by this function.
-agmsg_role_session_set_messaging() {   # <team> <agent> <messaging_socket> <claude_config_dir>
-  local team="$1" agent="$2" socket="$3" config_dir="$4"
+# <bare_sid>, when given, replaces the record's own session= line (#1577
+# review): a record's session= is only ever written at actas-claim time, so
+# after /clear -- which keeps the same socket/process but hands this session
+# a brand-new Claude Code session id -- it would otherwise go stale right as
+# this function refreshes the fields that matter for finding its transcript
+# (the daemon derives the transcript path from BOTH claude_config_dir and
+# this session id together). Empty means "leave session= as it is" (every
+# other existing caller passes none).
+agmsg_role_session_set_messaging() {   # <team> <agent> <messaging_socket> <claude_config_dir> [<bare_sid>]
+  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="${5:-}"
   [ -n "$team" ] && [ -n "$agent" ] || return 0
   local path dir tmp line
   _agmsg_role_session_path_into "$team" "$agent"
@@ -223,8 +231,13 @@ agmsg_role_session_set_messaging() {   # <team> <agent> <messaging_socket> <clau
   tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
   {
     while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in messaging_socket=*|claude_config_dir=*) ;; *) printf '%s\n' "$line" ;; esac
+      case "$line" in
+        messaging_socket=*|claude_config_dir=*) ;;
+        session=*) [ -z "$bare_sid" ] && printf '%s\n' "$line" ;;
+        *) printf '%s\n' "$line" ;;
+      esac
     done < "$path"
+    [ -z "$bare_sid" ] || printf 'session=%s\n' "$bare_sid"
     [ -z "$socket" ] || printf 'messaging_socket=%s\n' "$socket"
     [ -z "$config_dir" ] || printf 'claude_config_dir=%s\n' "$config_dir"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }

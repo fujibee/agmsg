@@ -18,24 +18,19 @@
 #     to ~/.claude, since this machine's own accounts live elsewhere.
 
 agmsg_session_start() {
-  # Record messaging_socket/claude_config_dir for every (team, agent) pair
-  # this session embodies. Only an EXISTING role-session record is updated
-  # (agmsg_role_session_set_messaging's own contract) -- a pair with no prior
-  # actas-claim record gets nothing written, exactly like Codex's
-  # role_session_missing seat.
   if ! declare -F agmsg_role_session_set_messaging >/dev/null 2>&1; then
     # shellcheck disable=SC1091
-    . "$SKILL_DIR/scripts/lib/role-session.sh"
+    . "${SKILL_DIR:-}/scripts/lib/role-session.sh"
   fi
 
   # Same guard shape codex-record-session.sh applies to CODEX_HOME: anything
   # that is not an absolute path, or that carries a control character, is
   # never published as a delivery destination (a malformed value is worse
   # than none -- it would look addressable and silently never deliver).
-  local socket=""
-  case "${CLAUDE_CODE_MESSAGING_SOCKET:-}" in
-    uds:/*) socket="${CLAUDE_CODE_MESSAGING_SOCKET#uds:}" ;;
-    /*) socket="${CLAUDE_CODE_MESSAGING_SOCKET}" ;;
+  local raw_socket="${CLAUDE_CODE_MESSAGING_SOCKET:-}" socket=""
+  case "$raw_socket" in
+    uds:/*) socket="${raw_socket#uds:}" ;;
+    /*) socket="$raw_socket" ;;
   esac
   case "$socket" in *[[:cntrl:]]*) socket="" ;; esac
 
@@ -46,22 +41,75 @@ agmsg_session_start() {
     *) config_dir="" ;;
   esac
 
+  # Only touch a pair THIS session actually, currently holds the actas lock
+  # for -- never every pair registered for the project (#1577 review): two
+  # seats sharing a project each have their OWN process and OWN socket, and
+  # writing one's socket into the other's record would misdeliver agmsgd's
+  # nudge to the wrong seat entirely. The lock, not the record's own (possibly
+  # stale, see agmsg_role_session_set_messaging's session= handling) session=
+  # field, is the live ownership fact -- the same primitive session-start.sh's
+  # own narrowing block below already trusts for exactly this question.
+  if ! command -v actas_lock_read >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "${SKILL_DIR:-}/scripts/lib/actas-lock.sh"
+  fi
+  local bare_sid
+  bare_sid="$(agmsg_instance_bare_sid "${SESSION_ID:-}" 2>/dev/null || true)"
+
+  # Write, then read every OWNED pair back: this is the SAME check the daemon
+  # itself applies (messaging_socket/claude_config_dir both present and
+  # non-empty) before it will ever address this seat, so "the record actually
+  # took" must be verified here too, not assumed from the write call
+  # returning. No owned pair verified this way leaves this session exactly as
+  # addressable-by-daemon as it already was -- never the one that silences
+  # Monitor when in doubt (#1577 review).
+  local any_pair_confirmed=0
+  local pair_team pair_agent
   while IFS=$'\t' read -r pair_team pair_agent; do
     [ -n "$pair_team" ] || continue
-    agmsg_role_session_set_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir"
-  done <<< "$PAIRS"
+    local lock_row lock_status lock_owner lock_owner_bare
+    lock_row="$(actas_lock_read "$pair_team" "$pair_agent" 2>/dev/null)" || lock_row="unreadable	"
+    lock_status="${lock_row%%$'\t'*}"
+    [ "$lock_status" = ok ] || continue
+    lock_owner="${lock_row#*$'\t'}"
+    [ -n "$lock_owner" ] || continue
+    lock_owner_bare="$(agmsg_instance_bare_sid "$lock_owner" 2>/dev/null || printf '%s' "$lock_owner")"
+    [ -n "$bare_sid" ] && [ "$lock_owner_bare" = "$bare_sid" ] || continue
 
-  # Only when agmsgd's own executor is actually ready do we skip the Monitor
-  # directive (mirrors codex's plug: a Monitor-less delivery path must be
-  # verifiably live before this session stops arming its own fallback). A
-  # daemon that is merely installed but not running leaves Monitor delivery
-  # exactly as it is today.
+    agmsg_role_session_set_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid"
+    local readback_socket readback_config_dir readback_session
+    readback_socket="$(agmsg_role_session_get "$pair_team" "$pair_agent" messaging_socket 2>/dev/null || true)"
+    readback_config_dir="$(agmsg_role_session_get "$pair_team" "$pair_agent" claude_config_dir 2>/dev/null || true)"
+    readback_session="$(agmsg_role_session_uuid "$pair_team" "$pair_agent" 2>/dev/null || true)"
+    if [ -n "$socket" ] && [ "$readback_socket" = "$socket" ] && \
+       [ -n "$config_dir" ] && [ "$readback_config_dir" = "$config_dir" ] && \
+       [ -n "$bare_sid" ] && [ "$readback_session" = "$bare_sid" ]; then
+      any_pair_confirmed=1
+    fi
+  done <<< "${PAIRS:-}"
+
+  # Windows has no native-channel implementation yet (named pipe + mandatory
+  # auth line, separate work) -- never claim this session is daemon-reachable
+  # there, no matter what the record says.
+  if ! command -v _agmsg_detect_platform >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "${SKILL_DIR:-}/scripts/lib/compat.sh"
+  fi
+  _agmsg_detect_platform
+
+  # Only when agmsgd's own executor is actually ready, this is not Windows,
+  # AND at least one owned pair's record round-tripped correctly (including
+  # the session= field) do we skip the Monitor directive (mirrors codex's
+  # plug: a Monitor-less delivery path must be verifiably live before this
+  # session stops arming its own fallback). Any one of these missing leaves
+  # Monitor delivery exactly as it is today -- when in doubt, arm Monitor
+  # (#1577 review).
   if ! declare -F agmsg_daemon_read_state >/dev/null 2>&1; then
     # shellcheck disable=SC1091
-    . "$SKILL_DIR/scripts/lib/daemon-state.sh"
+    . "${SKILL_DIR:-}/scripts/lib/daemon-state.sh"
   fi
   agmsg_daemon_read_state
-  if [ "$AGMSGD_HEALTH" = ready ] && [ -n "$socket" ]; then
+  if [ "${AGMSGD_HEALTH:-}" = ready ] && [ "$_agmsg_platform" != msys ] && [ "$any_pair_confirmed" = 1 ]; then
     cat <<EOF
 AGMSG delivery: agmsgd is running and will deliver to this session directly (native channel). No Monitor needed.
 EOF

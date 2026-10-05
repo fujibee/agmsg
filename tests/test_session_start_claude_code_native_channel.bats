@@ -4,10 +4,11 @@
 # agmsgd's own executor is verifiably ready, a claude-code seat must stop
 # arming the generic Monitor watcher — the daemon delivers to its messaging
 # socket directly instead, and a second, redundant receive path serves no
-# purpose. This is the one property this file pins: daemon ready -> no
-# Monitor directive; the usual directive is otherwise unaffected (every other
-# session-start behavior is covered by test_session_start_terminal_line.bats
-# and test_role_session.bats already).
+# purpose. But "ready" alone is not enough to skip Monitor (#1577 review):
+# the daemon only ever addresses a seat whose role-session record actually
+# carries a readable messaging_socket/claude_config_dir, so skipping Monitor
+# for a seat that never got that record (never actas-claimed) would leave it
+# with no delivery path at all. This file pins both halves of that gate.
 
 load test_helper
 
@@ -40,8 +41,9 @@ _mark_daemon_ready() {
     UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
 }
 
-@test "session-start: agmsgd ready -> no Monitor directive for a claude-code seat" {
+@test "session-start: agmsgd ready AND an actas-claimed role-session record -> no Monitor directive" {
   _mark_daemon_ready
+  bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-daemon-ready" >/dev/null
   run _run_session_start "sid-daemon-ready"
   [ "$status" -eq 0 ]
   refute grep -q "AGMSG monitor mode" <<<"$output"
@@ -53,4 +55,39 @@ _mark_daemon_ready() {
   run _run_session_start "sid-no-daemon"
   [ "$status" -eq 0 ]
   grep -qF "AGMSG monitor mode" <<<"$output"
+}
+
+# The counterexample #1577 review required: daemon ready is NOT enough by
+# itself. A seat that was only joined (never actas-claimed, so it has no
+# role-session record at all, let alone a messaging_socket field) must keep
+# its only delivery path -- Monitor -- rather than be silenced on the
+# assumption the daemon can reach it.
+@test "session-start: agmsgd ready but NO role-session record -> Monitor directive still fires" {
+  _mark_daemon_ready
+  run _run_session_start "sid-ready-no-record"
+  [ "$status" -eq 0 ]
+  grep -qF "AGMSG monitor mode" <<<"$output"
+  refute grep -q "agmsgd is running and will deliver" <<<"$output"
+}
+
+# #1577 review: a session-start plug that updates every pair REGISTERED
+# for the project, rather than only the pair this session actually holds the
+# actas lock for, misdelivers one seat's socket into a different seat sharing
+# the same project -- reproduced here with bob already claimed under his own
+# session before alice's SessionStart ever runs. Alice's run must not touch
+# bob's record at all.
+@test "session-start: starting one seat never overwrites another seat's messaging record" {
+  _mark_daemon_ready
+  bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code bob "sid-bob" >/dev/null
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_set_messaging team bob /tmp/cc-socks/bob-original.sock /home/bob/.claude sid-bob
+
+  bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-alice" >/dev/null
+  run _run_session_start "sid-alice"
+  [ "$status" -eq 0 ]
+
+  [ "$(agmsg_role_session_get team bob messaging_socket)" = /tmp/cc-socks/bob-original.sock ]
+  [ "$(agmsg_role_session_get team bob claude_config_dir)" = /home/bob/.claude ]
+  [ "$(agmsg_role_session_uuid team bob)" = sid-bob ]
 }
