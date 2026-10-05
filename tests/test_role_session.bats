@@ -274,3 +274,25 @@ fake_session() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK u=sid-9 p=/p/q r"* ]]
 }
+
+# Claude Code native-channel delivery (2026-10-05, arch-8 §12.1): a --resume
+# starts a brand-new process bound to a brand-new CLAUDE_CODE_MESSAGING_SOCKET
+# (measured in memory/design/2026-10-05-cross-session-messaging-socket-
+# measurement.md's addendum), so agmsgd must never cache the socket path --
+# session-start.sh re-derives and overwrites it on every start/resume via
+# agmsg_role_session_set_messaging. This is the load-bearing property: the
+# SECOND call's socket value wins, and unrelated fields (session, project)
+# untouched by that function survive unchanged.
+@test "role-session: set_messaging overwrites the socket on each call, as a --resume would require" {
+  agmsg_role_session_record T alice sid-1 /p/q claude-code
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/111.sock /home/x/.claude
+  [ "$(agmsg_role_session_get T alice messaging_socket)" = /tmp/cc-socks/111.sock ]
+  [ "$(agmsg_role_session_get T alice claude_config_dir)" = /home/x/.claude ]
+
+  # A --resume: same role, brand-new pid-named socket.
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/222.sock /home/x/.claude
+  [ "$(agmsg_role_session_get T alice messaging_socket)" = /tmp/cc-socks/222.sock ]
+  # Fields set_messaging does not touch must survive untouched.
+  [ "$(agmsg_role_session_uuid T alice)" = sid-1 ]
+  [ "$(agmsg_role_session_get T alice project)" = /p/q ]
+}

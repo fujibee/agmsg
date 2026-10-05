@@ -196,6 +196,42 @@ agmsg_role_session_record() {
 # $HERDR_SOCKET_PATH, which the server recreates when it starts). A restarted
 # server changes it, so a mark made against the old server no longer matches
 # even when the pane reference is reused unchanged.
+# Overwrite ONLY messaging_socket/claude_config_dir, leaving every other
+# field (session, project, owner, named_ref, ...) untouched — unlike
+# agmsg_role_session_record, this never creates a fresh record: SessionStart
+# calls this for every pair in PAIRS on every start/resume, and most of those
+# pairs already have a record from actas-claim.sh; one that does not is a
+# seat that was never claimed, and writing messaging-only fields for it would
+# fabricate a role-session record session-start.sh itself never establishes
+# (#339 stays actas-claim's job). A record that lacks these fields reads back
+# as empty, which the daemon treats exactly like Codex's role_session_missing
+# -- never as a fatal read error.
+#
+# <messaging_socket> is the this-session's uds: peer address with the prefix
+# stripped (empty if invalid/absent -- see _session-start.sh's own guard,
+# which mirrors codex_home's). <claude_config_dir> is CLAUDE_CONFIG_DIR, or
+# ~/.claude when unset -- the base this session's own Claude Code build
+# actually uses, never assumed by this function.
+agmsg_role_session_set_messaging() {   # <team> <agent> <messaging_socket> <claude_config_dir>
+  local team="$1" agent="$2" socket="$3" config_dir="$4"
+  [ -n "$team" ] && [ -n "$agent" ] || return 0
+  local path dir tmp line
+  _agmsg_role_session_path_into "$team" "$agent"
+  path="$_AGMSG_ROLE_SESSION_PATH"
+  [ -f "$path" ] || return 0
+  dir="$(_actas_lock_dir)"
+  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in messaging_socket=*|claude_config_dir=*) ;; *) printf '%s\n' "$line" ;; esac
+    done < "$path"
+    [ -z "$socket" ] || printf 'messaging_socket=%s\n' "$socket"
+    [ -z "$config_dir" ] || printf 'claude_config_dir=%s\n' "$config_dir"
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 agmsg_role_session_mark_named() {
   local team="$1" agent="$2" ref="$3" epoch="${4:-}" project="${5:-}" type="${6:-}"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$ref" ] || return 0
