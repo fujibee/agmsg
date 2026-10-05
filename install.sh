@@ -1179,7 +1179,7 @@ $_agmsg_running_team"
   fi
   install_windows_helpers || exit 1
   agmsg_install_op_phase_end || exit 1
-  agmsg_install_op_run_phase agmsg_launcher_install "$SKILL_DIR" || exit 1
+  agmsg_install_op_run_phase agmsg_launcher_install "$SKILL_DIR" "$CMD_NAME" || exit 1
   agmsg_install_op_run_phase agmsg_install_write_version || exit 1
   echo "  + updated scripts, templates, and SKILL.md (version $INSTALLED_VERSION)"
   echo "  ~ DB and team configs preserved"
@@ -1315,7 +1315,7 @@ install_windows_helpers || exit 1
 agmsg_install_op_phase_end || exit 1
 
 # The `agmsg` command launcher (never touches shell rc files or PATH).
-agmsg_install_op_run_phase agmsg_launcher_install "$SKILL_DIR" || exit 1
+agmsg_install_op_run_phase agmsg_launcher_install "$SKILL_DIR" "$CMD_NAME" || exit 1
 
 # Marker file for uninstall detection and source provenance version are one
 # protected phase so neither write can occur after a lost-lock boundary.

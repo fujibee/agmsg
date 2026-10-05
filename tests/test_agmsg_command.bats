@@ -64,6 +64,16 @@ teardown() {
   [ -d "$BIN_DIR" ]
 }
 
+@test "launcher: a custom command does not claim an empty shared bin directory" {
+  run bash -c 'source "$1"; agmsg_launcher_install "$2" agmsg-e2e' _ "$LIB" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  grep -Fq -- 'custom command name: agmsg-e2e' <<<"$output"
+  grep -Fq -- "$TEST_SKILL_DIR/scripts/agmsg" <<<"$output"
+  [ ! -e "$BIN_DIR/agmsg" ]
+  [ ! -e "$BIN_DIR/agmsg-e2e" ]
+  [ ! -e "$TEST_SKILL_DIR/run/agmsg-launcher.path" ]
+}
+
 # The four kinds of thing already sitting at the target: nothing is broken,
 # nothing is followed, and the message says why.
 @test "launcher: a valid symlink, a broken symlink, a directory and a foreign file are all left alone" {
