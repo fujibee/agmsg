@@ -53,7 +53,7 @@ Four possible outputs:
   > - **Team name**: a group of agents that can message each other (available: <list from output>)
   > - **Agent name**: this agent's identity within the team
 
-  1. Ask: "Enter a team name (joins existing or creates new)". If that name is not in `available_teams`, do not create it yet: ask whether to create a new local team or bring in the team of that name from a server (`remote pull`).
+  1. Ask: "Enter a team name (joins existing or creates new)". If that name is not in `available_teams`, do not create it yet: ask whether to create a new local team or bring in the team of that name from a server (`remote pull`; after it succeeds, return to Identity setup).
   2. If the team name given already appears in `available_teams`, run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` to see the current roster (name, type, project) and note the names already in use. Look for a naming convention already in play (e.g. a shared base name with role and number suffixes (`<base>-<role><n>`), or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label like `codex`/`cc`). Either way, names must not collide with the roster. Then ask: "Enter a name for this agent (suggestions: <name1>, <name2>, <name3> — or type your own)". For a brand-new team, skip the roster check and just ask: "Enter a name for this agent".
   3. **You MUST use join.sh** — run: `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <agent_name> __AGENT_TYPE__ "$(pwd)"`
   4. Show the result and explain:
@@ -75,7 +75,7 @@ Four possible outputs:
 
   1. Show the suggested agent names to the user.
   2. Ask whether to reuse one of those names or choose a new one.
-  3. Ask for the team name to join (existing or new).
+  3. Ask for the team name to join (existing or new). If that name is not in `available_teams`, do not create it yet: ask whether to create a new local team or bring in the team of that name from a server (`remote pull`; after it succeeds, return to Identity setup).
   4. Run: `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <agent_name> __AGENT_TYPE__ "$(pwd)"`
   5. Then continue with the normal post-join flow above.
 
