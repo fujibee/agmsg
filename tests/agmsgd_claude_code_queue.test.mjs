@@ -59,3 +59,23 @@ test('observeTranscript: a queue-operation enqueue line is not delivery evidence
   resolved = resolvePendingDelivery({ observation, ageMs: 1000, ttlMs: QUEUE_CONFIRMATION_TTL_MS });
   assert.equal(resolved.state, 'confirmed');
 });
+
+// #1577 review: a transcript that is genuinely missing (its session/project
+// no longer has a live file to write to) must eventually expire with a
+// reason, not poll forever -- but a transcript that merely failed to read
+// (a transient fs error) must stay pending indefinitely, since that one
+// really could resolve on the next read. Distinguishing these two is the
+// property this test pins.
+test('resolvePendingDelivery: a missing transcript expires at the TTL; a read failure never does', () => {
+  const missing = { state: 'unreadable', reason: 'transcript_missing' };
+  const readFailed = { state: 'unreadable', reason: 'transcript_read_failed' };
+
+  const missingBeforeTtl = resolvePendingDelivery({ observation: missing, ageMs: 1000, ttlMs: QUEUE_CONFIRMATION_TTL_MS });
+  assert.equal(missingBeforeTtl.state, 'pending');
+  const missingAfterTtl = resolvePendingDelivery({ observation: missing, ageMs: QUEUE_CONFIRMATION_TTL_MS + 1, ttlMs: QUEUE_CONFIRMATION_TTL_MS });
+  assert.equal(missingAfterTtl.state, 'expired');
+  assert.equal(missingAfterTtl.reason, 'transcript_missing');
+
+  const readFailedAfterTtl = resolvePendingDelivery({ observation: readFailed, ageMs: QUEUE_CONFIRMATION_TTL_MS + 1, ttlMs: QUEUE_CONFIRMATION_TTL_MS });
+  assert.equal(readFailedAfterTtl.state, 'pending');
+});

@@ -177,8 +177,21 @@ export function observeTranscript(transcriptPath, nonce) {
 // check, so "present" collapses to one case (delivered) instead of two.
 export function resolvePendingDelivery({ observation, ageMs, ttlMs }) {
   if (observation?.state === "delivered") return { state: "confirmed", reason: "nonce_observed" };
-  if (observation?.state === "unreadable") return { state: "pending", reason: observation.reason ?? "transcript_unreadable" };
-  if (!Number.isSafeInteger(ageMs) || ageMs < 0) return { state: "pending", reason: "pending_age_unreadable" };
+  const ageKnown = Number.isSafeInteger(ageMs) && ageMs >= 0;
+  if (observation?.state === "unreadable") {
+    // A transcript that is genuinely absent past the TTL is never coming
+    // back on its own (the session that would create it is gone, or this
+    // record's project/session no longer matches a live one) -- expire it
+    // with a reason that says so, rather than polling it forever. Any OTHER
+    // unreadable cause (a transient read failure, a malformed line) stays
+    // pending indefinitely: that one really could resolve on the next read,
+    // and timing it out would report a seat undeliverable that might not be.
+    if (observation.reason === "transcript_missing" && ageKnown && ageMs >= ttlMs) {
+      return { state: "expired", reason: "transcript_missing" };
+    }
+    return { state: "pending", reason: observation.reason ?? "transcript_unreadable" };
+  }
+  if (!ageKnown) return { state: "pending", reason: "pending_age_unreadable" };
   const reason = observation?.state === "held" ? "peer_held" : "awaiting_confirmation";
   if (ageMs >= ttlMs) return { state: "expired", reason: observation?.state === "held" ? "confirmation_timeout:peer_held" : "confirmation_timeout" };
   return { state: "pending", reason };

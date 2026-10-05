@@ -91,3 +91,46 @@ _mark_daemon_ready() {
   [ "$(agmsg_role_session_get team bob claude_config_dir)" = /home/bob/.claude ]
   [ "$(agmsg_role_session_uuid team bob)" = sid-bob ]
 }
+
+# #1577 review: agmsgd's own Claude Code channel does not send to a Windows
+# seat at all yet (named pipe + mandatory auth line is separate work), so the
+# plug must never skip Monitor there even with a daemon that is otherwise
+# ready and a role-session record that otherwise round-trips cleanly. Faking
+# `uname -s` for the whole session-start.sh run (as the full integration tests
+# above do for ready/not-ready) is unusable here: compat.sh's OWN platform
+# branches change unrelated behavior under a faked Windows uname too, which
+# would make this pass or fail for a confounded reason rather than the
+# platform check this test exists to pin. Isolate it instead: stub every
+# collaborator agmsg_session_start calls so the only real logic under test is
+# its own final gate, and set _agmsg_platform directly (compat.sh's own memo
+# variable, read, never recomputed, once non-empty).
+@test "session-start plug: the Monitor-skip gate itself never fires on Windows, in isolation" {
+  run bash -c '
+    set -uo pipefail
+    SKILL_DIR="'"$TEST_SKILL_DIR"'"
+    PROJECT="/tmp/p1"
+    TYPE="claude-code"
+    SESSION_ID="sid-1"
+    PAIRS="T	alice"
+    CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/1.sock"
+    CLAUDE_CONFIG_DIR="/home/x/.claude"
+    # Stubs: every collaborator reports "this pair is fully addressable" --
+    # the one thing NOT stubbed is _agmsg_platform/_agmsg_detect_platform and
+    # agmsg_daemon_read_state, which together are what this test is pinning.
+    agmsg_role_session_set_messaging() { :; }
+    agmsg_role_session_get() { printf "%s" "$3" | grep -q socket && echo "/tmp/cc-socks/1.sock" || echo "/home/x/.claude"; }
+    agmsg_role_session_uuid() { echo "sid-1"; }
+    actas_lock_read() { printf "ok\tsid-1\n"; }
+    agmsg_instance_bare_sid() { printf "%s" "$1"; }
+    agmsg_daemon_read_state() { AGMSGD_HEALTH=ready; }
+    _agmsg_platform=msys
+    _agmsg_detect_platform() { :; }   # already set -- compat.sh itself would also no-op here
+
+    SKILL_DIR="$SKILL_DIR" . "'"$TEST_SKILL_DIR"'/scripts/drivers/types/claude-code/_session-start.sh"
+    agmsg_session_start
+    echo "FELL THROUGH (correct: Windows must not skip Monitor)"
+  '
+  [ "$status" -eq 0 ]
+  grep -qF "FELL THROUGH" <<<"$output"
+  refute grep -q "agmsgd is running and will deliver" <<<"$output"
+}
