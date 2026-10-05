@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-10-05
+
+### Added
+- Sessions in the Claude desktop app (Code tab) and the Codex desktop app are recognized as desktop seats: team status shows them as such, and they are never recorded against a terminal pane. Message delivery is unchanged. (#1563, #1565)
+
+### Fixed
+- Remote sync no longer leaves a small temp file behind for every message it applies; on a long-running synced team these filled the temp directory (on Linux tmpfs, until it ran out of inodes) (#1572)
+- `install --update` removes the temp files leaked before this fix, and `doctor` reports them (`doctor --fix` removes them) (#1575)
+- Stop treating a missing TaskList entry as a failed watch (#1571)
+- Drop the previous name's placement record for this pane on a switch (#1568)
+- End the Claude Code watch at 1750 seconds, not 1790 (#1561)
+- Break a registry lock only when its recorded holder is gone (#1556)
+
+### Documentation
+- Ask before creating a team when remote is in use; point at delete and update (#1574)
+
+[1.5.3]: https://github.com/fujibee/agmsg/compare/v1.5.2...v1.5.3
+
 ## [1.5.2] - 2026-10-02
 
 ### Added
