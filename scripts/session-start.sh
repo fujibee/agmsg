@@ -454,7 +454,7 @@ WATCH="$SKILL_DIR/scripts/watch.sh"
 REARM_NOTE="
 This watch renews itself. A little before the 30-minute cap it prints one line on its own and exits: on \`agmsg watch: re-arm - ...\`, invoke Monitor again with exactly the command and description that line names (persistent: true, timeout_ms: 1800000), silently — no message to the user, no \"re-armed\", no acknowledgement, no summary, since announcing it every 30 minutes wastes tokens for no benefit; on \`agmsg watch: stopping - ...\`, do not re-arm it. If the watch is instead killed at the cap and no such line arrived (an agmsg install from before this), re-arm it only when the expiry notification says it delivered something."
 # The launch commands below end with the option that turns self-management on.
-WATCH_MAX_ARG="--max-seconds=1790"
+WATCH_MAX_ARG="--max-seconds=1750"
 # Shell-quote each argv so the host can paste the command into Monitor and run
 # it verbatim. A plain '...' wrap breaks on paths with an apostrophe
 # (/Users/o'brien/...); printf %q escapes spaces, quotes and other metacharacters
@@ -496,11 +496,10 @@ monitor-branded tools are not valid for agmsg delivery. Do not start watch.sh
 with Bash/background/nohup or a shell task. Success is:
 
   - Monitor(agmsg inbox stream (acting as $ROLE_NAME)) starts
-  - TaskList shows a task whose description begins with "agmsg inbox
-    stream (acting as $ROLE_NAME)" for this session (the reliable check;
-    the background-task footer is not)
   - the transcript later contains Monitor event: "agmsg inbox stream
     (acting as $ROLE_NAME)"
+
+TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either.
 
 If the generic Monitor tool is unavailable, do not treat a background shell
 watcher as success. Switch to turn delivery or run manual inbox checks instead;
@@ -551,10 +550,9 @@ monitor-branded tools are not valid for agmsg delivery. Do not start watch.sh
 with Bash/background/nohup or a shell task. Success is:
 
   - Monitor(agmsg inbox stream) starts
-  - TaskList shows a task whose description begins with "agmsg inbox
-    stream" for this session (the reliable check; the background-task
-    footer is not)
   - the transcript later contains Monitor event: "agmsg inbox stream"
+
+TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either.
 
 If the generic Monitor tool is unavailable, do not treat a background shell
 watcher as success. Switch to turn delivery or run manual inbox checks instead;

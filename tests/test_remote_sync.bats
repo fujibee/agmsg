@@ -996,6 +996,70 @@ _reconcile_one_ack_wire() {
   [ "$(sqlite3 "$db" "SELECT count(*) FROM messages WHERE body='arrived from elsewhere';" | tr -d '\r')" -eq 1 ]
 }
 
+# Regression: a successful apply used to leave storage-sync-driver.sh's own
+# AGMSG_SQLITE_OUTCOME_FILE (a bare `mktemp`, default name) on disk forever.
+# storage_sync_apply_pull sets its OWN `trap ... EXIT INT TERM HUP` for its sql
+# file partway through, and bash traps for one signal replace the previous
+# handler rather than stacking -- so the driver's outer trap, installed before
+# calling into here, was silently discarded on every call that reached this
+# function, not only on a crash or a kill. Run through the real driver
+# process (not a direct function call, like every other test in this file) so
+# this exercises the exact trap that was lost.
+@test "sync contract: a successful apply through the real driver process does not leak its own outcome file" {
+  # No override surface added to the driver for this: a `mktemp` wrapper is
+  # put ahead of it on PATH instead, recording the one BARE (no-template)
+  # call -- storage-sync-driver.sh's own AGMSG_SQLITE_OUTCOME_FILE -- while
+  # passing every call through to the real mktemp unchanged, templated ones
+  # (sqlite-sync.sh's own sql/jq temp files) included. Scanning the real
+  # system temp directory for an unrelated bare-named file afterward cannot
+  # be done reliably on a shared machine, and a bare `mktemp` ignores
+  # $TMPDIR entirely on macOS, so redirecting TMPDIR would not even reach
+  # the real leak this regresses (that leak landed in the real $TMPDIR on
+  # macOS too).
+  local wrap_dir real_mktemp bare_log outcome_file remote page
+  wrap_dir="$(mktemp -d)"
+  real_mktemp="$(command -v mktemp)"
+  bare_log="$wrap_dir/bare.log"
+  cat > "$wrap_dir/mktemp" <<EOF
+#!/usr/bin/env bash
+if [ "\$#" -eq 0 ]; then
+  result="\$("$real_mktemp")" || exit 1
+  printf '%s\n' "\$result" >> "$bare_log"
+  printf '%s\n' "\$result"
+else
+  exec "$real_mktemp" "\$@"
+fi
+EOF
+  chmod +x "$wrap_dir/mktemp"
+  remote=$(jq -nc '
+    {type:"sync_pull_message",server_seq:"1",
+     id:"550e8400-e29b-41d4-a716-4466554400a2",
+     server_received_at:"2026-07-20T13:00:01.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:(
+       {body:"driver process apply",created_at:"2026-07-20T13:00:01.000000Z",
+        from_agent:"carol",to_agent:"bob"}|tojson|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:"driver process apply",created_at:"2026-07-20T13:00:01.000000Z",
+                 from_agent:"carol",to_agent:"bob"}}')
+  page=$(printf '%s\n%s\n' "$remote" '{"type":"sync_pull_cursor","next_after":"1"}')
+  # 3>&- 4>&-: fd 3 is bats' own TAP pipe under this runner; a subprocess that
+  # inherits it (here, through the pipeline inside the `bash -c`) holds it
+  # open past this test, which is what broke every test after this one the
+  # first time (`3: Bad file descriptor`, from a later test's own `run`
+  # finding fd 3 already gone).
+  run env PATH="$wrap_dir:$PATH" bash -c \
+    'printf "%s" "$1" | "$2" apply demo "$3" "$4" 1' \
+    _ "$page" "$SCRIPTS/internal/storage-sync-driver.sh" "$SERVER_ID" "$TEAM_ID" 3>&- 4>&-
+  [ "$status" -eq 0 ]
+  [ -s "$bare_log" ]
+  # Exactly one bare mktemp call is expected (the outcome file). More than
+  # one would mean this wrapper, or the driver's own behavior, changed in a
+  # way this test no longer accounts for -- not something to average over.
+  [ "$(wc -l < "$bare_log" | tr -d ' ')" -eq 1 ]
+  outcome_file="$(cat "$bare_log")"
+  [ ! -e "$outcome_file" ]
+}
+
 # A partial commit is the failure this batch has to be incapable of. It now
 # spans the event, its legacy mirror, the sync mapping and the transport cursor,
 # and the CLI's default is to report a statement error and keep going — so

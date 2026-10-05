@@ -59,12 +59,12 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
     - `status=held team=<team> owner=<sid>`: another live session currently owns `<name>` in `<team>`. Tell the user: "Cannot actas as `<name>` — it is held by session `<sid>` in team `<team>`. Run `/__SKILL_NAME__ drop <name>` in that session first, then retry." Then abort — do NOT touch the running Monitor.
     - `status=not_registered`: shouldn't happen if step 3 ran; treat as an error.
 5. **Switch receive too — exclusive role mode.**
-   a. Run TaskList. Find any task whose description begins with "agmsg inbox stream".
-   b. **If a matching task is found**: TaskStop it.
-   c. **If no matching task is found** (typical when /__SKILL_NAME__ actas runs as the first command of a fresh session — SessionStart hasn't fired the Monitor directive yet, or you're invoking actas before the agent acted on it): skip TaskStop entirely. There is no Monitor to stop. Do NOT attempt TaskStop with a guessed or empty task_id — it will fail with "Invalid tool parameters" and confuse the flow.
+   a. Find this session's agmsg watch Monitor task: a task in TaskList whose description begins with "agmsg inbox stream", or the task_id returned by a Monitor call you made earlier in this conversation. Not every environment lists Monitor tasks in TaskList, so an empty list does not mean none is running.
+   b. **If you have such a task_id**: TaskStop it.
+   c. **If you have none** (typical when /__SKILL_NAME__ actas runs as the first command of a fresh session — SessionStart hasn't fired the Monitor directive yet, or you're invoking actas before the agent acted on it): skip TaskStop. Do NOT attempt TaskStop with a guessed or empty task_id — it will fail with "Invalid tool parameters" and confuse the flow. Starting a new watcher for this session in step d replaces any previous one.
    d. Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status __AGENT_TYPE__ "$(pwd)"` and read its **first line**.
       - **`mode: monitor` or `mode: both`**: invoke a fresh Monitor, regardless of whether step b or c applied:
-        - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" __AGENT_TYPE__ <name> --max-seconds=1790`
+        - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" __AGENT_TYPE__ <name> --max-seconds=1750`
         - description: `agmsg inbox stream (acting as <name>)`
         - persistent: true
         - timeout_ms: 1800000
@@ -77,7 +77,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 6. Set the session's active FROM to `<name>` — use `<name>` in every `send.sh` call for the rest of this session.
 7. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from; receive restricted to `<name>` only."
 8. **Only if this session was NOT launched via `spawn`** — check the environment variable `AGMSG_SPAWNED` (e.g. `printenv AGMSG_SPAWNED`): `spawn` exports `AGMSG_SPAWNED=1` and already named the session `<team>-<agent>` via `-n`, so when it is set, **skip this tip entirely**. When it is UNSET (a human typed `claude` then actas'd, so the session has no convention name), additionally suggest to the user: "Tip: rename this session to `<team>-<name>` with `/rename <team>-<name>` so it's easy to find in the `/resume` picker and stays labeled after a restart." `/rename` is a user-typed slash command — you cannot invoke it yourself, so only suggest it.
-9. **Confirm the Monitor actually attached** — only when step 5d invoked a fresh Monitor (`mode: monitor` or `mode: both`): run TaskList once more and confirm a task whose description begins with `agmsg inbox stream` is present. Do NOT read this off the terminal UI's background-task footer — it does not reliably reflect whether a Monitor is really streaming for this session; TaskList is the only check that does. If the task is missing, retry the Monitor invocation from step 5d once. If it is still missing after the retry, tell the user `actas` completed but delivery could not be confirmed as attached, and do not describe delivery as active.
+9. **Confirm the Monitor actually attached** — only when step 5d invoked a fresh Monitor (`mode: monitor` or `mode: both`): confirm the Monitor call from step 5d started (it returned a task id rather than an error). TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either. If the Monitor call failed, retry the invocation from step 5d once. If it still fails after the retry, tell the user `actas` completed but delivery could not be confirmed as attached, and do not describe delivery as active.
 <!-- /agmsg:slot actas -->
 
 <!-- agmsg:slot drop -->
@@ -85,12 +85,12 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" __AGENT_TYPE__ <name> "$CLAUDE_CODE_SESSION_ID"` to remove only that role's registration for this project. If the role has no other registrations left, reset.sh also drops it from the team config. The 4th argument releases any actas exclusivity locks this session held on the role so peers can pick it up immediately (see #62).
 3. If the session's active FROM was `<name>`, clear that state. Then:
-   a. Run TaskList. Find any task whose description begins with "agmsg inbox stream".
-   b. **If a matching task is found**: TaskStop it.
-   c. **If no matching task is found**: skip TaskStop. Do NOT attempt TaskStop with a guessed or empty task_id.
+   a. Find this session's agmsg watch Monitor task: a task in TaskList whose description begins with "agmsg inbox stream", or the task_id returned by a Monitor call you made earlier in this conversation. An empty TaskList does not mean none is running.
+   b. **If you have such a task_id**: TaskStop it.
+   c. **If you have none**: skip TaskStop. Do NOT attempt TaskStop with a guessed or empty task_id.
    d. Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status __AGENT_TYPE__ "$(pwd)"` and read its **first line**.
       - **`mode: monitor` or `mode: both`**: invoke a fresh Monitor with the default subscription (no `actas` name filter — receives every (team, agent) pair currently registered for this project that isn't held by another session):
-        - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" __AGENT_TYPE__ --max-seconds=1790`
+        - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" __AGENT_TYPE__ --max-seconds=1750`
         - description: `agmsg inbox stream`
         - persistent: true
         - timeout_ms: 1800000
@@ -121,7 +121,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 <!-- /agmsg:slot spawn -->
 
 <!-- agmsg:slot mode -->
-If argument is "mode", run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status __AGENT_TYPE__ "$(pwd)"`. Show the output to the user, and if it says `mode: monitor` (or `both`), say explicitly that this reports project *configuration* only — it does not prove the runtime Monitor task is attached in the current session. To confirm the runtime state, run TaskList and look for a task whose description begins with `agmsg inbox stream` (after an `actas` it reads `agmsg inbox stream (acting as <name>)`) — that is the reliable check; the background-task footer is not (it does not reliably reflect whether a Monitor is really streaming for this session).
+If argument is "mode", run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status __AGENT_TYPE__ "$(pwd)"`. Show the output to the user, and if it says `mode: monitor` (or `both`), say explicitly that this reports project *configuration* only — it does not prove the runtime Monitor task is attached in the current session. To confirm the runtime state, look for a Monitor whose description begins with `agmsg inbox stream` (after an `actas` it reads `agmsg inbox stream (acting as <name>)`). TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either.
 
 For `mode monitor|turn|both|off`, run `delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"` and follow its `AGMSG-DIRECTIVE` block. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
 <!-- /agmsg:slot mode -->
