@@ -293,6 +293,74 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   # alice keeps everything.
   [ "$(_mark team alice)" = $'tmux:/tmp/s:%3\tpid=4242' ]
   [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+
+  # An actas is different: the session is declaring that it now acts as bob, and
+  # alice was the name it acted as in this very pane a moment ago. Her record
+  # would otherwise refuse bob forever, so the claim retires it -- but only the
+  # records that point at THIS pane and belong to no other live session.
+  #   - alice in another team has a record for another pane: untouched
+  #   - a seat that another session holds, in another pane: its record stays and
+  #     it still refuses whoever acts from that pane
+  #   - a seat held by ANOTHER PROCESS OF THE SAME SESSION ID (the lock owner is
+  #     "<sid>.<pid>", and only the whole thing says whose it is): kept
+  #   - a record of ANOTHER TEAM that points at the same pane and has no lock:
+  #     kept, so the name acting from there is still refused
+  _join_unnamed team bob
+  _join_unnamed team2 alice
+  _join_unnamed team eve
+  _join_unnamed team frank
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  agmsg_write_atomic "$(agmsg_spawn_path team2 alice)" "$(printf 'tmux:/tmp/s:%%9\t/tmp/p\tclaude-code')"
+  agmsg_write_atomic "$(agmsg_spawn_path team eve)" "$(printf 'tmux:/tmp/s:%%5\t/tmp/p\tclaude-code')"
+  printf 'other-session.99999\n' > "$(actas_lock_path team eve)"
+
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code bob sid-bob
+  [ "$status" -eq 0 ]
+  grep -q 'status=ok' <<<"$output"
+  [ "$(_placement team bob)" = 'tmux:/tmp/s:%3' ]       # bob is named and recorded here now
+  [ -z "$(_placement team alice)" ]                     # alice's record for this pane is gone
+  [ -z "$(_mark team alice)" ]                          # and so is the mark that said she was named here
+  [ "$(_placement team2 alice)" = 'tmux:/tmp/s:%9' ]    # her other placement stays
+
+  _under_tmux /tmp/s 4242 %5
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code frank sid-frank
+  grep -q 'already recorded as' <<<"$output"            # held by another session: still a rival
+  [ -z "$(_placement team frank)" ]
+  [ "$(_placement team eve)" = 'tmux:/tmp/s:%5' ]
+
+  # Same bare session id, another live process: the lock owner differs only in
+  # its pid, and that is enough for the seat to stay.
+  _join_unnamed team gina
+  _join_unnamed team hank
+  agmsg_write_atomic "$(agmsg_spawn_path team gina)" "$(printf 'tmux:/tmp/s:%%6\t/tmp/p\tclaude-code')"
+  printf 'sid-hank.12345\n' > "$(actas_lock_path team gina)"
+  _under_tmux /tmp/s 4242 %6
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code hank sid-hank
+  grep -q 'already recorded as' <<<"$output"
+  [ -z "$(_placement team hank)" ]
+  [ "$(_placement team gina)" = 'tmux:/tmp/s:%6' ]
+
+  # A record of another team for the same pane, no lock: not this team's, so not
+  # retired, and it still refuses.
+  _join_unnamed team jack
+  _join_unnamed team2 iris
+  agmsg_write_atomic "$(agmsg_spawn_path team2 iris)" "$(printf 'tmux:/tmp/s:%%7\t/tmp/p\tclaude-code')"
+  _under_tmux /tmp/s 4242 %7
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code jack sid-jack
+  grep -q 'already recorded as' <<<"$output"
+  [ -z "$(_placement team jack)" ]
+  [ "$(_placement team2 iris)" = 'tmux:/tmp/s:%7' ]
+
+  # Owner and instance both BARE: equal, and so no proof of whose the lock is.
+  _join_unnamed team lena
+  _join_unnamed team mark
+  agmsg_write_atomic "$(agmsg_spawn_path team lena)" "$(printf 'tmux:/tmp/s:%%8\t/tmp/p\tclaude-code')"
+  printf 'shared\n' > "$(actas_lock_path team lena)"
+  _under_tmux /tmp/s 4242 %8
+  run agmsg_terminal_name_self_safe shared team mark /tmp/p claude-code record retire_previous shared
+  grep -q 'already recorded as' <<<"$output"
+  [ -z "$(_placement team mark)" ]
+  [ "$(_placement team lena)" = 'tmux:/tmp/s:%8' ]
 }
 
 # --- order independence with the existing paths -------------------------------------

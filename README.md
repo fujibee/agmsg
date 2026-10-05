@@ -297,17 +297,15 @@ For real-time delivery, verify the Claude Code runtime state:
 
 1. `ToolSearch select:Monitor` finds Claude Code's generic `Monitor` tool.
 2. The session starts `Monitor(agmsg inbox stream)` with the `watch.sh ... claude-code` command from the `AGMSG-DIRECTIVE` (or, after `actas <name>`, `Monitor(agmsg inbox stream (acting as <name>))`).
-3. `TaskList` shows a task whose description begins with `agmsg inbox stream` for this session.
-4. The transcript contains a `Monitor event: "agmsg inbox stream"` (or `"agmsg inbox stream (acting as <name>)"`) notification when messages arrive.
+3. The transcript contains a `Monitor event: "agmsg inbox stream"` (or `"agmsg inbox stream (acting as <name>)"`) notification when messages arrive.
 
 These are failure states, even if `delivery.sh status` says `mode: monitor`:
 
-- `TaskList` shows no task whose description begins with `agmsg inbox stream` for this session.
 - `watch.sh` is running only as a Bash/background/nohup shell process, not through the Monitor tool.
 - Tool search finds Azure Monitor, an MCP monitor, or any other monitor-branded tool instead of Claude Code's generic `Monitor` tool.
 - `ToolSearch select:Monitor` cannot find a generic `Monitor` tool.
 
-The background-task footer is not a reliable signal either way — it does not consistently reflect whether a Monitor is really streaming for this session, so check `TaskList` instead. If the Monitor tool is unavailable, use `turn` delivery or manual `/agmsg` inbox checks as a fallback. Those modes still deliver queued messages, but they are not real-time monitor delivery.
+TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either. If the Monitor tool is unavailable, use `turn` delivery or manual `/agmsg` inbox checks as a fallback. Those modes still deliver queued messages, but they are not real-time monitor delivery.
 
 ### Migrating from legacy `hook on/off`
 
