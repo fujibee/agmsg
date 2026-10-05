@@ -41,91 +41,77 @@ agmsg_session_start() {
     *) config_dir="" ;;
   esac
 
-  # Only touch a pair THIS session is the RECORDED owner of -- never every
-  # pair registered for the project (#1577 review): two seats sharing a
-  # project each have their own process and own socket, and writing one's
-  # socket into the other's record would misdeliver agmsgd's nudge entirely.
-  # Narrow to pairs whose role-session record's OWN session= already equals
-  # this bare sid (i.e. a role actas previously tied to this very
-  # conversation) before ever touching the lock -- a pair with no such prior
-  # relationship is never attempted, so this can't silently seize a role
-  # nobody ever actas'd this session into.
-  #
-  # The actual write gate past that narrowing is actas_lock_claim -- the
-  # SAME primitive watch.sh uses to reclaim a role's lock across --resume
-  # (session-start.sh's own 4th-arg "Role-aware resume" relies on exactly
-  # this, via watch.sh, when Monitor fires; this plug needs its own call
-  # since it may skip Monitor entirely). Its "mine" verdict requires an
-  # EXACT token match; a mismatched owner that is still genuinely alive
-  # fails the claim outright, and only a mismatched DEAD owner reclaims --
-  # so two live processes that happen to share a bare sid (#1577 re-review:
-  # same hazard class as #1568) can never both end up "owning" the same
-  # pair, while a real --resume (new pid, old pid now dead) correctly
-  # reclaims. A composite "<sid>.<pid>" identity is what this comparison
-  # needs; when the pid can't be resolved, agmsg_normalize_instance_id
-  # degrades to the bare sid, which can only ever read as "other" against a
-  # live composite owner or "mine" by lucky accident against no owner at
-  # all -- never a safe basis to claim on, so it is excluded outright below.
-  if ! command -v actas_lock_claim >/dev/null 2>&1; then
-    # shellcheck disable=SC1091
-    . "${SKILL_DIR:-}/scripts/lib/actas-lock.sh"
-  fi
-  local bare_sid my_instance
-  bare_sid="$(agmsg_instance_bare_sid "${SESSION_ID:-}" 2>/dev/null || true)"
-  my_instance="$(agmsg_normalize_instance_id "${SESSION_ID:-}" "${TYPE:-}" 2>/dev/null || true)"
-
-  # Write, then read every OWNED pair back: this is the SAME check the daemon
-  # itself applies (messaging_socket/claude_config_dir both present and
-  # non-empty) before it will ever address this seat, so "the record actually
-  # took" must be verified here too, not assumed from the write call
-  # returning. No owned pair verified this way leaves this session exactly as
-  # addressable-by-daemon as it already was -- never the one that silences
-  # Monitor when in doubt (#1577 review).
-  local any_pair_confirmed=0
-  local pair_team pair_agent
-  if [ -n "$bare_sid" ] && agmsg_instance_is_composite "$my_instance" 2>/dev/null; then
-    while IFS=$'\t' read -r pair_team pair_agent; do
-      [ -n "$pair_team" ] || continue
-      [ "$(agmsg_role_session_uuid "$pair_team" "$pair_agent" 2>/dev/null || true)" = "$bare_sid" ] || continue
-      local claim_result
-      claim_result="$(actas_lock_claim "$pair_team" "$pair_agent" "$my_instance" 2>/dev/null)" || claim_result="unknown:claim_failed"
-      [ "$claim_result" = ok ] || continue
-
-      agmsg_role_session_set_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid"
-      local readback_socket readback_config_dir readback_session
-      readback_socket="$(agmsg_role_session_get "$pair_team" "$pair_agent" messaging_socket 2>/dev/null || true)"
-      readback_config_dir="$(agmsg_role_session_get "$pair_team" "$pair_agent" claude_config_dir 2>/dev/null || true)"
-      readback_session="$(agmsg_role_session_uuid "$pair_team" "$pair_agent" 2>/dev/null || true)"
-      if [ -n "$socket" ] && [ "$readback_socket" = "$socket" ] && \
-         [ -n "$config_dir" ] && [ "$readback_config_dir" = "$config_dir" ] && \
-         [ "$readback_session" = "$bare_sid" ]; then
-        any_pair_confirmed=1
-      fi
-    done <<< "${PAIRS:-}"
-  fi
-
-  # Windows has no native-channel implementation yet (named pipe + mandatory
-  # auth line, separate work) -- never claim this session is daemon-reachable
-  # there, no matter what the record says.
+  # Check every OTHER precondition FIRST, before ever touching a lock
+  # (#1577 re-review): a session that cannot possibly use the native path
+  # (daemon not ready, Windows, no usable socket) must claim NOTHING. The
+  # earlier version claimed first and checked these after, so a session with
+  # agmsgd disabled or no socket could still silently seize an actas lock it
+  # was never going to use -- only Monitor's own watch.sh was ever supposed
+  # to touch that lock in that case.
+  if [ -z "$socket" ]; then return 0; fi
   if ! command -v _agmsg_detect_platform >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     . "${SKILL_DIR:-}/scripts/lib/compat.sh"
   fi
   _agmsg_detect_platform
-
-  # Only when agmsgd's own executor is actually ready, this is not Windows,
-  # AND at least one owned pair's record round-tripped correctly (including
-  # the session= field) do we skip the Monitor directive (mirrors codex's
-  # plug: a Monitor-less delivery path must be verifiably live before this
-  # session stops arming its own fallback). Any one of these missing leaves
-  # Monitor delivery exactly as it is today -- when in doubt, arm Monitor
-  # (#1577 review).
+  [ "$_agmsg_platform" != msys ] || return 0
   if ! declare -F agmsg_daemon_read_state >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     . "${SKILL_DIR:-}/scripts/lib/daemon-state.sh"
   fi
   agmsg_daemon_read_state
-  if [ "${AGMSGD_HEALTH:-}" = ready ] && [ "$_agmsg_platform" != msys ] && [ "$any_pair_confirmed" = 1 ]; then
+  [ "${AGMSGD_HEALTH:-}" = ready ] || return 0
+
+  # Claim ONLY the single role this session is actually resuming as -- never
+  # loop over every pair whose record happens to share this bare sid
+  # (#1577 re-review: the same conversation can carry session=<bare sid>
+  # into MORE THAN ONE role's record over its life, e.g. actas alice then
+  # later actas bob; a resumed session must take back only whichever one
+  # role it is now, not seize every stale name it ever wore). Delegates to
+  # agmsg_role_session_match_unique -- the SAME ambiguity rule session-
+  # start.sh's own narrowing uses elsewhere in this file: a second
+  # qualifying record makes the whole lookup refuse rather than guess.
+  if ! command -v agmsg_role_session_match_unique >/dev/null 2>&1 \
+     || ! command -v actas_lock_claim >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "${SKILL_DIR:-}/scripts/lib/actas-lock.sh"
+  fi
+  local bare_sid my_instance project_phys match pair_team pair_agent
+  bare_sid="$(agmsg_instance_bare_sid "${SESSION_ID:-}" 2>/dev/null || true)"
+  my_instance="$(agmsg_normalize_instance_id "${SESSION_ID:-}" "${TYPE:-}" 2>/dev/null || true)"
+  [ -n "$bare_sid" ] || return 0
+  agmsg_instance_is_composite "$my_instance" 2>/dev/null || return 0
+  project_phys="$(agmsg_canonical_path "${PROJECT:-}" 2>/dev/null || printf '%s' "${PROJECT:-}")"
+  match="$(agmsg_role_session_match_unique "${TYPE:-}" "$project_phys" "$bare_sid" 2>/dev/null)" || return 0
+  pair_team="${match%%$'\t'*}"
+  pair_agent="${match#*$'\t'}"
+  [ -n "$pair_team" ] && [ -n "$pair_agent" ] || return 0
+
+  # actas_lock_claim is the write gate -- the SAME primitive watch.sh uses to
+  # reclaim a role's lock across --resume (session-start.sh's own 4th-arg
+  # "Role-aware resume" relies on exactly this, via watch.sh, when Monitor
+  # fires; this plug needs its own call since it may skip Monitor entirely).
+  # Its "mine" verdict requires an EXACT token match; a mismatched owner
+  # that is still genuinely alive fails the claim outright, and only a
+  # mismatched DEAD owner reclaims -- so two live processes that happen to
+  # share a bare sid (same hazard class as #1568) can never both end up
+  # "owning" the same pair, while a real --resume (new pid, old pid now
+  # dead) correctly reclaims.
+  local claim_result
+  claim_result="$(actas_lock_claim "$pair_team" "$pair_agent" "$my_instance" 2>/dev/null)" || claim_result="unknown:claim_failed"
+  [ "$claim_result" = ok ] || return 0
+
+  # Write, then read back: this is the SAME check the daemon itself applies
+  # (messaging_socket/claude_config_dir both present and non-empty) before
+  # it will ever address this seat, so "the record actually took" must be
+  # verified here too, not assumed from the write call returning.
+  agmsg_role_session_set_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid"
+  local readback_socket readback_config_dir readback_session
+  readback_socket="$(agmsg_role_session_get "$pair_team" "$pair_agent" messaging_socket 2>/dev/null || true)"
+  readback_config_dir="$(agmsg_role_session_get "$pair_team" "$pair_agent" claude_config_dir 2>/dev/null || true)"
+  readback_session="$(agmsg_role_session_uuid "$pair_team" "$pair_agent" 2>/dev/null || true)"
+  if [ "$readback_socket" = "$socket" ] && [ -n "$config_dir" ] && \
+     [ "$readback_config_dir" = "$config_dir" ] && [ "$readback_session" = "$bare_sid" ]; then
     cat <<EOF
 AGMSG delivery: agmsgd is running and will deliver to this session directly (native channel). No Monitor needed.
 EOF

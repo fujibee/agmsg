@@ -41,6 +41,33 @@ _mark_daemon_ready() {
     UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
 }
 
+# #1577 re-review repro: a conversation that actas'd alice, then
+# LATER actas'd bob, leaves BOTH role-session records carrying the same
+# session=shared (actas-claim.sh always writes the CURRENT session's bare
+# sid into whichever record it claims). A later caller with that same bare
+# sid is genuinely resuming only ONE of those roles -- claiming the other's
+# lock too would silently seize an actas exclusivity lock nobody asked for,
+# with no watcher ever subscribed to use it. Neither role is ever claimed
+# here on purpose: the daemon isn't ready (the precondition-first ordering
+# this test also pins -- #1577 re-review point 2), so the plug must return
+# before ever touching a lock at all, for either pair.
+@test "session-start: two roles sharing a stale bare sid are never both claimed (#1577 re-review repro)" {
+  bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record team alice shared "$PROJ" claude-code
+  agmsg_role_session_record team bob shared "$PROJ" claude-code
+
+  run _run_session_start "shared"
+  [ "$status" -eq 0 ]
+  grep -qF "AGMSG monitor mode" <<<"$output"
+
+  if ! command -v actas_lock_path >/dev/null 2>&1; then source "$SCRIPTS/lib/actas-lock.sh"; fi
+  bob_lock="$(actas_lock_path team bob)"
+  [ ! -e "$bob_lock" ]
+  alice_lock="$(actas_lock_path team alice)"
+  [ ! -e "$alice_lock" ]
+}
+
 @test "session-start: agmsgd ready AND an actas-claimed role-session record -> no Monitor directive" {
   _mark_daemon_ready
   # The SAME live pid on both calls, explicit -- the plug's ownership check
