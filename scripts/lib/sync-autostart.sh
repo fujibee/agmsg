@@ -152,39 +152,77 @@ agmsg_sync_autostart() {
       agmsg_close_inherited_fds
       "$remote_sh" sync start "$team" >"$tmp" 2>&1
       printf '%s\n' "$?" > "$tmp.rc"
-      # A FOLLOW-UP cleanup, detached the same way, not this subshell waiting
-      # on its own sleep before returning: whichever of the two reads $tmp.rc
-      # first wins the race to remove it, and both reads are the SAME `rm -f`
-      # (idempotent, never an error if the other already won). The poll loop
-      # below checks every 0.1s, so 2s is generous margin for it to have
-      # already read and removed both files on the fast path (by far the
-      # common one) well before this grandchild ever wakes -- this exists
-      # only for the budget-exceeded path below, where the caller gave up
-      # before $tmp.rc appeared and nothing else was ever going to remove
-      # these two files again (#1537-adjacent: the exact bare-`mktemp`-left-
-      # in-the-system-temp-directory shape #1572/#1575 cleaned up once
-      # already, for a different pair of files).
-      ( sleep 2; rm -f "$tmp" "$tmp.rc" ) </dev/null >/dev/null 2>&1 3>&- 4>&- &
+      # Who removes $tmp/$tmp.rc, this child or the caller, is decided by a
+      # SINGLE atomic `mkdir` on a THIRD name, not by timing (a fixed sleep
+      # here was tried and was wrong: `mkdir` existing is not the same
+      # question as "has the caller actually read the files yet", and a
+      # caller delayed between seeing $tmp.rc exist and getting to its own
+      # `cat` -- reproduced -- raced a sleep-based cleanup into deleting
+      # both out from under a start that had already succeeded. See the
+      # caller's matching mkdir, right below the budget check, for the
+      # other half):
+      #   - this mkdir SUCCEEDS: the caller has not reached ITS OWN mkdir
+      #     yet, so it is still inside its wait loop and will read these
+      #     files itself the normal way, including removing them -- this
+      #     child does nothing further.
+      #   - this mkdir FAILS (EEXIST): the caller's OWN mkdir got there
+      #     first, which only happens on the path where it already gave up
+      #     on its budget -- nothing else will ever read these files again,
+      #     so this child removes all three names itself.
+      # mkdir is atomic -- POSIX guarantees exactly one of two concurrent
+      # calls on the same path succeeds -- so exactly one side ever takes
+      # ownership, never both and never neither.
+      if ! mkdir "$tmp.gaveup" 2>/dev/null; then
+        rm -f "$tmp" "$tmp.rc"
+        rmdir "$tmp.gaveup" 2>/dev/null
+      fi
+    ) </dev/null >/dev/null 2>&1 3>&- 4>&- &
     # The literal `3>&- 4>&-` as well as the call inside, because the repo-wide
     # check reads the spawn LINE (tests/test_spawn_fd_guard.bats). Belt and
     # braces is the right answer here anyway: the call closes whatever the
     # runtime handed down, and the redirections say so where a reader — and
     # that check — can see it without following a function.
-    ) </dev/null >/dev/null 2>&1 3>&- 4>&- &
     while [ ! -f "$tmp.rc" ] && [ $((SECONDS - elapsed_start)) -lt "$budget" ]; do
       sleep 0.1
     done
     if [ ! -f "$tmp.rc" ]; then
-      # Budget spent. The child is NOT killed — see the header — so its two
-      # temp files are left for it to finish writing into. They are in the
-      # system temp directory, and that is the price of not truncating a start
-      # that may be about to succeed.
-      slow="$slow$team"$'\n'
-      continue
+      # Budget spent, but NOT necessarily "the child has not finished" --
+      # the write ($tmp.rc) and this check are not atomic with each other,
+      # so the child may finish in the gap between them. The mkdir below is
+      # what actually answers "did the child already get here first", not
+      # this -f test (see the matching one in the child above):
+      if mkdir "$tmp.gaveup" 2>/dev/null; then
+        # Got there first. The child has not reached its own mkdir attempt
+        # yet (has not finished, or has not reached that line even if it
+        # has), so it still owns removing $tmp/$tmp.rc once it does.
+        slow="$slow$team"$'\n'
+        continue
+      fi
+      # The child's mkdir got there first, which only happens once it has
+      # already written $tmp.rc -- so despite the budget, this reads
+      # exactly like the fast path below, just a little later.
     fi
+    # Test-only, a no-op in production (empty unless a test sets it):
+    # simulates exactly the gap review measured -- the caller sees
+    # $tmp.rc exist (right above, by either route) and is then delayed
+    # before actually reading it. The mkdir protocol above is what makes
+    # that gap safe now; before it, a fixed-sleep cleanup in the child
+    # raced into deleting both files out from under a start that had
+    # already succeeded, reproduced with exactly this delay.
+    [ -n "${AGMSG_SYNC_AUTOSTART_TEST_DELAY:-}" ] && sleep "$AGMSG_SYNC_AUTOSTART_TEST_DELAY"
     rc="$(cat "$tmp.rc" 2>/dev/null || printf '1')"
     out="$(cat "$tmp" 2>/dev/null)"
     rm -f "$tmp" "$tmp.rc"
+    # Covers BOTH ways this line is reached: the budget-exceeded branch just
+    # above, where the child's mkdir winning is what sent this here instead
+    # of to `continue`, and the plain fast path (the while loop above exited
+    # because $tmp.rc already existed, never entering that branch at all) --
+    # on the fast path the child's own mkdir almost always wins (the caller
+    # never tried its own), leaving the marker owned by nobody once the
+    # child's "do nothing further" half of the protocol is reached; cleaned
+    # up here rather than left as a new kind of leaked empty directory. A
+    # no-op either way if the child got here first and already removed it.
+    rmdir "$tmp.gaveup" 2>/dev/null
     if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'already running'; then
       continue
     fi

@@ -399,13 +399,56 @@ EOF
   done < "$bare_log"
 
   # And gone on their own a few seconds later -- nothing here removes them;
-  # this is only time passing while the fake's own cleanup (2s after it
-  # finishes writing $tmp.rc) does.
-  sleep 3
+  # this is only time passing while the fake finishes (1.5s) and the child's
+  # own mkdir-decided cleanup, instant once it does, runs. The margin is
+  # generous on purpose, not tuned to that 1.5s -- this is confirming the
+  # files are gone eventually, not timing how fast.
+  sleep 5
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     [ ! -e "$line" ]
   done < "$bare_log"
+
+  # The review counterexample (#1580): a start that FINISHES WELL inside
+  # the budget, but whose caller is then delayed before actually reading
+  # the result -- a fixed-sleep cleanup in the child raced into deleting
+  # both files out from under this, reported as a false "connected, but
+  # not syncing" even though the start had genuinely succeeded. Run in the
+  # background so this test can check mid-delay, not only at the end.
+  : > "$calls"
+  : > "$bare_log"
+  fake="$(write_fake_remote starts)"
+  cp "$fake" "$SCRIPTS/remote.sh"
+  env PATH="$wrap_dir:$PATH" AGMSG_FAKE_REMOTE_CALLS="$calls" AGMSG_SYNC_AUTOSTART_TIMEOUT_S=5 \
+    AGMSG_SYNC_AUTOSTART_TEST_DELAY=3 bash -c \
+    'printf "{\"session_id\":\"sid-current\"}" | bash "$1" claude-code /tmp/p1 > "$2" 2>&1; echo "$?" > "$2.rc"' \
+    _ "$SCRIPTS/session-start.sh" "$TEST_SKILL_DIR/delay-output.txt" &
+  local bg_pid=$!
+  ENGINE_PIDS="$ENGINE_PIDS $bg_pid"
+  wait_for_call "$calls" testteam
+
+  # The fake finished immediately; the caller is mid-delay (3s) before it
+  # reads that. The files must still be there -- the child must NOT have
+  # raced ahead and removed them just because time passed.
+  sleep 1
+  [ -s "$bare_log" ]
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ -e "$line" ]
+  done < "$bare_log"
+
+  # Past the delay now: the caller read the (genuinely successful) result --
+  # "no sync engine was running; started one for" -- not the reproduced
+  # false reading of a start that had already succeeded as a FAILED one
+  # ("AGMSG: connected, but not syncing", with an empty reason: `out` reads
+  # back empty once $tmp is gone too). `wait`, not another `sleep`: exact,
+  # not "probably done by now", and it is what gives this a real exit
+  # status/output to check.
+  wait "$bg_pid"
+  [ "$(cat "$TEST_SKILL_DIR/delay-output.txt.rc" 2>/dev/null)" -eq 0 ]
+  grep -qF 'started one for' "$TEST_SKILL_DIR/delay-output.txt"
+  refute grep -q 'connected, but not syncing' "$TEST_SKILL_DIR/delay-output.txt"
+  refute grep -q 'still in flight' "$TEST_SKILL_DIR/delay-output.txt"
 }
 
 @test "actas-claim starts the engine and still prints status=ok" {
