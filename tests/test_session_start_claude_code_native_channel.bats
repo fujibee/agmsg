@@ -58,6 +58,23 @@ _mark_daemon_ready() {
   grep -qF "agmsgd is running and will deliver" <<<"$output"
 }
 
+# actas_lock_claim is the write gate (not a raw read+compare): its own
+# liveness check is what lets a genuine --resume (new pid, the OLD pid now
+# dead) correctly reclaim the lock and keep delivering natively, while still
+# refusing a same-bare-sid collision from a pid that is still alive (the
+# test above). Claim first under a pid nothing on this machine will ever be,
+# simulating the pre-resume process having already exited; the resumed
+# session's own live pid must still be able to take over.
+@test "session-start: a genuine --resume (dead old pid, same bare sid) reclaims the lock and still skips Monitor" {
+  _mark_daemon_ready
+  env AGMSG_AGENT_PID=999999999 bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-resumed" >/dev/null
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-resumed.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-resumed"}'
+  [ "$status" -eq 0 ]
+  refute grep -q "AGMSG monitor mode" <<<"$output"
+  grep -qF "agmsgd is running and will deliver" <<<"$output"
+}
+
 @test "session-start: agmsgd not running -> the usual Monitor directive still fires" {
   run _run_session_start "sid-no-daemon"
   [ "$status" -eq 0 ]
@@ -133,7 +150,7 @@ _mark_daemon_ready() {
     agmsg_role_session_set_messaging() { :; }
     agmsg_role_session_get() { printf "%s" "$3" | grep -q socket && echo "/tmp/cc-socks/1.sock" || echo "/home/x/.claude"; }
     agmsg_role_session_uuid() { echo "sid-1"; }
-    actas_lock_read() { printf "ok\tsid-1.4242\n"; }
+    actas_lock_claim() { echo "ok"; }
     agmsg_instance_bare_sid() { printf "%s" "$1"; }
     agmsg_normalize_instance_id() { echo "sid-1.4242"; }
     agmsg_instance_is_composite() { case "$1" in *.*) return 0 ;; *) return 1 ;; esac; }

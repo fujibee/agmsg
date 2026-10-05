@@ -41,28 +41,37 @@ agmsg_session_start() {
     *) config_dir="" ;;
   esac
 
-  # Only touch a pair THIS session actually, currently holds the actas lock
-  # for -- never every pair registered for the project (#1577 review): two
-  # seats sharing a project each have their OWN process and OWN socket, and
-  # writing one's socket into the other's record would misdeliver agmsgd's
-  # nudge to the wrong seat entirely. The lock, not the record's own (possibly
-  # stale, see agmsg_role_session_set_messaging's session= handling) session=
-  # field, is the live ownership fact -- the same primitive session-start.sh's
-  # own narrowing block below already trusts for exactly this question.
-  if ! command -v actas_lock_read >/dev/null 2>&1; then
+  # Only touch a pair THIS session is the RECORDED owner of -- never every
+  # pair registered for the project (#1577 review): two seats sharing a
+  # project each have their own process and own socket, and writing one's
+  # socket into the other's record would misdeliver agmsgd's nudge entirely.
+  # Narrow to pairs whose role-session record's OWN session= already equals
+  # this bare sid (i.e. a role actas previously tied to this very
+  # conversation) before ever touching the lock -- a pair with no such prior
+  # relationship is never attempted, so this can't silently seize a role
+  # nobody ever actas'd this session into.
+  #
+  # The actual write gate past that narrowing is actas_lock_claim -- the
+  # SAME primitive watch.sh uses to reclaim a role's lock across --resume
+  # (session-start.sh's own 4th-arg "Role-aware resume" relies on exactly
+  # this, via watch.sh, when Monitor fires; this plug needs its own call
+  # since it may skip Monitor entirely). Its "mine" verdict requires an
+  # EXACT token match; a mismatched owner that is still genuinely alive
+  # fails the claim outright, and only a mismatched DEAD owner reclaims --
+  # so two live processes that happen to share a bare sid (#1577 re-review:
+  # same hazard class as #1568) can never both end up "owning" the same
+  # pair, while a real --resume (new pid, old pid now dead) correctly
+  # reclaims. A composite "<sid>.<pid>" identity is what this comparison
+  # needs; when the pid can't be resolved, agmsg_normalize_instance_id
+  # degrades to the bare sid, which can only ever read as "other" against a
+  # live composite owner or "mine" by lucky accident against no owner at
+  # all -- never a safe basis to claim on, so it is excluded outright below.
+  if ! command -v actas_lock_claim >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     . "${SKILL_DIR:-}/scripts/lib/actas-lock.sh"
   fi
   local bare_sid my_instance
   bare_sid="$(agmsg_instance_bare_sid "${SESSION_ID:-}" 2>/dev/null || true)"
-  # The FULL composite "<sid>.<pid>" identifies THIS process uniquely; the
-  # bare sid alone does not when another --resume/--continue of the same
-  # underlying conversation is live under a different pid at the same time
-  # (#1577 re-review: comparing bare sids let one such process's SessionStart
-  # write its socket into the OTHER's already-claimed record -- same hazard
-  # class as #1568). When the pid can't be resolved, agmsg_normalize_instance_id
-  # degrades to the bare sid and warns on stderr; treat that exactly like any
-  # other proof failure below -- never write on an unproven identity.
   my_instance="$(agmsg_normalize_instance_id "${SESSION_ID:-}" "${TYPE:-}" 2>/dev/null || true)"
 
   # Write, then read every OWNED pair back: this is the SAME check the daemon
@@ -74,30 +83,26 @@ agmsg_session_start() {
   # Monitor when in doubt (#1577 review).
   local any_pair_confirmed=0
   local pair_team pair_agent
-  while IFS=$'\t' read -r pair_team pair_agent; do
-    [ -n "$pair_team" ] || continue
-    local lock_row lock_status lock_owner
-    lock_row="$(actas_lock_read "$pair_team" "$pair_agent" 2>/dev/null)" || lock_row="unreadable	"
-    lock_status="${lock_row%%$'\t'*}"
-    [ "$lock_status" = ok ] || continue
-    lock_owner="${lock_row#*$'\t'}"
-    [ -n "$lock_owner" ] || continue
-    # Exact match on the full composite id only -- a bare-sid match alone is
-    # not proof of ownership (see above).
-    agmsg_instance_is_composite "$my_instance" || continue
-    [ "$lock_owner" = "$my_instance" ] || continue
+  if [ -n "$bare_sid" ] && agmsg_instance_is_composite "$my_instance" 2>/dev/null; then
+    while IFS=$'\t' read -r pair_team pair_agent; do
+      [ -n "$pair_team" ] || continue
+      [ "$(agmsg_role_session_uuid "$pair_team" "$pair_agent" 2>/dev/null || true)" = "$bare_sid" ] || continue
+      local claim_result
+      claim_result="$(actas_lock_claim "$pair_team" "$pair_agent" "$my_instance" 2>/dev/null)" || claim_result="unknown:claim_failed"
+      [ "$claim_result" = ok ] || continue
 
-    agmsg_role_session_set_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid"
-    local readback_socket readback_config_dir readback_session
-    readback_socket="$(agmsg_role_session_get "$pair_team" "$pair_agent" messaging_socket 2>/dev/null || true)"
-    readback_config_dir="$(agmsg_role_session_get "$pair_team" "$pair_agent" claude_config_dir 2>/dev/null || true)"
-    readback_session="$(agmsg_role_session_uuid "$pair_team" "$pair_agent" 2>/dev/null || true)"
-    if [ -n "$socket" ] && [ "$readback_socket" = "$socket" ] && \
-       [ -n "$config_dir" ] && [ "$readback_config_dir" = "$config_dir" ] && \
-       [ -n "$bare_sid" ] && [ "$readback_session" = "$bare_sid" ]; then
-      any_pair_confirmed=1
-    fi
-  done <<< "${PAIRS:-}"
+      agmsg_role_session_set_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid"
+      local readback_socket readback_config_dir readback_session
+      readback_socket="$(agmsg_role_session_get "$pair_team" "$pair_agent" messaging_socket 2>/dev/null || true)"
+      readback_config_dir="$(agmsg_role_session_get "$pair_team" "$pair_agent" claude_config_dir 2>/dev/null || true)"
+      readback_session="$(agmsg_role_session_uuid "$pair_team" "$pair_agent" 2>/dev/null || true)"
+      if [ -n "$socket" ] && [ "$readback_socket" = "$socket" ] && \
+         [ -n "$config_dir" ] && [ "$readback_config_dir" = "$config_dir" ] && \
+         [ "$readback_session" = "$bare_sid" ]; then
+        any_pair_confirmed=1
+      fi
+    done <<< "${PAIRS:-}"
+  fi
 
   # Windows has no native-channel implementation yet (named pipe + mandatory
   # auth line, separate work) -- never claim this session is daemon-reachable
