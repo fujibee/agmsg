@@ -965,16 +965,17 @@ PS1
   _agmsg_watch_pid "$second" "$watch_signature"
   wait_for_pidfile_pid "$SK/run/watch.$sid.pid" "$second"
   # The pidfile can flip to $second a beat before $first's TERM trap has
-  # actually run — poll for its exit rather than checking the instant the
-  # pidfile changes (a single check raced this and flaked, see #124; same
-  # fix already applied to the equivalent check in test_watch.bats).
-  local i
-  for i in $(seq 1 30); do kill -0 "$first" 2>/dev/null || break; sleep 0.1; done
-  run kill -0 "$first"
-  [ "$status" -ne 0 ]
+  # actually run. `kill -0` also reports a terminated-but-unreaped child as
+  # alive, so reap it while polling via the shared helper (the same race
+  # covered in test_watch.bats and #124).
+  wait_for_pid_exit "$first"
 
-  kill "$second" 2>/dev/null || true
-  wait 2>/dev/null || true
+  # Do not use an unbounded `wait` after TERM: the pidfile is published just
+  # before the watcher's signal trap is installed, so this test can signal it
+  # during startup. The helper escalates to KILL and confirms process exit.
+  _agmsg_kill_confirmed "$second"
+  wait "$second" 2>/dev/null || true
+  wait "$first" 2>/dev/null || true
 }
 
 # --- Pipe-stdin guard: simulate a curl|bash entry path (#98) ---

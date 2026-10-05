@@ -498,20 +498,23 @@ wait_for_mock_server_port() {   # <port_file> -> prints the port on stdout
 # reintroduce it one level down.
 #
 # Mirrors _agmsg_pid_alive in scripts/lib/instance-id.sh, then cross-checks the
-# process table, which does not depend on signalling permission at all. Saying
-# "gone" now requires kill(2) and ps to agree.
+# process table, which does not depend on signalling permission at all. ESRCH
+# plus no process-table entry, or a zombie state, is positive evidence of exit;
+# EPERM and every ambiguous observation remain alive.
 _pid_gone() {
-  local pid="$1" err stat
+  local pid="$1" err stat kill_status=0
   # `export LC_ALL=C` rather than a bare prefix: a prefix misses the builtin on
   # bash 3.2, and the ESRCH match below is on English text.
-  err="$(export LC_ALL=C; kill -0 "$pid" 2>&1)" && return 1
-  case "$err" in
-    *[Nn]'o such process'*) ;;
-    *) return 1 ;;   # EPERM and anything unrecognised mean "assume alive"
-  esac
+  err="$(export LC_ALL=C; kill -0 "$pid" 2>&1)" || kill_status=$?
   stat="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')"
-  [ -z "$stat" ] && return 0
   case "$stat" in Z*) return 0 ;; esac   # terminated, just not reaped yet
+  if [ "$kill_status" -eq 0 ]; then
+    return 1
+  fi
+  case "$err" in
+    *[Nn]'o such process'*) [ -z "$stat" ] && return 0 ;;
+    *) return 1 ;;   # EPERM, a live ps result, and unknown errors fail closed
+  esac
   return 1
 }
 

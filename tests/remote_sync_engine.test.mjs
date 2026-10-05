@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
   utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -2285,6 +2285,149 @@ test("SIGTERM while this process holds the team config lock releases it before e
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await rm(root, { recursive: true });
+  }
+});
+
+test("the Node team config lock recovers a same-host holder that is gone (#1555)",
+  { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-node-stale-lock-"));
+  const previous = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  try {
+    const child = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+    assert.equal(child.status, 0);
+    const lockDir = join(root, "teams", "demo", ".config.lock");
+    const holderPath = `${lockDir}.holder`;
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(holderPath,
+      `token dead\npid ${child.pid}\ncommand remote-sync.mjs\nhost ${hostname()}\n`);
+    let entered = false;
+    await withTeamConfigLock("demo", async () => { entered = true; });
+    assert.ok(entered, "the callback was never reached after stale-lock recovery");
+    assert.ok(!existsSync(lockDir), "the recovered lock directory was left behind");
+    assert.ok(!existsSync(holderPath), "the recovered holder record was left behind");
+  } finally {
+    if (previous === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the Node team config lock does not trust a staged release record (#1555)",
+  { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-node-staged-lock-"));
+  const previous = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  const lockDir = join(root, "teams", "demo", ".config.lock");
+  const stagedPath = `${lockDir}.holder.releasing.123`;
+  await mkdir(lockDir, { recursive: true });
+  const child = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(child.status, 0);
+  const record = `token old\npid ${child.pid}\ncommand remote-sync.mjs\nhost ${hostname()}\n`;
+  await writeFile(stagedPath, record);
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  try {
+    await assert.rejects(() => withTeamConfigLock("demo", async () => {}),
+      /timed out acquiring the team registry lock/u);
+    assert.ok(existsSync(lockDir), "the lock with only a staged record was removed");
+    assert.equal(await readFile(stagedPath, "utf8"), record,
+      "the staged record was changed");
+  } finally {
+    if (previous === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the Node team config lock keeps a live same-host holder (#1555)",
+  { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-node-live-lock-"));
+  const previous = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  const lockDir = join(root, "teams", "demo", ".config.lock");
+  const holderPath = `${lockDir}.holder`;
+  await mkdir(lockDir, { recursive: true });
+  const record = `token live\npid ${process.pid}\ncommand remote-sync.mjs\nhost ${hostname()}\n`;
+  await writeFile(holderPath, record);
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  try {
+    await assert.rejects(() => withTeamConfigLock("demo", async () => {}),
+      /timed out acquiring the team registry lock/u);
+    assert.ok(existsSync(lockDir), "the live holder's lock directory was removed");
+    assert.equal(await readFile(holderPath, "utf8"), record,
+      "the live holder record was changed");
+  } finally {
+    if (previous === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the Node team config lock leaves unanswerable holders in place (#1555)",
+  { timeout: 60_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-node-unknown-lock-"));
+  const previous = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(dead.status, 0);
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  try {
+    const cases = [
+      ["foreign", `token t\npid ${dead.pid}\ncommand remote-sync.mjs\nhost another-host\n`],
+      ["badpid", `token t\npid not-a-pid\ncommand remote-sync.mjs\nhost ${hostname()}\n`],
+      ["missing", null],
+    ];
+    for (const [team, record] of cases) {
+      const lockDir = join(root, "teams", team, ".config.lock");
+      const holderPath = `${lockDir}.holder`;
+      await mkdir(lockDir, { recursive: true });
+      if (record !== null) await writeFile(holderPath, record);
+      await assert.rejects(() => withTeamConfigLock(team, async () => {}),
+        /timed out acquiring the team registry lock/u);
+      assert.ok(existsSync(lockDir), `${team}: an unanswerable lock was removed`);
+      if (record !== null) {
+        assert.equal(await readFile(holderPath, "utf8"), record,
+          `${team}: the holder record was changed`);
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent Node lock acquirers serialize around one dead holder (#1555)",
+  { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-node-lock-race-"));
+  const lockDir = join(root, "teams", "demo", ".config.lock");
+  const holderPath = `${lockDir}.holder`;
+  const markerPath = join(root, "critical-section");
+  const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(dead.status, 0);
+  await mkdir(lockDir, { recursive: true });
+  await writeFile(holderPath,
+    `token dead\npid ${dead.pid}\ncommand remote-sync.mjs\nhost ${hostname()}\n`);
+  const modulePath = fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url));
+  const scriptPath = join(root, "acquire.mjs");
+  await writeFile(scriptPath,
+    `import { closeSync, openSync, unlinkSync } from "node:fs";\n` +
+    `import { withTeamConfigLock } from ${JSON.stringify(modulePath)};\n` +
+    `await withTeamConfigLock("demo", async () => {\n` +
+    `  const fd = openSync(${JSON.stringify(markerPath)}, "wx");\n` +
+    `  await new Promise((resolve) => setTimeout(resolve, 100));\n` +
+    `  closeSync(fd); unlinkSync(${JSON.stringify(markerPath)});\n` +
+    `});\n`);
+  const env = { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root };
+  const children = [0, 1].map(() => spawn(process.execPath, [scriptPath],
+    { env, stdio: "ignore" }));
+  try {
+    const exits = await Promise.all(children.map((child) => once(child, "exit")));
+    assert.deepEqual(exits.map(([code, signal]) => [code, signal]), [[0, null], [0, null]]);
+    assert.ok(!existsSync(markerPath), "a critical section marker was left behind");
+    assert.ok(!existsSync(lockDir), "the last acquirer left the team lock behind");
+  } finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+    await rm(root, { recursive: true, force: true });
   }
 });
 

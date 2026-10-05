@@ -31,6 +31,16 @@ setup() { load 'test_helper'; }
   [ "$status" -eq 0 ]
 }
 
+@test "_pid_gone: reports an exited but unreaped child as gone" {
+  sleep 0.1 &
+  local p=$!
+  sleep 0.2
+  run _pid_gone "$p"
+  local status=$status
+  wait "$p" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+}
+
 @test "_pid_gone: a failed kill -0 that is not ESRCH counts as ALIVE" {
   # The EPERM case cannot be produced portably in-suite, so pin the decision
   # rule itself: anything other than "no such process" must not be read as

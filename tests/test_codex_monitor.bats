@@ -356,6 +356,15 @@ EOF
 
   run env AGMSG_REAL_CODEX="$win_codex" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  if [ "$status" -ne 0 ] \
+    || ! grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG" \
+    || ! grep -qx 'flag=1' "$TEST_PROJECT/app-server-env" \
+    || ! grep -qx 'url=' "$TEST_PROJECT/app-server-env"; then
+    printf 'windows-native diagnostic: status=%s\n%s\n' "$status" "$output" >&2
+    [ -f "$TEST_SKILL_DIR"/run/codex-app-server.*.log ] \
+      && cat "$TEST_SKILL_DIR"/run/codex-app-server.*.log >&2 || true
+    [ -f "$TEST_PROJECT/app-server-env" ] && cat "$TEST_PROJECT/app-server-env" >&2 || true
+  fi
   [ "$status" -eq 0 ]
   grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
   grep -qx 'flag=1' "$TEST_PROJECT/app-server-env"
