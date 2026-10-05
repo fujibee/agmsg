@@ -268,6 +268,18 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 
 Settings are per-project. Each `<project>/.claude/settings.local.json` gets exactly the hooks the chosen mode needs — repeated `set` calls are idempotent.
 
+Claude Code applies project hooks to every launch surface that reads the
+project settings. To skip the Monitor directive in selected surfaces, set the
+global comma-separated `session_start.skip_entrypoints` config value. For
+example, Claude Code's Desktop Code tab reports `claude-desktop`:
+
+```sh
+bash ~/.agents/skills/agmsg/scripts/config.sh set session_start.skip_entrypoints claude-desktop
+```
+
+Matching is exact and case-sensitive. Leave the value unset to keep the
+existing behavior on every launch surface; other agent types are unaffected.
+
 **Monitor priming**: in `monitor` mode, the receiving agent doesn't react to its first inbound message until it has taken at least one turn this session. If you've just started a fresh session and a teammate has already sent something, nudge the agent with any short message ("hi") to prime it — subsequent messages stream in real time.
 
 ### Claude Code monitor verification

@@ -250,6 +250,14 @@ despawnは指定されたメンバーにのみ作用する — `despawn` を実�
 
 設定はプロジェクトごと。`<project>/.claude/settings.local.json` にはそのプロジェクトで選んだモードが必要とするフックだけが設定される — `set` の呼び出しを繰り返しても冪等だ。
 
+Claude Code は、プロジェクト設定を読むすべての起動方法で同じフックを実行する。特定の起動方法では Monitor の指示を出さないようにするには、グローバル設定 `session_start.skip_entrypoints` にカンマ区切りで指定する。たとえば Claude Code Desktop の Code tab は `claude-desktop` を使う:
+
+```sh
+bash ~/.agents/skills/agmsg/scripts/config.sh set session_start.skip_entrypoints claude-desktop
+```
+
+照合は大文字小文字を区別する完全一致で、未設定なら従来どおりすべての起動方法で動作する。他のエージェントタイプには影響しない。
+
 **Monitorのプライミング**: `monitor` モードでは、受信側のエージェントはこのセッションで少なくとも1ターンを終えるまで最初の受信メッセージに反応しない。新しいセッションを始めたばかりで、チームメイトが既に何か送っている場合は、短いメッセージ（「hi」など）でエージェントをプライムしてやること — それ以降のメッセージはリアルタイムでストリームされる。
 
 ### レガシーの`hook on/off`からの移行

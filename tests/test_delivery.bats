@@ -1192,6 +1192,28 @@ EOF
   [[ ! "$2" =~ camelLoses ]]
 }
 
+@test "session-start: skips configured Claude Code entrypoints by exact comma-list match" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/config.sh" set session_start.skip_entrypoints "cli, claude-desktop" >/dev/null
+
+  run env AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_ENTRYPOINT=claude-desktop \
+    bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<<'{"session_id":"desktop"}'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "session-start: an unlisted or differently cased Claude Code entrypoint keeps the Monitor directive" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/config.sh" set session_start.skip_entrypoints claude-desktop >/dev/null
+
+  run env AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_ENTRYPOINT=Claude-Desktop \
+    bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<<'{"session_id":"terminal"}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Monitor"* ]]
+}
+
 # --- SessionEnd hook integration ---
 
 has_session_end() {
