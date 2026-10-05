@@ -48,7 +48,17 @@ setup_test_env() {
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
   unset CLAUDE_CONFIG_DIR
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
-  export TEST_SKILL_DIR="$(mktemp -d)"
+  # Saved ONCE (first call wins, via :=): a test that calls teardown_test_env
+  # and then setup_test_env again within its OWN body (several in
+  # test_remote.bats do, to re-enter with a different fixture) would
+  # otherwise have this SECOND call's `mktemp -d` run under the FIRST call's
+  # already-overridden TMPDIR (set below) -- pointed inside the very
+  # TEST_SKILL_DIR teardown just removed, so it fails outright. Always
+  # create TEST_SKILL_DIR under the REAL root, never under whatever TMPDIR
+  # setup_test_env itself last left behind.
+  : "${AGMSG_TEST_REAL_TMPDIR:=${TMPDIR:-/tmp}}"
+  export AGMSG_TEST_REAL_TMPDIR
+  export TEST_SKILL_DIR="$(TMPDIR="$AGMSG_TEST_REAL_TMPDIR" mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
   # Copy all scripts to isolated skill dir. Recursive so nested helper dirs
@@ -191,6 +201,12 @@ _actas_session_path() {   # <team> <agent>
 }
 
 teardown_test_env() {
+  # Belt and braces alongside setup_test_env's own fix above: put TMPDIR back
+  # to the real root before removing TEST_SKILL_DIR (which is where this
+  # test's TMPDIR pointed), so nothing run between this teardown and a
+  # later setup -- in this test or, if a suite ever stopped resetting it
+  # per test, a later one -- reads a TMPDIR that no longer exists.
+  [ -n "${AGMSG_TEST_REAL_TMPDIR:-}" ] && export TMPDIR="$AGMSG_TEST_REAL_TMPDIR"
   # Try the plain rm FIRST, and only reap when it actually fails. The reaper's scan is a
   # full `ps -eo pid=,args=`; running it in EVERY teardown would add that cost to all of
   # the (vast majority of) tests that hold nothing — across the suite's hundreds of tests
