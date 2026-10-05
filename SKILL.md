@@ -75,7 +75,7 @@ Four possible outputs:
   > - **Team name**: a group of agents that can message each other (available: <list from output>)
   > - **Agent name**: this agent's identity within the team
 
-  1. Ask: "Enter a team name (joins existing or creates new)"
+  1. Ask: "Enter a team name (joins existing or creates new)". If that name is not in `available_teams`, do not create it yet: ask whether to create a new local team or bring in the team of that name from a server (`remote pull`).
   2. If the team name given already appears in `available_teams`, run `~/.agents/skills/agmsg/scripts/team.sh <team>` to see the current roster (name, type, project) and note the names already in use. Look for a naming convention already in play (e.g. a shared base name with role and number suffixes (`<base>-<role><n>`), or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label like `codex`/`cc`). Either way, names must not collide with the roster. Then ask: "Enter a name for this agent (suggestions: <name1>, <name2>, <name3> — or type your own)". For a brand-new team, skip the roster check and just ask: "Enter a name for this agent".
   3. **You MUST use join.sh** — run: `~/.agents/skills/agmsg/scripts/join.sh <team> <agent_name> claude-code "$(pwd)"`
   4. Show the result and explain:
@@ -184,6 +184,10 @@ If argument starts with "config set" (e.g. "config set hook.check_interval 30"):
 If argument is "version":
 1. Run: `~/.agents/skills/agmsg/scripts/version.sh`
 2. Show the output — the installed version (git-describe provenance recorded at install time).
+
+If asked to update or upgrade agmsg:
+1. Run: `npx agmsg@latest install --update` — add `--cmd <name>` when this machine has more than one agmsg install. It keeps the database and team configs and replaces the scripts.
+2. Tell the user to restart running agent sessions so they pick up the new scripts.
 
 If argument is "where" (e.g. asked to report this session's own pane or placement):
 1. Run: `~/.agents/skills/agmsg/scripts/where.sh`
@@ -311,7 +315,7 @@ If argument starts with "rename-team":
 If argument starts with "delete-team" or asks to delete/remove a team's data:
 1. Accept only an explicit user request — never delete a team on an inference alone.
 2. Parse the team name and which of `--delete` (the team itself: config, roster, identity history, per-agent runtime state), `--force` (with `--delete`: also remove every remaining member first, the same effect as `leave.sh` for each), and `--purge-messages` (only its message history) the user wants — they can be combined.
-3. Run `~/.agents/skills/agmsg/scripts/team.sh <team>` first and show the roster. `--delete` refuses unless every member has already left (run `leave.sh` for each remaining one first, or use `--force`) and the team is not actively synced.
+3. Run `~/.agents/skills/agmsg/scripts/team.sh <team>` first and show the roster. `--delete` refuses unless every member has already left (run `leave.sh` for each remaining one first, or use `--force`) and the team is not actively synced (if it is, run `remote disconnect <team>` first).
 4. Repeat back exactly what will be lost — identity history for `--delete` (and, with `--force`, which members will be removed first), message history for `--purge-messages` — and wait for the user's explicit confirmation before running anything.
 5. Run: `~/.agents/skills/agmsg/scripts/team.sh <team> [--delete] [--force] [--purge-messages] --yes` — pass `--yes` since the confirmation already happened in chat; the script's own interactive prompt would otherwise block waiting for input this agent can't supply.
 6. Show the result.
@@ -364,7 +368,7 @@ If argument starts with "remote disconnect":
 3. Show the output to the user.
 
 If argument starts with "remote forget":
-1. Parse the required `<team>`. This permanently deletes that team's local roster, history, keys, trust, and sync state, but never changes the server.
+1. Parse the required `<team>`. This permanently deletes that team's local roster, history, keys, trust, and sync state, but never changes the server. It applies only to a team that has a remote binding; to delete any other local team, use `delete-team` above (`team.sh <team> --delete`).
 2. Do not add `--yes` yourself. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh forget <team>`
 3. The command requires the user to confirm in their terminal. If this agent has no interactive terminal, show the deletion summary and tell the user to rerun the displayed command directly; never bypass confirmation for them.
 
