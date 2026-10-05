@@ -1006,14 +1006,31 @@ _reconcile_one_ack_wire() {
 # process (not a direct function call, like every other test in this file) so
 # this exercises the exact trap that was lost.
 @test "sync contract: a successful apply through the real driver process does not leak its own outcome file" {
-  # AGMSG_SQLITE_OUTCOME_FILE is pre-set to a known, disposable path instead
-  # of left to the driver's own bare `mktemp`: scanning the real system temp
-  # directory for an unrelated bare-named file cannot be done reliably on a
-  # shared machine (and a bare `mktemp` ignores $TMPDIR entirely on macOS, so
-  # redirecting it to a throwaway TMPDIR would not even reach the real leak
-  # this regresses -- that leak landed in the real $TMPDIR on macOS too).
-  local outcome_file remote page
-  outcome_file="$(mktemp)"
+  # No override surface added to the driver for this: a `mktemp` wrapper is
+  # put ahead of it on PATH instead, recording the one BARE (no-template)
+  # call -- storage-sync-driver.sh's own AGMSG_SQLITE_OUTCOME_FILE -- while
+  # passing every call through to the real mktemp unchanged, templated ones
+  # (sqlite-sync.sh's own sql/jq temp files) included. Scanning the real
+  # system temp directory for an unrelated bare-named file afterward cannot
+  # be done reliably on a shared machine, and a bare `mktemp` ignores
+  # $TMPDIR entirely on macOS, so redirecting TMPDIR would not even reach
+  # the real leak this regresses (that leak landed in the real $TMPDIR on
+  # macOS too).
+  local wrap_dir real_mktemp bare_log outcome_file remote page
+  wrap_dir="$(mktemp -d)"
+  real_mktemp="$(command -v mktemp)"
+  bare_log="$wrap_dir/bare.log"
+  cat > "$wrap_dir/mktemp" <<EOF
+#!/usr/bin/env bash
+if [ "\$#" -eq 0 ]; then
+  result="\$("$real_mktemp")" || exit 1
+  printf '%s\n' "\$result" >> "$bare_log"
+  printf '%s\n' "\$result"
+else
+  exec "$real_mktemp" "\$@"
+fi
+EOF
+  chmod +x "$wrap_dir/mktemp"
   remote=$(jq -nc '
     {type:"sync_pull_message",server_seq:"1",
      id:"550e8400-e29b-41d4-a716-4466554400a2",
@@ -1030,10 +1047,16 @@ _reconcile_one_ack_wire() {
   # open past this test, which is what broke every test after this one the
   # first time (`3: Bad file descriptor`, from a later test's own `run`
   # finding fd 3 already gone).
-  run env AGMSG_SQLITE_OUTCOME_FILE="$outcome_file" bash -c \
+  run env PATH="$wrap_dir:$PATH" bash -c \
     'printf "%s" "$1" | "$2" apply demo "$3" "$4" 1' \
     _ "$page" "$SCRIPTS/internal/storage-sync-driver.sh" "$SERVER_ID" "$TEAM_ID" 3>&- 4>&-
   [ "$status" -eq 0 ]
+  [ -s "$bare_log" ]
+  # Exactly one bare mktemp call is expected (the outcome file). More than
+  # one would mean this wrapper, or the driver's own behavior, changed in a
+  # way this test no longer accounts for -- not something to average over.
+  [ "$(wc -l < "$bare_log" | tr -d ' ')" -eq 1 ]
+  outcome_file="$(cat "$bare_log")"
   [ ! -e "$outcome_file" ]
 }
 

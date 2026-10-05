@@ -32,12 +32,7 @@ agmsg_storage_load
 # prepare took the store for 63 s, the next page's `storage_init` waited out the
 # 5 s busy timeout, and the 13 it returned read as "this page cannot be
 # processed" rather than "not now".
-# Overridable (like AGMSG_SYNC_DRIVER, AGMSG_REAL_CODEX elsewhere in this
-# repo) so a test can point this at a known, disposable path instead of
-# scanning the real system temp directory for a bare `mktemp` name -- which a
-# test cannot do without risk of matching something unrelated that also
-# landed there in the same instant, on a shared machine.
-: "${AGMSG_SQLITE_OUTCOME_FILE:=$(mktemp)}" || exit 1
+AGMSG_SQLITE_OUTCOME_FILE="$(mktemp)" || exit 1
 export AGMSG_SQLITE_OUTCOME_FILE
 trap 'rm -f "$AGMSG_SQLITE_OUTCOME_FILE"' EXIT
 
