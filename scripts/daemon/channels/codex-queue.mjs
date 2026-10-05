@@ -30,11 +30,11 @@ import { checkWindowsCodexQueueGate } from "./windows-codex-queue.mjs";
 
 const QUEUE_TIMEOUT_MS = 10_000;
 
-function seatKey(team, agent) {
+export function seatKey(team, agent) {
   return JSON.stringify([team, agent]);
 }
 
-function sameProject(left, right) {
+export function sameProject(left, right) {
   if (typeof left !== "string" || !left || typeof right !== "string" || !right) return false;
   if (!isAbsolute(left) || !isAbsolute(right)) return false;
   const normalize = (value) => {

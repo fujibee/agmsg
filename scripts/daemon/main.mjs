@@ -18,12 +18,15 @@ import { logLine } from "./log.mjs";
 import { classify } from "./status.mjs";
 import { createCodexQueueChannel } from "./channels/codex-queue.mjs";
 import { ensureCodexChannelSchema } from "./channels/codex-queue-store.mjs";
+import { createClaudeCodeQueueChannel } from "./channels/claude-code-queue.mjs";
+import { ensureClaudeCodeChannelSchema } from "./channels/claude-code-queue-store.mjs";
 
 export const POLL_INTERVAL_MS = 5000;
 
 export async function prepareClaimWithCodexSchema(prepareClaim) {
   const prepared = await prepareClaim();
   ensureCodexChannelSchema(prepared.db);
+  ensureClaudeCodeChannelSchema(prepared.db);
   return prepared;
 }
 
@@ -168,6 +171,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
   gen = started.gen;
   controlHandle = started.controlHandle;
   channelHooks.push(createCodexQueueChannel({ db, installRoot, expectedOpGen }));
+  channelHooks.push(createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }));
 
   process.on("SIGTERM", () => doStop("normal"));
 
