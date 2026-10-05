@@ -60,13 +60,20 @@ agmsg_launcher_classify() {
   fi
 }
 
-# Places the launcher for the install at $1 and prints a three-part report:
+# Places the launcher for the install at $1 and command name $2 (default
+# agmsg for existing callers). Custom skill names do not claim the shared
+# shell command. Prints a three-part report:
 # what was placed, whether this process can see it, and what to check on a
 # real terminal. Always returns 0: not placing a launcher is never an install
 # failure.
 agmsg_launcher_install() {
-  local skill_dir="$1" target tmp resolved old
+  local skill_dir="$1" cmd_name="${2:-agmsg}" target tmp resolved old
   AGMSG_LAUNCHER_REASON=""
+  if [ "$cmd_name" != agmsg ]; then
+    echo "  ~ agmsg command: not placed (custom command name: $cmd_name; shared launcher is only for --cmd agmsg)"
+    printf '    use this installation directly: bash %q daemon status\n' "$skill_dir/scripts/agmsg"
+    return 0
+  fi
   if ! agmsg_launcher_pick_dir; then
     echo "  ~ agmsg command: not placed ($AGMSG_LAUNCHER_REASON)"
     return 0
