@@ -53,8 +53,17 @@ agmsg_session_start() {
     # shellcheck disable=SC1091
     . "${SKILL_DIR:-}/scripts/lib/actas-lock.sh"
   fi
-  local bare_sid
+  local bare_sid my_instance
   bare_sid="$(agmsg_instance_bare_sid "${SESSION_ID:-}" 2>/dev/null || true)"
+  # The FULL composite "<sid>.<pid>" identifies THIS process uniquely; the
+  # bare sid alone does not when another --resume/--continue of the same
+  # underlying conversation is live under a different pid at the same time
+  # (#1577 re-review: comparing bare sids let one such process's SessionStart
+  # write its socket into the OTHER's already-claimed record -- same hazard
+  # class as #1568). When the pid can't be resolved, agmsg_normalize_instance_id
+  # degrades to the bare sid and warns on stderr; treat that exactly like any
+  # other proof failure below -- never write on an unproven identity.
+  my_instance="$(agmsg_normalize_instance_id "${SESSION_ID:-}" "${TYPE:-}" 2>/dev/null || true)"
 
   # Write, then read every OWNED pair back: this is the SAME check the daemon
   # itself applies (messaging_socket/claude_config_dir both present and
@@ -67,14 +76,16 @@ agmsg_session_start() {
   local pair_team pair_agent
   while IFS=$'\t' read -r pair_team pair_agent; do
     [ -n "$pair_team" ] || continue
-    local lock_row lock_status lock_owner lock_owner_bare
+    local lock_row lock_status lock_owner
     lock_row="$(actas_lock_read "$pair_team" "$pair_agent" 2>/dev/null)" || lock_row="unreadable	"
     lock_status="${lock_row%%$'\t'*}"
     [ "$lock_status" = ok ] || continue
     lock_owner="${lock_row#*$'\t'}"
     [ -n "$lock_owner" ] || continue
-    lock_owner_bare="$(agmsg_instance_bare_sid "$lock_owner" 2>/dev/null || printf '%s' "$lock_owner")"
-    [ -n "$bare_sid" ] && [ "$lock_owner_bare" = "$bare_sid" ] || continue
+    # Exact match on the full composite id only -- a bare-sid match alone is
+    # not proof of ownership (see above).
+    agmsg_instance_is_composite "$my_instance" || continue
+    [ "$lock_owner" = "$my_instance" ] || continue
 
     agmsg_role_session_set_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid"
     local readback_socket readback_config_dir readback_session

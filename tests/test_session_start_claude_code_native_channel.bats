@@ -70,26 +70,32 @@ _mark_daemon_ready() {
   refute grep -q "agmsgd is running and will deliver" <<<"$output"
 }
 
-# #1577 review: a session-start plug that updates every pair REGISTERED
-# for the project, rather than only the pair this session actually holds the
-# actas lock for, misdelivers one seat's socket into a different seat sharing
-# the same project -- reproduced here with bob already claimed under his own
-# session before alice's SessionStart ever runs. Alice's run must not touch
-# bob's record at all.
-@test "session-start: starting one seat never overwrites another seat's messaging record" {
+# #1577 re-review: comparing only the BARE session id let one process
+# overwrite another's record whenever the two happened to share the same
+# underlying sid under different pids (two live --resume/--continue
+# processes of the same conversation -- same hazard class as #1568). bob
+# holds the actas lock as the composite "shared.<a live pid>"; the caller's
+# own SESSION_ID is the SAME bare "shared" but a DIFFERENT live pid, so the
+# caller's own composite id differs from bob's lock owner even though their
+# bare sids are identical. Only an exact composite match may write.
+@test "session-start: a different live pid with the SAME bare session id never overwrites that seat's record" {
   _mark_daemon_ready
   bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null
-  bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code bob "sid-bob" >/dev/null
+  env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code bob "shared" >/dev/null
   source "$SCRIPTS/lib/role-session.sh"
-  agmsg_role_session_set_messaging team bob /tmp/cc-socks/bob-original.sock /home/bob/.claude sid-bob
+  agmsg_role_session_set_messaging team bob /tmp/cc-socks/bob-original.sock /home/bob/.claude shared
 
-  bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-alice" >/dev/null
-  run _run_session_start "sid-alice"
-  [ "$status" -eq 0 ]
+  # A second, DIFFERENT live pid (this bats test's own subshell, genuinely
+  # alive and distinct from $$) claims the SAME bare sid for a different
+  # agent -- the scenario this test exists to catch.
+  ( env AGMSG_AGENT_PID=$BASHPID bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+    env AGMSG_AGENT_PID=$BASHPID bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "shared" >/dev/null
+    env AGMSG_AGENT_PID=$BASHPID AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/shared.$BASHPID.sock" \
+      bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"shared"}' ) >/dev/null
 
   [ "$(agmsg_role_session_get team bob messaging_socket)" = /tmp/cc-socks/bob-original.sock ]
   [ "$(agmsg_role_session_get team bob claude_config_dir)" = /home/bob/.claude ]
-  [ "$(agmsg_role_session_uuid team bob)" = sid-bob ]
+  [ "$(agmsg_role_session_uuid team bob)" = shared ]
 }
 
 # #1577 review: agmsgd's own Claude Code channel does not send to a Windows
