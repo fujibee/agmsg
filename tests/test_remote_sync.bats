@@ -996,6 +996,47 @@ _reconcile_one_ack_wire() {
   [ "$(sqlite3 "$db" "SELECT count(*) FROM messages WHERE body='arrived from elsewhere';" | tr -d '\r')" -eq 1 ]
 }
 
+# Regression: a successful apply used to leave storage-sync-driver.sh's own
+# AGMSG_SQLITE_OUTCOME_FILE (a bare `mktemp`, default name) on disk forever.
+# storage_sync_apply_pull sets its OWN `trap ... EXIT INT TERM HUP` for its sql
+# file partway through, and bash traps for one signal replace the previous
+# handler rather than stacking -- so the driver's outer trap, installed before
+# calling into here, was silently discarded on every call that reached this
+# function, not only on a crash or a kill. Run through the real driver
+# process (not a direct function call, like every other test in this file) so
+# this exercises the exact trap that was lost.
+@test "sync contract: a successful apply through the real driver process does not leak its own outcome file" {
+  # AGMSG_SQLITE_OUTCOME_FILE is pre-set to a known, disposable path instead
+  # of left to the driver's own bare `mktemp`: scanning the real system temp
+  # directory for an unrelated bare-named file cannot be done reliably on a
+  # shared machine (and a bare `mktemp` ignores $TMPDIR entirely on macOS, so
+  # redirecting it to a throwaway TMPDIR would not even reach the real leak
+  # this regresses -- that leak landed in the real $TMPDIR on macOS too).
+  local outcome_file remote page
+  outcome_file="$(mktemp)"
+  remote=$(jq -nc '
+    {type:"sync_pull_message",server_seq:"1",
+     id:"550e8400-e29b-41d4-a716-4466554400a2",
+     server_received_at:"2026-07-20T13:00:01.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:(
+       {body:"driver process apply",created_at:"2026-07-20T13:00:01.000000Z",
+        from_agent:"carol",to_agent:"bob"}|tojson|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:"driver process apply",created_at:"2026-07-20T13:00:01.000000Z",
+                 from_agent:"carol",to_agent:"bob"}}')
+  page=$(printf '%s\n%s\n' "$remote" '{"type":"sync_pull_cursor","next_after":"1"}')
+  # 3>&- 4>&-: fd 3 is bats' own TAP pipe under this runner; a subprocess that
+  # inherits it (here, through the pipeline inside the `bash -c`) holds it
+  # open past this test, which is what broke every test after this one the
+  # first time (`3: Bad file descriptor`, from a later test's own `run`
+  # finding fd 3 already gone).
+  run env AGMSG_SQLITE_OUTCOME_FILE="$outcome_file" bash -c \
+    'printf "%s" "$1" | "$2" apply demo "$3" "$4" 1' \
+    _ "$page" "$SCRIPTS/internal/storage-sync-driver.sh" "$SERVER_ID" "$TEAM_ID" 3>&- 4>&-
+  [ "$status" -eq 0 ]
+  [ ! -e "$outcome_file" ]
+}
+
 # A partial commit is the failure this batch has to be incapable of. It now
 # spans the event, its legacy mirror, the sync mapping and the transport cursor,
 # and the CLI's default is to report a statement error and keep going — so

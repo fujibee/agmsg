@@ -32,7 +32,12 @@ agmsg_storage_load
 # prepare took the store for 63 s, the next page's `storage_init` waited out the
 # 5 s busy timeout, and the 13 it returned read as "this page cannot be
 # processed" rather than "not now".
-AGMSG_SQLITE_OUTCOME_FILE="$(mktemp)" || exit 1
+# Overridable (like AGMSG_SYNC_DRIVER, AGMSG_REAL_CODEX elsewhere in this
+# repo) so a test can point this at a known, disposable path instead of
+# scanning the real system temp directory for a bare `mktemp` name -- which a
+# test cannot do without risk of matching something unrelated that also
+# landed there in the same instant, on a shared machine.
+: "${AGMSG_SQLITE_OUTCOME_FILE:=$(mktemp)}" || exit 1
 export AGMSG_SQLITE_OUTCOME_FILE
 trap 'rm -f "$AGMSG_SQLITE_OUTCOME_FILE"' EXIT
 
@@ -72,6 +77,21 @@ esac || rc=$?
 if [ "$rc" -ne 0 ] && [ "$(cat "$AGMSG_SQLITE_OUTCOME_FILE" 2>/dev/null)" = busy ]; then
   printf 'agmsg: sqlite-sync: %s: the store is busy -- another writer held it past the %sms busy timeout (SQLITE_BUSY); this is not a failed check, the same call succeeds once that writer is done\n' \
     "$op" "${AGMSG_BUSY_TIMEOUT:-5000}" >&2
+  rm -f "$AGMSG_SQLITE_OUTCOME_FILE"
   exit 11
 fi
+# Explicit, not left to the EXIT trap above: storage_sync_apply_pull and
+# storage_sync_apply_read_state each set their OWN `trap ... EXIT INT TERM
+# HUP` for their own sql file partway through (sqlite-sync.sh), and a bash
+# trap for one signal replaces the previous handler rather than stacking --
+# so by the time either of those returns, the EXIT trap above has already
+# been silently replaced (or cleared) and no longer removes this file. That
+# happens on every ordinary, successful call to either operation, not only
+# on a hang or a kill, and was the actual cause of the real /tmp fill this
+# guards against -- not stacking traps to recover the old one back is the
+# point: it is also depended on directly by every test that calls the
+# sqlite-sync.sh functions on their own, without this driver process (and,
+# inside this one process, by `_agmsg_sqlite_recording`'s outcome write
+# itself needing the file to still exist for the busy check above).
+rm -f "$AGMSG_SQLITE_OUTCOME_FILE"
 exit "$rc"
