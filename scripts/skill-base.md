@@ -75,7 +75,7 @@ Four possible outputs:
 
   1. Show the suggested agent names to the user.
   2. Ask whether to reuse one of those names or choose a new one.
-  3. Ask for the team name to join (existing or new). If that name is not in `available_teams`, do not create it yet: ask whether to create a new local team or bring in the team of that name from a server (`remote pull`; after it succeeds, return to Identity setup).
+  3. Ask for the team name to join (existing or new). If that name is not in `available_teams`, do not create it yet: ask whether to create a new local team or bring in the team of that name from a server (`remote pull`; after it succeeds, return to Identity setup). If the team is in `available_teams`, run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` and check that the agent name you are about to use (reused or new) is not already in its roster.
   4. Run: `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <agent_name> __AGENT_TYPE__ "$(pwd)"`
   5. Then continue with the normal post-join flow above.
 
