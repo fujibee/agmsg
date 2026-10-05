@@ -43,8 +43,15 @@ _mark_daemon_ready() {
 
 @test "session-start: agmsgd ready AND an actas-claimed role-session record -> no Monitor directive" {
   _mark_daemon_ready
-  bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-daemon-ready" >/dev/null
-  run _run_session_start "sid-daemon-ready"
+  # The SAME live pid on both calls, explicit -- the plug's ownership check
+  # (#1577 re-review) is an exact match on the full composite "<sid>.<pid>",
+  # so this positive case must prove the lock and the record really are
+  # composite-identified, not rely on whatever agmsg_agent_pid's real
+  # ancestry walk happens to resolve (or degrade to bare) in this
+  # environment, which left this case passing or failing by accident.
+  env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-daemon-ready" >/dev/null
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-daemon-ready.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-daemon-ready"}'
   [ "$status" -eq 0 ]
   refute grep -q "AGMSG monitor mode" <<<"$output"
   refute grep -q "invoke the Monitor tool" <<<"$output"
@@ -126,8 +133,10 @@ _mark_daemon_ready() {
     agmsg_role_session_set_messaging() { :; }
     agmsg_role_session_get() { printf "%s" "$3" | grep -q socket && echo "/tmp/cc-socks/1.sock" || echo "/home/x/.claude"; }
     agmsg_role_session_uuid() { echo "sid-1"; }
-    actas_lock_read() { printf "ok\tsid-1\n"; }
+    actas_lock_read() { printf "ok\tsid-1.4242\n"; }
     agmsg_instance_bare_sid() { printf "%s" "$1"; }
+    agmsg_normalize_instance_id() { echo "sid-1.4242"; }
+    agmsg_instance_is_composite() { case "$1" in *.*) return 0 ;; *) return 1 ;; esac; }
     agmsg_daemon_read_state() { AGMSGD_HEALTH=ready; }
     _agmsg_platform=msys
     _agmsg_detect_platform() { :; }   # already set -- compat.sh itself would also no-op here
