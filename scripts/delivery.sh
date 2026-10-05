@@ -642,10 +642,11 @@ EOF
 emit_stop_directive() {
   cat <<'EOF'
 
-AGMSG-DIRECTIVE: If an agmsg watch Monitor task is running in this session,
-find it with TaskList (description starts with "agmsg inbox stream") and
-stop it with TaskStop. Existing watch.sh processes have already been killed
-by this command.
+AGMSG-DIRECTIVE: If you know of an agmsg watch Monitor task running in this
+session (listed by TaskList with a description that starts with "agmsg inbox
+stream", or the task_id returned by your own Monitor call), stop it with
+TaskStop; do not guess a task_id. Existing watch.sh processes have already been
+killed by this command.
 EOF
 }
 

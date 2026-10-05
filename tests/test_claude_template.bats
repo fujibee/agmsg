@@ -50,7 +50,7 @@ setup() {
   grep -Fq 'command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code <name> --max-seconds=1750`' "$RENDERED"
   grep -Fq 'description: `agmsg inbox stream (acting as <name>)`' "$RENDERED"
   grep -Fq 'persistent: true' "$RENDERED"
-  grep -Fq 'Run TaskList. Find any task whose description begins with "agmsg inbox stream"' "$RENDERED"
+  grep -Fq 'a task in TaskList whose description begins with "agmsg inbox stream"' "$RENDERED"
   grep -Fq 'status=held team=<team> owner=<sid>' "$RENDERED"
   # drop's own re-subscribe must be equally explicit, not just actas's.
   grep -Fq 'command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code --max-seconds=1750`' "$RENDERED"
