@@ -33,6 +33,200 @@ agmsg_validate_team_name "$NEW_TEAM" || exit 1
 TEAMS_DIR="$SCRIPT_DIR/../teams"
 OLD_DIR="$TEAMS_DIR/$OLD_TEAM"
 NEW_DIR="$TEAMS_DIR/$NEW_TEAM"
+# The SQLite path uses persistent admission in both the selected store and
+# the shared fallback used while a config name is absent.
+_rename_team_sql() {
+  local db="$1" table column sql old_lit new_lit
+  old_lit=$(agmsg_sqlesc "$OLD_TEAM"); new_lit=$(agmsg_sqlesc "$NEW_TEAM")
+  sql="UPDATE messages SET team='$new_lit' WHERE team='$old_lit';"
+  for table in events read_cursors sync_bindings sync_messages sync_quarantine \
+    sync_conflicts sync_read_members sync_read_remote_exact sync_read_aliases sync_read_prepared; do
+    if [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$table';" | tr -d '\r')" = 1 ]; then
+      case "$table" in events|read_cursors) column=team ;; *) column=local_team ;; esac
+      sql="$sql UPDATE $table SET $column='$new_lit' WHERE $column='$old_lit';"
+    fi
+  done
+  printf '%s\n' "$sql"
+}
+
+_rename_team_sqlite() {
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/delivery-maintenance.sh"
+  agmsg_dm_load || return 1
+  local shared old_db new_db source_db selected descriptor found partition token shared_token
+  local config_before config_after journal_hash roster_sync_hash sync_before sync_after sync_plan updated
+  local file hash src dst now sql guard shared_guard record target_db fresh=false
+  shared="$(_agmsg_runtime_db_path)"
+  old_db="$(agmsg_storage_dir)/teams/$OLD_TEAM/messages.db"
+  new_db="$(agmsg_storage_dir)/teams/$NEW_TEAM/messages.db"
+  agmsg_dm_find "$OLD_TEAM" rename-team "$NEW_TEAM" "$shared" "$old_db" "$new_db" || return 1
+  if [ "${AGMSG_DM_FOUND:?maintenance result missing}" = false ]; then
+    [ -f "$OLD_DIR/config.json" ] || { echo "Team not found: $OLD_TEAM"; return 1; }
+    [ ! -f "$NEW_DIR/config.json" ] || { echo "Team already exists: $NEW_TEAM"; return 1; }
+  fi
+  mkdir -p "$OLD_DIR" "$NEW_DIR"
+  LOCK_A=$(printf '%s\n%s\n' "$OLD_DIR" "$NEW_DIR" | LC_ALL=C sort | sed -n 1p)
+  LOCK_B=$(printf '%s\n%s\n' "$OLD_DIR" "$NEW_DIR" | LC_ALL=C sort | sed -n 2p)
+  agmsg_lock_acquire "$LOCK_A" manual-recovery || return 1
+  agmsg_lock_acquire "$LOCK_B" manual-recovery || return 1
+  agmsg_dm_find "$OLD_TEAM" rename-team "$NEW_TEAM" "$shared" "$old_db" "$new_db" || return 1
+  if [ "${AGMSG_DM_FOUND:?maintenance result missing}" = false ]; then
+    [ -f "$OLD_DIR/config.json" ] && [ ! -e "$NEW_DIR/config.json" ] || {
+      agmsg_dm_error 'team registry changed before admission'; return 1;
+    }
+    partition=$(agmsg_driver_for_team partition "$OLD_TEAM" shared)
+    source_db="$shared"; target_db="$shared"
+    if [ "$partition" = per-team ]; then
+      source_db="$old_db"; target_db="$new_db"
+      [ ! -e "${new_db%/*}" ] && [ ! -L "${new_db%/*}" ] || {
+        echo "A store already exists for $NEW_TEAM" >&2; return 1;
+      }
+    fi
+    config_before=$(agmsg_dm_hash "$OLD_DIR/config.json")
+    updated=$(agmsg_sqlite_mem "SELECT json_set(CAST(readfile('$(agmsg_sql_readfile_path "$OLD_DIR/config.json")') AS TEXT), '\$.name', '$(agmsg_sqlesc "$NEW_TEAM")');")
+    config_after=$(agmsg_dm_hash_planned_line "$updated")
+    journal_hash=$(agmsg_dm_hash "$OLD_DIR/roster.jsonl")
+    roster_sync_hash=$(agmsg_dm_hash "$OLD_DIR/roster-sync.json")
+    sync_before=absent; sync_after=absent
+    if [ -d "$(agmsg_storage_dir)/remote-sync" ]; then
+      . "$SCRIPT_DIR/lib/node.sh"
+      NODE_BIN=$(agmsg_resolve_node)
+      sync_plan=$("$NODE_BIN" "$SCRIPT_DIR/internal/rename-sync-config.mjs" "$(agmsg_storage_dir)" "$OLD_TEAM" "$NEW_TEAM" --plan)
+      sync_before=$(agmsg_dm_field "$sync_plan" source)
+      sync_after=$(agmsg_dm_field "$sync_plan" target)
+    fi
+    descriptor=$(agmsg_sqlite_mem "SELECT json_object(
+      'version',1,'nonce',lower(hex(randomblob(32))),'operation','rename-team',
+      'team','$(agmsg_sqlesc "$OLD_TEAM")','argument','$(agmsg_sqlesc "$NEW_TEAM")',
+      'source','$(agmsg_sqlesc "$source_db")','target','$(agmsg_sqlesc "$target_db")',
+      'fallback','$(agmsg_sqlesc "$shared")','partition','$(agmsg_sqlesc "$partition")',
+      'config_before','$config_before','config_after','$config_after',
+      'journal','$journal_hash','roster_sync','$roster_sync_hash',
+      'sync_before','$sync_before','sync_after','$sync_after');")
+    agmsg_dm_begin "$shared" "$descriptor" "$OLD_TEAM" "$NEW_TEAM" || return 1
+    shared_token="${AGMSG_DM_TOKEN:?maintenance result missing}"
+    if [ "$source_db" != "$shared" ]; then
+      if ! agmsg_dm_begin "$source_db" "$descriptor" "$OLD_TEAM" "$NEW_TEAM"; then
+        _sqlite_delivery_maintenance_finish_db "$shared" "$descriptor" "$shared_token" "$OLD_TEAM" "$NEW_TEAM" >/dev/null || return 1
+        return 1
+      fi
+    fi
+    fresh=true
+  else
+    descriptor="${AGMSG_DM_DESCRIPTOR:?maintenance result missing}"
+    source_db=$(agmsg_dm_field "$descriptor" source)
+    target_db=$(agmsg_dm_field "$descriptor" target)
+    partition=$(agmsg_dm_field "$descriptor" partition)
+    [ "$(agmsg_dm_field "$descriptor" fallback)" = "$shared" ] || return 1
+    if [ "$partition" = per-team ]; then
+      [ "$source_db" = "$old_db" ] && [ "$target_db" = "$new_db" ] || return 1
+    else
+      [ "$partition" = shared ] && [ "$source_db" = "$shared" ] && [ "$target_db" = "$shared" ] || return 1
+    fi
+  fi
+  config_before=$(agmsg_dm_field "$descriptor" config_before)
+  config_after=$(agmsg_dm_field "$descriptor" config_after)
+  journal_hash=$(agmsg_dm_field "$descriptor" journal)
+  roster_sync_hash=$(agmsg_dm_field "$descriptor" roster_sync)
+  # Each file has one recorded origin and one allowed destination. Never adopt
+  # a recreated config or an unrelated target file on the strength of a name.
+  if [ -e "$OLD_DIR/config.json" ]; then
+    [ ! -e "$NEW_DIR/config.json" ] && [ ! -L "$NEW_DIR/config.json" ] || return 1
+    agmsg_dm_expect "$OLD_DIR/config.json" "$config_before" || return 1
+  else
+    now=$(agmsg_dm_hash "$NEW_DIR/config.json")
+    [ "$now" = "$config_before" ] || [ "$now" = "$config_after" ] || return 1
+  fi
+  for file in roster.jsonl roster-sync.json; do
+    case "$file" in roster.jsonl) hash="$journal_hash" ;; *) hash="$roster_sync_hash" ;; esac
+    src="$OLD_DIR/$file"; dst="$NEW_DIR/$file"
+    if [ "$hash" = absent ]; then
+      agmsg_dm_expect "$src" absent && agmsg_dm_expect "$dst" absent || return 1
+    elif [ -e "$src" ]; then
+      agmsg_dm_expect "$src" "$hash" && agmsg_dm_expect "$dst" absent || return 1
+    else
+      agmsg_dm_expect "$dst" "$hash" || return 1
+    fi
+  done
+  selected="$source_db"
+  if [ "$source_db" != "$shared" ] && [ -e "$target_db" ]; then
+    [ ! -e "${source_db%/*}" ] && [ ! -L "${source_db%/*}" ] || return 1
+    selected="$target_db"
+  fi
+  record=$(agmsg_dm_get "$shared" "$OLD_TEAM") || return 1
+  shared_token=""
+  if [ -n "$record" ]; then
+    shared_token=$(agmsg_dm_verify_keys "$shared" "$descriptor" '' "$OLD_TEAM" "$NEW_TEAM") || return 1
+  else
+    # Shared admission is removed only after every externally visible step.
+    # Verify those final states below before accepting this finalization case.
+    agmsg_dm_expect "$OLD_DIR/config.json" absent || return 1
+    agmsg_dm_expect "$NEW_DIR/config.json" "$config_after" || return 1
+    [ "$selected" = "$target_db" ] || return 1
+  fi
+  record=$(agmsg_dm_get "$selected" "$OLD_TEAM") || return 1
+  if [ -z "$record" ]; then
+    # A crash between the two begins has not moved any registry/store data.
+    [ -n "$shared_token" ] && [ "$selected" = "$source_db" ] || return 1
+    agmsg_dm_expect "$OLD_DIR/config.json" "$config_before" || return 1
+    agmsg_dm_expect "$NEW_DIR/config.json" absent || return 1
+    agmsg_dm_begin "$selected" "$descriptor" "$OLD_TEAM" "$NEW_TEAM" || return 1
+  fi
+  token=$(agmsg_dm_verify_keys "$selected" "$descriptor" '' "$OLD_TEAM" "$NEW_TEAM") || return 1
+  agmsg_dm_reservations_clear "$OLD_TEAM" && agmsg_dm_reservations_clear "$NEW_TEAM" || return 1
+  sql=$(_rename_team_sql "$selected") || return 1
+  guard=$(agmsg_dm_guard_sql "$descriptor" "$token" main "$OLD_TEAM" "$NEW_TEAM") || return 1
+  if ! _sqlite_exec_stdin "$selected" "BEGIN IMMEDIATE; $guard $sql ROLLBACK;"; then
+    if [ "$fresh" = true ]; then
+      _sqlite_delivery_maintenance_finish_db "$selected" "$descriptor" "$token" "$OLD_TEAM" "$NEW_TEAM" >/dev/null || return 1
+      if [ "$selected" != "$shared" ]; then
+        _sqlite_delivery_maintenance_finish_db "$shared" "$descriptor" "$shared_token" "$OLD_TEAM" "$NEW_TEAM" >/dev/null || return 1
+      fi
+    fi
+    return 1
+  fi
+  for file in config.json roster.jsonl roster-sync.json; do
+    if [ -f "$OLD_DIR/$file" ]; then mv "$OLD_DIR/$file" "$NEW_DIR/$file"; fi
+  done
+  if [ "$source_db" != "$shared" ] && [ "$selected" = "$source_db" ]; then
+    [ ! -e "${target_db%/*}" ] && [ ! -L "${target_db%/*}" ] || return 1
+    mv "${source_db%/*}" "${target_db%/*}"
+    selected="$target_db"
+    token=$(agmsg_dm_verify_keys "$selected" "$descriptor" "$token" "$OLD_TEAM" "$NEW_TEAM") || return 1
+  fi
+  if [ "$(agmsg_dm_hash "$NEW_DIR/config.json")" != "$config_after" ]; then
+    updated=$(agmsg_sqlite_mem "SELECT json_set(CAST(readfile('$(agmsg_sql_readfile_path "$NEW_DIR/config.json")') AS TEXT), '\$.name', '$(agmsg_sqlesc "$NEW_TEAM")');")
+    [ "$(agmsg_dm_hash_planned_line "$updated")" = "$config_after" ] || return 1
+    agmsg_write_atomic "$NEW_DIR/config.json" "$updated"
+  fi
+  _sqlite_exec_stdin "$selected" "BEGIN IMMEDIATE; $guard $sql $(agmsg_dm_discard_claims_sql "$OLD_TEAM" "$NEW_TEAM") COMMIT;"
+  sync_before=$(agmsg_dm_field "$descriptor" sync_before)
+  sync_after=$(agmsg_dm_field "$descriptor" sync_after)
+  if [ -d "$(agmsg_storage_dir)/remote-sync" ] || [ "$sync_before" != absent ]; then
+    . "$SCRIPT_DIR/lib/node.sh"
+    NODE_BIN=$(agmsg_resolve_node)
+    "$NODE_BIN" "$SCRIPT_DIR/internal/rename-sync-config.mjs" "$(agmsg_storage_dir)" "$OLD_TEAM" "$NEW_TEAM" --resume "$sync_before" "$sync_after"
+  fi
+  agmsg_dm_expect "$NEW_DIR/config.json" "$config_after"
+  agmsg_dm_expect "$NEW_DIR/roster.jsonl" "$journal_hash"
+  agmsg_dm_expect "$NEW_DIR/roster-sync.json" "$roster_sync_hash"
+  if [ "$selected" != "$shared" ] && [ -n "$shared_token" ]; then
+    shared_guard=$(agmsg_dm_guard_sql "$descriptor" "$shared_token" main "$OLD_TEAM" "$NEW_TEAM") || return 1
+    _sqlite_exec_stdin "$shared" "BEGIN IMMEDIATE; $shared_guard
+      $(agmsg_dm_discard_claims_sql "$OLD_TEAM" "$NEW_TEAM")
+      $(_sqlite_delivery_maintenance_finish_sql "$descriptor" "$shared_token" "$OLD_TEAM" "$NEW_TEAM") COMMIT;"
+  fi
+  _sqlite_delivery_maintenance_finish_db "$selected" "$descriptor" "$token" "$OLD_TEAM" "$NEW_TEAM" >/dev/null
+  agmsg_lock_release
+  rmdir "$OLD_DIR" 2>/dev/null || true
+  echo "Renamed team $OLD_TEAM → $NEW_TEAM"
+}
+
+if [ "$(agmsg_storage_driver)" = sqlite ]; then
+  _rename_team_sqlite
+  exit $?
+fi
+
 # Only a team on the per-team partition owns a directory to move. On the shared
 # partition its rows sit in a file with every other team's, so renaming rewrites
 # the `team` column and moves nothing — which is what this script always did.

@@ -381,6 +381,16 @@ decrypt/import progress. Exact remote state is bounded and paginated, and may
 be garbage-collected only after a durable mapping proves that its own sequence
 is covered by the merged remote frontier.
 
+### Optional delivery claims
+
+The bundled SQLite driver advertises `delivery-claims-v1` and
+`delivery-claims-bytes-v1`. These add local message reservations, renewal,
+acknowledgement receipts, and optional byte-bounded acquisition/readiness.
+They do not alter the existing read-state synchronization wire protocol.
+Drivers without these capabilities retain their existing interface; JSONL
+delivery claims are deferred. See [delivery claims and acknowledgement](delivery-claims.md)
+for the machine interface, acceptance boundaries, and recovery requirements.
+
 ## 3. CLI mapping
 
 | User command | Driver function(s) |

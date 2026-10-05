@@ -7,8 +7,8 @@
 # scope. State is an append-only `events` log (canonical JSONL: message_sent /
 # message_read). The legacy `messages` table is read **read-only** and UNIONed
 # into list_unread / history so an existing store keeps its inbox and history
-# after #206 switches call sites onto the contract (§2.4); legacy rows are never
-# migrated or mutated here.
+# after #206 switches call sites onto the contract (§2.4). Delivery ACK also
+# mirrors read markers into matching legacy rows; message content is unchanged.
 #
 # Framing (§1.4 / ADR 0003): record-returning ops write data only to stdout and
 # fail with a non-zero exit; control ops (check/init/mark_read_batch/compact)
@@ -28,6 +28,12 @@ _sqlite_db() { agmsg_db_path "$1"; }
 # producing '' on bash 4+. tests/test_sqlpath.bats holds this equal to the
 # forking form it replaces, on the inputs that matter to SQL quoting.
 _sqlite_lit() { local q="'"; printf '%s' "${1//$q/$q$q}"; }
+# Assignment avoids command-substitution newline trimming for opaque IDs and
+# owner/descriptor strings. Complete inline literals end in a quote, not data.
+_sqlite_lit_into() { local _sqlite_quote_mark="'"; printf -v "$1" '%s' "${2//$_sqlite_quote_mark/$_sqlite_quote_mark$_sqlite_quote_mark}"; }
+_sqlite_quote() { local _sqlite_quote_mark="'"; printf "'%s'" "${1//$_sqlite_quote_mark/$_sqlite_quote_mark$_sqlite_quote_mark}"; }
+_sqlite_quote_into() { local _sqlite_quote_mark="'"; printf -v "$1" "'%s'" "${2//$_sqlite_quote_mark/$_sqlite_quote_mark$_sqlite_quote_mark}"; }
+
 
 # Run a record-returning query: strip CR but PRESERVE the sqlite exit status
 # (pipefail), so a backend failure surfaces as a non-zero return instead of
@@ -100,7 +106,7 @@ storage_describe() {
   # store was asked about. This is not a second way to reach the store.
   printf 'name=sqlite\n'
   printf 'backend=SQLite (WAL) event log + legacy messages table\n'
-  printf 'capabilities=stage1-sync,stage1-resync,stage2-read-state\n'
+  printf 'capabilities=stage1-sync,stage1-resync,stage2-read-state,delivery-claims-v1,delivery-claims-bytes-v1\n'
   [ -z "${1-}" ] || printf 'db=%s\n' "$(_sqlite_db "$1")"
 }
 
@@ -112,10 +118,16 @@ storage_store_exists() { [ -f "$(_sqlite_db "$1")" ]; }
 # that already carries revision N skip the batch entirely (#1001). The number
 # is stamped INSIDE the same transaction as the schema statements, so a store
 # can never hold the new number over an old schema.
-_AGMSG_STORAGE_SCHEMA_REV=1
+_AGMSG_STORAGE_SCHEMA_REV=2
 
 storage_init() {
-  local db; db="$(_sqlite_db "$1")"
+  _sqlite_init_db "$(_sqlite_db "$1")"
+}
+
+# Explicit paths are needed before a maintenance operation publishes a new
+# storage selector. Normal callers continue through storage_init(team).
+_sqlite_init_db() {
+  local db="$1"
   mkdir -p "$(dirname "$db")" 2>/dev/null || true
   # Fast path (#1001): a store already at the current schema revision needs
   # nothing from this function -- and the check is a READ, which WAL serves
@@ -129,6 +141,16 @@ storage_init() {
     local schema_rev
     schema_rev="$(agmsg_sqlite "$db" "PRAGMA user_version;" 2>/dev/null | tr -d '[:space:]')" || schema_rev=""
     if [ "$schema_rev" = "$_AGMSG_STORAGE_SCHEMA_REV" ]; then
+      # Refuse incomplete revision-2 stores rather than treating an
+      # unclassified protected fence as generic.
+      local protection_columns
+      protection_columns="$(agmsg_sqlite "$db" "SELECT
+        (SELECT COUNT(*) FROM pragma_table_info('delivery_claims') WHERE name='protection_id')+
+        (SELECT COUNT(*) FROM pragma_table_info('delivery_ack_receipts') WHERE name='protection_id');")" || protection_columns=""
+      if [ "$protection_columns" != 2 ]; then
+        printf 'agmsg delivery: incomplete_delivery_schema\n' >&2
+        echo runtime_error; return 13
+      fi
       echo ok
       return 0
     fi
@@ -216,6 +238,21 @@ storage_init() {
     CREATE TABLE IF NOT EXISTS storage_metadata (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS delivery_claims (
+      team TEXT NOT NULL, agent TEXT NOT NULL, msg_id TEXT NOT NULL,
+      owner TEXT NOT NULL, token TEXT NOT NULL, expires_at INTEGER NOT NULL, protection_id TEXT,
+      PRIMARY KEY(team,agent,msg_id)
+    );
+    CREATE TABLE IF NOT EXISTS delivery_ack_receipts (
+      team TEXT NOT NULL, agent TEXT NOT NULL, msg_id TEXT NOT NULL,
+      owner TEXT NOT NULL, token TEXT NOT NULL,
+      acked_at INTEGER NOT NULL, retain_until INTEGER NOT NULL, protection_id TEXT,
+      PRIMARY KEY(team,agent,msg_id,token)
+    );
+    CREATE TABLE IF NOT EXISTS delivery_maintenance (
+      team TEXT PRIMARY KEY NOT NULL, descriptor TEXT NOT NULL,
+      token TEXT NOT NULL, created_at INTEGER NOT NULL
     );
     -- Legacy store (read-only here). Created so the UNION queries always parse
     -- even on a brand-new install with no pre-event-log data.
@@ -350,6 +387,57 @@ storage_read_cursor_get() {
     WHERE team='$(_sqlite_lit "$team")' AND agent='$(_sqlite_lit "$agent")'),0);"
 }
 
+# Shared exact-read and frontier SQL for legacy marking and fenced ACK. The
+# optional filter is an internal temporary ID table, never caller-supplied SQL.
+_sqlite_read_ids_sql() {
+  local team="$1" agent="$2" at="$3" filter="$4"; shift 4
+  local tl al id quoted_id quoted_at read_uuid uuid_sql
+  _sqlite_lit_into tl "$team"; _sqlite_lit_into al "$agent"
+  _sqlite_quote_into quoted_at "$at"
+  # One timestamp/version prefix for the batch; SQLite supplies independent
+  # random tails per row. Same UUIDv7 shape/fixed variant and 72 random bits as
+  # compat_uuid7, without date/head/od/tr subprocesses for every ACK member.
+  read_uuid="$(compat_uuid7)" || return 13
+  uuid_sql="'${read_uuid:0:14}7'||substr(lower(hex(randomblob(2))),1,3)||'-8'||substr(lower(hex(randomblob(2))),1,3)||'-'||lower(hex(randomblob(6)))"
+  for id in "$@"; do
+    _sqlite_quote_into quoted_id "$id"
+    printf '%s\n' "
+      INSERT INTO events(type,id,team,agent,msg_id,at)
+      SELECT 'message_read',$uuid_sql,'$tl','$al',
+             $quoted_id,$quoted_at
+       WHERE NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+         AND r.team='$tl' AND r.agent='$al' AND r.msg_id=$quoted_id)
+         ${filter:+AND EXISTS(SELECT 1 FROM $filter WHERE id=$quoted_id)};
+      -- Mirror the read into the legacy table, through the correspondence
+      -- rather than by guessing an id. Without this an external viewer shows
+      -- every message unread forever, which is a worse thing to hand someone
+      -- than the disagreement it costs (#689).
+      UPDATE messages SET read_at=$quoted_at
+       WHERE read_at IS NULL AND team='$tl' AND to_agent='$al'
+         ${filter:+AND EXISTS(SELECT 1 FROM $filter WHERE id=$quoted_id)}
+         AND id = (SELECT e.legacy_id FROM events e
+                    WHERE e.type='message_sent' AND e.team='$tl'
+                      AND e.to_agent='$al' AND e.id=$quoted_id
+                      AND e.legacy_id IS NOT NULL);"
+  done
+}
+
+_sqlite_read_frontier_sql() {
+  local team="$1" agent="$2" target="$3" condition="${4:-1}"
+  local tl al; tl="$(_sqlite_lit "$team")"; al="$(_sqlite_lit "$agent")"
+  printf '%s\n' "    INSERT OR IGNORE INTO read_cursors(team,agent,local_position)
+      SELECT '$tl','$al',0 WHERE ($condition);
+    UPDATE read_cursors SET local_position=MAX(local_position,COALESCE((
+      SELECT MIN(e.seq)-1 FROM events e
+       WHERE e.type='message_sent' AND e.team='$tl' AND e.to_agent='$al'
+         AND e.seq>read_cursors.local_position
+         AND e.seq<=MIN($target,$(_sqlite_highwater))
+         AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+           AND r.team=e.team AND r.agent='$al' AND r.msg_id=e.id)
+    ),MIN($target,$(_sqlite_highwater))))
+    WHERE team='$tl' AND agent='$al' AND ($condition);"
+}
+
 # Advance one recipient's local read frontier after a successful driver scan.
 # Exact IDs are recorded first; the frontier is then capped immediately before
 # the first still-unread addressed message, so a stale/malformed caller cannot
@@ -358,26 +446,11 @@ storage_read_cursor_consume() {
   local team="$1" agent="$2" target="$3"; shift 3
   case "$target" in ''|*[!0-9]*) echo runtime_error; return 13 ;; esac
   storage_init "$team" >/dev/null || { echo runtime_error; return 13; }
-  local db tl al at id sql=""
-  db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"; al="$(_sqlite_lit "$agent")"
+  local db at sql frontier_sql
+  db="$(_sqlite_db "$team")"
   at="$(_sqlite_now)"
-  for id in "$@"; do
-    sql="$sql
-      INSERT INTO events(type,id,team,agent,msg_id,at)
-      SELECT 'message_read','$(_sqlite_lit "$(compat_uuid7)")','$tl','$al',
-             '$(_sqlite_lit "$id")','$(_sqlite_lit "$at")'
-       WHERE NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
-         AND r.team='$tl' AND r.agent='$al' AND r.msg_id='$(_sqlite_lit "$id")');
-      -- Mirror the read into the legacy table, through the correspondence
-      -- rather than by guessing an id. Without this an external viewer shows
-      -- every message unread forever, which is a worse thing to hand someone
-      -- than the disagreement it costs (#689).
-      UPDATE messages SET read_at='$(_sqlite_lit "$at")'
-       WHERE read_at IS NULL
-         AND id = (SELECT e.legacy_id FROM events e
-                    WHERE e.type='message_sent' AND e.team='$tl'
-                      AND e.id='$(_sqlite_lit "$id")' AND e.legacy_id IS NOT NULL);"
-  done
+  sql="$(_sqlite_read_ids_sql "$team" "$agent" "$at" "" "$@")" || { echo runtime_error; return 13; }
+  frontier_sql="$(_sqlite_read_frontier_sql "$team" "$agent" "$target")" || { echo runtime_error; return 13; }
   # #777 ("Not measured" section): $sql gains one INSERT/UPDATE block per
   # delivered id, and the whole "BEGIN IMMEDIATE; ...; COMMIT;" statement
   # used to be handed to `agmsg_sqlite` as ONE argv element. Measured on
@@ -407,17 +480,7 @@ storage_read_cursor_consume() {
   {
     printf '%s\n' "BEGIN IMMEDIATE;"
     printf '%s\n' "$sql"
-    printf '%s\n' "    INSERT OR IGNORE INTO read_cursors(team,agent,local_position)
-      VALUES('$tl','$al',0);
-    UPDATE read_cursors SET local_position=MAX(local_position,COALESCE((
-      SELECT MIN(e.seq)-1 FROM events e
-       WHERE e.type='message_sent' AND e.team='$tl' AND e.to_agent='$al'
-         AND e.seq>read_cursors.local_position
-         AND e.seq<=MIN($target,$(_sqlite_highwater))
-         AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
-           AND r.team=e.team AND r.agent='$al' AND r.msg_id=e.id)
-    ),MIN($target,$(_sqlite_highwater))))
-    WHERE team='$tl' AND agent='$al';"
+    printf '%s\n' "$frontier_sql"
     printf '%s\n' "COMMIT;"
   } > "$sql_file"
   if ! agmsg_sqlite "$db" < "$sql_file" >/dev/null 2>&1; then
@@ -428,21 +491,31 @@ storage_read_cursor_consume() {
   echo ok
 }
 
-# storage_list_unread <team> <agent> [--limit N]
-# The local cursor is the fast contiguous boundary; exact message_read events
-# cover safe out-of-order reads. Legacy rows remain a frozen compatibility path.
-storage_list_unread() {
-  local team="$1" agent="$2" limit=""
-  shift 2
-  while [ $# -gt 0 ]; do case "$1" in --limit) limit="$2"; shift 2 ;; *) shift ;; esac; done
-  case "$limit" in ''|*[!0-9]*) limit="" ;; esac
-  storage_init "$team" >/dev/null
-  local tl al; tl="$(_sqlite_lit "$team")"; al="$(_sqlite_lit "$agent")"
-  _sqlite_data "$team" "
-    SELECT j FROM (
-      SELECT json_object('type','message_sent','id',e.id,'team',e.team,
-               'from',e.from_agent,'to',e.to_agent,'body',e.body,'at',e.at) AS j,
-             e.at AS ts, 1 AS src, e.seq AS ord
+# The single canonical unread projection. Claims and readiness must agree with
+# legacy inbox reads about live mirrors, negative projections and imported reads.
+_sqlite_unread_sql() {
+  local tl al raw_limit="${3:-}" event_json legacy_json
+  tl="$(_sqlite_lit "$1")"; al="$(_sqlite_lit "$2")"
+  event_json="json_object('type','message_sent','id',e.id,'team',e.team,
+    'from',e.from_agent,'to',e.to_agent,'body',e.body,'at',e.at)"
+  legacy_json="json_object('type','message_sent','id',CAST(m.id AS TEXT),'team',m.team,
+    'from',m.from_agent,'to',m.to_agent,'body',m.body,'at',m.created_at)"
+  if [ -n "$raw_limit" ]; then
+    _sqlite_delivery_byte_limit "$raw_limit" || return 13
+    # CASE is lazy: a giant raw field never reaches json_object. This is only
+    # a lower bound; the bounded caller must measure final escaped JSON too.
+    event_json="CASE WHEN COALESCE(length(CAST(e.id AS BLOB)),0)
+      +COALESCE(length(CAST(e.team AS BLOB)),0)+COALESCE(length(CAST(e.from_agent AS BLOB)),0)
+      +COALESCE(length(CAST(e.to_agent AS BLOB)),0)+COALESCE(length(CAST(e.body AS BLOB)),0)
+      +COALESCE(length(CAST(e.at AS BLOB)),0)<=$raw_limit THEN $event_json END"
+    legacy_json="CASE WHEN COALESCE(length(CAST(CAST(m.id AS TEXT) AS BLOB)),0)
+      +COALESCE(length(CAST(m.team AS BLOB)),0)+COALESCE(length(CAST(m.from_agent AS BLOB)),0)
+      +COALESCE(length(CAST(m.to_agent AS BLOB)),0)+COALESCE(length(CAST(m.body AS BLOB)),0)
+      +COALESCE(length(CAST(m.created_at AS BLOB)),0)<=$raw_limit THEN $legacy_json END"
+  fi
+  printf '%s\n' "
+      SELECT $event_json AS j,
+             e.id AS id, e.at AS ts, 1 AS src, e.seq AS ord
       FROM events e
       WHERE e.type='message_sent' AND e.team='$tl' AND e.to_agent='$al'
         AND e.seq>COALESCE((SELECT local_position FROM read_cursors
@@ -450,9 +523,8 @@ storage_list_unread() {
         AND NOT EXISTS (SELECT 1 FROM events r WHERE r.type='message_read'
                         AND r.team=e.team AND r.agent='$al' AND r.msg_id=e.id)
       UNION ALL
-      SELECT json_object('type','message_sent','id',CAST(m.id AS TEXT),'team',m.team,
-               'from',m.from_agent,'to',m.to_agent,'body',m.body,'at',m.created_at) AS j,
-             m.created_at AS ts, 0 AS src, m.id AS ord
+      SELECT $legacy_json AS j,
+             CAST(m.id AS TEXT) AS id, m.created_at AS ts, 0 AS src, m.id AS ord
       FROM messages m
       WHERE m.team='$tl' AND m.to_agent='$al' AND m.read_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM events r WHERE r.type='message_read'
@@ -471,9 +543,20 @@ storage_list_unread() {
         -- version of this dedupe did exactly that.
         AND NOT EXISTS (SELECT 1 FROM events e2
                          WHERE e2.legacy_id = m.id AND e2.seq > 0)
-    )
-    ORDER BY ts, src, ord ${limit:+LIMIT $limit};
   "
+}
+
+# storage_list_unread <team> <agent> [--limit N]
+# The local cursor is the fast contiguous boundary; exact message_read events
+# cover safe out-of-order reads. Legacy rows remain a frozen compatibility path.
+storage_list_unread() {
+  local team="$1" agent="$2" limit=""
+  shift 2
+  while [ $# -gt 0 ]; do case "$1" in --limit) limit="$2"; shift 2 ;; *) shift ;; esac; done
+  case "$limit" in ''|*[!0-9]*) limit="" ;; esac
+  storage_init "$team" >/dev/null
+  _sqlite_data "$team" "SELECT j FROM ($(_sqlite_unread_sql "$team" "$agent"))
+    ORDER BY ts, src, ord ${limit:+LIMIT $limit};"
 }
 
 # storage_mark_read_batch <team> <agent> <id> [<id> ...]  (control op)
@@ -623,8 +706,10 @@ storage_import() {
                 '$(_sqlite_lit "$agent")','$(_sqlite_lit "$msg_id")','$(_sqlite_lit "$at")');
         UPDATE messages SET read_at='$(_sqlite_lit "$at")'
          WHERE read_at IS NULL
+           AND team='$(_sqlite_lit "$team")' AND to_agent='$(_sqlite_lit "$agent")'
            AND id = (SELECT e.legacy_id FROM events e
                       WHERE e.type='message_sent' AND e.team='$(_sqlite_lit "$team")'
+                        AND e.to_agent='$(_sqlite_lit "$agent")'
                         AND e.id='$(_sqlite_lit "$msg_id")' AND e.legacy_id IS NOT NULL);" \
         >/dev/null 2>&1
     fi
@@ -647,3 +732,7 @@ storage_compact() {
 # not pay its jq/base64 dependency cost.
 # shellcheck disable=SC1090
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sqlite-sync.sh"
+
+# Optional delivery claims, including protected bridge and maintenance helpers.
+# shellcheck disable=SC1090
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sqlite-delivery.sh"

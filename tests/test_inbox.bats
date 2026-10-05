@@ -85,10 +85,27 @@ await_barrier_reached() {
   [ "$(unread_count alice)" -eq 0 ]
 }
 
-@test "inbox: a mark-read that loses to a concurrent writer is reported, and the message reappears (#1011)" {
-  # Before #1011 the mark's failure was fully swallowed: the message printed,
-  # the row stayed unread, the exit code was 0, and nothing said so. The
-  # display SELECT reads beside a writer (WAL); only the mark write loses.
+@test "inbox: writer contention refuses a claim without disclosing or reading the body" {
+  inbox_writer_contention claims
+}
+
+@test "inbox legacy: a failed mark-read is reported and the message reappears (#1011)" {
+  inbox_writer_contention legacy
+}
+
+inbox_writer_contention() {
+  local mode="$1"
+  if [ "$mode" = legacy ]; then
+    # Retain the original #1011 contract for drivers without claims. This
+    # override is confined to the disposable installed-driver fixture.
+    cat >> "$SCRIPTS/drivers/storage/sqlite.sh" <<'SH'
+storage_describe() {
+  printf 'name=sqlite\ncapabilities=stage1-sync,stage1-resync,stage2-read-state\n'
+}
+SH
+  fi
+  # A writer held before admission refuses claims before disclosure. Legacy
+  # delivery can read beside the WAL writer, then fail its mark-read write.
   bash "$SCRIPTS/send.sh" testteam bob alice "trapped"
   local db
   db="$(cd "$TEST_SKILL_DIR" && bash -c '. scripts/lib/storage.sh; agmsg_storage_load; agmsg_db_path testteam' 2>/dev/null)"
@@ -133,17 +150,23 @@ await_barrier_reached() {
   : > "$TEST_SKILL_DIR/hold.release"
   wait "$holder"
 
-  # Delivered, exit 0 — and the failed mark is now SAID, not swallowed.
-  [ "$st" -eq 0 ]
-  grep -q 'trapped' "$TEST_SKILL_DIR/held.out"
-  grep -q 'failed to record read state for 1 displayed message(s)' "$TEST_SKILL_DIR/held.err"
-  grep -q '#1011' "$TEST_SKILL_DIR/held.err"
-  # All-unread is a fact about THIS driver (sqlite marks in one transaction);
-  # the jsonl driver can legitimately leave a partial batch, which is why the
-  # diagnostic says "some or all".
+  if [ "$mode" = claims ]; then
+    [ "$st" -eq 13 ] || return 1
+    [ ! -s "$TEST_SKILL_DIR/held.out" ] || return 1
+    [ -s "$TEST_SKILL_DIR/held.err" ] || return 1
+    [ "$(grep -c 'trapped' "$TEST_SKILL_DIR/held.err" || true)" -eq 0 ] || return 1
+    [ "$(sqlite3 "$db" 'SELECT count(*) FROM delivery_claims;')" -eq 0 ] || return 1
+  else
+    # Legacy delivery still reports a failed mark after successful output.
+    [ "$st" -eq 0 ] || return 1
+    grep -q 'trapped' "$TEST_SKILL_DIR/held.out" || return 1
+    grep -q 'failed to record read state for 1 displayed message(s)' "$TEST_SKILL_DIR/held.err" || return 1
+    grep -q '#1011' "$TEST_SKILL_DIR/held.err" || return 1
+  fi
+  # Neither a refused claim nor a failed legacy mark consumes the message.
   [ "$(unread_count alice)" -eq 1 ]
 
-  # The same inbox once the writer is gone: shown again, marked, and silent.
+  # Once the writer is gone, delivery succeeds and records read state.
   st=0
   bash "$SCRIPTS/inbox.sh" testteam alice \
     > "$TEST_SKILL_DIR/free.out" 2> "$TEST_SKILL_DIR/free.err" || st=$?

@@ -390,7 +390,7 @@ SQLite guarantees the ordering of the log itself — every row has a monotonic i
 
 **Two Claude Code instances grab the same task — claim/lock?**
 
-Not in v1. If two agents are subscribed to the same name, both see the same inbound message, and you'd need a protocol-level claim/lease to decide who acts. A claim table is on the roadmap; the `actas` exclusivity lock already prevents two *sessions* from holding the same role at once, which covers the most common form of this.
+SQLite inbox, hooks, and body-delivery bridges reserve messages before handing them off, then acknowledge them at each route's acceptance boundary. A live reservation excludes another cooperating consumer of the same team and recipient. The `actas` lock also prevents two sessions from holding the same role at once. Lease expiry or an interrupted handoff can still cause redelivery; this does not guarantee exactly-once task execution. JSONL retains its legacy behavior. See [delivery claims and acknowledgement](docs/spec/delivery-claims.md) for boundaries, size limits, and recovery.
 
 **Runaway loops — where does the stop condition live?**
 

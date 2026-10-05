@@ -413,7 +413,7 @@ _use_per_team() {
   storage_init demo >/dev/null
   local db; db=$(agmsg_db_path demo)
   # The stamp landed.
-  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 1 ]
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 2 ]
   # Under a held write lock, the old init re-ran its write batch, waited the
   # full busy timeout and failed; the fast path READS the revision (WAL serves
   # reads beside a writer) and returns ok without touching the lock.
@@ -445,7 +445,7 @@ _use_per_team() {
   [ "$status" -eq 0 ]
   # The batch really ran: the schema piece is back, and so is the stamp.
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE name='events_id';" | tr -d ' \r')" = 1 ]
-  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 1 ]
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 2 ]
 }
 
 @test "storage: a failing init batch leaves the OLD revision, never a new stamp over a broken schema (#1001)" {
@@ -537,5 +537,5 @@ _use_per_team() {
   [ "$status" -eq 0 ]
   [ "$output" = ok ]
   [ "$(sqlite3 "$db" "PRAGMA journal_mode;" | tr -d ' \r')" = wal ]
-  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 1 ]
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 2 ]
 }

@@ -1011,7 +1011,7 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: message.id, error: { message: "wrong runtime workspace roots" } });
       return;
     }
-    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    send({ jsonrpc: "2.0", id: message.id, result: { turn: { id: "turn-1", status: "inProgress", items: [] } } });
     setTimeout(() => {
       send({
         jsonrpc: "2.0",
@@ -2124,13 +2124,13 @@ rl.on("line", (line) => {
       }, 20);
       // ...and only later does the request resolve; the turn then completes.
       setTimeout(() => {
-        send({ jsonrpc: "2.0", id: message.id, result: {} });
+        send({ jsonrpc: "2.0", id: message.id, result: { turn: { id: `turn-${turns}`, status: "inProgress", items: [] } } });
         setTimeout(() => {
           send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId } });
         }, 20);
       }, 120);
     } else {
-      send({ jsonrpc: "2.0", id: message.id, result: {} });
+      send({ jsonrpc: "2.0", id: message.id, result: { turn: { id: `turn-${turns}`, status: "inProgress", items: [] } } });
       setTimeout(() => {
         send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId } });
       }, 10);
@@ -2204,7 +2204,7 @@ rl.on("line", (line) => {
     send({ jsonrpc: "2.0", method: "turn/started", params: { threadId: message.params.threadId, turn: { id: "fast-1" } } });
     send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "fast-1" } } });
     setTimeout(() => {
-      send({ jsonrpc: "2.0", id: message.id, result: {} });
+      send({ jsonrpc: "2.0", id: message.id, result: { turn: { id: "fast-1", status: "inProgress", items: [] } } });
     }, 60);
   } else if (message.method === "process/kill") {
     send({ jsonrpc: "2.0", id: message.id, result: {} });
@@ -2300,7 +2300,7 @@ rl.on("line", (line) => {
       }, 20);
       // ...then the request is ACKed...
       setTimeout(() => {
-        send({ jsonrpc: "2.0", id: message.id, result: {} });
+        send({ jsonrpc: "2.0", id: message.id, result: { turn: { id: turns === 1 ? "new-1" : `later-${turns}`, status: "inProgress", items: [] } } });
       }, 80);
       // ...and the new turn's REAL completion comes much later. The delay is
       // deliberately far above the bridge's subprocess latency (send.sh /
@@ -2312,7 +2312,7 @@ rl.on("line", (line) => {
         send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId, turn: { id: "new-1" } } });
       }, 2000);
     } else {
-      send({ jsonrpc: "2.0", id: message.id, result: {} });
+      send({ jsonrpc: "2.0", id: message.id, result: { turn: { id: turns === 1 ? "new-1" : `later-${turns}`, status: "inProgress", items: [] } } });
       setTimeout(() => {
         send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId, turn: { id: `later-${turns}` } } });
       }, 10);

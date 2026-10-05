@@ -4,7 +4,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn,spawnSync} from 'node:child_process';
 import {randomBytes,randomUUID,createHash} from 'node:crypto';
 import {once} from 'node:events';
-import {read,atomic,proc,violations} from './bridge-read-guard.mjs';
+import {read,atomic,proc,violations,validateReservation} from './bridge-read-guard.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url));
 const root=path.resolve(here,'../../../..');
 const transport=path.join(here,'inbox-transport.sh');
@@ -17,6 +17,17 @@ export function forbiddenTool(event) {
   const p=s.tool_info?.parameters;
   const command=p?.CommandLine ?? p?.command ?? p?.cmd;
   return typeof command==='string' && /(?:^|[\s/'";|&])(check-inbox|inbox)\.sh(?:[\s'";|&]|$)|\$agmsg\s*(?:$|[;|&])/.test(command);
+}
+export function recoveryIdsMatch(ids,options) {
+  const repeated=options['confirm-id'];
+  if(repeated!==undefined) {
+    if(options['confirm-ids']!==undefined||!Array.isArray(repeated))return false;
+    return ids.length===repeated.length&&ids.every((id,i)=>id===repeated[i]);
+  }
+  // Keep old UUID-only recovery commands working. CSV cannot distinguish
+  // a comma inside one opaque ID from a boundary between two IDs.
+  return typeof options['confirm-ids']==='string'&&!ids.some(id=>id.includes(','))
+    &&ids.join(',')===options['confirm-ids'];
 }
 export class Bridge {
   constructor(options) {
@@ -39,6 +50,32 @@ export class Bridge {
     }
     return r.stdout;
   }
+  async delivery(command,request={}) {
+    const child=spawn('bash',[transport,command,this.project,this.team,this.role,this.owner],{stdio:['pipe','pipe','pipe','pipe']});
+    let out='',err='';child.stdout.on('data',d=>out+=d);child.stderr.on('data',d=>err+=d);
+    child.stdin.on('error',()=>{});child.stdio[3].on('error',()=>{});
+    child.stdio[3].end(this.cap+'\n');child.stdin.end(JSON.stringify(request));
+    const [code]=await once(child,'close');if(code!==0)throw Error(`${command} failed: ${err}`);
+    return out;
+  }
+  claimRequest(){const b=this.state.batch;return {owner:b.claim_owner,token:b.claim_token,protection_id:b.protection_id,ids:b.claim_ids};}
+  deliveryContent(){const b=this.state.batch;return JSON.stringify({id:b.id,phase:b.phase,messages:b.delivery_messages||b.messages});}
+  async renew() {
+    if(this.deliveryMode!=='claims'||!this.state.batch)return;
+    if(this.renewing)return this.renewing;
+    this.renewing=this.delivery('renew',this.claimRequest());
+    try {await this.renewing;this.lastRenew=Date.now();} finally {this.renewing=null;}
+  }
+  async reconcile() {
+    if(this.deliveryMode!=='claims')return;
+    const b=this.state.batch;
+    const result=JSON.parse(await this.delivery('recover-batch',{batch_id:b.id,ids:b.messages.map(m=>m.id)}));
+    Object.assign(b,{original_ids:result.original_ids,already_read_ids:result.already_read_ids,claim_ids:result.claim_ids,
+      claim_token:result.claim_token,protection_id:result.protection_id,claim_expires_at:result.claim_expires_at,
+      claim_owner:this.owner,delivery_messages:result.messages});
+    if(!b.claim_ids.length){this.state.batch=null;delete this.state.recovery;}
+    this.save();
+  }
   save(){atomic(this.file,this.state);}
   log(text){console.log(`${new Date().toLocaleString('sv-SE',{timeZone:'Asia/Tokyo'})} JST ${this.role} ${this.phase} conversation=${this.state?.conversation_id||'-'} batch=${this.state?.batch?.id||'-'} ${text}`);}
   check() {
@@ -55,36 +92,54 @@ export class Bridge {
     const existing=[this.reservation,this.legacyReservation].filter(file=>fs.existsSync(file));
     if(existing.length>1) throw Error('multiple reservation formats exist');
     if(existing.length===1) {
-      const old=read(existing[0]);
+      const {reservation:old}=validateReservation(existing[0],this.team,this.role);
       try {if(proc(old.pid).start===old.start) throw Error('bridge is already running');} catch(e){if(e.code!=='ENOENT') throw e;}
       if(this.state.batch && this.state.batch.phase!=='completed' && !this.o.action) throw Error('unresolved batch: use status/resolve');
       if(old.state!==this.file) throw Error('a reservation exists for another project');
-      fs.unlinkSync(existing[0]);
+      this.previousReservation=old;
+    }
+    if(this.o.action) {
+      const b=this.state.batch;
+      if(!['ack','replay'].includes(this.o.action)||!b||b.id!==this.o.batch||!recoveryIdsMatch(b.messages.map(m=>m.id),this.o))throw Error('recovery batch or ID confirmation mismatch; use repeated --confirm-id for opaque IDs');
     }
     const modeFile=path.join(this.project,'.agent/rules/agmsg.md');
     if(!this.o.action && !fs.readFileSync(modeFile,'utf8').includes('<!-- agmsg:antigravity:monitor -->'))throw Error('monitor configuration is required');
     this.call('claim');
+    if(this.state.batch&&this.previousReservation)this.state.recovery={batch_id:this.state.batch.id,
+      ids:this.state.batch.messages.map(m=>m.id),pid:this.previousReservation.pid,start:this.previousReservation.start};
     this.state.owner=this.owner;this.save();
     // Create new reservations exclusively; reclaim a dead one only after actas is acquired.
     if(!fs.existsSync(this.violation)) fs.writeFileSync(this.violation,'',{flag:'wx',mode:0o600});
     fs.closeSync(fs.openSync(this.violation+'.lock','a',0o600));
     atomic(this.reservation,{type:'antigravity',owner:this.owner,pid:process.pid,start:this.start,state:this.file,actas:this.actas,violations:this.violation,capHash:createHash('sha256').update(this.cap).digest('hex')});
+    if(fs.existsSync(this.legacyReservation))fs.unlinkSync(this.legacyReservation);
     if(this.o.action) {
       const b=this.state.batch;
-      if(!b||b.id!==this.o.batch||b.messages.map(m=>m.id).join(',')!==this.o['confirm-ids']) throw Error('recovery batch or ID confirmation mismatch');
+      if(!b||b.id!==this.o.batch||!recoveryIdsMatch(b.messages.map(m=>m.id),this.o)) throw Error('recovery batch or ID confirmation mismatch; use repeated --confirm-id for opaque IDs');
       // Only explicit recovery clears the violation latch; model execution is limited to replay.
       fs.writeFileSync(this.violation,'',{mode:0o600});
+      this.deliveryMode=(await this.delivery('admit')).trim();
+      await this.reconcile();
+      if(!this.state.batch)return false;
       if(this.o.action==='ack') {b.phase='completed';this.save();await this.ack();return false;}
       if(this.o.action!=='replay') throw Error('action must be ack or replay');
       b.phase='prepared';this.save();this.replay=true;
-    } else if(this.state.batch) {
-      if(this.state.batch.phase!=='completed') throw Error('unresolved batch');
-      await this.ack();
+    } else {
+      this.deliveryMode=(await this.delivery('admit')).trim();
+      if(this.state.batch) {
+        if(this.state.batch.phase!=='completed') throw Error('unresolved batch');
+        await this.reconcile();
+        if(this.state.batch)await this.ack();
+      }
     }
     return true;
   }
   async ack() {
     this.check();this.phase='ACK_PENDING';
+    if(this.deliveryMode==='claims') {
+      await this.delivery('finish',this.claimRequest());
+      this.state.batch=null;delete this.state.recovery;this.save();this.phase='IDLE';return;
+    }
     const ids=this.state.batch.messages.map(m=>m.id);
     const c=spawn('bash',[transport,'ack',this.project,this.team,this.role,this.owner],{stdio:['pipe','pipe','pipe','pipe']});
     let err='';c.stderr.on('data',d=>err+=d);c.stdout.resume();c.stdin.on('error',()=>{});c.stdio[3].on('error',()=>{});
@@ -95,7 +150,10 @@ export class Bridge {
   async input(content,initial=false) {
     this.check();if(this.busy) throw Error('duplicate input');
     this.busy=true;this.phase=initial?'INITIALIZING':'BUSY';this.delta=false;
-    if(!initial) {this.state.batch.phase='sent';this.save();}
+    if(!initial) {
+      await this.delivery('admit');await this.renew();
+      this.state.batch.phase='sent';this.save();
+    }
     this.deadline=Date.now()+(initial?60000:330000);
     await new Promise((resolve,reject)=>this.child.stdin.write(JSON.stringify({event:'user',message:{content}})+'\n',error=>error?reject(error):resolve()));
   }
@@ -144,16 +202,21 @@ export class Bridge {
     if(e.result?.status!=='SUCCESS'||!this.state.conversation_id)throw Error(`unfinished result ${e.result?.status}`);
     if(!this.delta && e.result.response)console.log(e.result.response);
     const initial=this.phase==='INITIALIZING';this.busy=false;this.deadline=null;this.restarts=0;
-    if(!initial){this.state.batch.phase='completed';this.save();await this.ack();}
+    if(!initial){if(this.renewing)await this.renewing;this.state.batch.phase='completed';this.save();await this.ack();}
     this.phase='IDLE';this.log('ready');
-    if(initial&&this.replay){this.replay=false;await this.input(JSON.stringify(this.state.batch));}
+    if(initial&&this.replay){this.replay=false;await this.input(this.deliveryContent());}
   }
   async tick() {
     this.check();if(this.deadline&&Date.now()>this.deadline)throw Error('turn time exceeded');
+    if(this.state.batch&&['prepared','sent'].includes(this.state.batch.phase)&&this.deliveryMode==='claims'&&Date.now()-(this.lastRenew||0)>30000)await this.renew();
     if(this.busy||this.phase!=='IDLE')return;
     let rows;
-    try { rows=this.call('peek').trim(); }
+    try { rows=(this.deliveryMode==='claims'?await this.delivery('receive'):this.call('peek')).trim(); }
     catch(error) {
+      if(this.deliveryMode==='claims'&&/CHECK constraint failed: message_size_limit/.test(error.message)) {
+        this.fail(Error('message size limit exceeded'));return;
+      }
+      if(this.deliveryMode==='claims'&&/claims_active/.test(error.message))return;
       if((error.code==='PEEK_TRANSPORT'||error.code==='SIGNAL_TRANSPORT')&&!this.busy&&this.phase==='IDLE'&&!this.state?.batch) this.stop().catch(stopError=>console.error(stopError.message));
       else this.fail(error);
       return;
@@ -162,8 +225,13 @@ export class Bridge {
     if(!rows)return;
     const messages=rows.split('\n').map(JSON.parse);let bytes=0;const batch=[];
     for(const m of messages){const size=Buffer.byteLength(m.body);if(size>65536)throw Error(`message size limit exceeded id=${m.id}`);if(bytes+size>65536)break;bytes+=size;batch.push(m);}
-    this.state.batch={id:randomUUID(),phase:'prepared',messages:batch};this.save();
-    await this.input(JSON.stringify(this.state.batch));
+    this.state.batch={id:randomUUID(),phase:'prepared',messages:batch};
+    if(this.deliveryMode==='claims')Object.assign(this.state.batch,{claim_owner:this.owner,original_ids:batch.map(m=>m.id),
+      claim_ids:batch.map(m=>m.id),claim_token:batch[0].claim_token,protection_id:batch[0].protection_id,claim_expires_at:batch[0].claim_expires_at});
+    // Tokens stay in supervisor state; child input contains message fields only.
+    this.state.batch.messages=batch.map(({claim_token,claim_expires_at,protection_id,...message})=>message);
+    this.save();
+    await this.input(this.deliveryContent());
   }
   fail(error) {
     // An in-flight peek ending after SIGINT/SIGTERM is normal shutdown; do not
@@ -210,7 +278,11 @@ export class Bridge {
 const invokedPath=process.argv[1]&&fs.existsSync(process.argv[1])?fs.realpathSync(process.argv[1]):'';
 const modulePath=fs.realpathSync(fileURLToPath(import.meta.url));
 if(invokedPath===modulePath) {
-  const o={};for(let i=2;i<process.argv.length;i+=2){if(!process.argv[i].startsWith('--')||!process.argv[i+1])throw Error('arguments must use --key value');o[process.argv[i].slice(2)]=process.argv[i+1];}
+  const o={};for(let i=2;i<process.argv.length;i+=2){
+    if(!process.argv[i].startsWith('--')||!process.argv[i+1])throw Error('arguments must use --key value');
+    const key=process.argv[i].slice(2),value=process.argv[i+1];
+    if(key==='confirm-id')(o[key]??=[]).push(value);else o[key]=value;
+  }
   if(!o.project||!o.team||!o.name)throw Error('--project, --team, and --name are required');
   const b=new Bridge(o);
   if(o.command==='status')console.log(JSON.stringify(fs.existsSync(b.file)?read(b.file):{status:'not started'},null,2));
