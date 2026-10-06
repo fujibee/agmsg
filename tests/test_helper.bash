@@ -48,7 +48,17 @@ setup_test_env() {
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
   unset CLAUDE_CONFIG_DIR
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
-  export TEST_SKILL_DIR="$(mktemp -d)"
+  # Saved ONCE (first call wins, via :=): a test that calls teardown_test_env
+  # and then setup_test_env again within its OWN body (several in
+  # test_remote.bats do, to re-enter with a different fixture) would
+  # otherwise have this SECOND call's `mktemp -d` run under the FIRST call's
+  # already-overridden TMPDIR (set below) -- pointed inside the very
+  # TEST_SKILL_DIR teardown just removed, so it fails outright. Always
+  # create TEST_SKILL_DIR under the REAL root, never under whatever TMPDIR
+  # setup_test_env itself last left behind.
+  : "${AGMSG_TEST_REAL_TMPDIR:=${TMPDIR:-/tmp}}"
+  export AGMSG_TEST_REAL_TMPDIR
+  export TEST_SKILL_DIR="$(TMPDIR="$AGMSG_TEST_REAL_TMPDIR" mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
   # Copy all scripts to isolated skill dir. Recursive so nested helper dirs
@@ -78,6 +88,27 @@ setup_test_env() {
   # export is scoped to the test and needs no restore. See #41.
   export HOME="$TEST_SKILL_DIR/home"
   mkdir -p "$HOME"
+
+  # Same reasoning as HOME above, now needed for a second path: doctor.sh's
+  # leaked-outcome-file check (#1572 cleanup) scans ${TMPDIR:-/tmp} directly,
+  # installation-wide, by design -- a bare `mktemp` always lands there
+  # regardless of SKILL_DIR. Without this, every test that does not already
+  # set its own TMPDIR would have that check see whatever is really in the
+  # developer's or CI runner's own temp directory at that moment (on a
+  # machine where the real leak this exists for is still happening, that is
+  # not empty), making unrelated tests fail for a reason that has nothing to
+  # do with what they test.
+  #
+  # A SIBLING of TEST_SKILL_DIR under the real root, not a subdirectory of
+  # it: several tests build their own fixture (a "project" dir, typically)
+  # with a bare `mktemp -d`, and more than one of those compares that path
+  # against SKILL_DIR to tell "this install's own files" apart from "a
+  # project's own" -- nesting TMPDIR inside TEST_SKILL_DIR put every such
+  # fixture inside the skill's own tree too, so those tests saw their own
+  # project as part of the skill. #1038's delivery test is the one CI
+  # caught; there may be others the same way, hence the sibling instead.
+  export AGMSG_TEST_TMPDIR="$(TMPDIR="$AGMSG_TEST_REAL_TMPDIR" mktemp -d)"
+  export TMPDIR="$AGMSG_TEST_TMPDIR"
 }
 
 # PIDs (one per line, this shell excluded) whose command line references <dir>.
@@ -179,6 +210,13 @@ _actas_session_path() {   # <team> <agent>
 }
 
 teardown_test_env() {
+  # Belt and braces alongside setup_test_env's own fix above: put TMPDIR back
+  # to the real root before removing AGMSG_TEST_TMPDIR (where this test's
+  # TMPDIR pointed) and TEST_SKILL_DIR, so nothing run between this teardown
+  # and a later setup -- in this test or, if a suite ever stopped resetting
+  # it per test, a later one -- reads a TMPDIR that no longer exists.
+  [ -n "${AGMSG_TEST_REAL_TMPDIR:-}" ] && export TMPDIR="$AGMSG_TEST_REAL_TMPDIR"
+  [ -n "${AGMSG_TEST_TMPDIR:-}" ] && rm -rf "$AGMSG_TEST_TMPDIR" 2>/dev/null
   # Try the plain rm FIRST, and only reap when it actually fails. The reaper's scan is a
   # full `ps -eo pid=,args=`; running it in EVERY teardown would add that cost to all of
   # the (vast majority of) tests that hold nothing — across the suite's hundreds of tests
