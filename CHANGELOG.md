@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 - Ask before creating a team when remote is in use; point at delete and update (#1574)
 
+### If you use remote sync and are already affected
+Check whether you use remote sync: `~/.agents/skills/agmsg/scripts/remote.sh status` lists each team, and only teams shown as `connected` are affected.
+
+If your temp directory is already full (on Linux, commands fail with "No space left on device" even though the disk has room), free it before updating. This removes only files that match the leaked files exactly: directly in the temp directory, named `tmp.` plus 10 characters, exactly 3 bytes containing the line `ok`, and older than 10 minutes:
+
+```sh
+find "${TMPDIR:-/tmp}" -maxdepth 1 -type f -name 'tmp.??????????' -size 3c -mmin +10 -print0 | xargs -0 grep -lx --null ok | xargs -0 rm -f
+```
+
+Then update with `npx agmsg@latest install --update`, which removes the rest. Afterwards, `doctor` reports any that remain and `doctor --fix` removes them.
+
 [1.5.3]: https://github.com/fujibee/agmsg/compare/v1.5.2...v1.5.3
 
 ## [1.5.2] - 2026-10-02
