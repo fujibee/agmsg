@@ -442,6 +442,12 @@ The message store is effectively a replay log. There's no one-shot "rehydrate fr
 ## Update
 
 ```bash
+npx agmsg@latest install --update      # add --cmd <name> if you have more than one install
+```
+
+From a clone:
+
+```bash
 cd agmsg
 git pull
 ./install.sh --update

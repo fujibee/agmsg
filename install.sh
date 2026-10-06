@@ -51,6 +51,8 @@ agmsg_load_renderable_skill_types
 # so the two cannot silently disagree about which files exist again.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/codex-config.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/stale-outcome-files.sh"
 
 # Types that already get their OWN dedicated skill file, written elsewhere in
 # this script -- always in that type's own format, unconditionally, gated
@@ -1183,6 +1185,16 @@ $_agmsg_running_team"
   agmsg_install_op_run_phase agmsg_install_write_version || exit 1
   echo "  + updated scripts, templates, and SKILL.md (version $INSTALLED_VERSION)"
   echo "  ~ DB and team configs preserved"
+  # #1572 fixed the leak; this sweeps up whatever an install made before
+  # that fix already left behind. Unconditional on every --update rather
+  # than gated on a once-only marker: once a cleaned install's temp
+  # directory holds none of these, the scan below finds nothing and costs
+  # one quick `find`, so there is no ongoing cost to running it again --
+  # see stale-outcome-files.sh for the full match criteria.
+  AGMSG_STALE_OUTCOME_REMOVED="$(agmsg_stale_outcome_candidates | agmsg_remove_stale_outcome_files)"
+  if [ "${AGMSG_STALE_OUTCOME_REMOVED:-0}" -gt 0 ]; then
+    echo "  + removed $AGMSG_STALE_OUTCOME_REMOVED leaked sync outcome file(s) from before #1572"
+  fi
   agmsg_install_op_run_phase configure_codex_sandbox || exit 1
   echo ""
   echo "  ! Restart any running agent sessions to pick up the updated scripts."

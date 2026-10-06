@@ -654,3 +654,56 @@ configured_off() {
   [ -d "$TEST_SKILL_DIR/teams/team/.config.lock" ]          # names its holder: kept
   [ -f "$TEST_SKILL_DIR/teams/team/.config.lock.holder" ]
 }
+
+# --- leaked storage sync driver outcome files (#1572) ----------------------
+
+@test "doctor: reports and removes only the storage sync driver's leaked outcome files, never another tool's temp file (#1572)" {
+  local tmp_dir="$TEST_SKILL_DIR/tmp"
+  mkdir -p "$tmp_dir/sub"
+
+  # Should be removed: right location, right name, right content, old enough.
+  printf 'ok\n' > "$tmp_dir/tmp.AAAAAAAAAA"
+  printf 'busy\n' > "$tmp_dir/tmp.BBBBBBBBBB"
+  printf 'failed\n' > "$tmp_dir/tmp.CCCCCCCCCC"
+  touch -t 202001010000 "$tmp_dir"/tmp.AAAAAAAAAA "$tmp_dir"/tmp.BBBBBBBBBB "$tmp_dir"/tmp.CCCCCCCCCC
+
+  # Should survive: each wrong on exactly one of the four conditions.
+  printf 'ok\n' > "$tmp_dir/tmp.DDDDDDDDDD"      # too new (not backdated)
+  printf 'nope\n' > "$tmp_dir/tmp.EEEEEEEEEE"    # wrong content
+  touch -t 202001010000 "$tmp_dir/tmp.EEEEEEEEEE"
+  printf 'ok\n' > "$tmp_dir/tmp.short"            # wrong name shape
+  touch -t 202001010000 "$tmp_dir/tmp.short"
+  printf 'ok\n' > "$tmp_dir/sub/tmp.FFFFFFFFFF"  # right everything, wrong location (subdirectory)
+  touch -t 202001010000 "$tmp_dir/sub/tmp.FFFFFFFFFF"
+  printf 'ok\n\0' > "$tmp_dir/tmp.GGGGGGGGGG"    # "ok\n" plus a trailing NUL -- 4 bytes, not 3
+  touch -t 202001010000 "$tmp_dir/tmp.GGGGGGGGGG"
+  printf 'ok\n\0\0' > "$tmp_dir/tmp.HHHHHHHHHH"  # "ok\n" plus two trailing NULs -- 5 bytes
+  touch -t 202001010000 "$tmp_dir/tmp.HHHHHHHHHH"  # (busy's size), but reads back as "ok", not "busy"
+
+  run env TMPDIR="$tmp_dir" bash "$SCRIPTS/doctor.sh"
+  [ "$status" -eq 1 ]
+  grep -qF 'leaked storage sync driver outcome files' <<<"$output"
+  grep -qF '(3):' <<<"$output"
+  grep -qF "$tmp_dir/tmp.AAAAAAAAAA" <<<"$output"
+  grep -qF "$tmp_dir/tmp.BBBBBBBBBB" <<<"$output"
+  grep -qF "$tmp_dir/tmp.CCCCCCCCCC" <<<"$output"
+  [ -z "$(grep -F 'tmp.DDDDDDDDDD' <<<"$output")" ]
+  [ -z "$(grep -F 'tmp.EEEEEEEEEE' <<<"$output")" ]
+  [ -z "$(grep -F 'tmp.short' <<<"$output")" ]
+  [ -z "$(grep -F 'tmp.FFFFFFFFFF' <<<"$output")" ]
+  [ -z "$(grep -F 'tmp.GGGGGGGGGG' <<<"$output")" ]
+  [ -z "$(grep -F 'tmp.HHHHHHHHHH' <<<"$output")" ]
+  [ -f "$tmp_dir/tmp.AAAAAAAAAA" ]   # reporting deletes nothing
+
+  run env TMPDIR="$tmp_dir" bash "$SCRIPTS/doctor.sh" --fix --yes
+  [ "$status" -eq 0 ]
+  [ ! -e "$tmp_dir/tmp.AAAAAAAAAA" ]
+  [ ! -e "$tmp_dir/tmp.BBBBBBBBBB" ]
+  [ ! -e "$tmp_dir/tmp.CCCCCCCCCC" ]
+  [ -f "$tmp_dir/tmp.DDDDDDDDDD" ]
+  [ -f "$tmp_dir/tmp.EEEEEEEEEE" ]
+  [ -f "$tmp_dir/tmp.short" ]
+  [ -f "$tmp_dir/sub/tmp.FFFFFFFFFF" ]
+  [ -f "$tmp_dir/tmp.GGGGGGGGGG" ]
+  [ -f "$tmp_dir/tmp.HHHHHHHHHH" ]
+}
