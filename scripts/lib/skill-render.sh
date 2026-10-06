@@ -118,9 +118,16 @@ agmsg_render_skill() {
     return 1
   fi
   chmod 644 "$temp" || { rm -f "$temp"; return 1; }
+  if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ] && ! agmsg_install_op_require; then
+    rm -f "$temp"
+    return 1
+  fi
   if ! mv -f "$temp" "$output"; then
     rm -f "$temp"
     echo "agmsg: cannot install rendered skill: $output" >&2
+    return 1
+  fi
+  if [ "${AGMSG_INSTALL_OP_ACTIVE:-false}" = true ] && ! agmsg_install_op_require; then
     return 1
   fi
 }
