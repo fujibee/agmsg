@@ -96,6 +96,11 @@ commit_parsers = [
 { message = "^sync-cipher: tolerate unknown message fields on receive", group = "<!-- 1 -->Fixed" },
 { message = "^codex: one app-server per seat, never shared", group = "<!-- 1 -->Fixed" },
 { message = "^plain driver: an agent-native substitute for peek/poke with no pane", group = "<!-- 0 -->Added" },
+# 1.6.0 agmsgd beta: squash subjects without a conventional prefix.
+{ message = "^agmsgd beta: skeleton", group = "<!-- 0 -->Added" },
+{ message = "^Add Codex queue delivery and seat status", group = "<!-- 0 -->Added" },
+{ message = "^Add daemon beta switching and recovery guidance", group = "<!-- 0 -->Added" },
+{ message = "^Allow Windows Codex queue from the measured minimum release", group = "<!-- 0 -->Added" },
   # 1.4.0's jev work was squashed with a "jev:" subject rather than a
   # Conventional prefix, so the catch-all below would drop it — including the
   # second provider, the most user-visible jev change in the release. Same
