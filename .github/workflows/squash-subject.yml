@@ -1,0 +1,53 @@
+# The subject a squash merge will write must match a cliff.toml rule.
+#
+# This repository squashes every PR with squash_merge_commit_title set to
+# COMMIT_OR_PR_TITLE: a one-commit PR lands under its commit's subject, a
+# larger one under the PR title (measured, see the script's header). A subject
+# that matches none of cliff.toml's commit parsers falls to the catch-all and
+# is silently absent from the release notes without anyone having decided
+# that; it has happened to a headline feature (1.1.7) and to four more
+# landings on the 1.3.0 integration branch. A subject a skip rule matches is
+# left out on purpose and passes. This runs the check on the subject that
+# would actually land.
+#
+# `edited` is in the event types on purpose: a PR title is fixed by editing it,
+# and without `edited` the fix would never be re-checked (nor would a title
+# broken after the last push). The other types are the defaults plus
+# ready_for_review, spelled out because naming `edited` replaces the default
+# list rather than adding to it.
+#
+# This is its own workflow rather than a job in tests.yml because `edited`
+# would otherwise re-run the whole test matrix on every title edit.
+
+name: squash-subject
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+    branches: [main, 'integration/**']
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: squash subject matches a cliff.toml rule
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The PR head itself, not the merge ref: for a one-commit PR the script
+      # reads that commit's subject from git, and the merge ref's parents are
+      # not present at depth 1.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: The subject that would land matches a cliff.toml rule (keep or deliberate skip)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          .github/scripts/check-squash-subject.sh \
+            --title "$PR_TITLE" --commits "$PR_COMMITS" --head "$HEAD_SHA"
