@@ -258,6 +258,130 @@ if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/n
   done
 fi
 
+source "$SCRIPT_DIR/lib/delivery-reader.sh"
+agmsg_reader_init hook
+if [ "${AGMSG_READER_CLAIMS?reader state missing}" -eq 1 ]; then
+  CLAIM_TEAMS=(); CLAIM_BATCHES=(); CLAIM_OWNERS=(); CLAIM_TEXTS=(); CLAIM_METADATA=()
+  LOOP_RC=0; LOOP_FAILED_TEAM=""
+  for team in "${TEAM_LIST[@]}"; do
+    storage_store_exists "$team" || continue
+    _rc=0
+    agmsg_reader_role_observe "$team" "$AGENT" "${SESSION_ID:-}" || _rc=$?
+    [ "$_rc" -ne 1 ] || continue
+    if [ "$_rc" -ne 0 ]; then
+      LOOP_RC=$_rc; LOOP_FAILED_TEAM="$team"; break
+    fi
+    _owner="${AGMSG_READER_ROLE_OWNER?reader role state missing}"
+    if [ "$EVENT" = PostToolUse ]; then
+      RESULT="$(agmsg_delivery_list_deliverable "$team" "$AGENT" --limit 1000)" || _rc=$?
+      _claimed=0
+    else
+      RESULT="$(agmsg_reader_claim "$team" "$AGENT")" || _rc=$?
+      _claimed=1
+    fi
+    if [ "$_rc" -ne 0 ]; then
+      LOOP_RC=$_rc; LOOP_FAILED_TEAM="$team"; break
+    fi
+    [ -n "$RESULT" ] || continue
+    if ! agmsg_reader_parse "$RESULT" inbox "$_claimed" "$team" "$AGENT"; then
+      [ "$_claimed" -eq 0 ] || agmsg_reader_release "$team" "$AGENT" "$RESULT"
+      LOOP_RC=13; LOOP_FAILED_TEAM="$team"; break
+    fi
+    _text="${#AGMSG_READER_IDS[@]} new message(s) in $team:"$'\n'"${AGMSG_READER_TEXT?reader state missing}"$'\n'
+    if ! _text="$(agmsg_reader_json_quote "$_text")"; then
+      [ "$_claimed" -eq 0 ] || agmsg_reader_release "$team" "$AGENT" "$RESULT"
+      LOOP_RC=13; LOOP_FAILED_TEAM="$team"; break
+    fi
+    # Store escaped fragments without their outer quotes; joining them later
+    # is pure shell work, so large-body JSON formatting precedes renewal.
+    _text="${_text#\"}"; _text="${_text%\"}"
+    CLAIM_TEAMS+=("$team")
+    CLAIM_BATCHES+=("$RESULT")
+    CLAIM_METADATA+=("${AGMSG_READER_METADATA?reader metadata missing}")
+    CLAIM_OWNERS+=("$_owner")
+    CLAIM_TEXTS+=("$_text")
+  done
+
+  # Format before renewing. A later team's failure never discards a prepared
+  # earlier payload. No IDs are joined/split on whitespace at any boundary.
+  OUTPUT=""
+  for ((_i=0; _i<${#CLAIM_TEAMS[@]}; _i++)); do
+    OUTPUT+="${CLAIM_TEXTS[$_i]}"
+  done
+  if [ -n "$OUTPUT" ]; then
+    if ! agmsg_reader_barrier; then
+      for ((_i=0; _i<${#CLAIM_TEAMS[@]}; _i++)); do
+        [ "$EVENT" = PostToolUse ] ||
+          agmsg_reader_release_metadata "${CLAIM_TEAMS[$_i]}" "$AGENT" "${CLAIM_METADATA[$_i]}"
+      done
+      exit 13
+    fi
+    # A failed renewal/ownership recheck is definitely NOT_SENT. Drop only that
+    # set, release what we still own, and keep other teams' prepared deliveries.
+    OUTPUT=""
+    for ((_i=0; _i<${#CLAIM_TEAMS[@]}; _i++)); do
+      team="${CLAIM_TEAMS[$_i]}"
+      _rc=0
+      agmsg_reader_role_matches "$team" "$AGENT" "${CLAIM_OWNERS[$_i]}" || _rc=$?
+      if [ "$_rc" -eq 0 ] && [ "$EVENT" != PostToolUse ]; then
+        agmsg_reader_control_metadata renew "$team" "$AGENT" "${CLAIM_METADATA[$_i]}" || _rc=$?
+      fi
+      if [ "$_rc" -ne 0 ]; then
+        [ "$EVENT" = PostToolUse ] ||
+          agmsg_reader_release_metadata "$team" "$AGENT" "${CLAIM_METADATA[$_i]}"
+        CLAIM_BATCHES[$_i]=""
+        LOOP_RC=13; LOOP_FAILED_TEAM="$team"
+        continue
+      fi
+      OUTPUT+="${CLAIM_TEXTS[$_i]}"
+    done
+  fi
+  if [ -n "$OUTPUT" ]; then
+    if [ "$LOOP_RC" -ne 0 ]; then
+      # Team names are validated, but still quote this small diagnostic using
+      # the same JSON encoder as payload text.
+      _note="agmsg: this poll stopped early — team '$LOOP_FAILED_TEAM' could not be delivered (status $LOOP_RC)."$'\n'
+      _note+="agmsg: omitted messages stay unread and will be offered again."$'\n'
+      if _note="$(agmsg_reader_json_quote "$_note")"; then
+        _note="${_note#\"}"; _note="${_note%\"}"
+        OUTPUT+="$_note"
+      else
+        # A diagnostic encoding failure must not discard prepared delivery.
+        OUTPUT+='agmsg: partial poll; omitted messages remain unread.\n'
+      fi
+    fi
+    ESCAPED="\"$OUTPUT\""
+    if [ "$EVENT" = PostToolUse ]; then
+      if [ "$POSTTOOL_OUTPUT" = hookSpecificOutput ]; then
+        printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":%s}}\n' "$ESCAPED" || EMIT_RC=$?
+      fi
+    else
+      printf '{\n  "decision": "block",\n  "reason": %s\n}\n' "$ESCAPED" || EMIT_RC=$?
+    fi
+    if [ -n "${AGMSG_TEST_MARK_BARRIER:-}" ]; then
+      printf '%s\n' "$EMIT_RC" > "$AGMSG_TEST_MARK_BARRIER.emitted"
+    fi
+    if [ "$EVENT" != PostToolUse ]; then
+      if [ "$EMIT_RC" -eq 0 ]; then
+        for ((_i=0; _i<${#CLAIM_TEAMS[@]}; _i++)); do
+          [ -n "${CLAIM_BATCHES[$_i]}" ] || continue
+          if ! agmsg_reader_control_metadata ack "${CLAIM_TEAMS[$_i]}" "$AGENT" "${CLAIM_METADATA[$_i]}"; then
+            printf 'agmsg: emitted hook payload but its read state is uncertain; redelivery is possible after reservation expiry.\n' >&2
+          fi
+        done
+      else
+        printf 'agmsg: hook write outcome is unknown; reservations retained until expiry, after which redelivery is possible.\n' >&2
+      fi
+    fi
+    # Hook runtimes can discard a nonzero result, including successfully
+    # emitted partial output. Preserve the established delivering exit status.
+    exit 0
+  fi
+  [ "$LOOP_RC" -eq 0 ] || exit "$LOOP_RC"
+  emit_status_json "agmsg: no new messages"
+  exit 0
+fi
+
 OUTPUT=""
 # Ids that have been FORMATTED but not yet written out: one "team<TAB>id id id"
 # entry per team. They become read only after the payload leaves this process.

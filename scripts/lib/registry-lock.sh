@@ -26,7 +26,7 @@
 # Newline-separated set of lock dirs this process currently holds.
 AGMSG_HELD_LOCKS="${AGMSG_HELD_LOCKS:-}"
 
-# agmsg_lock_acquire <team_dir>
+# agmsg_lock_acquire <team_dir> [manual-recovery]
 # Acquire <team_dir>'s lock. <team_dir> (teams/<team>) must already exist — the
 # caller creates it for a brand-new/target team before locking, so this never
 # resurrects a team dir that a concurrent leave/reset just removed. Spins with a
@@ -127,9 +127,23 @@ _agmsg_lock_same_host() {
 # process waits and reports contention instead of breaking a lock whose number
 # now belongs to a stranger. Fencing the number with a start time is the third
 # piece of #865 and is not in this change.
+# Maintenance transforms can leave a mutating foreground child behind when
+# their shell is killed. A dead shell alone cannot authorize their recovery.
+# Any explicit recovery record is conservative, including unknown/duplicate
+# values: an older reader must never guess that an unfamiliar policy is auto.
+_agmsg_lock_manual_recovery() {
+  local record="$1" line
+  [ -f "$record" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in recovery|recovery\ *) return 0 ;; esac
+  done < "$record"
+  return 1
+}
+
 _agmsg_lock_holder_gone() {
   local lock="$1" pid host
   [ -f "$lock.holder" ] || return 1
+  _agmsg_lock_manual_recovery "$lock.holder" && return 1
   _agmsg_lock_load_liveness || return 1
   pid="$(sed -n 's/^pid //p' "$lock.holder" 2>/dev/null | head -1)"
   host="$(sed -n 's/^host //p' "$lock.holder" 2>/dev/null | head -1)"
@@ -167,6 +181,12 @@ _agmsg_lock_break_dead() {
   local lock="$1" claimed="$1.dead.$$.${RANDOM:-0}" pid host
   _agmsg_lock_load_liveness || return 1
   mv "$lock.holder" "$claimed" 2>/dev/null || return 1
+  # The record may have changed since the cheap holder check. Judge the
+  # claimed record, while the directory still excludes a successor.
+  if _agmsg_lock_manual_recovery "$claimed"; then
+    mv "$claimed" "$lock.holder" 2>/dev/null || true
+    return 1
+  fi
   pid="$(sed -n 's/^pid //p' "$claimed" 2>/dev/null | head -1)"
   host="$(sed -n 's/^host //p' "$claimed" 2>/dev/null | head -1)"
   if ! _agmsg_pid_valid "$pid" 2147483647 || ! _agmsg_lock_same_host "$host" || _agmsg_pid_alive_local "$pid"; then
@@ -189,6 +209,12 @@ _agmsg_lock_break_dead() {
 }
 
 agmsg_lock_acquire() {
+  if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] ||
+     { [ "$#" -eq 2 ] && [ "$2" != manual-recovery ]; }; then
+    echo "agmsg: usage: agmsg_lock_acquire <team_dir> [manual-recovery]" >&2
+    return 1
+  fi
+  local recovery="${2:-auto}"
   local team_dir="$1" lock i=0 max="${AGMSG_LOCK_TRIES:-1000}" err=""
   local budget="${AGMSG_LOCK_SECONDS:-10}" started elapsed
   local tpid thost q
@@ -265,7 +291,10 @@ agmsg_lock_acquire() {
         # review).
         tpid="$(sed -n 's/^pid //p' "$lock.holder" 2>/dev/null | head -1)"
         thost="$(sed -n 's/^host //p' "$lock.holder" 2>/dev/null | head -1)"
-        if ! _agmsg_lock_load_liveness; then
+        if _agmsg_lock_manual_recovery "$lock.holder"; then
+          echo "agmsg: this maintenance lock requires manual recovery; its shell may have left mutating child processes running." >&2
+          echo "agmsg: verify the recorded process AND all its descendants are stopped before removing this exact lock and retrying the same operation." >&2
+        elif ! _agmsg_lock_load_liveness; then
           echo "agmsg: the liveness check could not be loaded, so nothing here could ask whether it is held." >&2
         elif ! _agmsg_pid_valid "$tpid" 2147483647; then
           echo "agmsg: that record names no usable pid, so nothing here could ask whether it is held." >&2
@@ -339,31 +368,60 @@ agmsg_lock_acquire() {
   if [ -n "$nonce" ]; then
     _agmsg_lock_set_token "$lock" "${HOSTNAME:-h}.$$.$(date +%s).$nonce"
   fi
-  {
-    printf 'token %s\n' "$(_agmsg_lock_get_token "$lock")"
-    printf 'pid %s\n' "$$"
-    printf 'command %s\n' "${0##*/}"
-    printf 'host %s\n' "${HOSTNAME:-$(uname -n 2>/dev/null || echo unknown)}"
-  } > "$lock.holder" 2>/dev/null || true
+  if [ "$recovery" = manual-recovery ]; then
+    # The marker precedes every usable pid. Stop on the first failed write:
+    # never publish a recoverable pid without its manual-recovery policy.
+    # Failure retains the lock and aborts before any transform work starts.
+    if ! {
+      printf 'recovery manual\n' &&
+      printf 'token %s\n' "$(_agmsg_lock_get_token "$lock")" &&
+      printf 'pid %s\n' "$$" &&
+      printf 'command %s\n' "${0##*/}" &&
+      printf 'host %s\n' "${HOSTNAME:-$(uname -n 2>/dev/null || echo unknown)}"
+    } > "$lock.holder" 2>/dev/null; then
+      echo "agmsg: cannot record the maintenance lock policy; refusing to start the operation" >&2
+      return 1
+    fi
+  else
+    {
+      printf 'token %s\n' "$(_agmsg_lock_get_token "$lock")"
+      printf 'pid %s\n' "$$"
+      printf 'command %s\n' "${0##*/}"
+      printf 'host %s\n' "${HOSTNAME:-$(uname -n 2>/dev/null || echo unknown)}"
+    } > "$lock.holder" 2>/dev/null || true
+  fi
   AGMSG_HELD_LOCKS="${AGMSG_HELD_LOCKS:+$AGMSG_HELD_LOCKS
 }$lock"
   # Idempotent: re-arming the same handlers each acquire is harmless.
   #
-  # WHAT THEY COVER, AND WHAT THEY DO NOT. These release every lock this process
-  # holds, so an ordinary exit or a Ctrl-C leaves nothing behind. `SIGKILL`, an
-  # OOM kill and the machine going down run no trap at all, and the lock stays.
-  # This sentence used to end at "a crash leaves no stale lock", with no
-  # qualifier, so the next reader believed crashes were covered — and the crash
-  # that is not covered is the one #865 was reported from. What covers it is the
-  # staleness check in the loop above, not this.
-  # EXIT releases only. INT/TERM release AND exit, so a signal arriving between
-  # commands in a critical section can't release the lock and then let the script
-  # continue into an unprotected config move/write (matters for 2-lock
-  # rename-team). NOTE: no current registry writer sets its own trap; a future
-  # caller that does must chain these in.
-  trap 'agmsg_lock_release' EXIT
-  trap 'agmsg_lock_release; exit 130' INT
-  trap 'agmsg_lock_release; exit 143' TERM
+  # Ordinary registry writers release on exit. A failed maintenance wrapper
+  # may leave a mutating descendant alive, even with foreground-only commands.
+  # Its manual locks therefore require explicit release after proven success
+  # or operator verification of the holder AND descendants. Signals exit and
+  # run the same EXIT cleanup; custom EXIT handlers must chain that cleanup.
+  trap 'agmsg_lock_cleanup' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+# Trap cleanup is deliberately weaker than explicit successful release.
+# Read the immutable holder policy; a missing/unreadable holder cannot pass
+# _agmsg_lock_drop's token check, so uncertain ownership is also retained.
+agmsg_lock_cleanup() {
+  local l kept=""
+  while IFS= read -r l; do
+    [ -n "$l" ] || continue
+    if _agmsg_lock_manual_recovery "$l.holder"; then
+      kept="${kept:+$kept
+}$l"
+      echo "agmsg: maintenance lock retained; verify the holder and all descendants have stopped before manual recovery" >&2
+    else
+      _agmsg_lock_drop "$l" || true
+    fi
+  done <<EOF
+${AGMSG_HELD_LOCKS:-}
+EOF
+  AGMSG_HELD_LOCKS="$kept"
 }
 
 # agmsg_lock_release

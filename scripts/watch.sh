@@ -66,6 +66,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
+source "$SCRIPT_DIR/lib/delivery-reader.sh"
+agmsg_reader_init watch || exit 13
 # Warm agmsg_storage_dir's own process-lifetime cache as a PLAIN STATEMENT,
 # not via $(...): every real caller (agmsg_db_path -> ... -> _agmsg_db_file)
 # reaches it through at least one command substitution of its own, and a
@@ -1201,6 +1203,191 @@ _watch_renew_or_stop() {
   exit 0
 }
 
+# Release only a validated subset which has not been handed to stdout. An
+# empty tail is normal; an uncertain attempted subset must never reach here.
+_watch_release_unattempted() {
+  [ -n "$1" ] || return 0
+  agmsg_reader_release_metadata "$pair_team" "$pair_agent" "$1"
+}
+
+# Prepared handoff shared by a normal group and a control-containing group's
+# serial rows. Return 10 to stop this pair, 99 for an uncertain stdout write,
+# or the public unhealthy status for a preparation failure.
+_watch_claimed_handoff() {
+  local payload="$1" metadata="$2" pending="$3" tail="$4" count="$5" control="$6"
+  local verdict=0 emit_rc=0
+  if ! agmsg_reader_barrier; then
+    _watch_release_unattempted "$pending"
+    return "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+  fi
+  _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || verdict=$?
+  if [ "$verdict" -ne 0 ]; then
+    _watch_release_unattempted "$pending"
+    _report_pair_refusal "$verdict" "$pair_team" "$pair_agent" delivery
+    return 10
+  fi
+  # Renew the untouched tail too: serial control handling must not let its
+  # later rows expire while earlier rows are being handed off.
+  if ! agmsg_reader_control_metadata renew "$pair_team" "$pair_agent" "$pending"; then
+    _watch_release_unattempted "$pending"
+    watch_report "$pair_team/$pair_agent: delivery reservation could not be renewed; nothing was sent."
+    return 10
+  fi
+  verdict=0
+  _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || verdict=$?
+  if [ "$verdict" -ne 0 ]; then
+    _watch_release_unattempted "$pending"
+    _report_pair_refusal "$verdict" "$pair_team" "$pair_agent" delivery
+    return 10
+  fi
+  if [ "$control" = true ]; then
+    # Consume a control before process actions, including broad watchers
+    # consuming without acting. This is not a completion acknowledgement.
+    if ! agmsg_reader_wait_barrier "${AGMSG_TEST_CONSUME_BARRIER:-}"; then
+      _watch_release_unattempted "$pending"
+      return 10
+    fi
+    verdict=0
+    _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || verdict=$?
+    if [ "$verdict" -ne 0 ]; then
+      _watch_release_unattempted "$pending"
+      _report_pair_refusal "$verdict" "$pair_team" "$pair_agent" "its ctrl:despawn acknowledgement"
+      return 10
+    fi
+    if ! agmsg_reader_control_metadata ack "$pair_team" "$pair_agent" "$metadata"; then
+      _watch_release_unattempted "$tail"
+      watch_report "$pair_team/$pair_agent: control acknowledgement failed; teardown was not attempted."
+      return 10
+    fi
+    if [ -n "$ACTIVE_NAME" ] && [ "$pair_agent" = "$ACTIVE_NAME" ]; then
+      despawn_target="$pair_agent"
+      # The control is already accepted. Failure to release untouched later
+      # messages leaves their leases to expire; it cannot postpone teardown.
+      _watch_release_unattempted "$tail"
+      return 10
+    fi
+    return 0
+  fi
+  printf '%s' "$payload" || emit_rc=$?
+  if [ "$emit_rc" -ne 0 ]; then
+    # Darwin stdio can retain bytes after a failed write. Bash 3.2 even
+    # flushes stdout during printf -v, so drain to a private sink before
+    # decoding tail IDs or redirecting stdout into a diagnostic. Use a
+    # nonempty format: printf '' can return without flushing. If the drain
+    # itself fails, keep every lease and stop without risking another write.
+    printf '%s' '' >/dev/null || return 99
+    _watch_release_unattempted "$tail"
+    watch_log "$pair_team/$pair_agent: write outcome UNKNOWN; keeping the reservation until expiry. Later redelivery is possible."
+    return 99
+  fi
+  _WATCH_DELIVERED=$((_WATCH_DELIVERED + count))
+  if ! agmsg_reader_wait_barrier "${AGMSG_TEST_CONSUME_BARRIER:-}"; then
+    _watch_release_unattempted "$tail"
+    return 10
+  fi
+  verdict=0
+  _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || verdict=$?
+  if [ "$verdict" -ne 0 ]; then
+    _watch_release_unattempted "$tail"
+    _report_pair_refusal "$verdict" "$pair_team" "$pair_agent" "acknowledgement (write accepted; reservation retained until expiry)"
+    return 10
+  fi
+  if ! agmsg_reader_control_metadata ack "$pair_team" "$pair_agent" "$metadata"; then
+    _watch_release_unattempted "$tail"
+    watch_report "$pair_team/$pair_agent: output was written but read acknowledgement is uncertain; redelivery is possible after reservation expiry."
+    return 10
+  fi
+}
+
+# A later row may be delivered while an earlier one is leased elsewhere; only
+# exact-ID ACK advances the gap-safe frontier. Amortize claim/parse/control work
+# over 32-row groups, retaining the 1000-row per-pair/cycle fairness boundary.
+_watch_claimed_pair() {
+  local jsonl n=0 limit count rows payload metadata token remaining_ids pending tail
+  local idh fromh bodyh tsh teamh toh tokenh body from ts team to
+  local group_kind control rc stop_pair=0 verdict despawn_target=""
+  while [ "$n" -lt 1000 ]; do
+    limit=$((1000 - n))
+    [ "$limit" -le 32 ] || limit=32
+    if ! jsonl="$(agmsg_reader_claim "$pair_team" "$pair_agent" "$limit")"; then
+      watch_report "$pair_team/$pair_agent: delivery reservation failed; read state is unknown. Restart to retry."
+      return "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+    fi
+    [ -n "$jsonl" ] || break
+    if ! agmsg_reader_parse "$jsonl" watch-group 1 "$pair_team" "$pair_agent"; then
+      agmsg_reader_release "$pair_team" "$pair_agent" "$jsonl"
+      watch_report "$pair_team/$pair_agent: delivery preparation failed; message remains unread."
+      return "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+    fi
+    payload="${AGMSG_READER_TEXT?reader state missing}"
+    metadata="${AGMSG_READER_METADATA?reader metadata missing}"
+    rows="${AGMSG_READER_ROWS?reader state missing}"
+    token="${AGMSG_READER_TOKEN?reader state missing}"
+    group_kind="${AGMSG_READER_GROUP_KIND?reader group kind missing}"
+    count="${#AGMSG_READER_IDS[@]}"
+    if [ "$count" -lt 1 ] || [ "$count" -gt "$limit" ]; then
+      _watch_release_unattempted "$metadata"
+      watch_report "$pair_team/$pair_agent: delivery preparation exceeded the requested group; nothing was sent."
+      return "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+    fi
+    n=$((n + count))
+    if [ "$group_kind" = text ]; then
+      rc=0
+      _watch_claimed_handoff "$payload" "$metadata" "$metadata" "" "$count" false || rc=$?
+      case "$rc" in 0) continue ;; 10) break ;; *) return "$rc" ;; esac
+    fi
+    if [ "$group_kind" != rows ]; then
+      _watch_release_unattempted "$metadata"
+      watch_report "$pair_team/$pair_agent: delivery preparation returned an invalid group; nothing was sent."
+      return "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+    fi
+    # Controls must use the already-owned token. Releasing and re-claiming
+    # would let a later acquisition failure prevent an accepted teardown.
+    # Header CR/LF also uses these lossless hex rows: the SQLite transport's
+    # line-ending normalization must not change embedded header bytes.
+    remaining_ids="${metadata#*$'\n'}"
+    while IFS='|' read -r idh fromh bodyh tsh teamh toh tokenh; do
+      [ -n "$idh" ] || continue
+      pending="$token"$'\n'"$remaining_ids"
+      remaining_ids="${remaining_ids#"$idh"$'\n'}"
+      tail=""
+      [ -z "$remaining_ids" ] || tail="$token"$'\n'"$remaining_ids"
+      metadata="$token"$'\n'"$idh"$'\n'
+      control=false; payload=""
+      if [ "$bodyh" = 6374726C3A6465737061776E ]; then
+        control=true
+      else
+        if ! _agmsg_delivery_decode_hex body "$bodyh" ||
+           ! _agmsg_delivery_decode_hex from "$fromh" ||
+           ! _agmsg_delivery_decode_hex ts "$tsh" ||
+           ! _agmsg_delivery_decode_hex team "$teamh" ||
+           ! _agmsg_delivery_decode_hex to "$toh"; then
+          _watch_release_unattempted "$pending"
+          return "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+        fi
+        printf -v payload '%s | %s | %s → %s | %s\n' "$ts" "$team" "$from" "$to" "$body"
+      fi
+      rc=0
+      _watch_claimed_handoff "$payload" "$metadata" "$pending" "$tail" 1 "$control" || rc=$?
+      case "$rc" in 0) ;; 10) stop_pair=1; break ;; *) return "$rc" ;; esac
+    done <<< "$rows"
+    [ "$stop_pair" -eq 0 ] || break
+  done
+  if [ -n "$despawn_target" ]; then
+    agmsg_reader_wait_barrier "${AGMSG_TEST_FOLD_BARRIER:-}" || return 0
+    verdict=0
+    _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || verdict=$?
+    if [ "$verdict" -ne 0 ]; then
+      _report_pair_refusal "$verdict" "$pair_team" "$pair_agent" "its ctrl:despawn"
+      return 0
+    fi
+    "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$despawn_target" "$SESSION_ID" >/dev/null 2>&1 || true
+    local close_rc=0
+    close_own_placement "$pair_team" "$despawn_target" || close_rc=$?
+    [ "$close_rc" -ne 1 ] || exit "$_AGMSG_EXIT_TEARDOWN_INCOMPLETE"
+    exit 0
+  fi
+}
 while true; do
   # Renewal point: see _watch_renew_or_stop above.
   [ -n "$WATCH_MAX_SECONDS" ] && _watch_renew_or_stop
@@ -1402,6 +1589,15 @@ EOF
     if _held_elsewhere_has "${pair_team}/${pair_agent}"; then
       HELD_ELSEWHERE="$(_held_elsewhere_without "${pair_team}/${pair_agent}")"
       echo "agmsg watch: ${pair_team}/${pair_agent} is unheld again; serving it here." >&2
+    fi
+    if [ "${AGMSG_READER_CLAIMS?reader state missing}" -eq 1 ]; then
+      _claimed_rc=0
+      _watch_claimed_pair || _claimed_rc=$?
+      case "$_claimed_rc" in
+        0) continue ;;
+        99) cleanup; exit 0 ;; # attempted stdout failure is UNKNOWN
+        *) cleanup; exit "$_claimed_rc" ;;
+      esac
     fi
     # Read this pair's delivery state -- its read frontier, then the messages
     # past it -- and KEEP THE STATUS separate from the output. A failed read must

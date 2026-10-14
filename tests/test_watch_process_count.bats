@@ -54,12 +54,43 @@ teardown() {
     {
       printf '#!/usr/bin/env bash\n'
       printf "printf '%%s\\\\n' '%s' >> '%s'\n" "$cmd" "$countlog"
+      if [ "$cmd" = dirname ]; then
+        printf 'if [ "${1:-}" = %q ]; then\n' "$SCRIPTS/lib/storage.sh"
+        printf "  printf '@storage-path\\\\n' >> '%s'\n" "$countlog"
+        printf 'fi\n'
+      fi
       printf "exec '%s' \"\$@\"\n" "$real"
     } > "$shimbin/$cmd"
     chmod +x "$shimbin/$cmd"
   done
 
-  AGMSG_WATCH_INTERVAL=2 PATH="$shimbin:$PATH" \
+  # Observe actual cache misses in this disposable installation. These
+  # wrappers delegate unchanged and only append fixed semantic markers via
+  # a builtin; their markers are never counted as external processes.
+  cat >> "$SCRIPTS/lib/actas-lock.sh" <<'SH'
+eval "$(declare -f _agmsg_id_key_or_legacy | sed '1s/_agmsg_id_key_or_legacy/_watch_count_real_id_key/')"
+_agmsg_id_key_or_legacy() {
+  if [ "${FUNCNAME[1]:-}" = _actas_lock_primitives_into ]; then
+    printf '@primitive-resolution\n' >> "$AGMSG_WATCH_PROCESS_COUNT_LOG"
+  fi
+  _watch_count_real_id_key "$@"
+}
+SH
+  cat >> "$SCRIPTS/lib/driver-registry.sh" <<'SH'
+eval "$(declare -f agmsg_driver_for_team | sed '1s/agmsg_driver_for_team/_watch_count_real_driver_for_team/')"
+agmsg_driver_for_team() {
+  if [ "$1" = partition ]; then
+    if [ "${_AGMSG_POLL_CYCLE_EPOCH:-0}" -gt 0 ]; then
+      printf '@partition-warm:%s\n' "$_AGMSG_POLL_CYCLE_EPOCH" >> "$AGMSG_WATCH_PROCESS_COUNT_LOG"
+    else
+      printf '@partition-fresh\n' >> "$AGMSG_WATCH_PROCESS_COUNT_LOG"
+    fi
+  fi
+  _watch_count_real_driver_for_team "$@"
+}
+SH
+
+  AGMSG_WATCH_PROCESS_COUNT_LOG="$countlog" AGMSG_WATCH_INTERVAL=2 PATH="$shimbin:$PATH" \
     bash "$SCRIPTS/watch.sh" "proccount-sess" "$PROJ" claude-code alice \
     >"$BATS_TEST_TMPDIR/watch.out" 2>"$BATS_TEST_TMPDIR/watch.err" &
   local wpid=$!
@@ -67,25 +98,64 @@ teardown() {
   kill "$wpid" 2>/dev/null
   wait "$wpid" 2>/dev/null
 
-  # Divide by the OBSERVED sleep count, not an assumed wall-clock/interval
-  # division: `sleep` is itself shimmed above, so this is the same cycle a
-  # completed "sleep $INTERVAL" at the bottom of the poll loop actually saw,
-  # immune to how many cycles a loaded machine fit into the fixed window.
-  local total cycles; total=$(wc -l < "$countlog" | tr -d ' ')
-  cycles=$(grep -c '^sleep$' "$countlog")
-  echo "forked sqlite3/tr/awk/sed/dirname/head/mktemp/paste: $total over $cycles idle cycles" >&3
-  sort "$countlog" | uniq -c | sort -rn >&3
+  # The first sleep starts only after startup and the first, cold poll. Count
+  # complete sleep-to-sleep intervals after that boundary: each includes the
+  # next poll and one sleep invocation, independent of machine speed. Buffer
+  # each interval until its closing sleep marker so an interrupted final poll
+  # cannot enter the numerator without a corresponding completed cycle.
+  local steadylog="$BATS_TEST_TMPDIR/steady-counts.log"
+  awk '
+    $0 == "sleep" {
+      if (started) printf "%ssleep\n", cycle
+      started = 1
+      cycle = ""
+      next
+    }
+    started { cycle = cycle $0 "\n" }
+  ' "$countlog" > "$steadylog"
+  local processlog="$BATS_TEST_TMPDIR/steady-processes.log"
+  awk '$0 !~ /^@/' "$steadylog" > "$processlog"
+  local total cycles; total=$(wc -l < "$processlog" | tr -d ' ')
+  cycles=$(grep -c '^sleep$' "$steadylog" || true)
+  echo "forked sqlite3/tr/awk/sed/dirname/head/mktemp/paste/sleep: $total over $cycles complete idle cycles" >&3
+  sort "$processlog" | uniq -c | sort -rn >&3
   [ "$cycles" -ge 2 ]
   local per_cycle=$((total / cycles))
   echo "per cycle: $per_cycle" >&3
-  # Measured (this change, isolated bats env, several runs, stable): 45/cycle
-  # with both stages above, against 61/cycle with only #1329's first stage
-  # (main at fcf74408, before this PR) and 85-95/cycle before #1330 entirely.
-  # 70 (the prior cap) sat inside the 60-75 range #1329 alone already
-  # produces, so this test could pass on fcf74408 with none of this PR's own
-  # changes -- not a regression test for what this PR adds (review, #1333
-  # round 2). Confirmed on fcf74408 directly: 61/cycle, three runs, before
-  # settling on this cap. 55 sits strictly between the two, so losing this
-  # PR's cache (not just regressing to the pre-#1330 baseline) fails it.
-  [ "$per_cycle" -le 55 ]
+  # Keep the existing 55-process budget. The old startup-inclusive averages
+  # (45 with both cache stages, 61 with only the first) motivated this cap,
+  # but are not steady-state measurements. Compare the exact total rather
+  # than letting integer division round an over-budget average down to 55.
+  [ "$total" -le "$((55 * cycles))" ]
+
+  # Each probe must actually see cold work before the first sleep: a broken
+  # wrapper or a misspelled shim target cannot pass by reporting no work.
+  local probe
+  for probe in @primitive-resolution @storage-path @partition-warm: @partition-fresh; do
+    awk -v probe="$probe" '
+      $0 == "sleep" { exit }
+      index($0, probe) == 1 { seen = 1 }
+      END { exit !seen }
+    ' "$countlog" || { echo "cold cache probe was not observed: $probe" >&3; return 1; }
+  done
+
+  # Cached actas primitives and the storage directory require no warm-cycle
+  # resolution. The partition selector MUST resolve once per positive epoch,
+  # while delivery admission deliberately forces two epoch-zero fresh reads
+  # before and after the claim transaction. Test both reuse and freshness in
+  # each complete interval, without lowering 55 to an arbitrary new budget.
+  awk '
+    /^@primitive-resolution$/ { primitive++ }
+    /^@storage-path$/ { directory++ }
+    /^@partition-warm:/ { warm++ }
+    /^@partition-fresh$/ { fresh++ }
+    $0 == "sleep" {
+      cycle++
+      printf "cache work cycle %d: primitives=%d storage-path=%d partition-warm=%d partition-fresh=%d\n",
+        cycle, primitive, directory, warm, fresh
+      if (primitive != 0 || directory != 0 || warm != 1 || fresh != 2) failed = 1
+      primitive = directory = warm = fresh = 0
+    }
+    END { exit failed }
+  ' "$steadylog" >&3
 }

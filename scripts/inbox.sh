@@ -38,6 +38,41 @@ if ! storage_store_exists "$TEAM"; then
   exit 0
 fi
 
+# On a capable driver, reserve before formatting and acknowledge only after
+# one successful stdout write. A failed attempted write is UNKNOWN: retaining
+# the lease avoids an immediate second handoff of possibly accepted bytes.
+source "$SCRIPT_DIR/lib/delivery-reader.sh"
+agmsg_reader_init inbox
+if [ "${AGMSG_READER_CLAIMS?reader state missing}" -eq 1 ]; then
+  UNREAD_JSONL="$(agmsg_reader_claim "$TEAM" "$AGENT")" || exit 13
+  if [ -z "$UNREAD_JSONL" ]; then
+    [ "$QUIET" = true ] || printf 'No new messages.\n'
+    exit 0
+  fi
+  if ! agmsg_reader_parse "$UNREAD_JSONL" inbox 1 "$TEAM" "$AGENT"; then
+    agmsg_reader_release "$TEAM" "$AGENT" "$UNREAD_JSONL"
+    exit 13
+  fi
+  COUNT="${#AGMSG_READER_IDS[@]}"
+  METADATA="${AGMSG_READER_METADATA?reader metadata missing}"
+  PAYLOAD="$COUNT new message(s):"$'\n\n'"${AGMSG_READER_TEXT?reader state missing}"$'\n'
+  if ! agmsg_reader_barrier ||
+     ! agmsg_reader_control_metadata renew "$TEAM" "$AGENT" "$METADATA"; then
+    agmsg_reader_release_metadata "$TEAM" "$AGENT" "$METADATA"
+    exit 13
+  fi
+  EMIT_RC=0
+  printf '%s' "$PAYLOAD" || EMIT_RC=$?
+  if [ "$EMIT_RC" -ne 0 ]; then
+    printf 'agmsg: delivery write outcome is unknown; reservation retained until expiry, after which redelivery is possible.\n' >&2
+    exit "$EMIT_RC"
+  fi
+  if ! agmsg_reader_control_metadata ack "$TEAM" "$AGENT" "$METADATA"; then
+    printf 'agmsg: failed to record read state for %s displayed message(s); some or all may be shown again after reservation expiry.\n' "$COUNT" >&2
+  fi
+  exit 0
+fi
+
 # Unread comes from the storage facade (§2.1 storage_list_unread = the event log
 # UNION the legacy messages table), as one JSONL record per line in delivery
 # order. Parse it with sqlite's JSON funcs in a single pass — the repo idiom, no

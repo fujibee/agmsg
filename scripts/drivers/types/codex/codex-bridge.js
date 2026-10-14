@@ -8,6 +8,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const readline = require("readline");
+const { DeliveryClient, acceptedTurn, CONTROL_TIMEOUT_MS, CLAIM_MAX_BYTES, PROMPT_MAX_BYTES } = require("./codex-delivery.js");
 
 const SCRIPT_DIR = __dirname;                              // .../scripts/drivers/types/codex (codex siblings live here)
 const SKILL_DIR = path.resolve(SCRIPT_DIR, "..", "..", "..", "..");    // skill root
@@ -464,7 +465,8 @@ class AppServerClient {
     // request with the approval's params and swallow the approval -- the
     // exact #299 deadlock this fix exists to close. `method` presence is
     // what a JSON-RPC response never has, so it is the correct discriminator.
-    if (message.method) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) return;
+    if (Object.prototype.hasOwnProperty.call(message, "method")) {
       // Fires for every thread-scoped notification/request, including the
       // many the bridge has no specific handler for (reasoning deltas, tool
       // -call/command-output progress, etc.) -- unlike the handlers Map
@@ -488,13 +490,17 @@ class AppServerClient {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
-      if (message.error) {
-        const rpcError = new Error(message.error.message || JSON.stringify(message.error));
+      if (Object.prototype.hasOwnProperty.call(message, "error")) {
+        const errorBody = message.error;
+        const rpcError = new Error(errorBody && typeof errorBody.message === "string" ? errorBody.message : "malformed app-server error response");
         // Carry the JSON-RPC error code through, not just its text. ensureThread
         // decides on the message ("already has an active writer"), so the code is
         // not what gates that today; it is kept for diagnostics and any future
         // caller that wants the numeric reason without parsing the text (#906).
-        if (typeof message.error.code === "number") rpcError.code = message.error.code;
+        if (errorBody && typeof errorBody.code === "number") rpcError.code = errorBody.code;
+        rpcError.protocolRejection = !Object.prototype.hasOwnProperty.call(message, "result") &&
+          !!errorBody && typeof errorBody === "object" && !Array.isArray(errorBody) &&
+          Number.isInteger(errorBody.code) && typeof errorBody.message === "string";
         pending.reject(rpcError);
       } else {
         pending.resolve(message.result);
@@ -786,6 +792,7 @@ class WebSocketAppServerClient {
       if (opcode === 0x1) {
         this.handleLine(payload.toString("utf8"));
       } else if (opcode === 0x8) {
+        this.rejectAll(new Error("app-server websocket closed during request"));
         this.stop();
         return;
       } else if (opcode === 0x9) {
@@ -812,7 +819,8 @@ class WebSocketAppServerClient {
     // approval's params and swallow the approval -- the exact #299 deadlock
     // this fix exists to close. `method` presence is what a JSON-RPC response
     // never has, so it is the correct discriminator.
-    if (message.method) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) return;
+    if (Object.prototype.hasOwnProperty.call(message, "method")) {
       // Fires for every thread-scoped notification/request, including the
       // many the bridge has no specific handler for (reasoning deltas, tool
       // -call/command-output progress, etc.) -- unlike the handlers Map
@@ -836,13 +844,17 @@ class WebSocketAppServerClient {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
-      if (message.error) {
-        const rpcError = new Error(message.error.message || JSON.stringify(message.error));
+      if (Object.prototype.hasOwnProperty.call(message, "error")) {
+        const errorBody = message.error;
+        const rpcError = new Error(errorBody && typeof errorBody.message === "string" ? errorBody.message : "malformed app-server error response");
         // Carry the JSON-RPC error code through, not just its text. ensureThread
         // decides on the message ("already has an active writer"), so the code is
         // not what gates that today; it is kept for diagnostics and any future
         // caller that wants the numeric reason without parsing the text (#906).
-        if (typeof message.error.code === "number") rpcError.code = message.error.code;
+        if (errorBody && typeof errorBody.code === "number") rpcError.code = errorBody.code;
+        rpcError.protocolRejection = !Object.prototype.hasOwnProperty.call(message, "result") &&
+          !!errorBody && typeof errorBody === "object" && !Array.isArray(errorBody) &&
+          Number.isInteger(errorBody.code) && typeof errorBody.message === "string";
         pending.reject(rpcError);
       } else {
         pending.resolve(message.result);
@@ -997,6 +1009,13 @@ class CodexBridge {
     this.watchRearmTimer = null;
     this.lastArmAt = 0;
     this.inlineInboxText = "";
+    this.delivery = new DeliveryClient(SCRIPTS_DIR, BASH_BIN, opts.project);
+    this.deliveryBatch = null;
+    this.legacyDeliveryWarned = false;
+    this.oversizedDeliveryWarned = false;
+    this.boundedWatch = false;
+    this.inFlightStartObserved = false;
+    this.inFlightStartConflict = false;
     this.stopping = false;
     const key = identities.length === 1
       ? `${identities[0].team}.${identities[0].name}`
@@ -1038,8 +1057,13 @@ class CodexBridge {
       // it ACKs the turn/start request. Capture its IDENTITY: only an end
       // signal carrying this same turn id may be attributed to the new turn
       // while the request is in flight (see onTurnCompleted).
-      if (this.startInFlight) {
-        this.inFlightTurnId = (params && params.turn && params.turn.id) || null;
+      if (this.startInFlight && params && params.threadId === this.threadId) {
+        this.inFlightStartObserved = true;
+        const id = params.turn && params.turn.id;
+        if (typeof id === "string" && id) {
+          if (this.inFlightTurnId && this.inFlightTurnId !== id) this.inFlightStartConflict = true;
+          this.inFlightTurnId = id;
+        }
       }
       this.turnActive = true;
       this.threadIdle = false;
@@ -1397,6 +1421,12 @@ class CodexBridge {
     if (this.opts.ownerId) command.push("--owner", this.opts.ownerId);
     for (const pair of this.identities) command.push("--pair", `${pair.team}\t${pair.name}`);
     try {
+      this.boundedWatch = this.opts.inlineInbox && this.delivery.capability();
+      if (this.boundedWatch) {
+        this.delivery.requireBytesCapability();
+        command.push("--max-bytes", String(CLAIM_MAX_BYTES));
+        if (this.oversizedDeliveryWarned) command.push("--oversized-reported");
+      }
       await this.client.request("process/spawn", {
         command,
         processHandle: handle,
@@ -1416,6 +1446,11 @@ class CodexBridge {
     this.watchHandle = null;
 
     if (params.exitCode === 0) {
+      if (this.boundedWatch) {
+        const status = /^status=pending count=[1-9][0-9]* max_id=[0-9]+( oversized=1)?\n$/.exec(params.stdout || "");
+        if (!status) throw new Error("malformed bounded delivery readiness response");
+        if (status[1]) this.reportOversizedDelivery();
+      }
       // Decay, not reset. A wake is progress, but a wake arriving amid failures
       // does not prove the host recovered -- it proves one message moved. The
       // old reset-to-0 let a fail/fail/wake churn hold the counter below the
@@ -1434,6 +1469,14 @@ class CodexBridge {
       this.wakeCount += 1;
       console.error(`codex-bridge: wakeup ${this.wakeCount} for ${this.identity.team}/${this.identity.name}`);
       await this.tryStartTurn();
+      return;
+    }
+
+    if (params.exitCode === 3 && this.boundedWatch) {
+      if (params.stdout !== "status=oversized\n") throw new Error("malformed oversized delivery readiness response");
+      this.reportOversizedDelivery();
+      this.watchFailureCount = 0;
+      await this.armWatch();
       return;
     }
 
@@ -1462,6 +1505,12 @@ class CodexBridge {
       this.watchRearmTimer = null;
       this.armWatch().catch((error) => this.failClientHandler("process/exited", error));
     }, WATCH_REARM_MS);
+  }
+
+  reportOversizedDelivery() {
+    if (this.oversizedDeliveryWarned) return;
+    this.oversizedDeliveryWarned = true;
+    console.error("codex-bridge: oversized messages remain unread and unclaimed; inspect the inbox or history manually. Fitting messages can still be delivered.");
   }
 
   clearWatchRearmTimer() {
@@ -1561,9 +1610,26 @@ class CodexBridge {
   }
 
   async tryStartTurn() {
-    if (!this.pendingWake || this.turnActive || !this.threadIdle) return;
+    if (this.stopping || !this.pendingWake || this.turnActive || !this.threadIdle || this.startInFlight) return;
+    let batch = null;
     if (this.opts.inlineInbox) {
-      this.inlineInboxText = this.readInboxForPrompt();
+      if (this.delivery.capability()) {
+        batch = this.claimInboxForPrompt();
+        if (this.delivery.oversized) this.reportOversizedDelivery();
+        this.deliveryBatch = batch;
+        try { this.inlineInboxText = batch ? batch.text() : ""; }
+        catch (error) {
+          if (batch) { try { batch.release(); } catch (_) { /* unread lease expires */ } }
+          this.deliveryBatch = null;
+          throw error;
+        }
+      } else {
+        if (!this.legacyDeliveryWarned) {
+          console.error("codex-bridge: delivery claims unavailable; inline inbox uses legacy consuming delivery without accepted-turn receipts");
+          this.legacyDeliveryWarned = true;
+        }
+        this.inlineInboxText = this.readInboxForPrompt();
+      }
       if (!this.inlineInboxText.trim()) {
         console.error("codex-bridge: pending wake had no inbox output; re-arming");
         this.pendingWake = false;
@@ -1571,42 +1637,79 @@ class CodexBridge {
         return;
       }
     }
-    const prompt = this.buildPrompt();
+    let prompt;
+    try {
+      prompt = this.buildPrompt();
+      if (batch) {
+        if (Buffer.byteLength(prompt) > PROMPT_MAX_BYTES) throw new Error("inline delivery prompt exceeds the 2 MiB limit; batch was not sent");
+        batch.renew();
+        // This last ownership observation is not atomic with the transport
+        // write. A change after attempted() must retain the uncertain lease.
+        if (!this.eligibleIdentities().has(`${batch.pair.team}\t${batch.pair.name}`)) {
+          batch.release();
+          this.deliveryBatch = null;
+          this.pendingWake = false;
+          await this.armWatch();
+          return;
+        }
+      }
+    } catch (error) {
+      if (batch) { try { batch.release(); } catch (_) { /* unread lease expires */ } }
+      this.deliveryBatch = null;
+      throw error;
+    }
     this.turnActive = true;
     this.threadIdle = false;
-    // Claim the wake BEFORE the request goes out, not after it succeeds. With
-    // the claim left set across the await, a turn-end signal arriving mid-
-    // request re-entered this method with the same wake and started a second
-    // turn. The claim is restored on failure so the wake fires again (the
-    // inline inbox rows are already marked read by then, so the retry
-    // re-delivers the wake, not the payload — unchanged from before).
+    // Consume this wake before transport. Uncertain body delivery never
+    // restores it: starting a new turn cannot repair a lost acceptance/ACK.
     this.pendingWake = false;
     this.startInFlight = true;
     this.inFlightTurnId = null;
     this.inFlightTurnEnded = false;
+    this.inFlightStartObserved = false;
+    this.inFlightStartConflict = false;
     try {
-      await this.client.request("turn/start", {
+      if (batch) batch.attempted();
+      const response = this.client.request("turn/start", {
         threadId: this.threadId,
         input: [{ type: "text", text: prompt, text_elements: [] }],
         cwd: this.opts.project,
         runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
+      const result = await (batch ? batch.waitFor(response) : response);
+      if (batch) {
+        if (this.stopping || !acceptedTurn(result, this.inFlightTurnId, this.inFlightStartConflict)) {
+          throw new Error("turn/start acceptance is unknown; unread delivery retained until expiry");
+        }
+        try { batch.ack(); }
+        catch (error) {
+          throw new Error(`turn accepted but read-state confirmation is uncertain: ${error.message}; no turn replay`);
+        }
+      }
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
-      // Bound how long we treat the turn as active. The real app-server may
-      // never send turn/completed; the watchdog (and thread/status idle) drive
-      // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
       this.startTurnWatchdog();
+      if (batch && result.turn.status !== "inProgress") this.inFlightTurnEnded = true;
     } catch (error) {
-      this.pendingWake = true;
+      if (batch) {
+        const safeRejection = error.protocolRejection === true &&
+          [-32600, -32601, -32602].includes(error.code) && !this.inFlightStartObserved && !this.stopping;
+        if (safeRejection) {
+          try { batch.release(true); }
+          catch (releaseError) { console.error(`codex-bridge: rejected turn lease release failed: ${releaseError.message}`); }
+        }
+        if (batch.state !== "RELEASED") console.error("codex-bridge: turn delivery is uncertain; unread lease retained until expiry");
+      } else {
+        this.pendingWake = true; // legacy/metadata behavior remains unchanged
+      }
       this.turnActive = false;
       this.threadIdle = true;
       this.clearTurnWatchdog();
       throw error;
     } finally {
+      if (batch) batch.stopRenewing();
+      this.deliveryBatch = null;
       this.startInFlight = false;
     }
-    // A fast turn can be fully notified (started AND ended) before the ACK
-    // arrived; its deferred end is processed now that the start is settled.
     if (this.inFlightTurnEnded) {
       this.inFlightTurnEnded = false;
       await this.onTurnEnded();
@@ -1704,20 +1807,28 @@ class CodexBridge {
     ].join("\n");
   }
 
-  readInboxForPrompt() {
-    // Re-resolve locks immediately before reading. watch-once only tells us
-    // that *some* eligible identity woke; ownership can change before this
-    // turn starts, so never let a stale bridge membership mark another
-    // session's messages read.
+  eligibleIdentities() {
     const eligibleArgs = [path.join(SCRIPT_DIR, "eligible-pairs.sh"), toPosixPath(this.opts.project), this.opts.type];
     if (this.opts.ownerId) eligibleArgs.push("--owner", this.opts.ownerId);
     eligibleArgs.push(...this.identities.flatMap((pair) => ["--pair", `${pair.team}\t${pair.name}`]));
-    const eligible = spawnSync(BASH_BIN, eligibleArgs, { cwd: this.opts.project, encoding: "utf8" });
+    const eligible = spawnSync(BASH_BIN, eligibleArgs, { cwd: this.opts.project, encoding: "utf8", timeout: CONTROL_TIMEOUT_MS, killSignal: "SIGKILL" });
     if (eligible.error || eligible.status !== 0) {
-      console.error("codex-bridge: could not resolve eligible identities before reading inbox");
-      return "";
+      throw new Error("could not resolve eligible identities before delivery");
     }
-    const allowed = new Set((eligible.stdout || "").split(/\r?\n/).filter(Boolean));
+    return new Set((eligible.stdout || "").split(/\r?\n/).filter(Boolean));
+  }
+
+  claimInboxForPrompt() {
+    const allowed = this.eligibleIdentities();
+    // Startup permits exactly one identity per bridge. Keep the same boundary
+    // here so a future subscription expansion cannot silently drop a batch.
+    if (this.identities.length !== 1) throw new Error("claim delivery requires one bridge identity");
+    const pair = this.identities[0];
+    return allowed.has(`${pair.team}\t${pair.name}`) ? this.delivery.claim(pair) : null;
+  }
+
+  readInboxForPrompt() {
+    const allowed = this.eligibleIdentities();
     const sections = [];
     for (const pair of this.identities) {
       if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
@@ -1734,6 +1845,14 @@ class CodexBridge {
   async shutdown() {
     if (this.stopping) return;
     this.stopping = true;
+    if (this.deliveryBatch) {
+      this.deliveryBatch.stopRenewing();
+      // A signal cannot interrupt a synchronous control callback. Once it
+      // runs here, no renewal is outstanding; attempted bodies stay UNKNOWN.
+      if (this.deliveryBatch.state === "NOT_SENT") {
+        try { this.deliveryBatch.release(); } catch (_) { /* unread lease expires */ }
+      }
+    }
     this.clearWatchRearmTimer();
     this.clearTurnWatchdog();
     if (this.watchHandle) {
@@ -1939,4 +2058,4 @@ if (require.main === module) {
 // the property that matters — a diagnostic never continues someone else's
 // half-line — is a property of these two together, and driving them directly
 // is the only way to state it without standing up an app-server.
-module.exports = { toPosixPath, writeErr, logLine };
+module.exports = { toPosixPath, writeErr, logLine, AppServerClient, WebSocketAppServerClient, CodexBridge };

@@ -472,3 +472,107 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
 
   kill "$live" 2>/dev/null || true
 }
+
+@test "lock: manual recovery mode validates arguments before creating a lock" {
+  for mode in unknown auto; do
+    run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '. "$LOCKLIB"; agmsg_lock_acquire "$TEAM_DIR" "$1"' _ "$mode"
+    [ "$status" -ne 0 ]
+    [ ! -d "$TEAM_DIR/.config.lock" ]
+  done
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '. "$LOCKLIB"; agmsg_lock_acquire "$TEAM_DIR" manual-recovery manual-recovery'
+  [ "$status" -ne 0 ]
+  [ ! -d "$TEAM_DIR/.config.lock" ]
+}
+
+@test "lock: manual recovery normal multi-lock release preserves token ownership" {
+  mkdir "$TEAM_DIR/second"
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    . "$LOCKLIB"
+    agmsg_lock_acquire "$TEAM_DIR" manual-recovery || exit 1
+    agmsg_lock_acquire "$TEAM_DIR/second" manual-recovery || exit 2
+    for dir in "$TEAM_DIR" "$TEAM_DIR/second"; do
+      IFS= read -r first < "$dir/.config.lock.holder"
+      [ "$first" = "recovery manual" ] || exit 3
+    done
+    agmsg_lock_release
+    [ ! -d "$TEAM_DIR/.config.lock" ] && [ ! -d "$TEAM_DIR/second/.config.lock" ]
+  '
+  [ "$status" -eq 0 ]
+}
+
+@test "lock: manual recovery marker write failure cannot publish an unmarked pid" {
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    . "$LOCKLIB"
+    printf() {
+      if [ "$1" = "recovery manual\n" ]; then return 42; fi
+      builtin printf "$@"
+    }
+    if agmsg_lock_acquire "$TEAM_DIR" manual-recovery; then exit 9; fi
+    [ -d "$TEAM_DIR/.config.lock" ] || exit 10
+    if grep -q "^pid " "$TEAM_DIR/.config.lock.holder"; then exit 11; fi
+  '
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -Fq 'cannot record the maintenance lock policy'
+}
+
+@test "lock: claimed manual recovery record is restored without breaking its directory" {
+  mkdir "$TEAM_DIR/.config.lock"
+  printf 'recovery manual\npid 2147483647\nhost %s\ntoken original\n' "$HOSTNAME" > "$TEAM_DIR/.config.lock.holder"
+  cp "$TEAM_DIR/.config.lock.holder" "$TEAM_DIR/before"
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    . "$LOCKLIB"
+    if _agmsg_lock_break_dead "$TEAM_DIR/.config.lock"; then exit 1; fi
+  '
+  [ "$status" -eq 0 ]
+  [ -d "$TEAM_DIR/.config.lock" ]
+  cmp "$TEAM_DIR/before" "$TEAM_DIR/.config.lock.holder"
+}
+
+@test "lock: manual recovery retains exclusion after a foreground child and TERM" {
+  local parent child tries=0
+  env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    . "$LOCKLIB"
+    agmsg_lock_acquire "$TEAM_DIR" manual-recovery || exit 1
+    bash -c '\''printf "%s\n" "$$" > "$1/child"; while [ ! -f "$1/release" ]; do sleep 0.01; done'\'' _ "$TEAM_DIR"
+  ' > "$TEAM_DIR/parent.log" 2>&1 &
+  parent=$!
+  while [ ! -f "$TEAM_DIR/child" ] && [ "$tries" -lt 1000 ]; do sleep 0.01; tries=$((tries+1)); done
+  [ -f "$TEAM_DIR/child" ]
+  child=$(cat "$TEAM_DIR/child")
+  kill -TERM "$parent"
+  sleep 0.1
+  kill -0 "$parent"
+  kill -0 "$child"
+  [ -d "$TEAM_DIR/.config.lock" ]
+  : > "$TEAM_DIR/release"
+  local result=0
+  wait "$parent" || result=$?
+  [ "$result" -eq 143 ]
+  [ -d "$TEAM_DIR/.config.lock" ]
+}
+
+@test "lock: implicit nonzero exit releases only automatic locks in a mixed set" {
+  mkdir "$TEAM_DIR/automatic"
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    . "$LOCKLIB"
+    agmsg_lock_acquire "$TEAM_DIR" manual-recovery || exit 1
+    agmsg_lock_acquire "$TEAM_DIR/automatic" || exit 2
+    exit 42
+  '
+  [ "$status" -eq 42 ]
+  [ -d "$TEAM_DIR/.config.lock" ]
+  [ ! -d "$TEAM_DIR/automatic/.config.lock" ]
+  grep -qx 'recovery manual' "$TEAM_DIR/.config.lock.holder"
+}
+
+@test "lock: manual recovery survives INT without releasing its holder" {
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    . "$LOCKLIB"
+    agmsg_lock_acquire "$TEAM_DIR" manual-recovery || exit 1
+    kill -INT "$$"
+    exit 9
+  '
+  [ "$status" -eq 130 ]
+  [ -d "$TEAM_DIR/.config.lock" ]
+  grep -qx 'recovery manual' "$TEAM_DIR/.config.lock.holder"
+}

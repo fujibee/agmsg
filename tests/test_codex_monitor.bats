@@ -323,6 +323,25 @@ EOF
   run node -e 'const net = require("net"); if (!net) process.exit(1);'
   [ "$status" -eq 0 ] || skip "node net module is not available"
 
+  # This test owns the monitor's dispatch boundary; the native launcher test
+  # below it in CI exercises the default dispatcher path separately. Running
+  # that dispatcher here can open SQLite after our fake TUI has exited, racing
+  # teardown. Record the same monitor invocation instead, and observe completion
+  # before cleanup. Keep the real app-server and all native PID probes intact.
+  local launcher="$TEST_PROJECT/record-launcher"
+  local launcher_record="$TEST_PROJECT/launcher-record"
+  cat > "$launcher" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf 'pid=%s\nargc=%s\ntype=%s\nproject=%s\nurl=%s\nparent=%s\nseat=%s\nbridge=%s\napp_server=%s\nlauncher=%s\n' \
+  "$$" "$#" "${1:-}" "${2:-}" "${3:-}" "${4:-}" \
+  "${AGMSG_CODEX_SEAT_KEY:-}" "${AGMSG_CODEX_BRIDGE:-}" \
+  "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" \
+  > "$TEST_PROJECT/launcher-record.$$"
+mv "$TEST_PROJECT/launcher-record.$$" "$TEST_PROJECT/launcher-record"
+EOF
+  chmod +x "$launcher"
+
   local win_codex="$TEST_PROJECT/win-codex"
   cat > "$win_codex" <<'EOF'
 #!/usr/bin/env bash
@@ -354,7 +373,7 @@ esac
 EOF
   chmod +x "$win_codex"
 
-  run env AGMSG_REAL_CODEX="$win_codex" \
+  run env AGMSG_REAL_CODEX="$win_codex" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
   [ "$status" -eq 0 ]
   grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
@@ -370,6 +389,22 @@ EOF
     bash -c 'source "$1"; _agmsg_codex_app_server_url "$2"' bash \
       "$TYPES/codex/_app-server.sh" "$TEST_PROJECT")"
   [ "$restored" = "ws://127.0.0.1:$port" ]
+
+  # The rename publishes a complete record; existence alone is not proof the
+  # detached recorder has exited, so also wait for its own shell PID to be gone.
+  wait_for_file "$launcher_record"
+  grep -qx 'pid=[1-9][0-9]*' "$launcher_record"
+  local launcher_pid; launcher_pid="$(sed -n 's/^pid=//p' "$launcher_record")"
+  wait_for_pid_exit "$launcher_pid"
+  grep -qxF 'argc=4' "$launcher_record"
+  grep -qxF 'type=codex' "$launcher_record"
+  grep -qxF "project=$TEST_PROJECT" "$launcher_record"
+  grep -qxF "url=$restored" "$launcher_record"
+  grep -qx 'parent=[1-9][0-9]*' "$launcher_record"
+  grep -qxF "seat=$seat" "$launcher_record"
+  grep -qxF 'bridge=1' "$launcher_record"
+  grep -qxF "app_server=$restored" "$launcher_record"
+  grep -qxF 'launcher=1' "$launcher_record"
   [[ "$output" != *"did not report a listening port"* ]]
 }
 

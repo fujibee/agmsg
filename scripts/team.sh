@@ -49,7 +49,7 @@ agmsg_validate_team_name "$TEAM" || exit 1
 
 CONFIG="$SCRIPT_DIR/../teams/$TEAM/config.json"
 
-if [ ! -f "$CONFIG" ]; then
+if [ ! -f "$CONFIG" ] && [ "$DELETE" = false ] && [ "$PURGE_MESSAGES" = false ]; then
   echo "Team not found: $TEAM"
   exit 1
 fi
@@ -73,6 +73,37 @@ if [ "$DELETE" = true ] || [ "$PURGE_MESSAGES" = true ]; then
   . "$SCRIPT_DIR/lib/actas-lock.sh"
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/lib/team-delete.sh"
+
+  _team_delete_lock() {
+    if [ "$(agmsg_storage_driver)" = sqlite ]; then
+      agmsg_lock_acquire "$TEAM_DIR" manual-recovery
+    else
+      agmsg_lock_acquire "$TEAM_DIR"
+    fi
+  }
+
+  # Exact-operation resume must be resolved before the old config check:
+  # a successful unlink can precede a crash before the final barrier commit.
+  agmsg_team_delete_delivery_find "$TEAM" "$DELETE" "$PURGE_MESSAGES" "$FORCE" || exit 1
+  if [ ! -f "$CONFIG" ]; then
+    if [ -z "${AGMSG_DM_DELETE_DESCRIPTOR:-}" ]; then
+      echo "Team not found: $TEAM"; exit 1
+    fi
+    if [ "$AUTO_YES" != true ]; then
+      printf "Finish the recorded deletion of team '%s'? (y/n) [n]: " "$TEAM"
+      read -r input
+      case "${input:-n}" in y|Y) ;; *) echo "Aborted."; exit 1 ;; esac
+    fi
+    mkdir -p "$TEAM_DIR"
+    _team_delete_lock || exit 1
+    agmsg_team_delete_delivery_begin "$TEAM" "$TEAM_DIR" "$CONFIG" "$DELETE" "$PURGE_MESSAGES" "$FORCE" || exit 1
+    if [ "$PURGE_MESSAGES" = true ]; then agmsg_team_purge_messages "$TEAM"; fi
+    agmsg_team_delete_delivery_finish "$TEAM" "$DELETE" "$TEAM_DIR" || exit 1
+    agmsg_lock_release
+    rmdir "$TEAM_DIR" 2>/dev/null || true
+    echo "Deleted team '$TEAM'."
+    exit 0
+  fi
 
   DELETE_CONFIG_ESCAPED="$(sed "s/'/''/g" "$CONFIG")"
 
@@ -172,7 +203,8 @@ if [ "$DELETE" = true ] || [ "$PURGE_MESSAGES" = true ]; then
     exit 1
   fi
 
-  agmsg_lock_acquire "$TEAM_DIR" || exit 1
+  _team_delete_lock || exit 1
+  agmsg_team_delete_delivery_begin "$TEAM" "$TEAM_DIR" "$CONFIG" "$DELETE" "$PURGE_MESSAGES" "$FORCE" || exit 1
 
   if [ "$PURGE_MESSAGES" = true ]; then
     agmsg_team_purge_messages "$TEAM"
@@ -181,11 +213,14 @@ if [ "$DELETE" = true ] || [ "$PURGE_MESSAGES" = true ]; then
 
   if [ "$DELETE" = true ]; then
     agmsg_team_delete_run_records "$TEAM" "$TEAM_DIR" "$CONFIG"
-    rm -f "$TEAM_DIR/config.json" "$TEAM_DIR/roster.jsonl" "$TEAM_DIR/roster-sync.json"
+    # Remove config last: a config-absent resume has no registry files left.
+    rm -f "$TEAM_DIR/roster.jsonl" "$TEAM_DIR/roster-sync.json" "$TEAM_DIR/config.json"
+    agmsg_team_delete_delivery_finish "$TEAM" "$DELETE" "$TEAM_DIR" || exit 1
     agmsg_lock_release
     rmdir "$TEAM_DIR" 2>/dev/null || true
     echo "Deleted team '$TEAM'."
   else
+    agmsg_team_delete_delivery_finish "$TEAM" "$DELETE" "$TEAM_DIR" || exit 1
     agmsg_lock_release
   fi
 

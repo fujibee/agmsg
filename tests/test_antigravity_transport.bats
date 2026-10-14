@@ -280,11 +280,28 @@ PY
   bash "$SCRIPTS/send.sh" fixture sender worker 'held message' >/dev/null
   printf '{"type":"antigravity","state":"%s"}\n' "$TEST_SKILL_DIR/run/missing-state.json" \
     > "$TEST_SKILL_DIR/run/read-reservation.fixture__worker.json"
+  local db attempt
+  db="$(bash -c 'source "$1/lib/storage.sh"; agmsg_storage_load; agmsg_db_path fixture' _ "$SCRIPTS")"
+  # Missing reservation state is ambiguous, so repeated reads must refuse
+  # before disclosure and preserve the unread event until explicit recovery.
+  for attempt in 1 2; do
+    run bash "$SCRIPTS/inbox.sh" fixture worker
+    [ "$status" -eq 13 ] || return 1
+    grep -q 'read reservation state could not be validated' <<<"$output" || return 1
+    refute grep -q 'held message' <<<"$output" || return 1
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM events WHERE type='message_sent' AND body='held message';")" = 1 ] || return 1
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM events WHERE type='message_read';")" = 0 ] || return 1
+  done
+  # Recover only this test's synthetic reservation; a normal read now works.
+  rm "$TEST_SKILL_DIR/run/read-reservation.fixture__worker.json" || return 1
   run bash "$SCRIPTS/inbox.sh" fixture worker
-  [ "$status" -eq 0 ]
-  grep -q 'failed to record read state' <<<"$output"
+  [ "$status" -eq 0 ] || return 1
+  grep -q 'held message' <<<"$output" || return 1
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM events WHERE type='message_read';")" = 1 ] || return 1
+  [ "$(sqlite3 "$db" 'SELECT COUNT(*) FROM delivery_ack_receipts;')" = 1 ] || return 1
   run bash "$SCRIPTS/inbox.sh" fixture worker
-  grep -q 'held message' <<<"$output"
+  [ "$status" -eq 0 ] || return 1
+  refute grep -q 'held message' <<<"$output" || return 1
 }
 
 @test "a non-Antigravity storage load does not source the Antigravity guard" {

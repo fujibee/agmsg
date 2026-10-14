@@ -95,3 +95,53 @@ agmsg_bridge_guard_install() {
     _bridge_original_consume "$team" "$agent" "$cursor" "$@"
   }
 }
+
+# Claim-aware guard. Contention on acquisition/renewal is ordinary admission,
+# not an unauthorized legacy mark-read attempt. Driver hooks must distinguish
+# an earlier generic fence from their own protected saved batch.
+_agmsg_bridge_claim_guard_load() {
+  local reservation="$1" hook="$2" type driver
+  type="$(_agmsg_bridge_guard_type "$reservation")" || {
+    printf 'agmsg delivery: invalid_role_reservation\n' >&2
+    return 13
+  }
+  driver="$_AGMSG_BRIDGE_SKILL_DIR/scripts/drivers/types/$type"
+  [ -f "$driver/bridge-read-guard.sh" ] || {
+    printf 'agmsg delivery: unsupported_role_guard\n' >&2
+    return 13
+  }
+  # Clear a previously sourced type's optional hook: it must not authorize a
+  # different reservation type that only implements the old read interface.
+  unset -f "$hook"
+  # shellcheck disable=SC1090
+  source "$driver/bridge-read-guard.sh" || return 13
+  declare -F "$hook" >/dev/null 2>&1 || {
+    printf 'agmsg delivery: unsupported_role_guard\n' >&2
+    return 13
+  }
+}
+
+agmsg_bridge_claim_guard_check() {
+  local operation="$1" team="$2" agent="$3" reservation rc
+  reservation="$(_agmsg_bridge_guard_reservation "$team" "$agent")" || {
+    rc=$?
+    [ "$rc" -eq 1 ] && return 0
+    return 13
+  }
+  _agmsg_bridge_claim_guard_load "$reservation" agmsg_type_bridge_claim_guard_check || return 13
+  agmsg_type_bridge_claim_guard_check "$reservation" "$@"
+}
+
+# 0: valid durable reservation; 1: absent; 13: malformed/ambiguous/unsupported.
+# Dead owners are still reservations. A corrupt file must not silently starve
+# a role by looking like an ordinary empty inbox forever.
+agmsg_bridge_reservation_status() {
+  local reservation rc
+  reservation="$(_agmsg_bridge_guard_reservation "$1" "$2")" || {
+    rc=$?
+    [ "$rc" -ne 1 ] || return 1
+    return 13
+  }
+  _agmsg_bridge_claim_guard_load "$reservation" agmsg_type_bridge_reservation_check || return 13
+  agmsg_type_bridge_reservation_check "$reservation" "$1" "$2" || return 13
+}

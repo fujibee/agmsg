@@ -33,17 +33,35 @@ record_owner() {
 # slow deliberately. `_slow_startup_path` does that with an `awk` shim: startup
 # resolves subscription pairs through awk, while the polling loop queries through
 # sqlite3, so delaying awk lengthens startup without touching the poll. The shim
-# sleeps once (marker file) so the delay is exactly N regardless of how many awk
-# calls startup makes.
+# elects one sleeper with an atomic mkdir. Other shim invocations wait for that
+# sleeper to finish, so concurrent startup calls cannot duplicate or bypass it.
 _slow_startup_path() {
   local secs="$1" dir="$BATS_TEST_TMPDIR/slowbin"
   mkdir -p "$dir"
   cat > "$dir/awk" <<EOF
 #!/usr/bin/env bash
-if [ ! -e "$BATS_TEST_TMPDIR/awk-delayed" ]; then
-  : > "$BATS_TEST_TMPDIR/awk-delayed"
-  sleep $secs
+if mkdir "$BATS_TEST_TMPDIR/awk-delay-lock" 2>/dev/null; then
+  printf '%s\n' delayed-once >> "$BATS_TEST_TMPDIR/awk-delayed"
+  if sleep $secs; then
+    : > "$BATS_TEST_TMPDIR/awk-delay-done"
+  else
+    : > "$BATS_TEST_TMPDIR/awk-delay-failed"
+    exit 1
+  fi
+else
+  # Bound the fixture barrier even if the elected sleeper exits unexpectedly.
+  remaining=100
+  while [ ! -e "$BATS_TEST_TMPDIR/awk-delay-done" ] && [ ! -e "$BATS_TEST_TMPDIR/awk-delay-failed" ]; do
+    if [ "\$remaining" -eq 0 ]; then
+      : > "$BATS_TEST_TMPDIR/awk-delay-failed"
+      echo 'startup delay fixture did not finish' >&2
+      exit 1
+    fi
+    sleep 0.1
+    remaining=\$(( remaining - 1 ))
+  done
 fi
+[ ! -e "$BATS_TEST_TMPDIR/awk-delay-failed" ] || exit 1
 exec $(command -v awk) "\$@"
 EOF
   chmod +x "$dir/awk"
@@ -57,8 +75,14 @@ EOF
 _assert_startup_was_delayed() {
   [ -e "$BATS_TEST_TMPDIR/awk-delayed" ] || {
     echo "the awk shim never fired — startup no longer routes through awk, so this test proves nothing; re-pick the seam"
-    false
+    return 1
   }
+  [ "$(cat "$BATS_TEST_TMPDIR/awk-delayed")" = delayed-once ] &&
+    [ -e "$BATS_TEST_TMPDIR/awk-delay-done" ] &&
+    [ ! -e "$BATS_TEST_TMPDIR/awk-delay-failed" ] || {
+      echo "the startup delay fixture did not complete exactly once"
+      return 1
+    }
 }
 
 @test "watch-once: total lifetime stays within the timeout even when startup is slow (#558)" {
