@@ -53,7 +53,13 @@ set -euo pipefail
 # curl's Authorization header. It is never echoed, logged, or included in
 # the failure line.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Process starts are the cost that matters here: on native Windows (Git Bash)
+# handle alone was measured at about 10s, almost all of it process creation
+# (#1584). So this file reads its input, its config and the key with builtins,
+# makes TWO jq calls (one over the request, one over the response) where it
+# used to make about two dozen, and builds the request without a temp dir.
+_src="${BASH_SOURCE[0]}"
+case "$_src" in */*) SCRIPT_DIR="${_src%/*}" ;; *) SCRIPT_DIR="." ;; esac
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/_lib.sh"
 
@@ -68,15 +74,41 @@ fail() {
   exit 1
 }
 
-input="$(cat)"
-config_path="$(printf '%s' "$input" | jq -r '.config_path // empty' 2>/dev/null)" ||
+IFS= read -r -d '' input || true
+
+# ONE jq call over the whole request. It prints, each field ended by the unit
+# separator (U+001F, a control character no JSON text can carry unescaped):
+#   config_path, a status, the state, the questions
+# The status is OK, E1 (body is not a JSON object carrying "questions") or E2
+# ("questions" is not an object); state and questions are compact JSON (tojson
+# escapes any control character, so neither can contain the separator).
+# -j adds no newline of its own, which is also what keeps a native Windows jq
+# from appending a CR to the last value (#829).
+#
+# config_path is read from the request the dispatcher built, never from the
+# sender's body, so it is the first field and cannot be forged into the others.
+# A body that is not a string (an object sent as JSON) is used as it is.
+_jev_fields_out="$(jq -j '
+  def US: "\u001f";
+  (.config_path // "") as $cp
+  | (.body // "") as $bd
+  | (if ($bd | type) == "string" then ($bd | try fromjson catch null) else $bd end) as $b
+  | $cp + US +
+    ( if ($b | type) != "object" or ($b | has("questions") | not) then "E1" + US + US + US
+      elif ($b.questions | type) != "object" then "E2" + US + US + US
+      else "OK" + US + (($b.state // "") | tojson) + US + ($b.questions | tojson) + US end )
+' <<<"$input" 2>/dev/null)" ||
   fail "jev: request is not valid JSON"
-body="$(printf '%s' "$input" | jq -r '.body // empty')"
+_jev_fields "$_jev_fields_out"
+config_path="${_JEV_F[0]:-}"
+body_status="${_JEV_F[1]:-}"
+state_json="${_JEV_F[2]:-}"
+questions_json="${_JEV_F[3]:-}"
 
 [ -n "$config_path" ] || fail "jev: request carries no config_path"
 [ -f "$config_path" ] || fail "jev: member config not found: $config_path"
 
-key_file="$(_jev_conf_get "$config_path" key_file)"
+_jev_conf_read key_file "$config_path" key_file
 [ -n "$key_file" ] || fail "jev: member config is missing key_file: $config_path"
 
 _jev_read_key "$key_file" || fail "jev: $_JEV_KEY_ERROR"
@@ -84,7 +116,7 @@ key="$_JEV_KEY"
 
 # provider= is optional; an absent line means openrouter (existing configs
 # predate this key entirely and must keep working unchanged).
-provider="$(_jev_conf_get "$config_path" provider)"
+_jev_conf_read provider "$config_path" provider
 [ -n "$provider" ] || provider="openrouter"
 case "$provider" in
   openrouter|typesafe) : ;;
@@ -95,22 +127,17 @@ esac
 # key. Anything else -- plain text, JSON without that key -- is refused
 # here, naming the usage doc rather than guessing what the caller meant.
 USAGE_HINT="send {\"state\": ..., \"questions\": {...}} as the body -- see drivers/ext-tools/jev/USAGE.md"
-body_json=""
-if ! body_json="$(printf '%s' "$body" | jq -e -c '.' 2>/dev/null)" ||
-    ! printf '%s' "$body_json" | jq -e 'type == "object" and has("questions")' >/dev/null 2>&1; then
-  fail "jev: $USAGE_HINT"
-fi
+[ "$body_status" != "E1" ] || fail "jev: $USAGE_HINT"
+[ "$body_status" != "E2" ] || fail "jev: questions must be a JSON object -- $USAGE_HINT"
+[ "$body_status" = "OK" ] || fail "jev: request is not valid JSON"
 
-questions_json="$(printf '%s' "$body_json" | jq -c '.questions')"
-printf '%s' "$questions_json" | jq -e 'type == "object"' >/dev/null 2>&1 ||
-  fail "jev: questions must be a JSON object -- $USAGE_HINT"
-state_json="$(printf '%s' "$body_json" | jq -c '.state // ""')"
+_jev_endpoint "$provider"
+# Same bytes `jq -cn '{model: $model, state: $state, questions: $questions}'`
+# printed: compact, keys in this order. The model is one of the two fixed
+# names in _jev_endpoint, so it needs no escaping.
+request_json="{\"model\":\"$_JEV_MODEL\",\"state\":$state_json,\"questions\":$questions_json}"
 
-model="$(_jev_provider_default_model "$provider")"
-request_json="$(jq -cn --arg model "$model" --argjson state "$state_json" \
-  --argjson questions "$questions_json" '{model: $model, state: $state, questions: $questions}')"
-
-url="$(_jev_api_base "$provider")$(_jev_provider_path "$provider")"
+url="$_JEV_URL"
 out_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-jev-handle.XXXXXX")"
 
 _jev_api_call "$key" "$request_json" "$out_file" "$url" ||
@@ -199,7 +226,31 @@ esac
 # emits one COMPLETE, self-escaped JSON object per line -- jq's own
 # compact encoding never puts a raw newline inside one value, so reading
 # it one line at a time is safe without needing a delimiter of our own.
-result_json="$(jq -c '
+# ONE jq call over the response. Everything handle prints is rendered from what
+# this emits: a first record (row count, cost, input tokens, output tokens),
+# then one record per answered question (name, ok, choice, p, confidence). A
+# record ends with the record separator (U+001E), each field with the unit
+# separator (U+001F) -- so an empty field survives, and no field can carry
+# either, because `one` below turns every control character in a name or
+# choice (including those two, and CR/LF into the two characters \r and \n)
+# into a space, exactly what _jev_one_line does to the finished line. No
+# newline is written at all, so a native Windows jq has nothing to turn into
+# CRLF (#829). Numbers are passed as jq prints them and formatted by printf
+# below, as before.
+result_out="$(jq -j '
+  def US: "\u001f";
+  def RS: "\u001e";
+  def one: explode
+    | map(if . == 13 then [92, 114] elif . == 10 then [92, 110]
+          elif (. < 32 or . == 127) then [32] else [.] end)
+    | (add // []) | implode;
+  # A number as jq prints it. Only a string can carry anything else, and a
+  # separator or other control character in one becomes "_" (not a space, which
+  # printf would accept as a leading blank): it stays a non-number, so printf
+  # refuses it below exactly as it refused the raw text before.
+  def num: if . == null then ""
+           else (tostring | explode | map(if (. < 32 or . == 127) then 95 else . end) | implode) end;
+  def rec(f): (f | map(. + US) | add) + RS;
   (.answers // {}) as $a
   | ($a | keys_unsorted) as $ks
   | if ($a | type) != "object" or ($ks | length) == 0 then empty else
@@ -246,6 +297,11 @@ result_json="$(jq -c '
           output_tokens: (.usage.output_tokens // null)
         }
     end
+  | ( rec([(.rows | length | tostring), (.cost | num), (.input_tokens | num), (.output_tokens | num)]),
+      ( .rows[]
+        | rec([(.name | one), (.ok | tostring),
+               (if (.choice | type) == "string" then (.choice | one) else "" end),
+               (.p | num), (.confidence | num)]) ) )
 ' "$out_file" 2>/dev/null)" || fail "jev: unexpected response shape"
 rm -f "$out_file"
 
@@ -255,15 +311,23 @@ rm -f "$out_file"
 # or one with no keys at all). Both are "unexpected response shape" to the
 # caller, but only the first is reachable without this explicit `|| fail`:
 # left as a bare assignment, a failing jq inside `$(...)` would otherwise
-# just set $result_json to whatever partial/empty output it managed and let
+# just set $result_out to whatever partial/empty output it managed and let
 # `set -e` end the process right there, with no diagnostic on either stream
 # (review round 4).
-[ -n "$result_json" ] || fail "jev: unexpected response shape"
+[ -n "$result_out" ] || fail "jev: unexpected response shape"
 
-row_count="$(jq -r '.rows | length' <<<"$result_json")"
-cost_val="$(jq -r '.cost // empty' <<<"$result_json")"
-in_tokens="$(jq -r '.input_tokens // empty' <<<"$result_json")"
-out_tokens="$(jq -r '.output_tokens // empty' <<<"$result_json")"
+# Every field above went through `one`, so none can hold a separator and the
+# shape is exactly: one first record of 4 fields, then row_count records of 5.
+# Anything else is not a response this script rendered.
+_jev_records "$result_out"
+_jev_fields "${_JEV_R[0]}"
+[ "${#_JEV_F[@]}" -eq 4 ] || fail "jev: unexpected response shape"
+row_count="${_JEV_F[0]:-}"
+case "$row_count" in ''|*[!0-9]*) fail "jev: unexpected response shape" ;; esac
+[ "$row_count" -eq $(( ${#_JEV_R[@]} - 1 )) ] || fail "jev: unexpected response shape"
+cost_val="${_JEV_F[1]:-}"
+in_tokens="${_JEV_F[2]:-}"
+out_tokens="${_JEV_F[3]:-}"
 
 # Exactly one question: same rendering as always (a joint figure over one
 # term IS that term, so this is not a special case mathematically -- it is
@@ -272,11 +336,12 @@ out_tokens="$(jq -r '.output_tokens // empty' <<<"$result_json")"
 # A malformed sole answer still fails the whole call -- there is nothing
 # else in the reply to salvage it with, unlike the 2+ case below.
 if [ "$row_count" -eq 1 ]; then
-  ok_val="$(jq -r '.rows[0].ok' <<<"$result_json")"
-  [ "$ok_val" = "true" ] || fail "jev: unexpected response shape"
-  choices="$(jq -r '.rows[0].choice' <<<"$result_json")"
-  p_val="$(jq -r '.rows[0].p' <<<"$result_json")"
-  c_val="$(jq -r '.rows[0].confidence' <<<"$result_json")"
+  _jev_fields "${_JEV_R[1]}"
+  [ "${#_JEV_F[@]}" -eq 5 ] || fail "jev: unexpected response shape"
+  [ "${_JEV_F[1]:-}" = "true" ] || fail "jev: unexpected response shape"
+  choices="${_JEV_F[2]:-}"
+  p_val="${_JEV_F[3]:-}"
+  c_val="${_JEV_F[4]:-}"
   if [ "$provider" = "typesafe" ]; then
     [ -n "$in_tokens" ] && [ -n "$out_tokens" ] || fail "jev: unexpected response shape"
     printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, tokens %s in / %s out)' \
@@ -286,7 +351,8 @@ if [ "$row_count" -eq 1 ]; then
     printf -v reply_line 'jev: %s (choice p=%.2f, confidence=%.2f, cost $%.6f)' \
       "$choices" "$p_val" "$c_val" "$cost_val"
   fi
-  printf '%s\n' "$(_jev_one_line "$reply_line")"
+  _jev_one_line_var reply_line "$reply_line"
+  printf '%s\n' "$reply_line"
 else
   # Two or more: one LINE per question, `name=choice (p=.., confidence=..)`,
   # addressable by NAME (the sender's own `questions` key) rather than by
@@ -303,19 +369,18 @@ else
   # row would throw away N-1 good answers along with it, and the caller
   # already has to read each row's own name regardless.
   lines=()
-  while IFS= read -r row; do
-    seg_name="$(jq -r '.name' <<<"$row")"
-    seg_ok="$(jq -r '.ok' <<<"$row")"
-    if [ "$seg_ok" != "true" ]; then
+  for ((idx = 1; idx < ${#_JEV_R[@]}; idx++)); do
+    _jev_fields "${_JEV_R[$idx]}"
+    [ "${#_JEV_F[@]}" -eq 5 ] || fail "jev: unexpected response shape"
+    seg_name="${_JEV_F[0]:-}"
+    if [ "${_JEV_F[1]:-}" != "true" ]; then
       printf -v line '%s=error (malformed answer)' "$seg_name"
     else
-      seg_choice="$(jq -r '.choice' <<<"$row")"
-      seg_p="$(jq -r '.p' <<<"$row")"
-      seg_c="$(jq -r '.confidence' <<<"$row")"
-      printf -v line '%s=%s (p=%.2f, confidence=%.2f)' "$seg_name" "$seg_choice" "$seg_p" "$seg_c"
+      printf -v line '%s=%s (p=%.2f, confidence=%.2f)' "$seg_name" "${_JEV_F[2]:-}" "${_JEV_F[3]:-}" "${_JEV_F[4]:-}"
     fi
-    lines+=("$(_jev_one_line "$line")")
-  done < <(jq -c '.rows[]' <<<"$result_json")
+    _jev_one_line_var line "$line"
+    lines+=("$line")
+  done
 
   # The call's own aggregate cost/tokens, same figure as before -- appended
   # to the LAST line rather than repeated on every one, since it describes
