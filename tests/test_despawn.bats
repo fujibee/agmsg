@@ -22,7 +22,18 @@ setup() {
 }
 
 teardown() {
-  teardown_test_env
+  # A test that backgrounds a watch.sh kills it at the end of its own body, which
+  # a failing assertion or an interrupt skips, and under Git Bash the kill reaches
+  # only the top-level process, not the watcher's own subshell. Left behind, the
+  # pair polls the deleted store forever (#1586). Reap by the test's own skill
+  # dir (unique per test) before the sandbox goes. Scanning ps is costly on
+  # Windows, so only tests that launched a watcher pay for it.
+  local reap_status=0 teardown_status=0
+  if [ -n "${_WATCHER_LAUNCHED:-}" ]; then
+    _reap_test_skill_dir_procs || reap_status=$?
+  fi
+  teardown_test_env || teardown_status=$?
+  [ "$reap_status" -eq 0 ] && [ "$teardown_status" -eq 0 ]
 }
 
 @test "despawn: graceful — ctrl:despawn makes the member drop its role" {
@@ -40,6 +51,7 @@ teardown() {
     bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- &
   local wpid=$! i
+  _WATCHER_LAUNCHED=1
   # Wait for the watcher to attach (it claims the lock + writes the ready sentinel).
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$(_ready_path team alice)" ] && break; sleep 0.5; done
   [ -e "$(_ready_path team alice)" ]
@@ -132,6 +144,7 @@ _wait_until_read_for_alice() {   # <body-substring> <budget-seconds>
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- &
   local wpid=$! i
+  _WATCHER_LAUNCHED=1
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$(_ready_path team alice)" ] && break; sleep 0.5; done
   [ -e "$(_ready_path team alice)" ]
 
@@ -381,6 +394,7 @@ EOF
     bash "$SCRIPTS/watch.sh" sess-broad "$PROJ" claude-code \
     >/dev/null 2>&1 3>&- &
   local wpid=$! i
+  _WATCHER_LAUNCHED=1
   for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$wpid" 2>/dev/null && break; sleep 0.5; done
 
   # Deliver a despawn aimed at alice straight into the stream.
@@ -508,6 +522,7 @@ _despawn_member_with_env() {   # <bindir> <env assignments...>
     bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
     >"$RUN/watch.out" 2>"$RUN/watch.err" 3>&- &
   WPID=$!
+  _WATCHER_LAUNCHED=1
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$(_ready_path team alice)" ] && break; sleep 0.5; done
   [ -e "$(_ready_path team alice)" ]

@@ -40,8 +40,10 @@ case "${1:-}" in
     fi
     # Run the listener as a CHILD (no exec) so this script stays the recorded pid;
     # its argv ("...real-codex app-server --listen") is what codex-monitor's
-    # cmdline check matches. The child exits when this parent is killed.
-    python3 - <<'PY'
+    # cmdline check matches. The child is backgrounded and teardown's kill is
+    # forwarded to it: native Python on Windows never sees its parent change
+    # (os.getppid() stays put), so the loop below cannot be what ends it (#1612).
+    python3 - <<'PY' &
 import socket, sys, os
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -57,6 +59,9 @@ while True:
     except Exception:
         pass
 PY
+    child=$!
+    trap 'kill "$child" 2>/dev/null' TERM INT
+    wait "$child" 2>/dev/null || wait "$child" 2>/dev/null
     ;;
   *)
     printf 'plain-codex' >> "$CALL_LOG"
