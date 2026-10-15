@@ -312,6 +312,32 @@ seed_resumable() {
   [[ "$output" != *"resume"* ]]
 }
 
+@test "spawn: forwards CODEX_HOME across a terminal environment boundary (#1436)" {
+  export CODEX_HOME="$TEST_SKILL_DIR/profile with spaces 'quoted' \$(literal)"
+  mkdir -p "$CODEX_HOME"
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  # Capture what the launched CLI actually receives without starting Codex or
+  # writing any real profile. The terminal shell has no CODEX_HOME of its own.
+  printf '#!/usr/bin/env bash\nprintf "%%s" "${CODEX_HOME-unset}" > "$CAPTURE.profile"\n' > "$SCRIPTS/drivers/types/codex/codex-shim.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/noshell"
+  chmod +x "$STUB_BIN/noshell"
+  local expected="$CODEX_HOME" boot
+  run bash "$SCRIPTS/spawn.sh" codex alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env -u CODEX_HOME SHELL="$STUB_BIN/noshell" bash "$boot"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CAPTURE.profile")" = "$expected" ]
+
+  # An unset caller must not override the terminal's existing profile/default.
+  run env -u CODEX_HOME bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(tail -1 "$CAPTURE")"
+  run env CODEX_HOME="$expected/terminal" SHELL="$STUB_BIN/noshell" bash "$boot"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CAPTURE.profile")" = "$expected/terminal" ]
+}
+
 @test "spawn: boot script unsets the type's session-identity vars (#294)" {
   # A same-type spawn (claude-code from a claude-code session) must not leak the
   # parent's CLAUDE_CODE_SESSION_ID to the child, or the child mistakes the

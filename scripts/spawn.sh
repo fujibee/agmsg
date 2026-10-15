@@ -318,6 +318,7 @@ fi
 # of the fix. `spawn_unset_env=` lists only vars that are safe (and necessary) to
 # drop on spawn; unset (the default) strips nothing.
 SPAWN_UNSET_VARS="$(agmsg_type_get "$AGENT_TYPE" spawn_unset_env)"
+SPAWN_FORWARD_VARS="$(agmsg_type_get "$AGENT_TYPE" spawn_forward_env)"
 
 # Extra CLI args for this type from the spawn options file (opt-in, see
 # scripts/lib/spawn-options.sh). Read line-by-line — never word-split — so a
@@ -529,6 +530,17 @@ PLAIN_WITNESS="${BOOT}.plain-witness"
   # actas flow knows the session is already named <team>-<agent> (name_arg) and
   # suppresses the "rename this session" tip meant for hand-started sessions.
   echo 'export AGMSG_SPAWNED=1'
+  # Terminal servers and OS launchers may start from a different environment.
+  # Capture the type's explicit configuration inputs in the boot script rather
+  # than relying on the terminal shell to inherit the spawning process's values.
+  for _v in $SPAWN_FORWARD_VARS; do
+    case "$_v" in
+      ''|[0-9]*|*[!A-Za-z0-9_]*) die "invalid spawn_forward_env variable: $_v" ;;
+    esac
+    if [ "${!_v+x}" = x ]; then
+      printf 'export %s=%q\n' "$_v" "${!_v}"
+    fi
+  done
   # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
   # An entry ending in `*` is a NAMESPACE: every exported variable whose name
   # starts with that prefix is unset, enumerated from `env` at boot time, so a
