@@ -1202,19 +1202,30 @@ _boxed_screen() {
 # on a real stuck pane 2026-09-21 -- it draws there too, not just on the
 # marker line, so the structural check must braille-strip THIS line before
 # judging it blank, or every read of a genuinely idle Codex pane fails to
-# confirm the live widget at all), a status footer containing "·" -- the
-# live-widget triplet #1321 requires to confirm this is the real box.
+# confirm the live widget at all), then a status footer -- the live-widget
+# triplet #1321 requires to confirm this is the real box.
 #
 # <dim>, same meaning as _boxed_screen's -- matches Codex's own placeholder
 # (dim) versus a real typed draft (not dim), measured live 2026-09-22.
+#
+# <footer> picks which of the two real footer shapes #1394 found
+# (agmsg_input_box_locate's flat reader must accept EITHER): "idle" (the
+# default, and the only one before #1394) has "·"; "typing" has no "·" at
+# all, measured live, throwaway tmux + real codex CLI -- #1394's own repro
+# of a genuine draft making the box impossible to even locate.
 _flat_screen() {
-  local tail="$1" dim="$2" esc
+  local tail="$1" dim="$2" footer="${3:-idle}" esc footer_line
   esc="$(printf '\033')"
-  if [ "$dim" = yes ]; then
-    printf 'some transcript line\n›%s[0m%s[2m%s%s[0m\n    ⠈   ⠁  ⠐    ⠄\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' \
-      "$esc" "$esc" "$tail" "$esc"
+  if [ "$footer" = typing ]; then
+    footer_line='  tab to queue message                            100% context left'
   else
-    printf 'some transcript line\n›%s\n    ⠈   ⠁  ⠐    ⠄\n  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task\n' "${tail:+ $tail}"
+    footer_line='  gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task'
+  fi
+  if [ "$dim" = yes ]; then
+    printf 'some transcript line\n›%s[0m%s[2m%s%s[0m\n    ⠈   ⠁  ⠐    ⠄\n%s\n' \
+      "$esc" "$esc" "$tail" "$esc" "$footer_line"
+  else
+    printf 'some transcript line\n›%s\n    ⠈   ⠁  ⠐    ⠄\n%s\n' "${tail:+ $tail}" "$footer_line"
   fi
 }
 
@@ -1275,11 +1286,58 @@ _flat_screen() {
   [ "$status" -eq 0 ]
   grep -q '^herdr \[agent\] \[prompt\]' "$ARGV_LOG"
 
-  # Codex, a real draft (not dim), refused on the first read alone.
+  # Codex, a real draft (not dim), refused on the first read alone. Uses
+  # the TYPING footer (#1394): real text sitting in the box changes the
+  # footer's own shape (no "·" anywhere), measured live -- before #1394
+  # this made the box impossible to even locate, let alone classify as a
+  # real draft; the status code below (14, not 15) proves the box WAS
+  # located this time, and refused only because of what is in it.
   : > "$ARGV_LOG"
-  _install_fake_herdr_screen_sequence "$(_flat_screen 'a real draft' '')"
+  _install_fake_herdr_screen_sequence "$(_flat_screen 'a real draft' '' typing)"
   run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
   [ "$status" -eq 14 ]
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
+
+  # Codex, the same real draft, but the typing footer carries TRAILING
+  # whitespace this time -- spaces and a tab (review, round 3): common
+  # from a tmux `capture-pane` read, and the suffix check is anchored to
+  # the literal end of the string, so without rtrimming first this still
+  # refused to even locate the box (15) despite the footer otherwise being
+  # the real one. Still a real draft once located, so still 14.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_screen_sequence "$(printf '›a real draft\n\n  tab to queue message    100%% context left  \t\t\n')"
+  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
+  [ "$status" -eq 14 ]
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
+
+  # Codex, the counterexample a review round found (#1394): a transcript
+  # line merely MENTIONING both of the typing footer's two key phrases in
+  # prose, never the real footer's own shape (not indented the way the
+  # real footer is, and not ending the line in a percentage). Matching
+  # just "contains these two substrings somewhere" (an earlier version of
+  # this fix) accepted this as the live widget; the anchored pattern must
+  # not. Refuses by NOT finding the box at all (15), the same as any other
+  # stale/decorative "›" with nothing live behind it -- never reaches a
+  # real-draft classification on prose that was never the footer.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_screen_sequence "$(printf '›\n\nA message quoted "tab to queue" and "context left" as examples.\n')"
+  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
+  [ "$status" -eq 15 ]
+  [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
+
+  # Codex, the SHARPER counterexample a second review round found (#1394):
+  # a `case` glob anchor (`[[:space:]]*'tab to queue message'*...`) is NOT
+  # a real "starts with" check -- `[[:space:]]` matches a single
+  # character, and the `*` right after it matches anything, so the whole
+  # pattern only ever required ONE leading space somewhere before the
+  # phrase, not that the phrase starts the line. This line has a leading
+  # space, then unrelated prose, then the phrase and a percentage -- which
+  # the glob-anchored version of this fix still accepted. Refused the same
+  # way, by failing to locate the box at all (15).
+  : > "$ARGV_LOG"
+  _install_fake_herdr_screen_sequence "$(printf '›\n\n  A message quotes this footer: tab to queue message and 100%% context left\n')"
+  run bash "$SCRIPTS/poke.sh" testteam codex1 "hello"
+  [ "$status" -eq 15 ]
   [ "$(grep -c '^herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
 
   # Codex, stale/off-screen marker on BOTH reads: a blank "›" with blank
