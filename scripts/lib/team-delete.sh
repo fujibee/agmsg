@@ -57,17 +57,35 @@ _agmsg_team_delete_all_names() {
 }
 
 # True IFF <encoded_team>__<encoded_name> has exactly one possible split back
-# into (team, name) -- i.e. neither half itself contains "__". actas-lock.sh's
-# own #1023 comment gives the failing case: team "a__b" agent "c" and team "a"
-# agent "b__c" both encode to the same legacy path, since "__" is a plain,
-# unescaped separator and either name may legally contain it. Only when this
-# returns true is the legacy path provably this (team, name) pair's alone; a
-# name that fails this check is left untouched rather than guessed at, the
-# same "check, don't guess" rule actas-lock.sh already applies to the lock's
-# own three-valued read.
+# into (team, name). actas-lock.sh's own #1023 comment gives the base failing
+# case: team "a__b" agent "c" and team "a" agent "b__c" both encode to the
+# same legacy path, since "__" is a plain, unescaped separator and either
+# name may legally contain it -- caught by neither half containing "__"
+# itself.
+#
+# That alone is not enough (review finding, #1625 round 2): team "a" agent
+# "_b" and team "a_" agent "b" both encode to "a___b" too, even though
+# NEITHER half contains "__" on its own -- the extra ambiguity comes from an
+# underscore sitting right at the boundary, adjacent to the inserted "__"
+# separator, forming a SECOND "__" that overlaps it. Rather than re-deriving
+# that case by case, this checks the general property directly: the full
+# joined string "<team>__<name>" must contain the "__" substring at exactly
+# one position. Any one of neither-half-contains-"__", team not ending in
+# "_", and name not starting with "_" failing to hold is exactly the four
+# ways a second "__" can appear next to, or inside, the one real separator
+# -- a 2-character substring can only lie entirely within one half, straddle
+# the team/separator boundary, or straddle the separator/name boundary, so
+# these four checks are exhaustive, not merely the ones found so far.
+#
+# Only when this returns true is the legacy path provably this (team, name)
+# pair's alone; a name that fails this check is left untouched rather than
+# guessed at, the same "check, don't guess" rule actas-lock.sh already
+# applies to the lock's own three-valued read.
 _agmsg_team_delete_legacy_unambiguous() {   # <encoded_team> <encoded_name>
   case "$1" in *__*) return 1 ;; esac
   case "$2" in *__*) return 1 ;; esac
+  case "$1" in *_) return 1 ;; esac
+  case "$2" in _*) return 1 ;; esac
   return 0
 }
 
