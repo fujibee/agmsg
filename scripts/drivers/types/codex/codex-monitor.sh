@@ -254,7 +254,31 @@ _agmsg_codex_seat_record_write "$SEAT_RECORD" "$PROJECT_HASH" "$server_bg" "$POR
   exec_plain_codex
 }
 
-"$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null
+# `delivery.sh set monitor` rewrites .codex/hooks.json to the same content when
+# monitor delivery is already configured, and costs dozens of processes to find
+# that out -- seconds on Windows, paid on every launch. Skip it only when the
+# file is byte-for-byte what `set monitor` itself left the last time it ran for
+# this project under this install: the marker below holds that content plus the
+# install's location and VERSION, so an upgrade, a moved install, or any edit to
+# the file (a changed project, a missing commandWindows, a stale entry) is a
+# mismatch and runs the full set. No partial match is trusted. Read and written
+# with builtins: no process is started on the skip path.
+_hooks_file="$PROJECT/.codex/hooks.json"
+_hooks_marker="$RUN_DIR/codex-hooks-set.$PROJECT_HASH"
+_hooks_stamp=""
+read -r _hooks_stamp < "$SKILL_DIR/VERSION" 2>/dev/null || true
+_hooks_now=""
+_hooks_last=""
+IFS= read -r -d '' _hooks_now < "$_hooks_file" 2>/dev/null || true
+IFS= read -r -d '' _hooks_last < "$_hooks_marker" 2>/dev/null || true
+if [ -n "$_hooks_now" ] && [ "$_hooks_last" = "$SKILL_DIR"$'\n'"$_hooks_stamp"$'\n'"$_hooks_now" ]; then
+  :
+else
+  "$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null
+  _hooks_now=""
+  IFS= read -r -d '' _hooks_now < "$_hooks_file" 2>/dev/null || true
+  printf '%s\n%s\n%s' "$SKILL_DIR" "$_hooks_stamp" "$_hooks_now" > "$_hooks_marker" 2>/dev/null || true
+fi
 
 export AGMSG_CODEX_BRIDGE=1
 export AGMSG_CODEX_BRIDGE_APP_SERVER="$SOCKET_URL"

@@ -206,8 +206,12 @@ agmsg_delivery_apply_default() {
   # startup/parse error, positive-control confirmed — the Hooks Review screen was
   # not directly reached (inferred harmless). So the gate is defense-in-depth on
   # top of that measurement, not the sole protection against an unknown.
+  # Only turn and both install the PostToolUse entry, so only they need the CLI's
+  # version. Asking for monitor/off ran `<cli> --version` for nothing, and for
+  # codex that call goes back through the PATH shim.
   local pt_output pt_min pt_cli pt_install=0
   pt_output=$(agmsg_type_get "$type" posttooluse_output 2>/dev/null || true)
+  case "$mode" in turn|both) ;; *) pt_output="" ;; esac
   if [ -n "$pt_output" ]; then
     pt_min=$(agmsg_type_get "$type" posttooluse_min_cli 2>/dev/null || true)
     pt_cli=$(agmsg_type_get "$type" cli 2>/dev/null || true)

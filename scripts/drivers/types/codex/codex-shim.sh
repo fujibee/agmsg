@@ -159,8 +159,11 @@ fi
 project="$(project_from_args "$@")"
 command_name="$(first_non_option "$@" || true)"
 
-use_monitor=1
-is_monitor_project "$project" || use_monitor=0
+# Whether this project is in monitor mode is only asked on the paths below that
+# launch a session. `delivery status` is the costliest thing this shim does (a
+# few dozen processes, which Windows pays dearly for), and the subcommands that
+# pass straight through to the real Codex -- `--version` included -- do not
+# need its answer.
 
 # A top-level Codex launch that does not go through the monitor bridge runs the
 # real binary directly. On an elevated Windows shell that binary refuses to
@@ -182,11 +185,11 @@ monitor_cmd="${AGMSG_CODEX_MONITOR_CMD:-$SCRIPT_DIR/codex-monitor.sh}"
 
 case "$command_name" in
   "")
-    [ "$use_monitor" = 1 ] || exec_plain_launch "$@"
+    is_monitor_project "$project" || exec_plain_launch "$@"
     AGMSG_REAL_CODEX="$real_codex" exec "$monitor_cmd" --project "$project" --codex-command codex -- "$@"
     ;;
   resume)
-    [ "$use_monitor" = 1 ] || exec_plain_launch "$@"
+    is_monitor_project "$project" || exec_plain_launch "$@"
     monitor_args=()
     removed_resume=0
     for arg in "$@"; do
@@ -211,7 +214,7 @@ case "$command_name" in
     exec "$real_codex" "$@"
     ;;
   *)
-    [ "$use_monitor" = 1 ] || exec_plain_launch "$@"
+    is_monitor_project "$project" || exec_plain_launch "$@"
     AGMSG_REAL_CODEX="$real_codex" exec "$monitor_cmd" --project "$project" --codex-command codex -- "$@"
     ;;
 esac
