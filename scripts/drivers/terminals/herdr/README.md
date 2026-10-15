@@ -5,6 +5,13 @@ this session's terminal as `herdr`. Its manifest ceiling (`terminal.conf`):
 
 ## peek exit codes
 
+Both `terminal_peek` and `terminal_peek_styled` recognize structured error
+JSON on stdout or stderr (herdr 0.9.1 reports it on stderr). A nonempty
+`error.code` on stdout takes precedence; stderr is consulted only when stdout
+has no usable code. Only `pane_not_found` confirms absence, and an explicit
+`error.pane` must match the requested pane. Failure diagnostics stay on stderr,
+never in the pane content returned on stdout (#1317).
+
 herdr's own `terminal_peek` returns exactly three failure codes, never a
 fourth: **12** = herdr's own reply confirmed the pane is gone; **11** = the
 read failed WITHOUT herdr confirming that — a denied socket operation, a
