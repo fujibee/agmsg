@@ -51,23 +51,23 @@ import {
   type SplitNode,
 } from "./paneTree";
 import { PulseDot } from "./pulseSync";
+import {
+  captureRoomMessageIds,
+  isMessageForCurrentRoom,
+  mergeCurrentRoomHistory,
+  mergeRefreshedRoomHistory,
+  mergeRoomMessages,
+  roomHistoryResponseIsCurrent,
+  scheduleRoomHistoryRetry,
+  startCurrentRoomSnapshot,
+  subscribeThenLoadRoomHistory,
+  type Message,
+} from "./roomMessages";
 import { RailAvatar, SidebarUser } from "./SidebarUser";
 import { resolveActiveTab } from "./tabMemory";
 import "./App.css";
 
 export type Member = { name: string; types: string[]; project: string };
-type Message = {
-  // Opaque. api.sh's contract: "Every id (message ids included) is a JSON
-  // string, never a bare number." Event-log ids are UUIDs; only the legacy
-  // table's were integers. Used as a React key and as the paging cursor,
-  // neither of which needs it to be ordered or numeric.
-  id: string;
-  team: string;
-  from: string;
-  to: string;
-  body: string;
-  created_at: string;
-};
 export type Pane = {
   id: string;
   label: string;
@@ -290,6 +290,8 @@ type Modal =
 export const APP_USER_TYPE = "agmsg-app";
 // Team-room history page size — the initial load, and each scroll-up "load more".
 const ROOM_PAGE_SIZE = 30;
+const ROOM_HISTORY_REFRESH_RETRY_DELAY_MS = 750;
+type RoomHistoryLoadOptions = { preserveCurrent?: boolean; retryOnFailure?: boolean };
 // Persists which team was selected across restarts. Window/pane state is
 // deliberately NOT persisted (yet) — just landing on the same team is
 // enough for now; panes always start fresh each launch anyway (they're
@@ -753,6 +755,30 @@ export default function App() {
   // or close the target tab (#431).
   const teamRef = useRef<string>("");
   teamRef.current = team;
+  const messagesRef = useRef<Message[]>([]);
+  messagesRef.current = messages;
+  const cmdNameRef = useRef(cmdName);
+  cmdNameRef.current = cmdName;
+  // The listener is installed once. It only accepts events for the team whose
+  // snapshot has started, so a new team's event before that boundary is picked
+  // up by the snapshot rather than being appended to the old room.
+  const roomListenerReadyRef = useRef(false);
+  const roomEventTeamRef = useRef("");
+  // A new initial history request makes any old initial/page response stale.
+  // The separate paging counter also prevents an old page's finally block
+  // from clearing the spinner for a newer page.
+  const roomHistoryRequestRef = useRef(0);
+  const roomPagingRequestRef = useRef(0);
+  const roomHistoryRetryCancelRef = useRef<(() => void) | null>(null);
+  // Keep the backend's page cursor separate from display order. Live events
+  // are merged and sorted for the room, but agmsg_messages expects beforeId
+  // from the oldest row in its own returned page.
+  const oldestRoomMessageIdRef = useRef<string | null>(null);
+  const cancelRoomHistoryRetry = useCallback(() => {
+    roomHistoryRetryCancelRef.current?.();
+    roomHistoryRetryCancelRef.current = null;
+  }, []);
+  useEffect(() => () => cancelRoomHistoryRetry(), [cancelRoomHistoryRetry]);
   // The current tab/window id, for the external-file-drop handler (mount-
   // once effect, refs so it doesn't need to resubscribe on every tab
   // switch) to fall back to when a dropped file doesn't land on any
@@ -1055,25 +1081,148 @@ export default function App() {
   }, [team, sidebarCollapsed]);
 
   // The most recent history page for `t`, replacing whatever's currently
-  // shown — used both on team switch and after purging a team's messages
-  // (the same reset a stale page would otherwise leave behind).
-  const loadRoomMessages = useCallback((t: string) => {
-    setMessages([]);
-    setHasMoreHistory(true);
-    return invoke<Message[]>("agmsg_messages", { team: t, limit: ROOM_PAGE_SIZE })
-      .then((msgs) => {
-        setMessages(msgs);
-        setHasMoreHistory(msgs.length >= ROOM_PAGE_SIZE);
+  // shown — used both on team switch and after purging a team's messages.
+  // A live event can land while this awaits, so its response merges rather
+  // than replaces. Older responses cannot overwrite a newer room/request.
+  const loadRoomMessages = useCallback(
+    (t: string, options: RoomHistoryLoadOptions = {}) => {
+      const preserveCurrent = options.preserveCurrent === true;
+      const retryOnFailure = options.retryOnFailure === true;
+      // onPurgeMessages can resume after a team switch. Do not clear the new
+      // room or invalidate its request with that old team callback.
+      if (!roomListenerReadyRef.current || teamRef.current !== t) return Promise.resolve();
+      cancelRoomHistoryRetry();
+      const request = ++roomHistoryRequestRef.current;
+      ++roomPagingRequestRef.current;
+      const idsBeforeRefresh = preserveCurrent ? captureRoomMessageIds(messagesRef.current) : null;
+      isPrependingRef.current = false;
+      roomEventTeamRef.current = t;
+      if (!preserveCurrent) {
+        oldestRoomMessageIdRef.current = null;
+        setMessages([]);
+        setHasMoreHistory(true);
+      }
+      setLoadingHistory(false);
+      const isCurrent = () =>
+        roomHistoryResponseIsCurrent(teamRef.current, roomHistoryRequestRef.current, t, request);
+      return invoke<Message[]>("agmsg_messages", { team: t, limit: ROOM_PAGE_SIZE })
+        .then((msgs) => {
+          if (!isCurrent()) return;
+          oldestRoomMessageIdRef.current = msgs[0]?.id ?? null;
+          setMessages((prev) => {
+            if (!isCurrent()) return prev;
+            if (idsBeforeRefresh) return mergeRefreshedRoomHistory(msgs, prev, idsBeforeRefresh);
+            return mergeCurrentRoomHistory(prev, msgs, teamRef.current, roomHistoryRequestRef.current, t, request);
+          });
+          setHasMoreHistory(msgs.length >= ROOM_PAGE_SIZE);
+        })
+        .catch((error) => {
+          if (!isCurrent()) return;
+          console.error(error);
+          if (!preserveCurrent || !retryOnFailure) return;
+          const retryRequest = request;
+          roomHistoryRetryCancelRef.current = scheduleRoomHistoryRetry(
+            ROOM_HISTORY_REFRESH_RETRY_DELAY_MS,
+            (callback, delay) => window.setTimeout(callback, delay),
+            (timer) => window.clearTimeout(timer as number),
+            () =>
+              roomListenerReadyRef.current &&
+              roomHistoryResponseIsCurrent(teamRef.current, roomHistoryRequestRef.current, t, retryRequest),
+            () => {
+              roomHistoryRetryCancelRef.current = null;
+              void loadRoomMessages(t, { preserveCurrent: true });
+            },
+          );
+        });
+    },
+    [cancelRoomHistoryRetry],
+  );
+
+  const handleLiveRoomMessage = useCallback((message: Message) => {
+    if (!isMessageForCurrentRoom(message, teamRef.current, roomEventTeamRef.current)) return;
+    setMessages((prev) => mergeRoomMessages(prev, [message]));
+    // Display reconciliation never suppresses delivery to a matching pane.
+    // Only inject into NON-native panes; a native (actas-booted) agent runs
+    // its own agmsg monitor and would otherwise receive the message twice.
+    const pane = panesRef.current.find((pn) => pn.label === message.to && !pn.native);
+    if (pane) {
+      // Inject a kickoff notice, not the raw message body verbatim. The real
+      // agmsg Monitor (watch.sh) never types a message's contents directly
+      // into an agent — it hands over a structured "<from> → <to> | <body>"
+      // event and lets the agent decide what to do, typically by checking
+      // its own inbox. Typing the raw body instead loses who it's from and
+      // — worse — feeds arbitrary user text straight into a TUI's input box,
+      // where line breaks/long text/special characters can break the
+      // keystroke replay (that's what caused the "types but doesn't submit"
+      // bug this replaces).
+      //
+      // A one-line preview of the body IS included (flattened + capped) —
+      // knowing at a glance what the message is about, not just that one
+      // arrived, is worth the small re-introduction of body content; the
+      // flattening/cap keeps it out of "arbitrary text breaks the TUI"
+      // territory since it can no longer contain newlines or run long.
+      const flat = message.body.replace(/\s+/g, " ").trim();
+      const preview = flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
+      const kickoff = `[agmsg] ${message.from}: "${preview}" — run /${cmdNameRef.current} to check it.`;
+      void invoke("pty_inject", { id: pane.id, text: kickoff });
+    }
+  }, []);
+
+  const handleRoomHistoryRefresh = useCallback(
+    (refreshedTeam: string) => {
+      if (refreshedTeam !== teamRef.current) return;
+      // A route change refreshes stored history; it is not a live delivery
+      // and must never produce a pane kickoff.
+      if (roomListenerReadyRef.current) {
+        void loadRoomMessages(refreshedTeam, { preserveCurrent: true, retryOnFailure: true });
+      }
+    },
+    [loadRoomMessages],
+  );
+
+  // Subscribe once for the App's lifetime, then start history only after both
+  // listeners resolve. Team changes reuse them and start a new snapshot
+  // through the current-team refs instead of opening a delivery gap.
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    const subscriptionAbort = new AbortController();
+    void subscribeThenLoadRoomHistory(
+      (onMessage) => listen<Message>("agmsg-message", (event) => onMessage(event.payload)),
+      (onHistoryRefresh) =>
+        listen<string>("agmsg-history-refresh", (event) => onHistoryRefresh(event.payload)),
+      () => teamRef.current,
+      () => {
+        roomListenerReadyRef.current = true;
+      },
+      (teamName) => loadRoomMessages(teamName),
+      handleLiveRoomMessage,
+      handleRoomHistoryRefresh,
+      () => active,
+      subscriptionAbort.signal,
+    )
+      .then((stop) => {
+        if (!active) stop?.();
+        else unlisten = stop;
       })
       .catch(console.error);
-  }, []);
+    return () => {
+      active = false;
+      roomListenerReadyRef.current = false;
+      roomEventTeamRef.current = "";
+      cancelRoomHistoryRetry();
+      subscriptionAbort.abort();
+      unlisten?.();
+    };
+  }, [cancelRoomHistoryRetry, handleLiveRoomMessage, handleRoomHistoryRefresh, loadRoomMessages]);
 
   // On team change: load members + the most recent history page. Prompt to
   // add an app-user if missing.
   useEffect(() => {
+    cancelRoomHistoryRetry();
     if (!team) return;
     setDeselected(new Set()); // reset the room filter when switching teams
-    loadRoomMessages(team);
+    startCurrentRoomSnapshot(team, roomListenerReadyRef.current, loadRoomMessages);
     loadMembers(team)
       .then((m) => {
         if (
@@ -1084,40 +1233,7 @@ export default function App() {
         }
       })
       .catch(console.error);
-  }, [team, loadMembers, loadRoomMessages]);
-
-  // Live team-room updates; inject into a matching pane.
-  useEffect(() => {
-    const p = listen<Message>("agmsg-message", (e) => {
-      if (e.payload.team !== team) return;
-      setMessages((prev) => [...prev, e.payload]);
-      // Only inject into NON-native panes; a native (actas-booted) agent runs
-      // its own agmsg monitor and would otherwise receive the message twice.
-      const pane = panesRef.current.find((pn) => pn.label === e.payload.to && !pn.native);
-      if (pane) {
-        // Inject a kickoff notice, not the raw message body verbatim. The
-        // real agmsg Monitor (watch.sh) never types a message's contents
-        // into an agent — it hands over a structured "<from> → <to> | <body>"
-        // event and lets the agent decide what to do, typically by checking
-        // its own inbox. Typing the raw body instead loses who it's from
-        // and — worse — feeds arbitrary user text straight into a TUI's
-        // input box, where line breaks/long text/special characters can
-        // break the keystroke replay (that's what caused the "types but
-        // doesn't submit" bug this replaces).
-        //
-        // A one-line preview of the body IS included (flattened + capped) —
-        // knowing at a glance what the message is about, not just that one
-        // arrived, is worth the small re-introduction of body content; the
-        // flattening/cap keeps it out of "arbitrary text breaks the TUI"
-        // territory since it can no longer contain newlines or run long.
-        const flat = e.payload.body.replace(/\s+/g, " ").trim();
-        const preview = flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
-        const kickoff = `[agmsg] ${e.payload.from}: "${preview}" — run /${cmdName} to check it.`;
-        void invoke("pty_inject", { id: pane.id, text: kickoff });
-      }
-    });
-    return () => void p.then((u) => u());
-  }, [team, cmdName]);
+  }, [team, cancelRoomHistoryRetry, loadMembers, loadRoomMessages]);
 
   useEffect(() => {
     const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
@@ -1131,31 +1247,54 @@ export default function App() {
   // (a naive prepend would otherwise yank the view down by the new content's
   // height, since scrollTop stays fixed while scrollHeight grows above it).
   const loadOlderMessages = useCallback(async () => {
-    if (loadingHistory || !hasMoreHistory || messages.length === 0) return;
+    const beforeId = oldestRoomMessageIdRef.current;
+    if (loadingHistory || !hasMoreHistory || !beforeId) return;
+    const historyRequest = roomHistoryRequestRef.current;
+    const pagingRequest = ++roomPagingRequestRef.current;
+    const requestedTeam = team;
     setLoadingHistory(true);
-    const beforeId = messages[0].id;
     const el = feedRef.current;
     const prevScrollHeight = el?.scrollHeight ?? 0;
     try {
       const older = await invoke<Message[]>("agmsg_messages", {
-        team,
+        team: requestedTeam,
         limit: ROOM_PAGE_SIZE,
         beforeId,
       });
+      if (
+        !roomHistoryResponseIsCurrent(
+          teamRef.current,
+          roomHistoryRequestRef.current,
+          requestedTeam,
+          historyRequest,
+        ) || roomPagingRequestRef.current !== pagingRequest
+      ) {
+        return;
+      }
       if (older.length > 0) {
+        oldestRoomMessageIdRef.current = older[0].id;
         isPrependingRef.current = true;
-        setMessages((prev) => [...older, ...prev]);
+        setMessages((prev) => mergeRoomMessages(older, prev));
         requestAnimationFrame(() => {
-          if (el) el.scrollTop += el.scrollHeight - prevScrollHeight;
+          if (
+            roomHistoryResponseIsCurrent(
+              teamRef.current,
+              roomHistoryRequestRef.current,
+              requestedTeam,
+              historyRequest,
+            ) && roomPagingRequestRef.current === pagingRequest && el
+          ) {
+            el.scrollTop += el.scrollHeight - prevScrollHeight;
+          }
         });
       }
       setHasMoreHistory(older.length >= ROOM_PAGE_SIZE);
     } catch (err) {
       console.error(err);
     } finally {
-      setLoadingHistory(false);
+      if (roomPagingRequestRef.current === pagingRequest) setLoadingHistory(false);
     }
-  }, [team, messages, loadingHistory, hasMoreHistory]);
+  }, [team, loadingHistory, hasMoreHistory]);
 
   // useLayoutEffect (not useEffect): runs synchronously right after the DOM
   // updates and before the browser paints, so scrollHeight already reflects
