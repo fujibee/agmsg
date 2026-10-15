@@ -41,55 +41,68 @@ esac
 EOF
 chmod +x "$work/real/codex"
 
+# The shim is installed as a COPY (a symlink made by `ln -s` on Git Bash is a
+# copy that loses its place in the skill tree), and told where the scripts are.
+export AGMSG_CODEX_SHIM_WRAPPER=1
+
 declare -A results
 for r in $(seq 1 "$runs"); do
   for ref in "${refs[@]}"; do
     id="$(printf '%s' "$ref" | tr '/.' '__')"
     skill="$work/skill-$id-$r"
-    proj="$work/proj-$id-$r"
-    mkdir -p "$proj" "$work/bin-$id-$r"
+    mkdir -p "$work/bin-$id-$r"
     make_skill "$repo" "$ref" "$skill"
-    export AGMSG_STORAGE_PATH="$skill/store" AGMSG_SELF_NAME=off CODEX_HOME="$work/codexhome"
+    export AGMSG_STORAGE_PATH="$skill/store" AGMSG_SELF_NAME=off CODEX_HOME="$work/codexhome-$id-$r"
+    export AGMSG_CODEX_SHIM_SCRIPT_DIR="$skill/scripts/drivers/types/codex"
     mkdir -p "$CODEX_HOME"
-    ln -sf "$skill/scripts/drivers/types/codex/codex-shim.sh" "$work/bin-$id-$r/codex"
-    bash "$skill/scripts/join.sh" ci seat codex "$proj" >/dev/null 2>&1
-    PATH="$work/bin-$id-$r:$work/real:$PATH" \
-      bash "$skill/scripts/delivery.sh" set monitor codex "$proj" >/dev/null 2>&1
+    cp "$skill/scripts/drivers/types/codex/codex-shim.sh" "$work/bin-$id-$r/codex"
+    chmod +x "$work/bin-$id-$r/codex"
+    P="$work/bin-$id-$r:$work/real:$PATH"
 
-    # Pieces, each timed on its own.
-    a=$(now); bash "$skill/scripts/delivery.sh" status codex "$proj" >/dev/null 2>&1; b=$(now)
-    t_status=$(elapsed "$a" "$b")
-    a=$(now); PATH="$work/bin-$id-$r:$work/real:$PATH" bash "$skill/scripts/delivery.sh" set monitor codex "$proj" >/dev/null 2>&1; b=$(now)
-    t_set=$(elapsed "$a" "$b")
-
-    # The whole launch: shim -> monitor -> exec of the fake TUI. The first launch
-    # in a project is a warm-up (a fix that skips an unchanged `set monitor` still
-    # runs it once); the second is timed WITHOUT tracing (xtrace itself costs on
-    # Windows); a third, traced launch only counts.
-    export TUI_FILE="$work/tui-$id-$r"
-    ( cd "$proj" && env PATH="$work/bin-$id-$r:$work/real:$PATH" codex ) >/dev/null 2>&1
-    rm -f "$TUI_FILE"
-    a=$(now)
-    ( cd "$proj" && env PATH="$work/bin-$id-$r:$work/real:$PATH" codex ) >/dev/null 2>&1
-    if [ -f "$TUI_FILE" ]; then t_launch=$(elapsed "$a" "$(cat "$TUI_FILE")"); else t_launch="no-TUI"; fi
-    trace="$work/trace-$id-$r.log"
-    ( cd "$proj" && env PATH="$work/bin-$id-$r:$work/real:$PATH" \
-        SHELLOPTS=xtrace PS4='+T ${EPOCHREALTIME} ${BASH_SOURCE##*/}:${LINENO} ' codex ) 2> "$trace" >/dev/null
-    n_status=$(grep -c "delivery.sh.* status\|delivery_script.* status" "$trace" || true)
-    n_lines=$(wc -l < "$trace" | tr -d ' ')
-    echo "run $r  $ref: launch=${t_launch}s  (delivery status alone ${t_status}s, set monitor alone ${t_set}s; traced launch: $n_lines lines, delivery status mentioned $n_status times)"
-    results["$ref"]+="$t_launch "
-    results["status:$ref"]+="$t_status "
-    results["set:$ref"]+="$t_set "
+    # Two fresh projects per ref and run, each launched 3 times in a row with the
+    # same CODEX_HOME: one untraced (timing), one traced (counting; xtrace itself
+    # costs on Windows, so its times are not reported).
+    for kind in timed traced; do
+      proj="$work/proj-$id-$r-$kind"
+      mkdir -p "$proj"
+      bash "$skill/scripts/join.sh" ci "seat-$kind" codex "$proj" >/dev/null 2>&1
+      PATH="$P" bash "$skill/scripts/delivery.sh" set monitor codex "$proj" >/dev/null 2>&1
+      for n in 1 2 3; do
+        export TUI_FILE="$work/tui-$id-$r-$kind-$n"
+        rm -f "$TUI_FILE"
+        if [ "$kind" = timed ]; then
+          a=$(now)
+          ( cd "$proj" && env PATH="$P" codex ) >/dev/null 2>&1
+          if [ -f "$TUI_FILE" ]; then t=$(elapsed "$a" "$(cat "$TUI_FILE")"); else t="no-TUI"; fi
+          echo "run $r  $ref  launch $n (untraced): ${t}s"
+          results["$ref#$n"]+="$t "
+        else
+          trace="$work/trace-$id-$r-$n.log"
+          ( cd "$proj" && env PATH="$P" SHELLOPTS=xtrace PS4='+T ${EPOCHREALTIME} ${BASH_SOURCE##*/}:${LINENO} ' codex ) 2> "$trace" >/dev/null
+          ns=$(grep -c 'delivery\.sh status' "$trace" || true)
+          nm=$(grep -c 'delivery\.sh set monitor' "$trace" || true)
+          if [ "$ns" -ge 1 ]; then v=counted; else v=DISCARDED; fi
+          echo "run $r  $ref  launch $n (traced): delivery status x$ns, set monitor x$nm -> $v"
+          if [ "$v" = counted ]; then
+            results["st:$ref#$n"]+="$ns "
+            results["sm:$ref#$n"]+="$nm "
+          else
+            results["drop:$ref"]+="r$r/l$n "
+          fi
+          grep -m1 'broken install' "$trace" >/dev/null 2>&1 && echo "  (shim fell through: broken install warning)"
+        fi
+      done
+    done
   done
 done
 
-summary "### #1613 codex launch through the shim (windows-latest, fake codex), seconds"
-summary "| ref | launch (median) | launch (all runs) | status alone (median) | set monitor alone (median) |"
-summary "| --- | ---: | --- | ---: | ---: |"
+summary "### #1613 codex launch through the shim (windows-latest, fake codex, 3 consecutive launches per project, same CODEX_HOME)"
+summary "| ref | launch # | launch s (median, untraced) | all runs | delivery status per launch | set monitor per launch |"
+summary "| --- | ---: | ---: | --- | --- | --- |"
 for ref in "${refs[@]}"; do
-  m=$(printf '%s\n' ${results["$ref"]} | grep -E '^[0-9.]+$' | median)
-  ms=$(printf '%s\n' ${results["status:$ref"]} | median)
-  mt=$(printf '%s\n' ${results["set:$ref"]} | median)
-  summary "| $ref | $m | ${results["$ref"]} | $ms | $mt |"
+  for n in 1 2 3; do
+    m=$(printf '%s\n' ${results["$ref#$n"]} | grep -E '^[0-9.]+$' | median)
+    summary "| $ref | $n | $m | ${results["$ref#$n"]} | ${results["st:$ref#$n"]:-none} | ${results["sm:$ref#$n"]:-none} |"
+  done
+  summary "Discarded traced launches for $ref (no delivery status in the trace): ${results["drop:$ref"]:-none}"
 done
