@@ -7,19 +7,6 @@ _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
 
-# Does the recorded pid exist? Answers "gone" only on a clear "no such
-# process". A sandbox may refuse the signal even for a live process (not
-# permitted), which says the process exists; anything else is "unknown".
-_agmsg_daemon_pid_presence() {   # <pid>
-  local out
-  out="$(export LC_ALL=C; kill -0 "$1" 2>&1)" && { echo alive; return 0; }
-  case "$out" in
-    *"No such process"*) echo gone ;;
-    *"not permitted"*) echo alive ;;
-    *) echo unknown ;;
-  esac
-}
-
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
   local row state pid boot recorded_start current_boot process_start started_epoch
@@ -94,7 +81,7 @@ agmsg_daemon_read_state() {
     return 0
   fi
   if [ -z "$current_boot" ] || [ -z "$started_epoch" ]; then
-    case "$(_agmsg_daemon_pid_presence "$pid")" in
+    case "$(_agmsg_pid_signal_presence "$pid")" in
       gone) ;;
       *)
         AGMSGD_HEALTH=unchecked

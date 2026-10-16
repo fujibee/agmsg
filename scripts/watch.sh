@@ -88,15 +88,14 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 # reaching for $TMUX_PANE behind its own back.
 # shellcheck disable=SC1091
 [ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
-# Same two libs actas-claim.sh reads the native-delivery record through
-# (role-session.sh's messaging_socket field, daemon-state.sh's AGMSGD_HEALTH) —
-# see _agmsg_watch_native_delivery_active below. Guarded the same way: an
-# install predating native delivery simply lacks these files, and the re-arm
-# loop falls back to its original always-renew-or-stop-on-silence behavior.
+# Same libs actas-claim.sh reads the native-delivery record through
+# (role-session.sh's messaging_socket field here, daemon-state.sh's
+# AGMSGD_HEALTH loaded lazily in _agmsg_watch_native_delivery_active below).
+# Guarded the same way: an install predating native delivery simply lacks
+# these files, and the re-arm loop falls back to its original
+# always-renew-or-stop-on-silence behavior.
 # shellcheck disable=SC1091
 [ -r "$SCRIPT_DIR/lib/role-session.sh" ] && . "$SCRIPT_DIR/lib/role-session.sh"
-# shellcheck disable=SC1091
-[ -r "$SCRIPT_DIR/lib/daemon-state.sh" ] && . "$SCRIPT_DIR/lib/daemon-state.sh"
 
 # Resolve a session id when the launcher could not bake one in (empty first arg).
 # Grok Build's `monitor` tool runs the watcher with $GROK_SESSION_ID unset, so
@@ -1248,7 +1247,11 @@ unset AGMSG_WATCH_ELAPSED_BASE AGMSG_WATCH_DELIVERED_BASE
 _agmsg_watch_native_delivery_active() {
   [ "$AGENT_TYPE" = claude-code ] && [ -n "$ACTIVE_NAME" ] || return 1
   declare -F agmsg_role_session_uuid >/dev/null 2>&1 || return 1
-  declare -F agmsg_daemon_read_state >/dev/null 2>&1 || return 1
+  # Loaded only here: a watcher and its children otherwise never pay for it.
+  # shellcheck disable=SC1091
+  declare -F agmsg_daemon_read_state >/dev/null 2>&1 \
+    || { [ -r "$SCRIPT_DIR/lib/daemon-state.sh" ] && . "$SCRIPT_DIR/lib/daemon-state.sh"; } \
+    || return 1
   local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
   agmsg_daemon_read_state
   [ "${AGMSGD_DESIRED:-}" = on ] && [ "${AGMSGD_HEALTH:-}" = ready ] || return 1
