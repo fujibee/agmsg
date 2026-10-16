@@ -405,6 +405,36 @@ eperm_pid() {
     [[ "$output" == *"$TEST_PROJECT"* ]]
 }
 
+@test "delivery status: a Codex project with no hooks file reads as agmsgd-delivered only while agmsgd is on and its seats have destinations" {
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
+
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  # agmsgd on, but alice has no recorded destination yet: unchanged.
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
+
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record team alice thread-1 "$TEST_PROJECT" codex "" "$TEST_PROJECT/codex-home"
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project's Codex seats; no hooks file needed)" ]
+
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
+}
+
 @test "delivery status: a settings file that exists but is not valid JSON is also unrecognized, not deliberate off (review)" {
   # A third way has_ss/has_st both land on 0: not "missing" and not "genuinely
   # empty of agmsg entries" but unreadable/malformed, which the has_ss/has_st
