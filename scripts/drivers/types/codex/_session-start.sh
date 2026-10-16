@@ -200,8 +200,8 @@ agmsg_session_start() {
     if [ "$clear_bound" = 0 ]; then
       ( export CODEX_THREAD_ID="$thread_id"
         # shellcheck disable=SC1091
-        . "$SKILL_DIR/scripts/lib/self-fix.sh" \
-          && cd "$PROJECT" \
+        . "${SKILL_DIR:-}/scripts/lib/self-fix.sh" \
+          && cd "${PROJECT:-}" \
           && AGMSG_FIX_REASSIGN_FROM_HOOK=1 _fix_codex_thread_reassign ) >/dev/null 2>&1 || true
     fi
   fi
