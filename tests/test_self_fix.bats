@@ -496,6 +496,21 @@ FAKEEOF
   [ "$(agmsg_role_session_uuid T cx)" = "new-thread-222" ]
   [ "$(cat "$RUN_DIR/codex-bridge.T.cx.thread")" = "new-thread-222" ]
 
+  # The SessionStart hook runs the same rebind with the full sync switched
+  # off: the record moves, and the bridge hand-off is the hook's own next
+  # step, so session-start.sh must not be run from inside it.
+  : > "$SPY"
+  agmsg_role_session_record T cx new-thread-222 "$project" codex ""
+  printf 'old-thread-111.%s\n' "$$" > "$(actas_lock_path T cx)"
+  printf '%s\n' "old-thread-111.$$" > "$RUN_DIR/cc-instance.$$"
+  export CODEX_THREAD_ID=new-thread-444
+  AGMSG_FIX_REASSIGN_FROM_HOOK=1 run _fix_codex_thread_reassign
+  [ "$status" -eq 0 ]
+  [ "$output" = "ok	T	cx	new-thread-444.$$" ]
+  grep -Fq "record-session T cx $project CODEX_THREAD_ID=new-thread-444" "$SPY"
+  refute grep -q '^session-start' "$SPY"
+  [ "$(agmsg_role_session_uuid T cx)" = "new-thread-444" ]
+
   # Condition missing: a DIFFERENT, still-alive pid holds the old lock -- a
   # genuinely separate live process, not this session's own. This is exactly
   # the case the narrow reclaim must never touch: same-pid is its whole

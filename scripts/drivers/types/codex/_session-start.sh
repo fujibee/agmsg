@@ -185,6 +185,23 @@ agmsg_session_start() {
   # shellcheck source=../../../lib/role-session.sh
   source "$SKILL_DIR/scripts/lib/role-session.sh"
   project_phys="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
+  # #1468: /clear starts a new thread inside the same Codex process, so no
+  # seat of this project is recorded on it and the old owner's pid is still
+  # alive. When nothing is bound to this thread, let the proof-gated rebind
+  # that `fix` uses move the one seat that proves it is this pane.
+  if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ]; then
+    clear_bound=0
+    while IFS=$'\t' read -r clear_team clear_name; do
+      [ -n "$clear_team" ] || continue
+      [ "$(agmsg_role_session_uuid "$clear_team" "$clear_name" 2>/dev/null || true)" = "$thread_id" ] && clear_bound=1
+    done <<< "$PAIRS"
+    if [ "$clear_bound" = 0 ]; then
+      ( # shellcheck disable=SC1091
+        . "$SKILL_DIR/scripts/lib/self-fix.sh" \
+          && cd "$PROJECT" \
+          && AGMSG_FIX_REASSIGN_FROM_HOOK=1 _fix_codex_thread_reassign ) >/dev/null 2>&1 || true
+    fi
+  fi
   agmsg_codex_refresh_destination "$thread_id" "$project_phys" "$PAIRS" || true
   safe_pairs=""
   while IFS=$'\t' read -r candidate_team candidate_name; do
