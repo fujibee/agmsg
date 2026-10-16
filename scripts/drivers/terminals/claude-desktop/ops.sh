@@ -133,6 +133,9 @@ terminal_name()    { _claude_desktop_unsupported "name"; }
 
 # No independent agent key to compare — this driver never names a pane.
 terminal_expected_label() { printf 'n/a:no_addressable_pane\n'; }
+# The app is one conversation, not an instance of a multiplexer: its ref is
+# already complete, so a locator needs nothing added.
+terminal_instance_for_ref() { printf 'n/a:bare\n'; }
 
 # No activity, label, key or title concept of its own — same shape as
 # plain's own terminal_team_observe, all four fields n/a.

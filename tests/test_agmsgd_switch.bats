@@ -226,6 +226,16 @@ WRAPPER
   run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
   [ "$status" -eq 0 ]
   [ "$output" = ready ]
+  # A caller that is denied the tool that reads the process start time (an app
+  # sandbox) cannot check: that is neither ready nor stopped, and it must not
+  # tell anyone to restart a daemon that is running.
+  mkdir -p "$BATS_TEST_TMPDIR/denied"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/denied/ps"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/denied/getconf"
+  chmod +x "$BATS_TEST_TMPDIR/denied/ps" "$BATS_TEST_TMPDIR/denied/getconf"
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"; agmsg_daemon_warn_if_stopped 2>&1'
+  [ "$status" -eq 0 ]
+  [ "$output" = unchecked ]
   if [ "$(uname -s)" = Darwin ]; then
     # A record written when the boot id was kern.boottime seconds: the kernel
     # shifts that value with clock adjustments, so while its pid exists it

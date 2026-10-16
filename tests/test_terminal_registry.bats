@@ -4002,6 +4002,10 @@ EOF
   [ "$(terminal_self_env)" = "$CODEX_THREAD_ID" ]
   [ "$(terminal_where "$CODEX_THREAD_ID")" = n/a:no_container_concept ]
   [ "$(agmsg_terminal_get codex-app capabilities)" = where ]
+  # No instance to add, and nothing said about it on every command.
+  run agmsg_terminal_ref_qualify "codex-app:$CODEX_THREAD_ID"
+  [ "$status" -eq 0 ]
+  [ "$output" = "codex-app:$CODEX_THREAD_ID" ]
   local verb
   for verb in spawn despawn peek poke arrange name pane_state; do
     run "terminal_$verb" "$CODEX_THREAD_ID"

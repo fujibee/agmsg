@@ -56,6 +56,15 @@ agmsg_daemon_read_state() {
       fi ;;
     esac
   fi
+  # Evidence that could not be gathered is not evidence of a mismatch. A
+  # sandboxed caller (an app that runs commands in its own sandbox) may be
+  # denied the boot id or the process start time; while the recorded pid is
+  # alive, say that the check is unavailable instead of calling it stopped.
+  if { [ -z "$current_boot" ] || [ -z "$started_epoch" ]; } && _agmsg_pid_alive "$pid"; then
+    AGMSGD_HEALTH=unchecked
+    AGMSGD_REASON="the boot id or process start time cannot be read from here"
+    return 0
+  fi
   if [ -z "$current_boot" ] || [ "$current_boot" != "$boot" ] || [ -z "$started_epoch" ]; then
     AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)"
     return 0
@@ -83,6 +92,10 @@ agmsg_daemon_read_state() {
 }
 
 agmsg_daemon_recovery_text() {
+  if [ "$AGMSGD_HEALTH" = unchecked ]; then
+    printf 'agmsgd (Codex notices) could not be checked from this environment (%s). It may be running; nothing needs to be done unless notices stop arriving.\n' "$AGMSGD_REASON"
+    return 0
+  fi
   if [ "$AGMSGD_HEALTH" = unverifiable ]; then
     printf 'agmsgd (Codex notices) was recorded by an older version, so whether it is still running cannot be checked. Run agmsg daemon stop and then agmsg daemon start to update the record. Unread messages are preserved. If agmsg is not found, use "%s/scripts/agmsg" daemon stop.\n' "$_AGMSG_DAEMON_ROOT"
     return 0
@@ -108,6 +121,8 @@ agmsg_daemon_warn_if_stopped() {
   fi
   agmsg_daemon_read_state
   [ "$AGMSGD_DESIRED" = on ] && [ "$AGMSGD_HEALTH" != ready ] || return 0
+  # Not being able to look is not a stop: say nothing on ordinary commands.
+  [ "$AGMSGD_HEALTH" != unchecked ] || [ "${1:-}" = always ] || return 0
   if [ "${1:-}" = always ]; then
     agmsg_daemon_recovery_text >&2
     return 0
