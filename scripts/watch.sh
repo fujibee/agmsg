@@ -1208,12 +1208,28 @@ unset AGMSG_WATCH_ELAPSED_BASE AGMSG_WATCH_DELIVERED_BASE
 # renewing exactly as before.
 #
 # "Recorded" means agmsg_role_session_uuid for THIS pair equals this session's
-# own bare sid (not merely that some session claimed native once) and
-# messaging_socket is non-empty -- a stale record from a since-exited session
-# must not stop a watcher that is this seat's only remaining delivery path.
-# AGMSGD_HEALTH=ready is re-checked every call (not cached) so a daemon that
-# stops after actas claimed native correctly falls back to normal re-arming
-# instead of leaving the seat with neither channel.
+# own bare sid (not merely that some session claimed native once) -- a stale
+# record from a since-exited session must not stop a watcher that is this
+# seat's only remaining delivery path. AGMSGD_HEALTH=ready is re-checked every
+# call (not cached) so a daemon that stops after actas claimed native
+# correctly falls back to normal re-arming instead of leaving the seat with
+# neither channel.
+#
+# Beyond the bare sid match, this mirrors every other gate
+# claude-code-queue.mjs's createPending itself applies to the SAME record
+# before it will ever enqueue a nudge for this pair (follow-up to #1633
+# review: checking messaging_socket alone proved the record existed, not that
+# the daemon would actually treat it as addressable):
+#   - type must read "claude-code" (role_session_type_mismatch)
+#   - claude_config_dir must be non-empty, same as messaging_socket
+#     (messaging_destination_missing)
+#   - project must canonically match this watcher's own project
+#     (role_session_project_mismatch) -- agmsg_canonical_path is the same
+#     normalization actas-claim.sh applies before writing PROJECT_PHYS, so
+#     comparing against it here can never disagree with what was recorded.
+# team/agent identity mismatch (the mjs reader's own first check) cannot
+# occur on this side: the record is looked up BY (team, agent), so a mismatch
+# there would be a different file, not a readable field to compare.
 #
 # AGMSGD_DESIRED must also be `on`, not just HEALTH=ready (review, #1633):
 # during `daemon disable`, the intent flips to off before the still-running
@@ -1240,12 +1256,18 @@ _agmsg_watch_native_delivery_active() {
     bare_sid="$(agmsg_instance_bare_sid "$SESSION_ID")"
   fi
   [ -n "$bare_sid" ] || return 1
+  local _canon_project
+  _canon_project="$(agmsg_canonical_path "$PROJECT_PATH")"
+  [ -n "$_canon_project" ] || return 1
   local _team _agent _any=0
   while IFS=$'\t' read -r _team _agent; do
     [ -z "$_team" ] && continue
     _any=1
     [ "$(agmsg_role_session_uuid "$_team" "$_agent" 2>/dev/null)" = "$bare_sid" ] || return 1
+    [ "$(agmsg_role_session_get "$_team" "$_agent" type 2>/dev/null)" = claude-code ] || return 1
     [ -n "$(agmsg_role_session_get "$_team" "$_agent" messaging_socket 2>/dev/null)" ] || return 1
+    [ -n "$(agmsg_role_session_get "$_team" "$_agent" claude_config_dir 2>/dev/null)" ] || return 1
+    [ "$(agmsg_role_session_get "$_team" "$_agent" project 2>/dev/null)" = "$_canon_project" ] || return 1
   done <<< "$PAIRS"
   [ "$_any" -eq 1 ]
 }
