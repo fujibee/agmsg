@@ -439,6 +439,23 @@ _wait_exit() {  # <pid> <tenths>
   grep -qF 'native-delivered probe' "$out"
   grep -qF 'agmsg watch: stopping' "$out"
   refute grep -qF 'agmsg watch: re-arm' "$out"
+
+  # #1633 review: `daemon disable` flips daemon_intent.desired to off
+  # before the still-running owner finishes shutting down, so HEALTH can read
+  # `ready` for a window after DESIRED already reads `off`. The queue this
+  # seat would otherwise rely on refuses to enqueue once desired != on, so the
+  # watcher must NOT treat that window as native-delivered -- it has to keep
+  # re-arming, same as a seat that never went native at all.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  bash "$SCRIPTS/send.sh" team bob erin "disable-window probe" >/dev/null
+  AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _bg_track "$pid"
+  _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
+  wait "$pid"
+  grep -qF 'disable-window probe' "$out"
+  grep -qF 'agmsg watch: re-arm' "$out"
 }
 
 @test "watch: restart delivers messages that arrived while the watcher was down" {

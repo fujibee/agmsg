@@ -1214,13 +1214,23 @@ unset AGMSG_WATCH_ELAPSED_BASE AGMSG_WATCH_DELIVERED_BASE
 # AGMSGD_HEALTH=ready is re-checked every call (not cached) so a daemon that
 # stops after actas claimed native correctly falls back to normal re-arming
 # instead of leaving the seat with neither channel.
+#
+# AGMSGD_DESIRED must also be `on`, not just HEALTH=ready (review, #1633):
+# during `daemon disable`, the intent flips to off before the still-running
+# owner finishes shutting down, so HEALTH can read `ready` for a window after
+# DESIRED already reads `off`. The queue this seat would otherwise rely on
+# (claude-code-queue.mjs createPending) refuses to enqueue at all once
+# desired != on, so stopping on HEALTH alone during that window would leave
+# the seat with no delivery path whatsoever -- exactly the failure this whole
+# check exists to avoid, just reached from the other direction (disable
+# in-flight instead of a dead executor).
 _agmsg_watch_native_delivery_active() {
   [ "$AGENT_TYPE" = claude-code ] && [ -n "$ACTIVE_NAME" ] || return 1
   declare -F agmsg_role_session_uuid >/dev/null 2>&1 || return 1
   declare -F agmsg_daemon_read_state >/dev/null 2>&1 || return 1
   local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
   agmsg_daemon_read_state
-  [ "$AGMSGD_HEALTH" = ready ] || return 1
+  [ "${AGMSGD_DESIRED:-}" = on ] && [ "${AGMSGD_HEALTH:-}" = ready ] || return 1
   declare -F _agmsg_detect_platform >/dev/null 2>&1 && _agmsg_detect_platform
   [ "${_agmsg_platform:-}" != msys ] || return 1
   declare -F agmsg_claude_code_native_storage_ready >/dev/null 2>&1 || return 1
