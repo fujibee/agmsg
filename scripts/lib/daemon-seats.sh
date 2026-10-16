@@ -10,7 +10,7 @@ source "$SKILL_DIR/scripts/lib/role-session.sh"
 
 agmsg_daemon_seat_report() {
   local action="${1:-status}" cfg cfg_sql roster team agent project pid meta_type meta_project meta_pid
-  local bridge record_status cached key driver record_type record_home label latest latest_state latest_thread
+  local bridge record_status cached key driver record_type record_home label latest
   local seen='|' omitted=0 pending owner updated recent active display
   local active_lines='' recent_lines='' older_lines='' recovery
   source "$SKILL_DIR/scripts/lib/type-registry.sh"
@@ -70,12 +70,11 @@ agmsg_daemon_seat_report() {
       thread_sql="$(printf '%s' "${AGMSG_ROLE_SESSION_UUID:-}" | sed "s/'/''/g")"
       cached="$(sqlite3 -readonly -cmd '.timeout 100' "$SKILL_DIR/run/install.db" "SELECT reason FROM beta_codex_seat WHERE seat=json_array('$key','$agent_sql') AND thread='$thread_sql';" 2>/dev/null)" || cached=""
       pending="$(sqlite3 -readonly -cmd '.timeout 100' "$SKILL_DIR/run/install.db" "SELECT count(*) FROM beta_codex_queue WHERE seat=json_array('$key','$agent_sql') AND state='pending';" 2>/dev/null)" || pending=0
-      # Ask for a refresh only on evidence: the newest notice attempt for this
-      # seat expired unconfirmed, or it went to another conversation than the
-      # recorded one. A confirmed attempt, or none yet, leaves the record as is.
-      latest="$(sqlite3 -readonly -separator $'\t' -cmd '.timeout 100' "$SKILL_DIR/run/install.db" "SELECT state, thread FROM beta_codex_queue WHERE seat=json_array('$key','$agent_sql') ORDER BY id DESC LIMIT 1;" 2>/dev/null)" || latest=""
-      latest_state="${latest%%$'\t'*}"; latest_thread="${latest#*$'\t'}"
-      if [ "$record_status" = 'destination recorded' ] && { [ "$latest_state" = expired ] || { [ -n "$latest" ] && [ "$latest_thread" != "${AGMSG_ROLE_SESSION_UUID:-}" ]; }; }; then
+      # Ask for a refresh only on evidence about the current destination: the
+      # newest notice attempt for this seat and thread expired unconfirmed. An
+      # attempt for another conversation says nothing about the recorded one.
+      latest="$(sqlite3 -readonly -cmd '.timeout 100' "$SKILL_DIR/run/install.db" "SELECT state FROM beta_codex_queue WHERE seat=json_array('$key','$agent_sql') AND thread='$thread_sql' ORDER BY id DESC LIMIT 1;" 2>/dev/null)" || latest=""
+      if [ "$record_status" = 'destination recorded' ] && [ "$latest" = expired ]; then
         record_status="destination recorded; the last notice was not delivered. In Codex, run $recovery to refresh the destination"
       fi
       owner="$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" owner)"

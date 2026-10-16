@@ -77,6 +77,7 @@ test('Codex startup refreshes the sole destination from the current hook thread 
   assert.ok(record('alice').includes(`codex_home=${realpathSync(profile)}\n`));
   const add = (state, id) => db.prepare("INSERT INTO beta_codex_queue(seat, codex_home, thread, up_to, nonce, state, children, created_at) VALUES (json_array('test','alice'), ?, ?, '1', 'n', ?, '{}', datetime('now'))").run(root, id, state);
   assert.match(status(), /alice: destination recorded\n/);
+  add('expired', '01a13352-3599-7d62-a149-4c8182bcf0ff');
   add('confirmed', current);
   assert.doesNotMatch(status(), /actas <name>/);
   add('expired', current);
