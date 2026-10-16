@@ -7,6 +7,19 @@ _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
 
+# Does the recorded pid exist? Answers "gone" only on a clear "no such
+# process". A sandbox may refuse the signal even for a live process (not
+# permitted), which says the process exists; anything else is "unknown".
+_agmsg_daemon_pid_presence() {   # <pid>
+  local out
+  out="$(LC_ALL=C kill -0 "$1" 2>&1)" && { echo alive; return 0; }
+  case "$out" in
+    *"No such process"*) echo gone ;;
+    *"not permitted"*) echo alive ;;
+    *) echo unknown ;;
+  esac
+}
+
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
   local row state pid boot recorded_start current_boot process_start started_epoch
@@ -58,12 +71,16 @@ agmsg_daemon_read_state() {
   fi
   # Evidence that could not be gathered is not evidence of a mismatch. A
   # sandboxed caller (an app that runs commands in its own sandbox) may be
-  # denied the boot id or the process start time; while the recorded pid is
-  # alive, say that the check is unavailable instead of calling it stopped.
-  if { [ -z "$current_boot" ] || [ -z "$started_epoch" ]; } && _agmsg_pid_alive "$pid"; then
-    AGMSGD_HEALTH=unchecked
-    AGMSGD_REASON="the boot id or process start time cannot be read from here"
-    return 0
+  # denied the boot id, the process start time and even the liveness signal;
+  # unless the pid is clearly gone, say the check is unavailable, not stopped.
+  if [ -z "$current_boot" ] || [ -z "$started_epoch" ]; then
+    case "$(_agmsg_daemon_pid_presence "$pid")" in
+      gone) ;;
+      *)
+        AGMSGD_HEALTH=unchecked
+        AGMSGD_REASON="the boot id or process start time cannot be read from here"
+        return 0 ;;
+    esac
   fi
   if [ -z "$current_boot" ] || [ "$current_boot" != "$boot" ] || [ -z "$started_epoch" ]; then
     AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)"

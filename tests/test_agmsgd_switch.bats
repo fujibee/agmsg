@@ -236,6 +236,12 @@ WRAPPER
   run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"; agmsg_daemon_warn_if_stopped 2>&1'
   [ "$status" -eq 0 ]
   [ "$output" = unchecked ]
+  # A sandbox that refuses the signal for a live process ("not permitted") is
+  # still "exists"; only "no such process" is a stopped daemon.
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - Operation not permitted" >&2; return 1; }; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = unchecked ]
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - No such process" >&2; return 1; }; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = stopped ]
   if [ "$(uname -s)" = Darwin ]; then
     # A record written when the boot id was kern.boottime seconds: the kernel
     # shifts that value with clock adjustments, so while its pid exists it
