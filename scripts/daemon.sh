@@ -374,6 +374,12 @@ _schtasks() {
   MSYS2_ARG_CONV_EXCL='*' "$AGMSGD_SCHTASKS" "$@"
 }
 
+# Paths go into the task XML as text; a "&" in a user name would otherwise
+# make the task impossible to create.
+_xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
 _register_windows() {
   local node_path="$1" name xml
   name="$(_schtasks_name)"
@@ -391,6 +397,8 @@ _register_windows() {
   fi
   native_bash="$(cygpath -w "$git_bash" 2>/dev/null || printf '%s' "$git_bash")"
   native_launcher="$(cygpath -w "$LAUNCHER" 2>/dev/null || printf '%s' "$LAUNCHER")"
+  native_bash="$(_xml_escape "$native_bash")"
+  native_launcher="$(_xml_escape "$native_launcher")"
   local xml_utf8="$xml.utf8"
   cat > "$xml_utf8" <<EOF
 <?xml version="1.0" encoding="UTF-16"?>

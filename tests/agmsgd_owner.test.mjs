@@ -34,7 +34,9 @@ test("takeOwnership: none -> starting -> ready is a clean run", () => {
     assert.equal(r.ok, true);
     assert.equal(r.gen, 1);
     assert.equal(readOwner(db).state, "starting");
-    assert.equal(readOwner(db).socket, join(dir, "run", "agmsgd.1.sock"));
+    const installId = db.prepare("SELECT install_id FROM meta").get().install_id;
+    assert.equal(readOwner(db).socket, controlSocketPath(dir, 1, installId));
+    assert.equal(controlSocketPath(dir, 1, installId, "linux"), join(dir, "run", "agmsgd.1.sock"));
     // On Windows the control endpoint is a named pipe (a file path cannot be
     // listened on there), still keyed by install and gen.
     const pipe = controlSocketPath(dir, 7, "id-a", "win32");

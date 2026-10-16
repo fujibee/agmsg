@@ -517,7 +517,7 @@ EOF
   marker="$TEST_SKILL_DIR/fake-windows/registered"
 
   export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"
-  export AGMSGD_FAKE_GIT_ROOT="$TEST_SKILL_DIR/fake-windows/Git Root"
+  export AGMSGD_FAKE_GIT_ROOT="$TEST_SKILL_DIR/fake-windows/Git & Root"
   # Without a Git Bash to name, nothing is registered.
   PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
     _run_with_deadline 15 bash "$DAEMON" enable
@@ -531,7 +531,8 @@ EOF
   [ "$status" -eq 0 ]
   # The task runs Git Bash by full path, not a bare bash.exe that Task
   # Scheduler would resolve to WSL's launcher in System32.
-  iconv -f UTF-16LE -t UTF-8 "$capture" | grep -Fq "<Command>$AGMSGD_FAKE_GIT_ROOT/bin/bash.exe</Command>"
+  # A & in the path is escaped in the XML.
+  iconv -f UTF-16LE -t UTF-8 "$capture" | grep -Fq "<Command>${AGMSGD_FAKE_GIT_ROOT//&/&amp;}/bin/bash.exe</Command>"
   # Every path named inside SQL went through the native-path conversion.
   grep -Fq "$TEST_SKILL_DIR/run/install-manifest.json" "$AGMSGD_FAKE_CYGPATH_LOG"
   grep -Fq "$TEST_SKILL_DIR/run/install.db" "$AGMSGD_FAKE_CYGPATH_LOG"
