@@ -152,6 +152,9 @@ agmsg_install_restart_daemon() {   # <skill_dir>
   # still this one, so a stop or disable during the wait is not undone.
   intent="$(sqlite3 "$db" "SELECT desired || '|' || op_gen FROM daemon_intent;" 2>/dev/null || true)"
   case "$intent" in on\|[0-9]*) op_gen="${intent#on|}" ;; *) return 0 ;; esac
+  # Tells the "stopped while enabled" warning that this gap is the update's own
+  # restart. It expires by age, so a killed update cannot silence it for good.
+  date +%s > "$skill/run/agmsgd-updating" 2>/dev/null || true
   while [ "$waited" -lt 25 ]; do
     state="$(sqlite3 "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
     [ "$state" = ready ] || break
@@ -162,6 +165,7 @@ agmsg_install_restart_daemon() {   # <skill_dir>
   if ! bash "$skill/scripts/daemon.sh" start --only-if-op-gen "$op_gen"; then
     echo "  ! agmsgd did not start after the update; run: bash $(printf '%q' "$skill/scripts/agmsg") daemon start" >&2
   fi
+  rm -f "$skill/run/agmsgd-updating"
 }
 
 agmsg_install_restart_guidance() {

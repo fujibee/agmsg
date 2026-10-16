@@ -136,8 +136,18 @@ agmsg_daemon_recovery_text() {
 agmsg_daemon_warn_if_stopped() {
   # Keep health state local without forking a shell that inherits caller FDs.
   local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
-  local now last=0 marker slot
+  local now last=0 marker slot updating=0
   marker="$_AGMSG_DAEMON_ROOT/run/agmsgd-warning-at"
+  # install --update is restarting the daemon right now (see
+  # agmsg_install_restart_daemon): it is not stopped, so say nothing. The
+  # marker is only believed for two minutes; after that, or once the update
+  # removes it, a daemon that did not come back warns as usual.
+  if [ -f "$_AGMSG_DAEMON_ROOT/run/agmsgd-updating" ]; then
+    IFS= read -r updating < "$_AGMSG_DAEMON_ROOT/run/agmsgd-updating" || updating=0
+    case "$updating" in ''|*[!0-9]*) updating=0 ;; esac
+    now="$(date +%s)" || now=0
+    [ "$((now - updating))" -ge 120 ] || return 0
+  fi
   if [ "${1:-}" != always ]; then
     now="$(date +%s)" || return 0
     [ ! -f "$marker" ] || IFS= read -r last < "$marker" || last=0

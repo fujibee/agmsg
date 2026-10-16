@@ -101,6 +101,14 @@ setup() {
   assert_lacks 'stopped while enabled'
   PATH="$TEST_SKILL_DIR/clock:$PATH" TEST_NOW=1799 run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
   assert_contains 'stopped while enabled'
+  # While install --update restarts the daemon the warning stays quiet and
+  # does not use up the interval; a marker older than two minutes is ignored.
+  printf '2950\n' > "$TEST_SKILL_DIR/run/agmsgd-updating"
+  PATH="$TEST_SKILL_DIR/clock:$PATH" TEST_NOW=3000 run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
+  assert_lacks 'stopped while enabled'
+  printf '2800\n' > "$TEST_SKILL_DIR/run/agmsgd-updating"
+  PATH="$TEST_SKILL_DIR/clock:$PATH" TEST_NOW=3000 run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
+  assert_contains 'stopped while enabled'
 }
 
 @test "storage skips daemon helper loading without an install record" {
