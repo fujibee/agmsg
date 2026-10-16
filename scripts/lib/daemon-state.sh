@@ -146,7 +146,11 @@ agmsg_daemon_warn_if_stopped() {
     IFS= read -r updating < "$_AGMSG_DAEMON_ROOT/run/agmsgd-updating" || updating=0
     case "$updating" in ''|*[!0-9]*) updating=0 ;; esac
     now="$(date +%s)" || now=0
-    [ "$((now - updating))" -ge 120 ] || return 0
+    # Only a readable clock and a timestamp not in the future count.
+    if [ "$now" -gt 0 ] && [ "$updating" -gt 0 ] \
+      && [ "$((now - updating))" -ge 0 ] && [ "$((now - updating))" -lt 120 ]; then
+      return 0
+    fi
   fi
   if [ "${1:-}" != always ]; then
     now="$(date +%s)" || return 0

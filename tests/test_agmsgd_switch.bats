@@ -109,6 +109,10 @@ setup() {
   printf '2800\n' > "$TEST_SKILL_DIR/run/agmsgd-updating"
   PATH="$TEST_SKILL_DIR/clock:$PATH" TEST_NOW=3000 run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
   assert_contains 'stopped while enabled'
+  # A marker dated in the future (clock moved back, bad value) never hides it.
+  printf '9999999999\n' > "$TEST_SKILL_DIR/run/agmsgd-updating"
+  PATH="$TEST_SKILL_DIR/clock:$PATH" TEST_NOW=4000 run bash "$SCRIPTS/identities.sh" "$TEST_SKILL_DIR" codex
+  assert_contains 'stopped while enabled'
 }
 
 @test "storage skips daemon helper loading without an install record" {
