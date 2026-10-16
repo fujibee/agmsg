@@ -238,8 +238,15 @@ WRAPPER
   [ "$output" = unchecked ]
   # A sandbox that refuses the signal for a live process ("not permitted") is
   # still "exists"; only "no such process" is a stopped daemon.
-  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - Operation not permitted" >&2; return 1; }; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -ec 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - Operation not permitted" >&2; return 1; }; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$status" -eq 0 ]
   [ "$output" = unchecked ]
+  # A readable boot id that differs from the record is proof even when the
+  # start time cannot be read.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_boot_id='previous-boot';"
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -ec 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = stopped ]
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_boot_id='$boot';"
   run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - No such process" >&2; return 1; }; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
   [ "$output" = stopped ]
   if [ "$(uname -s)" = Darwin ]; then

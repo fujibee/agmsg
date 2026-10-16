@@ -40,7 +40,7 @@ agmsg_daemon_read_state() {
   case "$pid" in ''|*[!0-9]*|0|1) return 0 ;; esac
   case "$(uname -s)" in
     Darwin)
-      current_boot="$(sysctl -n kern.bootsessionuuid 2>/dev/null)"
+      current_boot="$(sysctl -n kern.bootsessionuuid 2>/dev/null)" || current_boot=""
       process_start="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)" || process_start=""
       started_epoch="$(LC_ALL=C date -j -f '%a %b %e %T %Y' "$process_start" +%s 2>/dev/null)" || started_epoch=""
       ;;
@@ -73,6 +73,12 @@ agmsg_daemon_read_state() {
   # sandboxed caller (an app that runs commands in its own sandbox) may be
   # denied the boot id, the process start time and even the liveness signal;
   # unless the pid is clearly gone, say the check is unavailable, not stopped.
+  # A boot id that can be read and differs from the record is proof, whatever
+  # else cannot be read: that executor is from another boot.
+  if [ -n "$current_boot" ] && [ "$current_boot" != "$boot" ]; then
+    AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)"
+    return 0
+  fi
   if [ -z "$current_boot" ] || [ -z "$started_epoch" ]; then
     case "$(_agmsg_daemon_pid_presence "$pid")" in
       gone) ;;
