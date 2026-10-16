@@ -1227,9 +1227,14 @@ unset AGMSG_WATCH_ELAPSED_BASE AGMSG_WATCH_DELIVERED_BASE
 #     (role_session_project_mismatch) -- agmsg_canonical_path is the same
 #     normalization actas-claim.sh applies before writing PROJECT_PHYS, so
 #     comparing against it here can never disagree with what was recorded.
-# team/agent identity mismatch (the mjs reader's own first check) cannot
-# occur on this side: the record is looked up BY (team, agent), so a mismatch
-# there would be a different file, not a readable field to compare.
+# team/agent identity mismatch (the mjs reader's own first check,
+# role_session_identity_mismatch) DOES need its own comparison here (review
+# round 2): being looked up BY (team, agent) only proves the FILENAME
+# encodes this pair -- the daemon's reader separately checks the record's own
+# team=/agent= CONTENT fields, which a corrupted or hand-edited record can
+# disagree with the name it is filed under. The shell getters have no
+# built-in enforcement of that either, so it is compared explicitly, the
+# same as every other field above.
 #
 # AGMSGD_DESIRED must also be `on`, not just HEALTH=ready (review, #1633):
 # during `daemon disable`, the intent flips to off before the still-running
@@ -1264,6 +1269,8 @@ _agmsg_watch_native_delivery_active() {
     [ -z "$_team" ] && continue
     _any=1
     [ "$(agmsg_role_session_uuid "$_team" "$_agent" 2>/dev/null)" = "$bare_sid" ] || return 1
+    [ "$(agmsg_role_session_get "$_team" "$_agent" team 2>/dev/null)" = "$_team" ] || return 1
+    [ "$(agmsg_role_session_get "$_team" "$_agent" agent 2>/dev/null)" = "$_agent" ] || return 1
     [ "$(agmsg_role_session_get "$_team" "$_agent" type 2>/dev/null)" = claude-code ] || return 1
     [ -n "$(agmsg_role_session_get "$_team" "$_agent" messaging_socket 2>/dev/null)" ] || return 1
     [ -n "$(agmsg_role_session_get "$_team" "$_agent" claude_config_dir 2>/dev/null)" ] || return 1

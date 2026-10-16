@@ -479,6 +479,24 @@ _wait_exit() {  # <pid> <tenths>
   wait "$pid"
   grep -qF 'project-mismatch probe' "$out"
   grep -qF 'agmsg watch: re-arm' "$out"
+
+  # Review round 2: being looked up BY (team, agent) only proves the
+  # FILENAME encodes this pair, not that the record's own team=/agent=
+  # CONTENT fields agree with it -- the daemon's reader checks those
+  # separately (role_session_identity_mismatch) and the shell getters enforce
+  # nothing on their own. Restore the project= line this test corrupted above,
+  # then corrupt only agent= to a different seat name.
+  mv -f "$rs_file.bak" "$rs_file"
+  sed -i.bak 's#^agent=.*#agent=some-other-seat#' "$rs_file"
+  bash "$SCRIPTS/send.sh" team bob erin "identity-mismatch probe" >/dev/null
+  AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _bg_track "$pid"
+  _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
+  wait "$pid"
+  grep -qF 'identity-mismatch probe' "$out"
+  grep -qF 'agmsg watch: re-arm' "$out"
 }
 
 @test "watch: restart delivers messages that arrived while the watcher was down" {
