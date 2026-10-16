@@ -189,14 +189,17 @@ agmsg_session_start() {
   # seat of this project is recorded on it and the old owner's pid is still
   # alive. When nothing is bound to this thread, let the proof-gated rebind
   # that `fix` uses move the one seat that proves it is this pane.
-  if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ]; then
+  # Only an identity the session itself supplied (env or hook input) may drive
+  # it, never a rollout-inferred one.
+  if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
     clear_bound=0
     while IFS=$'\t' read -r clear_team clear_name; do
       [ -n "$clear_team" ] || continue
       [ "$(agmsg_role_session_uuid "$clear_team" "$clear_name" 2>/dev/null || true)" = "$thread_id" ] && clear_bound=1
     done <<< "$PAIRS"
     if [ "$clear_bound" = 0 ]; then
-      ( # shellcheck disable=SC1091
+      ( export CODEX_THREAD_ID="$thread_id"
+        # shellcheck disable=SC1091
         . "$SKILL_DIR/scripts/lib/self-fix.sh" \
           && cd "$PROJECT" \
           && AGMSG_FIX_REASSIGN_FROM_HOOK=1 _fix_codex_thread_reassign ) >/dev/null 2>&1 || true

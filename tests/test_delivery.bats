@@ -2914,6 +2914,37 @@ EOF
   [ ! -f "$log" ]
 }
 
+@test "session-start.sh for codex runs the /clear rebind only for an identity the session supplied (#1468)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice 11111111-1111-4111-8111-111111111111 "$TEST_PROJECT" codex
+  local spy="$TEST_SKILL_DIR/rebind.log"
+  # The proof-gated helper is covered in test_self_fix.bats; here only the
+  # hook entry is under test, so stand in for it and record how it was called.
+  cat >"$TEST_SKILL_DIR/scripts/lib/self-fix.sh" <<STUB
+_fix_codex_thread_reassign() {
+  printf 'called thread=%s hook=%s\n' "\${CODEX_THREAD_ID:-}" "\${AGMSG_FIX_REASSIGN_FROM_HOOK:-}" >> "$spy"
+  return 1
+}
+STUB
+  local new_id=22222222-2222-4222-8222-222222222222
+
+  # Hook input alone (no CODEX_THREAD_ID) names the new thread: rebind runs.
+  printf '{"session_id":"%s","source":"clear"}' "$new_id" \
+    | env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+  [ "$(cat "$spy")" = "called thread=$new_id hook=1" ]
+
+  # No identity from the session (only a rollout could name the thread): never.
+  : > "$spy"
+  env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" </dev/null >/dev/null
+  [ ! -s "$spy" ]
+
+  # A seat already bound to this thread: nothing to rebind.
+  : > "$spy"
+  _seed_role_record team alice "$new_id" "$TEST_PROJECT" codex
+  CODEX_THREAD_ID="$new_id" bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" </dev/null >/dev/null
+  [ ! -s "$spy" ]
+}
+
 # #1477: Codex installed after agmsg never gets this install's writable_roots
 # (configure_codex_sandbox only writes them into a Codex config that already
 # existed at install time), and nothing later says so. session-start.sh's
