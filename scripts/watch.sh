@@ -88,6 +88,15 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 # reaching for $TMUX_PANE behind its own back.
 # shellcheck disable=SC1091
 [ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+# Same two libs actas-claim.sh reads the native-delivery record through
+# (role-session.sh's messaging_socket field, daemon-state.sh's AGMSGD_HEALTH) —
+# see _agmsg_watch_native_delivery_active below. Guarded the same way: an
+# install predating native delivery simply lacks these files, and the re-arm
+# loop falls back to its original always-renew-or-stop-on-silence behavior.
+# shellcheck disable=SC1091
+[ -r "$SCRIPT_DIR/lib/role-session.sh" ] && . "$SCRIPT_DIR/lib/role-session.sh"
+# shellcheck disable=SC1091
+[ -r "$SCRIPT_DIR/lib/daemon-state.sh" ] && . "$SCRIPT_DIR/lib/daemon-state.sh"
 
 # Resolve a session id when the launcher could not bake one in (empty first arg).
 # Grok Build's `monitor` tool runs the watcher with $GROK_SESSION_ID unset, so
@@ -1186,9 +1195,58 @@ _WATCH_DELIVERED="${AGMSG_WATCH_DELIVERED_BASE:-0}"
 case "$_WATCH_DELIVERED" in ''|*[!0-9]*) _WATCH_DELIVERED=0 ;; esac
 unset AGMSG_WATCH_ELAPSED_BASE AGMSG_WATCH_DELIVERED_BASE
 
+# True only once agmsgd has actually taken over delivery for every pair this
+# watcher serves -- the same two reads actas-claim.sh/daemon.sh status use to
+# decide and report native delivery (daemon-state.sh's AGMSGD_HEALTH, role-
+# session.sh's messaging_socket field), reused rather than re-derived so this
+# can never disagree with what `delivery=native`/`daemon.sh status` already
+# told the seat.
+#
+# Native delivery is only ever claimed for an exclusive (actas) role (see
+# actas-claim.sh's own TYPE=claude-code, NAME-scoped gate) -- a broad watcher
+# (no ACTIVE_NAME) never has a role-session record to check, and must keep
+# renewing exactly as before.
+#
+# "Recorded" means agmsg_role_session_uuid for THIS pair equals this session's
+# own bare sid (not merely that some session claimed native once) and
+# messaging_socket is non-empty -- a stale record from a since-exited session
+# must not stop a watcher that is this seat's only remaining delivery path.
+# AGMSGD_HEALTH=ready is re-checked every call (not cached) so a daemon that
+# stops after actas claimed native correctly falls back to normal re-arming
+# instead of leaving the seat with neither channel.
+_agmsg_watch_native_delivery_active() {
+  [ "$AGENT_TYPE" = claude-code ] && [ -n "$ACTIVE_NAME" ] || return 1
+  declare -F agmsg_role_session_uuid >/dev/null 2>&1 || return 1
+  declare -F agmsg_daemon_read_state >/dev/null 2>&1 || return 1
+  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  agmsg_daemon_read_state
+  [ "$AGMSGD_HEALTH" = ready ] || return 1
+  declare -F _agmsg_detect_platform >/dev/null 2>&1 && _agmsg_detect_platform
+  [ "${_agmsg_platform:-}" != msys ] || return 1
+  declare -F agmsg_claude_code_native_storage_ready >/dev/null 2>&1 || return 1
+  agmsg_claude_code_native_storage_ready || return 1
+  local bare_sid="$SESSION_ID"
+  if declare -F agmsg_instance_bare_sid >/dev/null 2>&1; then
+    bare_sid="$(agmsg_instance_bare_sid "$SESSION_ID")"
+  fi
+  [ -n "$bare_sid" ] || return 1
+  local _team _agent _any=0
+  while IFS=$'\t' read -r _team _agent; do
+    [ -z "$_team" ] && continue
+    _any=1
+    [ "$(agmsg_role_session_uuid "$_team" "$_agent" 2>/dev/null)" = "$bare_sid" ] || return 1
+    [ -n "$(agmsg_role_session_get "$_team" "$_agent" messaging_socket 2>/dev/null)" ] || return 1
+  done <<< "$PAIRS"
+  [ "$_any" -eq 1 ]
+}
+
 _watch_renew_or_stop() {
   local elapsed=$((SECONDS + _WATCH_ELAPSED_BASE)) cmd desc arg
   [ "$elapsed" -ge "$WATCH_MAX_SECONDS" ] || return 0
+  if _agmsg_watch_native_delivery_active; then
+    watch_report "stopping - this seat's delivery has moved to agmsgd's native channel, so this watch is not re-armed"
+    exit 0
+  fi
   if [ "$_WATCH_DELIVERED" -gt 0 ] || [ -n "${AGMSG_CC_MONITOR_KEEP_ALIVE:-}" ]; then
     cmd="$(printf '%q' "$SCRIPT_DIR/watch.sh")"
     for arg in "${ORIG_ARGS[@]}"; do
