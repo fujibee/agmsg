@@ -70,12 +70,16 @@ async function waitForFile(path) {
 }
 
 test('Codex startup refreshes the sole destination from the current hook thread without replacing a live owner', async t => {
-  const { root, profile, start, startAsync, record, old, status } = codexStartupFixture(t, ['alice']);
+  const { root, db, profile, start, startAsync, record, old, status } = codexStartupFixture(t, ['alice']);
   const current = '01a13352-3599-7d62-a149-4c8182bcf008';
   start(current);
   assert.match(record('alice'), new RegExp(`session=${current}\\n`));
   assert.ok(record('alice').includes(`codex_home=${realpathSync(profile)}\n`));
-  assert.match(status(), /current session not verified.*\$.* actas <name>/);
+  const add = (state, id) => db.prepare("INSERT INTO beta_codex_queue(seat, codex_home, thread, up_to, nonce, state, children, created_at) VALUES (json_array('test','alice'), ?, ?, '1', 'n', ?, '{}', datetime('now'))").run(root, id, state);
+  assert.match(status(), /alice: destination recorded\n/);
+  add('confirmed', current);
+  assert.doesNotMatch(status(), /actas <name>/);
+  add('expired', current);
   assert.ok(status().includes(`$${basename(root)} actas <name>`));
   const live = `${old('alice')}owner=${thread}.${process.pid}\n`;
   writeFileSync(join(root, 'run/role-session.test__alice'), live);
