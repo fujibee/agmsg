@@ -249,6 +249,17 @@ WRAPPER
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_boot_id='$boot';"
   run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; kill() { echo "kill: ($2) - No such process" >&2; return 1; }; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
   [ "$output" = stopped ]
+  # A readable start time later than the recorded claim is a reused pid, even
+  # when the boot id is denied.
+  if [ "$(uname -s)" = Darwin ]; then
+    mkdir -p "$BATS_TEST_TMPDIR/boot-denied"
+    printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/boot-denied/sysctl"
+    chmod +x "$BATS_TEST_TMPDIR/boot-denied/sysctl"
+    sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_started_at='2000-01-01T00:00:00Z';"
+    run env PATH="$BATS_TEST_TMPDIR/boot-denied:$PATH" bash -ec 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+    [ "$output" = stopped ]
+    sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  fi
   if [ "$(uname -s)" = Darwin ]; then
     # A record written when the boot id was kern.boottime seconds: the kernel
     # shifts that value with clock adjustments, so while its pid exists it

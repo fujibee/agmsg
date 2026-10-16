@@ -79,6 +79,20 @@ agmsg_daemon_read_state() {
     AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)"
     return 0
   fi
+  # Likewise a readable start time later than the owner's claim: a reused pid.
+  local claim_epoch
+  case "$recorded_start" in
+    ????-??-??T??:??:??*)
+      case "$(uname -s)" in
+        Darwin) claim_epoch="$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%S' "${recorded_start:0:19}" +%s 2>/dev/null)" || claim_epoch="" ;;
+        Linux) claim_epoch="$(date -u -d "$recorded_start" +%s 2>/dev/null)" || claim_epoch="" ;;
+      esac ;;
+    *) claim_epoch="" ;;
+  esac
+  if [ -n "$started_epoch" ] && [ -n "$claim_epoch" ] && [ "$started_epoch" -gt "$claim_epoch" ]; then
+    AGMSGD_REASON="executor start evidence does not match ($AGMSGD_REASON)"
+    return 0
+  fi
   if [ -z "$current_boot" ] || [ -z "$started_epoch" ]; then
     case "$(_agmsg_daemon_pid_presence "$pid")" in
       gone) ;;
@@ -92,17 +106,6 @@ agmsg_daemon_read_state() {
     AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)"
     return 0
   fi
-  # The owner records its claim time. A process born after that claim is a
-  # reused PID, never evidence that the recorded executor is still running.
-  local claim_epoch
-  case "$recorded_start" in
-    ????-??-??T??:??:??*)
-      case "$(uname -s)" in
-        Darwin) claim_epoch="$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%S' "${recorded_start:0:19}" +%s 2>/dev/null)" || claim_epoch="" ;;
-        Linux) claim_epoch="$(date -u -d "$recorded_start" +%s 2>/dev/null)" || claim_epoch="" ;;
-      esac ;;
-    *) claim_epoch="" ;;
-  esac
   if [ -z "$claim_epoch" ] || [ "$started_epoch" -gt "$claim_epoch" ]; then
     AGMSGD_REASON="executor start evidence does not match ($AGMSGD_REASON)"
     return 0
