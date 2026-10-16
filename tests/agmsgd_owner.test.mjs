@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { openInstallDb } from "../scripts/daemon/db.mjs";
 import {
+  controlSocketPath,
   markReady,
   markStopping,
   readOwner,
@@ -33,6 +34,13 @@ test("takeOwnership: none -> starting -> ready is a clean run", () => {
     assert.equal(r.ok, true);
     assert.equal(r.gen, 1);
     assert.equal(readOwner(db).state, "starting");
+    assert.equal(readOwner(db).socket, join(dir, "run", "agmsgd.1.sock"));
+    // On Windows the control endpoint is a named pipe (a file path cannot be
+    // listened on there), still keyed by install and gen.
+    const pipe = controlSocketPath(dir, 7, "id-a", "win32");
+    assert.match(pipe, /^\\\\\.\\pipe\\agmsgd-[0-9a-f]{12}-7$/);
+    assert.notEqual(pipe, controlSocketPath(dir, 7, "id-b", "win32"));
+    assert.notEqual(pipe, controlSocketPath(dir, 8, "id-a", "win32"));
     assert.equal(markReady(db, r.gen), true);
     assert.equal(readOwner(db).state, "ready");
   } finally {

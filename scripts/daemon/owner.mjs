@@ -10,6 +10,7 @@
 // generation and through takeOwnership() plus control-socket readiness, so
 // an install cannot begin between validation and this claim.
 
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { currentExecutor, isAlive } from "./executor.mjs";
 import { withImmediateTransaction } from "./db.mjs";
@@ -22,7 +23,15 @@ export function readIntent(db) {
   return db.prepare("SELECT * FROM daemon_intent").get();
 }
 
-function socketPath(installRoot, gen) {
+// Node on Windows cannot listen on a file path (EACCES); a control endpoint
+// there is a named pipe, whose name carries the same install identity and gen
+// the file name does elsewhere. Everything that connects reads the endpoint
+// back from daemon_owner.socket, so this is the one place it is decided.
+export function controlSocketPath(installRoot, gen, installId, platform = process.platform) {
+  if (platform === "win32") {
+    const unit = createHash("sha256").update(`${installRoot}:${installId ?? ""}`).digest("hex").slice(0, 12);
+    return `\\\\.\\pipe\\agmsgd-${unit}-${gen}`;
+  }
   return join(installRoot, "run", `agmsgd.${gen}.sock`);
 }
 
@@ -60,7 +69,7 @@ export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen,
 
     const gen = owner.gen + 1;
     const executor = currentExecutor();
-    const socket = socketPath(installRoot, gen);
+    const socket = controlSocketPath(installRoot, gen, db.prepare("SELECT install_id FROM meta").get()?.install_id);
     const startedAt = new Date().toISOString();
     db.prepare(
       `UPDATE daemon_owner SET gen = ?, state = 'starting',

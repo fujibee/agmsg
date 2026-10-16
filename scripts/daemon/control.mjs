@@ -161,7 +161,8 @@ export function createControlServer(socketPath, handlers) {
     server.listen(socketPath, () => {
       server.removeListener("error", reject);
       try {
-        chmodSync(socketPath, 0o600);
+        // A Windows named pipe has no file mode to set.
+        if (!socketPath.startsWith("\\\\.\\pipe\\")) chmodSync(socketPath, 0o600);
       } catch (error) {
         server.close();
         reject(error);

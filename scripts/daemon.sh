@@ -378,7 +378,18 @@ _register_windows() {
   local node_path="$1" name xml
   name="$(_schtasks_name)"
   xml="$SKILL_DIR/run/${name}.xml"
-  local native_launcher
+  # A bare `bash.exe` in the task is resolved by CreateProcess, which looks in
+  # System32 first and finds WSL's launcher there, not Git Bash. Name the Git
+  # Bash that is running this script by its full path instead.
+  local git_root git_bash native_bash native_launcher
+  git_root="$(cygpath -m / 2>/dev/null || true)"
+  git_root="${git_root%/}"
+  git_bash="$git_root/bin/bash.exe"
+  if [ -z "$git_root" ] || [ ! -f "$git_bash" ]; then
+    echo "agmsg daemon: cannot find Git Bash's bin/bash.exe (looked for '$git_bash'); not registering the scheduled task" >&2
+    return 1
+  fi
+  native_bash="$(cygpath -w "$git_bash" 2>/dev/null || printf '%s' "$git_bash")"
   native_launcher="$(cygpath -w "$LAUNCHER" 2>/dev/null || printf '%s' "$LAUNCHER")"
   local xml_utf8="$xml.utf8"
   cat > "$xml_utf8" <<EOF
@@ -389,7 +400,7 @@ _register_windows() {
   </Triggers>
   <Actions>
     <Exec>
-      <Command>bash.exe</Command>
+      <Command>$native_bash</Command>
       <Arguments>"$native_launcher"</Arguments>
     </Exec>
   </Actions>
