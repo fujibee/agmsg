@@ -490,8 +490,8 @@ agmsg_agent_pid() {
     _agmsg_detect_platform
     case "$_agmsg_platform:${CLAUDE_PID:-}" in
       msys:''|msys:0*|msys:*[!0-9]*) ;;
-      msys:*) if _agmsg_pid_alive "$CLAUDE_PID" 2>/dev/null; then
-                printf '%s' "$CLAUDE_PID"; return 0
+      msys:*) if _agmsg_pid_alive "${CLAUDE_PID:-}" 2>/dev/null; then
+                printf '%s' "${CLAUDE_PID:-}"; return 0
               fi ;;
     esac
   fi
