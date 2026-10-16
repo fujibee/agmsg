@@ -12,7 +12,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
 # permitted), which says the process exists; anything else is "unknown".
 _agmsg_daemon_pid_presence() {   # <pid>
   local out
-  out="$(LC_ALL=C kill -0 "$1" 2>&1)" && { echo alive; return 0; }
+  out="$(export LC_ALL=C; kill -0 "$1" 2>&1)" && { echo alive; return 0; }
   case "$out" in
     *"No such process"*) echo gone ;;
     *"not permitted"*) echo alive ;;
