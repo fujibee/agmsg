@@ -1686,7 +1686,10 @@ EOF
           FINAL_CURSOR="${FINAL_CURSOR%%'"'*}"
           ;;
       esac
-      if [ -n "$FINAL_CURSOR" ]; then
+      # With no delivered IDs and an unchanged frontier, consume would only
+      # take a write transaction to store MAX(position, position). Re-read the
+      # frontier next cycle as usual; only a changed cursor needs consuming.
+      if [ -n "$FINAL_CURSOR" ] && [ "$FINAL_CURSOR" != "$READ_CURSOR" ]; then
         # Consume (#983): the same re-verification the heavy path above does
         # immediately before advancing the read frontier — a pair that
         # changed hands is left entirely alone, cursor included, so the
