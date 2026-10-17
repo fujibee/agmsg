@@ -332,6 +332,33 @@ agmsg_sqlite_warm() {
   [ -n "$_AGMSG_ESCAPE_PROBED" ] || _agmsg_escape_flag >/dev/null
 }
 
+# Is $1 (sqlite3's full stderr, possibly several lines) a real lock-timeout
+# giveup -- never a statement whose own error text happens to MENTION
+# "database is locked", e.g. a table or column named that, or a failed
+# statement displayed verbatim in a parse error. A plain substring test
+# cannot tell the two apart (review on #1645/#1654: a `SELECT` against a
+# table literally named "database is locked" read as busy and got the
+# busy diagnostic, when it was really "no such table"). Matched instead
+# against the exact whole lines sqlite3 itself emits for SQLITE_BUSY,
+# collected by reproducing a real lock timeout on both argv and stdin input
+# and on both supported CLI generations:
+#   3.51.0, argv:  Error: in prepare, database is locked (5)
+#   3.51.0, argv:  Error: stepping, database is locked (5)
+#   3.51.0, stdin: Parse error near line N: database is locked (5)
+#   3.53.4, argv:  Parse error in Nth command line argument: database is locked (5)
+#   3.53.4, argv:  Error in Nth command line argument: database is locked
+#   3.53.4, stdin: Parse error near line N: database is locked (5)
+# Anchored start-to-end per line, with no wildcard around "database is
+# locked" itself, so a line that embeds extra text around it (the
+# counter-example above renders as "...: no such table: database is
+# locked") fails every alternative and is correctly left unclassified.
+_agmsg_sqlite_err_is_busy() {
+  printf '%s\n' "$1" | grep -Eq \
+    '^Error: (in prepare|stepping), database is locked( \([0-9]+\))?$'\
+'|^(Error|Parse error) in [0-9]+(st|nd|rd|th) command line argument: database is locked( \([0-9]+\))?$'\
+'|^(Error|Parse error) near line [0-9]+: database is locked( \([0-9]+\))?$'
+}
+
 agmsg_sqlite() {
   # Probe in THIS shell, not in a command substitution. `$(_agmsg_escape_flag)`
   # ran the function in a subshell, so the memo it set was discarded on exit and
@@ -403,19 +430,17 @@ agmsg_sqlite() {
   } 3>&1 || _agmsg_sqlite_rc=$?
   [ -z "$_agmsg_sqlite_err" ] || printf '%s\n' "$_agmsg_sqlite_err" >&2
   # SQLite 3.53.4/3.54.0's CLI returns the generic 1 for a lock-timeout
-  # giveup instead of 5, on the same "database is locked" failure 3.51.0
-  # reports as 5 (#1645) -- so rc alone can no longer tell a busy timeout
-  # from any other failure on every supported CLI. The text survives across
-  # versions (seen above: "Error in Nth command line argument: database is
-  # locked" on the newer CLI, a plain "Error: database is locked" on
-  # 3.51.0), so a text match normalizes rc to the historical 5 whenever the
-  # CLI's own code did not already say so, which keeps every existing
-  # rc==5 caller (including the diagnostic below) working unchanged on
-  # either CLI generation.
-  if [ "$_agmsg_sqlite_rc" -ne 0 ] && [ "$_agmsg_sqlite_rc" -ne 5 ]; then
-    case "$_agmsg_sqlite_err" in
-      *"database is locked"*) _agmsg_sqlite_rc=5 ;;
-    esac
+  # giveup instead of 5, on the same failure 3.51.0 reports as 5 (#1645) --
+  # so rc alone can no longer tell a busy timeout from any other failure on
+  # every supported CLI. _agmsg_sqlite_err_is_busy() recognizes the exact
+  # lines sqlite3 itself emits for this, so a real lock timeout still
+  # normalizes to the historical 5 (keeping every existing rc==5 caller,
+  # including the diagnostic below, working unchanged on either CLI
+  # generation), while an ordinary error that merely mentions "database is
+  # locked" in a table/column name or an echoed statement does not.
+  if [ "$_agmsg_sqlite_rc" -ne 0 ] && [ "$_agmsg_sqlite_rc" -ne 5 ] &&
+     _agmsg_sqlite_err_is_busy "$_agmsg_sqlite_err"; then
+    _agmsg_sqlite_rc=5
   fi
   # SQLITE_BUSY after the full timeout used to pass in silence: the caller saw
   # a non-zero it often swallowed, and the operator saw a command that hung
