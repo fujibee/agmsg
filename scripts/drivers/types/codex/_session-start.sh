@@ -68,6 +68,11 @@ agmsg_resolve_codex_thread() {
     printf '%s' "$CODEX_THREAD_ID"
     return 0
   fi
+  # Hook input identifies this session directly; a rollout lookup only infers it.
+  if [[ "${SESSION_ID:-}" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+    printf '%s' "${SESSION_ID:-}"
+    return 0
+  fi
   local sessions_dir="$HOME/.codex/sessions"
   [ -d "$sessions_dir" ] || return 0
   # Compare PHYSICAL paths. agmsg may open the project via a symlinked/logical
@@ -102,6 +107,59 @@ INNER_EOF
   return 0
 }
 
+# A restart gets a new thread. Prefer this project's sole registration, or a
+# unique placement in this terminal generation, rather than keeping an old
+# conversation merely because its rollout is still on disk.
+agmsg_codex_refresh_destination() {
+  local thread="$1" project="$2" pairs="$3" team name count chosen_team='' chosen_name=''
+  AGMSG_CODEX_REFRESHED_PAIR=''
+  [[ "$thread" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || return 1
+  # Never bind a role to the newest rollout inference from another session.
+  [ "$thread" = "${CODEX_THREAD_ID:-}" ] || [ "$thread" = "${SESSION_ID:-}" ] || return 1
+  pairs="$(printf '%s\n' "$pairs" | sort -u)"
+  count="$(printf '%s\n' "$pairs" | grep -c . || true)"
+  if [ "$count" = 1 ]; then
+    IFS=$'\t' read -r chosen_team chosen_name <<< "$pairs"
+  else
+    # Environment-only driver observations perform no terminal writes or RPCs.
+    source "${SKILL_DIR:-}/scripts/lib/terminal-registry.sh" || return 1
+    local here terminal id epoch ref path recorded record_project record_type mark matches=0
+    here="$(agmsg_terminal_self_env)"
+    case "$here" in ''|unknown:*) return 1 ;; esac
+    IFS=$'\t' read -r terminal id epoch <<< "$here"
+    case "$terminal:$epoch" in plain:*|*:|*:unknown:*) return 1 ;; esac
+    ref="$(agmsg_terminal_ref "$terminal" "$id")" || return 1
+    while IFS=$'\t' read -r team name; do
+      [ -n "$team" ] && [ -n "$name" ] || continue
+      path="$(agmsg_spawn_path "$team" "$name")" || continue
+      [ -f "$path" ] || continue
+      IFS=$'\t' read -r recorded record_project record_type < "$path" || continue
+      [ "$recorded" = "$ref" ] && [ "$record_type" = codex ] || continue
+      [ "$(agmsg_canonical_path "$record_project" 2>/dev/null)" = "$project" ] || continue
+      mark="$(agmsg_role_session_named "$team" "$name")"
+      [ "$mark" = "$ref"$'\t'"$epoch" ] || continue
+      matches=$((matches + 1)); chosen_team="$team"; chosen_name="$name"
+    done <<< "$pairs"
+    [ "$matches" = 1 ] || return 1
+  fi
+  [ -n "$chosen_team" ] && [ -n "$chosen_name" ] || return 1
+  local profile owner
+  # shellcheck disable=SC1091
+  . "${SKILL_DIR:-}/scripts/drivers/types/codex/_profile.sh"
+  profile="$(agmsg_codex_profile_from_env)" || return 1
+  owner="$(agmsg_instance_id "$thread" codex 2>/dev/null)" || return 1
+  agmsg_role_session_record "$chosen_team" "$chosen_name" "$thread" "$project" codex "$owner" "$profile" inactive || return 1
+  agmsg_role_session_load "$chosen_team" "$chosen_name"
+  [ "${AGMSG_ROLE_SESSION_UUID:-}" = "$thread" ] \
+    && [ "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" codex_home)" = "$profile" ] || return 1
+  AGMSG_CODEX_REFRESHED_PAIR="$chosen_team"$'\t'"$chosen_name"
+}
+
+agmsg_codex_unseated_notice() {
+  source "${SKILL_DIR:-}/scripts/lib/boot-command.sh"
+  printf 'AGMSG delivery: this session is not connected to a seat yet. Run %s in Codex to receive messages.\n' "$(agmsg_actas_prompt codex '<name>')"
+}
+
 agmsg_session_start() {
   # #1477: report, once, if this profile's Codex config is missing this
   # install's writable_roots (Codex installed after agmsg, so
@@ -115,16 +173,48 @@ agmsg_session_start() {
   fi
   agmsg_codex_writable_roots_notice "$SKILL_DIR"
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
-  [ -n "$thread_id" ] || exit 0
+  if [ -z "$thread_id" ]; then
+    agmsg_codex_unseated_notice
+    exit 0
+  fi
   # A recorded role belongs to its recorded Codex thread. The in-sandbox
   # fallback has no launcher to arbitrate this, so exclude a mismatched role
   # rather than ever injecting it into this session's thread (#150/#350).
   # shellcheck source=../../../lib/role-session.sh
   source "$SKILL_DIR/scripts/lib/role-session.sh"
   project_phys="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
+  # #1468: /clear starts a new thread inside the same Codex process, so no
+  # seat of this project is recorded on it and the old owner's pid is still
+  # alive. When nothing is bound to this thread, let the proof-gated rebind
+  # that `fix` uses move the one seat that proves it is this pane.
+  # Only an identity the session itself supplied (env or hook input) may drive
+  # it, never a rollout-inferred one.
+  if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
+    clear_bound=0
+    while IFS=$'\t' read -r clear_team clear_name; do
+      [ -n "$clear_team" ] || continue
+      [ "$(agmsg_role_session_uuid "$clear_team" "$clear_name" 2>/dev/null || true)" = "$thread_id" ] && clear_bound=1
+    done <<< "$PAIRS"
+    if [ "$clear_bound" = 0 ]; then
+      ( export CODEX_THREAD_ID="$thread_id"
+        # shellcheck disable=SC1091
+        . "${SKILL_DIR:-}/scripts/lib/self-fix.sh" \
+          && cd "${PROJECT:-}" \
+          && AGMSG_FIX_REASSIGN_FROM_HOOK=1 _fix_codex_thread_reassign ) >/dev/null 2>&1 || true
+    fi
+  fi
+  # The hook runs in the TUI's environment; tool shells may not (see _profile.sh).
+  if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
+    # shellcheck disable=SC1091
+    . "${SKILL_DIR:-}/scripts/drivers/types/codex/_profile.sh"
+    agmsg_codex_thread_home_publish "${RUN_DIR:-}" "$thread_id"
+  fi
+  agmsg_codex_refresh_destination "$thread_id" "$project_phys" "$PAIRS" || true
   safe_pairs=""
   while IFS=$'\t' read -r candidate_team candidate_name; do
     [ -n "$candidate_team" ] || continue
+    if [ -n "${AGMSG_CODEX_REFRESHED_PAIR:-}" ] \
+      && [ "$candidate_team"$'\t'"$candidate_name" != "$AGMSG_CODEX_REFRESHED_PAIR" ]; then continue; fi
     candidate_thread="$(agmsg_role_session_uuid "$candidate_team" "$candidate_name" 2>/dev/null || true)"
     if [ -n "$candidate_thread" ]; then
       candidate_project="$(agmsg_role_session_get "$candidate_team" "$candidate_name" project 2>/dev/null || true)"
@@ -137,6 +227,10 @@ agmsg_session_start() {
     safe_pairs="${safe_pairs:+$safe_pairs$'\n'}${candidate_team}"$'\t'"${candidate_name}"
   done <<< "$PAIRS"
   PAIRS="$safe_pairs"
+  if [ "$(printf '%s\n' "$PAIRS" | grep -c . || true)" != 1 ] \
+    || { [ "$thread_id" != "${CODEX_THREAD_ID:-}" ] && [ "$thread_id" != "${SESSION_ID:-}" ]; }; then
+    agmsg_codex_unseated_notice
+  fi
   # A request is an authority hand-off, not a best-effort hint. Never derive a
   # path from an absent RUN_DIR or publish a record whose type is empty: callers
   # that cannot provide either input must leave the previous request untouched.

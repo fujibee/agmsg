@@ -44,6 +44,8 @@ flowchart LR
 
 この順で出す:
 
+**1.6.0 beta note:** agmsgd is optional and off by default before the 2.0.0 store migration. It only queues inbox notices for Codex sessions against the existing SQLite store. Existing Codex bridges and the remote sync engine remain separate processes; bridge sessions continue until restarted. Use `agmsg daemon enable` for new Codex launches, or `agmsg daemon disable` followed by restarting sessions that have no bridge. If `agmsg` is not found, use `<install>/scripts/agmsg daemon enable|disable`. macOS and Linux are supported; Windows delivery remains unsupported pending measurement, and JSONL storage is unsupported. The beta does not bring forward the 2.0.0 data migration.
+
 1. **1.3.1** — まだ知らないメッセージの項目を読み飛ばせるようにする(出荷済み)。
 2. **古い版が脇によけたものの読み直し** — 上げたあと、以前は理解できなかった保存済みの原文を読み直す(出荷済み)。
 3. **新しいメッセージすべてに、共通の id・件名・要約を付ける**(1.x)。

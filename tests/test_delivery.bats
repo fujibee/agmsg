@@ -405,6 +405,36 @@ eperm_pid() {
     [[ "$output" == *"$TEST_PROJECT"* ]]
 }
 
+@test "delivery status: a Codex project with no hooks file reads as agmsgd-delivered only while agmsgd is on and its seats have destinations" {
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
+
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  # agmsgd on, but alice has no recorded destination yet: unchanged.
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
+
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record team alice thread-1 "$TEST_PROJECT" codex "" "$TEST_PROJECT/codex-home"
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project's Codex seats; no hooks file needed)" ]
+
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
+}
+
 @test "delivery status: a settings file that exists but is not valid JSON is also unrecognized, not deliberate off (review)" {
   # A third way has_ss/has_st both land on 0: not "missing" and not "genuinely
   # empty of agmsg entries" but unreadable/malformed, which the has_ss/has_st
@@ -2882,6 +2912,37 @@ EOF
     bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
 
   [ ! -f "$log" ]
+}
+
+@test "session-start.sh for codex runs the /clear rebind only for an identity the session supplied (#1468)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice 11111111-1111-4111-8111-111111111111 "$TEST_PROJECT" codex
+  local spy="$TEST_SKILL_DIR/rebind.log"
+  # The proof-gated helper is covered in test_self_fix.bats; here only the
+  # hook entry is under test, so stand in for it and record how it was called.
+  cat >"$TEST_SKILL_DIR/scripts/lib/self-fix.sh" <<STUB
+_fix_codex_thread_reassign() {
+  printf 'called thread=%s hook=%s\n' "\${CODEX_THREAD_ID:-}" "\${AGMSG_FIX_REASSIGN_FROM_HOOK:-}" >> "$spy"
+  return 1
+}
+STUB
+  local new_id=22222222-2222-4222-8222-222222222222
+
+  # Hook input alone (no CODEX_THREAD_ID) names the new thread: rebind runs.
+  printf '{"session_id":"%s","source":"clear"}' "$new_id" \
+    | env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+  [ "$(cat "$spy")" = "called thread=$new_id hook=1" ]
+
+  # No identity from the session (only a rollout could name the thread): never.
+  : > "$spy"
+  env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" </dev/null >/dev/null
+  [ ! -s "$spy" ]
+
+  # A seat already bound to this thread: nothing to rebind.
+  : > "$spy"
+  _seed_role_record team alice "$new_id" "$TEST_PROJECT" codex
+  CODEX_THREAD_ID="$new_id" bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" </dev/null >/dev/null
+  [ ! -s "$spy" ]
 }
 
 # #1477: Codex installed after agmsg never gets this install's writable_roots

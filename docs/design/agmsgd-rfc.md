@@ -44,6 +44,8 @@ The trigger is concrete bugs. Several problems users actually hit came from mana
 
 It ships in this order:
 
+The 1.6.0 agmsgd beta is an optional, default-off exception before the 2.0.0 store migration: it only queues inbox notices for Codex sessions against the existing SQLite store. Existing Codex bridges and the remote sync engine remain available as separate processes; bridge sessions continue until restarted. `agmsg daemon enable` switches new Codex launches to daemon notices, and `agmsg daemon disable` requires restarting sessions that have no bridge. If `agmsg` is not found, use `<install>/scripts/agmsg daemon enable` or `<install>/scripts/agmsg daemon disable`. The beta supports macOS and Linux; Windows delivery remains unsupported pending measurement, and JSONL storage is unsupported. It does not bring forward the 2.0.0 data migration.
+
 1. **1.3.1** — clients skip message fields they do not know yet (released).
 2. **Re-reading what an older client set aside** — after an upgrade, the client re-reads the stored originals it could not understand before (released).
 3. **A shared id, subject and summary on every new message** (1.x).

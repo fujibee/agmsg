@@ -106,6 +106,21 @@ _agmsg_pid_valid() {
   return 0
 }
 
+# Does the pid exist, by the signal alone? Kept here because this file owns
+# every kill -0. Unlike _agmsg_pid_alive it reports three states, for a caller
+# that cannot run ps (an app sandbox denies it). Answers "gone" only on a clear
+# "no such process". A sandbox may refuse the signal even for a live process
+# (not permitted), which says the process exists; anything else is "unknown".
+_agmsg_pid_signal_presence() {   # <pid>
+  local out
+  out="$(export LC_ALL=C; kill -0 "$1" 2>&1)" && { echo alive; return 0; }
+  case "$out" in
+    *"No such process"*) echo gone ;;
+    *"not permitted"*) echo alive ;;
+    *) echo unknown ;;
+  esac
+}
+
 # Liveness for a pid THIS codebase minted: $! or $$ in one of these shells, or
 # read back from a pidfile one of them wrote. A pidfile does not launder the pid
 # space -- the number in it is still whatever the shell that wrote it was given.

@@ -140,6 +140,31 @@ while IFS= read -r team; do
   agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT_PHYS" "$TYPE" "$SESSION_ID" || true
 done <<< "$TEAMS"
 
+# Once the seat is decided, move this Claude Code session onto agmsgd's direct
+# delivery when the daemon is ready and the session has a usable messaging
+# socket, so a seat chosen by actas does not depend on how many seats the
+# project registers. Prints "delivery=native" after the status line; the actas
+# procedure then skips the Monitor. Anything short of a verified record leaves
+# the Monitor path as it was.
+NATIVE_DELIVERY=0
+if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
+   && _native_target="$(agmsg_claude_code_native_target 2>/dev/null)" \
+   && [ -r "$SKILL_DIR/scripts/lib/daemon-state.sh" ]; then
+  # shellcheck source=scripts/lib/daemon-state.sh
+  . "$SKILL_DIR/scripts/lib/daemon-state.sh"
+  command -v _agmsg_detect_platform >/dev/null 2>&1 || . "$SKILL_DIR/scripts/lib/compat.sh"
+  _agmsg_detect_platform
+  agmsg_daemon_read_state
+  if [ "${AGMSGD_HEALTH:-}" = ready ] && [ "$_agmsg_platform" != msys ] \
+     && agmsg_claude_code_native_storage_ready; then
+    NATIVE_DELIVERY=1
+    while IFS= read -r team; do
+      [ -z "$team" ] && continue
+      agmsg_role_session_publish_messaging "$team" "$NAME" "${_native_target%%$'\t'*}" "${_native_target#*$'\t'}" "$BARE_SID" || NATIVE_DELIVERY=0
+    done <<< "$TEAMS"
+  fi
+fi
+
 # A monitored Codex seat's dispatcher reads its role pair from the seat request
 # rather than inferring it from the project roster. Actas can change the role
 # after SessionStart, so publish the new pair (or an empty pair when the claim
@@ -261,4 +286,5 @@ while IFS= read -r team; do
   printf ' team=%s' "$team"
 done <<< "$TEAMS"
 printf '\n'
+[ "$NATIVE_DELIVERY" -ne 1 ] || echo "delivery=native"
 exit 0

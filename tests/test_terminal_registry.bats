@@ -3695,11 +3695,10 @@ _tmux_op_args() {
   refute test -e "$mine"
 }
 
-@test "placement guard: this seat's record under a VANISHED team blocks it (closed) and the message names the file to remove (#1114 review)" {
-  # The exact rule builds this agent's record path for each team on disk. A team
-  # dropped with its run/ record left behind has no path to build, so that
-  # record reads as a rival: fail-closed, and the refusal must say the way out
-  # is the file, since "drop or despawn" points at this seat itself.
+@test "placement guard: a record under a VANISHED team is dropped and the seat acting now is recorded, without a warning" {
+  # A team dropped with its run/ record left behind: the record is older than
+  # any seat now acting, so it is replaced rather than left to warn on every
+  # action. A claimant whose team still exists keeps the guard (control below).
   _install_fake_tmux
   export PATH="$FAKEBIN:$PATH"
   export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
@@ -3714,11 +3713,9 @@ _tmux_op_args() {
   : > "$ARGV_LOG"
   run agmsg_terminal_name_self "" seatteam alice /proj/MINE claude-code record
   [ "$status" -eq 0 ]
-  grep -q 'did not name or record' <<<"$output"
-  grep -q "recorded as gone__alice's" <<<"$output"
-  grep -q 'remove run/spawn.gone__alice' <<<"$output"
-  refute grep -qE '\[set-option\]|\[select-pane\]' "$ARGV_LOG"
-  refute test -e "$mine"
+  refute grep -q 'did not name or record' <<<"$output"
+  refute test -e "$stale"
+  grep -q '^tmux:/tmp/fake:%1	/proj/MINE	claude-code$' "$mine"
 
   # Control: a genuine other seat gets no such hint.
   rm -f "$stale"
@@ -3726,7 +3723,38 @@ _tmux_op_args() {
   printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$rival"
   run agmsg_terminal_name_self "" seatteam alice /proj/MINE claude-code record
   grep -q "recorded as seatteam__bob's" <<<"$output"
-  refute grep -q 'remove run/spawn' <<<"$output"
+  refute grep -q 'no longer exists' <<<"$output"
+
+  # No proof the team is gone, no drop: a name without a team/agent split, and
+  # a teams directory that cannot be listed, both keep the claimant.
+  rm -f "$rival"
+  local nosplit; nosplit="$(dirname "$mine")/spawn.unsplittable"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$nosplit"
+  run agmsg_terminal_name_self "" seatteam alice /proj/MINE claude-code record
+  grep -q "recorded as unsplittable's" <<<"$output"
+  test -e "$nosplit"
+  rm -f "$nosplit"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$stale"
+  chmod 111 "$SKILL_DIR/teams"
+  run agmsg_terminal_name_self "" seatteam alice /proj/MINE claude-code record
+  chmod 755 "$SKILL_DIR/teams"
+  grep -q "recorded as gone__alice's" <<<"$output"
+  test -e "$stale"
+
+  # The record is re-read before it is dropped: one that moved to another pane
+  # while the owner was being looked up is not the record that was judged.
+  chmod 755 "$SKILL_DIR/teams"
+  # The record moves during the LAST owner lookup, the one right before removal.
+  _agmsg_placement_claimant_here_now() {
+    if [ -e "$BATS_TEST_TMPDIR/asked" ]; then
+      printf 'tmux:/tmp/fake:%%2\t/proj/LIVE\tclaude-code\n' > "$stale"
+    fi
+    : > "$BATS_TEST_TMPDIR/asked"
+    echo unknown
+  }
+  run agmsg_terminal_name_self "" seatteam alice /proj/MINE claude-code record
+  test -e "$stale"
+  grep -q '%2' "$stale"
 }
 
 @test "placement guard: a claimant whose session is confirmed gone lets a live seat take the pane; a claimant still there still refuses (#1485)" {
@@ -3974,6 +4002,10 @@ EOF
   [ "$(terminal_self_env)" = "$CODEX_THREAD_ID" ]
   [ "$(terminal_where "$CODEX_THREAD_ID")" = n/a:no_container_concept ]
   [ "$(agmsg_terminal_get codex-app capabilities)" = where ]
+  # No instance to add, and nothing said about it on every command.
+  run agmsg_terminal_ref_qualify "codex-app:$CODEX_THREAD_ID"
+  [ "$status" -eq 0 ]
+  [ "$output" = "codex-app:$CODEX_THREAD_ID" ]
   local verb
   for verb in spawn despawn peek poke arrange name pane_state; do
     run "terminal_$verb" "$CODEX_THREAD_ID"

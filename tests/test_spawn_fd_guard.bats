@@ -28,7 +28,10 @@ _unguarded_spawns() {
         ;;
       *) printf '%s:%s: closes neither fd 3 nor fd 4 -- %s\n' "$file" "$line" "$rest" ;;
     esac
-  done < <(grep -rnE '^[^#]*[^&|]&[[:space:]]*$' "$root" 2>/dev/null)
+  done < <(
+    grep -rnE '^[^#]*[^&|]&[[:space:]]*$' "$root" 2>/dev/null
+    grep -rnE '^[^#]*coproc[[:space:]]' "$root" 2>/dev/null
+  )
 }
 
 @test "every background spawn under scripts/ closes bats' fd 3 and fd 4" {
@@ -44,10 +47,13 @@ _unguarded_spawns() {
   # Without this, a pattern that quietly stopped matching would leave a test
   # passing because it found nothing -- the failure being guarded against is a
   # silent one, so the count is asserted rather than assumed.
-  local total
+  local total coproc_total
   total="$(grep -rcE '^[^#]*[^&|]&[[:space:]]*$' "$REPO_ROOT/scripts" 2>/dev/null \
     | awk -F: '{s+=$2} END {print s+0}')"
+  coproc_total="$(grep -rcE '^[^#]*coproc[[:space:]]' "$REPO_ROOT/scripts" 2>/dev/null \
+    | awk -F: '{s+=$2} END {print s+0}')"
   [ "$total" -ge 5 ]
+  [ "$coproc_total" -ge 1 ]
 }
 
 @test "a spawn closing only fd 3 is reported" {

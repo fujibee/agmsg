@@ -163,3 +163,4 @@ test_watch_process_count.bats	17
 test_watch_stuck_map.bats	4
 test_watch.bats	216
 test_where.bats	3
+test_agmsgd_switch.bats	10

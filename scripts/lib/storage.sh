@@ -30,6 +30,22 @@
 [ -n "${_AGMSG_STORAGE_SH:-}" ] && return 0
 _AGMSG_STORAGE_SH=1
 
+# Ordinary operations on a non-daemon install pay only a file-existence check.
+# Watchers suppress this entry check in themselves and all child operations.
+_agmsg_entry_dir="${0%/*}"
+[ "$_agmsg_entry_dir" != "$0" ] || _agmsg_entry_dir=.
+if [ "${AGMSG_DAEMON_NOTICE_SKIP:-0}" != 1 ] && [ -f "$_agmsg_entry_dir/../run/install.db" ]; then
+  case "${0##*/}" in daemon.sh|doctor.sh|delivery.sh|watch.sh|session-start.sh|session-end.sh|check-inbox.sh) ;; *)
+    if [ -f "$_agmsg_entry_dir/lib/daemon-state.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$_agmsg_entry_dir/lib/daemon-state.sh"
+      agmsg_daemon_warn_if_stopped || true
+    fi
+    ;;
+  esac
+fi
+unset _agmsg_entry_dir
+
 # agmsg_db_path turns the team selector into a path segment, so it cannot do its
 # job without the shared name validator. Sourced here rather than left to each
 # caller: watch.sh already reached the store without validate.sh in scope, and a

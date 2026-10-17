@@ -433,7 +433,16 @@ _fix_codex_thread_reassign() {
   # the two commands' exit codes -- both routinely exit 0 without having
   # changed anything.
   local sync_reason sync_rc=0
-  sync_reason="$(_fix_codex_thread_sync "$proved_team" "$proved_agent" "$project")" || sync_rc=$?
+  if [ "${AGMSG_FIX_REASSIGN_FROM_HOOK:-}" = 1 ]; then
+    # Called from the codex SessionStart hook: that hook is itself the
+    # session-start.sh run the full sync would shell out to, and it hands the
+    # bridge off right after this returns. Only the record has to move here.
+    "$SKILL_DIR/scripts/drivers/types/codex/codex-record-session.sh" "$proved_team" "$proved_agent" "$project" >/dev/null 2>&1 || true
+    sync_reason=role_session_record_still_old
+    [ "$(agmsg_role_session_uuid "$proved_team" "$proved_agent" 2>/dev/null || true)" = "$CODEX_THREAD_ID" ] || sync_rc=1
+  else
+    sync_reason="$(_fix_codex_thread_sync "$proved_team" "$proved_agent" "$project")" || sync_rc=$?
+  fi
   if [ "$sync_rc" -ne 0 ]; then
     printf 'partial\t%s\t%s\t%s\t%s\n' "$proved_team" "$proved_agent" "$new_owner" "$sync_reason"
     return 2
