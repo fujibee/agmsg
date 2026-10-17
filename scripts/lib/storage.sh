@@ -352,8 +352,18 @@ agmsg_sqlite_warm() {
 # locked" itself, so a line that embeds extra text around it (the
 # counter-example above renders as "...: no such table: database is
 # locked") fails every alternative and is correctly left unclassified.
+#
+# Windows' sqlite3.exe ends stderr lines with \r\n, not \n (the same CRLF
+# behaviour as its stdout, see agmsg_sqlite()'s own CRLF comment above) --
+# left in, the trailing \r sits between "locked" and the `$` anchor and
+# every alternative misses, so a real busy timeout goes unclassified on
+# Windows (review on #1654). Stripped with a builtin substitution, not an
+# external command, matching ONLY the string this match is run against;
+# the original stderr this function was handed is still re-emitted to the
+# caller's stderr unchanged by agmsg_sqlite() itself.
 _agmsg_sqlite_err_is_busy() {
-  printf '%s\n' "$1" | grep -Eq \
+  local _err="${1//$'\r'/}"
+  printf '%s\n' "$_err" | grep -Eq \
     '^Error: (in prepare|stepping), database is locked( \([0-9]+\))?$'\
 '|^(Error|Parse error) in [0-9]+(st|nd|rd|th) command line argument: database is locked( \([0-9]+\))?$'\
 '|^(Error|Parse error) near line [0-9]+: database is locked( \([0-9]+\))?$'
