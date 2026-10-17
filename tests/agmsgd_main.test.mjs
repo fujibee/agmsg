@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { openInstallDb } from "../scripts/daemon/db.mjs";
 import { readOwner } from "../scripts/daemon/owner.mjs";
-import { gracefulStop, pollChannelHooks, pollOnce, prepareClaimWithCodexSchema, startup } from "../scripts/daemon/main.mjs";
+import { gracefulStop, pollChannelHooks, pollCycle, pollOnce, prepareClaimWithCodexSchema, startup } from "../scripts/daemon/main.mjs";
 import { captureWatchState } from "../scripts/daemon/lifecycle.mjs";
 import { createHash } from "node:crypto";
 
@@ -87,6 +87,17 @@ test("pollOnce: continues when nothing changed, steps aside on drift, stops on a
     assert.equal(verdict.action, "stop");
     assert.equal(verdict.reason, "normal");
     db.exec("UPDATE daemon_intent SET op_gen = 0"); // restore
+
+    // Case: another writer holds the database. The tick is skipped, not fatal;
+    // any other error is logged before it propagates.
+    const context = { gen: 1, expectedOpGen: 0, watchState };
+    const busy = Object.assign(new Error("database is locked"), { errcode: 5 });
+    const locked = { prepare() { throw busy; } };
+    assert.deepEqual(await pollCycle(locked, root, context, []), { action: "continue" });
+    await assert.rejects(pollCycle({ prepare() { throw new Error("boom"); } }, root, context, []), /boom/);
+    const log = readFileSync(join(root, "run", "agmsgd.log"), "utf8");
+    assert.match(log, /database busy, retrying next poll/);
+    assert.match(log, /unexpected error, exiting: Error: boom/);
 
     // Case: an in-place edit under scripts/ (the #963 case) with neither
     // the manifest nor the op_gen touched.

@@ -96,6 +96,30 @@ export async function pollOnce(db, installRoot, { gen, expectedOpGen, watchState
   return { action: "continue" };
 }
 
+// A transient lock held by another writer: the next poll simply tries again.
+export function isBusyError(error) {
+  return (error?.errcode & 0xff) === 5 || /database is (locked|busy)/i.test(String(error?.message ?? ""));
+}
+
+// One timer tick: the poll plus the channel polls. A busy database skips this
+// tick; any other unexpected error is written to agmsgd.log before it
+// propagates, so the exit is never silent.
+export async function pollCycle(db, installRoot, context, channelHooks) {
+  try {
+    const verdict = await pollOnce(db, installRoot, context);
+    if (verdict.action !== "continue") return verdict;
+    await pollChannelHooks(channelHooks, (message) => logLine(installRoot, message));
+    return verdict;
+  } catch (error) {
+    if (isBusyError(error)) {
+      logLine(installRoot, `poll: database busy, retrying next poll (${error.message})`);
+      return { action: "continue" };
+    }
+    logLine(installRoot, `poll: unexpected error, exiting: ${error?.stack ?? error}`);
+    throw error;
+  }
+}
+
 // The one place shutdown happens: mark stopping -> stop
 // every registered channel -> close the control socket -> record the
 // normal stop. `reason` becomes daemon_owner.last_end_reason (status.mjs
@@ -181,12 +205,8 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
     if (stopping || polling) return;
     polling = true;
     try {
-      const verdict = await pollOnce(db, installRoot, { gen, expectedOpGen, watchState });
-      if (verdict.action !== "continue") {
-        await doStop(verdict.reason);
-        return;
-      }
-      await pollChannelHooks(channelHooks, (message) => logLine(installRoot, message));
+      const verdict = await pollCycle(db, installRoot, { gen, expectedOpGen, watchState }, channelHooks);
+      if (verdict.action !== "continue") await doStop(verdict.reason);
     } finally {
       polling = false;
     }
