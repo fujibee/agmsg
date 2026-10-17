@@ -380,21 +380,27 @@ agmsg_sqlite() {
   # status is sqlite3's, not sed's, without changing pipefail for the
   # calling script (same shape as _sqlite_data / _sqlite_data_stdin in
   # drivers/storage/sqlite.sh).
-  local _agmsg_sqlite_rc=0 _agmsg_sqlite_errfile
-  # A mktemp failure degrades stderr capture to /dev/null rather than failing
-  # the call outright, same tradeoff as _agmsg_sqlite_recording below: worse
-  # busy diagnostics, not worse correctness.
-  _agmsg_sqlite_errfile=$(mktemp "${TMPDIR:-/tmp}/agmsg-sqlite-err.XXXXXX" 2>/dev/null) || _agmsg_sqlite_errfile=/dev/null
-  (
-    set -o pipefail
-    # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
-    sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" 2>"$_agmsg_sqlite_errfile" | sed $'s/\r$//'
-  ) || _agmsg_sqlite_rc=$?
-  local _agmsg_sqlite_err=""
-  if [ "$_agmsg_sqlite_errfile" != /dev/null ]; then
-    _agmsg_sqlite_err="$(cat "$_agmsg_sqlite_errfile" 2>/dev/null)"
-    rm -f "$_agmsg_sqlite_errfile"
-  fi
+  # stderr is captured into a variable, not a temp file: this function is on
+  # the hot path (every send/receive/watch.sh cycle), so mktemp+cat+rm on
+  # EVERY call -- including the common all-ok case -- would add 3 processes
+  # per call for the busy-text check below alone, the same class of per-cycle
+  # process cost #1627/#1630/#1652 were about removing, and the kind of
+  # leftover-temp-file risk #1580 just fixed. The classic fd-juggle instead:
+  # `3>&1` on the outer group saves this function's real stdout onto fd 3;
+  # inside the command substitution, `1>&3` then points the pipeline's
+  # stdout back at that real stdout (bypassing the substitution's own
+  # capture), while `2>&1` (evaluated first, while fd 1 still means the
+  # substitution's capture) sends the pipeline's stderr there instead. Net
+  # effect: stdout streams straight through to the caller as before, stderr
+  # lands in $_agmsg_sqlite_err, and no process beyond sqlite3/sed is forked.
+  local _agmsg_sqlite_rc=0 _agmsg_sqlite_err
+  {
+    _agmsg_sqlite_err=$(
+      set -o pipefail
+      # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
+      { sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" | sed $'s/\r$//'; } 2>&1 1>&3 3>&-
+    )
+  } 3>&1 || _agmsg_sqlite_rc=$?
   [ -z "$_agmsg_sqlite_err" ] || printf '%s\n' "$_agmsg_sqlite_err" >&2
   # SQLite 3.53.4/3.54.0's CLI returns the generic 1 for a lock-timeout
   # giveup instead of 5, on the same "database is locked" failure 3.51.0
