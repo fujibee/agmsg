@@ -259,6 +259,14 @@ export function createClaudeCodeQueueChannel({
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: "transcript_path_unresolvable" }, now);
       return;
     }
+    // A record whose socket no longer exists (the seat is restarting and has
+    // not written its new one yet) has nowhere to be nudged. Make no queue
+    // row for it: each poll would add one that expires at once. Once the seat
+    // records a socket that exists, this passes and the nudge goes out.
+    if (socketAlive(record.messaging_socket).reason === "messaging_socket_missing") {
+      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
+      return;
+    }
     const nonce = newNonce();
     let id;
     try {

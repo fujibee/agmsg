@@ -146,6 +146,19 @@ test('a nudge is sent again once the seat record names another session', async (
   await channel.stop();
 });
 
+test('a seat whose recorded socket is gone gets no new nudge rows until its record names a socket that exists', async (t) => {
+  const { db, channel, state } = channelFixture(t);
+  state.alive = { state: 'unreadable', reason: 'messaging_socket_missing' };
+  for (let i = 0; i < 5; i += 1) await channel.pollOnce();
+  assert.equal(state.sent, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM beta_claude_queue').get().n, 0);
+  state.alive = { state: 'ok' };
+  state.socket = '/tmp/cc-socks/2.sock';
+  await channel.pollOnce();
+  assert.equal(state.sent, 1);
+  await channel.stop();
+});
+
 test('a conversation stored under another project directory is found by its session id, only when exactly one matches', (t) => {
   const config = temporaryDirectory(t);
   const session = '0d7c2a52-5d4c-4d0f-8c0a-6b6f5f3f9a11';
