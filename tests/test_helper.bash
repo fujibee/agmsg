@@ -34,6 +34,9 @@ unset CLAUDE_CONFIG_DIR
 # of whatever the fixture set up, silently changing which branch a test
 # exercises. Tests that deliberately model a caller set these explicitly.
 unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
+# Codex Desktop exports this; the codex-app driver (priority 1, exclusive)
+# keys off it and would win over every fake terminal a test sets up.
+unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
 export AGMSG_SELF_NAME=off
 
 setup_test_env() {
@@ -48,6 +51,7 @@ setup_test_env() {
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
   unset CLAUDE_CONFIG_DIR
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
   # Saved ONCE (first call wins, via :=): a test that calls teardown_test_env
   # and then setup_test_env again within its OWN body (several in
   # test_remote.bats do, to re-enter with a different fixture) would
