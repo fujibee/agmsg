@@ -117,6 +117,24 @@ recorded_uuid() {
   [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
+@test "codex record: a tool shell without CODEX_HOME records the profile the SessionStart hook saw" {
+  local proj hook_home thread=11111111-2222-3333-4444-555555555555 expected_home
+  proj="$(mktemp -d)"
+  hook_home="$TEST_SKILL_DIR/tui profile"
+  mkdir -p "$hook_home" "$HOME/.codex"
+  source "$SCRIPTS/lib/resolve-project.sh"
+  source "$TYPES/codex/_profile.sh"
+  # The hook runs in the TUI's environment, which carries CODEX_HOME ...
+  CODEX_HOME="$hook_home" agmsg_codex_thread_home_publish "$RUN_DIR" "$thread"
+  # ... the app-server's tool shell, where actas runs, does not.
+  env -u CODEX_HOME CODEX_THREAD_ID="$thread" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  source "$SCRIPTS/lib/role-session.sh"
+  [ "$(recorded_uuid team alice)" = "$thread" ]
+  expected_home="$(agmsg_normalize_project_path "$(cd "$hook_home" && pwd -P)")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
+}
+
 @test "codex record: unresolved profile omits only the field and preserves legacy rollout discovery" {
   local proj invalid_home
   proj="$(mktemp -d)"

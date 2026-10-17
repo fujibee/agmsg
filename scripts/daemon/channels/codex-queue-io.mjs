@@ -337,6 +337,15 @@ export async function verifyPendingDelivery({
   return resolvePendingQueue({ queueObservation, rolloutObservation, ageMs });
 }
 
+// A readable profile with no rollout for the thread is a distinct, nameable
+// cause (the recorded profile is not the one this conversation runs in), not a
+// generic failure to observe it.
+export function rolloutStateOf(rollout) {
+  if (rollout?.state === "absent" || rollout?.state === "present") return "valid";
+  if (rollout?.reason === "thread_rollout_missing" || rollout?.reason === "sessions_dir_missing") return "no_rollout";
+  return "invalid";
+}
+
 export function classifyCodexSeat({ roleSession, bridgeState, rolloutState }) {
   if (bridgeState === "running") return { state: "bridged", reason: "bridge_running" };
   if (!roleSession || !roleSession.thread || !roleSession.codex_home) {

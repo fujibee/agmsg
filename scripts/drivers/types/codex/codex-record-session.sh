@@ -169,25 +169,19 @@ fi
 # a delivery destination, but it does not prevent the session record either:
 # the record is written without the profile, and discovery falls back to
 # $HOME/.codex as before.
-codex_home="${CODEX_HOME:-${HOME:+$HOME/.codex}}"
-case "$codex_home" in
-  *[[:cntrl:]]*) codex_home="" ;;
-  /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
-  *) codex_home="" ;;
-esac
-if [ -n "$codex_home" ] && [ -d "$codex_home" ]; then
-  codex_home="$(agmsg_canonical_path "$codex_home")" || codex_home=""
-  # Keep the absolute path in the cross-platform form used by Node consumers;
-  # Git Bash's physical /c/... spelling is normalized to C:/... on Windows.
-  codex_home="$(agmsg_normalize_project_path "$codex_home")" || codex_home=""
-  case "$codex_home" in
-    *[[:cntrl:]]*) codex_home="" ;;
-    /* | [A-Za-z]:/* | [A-Za-z]:\\*) ;;
-    *) codex_home="" ;;
-  esac
-else
-  codex_home=""
+# CODEX_HOME can be missing here even when the TUI was started with one: newer
+# Codex runs tool commands in the app-server's shell, which does not carry it.
+# The SessionStart hook runs in the TUI's environment and published the profile
+# for this thread, so use that before falling back to $HOME/.codex.
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/_profile.sh"
+codex_home=""
+if [ -n "${CODEX_HOME:-}" ]; then
+  codex_home="$(agmsg_codex_profile_from_env)" || codex_home=""
+elif [ -n "$thread" ]; then
+  codex_home="$(agmsg_codex_thread_home_lookup "$SKILL_DIR/run" "$thread")" || codex_home=""
 fi
+[ -n "$codex_home" ] || codex_home="$(agmsg_codex_profile_from_env)" || codex_home=""
 
 if [ -z "$thread" ]; then
   # No app-server to ask, or it could not be reached -- a codex session outside
