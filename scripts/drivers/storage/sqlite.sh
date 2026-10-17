@@ -162,7 +162,20 @@ storage_init() {
   # store says so, or none of it is visible and the store still says the old
   # revision. A crash or failure in the middle cannot leave a new stamp over
   # an old schema, which is the one way the fast path above could lie.
-  agmsg_sqlite -bail "$db" "
+  #
+  # Fed to sqlite3 on STDIN, not as a command-line argument (#1645). SQLite
+  # 3.53.4 and 3.54.0's CLI only honor -bail's stop-at-first-error contract
+  # when every top-level statement's terminating `;` ends its own physical
+  # line; the exact same statements handed over as a single argv string ran
+  # a failing statement past the error anyway and still reached the
+  # PRAGMA/COMMIT below it, stamping the current revision over a schema that
+  # never finished (3.51.0 did not have this gap). The statements below
+  # already satisfy the per-line shape -- a statement may span several
+  # lines, as CREATE TABLE events does, but never shares a line with another
+  # statement -- so moving them to stdin needs no reshaping, only the
+  # transport.
+  agmsg_sqlite_warm
+  printf '%s\n' "
     BEGIN IMMEDIATE;
     CREATE TABLE IF NOT EXISTS events (
       seq        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -262,7 +275,7 @@ storage_init() {
       VALUES('read_cursor_v1','1');
     PRAGMA user_version=${_AGMSG_STORAGE_SCHEMA_REV};
     COMMIT;
-  " >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  " | agmsg_sqlite -bail "$db" >/dev/null 2>&1 || { echo runtime_error; return 13; }
   echo ok
 }
 
