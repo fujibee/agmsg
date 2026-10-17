@@ -22,6 +22,7 @@ import {
   readQueuedItem,
   readRolloutNonce,
   resolvePendingQueue,
+  rolloutStateOf,
   runCodexQueue,
 } from "./codex-queue-io.mjs";
 import { captureProcessGroup, observeProcessGroup } from "./process-group.mjs";
@@ -436,7 +437,7 @@ export function createCodexQueueChannel({
 
     const nonce = newNonce();
     const rollout = await readRolloutNonce(record.codex_home, record.thread, nonce);
-    const classification = classifyCodexSeat({ roleSession: record, bridgeState: "stopped", rolloutState: rollout.state === "absent" || rollout.state === "present" ? "valid" : "invalid" });
+    const classification = classifyCodexSeat({ roleSession: record, bridgeState: "stopped", rolloutState: rolloutStateOf(rollout) });
     if (classification.state !== "addressable") {
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: classification.state, reason: classification.reason }, now);
       return;

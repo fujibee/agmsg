@@ -143,12 +143,10 @@ agmsg_codex_refresh_destination() {
     [ "$matches" = 1 ] || return 1
   fi
   [ -n "$chosen_team" ] && [ -n "$chosen_name" ] || return 1
-  local profile="${CODEX_HOME:-${HOME:+$HOME/.codex}}" owner
-  case "$profile" in /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;; *) return 1 ;; esac
-  [ -d "$profile" ] || return 1
-  profile="$(agmsg_canonical_path "$profile")" || return 1
-  profile="$(agmsg_normalize_project_path "$profile")" || return 1
-  case "$profile" in *[[:cntrl:]]*|'') return 1 ;; esac
+  local profile owner
+  # shellcheck disable=SC1091
+  . "${SKILL_DIR:-}/scripts/drivers/types/codex/_profile.sh"
+  profile="$(agmsg_codex_profile_from_env)" || return 1
   owner="$(agmsg_instance_id "$thread" codex 2>/dev/null)" || return 1
   agmsg_role_session_record "$chosen_team" "$chosen_name" "$thread" "$project" codex "$owner" "$profile" inactive || return 1
   agmsg_role_session_load "$chosen_team" "$chosen_name"
@@ -204,6 +202,12 @@ agmsg_session_start() {
           && cd "${PROJECT:-}" \
           && AGMSG_FIX_REASSIGN_FROM_HOOK=1 _fix_codex_thread_reassign ) >/dev/null 2>&1 || true
     fi
+  fi
+  # The hook runs in the TUI's environment; tool shells may not (see _profile.sh).
+  if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
+    # shellcheck disable=SC1091
+    . "${SKILL_DIR:-}/scripts/drivers/types/codex/_profile.sh"
+    agmsg_codex_thread_home_publish "${RUN_DIR:-}" "$thread_id"
   fi
   agmsg_codex_refresh_destination "$thread_id" "$project_phys" "$PAIRS" || true
   safe_pairs=""

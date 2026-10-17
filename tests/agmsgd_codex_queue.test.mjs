@@ -15,6 +15,7 @@ import {
   readQueuedItem,
   readRolloutNonce,
   resolvePendingQueue,
+  rolloutStateOf,
   runCodexQueue,
   verifyPendingDelivery,
 } from '../scripts/daemon/channels/codex-queue-io.mjs';
@@ -290,6 +291,9 @@ test('immediate post-receipt check confirms a still-queued item before rollout i
 });
 
 test('seat classification never treats an uncertain destination or bridge as addressable', () => {
+  // A profile with no rollout for the thread is named as such, not as an unobservable conversation.
+  assert.equal(rolloutStateOf({ state: 'unreadable', reason: 'thread_rollout_missing' }), 'no_rollout');
+  assert.equal(rolloutStateOf({ state: 'unreadable', reason: 'rollout_read_failed' }), 'invalid');
   const record = { thread, codex_home: '/tmp/profile' };
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'valid' }), { state: 'addressable', reason: '' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'running' }), { state: 'bridged', reason: 'bridge_running' });
