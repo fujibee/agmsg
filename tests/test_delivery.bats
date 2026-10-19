@@ -3783,6 +3783,7 @@ JSON
   grep -q "agmsg-delivery-mode: turn" "$ext_file"
   grep -q "agent_settled" "$ext_file"
   grep -F -q "$TEST_SKILL_DIR" "$ext_file"
+  grep -q "never counts as user approval" "$ext_file"
   refute grep -q "agmsg-delivery-mode: monitor" "$ext_file"
 }
 
