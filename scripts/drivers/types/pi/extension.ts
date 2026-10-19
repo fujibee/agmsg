@@ -1,18 +1,22 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+
+const execFileAsync = promisify(execFile);
 
 // agmsg-delivery-mode: __AGMSG_DELIVERY_MODE__
 const AGMSG_DELIVERY_MODE = "__AGMSG_DELIVERY_MODE__";
 const AGMSG_SKILL_DIR = __AGMSG_SKILL_DIR_JSON__;
 const AGMSG_POLL_MS = __AGMSG_POLL_MS__;
 
-function runScript(script: string, args: string[]): string {
-  return execFileSync(
+async function runScript(script: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync(
     "bash",
     [`${AGMSG_SKILL_DIR}/scripts/${script}`, ...args],
     { encoding: "utf-8", timeout: 15000 },
   );
+  return stdout;
 }
 
 function parseWhoami(output: string): { agent: string; teams: string[] } | null {
@@ -22,10 +26,10 @@ function parseWhoami(output: string): { agent: string; teams: string[] } | null 
   return { agent, teams: teams.split(",").filter(Boolean) };
 }
 
-function resolveIdentity(cwd: string): { agent: string; teams: string[] } | null {
+async function resolveIdentity(cwd: string): Promise<{ agent: string; teams: string[] } | null> {
   let whoami: string;
   try {
-    whoami = runScript("whoami.sh", [cwd, "pi"]);
+    whoami = await runScript("whoami.sh", [cwd, "pi"]);
   } catch {
     return null;
   }
@@ -35,13 +39,13 @@ function resolveIdentity(cwd: string): { agent: string; teams: string[] } | null
   return parseWhoami(whoami);
 }
 
-function collectUnread(cwd: string): string {
-  const id = resolveIdentity(cwd);
+async function collectUnread(cwd: string): Promise<string> {
+  const id = await resolveIdentity(cwd);
   if (!id) return "";
   const chunks: string[] = [];
   for (const team of id.teams) {
     try {
-      const out = runScript("inbox.sh", [team, id.agent, "--quiet"]).trim();
+      const out = (await runScript("inbox.sh", [team, id.agent, "--quiet"])).trim();
       if (out) chunks.push(out);
     } catch {
       // Keep polling even if one team store is missing or busy.
@@ -51,7 +55,7 @@ function collectUnread(cwd: string): string {
 }
 
 async function deliverUnread(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
-  const body = collectUnread(ctx.cwd);
+  const body = await collectUnread(ctx.cwd);
   if (!body) return;
   if (ctx.hasUI) {
     ctx.ui.notify("New agmsg message received", "info");
@@ -103,7 +107,7 @@ export default function (pi: ExtensionAPI) {
       message: Type.String({ description: "Message body" }),
     }),
     execute: async (_toolCallId, { recipient, message }, _signal, _onUpdate, ctx) => {
-      const id = resolveIdentity(ctx.cwd);
+      const id = await resolveIdentity(ctx.cwd);
       if (!id) {
         throw new Error("agmsg: this project is not joined as a single pi identity; run /agmsg to join.");
       }
@@ -111,7 +115,7 @@ export default function (pi: ExtensionAPI) {
       if (!team) {
         throw new Error("agmsg: no team is registered for this identity.");
       }
-      const output = runScript("send.sh", [team, id.agent, recipient, message]);
+      const output = await runScript("send.sh", [team, id.agent, recipient, message]);
       return {
         content: [{ type: "text", text: output.trim() || "Message sent." }],
         details: {},
@@ -124,13 +128,13 @@ export default function (pi: ExtensionAPI) {
     description: "Check this agent's agmsg inbox and mark unread messages as read",
     parameters: Type.Object({}),
     execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
-      const id = resolveIdentity(ctx.cwd);
+      const id = await resolveIdentity(ctx.cwd);
       if (!id) {
         throw new Error("agmsg: this project is not joined as a single pi identity; run /agmsg to join.");
       }
       const chunks: string[] = [];
       for (const team of id.teams) {
-        const output = runScript("inbox.sh", [team, id.agent]).trim();
+        const output = (await runScript("inbox.sh", [team, id.agent])).trim();
         if (output) chunks.push(output);
       }
       return {
