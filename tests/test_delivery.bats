@@ -3799,6 +3799,16 @@ JSON
   refute grep -q "watch.sh" "$ext_file"
 }
 
+@test "delivery set (pi): deliverAs defaults to followUp and is configurable via AGMSG_PI_DELIVER_AS" {
+  run bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local ext_file="$TEST_PROJECT/.pi/extensions/agmsg.ts"
+  grep -q "agmsg-deliver-as: followUp" "$ext_file"
+
+  AGMSG_PI_DELIVER_AS="steer" bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT"
+  grep -q "agmsg-deliver-as: steer" "$ext_file"
+}
+
 @test "delivery set off (pi): removes the extension" {
   bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT"
   [ -f "$TEST_PROJECT/.pi/extensions/agmsg.ts" ]

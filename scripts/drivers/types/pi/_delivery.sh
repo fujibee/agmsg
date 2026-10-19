@@ -24,26 +24,32 @@ _agmsg_pi_json_string() {
 
 _agmsg_pi_write_extension() {
   local dest="$1" mode="$2"
-  local src="$SKILL_DIR/scripts/drivers/types/pi/extension.ts"
-  local tmp skill_json poll_ms
+  [ -n "${SKILL_DIR:-}" ] || { echo "pi delivery: SKILL_DIR is not set" >&2; return 1; }
+  local src="${SKILL_DIR:-}/scripts/drivers/types/pi/extension.ts"
+  local tmp skill_json poll_ms deliver_as
   [ -f "$src" ] || { echo "pi delivery: missing extension template $src" >&2; return 1; }
 
   mkdir -p "$(dirname "$dest")"
-  skill_json="$(_agmsg_pi_json_string "$SKILL_DIR")"
+  skill_json="$(_agmsg_pi_json_string "${SKILL_DIR:-}")"
   if [ "$mode" = "monitor" ]; then
     poll_ms=15000
   else
     poll_ms=0
   fi
+  deliver_as="${AGMSG_PI_DELIVER_AS:-followUp}"
+  if [ "$deliver_as" != "steer" ] && [ "$deliver_as" != "followUp" ]; then
+    deliver_as="followUp"
+  fi
 
   tmp="${dest}.tmp.$$"
-  # The shipped extension.ts is a template: mode/skill-dir/poll-ms are filled
+  # The shipped extension.ts is a template: mode/skill-dir/poll-ms/deliver-as are filled
   # here so the running copy is pinned to this install and this delivery mode.
   # Bash replacement (not sed) so a skill path cannot be read as a delimiter.
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line//__AGMSG_DELIVERY_MODE__/${mode}}
     line=${line//__AGMSG_SKILL_DIR_JSON__/${skill_json}}
     line=${line//__AGMSG_POLL_MS__/${poll_ms}}
+    line=${line//__AGMSG_DELIVER_AS__/${deliver_as}}
     printf '%s\n' "$line"
   done < "$src" > "$tmp"
   mv "$tmp" "$dest"

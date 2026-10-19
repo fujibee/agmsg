@@ -2,7 +2,7 @@
 
 Pi ([earendil-works/pi](https://github.com/earendil-works/pi)) supports **turn, monitor, and off** delivery through a project-local extension. `both` is not supported. `spawn pi` launches the `pi` CLI.
 
-Pi's session store takes a SQLite writer lease, so an external process cannot inject into the live TUI (`pi --print` from a watcher would contend for that lease). Incoming messages are delivered **in-process**: `delivery.sh` writes `.pi/extensions/agmsg.ts`, which either checks the inbox when the agent settles (`turn`) or polls unread messages on a ~15s timer (`monitor`) and injects them with `pi.sendMessage({ triggerTurn: true, deliverAs: "steer" })`.
+Pi's session store takes a SQLite writer lease, so an external process cannot inject into the live TUI (`pi --print` from a watcher would contend for that lease). Incoming messages are delivered **in-process**: `delivery.sh` writes `.pi/extensions/agmsg.ts`, which either checks the inbox when the agent settles (`turn`) or polls unread messages on a ~15s timer (`monitor`) and injects them with `pi.sendMessage({ triggerTurn: true, deliverAs: "followUp" })` (configurable to `"steer"` via `AGMSG_PI_DELIVER_AS=steer`).
 
 ## Install
 
