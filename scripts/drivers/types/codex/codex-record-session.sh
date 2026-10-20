@@ -237,14 +237,23 @@ fi
 # as-is. The project is recorded in its canonical (physical) form so records
 # carry one path spelling regardless of how the caller spelled the argument.
 agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
-# A carried owner (<thread>.<pid>) is kept while its pid is alive. One whose
-# process is gone names nothing: left in place it outlives every restart
-# (a stopped app-server daemon's pid, say) and is handed on to each later
-# record, so drop it here instead of copying it forward.
+# A carried owner (<thread>.<pid>) is kept unless its process is PROVEN gone:
+# one that outlives every restart (a stopped app-server daemon's pid, say) is
+# otherwise handed on to each later record. Proof means kill(2) says "no such
+# process" and the process table agrees; anything unknown or unavailable keeps
+# the owner. Git Bash is never asked: its pids are not in the space kill(1)
+# sees, so no observation there is proof.
 rec_owner="${AGMSG_ROLE_SESSION_OWNER:-}"
-if agmsg_instance_is_composite "$rec_owner" && ! _agmsg_pid_alive "${rec_owner##*.}"; then
-  rec_owner=""
-fi
+case "${MSYSTEM:-}" in
+  MINGW*|MSYS*|CLANGARM*) ;;
+  *)
+    if agmsg_instance_is_composite "$rec_owner" \
+      && [ "$(_agmsg_pid_signal_presence "${rec_owner##*.}")" = gone ] \
+      && ! _agmsg_pid_alive "${rec_owner##*.}"; then
+      rec_owner=""
+    fi
+    ;;
+esac
 agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "$rec_owner" "$codex_home" || true
 
 # The Codex actas flow reaches this script instead of actas-claim.sh. Publish

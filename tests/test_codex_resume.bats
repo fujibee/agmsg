@@ -113,6 +113,11 @@ recorded_uuid() {
   CODEX_THREAD_ID="t2" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
   [ "$(recorded_uuid team alice)" = "t2" ]
   [ -z "$(agmsg_role_session_get team alice owner)" ]
+
+  # No proof of death where the pid cannot be observed (Git Bash): kept.
+  SKILL_DIR="$SKILL_DIR" bash -c 'source "$1/scripts/lib/role-session.sh"; agmsg_role_session_record team alice t0 "$2" codex "t0.$3"' _ "$SKILL_DIR" "$proj" "$dead"
+  MSYSTEM=MINGW64 CODEX_THREAD_ID="t3" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(agmsg_role_session_get team alice owner)" = "t0.$dead" ]
 }
 
 @test "codex record: adds the effective profile path without changing the thread" {
