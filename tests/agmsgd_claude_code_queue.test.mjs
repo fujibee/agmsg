@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -87,10 +87,67 @@ test('observeTranscript: a queue-operation enqueue line is not delivery evidence
   const delivered = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: marker } });
   const filler = `${JSON.stringify({ type: 'assistant', text: 'x'.repeat(1000) })}\n`.repeat(800);
   writeFileSync(transcriptPath, `${'y'.repeat(before)}\n${delivered}\n${filler}`);
-  assert.equal(observeTranscript(transcriptPath, nonce).state, 'absent');
+  // No recorded position (a pending row from before positions): searched from the start, however far back.
+  assert.equal(observeTranscript(transcriptPath, nonce).state, 'delivered');
   assert.equal(observeTranscript(transcriptPath, nonce, before + 1).state, 'delivered');
   assert.equal(observeTranscript(transcriptPath, nonce, statSync(transcriptPath).size + 10).state, 'delivered');
   assert.equal(observeTranscript(transcriptPath, nonce, statSync(transcriptPath).size).state, 'absent');
+});
+
+// A position recorded while a row was half written lands mid-row: the rest of
+// that row is a fragment, not a line, so evidence inside it is never read.
+test('observeTranscript: a recorded position inside a half-written row discards that fragment', (t) => {
+  const dir = temporaryDirectory(t);
+  const transcriptPath = path.join(dir, 'session.jsonl');
+  const nonce = 'mid-row-nonce';
+  const row = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: `[agmsg:${nonce}] x` } });
+  writeFileSync(transcriptPath, `unfinished-prefix${row}\n`);
+  assert.equal(observeTranscript(transcriptPath, nonce, 'unfinished-prefix'.length).state, 'absent');
+  writeFileSync(transcriptPath, `unfinished-prefix${row}\n${row}\n`);
+  assert.equal(observeTranscript(transcriptPath, nonce, 'unfinished-prefix'.length).state, 'delivered');
+});
+
+// The file is rewritten while a read is in flight: the first read sees a
+// delivery row that no complete version of the file ever held. The row must
+// read back unchanged before it counts.
+test('observeTranscript: a delivery row that changes between two reads is not confirmed', (t) => {
+  const dir = temporaryDirectory(t);
+  const transcriptPath = path.join(dir, 'session.jsonl');
+  const nonce = 'rewrite-nonce';
+  const row = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: `[agmsg:${nonce}]` } });
+  writeFileSync(transcriptPath, `${row}\n`);
+  let calls = 0;
+  const io = {
+    readSync(fd, buffer, offset, length, position) {
+      const read = readSync(fd, buffer, offset, length, position);
+      if (++calls === 1) writeFileSync(transcriptPath, `${JSON.stringify({ type: 'tool', origin: { body: `[agmsg:${nonce}]` } })}\n`);
+      return read;
+    },
+  };
+  assert.equal(observeTranscript(transcriptPath, nonce, 0, io).state, 'absent');
+  assert.equal(observeTranscript(transcriptPath, nonce, 0).state, 'absent');
+});
+
+// The line boundary is part of what must read back unchanged, and a short
+// read must not make a stable row look changed.
+test('observeTranscript: a rewritten line boundary is not confirmed, and short reads still confirm a stable row', (t) => {
+  const dir = temporaryDirectory(t);
+  const transcriptPath = path.join(dir, 'session.jsonl');
+  const nonce = 'boundary-nonce';
+  const row = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: `[agmsg:${nonce}]` } });
+  writeFileSync(transcriptPath, `{}\n${row}\n`);
+  let calls = 0;
+  const rewrite = {
+    readSync(fd, buffer, offset, length, position) {
+      const read = readSync(fd, buffer, offset, length, position);
+      if (++calls === 2) writeFileSync(transcriptPath, `bad${row}\n`);
+      return read;
+    },
+  };
+  assert.equal(observeTranscript(transcriptPath, nonce, 3, rewrite).state, 'absent');
+  writeFileSync(transcriptPath, `{}\n${row}\n`);
+  const short = { readSync: (fd, buffer, offset, length, position) => readSync(fd, buffer, offset, Math.min(length, 14), position) };
+  assert.equal(observeTranscript(transcriptPath, nonce, 3, short).state, 'delivered');
 });
 
 // No clock decides a pending nudge: whatever the transcript shows (or fails to
