@@ -37,6 +37,17 @@ import {
 
 const SEND_TIMEOUT_MS = 5_000;
 
+// What the seat's Claude Code did with a nudge it set aside. It is not
+// "addressable": the message is not reaching the model, so the seat must be
+// served some other way (watch.sh checks for this exact reason prefix).
+export const PEER_HELD_REASON = "peer_held: the seat's Claude Code is holding messages from agmsgd (see its crossSessionInbound setting and permission mode)";
+
+function observedSeat(reason) {
+  return reason === "peer_held"
+    ? { state: "blocked", reason: PEER_HELD_REASON }
+    : { state: "addressable", reason };
+}
+
 function registrationProjects(teamConfig, agent) {
   const registrations = teamConfig?.agents?.[agent]?.registrations;
   return Array.isArray(registrations)
@@ -179,7 +190,7 @@ export function createClaudeCodeQueueChannel({
         record.messaging_socket !== pending.messaging_socket ||
         (transcriptNow && transcriptNow !== pending.transcript_path));
       if (!socketGone && !recordMoved) {
-        saveSeat(db, { seat, messagingSocket: pending.messaging_socket, state: "addressable", reason: socketCheck.state === "ok" ? observation.reason : socketCheck.reason }, now);
+        saveSeat(db, { seat, messagingSocket: pending.messaging_socket, ...observedSeat(socketCheck.state === "ok" ? observation.reason : socketCheck.reason) }, now);
         return;
       }
       setQueueState(db, pending.id, "expired");
@@ -277,7 +288,7 @@ export function createClaudeCodeQueueChannel({
       return;
     }
 
-    const result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), timeoutMs });
+    const result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, timeoutMs });
     if (result.state !== "sent") {
       setQueueState(db, id, "expired");
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` }, now);
@@ -289,7 +300,7 @@ export function createClaudeCodeQueueChannel({
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
       return;
     }
-    saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable", reason: firstCheck.reason }, now);
+    saveSeat(db, { seat, messagingSocket: record.messaging_socket, ...observedSeat(firstCheck.reason) }, now);
   }
 
   async function pollOnce() {

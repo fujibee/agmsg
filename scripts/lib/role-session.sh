@@ -312,8 +312,12 @@ agmsg_role_session_set_messaging() {
   _agmsg_role_session_write _agmsg_role_session_set_messaging_unlocked "$@" || true
 }
 
-_agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_socket> <claude_config_dir> [<bare_sid>]
-  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="${5:-}"
+_agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_socket> <claude_config_dir> [<bare_sid> [<messaging_token>]]
+  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="${5:-}" token="${6:-}"
+  # The token is a credential for posting to this session's own inbox: kept
+  # only when it is a plain word, and the record (mktemp: owner-only) is never
+  # made readable by anyone else.
+  case "$token" in ''|*[!A-Za-z0-9._-]*) token="" ;; esac
   [ -n "$team" ] && [ -n "$agent" ] || return 0
   local path dir tmp line
   _agmsg_role_session_path_into "$team" "$agent"
@@ -324,7 +328,7 @@ _agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_soc
   {
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
-        messaging_socket=*|claude_config_dir=*) ;;
+        messaging_socket=*|claude_config_dir=*|messaging_token=*) ;;
         session=*) [ -z "$bare_sid" ] && printf '%s\n' "$line" ;;
         *) printf '%s\n' "$line" ;;
       esac
@@ -332,7 +336,9 @@ _agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_soc
     [ -z "$bare_sid" ] || printf 'session=%s\n' "$bare_sid"
     [ -z "$socket" ] || printf 'messaging_socket=%s\n' "$socket"
     [ -z "$config_dir" ] || printf 'claude_config_dir=%s\n' "$config_dir"
+    [ -z "$token" ] || printf 'messaging_token=%s\n' "$token"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
   return 0
 }
@@ -606,9 +612,9 @@ agmsg_claude_code_native_target() {
 # Publish <socket>/<config_dir> into <team>/<agent>'s record for <bare_sid>,
 # then read it back: the same check the daemon applies before it will address
 # the seat, so "the record took" is verified, not assumed. rc 0 only when it did.
-agmsg_role_session_publish_messaging() {   # <team> <agent> <socket> <config_dir> <bare_sid>
-  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="$5"
-  agmsg_role_session_set_messaging "$team" "$agent" "$socket" "$config_dir" "$bare_sid"
+agmsg_role_session_publish_messaging() {   # <team> <agent> <socket> <config_dir> <bare_sid> [<token>]
+  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="$5" token="${6:-}"
+  agmsg_role_session_set_messaging "$team" "$agent" "$socket" "$config_dir" "$bare_sid" "$token"
   [ "$(agmsg_role_session_get "$team" "$agent" messaging_socket 2>/dev/null || true)" = "$socket" ] \
     && [ "$(agmsg_role_session_get "$team" "$agent" claude_config_dir 2>/dev/null || true)" = "$config_dir" ] \
     && [ "$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)" = "$bare_sid" ]

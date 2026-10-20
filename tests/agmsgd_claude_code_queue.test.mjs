@@ -4,8 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { createServer } from 'node:net';
 import {
   observeTranscript,
+  sendClaudeCodeMessage,
   resolveTranscriptPath,
   resolvePendingDelivery,
 } from '../scripts/daemon/channels/claude-code-queue-io.mjs';
@@ -183,7 +185,7 @@ function channelFixture(t) {
     openStore: () => ({ close() {} }),
     readSnapshot: () => ({ state: 'ok', unread: true, upTo: '{}' }),
     send: async () => { state.sent += 1; return { state: 'sent' }; },
-    observe: () => ({ state: 'absent' }),
+    observe: () => (state.hold ? { state: 'held' } : { state: 'absent' }),
     socketAlive: () => state.alive,
     hostPlatform: 'linux',
   });
@@ -225,6 +227,46 @@ test('a seat whose recorded socket is gone gets no new nudge rows until its reco
   state.socket = '/tmp/cc-socks/2.sock';
   await channel.pollOnce();
   assert.equal(state.sent, 1);
+  await channel.stop();
+});
+
+test('a nudge opens with the session token as an auth line and claims no permission mode', async (t) => {
+  const dir = temporaryDirectory(t);
+  const socketPath = path.join(dir, 's.sock');
+  const received = new Promise((resolve) => {
+    const server = createServer((connection) => {
+      let data = '';
+      connection.on('data', (chunk) => { data += chunk; });
+      connection.on('end', () => { server.close(); resolve(data); });
+    });
+    server.listen(socketPath);
+    t.after(() => server.close());
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const result = await sendClaudeCodeMessage({ socketPath, nonce: 'n1', body: '[agmsg:n1] hello', token: 'tok-1', checkOwnership: () => ({ state: 'ok' }) });
+  assert.equal(result.state, 'sent');
+  const lines = (await received).trim().split('\n');
+  assert.deepEqual(JSON.parse(lines[0]), { type: 'auth', token: 'tok-1' });
+  assert.ok(!lines[1].includes('from-mode'));
+});
+
+test('a nudge the seat holds is seen from the preview that drops the brackets, and the seat is not called addressable', async (t) => {
+  const dir = temporaryDirectory(t);
+  const transcriptPath = path.join(dir, 'session.jsonl');
+  writeFileSync(transcriptPath, `${JSON.stringify({
+    type: 'system',
+    subtype: 'informational',
+    content: 'Held peer message \u2014 from an unidentified session; preview: \u00abagmsg:held-nonce New messages are waiting.\u00bb',
+  })}\n`);
+  assert.equal(observeTranscript(transcriptPath, 'held-nonce').state, 'held');
+
+  const { db, channel, state } = channelFixture(t);
+  await channel.pollOnce();
+  state.hold = true;
+  await channel.pollOnce();
+  const seat = db.prepare('SELECT state, reason FROM beta_claude_seat').get();
+  assert.equal(seat.state, 'blocked');
+  assert.match(seat.reason, /^peer_held/);
   await channel.stop();
 });
 

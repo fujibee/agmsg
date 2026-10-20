@@ -301,4 +301,13 @@ fake_session() {
   agmsg_role_session_set_messaging T alice /tmp/cc-socks/222.sock /home/x/.claude sid-2
   [ "$(agmsg_role_session_uuid T alice)" = sid-2 ]
   [ "$(agmsg_role_session_get T alice project)" = /p/q ]
+
+  # The session's inbox token is kept for the daemon, in a record only the
+  # owner can read, and a restart without one does not leave the old one.
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/333.sock /home/x/.claude sid-2 tok-A_1.b
+  [ "$(agmsg_role_session_get T alice messaging_token)" = tok-A_1.b ]
+  [ "$(find "$RUN_DIR" -name "*alice*" | wc -l | tr -d ' ')" -ge 1 ]
+  [ "$(find "$RUN_DIR" -name "*alice*" -perm -077 | wc -l | tr -d ' ')" = 0 ]
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/444.sock /home/x/.claude sid-2
+  [ -z "$(agmsg_role_session_get T alice messaging_token)" ]
 }
