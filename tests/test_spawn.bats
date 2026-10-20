@@ -1746,6 +1746,7 @@ _boot_line_executable() {
   # a file that receives this test's own temp dir.
   if [ -n "${AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH:-}" ]; then
     printf '%s' "$TEST_SKILL_DIR" > "$AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH"
+    ps -Ao pid=,args= | grep -F "$TEST_SKILL_DIR" | grep -v grep > "$AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH.procs" || true
     false
   fi
   _assert_bridged_argv
@@ -1761,6 +1762,11 @@ _boot_line_executable() {
   grep -q '^not ok 1 ' <<<"$output"
   inner="$(cat "$marker")"
   [ -n "$inner" ]
+  # Both halves of the fake were up and named by the temp dir: the bash codex
+  # and the python holding the listening socket. So "nothing references it
+  # now" covers the python and its socket, not just the bash.
+  grep -q 'codex app-server' "$marker.procs"
+  grep -qi 'python.* - ' "$marker.procs"
   [ -z "$(_pids_referencing_dir "$inner")" ]
 }
 
@@ -1821,7 +1827,10 @@ _install_fake_codex_bridge_stack() {
 case "${1:-}" in
   --version) echo "codex-cli 0.142.2"; exit 0 ;;
   app-server)
-    python3 - <<'PY'
+    # The test's own dir rides in argv (the script path), so the shared reaper
+    # finds this python directly; a native Windows python keeps reporting the
+    # same getppid() after its parent dies, so it cannot be left to notice.
+    python3 - "$0" <<'PY'
 import socket, sys, os
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
