@@ -265,6 +265,11 @@ test('a bypass seat is told from-mode=bypass; any other mode, or none readable, 
   assert.equal(latestPermissionMode(transcript), 'auto', 'the latest row decides');
   writeFileSync(transcript, row('auto') + row('bypassPermissions'));
   assert.equal(latestPermissionMode(transcript), 'bypassPermissions');
+  // shift+tab writes a row of its own, between user rows.
+  writeFileSync(transcript, row('bypassPermissions') + `${JSON.stringify({ type: 'permission-mode', permissionMode: 'auto', sessionId: 's' })}\n` + `${JSON.stringify({ type: 'assistant' })}\n`);
+  assert.equal(latestPermissionMode(transcript), 'auto', 'a permission-mode row counts');
+  writeFileSync(transcript, row('auto') + `${JSON.stringify({ type: 'permission-mode', permissionMode: 'bypassPermissions' })}\n`);
+  assert.equal(latestPermissionMode(transcript), 'bypassPermissions');
 
   for (const [mode, expected] of [['bypassPermissions', 'bypass'], ['auto', ''], ['default', ''], ['acceptEdits', ''], ['dontAsk', ''], ['plan', ''], ['', '']]) {
     const { channel, state } = channelFixture(t);
