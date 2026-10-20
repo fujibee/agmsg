@@ -140,7 +140,11 @@ EOF
     agmsg_role_session_record "$pair_team" "$pair_agent" "$bare_sid" \
       "$(agmsg_canonical_path "${PROJECT:-}" 2>/dev/null || printf '%s' "${PROJECT:-}")" "${TYPE:-}" "$my_instance"
   fi
-  if agmsg_role_session_publish_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid"; then
+  if agmsg_role_session_publish_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid" "${CLAUDE_CODE_MESSAGING_TOKEN:-}"; then
+    if agmsg_daemon_claude_seat_held "$pair_team" "$pair_agent" "$socket"; then
+      echo "AGMSG delivery: agmsgd's notices are being held by this Claude Code (its crossSessionInbound setting or permission mode), so the native channel is not used. Next: arm the Monitor below."
+      return 0
+    fi
     cat <<EOF
 AGMSG delivery: agmsgd is running and will deliver to this session directly (native channel). No Monitor needed.
 EOF

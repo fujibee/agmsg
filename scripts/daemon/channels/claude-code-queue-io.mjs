@@ -99,6 +99,7 @@ export async function sendClaudeCodeMessage({
   socketPath,
   nonce,
   body,
+  token = "",
   timeoutMs = SEND_TIMEOUT_MS,
   checkOwnership = checkSocketOwnership,
   connect = createConnection,
@@ -112,12 +113,17 @@ export async function sendClaudeCodeMessage({
     type: "user",
     message: {
       role: "user",
-      content: `<cross-session-message from="agmsgd" from-name="agmsgd" from-mode="bypass">\n${body}\n</cross-session-message>`,
+      content: `<cross-session-message from="agmsgd">\n${body}\n</cross-session-message>`,
     },
     priority: "next",
     from: "agmsgd",
   };
-  const line = `${JSON.stringify(payload)}\n`;
+  // The session's own inbox token goes first, as its documentation describes
+  // ({"type":"auth","token":...} as the first line of the connection), so the
+  // message is judged as one posted to its own session. The sender claims no
+  // permission mode: it is not a session and has none.
+  const auth = token ? `${JSON.stringify({ type: "auth", token })}\n` : "";
+  const line = `${auth}${JSON.stringify(payload)}\n`;
 
   return new Promise((resolve) => {
     let settled = false;
@@ -169,7 +175,10 @@ export function transcriptEndPosition(transcriptPath) {
 //     receipt, held or not — deliberately never read as evidence here (G4:
 //     never mark a seat notified on evidence that could be a hold).
 function judgeLine(line, marker) {
-  if (!line || !line.includes(marker)) return "";
+  // A held message is shown as a preview in which Claude Code drops the
+  // brackets: «agmsg:<nonce> …». Only delivery needs the bracketed form.
+  const heldMarker = marker.slice(1, -1);
+  if (!line || !line.includes(heldMarker)) return "";
   let row;
   try {
     row = JSON.parse(line);
@@ -187,7 +196,7 @@ function judgeLine(line, marker) {
     && typeof row.attachment.prompt === "string" && row.attachment.prompt.includes(marker)) {
     return "delivered";
   }
-  if (row?.type === "system" && row?.subtype === "informational" && typeof row?.content === "string" && row.content.includes(marker)) {
+  if (row?.type === "system" && row?.subtype === "informational" && typeof row?.content === "string" && row.content.includes(heldMarker)) {
     return "held";
   }
   return "";

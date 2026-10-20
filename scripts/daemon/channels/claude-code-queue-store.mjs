@@ -82,6 +82,7 @@ export function readClaudeRoleSession(runDir, team, agent) {
         session: fields.session ?? "",
         messaging_socket: fields.messaging_socket ?? "",
         claude_config_dir: fields.claude_config_dir ?? "",
+        messaging_token: fields.messaging_token ?? "",
       },
     };
   } catch {
