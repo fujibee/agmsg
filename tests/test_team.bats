@@ -92,6 +92,9 @@ EOF
 @test "join: adds multiple agents to same team" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
   bash "$SCRIPTS/join.sh" myteam bob codex /tmp/proj-b
+  # The renamed ledger stays a JSON array (a subquery result handed to
+  # json_set() as plain text is stored as a string on newer SQLite).
+  [ "$(sqlite3 :memory: "SELECT json_type(CAST(readfile('$(rf "$TEST_SKILL_DIR/teams/myteam/config.json")') AS TEXT), '\$.renamed');")" = array ]
   run bash "$SCRIPTS/team.sh" myteam
   [[ "$output" =~ "alice" ]]
   [[ "$output" =~ "bob" ]]

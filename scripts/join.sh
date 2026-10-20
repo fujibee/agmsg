@@ -251,12 +251,12 @@ UPDATED=$(agmsg_sqlite_mem \
       )
     ),
     '\$.renamed',
-    COALESCE(
+    json(COALESCE(
       (SELECT json_group_array(value)
        FROM json_each(json_extract(cfg.json, '\$.renamed'))
        WHERE json_extract(value, '\$.from') != '$AGENT_ID_SQL'),
-      json('[]')
-    )
+      '[]'
+    ))
   )
   FROM cfg;")
 agmsg_write_atomic "$TEAM_CONFIG" "$UPDATED"

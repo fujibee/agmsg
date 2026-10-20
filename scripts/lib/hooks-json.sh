@@ -77,12 +77,12 @@ strip_agmsg_event_file() {
         json_remove(src.j, '\$.hooks.$event')
       ELSE
         json_set(src.j, '\$.hooks.$event',
-          (SELECT json_group_array(json(s.value))
+          json((SELECT json_group_array(json(s.value))
            FROM json_each(json_extract(src.j, '\$.hooks.$event')) AS s
            WHERE NOT EXISTS (
              SELECT 1 FROM json_each(json_extract(s.value, '\$.hooks')) AS h
              WHERE instr(json_extract(h.value, '\$.command'), '$skill_dir_sql') > 0
-           ))
+           )))
         )
     END, '') AS blob FROM src)
     SELECT writefile('$tmp_sql', blob) = length(CAST(blob AS BLOB)) FROM out;
@@ -184,11 +184,11 @@ add_event_entry_file() {
         json_set(s, '\$.hooks.$event', json_array($entry_sql))
       ELSE
         json_set(s, '\$.hooks.$event',
-          (SELECT json_group_array(json(v.value)) FROM (
+          json((SELECT json_group_array(json(v.value)) FROM (
              SELECT value FROM json_each(json_extract(s, '\$.hooks.$event'))
              UNION ALL
              SELECT $entry_sql
-           ) v)
+           ) v))
         )
     END AS blob FROM base)
     SELECT writefile('$tmp_sql', blob) = length(CAST(blob AS BLOB)) FROM out;

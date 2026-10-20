@@ -272,6 +272,14 @@ settings_file() {
   local n
   n=$(sqlite_mem "SELECT count(*) FROM json_each(json_extract(readfile('$(rf "$(settings_file)")'), '\$.hooks.SessionStart'));")
   [ "$n" -eq 2 ]
+  # The event stays a JSON array (a subquery result passed to json_set() as
+  # plain text would be stored as a string on newer SQLite), through the
+  # strip on the way out as well.
+  [ "$(sqlite_mem "SELECT json_type(readfile('$(rf "$(settings_file)")'), '\$.hooks.SessionStart');")" = array ]
+  run bash "$SCRIPTS/delivery.sh" set off claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ "$(sqlite_mem "SELECT json_type(readfile('$(rf "$(settings_file)")'), '\$.hooks.SessionStart');")" = array ]
+  grep -q "${skill_name}-my-wrapper.sh" "$(settings_file)"
 }
 
 @test "delivery set monitor: round-trips multibyte (UTF-8) settings without a short-write reject" {
