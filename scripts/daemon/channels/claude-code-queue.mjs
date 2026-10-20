@@ -29,6 +29,7 @@ import {
   inboxNudge,
   newNonce,
   observeTranscript,
+  transcriptEndPosition,
   resolveTranscriptPath,
   resolvePendingDelivery,
   sendClaudeCodeMessage,
@@ -45,7 +46,7 @@ function registrationProjects(teamConfig, agent) {
 
 function readPending(db, seat) {
   return db.prepare(`
-    SELECT id, messaging_socket, transcript_path, up_to, nonce, state, created_at
+    SELECT id, messaging_socket, transcript_path, transcript_pos, up_to, nonce, state, created_at
     FROM beta_claude_queue WHERE seat = ? AND state = 'pending' ORDER BY id DESC LIMIT 1
   `).get(seat);
 }
@@ -91,7 +92,7 @@ function setQueueState(db, id, state) {
   });
 }
 
-function createPending(db, { seat, messagingSocket, transcriptPath, upTo, nonce, expectedOpGen }, now) {
+function createPending(db, { seat, messagingSocket, transcriptPath, transcriptPos, upTo, nonce, expectedOpGen }, now) {
   let rowId;
   withImmediateTransaction(db, () => {
     const intent = db.prepare("SELECT desired, op_gen FROM daemon_intent").get();
@@ -101,9 +102,9 @@ function createPending(db, { seat, messagingSocket, transcriptPath, upTo, nonce,
     const current = db.prepare("SELECT id FROM beta_claude_queue WHERE seat = ? AND state = 'pending'").get(seat);
     if (current) throw new Error("seat_already_pending");
     const result = db.prepare(`
-      INSERT INTO beta_claude_queue (seat, messaging_socket, transcript_path, up_to, nonce, state, created_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?)
-    `).run(seat, messagingSocket, transcriptPath, upTo, nonce, new Date(now()).toISOString());
+      INSERT INTO beta_claude_queue (seat, messaging_socket, transcript_path, transcript_pos, up_to, nonce, state, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    `).run(seat, messagingSocket, transcriptPath, transcriptPos, upTo, nonce, new Date(now()).toISOString());
     rowId = Number(result.lastInsertRowid);
   });
   return rowId;
@@ -117,7 +118,7 @@ function storagePaths(installRoot, env) {
 }
 
 function pendingObservation(pending, observe) {
-  return resolvePendingDelivery({ observation: observe(pending.transcript_path, pending.nonce) });
+  return resolvePendingDelivery({ observation: observe(pending.transcript_path, pending.nonce, pending.transcript_pos) });
 }
 
 export function createClaudeCodeQueueChannel({
@@ -270,7 +271,7 @@ export function createClaudeCodeQueueChannel({
     const nonce = newNonce();
     let id;
     try {
-      id = createPending(db, { seat, messagingSocket: record.messaging_socket, transcriptPath, upTo: snapshot.upTo, nonce, expectedOpGen }, now);
+      id = createPending(db, { seat, messagingSocket: record.messaging_socket, transcriptPath, transcriptPos: transcriptEndPosition(transcriptPath), upTo: snapshot.upTo, nonce, expectedOpGen }, now);
     } catch (error) {
       if (error.message !== "daemon_intent_changed" && error.message !== "seat_already_pending") throw error;
       return;
