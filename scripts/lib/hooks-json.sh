@@ -22,6 +22,26 @@ if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
   source "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/sqlpath.sh"
 fi
 
+# Refuse to rewrite a file whose .hooks.<event> is present but is not an array
+# (a string holding a JSON array counts: an affected SQLite stored it that way
+# and the next write restores it). The strip and the append both rebuild the
+# event from json_each(), which would turn any other shape into garbage.
+_agmsg_hooks_event_is_array() {
+  local path="$1" event="$2" sql_path verdict
+  sql_path=$(agmsg_sql_readfile_path "$path")
+  verdict=$(agmsg_sqlite_mem "
+    WITH src AS (SELECT readfile('$sql_path') AS j),
+    v AS (SELECT json_type(j, '\$.hooks.$event') AS t,
+                 json_extract(j, '\$.hooks.$event') AS x FROM src)
+    SELECT CASE WHEN t IS NULL OR t = 'null' OR t = 'array' THEN 'ok'
+                WHEN t = 'text' AND json_valid(x) AND json_type(x) = 'array' THEN 'ok'
+                ELSE 'bad' END FROM v;
+  " 2>/dev/null) || return 0
+  [ "$verdict" = bad ] || return 0
+  echo "agmsg: $path: hooks.$event is not an array; leaving the file unchanged" >&2
+  return 1
+}
+
 # Strip any agmsg-owned hook entries from <event> in the JSON at <path>. An
 # entry is "agmsg-owned" when one of its inner hooks references a path under
 # our skill directory. Result is written back to <path> atomically.
@@ -35,6 +55,7 @@ fi
 strip_agmsg_event_file() {
   local path="$1"
   local event="$2"
+  _agmsg_hooks_event_is_array "$path" "$event" || return 1
   local sql_path
   sql_path=$(agmsg_sql_readfile_path "$path")
   local tmp tmp_sql
@@ -144,6 +165,7 @@ add_event_entry_file() {
   local event="$2"
   local cmd="$3"
   local windows_wrap="${4:-}"
+  _agmsg_hooks_event_is_array "$path" "$event" || return 1
   local sql_path
   sql_path=$(agmsg_sql_readfile_path "$path")
 

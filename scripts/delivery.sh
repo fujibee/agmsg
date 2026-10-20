@@ -218,6 +218,15 @@ agmsg_delivery_apply_default() {
     fi
   fi
 
+  # A hooks file whose event is not an array is left exactly as it is, and the
+  # error names that file rather than the temp copy below.
+  if [ -f "$hooks_file" ]; then
+    local chk_event
+    for chk_event in SessionStart SessionEnd Stop PostToolUse; do
+      _agmsg_hooks_event_is_array "$hooks_file" "$chk_event" || return 1
+    done
+  fi
+
   # Work on a temp copy so a partially-modified file never replaces the
   # original until the whole chain succeeds.
   local tmp_state
