@@ -2945,11 +2945,22 @@ EOF
   env -u CODEX_THREAD_ID AGMSG_AGENT_PID="$pid" bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" </dev/null >/dev/null
   [ "$(cat "$rec")" = "$before" ]
 
-  # The same live process, hook input names the new thread: rebound.
+  # The record belongs to another project by the time it is examined: untouched.
+  cp "$rec" "$rec.keep"
+  sed -i.bak "s#^project=.*#project=$BATS_TEST_TMPDIR/elsewhere#" "$rec"
+  before="$(cat "$rec")"
   _hook "$pid"
+  [ "$(cat "$rec")" = "$before" ]
+  mv "$rec.keep" "$rec"
+
+  # The same live process, hook input names the new thread: rebound, and the
+  # thread's profile is published alongside.
+  mkdir -p "$BATS_TEST_TMPDIR/profile"
+  CODEX_HOME="$BATS_TEST_TMPDIR/profile" _hook "$pid"
   kill "$pid" 2>/dev/null || true
   grep -qx "session=$new" "$rec"
   grep -qx "owner=$new.$pid" "$rec"
+  [ -f "$TEST_SKILL_DIR/run/codex-thread-home.$new" ]
 }
 
 # #1477: Codex installed after agmsg never gets this install's writable_roots

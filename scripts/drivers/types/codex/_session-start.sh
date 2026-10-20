@@ -157,27 +157,12 @@ agmsg_codex_refresh_destination() {
 
 # A Codex seat holds no actas lock, so the only proof that a recorded seat is
 # this very process is its record: owner=<thread>.<pid> naming the Codex pid
-# this hook runs under, alive, and started before the record was written (a
-# reused pid starts later). Exactly one such seat in the project is rebound;
-# anything else is left for the unseated notice.
+# this hook runs under (see agmsg_role_session_rebind_same_process).
 agmsg_codex_rebind_after_clear() {
-  local thread="$1" project="$2" pairs="$3" team name rec_thread rec_project owner cur_pid match='' n=0
+  local thread="$1" project="$2" pairs="$3" cur_pid
   cur_pid="$(agmsg_agent_pid codex 2>/dev/null || true)"
   case "$cur_pid" in ''|*[!0-9]*) return 1 ;; esac
-  while IFS=$'\t' read -r team name; do
-    [ -n "$team" ] && [ -n "$name" ] || continue
-    rec_thread="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
-    [ -n "$rec_thread" ] || continue
-    [ "$rec_thread" != "$thread" ] || return 1
-    rec_project="$(agmsg_role_session_get "$team" "$name" project 2>/dev/null || true)"
-    [ "$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")" = "$project" ] || continue
-    owner="$(agmsg_role_session_get "$team" "$name" owner 2>/dev/null || true)"
-    agmsg_instance_is_composite "$owner" && [ "${owner##*.}" = "$cur_pid" ] || continue
-    n=$((n + 1)); match="$team"$'\t'"$name"
-  done <<< "$pairs"
-  [ "$n" = 1 ] || return 1
-  IFS=$'\t' read -r team name <<< "$match"
-  agmsg_role_session_rebind_same_process "$team" "$name" "$thread" "$cur_pid"
+  agmsg_role_session_rebind_same_process "$thread" "$project" "$cur_pid" "$pairs"
 }
 
 agmsg_codex_unseated_notice() {
@@ -214,6 +199,12 @@ agmsg_session_start() {
   # never a rollout guess) may drive the rebind.
   if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
     agmsg_codex_rebind_after_clear "$thread_id" "$project_phys" "$PAIRS" || true
+  fi
+  # The hook runs in the TUI's environment; tool shells may not (see _profile.sh).
+  if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
+    # shellcheck disable=SC1091
+    . "${SKILL_DIR:-}/scripts/drivers/types/codex/_profile.sh"
+    agmsg_codex_thread_home_publish "${RUN_DIR:-}" "$thread_id"
   fi
   agmsg_codex_refresh_destination "$thread_id" "$project_phys" "$PAIRS" || true
   safe_pairs=""
