@@ -24,6 +24,9 @@ const SEND_TIMEOUT_MS = 5_000;
 // recent (written within the TTL window of a message this same daemon just
 // sent). 512 KiB comfortably covers many turns' worth of lines.
 const TRANSCRIPT_TAIL_BYTES = 512 * 1024;
+// A pending nudge that recorded the transcript's EOF before it was sent is
+// checked from that position onward, in chunks of this size.
+const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
 
 // Measured 2026-10-05: Claude Code encodes a project's cwd into its
 // transcript directory name by replacing every "/" with "-"
@@ -160,8 +163,20 @@ function readTail(path, maxBytes) {
   return buf.toString("utf8");
 }
 
-// Reads the delivery outcome straight from the receiving session's own
-// transcript. Measured line shapes (2026-10-05 addendum):
+// The byte length of the transcript right now, recorded just before a nudge is
+// sent so the later check reads only what was written after it. null when the
+// file cannot be measured: that nudge falls back to reading the tail.
+export function transcriptEndPosition(transcriptPath) {
+  try {
+    const stat = statSync(transcriptPath);
+    return stat.isFile() ? stat.size : null;
+  } catch {
+    return null;
+  }
+}
+
+// Judges one transcript line: "delivered", "held", or "" when it says nothing
+// about this nonce. Measured line shapes (2026-10-05 addendum):
 //   - delivered: a `type:"user"` line with `origin.body` containing the
 //     nonce verbatim — proof of delivery (with the mid-turn shape below).
 //   - held/declined: a `type:"system"`, `subtype:"informational"` line whose
@@ -172,40 +187,90 @@ function readTail(path, maxBytes) {
 //   - a `type:"queue-operation"`, `operation:"enqueue"` line fires on mere
 //     receipt, held or not — deliberately never read as evidence here (G4:
 //     never mark a seat notified on evidence that could be a hold).
-export function observeTranscript(transcriptPath, nonce) {
-  if (typeof nonce !== "string" || !nonce) return { state: "unreadable", reason: "nonce_missing" };
-  let text;
+function judgeLine(line, marker) {
+  if (!line || !line.includes(marker)) return "";
+  let row;
   try {
-    text = readTail(transcriptPath, TRANSCRIPT_TAIL_BYTES);
+    row = JSON.parse(line);
+  } catch {
+    return "";
+  }
+  if (row?.type === "user" && typeof row?.origin?.body === "string" && row.origin.body.includes(marker)) {
+    return "delivered";
+  }
+  // A nudge that arrives while the seat is mid-turn is absorbed into that
+  // turn: the model reads it as a queued_command attachment and no user line
+  // is ever written for it. Without this the nudge stays pending forever and
+  // the seat gets no further notices.
+  if (row?.type === "attachment" && row?.attachment?.type === "queued_command"
+    && typeof row.attachment.prompt === "string" && row.attachment.prompt.includes(marker)) {
+    return "delivered";
+  }
+  if (row?.type === "system" && row?.subtype === "informational" && typeof row?.content === "string" && row.content.includes(marker)) {
+    return "held";
+  }
+  return "";
+}
+
+// Reads from `start` to EOF in fixed-size chunks, handing each complete line
+// to `onLine` (stop early by returning true). A line is decoded only whole, so
+// a multi-byte character is never split across chunks.
+function scanFrom(path, start, onLine) {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(TRANSCRIPT_CHUNK_BYTES);
+    let position = start;
+    let carry = Buffer.alloc(0);
+    for (;;) {
+      const read = readSync(fd, buf, 0, buf.length, position);
+      if (read <= 0) break;
+      position += read;
+      let data = Buffer.concat([carry, buf.subarray(0, read)]);
+      let from = 0;
+      for (let at = data.indexOf(10, from); at !== -1; at = data.indexOf(10, from)) {
+        if (onLine(data.subarray(from, at).toString("utf8"))) return;
+        from = at + 1;
+      }
+      carry = data.subarray(from);
+    }
+    onLine(carry.toString("utf8"));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// Reads the delivery outcome straight from the receiving session's own
+// transcript. With `fromPosition` (the transcript length recorded before the
+// nudge was sent) only what was written after it is read, however much the
+// conversation has grown since; a transcript shorter than that position was
+// rewritten or truncated and is read from the start. Without it, only the
+// tail is read.
+export function observeTranscript(transcriptPath, nonce, fromPosition = null) {
+  if (typeof nonce !== "string" || !nonce) return { state: "unreadable", reason: "nonce_missing" };
+  const marker = `[agmsg:${nonce}]`;
+  let heldSeen = false;
+  let delivered = false;
+  const onLine = (line) => {
+    const verdict = judgeLine(line, marker);
+    if (verdict === "delivered") delivered = true;
+    else if (verdict === "held") heldSeen = true;
+    return delivered;
+  };
+  try {
+    if (Number.isSafeInteger(fromPosition) && fromPosition >= 0) {
+      const stat = statSync(transcriptPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not_regular_file");
+      scanFrom(transcriptPath, fromPosition > stat.size ? 0 : fromPosition, onLine);
+    } else {
+      for (const line of readTail(transcriptPath, TRANSCRIPT_TAIL_BYTES).split("\n")) {
+        if (onLine(line)) break;
+      }
+    }
   } catch (error) {
     if (error?.code === "ENOENT") return { state: "unreadable", reason: "transcript_missing" };
     return { state: "unreadable", reason: "transcript_read_failed" };
   }
-  const marker = `[agmsg:${nonce}]`;
-  let heldSeen = false;
-  for (const line of text.split("\n")) {
-    if (!line || !line.includes(marker)) continue;
-    let row;
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (row?.type === "user" && typeof row?.origin?.body === "string" && row.origin.body.includes(marker)) {
-      return { state: "delivered" };
-    }
-    // A nudge that arrives while the seat is mid-turn is absorbed into that
-    // turn: the model reads it as a queued_command attachment and no user line
-    // is ever written for it. Without this the nudge stays pending forever and
-    // the seat gets no further notices.
-    if (row?.type === "attachment" && row?.attachment?.type === "queued_command"
-      && typeof row.attachment.prompt === "string" && row.attachment.prompt.includes(marker)) {
-      return { state: "delivered" };
-    }
-    if (row?.type === "system" && row?.subtype === "informational" && typeof row?.content === "string" && row.content.includes(marker)) {
-      heldSeen = true;
-    }
-  }
+  if (delivered) return { state: "delivered" };
   if (heldSeen) return { state: "held" };
   return { state: "absent" };
 }

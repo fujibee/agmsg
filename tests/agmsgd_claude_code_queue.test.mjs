@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -79,6 +79,18 @@ test('observeTranscript: a queue-operation enqueue line is not delivery evidence
     attachment: { type: 'queued_command', prompt: `<cross-session-message from="agmsgd">${marker}</cross-session-message>` },
   })}\n`);
   assert.equal(observeTranscript(transcriptPath, nonce).state, 'delivered');
+
+  // #1644: the delivered line scrolls out of the 512 KiB tail under later
+  // output. A position recorded before the send still finds it; a transcript
+  // that has become shorter than the position is read from the start.
+  const before = statSync(transcriptPath).size;
+  const delivered = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: marker } });
+  const filler = `${JSON.stringify({ type: 'assistant', text: 'x'.repeat(1000) })}\n`.repeat(800);
+  writeFileSync(transcriptPath, `${'y'.repeat(before)}\n${delivered}\n${filler}`);
+  assert.equal(observeTranscript(transcriptPath, nonce).state, 'absent');
+  assert.equal(observeTranscript(transcriptPath, nonce, before + 1).state, 'delivered');
+  assert.equal(observeTranscript(transcriptPath, nonce, statSync(transcriptPath).size + 10).state, 'delivered');
+  assert.equal(observeTranscript(transcriptPath, nonce, statSync(transcriptPath).size).state, 'absent');
 });
 
 // No clock decides a pending nudge: whatever the transcript shows (or fails to

@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS beta_claude_queue (
   up_to TEXT NOT NULL,
   nonce TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('pending', 'confirmed', 'expired')),
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  transcript_pos INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS beta_claude_queue_one_pending
   ON beta_claude_queue(seat) WHERE state = 'pending';
@@ -36,6 +37,11 @@ export function ensureClaudeCodeChannelSchema(db) {
   db.exec("BEGIN IMMEDIATE;");
   try {
     db.exec(CLAUDE_CODE_CHANNEL_SCHEMA);
+    // A table created before the transcript position was recorded gains the column.
+    const columns = db.prepare("PRAGMA table_info(beta_claude_queue)").all();
+    if (!columns.some((column) => column.name === "transcript_pos")) {
+      db.exec("ALTER TABLE beta_claude_queue ADD COLUMN transcript_pos INTEGER");
+    }
     db.exec("COMMIT;");
   } catch (error) {
     try { db.exec("ROLLBACK;"); } catch { /* preserve the schema error */ }
