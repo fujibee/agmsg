@@ -237,7 +237,15 @@ fi
 # as-is. The project is recorded in its canonical (physical) form so records
 # carry one path spelling regardless of how the caller spelled the argument.
 agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
-agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" "$codex_home" || true
+# A carried owner (<thread>.<pid>) is kept while its pid is alive. One whose
+# process is gone names nothing: left in place it outlives every restart
+# (a stopped app-server daemon's pid, say) and is handed on to each later
+# record, so drop it here instead of copying it forward.
+rec_owner="${AGMSG_ROLE_SESSION_OWNER:-}"
+if agmsg_instance_is_composite "$rec_owner" && ! _agmsg_pid_alive "${rec_owner##*.}"; then
+  rec_owner=""
+fi
+agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "$rec_owner" "$codex_home" || true
 
 # The Codex actas flow reaches this script instead of actas-claim.sh. Publish
 # the same seat request here so a resumed seat's dispatcher has an authority
