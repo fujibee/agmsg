@@ -2321,6 +2321,32 @@ CYG
   [ ! -e "$bad_manifest" ]
 }
 
+@test "install manifest batch-hashes under a Windows-shaped TMPDIR (drive letter, colon) (#1670)" {
+  # Bare `mktemp` on macOS prefers _CS_DARWIN_USER_TEMP_DIR over $TMPDIR, so
+  # setting TMPDIR alone can't reproduce this here -- stub mktemp itself to
+  # force the probe into a directory named like a Windows drive-letter path
+  # (e.g. a Claude-Code-launched Git Bash's real $TMPDIR, "C:/Users/.../Temp").
+  local scripts="$FAKE_HOME/win-tmpdir-scripts" manifest="$FAKE_HOME/win-tmpdir-manifest.json"
+  local fake_bin="$FAKE_HOME/fake-bin" winlike="$FAKE_HOME/C:/Users/win/AppData/Local/Temp"
+  mkdir -p "$scripts" "$fake_bin" "$winlike"
+  printf 'safe file\n' > "$scripts/safe.sh"
+  local real_mktemp
+  real_mktemp="$(command -v mktemp)"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    "if [ \"\$#\" -eq 0 ]; then exec \"$real_mktemp\" -p \"$winlike\"; fi" \
+    "exec \"$real_mktemp\" \"\$@\"" > "$fake_bin/mktemp"
+  chmod +x "$fake_bin/mktemp"
+
+  run env PATH="$fake_bin:$PATH" bash -c '. "$1/scripts/lib/install-manifest.sh"; agmsg_install_manifest_write "$2" "$3" 1.5.1 test-install 1 1' \
+    _ "$REPO_ROOT" "$scripts" "$manifest"
+  [ "$status" -eq 0 ]
+  local recorded_digest actual_digest
+  recorded_digest="$(sqlite3 :memory: "SELECT json_extract(value, '\$.digest') FROM json_each(json_extract(readfile('$(rf "$manifest")'), '\$.files')) WHERE json_extract(value, '\$.path')='scripts/safe.sh';")"
+  actual_digest="$(bash -c 'source "$1/scripts/lib/hash.sh"; agmsg_sha256 < "$2"' _ "$REPO_ROOT" "$scripts/safe.sh")"
+  [ "$recorded_digest" = "$actual_digest" ]
+}
+
 @test "install holds the operation lock while rendering the shared skill" {
   local bin="$FAKE_HOME/bin" entered="$FAKE_HOME/render-entered" release="$FAKE_HOME/render-release"
   local awk_real install_pid install_rc blocked=0 i
