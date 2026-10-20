@@ -280,6 +280,16 @@ settings_file() {
   [ "$status" -eq 0 ]
   [ "$(sqlite_mem "SELECT json_type(readfile('$(rf "$(settings_file)")'), '\$.hooks.SessionStart');")" = array ]
   grep -q "${skill_name}-my-wrapper.sh" "$(settings_file)"
+
+  # A file an affected version already corrupted (the array stored as a
+  # string) is restored by the next set, with the user's hook intact.
+  printf '%s' '{"hooks":{"SessionStart":"[{\"hooks\":[{\"type\":\"command\",\"command\":\"'"$TEST_PROJECT"'/scripts/'"$skill_name"'-my-wrapper.sh\"}]}]"}}' \
+    > "$(settings_file)"
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ "$(sqlite_mem "SELECT json_type(readfile('$(rf "$(settings_file)")'), '\$.hooks.SessionStart');")" = array ]
+  grep -q "${skill_name}-my-wrapper.sh" "$(settings_file)"
+  has_session_start "$(settings_file)"
 }
 
 @test "delivery set monitor: round-trips multibyte (UTF-8) settings without a short-write reject" {
