@@ -38,7 +38,35 @@ EOF
 }
 
 teardown() {
+  # Runs whether or not the test body got to its assertions: a fake app-server
+  # left behind by a failed test would otherwise live as long as its parent.
+  _reap_fake_app_servers
   teardown_test_env
+}
+
+# PIDs of the fake `codex app-server` this test's shim brought up, plus their
+# children. Matched on this test's own $STUB_BIN/codex in argv (TEST_SKILL_DIR
+# is unique per test), so another seat's run is never reached. The fake bash
+# waits on a foreground python that only exits when its parent changes, so both
+# must be signalled; the pidfile alone does not cover a launch that died before
+# writing it.
+_fake_app_server_pids() {
+  local pid child
+  for pid in $(ps -Ao pid=,args= 2>/dev/null | grep -F "$STUB_BIN/codex app-server" | grep -v grep | awk '{print $1}'); do
+    echo "$pid"
+    for child in $(pgrep -P "$pid" 2>/dev/null); do echo "$child"; done
+  done
+  local pf
+  for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
+    [ -f "$pf" ] && cat "$pf" 2>/dev/null
+  done
+}
+
+_reap_fake_app_servers() {
+  local pid pids
+  pids="$(_fake_app_server_pids | sort -u)"
+  for pid in $pids; do kill "$pid" 2>/dev/null || true; done
+  for pid in $pids; do wait_for_pid_exit "$pid" || true; done
 }
 
 # --- argument validation ---
@@ -1735,6 +1763,12 @@ _boot_line_executable() {
   boot="$(cat "$CAPTURE")"
   run env SHELL="$STUB_BIN/noshell" bash "$boot"
   _assert_bridged_argv
+  # The fake app-server is up, and the reap that teardown runs (even after a
+  # failed assertion above) puts all of it down, python child included.
+  [ -n "$(_fake_app_server_pids)" ]
+  _reap_fake_app_servers
+  [ -z "$(ps -Ao pid=,args= | grep -F "$STUB_BIN/codex app-server" | grep -v grep)" ]
+  [ -z "$(_fake_app_server_pids)" ]
 }
 
 @test "spawn: a codex seat spawned FROM a bridged codex seat still reaches the real binary WITH --remote" {
@@ -1829,7 +1863,7 @@ FAKE
 }
 
 # The evidence both end-to-end tests read: the real binary was reached exactly
-# once, bridged, with the actas prompt. Then the fake app-server is put down.
+# once, bridged, with the actas prompt. The fake app-server is put down by teardown.
 _assert_bridged_argv() {
   [ -f "$CALL_LOG" ]
   # The real binary was reached exactly once, with the bridge flag and the actas prompt.
@@ -1837,13 +1871,6 @@ _assert_bridged_argv() {
   grep -q '^real-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
   grep -q 'actas' "$CALL_LOG"
   grep -q 'reviewer' "$CALL_LOG"
-  # Clean up the fake app-server the shim brought up.
-  local pf pid
-  for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
-    [ -f "$pf" ] || continue
-    pid="$(cat "$pf" 2>/dev/null)"; [ -n "$pid" ] || continue
-    kill "$pid" 2>/dev/null || true
-  done
 }
 
 @test "spawn: an inherited PATH-wrapper install (AGMSG_CODEX_SHIM_WRAPPER/SCRIPT_DIR) cannot repoint the bundled shim" {
