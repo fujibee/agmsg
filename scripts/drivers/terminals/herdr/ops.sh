@@ -1384,7 +1384,7 @@ _herdr_record_kept_name() {   # <id> <team> <agent> <name>
 }
 
 terminal_name() {
-  local id="$1" team="$2" name="$3" mode="${4:-}" label key json esc current rec bare
+  local id="$1" team="$2" name="$3" mode="${4:-}" label key json esc current rec bare hex byte char
   label="$(_herdr_label "$team" "$name")"
 
   # Names chosen outside agmsg are herdr's public addressing surface. Keep
@@ -1401,12 +1401,22 @@ terminal_name() {
         OR json_type('$esc','\$.result.agent.name')='null'
         OR json_extract('$esc','\$.result.agent.name')='' THEN 'unnamed'
       WHEN json_type('$esc','\$.result.agent.name')='text'
-        THEN 'kept:' || json_extract('$esc','\$.result.agent.name')
+        THEN 'kept:' || hex(CAST(json_extract('$esc','\$.result.agent.name') AS BLOB))
       ELSE 'unknown' END
     ELSE 'unknown' END" 2>/dev/null)" || current=unknown
   case "$current" in
     kept:*)
-      key="${current#kept:}"
+      # Transport bytes as hex: sqlite's text output and $(...) can truncate
+      # NULs or trailing newlines before a shell-side check ever sees them.
+      hex="${current#kept:}"; key=""
+      while [ -n "$hex" ]; do
+        byte="${hex:0:2}"; hex="${hex:2}"
+        case "$byte" in
+          0?|1?|7F) current=unknown; break ;;
+        esac
+        printf -v char '%b' "\\x$byte"
+        key="$key$char"
+      done
       case "$key" in *[[:cntrl:]]*) current=unknown ;; esac
       if [ "$current" != unknown ] && _herdr_record_kept_name "$id" "$team" "$name" "$key"; then
         if [ "$mode" != key ]; then

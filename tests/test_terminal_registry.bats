@@ -2933,12 +2933,17 @@ M
   # Unknown is not unnamed: malformed replies and replies about another pane
   # cannot authorize either rename or turn a retained name into a hash.
   local reply
-  for reply in 'not json' '{}' '{"result":{"agent":{"pane_id":"w9:p9","name":"reviewer"}}}'; do
+  local kept_record; kept_record="$(_herdr_name_record_path onteam alice)"
+  for reply in 'not json' '{}' '{"result":{"agent":{"pane_id":"w9:p9","name":"reviewer"}}}' \
+    '{"result":{"agent":{"pane_id":"wC:p4","name":"reviewer\n"}}}' \
+    '{"result":{"agent":{"pane_id":"wC:p4","name":"reviewer\u0000hidden"}}}'; do
     : > "$ARGV_LOG"
+    printf 'existing decision\n' > "$kept_record"
     HERDR_AGENT_GET_JSON="$reply" run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
     [ "$status" -ne 0 ]
     refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
     refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+    [ "$(cat "$kept_record")" = 'existing decision' ]
   done
 }
 
