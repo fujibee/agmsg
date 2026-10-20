@@ -606,6 +606,41 @@ EOF
   [ ! -f "$marker" ]
 }
 
+# `/bin/bash` on this runner's macOS (Apple's stock, 3.2.57) still inherits a
+# `read`'s temporary `IFS='|'` into a process substitution's subshell, while
+# the bash on PATH here (homebrew, 5.x) does not -- the exact fork review
+# flagged on #1668 (_install_generation's `IFS='|' read ... < <(agmsg_sqlite
+# ...)`). daemon.sh's `#!/usr/bin/env bash` resolves to whichever bash is
+# first on PATH, so this only reproduces under the shell that actually has
+# the old behavior; skipped where /bin/bash is unavailable or already fixed
+# upstream (a future macOS could ship a non-vulnerable /bin/bash).
+@test "daemon.sh enable: _install_generation's manifest read survives a bash whose process substitution inherits IFS" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  [ -x /bin/bash ] || skip "no /bin/bash on this runner to exercise the old IFS-inheriting behavior"
+  /bin/bash -c '
+    f() { case "$IFS" in *"|"*) echo inherited ;; *) echo not-inherited ;; esac; }
+    IFS="|" read -r seen < <(f)
+    [ "$seen" = inherited ]
+  ' || skip "/bin/bash here does not inherit IFS into process substitution; nothing to reproduce"
+  _seed_install_db
+  _write_completion_record
+  local fake_launchctl marker events
+  fake_launchctl="$(_fake_launchctl)"
+  marker="$TEST_SKILL_DIR/fake-launchd/registered"
+  events="$TEST_SKILL_DIR/fake-launchd/events"
+
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+    run /bin/bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -qi "could not read this install's record" || false
+  [ -f "$marker" ]
+
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" \
+    run /bin/bash "$DAEMON" disable
+  [ "$status" -eq 0 ]
+  [ ! -f "$marker" ]
+}
+
 @test "daemon.sh enable/disable: without a systemd user manager enable explains and changes nothing, disable still works" {
   _seed_install_db
   _write_completion_record

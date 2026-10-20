@@ -83,10 +83,21 @@ _ensure_install_db_schema() {
 # PR 2 says it lives while still writing to the file that actually holds
 # the data, in one real cross-file transaction.
 _install_generation() {
-  local install_id manifest_path_sql manifest_id manifest_gen
+  local install_id manifest_path_sql manifest_id manifest_gen manifest_pair
   install_id="$(agmsg_sqlite "$INSTALL_DB" "SELECT install_id FROM meta;" 2>/dev/null)" || return 1
   manifest_path_sql="$(agmsg_sql_readfile_path "$SKILL_DIR/run/install-manifest.json")"
-  IFS='|' read -r manifest_id manifest_gen < <(agmsg_sqlite :memory: "SELECT json_extract(CAST(readfile('$manifest_path_sql') AS TEXT), '\$.install_id') || '|' || json_extract(CAST(readfile('$manifest_path_sql') AS TEXT), '\$.gen');" 2>/dev/null) || return 1
+  # Captured on its own line, THEN split -- not `IFS='|' read ... < <(agmsg_sqlite ...)`
+  # (review on #1668/#1631): a temporary assignment on a simple command's own
+  # line is visible to every word expansion on that same line, including a
+  # process substitution's subshell, so IFS='|' was still in effect inside
+  # agmsg_sqlite() there. storage.sh's agmsg_sqlite() relies on the DEFAULT
+  # IFS to word-split $_AGMSG_ESCAPE_FLAG ('-escape off') into two argv for
+  # sqlite3; under IFS='|' that string stayed one argument, and `sqlite3
+  # '-escape off' -cmd ...` failed outright on any sqlite3 build that
+  # supports -escape (3.50+) -- enable never got past this read on such a
+  # build, let alone to lock acquisition.
+  manifest_pair="$(agmsg_sqlite :memory: "SELECT json_extract(CAST(readfile('$manifest_path_sql') AS TEXT), '\$.install_id') || '|' || json_extract(CAST(readfile('$manifest_path_sql') AS TEXT), '\$.gen');" 2>/dev/null)" || return 1
+  IFS='|' read -r manifest_id manifest_gen <<<"$manifest_pair"
   [ -n "$install_id" ] && [ "$manifest_id" = "$install_id" ] && [ -n "$manifest_gen" ] || return 1
   printf '%s:%s' "$install_id" "$manifest_gen"
 }
@@ -823,8 +834,13 @@ cmd_disable() {
     # boot. Disable is the deliberate way out of it: the daemon was asked to
     # stop above, so drop the unverifiable record instead of leaving it to
     # block every later start.
-    local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON seen_gen seen_pid seen_boot
-    IFS='|' read -r seen_gen seen_pid seen_boot < <(agmsg_sqlite "$INSTALL_DB" "SELECT gen, COALESCE(executor_pid,0), COALESCE(executor_boot_id,'') FROM daemon_owner;" 2>/dev/null || true)
+    local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON seen_gen seen_pid seen_boot seen_triple
+    # Captured first, split after (same reason as _install_generation above,
+    # #1668 review): IFS='|' on this line would otherwise still be in effect
+    # inside agmsg_sqlite()'s own process-substitution subshell and break its
+    # `-escape off` argv splitting.
+    seen_triple="$(agmsg_sqlite "$INSTALL_DB" "SELECT gen, COALESCE(executor_pid,0), COALESCE(executor_boot_id,'') FROM daemon_owner;" 2>/dev/null || true)"
+    IFS='|' read -r seen_gen seen_pid seen_boot <<<"$seen_triple"
     agmsg_daemon_read_state
     # Only the exact record that was just judged unverifiable may be dropped:
     # a daemon started since then has a different gen, and is left alone.
