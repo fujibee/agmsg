@@ -48,7 +48,7 @@ setup_install_db() {
   [ "$count" -eq 1 ]
 }
 
-@test "agmsgd-launch: an update in progress (a held install-op lock) -> exits 75" {
+@test "agmsgd-launch: an update in progress (a held install-op lock) -> exits 75, records a start attempt" {
   setup_install_db
   sqlite3 "$SKILLDIR_INSTALL_DB" "UPDATE daemon_intent SET desired = 'on';"
   touch "$TEST_SKILL_DIR/run/install-manifest.json.prev"
@@ -86,7 +86,8 @@ setup_install_db() {
   wait "$holder_pid"
   [ "$status" -eq 75 ]
   printf '%s\n' "$output" | grep -Fq 'an install/uninstall is in progress'
-  [ "$(sqlite3 "$SKILLDIR_INSTALL_DB" 'SELECT count(*) FROM daemon_start_attempts;')" -eq 0 ]
+  [ "$(sqlite3 "$SKILLDIR_INSTALL_DB" 'SELECT count(*) FROM daemon_start_attempts;')" -eq 1 ]
+  [ "$(sqlite3 "$SKILLDIR_INSTALL_DB" "SELECT reason FROM daemon_start_attempts;")" = 'an install/uninstall is in progress' ]
 }
 
 @test "agmsgd-launch: a crashed update (.prev present, lock free) -> exits 0, records a start attempt" {

@@ -94,7 +94,7 @@ if [ -f "$MANIFEST" ]; then
   : # complete -- proceed
 elif [ -f "$MANIFEST.prev" ]; then
   if _agmsgd_launch_lock_held; then
-    echo "agmsgd-launch: an install/uninstall is in progress" >&2
+    _agmsgd_launch_record_attempt "an install/uninstall is in progress"
     exit 75
   fi
   _agmsgd_launch_record_attempt "a previous update never completed -- run install.sh again"

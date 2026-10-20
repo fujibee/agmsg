@@ -138,6 +138,35 @@ NODE
   [[ "$output" == *"operation is incomplete"* ]]
 }
 
+# Before this fix, a digest mismatch (bootstrap self-verification, before
+# main.mjs/owner.mjs is ever imported) only ever reached stderr -- discarded
+# by the real launcher, which `exec`s into this process and so has no stderr
+# left to capture, and never forwarded by the resident manager to anywhere a
+# user runs `agmsg daemon status`. The reason never reached daemon_owner
+# either (owner.mjs is never imported on this path), so status.mjs's
+# daemon_start_attempts lookup -- keyed off owner.last_end_at -- was the only
+# place left that could carry it forward. This is the end-to-end check that
+# it now does: not just that agmsgd records the row, but that `agmsg daemon
+# status`'s actual decision text (classify(), via status.mjs) surfaces this
+# specific reason instead of falling back to its generic "executor or
+# control socket unavailable" text.
+@test "agmsgd records a digest-mismatch start attempt, and daemon status surfaces that reason (#1631)" {
+  _write_completion_record
+  printf 'tampered\n' >> "$TEST_SKILL_DIR/scripts/daemon/schema.sql"
+
+  run node "$SCRIPTS/daemon/agmsgd" "$TEST_SKILL_DIR" on 0
+  [ "$status" -eq 75 ]
+  grep -qF -- "digest verification failed: digest mismatch: scripts/daemon/schema.sql" <<<"$output"
+
+  local recorded_reason
+  recorded_reason="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT reason FROM daemon_start_attempts;")"
+  [ "$recorded_reason" = "digest verification failed: digest mismatch: scripts/daemon/schema.sql" ]
+
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 1 ]
+  grep -qF -- "reason: digest verification failed: digest mismatch: scripts/daemon/schema.sql" <<<"$output"
+}
+
 @test "agmsgd entrypoint waits for a CLI read lock before marking ready" {
   # Instrument the copied module before hashing it. Synchronize a separate
   # reader after ownership is committed, exactly at the ready-write boundary.
