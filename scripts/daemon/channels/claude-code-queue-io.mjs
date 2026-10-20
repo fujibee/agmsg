@@ -100,6 +100,7 @@ export async function sendClaudeCodeMessage({
   nonce,
   body,
   token = "",
+  fromMode = "",
   timeoutMs = SEND_TIMEOUT_MS,
   checkOwnership = checkSocketOwnership,
   connect = createConnection,
@@ -113,15 +114,17 @@ export async function sendClaudeCodeMessage({
     type: "user",
     message: {
       role: "user",
-      content: `<cross-session-message from="agmsgd">\n${body}\n</cross-session-message>`,
+      content: `<cross-session-message from="agmsgd"${fromMode === "bypass" ? ' from-name="agmsgd" from-mode="bypass"' : ""}>\n${body}\n</cross-session-message>`,
     },
     priority: "next",
     from: "agmsgd",
   };
   // The session's own inbox token goes first, as its documentation describes
   // ({"type":"auth","token":...} as the first line of the connection), so the
-  // message is judged as one posted to its own session. The sender claims no
-  // permission mode: it is not a session and has none.
+  // message is judged as one posted to its own session. A permission mode is
+  // claimed only when the caller read the receiving seat to be in bypass mode
+  // (a bypass receiver holds anything that names no mode, and a prompting one
+  // holds a mode that is not its own).
   const auth = token ? `${JSON.stringify({ type: "auth", token })}\n` : "";
   const line = `${auth}${JSON.stringify(payload)}\n`;
 
@@ -148,6 +151,39 @@ export async function sendClaudeCodeMessage({
       socket.end(line, () => finish({ state: "sent", nonce, msgId: payload.msg_id }));
     });
   });
+}
+
+// The permission mode the seat's conversation last recorded: Claude Code
+// writes "permissionMode" on every user row. Only the tail is read; "" when the
+// transcript is unreadable or carries none.
+export function latestPermissionMode(transcriptPath, tailBytes = 1024 * 1024, io = { readSync }) {
+  let fd;
+  try {
+    const stat = statSync(transcriptPath);
+    if (!stat.isFile()) return "";
+    fd = openSync(transcriptPath, "r");
+    const start = Math.max(0, stat.size - tailBytes);
+    const buf = Buffer.alloc(stat.size - start);
+    let got = 0;
+    while (got < buf.length) {
+      const read = io.readSync(fd, buf, got, buf.length - got, start + got);
+      if (read <= 0) break;
+      got += read;
+    }
+    const lines = buf.subarray(0, got).toString("utf8").split("\n");
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      if (!lines[i].includes('"permissionMode"')) continue;
+      try {
+        const mode = JSON.parse(lines[i])?.permissionMode;
+        if (typeof mode === "string" && mode) return mode;
+      } catch { /* a cut first line or a half-written last one */ }
+    }
+    return "";
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* read only */ } }
+  }
 }
 
 // The byte length of the transcript right now, recorded just before a nudge is

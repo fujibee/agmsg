@@ -33,6 +33,7 @@ import {
   resolveTranscriptPath,
   resolvePendingDelivery,
   sendClaudeCodeMessage,
+  latestPermissionMode,
 } from "./claude-code-queue-io.mjs";
 
 const SEND_TIMEOUT_MS = 5_000;
@@ -57,7 +58,7 @@ function registrationProjects(teamConfig, agent) {
 
 function readPending(db, seat) {
   return db.prepare(`
-    SELECT id, messaging_socket, transcript_path, transcript_pos, up_to, nonce, state, created_at
+    SELECT id, messaging_socket, transcript_path, transcript_pos, up_to, nonce, state, created_at, tried_modes
     FROM beta_claude_queue WHERE seat = ? AND state = 'pending' ORDER BY id DESC LIMIT 1
   `).get(seat);
 }
@@ -103,7 +104,7 @@ function setQueueState(db, id, state) {
   });
 }
 
-function createPending(db, { seat, messagingSocket, transcriptPath, transcriptPos, upTo, nonce, expectedOpGen }, now) {
+function createPending(db, { seat, messagingSocket, transcriptPath, transcriptPos, upTo, nonce, triedModes, expectedOpGen }, now) {
   let rowId;
   withImmediateTransaction(db, () => {
     const intent = db.prepare("SELECT desired, op_gen FROM daemon_intent").get();
@@ -113,9 +114,9 @@ function createPending(db, { seat, messagingSocket, transcriptPath, transcriptPo
     const current = db.prepare("SELECT id FROM beta_claude_queue WHERE seat = ? AND state = 'pending'").get(seat);
     if (current) throw new Error("seat_already_pending");
     const result = db.prepare(`
-      INSERT INTO beta_claude_queue (seat, messaging_socket, transcript_path, transcript_pos, up_to, nonce, state, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-    `).run(seat, messagingSocket, transcriptPath, transcriptPos, upTo, nonce, new Date(now()).toISOString());
+      INSERT INTO beta_claude_queue (seat, messaging_socket, transcript_path, transcript_pos, up_to, nonce, state, created_at, tried_modes)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(seat, messagingSocket, transcriptPath, transcriptPos, upTo, nonce, new Date(now()).toISOString(), triedModes.join(","));
     rowId = Number(result.lastInsertRowid);
   });
   return rowId;
@@ -149,6 +150,7 @@ export function createClaudeCodeQueueChannel({
   observe = observeTranscript,
   socketAlive = checkSocketOwnership,
   hostPlatform = process.platform,
+  readMode = latestPermissionMode,
 }) {
   let stopped = false;
   let activePoll = null;
@@ -157,10 +159,13 @@ export function createClaudeCodeQueueChannel({
     const { team, agent, teamConfig, registered = true } = registration;
     const seat = seatKey(team, agent);
     const pending = readPending(db, seat);
+    let retryMode = "";
+    let carriedModes = [];
     // At most one nudge is outstanding per seat, and an outstanding one is not
     // re-sent on a timer: Claude Code holds a message received mid-work until
     // the work pauses, so a long wait is normal, not a loss. It is re-sent only
-    // when the thing it was sent to is gone (see below).
+    // when the thing it was sent to is gone, or when the seat set it aside and
+    // the other way of sending has not been tried (see below).
     if (pending) {
       const observation = pendingObservation(pending, observe);
       if (observation.state === "confirmed") {
@@ -189,11 +194,27 @@ export function createClaudeCodeQueueChannel({
       const recordMoved = record && (
         record.messaging_socket !== pending.messaging_socket ||
         (transcriptNow && transcriptNow !== pending.transcript_path));
-      if (!socketGone && !recordMoved) {
-        saveSeat(db, { seat, messagingSocket: pending.messaging_socket, ...observedSeat(socketCheck.state === "ok" ? observation.reason : socketCheck.reason) }, now);
-        return;
+      if (!socketGone && !recordMoved && observation.reason === "peer_held" && socketCheck.state === "ok") {
+        // The seat's Claude Code set the nudge aside. Whatever mode it was sent
+        // under is not accepted there (a bypass seat wants its mode named, a
+        // prompting one wants none), so it is sent once the other way.
+        // The ways tried are kept on the nudge's own row, so a daemon restart
+        // does not give a held nudge a fresh budget.
+        const tried = pending.tried_modes ? pending.tried_modes.split(",") : [];
+        const other = tried[tried.length - 1] === "bypass" ? "plain" : "bypass";
+        if (!tried.includes(other)) {
+          retryMode = other;
+          carriedModes = tried;
+          setQueueState(db, pending.id, "expired");
+        }
       }
-      setQueueState(db, pending.id, "expired");
+      if (retryMode === "") {
+        if (!socketGone && !recordMoved) {
+          saveSeat(db, { seat, messagingSocket: pending.messaging_socket, ...observedSeat(socketCheck.state === "ok" ? observation.reason : socketCheck.reason) }, now);
+          return;
+        }
+        setQueueState(db, pending.id, "expired");
+      }
     }
     if (!registered) return;
     if (hostPlatform === "win32") {
@@ -279,16 +300,19 @@ export function createClaudeCodeQueueChannel({
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
       return;
     }
+    // Say bypass only for a seat whose conversation is in bypass mode (or, after
+    // a hold, once as the one other try); every other seat gets no claim.
+    const mode = retryMode || (readMode(transcriptPath) === "bypassPermissions" ? "bypass" : "plain");
     const nonce = newNonce();
     let id;
     try {
-      id = createPending(db, { seat, messagingSocket: record.messaging_socket, transcriptPath, transcriptPos: transcriptEndPosition(transcriptPath), upTo: snapshot.upTo, nonce, expectedOpGen }, now);
+      id = createPending(db, { seat, messagingSocket: record.messaging_socket, transcriptPath, transcriptPos: transcriptEndPosition(transcriptPath), upTo: snapshot.upTo, nonce, triedModes: [...carriedModes, mode], expectedOpGen }, now);
     } catch (error) {
       if (error.message !== "daemon_intent_changed" && error.message !== "seat_already_pending") throw error;
       return;
     }
 
-    const result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, timeoutMs });
+    const result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
     if (result.state !== "sent") {
       setQueueState(db, id, "expired");
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` }, now);

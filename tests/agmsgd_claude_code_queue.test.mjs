@@ -10,6 +10,7 @@ import {
   sendClaudeCodeMessage,
   resolveTranscriptPath,
   resolvePendingDelivery,
+  latestPermissionMode,
 } from '../scripts/daemon/channels/claude-code-queue-io.mjs';
 import { createClaudeCodeQueueChannel } from '../scripts/daemon/channels/claude-code-queue.mjs';
 import { ensureClaudeCodeChannelSchema } from '../scripts/daemon/channels/claude-code-queue-store.mjs';
@@ -175,7 +176,7 @@ function channelFixture(t) {
   db.exec("UPDATE daemon_intent SET desired='on', op_gen=1");
   t.after(() => db.close());
   const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, hours: 0, alive: { state: 'ok' } };
-  const channel = createClaudeCodeQueueChannel({
+  const options = {
     db, installRoot: root, expectedOpGen: 1, env: { AGMSG_STORAGE_PATH: root },
     now: () => Date.UTC(2026, 9, 14) + state.hours * 3_600_000,
     log: () => {},
@@ -184,11 +185,14 @@ function channelFixture(t) {
     readDriver: () => ({ state: 'ok', driver: 'sqlite' }),
     openStore: () => ({ close() {} }),
     readSnapshot: () => ({ state: 'ok', unread: true, upTo: '{}' }),
-    send: async () => { state.sent += 1; return { state: 'sent' }; },
+    send: async (args) => { state.sent += 1; (state.modes ??= []).push(args.fromMode); return { state: 'sent' }; },
+    readMode: () => state.mode ?? '',
     observe: () => (state.hold ? { state: 'held' } : { state: 'absent' }),
     socketAlive: () => state.alive,
     hostPlatform: 'linux',
-  });
+  };
+  state.options = options;
+  const channel = createClaudeCodeQueueChannel(options);
   return { db, channel, state };
 }
 
@@ -230,7 +234,7 @@ test('a seat whose recorded socket is gone gets no new nudge rows until its reco
   await channel.stop();
 });
 
-test('a nudge opens with the session token as an auth line and claims no permission mode', async (t) => {
+test('a nudge opens with the session token as an auth line and claims no permission mode unless asked to', async (t) => {
   const dir = temporaryDirectory(t);
   const socketPath = path.join(dir, 's.sock');
   const received = new Promise((resolve) => {
@@ -248,6 +252,68 @@ test('a nudge opens with the session token as an auth line and claims no permiss
   const lines = (await received).trim().split('\n');
   assert.deepEqual(JSON.parse(lines[0]), { type: 'auth', token: 'tok-1' });
   assert.ok(!lines[1].includes('from-mode'));
+});
+
+test('a bypass seat is told from-mode=bypass; any other mode, or none readable, claims nothing', async (t) => {
+  const dir = temporaryDirectory(t);
+  const transcript = path.join(dir, 's.jsonl');
+  const row = (mode) => `${JSON.stringify({ type: 'user', permissionMode: mode, message: { role: 'user', content: 'hi' } })}\n`;
+  assert.equal(latestPermissionMode(path.join(dir, 'none.jsonl')), '');
+  writeFileSync(transcript, `${JSON.stringify({ type: 'assistant' })}\n`);
+  assert.equal(latestPermissionMode(transcript), '');
+  writeFileSync(transcript, row('bypassPermissions') + row('auto') + `${JSON.stringify({ type: 'assistant' })}\n`);
+  assert.equal(latestPermissionMode(transcript), 'auto', 'the latest row decides');
+  writeFileSync(transcript, row('auto') + row('bypassPermissions'));
+  assert.equal(latestPermissionMode(transcript), 'bypassPermissions');
+
+  for (const [mode, expected] of [['bypassPermissions', 'bypass'], ['auto', ''], ['default', ''], ['acceptEdits', ''], ['dontAsk', ''], ['plan', ''], ['', '']]) {
+    const { channel, state } = channelFixture(t);
+    state.mode = mode;
+    await channel.pollOnce();
+    assert.deepEqual(state.modes, [expected], mode || 'unreadable');
+    await channel.stop();
+  }
+
+  const socketPath = path.join(dir, 'b.sock');
+  const received = new Promise((resolve) => {
+    const server = createServer((connection) => {
+      let data = '';
+      connection.on('data', (chunk) => { data += chunk; });
+      connection.on('end', () => { server.close(); resolve(data); });
+    });
+    server.listen(socketPath);
+    t.after(() => server.close());
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await sendClaudeCodeMessage({ socketPath, nonce: 'n2', body: '[agmsg:n2] hi', fromMode: 'bypass', checkOwnership: () => ({ state: 'ok' }) });
+  assert.match(JSON.parse((await received).trim()).message.content, /^<cross-session-message from="agmsgd" from-name="agmsgd" from-mode="bypass">/);
+});
+
+test('a held nudge is sent once the other way (claim, or no claim) and then left alone', async (t) => {
+  // Not in bypass by its transcript, held anyway (it was switched): claim bypass.
+  let { db, channel, state } = channelFixture(t);
+  await channel.pollOnce();
+  state.hold = true;
+  for (let i = 0; i < 4; i += 1) await channel.pollOnce();
+  assert.deepEqual(state.modes, ['', 'bypass'], 'each way once, then no more');
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state='pending'").get().n, 1);
+  assert.match(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, /^peer_held/);
+  await channel.stop();
+  // A restarted daemon (a new channel on the same database) does not give the held nudge a new budget.
+  const again = createClaudeCodeQueueChannel({ ...state.options });
+  for (let i = 0; i < 3; i += 1) await again.pollOnce();
+  assert.deepEqual(state.modes, ['', 'bypass'], 'a restart adds no send');
+  await again.stop();
+
+  // A bypass seat that holds it anyway (switched to a prompting mode): no claim next.
+  ({ db, channel, state } = channelFixture(t));
+  state.mode = 'bypassPermissions';
+  await channel.pollOnce();
+  state.hold = true;
+  for (let i = 0; i < 4; i += 1) await channel.pollOnce();
+  assert.deepEqual(state.modes, ['bypass', '']);
+
+  await channel.stop();
 });
 
 test('a nudge the seat holds is seen from the preview that drops the brackets, and the seat is not called addressable', async (t) => {
