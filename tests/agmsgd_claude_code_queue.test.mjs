@@ -176,7 +176,7 @@ function channelFixture(t) {
   db.exec("UPDATE daemon_intent SET desired='on', op_gen=1");
   t.after(() => db.close());
   const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, hours: 0, alive: { state: 'ok' } };
-  const channel = createClaudeCodeQueueChannel({
+  const options = {
     db, installRoot: root, expectedOpGen: 1, env: { AGMSG_STORAGE_PATH: root },
     now: () => Date.UTC(2026, 9, 14) + state.hours * 3_600_000,
     log: () => {},
@@ -190,7 +190,9 @@ function channelFixture(t) {
     observe: () => (state.hold ? { state: 'held' } : { state: 'absent' }),
     socketAlive: () => state.alive,
     hostPlatform: 'linux',
-  });
+  };
+  state.options = options;
+  const channel = createClaudeCodeQueueChannel(options);
   return { db, channel, state };
 }
 
@@ -297,6 +299,11 @@ test('a held nudge is sent once the other way (claim, or no claim) and then left
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state='pending'").get().n, 1);
   assert.match(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, /^peer_held/);
   await channel.stop();
+  // A restarted daemon (a new channel on the same database) does not give the held nudge a new budget.
+  const again = createClaudeCodeQueueChannel({ ...state.options });
+  for (let i = 0; i < 3; i += 1) await again.pollOnce();
+  assert.deepEqual(state.modes, ['', 'bypass'], 'a restart adds no send');
+  await again.stop();
 
   // A bypass seat that holds it anyway (switched to a prompting mode): no claim next.
   ({ db, channel, state } = channelFixture(t));
