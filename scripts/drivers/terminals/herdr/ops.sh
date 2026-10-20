@@ -1386,8 +1386,27 @@ terminal_name() {
     echo "herdr: cannot compute the internal key for '$team/$name' — the sha256 helper is unavailable, so the pane was not named" >&2
     return 13
   }
-  local _err _rc=0
-  _err="$(_herdr_cli "$id" agent rename "$(_herdr_bare_of "$id")" "$key" 2>&1 >/dev/null)" || _rc=$?
+  # A pane whose running process just exited and restarted (measured: `codex
+  # resume` after the bridge to agmsgd was lost, #1631) has NO agent entry for
+  # herdr to rename for a few seconds after the new process starts -- herdr's
+  # own detection of it is passive and polled, not instant on the new
+  # process's first byte (measured here: 2-5s on an otherwise idle pane).
+  # `agent rename` on a pane with no agent entry yet fails with
+  # `{"error":{"code":"agent_not_found",...}}` on stderr -- retry only THAT
+  # failure, bounded, the same ~5s (50 * 0.1s) shape terminal_spawn's own
+  # input-readiness wait above uses. Any OTHER rename failure (a live-name
+  # collision, a key the server otherwise refuses) is not a detection race
+  # and still fails on the first try, exactly as before.
+  local _err _rc=0 _tries=0
+  while :; do
+    _rc=0
+    _err="$(_herdr_cli "$id" agent rename "$(_herdr_bare_of "$id")" "$key" 2>&1 >/dev/null)" || _rc=$?
+    [ "$_rc" -eq 0 ] && break
+    case "$_err" in *'"code":"agent_not_found"'*) ;; *) break ;; esac
+    [ "$_tries" -lt 50 ] || break
+    sleep 0.1 2>/dev/null || true
+    _tries=$((_tries + 1))
+  done
   if [ "$_rc" -ne 0 ]; then
     echo runtime_error
     echo "herdr: 'agent rename' for '$team/$name' on pane '$id' failed (rc=$_rc)${_err:+: $_err}" >&2

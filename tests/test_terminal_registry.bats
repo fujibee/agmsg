@@ -3008,6 +3008,73 @@ M
   refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
 }
 
+# A herdr whose `agent rename` answers `agent_not_found` (herdr's real shape,
+# measured live: `{"error":{"code":"agent_not_found","message":"agent target
+# <id> not found"}}` on stderr, exit 1) for the first N attempts, then
+# succeeds -- standing in for the pane whose running process just restarted
+# (measured: `codex resume` after the bridge was lost, #1631), where herdr's
+# own passive detection of the new process takes a few seconds and has not
+# caught up yet. Everything else matches _install_fake_herdr.
+_install_fake_herdr_rename_recovers_from_not_found() {
+  local sid="${1:-}" fail_times="${2:-1}"
+  printf '%s' "$fail_times" > "$TEST_SKILL_DIR/rename-not-found-remaining"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+counter="$TEST_SKILL_DIR/rename-not-found-remaining"
+if [ "\$1" = agent ] && [ "\$2" = list ]; then
+  printf '{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wC:p4","display_agent":"team:alice","name":"a-key"}]}}\n' "$sid"
+elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
+  exit 0
+elif [ "\$1" = agent ] && [ "\$2" = rename ]; then
+  remaining="\$(cat "\$counter" 2>/dev/null || echo 0)"
+  if [ "\$remaining" -gt 0 ]; then
+    echo "\$((remaining - 1))" > "\$counter"
+    echo '{"error":{"code":"agent_not_found","message":"agent target wC:p9 not found"},"id":"cli:agent:rename"}' >&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+  export HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock"
+}
+
+# --- a rename that fails only because herdr has not detected the agent YET
+# retries instead of failing the seat outright (#1631: `codex resume` after
+# the bridge was lost left the key unset, and re-running `/agmsg actas` right
+# after did not fix it -- herdr's own passive detection of the newly
+# (re)started process is not instant, and the single rename attempt this
+# driver made before this fix landed in exactly that few-second window).
+@test "terminal_name retries an 'agent_not_found' rename and succeeds once herdr catches up (#1631)" {
+  _install_fake_herdr_rename_recovers_from_not_found "sess-retry" 3
+  agmsg_terminal_load herdr
+
+  run terminal_name 'wC:p9' teamx alice
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  # Three agent_not_found answers, then the one that actually renamed it.
+  [ "$(grep -c '\[agent\] \[rename\]' "$ARGV_LOG")" -eq 4 ]
+}
+
+# The retry is bounded and specific to agent_not_found: a rename that never
+# recovers still fails (no infinite loop), and a DIFFERENT failure (no
+# agent_not_found body at all, same shape test_terminal_registry.bats's other
+# HERDR_AGENT_RENAME_RC=1 tests already use) is not retried at all -- which
+# this asserts directly, by call count, rather than only by the end result
+# those other tests already cover.
+@test "terminal_name does not retry a rename failure that is not 'agent_not_found' (#1631)" {
+  _install_fake_herdr "sess-k"
+  export HERDR_AGENT_RENAME_RC=1
+  agmsg_terminal_load herdr
+
+  run terminal_name 'wC:p9' teamx alice
+  [ "$status" -ne 0 ]
+  [ "$(grep -c '\[agent\] \[rename\]' "$ARGV_LOG")" -eq 1 ]
+}
+
 # --- a driver that is missing a required op does not load (#1051) -------------
 #
 # The registry has always refused a driver missing an ABI function; what it did
