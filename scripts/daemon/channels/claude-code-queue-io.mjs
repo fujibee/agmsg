@@ -19,13 +19,8 @@ import { isAbsolute } from "node:path";
 export { newNonce, inboxNudge } from "./codex-queue-io.mjs";
 
 const SEND_TIMEOUT_MS = 5_000;
-// Bound the transcript read to its tail: a long-lived seat's jsonl grows
-// without limit, and the delivery record this channel looks for is always
-// recent (written within the TTL window of a message this same daemon just
-// sent). 512 KiB comfortably covers many turns' worth of lines.
-const TRANSCRIPT_TAIL_BYTES = 512 * 1024;
-// A pending nudge that recorded the transcript's EOF before it was sent is
-// checked from that position onward, in chunks of this size.
+// A pending nudge is checked from the transcript position recorded before it
+// was sent (the start when none was), in chunks of this size.
 const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
 
 // Measured 2026-10-05: Claude Code encodes a project's cwd into its
@@ -149,23 +144,9 @@ export async function sendClaudeCodeMessage({
   });
 }
 
-function readTail(path, maxBytes) {
-  const stat = statSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not_regular_file");
-  if (stat.size <= maxBytes) return readFileSync(path, "utf8");
-  const buf = Buffer.alloc(maxBytes);
-  const fd = openSync(path, "r");
-  try {
-    readSync(fd, buf, 0, maxBytes, stat.size - maxBytes);
-  } finally {
-    closeSync(fd);
-  }
-  return buf.toString("utf8");
-}
-
 // The byte length of the transcript right now, recorded just before a nudge is
 // sent so the later check reads only what was written after it. null when the
-// file cannot be measured: that nudge falls back to reading the tail.
+// file cannot be measured: that nudge is checked from the start.
 export function transcriptEndPosition(transcriptPath) {
   try {
     const stat = statSync(transcriptPath);
@@ -213,59 +194,70 @@ function judgeLine(line, marker) {
 }
 
 // Reads from `start` to EOF in fixed-size chunks, handing each complete line
-// to `onLine` (stop early by returning true). A line is decoded only whole, so
-// a multi-byte character is never split across chunks.
-function scanFrom(path, start, onLine) {
+// and its byte offset to `onLine` (stop early by returning true). A line is
+// decoded only whole, so a multi-byte character is never split across chunks.
+// A `start` that is not at the beginning of a line (the byte before it is not a
+// newline: a row was half written when it was recorded) discards the fragment
+// up to the first newline instead of reading it as a line of its own.
+function scanFrom(path, start, onLine, io) {
   const fd = openSync(path, "r");
   try {
     const buf = Buffer.alloc(TRANSCRIPT_CHUNK_BYTES);
+    let skipping = false;
+    if (start > 0) {
+      const prior = Buffer.alloc(1);
+      skipping = io.readSync(fd, prior, 0, 1, start - 1) === 1 && prior[0] !== 10;
+    }
     let position = start;
     let carry = Buffer.alloc(0);
     for (;;) {
-      const read = readSync(fd, buf, 0, buf.length, position);
+      const read = io.readSync(fd, buf, 0, buf.length, position);
       if (read <= 0) break;
       position += read;
-      let data = Buffer.concat([carry, buf.subarray(0, read)]);
+      const data = Buffer.concat([carry, buf.subarray(0, read)]);
+      const base = position - data.length;
       let from = 0;
       for (let at = data.indexOf(10, from); at !== -1; at = data.indexOf(10, from)) {
-        if (onLine(data.subarray(from, at).toString("utf8"))) return;
+        if (skipping) skipping = false;
+        else if (onLine(data.subarray(from, at), base + from, fd)) return;
         from = at + 1;
       }
       carry = data.subarray(from);
     }
-    onLine(carry.toString("utf8"));
+    if (!skipping && carry.length) onLine(carry, position - carry.length, fd);
   } finally {
     closeSync(fd);
   }
 }
 
 // Reads the delivery outcome straight from the receiving session's own
-// transcript. With `fromPosition` (the transcript length recorded before the
-// nudge was sent) only what was written after it is read, however much the
+// transcript. Only what was written after `fromPosition` (the transcript
+// length recorded before the nudge was sent) is read, however much the
 // conversation has grown since; a transcript shorter than that position was
-// rewritten or truncated and is read from the start. Without it, only the
-// tail is read.
-export function observeTranscript(transcriptPath, nonce, fromPosition = null) {
+// rewritten or truncated and is read from the start, as is a nudge with no
+// recorded position. A line is accepted as delivery only after it reads back
+// byte for byte from the same place: a file rewritten during a read must not
+// be confirmed from bytes that no version of it ever held.
+export function observeTranscript(transcriptPath, nonce, fromPosition = null, io = { readSync }) {
   if (typeof nonce !== "string" || !nonce) return { state: "unreadable", reason: "nonce_missing" };
   const marker = `[agmsg:${nonce}]`;
   let heldSeen = false;
   let delivered = false;
-  const onLine = (line) => {
-    const verdict = judgeLine(line, marker);
-    if (verdict === "delivered") delivered = true;
+  const stable = (fd, bytes, offset) => {
+    const again = Buffer.alloc(bytes.length);
+    return io.readSync(fd, again, 0, again.length, offset) === bytes.length && again.equals(bytes);
+  };
+  const onLine = (bytes, offset, fd) => {
+    const verdict = judgeLine(bytes.toString("utf8"), marker);
+    if (verdict === "delivered" && stable(fd, bytes, offset)) delivered = true;
     else if (verdict === "held") heldSeen = true;
     return delivered;
   };
   try {
-    if (Number.isSafeInteger(fromPosition) && fromPosition >= 0) {
-      const stat = statSync(transcriptPath);
-      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not_regular_file");
-      scanFrom(transcriptPath, fromPosition > stat.size ? 0 : fromPosition, onLine);
-    } else {
-      for (const line of readTail(transcriptPath, TRANSCRIPT_TAIL_BYTES).split("\n")) {
-        if (onLine(line)) break;
-      }
-    }
+    const stat = statSync(transcriptPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not_regular_file");
+    const start = Number.isSafeInteger(fromPosition) && fromPosition >= 0 && fromPosition <= stat.size ? fromPosition : 0;
+    scanFrom(transcriptPath, start, onLine, io);
   } catch (error) {
     if (error?.code === "ENOENT") return { state: "unreadable", reason: "transcript_missing" };
     return { state: "unreadable", reason: "transcript_read_failed" };
