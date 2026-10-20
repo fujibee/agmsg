@@ -24,7 +24,44 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
+// Set once installRoot/dbPath are known in main(), below. Every fail()
+// before that point (an argv usage error) has nothing to record against and
+// nothing to lose by skipping it -- that path only fires when something
+// other than agmsgd-launch.sh invokes this file wrong.
+let failureDbPath;
+
+// Best-effort, same convention as main.mjs's own startup-declined insert and
+// agmsgd-launch.sh's _agmsgd_launch_record_attempt: status.mjs's
+// daemon_start_attempts read is what turns this into the reason a user
+// actually sees from `agmsg daemon start`/`status` instead of the generic
+// "executor or control socket unavailable" fallback. A reader that can't see
+// this row falls back to that generic text, never a crash here -- recording
+// it is strictly additive to what daemon_start_attempts already offers for
+// every OTHER kind of start failure.
+function recordStartAttempt(reason) {
+  if (!failureDbPath) return;
+  let db;
+  try {
+    db = new DatabaseSync(failureDbPath);
+    db.exec("PRAGMA busy_timeout = 2000;");
+    db.prepare("INSERT INTO daemon_start_attempts (at, reason, executor_pid) VALUES (?, ?, ?)").run(
+      new Date().toISOString(),
+      reason,
+      process.pid,
+    );
+  } catch {
+    /* best-effort */
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 function fail(code, message) {
+  recordStartAttempt(message);
   process.stderr.write(`agmsgd: ${message}\n`);
   process.exit(code);
 }
@@ -123,6 +160,7 @@ async function main() {
   const incompleteOperationPath = join(installRoot, "run", "install-op-incomplete.json");
   const manifestPath = join(installRoot, "run", "install-manifest.json");
   const dbPath = join(installRoot, "run", "install.db");
+  failureDbPath = dbPath;
 
   const lockDb = new DatabaseSync(lockPath);
   lockDb.exec("BEGIN EXCLUSIVE;");
