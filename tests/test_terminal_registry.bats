@@ -13,12 +13,7 @@
 load test_helper
 
 setup() {
-  local session_home="$HOME"
   setup_test_env
-  # These registration cases use explicit paths and retain the session HOME.
-  if [[ "$BATS_TEST_DESCRIPTION" == "join:"* ]]; then
-    export HOME="$session_home"
-  fi
   export SKILL_DIR="$TEST_SKILL_DIR"
   export AGMSG_PLUGIN_DIRS=""
   export FAKEBIN="$TEST_SKILL_DIR/fakebin"
@@ -2844,7 +2839,7 @@ STUB
   source "$SKILL_DIR/scripts/lib/role-session.sh"
   local named
   named="$(agmsg_role_session_named seatteam alice)"
-  [[ "$named" == "herdr:$HERDR_SOCKET_PATH:wB:p2"$'\t'* ]]
+  [ "${named%%$'\t'*}" = "herdr:$HERDR_SOCKET_PATH:wB:p2" ]
   [ "$(cat "$LABEL_STATE")" = caller:original ]
   refute grep -Eq '^(pane|agent) rename wA:p1 ' "$ARGV_LOG"
   grep -Fq 'pane rename wB:p2 seatteam:alice' "$ARGV_LOG"
