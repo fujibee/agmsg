@@ -1733,7 +1733,8 @@ JSON
   wait "$pid" 2>/dev/null || true
 
   grep -q "new-for-bob"   /tmp/agmsg-as-bob
-  ! grep -q "new-for-alice" /tmp/agmsg-as-bob
+  ! grep -q "new-for-alice" /tmp/agmsg-as-bob \
+    || { echo "forbidden message leaked to bob" >&2; rm -f /tmp/agmsg-as-bob; return 1; }
   rm -f /tmp/agmsg-as-bob
 }
 

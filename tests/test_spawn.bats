@@ -1388,7 +1388,8 @@ _spawn_recorded_id() {
     # contract that matters here — leaves NO placement record and renames/runs nothing.
     grep -q "placement failed" <<<"$output"
     [ ! -f "$(_spawn_record_path myteam alice)" ]
-    ! grep -q "pane run" "$HERDR_CALL_LOG"
+    ! grep -q "pane run" "$HERDR_CALL_LOG" \
+      || { echo "unexpected pane run for body: $body" >&3; false; }
   done
 }
 

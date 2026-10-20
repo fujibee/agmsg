@@ -139,7 +139,8 @@ teardown() {
 
     [ "$status" -eq 0 ]
     grep -Fq "real-codex <$subcommand> <test-arg>" "$CALL_LOG"
-    ! grep -q "^monitor" "$CALL_LOG"
+    ! grep -q "^monitor" "$CALL_LOG" \
+      || { echo "unexpected monitor routing for $subcommand: $(cat "$CALL_LOG")" >&3; false; }
   done
 }
 
@@ -157,7 +158,8 @@ teardown() {
       echo "unexpected routing for $subcommand: $(cat "$CALL_LOG")" >&3
       false
     }
-    ! grep -q "^real-codex" "$CALL_LOG"
+    ! grep -q "^real-codex" "$CALL_LOG" \
+      || { echo "unexpected real-codex call for $subcommand: $(cat "$CALL_LOG")" >&3; false; }
   done
 }
 
