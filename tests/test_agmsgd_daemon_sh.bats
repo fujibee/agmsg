@@ -546,6 +546,101 @@ EOF
   [ ! -f "$TEST_SKILL_DIR/run/agmsgd-$(_unit_id).xml" ]
 }
 
+# A wrapper named `sqlite3`, placed ahead of the real one on PATH, that
+# behaves exactly like the real binary except every line of its stdout gets a
+# synthetic \r appended right before the \n -- simulating the \r\n Windows'
+# sqlite3.exe emits at each row boundary (measured: 3.53.4). Same technique as
+# test_sqlite_crlf.bats's `_stub_sqlite3_crlf`, duplicated locally rather than
+# shared: bats only loads `test_helper` automatically, not another test file.
+#
+# The real binary's path is resolved HERE, before this directory is ever
+# prepended to PATH, so the wrapper's exec target does not resolve back to
+# itself once PATH includes this directory.
+_stub_sqlite3_crlf() {
+  local dir="$TEST_SKILL_DIR/crlfbin" real
+  real="$(command -v sqlite3)"
+  mkdir -p "$dir"
+  cat > "$dir/sqlite3" <<EOF
+#!/usr/bin/env bash
+set -o pipefail
+# -u (unbuffered): this stub also stands in for the interactive coprocess
+# _with_op_lock_run drives over anonymous pipes (#1631/#1667) -- several
+# round trips on the SAME long-lived sqlite3 process, not one shot read to
+# EOF. sed's default full buffering on a non-tty stdout would sit on each
+# reply until enough output piled up or the process exited, which never
+# happens here before the 10s read timeout, hanging every round trip.
+"$real" "\$@" | sed -u 's/\$/\r/'
+EOF
+  chmod +x "$dir/sqlite3"
+  printf '%s' "$dir"
+}
+
+@test "daemon.sh enable: acquires the install operation lock when sqlite3 answers with CRLF line endings (Windows sqlite3.exe)" {
+  _seed_install_db
+  _write_completion_record
+  _fake_windows_manager
+  local crlf_stub capture marker
+  crlf_stub="$(_stub_sqlite3_crlf)"
+  capture="$TEST_SKILL_DIR/fake-windows/captured.xml"
+  marker="$TEST_SKILL_DIR/fake-windows/registered"
+  export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"
+  export AGMSGD_FAKE_GIT_ROOT="$TEST_SKILL_DIR/fake-windows/Git Root"
+  mkdir -p "$AGMSGD_FAKE_GIT_ROOT/bin"
+  : > "$AGMSGD_FAKE_GIT_ROOT/bin/bash.exe"
+
+  # crlf_stub ahead of fake-windows ahead of the real PATH: `_os` still sees
+  # the fake-windows `uname` (routing _with_op_lock_run into the coproc
+  # branch #1631/#1667 added for native Windows sqlite3), while every
+  # `sqlite3` call -- including the coproc's own replies on fd 9 -- goes
+  # through the CRLF stub instead of the real, LF-only Linux binary.
+  PATH="$crlf_stub:$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+    _run_with_deadline 15 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q "could not acquire the install operation lock" || false
+  [ -f "$marker" ]
+  [ "$(PATH="$crlf_stub:$PATH" sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT desired FROM daemon_intent;" | tr -d '\r')" = "on" ]
+
+  PATH="$crlf_stub:$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_MARKER="$marker" \
+    _run_with_deadline 15 bash "$DAEMON" disable
+  [ "$status" -eq 0 ]
+  [ ! -f "$marker" ]
+}
+
+# `/bin/bash` on this runner's macOS (Apple's stock, 3.2.57) still inherits a
+# `read`'s temporary `IFS='|'` into a process substitution's subshell, while
+# the bash on PATH here (homebrew, 5.x) does not -- the exact fork review
+# flagged on #1668 (_install_generation's `IFS='|' read ... < <(agmsg_sqlite
+# ...)`). daemon.sh's `#!/usr/bin/env bash` resolves to whichever bash is
+# first on PATH, so this only reproduces under the shell that actually has
+# the old behavior; skipped where /bin/bash is unavailable or already fixed
+# upstream (a future macOS could ship a non-vulnerable /bin/bash).
+@test "daemon.sh enable: _install_generation's manifest read survives a bash whose process substitution inherits IFS" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  [ -x /bin/bash ] || skip "no /bin/bash on this runner to exercise the old IFS-inheriting behavior"
+  /bin/bash -c '
+    f() { case "$IFS" in *"|"*) echo inherited ;; *) echo not-inherited ;; esac; }
+    IFS="|" read -r seen < <(f)
+    [ "$seen" = inherited ]
+  ' || skip "/bin/bash here does not inherit IFS into process substitution; nothing to reproduce"
+  _seed_install_db
+  _write_completion_record
+  local fake_launchctl marker events
+  fake_launchctl="$(_fake_launchctl)"
+  marker="$TEST_SKILL_DIR/fake-launchd/registered"
+  events="$TEST_SKILL_DIR/fake-launchd/events"
+
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+    run /bin/bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -qi "could not read this install's record" || false
+  [ -f "$marker" ]
+
+  AGMSGD_LAUNCHCTL="$fake_launchctl" AGMSGD_FAKE_LAUNCHD_MARKER="$marker" AGMSGD_FAKE_LAUNCHD_EVENTS="$events" AGMSGD_FAKE_OP_LOCK_DB="$TEST_SKILL_DIR/run/install-op.lock.db" \
+    run /bin/bash "$DAEMON" disable
+  [ "$status" -eq 0 ]
+  [ ! -f "$marker" ]
+}
+
 @test "daemon.sh enable/disable: without a systemd user manager enable explains and changes nothing, disable still works" {
   _seed_install_db
   _write_completion_record

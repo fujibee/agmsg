@@ -83,10 +83,21 @@ _ensure_install_db_schema() {
 # PR 2 says it lives while still writing to the file that actually holds
 # the data, in one real cross-file transaction.
 _install_generation() {
-  local install_id manifest_path_sql manifest_id manifest_gen
-  install_id="$(sqlite3 "$INSTALL_DB" "SELECT install_id FROM meta;" 2>/dev/null)" || return 1
+  local install_id manifest_path_sql manifest_id manifest_gen manifest_pair
+  install_id="$(agmsg_sqlite "$INSTALL_DB" "SELECT install_id FROM meta;" 2>/dev/null)" || return 1
   manifest_path_sql="$(agmsg_sql_readfile_path "$SKILL_DIR/run/install-manifest.json")"
-  IFS='|' read -r manifest_id manifest_gen < <(sqlite3 :memory: "SELECT json_extract(CAST(readfile('$manifest_path_sql') AS TEXT), '\$.install_id') || '|' || json_extract(CAST(readfile('$manifest_path_sql') AS TEXT), '\$.gen');" 2>/dev/null) || return 1
+  # Captured on its own line, THEN split -- not `IFS='|' read ... < <(agmsg_sqlite ...)`
+  # (review on #1668/#1631): a temporary assignment on a simple command's own
+  # line is visible to every word expansion on that same line, including a
+  # process substitution's subshell, so IFS='|' was still in effect inside
+  # agmsg_sqlite() there. storage.sh's agmsg_sqlite() relies on the DEFAULT
+  # IFS to word-split $_AGMSG_ESCAPE_FLAG ('-escape off') into two argv for
+  # sqlite3; under IFS='|' that string stayed one argument, and `sqlite3
+  # '-escape off' -cmd ...` failed outright on any sqlite3 build that
+  # supports -escape (3.50+) -- enable never got past this read on such a
+  # build, let alone to lock acquisition.
+  manifest_pair="$(agmsg_sqlite :memory: "SELECT json_extract(CAST(readfile('$manifest_path_sql') AS TEXT), '\$.install_id') || '|' || json_extract(CAST(readfile('$manifest_path_sql') AS TEXT), '\$.gen');" 2>/dev/null)" || return 1
+  IFS='|' read -r manifest_id manifest_gen <<<"$manifest_pair"
   [ -n "$install_id" ] && [ "$manifest_id" = "$install_id" ] && [ -n "$manifest_gen" ] || return 1
   printf '%s:%s' "$install_id" "$manifest_gen"
 }
@@ -138,7 +149,7 @@ _with_op_lock_run() {
   fi
   attach_path="$(agmsg_sql_readfile_path "$INSTALL_DB")"
   printf '%s\n' '.bail on' "ATTACH DATABASE '$attach_path' AS installdb;" 'BEGIN EXCLUSIVE;' '.print LOCKED' >&8
-  if ! IFS= read -r -t 10 ready <&9 || [ "$ready" != "LOCKED" ]; then
+  if ! IFS= read -r -t 10 ready <&9 || [ "${ready%$'\r'}" != "LOCKED" ]; then
     printf 'ROLLBACK;\n.quit\n' >&8 2>/dev/null || true
     exec 8>&-
     exec 9<&-
@@ -153,8 +164,8 @@ _with_op_lock_run() {
   printf '%s\n' "SELECT CASE WHEN json_extract(CAST(readfile('$manifest_sql') AS TEXT), '\$.install_id') = (SELECT install_id FROM installdb.meta) THEN (SELECT install_id FROM installdb.meta) || ':' || json_extract(CAST(readfile('$manifest_sql') AS TEXT), '\$.gen') ELSE '' END;" '.print GENERATION_END' >&8
   IFS= read -r -t 10 generation_row <&9 || generation_row=""
   IFS= read -r -t 10 generation_marker <&9 || generation_marker=""
-  current_generation="$generation_row"
-  if [ "$generation_marker" != "GENERATION_END" ] || [ "$current_generation" != "$expected_generation" ]; then
+  current_generation="${generation_row%$'\r'}"
+  if [ "${generation_marker%$'\r'}" != "GENERATION_END" ] || [ "$current_generation" != "$expected_generation" ]; then
     printf 'ROLLBACK;\n.quit\n' >&8
     exec 8>&-
     exec 9<&-
@@ -169,6 +180,7 @@ _with_op_lock_run() {
     local has_codex_path
     printf '%s\n' "SELECT count(*) FROM pragma_table_info('meta', 'installdb') WHERE name='codex_path';" >&8
     IFS= read -r -t 10 has_codex_path <&9 || has_codex_path=""
+    has_codex_path="${has_codex_path%$'\r'}"
     if [ "$has_codex_path" = 0 ]; then
       printf '%s\n' 'ALTER TABLE installdb.meta ADD COLUMN codex_path TEXT;' >&8
     elif [ "$has_codex_path" != 1 ]; then
@@ -182,7 +194,7 @@ _with_op_lock_run() {
       return 1
     fi
     printf '%s\n.print APPLIED\n' "$statements" >&8
-    if ! IFS= read -r -t 10 applied <&9 || [ "$applied" != "APPLIED" ]; then
+    if ! IFS= read -r -t 10 applied <&9 || [ "${applied%$'\r'}" != "APPLIED" ]; then
       printf 'ROLLBACK;\n.quit\n' >&8 2>/dev/null || true
       exec 8>&-
       exec 9<&-
@@ -219,7 +231,7 @@ _with_op_lock_run() {
 _unit_id() {
   local install_id="${AGMSGD_LOCK_INSTALL_ID:-}"
   if [ -z "$install_id" ]; then
-    install_id="$(sqlite3 "$INSTALL_DB" "SELECT install_id FROM meta;" 2>/dev/null)"
+    install_id="$(agmsg_sqlite "$INSTALL_DB" "SELECT install_id FROM meta;" 2>/dev/null)"
   fi
   # shasum is absent from Git Bash; agmsg_sha256 falls back to sha256sum.
   printf '%s:%s' "$SKILL_DIR" "$install_id" | agmsg_sha256 | cut -c1-12
@@ -510,8 +522,8 @@ _wait_for_ready() {
   local target_op_gen="$1" waited=0
   while [ "$waited" -lt 100 ]; do
     local state op_gen
-    state="$(sqlite3 "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
-    op_gen="$(sqlite3 "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;" 2>/dev/null || true)"
+    state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+    op_gen="$(agmsg_sqlite "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;" 2>/dev/null || true)"
     if [ "$state" = "ready" ] && [ "$op_gen" = "$target_op_gen" ]; then
       return 0
     fi
@@ -535,7 +547,7 @@ cmd_start() {
   esac
   _ensure_install_db_schema
   local state
-  state="$(sqlite3 "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
+  state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
   if [ "$state" = "ready" ] && node "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
     echo "agmsg daemon start: already running"
     agmsg_daemon_seat_report start
@@ -548,7 +560,7 @@ cmd_start() {
   # one. Find it here the way enable does, and stop before touching the
   # intent when there is none.
   local recorded_node found_node found_version record_node_sql=""
-  recorded_node="$(sqlite3 "$INSTALL_DB" "SELECT node_path FROM meta;" 2>/dev/null || true)"
+  recorded_node="$(agmsg_sqlite "$INSTALL_DB" "SELECT node_path FROM meta;" 2>/dev/null || true)"
   if [ -z "$recorded_node" ] || [ ! -x "$recorded_node" ]; then
     found_node="$(_resolve_node node)" || {
       echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed. Install Node from https://nodejs.org/en/download, then run agmsg daemon start." >&2
@@ -571,9 +583,9 @@ cmd_start() {
   local start_where=""
   [ -z "$only_gen" ] || start_where=" WHERE desired = 'on' AND op_gen = $only_gen"
   _with_op_lock "$record_node_sql $codex_fill UPDATE daemon_intent SET desired = 'on', op_gen = op_gen + 1, set_by = 'start', set_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')$start_where;"
-  new_op_gen="$(sqlite3 "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;")"
+  new_op_gen="$(agmsg_sqlite "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;")"
   # The guarded UPDATE applied only if it left "on" at op_gen+1 written by start.
-  if [ -n "$only_gen" ] && [ "$(sqlite3 "$INSTALL_DB" "SELECT desired || '|' || op_gen || '|' || set_by FROM daemon_intent;")" != "on|$((only_gen + 1))|start" ]; then
+  if [ -n "$only_gen" ] && [ "$(agmsg_sqlite "$INSTALL_DB" "SELECT desired || '|' || op_gen || '|' || set_by FROM daemon_intent;")" != "on|$((only_gen + 1))|start" ]; then
     echo "agmsg daemon start: agmsgd was turned off or changed while waiting; left as it is now"
     return 0
   fi
@@ -629,19 +641,19 @@ cmd_stop() {
   _ensure_install_db_schema
   # Stop takes no operation lock.
   local desired
-  desired="$(sqlite3 "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
+  desired="$(agmsg_sqlite "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
   if [ "$desired" != "on" ]; then
     echo "agmsg daemon stop: already stopped"
     return 0
   fi
-  sqlite3 "$INSTALL_DB" "UPDATE daemon_intent SET desired = 'off', op_gen = op_gen + 1, set_by = 'stop', set_at = strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  agmsg_sqlite "$INSTALL_DB" "UPDATE daemon_intent SET desired = 'off', op_gen = op_gen + 1, set_by = 'stop', set_at = strftime('%Y-%m-%dT%H:%M:%fZ','now');"
   local socket
-  socket="$(sqlite3 "$INSTALL_DB" "SELECT socket FROM daemon_owner WHERE state = 'ready';" 2>/dev/null || true)"
+  socket="$(agmsg_sqlite "$INSTALL_DB" "SELECT socket FROM daemon_owner WHERE state = 'ready';" 2>/dev/null || true)"
   _request_stop_over_socket "$socket"
   local waited=0
   while [ "$waited" -lt 100 ]; do
     local state
-    state="$(sqlite3 "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+    state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
     [ "$state" = "none" ] && { echo "agmsg daemon stop: stopped"; return 0; }
     waited=$((waited + 1))
     sleep 0.1
@@ -664,7 +676,7 @@ cmd_status() {
   # Only a database that answers and has no daemon_owner table is "not in use
   # yet"; a query that fails (corrupt, locked) falls through to the normal
   # read below and is reported as unknown.
-  if owner_tables="$(sqlite3 "$INSTALL_DB" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='daemon_owner';" 2>/dev/null)" && [ "$owner_tables" = 0 ] && [ "$json" != true ]; then
+  if owner_tables="$(agmsg_sqlite "$INSTALL_DB" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='daemon_owner';" 2>/dev/null)" && [ "$owner_tables" = 0 ] && [ "$json" != true ]; then
     echo "agmsg daemon status: agmsgd is not in use yet (turn it on with 'agmsg daemon enable')"
     return 0
   fi
@@ -694,14 +706,14 @@ cmd_status() {
     health_rc=1
   fi
   if [ "$json" = true ]; then
-    sqlite3 "$INSTALL_DB" "SELECT json_object('state',state,'intent',(SELECT desired FROM daemon_intent),'health','${AGMSGD_HEALTH:-unknown}','detail','no usable Node') FROM daemon_owner;"
+    agmsg_sqlite "$INSTALL_DB" "SELECT json_object('state',state,'intent',(SELECT desired FROM daemon_intent),'health','${AGMSGD_HEALTH:-unknown}','detail','no usable Node') FROM daemon_owner;"
     return "$health_rc"
   fi
   # K14 fallback: no usable Node at all -- a minimal, honest read straight
   # from install.db rather than the fuller status.mjs decision text.
   local state desired
-  state="$(sqlite3 "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || echo "unknown")"
-  desired="$(sqlite3 "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null || echo "unknown")"
+  state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || echo "unknown")"
+  desired="$(agmsg_sqlite "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null || echo "unknown")"
   echo "agmsg daemon status: state=$state intent=$desired (no usable Node -- a fuller check needs 'agmsg daemon enable')"
   agmsg_daemon_seat_report status
   _path_hint enable
@@ -745,7 +757,7 @@ cmd_enable() {
 _wait_owner_none() {
   local waited=0 state
   while [ "$waited" -lt 100 ]; do
-    state="$(sqlite3 "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+    state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
     [ "$state" = "none" ] && break
     waited=$((waited + 1))
     sleep 0.1
@@ -803,7 +815,7 @@ cmd_disable() {
   local DISABLE_PREV_INTENT="" DISABLE_GEN="" DISABLE_SUPERSEDED=0
   _with_op_lock "" _disable_commit_intent || return 1
   local socket state
-  socket="$(sqlite3 "$INSTALL_DB" "SELECT socket FROM daemon_owner WHERE state = 'ready';" 2>/dev/null || true)"
+  socket="$(agmsg_sqlite "$INSTALL_DB" "SELECT socket FROM daemon_owner WHERE state = 'ready';" 2>/dev/null || true)"
   _request_stop_over_socket "$socket"
   state="$(_wait_owner_none)"
   if ! _with_op_lock "" _disable_unregister_if_current; then
@@ -822,8 +834,13 @@ cmd_disable() {
     # boot. Disable is the deliberate way out of it: the daemon was asked to
     # stop above, so drop the unverifiable record instead of leaving it to
     # block every later start.
-    local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON seen_gen seen_pid seen_boot
-    IFS='|' read -r seen_gen seen_pid seen_boot < <(sqlite3 "$INSTALL_DB" "SELECT gen, COALESCE(executor_pid,0), COALESCE(executor_boot_id,'') FROM daemon_owner;" 2>/dev/null || true)
+    local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON seen_gen seen_pid seen_boot seen_triple
+    # Captured first, split after (same reason as _install_generation above,
+    # #1668 review): IFS='|' on this line would otherwise still be in effect
+    # inside agmsg_sqlite()'s own process-substitution subshell and break its
+    # `-escape off` argv splitting.
+    seen_triple="$(agmsg_sqlite "$INSTALL_DB" "SELECT gen, COALESCE(executor_pid,0), COALESCE(executor_boot_id,'') FROM daemon_owner;" 2>/dev/null || true)"
+    IFS='|' read -r seen_gen seen_pid seen_boot <<<"$seen_triple"
     agmsg_daemon_read_state
     # Only the exact record that was just judged unverifiable may be dropped:
     # a daemon started since then has a different gen, and is left alone.
@@ -832,7 +849,7 @@ cmd_disable() {
       *)
         if [ "${AGMSGD_HEALTH:-}" = unverifiable ]; then
           _with_op_lock "UPDATE daemon_owner SET state = 'none', socket = NULL, last_end_reason = 'record from an older version discarded by disable', last_end_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE gen = $seen_gen AND executor_pid = $seen_pid AND executor_boot_id = '$seen_boot' AND state = 'ready';"
-          state="$(sqlite3 "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+          state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
         fi ;;
     esac
   fi
