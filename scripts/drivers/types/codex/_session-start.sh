@@ -155,6 +155,31 @@ agmsg_codex_refresh_destination() {
   AGMSG_CODEX_REFRESHED_PAIR="$chosen_team"$'\t'"$chosen_name"
 }
 
+# A Codex seat holds no actas lock, so the only proof that a recorded seat is
+# this very process is its record: owner=<thread>.<pid> naming the Codex pid
+# this hook runs under, alive, and started before the record was written (a
+# reused pid starts later). Exactly one such seat in the project is rebound;
+# anything else is left for the unseated notice.
+agmsg_codex_rebind_after_clear() {
+  local thread="$1" project="$2" pairs="$3" team name rec_thread rec_project owner cur_pid match='' n=0
+  cur_pid="$(agmsg_agent_pid codex 2>/dev/null || true)"
+  case "$cur_pid" in ''|*[!0-9]*) return 1 ;; esac
+  while IFS=$'\t' read -r team name; do
+    [ -n "$team" ] && [ -n "$name" ] || continue
+    rec_thread="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
+    [ -n "$rec_thread" ] || continue
+    [ "$rec_thread" != "$thread" ] || return 1
+    rec_project="$(agmsg_role_session_get "$team" "$name" project 2>/dev/null || true)"
+    [ "$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")" = "$project" ] || continue
+    owner="$(agmsg_role_session_get "$team" "$name" owner 2>/dev/null || true)"
+    agmsg_instance_is_composite "$owner" && [ "${owner##*.}" = "$cur_pid" ] || continue
+    n=$((n + 1)); match="$team"$'\t'"$name"
+  done <<< "$pairs"
+  [ "$n" = 1 ] || return 1
+  IFS=$'\t' read -r team name <<< "$match"
+  agmsg_role_session_rebind_same_process "$team" "$name" "$thread" "$cur_pid"
+}
+
 agmsg_codex_unseated_notice() {
   source "${SKILL_DIR:-}/scripts/lib/boot-command.sh"
   printf 'AGMSG delivery: this session is not connected to a seat yet. Run %s in Codex to receive messages.\n' "$(agmsg_actas_prompt codex '<name>')"
@@ -185,29 +210,10 @@ agmsg_session_start() {
   project_phys="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
   # #1468: /clear starts a new thread inside the same Codex process, so no
   # seat of this project is recorded on it and the old owner's pid is still
-  # alive. When nothing is bound to this thread, let the proof-gated rebind
-  # that `fix` uses move the one seat that proves it is this pane.
-  # Only an identity the session itself supplied (env or hook input) may drive
-  # it, never a rollout-inferred one.
+  # alive. Only an identity the session itself supplied (env or hook input,
+  # never a rollout guess) may drive the rebind.
   if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
-    clear_bound=0
-    while IFS=$'\t' read -r clear_team clear_name; do
-      [ -n "$clear_team" ] || continue
-      [ "$(agmsg_role_session_uuid "$clear_team" "$clear_name" 2>/dev/null || true)" = "$thread_id" ] && clear_bound=1
-    done <<< "$PAIRS"
-    if [ "$clear_bound" = 0 ]; then
-      ( export CODEX_THREAD_ID="$thread_id"
-        # shellcheck disable=SC1091
-        . "${SKILL_DIR:-}/scripts/lib/self-fix.sh" \
-          && cd "${PROJECT:-}" \
-          && AGMSG_FIX_REASSIGN_FROM_HOOK=1 _fix_codex_thread_reassign ) >/dev/null 2>&1 || true
-    fi
-  fi
-  # The hook runs in the TUI's environment; tool shells may not (see _profile.sh).
-  if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
-    # shellcheck disable=SC1091
-    . "${SKILL_DIR:-}/scripts/drivers/types/codex/_profile.sh"
-    agmsg_codex_thread_home_publish "${RUN_DIR:-}" "$thread_id"
+    agmsg_codex_rebind_after_clear "$thread_id" "$project_phys" "$PAIRS" || true
   fi
   agmsg_codex_refresh_destination "$thread_id" "$project_phys" "$PAIRS" || true
   safe_pairs=""

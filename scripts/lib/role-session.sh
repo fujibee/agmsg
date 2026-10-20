@@ -152,6 +152,52 @@ _agmsg_role_session_write() (
   "$@"
 )
 
+# Epoch at which <pid> started, empty when it cannot be read.
+_agmsg_process_start_epoch() {
+  local lstart
+  lstart="$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null)" || return 0
+  [ -n "$lstart" ] || return 0
+  if [ "$(uname -s)" = Darwin ]; then
+    LC_ALL=C date -j -f '%a %b %e %T %Y' "$lstart" +%s 2>/dev/null || true
+  else
+    LC_ALL=C date -d "$lstart" +%s 2>/dev/null || true
+  fi
+}
+
+_agmsg_iso_epoch() {
+  if [ "$(uname -s)" = Darwin ]; then
+    LC_ALL=C date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null || true
+  else
+    LC_ALL=C date -u -d "$1" +%s 2>/dev/null || true
+  fi
+}
+
+_agmsg_role_session_rebind_same_process_unlocked() {
+  local team="$1" agent="$2" thread="$3" pid="$4" owner started updated
+  agmsg_role_session_load "$team" "$agent"
+  [ -n "$AGMSG_ROLE_SESSION_UUID" ] && [ "$AGMSG_ROLE_SESSION_UUID" != "$thread" ] || return 1
+  owner="${AGMSG_ROLE_SESSION_OWNER:-}"
+  agmsg_instance_is_composite "$owner" && [ "${owner##*.}" = "$pid" ] || return 1
+  _agmsg_pid_alive "$pid" || return 1
+  started="$(_agmsg_process_start_epoch "$pid")"
+  updated="$(_agmsg_iso_epoch "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" updated_at)")"
+  case "$started:$updated" in ''|:*|*:|*[!0-9:]*) return 1 ;; esac
+  [ "$started" -le "$updated" ] || return 1
+  _agmsg_role_session_record_unlocked "$team" "$agent" "$thread" \
+    "$AGMSG_ROLE_SESSION_PROJECT" codex "$thread.$pid" \
+    "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" codex_home)"
+  agmsg_role_session_load "$team" "$agent"
+  [ "$AGMSG_ROLE_SESSION_UUID" = "$thread" ]
+}
+
+# /clear starts a new thread inside the same live Codex process. Move the
+# record onto it only when the recorded owner is that very process (same pid,
+# alive, started before the record was written), checked and written in one
+# transaction with every other writer.
+agmsg_role_session_rebind_same_process() {   # <team> <agent> <new-thread> <pid>
+  _agmsg_role_session_write _agmsg_role_session_rebind_same_process_unlocked "$@"
+}
+
 agmsg_role_session_record() {
   [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ -n "${3:-}" ] || return 0
   if _agmsg_role_session_write _agmsg_role_session_record_unlocked "$@"; then return 0; fi
