@@ -1746,7 +1746,12 @@ _boot_line_executable() {
   # a file that receives this test's own temp dir.
   if [ -n "${AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH:-}" ]; then
     printf '%s' "$TEST_SKILL_DIR" > "$AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH"
-    ps -Ao pid=,args= | grep -F "$TEST_SKILL_DIR" | grep -v grep > "$AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH.procs" || true
+    # The same listing and command-line source the reaper uses (no ps -o, which
+    # Git Bash lacks).
+    local _p
+    for _p in $(_pids_referencing_dir "$TEST_SKILL_DIR"); do
+      ( source "$SCRIPTS/lib/compat.sh"; compat_get_cmdline "$_p"; echo )
+    done > "$AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH.procs"
     false
   fi
   _assert_bridged_argv
