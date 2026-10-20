@@ -2914,35 +2914,57 @@ EOF
   [ ! -f "$log" ]
 }
 
-@test "session-start.sh for codex runs the /clear rebind only for an identity the session supplied (#1468)" {
+@test "session-start.sh for codex rebinds a /clear seat only to the same live process (#1468)" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
-  _seed_role_record team alice 11111111-1111-4111-8111-111111111111 "$TEST_PROJECT" codex
-  local spy="$TEST_SKILL_DIR/rebind.log"
-  # The proof-gated helper is covered in test_self_fix.bats; here only the
-  # hook entry is under test, so stand in for it and record how it was called.
-  cat >"$TEST_SKILL_DIR/scripts/lib/self-fix.sh" <<STUB
-_fix_codex_thread_reassign() {
-  printf 'called thread=%s hook=%s\n' "\${CODEX_THREAD_ID:-}" "\${AGMSG_FIX_REASSIGN_FROM_HOOK:-}" >> "$spy"
-  return 1
-}
-STUB
-  local new_id=22222222-2222-4222-8222-222222222222
+  local old=11111111-1111-4111-8111-111111111111 new=22222222-2222-4222-8222-222222222222
+  local rec="$TEST_SKILL_DIR/run/role-session.team__alice"
+  # A Codex seat holds no actas lock: its record alone names the process.
+  sleep 60 &
+  local pid=$!
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_record team alice "$2" "$3" codex "$2.$4"
+  ' _ "$SCRIPTS" "$old" "$TEST_PROJECT" "$pid"
+  local before; before="$(cat "$rec")"
+  _hook() { printf '{"session_id":"%s","source":"clear"}' "$new" \
+    | env -u CODEX_THREAD_ID AGMSG_AGENT_PID="$1" bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null; }
 
-  # Hook input alone (no CODEX_THREAD_ID) names the new thread: rebind runs.
-  printf '{"session_id":"%s","source":"clear"}' "$new_id" \
-    | env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
-  [ "$(cat "$spy")" = "called thread=$new_id hook=1" ]
+  # A different process (pid reuse, another Codex): untouched.
+  _hook "$$"
+  [ "$(cat "$rec")" = "$before" ]
 
-  # No identity from the session (only a rollout could name the thread): never.
-  : > "$spy"
-  env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" </dev/null >/dev/null
-  [ ! -s "$spy" ]
+  # The same pid, but the record predates the process: a reused pid, untouched.
+  sed -i.bak 's/^updated_at=.*/updated_at=2000-01-01T00:00:00Z/' "$rec"
+  local stale; stale="$(cat "$rec")"
+  _hook "$pid"
+  [ "$(cat "$rec")" = "$stale" ]
+  sed -i.bak "s/^updated_at=.*/updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)/" "$rec"
 
-  # A seat already bound to this thread: nothing to rebind.
-  : > "$spy"
-  _seed_role_record team alice "$new_id" "$TEST_PROJECT" codex
-  CODEX_THREAD_ID="$new_id" bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" </dev/null >/dev/null
-  [ ! -s "$spy" ]
+  # No identity supplied by the session (only a rollout could name it): untouched.
+  before="$(cat "$rec")"
+  env -u CODEX_THREAD_ID AGMSG_AGENT_PID="$pid" bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" </dev/null >/dev/null
+  [ "$(cat "$rec")" = "$before" ]
+
+  # The record belongs to another project by the time it is examined: untouched.
+  cp "$rec" "$rec.keep"
+  sed -i.bak "s#^project=.*#project=$BATS_TEST_TMPDIR/elsewhere#" "$rec"
+  before="$(cat "$rec")"
+  _hook "$pid"
+  [ "$(cat "$rec")" = "$before" ]
+  mv "$rec.keep" "$rec"
+
+  # Git Bash's ps has no start-time column, so no start evidence exists there
+  # and the rebind correctly refuses; the success case is POSIX-only.
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) kill "$pid" 2>/dev/null || true; return 0 ;; esac
+
+  # The same live process, hook input names the new thread: rebound, and the
+  # thread's profile is published alongside.
+  mkdir -p "$BATS_TEST_TMPDIR/profile"
+  CODEX_HOME="$BATS_TEST_TMPDIR/profile" _hook "$pid"
+  kill "$pid" 2>/dev/null || true
+  grep -qx "session=$new" "$rec"
+  grep -qx "owner=$new.$pid" "$rec"
+  [ -f "$TEST_SKILL_DIR/run/codex-thread-home.$new" ]
 }
 
 # #1477: Codex installed after agmsg never gets this install's writable_roots

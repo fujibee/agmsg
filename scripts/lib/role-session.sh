@@ -152,6 +152,65 @@ _agmsg_role_session_write() (
   "$@"
 )
 
+# Epoch at which <pid> started, empty when it cannot be read.
+_agmsg_process_start_epoch() {
+  local lstart
+  lstart="$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null)" || return 0
+  [ -n "$lstart" ] || return 0
+  if [ "$(uname -s)" = Darwin ]; then
+    LC_ALL=C date -j -f '%a %b %e %T %Y' "$lstart" +%s 2>/dev/null || true
+  else
+    LC_ALL=C date -d "$lstart" +%s 2>/dev/null || true
+  fi
+}
+
+_agmsg_iso_epoch() {
+  if [ "$(uname -s)" = Darwin ]; then
+    LC_ALL=C date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null || true
+  else
+    LC_ALL=C date -u -d "$1" +%s 2>/dev/null || true
+  fi
+}
+
+_agmsg_role_session_rebind_same_process_unlocked() {
+  local thread="$1" project="$2" pid="$3" pairs="$4" team agent owner started updated rec_project
+  local match_team='' match_agent='' n=0 match_codex_home=''
+  # Select under the writer lock: a record another writer moved between a
+  # caller's look and this transaction must not be rewritten from a stale view.
+  while IFS=$'\t' read -r team agent; do
+    [ -n "$team" ] && [ -n "$agent" ] || continue
+    agmsg_role_session_load "$team" "$agent"
+    [ -n "$AGMSG_ROLE_SESSION_UUID" ] || continue
+    # A seat is already bound to this thread: nothing to rebind.
+    [ "$AGMSG_ROLE_SESSION_UUID" != "$thread" ] || return 1
+    rec_project="$(agmsg_canonical_path "$AGMSG_ROLE_SESSION_PROJECT" 2>/dev/null || printf '%s' "$AGMSG_ROLE_SESSION_PROJECT")"
+    [ "$rec_project" = "$project" ] || continue
+    owner="${AGMSG_ROLE_SESSION_OWNER:-}"
+    agmsg_instance_is_composite "$owner" && [ "${owner##*.}" = "$pid" ] || continue
+    [ "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" type)" = codex ] || continue
+    _agmsg_pid_alive "$pid" || continue
+    started="$(_agmsg_process_start_epoch "$pid")"
+    updated="$(_agmsg_iso_epoch "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" updated_at)")"
+    case "$started:$updated" in ''|:*|*:|*[!0-9:]*) continue ;; esac
+    [ "$started" -le "$updated" ] || continue
+    n=$((n + 1)); match_team="$team"; match_agent="$agent"
+    match_codex_home="$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" codex_home)"
+  done <<< "$pairs"
+  [ "$n" = 1 ] || return 1
+  _agmsg_role_session_record_unlocked "$match_team" "$match_agent" "$thread" "$project" codex "$thread.$pid" "$match_codex_home"
+  agmsg_role_session_load "$match_team" "$match_agent"
+  [ "$AGMSG_ROLE_SESSION_UUID" = "$thread" ]
+}
+
+# /clear starts a new thread inside the same live Codex process. Move the
+# one seat of <project> whose record names that very process (same pid, alive,
+# started before the record was written) onto <new-thread>. Selection, check
+# and write are one transaction with every other writer. <pairs> is the
+# candidate "team<TAB>agent" lines.
+agmsg_role_session_rebind_same_process() {   # <new-thread> <project> <pid> <pairs>
+  _agmsg_role_session_write _agmsg_role_session_rebind_same_process_unlocked "$@"
+}
+
 agmsg_role_session_record() {
   [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ -n "${3:-}" ] || return 0
   if _agmsg_role_session_write _agmsg_role_session_record_unlocked "$@"; then return 0; fi
