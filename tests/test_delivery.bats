@@ -2953,6 +2953,10 @@ EOF
   [ "$(cat "$rec")" = "$before" ]
   mv "$rec.keep" "$rec"
 
+  # Git Bash's ps has no start-time column, so no start evidence exists there
+  # and the rebind correctly refuses; the success case is POSIX-only.
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) kill "$pid" 2>/dev/null || true; return 0 ;; esac
+
   # The same live process, hook input names the new thread: rebound, and the
   # thread's profile is published alongside.
   mkdir -p "$BATS_TEST_TMPDIR/profile"
