@@ -596,13 +596,12 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   [ "$status" -eq 0 ]
   grep -q '\[@agmsg_agent\] \[team:alice\]' "$ARGV_LOG"
   [ "$(_mark team alice)" = $'tmux:/tmp/s:%3\tpid=4242' ]
-  # Order independence end to end: a boot path (join, kept as it was: it
-  # names unconditionally) writes the SAME key, and the send after it finds
-  # the mark and makes no call of its own.
+  # Re-registering does not adopt the identity or name the caller. The mark
+  # from the first send remains valid, so the next send needs no naming call.
   : > "$ARGV_LOG"
   bash "$SKILL_DIR/scripts/join.sh" team alice claude-code /tmp/p >/dev/null
-  [ "$(_name_calls)" -eq 1 ]
-  grep -q '\[-t\] \[%3\] \[@agmsg_agent\] \[team:alice\]' "$ARGV_LOG"
+  [ "$(_name_calls)" -eq 0 ]
+  refute grep -q '\[@agmsg_agent\]' "$ARGV_LOG"
   : > "$ARGV_LOG"
   run bash "$SKILL_DIR/scripts/send.sh" team alice bob 'hello twice'
   [ "$status" -eq 0 ]

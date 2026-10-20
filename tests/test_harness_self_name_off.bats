@@ -1,8 +1,7 @@
 #!/usr/bin/env bats
 
 # #1095: the test harness must default every test to AGMSG_SELF_NAME=off, so a
-# naming-capable script (join.sh here — the exact script observed doing this
-# on a real machine) never touches the terminal it happens to be running in
+# naming-capable script (actas-claim.sh here) never touches its terminal
 # with a fixture team/agent, when that terminal is inherited from a real
 # developer pane (bats runs inside whatever pane invoked it).
 #
@@ -11,7 +10,7 @@
 # THIS is the protection: this test deliberately does NOT set
 # AGMSG_SELF_NAME itself anywhere. It relies entirely on the harness's
 # default already being in place before its own setup() runs. If that
-# default is ever removed, join.sh's self-naming hook reaches the fake
+# default is ever removed, actas-claim.sh self-naming reaches the fake
 # terminal below, and this test goes red.
 
 load test_helper
@@ -33,11 +32,13 @@ setup() {
 
 teardown() { teardown_test_env; }
 
-@test "harness default: join.sh under a real-looking terminal touches it NOT AT ALL (#1095)" {
+@test "harness default: actas under a real-looking terminal touches it NOT AT ALL (#1095)" {
   # A precondition the rest of this test depends on: confirm the harness
   # actually set it, so a failure below is never mistaken for something else.
   [ "${AGMSG_SELF_NAME:-}" = off ]
   run bash "$SCRIPTS/join.sh" fixtureteam alice claude-code /tmp/project-1095
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/actas-claim.sh" /tmp/project-1095 claude-code alice fixture-session
   [ "$status" -eq 0 ]
   # The naming hook's own terminal call is what must never happen here --
   # not "the label came out right", which a fake could satisfy either way.
