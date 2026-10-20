@@ -2,7 +2,7 @@
 
 <!-- agmsg:slot delivery -->
 <!-- agmsg:render-overlay __AGENT_TYPE__ -->
-  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick a delivery mode:
+  5. 有効なdelivery modeが未設定で、利用者の選択もない場合にだけ、選択肢と影響を説明して回答を待つ。設定済みなら既存modeを保持する。 Ask the user to pick a delivery mode:
 
      ```
      Choose delivery mode for incoming messages:
@@ -13,10 +13,10 @@
        2) off  — No automatic delivery
                   Manual __CMD_PREFIX____SKILL_NAME__ only.
 
-     [1]:
+     Choice:
      ```
 
-     Empty input means `1` (turn). Map `1`→`turn` and `2`→`off`, then run:
+     未回答や空入力をmode設定の許可として扱わない。 Map `1`→`turn` and `2`→`off`, then run:
      `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`
 
      `monitor` requires explicitly starting either the dedicated headless bridge or `antigravity-tui-monitor.sh`. While the TUI monitor is active, do not call bare `__CMD_PREFIX____SKILL_NAME__`, `inbox.sh`, or `check-inbox.sh`; use the pending state reported by the supervisor instead.

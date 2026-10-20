@@ -10,7 +10,7 @@ Do not use POSIX `'"'"'` quote splicing in PowerShell, and do not use escaped do
 
 <!-- agmsg:slot delivery -->
 <!-- agmsg:render-overlay __AGENT_TYPE__ -->
-  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, or `off` delivery. Empty input means `monitor`.
+  5. 有効なdelivery modeが未設定で、利用者の選択もない場合にだけ、選択肢と影響を説明して回答を待つ。設定済みなら既存modeを保持する。 Ask the user to pick `monitor`, `turn`, or `off` delivery. 未回答や空入力をmode設定の許可として扱わない。
      Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`.
      Monitor uses the Codex app-server bridge; it changes how `codex` starts and is documented in `docs/codex-monitor-beta.md`.
 <!-- /agmsg:slot delivery -->
@@ -40,7 +40,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 2. Determine which team `<name>` belongs to, then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/despawn.sh <team> $AGENT <name> [--force] [--timeout <secs>]`
    - The default graceful path sends a `ctrl:despawn` message so a Claude Code member's watcher drops its role and closes its spawned pane, then waits for the lock to release.
-   - A Codex member has no watcher, so use `--force` for it. `--force` skips the message, tears down the recorded pane/window, and drops the registration directly.
+   - A Codex member has no watcher; verify the target and existing authority for forced termination before using `--force`. `--force` skips the message, tears down the recorded pane/window, and drops the registration directly.
 3. Show the script's output.
 <!-- /agmsg:slot spawn -->
 
