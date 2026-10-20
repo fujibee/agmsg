@@ -71,8 +71,15 @@ _agmsg_install_manifest_hash_batch() {   # <scripts_dir> <relative-path>...
     return 1
   fi
 
+  # mktemp's own result is trusted as-is: unlike $line/$rel above, this path is
+  # never fed to the hashing tool as an argument -- it only ever reaches
+  # "$probe" via I/O redirection, never through the tool's own output lines --
+  # so no character in it can make $output ambiguous to parse below. $TMPDIR
+  # under a Node-launched shell on Windows (e.g. Claude Code) is commonly an
+  # absolute drive-letter path with a colon ("C:/Users/.../Temp"); rejecting
+  # that here silently dropped every such install onto the agmsg_sha256
+  # fallback, for a character class this path's use never needed.
   probe="$(mktemp)" || return 1
-  case "$probe" in *[!A-Za-z0-9._/-]*) rm -f "$probe"; return 1 ;; esac
   if ! printf '%s' probe > "$probe"; then
     rm -f "$probe"
     return 1
