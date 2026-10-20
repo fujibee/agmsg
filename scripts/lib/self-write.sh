@@ -208,7 +208,7 @@ _sw_cell_label_key() {   # <id> <team> <agent>
   terminal_name "$id" "$team" "$agent" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then attempt=ok; else attempt="failed:$rc"; fi
   if declare -F _herdr_label >/dev/null 2>&1; then exp_label="$(_herdr_label "$team" "$agent")"; else exp_label="$team:$agent"; fi
-  if declare -F _herdr_internal_key >/dev/null 2>&1; then exp_key="$(_herdr_internal_key "$team" "$agent" 2>/dev/null || true)"; else exp_key=""; fi
+  if declare -F _herdr_internal_key >/dev/null 2>&1; then exp_key="$(terminal_expected_label "$team" "$agent" "$id" 2>/dev/null || true)"; else exp_key=""; fi
   if declare -F terminal_team_observe >/dev/null 2>&1 && obs="$(terminal_team_observe "$id" 2>/dev/null)"; then
     lab="$(printf '%s' "$obs" | awk -F '\t' 'NR==1{print $2}')"
     key="$(printf '%s' "$obs" | awk -F '\t' 'NR==1{print $3}')"

@@ -88,6 +88,11 @@ if [ "\$1" = agent ] && [ "\$2" = list ]; then
   printf '{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wC:p4","display_agent":"team:alice","name":"a-key"}]}}\n' "$sid"
 elif [ "\$1" = pane ] && [ "\$2" = split ]; then
   echo '{"result":{"pane":{"pane_id":"wC:p9"}}}'
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  if [ -n "\${HERDR_AGENT_GET_JSON:-}" ]; then printf '%s\n' "\$HERDR_AGENT_GET_JSON"; exit 0; fi
+  printf '{"result":{"agent":{"pane_id":"%s","name":"%s"}}}\n' "\$3" "\${HERDR_AGENT_NAME:-}"
+elif [ "\$1" = pane ] && [ "\$2" = get ]; then
+  echo '{"result":{"pane":{"terminal_id":"term_naming"}}}'
 elif [ "\$1" = tab ] && [ "\$2" = create ]; then
   echo '{"result":{"root_pane":{"pane_id":"wD:p1"}}}'
 elif [ "\$1" = pane ] && [ "\$2" = read ]; then
@@ -2894,15 +2899,47 @@ M
   refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
 }
 
-@test "naming ON by default (herdr): both renames (#1044)" {
+@test "naming ON by default (herdr): keeps existing names and records placement (#1631)" {
   _install_fake_herdr "sess-on"
+  agmsg_terminal_load herdr
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   export HERDR_ENV=1
   unset AGMSG_TERMINAL_NAMING
 
-  run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code
+  export HERDR_AGENT_NAME=reviewer
+  run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
   [ "$status" -eq 0 ]
   grep -Fq 'herdr [pane] [rename] [wC:p4] [onteam:alice]' "$ARGV_LOG"
+  refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  local rec; rec="$(agmsg_spawn_path onteam alice)"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:wC:p4" "$rec"
+  [ "$(terminal_expected_label onteam alice "$HERDR_SOCKET_PATH:wC:p4")" = reviewer ]
+  : > "$ARGV_LOG"
+  AGMSG_TERMINAL_NAMING=off run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+
+  # A readable but unnamed agent still gets the internal key and placement.
+  : > "$ARGV_LOG"
+  unset HERDR_AGENT_NAME
+  run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
+  [ "$status" -eq 0 ]
   grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  grep -Fq 'herdr [pane] [rename] [wC:p4] [onteam:alice]' "$ARGV_LOG"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:wC:p4" "$rec"
+  [ "$(terminal_expected_label onteam alice "$HERDR_SOCKET_PATH:wC:p4")" = "$(_herdr_internal_key onteam alice)" ]
+
+  # Unknown is not unnamed: malformed replies and replies about another pane
+  # cannot authorize either rename or turn a retained name into a hash.
+  local reply
+  for reply in 'not json' '{}' '{"result":{"agent":{"pane_id":"w9:p9","name":"reviewer"}}}'; do
+    : > "$ARGV_LOG"
+    HERDR_AGENT_GET_JSON="$reply" run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
+    [ "$status" -ne 0 ]
+    refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+    refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+  done
 }
 
 # --- a failed KEY is a failure, in the mode everybody uses (#1044) ------------
@@ -4376,6 +4413,9 @@ if [ "$1" = agent ] && [ "$2" = rename ]; then
   echo 'herdr: pane w1:pX is gone' >&2
   exit 4
 fi
+if [ "$1" = agent ] && [ "$2" = get ]; then
+  echo '{"result":{"agent":{"pane_id":"w1:pX"}}}'
+fi
 exit 0
 EOF
   chmod +x "$FAKEBIN/herdr"
@@ -4396,6 +4436,9 @@ EOF
   # -- which is the state #1127 is about.
   cat > "$FAKEBIN/herdr" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = agent ] && [ "$2" = get ]; then
+  echo '{"result":{"agent":{"pane_id":"w1:pX"}}}'
+fi
 exit 0
 EOF
   chmod +x "$FAKEBIN/herdr"
