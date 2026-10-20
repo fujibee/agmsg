@@ -38,35 +38,14 @@ EOF
 }
 
 teardown() {
-  # Runs whether or not the test body got to its assertions: a fake app-server
-  # left behind by a failed test would otherwise live as long as its parent.
-  _reap_fake_app_servers
+  # The fake `codex app-server` (bash, with the python it waits on) is not in
+  # any pidfile a failed test is sure to have written, and teardown_test_env
+  # only reaps once its plain rm fails -- which it does not on macOS/Linux. So
+  # reap everything whose argv names this test's TEST_SKILL_DIR here, always.
+  # It reads argv the way the Git Bash path needs (/proc), is scoped to this
+  # test's own temp dir, and the python child exits once its parent is gone.
+  _reap_test_skill_dir_procs || true
   teardown_test_env
-}
-
-# PIDs of the fake `codex app-server` this test's shim brought up, plus their
-# children. Matched on this test's own $STUB_BIN/codex in argv (TEST_SKILL_DIR
-# is unique per test), so another seat's run is never reached. The fake bash
-# waits on a foreground python that only exits when its parent changes, so both
-# must be signalled; the pidfile alone does not cover a launch that died before
-# writing it.
-_fake_app_server_pids() {
-  local pid child
-  for pid in $(ps -Ao pid=,args= 2>/dev/null | grep -F "$STUB_BIN/codex app-server" | grep -v grep | awk '{print $1}'); do
-    echo "$pid"
-    for child in $(pgrep -P "$pid" 2>/dev/null); do echo "$child"; done
-  done
-  local pf
-  for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
-    [ -f "$pf" ] && cat "$pf" 2>/dev/null
-  done
-}
-
-_reap_fake_app_servers() {
-  local pid pids
-  pids="$(_fake_app_server_pids | sort -u)"
-  for pid in $pids; do kill "$pid" 2>/dev/null || true; done
-  for pid in $pids; do wait_for_pid_exit "$pid" || true; done
 }
 
 # --- argument validation ---
@@ -1762,13 +1741,27 @@ _boot_line_executable() {
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
   run env SHELL="$STUB_BIN/noshell" bash "$boot"
+  # Forced failure for the teardown test below: stop here, with the fake
+  # app-server still up, the way a failing assertion would. The variable names
+  # a file that receives this test's own temp dir.
+  if [ -n "${AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH:-}" ]; then
+    printf '%s' "$TEST_SKILL_DIR" > "$AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH"
+    false
+  fi
   _assert_bridged_argv
-  # The fake app-server is up, and the reap that teardown runs (even after a
-  # failed assertion above) puts all of it down, python child included.
-  [ -n "$(_fake_app_server_pids)" ]
-  _reap_fake_app_servers
-  [ -z "$(ps -Ao pid=,args= | grep -F "$STUB_BIN/codex app-server" | grep -v grep)" ]
-  [ -z "$(_fake_app_server_pids)" ]
+}
+
+@test "spawn: a test that fails after the launch leaves no fake app-server behind (teardown reap)" {
+  # Runs the launch test above for real, forced to fail right after the fake
+  # app-server is up. What the inner run's teardown does -- or does not do -- is
+  # then read off the process list, by the temp dir the inner test reported.
+  local marker="$TEST_SKILL_DIR/inner-dir" inner
+  run env AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH="$marker" \
+    bats -f "reaches the real binary WITH --remote \\(argv" "$BATS_TEST_DIRNAME/test_spawn.bats"
+  grep -q '^not ok 1 ' <<<"$output"
+  inner="$(cat "$marker")"
+  [ -n "$inner" ]
+  [ -z "$(_pids_referencing_dir "$inner")" ]
 }
 
 @test "spawn: a codex seat spawned FROM a bridged codex seat still reaches the real binary WITH --remote" {
