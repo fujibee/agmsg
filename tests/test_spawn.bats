@@ -2274,17 +2274,13 @@ EOF
   refute grep -qF 'status=spawned-but-unnamed' <<<"$output"
 }
 
-@test "join: names its own pane at boot (control), and not under AGMSG_SELF_NAME=off (#1096)" {
-  # The control half needs naming ON by default (against the fake herdr
-  # below, never a real terminal) to mean anything against the off half
-  # right after it -- opt back in from the harness's #1095 off
-  # (test_helper.bash).
+@test "join: registration does not name the caller with naming enabled or disabled" {
+  # Exercise both switch values against a fake terminal.
   unset AGMSG_SELF_NAME
   _setup_fake_herdr
-  # Control: a seat joining from its own pane names it -- key and prefixed label.
+  # Registration alone does not establish whose identity the caller holds.
   bash "$SCRIPTS/join.sh" myteam bob claude-code "$PROJ"
-  grep -q '^agent rename wT:pSelf ' "$HERDR_CALL_LOG"
-  grep -q '^pane rename wT:pSelf myteam:bob$' "$HERDR_CALL_LOG"
+  refute grep -q ' rename ' "$HERDR_CALL_LOG"
   : > "$HERDR_CALL_LOG"
   # The switch spawn sets on its pre-join: the same join, no naming call at all.
   AGMSG_SELF_NAME=off bash "$SCRIPTS/join.sh" myteam carol claude-code "$PROJ"
