@@ -194,7 +194,7 @@ function judgeLine(line, marker) {
 }
 
 // Reads from `start` to EOF in fixed-size chunks, handing each complete line
-// and its byte offset to `onLine` (stop early by returning true). A line is
+// its byte offset and whether a newline ended it to `onLine` (stop early by returning true). A line is
 // decoded only whole, so a multi-byte character is never split across chunks.
 // A `start` that is not at the beginning of a line (the byte before it is not a
 // newline: a row was half written when it was recorded) discards the fragment
@@ -219,12 +219,12 @@ function scanFrom(path, start, onLine, io) {
       let from = 0;
       for (let at = data.indexOf(10, from); at !== -1; at = data.indexOf(10, from)) {
         if (skipping) skipping = false;
-        else if (onLine(data.subarray(from, at), base + from, fd)) return;
+        else if (onLine(data.subarray(from, at), base + from, fd, true)) return;
         from = at + 1;
       }
       carry = data.subarray(from);
     }
-    if (!skipping && carry.length) onLine(carry, position - carry.length, fd);
+    if (!skipping && carry.length) onLine(carry, position - carry.length, fd, false);
   } finally {
     closeSync(fd);
   }
@@ -243,13 +243,33 @@ export function observeTranscript(transcriptPath, nonce, fromPosition = null, io
   const marker = `[agmsg:${nonce}]`;
   let heldSeen = false;
   let delivered = false;
-  const stable = (fd, bytes, offset) => {
-    const again = Buffer.alloc(bytes.length);
-    return io.readSync(fd, again, 0, again.length, offset) === bytes.length && again.equals(bytes);
+  // Reads exactly `length` bytes at `position` (short reads are legal), or
+  // fewer only at EOF.
+  const readFully = (fd, buffer, length, position) => {
+    let got = 0;
+    while (got < length) {
+      const read = io.readSync(fd, buffer, got, length - got, position + got);
+      if (read <= 0) break;
+      got += read;
+    }
+    return got;
   };
-  const onLine = (bytes, offset, fd) => {
+  // The line reads back unchanged with its own boundaries: the newline before
+  // it (every line but the first of the file follows one), its bytes in
+  // bounded chunks, and the newline after it when it had one.
+  const stable = (fd, bytes, offset, terminated) => {
+    const edge = Buffer.alloc(1);
+    if (offset > 0 && (readFully(fd, edge, 1, offset - 1) !== 1 || edge[0] !== 10)) return false;
+    const chunk = Buffer.alloc(Math.min(TRANSCRIPT_CHUNK_BYTES, bytes.length));
+    for (let done = 0; done < bytes.length; done += chunk.length) {
+      const size = Math.min(chunk.length, bytes.length - done);
+      if (readFully(fd, chunk, size, offset + done) !== size || !chunk.subarray(0, size).equals(bytes.subarray(done, done + size))) return false;
+    }
+    return !terminated || (readFully(fd, edge, 1, offset + bytes.length) === 1 && edge[0] === 10);
+  };
+  const onLine = (bytes, offset, fd, terminated) => {
     const verdict = judgeLine(bytes.toString("utf8"), marker);
-    if (verdict === "delivered" && stable(fd, bytes, offset)) delivered = true;
+    if (verdict === "delivered" && stable(fd, bytes, offset, terminated)) delivered = true;
     else if (verdict === "held") heldSeen = true;
     return delivered;
   };

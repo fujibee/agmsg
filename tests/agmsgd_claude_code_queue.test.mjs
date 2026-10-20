@@ -128,6 +128,28 @@ test('observeTranscript: a delivery row that changes between two reads is not co
   assert.equal(observeTranscript(transcriptPath, nonce, 0).state, 'absent');
 });
 
+// The line boundary is part of what must read back unchanged, and a short
+// read must not make a stable row look changed.
+test('observeTranscript: a rewritten line boundary is not confirmed, and short reads still confirm a stable row', (t) => {
+  const dir = temporaryDirectory(t);
+  const transcriptPath = path.join(dir, 'session.jsonl');
+  const nonce = 'boundary-nonce';
+  const row = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: `[agmsg:${nonce}]` } });
+  writeFileSync(transcriptPath, `{}\n${row}\n`);
+  let calls = 0;
+  const rewrite = {
+    readSync(fd, buffer, offset, length, position) {
+      const read = readSync(fd, buffer, offset, length, position);
+      if (++calls === 2) writeFileSync(transcriptPath, `bad${row}\n`);
+      return read;
+    },
+  };
+  assert.equal(observeTranscript(transcriptPath, nonce, 3, rewrite).state, 'absent');
+  writeFileSync(transcriptPath, `{}\n${row}\n`);
+  const short = { readSync: (fd, buffer, offset, length, position) => readSync(fd, buffer, offset, Math.min(length, 14), position) };
+  assert.equal(observeTranscript(transcriptPath, nonce, 3, short).state, 'delivered');
+});
+
 // No clock decides a pending nudge: whatever the transcript shows (or fails to
 // show), it stays pending until the channel itself sees the socket or the
 // seat's record change.
