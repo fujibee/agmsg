@@ -2914,57 +2914,47 @@ EOF
   [ ! -f "$log" ]
 }
 
-@test "session-start.sh for codex rebinds a /clear seat only to the same live process (#1468)" {
+@test "session-start.sh for codex does not choose a /clear seat by process: with several seats none moves, even one whose owner names the same live pid (#1468)" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
   local old=11111111-1111-4111-8111-111111111111 new=22222222-2222-4222-8222-222222222222
-  local rec="$TEST_SKILL_DIR/run/role-session.team__alice"
-  # A Codex seat holds no actas lock: its record alone names the process.
+  local rec_a="$TEST_SKILL_DIR/run/role-session.team__alice" rec_b="$TEST_SKILL_DIR/run/role-session.team__bob"
+  # Seats of a profile run under one app-server daemon, so a stale owner left
+  # on one seat names the pid every seat resolves to, and that pid stays alive
+  # across the /clear. The other seat (the one actually cleared) has no owner.
   sleep 60 &
   local pid=$!
   SKILL_DIR="$TEST_SKILL_DIR" bash -c '
     source "$1/lib/role-session.sh"
-    agmsg_role_session_record team alice "$2" "$3" codex "$2.$4"
-  ' _ "$SCRIPTS" "$old" "$TEST_PROJECT" "$pid"
-  local before; before="$(cat "$rec")"
-  _hook() { printf '{"session_id":"%s","source":"clear"}' "$new" \
-    | env -u CODEX_THREAD_ID AGMSG_AGENT_PID="$1" bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null; }
-
-  # A different process (pid reuse, another Codex): untouched.
-  _hook "$$"
-  [ "$(cat "$rec")" = "$before" ]
-
-  # The same pid, but the record predates the process: a reused pid, untouched.
-  sed -i.bak 's/^updated_at=.*/updated_at=2000-01-01T00:00:00Z/' "$rec"
-  local stale; stale="$(cat "$rec")"
-  _hook "$pid"
-  [ "$(cat "$rec")" = "$stale" ]
-  sed -i.bak "s/^updated_at=.*/updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)/" "$rec"
-
-  # No identity supplied by the session (only a rollout could name it): untouched.
-  before="$(cat "$rec")"
-  env -u CODEX_THREAD_ID AGMSG_AGENT_PID="$pid" bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" </dev/null >/dev/null
-  [ "$(cat "$rec")" = "$before" ]
-
-  # The record belongs to another project by the time it is examined: untouched.
-  cp "$rec" "$rec.keep"
-  sed -i.bak "s#^project=.*#project=$BATS_TEST_TMPDIR/elsewhere#" "$rec"
-  before="$(cat "$rec")"
-  _hook "$pid"
-  [ "$(cat "$rec")" = "$before" ]
-  mv "$rec.keep" "$rec"
-
-  # Git Bash's ps has no start-time column, so no start evidence exists there
-  # and the rebind correctly refuses; the success case is POSIX-only.
-  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) kill "$pid" 2>/dev/null || true; return 0 ;; esac
-
-  # The same live process, hook input names the new thread: rebound, and the
-  # thread's profile is published alongside.
+    agmsg_role_session_record team alice "$2" "$4" codex "$2.$5"
+    agmsg_role_session_record team bob "$3" "$4" codex
+  ' _ "$SCRIPTS" "$old" "33333333-3333-4333-8333-333333333333" "$TEST_PROJECT" "$pid"
+  local before_a before_b
+  before_a="$(cat "$rec_a")"; before_b="$(cat "$rec_b")"
   mkdir -p "$BATS_TEST_TMPDIR/profile"
-  CODEX_HOME="$BATS_TEST_TMPDIR/profile" _hook "$pid"
+  printf '{"session_id":"%s","source":"clear"}' "$new" \
+    | env -u CODEX_THREAD_ID CODEX_HOME="$BATS_TEST_TMPDIR/profile" AGMSG_AGENT_PID="$pid" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
   kill "$pid" 2>/dev/null || true
-  grep -qx "session=$new" "$rec"
-  grep -qx "owner=$new.$pid" "$rec"
+  [ "$(cat "$rec_a")" = "$before_a" ]
+  [ "$(cat "$rec_b")" = "$before_b" ]
+  # The thread's profile is still published, as for any session.
   [ -f "$TEST_SKILL_DIR/run/codex-thread-home.$new" ]
+}
+
+@test "session-start.sh for codex keeps #1607's recovery after /clear: the project's sole registration follows the new thread (#1468)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local old=11111111-1111-4111-8111-111111111111 new=22222222-2222-4222-8222-222222222222
+  local rec="$TEST_SKILL_DIR/run/role-session.team__alice"
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_record team alice "$2" "$3" codex
+  ' _ "$SCRIPTS" "$old" "$TEST_PROJECT"
+  mkdir -p "$BATS_TEST_TMPDIR/profile"
+  printf '{"session_id":"%s","source":"clear"}' "$new" \
+    | env -u CODEX_THREAD_ID CODEX_HOME="$BATS_TEST_TMPDIR/profile" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+  grep -qx "session=$new" "$rec"
 }
 
 # #1477: Codex installed after agmsg never gets this install's writable_roots

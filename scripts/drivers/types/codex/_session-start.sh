@@ -155,16 +155,6 @@ agmsg_codex_refresh_destination() {
   AGMSG_CODEX_REFRESHED_PAIR="$chosen_team"$'\t'"$chosen_name"
 }
 
-# A Codex seat holds no actas lock, so the only proof that a recorded seat is
-# this very process is its record: owner=<thread>.<pid> naming the Codex pid
-# this hook runs under (see agmsg_role_session_rebind_same_process).
-agmsg_codex_rebind_after_clear() {
-  local thread="$1" project="$2" pairs="$3" cur_pid
-  cur_pid="$(agmsg_agent_pid codex 2>/dev/null || true)"
-  case "$cur_pid" in ''|*[!0-9]*) return 1 ;; esac
-  agmsg_role_session_rebind_same_process "$thread" "$project" "$cur_pid" "$pairs"
-}
-
 agmsg_codex_unseated_notice() {
   source "${SKILL_DIR:-}/scripts/lib/boot-command.sh"
   printf 'AGMSG delivery: this session is not connected to a seat yet. Run %s in Codex to receive messages.\n' "$(agmsg_actas_prompt codex '<name>')"
@@ -193,13 +183,13 @@ agmsg_session_start() {
   # shellcheck source=../../../lib/role-session.sh
   source "$SKILL_DIR/scripts/lib/role-session.sh"
   project_phys="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
-  # #1468: /clear starts a new thread inside the same Codex process, so no
-  # seat of this project is recorded on it and the old owner's pid is still
-  # alive. Only an identity the session itself supplied (env or hook input,
-  # never a rollout guess) may drive the rebind.
-  if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
-    agmsg_codex_rebind_after_clear "$thread_id" "$project_phys" "$PAIRS" || true
-  fi
+  # #1468: /clear starts a new thread inside the same Codex process. No
+  # seat is chosen here by the process: the tool shells run under the
+  # profile's shared app-server daemon, so every seat of a profile resolves to
+  # the same pid and a pid match could move another seat's record. The only
+  # moves left are agmsg_codex_refresh_destination's (#1607): the project's
+  # sole registration, or a unique placement in this terminal generation,
+  # and never over a live owner.
   # The hook runs in the TUI's environment; tool shells may not (see _profile.sh).
   if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
     # shellcheck disable=SC1091
