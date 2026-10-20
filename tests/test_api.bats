@@ -67,6 +67,9 @@ json_valid_line() {
   local alice_line
   alice_line="$(echo "$output" | grep '"alice"')"
   [ "$(json_field "$alice_line" project)" = "/tmp/project-a" ]
+  # types stays a JSON array, not an array serialized into a string.
+  local escaped; escaped="$(printf %s "$alice_line" | sed "s/'/''/g")"
+  [ "$(sqlite_mem "SELECT json_type('$escaped', '\$.types');")" = array ]
 }
 
 @test "api: get teams <team> members is empty for a nonexistent team" {

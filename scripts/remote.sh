@@ -2476,12 +2476,12 @@ cmd_connect() {
       'team_id', json_extract('$cfg_escaped', '\$.team_id'),
       'team_name', json_extract('$cfg_escaped', '\$.name'),
       'cipher_profile', '$binding_cipher',
-      'members', coalesce(
+      'members', json(coalesce(
         (SELECT json_group_array(json_object(
             'member_id', json_extract(value, '\$.member_id'),
             'name', key))
            FROM json_each(json_extract('$cfg_escaped', '\$.agents'))),
-        json('[]'))
+        '[]'))
     );" > "$body_file"
 
   # A connect that already registered this team here must not register it
