@@ -183,12 +183,13 @@ agmsg_session_start() {
   # shellcheck source=../../../lib/role-session.sh
   source "$SKILL_DIR/scripts/lib/role-session.sh"
   project_phys="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
-  # #1468: /clear starts a new thread inside the same Codex process, and no
-  # seat is moved onto it here. A Codex process offers no per-seat identity
-  # this hook can read: the tool shells run under the shared app-server
-  # daemon, so every seat of a profile resolves to the same pid, and a pid
-  # match would let one seat's /clear rewrite another seat's record. The
-  # unseated notice below tells the user to run actas again.
+  # #1468: /clear starts a new thread inside the same Codex process. No
+  # seat is chosen here by the process: the tool shells run under the
+  # profile's shared app-server daemon, so every seat of a profile resolves to
+  # the same pid and a pid match could move another seat's record. The only
+  # moves left are agmsg_codex_refresh_destination's (#1607): the project's
+  # sole registration, or a unique placement in this terminal generation,
+  # and never over a live owner.
   # The hook runs in the TUI's environment; tool shells may not (see _profile.sh).
   if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
     # shellcheck disable=SC1091

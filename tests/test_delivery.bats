@@ -2914,7 +2914,7 @@ EOF
   [ ! -f "$log" ]
 }
 
-@test "session-start.sh for codex never moves a seat onto a /clear thread, even one whose owner names the same live pid (#1468)" {
+@test "session-start.sh for codex does not choose a /clear seat by process: with several seats none moves, even one whose owner names the same live pid (#1468)" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
   local old=11111111-1111-4111-8111-111111111111 new=22222222-2222-4222-8222-222222222222
@@ -2940,6 +2940,21 @@ EOF
   [ "$(cat "$rec_b")" = "$before_b" ]
   # The thread's profile is still published, as for any session.
   [ -f "$TEST_SKILL_DIR/run/codex-thread-home.$new" ]
+}
+
+@test "session-start.sh for codex keeps #1607's recovery after /clear: the project's sole registration follows the new thread (#1468)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local old=11111111-1111-4111-8111-111111111111 new=22222222-2222-4222-8222-222222222222
+  local rec="$TEST_SKILL_DIR/run/role-session.team__alice"
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_record team alice "$2" "$3" codex
+  ' _ "$SCRIPTS" "$old" "$TEST_PROJECT"
+  mkdir -p "$BATS_TEST_TMPDIR/profile"
+  printf '{"session_id":"%s","source":"clear"}' "$new" \
+    | env -u CODEX_THREAD_ID CODEX_HOME="$BATS_TEST_TMPDIR/profile" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+  grep -qx "session=$new" "$rec"
 }
 
 # #1477: Codex installed after agmsg never gets this install's writable_roots
