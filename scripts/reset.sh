@@ -148,14 +148,14 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     SELECT json_set(
       '$NORMALIZED_ESCAPED',
       '\$.registrations',
-      COALESCE((
+      json(COALESCE((
         SELECT json_group_array(json(value))
         FROM json_each(json_extract('$NORMALIZED_ESCAPED', '\$.registrations'))
         WHERE NOT (
           json_extract(value, '\$.type') = '$AGENT_TYPE_SQL'
           AND json_extract(value, '\$.project') IN ($PROJECT_SQL_IN)
         )
-      ), json('[]'))
+      ), '[]'))
     );
   ")
   FILTERED_ESCAPED=$(printf '%s' "$FILTERED" | sed "s/'/''/g")

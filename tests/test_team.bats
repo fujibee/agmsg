@@ -463,6 +463,8 @@ EOF
   [[ "$output" =~ "suggest=true" ]]
   run bash "$SCRIPTS/whoami.sh" /tmp/proj-b claude-code
   [[ "$output" =~ "agent=alice" ]]
+  # What stays registered is still a JSON array, not one serialized into a string.
+  [ "$(sqlite3 :memory: "SELECT json_type(CAST(readfile('$(rf "$TEST_SKILL_DIR/teams/myteam/config.json")') AS TEXT), '\$.agents.alice.registrations');")" = array ]
 }
 
 @test "reset: retires the member when its last registration is cleared" {
