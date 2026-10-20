@@ -65,7 +65,10 @@ _agmsgd_launch_check_bootstrap_version() {
     WITH raw(json) AS (SELECT CAST(readfile('$(printf '%s' "$manifest_path" | sed "s/'/''/g")') AS TEXT))
     SELECT json_extract(json, '\$.bootstrap_version') FROM raw;
   " 2>/dev/null)"
-  [ "$recorded" = "$BOOTSTRAP_VERSION" ]
+  # Windows' sqlite3.exe ends its output \r\n, not \n (scripts/lib/storage.sh's
+  # agmsg_sqlite() has the measurement); this file sources no lib and talks to
+  # sqlite3 directly, so every literal comparison below strips it itself.
+  [ "${recorded%$'\r'}" = "$BOOTSTRAP_VERSION" ]
 }
 
 # 1. install.db must be readable, or we must not assume `on`.
@@ -77,12 +80,14 @@ DESIRED="$(sqlite3 "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/nul
   _agmsgd_launch_record_attempt "install.db could not be read"
   exit 0
 }
+DESIRED="${DESIRED%$'\r'}"
 
 # 2. Not `on` -> nothing to do, silently.
 if [ "$DESIRED" != "on" ]; then
   exit 0
 fi
 OP_GEN="$(sqlite3 "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;" 2>/dev/null)"
+OP_GEN="${OP_GEN%$'\r'}"
 
 # 3. Completion record state.
 if [ -f "$MANIFEST" ]; then
@@ -108,6 +113,7 @@ _agmsgd_launch_check_bootstrap_version "$MANIFEST" || {
 # execution (version + node:sqlite loads), not by trusting the recorded
 # path/version strings.
 NODE_PATH="$(sqlite3 "$INSTALL_DB" "SELECT node_path FROM meta;" 2>/dev/null)"
+NODE_PATH="${NODE_PATH%$'\r'}"
 if [ -z "$NODE_PATH" ] || [ ! -x "$NODE_PATH" ]; then
   _agmsgd_launch_record_attempt "no usable Node recorded (run 'agmsg daemon enable' again)"
   exit 0
