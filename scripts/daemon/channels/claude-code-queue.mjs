@@ -33,6 +33,7 @@ import {
   resolveTranscriptPath,
   resolvePendingDelivery,
   sendClaudeCodeMessage,
+  latestPermissionMode,
 } from "./claude-code-queue-io.mjs";
 
 const SEND_TIMEOUT_MS = 5_000;
@@ -149,22 +150,31 @@ export function createClaudeCodeQueueChannel({
   observe = observeTranscript,
   socketAlive = checkSocketOwnership,
   hostPlatform = process.platform,
+  readMode = latestPermissionMode,
 }) {
   let stopped = false;
+  // How each nudge to a seat's current socket was sent ("bypass" = claimed
+  // from-mode=bypass, "plain" = no claim), so a held one is tried once the
+  // other way and no further. Lost on restart: the first held nudge then
+  // simply gets the same single retry.
+  const sentModes = new Map();
   let activePoll = null;
 
   async function pollSeat(registration, paths) {
     const { team, agent, teamConfig, registered = true } = registration;
     const seat = seatKey(team, agent);
     const pending = readPending(db, seat);
+    let retryMode = "";
     // At most one nudge is outstanding per seat, and an outstanding one is not
     // re-sent on a timer: Claude Code holds a message received mid-work until
     // the work pauses, so a long wait is normal, not a loss. It is re-sent only
-    // when the thing it was sent to is gone (see below).
+    // when the thing it was sent to is gone, or when the seat set it aside and
+    // the other way of sending has not been tried (see below).
     if (pending) {
       const observation = pendingObservation(pending, observe);
       if (observation.state === "confirmed") {
         setQueueState(db, pending.id, "confirmed");
+        sentModes.delete(pending.messaging_socket);
         saveSeat(db, { seat, messagingSocket: pending.messaging_socket, state: "addressable" }, now);
         return;
       }
@@ -189,11 +199,24 @@ export function createClaudeCodeQueueChannel({
       const recordMoved = record && (
         record.messaging_socket !== pending.messaging_socket ||
         (transcriptNow && transcriptNow !== pending.transcript_path));
-      if (!socketGone && !recordMoved) {
-        saveSeat(db, { seat, messagingSocket: pending.messaging_socket, ...observedSeat(socketCheck.state === "ok" ? observation.reason : socketCheck.reason) }, now);
-        return;
+      if (!socketGone && !recordMoved && observation.reason === "peer_held" && socketCheck.state === "ok") {
+        // The seat's Claude Code set the nudge aside. Whatever mode it was sent
+        // under is not accepted there (a bypass seat wants its mode named, a
+        // prompting one wants none), so it is sent once the other way.
+        const tried = sentModes.get(pending.messaging_socket) ?? new Set();
+        const other = tried.has("bypass") ? "plain" : "bypass";
+        if (!tried.has(other)) {
+          retryMode = other;
+          setQueueState(db, pending.id, "expired");
+        }
       }
-      setQueueState(db, pending.id, "expired");
+      if (retryMode === "") {
+        if (!socketGone && !recordMoved) {
+          saveSeat(db, { seat, messagingSocket: pending.messaging_socket, ...observedSeat(socketCheck.state === "ok" ? observation.reason : socketCheck.reason) }, now);
+          return;
+        }
+        setQueueState(db, pending.id, "expired");
+      }
     }
     if (!registered) return;
     if (hostPlatform === "win32") {
@@ -288,7 +311,13 @@ export function createClaudeCodeQueueChannel({
       return;
     }
 
-    const result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, timeoutMs });
+    // Say bypass only for a seat whose conversation is in bypass mode (or, after
+    // a hold, once as the one other try); every other seat gets no claim.
+    const mode = retryMode || (readMode(transcriptPath) === "bypassPermissions" ? "bypass" : "plain");
+    const tried = sentModes.get(record.messaging_socket) ?? new Set();
+    tried.add(mode);
+    sentModes.set(record.messaging_socket, tried);
+    const result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
     if (result.state !== "sent") {
       setQueueState(db, id, "expired");
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` }, now);
