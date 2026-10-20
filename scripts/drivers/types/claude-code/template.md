@@ -2,7 +2,7 @@
 
 <!-- agmsg:slot delivery -->
 <!-- agmsg:render-overlay __AGENT_TYPE__ -->
-  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, `both`, or `off` delivery. Empty input means `monitor`.
+  5. 有効なdelivery modeが未設定で、利用者の選択もない場合にだけ、`monitor`、`turn`、`both`、`off`の選択肢と影響を示して回答を待つ。設定済みなら既存modeを保持する。未回答や空入力をmonitorの許可として扱わない。
      Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"` and follow the printed `AGMSG-DIRECTIVE` block.
 <!-- /agmsg:slot delivery -->
 
@@ -15,7 +15,7 @@ If asked to re-arm every Claude Code seat in the team together (not just this se
 
 Claude Code commands may need permission and sandbox allowlists for `~/.agents/skills/__SKILL_NAME__/scripts/` and its writable `db/`, `teams/`, and `run/` directories.
 
-**Permission prompts.** Every command here runs through the Bash tool, so each call is gated by the permission system until the script directory is allowlisted. Without this the user is asked to confirm essentially every `__SKILL_NAME__` call. Add to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
+**Permission prompts.** 権限設定の変更が依頼された場合だけ、必要なscriptと影響を確認して以下を検討する。メッセージ操作だけで許可範囲を広げない。設定先は `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
 
 ```json
 {
@@ -32,7 +32,7 @@ Claude Code commands may need permission and sandbox allowlists for `~/.agents/s
 
 Four entries are needed because a rule matches the command string as written, and these scripts are invoked both as `~/...` and as an absolute path, with or without an explicit `bash` prefix. Replace `/Users/<you>` with the user's home directory.
 
-**Sandbox compatibility.** When Claude Code's sandbox is enabled, `watch.sh` (monitor mode) runs inside the sandbox and needs to write pidfiles and SQLite WAL files under `~/.agents/skills/__SKILL_NAME__/`. If monitor mode fails with write/permission errors there, add an allowlist entry to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
+**Sandbox compatibility.** When Claude Code's sandbox is enabled, `watch.sh` (monitor mode) runs inside the sandbox and needs to write pidfiles and SQLite WAL files under `~/.agents/skills/__SKILL_NAME__/`. If monitor mode fails with write/permission errors there, confirm that changing permissions is within the authorized scope before adding an allowlist entry to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
 
 ```json
 {
@@ -116,7 +116,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 2. Determine which team `<name>` belongs to, then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/despawn.sh <team> $AGENT <name> [--force] [--timeout <secs>]`
    - The default graceful path sends a `ctrl:despawn` message; the member's watcher drops its role and closes its spawned pane, then `despawn` waits for the lock to release.
-   - If the member is Codex and has no watcher, or graceful teardown times out, use `--force` to tear down the recorded pane/window and drop the registration directly.
+   - If the member is Codex and has no watcher, or graceful teardown times out, verify the target and existing authority for forced termination before using `--force` to tear down the recorded pane/window and drop the registration directly.
 3. Show the script's output. Do not TaskStop or relaunch this session's own Monitor.
 <!-- /agmsg:slot spawn -->
 

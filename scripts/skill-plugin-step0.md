@@ -1,6 +1,6 @@
 ## Step 0: First-run bootstrap
 
-agmsg keeps its SQLite database, team registry, and runtime state under `~/.agents/skills/agmsg/`. The `./install.sh` install path creates that tree; the Claude Code plugin install path does not (the plugin marketplace only copies this repository into `~/.claude/plugins/cache/`). Before any other command, bootstrap if needed:
+agmsg keeps its SQLite database, team registry, and runtime state under `~/.agents/skills/agmsg/`. The `./install.sh` install path creates that tree; the Claude Code plugin install path does not (the plugin marketplace only copies this repository into `~/.claude/plugins/cache/`). 実際の操作に必要な資材がなく、セットアップも依頼範囲に含まれる場合だけbootstrapする。説明や履歴の確認だけを理由にinstallしない:
 
 ```bash
 if [ ! -d ~/.agents/skills/agmsg ]; then
