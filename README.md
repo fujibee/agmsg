@@ -154,7 +154,7 @@ Git Bash PATH). There is no PowerShell reimplementation.
 
 ### agmsgd beta (1.6.0)
 
-The optional agmsgd beta sends Codex sessions a notice to check their inbox through the Codex queue, and sends Claude Code sessions a notice directly through that session's own cross-session messaging socket. A Claude Code seat delivered this way never needs its Monitor watch re-armed. The Claude Code path is macOS/Linux only; a Windows Claude Code seat keeps using Monitor as before. It is off by default. It reads the existing SQLite message store; it does not migrate data, deliver message bodies, take over remote sync, or change how any agent other than Claude Code and Codex receives messages. macOS, Linux, and Windows are supported for Codex. Windows requires native Codex 0.157.0 or later; earlier versions are blocked with a reason. Native queue execution and delivery to a logged-in live Windows session were measured with Codex 0.157.0 and 0.160.0. Unreadable version or delivery evidence keeps the existing conservative handling. JSONL storage is unsupported by this beta; keep using the bridge for those sessions.
+The optional agmsgd beta sends Codex sessions a notice to check their inbox through the Codex queue, and sends Claude Code sessions a notice directly through that session's own cross-session messaging socket. It detects whether that Claude Code session is running in bypass-permissions mode and labels notices for that mode automatically, with no action from you. A Claude Code seat delivered this way never needs its Monitor watch re-armed. The Claude Code path is macOS/Linux only; a Windows Claude Code seat keeps using Monitor as before, even with agmsgd enabled and running. It is off by default. It reads the existing SQLite message store; it does not migrate data, deliver message bodies, take over remote sync, or change how any agent other than Claude Code and Codex receives messages. macOS, Linux, and Windows are supported for Codex. Windows requires native Codex 0.157.0 or later; earlier versions are blocked with a reason. Native queue execution and delivery to a logged-in live Windows session were measured with Codex 0.157.0 and 0.160.0. Unreadable version or delivery evidence keeps the existing conservative handling. JSONL storage is unsupported by this beta; keep using the bridge for those sessions.
 
 Requires Node >= 22.13.0 with `node:sqlite` (the experimental SQLite warning is expected). Install Node from [nodejs.org](https://nodejs.org/en/download). Enable and inspect the beta with:
 
@@ -454,6 +454,12 @@ git pull
 ```
 
 DB and team configs are preserved. Only scripts and assets are updated.
+
+### Upgrading from 1.5.x
+
+`--update` does not enable agmsgd. If you have never run `agmsg daemon enable`, nothing changes: agmsgd stays off, and messaging keeps working exactly as it did on 1.5.x. If agmsgd is currently on, an update restarts it on the new version automatically; if `agmsg daemon status` still shows it stopped afterward, run `agmsg daemon start`. If you had turned it off yourself (`agmsg daemon disable`), it stays off through the update, as intended.
+
+No running Codex session needs to be restarted just because you ran `--update`. Restarting a Codex session is only needed to pick up agmsgd itself — either turning it on for the first time (see "agmsgd beta" above) or dropping back to the bridge after `agmsg daemon disable`.
 
 ## Uninstall
 
