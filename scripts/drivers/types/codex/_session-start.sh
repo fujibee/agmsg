@@ -107,41 +107,23 @@ INNER_EOF
   return 0
 }
 
-# A restart gets a new thread. Prefer this project's sole registration, or a
-# unique placement in this terminal generation, rather than keeping an old
-# conversation merely because its rollout is still on disk.
+# A restart gets a new thread. Prefer this project's sole registration rather
+# than keeping an old conversation merely because its rollout is still on disk.
+# With several registrations nothing here can say which seat this is: the hook
+# runs under the profile's shared app-server daemon, whose environment (the
+# pane it names, the pid it has) belongs to whichever TUI started the daemon,
+# not to this seat (#1112, #1468). So no seat is chosen then; the session is
+# reported as unseated and the user runs actas.
 agmsg_codex_refresh_destination() {
-  local thread="$1" project="$2" pairs="$3" team name count chosen_team='' chosen_name=''
+  local thread="$1" project="$2" pairs="$3" count chosen_team='' chosen_name=''
   AGMSG_CODEX_REFRESHED_PAIR=''
   [[ "$thread" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || return 1
   # Never bind a role to the newest rollout inference from another session.
   [ "$thread" = "${CODEX_THREAD_ID:-}" ] || [ "$thread" = "${SESSION_ID:-}" ] || return 1
   pairs="$(printf '%s\n' "$pairs" | sort -u)"
   count="$(printf '%s\n' "$pairs" | grep -c . || true)"
-  if [ "$count" = 1 ]; then
-    IFS=$'\t' read -r chosen_team chosen_name <<< "$pairs"
-  else
-    # Environment-only driver observations perform no terminal writes or RPCs.
-    source "${SKILL_DIR:-}/scripts/lib/terminal-registry.sh" || return 1
-    local here terminal id epoch ref path recorded record_project record_type mark matches=0
-    here="$(agmsg_terminal_self_env)"
-    case "$here" in ''|unknown:*) return 1 ;; esac
-    IFS=$'\t' read -r terminal id epoch <<< "$here"
-    case "$terminal:$epoch" in plain:*|*:|*:unknown:*) return 1 ;; esac
-    ref="$(agmsg_terminal_ref "$terminal" "$id")" || return 1
-    while IFS=$'\t' read -r team name; do
-      [ -n "$team" ] && [ -n "$name" ] || continue
-      path="$(agmsg_spawn_path "$team" "$name")" || continue
-      [ -f "$path" ] || continue
-      IFS=$'\t' read -r recorded record_project record_type < "$path" || continue
-      [ "$recorded" = "$ref" ] && [ "$record_type" = codex ] || continue
-      [ "$(agmsg_canonical_path "$record_project" 2>/dev/null)" = "$project" ] || continue
-      mark="$(agmsg_role_session_named "$team" "$name")"
-      [ "$mark" = "$ref"$'\t'"$epoch" ] || continue
-      matches=$((matches + 1)); chosen_team="$team"; chosen_name="$name"
-    done <<< "$pairs"
-    [ "$matches" = 1 ] || return 1
-  fi
+  [ "$count" = 1 ] || return 1
+  IFS=$'\t' read -r chosen_team chosen_name <<< "$pairs"
   [ -n "$chosen_team" ] && [ -n "$chosen_name" ] || return 1
   local profile owner
   # shellcheck disable=SC1091
@@ -187,9 +169,8 @@ agmsg_session_start() {
   # seat is chosen here by the process: the tool shells run under the
   # profile's shared app-server daemon, so every seat of a profile resolves to
   # the same pid and a pid match could move another seat's record. The only
-  # moves left are agmsg_codex_refresh_destination's (#1607): the project's
-  # sole registration, or a unique placement in this terminal generation,
-  # and never over a live owner.
+  # move left is agmsg_codex_refresh_destination's: the project's sole
+  # registration, never over a live owner.
   # The hook runs in the TUI's environment; tool shells may not (see _profile.sh).
   if [ "$thread_id" = "${CODEX_THREAD_ID:-}" ] || [ "$thread_id" = "${SESSION_ID:-}" ]; then
     # shellcheck disable=SC1091
