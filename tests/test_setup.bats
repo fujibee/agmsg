@@ -240,10 +240,12 @@ EOF
   FAKE_INSTALL='#!/usr/bin/env bash
 echo "SEEN TMP=$TMP TEMP=$TEMP TMPDIR=$TMPDIR"'
   export FAKE_INSTALL
+  # Real directories: mktemp honours TMPDIR and fails on one that does not exist.
+  mkdir "$FAKE_HOME/tmp" "$FAKE_HOME/temp" "$FAKE_HOME/tmpdir"
 
   run env PATH="$STUB_BIN:/usr/bin:/bin" HOME="$FAKE_HOME" \
-    TMP=/caller/tmp TEMP=/caller/temp TMPDIR=/caller/tmpdir \
+    TMP="$FAKE_HOME/tmp" TEMP="$FAKE_HOME/temp" TMPDIR="$FAKE_HOME/tmpdir" \
     bash "$REPO_ROOT/setup.sh" --cmd agmsg-test
   [ "$status" -eq 0 ]
-  [[ "$output" == *"SEEN TMP=/caller/tmp TEMP=/caller/temp TMPDIR=/caller/tmpdir"* ]]
+  [[ "$output" == *"SEEN TMP=$FAKE_HOME/tmp TEMP=$FAKE_HOME/temp TMPDIR=$FAKE_HOME/tmpdir"* ]]
 }
