@@ -543,3 +543,63 @@ EOF
   # The remedy is per team and runnable, unchanged from #765.
   printf '%s' "$output" | grep -q 'sync start'
 }
+
+@test "cleanup arbiter has one owner when mkdir reports racing EEXIST as success" {
+  local shim="$TEST_SKILL_DIR/arbiter-shim" arrivals="$TEST_SKILL_DIR/arbiter-arrivals"
+  local fake="$TEST_SKILL_DIR/arbiter-remote" temps="$TEST_SKILL_DIR/arbiter-temps"
+  mkdir -p "$shim" "$arrivals"
+  export ARBITER_REAL_MKDIR="$(command -v mkdir)"
+  export ARBITER_REAL_MKTEMP="$(command -v mktemp)"
+  export ARBITER_ARRIVALS="$arrivals" ARBITER_TEMPS="$temps"
+  cat > "$shim/mkdir" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *.gaveup)
+    "$ARBITER_REAL_MKDIR" -p "$@" || exit $?
+    if [ -f "${1%.gaveup}.rc" ]; then
+      : > "$ARBITER_ARRIVALS/child"
+    else
+      : > "$ARBITER_ARRIVALS/parent"
+    fi
+    for ((i=0; i<500; i++)); do
+      [ -e "$ARBITER_ARRIVALS/child" ] && exit 0
+      sleep 0.01
+    done
+    exit 1 ;;
+  *) exec "$ARBITER_REAL_MKDIR" "$@" ;;
+esac
+SH
+  cat > "$shim/mktemp" <<'SH'
+#!/usr/bin/env bash
+result="$("$ARBITER_REAL_MKTEMP" "$@")" || exit $?
+[ "$#" -ne 0 ] || printf '%s\n' "$result" >> "$ARBITER_TEMPS"
+printf '%s\n' "$result"
+SH
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+for ((i=0; i<500; i++)); do
+  if [ -e "$ARBITER_ARRIVALS/parent" ]; then
+    echo 'Sync engine started for testteam (pid 4242).'
+    exit 0
+  fi
+  sleep 0.01
+done
+exit 1
+SH
+  chmod +x "$shim/mkdir" "$shim/mktemp" "$fake"
+  run env PATH="$shim:$PATH" AGMSG_SYNC_AUTOSTART_TIMEOUT_S=0 bash -c     '. "$1"; agmsg_sync_autostart "$2" testteam' _ "$SCRIPTS/lib/sync-autostart.sh" "$fake"
+  [ "$status" -eq 0 ]
+  [ -e "$arrivals/parent" ]
+  [ -e "$arrivals/child" ]
+  local path i
+  [ -s "$temps" ]
+  while IFS= read -r path; do
+    for ((i=0; i<200; i++)); do
+      [ ! -e "$path" ] && [ ! -e "$path.rc" ] && [ ! -d "$path.gaveup" ] && break
+      sleep 0.01
+    done
+    [ ! -e "$path" ]
+    [ ! -e "$path.rc" ]
+    [ ! -d "$path.gaveup" ]
+  done < "$temps"
+}
