@@ -287,6 +287,30 @@ WRAPPER
   [ "$output" = stopped ]
 }
 
+@test "Git Bash (no boot id or start time to read) takes the daemon's own liveness judgement" {
+  local boot node
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  node="$(command -v node)"
+  mkdir -p "$BATS_TEST_TMPDIR/gitbash"
+  printf '#!/bin/sh\necho MINGW64_NT-10.0-26200\n' > "$BATS_TEST_TMPDIR/gitbash/uname"
+  chmod +x "$BATS_TEST_TMPDIR/gitbash/uname"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path='$node'; UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  run env PATH="$BATS_TEST_TMPDIR/gitbash:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = ready ]
+  # The same record from another boot is a stopped daemon.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_boot_id='previous-boot';"
+  run env PATH="$BATS_TEST_TMPDIR/gitbash:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = stopped ]
+  # A node that cannot be run is "cannot check", never "stopped".
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path='$BATS_TEST_TMPDIR/no-such-node'; UPDATE daemon_owner SET executor_boot_id='$boot';"
+  run env PATH="$BATS_TEST_TMPDIR/gitbash:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = unchecked ]
+}
+
 @test "all enabled failure causes produce recovery notices without losing messages" {
   for reason in 'restart limit reached' 'no usable Node recorded' 'repeated startup failures' crash; do
     sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','$reason',0);"
