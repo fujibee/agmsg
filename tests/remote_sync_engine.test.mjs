@@ -4887,7 +4887,7 @@ test("driver() waits out a busy store and retries; anything else is asked once",
   };
   const counter = join(root, "calls");
   // A driver that is busy for its first `busyFor` calls and answers after that.
-  const useDriver = async (name, busyFor, exitWith = STORAGE_BUSY_EXIT) => {
+  const useDriver = async (name, busyFor, exitWith = STORAGE_BUSY_EXIT, message = "agmsg: sqlite-sync: prepare: the store is busy -- another writer held it") => {
     const script = join(root, name);
     await writeFile(script, [
       "#!/usr/bin/env bash",
@@ -4895,7 +4895,7 @@ test("driver() waits out a busy store and retries; anything else is asked once",
       `n=$(( $(cat ${shellQuote(counter)} 2>/dev/null || echo 0) + 1 ))`,
       `printf %s "$n" > ${shellQuote(counter)}`,
       `if [ "$n" -le ${busyFor} ]; then`,
-      "  echo 'agmsg: sqlite-sync: prepare: the store is busy -- another writer held it' >&2",
+      `  echo ${shellQuote(message)} >&2`,
       `  exit ${exitWith}`,
       "fi",
       "printf '%s\\n' '{\"type\":\"sync_state\",\"transport_cursor\":\"0\"}'",
@@ -4934,6 +4934,14 @@ test("driver() waits out a busy store and retries; anything else is asked once",
   assert.deepEqual(waits, [1000, 2000, 4000, 8000, 16000, ...Array(8).fill(30000)]);
   assert.equal(await readFile(counter, "utf8"), "14");
   assert.equal(waits.reduce((sum, ms) => sum + ms, 0), 271000);
+
+  // A store that could not be opened for a moment (seen on Windows) is waited
+  // out like a busy one, so the engine does not die on it.
+  await useDriver("cannot-open.sh", 1, 13, "Error near line 50: unable to open database file");
+  waits.length = 0;
+  assert.deepEqual(await driver("prepare", config, [], [], dependencies), [{ type: "sync_state", transport_cursor: "0" }]);
+  assert.equal(await readFile(counter, "utf8"), "2");
+  assert.deepEqual(waits, [1000]);
 
   // A failed check (13) is a decision: asked once, not retried, not retryable.
   await useDriver("refuses.sh", 1000, 13);

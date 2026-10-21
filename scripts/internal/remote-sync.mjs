@@ -2122,6 +2122,10 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
 // is a decision (a failed check, an unsupported operation) and asking again
 // does not change it, so nothing else is retried here.
 export const STORAGE_BUSY_EXIT = 11;
+// SQLite could not open a file it needed (the store, or a temporary file) --
+// seen on Windows when something else held or removed it for a moment. Like a
+// busy store it is a fact about the moment, and the call is as safe to repeat.
+const STORAGE_OPEN_FAILURE = /unable to open database file/u;
 // One wait is never longer than this; the budget is the total. The budget has
 // to outlast a real writer, not a polite one: the first prepare on a pulled
 // store held the lock for 63 s on the machine that filed #910 (155 s on a copy
@@ -2167,7 +2171,8 @@ export async function driver(operation, config, input, extra = [], dependencies 
     try {
       return await run();
     } catch (error) {
-      if (error?.driverExitCode !== STORAGE_BUSY_EXIT) throw error;
+      const busy = error?.driverExitCode === STORAGE_BUSY_EXIT;
+      if (!busy && !STORAGE_OPEN_FAILURE.test(error?.message ?? "")) throw error;
       const waitMs = Math.min(STORAGE_BUSY_WAIT_CAP_MS, 1000 * 2 ** (attempt - 1));
       if (waitedMs + waitMs > budgetMs) {
         // The driver's own sentence stays in front; what is added is how long
@@ -2175,11 +2180,11 @@ export async function driver(operation, config, input, extra = [], dependencies 
         // "held forever".
         error.message += ` -- waited ${Math.round(waitedMs / 1000)} s for the store to come free ` +
           `(the ${budgetMs / 1000} s budget) and it did not`;
-        error.code = "storage-busy";
+        error.code = busy ? "storage-busy" : "storage-unavailable";
         error.retryable = true;
         throw error;
       }
-      await eventCall("driver.busy", { operation, attempt, wait_ms: waitMs, waited_ms: waitedMs });
+      await eventCall(busy ? "driver.busy" : "driver.unavailable", { operation, attempt, wait_ms: waitMs, waited_ms: waitedMs });
       await sleepCall(waitMs);
       waitedMs += waitMs;
     }
