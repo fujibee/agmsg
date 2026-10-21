@@ -190,53 +190,58 @@ _agmsg_lock_break_dead() {
 
 # A lock whose release was interrupted: the owner moved its record aside
 # (`<lock>.holder.releasing.<pid>`) and died before the rmdir, so the directory
-# stays with no record of its own (seen after a power loss on Windows, where the
-# staged copy was also left unreadable). The staged copy is not a record, and a
+# stays with no record of its own. The staged copy is not a record, and a
 # release that finished normally can leave one too, so it counts only with all
 # of these:
+#   - the staged copy is readable and says this machine, and the pid in its
+#     name is the pid it records and is not running (a copy that cannot be read
+#     says nothing about which machine wrote it, so it is left alone: the same
+#     rule as a holder record from another machine);
 #   - the directory is more than a minute old, so no new owner is between its
 #     mkdir and writing its record;
 #   - the directory is not newer than the staged copy, which keeps the time its
 #     record was written at acquire, so the directory is the one that record
-#     belonged to and no later owner created it;
-#   - the pid in the staged name is on this machine and not running (a record
-#     that can be read must say this machine too; an unreadable one cannot).
+#     belonged to and no later owner created it.
 # A recycled pid reads as alive, which leaves the lock alone, the safe direction.
+#
+# CLAIM FIRST, JUDGE SECOND, as _agmsg_lock_break_dead does: the staged copy is
+# renamed away (one breaker wins that rename), and only then are the age and
+# generation checked against the claimed copy. Once it is claimed nobody else can
+# legitimately remove this directory, so the rmdir below cannot reach a successor
+# that a check made before the claim would have missed.
 _agmsg_lock_break_interrupted_release() {
-  local lock="$1" staged pid host found=0 claimed
+  local lock="$1" staged claimed pid host recorded
   [ ! -e "$lock.holder" ] || return 1
   _agmsg_lock_load_liveness || return 1
-  [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ] || return 1
   for staged in "$lock".holder.releasing.*; do
     [ -f "$staged" ] || continue
-    found=1
     pid="${staged##*.holder.releasing.}"
-    _agmsg_pid_valid "$pid" 2147483647 || return 1
-    [ ! "$lock" -nt "$staged" ] || return 1
-    host="$(sed -n 's/^host //p' "$staged" 2>/dev/null | head -1)"
-    if [ -n "$host" ]; then _agmsg_lock_same_host "$host" || return 1; fi
-    ! _agmsg_pid_alive_local "$pid" || return 1
+    claimed="$lock.dead.$$.${RANDOM:-0}"
+    mv "$staged" "$claimed" 2>/dev/null || continue
+    recorded="$(sed -n 's/^pid //p' "$claimed" 2>/dev/null | head -1)"
+    host="$(sed -n 's/^host //p' "$claimed" 2>/dev/null | head -1)"
+    if _agmsg_pid_valid "$pid" 2147483647 && [ "$recorded" = "$pid" ] \
+        && [ -n "$host" ] && _agmsg_lock_same_host "$host" \
+        && ! _agmsg_pid_alive_local "$pid" \
+        && [ ! -e "$lock.holder" ] \
+        && [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ] \
+        && [ ! "$lock" -nt "$claimed" ] \
+        && rmdir "$lock" 2>/dev/null; then
+      if command -v rm >/dev/null 2>&1; then
+        rm -f "$claimed" "$lock".holder.releasing.* 2>/dev/null || true
+      fi
+      return 0
+    fi
+    # Not proven: the copy goes back where it was.
+    mv "$claimed" "$staged" 2>/dev/null || true
   done
-  [ "$found" = 1 ] || return 1
-  # Claim first, then judge once more, as _agmsg_lock_break_dead does: a holder
-  # record that appeared meanwhile means the lock changed hands.
-  claimed="$lock.dead.$$.${RANDOM:-0}"
-  mkdir "$claimed" 2>/dev/null || return 1
-  if [ -e "$lock.holder" ] || ! rmdir "$lock" 2>/dev/null; then
-    rmdir "$claimed" 2>/dev/null || true
-    return 1
-  fi
-  if command -v rm >/dev/null 2>&1; then
-    rm -f "$lock".holder.releasing.* 2>/dev/null || true
-  fi
-  rmdir "$claimed" 2>/dev/null || true
-  return 0
+  return 1
 }
 
 agmsg_lock_acquire() {
   local team_dir="$1" lock i=0 max="${AGMSG_LOCK_TRIES:-1000}" err=""
   local budget="${AGMSG_LOCK_SECONDS:-10}" started elapsed
-  local tpid thost q
+  local tpid thost q staged
   started="$(date +%s)"
   lock="$team_dir/.config.lock"
   until err="$(mkdir "$lock" 2>&1)"; do
@@ -331,6 +336,10 @@ agmsg_lock_acquire() {
         # paste cannot remove anything but an empty lock directory.
         q="$(printf "'%s'" "$(printf '%s' "$lock" | sed "s/'/'\\''/g")")"
         echo "agmsg: the lock records no holder, so nothing here could ask whether it is held." >&2
+        for staged in "$lock".holder.releasing.*; do
+          [ -f "$staged" ] || continue
+          echo "agmsg: a release was interrupted: $staged is what its owner (pid ${staged##*.holder.releasing.}) staged. If that record cannot be read, nothing here can say which machine wrote it, so the lock is kept." >&2
+        done
         echo "agmsg: a lock with no holder record is not broken automatically. If no agmsg command is running for this team, remove it:" >&2
         echo "agmsg:   rmdir $q" >&2
         echo "agmsg: doctor.sh lists such locks." >&2

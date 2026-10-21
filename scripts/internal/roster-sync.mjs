@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
 import { sealEnvelope } from "./sync-cipher.mjs";
@@ -75,7 +75,7 @@ function writeAtomic(path, contents) {
   const temporary = `${path}.tmp.${process.pid}.${randomUUID()}`;
   const fd = openSync(temporary, "wx", 0o600);
   try {
-    writeSync(fd, contents, null, "utf8");
+    writeFileSync(fd, contents, "utf8");
     fsyncSync(fd);
   } finally {
     closeSync(fd);
