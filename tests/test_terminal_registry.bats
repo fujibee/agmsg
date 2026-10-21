@@ -3907,6 +3907,10 @@ _tmux_op_args() {
   run agmsg_terminal_name_self "my-sid" seatteam resumer /proj/MINE codex record
   [ "$status" -eq 0 ]
   grep -q "recorded as seatteam__elder's" <<<"$output"
+  # Not a silent refusal: the reason and the way out are both printed.
+  grep -q "Codex seat" <<<"$output"
+  grep -q "cannot be read from the terminal" <<<"$output"
+  grep -q "drop or despawn that seat" <<<"$output"
   refute test -e "$mine"
   [ "$(agmsg_role_session_named seatteam elder)" = "$(printf 'herdr:%s:wC:p4\t1' "$HERDR_SOCKET_PATH")" ]
 }
