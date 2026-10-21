@@ -113,6 +113,9 @@ _install_fake_herdr() {
 state='$FAKE_HERDR_STATE'
 if [ "\$1" = agent ] && [ "\$2" = list ]; then
   printf '{"id":"1","result":{"type":"list","agents":[]}}\n'
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  # This fixture exercises naming marks with an initially unnamed agent.
+  printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "\$3"
 elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
   grep -v "^\$3	" "\$state" > "\$state.n" 2>/dev/null || : > "\$state.n"
   printf '%s\t%s\n' "\$3" "\$4" >> "\$state.n"; mv "\$state.n" "\$state"

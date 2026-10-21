@@ -1226,6 +1226,14 @@ case "$1/$2" in
     printf '%s\t%s\n' "$3" "$4" >> "$HERDR_AGENT_DB"
     echo '{"id":"cli:agent:rename","result":{"type":"ok"}}'
     ;;
+  agent/get)
+    if [ "$(grep -c '^agent get ' "$HERDR_CALL_LOG")" -le "${HERDR_AGENT_GET_FAILURES:-0}" ]; then
+      echo '{"error":{"code":"agent_not_found"}}' >&2
+      exit 1
+    fi
+    _key="$(awk -F'\t' -v id="$3" '$1==id{k=$2} END{print k}' "$HERDR_AGENT_DB")"
+    printf '{"result":{"agent":{"pane_id":"%s","name":"%s"}}}\n' "$3" "$_key"
+    ;;
   agent/list)
     # Replay the recorded (pane_id -> name) pairs as the agents array.
     printf '{"result":{"agents":['
@@ -1246,7 +1254,7 @@ case "$1/$2" in
     # person would), "pane" when none was. $3=pane id.
     _label="$(awk -F'\t' -v id="$3" '$1==id{l=$2} END{print (l==""?"pane":l)}' "$HERDR_LABEL_DB" 2>/dev/null)"
     [ -n "$_label" ] || _label=pane
-    printf '{"result":{"pane":{"pane_id":"%s","label":"%s","agent_status":"idle","terminal_title":"t"}}}\n' "$3" "$_label"
+    printf '{"result":{"pane":{"pane_id":"%s","label":"%s","agent_status":"idle","terminal_title":"t","terminal_id":"term_spawn"}}}\n' "$3" "$_label"
     ;;
   *)
     echo '{"error":"unknown stub call: '"$*"'}' >&2
@@ -1507,11 +1515,13 @@ _spawn_recorded_id() {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   _setup_fake_herdr
   export HERDR_PROCESS_INFO_RC=1                  # arm 3 (before-typing unknown)
+  export HERDR_AGENT_GET_FAILURES=2               # detector has not recognized the CLI yet
   run env -u TMUX bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ"
   [ "$status" -eq 0 ]
   grep -q "BEFORE the boot was typed" <<<"$output"          # arm 3, before typing
   grep -q "status=launched-unconfirmed" <<<"$output"         # requirement 2, after typing
   grep -q "no-readiness-handshake" <<<"$output"
+  [ "$(grep -c '^agent get ' "$HERDR_CALL_LOG")" -eq 3 ]
 }
 
 # --- --terminal-driver / AGMSG_TERMINAL_DRIVER override ---

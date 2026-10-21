@@ -4231,6 +4231,10 @@ _fake_herdr_with_session() {
 { printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
 if [ "\$1" = agent ] && [ "\$2" = list ]; then
   printf '{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wC:p4","display_agent":"x","name":"k"}]}}\n' "$sid"
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  printf '{"result":{"agent":{"pane_id":"%s","name":"k"}}}\n' "\$3"
+elif [ "\$1" = pane ] && [ "\$2" = get ]; then
+  echo '{"result":{"pane":{"terminal_id":"term_delivery"}}}'
 fi
 exit 0
 EOF

@@ -89,6 +89,7 @@ if [ "\$1" = agent ] && [ "\$2" = list ]; then
 elif [ "\$1" = pane ] && [ "\$2" = split ]; then
   echo '{"result":{"pane":{"pane_id":"wC:p9"}}}'
 elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  if [ "\${HERDR_AGENT_GET_FAIL:-}" = 1 ]; then echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1; fi
   if [ -n "\${HERDR_AGENT_GET_JSON:-}" ]; then printf '%s\n' "\$HERDR_AGENT_GET_JSON"; exit 0; fi
   printf '{"result":{"agent":{"pane_id":"%s","name":"%s"}}}\n' "\$3" "\${HERDR_AGENT_NAME:-}"
 elif [ "\$1" = pane ] && [ "\$2" = get ]; then
@@ -222,7 +223,15 @@ _fake_herdr_list_two_sessions() {   # <sid1> <pane1> <sid2> <pane2>
   if [ -n "$sid2" ]; then
     entries="$entries$sep{\"agent\":\"b\",\"agent_session\":{\"agent\":\"b\",\"kind\":\"id\",\"source\":\"herdr:b\",\"value\":\"$sid2\"},\"pane_id\":\"$pane2\"}"
   fi
-  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[%s]}}'\''; exit 0; }\nexit 0\n' "$entries" > "$FAKEBIN/herdr"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = agent ] && [ "\$2" = list ]; then
+  printf '%s\n' '{"id":"1","result":{"type":"list","agents":[$entries]}}'
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "\$3"
+fi
+exit 0
+EOF
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
 
@@ -2945,6 +2954,12 @@ M
     refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
     [ "$(cat "$kept_record")" = 'existing decision' ]
   done
+  : > "$ARGV_LOG"
+  HERDR_AGENT_GET_FAIL=1 run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
+  [ "$status" -ne 0 ]
+  grep -Fq agent_not_found <<< "$output"
+  refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  [ "$(cat "$kept_record")" = 'existing decision' ]
 }
 
 # --- a failed KEY is a failure, in the mode everybody uses (#1044) ------------
@@ -3872,6 +3887,8 @@ $(for pair in "$@"; do id="${pair%%=*}"; label="${pair#*=}"
   esac
 elif [ "\$1" = agent ] && [ "\$2" = list ]; then
   printf '{"id":"1","result":{"type":"list","agents":[]}}\n'
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "\$3"
 elif [ "\$1" = pane ] && [ "\$2" = rename ]; then exit 0
 elif [ "\$1" = agent ] && [ "\$2" = rename ]; then exit 0
 fi

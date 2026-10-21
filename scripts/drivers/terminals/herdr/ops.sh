@@ -1377,7 +1377,8 @@ _herdr_record_kept_name() {   # <id> <team> <agent> <name>
   rec="$(_herdr_name_record_path "$2" "$3")" || return 1
   fence="$(terminal_fence "$1")" || return 1
   if ! declare -F agmsg_write_atomic >/dev/null 2>&1; then
-    . "$SKILL_DIR/scripts/lib/registry-lock.sh" || return 1
+    [ -n "${SKILL_DIR:-}" ] || return 1
+    . "${SKILL_DIR:-}/scripts/lib/registry-lock.sh" || return 1
   fi
   mkdir -p "${rec%/*}" || return 1
   agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$(_herdr_bare_of "$1")" "$fence" "$4")"
@@ -1390,7 +1391,13 @@ terminal_name() {
   # Names chosen outside agmsg are herdr's public addressing surface. Keep
   # them; only a positively observed unnamed agent needs an internal key.
   # Unreadable/malformed observations must not authorize an overwrite.
-  json="$(_herdr_cli "$id" agent get "$(_herdr_bare_of "$id")" 2>/dev/null)" || json=""
+  # Preserve agent_not_found: spawn retries that specific startup observation
+  # while Herdr's detector is still recognizing the newly launched CLI.
+  if ! json="$(_herdr_cli "$id" agent get "$(_herdr_bare_of "$id")" 2>&1)"; then
+    echo runtime_error
+    echo "herdr: 'agent get' for pane '$id' failed${json:+: $json}" >&2
+    return 13
+  fi
   esc="$(printf '%s' "$json" | sed "s/'/''/g")"
   bare="$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")"
   current="$(sqlite3 :memory: "SELECT CASE
