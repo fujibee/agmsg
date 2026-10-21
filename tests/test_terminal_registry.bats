@@ -2767,20 +2767,9 @@ M
   grep -Fq "herdr:$HERDR_SOCKET_PATH:wC:p4" "$rec"
 }
 
-# --- join names a pane; it does not take the seat -----------------------------
-#
-# The 6th argument's default is "do not write the record", and join is the caller
-# that relies on it: the same identity can be joined from a second session while a
-# first one holds it through actas, and the record is what peek/poke resolve a
-# member's pane through. A second pane joining an already-held identity must not
-# take that placement over.
-#
-# Driven through join.sh, because the property is the CALLER's choice. The
-# helper's default is covered above — and that test stays green when join passes
-# `record`, which is measured: adding it to join.sh:260 leaves every test in this
-# file and in test_actas_integration green. A safe default proves nothing about
-# who takes it.
-@test "join: names the pane but does NOT take the seat's placement" {
+# --- Registration does not adopt a terminal identity ------------------------
+
+@test "join: tmux registration neither names the caller nor takes placement" {
   _install_fake_tmux
   export PATH="$FAKEBIN:$PATH"
   export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
@@ -2798,10 +2787,7 @@ M
   run bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A
   [ "$status" -eq 0 ]
 
-  # Positive control FIRST: join reached the naming step and the pane really was
-  # named. Without it a join that skipped naming altogether also leaves the record
-  # alone, and this test would read that as the property holding.
-  grep -q '\[select-pane\]' "$ARGV_LOG" || grep -q '\[set-option\]' "$ARGV_LOG"
+  refute grep -q '\[select-pane\]\|\[set-option\]' "$ARGV_LOG"
 
   # The seat's placement is not join's to take. `cmp`, not `[ "$(cat …)" = … ]`:
   # command substitution strips every trailing newline, so the string form is
@@ -2814,23 +2800,59 @@ M
   grep -q '/proj/OLD' "$rec"
 }
 
-@test "join: resolves a herdr pane from the type's dedicated session_env (#1024)" {
-  _install_fake_herdr "thread-right"
-  export PATH="$FAKEBIN:$PATH"
-  export HERDR_ENV=1 CODEX_SANDBOX=marker CODEX_THREAD_ID=thread-right
+@test "join: proxy registration leaves the caller untouched and actas records the member pane" {
+  export CODEX_HOME="$TEST_SKILL_DIR/codex-profile"
+  export AGMSG_CONFIG="$TEST_SKILL_DIR/config.json"
+  export AGMSG_APP_BASE="$TEST_SKILL_DIR/app"
   export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
-
-  run bash "$SKILL_DIR/scripts/join.sh" seatteam alice codex /proj/A
+  export HERDR_ENV=1 HERDR_PANE_ID=wA:p1
+  export LABEL_STATE="$TEST_SKILL_DIR/labels"
+  printf 'caller:original' > "$LABEL_STATE"
+  cat > "$FAKEBIN/herdr" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ARGV_LOG"
+case "$1/$2" in
+  pane/list)
+    printf '{"result":{"panes":[{"pane_id":"wA:p1","label":"%s"}]}}\n' "$(cat "$LABEL_STATE")" ;;
+  pane/get)
+    label=member
+    [ "$3" != wA:p1 ] || label="$(cat "$LABEL_STATE")"
+    printf '{"result":{"pane":{"pane_id":"%s","label":"%s"}}}\n' "$3" "$label" ;;
+  pane/rename)
+    [ "$3" != wA:p1 ] || printf '%s' "$4" > "$LABEL_STATE" ;;
+  agent/list) printf '{"result":{"agents":[]}}\n' ;;
+  agent/rename) : ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+  local project="$TEST_SKILL_DIR/project"
+  mkdir -p "$project"
+  run bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code "$project"
   [ "$status" -eq 0 ]
 
-  # Positive controls: join asked herdr and named the pane it found. The
-  # CODEX_SANDBOX marker is deliberately different; borrowing the first detect=
-  # key instead of session_env makes this test fail at the lookup.
-  grep -Fq 'herdr [agent] [list]' "$ARGV_LOG"
-  grep -Fq 'herdr [pane] [rename] [wC:p4] [seatteam:alice]' "$ARGV_LOG"
+  # Claim from the member's pane after registration by a different caller.
+  export HERDR_PANE_ID=wB:p2
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" "$project" claude-code alice member-session
+  [ "$status" -eq 0 ]
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  local named
+  named="$(agmsg_role_session_named seatteam alice)"
+  [ "${named%%$'\t'*}" = "herdr:$HERDR_SOCKET_PATH:wB:p2" ]
+  [ "$(cat "$LABEL_STATE")" = caller:original ]
+  refute grep -Eq '^(pane|agent) rename wA:p1 ' "$ARGV_LOG"
+  grep -Fq 'pane rename wB:p2 seatteam:alice' "$ARGV_LOG"
+}
 
-  # Naming at join is still display-only. Supplying a session id must not turn
-  # join into a placement claim for an identity that another session may hold.
+@test "join: a dedicated session_env does not authorize pane naming" {
+  _install_fake_herdr "thread-right"
+  export HERDR_ENV=1 CODEX_SANDBOX=marker CODEX_THREAD_ID=thread-right
+  export CODEX_HOME="$TEST_SKILL_DIR/codex-profile"
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  run bash "$SKILL_DIR/scripts/join.sh" seatteam alice codex /proj/A
+  [ "$status" -eq 0 ]
+  refute grep -q '\[rename\]' "$ARGV_LOG"
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   local rec; rec="$(agmsg_spawn_path seatteam alice)"
   refute test -e "$rec"

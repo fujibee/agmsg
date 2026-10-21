@@ -253,6 +253,25 @@ agmsg_lock_acquire() {
   local tpid thost q staged
   started="$(date +%s)"
   lock="$team_dir/.config.lock"
+  # EVERYTHING THE RECORD NEEDS IS MADE BEFORE THE LOCK IS TAKEN. The record
+  # (below) names the holder, and a lock with no record cannot be told from one
+  # taken a moment ago, so nothing ever breaks it -- the team waits until a
+  # person removes the directory. The old order took the lock and THEN produced
+  # the token (od, tr and date, each a fork), the host and a $(...) read-back;
+  # a kill in those milliseconds left exactly that lock. Now nothing is forked
+  # between mkdir and the record: what remains is one write.
+  local nonce="" token="" rec_host
+  nonce="$(LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  [ -n "$nonce" ] || nonce="${RANDOM:-}${RANDOM:-}${RANDOM:-}"
+  # FAIL SAFE MEANS NO TOKEN, not a weak one. With neither /dev/urandom nor
+  # $RANDOM, what is left is host.pid.second -- which collides across hosts, and
+  # a collision makes this process delete someone else's successor. That is the
+  # hazard the token exists to close, so the degraded path must not produce a
+  # token at all: no token recorded means release finds no match and refuses to
+  # remove anything. The lock leaks, and leaking is the failure this file chose
+  # over taking a live lock away.
+  [ -n "$nonce" ] && token="${HOSTNAME:-h}.$$.$(date +%s).$nonce"
+  rec_host="${HOSTNAME:-$(uname -n 2>/dev/null || echo unknown)}"
   until err="$(mkdir "$lock" 2>&1)"; do
     # WHY mkdir failed decides whether waiting can help, and only one reason
     # ever clears on its own: somebody holds the lock. Everything else -- no
@@ -390,28 +409,13 @@ agmsg_lock_acquire() {
   # when there is one; the fallbacks degrade toward "cannot prove it is mine",
   # and an unprovable lock is one this process will refuse to delete rather
   # than one it deletes on a coincidence.
-  local nonce=""
-  nonce="$(LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-  [ -n "$nonce" ] || nonce="${RANDOM:-}${RANDOM:-}${RANDOM:-}"
-  # FAIL SAFE MEANS NO TOKEN, not a weak one. With neither /dev/urandom nor
-  # $RANDOM, what is left is host.pid.second — which collides across hosts, and
-  # a collision makes this process delete someone else's successor. That is the
-  # hazard the token exists to close, so the degraded path must not produce a
-  # token at all.
   #
-  # No token recorded means release finds no match and refuses to remove
-  # anything: the lock leaks, and leaking is the failure this file chose over
-  # taking a live lock away. The claim "it degrades toward not deleting" was
-  # written before this branch existed; it is true now (raised in review).
-  if [ -n "$nonce" ]; then
-    _agmsg_lock_set_token "$lock" "${HOSTNAME:-h}.$$.$(date +%s).$nonce"
-  fi
-  {
-    printf 'token %s\n' "$(_agmsg_lock_get_token "$lock")"
-    printf 'pid %s\n' "$$"
-    printf 'command %s\n' "${0##*/}"
-    printf 'host %s\n' "${HOSTNAME:-$(uname -n 2>/dev/null || echo unknown)}"
-  } > "$lock.holder" 2>/dev/null || true
+  # One write, with nothing forked since the mkdir: the values were made above.
+  # The token is registered for release right after; a kill in between leaves a
+  # lock WITH a record, which the next acquirer can judge and break.
+  printf 'token %s\npid %s\ncommand %s\nhost %s\n' \
+    "$token" "$$" "${0##*/}" "$rec_host" > "$lock.holder" 2>/dev/null || true
+  [ -n "$token" ] && _agmsg_lock_set_token "$lock" "$token"
   AGMSG_HELD_LOCKS="${AGMSG_HELD_LOCKS:+$AGMSG_HELD_LOCKS
 }$lock"
   # Idempotent: re-arming the same handlers each acquire is harmless.

@@ -155,6 +155,164 @@ config_field() {
         AND json_extract(event,'\$.to')='carol';")" -eq 1 ]
 }
 
+@test "rename carries a name-only legacy team's placement record to the new name, replacing a stale one (#1403)" {
+  # A journaled team's placement path is keyed by member_id (#1023), which
+  # already survives a rename on its own -- the bug this covers is specific
+  # to a name-only legacy team (no roster.jsonl), where the path is purely
+  # name-keyed and the rename has nothing else carrying it over.
+  mkdir -p "$TEST_SKILL_DIR/teams/legacy"
+  printf '%s\n' \
+    '{"name":"legacy","agents":{"alice":{"type":"claude-code","project":"/tmp/a"}}}' \
+    > "$TEST_SKILL_DIR/teams/legacy/config.json"
+
+  # A stale placement record already sitting under the NEW name, left by
+  # some unrelated former member no longer in the roster (#1403's own
+  # reproduction: a dead tmux pane from months earlier). Computed through
+  # agmsg_spawn_path itself -- the exact path a real reader (team.sh,
+  # send.sh's #1114 guard) resolves -- rather than assuming its on-disk
+  # naming scheme.
+  local alice_spawn carol_spawn
+  (
+    export SKILL_DIR="$TEST_SKILL_DIR"
+    # shellcheck disable=SC1090
+    source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+    agmsg_spawn_path legacy alice > "$TEST_SKILL_DIR/alice_spawn_path"
+    agmsg_spawn_path legacy carol > "$TEST_SKILL_DIR/carol_spawn_path"
+  )
+  alice_spawn="$(cat "$TEST_SKILL_DIR/alice_spawn_path")"
+  carol_spawn="$(cat "$TEST_SKILL_DIR/carol_spawn_path")"
+  mkdir -p "$(dirname "$alice_spawn")"
+  printf 'herdr:sock:pA\t/tmp/a\tclaude-code\n' > "$alice_spawn"
+  printf 'tmux:%%9\t/tmp/long-gone\tclaude-code\n' > "$carol_spawn"
+
+  bash "$SCRIPTS/rename.sh" legacy alice carol
+
+  [ "$(config_field "$TEST_SKILL_DIR/teams/legacy/config.json" '$.agents.carol.type')" = claude-code ]
+
+  # alice's record moved to carol's path, overwriting the stale leftover --
+  # never left behind under the old name, never left alongside it under the
+  # new one.
+  [ ! -e "$alice_spawn" ]
+  [ -f "$carol_spawn" ]
+  grep -qF 'herdr:sock:pA' "$carol_spawn"
+
+  # The other half of the same fix (review round, #1625): a JOURNALED team's
+  # placement path is already keyed by member_id, not name, so renaming must
+  # not touch it at all -- the record stays exactly where it was, under the
+  # SAME path, with its original content intact. Proving this needs a live
+  # record already sitting there BEFORE the rename, not just "a file exists
+  # afterward": a version of this fix that blindly carried out the same
+  # move/replace for a journaled team too was confirmed (by hand, before
+  # this was gated off) to compute the identical id-keyed path for both
+  # names and reduce to a same-path no-op -- this only tells the two apart
+  # by also checking the content survived untouched.
+  bash "$SCRIPTS/join.sh" idteam dave claude-code /tmp/d
+  local dave_spawn
+  (
+    export SKILL_DIR="$TEST_SKILL_DIR"
+    # shellcheck disable=SC1090
+    source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+    agmsg_spawn_path idteam dave > "$TEST_SKILL_DIR/dave_spawn_path"
+  )
+  dave_spawn="$(cat "$TEST_SKILL_DIR/dave_spawn_path")"
+  mkdir -p "$(dirname "$dave_spawn")"
+  printf 'herdr:sock:pD\t/tmp/d\tclaude-code\n' > "$dave_spawn"
+
+  bash "$SCRIPTS/rename.sh" idteam dave erin
+
+  [ "$(config_field "$TEST_SKILL_DIR/teams/idteam/config.json" '$.agents.erin.registrations[0].type')" = claude-code ]
+  [ -f "$dave_spawn" ]
+  grep -qF 'herdr:sock:pD' "$dave_spawn"
+
+  # A third case in the same journaled team (review round, #1625): #1023
+  # only migrates a pair's file to its id key the next time something
+  # WRITES it, so an id-having team can still have ordinary legacy
+  # name-keyed files for BOTH names if neither was ever written since #1023
+  # landed -- #1403's own reproduction. frank's real record is still a
+  # legacy file (never promoted), and a dead tmux leftover already sits
+  # under the destination name -- also still legacy, from some unrelated
+  # former member.
+  bash "$SCRIPTS/join.sh" idteam frank claude-code /tmp/f
+  local rundir frank_legacy grace_legacy
+  (
+    export SKILL_DIR="$TEST_SKILL_DIR"
+    # shellcheck disable=SC1090
+    source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+    _actas_lock_dir > "$TEST_SKILL_DIR/rundir"
+  )
+  rundir="$(cat "$TEST_SKILL_DIR/rundir")"
+  frank_legacy="$rundir/spawn.idteam__frank"
+  grace_legacy="$rundir/spawn.idteam__grace"
+  printf 'herdr:sock:pF\t/tmp/f\tclaude-code\n' > "$frank_legacy"
+  printf 'tmux:%%9\t/tmp/long-gone\tclaude-code\n' > "$grace_legacy"
+
+  bash "$SCRIPTS/rename.sh" idteam frank grace
+
+  # Both legacy files are gone -- frank's never-promoted record did not stay
+  # behind under the old name, and grace's dead leftover did not survive
+  # either -- and whoever resolves grace's placement now (team.sh, the
+  # #1114 guard) reaches frank's real record, promoted to the id key.
+  [ ! -e "$frank_legacy" ]
+  [ ! -e "$grace_legacy" ]
+  (
+    export SKILL_DIR="$TEST_SKILL_DIR"
+    # shellcheck disable=SC1090
+    source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+    agmsg_spawn_path idteam grace > "$TEST_SKILL_DIR/grace_resolved_path"
+  )
+  local grace_resolved
+  grace_resolved="$(cat "$TEST_SKILL_DIR/grace_resolved_path")"
+  [ -f "$grace_resolved" ]
+  grep -qF 'herdr:sock:pF' "$grace_resolved"
+
+  # A fourth case, in the LEGACY-team branch (review finding, #1625): the
+  # encoded legacy filename "<enc_team>__<enc_name>" has no separator
+  # escaping, so renaming within team "legacy" to a name containing "__"
+  # can encode to the exact same path as an unrelated pair in a DIFFERENT
+  # team -- team "a__b" agent "c" also encodes to "spawn.a__b__c". Without
+  # the same unambiguity guard the id-team branch already uses, this
+  # would mv/rm that other team's live placement record.
+  mkdir -p "$TEST_SKILL_DIR/teams/a"
+  printf '%s\n' '{"name":"a","agents":{"old":{"type":"claude-code","project":"/tmp/a"}}}' \
+    > "$TEST_SKILL_DIR/teams/a/config.json"
+  mkdir -p "$TEST_SKILL_DIR/teams/a__b"
+  printf '%s\n' '{"name":"a__b","agents":{"c":{"type":"claude-code","project":"/tmp/c"}}}' \
+    > "$TEST_SKILL_DIR/teams/a__b/config.json"
+  local shared_spawn
+  (
+    export SKILL_DIR="$TEST_SKILL_DIR"
+    # shellcheck disable=SC1090
+    source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+    _actas_lock_dir > "$TEST_SKILL_DIR/rundir2"
+  )
+  shared_spawn="$(cat "$TEST_SKILL_DIR/rundir2")/spawn.a__b__c"
+  printf 'herdr:sock:LIVE\t/tmp/c\tclaude-code\n' > "$shared_spawn"
+
+  bash "$SCRIPTS/rename.sh" a old 'b__c'
+
+  grep -qF 'herdr:sock:LIVE' "$shared_spawn"
+
+  # A fifth case (review finding, #1625 round 2): the "__"-contains check
+  # above alone misses a collision caused by an underscore sitting right at
+  # the join boundary, not inside either half. Team "a" agent "_b" and team
+  # "a_" agent "b" both encode to "a___b" even though NEITHER half contains
+  # "__" on its own -- the ambiguity comes from the inserted "__" separator
+  # picking up an extra adjacent "_" from one side.
+  mkdir -p "$TEST_SKILL_DIR/teams/a2"
+  printf '%s\n' '{"name":"a2","agents":{"old2":{"type":"claude-code","project":"/tmp/x"}}}' \
+    > "$TEST_SKILL_DIR/teams/a2/config.json"
+  mkdir -p "$TEST_SKILL_DIR/teams/a2_"
+  printf '%s\n' '{"name":"a2_","agents":{"y":{"type":"claude-code","project":"/tmp/y"}}}' \
+    > "$TEST_SKILL_DIR/teams/a2_/config.json"
+  local shared_spawn2
+  shared_spawn2="$(cat "$TEST_SKILL_DIR/rundir2")/spawn.a2___y"
+  printf 'herdr:sock:LIVE2\t/tmp/y\tclaude-code\n' > "$shared_spawn2"
+
+  bash "$SCRIPTS/rename.sh" a2 old2 '_y'
+
+  grep -qF 'herdr:sock:LIVE2' "$shared_spawn2"
+}
+
 @test "concurrent renames accept only the first event whose from name is current" {
   bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
   local team_dir="$TEST_SKILL_DIR/teams/demo"

@@ -123,7 +123,8 @@ write_node_launcher_fixtures() {
   local type rendered
   while IFS= read -r type; do
     rendered="$(render_type "$type")"
-    ! grep -q '__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__' "$rendered"
+    ! grep -q '__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__' "$rendered" \
+      || { echo "unrendered placeholder left in: $rendered" >&2; return 1; }
     grep -Fq '<!-- agmsg:render-root -->' "$rendered"
     grep -Fq "<!-- agmsg:render-overlay $type -->" "$rendered"
     grep -Fq "whoami.sh \"\$(pwd)\" $type" "$rendered"

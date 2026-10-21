@@ -272,6 +272,33 @@ settings_file() {
   local n
   n=$(sqlite_mem "SELECT count(*) FROM json_each(json_extract(readfile('$(rf "$(settings_file)")'), '\$.hooks.SessionStart'));")
   [ "$n" -eq 2 ]
+  # The event stays a JSON array (a subquery result passed to json_set() as
+  # plain text would be stored as a string on newer SQLite), through the
+  # strip on the way out as well.
+  [ "$(sqlite_mem "SELECT json_type(readfile('$(rf "$(settings_file)")'), '\$.hooks.SessionStart');")" = array ]
+  run bash "$SCRIPTS/delivery.sh" set off claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ "$(sqlite_mem "SELECT json_type(readfile('$(rf "$(settings_file)")'), '\$.hooks.SessionStart');")" = array ]
+  grep -q "${skill_name}-my-wrapper.sh" "$(settings_file)"
+
+  # A file an affected version already corrupted (the array stored as a
+  # string) is restored by the next set, with the user's hook intact.
+  printf '%s' '{"hooks":{"SessionStart":"[{\"hooks\":[{\"type\":\"command\",\"command\":\"'"$TEST_PROJECT"'/scripts/'"$skill_name"'-my-wrapper.sh\"}]}]"}}' \
+    > "$(settings_file)"
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ "$(sqlite_mem "SELECT json_type(readfile('$(rf "$(settings_file)")'), '\$.hooks.SessionStart');")" = array ]
+  grep -q "${skill_name}-my-wrapper.sh" "$(settings_file)"
+  has_session_start "$(settings_file)"
+
+  # An event that is not an array (an object here) is refused, naming the file
+  # and event, and the file is not touched.
+  printf '%s' '{"hooks":{"SessionStart":{"user":"kept"}}}' > "$(settings_file)"
+  cp "$(settings_file)" "$BATS_TEST_TMPDIR/object-event.json"
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  grep -qF "$(settings_file): hooks.SessionStart is not an array" <<<"$output"
+  cmp "$(settings_file)" "$BATS_TEST_TMPDIR/object-event.json"
 }
 
 @test "delivery set monitor: round-trips multibyte (UTF-8) settings without a short-write reject" {
@@ -1763,7 +1790,8 @@ JSON
   wait "$pid" 2>/dev/null || true
 
   grep -q "new-for-bob"   /tmp/agmsg-as-bob
-  ! grep -q "new-for-alice" /tmp/agmsg-as-bob
+  ! grep -q "new-for-alice" /tmp/agmsg-as-bob \
+    || { echo "forbidden message leaked to bob" >&2; rm -f /tmp/agmsg-as-bob; return 1; }
   rm -f /tmp/agmsg-as-bob
 }
 

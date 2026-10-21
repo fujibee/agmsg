@@ -109,10 +109,10 @@ get_members() {
     WITH cfg AS (SELECT CAST(readfile('$path_sql') AS TEXT) AS json)
     SELECT json_object(
       'name', a.key,
-      'types', (
+      'types', json((
         SELECT json_group_array(DISTINCT json_extract(r.value, '\$.type'))
         FROM json_each(json_extract(a.value, '\$.registrations')) AS r
-      ),
+      )),
       'project', (
         SELECT json_extract(r.value, '\$.project')
         FROM json_each(json_extract(a.value, '\$.registrations')) AS r

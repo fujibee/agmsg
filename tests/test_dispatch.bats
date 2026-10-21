@@ -195,16 +195,8 @@ teardown() {
   [[ "$output" == *"Team: demo"* ]]
 }
 
-# #1096 seam: spawn turns self-naming off for the pre-join it runs on behalf of
-# the NEW member (join.sh in the caller's process). The dispatcher's two join.sh
-# calls -- `join`, and the `actas` fallback -- join the seat ITSELF, from its own
-# pane, and must keep naming it. A stray AGMSG_SELF_NAME=off on either path turns
-# the matching half of this test red; the fake herdr logs every argv.
-@test "dispatch: join and the actas fallback name the seat's OWN pane (#1096)" {
-  # This test's whole subject is the naming primitive firing (against a fake
-  # herdr below, never a real terminal), so it opts back into the
-  # primitive's own default (on) rather than the harness's #1095 off
-  # (test_helper.bash).
+# Both dispatcher registration paths leave the caller's terminal untouched.
+@test "dispatch: join and actas registration fallback do not name the caller" {
   unset AGMSG_SELF_NAME
   local proj="$BATS_TEST_TMPDIR/project-naming" log="$BATS_TEST_TMPDIR/herdr.log"
   local bin="$BATS_TEST_TMPDIR/bin"
@@ -224,16 +216,15 @@ STUB
   export HERDR_ENV=1 HERDR_SOCKET_PATH=/tmp/hsock HERDR_PANE_ID=wD:pSelf
   unset AGMSG_TERMINAL
 
-  # join: the seat names its own pane with the key and the prefixed label.
+  # join registers the member without adopting its terminal identity.
   run bash "$SCRIPTS/windows/dispatch.sh" --type claude-code --project "$proj" -- join demo carol
   [ "$status" -eq 0 ]
-  grep -q '^agent rename wD:pSelf ' "$log"
-  grep -q '^pane rename wD:pSelf demo:carol$' "$log"
+  refute grep -q ' rename ' "$log"
 
   # actas fallback (name not registered yet -> join.sh): the same.
   : > "$log"
   run env CLAUDE_CODE_SESSION_ID=test-session bash "$SCRIPTS/windows/dispatch.sh" --type claude-code --project "$proj" -- actas dave
   [ "$status" -eq 0 ]
-  grep -q '^agent rename wD:pSelf ' "$log"
-  grep -q '^pane rename wD:pSelf demo:dave$' "$log"
+  refute grep -q ' rename ' "$log"
+  bash "$SCRIPTS/identities.sh" "$proj" claude-code | grep -q 'dave'
 }

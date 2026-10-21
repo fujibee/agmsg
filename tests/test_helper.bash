@@ -34,6 +34,9 @@ unset CLAUDE_CONFIG_DIR
 # of whatever the fixture set up, silently changing which branch a test
 # exercises. Tests that deliberately model a caller set these explicitly.
 unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
+# Codex Desktop exports this; the codex-app driver (priority 1, exclusive)
+# keys off it and would win over every fake terminal a test sets up.
+unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
 export AGMSG_SELF_NAME=off
 
 setup_test_env() {
@@ -48,6 +51,7 @@ setup_test_env() {
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
   unset CLAUDE_CONFIG_DIR
   unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
   # Saved ONCE (first call wins, via :=): a test that calls teardown_test_env
   # and then setup_test_env again within its OWN body (several in
   # test_remote.bats do, to re-enter with a different fixture) would
@@ -130,8 +134,30 @@ setup_test_env() {
 # holds $dir without naming it in argv, revisit (add an lsof pass gated on the rm
 # actually failing, so the cost is paid only when it is needed).
 _pids_referencing_dir() {   # <dir>
+  # MSYS's ps has no -o, so on Git Bash the listing below would come back empty
+  # and the reap would "succeed" having stopped nothing. Read /proc/<pid>/cmdline
+  # there instead (the source compat_get_cmdline uses). A native process reports
+  # the dir in its mixed `C:/...` form, so match both spellings.
+  # _PIDS_PROC_ROOT forces this branch on a host with a /proc-shaped tree.
+  local proc_root="${_PIDS_PROC_ROOT:-/proc}" dir="$1" alt="" f p cl
+  if [ -n "${_PIDS_PROC_ROOT:-}" ] || case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; then
+    command -v cygpath >/dev/null 2>&1 && alt="$(cygpath -m "$dir" 2>/dev/null || true)"
+    for f in "$proc_root"/[0-9]*/cmdline; do
+      [ -r "$f" ] || continue
+      p="${f#"$proc_root"/}"; p="${p%/cmdline}"
+      [ "$p" = "$$" ] && continue
+      cl="$(tr '\0' ' ' < "$f" 2>/dev/null)" || continue
+      case "$cl" in
+        *"$dir"*) printf '%s\n' "$p" ;;
+        *) if [ -n "$alt" ] && [ "$alt" != "$dir" ]; then
+             case "$cl" in *"$alt"*) printf '%s\n' "$p" ;; esac
+           fi ;;
+      esac
+    done
+    return 0
+  fi
   ps -eo pid=,args= 2>/dev/null |
-    AGMSG_REAP_DIR="$1" awk -v me="$$" 'index($0, ENVIRON["AGMSG_REAP_DIR"]) { if ($1+0 != me+0) print $1 }'
+    AGMSG_REAP_DIR="$dir" awk -v me="$$" 'index($0, ENVIRON["AGMSG_REAP_DIR"]) { if ($1+0 != me+0) print $1 }'
 }
 
 # Reap any process still holding $TEST_SKILL_DIR, then let handles release, BEFORE the

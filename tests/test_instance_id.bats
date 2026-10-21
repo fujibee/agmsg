@@ -455,6 +455,27 @@ gone_pid() {
   [[ "$output" == *"ignoring non-numeric AGMSG_AGENT_PID"* ]]
 }
 
+@test "override: CLAUDE_PID names the seat on Windows only, and only while alive (#1585)" {
+  unset AGMSG_AGENT_PID
+  # Synthetic pid and stubbed liveness / ancestor walk: a real $$ is an MSYS pid
+  # that tasklist would not know on Windows, and the walk must be pinned too.
+  _agmsg_pid_alive() { return 0; }
+  compat_get_ppid() { return 1; }
+  # Windows: a live CLAUDE_PID is taken without walking ps (which cannot see claude.exe).
+  _agmsg_platform=msys CLAUDE_PID=424242 run agmsg_agent_pid claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" = "424242" ]
+  # Another host type, or a non-Windows host, never reads it.
+  _agmsg_platform=msys CLAUDE_PID=424242 run agmsg_agent_pid codex
+  [ "$status" -ne 0 ]
+  _agmsg_platform=linux CLAUDE_PID=424242 run agmsg_agent_pid claude-code
+  [ "$status" -ne 0 ]
+  # A dead pid is not trusted.
+  _agmsg_pid_alive() { return 1; }
+  _agmsg_platform=msys CLAUDE_PID=424242 run agmsg_agent_pid claude-code
+  [ "$status" -ne 0 ]
+}
+
 # --- actas distinctness: the #93 payoff ---
 
 # Two instance ids that share a session_id prefix but differ in pid must be

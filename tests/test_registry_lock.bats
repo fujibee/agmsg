@@ -109,6 +109,29 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   [ "$status" -eq 0 ]
   grep -qE "^pid [0-9]+$" <<<"$output"
   grep -q "^command " <<<"$output"
+  grep -q "^token ." <<<"$output"
+  grep -q "^host ." <<<"$output"
+
+  # And a process killed while it is still making the token (od is slowed to a
+  # crawl) must leave either a lock WITH its record or no lock at all -- never
+  # the directory alone, which nothing can tell from a lock taken a moment ago
+  # and so nothing ever breaks.
+  local shims="$BATS_TEST_TMPDIR/shims" pid
+  mkdir -p "$shims" "$BATS_TEST_TMPDIR/teams/killed"
+  printf '#!/bin/sh\nsleep 3\n' > "$shims/od"
+  chmod +x "$shims/od"
+  env PATH="$shims:$PATH" LOCKLIB="$LOCKLIB" TEAM_DIR="$BATS_TEST_TMPDIR/teams/killed" bash -c '
+    . "$LOCKLIB"
+    agmsg_lock_acquire "$TEAM_DIR"
+    sleep 30
+  ' >/dev/null 2>&1 3>&- 4>&- &
+  pid=$!
+  sleep 1
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  if [ -d "$BATS_TEST_TMPDIR/teams/killed/.config.lock" ]; then
+    [ -f "$BATS_TEST_TMPDIR/teams/killed/.config.lock.holder" ]
+  fi
 }
 
 @test "lock: a lock that cannot be released says so, and the way out works (#778)" {

@@ -162,7 +162,32 @@ storage_init() {
   # store says so, or none of it is visible and the store still says the old
   # revision. A crash or failure in the middle cannot leave a new stamp over
   # an old schema, which is the one way the fast path above could lie.
-  agmsg_sqlite -bail "$db" "
+  #
+  # Fed to sqlite3 on STDIN, not as a command-line argument (#1645). SQLite
+  # 3.53.4 and 3.54.0's CLI only honor -bail's stop-at-first-error contract
+  # when every top-level statement's terminating `;` ends its own physical
+  # line; the exact same statements handed over as a single argv string ran
+  # a failing statement past the error anyway and still reached the
+  # PRAGMA/COMMIT below it, stamping the current revision over a schema that
+  # never finished (3.51.0 did not have this gap). The statements below
+  # already satisfy the per-line shape -- a statement may span several
+  # lines, as CREATE TABLE events does, but never shares a line with another
+  # statement -- so moving them to stdin needs no reshaping, only the
+  # transport.
+  #
+  # A heredoc redirect, not a `printf | agmsg_sqlite` pipe (review on
+  # #1645/#1654): a pipe's right-hand side is a subshell, so the escape
+  # probe's memo set there dies with it and every call needs its own
+  # agmsg_sqlite_warm -- which is also what tests/test_remote_sync.bats's
+  # #462 scan looks for within two lines above a `| agmsg_sqlite`, and a
+  # warm 100 lines above the actual pipe here read as unwarmed and failed
+  # that scan. `<<SQL ... SQL` runs in the CURRENT shell, so there is no
+  # subshell to lose the memo to and no warm call needed here at all. The
+  # delimiter is intentionally unquoted (`<<SQL`, not `<<'SQL'`) so
+  # ${_AGMSG_STORAGE_SCHEMA_REV} below still expands; nothing else in this
+  # block contains a `$` or a backtick for that same unquoted expansion to
+  # misfire on.
+  agmsg_sqlite -bail "$db" <<SQL >/dev/null 2>&1 || { echo runtime_error; return 13; }
     BEGIN IMMEDIATE;
     CREATE TABLE IF NOT EXISTS events (
       seq        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -262,7 +287,7 @@ storage_init() {
       VALUES('read_cursor_v1','1');
     PRAGMA user_version=${_AGMSG_STORAGE_SCHEMA_REV};
     COMMIT;
-  " >/dev/null 2>&1 || { echo runtime_error; return 13; }
+SQL
   echo ok
 }
 

@@ -156,6 +156,28 @@ _start_mock_openrouter() {
   [ "$(printf '%s\n' "$output" | sed -n 1p)" = "jev: model=sonnet (p=0.80, confidence=0.90)" ]
   [ "$(printf '%s\n' "$output" | sed -n 2p)" = "effort=error (malformed answer) (cost \$0.000019)" ]
 
+  # --- the control characters handle frames its own rendering with, arriving
+  # inside a value: a string confidence carrying U+001F/U+001E must not forge a
+  # third answer (the old, per-field rendering returned exactly the two lines
+  # below), and the row it sits in is simply malformed. ---
+  _start_mock_openrouter MOCK_OPENROUTER_FRAMING_BYTES=1
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | sed -n 2p)" = "effort=error (malformed answer) (cost \$0.000019)" ]
+  refute grep -q phantom <<<"$output"
+
+  # --- a key file with a NUL in it is read to its end, not to the NUL: what
+  # follows one is checked like the rest, so a bad second line is still refused
+  # as a multi-line key rather than "test-key" being accepted from the front. ---
+  printf 'test-key\0\nbad second line\n' > "$KEY_FILE"
+  run env AGMSG_JEV_API_BASE="http://127.0.0.1:$MOCK_PORT" \
+    "$SCRIPTS/drivers/ext-tools/jev/handle" <<<"$INPUT"
+  [ "$status" -ne 0 ]
+  grep -q "key file does not hold a single-line key" <<<"$output"
+  printf 'or-test-key-do-not-print\n' > "$KEY_FILE"
+
   # --- contrast: a choice that is the literal STRING "null" is a genuine
   # answer, not a missing one -- `jq -r` turns a real JSON null and the
   # two-character string "null" into the identical output text, so a

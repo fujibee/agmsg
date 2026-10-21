@@ -348,6 +348,43 @@ agmsg_sqlite_warm() {
   [ -n "$_AGMSG_ESCAPE_PROBED" ] || _agmsg_escape_flag >/dev/null
 }
 
+# Is $1 (sqlite3's full stderr, possibly several lines) a real lock-timeout
+# giveup -- never a statement whose own error text happens to MENTION
+# "database is locked", e.g. a table or column named that, or a failed
+# statement displayed verbatim in a parse error. A plain substring test
+# cannot tell the two apart (review on #1645/#1654: a `SELECT` against a
+# table literally named "database is locked" read as busy and got the
+# busy diagnostic, when it was really "no such table"). Matched instead
+# against the exact whole lines sqlite3 itself emits for SQLITE_BUSY,
+# collected by reproducing a real lock timeout on both argv and stdin input
+# and on both supported CLI generations:
+#   3.51.0, argv:  Error: in prepare, database is locked (5)
+#   3.51.0, argv:  Error: stepping, database is locked (5)
+#   3.51.0, stdin: Parse error near line N: database is locked (5)
+#   3.53.4, argv:  Parse error in Nth command line argument: database is locked (5)
+#   3.53.4, argv:  Error in Nth command line argument: database is locked
+#   3.53.4, stdin: Parse error near line N: database is locked (5)
+# Anchored start-to-end per line, with no wildcard around "database is
+# locked" itself, so a line that embeds extra text around it (the
+# counter-example above renders as "...: no such table: database is
+# locked") fails every alternative and is correctly left unclassified.
+#
+# Windows' sqlite3.exe ends stderr lines with \r\n, not \n (the same CRLF
+# behaviour as its stdout, see agmsg_sqlite()'s own CRLF comment above) --
+# left in, the trailing \r sits between "locked" and the `$` anchor and
+# every alternative misses, so a real busy timeout goes unclassified on
+# Windows (review on #1654). Stripped with a builtin substitution, not an
+# external command, matching ONLY the string this match is run against;
+# the original stderr this function was handed is still re-emitted to the
+# caller's stderr unchanged by agmsg_sqlite() itself.
+_agmsg_sqlite_err_is_busy() {
+  local _err="${1//$'\r'/}"
+  printf '%s\n' "$_err" | grep -Eq \
+    '^Error: (in prepare|stepping), database is locked( \([0-9]+\))?$'\
+'|^(Error|Parse error) in [0-9]+(st|nd|rd|th) command line argument: database is locked( \([0-9]+\))?$'\
+'|^(Error|Parse error) near line [0-9]+: database is locked( \([0-9]+\))?$'
+}
+
 agmsg_sqlite() {
   # Probe in THIS shell, not in a command substitution. `$(_agmsg_escape_flag)`
   # ran the function in a subshell, so the memo it set was discarded on exit and
@@ -396,12 +433,41 @@ agmsg_sqlite() {
   # status is sqlite3's, not sed's, without changing pipefail for the
   # calling script (same shape as _sqlite_data / _sqlite_data_stdin in
   # drivers/storage/sqlite.sh).
-  local _agmsg_sqlite_rc=0
-  (
-    set -o pipefail
-    # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
-    sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" | sed $'s/\r$//'
-  ) || _agmsg_sqlite_rc=$?
+  # stderr is captured into a variable, not a temp file: this function is on
+  # the hot path (every send/receive/watch.sh cycle), so mktemp+cat+rm on
+  # EVERY call -- including the common all-ok case -- would add 3 processes
+  # per call for the busy-text check below alone, the same class of per-cycle
+  # process cost #1627/#1630/#1652 were about removing, and the kind of
+  # leftover-temp-file risk #1580 just fixed. The classic fd-juggle instead:
+  # `3>&1` on the outer group saves this function's real stdout onto fd 3;
+  # inside the command substitution, `1>&3` then points the pipeline's
+  # stdout back at that real stdout (bypassing the substitution's own
+  # capture), while `2>&1` (evaluated first, while fd 1 still means the
+  # substitution's capture) sends the pipeline's stderr there instead. Net
+  # effect: stdout streams straight through to the caller as before, stderr
+  # lands in $_agmsg_sqlite_err, and no process beyond sqlite3/sed is forked.
+  local _agmsg_sqlite_rc=0 _agmsg_sqlite_err
+  {
+    _agmsg_sqlite_err=$(
+      set -o pipefail
+      # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
+      { sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" | sed $'s/\r$//'; } 2>&1 1>&3 3>&-
+    )
+  } 3>&1 || _agmsg_sqlite_rc=$?
+  [ -z "$_agmsg_sqlite_err" ] || printf '%s\n' "$_agmsg_sqlite_err" >&2
+  # SQLite 3.53.4/3.54.0's CLI returns the generic 1 for a lock-timeout
+  # giveup instead of 5, on the same failure 3.51.0 reports as 5 (#1645) --
+  # so rc alone can no longer tell a busy timeout from any other failure on
+  # every supported CLI. _agmsg_sqlite_err_is_busy() recognizes the exact
+  # lines sqlite3 itself emits for this, so a real lock timeout still
+  # normalizes to the historical 5 (keeping every existing rc==5 caller,
+  # including the diagnostic below, working unchanged on either CLI
+  # generation), while an ordinary error that merely mentions "database is
+  # locked" in a table/column name or an echoed statement does not.
+  if [ "$_agmsg_sqlite_rc" -ne 0 ] && [ "$_agmsg_sqlite_rc" -ne 5 ] &&
+     _agmsg_sqlite_err_is_busy "$_agmsg_sqlite_err"; then
+    _agmsg_sqlite_rc=5
+  fi
   # SQLITE_BUSY after the full timeout used to pass in silence: the caller saw
   # a non-zero it often swallowed, and the operator saw a command that hung
   # for the timeout and said nothing (#1001 -- two people diagnosed two
