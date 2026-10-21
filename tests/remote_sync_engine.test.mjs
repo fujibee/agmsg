@@ -4939,15 +4939,22 @@ test("driver() waits out a busy store and retries; anything else is asked once",
   // out like a busy one, so the engine does not die on it.
   await useDriver("cannot-open.sh", 1, 13, "Error near line 50: unable to open database file");
   waits.length = 0;
-  assert.deepEqual(await driver("prepare", config, [], [], dependencies), [{ type: "sync_state", transport_cursor: "0" }]);
+  assert.deepEqual(await driver("read-prepare", config, [], [], dependencies), [{ type: "sync_state", transport_cursor: "0" }]);
   assert.equal(await readFile(counter, "utf8"), "2");
   assert.deepEqual(waits, [1000]);
+
+  // Another operation can fail after its COMMIT with the same words: a decision.
+  await useDriver("cannot-open-apply.sh", 1000, 13, "Error near line 50: unable to open database file");
+  waits.length = 0;
+  await assert.rejects(() => driver("apply", config, [], [], dependencies), (error) =>
+    error.driverExitCode === 13 && !isRetryable(error));
+  assert.equal(await readFile(counter, "utf8"), "1");
 
   // The same words from a statement outside the transaction script (it can
   // follow a COMMIT) are a decision: asked once.
   await useDriver("open-after-commit.sh", 1000, 13, "Error: unable to open database file");
   waits.length = 0;
-  await assert.rejects(() => driver("prepare", config, [], [], dependencies), (error) =>
+  await assert.rejects(() => driver("read-prepare", config, [], [], dependencies), (error) =>
     error.driverExitCode === 13 && !isRetryable(error));
   assert.equal(await readFile(counter, "utf8"), "1");
 

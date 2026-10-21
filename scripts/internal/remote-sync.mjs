@@ -2126,12 +2126,14 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
 // does not change it, so nothing else is retried here.
 export const STORAGE_BUSY_EXIT = 11;
 // SQLite could not open a file it needed (the store, or a temporary file) --
-// seen on Windows when something else held or removed it for a moment. Only the
-// form that names a line of the driver's transaction script ("Error near line
-// N:") is waited out like a busy store: the script runs inside one
-// BEGIN IMMEDIATE ... COMMIT, so it failed before anything was committed. The
-// plain "Error:" form comes from a separate statement, which can follow a
-// COMMIT, and is a decision like any other failure.
+// seen on Windows when something else held or removed it for a moment. Waited
+// out like a busy store, but only where repeating the call is known to be safe:
+// read-prepare, whose "Error near line N:" form names a line of its one
+// BEGIN IMMEDIATE ... COMMIT script (it failed before the COMMIT, so nothing
+// was committed), and whose read after the COMMIT is a separate statement that
+// reports the plain "Error:" form. Other operations (apply, resync, ...) can
+// fail after a COMMIT with the same words, so they stay a decision.
+const STORAGE_OPEN_RETRY_OPERATIONS = new Set(["read-prepare"]);
 const STORAGE_OPEN_FAILURE = /^Error near line \d+: unable to open database file/mu;
 // One wait is never longer than this; the budget is the total. The budget has
 // to outlast a real writer, not a polite one: the first prepare on a pulled
@@ -2179,7 +2181,7 @@ export async function driver(operation, config, input, extra = [], dependencies 
       return await run();
     } catch (error) {
       const busy = error?.driverExitCode === STORAGE_BUSY_EXIT;
-      if (!busy && !STORAGE_OPEN_FAILURE.test(error?.driverStderr ?? "")) throw error;
+      if (!busy && !(STORAGE_OPEN_RETRY_OPERATIONS.has(operation) && STORAGE_OPEN_FAILURE.test(error?.driverStderr ?? ""))) throw error;
       const waitMs = Math.min(STORAGE_BUSY_WAIT_CAP_MS, 1000 * 2 ** (attempt - 1));
       if (waitedMs + waitMs > budgetMs) {
         // The driver's own sentence stays in front; what is added is how long
