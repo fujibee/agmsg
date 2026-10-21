@@ -1948,9 +1948,13 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
       // holds the lock -- everyone else keeps the pipe, and with it the bounded
       // failure a pipe gives and an input that never reaches disk.
       if (holdsRegistryLock) stageInput(input, staging);
+      // windowsHide: an engine started from an SSH session outlives it, and on
+      // Windows every child it then creates without this fails to initialise
+      // (exit 0xC0000142) once the session's console is gone.
       child = spawn("bash", args, {
         stdio: [staging.fd === null ? "pipe" : staging.fd, "pipe", "pipe"],
         env: childEnvironment,
+        windowsHide: true,
       });
     } catch (error) {
       // Reached by a staging failure and by a synchronous spawn failure alike.

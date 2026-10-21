@@ -4943,3 +4943,14 @@ test("driver() waits out a busy store and retries; anything else is asked once",
   assert.equal(await readFile(counter, "utf8"), "1");
   assert.deepEqual(waits, []);
 });
+
+test("every child the engine creates is spawned with windowsHide, or it fails with 0xC0000142 once the SSH session that started it is gone", async () => {
+  // The failure exists only on Windows after a disconnect, so CI on other
+  // platforms cannot observe it; guard the call sites themselves.
+  for (const [file, call] of [["remote-sync.mjs", "spawn(\"bash\", args, {"], ["sync-cipher.mjs", "spawnSync(age, args, {"]]) {
+    const source = await readFile(new URL(`../scripts/internal/${file}`, import.meta.url), "utf8");
+    const at = source.indexOf(call);
+    assert.ok(at > 0, `${file}: spawn call not found`);
+    assert.match(source.slice(at, source.indexOf(");", at)), /windowsHide: true/, `${file}: spawn lacks windowsHide`);
+  }
+});
