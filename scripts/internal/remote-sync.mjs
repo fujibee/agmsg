@@ -2090,6 +2090,9 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
       // storage adapter's "busy" exit, see `driver` -- without parsing its own
       // sentence back out of the message.
       error.driverExitCode = code;
+      // The driver's own words, apart from the label/team/path context in the
+      // message, for the one caller that classifies a failure by them.
+      error.driverStderr = stderr;
       fail(error);
     });
     child.on("close", () => {
@@ -2122,6 +2125,16 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
 // is a decision (a failed check, an unsupported operation) and asking again
 // does not change it, so nothing else is retried here.
 export const STORAGE_BUSY_EXIT = 11;
+// SQLite could not open a file it needed (the store, or a temporary file) --
+// seen on Windows when something else held or removed it for a moment. Waited
+// out like a busy store, but only where repeating the call is known to be safe:
+// read-prepare, whose "Error near line N:" form names a line of its one
+// BEGIN IMMEDIATE ... COMMIT script (it failed before the COMMIT, so nothing
+// was committed), and whose read after the COMMIT is a separate statement that
+// reports the plain "Error:" form. Other operations (apply, resync, ...) can
+// fail after a COMMIT with the same words, so they stay a decision.
+const STORAGE_OPEN_RETRY_OPERATIONS = new Set(["read-prepare"]);
+const STORAGE_OPEN_FAILURE = /^Error near line \d+: unable to open database file/mu;
 // One wait is never longer than this; the budget is the total. The budget has
 // to outlast a real writer, not a polite one: the first prepare on a pulled
 // store held the lock for 63 s on the machine that filed #910 (155 s on a copy
@@ -2167,7 +2180,8 @@ export async function driver(operation, config, input, extra = [], dependencies 
     try {
       return await run();
     } catch (error) {
-      if (error?.driverExitCode !== STORAGE_BUSY_EXIT) throw error;
+      const busy = error?.driverExitCode === STORAGE_BUSY_EXIT;
+      if (!busy && !(STORAGE_OPEN_RETRY_OPERATIONS.has(operation) && STORAGE_OPEN_FAILURE.test(error?.driverStderr ?? ""))) throw error;
       const waitMs = Math.min(STORAGE_BUSY_WAIT_CAP_MS, 1000 * 2 ** (attempt - 1));
       if (waitedMs + waitMs > budgetMs) {
         // The driver's own sentence stays in front; what is added is how long
@@ -2175,11 +2189,11 @@ export async function driver(operation, config, input, extra = [], dependencies 
         // "held forever".
         error.message += ` -- waited ${Math.round(waitedMs / 1000)} s for the store to come free ` +
           `(the ${budgetMs / 1000} s budget) and it did not`;
-        error.code = "storage-busy";
+        error.code = busy ? "storage-busy" : "storage-unavailable";
         error.retryable = true;
         throw error;
       }
-      await eventCall("driver.busy", { operation, attempt, wait_ms: waitMs, waited_ms: waitedMs });
+      await eventCall(busy ? "driver.busy" : "driver.unavailable", { operation, attempt, wait_ms: waitMs, waited_ms: waitedMs });
       await sleepCall(waitMs);
       waitedMs += waitMs;
     }
