@@ -46,8 +46,10 @@ _agmsg_dir_drop() {
   fi
   mv "$dir/.owner" "$staged" || return $?
   rmdir "$dir" || rc=$?
-  if [ "$rc" -ne 0 ] && [ -d "$dir" ]; then
-    if ! ( umask 077; set -C; : > "$dir/.owner" ) 2>/dev/null && [ -f "$dir/.owner" ]; then
+  if [ "$rc" -ne 0 ]; then
+    if ! ( umask 077; set -C; : > "$dir/.owner" ) 2>/dev/null; then
+      # The namespace may have disappeared or changed hands since rmdir.
+      # Without reacquiring the marker we have no authority to restore a holder.
       rc=0
     fi
   fi
