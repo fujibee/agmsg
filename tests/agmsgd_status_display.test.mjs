@@ -110,7 +110,7 @@ test('Codex startup refreshes the sole destination from the current hook thread 
   assert.match(record('alice'), new RegExp(`session=${current}\\n`));
 });
 
-test('Codex startup selects a unique matching pane and epoch, and reports ambiguity instead of guessing', t => {
+test('Codex startup with two seats never picks one by pane and epoch, and changes neither record', t => {
   const { root, start, record, old } = codexStartupFixture(t, ['alice', 'bob']);
   const current = '01a13352-3599-7d62-a149-4c8182bcf009';
   const ref = 'tmux:/tmp/agmsg-hook-tmux:%4';
@@ -118,13 +118,10 @@ test('Codex startup selects a unique matching pane and epoch, and reports ambigu
   const mark = name => `${old(name)}named_ref=${ref}\nnamed_epoch=pid=321\n`;
   writeFileSync(join(root, 'run/spawn.test__bob'), `${ref}\t${root}\tcodex\n`);
   writeFileSync(join(root, 'run/role-session.test__bob'), mark('bob'));
-  start(current, pane);
-  assert.match(record('bob'), new RegExp(`session=${current}\\n`));
-  assert.equal(record('alice'), old('alice'));
-  writeFileSync(join(root, 'run/role-session.test__bob'), mark('bob').replace('pid=321', 'pid=320'));
+  // The pane comes from Codex's shared app-server, so it cannot tell the seats apart.
   assert.match(start(current, pane), /not connected to a seat yet.*\$.* actas <name>/);
-  assert.match(record('bob'), /named_epoch=pid=320/);
-  writeFileSync(join(root, 'run/role-session.test__bob'), mark('bob'));
+  assert.equal(record('bob'), mark('bob'));
+  assert.equal(record('alice'), old('alice'));
   writeFileSync(join(root, 'run/spawn.test__alice'), `${ref}\t${root}\tcodex\n`);
   writeFileSync(join(root, 'run/role-session.test__alice'), mark('alice'));
   assert.match(start(current, pane), /not connected to a seat yet.*\$.* actas <name>/);
