@@ -29,6 +29,9 @@ _plugin_enumerate() {
     for axisdir in "$base"/*/; do
       [ -d "$axisdir" ] || continue
       axis="$(basename "$axisdir")"
+      # plugins/sources/ holds installed plugin checkouts; each is its own base
+      # (db/plugin-sources), not an axis.
+      [ "$axis" != sources ] || continue
       for namedir in "$axisdir"*/; do
         [ -d "$namedir" ] || continue
         name="$(basename "$namedir")"
