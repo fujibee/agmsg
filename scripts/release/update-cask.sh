@@ -39,8 +39,8 @@ command -v gh >/dev/null 2>&1 || die "gh not found"
 who="$(gh api user --jq .login 2>/dev/null || true)"
 [ "$who" = "fujibee" ] || die "gh identity is '$who', expected 'fujibee' (check direnv .envrc)"
 
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
 
 # The cask's `app` stanza must track the bundle name, which follows
 # tauri.conf.json's productName (e.g. the 0.1.1 rename "agmsg app" ->
@@ -66,8 +66,8 @@ occ="$(printf '%s' "$DMG_NAME" | grep -o "$VERSION" | wc -l | tr -d ' ')"
 
 # 2. Download + hash.
 echo "==> Downloading $DMG_NAME from $TAG"
-gh release download "$TAG" --repo fujibee/agmsg --pattern "$DMG_NAME" --dir "$TMP"
-SHA="$(shasum -a 256 "$TMP/$DMG_NAME" | awk '{print $1}')"
+gh release download "$TAG" --repo fujibee/agmsg --pattern "$DMG_NAME" --dir "$WORK_DIR"
+SHA="$(shasum -a 256 "$WORK_DIR/$DMG_NAME" | awk '{print $1}')"
 echo "    sha256 $SHA"
 
 # 3. Rewrite the cask. Derive the url template from the real asset name so the
@@ -76,8 +76,8 @@ URL_ASSET="${DMG_NAME//$VERSION/#{version\}}"
 URL="https://github.com/fujibee/agmsg/releases/download/app-v#{version}/$URL_ASSET"
 
 echo "==> Updating tap"
-git clone --depth 1 -q "$TAP_REMOTE" "$TMP/tap"
-CASK="$TMP/tap/Casks/agmsg.rb"
+git clone --depth 1 -q "$TAP_REMOTE" "$WORK_DIR/tap"
+CASK="$WORK_DIR/tap/Casks/agmsg.rb"
 [ -f "$CASK" ] || die "Casks/agmsg.rb not found in the tap"
 
 sed -i '' \
@@ -108,10 +108,10 @@ grep -Fq "app \"$APP_BUNDLE\"" "$CASK" || die "app stanza rewrite failed — cas
 grep -Fq "depends_on arch: :arm64" "$CASK" && die "depends_on arch: :arm64 still present — cask format changed?"
 
 # 4. Commit + push (no-op safe: bail politely if nothing changed).
-if git -C "$TMP/tap" diff --quiet; then
+if git -C "$WORK_DIR/tap" diff --quiet; then
   echo "==> Tap already up to date for $VERSION — nothing to push"
   exit 0
 fi
-git -C "$TMP/tap" commit -aqm "agmsg $VERSION"
-git -C "$TMP/tap" push -q origin HEAD
+git -C "$WORK_DIR/tap" commit -aqm "agmsg $VERSION"
+git -C "$WORK_DIR/tap" push -q origin HEAD
 echo "==> Tap updated: agmsg $VERSION ($DMG_NAME)"
