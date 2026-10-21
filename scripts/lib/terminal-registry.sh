@@ -1165,6 +1165,13 @@ _agmsg_placement_claimant_here_now() {   # <rival-spawn-record-path> <claim-ref>
   declare -F _agmsg_role_session_field >/dev/null 2>&1 || { echo unknown; return 0; }
   claimant_sid="$(_agmsg_role_session_field "$role_path" session)"
   [ -n "$claimant_sid" ] || { echo unknown; return 0; }
+  # A Codex claimant's thread is not something herdr's agent list can answer
+  # for: its commands run under one shared app-server, and the list's
+  # agent_session for those panes is missing on most of them and, where present,
+  # names another seat's thread (measured: 1 of 5 Codex panes carried a session,
+  # and not the one running there). "Not among the live agents" would read a
+  # running Codex seat as gone and let another seat take its pane (#1112, #1468).
+  [ "$(_agmsg_role_session_field "$role_path" type)" != codex ] || { echo codex_unreadable; return 0; }
   declare -F terminal_session_live >/dev/null 2>&1 || { echo unknown; return 0; }
   live_out="$(terminal_session_live "$claimant_sid" 2>/dev/null)" || { echo unknown; return 0; }
   case "$live_out" in
@@ -1533,6 +1540,9 @@ agmsg_terminal_name_self() {
           *"__$(_actas_lock_encode "$agent")")
             _self_hint=" If '$_claimed_by' is this seat under a team that no longer exists, remove run/spawn.$_claimed_by." ;;
         esac
+        if [ "${_claimant_here:-}" = codex_unreadable ]; then
+          _self_hint="$_self_hint That seat is a Codex seat, and whether it is still running cannot be read from the terminal (its commands run under a shared app-server), so the record was not treated as stale."
+        fi
         echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. To keep this seat instead, drop or despawn that seat (or remove run/spawn.$_claimed_by) and act again.$_self_hint (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
         return 0
       fi
