@@ -24,6 +24,8 @@ import {
   discardInputDirectory,
   driver,
   STORAGE_BUSY_EXIT,
+  restartAfterStandDown,
+  standDownRestartArgs,
   stdinRedirect,
   storageDriverExitGraceMs,
   exportAgeHandoff,
@@ -3301,6 +3303,7 @@ test("configured native identity must belong to its epoch recipient manifest", a
 
 test("runLoop: an install update stands the engine down before any cycle, naming the update and the restart (#963)", async () => {
   const events = [];
+  const restarts = [];
   let cycles = 0;
   // Resolves -- a stand-down is a deliberate return, not a thrown failure.
   await runLoop(config, {}, {
@@ -3309,7 +3312,11 @@ test("runLoop: an install update stands the engine down before any cycle, naming
     cycleCall: async () => { cycles += 1; return {}; },
     sleepCall: async () => {},
     eventCall: async (name, fields) => { events.push({ name, ...fields }); },
+    restartCall: (team, root) => { restarts.push([team, root]); },
+    scriptsRoot: "/skill/scripts",
   });
+  // The stood-down engine asks for its own restart, from the updated scripts.
+  assert.deepEqual(restarts, [["demo", "/skill/scripts"]]);
   // Detected at the loop boundary: no driver was ever spawned.
   assert.equal(cycles, 0);
   assert.equal(events.length, 1);
@@ -4990,4 +4997,65 @@ test("a driver can read its staged input through the shell redirect used on Wind
   const result = spawnSync("bash", args, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'prepare\n{"type":"a"}\n{"type":"b"}\n');
+});
+
+test("restartAfterStandDown hands a detached helper the team and the updated remote.sh, without secrets, and survives a spawn error", () => {
+  const calls = [];
+  const listeners = {};
+  const fake = { unref() { calls.push("unref"); }, on(name, fn) { listeners[name] = fn; } };
+  restartAfterStandDown("demo", "/skill/scripts", {
+    spawnCall: (command, args, options) => { calls.push([command, args, options]); return fake; },
+    environment: { PATH: "/bin", AGMSG_SYNC_TOKEN: "secret", AGMSG_AGE_IDENTITY_FILE: "/id", AGMSG_SYNC_CONNECTION_DIR: "/conn" },
+  });
+  const [command, args, options] = calls[0];
+  assert.equal(command, "bash");
+  assert.deepEqual(args.slice(3, 5), [join("/skill/scripts", "remote.sh"), "demo"]);
+  assert.equal(options.detached, true);
+  assert.equal(options.stdio, "ignore");
+  assert.equal(options.windowsHide, true);
+  assert.deepEqual(options.env, { PATH: "/bin", AGMSG_SYNC_CONNECTION_DIR: "/conn" });
+  assert.equal(calls[1], "unref");
+  // An asynchronous spawn failure is reported, not raised.
+  assert.doesNotThrow(() => listeners.error(new Error("spawn bash ENOENT")));
+});
+
+test("the restart helper retries a failed start, never takes the predecessor's own 'already running' as success, and stops once another engine is up", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-restart-helper-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  await mkdir(join(root, "run"));
+  await writeFile(join(root, "run", "remote-sync.demo.pid"), "111\n");
+  const remote = join(root, "remote.sh");
+  const log = join(root, "calls");
+  const counter = join(root, "n");
+  const useRemote = async (script) => {
+    await rm(counter, { force: true }); await rm(log, { force: true });
+    await writeFile(remote, [
+      "#!/usr/bin/env bash",
+      `n=$(( $(cat ${shellQuote(counter)} 2>/dev/null || echo 0) + 1 )); printf %s "$n" > ${shellQuote(counter)}`,
+      `printf '%s\\n' "$*" >> ${shellQuote(log)}`,
+      script, "",
+    ].join("\n"), { mode: 0o755 });
+  };
+  const run = () => spawnSync("bash", standDownRestartArgs("demo", root, [0, 0, 0, 0, 0]).map((a) => a === join(root, "remote.sh") ? remote : a),
+    { encoding: "utf8", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root } });
+  const calls = async () => (await readFile(log, "utf8")).trim().split("\n").length;
+
+  // A failed start, then the predecessor (pid 111) still reported twice, then started: three
+  // tries after the failure, and the predecessor's no-ops never count.
+  await useRemote('case "$n" in 1) echo "not yet" >&2; exit 1 ;; 2|3) echo "Sync engine already running (pid 111)."; exit 0 ;; *) echo "Sync engine started for demo (pid 2)."; exit 0 ;; esac');
+  let result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await calls(), 4);
+
+  // Another engine (pid 222) already up: done at once.
+  await useRemote('echo "Sync engine already running (pid 222)."; exit 0');
+  result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await calls(), 1);
+
+  // The predecessor never exits: the bounded attempts run out and the helper says it failed.
+  await useRemote('echo "Sync engine already running (pid 111)."; exit 0');
+  result = run();
+  assert.equal(result.status, 1);
+  assert.equal(await calls(), 5);
 });

@@ -3488,6 +3488,55 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
 import { collectInstallBaseline, installChangedAgainst } from "./install-baseline.mjs";
 export { collectInstallBaseline, installChangedAgainst };
 
+// After an update stands the engine down, nothing else starts the new one when
+// the update did not know this engine was running (it started while the update
+// was in progress, for example). So a stood-down engine asks for its own
+// restart from a detached helper that outlives it. The helper notes the pid in
+// the team's pidfile (the predecessor's), then waits and runs
+// `remote.sh sync start`, again on a growing wait, until a start reports
+// "started" or reports an engine already running under a DIFFERENT pid (someone
+// else restarted it). An "already running" under the predecessor's own pid only
+// means it has not exited yet, so that attempt is retried. A start that fails --
+// the update is still copying files, say -- is just another attempt; `sync
+// start` itself refuses a team that is disconnected or owned by systemd. An
+// engine it starts too early stands down again and asks again. The attempts are
+// bounded: the waits add up to 1110 seconds (about 18.5 minutes), after which a
+// person has to run `remote.sh sync start`, as the stand-down event says.
+const STAND_DOWN_RESTART_DELAYS_SECONDS = [30, 60, 120, 300, 600];
+const STAND_DOWN_RESTART_SCRIPT = [
+  'remote="$1"; team="$2"; shift 2',
+  'root="${AGMSG_SYNC_CONNECTION_DIR:-$(cd "$(dirname "$remote")/.." && pwd)}"',
+  'old="$(cat "$root/run/remote-sync.$team.pid" 2>/dev/null)"',
+  'for delay in "$@"; do',
+  '  sleep "$delay"',
+  '  out="$(bash "$remote" sync start "$team" 2>&1)"; rc=$?',
+  '  [ "$rc" = 0 ] || continue',
+  '  case "$out" in',
+  '    *started*) exit 0 ;;',
+  '    *already*running*) case "$out" in *"pid $old)"*) ;; *) exit 0 ;; esac ;;',
+  '  esac',
+  'done',
+  'exit 1',
+].join("\n");
+export function standDownRestartArgs(team, scriptsRoot, delays = STAND_DOWN_RESTART_DELAYS_SECONDS) {
+  return ["-c", STAND_DOWN_RESTART_SCRIPT, "bash", join(scriptsRoot, "remote.sh"), team, ...delays.map(String)];
+}
+export function restartAfterStandDown(team, scriptsRoot, { spawnCall = spawn, environment = process.env } = {}) {
+  const childEnvironment = { ...environment };
+  delete childEnvironment.AGMSG_SYNC_TOKEN;
+  for (const key of Object.keys(childEnvironment)) {
+    if (/^(?:AGMSG_AGE_IDENTITY|AGMSG_SYNC_AGE_IDENTITY)/u.test(key)) delete childEnvironment[key];
+  }
+  const child = spawnCall("bash", standDownRestartArgs(team, scriptsRoot),
+    { detached: true, stdio: "ignore", env: childEnvironment, windowsHide: true });
+  // A spawn that fails (no bash) is reported on 'error' later, not thrown.
+  child.on?.("error", (error) => {
+    process.stderr.write(`agmsg: could not start the restart helper for '${team}': ${error.message}\n`);
+  });
+  child.unref?.();
+  return child;
+}
+
 export async function runLoop(config, options, dependencies = {}) {
   const cycleCall = dependencies.cycleCall ?? cycle;
   const sleepCall = dependencies.sleepCall ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -3501,6 +3550,7 @@ export async function runLoop(config, options, dependencies = {}) {
   const collectInstallBaselineCall = dependencies.collectInstallBaselineCall ?? collectInstallBaseline;
   const installChangedCall = dependencies.installChangedCall ?? installChangedAgainst;
   const scriptsRoot = dependencies.scriptsRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const restartCall = dependencies.restartCall ?? restartAfterStandDown;
 
   // An explicit --limit is a ceiling for BOTH push and pull (request size /
   // memory / slow-link timeout); only the default lets the loop go large.
@@ -3544,6 +3594,8 @@ export async function runLoop(config, options, dependencies = {}) {
           restart: `remote.sh sync start ${config.local_team}`,
         });
       } catch { /* logging is best-effort; the stand-down does not depend on it */ }
+      try { restartCall(config.local_team, scriptsRoot); }
+      catch { /* the restart line in the event above is what remains */ }
       return;
     }
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);
