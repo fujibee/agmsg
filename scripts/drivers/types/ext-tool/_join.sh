@@ -35,14 +35,11 @@ agmsg_join_type_parse_args() {
     FORCE=1
   fi
 
-  local driver_dir="$SCRIPT_DIR/drivers/ext-tools/$tool"
-  if [ ! -f "$driver_dir/tool.conf" ]; then
-    local available="" d
-    for d in "$SCRIPT_DIR"/drivers/ext-tools/*/; do
-      [ -f "${d}tool.conf" ] || continue
-      available="${available:+$available, }$(basename "$d")"
-    done
-    echo "Unknown ext-tool: '$tool' (available: ${available:-none})" >&2
+  local driver_dir
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/driver-registry.sh"
+  if ! driver_dir="$(agmsg_ext_tool_dir "$tool")"; then
+    echo "Unknown ext-tool: '$tool' (available: $(agmsg_ext_tool_available))" >&2
     return 1
   fi
 
