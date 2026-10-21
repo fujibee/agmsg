@@ -2957,6 +2957,40 @@ EOF
   grep -qx "session=$new" "$rec"
 }
 
+@test "session-start.sh for codex never picks a seat by the pane its environment names, and says the conversation is unseated (#1468)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
+  local old_a=11111111-1111-4111-8111-111111111111 old_b=33333333-3333-4333-8333-333333333333
+  local new=22222222-2222-4222-8222-222222222222
+  local rec_a="$TEST_SKILL_DIR/run/role-session.team__alice" rec_b="$TEST_SKILL_DIR/run/role-session.team__bob"
+  # The hook runs under the profile's shared app-server daemon, so the pane in
+  # its environment is the one that started the daemon: here, bob's, while the
+  # /clear happened in another seat. bob's placement record and naming mark
+  # both agree with that pane.
+  local sock="$BATS_TEST_TMPDIR/herdr.sock" ref epoch
+  : > "$sock"
+  SKILL_DIR="$TEST_SKILL_DIR" HERDR_ENV=1 HERDR_SOCKET_PATH="$sock" HERDR_PANE_ID=w1:p17 bash -c '
+    source "$1/lib/terminal-registry.sh"; source "$1/lib/role-session.sh"
+    here="$(agmsg_terminal_self_env)"; IFS=$'"'"'\t'"'"' read -r t id epoch <<< "$here"
+    ref="$(agmsg_terminal_ref "$t" "$id")"
+    agmsg_role_session_record team alice "$2" "$4" codex
+    agmsg_role_session_record team bob "$3" "$4" codex
+    printf "%s\t%s\tcodex\n" "$ref" "$4" > "$(agmsg_spawn_path team bob)"
+    agmsg_role_session_mark_named team bob "$ref" "$epoch" "$4" codex
+  ' _ "$SCRIPTS" "$old_a" "$old_b" "$TEST_PROJECT"
+  local before_a before_b out
+  before_a="$(cat "$rec_a")"; before_b="$(cat "$rec_b")"
+  mkdir -p "$BATS_TEST_TMPDIR/profile"
+  out="$(printf '{"session_id":"%s","source":"clear"}' "$new" \
+    | env -u CODEX_THREAD_ID CODEX_HOME="$BATS_TEST_TMPDIR/profile" \
+      HERDR_ENV=1 HERDR_SOCKET_PATH="$sock" HERDR_PANE_ID=w1:p17 \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT")"
+  [ "$(cat "$rec_a")" = "$before_a" ]
+  [ "$(cat "$rec_b")" = "$before_b" ]
+  grep -q "not connected to a seat" <<<"$out"
+  grep -q "actas" <<<"$out"
+}
+
 # #1477: Codex installed after agmsg never gets this install's writable_roots
 # (configure_codex_sandbox only writes them into a Codex config that already
 # existed at install time), and nothing later says so. session-start.sh's
