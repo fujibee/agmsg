@@ -463,6 +463,26 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   rm -f "$lock.holder.releasing.$gone"
   rmdir "$lock"
 
+  # The same leftover on a directory that is over a minute old and no newer than
+  # the staged copy (the release was interrupted: the staged copy is unreadable
+  # after a power loss, its name still says whose it was): the owner is gone, so
+  # it is broken. A leftover whose owner is alive is not.
+  mkdir "$lock"
+  : > "$lock.holder.releasing.$live"
+  touch -t 202601010000 "$lock"
+  touch -t 202601010001 "$lock.holder.releasing.$live"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  [ -d "$lock" ]
+  rm -f "$lock.holder.releasing.$live"
+  : > "$lock.holder.releasing.$gone"
+  touch -t 202601010001 "$lock.holder.releasing.$gone"
+  acquire
+  [ "$status" -eq 0 ]
+  grep -qF "release was interrupted" <<<"$output"
+  [ ! -e "$lock.holder.releasing.$gone" ]
+
   # A dead holder on this machine: broken, and the acquire then succeeds.
   mkdir "$lock"
   printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder"

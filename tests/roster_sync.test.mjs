@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -142,6 +142,15 @@ test("roster mutations use the message transport and converge by server sequence
     }]);
     assert.equal(Object.keys(configA.agents).length, 1);
     assert.equal(Object.keys(configB.agents).length, 1);
+
+    // A state file left full of NUL bytes by a power loss is set aside, not
+    // fatal and not deleted, and the next prepare rebuilds it.
+    await writeFile(join(aRoot, "roster-sync.json"), Buffer.alloc(997));
+    call("prepare", a.config, prepare, ["10"]);
+    const kept = (await readdir(aRoot)).filter((name) => name.startsWith("roster-sync.json.corrupt-"));
+    assert.equal(kept.length, 1);
+    assert.equal((await readFile(join(aRoot, kept[0]))).length, 997);
+    assert.equal(JSON.parse(await readFile(join(aRoot, "roster-sync.json"), "utf8")).format_version, 1);
   } finally {
     await rm(scratch, { recursive: true });
   }

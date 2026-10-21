@@ -188,6 +188,51 @@ _agmsg_lock_break_dead() {
   return 0
 }
 
+# A lock whose release was interrupted: the owner moved its record aside
+# (`<lock>.holder.releasing.<pid>`) and died before the rmdir, so the directory
+# stays with no record of its own (seen after a power loss on Windows, where the
+# staged copy was also left unreadable). The staged copy is not a record, and a
+# release that finished normally can leave one too, so it counts only with all
+# of these:
+#   - the directory is more than a minute old, so no new owner is between its
+#     mkdir and writing its record;
+#   - the directory is not newer than the staged copy, which keeps the time its
+#     record was written at acquire, so the directory is the one that record
+#     belonged to and no later owner created it;
+#   - the pid in the staged name is on this machine and not running (a record
+#     that can be read must say this machine too; an unreadable one cannot).
+# A recycled pid reads as alive, which leaves the lock alone, the safe direction.
+_agmsg_lock_break_interrupted_release() {
+  local lock="$1" staged pid host found=0 claimed
+  [ ! -e "$lock.holder" ] || return 1
+  _agmsg_lock_load_liveness || return 1
+  [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ] || return 1
+  for staged in "$lock".holder.releasing.*; do
+    [ -f "$staged" ] || continue
+    found=1
+    pid="${staged##*.holder.releasing.}"
+    _agmsg_pid_valid "$pid" 2147483647 || return 1
+    [ ! "$lock" -nt "$staged" ] || return 1
+    host="$(sed -n 's/^host //p' "$staged" 2>/dev/null | head -1)"
+    if [ -n "$host" ]; then _agmsg_lock_same_host "$host" || return 1; fi
+    ! _agmsg_pid_alive_local "$pid" || return 1
+  done
+  [ "$found" = 1 ] || return 1
+  # Claim first, then judge once more, as _agmsg_lock_break_dead does: a holder
+  # record that appeared meanwhile means the lock changed hands.
+  claimed="$lock.dead.$$.${RANDOM:-0}"
+  mkdir "$claimed" 2>/dev/null || return 1
+  if [ -e "$lock.holder" ] || ! rmdir "$lock" 2>/dev/null; then
+    rmdir "$claimed" 2>/dev/null || true
+    return 1
+  fi
+  if command -v rm >/dev/null 2>&1; then
+    rm -f "$lock".holder.releasing.* 2>/dev/null || true
+  fi
+  rmdir "$claimed" 2>/dev/null || true
+  return 0
+}
+
 agmsg_lock_acquire() {
   local team_dir="$1" lock i=0 max="${AGMSG_LOCK_TRIES:-1000}" err=""
   local budget="${AGMSG_LOCK_SECONDS:-10}" started elapsed
@@ -231,6 +276,10 @@ agmsg_lock_acquire() {
     # a lock with a holder record and no holder.
     if _agmsg_lock_holder_gone "$lock" && _agmsg_lock_break_dead "$lock"; then
       echo "agmsg: broke a registry lock in $team_dir whose recorded holder is gone" >&2
+      continue
+    fi
+    if _agmsg_lock_break_interrupted_release "$lock"; then
+      echo "agmsg: broke a registry lock in $team_dir whose release was interrupted (its owner is gone)" >&2
       continue
     fi
     i=$((i + 1))
