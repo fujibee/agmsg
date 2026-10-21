@@ -197,6 +197,7 @@ _agmsg_lock_break_dead() {
 #     name is the pid it records and is not running (a copy that cannot be read
 #     says nothing about which machine wrote it, so it is left alone: the same
 #     rule as a holder record from another machine);
+#   - it is the only staged copy there (several cannot be claimed as one);
 #   - the directory is more than a minute old, so no new owner is between its
 #     mkdir and writing its record;
 #   - the directory is not newer than the staged copy, which keeps the time its
@@ -210,11 +211,18 @@ _agmsg_lock_break_dead() {
 # legitimately remove this directory, so the rmdir below cannot reach a successor
 # that a check made before the claim would have missed.
 _agmsg_lock_break_interrupted_release() {
-  local lock="$1" staged claimed pid host recorded
+  local lock="$1" staged claimed pid host recorded count=0 only=""
   [ ! -e "$lock.holder" ] || return 1
   _agmsg_lock_load_liveness || return 1
+  # Exactly one staged copy. Breakers can only compete for the same claim
+  # object when there is one; with several (normal releases leave them too) each
+  # could claim a different one and both go on to remove the directory.
   for staged in "$lock".holder.releasing.*; do
     [ -f "$staged" ] || continue
+    count=$((count + 1)); only="$staged"
+  done
+  [ "$count" = 1 ] || return 1
+  for staged in "$only"; do
     pid="${staged##*.holder.releasing.}"
     claimed="$lock.dead.$$.${RANDOM:-0}"
     mv "$staged" "$claimed" 2>/dev/null || continue
@@ -232,8 +240,9 @@ _agmsg_lock_break_interrupted_release() {
       fi
       return 0
     fi
-    # Not proven: the copy goes back where it was.
-    mv "$claimed" "$staged" 2>/dev/null || true
+    # Not proven: the copy goes back where it was, unless something else has
+    # taken that name meanwhile.
+    if [ ! -e "$staged" ]; then mv "$claimed" "$staged" 2>/dev/null || true; fi
   done
   return 1
 }

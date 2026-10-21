@@ -485,6 +485,13 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   [ -d "$lock" ]
   printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder.releasing.$gone"
   touch -t 202601010001 "$lock.holder.releasing.$gone"
+  # Two staged copies are ambiguous (two breakers could claim one each): kept.
+  printf 'token t\npid %s\ncommand t\nhost %s\n' "$((gone + 1))" "$me" > "$lock.holder.releasing.$((gone + 1))"
+  touch -t 202601010001 "$lock.holder.releasing.$((gone + 1))"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  rm -f "$lock.holder.releasing.$((gone + 1))"
   acquire
   [ "$status" -eq 0 ]
   grep -qF "release was interrupted" <<<"$output"
