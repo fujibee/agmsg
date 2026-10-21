@@ -12,7 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import process from "node:process";
 import { isAbsolute } from "node:path";
 
@@ -100,13 +100,11 @@ function isFile(path) {
 // refused the same way every other agmsg state-file reader on this codebase
 // refuses one.
 export function checkSocketOwnership(socketPath, platform = process.platform) {
-  // A named pipe (native Windows) is not a file to lstat: opening it for
-  // attributes would connect to it. It is only asked whether it exists, which
-  // opens nothing, and the pipe's own access rule is the key every connection
-  // must present first.
-  if (platform === "win32" && isNamedPipePath(socketPath)) {
-    return existsSync(socketPath) ? { state: "ok" } : { state: "unreadable", reason: "messaging_socket_missing" };
-  }
+  // A named pipe (native Windows) is not a file: every filesystem probe of it
+  // (stat, access, exists) can open it, which connects to the seat's inbox.
+  // Nothing is asked of it here; a pipe that is gone shows as ENOENT when the
+  // nudge connects, and the caller treats that as the socket being gone.
+  if (platform === "win32" && isNamedPipePath(socketPath)) return { state: "ok" };
   let stat;
   try {
     stat = lstatSync(socketPath);

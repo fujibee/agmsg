@@ -154,6 +154,10 @@ export function createClaudeCodeQueueChannel({
   transcriptPathOf = resolveTranscriptPath,
 }) {
   let stopped = false;
+  // Sockets a nudge found gone when it connected. A named pipe cannot be
+  // checked beforehand, so without this each poll would add a queue row that
+  // fails at once until the seat records another pipe.
+  const goneSockets = new Set();
   let activePoll = null;
 
   async function pollSeat(registration, paths) {
@@ -293,7 +297,7 @@ export function createClaudeCodeQueueChannel({
     // not written its new one yet) has nowhere to be nudged. Make no queue
     // row for it: each poll would add one that expires at once. Once the seat
     // records a socket that exists, this passes and the nudge goes out.
-    if (socketAlive(record.messaging_socket).reason === "messaging_socket_missing") {
+    if (socketAlive(record.messaging_socket).reason === "messaging_socket_missing" || goneSockets.has(record.messaging_socket)) {
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
       return;
     }
@@ -312,6 +316,11 @@ export function createClaudeCodeQueueChannel({
     const result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
     if (result.state !== "sent") {
       setQueueState(db, id, "expired");
+      if (result.reason === "socket_error:ENOENT") {
+        goneSockets.add(record.messaging_socket);
+        saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
+        return;
+      }
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` }, now);
       return;
     }
