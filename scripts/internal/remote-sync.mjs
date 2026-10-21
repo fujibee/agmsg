@@ -2090,6 +2090,9 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
       // storage adapter's "busy" exit, see `driver` -- without parsing its own
       // sentence back out of the message.
       error.driverExitCode = code;
+      // The driver's own words, apart from the label/team/path context in the
+      // message, for the one caller that classifies a failure by them.
+      error.driverStderr = stderr;
       fail(error);
     });
     child.on("close", () => {
@@ -2123,9 +2126,13 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
 // does not change it, so nothing else is retried here.
 export const STORAGE_BUSY_EXIT = 11;
 // SQLite could not open a file it needed (the store, or a temporary file) --
-// seen on Windows when something else held or removed it for a moment. Like a
-// busy store it is a fact about the moment, and the call is as safe to repeat.
-const STORAGE_OPEN_FAILURE = /unable to open database file/u;
+// seen on Windows when something else held or removed it for a moment. Only the
+// form that names a line of the driver's transaction script ("Error near line
+// N:") is waited out like a busy store: the script runs inside one
+// BEGIN IMMEDIATE ... COMMIT, so it failed before anything was committed. The
+// plain "Error:" form comes from a separate statement, which can follow a
+// COMMIT, and is a decision like any other failure.
+const STORAGE_OPEN_FAILURE = /^Error near line \d+: unable to open database file/mu;
 // One wait is never longer than this; the budget is the total. The budget has
 // to outlast a real writer, not a polite one: the first prepare on a pulled
 // store held the lock for 63 s on the machine that filed #910 (155 s on a copy
@@ -2172,7 +2179,7 @@ export async function driver(operation, config, input, extra = [], dependencies 
       return await run();
     } catch (error) {
       const busy = error?.driverExitCode === STORAGE_BUSY_EXIT;
-      if (!busy && !STORAGE_OPEN_FAILURE.test(error?.message ?? "")) throw error;
+      if (!busy && !STORAGE_OPEN_FAILURE.test(error?.driverStderr ?? "")) throw error;
       const waitMs = Math.min(STORAGE_BUSY_WAIT_CAP_MS, 1000 * 2 ** (attempt - 1));
       if (waitedMs + waitMs > budgetMs) {
         // The driver's own sentence stays in front; what is added is how long

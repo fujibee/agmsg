@@ -4943,6 +4943,14 @@ test("driver() waits out a busy store and retries; anything else is asked once",
   assert.equal(await readFile(counter, "utf8"), "2");
   assert.deepEqual(waits, [1000]);
 
+  // The same words from a statement outside the transaction script (it can
+  // follow a COMMIT) are a decision: asked once.
+  await useDriver("open-after-commit.sh", 1000, 13, "Error: unable to open database file");
+  waits.length = 0;
+  await assert.rejects(() => driver("prepare", config, [], [], dependencies), (error) =>
+    error.driverExitCode === 13 && !isRetryable(error));
+  assert.equal(await readFile(counter, "utf8"), "1");
+
   // A failed check (13) is a decision: asked once, not retried, not retryable.
   await useDriver("refuses.sh", 1000, 13);
   waits.length = 0;
