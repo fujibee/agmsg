@@ -1829,6 +1829,15 @@ function bindingNote(binding) {
 // has today, since a driver that stops reading a pipe fails at once while a
 // driver handed a file is waited for. This is a fix for one caller and it is
 // scoped to that caller.
+// The command line that runs a driver with a staged file as its stdin by
+// opening it in the child, rather than handing the child a file handle.
+export function stdinRedirect(args, path) {
+  return {
+    args: ["-c", 'exec bash "$@" < "$AGMSG_DRIVER_INPUT"', "bash", ...args],
+    env: { AGMSG_DRIVER_INPUT: path.replace(/\\/gu, "/") },
+  };
+}
+
 function stageInput(input, staging) {
   // Filled IN PLACE, so that one cleanup path can undo whatever part of it got
   // made. The first version cleaned up inside here as well as at settle, which
@@ -1845,6 +1854,7 @@ function stageInput(input, staging) {
   // A fresh read-only descriptor. Passing on the one the write used would hand
   // over a descriptor sitting at EOF, and the driver would read an empty input
   // and report a successful sync of nothing.
+  staging.path = path;
   staging.fd = openSync(path, "r");
   // Then take the name away immediately, while the descriptor stays open: the
   // spawn duplicates it into the child, so both sides keep reading a file that
@@ -1852,10 +1862,12 @@ function stageInput(input, staging) {
   // message content behind. Windows cannot unlink an open file, so there it
   // stays until the call settles -- which is why the directory is still tracked
   // and removed there rather than only here.
+  // (On Windows the child opens the file by name, so it is kept there.)
+  if (process.platform === "win32") return;
   try {
     rmSync(staging.directory, { recursive: true, force: true });
     staging.directory = null;
-  } catch { /* Windows, or a tmpdir that will not allow it; settle cleans up */ }
+  } catch { /* a tmpdir that will not allow it; settle cleans up */ }
 }
 
 // Removing a temp directory must not fail the call around it -- refusing a sync
@@ -1927,7 +1939,7 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     // that does. That matters more than it looks: the routes into it that a
     // test cannot reach are undone by the same lines as the route a test can,
     // so binding one binds them all.
-    const staging = { directory: null, fd: null };
+    const staging = { directory: null, fd: null, path: null };
     const releaseInput = () => {
       if (staging.fd !== null) {
         try { closeSync(staging.fd); } catch { /* already closed */ }
@@ -1942,20 +1954,40 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     };
 
     let child;
+    let inputSupplied = false;
     try {
       // Staged before the spawn, so before the lock: a failure to stage is a
       // failure with no child and no lock to leak. Only for the caller that
       // holds the lock -- everyone else keeps the pipe, and with it the bounded
       // failure a pipe gives and an input that never reaches disk.
       if (holdsRegistryLock) stageInput(input, staging);
-      // windowsHide: an engine started from an SSH session outlives it, and on
-      // Windows every child it then creates without this fails to initialise
-      // (exit 0xC0000142) once the session's console is gone.
-      child = spawn("bash", args, {
-        stdio: [staging.fd === null ? "pipe" : staging.fd, "pipe", "pipe"],
+      // On Windows a file handle handed to the child as its stdin fails to
+      // initialise it (exit 0xC0000142) once the SSH session that started the
+      // engine is gone, so there the child opens the staged file itself with a
+      // shell redirect. The file stays (it cannot be unlinked while open, and
+      // it is still removed when the call settles), the handle is closed, and
+      // nothing is inherited.
+      let childArgs = args;
+      let stdin = staging.fd === null ? "pipe" : staging.fd;
+      inputSupplied = staging.fd !== null;
+      if (inputSupplied && process.platform === "win32") {
+        const redirect = stdinRedirect(args, staging.path);
+        childArgs = redirect.args;
+        Object.assign(childEnvironment, redirect.env);
+        stdin = "ignore";
+      }
+      // windowsHide: the same disconnect fails every child created without it.
+      child = spawn("bash", childArgs, {
+        stdio: [stdin, "pipe", "pipe"],
         env: childEnvironment,
         windowsHide: true,
       });
+      if (inputSupplied && process.platform === "win32") {
+        // The child opens the file by name; this handle was only for the
+        // unlink attempt in stageInput.
+        try { closeSync(staging.fd); } catch { /* already closed */ }
+        staging.fd = null;
+      }
     } catch (error) {
       // Reached by a staging failure and by a synchronous spawn failure alike.
       // Neither leaves a child, and a synchronous spawn failure never reaches
@@ -1966,7 +1998,7 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     }
     // Read once, here: `staging.fd` is nulled on release, so it cannot be asked
     // later whether there was ever a pipe to write to.
-    const staged = staging.fd !== null;
+    const staged = inputSupplied;
     let stdout = ""; let stderr = ""; let settled = false; let failure = null;
     // The last stdin-write error, kept only so a child that exits 0 despite a
     // broken write is not reported as a silent success. See the stdin handler.
