@@ -463,6 +463,40 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   rm -f "$lock.holder.releasing.$gone"
   rmdir "$lock"
 
+  # The same leftover on a directory that is over a minute old and no newer than
+  # the staged copy (the release was interrupted): broken when the copy is
+  # readable, says this machine and names a pid that is not running. A live
+  # owner's copy, and a copy that cannot be read (it cannot say which machine
+  # wrote it), keep the lock.
+  mkdir "$lock"
+  printf 'token t\npid %s\ncommand t\nhost %s\n' "$live" "$me" > "$lock.holder.releasing.$live"
+  touch -t 202601010000 "$lock"
+  touch -t 202601010001 "$lock.holder.releasing.$live"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  rm -f "$lock.holder.releasing.$live"
+  : > "$lock.holder.releasing.$gone"
+  touch -t 202601010001 "$lock.holder.releasing.$gone"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  grep -qF "a release was interrupted" <<<"$output"
+  [ -d "$lock" ]
+  printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder.releasing.$gone"
+  touch -t 202601010001 "$lock.holder.releasing.$gone"
+  # Two staged copies are ambiguous (two breakers could claim one each): kept.
+  printf 'token t\npid %s\ncommand t\nhost %s\n' "$((gone + 1))" "$me" > "$lock.holder.releasing.$((gone + 1))"
+  touch -t 202601010001 "$lock.holder.releasing.$((gone + 1))"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  rm -f "$lock.holder.releasing.$((gone + 1))"
+  acquire
+  [ "$status" -eq 0 ]
+  grep -qF "release was interrupted" <<<"$output"
+  [ ! -e "$lock.holder.releasing.$gone" ]
+
   # A dead holder on this machine: broken, and the acquire then succeeds.
   mkdir "$lock"
   printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder"

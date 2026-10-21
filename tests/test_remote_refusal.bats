@@ -189,6 +189,10 @@ write_fatal() {
   [ "$status" -eq 0 ]
   printf '%s' "$output" | grep -q 'engine stopped'
   printf '%s' "$output" | grep -q 'last fatal: age executable not found on PATH'
+  # A roster state file the engine set aside is named, so a reset is not silent.
+  : > "$TEST_SKILL_DIR/teams/testteam/roster-sync.json.corrupt-20261021T000000Z-1"
+  run bash "$SCRIPTS/remote.sh" status testteam
+  printf '%s' "$output" | grep -q 'roster state was reset: unreadable copy kept at .*roster-sync.json.corrupt-20261021T000000Z-1'
 }
 
 # What `_remote_sync_engine_start_locked` writes as the very first thing
