@@ -3825,7 +3825,7 @@ _tmux_op_args() {
 }
 
 @test "placement guard: a claimant whose session is confirmed gone lets a live seat take the pane; a claimant still there still refuses (#1485)" {
-  # elder's Codex session ended; resumer's fresh session now sits in the same
+  # elder's session ended; resumer's fresh session now sits in the same
   # herdr pane. elder's spawn record still claims it (first-writer-wins,
   # #1114), but elder's own role-session record names the session that used
   # to hold it.
@@ -3837,8 +3837,8 @@ _tmux_op_args() {
 
   local rival; rival="$(agmsg_spawn_path seatteam elder)"
   mkdir -p "$(dirname "$rival")"
-  printf 'herdr:%s:wC:p4\t/proj/OLD\tcodex\n' "$HERDR_SOCKET_PATH" > "$rival"
-  agmsg_role_session_record seatteam elder old-sid /proj/OLD codex
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$rival"
+  agmsg_role_session_record seatteam elder old-sid /proj/OLD claude-code
   agmsg_role_session_mark_named seatteam elder "herdr:$HERDR_SOCKET_PATH:wC:p4" 1
 
   local mine; mine="$(agmsg_spawn_path seatteam resumer)"
@@ -3885,6 +3885,30 @@ _tmux_op_args() {
   [ "$status" -eq 0 ]
   grep -q "recorded as a__b__c's" <<<"$output"
   cmp -s "$ghost_role" <(printf 'session=ghost-sid\nname=x\nteam=x\nagent=x\ntype=codex\nproject=/proj/GHOST\n')
+}
+
+@test "placement guard: a Codex claimant is never read as gone from herdr's agent list (it cannot answer for those threads)" {
+  export HERDR_ENV=1 HERDR_PANE_ID='wC:p4'
+  unset TMUX TMUX_PANE
+  export AGMSG_TERMINAL_DRIVER=herdr
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+
+  local rival; rival="$(agmsg_spawn_path seatteam elder)"
+  mkdir -p "$(dirname "$rival")"
+  printf 'herdr:%s:wC:p4\t/proj/OLD\tcodex\n' "$HERDR_SOCKET_PATH" > "$rival"
+  agmsg_role_session_record seatteam elder old-sid /proj/OLD codex
+  agmsg_role_session_mark_named seatteam elder "herdr:$HERDR_SOCKET_PATH:wC:p4" 1
+  local mine; mine="$(agmsg_spawn_path seatteam resumer)"
+
+  # Same lists that let a non-Codex claimant be taken over: the claimant's
+  # session is absent, the asking seat's own is listed at the pane.
+  _fake_herdr_list_two_sessions "" "" my-sid wC:p4
+  run agmsg_terminal_name_self "my-sid" seatteam resumer /proj/MINE codex record
+  [ "$status" -eq 0 ]
+  grep -q "recorded as seatteam__elder's" <<<"$output"
+  refute test -e "$mine"
+  [ "$(agmsg_role_session_named seatteam elder)" = "$(printf 'herdr:%s:wC:p4\t1' "$HERDR_SOCKET_PATH")" ]
 }
 
 # --- #1112: a seat identifies its own pane by its LABEL ------------------------
