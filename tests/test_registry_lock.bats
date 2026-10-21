@@ -91,6 +91,7 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
     . "$LOCKLIB"
     agmsg_lock_acquire "$TEAM_DIR" || exit 1
     [ -d "$TEAM_DIR/.config.lock" ] || exit 2
+    [ -f "$TEAM_DIR/.config.lock/.owner" ] || exit 4
     agmsg_lock_release
     [ ! -d "$TEAM_DIR/.config.lock" ] || exit 3
   '
@@ -497,8 +498,9 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   grep -qF "release was interrupted" <<<"$output"
   [ ! -e "$lock.holder.releasing.$gone" ]
 
-  # A dead holder on this machine: broken, and the acquire then succeeds.
+  # A dead holder with the new owner marker is still reclaimable.
   mkdir "$lock"
+  : > "$lock/.owner"
   printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder"
   acquire
   [ "$status" -eq 0 ]

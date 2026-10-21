@@ -4251,6 +4251,7 @@ function releaseTeamConfigLockSync(held) {
   } catch { seen = undefined; }
   if (seen !== held.token) return;
   try { unlinkSync(held.holderPath); } catch { /* already gone */ }
+  try { unlinkSync(join(held.lockDir, ".owner")); } catch { /* legacy marker-less directory */ }
   try { rmdirSync(held.lockDir); } catch { /* already gone */ }
 }
 
@@ -4281,7 +4282,13 @@ export async function withTeamConfigLock(team, fn) {
   const lockDir = join(dirname(teamConfigPath(team)), ".config.lock");
   const holderPath = `${lockDir}.holder`;
   for (let attempt = 0; ; attempt += 1) {
-    try { mkdirSync(lockDir); break; }
+    try {
+      mkdirSync(lockDir);
+      // Same exclusive owner marker as registry-lock.sh. A shell mkdir utility
+      // may report a racing EEXIST as success, so mkdir alone is not shared exclusion.
+      closeSync(openSync(join(lockDir, ".owner"), "wx", 0o600));
+      break;
+    }
     catch (error) {
       if (error?.code !== "EEXIST") throw error;
       // Same exit as the shell side (registry-lock.sh): a holder that died
