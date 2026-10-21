@@ -151,6 +151,7 @@ export function createClaudeCodeQueueChannel({
   socketAlive = checkSocketOwnership,
   hostPlatform = process.platform,
   readMode = latestPermissionMode,
+  transcriptPathOf = resolveTranscriptPath,
 }) {
   let stopped = false;
   let activePoll = null;
@@ -181,7 +182,7 @@ export function createClaudeCodeQueueChannel({
       const session = readSession(join(installRoot, "run"), team, agent);
       const record = session.state === "present" ? session.record : null;
       const transcriptNow = record
-        ? resolveTranscriptPath(record.claude_config_dir, record.project, record.session)
+        ? transcriptPathOf(record.claude_config_dir, record.project, record.session, hostPlatform)
         : "";
       // The nudge is out of date when its socket is gone, or the seat's record
       // now names another socket or session (/compact, restart, --resume).
@@ -217,10 +218,6 @@ export function createClaudeCodeQueueChannel({
       }
     }
     if (!registered) return;
-    if (hostPlatform === "win32") {
-      saveSeat(db, { seat, state: "blocked", reason: "windows_not_supported_yet" }, now);
-      return;
-    }
     const session = readSession(join(installRoot, "run"), team, agent);
     if (session.state !== "present") {
       saveSeat(db, { seat, state: "unaddressable", reason: session.reason ?? "role_session_missing" }, now);
@@ -287,7 +284,7 @@ export function createClaudeCodeQueueChannel({
       return;
     }
 
-    const transcriptPath = resolveTranscriptPath(record.claude_config_dir, record.project, record.session);
+    const transcriptPath = transcriptPathOf(record.claude_config_dir, record.project, record.session, hostPlatform);
     if (!transcriptPath) {
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: "transcript_path_unresolvable" }, now);
       return;

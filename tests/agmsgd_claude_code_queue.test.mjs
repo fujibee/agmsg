@@ -11,6 +11,10 @@ import {
   resolveTranscriptPath,
   resolvePendingDelivery,
   latestPermissionMode,
+  encodeClaudeProjectDir,
+  nativePath,
+  isNamedPipePath,
+  checkSocketOwnership,
 } from '../scripts/daemon/channels/claude-code-queue-io.mjs';
 import { createClaudeCodeQueueChannel } from '../scripts/daemon/channels/claude-code-queue.mjs';
 import { ensureClaudeCodeChannelSchema } from '../scripts/daemon/channels/claude-code-queue-store.mjs';
@@ -168,7 +172,7 @@ test('resolvePendingDelivery: nothing but a delivered nonce ends a pending nudge
   assert.equal(resolvePendingDelivery({ observation: { state: 'delivered' } }).state, 'confirmed');
 });
 
-function channelFixture(t) {
+function channelFixture(t, hostPlatform = 'linux') {
   const root = temporaryDirectory(t);
   mkdirSync(path.join(root, 'run'));
   const db = openInstallDb(path.join(root, 'run', 'install.db'));
@@ -189,7 +193,8 @@ function channelFixture(t) {
     readMode: () => state.mode ?? '',
     observe: () => (state.hold ? { state: 'held' } : { state: 'absent' }),
     socketAlive: () => state.alive,
-    hostPlatform: 'linux',
+    hostPlatform,
+    transcriptPathOf: hostPlatform === 'win32' ? () => path.join(root, 'session.jsonl') : undefined,
   };
   state.options = options;
   const channel = createClaudeCodeQueueChannel(options);
@@ -356,4 +361,31 @@ test('a conversation stored under another project directory is found by its sess
   mkdirSync(path.dirname(expected), { recursive: true });
   writeFileSync(expected, '');
   assert.equal(resolveTranscriptPath(config, '/proj/recorded', session), expected, 'the recorded project wins when it has the file');
+});
+
+// Native Windows (measured on a real machine 2026-10-21): the inbox is the named
+// pipe \\.\pipe\LOCAL\cc-msg-<hex>, the profile has no CLAUDE_CONFIG_DIR, and
+// the transcript directory is the project path with every character that is not
+// a letter, digit or "-" turned into "-".
+test('Windows: the transcript directory name, shell-style paths and pipe paths are read the way Claude Code writes them', () => {
+  assert.equal(encodeClaudeProjectDir('C:\\Users\\koich\\agmsg-agents\\win-test', 'win32'), 'C--Users-koich-agmsg-agents-win-test');
+  assert.equal(encodeClaudeProjectDir('C:/Users/koich/agmsg-agents/win-test', 'win32'), 'C--Users-koich-agmsg-agents-win-test');
+  assert.equal(encodeClaudeProjectDir('/home/u/a_b.c', 'linux'), '-home-u-a_b.c');
+  assert.equal(nativePath('/c/Users/koich/.claude', 'win32'), 'C:/Users/koich/.claude');
+  assert.equal(nativePath('/c', 'win32'), 'C:/');
+  assert.equal(nativePath('C:\\Users\\x', 'win32'), 'C:\\Users\\x');
+  assert.equal(nativePath('/c/Users/x', 'linux'), '/c/Users/x');
+  assert.equal(isNamedPipePath('\\\\.\\pipe\\LOCAL\\cc-msg-ab12'), true);
+  assert.equal(isNamedPipePath('/tmp/cc-socks/1.sock'), false);
+  assert.equal(isNamedPipePath('\\\\.\\pipe\\'), false);
+  // A pipe is asked whether it exists, never opened or lstat'ed.
+  assert.deepEqual(checkSocketOwnership('\\\\.\\pipe\\LOCAL\\cc-msg-not-here', 'win32'), { state: 'unreadable', reason: 'messaging_socket_missing' });
+});
+
+test('Windows: a seat is no longer blocked as unsupported', async (t) => {
+  const { db, channel, state } = channelFixture(t, 'win32');
+  await channel.pollOnce();
+  assert.equal(state.sent, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM beta_claude_seat WHERE reason = ?').get('windows_not_supported_yet').n, 0);
+  await channel.stop();
 });

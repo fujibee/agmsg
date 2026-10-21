@@ -42,7 +42,6 @@ agmsg_session_start() {
     . "${SKILL_DIR:-}/scripts/lib/compat.sh"
   fi
   _agmsg_detect_platform
-  [ "$_agmsg_platform" != msys ] || return 0
   if ! declare -F agmsg_daemon_read_state >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     . "${SKILL_DIR:-}/scripts/lib/daemon-state.sh"
