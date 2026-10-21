@@ -60,7 +60,7 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   grep -q "types/fx" <<<"$output"
   grep -q "ext-tools/tl/handle" <<<"$output"
   grep -q "at your own risk" <<<"$output"
-  grep -q "Ignored (not installed): docs/" <<<"$output"
+  grep -q "Ignored (not installed.*): docs/" <<<"$output"
   grep -q "plugin install acme/pack@$(head_of acme pack) --yes" <<<"$output"
   [ ! -e "$TEST_SKILL_DIR/db/plugin-sources" ]
   [ ! -e "$TEST_SKILL_DIR/plugins/sources/github" ]
@@ -354,4 +354,92 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   run PLUGIN list
   refute grep -q "zz" <<<"$output"
   refute grep -q "^sources" <<<"$output"
+}
+
+@test "only agmsg-plugin.conf and the driver directories are kept on disk" {
+  w="$(mk_repo acme pack)"
+  echo readme > "$w/README.md"
+  mkdir -p "$w/storage/x"; echo y > "$w/storage/x/file"
+  git -C "$w" add -A; git -C "$w" commit -qm extra
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 0 ]
+  d="$TEST_SKILL_DIR/plugins/sources/github/acme/pack/$(head_of acme pack)"
+  [ -f "$d/agmsg-plugin.conf" ]
+  [ -d "$d/types/fx" ]
+  [ ! -e "$d/docs" ]
+  [ ! -e "$d/storage" ]
+  [ ! -e "$d/README.md" ]
+  # nothing unactivated shows up as an untrusted driver
+  run PLUGIN list
+  refute grep -q "UNTRUSTED" <<<"$output"
+}
+
+@test "a symlink inside a driver directory is refused" {
+  w="$(mk_repo acme pack)"
+  ln -s /etc/hosts "$w/types/fx/link"
+  git -C "$w" add -A; git -C "$w" commit -qm link
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 1 ]
+  grep -q "may not contain symlinks" <<<"$output"
+  [ ! -e "$TEST_SKILL_DIR/db/plugin-sources" ]
+}
+
+@test "update that adds a built-in clash prints a runnable update command that keeps the ref" {
+  mk_repo acme pack >/dev/null
+  PLUGIN install acme/pack@main --yes >/dev/null
+  w="$BATS_TEST_TMPDIR/work-acme-pack"
+  mkdir -p "$w/types/core"
+  printf 'name=core\ntemplate=template.md\nhooks_file=.x/c.json\n' > "$w/types/core/type.conf"
+  git -C "$w" add -A; git -C "$w" commit -qm core
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  mkdir -p "$SCRIPTS/drivers/types/core"
+  printf 'name=core\n' > "$SCRIPTS/drivers/types/core/type.conf"
+  run PLUGIN update acme/pack --yes
+  [ "$status" -eq 1 ]
+  grep -q "would replace built-in" <<<"$output"
+  grep -q "agmsg plugin update acme/pack@main --override" <<<"$output"
+  refute grep -q "plugin install acme/pack" <<<"$output"
+  # the old commit is untouched
+  [ "$(cut -f3 "$TEST_SKILL_DIR/db/plugin-sources")" != "$(head_of acme pack)" ]
+  run PLUGIN update acme/pack --yes --override
+  [ "$status" -eq 0 ]
+}
+
+@test "concurrent removes of different sources do not resurrect or lose rows" {
+  for i in 1 2 3 4 5 6; do
+    w="$(mk_repo "o$i" "p$i")"
+    git -C "$w" mv types/fx "types/fx$i"; git -C "$w" mv ext-tools/tl "ext-tools/tl$i"
+    git -C "$w" commit -qam "rename $i"
+    git -C "$w" push -q "$GIT_BASE/o$i/p$i.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/o$i/p$i.git" HEAD
+    PLUGIN install "o$i/p$i" --yes >/dev/null
+  done
+  [ "$(wc -l < "$TEST_SKILL_DIR/db/plugin-sources" | tr -d ' ')" -eq 6 ]
+  pids=""
+  for i in 1 2 3 4 5 6; do
+    PLUGIN remove "o$i/p$i" >/dev/null 2>&1 &
+    pids="$pids $!"
+  done
+  for p in $pids; do wait "$p"; done
+  [ ! -s "$TEST_SKILL_DIR/db/plugin-sources" ]
+  [ ! -s "$TEST_SKILL_DIR/db/trusted-plugins" ]
+  [ ! -d "$TEST_SKILL_DIR/plugins/sources/github" ] || [ -z "$(ls -A "$TEST_SKILL_DIR/plugins/sources/github")" ]
+}
+
+@test "concurrent installs of different sources keep every row and every trust line" {
+  for i in 1 2 3 4 5 6; do
+    w="$(mk_repo "o$i" "p$i")"
+    git -C "$w" mv types/fx "types/fx$i"; git -C "$w" mv ext-tools/tl "ext-tools/tl$i"
+    git -C "$w" commit -qam "rename $i"
+    git -C "$w" push -q "$GIT_BASE/o$i/p$i.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/o$i/p$i.git" HEAD
+  done
+  pids=""
+  for i in 1 2 3 4 5 6; do
+    PLUGIN install "o$i/p$i" --yes >/dev/null 2>&1 &
+    pids="$pids $!"
+  done
+  for p in $pids; do wait "$p"; done
+  [ "$(wc -l < "$TEST_SKILL_DIR/db/plugin-sources" | tr -d ' ')" -eq 6 ]
+  [ "$(wc -l < "$TEST_SKILL_DIR/db/trusted-plugins" | tr -d ' ')" -eq 12 ]
 }

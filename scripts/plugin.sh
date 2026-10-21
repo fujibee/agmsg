@@ -246,8 +246,7 @@ _plugin_inspect() {
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       if [ -L "$f" ]; then
-        PLUGIN_EXEC="${PLUGIN_EXEC:+$PLUGIN_EXEC
-}${f#"$dir"/} (symlink)"
+        _plugin_die "${f#"$dir"/} is a symlink; plugins may not contain symlinks"
       elif [ -x "$f" ] || [ "$(head -c 2 "$f" 2>/dev/null)" = '#!' ]; then
         PLUGIN_EXEC="${PLUGIN_EXEC:+$PLUGIN_EXEC
 }${f#"$dir"/}"
@@ -269,23 +268,33 @@ _plugin_record_add() {  # id spec sha dir
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$PLUGIN_SOURCES_FILE"
 }
 
+# Replace <file> with <content> atomically (an empty result just empties it).
+# Callers hold the plugin lock; the rename keeps unlocked readers (the registry
+# reads these files on every lookup) from ever seeing a half-written file.
+_plugin_write_filtered() {  # file content
+  if [ -z "$2" ]; then
+    : > "$1"
+  else
+    # shellcheck disable=SC1091
+    declare -F agmsg_write_atomic >/dev/null 2>&1 || . "$SCRIPT_DIR/lib/registry-lock.sh"
+    agmsg_write_atomic "$1" "$2"
+  fi
+}
+
 _plugin_record_drop() {  # id
-  local tmp
   [ -f "$PLUGIN_SOURCES_FILE" ] || return 0
-  tmp="$(mktemp "${TMPDIR:-/tmp}/agmsg-sources.XXXXXX")"
-  awk -F'\t' -v id="$1" '$1 != id' "$PLUGIN_SOURCES_FILE" > "$tmp" || true
-  mv "$tmp" "$PLUGIN_SOURCES_FILE"
+  _plugin_write_filtered "$PLUGIN_SOURCES_FILE" \
+    "$(awk -F'\t' -v id="$1" '$1 != id' "$PLUGIN_SOURCES_FILE")"
 }
 
 # Drop the trust line for exactly <axis>/<name> at <path>; other paths for the
 # same name (there should be none) are left alone.
 _plugin_untrust_path() {
-  local axis="$1" name="$2" path="$3" tf tmp
+  local axis="$1" name="$2" path="$3" tf
   tf="$(agmsg_driver_trustfile)" || return 0
   [ -f "$tf" ] || return 0
-  tmp="$(mktemp "${TMPDIR:-/tmp}/agmsg-trust.XXXXXX")"
-  grep -vxF "$(printf '%s/%s\t%s' "$axis" "$name" "$path")" "$tf" > "$tmp" || true
-  mv "$tmp" "$tf"
+  _plugin_write_filtered "$tf" \
+    "$( { grep -vxF "$(printf '%s/%s\t%s' "$axis" "$name" "$path")" "$tf" || true; } )"
 }
 
 # Delete one commit directory of a source, only if it is where we put it.
@@ -331,7 +340,7 @@ $(_plugin_drivers_in "$dir")
 EOF
 }
 
-_plugin_explain_override() {  # owner repo builtin-list
+_plugin_explain_override() {  # owner repo builtin-list action ref
   {
     echo "agmsg plugin: $1/$2 would replace built-in driver(s):"
     printf '%s\n' "$3" | sed 's/^/  - /'
@@ -344,7 +353,7 @@ _plugin_explain_override() {  # owner repo builtin-list
     echo "  - To go back, run: agmsg plugin remove $1/$2   (the built-in is restored)."
     echo
     echo "Nothing was installed. If you want this on purpose, run:"
-    echo "  agmsg plugin install $1/$2 --override"
+    echo "  agmsg plugin ${4:-install} $1/$2${5:+@$5} --override"
   } >&2
 }
 
@@ -378,7 +387,7 @@ EOF
   fi
   if [ -n "$PLUGIN_IGNORED" ]; then
     echo
-    echo "Ignored (not installed): $PLUGIN_IGNORED"
+    echo "Ignored (not installed; only agmsg-plugin.conf and the driver directories are kept): $PLUGIN_IGNORED"
   fi
   echo
   echo "NOTICE: installing a plugin is at your own risk. agmsg does not review or sign"
@@ -440,6 +449,71 @@ $(_plugin_drivers_in "$1")
 EOF
 }
 
+# db/plugin-sources and db/trusted-plugins are rewritten read-filter-mv, so two
+# commands on different sources could lose each other's change. Every mutation
+# runs under one lock (the registry's mkdir lock, keyed on db/); downloading,
+# the report and the confirmation stay outside it, and each command re-checks
+# what it relied on once it holds the lock.
+_plugin_lock() {
+  mkdir -p "$PLUGIN_ROOT/db"
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/registry-lock.sh"
+  agmsg_lock_acquire "$PLUGIN_ROOT/db" \
+    || _plugin_die "could not lock the plugin records (another plugin command may be running)"
+  # acquire installs its own EXIT trap; keep staging cleanup alongside it.
+  trap '_plugin_stage_cleanup; agmsg_lock_release' EXIT
+}
+
+_plugin_unlock() {
+  agmsg_lock_release
+  trap _plugin_stage_cleanup EXIT
+}
+
+# Keep only agmsg-plugin.conf and the accepted driver directories of the staged
+# tree, so what lands on disk is what the report said. Removes only direct
+# children of the staging checkout this process made.
+_plugin_prune_ignored() {  # dir
+  local entry name
+  case "$1" in "$PLUGIN_STAGE"/?*) ;; *) _plugin_die "refusing to prune outside the staging directory" ;; esac
+  for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="$(basename "$entry")"
+    [ "$name" != agmsg-plugin.conf ] || continue
+    case " $PLUGIN_ACCEPTED_AXES " in *" $name "*) [ -d "$entry" ] && [ ! -L "$entry" ] && continue ;; esac
+    if [ -d "$entry" ] && [ ! -L "$entry" ]; then rm -rf -- "$entry"; else rm -f -- "$entry"; fi
+  done
+}
+
+# Refuse on a clash with another source / hand-placed driver, and on a new
+# built-in replacement without --override. Run before the report and again under
+# the lock. $4 = install|update, $5 = ref for the printed command, $6 = built-ins
+# already accepted (update only).
+_plugin_check_clashes() {  # id dir owner repo action ref accepted-dir
+  local id="$1" dir="$2" owner="$3" repo="$4" action="$5" ref="$6" accepted="${7:-}" self="" drv new=""
+  [ "$action" != update ] || self="$id"
+  _plugin_clashes "$dir" "$self"
+  if [ -n "$CLASH_OTHER" ]; then
+    {
+      echo "agmsg plugin: $id clashes with an existing driver of the same name:"
+      printf '%s\n' "$CLASH_OTHER" | sed 's/^/  - /'
+      echo "Nothing was changed. Remove the other one first if you want to switch."
+    } >&2
+    exit 1
+  fi
+  while IFS= read -r drv; do
+    [ -n "$drv" ] || continue
+    [ -n "$accepted" ] && [ -d "$accepted/$drv" ] && continue
+    new="${new:+$new
+}$drv"
+  done <<EOF
+$CLASH_BUILTIN
+EOF
+  if [ -n "$new" ] && [ "$OVERRIDE" -ne 1 ]; then
+    _plugin_explain_override "$owner" "$repo" "$new" "$action" "$ref"
+    exit 1
+  fi
+}
+
 _plugin_cmd_install() {
   _plugin_parse_flags "$@"
   [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: plugin.sh install <owner>/<repo>[@<ref>] [--yes] [--override]"
@@ -451,27 +525,23 @@ _plugin_cmd_install() {
   fi
   _plugin_fetch "$owner" "$repo" "$ref"
   _plugin_inspect "$PLUGIN_SRC"
-  _plugin_clashes "$PLUGIN_SRC" ""
-  if [ -n "$CLASH_OTHER" ]; then
-    {
-      echo "agmsg plugin: $id clashes with an existing driver of the same name:"
-      printf '%s\n' "$CLASH_OTHER" | sed 's/^/  - /'
-      echo "Nothing was installed. Remove the other one first if you want to switch."
-    } >&2
-    exit 1
-  fi
-  if [ -n "$CLASH_BUILTIN" ] && [ "$OVERRIDE" -ne 1 ]; then
-    _plugin_explain_override "$owner" "$repo" "$CLASH_BUILTIN"
-    exit 1
-  fi
+  _plugin_prune_ignored "$PLUGIN_SRC"
+  _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" install "$ref"
   _plugin_report "$id" "$PLUGIN_SHA"
   _plugin_confirm "agmsg plugin install $owner/$repo@$PLUGIN_SHA --yes$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
   local final="$PLUGIN_SOURCES_DIR/github/$owner/$repo/$PLUGIN_SHA"
+  _plugin_lock
+  # Everything above ran without the lock; confirm it still holds.
+  if rec="$(_plugin_record "$id")"; then
+    _plugin_die "$id was installed by another command while this one waited (commit $(printf '%s' "$rec" | cut -f3))"
+  fi
+  _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" install "$ref"
   [ ! -e "$final" ] || _plugin_die "$final already exists; run 'plugin.sh remove $owner/$repo' and retry"
   mkdir -p "$(dirname "$final")"
   mv "$PLUGIN_SRC" "$final"
   _plugin_record_add "$id" "$owner/$repo${ref:+@$ref}" "$PLUGIN_SHA" "$final"
   _plugin_trust_all "$final"
+  _plugin_unlock
   echo
   echo "Installed $id at $PLUGIN_SHA and trusted its drivers."
 }
@@ -508,29 +578,10 @@ _plugin_cmd_update() {
     return 0
   fi
   _plugin_inspect "$PLUGIN_SRC"
-  _plugin_clashes "$PLUGIN_SRC" "$id"
-  if [ -n "$CLASH_OTHER" ]; then
-    {
-      echo "agmsg plugin: the new version of $id clashes with an existing driver of the same name:"
-      printf '%s\n' "$CLASH_OTHER" | sed 's/^/  - /'
-      echo "Nothing was changed."
-    } >&2
-    exit 1
-  fi
+  _plugin_prune_ignored "$PLUGIN_SRC"
   # A built-in the old commit already replaced was accepted at install time;
   # only a NEW replacement needs --override.
-  local new_override="" drv
-  while IFS= read -r drv; do
-    [ -n "$drv" ] || continue
-    [ -d "$old_dir/$drv" ] || new_override="${new_override:+$new_override
-}$drv"
-  done <<EOF
-$CLASH_BUILTIN
-EOF
-  if [ -n "$new_override" ] && [ "$OVERRIDE" -ne 1 ]; then
-    _plugin_explain_override "$owner" "$repo" "$new_override"
-    exit 1
-  fi
+  _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" update "$ref" "$old_dir"
   echo "Updating $id"
   echo "  from $old_sha"
   echo "    to $PLUGIN_SHA"
@@ -541,6 +592,12 @@ EOF
   _plugin_report "$id" "$PLUGIN_SHA"
   _plugin_confirm "agmsg plugin update $owner/$repo@$PLUGIN_SHA --yes$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
   local final="$PLUGIN_SOURCES_DIR/github/$owner/$repo/$PLUGIN_SHA"
+  _plugin_lock
+  # Re-check under the lock: the source must still be at the commit we compared.
+  rec="$(_plugin_record "$id")" || _plugin_die "$id was removed by another command while this one waited"
+  [ "$(printf '%s' "$rec" | cut -f3)" = "$old_sha" ] \
+    || _plugin_die "$id was changed by another command while this one waited; run the update again"
+  _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" update "$ref" "$old_dir"
   [ ! -e "$final" ] || _plugin_die "$final already exists; run 'plugin.sh remove $owner/$repo' and retry"
   mkdir -p "$(dirname "$final")"
   mv "$PLUGIN_SRC" "$final"
@@ -549,6 +606,7 @@ EOF
   _plugin_record_add "$id" "$owner/$repo${ref:+@$ref}" "$PLUGIN_SHA" "$final"
   _plugin_trust_all "$final"
   _plugin_rm_commit_dir "$owner" "$repo" "$old_dir"
+  _plugin_unlock
   echo
   echo "Updated $id to $PLUGIN_SHA; the previous commit was removed."
 }
@@ -560,6 +618,7 @@ _plugin_cmd_remove() {
   _plugin_parse_spec "$PLUGIN_SPEC_ARG"
   local owner="$SPEC_OWNER" repo="$SPEC_REPO" id rec dir drv back=""
   id="github/$owner/$repo"
+  _plugin_lock
   rec="$(_plugin_record "$id")" || _plugin_die "$id is not installed"
   dir="$(printf '%s' "$rec" | cut -f4)"
   while IFS= read -r drv; do
@@ -574,6 +633,7 @@ EOF
   _plugin_record_drop "$id"
   rm -rf -- "$PLUGIN_SOURCES_DIR/github/$owner/$repo"
   rmdir "$PLUGIN_SOURCES_DIR/github/$owner" 2>/dev/null || true
+  _plugin_unlock
   echo "Removed $id."
   if [ -n "$back" ]; then
     echo "The built-in driver(s) are back in use: $back"
@@ -661,7 +721,9 @@ case "$ACTION" in
     ref="${1:?Usage: plugin.sh trust <axis/name|name>}"
     res="$(_plugin_resolve_external "$ref")" || exit 1
     IFS=$'\t' read -r axis name dir <<<"$res"
+    _plugin_lock
     agmsg_driver_trust "$axis" "$name" "$dir"
+    _plugin_unlock
     echo "Trusted $axis/$name -> $dir"
     ;;
   untrust)
@@ -671,7 +733,9 @@ case "$ACTION" in
       *)   res="$(_plugin_resolve_external "$ref")" || exit 1
            IFS=$'\t' read -r axis name _ <<<"$res" ;;
     esac
+    _plugin_lock
     agmsg_driver_untrust "$axis" "$name"
+    _plugin_unlock
     echo "Untrusted $axis/$name"
     ;;
   *)
