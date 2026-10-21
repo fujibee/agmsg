@@ -38,6 +38,13 @@ EOF
 }
 
 teardown() {
+  # The fake `codex app-server` (bash, with the python it waits on) is not in
+  # any pidfile a failed test is sure to have written, and teardown_test_env
+  # only reaps once its plain rm fails -- which it does not on macOS/Linux. So
+  # reap everything whose argv names this test's TEST_SKILL_DIR here, always.
+  # It reads argv the way the Git Bash path needs (/proc), is scoped to this
+  # test's own temp dir, and the python child exits once its parent is gone.
+  _reap_test_skill_dir_procs || true
   teardown_test_env
 }
 
@@ -1744,7 +1751,38 @@ _boot_line_executable() {
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
   run env SHELL="$STUB_BIN/noshell" bash "$boot"
+  # Forced failure for the teardown test below: stop here, with the fake
+  # app-server still up, the way a failing assertion would. The variable names
+  # a file that receives this test's own temp dir.
+  if [ -n "${AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH:-}" ]; then
+    printf '%s' "$TEST_SKILL_DIR" > "$AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH"
+    # The same listing and command-line source the reaper uses (no ps -o, which
+    # Git Bash lacks).
+    local _p
+    for _p in $(_pids_referencing_dir "$TEST_SKILL_DIR"); do
+      ( source "$SCRIPTS/lib/compat.sh"; compat_get_cmdline "$_p"; echo )
+    done > "$AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH.procs"
+    false
+  fi
   _assert_bridged_argv
+}
+
+@test "spawn: a test that fails after the launch leaves no fake app-server behind (teardown reap)" {
+  # Runs the launch test above for real, forced to fail right after the fake
+  # app-server is up. What the inner run's teardown does -- or does not do -- is
+  # then read off the process list, by the temp dir the inner test reported.
+  local marker="$TEST_SKILL_DIR/inner-dir" inner
+  run env AGMSG_TEST_SPAWN_FAIL_AFTER_LAUNCH="$marker" \
+    bats -f "reaches the real binary WITH --remote \\(argv" "$BATS_TEST_DIRNAME/test_spawn.bats"
+  grep -q '^not ok 1 ' <<<"$output"
+  inner="$(cat "$marker")"
+  [ -n "$inner" ]
+  # Both halves of the fake were up and named by the temp dir: the bash codex
+  # and the python holding the listening socket. So "nothing references it
+  # now" covers the python and its socket, not just the bash.
+  grep -q 'codex app-server' "$marker.procs"
+  grep -qi 'python.* - ' "$marker.procs"
+  [ -z "$(_pids_referencing_dir "$inner")" ]
 }
 
 @test "spawn: a codex seat spawned FROM a bridged codex seat still reaches the real binary WITH --remote" {
@@ -1804,7 +1842,10 @@ _install_fake_codex_bridge_stack() {
 case "${1:-}" in
   --version) echo "codex-cli 0.142.2"; exit 0 ;;
   app-server)
-    python3 - <<'PY'
+    # The test's own dir rides in argv (the script path), so the shared reaper
+    # finds this python directly; a native Windows python keeps reporting the
+    # same getppid() after its parent dies, so it cannot be left to notice.
+    python3 - "$0" <<'PY'
 import socket, sys, os
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1839,7 +1880,7 @@ FAKE
 }
 
 # The evidence both end-to-end tests read: the real binary was reached exactly
-# once, bridged, with the actas prompt. Then the fake app-server is put down.
+# once, bridged, with the actas prompt. The fake app-server is put down by teardown.
 _assert_bridged_argv() {
   [ -f "$CALL_LOG" ]
   # The real binary was reached exactly once, with the bridge flag and the actas prompt.
@@ -1847,13 +1888,6 @@ _assert_bridged_argv() {
   grep -q '^real-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
   grep -q 'actas' "$CALL_LOG"
   grep -q 'reviewer' "$CALL_LOG"
-  # Clean up the fake app-server the shim brought up.
-  local pf pid
-  for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
-    [ -f "$pf" ] || continue
-    pid="$(cat "$pf" 2>/dev/null)"; [ -n "$pid" ] || continue
-    kill "$pid" 2>/dev/null || true
-  done
 }
 
 @test "spawn: an inherited PATH-wrapper install (AGMSG_CODEX_SHIM_WRAPPER/SCRIPT_DIR) cannot repoint the bundled shim" {
@@ -2284,17 +2318,13 @@ EOF
   refute grep -qF 'status=spawned-but-unnamed' <<<"$output"
 }
 
-@test "join: names its own pane at boot (control), and not under AGMSG_SELF_NAME=off (#1096)" {
-  # The control half needs naming ON by default (against the fake herdr
-  # below, never a real terminal) to mean anything against the off half
-  # right after it -- opt back in from the harness's #1095 off
-  # (test_helper.bash).
+@test "join: registration does not name the caller with naming enabled or disabled" {
+  # Exercise both switch values against a fake terminal.
   unset AGMSG_SELF_NAME
   _setup_fake_herdr
-  # Control: a seat joining from its own pane names it -- key and prefixed label.
+  # Registration alone does not establish whose identity the caller holds.
   bash "$SCRIPTS/join.sh" myteam bob claude-code "$PROJ"
-  grep -q '^agent rename wT:pSelf ' "$HERDR_CALL_LOG"
-  grep -q '^pane rename wT:pSelf myteam:bob$' "$HERDR_CALL_LOG"
+  refute grep -q ' rename ' "$HERDR_CALL_LOG"
   : > "$HERDR_CALL_LOG"
   # The switch spawn sets on its pre-join: the same join, no naming call at all.
   AGMSG_SELF_NAME=off bash "$SCRIPTS/join.sh" myteam carol claude-code "$PROJ"
