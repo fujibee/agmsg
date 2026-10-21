@@ -539,11 +539,19 @@ agmsg_claude_code_native_target() {
   case "$raw" in
     uds:/*) socket="${raw#uds:}" ;;
     /*) socket="$raw" ;;
+    # Native Windows: a named pipe, \\.\pipe\LOCAL\cc-msg-<hex>
+    uds:\\\\*) socket="${raw#uds:}" ;;
+    \\\\*) socket="$raw" ;;
   esac
   case "$socket" in *[[:cntrl:]]*) socket="" ;; esac
+  # Native Windows sets no CLAUDE_CONFIG_DIR; its default is under the user
+  # profile, which a Git Bash hook sees as $HOME (/c/Users/me) or only as
+  # %USERPROFILE% (C:\Users\me).
+  [ -n "$config_dir" ] || config_dir="${USERPROFILE:+$USERPROFILE/.claude}"
   case "$config_dir" in
     *[[:cntrl:]]*) config_dir="" ;;
     /*) ;;
+    [A-Za-z]:[\\/]*) ;;
     *) config_dir="" ;;
   esac
   [ -n "$socket" ] && [ -n "$config_dir" ] || return 1

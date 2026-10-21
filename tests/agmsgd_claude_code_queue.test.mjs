@@ -11,6 +11,10 @@ import {
   resolveTranscriptPath,
   resolvePendingDelivery,
   latestPermissionMode,
+  encodeClaudeProjectDir,
+  nativePath,
+  isNamedPipePath,
+  checkSocketOwnership,
 } from '../scripts/daemon/channels/claude-code-queue-io.mjs';
 import { createClaudeCodeQueueChannel } from '../scripts/daemon/channels/claude-code-queue.mjs';
 import { ensureClaudeCodeChannelSchema } from '../scripts/daemon/channels/claude-code-queue-store.mjs';
@@ -168,7 +172,7 @@ test('resolvePendingDelivery: nothing but a delivered nonce ends a pending nudge
   assert.equal(resolvePendingDelivery({ observation: { state: 'delivered' } }).state, 'confirmed');
 });
 
-function channelFixture(t) {
+function channelFixture(t, hostPlatform = 'linux') {
   const root = temporaryDirectory(t);
   mkdirSync(path.join(root, 'run'));
   const db = openInstallDb(path.join(root, 'run', 'install.db'));
@@ -189,7 +193,8 @@ function channelFixture(t) {
     readMode: () => state.mode ?? '',
     observe: () => (state.hold ? { state: 'held' } : { state: 'absent' }),
     socketAlive: () => state.alive,
-    hostPlatform: 'linux',
+    hostPlatform,
+    transcriptPathOf: hostPlatform === 'win32' ? () => path.join(root, 'session.jsonl') : undefined,
   };
   state.options = options;
   const channel = createClaudeCodeQueueChannel(options);
@@ -356,4 +361,71 @@ test('a conversation stored under another project directory is found by its sess
   mkdirSync(path.dirname(expected), { recursive: true });
   writeFileSync(expected, '');
   assert.equal(resolveTranscriptPath(config, '/proj/recorded', session), expected, 'the recorded project wins when it has the file');
+});
+
+// Native Windows (measured on a real machine 2026-10-21): the inbox is the named
+// pipe \\.\pipe\LOCAL\cc-msg-<hex>, the profile has no CLAUDE_CONFIG_DIR, and
+// the transcript directory is the project path with every character that is not
+// a letter, digit or "-" turned into "-".
+test('Windows: the transcript directory name, shell-style paths and pipe paths are read the way Claude Code writes them', () => {
+  assert.equal(encodeClaudeProjectDir('C:\\Users\\koich\\agmsg-agents\\win-test', 'win32'), 'C--Users-koich-agmsg-agents-win-test');
+  assert.equal(encodeClaudeProjectDir('C:/Users/koich/agmsg-agents/win-test', 'win32'), 'C--Users-koich-agmsg-agents-win-test');
+  assert.equal(encodeClaudeProjectDir('/home/u/a_b.c', 'linux'), '-home-u-a_b.c');
+  assert.equal(nativePath('/c/Users/koich/.claude', 'win32'), 'C:/Users/koich/.claude');
+  assert.equal(nativePath('/c', 'win32'), 'C:/');
+  assert.equal(nativePath('C:\\Users\\x', 'win32'), 'C:\\Users\\x');
+  assert.equal(nativePath('/c/Users/x', 'linux'), '/c/Users/x');
+  assert.equal(isNamedPipePath('\\\\.\\pipe\\LOCAL\\cc-msg-ab12'), true);
+  assert.equal(isNamedPipePath('/tmp/cc-socks/1.sock'), false);
+  assert.equal(isNamedPipePath('\\\\.\\pipe\\'), false);
+  // A pipe is never probed: no filesystem call can be made on this name, so the
+  // answer is "unknown, go on" for a name that is not there.
+  assert.deepEqual(checkSocketOwnership('\\\\.\\pipe\\LOCAL\\cc-msg-not-here', 'win32'), { state: 'ok' });
+});
+
+test('Windows: a seat is no longer blocked as unsupported', async (t) => {
+  const { db, channel, state } = channelFixture(t, 'win32');
+  await channel.pollOnce();
+  assert.equal(state.sent, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM beta_claude_seat WHERE reason = ?').get('windows_not_supported_yet').n, 0);
+  await channel.stop();
+});
+
+test('a nudge that finds its socket gone (ENOENT on connect) ends the row and is not retried for that socket', async (t) => {
+  const { db, channel, state } = channelFixture(t, 'win32');
+  const options = state.options;
+  let calls = 0;
+  const gone = createClaudeCodeQueueChannel({ ...options, send: async () => { calls += 1; return { state: 'failed', reason: 'socket_error:ENOENT' }; } });
+  for (let i = 0; i < 4; i += 1) await gone.pollOnce();
+  assert.equal(calls, 1, 'one attempt, then the seat waits for a new socket');
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue").get().n, 1);
+  assert.equal(db.prepare("SELECT reason FROM beta_claude_seat").get().reason, 'messaging_socket_missing');
+  state.socket = '/tmp/cc-socks/9.sock';
+  await gone.pollOnce();
+  assert.equal(calls, 2);
+  await gone.stop();
+  await channel.stop();
+});
+
+// Only on a Windows machine: a real pipe, probed by the preflight, then nudged.
+test('Windows pipe: the preflight makes no connection, and an authenticated nudge is delivered', { skip: process.platform !== 'win32' }, async (t) => {
+  const name = `\\\\.\\pipe\\LOCAL\\agmsg-test-${process.pid}`;
+  let connections = 0;
+  const lines = [];
+  const server = createServer((connection) => {
+    connections += 1;
+    let data = '';
+    connection.on('data', (chunk) => { data += chunk; });
+    connection.on('end', () => lines.push(...data.trim().split('\n')));
+  });
+  await new Promise((resolve) => server.listen(name, resolve));
+  t.after(() => server.close());
+  assert.deepEqual(checkSocketOwnership(name, 'win32'), { state: 'ok' });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(connections, 0, 'the preflight connected to the pipe');
+  const result = await sendClaudeCodeMessage({ socketPath: name, nonce: 'w1', body: '[agmsg:w1] hi', token: 'tok-w' });
+  assert.equal(result.state, 'sent');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(connections, 1);
+  assert.deepEqual(JSON.parse(lines[0]), { type: 'auth', token: 'tok-w' });
 });

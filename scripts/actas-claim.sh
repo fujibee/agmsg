@@ -155,8 +155,7 @@ if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
   command -v _agmsg_detect_platform >/dev/null 2>&1 || . "$SKILL_DIR/scripts/lib/compat.sh"
   _agmsg_detect_platform
   agmsg_daemon_read_state
-  if [ "${AGMSGD_HEALTH:-}" = ready ] && [ "$_agmsg_platform" != msys ] \
-     && agmsg_claude_code_native_storage_ready; then
+  if [ "${AGMSGD_HEALTH:-}" = ready ] && agmsg_claude_code_native_storage_ready; then
     NATIVE_DELIVERY=1
     while IFS= read -r team; do
       [ -z "$team" ] && continue

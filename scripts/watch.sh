@@ -1256,7 +1256,6 @@ _agmsg_watch_native_delivery_active() {
   agmsg_daemon_read_state
   [ "${AGMSGD_DESIRED:-}" = on ] && [ "${AGMSGD_HEALTH:-}" = ready ] || return 1
   declare -F _agmsg_detect_platform >/dev/null 2>&1 && _agmsg_detect_platform
-  [ "${_agmsg_platform:-}" != msys ] || return 1
   declare -F agmsg_claude_code_native_storage_ready >/dev/null 2>&1 || return 1
   agmsg_claude_code_native_storage_ready || return 1
   local bare_sid="$SESSION_ID"

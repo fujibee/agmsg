@@ -311,3 +311,17 @@ fake_session() {
   agmsg_role_session_set_messaging T alice /tmp/cc-socks/444.sock /home/x/.claude sid-2
   [ -z "$(agmsg_role_session_get T alice messaging_token)" ]
 }
+
+@test "native target: a Windows named pipe and the profile directory under USERPROFILE are accepted" {
+  run env CLAUDE_CODE_MESSAGING_SOCKET='\\.\pipe\LOCAL\cc-msg-ab12' USERPROFILE='C:\Users\me' HOME= CLAUDE_CONFIG_DIR= \
+    bash -c ". '$TEST_SKILL_DIR/scripts/lib/role-session.sh'; agmsg_claude_code_native_target"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'\\\\.\\pipe\\LOCAL\\cc-msg-ab12\tC:\\Users\\me/.claude' ]
+  run env CLAUDE_CODE_MESSAGING_SOCKET='uds:\\.\pipe\LOCAL\cc-msg-ab12' CLAUDE_CONFIG_DIR='/c/Users/me/.claude' \
+    bash -c ". '$TEST_SKILL_DIR/scripts/lib/role-session.sh'; agmsg_claude_code_native_target"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'\\\\.\\pipe\\LOCAL\\cc-msg-ab12\t/c/Users/me/.claude' ]
+  run env CLAUDE_CODE_MESSAGING_SOCKET='relative.sock' CLAUDE_CONFIG_DIR='/c/Users/me/.claude' \
+    bash -c ". '$TEST_SKILL_DIR/scripts/lib/role-session.sh'; agmsg_claude_code_native_target"
+  [ "$status" -ne 0 ]
+}

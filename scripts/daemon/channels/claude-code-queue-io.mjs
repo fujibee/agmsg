@@ -29,16 +29,35 @@ const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
 // Only this simple case was measured; a cwd containing a literal "-" was not
 // tested separately and is not known to collide in practice, so this is not
 // claimed exhaustive.
-export function encodeClaudeProjectDir(cwd) {
+// Native Windows (measured 2026-10-21): C:\Users\koich\agmsg-agents\win-test
+// -> C--Users-koich-agmsg-agents-win-test, i.e. every character that is not a
+// letter, digit or "-" becomes "-".
+export function encodeClaudeProjectDir(cwd, platform = process.platform) {
   if (typeof cwd !== "string" || !cwd) return "";
-  return cwd.replace(/\//g, "-");
+  return platform === "win32" ? cwd.replace(/[^A-Za-z0-9-]/g, "-") : cwd.replace(/\//g, "-");
 }
 
-export function resolveTranscriptPath(claudeConfigDir, project, sessionId) {
-  if (typeof claudeConfigDir !== "string" || !isAbsolute(claudeConfigDir)) return "";
-  if (typeof project !== "string" || !isAbsolute(project)) return "";
+// A path the shell recorded, as a path this process can open. Git Bash writes
+// /c/Users/me; node on Windows needs C:/Users/me. Anything else is unchanged,
+// and so is every path off Windows.
+export function nativePath(value, platform = process.platform) {
+  if (platform !== "win32" || typeof value !== "string") return value;
+  const gitBash = value.match(/^\/([A-Za-z])(?:\/(.*))?$/);
+  return gitBash ? `${gitBash[1].toUpperCase()}:/${gitBash[2] ?? ""}` : value;
+}
+
+export function isNamedPipePath(value) {
+  return typeof value === "string" && /^\\\\[.?]\\pipe\\[^\\/\0]/i.test(value);
+}
+
+export function resolveTranscriptPath(claudeConfigDirRaw, projectRaw, sessionId, platform = process.platform) {
+  const claudeConfigDir = nativePath(claudeConfigDirRaw, platform);
+  const project = nativePath(projectRaw, platform);
+  const absolute = platform === "win32" ? winAbsolute : isAbsolute;
+  if (typeof claudeConfigDir !== "string" || !absolute(claudeConfigDir)) return "";
+  if (typeof project !== "string" || !absolute(project)) return "";
   if (typeof sessionId !== "string" || !sessionId) return "";
-  const encoded = encodeClaudeProjectDir(project);
+  const encoded = encodeClaudeProjectDir(project, platform);
   if (!encoded) return "";
   const expected = `${claudeConfigDir}/projects/${encoded}/${sessionId}.jsonl`;
   if (isFile(expected)) return expected;
@@ -62,6 +81,11 @@ export function resolveTranscriptPath(claudeConfigDir, project, sessionId) {
   return found.length === 1 ? found[0] : expected;
 }
 
+// A drive path (C:\x or C:/x) or a UNC one; the POSIX test does not apply.
+function winAbsolute(value) {
+  return /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]/.test(value);
+}
+
 function isFile(path) {
   try {
     return lstatSync(path).isFile();
@@ -75,7 +99,12 @@ function isFile(path) {
 // record must never be written to on trust alone. A symlinked path is
 // refused the same way every other agmsg state-file reader on this codebase
 // refuses one.
-export function checkSocketOwnership(socketPath) {
+export function checkSocketOwnership(socketPath, platform = process.platform) {
+  // A named pipe (native Windows) is not a file: every filesystem probe of it
+  // (stat, access, exists) can open it, which connects to the seat's inbox.
+  // Nothing is asked of it here; a pipe that is gone shows as ENOENT when the
+  // nudge connects, and the caller treats that as the socket being gone.
+  if (platform === "win32" && isNamedPipePath(socketPath)) return { state: "ok" };
   let stat;
   try {
     stat = lstatSync(socketPath);
