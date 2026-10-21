@@ -1915,7 +1915,7 @@ export function storageDriverExitGraceMs(busyTimeoutEnv = process.env.AGMSG_BUSY
 }
 
 function runDriver({ args, label, operation, parse, input, rosterFile, team, bindingPath,
-  holdsRegistryLock = false }) {
+  holdsRegistryLock = false, onNotice = null }) {
   return new Promise((resolve, reject) => {
     const childEnvironment = { ...process.env };
     delete childEnvironment.AGMSG_SYNC_TOKEN;
@@ -2136,6 +2136,11 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
       // catches this when the exit is seen first; this catches the case where
       // the write error was recorded only after a clean exit had returned.
       if (lastStdinError) { settle(lastStdinError, null); return; }
+      // What a driver said on stderr while succeeding, for the one caller that
+      // reports it (a roster state it had to set aside). Never part of the result.
+      if (onNotice !== null && stderr.trim()) {
+        try { onNotice(stderr.trim()); } catch { /* a report must not cost the call */ }
+      }
       try {
         settle(null, parse(stdout));
       } catch (error) {
@@ -2281,6 +2286,14 @@ export async function rosterDriver(operation, config, input, extra = []) {
     // caller that has no connection root, which is what happened the first time
     // this was written unconditionally.
     rosterFile: rosterFileFor(config.local_team),
+    // The driver sets an unreadable roster state file aside and carries on; say
+    // so in the engine log, where the engine's other events are.
+    onNotice: (text) => {
+      const reset = /roster sync state .* was unreadable .*kept as (\S+) and rebuilt/u.exec(text);
+      if (reset) {
+        event("roster.state_reset", { team: config.local_team, file: reset[1] }).catch(() => {});
+      }
+    },
   });
 }
 

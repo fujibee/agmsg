@@ -5059,3 +5059,30 @@ test("the restart helper retries a failed start, never takes the predecessor's o
   assert.equal(result.status, 1);
   assert.equal(await calls(), 5);
 });
+
+test("a roster state file the driver set aside is reported in the engine log, not in the result", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-roster-reset-log-"));
+  const previous = { driver: process.env.AGMSG_SYNC_ROSTER_DRIVER, log: process.env.AGMSG_SYNC_LOG_FILE };
+  t.after(async () => {
+    for (const [name, value] of [["AGMSG_SYNC_ROSTER_DRIVER", previous.driver], ["AGMSG_SYNC_LOG_FILE", previous.log]]) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  const script = join(root, "roster-driver.sh");
+  await writeFile(script, [
+    "#!/usr/bin/env bash",
+    "cat > /dev/null",
+    "echo 'agmsg: roster sync state /t/roster-sync.json was unreadable (bad); kept as /t/roster-sync.json.corrupt-1-2 and rebuilt from the server' >&2",
+    "echo '{\"type\":\"roster_sync_state\",\"transport_cursor\":\"0\"}'",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  process.env.AGMSG_SYNC_ROSTER_DRIVER = script;
+  process.env.AGMSG_SYNC_LOG_FILE = join(root, "engine.log");
+  const records = await rosterDriver("prepare", config, [], []);
+  assert.deepEqual(records, [{ type: "roster_sync_state", transport_cursor: "0" }]);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const logged = (await readFile(process.env.AGMSG_SYNC_LOG_FILE, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(logged.map(({ event, team, file }) => [event, team, file]),
+    [["roster.state_reset", config.local_team, "/t/roster-sync.json.corrupt-1-2"]]);
+});

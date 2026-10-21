@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
 import { sealEnvelope } from "./sync-cipher.mjs";
@@ -40,13 +40,6 @@ function setAside(error) {
   renameSync(statePath, aside);
   const note = `roster sync state ${statePath} was unreadable (${error.message}); kept as ${aside} and rebuilt from the server`;
   process.stderr.write(`agmsg: ${note}\n`);
-  if (process.env.AGMSG_SYNC_LOG_FILE) {
-    try {
-      appendFileSync(process.env.AGMSG_SYNC_LOG_FILE, `${JSON.stringify({
-        at: new Date().toISOString(), event: "roster.state_reset", file: aside, reason: error.message,
-      })}\n`, { encoding: "utf8", mode: 0o600 });
-    } catch { /* the file set aside is the durable record */ }
-  }
 }
 
 function readState() {
