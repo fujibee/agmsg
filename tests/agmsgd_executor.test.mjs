@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { bootId, currentExecutor, isAlive } from "../scripts/daemon/executor.mjs";
+import { bootId, currentExecutor, isAlive, sameBoot } from "../scripts/daemon/executor.mjs";
 
 test("bootId is stable across calls and isAlive tells living/dead/wrong-boot apart", () => {
   assert.equal(bootId(), bootId(), "bootId must not change within the same boot");
@@ -56,4 +56,19 @@ test("bootId is stable across calls and isAlive tells living/dead/wrong-boot apa
       process.env.PATH = savedPath;
     }
   }
+});
+
+// The Windows boot id is Date.now() minus os.uptime(): two readings in one boot
+// differ by a second or so, and a sleep can move them further. A live process
+// must not be called dead for that.
+test("the approximate (win32) boot id tolerates drift and never proves death by differing", () => {
+  const self = currentExecutor();
+  assert.equal(sameBoot("99900", "win32", "99900"), true);
+  assert.equal(sameBoot("99900", "win32", "99899"), true, "a second of drift is the same boot");
+  assert.equal(isAlive({ pid: self.pid, bootId: "99900" }, { plat: "win32", current: "99899" }), true, "a live pid across drift is alive");
+  assert.equal(sameBoot("99900", "win32", "99000"), null, "a large gap cannot tell");
+  assert.equal(isAlive({ pid: self.pid, bootId: "99900" }, { plat: "win32", current: "99000" }), null, "a live pid across a large gap cannot tell");
+  const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(isAlive({ pid: dead.pid, bootId: "99900" }, { plat: "win32", current: "99000" }), false, "a pid that is gone is dead");
+  assert.equal(sameBoot("another-boot", "win32", "99900"), false, "a record in another form is a plain mismatch");
 });

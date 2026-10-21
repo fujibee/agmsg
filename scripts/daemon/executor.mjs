@@ -60,22 +60,25 @@ export function bootId() {
   return String(Math.round(Date.now() / 1000 - uptime()));
 }
 
-// A darwin record written before bootId() moved to kern.bootsessionuuid holds
-// kern.boottime seconds. The kernel shifts that value whenever the wall clock
-// is stepped, so it can neither be compared for equality nor be trusted as
-// proof of the same boot: such a record is "cannot tell" while its pid still
-// exists.
-function isOldDarwinBootId(recorded) {
-  return platform() === "darwin" && /^\d+$/.test(String(recorded));
-}
+// How far two readings of the approximate boot id (win32) may differ and still
+// be the same boot: they come from Date.now() minus os.uptime(), which
+// wanders by seconds within one boot.
+const APPROXIMATE_BOOT_TOLERANCE_SECONDS = 30;
 
 // true / false / null (cannot tell) for "`recorded` is this boot's id".
-export function sameBoot(recorded) {
+// `current` is this boot's id as read now (injectable for tests).
+export function sameBoot(recorded, plat = platform(), current = bootId()) {
   // Checked before the value comparison: when kern.bootsessionuuid cannot
   // be read, bootId() falls back to a number, which must not make an
   // old-format record look like an exact match.
-  if (isOldDarwinBootId(recorded)) return null;
-  return bootId() === recorded;
+  if (plat === "darwin" && /^\d+$/.test(String(recorded))) return null;
+  // The approximate id proves nothing by differing: a gap beyond the tolerance
+  // (a sleep, a clock step) is "cannot tell", never "another boot". Only a
+  // record in some other form is a plain mismatch.
+  if (plat === "win32" && /^\d+$/.test(String(recorded)) && /^\d+$/.test(String(current))) {
+    return Math.abs(Number(current) - Number(recorded)) <= APPROXIMATE_BOOT_TOLERANCE_SECONDS ? true : null;
+  }
+  return current === recorded;
 }
 
 // This process's own executor triple, as of the call. `role` and `pid` are
@@ -95,8 +98,8 @@ export function currentExecutor() {
 // (confirmed dead) without even checking the pid -- this is the one case
 // where a stale boot id is itself the proof, not a reason to say "cannot
 // tell".
-export function isAlive({ pid, bootId: capturedBootId }) {
-  const sameBootId = sameBoot(capturedBootId);
+export function isAlive({ pid, bootId: capturedBootId }, { plat = platform(), current = bootId() } = {}) {
+  const sameBootId = sameBoot(capturedBootId, plat, current);
   if (sameBootId === false) return false;
   try {
     process.kill(pid, 0);
