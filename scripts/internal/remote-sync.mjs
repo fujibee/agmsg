@@ -3488,6 +3488,29 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
 import { collectInstallBaseline, installChangedAgainst } from "./install-baseline.mjs";
 export { collectInstallBaseline, installChangedAgainst };
 
+// After an update stands the engine down, nothing else starts the new one when
+// the update did not know this engine was running (it started while the update
+// was in progress, for example). So a stood-down engine asks for its own
+// restart from a detached helper that outlives it: it waits for the update to
+// settle, then runs `remote.sh sync start`, which does nothing if an engine is
+// already running for the team and runs the updated code if not. An engine the
+// helper starts too early stands down again and asks again, so this converges
+// once the update is finished.
+const STAND_DOWN_RESTART_DELAY_SECONDS = 30;
+export function restartAfterStandDown(team, scriptsRoot, { spawnCall = spawn, environment = process.env } = {}) {
+  const childEnvironment = { ...environment };
+  delete childEnvironment.AGMSG_SYNC_TOKEN;
+  for (const key of Object.keys(childEnvironment)) {
+    if (/^(?:AGMSG_AGE_IDENTITY|AGMSG_SYNC_AGE_IDENTITY)/u.test(key)) delete childEnvironment[key];
+  }
+  const child = spawnCall("bash", [
+    "-c", 'sleep "$1"; exec bash "$2" sync start "$3"', "bash",
+    String(STAND_DOWN_RESTART_DELAY_SECONDS), join(scriptsRoot, "remote.sh"), team,
+  ], { detached: true, stdio: "ignore", env: childEnvironment, windowsHide: true });
+  child.unref?.();
+  return child;
+}
+
 export async function runLoop(config, options, dependencies = {}) {
   const cycleCall = dependencies.cycleCall ?? cycle;
   const sleepCall = dependencies.sleepCall ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -3501,6 +3524,7 @@ export async function runLoop(config, options, dependencies = {}) {
   const collectInstallBaselineCall = dependencies.collectInstallBaselineCall ?? collectInstallBaseline;
   const installChangedCall = dependencies.installChangedCall ?? installChangedAgainst;
   const scriptsRoot = dependencies.scriptsRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const restartCall = dependencies.restartCall ?? restartAfterStandDown;
 
   // An explicit --limit is a ceiling for BOTH push and pull (request size /
   // memory / slow-link timeout); only the default lets the loop go large.
@@ -3544,6 +3568,8 @@ export async function runLoop(config, options, dependencies = {}) {
           restart: `remote.sh sync start ${config.local_team}`,
         });
       } catch { /* logging is best-effort; the stand-down does not depend on it */ }
+      try { restartCall(config.local_team, scriptsRoot); }
+      catch { /* the restart line in the event above is what remains */ }
       return;
     }
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);

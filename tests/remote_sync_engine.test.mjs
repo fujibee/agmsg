@@ -24,6 +24,7 @@ import {
   discardInputDirectory,
   driver,
   STORAGE_BUSY_EXIT,
+  restartAfterStandDown,
   stdinRedirect,
   storageDriverExitGraceMs,
   exportAgeHandoff,
@@ -3301,6 +3302,7 @@ test("configured native identity must belong to its epoch recipient manifest", a
 
 test("runLoop: an install update stands the engine down before any cycle, naming the update and the restart (#963)", async () => {
   const events = [];
+  const restarts = [];
   let cycles = 0;
   // Resolves -- a stand-down is a deliberate return, not a thrown failure.
   await runLoop(config, {}, {
@@ -3309,7 +3311,11 @@ test("runLoop: an install update stands the engine down before any cycle, naming
     cycleCall: async () => { cycles += 1; return {}; },
     sleepCall: async () => {},
     eventCall: async (name, fields) => { events.push({ name, ...fields }); },
+    restartCall: (team, root) => { restarts.push([team, root]); },
+    scriptsRoot: "/skill/scripts",
   });
+  // The stood-down engine asks for its own restart, from the updated scripts.
+  assert.deepEqual(restarts, [["demo", "/skill/scripts"]]);
   // Detected at the loop boundary: no driver was ever spawned.
   assert.equal(cycles, 0);
   assert.equal(events.length, 1);
@@ -4990,4 +4996,21 @@ test("a driver can read its staged input through the shell redirect used on Wind
   const result = spawnSync("bash", args, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'prepare\n{"type":"a"}\n{"type":"b"}\n');
+});
+
+test("restartAfterStandDown hands a detached helper the team and the updated remote.sh, without secrets", () => {
+  const calls = [];
+  const fake = { unref() { calls.push("unref"); } };
+  restartAfterStandDown("demo", "/skill/scripts", {
+    spawnCall: (command, args, options) => { calls.push([command, args, options]); return fake; },
+    environment: { PATH: "/bin", AGMSG_SYNC_TOKEN: "secret", AGMSG_AGE_IDENTITY_FILE: "/id", AGMSG_SYNC_CONNECTION_DIR: "/conn" },
+  });
+  const [command, args, options] = calls[0];
+  assert.equal(command, "bash");
+  assert.deepEqual(args.slice(-2), [join("/skill/scripts", "remote.sh"), "demo"]);
+  assert.equal(options.detached, true);
+  assert.equal(options.stdio, "ignore");
+  assert.equal(options.windowsHide, true);
+  assert.deepEqual(options.env, { PATH: "/bin", AGMSG_SYNC_CONNECTION_DIR: "/conn" });
+  assert.equal(calls[1], "unref");
 });
