@@ -456,12 +456,10 @@ if [ -n "$OUTPUT" ]; then
       *) EMIT_RC=0 ;;
     esac
   else
-    cat <<ENDJSON || EMIT_RC=$?
-{
-  "decision": "block",
-  "reason": "$ESCAPED"
-}
-ENDJSON
+    # Use the shell builtin so a closed stdout stays a failed delivery.
+    # Some cat implementations reopen missing standard fds on /dev/null and
+    # return success, which would consume messages without delivering them.
+    printf '{\n  "decision": "block",\n  "reason": "%s"\n}\n' "$ESCAPED" || EMIT_RC=$?
   fi
   # A test-only observation point, and the reason it has to be HERE rather than
   # in the test: the failure this ordering exists for makes stdout unwritable, so
