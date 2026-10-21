@@ -24,6 +24,7 @@ import {
   discardInputDirectory,
   driver,
   STORAGE_BUSY_EXIT,
+  stdinRedirect,
   storageDriverExitGraceMs,
   exportAgeHandoff,
   exportAgeSnapshot,
@@ -4970,10 +4971,23 @@ test("driver() waits out a busy store and retries; anything else is asked once",
 test("every child the engine creates is spawned with windowsHide, or it fails with 0xC0000142 once the SSH session that started it is gone", async () => {
   // The failure exists only on Windows after a disconnect, so CI on other
   // platforms cannot observe it; guard the call sites themselves.
-  for (const [file, call] of [["remote-sync.mjs", "spawn(\"bash\", args, {"], ["sync-cipher.mjs", "spawnSync(age, args, {"]]) {
+  for (const [file, call] of [["remote-sync.mjs", "spawn(\"bash\", childArgs, {"], ["sync-cipher.mjs", "spawnSync(age, args, {"]]) {
     const source = await readFile(new URL(`../scripts/internal/${file}`, import.meta.url), "utf8");
     const at = source.indexOf(call);
     assert.ok(at > 0, `${file}: spawn call not found`);
     assert.match(source.slice(at, source.indexOf(");", at)), /windowsHide: true/, `${file}: spawn lacks windowsHide`);
   }
+});
+
+test("a driver can read its staged input through the shell redirect used on Windows, where an inherited stdin file handle fails once the SSH session that started the engine is gone", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-stdin-redirect-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const input = join(root, "input.jsonl");
+  const driverScript = join(root, "driver.sh");
+  await writeFile(input, '{"type":"a"}\n{"type":"b"}\n');
+  await writeFile(driverScript, "#!/usr/bin/env bash\necho \"$1\"\ncat\n", { mode: 0o755 });
+  const { args, env } = stdinRedirect([driverScript, "prepare"], input);
+  const result = spawnSync("bash", args, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'prepare\n{"type":"a"}\n{"type":"b"}\n');
 });
