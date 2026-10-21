@@ -2835,6 +2835,7 @@ case "$1/$2" in
   pane/rename)
     [ "$3" != wA:p1 ] || printf '%s' "$4" > "$LABEL_STATE" ;;
   agent/list) printf '{"result":{"agents":[]}}\n' ;;
+  agent/get) printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "$3" ;;
   agent/rename) : ;;
   *) exit 1 ;;
 esac
