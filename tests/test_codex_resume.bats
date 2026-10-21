@@ -96,6 +96,30 @@ recorded_uuid() {
   [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
+@test "codex record: carries a live owner forward and drops one whose process is gone" {
+  local proj; proj="$(mktemp -d)"
+  mkdir -p "$HOME/.codex"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  sleep 60 &
+  local live=$!
+  sleep 0.1 &
+  local dead=$!
+  wait "$dead"
+  SKILL_DIR="$SKILL_DIR" bash -c 'source "$1/scripts/lib/role-session.sh"; agmsg_role_session_record team alice t0 "$2" codex "t0.$3"' _ "$SKILL_DIR" "$proj" "$live"
+  CODEX_THREAD_ID="t1" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(agmsg_role_session_get team alice owner)" = "t0.$live" ]
+  SKILL_DIR="$SKILL_DIR" bash -c 'source "$1/scripts/lib/role-session.sh"; agmsg_role_session_record team alice t0 "$2" codex "t0.$3"' _ "$SKILL_DIR" "$proj" "$dead"
+  kill "$live" 2>/dev/null || true
+  CODEX_THREAD_ID="t2" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "t2" ]
+  [ -z "$(agmsg_role_session_get team alice owner)" ]
+
+  # No proof of death where the pid cannot be observed (Git Bash): kept.
+  SKILL_DIR="$SKILL_DIR" bash -c 'source "$1/scripts/lib/role-session.sh"; agmsg_role_session_record team alice t0 "$2" codex "t0.$3"' _ "$SKILL_DIR" "$proj" "$dead"
+  MSYSTEM=MINGW64 CODEX_THREAD_ID="t3" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(agmsg_role_session_get team alice owner)" = "t0.$dead" ]
+}
+
 @test "codex record: adds the effective profile path without changing the thread" {
   local proj explicit_home expected_home
   proj="$(mktemp -d)"
