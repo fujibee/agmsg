@@ -3491,23 +3491,29 @@ export { collectInstallBaseline, installChangedAgainst };
 // After an update stands the engine down, nothing else starts the new one when
 // the update did not know this engine was running (it started while the update
 // was in progress, for example). So a stood-down engine asks for its own
-// restart from a detached helper that outlives it. The helper waits, then runs
-// `remote.sh sync start`, and tries again on a growing wait until a start
-// reports "started", or two starts in a row report an engine already running (so
-// the predecessor has really gone), or the attempts are used up. A start that
-// fails -- the update is still copying files, say -- is just another attempt;
-// `sync start` itself refuses a team that is disconnected or owned by systemd.
-// An engine it starts too early stands down again and asks again.
+// restart from a detached helper that outlives it. The helper notes the pid in
+// the team's pidfile (the predecessor's), then waits and runs
+// `remote.sh sync start`, again on a growing wait, until a start reports
+// "started" or reports an engine already running under a DIFFERENT pid (someone
+// else restarted it). An "already running" under the predecessor's own pid only
+// means it has not exited yet, so that attempt is retried. A start that fails --
+// the update is still copying files, say -- is just another attempt; `sync
+// start` itself refuses a team that is disconnected or owned by systemd. An
+// engine it starts too early stands down again and asks again. The attempts are
+// bounded: the waits add up to 1110 seconds (about 18.5 minutes), after which a
+// person has to run `remote.sh sync start`, as the stand-down event says.
 const STAND_DOWN_RESTART_DELAYS_SECONDS = [30, 60, 120, 300, 600];
 const STAND_DOWN_RESTART_SCRIPT = [
-  'remote="$1"; team="$2"; shift 2; seen=0',
+  'remote="$1"; team="$2"; shift 2',
+  'root="${AGMSG_SYNC_CONNECTION_DIR:-$(cd "$(dirname "$remote")/.." && pwd)}"',
+  'old="$(cat "$root/run/remote-sync.$team.pid" 2>/dev/null)"',
   'for delay in "$@"; do',
   '  sleep "$delay"',
   '  out="$(bash "$remote" sync start "$team" 2>&1)"; rc=$?',
-  '  case "$rc:$out" in',
-  '    0:*started*) exit 0 ;;',
-  '    0:*already*running*) seen=$((seen + 1)); [ "$seen" -ge 2 ] && exit 0 ;;',
-  '    *) seen=0 ;;',
+  '  [ "$rc" = 0 ] || continue',
+  '  case "$out" in',
+  '    *started*) exit 0 ;;',
+  '    *already*running*) case "$out" in *"pid $old)"*) ;; *) exit 0 ;; esac ;;',
   '  esac',
   'done',
   'exit 1',

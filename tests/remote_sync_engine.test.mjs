@@ -5019,23 +5019,43 @@ test("restartAfterStandDown hands a detached helper the team and the updated rem
   assert.doesNotThrow(() => listeners.error(new Error("spawn bash ENOENT")));
 });
 
-test("the restart helper retries a failed start until one reports started, and stops once an engine is up", async (t) => {
+test("the restart helper retries a failed start, never takes the predecessor's own 'already running' as success, and stops once another engine is up", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agmsg-restart-helper-"));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
-  const log = join(root, "calls");
+  await mkdir(join(root, "run"));
+  await writeFile(join(root, "run", "remote-sync.demo.pid"), "111\n");
   const remote = join(root, "remote.sh");
+  const log = join(root, "calls");
   const counter = join(root, "n");
-  // 1st start: the update is still copying files (fails). 2nd: an old engine is
-  // still there. 3rd: started. A 4th must never be asked for.
-  await writeFile(remote, [
-    "#!/usr/bin/env bash",
-    `n=$(( $(cat ${shellQuote(counter)} 2>/dev/null || echo 0) + 1 )); printf %s "$n" > ${shellQuote(counter)}`,
-    `printf '%s\\n' "$*" >> ${shellQuote(log)}`,
-    'case "$n" in 1) echo "not yet" >&2; exit 1 ;; 2) echo "Sync engine already running (pid 1)."; exit 0 ;; *) echo "Sync engine started for demo (pid 2)."; exit 0 ;; esac',
-    "",
-  ].join("\n"), { mode: 0o755 });
-  const result = spawnSync("bash", standDownRestartArgs("demo", root, [0, 0, 0, 0, 0]).map((a) => a === join(root, "remote.sh") ? remote : a), { encoding: "utf8" });
+  const useRemote = async (script) => {
+    await rm(counter, { force: true }); await rm(log, { force: true });
+    await writeFile(remote, [
+      "#!/usr/bin/env bash",
+      `n=$(( $(cat ${shellQuote(counter)} 2>/dev/null || echo 0) + 1 )); printf %s "$n" > ${shellQuote(counter)}`,
+      `printf '%s\\n' "$*" >> ${shellQuote(log)}`,
+      script, "",
+    ].join("\n"), { mode: 0o755 });
+  };
+  const run = () => spawnSync("bash", standDownRestartArgs("demo", root, [0, 0, 0, 0, 0]).map((a) => a === join(root, "remote.sh") ? remote : a),
+    { encoding: "utf8", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root } });
+  const calls = async () => (await readFile(log, "utf8")).trim().split("\n").length;
+
+  // A failed start, then the predecessor (pid 111) still reported twice, then started: three
+  // tries after the failure, and the predecessor's no-ops never count.
+  await useRemote('case "$n" in 1) echo "not yet" >&2; exit 1 ;; 2|3) echo "Sync engine already running (pid 111)."; exit 0 ;; *) echo "Sync engine started for demo (pid 2)."; exit 0 ;; esac');
+  let result = run();
   assert.equal(result.status, 0, result.stderr);
-  assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 3);
-  assert.match(await readFile(log, "utf8"), /sync start demo/u);
+  assert.equal(await calls(), 4);
+
+  // Another engine (pid 222) already up: done at once.
+  await useRemote('echo "Sync engine already running (pid 222)."; exit 0');
+  result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await calls(), 1);
+
+  // The predecessor never exits: the bounded attempts run out and the helper says it failed.
+  await useRemote('echo "Sync engine already running (pid 111)."; exit 0');
+  result = run();
+  assert.equal(result.status, 1);
+  assert.equal(await calls(), 5);
 });
