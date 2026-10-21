@@ -2289,7 +2289,7 @@ export async function rosterDriver(operation, config, input, extra = []) {
     // The driver sets an unreadable roster state file aside and carries on; say
     // so in the engine log, where the engine's other events are.
     onNotice: (text) => {
-      const reset = /roster sync state .* was unreadable .*kept as (\S+) and rebuilt/u.exec(text);
+      const reset = /roster sync state .* was unreadable .*; kept as (.+) and rebuilt from the server$/u.exec(text);
       if (reset) {
         event("roster.state_reset", { team: config.local_team, file: reset[1] }).catch(() => {});
       }
