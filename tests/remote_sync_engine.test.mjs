@@ -2281,6 +2281,7 @@ test("SIGTERM while this process holds the team config lock releases it before e
     }
     assert.ok(existsSync(lockDir), "child never took the team config lock");
     assert.ok(existsSync(holderPath), "child never wrote its holder");
+    assert.ok(existsSync(join(lockDir, ".owner")), "child never took the shared owner marker");
     child.kill("SIGTERM");
     await once(child, "exit");
     assert.ok(!existsSync(lockDir), "SIGTERM left the lock directory behind");
