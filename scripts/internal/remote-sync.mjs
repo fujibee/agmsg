@@ -3491,22 +3491,42 @@ export { collectInstallBaseline, installChangedAgainst };
 // After an update stands the engine down, nothing else starts the new one when
 // the update did not know this engine was running (it started while the update
 // was in progress, for example). So a stood-down engine asks for its own
-// restart from a detached helper that outlives it: it waits for the update to
-// settle, then runs `remote.sh sync start`, which does nothing if an engine is
-// already running for the team and runs the updated code if not. An engine the
-// helper starts too early stands down again and asks again, so this converges
-// once the update is finished.
-const STAND_DOWN_RESTART_DELAY_SECONDS = 30;
+// restart from a detached helper that outlives it. The helper waits, then runs
+// `remote.sh sync start`, and tries again on a growing wait until a start
+// reports "started", or two starts in a row report an engine already running (so
+// the predecessor has really gone), or the attempts are used up. A start that
+// fails -- the update is still copying files, say -- is just another attempt;
+// `sync start` itself refuses a team that is disconnected or owned by systemd.
+// An engine it starts too early stands down again and asks again.
+const STAND_DOWN_RESTART_DELAYS_SECONDS = [30, 60, 120, 300, 600];
+const STAND_DOWN_RESTART_SCRIPT = [
+  'remote="$1"; team="$2"; shift 2; seen=0',
+  'for delay in "$@"; do',
+  '  sleep "$delay"',
+  '  out="$(bash "$remote" sync start "$team" 2>&1)"; rc=$?',
+  '  case "$rc:$out" in',
+  '    0:*started*) exit 0 ;;',
+  '    0:*already*running*) seen=$((seen + 1)); [ "$seen" -ge 2 ] && exit 0 ;;',
+  '    *) seen=0 ;;',
+  '  esac',
+  'done',
+  'exit 1',
+].join("\n");
+export function standDownRestartArgs(team, scriptsRoot, delays = STAND_DOWN_RESTART_DELAYS_SECONDS) {
+  return ["-c", STAND_DOWN_RESTART_SCRIPT, "bash", join(scriptsRoot, "remote.sh"), team, ...delays.map(String)];
+}
 export function restartAfterStandDown(team, scriptsRoot, { spawnCall = spawn, environment = process.env } = {}) {
   const childEnvironment = { ...environment };
   delete childEnvironment.AGMSG_SYNC_TOKEN;
   for (const key of Object.keys(childEnvironment)) {
     if (/^(?:AGMSG_AGE_IDENTITY|AGMSG_SYNC_AGE_IDENTITY)/u.test(key)) delete childEnvironment[key];
   }
-  const child = spawnCall("bash", [
-    "-c", 'sleep "$1"; exec bash "$2" sync start "$3"', "bash",
-    String(STAND_DOWN_RESTART_DELAY_SECONDS), join(scriptsRoot, "remote.sh"), team,
-  ], { detached: true, stdio: "ignore", env: childEnvironment, windowsHide: true });
+  const child = spawnCall("bash", standDownRestartArgs(team, scriptsRoot),
+    { detached: true, stdio: "ignore", env: childEnvironment, windowsHide: true });
+  // A spawn that fails (no bash) is reported on 'error' later, not thrown.
+  child.on?.("error", (error) => {
+    process.stderr.write(`agmsg: could not start the restart helper for '${team}': ${error.message}\n`);
+  });
   child.unref?.();
   return child;
 }

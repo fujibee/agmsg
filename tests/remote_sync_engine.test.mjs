@@ -25,6 +25,7 @@ import {
   driver,
   STORAGE_BUSY_EXIT,
   restartAfterStandDown,
+  standDownRestartArgs,
   stdinRedirect,
   storageDriverExitGraceMs,
   exportAgeHandoff,
@@ -4998,19 +4999,43 @@ test("a driver can read its staged input through the shell redirect used on Wind
   assert.equal(result.stdout, 'prepare\n{"type":"a"}\n{"type":"b"}\n');
 });
 
-test("restartAfterStandDown hands a detached helper the team and the updated remote.sh, without secrets", () => {
+test("restartAfterStandDown hands a detached helper the team and the updated remote.sh, without secrets, and survives a spawn error", () => {
   const calls = [];
-  const fake = { unref() { calls.push("unref"); } };
+  const listeners = {};
+  const fake = { unref() { calls.push("unref"); }, on(name, fn) { listeners[name] = fn; } };
   restartAfterStandDown("demo", "/skill/scripts", {
     spawnCall: (command, args, options) => { calls.push([command, args, options]); return fake; },
     environment: { PATH: "/bin", AGMSG_SYNC_TOKEN: "secret", AGMSG_AGE_IDENTITY_FILE: "/id", AGMSG_SYNC_CONNECTION_DIR: "/conn" },
   });
   const [command, args, options] = calls[0];
   assert.equal(command, "bash");
-  assert.deepEqual(args.slice(-2), [join("/skill/scripts", "remote.sh"), "demo"]);
+  assert.deepEqual(args.slice(3, 5), [join("/skill/scripts", "remote.sh"), "demo"]);
   assert.equal(options.detached, true);
   assert.equal(options.stdio, "ignore");
   assert.equal(options.windowsHide, true);
   assert.deepEqual(options.env, { PATH: "/bin", AGMSG_SYNC_CONNECTION_DIR: "/conn" });
   assert.equal(calls[1], "unref");
+  // An asynchronous spawn failure is reported, not raised.
+  assert.doesNotThrow(() => listeners.error(new Error("spawn bash ENOENT")));
+});
+
+test("the restart helper retries a failed start until one reports started, and stops once an engine is up", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-restart-helper-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const log = join(root, "calls");
+  const remote = join(root, "remote.sh");
+  const counter = join(root, "n");
+  // 1st start: the update is still copying files (fails). 2nd: an old engine is
+  // still there. 3rd: started. A 4th must never be asked for.
+  await writeFile(remote, [
+    "#!/usr/bin/env bash",
+    `n=$(( $(cat ${shellQuote(counter)} 2>/dev/null || echo 0) + 1 )); printf %s "$n" > ${shellQuote(counter)}`,
+    `printf '%s\\n' "$*" >> ${shellQuote(log)}`,
+    'case "$n" in 1) echo "not yet" >&2; exit 1 ;; 2) echo "Sync engine already running (pid 1)."; exit 0 ;; *) echo "Sync engine started for demo (pid 2)."; exit 0 ;; esac',
+    "",
+  ].join("\n"), { mode: 0o755 });
+  const result = spawnSync("bash", standDownRestartArgs("demo", root, [0, 0, 0, 0, 0]).map((a) => a === join(root, "remote.sh") ? remote : a), { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 3);
+  assert.match(await readFile(log, "utf8"), /sync start demo/u);
 });
