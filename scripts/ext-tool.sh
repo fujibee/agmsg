@@ -43,23 +43,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/driver-registry.sh"
 
 _ext_tool_available() {
-  local dir name found=""
-  for dir in "$SCRIPT_DIR"/drivers/ext-tools/*/; do
-    [ -f "${dir}tool.conf" ] || continue
-    name="$(basename "$dir")"
-    found="${found:+$found, }$name"
-  done
-  printf '%s' "${found:-none}"
+  agmsg_ext_tool_available
 }
 
 # Echoes the tool's driver directory, or refuses and exits.
 _ext_tool_dir() {
   local tool="$1" dir
   agmsg_validate_tool_name "$tool" || exit 1
-  dir="$SCRIPT_DIR/drivers/ext-tools/$tool"
-  if [ ! -f "$dir/tool.conf" ]; then
+  if ! dir="$(agmsg_ext_tool_dir "$tool")"; then
     echo "Unknown ext-tool: '$tool' (available: $(_ext_tool_available))" >&2
     exit 1
   fi

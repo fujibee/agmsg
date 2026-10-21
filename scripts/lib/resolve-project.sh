@@ -251,13 +251,15 @@ agmsg_find_registered_project_variant() {
 # always eligible, not checked here since it is never itself an override
 # source), then $root/plugins, then each $AGMSG_PLUGIN_DIRS entry.
 _agmsg_type_external_candidate() {
-  local type="$1" root="${SKILL_DIR:-}" d
+  local type="$1" root="${SKILL_DIR:-}" kind base
   [ -n "$root" ] || return 1
-  [ -f "$root/plugins/types/$type/type.conf" ] && return 0
-  local IFS=:
-  for d in ${AGMSG_PLUGIN_DIRS:-}; do
-    [ -n "$d" ] && [ -f "$d/types/$type/type.conf" ] && return 0
-  done
+  declare -F agmsg_driver_bases >/dev/null 2>&1 \
+    || . "$root/scripts/lib/driver-registry.sh" 2>/dev/null || return 1
+  while IFS=$'\t' read -r kind base; do
+    [ "$kind" = external ] && [ -f "$base/types/$type/type.conf" ] && return 0
+  done <<EOF
+$(agmsg_driver_bases)
+EOF
   return 1
 }
 
