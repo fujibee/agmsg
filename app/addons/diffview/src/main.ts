@@ -3,7 +3,7 @@ import { app, errorText } from "../../_shared/kit";
 import type { DiffFile, DiffHunk, DiffLine, DiffResult, DiffStatus } from "../../../addon-kit/protocol";
 import { h } from "../../_shared/dom";
 import { baseName } from "../../_shared/format";
-import { gapBefore, sideBySide, wordDiff, type Range } from "./diff";
+import { gapBefore, initialBase, sideBySide, wordDiff, type Range } from "./diff";
 
 type Mode = "unified" | "split";
 
@@ -16,6 +16,8 @@ const state = {
   base: "",
   filter: "",
   whole: new Set<string>(), // files shown with all their lines
+  loadSeq: 0, // bumped by every comparison; an older answer is dropped
+  wholeSeq: new Map<string, number>(), // per file: the newest "Whole file" request
   hunk: -1,
 };
 
@@ -159,17 +161,27 @@ function renderFile(): void {
 }
 
 async function toggleWhole(f: DiffFile): Promise<void> {
-  const r = state.result!;
-  const on = !state.whole.has(f.path);
+  const r = state.result;
+  if (!r) return;
+  const path = f.path;
+  const on = !state.whole.has(path);
+  const seq = (state.wholeSeq.get(path) ?? 0) + 1;
+  state.wholeSeq.set(path, seq);
   try {
-    const part = await app.git.diff({ ...req(), path: f.path, context: on ? "all" : undefined });
-    const nf = part.files.find((x) => x.path === f.path);
+    const part = await app.git.diff({ ...req(), path, context: on ? "all" : undefined });
+    // Drop the answer if the comparison was replaced, or this file was asked again.
+    if (state.result !== r || state.wholeSeq.get(path) !== seq) return;
+    const nf = part.files.find((x) => x.path === path);
     if (!nf) return;
-    r.files[state.selected] = nf;
-    if (on) state.whole.add(f.path); else state.whole.delete(f.path);
-    renderFile();
+    const idx = r.files.findIndex((x) => x.path === path);
+    if (idx < 0) return;
+    r.files[idx] = nf;
+    if (on) state.whole.add(path); else state.whole.delete(path);
+    if (idx === state.selected) renderFile(); // another file may be showing by now
   } catch (e) {
-    diffEl.replaceChildren(notice("Can't load the whole file", errorText(e), true));
+    if (state.result === r && r.files[state.selected]?.path === path) {
+      diffEl.replaceChildren(notice("Can't load the whole file", errorText(e), true));
+    }
   }
 }
 
@@ -232,10 +244,13 @@ function req() {
 }
 
 async function load(): Promise<void> {
+  const seq = ++state.loadSeq;
   diffEl.replaceChildren(h("div", { class: "empty" }, "Loading…"));
   state.whole.clear();
+  state.wholeSeq.clear();
   try {
     const r = await app.git.diff({ ...req() });
+    if (seq !== state.loadSeq) return; // a newer comparison was started
     state.result = r;
     state.selected = 0;
     const files = r.files.length;
@@ -249,6 +264,7 @@ async function load(): Promise<void> {
       renderFile();
     }
   } catch (e) {
+    if (seq !== state.loadSeq) return;
     state.result = null;
     totals.replaceChildren();
     compare.textContent = "";
@@ -268,7 +284,7 @@ async function main(): Promise<void> {
     root.replaceChildren(notice("Can't open", errorText(e), true));
     return;
   }
-  state.base = args.base ?? "";
+  state.base = initialBase(args.base);
   const label = args.path ? baseName(args.path.replace(/\/+$/, "")) || args.path : "repository";
   document.title = `Diff view: ${label}`;
 

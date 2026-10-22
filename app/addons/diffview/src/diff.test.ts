@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DiffLine } from "../../../addon-kit/protocol";
-import { changeStarts, gapBefore, sideBySide, wordDiff } from "./diff";
+import { changeStarts, gapBefore, initialBase, sideBySide, wordDiff } from "./diff";
 
 const L = (type: DiffLine["type"], text: string, oldNo: number | null, newNo: number | null): DiffLine => ({ type, text, oldNo, newNo });
 
@@ -58,5 +58,21 @@ describe("changeStarts", () => {
   it("finds the first line of every run of changes", () => {
     const lines = [L("add", "a", null, 1), L("context", "b", 1, 2), L("del", "c", 2, null), L("add", "d", null, 3)];
     expect(changeStarts(lines)).toEqual([0, 2]);
+  });
+});
+
+describe("initialBase", () => {
+  it("turns a branch or ref name into a merge-base comparison", () => {
+    expect(initialBase("main")).toBe("merge-base:main");
+    expect(initialBase("origin/dev")).toBe("merge-base:origin/dev");
+  });
+  it("keeps a full SHA and explicit forms as they are", () => {
+    const sha = "9f3e1b0c2a7d4e8f6b5a1c3d2e4f5a6b7c8d9e0f";
+    expect(initialBase(sha)).toBe(sha);
+    expect(initialBase("merge-base:main")).toBe("merge-base:main");
+  });
+  it("is empty when nothing was given", () => {
+    expect(initialBase(undefined)).toBe("");
+    expect(initialBase("  ")).toBe("");
   });
 });

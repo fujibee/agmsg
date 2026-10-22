@@ -29,7 +29,7 @@ export class Viewer {
   private objectUrls: string[] = [];
   private wrap = false;
   private mdSource = false;
-  private current: { path: string; entry: FsEntry } | null = null;
+  private current: { path: string; entry: FsEntry; name: string } | null = null;
   onNavigate: (path: string) => void = () => {};
 
   constructor() {
@@ -61,18 +61,23 @@ export class Viewer {
     this.body.replaceChildren(h("div", { class: `notice${error ? " error" : ""}` }, h("h2", null, title), h("div", null, text)));
   }
 
-  async open(path: string, entry: FsEntry): Promise<void> {
+  /**
+   * `path` is what the broker is asked for (a single granted file is ".");
+   * `name` is what the file is called, and decides how it is shown (image,
+   * Markdown, language).
+   */
+  async open(path: string, entry: FsEntry, name: string = path): Promise<void> {
     this.release();
     const token = this.token;
-    this.current = { path, entry };
-    this.bar.replaceChildren(h("span", { class: "path", title: path }, path), h("span", { class: "dim" }, formatBytes(entry.size)));
+    this.current = { path, entry, name };
+    this.bar.replaceChildren(h("span", { class: "path", title: name }, name), h("span", { class: "dim" }, formatBytes(entry.size)));
     this.body.replaceChildren(h("div", { class: "empty" }, "Loading…"));
     this.body.scrollTop = 0;
     try {
-      const img = imageType(path);
-      if (img) await this.showImage(path, entry, img, token);
-      else if (isMarkdown(path) && !this.mdSource && entry.size <= MARKDOWN_MAX) await this.showMarkdown(path, entry, token);
-      else await this.showText(path, entry, token);
+      const img = imageType(name);
+      if (img) await this.showImage(path, entry, img, token, name);
+      else if (isMarkdown(name) && !this.mdSource && entry.size <= MARKDOWN_MAX) await this.showMarkdown(path, entry, token, name);
+      else await this.showText(path, entry, token, name);
     } catch (e) {
       if (token !== this.token) return;
       this.notice("Can't show this file", errorText(e), true);
@@ -87,14 +92,14 @@ export class Viewer {
     this.bar.append(...items);
   }
 
-  private async showImage(path: string, entry: FsEntry, type: string, token: number): Promise<void> {
+  private async showImage(path: string, entry: FsEntry, type: string, token: number, name: string): Promise<void> {
     if (entry.size > IMAGE_MAX) {
       return this.notice("Image too large to preview", `${formatBytes(entry.size)} (limit ${formatBytes(IMAGE_MAX)}).`);
     }
     const bytes = await readBytes(path);
     if (token !== this.token) return;
-    const img = h("img", { alt: baseName(path) });
-    img.addEventListener("error", () => this.notice("Can't decode this image", `${baseName(path)} is not a valid ${type} file.`, true));
+    const img = h("img", { alt: baseName(name) });
+    img.addEventListener("error", () => this.notice("Can't decode this image", `${baseName(name)} is not a valid ${type} file.`, true));
     img.src = this.blobUrl(bytes, type);
     img.addEventListener("load", () => {
       info.textContent = `${img.naturalWidth} × ${img.naturalHeight}`;
@@ -103,12 +108,12 @@ export class Viewer {
     this.body.replaceChildren(h("div", { class: "imgwrap" }, img, info));
   }
 
-  private async showMarkdown(path: string, entry: FsEntry, token: number): Promise<void> {
+  private async showMarkdown(path: string, entry: FsEntry, token: number, name: string): Promise<void> {
     const text = new TextDecoder().decode(await readBytes(path));
     if (token !== this.token) return;
     const doc = h("div", { class: "md" });
     doc.innerHTML = renderMarkdown(text); // markdown-it with html:false escapes raw HTML
-    const dir = dirName(path);
+    const dir = dirName(name);
     for (const a of doc.querySelectorAll("a")) {
       const href = a.getAttribute("href") || "";
       const target = resolveRelative(dir, href);
@@ -137,12 +142,12 @@ export class Viewer {
     const toggle = h("button", { "aria-pressed": "false" }, "Source");
     toggle.addEventListener("click", () => {
       this.mdSource = true;
-      void this.open(path, entry);
+      void this.open(path, entry, name);
     });
     this.controls(toggle);
   }
 
-  private async showText(path: string, entry: FsEntry, token: number): Promise<void> {
+  private async showText(path: string, entry: FsEntry, token: number, name: string): Promise<void> {
     const total = entry.size;
     const firstRead = await readChunk(path, 0, Math.min(Math.max(total, 1), CHUNK));
     const first = firstRead.bytes;
@@ -150,7 +155,7 @@ export class Viewer {
     if (looksBinary(first)) {
       return this.notice("Binary file", `${formatBytes(total)}. Not shown as text.`);
     }
-    const lang = total <= HIGHLIGHT_MAX ? languageFor(path) : null;
+    const lang = total <= HIGHLIGHT_MAX ? languageFor(name) : null;
     const code = h("div", { class: `code${this.wrap ? " wrap" : ""}` });
     const more = h("div", { class: "more" });
     this.body.replaceChildren(code, more);
@@ -230,11 +235,11 @@ export class Viewer {
       code.classList.toggle("wrap", this.wrap);
     });
     const extra: Node[] = [h("span", { class: "dim" }, lang ?? "plain text"), wrapBtn];
-    if (isMarkdown(path) && this.mdSource) {
+    if (isMarkdown(name) && this.mdSource) {
       const rendered = h("button", null, "Rendered");
       rendered.addEventListener("click", () => {
         this.mdSource = false;
-        void this.open(path, entry);
+        void this.open(path, entry, name);
       });
       extra.push(rendered);
     }
@@ -242,6 +247,6 @@ export class Viewer {
   }
 
   reopenCurrent(): void {
-    if (this.current) void this.open(this.current.path, this.current.entry);
+    if (this.current) void this.open(this.current.path, this.current.entry, this.current.name);
   }
 }

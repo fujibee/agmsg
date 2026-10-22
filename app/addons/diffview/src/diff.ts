@@ -98,3 +98,15 @@ export function changeStarts(lines: DiffLine[]): number[] {
   });
   return out;
 }
+
+/**
+ * The open argument `base=<X>` means "changes since the merge base with X": a
+ * branch or ref name becomes merge-base:<X>; a full 40-hex SHA stays a direct
+ * comparison. The field in the view keeps the explicit forms.
+ */
+export function initialBase(arg: string | undefined): string {
+  const b = (arg ?? "").trim();
+  if (!b || /^[0-9a-f]{40}$/i.test(b) || b.startsWith("merge-base:")) return b;
+  return `merge-base:${b}`;
+}
+

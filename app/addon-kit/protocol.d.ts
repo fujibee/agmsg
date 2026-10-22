@@ -24,6 +24,12 @@ export interface InitEvent {
 export interface OpenArgs {
   path?: string;
   url?: string;
+  /**
+   * diffview: "changes since the merge base with <base>". A branch or ref name is
+   * compared as merge-base:<base>; a full 40-hex SHA is a direct comparison. (The
+   * base field inside the view keeps the explicit forms: HEAD, a branch, a SHA or
+   * merge-base:<branch>.)
+   */
   base?: string;
 }
 

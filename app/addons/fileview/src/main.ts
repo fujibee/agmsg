@@ -32,7 +32,7 @@ async function main(): Promise<void> {
   if (top.kind === "file") {
     root.replaceChildren(bar, viewer.el);
     document.title = `File view: ${label}`;
-    void viewer.open(".", top);
+    void viewer.open(".", top, label.split("/").pop() || label);
     return;
   }
 

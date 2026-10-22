@@ -172,7 +172,8 @@ const WINDOWS: &[(MatchKind, &str)] = &[
     (MatchKind::Subtree, "%LOCALAPPDATA%/1Password"),
 ];
 
-// Not in the written list; the same kinds of place on Linux.
+// UNREVIEWED: not in the written list. The same kinds of places on Linux; the app
+// ships no Linux build, so nobody has checked this table.
 const LINUX: &[(MatchKind, &str)] = &[
     (MatchKind::RootOnly, "/"),
     (MatchKind::Subtree, "~/.local/share/keyrings"),
@@ -261,11 +262,10 @@ fn wildcard(pattern: &str, text: &str) -> bool {
 #[derive(Debug, Clone)]
 struct Entry {
     kind: MatchKind,
-    /// The entry as written (for the reason shown to the user).
-    shown: PathBuf,
-    /// Component forms to compare against: lexical, and canonical when the
-    /// entry exists and differs (a protected folder that is itself a symlink).
-    forms: Vec<Vec<String>>,
+    /// The entry as written: a lexical path under the canonical home. Its real
+    /// places are worked out when the list is used, never kept: a parent can turn
+    /// into a link, and a protected folder can be created, after the list is built.
+    path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,30 +322,16 @@ impl Denylist {
         let mut entries = Vec::new();
         for (kind, pat) in COMMON.iter().chain(os_table.iter()) {
             if let Some(path) = expand(pat, &env_real) {
-                entries.push(Self::entry(*kind, path, fold));
+                entries.push(Entry { kind: *kind, path });
             }
         }
         for extra in &env.extra_subtrees {
-            entries.push(Self::entry(MatchKind::Subtree, extra.clone(), fold));
+            entries.push(Entry {
+                kind: MatchKind::Subtree,
+                path: extra.clone(),
+            });
         }
         Denylist { fold, entries }
-    }
-
-    fn entry(kind: MatchKind, path: PathBuf, fold: bool) -> Entry {
-        let mut forms = vec![components(&path, fold)];
-        if kind != MatchKind::Glob {
-            if let Ok(real) = path.canonicalize() {
-                let f = components(&real, fold);
-                if !forms.contains(&f) {
-                    forms.push(f);
-                }
-            }
-        }
-        Entry {
-            kind,
-            shown: path,
-            forms,
-        }
     }
 
     /// Build from the process environment, plus the app's own protected folders.
@@ -353,8 +339,91 @@ impl Denylist {
         Denylist::new(&DenyEnv::from_process(extra_subtrees))
     }
 
-    fn matches(&self, entry: &Entry, p: &[String]) -> bool {
-        entry.forms.iter().any(|e| match entry.kind {
+    /// The list as it is on disk right now: every entry's real places, worked out
+    /// from the longest existing prefix of its path (so a link above an entry, or
+    /// an entry created later, is followed), and for a glob the real targets of
+    /// the names that match. Take one for a batch of checks; take a new one for
+    /// the next batch.
+    pub fn snapshot(&self) -> Snapshot {
+        let entries = self
+            .entries
+            .iter()
+            .map(|e| (e.kind, e.path.clone(), entry_forms(e, self.fold)))
+            .collect();
+        Snapshot {
+            fold: self.fold,
+            entries,
+        }
+    }
+
+    pub fn is_denied(&self, path: &Path) -> bool {
+        self.snapshot().is_denied(path)
+    }
+
+    pub fn check_grant_root(&self, path: &Path) -> GrantCheck {
+        self.snapshot().check_grant_root(path)
+    }
+
+    pub fn filter_children<I, S>(&self, dir: &Path, names: I) -> Vec<S>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.snapshot().filter_children(dir, names)
+    }
+
+    pub fn is_denied_repo_path(&self, worktree_root: &Path, rel: &str) -> bool {
+        self.snapshot().is_denied_repo_path(worktree_root, rel)
+    }
+}
+
+/// Component forms to compare a path against: the lexical entry, its resolved
+/// location, and (glob) the real target of each name that matches today.
+fn entry_forms(e: &Entry, fold: bool) -> Vec<Vec<String>> {
+    let mut forms = vec![components(&e.path, fold)];
+    if e.kind == MatchKind::Glob {
+        if let (Some(parent), Some(last)) = (e.path.parent(), e.path.file_name()) {
+            let real_parent = resolve(parent);
+            forms.push(components(&real_parent.join(last), fold));
+            let pat = if fold {
+                last.to_string_lossy().to_lowercase()
+            } else {
+                last.to_string_lossy().into_owned()
+            };
+            if let Ok(rd) = std::fs::read_dir(&real_parent) {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let cmp = if fold { name.to_lowercase() } else { name };
+                    if wildcard(&pat, &cmp) {
+                        if let Ok(real) = entry.path().canonicalize() {
+                            forms.push(components(&real, fold));
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        forms.push(components(&resolve(&e.path), fold));
+    }
+    forms.dedup();
+    let mut seen = Vec::new();
+    for f in forms {
+        if !seen.contains(&f) {
+            seen.push(f);
+        }
+    }
+    seen
+}
+
+/// The list resolved against the disk at one moment (see `Denylist::snapshot`).
+pub struct Snapshot {
+    fold: bool,
+    entries: Vec<(MatchKind, PathBuf, Vec<Vec<String>>)>,
+}
+
+impl Snapshot {
+    fn matches(kind: MatchKind, forms: &[Vec<String>], p: &[String]) -> bool {
+        forms.iter().any(|e| match kind {
             MatchKind::Subtree => p.len() >= e.len() && p[..e.len()] == e[..],
             MatchKind::File | MatchKind::RootOnly => p == &e[..],
             MatchKind::Glob => {
@@ -379,14 +448,14 @@ impl Denylist {
             components(&resolved, self.fold),
             components(&lexical, self.fold),
         ];
-        for entry in &self.entries {
-            if entry.kind == MatchKind::RootOnly && !roots_too {
+        for (kind, shown, forms) in &self.entries {
+            if *kind == MatchKind::RootOnly && !roots_too {
                 continue;
             }
-            if candidates.iter().any(|c| self.matches(entry, c)) {
+            if candidates.iter().any(|c| Self::matches(*kind, forms, c)) {
                 return Some(Reason {
-                    entry: entry.shown.clone(),
-                    kind: entry.kind,
+                    entry: shown.clone(),
+                    kind: *kind,
                 });
             }
         }
@@ -448,7 +517,7 @@ fn absolute(path: &Path) -> PathBuf {
 
 /// The real path: the longest existing prefix canonicalized, the rest appended
 /// lexically (`.` dropped, `..` popped).
-fn resolve(path: &Path) -> PathBuf {
+pub(crate) fn resolve(path: &Path) -> PathBuf {
     let abs = absolute(path);
     if let Ok(real) = abs.canonicalize() {
         return real;
@@ -785,6 +854,75 @@ mod tests {
         let d = list(&h, Os::Linux);
         let p = h.home.join("proj/missing/../../.ssh/id");
         assert!(d.is_denied(&p));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_above_an_entry_that_appears_later_still_protects_its_real_place() {
+        // Case A: ~/.config is a link; the list is built before gcloud exists.
+        let h = home();
+        let target = h.home.join("elsewhere");
+        fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, h.home.join(".config")).unwrap();
+        let d = list(&h, Os::Linux);
+        assert!(!target.join("gcloud").exists());
+        fs::create_dir_all(target.join("gcloud")).unwrap();
+        fs::write(target.join("gcloud/token"), "t").unwrap();
+        // Through the home, and straight through the real target.
+        assert!(d.is_denied(&h.home.join(".config/gcloud/token")));
+        assert!(
+            d.is_denied(&target.join("gcloud/token")),
+            "a grant via the real target"
+        );
+        assert!(!d.check_grant_root(&target.join("gcloud")).is_ok());
+        assert!(!d.is_denied(&target.join("other/file")));
+        // The same, for history paths and for a repo whose root is the real target.
+        assert!(d.is_denied_repo_path(&target, "gcloud/token"));
+        assert!(d.is_denied_repo_path(&target, "gcloud/never-existed"));
+        assert!(!d.is_denied_repo_path(&target, "src/main.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_glob_match_that_is_a_link_protects_its_real_target() {
+        // Case B: ~/.codex-work is a link to a profile folder.
+        let h = home();
+        let profile = h.home.join("profile-target");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(profile.join("auth.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(&profile, h.home.join(".codex-work")).unwrap();
+        let d = list(&h, Os::Linux);
+        assert!(d.is_denied(&h.home.join(".codex-work/auth.json")));
+        assert!(
+            d.is_denied(&profile.join("auth.json")),
+            "a grant via the real target"
+        );
+        assert!(!d.check_grant_root(&profile).is_ok());
+        assert!(d.is_denied_repo_path(&profile, "auth.json"));
+        assert!(d.is_denied_repo_path(&profile, "nested/never-existed"));
+        // A glob match created after the list was built is seen too.
+        let later = h.home.join("later-target");
+        fs::create_dir_all(&later).unwrap();
+        std::os::unix::fs::symlink(&later, h.home.join(".claude-later")).unwrap();
+        assert!(d.is_denied(&later.join("settings.json")));
+        // ... and filter_children hides both the link and the folder it leads to.
+        assert_eq!(
+            d.filter_children(&h.home, [".codex-work", "profile-target", "plain"]),
+            vec!["plain"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_protected_folder_linked_from_a_granted_repo_is_judged_by_its_target() {
+        let h = home();
+        let repo = h.home.join("repo");
+        fs::create_dir_all(repo.join("sub")).unwrap();
+        fs::create_dir_all(h.home.join(".aws")).unwrap();
+        std::os::unix::fs::symlink(h.home.join(".aws"), repo.join("sub/creds")).unwrap();
+        let d = list(&h, Os::Linux);
+        assert!(d.is_denied_repo_path(&repo, "sub/creds/credentials"));
+        assert!(!d.is_denied_repo_path(&repo, "sub/other"));
     }
 
     #[test]
