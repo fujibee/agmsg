@@ -91,6 +91,7 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
     . "$LOCKLIB"
     agmsg_lock_acquire "$TEAM_DIR" || exit 1
     [ -d "$TEAM_DIR/.config.lock" ] || exit 2
+    [ -f "$TEAM_DIR/.config.lock/.owner" ] || exit 4
     agmsg_lock_release
     [ ! -d "$TEAM_DIR/.config.lock" ] || exit 3
   '
@@ -520,12 +521,40 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   grep -qF "release was interrupted" <<<"$output"
   [ ! -e "$lock.holder.releasing.$gone" ]
 
-  # A dead holder on this machine: broken, and the acquire then succeeds.
+  # A dead holder with the new owner marker is still reclaimable.
   mkdir "$lock"
+  : > "$lock/.owner"
   printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder"
   acquire
   [ "$status" -eq 0 ]
   grep -qF "broke a registry lock" <<<"$output"
 
   kill "$live" 2>/dev/null || true
+}
+
+@test "lock: a vanished namespace after marker release never restores an old holder" {
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    . "$LOCKLIB"
+    agmsg_lock_acquire "$TEAM_DIR" || exit 1
+    rmdir() {
+      # A delayed contender has taken and released the marker and namespace.
+      command rmdir "$1" || return 1
+      return 1
+    }
+    mv() {
+      case "$1" in
+        *.holder.releasing.*)
+          # The next owner arrives just before the old rollback would overwrite it.
+          command mkdir "$TEAM_DIR/.config.lock"
+          : > "$TEAM_DIR/.config.lock/.owner"
+          printf "token SUCCESSOR\n" > "$TEAM_DIR/.config.lock.holder"
+          : > "$TEAM_DIR/rollback-attempted" ;;
+      esac
+      command mv "$@"
+    }
+    agmsg_lock_release
+    [ ! -e "$TEAM_DIR/rollback-attempted" ] || exit 2
+    [ ! -e "$TEAM_DIR/.config.lock.holder" ] || exit 3
+  '
+  [ "$status" -eq 0 ]
 }
