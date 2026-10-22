@@ -124,11 +124,11 @@
    ],
    "expect": {
     "errors": [
-     "Refused: the repository contains a reserved file name at app-panes/x/web/CON.txt."
+     "Refused: the repository contains a reserved file name at app-panes/x/web/CON.txt. Add-ons may contain only plain files."
     ]
    },
    "extract": {
-    "error": "Refused: the repository contains a reserved file name at app-panes/x/web/CON.txt."
+    "error": "Refused: the repository contains a reserved file name at app-panes/x/web/CON.txt. Add-ons may contain only plain files."
    }
   },
   {
@@ -157,11 +157,11 @@
    ],
    "expect": {
     "errors": [
-     "Refused: the repository contains a reserved file name at app-panes/x/web/x.."
+     "Refused: the repository contains a reserved file name at app-panes/x/web/x.. Add-ons may contain only plain files."
     ]
    },
    "extract": {
-    "error": "Refused: the repository contains a reserved file name at app-panes/x/web/x.."
+    "error": "Refused: the repository contains a reserved file name at app-panes/x/web/x.. Add-ons may contain only plain files."
    }
   },
   {
@@ -190,11 +190,11 @@
    ],
    "expect": {
     "errors": [
-     "Refused: the repository contains a reserved file name at app-panes/x/web/a:b."
+     "Refused: the repository contains a reserved file name at app-panes/x/web/a:b. Add-ons may contain only plain files."
     ]
    },
    "extract": {
-    "error": "Refused: the repository contains a reserved file name at app-panes/x/web/a:b."
+    "error": "Refused: the repository contains a reserved file name at app-panes/x/web/a:b. Add-ons may contain only plain files."
    }
   },
   {

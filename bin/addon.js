@@ -162,7 +162,7 @@ function checkTree(root, files, limits) {
     else if (st.nlink > 1) errors.push('Refused: the repository contains a hard link at ' + rel + '. Add-ons may contain only plain files.');
     for (const part of rel.split('/')) {
       if (RESERVED.test(part) || /[. ]$/.test(part) || /[:\\<>|?*"]/.test(part)) {
-        errors.push('Refused: the repository contains a reserved file name at ' + rel + '.');
+        errors.push('Refused: the repository contains a reserved file name at ' + rel + '. Add-ons may contain only plain files.');
         break;
       }
     }
