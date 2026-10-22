@@ -142,6 +142,12 @@ impl Drop for Slot {
 /// Per pane: at most this many requests queued or running.
 pub const MAX_INFLIGHT: usize = 64;
 
+impl Default for Registry {
+    fn default() -> Self {
+        Registry::new()
+    }
+}
+
 impl Registry {
     pub fn new() -> Registry {
         Registry { next: 1, panes: HashMap::new() }
