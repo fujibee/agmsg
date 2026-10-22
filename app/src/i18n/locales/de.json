@@ -257,5 +257,180 @@
   },
   "stage": {
     "emptyHint": "Klicke links auf ein Mitglied, um einen Agenten zu starten."
+  },
+  "addons": {
+    "tab": {
+      "general": "General",
+      "addons": "Add-ons"
+    },
+    "engineOff": "Add-ons are not available on this computer yet. A safety check did not pass with this system's web engine. Your other features are not affected.",
+    "engineReasons": "Reason: {{reasons}}",
+    "builtin": {
+      "title": "Built in"
+    },
+    "installed": {
+      "title": "Installed",
+      "empty": "No add-ons installed.",
+      "checkUpdates": "Check for updates",
+      "remove": "Remove"
+    },
+    "install": {
+      "label": "Add-on repository",
+      "placeholder": "owner/repo or owner/repo@ref",
+      "button": "Install…",
+      "later": "Installing from GitHub isn't available in this build yet."
+    },
+    "openRequests": {
+      "label": "Open requests from seats",
+      "show": "Show",
+      "off": "Off"
+    },
+    "developer": {
+      "title": "Developer",
+      "loadFromFolder": "Load from folder…"
+    },
+    "permission": {
+      "none": "Runs with no permissions",
+      "messagesRead": "Read messages of a team you choose",
+      "filesRead": "Read files in a folder you choose",
+      "gitRead": "Read git history and changes in that folder",
+      "network": "Connect to {{hosts}}",
+      "networkAny": "Connect to any site on the internet"
+    },
+    "grant": {
+      "messages": "Reads messages: {{scope}}",
+      "files": "Reads files: {{scope}}",
+      "remembered": "(remembered)",
+      "revoke": "Revoke",
+      "none": "No permissions given yet."
+    },
+    "card": {
+      "grantAria": "Permission request",
+      "messagesWant": "{{title}} wants to read messages of team {{team}}.",
+      "filesWant": "{{title}} wants to read {{path}} (folder, {{count}} files).",
+      "filesWantOne": "{{title}} wants to read {{path}}.",
+      "allow": "Allow",
+      "allowOnce": "Allow once",
+      "allowAlways": "Always for this folder",
+      "notNow": "Not now",
+      "denied": "{{path}} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
+      "chooseAnother": "Choose another…",
+      "allowAlwaysLater": "Not available yet"
+    },
+    "installError": {
+      "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
+      "ref_not_found": "{{repo}} has no branch, tag or commit named {{ref}}.",
+      "no_app_panes": "{{repo}} has no app add-on (no app-panes/ folder). If it is an agmsg CLI plugin, it is installed from the CLI, not here.",
+      "conf_invalid": "app-panes/{{pane}}/addon.conf line {{line}}: {{problem}}.",
+      "entry_missing": "app-panes/{{pane}}/web/{{entry}} is missing. Add-ons must commit their built web/ folder.",
+      "min_app": "Needs agmsg app {{minApp}} or newer; this is {{appVersion}}.",
+      "protocol_unknown": "Made for a newer app (protocol {{protocol}}). Update the app to use it.",
+      "too_large": "Too large to install: {{measured}} (limit {{limit}}). Largest file: {{largest}}.",
+      "unsafe_entry": {
+        "symlink": "Refused: the repository contains a symbolic link at {{path}}. Add-ons may contain only plain files.",
+        "hardlink": "Refused: the repository contains a hard link at {{path}}. Add-ons may contain only plain files.",
+        "outside_path": "Refused: the repository contains a path outside the folder at {{path}}. Add-ons may contain only plain files.",
+        "reserved_name": "Refused: the repository contains a reserved file name at {{path}}. Add-ons may contain only plain files."
+      },
+      "github_error": "GitHub didn't answer: {{status}}. Try again.",
+      "rate_limited": "GitHub limits unauthenticated downloads; try again after {{time}}.",
+      "already_installed": "Already installed ({{sha}})."
+    },
+    "pane": {
+      "reload": "Reload",
+      "askedBy": "asked by {{agent}}",
+      "blocked": "blocked: {{what}}",
+      "dev": "DEV · {{folder}}",
+      "networkChip": "network: {{hosts}}",
+      "networkAnyChip": "network: any site",
+      "framePlaceholder": "Add-on frame"
+    },
+    "failure": {
+      "digest_mismatch": "{{title}} can't open: its files are incomplete or were changed after install.",
+      "load_timeout": "{{title}} didn't finish loading.",
+      "path_missing": "{{path}} no longer exists.",
+      "revoked": "Not reading {{scope}}.",
+      "action": {
+        "reinstall": "Reinstall",
+        "remove": "Remove",
+        "reload": "Reload",
+        "chooseAnother": "Choose another…",
+        "allowAgain": "Allow again"
+      },
+      "init_too_large": "{{title}} was given more than it can take at once (the starting data is too large).",
+      "open_failed": "{{title}} can't open: {{message}}"
+    },
+    "confirm": {
+      "installTitle": "Install {{title}}?",
+      "updateTitle": "Update {{title}}?",
+      "fromTo": "{{from}} → {{to}}",
+      "details": "Details",
+      "fullSha": "Commit: {{sha}}",
+      "archive": "Archive SHA-256: {{hash}}",
+      "panes": "Adds: {{names}}",
+      "canTitle": "This add-on can:",
+      "new": "New:",
+      "sends": "It can send what it reads to {{hosts}}.",
+      "sendsAny": "It can send what it reads to any site on the internet.",
+      "never": "It can never: run programs, use the app's controls, or read anything you have not chosen.",
+      "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
+      "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
+      "install": "Install",
+      "update": "Update"
+    },
+    "remove": {
+      "title": "Remove {{title}}?",
+      "body": "Closes its {{count}} open panes, deletes its files, and forgets every permission you gave it.",
+      "confirm": "Remove"
+    },
+    "fetch": {
+      "resolving": "Resolving the commit…",
+      "resolved": "Commit {{sha}}",
+      "downloading": "Downloading {{done}} MB of {{total}} MB…",
+      "checking": "Checking files: {{files}} files, {{size}} MB"
+    },
+    "request": {
+      "wants": "{{agent}} wants to open {{pane}}: {{args}}",
+      "base": "base {{base}}",
+      "open": "Open",
+      "dismiss": "Dismiss",
+      "install": "Install…",
+      "many": "{{count}} open requests ▾",
+      "status": {
+        "open": "",
+        "not_installed": "{{pane}} is not installed.",
+        "not_found_here": "Not found here.",
+        "expired": "Expired.",
+        "args_not_allowed": "Malformed for this pane.",
+        "bad_requester": "The sender does not match the requester."
+      },
+      "note": {
+        "other_machine": "Control requests from other machines are not shown.",
+        "malformed": "Malformed open request ({{reason}}{{detail}})."
+      },
+      "notes": "{{count}} notes ▾",
+      "reason": {
+        "missing_payload": "the JSON line is missing",
+        "extra_content": "there is extra text after the JSON line",
+        "too_large": "the JSON line is over 2 KB",
+        "bad_json": "the JSON line is not valid JSON",
+        "bad_shape": "the request has the wrong shape",
+        "bad_pane": "unknown pane",
+        "unknown_arg_key": "unknown argument",
+        "bad_arg_value": "an argument value is not text",
+        "bad_requester": "the requester is missing or malformed",
+        "bad_request_id": "the request id is missing"
+      }
+    },
+    "menu": {
+      "fileViewEntry": "File view…",
+      "diffViewEntry": "Diff view…",
+      "fileView": "File view",
+      "diffView": "Diff view",
+      "addonPane": "Add-on pane ▸ {{title}}",
+      "install": "Install an add-on…"
+    },
+    "listFailed": "Couldn't read the add-on list: {{message}}",
+    "listRetry": "Try again"
   }
 }

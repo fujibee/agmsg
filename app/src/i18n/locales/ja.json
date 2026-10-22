@@ -257,5 +257,180 @@
   },
   "stage": {
     "emptyHint": "左のメンバーをクリックしてエージェントを起動してください。"
+  },
+  "addons": {
+    "tab": {
+      "general": "一般",
+      "addons": "アドオン"
+    },
+    "engineOff": "このコンピュータではまだアドオンを使えません。このシステムの Web エンジンで安全性チェックに通りませんでした。ほかの機能には影響しません。",
+    "engineReasons": "理由: {{reasons}}",
+    "builtin": {
+      "title": "内蔵"
+    },
+    "installed": {
+      "title": "インストール済み",
+      "empty": "インストール済みのアドオンはありません。",
+      "checkUpdates": "更新を確認",
+      "remove": "削除"
+    },
+    "install": {
+      "label": "アドオンのリポジトリ",
+      "placeholder": "owner/repo または owner/repo@ref",
+      "button": "インストール…",
+      "later": "GitHub からのインストールは、このビルドではまだ使えません。"
+    },
+    "openRequests": {
+      "label": "seat からの open request",
+      "show": "表示",
+      "off": "オフ"
+    },
+    "developer": {
+      "title": "開発者",
+      "loadFromFolder": "フォルダから読み込み…"
+    },
+    "permission": {
+      "none": "権限なしで動作します",
+      "messagesRead": "選んだチームのメッセージを読む",
+      "filesRead": "選んだフォルダのファイルを読む",
+      "gitRead": "そのフォルダの git 履歴と変更を読む",
+      "network": "{{hosts}} に接続する",
+      "networkAny": "インターネット上の任意のサイトに接続する"
+    },
+    "grant": {
+      "messages": "メッセージを読む: {{scope}}",
+      "files": "ファイルを読む: {{scope}}",
+      "remembered": "(記憶済み)",
+      "revoke": "取り消す",
+      "none": "まだ許可した権限はありません。"
+    },
+    "card": {
+      "grantAria": "権限のリクエスト",
+      "messagesWant": "{{title}} がチーム {{team}} のメッセージを読もうとしています。",
+      "filesWant": "{{title}} が {{path}} を読もうとしています(フォルダ、{{count}} ファイル)。",
+      "filesWantOne": "{{title}} が {{path}} を読もうとしています。",
+      "allow": "許可",
+      "allowOnce": "今回だけ許可",
+      "allowAlways": "このフォルダは常に許可",
+      "notNow": "今はしない",
+      "denied": "{{path}} は agmsg の保護対象(鍵・認証情報・ブラウザデータ)です。アドオンは読めません。",
+      "chooseAnother": "別のものを選ぶ…",
+      "allowAlwaysLater": "まだ使えません"
+    },
+    "installError": {
+      "repo_not_found": "github.com/{{owner}}/{{repo}} が見つかりません。名前を確認してください。非公開リポジトリはまだ未対応です。",
+      "ref_not_found": "{{repo}} に {{ref}} という branch・tag・commit はありません。",
+      "no_app_panes": "{{repo}} にはアプリ用アドオンがありません(app-panes/ フォルダなし)。agmsg CLI の plugin なら、ここではなく CLI からインストールします。",
+      "conf_invalid": "app-panes/{{pane}}/addon.conf の {{line}} 行目: {{problem}}。",
+      "entry_missing": "app-panes/{{pane}}/web/{{entry}} がありません。アドオンはビルド済みの web/ フォルダを commit する必要があります。",
+      "min_app": "agmsg アプリ {{minApp}} 以上が必要です。現在は {{appVersion}} です。",
+      "protocol_unknown": "より新しいアプリ向けです(protocol {{protocol}})。アプリを更新してください。",
+      "too_large": "大きすぎてインストールできません: {{measured}}(上限 {{limit}})。最大のファイル: {{largest}}。",
+      "unsafe_entry": {
+        "symlink": "拒否しました: リポジトリの {{path}} にシンボリックリンクがあります。アドオンに含められるのは通常のファイルだけです。",
+        "hardlink": "拒否しました: リポジトリの {{path}} にハードリンクがあります。アドオンに含められるのは通常のファイルだけです。",
+        "outside_path": "拒否しました: リポジトリの {{path}} がフォルダの外を指しています。アドオンに含められるのは通常のファイルだけです。",
+        "reserved_name": "拒否しました: リポジトリの {{path}} に予約済みのファイル名があります。アドオンに含められるのは通常のファイルだけです。"
+      },
+      "github_error": "GitHub から応答がありません: {{status}}。もう一度試してください。",
+      "rate_limited": "GitHub は未認証のダウンロードを制限しています。{{time}} 以降に再試行してください。",
+      "already_installed": "インストール済みです({{sha}})。"
+    },
+    "pane": {
+      "reload": "再読み込み",
+      "askedBy": "{{agent}} の依頼",
+      "blocked": "ブロック: {{what}}",
+      "dev": "DEV · {{folder}}",
+      "networkChip": "ネットワーク: {{hosts}}",
+      "networkAnyChip": "ネットワーク: 任意のサイト",
+      "framePlaceholder": "アドオンのフレーム"
+    },
+    "failure": {
+      "digest_mismatch": "{{title}} を開けません。ファイルが不完全か、インストール後に変更されています。",
+      "load_timeout": "{{title}} の読み込みが終わりませんでした。",
+      "path_missing": "{{path}} はもう存在しません。",
+      "revoked": "{{scope}} は読んでいません。",
+      "action": {
+        "reinstall": "再インストール",
+        "remove": "削除",
+        "reload": "再読み込み",
+        "chooseAnother": "別のものを選ぶ…",
+        "allowAgain": "もう一度許可"
+      },
+      "init_too_large": "{{title}} に渡すデータが大きすぎて、開けません。",
+      "open_failed": "{{title}} を開けません: {{message}}"
+    },
+    "confirm": {
+      "installTitle": "{{title}} をインストールしますか?",
+      "updateTitle": "{{title}} を更新しますか?",
+      "fromTo": "{{from}} → {{to}}",
+      "details": "詳細",
+      "fullSha": "Commit: {{sha}}",
+      "archive": "アーカイブ SHA-256: {{hash}}",
+      "panes": "追加されるもの: {{names}}",
+      "canTitle": "このアドオンができること:",
+      "new": "新規:",
+      "sends": "読み取った内容を {{hosts}} に送れます。",
+      "sendsAny": "読み取った内容をインターネット上の任意のサイトに送れます。",
+      "never": "できないこと: プログラムの実行、アプリの操作、あなたが選んでいないものの読み取り。",
+      "noReview": "agmsg はアドオンの審査も署名も行いません。信頼できる人のものだけインストールしてください。",
+      "asksAgain": "この更新でアドオンができることが変わります。変わった項目の許可は改めて確認します。",
+      "install": "インストール",
+      "update": "更新"
+    },
+    "remove": {
+      "title": "{{title}} を削除しますか?",
+      "body": "開いている {{count}} 個のペインを閉じ、ファイルを削除し、与えた権限をすべて取り消します。",
+      "confirm": "削除"
+    },
+    "fetch": {
+      "resolving": "commit を解決しています…",
+      "resolved": "Commit {{sha}}",
+      "downloading": "ダウンロード中 {{done}} MB / {{total}} MB…",
+      "checking": "ファイルを確認中: {{files}} ファイル、{{size}} MB"
+    },
+    "request": {
+      "wants": "{{agent}} が {{pane}} を開きたい: {{args}}",
+      "base": "base {{base}}",
+      "open": "開く",
+      "dismiss": "閉じる",
+      "install": "インストール…",
+      "many": "{{count}} 件の open request ▾",
+      "status": {
+        "open": "",
+        "not_installed": "{{pane}} はインストールされていません。",
+        "not_found_here": "ここには見つかりません。",
+        "expired": "期限切れです。",
+        "args_not_allowed": "このペインには不正な形式です。",
+        "bad_requester": "送信者と依頼者が一致しません。"
+      },
+      "note": {
+        "other_machine": "他のマシンからの control request は表示されません。",
+        "malformed": "不正な open request です({{reason}}{{detail}})。"
+      },
+      "notes": "{{count}} 件のメモ ▾",
+      "reason": {
+        "missing_payload": "JSON の行がありません",
+        "extra_content": "JSON の行の後に余分なテキストがあります",
+        "too_large": "JSON の行が 2 KB を超えています",
+        "bad_json": "JSON として読めません",
+        "bad_shape": "リクエストの形が正しくありません",
+        "bad_pane": "不明なペイン",
+        "unknown_arg_key": "不明な引数",
+        "bad_arg_value": "引数の値がテキストではありません",
+        "bad_requester": "依頼者がないか形が正しくありません",
+        "bad_request_id": "リクエスト ID がありません"
+      }
+    },
+    "menu": {
+      "fileViewEntry": "ファイルビュー…",
+      "diffViewEntry": "差分ビュー…",
+      "fileView": "ファイルビュー",
+      "diffView": "差分ビュー",
+      "addonPane": "アドオンペイン ▸ {{title}}",
+      "install": "アドオンをインストール…"
+    },
+    "listFailed": "アドオンの一覧を読み込めませんでした: {{message}}",
+    "listRetry": "再試行"
   }
 }
