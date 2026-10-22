@@ -314,7 +314,8 @@
       "allowAlways": "Always for this folder",
       "notNow": "Not now",
       "denied": "{{path}} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
-      "chooseAnother": "Choose another…"
+      "chooseAnother": "Choose another…",
+      "allowAlwaysLater": "Not available yet"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",

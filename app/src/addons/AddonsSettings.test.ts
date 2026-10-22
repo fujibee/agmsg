@@ -91,4 +91,10 @@ describe("locale keys", () => {
     expect(html).toContain("addon-digest-bad");
     expect(html).toContain("addons.failure.digest_mismatch");
   });
+  it("Always for this folder is disabled while grants cannot persist", () => {
+    const need = { permission: "files:read" as const, path: "/p", fileCount: null, denied: false };
+    const off = renderToStaticMarkup(createElement(GrantCard, { t, title: "X", need, canRemember: false, onChoose: noop }));
+    expect(off).toMatch(/<button[^>]*disabled[^>]*>\[addons\.card\.allowAlways\]/);
+    expect(renderToStaticMarkup(createElement(GrantCard, { t, title: "X", need, onChoose: noop }))).not.toMatch(/disabled/);
+  });
 });

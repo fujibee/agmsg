@@ -16,6 +16,7 @@ export function startFrameRelay(deps: {
   newChannel?: () => ChannelLike;
   /** Read at call time, so a new callback identity never rebuilds the relay. */
   onRefused: () => ((op: string, code: string) => void) | undefined;
+  onFeedFailed?: () => ((code: string, message: string) => void) | undefined;
 }): { relay: PaneRelay; dispose: () => void } {
   const relay = createPaneRelay({
     id: deps.paneInstance,
@@ -24,6 +25,7 @@ export function startFrameRelay(deps: {
     wantsFeed: deps.wantsFeed,
     newChannel: deps.newChannel,
     onRefused: (op, code) => deps.onRefused()?.(op, code),
+    onFeedFailed: (code, message) => deps.onFeedFailed?.()?.(code, message),
   });
   let disposed = false;
   let unlisten: (() => void) | null = null;

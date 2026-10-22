@@ -16,6 +16,8 @@ export function AddonPane(props: {
   /** When the host app already draws the pane title and × (the tab's pane header). */
   hideTitle?: boolean;
   hideClose?: boolean;
+  /** Whether grants can be remembered ("Always for this folder"); false shows it disabled. */
+  canRemember?: boolean;
   /** Header badge for a developer pane, e.g. the folder. */
   devFolder?: string;
   /** A refusal the broker just returned, shown briefly in the header. */
@@ -51,7 +53,7 @@ export function AddonPane(props: {
         )}
       </div>
       <div className="addon-pane-body">
-        {state.kind === "grant" && <GrantCard t={t} title={props.title} need={state.need} onChoose={props.onGrant} />}
+        {state.kind === "grant" && <GrantCard t={t} title={props.title} need={state.need} canRemember={props.canRemember} onChoose={props.onGrant} />}
         {state.kind === "failure" && (
           <FailureCard t={t} title={props.title} failure={state.failure} onAction={props.onFailure} />
         )}

@@ -155,6 +155,7 @@ function LiveAddonPane(props: {
       chips={[...chips, ...grantChips([], decl?.network ?? network, tt)]}
       askedBy={pane.askedBy}
       blocked={blocked}
+      canRemember={false}
       hideTitle
       hideClose
       state={state}
@@ -168,6 +169,9 @@ function LiveAddonPane(props: {
             declaresMessages={added.permissions.includes("messages:read")}
             reloadKey={reloadKey}
             onRefused={(op, code) => setBlocked(`${op} (${code})`)}
+            onFeedFailed={(code, message) =>
+              setState({ kind: "failure", failure: code === "init_too_large" ? { code } : { code: "open_failed", message } })
+            }
           />
         ) : undefined
       }

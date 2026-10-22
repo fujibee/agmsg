@@ -20,6 +20,7 @@ export function AddonFrame(props: {
   declaresMessages: boolean;
   reloadKey: number;
   onRefused?: (op: string, code: string) => void;
+  onFeedFailed?: (code: string, message: string) => void;
 }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const relayRef = useRef<PaneRelay | null>(null);
@@ -27,6 +28,8 @@ export function AddonFrame(props: {
   // The callback lives in a ref: a new identity must not rebuild the relay (a rebuilt relay gets no port without a new load).
   const onRefusedRef = useRef(props.onRefused);
   onRefusedRef.current = props.onRefused;
+  const onFeedFailedRef = useRef(props.onFeedFailed);
+  onFeedFailedRef.current = props.onFeedFailed;
 
   useEffect(() => {
     const { relay, dispose } = startFrameRelay({
@@ -36,6 +39,7 @@ export function AddonFrame(props: {
       listen: (event, handler) => listen<PushEvent>(event, handler),
       frameWindow: () => ref.current?.contentWindow ?? null,
       onRefused: () => onRefusedRef.current,
+      onFeedFailed: () => onFeedFailedRef.current,
     });
     relayRef.current = relay;
     return () => {

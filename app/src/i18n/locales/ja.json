@@ -314,7 +314,8 @@
       "allowAlways": "このフォルダは常に許可",
       "notNow": "今はしない",
       "denied": "{{path}} は agmsg の保護対象(鍵・認証情報・ブラウザデータ)です。アドオンは読めません。",
-      "chooseAnother": "別のものを選ぶ…"
+      "chooseAnother": "別のものを選ぶ…",
+      "allowAlwaysLater": "まだ使えません"
     },
     "installError": {
       "repo_not_found": "github.com/{{owner}}/{{repo}} が見つかりません。名前を確認してください。非公開リポジトリはまだ未対応です。",

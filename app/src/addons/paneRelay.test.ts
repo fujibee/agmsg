@@ -32,6 +32,7 @@ function setup(opts: { wantsFeed?: boolean; handler?: (cmd: string, args: Record
     return { agmsg: 1, type: "response", ok: true, result: {} };
   };
   const refused: [string, string][] = [];
+  const feedFailed: [string, string][] = [];
   const relay = createPaneRelay({
     id: 7,
     invoke,
@@ -43,8 +44,9 @@ function setup(opts: { wantsFeed?: boolean; handler?: (cmd: string, args: Record
       return { port1, port2: { tag: "port2" } };
     },
     onRefused: (op, code) => refused.push([op, code]),
+    onFeedFailed: (code, message) => feedFailed.push([code, message]),
   });
-  return { relay, calls, ports, posted, refused };
+  return { relay, calls, ports, posted, refused, feedFailed };
 }
 
 const send = (port: PortLike, data: unknown) => port.onmessage?.({ data });
@@ -60,6 +62,15 @@ describe("pane relay", () => {
     expect(s.posted[0].transfer).toHaveLength(1);
     expect(s.ports[0].sent).toEqual([{ agmsg: 1, type: "init" }, { agmsg: 1, type: "message", n: 1 }]);
     expect(s.relay.generation()).toBe(1);
+  });
+
+  it("tells the host when the first feed fails (init_too_large), but not when no team is allowed yet", async () => {
+    const big = setup({ handler: (cmd) => (cmd === "addon_feed_init" ? Promise.reject({ code: "init_too_large", message: "too big" }) : undefined) });
+    await big.relay.onFrameLoad();
+    expect(big.feedFailed).toEqual([["init_too_large", "too big"]]);
+    const early = setup({ handler: (cmd) => (cmd === "addon_feed_init" ? Promise.reject({ code: "not_granted", message: "no team" }) : undefined) });
+    await early.relay.onFrameLoad();
+    expect(early.feedFailed).toEqual([]);
   });
 
   it("does not ask for a feed when the pane does not declare messages:read", async () => {

@@ -72,6 +72,8 @@ export function createPaneRelay(deps: {
   newChannel?: () => ChannelLike;
   /** Called when a broker op is refused, so the header can show "blocked: …" briefly. */
   onRefused?: (op: string, code: string) => void;
+  /** Called when the first feed (`addon_feed_init`) fails for a reason the user can see, e.g. init_too_large. */
+  onFeedFailed?: (code: string, message: string) => void;
 }): PaneRelay {
   const newChannel = deps.newChannel ?? (() => new MessageChannel() as unknown as ChannelLike);
   let bound: Bound | null = null;
@@ -148,8 +150,12 @@ export function createPaneRelay(deps: {
           }
           mine.port.postMessage(ev);
         }
-      } catch {
+      } catch (e) {
         // No team allowed yet (or the frame was replaced): the grant card handles it; nothing is sent.
+        // Anything else is told to the pane's host, which shows a card instead of an empty frame.
+        const err = typeof e === "object" && e !== null ? (e as { code?: unknown; message?: unknown }) : null;
+        const code = typeof err?.code === "string" ? err.code : "error";
+        if (bound === mine && code !== "not_granted") deps.onFeedFailed?.(code, String(err?.message ?? e));
       } finally {
         if (bound === mine) {
           mine.buffered = [];

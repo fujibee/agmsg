@@ -12,8 +12,11 @@ export function GrantCard(props: {
   title: string;
   need: GrantNeed;
   onChoose: (choice: GrantChoice) => void;
+  /** False until grants persist: "Always" is shown disabled, never accepted and treated as "once". */
+  canRemember?: boolean;
 }) {
   const { t, title, need, onChoose } = props;
+  const canRemember = props.canRemember ?? true;
   if (need.permission === "messages:read") {
     return (
       <div className="addon-card addon-grant-card" role="group" aria-label={t("addons.card.grantAria")}>
@@ -52,7 +55,12 @@ export function GrantCard(props: {
         <button type="button" onClick={() => onChoose("once")}>
           {t("addons.card.allowOnce")}
         </button>
-        <button type="button" onClick={() => onChoose("always")}>
+        <button
+          type="button"
+          disabled={!canRemember}
+          title={canRemember ? undefined : t("addons.card.allowAlwaysLater")}
+          onClick={() => onChoose("always")}
+        >
           {t("addons.card.allowAlways")}
         </button>
         <button type="button" onClick={() => onChoose("notNow")}>
