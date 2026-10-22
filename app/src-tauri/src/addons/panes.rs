@@ -183,6 +183,29 @@ impl Registry {
         v
     }
 
+    /// Open panes of `addon`/`pane` that currently hold exactly this grant
+    /// (`files:read` on this folder, `messages:read` on this team).
+    pub fn holders(&self, addon: &str, pane: &str, permission: &str, scope: &str) -> Vec<PaneId> {
+        let mut v: Vec<_> = self
+            .panes
+            .values()
+            .filter(|p| p.addon == addon && p.name == pane)
+            .filter(|p| match permission {
+                "files:read" => p.root.as_ref().is_some_and(|r| r.to_string_lossy() == scope),
+                "messages:read" => p.team.as_deref() == Some(scope),
+                _ => false,
+            })
+            .map(|p| p.id)
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// What a pane instance is and holds, for binding a saved consent to it.
+    pub fn consent_view(&self, id: PaneId) -> Option<(String, String, String, Option<String>, Option<String>)> {
+        self.panes.get(&id).map(|p| (p.addon.clone(), p.name.clone(), p.commit.clone(), p.team.clone(), p.root.as_ref().map(|r| r.to_string_lossy().into_owned())))
+    }
+
     pub fn contains(&self, id: PaneId) -> bool {
         self.panes.contains_key(&id)
     }

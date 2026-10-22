@@ -245,33 +245,184 @@ pub struct SavedGrantOut {
     pub granted_at: String,
 }
 
-fn rememberable(id: &str) -> Result<(), Failure> {
-    if id.starts_with("dev:") {
-        return Err(Failure { code: "bad_args", message: "Developer grants last until the app quits and are never saved.".into() });
-    }
-    Ok(())
-}
-
 #[tauri::command]
 pub fn addon_saved_grants(host: State<'_, Arc<AddonHost>>, spec: GrantIn) -> Vec<SavedGrantOut> {
     grants::for_pane(host.catalog().addons_dir(), &spec.id, &spec.pane).into_iter().map(|g| SavedGrantOut { permission: g.permission, scope: g.scope, granted_at: g.granted_at }).collect()
 }
 
-#[tauri::command]
-pub fn addon_save_grant(host: State<'_, Arc<AddonHost>>, spec: GrantIn) -> Result<(), Failure> {
-    rememberable(&spec.id)?;
-    let addons = host.catalog().addons_dir().to_path_buf();
-    // only a pane that exists and declared the permission can have it remembered
+/// Remembering a grant is bound to the pane instance and the commit the user
+/// consented under, and to what that pane actually holds right now.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveGrantIn {
+    pub id: String,
+    pub pane: String,
+    pub permission: String,
+    pub scope: String,
+    /// The pane instance the user clicked Allow in.
+    pub pane_id: u64,
+    /// The add-on commit that pane runs (`addon_pane_add` returned it as `commit`).
+    pub commit: String,
+}
+
+/// Checks a save against the live pane and the catalog; returns what to store.
+pub fn check_save(host: &AddonHost, spec: &SaveGrantIn) -> Result<SavedGrant, Failure> {
+    if spec.id.starts_with("dev:") {
+        return Err(Failure { code: "bad_args", message: "Developer grants last until the app quits and are never saved.".into() });
+    }
+    let gone = || Failure { code: "pane_gone", message: "That pane is closed, so its permission was not saved.".into() };
+    let (addon, pane, commit, team, root) = host.panes.registry.lock().unwrap().consent_view(spec.pane_id).ok_or_else(gone)?;
+    if addon != spec.id || pane != spec.pane {
+        return Err(Failure { code: "pane_gone", message: "That pane is not this add-on's pane.".into() });
+    }
+    if commit != spec.commit {
+        return Err(Failure { code: "commit_changed", message: "This add-on changed after you allowed it. Allow it again to remember it.".into() });
+    }
     let info = host.catalog().list().into_iter().find(|a| a.id == spec.id).ok_or_else(|| Failure { code: "not_found", message: "No such add-on.".into() })?;
-    let pane = info.panes.iter().find(|p| p.name == spec.pane).ok_or_else(|| Failure { code: "not_found", message: "No such pane.".into() })?;
-    if !pane.permissions.contains(&spec.permission) {
+    if info.commit != spec.commit {
+        return Err(Failure { code: "commit_changed", message: "This add-on was updated after you allowed it. Allow it again to remember it.".into() });
+    }
+    let declared = info.panes.iter().find(|p| p.name == spec.pane).ok_or_else(|| Failure { code: "not_found", message: "No such pane.".into() })?;
+    if !declared.permissions.contains(&spec.permission) {
         return Err(Failure { code: "not_declared", message: "This add-on did not declare that permission.".into() });
     }
-    grants::add(&addons, SavedGrant { repo: spec.id, sha: info.commit, pane: spec.pane, permission: spec.permission, scope: spec.scope, granted_at: now_iso() })
-        .map_err(|e| Failure { code: "bad_args", message: format!("That grant cannot be saved: {e}") })
+    // only what the pane really holds can be remembered
+    let held = match spec.permission.as_str() {
+        "files:read" => root.as_deref() == Some(spec.scope.as_str()),
+        "messages:read" => team.as_deref() == Some(spec.scope.as_str()),
+        _ => false,
+    };
+    if !held {
+        return Err(Failure { code: "not_granted", message: "That pane does not hold that permission, so nothing was saved.".into() });
+    }
+    Ok(SavedGrant { repo: spec.id.clone(), sha: spec.commit.clone(), pane: spec.pane.clone(), permission: spec.permission.clone(), scope: spec.scope.clone(), granted_at: now_iso() })
 }
 
 #[tauri::command]
-pub fn addon_forget_grant(host: State<'_, Arc<AddonHost>>, spec: GrantIn) -> Result<bool, Failure> {
-    grants::revoke(host.catalog().addons_dir(), &spec.id, &spec.pane, &spec.permission, &spec.scope).map_err(|e| Failure { code: "io", message: e.to_string() })
+pub fn addon_save_grant(host: State<'_, Arc<AddonHost>>, spec: SaveGrantIn) -> Result<(), Failure> {
+    let g = check_save(&host, &spec)?;
+    grants::add(host.catalog().addons_dir(), g).map_err(|e| Failure { code: "bad_args", message: format!("That grant cannot be saved: {e}") })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgetOut {
+    pub forgotten: bool,
+    pub closed_panes: Vec<u64>,
+}
+
+/// Settings → Revoke: forgets the remembered grant AND takes it away from every
+/// live pane that holds it (they lose access at once and are closed; the UI gets
+/// `addon-pane-failed {pane, reason}` once per pane).
+#[tauri::command]
+pub fn addon_forget_grant<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<AddonHost>>, spec: GrantIn) -> Result<ForgetOut, Failure> {
+    let forgotten = grants::revoke(host.catalog().addons_dir(), &spec.id, &spec.pane, &spec.permission, &spec.scope).map_err(|e| Failure { code: "io", message: e.to_string() })?;
+    let closed = host.panes.revoke_matching(&host.nav, &spec.id, &spec.pane, &spec.permission, &spec.scope);
+    for id in &closed {
+        let _ = app.emit(PANE_FAILED_EVENT, json!({ "pane": id, "reason": "Permission revoked. Open it again." }));
+    }
+    Ok(ForgetOut { forgotten, closed_panes: closed })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::addons::catalog::Catalog;
+    use crate::addons::install::testutil::tarball;
+    use crate::addons::panes::{AddPane, Declared, OpenArgs};
+    use crate::addons::server::Payload;
+    use std::collections::HashMap;
+
+    const SHA1: &str = "1111111111111111111111111111111111111111";
+    const SHA2: &str = "2222222222222222222222222222222222222222";
+
+    fn install(addons: &std::path::Path, sha: &str) {
+        let tar = tarball(&[
+            json!({"path": "agmsg-plugin.conf", "type": "file", "text": "name = x\n"}),
+            json!({"path": "app-panes/main/addon.conf", "type": "file", "text": "title = M\nprotocol = 1\npermissions = files:read, messages:read\nwhy.files:read = r\nwhy.messages:read = m\n"}),
+            json!({"path": "app-panes/main/web/index.html", "type": "file", "text": "<div></div>"}),
+        ]);
+        let s = stage::stage(addons, "o/r", sha, &tar[..], "0.5.0", Limits::default()).unwrap();
+        stage::activate(addons, &s, "t").unwrap();
+    }
+
+    fn host_with(addons: &std::path::Path) -> Arc<AddonHost> {
+        let h = Arc::new(AddonHost::new(None));
+        h.set_catalog_for_test(Catalog::new(None, addons.to_path_buf()));
+        h
+    }
+
+    fn open_pane(h: &AddonHost, commit: &str, root: Option<&str>, team: Option<&str>) -> u64 {
+        let mut files = HashMap::new();
+        files.insert("index.html".to_string(), b"x".to_vec());
+        let declared = Declared { messages_read: true, files_read: true, ..Default::default() };
+        let mut reg = h.panes.registry.lock().unwrap();
+        let id = reg
+            .add(AddPane { addon: "o/r".into(), commit: commit.into(), name: "main".into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared, open_args: OpenArgs::default(), expected_digest: None, pinned: None, on_tamper: None })
+            .unwrap()
+            .id;
+        reg.begin_generation(id);
+        if let Some(r) = root {
+            reg.grant_root(id, std::path::PathBuf::from(r)).unwrap();
+        }
+        if let Some(t) = team {
+            reg.grant_team(id, t).unwrap();
+        }
+        id
+    }
+
+    fn save(id: &str, pane_id: u64, commit: &str, perm: &str, scope: &str) -> SaveGrantIn {
+        SaveGrantIn { id: id.into(), pane: "main".into(), permission: perm.into(), scope: scope.into(), pane_id, commit: commit.into() }
+    }
+
+    #[test]
+    fn a_save_is_bound_to_the_pane_instance_the_commit_and_what_it_holds() {
+        let d = tempfile::tempdir().unwrap();
+        install(d.path(), SHA1);
+        let h = host_with(d.path());
+        let p = open_pane(&h, SHA1, Some("/proj"), Some("team-a"));
+        let g = check_save(&h, &save("o/r", p, SHA1, "files:read", "/proj")).unwrap();
+        assert_eq!((g.repo.as_str(), g.sha.as_str(), g.scope.as_str()), ("o/r", SHA1, "/proj"));
+        assert!(check_save(&h, &save("o/r", p, SHA1, "messages:read", "team-a")).is_ok());
+        // what the pane does not hold cannot be remembered
+        assert_eq!(check_save(&h, &save("o/r", p, SHA1, "files:read", "/elsewhere")).unwrap_err().code, "not_granted");
+        assert_eq!(check_save(&h, &save("o/r", p, SHA1, "messages:read", "team-b")).unwrap_err().code, "not_granted");
+        assert_eq!(check_save(&h, &save("o/r", p, SHA1, "git:read", "/proj")).unwrap_err().code, "not_declared");
+        // a pane that never existed, or belongs to another add-on id
+        assert_eq!(check_save(&h, &save("o/r", p + 99, SHA1, "files:read", "/proj")).unwrap_err().code, "pane_gone");
+        assert_eq!(check_save(&h, &save("x/y", p, SHA1, "files:read", "/proj")).unwrap_err().code, "pane_gone");
+        // developer add-ons are never saved
+        assert_eq!(check_save(&h, &save("dev:thing", p, SHA1, "files:read", "/proj")).unwrap_err().code, "bad_args");
+    }
+
+    #[test]
+    fn consent_given_under_an_old_commit_cannot_be_attached_to_the_new_one() {
+        let d = tempfile::tempdir().unwrap();
+        install(d.path(), SHA1);
+        let h = host_with(d.path());
+        let old_pane = open_pane(&h, SHA1, Some("/proj"), None);
+        // the add-on is updated while the old pane's Allow is still in flight
+        let tar_dir = d.path();
+        install(tar_dir, SHA2);
+        // the old consent names SHA1: the catalog now says SHA2
+        let e = check_save(&h, &save("o/r", old_pane, SHA1, "files:read", "/proj")).unwrap_err();
+        assert_eq!(e.code, "commit_changed");
+        // a save that claims the new commit for the old pane is refused too
+        let e = check_save(&h, &save("o/r", old_pane, SHA2, "files:read", "/proj")).unwrap_err();
+        assert_eq!(e.code, "commit_changed");
+        assert!(grants::read(d.path()).is_empty(), "nothing was written");
+        // a pane opened after the update, under the new commit, can save
+        let new_pane = open_pane(&h, SHA2, Some("/proj"), None);
+        assert!(check_save(&h, &save("o/r", new_pane, SHA2, "files:read", "/proj")).is_ok());
+    }
+
+    #[test]
+    fn a_closed_pane_cannot_save() {
+        let d = tempfile::tempdir().unwrap();
+        install(d.path(), SHA1);
+        let h = host_with(d.path());
+        let p = open_pane(&h, SHA1, Some("/proj"), None);
+        h.panes.registry.lock().unwrap().remove(p);
+        assert_eq!(check_save(&h, &save("o/r", p, SHA1, "files:read", "/proj")).unwrap_err().code, "pane_gone");
+    }
 }
