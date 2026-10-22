@@ -17,12 +17,16 @@
 //!
 //! What is checked, in order, for every row (a refusal is shown, never silent):
 //! 1. addressed to the team's app-user (a team with none, or more than one, has no requests);
-//! 2. **origin**: the row was accepted on this machine. A row that came through sync
-//!    (`sync_messages` direction `pull`) or whose origin cannot be established (a legacy
-//!    row with no event, a store only `api.sh` can read) never gets an Open;
-//! 3. **requester**: `requester.member_id` equals the row's accepted `from`. The token
-//!    cannot be checked without agmsgd's `send_commits`; its hash is recorded and the bar
-//!    must call the name unverified (`tokenCheck: "unverified"`);
+//! 2. **origin**: the row was accepted on this machine. Only a live event (`seq > 0`,
+//!    written by a send on this machine) that sync did not pull in is local. "No auxiliary
+//!    information, so local" holds for exactly that and nothing wider: a legacy projection
+//!    (the sync driver writes old messages as events at `seq <= 0`), a legacy row with no
+//!    event, a row whose origin an import or projection could have re-derived, and a store
+//!    only `api.sh` can read are all unproven. A pulled row is synced. Neither gets an Open;
+//! 3. **requester**: `requester.member_id` equals the row's accepted `from`. The token is
+//!    optional in the interim form (1.6 seats have no claim token) and cannot be checked
+//!    without a delivery DB; when present its hash is recorded, and the bar must call the
+//!    name unverified (`tokenCheck: "unverified"` either way);
 //! 4. the pane is built in or installed (and enabled, and its files match what was pinned);
 //! 5. the args are exactly what that pane's `opens` allows;
 //! 6. a path exists on this machine and is not a protected place.
@@ -31,7 +35,11 @@
 //! records `opened` against the request id, and returns what `addon_pane_add` takes.
 //! There is no expiry yet: the time is shown, an unhandled request is listed
 //! again after a restart. A request id is acted on once; the same id with other content
-//! is refused (`request_id_reused`).
+//! is refused (`request_id_reused`). The record of handled ids is never trimmed (an old
+//! message row can therefore never become openable again), and one that cannot be read or
+//! parsed stops requests from being shown at all (`state_unreadable`) rather than being
+//! treated as empty. A new message that reuses an id is not an old row coming back: a local
+//! sender can always mint a fresh id, so it is refused only while the id is on record.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -52,7 +60,6 @@ pub const HEADER: &str = "agmsg-ctrl v1 ctrl.app_open_pane";
 pub const MAX_PAYLOAD_BYTES: usize = 2048;
 /// How many request-looking messages to a team's app-user one scan reads (the newest).
 pub const SCAN_CAP: usize = 500;
-const STATE_CAP: usize = 5000;
 const TYPE_APP: &str = "agmsg-app";
 
 // ---------------------------------------------------------------------------
@@ -115,7 +122,8 @@ pub struct Request {
     pub target: Target,
     pub args: Args,
     pub member_id: String,
-    pub token: String,
+    /// Optional in the interim form: 1.6 seats have no claim token. Only its hash is ever stored.
+    pub token: Option<String>,
     pub request_id: String,
     /// sha256 of the exact payload line: a second request with this id must carry the same.
     pub payload_sha256: String,
@@ -206,15 +214,20 @@ pub fn parse(body: &str) -> Parsed {
     }
 
     let Some(r) = obj.get("requester").and_then(Value::as_object) else { return refuse("bad_requester", None) };
-    let (Some(member_id), Some(token)) = (r.get("member_id").and_then(Value::as_str), r.get("token").and_then(Value::as_str)) else { return refuse("bad_requester", None) };
-    if r.len() != 2 || !plain_text(member_id, 256) || !plain_text(token, 256) {
+    let Some(member_id) = r.get("member_id").and_then(Value::as_str) else { return refuse("bad_requester", None) };
+    let token = match r.get("token") {
+        None => None,
+        Some(Value::String(t)) if plain_text(t, 256) => Some(t.clone()),
+        Some(_) => return refuse("bad_requester", None),
+    };
+    if r.keys().any(|k| k != "member_id" && k != "token") || !plain_text(member_id, 256) {
         return refuse("bad_requester", None);
     }
     let Some(request_id) = obj.get("request_id").and_then(Value::as_str) else { return refuse("bad_request_id", None) };
     if !id_ok(request_id) {
         return refuse("bad_request_id", None);
     }
-    Parsed::Request(Box::new(Request { pane: pane.to_string(), target, args, member_id: member_id.to_string(), token: token.to_string(), request_id: request_id.to_string(), payload_sha256: sha256_hex(payload.as_bytes()) }))
+    Parsed::Request(Box::new(Request { pane: pane.to_string(), target, args, member_id: member_id.to_string(), token, request_id: request_id.to_string(), payload_sha256: sha256_hex(payload.as_bytes()) }))
 }
 
 // ---------------------------------------------------------------------------
@@ -240,14 +253,24 @@ fn state_path(addons: &Path) -> PathBuf {
     addons.join("ctrl-state.tsv")
 }
 
-fn state_read(addons: &Path) -> Vec<StateRow> {
-    let Ok(text) = fs::read_to_string(state_path(addons)) else { return Vec::new() };
-    text.lines()
-        .filter_map(|l| {
-            let c: Vec<&str> = l.split('\t').collect();
-            (c.len() == 6 && id_ok(c[0]) && matches!(c[2], "opened" | "dismissed")).then(|| StateRow { request_id: c[0].into(), team: c[1].into(), state: c[2].into(), at: c[3].into(), payload_sha256: c[4].into(), token_sha256: c[5].into() })
-        })
-        .collect()
+/// The handled-request record. A missing file is an empty history; a file that cannot be
+/// read or has a line that does not parse is an error, never an empty history: the record
+/// is what keeps a request from being acted on twice.
+fn state_read(addons: &Path) -> io::Result<Vec<StateRow>> {
+    let text = match fs::read_to_string(state_path(addons)) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut rows = Vec::new();
+    for l in text.lines().filter(|l| !l.trim().is_empty()) {
+        let c: Vec<&str> = l.split('\t').collect();
+        if !(c.len() == 6 && id_ok(c[0]) && matches!(c[2], "opened" | "dismissed")) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "ctrl-state.tsv has a line that does not parse"));
+        }
+        rows.push(StateRow { request_id: c[0].into(), team: c[1].into(), state: c[2].into(), at: c[3].into(), payload_sha256: c[4].into(), token_sha256: c[5].into() });
+    }
+    Ok(rows)
 }
 
 fn state_write(addons: &Path, rows: &[StateRow]) -> io::Result<()> {
@@ -274,15 +297,12 @@ fn state_write(addons: &Path, rows: &[StateRow]) -> io::Result<()> {
 /// Records one decision, once per request id. Returns false when the id was already handled.
 fn state_record(addons: &Path, row: StateRow) -> io::Result<bool> {
     let _g = STATE_LOCK.lock().unwrap();
-    let mut all = state_read(addons);
+    let mut all = state_read(addons)?;
     if all.iter().any(|r| r.request_id == row.request_id) {
         return Ok(false);
     }
+    // never trimmed: a forgotten id could be acted on again (a row is a few hundred bytes)
     all.push(row);
-    if all.len() > STATE_CAP {
-        let drop = all.len() - STATE_CAP;
-        all.drain(..drop);
-    }
     state_write(addons, &all)?;
     Ok(true)
 }
@@ -324,7 +344,10 @@ pub fn scan_sqlite(conn: &rusqlite::Connection, team: &str, app_user: &str, cap:
 
     if table_exists(conn, "events") {
         // a store that never synced has no sync_messages table: nothing could have been pulled into it
-        let synced = if table_exists(conn, "sync_messages") { "EXISTS (SELECT 1 FROM sync_messages s WHERE s.local_id = e.id AND s.direction = 'pull')" } else { "0" };
+        // 1 = pulled by sync. 2 = a legacy projection (seq <= 0: the sync driver projects old messages
+        // below every cursor), whose true origin is lost. Only a live, unpulled event is local.
+        let pulled = if table_exists(conn, "sync_messages") { "EXISTS (SELECT 1 FROM sync_messages s WHERE s.local_id = e.id AND s.direction = 'pull')" } else { "0" };
+        let synced = format!("CASE WHEN {pulled} THEN 1 WHEN e.seq <= 0 THEN 2 ELSE 0 END");
         let sql = format!(
             "SELECT e.id, e.team, e.from_agent, e.to_agent, e.body, e.at, {synced}, e.seq
                FROM events e
@@ -335,7 +358,7 @@ pub fn scan_sqlite(conn: &rusqlite::Connection, team: &str, app_user: &str, cap:
         let rows = stmt
             .query_map(rusqlite::params![team, app_user, limit], |r| {
                 Ok((
-                    Candidate { id: r.get(0)?, team: r.get(1)?, from: r.get(2)?, to: r.get(3)?, body: r.get(4)?, created_at: r.get(5)?, origin: if r.get::<_, i64>(6)? != 0 { Origin::Synced } else { Origin::Local } },
+                    Candidate { id: r.get(0)?, team: r.get(1)?, from: r.get(2)?, to: r.get(3)?, body: r.get(4)?, created_at: r.get(5)?, origin: match r.get::<_, i64>(6)? { 0 => Origin::Local, 1 => Origin::Synced, _ => Origin::Unproven } },
                     1u8,
                     r.get::<_, i64>(7)?,
                 ))
@@ -753,7 +776,7 @@ fn candidates(team: &str, app_user: &str) -> Result<(Vec<Candidate>, bool), Ctrl
 
 fn scan_with(host: &AddonHost, team: &str, app_user: &str) -> Result<(CtrlScan, Vec<Found>), CtrlError> {
     let (cands, truncated) = candidates(team, app_user)?;
-    let state = state_read(host.catalog().addons_dir());
+    let state = state_read(host.catalog().addons_dir()).map_err(|e| err("state_unreadable", format!("The record of handled requests cannot be read, so requests are not shown: {e}")))?;
     let env = HostEnv::new(host);
     let (rows, handled, found) = assemble(&cands, &state, &env);
     Ok((CtrlScan { app_user: Some(app_user.to_string()), rows, handled, truncated, notice: None }, found))
@@ -820,7 +843,7 @@ pub fn addon_ctrl_open(host: State<'_, Arc<AddonHost>>, spec: RequestIn) -> Resu
     let open = hit.evaluated.spec.clone().ok_or_else(|| err("not_openable", "nothing to open"))?;
     let recorded = state_record(
         host.catalog().addons_dir(),
-        StateRow { request_id: hit.request.request_id.clone(), team: spec.team.clone(), state: "opened".into(), at: now_iso(), payload_sha256: hit.request.payload_sha256.clone(), token_sha256: sha256_hex(hit.request.token.as_bytes()) },
+        StateRow { request_id: hit.request.request_id.clone(), team: spec.team.clone(), state: "opened".into(), at: now_iso(), payload_sha256: hit.request.payload_sha256.clone(), token_sha256: token_hash(&hit.request) },
     )
     .map_err(|e| err("state_failed", e.to_string()))?;
     if !recorded {
@@ -843,8 +866,12 @@ pub fn addon_ctrl_dismiss(host: State<'_, Arc<AddonHost>>, spec: RequestIn) -> R
             _ => None,
         })
         .ok_or_else(|| err("not_found", "That request is no longer there."))?;
-    state_record(host.catalog().addons_dir(), StateRow { request_id: req.request_id.clone(), team: spec.team.clone(), state: "dismissed".into(), at: now_iso(), payload_sha256: req.payload_sha256.clone(), token_sha256: sha256_hex(req.token.as_bytes()) }).map_err(|e| err("state_failed", e.to_string()))?;
+    state_record(host.catalog().addons_dir(), StateRow { request_id: req.request_id.clone(), team: spec.team.clone(), state: "dismissed".into(), at: now_iso(), payload_sha256: req.payload_sha256.clone(), token_sha256: token_hash(&req) }).map_err(|e| err("state_failed", e.to_string()))?;
     Ok(())
+}
+
+fn token_hash(r: &Request) -> String {
+    r.token.as_deref().map(|t| sha256_hex(t.as_bytes())).unwrap_or_default()
 }
 
 fn now_iso() -> String {
@@ -855,7 +882,7 @@ fn now_iso() -> String {
 /// Ids already handled, for the tests and for anything that needs them without a scan.
 #[allow(dead_code)]
 pub fn handled_ids(addons: &Path) -> HashSet<String> {
-    state_read(addons).into_iter().map(|r| r.request_id).collect()
+    state_read(addons).expect("readable record").into_iter().map(|r| r.request_id).collect()
 }
 
 
@@ -932,10 +959,24 @@ mod tests {
         assert_eq!(reason(&p("diffview", r#"{"path":"/tmp","base":"a b"}"#)), "bad_arg_value");
         assert_eq!(reason(&body(r#"{"pane":"fileview","args":{"path":"/tmp"},"request_id":"r"}"#)), "bad_requester");
         assert_eq!(reason(&body(r#"{"pane":"fileview","args":{"path":"/tmp"},"requester":{"member_id":"a","token":"t","x":1},"request_id":"r"}"#)), "bad_requester");
+        assert_eq!(reason(&body(r#"{"pane":"fileview","args":{"path":"/tmp"},"requester":{"member_id":"a","token":5},"request_id":"r"}"#)), "bad_requester");
+        assert_eq!(reason(&body(r#"{"pane":"fileview","args":{"path":"/tmp"},"requester":{"token":"t"},"request_id":"r"}"#)), "bad_requester");
         assert_eq!(reason(&body(r#"{"pane":"fileview","args":{"path":"/tmp"},"requester":{"member_id":"a","token":"t"}}"#)), "bad_request_id");
         assert_eq!(reason(&body(r#"{"pane":"fileview","args":{"path":"/tmp"},"requester":{"member_id":"a","token":"t"},"request_id":"a b"}"#)), "bad_request_id");
         // no TTL exists, so a deadline is not guessed at
         assert_eq!(reason(&body(r#"{"pane":"fileview","args":{"path":"/tmp"},"requester":{"member_id":"a","token":"t"},"request_id":"r","deadline":{"at":"x"}}"#)), "bad_shape");
+    }
+
+    #[test]
+    fn the_token_is_optional_and_only_its_hash_is_kept() {
+        let with = req(&body(&payload("fileview", r#"{"path":"/tmp/x"}"#, "alice", "r-1")));
+        assert_eq!(with.token.as_deref(), Some("tok-1"));
+        assert_eq!(token_hash(&with), sha256_hex(b"tok-1"));
+        let without = req(&body(r#"{"pane":"fileview","args":{"path":"/tmp/x"},"requester":{"member_id":"alice"},"request_id":"r-2"}"#));
+        assert_eq!(without.token, None);
+        assert_eq!(token_hash(&without), "");
+        // a request without a token goes through the same checks and is just as openable
+        assert_eq!(evaluate(Origin::Local, "alice", &without, &env()).verdict, Verdict::NotFoundHere);
     }
 
     #[test]
@@ -1128,24 +1169,40 @@ mod tests {
     }
 
     #[test]
-    fn a_line_that_does_not_parse_is_not_a_decision() {
+    fn a_record_that_cannot_be_read_is_an_error_not_an_empty_history() {
         let d = tempfile::tempdir().unwrap();
-        fs::write(state_path(d.path()), "r1\tt\topened\n\u{0}bad\nr2 x\tt\topened\tat\tp\th\nr3\tt\topened\tat\tp\th\n").unwrap();
-        let ids = handled_ids(d.path());
-        assert_eq!(ids.len(), 1);
-        assert!(ids.contains("r3"));
+        assert!(state_read(d.path()).unwrap().is_empty(), "no file yet is an empty history");
+        fs::write(state_path(d.path()), "r3\tt\topened\tat\tp\th\n").unwrap();
+        assert_eq!(state_read(d.path()).unwrap().len(), 1);
+        for bad in ["r1\tt\topened\n", "\u{0}bad\n", "r2 x\tt\topened\tat\tp\th\n", "r1\tt\tweird\tat\tp\th\n"] {
+            fs::write(state_path(d.path()), format!("r3\tt\topened\tat\tp\th\n{bad}")).unwrap();
+            assert!(state_read(d.path()).is_err(), "{bad:?}");
+            // and a new decision is not recorded on top of a record that cannot be trusted
+            assert!(state_record(d.path(), state_row("r9", "p")).is_err());
+        }
+        // a path that is not a readable file at all
+        fs::remove_file(state_path(d.path())).unwrap();
+        fs::create_dir(state_path(d.path())).unwrap();
+        assert!(state_read(d.path()).is_err());
     }
 
     #[test]
-    fn the_state_file_keeps_the_newest_rows() {
+    fn handled_ids_are_never_forgotten() {
         let d = tempfile::tempdir().unwrap();
-        let mut rows: Vec<StateRow> = (0..STATE_CAP).map(|i| state_row(&format!("old-{i}"), "p")).collect();
-        rows.push(state_row("keep", "p"));
-        state_write(d.path(), &rows[1..]).unwrap();
+        let first = state_row("r0", "p");
+        assert!(state_record(d.path(), first.clone()).unwrap());
+        for i in 1..5200 {
+            state_write_append(d.path(), state_row(&format!("n-{i}"), "p"));
+        }
         assert!(state_record(d.path(), state_row("new", "p")).unwrap());
-        let ids = handled_ids(d.path());
-        assert_eq!(ids.len(), STATE_CAP);
-        assert!(ids.contains("new") && ids.contains("keep") && !ids.contains("old-1"));
+        assert!(!state_record(d.path(), first).unwrap(), "the oldest id is still handled");
+        assert_eq!(handled_ids(d.path()).len(), 5201);
+    }
+
+    fn state_write_append(addons: &Path, row: StateRow) {
+        let mut all = state_read(addons).unwrap();
+        all.push(row);
+        state_write(addons, &all).unwrap();
     }
 
     // ---- the store ----
@@ -1212,6 +1269,23 @@ mod tests {
         let (rows, _) = scan_sqlite(&c, "t", "me", 10).unwrap();
         let o: Vec<(&str, Origin)> = rows.iter().map(|r| (r.id.as_str(), r.origin)).collect();
         assert_eq!(o, vec![("ev1", Origin::Local), ("2", Origin::Unproven)]);
+    }
+
+    #[test]
+    fn a_legacy_projection_below_the_cursors_is_never_local() {
+        let b = body(&payload("fileview", r#"{"path":"/proj"}"#, "alice", "r1"));
+        let c = store(true, true);
+        // what the sync driver does to an old message: an event at seq = id - 1e9, no pull marker
+        c.execute("INSERT INTO messages(team,from_agent,to_agent,body,created_at) VALUES('t','alice','me',?1,'2026-10-23T00:00:01Z')", [&b]).unwrap();
+        c.execute("INSERT INTO events(seq,type,id,team,from_agent,to_agent,body,at,legacy_id) VALUES(-999999999,'message_sent','proj1','t','alice','me',?1,'2026-10-23T00:00:01Z',1)", [&b]).unwrap();
+        let (rows, _) = scan_sqlite(&c, "t", "me", 10).unwrap();
+        assert!(!rows.is_empty() && rows.iter().all(|r| r.origin == Origin::Unproven), "{rows:?}");
+        let (out, _, found) = assemble(&rows, &[], &env());
+        assert!(out.iter().all(|r| r.verdict == Verdict::Unproven) && found.is_empty());
+        // a pulled marker still wins: that row is the other machine's
+        c.execute("INSERT INTO sync_messages VALUES('t','proj1','pull')", []).unwrap();
+        let (rows, _) = scan_sqlite(&c, "t", "me", 10).unwrap();
+        assert!(rows.iter().any(|r| r.id == "proj1" && r.origin == Origin::Synced));
     }
 
     #[test]
