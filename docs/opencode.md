@@ -1,6 +1,6 @@
 # agmsg for OpenCode
 
-OpenCode supports **manual, turn/off, and real-time `monitor` delivery**.
+OpenCode supports **manual, turn/off, and real-time `monitor` (legacy) delivery**.
 
 `monitor` mode routes incoming messages through the external [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) plugin (a Monitor-tool equivalent for OpenCode); when the plugin is not installed the rule instructs a fallback to turn mode, which the agent follows rather than agmsg enforcing it. `spawn opencode` is supported via `opencode --prompt` (TUI mode). `both` is not supported. OpenCode + Ollama is a useful local coding agent that can participate in an agmsg team alongside Claude Code, Codex, Gemini CLI, and other CLI agents.
 
@@ -147,8 +147,8 @@ See the main spawn documentation in [README.md](../README.md#spawn-a-new-agent-s
 
 ```text
 tmux
-├─ Claude Code        Main implementation — monitor mode
-├─ Codex              Review / design checks — turn mode
+├─ Claude Code        Main implementation — agmsgd or monitor (legacy) mode
+├─ Codex              Review / design checks — agmsgd or turn mode
 ├─ OpenCode + Ollama  Local tasks (research, drafts, tests) — turn mode
 └─ agmsg SQLite       Shared message store
 ```

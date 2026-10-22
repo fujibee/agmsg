@@ -1,7 +1,15 @@
-# Codex Monitor
+# Codex Monitor (legacy)
 
-Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor
-approximates the same experience by launching Codex through an app-server bridge.
+Codex does not expose Claude Code's Monitor tool, but it can still receive messages in
+monitor (legacy) mode: agmsg's Codex monitor launches Codex through an app-server bridge
+and delivers incoming messages as turns.
+
+> **agmsgd is the recommended alternative.** The optional agmsgd service (1.6.0 beta)
+> notifies Codex sessions through the Codex queue instead of a bridge, including on
+> Windows (Codex 0.157 or later). While it is enabled, new Codex launches through the shim
+> use plain Codex: no bridge app-server or dispatcher starts, and sessions that already
+> have a bridge keep using it until restarted. See "agmsgd beta" in the
+> [README](../README.md#agmsgd-beta-160).
 
 > ⚠️ **This changes how Codex starts — read before enabling.**
 > Enabling monitor mode prints a shell function that makes `codex` route through

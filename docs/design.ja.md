@@ -56,11 +56,14 @@ sqlite3 の JSON1 関数を介して操作される（python3 依存なし）。
 
 ```yaml
 # agmsg configuration
-hook:
-  check_interval: 60  # seconds between inbox checks
+delivery:
+  monitor:
+    poll_interval: 5    # watch.sh poll interval, seconds
+  turn:
+    check_interval: 60  # Stop-hook cooldown, seconds between inbox checks
 ```
 
-`config.sh` が awk を使って読み書きする。ドット区切りキー（`hook.check_interval`）をサポート。
+`config.sh` が awk を使って読み書きする。ドット区切りキー（`delivery.turn.check_interval`。`hook.check_interval` は互換のため引き続き読まれる）をサポート。
 
 ## フックシステム
 
@@ -81,7 +84,7 @@ Agent responds → Stop hook fires → check-inbox.sh runs
 
 ### クールダウン
 
-マーカーファイル（`run/.lastcheck-<agent>`）が最終チェック時刻を追跡する。`hook.check_interval`（デフォルト 60 秒）で設定可能。これは run ディレクトリ（フックのランタイム状態）に置かれ、メッセージストアには含まれないため、`AGMSG_STORAGE_PATH` の影響を受けない。
+マーカーファイル（`run/.lastcheck-<agent>`）が最終チェック時刻を追跡する。`delivery.turn.check_interval`（デフォルト 60 秒。`hook.check_interval` は互換用の別名）で設定可能。これは run ディレクトリ（フックのランタイム状態）に置かれ、メッセージストアには含まれないため、`AGMSG_STORAGE_PATH` の影響を受けない。
 
 ### Claude Code と Codex の比較
 
@@ -97,7 +100,7 @@ Agent responds → Stop hook fires → check-inbox.sh runs
 
 スラッシュコマンドはプロジェクトキーとして `"$(pwd)"` を渡す。ユーザーがセッションの実体が存在するプロジェクトのサブディレクトリや git worktree に `cd` すると、その pwd は登録済みプロジェクトと一致しなくなり、ルックアップが外れてサブディレクトリ用の幽霊レコードが作られてしまう。`lib/resolve-project.sh` は、安定した `session_id` を必要としない（Codex はそれを公開していない）3 つのシグナルを使って本当のルートを復元する。
 
-1. **プロセス単位のマーカー。** SessionStart 時に、`proj.<agent_pid>.project` が正式なプロジェクト（フックに組み込まれた `$2`）を、包含するエージェントプロセスの PID をキーとして記録する。スラッシュコマンドはその同じプロセスの子として実行されるため、ppid チェーンを遡ってエージェント PID にたどり着き、マーカーを読み戻す。信頼するかどうかは、その PID がまだ生きているエージェントプロセスであること（リサイクルガード）に依存し、古いマーカーは SessionStart/SessionEnd で GC される。**Claude Code の monitor/both のみ** — Codex は monitor モードを拒否する（Monitor ツールがない）ため `session-start.sh` をインストールせず、マーカーも書き込まない。Codex はシグナル 2〜3 に依存する。
+1. **プロセス単位のマーカー。** SessionStart 時に、`proj.<agent_pid>.project` が正式なプロジェクト（フックに組み込まれた `$2`）を、包含するエージェントプロセスの PID をキーとして記録する。スラッシュコマンドはその同じプロセスの子として実行されるため、ppid チェーンを遡ってエージェント PID にたどり着き、マーカーを読み戻す。信頼するかどうかは、その PID がまだ生きているエージェントプロセスであること（リサイクルガード）に依存し、古いマーカーは SessionStart/SessionEnd で GC される。`session-start.sh` が **Claude Code の monitor (legacy) / both** のセッションに対して書く。Codex も（app-server ブリッジ経由で）monitor モードに対応するが、その SessionStart プラグは、このマーカーを書く前に終了する。turn や off のセッションにはそのフック自体がない。これらはシグナル 2〜3 に依存する。
 2. **祖先ウォーク。** マーカーが見つからない場合、そのタイプについて登録済みプロジェクトである pwd の最も近い祖先が採用される。git に依存しないため、登録済みプロジェクトの*配下*にあるネストしたサブディレクトリや worktree を、cc と Codex の両方でカバーできる。
 3. **git 共通ディレクトリ。** それも失敗した場合、pwd の git リポジトリの登録済みメインチェックアウト（`git rev-parse --git-common-dir` 経由）を使う。これにより、祖先ウォークでは到達できない*兄弟*の worktree を復元できる。レジストリと突き合わせて検証されるため、登録がアンブレラの親ディレクトリ上にある場合は採用を見送る。
 
@@ -160,7 +163,7 @@ Claude Code コマンドは別途 `~/.claude/commands/<cmd>.md` にインスト�
   経由のデータベース操作とJSON操作）、`awk`/`sed`（設定・TOML編集）。
   `send`/`inbox`/`history`/`team`/`join`/`leave`/`rename` など、ローカルの
   SQLiteストアとしかやり取りしないもの全てをカバーする。python3もnode
-  もネットワークもデーモンも不要。
+  もネットワークもデーモンも不要（任意の agmsgd サービスは Node を要し、ユーザーが選ぶ別の層）。
 - **codex agent type / launcher付きspawn** — coreに加えて `node`
   （`scripts/lib/node.sh` が解決する。Codex monitorの配送ブリッジ
   `codex-bridge.js` はNodeプログラム）。launcherを持つagent typeに対して

@@ -63,8 +63,8 @@ The send side mirrors this: every `send.sh` call from this CC uses the active ro
 
 ## Codex caveat
 
-On Codex, `$agmsg actas <name>` is **send-side only** for this session. Codex slash commands don't see a stable `session_id`, so they can't claim a peer-visible exclusivity lock — Claude Code peers will still subscribe to `<name>`.
+On Codex, `$agmsg actas <name>` makes `<name>` the active `from` role and records this session's Codex thread and profile for the role (`codex-record-session.sh`), so a later spawn can resume it and monitor (legacy) or agmsgd delivery routes notices only to that thread. It does **not** claim a peer-visible exclusivity lock: Codex slash commands don't see a stable `session_id`, so Claude Code peers can still subscribe to `<name>`.
 
-The receive side isn't actually narrowed either: `check-inbox.sh` resolves identity through `whoami.sh` (which picks the first registered agent) and has no view of the agent's in-session actas role, so Codex keeps polling whichever pair it would have without actas. The check-inbox lock filter only skips pairs *another* session owns.
+In turn mode the receive side isn't narrowed by actas: `check-inbox.sh` resolves identity through `whoami.sh` (which picks the first registered agent) and has no view of the agent's in-session actas role, so Codex keeps polling whichever pair it would have without actas. The check-inbox lock filter only skips pairs *another* session owns.
 
-Treat Codex actas as a from-line override until a Codex session-id story exists. Claude Code's `/agmsg actas` does claim the lock symmetrically and is the path that exercises the full exclusivity model.
+Claude Code's `/agmsg actas` claims the lock symmetrically and is the path that exercises the full exclusivity model.

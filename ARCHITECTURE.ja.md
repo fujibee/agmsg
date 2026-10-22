@@ -6,21 +6,24 @@
 
 ## ゴール
 
-Claude Code、Codex、Gemini CLI、Antigravity、そして将来登場するエージェントランタイムの、あらゆる組み合わせの間で動作するクロスエージェントメッセージングのプリミティブ — デーモンなし、ネットワークなし、共有クラウドなし。メッセージは単一マシン上のローカルファイルを通じて移動し、受信側はホストランタイムが提供するフックやストリーミング機構を通じて通知を受ける。
+Claude Code、Codex、Gemini CLI、Antigravity、そして将来登場するエージェントランタイムの、あらゆる組み合わせの間で動作するクロスエージェントメッセージングのプリミティブ — 必須のデーモンなし、ネットワークなし、共有クラウドなし。agmsg 本体はデーモンなしで動く。任意の agmsgd（1.6.0 beta）は、ユーザーが選んだときだけ入る常駐サービスである。メッセージは単一マシン上のローカルファイルを通じて移動し、受信側はホストランタイムが提供するフックやストリーミング機構を通じて通知を受ける。
 
 デフォルトのインストールは **bash + sqlite3 のみ**で動作しなければならない。それを超える機能はすべてオプトインであり、ユーザーが同意した場合に限り追加の依存関係を要求してよい。
 
-## 3軸ドライバーモデル
+## 4軸ドライバーモデル
 
-agmsg は3つの直交する軸を中心に構築されており、各軸には常にちょうど1つの**ドライバー (driver)** がアクティブになる。ドライバーとは、固定されたプロトコルの背後にある差し替え可能な実装である。
+agmsg は4つの直交する軸を中心に構築されており、各軸には常にちょうど1つの**ドライバー (driver)** がアクティブになる（terminal 軸はメンバーごと。下記参照）。ドライバーとは、固定されたプロトコルの背後にある差し替え可能な実装である。
 
 | 軸 | 抽象化する対象 | バンドルされているドライバー |
 |---|---|---|
-| **storage（ストレージ）** | メッセージとチームの状態がどこに存在し、どのようにクエリされるか | `sqlite`（デフォルト）、`jsonl-duckdb` |
-| **agent（エージェント）** | ランタイムごとの差異（フック形式、設定ファイルの場所、monitor ツールの有無） | `claude-code`、`codex`、`gemini`、`antigravity`、`copilot` |
-| **delivery（配信）** | 受信者にメッセージの到着をどう通知するか | `monitor`、`turn`、`both`、`off` |
+| **storage（ストレージ）** | メッセージとチームの状態がどこに存在し、どのようにクエリされるか | `sqlite`（デフォルト）、`jsonl`、`sqlite-sync` |
+| **agent（エージェント）** | ランタイムごとの差異（フック形式、設定ファイルの場所、monitor ツールの有無） | `claude-code`、`codex`、`gemini`、`antigravity`、`copilot`、`opencode`、`grok-build`、`cursor`、`devin`、`hermes`（CLI でないメンバー用に `agmsg-app` と `ext-tool`） |
+| **delivery（配信）** | 受信者にメッセージの到着をどう通知するか | `monitor`（legacy）、`turn`、`both`、`off`。どれに対応するかは agent タイプごとに決まる（`type.conf` の `delivery_modes=`）。任意の agmsgd デーモンは、Claude Code と Codex のセッションに直接届ける別の手段である |
+| **terminal（ターミナル）** | メンバーのホストエージェント CLI が動くペイン、ウィンドウ、プロセスと、その作成・読み取り・信号送信の方法 | `herdr`、`tmux`、`plain`、`orca`、`claude-desktop`、`codex-app` |
 
-3つの軸は独立している。どの storage ドライバーも、どの agent ドライバー・どの delivery モードとも組み合わせ可能である。これらは共通の discovery/config/dependency-check プロトコル（仕様参照）を共有しつつ、軸ごとに固有の操作を公開する。
+3つの設定用の軸は独立している。どの storage ドライバーも、どの agent ドライバーとも、その agent ドライバーが対応する delivery モードとも組み合わせ可能である。これらは共通の discovery/config/dependency-check プロトコル（仕様参照）を共有しつつ、軸ごとに固有の操作を公開する。
+
+**terminal は設定ではなく検出される** — セッションは、自分がどの terminal ドライバーの下で動いているかを（どれにも一致しなければ最後の手段である `plain` に落ちて）、指示されるのではなく自分で判断する。それ以外は同じ種類のドライバーであり、固定されたプロトコル（`terminal_*` 関数。[`docs/spec/driver-interface.md`](docs/spec/driver-interface.md) §6 参照）の背後で `herdr`、`tmux`、`orca`、通常の OS ターミナルが交換可能であり、他の3軸と同じ discovery/trust プロトコルを共有する。他の軸と違って、メンバーは terminal の機能が一切なくても機能する — `plain` は「アドレス指定できるペインなし」に縮退するだけで、メッセージングは続く。terminal が加えるのは、他のメンバーのペインを探し、読み、入力する能力だけである。
 
 ## ドライバー (driver) と プラグイン (plugin)
 
@@ -29,7 +32,7 @@ agmsg は3つの直交する軸を中心に構築されており、各軸には�
 
 バンドルされたドライバーは `scripts/drivers/<axis>/` 配下に存在する。`scripts/` の中では、トップレベルの `.sh` ファイルは直接実行可能なコマンドであり、サブディレクトリは実装コードをカテゴリ別にグループ化する（軸ドライバー用の `drivers/`、共有ヘルパー用の `lib/`）。
 
-プラグインパス（`~/.agents/agmsg/plugins/<axis>/<name>/`）は将来の拡張のために予約されており、v1 では未実装である。具体的な外部ドライバーが必要になるまでは、すべてのドライバーがバンドル形式で提供される。いずれも同じプロトコルを通じて発見・ロードされる。
+外部ドライバーは `<skill>/plugins/<axis>/<name>/`、または `$AGMSG_PLUGIN_DIRS` に列挙したディレクトリに置く。ユーザーが `agmsg plugin trust <axis>/<name>` でオプトインするまでは無視される。現時点で外部ドライバーを読み込めるのは `types` 軸だけである。バンドルされたドライバーも外部ドライバーも同じプロトコルで発見・ロードされる。[`docs/plugins.md`](docs/plugins.md) と [ADR 0002](docs/adr/0002-driver-discovery-and-plugin-opt-in.md) を参照。
 
 agmsg では *backend*、*extension*、*provider*、*adapter* という用語は使用しない。ユーザー向けドキュメントや CLI において `storage` は「storage driver（ストレージドライバー）」の同義語として書かれる。
 
@@ -44,7 +47,7 @@ agmsg では *backend*、*extension*、*provider*、*adapter* という用語は
 
 これにより agmsg 自体は最小限かつプラットフォームに依存しない状態を保てる。ホストエージェントはすでにファイルアクセスやシェルアクセスを信頼されているため、依存関係のインストールはホストエージェントの責務とするのが自然である。
 
-同じ `AGMSG-DIRECTIVE` の仕組みは、他のホストエージェント連携アクション（例: delivery モードが `monitor` に設定されたときに Claude Code に Monitor ツールを呼び出すよう伝える、など）にも使われる。
+同じ `AGMSG-DIRECTIVE` の仕組みは、他のホストエージェント連携アクション（例: delivery モードが monitor (legacy) に設定されたときに Claude Code に Monitor ツールを呼び出すよう伝える、など。agmsgd が直接届けるセッションにはこのディレクティブは要らない）にも使われる。
 
 ## 失敗時の挙動 (Failure semantics)
 
@@ -72,6 +75,7 @@ sqlite ドライバーは、インライン `read` カラムを持つレガシ�
 | **storage（ストレージ）** | ユーザー向けの文脈における storage 軸、またはそのアクティブなドライバー |
 | **AGMSG-DIRECTIVE** | ホストエージェントに特定のアクションを取るよう指示するために stdout に出力される JSON 行 |
 | **host agent（ホストエージェント）** | agmsg スクリプトを呼び出すランタイム（Claude Code、Codex、Gemini CLI、Antigravity、…） |
+| **placement（配置）** | 1 人のメンバーのペイン/ウィンドウへの `<terminal>:<id>` 参照（例: `tmux:/path/to/socket:%3`） |
 | **event log（イベントログ）** | バンドルされた storage ドライバーがクエリの射影元とする、メッセージのライフサイクルイベントの追記専用記録 |
 
 ## 関連ドキュメント

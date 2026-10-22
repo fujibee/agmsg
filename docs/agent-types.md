@@ -1,7 +1,7 @@
 # Agent types
 
 agmsg supports several agent runtimes — claude-code, codex, gemini, antigravity,
-copilot, opencode, hermes, cursor, devin — and each is described by a small **manifest** so that the rest
+copilot, opencode, hermes, cursor, devin, grok-build — plus `agmsg-app` and `ext-tool` for members that are not CLI agents — and each is described by a small **manifest** so that the rest
 of agmsg (detection, the join whitelist, spawn, and delivery routing) discovers it
 from data instead of hardcoded `case` arms.
 
@@ -30,10 +30,12 @@ a manifest cannot execute code. Multi-value keys are whitespace-separated.
 | `model_arg` | — | the `--model`/`-m`-style flag `spawn --model <id>` passes through to the CLI; a type with no `model_arg` refuses `--model` |
 | `prompt_arg` | — | for a CLI that does not accept the actas prompt as a bare positional argument, the named flag whose value IS the prompt (e.g. antigravity's `--prompt-interactive`, copilot's `--interactive`, opencode's `--prompt`) — `spawn.sh` inserts it immediately before the (already-quoted) prompt. Unset = bare positional, the default |
 | `hooks_file` | yes | project-relative delivery hooks file (e.g. `.codex/hooks.json`) |
-| `monitor` | — | `yes` if the type exposes a native Monitor tool; `spawn` skips the readiness wait when `no` |
+| `readiness_sentinel` | — | `yes` if the type produces a spawn-awaitable readiness sentinel; `spawn` skips the readiness wait when `no`. It says nothing about which delivery modes the type supports (that is `delivery_modes`): codex has `readiness_sentinel=no` and still supports `monitor`. The older name `monitor=` is read only as a fallback for manifests installed before the rename |
 | `delivery_modes` | — | space-separated delivery modes the type's CLI accepts (e.g. `monitor turn off`); `delivery.sh`'s gate rejects anything else. Defaults to `monitor turn both off` when omitted |
 | `stop_output` | — | output protocol for the Stop/turn inbox check — `json` (codex, copilot) vs. plain text (default) |
 | `hook_windows_wrap` | — | `yes` if JSON hook entries also need a Windows-native `commandWindows` variant (codex) |
+
+Other keys (`spawn_wrapper`, `resume_arg`, `name_arg`, `rename_cmd`, `session_name_source`, `cmd_prefix`, `posttooluse_output`, …) are described in the comments of the shipped `type.conf` files.
 
 > The reader does not fail-fast: an omitted key reads as the empty string, so
 > "required" above means "needed for the type to actually work", not "validated at
@@ -106,7 +108,7 @@ registry with no further edits.
 
 ## Worked example
 
-The six built-in manifests under `scripts/drivers/types/` are the reference. For
+The built-in manifests under `scripts/drivers/types/` are the reference. For
 instance `scripts/drivers/types/codex/type.conf`:
 
 ```

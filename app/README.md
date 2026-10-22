@@ -26,9 +26,11 @@ Download the `.msi` or `.exe` installer from the same [Releases page](https://gi
 Both platforms auto-update in place after install (**agmsg → Check for
 Updates…**, or silently on launch).
 
-Prerequisite either way: agmsg itself installed at `~/.agents/skills/agmsg` (the
-app reads its DB and team config from there) — see the
-[main README](../README.md) for that install.
+The app reads its DB and team config from `~/.agents/skills/agmsg`. It bundles a
+pinned agmsg core (`app/AGMSG_CORE_REF`, currently v1.5.1) and installs it on first
+run when nothing is installed there; an installed agmsg older than that core is
+reported as outdated. The app does not follow the CLI release — see the
+[main README](../README.md) to install or update the CLI yourself.
 
 ## Strategic core — universal stdin-inject delivery
 
@@ -72,8 +74,10 @@ pnpm install
 pnpm tauri dev
 ```
 
-Prerequisite: agmsg already installed at `~/.agents/skills/agmsg` (the app reads its
-DB and team config from there). `claude` must be on `PATH` to spawn Claude Code panes.
+The app reads its DB and team config from `~/.agents/skills/agmsg` and installs its
+bundled core there on first run if nothing is installed (set up a CLI install
+beforehand if you want a different version). `claude` must be on `PATH` to spawn
+Claude Code panes.
 
 ### Try the core
 1. Pick a team (top bar). The left list shows its members; the default tab is the
@@ -169,4 +173,4 @@ resolve as soon as the tap commit lands.
 - Windows Trusted Signing is wired into CI but unverified end to end — its
   federated identity trusts `main` only, so every `feat/desktop-app` run fails
   at the Azure login step. First real signal comes from a `main`-branch run.
-- No automated tests for the Tauri app itself.
+- Test coverage is partial: the frontend has vitest suites (`pnpm test` in `app/`) and the Rust side has unit tests in a few modules, but there are no end-to-end tests of the Tauri app itself.
