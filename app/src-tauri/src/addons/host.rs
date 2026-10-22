@@ -45,6 +45,10 @@ pub struct AddonHost {
     pub nav: NavPolicy,
     pub panes: super::commands::Panes,
     catalog: std::sync::OnceLock<super::catalog::Catalog>,
+    /// Installs waiting for the user's decision (staging id -> staged files).
+    pub staged: Mutex<HashMap<String, super::install::stage::Staged>>,
+    /// One install, update or removal at a time.
+    pub install_lock: Mutex<()>,
     engine: Mutex<EngineReport>,
     probe: Mutex<Option<ProbeRun>>,
 }
@@ -56,7 +60,7 @@ impl AddonHost {
     }
 
     pub fn new(dev_url: Option<&Url>) -> AddonHost {
-        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), panes: super::commands::Panes::new(), catalog: std::sync::OnceLock::new(), engine: Mutex::new(EngineReport::default()), probe: Mutex::new(None) }
+        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), panes: super::commands::Panes::new(), catalog: std::sync::OnceLock::new(), staged: Mutex::new(HashMap::new()), install_lock: Mutex::new(()), engine: Mutex::new(EngineReport::default()), probe: Mutex::new(None) }
     }
 
     fn end_probe(&self) {
@@ -119,6 +123,8 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
         .build()?;
     host.panes.set_app_dirs(app_owned_dirs(&handle));
     let builtin_root = super::catalog::Catalog::locate_builtin_root(handle.path().resource_dir().ok());
+    super::install::stage::gc_staging(&crate::agmsg::base_dir().join("addons"));
+    super::install::dev::clear(&crate::agmsg::base_dir().join("addons"));
     let _ = host.catalog.set(super::catalog::Catalog::new(builtin_root, crate::agmsg::base_dir().join("addons")));
     {
         let list: Vec<String> = host.catalog().list().iter().map(|a| format!("{}({})", a.id, if a.digest_ok { "ok" } else { "CHANGED" })).collect();

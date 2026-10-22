@@ -5,6 +5,7 @@
 //! `bin/addon.js`); `app/addon-kit/fixtures/install-cases.json` is run against
 //! both so an author sees before pushing exactly what the app refuses after.
 
+pub mod dev;
 pub mod extract;
 pub mod github;
 pub mod grants;

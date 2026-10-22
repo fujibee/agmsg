@@ -326,6 +326,39 @@ mod tests {
     }
 
     #[test]
+    fn resolve_download_stage_and_activate_end_to_end_against_a_fake_github() {
+        use crate::addons::install::{stage, testutil::tarball};
+        use serde_json::json;
+        let tar = tarball(&[
+            json!({"path": "agmsg-plugin.conf", "type": "file", "text": "name = x\n"}),
+            json!({"path": "app-panes/main/addon.conf", "type": "file", "text": "title = E2E\nprotocol = 1\npermissions = files:read\nwhy.files:read = r\nopens = path\n"}),
+            json!({"path": "app-panes/main/web/index.html", "type": "file", "text": "<div></div>"}),
+        ]);
+        let f = fake(vec![
+            route("/repos/o/r", 200, r#"{"default_branch":"main","private":false}"#),
+            route("/repos/o/r/commits/main", 200, SHA),
+            ("/repos/o/r/tarball".into(), 302, vec![("Location".into(), "/dl/o-r-abc".into())], vec![]),
+            ("/dl/o-r-abc".into(), 200, vec![], tar.clone()),
+        ]);
+        let g = Github::with_base(&f.base);
+        let src = parse_source("o/r").unwrap();
+        let sha = g.resolve(&src).unwrap();
+        assert_eq!(sha, SHA);
+        let body = g.download(&src, &sha).unwrap();
+        let addons = tempfile::tempdir().unwrap();
+        let staged = stage::stage(addons.path(), &src.slug(), &sha, body, "0.5.0", crate::addons::install::extract::Limits::default()).unwrap();
+        assert_eq!(staged.archive_sha256, crate::addons::digest::sha256_hex(&tar), "the recorded archive hash is the hash of what GitHub sent");
+        stage::activate(addons.path(), &staged, "2026-10-23T00:00:00Z").unwrap();
+        let installed = crate::addons::index::read(addons.path());
+        assert_eq!((installed[0].repo.as_str(), installed[0].sha.as_str()), ("o/r", SHA));
+        // and it opens: pinned files, parsed conf
+        let cat = crate::addons::catalog::Catalog::new(None, addons.path().to_path_buf());
+        let r = cat.resolve("o/r", "main").unwrap();
+        assert_eq!(r.conf.title, "E2E");
+        assert!(r.pinned.contains_key("index.html"));
+    }
+
+    #[test]
     fn hosts_that_may_serve_a_download() {
         for h in ["github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com", "raw.githubusercontent.com"] {
             assert!(host_allowed(h), "{h}");

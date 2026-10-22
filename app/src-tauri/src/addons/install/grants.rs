@@ -26,7 +26,7 @@ fn clean(s: &str) -> bool {
 
 impl SavedGrant {
     fn valid(&self) -> bool {
-        clean(&self.repo) && self.repo.contains('/') && clean(&self.sha) && clean(&self.pane) && GRANTABLE.contains(&self.permission.as_str()) && clean(&self.scope) && clean(&self.granted_at)
+        clean(&self.repo) && (self.repo.contains('/') || self.repo.starts_with("builtin:")) && clean(&self.sha) && clean(&self.pane) && GRANTABLE.contains(&self.permission.as_str()) && clean(&self.scope) && clean(&self.granted_at)
     }
 
     fn line(&self) -> Option<String> {
@@ -146,10 +146,18 @@ mod tests {
             g("o/r", "main", "files:read", "a\tb"),
             g("o/r", "main", "files:read", "a\nb"),
             g("nobar", "main", "files:read", "/x"),
+            g("dev:thing", "main", "files:read", "/x"),
         ] {
             assert!(add(d.path(), bad).is_err());
         }
         assert!(!path(d.path()).exists());
+    }
+
+    #[test]
+    fn built_in_add_ons_can_remember_a_folder() {
+        let d = tempfile::tempdir().unwrap();
+        add(d.path(), g("builtin:fileview", "fileview", "files:read", "/proj")).unwrap();
+        assert_eq!(for_pane(d.path(), "builtin:fileview", "fileview").len(), 1);
     }
 
     #[test]

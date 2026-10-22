@@ -176,6 +176,13 @@ impl Registry {
         self.panes.remove(&id).map(|p| (p.server.port(), p.server.token().to_string()))
     }
 
+    /// Every open pane of an add-on (`owner/repo`, `builtin:x` or `dev:x`).
+    pub fn ids_for_addon(&self, addon: &str) -> Vec<PaneId> {
+        let mut v: Vec<_> = self.panes.values().filter(|p| p.addon == addon).map(|p| p.id).collect();
+        v.sort();
+        v
+    }
+
     pub fn contains(&self, id: PaneId) -> bool {
         self.panes.contains_key(&id)
     }
@@ -467,6 +474,15 @@ mod tests {
         assert_eq!(r.remove_matching(port, &token).map(|x| x.0), Some(a));
         assert!(r.remove_matching(port, &token).is_none());
         assert!(!r.contains(a));
+    }
+
+    #[test]
+    fn open_panes_are_found_by_add_on() {
+        let (mut r, a) = reg_with(all());
+        assert_eq!(r.ids_for_addon("o/r"), vec![a]);
+        assert!(r.ids_for_addon("x/y").is_empty());
+        r.remove(a);
+        assert!(r.ids_for_addon("o/r").is_empty());
     }
 
     #[test]

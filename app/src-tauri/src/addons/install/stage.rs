@@ -227,7 +227,7 @@ pub fn version_at_least(have: &str, need: &str) -> bool {
     }
 }
 
-fn map_error(errors: &[String], repo: &str) -> Failure {
+pub(crate) fn map_error(errors: &[String], repo: &str) -> Failure {
     let first = errors.first().cloned().unwrap_or_default();
     if errors.iter().any(|e| e.starts_with("No app add-on here")) {
         return Failure::new("no_app_panes", format!("{repo} has no app add-on (no app-panes/ folder). If it is an agmsg CLI plugin, it is installed from the CLI, not here."));

@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use super::conf::{self, AddonConf};
 use super::digest;
 use super::index::{self, IndexEntry};
+use super::install::dev::DevEntry;
+use std::sync::Mutex;
 
 include!(concat!(env!("OUT_DIR"), "/builtin_digests.rs"));
 
@@ -35,7 +37,7 @@ pub struct PaneInfo {
 pub struct AddonInfo {
     /// `builtin:<name>` or `owner/repo`; opaque to the UI.
     pub id: String,
-    /// `builtin` | `installed`
+    /// `builtin` | `installed` | `dev`
     pub kind: &'static str,
     /// `agmsg` for built-ins, `owner/repo` for installed ones.
     pub source: String,
@@ -82,6 +84,8 @@ pub struct Resolved {
 }
 
 pub struct Catalog {
+    /// Developer copies loaded with "Load from folder" (memory only; gone when the app quits).
+    dev: Mutex<Vec<DevEntry>>,
     /// Where the built-ins live: `<resources>/builtin-addons` (falls back to the source tree in a dev build).
     builtin_root: Option<PathBuf>,
     /// `<base>/addons`.
@@ -129,7 +133,7 @@ fn read_panes(app_panes: &Path) -> (Vec<PaneInfo>, Vec<String>) {
 
 impl Catalog {
     pub fn new(builtin_root: Option<PathBuf>, addons_dir: PathBuf) -> Catalog {
-        Catalog { builtin_root, addons_dir }
+        Catalog { dev: Mutex::new(Vec::new()), builtin_root, addons_dir }
     }
 
     /// The built-in root: the bundle's resources, or in a development build the
@@ -144,6 +148,27 @@ impl Catalog {
             return None;
         }
         None
+    }
+
+    pub fn addons_dir(&self) -> &Path {
+        &self.addons_dir
+    }
+
+    pub fn dev_entries(&self) -> Vec<DevEntry> {
+        self.dev.lock().unwrap().clone()
+    }
+
+    /// Adds a developer copy, or replaces the one with the same id (Reload from folder).
+    pub fn dev_put(&self, e: DevEntry) {
+        let mut d = self.dev.lock().unwrap();
+        d.retain(|x| x.id != e.id);
+        d.push(e);
+    }
+
+    pub fn dev_remove(&self, id: &str) -> Option<DevEntry> {
+        let mut d = self.dev.lock().unwrap();
+        let i = d.iter().position(|x| x.id == id)?;
+        Some(d.remove(i))
     }
 
     fn builtin_pane_root(&self, name: &str) -> Option<PathBuf> {
@@ -174,6 +199,12 @@ impl Catalog {
             let title = panes.first().map(|p| p.title.clone()).unwrap_or_else(|| e.repo.clone());
             out.push(AddonInfo { id: e.repo.clone(), kind: "installed", source: e.repo.clone(), commit: e.sha.clone(), title, panes, digest_ok: ok, enabled: e.enabled, problems });
         }
+        for e in self.dev_entries() {
+            let ok = digest::payload_digest(&e.tree_root).map(|d| d == e.digest).unwrap_or(false);
+            let (panes, problems) = if ok { read_panes(&e.tree_root.join("app-panes")) } else { (Vec::new(), vec!["its files are incomplete or were changed".to_string()]) };
+            let title = panes.first().map(|p| p.title.clone()).unwrap_or_else(|| e.label.clone());
+            out.push(AddonInfo { id: e.id.clone(), kind: "dev", source: e.label.clone(), commit: format!("dev copy {}", e.copy), title, panes, digest_ok: ok, enabled: true, problems });
+        }
         out
     }
 
@@ -186,7 +217,10 @@ impl Catalog {
             return Err(CatalogError::Unknown("no such pane".into()));
         }
         // tree_root = the directory the pinned digest covers; pane_prefix = the pane's folder inside it
-        let (addon, commit, tree_root, pane_prefix, expected): (String, String, PathBuf, String, String) = if let Some(name) = id.strip_prefix("builtin:") {
+        let (addon, commit, tree_root, pane_prefix, expected): (String, String, PathBuf, String, String) = if id.starts_with("dev:") {
+            let e = self.dev_entries().into_iter().find(|e| e.id == id).ok_or_else(|| CatalogError::Unknown("no such add-on".into()))?;
+            (e.id.clone(), format!("dev copy {}", e.copy), e.tree_root.clone(), format!("app-panes/{pane}"), e.digest.clone())
+        } else if let Some(name) = id.strip_prefix("builtin:") {
             let expected = BUILTIN_DIGESTS.iter().find(|(n, _)| *n == name).map(|(_, d)| d.to_string()).ok_or_else(|| CatalogError::Unknown("no such add-on".into()))?;
             let dir = self.builtin_pane_root(name).ok_or_else(|| CatalogError::Unknown("this build does not include that add-on".into()))?;
             (id.to_string(), env!("CARGO_PKG_VERSION").to_string(), dir, pane.to_string(), expected)

@@ -16,6 +16,7 @@ pub mod gate;
 pub mod host;
 pub mod index;
 pub mod install;
+pub mod install_cmds;
 pub mod nav;
 pub mod panes;
 pub mod server;
