@@ -206,7 +206,9 @@ fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &st
         std::thread::sleep(PROBE_TIMEOUT + Duration::from_millis(500));
         if host2.gate.generation() == generation && host2.gate.expire(Instant::now()) {
             host2.end_probe();
-            let _ = app2.emit(GATE_EVENT, host2.gate.status());
+            let v = host2.gate.status();
+            eprintln!("[addons] startup check: enabled={} {}", v.enabled, v.reasons.join("; "));
+            let _ = app2.emit(GATE_EVENT, v);
         }
     });
 }
