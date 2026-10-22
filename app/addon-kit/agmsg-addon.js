@@ -210,7 +210,7 @@ function sampleRequest(op, args) {
         }
       }
       if (!seen.size && dir) throw new AddonError("not_found", `${args.path} not found`);
-      return [...seen.values()];
+      return { entries: [...seen.values()], truncated: false };
     }
     case "fs.stat": {
       const p = norm(args.path);
@@ -221,7 +221,10 @@ function sampleRequest(op, args) {
     case "fs.read": {
       const p = norm(args.path);
       if (!(p in SAMPLE_FILES)) throw new AddonError("not_found", `${args.path} not found`);
-      return { text: SAMPLE_FILES[p] };
+      const full = SAMPLE_FILES[p];
+      const r = args.range;
+      const text = r ? full.slice(r.offset, r.offset + r.length) : full; // sample files are ASCII
+      return { text, size: full.length, eof: !r || r.offset + r.length >= full.length };
     }
     case "git.diff":
       return sampleDiff(args);

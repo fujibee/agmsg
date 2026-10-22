@@ -7,14 +7,8 @@ export function formatBytes(n: number): string {
   return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
 }
 
-export function toBytes(
-  x: string | ArrayBuffer | Uint8Array | { text: string } | { bytes: ArrayBuffer | Uint8Array },
-): Uint8Array {
-  if (typeof x === "string") return new TextEncoder().encode(x);
-  if (x instanceof Uint8Array) return x;
-  if (x instanceof ArrayBuffer) return new Uint8Array(x);
-  if ("text" in x) return new TextEncoder().encode(x.text);
-  return toBytes(x.bytes);
+export function toBytes(r: { text: string } | { bytes: ArrayBuffer }): Uint8Array {
+  return "text" in r ? new TextEncoder().encode(r.text) : new Uint8Array(r.bytes);
 }
 
 export function joinPath(dir: string, name: string): string {

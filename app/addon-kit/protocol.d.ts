@@ -45,6 +45,21 @@ export type ErrorCode =
   | "bad_args"
   | "not_available";
 
+/** fs.list result. `truncated` is true when the folder has more than the broker's cap of entries. */
+export interface FsList {
+  entries: FsEntry[];
+  truncated: boolean;
+}
+
+/**
+ * fs.read result. Valid UTF-8 without a NUL byte comes back as `text`, anything
+ * else as `bytes`. `size` is the file's size in bytes; `eof` is true when this
+ * range reached the end of the file.
+ */
+export type FsReadResult =
+  | { text: string; size: number; eof: boolean }
+  | { bytes: ArrayBuffer; size: number; eof: boolean };
+
 /** fs.read: a byte range. Omitted = from the start. One call is capped at 10 MB. */
 export interface FsReadRange {
   offset: number;

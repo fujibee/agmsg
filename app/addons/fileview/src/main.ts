@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   // A seat or the user can ask for a file inside the folder: #path in the URL is
   // not used (the pane URL is the app's), so open the README if there is one.
   const readme = await app.fs.list(".").then(
-    (es) => es.find((x) => x.kind === "file" && /^readme(\.md|\.markdown|\.txt)?$/i.test(x.name)),
+    (l) => l.entries.find((x) => x.kind === "file" && /^readme(\.md|\.markdown|\.txt)?$/i.test(x.name)),
     () => undefined,
   );
   if (readme) {

@@ -1,10 +1,7 @@
 // The one place the views touch agmsg-addon.js. Vite resolves "agmsg-addon-kit"
 // to app/addon-kit/agmsg-addon.js (see makeConfig in vite.shared.ts).
 import { connect } from "agmsg-addon-kit";
-import type { DiffRequest, DiffResult, FsEntry, FsReadRange, OpenArgs } from "../../addon-kit/protocol";
-
-/** What fs.read hands back; the broker may send text or bytes. */
-export type ReadResult = string | ArrayBuffer | Uint8Array | { text: string } | { bytes: ArrayBuffer | Uint8Array };
+import type { DiffRequest, DiffResult, FsEntry, FsList, FsReadRange, FsReadResult, OpenArgs } from "../../addon-kit/protocol";
 
 export interface AddonApp {
   readonly inApp: boolean;
@@ -12,8 +9,8 @@ export interface AddonApp {
   openArgs(): Promise<OpenArgs>;
   fs: {
     stat(path: string): Promise<FsEntry>;
-    list(path?: string): Promise<FsEntry[]>;
-    read(path: string, range?: FsReadRange): Promise<ReadResult>;
+    list(path?: string): Promise<FsList>;
+    read(path: string, range?: FsReadRange): Promise<FsReadResult>;
   };
   git: { diff(req?: DiffRequest): Promise<DiffResult> };
 }

@@ -12,9 +12,13 @@ const HIGHLIGHT_MAX = 1024 * 1024; // beyond this a file is shown as plain text
 const IMAGE_MAX = 10 * 1024 * 1024; // the broker's cap for one read
 const MARKDOWN_MAX = 2 * 1024 * 1024; // rendered view needs the whole file
 
-async function readBytes(path: string, offset?: number, length?: number): Promise<Uint8Array> {
+async function readChunk(path: string, offset?: number, length?: number): Promise<{ bytes: Uint8Array; eof: boolean }> {
   const r = await app.fs.read(path, offset === undefined ? undefined : { offset, length: length as number });
-  return toBytes(r);
+  return { bytes: toBytes(r), eof: r.eof };
+}
+
+async function readBytes(path: string, offset?: number, length?: number): Promise<Uint8Array> {
+  return (await readChunk(path, offset, length)).bytes;
 }
 
 export class Viewer {
@@ -140,7 +144,8 @@ export class Viewer {
 
   private async showText(path: string, entry: FsEntry, token: number): Promise<void> {
     const total = entry.size;
-    const first = await readBytes(path, 0, Math.min(Math.max(total, 1), CHUNK));
+    const firstRead = await readChunk(path, 0, Math.min(Math.max(total, 1), CHUNK));
+    const first = firstRead.bytes;
     if (token !== this.token) return;
     if (looksBinary(first)) {
       return this.notice("Binary file", `${formatBytes(total)}. Not shown as text.`);
@@ -175,9 +180,9 @@ export class Viewer {
       code.append(frag);
     };
 
-    const page = async (bytes: Uint8Array) => {
+    const page = async (bytes: Uint8Array, eof: boolean) => {
       offset += bytes.length;
-      done = offset >= total || bytes.length === 0;
+      done = eof || bytes.length === 0;
       append(buf.push(bytes, done));
     };
 
@@ -196,9 +201,9 @@ export class Viewer {
       if (loading || done) return;
       loading = true;
       try {
-        const bytes = await readBytes(path, offset, Math.min(CHUNK, total - offset));
+        const next = await readChunk(path, offset, CHUNK);
         if (token !== this.token) return;
-        await page(bytes);
+        await page(next.bytes, next.eof);
         updateMore();
       } catch (e) {
         more.replaceChildren(h("span", { class: "dim" }, `Stopped: ${errorText(e)}`));
@@ -207,7 +212,7 @@ export class Viewer {
       }
     };
 
-    await page(first);
+    await page(first, firstRead.eof);
     updateMore();
     // Fetch the next page on its own when the end comes into view.
     if (!done && "IntersectionObserver" in window) {

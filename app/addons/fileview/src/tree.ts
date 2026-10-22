@@ -3,8 +3,6 @@ import type { FsEntry } from "../../../addon-kit/protocol";
 import { h } from "../../_shared/dom";
 import { formatBytes, joinPath } from "../../_shared/format";
 
-const LIST_CAP = 5000;
-
 export function sortEntries(entries: FsEntry[]): FsEntry[] {
   return [...entries].sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
@@ -49,17 +47,17 @@ export class Tree {
   }
 
   private async loadChildren(dir: string, into: HTMLUListElement): Promise<void> {
-    let entries: FsEntry[];
+    let list;
     try {
-      entries = await app.fs.list(dir);
+      list = await app.fs.list(dir);
     } catch (e) {
       into.replaceChildren(h("li", { class: "child-note", role: "none" }, `Could not list: ${errorText(e)}`));
       throw e;
     }
     into.replaceChildren();
-    for (const entry of sortEntries(entries)) into.append(this.makeNode(dir, entry));
-    if (entries.length >= LIST_CAP) {
-      into.append(h("li", { class: "child-note", role: "none" }, `Only the first ${LIST_CAP} entries are listed.`));
+    for (const entry of sortEntries(list.entries)) into.append(this.makeNode(dir, entry));
+    if (list.truncated) {
+      into.append(h("li", { class: "child-note", role: "none" }, "This folder has more entries than can be listed; only the first are shown."));
     }
     this.applyFilter();
   }
