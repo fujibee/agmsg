@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "create": false,
         "title": "agmsg",
         "width": 1100,
         "height": 720,

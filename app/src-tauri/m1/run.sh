@@ -5,7 +5,12 @@
 set -u
 cd "$(dirname "$0")/.."
 variant=$1; profile=$2; name=$3; wait=${4:-18}
-export TAURI_CONFIG='{"identifier":"cc.agmsg.m1spike"}' M1_VARIANT=$variant
+if [ -n "${M1_MAIN_CSP:-}" ]; then
+  export TAURI_CONFIG="$(python3 -c 'import json,os;print(json.dumps({"identifier":"cc.agmsg.m1spike","app":{"security":{"csp":os.environ["M1_MAIN_CSP"]}}}))')"
+else
+  export TAURI_CONFIG='{"identifier":"cc.agmsg.m1spike"}'
+fi
+export M1_VARIANT=$variant
 flags="--features tauri/custom-protocol"; [ "$profile" = release ] && flags="$flags --release"
 cargo build $flags 2>&1 | grep -E "^error|Finished" 
 export M1_SPIKE=1 M1_LOG=/tmp/m1run/$name.log M1_PAYLOAD=${M1_PAYLOAD:-$PWD/m1/payload} AGMSG_APP_BASE=/tmp/m1run/base

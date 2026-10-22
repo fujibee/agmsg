@@ -12,6 +12,48 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Manager};
+use tauri::webview::NewWindowResponse;
+use std::sync::OnceLock;
+
+/// (port, token) of the live pane; the navigation handler allows only this.
+static REPORT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+static LIVE_PANE: OnceLock<Mutex<Option<(u16, String)>>> = OnceLock::new();
+fn live() -> &'static Mutex<Option<(u16, String)>> {
+    LIVE_PANE.get_or_init(|| Mutex::new(None))
+}
+
+fn nav_allowed(url: &tauri::Url) -> bool {
+    let s = url.as_str();
+    let app = matches!(url.scheme(), "tauri") || s.starts_with("http://tauri.localhost") || s.starts_with("https://tauri.localhost");
+    let pane = live().lock().unwrap().as_ref().map(|(p, t)| s.starts_with(&format!("http://127.0.0.1:{p}/{t}/"))).unwrap_or(false);
+    app || pane
+}
+
+/// Main window built here (tauri.conf has create=false) so native handlers can be attached.
+pub fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
+    let cfg = app.config().app.windows[0].clone();
+    let spike = std::env::var("M1_SPIKE").ok().as_deref() == Some("1");
+    let mut b = tauri::WebviewWindowBuilder::from_config(app, &cfg)?;
+    if spike {
+        let enforce = std::env::var("M1_NAV").ok().as_deref() != Some("off");
+        b = b
+            .on_navigation(move |url| {
+                let ok = nav_allowed(url);
+                log(&format!("NAV {} -> {}", url, if ok || !enforce { "allow" } else { "CANCEL" }));
+                ok || !enforce
+            })
+            .on_new_window(|url, _f| {
+                log(&format!("NEWWINDOW {url} -> deny"));
+                NewWindowResponse::Deny
+            })
+            .on_download(|_w, ev| {
+                log(&format!("DOWNLOAD {:?} -> deny", std::mem::discriminant(&ev)));
+                false
+            });
+    }
+    b.build()?;
+    Ok(())
+}
 
 pub fn log(line: &str) {
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
@@ -85,7 +127,9 @@ fn spawn_sentinel(name: &'static str) -> u16 {
     let port = l.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for s in l.incoming().flatten() {
+            std::thread::spawn(move || {
             let mut s = s;
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
             if let Some(r) = read_req(&mut s) {
                 log(&format!(
                     "SENTINEL {name} port={port} {} {} origin={:?} referer={:?} host={:?}",
@@ -95,18 +139,32 @@ fn spawn_sentinel(name: &'static str) -> u16 {
                     r.headers.get("referer"),
                     r.headers.get("host")
                 ));
+                if r.path.starts_with("/redir") {
+                    let to = r.path.split("to=").nth(1).unwrap_or("").to_string();
+                    let loc = percent_decode(&to);
+                    respond(&mut s, "302 Found", &[("Location", loc), ("Access-Control-Allow-Origin", "*".into())], b"", false);
+                    return;
+                }
+                let is_js = r.path.split('?').next().unwrap_or("").ends_with(".js");
+                let rp = REPORT_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                let body = if is_js {
+                    format!("(new Image).src='http://127.0.0.1:{rp}/r?RAN_remote_script_from_{name}=1';")
+                } else {
+                    "sentinel".to_string()
+                };
                 respond(
                     &mut s,
                     "200 OK",
                     &[
                         ("Access-Control-Allow-Origin", "*".into()),
                         ("Access-Control-Allow-Headers", "*".into()),
-                        ("Content-Type", "text/plain".into()),
+                        ("Content-Type", if is_js { "text/javascript" } else { "text/plain" }.into()),
                     ],
-                    b"sentinel",
+                    body.as_bytes(),
                     r.method == "HEAD",
                 );
             }
+            });
         }
     });
     port
@@ -118,12 +176,15 @@ fn spawn_report() -> u16 {
     let port = l.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for s in l.incoming().flatten() {
+            std::thread::spawn(move || {
             let mut s = s;
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
             if let Some(r) = read_req(&mut s) {
                 let p = r.path.replace('+', " ");
                 log(&format!("REPORT {}", percent_decode(&p)));
                 respond(&mut s, "200 OK", &[("Access-Control-Allow-Origin", "*".into()), ("Content-Type", "text/plain".into())], b"ok", false);
             }
+            });
         }
     });
     port
@@ -153,6 +214,7 @@ pub struct PaneCfg {
     pub csp: Option<String>,
     pub root: std::path::PathBuf,
     pub ports: Arc<Mutex<Vec<u16>>>,
+    pub net: Arc<Mutex<String>>,
 }
 
 fn mime(path: &str) -> &'static str {
@@ -176,8 +238,11 @@ pub fn spawn_pane(cfg: PaneCfg) -> u16 {
     let port = l.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for s in l.incoming().flatten() {
+            let cfg = cfg.clone();
+            std::thread::spawn(move || {
             let mut s = s;
-            let Some(r) = read_req(&mut s) else { continue };
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            let Some(r) = read_req(&mut s) else { return };
             let head_only = r.method == "HEAD";
             let host_ok = r.headers.get("host").map(|h| h == &format!("127.0.0.1:{port}")).unwrap_or(false);
             let path_only = r.path.split('?').next().unwrap_or("").to_string();
@@ -195,7 +260,24 @@ pub fn spawn_pane(cfg: PaneCfg) -> u16 {
                     status = "400 Bad Request";
                 } else {
                     let file = cfg.root.join(if dec.is_empty() { "index.html" } else { &dec });
-                    match std::fs::read(&file) {
+                    // pinned-directory rule: every component must be a plain file/dir (no symlinks) and the
+                    // real path must stay under the real root
+                    let mut plain = true;
+                    let mut cur = cfg.root.clone();
+                    for comp in std::path::Path::new(if dec.is_empty() { "index.html" } else { &dec }).components() {
+                        cur.push(comp);
+                        match std::fs::symlink_metadata(&cur) {
+                            Ok(m) if m.file_type().is_symlink() => { plain = false; break; }
+                            Ok(_) => {}
+                            Err(_) => { plain = false; break; }
+                        }
+                    }
+                    let under = match (std::fs::canonicalize(&file), std::fs::canonicalize(&cfg.root)) {
+                        (Ok(f), Ok(r)) => f.starts_with(r),
+                        _ => false,
+                    };
+                    let read = if plain && under && file.is_file() { std::fs::read(&file) } else { Err(std::io::Error::from(std::io::ErrorKind::NotFound)) };
+                    match read {
                         Ok(b) => {
                             status = "200 OK";
                             body = b;
@@ -207,7 +289,7 @@ pub fn spawn_pane(cfg: PaneCfg) -> u16 {
             } else {
                 status = "404 Not Found";
             }
-            log(&format!("PANE {} {} -> {}", r.method, r.path, status));
+            log(&format!("PANE {} {} -> {}", r.method, path_only, status));
             let mut hs: Vec<(&str, String)> = vec![
                 ("Content-Type", ct.into()),
                 ("Access-Control-Allow-Origin", "*".into()),
@@ -216,10 +298,12 @@ pub fn spawn_pane(cfg: PaneCfg) -> u16 {
                 ("X-Content-Type-Options", "nosniff".into()),
             ];
             if let Some(csp) = &cfg.csp {
-                let csp = csp.replace("<own>", &format!("http://127.0.0.1:{port}"));
+                let net = cfg.net.lock().unwrap().clone();
+                let csp = csp.replace("<own>", &format!("http://127.0.0.1:{port}")).replace("<net>", &net);
                 hs.push(("Content-Security-Policy", csp));
             }
             respond(&mut s, status, &hs, &body, head_only);
+            });
         }
     });
     let _ = &port;
@@ -232,13 +316,30 @@ pub fn start(app: &AppHandle) {
     }
     let variant = env!("M1_VARIANT");
     let report = spawn_report();
+    REPORT_PORT.store(report, std::sync::atomic::Ordering::Relaxed);
     let s1 = spawn_sentinel("S1");
     let s2 = spawn_sentinel("S2");
+    let udp = spawn_udp();
+    let lan = spawn_lan();
+    let lan_js = lan.map(|x| format!("\"{x}\"")).unwrap_or_else(|| "null".into());
     let token: String = (0..16).map(|_| format!("{:02x}", rand_byte())).collect();
     let root = std::path::PathBuf::from(std::env::var("M1_PAYLOAD").unwrap_or_else(|_| "m1/payload".into()));
     let csp = std::env::var("M1_CSP").ok().filter(|s| !s.is_empty());
     let ports = Arc::new(Mutex::new(vec![]));
-    let pane = spawn_pane(PaneCfg { token: token.clone(), csp: csp.clone(), root: root.clone(), ports });
+    let net = Arc::new(Mutex::new(String::new()));
+    let pane = spawn_pane(PaneCfg { token: token.clone(), csp: csp.clone(), root: root.clone(), ports, net: net.clone() });
+    *live().lock().unwrap() = Some((pane, token.clone()));
+    if std::env::var("M1_NET").ok().as_deref() == Some("1") {
+        *net.lock().unwrap() = format!("http://127.0.0.1:{s2} http://127.0.0.1:{report}");
+    } else {
+        *net.lock().unwrap() = format!("http://127.0.0.1:{report}");
+    }
+    if let Ok(root2) = std::env::var("M1_PAYLOAD2") {
+        let token2: String = (0..16).map(|_| format!("{:02x}", rand_byte())).collect();
+        let pane2 = spawn_pane(PaneCfg { token: token2.clone(), csp: None, root: std::path::PathBuf::from(root2), ports: Arc::new(Mutex::new(vec![])), net: Arc::new(Mutex::new(String::new())) });
+        log(&format!("PANE2 port={pane2} token={token2}"));
+    }
+    log(&format!("PANE1 port={pane} token={token}"));
     let entry = std::env::var("M1_ENTRY").unwrap_or_else(|_| "index.html".into());
     log(&format!(
         "START variant={variant} debug={} pane={pane} report={report} s1={s1} s2={s2} csp={:?} root={:?} entry={entry}",
@@ -253,8 +354,9 @@ pub fn start(app: &AppHandle) {
         let Some(w) = app.get_webview_window("main") else { return };
         let js = format!(
             r#"(async () => {{
-  const cfg = {{ pane: {pane}, token: "{token}", report: {report}, s1: {s1}, s2: {s2}, entry: "{entry}", variant: "{variant}" }};
+  const cfg = {{ udp: {udp}, lan: {lan_js}, pane: {pane}, token: "{token}", report: {report}, s1: {s1}, s2: {s2}, entry: "{entry}", variant: "{variant}" }};
   window.__m1cfg = cfg;
+  setInterval(() => {{ new Image().src = 'http://127.0.0.1:' + cfg.report + '/r?mainhb=' + (document.visibilityState); }}, 2000);
   // Capture the real invoke key from one genuine invoke by the main UI.
   let key = null;
   const of = window.fetch;
@@ -277,6 +379,42 @@ pub fn start(app: &AppHandle) {
   window.__m1frame = f;
 }})();"#
         );
+        #[cfg(target_os = "macos")]
+        {
+            // M1 harness only: the screen may be locked, which makes WebKit treat every page as hidden
+            // and suspend it. Turn off visibility-based suppression so measurements can run.
+            let _ = w.with_webview(|wv| unsafe {
+                use objc2::runtime::AnyObject;
+                use objc2::{msg_send, sel};
+                let view = wv.inner() as *mut AnyObject;
+                let conf: *mut AnyObject = msg_send![view, configuration];
+                let prefs: *mut AnyObject = msg_send![conf, preferences];
+                let r: bool = msg_send![prefs, respondsToSelector: sel!(_setPageVisibilityBasedProcessSuppressionEnabled:)];
+                if r { let _: () = msg_send![prefs, _setPageVisibilityBasedProcessSuppressionEnabled: false]; }
+                let r2: bool = msg_send![view, respondsToSelector: sel!(_setWindowOcclusionDetectionEnabled:)];
+                if r2 { let _: () = msg_send![view, _setWindowOcclusionDetectionEnabled: false]; }
+                {
+                    use objc2::runtime::{AnyClass, Sel};
+                    let cls: &AnyClass = (*prefs).class();
+                    let mut names = vec![];
+                    for m in cls.instance_methods().iter() {
+                        let n = m.name().name().to_string_lossy().to_string();
+                        if n.to_lowercase().contains("peer") || n.to_lowercase().contains("webrtc") || n.to_lowercase().contains("mediadevices") || n.to_lowercase().contains("ice") && n.starts_with("_") { names.push(n); }
+                    }
+                    log(&format!("WK prefs webrtc-ish selectors: {:?}", names));
+                    let _ = Sel::register(c"_x");
+                }
+                if std::env::var("M1_NO_WEBRTC").ok().as_deref() == Some("1") {
+                    let _: () = msg_send![prefs, _setPeerConnectionEnabled: false];
+                    let now: bool = msg_send![prefs, _peerConnectionEnabled];
+                    log(&format!("WK _setPeerConnectionEnabled(false) -> _peerConnectionEnabled={now}"));
+                }
+                log(&format!("WK visibility SPI: suppression_pref={r} occlusion_detection={r2}"));
+            });
+        }
+        let _ = w.show();
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_focus();
         let _ = w.eval(&js);
     });
 }
@@ -290,4 +428,37 @@ fn rand_byte() -> u8 {
         b[0] = (SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(7) & 0xff) as u8;
     }
     b[0]
+}
+
+fn spawn_udp() -> u16 {
+    let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = sock.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut b = [0u8; 2048];
+        while let Ok((n, from)) = sock.recv_from(&mut b) {
+            log(&format!("SENTINEL UDP(stun) port={port} {n} bytes from {from}"));
+        }
+    });
+    port
+}
+
+/// Sentinel bound on all interfaces, reached through the machine's LAN address.
+fn spawn_lan() -> Option<String> {
+    let ip = std::process::Command::new("ipconfig").args(["getifaddr", "en0"]).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty())?;
+    let l = TcpListener::bind("0.0.0.0:0").ok()?;
+    let port = l.local_addr().ok()?.port();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            std::thread::spawn(move || {
+            let mut s = s;
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            if let Some(r) = read_req(&mut s) {
+                log(&format!("SENTINEL LAN port={port} {} {} origin={:?}", r.method, r.path, r.headers.get("origin")));
+                respond(&mut s, "200 OK", &[("Access-Control-Allow-Origin", "*".into())], b"lan", r.method == "HEAD");
+            }
+            });
+        }
+    });
+    Some(format!("{ip}:{port}"))
 }

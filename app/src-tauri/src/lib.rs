@@ -634,6 +634,7 @@ pub fn run() {
                 let _ = window.set_zoom(zoom);
             }
             // Start the agmsg DB watcher so the team room updates live.
+            addon_spike::create_main_window(app.handle())?;
             addon_spike::start(app.handle());
             agmsg::start_watcher(app.handle().clone());
             app.state::<PtyManager>().start_detection_tick(app.handle().clone());
