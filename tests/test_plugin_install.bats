@@ -443,3 +443,98 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   [ "$(wc -l < "$TEST_SKILL_DIR/db/plugin-sources" | tr -d ' ')" -eq 6 ]
   [ "$(wc -l < "$TEST_SKILL_DIR/db/trusted-plugins" | tr -d ' ')" -eq 12 ]
 }
+
+@test "the printed proceed command carries --track for a branch and --track-default for none" {
+  mk_repo acme pack >/dev/null
+  run PLUGIN install acme/pack@main
+  [ "$status" -eq 3 ]
+  grep -q "plugin install acme/pack@$(head_of acme pack) --yes --track main" <<<"$output"
+  run PLUGIN install acme/pack
+  [ "$status" -eq 3 ]
+  grep -q "plugin install acme/pack@$(head_of acme pack) --yes --track-default" <<<"$output"
+  run PLUGIN install "acme/pack@$(head_of acme pack)"
+  [ "$status" -eq 3 ]
+  refute grep -q -- "--track" <<<"$output"
+}
+
+@test "an approved pinned commit installed with --track keeps following that branch on update" {
+  mk_repo acme pack >/dev/null
+  sha="$(head_of acme pack)"
+  run PLUGIN install "acme/pack@$sha" --yes --track main
+  [ "$status" -eq 0 ]
+  [ "$(cut -f2 "$TEST_SKILL_DIR/db/plugin-sources")" = "acme/pack@main" ]
+  [ "$(cut -f3 "$TEST_SKILL_DIR/db/plugin-sources")" = "$sha" ]
+  bump_repo acme pack
+  new="$(head_of acme pack)"
+  run PLUGIN update acme/pack
+  [ "$status" -eq 3 ]
+  grep -q "to $new" <<<"$output"
+  grep -q "plugin update acme/pack@$new --yes --track main" <<<"$output"
+  run PLUGIN update "acme/pack@$new" --yes --track main
+  [ "$status" -eq 0 ]
+  [ "$(cut -f2 "$TEST_SKILL_DIR/db/plugin-sources")" = "acme/pack@main" ]
+  [ "$(cut -f3 "$TEST_SKILL_DIR/db/plugin-sources")" = "$new" ]
+}
+
+@test "--track-default records no ref, and an exact SHA without --track stays a pin" {
+  mk_repo acme pack >/dev/null
+  mk_repo other pin >/dev/null
+  PLUGIN install "acme/pack@$(head_of acme pack)" --yes --track-default >/dev/null
+  [ "$(grep '^github/acme/pack	' "$TEST_SKILL_DIR/db/plugin-sources" | cut -f2)" = "acme/pack" ]
+  PLUGIN remove acme/pack >/dev/null
+  w="$BATS_TEST_TMPDIR/work-other-pin"
+  git -C "$w" mv types/fx types/fy; git -C "$w" mv ext-tools/tl ext-tools/tm; git -C "$w" commit -qm ren
+  git -C "$w" push -q "$GIT_BASE/other/pin.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/other/pin.git" HEAD
+  # installed from its first commit, so it differs from the branch tip
+  first="$(git -C "$w" rev-parse HEAD~1)"
+  PLUGIN install "other/pin@$first" --yes >/dev/null
+  [ "$(grep '^github/other/pin	' "$TEST_SKILL_DIR/db/plugin-sources" | cut -f2)" = "other/pin@$first" ]
+  run PLUGIN update other/pin --yes
+  grep -q "already up to date" <<<"$output"
+}
+
+@test "--track is refused unless the request is an exact SHA, and takes a branch or tag" {
+  mk_repo acme pack >/dev/null
+  run PLUGIN install acme/pack@main --yes --track main
+  [ "$status" -eq 1 ]
+  grep -q "only go with a pinned" <<<"$output"
+  run PLUGIN install "acme/pack@$(head_of acme pack)" --yes --track "$(head_of acme pack)"
+  [ "$status" -eq 1 ]
+  run PLUGIN install "acme/pack@$(head_of acme pack)" --yes --track '../x'
+  [ "$status" -eq 1 ]
+  [ ! -e "$TEST_SKILL_DIR/db/plugin-sources" ]
+}
+
+@test "an override refusal is followed by a full report when --override is added without --yes" {
+  mk_repo acme pack >/dev/null
+  mkdir -p "$SCRIPTS/drivers/types/fx"
+  printf 'name=fx\n' > "$SCRIPTS/drivers/types/fx/type.conf"
+  run PLUGIN install acme/pack
+  [ "$status" -eq 1 ]
+  refute grep -q "Commit:" <<<"$output"
+  run PLUGIN install acme/pack --override
+  [ "$status" -eq 3 ]
+  grep -q "Commit: " <<<"$output"
+  grep -q "REPLACES THE BUILT-IN" <<<"$output"
+  grep -q -- "--yes --track-default --override" <<<"$output"
+}
+
+@test "a pinned preview with --track or --track-default prints a proceed command that keeps it" {
+  mk_repo acme pack >/dev/null
+  sha="$(head_of acme pack)"
+  run PLUGIN install "acme/pack@$sha" --track main
+  [ "$status" -eq 3 ]
+  grep -q "plugin install acme/pack@$sha --yes --track main" <<<"$output"
+  run PLUGIN install "acme/pack@$sha" --track-default
+  [ "$status" -eq 3 ]
+  grep -q "plugin install acme/pack@$sha --yes --track-default" <<<"$output"
+  PLUGIN install "acme/pack@$sha" --yes --track main >/dev/null
+  bump_repo acme pack
+  new="$(head_of acme pack)"
+  run PLUGIN update "acme/pack@$new" --track main
+  [ "$status" -eq 3 ]
+  grep -q "plugin update acme/pack@$new --yes --track main" <<<"$output"
+  run PLUGIN update "acme/pack@$new" --track-default
+  [ "$status" -eq 3 ]
+  grep -q "plugin update acme/pack@$new --yes --track-default" <<<"$output"
+}

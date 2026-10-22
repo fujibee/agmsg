@@ -7,6 +7,8 @@ agmsgのプラグイン可能な単位は**ドライバー**であり、**軸(ax
 | axis | 何を差し替えるか | status |
 |---|---|---|
 | `types` | エージェントランタイム(claude-code, codex, gemini, …) | shipping |
+| `ext-tools` | チームメンバーになれる外部ツール(Slackなど) | shipping |
+| `terminals` | ターミナルドライバー(tmux, herdr, …) | shipping |
 | `storage` | メッセージストア(sqlite, …) | planned |
 | `delivery` | メッセージがエージェントに届く方法(monitor / turn / …) | planned |
 
@@ -22,7 +24,9 @@ agmsgは次のベースを順番に探索する:
 
 1. `<skill>/scripts/drivers/` — 組み込み(常に信頼される)
 2. `<skill>/plugins/` — デフォルトのプラグイン配置ディレクトリ
-3. `$AGMSG_PLUGIN_DIRS` の `:` 区切りの各エントリ — 追加ディレクトリ
+3. `<skill>/db/plugin-sources` に記録されたインストール済みのプラグインソース(
+   [GitHubからプラグインをインストールする](#githubからプラグインをインストールする) を参照)
+4. `$AGMSG_PLUGIN_DIRS` の `:` 区切りの各エントリ — 追加ディレクトリ
 
 `<skill>` はインストールディレクトリ(`~/.agents/skills/<cmd>/`)である。各ベースは
 axisごとのサブディレクトリを持つため、`foo` という名前のtypesプラグインは
@@ -62,6 +66,7 @@ allowlistは `<skill>/db/trusted-plugins` にある単純なTSVで(`config.yaml`
 agmsg plugin list                 # every discovered driver + its trust state
 agmsg plugin trust <ref>          # opt into an external driver
 agmsg plugin untrust <ref>        # revoke
+agmsg plugin install|update|remove ...   # GitHubから。下記を参照
 ```
 
 `<ref>` は `<axis>/<name>`(例: `types/codex`)または裸の `<name>` である。裸の名前は
@@ -78,15 +83,18 @@ agmsg plugin: 'codex' is ambiguous across axes:
 `agmsg plugin list` は各ドライバーを `builtin`、`trusted`、`UNTRUSTED` のいずれかで示す:
 
 ```
-AXIS/NAME                  STATE       PATH
-types/codex                builtin     /…/scripts/drivers/types/codex
-types/foo                  trusted     /…/plugins/types/foo
-types/bar                  UNTRUSTED   /…/plugins/types/bar
+AXIS/NAME                  STATE       SOURCE                       COMMIT        PATH
+types/codex                builtin     -                            -             /…/scripts/drivers/types/codex
+types/foo                  trusted     -                            -             /…/plugins/types/foo
+types/bar                  UNTRUSTED   -                            -             /…/plugins/types/bar
+types/baz                  trusted     github/acme/baz              9074a92c6404  /…/plugins/sources/github/acme/baz/9074…/types/baz
 ```
 
 > Windows以外のホストでは、`agmsg` コマンドの表面はエージェントのskillフローによって提供される。
 > スクリプトを直接呼び出すこともできる:
 > `~/.agents/skills/<cmd>/scripts/plugin.sh list`。
+> `install`、`update`、`remove` も同じ方法で使えるほか、エージェント内の `/agmsg plugin ...` でも使える
+> (エージェントは何かをインストールする前にあなたへ確認する)。
 
 ## typesプラグインの作成
 
@@ -113,9 +121,99 @@ agmsg plugin list          # types/foo -> trusted
 `type.conf` がコードを実行することはできない。実行されるのは `_delivery.sh` /
 ランチャースクリプトのみであり、それもプラグインを信頼した後に限られる。
 
+## GitHubからプラグインをインストールする
+
+プラグインは独立したGitHubリポジトリとして公開でき、1つのコマンドでインストールできる。
+この方法で入れるプラグインはサードパーティのコードであり、**自己責任でインストールすること。
+agmsgはプラグインのレビューも署名も行わない。** バージョン1がサポートするのは `git` のみ
+(アーカイブURLは不可)なので、`git` が必要である。
+
+```
+agmsg plugin install <owner>/<repo>[@<ref>] [--yes] [--override]   # alias: add
+agmsg plugin update  <owner>/<repo>[@<ref>] [--yes] [--override]
+agmsg plugin remove  <owner>/<repo>                                 # alias: uninstall
+agmsg plugin list
+```
+
+`<ref>` はブランチ、タグ、または完全なコミットSHAである。`install` で省略するとデフォルト
+ブランチを使う。`update` で省略すると、インストール時に記録したref(なければデフォルトブランチ)に
+従うので、完全なSHAでインストールしたプラグインは、`update` に別のrefを渡すまでそのSHAのままである。
+インストールと更新は、必ず先に内容を表示して確認を求める。端末がなく `--yes` もない場合は、
+同じレポートを表示し、何もインストールせずステータス3("needs confirmation")で終了する。
+
+**`install` の動作**
+
+1. `https://github.com/<owner>/<repo>` の浅いチェックアウトをステージング用ディレクトリに取得する。
+2. 検査する: `agmsg-plugin.conf` があること、使えるaxisは `ext-tools` / `terminals` / `types`
+   のみ(それ以外は無視され、その旨が表示される)、ドライバー名が `[a-z0-9-]+` であること、
+   シンボリックリンクがないこと、`min_core` がこのagmsgより新しくないこと、衝突がないこと
+   (後述)。
+3. ソースとコミット、追加される `<axis>/<name>`、実行されうるすべてのファイル(shebangまたは
+   実行ビットがあるもの)、自己責任の注意を表示する。
+4. `y/N` を尋ね(または `--yes`)、各ドライバーをインストールして信頼する。
+
+チェックアウトは `<skill>/plugins/sources/github/<owner>/<repo>/<sha>/` に置かれ、
+`<skill>/db/plugin-sources` に記録される。残るのは `agmsg-plugin.conf` とドライバーのディレクトリ
+だけである。`plugins/sources/` はこれらのコマンドが管理するので、手作りのプラグインを置かないこと。
+
+**コミットは固定される。** ディレクトリ名がコミットSHAで、信頼はパスに固定される(上記)ため、
+信頼はそのコミットそのものに結び付く。`update` は同じ指定をもう一度取得する: コミットが同じなら
+その旨を表示し、新しければ旧SHAと新SHA、追加・変更・削除されたファイルを表示して再度確認する。
+確認した後にだけ新しいコミットを信頼し、古い方を削除する。自動更新は一切ない
+(`install --update` でも、バックグラウンドでも更新しない)。自分で固定したい場合は
+`<owner>/<repo>@<完全なSHA>` をインストールする。エージェントがコマンドを実行する場合は、
+レポートを見せてチャットで確認し、表示したコミットに固定して
+`plugin install <owner>/<repo>@<sha> --yes --track <branch>` を再実行する。末尾の
+`--track <branch>`(デフォルトブランチなら `--track-default`)は、承認したコミットはそのままに、
+以後の更新が追うrefを記録する。完全なコマンドはレポートの最後に表示される。付けない場合、完全な
+SHAは恒久的な固定になる。
+
+**衝突。**
+
+- 他のインストール済みソース、または `plugins/` に手で置いたドライバーと同じ `<axis>/<name>` は、
+  双方を示して拒否される。
+- **組み込み**と同じ `<axis>/<name>`(例: `types/codex`)は、このマシンのすべてのチームで
+  組み込みを置き換えてしまう。`install` は停止し、何が置き換わるか、何が壊れうるか、
+  `plugin remove` で組み込みに戻ることを説明する。意図して進めるには `--override` を付ける。
+  `update` が `--override` を求めるのは、インストール済みのコミットがまだ置き換えていなかった
+  組み込みに限る。
+
+**`remove`** はそのソースのドライバーの信頼を外し、チェックアウトと記録を削除し、組み込みが
+再び使われる場合はその旨を表示する。
+
+**`agmsg-plugin.conf`** は `key=value` のデータである(`source` されない):
+
+```
+name=my-plugin
+description=What it adds
+min_core=1.6.0
+```
+
+`name` と `description` はレポートに表示される。`min_core` は任意で、実行中のagmsgより新しい
+場合はインストールが拒否される。
+
+**リポジトリの構成**
+
+```
+<repo>/
+├── agmsg-plugin.conf
+├── ext-tools/<tool>/...      # scripts/drivers/ext-tools/README.md と同じ契約
+├── terminals/<name>/...      # 組み込みterminalドライバーと同じ契約
+└── types/<name>/...          # agent-types.md と同じ契約
+```
+
+`storage` プラグインは、GitHubからはまだ受け付けない。プラグインのagent typeは従来のdelivery
+経路で配信され、agmsgdのネイティブ配信には乗らない。
+
+> ここで扱うのは**agmsgプラグイン**(ドライバー)である。agmsg自体の配布方法の1つである
+> *Claude Codeプラグイン*とは別物である。
+
+テスト用に、`AGMSG_PLUGIN_GIT_BASE` でクローンURLの `https://github.com` の部分を置き換えられる
+(例: ローカルの `file://` ディレクトリ)。
+
 ## 未サポート
 
-`plugin.json` メタデータ、`min_core_version` によるゲーティング、署名/サンドボックス化は
-先送りされている([ADR 0001](adr/0001-storage-driver-pluginization.md) §5 と
-[ADR 0002](adr/0002-driver-discovery-and-plugin-opt-in.md) を参照)。現時点でのプラグインとは、
-パスを信頼するだけの単なるディレクトリである。
+署名とサンドボックス化は先送りされている([ADR 0001](adr/0001-storage-driver-pluginization.md) §5 と
+[ADR 0002](adr/0002-driver-discovery-and-plugin-opt-in.md) を参照)。アーカイブURLからの
+インストールと、`storage` プラグインのインストールも同様である。プラグインとは、パス(GitHubから
+入れた場合はコミットも)で信頼するコードである。

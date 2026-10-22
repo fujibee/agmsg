@@ -28,5 +28,10 @@ agmsg plugin trust types/foo      # opt in (path-pinned)
 Full details: [../docs/plugins.md](../docs/plugins.md) ·
 rationale: [../docs/adr/0002-driver-discovery-and-plugin-opt-in.md](../docs/adr/0002-driver-discovery-and-plugin-opt-in.md)
 
+`plugins/sources/` is reserved: `agmsg plugin install <owner>/<repo>` keeps its
+checkouts there (one directory per commit) and records them in
+`db/plugin-sources`. Do not put hand-made plugins in it, and do not edit it by hand;
+use `agmsg plugin update` / `remove`.
+
 > This directory ships with only this README. Your trusted plugins and the
 > `db/trusted-plugins` allowlist are preserved across `--update` installs.

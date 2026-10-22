@@ -416,17 +416,50 @@ _plugin_confirm() {
 _plugin_parse_flags() {  # sets ASSUME_YES OVERRIDE and PLUGIN_SPEC_ARG
   ASSUME_YES=0
   OVERRIDE=0
+  TRACK_SET=0
+  TRACK=""
   PLUGIN_SPEC_ARG=""
   local a
-  for a in "$@"; do
+  while [ $# -gt 0 ]; do
+    a="$1"; shift
     case "$a" in
       --yes|-y) ASSUME_YES=1 ;;
       --override) OVERRIDE=1 ;;
+      --track)
+        [ $# -gt 0 ] || _plugin_die "--track needs a ref"
+        TRACK_SET=1; TRACK="$1"; shift
+        _plugin_valid_ref "$TRACK" || _plugin_die "invalid ref '$TRACK'"
+        if _plugin_is_full_sha "$TRACK"; then _plugin_die "--track takes a branch or tag, not a commit"; fi ;;
+      --track-default) TRACK_SET=1; TRACK="" ;;
       -*) _plugin_die "unknown option '$a'" ;;
       *) [ -z "$PLUGIN_SPEC_ARG" ] || _plugin_die "unexpected argument '$a'"
          PLUGIN_SPEC_ARG="$a" ;;
     esac
   done
+}
+
+# The ref later updates should follow. Normally the one asked for. When the
+# request is an exact commit and --track/--track-default is given, that is the
+# ref to follow while the commit stays what was approved; without it an exact
+# commit stays pinned.
+_plugin_tracking_ref() {  # requested-ref
+  if [ "$TRACK_SET" -eq 1 ]; then
+    _plugin_is_full_sha "$1" || _plugin_die "--track and --track-default only go with a pinned @<full-sha>"
+    printf '%s' "$TRACK"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# Options that carry the requested ref into the printed "proceed" command, so a
+# command pinned to the shown commit still follows the same branch later.
+_plugin_track_flags() {  # requested-ref
+  local r="$1"
+  # An explicit --track / --track-default is the ref to follow, even when the
+  # request itself is an exact commit.
+  if [ "$TRACK_SET" -eq 1 ]; then r="$TRACK"
+  elif _plugin_is_full_sha "$r"; then return 0; fi
+  if [ -n "$r" ]; then printf ' --track %s' "$r"; else printf ' --track-default'; fi
 }
 
 _plugin_trust_all() {  # dir
@@ -518,7 +551,8 @@ _plugin_cmd_install() {
   _plugin_parse_flags "$@"
   [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: plugin.sh install <owner>/<repo>[@<ref>] [--yes] [--override]"
   _plugin_parse_spec "$PLUGIN_SPEC_ARG"
-  local owner="$SPEC_OWNER" repo="$SPEC_REPO" ref="$SPEC_REF" id rec
+  local owner="$SPEC_OWNER" repo="$SPEC_REPO" ref="$SPEC_REF" id rec track_ref
+  track_ref="$(_plugin_tracking_ref "$ref")" || exit 1
   id="github/$owner/$repo"
   if rec="$(_plugin_record "$id")"; then
     _plugin_die "$id is already installed (commit $(printf '%s' "$rec" | cut -f3)). Use 'plugin.sh update $owner/$repo', or 'plugin.sh remove $owner/$repo' first."
@@ -528,7 +562,7 @@ _plugin_cmd_install() {
   _plugin_prune_ignored "$PLUGIN_SRC"
   _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" install "$ref"
   _plugin_report "$id" "$PLUGIN_SHA"
-  _plugin_confirm "agmsg plugin install $owner/$repo@$PLUGIN_SHA --yes$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
+  _plugin_confirm "agmsg plugin install $owner/$repo@$PLUGIN_SHA --yes$(_plugin_track_flags "$ref")$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
   local final="$PLUGIN_SOURCES_DIR/github/$owner/$repo/$PLUGIN_SHA"
   _plugin_lock
   # Everything above ran without the lock; confirm it still holds.
@@ -539,7 +573,7 @@ _plugin_cmd_install() {
   [ ! -e "$final" ] || _plugin_die "$final already exists; run 'plugin.sh remove $owner/$repo' and retry"
   mkdir -p "$(dirname "$final")"
   mv "$PLUGIN_SRC" "$final"
-  _plugin_record_add "$id" "$owner/$repo${ref:+@$ref}" "$PLUGIN_SHA" "$final"
+  _plugin_record_add "$id" "$owner/$repo${track_ref:+@$track_ref}" "$PLUGIN_SHA" "$final"
   _plugin_trust_all "$final"
   _plugin_unlock
   echo
@@ -569,8 +603,11 @@ _plugin_cmd_update() {
   old_sha="$(printf '%s' "$rec" | cut -f3)"
   old_dir="$(printf '%s' "$rec" | cut -f4)"
   # No ref given: follow the one recorded at install time.
+  local track_ref
+  track_ref="$(_plugin_tracking_ref "$ref")" || exit 1
   if [ -z "$ref" ]; then
     case "$old_spec" in *@*) ref="${old_spec#*@}" ;; esac
+    track_ref="$ref"
   fi
   _plugin_fetch "$owner" "$repo" "$ref"
   if [ "$PLUGIN_SHA" = "$old_sha" ]; then
@@ -590,7 +627,7 @@ _plugin_cmd_update() {
   _plugin_changes "$old_dir" "$PLUGIN_SRC" | sed 's/^/  /'
   echo
   _plugin_report "$id" "$PLUGIN_SHA"
-  _plugin_confirm "agmsg plugin update $owner/$repo@$PLUGIN_SHA --yes$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
+  _plugin_confirm "agmsg plugin update $owner/$repo@$PLUGIN_SHA --yes$(_plugin_track_flags "$ref")$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
   local final="$PLUGIN_SOURCES_DIR/github/$owner/$repo/$PLUGIN_SHA"
   _plugin_lock
   # Re-check under the lock: the source must still be at the commit we compared.
@@ -603,7 +640,7 @@ _plugin_cmd_update() {
   mv "$PLUGIN_SRC" "$final"
   _plugin_untrust_all "$old_dir"
   _plugin_record_drop "$id"
-  _plugin_record_add "$id" "$owner/$repo${ref:+@$ref}" "$PLUGIN_SHA" "$final"
+  _plugin_record_add "$id" "$owner/$repo${track_ref:+@$track_ref}" "$PLUGIN_SHA" "$final"
   _plugin_trust_all "$final"
   _plugin_rm_commit_dir "$owner" "$repo" "$old_dir"
   _plugin_unlock
