@@ -34,6 +34,10 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     let cfg = app.config().app.windows[0].clone();
     let spike = std::env::var("M1_SPIKE").ok().as_deref() == Some("1");
     let mut b = tauri::WebviewWindowBuilder::from_config(app, &cfg)?;
+    #[cfg(windows)]
+    if let Ok(a) = std::env::var("M1_WV2_ARGS") {
+        b = b.additional_browser_args(&a);
+    }
     if spike {
         let enforce = std::env::var("M1_NAV").ok().as_deref() != Some("off");
         b = b
@@ -71,6 +75,21 @@ pub fn addon_canary(arg: Option<String>) -> String {
     log(&format!("CANARY ENTERED arg={:?}", arg));
     "canary-ok".to_string()
 }
+
+/// Streams 4 KB binary chunks over a Channel for ~12 s, so the Tauri channel-data queue
+/// (`plugin:__TAURI_CHANNEL__|fetch`) holds live entries while an add-on frame polls it.
+#[tauri::command]
+pub async fn addon_channel_feed(on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> Result<(), String> {
+    log("CHANNEL FEED started");
+    for i in 0..60u32 {
+        let mut b = vec![0x41u8; 4096];
+        b[..4].copy_from_slice(&i.to_be_bytes());
+        let _ = on_event.send(tauri::ipc::InvokeResponseBody::Raw(b));
+        tokio_sleep().await;
+    }
+    Ok(())
+}
+async fn tokio_sleep() { tauri::async_runtime::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_millis(200))).await.ok(); }
 
 struct Req {
     method: String,
@@ -368,6 +387,7 @@ pub fn start(app: &AppHandle) {
   if (oi) window.ipc.postMessage = function (d) {{ try {{ const m = JSON.parse(d); if (m.__TAURI_INVOKE_KEY__) key = m.__TAURI_INVOKE_KEY__; }} catch (e) {{}} return oi.apply(this, arguments); }};
   try {{ await window.__TAURI_INTERNALS__.invoke('agmsg_is_installed'); }} catch (e) {{}}
   try {{ const r = await window.__TAURI_INTERNALS__.invoke('addon_canary', {{ arg: 'from-main-ui' }}); new Image().src = 'http://127.0.0.1:' + cfg.report + '/r?main_canary=' + encodeURIComponent(String(r)); }} catch (e) {{ new Image().src = 'http://127.0.0.1:' + cfg.report + '/r?main_canary_err=' + encodeURIComponent(String(e)); }}
+  try {{ const cb = window.__TAURI_INTERNALS__.transformCallback(() => {{}}); window.__TAURI_INTERNALS__.invoke('addon_channel_feed', {{ onEvent: '__CHANNEL__:' + cb }}); }} catch (e) {{}}
   const f = document.createElement('iframe');
   f.setAttribute('sandbox', 'allow-scripts');
   f.style.cssText = 'position:fixed;right:0;bottom:0;width:480px;height:320px;z-index:99999;background:#fff;border:2px solid red';
@@ -444,8 +464,8 @@ fn spawn_udp() -> u16 {
 
 /// Sentinel bound on all interfaces, reached through the machine's LAN address.
 fn spawn_lan() -> Option<String> {
-    let ip = std::process::Command::new("ipconfig").args(["getifaddr", "en0"]).output().ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty())?;
+    let ip = std::env::var("M1_LAN_IP").ok().or_else(|| std::process::Command::new("ipconfig").args(["getifaddr", "en0"]).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty())).filter(|s| !s.is_empty())?;
     let l = TcpListener::bind("0.0.0.0:0").ok()?;
     let port = l.local_addr().ok()?.port();
     std::thread::spawn(move || {

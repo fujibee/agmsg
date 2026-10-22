@@ -9,6 +9,7 @@ window.addEventListener('message', async (ev) => {
   const { cfg, key } = ev.data;
   REP = cfg.report;
   rep('variant', cfg.variant);
+  rep('ua', navigator.userAgent);
   rep('origin', location.origin + ' | ' + (typeof self.origin !== 'undefined' ? self.origin : 'n/a'));
   rep('key_received', key ? 'yes(len ' + key.length + ')' : 'NO');
   rep('globals', JSON.stringify({
@@ -51,9 +52,17 @@ window.addEventListener('message', async (ev) => {
   // app-level destructive-class command (arg-less, harmless): agmsg_is_installed reads state only
   await viaFetch('A1_agmsg_is_installed', 'ipc://localhost/agmsg_is_installed', 'x');
   // 7. channel fetch endpoint (ACL-exempt in tauri 2.11.3)
-  for (const id of [0, 1, 2]) {
-    await viaFetch('A1_channel_fetch_id' + id, 'ipc://localhost/plugin%3A__TAURI_CHANNEL__%7Cfetch', 'x', { 'Tauri-Channel-Id': String(id) });
+  const ch = { tried: 0, data: 0, notfound: 0, other: {} };
+  for (let id = 0; id < 120; id++) {
+    ch.tried++;
+    try {
+      const r = await fetch('ipc://localhost/plugin%3A__TAURI_CHANNEL__%7Cfetch', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Tauri-Callback': '1', 'Tauri-Error': '2', 'Tauri-Invoke-Key': key, 'Tauri-Channel-Id': String(id) }, body: '{}' });
+      const b = await r.arrayBuffer();
+      const t = new TextDecoder().decode(b.slice(0, 40));
+      if (r.headers.get('Tauri-Response') === 'ok') ch.data++; else if (/not found/.test(t)) ch.notfound++; else ch.other[t] = (ch.other[t] || 0) + 1;
+    } catch (e) { ch.other['threw ' + e.name] = (ch.other['threw ' + e.name] || 0) + 1; }
   }
+  rep('A1_channel_fetch_0_119', JSON.stringify(ch));
   // 8. a command with the *wrong* key (control: must not enter)
   try { window.webkit.messageHandlers.ipc.postMessage(JSON.stringify({ cmd: 'addon_canary', callback: 1, error: 2, payload: { arg: 'A1-wrongkey' }, options: {}, __TAURI_INVOKE_KEY__: 'wrong' })); rep('A1_wrongkey', 'sent'); } catch (e) { rep('A1_wrongkey', 'threw ' + e); }
   rep('done', n);

@@ -43,6 +43,7 @@
     "allow-set-team-room-visible",
     "allow-set-user-chat-visible",
     "allow-view-visibility",
-    "allow-addon-canary"
+    "allow-addon-canary",
+    "allow-addon-channel-feed"
   ]
 }

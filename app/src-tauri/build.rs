@@ -12,7 +12,7 @@ fn main() {
         "agmsg_delete_team_force", "agmsg_purge_team_messages", "agmsg_delivery_mode",
         "agmsg_default_project", "agmsg_command_name", "agmsg_spawnable_types",
         "set_menu_language", "set_team_room_visible", "set_user_chat_visible", "view_visibility",
-        "addon_canary",
+        "addon_canary", "addon_channel_feed",
     ];
     let variant = std::env::var("M1_VARIANT").unwrap_or_else(|_| "none".into());
     println!("cargo:rustc-env=M1_VARIANT={variant}");

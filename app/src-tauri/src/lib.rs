@@ -648,6 +648,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             addon_spike::addon_canary,
+            addon_spike::addon_channel_feed,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
