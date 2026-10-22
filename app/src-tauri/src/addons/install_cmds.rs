@@ -263,7 +263,7 @@ pub fn addon_save_grant(host: State<'_, Arc<AddonHost>>, spec: GrantIn) -> Resul
     // only a pane that exists and declared the permission can have it remembered
     let info = host.catalog().list().into_iter().find(|a| a.id == spec.id).ok_or_else(|| Failure { code: "not_found", message: "No such add-on.".into() })?;
     let pane = info.panes.iter().find(|p| p.name == spec.pane).ok_or_else(|| Failure { code: "not_found", message: "No such pane.".into() })?;
-    if !pane.permissions.iter().any(|p| *p == spec.permission) {
+    if !pane.permissions.contains(&spec.permission) {
         return Err(Failure { code: "not_declared", message: "This add-on did not declare that permission.".into() });
     }
     grants::add(&addons, SavedGrant { repo: spec.id, sha: info.commit, pane: spec.pane, permission: spec.permission, scope: spec.scope, granted_at: now_iso() })

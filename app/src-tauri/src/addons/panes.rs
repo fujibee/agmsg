@@ -104,7 +104,7 @@ pub struct AddPane {
     pub open_args: OpenArgs,
     pub expected_digest: Option<String>,
     pub pinned: Option<std::collections::BTreeMap<String, (String, u64)>>,
-    pub on_tamper: Option<std::sync::Arc<dyn Fn(u16, String, String) + Send + Sync>>,
+    pub on_tamper: Option<super::server::TamperFn>,
 }
 
 #[derive(Default)]

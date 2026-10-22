@@ -51,6 +51,12 @@ pub struct Panes {
     extra_protected: Mutex<Vec<PathBuf>>,
 }
 
+impl Default for Panes {
+    fn default() -> Self {
+        Panes::new()
+    }
+}
+
 impl Panes {
     pub fn new() -> Panes {
         Panes {

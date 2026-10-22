@@ -186,7 +186,7 @@ mod tests {
         repo(src.path(), CONF);
         let e1 = load(a.path(), src.path(), &[], Limits::default()).unwrap();
         write(src.path(), "app-panes/main/web/app.js", "export {}");
-        let e2 = load(a.path(), src.path(), &[e1.clone()], Limits::default()).unwrap();
+        let e2 = load(a.path(), src.path(), std::slice::from_ref(&e1), Limits::default()).unwrap();
         assert_eq!((e2.id.as_str(), e2.copy), (e1.id.as_str(), 2));
         assert!(e2.tree_root.join("app-panes/main/web/app.js").is_file());
         assert!(!e1.tree_root.exists(), "the previous copy is deleted");

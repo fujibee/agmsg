@@ -109,11 +109,11 @@ impl Staged {
             files: self.files,
             bytes: self.bytes,
             previous_sha,
-            asks_again: diff.as_ref().map_or(false, Diff::needs_confirm_again),
+            asks_again: diff.as_ref().is_some_and(Diff::needs_confirm_again),
             added_permissions: diff.as_ref().map(|d| d.added.clone()).unwrap_or_default(),
             removed_permissions: diff.as_ref().map(|d| d.removed.clone()).unwrap_or_default(),
-            network_widened: diff.as_ref().map_or(false, |d| d.network_widened),
-            network_newly_combined: diff.as_ref().map_or(false, |d| d.network_newly_combined),
+            network_widened: diff.as_ref().is_some_and(|d| d.network_widened),
+            network_newly_combined: diff.as_ref().is_some_and(|d| d.network_newly_combined),
         }
     }
 

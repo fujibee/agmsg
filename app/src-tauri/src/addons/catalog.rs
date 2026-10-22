@@ -496,7 +496,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let addons = tmp.path().join("addons");
         let e = install(&addons, "o/r", '1', true);
-        index::write(&addons, &[e.clone()]).unwrap();
+        index::write(&addons, std::slice::from_ref(&e)).unwrap();
         fs::write(e.dir(&addons).join("app-panes/main/addon.conf"), "title=Main\nprotocol=1\npermissions=files:read,network\nnetwork=*\n").unwrap();
         assert!(matches!(Catalog::new(None, addons).resolve("o/r", "main"), Err(CatalogError::Changed(_))));
     }
