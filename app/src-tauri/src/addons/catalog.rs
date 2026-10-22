@@ -355,7 +355,7 @@ mod tests {
             network: Network::None,
             expected_digest: None,
             pinned: Some(r.pinned.clone()),
-            on_tamper: Some(Arc::new(move |_, _| {
+            on_tamper: Some(Arc::new(move |_, _, _| {
                 h.fetch_add(1, Ordering::SeqCst);
             })),
         })

@@ -104,7 +104,7 @@ pub struct AddPane {
     pub open_args: OpenArgs,
     pub expected_digest: Option<String>,
     pub pinned: Option<std::collections::BTreeMap<String, (String, u64)>>,
-    pub on_tamper: Option<std::sync::Arc<dyn Fn(u16, String) + Send + Sync>>,
+    pub on_tamper: Option<std::sync::Arc<dyn Fn(u16, String, String) + Send + Sync>>,
 }
 
 #[derive(Default)]
@@ -162,9 +162,11 @@ impl Registry {
         Ok(added)
     }
 
-    /// Closes the pane that listens on `port` (a pinned file changed). Returns what was closed.
-    pub fn remove_by_port(&mut self, port: u16) -> Option<(PaneId, u16, String)> {
-        let id = self.panes.values().find(|p| p.server.port() == port).map(|p| p.id)?;
+    /// Closes the pane that listens on `port` with exactly this `token` (a pinned
+    /// file changed). A late notice for a pane that is already gone, whose port
+    /// was reused by another pane, matches nothing and closes nothing.
+    pub fn remove_matching(&mut self, port: u16, token: &str) -> Option<(PaneId, u16, String)> {
+        let id = self.panes.values().find(|p| p.server.port() == port && p.server.token() == token).map(|p| p.id)?;
         let (port, token) = self.remove(id)?;
         Some((id, port, token))
     }
@@ -446,6 +448,25 @@ mod tests {
         assert!(r.panes_reading_team("team-c").is_empty());
         r.revoke_team(a);
         assert_eq!(r.panes_reading_team("team-b"), vec![(b, gb)]);
+    }
+
+    #[test]
+    fn a_late_notice_closes_only_the_pane_with_that_port_and_token() {
+        let (mut r, a) = reg_with(all());
+        let (port, token) = {
+            let p = r.panes.get(&a).unwrap();
+            (p.server.port(), p.server.token().to_string())
+        };
+        // wrong token for a live port: nothing closes
+        assert!(r.remove_matching(port, "0".repeat(32).as_str()).is_none());
+        assert!(r.contains(a));
+        // wrong port with the right token: nothing closes
+        assert!(r.remove_matching(port.wrapping_add(1), &token).is_none());
+        assert!(r.contains(a));
+        // the pane is removed; the same notice arriving late matches nothing, even if the port is reused
+        assert_eq!(r.remove_matching(port, &token).map(|x| x.0), Some(a));
+        assert!(r.remove_matching(port, &token).is_none());
+        assert!(!r.contains(a));
     }
 
     #[test]

@@ -162,11 +162,12 @@ pub fn addon_pane_add<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<AddonHo
     let open_args = validate_open_args(spec.open_args, &resolved.conf)?;
     host.panes.refresh_deny();
     // If a served file stops matching what was verified, the pane is closed and the UI told why.
-    let on_tamper: Arc<dyn Fn(u16, String) + Send + Sync> = {
+    let on_tamper: Arc<dyn Fn(u16, String, String) + Send + Sync> = {
         let host: Arc<AddonHost> = host.inner().clone();
         let app = app.clone();
-        Arc::new(move |port: u16, detail: String| {
-            let closed = host.panes.registry.lock().unwrap().remove_by_port(port);
+        Arc::new(move |port: u16, token: String, detail: String| {
+            // closes only the pane with this port AND this token: a late notice never touches another pane
+            let closed = host.panes.registry.lock().unwrap().remove_matching(port, &token);
             if let Some((id, port, token)) = closed {
                 host.nav.unregister_pane(port, &token);
                 host.panes.feeds.lock().unwrap().retain(|(p, _), _| *p != id);
