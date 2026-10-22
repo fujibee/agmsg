@@ -179,12 +179,12 @@ function LiveAddonPane(props: {
         const g = await source.grantTeam(added.id, need.team);
         if (!g.ok) return { error: g.error };
         // The pane was reopened or its add-on updated while the grant ran: that consent must not be saved.
-        const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "messages:read", need.team) : null;
+        const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "messages:read", need.team, added.id, added.commit) : null;
         return { chip: { key: `team:${need.team}`, label: need.team }, saveFailed: saved && !saved.ok ? saved.error.message : undefined };
       }
       const g = await source.grantRoot(added.id, need.path);
       if (!g.ok) return { error: g.error };
-      const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "files:read", g.realPath) : null;
+      const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "files:read", g.realPath, added.id, added.commit) : null;
       return { chip: { key: `root:${g.realPath}`, label: g.realPath }, saveFailed: saved && !saved.ok ? saved.error.message : undefined };
     });
     if (r.kind !== "done") return; // busy: ignored; stale: the pane was reopened, so nothing here applies to it

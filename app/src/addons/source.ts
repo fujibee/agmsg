@@ -124,7 +124,7 @@ async function attempt<T>(fn: () => Promise<T>): Promise<Outcome<T>> {
 }
 
 /** What addon_pane_add returns: the frame URL and what Rust read from addon.conf. */
-export type AddedPane = { id: number; url: string; port: number; title: string; permissions: string[]; network: string };
+export type AddedPane = { id: number; url: string; port: number; commit: string; title: string; permissions: string[]; network: string };
 
 export type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -170,10 +170,11 @@ export function createLiveSource(invoke: Invoke) {
     devRemove: (id: string) => attempt(async () => void (await invoke("addon_dev_remove", { spec: { id } }))),
     savedGrants: (id: string, pane: string) =>
       attempt(async () => (await invoke("addon_saved_grants", { spec: { id, pane } })) as SavedGrantRaw[]),
-    saveGrant: (id: string, pane: string, permission: "files:read" | "messages:read", scope: string) =>
-      attempt(async () => void (await invoke("addon_save_grant", { spec: { id, pane, permission, scope } }))),
+    /** Remember a grant the user just gave: bound to the pane instance they clicked Allow in and the commit it runs, so Rust refuses it if either changed. */
+    saveGrant: (id: string, pane: string, permission: "files:read" | "messages:read", scope: string, paneId: number, commit: string) =>
+      attempt(async () => void (await invoke("addon_save_grant", { spec: { id, pane, permission, scope, paneId, commit } }))),
     forgetGrant: (id: string, pane: string, permission: string, scope: string) =>
-      attempt(async () => (await invoke("addon_forget_grant", { spec: { id, pane, permission, scope } })) as boolean),
+      attempt(async () => (await invoke("addon_forget_grant", { spec: { id, pane, permission, scope } })) as { forgotten: boolean; closedPanes: number[] }),
     async removePane(id: number): Promise<void> {
       await invoke("addon_pane_remove", { id });
     },

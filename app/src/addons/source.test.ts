@@ -20,7 +20,7 @@ describe("live source", () => {
     expect(await createLiveSource(recorder({ addon_gate_status: reject("no gate") }).invoke).engine()).toEqual({ ok: false, reasons: ["no gate"] });
   });
 
-  const pane = { id: 3, url: "http://127.0.0.1:1/t/", port: 1, title: "Diff view", permissions: ["files:read"], network: "" };
+  const pane = { id: 3, url: "http://127.0.0.1:1/t/", port: 1, commit: "c1", title: "Diff view", permissions: ["files:read"], network: "" };
 
   it("sends the commands with the names and argument shapes Rust expects", async () => {
     const r = recorder({ addon_pane_add: pane, addon_grant_root: "/real" });
@@ -95,14 +95,15 @@ describe("live source", () => {
     expect(await s.savedGrants("o/r", "p")).toMatchObject({ ok: true, value: [{ scope: "/p" }] });
     await s.installCancel("s1");
     await s.devLoad("/dev/x");
-    await s.saveGrant("o/r", "p", "files:read", "/p");
+    await s.saveGrant("o/r", "p", "files:read", "/p", 3, "c1");
     await s.forgetGrant("o/r", "p", "files:read", "/p");
     expect(r.calls.map((c) => c[0])).toEqual([
       "addon_install_start", "addon_check_update", "addon_install_confirm", "addon_remove", "addon_saved_grants",
       "addon_install_cancel", "addon_dev_load", "addon_save_grant", "addon_forget_grant",
     ]);
     expect(r.calls[0][1]).toEqual({ spec: { source: "o/r@main", opId: "op-1" } });
-    expect(r.calls[7][1]).toEqual({ spec: { id: "o/r", pane: "p", permission: "files:read", scope: "/p" } });
+    // the consent is bound to the pane instance and commit it was given in
+    expect(r.calls[7][1]).toEqual({ spec: { id: "o/r", pane: "p", permission: "files:read", scope: "/p", paneId: 3, commit: "c1" } });
   });
   it("a dev copy in addon_list is flagged with its folder label", async () => {
     const raw = [{ id: "dev:x", kind: "dev", source: "my-folder", commit: "dev copy 2", title: "X", digestOk: true, enabled: true, problems: [],
