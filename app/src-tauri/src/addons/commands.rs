@@ -25,11 +25,11 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Listener, Runtime, State};
 
 use super::broker;
-use super::csp;
+use super::catalog::AddonInfo;
 use super::denylist::{self, Denylist, GrantCheck};
 use super::feed::{self, Feed, FeedMessage};
 use super::host::AddonHost;
-use super::panes::{AddPane, BrokerError, Declared, Need, OpenArgs, PaneId, Registry};
+use super::panes::{AddPane, BrokerError, Need, OpenArgs, PaneId, Registry};
 use super::server::Payload;
 
 pub const PUSH_EVENT: &str = "addon-push";
@@ -88,25 +88,17 @@ impl Panes {
     }
 }
 
+/// The UI names an add-on and a pane; Rust finds the directory, checks its
+/// digest and reads what it declared. No path comes from the UI.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaneAddIn {
-    pub addon: String,
-    pub commit: String,
-    pub name: String,
-    /// The installed (pinned) payload directory.
-    pub dir: String,
-    #[serde(default)]
-    pub entry: Option<String>,
-    #[serde(default)]
-    pub declared: Declared,
-    /// `addon.conf` `network` value: `*` or a list of origins.
-    #[serde(default)]
-    pub network: Option<String>,
+    /// An `id` from `addon_list`.
+    pub addon_id: String,
+    pub pane: String,
+    /// What the pane is opened with (a folder the user picked, a base ref, …).
     #[serde(default)]
     pub open_args: OpenArgs,
-    #[serde(default)]
-    pub expected_digest: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +106,9 @@ pub struct PaneAddOut {
     pub id: PaneId,
     pub url: String,
     pub port: u16,
+    pub title: String,
+    pub permissions: Vec<String>,
+    pub network: String,
 }
 
 fn off(host: &AddonHost) -> String {
@@ -121,18 +116,28 @@ fn off(host: &AddonHost) -> String {
     format!("add-ons are off on this computer: {}", v.reasons.join("; "))
 }
 
+/// Every add-on the user can open: built-ins, installed ones. Never a path.
+#[tauri::command(async)]
+pub fn addon_list(host: State<'_, Arc<AddonHost>>) -> Vec<AddonInfo> {
+    host.catalog().list()
+}
+
+fn clean_open_args(a: OpenArgs) -> Result<OpenArgs, String> {
+    for v in [&a.path, &a.url, &a.base].into_iter().flatten() {
+        if v.len() > 4096 || v.contains('\0') {
+            return Err("an open argument is too long or has a NUL byte".into());
+        }
+    }
+    Ok(a)
+}
+
 #[tauri::command(async)]
 pub fn addon_pane_add(host: State<'_, Arc<AddonHost>>, spec: PaneAddIn) -> Result<PaneAddOut, String> {
     if !host.gate.status().enabled {
         return Err(off(&host));
     }
-    let mut declared = spec.declared.clone();
-    if declared.network.is_some() {
-        return Err("`network` is taken from `network`, not from `declared`".into());
-    }
-    if let Some(n) = spec.network.as_deref() {
-        declared.network = Some(csp::parse_network(n).map_err(|e| e.to_string())?);
-    }
+    let open_args = clean_open_args(spec.open_args)?;
+    let resolved = host.catalog().resolve(&spec.addon_id, &spec.pane).map_err(|e| e.to_string())?;
     host.panes.refresh_deny();
     let added = host
         .panes
@@ -140,18 +145,25 @@ pub fn addon_pane_add(host: State<'_, Arc<AddonHost>>, spec: PaneAddIn) -> Resul
         .lock()
         .unwrap()
         .add(AddPane {
-            addon: spec.addon,
-            commit: spec.commit,
-            name: spec.name,
-            payload: Payload::Dir(PathBuf::from(spec.dir)),
-            entry: spec.entry.unwrap_or_else(|| "index.html".into()),
-            declared,
-            open_args: spec.open_args,
-            expected_digest: spec.expected_digest,
+            addon: resolved.addon.clone(),
+            commit: resolved.commit.clone(),
+            name: resolved.pane.clone(),
+            payload: Payload::Dir(resolved.web_dir.clone()),
+            entry: resolved.conf.entry.clone(),
+            declared: resolved.conf.declared(),
+            open_args,
+            expected_digest: None,
         })
         .map_err(|e| e.to_string())?;
     host.nav.register_pane(added.port, &added.token);
-    Ok(PaneAddOut { id: added.id, url: added.url, port: added.port })
+    Ok(PaneAddOut {
+        id: added.id,
+        url: added.url,
+        port: added.port,
+        title: resolved.conf.title.clone(),
+        permissions: resolved.conf.permissions.clone(),
+        network: resolved.conf.network.clone().unwrap_or_default(),
+    })
 }
 
 #[tauri::command]
@@ -219,6 +231,15 @@ fn to_feed(m: &crate::agmsg::Message) -> FeedMessage {
 /// History for the granted team plus whatever arrived while it was being built.
 #[tauri::command(async)]
 pub fn addon_feed_init(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: u64) -> Result<Value, BrokerError> {
+    let out = feed_init_inner(&host, id, generation);
+    if out.is_err() {
+        // a failed init must not leave a feed buffering messages for a frame that never got its init
+        host.panes.feeds.lock().unwrap().remove(&(id, generation));
+    }
+    out
+}
+
+fn feed_init_inner(host: &AddonHost, id: PaneId, generation: u64) -> Result<Value, BrokerError> {
     let auth = host.panes.registry.lock().unwrap().authorize(id, generation, Need::Messages)?;
     let team = auth.team.clone().ok_or_else(|| BrokerError::new("not_granted", "no team is allowed for this pane"))?;
     // live messages queue from now on, so none falls between the history read and `finish`
@@ -283,6 +304,7 @@ fn strip_to_feed(payload: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addons::panes::Declared;
     use std::fs;
 
     #[test]

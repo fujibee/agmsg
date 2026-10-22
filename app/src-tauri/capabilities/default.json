@@ -53,6 +53,7 @@
     "allow-addon-grant-root",
     "allow-addon-revoke-root",
     "allow-addon-feed-init",
-    "allow-addon-request"
+    "allow-addon-request",
+    "allow-addon-list"
   ]
 }

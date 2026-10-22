@@ -32,7 +32,9 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "resources": {
-      "resources/agmsg-core": "agmsg-core"
+      "resources/agmsg-core": "agmsg-core",
+      "../addons/fileview/app-panes": "builtin-addons/fileview",
+      "../addons/diffview/app-panes": "builtin-addons/diffview"
     },
     "icon": [
       "icons/32x32.png",

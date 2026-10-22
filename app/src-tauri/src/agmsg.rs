@@ -43,6 +43,11 @@ fn agmsg_base() -> PathBuf {
     PathBuf::from(home).join(".agents/skills/agmsg")
 }
 
+/// The agmsg base (`AGMSG_APP_BASE` or `~/.agents/skills/agmsg`).
+pub(crate) fn base_dir() -> PathBuf {
+    agmsg_base()
+}
+
 /// Places add-on panes must never read, however a folder is granted: the agmsg
 /// base (its db/, teams/, addons/, scripts/ and config), where `AGMSG_APP_BASE`
 /// moves it, any separately configured storage or config location, and the

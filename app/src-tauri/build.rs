@@ -8,6 +8,12 @@
 //! a registered command is not granted or a grant names no command.
 
 use std::fs;
+use std::path::Path;
+
+// The same digest the app computes when it opens a built-in add-on.
+#[path = "src/addons/digest.rs"]
+#[allow(dead_code)]
+mod digest;
 
 fn registered_commands(lib_rs: &str) -> Vec<String> {
     let start = lib_rs.find("generate_handler![").expect("generate_handler! not found in src/lib.rs") + "generate_handler![".len();
@@ -22,7 +28,37 @@ fn registered_commands(lib_rs: &str) -> Vec<String> {
         .collect()
 }
 
+/// `src/builtin_digests.rs`: `(name, digest)` for every folder under `../addons`
+/// that has an `app-panes/` (the built-in add-ons, shipped as app resources).
+fn write_builtin_digests() {
+    println!("cargo:rerun-if-changed=../addons");
+    let root = Path::new("../addons");
+    let mut rows: Vec<(String, String)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(root) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('_') || name.starts_with('.') {
+                continue;
+            }
+            let panes = e.path().join("app-panes");
+            if panes.is_dir() {
+                let d = digest::payload_digest(&panes).unwrap_or_else(|err| panic!("cannot hash built-in add-on {name}: {err}"));
+                rows.push((name, d));
+            }
+        }
+    }
+    rows.sort();
+    let mut out = String::from("pub const BUILTIN_DIGESTS: &[(&str, &str)] = &[\n");
+    for (n, d) in rows {
+        out.push_str(&format!("    ({n:?}, {d:?}),\n"));
+    }
+    out.push_str("];\n");
+    let dest = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("builtin_digests.rs");
+    fs::write(dest, out).expect("write builtin_digests.rs");
+}
+
 fn main() {
+    write_builtin_digests();
     println!("cargo:rerun-if-changed=src/lib.rs");
     let lib_rs = fs::read_to_string("src/lib.rs").expect("read src/lib.rs");
     let names: Vec<&'static str> = registered_commands(&lib_rs).into_iter().map(|n| &*Box::leak(n.into_boxed_str())).collect();
