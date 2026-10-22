@@ -19,7 +19,7 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
 
 @test "delivery: the shell command is public and listed in help" {
   run bash "$SCRIPTS/agmsg" help
-  [[ "$output" == *"delivery"* ]]
+  grep -Fq "delivery" <<<"$output"
 }
 
 @test "delivery status: agmsgd on shows the install state and the project's fallback as monitor (legacy)" {
@@ -27,15 +27,15 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJECT" >/dev/null
   run bash "$SCRIPTS/agmsg" delivery status --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"delivery: agmsgd (on) — notices are delivered directly"* ]]
-  [[ "$output" == *"this project's fallback: monitor (legacy)"* ]]
+  grep -Fq "delivery: agmsgd (on) — notices are delivered directly" <<<"$output"
+  grep -Fq "this project's fallback: monitor (legacy)" <<<"$output"
 }
 
 @test "delivery status: agmsgd off but available says how to turn it on; no arguments mean status" {
   bash "$SCRIPTS/delivery.sh" set turn claude-code "$PROJECT" >/dev/null
   run bash "$SCRIPTS/agmsg" delivery --type claude-code --project "$PROJECT"
-  [[ "$output" == *"delivery: agmsgd (off) — available; turn it on with: agmsg delivery agmsgd"* ]]
-  [[ "$output" == *"this project: turn"* ]]
+  grep -Fq "delivery: agmsgd (off) — available; turn it on with: agmsg delivery agmsgd" <<<"$output"
+  grep -Fq "this project: turn" <<<"$output"
 }
 
 @test "delivery agmsgd: where daemon enable would refuse, it says why and changes nothing" {
@@ -43,10 +43,10 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   bash "$SCRIPTS/delivery.sh" set turn claude-code "$PROJECT" >/dev/null
   run bash "$SCRIPTS/agmsg" delivery agmsgd --type claude-code --project "$PROJECT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"agmsgd is not available here"* ]]
+  grep -Fq "agmsgd is not available here" <<<"$output"
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" != on ]
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
-  [[ "$output" == *"mode: turn"* ]]
+  grep -Fq "mode: turn" <<<"$output"
 }
 
 @test "delivery agmsgd: with agmsgd already on it leaves the project on monitor and does not enable again" {
@@ -54,16 +54,16 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   run bash "$SCRIPTS/agmsg" delivery agmsgd --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
-  [[ "$output" == *"mode: monitor"* ]]
+  grep -Fq "mode: monitor" <<<"$output"
 }
 
 @test "delivery <mode>: the other modes are exactly delivery.sh set, and an agmsgd that is on is noted" {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
   run bash "$SCRIPTS/agmsg" delivery turn --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"agmsgd is still on"* ]]
+  grep -Fq "agmsgd is still on" <<<"$output"
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
-  [[ "$output" == *"mode: turn"* ]]
+  grep -Fq "mode: turn" <<<"$output"
 }
 
 @test "delivery: an unknown value is refused" {
