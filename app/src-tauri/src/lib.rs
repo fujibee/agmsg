@@ -649,6 +649,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             addons::commands::addon_list,
+            addons::install_cmds::addon_install_start,
+            addons::install_cmds::addon_check_update,
+            addons::install_cmds::addon_install_confirm,
+            addons::install_cmds::addon_install_cancel,
+            addons::install_cmds::addon_remove,
+            addons::install_cmds::addon_dev_load,
+            addons::install_cmds::addon_dev_remove,
+            addons::install_cmds::addon_saved_grants,
+            addons::install_cmds::addon_save_grant,
+            addons::install_cmds::addon_forget_grant,
             addons::commands::addon_pane_add,
             addons::commands::addon_pane_remove,
             addons::commands::addon_pane_loaded,

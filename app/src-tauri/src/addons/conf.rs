@@ -107,7 +107,7 @@ pub fn parse(text: &str, rel: &str) -> ConfReport {
     let val = |k: &str| values.get(k).map(|v| v.0.as_str());
     let at = |k: &str| format!("{rel} line {}", values[k].1);
 
-    if val("title").map_or(true, str::is_empty) {
+    if val("title").is_none_or(str::is_empty) {
         errors.push(format!("{rel}: \"title\" is required."));
     }
     let mut protocol = 0u32;
@@ -149,7 +149,7 @@ pub fn parse(text: &str, rel: &str) -> ConfReport {
         errors.push(format!("{}: \"network\" is set but the network permission is not declared.", at("network")));
     }
     for p in &perms {
-        if val(&format!("why.{p}")).map_or(true, str::is_empty) {
+        if val(&format!("why.{p}")).is_none_or(str::is_empty) {
             warnings.push(format!("{rel}: no \"why.{p}\" line; users see it next to the permission."));
         }
     }
