@@ -14,7 +14,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use std::sync::{Arc, OnceLock};
+
 use super::denylist::Denylist;
+use super::git::{self, DiffRequest, GitBroker, GitEnv, GitError, LogRequest};
 use super::panes::{Authorized, BrokerError, Need, Registry};
 
 pub const MAX_LIST: usize = 5000;
@@ -35,6 +38,22 @@ pub fn need_for(op: &str) -> Option<Need> {
 /// Runs one request. `reg` is locked only while authorizing and while checking
 /// again before the answer is returned; the op itself runs unlocked.
 pub fn handle(reg: &std::sync::Mutex<Registry>, deny: &Denylist, id: u64, generation: u64, op: &str, args: &Value) -> Res {
+    // The git side is only measured when an op needs it, so a pane that never asks
+    // for git never starts a git process.
+    let lazy: &dyn Fn() -> &'static GitSupport = &git_support;
+    handle_with_git(reg, deny, lazy, id, generation, op, args)
+}
+
+/// `handle`, with the git side supplied (tests pass their own).
+pub fn handle_with_git(
+    reg: &std::sync::Mutex<Registry>,
+    deny: &Denylist,
+    git: &dyn Fn() -> &'static GitSupport,
+    id: u64,
+    generation: u64,
+    op: &str,
+    args: &Value,
+) -> Res {
     let need = need_for(op).ok_or_else(|| BrokerError::new("bad_args", format!("unknown op `{op}`")))?;
     let (auth, _slot) = {
         let r = reg.lock().unwrap();
@@ -42,14 +61,14 @@ pub fn handle(reg: &std::sync::Mutex<Registry>, deny: &Denylist, id: u64, genera
         let slot = r.slot(id).ok_or_else(|| BrokerError::new("not_available", "too many requests are waiting"))?;
         (auth, slot)
     };
-    let out = run(&auth, deny, op, args);
+    let out = run(&auth, deny, git, op, args);
     // Re-check just before the answer leaves: if the pane was reloaded, closed
     // or revoked meanwhile, the answer is dropped, not delivered late.
     reg.lock().unwrap().authorize(id, generation, need)?;
     out
 }
 
-fn run(a: &Authorized, deny: &Denylist, op: &str, args: &Value) -> Res {
+fn run(a: &Authorized, deny: &Denylist, git: &dyn Fn() -> &'static GitSupport, op: &str, args: &Value) -> Res {
     match op {
         "open.args" => Ok(serde_json::to_value(&a.open_args).unwrap_or(json!({}))),
         "fs.stat" => {
@@ -59,7 +78,7 @@ fn run(a: &Authorized, deny: &Denylist, op: &str, args: &Value) -> Res {
         }
         "fs.list" => fs_list(a, deny, args),
         "fs.read" => fs_read(a, deny, args),
-        "git.status" | "git.log" | "git.diff" | "git.show" => Err(BrokerError::new("not_available", "git is not available in this build yet")),
+        "git.status" | "git.log" | "git.diff" | "git.show" => git_op(git(), a, deny, op, args),
         _ => Err(BrokerError::new("bad_args", "unknown op")),
     }
 }
@@ -235,14 +254,136 @@ fn fs_read(a: &Authorized, deny: &Denylist, args: &Value) -> Res {
     let mut buf = Vec::new();
     f.take(length).read_to_end(&mut buf).map_err(io_err)?;
     let eof = offset.saturating_add(buf.len() as u64) >= size;
-    // text when it is valid UTF-8 without a NUL byte, bytes otherwise
+    Ok(text_or_bytes(&buf, size, eof))
+}
+
+/// Text when the bytes are valid UTF-8 without a NUL, base64 bytes otherwise
+/// (the window side turns `bytesBase64` into an ArrayBuffer).
+fn text_or_bytes(buf: &[u8], size: u64, eof: bool) -> Value {
     if !buf.contains(&0) {
-        if let Ok(t) = std::str::from_utf8(&buf) {
-            return Ok(json!({ "text": t, "size": size, "eof": eof }));
+        if let Ok(t) = std::str::from_utf8(buf) {
+            return json!({ "text": t, "size": size, "eof": eof });
         }
     }
     use base64::Engine;
-    Ok(json!({ "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&buf), "size": size, "eof": eof }))
+    json!({ "bytesBase64": base64::engine::general_purpose::STANDARD.encode(buf), "size": size, "eof": eof })
+}
+
+// ---- git ----------------------------------------------------------------------
+
+/// Whether `git:read` can be offered on this computer. Measured once: a usable git
+/// that honours `GIT_NO_LAZY_FETCH`. When it is off, every git op answers
+/// `not_available` with the reason.
+pub enum GitSupport {
+    Ready(GitEnv),
+    Off(String),
+}
+
+static GIT: OnceLock<GitSupport> = OnceLock::new();
+
+pub fn git_support() -> &'static GitSupport {
+    GIT.get_or_init(|| {
+        let support = crate::agmsg::base_dir().join("addons").join(".git-support");
+        measure_git(find_git(), &support)
+    })
+}
+
+/// Runs the measurement now (at startup, off the UI thread) so the first git op
+/// does not pay for it. Returns the reason when git:read is off.
+pub fn prepare_git() -> Option<String> {
+    match git_support() {
+        GitSupport::Ready(_) => None,
+        GitSupport::Off(why) => Some(why.clone()),
+    }
+}
+
+pub fn measure_git(git: Result<PathBuf, String>, support_dir: &Path) -> GitSupport {
+    let git = match git {
+        Ok(g) => g,
+        Err(why) => return GitSupport::Off(why),
+    };
+    if let Err(e) = fs::create_dir_all(support_dir) {
+        return GitSupport::Off(format!("cannot prepare {}: {e}", support_dir.display()));
+    }
+    let env = match GitEnv::new(&git, support_dir) {
+        Ok(e) => e,
+        Err(e) => return GitSupport::Off(format!("cannot prepare {}: {e}", support_dir.display())),
+    };
+    match git::probe_no_lazy_fetch(&env, support_dir) {
+        Ok(()) => GitSupport::Ready(env),
+        Err(e) => GitSupport::Off(e.message),
+    }
+}
+
+/// The git to use: the first `git` on the login-shell PATH the app imported (or the
+/// process PATH). On macOS the system `git` is a stub that offers to install the
+/// command line tools, so it is used only when those are installed.
+pub fn find_git() -> Result<PathBuf, String> {
+    let path = crate::imported_path().map(std::ffi::OsString::from).or_else(|| std::env::var_os("PATH")).unwrap_or_default();
+    let exe = if cfg!(windows) { "git.exe" } else { "git" };
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join(exe);
+        if cand.is_file() {
+            if cfg!(target_os = "macos") && cand == Path::new("/usr/bin/git") && !command_line_tools_installed() {
+                continue;
+            }
+            return Ok(cand);
+        }
+    }
+    Err("git was not found on this computer".to_string())
+}
+
+fn command_line_tools_installed() -> bool {
+    std::process::Command::new("/usr/bin/xcode-select")
+        .arg("-p")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn git_err(e: GitError) -> BrokerError {
+    BrokerError::new(e.code.as_str(), e.message)
+}
+
+fn from_args<T: serde::de::DeserializeOwned>(args: &Value) -> Result<T, BrokerError> {
+    serde_json::from_value(args.clone()).map_err(|e| BrokerError::new("bad_args", e.to_string()))
+}
+
+/// One git op. The repository is the granted folder itself; its layout is checked
+/// again on every request (the folder can change between requests), then git runs
+/// only through `GitBroker`.
+fn git_op(support: &GitSupport, a: &Authorized, deny: &Denylist, op: &str, args: &Value) -> Res {
+    let env = match support {
+        GitSupport::Ready(e) => e,
+        GitSupport::Off(why) => return Err(BrokerError::new("not_available", format!("git:read is off on this computer: {why}"))),
+    };
+    let root = a.root.as_ref().ok_or_else(|| BrokerError::new("not_granted", "no folder is allowed for this pane"))?;
+    let root_real = fs::canonicalize(root).map_err(|_| BrokerError::new("not_found", "the allowed folder no longer exists"))?;
+    if deny.is_denied(&root_real) {
+        return Err(BrokerError::new("denied_path", super::denylist::refusal_message(&root_real)));
+    }
+    let g = GitBroker::open(env, &root_real, Arc::new(deny.clone())).map_err(git_err)?;
+    match op {
+        "git.status" => Ok(json!({ "files": g.status().map_err(git_err)? })),
+        "git.log" => {
+            let req: LogRequest = from_args(args)?;
+            Ok(json!({ "commits": g.log(&req).map_err(git_err)? }))
+        }
+        "git.diff" => {
+            let req: DiffRequest = from_args(args)?;
+            let r = g.diff(&req).map_err(git_err)?;
+            serde_json::to_value(r).map_err(|e| BrokerError::new("not_available", e.to_string()))
+        }
+        "git.show" => {
+            let rev = args.get("rev").and_then(Value::as_str).ok_or_else(|| BrokerError::new("bad_args", "`rev` must be a string"))?;
+            let path = args.get("path").and_then(Value::as_str);
+            let r = g.show(rev, path).map_err(git_err)?;
+            Ok(text_or_bytes(&r.bytes, r.size, true))
+        }
+        _ => Err(BrokerError::new("bad_args", "unknown op")),
+    }
 }
 
 #[cfg(test)]
@@ -322,12 +463,108 @@ mod tests {
         assert_eq!(code(call(&f, "", json!({}))), "bad_args");
     }
 
+    fn ready_git(f: &Fx) -> &'static GitSupport {
+        let support = f._tmp.path().join("support");
+        fs::create_dir_all(&support).unwrap();
+        Box::leak(Box::new(GitSupport::Ready(GitEnv::new("git", &support).unwrap())))
+    }
+
+    fn git_call(f: &Fx, g: &'static GitSupport, op: &str, args: Value) -> Res {
+        let lazy = move || g;
+        handle_with_git(&f.reg, &f.deny, &lazy, f.id, f.gen, op, &args)
+    }
+
+    fn sh_git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
     #[test]
-    fn git_is_not_available_yet_but_still_gated() {
+    fn git_ops_stay_gated_and_answer_for_a_folder_that_is_not_a_repository() {
         let f = fx(Declared { files_read: true, git_read: true, ..Default::default() });
-        assert_eq!(code(call(&f, "git.status", json!({}))), "not_available");
+        assert_eq!(code(call(&f, "git.status", json!({}))), "unsupported_repo", "proj has no .git");
         let g = fx(files_only());
         assert_eq!(code(call(&g, "git.log", json!({}))), "not_declared");
+    }
+
+    #[test]
+    fn git_is_off_with_its_reason_when_it_was_not_measured_ok() {
+        let f = fx(Declared { files_read: true, git_read: true, ..Default::default() });
+        let off: &'static GitSupport = Box::leak(Box::new(GitSupport::Off("this git starts a transport helper".into())));
+        for op in ["git.status", "git.log", "git.diff", "git.show"] {
+            let e = git_call(&f, off, op, json!({"rev": "HEAD", "path": "a"})).unwrap_err();
+            assert_eq!(e.code, "not_available", "{op}");
+            assert!(e.message.contains("git:read is off") && e.message.contains("transport helper"), "{}", e.message);
+        }
+    }
+
+    #[test]
+    fn git_status_log_diff_and_show_over_the_broker() {
+        let f = fx(Declared { files_read: true, git_read: true, ..Default::default() });
+        let g = ready_git(&f);
+        sh_git(&f.root, &["init", "-q", "-b", "main"]);
+        sh_git(&f.root, &["add", "README.md", "src"]);
+        sh_git(&f.root, &["commit", "-q", "-m", "first"]);
+        fs::write(f.root.join("README.md"), "# changed\n").unwrap();
+        fs::write(f.root.join("new.txt"), "new\n").unwrap();
+
+        let st = git_call(&f, g, "git.status", json!({})).unwrap();
+        let files: Vec<(&str, &str)> = st["files"].as_array().unwrap().iter().map(|e| (e["path"].as_str().unwrap(), e["status"].as_str().unwrap())).collect();
+        assert!(files.contains(&("README.md", "modified")) && files.contains(&("new.txt", "added")), "{files:?}");
+
+        let d = git_call(&f, g, "git.diff", json!({})).unwrap();
+        assert_eq!(d["base"]["rev"], "HEAD");
+        assert_eq!(d["head"]["worktree"], true);
+        let readme = d["files"].as_array().unwrap().iter().find(|e| e["path"] == "README.md").unwrap();
+        assert_eq!(readme["hunks"][0]["lines"][0]["type"], "del");
+        assert_eq!(readme["hunks"][0]["lines"][0]["oldNo"], 1);
+        let ctx = git_call(&f, g, "git.diff", json!({"context": "all", "path": "README.md"})).unwrap();
+        assert_eq!(ctx["files"].as_array().unwrap().len(), 1);
+        assert_eq!(code_of(git_call(&f, g, "git.diff", json!({"context": "lots"}))), "bad_args");
+        assert_eq!(code_of(git_call(&f, g, "git.diff", json!({"base": "--output=/tmp/x"}))), "bad_args");
+
+        let log = git_call(&f, g, "git.log", json!({})).unwrap();
+        assert_eq!(log["commits"][0]["subject"], "first");
+        assert_eq!(log["commits"].as_array().unwrap().len(), 1);
+
+        let shown = git_call(&f, g, "git.show", json!({"rev": "HEAD", "path": "README.md"})).unwrap();
+        assert_eq!(shown["text"], "# hi\n");
+        assert_eq!(shown["eof"], true);
+        assert_eq!(code_of(git_call(&f, g, "git.show", json!({"rev": "HEAD"}))), "bad_args", "a path is required");
+        assert_eq!(code_of(git_call(&f, g, "git.show", json!({"path": "README.md"}))), "bad_args");
+        assert_eq!(code_of(git_call(&f, g, "git.show", json!({"rev": "HEAD", "path": "missing"}))), "not_found");
+        // binary content comes back as bytes
+        sh_git(&f.root, &["add", "blob.bin"]);
+        sh_git(&f.root, &["commit", "-q", "-m", "bin"]);
+        let bin = git_call(&f, g, "git.show", json!({"rev": "HEAD", "path": "blob.bin"})).unwrap();
+        assert!(bin.get("text").is_none() && bin["bytesBase64"].is_string());
+    }
+
+    fn code_of(r: Res) -> &'static str {
+        r.unwrap_err().code
+    }
+
+    #[test]
+    fn git_measurement_reports_a_missing_git_and_passes_on_a_good_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        match measure_git(Err("git was not found on this computer".into()), tmp.path()) {
+            GitSupport::Off(why) => assert!(why.contains("not found")),
+            _ => panic!("expected off"),
+        }
+        #[cfg(unix)]
+        match measure_git(find_git(), tmp.path()) {
+            GitSupport::Ready(_) => {}
+            GitSupport::Off(why) => panic!("git is expected on a development machine: {why}"),
+        }
     }
 
     #[test]

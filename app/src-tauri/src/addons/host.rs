@@ -120,6 +120,11 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     host.panes.set_app_dirs(app_owned_dirs(&handle));
     let builtin_root = super::catalog::Catalog::locate_builtin_root(handle.path().resource_dir().ok());
     let _ = host.catalog.set(super::catalog::Catalog::new(builtin_root, crate::agmsg::base_dir().join("addons")));
+    // Measure git once at startup, off this thread: git:read is off, with the reason, when it fails.
+    std::thread::spawn(|| match super::broker::prepare_git() {
+        None => eprintln!("[addons] git:read is available"),
+        Some(why) => eprintln!("[addons] git:read is off: {why}"),
+    });
     {
         let list: Vec<String> = host.catalog().list().iter().map(|a| format!("{}({})", a.id, if a.digest_ok { "ok" } else { "CHANGED" })).collect();
         eprintln!("[addons] add-ons: {}", if list.is_empty() { "none".to_string() } else { list.join(" ") });
