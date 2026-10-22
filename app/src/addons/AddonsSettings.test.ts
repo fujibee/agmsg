@@ -104,4 +104,16 @@ describe("locale keys", () => {
     expect(html).toContain("addons.listRetry");
     expect(render({})).not.toContain("addons.listFailed");
   });
+  it("shows a notice above the installed list, and developer copies with a DEV badge, Reload and Remove", () => {
+    const dev = { ...mockSnapshot.addons[0], id: "dev:x", builtin: false, dev: { label: "my-folder", copy: "dev copy 1" } };
+    const html = render({
+      notice: { kind: "info", text: "Up to date (abc1234)." },
+      snapshot: { ...mockSnapshot, addons: [...mockSnapshot.addons, dev] },
+    });
+    expect(html).toContain("Up to date (abc1234).");
+    expect(html).toContain("&quot;folder&quot;:&quot;my-folder&quot;");
+    expect(html).toContain("addons.developer.reload");
+    // a dev copy is not in the installed list (no updates, no saved grants)
+    expect(html.split("addons.developer.title")[0]).not.toContain("dev:x");
+  });
 });

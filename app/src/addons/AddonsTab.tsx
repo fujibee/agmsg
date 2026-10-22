@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AddonsSettings } from "./AddonsSettings";
+import { AddonsTabLive } from "./AddonsTabLive";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
 import type { Catalog } from "./catalog";
 import { mockSnapshot, mockStage } from "./mock";
@@ -9,13 +10,16 @@ import type { AddonsSnapshot, FetchProgress, InstallError, StagedInstall } from 
 // Container for Settings → Add-ons. Holds the snapshot in local state seeded
 // from the mock module; the wiring later replaces the seed and the callbacks
 // with the Tauri commands, and the screens do not change.
-export function AddonsTab(props: { catalog: Catalog }) {
+export function AddonsTab(props: { catalog: Catalog; openPanesOf: (addonId: string) => number }) {
+  return props.catalog.live ? <AddonsTabLive catalog={props.catalog} openPanesOf={props.openPanesOf} /> : <MockAddonsTab catalog={props.catalog} />;
+}
+
+function MockAddonsTab(props: { catalog: Catalog }) {
   const { catalog } = props;
   const { t } = useTranslation();
   const tt = t as never;
   const [local, setSnapshot] = useState<AddonsSnapshot>(mockSnapshot);
-  // The add-on list is Rust's answer in the app (the mock's local edits only apply without Tauri).
-  const snapshot: AddonsSnapshot = catalog.live ? { ...local, addons: catalog.addons, grants: [] } : local;
+    const snapshot: AddonsSnapshot = local;
   const [installError, setInstallError] = useState<InstallError | null>(null);
   const [staged, setStaged] = useState<StagedInstall | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
@@ -57,9 +61,6 @@ export function AddonsTab(props: { catalog: Catalog }) {
         t={tt}
         snapshot={snapshot}
         engine={catalog.engine}
-        canInstall={!catalog.live}
-        listError={catalog.listError}
-        onRetryList={catalog.reload}
         installError={installError}
         onInstall={({ owner, repo }) => {
           if (snapshot.addons.some((a) => a.id === `${owner}/${repo}`)) {

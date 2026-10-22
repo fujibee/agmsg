@@ -15,7 +15,7 @@ export function ConfirmInstallDialog(props: {
   onCancel: () => void;
 }) {
   const { t, staged } = props;
-  const diff = staged.from ? permissionDiff(staged.from.panes, staged.panes) : null;
+  const diff = staged.diff ?? (staged.from ? permissionDiff(staged.from.panes, staged.panes) : null);
   const perms = new Map<Permission, { panes: string[] }>();
   for (const pane of staged.panes) for (const p of pane.permissions) perms.set(p, { panes: [...(perms.get(p)?.panes ?? []), pane.name] });
   const net = addonNetwork({ panes: staged.panes } as InstalledAddon);
@@ -99,8 +99,12 @@ export function FetchProgressView(props: { t: Translate; progress: FetchProgress
         ? t("addons.fetch.resolved", { sha: shortSha(p.sha) })
         : t("addons.fetch.resolving")
       : p.step === "downloading"
-        ? t("addons.fetch.downloading", { done: p.doneMb, total: p.totalMb })
-        : t("addons.fetch.checking", { files: p.files, size: p.sizeMb });
+        ? p.doneMb === undefined || p.totalMb === undefined
+          ? t("addons.fetch.downloadingPlain")
+          : t("addons.fetch.downloading", { done: p.doneMb, total: p.totalMb })
+        : p.files === undefined || p.sizeMb === undefined
+          ? t("addons.fetch.checkingPlain")
+          : t("addons.fetch.checking", { files: p.files, size: p.sizeMb });
   return (
     <div className="addon-fetch" role="status">
       <span>{text}</span>{" "}

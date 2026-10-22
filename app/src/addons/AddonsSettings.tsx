@@ -24,13 +24,18 @@ export function AddonsSettings(props: {
   /** addon_list failed: shown with a retry instead of an empty list. */
   listError?: string;
   onRetryList?: () => void;
+  /** A one-line result shown above the installed list: "Up to date (abc1234)." or a failure of check / remove / load. */
+  notice?: { kind: "info" | "error"; text: string } | null;
+  /** Developer copies get Reload and Remove here. */
+  onDevReload?: (addonId: string) => void;
 }) {
   const { t, snapshot, engine } = props;
   const canInstall = props.canInstall ?? true;
   const [input, setInput] = useState("");
   const parsed = parseRepoInput(input);
   const builtins = snapshot.addons.filter((a) => a.builtin);
-  const installed = snapshot.addons.filter((a) => !a.builtin);
+  const installed = snapshot.addons.filter((a) => !a.builtin && !a.dev);
+  const devs = snapshot.addons.filter((a) => a.dev);
 
   if (!engine.ok) {
     return (
@@ -77,6 +82,11 @@ export function AddonsSettings(props: {
 
       <section>
         <h3>{t("addons.installed.title")}</h3>
+        {props.notice && (
+          <p className={`addon-notice ${props.notice.kind}`} role={props.notice.kind === "error" ? "alert" : "status"}>
+            {props.notice.text}
+          </p>
+        )}
         <InstalledList {...props} installed={installed} />
         <form
           className="addon-install-form"
@@ -127,6 +137,27 @@ export function AddonsSettings(props: {
           <button type="button" onClick={props.onLoadFromFolder}>
             {t("addons.developer.loadFromFolder")}
           </button>
+          <h4>{t("addons.developer.loaded")}</h4>
+          {devs.length === 0 && <p className="modal-note">{t("addons.developer.none")}</p>}
+          <ul className="addon-list">
+            {devs.map((a) => (
+              <li key={a.id} className="addon-row">
+                <div className="addon-head">
+                  <span className="addon-name">{a.panes.map((p) => p.title).join(", ")}</span>
+                  <span className="addon-badge">{t("addons.pane.dev", { folder: a.dev?.label ?? a.id })}</span>
+                </div>
+                <PermissionList t={t} addon={a} />
+                <div className="addon-actions">
+                  <button type="button" onClick={() => props.onDevReload?.(a.id)}>
+                    {t("addons.developer.reload")}
+                  </button>
+                  <button type="button" onClick={() => props.onRemove(a.id)}>
+                    {t("addons.developer.remove")}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
         </details>
       )}
     </div>

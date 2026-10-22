@@ -3,13 +3,13 @@
 // by tests with a mocked invoke. Rust decides everything; this only maps its
 // answers to what the screens show.
 
-import type { AddonPaneDecl, EngineState, InstalledAddon, NetworkScope, Permission } from "./types";
+import type { AddonPaneDecl, EngineState, InstalledAddon, NetworkScope, Permission, StagedInstall } from "./types";
 import { PERMISSIONS } from "./types";
 
 /** addon_list's rows (camelCase JSON). Rust never returns a path. */
 export type AddonInfoRaw = {
   id: string;
-  kind: "builtin" | "installed";
+  kind: "builtin" | "installed" | "dev";
   source: string;
   commit: string;
   title: string;
@@ -33,8 +33,10 @@ export function parseNetwork(n: string): NetworkScope {
   return { kind: "origins", origins: n.split(",").map((o) => o.trim()).filter(Boolean) };
 }
 
-export function toInstalledAddon(r: AddonInfoRaw): InstalledAddon {
-  const panes: AddonPaneDecl[] = r.panes.map((p) => ({
+type PaneRaw = { name: string; title: string; permissions: string[]; network: string; opens: string[]; why: Record<string, string> };
+
+export function toPaneDecl(p: PaneRaw): AddonPaneDecl {
+  return {
     name: p.name,
     title: p.title,
     permissions: p.permissions.filter((x): x is Permission => (PERMISSIONS as readonly string[]).includes(x)),
@@ -42,19 +44,79 @@ export function toInstalledAddon(r: AddonInfoRaw): InstalledAddon {
     // A pane that opens with both path and url shows as the first; the add-on's own list is Rust's to enforce.
     opens: p.opens[0] === "path" || p.opens[0] === "url" ? p.opens[0] : "",
     why: p.why as AddonPaneDecl["why"],
-  }));
+  };
+}
+
+export function toInstalledAddon(r: AddonInfoRaw): InstalledAddon {
   return {
     id: r.id,
     builtin: r.kind === "builtin",
-    sha: r.kind === "builtin" ? "" : r.commit,
+    sha: r.kind === "installed" ? r.commit : "",
     archiveSha256: "",
     payloadDigest: "",
-    panes,
+    panes: r.panes.map(toPaneDecl),
     installedAt: "",
     enabled: r.enabled,
     digestOk: r.digestOk,
     problems: r.problems,
+    ...(r.kind === "dev" ? { dev: { label: r.source, copy: r.commit } } : {}),
   };
+}
+
+/** addon_install_start / addon_check_update: what the confirm dialog is built from. */
+export type ConfirmRaw = {
+  stagingId: string;
+  repo: string;
+  sha: string;
+  archiveSha256: string;
+  treeDigest: string;
+  panes: (PaneRaw & { entry: string; canSendWhatItReads: boolean })[];
+  warnings: string[];
+  files: number;
+  bytes: number;
+  previousSha: string | null;
+  asksAgain: boolean;
+  addedPermissions: string[];
+  removedPermissions: string[];
+  networkWidened: boolean;
+  networkNewlyCombined: boolean;
+};
+
+export function toStaged(c: ConfirmRaw): StagedInstall {
+  const panes = c.panes.map(toPaneDecl);
+  return {
+    addonId: c.repo,
+    title: panes[0]?.title ?? c.repo,
+    sha: c.sha,
+    archiveSha256: c.archiveSha256,
+    panes,
+    stagingId: c.stagingId,
+    ...(c.previousSha
+      ? {
+          from: { sha: c.previousSha, panes: [] },
+          diff: {
+            added: c.addedPermissions.filter((x): x is Permission => (PERMISSIONS as readonly string[]).includes(x)),
+            networkWider: c.networkWidened,
+            networkWithRead: c.networkNewlyCombined,
+            asksAgain: c.asksAgain,
+          },
+        }
+      : {}),
+  };
+}
+
+export type InstallDone = { id: string; repo: string; sha: string; previousSha: string | null; closedPanes: number[] };
+export type DevEntryRaw = { id: string; label: string; panes: string[]; copy: number };
+export type SavedGrantRaw = { permission: string; scope: string; grantedAt: string };
+
+export type Outcome<T> = { ok: true; value: T } | { ok: false; error: CommandError };
+
+async function attempt<T>(fn: () => Promise<T>): Promise<Outcome<T>> {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (e) {
+    return { ok: false, error: toCommandError(e) };
+  }
 }
 
 /** What addon_pane_add returns: the frame URL and what Rust read from addon.conf. */
@@ -93,6 +155,21 @@ export function createLiveSource(invoke: Invoke) {
     async addPane(spec: { addonId: string; pane: string; openArgs: { path?: string; url?: string; base?: string } }): Promise<AddedPane> {
       return (await invoke("addon_pane_add", { spec })) as AddedPane;
     },
+    installStart: (source: string, opId: string) =>
+      attempt(async () => toStaged((await invoke("addon_install_start", { spec: { source, opId } })) as ConfirmRaw)),
+    checkUpdate: (id: string, opId: string) =>
+      attempt(async () => toStaged((await invoke("addon_check_update", { spec: { id, opId } })) as ConfirmRaw)),
+    installConfirm: (stagingId: string) => attempt(async () => (await invoke("addon_install_confirm", { spec: { stagingId } })) as InstallDone),
+    installCancel: (stagingId: string) => attempt(async () => void (await invoke("addon_install_cancel", { spec: { stagingId } }))),
+    remove: (id: string) => attempt(async () => void (await invoke("addon_remove", { spec: { id } }))),
+    devLoad: (path: string) => attempt(async () => (await invoke("addon_dev_load", { spec: { path } })) as DevEntryRaw),
+    devRemove: (id: string) => attempt(async () => void (await invoke("addon_dev_remove", { spec: { id } }))),
+    savedGrants: (id: string, pane: string) =>
+      attempt(async () => (await invoke("addon_saved_grants", { spec: { id, pane } })) as SavedGrantRaw[]),
+    saveGrant: (id: string, pane: string, permission: "files:read" | "messages:read", scope: string) =>
+      attempt(async () => void (await invoke("addon_save_grant", { spec: { id, pane, permission, scope } }))),
+    forgetGrant: (id: string, pane: string, permission: string, scope: string) =>
+      attempt(async () => (await invoke("addon_forget_grant", { spec: { id, pane, permission, scope } })) as boolean),
     async removePane(id: number): Promise<void> {
       await invoke("addon_pane_remove", { id });
     },

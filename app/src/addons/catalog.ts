@@ -46,8 +46,9 @@ export function useAddonCatalog(): Catalog {
   useEffect(() => {
     if (!live) return;
     reload();
-    const un = listen("addon-gate", reload);
-    return () => void un.then((f) => f());
+    // The gate changed, or an install / update / removal / dev load finished: ask Rust again.
+    const unlisten = [listen("addon-gate", reload), listen("addon-updated", reload)];
+    return () => unlisten.forEach((un) => void un.then((f) => f()));
   }, [reload]);
   return { live, ready: state.ready, addons: state.addons, engine: state.engine, listError: state.listError, reload };
 }

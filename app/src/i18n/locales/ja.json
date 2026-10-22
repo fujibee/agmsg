@@ -287,7 +287,11 @@
     },
     "developer": {
       "title": "開発者",
-      "loadFromFolder": "フォルダから読み込み…"
+      "loadFromFolder": "フォルダから読み込み…",
+      "loaded": "開発用アドオン",
+      "none": "読み込んだ開発用アドオンはありません。",
+      "reload": "フォルダから再読み込み",
+      "remove": "削除"
     },
     "permission": {
       "none": "権限なしで動作します",
@@ -334,7 +338,8 @@
       },
       "github_error": "GitHub から応答がありません: {{status}}。もう一度試してください。",
       "rate_limited": "GitHub は未認証のダウンロードを制限しています。{{time}} 以降に再試行してください。",
-      "already_installed": "インストール済みです({{sha}})。"
+      "already_installed": "インストール済みです({{sha}})。",
+      "message": "{{message}}"
     },
     "pane": {
       "reload": "再読み込み",
@@ -387,7 +392,9 @@
       "resolving": "commit を解決しています…",
       "resolved": "Commit {{sha}}",
       "downloading": "ダウンロード中 {{done}} MB / {{total}} MB…",
-      "checking": "ファイルを確認中: {{files}} ファイル、{{size}} MB"
+      "checking": "ファイルを確認中: {{files}} ファイル、{{size}} MB",
+      "downloadingPlain": "ダウンロード中…",
+      "checkingPlain": "ファイルを確認中…"
     },
     "request": {
       "wants": "{{agent}} が {{pane}} を開きたい: {{args}}",
