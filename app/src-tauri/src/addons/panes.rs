@@ -108,6 +108,16 @@ pub struct AddPane {
 }
 
 #[derive(Default)]
+/// What a pane instance is and holds right now (to bind a saved consent to it).
+#[derive(Debug, Clone)]
+pub struct ConsentView {
+    pub addon: String,
+    pub pane: String,
+    pub commit: String,
+    pub team: Option<String>,
+    pub root: Option<String>,
+}
+
 pub struct Registry {
     next: PaneId,
     panes: HashMap<PaneId, Pane>,
@@ -181,6 +191,29 @@ impl Registry {
         let mut v: Vec<_> = self.panes.values().filter(|p| p.addon == addon).map(|p| p.id).collect();
         v.sort();
         v
+    }
+
+    /// Open panes of `addon`/`pane` that currently hold exactly this grant
+    /// (`files:read` on this folder, `messages:read` on this team).
+    pub fn holders(&self, addon: &str, pane: &str, permission: &str, scope: &str) -> Vec<PaneId> {
+        let mut v: Vec<_> = self
+            .panes
+            .values()
+            .filter(|p| p.addon == addon && p.name == pane)
+            .filter(|p| match permission {
+                "files:read" => p.root.as_ref().is_some_and(|r| r.to_string_lossy() == scope),
+                "messages:read" => p.team.as_deref() == Some(scope),
+                _ => false,
+            })
+            .map(|p| p.id)
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// What a pane instance is and holds, for binding a saved consent to it.
+    pub fn consent_view(&self, id: PaneId) -> Option<ConsentView> {
+        self.panes.get(&id).map(|p| ConsentView { addon: p.addon.clone(), pane: p.name.clone(), commit: p.commit.clone(), team: p.team.clone(), root: p.root.as_ref().map(|r| r.to_string_lossy().into_owned()) })
     }
 
     pub fn contains(&self, id: PaneId) -> bool {

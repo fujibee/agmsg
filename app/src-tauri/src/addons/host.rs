@@ -54,6 +54,11 @@ pub struct AddonHost {
 }
 
 impl AddonHost {
+    #[cfg(test)]
+    pub fn set_catalog_for_test(&self, c: super::catalog::Catalog) {
+        let _ = self.catalog.set(c);
+    }
+
     /// The built-in and installed add-ons. Set once at startup.
     pub fn catalog(&self) -> &super::catalog::Catalog {
         self.catalog.get().expect("the add-on catalog is set at startup")
