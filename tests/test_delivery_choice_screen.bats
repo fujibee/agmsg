@@ -25,12 +25,14 @@ _step5() {   # <file>: the delivery step of the join flow
   done
 }
 
-@test "choice screen: the three offer answers are handled (on, unavailable with a reason)" {
+@test "choice screen: every offer answer is handled (on, not-running, unavailable with a reason)" {
   for file in "$BATS_TEST_TMPDIR/claude-code.md" "$BATS_TEST_TMPDIR/codex.md"; do
     screen="$(_step5 "$file")"
     grep -Fq 'agmsgd=on' <<<"$screen"
     grep -Fq 'agmsgd is on: notices are delivered directly' <<<"$screen"
     grep -Fq 'agmsgd=unavailable' <<<"$screen"
+    grep -Fq 'agmsgd=not-running' <<<"$screen"
+    grep -Fq 'do not say notices are delivered directly' <<<"$screen"
   done
 }
 

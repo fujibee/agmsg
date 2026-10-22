@@ -14,6 +14,17 @@ setup() {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
 }
 
+_mark_daemon_ready() {
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path='$(command -v node)'; UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+}
+
 teardown() { rm -rf "$TEST_SKILL_DIR"; }
 
 @test "offer: a fresh install can enable agmsgd" {
@@ -29,10 +40,18 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" != on ]
 }
 
-@test "offer: agmsgd that is already on is reported as on, not offered again" {
-  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
+@test "offer: agmsgd that is on and running is reported as on, not offered again" {
+  _mark_daemon_ready
   run bash "$SCRIPTS/daemon.sh" offer claude-code
   [ "$output" = "agmsgd=on" ]
+}
+
+@test "offer: turned on but nothing running is not reported as on (a failed start leaves exactly this)" {
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
+  run bash "$SCRIPTS/daemon.sh" offer claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" != "agmsgd=on" ]
+  [[ "$output" == "agmsgd=not-running reason="* ]]
 }
 
 @test "offer: a non-sqlite storage is unavailable, with the reason" {

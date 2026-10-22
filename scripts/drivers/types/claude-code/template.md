@@ -8,11 +8,12 @@
        2. `monitor (legacy)` — the Claude Code Monitor tool streams the inbox (the `monitor` mode value).
        3. `turn`, 4. `both`, 5. `off` — as before.
      - `agmsgd=on`: do not ask which to use. Say "agmsgd is on: notices are delivered directly" and ask only whether to keep using it or switch to `monitor (legacy)`.
+     - `agmsgd=not-running reason=...`: agmsgd is turned on but is not running, so do not say notices are delivered directly. Say so with the reason and ask whether to start it (`agmsg delivery agmsgd` starts it) or switch to `monitor (legacy)`.
      - `agmsgd=unavailable reason=...`: do not offer agmsgd; say the reason in one line, then ask for `monitor (legacy)`, `turn`, `both`, or `off` (empty input means `monitor`).
 
      To apply the choice, run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery <choice> --type __AGENT_TYPE__ --project "$(pwd)"` with `<choice>` = `agmsgd`, `monitor`, `turn`, `both` or `off` (`monitor (legacy)` is the value `monitor`) and show its output and follow the printed `AGMSG-DIRECTIVE` block:
      - `agmsgd` turns the background service on (`daemon enable`) and leaves the project on `monitor` as the fallback for a seat whose destination is not confirmed yet. If it fails, say so and offer the other choices.
-     - Keep using agmsgd (it is on): run `agmsg delivery agmsgd` the same way.
+     - Keep using agmsgd (it is on or turned on but not running): run `agmsg delivery agmsgd` the same way.
      - `monitor (legacy)` when agmsgd is on: run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg daemon disable` first, then `agmsg delivery monitor`.
 <!-- /agmsg:slot delivery -->
 

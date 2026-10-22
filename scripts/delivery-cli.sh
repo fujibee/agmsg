@@ -50,6 +50,7 @@ case "$ACTION" in
   status)
     case "$offer" in
       agmsgd=on) echo "delivery: agmsgd (on) — notices are delivered directly" ;;
+      agmsgd=not-running*) echo "delivery: agmsgd (on, but not running: ${offer#*reason=}) — start it with: agmsg delivery agmsgd" ;;
       agmsgd=available) echo "delivery: agmsgd (off) — available; turn it on with: agmsg delivery agmsgd" ;;
       agmsgd=unavailable*) echo "delivery: agmsgd (unavailable) — ${offer#*reason=}" ;;
       *) echo "delivery: agmsgd (unknown)" ;;
@@ -68,6 +69,9 @@ case "$ACTION" in
   agmsgd)
     case "$offer" in
       agmsgd=on) ;;
+      agmsgd=not-running*)
+        bash "$SCRIPT_DIR/daemon.sh" start || { echo "agmsg delivery: agmsgd is turned on but could not be started; this project's delivery is unchanged" >&2; exit 1; }
+        ;;
       agmsgd=available)
         bash "$SCRIPT_DIR/daemon.sh" enable || { echo "agmsg delivery: agmsgd was not turned on; this project's delivery is unchanged" >&2; exit 1; }
         ;;

@@ -866,7 +866,8 @@ cmd_disable() {
 
 # `agmsg daemon offer <type>` -- read-only. One line saying whether the delivery
 # choice screen should offer agmsgd for this agent type:
-#   agmsgd=on                       already turned on; do not ask again
+#   agmsgd=on                       turned on and running; do not ask again
+#   agmsgd=not-running reason=...   turned on, but not confirmed running
 #   agmsgd=available                enable would go ahead
 #   agmsgd=unavailable reason=...   enable would refuse (or does not apply)
 # It changes nothing, and never enables anything.
@@ -878,7 +879,15 @@ cmd_offer() {
   esac
   desired="$(sqlite3 -readonly -cmd '.timeout 100' "$INSTALL_DB" 'SELECT desired FROM daemon_intent;' 2>/dev/null | tr -d '\r' || true)"
   if [ "$desired" = on ]; then
-    echo "agmsgd=on"
+    # Turned on is an intent, not proof that notices are being delivered:
+    # a failed start or a stopped executor leaves it on with nothing running.
+    local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+    agmsg_daemon_read_state
+    if [ "${AGMSGD_HEALTH:-}" = ready ]; then
+      echo "agmsgd=on"
+    else
+      echo "agmsgd=not-running reason=${AGMSGD_REASON:-agmsgd is turned on but is not confirmed running}"
+    fi
     return 0
   fi
   if [ "$(_os)" = linux ] && ! _systemd_user_usable; then
