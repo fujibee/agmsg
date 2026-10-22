@@ -168,7 +168,18 @@ fn read_small(p: &Path) -> Res<Option<String>> {
 /// objects, packs, refs and control files by following whatever is there, so a
 /// link below `objects/` or `refs/` is as much a way out as one at the top.
 /// Links are checked, not followed; a link that stays inside is allowed.
-fn check_no_link_out(root: &Path, dir: &Path) -> Res<()> {
+/// Refuse a place the denylist protects: git would read it for the repository.
+fn refuse_denied(snap: &Snapshot, p: &Path) -> Res<()> {
+    if snap.is_denied(p) {
+        return Err(GitError::new(
+            ErrorCode::DeniedPath,
+            super::denylist::refusal_message(p),
+        ));
+    }
+    Ok(())
+}
+
+fn check_no_link_out(root: &Path, dir: &Path, snap: &Snapshot) -> Res<()> {
     let mut stack = vec![resolve(dir)];
     let mut seen = 0usize;
     while let Some(d) = stack.pop() {
@@ -201,6 +212,13 @@ fn check_no_link_out(root: &Path, dir: &Path) -> Res<()> {
                         "a folder link inside .git is not supported ({shown})"
                     )));
                 }
+                // Any other link is refused too: what git would read through it
+                // (a file inside a protected place, or inside the root but meant
+                // to be something else) is not something to vouch for.
+                refuse_denied(snap, &real)?;
+                return Err(unsupported(format!(
+                    "a link inside .git is not supported ({shown})"
+                )));
             } else if ft.is_dir() {
                 stack.push(path);
             }
@@ -210,7 +228,7 @@ fn check_no_link_out(root: &Path, dir: &Path) -> Res<()> {
 }
 
 /// Validate the repository at `root` (the real path of the granted folder).
-pub fn validate_layout(root: &Path) -> Res<Layout> {
+pub fn validate_layout(root: &Path, snap: &Snapshot) -> Res<Layout> {
     let root = root
         .canonicalize()
         .map_err(|e| not_found(format!("cannot read the folder: {e}")))?;
@@ -220,6 +238,7 @@ pub fn validate_layout(root: &Path) -> Res<Layout> {
     if !is_under(&root, &dotgit) {
         return Err(outside(".git points outside the granted folder"));
     }
+    refuse_denied(snap, &dotgit)?;
     let git_dir = if meta.is_dir() {
         dotgit
     } else {
@@ -243,6 +262,7 @@ pub fn validate_layout(root: &Path) -> Res<Layout> {
                 "the gitdir of this repository is outside the granted folder",
             ));
         }
+        refuse_denied(snap, &abs)?;
         resolve(&abs)
     };
     if !git_dir.join("HEAD").is_file() {
@@ -261,6 +281,7 @@ pub fn validate_layout(root: &Path) -> Res<Layout> {
                     "the common git directory of this repository is outside the granted folder",
                 ));
             }
+            refuse_denied(snap, &abs)?;
             resolve(&abs)
         }
         _ => git_dir.clone(),
@@ -270,15 +291,15 @@ pub fn validate_layout(root: &Path) -> Res<Layout> {
         git_dir,
         common_dir,
     };
-    check_entries(&layout)?;
-    check_alternates(&layout.root, &layout.common_dir.join("objects"), 0)?;
-    check_config(&layout)?;
+    check_entries(&layout, snap)?;
+    check_alternates(&layout.root, &layout.common_dir.join("objects"), 0, snap)?;
+    check_config(&layout, snap)?;
     Ok(layout)
 }
 
 /// Top-level files and folders of the git directories must not be links that
 /// lead out, and a promisor pack means a partial clone.
-fn check_entries(l: &Layout) -> Res<()> {
+fn check_entries(l: &Layout, snap: &Snapshot) -> Res<()> {
     for dir in [&l.git_dir, &l.common_dir] {
         for name in [
             "HEAD",
@@ -300,9 +321,9 @@ fn check_entries(l: &Layout) -> Res<()> {
             }
         }
     }
-    check_no_link_out(&l.root, &l.git_dir)?;
+    check_no_link_out(&l.root, &l.git_dir, snap)?;
     if l.common_dir != l.git_dir {
-        check_no_link_out(&l.root, &l.common_dir)?;
+        check_no_link_out(&l.root, &l.common_dir, snap)?;
     }
     if let Ok(rd) = fs::read_dir(l.common_dir.join("objects/pack")) {
         for e in rd.flatten() {
@@ -314,7 +335,7 @@ fn check_entries(l: &Layout) -> Res<()> {
     Ok(())
 }
 
-fn check_alternates(root: &Path, objects: &Path, depth: usize) -> Res<()> {
+fn check_alternates(root: &Path, objects: &Path, depth: usize, snap: &Snapshot) -> Res<()> {
     if depth > MAX_ALTERNATE_DEPTH {
         return Err(unsupported("object alternates are nested too deeply"));
     }
@@ -338,17 +359,19 @@ fn check_alternates(root: &Path, objects: &Path, depth: usize) -> Res<()> {
                     "this repository borrows objects from outside the granted folder (alternates)",
                 ));
             }
+            refuse_denied(snap, &abs)?;
             if file == "info/alternates" {
                 let alt = resolve(&abs);
-                check_no_link_out(root, &alt)?;
-                check_alternates(root, &alt, depth + 1)?;
+                refuse_denied(snap, &alt)?;
+                check_no_link_out(root, &alt, snap)?;
+                check_alternates(root, &alt, depth + 1, snap)?;
             }
         }
     }
     Ok(())
 }
 
-fn check_config(l: &Layout) -> Res<()> {
+fn check_config(l: &Layout, snap: &Snapshot) -> Res<()> {
     let mut files = vec![
         l.common_dir.join("config"),
         l.common_dir.join("config.worktree"),
@@ -358,7 +381,7 @@ fn check_config(l: &Layout) -> Res<()> {
         files.push(l.git_dir.join("config.worktree"));
     }
     for f in files {
-        scan_config(&l.root, &f, 0)?;
+        scan_config(&l.root, &f, 0, snap)?;
     }
     Ok(())
 }
@@ -366,7 +389,7 @@ fn check_config(l: &Layout) -> Res<()> {
 /// A lenient, conservative reader of git config syntax. It does not need to be
 /// exact: it must never *miss* what git would read, so it looks at the key names
 /// alone (any section) and refuses on any sign of a redirect or a partial clone.
-fn scan_config(root: &Path, file: &Path, depth: usize) -> Res<()> {
+fn scan_config(root: &Path, file: &Path, depth: usize, snap: &Snapshot) -> Res<()> {
     if depth > MAX_INCLUDE_DEPTH {
         return Err(unsupported("config includes are nested too deeply"));
     }
@@ -378,6 +401,7 @@ fn scan_config(root: &Path, file: &Path, depth: usize) -> Res<()> {
             "a config file of this repository is outside the granted folder",
         ));
     }
+    refuse_denied(snap, file)?;
     let Some(text) = read_small(file)? else {
         return Ok(());
     };
@@ -439,7 +463,8 @@ fn scan_config(root: &Path, file: &Path, depth: usize) -> Res<()> {
                 if !is_under(root, &abs) {
                     return Err(outside("a config include is outside the granted folder"));
                 }
-                scan_config(root, &resolve(&abs), depth + 1)?;
+                refuse_denied(snap, &abs)?;
+                scan_config(root, &resolve(&abs), depth + 1, snap)?;
             }
             _ => {}
         }
@@ -961,7 +986,8 @@ struct Change {
 impl GitBroker {
     /// Validate the layout of the repository at `root` and prepare a runner.
     pub fn open(env: &GitEnv, root: &Path, deny: Arc<Denylist>) -> Res<GitBroker> {
-        let layout = validate_layout(root)?;
+        let snap = deny.snapshot();
+        let layout = validate_layout(root, &snap)?;
         let ceiling = layout
             .root
             .parent()
@@ -2461,6 +2487,121 @@ mod tests {
         assert_eq!(e.code, ErrorCode::UnsupportedRepo, "{e}");
     }
 
+    /// A repository inside the granted home, in a place the denylist protects.
+    #[cfg(unix)]
+    fn protected_repo_in_home(f: &Fx, packed: bool) -> (PathBuf, PathBuf) {
+        let home = f.root.join("home");
+        init(&home);
+        let vault = home.join(".codex-vault");
+        init(&vault);
+        write(&vault.join("secret.txt"), "DENIED SENTINEL\n");
+        commit_all(&vault, "secret");
+        if packed {
+            git_in(&vault, &["repack", "-q", "-a", "-d"]);
+            git_in(&vault, &["prune-packed"]);
+        }
+        (home, vault)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_links_from_the_git_directory_into_a_protected_place_are_refused() {
+        let f = fx();
+        let (home, vault) = protected_repo_in_home(&f, true);
+        // The denylist itself says the vault is off limits.
+        assert!(deny_for(&home).is_denied(&vault.join("secret.txt")));
+        let pack_dir = home.join(".git/objects/pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        for entry in fs::read_dir(vault.join(".git/objects/pack"))
+            .unwrap()
+            .flatten()
+        {
+            link(&entry.path(), &pack_dir.join(entry.file_name()));
+        }
+        link(
+            &vault.join(".git/refs/heads/main"),
+            &home.join(".git/refs/heads/main"),
+        );
+        let e = open_at(&f, &home).err().expect("refused");
+        assert_eq!(e.code, ErrorCode::DeniedPath, "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loose_objects_and_control_files_leading_into_a_protected_place_are_refused() {
+        let f = fx();
+        let (home, vault) = protected_repo_in_home(&f, false);
+        let commit = git_in(&vault, &["rev-parse", "HEAD"]);
+        let tree = git_in(&vault, &["rev-parse", "HEAD^{tree}"]);
+        let blob = git_in(&vault, &["rev-parse", "HEAD:secret.txt"]);
+        for oid in [&commit, &tree, &blob] {
+            link(
+                &vault.join(".git/objects").join(&oid[..2]).join(&oid[2..]),
+                &home.join(".git/objects").join(&oid[..2]).join(&oid[2..]),
+            );
+        }
+        fs::write(home.join(".git/refs/heads/main"), format!("{commit}\n")).unwrap();
+        assert_eq!(code(open_at(&f, &home)), ErrorCode::DeniedPath);
+        // A config that is a link to a protected file, and an include of one.
+        let home2 = f.root.join("home2");
+        let _ = &home2;
+        let cfg = home.join(".git/config");
+        let original = fs::read_to_string(&cfg).unwrap();
+        fs::remove_dir_all(home.join(".git/objects")).unwrap();
+        fs::create_dir_all(home.join(".git/objects/pack")).unwrap();
+        fs::remove_file(home.join(".git/refs/heads/main")).unwrap();
+        write(&vault.join("shared.cfg"), "[user]\n\tname = x\n");
+        fs::write(
+            &cfg,
+            format!(
+                "{original}[include]\n\tpath = {}\n",
+                vault.join("shared.cfg").display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            code(open_at(&f, &home)),
+            ErrorCode::DeniedPath,
+            "an include of a protected file"
+        );
+        fs::write(&cfg, &original).unwrap();
+        link(&vault.join(".git/config"), &cfg);
+        assert_eq!(
+            code(open_at(&f, &home)),
+            ErrorCode::DeniedPath,
+            "a config that is a link into a protected place"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_alternate_store_and_a_gitdir_inside_a_protected_place_are_refused() {
+        let f = fx();
+        let (home, vault) = protected_repo_in_home(&f, true);
+        write(
+            &home.join(".git/objects/info/alternates"),
+            &format!("{}\n", vault.join(".git/objects").display()),
+        );
+        assert_eq!(code(open_at(&f, &home)), ErrorCode::DeniedPath);
+        // A commondir that names a protected git directory.
+        let _ = fs::remove_file(home.join(".git/objects/info/alternates"));
+        fs::write(
+            home.join(".git/commondir"),
+            format!("{}\n", vault.join(".git").display()),
+        )
+        .unwrap();
+        assert_eq!(code(open_at(&f, &home)), ErrorCode::DeniedPath);
+        let _ = fs::remove_file(home.join(".git/commondir"));
+        // A gitfile that names a git directory inside a protected place.
+        fs::remove_dir_all(home.join(".git")).unwrap();
+        fs::write(
+            home.join(".git"),
+            format!("gitdir: {}\n", vault.join(".git").display()),
+        )
+        .unwrap();
+        assert_eq!(code(open_at(&f, &home)), ErrorCode::DeniedPath);
+    }
+
     #[cfg(unix)]
     #[test]
     fn any_folder_link_inside_the_git_directory_is_unsupported() {
@@ -2486,16 +2627,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_link_that_stays_inside_the_folder_is_allowed() {
+    fn a_file_link_inside_the_git_directory_is_unsupported_even_when_it_stays_inside() {
         let f = fx();
         let repo = basic(&f);
         let keep = repo.join("kept-note.txt");
         fs::write(&keep, "note").unwrap();
         link(&keep, &repo.join(".git/objects/info/inside-link"));
-        assert!(
-            open_at(&f, &repo).is_ok(),
-            "a file link that stays inside is allowed"
-        );
+        let e = open_at(&f, &repo).err().expect("refused");
+        assert_eq!(e.code, ErrorCode::UnsupportedRepo, "{e}");
+        assert!(e.message.contains("inside-link"), "{}", e.message);
     }
 
     #[cfg(unix)]
