@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use super::extract::{self, InstallErrorKind, Limits};
 use super::grants;
-use super::update::{self, Diff, PermSet};
+use super::update::{self, PaneDiffs, PermSet};
 use super::check_all;
 use crate::addons::conf::AddonConf;
 use crate::addons::csp::{self, Network};
@@ -78,7 +78,11 @@ impl Staged {
         self.root.join("tree")
     }
 
-    pub fn confirm_data(&self, previous: Option<&IndexEntry>) -> Confirm {
+    pub fn pane_perms(&self) -> Vec<(String, PermSet)> {
+        self.panes.iter().map(|(n, c)| (n.clone(), conf_perm_set(c))).collect()
+    }
+
+    pub fn confirm_data(&self, previous: Option<&Previous>) -> Confirm {
         let panes: Vec<PaneConfirm> = self
             .panes
             .iter()
@@ -93,11 +97,14 @@ impl Staged {
                 can_send_what_it_reads: c.permissions.iter().any(|p| p == "network") && c.permissions.iter().any(|p| p == "messages:read" || p == "files:read" || p == "git:read"),
             })
             .collect();
-        let new = self.perm_set();
-        let (diff, previous_sha) = match previous {
-            Some(p) => (Some(update::diff(&perm_set_of_entry(p), &new)), Some(p.sha.clone())),
+        let (diffs, previous_sha): (Option<PaneDiffs>, Option<String>) = match previous {
+            Some(p) => (Some(update::diff_panes(&p.panes, &self.pane_perms())), Some(p.entry.sha.clone())),
             None => (None, None),
         };
+        let pane_changes: Vec<PaneChange> = diffs
+            .as_ref()
+            .map(|d| d.per_pane.iter().map(|(n, pd)| PaneChange { pane: n.clone(), added: pd.added.clone(), removed: pd.removed.clone(), network_widened: pd.network_widened, network_newly_combined: pd.network_newly_combined, asks_again: pd.needs_confirm_again() }).collect())
+            .unwrap_or_default();
         Confirm {
             staging_id: self.id.clone(),
             repo: self.repo.clone(),
@@ -109,11 +116,13 @@ impl Staged {
             files: self.files,
             bytes: self.bytes,
             previous_sha,
-            asks_again: diff.as_ref().is_some_and(Diff::needs_confirm_again),
-            added_permissions: diff.as_ref().map(|d| d.added.clone()).unwrap_or_default(),
-            removed_permissions: diff.as_ref().map(|d| d.removed.clone()).unwrap_or_default(),
-            network_widened: diff.as_ref().is_some_and(|d| d.network_widened),
-            network_newly_combined: diff.as_ref().is_some_and(|d| d.network_newly_combined),
+            asks_again: diffs.as_ref().is_some_and(PaneDiffs::needs_confirm_again),
+            added_permissions: diffs.as_ref().map(|d| d.summary.added.clone()).unwrap_or_default(),
+            removed_permissions: diffs.as_ref().map(|d| d.summary.removed.clone()).unwrap_or_default(),
+            network_widened: diffs.as_ref().is_some_and(|d| d.summary.network_widened),
+            network_newly_combined: diffs.as_ref().is_some_and(|d| d.summary.network_newly_combined),
+            removed_panes: diffs.as_ref().map(|d| d.removed_panes.clone()).unwrap_or_default(),
+            pane_changes,
         }
     }
 
@@ -153,8 +162,40 @@ impl Staged {
     }
 }
 
-pub fn perm_set_of_entry(e: &IndexEntry) -> PermSet {
-    PermSet { permissions: e.permissions.clone(), network: csp::parse_network(&e.network).unwrap_or(Network::None) }
+fn conf_perm_set(c: &AddonConf) -> PermSet {
+    let network = match &c.network {
+        Some(n) if c.permissions.iter().any(|p| p == "network") => csp::parse_network(n).unwrap_or(Network::None),
+        _ => Network::None,
+    };
+    PermSet { permissions: c.permissions.clone(), network }
+}
+
+/// What an installed version of an add-on could do, pane by pane, read from its
+/// own `addon.conf` files. A pane whose conf cannot be read counts as having no
+/// permissions, so everything it has now is a change that asks again.
+#[derive(Debug, Clone)]
+pub struct Previous {
+    pub entry: IndexEntry,
+    pub panes: Vec<(String, PermSet)>,
+}
+
+impl Previous {
+    pub fn load(addons: &Path, entry: &IndexEntry) -> Previous {
+        let panes_dir = entry.dir(addons).join("app-panes");
+        let mut panes = Vec::new();
+        if let Ok(rd) = fs::read_dir(&panes_dir) {
+            for e in rd.flatten().filter(|e| e.path().is_dir()) {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if let crate::addons::conf::ConfRead::Ok(b) = crate::addons::conf::read_bounded(&e.path().join("addon.conf")) {
+                    if let Some(c) = crate::addons::conf::parse(&String::from_utf8_lossy(&b), "old").conf {
+                        panes.push((name, conf_perm_set(&c)));
+                    }
+                }
+            }
+        }
+        panes.sort_by(|a, b| a.0.cmp(&b.0));
+        Previous { entry: entry.clone(), panes }
+    }
 }
 
 /// What the confirm dialog (S3/S8) is built from.
@@ -178,6 +219,21 @@ pub struct Confirm {
     pub removed_permissions: Vec<String>,
     pub network_widened: bool,
     pub network_newly_combined: bool,
+    /// Panes the new version no longer has.
+    pub removed_panes: Vec<String>,
+    /// The difference pane by pane (what each pane gains or loses); `asksAgain` is true if any pane asks.
+    pub pane_changes: Vec<PaneChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneChange {
+    pub pane: String,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub network_widened: bool,
+    pub network_newly_combined: bool,
+    pub asks_again: bool,
 }
 
 /// Hashes (SHA-256) and counts what passes through, so the archive's hash comes
@@ -187,6 +243,7 @@ struct Tee<R> {
     hash: Sha256,
     bytes: u64,
     cap: u64,
+    exceeded: bool,
 }
 
 impl<R: Read> Read for Tee<R> {
@@ -195,6 +252,7 @@ impl<R: Read> Read for Tee<R> {
         self.hash.update(&buf[..n]);
         self.bytes += n as u64;
         if self.bytes > self.cap {
+            self.exceeded = true;
             return Err(io::Error::new(io::ErrorKind::InvalidData, "the download is larger than the limit"));
         }
         Ok(n)
@@ -251,6 +309,10 @@ pub(crate) fn map_error(errors: &[String], repo: &str) -> Failure {
 
 /// Extracts and checks one archive into a new staging folder.
 pub fn stage<R: Read>(addons: &Path, repo: &str, sha: &str, archive: R, app_version: &str, limits: Limits) -> Result<Staged, Failure> {
+    stage_capped(addons, repo, sha, archive, app_version, limits, MAX_DOWNLOAD)
+}
+
+pub(crate) fn stage_capped<R: Read>(addons: &Path, repo: &str, sha: &str, archive: R, app_version: &str, limits: Limits, download_cap: u64) -> Result<Staged, Failure> {
     let id = random_id();
     let root = staging_root(addons).join(&id);
     let tree = root.join("tree");
@@ -259,9 +321,11 @@ pub fn stage<R: Read>(addons: &Path, repo: &str, sha: &str, archive: R, app_vers
         extract::discard(&root);
         f
     };
-    let mut tee = Tee { inner: archive, hash: Sha256::new(), bytes: 0, cap: MAX_DOWNLOAD };
+    let mut tee = Tee { inner: archive, hash: Sha256::new(), bytes: 0, cap: download_cap, exceeded: false };
+    let too_big = |cap: u64| Failure::new("too_large", format!("Too large to install: the download is more than {} (limit {}).", extract::mb(cap), extract::mb(cap)));
     let extracted = match extract::extract_tar_gz(&mut tee, &tree, limits) {
         Ok(x) => x,
+        Err(_) if tee.exceeded => return Err(fail(too_big(download_cap))),
         Err(e) => {
             let code = match e.kind {
                 InstallErrorKind::UnsafeEntry => "unsafe_entry",
@@ -273,8 +337,16 @@ pub fn stage<R: Read>(addons: &Path, repo: &str, sha: &str, archive: R, app_vers
         }
     };
     // drain what the extractor did not need (the tar end blocks), so the hash covers the whole download
+    // Every read error and the size cap are failures here; the hash is final only at a clean end.
     let mut sink = [0u8; 8192];
-    while tee.read(&mut sink).map(|n| n > 0).unwrap_or(false) {}
+    loop {
+        match tee.read(&mut sink) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) if tee.exceeded => return Err(fail(too_big(download_cap))),
+            Err(e) => return Err(fail(Failure::new("archive", format!("The download was interrupted: {e}. Try again.")))),
+        }
+    }
     let archive_sha256 = hex(&tee.hash.finalize());
 
     let (errors, layout_report) = check_all(&tree, limits);
@@ -314,7 +386,7 @@ pub fn gc_staging(addons: &Path) {
 pub struct Activation {
     pub entry: IndexEntry,
     pub previous: Option<IndexEntry>,
-    pub diff: Option<Diff>,
+    pub diff: Option<PaneDiffs>,
 }
 
 fn short(sha: &str) -> &str {
@@ -333,6 +405,8 @@ pub fn activate(addons: &Path, staged: &Staged, installed_at: &str) -> Result<Ac
     }
     let mut table = index::read(addons);
     let previous = table.iter().find(|e| e.repo == staged.repo).cloned();
+    // what the old version could do, pane by pane, read before its folder is touched
+    let diffs = previous.as_ref().map(|p| update::diff_panes(&Previous::load(addons, p).panes, &staged.pane_perms()));
     if previous.as_ref().is_some_and(|p| p.sha == staged.sha) {
         extract::discard(&staged.root);
         return Err(Failure::new("already_installed", format!("Already installed ({}).", short(&staged.sha))));
@@ -367,8 +441,7 @@ pub fn activate(addons: &Path, staged: &Staged, installed_at: &str) -> Result<Ac
     }
     fs::rename(staged.tree(), &target).map_err(|e| Failure::new("io", format!("Could not activate the add-on: {e}")))?;
 
-    let diff = previous.as_ref().map(|p| update::diff(&perm_set_of_entry(p), &perm));
-    if let Some(d) = &diff {
+    if let Some(d) = &diffs {
         let kept = update::migrate_grants(grants::read(addons), &staged.repo, &staged.sha, d);
         grants::write(addons, &kept).map_err(|e| Failure::new("io", format!("Could not update the saved permissions: {e}")))?;
     }
@@ -380,7 +453,7 @@ pub fn activate(addons: &Path, staged: &Staged, installed_at: &str) -> Result<Ac
         let _ = fs::remove_dir_all(p.dir(addons));
     }
     extract::discard(&staged.root);
-    Ok(Activation { entry, previous, diff })
+    Ok(Activation { entry, previous, diff: diffs })
 }
 
 /// Removes an installed add-on: its record, its remembered grants and every version on disk.
@@ -414,6 +487,7 @@ mod tests {
     use super::*;
     use crate::addons::catalog::Catalog;
     use serde_json::json;
+    use std::io::Write;
 
     const SHA1: &str = "1111111111111111111111111111111111111111";
     const SHA2: &str = "2222222222222222222222222222222222222222";
@@ -586,7 +660,7 @@ mod tests {
         activate(d.path(), &stage_ok(d.path(), "o/r", SHA1, &addon(FILES_CONF, vec![])), "t1").unwrap();
         grants::add(d.path(), grant("files:read", "/proj")).unwrap();
         let s2 = stage_ok(d.path(), "o/r", SHA2, &addon(FILES_CONF, vec![json!({"path": "app-panes/main/web/new.js", "type": "file", "text": "1"})]));
-        let c = s2.confirm_data(index::read(d.path()).first());
+        let c = s2.confirm_data(index::read(d.path()).first().map(|e| Previous::load(d.path(), e)).as_ref());
         assert_eq!(c.previous_sha.as_deref(), Some(SHA1));
         assert!(!c.asks_again);
         let a = activate(d.path(), &s2, "t2").unwrap();
@@ -608,7 +682,7 @@ mod tests {
         grants::add(d.path(), grant("messages:read", "team-a")).unwrap();
         let new_conf = "title = Main\nprotocol = 1\npermissions = files:read, network\nnetwork = https://x.test\nwhy.files:read = r\nwhy.network = n\n";
         let s2 = stage_ok(d.path(), "o/r", SHA2, &addon(new_conf, vec![]));
-        let c = s2.confirm_data(index::read(d.path()).first());
+        let c = s2.confirm_data(index::read(d.path()).first().map(|e| Previous::load(d.path(), e)).as_ref());
         assert!(c.asks_again && c.added_permissions == vec!["network"] && c.network_newly_combined);
         activate(d.path(), &s2, "t2").unwrap();
         assert!(grants::read(d.path()).is_empty(), "remembered read grants are cleared when network joins them");
@@ -644,9 +718,106 @@ mod tests {
         assert!(!s.root.exists());
     }
 
+    fn two_pane_addon(a: &str, b: &str) -> Vec<u8> {
+        tarball(&[
+            json!({"path": "agmsg-plugin.conf", "type": "file", "text": "name = x\n"}),
+            json!({"path": "app-panes/a/addon.conf", "type": "file", "text": a}),
+            json!({"path": "app-panes/a/web/index.html", "type": "file", "text": "<div></div>"}),
+            json!({"path": "app-panes/b/addon.conf", "type": "file", "text": b}),
+            json!({"path": "app-panes/b/web/index.html", "type": "file", "text": "<div></div>"}),
+        ])
+    }
+
+    fn gr(pane: &str, perm: &str, scope: &str) -> grants::SavedGrant {
+        grants::SavedGrant { pane: pane.into(), ..grant(perm, scope) }
+    }
+
+    #[test]
+    fn network_given_to_the_reading_pane_asks_again_and_voids_its_grant_even_if_the_union_is_unchanged() {
+        let d = tempfile::tempdir().unwrap();
+        let reads = "title = A\nprotocol = 1\npermissions = files:read\nwhy.files:read = r\n";
+        let sends = "title = B\nprotocol = 1\npermissions = network\nnetwork = *\nwhy.network = n\n";
+        activate(d.path(), &stage_ok(d.path(), "o/r", SHA1, &two_pane_addon(reads, sends)), "t1").unwrap();
+        grants::add(d.path(), gr("a", "files:read", "/proj")).unwrap();
+        // the union of permissions and networks is exactly the same as before; pane a now also has network(*)
+        let reads_and_sends = "title = A\nprotocol = 1\npermissions = files:read, network\nnetwork = *\nwhy.files:read = r\nwhy.network = n\n";
+        let s2 = stage_ok(d.path(), "o/r", SHA2, &two_pane_addon(reads_and_sends, sends));
+        assert_eq!(s2.perm_set().permissions.len(), 2);
+        let prev = index::read(d.path()).first().map(|e| Previous::load(d.path(), e)).unwrap();
+        let c = s2.confirm_data(Some(&prev));
+        assert!(c.asks_again, "the dialog must ask again");
+        assert!(c.network_newly_combined);
+        let a = c.pane_changes.iter().find(|p| p.pane == "a").unwrap();
+        assert!(a.asks_again && a.network_newly_combined && a.added == vec!["network"]);
+        assert!(!c.pane_changes.iter().find(|p| p.pane == "b").unwrap().asks_again);
+        activate(d.path(), &s2, "t2").unwrap();
+        assert!(grants::read(d.path()).is_empty(), "pane a's remembered read grant is void");
+    }
+
+    #[test]
+    fn a_change_in_one_pane_leaves_the_other_panes_grants_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let reads = "title = A\nprotocol = 1\npermissions = files:read\nwhy.files:read = r\n";
+        activate(d.path(), &stage_ok(d.path(), "o/r", SHA1, &two_pane_addon(reads, reads)), "t1").unwrap();
+        grants::add(d.path(), gr("a", "files:read", "/proj")).unwrap();
+        grants::add(d.path(), gr("b", "files:read", "/proj")).unwrap();
+        let b_sends = "title = B\nprotocol = 1\npermissions = files:read, network\nnetwork = https://x.test\nwhy.files:read = r\nwhy.network = n\n";
+        let s2 = stage_ok(d.path(), "o/r", SHA2, &two_pane_addon(reads, b_sends));
+        activate(d.path(), &s2, "t2").unwrap();
+        let g = grants::read(d.path());
+        assert_eq!(g.len(), 1);
+        assert_eq!((g[0].pane.as_str(), g[0].sha.as_str()), ("a", SHA2));
+    }
+
+    /// A reader that serves `data`, then fails.
+    struct FailingAfter<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
+    impl Read for FailingAfter<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos >= self.data.len() {
+                return Err(io::Error::new(io::ErrorKind::ConnectionReset, "connection reset"));
+            }
+            let n = buf.len().min(self.data.len() - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_read_error_after_a_valid_archive_is_a_failure_not_a_partial_hash() {
+        let d = tempfile::tempdir().unwrap();
+        let tar = addon(FILES_CONF, vec![]);
+        let f = stage(d.path(), "o/r", SHA1, FailingAfter { data: &tar, pos: 0 }, "0.5.0", Limits::default()).unwrap_err();
+        assert_eq!(f.code, "archive");
+        assert!(f.message.contains("interrupted"), "{}", f.message);
+        assert!(fs::read_dir(staging_root(d.path())).map(|r| r.count()).unwrap_or(0) == 0, "the stage is discarded");
+        assert!(index::read(d.path()).is_empty());
+    }
+
+    #[test]
+    fn bytes_after_the_end_of_the_archive_count_against_the_download_cap() {
+        let d = tempfile::tempdir().unwrap();
+        let mut tar = addon(FILES_CONF, vec![]);
+        // a gzip member of zeros after the archive: valid to read past, far over a small cap
+        let mut extra = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none());
+        extra.write_all(&vec![0u8; 400_000]).unwrap();
+        tar.extend_from_slice(&extra.finish().unwrap());
+        let cap = (tar.len() as u64) - 1000;
+        let f = stage_capped(d.path(), "o/r", SHA1, &tar[..], "0.5.0", Limits::default(), cap).unwrap_err();
+        assert_eq!(f.code, "too_large");
+        assert!(f.message.starts_with("Too large to install: the download is more than"), "{}", f.message);
+        assert!(fs::read_dir(staging_root(d.path())).map(|r| r.count()).unwrap_or(0) == 0);
+        // within the cap it is fine, and the hash covers every byte including the trailer
+        let ok = stage_capped(d.path(), "o/r", SHA1, &tar[..], "0.5.0", Limits::default(), tar.len() as u64 + 10).unwrap();
+        assert_eq!(ok.archive_sha256, digest::sha256_hex(&tar));
+    }
+
     #[test]
     fn download_size_is_capped_while_reading() {
-        let mut tee = Tee { inner: &[0u8; 100][..], hash: Sha256::new(), bytes: 0, cap: 50 };
+        let mut tee = Tee { inner: &[0u8; 100][..], hash: Sha256::new(), bytes: 0, cap: 50, exceeded: false };
         let mut buf = [0u8; 100];
         assert!(tee.read(&mut buf).is_err());
     }
