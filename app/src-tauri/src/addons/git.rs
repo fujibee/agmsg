@@ -169,10 +169,7 @@ fn read_small(p: &Path) -> Res<Option<String>> {
 /// link below `objects/` or `refs/` is as much a way out as one at the top.
 /// Links are checked, not followed; a link that stays inside is allowed.
 fn check_no_link_out(root: &Path, dir: &Path) -> Res<()> {
-    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
-    let start = resolve(dir);
-    visited.insert(start.clone());
-    let mut stack = vec![start];
+    let mut stack = vec![resolve(dir)];
     let mut seen = 0usize;
     while let Some(d) = stack.pop() {
         let Ok(rd) = fs::read_dir(&d) else { continue };
@@ -185,24 +182,27 @@ fn check_no_link_out(root: &Path, dir: &Path) -> Res<()> {
             }
             let Ok(ft) = entry.file_type() else { continue };
             let path = entry.path();
+            let shown = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
             if ft.is_symlink() {
                 let real = resolve(&path);
                 if !real.starts_with(root) {
                     return Err(outside(format!(
-                        "{} is a link that leads outside the granted folder",
-                        path.strip_prefix(root).unwrap_or(&path).display()
+                        "{shown} is a link that leads outside the granted folder"
                     )));
                 }
-                // A link to a folder inside the root is followed too: what it
-                // holds can be a link out. Each real folder is walked once.
-                if real.is_dir() && visited.insert(real.clone()) {
-                    stack.push(real);
+                // A folder link is not followed and not supported: what the folder
+                // holds could be a link out, and git would read it.
+                if real.is_dir() {
+                    return Err(unsupported(format!(
+                        "a folder link inside .git is not supported ({shown})"
+                    )));
                 }
             } else if ft.is_dir() {
-                let real = resolve(&path);
-                if visited.insert(real.clone()) {
-                    stack.push(real);
-                }
+                stack.push(path);
             }
         }
     }
@@ -2437,7 +2437,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_link_to_a_folder_inside_the_root_does_not_hide_a_link_out() {
+    fn a_folder_link_inside_the_root_cannot_hide_a_link_out() {
         let f = fx();
         let out = outside_repo_with_secret(&f, true);
         let repo = f.root.join("granted");
@@ -2457,17 +2457,31 @@ mod tests {
         fs::remove_dir_all(repo.join(".git/refs")).unwrap();
         link(&inside_objects, &repo.join(".git/objects"));
         link(&inside_refs, &repo.join(".git/refs"));
-        assert_secret_never_returned(&f, &repo);
+        let e = open_at(&f, &repo).err().expect("refused");
+        assert_eq!(e.code, ErrorCode::UnsupportedRepo, "{e}");
     }
 
     #[cfg(unix)]
     #[test]
-    fn link_cycles_inside_the_git_directory_do_not_loop() {
+    fn any_folder_link_inside_the_git_directory_is_unsupported() {
         let f = fx();
         let repo = basic(&f);
+        let keep = repo.join("kept-objects");
+        fs::create_dir_all(&keep).unwrap();
+        link(&keep, &repo.join(".git/objects/info/inside-folder-link"));
+        let e = open_at(&f, &repo).err().expect("refused");
+        assert_eq!(e.code, ErrorCode::UnsupportedRepo);
+        assert!(
+            e.message
+                .contains("a folder link inside .git is not supported"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("inside-folder-link"), "{}", e.message);
+        // A cycle is a folder link too, and ends the same way.
+        let _ = fs::remove_file(repo.join(".git/objects/info/inside-folder-link"));
         link(&repo.join(".git"), &repo.join(".git/objects/info/cycle"));
-        link(&repo.join(".git/objects"), &repo.join(".git/refs/loop"));
-        assert!(open_at(&f, &repo).is_ok());
+        assert_eq!(code(open_at(&f, &repo)), ErrorCode::UnsupportedRepo);
     }
 
     #[cfg(unix)]
@@ -2475,10 +2489,13 @@ mod tests {
     fn a_link_that_stays_inside_the_folder_is_allowed() {
         let f = fx();
         let repo = basic(&f);
-        let keep = repo.join("kept-objects");
-        fs::create_dir_all(&keep).unwrap();
+        let keep = repo.join("kept-note.txt");
+        fs::write(&keep, "note").unwrap();
         link(&keep, &repo.join(".git/objects/info/inside-link"));
-        assert!(open_at(&f, &repo).is_ok());
+        assert!(
+            open_at(&f, &repo).is_ok(),
+            "a file link that stays inside is allowed"
+        );
     }
 
     #[cfg(unix)]
