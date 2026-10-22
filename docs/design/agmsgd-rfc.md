@@ -1,5 +1,7 @@
 # RFC: agmsgd — a resident delivery daemon
 
+> **Changed in 1.6.0.** This record describes the first beta. As shipped, agmsgd delivers to both Claude Code and Codex sessions, works on Windows too (Claude Code 2.1.302 or later, Codex 0.157 or later), and is offered in the delivery-method screen as the recommended choice; it is turned on only when the person picks it. Statements below that it is Codex-only, macOS/Linux-only, default-off, or unsupported on Windows describe the first beta.
+
 This is an RFC: a request for comments on a design, not a decision record. Decisions land as ADRs as usual once settled — this is published first, so the shape can change while changing it is still cheap.
 
 > **Status (2026-09-28).** The direction described here has been approved, and this note now matches it. What changed since the first version is listed in [Changes since the first version](#changes-since-the-first-version). The architecture design (how each part works) is done and published next to this note as [agmsgd-architecture.md](agmsgd-architecture.md). Next is the technical design (where the source lives, how it is built and shipped); implementation follows after that. Every release has to be something that can be stopped, and none is built all at once. Thank you to everyone who answered the open questions in the discussion — the answers are reflected below.
