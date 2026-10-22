@@ -65,6 +65,11 @@ impl NavPolicy {
         self.panes.lock().unwrap().retain(|(pp, t)| !(*pp == port && t == token));
     }
 
+    /// True for the app's own origins (not panes).
+    pub fn is_app(&self, url: &Url) -> bool {
+        Origin::of(url).map_or(false, |o| self.app.contains(&o))
+    }
+
     pub fn decide(&self, url: &Url) -> Decision {
         if let Some(o) = Origin::of(url) {
             if self.app.contains(&o) {

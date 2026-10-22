@@ -1,0 +1,356 @@
+//! The startup gate: add-ons run only while the app has just confirmed, with
+//! an app-owned known frame, that this webview really isolates them.
+//!
+//! Rules:
+//! - The probe frame is the app's own page in a frame with exactly the same
+//!   webview, preferences and sandbox as a real add-on. A timeout, an
+//!   exception or a missing result all mean add-ons stay off. An add-on's own
+//!   report is never used as the probe.
+//! - The CSP check attempts a forbidden self-navigation (to the app origin) and
+//!   requires that it was refused; reading the configured CSP is not enough.
+//! - WebRTC must be absent in the frame (`RTCPeerConnection` and its aliases)
+//!   and a UDP sentinel the app opened must have received nothing.
+//! - The gate is cleared for every new webview, reload and update; a window
+//!   whose settings cannot be confirmed does not enable add-ons.
+//! - Windows stays off until the same negative and positive tests have passed
+//!   there (`WINDOWS_VERIFIED`).
+
+use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Flip only when M1's Windows rows have passed and the WebView2 equivalents of
+/// the macOS settings are in place and probed.
+pub const WINDOWS_VERIFIED: bool = false;
+
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    MacOs,
+    Windows,
+    Other,
+}
+
+impl Os {
+    pub fn host() -> Os {
+        if cfg!(target_os = "macos") {
+            Os::MacOs
+        } else if cfg!(windows) {
+            Os::Windows
+        } else {
+            Os::Other
+        }
+    }
+}
+
+/// What the probe frame measured about itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProbeReport {
+    pub nonce: String,
+    /// The frame's script ran at all.
+    pub started: bool,
+    /// `self.origin === 'null'`: the sandbox has no `allow-same-origin`.
+    pub opaque_origin: bool,
+    /// `eval` threw: the pane CSP is in force.
+    pub csp_blocks_eval: bool,
+    /// After a forbidden navigation to the app origin the frame was still the
+    /// same document, running.
+    pub nav_refused: bool,
+    /// `RTCPeerConnection`, `webkitRTCPeerConnection`, `RTCSessionDescription`
+    /// and `RTCDataChannel` are all undefined.
+    pub webrtc_absent: bool,
+    /// Informational: the bridge globals present in the frame (macOS: none;
+    /// WebView2 injects them into subframes).
+    pub bridge_in_frame: bool,
+}
+
+/// What the app itself did to the engine before the probe.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineReport {
+    /// The WebRTC-off setting exists on this engine.
+    pub webrtc_setting_present: bool,
+    /// ... and was applied and reads back as off.
+    pub webrtc_setting_applied: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Verdict {
+    pub enabled: bool,
+    pub reasons: Vec<String>,
+}
+
+pub fn evaluate(expected_nonce: &str, r: &ProbeReport, engine: &EngineReport, udp_hits: usize, os: Os) -> Verdict {
+    let mut reasons = Vec::new();
+    if r.nonce != expected_nonce {
+        reasons.push("the probe answered with the wrong nonce".to_string());
+    }
+    if !r.started {
+        reasons.push("the probe frame did not run".to_string());
+    }
+    if !r.opaque_origin {
+        reasons.push("the probe frame does not have an opaque origin".to_string());
+    }
+    if !r.csp_blocks_eval {
+        reasons.push("the pane CSP is not in force in the probe frame".to_string());
+    }
+    if !r.nav_refused {
+        reasons.push("the probe frame was able to navigate itself to the app origin".to_string());
+    }
+    if !r.webrtc_absent {
+        reasons.push("WebRTC is available in the probe frame".to_string());
+    }
+    if udp_hits > 0 {
+        reasons.push(format!("the probe frame sent {udp_hits} UDP packets to the sentinel"));
+    }
+    match os {
+        Os::MacOs => {
+            if !engine.webrtc_setting_present {
+                reasons.push("this WebKit has no WebRTC-off setting".to_string());
+            } else if !engine.webrtc_setting_applied {
+                reasons.push("the WebRTC-off setting could not be applied".to_string());
+            }
+        }
+        Os::Windows => {
+            if !WINDOWS_VERIFIED {
+                reasons.push("add-ons are not verified on WebView2 yet".to_string());
+            }
+        }
+        Os::Other => reasons.push("add-ons are not available on this platform".to_string()),
+    }
+    Verdict { enabled: reasons.is_empty(), reasons }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pending {
+    nonce: String,
+    deadline: Instant,
+    generation: u64,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    generation: u64,
+    pending: Option<Pending>,
+    verdict: Verdict,
+}
+
+/// Add-ons are enabled iff `status().enabled`. The initial state is off.
+#[derive(Default)]
+pub struct AddonGate {
+    inner: Mutex<State>,
+}
+
+impl AddonGate {
+    pub fn new() -> AddonGate {
+        let g = AddonGate::default();
+        g.inner.lock().unwrap().verdict = Verdict { enabled: false, reasons: vec!["the startup check has not run yet".into()] };
+        g
+    }
+
+    /// A new webview, a reload or an update: everything proven so far is void.
+    /// Returns the new generation.
+    pub fn invalidate(&self, why: &str) -> u64 {
+        let mut s = self.inner.lock().unwrap();
+        s.generation += 1;
+        s.pending = None;
+        s.verdict = Verdict { enabled: false, reasons: vec![format!("checking again: {why}")] };
+        s.generation
+    }
+
+    /// Starts a probe for the current generation.
+    pub fn begin(&self, nonce: &str, now: Instant) -> u64 {
+        let mut s = self.inner.lock().unwrap();
+        let generation = s.generation;
+        s.pending = Some(Pending { nonce: nonce.to_string(), deadline: now + PROBE_TIMEOUT, generation });
+        generation
+    }
+
+    /// The probe frame's answer (relayed by the main UI). Accepted once, only
+    /// for the pending nonce of the current generation, and not after the
+    /// deadline. `udp_hits` is read by the caller at this moment.
+    pub fn report(&self, r: &ProbeReport, engine: &EngineReport, udp_hits: usize, os: Os, now: Instant) -> Verdict {
+        let mut s = self.inner.lock().unwrap();
+        let Some(p) = s.pending.clone() else {
+            return s.verdict.clone();
+        };
+        if p.generation != s.generation {
+            return s.verdict.clone();
+        }
+        if now > p.deadline {
+            s.pending = None;
+            s.verdict = Verdict { enabled: false, reasons: vec!["the startup check took too long".into()] };
+            return s.verdict.clone();
+        }
+        if r.nonce != p.nonce {
+            // a stray or forged answer does not end the probe; the real one may still come
+            return Verdict { enabled: false, reasons: vec!["ignored an answer with the wrong nonce".into()] };
+        }
+        s.pending = None;
+        s.verdict = evaluate(&p.nonce, r, engine, udp_hits, os);
+        s.verdict.clone()
+    }
+
+    /// Called by a timer: a probe past its deadline turns into "off".
+    pub fn expire(&self, now: Instant) -> bool {
+        let mut s = self.inner.lock().unwrap();
+        match &s.pending {
+            Some(p) if p.generation == s.generation && now > p.deadline => {
+                s.pending = None;
+                s.verdict = Verdict { enabled: false, reasons: vec!["the startup check did not finish (timeout)".into()] };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.inner.lock().unwrap().generation
+    }
+
+    pub fn status(&self) -> Verdict {
+        self.inner.lock().unwrap().verdict.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn good(nonce: &str) -> ProbeReport {
+        ProbeReport { nonce: nonce.into(), started: true, opaque_origin: true, csp_blocks_eval: true, nav_refused: true, webrtc_absent: true, bridge_in_frame: false }
+    }
+
+    fn eng() -> EngineReport {
+        EngineReport { webrtc_setting_present: true, webrtc_setting_applied: true }
+    }
+
+    #[test]
+    fn all_good_on_macos_enables() {
+        let v = evaluate("n", &good("n"), &eng(), 0, Os::MacOs);
+        assert!(v.enabled, "{:?}", v.reasons);
+    }
+
+    #[test]
+    fn every_single_failure_turns_it_off() {
+        let base = good("n");
+        let cases: Vec<(&str, ProbeReport)> = vec![
+            ("nonce", ProbeReport { nonce: "x".into(), ..base.clone() }),
+            ("started", ProbeReport { started: false, ..base.clone() }),
+            ("opaque", ProbeReport { opaque_origin: false, ..base.clone() }),
+            ("csp", ProbeReport { csp_blocks_eval: false, ..base.clone() }),
+            ("nav", ProbeReport { nav_refused: false, ..base.clone() }),
+            ("webrtc", ProbeReport { webrtc_absent: false, ..base.clone() }),
+        ];
+        for (name, r) in cases {
+            let v = evaluate("n", &r, &eng(), 0, Os::MacOs);
+            assert!(!v.enabled, "{name}");
+            assert_eq!(v.reasons.len(), 1, "{name}: {:?}", v.reasons);
+        }
+        assert!(!evaluate("n", &base, &eng(), 1, Os::MacOs).enabled, "udp");
+        assert!(!evaluate("n", &base, &EngineReport { webrtc_setting_present: false, webrtc_setting_applied: false }, 0, Os::MacOs).enabled, "no selector");
+        assert!(!evaluate("n", &base, &EngineReport { webrtc_setting_present: true, webrtc_setting_applied: false }, 0, Os::MacOs).enabled, "not applied");
+        assert!(!evaluate("n", &ProbeReport::default(), &eng(), 0, Os::MacOs).enabled, "empty report");
+    }
+
+    #[test]
+    fn windows_and_other_platforms_stay_off_until_verified() {
+        assert!(!WINDOWS_VERIFIED);
+        let v = evaluate("n", &good("n"), &eng(), 0, Os::Windows);
+        assert!(!v.enabled);
+        assert!(v.reasons.iter().any(|r| r.contains("WebView2")));
+        assert!(!evaluate("n", &good("n"), &eng(), 0, Os::Other).enabled);
+    }
+
+    #[test]
+    fn a_bridge_in_the_frame_is_informational() {
+        let r = ProbeReport { bridge_in_frame: true, ..good("n") };
+        assert!(evaluate("n", &r, &eng(), 0, Os::MacOs).enabled);
+    }
+
+    #[test]
+    fn starts_off() {
+        let g = AddonGate::new();
+        assert!(!g.status().enabled);
+    }
+
+    #[test]
+    fn happy_path_enables_once() {
+        let g = AddonGate::new();
+        let t0 = Instant::now();
+        g.invalidate("startup");
+        g.begin("n1", t0);
+        let v = g.report(&good("n1"), &eng(), 0, Os::MacOs, t0 + Duration::from_secs(1));
+        assert!(v.enabled);
+        assert!(g.status().enabled);
+        // an answer after it was consumed changes nothing
+        let again = g.report(&ProbeReport::default(), &eng(), 9, Os::MacOs, t0 + Duration::from_secs(2));
+        assert!(again.enabled, "second answer is ignored, state kept");
+    }
+
+    #[test]
+    fn a_wrong_nonce_does_not_enable_and_does_not_end_the_probe() {
+        let g = AddonGate::new();
+        let t0 = Instant::now();
+        g.invalidate("startup");
+        g.begin("real", t0);
+        let v = g.report(&good("forged"), &eng(), 0, Os::MacOs, t0);
+        assert!(!v.enabled);
+        assert!(!g.status().enabled);
+        assert!(g.report(&good("real"), &eng(), 0, Os::MacOs, t0).enabled);
+    }
+
+    #[test]
+    fn a_late_answer_is_off() {
+        let g = AddonGate::new();
+        let t0 = Instant::now();
+        g.invalidate("startup");
+        g.begin("n", t0);
+        let v = g.report(&good("n"), &eng(), 0, Os::MacOs, t0 + PROBE_TIMEOUT + Duration::from_millis(1));
+        assert!(!v.enabled);
+        assert!(!g.status().enabled);
+    }
+
+    #[test]
+    fn no_answer_means_off_after_the_deadline() {
+        let g = AddonGate::new();
+        let t0 = Instant::now();
+        g.invalidate("startup");
+        g.begin("n", t0);
+        assert!(!g.expire(t0 + Duration::from_secs(1)), "not yet");
+        assert!(g.expire(t0 + PROBE_TIMEOUT + Duration::from_millis(1)));
+        assert!(!g.status().enabled);
+        assert!(g.status().reasons[0].contains("timeout"));
+        assert!(!g.expire(t0 + Duration::from_secs(60)), "only once");
+    }
+
+    #[test]
+    fn invalidate_voids_an_enabled_gate_and_a_pending_probe() {
+        let g = AddonGate::new();
+        let t0 = Instant::now();
+        g.invalidate("startup");
+        g.begin("n", t0);
+        assert!(g.report(&good("n"), &eng(), 0, Os::MacOs, t0).enabled);
+        let gen = g.generation();
+        g.invalidate("reload");
+        assert!(g.generation() > gen);
+        assert!(!g.status().enabled, "reload clears it");
+        // an answer to the old probe cannot re-enable
+        g.begin("n2", t0);
+        g.invalidate("update");
+        let v = g.report(&good("n2"), &eng(), 0, Os::MacOs, t0);
+        assert!(!v.enabled);
+        assert!(!g.status().enabled);
+    }
+
+    #[test]
+    fn report_without_a_pending_probe_changes_nothing() {
+        let g = AddonGate::new();
+        let v = g.report(&good("n"), &eng(), 0, Os::MacOs, Instant::now());
+        assert!(!v.enabled);
+        assert!(!g.status().enabled);
+    }
+}
