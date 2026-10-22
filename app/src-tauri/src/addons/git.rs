@@ -169,7 +169,10 @@ fn read_small(p: &Path) -> Res<Option<String>> {
 /// link below `objects/` or `refs/` is as much a way out as one at the top.
 /// Links are checked, not followed; a link that stays inside is allowed.
 fn check_no_link_out(root: &Path, dir: &Path) -> Res<()> {
-    let mut stack = vec![dir.to_path_buf()];
+    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
+    let start = resolve(dir);
+    visited.insert(start.clone());
+    let mut stack = vec![start];
     let mut seen = 0usize;
     while let Some(d) = stack.pop() {
         let Ok(rd) = fs::read_dir(&d) else { continue };
@@ -183,14 +186,23 @@ fn check_no_link_out(root: &Path, dir: &Path) -> Res<()> {
             let Ok(ft) = entry.file_type() else { continue };
             let path = entry.path();
             if ft.is_symlink() {
-                if !is_under(root, &path) {
+                let real = resolve(&path);
+                if !real.starts_with(root) {
                     return Err(outside(format!(
                         "{} is a link that leads outside the granted folder",
                         path.strip_prefix(root).unwrap_or(&path).display()
                     )));
                 }
+                // A link to a folder inside the root is followed too: what it
+                // holds can be a link out. Each real folder is walked once.
+                if real.is_dir() && visited.insert(real.clone()) {
+                    stack.push(real);
+                }
             } else if ft.is_dir() {
-                stack.push(path);
+                let real = resolve(&path);
+                if visited.insert(real.clone()) {
+                    stack.push(real);
+                }
             }
         }
     }
@@ -2421,6 +2433,41 @@ mod tests {
         }
         fs::write(repo2.join(".git/refs/heads/main"), format!("{commit}\n")).unwrap();
         assert_secret_never_returned(&f, &repo2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_folder_inside_the_root_does_not_hide_a_link_out() {
+        let f = fx();
+        let out = outside_repo_with_secret(&f, true);
+        let repo = f.root.join("granted");
+        init(&repo);
+        // .git/objects and .git/refs are links to folders inside the root; the links
+        // out are one level further in.
+        let inside_objects = repo.join("inside-objects");
+        let inside_refs = repo.join("inside-refs");
+        fs::create_dir_all(&inside_objects).unwrap();
+        fs::create_dir_all(inside_refs.join("heads")).unwrap();
+        link(&out.join(".git/objects/pack"), &inside_objects.join("pack"));
+        link(
+            &out.join(".git/refs/heads/main"),
+            &inside_refs.join("heads/main"),
+        );
+        fs::remove_dir_all(repo.join(".git/objects")).unwrap();
+        fs::remove_dir_all(repo.join(".git/refs")).unwrap();
+        link(&inside_objects, &repo.join(".git/objects"));
+        link(&inside_refs, &repo.join(".git/refs"));
+        assert_secret_never_returned(&f, &repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_cycles_inside_the_git_directory_do_not_loop() {
+        let f = fx();
+        let repo = basic(&f);
+        link(&repo.join(".git"), &repo.join(".git/objects/info/cycle"));
+        link(&repo.join(".git/objects"), &repo.join(".git/refs/loop"));
+        assert!(open_at(&f, &repo).is_ok());
     }
 
     #[cfg(unix)]
