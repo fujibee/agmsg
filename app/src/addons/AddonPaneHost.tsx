@@ -9,6 +9,7 @@ import type { FailureAction } from "./FailureCard";
 import type { GrantChoice } from "./GrantCard";
 import { grantChips } from "./model";
 import { createOpGuard } from "./opGuard";
+import { listenPaneFailed, type PaneFailedEvent } from "./paneFailed";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
 import { createLiveSource, parseNetwork, toCommandError, type AddedPane } from "./source";
 import type { AddonPaneRef, GrantChip, GrantNeed, InstalledAddon, PaneState } from "./types";
@@ -100,10 +101,11 @@ function LiveAddonPane(props: {
   // Rust closes a pane whose files changed after it opened and says so; show its reason with Reload / Remove.
   useEffect(() => {
     if (!added) return;
-    const un = listen<{ pane: number; reason: string }>("addon-pane-failed", (e) => {
-      if (e.payload.pane === added.id) setState({ kind: "failure", failure: { code: "pane_closed", reason: e.payload.reason } });
-    });
-    return () => void un.then((f) => f());
+    return listenPaneFailed(
+      (event, handler) => listen<PaneFailedEvent>(event, handler),
+      added.id,
+      (reason) => setState({ kind: "failure", failure: { code: "pane_closed", reason } }),
+    );
   }, [added]);
 
   const chooseFolder = async () => {
