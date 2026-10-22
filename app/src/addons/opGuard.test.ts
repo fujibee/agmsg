@@ -41,4 +41,22 @@ describe("op guard", () => {
     await expect(g.run(async () => Promise.reject(new Error("x")))).rejects.toThrow("x");
     expect(g.isBusy()).toBe(false);
   });
+  it("stale() lets a step skip its side effect once the attempt was invalidated, grant -> invalidate -> save", async () => {
+    const g = createOpGuard();
+    const grant = deferred<void>();
+    let saves = 0;
+    const run = g.run(async ({ stale }) => {
+      await grant.promise;
+      if (!stale()) saves++;
+    });
+    g.invalidate(); // retry / unmount / update while the grant was in flight
+    grant.resolve();
+    expect(await run).toEqual({ kind: "stale" });
+    expect(saves).toBe(0);
+    // the current attempt still saves
+    await g.run(async ({ stale }) => {
+      if (!stale()) saves++;
+    });
+    expect(saves).toBe(1);
+  });
 });
