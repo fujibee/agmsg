@@ -70,7 +70,7 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   run bash "$SCRIPTS/agmsg" delivery agmsgd --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
   # The explanation comes before the Monitor instruction, which stays.
-  explain="$(grep -n "keeps receiving through a Monitor watch until it restarts or runs actas; agmsgd takes over after that" <<<"$output" | head -1 | cut -d: -f1)"
+  explain="$(grep -n "keeps receiving through a Monitor watch until it restarts or runs actas; agmsgd can take over once it confirms this session's destination" <<<"$output" | head -1 | cut -d: -f1)"
   directive="$(grep -n "AGMSG-DIRECTIVE" <<<"$output" | head -1 | cut -d: -f1)"
   [ -n "$explain" ] && [ -n "$directive" ] && [ "$explain" -lt "$directive" ]
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
@@ -81,7 +81,7 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   _mark_daemon_ready
   run bash "$SCRIPTS/agmsg" delivery turn --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
-  refute grep -Fq "takes over after that" <<<"$output"
+  refute grep -Fq "can take over once it confirms" <<<"$output"
   grep -Fq "agmsgd does not deliver to this project now (turn chosen)" <<<"$output"
   grep -Fq "agmsg daemon disable" <<<"$output"
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
