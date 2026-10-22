@@ -1,4 +1,4 @@
-import type { BarItem } from "./requests";
+import type { BarItem, RowNote } from "./requests";
 import { canOpen } from "./requests";
 import type { Translate } from "./model";
 
@@ -59,6 +59,34 @@ export function OpenRequestBar(props: {
     <details className="addon-request-bar">
       <summary>{t("addons.request.many", { count: items.length })}</summary>
       {rows}
+    </details>
+  );
+}
+
+/**
+ * Notes for control requests that get no bar: a malformed local request is
+ * shown with the reason it was refused, and a request received from another
+ * machine says it is not shown. Nothing here has an Open button; nothing fails
+ * silently.
+ */
+export function OpenRequestNotes(props: { t: Translate; notes: { rowId: string; note: RowNote }[] }) {
+  const { t, notes } = props;
+  if (notes.length === 0) return null;
+  const lines = notes.map(({ rowId, note }) => (
+    <div key={rowId} className={`addon-request-note addon-request-note-${note.kind}`} role="status">
+      {note.kind === "other_machine"
+        ? t("addons.request.note.other_machine")
+        : t("addons.request.note.malformed", {
+            reason: t(`addons.request.reason.${note.reason}`),
+            detail: note.detail ? `: ${note.detail}` : "",
+          })}
+    </div>
+  ));
+  if (notes.length === 1) return <div className="addon-request-notes">{lines}</div>;
+  return (
+    <details className="addon-request-notes">
+      <summary>{t("addons.request.notes", { count: notes.length })}</summary>
+      {lines}
     </details>
   );
 }

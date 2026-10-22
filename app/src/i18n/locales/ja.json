@@ -403,6 +403,19 @@
       "note": {
         "other_machine": "他のマシンからの control request は表示されません。",
         "malformed": "不正な open request です({{reason}}{{detail}})。"
+      },
+      "notes": "{{count}} 件のメモ ▾",
+      "reason": {
+        "missing_payload": "JSON の行がありません",
+        "extra_content": "JSON の行の後に余分なテキストがあります",
+        "too_large": "JSON の行が 2 KB を超えています",
+        "bad_json": "JSON として読めません",
+        "bad_shape": "リクエストの形が正しくありません",
+        "bad_pane": "不明なペイン",
+        "unknown_arg_key": "不明な引数",
+        "bad_arg_value": "引数の値がテキストではありません",
+        "bad_requester": "依頼者がないか形が正しくありません",
+        "bad_request_id": "リクエスト ID がありません"
       }
     },
     "menu": {

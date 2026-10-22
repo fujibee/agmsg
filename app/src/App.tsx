@@ -17,7 +17,7 @@ import {
 import { TerminalPane } from "./TerminalPane";
 import { AddonPaneHost } from "./addons/AddonPaneHost";
 import type { AddonPaneRef } from "./addons/types";
-import { OpenRequestBar } from "./addons/OpenRequestBar";
+import { OpenRequestBar, OpenRequestNotes } from "./addons/OpenRequestBar";
 import { scanRequests, type BarItem } from "./addons/requests";
 import { mockEngine, mockRequestContext, mockRequestRows, mockSnapshot } from "./addons/mock";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
@@ -1476,12 +1476,17 @@ export default function App() {
 
   // S10: open requests from seats, on mock rows. Nothing opens without the click.
   const [handledRequests, setHandledRequests] = useState<ReadonlySet<string>>(new Set());
-  const requestItems = useMemo(
+  const requestScan = useMemo(
     () =>
       mockSnapshot.openRequests === "show"
-        ? scanRequests(mockRequestRows, { ...mockRequestContext, team, handled: handledRequests }).items
-        : [],
+        ? scanRequests(mockRequestRows, { ...mockRequestContext, team, handled: handledRequests })
+        : { items: [], notes: new Map() },
     [team, handledRequests],
+  );
+  const requestItems = requestScan.items;
+  const requestNotes = useMemo(
+    () => [...requestScan.notes].map(([rowId, note]) => ({ rowId, note })),
+    [requestScan],
   );
   const handleRequest = useCallback((item: BarItem, opened: boolean) => {
     setHandledRequests((prev) => new Set(prev).add(item.requestId));
@@ -2664,6 +2669,7 @@ export default function App() {
               onInstall={() => setModal({ kind: "settings" })}
             />
           )}
+          {team && <OpenRequestNotes t={t as never} notes={requestNotes} />}
           <section className="stage" hidden={showUserChat && chatPaneState === "maximized"}>
             <div
               className="room"

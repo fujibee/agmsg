@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { mockRequestContext, mockRequestRows } from "./mock";
 import { argsAllowed, scanRequests, type RequestContext, type RequestRow } from "./requests";
-import { OpenRequestBar } from "./OpenRequestBar";
+import { OpenRequestBar, OpenRequestNotes } from "./OpenRequestBar";
 
 const ctx = (o: Partial<RequestContext> = {}): RequestContext => ({ ...mockRequestContext, ...o });
 const t = (key: string, o?: Record<string, unknown>) => `[${key}${o ? " " + JSON.stringify(o) : ""}]`;
@@ -81,5 +81,34 @@ describe("OpenRequestBar", () => {
     expect(html).toContain("addons.request.install");
     expect(html).toMatch(/disabled=""[^>]*>\[addons\.request\.open\]/);
     expect(bar([mockRequestRows[2]])).toMatch(/disabled=""[^>]*>\[addons\.request\.open\]/);
+  });
+});
+
+describe("OpenRequestNotes", () => {
+  const notes = (rows: RequestRow[], c = ctx()) => [...scanRequests(rows, c).notes].map(([rowId, note]) => ({ rowId, note }));
+  const render = (n: ReturnType<typeof notes>) => renderToStaticMarkup(createElement(OpenRequestNotes, { t, notes: n }));
+  const bad: RequestRow = { ...mockRequestRows[0], id: "x", body: mockRequestRows[0].body.replace('"path"', '"cmd"') };
+
+  it("shows nothing when there is nothing to say", () => expect(render([])).toBe(""));
+  it("a malformed local request is visible with its reason and the offending key, and has no Open", () => {
+    const html = render(notes([bad]));
+    expect(html).toContain("addons.request.note.malformed");
+    expect(html).toContain("addons.request.reason.unknown_arg_key");
+    expect(html).toContain("cmd");
+    expect(html).not.toContain("addons.request.open");
+  });
+  it("a request from another machine is visible and has no Open", () => {
+    const html = render(notes([mockRequestRows[0]], ctx({ isLocalOrigin: () => false })));
+    expect(html).toContain("addons.request.note.other_machine");
+    expect(html).not.toContain("addons.request.open");
+  });
+  it("several notes collapse into a count", () => {
+    expect(render(notes([bad, { ...bad, id: "y" }]))).toContain("addons.request.notes");
+  });
+  it("every refusal reason has a string", async () => {
+    const en = (await import("../i18n/locales/en.json")).default.addons.request.reason;
+    for (const r of ["missing_payload", "extra_content", "too_large", "bad_json", "bad_shape", "bad_pane", "unknown_arg_key", "bad_arg_value", "bad_requester", "bad_request_id"]) {
+      expect(en, r).toHaveProperty(r);
+    }
   });
 });
