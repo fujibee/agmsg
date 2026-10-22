@@ -285,6 +285,33 @@ fn direct_store_path(team: &str) -> Option<PathBuf> {
     }
 }
 
+/// How the open-request scan may read one team's messages.
+pub(crate) enum TeamStore {
+    /// A store file this app can read directly (the plain and the sync driver share the layout).
+    Sqlite(PathBuf),
+    /// The team has never been written to.
+    Empty,
+    /// Anything else, or a failed lookup: only `api.sh` can answer, and it cannot say where a row came from.
+    Api,
+}
+
+pub(crate) fn team_store(team: &str) -> TeamStore {
+    match store_info(team) {
+        Ok(info) if !info.exists => TeamStore::Empty,
+        Ok(info) if info.driver == DIRECTLY_READABLE_DRIVER || info.driver == "sqlite-sync" => TeamStore::Sqlite(PathBuf::from(info.path)),
+        _ => TeamStore::Api,
+    }
+}
+
+pub(crate) fn open_store_ro(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
+    open_ro(path)
+}
+
+/// The newest `limit` messages of a team through `api.sh`, oldest first.
+pub(crate) fn api_recent_messages(team: &str, limit: u32) -> Result<Vec<Message>, String> {
+    agmsg_messages(team.to_string(), Some(limit), None)
+}
+
 /// New messages, from the event log and the legacy table together.
 ///
 /// The read rule mirrors `storage_list_unread()` in
