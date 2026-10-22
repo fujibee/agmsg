@@ -117,9 +117,9 @@ case "$ACTION" in
     # SessionStart or actas), so it keeps the Monitor the directive below starts.
     # Say so first, so the Monitor instruction does not read as contradicting the choice.
     if [ "$TYPE" = claude-code ]; then
-      echo "This session keeps receiving through a Monitor watch until it restarts or runs actas; agmsgd takes over after that."
+      echo "This session keeps receiving through a Monitor watch until it restarts or runs actas; agmsgd can take over once it confirms this session's destination."
     else
-      echo "This session keeps its current delivery until it restarts or runs actas; agmsgd takes over after that."
+      echo "This session keeps its current delivery until it restarts or runs actas; agmsgd can take over once it confirms this session's destination."
     fi
     bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT"
     _record_choice agmsgd
