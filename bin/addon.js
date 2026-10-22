@@ -143,7 +143,8 @@ function collectFiles(root) {
   }
 }
 
-function checkTree(root, files) {
+function checkTree(root, files, limits) {
+  limits = limits || LIMITS;
   const errors = [];
   let total = 0;
   let largest = { file: '', size: 0 };
@@ -170,11 +171,11 @@ function checkTree(root, files) {
     lower.set(key, rel);
     total += st.size;
     if (st.size > largest.size) largest = { file: rel, size: st.size };
-    if (st.size > LIMITS.fileBytes) errors.push('Too large to install: ' + rel + ' is ' + mb(st.size) + ' (limit ' + mb(LIMITS.fileBytes) + ' per file).');
+    if (st.size > limits.fileBytes) errors.push('Too large to install: ' + rel + ' is ' + mb(st.size) + ' (limit ' + mb(limits.fileBytes) + ' per file).');
   }
-  if (files.length > LIMITS.files) errors.push('Too large to install: ' + files.length + ' files (limit ' + LIMITS.files + ').');
-  if (total > LIMITS.totalBytes) {
-    errors.push('Too large to install: ' + mb(total) + ' (limit ' + mb(LIMITS.totalBytes) + '). Largest file: ' + largest.file + ' (' + mb(largest.size) + ').');
+  if (files.length > limits.files) errors.push('Too large to install: ' + files.length + ' files (limit ' + limits.files + ').');
+  if (total > limits.totalBytes) {
+    errors.push('Too large to install: ' + mb(total) + ' (limit ' + mb(limits.totalBytes) + '). Largest file: ' + largest.file + ' (' + mb(largest.size) + ').');
   }
   return { errors, total, count: files.length, largest };
 }
@@ -215,7 +216,9 @@ function scanWeb(root, webFiles, conf) {
   return { errors, warnings };
 }
 
-function check(root) {
+// The findings without printing: `check` prints them, the shared fixture tests compare them
+// with the app's Rust installer (`app/addon-kit/fixtures/install-cases.json`).
+function collect(root, limits) {
   const errors = [];
   const blocked = [];
   const warnings = [];
@@ -225,7 +228,7 @@ function check(root) {
   }
   if (!fs.existsSync(panesDir)) {
     errors.push('No app add-on here (no app-panes/ folder). Run `npx agmsg addon init <name>` first.');
-    return report(errors, blocked, warnings, null);
+    return { errors, blocked, warnings, t: null };
   }
   const panes = fs.readdirSync(panesDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
   if (!panes.length) errors.push('app-panes/ has no add-on folder.');
@@ -257,9 +260,14 @@ function check(root) {
     blocked.push(...s.errors);
     warnings.push(...s.warnings);
   }
-  const t = checkTree(root, tree.files);
+  const t = checkTree(root, tree.files, limits);
   errors.push(...t.errors);
-  return report(errors, blocked, warnings, t);
+  return { errors, blocked, warnings, t };
+}
+
+function check(root) {
+  const c = collect(root);
+  return report(c.errors, c.blocked, c.warnings, c.t);
 }
 
 function report(errors, blocked, warnings, t) {
@@ -325,4 +333,4 @@ function main(args, root) {
   return 2;
 }
 
-module.exports = { main, parseConf, checkConf, check, init, LIMITS };
+module.exports = { main, parseConf, checkConf, check, collect, init, LIMITS };

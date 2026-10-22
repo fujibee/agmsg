@@ -14,6 +14,7 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "flate2",
  "getrandom 0.2.17",
  "objc2",
  "portable-pty",
@@ -23,6 +24,7 @@ dependencies = [
  "serial_test",
  "sha2",
  "similar",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

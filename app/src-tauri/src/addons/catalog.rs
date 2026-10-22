@@ -74,7 +74,11 @@ pub struct Resolved {
     pub commit: String,
     pub pane: String,
     pub web_dir: PathBuf,
+    /// Parsed from the exact `addon.conf` bytes that were verified.
     pub conf: AddonConf,
+    /// Every file under `web/` as it was verified: path relative to `web/` → (sha256, size).
+    /// The pane server serves only these files, only with these bytes.
+    pub pinned: std::collections::BTreeMap<String, (String, u64)>,
 }
 
 pub struct Catalog {
@@ -97,9 +101,16 @@ fn read_panes(app_panes: &Path) -> (Vec<PaneInfo>, Vec<String>) {
     let mut problems = Vec::new();
     for name in pane_names(app_panes) {
         let rel = format!("app-panes/{name}/addon.conf");
-        let Ok(text) = fs::read_to_string(app_panes.join(&name).join("addon.conf")) else {
-            problems.push(format!("{rel} is missing."));
-            continue;
+        let text = match conf::read_bounded(&app_panes.join(&name).join("addon.conf")) {
+            conf::ConfRead::Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+            conf::ConfRead::TooLarge => {
+                problems.push(format!("{rel}: is larger than 64 KiB; an add-on manifest is a few lines."));
+                continue;
+            }
+            conf::ConfRead::Absent => {
+                problems.push(format!("{rel} is missing."));
+                continue;
+            }
         };
         let r = conf::parse(&text, &rel);
         problems.extend(r.errors);
@@ -166,33 +177,51 @@ impl Catalog {
         out
     }
 
-    /// `(id, pane)` → the directory to serve and what it declared. The digest
-    /// is checked here, every time.
+    /// `(id, pane)` → the directory to serve and what it declared. Every file is
+    /// hashed here, once: the tree digest must match what was pinned, the
+    /// `addon.conf` is parsed from the verified bytes, and the per-file hashes of
+    /// `web/` are returned for the server to hold every response to.
     pub fn resolve(&self, id: &str, pane: &str) -> Result<Resolved, CatalogError> {
-        if !pane.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') || pane.is_empty() {
+        if pane.is_empty() || !pane.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
             return Err(CatalogError::Unknown("no such pane".into()));
         }
-        let (addon, commit, app_panes, tree_ok): (String, String, PathBuf, bool) = if let Some(name) = id.strip_prefix("builtin:") {
-            let expected = BUILTIN_DIGESTS.iter().find(|(n, _)| *n == name).map(|(_, d)| *d).ok_or_else(|| CatalogError::Unknown("no such add-on".into()))?;
+        // tree_root = the directory the pinned digest covers; pane_prefix = the pane's folder inside it
+        let (addon, commit, tree_root, pane_prefix, expected): (String, String, PathBuf, String, String) = if let Some(name) = id.strip_prefix("builtin:") {
+            let expected = BUILTIN_DIGESTS.iter().find(|(n, _)| *n == name).map(|(_, d)| d.to_string()).ok_or_else(|| CatalogError::Unknown("no such add-on".into()))?;
             let dir = self.builtin_pane_root(name).ok_or_else(|| CatalogError::Unknown("this build does not include that add-on".into()))?;
-            (id.to_string(), env!("CARGO_PKG_VERSION").to_string(), dir.clone(), self.builtin_digest_ok(name, expected))
+            (id.to_string(), env!("CARGO_PKG_VERSION").to_string(), dir, pane.to_string(), expected)
         } else {
             let e: IndexEntry = index::read(&self.addons_dir).into_iter().find(|e| e.repo == id).ok_or_else(|| CatalogError::Unknown("no such add-on".into()))?;
             if !e.enabled {
                 return Err(CatalogError::Unknown("that add-on is turned off".into()));
             }
-            let dir = e.dir(&self.addons_dir);
-            let ok = digest::payload_digest(&dir).map(|d| d == e.payload_digest).unwrap_or(false);
-            (e.repo.clone(), e.sha.clone(), dir.join("app-panes"), ok)
+            (e.repo.clone(), e.sha.clone(), e.dir(&self.addons_dir), format!("app-panes/{pane}"), e.payload_digest.clone())
         };
-        if !tree_ok {
-            return Err(CatalogError::Changed("can't open: its files are incomplete or were changed after install".into()));
+        let changed = || CatalogError::Changed("can't open: its files are incomplete or were changed after install".into());
+        let manifest = digest::manifest(&tree_root).map_err(|_| changed())?;
+        if manifest.digest != expected {
+            return Err(changed());
         }
-        let pane_dir = app_panes.join(pane);
-        let text = fs::read_to_string(pane_dir.join("addon.conf")).map_err(|_| CatalogError::Unknown("no such pane".into()))?;
+        let conf_key = format!("{pane_prefix}/addon.conf");
+        let Some((conf_sha, _)) = manifest.files.get(&conf_key) else {
+            return Err(CatalogError::Unknown("no such pane".into()));
+        };
+        let bytes = match conf::read_bounded(&tree_root.join(&conf_key)) {
+            conf::ConfRead::Ok(b) => b,
+            conf::ConfRead::TooLarge => return Err(CatalogError::Invalid("addon.conf is larger than 64 KiB".into())),
+            conf::ConfRead::Absent => return Err(CatalogError::Unknown("no such pane".into())),
+        };
+        if &digest::sha256_hex(&bytes) != conf_sha {
+            return Err(changed());
+        }
+        let text = String::from_utf8(bytes).map_err(|_| CatalogError::Invalid("addon.conf is not valid text".into()))?;
         let r = conf::parse(&text, &format!("app-panes/{pane}/addon.conf"));
         let conf = r.conf.ok_or_else(|| CatalogError::Invalid(r.errors.join(" ")))?;
-        Ok(Resolved { addon, commit, pane: pane.to_string(), web_dir: pane_dir.join("web"), conf })
+        let pinned = manifest.under(&format!("{pane_prefix}/web"));
+        if !pinned.contains_key(&conf.entry) {
+            return Err(CatalogError::Invalid(format!("web/{} is missing", conf.entry)));
+        }
+        Ok(Resolved { addon, commit, pane: pane.to_string(), web_dir: tree_root.join(&pane_prefix).join("web"), conf, pinned })
     }
 }
 
@@ -306,6 +335,154 @@ mod tests {
         fs::write(a.dir(&addons).join("app-panes/main/web/index.html"), "<script>evil()</script>").unwrap();
         assert!(matches!(cat.resolve("o/r", "main"), Err(CatalogError::Changed(_))));
         assert!(!cat.list().iter().find(|x| x.id == "o/r").unwrap().digest_ok);
+    }
+
+    // ---- what is served is what was verified (resolve + server) ----
+
+    use crate::addons::csp::Network;
+    use crate::addons::server::{PaneServer, PaneSpec, Payload};
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn serve(r: &Resolved) -> (PaneServer, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let srv = PaneServer::start(PaneSpec {
+            payload: Payload::Dir(r.web_dir.clone()),
+            entry: r.conf.entry.clone(),
+            network: Network::None,
+            expected_digest: None,
+            pinned: Some(r.pinned.clone()),
+            on_tamper: Some(Arc::new(move |_, _| {
+                h.fetch_add(1, Ordering::SeqCst);
+            })),
+        })
+        .unwrap();
+        (srv, hits)
+    }
+
+    fn http_get(srv: &PaneServer, path: &str) -> (u16, Vec<u8>) {
+        let mut s = TcpStream::connect(("127.0.0.1", srv.port())).unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        s.write_all(format!("GET /{}/{path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", srv.token(), srv.port()).as_bytes()).unwrap();
+        let mut buf = Vec::new();
+        let _ = s.read_to_end(&mut buf);
+        let end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(buf.len());
+        let st = String::from_utf8_lossy(&buf[..end]).split(' ').nth(1).and_then(|x| x.parse().ok()).unwrap_or(0);
+        (st, buf.get(end + 4..).unwrap_or(&[]).to_vec())
+    }
+
+    fn wait(hits: &Arc<AtomicUsize>) {
+        for _ in 0..200 {
+            if hits.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn installed_resolved() -> (tempfile::TempDir, Resolved) {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("addons");
+        let e = install(&addons, "o/r", '1', true);
+        fs::write(e.dir(&addons).join("app-panes/main/web/app.js"), "export const ok = 1;").unwrap();
+        let mut e = e;
+        e.payload_digest = digest::payload_digest(&e.dir(&addons)).unwrap();
+        index::write(&addons, &[e]).unwrap();
+        let r = Catalog::new(None, addons).resolve("o/r", "main").unwrap();
+        (tmp, r)
+    }
+
+    fn builtin_resolved() -> (tempfile::TempDir, Resolved) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../addons");
+        let tmp = tempfile::tempdir().unwrap();
+        let res = tmp.path().join("res/builtin-addons");
+        for (name, _) in BUILTIN_DIGESTS {
+            copy_dir(&root.join(name).join("app-panes"), &res.join(name));
+        }
+        let r = Catalog::new(Some(res), tmp.path().join("addons")).resolve("builtin:fileview", "fileview").unwrap();
+        (tmp, r)
+    }
+
+    fn some_pinned_file(r: &Resolved) -> String {
+        r.pinned.keys().find(|k| k.ends_with(".js")).cloned().unwrap_or_else(|| r.conf.entry.clone())
+    }
+
+    #[test]
+    fn resolve_pins_every_web_file_and_the_conf_bytes_it_parsed() {
+        for (_t, r) in [installed_resolved(), builtin_resolved()] {
+            assert!(r.pinned.contains_key(&r.conf.entry));
+            assert!(r.pinned.keys().all(|k| !k.contains("addon.conf")), "only web/ is served");
+            let (srv, hits) = serve(&r);
+            assert_eq!(http_get(&srv, &r.conf.entry).0, 200);
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn edits_after_resolve_or_after_start_never_reach_the_pane() {
+        for (name, make) in [("installed", installed_resolved as fn() -> (tempfile::TempDir, Resolved)), ("builtin", builtin_resolved)] {
+            // edited after start
+            let (_t, r) = make();
+            let (srv, hits) = serve(&r);
+            let f = some_pinned_file(&r);
+            fs::write(r.web_dir.join(&f), "/* CHANGED_AFTER_VERIFICATION */").unwrap();
+            let (st, body) = http_get(&srv, &f);
+            assert_eq!(st, 503, "{name}");
+            assert!(!String::from_utf8_lossy(&body).contains("CHANGED_AFTER_VERIFICATION"), "{name}");
+            wait(&hits);
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "{name}");
+            // edited between resolve and start (an html file is re-verified at start; others at first read)
+            let (_t2, r2) = make();
+            fs::write(r2.web_dir.join(&r2.conf.entry), "<script>evil()</script>").unwrap();
+            let started = PaneServer::start(PaneSpec { payload: Payload::Dir(r2.web_dir.clone()), entry: r2.conf.entry.clone(), network: Network::None, expected_digest: None, pinned: Some(r2.pinned.clone()), on_tamper: None });
+            assert!(started.is_err(), "{name}: a changed entry cannot start");
+            // deleted after start
+            let (_t3, r3) = make();
+            let (srv3, hits3) = serve(&r3);
+            fs::remove_file(r3.web_dir.join(some_pinned_file(&r3))).unwrap();
+            assert_eq!(http_get(&srv3, &some_pinned_file(&r3)).0, 503, "{name}");
+            wait(&hits3);
+            assert_eq!(hits3.load(Ordering::SeqCst), 1, "{name}");
+            // a file that is not in the manifest
+            let (_t4, r4) = make();
+            let (srv4, hits4) = serve(&r4);
+            fs::write(r4.web_dir.join("injected.js"), "x").unwrap();
+            assert_eq!(http_get(&srv4, "injected.js").0, 404, "{name}");
+            assert_eq!(http_get(&srv4, &r4.conf.entry).0, 200, "{name}");
+            assert_eq!(hits4.load(Ordering::SeqCst), 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_conf_changed_between_verification_and_use_is_not_trusted() {
+        // the conf is parsed from the bytes that were hashed; a changed conf changes the tree digest, so resolve refuses
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("addons");
+        let e = install(&addons, "o/r", '1', true);
+        index::write(&addons, &[e.clone()]).unwrap();
+        fs::write(e.dir(&addons).join("app-panes/main/addon.conf"), "title=Main\nprotocol=1\npermissions=files:read,network\nnetwork=*\n").unwrap();
+        assert!(matches!(Catalog::new(None, addons).resolve("o/r", "main"), Err(CatalogError::Changed(_))));
+    }
+
+    #[test]
+    fn an_oversized_conf_is_refused_with_a_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("addons");
+        let mut e = install(&addons, "o/r", '1', true);
+        let big = format!("title=Main\nprotocol=1\n# {}\n", "x".repeat(70_000));
+        fs::write(e.dir(&addons).join("app-panes/main/addon.conf"), big).unwrap();
+        e.payload_digest = digest::payload_digest(&e.dir(&addons)).unwrap();
+        index::write(&addons, &[e]).unwrap();
+        let cat = Catalog::new(None, addons);
+        match cat.resolve("o/r", "main") {
+            Err(CatalogError::Invalid(m)) => assert!(m.contains("larger than 64 KiB"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        let l = cat.list();
+        assert!(l[0].problems.iter().any(|p| p.contains("larger than 64 KiB")), "{:?}", l[0].problems);
     }
 
     #[test]

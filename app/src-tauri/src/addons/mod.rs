@@ -15,6 +15,7 @@ pub mod feed;
 pub mod gate;
 pub mod host;
 pub mod index;
+pub mod install;
 pub mod nav;
 pub mod panes;
 pub mod server;

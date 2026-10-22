@@ -8,6 +8,10 @@ use std::collections::BTreeMap;
 
 use super::panes::Declared;
 
+/// An `addon.conf` is a short manifest. Larger than this is refused unread.
+pub const MAX_CONF_BYTES: usize = 64 * 1024;
+pub const MAX_CONF_LINES: usize = 1000;
+
 pub const PERMISSIONS: [&str; 4] = ["messages:read", "files:read", "git:read", "network"];
 const KEYS: [&str; 7] = ["title", "entry", "min_app", "protocol", "permissions", "network", "opens"];
 const OPENS: [&str; 2] = ["path", "url"];
@@ -33,6 +37,29 @@ pub struct ConfReport {
     pub warnings: Vec<String>,
 }
 
+/// Reads an `addon.conf` without trusting its size: absent, ok, or too large
+/// (anything over the cap is not read past it).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConfRead {
+    Absent,
+    Ok(Vec<u8>),
+    TooLarge,
+}
+
+pub fn read_bounded(path: &std::path::Path) -> ConfRead {
+    use std::io::Read;
+    let Ok(f) = std::fs::File::open(path) else { return ConfRead::Absent };
+    let mut buf = Vec::new();
+    if f.take(MAX_CONF_BYTES as u64 + 1).read_to_end(&mut buf).is_err() {
+        return ConfRead::Absent;
+    }
+    if buf.len() > MAX_CONF_BYTES {
+        ConfRead::TooLarge
+    } else {
+        ConfRead::Ok(buf)
+    }
+}
+
 fn list(v: &str) -> Vec<String> {
     v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
 }
@@ -40,6 +67,12 @@ fn list(v: &str) -> Vec<String> {
 /// Parses and validates one `addon.conf`. `rel` is the file's path as shown in
 /// messages (`app-panes/<name>/addon.conf`). `conf` is `Some` only without errors.
 pub fn parse(text: &str, rel: &str) -> ConfReport {
+    if text.len() > MAX_CONF_BYTES {
+        return ConfReport { conf: None, errors: vec![format!("{rel}: is larger than {} KiB; an add-on manifest is a few lines.", MAX_CONF_BYTES / 1024)], warnings: Vec::new() };
+    }
+    if text.split('\n').count() > MAX_CONF_LINES {
+        return ConfReport { conf: None, errors: vec![format!("{rel}: has more than {MAX_CONF_LINES} lines; an add-on manifest is a few lines.")], warnings: Vec::new() };
+    }
     let mut errors: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut values: BTreeMap<String, (String, usize)> = BTreeMap::new();
@@ -291,6 +324,31 @@ mod tests {
         assert!(r.warnings.iter().any(|w| w.contains("no \"why.files:read\" line")));
         assert!(r.warnings.iter().any(|w| w.contains("for a permission that is not declared")));
         assert!(r.errors.is_empty());
+    }
+
+    #[test]
+    fn an_oversized_conf_is_refused_with_a_reason() {
+        let big = format!("title = T\nprotocol = 1\n# {}\n", "x".repeat(MAX_CONF_BYTES));
+        let r = parse(&big, "app-panes/x/addon.conf");
+        assert!(r.conf.is_none() && r.errors[0].contains("larger than 64 KiB"), "{:?}", r.errors);
+        let many = format!("title = T\nprotocol = 1\n{}", "# c\n".repeat(MAX_CONF_LINES));
+        let r = parse(&many, "c");
+        assert!(r.conf.is_none() && r.errors[0].contains("more than 1000 lines"), "{:?}", r.errors);
+        let just = format!("title = T\nprotocol = 1\n{}", "# c\n".repeat(900));
+        assert!(parse(&just, "c").conf.is_some());
+    }
+
+    #[test]
+    fn read_bounded_splits_absent_ok_and_too_large() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(read_bounded(&d.path().join("nope")), ConfRead::Absent);
+        std::fs::write(d.path().join("ok"), "title=T").unwrap();
+        assert_eq!(read_bounded(&d.path().join("ok")), ConfRead::Ok(b"title=T".to_vec()));
+        std::fs::write(d.path().join("big"), vec![b'a'; MAX_CONF_BYTES + 1]).unwrap();
+        assert_eq!(read_bounded(&d.path().join("big")), ConfRead::TooLarge);
+        std::fs::write(d.path().join("exact"), vec![b'#'; MAX_CONF_BYTES]).unwrap();
+        assert!(matches!(read_bounded(&d.path().join("exact")), ConfRead::Ok(_)));
+        assert_eq!(read_bounded(d.path()), ConfRead::Absent, "a directory is not a conf");
     }
 
     #[test]
