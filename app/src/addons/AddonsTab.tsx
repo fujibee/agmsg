@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AddonsSettings } from "./AddonsSettings";
-import { ConfirmInstallDialog, RemoveDialog } from "./Dialogs";
+import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
 import { mockEngine, mockSnapshot, mockStage } from "./mock";
-import type { AddonsSnapshot, InstallError, StagedInstall } from "./types";
+import type { AddonsSnapshot, FetchProgress, InstallError, StagedInstall } from "./types";
 
 // Container for Settings → Add-ons. Holds the snapshot in local state seeded
 // from the mock module; the wiring later replaces the seed and the callbacks
@@ -15,6 +15,36 @@ export function AddonsTab() {
   const [installError, setInstallError] = useState<InstallError | null>(null);
   const [staged, setStaged] = useState<StagedInstall | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [progress, setProgress] = useState<FetchProgress | null>(null);
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const cancelFetch = () => {
+    timers.current.forEach(clearTimeout);
+    timers.current = [];
+    setProgress(null);
+  };
+  useEffect(() => cancelFetch, []);
+  // Mock of the fetch steps (resolving → downloading → checking); the real one reports from Rust.
+  const startFetch = (owner: string, repo: string) => {
+    const sha = "d41d8cd98f00b204e9800998ecf8427e1a2b3c4d";
+    const steps: [number, FetchProgress | "done"][] = [
+      [0, { step: "resolving" }],
+      [250, { step: "resolving", sha }],
+      [500, { step: "downloading", doneMb: 4, totalMb: 12 }],
+      [800, { step: "checking", files: 30, sizeMb: 24 }],
+      [1100, "done"],
+    ];
+    cancelFetch();
+    for (const [at, p] of steps) {
+      timers.current.push(
+        setTimeout(() => {
+          if (p === "done") {
+            setProgress(null);
+            setStaged(mockStage(owner, repo));
+          } else setProgress(p);
+        }, at),
+      );
+    }
+  };
   const removingAddon = snapshot.addons.find((a) => a.id === removing);
   return (
     <>
@@ -29,7 +59,7 @@ export function AddonsTab() {
             return;
           }
           setInstallError(null);
-          setStaged(mockStage(owner, repo));
+          startFetch(owner, repo);
         }}
         onRevoke={(addonId, i) =>
           setSnapshot((s) => ({ ...s, grants: s.grants.filter((g, idx) => !(g.addonId === addonId && idx === i)) }))
@@ -39,6 +69,7 @@ export function AddonsTab() {
         onOpenRequestsChange={(v) => setSnapshot((s) => ({ ...s, openRequests: v }))}
         onLoadFromFolder={() => {}}
       />
+      {progress && <FetchProgressView t={tt} progress={progress} onCancel={cancelFetch} />}
       {staged && (
         <ConfirmInstallDialog
           t={tt}

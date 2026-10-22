@@ -1493,6 +1493,7 @@ export default function App() {
       paneName: k.kind === "addon" ? k.pane : k.kind,
       title,
       askedBy: item.from,
+      openArgs: item.request.args,
     });
   }, [openAddonPane]);
 

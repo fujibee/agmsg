@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { AddonPane } from "./AddonPane";
 import { grantChips } from "./model";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
-import type { AddonPaneRef, GrantChip, PaneState } from "./types";
+import type { AddonPaneRef, GrantChip, GrantNeed, PaneState } from "./types";
 
 // Holds one add-on pane's state on mock data: starts at the grant card for
 // what the pane declares, Allow moves to the frame placeholder, Reload goes
@@ -17,7 +17,7 @@ export function AddonPaneHost(props: { pane: AddonPaneRef; onClose: () => void }
     decl?.permissions.includes("messages:read")
       ? { kind: "grant", need: mockGrantNeeds.messages }
       : decl?.permissions.includes("files:read")
-        ? { kind: "grant", need: mockGrantNeeds.files }
+        ? { kind: "grant", need: { permission: "files:read", path: props.pane.openArgs?.path ?? "", fileCount: 1240, denied: false } satisfies GrantNeed }
         : { kind: "frame" },
   );
   const [chips, setChips] = useState<GrantChip[]>([]);

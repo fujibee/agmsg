@@ -102,7 +102,14 @@ export type GrantChip = { key: string; label: string };
 export type BrokerErrorCode = ErrorCode;
 
 /** What a tab's `Pane` (kind "addon") carries: which add-on pane it shows. */
-export type AddonPaneRef = { addonId: string; paneName: string; title: string; askedBy?: string };
+export type AddonPaneRef = {
+  addonId: string;
+  paneName: string;
+  title: string;
+  askedBy?: string;
+  /** What the pane was opened with (a request's args, or the folder picked). */
+  openArgs?: { path?: string; url?: string; base?: string };
+};
 
 /** What the confirm dialog (S3 install, S8 update) is built from: the staged files. */
 export type StagedInstall = {
