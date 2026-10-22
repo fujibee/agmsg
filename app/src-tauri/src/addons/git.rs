@@ -13,6 +13,19 @@
 //!    `addons::diff`, reading worktree files through checked reads;
 //! 4. drops every path the denylist matches, in history too.
 //!
+//! Limits of version 1 (deliberate, not bugs):
+//! - Worktree files are compared as they are on disk. `core.autocrlf`, clean
+//!   filters and `.gitattributes` are not applied, so a repository that converts
+//!   line endings shows those files as changed.
+//! - Submodules are never entered; a submodule path is left out of status and diff.
+//! - `log` returns the author name, an ISO date, the subject and the parents:
+//!   no e-mail address and no message body.
+//! - A single file is compared up to 2 MB, `show` reads up to 10 MB, a status or
+//!   diff lists at most 5,000 files.
+//! - Every git run has a time limit (`GitEnv::timeout`, 30 s by default); a run
+//!   that exceeds it is killed and reported as `not_available`.
+//! - Untracked files that are not ignored are listed as added.
+//!
 //! Errors carry the protocol codes: `outside_root`, `unsupported_repo`,
 //! `not_found`, `bad_args`, `denied_path`, `too_large`, `not_available`.
 
@@ -22,8 +35,11 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha1::{Digest, Sha1};
@@ -455,7 +471,12 @@ pub struct GitEnv {
     pub git: PathBuf,
     pub empty_dir: PathBuf,
     pub empty_config: PathBuf,
+    /// A git run (or one answer of the object reader) that takes longer is killed.
+    pub timeout: Duration,
 }
+
+/// Default time limit of one git run.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl GitEnv {
     pub fn new(git: impl Into<PathBuf>, support_dir: &Path) -> std::io::Result<GitEnv> {
@@ -469,6 +490,7 @@ impl GitEnv {
             git: git.into(),
             empty_dir,
             empty_config,
+            timeout: DEFAULT_TIMEOUT,
         })
     }
 }
@@ -564,32 +586,57 @@ impl Runner {
                 let _ = si.write_all(&d);
             })
         });
-        let mut out = Vec::new();
-        let _ = child
-            .stdout
-            .take()
-            .expect("piped")
-            .take(cap as u64 + 1)
-            .read_to_end(&mut out);
-        let too_big = out.len() > cap;
-        if too_big {
-            let _ = child.kill();
-        }
-        let status = child
-            .wait()
-            .map_err(|e| unavailable(format!("git did not finish: {e}")))?;
+        let exceeded = Arc::new(AtomicBool::new(false));
+        let mut so = child.stdout.take().expect("piped");
+        let flag = exceeded.clone();
+        let out_thread = thread::spawn(move || {
+            let mut v = Vec::new();
+            let _ = (&mut so).take(cap as u64 + 1).read_to_end(&mut v);
+            if v.len() > cap {
+                flag.store(true, Ordering::SeqCst);
+            }
+            v
+        });
+        let deadline = Instant::now() + self.env.timeout;
+        let mut timed_out = false;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break Some(st),
+                Ok(None) => {}
+                Err(e) => return Err(unavailable(format!("git did not finish: {e}"))),
+            }
+            if exceeded.load(Ordering::SeqCst) {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            if Instant::now() >= deadline {
+                timed_out = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        let out = out_thread.join().unwrap_or_default();
         if let Some(t) = in_thread {
             let _ = t.join();
         }
         let stderr = String::from_utf8_lossy(&err_thread.join().unwrap_or_default())
             .trim()
             .to_string();
-        if too_big {
+        if timed_out {
+            return Err(unavailable(format!(
+                "git did not answer within {} s and was stopped",
+                self.env.timeout.as_secs_f32()
+            )));
+        }
+        let Some(status) = status else {
             return Err(GitError::new(
                 ErrorCode::TooLarge,
                 "git produced more output than the broker allows",
             ));
-        }
+        };
         Ok((status.success(), out, stderr))
     }
 
@@ -618,9 +665,10 @@ impl Runner {
         let stdin = child.stdin.take().expect("piped");
         let stdout = BufReader::new(child.stdout.take().expect("piped"));
         Ok(Batch {
-            child,
+            child: Arc::new(Mutex::new(child)),
             stdin,
             stdout,
+            timeout: self.env.timeout,
         })
     }
 }
@@ -631,24 +679,58 @@ fn first_line(s: &str) -> &str {
 
 /// One `cat-file --batch` process for many objects.
 struct Batch {
-    child: Child,
+    child: Arc<Mutex<Child>>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    timeout: Duration,
 }
 
 impl Drop for Batch {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Ok(mut c) = self.child.lock() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
     }
 }
 
 impl Batch {
-    /// The content of a blob, at most `cap` bytes.
+    fn kill(&self) {
+        if let Ok(mut c) = self.child.lock() {
+            let _ = c.kill();
+        }
+    }
+
+    /// The content of a blob, at most `cap` bytes. One answer must arrive within
+    /// the time limit, or the process is killed.
     fn blob(&mut self, oid: &str, cap: u64) -> Res<Vec<u8>> {
         if !is_hex_oid(oid) {
             return Err(bad_args("not an object id"));
         }
+        let (done, wait) = mpsc::channel::<()>();
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let (flag, child, limit) = (timed_out.clone(), self.child.clone(), self.timeout);
+        let dog = thread::spawn(move || {
+            if wait.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
+                flag.store(true, Ordering::SeqCst);
+                if let Ok(mut c) = child.lock() {
+                    let _ = c.kill();
+                }
+            }
+        });
+        let result = self.read_blob(oid, cap);
+        drop(done);
+        let _ = dog.join();
+        if timed_out.load(Ordering::SeqCst) {
+            return Err(unavailable(format!(
+                "git did not answer within {} s and was stopped",
+                self.timeout.as_secs_f32()
+            )));
+        }
+        result
+    }
+
+    fn read_blob(&mut self, oid: &str, cap: u64) -> Res<Vec<u8>> {
         writeln!(self.stdin, "{oid}")
             .and_then(|_| self.stdin.flush())
             .map_err(|e| unavailable(format!("git stopped: {e}")))?;
@@ -668,7 +750,7 @@ impl Batch {
                     .map_err(|_| unavailable("unreadable git answer"))?;
                 if size > cap {
                     // The rest of the answer is still in the pipe; this process is done.
-                    let _ = self.child.kill();
+                    self.kill();
                     return Err(GitError::new(
                         ErrorCode::TooLarge,
                         format!("the file is {size} bytes (limit {cap})"),
@@ -1195,6 +1277,22 @@ impl GitBroker {
 
     // -- changes, status, diff
 
+    /// Files that are not tracked and not ignored. Nested repositories (listed with
+    /// a trailing slash) are not entered.
+    fn untracked_files(&self, snap: &Snapshot) -> Res<Vec<String>> {
+        let out = self.runner.run(
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+            None,
+            MAX_LIST_BYTES,
+        )?;
+        Ok(out
+            .split(|&b| b == 0)
+            .filter(|r| !r.is_empty())
+            .map(|r| String::from_utf8_lossy(r).into_owned())
+            .filter(|p| !p.ends_with('/') && !self.hidden(snap, p))
+            .collect())
+    }
+
     fn base_tree(
         &self,
         snap: &Snapshot,
@@ -1254,6 +1352,7 @@ impl GitBroker {
                 let mut paths: BTreeSet<String> = base_files.keys().cloned().collect();
                 let idx = self.index_files(snap)?;
                 paths.extend(idx.keys().cloned());
+                paths.extend(self.untracked_files(snap)?);
                 let mut m = BTreeMap::new();
                 for p in paths.into_iter().filter(|p| in_filter(p)) {
                     let fallback = base_files
@@ -2419,6 +2518,159 @@ mod tests {
             .collect();
         assert_eq!(git_vars, ours.iter().copied().collect::<BTreeSet<_>>());
         assert!(real.is_ok(), "{real:?}");
+    }
+
+    // -- time limit
+
+    #[cfg(unix)]
+    fn hanging_git(f: &Fx) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = f.root.join("hanging-git");
+        // exec: the sleeping process is the one that gets killed.
+        fs::write(&fake, "#!/bin/sh\nexec sleep 20\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        fake
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_git_run_that_hangs_is_killed_and_reported() {
+        let f = fx();
+        let repo = basic(&f);
+        let mut env = GitEnv::new(hanging_git(&f), &f.support).unwrap();
+        env.timeout = Duration::from_millis(300);
+        let runner = Runner {
+            env,
+            git_dir: repo.join(".git"),
+            work_tree: repo.clone(),
+            ceiling: f.root.clone(),
+        };
+        let started = Instant::now();
+        let err = runner
+            .run_raw(&["rev-parse", "HEAD"], None, 4096)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotAvailable);
+        assert!(err.message.contains("did not answer"), "{}", err.message);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "returned only after {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_object_reader_that_stops_answering_is_killed_and_reported() {
+        let f = fx();
+        let repo = basic(&f);
+        let mut env = GitEnv::new(hanging_git(&f), &f.support).unwrap();
+        env.timeout = Duration::from_millis(300);
+        let runner = Runner {
+            env,
+            git_dir: repo.join(".git"),
+            work_tree: repo.clone(),
+            ceiling: f.root.clone(),
+        };
+        let mut batch = runner.batch().unwrap();
+        let started = Instant::now();
+        let oid = git_in(&repo, &["rev-parse", "HEAD:a.txt"]);
+        let err = batch.blob(&oid, 1024).unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotAvailable);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_normal_run_is_well_inside_the_default_limit() {
+        assert!(DEFAULT_TIMEOUT >= Duration::from_secs(10));
+    }
+
+    // -- untracked files
+
+    #[test]
+    fn untracked_files_that_are_not_ignored_show_as_added() {
+        let f = fx();
+        let repo = basic(&f);
+        write(&repo.join(".gitignore"), "*.log\nbuild/\n");
+        git_in(&repo, &["add", ".gitignore"]);
+        git_in(&repo, &["commit", "-q", "-m", "ignore"]);
+        write(&repo.join("new.txt"), "brand new\n");
+        write(&repo.join("sub/deep/also.txt"), "deep\n");
+        write(&repo.join("debug.log"), "ignored\n");
+        write(&repo.join("build/out.bin"), "ignored\n");
+        // A nested repository is not entered.
+        let nested = repo.join("vendor");
+        init(&nested);
+        write(&nested.join("inner.txt"), "inner\n");
+        let g = open_at(&f, &repo).unwrap();
+        let d = g.diff(&DiffRequest::default()).unwrap();
+        let mut paths: Vec<_> = d.files.iter().map(|x| x.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["new.txt", "sub/deep/also.txt"]);
+        assert!(d.files.iter().all(|x| x.status == DiffStatus::Added));
+        assert_eq!(d.files[0].hunks[0].lines[0].text, "brand new");
+        let st = g.status().unwrap();
+        assert_eq!(st.len(), 2);
+        // A path filter applies to them too.
+        let only = g
+            .diff(&DiffRequest {
+                path: Some("sub".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(only.files.len(), 1);
+        // Comparing two commits does not look at the work tree.
+        let c = g
+            .diff(&DiffRequest {
+                base: Some("HEAD".into()),
+                head: Some("HEAD".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(c.files.is_empty());
+    }
+
+    #[test]
+    fn untracked_protected_files_and_big_files_are_handled_like_tracked_ones() {
+        let f = fx();
+        let home = f.root.join("home");
+        init(&home);
+        write(&home.join("ok.txt"), "ok\n");
+        commit_all(&home, "c");
+        write(&home.join(".ssh/id_rsa"), "UNTRACKED-SECRET\n");
+        write(&home.join(".aws/credentials"), "UNTRACKED-AWS\n");
+        write(&home.join("fresh.txt"), "fresh\n");
+        write(&home.join("big.txt"), &"x\n".repeat(1_100_000));
+        let d = open_at(&f, &home)
+            .unwrap()
+            .diff(&DiffRequest::default())
+            .unwrap();
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(
+            !json.contains(".ssh") && !json.contains(".aws") && !json.contains("UNTRACKED"),
+            "{json}"
+        );
+        let by: BTreeMap<_, _> = d.files.iter().map(|x| (x.path.as_str(), x)).collect();
+        assert_eq!(by["fresh.txt"].status, DiffStatus::Added);
+        assert!(by["big.txt"].too_large);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_untracked_symlink_is_listed_by_its_text_and_never_followed() {
+        let f = fx();
+        let repo = basic(&f);
+        let out = outside_dir(&f);
+        std::os::unix::fs::symlink(out.join("sentinel.txt"), repo.join("link")).unwrap();
+        std::os::unix::fs::symlink(&out, repo.join("dirlink")).unwrap();
+        let d = open_at(&f, &repo)
+            .unwrap()
+            .diff(&DiffRequest::default())
+            .unwrap();
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("OUTSIDE-SECRET"), "{json}");
+        let by: BTreeMap<_, _> = d.files.iter().map(|x| (x.path.as_str(), x)).collect();
+        assert_eq!(by["link"].new_mode.as_deref(), Some("120000"));
+        assert_eq!(by["dirlink"].new_mode.as_deref(), Some("120000"));
     }
 
     // -- the denylist inside history
