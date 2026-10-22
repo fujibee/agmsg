@@ -6,6 +6,7 @@
 //! both so an author sees before pushing exactly what the app refuses after.
 
 pub mod extract;
+pub mod github;
 pub mod grants;
 pub mod layout;
 pub mod stage;
