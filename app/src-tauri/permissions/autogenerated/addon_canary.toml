@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-addon-canary"
+description = "Enables the addon_canary command without any pre-configured scope."
+commands.allow = ["addon_canary"]
+
+[[permission]]
+identifier = "deny-addon-canary"
+description = "Denies the addon_canary command without any pre-configured scope."
+commands.deny = ["addon_canary"]

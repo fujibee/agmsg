@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agmsg-is-installed"
+description = "Enables the agmsg_is_installed command without any pre-configured scope."
+commands.allow = ["agmsg_is_installed"]
+
+[[permission]]
+identifier = "deny-agmsg-is-installed"
+description = "Denies the agmsg_is_installed command without any pre-configured scope."
+commands.deny = ["agmsg_is_installed"]

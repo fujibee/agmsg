@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pty-resize"
+description = "Enables the pty_resize command without any pre-configured scope."
+commands.allow = ["pty_resize"]
+
+[[permission]]
+identifier = "deny-pty-resize"
+description = "Denies the pty_resize command without any pre-configured scope."
+commands.deny = ["pty_resize"]

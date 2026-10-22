@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agmsg-rename-team"
+description = "Enables the agmsg_rename_team command without any pre-configured scope."
+commands.allow = ["agmsg_rename_team"]
+
+[[permission]]
+identifier = "deny-agmsg-rename-team"
+description = "Denies the agmsg_rename_team command without any pre-configured scope."
+commands.deny = ["agmsg_rename_team"]

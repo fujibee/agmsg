@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agmsg-update-core"
+description = "Enables the agmsg_update_core command without any pre-configured scope."
+commands.allow = ["agmsg_update_core"]
+
+[[permission]]
+identifier = "deny-agmsg-update-core"
+description = "Denies the agmsg_update_core command without any pre-configured scope."
+commands.deny = ["agmsg_update_core"]

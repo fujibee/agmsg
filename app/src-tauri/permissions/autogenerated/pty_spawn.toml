@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pty-spawn"
+description = "Enables the pty_spawn command without any pre-configured scope."
+commands.allow = ["pty_spawn"]
+
+[[permission]]
+identifier = "deny-pty-spawn"
+description = "Denies the pty_spawn command without any pre-configured scope."
+commands.deny = ["pty_spawn"]

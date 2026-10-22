@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pty-write"
+description = "Enables the pty_write command without any pre-configured scope."
+commands.allow = ["pty_write"]
+
+[[permission]]
+identifier = "deny-pty-write"
+description = "Denies the pty_write command without any pre-configured scope."
+commands.deny = ["pty_write"]

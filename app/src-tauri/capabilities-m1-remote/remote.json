@@ -1,0 +1,15 @@
+{
+  "identifier": "m1-remote",
+  "description": "M1 A2: ACL temporarily allows the loopback add-on origin",
+  "windows": [
+    "main"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*"
+    ]
+  },
+  "permissions": [
+    "allow-addon-canary"
+  ]
+}

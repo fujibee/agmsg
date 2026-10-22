@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agmsg-delete-team"
+description = "Enables the agmsg_delete_team command without any pre-configured scope."
+commands.allow = ["agmsg_delete_team"]
+
+[[permission]]
+identifier = "deny-agmsg-delete-team"
+description = "Denies the agmsg_delete_team command without any pre-configured scope."
+commands.deny = ["agmsg_delete_team"]

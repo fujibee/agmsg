@@ -1,3 +1,4 @@
+mod addon_spike;
 mod agmsg;
 mod agent_state;
 mod menu_i18n;
@@ -633,6 +634,7 @@ pub fn run() {
                 let _ = window.set_zoom(zoom);
             }
             // Start the agmsg DB watcher so the team room updates live.
+            addon_spike::start(app.handle());
             agmsg::start_watcher(app.handle().clone());
             app.state::<PtyManager>().start_detection_tick(app.handle().clone());
             // Quiet startup check — only surfaces a dialog when an update is
@@ -644,6 +646,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            addon_spike::addon_canary,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

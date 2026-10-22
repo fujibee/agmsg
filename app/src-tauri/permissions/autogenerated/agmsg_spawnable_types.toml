@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agmsg-spawnable-types"
+description = "Enables the agmsg_spawnable_types command without any pre-configured scope."
+commands.allow = ["agmsg_spawnable_types"]
+
+[[permission]]
+identifier = "deny-agmsg-spawnable-types"
+description = "Denies the agmsg_spawnable_types command without any pre-configured scope."
+commands.deny = ["agmsg_spawnable_types"]
