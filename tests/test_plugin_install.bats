@@ -518,3 +518,23 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   grep -q "REPLACES THE BUILT-IN" <<<"$output"
   grep -q -- "--yes --track-default --override" <<<"$output"
 }
+
+@test "a pinned preview with --track or --track-default prints a proceed command that keeps it" {
+  mk_repo acme pack >/dev/null
+  sha="$(head_of acme pack)"
+  run PLUGIN install "acme/pack@$sha" --track main
+  [ "$status" -eq 3 ]
+  grep -q "plugin install acme/pack@$sha --yes --track main" <<<"$output"
+  run PLUGIN install "acme/pack@$sha" --track-default
+  [ "$status" -eq 3 ]
+  grep -q "plugin install acme/pack@$sha --yes --track-default" <<<"$output"
+  PLUGIN install "acme/pack@$sha" --yes --track main >/dev/null
+  bump_repo acme pack
+  new="$(head_of acme pack)"
+  run PLUGIN update "acme/pack@$new" --track main
+  [ "$status" -eq 3 ]
+  grep -q "plugin update acme/pack@$new --yes --track main" <<<"$output"
+  run PLUGIN update "acme/pack@$new" --track-default
+  [ "$status" -eq 3 ]
+  grep -q "plugin update acme/pack@$new --yes --track-default" <<<"$output"
+}

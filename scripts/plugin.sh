@@ -454,8 +454,12 @@ _plugin_tracking_ref() {  # requested-ref
 # Options that carry the requested ref into the printed "proceed" command, so a
 # command pinned to the shown commit still follows the same branch later.
 _plugin_track_flags() {  # requested-ref
-  if _plugin_is_full_sha "$1"; then return 0; fi
-  if [ -n "$1" ]; then printf ' --track %s' "$1"; else printf ' --track-default'; fi
+  local r="$1"
+  # An explicit --track / --track-default is the ref to follow, even when the
+  # request itself is an exact commit.
+  if [ "$TRACK_SET" -eq 1 ]; then r="$TRACK"
+  elif _plugin_is_full_sha "$r"; then return 0; fi
+  if [ -n "$r" ]; then printf ' --track %s' "$r"; else printf ' --track-default'; fi
 }
 
 _plugin_trust_all() {  # dir
