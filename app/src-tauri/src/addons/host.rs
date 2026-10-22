@@ -38,6 +38,7 @@ struct ProbeRun {
     udp_hits: Arc<AtomicUsize>,
     udp_stop: Arc<AtomicBool>,
     udp_port: u16,
+    target: String,
 }
 
 pub struct AddonHost {
@@ -171,10 +172,14 @@ fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &st
     let n = nonce();
     host.nav.register_pane(server.port(), server.token());
     let url = server.url();
-    let hash = serde_json::json!({ "nonce": n, "udp": udp_port, "appOrigin": app_origin(&window) }).to_string();
+    // The forbidden navigation: the app origin (unique per probe so a violation can be tied to it).
+    let target = format!("{}/__agmsg_probe_nav__/{n}", app_origin(&window));
+    #[cfg(debug_assertions)]
+    let target = std::env::var("AGMSG_PROBE_TEST_TARGET").unwrap_or(target); // negative controls only; absent in release
+    let hash = serde_json::json!({ "nonce": n, "udp": udp_port, "target": target }).to_string();
     let src = format!("{url}#{}", percent_encode(&hash));
-    host.gate.begin(&n, Instant::now());
-    *host.probe.lock().unwrap() = Some(ProbeRun { nonce: n.clone(), server, udp_hits, udp_stop, udp_port });
+    host.gate.begin(&n, &target, Instant::now());
+    *host.probe.lock().unwrap() = Some(ProbeRun { nonce: n.clone(), server, udp_hits, udp_stop, udp_port, target: target.clone() });
 
     // The only code the app runs in the main page for this: relay the probe
     // frame's postMessage to the command, and create the frame.
@@ -182,13 +187,24 @@ fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &st
         r#"(function () {{
   if (!window.__agmsgProbeRelay) {{
     window.__agmsgProbeRelay = true;
+    window.__agmsgViolations = [];
+    // The refusal has to be seen here, in the embedding page: an enforced CSP
+    // violation, with the blocked URI and the directive.
+    document.addEventListener('securitypolicyviolation', function (e) {{
+      if (e.disposition === 'enforce') window.__agmsgViolations.push([e.effectiveDirective, e.blockedURI]);
+    }});
     window.addEventListener('message', function (ev) {{
       var f = document.getElementById('agmsg-probe-frame');
       if (!f || ev.source !== f.contentWindow) return;
       var d = ev.data;
       if (!d || d.agmsgProbe !== 1) return;
       f.remove();
-      window.__TAURI_INTERNALS__.invoke('addon_probe_report', {{ report: d.report }}).catch(function () {{}});
+      var rep = d.report || {{}};
+      var target = {target:?};
+      var hit = window.__agmsgViolations.filter(function (v) {{ return (v[0] === 'frame-src' || v[0] === 'child-src') && v[1] === target; }})[0];
+      rep.navViolationDirective = hit ? hit[0] : '';
+      rep.navViolationUri = hit ? hit[1] : '';
+      window.__TAURI_INTERNALS__.invoke('addon_probe_report', {{ report: rep }}).catch(function () {{}});
     }});
   }}
   var old = document.getElementById('agmsg-probe-frame');

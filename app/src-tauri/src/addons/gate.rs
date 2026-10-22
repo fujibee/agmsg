@@ -60,6 +60,13 @@ pub struct ProbeReport {
     /// After a forbidden navigation to the app origin the frame was still the
     /// same document, running.
     pub nav_refused: bool,
+    /// The parent page observed an *enforced* `securitypolicyviolation` for the
+    /// forbidden navigation: its directive (`frame-src`/`child-src`) ...
+    pub nav_violation_directive: String,
+    /// ... and the exact URI that was blocked. Both must match what the app
+    /// asked for; a frame that merely survived (navigation pending, cancelled
+    /// elsewhere, or failing for another reason) proves nothing.
+    pub nav_violation_uri: String,
     /// Positive control: an allowed navigation (to the probe's own second page)
     /// completed in this environment, so a forbidden one that did not complete
     /// was refused, not merely slow.
@@ -89,7 +96,7 @@ pub struct Verdict {
     pub reasons: Vec<String>,
 }
 
-pub fn evaluate(expected_nonce: &str, r: &ProbeReport, engine: &EngineReport, udp_hits: usize, os: Os) -> Verdict {
+pub fn evaluate(expected_nonce: &str, expected_target: &str, r: &ProbeReport, engine: &EngineReport, udp_hits: usize, os: Os) -> Verdict {
     let mut reasons = Vec::new();
     if r.nonce != expected_nonce {
         reasons.push("the probe answered with the wrong nonce".to_string());
@@ -108,6 +115,11 @@ pub fn evaluate(expected_nonce: &str, r: &ProbeReport, engine: &EngineReport, ud
     }
     if !r.nav_refused {
         reasons.push("the probe frame was able to navigate itself to the app origin".to_string());
+    }
+    // A refusal must be *seen*: the page's CSP reported blocking exactly that
+    // navigation. Surviving for two seconds is not evidence.
+    if !(matches!(r.nav_violation_directive.as_str(), "frame-src" | "child-src") && !expected_target.is_empty() && r.nav_violation_uri == expected_target) {
+        reasons.push("no enforced frame-src violation was observed for the forbidden navigation, so a refusal cannot be told from a navigation that is pending or failed".to_string());
     }
     if !r.webrtc_absent {
         reasons.push("WebRTC is available in the probe frame".to_string());
@@ -136,6 +148,7 @@ pub fn evaluate(expected_nonce: &str, r: &ProbeReport, engine: &EngineReport, ud
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Pending {
     nonce: String,
+    target: String,
     deadline: Instant,
     generation: u64,
 }
@@ -171,10 +184,10 @@ impl AddonGate {
     }
 
     /// Starts a probe for the current generation.
-    pub fn begin(&self, nonce: &str, now: Instant) -> u64 {
+    pub fn begin(&self, nonce: &str, target: &str, now: Instant) -> u64 {
         let mut s = self.inner.lock().unwrap();
         let generation = s.generation;
-        s.pending = Some(Pending { nonce: nonce.to_string(), deadline: now + PROBE_TIMEOUT, generation });
+        s.pending = Some(Pending { nonce: nonce.to_string(), target: target.to_string(), deadline: now + PROBE_TIMEOUT, generation });
         generation
     }
 
@@ -199,7 +212,7 @@ impl AddonGate {
             return Verdict { enabled: false, reasons: vec!["ignored an answer with the wrong nonce".into()] };
         }
         s.pending = None;
-        s.verdict = evaluate(&p.nonce, r, engine, udp_hits, os);
+        s.verdict = evaluate(&p.nonce, &p.target, r, engine, udp_hits, os);
         s.verdict.clone()
     }
 
@@ -229,8 +242,10 @@ impl AddonGate {
 mod tests {
     use super::*;
 
+    const TARGET: &str = "tauri://localhost/__agmsg_probe_nav__/n";
+
     fn good(nonce: &str) -> ProbeReport {
-        ProbeReport { nonce: nonce.into(), started: true, opaque_origin: true, csp_blocks_eval: true, nav_refused: true, control_nav_ok: true, webrtc_absent: true, bridge_in_frame: false }
+        ProbeReport { nonce: nonce.into(), nav_violation_directive: "frame-src".into(), nav_violation_uri: TARGET.into(), started: true, opaque_origin: true, csp_blocks_eval: true, nav_refused: true, control_nav_ok: true, webrtc_absent: true, bridge_in_frame: false }
     }
 
     fn eng() -> EngineReport {
@@ -239,7 +254,7 @@ mod tests {
 
     #[test]
     fn all_good_on_macos_enables() {
-        let v = evaluate("n", &good("n"), &eng(), 0, Os::MacOs);
+        let v = evaluate("n", TARGET, &good("n"), &eng(), 0, Os::MacOs);
         assert!(v.enabled, "{:?}", v.reasons);
     }
 
@@ -253,33 +268,48 @@ mod tests {
             ("csp", ProbeReport { csp_blocks_eval: false, ..base.clone() }),
             ("nav", ProbeReport { nav_refused: false, ..base.clone() }),
             ("control", ProbeReport { control_nav_ok: false, ..base.clone() }),
+            ("no violation seen", ProbeReport { nav_violation_uri: String::new(), nav_violation_directive: String::new(), ..base.clone() }),
+            ("violation for another uri", ProbeReport { nav_violation_uri: "tauri://localhost/other".into(), ..base.clone() }),
+            ("violation of another directive", ProbeReport { nav_violation_directive: "img-src".into(), ..base.clone() }),
             ("webrtc", ProbeReport { webrtc_absent: false, ..base.clone() }),
         ];
         for (name, r) in cases {
-            let v = evaluate("n", &r, &eng(), 0, Os::MacOs);
+            let v = evaluate("n", TARGET, &r, &eng(), 0, Os::MacOs);
             assert!(!v.enabled, "{name}");
             assert_eq!(v.reasons.len(), 1, "{name}: {:?}", v.reasons);
         }
-        assert!(!evaluate("n", &base, &eng(), 1, Os::MacOs).enabled, "udp");
-        assert!(!evaluate("n", &base, &EngineReport { webrtc_setting_present: false, webrtc_setting_applied: false }, 0, Os::MacOs).enabled, "no selector");
-        assert!(!evaluate("n", &base, &EngineReport { webrtc_setting_present: true, webrtc_setting_applied: false }, 0, Os::MacOs).enabled, "not applied");
-        assert!(!evaluate("n", &ProbeReport::default(), &eng(), 0, Os::MacOs).enabled, "empty report");
+        assert!(!evaluate("n", TARGET, &base, &eng(), 1, Os::MacOs).enabled, "udp");
+        assert!(!evaluate("n", TARGET, &base, &EngineReport { webrtc_setting_present: false, webrtc_setting_applied: false }, 0, Os::MacOs).enabled, "no selector");
+        assert!(!evaluate("n", TARGET, &base, &EngineReport { webrtc_setting_present: true, webrtc_setting_applied: false }, 0, Os::MacOs).enabled, "not applied");
+        assert!(!evaluate("n", TARGET, &ProbeReport::default(), &eng(), 0, Os::MacOs).enabled, "empty report");
+    }
+
+    #[test]
+    fn a_surviving_frame_without_an_observed_refusal_stays_off() {
+        // the frame is alive after two seconds, the allowed control navigation worked,
+        // but nothing proves the forbidden navigation was refused: pending, failed or slow
+        let r = ProbeReport { nav_violation_uri: String::new(), nav_violation_directive: String::new(), ..good("n") };
+        assert!(r.nav_refused && r.control_nav_ok);
+        let v = evaluate("n", TARGET, &r, &eng(), 0, Os::MacOs);
+        assert!(!v.enabled);
+        assert!(v.reasons[0].contains("pending or failed"));
+        assert!(!evaluate("n", "", &good("n"), &eng(), 0, Os::MacOs).enabled, "no expected target means nothing can match");
     }
 
     #[test]
     fn windows_and_other_platforms_stay_off_until_verified() {
         let verified = WINDOWS_VERIFIED;
         assert!(!verified);
-        let v = evaluate("n", &good("n"), &eng(), 0, Os::Windows);
+        let v = evaluate("n", TARGET, &good("n"), &eng(), 0, Os::Windows);
         assert!(!v.enabled);
         assert!(v.reasons.iter().any(|r| r.contains("WebView2")));
-        assert!(!evaluate("n", &good("n"), &eng(), 0, Os::Other).enabled);
+        assert!(!evaluate("n", TARGET, &good("n"), &eng(), 0, Os::Other).enabled);
     }
 
     #[test]
     fn a_bridge_in_the_frame_is_informational() {
         let r = ProbeReport { bridge_in_frame: true, ..good("n") };
-        assert!(evaluate("n", &r, &eng(), 0, Os::MacOs).enabled);
+        assert!(evaluate("n", TARGET, &r, &eng(), 0, Os::MacOs).enabled);
     }
 
     #[test]
@@ -293,7 +323,7 @@ mod tests {
         let g = AddonGate::new();
         let t0 = Instant::now();
         g.invalidate("startup");
-        g.begin("n1", t0);
+        g.begin("n1", TARGET, t0);
         let v = g.report(&good("n1"), &eng(), 0, Os::MacOs, t0 + Duration::from_secs(1));
         assert!(v.enabled);
         assert!(g.status().enabled);
@@ -307,7 +337,7 @@ mod tests {
         let g = AddonGate::new();
         let t0 = Instant::now();
         g.invalidate("startup");
-        g.begin("real", t0);
+        g.begin("real", TARGET, t0);
         let v = g.report(&good("forged"), &eng(), 0, Os::MacOs, t0);
         assert!(!v.enabled);
         assert!(!g.status().enabled);
@@ -319,7 +349,7 @@ mod tests {
         let g = AddonGate::new();
         let t0 = Instant::now();
         g.invalidate("startup");
-        g.begin("n", t0);
+        g.begin("n", TARGET, t0);
         let v = g.report(&good("n"), &eng(), 0, Os::MacOs, t0 + PROBE_TIMEOUT + Duration::from_millis(1));
         assert!(!v.enabled);
         assert!(!g.status().enabled);
@@ -330,7 +360,7 @@ mod tests {
         let g = AddonGate::new();
         let t0 = Instant::now();
         g.invalidate("startup");
-        g.begin("n", t0);
+        g.begin("n", TARGET, t0);
         assert!(!g.expire(t0 + Duration::from_secs(1)), "not yet");
         assert!(g.expire(t0 + PROBE_TIMEOUT + Duration::from_millis(1)));
         assert!(!g.status().enabled);
@@ -343,14 +373,14 @@ mod tests {
         let g = AddonGate::new();
         let t0 = Instant::now();
         g.invalidate("startup");
-        g.begin("n", t0);
+        g.begin("n", TARGET, t0);
         assert!(g.report(&good("n"), &eng(), 0, Os::MacOs, t0).enabled);
         let gen = g.generation();
         g.invalidate("reload");
         assert!(g.generation() > gen);
         assert!(!g.status().enabled, "reload clears it");
         // an answer to the old probe cannot re-enable
-        g.begin("n2", t0);
+        g.begin("n2", TARGET, t0);
         g.invalidate("update");
         let v = g.report(&good("n2"), &eng(), 0, Os::MacOs, t0);
         assert!(!v.enabled);

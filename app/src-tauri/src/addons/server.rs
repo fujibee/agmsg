@@ -223,8 +223,12 @@ impl PaneServer {
     }
 
     /// Fence: when this returns, the listener is closed, every accepted socket
-    /// is closed, no handler is running, and nothing can be read, routed or
-    /// written for this token again.
+    /// has been shut down, and the fence flag is set, so no handler routes or
+    /// writes a response from here on (they check it after the head is read and
+    /// before writing, and a blocked read or write is ended by the socket
+    /// shutdown). Waiting for handler threads to exit is bounded to 3 s: that is
+    /// housekeeping, not part of the guarantee; the guarantee is the flag plus
+    /// the closed sockets.
     fn shutdown(&mut self) {
         self.ctx.stopped.store(true, Ordering::SeqCst);
         // close what is already accepted: a handler blocked in read or write ends now
