@@ -43,13 +43,14 @@ struct ProbeRun {
 pub struct AddonHost {
     pub gate: AddonGate,
     pub nav: NavPolicy,
+    pub panes: super::commands::Panes,
     engine: Mutex<EngineReport>,
     probe: Mutex<Option<ProbeRun>>,
 }
 
 impl AddonHost {
     pub fn new(dev_url: Option<&Url>) -> AddonHost {
-        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), engine: Mutex::new(EngineReport::default()), probe: Mutex::new(None) }
+        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), panes: super::commands::Panes::new(), engine: Mutex::new(EngineReport::default()), probe: Mutex::new(None) }
     }
 
     fn end_probe(&self) {
@@ -95,6 +96,10 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
             let is_app = load_host.nav.is_app(payload.url());
             match payload.event() {
                 PageLoadEvent::Started => {
+                    // a new page voids every pane: servers stop, tokens die, feeds go
+                    for (port, token) in load_host.panes.close_all() {
+                        load_host.nav.unregister_pane(port, &token);
+                    }
                     load_host.end_probe();
                     load_host.gate.invalidate("page load");
                     let _ = load_handle.emit(GATE_EVENT, load_host.gate.status());
@@ -107,6 +112,7 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
         })
         .build()?;
     *host.engine.lock().unwrap() = engine::harden(&window);
+    super::commands::listen_for_live_messages(&handle, host.clone());
     Ok(())
 }
 

@@ -3,6 +3,7 @@
 //! window system (`host`, `engine`, `probe`) are thin.
 
 pub mod broker;
+pub mod commands;
 pub mod csp;
 pub mod denylist;
 pub mod diff;

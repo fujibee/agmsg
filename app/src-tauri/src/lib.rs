@@ -648,6 +648,15 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            addons::commands::addon_pane_add,
+            addons::commands::addon_pane_remove,
+            addons::commands::addon_pane_loaded,
+            addons::commands::addon_grant_team,
+            addons::commands::addon_revoke_team,
+            addons::commands::addon_grant_root,
+            addons::commands::addon_revoke_root,
+            addons::commands::addon_feed_init,
+            addons::commands::addon_request,
             addons::host::addon_probe_report,
             addons::host::addon_gate_status,
             pty::pty_spawn,

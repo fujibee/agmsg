@@ -44,6 +44,15 @@
     "allow-set-menu-language",
     "allow-set-team-room-visible",
     "allow-set-user-chat-visible",
-    "allow-view-visibility"
+    "allow-view-visibility",
+    "allow-addon-pane-add",
+    "allow-addon-pane-remove",
+    "allow-addon-pane-loaded",
+    "allow-addon-grant-team",
+    "allow-addon-revoke-team",
+    "allow-addon-grant-root",
+    "allow-addon-revoke-root",
+    "allow-addon-feed-init",
+    "allow-addon-request"
   ]
 }
