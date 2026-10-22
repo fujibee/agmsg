@@ -558,3 +558,22 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   '
   [ "$status" -eq 0 ]
 }
+
+@test "lock: the timeout remedy removes a stale owner marker and preserves team data" {
+  local component remedy
+  for component in "team space \$literal" "team 'quote' \$literal"; do
+    TEAM_DIR="$BATS_TEST_TMPDIR/$component"
+    mkdir -p "$TEAM_DIR/.config.lock"
+    : > "$TEAM_DIR/.config.lock/.owner"
+    printf '%s\n' preserved > "$TEAM_DIR/config.json"
+    TRIES=1 acquire
+    [ "$status" -ne 0 ]
+    [ -f "$TEAM_DIR/.config.lock/.owner" ]
+    remedy="$(printf '%s\n' "$output" | sed -n 's/^agmsg:   //p' | tail -1)"
+    [ -n "$remedy" ]
+    run bash -c "$remedy"
+    [ "$status" -eq 0 ]
+    [ ! -d "$TEAM_DIR/.config.lock" ]
+    [ "$(cat "$TEAM_DIR/config.json")" = preserved ]
+  done
+}
