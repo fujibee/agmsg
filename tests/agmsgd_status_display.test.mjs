@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
@@ -193,6 +193,25 @@ test('installer restart guidance tells users to resume, refresh their destinatio
   assert.match(output, /does not enable agmsgd/);
   assert.equal((source.match(/^  agmsg_install_restart_guidance$/gm) ?? []).length, 1);
   assert.equal((source.match(/^agmsg_install_restart_guidance$/gm) ?? []).length, 1);
+});
+
+test('installer points at agmsgd only while it is off, and never turns it on', t => {
+  const source = readFileSync(join(repo, 'install.sh'), 'utf8');
+  const fn = source.match(/agmsg_install_daemon_hint\(\) \{[\s\S]*?\n\}/)[0];
+  const skill = mkdtempSync(join(tmpdir(), 'agmsg-install-hint-'));
+  t.after(() => rmSync(skill, { recursive: true, force: true }));
+  const hint = () => execFileSync('bash', ['-c', `${fn}\nagmsg_install_daemon_hint "$1"`, 'bash', skill], { encoding: 'utf8' });
+  // No install record yet (a fresh install): off.
+  assert.match(hint(), /agmsgd \(beta\) delivers notices.*Turn it on with: bash .*\/scripts\/agmsg daemon enable/);
+  mkdirSync(join(skill, 'run'));
+  const setIntent = (desired) => execFileSync('sqlite3', [join(skill, 'run', 'install.db'),
+    `DROP TABLE IF EXISTS daemon_intent; CREATE TABLE daemon_intent (desired TEXT); INSERT INTO daemon_intent VALUES ('${desired}');`]);
+  setIntent('off');
+  assert.match(hint(), /daemon enable/);
+  setIntent('on');
+  assert.equal(hint(), '');
+  assert.equal((source.match(/^  agmsg_install_daemon_hint "\$SKILL_DIR"$/gm) ?? []).length, 1);
+  assert.equal((source.match(/^agmsg_install_daemon_hint "\$SKILL_DIR"$/gm) ?? []).length, 1);
 });
 
 test('pending confirmations remain discoverable after a seat registration is removed', t => {
