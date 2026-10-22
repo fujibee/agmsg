@@ -74,7 +74,7 @@ known() {
   echo "$output" | grep -qx baz
 }
 
-@test "plugin: trust is path-pinned — a name trusted at a different path is not honored" {
+@test "plugin: trust is path-pinned, a name trusted at a different path is not honored" {
   mk_ext_type "$TEST_SKILL_DIR/plugins" foo
   # Hand-write a trust entry pointing somewhere else; the real dir must stay ignored.
   mkdir -p "$TEST_SKILL_DIR/db"
