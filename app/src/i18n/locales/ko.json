@@ -429,6 +429,8 @@
       "diffView": "Diff view",
       "addonPane": "Add-on pane ▸ {{title}}",
       "install": "Install an add-on…"
-    }
+    },
+    "listFailed": "Couldn't read the add-on list: {{message}}",
+    "listRetry": "Try again"
   }
 }

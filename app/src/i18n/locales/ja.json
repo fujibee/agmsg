@@ -429,6 +429,8 @@
       "diffView": "差分ビュー",
       "addonPane": "アドオンペイン ▸ {{title}}",
       "install": "アドオンをインストール…"
-    }
+    },
+    "listFailed": "アドオンの一覧を読み込めませんでした: {{message}}",
+    "listRetry": "再試行"
   }
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mockEngine, mockSnapshot } from "./mock";
-import { createLiveSource } from "./source";
+import { createLiveSource, toCommandError } from "./source";
 import type { EngineState, InstalledAddon } from "./types";
 
 // What the screens read of the add-on engine: the list of add-ons and whether
@@ -16,6 +16,8 @@ export type Catalog = {
   ready: boolean;
   addons: InstalledAddon[];
   engine: EngineState;
+  /** Set when addon_list failed: the list is unknown, which is not the same as empty. */
+  listError?: string;
   /** Ask Rust again (after the gate changes or something is installed or removed). */
   reload: () => void;
 };
@@ -24,7 +26,7 @@ const live = isTauri();
 const source = createLiveSource((cmd, args) => invoke(cmd, args));
 
 export function useAddonCatalog(): Catalog {
-  const [state, setState] = useState<{ ready: boolean; addons: InstalledAddon[]; engine: EngineState }>(
+  const [state, setState] = useState<{ ready: boolean; addons: InstalledAddon[]; engine: EngineState; listError?: string }>(
     live ? { ready: false, addons: [], engine: { ok: false, reasons: [] } } : { ready: true, addons: mockSnapshot.addons, engine: mockEngine },
   );
   const reload = useCallback(() => {
@@ -32,12 +34,13 @@ export function useAddonCatalog(): Catalog {
     void (async () => {
       const engine = await source.engine();
       let addons: InstalledAddon[] = [];
+      let listError: string | undefined;
       try {
         addons = await source.list();
-      } catch {
-        // The engine state already carries why add-ons are off; an empty list is the honest answer then.
+      } catch (e) {
+        listError = toCommandError(e).message;
       }
-      setState({ ready: true, addons, engine });
+      setState({ ready: true, addons, engine, listError });
     })();
   }, []);
   useEffect(() => {
@@ -46,5 +49,5 @@ export function useAddonCatalog(): Catalog {
     const un = listen("addon-gate", reload);
     return () => void un.then((f) => f());
   }, [reload]);
-  return { live, ready: state.ready, addons: state.addons, engine: state.engine, reload };
+  return { live, ready: state.ready, addons: state.addons, engine: state.engine, listError: state.listError, reload };
 }

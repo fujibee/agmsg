@@ -127,10 +127,9 @@ function LiveAddonPane(props: {
     const need = state.need;
     const step: Step = need.permission === "messages:read" ? "team" : "folder";
     if (c === "notNow") {
-      if (need.permission === "files:read") {
-        setFolder(null);
-        void chooseFolder();
-      } else props.onClose();
+      // Dropping the folder is what makes the effect above launch the picker (its only owner).
+      if (need.permission === "files:read") setFolder(null);
+      else props.onClose();
       return;
     }
     setPending(true);
@@ -161,7 +160,6 @@ function LiveAddonPane(props: {
     else if (a === "chooseAnother") {
       setFolder(null);
       setState({ kind: "frame" });
-      void chooseFolder();
     } else if (a === "allowAgain") setAttempt((n) => n + 1);
     else props.onOpenSettings();
   };

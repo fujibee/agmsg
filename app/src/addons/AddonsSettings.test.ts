@@ -97,4 +97,11 @@ describe("locale keys", () => {
     expect(off).toMatch(/<button[^>]*disabled[^>]*>\[addons\.card\.allowAlways\]/);
     expect(renderToStaticMarkup(createElement(GrantCard, { t, title: "X", need, onChoose: noop }))).not.toMatch(/disabled/);
   });
+  it("a failed add-on list is shown with a retry, not as an empty list with no reason", () => {
+    const html = render({ listError: "LIST SENTINEL FAILURE", onRetryList: noop });
+    expect(html).toContain("addons.listFailed");
+    expect(html).toContain("LIST SENTINEL FAILURE");
+    expect(html).toContain("addons.listRetry");
+    expect(render({})).not.toContain("addons.listFailed");
+  });
 });

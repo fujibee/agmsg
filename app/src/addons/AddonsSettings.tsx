@@ -21,6 +21,9 @@ export function AddonsSettings(props: {
   onLoadFromFolder: () => void;
   /** False while Rust has no install pipeline: the input is shown disabled with a note instead of faking an install. */
   canInstall?: boolean;
+  /** addon_list failed: shown with a retry instead of an empty list. */
+  listError?: string;
+  onRetryList?: () => void;
 }) {
   const { t, snapshot, engine } = props;
   const canInstall = props.canInstall ?? true;
@@ -32,6 +35,14 @@ export function AddonsSettings(props: {
   if (!engine.ok) {
     return (
       <div className="addons-settings">
+        {props.listError !== undefined && (
+        <p className="addon-list-error" role="alert">
+          {t("addons.listFailed", { message: props.listError })}{" "}
+          <button type="button" onClick={props.onRetryList}>
+            {t("addons.listRetry")}
+          </button>
+        </p>
+      )}
         <p className="addon-engine-off" role="status">
           {t("addons.engineOff")}{" "}
           {engine.reasons.length > 0 && t("addons.engineReasons", { reasons: engine.reasons.join("; ") })}
@@ -43,6 +54,14 @@ export function AddonsSettings(props: {
 
   return (
     <div className="addons-settings">
+      {props.listError !== undefined && (
+        <p className="addon-list-error" role="alert">
+          {t("addons.listFailed", { message: props.listError })}{" "}
+          <button type="button" onClick={props.onRetryList}>
+            {t("addons.listRetry")}
+          </button>
+        </p>
+      )}
       <section>
         <h3>{t("addons.builtin.title")}</h3>
         <ul className="addon-list">

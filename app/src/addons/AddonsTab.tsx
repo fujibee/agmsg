@@ -58,6 +58,8 @@ export function AddonsTab(props: { catalog: Catalog }) {
         snapshot={snapshot}
         engine={catalog.engine}
         canInstall={!catalog.live}
+        listError={catalog.listError}
+        onRetryList={catalog.reload}
         installError={installError}
         onInstall={({ owner, repo }) => {
           if (snapshot.addons.some((a) => a.id === `${owner}/${repo}`)) {
