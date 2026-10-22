@@ -35,6 +35,10 @@ anyhow = "1"
 # PTY output is raw bytes (TUI box-drawing etc.); ship it to the webview as
 # base64 so multibyte sequences split across reads render correctly in xterm.
 base64 = "0.22"
+# Add-on panes: content hashes for the per-pane CSP and the payload digest, and
+# random pane tokens.
+sha2 = "0.10"
+getrandom = "0.2"
 # Myers line diff for the add-on git.diff result (addons/diff.rs).
 similar = "2"
 
@@ -44,3 +48,7 @@ tempfile = "3"
 # The command layer reads process env (AGMSG_APP_BASE / HOME / PATH); serialize
 # the tests that mutate it so they don't race under the default parallel runner.
 serial_test = "3"
+
+# Engine hardening (WKPreferences) for add-on panes.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"

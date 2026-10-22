@@ -1,0 +1,239 @@
+//! The message feed of a pane (design 4.2): which messages a pane gets, and how
+//! many. Rust filters to the granted team; the UI only forwards over the port.
+//!
+//! Caps: `init` carries at most 500 messages and 4 MB, newest kept; a live
+//! message over 256 KB is truncated with `truncated: true`. Live messages that
+//! arrive while `init` is being built are queued and de-duplicated by id.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+
+pub const INIT_MAX_MESSAGES: usize = 500;
+pub const INIT_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const BODY_MAX_BYTES: usize = 256 * 1024;
+
+/// A message in protocol v1 shape (`Message` in `addon-kit/protocol.d.ts`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedMessage {
+    pub id: String,
+    pub team: String,
+    pub from: String,
+    pub to: String,
+    pub body: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+}
+
+impl FeedMessage {
+    fn weight(&self) -> usize {
+        self.id.len() + self.team.len() + self.from.len() + self.to.len() + self.body.len() + self.created_at.len() + 64
+    }
+}
+
+/// Cuts the body at 256 KB (on a character boundary) and marks it.
+pub fn cap_body(mut m: FeedMessage) -> FeedMessage {
+    if m.body.len() > BODY_MAX_BYTES {
+        let mut cut = BODY_MAX_BYTES;
+        while !m.body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        m.body.truncate(cut);
+        m.truncated = Some(true);
+    }
+    m
+}
+
+/// The `init` event: `messages` are oldest-first; messages of other teams are
+/// dropped; the newest that fit the count and byte caps are kept, in order.
+/// Returns the JSON event and the ids it contains.
+pub fn build_init(team: &str, members: &[(String, String)], messages: Vec<FeedMessage>) -> (Value, HashSet<String>) {
+    let mut kept: Vec<FeedMessage> = Vec::new();
+    let mut bytes = 0usize;
+    for m in messages.into_iter().rev().filter(|m| m.team == team) {
+        let m = cap_body(m);
+        let w = m.weight();
+        if kept.len() >= INIT_MAX_MESSAGES || bytes + w > INIT_MAX_BYTES {
+            break;
+        }
+        bytes += w;
+        kept.push(m);
+    }
+    kept.reverse();
+    let ids: HashSet<String> = kept.iter().map(|m| m.id.clone()).collect();
+    let members: Vec<Value> = members.iter().map(|(name, ty)| json!({ "name": name, "type": ty })).collect();
+    (json!({ "agmsg": 1, "type": "init", "team": team, "members": members, "messages": kept }), ids)
+}
+
+/// Wraps one live message in the protocol event.
+pub fn message_event(m: &FeedMessage) -> Value {
+    json!({ "agmsg": 1, "type": "message", "message": m })
+}
+
+/// Per pane and frame generation.
+#[derive(Debug)]
+pub enum Feed {
+    /// `init` is being built: live messages wait here.
+    Buffering(Vec<FeedMessage>),
+    Live { seen: HashSet<String> },
+}
+
+impl Feed {
+    pub fn begin() -> Feed {
+        Feed::Buffering(Vec::new())
+    }
+
+    /// A live message for the pane's team. Returns what to push now (nothing
+    /// while buffering, nothing for a duplicate).
+    pub fn on_live(&mut self, team: &str, m: FeedMessage) -> Option<FeedMessage> {
+        if m.team != team {
+            return None;
+        }
+        match self {
+            Feed::Buffering(q) => {
+                if !q.iter().any(|x| x.id == m.id) {
+                    q.push(m);
+                }
+                None
+            }
+            Feed::Live { seen } => {
+                if seen.insert(m.id.clone()) {
+                    Some(cap_body(m))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// `init` was built with `ids`; the queued messages that are not in it are
+    /// returned (to be pushed right after `init`), and the feed goes live.
+    pub fn finish(&mut self, mut ids: HashSet<String>) -> Vec<FeedMessage> {
+        let queued = match std::mem::replace(self, Feed::Live { seen: HashSet::new() }) {
+            Feed::Buffering(q) => q,
+            Feed::Live { seen } => {
+                *self = Feed::Live { seen };
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for m in queued {
+            if ids.insert(m.id.clone()) {
+                out.push(cap_body(m));
+            }
+        }
+        *self = Feed::Live { seen: ids };
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(id: &str, team: &str, body: &str) -> FeedMessage {
+        FeedMessage { id: id.into(), team: team.into(), from: "a".into(), to: "b".into(), body: body.into(), created_at: "2026-10-22T00:00:00Z".into(), truncated: None }
+    }
+
+    fn ids(v: &Value) -> Vec<String> {
+        v["messages"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn init_has_the_protocol_shape() {
+        let (ev, seen) = build_init("t", &[("alice".into(), "claude-code".into())], vec![m("1", "t", "hi")]);
+        assert_eq!(ev["agmsg"], 1);
+        assert_eq!(ev["type"], "init");
+        assert_eq!(ev["team"], "t");
+        assert_eq!(ev["members"][0], json!({"name": "alice", "type": "claude-code"}));
+        assert_eq!(ev["messages"][0]["body"], "hi");
+        assert!(ev["messages"][0].get("truncated").is_none());
+        assert!(seen.contains("1"));
+    }
+
+    #[test]
+    fn init_keeps_the_newest_500_in_order() {
+        let all: Vec<_> = (0..700).map(|i| m(&i.to_string(), "t", "x")).collect();
+        let (ev, seen) = build_init("t", &[], all);
+        let got = ids(&ev);
+        assert_eq!(got.len(), INIT_MAX_MESSAGES);
+        assert_eq!(got.first().unwrap(), "200");
+        assert_eq!(got.last().unwrap(), "699");
+        assert_eq!(seen.len(), 500);
+    }
+
+    #[test]
+    fn init_never_includes_other_teams() {
+        let (ev, _) = build_init("t", &[], vec![m("1", "t", "a"), m("2", "other", "SECRET"), m("3", "t", "b")]);
+        assert_eq!(ids(&ev), vec!["1", "3"]);
+        assert!(!ev.to_string().contains("SECRET"));
+    }
+
+    #[test]
+    fn init_is_cut_at_4mb_keeping_the_newest() {
+        let body = "x".repeat(200 * 1024);
+        let all: Vec<_> = (0..40).map(|i| m(&i.to_string(), "t", &body)).collect();
+        let (ev, _) = build_init("t", &[], all);
+        let got = ids(&ev);
+        assert!(got.len() < 40 && got.len() >= 19, "{}", got.len());
+        assert_eq!(got.last().unwrap(), "39");
+        assert!(ev.to_string().len() <= INIT_MAX_BYTES + 64 * 1024);
+    }
+
+    #[test]
+    fn a_huge_body_is_truncated_on_a_char_boundary_and_marked() {
+        let body = "あ".repeat(BODY_MAX_BYTES); // 3 bytes each
+        let c = cap_body(m("1", "t", &body));
+        assert!(c.body.len() <= BODY_MAX_BYTES);
+        assert!(c.body.is_char_boundary(c.body.len()));
+        assert_eq!(c.truncated, Some(true));
+        let small = cap_body(m("2", "t", "ok"));
+        assert_eq!(small.truncated, None);
+        let at = cap_body(m("3", "t", &"y".repeat(BODY_MAX_BYTES)));
+        assert_eq!(at.truncated, None, "exactly at the cap is not truncated");
+        let (ev, _) = build_init("t", &[], vec![m("4", "t", &"z".repeat(BODY_MAX_BYTES + 5))]);
+        assert_eq!(ev["messages"][0]["truncated"], true);
+    }
+
+    #[test]
+    fn live_messages_wait_during_init_and_are_deduplicated() {
+        let mut f = Feed::begin();
+        assert!(f.on_live("t", m("5", "t", "during")).is_none());
+        assert!(f.on_live("t", m("5", "t", "during again")).is_none(), "queued once");
+        assert!(f.on_live("t", m("6", "t", "during too")).is_none());
+        assert!(f.on_live("t", m("7", "other", "no")).is_none());
+        // init already contains 5
+        let ids: HashSet<String> = ["1", "2", "5"].iter().map(|s| s.to_string()).collect();
+        let queued = f.finish(ids);
+        assert_eq!(queued.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec!["6"]);
+        assert!(f.on_live("t", m("6", "t", "again")).is_none(), "already delivered");
+        assert!(f.on_live("t", m("5", "t", "again")).is_none(), "already in init");
+        assert_eq!(f.on_live("t", m("8", "t", "new")).unwrap().id, "8");
+        assert!(f.on_live("t", m("8", "t", "dup")).is_none());
+        assert!(f.on_live("t", m("9", "other", "x")).is_none(), "wrong team never passes");
+    }
+
+    #[test]
+    fn live_bodies_are_capped() {
+        let mut f = Feed::Live { seen: HashSet::new() };
+        let out = f.on_live("t", m("1", "t", &"q".repeat(BODY_MAX_BYTES + 1))).unwrap();
+        assert_eq!(out.truncated, Some(true));
+        assert_eq!(out.body.len(), BODY_MAX_BYTES);
+    }
+
+    #[test]
+    fn finish_twice_keeps_the_feed_live() {
+        let mut f = Feed::begin();
+        f.finish(HashSet::new());
+        assert!(f.finish(HashSet::new()).is_empty());
+        assert!(matches!(f, Feed::Live { .. }));
+    }
+
+    #[test]
+    fn message_event_shape() {
+        let ev = message_event(&m("1", "t", "b"));
+        assert_eq!(ev["type"], "message");
+        assert_eq!(ev["message"]["id"], "1");
+    }
+}

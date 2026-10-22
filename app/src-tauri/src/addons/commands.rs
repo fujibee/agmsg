@@ -1,0 +1,301 @@
+//! The Tauri commands the main UI uses to run add-on panes. All of them are
+//! behind the app ACL (main window only). The UI is a relay: it creates the
+//! iframe from `addon_pane_add`'s URL, tells Rust when the frame loaded
+//! (`addon_pane_loaded` → the new generation), forwards requests from the pane's
+//! MessagePort to `addon_request` with the pane instance and generation of that
+//! port, and posts back what Rust returns. Rust decides every time.
+//!
+//! Shapes (JSON, camelCase):
+//! - `addon_pane_add({addon, commit, name, dir, entry?, declared:{messagesRead,filesRead,gitRead}, network?, openArgs:{path?,url?,base?}, expectedDigest?}) → {id, url, port}`
+//! - `addon_pane_remove(id)`; `addon_pane_loaded(id) → generation`
+//! - `addon_grant_team(id, team)`, `addon_revoke_team(id)`
+//! - `addon_grant_root(id, path) → realPath`, `addon_revoke_root(id)`
+//! - `addon_feed_init(id, generation) → {init, queued}`: post `init`, then each of `queued`
+//! - `addon_request(id, generation, op, args) → {agmsg:1,type:"response",ok:true,result} | {…ok:false,error:{code,message}}`
+//!   (the UI adds the request `id`); a `fs.read` result with `bytesBase64` must become an
+//!   `ArrayBuffer` in `bytes` before it is posted to the add-on.
+//! - event `addon-push`: `{pane, generation, event}` for a live message; the UI posts `event`
+//!   to the pane's port only if `generation` is the pane's current one.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, Listener, Runtime, State};
+
+use super::broker;
+use super::csp;
+use super::denylist::{self, Denylist, GrantCheck};
+use super::feed::{self, Feed, FeedMessage};
+use super::host::AddonHost;
+use super::panes::{AddPane, BrokerError, Declared, Need, OpenArgs, PaneId, Registry};
+use super::server::Payload;
+
+pub const PUSH_EVENT: &str = "addon-push";
+
+/// Registry, feeds and the denylist, shared with the window-side `AddonHost`.
+pub struct Panes {
+    pub registry: Mutex<Registry>,
+    pub feeds: Mutex<HashMap<(PaneId, u64), Feed>>,
+    pub deny: Denylist,
+}
+
+impl Panes {
+    pub fn new() -> Panes {
+        Panes { registry: Mutex::new(Registry::new()), feeds: Mutex::new(HashMap::new()), deny: Denylist::from_process_env(Vec::new()) }
+    }
+
+    /// Everything a page load, reload or update voids: every pane and its feeds.
+    /// Returns the (port, token) pairs that were closed.
+    pub fn close_all(&self) -> Vec<(u16, String)> {
+        let mut reg = self.registry.lock().unwrap();
+        let ids = reg.ids();
+        let closed = ids.into_iter().filter_map(|id| reg.remove(id)).collect();
+        self.feeds.lock().unwrap().clear();
+        closed
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneAddIn {
+    pub addon: String,
+    pub commit: String,
+    pub name: String,
+    /// The installed (pinned) payload directory.
+    pub dir: String,
+    #[serde(default)]
+    pub entry: Option<String>,
+    #[serde(default)]
+    pub declared: Declared,
+    /// `addon.conf` `network` value: `*` or a list of origins.
+    #[serde(default)]
+    pub network: Option<String>,
+    #[serde(default)]
+    pub open_args: OpenArgs,
+    #[serde(default)]
+    pub expected_digest: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaneAddOut {
+    pub id: PaneId,
+    pub url: String,
+    pub port: u16,
+}
+
+fn off(host: &AddonHost) -> String {
+    let v = host.gate.status();
+    format!("add-ons are off on this computer: {}", v.reasons.join("; "))
+}
+
+#[tauri::command(async)]
+pub fn addon_pane_add(host: State<'_, Arc<AddonHost>>, spec: PaneAddIn) -> Result<PaneAddOut, String> {
+    if !host.gate.status().enabled {
+        return Err(off(&host));
+    }
+    let mut declared = spec.declared.clone();
+    if declared.network.is_some() {
+        return Err("`network` is taken from `network`, not from `declared`".into());
+    }
+    if let Some(n) = spec.network.as_deref() {
+        declared.network = Some(csp::parse_network(n).map_err(|e| e.to_string())?);
+    }
+    let added = host
+        .panes
+        .registry
+        .lock()
+        .unwrap()
+        .add(AddPane {
+            addon: spec.addon,
+            commit: spec.commit,
+            name: spec.name,
+            payload: Payload::Dir(PathBuf::from(spec.dir)),
+            entry: spec.entry.unwrap_or_else(|| "index.html".into()),
+            declared,
+            open_args: spec.open_args,
+            expected_digest: spec.expected_digest,
+        })
+        .map_err(|e| e.to_string())?;
+    host.nav.register_pane(added.port, &added.token);
+    Ok(PaneAddOut { id: added.id, url: added.url, port: added.port })
+}
+
+#[tauri::command]
+pub fn addon_pane_remove(host: State<'_, Arc<AddonHost>>, id: PaneId) {
+    let closed = host.panes.registry.lock().unwrap().remove(id);
+    if let Some((port, token)) = closed {
+        host.nav.unregister_pane(port, &token);
+    }
+    host.panes.feeds.lock().unwrap().retain(|(p, _), _| *p != id);
+}
+
+/// The pane's iframe finished loading (first load or reload): a new generation.
+#[tauri::command]
+pub fn addon_pane_loaded(host: State<'_, Arc<AddonHost>>, id: PaneId) -> Result<u64, BrokerError> {
+    let g = host.panes.registry.lock().unwrap().begin_generation(id).ok_or_else(|| BrokerError::new("not_granted", "this pane is closed"))?;
+    // feeds of older generations are void
+    host.panes.feeds.lock().unwrap().retain(|(p, gen), _| *p != id || *gen == g);
+    Ok(g)
+}
+
+#[tauri::command]
+pub fn addon_grant_team(host: State<'_, Arc<AddonHost>>, id: PaneId, team: String) -> Result<(), BrokerError> {
+    host.panes.registry.lock().unwrap().grant_team(id, &team)
+}
+
+#[tauri::command]
+pub fn addon_revoke_team(host: State<'_, Arc<AddonHost>>, id: PaneId) {
+    host.panes.registry.lock().unwrap().revoke_team(id);
+    host.panes.feeds.lock().unwrap().retain(|(p, _), _| *p != id);
+}
+
+/// Resolves and checks a folder the user picked, then allows the pane to read under it.
+#[tauri::command(async)]
+pub fn addon_grant_root(host: State<'_, Arc<AddonHost>>, id: PaneId, path: String) -> Result<String, BrokerError> {
+    let real = grant_root_path(&host.panes.deny, &path)?;
+    host.panes.registry.lock().unwrap().grant_root(id, real.clone())?;
+    Ok(real.to_string_lossy().into_owned())
+}
+
+pub fn grant_root_path(deny: &Denylist, path: &str) -> Result<PathBuf, BrokerError> {
+    let p = PathBuf::from(path);
+    if !p.is_absolute() {
+        return Err(BrokerError::new("bad_args", "choose a folder by its full path"));
+    }
+    let real = std::fs::canonicalize(&p).map_err(|_| BrokerError::new("not_found", format!("{path} no longer exists")))?;
+    if !real.is_dir() {
+        return Err(BrokerError::new("bad_args", "that is not a folder"));
+    }
+    match deny.check_grant_root(&real) {
+        GrantCheck::Ok => Ok(real),
+        GrantCheck::Denied(_) => Err(BrokerError::new("denied_path", denylist::refusal_message(&real))),
+    }
+}
+
+#[tauri::command]
+pub fn addon_revoke_root(host: State<'_, Arc<AddonHost>>, id: PaneId) {
+    host.panes.registry.lock().unwrap().revoke_root(id);
+}
+
+fn to_feed(m: &crate::agmsg::Message) -> FeedMessage {
+    FeedMessage { id: m.id.clone(), team: m.team.clone(), from: m.from.clone(), to: m.to.clone(), body: m.body.clone(), created_at: m.created_at.clone(), truncated: None }
+}
+
+/// History for the granted team plus whatever arrived while it was being built.
+#[tauri::command(async)]
+pub fn addon_feed_init(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: u64) -> Result<Value, BrokerError> {
+    let auth = host.panes.registry.lock().unwrap().authorize(id, generation, Need::Messages)?;
+    let team = auth.team.clone().ok_or_else(|| BrokerError::new("not_granted", "no team is allowed for this pane"))?;
+    // live messages queue from now on, so none falls between the history read and `finish`
+    host.panes.feeds.lock().unwrap().insert((id, generation), Feed::begin());
+    let members = crate::agmsg::agmsg_members(team.clone()).map_err(|e| BrokerError::new("not_available", e))?;
+    let members: Vec<(String, String)> = members.into_iter().map(|m| (m.name, m.types.into_iter().next().unwrap_or_else(|| "unknown".into()))).collect();
+    let history = crate::agmsg::agmsg_messages(team.clone(), Some(feed::INIT_MAX_MESSAGES as u32), None).map_err(|e| BrokerError::new("not_available", e))?;
+    let (init, ids) = feed::build_init(&team, &members, history.iter().map(to_feed).collect());
+    // the pane may have been revoked or reloaded while the history was read
+    host.panes.registry.lock().unwrap().authorize(id, generation, Need::Messages)?;
+    let queued = {
+        let mut feeds = host.panes.feeds.lock().unwrap();
+        match feeds.get_mut(&(id, generation)) {
+            Some(f) => f.finish(ids),
+            None => return Err(BrokerError::new("not_granted", "this frame is not the pane's current one")),
+        }
+    };
+    let queued: Vec<Value> = queued.iter().map(feed::message_event).collect();
+    Ok(json!({ "init": init, "queued": queued }))
+}
+
+/// One request from the pane's port. The answer is ready to post back.
+#[tauri::command(async)]
+pub fn addon_request(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: u64, op: String, args: Value) -> Value {
+    match broker::handle(&host.panes.registry, &host.panes.deny, id, generation, &op, &args) {
+        Ok(result) => json!({ "agmsg": 1, "type": "response", "ok": true, "result": result }),
+        Err(e) => json!({ "agmsg": 1, "type": "response", "ok": false, "error": { "code": e.code, "message": e.message } }),
+    }
+}
+
+/// Listens for the app's own `agmsg-message` events and pushes each to the panes
+/// that read that team. Rust filters; the UI forwards.
+pub fn listen_for_live_messages<R: Runtime>(app: &AppHandle<R>, host: Arc<AddonHost>) {
+    let emit_app = app.clone();
+    app.listen("agmsg-message", move |ev| {
+        let Ok(m) = serde_json::from_str::<FeedMessage>(&strip_to_feed(ev.payload())) else { return };
+        let targets = host.panes.registry.lock().unwrap().panes_reading_team(&m.team);
+        for (pane, generation) in targets {
+            let push = {
+                let mut feeds = host.panes.feeds.lock().unwrap();
+                feeds.get_mut(&(pane, generation)).and_then(|f| f.on_live(&m.team, m.clone()))
+            };
+            if let Some(msg) = push {
+                // re-check right before sending: the grant may have changed since
+                if host.panes.registry.lock().unwrap().authorize(pane, generation, Need::Messages).is_ok() {
+                    let _ = emit_app.emit(PUSH_EVENT, json!({ "pane": pane, "generation": generation, "event": feed::message_event(&msg) }));
+                }
+            }
+        }
+    });
+}
+
+/// The watcher's `Message` has exactly the feed fields; keep only those.
+fn strip_to_feed(payload: &str) -> String {
+    payload.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn grant_root_needs_an_absolute_existing_folder() {
+        let deny = Denylist::from_process_env(Vec::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let ok = grant_root_path(&deny, tmp.path().to_str().unwrap()).unwrap();
+        assert_eq!(ok, tmp.path().canonicalize().unwrap());
+        assert_eq!(grant_root_path(&deny, "relative/dir").unwrap_err().code, "bad_args");
+        assert_eq!(grant_root_path(&deny, "").unwrap_err().code, "bad_args");
+        assert_eq!(grant_root_path(&deny, tmp.path().join("nope").to_str().unwrap()).unwrap_err().code, "not_found");
+        let f = tmp.path().join("file.txt");
+        fs::write(&f, "x").unwrap();
+        assert_eq!(grant_root_path(&deny, f.to_str().unwrap()).unwrap_err().code, "bad_args");
+    }
+
+    #[test]
+    fn grant_root_refuses_protected_places_by_their_real_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let protected = tmp.path().join("keys");
+        fs::create_dir_all(protected.join("sub")).unwrap();
+        let deny = Denylist::from_process_env(vec![protected.canonicalize().unwrap()]);
+        assert_eq!(grant_root_path(&deny, protected.to_str().unwrap()).unwrap_err().code, "denied_path");
+        assert_eq!(grant_root_path(&deny, protected.join("sub").to_str().unwrap()).unwrap_err().code, "denied_path");
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("innocent");
+            std::os::unix::fs::symlink(&protected, &link).unwrap();
+            assert_eq!(grant_root_path(&deny, link.to_str().unwrap()).unwrap_err().code, "denied_path");
+        }
+    }
+
+    #[test]
+    fn close_all_voids_panes_and_feeds() {
+        use std::collections::HashMap;
+        let panes = Panes::new();
+        let mut files = HashMap::new();
+        files.insert("index.html".to_string(), b"x".to_vec());
+        let a = panes
+            .registry
+            .lock()
+            .unwrap()
+            .add(AddPane { addon: "o/r".into(), commit: "c".into(), name: "n".into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared: Declared::default(), open_args: OpenArgs::default(), expected_digest: None })
+            .unwrap();
+        let g = panes.registry.lock().unwrap().begin_generation(a.id).unwrap();
+        panes.feeds.lock().unwrap().insert((a.id, g), Feed::begin());
+        let closed = panes.close_all();
+        assert_eq!(closed, vec![(a.port, a.token.clone())]);
+        assert!(panes.feeds.lock().unwrap().is_empty());
+        assert!(panes.registry.lock().unwrap().authorize(a.id, g, Need::Current).is_err());
+        assert!(panes.close_all().is_empty());
+    }
+}
