@@ -121,30 +121,38 @@ export type PermissionDiff = {
   asksAgain: boolean;
 };
 
-function paneUnion(panes: AddonPaneDecl[]): { perms: Set<Permission>; network: NetworkScope } {
-  const perms = new Set<Permission>();
-  for (const p of panes) for (const x of p.permissions) perms.add(x);
-  let origins: string[] = [];
-  let any = false;
-  for (const p of panes) {
-    if (p.network.kind === "any") any = true;
-    else if (p.network.kind === "origins") origins = [...new Set([...origins, ...p.network.origins])];
-  }
-  return { perms, network: any ? { kind: "any" } : origins.length ? { kind: "origins", origins } : { kind: "none" } };
+function paneParts(p: AddonPaneDecl): { perms: Set<Permission>; origins: string[]; any: boolean } {
+  return {
+    perms: new Set(p.permissions),
+    origins: p.network.kind === "origins" ? p.network.origins : [],
+    any: p.network.kind === "any",
+  };
 }
 
-/** S8: what an update changes in the permissions (design §2, "Update"). */
+const READS: Permission[] = ["messages:read", "files:read", "git:read"];
+const combined = (perms: Set<Permission>) => perms.has("network") && READS.some((r) => perms.has(r));
+
+/**
+ * S8: what an update changes in the permissions (design §2, "Update"). Compared
+ * per pane (by name), then aggregated for the dialog: a capability one pane
+ * gains is not hidden because another pane already had it. A pane that is new
+ * counts as entirely added.
+ */
 export function permissionDiff(oldPanes: AddonPaneDecl[], newPanes: AddonPaneDecl[]): PermissionDiff {
-  const o = paneUnion(oldPanes);
-  const n = paneUnion(newPanes);
-  const added = (["messages:read", "files:read", "git:read", "network"] as const).filter((p) => n.perms.has(p) && !o.perms.has(p));
-  const oldOrigins = o.network.kind === "origins" ? o.network.origins : [];
-  const networkWider =
-    n.network.kind === "any"
-      ? o.network.kind !== "any"
-      : n.network.kind === "origins" && (o.network.kind === "none" || n.network.origins.some((x) => !oldOrigins.includes(x)));
-  const reads = (s: Set<Permission>) => s.has("messages:read") || s.has("files:read") || s.has("git:read");
-  const combined = (s: Set<Permission>) => s.has("network") && reads(s);
-  const networkWithRead = combined(n.perms) && !combined(o.perms);
-  return { added, networkWider, networkWithRead, asksAgain: added.length > 0 || networkWider || networkWithRead };
+  const added = new Set<Permission>();
+  let networkWider = false;
+  let networkWithRead = false;
+  for (const np of newPanes) {
+    const n = paneParts(np);
+    const op = oldPanes.find((x) => x.name === np.name);
+    const o = op ? paneParts(op) : { perms: new Set<Permission>(), origins: [] as string[], any: false };
+    for (const p of n.perms) if (!o.perms.has(p)) added.add(p);
+    // Wider: any site where it was not any site; or an origin that was not allowed before (any site already covers every origin).
+    const wider = n.any ? !o.any : !o.any && n.origins.some((x) => !o.origins.includes(x));
+    if (wider) networkWider = true;
+    if (combined(n.perms) && !combined(o.perms)) networkWithRead = true;
+  }
+  const order = ["messages:read", "files:read", "git:read", "network"] as const;
+  const list = order.filter((p) => added.has(p));
+  return { added: list, networkWider, networkWithRead, asksAgain: list.length > 0 || networkWider || networkWithRead };
 }

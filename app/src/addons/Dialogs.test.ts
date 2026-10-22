@@ -71,3 +71,37 @@ describe("remove and fetch", () => {
     }
   });
 });
+
+describe("permissionDiff per pane", () => {
+  const named = (name: string, permissions: AddonPaneDecl["permissions"], network: AddonPaneDecl["network"] = { kind: "none" }): AddonPaneDecl => ({
+    ...pane(permissions, network),
+    name,
+  });
+  const a = { kind: "origins" as const, origins: ["https://a.test"] };
+
+  it("a capability one pane gains is not hidden because another pane already had it", () => {
+    const oldPanes = [named("reader", ["files:read"]), named("net", ["network"], a)];
+    const newPanes = [named("reader", ["files:read", "network"], a), named("net", [])];
+    expect(permissionDiff(oldPanes, newPanes)).toEqual({
+      added: ["network"],
+      networkWider: true,
+      networkWithRead: true,
+      asksAgain: true,
+    });
+  });
+  it("a pane that is new on update counts as entirely added", () => {
+    const d = permissionDiff([named("a", ["messages:read"])], [named("a", ["messages:read"]), named("b", ["files:read", "network"], { kind: "any" })]);
+    expect(d).toMatchObject({ added: ["files:read", "network"], networkWider: true, networkWithRead: true, asksAgain: true });
+  });
+  it("any site narrowed to a bounded list is narrower, not wider", () => {
+    const d = permissionDiff([named("a", ["network"], { kind: "any" })], [named("a", ["network"], a)]);
+    expect(d).toEqual({ added: [], networkWider: false, networkWithRead: false, asksAgain: false });
+  });
+  it("a bounded list widened to any site, or by one origin, is wider", () => {
+    expect(permissionDiff([named("a", ["network"], a)], [named("a", ["network"], { kind: "any" })]).networkWider).toBe(true);
+    expect(permissionDiff([named("a", ["network"], a)], [named("a", ["network"], { kind: "origins", origins: ["https://a.test", "https://b.test"] })]).networkWider).toBe(true);
+  });
+  it("a removed pane and unchanged panes ask nothing", () => {
+    expect(permissionDiff([named("a", ["files:read"]), named("b", ["messages:read"])], [named("a", ["files:read"])]).asksAgain).toBe(false);
+  });
+});
