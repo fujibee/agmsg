@@ -1,0 +1,33 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --bg-alt: #f6f7f9; --bg-hover: #eceff3; --bg-sel: #dbe7fb;
+  --fg: #1f2328; --fg-dim: #656d76; --border: #d8dce1; --accent: #1f6feb;
+  --add-bg: #e6f6ea; --add-hl: #b7e5c2; --del-bg: #fdecec; --del-hl: #f6c4c4;
+  --ctx-bg: transparent; --err: #cf222e;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b; --bg-alt: #1a1e23; --bg-hover: #232830; --bg-sel: #26395c;
+    --fg: #d7dce1; --fg-dim: #8b949e; --border: #2d333b; --accent: #5aa2ff;
+    --add-bg: #14301d; --add-hl: #1f5a30; --del-bg: #3a1b1d; --del-hl: #6b2a2d;
+    --err: #ff7b72;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 13px/1.45 var(--sans); overflow: hidden; }
+button { font: inherit; color: inherit; background: var(--bg-alt); border: 1px solid var(--border);
+  border-radius: 5px; padding: 2px 8px; cursor: pointer; }
+button:hover { background: var(--bg-hover); }
+button[aria-pressed="true"] { background: var(--bg-sel); border-color: var(--accent); }
+input { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 5px; padding: 2px 6px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.dim { color: var(--fg-dim); }
+.notice { margin: 24px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-alt); max-width: 640px; }
+.notice.error { border-color: var(--err); }
+.notice h2 { margin: 0 0 6px; font-size: 14px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }

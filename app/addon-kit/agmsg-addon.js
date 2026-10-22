@@ -210,7 +210,7 @@ function sampleRequest(op, args) {
         }
       }
       if (!seen.size && dir) throw new AddonError("not_found", `${args.path} not found`);
-      return [...seen.values()];
+      return { entries: [...seen.values()], truncated: false };
     }
     case "fs.stat": {
       const p = norm(args.path);
@@ -221,14 +221,76 @@ function sampleRequest(op, args) {
     case "fs.read": {
       const p = norm(args.path);
       if (!(p in SAMPLE_FILES)) throw new AddonError("not_found", `${args.path} not found`);
-      return { text: SAMPLE_FILES[p] };
+      const full = SAMPLE_FILES[p];
+      const r = args.range;
+      const text = r ? full.slice(r.offset, r.offset + r.length) : full; // sample files are ASCII
+      return { text, size: full.length, eof: !r || r.offset + r.length >= full.length };
     }
+    case "git.diff":
+      return sampleDiff(args);
     default:
-      // git.* sample results follow the shapes in protocol.d.ts once they are fixed.
-      throw new AddonError("not_available", `${op} has no sample data yet`);
+      throw new AddonError("not_available", `${op} has no sample data`);
   }
 }
 
 function norm(p = ".") {
   return String(p).replace(/^\.\/?/, "").replace(/\/+$/, "");
+}
+
+// git.diff sample, in the DiffResult shape of protocol.d.ts.
+function sampleDiff(args) {
+  const L = (type, text, oldNo, newNo) => ({ type, text, oldNo, newNo });
+  const greet = {
+    path: "src/greet.ts", status: "modified", binary: false, additions: 4, deletions: 2,
+    hunks: [
+      {
+        oldStart: 1, oldLines: 5, newStart: 1, newLines: 7, section: "greet",
+        lines: [
+          L("context", "export function greet(name: string): string {", 1, 1),
+          L("del", "  return `Hello, ${name}!`;", 2, null),
+          L("add", "  const hello = `Hello, ${name}!`;", null, 2),
+          L("add", "  return hello.trim();", null, 3),
+          L("context", "}", 3, 4),
+          L("context", "", 4, 5),
+          L("del", "export const VERSION = 1;", 5, null),
+          L("add", "export const VERSION = 2;", null, 6),
+          L("add", "export const NAME = \"greet\";", null, 7),
+        ],
+      },
+      {
+        oldStart: 20, oldLines: 3, newStart: 22, newLines: 3,
+        lines: [
+          L("context", "function helper() {", 20, 22),
+          L("del", "  return computeTotal(items.length);", 21, null),
+          L("add", "  return computeTotal(items.size);", null, 23),
+          L("context", "}", 22, 24),
+        ],
+      },
+    ],
+  };
+  const farewell = {
+    path: "src/farewell.ts", status: "added", binary: false, additions: 3, deletions: 0,
+    hunks: [{
+      oldStart: 0, oldLines: 0, newStart: 1, newLines: 3,
+      lines: [
+        L("add", "export function farewell(name: string): string {", null, 1),
+        L("add", "  return `Goodbye, ${name}.`;", null, 2),
+        L("add", "}", null, 3),
+      ],
+    }],
+  };
+  const logo = { path: "assets/logo.png", status: "modified", binary: true, additions: 0, deletions: 0, hunks: [] };
+  const old = { path: "docs/old.md", status: "deleted", binary: false, additions: 0, deletions: 2,
+    hunks: [{ oldStart: 1, oldLines: 2, newStart: 0, newLines: 0,
+      lines: [L("del", "# Old notes", 1, null), L("del", "Superseded.", 2, null)] }] };
+  let files = [greet, farewell, logo, old];
+  if (args && args.path) files = files.filter((f) => f.path === args.path);
+  const base = (args && args.base) || "HEAD";
+  return {
+    base: { rev: base, sha: "9f3e1b0c2a7d4e8f6b5a1c3d2e4f5a6b7c8d9e0f" },
+    head: { worktree: true },
+    files,
+    additions: files.reduce((n, f) => n + f.additions, 0),
+    deletions: files.reduce((n, f) => n + f.deletions, 0),
+  };
 }
