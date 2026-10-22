@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { openInstallDb } from "../scripts/daemon/db.mjs";
 import { readOwner } from "../scripts/daemon/owner.mjs";
-import { gracefulStop, pollChannelHooks, pollCycle, pollOnce, prepareClaimWithCodexSchema, startup } from "../scripts/daemon/main.mjs";
+import { gracefulStop, pollChannelHooks, pollCycle, pollOnce, prepareClaimWithCodexSchema, startup, stopExitCode } from "../scripts/daemon/main.mjs";
 import { captureWatchState } from "../scripts/daemon/lifecycle.mjs";
 import { createHash } from "node:crypto";
 
@@ -188,4 +188,13 @@ test("channel setup is inside the prepared install lock and channel polls stay s
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("stepping aside for an update exits 0 so the service manager does not schedule a restart", () => {
+  assert.equal(stopExitCode("stepped_aside_for_update"), 0);
+  assert.equal(stopExitCode("normal"), 0);
+  // The premise: both managers restart only after a failure, so exit 0 leaves the start to the installer.
+  const script = readFileSync(join(import.meta.dirname, "..", "scripts", "daemon.sh"), "utf8");
+  assert.match(script, /<key>SuccessfulExit<\/key><false\/>/);
+  assert.match(script, /Restart=on-failure/);
 });
