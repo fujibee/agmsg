@@ -135,7 +135,9 @@ agmsg plugin remove  <owner>/<repo>                                 # alias: uni
 agmsg plugin list
 ```
 
-`<ref>` はブランチ、タグ、または完全なコミットSHAである。省略するとデフォルトブランチを使う。
+`<ref>` はブランチ、タグ、または完全なコミットSHAである。`install` で省略するとデフォルト
+ブランチを使う。`update` で省略すると、インストール時に記録したref(なければデフォルトブランチ)に
+従うので、完全なSHAでインストールしたプラグインは、`update` に別のrefを渡すまでそのSHAのままである。
 インストールと更新は、必ず先に内容を表示して確認を求める。端末がなく `--yes` もない場合は、
 同じレポートを表示し、何もインストールせずステータス3("needs confirmation")で終了する。
 
@@ -161,7 +163,10 @@ agmsg plugin list
 (`install --update` でも、バックグラウンドでも更新しない)。自分で固定したい場合は
 `<owner>/<repo>@<完全なSHA>` をインストールする。エージェントがコマンドを実行する場合は、
 レポートを見せてチャットで確認し、表示したコミットに固定して
-`plugin install <owner>/<repo>@<sha> --yes` を再実行する。
+`plugin install <owner>/<repo>@<sha> --yes --track <branch>` を再実行する。末尾の
+`--track <branch>`(デフォルトブランチなら `--track-default`)は、承認したコミットはそのままに、
+以後の更新が追うrefを記録する。完全なコマンドはレポートの最後に表示される。付けない場合、完全な
+SHAは恒久的な固定になる。
 
 **衝突。**
 

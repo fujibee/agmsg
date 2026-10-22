@@ -111,8 +111,10 @@ agmsg plugin remove  <owner>/<repo>                                 # alias: uni
 agmsg plugin list
 ```
 
-`<ref>` is a branch, a tag, or a full commit SHA; without it the default branch is
-used. Installing and updating always show what will happen first and ask. With no
+`<ref>` is a branch, a tag, or a full commit SHA. `install` without it uses the
+default branch. `update` without it follows the ref recorded at install time (the
+default branch if none), so a plugin installed from an exact SHA stays on that SHA
+until you give `update` another ref. Installing and updating always show what will happen first and ask. With no
 terminal and no `--yes`, the command prints the same report, installs nothing and
 exits with status 3 ("needs confirmation").
 
@@ -141,7 +143,11 @@ after you confirm is the new commit trusted and the old one removed. Nothing is 
 updated on its own — not by `install --update`, not in the background. To pin
 yourself, install `<owner>/<repo>@<full-sha>`. When an agent runs the command for
 you, it shows you the report and asks in chat, then reruns pinned to the commit it
-showed: `plugin install <owner>/<repo>@<sha> --yes`.
+showed: `plugin install <owner>/<repo>@<sha> --yes --track <branch>`. The extra
+`--track <branch>` (or `--track-default` for the default branch) records which ref
+later updates follow while the commit stays exactly the one you approved; the
+report's closing line prints the full command. Without it, an exact SHA is a
+permanent pin.
 
 **Clashes.**
 
