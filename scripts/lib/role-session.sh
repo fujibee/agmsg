@@ -288,19 +288,25 @@ _agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_soc
 # (<reason>, a short snake_case word). Drop the old destination, which belongs to
 # a process that is gone, and record why, so agmsgd reports the seat as
 # unaddressable for that reason instead of keeping an out-of-date address.
-agmsg_role_session_mark_messaging_blocked() {   # <team> <agent> <reason>
-  _agmsg_role_session_write _agmsg_role_session_mark_messaging_blocked_unlocked "$@" || true
+# <expected_bare_sid> is checked under the same lock as the write: a session that
+# published in between keeps its destination, and rc 1 says nothing was changed.
+agmsg_role_session_mark_messaging_blocked() {   # <team> <agent> <reason> <expected_bare_sid>
+  _agmsg_role_session_write _agmsg_role_session_mark_messaging_blocked_unlocked "$@"
 }
 
 _agmsg_role_session_mark_messaging_blocked_unlocked() {
-  local team="$1" agent="$2" reason="$3" path dir tmp line
-  case "$reason" in ''|*[!a-z_]*) return 0 ;; esac
-  [ -n "$team" ] && [ -n "$agent" ] || return 0
+  local team="$1" agent="$2" reason="$3" expect="${4:-}" path dir tmp line current=""
+  case "$reason" in ''|*[!a-z_]*) return 1 ;; esac
+  [ -n "$team" ] && [ -n "$agent" ] && [ -n "$expect" ] || return 1
   _agmsg_role_session_path_into "$team" "$agent"
   path="$_AGMSG_ROLE_SESSION_PATH"
-  [ -f "$path" ] || return 0
+  [ -f "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in session=*) current="${line#session=}"; break ;; esac
+  done < "$path"
+  [ "$current" = "$expect" ] || return 1
   dir="$(_actas_lock_dir)"
-  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
+  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 1
   {
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
@@ -309,9 +315,9 @@ _agmsg_role_session_mark_messaging_blocked_unlocked() {
       esac
     done < "$path"
     printf 'messaging_blocked=%s\n' "$reason"
-  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
   return 0
 }
 

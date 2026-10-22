@@ -116,13 +116,14 @@ EOF
   if [ "$pid_unresolved" = 1 ]; then
     # The record still holds the destination of the process this session
     # replaced, so say the seat cannot be reached rather than leave it looking
-    # addressable.
-    # Only a record that already names this session is cleared: a seat held by
-    # another live session keeps its own destination.
-    if [ "$(agmsg_role_session_uuid "$pair_team" "$pair_agent" 2>/dev/null || true)" = "$bare_sid" ]; then
-      agmsg_role_session_mark_messaging_blocked "$pair_team" "$pair_agent" seat_pid_unresolved
+    # addressable. Only a record that names this session is cleared (checked
+    # under the write lock): a seat held by another live session keeps its own
+    # destination.
+    if agmsg_role_session_mark_messaging_blocked "$pair_team" "$pair_agent" seat_pid_unresolved "$bare_sid"; then
+      echo "AGMSG delivery: agmsgd is running, but this session's own process could not be identified, so the native channel is not used and the old delivery record for $pair_agent@$pair_team was cleared (agmsg daemon status shows seat_pid_unresolved). Next: arm the Monitor below."
+    else
+      echo "AGMSG delivery: agmsgd is running, but this session's own process could not be identified, so the native channel is not used. Next: arm the Monitor below."
     fi
-    echo "AGMSG delivery: agmsgd is running, but this session's own process could not be identified, so the native channel is not used and the old delivery record for $pair_agent@$pair_team was cleared (agmsg daemon status shows seat_pid_unresolved). Next: arm the Monitor below."
     return 0
   fi
 
