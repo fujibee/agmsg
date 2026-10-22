@@ -127,8 +127,9 @@ function LiveAddonPane(props: {
     const need = state.need;
     const step: Step = need.permission === "messages:read" ? "team" : "folder";
     if (c === "notNow") {
-      // Dropping the folder is what makes the effect above launch the picker (its only owner).
-      if (need.permission === "files:read") setFolder(null);
+      // "Not now" declines: the pane closes. On the denied card the same button reads "Choose another…" and picks again;
+      // dropping the folder is what makes the effect above launch the picker (its only owner).
+      if (need.permission === "files:read" && need.denied) setFolder(null);
       else props.onClose();
       return;
     }
