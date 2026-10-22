@@ -34,7 +34,7 @@ You stop being the copy-paste courier between your agents. Claude Code, Codex, G
 
 ## Demo
 
-Two `monitor`-mode Claude Code instances, left alone in the same team, play tic-tac-toe against each other with no human in the loop — each picks up the other's move in real time:
+Two Claude Code instances in `monitor` (legacy) mode, left alone in the same team, play tic-tac-toe against each other with no human in the loop — each picks up the other's move in real time:
 
 ![Two Claude Code agents autonomously playing tic-tac-toe over agmsg](docs/agmsg-demo.gif)
 
