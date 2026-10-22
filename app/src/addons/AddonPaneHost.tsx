@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AddonFrame } from "./AddonFrame";
 import { AddonPane } from "./AddonPane";
@@ -96,6 +97,15 @@ function LiveAddonPane(props: {
     };
   }, [pane.addonId, pane.paneName, pane.openArgs, attempt]);
 
+  // Rust closes a pane whose files changed after it opened and says so; show its reason with Reload / Remove.
+  useEffect(() => {
+    if (!added) return;
+    const un = listen<{ pane: number; reason: string }>("addon-pane-failed", (e) => {
+      if (e.payload.pane === added.id) setState({ kind: "failure", failure: { code: "pane_closed", reason: e.payload.reason } });
+    });
+    return () => void un.then((f) => f());
+  }, [added]);
+
   const chooseFolder = async () => {
     const r = await guard.current.run(() => openDialog({ directory: true, multiple: false })).catch((e) => {
       setState({ kind: "failure", failure: { code: "open_failed", message: toCommandError(e).message } });
@@ -114,11 +124,11 @@ function LiveAddonPane(props: {
     if (step === undefined) {
       setState({ kind: "frame" });
     } else if (step === "team") {
-      setState({ kind: "grant", need: { permission: "messages:read", team: props.team } });
+      setState({ kind: "grant", need: { permission: "messages:read", team: props.team, why: decl?.why["messages:read"] } });
     } else if (folder === null) {
       void chooseFolder();
     } else {
-      setState({ kind: "grant", need: { permission: "files:read", path: folder, fileCount: null, denied: false } });
+      setState({ kind: "grant", need: { permission: "files:read", path: folder, fileCount: null, denied: false, why: decl?.why["files:read"] } });
     }
   }, [added, steps, folder, props.team]);
 

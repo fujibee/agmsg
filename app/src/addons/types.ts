@@ -83,8 +83,8 @@ export type UnsafeEntryKind = "symlink" | "hardlink" | "outside_path" | "reserve
 
 /** The grant a pane is waiting for (S6). */
 export type GrantNeed =
-  | { permission: "messages:read"; team: string }
-  | { permission: "files:read"; path: string; fileCount: number | null; denied: boolean };
+  | { permission: "messages:read"; team: string; why?: string }
+  | { permission: "files:read"; path: string; fileCount: number | null; denied: boolean; why?: string };
 
 /** What an open pane shows instead of (or before) its frame. */
 export type PaneState =
@@ -100,7 +100,9 @@ export type PaneFailure =
   | { code: "revoked"; permission: Exclude<Permission, "network">; scope: string }
   /** Rust refused to open the pane (gate off, unknown add-on, bad conf); its words are shown as they are. */
   | { code: "open_failed"; message: string }
-  | { code: "init_too_large" };
+  | { code: "init_too_large" }
+  /** Rust closed the pane because its files changed after it was opened (addon-pane-failed); `reason` is its words. */
+  | { code: "pane_closed"; reason: string };
 
 /** A grant chip in the pane header. */
 export type GrantChip = { key: string; label: string };

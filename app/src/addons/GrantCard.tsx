@@ -24,6 +24,7 @@ export function GrantCard(props: {
     return (
       <div className="addon-card addon-grant-card" role="group" aria-label={t("addons.card.grantAria")}>
         <p>{t("addons.card.messagesWant", { title, team: need.team })}</p>
+        {need.why && <p className="addon-why">{need.why}</p>}
         <div className="addon-card-actions">
           <button type="button" disabled={pending} onClick={() => onChoose("allow")}>
             {t("addons.card.allow")}
@@ -54,6 +55,7 @@ export function GrantCard(props: {
           ? t("addons.card.filesWantOne", { title, path: need.path })
           : t("addons.card.filesWant", { title, path: need.path, count: need.fileCount })}
       </p>
+      {need.why && <p className="addon-why">{need.why}</p>}
       <div className="addon-card-actions">
         <button type="button" disabled={pending} onClick={() => onChoose("once")}>
           {t("addons.card.allowOnce")}

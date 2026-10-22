@@ -55,6 +55,7 @@ describe("failure cards", () => {
     expect(failureActions({ code: "revoked", permission: "messages:read", scope: "t" })).toEqual(["allowAgain"]);
     expect(failureActions({ code: "open_failed", message: "m" })).toEqual(["reload"]);
     expect(failureActions({ code: "init_too_large" })).toEqual(["reload"]);
+    expect(failureActions({ code: "pane_closed", reason: "r" })).toEqual(["reload", "remove"]);
   });
 });
 

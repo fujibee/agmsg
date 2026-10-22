@@ -10,6 +10,8 @@ export function failureActions(f: PaneFailure): FailureAction[] {
   switch (f.code) {
     case "digest_mismatch":
       return ["reinstall", "remove"];
+    case "pane_closed":
+      return ["reload", "remove"];
     case "load_timeout":
     case "open_failed":
     case "init_too_large":
@@ -33,7 +35,9 @@ export function FailureCard(props: {
       ? t("addons.failure.path_missing", { path: failure.path })
       : failure.code === "revoked"
         ? t("addons.failure.revoked", { scope: failure.scope })
-        : failure.code === "open_failed"
+        : failure.code === "pane_closed"
+          ? failure.reason
+          : failure.code === "open_failed"
           ? t("addons.failure.open_failed", { title, message: failure.message })
           : t(`addons.failure.${failure.code}`, { title });
   return (
