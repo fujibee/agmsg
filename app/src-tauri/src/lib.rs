@@ -627,6 +627,12 @@ pub fn run() {
             // registry regardless of launch method), hence unix-only.
             #[cfg(unix)]
             import_login_shell_path();
+            // Measure git only now: a Finder launch has a minimal PATH until the login
+            // shell's PATH is imported, and the measurement is kept for the whole run.
+            std::thread::spawn(|| match addons::broker::prepare_git() {
+                None => eprintln!("[addons] git:read is available"),
+                Some(why) => eprintln!("[addons] git:read is off: {why}"),
+            });
 
             // Restore the zoom level saved on the last quit/change — .manage()
             // above only had 1.0 to work with (no AppHandle yet to read the

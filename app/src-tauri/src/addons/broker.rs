@@ -327,17 +327,31 @@ pub fn measure_git(git: Result<PathBuf, String>, support_dir: &Path) -> GitSuppo
 /// command line tools, so it is used only when those are installed.
 pub fn find_git() -> Result<PathBuf, String> {
     let path = crate::imported_path().map(std::ffi::OsString::from).or_else(|| std::env::var_os("PATH")).unwrap_or_default();
+    find_git_in(&path)
+}
+
+/// `find_git` over an explicit PATH.
+pub fn find_git_in(path: &std::ffi::OsStr) -> Result<PathBuf, String> {
     let exe = if cfg!(windows) { "git.exe" } else { "git" };
-    for dir in std::env::split_paths(&path) {
+    for dir in std::env::split_paths(path) {
         let cand = dir.join(exe);
         if cand.is_file() {
-            if cfg!(target_os = "macos") && cand == Path::new("/usr/bin/git") && !command_line_tools_installed() {
+            if cfg!(target_os = "macos") && is_system_git_stub(&cand) && !command_line_tools_installed() {
                 continue;
             }
             return Ok(cand);
         }
     }
     Err("git was not found on this computer".to_string())
+}
+
+/// Is this the system `git` stub (`/usr/bin/git`)? Compared by real path, so a link to
+/// it or a `../` in PATH does not slip past.
+fn is_system_git_stub(cand: &Path) -> bool {
+    match (fs::canonicalize(cand), fs::canonicalize("/usr/bin/git")) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => cand == Path::new("/usr/bin/git"),
+    }
 }
 
 fn command_line_tools_installed() -> bool {
@@ -558,6 +572,36 @@ mod tests {
 
     fn code_of(r: Res) -> &'static str {
         r.unwrap_err().code
+    }
+
+    #[test]
+    fn find_git_uses_the_given_path_and_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = tmp.path().join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        // A minimal PATH without git finds none; the login PATH with git finds it.
+        assert!(find_git_in(empty.as_os_str()).is_err());
+        let bin = tmp.path().join("login-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let exe = if cfg!(windows) { "git.exe" } else { "git" };
+        fs::write(bin.join(exe), b"#!/bin/sh\n").unwrap();
+        let joined = std::env::join_paths([empty.clone(), bin.clone()]).unwrap();
+        assert_eq!(find_git_in(&joined).unwrap(), bin.join(exe));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_system_git_stub_is_recognised_through_links_and_dot_dot() {
+        if !Path::new("/usr/bin/git").exists() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("git");
+        std::os::unix::fs::symlink("/usr/bin/git", &link).unwrap();
+        assert!(is_system_git_stub(&link));
+        assert!(is_system_git_stub(Path::new("/usr/bin/git")));
+        assert!(is_system_git_stub(Path::new("/usr/lib/../bin/git")));
+        assert!(!is_system_git_stub(&tmp.path().join("other")));
     }
 
     #[test]

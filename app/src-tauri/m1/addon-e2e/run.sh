@@ -71,4 +71,13 @@ done
 grep -E 'resolved:' "$log" | cut -c1-160
 grep -E 'git:read|add-ons:|addons-trace|addons-e2e\] "(ASK|opening|file view|diff view|FAILED|finished)' "$log" | cut -c1-420
 echo "== full log: $log (the safe copy and fixture are in $work; delete by hand)"
-grep -q '"finished' "$log"
+# The run passes only if every direct answer was as expected and the two frames themselves
+# made their requests: File view (open.args, fs.stat, fs.list, fs.read) and Diff view (git.diff).
+ok=1
+grep -q '"finished' "$log" || { echo "FAIL: the driver did not finish" >&2; ok=0; }
+grep -q 'ASK FAIL' "$log" && { echo "FAIL: an answer was not what was expected" >&2; ok=0; }
+for need in 'pane=1 gen=1 op=open.args ok' 'pane=1 gen=1 op=fs.stat ok' 'pane=1 gen=1 op=fs.list ok' 'pane=1 gen=1 op=fs.read ok' 'pane=2 gen=1 op=git.diff ok'; do
+  grep -q "$need" "$log" || { echo "FAIL: the frames never made: $need" >&2; ok=0; }
+done
+[ "$ok" = 1 ] && echo "PASS"
+[ "$ok" = 1 ]

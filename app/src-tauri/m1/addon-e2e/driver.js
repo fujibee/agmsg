@@ -40,33 +40,41 @@
     await report("diff view granted");
     await sleep(12000);
     // Straight requests through the same command the frames use, for the pane ids and generations seen in the trace.
-    const ask = async (id, op, args) => {
+    let mismatches = 0;
+    // expect: "ok" or the error code the answer must carry
+    const ask = async (id, op, args, expect) => {
+      let got;
+      let body;
       try {
         const r = await real("addon_request", { id, generation: 1, op, args });
-        const body = r.ok ? "ok " + JSON.stringify(r.result).slice(0, 260) : "ERR " + r.error.code + ": " + r.error.message.slice(0, 120);
-        report("ASK pane" + id + " " + op + " " + JSON.stringify(args) + " -> " + body);
-      } catch (e) { report("ASK pane" + id + " " + op + " threw " + e); }
+        got = r.ok ? "ok" : r.error.code;
+        body = r.ok ? "ok " + JSON.stringify(r.result).slice(0, 260) : "ERR " + r.error.code + ": " + r.error.message.slice(0, 120);
+      } catch (e) { got = "threw"; body = "threw " + e; }
+      const pass = got === expect;
+      if (!pass) mismatches++;
+      report((pass ? "ASK PASS " : "ASK FAIL(expected " + expect + ") ") + "pane" + id + " " + op + " " + JSON.stringify(args) + " -> " + body);
     };
-    await ask(1, "open.args", {});
-    await ask(1, "fs.stat", { path: "." });
-    await ask(1, "fs.list", { path: "." });
-    await ask(1, "fs.list", { path: "src" });
-    await ask(1, "fs.read", { path: "src/main.ts", range: { offset: 0, length: 20 } });
-    await ask(1, "fs.read", { path: "logo.png" });
-    await ask(1, "fs.read", { path: "../x" });
-    await ask(1, "fs.read", { path: "missing.txt" });
-    await ask(1, "git.status", {});
-    await ask(2, "open.args", {});
-    await ask(2, "git.status", {});
-    await ask(2, "git.log", {});
-    await ask(2, "git.diff", {});
-    await ask(2, "git.diff", { base: "merge-base:main", context: 0 });
-    await ask(2, "git.diff", { base: "--output=/tmp/x" });
-    await ask(2, "git.show", { rev: "HEAD", path: "README.md" });
-    await ask(2, "git.show", { rev: "HEAD", path: "logo.png" });
-    await ask(2, "git.show", { rev: "HEAD" });
-    await ask(2, "git.show", { rev: "HEAD", path: "../../etc/hosts" });
-    await ask(2, "fs.list", { path: "." });
+    await ask(1, "open.args", {}, "ok");
+    await ask(1, "fs.stat", { path: "." }, "ok");
+    await ask(1, "fs.list", { path: "." }, "ok");
+    await ask(1, "fs.list", { path: "src" }, "ok");
+    await ask(1, "fs.read", { path: "src/main.ts", range: { offset: 0, length: 20 } }, "ok");
+    await ask(1, "fs.read", { path: "logo.png" }, "ok");
+    await ask(1, "fs.read", { path: "../x" }, "bad_args");
+    await ask(1, "fs.read", { path: "missing.txt" }, "not_found");
+    await ask(1, "git.status", {}, "not_declared");
+    await ask(2, "open.args", {}, "ok");
+    await ask(2, "git.status", {}, "ok");
+    await ask(2, "git.log", {}, "ok");
+    await ask(2, "git.diff", {}, "ok");
+    await ask(2, "git.diff", { base: "merge-base:main", context: 0 }, "ok");
+    await ask(2, "git.diff", { base: "--output=/tmp/x" }, "bad_args");
+    await ask(2, "git.show", { rev: "HEAD", path: "README.md" }, "ok");
+    await ask(2, "git.show", { rev: "HEAD", path: "logo.png" }, "ok");
+    await ask(2, "git.show", { rev: "HEAD" }, "bad_args");
+    await ask(2, "git.show", { rev: "HEAD", path: "../../etc/hosts" }, "bad_args");
+    await ask(2, "fs.list", { path: "." }, "ok");
+    if (mismatches > 0) throw new Error(mismatches + " answer(s) were not what was expected");
     await report("finished");
   } catch (e) {
     try { await report("FAILED: " + e.message + "; buttons: " + [...document.querySelectorAll("button")].map((b) => (b.textContent.trim() || b.title) + (b.disabled ? "(disabled)" : "")).slice(0, 40).join(" | ")); } catch (_) {}
