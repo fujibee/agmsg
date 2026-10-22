@@ -45,18 +45,27 @@ pub struct AddonHost {
     pub nav: NavPolicy,
     pub panes: super::commands::Panes,
     catalog: std::sync::OnceLock<super::catalog::Catalog>,
+    /// Installs waiting for the user's decision (staging id -> staged files).
+    pub staged: Mutex<HashMap<String, super::install::stage::Staged>>,
+    /// One install, update or removal at a time.
+    pub install_lock: Mutex<()>,
     engine: Mutex<EngineReport>,
     probe: Mutex<Option<ProbeRun>>,
 }
 
 impl AddonHost {
+    #[cfg(test)]
+    pub fn set_catalog_for_test(&self, c: super::catalog::Catalog) {
+        let _ = self.catalog.set(c);
+    }
+
     /// The built-in and installed add-ons. Set once at startup.
     pub fn catalog(&self) -> &super::catalog::Catalog {
         self.catalog.get().expect("the add-on catalog is set at startup")
     }
 
     pub fn new(dev_url: Option<&Url>) -> AddonHost {
-        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), panes: super::commands::Panes::new(), catalog: std::sync::OnceLock::new(), engine: Mutex::new(EngineReport::default()), probe: Mutex::new(None) }
+        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), panes: super::commands::Panes::new(), catalog: std::sync::OnceLock::new(), staged: Mutex::new(HashMap::new()), install_lock: Mutex::new(()), engine: Mutex::new(EngineReport::default()), probe: Mutex::new(None) }
     }
 
     fn end_probe(&self) {
@@ -121,6 +130,8 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     super::e2e::spawn_driver(handle.clone());
     host.panes.set_app_dirs(app_owned_dirs(&handle));
     let builtin_root = super::catalog::Catalog::locate_builtin_root(handle.path().resource_dir().ok());
+    super::install::stage::gc_staging(&crate::agmsg::base_dir().join("addons"));
+    super::install::dev::clear(&crate::agmsg::base_dir().join("addons"));
     let _ = host.catalog.set(super::catalog::Catalog::new(builtin_root, crate::agmsg::base_dir().join("addons")));
     // Measure git once at startup, off this thread: git:read is off, with the reason, when it fails.
     std::thread::spawn(|| match super::broker::prepare_git() {

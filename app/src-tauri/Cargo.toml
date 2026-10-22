@@ -44,6 +44,10 @@ getrandom = "0.2"
 # Add-on install: read the GitHub tarball of one commit.
 flate2 = "1"
 tar = "0.4"
+# GitHub API and tarball download (public repositories only). TLS is rustls with the
+# ring provider, installed the same way tauri-plugin-updater does.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Myers line diff for the add-on git.diff result (addons/diff.rs).
 similar = "2"
 # Blob ids of working-tree files, to tell unchanged files from changed ones (addons/git.rs).

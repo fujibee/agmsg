@@ -104,10 +104,20 @@ pub struct AddPane {
     pub open_args: OpenArgs,
     pub expected_digest: Option<String>,
     pub pinned: Option<std::collections::BTreeMap<String, (String, u64)>>,
-    pub on_tamper: Option<std::sync::Arc<dyn Fn(u16, String, String) + Send + Sync>>,
+    pub on_tamper: Option<super::server::TamperFn>,
 }
 
 #[derive(Default)]
+/// What a pane instance is and holds right now (to bind a saved consent to it).
+#[derive(Debug, Clone)]
+pub struct ConsentView {
+    pub addon: String,
+    pub pane: String,
+    pub commit: String,
+    pub team: Option<String>,
+    pub root: Option<String>,
+}
+
 pub struct Registry {
     next: PaneId,
     panes: HashMap<PaneId, Pane>,
@@ -131,6 +141,12 @@ impl Drop for Slot {
 
 /// Per pane: at most this many requests queued or running.
 pub const MAX_INFLIGHT: usize = 64;
+
+impl Default for Registry {
+    fn default() -> Self {
+        Registry::new()
+    }
+}
 
 impl Registry {
     pub fn new() -> Registry {
@@ -174,6 +190,36 @@ impl Registry {
     /// Closes the pane: the listener and token are dropped with the server.
     pub fn remove(&mut self, id: PaneId) -> Option<(u16, String)> {
         self.panes.remove(&id).map(|p| (p.server.port(), p.server.token().to_string()))
+    }
+
+    /// Every open pane of an add-on (`owner/repo`, `builtin:x` or `dev:x`).
+    pub fn ids_for_addon(&self, addon: &str) -> Vec<PaneId> {
+        let mut v: Vec<_> = self.panes.values().filter(|p| p.addon == addon).map(|p| p.id).collect();
+        v.sort();
+        v
+    }
+
+    /// Open panes of `addon`/`pane` that currently hold exactly this grant
+    /// (`files:read` on this folder, `messages:read` on this team).
+    pub fn holders(&self, addon: &str, pane: &str, permission: &str, scope: &str) -> Vec<PaneId> {
+        let mut v: Vec<_> = self
+            .panes
+            .values()
+            .filter(|p| p.addon == addon && p.name == pane)
+            .filter(|p| match permission {
+                "files:read" => p.root.as_ref().is_some_and(|r| r.to_string_lossy() == scope),
+                "messages:read" => p.team.as_deref() == Some(scope),
+                _ => false,
+            })
+            .map(|p| p.id)
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// What a pane instance is and holds, for binding a saved consent to it.
+    pub fn consent_view(&self, id: PaneId) -> Option<ConsentView> {
+        self.panes.get(&id).map(|p| ConsentView { addon: p.addon.clone(), pane: p.name.clone(), commit: p.commit.clone(), team: p.team.clone(), root: p.root.as_ref().map(|r| r.to_string_lossy().into_owned()) })
     }
 
     pub fn contains(&self, id: PaneId) -> bool {
@@ -467,6 +513,15 @@ mod tests {
         assert_eq!(r.remove_matching(port, &token).map(|x| x.0), Some(a));
         assert!(r.remove_matching(port, &token).is_none());
         assert!(!r.contains(a));
+    }
+
+    #[test]
+    fn open_panes_are_found_by_add_on() {
+        let (mut r, a) = reg_with(all());
+        assert_eq!(r.ids_for_addon("o/r"), vec![a]);
+        assert!(r.ids_for_addon("x/y").is_empty());
+        r.remove(a);
+        assert!(r.ids_for_addon("o/r").is_empty());
     }
 
     #[test]

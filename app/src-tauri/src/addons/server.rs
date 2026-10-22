@@ -20,6 +20,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use super::csp::{self, Network, PaneCsp};
+
+/// Called once, with `(port, token, reason)`, when a pinned file no longer matches.
+pub type TamperFn = Arc<dyn Fn(u16, String, String) + Send + Sync>;
 use super::digest;
 
 const MAX_HEAD: usize = 16 * 1024;
@@ -48,7 +51,7 @@ pub struct PaneSpec {
     /// file that is not in the manifest is not served at all.
     pub pinned: Option<BTreeMap<String, (String, u64)>>,
     /// Called once, with `(port, token, reason)`, when a pinned file no longer matches.
-    pub on_tamper: Option<Arc<dyn Fn(u16, String, String) + Send + Sync>>,
+    pub on_tamper: Option<TamperFn>,
 }
 
 #[derive(Debug)]
@@ -87,7 +90,7 @@ struct Ctx {
     entry: String,
     csp: String,
     pinned: Option<BTreeMap<String, (String, u64)>>,
-    on_tamper: Option<Arc<dyn Fn(u16, String, String) + Send + Sync>>,
+    on_tamper: Option<TamperFn>,
     /// A pinned file changed: everything answers 503 from then on.
     tampered: AtomicBool,
     /// Set by `stop`; nothing is read, routed or written once it is set.

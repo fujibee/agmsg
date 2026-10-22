@@ -51,6 +51,12 @@ pub struct Panes {
     extra_protected: Mutex<Vec<PathBuf>>,
 }
 
+impl Default for Panes {
+    fn default() -> Self {
+        Panes::new()
+    }
+}
+
 impl Panes {
     pub fn new() -> Panes {
         Panes {
@@ -78,6 +84,38 @@ impl Panes {
         extra.extend(self.extra_protected.lock().unwrap().iter().cloned());
         extra.extend(crate::agmsg::protected_locations());
         *self.deny.lock().unwrap() = Arc::new(Denylist::from_process_env(extra));
+    }
+
+    /// Closes these panes now: the listener and token go, feeds go, the navigation
+    /// entry goes. Returns the ids that were actually closed (each only once).
+    pub fn close_ids(&self, nav: &super::nav::NavPolicy, ids: &[PaneId]) -> Vec<PaneId> {
+        let mut closed = Vec::new();
+        for id in ids {
+            let r = self.registry.lock().unwrap().remove(*id);
+            if let Some((port, token)) = r {
+                nav.unregister_pane(port, &token);
+                closed.push(*id);
+            }
+            self.feeds.lock().unwrap().retain(|(p, _), _| p != id);
+        }
+        closed
+    }
+
+    /// Settings → Revoke: every live pane of this add-on that holds this grant loses it
+    /// (the generation is bumped like any scope change) and is closed.
+    pub fn revoke_matching(&self, nav: &super::nav::NavPolicy, addon: &str, pane: &str, permission: &str, scope: &str) -> Vec<PaneId> {
+        let ids = {
+            let mut reg = self.registry.lock().unwrap();
+            let ids = reg.holders(addon, pane, permission, scope);
+            for id in &ids {
+                match permission {
+                    "files:read" => reg.revoke_root(*id),
+                    _ => reg.revoke_team(*id),
+                }
+            }
+            ids
+        };
+        self.close_ids(nav, &ids)
     }
 
     /// Everything a page load, reload or update voids: every pane and its feeds.
@@ -112,6 +150,8 @@ pub struct PaneAddOut {
     pub title: String,
     pub permissions: Vec<String>,
     pub network: String,
+    /// The add-on commit this pane runs; send it back with `addon_save_grant`.
+    pub commit: String,
 }
 
 fn off(host: &AddonHost) -> String {
@@ -202,6 +242,7 @@ pub fn addon_pane_add<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<AddonHo
         title: resolved.conf.title.clone(),
         permissions: resolved.conf.permissions.clone(),
         network: resolved.conf.network.clone().unwrap_or_default(),
+        commit: resolved.commit.clone(),
     })
 }
 
@@ -345,6 +386,7 @@ mod tests {
     use super::*;
     use crate::addons::panes::Declared;
     use std::fs;
+    use crate::addons::broker;
 
     fn conf_with(opens: &str, perms: &str) -> AddonConf {
         let mut t = String::from("title = T\nprotocol = 1\n");
@@ -423,6 +465,80 @@ mod tests {
             std::os::unix::fs::symlink(&protected, &link).unwrap();
             assert_eq!(grant_root_path(&deny, link.to_str().unwrap()).unwrap_err().code, "denied_path");
         }
+    }
+
+    fn embedded_pane(panes: &Panes, addon: &str, name: &str) -> PaneId {
+        let mut files = HashMap::new();
+        files.insert("index.html".to_string(), b"x".to_vec());
+        let declared = Declared { messages_read: true, files_read: true, ..Default::default() };
+        panes
+            .registry
+            .lock()
+            .unwrap()
+            .add(AddPane { addon: addon.into(), commit: "c".into(), name: name.into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared, open_args: OpenArgs::default(), expected_digest: None, pinned: None, on_tamper: None })
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn revoke_voids_the_live_grant_closes_the_pane_and_reports_each_pane_once() {
+        let nav = crate::addons::nav::NavPolicy::new(None);
+        let panes = Panes::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("f.txt"), "data").unwrap();
+        let a = embedded_pane(&panes, "o/r", "main");
+        let other_folder = embedded_pane(&panes, "o/r", "main");
+        let other_addon = embedded_pane(&panes, "x/y", "main");
+        let g = panes.registry.lock().unwrap().begin_generation(a).unwrap();
+        panes.registry.lock().unwrap().grant_root(a, root.clone()).unwrap();
+        let g2 = panes.registry.lock().unwrap().begin_generation(other_folder).unwrap();
+        panes.registry.lock().unwrap().grant_root(other_folder, std::env::temp_dir()).unwrap();
+        let g3 = panes.registry.lock().unwrap().begin_generation(other_addon).unwrap();
+        panes.registry.lock().unwrap().grant_root(other_addon, root.clone()).unwrap();
+        // before: the pane reads
+        let deny = Denylist::from_process_env(Vec::new());
+        let ok = broker::handle(&panes.registry, &deny, a, g, "fs.read", &json!({"path": "f.txt"}));
+        assert_eq!(ok.unwrap()["text"], "data");
+        // revoke that folder for that add-on
+        let closed = panes.revoke_matching(&nav, "o/r", "main", "files:read", &root.to_string_lossy());
+        assert_eq!(closed, vec![a], "exactly the pane that held the grant");
+        let after = broker::handle(&panes.registry, &deny, a, g, "fs.read", &json!({"path": "f.txt"}));
+        assert_eq!(after.unwrap_err().code, "not_granted");
+        assert!(!panes.registry.lock().unwrap().contains(a));
+        // a second revoke finds nothing: the UI is told once per pane
+        assert!(panes.revoke_matching(&nav, "o/r", "main", "files:read", &root.to_string_lossy()).is_empty());
+        // the other folder's pane and the other add-on's pane are untouched
+        assert!(broker::handle(&panes.registry, &deny, other_folder, g2, "open.args", &json!({})).is_ok());
+        assert!(broker::handle(&panes.registry, &deny, other_addon, g3, "fs.read", &json!({"path": "f.txt"})).is_ok());
+    }
+
+    #[test]
+    fn revoking_a_team_stops_pushes_and_closes_the_pane() {
+        let nav = crate::addons::nav::NavPolicy::new(None);
+        let panes = Panes::new();
+        let a = embedded_pane(&panes, "o/r", "main");
+        let g = panes.registry.lock().unwrap().begin_generation(a).unwrap();
+        panes.registry.lock().unwrap().grant_team(a, "team-a").unwrap();
+        panes.feeds.lock().unwrap().insert((a, g), Feed::begin("team-a"));
+        assert_eq!(panes.registry.lock().unwrap().panes_reading_team("team-a"), vec![(a, g)]);
+        let closed = panes.revoke_matching(&nav, "o/r", "main", "messages:read", "team-a");
+        assert_eq!(closed, vec![a]);
+        assert!(panes.registry.lock().unwrap().panes_reading_team("team-a").is_empty());
+        assert!(panes.feeds.lock().unwrap().is_empty(), "the feed is dropped with the pane");
+    }
+
+    #[test]
+    fn a_grant_for_another_scope_or_pane_name_revokes_nothing() {
+        let nav = crate::addons::nav::NavPolicy::new(None);
+        let panes = Panes::new();
+        let a = embedded_pane(&panes, "o/r", "main");
+        panes.registry.lock().unwrap().begin_generation(a).unwrap();
+        panes.registry.lock().unwrap().grant_team(a, "team-a").unwrap();
+        assert!(panes.revoke_matching(&nav, "o/r", "main", "messages:read", "team-b").is_empty());
+        assert!(panes.revoke_matching(&nav, "o/r", "other-pane", "messages:read", "team-a").is_empty());
+        assert!(panes.revoke_matching(&nav, "o/r", "main", "git:read", "team-a").is_empty());
+        assert!(panes.registry.lock().unwrap().contains(a));
     }
 
     #[test]

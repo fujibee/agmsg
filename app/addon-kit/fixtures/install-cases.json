@@ -935,6 +935,164 @@
    "extract": {
     "error": "Refused: the repository contains a symbolic link at app-panes/x/web/a/b/c/ok.js. Add-ons may contain only plain files."
    }
+  },
+  {
+   "name": "[archive] an absolute path with no top folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "/app-panes/main/web/index.html",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at /app-panes/main/web/index.html. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a parent-directory top folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "../x/app-panes/main/addon.conf",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at ../x/app-panes/main/addon.conf. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a drive letter as the top folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "C:/x/app-panes/main/addon.conf",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at C:/x/app-panes/main/addon.conf. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a backslash in the top folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "o-r\\\\x/app-panes/main/addon.conf",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at o-r\\\\x/app-panes/main/addon.conf. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] two different top folders",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "a-top/app-panes/main/addon.conf",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    },
+    {
+     "path": "b-top/app-panes/main/web/index.html",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a file outside the top-level folder at b-top/app-panes/main/web/index.html. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] folders that differ only in case",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "app-panes/Main/web/a.js",
+     "type": "file",
+     "text": "x"
+    },
+    {
+     "path": "app-panes/main/web/b.js",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: app-panes/main and app-panes/Main differ only in case."
+   }
+  },
+  {
+   "name": "[archive] a file and a folder with the same name",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "app-panes/main/web/thing",
+     "type": "file",
+     "text": "x"
+    },
+    {
+     "path": "app-panes/main/web/thing/inside.js",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: app-panes/main/web/thing is both a file and a folder."
+   }
+  },
+  {
+   "name": "[archive] a file outside any top folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "loose-file.txt",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a file outside the top-level folder at loose-file.txt. Add-ons may contain only plain files."
+   }
   }
  ]
 }

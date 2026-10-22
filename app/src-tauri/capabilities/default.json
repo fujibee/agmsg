@@ -54,6 +54,16 @@
     "allow-addon-revoke-root",
     "allow-addon-feed-init",
     "allow-addon-request",
-    "allow-addon-list"
+    "allow-addon-list",
+    "allow-addon-install-start",
+    "allow-addon-check-update",
+    "allow-addon-install-confirm",
+    "allow-addon-install-cancel",
+    "allow-addon-remove",
+    "allow-addon-dev-load",
+    "allow-addon-dev-remove",
+    "allow-addon-saved-grants",
+    "allow-addon-save-grant",
+    "allow-addon-forget-grant"
   ]
 }

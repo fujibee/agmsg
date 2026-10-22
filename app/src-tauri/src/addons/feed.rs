@@ -275,7 +275,7 @@ mod tests {
         let sent = serde_json::to_string(&ev).unwrap().len();
         assert!(sent <= INIT_MAX_BYTES, "sent {sent} bytes, cap {INIT_MAX_BYTES}");
         let n = ev["messages"].as_array().unwrap().len();
-        assert!(n >= 1 && n < 16, "{n}");
+        assert!((1..16).contains(&n), "{n}");
         assert_eq!(ev["messages"].as_array().unwrap().last().unwrap()["id"], "15", "newest kept");
     }
 
