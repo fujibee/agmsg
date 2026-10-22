@@ -3,3 +3,4 @@
 
 pub mod denylist;
 pub mod diff;
+pub mod git;
