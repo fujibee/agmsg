@@ -67,7 +67,7 @@ impl NavPolicy {
 
     /// True for the app's own origins (not panes).
     pub fn is_app(&self, url: &Url) -> bool {
-        Origin::of(url).map_or(false, |o| self.app.contains(&o))
+        Origin::of(url).is_some_and(|o| self.app.contains(&o))
     }
 
     pub fn decide(&self, url: &Url) -> Decision {
@@ -79,7 +79,7 @@ impl NavPolicy {
                 if let Some(port) = o.port {
                     let path = url.path();
                     let panes = self.panes.lock().unwrap();
-                    if panes.iter().any(|(pp, t)| *pp == port && path.strip_prefix('/').and_then(|p| p.strip_prefix(t.as_str())).map_or(false, |r| r.starts_with('/'))) {
+                    if panes.iter().any(|(pp, t)| *pp == port && path.strip_prefix('/').and_then(|p| p.strip_prefix(t.as_str())).is_some_and(|r| r.starts_with('/'))) {
                         return Decision::Allow;
                     }
                     return Decision::Deny("loopback address that is not a live add-on pane");

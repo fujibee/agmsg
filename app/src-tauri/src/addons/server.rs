@@ -105,7 +105,7 @@ impl PaneServer {
                     _ => return Err(StartError::NoEntry(spec.entry.clone())),
                 }
                 let mut hashes = Vec::new();
-                collect_html_hashes(&canon, &canon, &mut hashes);
+                collect_html_hashes(&canon, &mut hashes);
                 (Some(canon), hashes)
             }
             Payload::Embedded(files) => {
@@ -209,14 +209,14 @@ fn new_token() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn collect_html_hashes(root: &Path, dir: &Path, out: &mut Vec<String>) {
+fn collect_html_hashes(dir: &Path, out: &mut Vec<String>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
         let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
         if m.is_dir() {
-            collect_html_hashes(root, &p, out);
-        } else if m.is_file() && p.extension().map_or(false, |x| x.eq_ignore_ascii_case("html") || x.eq_ignore_ascii_case("htm")) {
+            collect_html_hashes(&p, out);
+        } else if m.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("html") || x.eq_ignore_ascii_case("htm")) {
             if let Ok(text) = std::fs::read(&p) {
                 for h in csp::inline_script_hashes(&String::from_utf8_lossy(&text)) {
                     if !out.contains(&h) {

@@ -258,7 +258,8 @@ mod tests {
 
     #[test]
     fn windows_and_other_platforms_stay_off_until_verified() {
-        assert!(!WINDOWS_VERIFIED);
+        let verified = WINDOWS_VERIFIED;
+        assert!(!verified);
         let v = evaluate("n", &good("n"), &eng(), 0, Os::Windows);
         assert!(!v.enabled);
         assert!(v.reasons.iter().any(|r| r.contains("WebView2")));
