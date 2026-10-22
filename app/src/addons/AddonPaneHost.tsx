@@ -104,7 +104,7 @@ function LiveAddonPane(props: {
     if (r === null) return;
     if (r.kind !== "done") return; // another operation is running, or this attempt is gone
     if (typeof r.value === "string") setFolder(r.value);
-    else if (folder === null) props.onClose();
+    else props.onClose(); // cancelling the folder choice leaves nothing to show, so the pane closes (same as "Not now" on the team card)
   };
 
   // Show the card for the first step still open; with none left the frame runs.
