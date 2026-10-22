@@ -236,6 +236,10 @@ export function createClaudeCodeQueueChannel({
       saveSeat(db, { seat, state: "blocked", reason: "role_session_type_mismatch" }, now);
       return;
     }
+    if (record.messaging_blocked) {
+      saveSeat(db, { seat, state: "unaddressable", reason: record.messaging_blocked }, now);
+      return;
+    }
     if (!record.messaging_socket || !record.claude_config_dir || !record.session) {
       saveSeat(db, { seat, state: "unaddressable", reason: "messaging_destination_missing" }, now);
       return;

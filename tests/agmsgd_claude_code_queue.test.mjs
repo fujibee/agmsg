@@ -17,7 +17,7 @@ import {
   checkSocketOwnership,
 } from '../scripts/daemon/channels/claude-code-queue-io.mjs';
 import { createClaudeCodeQueueChannel } from '../scripts/daemon/channels/claude-code-queue.mjs';
-import { ensureClaudeCodeChannelSchema } from '../scripts/daemon/channels/claude-code-queue-store.mjs';
+import { ensureClaudeCodeChannelSchema, readClaudeRoleSession } from '../scripts/daemon/channels/claude-code-queue-store.mjs';
 import { openInstallDb } from '../scripts/daemon/db.mjs';
 
 function temporaryDirectory(t) {
@@ -428,4 +428,19 @@ test('Windows pipe: the preflight makes no connection, and an authenticated nudg
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(connections, 1);
   assert.deepEqual(JSON.parse(lines[0]), { type: 'auth', token: 'tok-w' });
+});
+
+test('a seat whose hook could not publish a destination is reported with that reason, and the record is read from disk', async (t) => {
+  const { root, db, state } = (() => { const f = channelFixture(t); return { root: f.state.options.installRoot, db: f.db, state: f.state }; })();
+  const record = (extra) => `team=test\nagent=alice\ntype=claude-code\nproject=${root}\nsession=sess-1\n${extra}`;
+  writeFileSync(path.join(root, 'run', 'role-session.test__alice'), record('messaging_blocked=seat_pid_unresolved\n'));
+  const read = readClaudeRoleSession(path.join(root, 'run'), 'test', 'alice');
+  assert.equal(read.record.messaging_blocked, 'seat_pid_unresolved');
+  const channel = createClaudeCodeQueueChannel({ ...state.options, readSession: () => read });
+  await channel.pollOnce();
+  assert.equal(db.prepare("SELECT state || '/' || reason AS r FROM beta_claude_seat").get().r, 'unaddressable/seat_pid_unresolved');
+  assert.equal(state.sent, 0);
+  // A value that is not a plain word is ignored, not shown.
+  writeFileSync(path.join(root, 'run', 'role-session.test__alice'), record('messaging_blocked=bad value;\n'));
+  assert.equal(readClaudeRoleSession(path.join(root, 'run'), 'test', 'alice').record.messaging_blocked, '');
 });

@@ -274,6 +274,29 @@ fake_session() {
   [[ "$output" == *"OK u=sid-9 p=/p/q r"* ]]
 }
 
+@test "role-session: mark_messaging_blocked rechecks the session under the lock and leaves a newer session's destination alone" {
+  agmsg_role_session_record T alice sid-old /p/q claude-code
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/old.sock /home/x/.claude sid-old tok-old
+  # The record is read as sid-old, then a newer session publishes before the mark lands.
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/new.sock /home/x/.claude sid-new tok-new
+  run agmsg_role_session_mark_messaging_blocked T alice seat_pid_unresolved sid-old
+  [ "$status" -eq 1 ]
+  [ "$(agmsg_role_session_get T alice messaging_socket)" = /tmp/cc-socks/new.sock ]
+  [ "$(agmsg_role_session_get T alice messaging_token)" = tok-new ]
+  [ -z "$(agmsg_role_session_get T alice messaging_blocked)" ]
+  # The session that owns the record gets the mark, and its destination goes.
+  run agmsg_role_session_mark_messaging_blocked T alice seat_pid_unresolved sid-new
+  [ "$status" -eq 0 ]
+  [ "$(agmsg_role_session_get T alice messaging_blocked)" = seat_pid_unresolved ]
+  [ -z "$(agmsg_role_session_get T alice messaging_socket)" ]
+  [ -z "$(agmsg_role_session_get T alice messaging_token)" ]
+  # No expected session, or a reason that is not a plain word: nothing is written.
+  run agmsg_role_session_mark_messaging_blocked T alice seat_pid_unresolved ""
+  [ "$status" -eq 1 ]
+  run agmsg_role_session_mark_messaging_blocked T alice "bad reason" sid-new
+  [ "$status" -eq 1 ]
+}
+
 # Claude Code native-channel delivery (2026-10-05, arch-8 §12.1): a --resume
 # starts a brand-new process bound to a brand-new CLAUDE_CODE_MESSAGING_SOCKET
 # (measured in memory/design/2026-10-05-cross-session-messaging-socket-

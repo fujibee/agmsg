@@ -75,7 +75,10 @@ agmsg_session_start() {
   bare_sid="$(agmsg_instance_bare_sid "${SESSION_ID:-}" 2>/dev/null || true)"
   my_instance="$(agmsg_normalize_instance_id "${SESSION_ID:-}" "${TYPE:-}" 2>/dev/null || true)"
   [ -n "$bare_sid" ] || return 0
-  agmsg_instance_is_composite "$my_instance" 2>/dev/null || return 0
+  # An instance id without a process id cannot claim the seat's lock; that is
+  # reported below, once the seat is known, rather than skipped silently.
+  local pid_unresolved=0
+  agmsg_instance_is_composite "$my_instance" 2>/dev/null || pid_unresolved=1
   local _tab _p_team _p_agent _rs _own _owner _n=0
   _tab="$(printf '\t')"
   while IFS="$_tab" read -r _p_team _p_agent; do
@@ -107,6 +110,20 @@ EOF
     fi
   elif [ "$_n" -gt 1 ]; then
     echo "AGMSG delivery: agmsgd is running, but this session is recorded under $_n registered seats, so the native channel is not used. Next: arm the Monitor below; the extra records stay until they are cleaned up."
+    return 0
+  fi
+
+  if [ "$pid_unresolved" = 1 ]; then
+    # The record still holds the destination of the process this session
+    # replaced, so say the seat cannot be reached rather than leave it looking
+    # addressable. Only a record that names this session is cleared (checked
+    # under the write lock): a seat held by another live session keeps its own
+    # destination.
+    if agmsg_role_session_mark_messaging_blocked "$pair_team" "$pair_agent" seat_pid_unresolved "$bare_sid"; then
+      echo "AGMSG delivery: agmsgd is running, but this session's own process could not be identified, so the native channel is not used and the old delivery record for $pair_agent@$pair_team was cleared (agmsg daemon status shows seat_pid_unresolved). Next: arm the Monitor below."
+    else
+      echo "AGMSG delivery: agmsgd is running, but this session's own process could not be identified, so the native channel is not used. Next: arm the Monitor below."
+    fi
     return 0
   fi
 

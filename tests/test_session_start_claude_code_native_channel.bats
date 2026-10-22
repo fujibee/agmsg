@@ -117,6 +117,39 @@ _mark_daemon_ready() {
   grep -qF "agmsgd is running and will deliver" <<<"$output"
 }
 
+@test "session-start: a resumed session whose own pid cannot be identified clears the stale destination and says why" {
+  _mark_daemon_ready
+  env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-nopid" >/dev/null
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/old.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-nopid"}'
+  grep -qF "agmsgd is running and will deliver" <<<"$output"
+  grep -qF "messaging_socket=/tmp/cc-socks/old.sock" "$RUN_DIR/role-session.team__alice"
+  # The resume: same session id, the pid cannot be told.
+  run env AGMSG_AGENT_PID= AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/new.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-nopid"}'
+  [ "$status" -eq 0 ]
+  grep -qF "seat_pid_unresolved" <<<"$output"
+  refute grep -qF "will deliver to this session directly" <<<"$output"
+  refute grep -q "^messaging_socket=" "$RUN_DIR/role-session.team__alice"
+  grep -qF "messaging_blocked=seat_pid_unresolved" "$RUN_DIR/role-session.team__alice"
+  # A later publish (the pid is known) takes the block away again.
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/new.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-nopid"}'
+  grep -qF "messaging_socket=/tmp/cc-socks/new.sock" "$RUN_DIR/role-session.team__alice"
+  refute grep -q "^messaging_blocked=" "$RUN_DIR/role-session.team__alice"
+}
+
+@test "session-start: an unidentified pid never clears a record that names another session" {
+  _mark_daemon_ready
+  env AGMSG_AGENT_PID=$$ bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-owner" >/dev/null
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/owner.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-owner"}'
+  run env AGMSG_AGENT_PID= AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/other.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-other"}'
+  grep -qF "messaging_socket=/tmp/cc-socks/owner.sock" "$RUN_DIR/role-session.team__alice"
+  refute grep -q "^messaging_blocked=" "$RUN_DIR/role-session.team__alice"
+}
+
 @test "session-start: agmsgd not running -> the usual Monitor directive still fires" {
   run _run_session_start "sid-no-daemon"
   [ "$status" -eq 0 ]
