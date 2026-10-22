@@ -30,7 +30,7 @@ Measured once (2026-09-21, via OpenRouter) — not a guaranteed number:
 **The real ceiling on a batch is total input tokens, not how many questions
 or lines you send** (measured 2026-09-24). Time is not a concern either
 way — even the slowest successful call measured was 2.42s, well under this
-member's 10s timeout. `state` plus every question's
+member's 30s timeout. `state` plus every question's
 own `criteria` descriptions all count toward the same per-call input total,
 and `criteria` is repeated in full for EVERY question that uses it — so how
 many questions fit in one call depends heavily on how many choices each one

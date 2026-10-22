@@ -480,6 +480,21 @@ agmsg_agent_pid() {
       *) printf '%s' "$AGMSG_AGENT_PID"; return 0 ;;
     esac
   fi
+  # Git Bash's ps lists MSYS pids only, so the walk below never sees the native
+  # claude.exe and every Claude Code seat would fall back to the bare session id
+  # (#1585). Claude Code exports its own pid as CLAUDE_PID; on Windows only, take
+  # it when it names a live process. Claude Code re-exports it at its own
+  # startup, so a value inherited from a spawner is replaced before any seat
+  # runs. Elsewhere the walk finds the agent, so behaviour there is unchanged.
+  if [ "$type" = "claude-code" ]; then
+    _agmsg_detect_platform
+    case "$_agmsg_platform:${CLAUDE_PID:-}" in
+      msys:''|msys:0*|msys:*[!0-9]*) ;;
+      msys:*) if _agmsg_pid_alive "${CLAUDE_PID:-}" 2>/dev/null; then
+                printf '%s' "${CLAUDE_PID:-}"; return 0
+              fi ;;
+    esac
+  fi
   local pid="$$" hops=0
   while [ "${pid:-0}" -gt 1 ] && [ "$hops" -lt 20 ]; do
     pid=$(compat_get_ppid "$pid" 2>/dev/null || true)

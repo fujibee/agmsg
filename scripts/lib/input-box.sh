@@ -211,10 +211,74 @@ _agmsg_input_box_raw_boxed() {
 #   › Ask Codex to do anything
 #
 #     gpt-5.6-sol low · ~/projects/esota/agmsg-dev · task
-# That triplet is required to confirm this is the LIVE box at all (located
-# on the STYLE-STRIPPED derived copy, same reason as the boxed check above);
-# without it, refuse. Echoes the marker line's own raw content (single
-# line), styling intact.
+#
+# That is Codex's IDLE footer only, though (#1394). Once real text is
+# actually sitting in the box, the footer's own shape changes -- measured
+# live, throwaway tmux session, real `codex` CLI (#1394's own repro): no
+# "·" appears anywhere in it.
+#   › a real draft
+#
+#     tab to queue message                            100% context left
+# Both forms are accepted as proof of the live widget -- the ORIGINAL
+# purpose (#1321: refuse a stale "›" with nothing live behind it) only
+# needs SOME specific, non-decorative footer text, not that specific text.
+#
+# Matching just the substrings "tab to queue" and "context left" anywhere
+# in the line was tried and rejected on review (#1394): a quoted transcript
+# line that merely MENTIONS both phrases in prose -- e.g. `A message quoted
+# "tab to queue" and "context left" as examples.` -- passed it too, which
+# is exactly the kind of decorative/quoted text this whole function exists
+# to refuse. Anchoring with a `case` glob (`[[:space:]]*'tab to queue
+# message'*...`) was tried next and was STILL wrong, for a sharper reason
+# than just being loose (review, round 2): `[[:space:]]` is a single
+# required whitespace CHARACTER, and the `*` right after it matches
+# anything at all -- so that pattern reads as "one leading space,
+# somewhere followed eventually by the phrase", never "the line STARTS
+# with the phrase". A line like `  A message quotes this footer: tab to
+# queue message and 100% context left` still has a leading space, so it
+# still matched. There is no "zero-or-more of a class" repetition
+# available in a plain glob at all, which is why this is done by
+# PARAMETER EXPANSION instead, never a `case` glob: strip the line's
+# leading whitespace run first (the standard `${v%%[![:space:]]*}` /
+# `${v#...}` ltrim pair), THEN require the result to literally START
+# with "tab to queue message" via a prefix `case`, THEN strip that prefix
+# and confirm what is left ends in the literal suffix "% context left",
+# THEN confirm everything between the two (after ALSO ltrimming it, for
+# the padding before the percentage) is digits and nothing else -- never a
+# single trailing `[0-9]`, which only ever checked the final digit and let
+# "100%" 's leading "10" through unexamined.
+#
+# Also rtrims trailing whitespace (spaces AND tabs, both inside
+# `[[:space:]]`) before any of that (review, round 3): a real footer with
+# trailing padding -- common from a tmux `capture-pane` read -- otherwise
+# fails the suffix check, which is anchored to the literal END of the
+# string and has no tolerance of its own for anything coming after
+# "context left". Same idiom as the leading strip, mirrored: the longest
+# PREFIX ending in a non-space character (`${v##*[![:space:]]}`'s complement,
+# via `%`) is everything except the trailing run, which is what is kept.
+# Located on the STYLE-STRIPPED derived copy, same reason as the boxed
+# check above; without either form, refuse. Echoes the marker line's own
+# raw content (single line), styling intact.
+_agmsg_input_box_flat_typing_footer() {   # <one plain, style-stripped line>
+  local line="$1" trimmed stripped rest digits
+  trimmed="${line%"${line##*[![:space:]]}"}"
+  stripped="${trimmed#"${trimmed%%[![:space:]]*}"}"
+  case "$stripped" in
+    'tab to queue message'*) ;;
+    *) return 1 ;;
+  esac
+  rest="${stripped#'tab to queue message'}"
+  case "$rest" in
+    *'% context left') ;;
+    *) return 1 ;;
+  esac
+  digits="${rest%'% context left'}"
+  digits="${digits#"${digits%%[![:space:]]*}"}"
+  case "$digits" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
 _agmsg_input_box_raw_flat() {
   local marker="$1" screen="$2"
   local -a lines=() plain=()
@@ -246,7 +310,10 @@ _agmsg_input_box_raw_flat() {
   case "$(_agmsg_strip_decorative_braille "${plain[$((marker_idx + 1))]}")" in
     *[![:space:]]*) return 1 ;;
   esac
-  case "${plain[$footer_idx]}" in *·*) ;; *) return 1 ;; esac
+  case "${plain[$footer_idx]}" in
+    *·*) ;;
+    *) _agmsg_input_box_flat_typing_footer "${plain[$footer_idx]}" || return 1 ;;
+  esac
 
   printf '%s\n' "${lines[$marker_idx]}"
   return 0

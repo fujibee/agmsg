@@ -206,8 +206,12 @@ agmsg_delivery_apply_default() {
   # startup/parse error, positive-control confirmed — the Hooks Review screen was
   # not directly reached (inferred harmless). So the gate is defense-in-depth on
   # top of that measurement, not the sole protection against an unknown.
+  # Only turn and both install the PostToolUse entry, so only they need the CLI's
+  # version. Asking for monitor/off ran `<cli> --version` for nothing, and for
+  # codex that call goes back through the PATH shim.
   local pt_output pt_min pt_cli pt_install=0
   pt_output=$(agmsg_type_get "$type" posttooluse_output 2>/dev/null || true)
+  case "$mode" in turn|both) ;; *) pt_output="" ;; esac
   if [ -n "$pt_output" ]; then
     pt_min=$(agmsg_type_get "$type" posttooluse_min_cli 2>/dev/null || true)
     pt_cli=$(agmsg_type_get "$type" cli 2>/dev/null || true)
@@ -216,6 +220,15 @@ agmsg_delivery_apply_default() {
     elif _agmsg_cli_version_ge "$pt_cli" "$pt_min"; then
       pt_install=1                              # CLI confirmed new enough
     fi
+  fi
+
+  # A hooks file whose event is not an array is left exactly as it is, and the
+  # error names that file rather than the temp copy below.
+  if [ -f "$hooks_file" ]; then
+    local chk_event
+    for chk_event in SessionStart SessionEnd Stop PostToolUse; do
+      _agmsg_hooks_event_is_array "$hooks_file" "$chk_event" || return 1
+    done
   fi
 
   # Work on a temp copy so a partially-modified file never replaces the

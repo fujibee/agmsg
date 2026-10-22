@@ -40,8 +40,10 @@ case "${1:-}" in
     fi
     # Run the listener as a CHILD (no exec) so this script stays the recorded pid;
     # its argv ("...real-codex app-server --listen") is what codex-monitor's
-    # cmdline check matches. The child exits when this parent is killed.
-    python3 - <<'PY'
+    # cmdline check matches. The child is backgrounded and teardown's kill is
+    # forwarded to it: native Python on Windows never sees its parent change
+    # (os.getppid() stays put), so the loop below cannot be what ends it (#1612).
+    python3 - <<'PY' &
 import socket, sys, os
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -57,6 +59,9 @@ while True:
     except Exception:
         pass
 PY
+    child=$!
+    trap 'kill "$child" 2>/dev/null' TERM INT
+    wait "$child" 2>/dev/null || wait "$child" 2>/dev/null
     ;;
   *)
     printf 'plain-codex' >> "$CALL_LOG"
@@ -125,6 +130,47 @@ teardown() {
 }
 
 # --- #1537: the seat key must reach tool commands under any shell_environment_policy ---
+
+# A monitor launch through the shim used to run `delivery status` twice (the shim's own
+# check, then again when `set monitor` asked the PATH shim for `codex --version`) and
+# rewrite hooks that were already in place. Each is dozens of processes, which is
+# the bulk of a Windows launch (#1613). Counted, not timed. `set` may be skipped only
+# when hooks.json is exactly what the last `set monitor` left, so a file that differs
+# in ONE entry (here SessionEnd's project) must run it again.
+@test "codex-monitor: a shim launch runs delivery status once, and set only when hooks.json is not exactly what set last left (#1613)" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  export DELIVERY_LOG="$TEST_PROJECT/delivery.log"
+  mv "$SCRIPTS/delivery.sh" "$SCRIPTS/delivery.real.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >> "$DELIVERY_LOG"' \
+    'exec bash "$(dirname "$0")/delivery.real.sh" "$@"' > "$SCRIPTS/delivery.sh"
+  chmod +x "$SCRIPTS/delivery.sh"
+  # codex on PATH is the shim itself, as in a real install, so any nested
+  # `codex --version` re-enters it.
+  mkdir -p "$TEST_PROJECT/shimbin"
+  ln -s "$TYPES/codex/codex-shim.sh" "$TEST_PROJECT/shimbin/codex"
+  _launch() {
+    : > "$DELIVERY_LOG"
+    run bash -c 'cd "$TEST_PROJECT" && PATH="$TEST_PROJECT/shimbin:$PATH" AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true codex'
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^status ' "$DELIVERY_LOG")" -eq 1 ]
+  }
+
+  # No marker yet: the one full set runs and leaves its marker.
+  _launch
+  [ "$(grep -c '^set ' "$DELIVERY_LOG")" -eq 1 ]
+  # Same file, same install: skipped.
+  _launch
+  [ "$(grep -c '^set ' "$DELIVERY_LOG" || true)" -eq 0 ]
+  grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
+  # Only SessionEnd's project differs: not what set left, so it runs again and repairs it.
+  sed 's#session-end.sh\(.\{1,3\}\)[^ ]* \{0,1\}[^"]*"#session-end.sh\1 codex /tmp/wrong-project"#' "$TEST_PROJECT/.codex/hooks.json" > "$TEST_PROJECT/hooks.edited"
+  refute cmp -s "$TEST_PROJECT/hooks.edited" "$TEST_PROJECT/.codex/hooks.json"
+  cp "$TEST_PROJECT/hooks.edited" "$TEST_PROJECT/.codex/hooks.json"
+  _launch
+  [ "$(grep -c '^set ' "$DELIVERY_LOG")" -eq 1 ]
+  refute grep -q '/tmp/wrong-project' "$TEST_PROJECT/.codex/hooks.json"
+}
 
 @test "codex-monitor: the app-server is launched with the seat key as a shell_environment_policy.set override (#1537)" {
   skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
@@ -520,6 +566,14 @@ EOF
   local unwritable_dir="$TEST_PROJECT/unwritable-run"
   mkdir -p "$unwritable_dir"
   chmod 555 "$unwritable_dir"
+  # chmod 555 does not make the directory unwritable everywhere (Windows/NTFS,
+  # or a process holding CAP_DAC_OVERRIDE such as root). The write cannot be
+  # made to fail there, so skip rather than assert a failure that never occurs.
+  if touch "$unwritable_dir/.probe" 2>/dev/null; then
+    rm -f "$unwritable_dir/.probe"
+    chmod 755 "$unwritable_dir"
+    skip "chmod 555 does not make the directory unwritable here (Windows/NTFS or CAP_DAC_OVERRIDE such as root)"
+  fi
   run env AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
     AGMSG_CODEX_TEST_RESUME_REQUEST_DIR="$unwritable_dir" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume -- thread-B

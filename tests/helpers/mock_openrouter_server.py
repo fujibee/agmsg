@@ -60,6 +60,10 @@ MOCK_OPENROUTER_BAD_ROW = os.environ.get("MOCK_OPENROUTER_BAD_ROW", "")
 # a stricter malformation than a missing field: every field access on it
 # (not just .choice) is a jq type error, not a missing-value one.
 MOCK_OPENROUTER_BAD_ROW_STRING = os.environ.get("MOCK_OPENROUTER_BAD_ROW_STRING", "")
+# A confidence that is a STRING carrying the control characters handle uses to
+# frame its own rendering (U+001F/U+001E): it must neither forge a further answer
+# nor be read as one.
+MOCK_OPENROUTER_FRAMING_BYTES = os.environ.get("MOCK_OPENROUTER_FRAMING_BYTES", "")
 # When set, "effort" is dropped entirely, leaving exactly one answer --
 # the mock's fixed answer set is otherwise always two, so this is the only
 # way a test reaches handle's "exactly one question" reply path.
@@ -155,6 +159,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Not just missing a field -- the whole answer VALUE is not
                 # an object at all, so nothing inside it can be indexed.
                 payload["answers"]["effort"] = "oops"
+            if MOCK_OPENROUTER_FRAMING_BYTES:
+                payload["answers"]["effort"]["confidence"] = "\u001f\u001ephantom\u001ffalse\u001f\u001f\u001f"
             if MOCK_OPENROUTER_SINGLE_ANSWER:
                 del payload["answers"]["effort"]
         body = json.dumps(payload).encode("utf-8")

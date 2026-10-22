@@ -54,6 +54,11 @@ teardown() {
     {
       printf '#!/usr/bin/env bash\n'
       printf "printf '%%s\\\\n' '%s' >> '%s'\n" "$cmd" "$countlog"
+      if [ "$cmd" = mktemp ]; then
+        # The real consume path creates this SQL input before its write
+        # transaction. Count it without replacing any storage behavior.
+        printf 'case "$*" in *agmsg-cursor-consume.*) printf "cursor-consume\\n" >> %q ;; esac\n' "$countlog"
+      fi
       printf "exec '%s' \"\$@\"\n" "$real"
     } > "$shimbin/$cmd"
     chmod +x "$shimbin/$cmd"
@@ -71,10 +76,25 @@ teardown() {
   # division: `sleep` is itself shimmed above, so this is the same cycle a
   # completed "sleep $INTERVAL" at the bottom of the poll loop actually saw,
   # immune to how many cycles a loaded machine fit into the fixed window.
-  local total cycles; total=$(wc -l < "$countlog" | tr -d ' ')
+  local total cycles; total=$(grep -cv '^cursor-consume$' "$countlog")
   cycles=$(grep -c '^sleep$' "$countlog")
   echo "forked sqlite3/tr/awk/sed/dirname/head/mktemp/paste: $total over $cycles idle cycles" >&3
   sort "$countlog" | uniq -c | sort -rn >&3
+  # Ignore startup/the first catch-up cycle and any incomplete final cycle.
+  # Each sleep closes one real poll; the store remains quiet throughout.
+  local measured_cycles forks sqlite_calls consumes
+  read -r measured_cycles forks sqlite_calls consumes < <(awk '
+    $0 == "sleep" {
+      if (started) { cycles++; forks += f; sqlite += s; consumes += c }
+      started=1; f=0; s=0; c=0; next
+    }
+    $0 == "cursor-consume" { c++; next }
+    { f++; if ($0 == "sqlite3") s++ }
+    END { print cycles+0, forks+0, sqlite+0, consumes+0 }
+  ' "$countlog")
+  echo "completed warm idle cycles: $measured_cycles; external commands: $forks; sqlite3 calls: $sqlite_calls; cursor consumes: $consumes" >&3
+  [ "$measured_cycles" -ge 2 ]
+  [ "$consumes" -eq 0 ]
   [ "$cycles" -ge 2 ]
   local per_cycle=$((total / cycles))
   echo "per cycle: $per_cycle" >&3
