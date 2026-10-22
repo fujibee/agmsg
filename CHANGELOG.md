@@ -4,14 +4,40 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-22
+
+### Added
+- Agmsgd beta, opt-in notice delivery for Claude Code and Codex (#1529)
+
+### Fixed
+- Refresh vulnerable dependencies, keeping @types/node on Node 22 (#1673)
+- Avoid renaming the caller during proxy registration (#1672)
+- Keep JSON arrays as arrays when a subquery result is written with json_set (#1661)
+- SQLite 3.53.4/3.54.0 CLI compatibility for init rollback and busy diagnostics (#1654)
+- Accept Codex's typing-state footer as a live widget (#1629)
+- Raise the ext-tool timeout to 30s (#1628)
+- Carry a member's placement record to the new name (#1625)
+- Preserve the caller's Codex profile (#1624)
+- Use CLAUDE_PID as the Claude Code agent pid (#1622)
+- Read the owner start time with LC_ALL=C so non-English locales can spawn (#1593)
+
+### Performance
+- Skip unchanged idle cursor consumption (#1652)
+- Start a handful of processes per call instead of about 40 (#1630)
+- Skip needless delivery status and set monitor at launch (#1627)
+
+### Documentation
+- Add recovery steps to 1.5.3 for machines already affected by the temp-file leak (#1581)
+
 ## [1.5.3] - 2026-10-05
 
 ### Added
-- Sessions in the Claude desktop app (Code tab) and the Codex desktop app are recognized as desktop seats: team status shows them as such, and they are never recorded against a terminal pane. Message delivery is unchanged. (#1563, #1565)
+- Add a codex-app driver for the Codex desktop app (#1565)
+- Add a claude-desktop driver for the Claude desktop app (#1563)
 
 ### Fixed
-- Remote sync no longer leaves a small temp file behind for every message it applies; on a long-running synced team these filled the temp directory (on Linux tmpfs, until it ran out of inodes) (#1572)
-- `install --update` removes the temp files leaked before this fix, and `doctor` reports them (`doctor --fix` removes them) (#1575)
+- Clean up outcome files leaked before #1572 on update and in doctor (#1575)
+- Remove the storage driver's outcome file on every exit (#1572)
 - Stop treating a missing TaskList entry as a failed watch (#1571)
 - Drop the previous name's placement record for this pane on a switch (#1568)
 - End the Claude Code watch at 1750 seconds, not 1790 (#1561)
@@ -20,27 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 - Ask before creating a team when remote is in use; point at delete and update (#1574)
 
-### If you use remote sync and are already affected
-Check whether you use remote sync: `~/.agents/skills/agmsg/scripts/remote.sh status` lists each team, and only teams shown as `connected` are affected.
-
-If your temp directory is already full (on Linux, commands fail with "No space left on device" even though the disk has room), free it before updating. This removes only files that match the leaked files exactly: directly in the temp directory, named `tmp.` plus 10 characters, exactly 3 bytes containing the line `ok`, and older than 10 minutes:
-
-```sh
-find "${TMPDIR:-/tmp}" -maxdepth 1 -type f -name 'tmp.??????????' -size 3c -mmin +10 -print0 | xargs -0 grep -lx --null ok | xargs -0 rm -f
-```
-
-Then update with `npx agmsg@latest install --update`, which removes the rest. Afterwards, `doctor` reports any that remain and `doctor --fix` removes them.
-
-[1.5.3]: https://github.com/fujibee/agmsg/compare/v1.5.2...v1.5.3
-
 ## [1.5.2] - 2026-10-02
 
 ### Added
 - Report run/ records of a team that no longer exists; remove them with --fix (#1532)
 
 ### Fixed
-- The Claude Code watcher renews or stops by itself shortly before the Monitor 30-minute cap (#1553)
-- Record the Codex profile (CODEX_HOME) of a seat as optional metadata without changing delivery (#1549)
+- Renew or stop by itself shortly before the Monitor 30-minute cap (#1553)
+- Record optional Codex profile metadata without changing delivery (#1549)
 - Pass the launcher flag to the app-server so SessionStart sees it (#1524)
 - Pass the seat key to app-server tool commands under a restricted shell environment policy (#1541)
 - Reclaim a role held by the same live process after /clear (#1540)
@@ -50,25 +63,21 @@ Then update with `npx agmsg@latest install --update`, which removes the rest. Af
 - Ship a rendered repo-root SKILL.md with a first-run bootstrap (#1286) (#1516)
 
 ### Documentation
-- State the privacy policy as principles that match current behavior (#1546)
-
-[1.5.2]: https://github.com/fujibee/agmsg/compare/v1.5.1...v1.5.2
+- State the policy as principles that match current behavior (#1546)
 
 ## [1.5.1] - 2026-09-28
 
 ### Added
-- Add --delete and --purge-messages to team.sh (#1475) (#1482)
 - Add --force to team.sh --delete for teams with members (#1493) (#1494)
-- Report when a Codex config is missing this install's writable_roots, with the command that fixes it (#1477) (#1483)
+- Report when a Codex config is missing this install's writable_roots (#1477) (#1483)
+- Add --delete and --purge-messages to team.sh (#1475) (#1482)
 
 ### Fixed
-- Let a live seat take a pane a dead session's record still claims (#1485) (#1486)
 - Name a missing age binary, and surface the last fatal on status (#1487) (#1488)
+- Let a live seat take a pane a dead session's record still claims (#1485) (#1486)
 
 ### Documentation
 - Update the RFC to the approved design and add the architecture design (#1492)
-
-[1.5.1]: https://github.com/fujibee/agmsg/compare/v1.5.0...v1.5.1
 
 ## [1.5.0] - 2026-09-25
 
@@ -80,8 +89,6 @@ Then update with `npx agmsg@latest install --update`, which removes the rest. Af
 - Clean the CODEX_HOME Codex config and the OpenCode/Hermes/Grok files (#1471)
 - Don't retype the shared SKILL.md for a type with its own file (#1464)
 - Find a seat's actas lock from its registration, and name a sandbox refusal (#1461)
-
-[1.5.0]: https://github.com/fujibee/agmsg/compare/v1.4.2...v1.5.0
 
 ## [1.4.2] - 2026-09-24
 
@@ -97,17 +104,12 @@ Then update with `npx agmsg@latest install --update`, which removes the rest. Af
 - Restore <team> <name> in the actas record step, and say so when they are missing (#1398)
 - Detect a type's agent process from its manifest, not a fixed list (#631)
 
-[1.4.2]: https://github.com/fujibee/agmsg/compare/v1.4.1...v1.4.2
-
 ## [1.4.1] - 2026-09-23
 
 ### Added
 - Add terminal_peek_styled so poke's real-draft check covers tmux (#1393)
-- poke on herdr: use pane focus to deliver past an abandoned draft, not just refuse (#1384) (#1395)
-- Add SECURITY.md and Dependabot configuration (#1404)
 
 ### Fixed
-- install: add ext-tools/ to Codex sandbox writable_roots (#1380)
 - Arm the bridge request on resume when the thread has an exact role match (#1401) (#1405)
 - Stop guessing a seat's type into its placement record (#1402)
 - Distinguish a failed ps observation from proof of death (#970)
@@ -119,13 +121,8 @@ Then update with `npx agmsg@latest install --update`, which removes the rest. Af
 - Let an e2ee team use an address the plaintext check refuses (#1019)
 - Bound the sync readiness wait by wall clock, not attempts alone (#839)
 
-### Changed
-- install: prune scripts/ files a prior release no longer ships (#1375)
-
 ### Documentation
 - The JA preview page said the send waits for the adapter; it does not (#1377)
-
-[1.4.1]: https://github.com/fujibee/agmsg/compare/v1.4.0...v1.4.1
 
 ## [1.4.0] - 2026-09-21
 
@@ -166,70 +163,52 @@ Then update with `npx agmsg@latest install --update`, which removes the rest. Af
 - Point the three stale source comments at #983 (#989)
 - Document the terminal axis and the terminal driver interface (#1357)
 
-[1.4.0]: https://github.com/fujibee/agmsg/compare/v1.3.1...v1.4.0
-
-## [1.3.1] - 2026-09-17
-
-Teams that use remote sync should update every machine to 1.3.1 or later. From this release the client reports its version to the server, so older clients can be told apart.
-
-The Antigravity monitor remains experimental: it is usable only on a dedicated seat that no person types into, started with `agy-tui ... -- --dangerously-skip-permissions`. For interactive Antigravity use, keep the default turn delivery. It runs on macOS and Linux only; on other systems the monitor refuses to start. This release's live check covered macOS only.
+## [1.3.1] - 2026-09-18
 
 ### Added
-- The client sends its version to the server in an `Agmsg-Client-Version` header on every request; a request without it comes from a client older than 1.3.1 (#1290)
-- `peek` and `poke` have an agent-native substitute on terminals with no addressable pane (#1256)
-- `agy-tui` passes everything after `--` to `agy`, and rejects any other unknown option (#1291)
-- Devin is supported as an agent type (#898)
+- Opt-in monitor keep-alive and a team-wide re-arm (#1315)
+- Add the devin agent type (#898)
+- Announce the client's version to the server with Agmsg-Client-Version (#1290)
+- Plain driver: an agent-native substitute for peek/poke with no pane (#1256)
 
 ### Fixed
-- Codex: each seat runs its own app-server, and its bridge dispatcher starts only the role recorded for that seat instead of every role in the project (#1273, #1285)
-- Codex: a stale app-server URL left in a request file no longer overrides the live endpoint (#1293, #1305)
-- `install --update` restarts a sync engine that was running, on the new code, instead of leaving it stale (#1288)
-- Receiving tolerates unknown fields in a message, so a newer sender does not get its messages rejected (#1282)
-- Claude Code Monitor directives set a 30-minute timeout (#1287). The instruction to re-arm silently on expiry is now opt-in, behind `AGMSG_CC_MONITOR_KEEP_ALIVE` (unset by default) — most seats do not need a watch kept alive across its own natural expiry, and `rearm.sh` covers the ones that do by poking every claude-code seat in a team whose delivery mode is monitor or both (#1315)
-- Antigravity monitor delivery, which is experimental, now also runs on macOS (#1253); switching an existing 1.3.0 project to monitor delivery is accepted (#1289, #1303); user-facing messages are in English (#1281); a refused claim names the process that holds the role and how to release it (#1301); the driver's messages and comments are all in English (#1313). See docs/antigravity-monitor-beta.md for its limitations before enabling it.
-- Sync engines supervised by systemd are detected (#1006)
-- Windows: every jq call in the sqlite driver forces binary output, so values read back from the server no longer carry a stray carriage return and fail the sequence check (#1277, #1278)
-- A backtick in a SQL comment no longer runs as a command substitution (#1276)
-- herdr instance names containing a backslash survive percent-decoding (#1275)
+- Route every jq call through a wrapper that forces -b (#1278)
+- Say what holds the role and how to release it (#1301)
+- Ignore a stale app-server URL in the request file (#1293)
+- Stop percent-decode from mangling backslash-bearing herdr instances (#1275)
+- Stop a backtick in a SQL comment from running as command substitution (#1276)
+- Ignore a stale request app-server URL (#1305)
+- Agy-tui passes args after -- to agy, and says how to resume when paused (#1291)
+- Give every Monitor directive a timeout and a silent re-arm instruction (#1287)
+- Refuse the legacy rule-file check when its notes path is unset (#1303)
+- Accept the 1.3.0 rule file when switching to monitor, and document narrow agy permissions (#1289)
+- Dispatch only the role recorded for this seat (#1285)
+- Translate user-facing messages to English (#1281)
+- Restart a running sync engine on the new code during --update (#1288)
+- Tolerate unknown message fields on receive (#1282)
+- One app-server per seat, never shared (#1254) (#1273)
+- Detect systemd-supervised sync engines (#1006)
+- Support Antigravity monitors on macOS (#1253)
 
 ### Changed
-- Antigravity's read-reservation guard lives in the Antigravity driver (#1271)
+- Put the driver's user-facing messages and comments in English (#1313)
+- Isolate Antigravity read reservation guard (#1271)
 
 ### Documentation
-- `mode: monitor` means the mode is configured, and the docs say how to confirm the watcher is actually running (#270)
-- Antigravity permission guidance covers the exact invocation shapes `agy` prompts for, including `bash -lc` (#1289)
-- The design RFC describes tag subscriptions, session-start identity, and delivery through the driver (#1251, #1267)
+- Say that mode: monitor means configured, and how to confirm the Monitor is running (#270)
+- Mark the monitor experimental and document its observed limitations (#1311)
+- Describe server-side work in neutral terms
+- The daemon delivers through the driver, and poke is not how it does it (#1267)
+- Subscribe to tags, and resolve the identity at session start (#1251)
 
 ## [1.3.0] - 2026-09-14
 
 ### Added
-- Terminal drivers for tmux, herdr, and plain OS terminal windows: `peek`, `poke`, and `arrange` work through whichever terminal a member runs in (#1014, #1060, #1078, #1163, #1207)
-- `peek` with no member name summarizes the screens of the whole local team (#1194)
-- `where` reports this session's terminal, its pane, and the operations that terminal supports; Claude Code sessions are told their terminal at start (#1082, #1173, #1224)
-- `team` shows, for each teammate, whether `peek`, `poke`, and `arrange` can reach it, and why not when they cannot (#1232)
-- `fix`: a session proves which pane it is running in and repairs only its own name and placement records (#1152, #1157, #1188, #1191, #1227)
-- A session names its own pane when it acts, and `spawn` names the pane it created and sets its agent key (#1065, #1080, #1099)
-- `send` accepts `--body-file <path>` and `--body -` (stdin) like `poke`, and refuses a body that looks like a flag (#1101)
-- Antigravity (`agy`): the skill is installed where `agy` discovers skills, and monitor delivery with safe automatic resume is available on Linux (#1090, #1223)
+- Terminal driver v1 (integration/terminal-driver-v1 into main) (#1240)
 - Report a mark-read that lost to a concurrent writer (#1011) (#1013)
 - Deliver the inbox mid-turn via a PostToolUse hook, not only at Stop (#1003) (#1004)
 
-### Changed
-- `team` is read-only: the leader-side repair options `--fix`, `--fix-pane-names`, and `--rename-sessions` are removed; each session repairs itself with `fix` (#1152, #1211, #1213)
-- actas lock, readiness, and spawn records are keyed by team and member id, so team or member names containing `__` no longer collide (#1023)
-- Agent type detection follows an explicit priority, and `GEMINI_API_KEY` on its own is only a last resort (#1247)
-- Per-driver notes live at `scripts/drivers/terminals/<driver>/README.md`; `install --update` removes the old `SKILL.md` copies (#1248)
-
 ### Fixed
-- Codex seats that hold an actas lock no longer drop out of their own bridge's delivery, and spawned seats do not inherit it (#1239, #1245)
-- Claude Code's `actas` and `drop` instructions again start the watcher through the Monitor tool and confirm it attached (#1237)
-- `spawn` skips the readiness wait only when delivery is explicitly off or turn (#647)
-- A graceful `despawn` waits for the pane to close, not only for the lock (#1097)
-- herdr socket paths containing `:` round-trip through placement records (#1166)
-- `watch` and `inbox` deliver a backlog past the argument-length limit instead of failing silently (#777, #1045)
-- `check-inbox` consumes rows only after the payload is written (#1026)
-- The Windows hook payload stays off the login shell's stdout (#1015)
-- Antigravity's delivery plug parses under bash 3.2 (#1244)
 - Pass non-remote subcommands through (#590)
 - The remaining argv-to-stdin sites, plus a Windows CRLF row-separator bug (#991)
 - Give the identity lease a start token on Windows (#978)
@@ -389,6 +368,7 @@ The Antigravity monitor remains experimental: it is usable only on a dedicated s
 - Narrow a claim I disproved myself two commits later
 - Delete a comment describing the control this one replaced
 - Point key.sh at the current design, and stop asserting the move has happened
+- Move the connect onboarding design to agmsg-cloud, and drop labels that point at nothing
 - Make the promise about this document weak enough to be true
 - Label what stands behind each claim, instead of asserting they all cite
 - Add a Japanese translation, and consolidate the derivation it mirrors
@@ -700,7 +680,7 @@ The Antigravity monitor remains experimental: it is usable only on a dedicated s
 - Support spawning into herdr panes (#495)
 - Drag files onto a pane to insert their path (#481)
 - Adaptive catch-up so a backlog doesn't crawl at 100/5s
-- Add team-list.sh (agmsg team list --json)
+- Add team-list.sh (agmsg team list --json, koit-approved)
 - Add status --json and pending list/abort (ADR 0007 addendum)
 - Consume connected team credentials
 - Add scripts/remote.sh (connect/status/disconnect/doctor) per ADR 0007
@@ -735,10 +715,10 @@ The Antigravity monitor remains experimental: it is usable only on a dedicated s
 - Resolve symlinks before trampoline compare; doctor checks node
 - Detect the macOS CLT python3 trampoline, not just PATH presence
 - Close the python3 dependency-tiering gap on the remote path
-- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation
-- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer
-- Fail closed on incompleteness; shrink v1 schema
-- Wire 'agmsg team list' into actual dispatch entry points
+- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation (co1 delta review round 2)
+- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer (co1 delta review)
+- Fail closed on incompleteness; shrink v1 schema (co1 P2, mentor-cc ruling)
+- Wire 'agmsg team list' into actual dispatch entry points (co1 P1)
 - Stop binding config JSON via .param set (#87-class tokenizer bug)
 - Hide imported identity at TTY
 - Separate token input from E2EE prompts
@@ -773,15 +753,15 @@ The Antigravity monitor remains experimental: it is usable only on a dedicated s
 - Read messages from the event log too, not just the legacy table
 - Assert against the event log, not the legacy messages table
 - Escape interpolated names in rename/rename-team SQL (#223, #87)
-- Jsonl compact keys reads by tuple, not a space-join (#221)
+- Jsonl compact keys reads by tuple, not a space-join (co1 #221)
 - Make the jsonl driver parse under macOS bash 3.2 (#207, #221 CI)
-- Jsonl mark aborts on a failed existing-reads scan (#207)
-- Jsonl driver must not swallow failures as ok (#207)
+- Jsonl mark aborts on a failed existing-reads scan (co1 #207 residual)
+- Jsonl driver must not swallow failures as ok (co1 #207 review)
 - Watch-once stale-wake token = unread-set digest, not a max id (#207)
-- Document --limit semantics + make storage_history agent truly optional (#206)
-- Export skips unknown event types; pin high-water with a tail-duplicate test (#205)
-- Describe is a metadata op; surface backend errors; chronological reads (#204)
-- Legacy read, pipefail framing, §1.4 control ops (#204)
+- Document --limit semantics + make storage_history agent truly optional (co1 #206 review)
+- Export skips unknown event types; pin high-water with a tail-duplicate test (co1 #205 review)
+- Describe is a metadata op; surface backend errors; chronological reads (co1 re-review, #204)
+- Legacy read, pipefail framing, §1.4 control ops (co1 review, #204)
 
 ### Performance
 - Seal a bulk push page in parallel (#502)
@@ -809,8 +789,8 @@ The Antigravity monitor remains experimental: it is usable only on a dedicated s
 - Close Stage 2 frontier edge cases
 - Define Stage 2 read-state synchronization
 - Note rename.sh/rename-team.sh/api.sh as sqlite-coupled known gaps
-- Correct the ctrl:despawn cursor-advance comment
-- Clarify stdout framing, cursor token, watch tip (#203)
+- Correct the ctrl:despawn cursor-advance comment (co1 step-3 review)
+- Clarify stdout framing, cursor token, watch tip (co1 review, #203)
 - Storage contract §2 — messages-only, opaque cursor, recipient-scoped read (#203)
 - Draft ADR 0003 — storage axis driver ABI, contract, scope (proposed)
 
@@ -1038,7 +1018,7 @@ The Antigravity monitor remains experimental: it is usable only on a dedicated s
 
 ### Documentation
 - Add supported-agents logo strip
-- List hermes in the --agent-type help
+- List hermes in the --agent-type help (co1 nit)
 - Add docs/plugins.md + README section + plugins/ drop-in dir
 - Refresh manifest table + paths for the 1.1.0 layout
 - Lead Quick Start with npx, the zero-clone install path
@@ -1121,6 +1101,15 @@ The Antigravity monitor remains experimental: it is usable only on a dedicated s
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.6.0]: https://github.com/fujibee/agmsg/compare/v1.5.3...v1.6.0
+[1.5.3]: https://github.com/fujibee/agmsg/compare/v1.5.2...v1.5.3
+[1.5.2]: https://github.com/fujibee/agmsg/compare/app-v0.5.0...v1.5.2
+[1.5.1]: https://github.com/fujibee/agmsg/compare/v1.5.0...v1.5.1
+[1.5.0]: https://github.com/fujibee/agmsg/compare/v1.4.2...v1.5.0
+[1.4.2]: https://github.com/fujibee/agmsg/compare/v1.4.1...v1.4.2
+[1.4.1]: https://github.com/fujibee/agmsg/compare/v1.4.0...v1.4.1
+[1.4.0]: https://github.com/fujibee/agmsg/compare/v1.3.1...v1.4.0
+[1.3.1]: https://github.com/fujibee/agmsg/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/fujibee/agmsg/compare/v1.2.3...v1.3.0
 [1.2.3]: https://github.com/fujibee/agmsg/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/fujibee/agmsg/compare/v1.2.1...v1.2.2
