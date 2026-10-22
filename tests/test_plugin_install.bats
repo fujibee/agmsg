@@ -378,6 +378,8 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
 @test "a symlink inside a driver directory is refused" {
   w="$(mk_repo acme pack)"
   ln -s /etc/hosts "$w/types/fx/link"
+  # Some Git Bash setups make ln -s copy the file; there is nothing to refuse then.
+  [ -L "$w/types/fx/link" ] || skip "ln -s does not create a real symlink here"
   git -C "$w" add -A; git -C "$w" commit -qm link
   git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
   run PLUGIN install acme/pack --yes
@@ -416,6 +418,9 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
     PLUGIN install "o$i/p$i" --yes >/dev/null
   done
   [ "$(wc -l < "$TEST_SKILL_DIR/db/plugin-sources" | tr -d ' ')" -eq 6 ]
+  # Budget: slow hosts (Windows Git Bash) queue six commands for ~15s; the lock
+  # wait must outlast that, and every command must succeed, not just most.
+  export AGMSG_LOCK_SECONDS=120
   pids=""
   for i in 1 2 3 4 5 6; do
     PLUGIN remove "o$i/p$i" >/dev/null 2>&1 &
@@ -434,6 +439,7 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
     git -C "$w" commit -qam "rename $i"
     git -C "$w" push -q "$GIT_BASE/o$i/p$i.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/o$i/p$i.git" HEAD
   done
+  export AGMSG_LOCK_SECONDS=120
   pids=""
   for i in 1 2 3 4 5 6; do
     PLUGIN install "o$i/p$i" --yes >/dev/null 2>&1 &
@@ -442,6 +448,37 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   for p in $pids; do wait "$p"; done
   [ "$(wc -l < "$TEST_SKILL_DIR/db/plugin-sources" | tr -d ' ')" -eq 6 ]
   [ "$(wc -l < "$TEST_SKILL_DIR/db/trusted-plugins" | tr -d ' ')" -eq 12 ]
+}
+
+@test "an explicit AGMSG_LOCK_SECONDS is honored by the plugin lock" {
+  mk_repo acme pack >/dev/null
+  PLUGIN install acme/pack --yes >/dev/null
+  bash -c ". '$SCRIPTS/lib/registry-lock.sh'; agmsg_lock_acquire '$TEST_SKILL_DIR/db' && sleep 6" &
+  holder=$!
+  sleep 1
+  AGMSG_LOCK_SECONDS=1 run PLUGIN remove acme/pack
+  [ "$status" -eq 1 ]
+  grep -q "timed out acquiring registry lock" <<<"$output"
+  grep -q "could not lock the plugin records" <<<"$output"
+  wait "$holder" || true
+  # nothing was removed while it could not lock
+  [ -s "$TEST_SKILL_DIR/db/plugin-sources" ]
+}
+
+@test "update and remove leave no trash behind and still delete the old commit" {
+  mk_repo acme pack >/dev/null
+  PLUGIN install acme/pack@main --yes >/dev/null
+  old="$(cut -f4 "$TEST_SKILL_DIR/db/plugin-sources")"
+  w="$BATS_TEST_TMPDIR/work-acme-pack"
+  echo more > "$w/types/fx/extra.txt"
+  git -C "$w" add -A; git -C "$w" commit -qm more
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  PLUGIN update acme/pack --yes >/dev/null
+  [ ! -e "$old" ]
+  [ -z "$(ls -A "$TEST_SKILL_DIR/plugins/sources/.staging" 2>/dev/null)" ]
+  PLUGIN remove acme/pack >/dev/null
+  [ -z "$(ls -A "$TEST_SKILL_DIR/plugins/sources/.staging" 2>/dev/null)" ]
+  [ ! -d "$TEST_SKILL_DIR/plugins/sources/github/acme" ]
 }
 
 @test "the printed proceed command carries --track for a branch and --track-default for none" {

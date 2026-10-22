@@ -297,16 +297,26 @@ _plugin_untrust_path() {
     "$( { grep -vxF "$(printf '%s/%s\t%s' "$axis" "$name" "$path")" "$tf" || true; } )"
 }
 
-# Delete one commit directory of a source, only if it is where we put it.
-_plugin_rm_commit_dir() {  # owner repo path
-  local base="$PLUGIN_SOURCES_DIR/github/$1/$2" path="$3"
+# Move a commit directory (or the whole source dir) of <owner>/<repo> out of the
+# way and print where it went; the caller deletes it with _plugin_trash_rm after
+# releasing the lock. A rename is cheap; walking and deleting a tree is not,
+# especially on Windows. Only paths inside this source's own directory qualify.
+_plugin_trash() {  # owner repo path
+  local base="$PLUGIN_SOURCES_DIR/github/$1/$2" path="$3" trash
   case "$path" in
-    "$base"/*) ;;
+    "$base"|"$base"/*) ;;
     *) _plugin_die "refusing to delete '$path': not inside $base" ;;
   esac
-  _plugin_is_full_sha "$(basename "$path")" \
-    || _plugin_die "refusing to delete '$path': not a commit directory"
-  rm -rf -- "$path"
+  [ -e "$path" ] || return 0
+  mkdir -p "$PLUGIN_SOURCES_DIR/.staging"
+  trash="$(mktemp -d "$PLUGIN_SOURCES_DIR/.staging/trash.XXXXXX")" || exit 1
+  mv "$path" "$trash/old" || exit 1
+  printf '%s' "$trash"
+}
+
+_plugin_trash_rm() {  # trash-dir (may be empty)
+  case "$1" in "$PLUGIN_SOURCES_DIR"/.staging/trash.??*) rm -rf -- "$1" ;; esac
+  return 0
 }
 
 # Clashes of the checkout in $1 (owned by source-id $2, "" if new) with built-in
@@ -491,7 +501,12 @@ _plugin_lock() {
   mkdir -p "$PLUGIN_ROOT/db"
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/lib/registry-lock.sh"
-  agmsg_lock_acquire "$PLUGIN_ROOT/db" \
+  # A plugin command is a rare, person-typed operation, and on Windows a Git Bash
+  # fork is slow enough that six parallel installs queue for ~15s. Wait longer
+  # here than the registry default (10s) -- only for this path, and only when the
+  # caller did not set a budget of their own.
+  AGMSG_LOCK_SECONDS="${AGMSG_LOCK_SECONDS:-60}" AGMSG_LOCK_TRIES="${AGMSG_LOCK_TRIES:-6000}" \
+    agmsg_lock_acquire "$PLUGIN_ROOT/db" \
     || _plugin_die "could not lock the plugin records (another plugin command may be running)"
   # acquire installs its own EXIT trap; keep staging cleanup alongside it.
   trap '_plugin_stage_cleanup; agmsg_lock_release' EXIT
@@ -642,8 +657,11 @@ _plugin_cmd_update() {
   _plugin_record_drop "$id"
   _plugin_record_add "$id" "$owner/$repo${track_ref:+@$track_ref}" "$PLUGIN_SHA" "$final"
   _plugin_trust_all "$final"
-  _plugin_rm_commit_dir "$owner" "$repo" "$old_dir"
+  # Under the lock only rename the old commit away; deleting the tree is the slow part.
+  local trash
+  trash="$(_plugin_trash "$owner" "$repo" "$old_dir")"
   _plugin_unlock
+  _plugin_trash_rm "$trash"
   echo
   echo "Updated $id to $PLUGIN_SHA; the previous commit was removed."
 }
@@ -668,9 +686,11 @@ $(_plugin_drivers_in "$dir")
 EOF
   _plugin_untrust_all "$dir"
   _plugin_record_drop "$id"
-  rm -rf -- "$PLUGIN_SOURCES_DIR/github/$owner/$repo"
+  local trash
+  trash="$(_plugin_trash "$owner" "$repo" "$PLUGIN_SOURCES_DIR/github/$owner/$repo")"
   rmdir "$PLUGIN_SOURCES_DIR/github/$owner" 2>/dev/null || true
   _plugin_unlock
+  _plugin_trash_rm "$trash"
   echo "Removed $id."
   if [ -n "$back" ]; then
     echo "The built-in driver(s) are back in use: $back"
