@@ -6,7 +6,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AddonsSettings } from "./AddonsSettings";
 import type { Catalog } from "./catalog";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
-import { createLiveSource, type Outcome } from "./source";
+import { createLiveSource, toCommandError, type Outcome } from "./source";
 import type { FetchProgress, Grant, InstallError, StagedInstall } from "./types";
 
 const source = createLiveSource((cmd, args) => invoke(cmd, args));
@@ -26,6 +26,8 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
   const [removing, setRemoving] = useState<string | null>(null);
   const [progress, setProgress] = useState<FetchProgress | null>(null);
   const [grants, setGrants] = useState<Grant[]>([]);
+  const [grantsError, setGrantsError] = useState<string | null>(null);
+  const grantsSeq = useRef(0);
   const [openRequests, setOpenRequests] = useState<"show" | "off">("show");
   // The fetch in flight: its progress and result count only while this is still its id.
   const currentOp = useRef<string | null>(null);
@@ -51,18 +53,25 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
 
   // Remembered grants of the installed add-ons, read from Rust whenever the list changes.
   const loadGrants = useCallback(async () => {
+    const seq = ++grantsSeq.current;
     const out: Grant[] = [];
+    let failure: string | null = null;
     for (const a of catalog.addons) {
       if (a.builtin || a.dev) continue;
       for (const p of a.panes) {
         const r = await source.savedGrants(a.id, p.name);
-        if (!r.ok) continue;
+        if (!r.ok) {
+          failure ??= r.error.message;
+          continue;
+        }
         for (const g of r.value)
           if (g.permission === "files:read" || g.permission === "messages:read")
             out.push({ addonId: a.id, pane: p.name, permission: g.permission, scope: g.scope, remember: true, grantedAt: g.grantedAt });
       }
     }
+    if (seq !== grantsSeq.current) return; // a newer load started: this one is out of date
     setGrants(out);
+    setGrantsError(failure);
   }, [catalog.addons]);
   useEffect(() => {
     void loadGrants();
@@ -119,7 +128,14 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
   };
 
   const loadFolder = async (known?: string) => {
-    const picked = known ?? (await openDialog({ directory: true, multiple: false }));
+    let picked: unknown = known;
+    if (picked === undefined) {
+      try {
+        picked = await openDialog({ directory: true, multiple: false });
+      } catch (e) {
+        return setNotice({ kind: "error", text: toCommandError(e).message });
+      }
+    }
     if (typeof picked !== "string") return;
     setNotice(null);
     const r = await source.devLoad(picked);
@@ -139,6 +155,8 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
         onRetryList={catalog.reload}
         installError={installError}
         notice={notice}
+        grantsError={grantsError ?? undefined}
+        onRetryGrants={() => void loadGrants()}
         onInstall={({ owner, repo, ref }) => void stage((opId) => source.installStart(`${owner}/${repo}${ref ? `@${ref}` : ""}`, opId), false)}
         onCheckUpdate={(id) => void stage((opId) => source.checkUpdate(id, opId), true)}
         onRevoke={(addonId, i) => {

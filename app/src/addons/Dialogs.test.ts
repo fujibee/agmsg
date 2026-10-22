@@ -104,4 +104,21 @@ describe("permissionDiff per pane", () => {
   it("a removed pane and unchanged panes ask nothing", () => {
     expect(permissionDiff([named("a", ["files:read"]), named("b", ["messages:read"])], [named("a", ["files:read"])]).asksAgain).toBe(false);
   });
+  it("an update lists what each pane gains and which panes ask again or are removed", () => {
+    const staged_ = staged({
+      from: { sha: "c".repeat(40), panes: [] },
+      diff: { added: ["network"], networkWider: true, networkWithRead: true, asksAgain: true },
+      paneChanges: [
+        { pane: "reader", added: ["network"], removed: [], networkWidened: true, networkNewlyCombined: true, asksAgain: true },
+        { pane: "quiet", added: [], removed: ["files:read"], networkWidened: false, networkNewlyCombined: false, asksAgain: false },
+      ],
+      removedPanes: ["old"],
+    });
+    const html = renderToStaticMarkup(createElement(ConfirmInstallDialog, { t, staged: staged_, onInstall: noop, onCancel: noop }));
+    expect(html).toContain("addons.confirm.paneAdds");
+    expect(html).toContain("&quot;pane&quot;:&quot;reader&quot;");
+    expect(html).toContain("addons.confirm.paneAsksAgain");
+    expect(html).toContain("addons.confirm.paneRemoved");
+    expect(html).not.toContain("&quot;pane&quot;:&quot;quiet&quot;");
+  });
 });

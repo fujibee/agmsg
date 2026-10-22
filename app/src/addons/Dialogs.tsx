@@ -59,6 +59,7 @@ export function ConfirmInstallDialog(props: {
       )}
       <p className="modal-note">{t("addons.confirm.never")}</p>
       <p className="modal-note">{t("addons.confirm.noReview")}</p>
+      {diff && <PaneChanges t={t} staged={staged} />}
       {diff?.asksAgain && <p className="modal-note addon-asks-again">{t("addons.confirm.asksAgain")}</p>}
       <div className="modal-actions">
         <button type="button" autoFocus onClick={props.onCancel}>
@@ -111,6 +112,30 @@ export function FetchProgressView(props: { t: Translate; progress: FetchProgress
       <button type="button" onClick={props.onCancel}>
         {t("common.cancel")}
       </button>
+    </div>
+  );
+}
+
+/** The update's difference pane by pane: who gains what, and which panes lose their saved access. */
+function PaneChanges(props: { t: Translate; staged: StagedInstall }) {
+  const { t, staged } = props;
+  const lines: string[] = [];
+  for (const c of staged.paneChanges ?? []) {
+    if (c.added.length > 0) lines.push(t("addons.confirm.paneAdds", { pane: c.pane, perms: c.added.join(", ") }));
+    if (c.networkWidened) lines.push(t("addons.confirm.paneWider", { pane: c.pane }));
+    if (c.networkNewlyCombined) lines.push(t("addons.confirm.paneCombined", { pane: c.pane }));
+    if (c.networkWidened || c.networkNewlyCombined) lines.push(t("addons.confirm.paneAsksAgain", { pane: c.pane }));
+  }
+  for (const pane of staged.removedPanes ?? []) lines.push(t("addons.confirm.paneRemoved", { pane }));
+  if (lines.length === 0) return null;
+  return (
+    <div className="addon-pane-changes">
+      <div className="addon-confirm-can">{t("addons.confirm.changesTitle")}</div>
+      <ul className="addon-perms">
+        {lines.map((l, i) => (
+          <li key={i}>{l}</li>
+        ))}
+      </ul>
     </div>
   );
 }

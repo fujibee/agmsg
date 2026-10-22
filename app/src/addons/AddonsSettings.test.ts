@@ -116,4 +116,9 @@ describe("locale keys", () => {
     // a dev copy is not in the installed list (no updates, no saved grants)
     expect(html.split("addons.developer.title")[0]).not.toContain("dev:x");
   });
+  it("a failed grants read is shown with a retry instead of an empty grants list", () => {
+    const html = render({ grantsError: "GRANTS SENTINEL FAILURE", onRetryGrants: noop });
+    expect(html).toContain("addons.grantsFailed");
+    expect(html).toContain("GRANTS SENTINEL FAILURE");
+  });
 });

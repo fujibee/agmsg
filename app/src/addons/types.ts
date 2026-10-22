@@ -138,6 +138,18 @@ export type StagedInstall = {
   diff?: PermissionDiff;
   /** Live: names the staged files in Rust (confirm / cancel by this id). */
   stagingId?: string;
+  /** Live updates: what each pane gains or loses (Rust decides per pane), and the panes the new version no longer has. */
+  paneChanges?: PaneChange[];
+  removedPanes?: string[];
+};
+
+export type PaneChange = {
+  pane: string;
+  added: string[];
+  removed: string[];
+  networkWidened: boolean;
+  networkNewlyCombined: boolean;
+  asksAgain: boolean;
 };
 
 /** S2: where a fetch is. */

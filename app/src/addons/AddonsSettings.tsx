@@ -26,6 +26,9 @@ export function AddonsSettings(props: {
   onRetryList?: () => void;
   /** A one-line result shown above the installed list: "Up to date (abc1234)." or a failure of check / remove / load. */
   notice?: { kind: "info" | "error"; text: string } | null;
+  /** Reading the remembered grants failed: the list below may be missing rows, so say so with a retry. */
+  grantsError?: string;
+  onRetryGrants?: () => void;
   /** Developer copies get Reload and Remove here. */
   onDevReload?: (addonId: string) => void;
 }) {
@@ -85,6 +88,14 @@ export function AddonsSettings(props: {
         {props.notice && (
           <p className={`addon-notice ${props.notice.kind}`} role={props.notice.kind === "error" ? "alert" : "status"}>
             {props.notice.text}
+          </p>
+        )}
+        {props.grantsError !== undefined && (
+          <p className="addon-list-error" role="alert">
+            {t("addons.grantsFailed", { message: props.grantsError })}{" "}
+            <button type="button" onClick={props.onRetryGrants}>
+              {t("addons.listRetry")}
+            </button>
           </p>
         )}
         <InstalledList {...props} installed={installed} />

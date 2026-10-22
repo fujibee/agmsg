@@ -381,7 +381,13 @@
       "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
       "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
       "install": "Install",
-      "update": "Update"
+      "update": "Update",
+      "changesTitle": "What changes, pane by pane:",
+      "paneAdds": "{{pane}} gains: {{perms}}",
+      "paneWider": "{{pane}} can reach more sites",
+      "paneCombined": "{{pane}} can now send what it reads over the network",
+      "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
+      "paneRemoved": "{{pane}} is removed (its saved access is dropped)"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -438,6 +444,7 @@
       "install": "Install an add-on…"
     },
     "listFailed": "Couldn't read the add-on list: {{message}}",
-    "listRetry": "Try again"
+    "listRetry": "Try again",
+    "grantsFailed": "Couldn't read what you allowed: {{message}}"
   }
 }

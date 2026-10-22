@@ -80,6 +80,8 @@ export type ConfirmRaw = {
   removedPermissions: string[];
   networkWidened: boolean;
   networkNewlyCombined: boolean;
+  removedPanes?: string[];
+  paneChanges?: { pane: string; added: string[]; removed: string[]; networkWidened: boolean; networkNewlyCombined: boolean; asksAgain: boolean }[];
 };
 
 export function toStaged(c: ConfirmRaw): StagedInstall {
@@ -94,6 +96,8 @@ export function toStaged(c: ConfirmRaw): StagedInstall {
     ...(c.previousSha
       ? {
           from: { sha: c.previousSha, panes: [] },
+          paneChanges: c.paneChanges ?? [],
+          removedPanes: c.removedPanes ?? [],
           diff: {
             added: c.addedPermissions.filter((x): x is Permission => (PERMISSIONS as readonly string[]).includes(x)),
             networkWider: c.networkWidened,

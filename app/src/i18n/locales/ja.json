@@ -381,7 +381,13 @@
       "noReview": "agmsg はアドオンの審査も署名も行いません。信頼できる人のものだけインストールしてください。",
       "asksAgain": "この更新でアドオンができることが変わります。変わった項目の許可は改めて確認します。",
       "install": "インストール",
-      "update": "更新"
+      "update": "更新",
+      "changesTitle": "ペインごとの変更:",
+      "paneAdds": "{{pane}} に追加: {{perms}}",
+      "paneWider": "{{pane}} が、より多くのサイトに接続できるようになります",
+      "paneCombined": "{{pane}} が、読み取った内容をネットワークへ送れるようになります",
+      "paneAsksAgain": "{{pane}} は、フォルダやチームへのアクセスを改めて確認します",
+      "paneRemoved": "{{pane}} は削除されます(保存済みのアクセスも破棄されます)"
     },
     "remove": {
       "title": "{{title}} を削除しますか?",
@@ -438,6 +444,7 @@
       "install": "アドオンをインストール…"
     },
     "listFailed": "アドオンの一覧を読み込めませんでした: {{message}}",
-    "listRetry": "再試行"
+    "listRetry": "再試行",
+    "grantsFailed": "許可した内容を読み込めませんでした: {{message}}"
   }
 }
