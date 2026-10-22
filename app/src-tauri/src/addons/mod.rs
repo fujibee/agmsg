@@ -4,6 +4,7 @@
 
 pub mod broker;
 pub mod commands;
+pub mod conf;
 pub mod csp;
 pub mod denylist;
 pub mod diff;
@@ -12,6 +13,7 @@ pub mod engine;
 pub mod feed;
 pub mod gate;
 pub mod host;
+pub mod index;
 pub mod nav;
 pub mod panes;
 pub mod server;
