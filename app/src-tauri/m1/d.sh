@@ -1,18 +1,25 @@
 #!/bin/bash
 # D: pane-server cases, driven with curl against a running spike app. usage: m1/d.sh <variant> <profile> <tag>
 cd "$(dirname "$0")/.."
-tag=$3; D=/tmp/m1run/dfix; D2=/tmp/m1run/dfix2; out=/tmp/m1run/$tag.txt
+. m1/env.sh
+tag=$3; D=$RUN/dfix; D2=$RUN/dfix2; out=$RUN/$tag.txt
 mkdir -p $D/sub $D2; printf 'pane1-index' > $D/index.html; printf 'sub-file' > $D/sub/file.txt; printf 'pane2-index' > $D2/index.html
-printf 'OUTSIDE-SECRET' > /tmp/m1run/outside.txt
-ln -sfn /etc/hosts $D/link; ln -sfn /tmp/m1run $D/sublink; ln -f /tmp/m1run/outside.txt $D/hard.txt
-export TAURI_CONFIG='{"identifier":"cc.agmsg.m1spike"}' M1_VARIANT=$1
-flags="--features tauri/custom-protocol"; [ "$2" = release ] && flags="$flags --release"
-cargo build $flags 2>&1 | grep -E "^error|Finished"
-export M1_SPIKE=1 M1_LOG=/tmp/m1run/$tag.log M1_PAYLOAD=$D M1_PAYLOAD2=$D2 AGMSG_APP_BASE=/tmp/m1run/base M1_ENTRY=none.html
-rm -f $M1_LOG; target/$2/agmsg-app > /tmp/m1run/$tag.out 2>&1 & APP=$!
+printf 'OUTSIDE-SECRET' > $RUN/outside.txt
+ln -sfn /etc/hosts $D/link; ln -sfn $RUN $D/sublink; ln -f $RUN/outside.txt $D/hard.txt
+if [ -n "${M1_PREBUILT:-}" ]; then
+  EXE=$(prebuilt_exe "$1" "$2") || exit 2
+else
+  export TAURI_CONFIG='{"identifier":"cc.agmsg.m1spike"}' M1_VARIANT=$1
+  flags="--features tauri/custom-protocol"; [ "$2" = release ] && flags="$flags --release"
+  cargo build $flags 2>&1 | grep -E "^error|Finished"
+  EXE=target/$2/agmsg-app
+fi
+export M1_SPIKE=1 M1_LOG=$RUN_N/$tag.log M1_PAYLOAD=$(nat "$D") M1_PAYLOAD2=$(nat "$D2") AGMSG_APP_BASE=$RUN_N/base M1_ENTRY=none.html
+mkdir -p "$RUN/base"
+rm -f "$RUN/$tag.log"; "$EXE" > "$RUN/$tag.out" 2>&1 & APP=$!
 sleep 4
-P1=$(grep -o 'PANE1 port=[0-9]* token=[0-9a-f]*' $M1_LOG); PORT=$(echo $P1 | sed 's/.*port=\([0-9]*\).*/\1/'); T=$(echo $P1 | sed 's/.*token=//')
-P2=$(grep -o 'PANE2 port=[0-9]* token=[0-9a-f]*' $M1_LOG); PORT2=$(echo $P2 | sed 's/.*port=\([0-9]*\).*/\1/'); T2=$(echo $P2 | sed 's/.*token=//')
+P1=$(grep -o 'PANE1 port=[0-9]* token=[0-9a-f]*' $RUN/$tag.log); PORT=$(echo $P1 | sed 's/.*port=\([0-9]*\).*/\1/'); T=$(echo $P1 | sed 's/.*token=//')
+P2=$(grep -o 'PANE2 port=[0-9]* token=[0-9a-f]*' $RUN/$tag.log); PORT2=$(echo $P2 | sed 's/.*port=\([0-9]*\).*/\1/'); T2=$(echo $P2 | sed 's/.*token=//')
 echo "pane1=$PORT pane2=$PORT2" > $out
 c() { # label, curl args...
   local label=$1; shift
@@ -59,6 +66,6 @@ c method_TRACE                -X TRACE $B/$T/index.html
 c query_with_secret           "$B/$T/index.html?secret=QRYSECRET"
 c header_with_secret          -H "Authorization: Bearer HDRSECRET" -H "Cookie: c=COOKIESECRET" $B/$T/index.html
 c response_headers            -s -D - -o /dev/null $B/$T/index.html
-{ echo "--- response headers"; curl -s -D - -o /dev/null $B/$T/index.html | tr -d '\r'; echo "--- redirects? (curl -L on directory)"; curl -s -L -o /dev/null -w '%{http_code} %{num_redirects}\n' $B/$T/sub; echo "--- log scan for logged secrets"; grep -c "QRYSECRET\|HDRSECRET\|COOKIESECRET" $M1_LOG; } >> $out
-kill $APP 2>/dev/null; wait $APP 2>/dev/null
+{ echo "--- response headers"; curl -s -D - -o /dev/null $B/$T/index.html | tr -d '\r'; echo "--- redirects? (curl -L on directory)"; curl -s -L -o /dev/null -w '%{http_code} %{num_redirects}\n' $B/$T/sub; echo "--- log scan for logged secrets"; grep -c "QRYSECRET\|HDRSECRET\|COOKIESECRET" $RUN/$tag.log; } >> $out
+kill $APP 2>/dev/null; command -v taskkill >/dev/null 2>&1 && taskkill //F //IM "$(basename "$EXE")" >/dev/null 2>&1; wait $APP 2>/dev/null
 cat $out

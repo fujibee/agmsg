@@ -1,0 +1,90 @@
+# Spike only (branch addon-m1): prebuilt Windows binaries for the add-on pane
+# measurements, so a test machine without a Rust toolchain can run them.
+# No secrets, no signing, nothing is released.
+name: m1-windows
+
+on:
+  push:
+    branches: [addon-m1]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Build the frontend (embedded into every variant)
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Stub the bundled core resource (not used by the measurements)
+        working-directory: app/src-tauri
+        run: |
+          mkdir -p resources/agmsg-core
+          echo spike > resources/agmsg-core/PLACEHOLDER
+
+      - name: Build every variant, debug and release
+        working-directory: app/src-tauri
+        run: |
+          mkdir -p ../../out/m1-windows/bin
+          export MAIN_CSP="$(cat m1/main-csp.txt)"
+          for variant in none acl remote aclcsp; do
+            for profile in debug release; do
+              if [ "$variant" = aclcsp ]; then
+                export M1_VARIANT=acl
+                export TAURI_CONFIG="$(python -c 'import json,os;print(json.dumps({"identifier":"cc.agmsg.m1spike","app":{"security":{"csp":os.environ["MAIN_CSP"]}}}))')"
+              else
+                export M1_VARIANT=$variant
+                export TAURI_CONFIG='{"identifier":"cc.agmsg.m1spike"}'
+              fi
+              flags="--features tauri/custom-protocol"
+              [ "$profile" = release ] && flags="$flags --release"
+              cargo build $flags
+              cp "target/$profile/agmsg-app.exe" "../../out/m1-windows/bin/agmsg-app-$variant-$profile.exe"
+            done
+          done
+
+      - name: Assemble the artifact (executables + scripts + fixtures)
+        run: |
+          mkdir -p out/m1-windows
+          cp -R app/src-tauri/m1 out/m1-windows/m1
+          {
+            echo "## M1 Windows build"
+            echo '```'
+            rustc --version
+            cargo --version
+            grep -A1 -E '^name = "(tauri|wry|tauri-runtime-wry|webview2-com|tao)"$' app/src-tauri/Cargo.lock | grep -v '^--'
+            echo "commit: $GITHUB_SHA"
+            ls -la out/m1-windows/bin
+            echo '```'
+          } | tee out/m1-windows/BUILD-INFO.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m1-windows
+          path: out/m1-windows
+          retention-days: 14
