@@ -14,18 +14,21 @@ export function GrantCard(props: {
   onChoose: (choice: GrantChoice) => void;
   /** False until grants persist: "Always" is shown disabled, never accepted and treated as "once". */
   canRemember?: boolean;
+  /** A grant call or the folder dialog is running: every choice is disabled until it ends. */
+  pending?: boolean;
 }) {
   const { t, title, need, onChoose } = props;
   const canRemember = props.canRemember ?? true;
+  const pending = props.pending ?? false;
   if (need.permission === "messages:read") {
     return (
       <div className="addon-card addon-grant-card" role="group" aria-label={t("addons.card.grantAria")}>
         <p>{t("addons.card.messagesWant", { title, team: need.team })}</p>
         <div className="addon-card-actions">
-          <button type="button" onClick={() => onChoose("allow")}>
+          <button type="button" disabled={pending} onClick={() => onChoose("allow")}>
             {t("addons.card.allow")}
           </button>
-          <button type="button" onClick={() => onChoose("notNow")}>
+          <button type="button" disabled={pending} onClick={() => onChoose("notNow")}>
             {t("addons.card.notNow")}
           </button>
         </div>
@@ -37,7 +40,7 @@ export function GrantCard(props: {
       <div className="addon-card addon-grant-card denied" role="alert">
         <p>{t("addons.card.denied", { path: need.path })}</p>
         <div className="addon-card-actions">
-          <button type="button" onClick={() => onChoose("notNow")}>
+          <button type="button" disabled={pending} onClick={() => onChoose("notNow")}>
             {t("addons.card.chooseAnother")}
           </button>
         </div>
@@ -52,18 +55,18 @@ export function GrantCard(props: {
           : t("addons.card.filesWant", { title, path: need.path, count: need.fileCount })}
       </p>
       <div className="addon-card-actions">
-        <button type="button" onClick={() => onChoose("once")}>
+        <button type="button" disabled={pending} onClick={() => onChoose("once")}>
           {t("addons.card.allowOnce")}
         </button>
         <button
           type="button"
-          disabled={!canRemember}
+          disabled={!canRemember || pending}
           title={canRemember ? undefined : t("addons.card.allowAlwaysLater")}
           onClick={() => onChoose("always")}
         >
           {t("addons.card.allowAlways")}
         </button>
-        <button type="button" onClick={() => onChoose("notNow")}>
+        <button type="button" disabled={pending} onClick={() => onChoose("notNow")}>
           {t("addons.card.notNow")}
         </button>
       </div>

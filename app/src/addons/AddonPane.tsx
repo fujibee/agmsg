@@ -18,6 +18,8 @@ export function AddonPane(props: {
   hideClose?: boolean;
   /** Whether grants can be remembered ("Always for this folder"); false shows it disabled. */
   canRemember?: boolean;
+  /** A grant is being asked of Rust: the card disables its choices. */
+  pending?: boolean;
   /** Header badge for a developer pane, e.g. the folder. */
   devFolder?: string;
   /** A refusal the broker just returned, shown briefly in the header. */
@@ -53,7 +55,7 @@ export function AddonPane(props: {
         )}
       </div>
       <div className="addon-pane-body">
-        {state.kind === "grant" && <GrantCard t={t} title={props.title} need={state.need} canRemember={props.canRemember} onChoose={props.onGrant} />}
+        {state.kind === "grant" && <GrantCard t={t} title={props.title} need={state.need} canRemember={props.canRemember} pending={props.pending} onChoose={props.onGrant} />}
         {state.kind === "failure" && (
           <FailureCard t={t} title={props.title} failure={state.failure} onAction={props.onFailure} />
         )}

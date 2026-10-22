@@ -7,6 +7,7 @@ import { AddonPane } from "./AddonPane";
 import type { FailureAction } from "./FailureCard";
 import type { GrantChoice } from "./GrantCard";
 import { grantChips } from "./model";
+import { createOpGuard } from "./opGuard";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
 import { createLiveSource, parseNetwork, toCommandError, type AddedPane } from "./source";
 import type { AddonPaneRef, GrantChip, GrantNeed, InstalledAddon, PaneState } from "./types";
@@ -49,6 +50,9 @@ function LiveAddonPane(props: {
   const [blocked, setBlocked] = useState<string | undefined>();
   const [attempt, setAttempt] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
+  const [pending, setPending] = useState(false);
+  // One grant call or folder dialog at a time; invalidated when the pane is reopened or goes away.
+  const guard = useRef(createOpGuard());
   const addonsRef = useRef(props.addons);
   addonsRef.current = props.addons;
 
@@ -56,6 +60,8 @@ function LiveAddonPane(props: {
   useEffect(() => {
     let cancelled = false;
     let openedId: number | null = null;
+    guard.current.invalidate();
+    setPending(false);
     setAdded(null);
     setSteps([]);
     setState({ kind: "frame" });
@@ -85,13 +91,19 @@ function LiveAddonPane(props: {
       });
     return () => {
       cancelled = true;
+      guard.current.invalidate();
       if (openedId !== null) void source.removePane(openedId).catch(() => {});
     };
   }, [pane.addonId, pane.paneName, pane.openArgs, attempt]);
 
   const chooseFolder = async () => {
-    const picked = await openDialog({ directory: true, multiple: false });
-    if (typeof picked === "string") setFolder(picked);
+    const r = await guard.current.run(() => openDialog({ directory: true, multiple: false })).catch((e) => {
+      setState({ kind: "failure", failure: { code: "open_failed", message: toCommandError(e).message } });
+      return null;
+    });
+    if (r === null) return;
+    if (r.kind !== "done") return; // another operation is running, or this attempt is gone
+    if (typeof r.value === "string") setFolder(r.value);
     else if (folder === null) props.onClose();
   };
 
@@ -111,8 +123,9 @@ function LiveAddonPane(props: {
   }, [added, steps, folder, props.team]);
 
   const onGrant = async (c: GrantChoice) => {
-    if (!added || state.kind !== "grant") return;
+    if (!added || state.kind !== "grant" || guard.current.isBusy()) return;
     const need = state.need;
+    const step: Step = need.permission === "messages:read" ? "team" : "folder";
     if (c === "notNow") {
       if (need.permission === "files:read") {
         setFolder(null);
@@ -120,20 +133,27 @@ function LiveAddonPane(props: {
       } else props.onClose();
       return;
     }
-    if (need.permission === "messages:read") {
-      const r = await source.grantTeam(added.id, need.team);
-      if (!r.ok) return setState({ kind: "failure", failure: { code: "open_failed", message: r.error.message } });
-      setChips((cs) => [...cs, { key: `team:${need.team}`, label: need.team }]);
-    } else {
-      const r = await source.grantRoot(added.id, need.path);
-      if (!r.ok) {
-        if (r.error.code === "denied_path") return setState({ kind: "grant", need: { ...need, denied: true } });
-        if (r.error.code === "not_found") return setState({ kind: "failure", failure: { code: "path_missing", path: need.path } });
-        return setState({ kind: "failure", failure: { code: "open_failed", message: r.error.message } });
+    setPending(true);
+    const r = await guard.current.run(async (): Promise<{ error: { code: string; message: string } } | { chip: GrantChip }> => {
+      if (need.permission === "messages:read") {
+        const g = await source.grantTeam(added.id, need.team);
+        return g.ok ? { chip: { key: `team:${need.team}`, label: need.team } } : { error: g.error };
       }
-      setChips((cs) => [...cs, { key: `root:${r.realPath}`, label: r.realPath }]);
+      const g = await source.grantRoot(added.id, need.path);
+      return g.ok ? { chip: { key: `root:${g.realPath}`, label: g.realPath } } : { error: g.error };
+    });
+    if (r.kind !== "done") return; // busy: ignored; stale: the pane was reopened, so nothing here applies to it
+    setPending(false);
+    if ("error" in r.value) {
+      const e = r.value.error;
+      if (need.permission === "files:read" && e.code === "denied_path") return setState({ kind: "grant", need: { ...need, denied: true } });
+      if (need.permission === "files:read" && e.code === "not_found") return setState({ kind: "failure", failure: { code: "path_missing", path: need.path } });
+      return setState({ kind: "failure", failure: { code: "open_failed", message: e.message } });
     }
-    setSteps((s) => s.slice(1));
+    const chip = r.value.chip;
+    setChips((cs) => [...cs, chip]);
+    // Only the step this card was for is done; another step stays.
+    setSteps((s) => (s[0] === step ? s.slice(1) : s));
   };
 
   const onFailure = (a: FailureAction) => {
@@ -156,6 +176,7 @@ function LiveAddonPane(props: {
       askedBy={pane.askedBy}
       blocked={blocked}
       canRemember={false}
+      pending={pending}
       hideTitle
       hideClose
       state={state}
