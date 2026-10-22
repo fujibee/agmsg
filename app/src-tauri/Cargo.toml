@@ -46,6 +46,8 @@ flate2 = "1"
 tar = "0.4"
 # Myers line diff for the add-on git.diff result (addons/diff.rs).
 similar = "2"
+# Blob ids of working-tree files, to tell unchanged files from changed ones (addons/git.rs).
+sha1 = "0.10"
 
 [dev-dependencies]
 # Fake-script harness: a temp install base of stub scripts the command layer runs.

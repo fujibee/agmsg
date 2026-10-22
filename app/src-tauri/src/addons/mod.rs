@@ -13,6 +13,7 @@ pub mod digest;
 pub mod engine;
 pub mod feed;
 pub mod gate;
+pub mod git;
 pub mod host;
 pub mod index;
 pub mod install;
