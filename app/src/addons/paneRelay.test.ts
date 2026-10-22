@@ -166,3 +166,105 @@ describe("pane relay", () => {
     expect(s.relay.generation()).toBeNull();
   });
 });
+
+const deferred = <T>() => {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+};
+
+describe("pane relay: close during a pending load", () => {
+  it("a load that answers after closePort creates no port and leaves generation null", async () => {
+    const d = deferred<number>();
+    const s = setup({ handler: (cmd) => (cmd === "addon_pane_loaded" ? (d.promise as never) : undefined) });
+    const load = s.relay.onFrameLoad();
+    s.relay.closePort();
+    d.resolve(1);
+    await load;
+    expect(s.ports).toHaveLength(0);
+    expect(s.posted).toHaveLength(0);
+    expect(s.relay.generation()).toBeNull();
+  });
+
+  it("a load that answers long after closePort still creates no port", async () => {
+    const d = deferred<number>();
+    const s = setup({ handler: (cmd) => (cmd === "addon_pane_loaded" ? (d.promise as never) : undefined) });
+    const load = s.relay.onFrameLoad();
+    s.relay.closePort();
+    await tick();
+    d.resolve(1);
+    await load;
+    expect(s.ports).toHaveLength(0);
+    expect(s.relay.generation()).toBeNull();
+  });
+
+  it("a load started after closePort works again", async () => {
+    const s = setup({ wantsFeed: false });
+    s.relay.closePort();
+    await s.relay.onFrameLoad();
+    expect(s.ports).toHaveLength(1);
+    expect(s.relay.generation()).toBe(1);
+  });
+});
+
+describe("pane relay: pushes while init is being fetched", () => {
+  const msg = (id: string) => ({ agmsg: 1, type: "message", message: { id } });
+
+  it("posts init, then queued, then buffered pushes, in that order", async () => {
+    const d = deferred<unknown>();
+    const s = setup({ handler: (cmd) => (cmd === "addon_feed_init" ? (d.promise as never) : undefined) });
+    const load = s.relay.onFrameLoad();
+    await tick();
+    s.relay.onPush({ pane: 7, generation: 1, event: msg("live1") });
+    s.relay.onPush({ pane: 7, generation: 1, event: msg("live2") });
+    expect(s.ports[0].sent).toEqual([]); // nothing before init
+    d.resolve({ init: { agmsg: 1, type: "init", messages: [{ id: "h1" }] }, queued: [msg("q1")] });
+    await load;
+    expect(s.ports[0].sent).toEqual([{ agmsg: 1, type: "init", messages: [{ id: "h1" }] }, msg("q1"), msg("live1"), msg("live2")]);
+    // and live from then on
+    s.relay.onPush({ pane: 7, generation: 1, event: msg("live3") });
+    expect(s.ports[0].sent.slice(-1)[0]).toEqual(msg("live3"));
+  });
+
+  it("does not post a message twice when init, the queue and a push all carry it", async () => {
+    const d = deferred<unknown>();
+    const s = setup({ handler: (cmd) => (cmd === "addon_feed_init" ? (d.promise as never) : undefined) });
+    const load = s.relay.onFrameLoad();
+    await tick();
+    s.relay.onPush({ pane: 7, generation: 1, event: msg("h1") });
+    s.relay.onPush({ pane: 7, generation: 1, event: msg("q1") });
+    d.resolve({ init: { agmsg: 1, type: "init", messages: [{ id: "h1" }] }, queued: [msg("q1")] });
+    await load;
+    const ids = s.ports[0].sent.map((m) => (m as { message?: { id: string } }).message?.id).filter(Boolean);
+    expect(ids).toEqual(["q1"]);
+  });
+
+  it("drops pushes buffered for a frame that was replaced before init answered", async () => {
+    const d = deferred<unknown>();
+    let first = true;
+    const s = setup({
+      handler: (cmd) => {
+        if (cmd === "addon_feed_init" && first) {
+          first = false;
+          return d.promise as never;
+        }
+        return undefined;
+      },
+    });
+    const load = s.relay.onFrameLoad();
+    await tick();
+    s.relay.onPush({ pane: 7, generation: 1, event: msg("old") });
+    await s.relay.onFrameLoad(); // reload: generation 2, its own init
+    d.resolve({ init: { agmsg: 1, type: "init" }, queued: [] });
+    await load;
+    expect(s.ports[0].sent).toEqual([]);
+    expect(s.ports[1].sent.some((m) => (m as { message?: { id: string } }).message?.id === "old")).toBe(false);
+  });
+
+  it("a failed init does not leave the relay buffering forever", async () => {
+    const s = setup({ handler: (cmd) => (cmd === "addon_feed_init" ? Promise.reject({ code: "not_granted" }) : undefined) });
+    await s.relay.onFrameLoad();
+    s.relay.onPush({ pane: 7, generation: 1, event: msg("x") });
+    expect(s.ports[0].sent).toEqual([msg("x")]);
+  });
+});

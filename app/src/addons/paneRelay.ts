@@ -40,7 +40,18 @@ export interface PaneRelay {
   generation(): number | null;
 }
 
-type Bound = { generation: number; port: PortLike };
+type Bound = {
+  generation: number;
+  port: PortLike;
+  /** "initializing": init is being fetched, pushes wait in `buffered`. "live": pushes go straight through. */
+  state: "initializing" | "live";
+  buffered: unknown[];
+};
+
+const messageId = (ev: unknown): string | null => {
+  const m = (ev as { message?: { id?: unknown } } | null)?.message;
+  return typeof m?.id === "string" ? m.id : null;
+};
 
 const isRequest = (d: unknown): d is { agmsg: 1; type: "request"; id: number; op: string; args?: unknown } => {
   if (typeof d !== "object" || d === null) return false;
@@ -104,7 +115,7 @@ export function createPaneRelay(deps: {
       const win = deps.frameWindow();
       if (!win) return;
       const channel = newChannel();
-      const mine: Bound = { generation, port: channel.port1 };
+      const mine: Bound = { generation, port: channel.port1, state: deps.wantsFeed ? "initializing" : "live", buffered: [] };
       bound = mine;
       mine.port.onmessage = (e) => {
         if (bound !== mine || !isRequest(e.data)) return;
@@ -115,17 +126,47 @@ export function createPaneRelay(deps: {
       try {
         const feed = (await deps.invoke("addon_feed_init", { id: deps.id, generation })) as { init: unknown; queued: unknown[] };
         if (bound !== mine) return;
+        // init, then what Rust queued while building it, then pushes that arrived on the event path meanwhile;
+        // a message already delivered by init or the queue is not posted again.
+        const seen = new Set<string>();
+        const init = feed.init as { messages?: { id?: unknown }[] };
+        for (const m of init.messages ?? []) if (typeof m.id === "string") seen.add(m.id);
         mine.port.postMessage(feed.init);
-        for (const ev of feed.queued) mine.port.postMessage(ev);
+        for (const ev of feed.queued) {
+          const id = messageId(ev);
+          if (id !== null) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+          }
+          mine.port.postMessage(ev);
+        }
+        for (const ev of mine.buffered) {
+          const id = messageId(ev);
+          if (id !== null) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+          }
+          mine.port.postMessage(ev);
+        }
       } catch {
         // No team allowed yet (or the frame was replaced): the grant card handles it; nothing is sent.
+      } finally {
+        if (bound === mine) {
+          mine.buffered = [];
+          mine.state = "live";
+        }
       }
     },
     onPush(p) {
       if (!bound || p.pane !== deps.id || p.generation !== bound.generation) return;
-      bound.port.postMessage(p.event);
+      if (bound.state === "initializing") bound.buffered.push(p.event);
+      else bound.port.postMessage(p.event);
     },
-    closePort: closeBound,
+    closePort() {
+      // Also cancels a load whose addon_pane_loaded has not answered yet: its answer must not build a port.
+      loadSeq++;
+      closeBound();
+    },
     generation: () => bound?.generation ?? null,
   };
 }
