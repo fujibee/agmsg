@@ -16,7 +16,7 @@ pub(crate) fn tarball(entries: &[Value]) -> Vec<u8> {
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut b = tar::Builder::new(gz);
     for e in entries {
-        let name = format!("o-r-abc123/{}", e["path"].as_str().unwrap());
+        let name = if e.get("raw").and_then(Value::as_bool).unwrap_or(false) { e["path"].as_str().unwrap().to_string() } else { format!("o-r-abc123/{}", e["path"].as_str().unwrap()) };
         assert!(name.len() < 100, "fixture path too long for a plain header: {name}");
         let mut h = tar::Header::new_gnu();
         h.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());

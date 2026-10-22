@@ -132,8 +132,10 @@ pub fn extract_tar_gz<R: Read>(reader: R, dest: &Path, limits: Limits) -> Result
     let entries = archive.entries().map_err(|e| InstallError::bad(format!("The download is not a readable archive: {e}")))?;
 
     let mut out = Extracted { files: Vec::new(), total: 0 };
-    let mut lower: HashMap<String, String> = HashMap::new();
+    // every path prefix seen so far (folders and files), by lowercase, with its spelling and kind
+    let mut seen: HashMap<String, (String, bool)> = HashMap::new();
     let mut largest: (String, u64) = (String::new(), 0);
+    let mut top: Option<String> = None;
 
     for entry in entries {
         let mut entry = entry.map_err(|e| InstallError::bad(format!("The download is not a readable archive: {e}")))?;
@@ -146,20 +148,28 @@ pub fn extract_tar_gz<R: Read>(reader: R, dest: &Path, limits: Limits) -> Result
         let Ok(full) = String::from_utf8(raw) else {
             return Err(InstallError::unsafe_entry("a file name that is not valid text", "(unreadable name)"));
         };
-        // strip the top-level folder
-        let rel_full = full.trim_end_matches('/');
-        let rel = match rel_full.split_once('/') {
-            Some((_top, rest)) => rest,
-            None => {
-                // the top-level folder entry itself (or a stray top-level file)
-                if matches!(ty, EntryType::Directory) {
-                    continue;
-                }
-                return Err(InstallError::unsafe_entry("a file outside the top-level folder", &full));
-            }
+        let full_trim = full.trim_end_matches('/');
+        // The FULL path is judged before anything is stripped: an absolute path, a `..` or
+        // a drive prefix cannot hide in the part that GitHub's top folder would have been.
+        let (top_name, rel) = match full_trim.split_once('/') {
+            Some((t, r)) => (t, r),
+            None => (full_trim, ""),
         };
+        let top_ok = !full_trim.starts_with('/') && !top_name.is_empty() && top_name != "." && top_name != ".." && !top_name.contains(['\\', ':', '\0']) && !is_reserved_segment(top_name);
+        if !top_ok {
+            return Err(InstallError::unsafe_entry("a path outside the folder", &full));
+        }
+        match &top {
+            None => top = Some(top_name.to_string()),
+            Some(t) if t == top_name => {}
+            Some(_) => return Err(InstallError::unsafe_entry("a file outside the top-level folder", &full)),
+        }
         if rel.is_empty() {
-            continue;
+            // the top-level folder entry itself
+            if matches!(ty, EntryType::Directory) {
+                continue;
+            }
+            return Err(InstallError::unsafe_entry("a file outside the top-level folder", &full));
         }
         // type before path: a link entry is refused as a link whatever it is named
         match ty {
@@ -174,17 +184,34 @@ pub fn extract_tar_gz<R: Read>(reader: R, dest: &Path, limits: Limits) -> Result
             Err(PathProblem::Outside) => return Err(InstallError::unsafe_entry("a path outside the folder", rel)),
             Err(PathProblem::Reserved) => return Err(InstallError::unsafe_entry("a reserved file name", rel)),
         }
-        let key = rel.to_lowercase();
+        let is_dir = matches!(ty, EntryType::Directory);
+        // folders and files share one namespace: case-only twins and "file here, folder there" are refused
+        let comps: Vec<&str> = rel.split('/').collect();
+        for i in 1..=comps.len() {
+            let prefix = comps[..i].join("/");
+            let leaf_is_file = i == comps.len() && !is_dir;
+            let key = prefix.to_lowercase();
+            match seen.get(&key) {
+                Some((spelled, was_file)) => {
+                    if *spelled != prefix {
+                        return Err(InstallError { kind: InstallErrorKind::UnsafeEntry, message: format!("Refused: {prefix} and {spelled} differ only in case.") });
+                    }
+                    if i == comps.len() && leaf_is_file {
+                        return Err(InstallError { kind: InstallErrorKind::UnsafeEntry, message: format!("Refused: {rel} appears twice in the archive.") });
+                    }
+                    if *was_file || leaf_is_file && i < comps.len() {
+                        return Err(InstallError { kind: InstallErrorKind::UnsafeEntry, message: format!("Refused: {prefix} is both a file and a folder.") });
+                    }
+                }
+                None => {
+                    seen.insert(key, (prefix.clone(), leaf_is_file));
+                }
+            }
+        }
         let target = dest.join(rel);
-        if matches!(ty, EntryType::Directory) {
+        if is_dir {
             fs::create_dir_all(&target)?;
             continue;
-        }
-        if let Some(prev) = lower.get(&key) {
-            return Err(InstallError {
-                kind: InstallErrorKind::UnsafeEntry,
-                message: if prev == rel { format!("Refused: {rel} appears twice in the archive.") } else { format!("Refused: {rel} and {prev} differ only in case.") },
-            });
         }
         if out.files.len() + 1 > limits.files {
             return Err(InstallError::too_large(format!("Too large to install: more than {} files (limit {}).", limits.files, limits.files)));
@@ -221,7 +248,6 @@ pub fn extract_tar_gz<R: Read>(reader: R, dest: &Path, limits: Limits) -> Result
             largest = (rel.to_string(), size);
         }
         out.total += size;
-        lower.insert(key, rel.to_string());
         out.files.push((rel.to_string(), size));
     }
     if out.files.is_empty() {

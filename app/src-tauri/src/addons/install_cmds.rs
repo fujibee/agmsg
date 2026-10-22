@@ -99,7 +99,8 @@ fn fetch_and_stage<R: Runtime>(app: &AppHandle<R>, host: &AddonHost, source: &st
     let body = gh.download(&src, &sha)?;
     progress(app, op, "checking", "");
     let staged = stage::stage(&addons, &src.slug(), &sha, body, APP_VERSION, Limits::default())?;
-    let confirm = staged.confirm_data(previous.as_ref());
+    let prev = previous.as_ref().map(|p| stage::Previous::load(&addons, p));
+    let confirm = staged.confirm_data(prev.as_ref());
     let mut map = host.staged.lock().unwrap();
     // one staged install per add-on, and a bounded number overall
     let same: Vec<String> = map.iter().filter(|(_, s)| s.repo == staged.repo).map(|(k, _)| k.clone()).collect();
