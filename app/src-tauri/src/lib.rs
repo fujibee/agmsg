@@ -1,3 +1,4 @@
+pub mod addons;
 mod agmsg;
 mod agent_state;
 mod menu_i18n;
