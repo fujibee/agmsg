@@ -412,6 +412,42 @@ mod tests {
     }
 
     #[test]
+    fn a_granted_home_cannot_reach_the_agmsg_base_stores_or_addons() {
+        // the agmsg home sits inside the folder the user granted (the usual layout:
+        // the base is under the home folder); its stores, db, teams and add-on
+        // state must stay unreadable, which is what keeps messages:read's one-team limit real
+        let f = fx(files_only());
+        let base = f.root.join(".agents/skills/agmsg");
+        for d in ["db", "teams/t", "addons/o/r", "scripts"] {
+            fs::create_dir_all(base.join(d)).unwrap();
+        }
+        fs::write(base.join("db/messages.db"), "SQLITE-SECRET").unwrap();
+        fs::write(base.join("db/messages.db-wal"), "WAL-SECRET").unwrap();
+        fs::write(base.join("teams/t/config"), "TEAM-SECRET").unwrap();
+        fs::write(base.join("addons/grants.tsv"), "GRANTS-SECRET").unwrap();
+        fs::write(base.join("addons/index.tsv"), "INDEX-SECRET").unwrap();
+        let store = f.root.join("elsewhere/store.db");
+        fs::create_dir_all(store.parent().unwrap()).unwrap();
+        fs::write(&store, "STORE-SECRET").unwrap();
+        let mut extra = vec![base.clone(), store.clone(), PathBuf::from(format!("{}-wal", store.display()))];
+        extra.sort();
+        let f = Fx { deny: Denylist::from_process_env(extra), ..f };
+        for p in [".agents/skills/agmsg/db/messages.db", ".agents/skills/agmsg/db/messages.db-wal", ".agents/skills/agmsg/teams/t/config", ".agents/skills/agmsg/addons/grants.tsv", ".agents/skills/agmsg/addons/index.tsv", "elsewhere/store.db"] {
+            let r = call(&f, "fs.read", json!({ "path": p }));
+            assert_eq!(r.as_ref().unwrap_err().code, "denied_path", "{p}: {r:?}");
+        }
+        for d in [".agents/skills/agmsg", ".agents/skills/agmsg/db", ".agents/skills/agmsg/addons"] {
+            assert_eq!(code(call(&f, "fs.list", json!({ "path": d }))), "denied_path", "{d}");
+        }
+        let top = call(&f, "fs.list", json!({})).unwrap();
+        let names: Vec<_> = top["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+        assert!(names.contains(&"README.md".to_string()));
+        let hidden = call(&f, "fs.list", json!({"path": ".agents/skills"}));
+        assert!(hidden.is_ok() && hidden.unwrap()["entries"].as_array().unwrap().is_empty(), "the base is not even listed");
+        assert_eq!(code(call(&f, "fs.stat", json!({"path": ".agents/skills/agmsg/db/messages.db"}))), "denied_path");
+    }
+
+    #[test]
     fn missing_paths_and_special_files() {
         let f = fx(files_only());
         assert_eq!(code(call(&f, "fs.read", json!({"path": "nope.txt"}))), "not_found");

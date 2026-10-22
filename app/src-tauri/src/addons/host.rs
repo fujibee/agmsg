@@ -38,20 +38,25 @@ struct ProbeRun {
     udp_hits: Arc<AtomicUsize>,
     udp_stop: Arc<AtomicBool>,
     udp_port: u16,
-    target: String,
 }
 
 pub struct AddonHost {
     pub gate: AddonGate,
     pub nav: NavPolicy,
     pub panes: super::commands::Panes,
+    catalog: std::sync::OnceLock<super::catalog::Catalog>,
     engine: Mutex<EngineReport>,
     probe: Mutex<Option<ProbeRun>>,
 }
 
 impl AddonHost {
+    /// The built-in and installed add-ons. Set once at startup.
+    pub fn catalog(&self) -> &super::catalog::Catalog {
+        self.catalog.get().expect("the add-on catalog is set at startup")
+    }
+
     pub fn new(dev_url: Option<&Url>) -> AddonHost {
-        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), panes: super::commands::Panes::new(), engine: Mutex::new(EngineReport::default()), probe: Mutex::new(None) }
+        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), panes: super::commands::Panes::new(), catalog: std::sync::OnceLock::new(), engine: Mutex::new(EngineReport::default()), probe: Mutex::new(None) }
     }
 
     fn end_probe(&self) {
@@ -112,9 +117,38 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
             }
         })
         .build()?;
+    host.panes.set_app_dirs(app_owned_dirs(&handle));
+    let builtin_root = super::catalog::Catalog::locate_builtin_root(handle.path().resource_dir().ok());
+    let _ = host.catalog.set(super::catalog::Catalog::new(builtin_root, crate::agmsg::base_dir().join("addons")));
+    {
+        let list: Vec<String> = host.catalog().list().iter().map(|a| format!("{}({})", a.id, if a.digest_ok { "ok" } else { "CHANGED" })).collect();
+        eprintln!("[addons] add-ons: {}", if list.is_empty() { "none".to_string() } else { list.join(" ") });
+    }
+    // One line at startup naming the agmsg base and every store this app resolved,
+    // so a tester can see that nothing outside the folder they pointed it at is in play.
+    std::thread::spawn(|| {
+        let places: Vec<String> = crate::agmsg::protected_locations().iter().map(|p| p.display().to_string()).collect();
+        eprintln!("[agmsg-app] resolved: {}", places.join(" | "));
+    });
     *host.engine.lock().unwrap() = engine::harden(&window);
     super::commands::listen_for_live_messages(&handle, host.clone());
     Ok(())
+}
+
+/// The app's own bundle, data, config, cache and log folders, and the folder the
+/// executable lives in: never readable by an add-on, whatever folder is granted.
+fn app_owned_dirs<R: Runtime>(app: &AppHandle<R>) -> Vec<std::path::PathBuf> {
+    let p = app.path();
+    let mut v: Vec<std::path::PathBuf> = [p.app_data_dir(), p.app_config_dir(), p.app_local_data_dir(), p.app_cache_dir(), p.app_log_dir(), p.resource_dir()]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
+        v.push(dir);
+    }
+    v.sort();
+    v.dedup();
+    v
 }
 
 /// Scheme, host and port only: a URL in a log line must not carry a query.
@@ -179,7 +213,7 @@ fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &st
     let hash = serde_json::json!({ "nonce": n, "udp": udp_port, "target": target }).to_string();
     let src = format!("{url}#{}", percent_encode(&hash));
     host.gate.begin(&n, &target, Instant::now());
-    *host.probe.lock().unwrap() = Some(ProbeRun { nonce: n.clone(), server, udp_hits, udp_stop, udp_port, target: target.clone() });
+    *host.probe.lock().unwrap() = Some(ProbeRun { nonce: n.clone(), server, udp_hits, udp_stop, udp_port });
 
     // The only code the app runs in the main page for this: relay the probe
     // frame's postMessage to the command, and create the frame.

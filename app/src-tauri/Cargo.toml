@@ -16,6 +16,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Built-in add-ons are pinned by a digest computed at build time.
+sha2 = "0.10"
 
 [dependencies]
 tauri = { version = "2", features = ["image-png"] }

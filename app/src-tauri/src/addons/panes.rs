@@ -193,6 +193,11 @@ impl Registry {
         if !p.declared.messages_read {
             return Err(BrokerError::new("not_declared", "this add-on did not declare messages:read"));
         }
+        // Changing an existing scope (team A -> B) voids the frame exactly like a
+        // revoke: whatever was authorized under A can no longer be answered under B.
+        if p.team.as_deref().is_some_and(|old| old != team) {
+            p.generation += 1;
+        }
         p.team = Some(team.to_string());
         Ok(())
     }
@@ -212,6 +217,9 @@ impl Registry {
         let p = self.panes.get_mut(&id).ok_or_else(gone)?;
         if !p.declared.files_read {
             return Err(BrokerError::new("not_declared", "this add-on did not declare files:read"));
+        }
+        if p.root.as_ref().is_some_and(|old| old != &root) {
+            p.generation += 1;
         }
         p.root = Some(root);
         Ok(())
@@ -373,6 +381,29 @@ mod tests {
         let g3 = r.generation(id).unwrap();
         r.revoke_root(id);
         assert!(r.generation(id).unwrap() > g3);
+    }
+
+    #[test]
+    fn swapping_the_team_or_the_folder_voids_the_authority_it_replaces() {
+        let (mut r, id) = reg_with(all());
+        let g = r.begin_generation(id).unwrap();
+        r.grant_team(id, "team-a").unwrap();
+        r.grant_root(id, PathBuf::from("/a")).unwrap();
+        assert_eq!(r.generation(id), Some(g), "first grants do not change the frame");
+        r.grant_team(id, "team-a").unwrap();
+        r.grant_root(id, PathBuf::from("/a")).unwrap();
+        assert!(r.authorize(id, g, Need::Messages).is_ok(), "granting the same scope again is a no-op");
+        let held = r.authorize(id, g, Need::Messages).unwrap();
+        assert_eq!(held.team.as_deref(), Some("team-a"));
+        r.grant_team(id, "team-b").unwrap();
+        assert!(r.authorize(id, g, Need::Messages).is_err(), "team A authority must not survive the swap to B");
+        assert!(r.authorize(id, g, Need::Files).is_err(), "the whole frame is stale after a swap");
+        let g2 = r.generation(id).unwrap();
+        assert!(g2 > g);
+        assert_eq!(r.authorize(id, g2, Need::Messages).unwrap().team.as_deref(), Some("team-b"));
+        r.grant_root(id, PathBuf::from("/b")).unwrap();
+        assert!(r.authorize(id, g2, Need::Files).is_err(), "root A authority must not survive the swap to B");
+        assert!(r.generation(id).unwrap() > g2);
     }
 
     #[test]

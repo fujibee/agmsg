@@ -817,7 +817,8 @@ mod tests {
 
     /// Reads whatever arrives until the peer closes or errors.
     fn drain(mut s: TcpStream) -> Vec<u8> {
-        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        // (macOS refuses to set options on a socket the peer already closed: that is fine here)
+        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
         let mut buf = Vec::new();
         let _ = s.read_to_end(&mut buf);
         buf
