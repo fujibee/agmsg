@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { createPaneRelay, type PaneRelay, type PushEvent } from "./paneRelay";
+import type { PaneRelay, PushEvent } from "./paneRelay";
+import { startFrameRelay } from "./frameRelay";
 
 // The iframe of a live add-on pane. `url` is what addon_pane_add returned
 // (http://127.0.0.1:<port>/<token>/); the sandbox is allow-scripts only, never
@@ -22,30 +23,26 @@ export function AddonFrame(props: {
 }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const relayRef = useRef<PaneRelay | null>(null);
-  const { paneInstance, declaresMessages, onRefused } = props;
+  const { paneInstance, declaresMessages } = props;
+  // The callback lives in a ref: a new identity must not rebuild the relay (a rebuilt relay gets no port without a new load).
+  const onRefusedRef = useRef(props.onRefused);
+  onRefusedRef.current = props.onRefused;
 
   useEffect(() => {
-    const relay = createPaneRelay({
-      id: paneInstance,
-      invoke: (cmd, args) => invoke(cmd, args),
-      frameWindow: () => ref.current?.contentWindow ?? null,
+    const { relay, dispose } = startFrameRelay({
+      paneInstance,
       wantsFeed: declaresMessages,
-      onRefused,
+      invoke: (cmd, args) => invoke(cmd, args),
+      listen: (event, handler) => listen<PushEvent>(event, handler),
+      frameWindow: () => ref.current?.contentWindow ?? null,
+      onRefused: () => onRefusedRef.current,
     });
     relayRef.current = relay;
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    void listen<PushEvent>("addon-push", (e) => relay.onPush(e.payload)).then((u) => {
-      if (disposed) u();
-      else unlisten = u;
-    });
     return () => {
-      disposed = true;
-      unlisten?.();
-      relay.closePort();
+      dispose();
       relayRef.current = null;
     };
-  }, [paneInstance, declaresMessages, onRefused]);
+  }, [paneInstance, declaresMessages]);
 
   return (
     <iframe
