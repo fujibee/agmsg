@@ -10,9 +10,19 @@ Do not use POSIX `'"'"'` quote splicing in PowerShell, and do not use escaped do
 
 <!-- agmsg:slot delivery -->
 <!-- agmsg:render-overlay __AGENT_TYPE__ -->
-  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, or `off` delivery. Empty input means `monitor`.
-     Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`.
-     Monitor uses the Codex app-server bridge; it changes how `codex` starts and is documented in `docs/codex-monitor-beta.md`.
+  5. **REQUIRED — Do NOT skip this step.** Choose how incoming messages reach this agent. Show this screen every time (a new join, a new seat added by someone already using agmsg, and when the mode is changed). First run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg daemon offer __AGENT_TYPE__`; it only reads and prints one line:
+     - `agmsgd=available`: ask the user to pick one, in this order:
+       1. `agmsgd` — notices delivered directly by a background service (recommended). Choosing it registers a background service that starts at login; `agmsg daemon disable` stops and removes it. Empty input means this one.
+       2. `monitor (legacy)` — the Codex app-server bridge streams the inbox (the `monitor` mode value). It changes how `codex` starts and is documented in `docs/codex-monitor-beta.md`.
+       3. `turn`, 4. `off` — as before.
+     - `agmsgd=on`: do not ask which to use. Say "agmsgd is on: notices are delivered directly" and ask only whether to keep using it or switch to `monitor (legacy)`.
+     - `agmsgd=not-running reason=...`: agmsgd is turned on but is not running, so do not say notices are delivered directly. Say so with the reason and ask whether to start it (`agmsg delivery agmsgd` starts it) or switch to `monitor (legacy)`.
+     - `agmsgd=unavailable reason=...`: do not offer agmsgd; say the reason in one line, then ask for `monitor (legacy)`, `turn`, or `off` (empty input means `monitor`).
+
+     To apply the choice, run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery <choice> --type __AGENT_TYPE__ --project "$(pwd)"` with `<choice>` = `agmsgd`, `monitor`, `turn` or `off` (`monitor (legacy)` is the value `monitor`) and show its output:
+     - `agmsgd` turns the background service on (`daemon enable`) and leaves the project on `monitor` as the fallback for a seat whose destination is not confirmed yet. If it fails, say so and offer the other choices.
+     - Keep using agmsgd (it is on or turned on but not running): run `agmsg delivery agmsgd` the same way.
+     - `monitor (legacy)` when agmsgd is on: run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg daemon disable` first, then `agmsg delivery monitor`.
 <!-- /agmsg:slot delivery -->
 
 <!-- agmsg:slot actas -->
@@ -45,7 +55,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 <!-- /agmsg:slot spawn -->
 
 <!-- agmsg:slot mode -->
-If argument is "mode", run `delivery.sh status __AGENT_TYPE__ "$(pwd)"`.
+If argument is "delivery" (or its alias "mode") with nothing after it, run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery status --type __AGENT_TYPE__ --project "$(pwd)"`. It shows both the install-wide agmsgd state (for example "delivery: agmsgd (on) — notices are delivered directly") and this project's own delivery ("this project's fallback: monitor (legacy)"). When agmsgd is off but available, tell the user that `/agmsg delivery agmsgd` turns direct delivery on.
 
-For `mode monitor|turn|off`, run `delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`; `both` is unsupported. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
+For `delivery agmsgd|monitor|turn|off` (and the same values after the alias `mode`), run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery <value> --type __AGENT_TYPE__ --project "$(pwd)"`; `both` is unsupported. `agmsgd` runs `daemon enable` and leaves the project on `monitor` as the fallback; the other values are exactly `delivery.sh set <value>`. `monitor` is always shown as `monitor (legacy)` on the choice screen, but its value stays `monitor`. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
 <!-- /agmsg:slot mode -->
