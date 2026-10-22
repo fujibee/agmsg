@@ -46,6 +46,7 @@ window.addEventListener('message', async (ev) => {
       for (const [name, fn] of Object.entries(perTarget[G])) await T('C_' + name + '_' + tn, () => fn(base));
     }
   } else if (G === 'webrtc') {
+    rep('C_webrtc_globals', JSON.stringify({ RTCPeerConnection: typeof window.RTCPeerConnection, webkitRTCPeerConnection: typeof window.webkitRTCPeerConnection, RTCSessionDescription: typeof window.RTCSessionDescription, RTCDataChannel: typeof window.RTCDataChannel, mediaDevices: typeof (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) }));
     await T('C_webrtc_stun', async () => {
       const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:' + CFG.udp }] });
       pc.createDataChannel('x');
