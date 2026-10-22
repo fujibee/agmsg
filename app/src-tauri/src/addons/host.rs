@@ -117,6 +117,8 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
             }
         })
         .build()?;
+    #[cfg(debug_assertions)]
+    super::e2e::spawn_driver(handle.clone());
     host.panes.set_app_dirs(app_owned_dirs(&handle));
     let builtin_root = super::catalog::Catalog::locate_builtin_root(handle.path().resource_dir().ok());
     let _ = host.catalog.set(super::catalog::Catalog::new(builtin_root, crate::agmsg::base_dir().join("addons")));

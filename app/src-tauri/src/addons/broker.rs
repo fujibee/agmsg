@@ -62,6 +62,13 @@ pub fn handle_with_git(
         (auth, slot)
     };
     let out = run(&auth, deny, git, op, args);
+    #[cfg(debug_assertions)]
+    if std::env::var_os("AGMSG_ADDON_TRACE").is_some() {
+        match &out {
+            Ok(v) => eprintln!("[addons-trace] pane={id} gen={generation} op={op} ok {}B", v.to_string().len()),
+            Err(e) => eprintln!("[addons-trace] pane={id} gen={generation} op={op} err {}", e.code),
+        }
+    }
     // Re-check just before the answer leaves: if the pane was reloaded, closed
     // or revoked meanwhile, the answer is dropped, not delivered late.
     reg.lock().unwrap().authorize(id, generation, need)?;

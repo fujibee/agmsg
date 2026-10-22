@@ -10,6 +10,8 @@ pub mod csp;
 pub mod denylist;
 pub mod diff;
 pub mod digest;
+#[cfg(debug_assertions)]
+pub mod e2e;
 pub mod engine;
 pub mod feed;
 pub mod gate;

@@ -16,6 +16,15 @@ import type { AddonPaneRef, GrantChip, GrantNeed, InstalledAddon, PaneState } fr
 
 const source = createLiveSource((cmd, args) => invoke(cmd, args));
 
+// End-to-end seam, present only in a build made with `vite build --mode e2e`
+// (constant-folded away otherwise): lets a scripted run answer the native folder
+// picker, which nothing can click from outside.
+const e2eFolder = (): Promise<string> | null => {
+  if (import.meta.env.MODE !== "e2e") return null;
+  const f = (window as unknown as { __AGMSG_E2E_FOLDER__?: string }).__AGMSG_E2E_FOLDER__;
+  return f ? Promise.resolve(f) : null;
+};
+
 // One add-on pane in a tab. In the app it runs the real thing: addon_pane_add,
 // the grant cards (Rust holds and decides every grant), then the sandboxed
 // frame. Without Tauri (vite dev) it runs on mock state instead.
@@ -109,7 +118,7 @@ function LiveAddonPane(props: {
   }, [added]);
 
   const chooseFolder = async () => {
-    const r = await guard.current.run(() => openDialog({ directory: true, multiple: false })).catch((e) => {
+    const r = await guard.current.run(() => e2eFolder() ?? openDialog({ directory: true, multiple: false })).catch((e) => {
       setState({ kind: "failure", failure: { code: "open_failed", message: toCommandError(e).message } });
       return null;
     });
