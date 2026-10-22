@@ -61,6 +61,11 @@ source "$SCRIPT_DIR/lib/terminal-context-line.sh"
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
 [ -n "$PAIRS" ] || exit 0
 
+# One-time introduction to agmsgd, for an install that has not turned it on.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/agmsgd-intro.sh"
+agmsg_agmsgd_intro_notice "$TYPE"
+
 # Read hook input JSON from stdin BEFORE the type plug below runs (#1468):
 # stdin can only be read once, and a plug that needs a hook input field (e.g.
 # codex reading `source` to tell startup/resume/clear apart) has to see it
