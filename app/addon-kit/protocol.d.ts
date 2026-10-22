@@ -151,3 +151,44 @@ export interface DiffResult {
   /** The file list itself was cut at the broker's cap. */
   truncated?: boolean;
 }
+
+// ---- git.status / git.log / git.show ----------------------------------------
+
+/** One changed file of git.status: the work tree compared with HEAD, untracked files included (as added). */
+export interface GitStatusEntry {
+  path: string;
+  status: DiffStatus;
+  /** Set for an exact rename. */
+  oldPath?: string;
+}
+
+export interface GitStatus {
+  files: GitStatusEntry[];
+}
+
+export interface GitLogRequest {
+  /** Default HEAD. A ref name, a SHA or merge-base:<ref>. */
+  rev?: string;
+  /** Only commits that touched this file or folder. */
+  path?: string;
+  /** Default 50, at most 500. */
+  limit?: number;
+}
+
+export interface GitCommit {
+  sha: string;
+  parents: string[];
+  /** Name only: no e-mail address. */
+  author: string;
+  /** ISO 8601. */
+  date: string;
+  /** First line of the message. */
+  subject: string;
+}
+
+export interface GitLog {
+  commits: GitCommit[];
+}
+
+/** git.show(rev, path): a file at a revision. Same shape as fs.read, always the whole file (at most 10 MB). */
+export type GitShowResult = FsReadResult;
