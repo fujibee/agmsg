@@ -26,6 +26,7 @@ Read-only `key=value` data, never sourced. Recognized keys:
 ```
 name=<tool>
 timeout=<seconds>       # handle's per-call budget (default 30 if absent)
+required_config=<keys>  # space-separated keys the member's config must carry
 ```
 
 ## `setup`

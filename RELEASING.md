@@ -28,7 +28,7 @@ stays behind a person. The script prints the remaining commands when it exits.
 (This paragraph used to say it auto-merged and tagged. It never did.)
 
 **Which branch:** whichever one you are on. The PR targets that same branch, so
-a prerelease cut from `integration/remote` opens against `integration/remote`.
+a prerelease cut from an integration branch (`integration/<name>`) opens against that branch.
 Releases from a side branch are a real case — 1.2.0-rc.1 through rc.3 were all
 cut that way — and the script used to refuse them outright (#679).
 
@@ -64,11 +64,11 @@ which:
 ### Manual steps (if you'd rather not use the script)
 
 The base is a variable here for the same reason it is one in the script: an rc
-is cut from `integration/remote`, and a copy-paste that says `main` puts the
+is cut from an `integration/<name>` branch, and a copy-paste that says `main` puts the
 release commit on the wrong branch.
 
 ```bash
-BASE=main                 # integration/remote for a prerelease
+BASE=main                 # integration/<name> for a prerelease
 VER=1.0.4                 # 1.2.0-rc.4 for a prerelease
 
 # On an up-to-date $BASE, on a release branch:
@@ -167,10 +167,10 @@ The pipeline layers four defenses against silent drift and malicious publish:
   and linked back to this workflow run. A tarball without provenance — or with
   provenance pointing elsewhere — is distinguishable on npmjs.com.
 - **`verify-versions.yml`.** Runs `sync-version.sh --check` on every push and
-  PR to `main` **and `integration/remote`**. A hand-edit of `package.json` or
+  PR to `main` **and `integration/**`**. A hand-edit of `package.json` or
   `plugin.json` without a `VERSION` bump fails CI before merge. It was
   `main`-only until #679, which meant it never ran on any of the three
-  prereleases cut from `integration/remote` — `release.yml` runs the same check
+  prereleases cut from an integration branch — `release.yml` runs the same check
   at tag time, so nothing shipped out of sync, but the failure would have
   surfaced at publish rather than at review.
 

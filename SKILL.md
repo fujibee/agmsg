@@ -1,6 +1,6 @@
 ---
 name: agmsg
-description: Cross-agent messaging via SQLite. Send messages between Claude Code, Codex, Gemini CLI, and other agents. No daemon, no network, no dependencies beyond bash and sqlite3.
+description: Cross-agent messaging via SQLite. Send messages between Claude Code, Codex, Gemini CLI, and other agents. No network, no dependencies beyond bash and sqlite3, and no daemon required (the optional agmsgd is a local resident service).
 ---
 
 <!-- agmsg:render-root -->
@@ -188,7 +188,7 @@ If argument is "config":
 1. Run: `~/.agents/skills/agmsg/scripts/config.sh show`
 2. Show the output to the user.
 
-If argument starts with "config set" (e.g. "config set hook.check_interval 30"):
+If argument starts with "config set" (e.g. "config set delivery.turn.check_interval 30"):
 1. Parse key and value from the arguments.
 2. Run: `~/.agents/skills/agmsg/scripts/config.sh set <key> <value>`
 
@@ -258,7 +258,7 @@ If argument starts with "spawn" (e.g. "spawn codex reviewer", "spawn claude-code
 1. Parse `<type>` (a spawnable agent type), `<name>`, and any options (`--boot-prompt <text>`, `--project <path>`, `--team <team>`, `--window`, `--split h|v`, `--terminal <template>`, `--no-wait`, `--ready-timeout <secs>`, `--model <id>`, `--fresh`).
 2. Run: `~/.agents/skills/agmsg/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
    - `spawn.sh` pre-joins `<name>`, then opens a new pane or window through the terminal driver and launches the target CLI with `/agmsg actas <name>` as its initial prompt. `--boot-prompt` appends a first task to that prompt. Which terminal that is is the driver's decision, never something to name here.
-   - By default it blocks until a spawned Claude Code agent's watcher attaches and prints `status=ready`; `--no-wait` returns immediately. A spawned Codex agent has no Monitor and skips the readiness wait.
+   - By default it blocks until a spawned Claude Code agent's watcher attaches and prints `status=ready`; `--no-wait` returns immediately. A spawned Codex agent skips the readiness wait: it has no spawn-time readiness handshake (that is separate from how it receives messages).
    - It refuses early when `<name>` is already held by another live session, the target CLI is missing, the project path is invalid, or the terminal driver has nowhere to place it.
 3. Show the script's output. Do not TaskStop or relaunch this session's own Monitor; spawn affects a separate agent.
 
@@ -267,7 +267,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 2. Determine which team `<name>` belongs to, then run:
    `~/.agents/skills/agmsg/scripts/despawn.sh <team> $AGENT <name> [--force] [--timeout <secs>]`
    - The default graceful path sends a `ctrl:despawn` message; the member's watcher drops its role and closes its spawned pane, then `despawn` waits for the lock to release.
-   - If the member is Codex and has no watcher, or graceful teardown times out, use `--force` to tear down the recorded pane/window and drop the registration directly.
+   - If the member is Codex and has no watcher (it never holds an actas lock), or graceful teardown times out, use `--force` to tear down the recorded pane/window and drop the registration directly.
 3. Show the script's output. Do not TaskStop or relaunch this session's own Monitor.
 
 If argument starts with "arrange" (e.g. "arrange alice place_below <anchor-ref>"):

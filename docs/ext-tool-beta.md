@@ -8,9 +8,10 @@ the team's messages are the interface.
 
 > ⚠️ **Experimental. The interface and the architecture will change.**
 > ext-tool ships as a preview so the adapter contract can be exercised against
-> real tools. Two things are already decided and will land later: message
-> delivery moves into a daemon (`agmsgd`), and the invocation you see here
-> becomes a *delivery mode* owned by that daemon rather than something the
+> real tools. Two things are already decided: message delivery moves into a
+> daemon (`agmsgd`, which shipped as a beta in 1.6.0 for Claude Code and Codex
+> sessions and does not cover ext-tool members yet), and the invocation you see
+> here will become a *delivery mode* owned by that daemon rather than something the
 > sending command does. Treat every path and flag on this page as unstable.
 >
 > **We are not taking external adapter contributions yet.** Please open an
