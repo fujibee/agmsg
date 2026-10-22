@@ -110,9 +110,10 @@ three signals, none needing a stable `session_id` (Codex doesn't expose one):
    it walks the ppid chain to the agent PID and reads the marker back. Trust is
    gated on the PID still being a live agent process (recycling guard); stale
    markers are GC'd at SessionStart/SessionEnd. Written by
-   `session-start.sh`, so only sessions whose project has the SessionStart hook
-   (monitor (legacy) or both; Codex monitor mode too, through the same hook) get a
-   marker. A session in turn or off mode writes none and relies on signals 2–3.
+   `session-start.sh` for **Claude Code monitor (legacy) / both** sessions. Codex
+   supports monitor mode too (through the app-server bridge), but its SessionStart
+   plug exits before this marker is written, and a session in turn or off mode has
+   no such hook, so those rely on signals 2–3.
 2. **Ancestor walk.** Failing a marker, the nearest ancestor of pwd that is a
    registered project for the type wins. Git-independent — covers nested
    subdirs and worktrees that live *under* the registered project, on cc and
