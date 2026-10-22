@@ -141,8 +141,8 @@ agmsg_source_version() {
 }
 
 # After an --update the running agmsgd notices the new files within one poll
-# (5s), stops itself with "stepped_aside_for_update" and nothing starts it
-# again. When the install had the daemon turned on, wait for that step-aside
+# (5s), stops itself with "stepped_aside_for_update" (exit 0, so the service
+# manager does not schedule a restart of its own) and nothing starts it again. When the install had the daemon turned on, wait for that step-aside
 # (bounded) and start the new version, so an enabled daemon comes back by
 # itself. A failure here never fails the update; it says how to start it.
 agmsg_install_restart_daemon() {   # <skill_dir>

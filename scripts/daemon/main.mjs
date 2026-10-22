@@ -143,8 +143,18 @@ export async function gracefulStop(db, installRoot, gen, controlHandle, channelH
 // pollOnce(), real SIGTERM handling, and control.mjs's stop/status
 // handlers, onto db/manifest values the caller (agmsgd's bootstrap) has
 // already verified. Exit codes: 0 for a declined
-// start or a normal/SIGTERM stop, 75 for stepping aside for an update, 1
-// for a bind failure or any other unexpected error.
+// start, a normal/SIGTERM stop or stepping aside for an update, 1 for a bind
+// failure or any other unexpected error.
+// The code a stopped daemon exits with. Stepping aside for an update exits 0 on
+// purpose: the service managers restart only after a failure (launchd
+// KeepAlive SuccessfulExit=false, systemd Restart=on-failure), and a restart
+// during an update finds the install half replaced, is refused by the launcher
+// and starts the manager's wait (60 s on launchd) before the installer's own
+// start can bring the new version up. The installer starts it right after.
+export function stopExitCode(_reason) {
+  return 0;
+}
+
 export async function main(db, { installRoot, manifest, manifestText, expectedDesired, expectedOpGen, version, prepareClaim }) {
   const channelHooks = [];
   let controlHandle;
@@ -157,7 +167,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
     stopping = true;
     clearInterval(timer);
     await gracefulStop(db, installRoot, gen, controlHandle, channelHooks, reason);
-    process.exit(reason === "stepped_aside_for_update" ? 75 : 0);
+    process.exit(stopExitCode(reason));
   }
 
   const started = await startup(db, {
