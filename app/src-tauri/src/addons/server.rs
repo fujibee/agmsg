@@ -47,8 +47,8 @@ pub struct PaneSpec {
     /// file that differs or is gone turns the pane off (see `on_tamper`), and a
     /// file that is not in the manifest is not served at all.
     pub pinned: Option<BTreeMap<String, (String, u64)>>,
-    /// Called once, with `(port, reason)`, when a pinned file no longer matches.
-    pub on_tamper: Option<Arc<dyn Fn(u16, String) + Send + Sync>>,
+    /// Called once, with `(port, token, reason)`, when a pinned file no longer matches.
+    pub on_tamper: Option<Arc<dyn Fn(u16, String, String) + Send + Sync>>,
 }
 
 #[derive(Debug)]
@@ -87,7 +87,7 @@ struct Ctx {
     entry: String,
     csp: String,
     pinned: Option<BTreeMap<String, (String, u64)>>,
-    on_tamper: Option<Arc<dyn Fn(u16, String) + Send + Sync>>,
+    on_tamper: Option<Arc<dyn Fn(u16, String, String) + Send + Sync>>,
     /// A pinned file changed: everything answers 503 from then on.
     tampered: AtomicBool,
     /// Set by `stop`; nothing is read, routed or written once it is set.
@@ -558,8 +558,8 @@ fn tamper(ctx: &Ctx, reason: String) {
         return;
     }
     if let Some(cb) = ctx.on_tamper.clone() {
-        let port = ctx.port;
-        std::thread::spawn(move || cb(port, reason));
+        let (port, token) = (ctx.port, ctx.token.clone());
+        std::thread::spawn(move || cb(port, token, reason));
     }
 }
 
@@ -1022,7 +1022,7 @@ mod tests {
             network: Network::None,
             expected_digest: None,
             pinned: Some(m.files),
-            on_tamper: Some(Arc::new(move |_port, _why| {
+            on_tamper: Some(Arc::new(move |_port, _token, _why| {
                 h.fetch_add(1, Ordering::SeqCst);
             })),
         })

@@ -62,7 +62,7 @@ pub fn check_tree(root: &Path, files: &[String], limits: Limits) -> TreeReport {
         }
         for part in rel.split('/') {
             if is_reserved_segment(part) {
-                errors.push(format!("Refused: the repository contains a reserved file name at {rel}."));
+                errors.push(format!("Refused: the repository contains a reserved file name at {rel}. Add-ons may contain only plain files."));
                 break;
             }
         }
