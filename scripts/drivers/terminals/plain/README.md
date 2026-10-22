@@ -51,6 +51,9 @@ There is no pane to type into, but that is not automatically a dead end:
   path to this channel (its wire protocol is internal and undocumented,
   #1229) — called anyway for this pair, it refuses (still exit 13) and names
   this section rather than attempting anything.
+  This is only a way to nudge a session that has no pane to type into; it is
+  not a second route for agmsg messages. The message itself still goes through
+  agmsg (`send.sh`), so it is recorded in the team's history like any other.
 - **Otherwise** (the caller is not Claude Code, or the target's type has no
   native channel of its own): `poke.sh` delivers the poke text as an
   ordinary agmsg message instead of typing it — the same store `send.sh`
