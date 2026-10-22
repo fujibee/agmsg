@@ -476,6 +476,30 @@ gone_pid() {
   [ "$status" -ne 0 ]
 }
 
+@test "override: a Windows hook without CLAUDE_PID finds the claude.exe ancestor through Windows" {
+  unset AGMSG_AGENT_PID CLAUDE_PID _AGMSG_COMPAT_NO_CIM
+  _agmsg_pid_alive() { return 0; }
+  compat_get_ppid() { return 1; }
+  _compat_get_winpid() { printf '7777'; }
+  # Records the question so the test can see which image was asked for.
+  powershell.exe() { printf '%s\n' "$*" > "$BATS_TEST_TMPDIR/ps-args"; printf '5480\r\n'; }
+  _agmsg_platform=msys run agmsg_agent_pid claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" = "5480" ]
+  grep -Fq "claude.exe" "$BATS_TEST_TMPDIR/ps-args"
+  grep -Fq "7777" "$BATS_TEST_TMPDIR/ps-args"
+  # No claude.exe ancestor: the bare fallback, as before.
+  powershell.exe() { :; }
+  _agmsg_platform=msys run agmsg_agent_pid claude-code
+  [ "$status" -ne 0 ]
+  # Never asked off Windows or for another host type.
+  powershell.exe() { printf '5480'; }
+  _agmsg_platform=linux run agmsg_agent_pid claude-code
+  [ "$status" -ne 0 ]
+  _agmsg_platform=msys run agmsg_agent_pid codex
+  [ "$status" -ne 0 ]
+}
+
 # --- actas distinctness: the #93 payoff ---
 
 # Two instance ids that share a session_id prefix but differ in pid must be
