@@ -7,7 +7,7 @@ import { declaredPermissions, addonNetwork, grantText, grantsOf, installErrorTex
 // and a collapsed Developer section. Reads only AddonsSnapshot, so the wiring
 // later swaps the source without touching this.
 
-export function AddonsSettings(props: {
+type Props = {
   t: Translate;
   snapshot: AddonsSnapshot;
   engine: EngineState;
@@ -31,7 +31,9 @@ export function AddonsSettings(props: {
   onRetryGrants?: () => void;
   /** Developer copies get Reload and Remove here. */
   onDevReload?: (addonId: string) => void;
-}) {
+};
+
+export function AddonsSettings(props: Props) {
   const { t, snapshot, engine } = props;
   const canInstall = props.canInstall ?? true;
   const [input, setInput] = useState("");
@@ -43,14 +45,7 @@ export function AddonsSettings(props: {
   if (!engine.ok) {
     return (
       <div className="addons-settings">
-        {props.listError !== undefined && (
-        <p className="addon-list-error" role="alert">
-          {t("addons.listFailed", { message: props.listError })}{" "}
-          <button type="button" onClick={props.onRetryList}>
-            {t("addons.listRetry")}
-          </button>
-        </p>
-      )}
+        <Alerts {...props} />
         <p className="addon-engine-off" role="status">
           {t("addons.engineOff")}{" "}
           {engine.reasons.length > 0 && t("addons.engineReasons", { reasons: engine.reasons.join("; ") })}
@@ -62,14 +57,7 @@ export function AddonsSettings(props: {
 
   return (
     <div className="addons-settings">
-      {props.listError !== undefined && (
-        <p className="addon-list-error" role="alert">
-          {t("addons.listFailed", { message: props.listError })}{" "}
-          <button type="button" onClick={props.onRetryList}>
-            {t("addons.listRetry")}
-          </button>
-        </p>
-      )}
+      <Alerts {...props} />
       <section>
         <h3>{t("addons.builtin.title")}</h3>
         <ul className="addon-list">
@@ -85,19 +73,6 @@ export function AddonsSettings(props: {
 
       <section>
         <h3>{t("addons.installed.title")}</h3>
-        {props.notice && (
-          <p className={`addon-notice ${props.notice.kind}`} role={props.notice.kind === "error" ? "alert" : "status"}>
-            {props.notice.text}
-          </p>
-        )}
-        {props.grantsError !== undefined && (
-          <p className="addon-list-error" role="alert">
-            {t("addons.grantsFailed", { message: props.grantsError })}{" "}
-            <button type="button" onClick={props.onRetryGrants}>
-              {t("addons.listRetry")}
-            </button>
-          </p>
-        )}
         <InstalledList {...props} installed={installed} />
         <form
           className="addon-install-form"
@@ -172,6 +147,35 @@ export function AddonsSettings(props: {
         </details>
       )}
     </div>
+  );
+}
+
+function Alerts(props: { t: Translate } & Pick<Props, "listError" | "onRetryList" | "grantsError" | "onRetryGrants" | "notice">) {
+  const { t } = props;
+  return (
+    <>
+      {props.listError !== undefined && (
+        <p className="addon-list-error" role="alert">
+          {t("addons.listFailed", { message: props.listError })}{" "}
+          <button type="button" onClick={props.onRetryList}>
+            {t("addons.listRetry")}
+          </button>
+        </p>
+      )}
+      {props.grantsError !== undefined && (
+        <p className="addon-list-error" role="alert">
+          {t("addons.grantsFailed", { message: props.grantsError })}{" "}
+          <button type="button" onClick={props.onRetryGrants}>
+            {t("addons.listRetry")}
+          </button>
+        </p>
+      )}
+      {props.notice && (
+        <p className={`addon-notice ${props.notice.kind}`} role={props.notice.kind === "error" ? "alert" : "status"}>
+          {props.notice.text}
+        </p>
+      )}
+    </>
   );
 }
 

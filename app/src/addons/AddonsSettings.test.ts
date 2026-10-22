@@ -121,4 +121,15 @@ describe("locale keys", () => {
     expect(html).toContain("addons.grantsFailed");
     expect(html).toContain("GRANTS SENTINEL FAILURE");
   });
+  it("while add-ons are off, a failed grants read and a failed Remove still show their reasons", () => {
+    const html = render({
+      engine: mockEngineOff,
+      grantsError: "GRANTS OFF SENTINEL",
+      notice: { kind: "error", text: "REMOVE OFF SENTINEL" },
+      listError: "LIST OFF SENTINEL",
+    });
+    expect(html).toContain("GRANTS OFF SENTINEL");
+    expect(html).toContain("REMOVE OFF SENTINEL");
+    expect(html).toContain("LIST OFF SENTINEL");
+  });
 });
