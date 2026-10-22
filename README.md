@@ -276,7 +276,7 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 | **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
 | **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
 
-agmsgd is not offered where `agmsg daemon enable` would refuse (Node older than 22.13, a JSONL message storage, no systemd user services on Linux, Codex older than 0.157 on Windows); the prompt says why in one line and lists the other modes. When agmsgd is already on, the prompt does not ask which to use: it says so and asks only whether to keep it or switch to `monitor (legacy)`. Choosing agmsgd runs `agmsg daemon enable` and leaves the project on `monitor` as the fallback for a session whose destination is not confirmed yet.
+agmsgd is not offered where `agmsg daemon enable` would refuse (Node older than 22.13, a JSONL message storage, no systemd user services on Linux, Codex older than 0.157 on Windows); the prompt says why in one line and lists the other modes. When agmsgd is already on, the prompt does not ask which to use: it says so and asks only whether to keep it or switch to `monitor (legacy)`. Choosing agmsgd runs `agmsg daemon enable` and leaves the project on `monitor` as the fallback for a session whose destination is not confirmed yet. Choosing `monitor (legacy)` (or `turn`, `both`, `off`) is a real opt-out for that project: agmsgd stops delivering to its seats (`agmsg daemon status` shows them as chosen), and agmsgd itself stays on for the install's other projects (`agmsg daemon disable` turns it off for all of them). A project that never chose is unchanged.
 
 ### Picking a mode
 

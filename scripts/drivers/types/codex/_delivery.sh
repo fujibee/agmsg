@@ -220,6 +220,7 @@ agmsg_delivery_status() {
   # shellcheck disable=SC1091
   source "${SKILL_DIR:-}/scripts/lib/role-session.sh"
   agmsg_daemon_read_state
+  agmsg_daemon_apply_project_choice codex "$project"
   if [ "${AGMSGD_DESIRED:-}" = on ] && [ "${AGMSGD_HEALTH:-}" = ready ]; then
     pairs="$("${SCRIPT_DIR:-}/identities.sh" "$project" "$type" 2>/dev/null || true)"
     while IFS=$'\t' read -r team name _rest; do

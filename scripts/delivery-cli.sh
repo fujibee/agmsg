@@ -18,6 +18,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/compat.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/detect-cli-type.sh"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+export SKILL_DIR
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/role-session.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/daemon-state.sh"
 
 _usage() {
   cat >&2 <<'USAGE'
@@ -43,6 +51,27 @@ done
 [ -n "$TYPE" ] || TYPE="$(agmsg_detect_cli_type)"
 
 offer="$(bash "$SCRIPT_DIR/daemon.sh" offer "$TYPE" 2>/dev/null || true)"
+CANON_PROJECT="$(agmsg_canonical_path "$PROJECT")"
+
+# Record what this project chose, in run/delivery-choice ("<type> <project>
+# <value>"): the daemon, the shim and the session hooks read it, so a project that
+# chose something other than agmsgd is not delivered to by agmsgd. Only this
+# command writes it; a project that never chose has no line and is unchanged.
+_choice_write_unlocked() {   # <value>
+  local file="$SKILL_DIR/run/delivery-choice" tmp
+  mkdir -p "$SKILL_DIR/run" 2>/dev/null || return 1
+  tmp="$(mktemp "$SKILL_DIR/run/.delivery-choice.XXXXXX")" || return 1
+  {
+    [ ! -f "$file" ] || awk -F'\t' -v t="$TYPE" -v p="$CANON_PROJECT" '!($1 == t && $2 == p)' "$file"
+    printf '%s\t%s\t%s\n' "$TYPE" "$CANON_PROJECT" "$1"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file"
+}
+_record_choice() {   # <value>
+  case "$CANON_PROJECT" in *$'\t'*|*$'\n'*) echo "agmsg delivery: this project path cannot be recorded; the choice was not saved" >&2; return 1 ;; esac
+  _agmsg_role_session_write _choice_write_unlocked "$1" || { echo "agmsg delivery: could not record the choice for this project" >&2; return 1; }
+}
 
 _mode_label() { case "$1" in monitor) printf 'monitor (legacy)' ;; *) printf '%s' "$1" ;; esac; }
 
@@ -57,7 +86,10 @@ case "$ACTION" in
     esac
     out="$(bash "$SCRIPT_DIR/delivery.sh" status "$TYPE" "$PROJECT")"
     mode="$(sed -n 's/^mode: *\([a-z]*\).*/\1/p' <<<"$out" | head -1)"
-    if [ -n "$mode" ]; then
+    chosen="$(agmsg_delivery_choice_get "$TYPE" "$PROJECT")"
+    if [ -n "$chosen" ] && [ "$chosen" != agmsgd ]; then
+      echo "this project: $(_mode_label "$chosen") chosen — agmsgd does not deliver here"
+    elif [ -n "$mode" ]; then
       if [ "$offer" = agmsgd=on ]; then
         echo "this project's fallback: $(_mode_label "$mode")"
       else
@@ -81,12 +113,16 @@ case "$ACTION" in
         ;;
       *) echo "agmsg delivery: could not tell whether agmsgd is available" >&2; exit 1 ;;
     esac
-    exec bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT"
+    bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT"
+    _record_choice agmsgd
     ;;
   *)
     bash "$SCRIPT_DIR/delivery.sh" set "$ACTION" "$TYPE" "$PROJECT"
-    if [ "$offer" = agmsgd=on ]; then
-      echo "note: agmsgd is still on; 'agmsg daemon disable' turns it off."
-    fi
+    _record_choice "$ACTION"
+    case "$offer" in
+      agmsgd=on|agmsgd=not-running*)
+        echo "agmsgd does not deliver to this project now ($(_mode_label "$ACTION") chosen). agmsgd itself stays on for the other projects of this install; to turn it off for all of them: agmsg daemon disable"
+        ;;
+    esac
     ;;
 esac

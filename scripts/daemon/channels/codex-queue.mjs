@@ -6,6 +6,7 @@ import { homedir, hostname } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { accessSync, constants, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { logLine } from "../log.mjs";
+import { optedOutOfAgmsgd } from "./delivery-choice.mjs";
 import { withImmediateTransaction } from "../db.mjs";
 import {
   listCodexRegistrations,
@@ -408,6 +409,12 @@ export function createCodexQueueChannel({
     const projects = registeredProjects;
     if (projects.length === 0 || !projects.some((project) => sameProject(project, record.project))) {
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: "role_session_project_mismatch" }, now);
+      return;
+    }
+    // A project that chose something other than agmsgd gets no new notices.
+    const optedOut = optedOutOfAgmsgd(installRoot, "codex", record.project);
+    if (optedOut) {
+      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "unaddressable", reason: `delivery_chosen_${optedOut}` }, now);
       return;
     }
     let storePath;

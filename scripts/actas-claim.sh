@@ -155,6 +155,8 @@ if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
   command -v _agmsg_detect_platform >/dev/null 2>&1 || . "$SKILL_DIR/scripts/lib/compat.sh"
   _agmsg_detect_platform
   agmsg_daemon_read_state
+  # A project that chose something other than agmsgd keeps the Monitor path.
+  agmsg_daemon_apply_project_choice claude-code "$PROJECT_PHYS"
   if [ "${AGMSGD_HEALTH:-}" = ready ] && agmsg_claude_code_native_storage_ready; then
     NATIVE_DELIVERY=1
     while IFS= read -r team; do

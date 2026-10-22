@@ -444,3 +444,19 @@ test('a seat whose hook could not publish a destination is reported with that re
   writeFileSync(path.join(root, 'run', 'role-session.test__alice'), record('messaging_blocked=bad value;\n'));
   assert.equal(readClaudeRoleSession(path.join(root, 'run'), 'test', 'alice').record.messaging_blocked, '');
 });
+
+test('a project that chose something other than agmsgd gets no nudge, a waiting one is dropped, and a project that never chose is unchanged', async (t) => {
+  const { db, channel, state } = channelFixture(t);
+  const root = state.options.installRoot;
+  await channel.pollOnce();
+  assert.equal(state.sent, 1, 'no choice recorded: agmsgd delivers as before');
+  writeFileSync(path.join(root, 'run', 'delivery-choice'), `claude-code\t${root}\tmonitor\n`);
+  for (let i = 0; i < 3; i += 1) await channel.pollOnce();
+  assert.equal(state.sent, 1, 'no further nudge for an opted-out project');
+  assert.equal(db.prepare("SELECT state || '/' || reason AS r FROM beta_claude_seat").get().r, 'unaddressable/delivery_chosen_monitor');
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state = 'pending'").get().n, 0);
+  writeFileSync(path.join(root, 'run', 'delivery-choice'), `claude-code\t${root}\tagmsgd\n`);
+  state.hold = false;
+  await channel.pollOnce();
+  assert.equal(db.prepare("SELECT state FROM beta_claude_seat").get().state === 'unaddressable', false, 'choosing agmsgd again puts the seat back');
+});

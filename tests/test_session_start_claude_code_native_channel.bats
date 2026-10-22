@@ -150,6 +150,24 @@ _mark_daemon_ready() {
   refute grep -q "^messaging_blocked=" "$RUN_DIR/role-session.team__alice"
 }
 
+@test "session-start: a project that chose monitor (legacy) keeps the Monitor directive even with agmsgd ready" {
+  _mark_daemon_ready
+  printf 'claude-code\t%s\tmonitor\n' "$(cd "$PROJ" 2>/dev/null && pwd -P || printf "%s" "$PROJ")" > "$RUN_DIR/delivery-choice"
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-legacy.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-legacy"}'
+  [ "$status" -eq 0 ]
+  grep -qF "AGMSG monitor mode" <<<"$output"
+  refute grep -q "agmsgd is running and will deliver" <<<"$output"
+  refute grep -q "^messaging_socket=" "$RUN_DIR/role-session.team__alice" 2>/dev/null
+  # actas-claim keeps the same project on the Monitor path.
+  run env AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-legacy.sock" bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-legacy"
+  refute grep -qx "delivery=native" <<<"$output"
+  # Choosing agmsgd for the project brings the direct path back.
+  printf 'claude-code\t%s\tagmsgd\n' "$(cd "$PROJ" 2>/dev/null && pwd -P || printf "%s" "$PROJ")" > "$RUN_DIR/delivery-choice"
+  run env AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-legacy.sock" bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-legacy"
+  grep -qx "delivery=native" <<<"$output"
+}
+
 @test "session-start: agmsgd not running -> the usual Monitor directive still fires" {
   run _run_session_start "sid-no-daemon"
   [ "$status" -eq 0 ]

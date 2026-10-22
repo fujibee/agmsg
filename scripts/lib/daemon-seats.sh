@@ -11,7 +11,7 @@ source "$SKILL_DIR/scripts/lib/role-session.sh"
 agmsg_daemon_seat_report() {
   local action="${1:-status}" cfg cfg_sql roster team agent project pid meta_type meta_project meta_pid
   local bridge record_status cached key driver record_type record_home label latest
-  local seen='|' omitted=0 pending owner updated recent active display
+  local seen='|' omitted=0 pending owner updated recent active display chosen
   local active_lines='' recent_lines='' older_lines='' recovery
   source "$SKILL_DIR/scripts/lib/type-registry.sh"
   source "$SKILL_DIR/scripts/lib/boot-command.sh"
@@ -82,6 +82,12 @@ agmsg_daemon_seat_report() {
       updated="$(printf '%s' "$updated" | sed "s/'/''/g")"
       recent="$(sqlite3 :memory: "SELECT COALESCE(strftime('%s','$updated') >= strftime('%s','now','-1 day'),0);" 2>/dev/null)" || recent=0
       active=0
+      chosen=""
+      if declare -F agmsg_delivery_choice_get >/dev/null 2>&1; then
+        chosen="$(agmsg_delivery_choice_get codex "$project")"
+        [ "$chosen" != agmsgd ] || chosen=""
+        [ -z "$chosen" ] || active=1
+      fi
       [ "$bridge" != running ] || active=1
       [ "$pending" = 0 ] || active=1
       # Bare historical thread IDs have no process witness. Do not scan all
@@ -127,6 +133,10 @@ agmsg_daemon_seat_report() {
         *:unknown) display="bridge could not be verified; inspect delivery.sh status codex ($record_status)" ;;
         *) display="$record_status" ;;
       esac
+      if [ -n "$chosen" ]; then
+        [ "$chosen" != monitor ] || chosen='monitor (legacy)'
+        display="$chosen chosen; agmsgd does not deliver here"
+      fi
       if [ "$driver" != sqlite ]; then
         local storage_label="$driver"
         [ "$driver" != jsonl ] || storage_label=JSONL

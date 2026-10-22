@@ -250,6 +250,13 @@ function formatClaudeSeats(inventory, all) {
   let omitted = 0;
   const lines = [];
   for (const seat of inventory?.seats ?? []) {
+    const chosen = /^delivery_chosen_([a-z]+)$/.exec(seat.reason ?? "")?.[1];
+    if (chosen) {
+      let label;
+      try { label = JSON.parse(seat.seat).join("/"); } catch { label = "unidentified seat"; }
+      lines.push(`Claude Code ${label}: ${chosen === "monitor" ? "monitor (legacy)" : chosen} chosen; agmsgd does not deliver here`);
+      continue;
+    }
     if (!all && (seat.state === "unaddressable" || !seat.messaging_socket)) {
       omitted += 1;
       continue;

@@ -1254,6 +1254,7 @@ _agmsg_watch_native_delivery_active() {
     || return 1
   local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
   agmsg_daemon_read_state
+  agmsg_daemon_apply_project_choice claude-code "$PROJECT_PATH"
   [ "${AGMSGD_DESIRED:-}" = on ] && [ "${AGMSGD_HEALTH:-}" = ready ] || return 1
   declare -F _agmsg_detect_platform >/dev/null 2>&1 && _agmsg_detect_platform
   declare -F agmsg_claude_code_native_storage_ready >/dev/null 2>&1 || return 1
