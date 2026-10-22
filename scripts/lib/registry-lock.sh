@@ -390,17 +390,20 @@ agmsg_lock_acquire() {
           echo "agmsg: that process is not running — the lock was being broken as this wait ended." >&2
         fi
       else
-        # QUOTED, because this line is meant to be pasted: the store root and the
-        # team name can both contain a space. `rmdir` rather than `rm -r`, so the
-        # paste cannot remove anything but an empty lock directory.
-        q="$(printf "'%s'" "$(printf '%s' "$lock" | sed "s/'/'\\''/g")")"
+        # Quote the exact lock path for the recovery command, including spaces,
+        # apostrophes and shell metacharacters. Only lock metadata lives inside.
+        q="$(printf '%q' "$lock")"
         echo "agmsg: the lock records no holder, so nothing here could ask whether it is held." >&2
         for staged in "$lock".holder.releasing.*; do
           [ -f "$staged" ] || continue
           echo "agmsg: a release was interrupted: $staged is what its owner (pid ${staged##*.holder.releasing.}) staged. If that record cannot be read, nothing here can say which machine wrote it, so the lock is kept." >&2
         done
         echo "agmsg: a lock with no holder record is not broken automatically. If no agmsg command is running for this team, remove it:" >&2
-        echo "agmsg:   rmdir $q" >&2
+        if [ -e "$lock/.owner" ] || [ -L "$lock/.owner" ]; then
+          echo "agmsg:   rm -r -- $q" >&2
+        else
+          echo "agmsg:   rmdir $q" >&2
+        fi
         echo "agmsg: doctor.sh lists such locks." >&2
       fi
       # The reason travels with the timeout too. If the wait was hopeless for
