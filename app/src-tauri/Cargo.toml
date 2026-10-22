@@ -41,6 +41,9 @@ base64 = "0.22"
 # random pane tokens.
 sha2 = "0.10"
 getrandom = "0.2"
+# Add-on install: read the GitHub tarball of one commit.
+flate2 = "1"
+tar = "0.4"
 # Myers line diff for the add-on git.diff result (addons/diff.rs).
 similar = "2"
 

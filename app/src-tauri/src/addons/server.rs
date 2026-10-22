@@ -10,7 +10,7 @@
 //! (no credentials) because an opaque-origin frame fetching its own files is
 //! cross-origin. When the server is stopped the listener and the token are gone.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -41,6 +41,14 @@ pub struct PaneSpec {
     pub network: Network,
     /// When set, the payload directory must hash to this value to start.
     pub expected_digest: Option<String>,
+    /// What each served file hashed to when it was verified (path relative to the
+    /// served directory → sha256, size). With this set, every response is built
+    /// from bytes that were hashed after being read and match the manifest; a
+    /// file that differs or is gone turns the pane off (see `on_tamper`), and a
+    /// file that is not in the manifest is not served at all.
+    pub pinned: Option<BTreeMap<String, (String, u64)>>,
+    /// Called once, with `(port, reason)`, when a pinned file no longer matches.
+    pub on_tamper: Option<Arc<dyn Fn(u16, String) + Send + Sync>>,
 }
 
 #[derive(Debug)]
@@ -78,6 +86,10 @@ struct Ctx {
     root: Option<PathBuf>,
     entry: String,
     csp: String,
+    pinned: Option<BTreeMap<String, (String, u64)>>,
+    on_tamper: Option<Arc<dyn Fn(u16, String) + Send + Sync>>,
+    /// A pinned file changed: everything answers 503 from then on.
+    tampered: AtomicBool,
     /// Set by `stop`; nothing is read, routed or written once it is set.
     stopped: AtomicBool,
     /// Accepted sockets, so `stop` can close them under a handler's feet.
@@ -112,7 +124,29 @@ impl PaneServer {
                     _ => return Err(StartError::NoEntry(spec.entry.clone())),
                 }
                 let mut hashes = Vec::new();
-                collect_html_hashes(&canon, &mut hashes);
+                match &spec.pinned {
+                    Some(pinned) => {
+                        // inline-script hashes come from the verified bytes, not from whatever is on disk now
+                        for (rel, (sha, size)) in pinned {
+                            if !(rel.ends_with(".html") || rel.ends_with(".htm")) {
+                                continue;
+                            }
+                            let bytes = read_exact_file(&canon, rel, *size).ok_or(StartError::DigestMismatch)?;
+                            if &digest::sha256_hex(&bytes) != sha {
+                                return Err(StartError::DigestMismatch);
+                            }
+                            for h in csp::inline_script_hashes(&String::from_utf8_lossy(&bytes)) {
+                                if !hashes.contains(&h) {
+                                    hashes.push(h);
+                                }
+                            }
+                        }
+                        if !pinned.contains_key(&spec.entry) {
+                            return Err(StartError::NoEntry(spec.entry.clone()));
+                        }
+                    }
+                    None => collect_html_hashes(&canon, &mut hashes),
+                }
                 (Some(canon), hashes)
             }
             Payload::Embedded(files) => {
@@ -145,6 +179,9 @@ impl PaneServer {
             root,
             entry: spec.entry,
             csp: csp.clone(),
+            pinned: spec.pinned,
+            on_tamper: spec.on_tamper,
+            tampered: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             conns: Mutex::new(HashMap::new()),
             next_conn: AtomicU64::new(1),
@@ -380,6 +417,9 @@ impl Reply {
 }
 
 fn route(ctx: &Ctx, method: &str, target: &str, hosts: &[String]) -> Reply {
+    if ctx.tampered.load(Ordering::SeqCst) {
+        return Reply::status(503);
+    }
     // DNS rebinding first: the one allowed Host is exactly this listener.
     if hosts.len() != 1 || hosts[0] != format!("127.0.0.1:{}", ctx.port) {
         return Reply::status(421);
@@ -463,6 +503,19 @@ fn is_reserved_device_name(seg: &str) -> bool {
 fn read_payload_file(ctx: &Ctx, rel: &str) -> Result<Vec<u8>, u16> {
     match &ctx.payload {
         Payload::Embedded(files) => files.get(rel).cloned().ok_or(404),
+        Payload::Dir(_) if ctx.pinned.is_some() => {
+            let root = ctx.root.as_ref().ok_or(404u16)?;
+            let pinned = ctx.pinned.as_ref().ok_or(404u16)?;
+            // a file that was never verified is not served
+            let (sha, size) = pinned.get(rel).ok_or(404u16)?;
+            match read_exact_file(root, rel, *size) {
+                Some(bytes) if &digest::sha256_hex(&bytes) == sha => Ok(bytes),
+                _ => {
+                    tamper(ctx, format!("{rel} no longer matches the files that were verified when this add-on was opened"));
+                    Err(503)
+                }
+            }
+        }
         Payload::Dir(_) => {
             let root = ctx.root.as_ref().ok_or(404u16)?;
             let mut cur = root.clone();
@@ -496,6 +549,57 @@ fn read_payload_file(ctx: &Ctx, rel: &str) -> Result<Vec<u8>, u16> {
             std::fs::read(&real).map_err(|_| 404)
         }
     }
+}
+
+/// Turns the pane off after a pinned file changed. The callback runs once, on
+/// its own thread (it closes this very server).
+fn tamper(ctx: &Ctx, reason: String) {
+    if ctx.tampered.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(cb) = ctx.on_tamper.clone() {
+        let port = ctx.port;
+        std::thread::spawn(move || cb(port, reason));
+    }
+}
+
+/// Reads a plain file of exactly `size` bytes under `root` (no symlink on the
+/// way, a single hard link, real path under `root`) and returns the bytes that
+/// were read, which the caller hashes and then serves, so what is hashed is what is sent.
+fn read_exact_file(root: &Path, rel: &str, size: u64) -> Option<Vec<u8>> {
+    if !valid_relative(rel) {
+        return None;
+    }
+    let mut cur = root.to_path_buf();
+    let mut last = None;
+    for seg in rel.split('/') {
+        cur.push(seg);
+        let meta = std::fs::symlink_metadata(&cur).ok()?;
+        if meta.file_type().is_symlink() {
+            return None;
+        }
+        last = Some(meta);
+    }
+    let meta = last?;
+    if !meta.is_file() || meta.len() != size || size > MAX_FILE {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() > 1 {
+            return None;
+        }
+    }
+    let real = std::fs::canonicalize(&cur).ok()?;
+    if !real.starts_with(root) {
+        return None;
+    }
+    let mut f = std::fs::File::open(&real).ok()?;
+    let mut buf = Vec::with_capacity(size as usize);
+    // one byte more than expected: a file that grew is not the file that was verified
+    Read::by_ref(&mut f).take(size + 1).read_to_end(&mut buf).ok()?;
+    (buf.len() as u64 == size).then_some(buf)
 }
 
 fn mime(path: &str) -> &'static str {
@@ -537,6 +641,7 @@ fn reason(status: u16) -> &'static str {
         413 => "Content Too Large",
         421 => "Misdirected Request",
         431 => "Request Header Fields Too Large",
+        503 => "Service Unavailable",
         _ => "Error",
     }
 }
@@ -573,6 +678,7 @@ fn write_reply(ctx: &Ctx, stream: &mut TcpStream, r: &Reply, head_only: bool) ->
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::AtomicUsize;
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("agmsg-server-{}-{name}", std::process::id()));
@@ -593,7 +699,7 @@ mod tests {
     }
 
     fn start(payload: &Path) -> PaneServer {
-        PaneServer::start(PaneSpec { payload: Payload::Dir(payload.to_path_buf()), entry: "index.html".into(), network: Network::None, expected_digest: None }).unwrap()
+        PaneServer::start(PaneSpec { payload: Payload::Dir(payload.to_path_buf()), entry: "index.html".into(), network: Network::None, expected_digest: None, pinned: None, on_tamper: None }).unwrap()
     }
 
     /// One raw request over a real socket; returns (status, headers text, body).
@@ -770,18 +876,18 @@ mod tests {
     fn digest_mismatch_refuses_to_start_and_match_starts() {
         let (_r, p) = fixture("dig");
         let good = digest::payload_digest(&p).unwrap();
-        let ok = PaneServer::start(PaneSpec { payload: Payload::Dir(p.clone()), entry: "index.html".into(), network: Network::None, expected_digest: Some(good.clone()) });
+        let ok = PaneServer::start(PaneSpec { payload: Payload::Dir(p.clone()), entry: "index.html".into(), network: Network::None, expected_digest: Some(good.clone()), pinned: None, on_tamper: None });
         assert!(ok.is_ok());
         drop(ok);
         fs::write(p.join("app.js"), "changed").unwrap();
-        let bad = PaneServer::start(PaneSpec { payload: Payload::Dir(p.clone()), entry: "index.html".into(), network: Network::None, expected_digest: Some(good) });
+        let bad = PaneServer::start(PaneSpec { payload: Payload::Dir(p.clone()), entry: "index.html".into(), network: Network::None, expected_digest: Some(good), pinned: None, on_tamper: None });
         assert!(matches!(bad, Err(StartError::DigestMismatch)));
     }
 
     #[test]
     fn missing_entry_refuses_to_start() {
         let (_r, p) = fixture("noentry");
-        let r = PaneServer::start(PaneSpec { payload: Payload::Dir(p), entry: "nope.html".into(), network: Network::None, expected_digest: None });
+        let r = PaneServer::start(PaneSpec { payload: Payload::Dir(p), entry: "nope.html".into(), network: Network::None, expected_digest: None, pinned: None, on_tamper: None });
         assert!(matches!(r, Err(StartError::NoEntry(_))));
     }
 
@@ -794,6 +900,8 @@ mod tests {
             entry: "index.html".into(),
             network: Network::Origins(vec!["https://api.example.com".into()]),
             expected_digest: None,
+            pinned: None,
+            on_tamper: None,
         })
         .unwrap();
         let (st, head, body) = get(&srv, &format!("/{}/", srv.token()));
@@ -900,6 +1008,138 @@ mod tests {
         drop(srv);
         let _ = c.write_all(format!("/{token}/index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes());
         assert!(drain(c).is_empty());
+    }
+
+    // ---- pinned mode: every served byte is held to what was verified ----
+
+    fn pinned_server(p: &Path) -> (PaneServer, Arc<AtomicUsize>) {
+        let m = digest::manifest(p).unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let srv = PaneServer::start(PaneSpec {
+            payload: Payload::Dir(p.to_path_buf()),
+            entry: "index.html".into(),
+            network: Network::None,
+            expected_digest: None,
+            pinned: Some(m.files),
+            on_tamper: Some(Arc::new(move |_port, _why| {
+                h.fetch_add(1, Ordering::SeqCst);
+            })),
+        })
+        .unwrap();
+        (srv, hits)
+    }
+
+    fn wait_for(hits: &Arc<AtomicUsize>, n: usize) {
+        for _ in 0..200 {
+            if hits.load(Ordering::SeqCst) >= n {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn pinned_files_are_served_as_verified() {
+        let (_r, p) = fixture("pin-ok");
+        let (srv, hits) = pinned_server(&p);
+        let t = srv.token().to_string();
+        assert_eq!(get(&srv, &format!("/{t}/index.html")).0, 200);
+        assert_eq!(get(&srv, &format!("/{t}/sub/file.txt")).2, b"sub-file");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_file_edited_after_start_turns_the_pane_off() {
+        let (_r, p) = fixture("pin-edit");
+        let (srv, hits) = pinned_server(&p);
+        let t = srv.token().to_string();
+        fs::write(p.join("app.js"), "export const evil = 1;").unwrap();
+        let (st, _, body) = get(&srv, &format!("/{t}/app.js"));
+        assert_eq!(st, 503);
+        assert!(!String::from_utf8_lossy(&body).contains("evil"));
+        wait_for(&hits, 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // everything answers 503 from then on, including files that did not change; and only one notice
+        assert_eq!(get(&srv, &format!("/{t}/index.html")).0, 503);
+        assert_eq!(get(&srv, &format!("/{t}/app.js")).0, 503);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_index_edited_after_start_is_not_served() {
+        let (_r, p) = fixture("pin-index");
+        let (srv, hits) = pinned_server(&p);
+        fs::write(p.join("index.html"), "<script>steal()</script>").unwrap();
+        let (st, _, body) = get(&srv, &format!("/{}/", srv.token()));
+        assert_eq!(st, 503);
+        assert!(body.is_empty());
+        wait_for(&hits, 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_deleted_file_turns_the_pane_off() {
+        let (_r, p) = fixture("pin-del");
+        let (srv, hits) = pinned_server(&p);
+        fs::remove_file(p.join("app.js")).unwrap();
+        assert_eq!(get(&srv, &format!("/{}/app.js", srv.token())).0, 503);
+        wait_for(&hits, 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_file_that_grew_or_shrank_is_not_the_verified_one() {
+        let (_r, p) = fixture("pin-size");
+        let (srv, hits) = pinned_server(&p);
+        let mut f = fs::OpenOptions::new().append(true).open(p.join("app.js")).unwrap();
+        f.write_all(b" // appended").unwrap();
+        assert_eq!(get(&srv, &format!("/{}/app.js", srv.token())).0, 503);
+        wait_for(&hits, 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_file_that_was_not_verified_is_not_served_and_is_not_a_tamper() {
+        let (_r, p) = fixture("pin-new");
+        let (srv, hits) = pinned_server(&p);
+        fs::write(p.join("added-later.js"), "console.log(1)").unwrap();
+        let t = srv.token().to_string();
+        assert_eq!(get(&srv, &format!("/{t}/added-later.js")).0, 404);
+        assert_eq!(get(&srv, &format!("/{t}/index.html")).0, 200, "the pane keeps working");
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_verified_file_swapped_for_a_symlink_turns_the_pane_off() {
+        let (r, p) = fixture("pin-link");
+        let (srv, hits) = pinned_server(&p);
+        fs::remove_file(p.join("app.js")).unwrap();
+        std::os::unix::fs::symlink(r.join("outside.txt"), p.join("app.js")).unwrap();
+        let (st, _, body) = get(&srv, &format!("/{}/app.js", srv.token()));
+        assert_eq!(st, 503);
+        assert!(!String::from_utf8_lossy(&body).contains("OUTSIDE-SECRET"));
+        wait_for(&hits, 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn starting_over_a_changed_html_file_is_refused() {
+        let (_r, p) = fixture("pin-start");
+        let m = digest::manifest(&p).unwrap();
+        fs::write(p.join("index.html"), "<script>other()</script>").unwrap();
+        let r = PaneServer::start(PaneSpec { payload: Payload::Dir(p), entry: "index.html".into(), network: Network::None, expected_digest: None, pinned: Some(m.files), on_tamper: None });
+        assert!(matches!(r, Err(StartError::DigestMismatch)));
+    }
+
+    #[test]
+    fn the_inline_script_hashes_come_from_the_verified_bytes() {
+        let (_r, p) = fixture("pin-hash");
+        let (srv, _h) = pinned_server(&p);
+        assert!(srv.csp().contains(&csp::script_hash("var a=1;")));
     }
 
     #[test]

@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use flate2::read::GzDecoder;
 use tar::EntryType;
@@ -181,10 +181,10 @@ pub fn extract_tar_gz<R: Read>(reader: R, dest: &Path, limits: Limits) -> Result
             continue;
         }
         if let Some(prev) = lower.get(&key) {
-            return Err(InstallError::unsafe_entry(
-                "two files that differ only in case",
-                &if prev == rel { format!("{rel} (it appears twice)") } else { format!("{rel} and {prev}") },
-            ));
+            return Err(InstallError {
+                kind: InstallErrorKind::UnsafeEntry,
+                message: if prev == rel { format!("Refused: {rel} appears twice in the archive.") } else { format!("Refused: {rel} and {prev} differ only in case.") },
+            });
         }
         if out.files.len() + 1 > limits.files {
             return Err(InstallError::too_large(format!("Too large to install: more than {} files (limit {}).", limits.files, limits.files)));
@@ -193,7 +193,7 @@ pub fn extract_tar_gz<R: Read>(reader: R, dest: &Path, limits: Limits) -> Result
             fs::create_dir_all(parent)?;
         }
         // never follow anything that is already there
-        let mut file = fs::OpenOptions::new().write_only_new()?.open_new(&target)?;
+        let mut file = create_new_file(&target)?;
         let mut size: u64 = 0;
         let mut buf = [0u8; 64 * 1024];
         loop {
@@ -230,27 +230,18 @@ pub fn extract_tar_gz<R: Read>(reader: R, dest: &Path, limits: Limits) -> Result
     Ok(out)
 }
 
-/// `OpenOptions` that creates a file only if it does not exist (no symlink
-/// follow-through, no overwrite) and writes with plain permissions.
-trait NewFileOpts {
-    fn write_only_new(&mut self) -> io::Result<&mut Self>;
-    fn open_new(&mut self, path: &Path) -> io::Result<fs::File>;
-}
-
-impl NewFileOpts for fs::OpenOptions {
-    fn write_only_new(&mut self) -> io::Result<&mut Self> {
-        self.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // plain 0644: archive modes (setuid, executable) are never applied
-            self.mode(0o644);
-        }
-        Ok(self)
+/// Creates a file only if it does not exist (never follows or overwrites
+/// anything already there), with plain permissions: archive modes (setuid,
+/// executable) are never applied.
+fn create_new_file(path: &Path) -> io::Result<fs::File> {
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o644);
     }
-    fn open_new(&mut self, path: &Path) -> io::Result<fs::File> {
-        self.open(path)
-    }
+    o.open(path)
 }
 
 /// Removes a staging directory after a refusal or a cancel.
@@ -262,5 +253,3 @@ pub fn staging_is_empty(dir: &Path) -> bool {
     fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(false)
 }
 
-#[allow(dead_code)]
-fn _path_type_check(_: PathBuf) {}

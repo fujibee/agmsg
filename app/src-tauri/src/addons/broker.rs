@@ -283,7 +283,7 @@ mod tests {
         let mut files = HashMap::new();
         files.insert("index.html".to_string(), b"x".to_vec());
         let id = reg
-            .add(AddPane { addon: "o/r".into(), commit: "c".into(), name: "n".into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared, open_args: OpenArgs { path: Some(root.to_string_lossy().into_owned()), ..Default::default() }, expected_digest: None })
+            .add(AddPane { addon: "o/r".into(), commit: "c".into(), name: "n".into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared, open_args: OpenArgs { path: Some(root.to_string_lossy().into_owned()), ..Default::default() }, expected_digest: None, pinned: None, on_tamper: None })
             .unwrap()
             .id;
         let gen = reg.begin_generation(id).unwrap();

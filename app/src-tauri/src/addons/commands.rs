@@ -26,6 +26,7 @@ use tauri::{AppHandle, Emitter, Listener, Runtime, State};
 
 use super::broker;
 use super::catalog::AddonInfo;
+use super::conf::AddonConf;
 use super::denylist::{self, Denylist, GrantCheck};
 use super::feed::{self, Feed, FeedMessage};
 use super::host::AddonHost;
@@ -33,6 +34,8 @@ use super::panes::{AddPane, BrokerError, Need, OpenArgs, PaneId, Registry};
 use super::server::Payload;
 
 pub const PUSH_EVENT: &str = "addon-push";
+/// A pane was closed by the app because its files changed: `{pane, reason}`.
+pub const PANE_FAILED_EVENT: &str = "addon-pane-failed";
 
 /// Registry, feeds and the denylist, shared with the window-side `AddonHost`.
 pub struct Panes {
@@ -122,23 +125,56 @@ pub fn addon_list(host: State<'_, Arc<AddonHost>>) -> Vec<AddonInfo> {
     host.catalog().list()
 }
 
-fn clean_open_args(a: OpenArgs) -> Result<OpenArgs, String> {
-    for v in [&a.path, &a.url, &a.base].into_iter().flatten() {
-        if v.len() > 4096 || v.contains('\0') {
-            return Err("an open argument is too long or has a NUL byte".into());
+/// What a pane may be opened with: only what its `addon.conf` says it accepts
+/// (`opens`), with named errors. `base` rides with a path and needs `git:read`.
+pub fn validate_open_args(a: OpenArgs, conf: &AddonConf) -> Result<OpenArgs, String> {
+    for (name, v) in [("path", &a.path), ("url", &a.url), ("base", &a.base)] {
+        if let Some(v) = v {
+            if v.len() > 4096 || v.contains('\0') {
+                return Err(format!("open_args_invalid: `{name}` is too long or has a NUL byte"));
+            }
+        }
+    }
+    let opens = |k: &str| conf.opens.iter().any(|o| o == k);
+    if a.path.is_some() && !opens("path") {
+        return Err("open_args_not_declared: this pane does not accept a path (its addon.conf has no `opens = path`)".into());
+    }
+    if a.url.is_some() && !opens("url") {
+        return Err("open_args_not_declared: this pane does not accept a url (its addon.conf has no `opens = url`)".into());
+    }
+    if a.base.is_some() {
+        if a.path.is_none() {
+            return Err("open_args_not_declared: `base` is only accepted together with a path".into());
+        }
+        if !conf.permissions.iter().any(|p| p == "git:read") {
+            return Err("open_args_not_declared: this pane did not declare git:read, so it takes no `base`".into());
         }
     }
     Ok(a)
 }
 
 #[tauri::command(async)]
-pub fn addon_pane_add(host: State<'_, Arc<AddonHost>>, spec: PaneAddIn) -> Result<PaneAddOut, String> {
+pub fn addon_pane_add<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<AddonHost>>, spec: PaneAddIn) -> Result<PaneAddOut, String> {
     if !host.gate.status().enabled {
         return Err(off(&host));
     }
-    let open_args = clean_open_args(spec.open_args)?;
     let resolved = host.catalog().resolve(&spec.addon_id, &spec.pane).map_err(|e| e.to_string())?;
+    let open_args = validate_open_args(spec.open_args, &resolved.conf)?;
     host.panes.refresh_deny();
+    // If a served file stops matching what was verified, the pane is closed and the UI told why.
+    let on_tamper: Arc<dyn Fn(u16, String) + Send + Sync> = {
+        let host: Arc<AddonHost> = host.inner().clone();
+        let app = app.clone();
+        Arc::new(move |port: u16, detail: String| {
+            let closed = host.panes.registry.lock().unwrap().remove_by_port(port);
+            if let Some((id, port, token)) = closed {
+                host.nav.unregister_pane(port, &token);
+                host.panes.feeds.lock().unwrap().retain(|(p, _), _| *p != id);
+                eprintln!("[addons] closed pane {id}: {detail}");
+                let _ = app.emit(PANE_FAILED_EVENT, json!({ "pane": id, "reason": "This add-on's files changed after it was opened. Reinstall it or reload." }));
+            }
+        })
+    };
     let added = host
         .panes
         .registry
@@ -153,6 +189,8 @@ pub fn addon_pane_add(host: State<'_, Arc<AddonHost>>, spec: PaneAddIn) -> Resul
             declared: resolved.conf.declared(),
             open_args,
             expected_digest: None,
+            pinned: Some(resolved.pinned.clone()),
+            on_tamper: Some(on_tamper),
         })
         .map_err(|e| e.to_string())?;
     host.nav.register_pane(added.port, &added.token);
@@ -307,6 +345,55 @@ mod tests {
     use crate::addons::panes::Declared;
     use std::fs;
 
+    fn conf_with(opens: &str, perms: &str) -> AddonConf {
+        let mut t = String::from("title = T\nprotocol = 1\n");
+        if !opens.is_empty() {
+            t.push_str(&format!("opens = {opens}\n"));
+        }
+        if !perms.is_empty() {
+            t.push_str(&format!("permissions = {perms}\n"));
+        }
+        crate::addons::conf::parse(&t, "c").conf.expect("valid conf")
+    }
+
+    fn args(path: Option<&str>, url: Option<&str>, base: Option<&str>) -> OpenArgs {
+        OpenArgs { path: path.map(Into::into), url: url.map(Into::into), base: base.map(Into::into) }
+    }
+
+    #[test]
+    fn open_args_must_be_declared_by_the_pane() {
+        let none = conf_with("", "");
+        assert!(validate_open_args(OpenArgs::default(), &none).is_ok(), "no args is always fine");
+        assert!(validate_open_args(args(Some("/p"), None, None), &none).unwrap_err().starts_with("open_args_not_declared"));
+        assert!(validate_open_args(args(None, Some("https://a"), None), &none).unwrap_err().starts_with("open_args_not_declared"));
+        let path_only = conf_with("path", "files:read");
+        assert!(validate_open_args(args(Some("/p"), None, None), &path_only).is_ok());
+        assert!(validate_open_args(args(None, Some("https://a"), None), &path_only).unwrap_err().contains("does not accept a url"));
+        let url_only = conf_with("url", "");
+        assert!(validate_open_args(args(None, Some("https://a"), None), &url_only).is_ok());
+        assert!(validate_open_args(args(Some("/p"), None, None), &url_only).unwrap_err().contains("does not accept a path"));
+        let both = conf_with("path, url", "");
+        assert!(validate_open_args(args(Some("/p"), Some("https://a"), None), &both).is_ok());
+    }
+
+    #[test]
+    fn base_needs_a_path_and_git_read() {
+        let no_git = conf_with("path", "files:read");
+        assert!(validate_open_args(args(Some("/p"), None, Some("main")), &no_git).unwrap_err().contains("git:read"));
+        let git = conf_with("path", "files:read, git:read");
+        assert!(validate_open_args(args(Some("/p"), None, Some("main")), &git).is_ok());
+        assert!(validate_open_args(args(None, None, Some("main")), &git).unwrap_err().contains("together with a path"));
+        assert!(validate_open_args(args(Some("/p"), None, None), &git).is_ok());
+    }
+
+    #[test]
+    fn open_args_are_bounded() {
+        let c = conf_with("path", "");
+        assert!(validate_open_args(args(Some(&"a".repeat(4097)), None, None), &c).unwrap_err().starts_with("open_args_invalid"));
+        assert!(validate_open_args(args(Some("a\0b"), None, None), &c).unwrap_err().starts_with("open_args_invalid"));
+        assert!(validate_open_args(args(Some(&"a".repeat(4096)), None, None), &c).is_ok());
+    }
+
     #[test]
     fn grant_root_needs_an_absolute_existing_folder() {
         let deny = Denylist::from_process_env(Vec::new());
@@ -347,7 +434,7 @@ mod tests {
             .registry
             .lock()
             .unwrap()
-            .add(AddPane { addon: "o/r".into(), commit: "c".into(), name: "n".into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared: Declared::default(), open_args: OpenArgs::default(), expected_digest: None })
+            .add(AddPane { addon: "o/r".into(), commit: "c".into(), name: "n".into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared: Declared::default(), open_args: OpenArgs::default(), expected_digest: None, pinned: None, on_tamper: None })
             .unwrap();
         let g = panes.registry.lock().unwrap().begin_generation(a.id).unwrap();
         panes.feeds.lock().unwrap().insert((a.id, g), Feed::begin("t"));

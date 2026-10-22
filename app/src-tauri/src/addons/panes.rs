@@ -103,6 +103,8 @@ pub struct AddPane {
     pub declared: Declared,
     pub open_args: OpenArgs,
     pub expected_digest: Option<String>,
+    pub pinned: Option<std::collections::BTreeMap<String, (String, u64)>>,
+    pub on_tamper: Option<std::sync::Arc<dyn Fn(u16, String) + Send + Sync>>,
 }
 
 #[derive(Default)]
@@ -137,7 +139,7 @@ impl Registry {
 
     pub fn add(&mut self, spec: AddPane) -> Result<Added, StartError> {
         let network = spec.declared.network.clone().unwrap_or(Network::None);
-        let server = PaneServer::start(PaneSpec { payload: spec.payload, entry: spec.entry, network, expected_digest: spec.expected_digest })?;
+        let server = PaneServer::start(PaneSpec { payload: spec.payload, entry: spec.entry, network, expected_digest: spec.expected_digest, pinned: spec.pinned, on_tamper: spec.on_tamper })?;
         let id = self.next;
         self.next += 1;
         let added = Added { id, url: server.url(), port: server.port(), token: server.token().to_string() };
@@ -158,6 +160,13 @@ impl Registry {
             },
         );
         Ok(added)
+    }
+
+    /// Closes the pane that listens on `port` (a pinned file changed). Returns what was closed.
+    pub fn remove_by_port(&mut self, port: u16) -> Option<(PaneId, u16, String)> {
+        let id = self.panes.values().find(|p| p.server.port() == port).map(|p| p.id)?;
+        let (port, token) = self.remove(id)?;
+        Some((id, port, token))
     }
 
     /// Closes the pane: the listener and token are dropped with the server.
@@ -310,6 +319,8 @@ mod tests {
                 declared,
                 open_args: OpenArgs::default(),
                 expected_digest: None,
+                pinned: None,
+                on_tamper: None,
             })
             .unwrap();
         (r, a.id)
@@ -423,7 +434,7 @@ mod tests {
         let mut files = HashMap::new();
         files.insert("index.html".to_string(), b"x".to_vec());
         let b = r
-            .add(AddPane { addon: "o/r".into(), commit: "c".into(), name: "n".into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared: all(), open_args: OpenArgs::default(), expected_digest: None })
+            .add(AddPane { addon: "o/r".into(), commit: "c".into(), name: "n".into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared: all(), open_args: OpenArgs::default(), expected_digest: None, pinned: None, on_tamper: None })
             .unwrap()
             .id;
         let ga = r.begin_generation(a).unwrap();
