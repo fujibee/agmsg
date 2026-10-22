@@ -104,4 +104,32 @@ describe("locale keys", () => {
     expect(html).toContain("addons.listRetry");
     expect(render({})).not.toContain("addons.listFailed");
   });
+  it("shows a notice above the installed list, and developer copies with a DEV badge, Reload and Remove", () => {
+    const dev = { ...mockSnapshot.addons[0], id: "dev:x", builtin: false, dev: { label: "my-folder", copy: "dev copy 1" } };
+    const html = render({
+      notice: { kind: "info", text: "Up to date (abc1234)." },
+      snapshot: { ...mockSnapshot, addons: [...mockSnapshot.addons, dev] },
+    });
+    expect(html).toContain("Up to date (abc1234).");
+    expect(html).toContain("&quot;folder&quot;:&quot;my-folder&quot;");
+    expect(html).toContain("addons.developer.reload");
+    // a dev copy is not in the installed list (no updates, no saved grants)
+    expect(html.split("addons.developer.title")[0]).not.toContain("dev:x");
+  });
+  it("a failed grants read is shown with a retry instead of an empty grants list", () => {
+    const html = render({ grantsError: "GRANTS SENTINEL FAILURE", onRetryGrants: noop });
+    expect(html).toContain("addons.grantsFailed");
+    expect(html).toContain("GRANTS SENTINEL FAILURE");
+  });
+  it("while add-ons are off, a failed grants read and a failed Remove still show their reasons", () => {
+    const html = render({
+      engine: mockEngineOff,
+      grantsError: "GRANTS OFF SENTINEL",
+      notice: { kind: "error", text: "REMOVE OFF SENTINEL" },
+      listError: "LIST OFF SENTINEL",
+    });
+    expect(html).toContain("GRANTS OFF SENTINEL");
+    expect(html).toContain("REMOVE OFF SENTINEL");
+    expect(html).toContain("LIST OFF SENTINEL");
+  });
 });

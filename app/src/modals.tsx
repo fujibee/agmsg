@@ -647,6 +647,7 @@ export function SettingsModal(props: {
   timezone: string;
   onTimezoneChange: (timezone: string) => void;
   catalog: Catalog;
+  openAddonPanesOf: (addonId: string) => number;
 }) {
   const { t, i18n } = useTranslation();
   // Local draft text, not a number bound directly to props.terminalFontSize
@@ -714,7 +715,7 @@ export function SettingsModal(props: {
         ))}
       </div>
       {tab === "addons" ? (
-        <AddonsTab catalog={props.catalog} />
+        <AddonsTab catalog={props.catalog} openPanesOf={props.openAddonPanesOf} />
       ) : (
       <>
       <label>

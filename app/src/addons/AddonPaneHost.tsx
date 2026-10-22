@@ -10,6 +10,7 @@ import type { GrantChoice } from "./GrantCard";
 import { grantChips } from "./model";
 import { createOpGuard } from "./opGuard";
 import { listenPaneFailed, type PaneFailedEvent } from "./paneFailed";
+import { pickSavedRoot, pickSavedTeam } from "./savedGrants";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
 import { createLiveSource, parseNetwork, toCommandError, type AddedPane } from "./source";
 import type { AddonPaneRef, GrantChip, GrantNeed, InstalledAddon, PaneState } from "./types";
@@ -53,6 +54,7 @@ function LiveAddonPane(props: {
   const { pane } = props;
   const addon = props.addons.find((a) => a.id === pane.addonId);
   const decl = addon?.panes.find((p) => p.name === pane.paneName);
+  const isDev = pane.addonId.startsWith("dev:");
   const [added, setAdded] = useState<AddedPane | null>(null);
   const [state, setState] = useState<PaneState>({ kind: "frame" });
   const [steps, setSteps] = useState<Step[]>([]);
@@ -65,6 +67,8 @@ function LiveAddonPane(props: {
   // One grant call or folder dialog at a time; invalidated when the pane is reopened or goes away.
   const guard = useRef(createOpGuard());
   const addonsRef = useRef(props.addons);
+  const teamRef = useRef(props.team);
+  teamRef.current = props.team;
   addonsRef.current = props.addons;
 
   // Open the pane (again on every retry); the pane is removed when this goes away.
@@ -85,16 +89,39 @@ function LiveAddonPane(props: {
     }
     source
       .addPane({ addonId: pane.addonId, pane: pane.paneName, openArgs: pane.openArgs ?? {} })
-      .then((a) => {
+      .then(async (a) => {
         if (cancelled) {
           void source.removePane(a.id).catch(() => {});
           return;
         }
         openedId = a.id;
-        setAdded(a);
         const next: Step[] = [];
         if (a.permissions.includes("messages:read")) next.push("team");
         if (a.permissions.includes("files:read") || a.permissions.includes("git:read")) next.push("folder");
+        // Replay what the user chose to remember; Rust checks each one again as if new. Not for developer copies.
+        const replayed: GrantChip[] = [];
+        if (!pane.addonId.startsWith("dev:")) {
+          const saved = await source.savedGrants(pane.addonId, pane.paneName);
+          if (cancelled) return;
+          if (saved.ok) {
+            const team = next.includes("team") ? pickSavedTeam(saved.value, teamRef.current) : undefined;
+            if (team !== undefined && (await source.grantTeam(a.id, team)).ok) {
+              replayed.push({ key: `team:${team}`, label: team });
+              next.splice(next.indexOf("team"), 1);
+            }
+            const root = next.includes("folder") ? pickSavedRoot(saved.value, pane.openArgs?.path) : undefined;
+            if (root !== undefined) {
+              const g = await source.grantRoot(a.id, root);
+              if (g.ok) {
+                replayed.push({ key: `root:${g.realPath}`, label: g.realPath });
+                next.splice(next.indexOf("folder"), 1);
+              }
+            }
+          }
+          if (cancelled) return;
+        }
+        setChips(replayed);
+        setAdded(a);
         setSteps(next);
       })
       .catch((e) => {
@@ -155,13 +182,19 @@ function LiveAddonPane(props: {
       return;
     }
     setPending(true);
-    const r = await guard.current.run(async (): Promise<{ error: { code: string; message: string } } | { chip: GrantChip }> => {
+    const r = await guard.current.run(async ({ stale }): Promise<{ error: { code: string; message: string } } | { chip: GrantChip; saveFailed?: string }> => {
+      const remember = !isDev && (c === "always" || need.permission === "messages:read");
       if (need.permission === "messages:read") {
         const g = await source.grantTeam(added.id, need.team);
-        return g.ok ? { chip: { key: `team:${need.team}`, label: need.team } } : { error: g.error };
+        if (!g.ok) return { error: g.error };
+        // The pane was reopened or its add-on updated while the grant ran: that consent must not be saved.
+        const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "messages:read", need.team, added.id, added.commit) : null;
+        return { chip: { key: `team:${need.team}`, label: need.team }, saveFailed: saved && !saved.ok ? saved.error.message : undefined };
       }
       const g = await source.grantRoot(added.id, need.path);
-      return g.ok ? { chip: { key: `root:${g.realPath}`, label: g.realPath } } : { error: g.error };
+      if (!g.ok) return { error: g.error };
+      const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "files:read", g.realPath, added.id, added.commit) : null;
+      return { chip: { key: `root:${g.realPath}`, label: g.realPath }, saveFailed: saved && !saved.ok ? saved.error.message : undefined };
     });
     if (r.kind !== "done") return; // busy: ignored; stale: the pane was reopened, so nothing here applies to it
     setPending(false);
@@ -173,6 +206,8 @@ function LiveAddonPane(props: {
     }
     const chip = r.value.chip;
     setChips((cs) => [...cs, chip]);
+    // Allowed for now, but it could not be remembered: say so, never pretend.
+    if (r.value.saveFailed) setBlocked(r.value.saveFailed);
     // Only the step this card was for is done; another step stays.
     setSteps((s) => (s[0] === step ? s.slice(1) : s));
   };
@@ -195,7 +230,8 @@ function LiveAddonPane(props: {
       chips={[...chips, ...grantChips([], decl?.network ?? network, tt)]}
       askedBy={pane.askedBy}
       blocked={blocked}
-      canRemember={false}
+      canRemember={!isDev}
+      devFolder={addon?.dev?.label}
       pending={pending}
       hideTitle
       hideClose

@@ -3078,6 +3078,7 @@ export default function App() {
           timezone={timezone}
           onTimezoneChange={setTimezone}
           catalog={catalog}
+          openAddonPanesOf={(addonId) => panes.filter((p) => p.kind === "addon" && p.addon?.addonId === addonId).length}
         />
       )}
       {modal?.kind === "closeWindow" &&

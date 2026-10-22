@@ -86,6 +86,8 @@ export function installErrorText(e: InstallError): { key: string; params: Record
       return { key, params: { time: e.retryAfter } };
     case "already_installed":
       return { key, params: { sha: e.sha } };
+    case "message":
+      return { key, params: { message: e.message } };
   }
 }
 

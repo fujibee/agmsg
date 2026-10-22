@@ -7,7 +7,7 @@ import { declaredPermissions, addonNetwork, grantText, grantsOf, installErrorTex
 // and a collapsed Developer section. Reads only AddonsSnapshot, so the wiring
 // later swaps the source without touching this.
 
-export function AddonsSettings(props: {
+type Props = {
   t: Translate;
   snapshot: AddonsSnapshot;
   engine: EngineState;
@@ -24,25 +24,28 @@ export function AddonsSettings(props: {
   /** addon_list failed: shown with a retry instead of an empty list. */
   listError?: string;
   onRetryList?: () => void;
-}) {
+  /** A one-line result shown above the installed list: "Up to date (abc1234)." or a failure of check / remove / load. */
+  notice?: { kind: "info" | "error"; text: string } | null;
+  /** Reading the remembered grants failed: the list below may be missing rows, so say so with a retry. */
+  grantsError?: string;
+  onRetryGrants?: () => void;
+  /** Developer copies get Reload and Remove here. */
+  onDevReload?: (addonId: string) => void;
+};
+
+export function AddonsSettings(props: Props) {
   const { t, snapshot, engine } = props;
   const canInstall = props.canInstall ?? true;
   const [input, setInput] = useState("");
   const parsed = parseRepoInput(input);
   const builtins = snapshot.addons.filter((a) => a.builtin);
-  const installed = snapshot.addons.filter((a) => !a.builtin);
+  const installed = snapshot.addons.filter((a) => !a.builtin && !a.dev);
+  const devs = snapshot.addons.filter((a) => a.dev);
 
   if (!engine.ok) {
     return (
       <div className="addons-settings">
-        {props.listError !== undefined && (
-        <p className="addon-list-error" role="alert">
-          {t("addons.listFailed", { message: props.listError })}{" "}
-          <button type="button" onClick={props.onRetryList}>
-            {t("addons.listRetry")}
-          </button>
-        </p>
-      )}
+        <Alerts {...props} />
         <p className="addon-engine-off" role="status">
           {t("addons.engineOff")}{" "}
           {engine.reasons.length > 0 && t("addons.engineReasons", { reasons: engine.reasons.join("; ") })}
@@ -54,14 +57,7 @@ export function AddonsSettings(props: {
 
   return (
     <div className="addons-settings">
-      {props.listError !== undefined && (
-        <p className="addon-list-error" role="alert">
-          {t("addons.listFailed", { message: props.listError })}{" "}
-          <button type="button" onClick={props.onRetryList}>
-            {t("addons.listRetry")}
-          </button>
-        </p>
-      )}
+      <Alerts {...props} />
       <section>
         <h3>{t("addons.builtin.title")}</h3>
         <ul className="addon-list">
@@ -127,9 +123,59 @@ export function AddonsSettings(props: {
           <button type="button" onClick={props.onLoadFromFolder}>
             {t("addons.developer.loadFromFolder")}
           </button>
+          <h4>{t("addons.developer.loaded")}</h4>
+          {devs.length === 0 && <p className="modal-note">{t("addons.developer.none")}</p>}
+          <ul className="addon-list">
+            {devs.map((a) => (
+              <li key={a.id} className="addon-row">
+                <div className="addon-head">
+                  <span className="addon-name">{a.panes.map((p) => p.title).join(", ")}</span>
+                  <span className="addon-badge">{t("addons.pane.dev", { folder: a.dev?.label ?? a.id })}</span>
+                </div>
+                <PermissionList t={t} addon={a} />
+                <div className="addon-actions">
+                  <button type="button" onClick={() => props.onDevReload?.(a.id)}>
+                    {t("addons.developer.reload")}
+                  </button>
+                  <button type="button" onClick={() => props.onRemove(a.id)}>
+                    {t("addons.developer.remove")}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
         </details>
       )}
     </div>
+  );
+}
+
+function Alerts(props: { t: Translate } & Pick<Props, "listError" | "onRetryList" | "grantsError" | "onRetryGrants" | "notice">) {
+  const { t } = props;
+  return (
+    <>
+      {props.listError !== undefined && (
+        <p className="addon-list-error" role="alert">
+          {t("addons.listFailed", { message: props.listError })}{" "}
+          <button type="button" onClick={props.onRetryList}>
+            {t("addons.listRetry")}
+          </button>
+        </p>
+      )}
+      {props.grantsError !== undefined && (
+        <p className="addon-list-error" role="alert">
+          {t("addons.grantsFailed", { message: props.grantsError })}{" "}
+          <button type="button" onClick={props.onRetryGrants}>
+            {t("addons.listRetry")}
+          </button>
+        </p>
+      )}
+      {props.notice && (
+        <p className={`addon-notice ${props.notice.kind}`} role={props.notice.kind === "error" ? "alert" : "status"}>
+          {props.notice.text}
+        </p>
+      )}
+    </>
   );
 }
 

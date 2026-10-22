@@ -287,7 +287,11 @@
     },
     "developer": {
       "title": "Developer",
-      "loadFromFolder": "Load from folder…"
+      "loadFromFolder": "Load from folder…",
+      "loaded": "Developer add-ons",
+      "none": "No developer add-ons loaded.",
+      "reload": "Reload from folder",
+      "remove": "Remove"
     },
     "permission": {
       "none": "Runs with no permissions",
@@ -334,7 +338,8 @@
       },
       "github_error": "GitHub didn't answer: {{status}}. Try again.",
       "rate_limited": "GitHub limits unauthenticated downloads; try again after {{time}}.",
-      "already_installed": "Already installed ({{sha}})."
+      "already_installed": "Already installed ({{sha}}).",
+      "message": "{{message}}"
     },
     "pane": {
       "reload": "Reload",
@@ -376,7 +381,13 @@
       "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
       "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
       "install": "Install",
-      "update": "Update"
+      "update": "Update",
+      "changesTitle": "What changes, pane by pane:",
+      "paneAdds": "{{pane}} gains: {{perms}}",
+      "paneWider": "{{pane}} can reach more sites",
+      "paneCombined": "{{pane}} can now send what it reads over the network",
+      "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
+      "paneRemoved": "{{pane}} is removed (its saved access is dropped)"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -387,7 +398,9 @@
       "resolving": "Resolving the commit…",
       "resolved": "Commit {{sha}}",
       "downloading": "Downloading {{done}} MB of {{total}} MB…",
-      "checking": "Checking files: {{files}} files, {{size}} MB"
+      "checking": "Checking files: {{files}} files, {{size}} MB",
+      "downloadingPlain": "Downloading…",
+      "checkingPlain": "Checking the files…"
     },
     "request": {
       "wants": "{{agent}} wants to open {{pane}}: {{args}}",
@@ -431,6 +444,7 @@
       "install": "Install an add-on…"
     },
     "listFailed": "Couldn't read the add-on list: {{message}}",
-    "listRetry": "Try again"
+    "listRetry": "Try again",
+    "grantsFailed": "Couldn't read what you allowed: {{message}}"
   }
 }

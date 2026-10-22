@@ -15,7 +15,7 @@ export function ConfirmInstallDialog(props: {
   onCancel: () => void;
 }) {
   const { t, staged } = props;
-  const diff = staged.from ? permissionDiff(staged.from.panes, staged.panes) : null;
+  const diff = staged.diff ?? (staged.from ? permissionDiff(staged.from.panes, staged.panes) : null);
   const perms = new Map<Permission, { panes: string[] }>();
   for (const pane of staged.panes) for (const p of pane.permissions) perms.set(p, { panes: [...(perms.get(p)?.panes ?? []), pane.name] });
   const net = addonNetwork({ panes: staged.panes } as InstalledAddon);
@@ -59,6 +59,7 @@ export function ConfirmInstallDialog(props: {
       )}
       <p className="modal-note">{t("addons.confirm.never")}</p>
       <p className="modal-note">{t("addons.confirm.noReview")}</p>
+      {diff && <PaneChanges t={t} staged={staged} />}
       {diff?.asksAgain && <p className="modal-note addon-asks-again">{t("addons.confirm.asksAgain")}</p>}
       <div className="modal-actions">
         <button type="button" autoFocus onClick={props.onCancel}>
@@ -99,14 +100,42 @@ export function FetchProgressView(props: { t: Translate; progress: FetchProgress
         ? t("addons.fetch.resolved", { sha: shortSha(p.sha) })
         : t("addons.fetch.resolving")
       : p.step === "downloading"
-        ? t("addons.fetch.downloading", { done: p.doneMb, total: p.totalMb })
-        : t("addons.fetch.checking", { files: p.files, size: p.sizeMb });
+        ? p.doneMb === undefined || p.totalMb === undefined
+          ? t("addons.fetch.downloadingPlain")
+          : t("addons.fetch.downloading", { done: p.doneMb, total: p.totalMb })
+        : p.files === undefined || p.sizeMb === undefined
+          ? t("addons.fetch.checkingPlain")
+          : t("addons.fetch.checking", { files: p.files, size: p.sizeMb });
   return (
     <div className="addon-fetch" role="status">
       <span>{text}</span>{" "}
       <button type="button" onClick={props.onCancel}>
         {t("common.cancel")}
       </button>
+    </div>
+  );
+}
+
+/** The update's difference pane by pane: who gains what, and which panes lose their saved access. */
+function PaneChanges(props: { t: Translate; staged: StagedInstall }) {
+  const { t, staged } = props;
+  const lines: string[] = [];
+  for (const c of staged.paneChanges ?? []) {
+    if (c.added.length > 0) lines.push(t("addons.confirm.paneAdds", { pane: c.pane, perms: c.added.join(", ") }));
+    if (c.networkWidened) lines.push(t("addons.confirm.paneWider", { pane: c.pane }));
+    if (c.networkNewlyCombined) lines.push(t("addons.confirm.paneCombined", { pane: c.pane }));
+    if (c.networkWidened || c.networkNewlyCombined) lines.push(t("addons.confirm.paneAsksAgain", { pane: c.pane }));
+  }
+  for (const pane of staged.removedPanes ?? []) lines.push(t("addons.confirm.paneRemoved", { pane }));
+  if (lines.length === 0) return null;
+  return (
+    <div className="addon-pane-changes">
+      <div className="addon-confirm-can">{t("addons.confirm.changesTitle")}</div>
+      <ul className="addon-perms">
+        {lines.map((l, i) => (
+          <li key={i}>{l}</li>
+        ))}
+      </ul>
     </div>
   );
 }

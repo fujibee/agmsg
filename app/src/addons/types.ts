@@ -4,6 +4,7 @@
 // records in the design (index.tsv / grants.tsv, the addon.conf fields).
 
 export type * from "../../addon-kit/protocol";
+import type { PermissionDiff } from "./model";
 import type { ErrorCode } from "../../addon-kit/protocol";
 
 export type Permission = "messages:read" | "files:read" | "git:read" | "network";
@@ -40,6 +41,8 @@ export type InstalledAddon = {
   digestOk?: boolean;
   /** Live list only: panes whose addon.conf was refused, in the words `check` uses. */
   problems?: string[];
+  /** A developer copy loaded from a folder (`dev:<slug>`): `label` is the folder name for the DEV badge. */
+  dev?: { label: string; copy: string };
 };
 
 /** A row of grants.tsv. `scope` is a stable team id for messages:read, a real path for files:read. */
@@ -77,7 +80,9 @@ export type InstallError =
   | { code: "unsafe_entry"; what: UnsafeEntryKind; path: string }
   | { code: "github_error"; status: number }
   | { code: "rate_limited"; retryAfter: string }
-  | { code: "already_installed"; sha: string };
+  | { code: "already_installed"; sha: string }
+  /** Rust's own words for a failure of the install table (live installs); shown as they are. */
+  | { code: "message"; message: string };
 
 export type UnsafeEntryKind = "symlink" | "hardlink" | "outside_path" | "reserved_name";
 
@@ -129,10 +134,26 @@ export type StagedInstall = {
   panes: AddonPaneDecl[];
   /** Set for an update: the commit being replaced and its panes, so the dialog can show the difference. */
   from?: { sha: string; panes: AddonPaneDecl[] };
+  /** Live updates: Rust's own answer to "does this ask again", used instead of comparing panes here. */
+  diff?: PermissionDiff;
+  /** Live: names the staged files in Rust (confirm / cancel by this id). */
+  stagingId?: string;
+  /** Live updates: what each pane gains or loses (Rust decides per pane), and the panes the new version no longer has. */
+  paneChanges?: PaneChange[];
+  removedPanes?: string[];
+};
+
+export type PaneChange = {
+  pane: string;
+  added: string[];
+  removed: string[];
+  networkWidened: boolean;
+  networkNewlyCombined: boolean;
+  asksAgain: boolean;
 };
 
 /** S2: where a fetch is. */
 export type FetchProgress =
   | { step: "resolving"; sha?: string }
-  | { step: "downloading"; doneMb: number; totalMb: number }
-  | { step: "checking"; files: number; sizeMb: number };
+  | { step: "downloading"; doneMb?: number; totalMb?: number }
+  | { step: "checking"; files?: number; sizeMb?: number };

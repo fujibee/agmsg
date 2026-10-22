@@ -15,12 +15,17 @@ export function createOpGuard() {
       busy = false;
     },
     isBusy: () => busy,
-    async run<T>(fn: () => Promise<T>): Promise<OpResult<T>> {
+    /**
+     * `fn` gets `stale()`: true once the attempt was replaced or closed. A step
+     * with a side effect (saving a consent) must check it after every await
+     * and stop, not only rely on the result being dropped at the end.
+     */
+    async run<T>(fn: (ctx: { stale: () => boolean }) => Promise<T>): Promise<OpResult<T>> {
       if (busy) return { kind: "busy" };
       const mine = epoch;
       busy = true;
       try {
-        const value = await fn();
+        const value = await fn({ stale: () => mine !== epoch });
         return mine === epoch ? { kind: "done", value } : { kind: "stale" };
       } catch (e) {
         if (mine !== epoch) return { kind: "stale" };
