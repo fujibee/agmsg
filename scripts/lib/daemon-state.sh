@@ -210,3 +210,30 @@ agmsg_daemon_warn_if_stopped() {
   done
   return 0
 }
+
+# A project's explicit delivery choice, written only by `agmsg delivery <value>`
+# as a line "<type><TAB><canonical project><TAB><value>" in run/delivery-choice.
+# No line means nobody chose (an install updated from before, or a project that
+# never saw the choice screen): agmsgd delivers as it always has. A value other
+# than "agmsgd" (monitor, turn, both, off) is a decision not to use agmsgd for
+# that project.
+agmsg_delivery_choice_get() {   # <type> <project>
+  local file="$_AGMSG_DAEMON_ROOT/run/delivery-choice" project="$2"
+  [ -r "$file" ] && [ -n "$project" ] || return 0
+  project="$(cd -- "$project" 2>/dev/null && pwd -P)" || project="$2"
+  awk -F'\t' -v t="$1" -v p="$project" '$1 == t && $2 == p { c = $3 } END { if (c != "") print c }' "$file" 2>/dev/null
+}
+
+# Make this project read as agmsgd-off when it chose something other than agmsgd,
+# so every caller that asks "does agmsgd deliver here" gets the project's answer.
+# Call right after agmsg_daemon_read_state, in the same scope.
+agmsg_daemon_apply_project_choice() {   # <type> <project>
+  local choice
+  choice="$(agmsg_delivery_choice_get "$1" "${2:-}")"
+  case "$choice" in
+    ''|agmsgd) return 0 ;;
+  esac
+  AGMSGD_DESIRED=off
+  AGMSGD_HEALTH=stopped
+  AGMSGD_REASON="this project chose $choice, not agmsgd"
+}

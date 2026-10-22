@@ -48,6 +48,22 @@ setup() {
   refute grep -q '^monitor' "$CALL_LOG"
 }
 
+@test "a project that chose monitor (legacy) still gets the bridge while agmsgd is on; one that chose agmsgd or never chose gets none" {
+  printf 'codex\t%s\tmonitor\n' "$TEST_SKILL_DIR/project" > "$TEST_SKILL_DIR/run/delivery-choice"
+  : > "$CALL_LOG"
+  run bash "$SCRIPTS/drivers/types/codex/codex-shim.sh" -C "$TEST_SKILL_DIR/project" resume --last
+  [ "$status" -eq 0 ]
+  grep -q '^monitor' "$CALL_LOG"
+  : > "$CALL_LOG"
+  printf 'codex\t%s\tagmsgd\n' "$TEST_SKILL_DIR/project" > "$TEST_SKILL_DIR/run/delivery-choice"
+  run bash "$SCRIPTS/drivers/types/codex/codex-shim.sh" -C "$TEST_SKILL_DIR/project" resume --last
+  refute grep -q '^monitor' "$CALL_LOG"
+  : > "$CALL_LOG"
+  rm -f "$TEST_SKILL_DIR/run/delivery-choice"
+  run bash "$SCRIPTS/drivers/types/codex/codex-shim.sh" -C "$TEST_SKILL_DIR/project" resume --last
+  refute grep -q '^monitor' "$CALL_LOG"
+}
+
 @test "off, missing and unreadable install records retain the existing monitor route" {
   for condition in off missing unreadable; do
     case "$condition" in

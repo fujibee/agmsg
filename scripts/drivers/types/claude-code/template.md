@@ -13,8 +13,8 @@
 
      To apply the choice, run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery <choice> --type __AGENT_TYPE__ --project "$(pwd)"` with `<choice>` = `agmsgd`, `monitor`, `turn`, `both` or `off` (`monitor (legacy)` is the value `monitor`) and show its output and follow the printed `AGMSG-DIRECTIVE` block:
      - `agmsgd` turns the background service on (`daemon enable`) and leaves the project on `monitor` as the fallback for a seat whose destination is not confirmed yet. If it fails, say so and offer the other choices.
-     - Keep using agmsgd (it is on or turned on but not running): run `agmsg delivery agmsgd` the same way.
-     - `monitor (legacy)` when agmsgd is on: run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg daemon disable` first, then `agmsg delivery monitor`.
+     - Keep using agmsgd (it is on or turned on but not running): run `agmsg delivery agmsgd` the same way; it also records that this project uses agmsgd.
+     - `monitor (legacy)` (and `turn`, `both`, `off`) is a real opt-out: the CLI records that this project does not use agmsgd, so agmsgd stops delivering here and the project keeps the old path. agmsgd stays on for the install's other projects; when it says so, pass on its line that `agmsg daemon disable` turns agmsgd off for all of them.
 <!-- /agmsg:slot delivery -->
 
 <!-- agmsg:slot execute-extra -->

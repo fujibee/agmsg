@@ -239,7 +239,7 @@ despawnは指定されたメンバーにのみ作用する — `despawn` を実�
 | **`both`** | monitorを主に、turnをセッションごとの安全網として | 約5秒。ウォッチャー障害時はturn相当にフォールバック | 二重の保険をかけたい場合 |
 | **`off`** | 自動配信なし | 手動の `/agmsg` のみ | ミニマリスト |
 
-`agmsg daemon enable` が断る環境（Node 22.13未満、JSONLのメッセージストレージ、Linuxでsystemdのユーザーサービスが使えない、WindowsのCodexが0.157未満）ではagmsgdは出さず、理由を1行添えて他のモードを並べる。agmsgdがすでにオンのときはどれを使うかを聞かず、そう伝えたうえで、そのまま使うか `monitor (legacy)` に切り替えるかだけ尋ねる。agmsgdを選ぶと `agmsg daemon enable` を実行し、届け先がまだ確かめられないセッションのために、プロジェクトのモードは `monitor` のままにしておく。
+`agmsg daemon enable` が断る環境（Node 22.13未満、JSONLのメッセージストレージ、Linuxでsystemdのユーザーサービスが使えない、WindowsのCodexが0.157未満）ではagmsgdは出さず、理由を1行添えて他のモードを並べる。agmsgdがすでにオンのときはどれを使うかを聞かず、そう伝えたうえで、そのまま使うか `monitor (legacy)` に切り替えるかだけ尋ねる。agmsgdを選ぶと `agmsg daemon enable` を実行し、届け先がまだ確かめられないセッションのために、プロジェクトのモードは `monitor` のままにしておく。`monitor (legacy)`（や `turn`、`both`、`off`）を選ぶとそのプロジェクトについては本当にagmsgdを使わない: agmsgdはそのプロジェクトの席に届けなくなり（`agmsg daemon status` には選択済みと出る）、agmsgd自体はインストール内の他のプロジェクト向けに動き続ける（全部止めるなら `agmsg daemon disable`）。一度も選んでいないプロジェクトは変わらない。
 
 ### モードの選択
 

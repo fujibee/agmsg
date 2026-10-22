@@ -73,13 +73,47 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   grep -Fq "mode: monitor" <<<"$output"
 }
 
-@test "delivery <mode>: the other modes are exactly delivery.sh set, and an agmsgd that is on is noted" {
+@test "delivery <mode>: the other modes are delivery.sh set plus a recorded choice; agmsgd stays on for the install" {
   _mark_daemon_ready
   run bash "$SCRIPTS/agmsg" delivery turn --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
-  grep -Fq "agmsgd is still on" <<<"$output"
+  grep -Fq "agmsgd does not deliver to this project now (turn chosen)" <<<"$output"
+  grep -Fq "agmsg daemon disable" <<<"$output"
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
   grep -Fq "mode: turn" <<<"$output"
+  [ "$(cat "$TEST_SKILL_DIR/run/delivery-choice")" = "$(printf 'claude-code\t%s\tturn' "$(cd "$PROJECT" && pwd -P)")" ]
+}
+
+@test "delivery monitor: choosing monitor (legacy) is a real opt-out that status shows and a later agmsgd choice undoes" {
+  _mark_daemon_ready
+  run bash "$SCRIPTS/agmsg" delivery monitor --type claude-code --project "$PROJECT"
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/agmsg" delivery status --type claude-code --project "$PROJECT"
+  grep -Fq "this project: monitor (legacy) chosen — agmsgd does not deliver here" <<<"$output"
+  refute grep -Fq "fallback" <<<"$output"
+  run bash "$SCRIPTS/agmsg" delivery agmsgd --type claude-code --project "$PROJECT"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c . "$TEST_SKILL_DIR/run/delivery-choice")" -eq 1 ]
+  run bash "$SCRIPTS/agmsg" delivery status --type claude-code --project "$PROJECT"
+  grep -Fq "this project's fallback: monitor (legacy)" <<<"$output"
+}
+
+@test "delivery choice: a project that never chose is untouched; agmsgd and other choices apply to their own project only" {
+  other="$TEST_SKILL_DIR/other"
+  mkdir -p "$other"
+  _mark_daemon_ready
+  bash "$SCRIPTS/agmsg" delivery monitor --type claude-code --project "$PROJECT" >/dev/null
+  run bash -c '
+    export SKILL_DIR="$1"; . "$1/scripts/lib/daemon-state.sh"
+    for p in "$2" "$3"; do
+      AGMSGD_DESIRED=on; AGMSGD_HEALTH=ready; agmsg_daemon_apply_project_choice claude-code "$p"
+      echo "$p $AGMSGD_DESIRED $AGMSGD_HEALTH"
+    done
+    AGMSGD_DESIRED=on; AGMSGD_HEALTH=ready; agmsg_daemon_apply_project_choice codex "$2"
+    echo "codex $AGMSGD_DESIRED"' _ "$TEST_SKILL_DIR" "$PROJECT" "$other"
+  grep -Fq "$PROJECT off stopped" <<<"$output"
+  grep -Fq "$other on ready" <<<"$output"
+  grep -Fq "codex on" <<<"$output"
 }
 
 @test "delivery: an unknown value is refused" {

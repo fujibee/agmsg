@@ -188,6 +188,8 @@ if [ -f "$daemon_state_lib" ]; then
   # shellcheck disable=SC1090
   source "$daemon_state_lib"
   agmsg_daemon_read_state
+  # A project that chose something other than agmsgd is launched as before.
+  agmsg_daemon_apply_project_choice codex "$project"
   if [ "${AGMSGD_DESIRED:-unknown}" = on ]; then
     case "$command_name" in
       app-server|exec|e|login|logout|mcp|plugin|remote-control|completion|update|doctor|cloud|exec-server|features|debug|apply|a|review|sandbox|help|--help|-h|version|--version|-V)

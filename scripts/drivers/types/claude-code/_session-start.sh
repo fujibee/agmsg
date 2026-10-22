@@ -47,6 +47,8 @@ agmsg_session_start() {
     . "${SKILL_DIR:-}/scripts/lib/daemon-state.sh"
   fi
   agmsg_daemon_read_state
+  # A project that chose something other than agmsgd keeps the Monitor path.
+  agmsg_daemon_apply_project_choice claude-code "${PROJECT:-}"
   [ "${AGMSGD_HEALTH:-}" = ready ] || return 0
   if ! agmsg_claude_code_native_storage_ready; then
     echo "AGMSG delivery: agmsgd is running, but its Claude channel only reads the sqlite storage and this install's storage config is not usable for it, so the native channel is not used. Next: arm the Monitor below."

@@ -12,6 +12,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { logLine } from "../log.mjs";
+import { optedOutOfAgmsgd } from "./delivery-choice.mjs";
 import { withImmediateTransaction } from "../db.mjs";
 import {
   messageStorePath,
@@ -164,6 +165,17 @@ export function createClaudeCodeQueueChannel({
     const { team, agent, teamConfig, registered = true } = registration;
     const seat = seatKey(team, agent);
     const pending = readPending(db, seat);
+    // A project that chose something other than agmsgd gets no nudges, including
+    // a re-send of one already waiting.
+    const chosen = readSession(join(installRoot, "run"), team, agent);
+    const optedOut = chosen.state === "present" && chosen.record.type === "claude-code"
+      ? optedOutOfAgmsgd(installRoot, "claude-code", chosen.record.project)
+      : "";
+    if (optedOut) {
+      if (pending) setQueueState(db, pending.id, "expired");
+      saveSeat(db, { seat, messagingSocket: chosen.record.messaging_socket, state: "unaddressable", reason: `delivery_chosen_${optedOut}` }, now);
+      return;
+    }
     let retryMode = "";
     let carriedModes = [];
     // At most one nudge is outstanding per seat, and an outstanding one is not
