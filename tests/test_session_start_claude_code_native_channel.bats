@@ -298,3 +298,27 @@ _mark_daemon_ready() {
   [ "$status" -eq 0 ]
   [ "$(cat "$BATS_TEST_TMPDIR/published")" = '\\.\pipe\LOCAL\cc-msg-ab12|C:\Users\me/.claude|tok-1' ]
 }
+
+# 1.6.0 migration: an install that has not turned agmsgd on is told about it
+# once, on a session's screen, and never again; one that has turned it on is
+# never told.
+@test "session-start: agmsgd off -> the introduction is printed once per install, then never again" {
+  sqlite3 "$RUN_DIR/install.db" < "$SCRIPTS/daemon/schema.sql"
+  run _run_session_start "sid-intro-1"
+  [ "$status" -eq 0 ]
+  grep -qF "A new delivery, agmsgd, is available" <<<"$output"
+  grep -qF "Switch with /" <<<"$output"
+  grep -qF "Nothing changes until you do." <<<"$output"
+  [ -e "$RUN_DIR/agmsgd-intro-shown" ]
+  run _run_session_start "sid-intro-2"
+  [ "$status" -eq 0 ]
+  refute grep -qF "A new delivery, agmsgd" <<<"$output"
+}
+
+@test "session-start: agmsgd on -> no introduction and no marker" {
+  _mark_daemon_ready
+  run _run_session_start "sid-intro-on"
+  [ "$status" -eq 0 ]
+  refute grep -qF "A new delivery, agmsgd" <<<"$output"
+  [ ! -e "$RUN_DIR/agmsgd-intro-shown" ]
+}
