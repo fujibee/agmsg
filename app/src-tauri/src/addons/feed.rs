@@ -39,15 +39,34 @@ pub fn cap_body(mut m: FeedMessage) -> FeedMessage {
     m
 }
 
+/// The team's member list alone does not fit the 4 MB init cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitTooLarge {
+    pub measured: usize,
+    pub cap: usize,
+}
+
+impl InitTooLarge {
+    /// The plain reason the pane's failure card shows.
+    pub fn message(&self) -> String {
+        format!("This team's member list is too large to send to an add-on ({} bytes, limit {}).", self.measured, self.cap)
+    }
+}
+
 /// The `init` event: `messages` are oldest-first; messages of other teams are
 /// dropped; the newest that fit the count and the byte cap are kept, in order.
 /// The byte cap is measured on the JSON that is actually sent (escaping
 /// included), for the whole event: envelope, members and every message.
 /// Returns the JSON event and the ids it contains.
-pub fn build_init(team: &str, members: &[(String, String)], messages: Vec<FeedMessage>) -> (Value, HashSet<String>) {
+pub fn build_init(team: &str, members: &[(String, String)], messages: Vec<FeedMessage>) -> Result<(Value, HashSet<String>), InitTooLarge> {
     let members_json: Vec<Value> = members.iter().map(|(name, ty)| json!({ "name": name, "type": ty })).collect();
     let envelope = json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": [] });
     let mut bytes = serde_json::to_string(&envelope).map(|s| s.len()).unwrap_or(usize::MAX);
+    // Members are never cut silently: if the envelope alone is over the cap the
+    // pane fails closed with a named error the failure card can explain.
+    if bytes > INIT_MAX_BYTES {
+        return Err(InitTooLarge { measured: bytes, cap: INIT_MAX_BYTES });
+    }
     let mut kept: Vec<FeedMessage> = Vec::new();
     for m in messages.into_iter().rev().filter(|m| m.team == team) {
         let m = cap_body(m);
@@ -61,7 +80,7 @@ pub fn build_init(team: &str, members: &[(String, String)], messages: Vec<FeedMe
     }
     kept.reverse();
     let ids: HashSet<String> = kept.iter().map(|m| m.id.clone()).collect();
-    (json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": kept }), ids)
+    Ok((json!({ "agmsg": 1, "type": "init", "team": team, "members": members_json, "messages": kept }), ids))
 }
 
 /// Wraps one live message in the protocol event.
@@ -148,7 +167,7 @@ mod tests {
 
     #[test]
     fn init_has_the_protocol_shape() {
-        let (ev, seen) = build_init("t", &[("alice".into(), "claude-code".into())], vec![m("1", "t", "hi")]);
+        let (ev, seen) = build_init("t", &[("alice".into(), "claude-code".into())], vec![m("1", "t", "hi")]).unwrap();
         assert_eq!(ev["agmsg"], 1);
         assert_eq!(ev["type"], "init");
         assert_eq!(ev["team"], "t");
@@ -161,7 +180,7 @@ mod tests {
     #[test]
     fn init_keeps_the_newest_500_in_order() {
         let all: Vec<_> = (0..700).map(|i| m(&i.to_string(), "t", "x")).collect();
-        let (ev, seen) = build_init("t", &[], all);
+        let (ev, seen) = build_init("t", &[], all).unwrap();
         let got = ids(&ev);
         assert_eq!(got.len(), INIT_MAX_MESSAGES);
         assert_eq!(got.first().unwrap(), "200");
@@ -171,7 +190,7 @@ mod tests {
 
     #[test]
     fn init_never_includes_other_teams() {
-        let (ev, _) = build_init("t", &[], vec![m("1", "t", "a"), m("2", "other", "SECRET"), m("3", "t", "b")]);
+        let (ev, _) = build_init("t", &[], vec![m("1", "t", "a"), m("2", "other", "SECRET"), m("3", "t", "b")]).unwrap();
         assert_eq!(ids(&ev), vec!["1", "3"]);
         assert!(!ev.to_string().contains("SECRET"));
     }
@@ -180,7 +199,7 @@ mod tests {
     fn init_is_cut_at_4mb_keeping_the_newest() {
         let body = "x".repeat(200 * 1024);
         let all: Vec<_> = (0..40).map(|i| m(&i.to_string(), "t", &body)).collect();
-        let (ev, _) = build_init("t", &[], all);
+        let (ev, _) = build_init("t", &[], all).unwrap();
         let got = ids(&ev);
         assert!(got.len() < 40 && got.len() >= 19, "{}", got.len());
         assert_eq!(got.last().unwrap(), "39");
@@ -198,7 +217,7 @@ mod tests {
         assert_eq!(small.truncated, None);
         let at = cap_body(m("3", "t", &"y".repeat(BODY_MAX_BYTES)));
         assert_eq!(at.truncated, None, "exactly at the cap is not truncated");
-        let (ev, _) = build_init("t", &[], vec![m("4", "t", &"z".repeat(BODY_MAX_BYTES + 5))]);
+        let (ev, _) = build_init("t", &[], vec![m("4", "t", &"z".repeat(BODY_MAX_BYTES + 5))]).unwrap();
         assert_eq!(ev["messages"][0]["truncated"], true);
     }
 
@@ -252,7 +271,7 @@ mod tests {
         // U+0001 is one byte raw and six bytes (\u0001) in JSON
         let body = "\u{1}".repeat(BODY_MAX_BYTES);
         let all: Vec<_> = (0..16).map(|i| m(&i.to_string(), "t", &body)).collect();
-        let (ev, _) = build_init("t", &[("alice".into(), "claude-code".into())], all);
+        let (ev, _) = build_init("t", &[("alice".into(), "claude-code".into())], all).unwrap();
         let sent = serde_json::to_string(&ev).unwrap().len();
         assert!(sent <= INIT_MAX_BYTES, "sent {sent} bytes, cap {INIT_MAX_BYTES}");
         let n = ev["messages"].as_array().unwrap().len();
@@ -260,17 +279,45 @@ mod tests {
         assert_eq!(ev["messages"].as_array().unwrap().last().unwrap()["id"], "15", "newest kept");
     }
 
+    fn members_of(n: usize, pad: usize) -> Vec<(String, String)> {
+        (0..n).map(|i| (format!("member-{i:06}-{}", "x".repeat(pad)), "claude-code".into())).collect()
+    }
+
+    fn sent(ev: &Value) -> usize {
+        serde_json::to_string(ev).unwrap().len()
+    }
+
     #[test]
-    fn members_and_metadata_count_toward_the_cap() {
-        let members: Vec<(String, String)> = (0..40_000).map(|i| (format!("member-{i:05}-{}", "x".repeat(60)), "claude-code".into())).collect();
-        let all: Vec<_> = (0..300).map(|i| m(&i.to_string(), "t", &"y".repeat(20_000))).collect();
-        let (ev, _) = build_init("t", &members, all);
-        let sent = serde_json::to_string(&ev).unwrap().len();
-        assert!(sent <= INIT_MAX_BYTES.max(serde_json::to_string(&json!({"members": ev["members"]})).unwrap().len() + 200), "sent {sent}");
-        // a huge member list leaves little or no room for messages, but never exceeds the cap with them
-        let with_msgs = ev["messages"].as_array().unwrap().len();
-        let (ev2, _) = build_init("t", &[], (0..300).map(|i| m(&i.to_string(), "t", &"y".repeat(20_000))).collect());
-        assert!(with_msgs < ev2["messages"].as_array().unwrap().len());
+    fn members_count_toward_the_cap_and_messages_give_way_to_them() {
+        let msgs = |n: usize| -> Vec<FeedMessage> { (0..n).map(|i| m(&i.to_string(), "t", &"y".repeat(20_000))).collect() };
+        // 30,000 ordinary members take ~3.2 MB of the 4 MiB: they fit, and fewer messages do
+        let (big, _) = build_init("t", &members_of(30_000, 60), msgs(300)).unwrap();
+        assert!(sent(&big) <= INIT_MAX_BYTES, "sent {}", sent(&big));
+        let (none, _) = build_init("t", &[], msgs(300)).unwrap();
+        assert!(sent(&none) <= INIT_MAX_BYTES);
+        assert!(big["messages"].as_array().unwrap().len() < none["messages"].as_array().unwrap().len());
+        // a member list that fills the cap exactly to the edge keeps zero messages, still within the cap
+        let (edge, _) = build_init("t", &members_of(30_000, 60), msgs(5)).unwrap();
+        assert!(sent(&edge) <= INIT_MAX_BYTES);
+    }
+
+    #[test]
+    fn a_member_list_over_the_cap_fails_closed_with_a_named_error() {
+        // one member whose name alone is over the cap
+        let huge = vec![("x".repeat(INIT_MAX_BYTES + 1), "claude-code".to_string())];
+        let e = build_init("t", &huge, vec![]).unwrap_err();
+        assert!(e.measured > INIT_MAX_BYTES && e.cap == INIT_MAX_BYTES, "{e:?}");
+        assert!(e.message().contains("too large") && e.message().contains(&INIT_MAX_BYTES.to_string()));
+        // many ordinary members
+        let many = members_of(80_000, 60);
+        let e = build_init("t", &many, vec![m("1", "t", "hi")]).unwrap_err();
+        assert!(e.measured > INIT_MAX_BYTES);
+        // the error does not depend on the messages
+        assert!(build_init("t", &many, vec![]).is_err());
+        // and nothing is silently cut: just under the cap still succeeds whole
+        let (ok, _) = build_init("t", &members_of(20_000, 60), vec![]).unwrap();
+        assert_eq!(ok["members"].as_array().unwrap().len(), 20_000);
+        assert!(sent(&ok) <= INIT_MAX_BYTES);
     }
 
     #[test]

@@ -226,7 +226,7 @@ pub fn addon_feed_init(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: 
     let members = crate::agmsg::agmsg_members(team.clone()).map_err(|e| BrokerError::new("not_available", e))?;
     let members: Vec<(String, String)> = members.into_iter().map(|m| (m.name, m.types.into_iter().next().unwrap_or_else(|| "unknown".into()))).collect();
     let history = crate::agmsg::agmsg_messages(team.clone(), Some(feed::INIT_MAX_MESSAGES as u32), None).map_err(|e| BrokerError::new("not_available", e))?;
-    let (init, ids) = feed::build_init(&team, &members, history.iter().map(to_feed).collect());
+    let (init, ids) = feed::build_init(&team, &members, history.iter().map(to_feed).collect()).map_err(|e| BrokerError::new("init_too_large", e.message()))?;
     // the pane may have been revoked, reloaded or moved to another team while the
     // history was read: the same frame and the same team, or nothing is returned
     let again = host.panes.registry.lock().unwrap().authorize(id, generation, Need::Messages)?;
