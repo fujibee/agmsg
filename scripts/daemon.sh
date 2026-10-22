@@ -44,7 +44,7 @@ AGMSGD_SCHTASKS="${AGMSGD_SCHTASKS:-schtasks}"
 
 _usage() {
   cat >&2 <<'EOF'
-usage: agmsg daemon start|stop|status|enable|disable
+usage: agmsg daemon start|stop|status|enable|disable|offer <type>
 status options: --json (machine-readable), --all (include older destinations)
 EOF
 }
@@ -864,11 +864,55 @@ cmd_disable() {
   _path_hint disable
 }
 
+# `agmsg daemon offer <type>` -- read-only. One line saying whether the delivery
+# choice screen should offer agmsgd for this agent type:
+#   agmsgd=on                       already turned on; do not ask again
+#   agmsgd=available                enable would go ahead
+#   agmsgd=unavailable reason=...   enable would refuse (or does not apply)
+# It changes nothing, and never enables anything.
+cmd_offer() {
+  local type="${1:-}" desired node_path found
+  case "$type" in
+    claude-code|codex) ;;
+    *) echo "agmsgd=unavailable reason=agmsgd does not deliver to $type sessions"; return 0 ;;
+  esac
+  desired="$(sqlite3 -readonly -cmd '.timeout 100' "$INSTALL_DB" 'SELECT desired FROM daemon_intent;' 2>/dev/null | tr -d '\r' || true)"
+  if [ "$desired" = on ]; then
+    echo "agmsgd=on"
+    return 0
+  fi
+  if [ "$(_os)" = linux ] && ! _systemd_user_usable; then
+    echo "agmsgd=unavailable reason=systemd user services are not available here, so agmsgd cannot start on its own"
+    return 0
+  fi
+  node_path="$(_resolve_node node)" || {
+    echo "agmsgd=unavailable reason=agmsgd needs Node 22.13 or newer with node:sqlite, and none was found"
+    return 0
+  }
+  if ! "$node_path" "$SCRIPT_DIR/daemon/channels/storage-gate.mjs" >/dev/null 2>&1; then
+    echo "agmsgd=unavailable reason=agmsgd reads only the sqlite message storage, and this install uses another storage"
+    return 0
+  fi
+  if [ "$type" = codex ] && [ "$(_os)" = windows ]; then
+    found="$("$node_path" --input-type=module -e '
+      const { checkWindowsCodexQueueGate } = await import(process.argv[1]);
+      const gate = checkWindowsCodexQueueGate({ executable: "codex" });
+      console.log(gate.state === "ok" ? "ok" : gate.reason);
+    ' "file://$(cd "$SCRIPT_DIR/daemon/channels" && pwd -W 2>/dev/null || pwd)/windows-codex-queue.mjs" 2>/dev/null | tr -d '\r')" || found="windows_codex_version_unreadable"
+    if [ "$found" != ok ]; then
+      echo "agmsgd=unavailable reason=agmsgd needs Codex 0.157 or newer on Windows ($found)"
+      return 0
+    fi
+  fi
+  echo "agmsgd=available"
+}
+
 case "${1:-}" in
   start) shift; cmd_start "$@" ;;
   stop) cmd_stop ;;
   status) shift; cmd_status "$@" ;;
   enable) cmd_enable ;;
   disable) cmd_disable ;;
+  offer) shift; cmd_offer "$@" ;;
   *) _usage; exit 2 ;;
 esac

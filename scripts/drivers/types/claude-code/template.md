@@ -2,8 +2,18 @@
 
 <!-- agmsg:slot delivery -->
 <!-- agmsg:render-overlay __AGENT_TYPE__ -->
-  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, `both`, or `off` delivery. Empty input means `monitor`.
-     Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"` and follow the printed `AGMSG-DIRECTIVE` block.
+  5. **REQUIRED — Do NOT skip this step.** Choose how incoming messages reach this agent. Show this screen every time (a new join, a new seat added by someone already using agmsg, and when the mode is changed). First run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg daemon offer __AGENT_TYPE__`; it only reads and prints one line:
+     - `agmsgd=available`: ask the user to pick one, in this order:
+       1. `agmsgd` — notices delivered directly by a background service (recommended). Choosing it registers a background service that starts at login; `agmsg daemon disable` stops and removes it. Empty input means this one.
+       2. `monitor (legacy)` — the Claude Code Monitor tool streams the inbox (the `monitor` mode value).
+       3. `turn`, 4. `both`, 5. `off` — as before.
+     - `agmsgd=on`: do not ask which to use. Say "agmsgd is on: notices are delivered directly" and ask only whether to keep using it or switch to `monitor (legacy)`.
+     - `agmsgd=unavailable reason=...`: do not offer agmsgd; say the reason in one line, then ask for `monitor (legacy)`, `turn`, `both`, or `off` (empty input means `monitor`).
+
+     To apply the choice, run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery <choice> --type __AGENT_TYPE__ --project "$(pwd)"` with `<choice>` = `agmsgd`, `monitor`, `turn`, `both` or `off` (`monitor (legacy)` is the value `monitor`) and show its output and follow the printed `AGMSG-DIRECTIVE` block:
+     - `agmsgd` turns the background service on (`daemon enable`) and leaves the project on `monitor` as the fallback for a seat whose destination is not confirmed yet. If it fails, say so and offer the other choices.
+     - Keep using agmsgd (it is on): run `agmsg delivery agmsgd` the same way.
+     - `monitor (legacy)` when agmsgd is on: run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg daemon disable` first, then `agmsg delivery monitor`.
 <!-- /agmsg:slot delivery -->
 
 <!-- agmsg:slot execute-extra -->
@@ -121,7 +131,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 <!-- /agmsg:slot spawn -->
 
 <!-- agmsg:slot mode -->
-If argument is "mode", run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status __AGENT_TYPE__ "$(pwd)"`. Show the output to the user, and if it says `mode: monitor` (or `both`), say explicitly that this reports project *configuration* only — it does not prove the runtime Monitor task is attached in the current session. To confirm the runtime state, look for a Monitor whose description begins with `agmsg inbox stream` (after an `actas` it reads `agmsg inbox stream (acting as <name>)`). TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either.
+If argument is "delivery" (or its alias "mode") with nothing after it, run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery status --type __AGENT_TYPE__ --project "$(pwd)"`. It shows both the install-wide agmsgd state (for example "delivery: agmsgd (on) — notices are delivered directly") and this project's own delivery ("this project's fallback: monitor (legacy)"). Show the output to the user, and if it says `mode: monitor` (or `both`), say explicitly that this reports project *configuration* only — it does not prove the runtime Monitor task is attached in the current session. To confirm the runtime state, look for a Monitor whose description begins with `agmsg inbox stream` (after an `actas` it reads `agmsg inbox stream (acting as <name>)`). TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either. When agmsgd is off but available, tell the user that `/agmsg delivery agmsgd` turns direct delivery on.
 
-For `mode monitor|turn|both|off`, run `delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"` and follow its `AGMSG-DIRECTIVE` block. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
+For `delivery agmsgd|monitor|turn|both|off` (and the same values after the alias `mode`), run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery <value> --type __AGENT_TYPE__ --project "$(pwd)"` and follow its `AGMSG-DIRECTIVE` block. `agmsgd` runs `daemon enable` and leaves the project on `monitor` as the fallback; the other values are exactly `delivery.sh set <value>`. `monitor` is always shown as `monitor (legacy)` on the choice screen, but its value stays `monitor`. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
 <!-- /agmsg:slot mode -->

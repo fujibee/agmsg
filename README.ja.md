@@ -229,23 +229,27 @@ despawnは指定されたメンバーにのみ作用する — `despawn` を実�
 
 ## 配信モード
 
-受信メッセージがエージェントにどう届くか。初回参加時のプロンプトで1つ選ぶか、後で `/agmsg mode <name>` で変更する。
+受信メッセージがエージェントにどう届くか。初回参加時のプロンプトで1つ選ぶか、後で `/agmsg delivery <name>` で変更する（`/agmsg mode` も別名として使える。シェルからは `agmsg delivery <name>`）。Claude CodeとCodexではプロンプトの先頭にagmsgdがおすすめとして出て、monitorは **`monitor (legacy)`** と表示される（モードの値は今まで通り `monitor`）。インストールや更新でagmsgdが勝手にオンになることはなく、更新で今使っているモードが変わることもない。
 
 | モード | 仕組み | レイテンシ | 向いている相手 |
 |---|---|---|---|
-| **`monitor`**（Claude Codeのデフォルト。OpenCodeではopencode-sentinel pluginで利用可能） | SessionStartフック → Monitorツール → ブロッキングSQLiteストリーム | 約5秒 | リアルタイムプッシュを望むClaude Codeユーザー |
+| **agmsgd**（Claude CodeとCodexでおすすめ。プロンプトか `/agmsg delivery agmsgd` で選ぶ） | バックグラウンドサービスが通知をセッションに直接届ける。Monitorタスクは不要 | 数秒 | サービスを動かせるClaude Code / Codexユーザー。ログイン時に起動するサービスを登録し、`agmsg daemon disable` で止めて削除できる |
+| **`monitor (legacy)`**（値は `monitor`。Claude Codeのデフォルト。OpenCodeではopencode-sentinel pluginで利用可能） | SessionStartフック → Monitorツール → ブロッキングSQLiteストリーム | 約5秒 | リアルタイムプッシュを望むClaude Codeユーザー |
 | **`turn`**（Codex / Copilot CLI / OpenCode（plugin未導入）のデフォルト） | アシスタントのターン間でStopフックが `check-inbox.sh` を発火 | 次のやり取りまで | monitorを実行していないCodex / Copilot CLI / OpenCodeユーザー、より静かなループを好むClaude Codeユーザー |
 | **`both`** | monitorを主に、turnをセッションごとの安全網として | 約5秒。ウォッチャー障害時はturn相当にフォールバック | 二重の保険をかけたい場合 |
 | **`off`** | 自動配信なし | 手動の `/agmsg` のみ | ミニマリスト |
 
+`agmsg daemon enable` が断る環境（Node 22.13未満、JSONLのメッセージストレージ、Linuxでsystemdのユーザーサービスが使えない、WindowsのCodexが0.157未満）ではagmsgdは出さず、理由を1行添えて他のモードを並べる。agmsgdがすでにオンのときはどれを使うかを聞かず、そう伝えたうえで、そのまま使うか `monitor (legacy)` に切り替えるかだけ尋ねる。agmsgdを選ぶと `agmsg daemon enable` を実行し、届け先がまだ確かめられないセッションのために、プロジェクトのモードは `monitor` のままにしておく。
+
 ### モードの選択
 
 ```
-/agmsg mode monitor    — このプロジェクトをリアルタイムプッシュに切り替え（Claude Code）
-/agmsg mode turn       — ターン間チェックに切り替え
-/agmsg mode both       — monitorをturnを安全網として併用
-/agmsg mode off        — 手動の/agmsgのみ
-/agmsg mode            — 現在のモードを表示
+/agmsg delivery agmsgd     — バックグラウンドサービスによる直接配信（Claude Code、Codex）
+/agmsg delivery monitor    — このプロジェクトをリアルタイムプッシュに切り替え（Claude Code）
+/agmsg delivery turn       — ターン間チェックに切り替え
+/agmsg delivery both       — monitorをturnを安全網として併用
+/agmsg delivery off        — 手動の/agmsgのみ
+/agmsg delivery            — 現在のモードを表示
 ```
 
 設定はプロジェクトごと。`<project>/.claude/settings.local.json` にはそのプロジェクトで選んだモードが必要とするフックだけが設定される — `set` の呼び出しを繰り返しても冪等だ。
@@ -257,7 +261,7 @@ despawnは指定されたメンバーにのみ作用する — `despawn` を実�
 `hook on` は現在 `mode turn` の薄いエイリアスになっている（非推奨の一行ヒント付き）。リアルタイムプッシュに切り替えるには:
 
 ```
-/agmsg mode monitor
+/agmsg delivery monitor
 ```
 
 このコマンドは `db/config.yaml` を更新し、プロジェクトのフックエントリを書き換え、現在のセッションで `monitor` を有効化する `AGMSG-DIRECTIVE` を表示する — エージェントの再起動は不要。
@@ -271,7 +275,7 @@ despawnは指定されたメンバーにのみ作用する — `despawn` を実�
 /agmsg history                          — メッセージ履歴
 /agmsg team                             — チームメンバー一覧
 /agmsg send <agent> <message>           — メッセージ送信
-/agmsg mode <monitor|turn|both|off>     — 配信モード切り替え
+/agmsg delivery <agmsgd|monitor|turn|both|off>     — 配信の切り替え（別名: /agmsg mode）
 /agmsg mode                             — 現在のモードを表示
 /agmsg actas <name>                     — このプロジェクトで別のロールに切り替え（必要なら作成）
 /agmsg drop <name>                      — このプロジェクトからロールを削除

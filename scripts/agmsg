@@ -15,6 +15,7 @@ commands:
   daemon start|stop|status|enable|disable   manage the agmsgd beta daemon
     status --all                           include older destination records
     status --json                          machine-readable status
+  delivery [status|agmsgd|monitor|turn|both|off]   how messages reach this agent
   --version                                 print the installed version
   help                                      show this message
 
@@ -26,6 +27,10 @@ case "${1:-}" in
   daemon)
     shift
     exec bash "$SCRIPT_DIR/daemon.sh" "$@"
+    ;;
+  delivery)
+    shift
+    exec bash "$SCRIPT_DIR/delivery-cli.sh" "$@"
     ;;
   --version|-v)
     printf 'agmsg %s (install: %s)\n' "$(bash "$SCRIPT_DIR/version.sh")" "$(cd "$SCRIPT_DIR/.." && pwd)"

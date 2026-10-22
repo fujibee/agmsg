@@ -266,23 +266,27 @@ the manual fallback.
 
 ## Delivery modes
 
-How incoming messages reach your agent. Pick one at first join via the prompt, or change it later with `/agmsg mode <name>`.
+How incoming messages reach your agent. Pick one at first join via the prompt, or change it later with `/agmsg delivery <name>` (`/agmsg mode` still works as an alias; from a shell: `agmsg delivery <name>`). On Claude Code and Codex the prompt offers agmsgd first, as the recommended choice, and lists the monitor as **`monitor (legacy)`** (the mode value is still `monitor`). Installing or updating never turns agmsgd on by itself, and an update changes nothing about the mode you already use.
 
 | mode | mechanism | latency | who it's for |
 |---|---|---|---|
-| **`monitor`** (default on Claude Code; on OpenCode with the opencode-sentinel plugin) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
+| **agmsgd** (recommended on Claude Code and Codex; choose it at the prompt or with `/agmsg delivery agmsgd`) | a background service delivers a notice straight into the session, no Monitor task needed | a few seconds | anyone on Claude Code or Codex who can run the service: it registers one that starts at login, and `agmsg daemon disable` stops and removes it |
+| **`monitor (legacy)`** (value `monitor`; default on Claude Code; on OpenCode with the opencode-sentinel plugin) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
 | **`turn`** (default on Codex / Copilot CLI / OpenCode without the plugin) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode users not running monitor; Claude Code users on a quieter loop |
 | **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
 | **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
 
+agmsgd is not offered where `agmsg daemon enable` would refuse (Node older than 22.13, a JSONL message storage, no systemd user services on Linux, Codex older than 0.157 on Windows); the prompt says why in one line and lists the other modes. When agmsgd is already on, the prompt does not ask which to use: it says so and asks only whether to keep it or switch to `monitor (legacy)`. Choosing agmsgd runs `agmsg daemon enable` and leaves the project on `monitor` as the fallback for a session whose destination is not confirmed yet.
+
 ### Picking a mode
 
 ```
-/agmsg mode monitor    — switch this project to real-time push (Claude Code)
-/agmsg mode turn       — switch to between-turns checking
-/agmsg mode both       — monitor with turn as a safety net
-/agmsg mode off        — manual /agmsg only
-/agmsg mode            — show current mode
+/agmsg delivery agmsgd     — direct delivery by the background service (Claude Code, Codex)
+/agmsg delivery monitor    — switch this project to real-time push (Claude Code)
+/agmsg delivery turn       — switch to between-turns checking
+/agmsg delivery both       — monitor with turn as a safety net
+/agmsg delivery off        — manual /agmsg only
+/agmsg delivery            — show current mode
 ```
 
 Settings are per-project. Each `<project>/.claude/settings.local.json` gets exactly the hooks the chosen mode needs — repeated `set` calls are idempotent.
@@ -312,7 +316,7 @@ TaskList may list this task, but not every environment does (the desktop app's C
 `hook on` is now a thin alias for `mode turn` (with a one-line deprecation hint). To switch to real-time push:
 
 ```
-/agmsg mode monitor
+/agmsg delivery monitor
 ```
 
 The command updates `db/config.yaml`, rewrites the project's hook entries, and prints an `AGMSG-DIRECTIVE` that activates `monitor` in the current session — no agent restart needed.
@@ -326,7 +330,7 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 /agmsg history                          — message history
 /agmsg team                             — list team members
 /agmsg send <agent> <message>           — send message
-/agmsg mode <monitor|turn|both|off>     — switch delivery mode
+/agmsg delivery <agmsgd|monitor|turn|both|off>     — switch delivery (alias: /agmsg mode)
 /agmsg mode                             — show current mode
 /agmsg actas <name>                     — switch to another role in this project (create if needed)
 /agmsg drop <name>                      — remove a role from this project
