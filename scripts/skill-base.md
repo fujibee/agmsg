@@ -226,6 +226,18 @@ If argument starts with "delete-team" or asks to delete/remove a team's data:
 5. Run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team> [--delete] [--force] [--purge-messages] --yes` — pass `--yes` since the confirmation already happened in chat; the script's own interactive prompt would otherwise block waiting for input this agent can't supply.
 6. Show the result.
 
+If argument starts with "plugin" (e.g. "plugin list", "plugin install owner/repo", "plugin update owner/repo", "plugin remove owner/repo"):
+1. `plugin list`: run `~/.agents/skills/__SKILL_NAME__/scripts/plugin.sh list` and show the result (every driver, its trust state, and the source and commit it came from).
+2. `plugin install <owner>/<repo>[@<ref>]` and `plugin update <owner>/<repo>`: a plugin is someone else's shell code that will run with the user's privileges. Never add `--yes` on your own judgment.
+   a. Run `~/.agents/skills/__SKILL_NAME__/scripts/plugin.sh install <owner>/<repo>[@<ref>]` (or `update <owner>/<repo>`) **without** `--yes`. With no terminal it fetches, prints what it found, installs nothing and exits 3 ("needs confirmation").
+   b. Show the user the whole printout, not a summary: the source and commit, each driver it adds, every file that can run, any ignored directories, and the notice. For `update`, include the changed-file list.
+   c. Tell the user that a third-party plugin is installed at their own risk — agmsg does not review or sign plugins — and ask in chat whether to install it. Wait for an explicit yes.
+   d. Only then rerun with `--yes`, pinned to the commit you showed — use the command the printout ends with (`plugin.sh install <owner>/<repo>@<sha> --yes ...`, or `update`; it carries any option, such as `--track <branch>`, that keeps later updates following the same branch), so what runs is exactly what was shown. If the user said no, stop; nothing was installed.
+   e. If it refuses with "would replace built-in", that refusal is not the printout: show the explanation to the user unchanged and stop. Only if the user, having read it, explicitly chooses to replace the built-in, rerun the same command with `--override` but still **without** `--yes`; that prints the full printout (source, commit, files, changes). Show all of it and ask for confirmation again — agreeing to the override is not agreeing to the files. Only then rerun pinned with `--yes --override`.
+3. `plugin remove <owner>/<repo>`: run `~/.agents/skills/__SKILL_NAME__/scripts/plugin.sh remove <owner>/<repo>` for an explicit user request and show the result (it says when a built-in is back in use).
+4. `plugin trust <ref>` / `plugin untrust <ref>` are for a driver the user placed by hand under `plugins/`; run them only on an explicit request.
+5. Plugins here are agmsg drivers installed from a GitHub repository. They are unrelated to the Claude Code plugin that can distribute agmsg itself.
+
 If argument starts with "remote connect":
 1. Parse the required `--endpoint <url>` and `<team>`, plus optional `--e2ee`.
 2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> [--e2ee] <team>`
