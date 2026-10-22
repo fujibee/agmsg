@@ -108,6 +108,16 @@ pub struct AddPane {
 }
 
 #[derive(Default)]
+/// What a pane instance is and holds right now (to bind a saved consent to it).
+#[derive(Debug, Clone)]
+pub struct ConsentView {
+    pub addon: String,
+    pub pane: String,
+    pub commit: String,
+    pub team: Option<String>,
+    pub root: Option<String>,
+}
+
 pub struct Registry {
     next: PaneId,
     panes: HashMap<PaneId, Pane>,
@@ -202,8 +212,8 @@ impl Registry {
     }
 
     /// What a pane instance is and holds, for binding a saved consent to it.
-    pub fn consent_view(&self, id: PaneId) -> Option<(String, String, String, Option<String>, Option<String>)> {
-        self.panes.get(&id).map(|p| (p.addon.clone(), p.name.clone(), p.commit.clone(), p.team.clone(), p.root.as_ref().map(|r| r.to_string_lossy().into_owned())))
+    pub fn consent_view(&self, id: PaneId) -> Option<ConsentView> {
+        self.panes.get(&id).map(|p| ConsentView { addon: p.addon.clone(), pane: p.name.clone(), commit: p.commit.clone(), team: p.team.clone(), root: p.root.as_ref().map(|r| r.to_string_lossy().into_owned()) })
     }
 
     pub fn contains(&self, id: PaneId) -> bool {

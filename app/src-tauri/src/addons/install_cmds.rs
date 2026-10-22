@@ -271,7 +271,8 @@ pub fn check_save(host: &AddonHost, spec: &SaveGrantIn) -> Result<SavedGrant, Fa
         return Err(Failure { code: "bad_args", message: "Developer grants last until the app quits and are never saved.".into() });
     }
     let gone = || Failure { code: "pane_gone", message: "That pane is closed, so its permission was not saved.".into() };
-    let (addon, pane, commit, team, root) = host.panes.registry.lock().unwrap().consent_view(spec.pane_id).ok_or_else(gone)?;
+    let v = host.panes.registry.lock().unwrap().consent_view(spec.pane_id).ok_or_else(gone)?;
+    let (addon, pane, commit, team, root) = (v.addon, v.pane, v.commit, v.team, v.root);
     if addon != spec.id || pane != spec.pane {
         return Err(Failure { code: "pane_gone", message: "That pane is not this add-on's pane.".into() });
     }
