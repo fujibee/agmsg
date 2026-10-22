@@ -245,9 +245,21 @@ pub struct SavedGrantOut {
     pub granted_at: String,
 }
 
+/// The remembered grants of a pane that were given to the version that is installed
+/// now (a row from an older commit is never replayed).
+pub fn current_saved_grants(host: &AddonHost, id: &str, pane: &str) -> Vec<SavedGrantOut> {
+    let Some(info) = host.catalog().list().into_iter().find(|a| a.id == id) else { return Vec::new() };
+    grants::for_pane(host.catalog().addons_dir(), id, pane)
+        .into_iter()
+        .filter(|g| g.sha == info.commit)
+        .map(|g| SavedGrantOut { permission: g.permission, scope: g.scope, granted_at: g.granted_at })
+        .collect()
+}
+
 #[tauri::command]
 pub fn addon_saved_grants(host: State<'_, Arc<AddonHost>>, spec: GrantIn) -> Vec<SavedGrantOut> {
-    grants::for_pane(host.catalog().addons_dir(), &spec.id, &spec.pane).into_iter().map(|g| SavedGrantOut { permission: g.permission, scope: g.scope, granted_at: g.granted_at }).collect()
+    let _serial = host.install_lock.lock().unwrap();
+    current_saved_grants(&host, &spec.id, &spec.pane)
 }
 
 /// Remembering a grant is bound to the pane instance and the commit the user
@@ -299,10 +311,18 @@ pub fn check_save(host: &AddonHost, spec: &SaveGrantIn) -> Result<SavedGrant, Fa
     Ok(SavedGrant { repo: spec.id.clone(), sha: spec.commit.clone(), pane: spec.pane.clone(), permission: spec.permission.clone(), scope: spec.scope.clone(), granted_at: now_iso() })
 }
 
+/// Check and write under the install lock: an update, a removal, a revoke or
+/// another save cannot slip in between the check and the write, so a consent
+/// given to an old version can never be written after the version changed.
+pub fn save_serialized(host: &AddonHost, spec: &SaveGrantIn) -> Result<(), Failure> {
+    let _serial = host.install_lock.lock().unwrap();
+    let g = check_save(host, spec)?;
+    grants::add(host.catalog().addons_dir(), g).map_err(|e| Failure { code: "bad_args", message: format!("That grant cannot be saved: {e}") })
+}
+
 #[tauri::command]
 pub fn addon_save_grant(host: State<'_, Arc<AddonHost>>, spec: SaveGrantIn) -> Result<(), Failure> {
-    let g = check_save(&host, &spec)?;
-    grants::add(host.catalog().addons_dir(), g).map_err(|e| Failure { code: "bad_args", message: format!("That grant cannot be saved: {e}") })
+    save_serialized(&host, &spec)
 }
 
 #[derive(Debug, Serialize)]
@@ -317,6 +337,7 @@ pub struct ForgetOut {
 /// `addon-pane-failed {pane, reason}` once per pane).
 #[tauri::command]
 pub fn addon_forget_grant<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<AddonHost>>, spec: GrantIn) -> Result<ForgetOut, Failure> {
+    let _serial = host.install_lock.lock().unwrap();
     let forgotten = grants::revoke(host.catalog().addons_dir(), &spec.id, &spec.pane, &spec.permission, &spec.scope).map_err(|e| Failure { code: "io", message: e.to_string() })?;
     let closed = host.panes.revoke_matching(&host.nav, &spec.id, &spec.pane, &spec.permission, &spec.scope);
     for id in &closed {
@@ -415,6 +436,58 @@ mod tests {
         // a pane opened after the update, under the new commit, can save
         let new_pane = open_pane(&h, SHA2, Some("/proj"), None);
         assert!(check_save(&h, &save("o/r", new_pane, SHA2, "files:read", "/proj")).is_ok());
+    }
+
+    #[test]
+    fn an_update_between_the_check_and_the_write_cannot_leave_an_old_row() {
+        // the update takes the install lock first and holds it while it activates;
+        // the save, started meanwhile, waits and then sees the new commit
+        let d = tempfile::tempdir().unwrap();
+        install(d.path(), SHA1);
+        let h = host_with(d.path());
+        let p = open_pane(&h, SHA1, Some("/proj"), None);
+        let (h2, addons) = (h.clone(), d.path().to_path_buf());
+        let updater = std::thread::spawn(move || {
+            let _serial = h2.install_lock.lock().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            install(&addons, SHA2);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let r = save_serialized(&h, &save("o/r", p, SHA1, "files:read", "/proj"));
+        updater.join().unwrap();
+        assert_eq!(r.unwrap_err().code, "commit_changed");
+        assert!(grants::read(d.path()).is_empty(), "no old-version row after the update");
+    }
+
+    #[test]
+    fn a_revoke_that_finished_cannot_be_undone_by_a_save_that_started_before_it() {
+        let d = tempfile::tempdir().unwrap();
+        install(d.path(), SHA1);
+        let h = host_with(d.path());
+        let p = open_pane(&h, SHA1, Some("/proj"), None);
+        assert!(save_serialized(&h, &save("o/r", p, SHA1, "files:read", "/proj")).is_ok());
+        // revoke under the same lock the save takes
+        {
+            let _serial = h.install_lock.lock().unwrap();
+            grants::revoke(d.path(), "o/r", "main", "files:read", "/proj").unwrap();
+            h.panes.revoke_matching(&h.nav, "o/r", "main", "files:read", "/proj");
+        }
+        // the late save of the same consent finds the pane gone and writes nothing
+        let late = save_serialized(&h, &save("o/r", p, SHA1, "files:read", "/proj")).unwrap_err();
+        assert_eq!(late.code, "pane_gone");
+        assert!(grants::read(d.path()).is_empty());
+    }
+
+    #[test]
+    fn saved_grants_of_an_older_commit_are_never_replayed() {
+        let d = tempfile::tempdir().unwrap();
+        install(d.path(), SHA1);
+        let h = host_with(d.path());
+        grants::add(d.path(), SavedGrant { repo: "o/r".into(), sha: SHA1.into(), pane: "main".into(), permission: "files:read".into(), scope: "/old".into(), granted_at: "t".into() }).unwrap();
+        grants::add(d.path(), SavedGrant { repo: "o/r".into(), sha: SHA2.into(), pane: "main".into(), permission: "files:read".into(), scope: "/other".into(), granted_at: "t".into() }).unwrap();
+        let now = current_saved_grants(&h, "o/r", "main");
+        assert_eq!(now.iter().map(|g| g.scope.as_str()).collect::<Vec<_>>(), vec!["/old"], "only rows given to the installed commit");
+        assert!(current_saved_grants(&h, "x/unknown", "main").is_empty());
     }
 
     #[test]
