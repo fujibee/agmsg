@@ -177,6 +177,15 @@ agmsg_install_restart_guidance() {
   echo '    This installation does not enable agmsgd or switch existing sessions automatically.'
 }
 
+# One line pointing at agmsgd, only while it is off. Never turns it on. Kept in
+# one place so the wording, and later a different default, change here only.
+agmsg_install_daemon_hint() {   # <skill_dir>
+  local skill="$1" desired
+  desired="$(sqlite3 -readonly "$skill/run/install.db" "SELECT desired FROM daemon_intent;" 2>/dev/null || true)"
+  [ "$desired" != on ] || return 0
+  printf '    agmsgd (beta) delivers notices to Claude Code and Codex sessions directly. Turn it on with: bash %q daemon enable\n' "$skill/scripts/agmsg"
+}
+
 # --- Defaults ---
 CMD_NAME=""
 UPDATE_ONLY=false
@@ -1239,6 +1248,7 @@ $_agmsg_running_team"
   agmsg_install_op_run_phase configure_codex_sandbox || exit 1
   echo ""
   agmsg_install_restart_guidance
+  agmsg_install_daemon_hint "$SKILL_DIR"
   echo ""
   # #963: a sync engine has no equivalent self-detection, so this update
   # restarts one itself for every team the snapshot above found running.
@@ -1471,6 +1481,7 @@ echo "  ✓ Installed to ~/.agents/skills/$CMD_NAME/ (version $INSTALLED_VERSION
 echo ""
 echo "  Next steps:"
 agmsg_install_restart_guidance
+agmsg_install_daemon_hint "$SKILL_DIR"
 echo "    Run the command to join a team:"
 echo "       Claude Code:  /$CMD_NAME"
 echo "       Codex:        \$$CMD_NAME"
