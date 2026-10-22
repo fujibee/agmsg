@@ -164,10 +164,6 @@ fn read_small(p: &Path) -> Res<Option<String>> {
     Ok(Some(String::from_utf8_lossy(&s).into_owned()))
 }
 
-/// Every link anywhere under `dir` must lead inside `root`. Git reads loose
-/// objects, packs, refs and control files by following whatever is there, so a
-/// link below `objects/` or `refs/` is as much a way out as one at the top.
-/// Links are checked, not followed; a link that stays inside is allowed.
 /// Refuse a place the denylist protects: git would read it for the repository.
 fn refuse_denied(snap: &Snapshot, p: &Path) -> Res<()> {
     if snap.is_denied(p) {
@@ -179,6 +175,12 @@ fn refuse_denied(snap: &Snapshot, p: &Path) -> Res<()> {
     Ok(())
 }
 
+/// No link is allowed anywhere under `dir`. Git reads loose objects, packs, refs
+/// and control files by following whatever is there, so a link below `objects/`
+/// or `refs/` is as much a way out as one at the top. Links are not followed: a
+/// link out is `outside_root`, a link to a protected place is `denied_path`, and
+/// any other link (a folder or a file, even one that stays inside the root) is
+/// `unsupported_repo` with its path in the reason.
 fn check_no_link_out(root: &Path, dir: &Path, snap: &Snapshot) -> Res<()> {
     let mut stack = vec![resolve(dir)];
     let mut seen = 0usize;
