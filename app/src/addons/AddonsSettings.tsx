@@ -19,8 +19,11 @@ export function AddonsSettings(props: {
   onRemove: (addonId: string) => void;
   onOpenRequestsChange: (v: "show" | "off") => void;
   onLoadFromFolder: () => void;
+  /** False while Rust has no install pipeline: the input is shown disabled with a note instead of faking an install. */
+  canInstall?: boolean;
 }) {
   const { t, snapshot, engine } = props;
+  const canInstall = props.canInstall ?? true;
   const [input, setInput] = useState("");
   const parsed = parseRepoInput(input);
   const builtins = snapshot.addons.filter((a) => a.builtin);
@@ -46,6 +49,7 @@ export function AddonsSettings(props: {
           {builtins.map((a) => (
             <li key={a.id} className="addon-row">
               <span className="addon-name">{a.panes.map((p) => p.title).join(", ")}</span>
+              {a.digestOk === false && <p className="addon-digest-bad" role="alert">{t("addons.failure.digest_mismatch", { title: a.panes[0]?.title ?? a.id })}</p>}
               <PermissionList t={t} addon={a} />
             </li>
           ))}
@@ -67,12 +71,14 @@ export function AddonsSettings(props: {
             value={input}
             placeholder={t("addons.install.placeholder")}
             aria-label={t("addons.install.label")}
+            disabled={!canInstall}
             onChange={(e) => setInput(e.target.value)}
           />
-          <button type="submit" disabled={!parsed}>
+          <button type="submit" disabled={!parsed || !canInstall}>
             {t("addons.install.button")}
           </button>
         </form>
+        {!canInstall && <p className="modal-note">{t("addons.install.later")}</p>}
         {props.installError && (
           <div className="addon-install-error" role="alert">
             {(() => {
@@ -96,12 +102,14 @@ export function AddonsSettings(props: {
         </label>
       </section>
 
-      <details className="addon-developer">
-        <summary>{t("addons.developer.title")}</summary>
-        <button type="button" onClick={props.onLoadFromFolder}>
-          {t("addons.developer.loadFromFolder")}
-        </button>
-      </details>
+      {canInstall && (
+        <details className="addon-developer">
+          <summary>{t("addons.developer.title")}</summary>
+          <button type="button" onClick={props.onLoadFromFolder}>
+            {t("addons.developer.loadFromFolder")}
+          </button>
+        </details>
+      )}
     </div>
   );
 }
@@ -126,6 +134,7 @@ function InstalledList(props: {
   snapshot: AddonsSnapshot;
   installed: InstalledAddon[];
   readOnly?: boolean;
+  canInstall?: boolean;
   onRevoke: (addonId: string, grantIndex: number) => void;
   onCheckUpdate: (addonId: string) => void;
   onRemove: (addonId: string) => void;
@@ -142,6 +151,7 @@ function InstalledList(props: {
               {a.id} · {shortSha(a.sha)} · {a.installedAt.slice(0, 10)}
             </span>
           </div>
+          {a.digestOk === false && <p className="addon-digest-bad" role="alert">{t("addons.failure.digest_mismatch", { title: a.panes[0]?.title ?? a.id })}</p>}
           <PermissionList t={t} addon={a} />
           <ul className="addon-grants">
             {snapshot.grants.map((g, i) =>
@@ -157,14 +167,16 @@ function InstalledList(props: {
             {grantsOf(snapshot.grants, a.id).length === 0 && <li className="none">{t("addons.grant.none")}</li>}
           </ul>
           <div className="addon-actions">
-            {!props.readOnly && (
+            {!props.readOnly && props.canInstall !== false && (
               <button type="button" onClick={() => props.onCheckUpdate(a.id)}>
                 {t("addons.installed.checkUpdates")}
               </button>
             )}
-            <button type="button" onClick={() => props.onRemove(a.id)}>
-              {t("addons.installed.remove")}
-            </button>
+            {props.canInstall !== false && (
+              <button type="button" onClick={() => props.onRemove(a.id)}>
+                {t("addons.installed.remove")}
+              </button>
+            )}
           </div>
         </li>
       ))}

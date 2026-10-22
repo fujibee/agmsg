@@ -11,6 +11,8 @@ export function failureActions(f: PaneFailure): FailureAction[] {
     case "digest_mismatch":
       return ["reinstall", "remove"];
     case "load_timeout":
+    case "open_failed":
+    case "init_too_large":
       return ["reload"];
     case "path_missing":
       return ["chooseAnother"];
@@ -31,7 +33,9 @@ export function FailureCard(props: {
       ? t("addons.failure.path_missing", { path: failure.path })
       : failure.code === "revoked"
         ? t("addons.failure.revoked", { scope: failure.scope })
-        : t(`addons.failure.${failure.code}`, { title });
+        : failure.code === "open_failed"
+          ? t("addons.failure.open_failed", { title, message: failure.message })
+          : t(`addons.failure.${failure.code}`, { title });
   return (
     <div className="addon-card addon-failure-card" role="alert">
       <p>{text}</p>

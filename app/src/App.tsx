@@ -19,7 +19,8 @@ import { AddonPaneHost } from "./addons/AddonPaneHost";
 import type { AddonPaneRef } from "./addons/types";
 import { OpenRequestBar, OpenRequestNotes } from "./addons/OpenRequestBar";
 import { scanRequests, type BarItem } from "./addons/requests";
-import { mockEngine, mockRequestContext, mockRequestRows, mockSnapshot } from "./addons/mock";
+import { useAddonCatalog } from "./addons/catalog";
+import { mockRequestContext, mockRequestRows, mockSnapshot } from "./addons/mock";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
 import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
@@ -1474,14 +1475,18 @@ export default function App() {
     [team],
   );
 
-  // S10: open requests from seats, on mock rows. Nothing opens without the click.
+  const catalog = useAddonCatalog();
+  const addonEngine = catalog.engine;
+  // S10: open requests from seats. Nothing opens without the click. Still on
+  // mock rows: in the app there are none until the rows come from the message
+  // store and Rust says which are local.
   const [handledRequests, setHandledRequests] = useState<ReadonlySet<string>>(new Set());
   const requestScan = useMemo(
     () =>
-      mockSnapshot.openRequests === "show"
+      !catalog.live && mockSnapshot.openRequests === "show"
         ? scanRequests(mockRequestRows, { ...mockRequestContext, team, handled: handledRequests })
         : { items: [], notes: new Map() },
-    [team, handledRequests],
+    [team, handledRequests, catalog.live],
   );
   const requestItems = requestScan.items;
   const requestNotes = useMemo(
@@ -1494,7 +1499,7 @@ export default function App() {
     const k = item.request.target;
     const title = k.kind === "fileview" ? "File view" : k.kind === "diffview" ? "Diff view" : item.pane;
     openAddonPane({
-      addonId: k.kind === "addon" ? `${k.owner}/${k.repo}` : k.kind,
+      addonId: k.kind === "addon" ? `${k.owner}/${k.repo}` : `builtin:${k.kind}`,
       paneName: k.kind === "addon" ? k.pane : k.kind,
       title,
       askedBy: item.from,
@@ -2320,32 +2325,32 @@ export default function App() {
                       {t("sidebar.newMenu.agent")}
                     </button>
                     <button
-                      disabled={!team || !mockEngine.ok}
-                      title={mockEngine.ok ? undefined : mockEngine.reasons.join("; ")}
+                      disabled={!team || !addonEngine.ok}
+                      title={addonEngine.ok ? undefined : addonEngine.reasons.join("; ")}
                       onClick={() => {
                         setNewMenu(false);
-                        openAddonPane({ addonId: "fileview", paneName: "fileview", title: t("addons.menu.fileView") });
+                        openAddonPane({ addonId: "builtin:fileview", paneName: "fileview", title: t("addons.menu.fileView") });
                       }}
                     >
                       {t("addons.menu.fileViewEntry")}
                     </button>
                     <button
-                      disabled={!team || !mockEngine.ok}
-                      title={mockEngine.ok ? undefined : mockEngine.reasons.join("; ")}
+                      disabled={!team || !addonEngine.ok}
+                      title={addonEngine.ok ? undefined : addonEngine.reasons.join("; ")}
                       onClick={() => {
                         setNewMenu(false);
-                        openAddonPane({ addonId: "diffview", paneName: "diffview", title: t("addons.menu.diffView") });
+                        openAddonPane({ addonId: "builtin:diffview", paneName: "diffview", title: t("addons.menu.diffView") });
                       }}
                     >
                       {t("addons.menu.diffViewEntry")}
                     </button>
-                    {mockSnapshot.addons
-                      .filter((a) => !a.builtin)
+                    {catalog.addons
+                      .filter((a) => !a.builtin && a.enabled)
                       .flatMap((a) => a.panes.map((p) => ({ a, p })))
                       .map(({ a, p }) => (
                         <button
                           key={`${a.id}/${p.name}`}
-                          disabled={!team || !mockEngine.ok}
+                          disabled={!team || !addonEngine.ok}
                           onClick={() => {
                             setNewMenu(false);
                             openAddonPane({ addonId: a.id, paneName: p.name, title: p.title });
@@ -2814,7 +2819,14 @@ export default function App() {
                     </button>
                   </div>
                   {p.kind === "addon" && p.addon ? (
-                    <AddonPaneHost pane={p.addon} onClose={() => setModal({ kind: "closePane", paneId: p.id })} />
+                    <AddonPaneHost
+                      pane={p.addon}
+                      team={win.team}
+                      live={catalog.live}
+                      addons={catalog.addons}
+                      onClose={() => setModal({ kind: "closePane", paneId: p.id })}
+                      onOpenSettings={() => setModal({ kind: "settings" })}
+                    />
                   ) : (
                   <TerminalPane
                     id={p.id}
@@ -3065,6 +3077,7 @@ export default function App() {
           onTerminalFontSizeChange={setTerminalFontSize}
           timezone={timezone}
           onTimezoneChange={setTimezone}
+          catalog={catalog}
         />
       )}
       {modal?.kind === "closeWindow" &&

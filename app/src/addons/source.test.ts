@@ -20,17 +20,19 @@ describe("live source", () => {
     expect(await createLiveSource(recorder({ addon_gate_status: reject("no gate") }).invoke).engine()).toEqual({ ok: false, reasons: ["no gate"] });
   });
 
+  const pane = { id: 3, url: "http://127.0.0.1:1/t/", port: 1, title: "Diff view", permissions: ["files:read"], network: "" };
+
   it("sends the commands with the names and argument shapes Rust expects", async () => {
-    const r = recorder({ addon_pane_add: { id: 3, url: "http://127.0.0.1:1/t/", port: 1 }, addon_grant_root: "/real" });
+    const r = recorder({ addon_pane_add: pane, addon_grant_root: "/real" });
     const s = createLiveSource(r.invoke);
-    expect(await s.addPane({ addon: "diffview", name: "diffview", openArgs: { path: "/p" } })).toEqual({ id: 3, url: "http://127.0.0.1:1/t/", port: 1 });
+    expect(await s.addPane({ addonId: "builtin:diffview", pane: "diffview", openArgs: { path: "/p" } })).toEqual(pane);
     await s.grantTeam(3, "agmsg");
     expect(await s.grantRoot(3, "/p")).toEqual({ ok: true, realPath: "/real" });
     await s.revokeTeam(3);
     await s.revokeRoot(3);
     await s.removePane(3);
     expect(r.calls).toEqual([
-      ["addon_pane_add", { spec: { addon: "diffview", name: "diffview", openArgs: { path: "/p" } } }],
+      ["addon_pane_add", { spec: { addonId: "builtin:diffview", pane: "diffview", openArgs: { path: "/p" } } }],
       ["addon_grant_team", { id: 3, team: "agmsg" }],
       ["addon_grant_root", { id: 3, path: "/p" }],
       ["addon_revoke_team", { id: 3 }],
@@ -52,6 +54,22 @@ describe("live source", () => {
 
   it("addPane lets Rust's refusal (gate off) reach the caller", async () => {
     const s = createLiveSource(recorder({ addon_pane_add: reject("add-ons are off on this computer: probe failed") }).invoke);
-    await expect(s.addPane({ addon: "a", name: "b", openArgs: {} })).rejects.toBe("add-ons are off on this computer: probe failed");
+    await expect(s.addPane({ addonId: "a", pane: "b", openArgs: {} })).rejects.toBe("add-ons are off on this computer: probe failed");
+  });
+
+  it("list maps addon_list rows: built-in vs installed, network text, permissions, opens, digestOk", async () => {
+    const raw = [
+      { id: "builtin:fileview", kind: "builtin", source: "agmsg", commit: "1.2.3", title: "File view", digestOk: true, enabled: true, problems: [],
+        panes: [{ name: "fileview", title: "File view", entry: "index.html", permissions: ["files:read"], network: "", opens: ["path"], why: { "files:read": "Lists." } }] },
+      { id: "o/r", kind: "installed", source: "o/r", commit: "a".repeat(40), title: "R", digestOk: false, enabled: true, problems: ["p: bad"],
+        panes: [{ name: "p", title: "P", entry: "index.html", permissions: ["network", "bogus"], network: "https://a.test,https://b.test", opens: [], why: {} },
+                { name: "q", title: "Q", entry: "index.html", permissions: ["network"], network: "*", opens: ["url", "path"], why: {} }] },
+    ];
+    const list = await createLiveSource(recorder({ addon_list: raw }).invoke).list();
+    expect(list[0]).toMatchObject({ id: "builtin:fileview", builtin: true, sha: "", digestOk: true });
+    expect(list[0].panes[0]).toMatchObject({ permissions: ["files:read"], network: { kind: "none" }, opens: "path" });
+    expect(list[1]).toMatchObject({ id: "o/r", builtin: false, sha: "a".repeat(40), digestOk: false, problems: ["p: bad"] });
+    expect(list[1].panes[0]).toMatchObject({ permissions: ["network"], network: { kind: "origins", origins: ["https://a.test", "https://b.test"] }, opens: "" });
+    expect(list[1].panes[1]).toMatchObject({ network: { kind: "any" }, opens: "url" });
   });
 });

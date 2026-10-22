@@ -8,7 +8,7 @@ import type { AddonsSnapshot, EngineState, GrantNeed, InstallError, StagedInstal
 export const mockSnapshot: AddonsSnapshot = {
   addons: [
     {
-      id: "fileview",
+      id: "builtin:fileview",
       builtin: true,
       sha: "",
       archiveSha256: "",
@@ -27,7 +27,7 @@ export const mockSnapshot: AddonsSnapshot = {
       ],
     },
     {
-      id: "diffview",
+      id: "builtin:diffview",
       builtin: true,
       sha: "",
       archiveSha256: "",

@@ -277,7 +277,8 @@
     "install": {
       "label": "Add-on repository",
       "placeholder": "owner/repo or owner/repo@ref",
-      "button": "Install…"
+      "button": "Install…",
+      "later": "Installing from GitHub isn't available in this build yet."
     },
     "openRequests": {
       "label": "Open requests from seats",
@@ -354,7 +355,9 @@
         "reload": "Reload",
         "chooseAnother": "Choose another…",
         "allowAgain": "Allow again"
-      }
+      },
+      "init_too_large": "{{title}} was given more than it can take at once (the starting data is too large).",
+      "open_failed": "{{title}} can't open: {{message}}"
     },
     "confirm": {
       "installTitle": "Install {{title}}?",

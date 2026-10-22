@@ -77,4 +77,18 @@ describe("locale keys", () => {
       expect(keys).toContain(k);
     }
   });
+
+  it("without an install pipeline the input is disabled with a note, and no Remove / Check / Developer", () => {
+    const html = render({ canInstall: false });
+    expect(html).toContain("addons.install.later");
+    expect(html).toMatch(/<input[^>]*disabled/);
+    expect(html).not.toContain("addons.installed.remove");
+    expect(html).not.toContain("addons.developer.title");
+  });
+  it("an add-on whose files changed after install says it can't open", () => {
+    const addons = mockSnapshot.addons.map((a) => (a.id === "builtin:fileview" ? { ...a, digestOk: false } : a));
+    const html = render({ snapshot: { ...mockSnapshot, addons } });
+    expect(html).toContain("addon-digest-bad");
+    expect(html).toContain("addons.failure.digest_mismatch");
+  });
 });

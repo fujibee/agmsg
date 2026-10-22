@@ -36,6 +36,10 @@ export type InstalledAddon = {
   panes: AddonPaneDecl[];
   installedAt: string;
   enabled: boolean;
+  /** Live list only: the files on disk match what was pinned. False means it cannot be opened. */
+  digestOk?: boolean;
+  /** Live list only: panes whose addon.conf was refused, in the words `check` uses. */
+  problems?: string[];
 };
 
 /** A row of grants.tsv. `scope` is a stable team id for messages:read, a real path for files:read. */
@@ -93,7 +97,10 @@ export type PaneFailure =
   | { code: "digest_mismatch" }
   | { code: "load_timeout" }
   | { code: "path_missing"; path: string }
-  | { code: "revoked"; permission: Exclude<Permission, "network">; scope: string };
+  | { code: "revoked"; permission: Exclude<Permission, "network">; scope: string }
+  /** Rust refused to open the pane (gate off, unknown add-on, bad conf); its words are shown as they are. */
+  | { code: "open_failed"; message: string }
+  | { code: "init_too_large" };
 
 /** A grant chip in the pane header. */
 export type GrantChip = { key: string; label: string };

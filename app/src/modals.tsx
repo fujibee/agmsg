@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { SUPPORTED_LANGUAGES } from "./i18n";
 import { AddonsTab } from "./addons/AddonsTab";
+import type { Catalog } from "./addons/catalog";
 import { AUTO_TIMEZONE, detectTimeZone, isValidTimeZone, listTimeZones } from "./time";
 
 type BrowseDir = (current: string) => Promise<string | null>;
@@ -645,6 +646,7 @@ export function SettingsModal(props: {
   onTerminalFontSizeChange: (size: number) => void;
   timezone: string;
   onTimezoneChange: (timezone: string) => void;
+  catalog: Catalog;
 }) {
   const { t, i18n } = useTranslation();
   // Local draft text, not a number bound directly to props.terminalFontSize
@@ -712,7 +714,7 @@ export function SettingsModal(props: {
         ))}
       </div>
       {tab === "addons" ? (
-        <AddonsTab />
+        <AddonsTab catalog={props.catalog} />
       ) : (
       <>
       <label>

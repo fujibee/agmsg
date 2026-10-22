@@ -1,10 +1,64 @@
 // The live source behind the add-on screens: thin wrappers over the Tauri
 // commands, taking `invoke` as a parameter so the swap from mock.ts is covered
 // by tests with a mocked invoke. Rust decides everything; this only maps its
-// answers to what the screens show. addon_list (installed and built-in
-// add-ons) is not here yet: it lands with the Rust side and joins this file.
+// answers to what the screens show.
 
-import type { EngineState } from "./types";
+import type { AddonPaneDecl, EngineState, InstalledAddon, NetworkScope, Permission } from "./types";
+import { PERMISSIONS } from "./types";
+
+/** addon_list's rows (camelCase JSON). Rust never returns a path. */
+export type AddonInfoRaw = {
+  id: string;
+  kind: "builtin" | "installed";
+  source: string;
+  commit: string;
+  title: string;
+  panes: {
+    name: string;
+    title: string;
+    entry: string;
+    permissions: string[];
+    network: string;
+    opens: string[];
+    why: Record<string, string>;
+  }[];
+  digestOk: boolean;
+  enabled: boolean;
+  problems: string[];
+};
+
+export function parseNetwork(n: string): NetworkScope {
+  if (n === "") return { kind: "none" };
+  if (n === "*") return { kind: "any" };
+  return { kind: "origins", origins: n.split(",").map((o) => o.trim()).filter(Boolean) };
+}
+
+export function toInstalledAddon(r: AddonInfoRaw): InstalledAddon {
+  const panes: AddonPaneDecl[] = r.panes.map((p) => ({
+    name: p.name,
+    title: p.title,
+    permissions: p.permissions.filter((x): x is Permission => (PERMISSIONS as readonly string[]).includes(x)),
+    network: parseNetwork(p.network),
+    // A pane that opens with both path and url shows as the first; the add-on's own list is Rust's to enforce.
+    opens: p.opens[0] === "path" || p.opens[0] === "url" ? p.opens[0] : "",
+    why: p.why as AddonPaneDecl["why"],
+  }));
+  return {
+    id: r.id,
+    builtin: r.kind === "builtin",
+    sha: r.kind === "builtin" ? "" : r.commit,
+    archiveSha256: "",
+    payloadDigest: "",
+    panes,
+    installedAt: "",
+    enabled: r.enabled,
+    digestOk: r.digestOk,
+    problems: r.problems,
+  };
+}
+
+/** What addon_pane_add returns: the frame URL and what Rust read from addon.conf. */
+export type AddedPane = { id: number; url: string; port: number; title: string; permissions: string[]; network: string };
 
 export type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -32,8 +86,12 @@ export function createLiveSource(invoke: Invoke) {
         return { ok: false, reasons: [toCommandError(e).message] };
       }
     },
-    async addPane(spec: { addon: string; name: string; openArgs: { path?: string; url?: string; base?: string } }) {
-      return (await invoke("addon_pane_add", { spec })) as { id: number; url: string; port: number };
+    async list(): Promise<InstalledAddon[]> {
+      return ((await invoke("addon_list")) as AddonInfoRaw[]).map(toInstalledAddon);
+    },
+    /** Rust resolves the pinned directory, checks its digest and builds the grants itself; a refusal is a string. */
+    async addPane(spec: { addonId: string; pane: string; openArgs: { path?: string; url?: string; base?: string } }): Promise<AddedPane> {
+      return (await invoke("addon_pane_add", { spec })) as AddedPane;
     },
     async removePane(id: number): Promise<void> {
       await invoke("addon_pane_remove", { id });

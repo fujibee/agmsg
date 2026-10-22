@@ -277,7 +277,8 @@
     "install": {
       "label": "アドオンのリポジトリ",
       "placeholder": "owner/repo または owner/repo@ref",
-      "button": "インストール…"
+      "button": "インストール…",
+      "later": "GitHub からのインストールは、このビルドではまだ使えません。"
     },
     "openRequests": {
       "label": "seat からの open request",
@@ -354,7 +355,9 @@
         "reload": "再読み込み",
         "chooseAnother": "別のものを選ぶ…",
         "allowAgain": "もう一度許可"
-      }
+      },
+      "init_too_large": "{{title}} に渡すデータが大きすぎて、開けません。",
+      "open_failed": "{{title}} を開けません: {{message}}"
     },
     "confirm": {
       "installTitle": "{{title}} をインストールしますか?",

@@ -2,16 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AddonsSettings } from "./AddonsSettings";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
-import { mockEngine, mockSnapshot, mockStage } from "./mock";
+import type { Catalog } from "./catalog";
+import { mockSnapshot, mockStage } from "./mock";
 import type { AddonsSnapshot, FetchProgress, InstallError, StagedInstall } from "./types";
 
 // Container for Settings → Add-ons. Holds the snapshot in local state seeded
 // from the mock module; the wiring later replaces the seed and the callbacks
 // with the Tauri commands, and the screens do not change.
-export function AddonsTab() {
+export function AddonsTab(props: { catalog: Catalog }) {
+  const { catalog } = props;
   const { t } = useTranslation();
   const tt = t as never;
-  const [snapshot, setSnapshot] = useState<AddonsSnapshot>(mockSnapshot);
+  const [local, setSnapshot] = useState<AddonsSnapshot>(mockSnapshot);
+  // The add-on list is Rust's answer in the app (the mock's local edits only apply without Tauri).
+  const snapshot: AddonsSnapshot = catalog.live ? { ...local, addons: catalog.addons, grants: [] } : local;
   const [installError, setInstallError] = useState<InstallError | null>(null);
   const [staged, setStaged] = useState<StagedInstall | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
@@ -45,13 +49,15 @@ export function AddonsTab() {
       );
     }
   };
+  if (!catalog.ready) return null;
   const removingAddon = snapshot.addons.find((a) => a.id === removing);
   return (
     <>
       <AddonsSettings
         t={tt}
         snapshot={snapshot}
-        engine={mockEngine}
+        engine={catalog.engine}
+        canInstall={!catalog.live}
         installError={installError}
         onInstall={({ owner, repo }) => {
           if (snapshot.addons.some((a) => a.id === `${owner}/${repo}`)) {
