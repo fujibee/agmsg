@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { SUPPORTED_LANGUAGES } from "./i18n";
+import { AddonsTab } from "./addons/AddonsTab";
 import { AUTO_TIMEZONE, detectTimeZone, isValidTimeZone, listTimeZones } from "./time";
 
 type BrowseDir = (current: string) => Promise<string | null>;
@@ -693,8 +694,27 @@ export function SettingsModal(props: {
     // timezoneText/props.timezone are read via closure, not deps, so this
     // doesn't re-fire on every keystroke or timezone change.
   }, [autoLabel]);
+  const [tab, setTab] = useState<"general" | "addons">("general");
   return (
     <Modal title={t("modal.settings.title")} onClose={props.onClose}>
+      <div className="settings-tabs" role="tablist">
+        {(["general", "addons"] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            role="tab"
+            aria-selected={tab === k}
+            className={tab === k ? "active" : ""}
+            onClick={() => setTab(k)}
+          >
+            {t(`addons.tab.${k}`)}
+          </button>
+        ))}
+      </div>
+      {tab === "addons" ? (
+        <AddonsTab />
+      ) : (
+      <>
       <label>
         {t("language.label")}
         <select
@@ -796,6 +816,8 @@ export function SettingsModal(props: {
           ))}
         </datalist>
       </label>
+      </>
+      )}
       <div className="modal-actions">
         <button type="button" className="primary" onClick={props.onClose}>
           {t("common.close")}

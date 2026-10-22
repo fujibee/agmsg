@@ -257,5 +257,82 @@
   },
   "stage": {
     "emptyHint": "Cliquez sur un membre à gauche pour démarrer un agent."
+  },
+  "addons": {
+    "tab": {
+      "general": "General",
+      "addons": "Add-ons"
+    },
+    "engineOff": "Add-ons are not available on this computer yet. A safety check did not pass with this system's web engine. Your other features are not affected.",
+    "engineReasons": "Reason: {{reasons}}",
+    "builtin": {
+      "title": "Built in"
+    },
+    "installed": {
+      "title": "Installed",
+      "empty": "No add-ons installed.",
+      "checkUpdates": "Check for updates",
+      "remove": "Remove"
+    },
+    "install": {
+      "label": "Add-on repository",
+      "placeholder": "owner/repo or owner/repo@ref",
+      "button": "Install…"
+    },
+    "openRequests": {
+      "label": "Open requests from seats",
+      "show": "Show",
+      "off": "Off"
+    },
+    "developer": {
+      "title": "Developer",
+      "loadFromFolder": "Load from folder…"
+    },
+    "permission": {
+      "none": "Runs with no permissions",
+      "messagesRead": "Read messages of a team you choose",
+      "filesRead": "Read files in a folder you choose",
+      "gitRead": "Read git history and changes in that folder",
+      "network": "Connect to {{hosts}}",
+      "networkAny": "Connect to any site on the internet"
+    },
+    "grant": {
+      "messages": "Reads messages: {{scope}}",
+      "files": "Reads files: {{scope}}",
+      "remembered": "(remembered)",
+      "revoke": "Revoke",
+      "none": "No permissions given yet."
+    },
+    "card": {
+      "grantAria": "Permission request",
+      "messagesWant": "{{title}} wants to read messages of team {{team}}.",
+      "filesWant": "{{title}} wants to read {{path}} (folder, {{count}} files).",
+      "filesWantOne": "{{title}} wants to read {{path}}.",
+      "allow": "Allow",
+      "allowOnce": "Allow once",
+      "allowAlways": "Always for this folder",
+      "notNow": "Not now",
+      "denied": "{{path}} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
+      "chooseAnother": "Choose another…"
+    },
+    "installError": {
+      "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
+      "ref_not_found": "{{repo}} has no branch, tag or commit named {{ref}}.",
+      "no_app_panes": "{{repo}} has no app add-on (no app-panes/ folder). If it is an agmsg CLI plugin, it is installed from the CLI, not here.",
+      "conf_invalid": "app-panes/{{pane}}/addon.conf line {{line}}: {{problem}}.",
+      "entry_missing": "app-panes/{{pane}}/web/{{entry}} is missing. Add-ons must commit their built web/ folder.",
+      "min_app": "Needs agmsg app {{minApp}} or newer; this is {{appVersion}}.",
+      "protocol_unknown": "Made for a newer app (protocol {{protocol}}). Update the app to use it.",
+      "too_large": "Too large to install: {{measured}} (limit {{limit}}). Largest file: {{largest}}.",
+      "unsafe_entry": {
+        "symlink": "Refused: the repository contains a symbolic link at {{path}}. Add-ons may contain only plain files.",
+        "hardlink": "Refused: the repository contains a hard link at {{path}}. Add-ons may contain only plain files.",
+        "outside_path": "Refused: the repository contains a path outside the folder at {{path}}. Add-ons may contain only plain files.",
+        "reserved_name": "Refused: the repository contains a reserved file name at {{path}}. Add-ons may contain only plain files."
+      },
+      "github_error": "GitHub didn't answer: {{status}}. Try again.",
+      "rate_limited": "GitHub limits unauthenticated downloads; try again after {{time}}.",
+      "already_installed": "Already installed ({{sha}})."
+    }
   }
 }

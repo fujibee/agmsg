@@ -257,5 +257,82 @@
   },
   "stage": {
     "emptyHint": "左のメンバーをクリックしてエージェントを起動してください。"
+  },
+  "addons": {
+    "tab": {
+      "general": "一般",
+      "addons": "アドオン"
+    },
+    "engineOff": "このコンピュータではまだアドオンを使えません。このシステムの Web エンジンで安全性チェックに通りませんでした。ほかの機能には影響しません。",
+    "engineReasons": "理由: {{reasons}}",
+    "builtin": {
+      "title": "内蔵"
+    },
+    "installed": {
+      "title": "インストール済み",
+      "empty": "インストール済みのアドオンはありません。",
+      "checkUpdates": "更新を確認",
+      "remove": "削除"
+    },
+    "install": {
+      "label": "アドオンのリポジトリ",
+      "placeholder": "owner/repo または owner/repo@ref",
+      "button": "インストール…"
+    },
+    "openRequests": {
+      "label": "seat からの open request",
+      "show": "表示",
+      "off": "オフ"
+    },
+    "developer": {
+      "title": "開発者",
+      "loadFromFolder": "フォルダから読み込み…"
+    },
+    "permission": {
+      "none": "権限なしで動作します",
+      "messagesRead": "選んだチームのメッセージを読む",
+      "filesRead": "選んだフォルダのファイルを読む",
+      "gitRead": "そのフォルダの git 履歴と変更を読む",
+      "network": "{{hosts}} に接続する",
+      "networkAny": "インターネット上の任意のサイトに接続する"
+    },
+    "grant": {
+      "messages": "メッセージを読む: {{scope}}",
+      "files": "ファイルを読む: {{scope}}",
+      "remembered": "(記憶済み)",
+      "revoke": "取り消す",
+      "none": "まだ許可した権限はありません。"
+    },
+    "card": {
+      "grantAria": "権限のリクエスト",
+      "messagesWant": "{{title}} がチーム {{team}} のメッセージを読もうとしています。",
+      "filesWant": "{{title}} が {{path}} を読もうとしています(フォルダ、{{count}} ファイル)。",
+      "filesWantOne": "{{title}} が {{path}} を読もうとしています。",
+      "allow": "許可",
+      "allowOnce": "今回だけ許可",
+      "allowAlways": "このフォルダは常に許可",
+      "notNow": "今はしない",
+      "denied": "{{path}} は agmsg の保護対象(鍵・認証情報・ブラウザデータ)です。アドオンは読めません。",
+      "chooseAnother": "別のものを選ぶ…"
+    },
+    "installError": {
+      "repo_not_found": "github.com/{{owner}}/{{repo}} が見つかりません。名前を確認してください。非公開リポジトリはまだ未対応です。",
+      "ref_not_found": "{{repo}} に {{ref}} という branch・tag・commit はありません。",
+      "no_app_panes": "{{repo}} にはアプリ用アドオンがありません(app-panes/ フォルダなし)。agmsg CLI の plugin なら、ここではなく CLI からインストールします。",
+      "conf_invalid": "app-panes/{{pane}}/addon.conf の {{line}} 行目: {{problem}}。",
+      "entry_missing": "app-panes/{{pane}}/web/{{entry}} がありません。アドオンはビルド済みの web/ フォルダを commit する必要があります。",
+      "min_app": "agmsg アプリ {{minApp}} 以上が必要です。現在は {{appVersion}} です。",
+      "protocol_unknown": "より新しいアプリ向けです(protocol {{protocol}})。アプリを更新してください。",
+      "too_large": "大きすぎてインストールできません: {{measured}}(上限 {{limit}})。最大のファイル: {{largest}}。",
+      "unsafe_entry": {
+        "symlink": "拒否しました: リポジトリの {{path}} にシンボリックリンクがあります。アドオンに含められるのは通常のファイルだけです。",
+        "hardlink": "拒否しました: リポジトリの {{path}} にハードリンクがあります。アドオンに含められるのは通常のファイルだけです。",
+        "outside_path": "拒否しました: リポジトリの {{path}} がフォルダの外を指しています。アドオンに含められるのは通常のファイルだけです。",
+        "reserved_name": "拒否しました: リポジトリの {{path}} に予約済みのファイル名があります。アドオンに含められるのは通常のファイルだけです。"
+      },
+      "github_error": "GitHub から応答がありません: {{status}}。もう一度試してください。",
+      "rate_limited": "GitHub は未認証のダウンロードを制限しています。{{time}} 以降に再試行してください。",
+      "already_installed": "インストール済みです({{sha}})。"
+    }
   }
 }
