@@ -269,7 +269,7 @@ _agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_soc
   {
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
-        messaging_socket=*|claude_config_dir=*|messaging_token=*) ;;
+        messaging_socket=*|claude_config_dir=*|messaging_token=*|messaging_blocked=*) ;;
         session=*) [ -z "$bare_sid" ] && printf '%s\n' "$line" ;;
         *) printf '%s\n' "$line" ;;
       esac
@@ -278,6 +278,37 @@ _agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_soc
     [ -z "$socket" ] || printf 'messaging_socket=%s\n' "$socket"
     [ -z "$config_dir" ] || printf 'claude_config_dir=%s\n' "$config_dir"
     [ -z "$token" ] || printf 'messaging_token=%s\n' "$token"
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# The SessionStart hook could not publish this session's delivery destination
+# (<reason>, a short snake_case word). Drop the old destination, which belongs to
+# a process that is gone, and record why, so agmsgd reports the seat as
+# unaddressable for that reason instead of keeping an out-of-date address.
+agmsg_role_session_mark_messaging_blocked() {   # <team> <agent> <reason>
+  _agmsg_role_session_write _agmsg_role_session_mark_messaging_blocked_unlocked "$@" || true
+}
+
+_agmsg_role_session_mark_messaging_blocked_unlocked() {
+  local team="$1" agent="$2" reason="$3" path dir tmp line
+  case "$reason" in ''|*[!a-z_]*) return 0 ;; esac
+  [ -n "$team" ] && [ -n "$agent" ] || return 0
+  _agmsg_role_session_path_into "$team" "$agent"
+  path="$_AGMSG_ROLE_SESSION_PATH"
+  [ -f "$path" ] || return 0
+  dir="$(_actas_lock_dir)"
+  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        messaging_socket=*|claude_config_dir=*|messaging_token=*|messaging_blocked=*) ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$path"
+    printf 'messaging_blocked=%s\n' "$reason"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null

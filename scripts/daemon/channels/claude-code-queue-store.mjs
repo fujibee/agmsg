@@ -87,6 +87,8 @@ export function readClaudeRoleSession(runDir, team, agent) {
         messaging_socket: fields.messaging_socket ?? "",
         claude_config_dir: fields.claude_config_dir ?? "",
         messaging_token: fields.messaging_token ?? "",
+        // Why the seat published no destination (set by the SessionStart hook).
+        messaging_blocked: /^[a-z_]{1,64}$/.test(fields.messaging_blocked ?? "") ? fields.messaging_blocked : "",
       },
     };
   } catch {
