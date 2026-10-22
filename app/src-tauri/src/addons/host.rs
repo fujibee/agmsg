@@ -129,6 +129,8 @@ fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &st
     let mut files = HashMap::new();
     files.insert("index.html".to_string(), include_bytes!("probe/index.html").to_vec());
     files.insert("probe.js".to_string(), include_bytes!("probe/probe.js").to_vec());
+    files.insert("control.html".to_string(), include_bytes!("probe/control.html").to_vec());
+    files.insert("control.js".to_string(), include_bytes!("probe/control.js").to_vec());
     let server = match PaneServer::start(PaneSpec { payload: Payload::Embedded(files), entry: "index.html".into(), network: Network::None, expected_digest: None }) {
         Ok(s) => s,
         Err(e) => {

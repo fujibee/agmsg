@@ -7,7 +7,9 @@
 //!   exception or a missing result all mean add-ons stay off. An add-on's own
 //!   report is never used as the probe.
 //! - The CSP check attempts a forbidden self-navigation (to the app origin) and
-//!   requires that it was refused; reading the configured CSP is not enough.
+//!   requires that it was refused; reading the configured CSP is not enough. It
+//!   also makes an allowed navigation first and requires that to complete (a
+//!   positive control), so a refusal is told apart from a slow navigation.
 //! - WebRTC must be absent in the frame (`RTCPeerConnection` and its aliases)
 //!   and a UDP sentinel the app opened must have received nothing.
 //! - The gate is cleared for every new webview, reload and update; a window
@@ -58,6 +60,10 @@ pub struct ProbeReport {
     /// After a forbidden navigation to the app origin the frame was still the
     /// same document, running.
     pub nav_refused: bool,
+    /// Positive control: an allowed navigation (to the probe's own second page)
+    /// completed in this environment, so a forbidden one that did not complete
+    /// was refused, not merely slow.
+    pub control_nav_ok: bool,
     /// `RTCPeerConnection`, `webkitRTCPeerConnection`, `RTCSessionDescription`
     /// and `RTCDataChannel` are all undefined.
     pub webrtc_absent: bool,
@@ -96,6 +102,9 @@ pub fn evaluate(expected_nonce: &str, r: &ProbeReport, engine: &EngineReport, ud
     }
     if !r.csp_blocks_eval {
         reasons.push("the pane CSP is not in force in the probe frame".to_string());
+    }
+    if !r.control_nav_ok {
+        reasons.push("the probe could not tell a refused navigation from a slow one (its allowed navigation did not complete)".to_string());
     }
     if !r.nav_refused {
         reasons.push("the probe frame was able to navigate itself to the app origin".to_string());
@@ -221,7 +230,7 @@ mod tests {
     use super::*;
 
     fn good(nonce: &str) -> ProbeReport {
-        ProbeReport { nonce: nonce.into(), started: true, opaque_origin: true, csp_blocks_eval: true, nav_refused: true, webrtc_absent: true, bridge_in_frame: false }
+        ProbeReport { nonce: nonce.into(), started: true, opaque_origin: true, csp_blocks_eval: true, nav_refused: true, control_nav_ok: true, webrtc_absent: true, bridge_in_frame: false }
     }
 
     fn eng() -> EngineReport {
@@ -243,6 +252,7 @@ mod tests {
             ("opaque", ProbeReport { opaque_origin: false, ..base.clone() }),
             ("csp", ProbeReport { csp_blocks_eval: false, ..base.clone() }),
             ("nav", ProbeReport { nav_refused: false, ..base.clone() }),
+            ("control", ProbeReport { control_nav_ok: false, ..base.clone() }),
             ("webrtc", ProbeReport { webrtc_absent: false, ..base.clone() }),
         ];
         for (name, r) in cases {

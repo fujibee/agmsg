@@ -8,6 +8,7 @@ pub mod denylist;
 pub mod diff;
 pub mod digest;
 pub mod engine;
+pub mod feed;
 pub mod gate;
 pub mod host;
 pub mod nav;

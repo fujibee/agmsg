@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -78,13 +78,20 @@ struct Ctx {
     root: Option<PathBuf>,
     entry: String,
     csp: String,
+    /// Set by `stop`; nothing is read, routed or written once it is set.
+    stopped: AtomicBool,
+    /// Accepted sockets, so `stop` can close them under a handler's feet.
+    conns: Mutex<HashMap<u64, TcpStream>>,
+    next_conn: AtomicU64,
+    /// Handlers running; `stop` waits for zero.
+    active: AtomicUsize,
 }
 
 pub struct PaneServer {
     port: u16,
     token: String,
     csp: String,
-    stop: Arc<AtomicBool>,
+    ctx: Arc<Ctx>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -131,33 +138,61 @@ impl PaneServer {
         let token = new_token();
         let own = format!("http://127.0.0.1:{port}");
         let csp = csp::build(&PaneCsp { own: &own, network: &spec.network, script_hashes: &hashes });
-        let ctx = Arc::new(Ctx { port, token: token.clone(), payload: spec.payload, root, entry: spec.entry, csp: csp.clone() });
+        let ctx = Arc::new(Ctx {
+            port,
+            token: token.clone(),
+            payload: spec.payload,
+            root,
+            entry: spec.entry,
+            csp: csp.clone(),
+            stopped: AtomicBool::new(false),
+            conns: Mutex::new(HashMap::new()),
+            next_conn: AtomicU64::new(1),
+            active: AtomicUsize::new(0),
+        });
 
-        let stop = Arc::new(AtomicBool::new(false));
-        let active = Arc::new(AtomicUsize::new(0));
         let thread = {
-            let stop = stop.clone();
+            let ctx = ctx.clone();
             std::thread::Builder::new().name(format!("addon-pane-{port}")).spawn(move || {
                 for conn in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
+                    if ctx.stopped.load(Ordering::SeqCst) {
                         break;
                     }
                     let Ok(stream) = conn else { continue };
-                    if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-                        active.fetch_sub(1, Ordering::SeqCst);
+                    if ctx.active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                        ctx.active.fetch_sub(1, Ordering::SeqCst);
                         let _ = stream.shutdown(Shutdown::Both);
                         continue;
                     }
+                    let conn_id = ctx.next_conn.fetch_add(1, Ordering::SeqCst);
+                    // Register a handle to the socket before the handler starts, so a
+                    // `stop` that comes at any moment can close it.
+                    match stream.try_clone() {
+                        Ok(clone) => {
+                            ctx.conns.lock().unwrap().insert(conn_id, clone);
+                        }
+                        Err(_) => {
+                            ctx.active.fetch_sub(1, Ordering::SeqCst);
+                            continue;
+                        }
+                    }
+                    if ctx.stopped.load(Ordering::SeqCst) {
+                        // stop() raced with this accept: it may have drained `conns` already
+                        let _ = stream.shutdown(Shutdown::Both);
+                        ctx.conns.lock().unwrap().remove(&conn_id);
+                        ctx.active.fetch_sub(1, Ordering::SeqCst);
+                        break;
+                    }
                     let ctx = ctx.clone();
-                    let active = active.clone();
                     std::thread::spawn(move || {
                         handle(&ctx, stream);
-                        active.fetch_sub(1, Ordering::SeqCst);
+                        ctx.conns.lock().unwrap().remove(&conn_id);
+                        ctx.active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
             })?
         };
-        Ok(PaneServer { port, token, csp, stop, thread: Some(thread) })
+        Ok(PaneServer { port, token, csp, ctx, thread: Some(thread) })
     }
 
     pub fn port(&self) -> u16 {
@@ -187,12 +222,29 @@ impl PaneServer {
         self.shutdown();
     }
 
+    /// Fence: when this returns, the listener is closed, every accepted socket
+    /// is closed, no handler is running, and nothing can be read, routed or
+    /// written for this token again.
     fn shutdown(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.ctx.stopped.store(true, Ordering::SeqCst);
+        // close what is already accepted: a handler blocked in read or write ends now
+        let open: Vec<TcpStream> = self.ctx.conns.lock().unwrap().drain().map(|(_, s)| s).collect();
+        for s in open {
+            let _ = s.shutdown(Shutdown::Both);
+        }
         // wake the accept loop
         let _ = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, self.port)), Duration::from_millis(500));
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+        // a connection accepted in the instant before the flag was seen
+        let open: Vec<TcpStream> = self.ctx.conns.lock().unwrap().drain().map(|(_, s)| s).collect();
+        for s in open {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while self.ctx.active.load(Ordering::SeqCst) > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 }
@@ -236,15 +288,25 @@ fn handle(ctx: &Ctx, mut stream: TcpStream) {
     let head = match read_head(&mut stream) {
         Ok(h) => h,
         Err(status) => {
-            let _ = write_reply(ctx, &mut stream, &Reply::status(status), false);
+            if !ctx.stopped.load(Ordering::SeqCst) {
+                let _ = write_reply(ctx, &mut stream, &Reply::status(status), false);
+            }
             return;
         }
     };
+    // A request completed after `stop` must not be served, even if its bytes
+    // were already on the wire.
+    if ctx.stopped.load(Ordering::SeqCst) {
+        return;
+    }
     let reply = match parse_head(&head) {
         Ok(req) => route(ctx, &req.method, &req.target, &req.hosts),
         Err(status) => Reply::status(status),
     };
     let head_only = head.starts_with("HEAD ");
+    if ctx.stopped.load(Ordering::SeqCst) {
+        return;
+    }
     let _ = write_reply(ctx, &mut stream, &reply, head_only);
     let _ = stream.shutdown(Shutdown::Both);
 }
@@ -747,6 +809,92 @@ mod tests {
         assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
         srv.stop();
         assert!(TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), Duration::from_millis(500)).is_err());
+    }
+
+    /// Reads whatever arrives until the peer closes or errors.
+    fn drain(mut s: TcpStream) -> Vec<u8> {
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut buf = Vec::new();
+        let _ = s.read_to_end(&mut buf);
+        buf
+    }
+
+    #[test]
+    fn an_accepted_connection_does_not_serve_after_stop() {
+        let (_r, p) = fixture("fence-partial");
+        let srv = start(&p);
+        let (port, token) = (srv.port(), srv.token().to_string());
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(b"GET ").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let t0 = std::time::Instant::now();
+        srv.stop();
+        assert!(t0.elapsed() < Duration::from_secs(2), "stop must not wait for a stalled client");
+        // the rest of the request arrives after stop returned
+        let _ = c.write_all(format!("/{token}/index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes());
+        let got = drain(c);
+        assert!(!String::from_utf8_lossy(&got).contains("200"), "served after stop: {:?}", String::from_utf8_lossy(&got));
+        assert!(got.is_empty(), "nothing at all may be answered after stop");
+    }
+
+    #[test]
+    fn stop_in_the_middle_of_a_header_read() {
+        let (_r, p) = fixture("fence-mid-read");
+        let srv = start(&p);
+        let (port, token) = (srv.port(), srv.token().to_string());
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(format!("GET /{token}/index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Slow: a").as_bytes()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        srv.stop();
+        let _ = c.write_all(b"b\r\n\r\n");
+        assert!(drain(c).is_empty());
+    }
+
+    #[test]
+    fn stop_in_the_middle_of_a_send() {
+        let (_r, p) = fixture("fence-mid-send");
+        // a file much larger than the socket buffers, and a client that never reads
+        fs::write(p.join("huge.bin"), vec![7u8; 40 * 1024 * 1024]).unwrap();
+        let srv = start(&p);
+        let (port, token) = (srv.port(), srv.token().to_string());
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(format!("GET /{token}/huge.bin HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes()).unwrap();
+        std::thread::sleep(Duration::from_millis(300)); // the handler is now blocked in write
+        let t0 = std::time::Instant::now();
+        srv.stop();
+        assert!(t0.elapsed() < Duration::from_secs(2), "stop must close a blocked send, took {:?}", t0.elapsed());
+        let got = drain(c);
+        assert!(got.len() < 40 * 1024 * 1024, "the transfer was cut, not completed");
+    }
+
+    #[test]
+    fn the_old_token_serves_nothing_after_stop_even_on_a_new_connection() {
+        let (_r, p) = fixture("fence-token");
+        let srv = start(&p);
+        let (port, token) = (srv.port(), srv.token().to_string());
+        assert_eq!(raw(port, &format!("GET /{token}/index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")).0, 200);
+        srv.stop();
+        match TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), Duration::from_millis(500)) {
+            Err(_) => {}
+            Ok(mut s) => {
+                // another process may have taken the port; it must at least not be this server
+                let _ = s.write_all(format!("GET /{token}/index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes());
+                assert!(!String::from_utf8_lossy(&drain(s)).contains("pane payload"));
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_the_server_is_the_same_fence() {
+        let (_r, p) = fixture("fence-drop");
+        let srv = start(&p);
+        let (port, token) = (srv.port(), srv.token().to_string());
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(b"GET ").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        drop(srv);
+        let _ = c.write_all(format!("/{token}/index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes());
+        assert!(drain(c).is_empty());
     }
 
     #[test]
