@@ -14,11 +14,13 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "getrandom 0.2.17",
  "portable-pty",
  "rusqlite",
  "serde",
  "serde_json",
  "serial_test",
+ "sha2",
  "similar",
  "tauri",
  "tauri-build",

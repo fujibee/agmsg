@@ -35,6 +35,10 @@ anyhow = "1"
 # PTY output is raw bytes (TUI box-drawing etc.); ship it to the webview as
 # base64 so multibyte sequences split across reads render correctly in xterm.
 base64 = "0.22"
+# Add-on panes: content hashes for the per-pane CSP and the payload digest, and
+# random pane tokens.
+sha2 = "0.10"
+getrandom = "0.2"
 # Myers line diff for the add-on git.diff result (addons/diff.rs).
 similar = "2"
 
