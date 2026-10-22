@@ -131,16 +131,70 @@ pub struct Layout {
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_INCLUDE_DEPTH: usize = 10;
 const MAX_ALTERNATE_DEPTH: usize = 5;
+const MAX_GIT_DIR_ENTRIES: usize = 1_000_000;
 
 fn is_under(root: &Path, p: &Path) -> bool {
     resolve(p).starts_with(root)
 }
 
-fn read_small(p: &Path) -> Option<String> {
-    let f = fs::File::open(p).ok()?;
+/// Read a small control file. Absent is `Ok(None)`; a file that cannot be read, or
+/// is larger than the limit, is refused: an unscanned tail could hold the very
+/// entry the scan is looking for.
+fn read_small(p: &Path) -> Res<Option<String>> {
+    let f = match fs::File::open(p) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(unsupported(format!(
+                "cannot read {} to check it: {e}",
+                p.display()
+            )))
+        }
+    };
     let mut s = Vec::new();
-    f.take(MAX_CONFIG_BYTES).read_to_end(&mut s).ok()?;
-    Some(String::from_utf8_lossy(&s).into_owned())
+    f.take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut s)
+        .map_err(|e| unsupported(format!("cannot read {} to check it: {e}", p.display())))?;
+    if s.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(unsupported(format!(
+            "{} is larger than {MAX_CONFIG_BYTES} bytes and cannot be checked",
+            p.display()
+        )));
+    }
+    Ok(Some(String::from_utf8_lossy(&s).into_owned()))
+}
+
+/// Every link anywhere under `dir` must lead inside `root`. Git reads loose
+/// objects, packs, refs and control files by following whatever is there, so a
+/// link below `objects/` or `refs/` is as much a way out as one at the top.
+/// Links are checked, not followed; a link that stays inside is allowed.
+fn check_no_link_out(root: &Path, dir: &Path) -> Res<()> {
+    let mut stack = vec![dir.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for entry in rd.flatten() {
+            seen += 1;
+            if seen > MAX_GIT_DIR_ENTRIES {
+                return Err(unsupported(
+                    "the git directory of this repository has too many files to check",
+                ));
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            let path = entry.path();
+            if ft.is_symlink() {
+                if !is_under(root, &path) {
+                    return Err(outside(format!(
+                        "{} is a link that leads outside the granted folder",
+                        path.strip_prefix(root).unwrap_or(&path).display()
+                    )));
+                }
+            } else if ft.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate the repository at `root` (the real path of the granted folder).
@@ -158,7 +212,7 @@ pub fn validate_layout(root: &Path) -> Res<Layout> {
         dotgit
     } else {
         // A gitfile: "gitdir: <path>", relative to the folder holding it.
-        let text = read_small(&dotgit).unwrap_or_default();
+        let text = read_small(&dotgit)?.unwrap_or_default();
         let line = text.lines().next().unwrap_or("").trim();
         let target = line
             .strip_prefix("gitdir:")
@@ -182,7 +236,7 @@ pub fn validate_layout(root: &Path) -> Res<Layout> {
     if !git_dir.join("HEAD").is_file() {
         return Err(unsupported("this folder is not a git repository (no HEAD)"));
     }
-    let common_dir = match read_small(&git_dir.join("commondir")) {
+    let common_dir = match read_small(&git_dir.join("commondir"))? {
         Some(c) if !c.trim().is_empty() => {
             let p = Path::new(c.trim());
             let abs = if p.is_absolute() {
@@ -234,6 +288,10 @@ fn check_entries(l: &Layout) -> Res<()> {
             }
         }
     }
+    check_no_link_out(&l.root, &l.git_dir)?;
+    if l.common_dir != l.git_dir {
+        check_no_link_out(&l.root, &l.common_dir)?;
+    }
     if let Ok(rd) = fs::read_dir(l.common_dir.join("objects/pack")) {
         for e in rd.flatten() {
             if e.file_name().to_string_lossy().ends_with(".promisor") {
@@ -249,7 +307,7 @@ fn check_alternates(root: &Path, objects: &Path, depth: usize) -> Res<()> {
         return Err(unsupported("object alternates are nested too deeply"));
     }
     for file in ["info/alternates", "info/http-alternates"] {
-        let Some(text) = read_small(&objects.join(file)) else {
+        let Some(text) = read_small(&objects.join(file))? else {
             continue;
         };
         for line in text.lines() {
@@ -269,7 +327,9 @@ fn check_alternates(root: &Path, objects: &Path, depth: usize) -> Res<()> {
                 ));
             }
             if file == "info/alternates" {
-                check_alternates(root, &resolve(&abs), depth + 1)?;
+                let alt = resolve(&abs);
+                check_no_link_out(root, &alt)?;
+                check_alternates(root, &alt, depth + 1)?;
             }
         }
     }
@@ -306,7 +366,7 @@ fn scan_config(root: &Path, file: &Path, depth: usize) -> Res<()> {
             "a config file of this repository is outside the granted folder",
         ));
     }
-    let Some(text) = read_small(file) else {
+    let Some(text) = read_small(file)? else {
         return Ok(());
     };
     let base = file.parent().unwrap_or(Path::new("."));
@@ -2236,6 +2296,221 @@ mod tests {
         fs::create_dir_all(&repo).unwrap();
         std::os::unix::fs::symlink(f.root.join("repo-HEAD/.git"), repo.join(".git")).unwrap();
         assert_eq!(code(open_at(&f, &repo)), ErrorCode::OutsideRoot);
+    }
+
+    /// An outside repository whose only file is secret.txt, packed or loose.
+    #[cfg(unix)]
+    fn outside_repo_with_secret(f: &Fx, packed: bool) -> PathBuf {
+        let out = f.root.join("outside-repo");
+        init(&out);
+        write(&out.join("secret.txt"), "OUTSIDE SENTINEL\n");
+        commit_all(&out, "secret");
+        if packed {
+            git_in(&out, &["repack", "-q", "-a", "-d"]);
+            git_in(&out, &["prune-packed"]);
+        }
+        out
+    }
+
+    #[cfg(unix)]
+    fn link(target: &Path, at: &Path) {
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        let _ = fs::remove_dir_all(at);
+        let _ = fs::remove_file(at);
+        std::os::unix::fs::symlink(target, at).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn assert_secret_never_returned(f: &Fx, repo: &Path) {
+        match open_at(f, repo) {
+            Err(e) => assert_eq!(e.code, ErrorCode::OutsideRoot, "{e}"),
+            Ok(g) => {
+                let r = g.show("HEAD", Some("secret.txt"));
+                panic!(
+                    "the layout was accepted; show returned {:?}",
+                    r.map(|x| x.bytes)
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn packed_objects_and_refs_linked_from_outside_are_refused() {
+        let f = fx();
+        let out = outside_repo_with_secret(&f, true);
+        let repo = f.root.join("granted");
+        init(&repo);
+        link(
+            &out.join(".git/objects/pack"),
+            &repo.join(".git/objects/pack"),
+        );
+        link(
+            &out.join(".git/refs/heads/main"),
+            &repo.join(".git/refs/heads/main"),
+        );
+        assert_secret_never_returned(&f, &repo);
+        // Each link alone is refused as well.
+        link(
+            &out.join(".git/objects/pack"),
+            &repo.join(".git/objects/pack"),
+        );
+        let _ = fs::remove_file(repo.join(".git/refs/heads/main"));
+        assert_eq!(code(open_at(&f, &repo)), ErrorCode::OutsideRoot);
+        fs::remove_file(repo.join(".git/objects/pack")).unwrap();
+        fs::create_dir_all(repo.join(".git/objects/pack")).unwrap();
+        link(
+            &out.join(".git/refs/heads/main"),
+            &repo.join(".git/refs/heads/main"),
+        );
+        assert_eq!(code(open_at(&f, &repo)), ErrorCode::OutsideRoot);
+        // A single pack file, a nested ref folder and packed-refs.
+        let _ = fs::remove_file(repo.join(".git/refs/heads/main"));
+        for entry in fs::read_dir(out.join(".git/objects/pack"))
+            .unwrap()
+            .flatten()
+        {
+            link(
+                &entry.path(),
+                &repo.join(".git/objects/pack").join(entry.file_name()),
+            );
+        }
+        assert_eq!(
+            code(open_at(&f, &repo)),
+            ErrorCode::OutsideRoot,
+            "a link to one pack file"
+        );
+        link(&out.join(".git/refs/heads"), &repo.join(".git/refs/heads"));
+        assert_eq!(
+            code(open_at(&f, &repo)),
+            ErrorCode::OutsideRoot,
+            "a linked refs/heads folder"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loose_objects_linked_from_outside_are_refused() {
+        let f = fx();
+        let out = outside_repo_with_secret(&f, false);
+        let blob = git_in(&out, &["rev-parse", "HEAD:secret.txt"]);
+        let commit = git_in(&out, &["rev-parse", "HEAD"]);
+        let tree = git_in(&out, &["rev-parse", "HEAD^{tree}"]);
+        let repo = f.root.join("granted");
+        init(&repo);
+        // A whole fanout folder.
+        for oid in [&blob, &commit, &tree] {
+            link(
+                &out.join(".git/objects").join(&oid[..2]),
+                &repo.join(".git/objects").join(&oid[..2]),
+            );
+        }
+        link(
+            &out.join(".git/refs/heads/main"),
+            &repo.join(".git/refs/heads/main"),
+        );
+        assert_secret_never_returned(&f, &repo);
+        // Single object files inside real folders.
+        let repo2 = f.root.join("granted2");
+        init(&repo2);
+        for oid in [&blob, &commit, &tree] {
+            link(
+                &out.join(".git/objects").join(&oid[..2]).join(&oid[2..]),
+                &repo2.join(".git/objects").join(&oid[..2]).join(&oid[2..]),
+            );
+        }
+        fs::write(repo2.join(".git/refs/heads/main"), format!("{commit}\n")).unwrap();
+        assert_secret_never_returned(&f, &repo2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_stays_inside_the_folder_is_allowed() {
+        let f = fx();
+        let repo = basic(&f);
+        let keep = repo.join("kept-objects");
+        fs::create_dir_all(&keep).unwrap();
+        link(&keep, &repo.join(".git/objects/info/inside-link"));
+        assert!(open_at(&f, &repo).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_alternates_file_and_alternate_stores_are_checked_for_links_too() {
+        let f = fx();
+        let out = outside_repo_with_secret(&f, true);
+        let repo = basic(&f);
+        // info/alternates itself is a link to an outside file.
+        let list = f.root.join("alternates-list");
+        write(&list, &format!("{}\n", repo.join("store").display()));
+        fs::create_dir_all(repo.join("store")).unwrap();
+        link(&list, &repo.join(".git/objects/info/alternates"));
+        assert_eq!(code(open_at(&f, &repo)), ErrorCode::OutsideRoot);
+        // An alternate store inside the folder that holds a link out.
+        fs::remove_file(repo.join(".git/objects/info/alternates")).unwrap();
+        write(
+            &repo.join(".git/objects/info/alternates"),
+            &format!("{}\n", repo.join("store").display()),
+        );
+        link(&out.join(".git/objects/pack"), &repo.join("store/pack"));
+        assert_eq!(code(open_at(&f, &repo)), ErrorCode::OutsideRoot);
+    }
+
+    #[test]
+    fn control_files_that_are_too_large_to_scan_are_refused() {
+        let f = fx();
+        let big_comment = format!("# {}\n", "x".repeat(1_100_000));
+        // config
+        let repo = f.root.join("big-config");
+        init(&repo);
+        write(&repo.join("a"), "a");
+        commit_all(&repo, "c");
+        let mut c = fs::read_to_string(repo.join(".git/config")).unwrap();
+        c.push_str(&big_comment);
+        c.push_str("[extensions]\n\tpartialClone = origin\n");
+        fs::write(repo.join(".git/config"), c).unwrap();
+        let e = open_at(&f, &repo).err().expect("refused");
+        assert_eq!(e.code, ErrorCode::UnsupportedRepo);
+        assert!(e.message.contains("cannot be checked"), "{}", e.message);
+        // an included file
+        let repo = f.root.join("big-include");
+        init(&repo);
+        write(&repo.join("a"), "a");
+        commit_all(&repo, "c");
+        write(
+            &repo.join(".git/inc.cfg"),
+            &format!("{big_comment}[core]\n\tworktree = /elsewhere\n"),
+        );
+        let mut c = fs::read_to_string(repo.join(".git/config")).unwrap();
+        c.push_str("[include]\n\tpath = inc.cfg\n");
+        fs::write(repo.join(".git/config"), c).unwrap();
+        assert_eq!(code(open_at(&f, &repo)), ErrorCode::UnsupportedRepo);
+        // alternates, commondir and a gitfile
+        let repo = basic(&f);
+        write(
+            &repo.join(".git/objects/info/alternates"),
+            &format!("{big_comment}/somewhere/else\n"),
+        );
+        assert_eq!(code(open_at(&f, &repo)), ErrorCode::UnsupportedRepo);
+        let repo = f.root.join("big-gitfile");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join(".git"), format!("gitdir: .real\n{big_comment}")).unwrap();
+        assert_eq!(code(open_at(&f, &repo)), ErrorCode::UnsupportedRepo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_control_file_that_cannot_be_read_is_refused_not_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fx();
+        let repo = basic(&f);
+        let cfg = repo.join(".git/config");
+        fs::set_permissions(&cfg, fs::Permissions::from_mode(0o000)).unwrap();
+        // Skip when running as a user that can read anything.
+        if fs::File::open(&cfg).is_err() {
+            assert_eq!(code(open_at(&f, &repo)), ErrorCode::UnsupportedRepo);
+        }
+        fs::set_permissions(&cfg, fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     #[test]
