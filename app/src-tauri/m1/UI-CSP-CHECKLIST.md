@@ -2,22 +2,18 @@
 
 The main window now has a CSP (`app.security.csp` in `tauri.conf.json`) and every app command is behind an explicit ACL. A quick automated check showed the first seconds of the UI are clean. This page is for a person to use the app for about ten minutes and report anything the policy broke. A break shows up as a missing feature, a blank area, or a `Refused to …` line in the devtools console.
 
-## 1. Launch a debug build with its own identity
+## 1. Launch (two lines)
 
-It uses its own app identifier (so it never forwards to an installed agmsg app, and does not touch its settings) and a **copy** of the agmsg home (so renames and deletes in this session cannot touch your real teams).
+The binaries are prebuilt (`csp-check/agmsg-app-debug` and `csp-check/agmsg-app-release`, next to this folder's `src-tauri`), with their own app identifier `cc.agmsg.csp-check` (so they never forward to an installed agmsg app and keep their own window settings). Run them against a **copy** of the agmsg home so renames and deletes in this session cannot touch your real teams. From `app/src-tauri`:
 
 ```
-cp -R ~/.agents/skills/agmsg /tmp/agmsg-csp-check            # a copy of the data this build will read and change
-cd app && pnpm install --frozen-lockfile && pnpm build       # frontend, embedded into the binary
-cd src-tauri
-mkdir -p resources/agmsg-core && echo stub > resources/agmsg-core/PLACEHOLDER   # not used in this check
-export TAURI_CONFIG='{"identifier":"cc.agmsg.csp-check"}'
-cargo build --features tauri/custom-protocol                 # debug build; devtools are available in it
-AGMSG_APP_BASE=/tmp/agmsg-csp-check ./target/debug/agmsg-app
+rm -rf /tmp/agmsg-csp-check; cp -R ~/.agents/skills/agmsg /tmp/agmsg-csp-check      # once per session
+AGMSG_APP_BASE=/tmp/agmsg-csp-check ./csp-check/agmsg-app-debug                      # debug pass (devtools available)
+AGMSG_APP_BASE=/tmp/agmsg-csp-check ./csp-check/agmsg-app-release                    # release pass (no devtools)
 ```
-Run the same with `cargo build --release --features tauri/custom-protocol` and `./target/release/agmsg-app` for the release pass (devtools are not available in release: watch for features that do not work instead).
-
 Do **not** set `HOME` to anything else. Delete `/tmp/agmsg-csp-check` when done.
+
+> **Warning: panes run real programs.** A terminal pane spawns a real CLI agent, and agents use the *real* `~/.agents` install, not the copy. So "new agent end to end", and anything sent from inside a pane, can reach your real teams even though the app itself reads the copy. Do those items **only on a new throwaway team created in this session** (name it `csp-check-tmp`), and delete that team afterwards (in the real install too, if an agent joined it there). Never type into a pane that belongs to a real team.
 
 ## 2. See CSP violations
 
@@ -40,7 +36,7 @@ Tick each one; note "ok" or what broke.
 - [ ] **Zoom**: View → zoom in / out / reset.
 - [ ] **Settings** (open it, change the language, change every toggle, close it).
 - [ ] **Every dialog**: open and cancel each one — new team, new agent, join, rename, rename team, delete team, purge messages, delivery mode, update-core / install prompts, about, check for updates.
-- [ ] **New team** and **new agent** end to end in the copy.
+- [ ] **New team** (`csp-check-tmp`) and **new agent** in it, end to end. Throwaway team only (see the warning).
 - [ ] **Rename** an agent and a team.
 - [ ] **Chat composer** (the user chat box): type, send a message, send a long one, a multi-line one; the message appears in the room.
 - [ ] Theme / dark mode switch if the UI has one; logo and avatar images render; fonts look normal.
@@ -50,3 +46,14 @@ Tick each one; note "ok" or what broke.
 ## 4. Report
 
 Per finding: what you did, what you expected, what happened, the console line (copy it whole), debug or release. "No violations in N minutes of use, all items ticked" is also a result worth sending.
+
+## Appendix: building the binaries yourself
+
+```
+cd app && pnpm install --frozen-lockfile && pnpm build              # frontend, embedded into the binary
+cd src-tauri
+mkdir -p resources/agmsg-core && echo stub > resources/agmsg-core/PLACEHOLDER   # not used in this check
+export TAURI_CONFIG='{"identifier":"cc.agmsg.csp-check"}'
+cargo build --features tauri/custom-protocol                        # target/debug/agmsg-app
+cargo build --release --features tauri/custom-protocol              # target/release/agmsg-app
+```
