@@ -1603,3 +1603,21 @@ body.resizing-row {
 .addon-card.denied { border-color: #f7768e; }
 .addon-card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .addon-card-actions button { background: var(--panel-2); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+.addon-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.addon-pane-body { flex: 1; min-height: 0; overflow: auto; }
+.addon-pane-header { display: flex; align-items: center; gap: 6px; }
+.addon-pane-title { font-weight: 600; }
+.addon-chip, .addon-badge { font-size: 11px; border: 1px solid var(--border); border-radius: 10px; padding: 0 6px; color: var(--muted); }
+.addon-asked-by { font-size: 11px; color: var(--muted); }
+.addon-blocked { font-size: 11px; color: #f7768e; }
+.addon-frame-placeholder { padding: 16px; color: var(--muted); }
+.addon-perm-new { background: rgba(122, 162, 247, 0.15); border-radius: 4px; padding: 0 4px; }
+.addon-why { color: var(--muted); }
+.addon-details { font-size: 11px; color: var(--muted); margin: 6px 0; word-break: break-all; }
+.addon-asks-again { color: var(--accent); }
+.addon-fetch { font-size: 12px; margin-top: 6px; }
+.addon-request-bar { padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--panel); font-size: 12px; }
+.addon-request { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.addon-request-time, .addon-request-why { color: var(--muted); }
+.addon-request button { background: var(--panel-2); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+.addon-request button:disabled { opacity: 0.4; cursor: default; }

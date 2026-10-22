@@ -96,3 +96,55 @@ export function parseRepoInput(raw: string): { owner: string; repo: string; ref:
   if (m[2] === "." || m[2] === "..") return null;
   return { owner: m[1], repo: m[2], ref: m[3] ?? null };
 }
+
+/** The chips in a pane header: one per active grant, plus the network scope. */
+export function grantChips(
+  grants: Pick<Grant, "permission" | "scope">[],
+  network: NetworkScope,
+  t: Translate,
+): { key: string; label: string }[] {
+  const chips = grants.map((g) => ({ key: `${g.permission}:${g.scope}`, label: g.scope }));
+  if (network.kind === "any") chips.push({ key: "network:*", label: t("addons.pane.networkAnyChip") });
+  else if (network.kind === "origins")
+    chips.push({ key: "network", label: t("addons.pane.networkChip", { hosts: network.origins.map(originHost).join(", ") }) });
+  return chips;
+}
+
+export type PermissionDiff = {
+  /** Permissions the new version declares that the old one did not. */
+  added: Permission[];
+  /** The network list got wider (any site, or an origin that was not there). */
+  networkWider: boolean;
+  /** `network` is now declared together with a read permission it was not combined with before. */
+  networkWithRead: boolean;
+  /** True when anything above means the grants of the changed permissions are cleared and the user is asked again. */
+  asksAgain: boolean;
+};
+
+function paneUnion(panes: AddonPaneDecl[]): { perms: Set<Permission>; network: NetworkScope } {
+  const perms = new Set<Permission>();
+  for (const p of panes) for (const x of p.permissions) perms.add(x);
+  let origins: string[] = [];
+  let any = false;
+  for (const p of panes) {
+    if (p.network.kind === "any") any = true;
+    else if (p.network.kind === "origins") origins = [...new Set([...origins, ...p.network.origins])];
+  }
+  return { perms, network: any ? { kind: "any" } : origins.length ? { kind: "origins", origins } : { kind: "none" } };
+}
+
+/** S8: what an update changes in the permissions (design §2, "Update"). */
+export function permissionDiff(oldPanes: AddonPaneDecl[], newPanes: AddonPaneDecl[]): PermissionDiff {
+  const o = paneUnion(oldPanes);
+  const n = paneUnion(newPanes);
+  const added = (["messages:read", "files:read", "git:read", "network"] as const).filter((p) => n.perms.has(p) && !o.perms.has(p));
+  const oldOrigins = o.network.kind === "origins" ? o.network.origins : [];
+  const networkWider =
+    n.network.kind === "any"
+      ? o.network.kind !== "any"
+      : n.network.kind === "origins" && (o.network.kind === "none" || n.network.origins.some((x) => !oldOrigins.includes(x)));
+  const reads = (s: Set<Permission>) => s.has("messages:read") || s.has("files:read") || s.has("git:read");
+  const combined = (s: Set<Permission>) => s.has("network") && reads(s);
+  const networkWithRead = combined(n.perms) && !combined(o.perms);
+  return { added, networkWider, networkWithRead, asksAgain: added.length > 0 || networkWider || networkWithRead };
+}

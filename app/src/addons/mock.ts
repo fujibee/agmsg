@@ -2,7 +2,8 @@
 // design (§3.1 index/grants, §2 permissions). The wiring later swaps this
 // source for the Tauri commands; the screens read only AddonsSnapshot.
 
-import type { AddonsSnapshot, EngineState, GrantNeed, InstallError } from "./types";
+import type { RequestContext, RequestRow } from "./requests";
+import type { AddonsSnapshot, EngineState, GrantNeed, InstallError, StagedInstall } from "./types";
 
 export const mockSnapshot: AddonsSnapshot = {
   addons: [
@@ -111,4 +112,51 @@ export const mockInstallErrors: InstallError[] = [
   { code: "github_error", status: 502 },
   { code: "rate_limited", retryAfter: "10:42" },
   { code: "already_installed", sha: "67722c2" },
+];
+
+/** What a successful fetch of `owner/repo` stages, on mock data. */
+export function mockStage(owner: string, repo: string): StagedInstall {
+  return {
+    addonId: `${owner}/${repo}`,
+    title: repo,
+    sha: "d41d8cd98f00b204e9800998ecf8427e1a2b3c4d",
+    archiveSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    panes: [
+      {
+        name: repo,
+        title: repo,
+        permissions: ["files:read"],
+        network: { kind: "none" },
+        opens: "path",
+        why: { "files:read": "Shows the files you open it with." },
+      },
+    ],
+  };
+}
+
+/** The mocked app-side checks for the S10 bar; the app side replaces each. */
+export const mockRequestContext: RequestContext = {
+  team: "agmsg",
+  appUser: "me",
+  isLocalOrigin: () => true,
+  requesterMatches: () => true,
+  installedPane: (target) =>
+    target.kind === "browser"
+      ? null // the browser pane ships later
+      : target.kind !== "addon"
+        ? "builtin"
+        : mockSnapshot.addons.find((a) => a.id === `${target.owner}/${target.repo}`)?.panes.find((p) => p.name === target.pane) ?? null,
+  pathExists: (path) => !path.includes("missing"),
+  isExpired: () => false,
+  handled: new Set<string>(),
+};
+
+const ctrl = (o: object) =>
+  `agmsg-ctrl v1 ctrl.app_open_pane\n${JSON.stringify({ requester: { member_id: "m-alice", token: "t" }, ...o })}`;
+const row = (id: string, body: string): RequestRow => ({ id, team: "agmsg", from: "alice", to: "me", body, created_at: "2026-10-22T08:40:00Z" });
+
+export const mockRequestRows: RequestRow[] = [
+  row("1", ctrl({ pane: "diffview", args: { path: "/Users/me/proj/agmsg", base: "main" }, request_id: "r1" })),
+  row("2", ctrl({ pane: "addon:someone/viewer/viewer", args: {}, request_id: "r2" })),
+  row("3", ctrl({ pane: "fileview", args: { path: "/Users/me/missing" }, request_id: "r3" })),
 ];

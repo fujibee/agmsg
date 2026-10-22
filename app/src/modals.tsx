@@ -37,7 +37,7 @@ export function shouldCloseOnEscape(e: Pick<KeyboardEvent, "key" | "isComposing"
  * round 2) — closing here only dismisses the dialog, not the invoke() call
  * already in flight.
  */
-function Modal(props: {
+export function Modal(props: {
   title: string;
   children: React.ReactNode;
   onClose?: () => void;

@@ -333,6 +333,85 @@
       "github_error": "GitHub didn't answer: {{status}}. Try again.",
       "rate_limited": "GitHub limits unauthenticated downloads; try again after {{time}}.",
       "already_installed": "Already installed ({{sha}})."
+    },
+    "pane": {
+      "reload": "Reload",
+      "askedBy": "asked by {{agent}}",
+      "blocked": "blocked: {{what}}",
+      "dev": "DEV · {{folder}}",
+      "networkChip": "network: {{hosts}}",
+      "networkAnyChip": "network: any site",
+      "framePlaceholder": "Add-on frame"
+    },
+    "failure": {
+      "digest_mismatch": "{{title}} can't open: its files are incomplete or were changed after install.",
+      "load_timeout": "{{title}} didn't finish loading.",
+      "path_missing": "{{path}} no longer exists.",
+      "revoked": "Not reading {{scope}}.",
+      "action": {
+        "reinstall": "Reinstall",
+        "remove": "Remove",
+        "reload": "Reload",
+        "chooseAnother": "Choose another…",
+        "allowAgain": "Allow again"
+      }
+    },
+    "confirm": {
+      "installTitle": "Install {{title}}?",
+      "updateTitle": "Update {{title}}?",
+      "fromTo": "{{from}} → {{to}}",
+      "details": "Details",
+      "fullSha": "Commit: {{sha}}",
+      "archive": "Archive SHA-256: {{hash}}",
+      "panes": "Adds: {{names}}",
+      "canTitle": "This add-on can:",
+      "new": "New:",
+      "sends": "It can send what it reads to {{hosts}}.",
+      "sendsAny": "It can send what it reads to any site on the internet.",
+      "never": "It can never: run programs, use the app's controls, or read anything you have not chosen.",
+      "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
+      "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
+      "install": "Install",
+      "update": "Update"
+    },
+    "remove": {
+      "title": "Remove {{title}}?",
+      "body": "Closes its {{count}} open panes, deletes its files, and forgets every permission you gave it.",
+      "confirm": "Remove"
+    },
+    "fetch": {
+      "resolving": "Resolving the commit…",
+      "resolved": "Commit {{sha}}",
+      "downloading": "Downloading {{done}} MB of {{total}} MB…",
+      "checking": "Checking files: {{files}} files, {{size}} MB"
+    },
+    "request": {
+      "wants": "{{agent}} wants to open {{pane}}: {{args}}",
+      "base": "base {{base}}",
+      "open": "Open",
+      "dismiss": "Dismiss",
+      "install": "Install…",
+      "many": "{{count}} open requests ▾",
+      "status": {
+        "open": "",
+        "not_installed": "{{pane}} is not installed.",
+        "not_found_here": "Not found here.",
+        "expired": "Expired.",
+        "args_not_allowed": "Malformed for this pane.",
+        "bad_requester": "The sender does not match the requester."
+      },
+      "note": {
+        "other_machine": "Control requests from other machines are not shown.",
+        "malformed": "Malformed open request ({{reason}}{{detail}})."
+      }
+    },
+    "menu": {
+      "fileViewEntry": "File view…",
+      "diffViewEntry": "Diff view…",
+      "fileView": "File view",
+      "diffView": "Diff view",
+      "addonPane": "Add-on pane ▸ {{title}}",
+      "install": "Install an add-on…"
     }
   }
 }

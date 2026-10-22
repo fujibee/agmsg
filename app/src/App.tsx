@@ -15,6 +15,11 @@ import {
   Users,
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
+import { AddonPaneHost } from "./addons/AddonPaneHost";
+import type { AddonPaneRef } from "./addons/types";
+import { OpenRequestBar } from "./addons/OpenRequestBar";
+import { scanRequests, type BarItem } from "./addons/requests";
+import { mockEngine, mockRequestContext, mockRequestRows, mockSnapshot } from "./addons/mock";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
 import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
@@ -85,6 +90,9 @@ export type Pane = {
    *  explicit flag rather than inferred from `cmd`, since `cmd` is
    *  whatever login_shell resolved (zsh/bash/fish/...), not a fixed string. */
   shell?: boolean;
+  /** An add-on pane (no PTY): rendered by AddonPaneHost instead of TerminalPane. */
+  kind?: "addon";
+  addon?: AddonPaneRef;
 };
 // A tab. Holds one or more panes, arranged as a binary split tree (see
 // paneTree.ts) — draggable dividers and directional split/swap drag-drop
@@ -1446,6 +1454,48 @@ export default function App() {
     setActive(winId);
   }, [buildShellPane, team]);
 
+  // Add-on panes (no PTY): join the tab being viewed like a terminal pane, or
+  // open a tab of their own. Runs on the mock state until the relay is wired.
+  const openAddonPane = useCallback(
+    (ref: AddonPaneRef) => {
+      const id = `addon-${seq.current++}`;
+      const pane: Pane = { id, label: ref.title, cmd: "", args: [], native: false, kind: "addon", addon: ref };
+      setPanes((prev) => [...prev, pane]);
+      const targetWindowId = spawnTargetWindowId(windowsRef.current, activeRef.current, team);
+      if (targetWindowId) {
+        setWindows((prev) => prev.map((w) => (w.id === targetWindowId ? { ...w, root: insertAsNewLeaf(w.root, id) } : w)));
+        setActive(targetWindowId);
+      } else {
+        const winId = `w-${seq.current++}`;
+        setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: id }, team }]);
+        setActive(winId);
+      }
+    },
+    [team],
+  );
+
+  // S10: open requests from seats, on mock rows. Nothing opens without the click.
+  const [handledRequests, setHandledRequests] = useState<ReadonlySet<string>>(new Set());
+  const requestItems = useMemo(
+    () =>
+      mockSnapshot.openRequests === "show"
+        ? scanRequests(mockRequestRows, { ...mockRequestContext, team, handled: handledRequests }).items
+        : [],
+    [team, handledRequests],
+  );
+  const handleRequest = useCallback((item: BarItem, opened: boolean) => {
+    setHandledRequests((prev) => new Set(prev).add(item.requestId));
+    if (!opened) return;
+    const k = item.request.target;
+    const title = k.kind === "fileview" ? "File view" : k.kind === "diffview" ? "Diff view" : item.pane;
+    openAddonPane({
+      addonId: k.kind === "addon" ? `${k.owner}/${k.repo}` : k.kind,
+      paneName: k.kind === "addon" ? k.pane : k.kind,
+      title,
+      askedBy: item.from,
+    });
+  }, [openAddonPane]);
+
   // A tab's "Open shell" context-menu item — splits a shell pane in beside
   // whatever's already in that tab, the same way a sidebar click splits an
   // agent into the tab being viewed (see spawnTargetWindowId/spawnMember
@@ -2263,6 +2313,49 @@ export default function App() {
                     >
                       {t("sidebar.newMenu.agent")}
                     </button>
+                    <button
+                      disabled={!team || !mockEngine.ok}
+                      title={mockEngine.ok ? undefined : mockEngine.reasons.join("; ")}
+                      onClick={() => {
+                        setNewMenu(false);
+                        openAddonPane({ addonId: "fileview", paneName: "fileview", title: t("addons.menu.fileView") });
+                      }}
+                    >
+                      {t("addons.menu.fileViewEntry")}
+                    </button>
+                    <button
+                      disabled={!team || !mockEngine.ok}
+                      title={mockEngine.ok ? undefined : mockEngine.reasons.join("; ")}
+                      onClick={() => {
+                        setNewMenu(false);
+                        openAddonPane({ addonId: "diffview", paneName: "diffview", title: t("addons.menu.diffView") });
+                      }}
+                    >
+                      {t("addons.menu.diffViewEntry")}
+                    </button>
+                    {mockSnapshot.addons
+                      .filter((a) => !a.builtin)
+                      .flatMap((a) => a.panes.map((p) => ({ a, p })))
+                      .map(({ a, p }) => (
+                        <button
+                          key={`${a.id}/${p.name}`}
+                          disabled={!team || !mockEngine.ok}
+                          onClick={() => {
+                            setNewMenu(false);
+                            openAddonPane({ addonId: a.id, paneName: p.name, title: p.title });
+                          }}
+                        >
+                          {t("addons.menu.addonPane", { title: p.title })}
+                        </button>
+                      ))}
+                    <button
+                      onClick={() => {
+                        setNewMenu(false);
+                        setModal({ kind: "settings" });
+                      }}
+                    >
+                      {t("addons.menu.install")}
+                    </button>
                   </div>
                 )}
               </div>
@@ -2560,6 +2653,16 @@ export default function App() {
             />
           </nav>
 
+          {team && (
+            <OpenRequestBar
+              t={t as never}
+              items={requestItems}
+              formatTime={(iso) => formatMessageTime(iso, resolveTimeZone(timezone))}
+              onOpen={(i) => handleRequest(i, true)}
+              onDismiss={(i) => handleRequest(i, false)}
+              onInstall={() => setModal({ kind: "settings" })}
+            />
+          )}
           <section className="stage" hidden={showUserChat && chatPaneState === "maximized"}>
             <div
               className="room"
@@ -2703,6 +2806,9 @@ export default function App() {
                       ×
                     </button>
                   </div>
+                  {p.kind === "addon" && p.addon ? (
+                    <AddonPaneHost pane={p.addon} onClose={() => setModal({ kind: "closePane", paneId: p.id })} />
+                  ) : (
                   <TerminalPane
                     id={p.id}
                     cmd={p.cmd}
@@ -2714,6 +2820,7 @@ export default function App() {
                     onCellSize={handleCellSize}
                     onFocusPane={handleFocusPane}
                   />
+                  )}
                 </div>
               );
             })}

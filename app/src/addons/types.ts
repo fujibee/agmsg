@@ -100,3 +100,23 @@ export type GrantChip = { key: string; label: string };
 
 /** The broker's refusal codes, so a card can name one. */
 export type BrokerErrorCode = ErrorCode;
+
+/** What a tab's `Pane` (kind "addon") carries: which add-on pane it shows. */
+export type AddonPaneRef = { addonId: string; paneName: string; title: string; askedBy?: string };
+
+/** What the confirm dialog (S3 install, S8 update) is built from: the staged files. */
+export type StagedInstall = {
+  addonId: string;
+  title: string;
+  sha: string;
+  archiveSha256: string;
+  panes: AddonPaneDecl[];
+  /** Set for an update: the commit being replaced and its panes, so the dialog can show the difference. */
+  from?: { sha: string; panes: AddonPaneDecl[] };
+};
+
+/** S2: where a fetch is. */
+export type FetchProgress =
+  | { step: "resolving"; sha?: string }
+  | { step: "downloading"; doneMb: number; totalMb: number }
+  | { step: "checking"; files: number; sizeMb: number };

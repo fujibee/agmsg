@@ -333,6 +333,85 @@
       "github_error": "GitHub から応答がありません: {{status}}。もう一度試してください。",
       "rate_limited": "GitHub は未認証のダウンロードを制限しています。{{time}} 以降に再試行してください。",
       "already_installed": "インストール済みです({{sha}})。"
+    },
+    "pane": {
+      "reload": "再読み込み",
+      "askedBy": "{{agent}} の依頼",
+      "blocked": "ブロック: {{what}}",
+      "dev": "DEV · {{folder}}",
+      "networkChip": "ネットワーク: {{hosts}}",
+      "networkAnyChip": "ネットワーク: 任意のサイト",
+      "framePlaceholder": "アドオンのフレーム"
+    },
+    "failure": {
+      "digest_mismatch": "{{title}} を開けません。ファイルが不完全か、インストール後に変更されています。",
+      "load_timeout": "{{title}} の読み込みが終わりませんでした。",
+      "path_missing": "{{path}} はもう存在しません。",
+      "revoked": "{{scope}} は読んでいません。",
+      "action": {
+        "reinstall": "再インストール",
+        "remove": "削除",
+        "reload": "再読み込み",
+        "chooseAnother": "別のものを選ぶ…",
+        "allowAgain": "もう一度許可"
+      }
+    },
+    "confirm": {
+      "installTitle": "{{title}} をインストールしますか?",
+      "updateTitle": "{{title}} を更新しますか?",
+      "fromTo": "{{from}} → {{to}}",
+      "details": "詳細",
+      "fullSha": "Commit: {{sha}}",
+      "archive": "アーカイブ SHA-256: {{hash}}",
+      "panes": "追加されるもの: {{names}}",
+      "canTitle": "このアドオンができること:",
+      "new": "新規:",
+      "sends": "読み取った内容を {{hosts}} に送れます。",
+      "sendsAny": "読み取った内容をインターネット上の任意のサイトに送れます。",
+      "never": "できないこと: プログラムの実行、アプリの操作、あなたが選んでいないものの読み取り。",
+      "noReview": "agmsg はアドオンの審査も署名も行いません。信頼できる人のものだけインストールしてください。",
+      "asksAgain": "この更新でアドオンができることが変わります。変わった項目の許可は改めて確認します。",
+      "install": "インストール",
+      "update": "更新"
+    },
+    "remove": {
+      "title": "{{title}} を削除しますか?",
+      "body": "開いている {{count}} 個のペインを閉じ、ファイルを削除し、与えた権限をすべて取り消します。",
+      "confirm": "削除"
+    },
+    "fetch": {
+      "resolving": "commit を解決しています…",
+      "resolved": "Commit {{sha}}",
+      "downloading": "ダウンロード中 {{done}} MB / {{total}} MB…",
+      "checking": "ファイルを確認中: {{files}} ファイル、{{size}} MB"
+    },
+    "request": {
+      "wants": "{{agent}} が {{pane}} を開きたい: {{args}}",
+      "base": "base {{base}}",
+      "open": "開く",
+      "dismiss": "閉じる",
+      "install": "インストール…",
+      "many": "{{count}} 件の open request ▾",
+      "status": {
+        "open": "",
+        "not_installed": "{{pane}} はインストールされていません。",
+        "not_found_here": "ここには見つかりません。",
+        "expired": "期限切れです。",
+        "args_not_allowed": "このペインには不正な形式です。",
+        "bad_requester": "送信者と依頼者が一致しません。"
+      },
+      "note": {
+        "other_machine": "他のマシンからの control request は表示されません。",
+        "malformed": "不正な open request です({{reason}}{{detail}})。"
+      }
+    },
+    "menu": {
+      "fileViewEntry": "ファイルビュー…",
+      "diffViewEntry": "差分ビュー…",
+      "fileView": "ファイルビュー",
+      "diffView": "差分ビュー",
+      "addonPane": "アドオンペイン ▸ {{title}}",
+      "install": "アドオンをインストール…"
     }
   }
 }
