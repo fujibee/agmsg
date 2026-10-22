@@ -43,6 +43,32 @@ fn agmsg_base() -> PathBuf {
     PathBuf::from(home).join(".agents/skills/agmsg")
 }
 
+/// Places add-on panes must never read, however a folder is granted: the agmsg
+/// base (its db/, teams/, addons/, scripts/ and config), where `AGMSG_APP_BASE`
+/// moves it, any separately configured storage or config location, and the
+/// store files the app reads directly (with the sidecar files SQLite keeps next
+/// to them).
+pub(crate) fn protected_locations() -> Vec<PathBuf> {
+    let mut v = vec![agmsg_base()];
+    for var in ["AGMSG_STORAGE_PATH", "AGMSG_CONFIG"] {
+        if let Ok(p) = std::env::var(var) {
+            if !p.is_empty() {
+                v.push(PathBuf::from(p));
+            }
+        }
+    }
+    for store in watchable_stores().0 {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut s = store.clone().into_os_string();
+            s.push(suffix);
+            v.push(PathBuf::from(s));
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
 /// Converts to the full POSIX form Git Bash/MSYS resolve internally
 /// ("C:/Users/name" -> "/c/Users/name"), matching `cygpath -u` — one step
 /// further than agmsg-core's own scripts/lib/storage.sh convention
@@ -1280,6 +1306,18 @@ mod tests {
         }
         let env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
         FakeBase { _dir: dir, _env: env }
+    }
+
+    #[test]
+    #[serial]
+    fn protected_locations_cover_the_base_and_configured_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        let storage = dir.path().join("elsewhere");
+        let _s = EnvGuard::set("AGMSG_STORAGE_PATH", &storage.to_string_lossy());
+        let p = crate::agmsg::protected_locations();
+        assert!(p.contains(&dir.path().to_path_buf()), "{p:?}");
+        assert!(p.contains(&storage), "{p:?}");
     }
 
     #[test]

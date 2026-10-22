@@ -112,9 +112,26 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
             }
         })
         .build()?;
+    host.panes.set_app_dirs(app_owned_dirs(&handle));
     *host.engine.lock().unwrap() = engine::harden(&window);
     super::commands::listen_for_live_messages(&handle, host.clone());
     Ok(())
+}
+
+/// The app's own bundle, data, config, cache and log folders, and the folder the
+/// executable lives in: never readable by an add-on, whatever folder is granted.
+fn app_owned_dirs<R: Runtime>(app: &AppHandle<R>) -> Vec<std::path::PathBuf> {
+    let p = app.path();
+    let mut v: Vec<std::path::PathBuf> = [p.app_data_dir(), p.app_config_dir(), p.app_local_data_dir(), p.app_cache_dir(), p.app_log_dir(), p.resource_dir()]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
+        v.push(dir);
+    }
+    v.sort();
+    v.dedup();
+    v
 }
 
 /// Scheme, host and port only: a URL in a log line must not carry a query.
