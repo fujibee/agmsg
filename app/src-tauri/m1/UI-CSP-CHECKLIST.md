@@ -2,16 +2,26 @@
 
 The main window now has a CSP (`app.security.csp` in `tauri.conf.json`) and every app command is behind an explicit ACL. A quick automated check showed the first seconds of the UI are clean. This page is for a person to use the app for about ten minutes and report anything the policy broke. A break shows up as a missing feature, a blank area, or a `Refused to …` line in the devtools console.
 
-## 1. Launch (two lines)
+## 1. Launch
 
-The binaries are prebuilt (`csp-check/agmsg-app-debug` and `csp-check/agmsg-app-release`, next to this folder's `src-tauri`), with their own app identifier `cc.agmsg.csp-check` (so they never forward to an installed agmsg app and keep their own window settings). Run them against a **copy** of the agmsg home so renames and deletes in this session cannot touch your real teams. From `app/src-tauri`:
+The binaries are prebuilt (`csp-check/agmsg-app-debug` and `csp-check/agmsg-app-release` under `app/src-tauri`) with their own app identifier `cc.agmsg.csp-check` (so they never forward to an installed agmsg app and keep their own window settings). They run against a **safe copy** of the agmsg home, made by `m1/make-check-copy.sh`: it leaves out the live daemon files (`run/`) and the cloud-sync state (`db/remote-sync/`), takes every message store with sqlite's own `.backup` (never a plain copy of a live WAL database), and prints any storage or sync line in the copied config for you to look at. Nothing in your real install is changed.
+
+Run these from `app/src-tauri`, **one line at a time**:
 
 ```
-rm -rf /tmp/agmsg-csp-check; cp -R ~/.agents/skills/agmsg /tmp/agmsg-csp-check      # once per session
-AGMSG_APP_BASE=/tmp/agmsg-csp-check ./csp-check/agmsg-app-debug                      # debug pass (devtools available)
-AGMSG_APP_BASE=/tmp/agmsg-csp-check ./csp-check/agmsg-app-release                    # release pass (no devtools)
+d=$(mktemp -d)
+m1/make-check-copy.sh "$d"
+export AGMSG_APP_BASE="$d"
+./csp-check/agmsg-app-debug
 ```
-Do **not** set `HOME` to anything else. Delete `/tmp/agmsg-csp-check` when done.
+Release pass, later, in the same terminal:
+```
+./csp-check/agmsg-app-release
+```
+
+**Check that it uses only the copy.** On start the app prints one line, `[agmsg-app] resolved: <path> | <path> | …`: the agmsg base and every store it found. Every path in that line must start with the folder `mktemp` made (`echo "$d"`). If any path is outside it, quit and report that before doing anything else. The `mktemp` folder is left in place when you are done; delete it by hand (its path is in `$d`).
+
+Do **not** set `HOME` to anything else.
 
 > **Warning: panes run real programs.** A terminal pane spawns a real CLI agent, and agents use the *real* `~/.agents` install, not the copy. So "new agent end to end", and anything sent from inside a pane, can reach your real teams even though the app itself reads the copy. Do those items **only on a new throwaway team created in this session** (name it `csp-check-tmp`), and delete that team afterwards (in the real install too, if an agent joined it there). Never type into a pane that belongs to a real team.
 

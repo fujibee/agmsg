@@ -113,6 +113,12 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
         })
         .build()?;
     host.panes.set_app_dirs(app_owned_dirs(&handle));
+    // One line at startup naming the agmsg base and every store this app resolved,
+    // so a tester can see that nothing outside the folder they pointed it at is in play.
+    std::thread::spawn(|| {
+        let places: Vec<String> = crate::agmsg::protected_locations().iter().map(|p| p.display().to_string()).collect();
+        eprintln!("[agmsg-app] resolved: {}", places.join(" | "));
+    });
     *host.engine.lock().unwrap() = engine::harden(&window);
     super::commands::listen_for_live_messages(&handle, host.clone());
     Ok(())
