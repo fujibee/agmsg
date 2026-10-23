@@ -1730,7 +1730,9 @@ EOF
   # issue's own FIFO repro. A plain `sleep N | check-inbox.sh` does NOT
   # reproduce this: bash waits for every pipeline member, so it looks like a
   # hang even when the hook itself exits immediately.
-  { printf '%s' '{"stop_hook_active":false,"session_id":"repro-381"}'; sleep 300; } \
+  # Replace the writer shell so killing writer_pid also closes inherited Bats
+  # descriptors, instead of leaving an orphan sleep holding the runner open.
+  { printf '%s' '{"stop_hook_active":false,"session_id":"repro-381"}'; exec sleep 300; } \
     3>&- 4>&- > "$fifo" &
   local writer_pid="$!"
 
@@ -1738,6 +1740,7 @@ EOF
   run bash -c "PATH='$newpath' AGMSG_HOOK_STDIN_TIMEOUT=1 bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT' < '$fifo'"
 
   kill "$writer_pid" 2>/dev/null || true
+  wait "$writer_pid" 2>/dev/null || true
   rm -f "$fifo"
 
   [ "$status" -eq 0 ]
