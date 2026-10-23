@@ -3096,14 +3096,32 @@ STUB
 # own passive detection of the new process takes a few seconds and has not
 # caught up yet. Everything else matches _install_fake_herdr.
 _install_fake_herdr_rename_recovers_from_not_found() {
-  local sid="${1:-}" fail_times="${2:-1}"
+  local sid="${1:-}" fail_times="${2:-1}" get_fail_times="${3:-0}"
   printf '%s' "$fail_times" > "$TEST_SKILL_DIR/rename-not-found-remaining"
+  printf '%s' "$get_fail_times" > "$TEST_SKILL_DIR/get-not-found-remaining"
   cat > "$FAKEBIN/herdr" <<EOF
 #!/usr/bin/env bash
 { printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
 counter="$TEST_SKILL_DIR/rename-not-found-remaining"
+get_counter="$TEST_SKILL_DIR/get-not-found-remaining"
 if [ "\$1" = agent ] && [ "\$2" = list ]; then
   printf '{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wC:p4","display_agent":"team:alice","name":"a-key"}]}}\n' "$sid"
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  if [ "\${HERDR_QUERY_OTHER_ERROR:-}" = 1 ]; then
+    echo '{"error":{"code":"permission_denied"}}' >&2; exit 1
+  fi
+  remaining="\$(cat "\$get_counter")"
+  if [ "\$remaining" -gt 0 ]; then
+    echo "\$((remaining - 1))" > "\$get_counter"
+    echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1
+  fi
+  kept="\${HERDR_AFTER_DETECTION_NAME:-}"
+  if [ -n "\${HERDR_AFTER_RENAME_NAME:-}" ] && [ "\$(cat "\$counter")" = 0 ]; then
+    kept="\$HERDR_AFTER_RENAME_NAME"
+  fi
+  printf '{"result":{"agent":{"pane_id":"%s","name":"%s"}}}\n' "\$3" "\$kept"
+elif [ "\$1" = pane ] && [ "\$2" = get ]; then
+  echo '{"result":{"pane":{"terminal_id":"term_retry"}}}'
 elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
   exit 0
 elif [ "\$1" = agent ] && [ "\$2" = rename ]; then
@@ -3137,6 +3155,41 @@ EOF
   [ "$output" = ok ]
   # Three agent_not_found answers, then the one that actually renamed it.
   [ "$(grep -c '\[agent\] \[rename\]' "$ARGV_LOG")" -eq 4 ]
+
+  # A real not-yet-detected agent makes get fail too, rather than returning
+  # empty successful output. Keep a name that appears when detection catches up.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_rename_recovers_from_not_found sess-retry 0 3
+  HERDR_AFTER_DETECTION_NAME=reviewer run terminal_name wC:p9 teamx alice
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  [ "$(grep -c '\[agent\] \[get\]' "$ARGV_LOG")" -eq 4 ]
+  refute grep -q '\[agent\] \[rename\]' "$ARGV_LOG"
+  [ "$(terminal_expected_label teamx alice wC:p9)" = reviewer ]
+
+  # Re-observe after rename fails: a newly registered, externally named agent
+  # is not permission to retry the stale plan to overwrite its name.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_rename_recovers_from_not_found sess-retry 1
+  HERDR_AFTER_RENAME_NAME=reviewer run terminal_name wC:p9 teamx alice
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '\[agent\] \[rename\]' "$ARGV_LOG")" -eq 1 ]
+  [ "$(grep -c '\[agent\] \[get\]' "$ARGV_LOG")" -eq 2 ]
+  [ "$(terminal_expected_label teamx alice wC:p9)" = reviewer ]
+
+  : > "$ARGV_LOG"
+  _install_fake_herdr_rename_recovers_from_not_found sess-retry 0 99
+  run terminal_name wC:p9 teamx alice
+  [ "$status" -eq 13 ]
+  [ "$(grep -c '\[agent\] \[get\]' "$ARGV_LOG")" -eq 51 ]
+  refute grep -q '\[agent\] \[rename\]' "$ARGV_LOG"
+
+  # Unrelated observation failures are refused immediately, not retried.
+  : > "$ARGV_LOG"
+  HERDR_QUERY_OTHER_ERROR=1 run terminal_name wC:p9 teamx alice
+  [ "$status" -eq 13 ]
+  [ "$(grep -c '\[agent\] \[get\]' "$ARGV_LOG")" -eq 1 ]
+  refute grep -q '\[agent\] \[rename\]' "$ARGV_LOG"
 }
 
 # The retry is bounded and specific to agent_not_found: a rename that never
