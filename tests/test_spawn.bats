@@ -1228,6 +1228,10 @@ case "$1/$2" in
     echo '{"id":"cli:tab:close","result":{"type":"ok"}}'
     ;;
   agent/rename)
+    if [ "$(grep -c '^agent rename ' "$HERDR_CALL_LOG")" -le "${HERDR_AGENT_RENAME_FAILURES:-0}" ]; then
+      echo '{"error":{"code":"agent_not_found"}}' >&2
+      exit 1
+    fi
     # `agent rename <pane_id> <key>` — record the mapping so `agent list` can
     # replay it. $3=pane id, $4=key.
     printf '%s\t%s\n' "$3" "$4" >> "$HERDR_AGENT_DB"
@@ -2092,10 +2096,8 @@ OPS
 }
 
 @test "spawn-side naming: herdr retries agent_not_found until detection then confirms the key (#1100)" {
-  _install_fake_naming_herdr
+  _setup_fake_herdr
   bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
-  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
-  : > "$FAKE_NAME_LOG"
   cat > "$STUB_BIN/sleep" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_SLEEP_LOG"
@@ -2104,20 +2106,20 @@ EOF
   export FAKE_SLEEP_LOG="$TEST_SKILL_DIR/sleep.log"
   : > "$FAKE_SLEEP_LOG"
 
-  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_FAILS=2 \
+  run env HERDR_AGENT_GET_FAILURES=2 \
     FAKE_SLEEP_LOG="$FAKE_SLEEP_LOG" \
     bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
   [ "$status" -eq 0 ]
-  [ "$(wc -l < "$FAKE_NAME_LOG" | tr -d ' ')" -eq 3 ]
+  [ "$(grep -c '^agent get ' "$HERDR_CALL_LOG")" -eq 3 ]
+  [ "$(grep -c '^agent rename ' "$HERDR_CALL_LOG")" -eq 1 ]
   [ "$(wc -l < "$FAKE_SLEEP_LOG" | tr -d ' ')" -eq 2 ]
+  [ "$(grep -c '^0.1$' "$FAKE_SLEEP_LOG")" -eq 2 ]
   refute grep -qF "status=spawned-but-unnamed" <<<"$output"
 }
 
 @test "spawn-side naming: herdr bounds a persistent agent_not_found and reports unnamed (#1100)" {
-  _install_fake_naming_herdr
+  _setup_fake_herdr
   bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
-  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
-  : > "$FAKE_NAME_LOG"
   cat > "$STUB_BIN/sleep" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_SLEEP_LOG"
@@ -2126,12 +2128,16 @@ EOF
   export FAKE_SLEEP_LOG="$TEST_SKILL_DIR/sleep.log"
   : > "$FAKE_SLEEP_LOG"
 
-  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_FAILS=99 \
+  run env HERDR_AGENT_GET_FAILURES=3 HERDR_AGENT_RENAME_FAILURES=99 \
     FAKE_SLEEP_LOG="$FAKE_SLEEP_LOG" \
     bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
   [ "$status" -eq 0 ]
-  [ "$(wc -l < "$FAKE_NAME_LOG" | tr -d ' ')" -eq 11 ]
-  [ "$(wc -l < "$FAKE_SLEEP_LOG" | tr -d ' ')" -eq 10 ]
+  # One driver budget across both phases, with no outer retry restarting it:
+  # three failed observations, then 48 failed renames, and 50 sleeps total.
+  [ "$(grep -c '^agent get ' "$HERDR_CALL_LOG")" -eq 51 ]
+  [ "$(grep -c '^agent rename ' "$HERDR_CALL_LOG")" -eq 48 ]
+  [ "$(wc -l < "$FAKE_SLEEP_LOG" | tr -d ' ')" -eq 50 ]
+  [ "$(grep -c '^0.1$' "$FAKE_SLEEP_LOG")" -eq 50 ]
   grep -qF "status=spawned-but-unnamed" <<<"$output"
 }
 
