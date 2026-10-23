@@ -64,7 +64,7 @@ function fakeChild({ stdout, stderr = '', code = 0, autoClose = true }) {
 }
 
 function executableFixture(t) {
-  const root = temporaryDirectory(t);
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-codex-queue-'));
   mkdirSync(path.join(root, 'run'));
   const home = path.join(root, 'profile');
   mkdirSync(path.join(home, 'sessions'), { recursive: true });
@@ -73,9 +73,13 @@ function executableFixture(t) {
     JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'earlier prompt' } }), '',
   ].join('\n'));
   const db = openInstallDb(path.join(root, 'run', 'install.db'));
+  // A single teardown enforces close-before-removal regardless of hook order.
+  t.after(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
   ensureCodexChannelSchema(db);
   db.exec("UPDATE daemon_intent SET desired='on', op_gen=1");
-  t.after(() => db.close());
   const options = {
     db, installRoot: root, expectedOpGen: 1,
     env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', AGMSG_STORAGE_PATH: root },
