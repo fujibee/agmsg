@@ -1,6 +1,6 @@
 ---
 name: agmsg
-description: Cross-agent messaging via SQLite. Send messages between Claude Code, Codex, Gemini CLI, and other agents. No daemon, no network, no dependencies beyond bash and sqlite3.
+description: Cross-agent messaging via SQLite. Send messages between Claude Code, Codex, Gemini CLI, and other agents. No network, no dependencies beyond bash and sqlite3, and no daemon required (the optional agmsgd is a local resident service).
 ---
 
 <!-- agmsg:render-root -->
@@ -87,8 +87,19 @@ Four possible outputs:
   > - `/agmsg history` — message history
 
 <!-- agmsg:render-overlay claude-code -->
-  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, `both`, or `off` delivery. Empty input means `monitor`.
-     Run `~/.agents/skills/agmsg/scripts/delivery.sh set <mode> claude-code "$(pwd)"` and follow the printed `AGMSG-DIRECTIVE` block.
+  5. **REQUIRED — Do NOT skip this step.** Choose how incoming messages reach this agent. Show this screen every time (a new join, a new seat added by someone already using agmsg, and when the mode is changed). First run `~/.agents/skills/agmsg/scripts/agmsg daemon offer claude-code`; it only reads and prints one line:
+     - `agmsgd=available`: ask the user to pick one, in this order:
+       1. `agmsgd` — notices delivered directly by a background service (recommended). Choosing it registers a background service that starts at login; `agmsg daemon disable` stops and removes it. Empty input means this one.
+       2. `monitor (legacy)` — the Claude Code Monitor tool streams the inbox (the `monitor` mode value).
+       3. `turn`, 4. `both`, 5. `off` — as before.
+     - `agmsgd=on`: do not ask which to use. Say "agmsgd is on: notices are delivered directly" and ask only whether to keep using it or switch to `monitor (legacy)`.
+     - `agmsgd=not-running reason=...`: agmsgd is turned on but is not running, so do not say notices are delivered directly. Say so with the reason and ask whether to start it (`agmsg delivery agmsgd` starts it) or switch to `monitor (legacy)`.
+     - `agmsgd=unavailable reason=...`: do not offer agmsgd; say the reason in one line, then ask for `monitor (legacy)`, `turn`, `both`, or `off` (empty input means `monitor`).
+
+     To apply the choice, run `~/.agents/skills/agmsg/scripts/agmsg delivery <choice> --type claude-code --project "$(pwd)"` with `<choice>` = `agmsgd`, `monitor`, `turn`, `both` or `off` (`monitor (legacy)` is the value `monitor`) and show its output and follow the printed `AGMSG-DIRECTIVE` block:
+     - `agmsgd` turns the background service on (`daemon enable`) and leaves the project on `monitor` as the fallback for a seat whose destination is not confirmed yet. If it fails, say so and offer the other choices.
+     - Keep using agmsgd (it is on or turned on but not running): run `agmsg delivery agmsgd` the same way; it also records that this project uses agmsgd.
+     - `monitor (legacy)` (and `turn`, `both`, `off`) is a real opt-out: the CLI records that this project does not use agmsgd, so agmsgd stops delivering here and the project keeps the old path. agmsgd stays on for the install's other projects; when it says so, pass on its line that `agmsg daemon disable` turns agmsgd off for all of them.
 
   6. Then check inbox for the newly joined team.
 
@@ -177,7 +188,7 @@ If argument is "config":
 1. Run: `~/.agents/skills/agmsg/scripts/config.sh show`
 2. Show the output to the user.
 
-If argument starts with "config set" (e.g. "config set hook.check_interval 30"):
+If argument starts with "config set" (e.g. "config set delivery.turn.check_interval 30"):
 1. Parse key and value from the arguments.
 2. Run: `~/.agents/skills/agmsg/scripts/config.sh set <key> <value>`
 
@@ -208,7 +219,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
    a. Find this session's agmsg watch Monitor task: a task in TaskList whose description begins with "agmsg inbox stream", or the task_id returned by a Monitor call you made earlier in this conversation. Not every environment lists Monitor tasks in TaskList, so an empty list does not mean none is running.
    b. **If you have such a task_id**: TaskStop it.
    c. **If you have none** (typical when /agmsg actas runs as the first command of a fresh session — SessionStart hasn't fired the Monitor directive yet, or you're invoking actas before the agent acted on it): skip TaskStop. Do NOT attempt TaskStop with a guessed or empty task_id — it will fail with "Invalid tool parameters" and confuse the flow. Starting a new watcher for this session in step d replaces any previous one.
-   d. Run `~/.agents/skills/agmsg/scripts/delivery.sh status claude-code "$(pwd)"` and read its **first line**.
+   d. **If the step 4 output had a `delivery=native` line**: agmsgd now delivers to this session directly, so start no Monitor and skip the rest of this step. Otherwise run `~/.agents/skills/agmsg/scripts/delivery.sh status claude-code "$(pwd)"` and read its **first line**.
       - **`mode: monitor` or `mode: both`**: invoke a fresh Monitor, regardless of whether step b or c applied:
         - command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code <name> --max-seconds=1750`
         - description: `agmsg inbox stream (acting as <name>)`
@@ -247,7 +258,7 @@ If argument starts with "spawn" (e.g. "spawn codex reviewer", "spawn claude-code
 1. Parse `<type>` (a spawnable agent type), `<name>`, and any options (`--boot-prompt <text>`, `--project <path>`, `--team <team>`, `--window`, `--split h|v`, `--terminal <template>`, `--no-wait`, `--ready-timeout <secs>`, `--model <id>`, `--fresh`).
 2. Run: `~/.agents/skills/agmsg/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
    - `spawn.sh` pre-joins `<name>`, then opens a new pane or window through the terminal driver and launches the target CLI with `/agmsg actas <name>` as its initial prompt. `--boot-prompt` appends a first task to that prompt. Which terminal that is is the driver's decision, never something to name here.
-   - By default it blocks until a spawned Claude Code agent's watcher attaches and prints `status=ready`; `--no-wait` returns immediately. A spawned Codex agent has no Monitor and skips the readiness wait.
+   - By default it blocks until a spawned Claude Code agent's watcher attaches and prints `status=ready`; `--no-wait` returns immediately. A spawned Codex agent skips the readiness wait: it has no spawn-time readiness handshake (that is separate from how it receives messages).
    - It refuses early when `<name>` is already held by another live session, the target CLI is missing, the project path is invalid, or the terminal driver has nowhere to place it.
 3. Show the script's output. Do not TaskStop or relaunch this session's own Monitor; spawn affects a separate agent.
 
@@ -256,7 +267,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 2. Determine which team `<name>` belongs to, then run:
    `~/.agents/skills/agmsg/scripts/despawn.sh <team> $AGENT <name> [--force] [--timeout <secs>]`
    - The default graceful path sends a `ctrl:despawn` message; the member's watcher drops its role and closes its spawned pane, then `despawn` waits for the lock to release.
-   - If the member is Codex and has no watcher, or graceful teardown times out, use `--force` to tear down the recorded pane/window and drop the registration directly.
+   - If the member is Codex and has no watcher (it never holds an actas lock), or graceful teardown times out, use `--force` to tear down the recorded pane/window and drop the registration directly.
 3. Show the script's output. Do not TaskStop or relaunch this session's own Monitor.
 
 If argument starts with "arrange" (e.g. "arrange alice place_below <anchor-ref>"):
@@ -288,9 +299,9 @@ If argument starts with "poke" (e.g. "poke reviewer status?"):
 3. `poke` TYPES INTO another agent's session and submits it, as if a person had typed it there. Use it to reach a member whose watcher is not delivering (that is what it is for); use `send` for ordinary messages, which the member reads on its own terms.
 4. Exit codes split what "could not poke" means — see the shape and the pointer to the driver-specific file in point 4 of the "where" section above. **13** specifically means: do not fall back to `send` silently; the two are not the same act, say which one you did. Two more codes are `poke.sh`'s own, the same across every driver (not in the per-driver files, which only cover the driver's own layer below this one): **14** means it found the input box and it looks like someone is actively typing there right now — a transient condition `--retries` waits out. **15** means it could not even confirm where the input box is on this read (e.g. a mid-redraw screen) — a different finding from 14, not a typing detection, though it is also transient and also covered by `--retries`.
 
-If argument is "mode", run `~/.agents/skills/agmsg/scripts/delivery.sh status claude-code "$(pwd)"`. Show the output to the user, and if it says `mode: monitor` (or `both`), say explicitly that this reports project *configuration* only — it does not prove the runtime Monitor task is attached in the current session. To confirm the runtime state, look for a Monitor whose description begins with `agmsg inbox stream` (after an `actas` it reads `agmsg inbox stream (acting as <name>)`). TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either.
+If argument is "delivery" (or its alias "mode") with nothing after it, run `~/.agents/skills/agmsg/scripts/agmsg delivery status --type claude-code --project "$(pwd)"`. It shows both the install-wide agmsgd state (for example "delivery: agmsgd (on) — notices are delivered directly") and this project's own delivery ("this project's fallback: monitor (legacy)"). Show the output to the user, and if it says `mode: monitor` (or `both`), say explicitly that this reports project *configuration* only — it does not prove the runtime Monitor task is attached in the current session. To confirm the runtime state, look for a Monitor whose description begins with `agmsg inbox stream` (after an `actas` it reads `agmsg inbox stream (acting as <name>)`). TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either. When agmsgd is off but available, tell the user that `/agmsg delivery agmsgd` turns direct delivery on.
 
-For `mode monitor|turn|both|off`, run `delivery.sh set <mode> claude-code "$(pwd)"` and follow its `AGMSG-DIRECTIVE` block. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
+For `delivery agmsgd|monitor|turn|both|off` (and the same values after the alias `mode`), run `~/.agents/skills/agmsg/scripts/agmsg delivery <value> --type claude-code --project "$(pwd)"` and follow its `AGMSG-DIRECTIVE` block. `agmsgd` runs `daemon enable` and leaves the project on `monitor` as the fallback; the other values are exactly `delivery.sh set <value>`. `monitor` is always shown as `monitor (legacy)` on the choice screen, but its value stays `monitor`. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
 
 If argument is "fix" (no further words):
 1. Run: `~/.agents/skills/agmsg/scripts/fix.sh` — with NO arguments. `fix` repairs THIS session's own seat marks (placement record, pane label, agent key, session name) at the pane the seat PROVES it is in. It takes no location: the seat establishes where it is from its own process ancestry (and, when that cannot decide, by writing a token to its own screen and finding it), and when it cannot establish that, it writes nothing and says why. Whoever invokes it — a `poke` from another member, a person at the keyboard, or this skill — gets the same answer. Passing a pane, a `--pane`, or any word is refused by name: a location handed in from outside is exactly the mistake this exists to remove.

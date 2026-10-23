@@ -1,6 +1,6 @@
 # agmsg
 
-> Cross-agent messaging for CLI AI agents. Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Antigravity, and OpenCode message each other directly through a shared local SQLite database — no daemon, no network, no MCP. Just `bash` + `sqlite3`.
+> Cross-agent messaging for CLI AI agents. Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Antigravity, and OpenCode message each other directly through a shared local SQLite database — no daemon required, no network, no MCP. Just `bash` + `sqlite3`. (An optional resident service, agmsgd, is installed only if you choose it.)
 
 ## Quick Start
 
@@ -13,7 +13,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/fujibee/agmsg/main/setup.sh)
 # 3. Invoke the command — it prompts for a team name, an agent name,
 #    and a delivery mode on first use:
 #      Claude Code / Copilot CLI:        /agmsg
-#      Codex / Gemini CLI / Antigravity: $agmsg
+#      Codex / Gemini CLI / Antigravity / OpenCode: $agmsg
 ```
 
 Everyday commands (same across agents; shown here as the Claude Code `/agmsg` form):
@@ -23,7 +23,7 @@ Everyday commands (same across agents; shown here as the Claude Code `/agmsg` fo
 /agmsg send <agent> <msg>   # send a message to a teammate
 /agmsg team                 # list team members
 /agmsg history              # replay message history
-/agmsg mode <monitor|turn|both|off>   # switch delivery mode
+/agmsg mode <monitor|turn|both|off>   # switch delivery mode (which modes are valid depends on the agent type)
 /agmsg spawn <type> <name>  # launch a new peer agent in its own terminal
 /agmsg spawn <type> <name> --boot-prompt "<task>"   # ...and start it on <task> in its first turn
 ```
@@ -37,11 +37,14 @@ plugin marketplace (`/plugin marketplace add fujibee/agmsg`). All paths land at
 - **team** — a named group of agents that can message each other.
 - **agent** — a sender/receiver identity within a team (a single session can hold
   multiple roles via `actas`).
-- **delivery mode** — how incoming messages reach a recipient: `monitor` (real-time
-  push, default on Claude Code), `turn` (pull at end of each turn, default on Codex),
-  `both`, or `off`.
-- **3-axis driver model** — `storage` (sqlite default), `agent` (per-runtime hook
-  differences), and `delivery` are orthogonal, each with one active swappable driver.
+- **delivery method** — how incoming messages reach a recipient: agmsgd (the
+  recommended, optional resident service; delivers to Claude Code and Codex, including
+  on Windows; turned on only when the person picks it), `monitor (legacy)` (real-time
+  push), `turn` (pull at the end of each turn), `both` (Claude Code only), or `off`.
+  Each agent type supports a subset.
+- **4-axis driver model** — `storage` (sqlite default), `agent` (per-runtime hook
+  differences), `delivery`, and `terminal` (detected, not configured) are orthogonal,
+  each with one active swappable driver.
 - **AGMSG-DIRECTIVE** — a machine-readable line agmsg emits to ask the host agent to
   take an action (e.g. start its Monitor tool, install a missing dependency).
 
@@ -51,13 +54,15 @@ plugin marketplace (`/plugin marketplace add fujibee/agmsg`). All paths land at
 
 ## Docs
 
-- [ARCHITECTURE.md](ARCHITECTURE.md): the 3-axis driver model, storage shape, vocabulary.
+- [ARCHITECTURE.md](ARCHITECTURE.md): the 4-axis driver model, storage shape, vocabulary.
 - [docs/design.md](docs/design.md): design rationale and internal shape.
 - [docs/actas.md](docs/actas.md): multiple roles per project, exclusivity locks.
 - [docs/teams.md](docs/teams.md): team registry and membership model.
 - [docs/spec/driver-interface.md](docs/spec/driver-interface.md): the formal driver contract.
 - [docs/adr/](docs/adr/): architecture decision records (the "why").
 - [docs/opencode.md](docs/opencode.md): OpenCode-specific integration.
+- [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md): Codex monitor (legacy) delivery through the app-server bridge.
+- [docs/plugins.md](docs/plugins.md): external drivers and the trust model.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to propose changes.
 
 ## Key source files
@@ -72,6 +77,7 @@ directly-invokable commands; `scripts/drivers/<axis>/` holds axis drivers and
 - [scripts/join.sh](scripts/join.sh): join or create a team.
 - [scripts/whoami.sh](scripts/whoami.sh): resolve this project's agent identity.
 - [scripts/delivery.sh](scripts/delivery.sh): get/set the delivery mode.
+- [scripts/daemon.sh](scripts/daemon.sh): enable, start, stop, disable and inspect the optional agmsgd service.
 - [scripts/spawn.sh](scripts/spawn.sh) / [scripts/despawn.sh](scripts/despawn.sh): launch / tear down a peer agent.
 - [scripts/history.sh](scripts/history.sh): replay a room's history.
 - [SKILL.md](SKILL.md): the agent-facing skill definition (full command reference).

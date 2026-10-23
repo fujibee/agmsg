@@ -230,3 +230,22 @@ EOF
   tmp_dir="$(dirname "$install_dir")"
   [ ! -d "$tmp_dir" ]
 }
+
+@test "setup: the installer's temp directory never reaches the environment it hands on" {
+  stub_git_success
+  stub_curl_marker
+  # Whatever the installer starts (a sync engine, say) keeps this environment
+  # after setup.sh has deleted its working directory, so TMP/TEMP/TMPDIR must
+  # still be what the caller passed, not setup.sh's own directory.
+  FAKE_INSTALL='#!/usr/bin/env bash
+echo "SEEN TMP=$TMP TEMP=$TEMP TMPDIR=$TMPDIR"'
+  export FAKE_INSTALL
+  # Real directories: mktemp honours TMPDIR and fails on one that does not exist.
+  mkdir "$FAKE_HOME/tmp" "$FAKE_HOME/temp" "$FAKE_HOME/tmpdir"
+
+  run env PATH="$STUB_BIN:/usr/bin:/bin" HOME="$FAKE_HOME" \
+    TMP="$FAKE_HOME/tmp" TEMP="$FAKE_HOME/temp" TMPDIR="$FAKE_HOME/tmpdir" \
+    bash "$REPO_ROOT/setup.sh" --cmd agmsg-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SEEN TMP=$FAKE_HOME/tmp TEMP=$FAKE_HOME/temp TMPDIR=$FAKE_HOME/tmpdir"* ]]
+}

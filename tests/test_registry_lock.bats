@@ -91,6 +91,7 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
     . "$LOCKLIB"
     agmsg_lock_acquire "$TEAM_DIR" || exit 1
     [ -d "$TEAM_DIR/.config.lock" ] || exit 2
+    [ -f "$TEAM_DIR/.config.lock/.owner" ] || exit 4
     agmsg_lock_release
     [ ! -d "$TEAM_DIR/.config.lock" ] || exit 3
   '
@@ -486,12 +487,93 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   rm -f "$lock.holder.releasing.$gone"
   rmdir "$lock"
 
-  # A dead holder on this machine: broken, and the acquire then succeeds.
+  # The same leftover on a directory that is over a minute old and no newer than
+  # the staged copy (the release was interrupted): broken when the copy is
+  # readable, says this machine and names a pid that is not running. A live
+  # owner's copy, and a copy that cannot be read (it cannot say which machine
+  # wrote it), keep the lock.
   mkdir "$lock"
+  printf 'token t\npid %s\ncommand t\nhost %s\n' "$live" "$me" > "$lock.holder.releasing.$live"
+  touch -t 202601010000 "$lock"
+  touch -t 202601010001 "$lock.holder.releasing.$live"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  rm -f "$lock.holder.releasing.$live"
+  : > "$lock.holder.releasing.$gone"
+  touch -t 202601010001 "$lock.holder.releasing.$gone"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  grep -qF "a release was interrupted" <<<"$output"
+  [ -d "$lock" ]
+  printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder.releasing.$gone"
+  touch -t 202601010001 "$lock.holder.releasing.$gone"
+  # Two staged copies are ambiguous (two breakers could claim one each): kept.
+  printf 'token t\npid %s\ncommand t\nhost %s\n' "$((gone + 1))" "$me" > "$lock.holder.releasing.$((gone + 1))"
+  touch -t 202601010001 "$lock.holder.releasing.$((gone + 1))"
+  acquire
+  [ "$status" -ne 0 ]
+  refute grep -qF "broke a registry lock" <<<"$output"
+  rm -f "$lock.holder.releasing.$((gone + 1))"
+  acquire
+  [ "$status" -eq 0 ]
+  grep -qF "release was interrupted" <<<"$output"
+  [ ! -e "$lock.holder.releasing.$gone" ]
+
+  # A dead holder with the new owner marker is still reclaimable.
+  mkdir "$lock"
+  : > "$lock/.owner"
   printf 'token t\npid %s\ncommand t\nhost %s\n' "$gone" "$me" > "$lock.holder"
   acquire
   [ "$status" -eq 0 ]
   grep -qF "broke a registry lock" <<<"$output"
 
   kill "$live" 2>/dev/null || true
+}
+
+@test "lock: a vanished namespace after marker release never restores an old holder" {
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    . "$LOCKLIB"
+    agmsg_lock_acquire "$TEAM_DIR" || exit 1
+    rmdir() {
+      # A delayed contender has taken and released the marker and namespace.
+      command rmdir "$1" || return 1
+      return 1
+    }
+    mv() {
+      case "$1" in
+        *.holder.releasing.*)
+          # The next owner arrives just before the old rollback would overwrite it.
+          command mkdir "$TEAM_DIR/.config.lock"
+          : > "$TEAM_DIR/.config.lock/.owner"
+          printf "token SUCCESSOR\n" > "$TEAM_DIR/.config.lock.holder"
+          : > "$TEAM_DIR/rollback-attempted" ;;
+      esac
+      command mv "$@"
+    }
+    agmsg_lock_release
+    [ ! -e "$TEAM_DIR/rollback-attempted" ] || exit 2
+    [ ! -e "$TEAM_DIR/.config.lock.holder" ] || exit 3
+  '
+  [ "$status" -eq 0 ]
+}
+
+@test "lock: the timeout remedy removes a stale owner marker and preserves team data" {
+  local component remedy
+  for component in "team space \$literal" "team 'quote' \$literal"; do
+    TEAM_DIR="$BATS_TEST_TMPDIR/$component"
+    mkdir -p "$TEAM_DIR/.config.lock"
+    : > "$TEAM_DIR/.config.lock/.owner"
+    printf '%s\n' preserved > "$TEAM_DIR/config.json"
+    TRIES=1 acquire
+    [ "$status" -ne 0 ]
+    [ -f "$TEAM_DIR/.config.lock/.owner" ]
+    remedy="$(printf '%s\n' "$output" | sed -n 's/^agmsg:   //p' | tail -1)"
+    [ -n "$remedy" ]
+    run bash -c "$remedy"
+    [ "$status" -eq 0 ]
+    [ ! -d "$TEAM_DIR/.config.lock" ]
+    [ "$(cat "$TEAM_DIR/config.json")" = preserved ]
+  done
 }

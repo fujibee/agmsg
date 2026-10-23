@@ -1,6 +1,10 @@
 # agmsgd — architecture design
 
+> **Changed in 1.6.0.** This record describes the first beta. As shipped, agmsgd delivers to both Claude Code and Codex sessions, works on Windows too (Claude Code 2.1.302 or later, Codex 0.157 or later), and is offered in the delivery-method screen as the recommended choice; it is turned on only when the person picks it. Statements below that it is Codex-only, macOS/Linux-only, default-off, or unsupported on Windows describe the first beta.
+
 This is the architecture design for agmsgd: the approved direction in [the RFC](agmsgd-rfc.md), worked down to how each part behaves. It describes the current design only; the reasoning behind each choice lives in the discussion and in the ADRs that will follow. Implementation has not started. The technical design (where the source lives, how it is built and shipped, the main components) comes next.
+
+**1.6.0 beta scope:** the optional, default-off daemon queues inbox notices for Codex sessions against the existing SQLite store, before the 2.0.0 migration. Existing bridges and remote sync processes remain separate; a live bridge continues until its Codex session restarts. `agmsg daemon enable` changes new Codex launches, while `agmsg daemon disable` lists sessions that need restarting to restore bridge notices. If `agmsg` is not found, use `<install>/scripts/agmsg daemon enable|disable`. macOS and Linux are supported. Windows delivery remains unsupported pending measurement, and JSONL storage is unsupported. The beta does not implement the 2.0.0 storage or delivery changes described below.
 
 Status: 2026-09-28. [日本語版](agmsgd-architecture.ja.md)
 

@@ -54,5 +54,6 @@ caller must never read this as `gone` and delete the placement record on it.
 ## Monitor / delivery
 
 Unchanged by this driver. Receiving agmsg messages in the desktop app's Code
-tab still goes through the same Monitor mechanism every other Claude Code
-seat uses.
+tab goes through the same delivery every other Claude Code seat uses: agmsgd
+(no Monitor involved) when it is enabled and has confirmed this seat's
+destination, otherwise the Monitor (legacy) stream.

@@ -10,11 +10,11 @@ consuming agmsg from the outside, not swapping a piece of it from the inside.
 ## The rule: go through scripts, not files
 
 agmsg's actual storage (a SQLite file today, `teams/<team>/config.json` for
-rosters) is an implementation detail, not a contract. Design work is underway
-for a pluggable storage axis — swappable backends behind a common contract,
-so a message store doesn't have to be this SQLite file. Code outside
-`scripts/` that opens `messages.db` directly, or hand-parses a team's
-`config.json`, will break with no warning if that lands. Go through the
+rosters) is an implementation detail, not a contract. agmsg already has a
+storage driver axis (`sqlite` by default, `jsonl`, and a per-team store when a
+team is connected to a server), so a message store isn't always this SQLite
+file. Code outside `scripts/` that opens `messages.db` directly, or hand-parses
+a team's `config.json`, will break with no warning when a team's store moves. Go through the
 scripts in `scripts/` instead — they're the stable surface; what's behind
 them is free to change.
 
@@ -23,11 +23,12 @@ them is free to change.
 ```sh
 ~/.agents/skills/<cmd>/scripts/api.sh get teams
 ~/.agents/skills/<cmd>/scripts/api.sh get teams <team> members
+~/.agents/skills/<cmd>/scripts/api.sh get teams <team> store
 ~/.agents/skills/<cmd>/scripts/api.sh get teams <team> messages [--agent <name>] [--limit N] [--before-id <id>]
 ```
 
 JSON out — plain lines for `teams`, JSONL (one record per line) for
-`members`/`messages`. `messages` returns oldest-first, capped by `--limit`
+`members`/`messages`, and a single JSON object (`driver`, `path`, `exists`, …) for `store`. `messages` returns oldest-first, capped by `--limit`
 (default 30, meaning the most recent 30 — not the first 30), each record
 shaped like:
 

@@ -133,10 +133,9 @@ fake_session() {
 @test "record: writes even when mkdir -p fails but the leaf dir already exists (#579)" {
   # Windows codex sandbox (workspace-write + elevated): mkdir -p walks the
   # already-existing intermediate path and returns EACCES, not EEXIST -- the
-  # leaf dir itself remains present and writable throughout. Stubbing mkdir to
-  # always fail reproduces that: the real RUN_DIR (made in setup()) is never
-  # touched, so mktemp on it still succeeds and the record must still be written.
-  mkdir() { return 1; }
+  # leaf dir itself remains present and writable throughout. Fail only -p:
+  # creating the writer lock directly inside RUN_DIR must still be allowed.
+  mkdir() { [ "${1:-}" != -p ] || return 1; command mkdir "$@"; }
   agmsg_role_session_record T alice "sid-x" /tmp/p1
   unset -f mkdir
   [ "$(agmsg_role_session_uuid T alice)" = "sid-x" ]
@@ -273,4 +272,79 @@ fake_session() {
   '
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK u=sid-9 p=/p/q r"* ]]
+}
+
+@test "role-session: mark_messaging_blocked rechecks the session under the lock and leaves a newer session's destination alone" {
+  agmsg_role_session_record T alice sid-old /p/q claude-code
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/old.sock /home/x/.claude sid-old tok-old
+  # The record is read as sid-old, then a newer session publishes before the mark lands.
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/new.sock /home/x/.claude sid-new tok-new
+  run agmsg_role_session_mark_messaging_blocked T alice seat_pid_unresolved sid-old
+  [ "$status" -eq 1 ]
+  [ "$(agmsg_role_session_get T alice messaging_socket)" = /tmp/cc-socks/new.sock ]
+  [ "$(agmsg_role_session_get T alice messaging_token)" = tok-new ]
+  [ -z "$(agmsg_role_session_get T alice messaging_blocked)" ]
+  # The session that owns the record gets the mark, and its destination goes.
+  run agmsg_role_session_mark_messaging_blocked T alice seat_pid_unresolved sid-new
+  [ "$status" -eq 0 ]
+  [ "$(agmsg_role_session_get T alice messaging_blocked)" = seat_pid_unresolved ]
+  [ -z "$(agmsg_role_session_get T alice messaging_socket)" ]
+  [ -z "$(agmsg_role_session_get T alice messaging_token)" ]
+  # No expected session, or a reason that is not a plain word: nothing is written.
+  run agmsg_role_session_mark_messaging_blocked T alice seat_pid_unresolved ""
+  [ "$status" -eq 1 ]
+  run agmsg_role_session_mark_messaging_blocked T alice "bad reason" sid-new
+  [ "$status" -eq 1 ]
+}
+
+# Claude Code native-channel delivery (2026-10-05, arch-8 §12.1): a --resume
+# starts a brand-new process bound to a brand-new CLAUDE_CODE_MESSAGING_SOCKET
+# (measured in memory/design/2026-10-05-cross-session-messaging-socket-
+# measurement.md's addendum), so agmsgd must never cache the socket path --
+# session-start.sh re-derives and overwrites it on every start/resume via
+# agmsg_role_session_set_messaging. This is the load-bearing property: the
+# SECOND call's socket value wins, and unrelated fields (session, project)
+# untouched by that function survive unchanged.
+@test "role-session: set_messaging overwrites the socket on each call, as a --resume would require" {
+  agmsg_role_session_record T alice sid-1 /p/q claude-code
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/111.sock /home/x/.claude
+  [ "$(agmsg_role_session_get T alice messaging_socket)" = /tmp/cc-socks/111.sock ]
+  [ "$(agmsg_role_session_get T alice claude_config_dir)" = /home/x/.claude ]
+
+  # A --resume: same role, brand-new pid-named socket.
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/222.sock /home/x/.claude
+  [ "$(agmsg_role_session_get T alice messaging_socket)" = /tmp/cc-socks/222.sock ]
+  # Fields set_messaging does not touch must survive untouched.
+  [ "$(agmsg_role_session_uuid T alice)" = sid-1 ]
+  [ "$(agmsg_role_session_get T alice project)" = /p/q ]
+
+  # A /clear: same socket, but Claude Code hands this session a brand-new
+  # session id -- the 5th argument must replace session= too (#1577 review),
+  # since the daemon derives the transcript path from it.
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/222.sock /home/x/.claude sid-2
+  [ "$(agmsg_role_session_uuid T alice)" = sid-2 ]
+  [ "$(agmsg_role_session_get T alice project)" = /p/q ]
+
+  # The session's inbox token is kept for the daemon, in a record only the
+  # owner can read, and a restart without one does not leave the old one.
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/333.sock /home/x/.claude sid-2 tok-A_1.b
+  [ "$(agmsg_role_session_get T alice messaging_token)" = tok-A_1.b ]
+  [ "$(find "$RUN_DIR" -name "*alice*" | wc -l | tr -d ' ')" -ge 1 ]
+  [ "$(find "$RUN_DIR" -name "*alice*" -perm -077 | wc -l | tr -d ' ')" = 0 ]
+  agmsg_role_session_set_messaging T alice /tmp/cc-socks/444.sock /home/x/.claude sid-2
+  [ -z "$(agmsg_role_session_get T alice messaging_token)" ]
+}
+
+@test "native target: a Windows named pipe and the profile directory under USERPROFILE are accepted" {
+  run env CLAUDE_CODE_MESSAGING_SOCKET='\\.\pipe\LOCAL\cc-msg-ab12' USERPROFILE='C:\Users\me' HOME= CLAUDE_CONFIG_DIR= \
+    bash -c ". '$TEST_SKILL_DIR/scripts/lib/role-session.sh'; agmsg_claude_code_native_target"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'\\\\.\\pipe\\LOCAL\\cc-msg-ab12\tC:\\Users\\me/.claude' ]
+  run env CLAUDE_CODE_MESSAGING_SOCKET='uds:\\.\pipe\LOCAL\cc-msg-ab12' CLAUDE_CONFIG_DIR='/c/Users/me/.claude' \
+    bash -c ". '$TEST_SKILL_DIR/scripts/lib/role-session.sh'; agmsg_claude_code_native_target"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'\\\\.\\pipe\\LOCAL\\cc-msg-ab12\t/c/Users/me/.claude' ]
+  run env CLAUDE_CODE_MESSAGING_SOCKET='relative.sock' CLAUDE_CONFIG_DIR='/c/Users/me/.claude' \
+    bash -c ". '$TEST_SKILL_DIR/scripts/lib/role-session.sh'; agmsg_claude_code_native_target"
+  [ "$status" -ne 0 ]
 }

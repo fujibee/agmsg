@@ -56,6 +56,9 @@ terminal_poke() { _codex_app_unsupported poke; }
 terminal_arrange() { _codex_app_unsupported arrange; }
 terminal_name() { _codex_app_unsupported name; }
 terminal_expected_label() { printf 'n/a:no_addressable_pane\n'; }
+# The app is one conversation, not an instance of a multiplexer: its ref is
+# already complete, so a locator needs nothing added.
+terminal_instance_for_ref() { printf 'n/a:bare\n'; }
 terminal_team_observe() {
   printf 'n/a:no_addressable_pane\tn/a:no_addressable_pane\tn/a:no_addressable_pane\tn/a:no_addressable_pane\n'
 }

@@ -432,6 +432,36 @@ eperm_pid() {
     [[ "$output" == *"$TEST_PROJECT"* ]]
 }
 
+@test "delivery status: a Codex project with no hooks file reads as agmsgd-delivered only while agmsgd is on and its seats have destinations" {
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
+
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  # agmsgd on, but alice has no recorded destination yet: unchanged.
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
+
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record team alice thread-1 "$TEST_PROJECT" codex "" "$TEST_PROJECT/codex-home"
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "${output%%$'\n'*}" = "mode: agmsgd (agmsgd delivers to this project's Codex seats; no hooks file needed)" ]
+
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  grep -q '^mode: off (unrecognized: no settings file found' <<<"$output"
+}
+
 @test "delivery status: a settings file that exists but is not valid JSON is also unrecognized, not deliberate off (review)" {
   # A third way has_ss/has_st both land on 0: not "missing" and not "genuinely
   # empty of agmsg entries" but unreadable/malformed, which the has_ss/has_st
@@ -2910,6 +2940,83 @@ EOF
     bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
 
   [ ! -f "$log" ]
+}
+
+@test "session-start.sh for codex does not choose a /clear seat by process: with several seats none moves, even one whose owner names the same live pid (#1468)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
+  local old=11111111-1111-4111-8111-111111111111 new=22222222-2222-4222-8222-222222222222
+  local rec_a="$TEST_SKILL_DIR/run/role-session.team__alice" rec_b="$TEST_SKILL_DIR/run/role-session.team__bob"
+  # Seats of a profile run under one app-server daemon, so a stale owner left
+  # on one seat names the pid every seat resolves to, and that pid stays alive
+  # across the /clear. The other seat (the one actually cleared) has no owner.
+  sleep 60 &
+  local pid=$!
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_record team alice "$2" "$4" codex "$2.$5"
+    agmsg_role_session_record team bob "$3" "$4" codex
+  ' _ "$SCRIPTS" "$old" "33333333-3333-4333-8333-333333333333" "$TEST_PROJECT" "$pid"
+  local before_a before_b
+  before_a="$(cat "$rec_a")"; before_b="$(cat "$rec_b")"
+  mkdir -p "$BATS_TEST_TMPDIR/profile"
+  printf '{"session_id":"%s","source":"clear"}' "$new" \
+    | env -u CODEX_THREAD_ID CODEX_HOME="$BATS_TEST_TMPDIR/profile" AGMSG_AGENT_PID="$pid" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+  kill "$pid" 2>/dev/null || true
+  [ "$(cat "$rec_a")" = "$before_a" ]
+  [ "$(cat "$rec_b")" = "$before_b" ]
+  # The thread's profile is still published, as for any session.
+  [ -f "$TEST_SKILL_DIR/run/codex-thread-home.$new" ]
+}
+
+@test "session-start.sh for codex keeps #1607's recovery after /clear: the project's sole registration follows the new thread (#1468)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local old=11111111-1111-4111-8111-111111111111 new=22222222-2222-4222-8222-222222222222
+  local rec="$TEST_SKILL_DIR/run/role-session.team__alice"
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_record team alice "$2" "$3" codex
+  ' _ "$SCRIPTS" "$old" "$TEST_PROJECT"
+  mkdir -p "$BATS_TEST_TMPDIR/profile"
+  printf '{"session_id":"%s","source":"clear"}' "$new" \
+    | env -u CODEX_THREAD_ID CODEX_HOME="$BATS_TEST_TMPDIR/profile" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+  grep -qx "session=$new" "$rec"
+}
+
+@test "session-start.sh for codex never picks a seat by the pane its environment names, and says the conversation is unseated (#1468)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
+  local old_a=11111111-1111-4111-8111-111111111111 old_b=33333333-3333-4333-8333-333333333333
+  local new=22222222-2222-4222-8222-222222222222
+  local rec_a="$TEST_SKILL_DIR/run/role-session.team__alice" rec_b="$TEST_SKILL_DIR/run/role-session.team__bob"
+  # The hook runs under the profile's shared app-server daemon, so the pane in
+  # its environment is the one that started the daemon: here, bob's, while the
+  # /clear happened in another seat. bob's placement record and naming mark
+  # both agree with that pane.
+  local sock="$BATS_TEST_TMPDIR/herdr.sock" ref epoch
+  : > "$sock"
+  SKILL_DIR="$TEST_SKILL_DIR" HERDR_ENV=1 HERDR_SOCKET_PATH="$sock" HERDR_PANE_ID=w1:p17 bash -c '
+    source "$1/lib/terminal-registry.sh"; source "$1/lib/role-session.sh"
+    here="$(agmsg_terminal_self_env)"; IFS=$'"'"'\t'"'"' read -r t id epoch <<< "$here"
+    ref="$(agmsg_terminal_ref "$t" "$id")"
+    agmsg_role_session_record team alice "$2" "$4" codex
+    agmsg_role_session_record team bob "$3" "$4" codex
+    printf "%s\t%s\tcodex\n" "$ref" "$4" > "$(agmsg_spawn_path team bob)"
+    agmsg_role_session_mark_named team bob "$ref" "$epoch" "$4" codex
+  ' _ "$SCRIPTS" "$old_a" "$old_b" "$TEST_PROJECT"
+  local before_a before_b out
+  before_a="$(cat "$rec_a")"; before_b="$(cat "$rec_b")"
+  mkdir -p "$BATS_TEST_TMPDIR/profile"
+  out="$(printf '{"session_id":"%s","source":"clear"}' "$new" \
+    | env -u CODEX_THREAD_ID CODEX_HOME="$BATS_TEST_TMPDIR/profile" \
+      HERDR_ENV=1 HERDR_SOCKET_PATH="$sock" HERDR_PANE_ID=w1:p17 \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT")"
+  [ "$(cat "$rec_a")" = "$before_a" ]
+  [ "$(cat "$rec_b")" = "$before_b" ]
+  grep -q "not connected to a seat" <<<"$out"
+  grep -q "actas" <<<"$out"
 }
 
 # #1477: Codex installed after agmsg never gets this install's writable_roots

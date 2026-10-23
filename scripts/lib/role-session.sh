@@ -139,12 +139,41 @@ agmsg_role_session_load() {
 #   owner=<instance_id>    the actas owner token written by actas-claim
 #   codex_home=<path>      the effective absolute Codex profile directory
 #   updated_at=<iso8601>   best-effort timestamp (empty if date(1) unavailable)
+# All read/modify/write operations share this lock. In particular, startup's
+# inactive-owner check and replacement must be one transaction with every writer.
+_agmsg_role_session_write() (
+  local dir
+  dir="$(_actas_lock_dir)"
+  [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || return 1
+  AGMSG_HELD_LOCKS=''
+  source "$SKILL_DIR/scripts/lib/registry-lock.sh" || return 1
+  agmsg_lock_acquire "$dir" || return 1
+  trap agmsg_lock_release EXIT
+  "$@"
+)
+
 agmsg_role_session_record() {
+  [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ -n "${3:-}" ] || return 0
+  if _agmsg_role_session_write _agmsg_role_session_record_unlocked "$@"; then return 0; fi
+  # Existing callers use best-effort recording; automatic takeover needs a verdict.
+  [ "${8:-}" != inactive ]
+}
+
+_agmsg_role_session_record_unlocked() {
   local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}" owner="${6:-}" codex_home="${7:-}"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$bare_sid" ] || return 0
   local path dir tmp ts named_ref="" named_epoch="" named_at=""
   _agmsg_role_session_path_into "$team" "$agent"
   path="$_AGMSG_ROLE_SESSION_PATH"
+  if [ "${8:-}" = inactive ]; then
+    agmsg_role_session_load "$team" "$agent"
+    if [ "$AGMSG_ROLE_SESSION_UUID" != "$bare_sid" ] \
+      && agmsg_instance_is_composite "${AGMSG_ROLE_SESSION_OWNER:-}"; then
+      local alive=0
+      agmsg_instance_alive "$AGMSG_ROLE_SESSION_OWNER" || alive=$?
+      [ "$alive" = 1 ] || return 1
+    fi
+  fi
   # The naming mark (named_ref / named_at, see agmsg_role_session_mark_named)
   # survives a re-record: this function rewrites the session fields, and the
   # mark is a fact about the PANE, not about the session. Dropping it here
@@ -196,7 +225,107 @@ agmsg_role_session_record() {
 # $HERDR_SOCKET_PATH, which the server recreates when it starts). A restarted
 # server changes it, so a mark made against the old server no longer matches
 # even when the pane reference is reused unchanged.
+# Overwrite ONLY messaging_socket/claude_config_dir, leaving every other
+# field (session, project, owner, named_ref, ...) untouched — unlike
+# agmsg_role_session_record, this never creates a fresh record: SessionStart
+# calls this for every pair in PAIRS on every start/resume, and most of those
+# pairs already have a record from actas-claim.sh; one that does not is a
+# seat that was never claimed, and writing messaging-only fields for it would
+# fabricate a role-session record session-start.sh itself never establishes
+# (#339 stays actas-claim's job). A record that lacks these fields reads back
+# as empty, which the daemon treats exactly like Codex's role_session_missing
+# -- never as a fatal read error.
+#
+# <messaging_socket> is the this-session's uds: peer address with the prefix
+# stripped (empty if invalid/absent -- see _session-start.sh's own guard,
+# which mirrors codex_home's). <claude_config_dir> is CLAUDE_CONFIG_DIR, or
+# ~/.claude when unset -- the base this session's own Claude Code build
+# actually uses, never assumed by this function.
+# <bare_sid>, when given, replaces the record's own session= line (#1577
+# review): a record's session= is only ever written at actas-claim time, so
+# after /clear -- which keeps the same socket/process but hands this session
+# a brand-new Claude Code session id -- it would otherwise go stale right as
+# this function refreshes the fields that matter for finding its transcript
+# (the daemon derives the transcript path from BOTH claude_config_dir and
+# this session id together). Empty means "leave session= as it is" (every
+# other existing caller passes none).
+agmsg_role_session_set_messaging() {
+  _agmsg_role_session_write _agmsg_role_session_set_messaging_unlocked "$@" || true
+}
+
+_agmsg_role_session_set_messaging_unlocked() {   # <team> <agent> <messaging_socket> <claude_config_dir> [<bare_sid> [<messaging_token>]]
+  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="${5:-}" token="${6:-}"
+  # The token is a credential for posting to this session's own inbox: kept
+  # only when it is a plain word, and the record (mktemp: owner-only) is never
+  # made readable by anyone else.
+  case "$token" in ''|*[!A-Za-z0-9._-]*) token="" ;; esac
+  [ -n "$team" ] && [ -n "$agent" ] || return 0
+  local path dir tmp line
+  _agmsg_role_session_path_into "$team" "$agent"
+  path="$_AGMSG_ROLE_SESSION_PATH"
+  [ -f "$path" ] || return 0
+  dir="$(_actas_lock_dir)"
+  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        messaging_socket=*|claude_config_dir=*|messaging_token=*|messaging_blocked=*) ;;
+        session=*) [ -z "$bare_sid" ] && printf '%s\n' "$line" ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$path"
+    [ -z "$bare_sid" ] || printf 'session=%s\n' "$bare_sid"
+    [ -z "$socket" ] || printf 'messaging_socket=%s\n' "$socket"
+    [ -z "$config_dir" ] || printf 'claude_config_dir=%s\n' "$config_dir"
+    [ -z "$token" ] || printf 'messaging_token=%s\n' "$token"
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# The SessionStart hook could not publish this session's delivery destination
+# (<reason>, a short snake_case word). Drop the old destination, which belongs to
+# a process that is gone, and record why, so agmsgd reports the seat as
+# unaddressable for that reason instead of keeping an out-of-date address.
+# <expected_bare_sid> is checked under the same lock as the write: a session that
+# published in between keeps its destination, and rc 1 says nothing was changed.
+agmsg_role_session_mark_messaging_blocked() {   # <team> <agent> <reason> <expected_bare_sid>
+  _agmsg_role_session_write _agmsg_role_session_mark_messaging_blocked_unlocked "$@"
+}
+
+_agmsg_role_session_mark_messaging_blocked_unlocked() {
+  local team="$1" agent="$2" reason="$3" expect="${4:-}" path dir tmp line current=""
+  case "$reason" in ''|*[!a-z_]*) return 1 ;; esac
+  [ -n "$team" ] && [ -n "$agent" ] && [ -n "$expect" ] || return 1
+  _agmsg_role_session_path_into "$team" "$agent"
+  path="$_AGMSG_ROLE_SESSION_PATH"
+  [ -f "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in session=*) current="${line#session=}"; break ;; esac
+  done < "$path"
+  [ "$current" = "$expect" ] || return 1
+  dir="$(_actas_lock_dir)"
+  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 1
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        messaging_socket=*|claude_config_dir=*|messaging_token=*|messaging_blocked=*) ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$path"
+    printf 'messaging_blocked=%s\n' "$reason"
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  return 0
+}
+
 agmsg_role_session_mark_named() {
+  _agmsg_role_session_write _agmsg_role_session_mark_named_unlocked "$@" || true
+}
+
+_agmsg_role_session_mark_named_unlocked() {
   local team="$1" agent="$2" ref="$3" epoch="${4:-}" project="${5:-}" type="${6:-}"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$ref" ] || return 0
   local path dir tmp ts line
@@ -240,7 +369,11 @@ agmsg_role_session_mark_named() {
 # takes the same role-session PATH the guard already computed by substituting
 # "spawn." for "role-session." in that file name, rather than asking every
 # caller to re-derive team/agent just to hand them back in for re-encoding.
-agmsg_role_session_clear_named_at() {   # <role-session-record-path>
+agmsg_role_session_clear_named_at() {
+  _agmsg_role_session_write _agmsg_role_session_clear_named_at_unlocked "$@" || true
+}
+
+_agmsg_role_session_clear_named_at_unlocked() {   # <role-session-record-path>
   local path="$1" dir tmp line
   [ -n "$path" ] && [ -f "$path" ] || return 0
   dir="$(_actas_lock_dir)"
@@ -274,6 +407,10 @@ agmsg_role_session_named() {
 # a restarted server is a NEW attempt, exactly as the naming mark is.
 #   agmsg_role_session_mark_renamed <team> <agent> <ref> <epoch> <result> [project] [type]
 agmsg_role_session_mark_renamed() {
+  _agmsg_role_session_write _agmsg_role_session_mark_renamed_unlocked "$@" || true
+}
+
+_agmsg_role_session_mark_renamed_unlocked() {
   local team="$1" agent="$2" ref="$3" epoch="${4:-}" result="${5:-}" project="${6:-}" type="${7:-}"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$ref" ] || return 0
   local path dir tmp ts line
@@ -425,4 +562,61 @@ agmsg_role_session_match_unique() {
   [ -n "$match" ] || return 1
   printf '%s\n' "$match"
   return 0
+}
+
+# Print "<socket>\t<claude_config_dir>" for this Claude Code process, or
+# nothing (rc 1) when it has no usable messaging socket. Same guard shape
+# codex-record-session.sh applies to CODEX_HOME: anything that is not an
+# absolute path, or that carries a control character, is never published as a
+# delivery destination (a malformed value would look addressable and silently
+# never deliver). CLAUDE_CONFIG_DIR falls back to ~/.claude only when unset;
+# it must never be hardcoded, since accounts can live elsewhere.
+agmsg_claude_code_native_target() {
+  local raw="${CLAUDE_CODE_MESSAGING_SOCKET:-}" socket="" config_dir="${CLAUDE_CONFIG_DIR:-${HOME:+$HOME/.claude}}"
+  case "$raw" in
+    uds:/*) socket="${raw#uds:}" ;;
+    /*) socket="$raw" ;;
+    # Native Windows: a named pipe, \\.\pipe\LOCAL\cc-msg-<hex>
+    uds:\\\\*) socket="${raw#uds:}" ;;
+    \\\\*) socket="$raw" ;;
+  esac
+  case "$socket" in *[[:cntrl:]]*) socket="" ;; esac
+  # Native Windows sets no CLAUDE_CONFIG_DIR; its default is under the user
+  # profile, which a Git Bash hook sees as $HOME (/c/Users/me) or only as
+  # %USERPROFILE% (C:\Users\me).
+  [ -n "$config_dir" ] || config_dir="${USERPROFILE:+$USERPROFILE/.claude}"
+  case "$config_dir" in
+    *[[:cntrl:]]*) config_dir="" ;;
+    /*) ;;
+    [A-Za-z]:[\\/]*) ;;
+    *) config_dir="" ;;
+  esac
+  [ -n "$socket" ] && [ -n "$config_dir" ] || return 1
+  printf '%s\t%s\n' "$socket" "$config_dir"
+}
+
+# Publish <socket>/<config_dir> into <team>/<agent>'s record for <bare_sid>,
+# then read it back: the same check the daemon applies before it will address
+# the seat, so "the record took" is verified, not assumed. rc 0 only when it did.
+agmsg_role_session_publish_messaging() {   # <team> <agent> <socket> <config_dir> <bare_sid> [<token>]
+  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="$5" token="${6:-}"
+  agmsg_role_session_set_messaging "$team" "$agent" "$socket" "$config_dir" "$bare_sid" "$token"
+  [ "$(agmsg_role_session_get "$team" "$agent" messaging_socket 2>/dev/null || true)" = "$socket" ] \
+    && [ "$(agmsg_role_session_get "$team" "$agent" claude_config_dir 2>/dev/null || true)" = "$config_dir" ] \
+    && [ "$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)" = "$bare_sid" ]
+}
+
+# rc 0 only when agmsgd's Claude channel will accept this install's storage.
+# The answer comes from the daemon's own reader (storage-gate.mjs calls
+# readStorageDriver), run with the node the daemon itself runs on (the
+# node_path recorded at enable), not whatever node is first on PATH: an older
+# PATH node would fail the check while the daemon is fine. Declaring the
+# native channel when the daemon will refuse to deliver would leave the seat
+# with neither the daemon nor a Monitor; an unreadable node_path or a failed
+# check is "not ready".
+agmsg_claude_code_native_storage_ready() {
+  local node_path
+  node_path="$(sqlite3 -readonly -cmd '.timeout 100' "${SKILL_DIR:-}/run/install.db" 'SELECT node_path FROM meta;' 2>/dev/null)" || return 1
+  [ -n "$node_path" ] && [ -x "$node_path" ] || return 1
+  "$node_path" "${SKILL_DIR:-}/scripts/daemon/channels/storage-gate.mjs" >/dev/null 2>&1
 }

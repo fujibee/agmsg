@@ -4,6 +4,40 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-23
+
+### Added
+- agmsgd beta: an opt-in, per-machine resident service that delivers new-message notices to Claude Code and Codex sessions, controlled with `agmsg daemon start | stop | status | enable | disable`. It registers with launchd on macOS, `systemd --user` on Linux and Task Scheduler on Windows (Claude Code 2.1.302 or later on Windows). Nothing changes until you turn it on (#1529)
+- The delivery choice after joining a team, and `/agmsg delivery` (`/agmsg mode` keeps working as an alias), offer agmsgd first as the recommended option, then `monitor (legacy)`, `turn`, `both` and `off`, for Claude Code and Codex alike. Where agmsgd cannot run on a machine, it is not offered and the reason is shown. Choosing `monitor (legacy)` keeps agmsgd away from that project (#1529)
+- Install and update never ask and never enable agmsgd. They end with one line on how to turn it on, and the first session after an update shows a one-time notice. An update steps a running agmsgd aside and restarts it on the new code (#1529)
+
+### Fixed
+- Windows remote sync survives SSH disconnects and power loss, and the setup temp directory no longer leaks into the sync engine (#1529)
+- Lock directories work on systems whose `mkdir` reports success for an existing directory, such as Ubuntu 26.04 (#1529)
+- Refresh vulnerable dependencies, keeping @types/node on Node 22 (#1673)
+- Avoid renaming the caller during proxy registration (#1672)
+- Keep JSON arrays as arrays when a subquery result is written with json_set (#1661)
+- SQLite 3.53.4/3.54.0 CLI compatibility for init rollback and busy diagnostics (#1654)
+- Accept Codex's typing-state footer as a live widget (#1629)
+- Raise the ext-tool timeout to 30s (#1628)
+- Carry a member's placement record to the new name (#1625)
+- Preserve the caller's Codex profile (#1624)
+- Use CLAUDE_PID as the Claude Code agent pid (#1622)
+- Remove the two temp files once the slow child finishes (#1580)
+- Leave no window between taking a registry lock and recording its holder (#1592)
+- Read the owner start time with LC_ALL=C so non-English locales can spawn (#1593)
+
+### Performance
+- Skip unchanged idle cursor consumption (#1652)
+- Start a handful of processes per call instead of about 40 (#1630)
+- Skip needless delivery status and set monitor at launch (#1627)
+
+### Documentation
+- README (English and Japanese) and the reference docs describe agmsgd and the `monitor (legacy)` naming (#1529)
+- Add recovery steps to 1.5.3 for machines already affected by the temp-file leak (#1581)
+
+[1.6.0]: https://github.com/fujibee/agmsg/compare/v1.5.3...v1.6.0
+
 ## [1.5.3] - 2026-10-05
 
 ### Added

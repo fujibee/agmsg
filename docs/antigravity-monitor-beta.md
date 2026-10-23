@@ -19,8 +19,10 @@ The long-term direction is delivery through agmsg's terminal driver
 integration — the same mechanism this skill already uses to reach other
 CLIs — rather than a PTY supervisor built specifically for Antigravity.
 
+The optional agmsgd service (1.6.0 beta) delivers to Claude Code and Codex only, so it does not cover Antigravity; this monitor is how an Antigravity seat gets push delivery.
+
 Antigravity (`agy`) does not expose Claude Code's Monitor tool. agmsg's Antigravity
-monitor delivers incoming messages into the **TUI conversation you are actually
+monitor (legacy) mode delivers incoming messages into the **TUI conversation you are actually
 talking to**, by running `agy` under a PTY supervisor that injects message
 envelopes into its input and waits for the model to acknowledge them.
 

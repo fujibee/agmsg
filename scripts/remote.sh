@@ -2743,6 +2743,13 @@ _remote_status_one() {
       echo "		last fatal: $fatal_msg"
     fi
   fi
+  # A roster state file the engine could not read is set aside and rebuilt; say
+  # so, so a reset never passes unseen. The set-aside copy is never deleted here.
+  local _reset_file
+  for _reset_file in "$TEAMS_DIR/$team"/roster-sync.json.corrupt-*; do
+    [ -e "$_reset_file" ] || continue
+    echo "		roster state was reset: unreadable copy kept at $_reset_file (delete it once the roster looks right)"
+  done
   # Connected, and unable to name anybody.
   #
   # `status` could say "engine running" indefinitely while `team.sh` said

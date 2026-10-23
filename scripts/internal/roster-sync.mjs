@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
 import { sealEnvelope } from "./sync-cipher.mjs";
@@ -28,22 +28,51 @@ function readJournal() {
   }
 }
 
+// roster-sync.json holds the pull cursor and the wire ids reserved for roster
+// mutations not yet acknowledged. Both can be rebuilt: a cursor of 0 pulls the
+// roster again and apply skips mutation ids already in the journal, and a lost
+// reservation only makes the next prepare reserve a new wire id for a mutation
+// that is still unsynced, which receivers also skip by mutation id. So a file
+// that cannot be read is set aside, never deleted, and rebuilt.
+function setAside(error) {
+  const stamp = new Date().toISOString().replace(/[-:]/gu, "").replace(/\.\d+Z$/u, "Z");
+  const aside = `${statePath}.corrupt-${stamp}-${process.pid}`;
+  renameSync(statePath, aside);
+  const note = `roster sync state ${statePath} was unreadable (${error.message}); kept as ${aside} and rebuilt from the server`;
+  process.stderr.write(`agmsg: ${note}\n`);
+}
+
 function readState() {
+  let text;
   try {
-    const state = JSON.parse(readFileSync(statePath, "utf8"));
-    if (state.format_version !== 1 || typeof state.bindings !== "object") {
-      throw new Error("roster sync state is invalid");
-    }
-    return state;
+    text = readFileSync(statePath, "utf8");
   } catch (error) {
     if (error.code === "ENOENT") return { format_version: 1, bindings: {} };
     throw error;
   }
+  try {
+    const state = JSON.parse(text);
+    if (state.format_version !== 1 || typeof state.bindings !== "object" || state.bindings === null) {
+      throw new Error("roster sync state is invalid");
+    }
+    return state;
+  } catch (error) {
+    setAside(error);
+    return { format_version: 1, bindings: {} };
+  }
 }
 
+// Flushed before the rename: a rename that reaches the disk ahead of the data
+// leaves a file of the right size full of NUL bytes after a power loss.
 function writeAtomic(path, contents) {
   const temporary = `${path}.tmp.${process.pid}.${randomUUID()}`;
-  writeFileSync(temporary, contents, { encoding: "utf8", mode: 0o600 });
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    writeFileSync(fd, contents, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(temporary, path);
 }
 

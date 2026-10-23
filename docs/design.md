@@ -6,7 +6,7 @@ Developer documentation for contributors and maintainers.
 
 ## Identity Model
 
-An agent is identified by `(name, team)`. Project path and agent type (claude-code, codex, gemini) are metadata — reference information stored alongside the identity but not part of it.
+An agent is identified by `(name, team)`. Project path and agent type (claude-code, codex, gemini, …) are metadata — reference information stored alongside the identity but not part of it.
 
 - An agent can be registered from multiple projects under the same name
 - `whoami.sh` uses project path and type to suggest an identity, but the user can choose any name
@@ -56,11 +56,14 @@ Manipulated via sqlite3 JSON1 functions (no python3 dependency).
 
 ```yaml
 # agmsg configuration
-hook:
-  check_interval: 60  # seconds between inbox checks
+delivery:
+  monitor:
+    poll_interval: 5    # watch.sh poll interval, seconds
+  turn:
+    check_interval: 60  # Stop-hook cooldown, seconds between inbox checks
 ```
 
-Read/written by `config.sh` using awk. Supports dotted keys (`hook.check_interval`).
+Read/written by `config.sh` using awk. Supports dotted keys (`delivery.turn.check_interval`; `hook.check_interval` is still read as a legacy alias).
 
 ## Hook System
 
@@ -81,7 +84,7 @@ Agent responds → Stop hook fires → check-inbox.sh runs
 
 ### Cooldown
 
-A marker file (`run/.lastcheck-<agent>`) tracks the last check time. Configurable via `hook.check_interval` (default 60 seconds). It lives in the run dir (hook runtime state), not the message store, so it is unaffected by `AGMSG_STORAGE_PATH`.
+A marker file (`run/.lastcheck-<agent>`) tracks the last check time. Configurable via `delivery.turn.check_interval` (default 60 seconds; `hook.check_interval` is a legacy alias). It lives in the run dir (hook runtime state), not the message store, so it is unaffected by `AGMSG_STORAGE_PATH`.
 
 ### Claude Code vs Codex
 
@@ -106,9 +109,11 @@ three signals, none needing a stable `session_id` (Codex doesn't expose one):
    agent process PID. A slash command runs as a child of that same process, so
    it walks the ppid chain to the agent PID and reads the marker back. Trust is
    gated on the PID still being a live agent process (recycling guard); stale
-   markers are GC'd at SessionStart/SessionEnd. **Claude Code monitor/both
-   only** — Codex rejects monitor mode (no Monitor tool), so it never installs
-   `session-start.sh` and writes no marker; Codex relies on signals 2–3.
+   markers are GC'd at SessionStart/SessionEnd. Written by
+   `session-start.sh` for **Claude Code monitor (legacy) / both** sessions. Codex
+   supports monitor mode too (through the app-server bridge), but its SessionStart
+   plug exits before this marker is written, and a session in turn or off mode has
+   no such hook, so those rely on signals 2–3.
 2. **Ancestor walk.** Failing a marker, the nearest ancestor of pwd that is a
    registered project for the type wins. Git-independent — covers nested
    subdirs and worktrees that live *under* the registered project, on cc and
@@ -186,7 +191,8 @@ either).
   manipulation via the JSON1 extension), `awk`/`sed` (config, TOML
   editing). Covers `send`/`inbox`/`history`/`team`/`join`/`leave`/`rename`
   and everything else that only talks to the local SQLite store. No
-  python3, no node, no network, no daemon.
+  python3, no node, no network, and no daemon (the optional agmsgd service, which
+  needs Node, is a separate tier the user opts into).
 - **codex agent type / launcher-based spawn** — core, plus `node`
   (`scripts/lib/node.sh` resolves it; the Codex monitor delivery bridge,
   `codex-bridge.js`, is a Node program). `spawn.sh` dies explicitly
@@ -238,5 +244,5 @@ override, version-manager paths, PATH) rather than a separate raw
 `command -v node` check, so doctor's judgment of "usable" always matches
 what `remote-sync.sh` itself would actually try to run.
 
-No persistent daemon at any tier. The core tier alone makes no network
+No persistent daemon is required at any tier; the optional agmsgd service (a resident process the user chooses, needing Node) is the only one. The core tier alone makes no network
 calls; the remote tiers do, by definition.

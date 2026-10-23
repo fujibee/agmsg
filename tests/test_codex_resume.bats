@@ -14,6 +14,8 @@ setup() {
   export RUN_DIR="$SKILL_DIR/run"
   mkdir -p "$RUN_DIR"
   export CODEX_SESSIONS="$HOME/.codex/sessions"
+  export CODEX_HOME="$HOME/.codex"
+  mkdir -p "$CODEX_HOME"
 }
 
 teardown() { teardown_test_env; }
@@ -68,14 +70,54 @@ recorded_uuid() {
   agmsg_role_session_uuid "$1" "$2"
 }
 
-@test "codex record: prefers CODEX_THREAD_ID (unambiguous env path)" {
-  local proj; proj="$(mktemp -d)"
-  CODEX_THREAD_ID="env-thread-1" \
+@test "codex record: stores the thread and effective profile path" {
+  local proj explicit_home expected_home; proj="$(mktemp -d)"
+  explicit_home="$TEST_SKILL_DIR/codex profile"
+  mkdir -p "$explicit_home" "$HOME/.codex"
+  CODEX_HOME="$explicit_home" CODEX_THREAD_ID="env-thread-1" \
     bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
   [ "$(recorded_uuid team alice)" = "env-thread-1" ]
-  # type is recorded as codex.
   source "$SKILL_DIR/scripts/lib/role-session.sh"
   [ "$(agmsg_role_session_get team alice type)" = "codex" ]
+  expected_home="$(cd "$explicit_home" && pwd -P)"
+  # Match the recorder's cross-platform path spelling (not raw Git Bash /c/...).
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/resolve-project.sh"
+  expected_home="$(agmsg_normalize_project_path "$expected_home")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
+
+  # Unset CODEX_HOME uses the same default Codex uses, recorded as an absolute
+  # path rather than leaving a later reader to infer it from its own HOME.
+  env -u CODEX_HOME CODEX_THREAD_ID="env-thread-2" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "env-thread-2" ]
+  expected_home="$(cd "$HOME/.codex" && pwd -P)"
+  expected_home="$(agmsg_normalize_project_path "$expected_home")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
+}
+
+@test "codex record: carries a live owner forward and drops one whose process is gone" {
+  local proj; proj="$(mktemp -d)"
+  mkdir -p "$HOME/.codex"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  sleep 60 &
+  local live=$!
+  sleep 0.1 &
+  local dead=$!
+  wait "$dead"
+  SKILL_DIR="$SKILL_DIR" bash -c 'source "$1/scripts/lib/role-session.sh"; agmsg_role_session_record team alice t0 "$2" codex "t0.$3"' _ "$SKILL_DIR" "$proj" "$live"
+  CODEX_THREAD_ID="t1" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(agmsg_role_session_get team alice owner)" = "t0.$live" ]
+  SKILL_DIR="$SKILL_DIR" bash -c 'source "$1/scripts/lib/role-session.sh"; agmsg_role_session_record team alice t0 "$2" codex "t0.$3"' _ "$SKILL_DIR" "$proj" "$dead"
+  kill "$live" 2>/dev/null || true
+  CODEX_THREAD_ID="t2" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "t2" ]
+  [ -z "$(agmsg_role_session_get team alice owner)" ]
+
+  # No proof of death where the pid cannot be observed (Git Bash): kept.
+  SKILL_DIR="$SKILL_DIR" bash -c 'source "$1/scripts/lib/role-session.sh"; agmsg_role_session_record team alice t0 "$2" codex "t0.$3"' _ "$SKILL_DIR" "$proj" "$dead"
+  MSYSTEM=MINGW64 CODEX_THREAD_ID="t3" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(agmsg_role_session_get team alice owner)" = "t0.$dead" ]
 }
 
 @test "codex record: adds the effective profile path without changing the thread" {
@@ -99,6 +141,24 @@ recorded_uuid() {
   [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
+@test "codex record: a tool shell without CODEX_HOME records the profile the SessionStart hook saw" {
+  local proj hook_home thread=11111111-2222-3333-4444-555555555555 expected_home
+  proj="$(mktemp -d)"
+  hook_home="$TEST_SKILL_DIR/tui profile"
+  mkdir -p "$hook_home" "$HOME/.codex"
+  source "$SCRIPTS/lib/resolve-project.sh"
+  source "$TYPES/codex/_profile.sh"
+  # The hook runs in the TUI's environment, which carries CODEX_HOME ...
+  CODEX_HOME="$hook_home" agmsg_codex_thread_home_publish "$RUN_DIR" "$thread"
+  # ... the app-server's tool shell, where actas runs, does not.
+  env -u CODEX_HOME CODEX_THREAD_ID="$thread" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  source "$SCRIPTS/lib/role-session.sh"
+  [ "$(recorded_uuid team alice)" = "$thread" ]
+  expected_home="$(agmsg_normalize_project_path "$(cd "$hook_home" && pwd -P)")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
+}
+
 @test "codex record: unresolved profile omits only the field and preserves legacy rollout discovery" {
   local proj invalid_home
   proj="$(mktemp -d)"
@@ -119,10 +179,24 @@ recorded_uuid() {
 }
 
 @test "codex record: falls back to the unique matching-cwd rollout when env is unset" {
-  local proj; proj="$(mktemp -d)"
+  local proj explicit_home expected_home; proj="$(mktemp -d)"
+  explicit_home="$TEST_SKILL_DIR/profile-B"
+  mkdir -p "$explicit_home"
+  # A matching rollout in the default profile must not outrank the selected
+  # profile's own unique matching rollout.
+  CODEX_SESSIONS="$HOME/.codex/sessions"
+  make_rollout "wrong-profile-uuid" "$proj"
+  CODEX_SESSIONS="$explicit_home/sessions"
   make_rollout "fallback-uuid" "$proj"
-  ( unset CODEX_THREAD_ID; bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+  CODEX_HOME="$explicit_home" env -u CODEX_THREAD_ID \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
   [ "$(recorded_uuid team alice)" = "fallback-uuid" ]
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  expected_home="$(cd "$explicit_home" && pwd -P)"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/resolve-project.sh"
+  expected_home="$(agmsg_normalize_project_path "$expected_home")"
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$expected_home" ]
 }
 
 @test "codex record: records NOTHING when two recent rollouts share the cwd (ambiguous)" {

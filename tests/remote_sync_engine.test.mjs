@@ -24,6 +24,9 @@ import {
   discardInputDirectory,
   driver,
   STORAGE_BUSY_EXIT,
+  restartAfterStandDown,
+  standDownRestartArgs,
+  stdinRedirect,
   storageDriverExitGraceMs,
   exportAgeHandoff,
   exportAgeSnapshot,
@@ -2278,6 +2281,7 @@ test("SIGTERM while this process holds the team config lock releases it before e
     }
     assert.ok(existsSync(lockDir), "child never took the team config lock");
     assert.ok(existsSync(holderPath), "child never wrote its holder");
+    assert.ok(existsSync(join(lockDir, ".owner")), "child never took the shared owner marker");
     child.kill("SIGTERM");
     await once(child, "exit");
     assert.ok(!existsSync(lockDir), "SIGTERM left the lock directory behind");
@@ -3300,6 +3304,7 @@ test("configured native identity must belong to its epoch recipient manifest", a
 
 test("runLoop: an install update stands the engine down before any cycle, naming the update and the restart (#963)", async () => {
   const events = [];
+  const restarts = [];
   let cycles = 0;
   // Resolves -- a stand-down is a deliberate return, not a thrown failure.
   await runLoop(config, {}, {
@@ -3308,7 +3313,11 @@ test("runLoop: an install update stands the engine down before any cycle, naming
     cycleCall: async () => { cycles += 1; return {}; },
     sleepCall: async () => {},
     eventCall: async (name, fields) => { events.push({ name, ...fields }); },
+    restartCall: (team, root) => { restarts.push([team, root]); },
+    scriptsRoot: "/skill/scripts",
   });
+  // The stood-down engine asks for its own restart, from the updated scripts.
+  assert.deepEqual(restarts, [["demo", "/skill/scripts"]]);
   // Detected at the loop boundary: no driver was ever spawned.
   assert.equal(cycles, 0);
   assert.equal(events.length, 1);
@@ -4887,7 +4896,7 @@ test("driver() waits out a busy store and retries; anything else is asked once",
   };
   const counter = join(root, "calls");
   // A driver that is busy for its first `busyFor` calls and answers after that.
-  const useDriver = async (name, busyFor, exitWith = STORAGE_BUSY_EXIT) => {
+  const useDriver = async (name, busyFor, exitWith = STORAGE_BUSY_EXIT, message = "agmsg: sqlite-sync: prepare: the store is busy -- another writer held it") => {
     const script = join(root, name);
     await writeFile(script, [
       "#!/usr/bin/env bash",
@@ -4895,7 +4904,7 @@ test("driver() waits out a busy store and retries; anything else is asked once",
       `n=$(( $(cat ${shellQuote(counter)} 2>/dev/null || echo 0) + 1 ))`,
       `printf %s "$n" > ${shellQuote(counter)}`,
       `if [ "$n" -le ${busyFor} ]; then`,
-      "  echo 'agmsg: sqlite-sync: prepare: the store is busy -- another writer held it' >&2",
+      `  echo ${shellQuote(message)} >&2`,
       `  exit ${exitWith}`,
       "fi",
       "printf '%s\\n' '{\"type\":\"sync_state\",\"transport_cursor\":\"0\"}'",
@@ -4935,6 +4944,29 @@ test("driver() waits out a busy store and retries; anything else is asked once",
   assert.equal(await readFile(counter, "utf8"), "14");
   assert.equal(waits.reduce((sum, ms) => sum + ms, 0), 271000);
 
+  // A store that could not be opened for a moment (seen on Windows) is waited
+  // out like a busy one, so the engine does not die on it.
+  await useDriver("cannot-open.sh", 1, 13, "Error near line 50: unable to open database file");
+  waits.length = 0;
+  assert.deepEqual(await driver("read-prepare", config, [], [], dependencies), [{ type: "sync_state", transport_cursor: "0" }]);
+  assert.equal(await readFile(counter, "utf8"), "2");
+  assert.deepEqual(waits, [1000]);
+
+  // Another operation can fail after its COMMIT with the same words: a decision.
+  await useDriver("cannot-open-apply.sh", 1000, 13, "Error near line 50: unable to open database file");
+  waits.length = 0;
+  await assert.rejects(() => driver("apply", config, [], [], dependencies), (error) =>
+    error.driverExitCode === 13 && !isRetryable(error));
+  assert.equal(await readFile(counter, "utf8"), "1");
+
+  // The same words from a statement outside the transaction script (it can
+  // follow a COMMIT) are a decision: asked once.
+  await useDriver("open-after-commit.sh", 1000, 13, "Error: unable to open database file");
+  waits.length = 0;
+  await assert.rejects(() => driver("read-prepare", config, [], [], dependencies), (error) =>
+    error.driverExitCode === 13 && !isRetryable(error));
+  assert.equal(await readFile(counter, "utf8"), "1");
+
   // A failed check (13) is a decision: asked once, not retried, not retryable.
   await useDriver("refuses.sh", 1000, 13);
   waits.length = 0;
@@ -4942,4 +4974,116 @@ test("driver() waits out a busy store and retries; anything else is asked once",
     error.driverExitCode === 13 && !isRetryable(error) && error.code === undefined);
   assert.equal(await readFile(counter, "utf8"), "1");
   assert.deepEqual(waits, []);
+});
+
+test("every child the engine creates is spawned with windowsHide, or it fails with 0xC0000142 once the SSH session that started it is gone", async () => {
+  // The failure exists only on Windows after a disconnect, so CI on other
+  // platforms cannot observe it; guard the call sites themselves.
+  for (const [file, call] of [["remote-sync.mjs", "spawn(\"bash\", childArgs, {"], ["sync-cipher.mjs", "spawnSync(age, args, {"]]) {
+    const source = await readFile(new URL(`../scripts/internal/${file}`, import.meta.url), "utf8");
+    const at = source.indexOf(call);
+    assert.ok(at > 0, `${file}: spawn call not found`);
+    assert.match(source.slice(at, source.indexOf(");", at)), /windowsHide: true/, `${file}: spawn lacks windowsHide`);
+  }
+});
+
+test("a driver can read its staged input through the shell redirect used on Windows, where an inherited stdin file handle fails once the SSH session that started the engine is gone", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-stdin-redirect-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const input = join(root, "input.jsonl");
+  const driverScript = join(root, "driver.sh");
+  await writeFile(input, '{"type":"a"}\n{"type":"b"}\n');
+  await writeFile(driverScript, "#!/usr/bin/env bash\necho \"$1\"\ncat\n", { mode: 0o755 });
+  const { args, env } = stdinRedirect([driverScript, "prepare"], input);
+  const result = spawnSync("bash", args, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'prepare\n{"type":"a"}\n{"type":"b"}\n');
+});
+
+test("restartAfterStandDown hands a detached helper the team and the updated remote.sh, without secrets, and survives a spawn error", () => {
+  const calls = [];
+  const listeners = {};
+  const fake = { unref() { calls.push("unref"); }, on(name, fn) { listeners[name] = fn; } };
+  restartAfterStandDown("demo", "/skill/scripts", {
+    spawnCall: (command, args, options) => { calls.push([command, args, options]); return fake; },
+    environment: { PATH: "/bin", AGMSG_SYNC_TOKEN: "secret", AGMSG_AGE_IDENTITY_FILE: "/id", AGMSG_SYNC_CONNECTION_DIR: "/conn" },
+  });
+  const [command, args, options] = calls[0];
+  assert.equal(command, "bash");
+  assert.deepEqual(args.slice(3, 5), [join("/skill/scripts", "remote.sh"), "demo"]);
+  assert.equal(options.detached, true);
+  assert.equal(options.stdio, "ignore");
+  assert.equal(options.windowsHide, true);
+  assert.deepEqual(options.env, { PATH: "/bin", AGMSG_SYNC_CONNECTION_DIR: "/conn" });
+  assert.equal(calls[1], "unref");
+  // An asynchronous spawn failure is reported, not raised.
+  assert.doesNotThrow(() => listeners.error(new Error("spawn bash ENOENT")));
+});
+
+test("the restart helper retries a failed start, never takes the predecessor's own 'already running' as success, and stops once another engine is up", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-restart-helper-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  await mkdir(join(root, "run"));
+  await writeFile(join(root, "run", "remote-sync.demo.pid"), "111\n");
+  const remote = join(root, "remote.sh");
+  const log = join(root, "calls");
+  const counter = join(root, "n");
+  const useRemote = async (script) => {
+    await rm(counter, { force: true }); await rm(log, { force: true });
+    await writeFile(remote, [
+      "#!/usr/bin/env bash",
+      `n=$(( $(cat ${shellQuote(counter)} 2>/dev/null || echo 0) + 1 )); printf %s "$n" > ${shellQuote(counter)}`,
+      `printf '%s\\n' "$*" >> ${shellQuote(log)}`,
+      script, "",
+    ].join("\n"), { mode: 0o755 });
+  };
+  const run = () => spawnSync("bash", standDownRestartArgs("demo", root, [0, 0, 0, 0, 0]).map((a) => a === join(root, "remote.sh") ? remote : a),
+    { encoding: "utf8", env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root } });
+  const calls = async () => (await readFile(log, "utf8")).trim().split("\n").length;
+
+  // A failed start, then the predecessor (pid 111) still reported twice, then started: three
+  // tries after the failure, and the predecessor's no-ops never count.
+  await useRemote('case "$n" in 1) echo "not yet" >&2; exit 1 ;; 2|3) echo "Sync engine already running (pid 111)."; exit 0 ;; *) echo "Sync engine started for demo (pid 2)."; exit 0 ;; esac');
+  let result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await calls(), 4);
+
+  // Another engine (pid 222) already up: done at once.
+  await useRemote('echo "Sync engine already running (pid 222)."; exit 0');
+  result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await calls(), 1);
+
+  // The predecessor never exits: the bounded attempts run out and the helper says it failed.
+  await useRemote('echo "Sync engine already running (pid 111)."; exit 0');
+  result = run();
+  assert.equal(result.status, 1);
+  assert.equal(await calls(), 5);
+});
+
+test("a roster state file the driver set aside is reported in the engine log, not in the result", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-roster-reset-log-"));
+  const previous = { driver: process.env.AGMSG_SYNC_ROSTER_DRIVER, log: process.env.AGMSG_SYNC_LOG_FILE };
+  t.after(async () => {
+    for (const [name, value] of [["AGMSG_SYNC_ROSTER_DRIVER", previous.driver], ["AGMSG_SYNC_LOG_FILE", previous.log]]) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  const script = join(root, "roster-driver.sh");
+  await writeFile(script, [
+    "#!/usr/bin/env bash",
+    "cat > /dev/null",
+    "echo 'agmsg: roster sync state /t/roster-sync.json was unreadable (bad); kept as /t/First Last/roster-sync.json.corrupt-1-2 and rebuilt from the server' >&2",
+    "echo '{\"type\":\"roster_sync_state\",\"transport_cursor\":\"0\"}'",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  process.env.AGMSG_SYNC_ROSTER_DRIVER = script;
+  process.env.AGMSG_SYNC_LOG_FILE = join(root, "engine.log");
+  const records = await rosterDriver("prepare", config, [], []);
+  assert.deepEqual(records, [{ type: "roster_sync_state", transport_cursor: "0" }]);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const logged = (await readFile(process.env.AGMSG_SYNC_LOG_FILE, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(logged.map(({ event, team, file }) => [event, team, file]),
+    [["roster.state_reset", config.local_team, "/t/First Last/roster-sync.json.corrupt-1-2"]]);
 });

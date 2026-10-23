@@ -206,6 +206,42 @@ agmsg_codex_report_missing_bridge() {
   esac
 }
 
+# With agmsgd on and every registered seat's destination recorded, Codex needs
+# no hooks file, so "no settings file found" would read as broken when nothing
+# is. Hooks that exist keep their own mode; agmsgd off keeps the default text.
+agmsg_delivery_status() {
+  local type="$1" project="$2" full first pairs team name seats=0
+  full="$(agmsg_delivery_status_default "$type" "$project")"
+  first="${full%%$'\n'*}"
+  case "$first" in "mode: off (unrecognized: no settings file found"*) ;; *) printf '%s\n' "$full"; return 0 ;; esac
+  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  # shellcheck disable=SC1091
+  source "${SKILL_DIR:-}/scripts/lib/daemon-state.sh"
+  # shellcheck disable=SC1091
+  source "${SKILL_DIR:-}/scripts/lib/role-session.sh"
+  agmsg_daemon_read_state
+  agmsg_daemon_apply_project_choice codex "$project"
+  if [ "${AGMSGD_DESIRED:-}" = on ] && [ "${AGMSGD_HEALTH:-}" = ready ]; then
+    pairs="$("${SCRIPT_DIR:-}/identities.sh" "$project" "$type" 2>/dev/null || true)"
+    while IFS=$'\t' read -r team name _rest; do
+      [ -n "$team" ] && [ -n "$name" ] || continue
+      agmsg_role_session_load "$team" "$name" 2>/dev/null || { seats=0; break; }
+      if [ "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" type)" = codex ] \
+        && [ -n "${AGMSG_ROLE_SESSION_UUID:-}" ] \
+        && [ -n "$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" codex_home)" ]; then
+        seats=$((seats + 1))
+      else
+        seats=0; break
+      fi
+    done <<< "$pairs"
+  fi
+  if [ "$seats" -gt 0 ]; then
+    echo "mode: agmsgd (agmsgd delivers to this project's Codex seats; no hooks file needed)"
+  else
+    printf '%s\n' "$full"
+  fi
+}
+
 agmsg_delivery_runtime_status() {
   local type="$1" project="$2"
   local pairs found=0 any_alive=0

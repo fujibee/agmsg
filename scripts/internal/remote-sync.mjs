@@ -1829,6 +1829,15 @@ function bindingNote(binding) {
 // has today, since a driver that stops reading a pipe fails at once while a
 // driver handed a file is waited for. This is a fix for one caller and it is
 // scoped to that caller.
+// The command line that runs a driver with a staged file as its stdin by
+// opening it in the child, rather than handing the child a file handle.
+export function stdinRedirect(args, path) {
+  return {
+    args: ["-c", 'exec bash "$@" < "$AGMSG_DRIVER_INPUT"', "bash", ...args],
+    env: { AGMSG_DRIVER_INPUT: path.replace(/\\/gu, "/") },
+  };
+}
+
 function stageInput(input, staging) {
   // Filled IN PLACE, so that one cleanup path can undo whatever part of it got
   // made. The first version cleaned up inside here as well as at settle, which
@@ -1845,6 +1854,7 @@ function stageInput(input, staging) {
   // A fresh read-only descriptor. Passing on the one the write used would hand
   // over a descriptor sitting at EOF, and the driver would read an empty input
   // and report a successful sync of nothing.
+  staging.path = path;
   staging.fd = openSync(path, "r");
   // Then take the name away immediately, while the descriptor stays open: the
   // spawn duplicates it into the child, so both sides keep reading a file that
@@ -1852,10 +1862,12 @@ function stageInput(input, staging) {
   // message content behind. Windows cannot unlink an open file, so there it
   // stays until the call settles -- which is why the directory is still tracked
   // and removed there rather than only here.
+  // (On Windows the child opens the file by name, so it is kept there.)
+  if (process.platform === "win32") return;
   try {
     rmSync(staging.directory, { recursive: true, force: true });
     staging.directory = null;
-  } catch { /* Windows, or a tmpdir that will not allow it; settle cleans up */ }
+  } catch { /* a tmpdir that will not allow it; settle cleans up */ }
 }
 
 // Removing a temp directory must not fail the call around it -- refusing a sync
@@ -1903,7 +1915,7 @@ export function storageDriverExitGraceMs(busyTimeoutEnv = process.env.AGMSG_BUSY
 }
 
 function runDriver({ args, label, operation, parse, input, rosterFile, team, bindingPath,
-  holdsRegistryLock = false }) {
+  holdsRegistryLock = false, onNotice = null }) {
   return new Promise((resolve, reject) => {
     const childEnvironment = { ...process.env };
     delete childEnvironment.AGMSG_SYNC_TOKEN;
@@ -1927,7 +1939,7 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     // that does. That matters more than it looks: the routes into it that a
     // test cannot reach are undone by the same lines as the route a test can,
     // so binding one binds them all.
-    const staging = { directory: null, fd: null };
+    const staging = { directory: null, fd: null, path: null };
     const releaseInput = () => {
       if (staging.fd !== null) {
         try { closeSync(staging.fd); } catch { /* already closed */ }
@@ -1942,16 +1954,40 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     };
 
     let child;
+    let inputSupplied = false;
     try {
       // Staged before the spawn, so before the lock: a failure to stage is a
       // failure with no child and no lock to leak. Only for the caller that
       // holds the lock -- everyone else keeps the pipe, and with it the bounded
       // failure a pipe gives and an input that never reaches disk.
       if (holdsRegistryLock) stageInput(input, staging);
-      child = spawn("bash", args, {
-        stdio: [staging.fd === null ? "pipe" : staging.fd, "pipe", "pipe"],
+      // On Windows a file handle handed to the child as its stdin fails to
+      // initialise it (exit 0xC0000142) once the SSH session that started the
+      // engine is gone, so there the child opens the staged file itself with a
+      // shell redirect. The file stays (it cannot be unlinked while open, and
+      // it is still removed when the call settles), the handle is closed, and
+      // nothing is inherited.
+      let childArgs = args;
+      let stdin = staging.fd === null ? "pipe" : staging.fd;
+      inputSupplied = staging.fd !== null;
+      if (inputSupplied && process.platform === "win32") {
+        const redirect = stdinRedirect(args, staging.path);
+        childArgs = redirect.args;
+        Object.assign(childEnvironment, redirect.env);
+        stdin = "ignore";
+      }
+      // windowsHide: the same disconnect fails every child created without it.
+      child = spawn("bash", childArgs, {
+        stdio: [stdin, "pipe", "pipe"],
         env: childEnvironment,
+        windowsHide: true,
       });
+      if (inputSupplied && process.platform === "win32") {
+        // The child opens the file by name; this handle was only for the
+        // unlink attempt in stageInput.
+        try { closeSync(staging.fd); } catch { /* already closed */ }
+        staging.fd = null;
+      }
     } catch (error) {
       // Reached by a staging failure and by a synchronous spawn failure alike.
       // Neither leaves a child, and a synchronous spawn failure never reaches
@@ -1962,7 +1998,7 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     }
     // Read once, here: `staging.fd` is nulled on release, so it cannot be asked
     // later whether there was ever a pipe to write to.
-    const staged = staging.fd !== null;
+    const staged = inputSupplied;
     let stdout = ""; let stderr = ""; let settled = false; let failure = null;
     // The last stdin-write error, kept only so a child that exits 0 despite a
     // broken write is not reported as a silent success. See the stdin handler.
@@ -2086,6 +2122,9 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
       // storage adapter's "busy" exit, see `driver` -- without parsing its own
       // sentence back out of the message.
       error.driverExitCode = code;
+      // The driver's own words, apart from the label/team/path context in the
+      // message, for the one caller that classifies a failure by them.
+      error.driverStderr = stderr;
       fail(error);
     });
     child.on("close", () => {
@@ -2097,6 +2136,11 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
       // catches this when the exit is seen first; this catches the case where
       // the write error was recorded only after a clean exit had returned.
       if (lastStdinError) { settle(lastStdinError, null); return; }
+      // What a driver said on stderr while succeeding, for the one caller that
+      // reports it (a roster state it had to set aside). Never part of the result.
+      if (onNotice !== null && stderr.trim()) {
+        try { onNotice(stderr.trim()); } catch { /* a report must not cost the call */ }
+      }
       try {
         settle(null, parse(stdout));
       } catch (error) {
@@ -2118,6 +2162,16 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
 // is a decision (a failed check, an unsupported operation) and asking again
 // does not change it, so nothing else is retried here.
 export const STORAGE_BUSY_EXIT = 11;
+// SQLite could not open a file it needed (the store, or a temporary file) --
+// seen on Windows when something else held or removed it for a moment. Waited
+// out like a busy store, but only where repeating the call is known to be safe:
+// read-prepare, whose "Error near line N:" form names a line of its one
+// BEGIN IMMEDIATE ... COMMIT script (it failed before the COMMIT, so nothing
+// was committed), and whose read after the COMMIT is a separate statement that
+// reports the plain "Error:" form. Other operations (apply, resync, ...) can
+// fail after a COMMIT with the same words, so they stay a decision.
+const STORAGE_OPEN_RETRY_OPERATIONS = new Set(["read-prepare"]);
+const STORAGE_OPEN_FAILURE = /^Error near line \d+: unable to open database file/mu;
 // One wait is never longer than this; the budget is the total. The budget has
 // to outlast a real writer, not a polite one: the first prepare on a pulled
 // store held the lock for 63 s on the machine that filed #910 (155 s on a copy
@@ -2163,7 +2217,8 @@ export async function driver(operation, config, input, extra = [], dependencies 
     try {
       return await run();
     } catch (error) {
-      if (error?.driverExitCode !== STORAGE_BUSY_EXIT) throw error;
+      const busy = error?.driverExitCode === STORAGE_BUSY_EXIT;
+      if (!busy && !(STORAGE_OPEN_RETRY_OPERATIONS.has(operation) && STORAGE_OPEN_FAILURE.test(error?.driverStderr ?? ""))) throw error;
       const waitMs = Math.min(STORAGE_BUSY_WAIT_CAP_MS, 1000 * 2 ** (attempt - 1));
       if (waitedMs + waitMs > budgetMs) {
         // The driver's own sentence stays in front; what is added is how long
@@ -2171,11 +2226,11 @@ export async function driver(operation, config, input, extra = [], dependencies 
         // "held forever".
         error.message += ` -- waited ${Math.round(waitedMs / 1000)} s for the store to come free ` +
           `(the ${budgetMs / 1000} s budget) and it did not`;
-        error.code = "storage-busy";
+        error.code = busy ? "storage-busy" : "storage-unavailable";
         error.retryable = true;
         throw error;
       }
-      await eventCall("driver.busy", { operation, attempt, wait_ms: waitMs, waited_ms: waitedMs });
+      await eventCall(busy ? "driver.busy" : "driver.unavailable", { operation, attempt, wait_ms: waitMs, waited_ms: waitedMs });
       await sleepCall(waitMs);
       waitedMs += waitMs;
     }
@@ -2231,6 +2286,14 @@ export async function rosterDriver(operation, config, input, extra = []) {
     // caller that has no connection root, which is what happened the first time
     // this was written unconditionally.
     rosterFile: rosterFileFor(config.local_team),
+    // The driver sets an unreadable roster state file aside and carries on; say
+    // so in the engine log, where the engine's other events are.
+    onNotice: (text) => {
+      const reset = /roster sync state .* was unreadable .*; kept as (.+) and rebuilt from the server$/u.exec(text);
+      if (reset) {
+        event("roster.state_reset", { team: config.local_team, file: reset[1] }).catch(() => {});
+      }
+    },
   });
 }
 
@@ -3427,99 +3490,64 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
 // cadence: after any retryable failure the loop always backs off (exponential,
 // capped), so a machine that can't reach the server never hot-loops even while
 // catch-up would otherwise skip the wait.
-// The installation can be updated while an engine runs (#963). watch.sh
-// already detects that and stands down on its own; the engine used to find
-// out only by executing a half-written driver script -- and only when its
-// timing was unlucky enough to hit the write window (observed live: a
-// mid-rewrite storage-sync-driver.sh failed to parse, and the fatal named a
-// syntax error instead of the update).
+// The #963 install-changed detector now lives in install-baseline.mjs
+// re-exported here, unchanged, so this
+// file's own runLoop below keeps working exactly as it did.
 //
-// What is proof here went through review twice, and both cuts were the same
-// disease: an observable standing in for the fact. "mtime newer than the
-// engine's start clock" stands down every engine under a pre-existing
-// future mtime (clock skew, an archive with preserved timestamps).
-// "mtime changed against a baseline" stands down on a touch, a
-// metadata-only correction, a same-content re-copy -- the code in memory
-// and on disk still identical, and a stood-down sync engine does not come
-// back by itself. The fact that matters is CONTENT: the engine must stand
-// down exactly when the bytes on disk are no longer the bytes it started
-// from. So the baseline holds a content digest per file; a path or mtime
-// difference merely nominates a file for re-reading, and only a digest
-// that actually differs -- or a path that did not exist at start, a new
-// install artifact -- is proof. A benign mtime change is remembered so the
-// file is not re-read every cycle; content is the identity, the mtime is
-// only a cheap change hint.
-//
-// The failure direction is deliberate, in both phases: an OBSERVATION
-// failure is not evidence.
-//   - Baseline phase: one unreadable directory, one failed stat, one
-//     unreadable file and the whole detector is disabled (null), not
-//     partially armed. A partial baseline would recreate the false
-//     positive: a pre-existing file unreadable at start and readable later
-//     would look newly added. Disabled means exactly today's behavior.
-//   - Check phase: an entry that cannot be listed, stat'ed, or read is
-//     skipped and proves nothing. A rewrite that lands different bytes
-//     under the exact baseline mtime defeats the hint and is never
-//     re-read -- a miss, and a miss degrades to today's behavior, which
-//     is the safe side. A file DELETED by an update is deliberately not
-//     proof on its own; a real update always rewrites something.
-export async function collectInstallBaseline(rootDir, dependencies = {}) {
-  const readdirCall = dependencies.readdirCall ?? readdir;
-  const statCall = dependencies.statCall ?? stat;
-  const readFileCall = dependencies.readFileCall ?? readFile;
-  const baseline = new Map();
-  const pending = [rootDir];
-  while (pending.length > 0) {
-    const dir = pending.pop();
-    let entries;
-    try { entries = await readdirCall(dir, { withFileTypes: true }); }
-    catch { return null; } // incomplete observation: the detector stays OFF
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) { pending.push(path); continue; }
-      if (!entry.isFile()) continue; // links and specials are not install artifacts
-      let stats, bytes;
-      try {
-        stats = await statCall(path);
-        bytes = await readFileCall(path);
-      } catch { return null; } // incomplete observation: the detector stays OFF
-      baseline.set(path, {
-        mtimeMs: stats.mtimeMs,
-        digest: createHash("sha256").update(bytes).digest("hex"),
-      });
-    }
-  }
-  return baseline;
-}
+// `export { X } from "mod"` alone does NOT bind X as a local name in THIS
+// module (verified: it re-exports for importers of remote-sync.mjs but
+// leaves a bare reference to X here as `undefined`) -- runLoop below calls
+// these by their bare names, so the import is needed too.
+import { collectInstallBaseline, installChangedAgainst } from "./install-baseline.mjs";
+export { collectInstallBaseline, installChangedAgainst };
 
-export async function installChangedAgainst(rootDir, baseline, dependencies = {}) {
-  const readdirCall = dependencies.readdirCall ?? readdir;
-  const statCall = dependencies.statCall ?? stat;
-  const readFileCall = dependencies.readFileCall ?? readFile;
-  const pending = [rootDir];
-  while (pending.length > 0) {
-    const dir = pending.pop();
-    let entries;
-    try { entries = await readdirCall(dir, { withFileTypes: true }); }
-    catch { continue; } // unreadable now: no evidence either way
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) { pending.push(path); continue; }
-      if (!entry.isFile()) continue;
-      let stats;
-      try { stats = await statCall(path); }
-      catch { continue; } // vanished or unreadable: no evidence
-      const known = baseline.get(path);
-      if (known === undefined) return path; // did not exist at start: a new install artifact
-      if (stats.mtimeMs === known.mtimeMs) continue; // no hint of change
-      let digest;
-      try { digest = createHash("sha256").update(await readFileCall(path)).digest("hex"); }
-      catch { continue; } // could not re-read: no evidence
-      if (digest !== known.digest) return path; // the bytes actually changed
-      known.mtimeMs = stats.mtimeMs; // benign touch: remember it, content is the identity
-    }
+// After an update stands the engine down, nothing else starts the new one when
+// the update did not know this engine was running (it started while the update
+// was in progress, for example). So a stood-down engine asks for its own
+// restart from a detached helper that outlives it. The helper notes the pid in
+// the team's pidfile (the predecessor's), then waits and runs
+// `remote.sh sync start`, again on a growing wait, until a start reports
+// "started" or reports an engine already running under a DIFFERENT pid (someone
+// else restarted it). An "already running" under the predecessor's own pid only
+// means it has not exited yet, so that attempt is retried. A start that fails --
+// the update is still copying files, say -- is just another attempt; `sync
+// start` itself refuses a team that is disconnected or owned by systemd. An
+// engine it starts too early stands down again and asks again. The attempts are
+// bounded: the waits add up to 1110 seconds (about 18.5 minutes), after which a
+// person has to run `remote.sh sync start`, as the stand-down event says.
+const STAND_DOWN_RESTART_DELAYS_SECONDS = [30, 60, 120, 300, 600];
+const STAND_DOWN_RESTART_SCRIPT = [
+  'remote="$1"; team="$2"; shift 2',
+  'root="${AGMSG_SYNC_CONNECTION_DIR:-$(cd "$(dirname "$remote")/.." && pwd)}"',
+  'old="$(cat "$root/run/remote-sync.$team.pid" 2>/dev/null)"',
+  'for delay in "$@"; do',
+  '  sleep "$delay"',
+  '  out="$(bash "$remote" sync start "$team" 2>&1)"; rc=$?',
+  '  [ "$rc" = 0 ] || continue',
+  '  case "$out" in',
+  '    *started*) exit 0 ;;',
+  '    *already*running*) case "$out" in *"pid $old)"*) ;; *) exit 0 ;; esac ;;',
+  '  esac',
+  'done',
+  'exit 1',
+].join("\n");
+export function standDownRestartArgs(team, scriptsRoot, delays = STAND_DOWN_RESTART_DELAYS_SECONDS) {
+  return ["-c", STAND_DOWN_RESTART_SCRIPT, "bash", join(scriptsRoot, "remote.sh"), team, ...delays.map(String)];
+}
+export function restartAfterStandDown(team, scriptsRoot, { spawnCall = spawn, environment = process.env } = {}) {
+  const childEnvironment = { ...environment };
+  delete childEnvironment.AGMSG_SYNC_TOKEN;
+  for (const key of Object.keys(childEnvironment)) {
+    if (/^(?:AGMSG_AGE_IDENTITY|AGMSG_SYNC_AGE_IDENTITY)/u.test(key)) delete childEnvironment[key];
   }
-  return null;
+  const child = spawnCall("bash", standDownRestartArgs(team, scriptsRoot),
+    { detached: true, stdio: "ignore", env: childEnvironment, windowsHide: true });
+  // A spawn that fails (no bash) is reported on 'error' later, not thrown.
+  child.on?.("error", (error) => {
+    process.stderr.write(`agmsg: could not start the restart helper for '${team}': ${error.message}\n`);
+  });
+  child.unref?.();
+  return child;
 }
 
 export async function runLoop(config, options, dependencies = {}) {
@@ -3535,6 +3563,7 @@ export async function runLoop(config, options, dependencies = {}) {
   const collectInstallBaselineCall = dependencies.collectInstallBaselineCall ?? collectInstallBaseline;
   const installChangedCall = dependencies.installChangedCall ?? installChangedAgainst;
   const scriptsRoot = dependencies.scriptsRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const restartCall = dependencies.restartCall ?? restartAfterStandDown;
 
   // An explicit --limit is a ceiling for BOTH push and pull (request size /
   // memory / slow-link timeout); only the default lets the loop go large.
@@ -3578,6 +3607,8 @@ export async function runLoop(config, options, dependencies = {}) {
           restart: `remote.sh sync start ${config.local_team}`,
         });
       } catch { /* logging is best-effort; the stand-down does not depend on it */ }
+      try { restartCall(config.local_team, scriptsRoot); }
+      catch { /* the restart line in the event above is what remains */ }
       return;
     }
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);
@@ -4220,6 +4251,7 @@ function releaseTeamConfigLockSync(held) {
   } catch { seen = undefined; }
   if (seen !== held.token) return;
   try { unlinkSync(held.holderPath); } catch { /* already gone */ }
+  try { unlinkSync(join(held.lockDir, ".owner")); } catch { /* legacy marker-less directory */ }
   try { rmdirSync(held.lockDir); } catch { /* already gone */ }
 }
 
@@ -4250,7 +4282,13 @@ export async function withTeamConfigLock(team, fn) {
   const lockDir = join(dirname(teamConfigPath(team)), ".config.lock");
   const holderPath = `${lockDir}.holder`;
   for (let attempt = 0; ; attempt += 1) {
-    try { mkdirSync(lockDir); break; }
+    try {
+      mkdirSync(lockDir);
+      // Same exclusive owner marker as registry-lock.sh. A shell mkdir utility
+      // may report a racing EEXIST as success, so mkdir alone is not shared exclusion.
+      closeSync(openSync(join(lockDir, ".owner"), "wx", 0o600));
+      break;
+    }
     catch (error) {
       if (error?.code !== "EEXIST") throw error;
       // Same exit as the shell side (registry-lock.sh): a holder that died

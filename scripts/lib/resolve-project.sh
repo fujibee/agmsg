@@ -459,6 +459,21 @@ agmsg_pid_is_agent() {
   return 1
 }
 
+# Print the Windows pid of the nearest ancestor of this shell whose image name is
+# <image> (e.g. claude.exe), asking Windows because Git Bash's ps stops at the
+# native parent. Empty and non-zero when there is none or CIM is unavailable.
+_agmsg_msys_ancestor_pid() {   # <image>
+  local image="$1" winpid found
+  [ -z "${_AGMSG_COMPAT_NO_CIM:-}" ] || return 1
+  winpid="$(_compat_get_winpid "$$" 2>/dev/null)"
+  case "$winpid" in ''|*[!0-9]*) return 1 ;; esac
+  found="$(powershell.exe -NoProfile -Command \
+    "\$id=$winpid; for(\$i=0;\$i -lt 16 -and \$id;\$i++){ \$p=Get-CimInstance Win32_Process -Filter \"ProcessId=\$id\"; if(-not \$p){break}; if(\$p.Name -ieq '$image'){\$p.ProcessId;break}; \$id=\$p.ParentProcessId }" \
+    2>/dev/null | tr -d '\r')"
+  case "$found" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$found"
+}
+
 # Walk the process tree from $$ upward, echoing the PID of the nearest ancestor
 # that looks like an agent process of <type>. Empty (return 1) when none is
 # found — e.g. a detached watcher or a plain human shell.
@@ -494,6 +509,16 @@ agmsg_agent_pid() {
                 printf '%s' "${CLAUDE_PID:-}"; return 0
               fi ;;
     esac
+    # A hook does not get CLAUDE_PID (only the Bash tool does), and Git Bash's ps
+    # cannot see claude.exe, so a SessionStart hook found no seat pid and the
+    # seat's delivery record was never written on --resume. Ask Windows for the
+    # nearest claude.exe ancestor instead.
+    if [ "$_agmsg_platform" = msys ]; then
+      local native
+      native="$(_agmsg_msys_ancestor_pid claude.exe)" && [ -n "$native" ] && {
+        printf '%s' "$native"; return 0
+      }
+    fi
   fi
   local pid="$$" hops=0
   while [ "${pid:-0}" -gt 1 ] && [ "$hops" -lt 20 ]; do

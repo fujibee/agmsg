@@ -525,16 +525,43 @@ EOF
 
 @test "jsonl concurrent prepare converges on one journal winner" {
   storage_send demo alice bob concurrent >/dev/null
-  local first="$BATS_TEST_TMPDIR/first" second="$BATS_TEST_TMPDIR/second" log
-  (printf '%s\n' "$PREPARE" |
-    storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100 >"$first") 3>&- 4>&- &
-  local first_pid=$!
-  (printf '%s\n' "$PREPARE" |
-    storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100 >"$second") 3>&- 4>&- &
-  local second_pid=$!
-  wait "$first_pid"; wait "$second_pid"
-  [ "$(candidate_of "$(cat "$first")" | jq -c '{local_id,id,envelope}')" = \
-    "$(candidate_of "$(cat "$second")" | jq -c '{local_id,id,envelope}')" ]
+  # Model mkdir implementations that report success for a racing EEXIST.
+  # Both contenders must reach mkdir before either enters the journal helper.
+  local shim="$BATS_TEST_TMPDIR/mkdir-shim"
+  export JSONL_REAL_MKDIR="$(command -v mkdir)"
+  export JSONL_MKDIR_ARRIVALS="$BATS_TEST_TMPDIR/mkdir-arrivals"
+  mkdir -p "$shim" "$JSONL_MKDIR_ARRIVALS"
+  cat > "$shim/mkdir" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *events.jsonl.lock)
+    "$JSONL_REAL_MKDIR" -p "$@" || exit $?
+    : > "$JSONL_MKDIR_ARRIVALS/$$"
+    for ((i=0; i<500; i++)); do
+      arrivals=("$JSONL_MKDIR_ARRIVALS"/*)
+      [ "${#arrivals[@]}" -ge 16 ] && exit 0
+      sleep 0.01
+    done
+    exit 1 ;;
+  *) exec "$JSONL_REAL_MKDIR" "$@" ;;
+esac
+SH
+  chmod +x "$shim/mkdir"
+  export PATH="$shim:$PATH"
+  local first="$BATS_TEST_TMPDIR/prepare-0" log i pid expected wait_rc=0
+  local pids=()
+  for ((i=0; i<16; i++)); do
+    (printf '%s\n' "$PREPARE" |
+      storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 100 >"$BATS_TEST_TMPDIR/prepare-$i") 3>&- 4>&- &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do wait "$pid" || wait_rc=$?; done
+  [ "$wait_rc" -eq 0 ]
+  expected="$(candidate_of "$(cat "$first")" | jq -c '{local_id,id,envelope}')"
+  [ -n "$expected" ]
+  for ((i=1; i<16; i++)); do
+    [ "$(candidate_of "$(cat "$BATS_TEST_TMPDIR/prepare-$i")" | jq -c '{local_id,id,envelope}')" = "$expected" ]
+  done
   log="$(dirname "$(agmsg_db_path demo)")/events.jsonl"
   [ "$(jq -s '[.[]|select(.type=="sync_prepare_commit")]|length' "$log")" -eq 1 ]
 }

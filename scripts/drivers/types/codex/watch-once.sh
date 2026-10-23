@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Internal polling and its child operations must not run user notices.
+export AGMSG_DAEMON_NOTICE_SKIP=1
 
 # One-shot pending-message oracle for the Codex app-server bridge.
 #

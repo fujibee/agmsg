@@ -1,5 +1,7 @@
 # RFC: agmsgd — a resident delivery daemon
 
+> **Changed in 1.6.0.** This record describes the first beta. As shipped, agmsgd delivers to both Claude Code and Codex sessions, works on Windows too (Claude Code 2.1.302 or later, Codex 0.157 or later), and is offered in the delivery-method screen as the recommended choice; it is turned on only when the person picks it. Statements below that it is Codex-only, macOS/Linux-only, default-off, or unsupported on Windows describe the first beta.
+
 This is an RFC: a request for comments on a design, not a decision record. Decisions land as ADRs as usual once settled — this is published first, so the shape can change while changing it is still cheap.
 
 > **Status (2026-09-28).** The direction described here has been approved, and this note now matches it. What changed since the first version is listed in [Changes since the first version](#changes-since-the-first-version). The architecture design (how each part works) is done and published next to this note as [agmsgd-architecture.md](agmsgd-architecture.md). Next is the technical design (where the source lives, how it is built and shipped); implementation follows after that. Every release has to be something that can be stopped, and none is built all at once. Thank you to everyone who answered the open questions in the discussion — the answers are reflected below.
@@ -43,6 +45,8 @@ The trigger is concrete bugs. Several problems users actually hit came from mana
 - **Sending**: unchanged. `send` writes straight to the message database, daemon or no daemon. Without the daemon you lose automatic delivery, not messaging.
 
 It ships in this order:
+
+The 1.6.0 agmsgd beta is an optional, default-off exception before the 2.0.0 store migration: it only queues inbox notices for Codex sessions against the existing SQLite store. Existing Codex bridges and the remote sync engine remain available as separate processes; bridge sessions continue until restarted. `agmsg daemon enable` switches new Codex launches to daemon notices, and `agmsg daemon disable` requires restarting sessions that have no bridge. If `agmsg` is not found, use `<install>/scripts/agmsg daemon enable` or `<install>/scripts/agmsg daemon disable`. The beta supports macOS and Linux; Windows delivery remains unsupported pending measurement, and JSONL storage is unsupported. It does not bring forward the 2.0.0 data migration.
 
 1. **1.3.1** — clients skip message fields they do not know yet (released).
 2. **Re-reading what an older client set aside** — after an upgrade, the client re-reads the stored originals it could not understand before (released).

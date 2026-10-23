@@ -28,6 +28,9 @@
 # carry apostrophe-laden SQL inline (which the macOS bash 3.2 parser mis-handles).
 _JSONL_DRIVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 _JSONL_SYNC_HELPER_DEFAULT="$_JSONL_DRIVER_DIR/../../internal/jsonl-sync.mjs"
+# Shared directory ownership also protects against non-atomic mkdir utilities.
+# shellcheck source=../../lib/registry-lock.sh
+source "$_JSONL_DRIVER_DIR/../../lib/registry-lock.sh"
 
 _jsonl_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # The storage selector for the call in progress. Every contract entry point below
@@ -66,28 +69,28 @@ _jsonl_read_cursor_migrate() {
   local marker lock i=0 log cursors tmp tip
   marker="$(_jsonl_read_cursor_marker)"; [ -f "$marker" ] && return 0
   lock="$marker.lock"
-  until mkdir "$lock" 2>/dev/null; do
+  until _agmsg_dir_take "$lock" 2>/dev/null; do
     [ -f "$marker" ] && return 0
     i=$((i + 1)); [ "$i" -ge 1000 ] && return 1
     sleep 0.01
   done
-  if [ -f "$marker" ]; then rmdir "$lock" 2>/dev/null || true; return 0; fi
+  if [ -f "$marker" ]; then _agmsg_dir_drop "$lock" 2>/dev/null || true; return 0; fi
   log="$(_jsonl_log)"; cursors="$(_jsonl_read_cursors)"
-  tmp=$(mktemp "${cursors}.tmp.XXXXXX") || { rmdir "$lock" 2>/dev/null || true; return 1; }
+  tmp=$(mktemp "${cursors}.tmp.XXXXXX") || { _agmsg_dir_drop "$lock" 2>/dev/null || true; return 1; }
   tip=$(jq -s 'def logical_events: .[] | if .type=="sync_pull_commit" then
     .messages[]? | select(.status=="imported") | .local_event // empty else . end;
     [logical_events | select(.type=="message_sent")] | length' "$log") || {
-    rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true; return 1;
+    rm -f "$tmp"; _agmsg_dir_drop "$lock" 2>/dev/null || true; return 1;
   }
   jq -r --argjson tip "$tip" -s 'def logical_events: .[] |
     if .type=="sync_pull_commit" then .messages[]? | select(.status=="imported") |
       .local_event // empty else . end;
     [logical_events | select(.type=="message_sent") | [.team,.to]] | unique[] |
-    @tsv + "\t" + ($tip|tostring)' "$log" > "$tmp" || { rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true; return 1; }
-  mv "$tmp" "$cursors" || { rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true; return 1; }
-  : > "$marker.tmp.$$" || { rmdir "$lock" 2>/dev/null || true; return 1; }
-  mv "$marker.tmp.$$" "$marker" || { rm -f "$marker.tmp.$$"; rmdir "$lock" 2>/dev/null || true; return 1; }
-  rmdir "$lock" 2>/dev/null || true
+    @tsv + "\t" + ($tip|tostring)' "$log" > "$tmp" || { rm -f "$tmp"; _agmsg_dir_drop "$lock" 2>/dev/null || true; return 1; }
+  mv "$tmp" "$cursors" || { rm -f "$tmp"; _agmsg_dir_drop "$lock" 2>/dev/null || true; return 1; }
+  : > "$marker.tmp.$$" || { _agmsg_dir_drop "$lock" 2>/dev/null || true; return 1; }
+  mv "$marker.tmp.$$" "$marker" || { rm -f "$marker.tmp.$$"; _agmsg_dir_drop "$lock" 2>/dev/null || true; return 1; }
+  _agmsg_dir_drop "$lock" 2>/dev/null || true
 }
 
 # Serialize all log mutations (append / mark / compact / import) behind a portable
@@ -95,12 +98,12 @@ _jsonl_read_cursor_migrate() {
 _jsonl_with_lock() {
   local lock i=0 rc=0 max="${AGMSG_JSONL_LOCK_TRIES:-1000}"
   lock="$(_jsonl_log).lock"
-  until mkdir "$lock" 2>/dev/null; do
+  until _agmsg_dir_take "$lock" 2>/dev/null; do
     i=$((i + 1)); [ "$i" -ge "$max" ] && return 1
     sleep 0.01
   done
   "$@" || rc=$?
-  rmdir "$lock" 2>/dev/null || true
+  _agmsg_dir_drop "$lock" 2>/dev/null || true
   return $rc
 }
 

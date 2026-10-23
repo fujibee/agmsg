@@ -90,6 +90,20 @@ teardown() {
     kill "$pid" 2>/dev/null || true
     wait_for_pid_exit "$pid" || true
   done
+  if [ -n "${MONITOR_TEST_LAUNCHER_PID_FILE:-}" ]; then
+    # The detached dispatcher can still be initializing messages.db after the
+    # fake TUI exits. Let its foreground SQLite children and EXIT trap finish
+    # before removing their store; killing just the shell can orphan sqlite3.
+    if ! wait_for_file_contains "$MONITOR_TEST_LAUNCHER_PID_FILE" '^[0-9][0-9]*$'; then
+      echo "codex-monitor teardown: launcher did not publish its pid" >&2
+      return 1
+    fi
+    pid="$(cat "$MONITOR_TEST_LAUNCHER_PID_FILE")"
+    if ! wait_for_pid_exit "$pid"; then
+      echo "codex-monitor teardown: launcher $pid did not exit; retaining its store" >&2
+      return 1
+    fi
+  fi
   rm -rf "$TEST_PROJECT"
   teardown_test_env
 }
@@ -400,7 +414,19 @@ esac
 EOF
   chmod +x "$win_codex"
 
+  # Keep the real dispatcher, but retain its PID so teardown can wait for all
+  # of its DB work, including lock release, rather than racing a detached child.
+  export MONITOR_TEST_LAUNCHER_PID_FILE="$TEST_PROJECT/launcher.pid"
+  local tracked_launcher="$TEST_PROJECT/tracked-launcher"
+  cat > "$tracked_launcher" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$MONITOR_TEST_LAUNCHER_PID_FILE"
+exec "$TYPES/codex/codex-bridge-launcher.sh" "$@"
+EOF
+  chmod +x "$tracked_launcher"
+
   run env AGMSG_REAL_CODEX="$win_codex" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$tracked_launcher" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
   [ "$status" -eq 0 ]
   grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"

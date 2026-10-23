@@ -7,13 +7,13 @@ Thanks for considering a contribution! agmsg is a small project; this guide is i
 ## Where to start
 
 - Read [`README.md`](README.md) for what agmsg does and how to install it.
-- Read [`ARCHITECTURE.md`](ARCHITECTURE.md) for the mental model (3-axis driver, vocabulary, dependency-management philosophy).
+- Read [`ARCHITECTURE.md`](ARCHITECTURE.md) for the mental model (4-axis driver model, vocabulary, dependency-management philosophy).
 - Browse [`docs/adr/`](docs/adr/) for the history of design decisions — they explain *why* things are the way they are.
 - The [`docs/spec/`](docs/spec/) directory contains the formal contracts; consult these when implementing or extending a driver.
 
 ## Reporting bugs and requesting features
 
-Open an issue on [`fujibee/agmsg`](https://github.com/fujibee/agmsg/issues). Include the agmsg version, the host agent (Claude Code / Codex / Gemini CLI / Antigravity), and a minimal reproduction if possible.
+Open an issue on [`fujibee/agmsg`](https://github.com/fujibee/agmsg/issues). Include the agmsg version, the host agent (Claude Code, Codex, Gemini CLI, Antigravity, Copilot CLI, OpenCode, Cursor, Grok Build, Devin, or Hermes), and a minimal reproduction if possible.
 
 ## Pull requests
 
@@ -26,7 +26,7 @@ Open an issue on [`fujibee/agmsg`](https://github.com/fujibee/agmsg/issues). Inc
 
 ## Releases
 
-See [`RELEASING.md`](RELEASING.md). The short version: bump [`VERSION`](VERSION), run `./scripts/release/sync-version.sh`, commit, tag `v$(cat VERSION)`, push. CI handles the rest.
+See [`RELEASING.md`](RELEASING.md). The short version: run `scripts/release/cut-release.sh <version>`, which prepares the release PR; the PR and the tag push each need a maintainer's approval, and CI publishes after the tag.
 
 ## Architecture Decision Records
 
@@ -58,7 +58,7 @@ If you spot a design choice in the code whose rationale is unclear, an ADR retro
 
 ## Adding a driver
 
-Bundled drivers live under `scripts/drivers/<axis>/<name>.sh`. (Top-level `.sh` files in `scripts/` are directly-invokable commands; subdirectories group implementation code.) Third-party plugin drivers live under `~/.agents/agmsg/plugins/<axis>/<name>/`. Both must implement the contract in [`docs/spec/driver-interface.md`](docs/spec/driver-interface.md).
+Bundled drivers live under `scripts/drivers/<axis>/` (a `<name>.sh` file for storage, a `<name>/` directory with its manifest for agent types and terminals). Top-level `.sh` files in `scripts/` are directly-invokable commands; subdirectories group implementation code. Third-party plugin drivers live under `<skill>/plugins/<axis>/<name>/` or a directory in `$AGMSG_PLUGIN_DIRS`, and run only after `agmsg plugin trust` (see [`docs/plugins.md`](docs/plugins.md)). Both must implement the contract in [`docs/spec/driver-interface.md`](docs/spec/driver-interface.md).
 
 A new bundled driver should arrive with:
 

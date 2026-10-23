@@ -6,7 +6,7 @@
 [![release](https://img.shields.io/github/v/release/fujibee/agmsg?label=release)](https://github.com/fujibee/agmsg/releases/latest)
 [![license](https://img.shields.io/github/license/fujibee/agmsg)](LICENSE)
 
-Cross-agent messaging for CLI AI agents. No daemon, no network, no complexity.
+Cross-agent messaging for CLI AI agents. No daemon required, no network, no complexity.
 
 > **For AI agents:** see [`/llms.txt`](llms.txt) for a quick, machine-friendly orientation.
 
@@ -34,7 +34,7 @@ You stop being the copy-paste courier between your agents. Claude Code, Codex, G
 
 ## Demo
 
-Two `monitor`-mode Claude Code instances, left alone in the same team, play tic-tac-toe against each other with no human in the loop — each picks up the other's move in real time:
+Two Claude Code instances in `monitor` (legacy) mode, left alone in the same team, play tic-tac-toe against each other with no human in the loop — each picks up the other's move in real time:
 
 ![Two Claude Code agents autonomously playing tic-tac-toe over agmsg](docs/agmsg-demo.gif)
 
@@ -68,7 +68,7 @@ To sync a team between two installs through the self-hosted reference server, fo
 
 ## How it works
 
-agmsg is a thin transport. Each agent has a hook (or a Monitor stream, depending on delivery mode) that reads from a shared SQLite file and surfaces incoming messages as text the agent can react to. Sending is a `send.sh` call that appends a row. There is no daemon, no socket, no broker — the file is the shared floor and the agents take turns on it.
+agmsg is a thin transport. Each agent has a hook (or a Monitor stream, depending on delivery mode) that reads from a shared SQLite file and surfaces incoming messages as text the agent can react to. Sending is a `send.sh` call that appends a row. agmsg itself runs with no daemon, no socket and no broker — the file is the shared floor and the agents take turns on it. The optional [agmsgd](#agmsgd-beta-160) is a resident service that is installed only if you choose it.
 
 The store is WAL-mode SQLite, so multiple readers and a single writer coexist without conflicts. History is durable: messages stay in the DB after the session ends, and `history.sh` can replay an old room into a fresh agent.
 
@@ -152,6 +152,25 @@ Git Bash PATH). There is no PowerShell reimplementation.
   Set-Alias bash 'C:\Program Files\Git\bin\bash.exe'
   ```
 
+### agmsgd beta (1.6.0)
+
+The optional agmsgd beta sends Codex sessions a notice to check their inbox through the Codex queue, and sends Claude Code sessions a notice directly through that session's own cross-session messaging socket. It detects whether that Claude Code session is running in bypass-permissions mode and labels notices for that mode automatically, with no action from you. A Claude Code seat delivered this way never needs its Monitor watch re-armed. On Windows, Claude Code must be 2.1.302 or later to receive notices this way (2.1.198 has no endpoint for them). A Claude Code seat whose delivery destination cannot be confirmed, such as one on an older Claude Code, keeps using Monitor as before, even with agmsgd enabled and running. It is offered as the recommended choice in the delivery-method screen and is turned on only if you pick it: install never asks, and `--update` never changes it. It reads the existing SQLite message store; it does not migrate data, deliver message bodies, take over remote sync, or change how any agent other than Claude Code and Codex receives messages. macOS, Linux, and Windows are supported for Codex. Windows requires native Codex 0.157.0 or later; earlier versions are blocked with a reason. Native queue execution and delivery to a logged-in live Windows session were measured with Codex 0.157.0 and 0.160.0. Unreadable version or delivery evidence keeps the existing conservative handling. JSONL storage is unsupported by this beta; keep using the bridge for those sessions.
+
+Requires Node >= 22.13.0 with `node:sqlite` (the experimental SQLite warning is expected). Install Node from [nodejs.org](https://nodejs.org/en/download). Enable and inspect the beta with:
+
+```bash
+agmsg daemon enable
+agmsg daemon status
+```
+
+If `agmsg` is not found, use `<install>/scripts/agmsg daemon enable` (and the same path for `status`, `start`, `stop`, or `disable`); `<install>` is the installation directory printed by the installer. Follow its PATH instructions to make `agmsg` available in your shell.
+
+While enabled, new Codex launches through the shim use plain Codex: no bridge app-server or dispatcher is started. Sessions that already have a bridge keep using it until restarted; agmsgd skips those sessions. `enable` and `start` list the remaining bridge sessions and missing destination records. Restart Codex and run `$agmsg actas <name>` to record a missing destination. Existing remote sync processes remain separate, so this beta does not yet reduce all background work to one process. A Claude Code seat only skips Monitor once agmsgd confirms it can actually be delivered to; every other seat keeps using Monitor as before. `daemon status` reports each such seat's state under `claude_code_seats`.
+
+If agmsgd stops while enabled, the next ordinary agmsg script operation warns at most once every ten minutes per install. Codex startup also warns, and `daemon status` and `scripts/doctor.sh` report the failure with exit code 1. Run `agmsg daemon start` to recover. For a missing or outdated Node executable, install Node and run `agmsg daemon enable` again. Unread messages are preserved.
+
+To return to bridge notices, run `agmsg daemon disable`, then restart the Codex sessions listed as having no bridge (for example, `codex resume`, followed by `$agmsg actas <name>`). They receive no new notices until restarted. Existing bridge sessions need no restart, and subsequent Codex launches get a bridge. Notices already accepted by the Codex queue are not cancelled and may appear once more. Claude Code seats go back to Monitor at their next SessionStart; an open Claude Code session gets no notices until then. To restore notices in an existing session, resume it so SessionStart arms Monitor again. `stop` stops the daemon without removing its resident service; `disable` also unregisters that service.
+
 ## First run
 
 Open your project in your agent (Claude Code, Codex, Gemini CLI, etc.) and run:
@@ -197,9 +216,9 @@ Where `actas` switches *this* session to a different role, `spawn` brings up a *
 
 `spawn <type> <name>` pre-joins `<name>`, then launches the target CLI with the actas slash command (`/<your-command> actas <name>`, matching your install command name) as its initial prompt. If the current session is inside **tmux**, it opens in a new pane (or `--window` for a new window, `--split h|v` for the direction); otherwise it opens a new **OS terminal** window.
 
-Pass `--boot-prompt <text>` to hand the new agent an initial task: the boot prompt becomes the actas slash command followed (newline-separated) by your text, so the agent claims its identity **and** acts on the task in the same first turn. This is the only way to give a one-shot goal to a **codex** peer, which has no Monitor and so never notices a message you `send` after it goes idle.
+Pass `--boot-prompt <text>` to hand the new agent an initial task: the boot prompt becomes the actas slash command followed (newline-separated) by your text, so the agent claims its identity **and** acts on the task in the same first turn. This is the reliable way to give a one-shot goal to a **codex** peer: a Codex session that is not on monitor (legacy) or agmsgd delivery only looks at its inbox on its next turn, so it never notices a message you `send` after it goes idle.
 
-By default `spawn` **blocks until the new agent is actually listening** — its watcher attaches and touches a readiness sentinel — then prints `status=ready`, so you can send work the moment `spawn` returns without losing it to the agent's cold start. Use `--no-wait` for fire-and-forget, or `--ready-timeout <secs>` to bound the wait (default 90; on timeout it prints `status=timeout` and exits 3 so a caller can re-spawn). Codex skips the wait (it has no Monitor).
+By default `spawn` **blocks until the new agent is actually listening** — its watcher attaches and touches a readiness sentinel — then prints `status=ready`, so you can send work the moment `spawn` returns without losing it to the agent's cold start. Use `--no-wait` for fire-and-forget, or `--ready-timeout <secs>` to bound the wait (default 90; on timeout it prints `status=timeout` and exits 3 so a caller can re-spawn). Codex skips the wait: it has no spawn-time readiness handshake (this is separate from how it receives messages).
 
 Options: `--boot-prompt <text>` (initial task; see above), `--project <path>` (default: current project), `--team <team>` (auto-resolved when the project has a single team), and `--terminal <tmpl>` / `$AGMSG_TERMINAL` / config `spawn.terminal` to override the terminal command on the non-tmux path (a `{cmd}` placeholder is replaced with the path to the generated boot script). On macOS the default opens whichever terminal you're currently in (iTerm or Terminal, via `$TERM_PROGRAM`) using `open -a` — a plain app launch, so it does **not** trigger the Automation/AppleScript permission prompts that scripting the terminal directly would.
 
@@ -228,7 +247,7 @@ Eight of the ten agent types are spawnable — `claude-code`, `codex`, `grok-bui
 
 By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control message to `<name>`, whose watcher drops its own role (releasing the actas lock and registration) and closes its own tmux pane — ending the agent. It blocks until the role is released, up to `--timeout <secs>` (default 30), then prints `status=ok`. If the member's watcher never responds it prints `status=timeout` and exits 3 — retry with `--force`.
 
-`--force` skips the message and tears the member down from the placement recorded at spawn time: it kills the member's tmux pane/window and drops its registration. Use it when the member's watcher can't respond — a dead watcher, or a **codex** member (no Monitor, so graceful has nothing to act on). A member started by hand (no spawn placement record) can't be `--force`d; despawn says so and leaves it for you to close.
+`--force` skips the message and tears the member down from the placement recorded at spawn time: it kills the member's tmux pane/window and drops its registration. Use it when the member's watcher can't respond — a dead watcher, or a **codex** member (it never holds an actas lock and runs no Claude Code watcher, so graceful has nothing to confirm). A member started by hand (no spawn placement record) can't be `--force`d; despawn says so and leaves it for you to close.
 
 Despawn only acts on the named member — the session running `despawn` is never torn down, and a broad-subscription watcher ignores a `ctrl:despawn` aimed at another role.
 
@@ -247,23 +266,27 @@ the manual fallback.
 
 ## Delivery modes
 
-How incoming messages reach your agent. Pick one at first join via the prompt, or change it later with `/agmsg mode <name>`.
+How incoming messages reach your agent. Pick one at first join via the prompt, or change it later with `/agmsg delivery <name>` (`/agmsg mode` still works as an alias; from a shell: `agmsg delivery <name>`). On Claude Code and Codex the prompt offers agmsgd first, as the recommended choice, and lists the monitor as **`monitor (legacy)`** (the mode value is still `monitor`). Installing or updating never turns agmsgd on by itself, and an update changes nothing about the mode you already use.
 
 | mode | mechanism | latency | who it's for |
 |---|---|---|---|
-| **`monitor`** (default on Claude Code; on OpenCode with the opencode-sentinel plugin) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
+| **agmsgd** (recommended on Claude Code and Codex; choose it at the prompt or with `/agmsg delivery agmsgd`) | a background service delivers a notice straight into the session, no Monitor task needed | a few seconds | anyone on Claude Code or Codex who can run the service: it registers one that starts at login, and `agmsg daemon disable` stops and removes it |
+| **`monitor (legacy)`** (value `monitor`; default on Claude Code; on OpenCode with the opencode-sentinel plugin) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
 | **`turn`** (default on Codex / Copilot CLI / OpenCode without the plugin) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode users not running monitor; Claude Code users on a quieter loop |
 | **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
 | **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
 
+agmsgd is not offered where `agmsg daemon enable` would refuse (Node older than 22.13, a JSONL message storage, no systemd user services on Linux, Codex older than 0.157 on Windows); the prompt says why in one line and lists the other modes. When agmsgd is already on, the prompt does not ask which to use: it says so and asks only whether to keep it or switch to `monitor (legacy)`. Choosing agmsgd runs `agmsg daemon enable` and leaves the project on `monitor` as the fallback for a session whose destination is not confirmed yet. Choosing `monitor (legacy)` (or `turn`, `both`, `off`) is a real opt-out for that project: agmsgd stops delivering to its seats (`agmsg daemon status` shows them as chosen), and agmsgd itself stays on for the install's other projects (`agmsg daemon disable` turns it off for all of them). A project that never chose is unchanged.
+
 ### Picking a mode
 
 ```
-/agmsg mode monitor    — switch this project to real-time push (Claude Code)
-/agmsg mode turn       — switch to between-turns checking
-/agmsg mode both       — monitor with turn as a safety net
-/agmsg mode off        — manual /agmsg only
-/agmsg mode            — show current mode
+/agmsg delivery agmsgd     — direct delivery by the background service (Claude Code, Codex)
+/agmsg delivery monitor    — switch this project to real-time push (Claude Code)
+/agmsg delivery turn       — switch to between-turns checking
+/agmsg delivery both       — monitor with turn as a safety net
+/agmsg delivery off        — manual /agmsg only
+/agmsg delivery            — show current mode
 ```
 
 Settings are per-project. Each `<project>/.claude/settings.local.json` gets exactly the hooks the chosen mode needs — repeated `set` calls are idempotent.
@@ -293,7 +316,7 @@ TaskList may list this task, but not every environment does (the desktop app's C
 `hook on` is now a thin alias for `mode turn` (with a one-line deprecation hint). To switch to real-time push:
 
 ```
-/agmsg mode monitor
+/agmsg delivery monitor
 ```
 
 The command updates `db/config.yaml`, rewrites the project's hook entries, and prints an `AGMSG-DIRECTIVE` that activates `monitor` in the current session — no agent restart needed.
@@ -307,11 +330,11 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 /agmsg history                          — message history
 /agmsg team                             — list team members
 /agmsg send <agent> <message>           — send message
-/agmsg mode <monitor|turn|both|off>     — switch delivery mode
+/agmsg delivery <agmsgd|monitor|turn|both|off>     — switch delivery (alias: /agmsg mode)
 /agmsg mode                             — show current mode
 /agmsg actas <name>                     — switch to another role in this project (create if needed)
 /agmsg drop <name>                      — remove a role from this project
-/agmsg spawn <type> <name>              — launch a new agent (claude-code/codex) that takes <name>
+/agmsg spawn <type> <name>              — launch a new agent that takes <name> (supported types: see "Spawn a new agent")
 /agmsg despawn <name> [--force]         — tear down a member you spawned (graceful, or --force)
 /agmsg hook on | off                    — legacy aliases (mode turn | off)
 /agmsg version                          — show the installed version (git-describe provenance)
@@ -326,7 +349,7 @@ $agmsg                          — or /skills → agmsg
 
 Codex supports `mode monitor` through an app-server bridge, plus `mode turn` and `mode off`.
 
-> ⚠️ **Monitor mode changes how Codex starts — enable it knowing that.** Codex has no Monitor tool, so `mode monitor` prints a shell function that makes `codex` route through agmsg's monitor shim in your interactive shell. In monitor-mode projects the shim routes interactive launches through a bridge that turns incoming agmsg messages into turns on the current Codex thread; `codex exec` and non-monitor projects pass straight through to the real Codex. It depends on Codex app-server behavior and has a known limitation (orphans on TUI close — #149).
+> ⚠️ **Monitor mode changes how Codex starts — enable it knowing that.** Codex has no Claude Code Monitor tool, so monitor (legacy) mode (`mode monitor`) prints a shell function that makes `codex` route through agmsg's monitor shim in your interactive shell. In monitor-mode projects the shim routes interactive launches through a bridge that turns incoming agmsg messages into turns on the current Codex thread; `codex exec` and non-monitor projects pass straight through to the real Codex. It depends on Codex app-server behavior and has a known limitation (orphans on TUI close — #149).
 
 If you prefer a global PATH shim, run `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` before the real Codex binary on PATH. You can also launch with `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh`. Codex sandboxing must allow writes to the skill's `db/`, `teams/`, and `run/` dirs — `install.sh` configures those `writable_roots` when `~/.codex/config.toml` exists. Setup notes and internals: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md).
 
@@ -364,7 +387,7 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
 
-`team.sh` combines the roster with terminal placement, activity, delivery mode, and identity consistency. Verified identity is collapsed to `identity=ok`; mismatches and values that could not be observed are expanded with their evidence. `--json` emits every field for every registration. The repair flags report each action per identity cell as `changed`, `skipped`, `failed`, or (for a session name that could not be read back) `poked_unverified`. They are two different kinds of act: `--fix-pane-names` repairs the pane label and agent key through the terminal's own API and never types into a session; `--rename-sessions` repairs the CLI session name by typing the type's rename command (`/rename <team>-<agent>` for Claude Code, whatever the type's manifest declares otherwise) into the pane, and only after positively identifying a ready process there. `--fix` does both, unconditionally, including the keystroke. Pane liveness will join this view when the pane-state contract lands; until then the unavailable column is omitted rather than filled with `unknown`.
+`team.sh` combines the roster with terminal placement, activity, delivery mode, and identity consistency. Verified identity is collapsed to `identity=ok`; mismatches and values that could not be observed are expanded with their evidence. `--json` emits every field for every registration. `team.sh` is read-only with respect to other seats: it reports an inconsistent or unresponsive seat but never repairs it from outside (the former `--fix`, `--fix-pane-names` and `--rename-sessions` flags were removed in #1152). A seat repairs its own identity cells by running `fix` from itself; one that cannot is despawned and restarted, or taken over by a person. Pane liveness will join this view when the pane-state contract lands; until then the unavailable column is omitted rather than filled with `unknown`.
 
 `--delete` removes a team once every member has left (`leave.sh` each remaining one first) and the team is not actively synced (`binding_state=active` in `team-list.sh --json` refuses; `disconnected` proceeds with an extra warning) — its config, roster, identity history, and per-agent runtime state (actas locks, role-session records, spawn/placement records), but not its message history. `--force` (combined with `--delete`) removes every remaining member first, the same effect as running `leave.sh` for each, then deletes the team as `--delete` alone does — a team the desktop app created always has its app-user as a member, so it could never be deleted from the app without this; a `--force` confirmation names the members it will remove. `--purge-messages` deletes only a team's rows from the sqlite message store (jsonl is not supported yet) and can be used standalone or together with `--delete`; other teams' data is untouched. Both prompt for confirmation, in the same style as `uninstall.sh`'s, unless `--yes` is given.
 
@@ -378,7 +401,7 @@ Terminal identity has a different number of observable names on each backend. He
 
 **Is this MCP? Do I need an MCP server?**
 
-No. agmsg is standalone — `bash` + `sqlite3`, no server, no daemon, no network. The two stacks are orthogonal: you can run agmsg alongside any MCP setup you already have.
+No. agmsg is standalone — `bash` + `sqlite3`, no server, no network, and no daemon unless you choose the optional agmsgd. The two stacks are orthogonal: you can run agmsg alongside any MCP setup you already have.
 
 **Concurrent writes to the same channel — do they conflict?**
 
@@ -435,6 +458,12 @@ git pull
 ```
 
 DB and team configs are preserved. Only scripts and assets are updated.
+
+### Upgrading from 1.5.x
+
+`--update` does not enable agmsgd. If you have never run `agmsg daemon enable`, nothing changes: agmsgd stays off, and messaging keeps working exactly as it did on 1.5.x. If agmsgd is currently on, an update restarts it on the new version automatically; if `agmsg daemon status` still shows it stopped afterward, run `agmsg daemon start`. If you had turned it off yourself (`agmsg daemon disable`), it stays off through the update, as intended.
+
+No running Codex session needs to be restarted just because you ran `--update`. Restarting a Codex session is only needed to pick up agmsgd itself — either turning it on for the first time (see "agmsgd beta" above) or dropping back to the bridge after `agmsg daemon disable`.
 
 ## Uninstall
 
@@ -526,6 +555,7 @@ sandbox_mode = "workspace-write"
 writable_roots = [
   "~/.agents/skills/agmsg/db",
   "~/.agents/skills/agmsg/teams",
+  "~/.agents/skills/agmsg/run",
 ]
 ```
 
@@ -536,6 +566,7 @@ If you installed agmsg under a custom command name, adjust the path accordingly:
 writable_roots = [
   "~/.agents/skills/m/db",
   "~/.agents/skills/m/teams",
+  "~/.agents/skills/m/run",
 ]
 ```
 
@@ -548,9 +579,10 @@ writable_roots = [
 ]
 ```
 
-Codex only supports `mode turn` and `mode off`; it does not have Claude Code's
-Monitor tool. The sandbox allowlist is still required for writes performed by
-manual `$agmsg` commands and turn-end inbox checks.
+Codex supports `mode monitor` (legacy) through the app-server bridge, plus `mode turn`
+and `mode off`; it just has no Claude Code Monitor tool. The sandbox allowlist is
+required for writes performed by manual `$agmsg` commands, turn-end inbox checks and
+the bridge.
 
 Some Codex runtimes or automations may inject a managed permission profile for a
 single run. In that case, the run-specific writable roots must also include the
@@ -574,6 +606,7 @@ bats tests/    # requires bats-core: brew install bats-core
 │   └── drivers/types/<name>/     # Built-in agent-type drivers (manifest + runtime)
 ├── plugins/<axis>/<name>/        # External drivers you opt into (agmsg plugin trust)
 ├── db/messages.db                # SQLite WAL-mode message store
+├── run/                          # Runtime state: pidfiles, actas locks, agmsgd install record
 └── teams/                        # Team configs (self-contained)
     └── <team>/
         └── config.json
@@ -582,8 +615,8 @@ bats tests/    # requires bats-core: brew install bats-core
 - **Storage**: Single SQLite file with WAL mode
 - **Concurrency**: Multiple readers + 1 writer, no conflicts
 - **Dependencies**: `bash`, `sqlite3` (no Python required)
-- **Auto detection**: Stop hook checks inbox after each response (60s cooldown, configurable via `hook.check_interval`)
-- **No daemon**: Direct filesystem access
+- **Auto detection**: Stop hook checks inbox after each response (60s cooldown, configurable via `delivery.turn.check_interval`)
+- **No daemon required**: direct filesystem access (the optional agmsgd is a resident service you choose)
 - **No network**: Everything local
 
 ## Plugins

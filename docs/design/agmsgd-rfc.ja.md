@@ -1,5 +1,7 @@
 # RFC: agmsgd — 常駐配達デーモン
 
+> **1.6.0 での変更:** この記録は最初の beta の内容です。出荷された agmsgd は Claude Code と Codex の両方のセッションに届け、Windows でも動きます（Claude Code 2.1.302 以上、Codex 0.157 以上）。配達方法の選択画面でおすすめとして出され、本人が選んだときだけ有効になります。以下の「Codex のみ」「macOS/Linux のみ」「既定でオフ」「Windows 未対応」は最初の beta の記述です。
+
 これは RFC ---- 設計への意見を求める文書であって、決定の記録ではない。決まったことは従来どおり ADR に落ちる。**変えるのがまだ安いうちに形を変えられるよう**、実装の前に公開する。
 
 > **現在の状態(2026-09-28)。** ここに書いた方向は承認され、この note はそれに合わせてある。最初の版から変わった点は[最初の版からの変更](#最初の版からの変更)にまとめた。アーキテクチャ設計(各部分がどう動くか)は済み、この note の隣に [agmsgd-architecture.ja.md](agmsgd-architecture.ja.md) として置いた。次は技術設計(ソースの置き場所、ビルドと配布の方法)で、実装はその後になる。どのリリースも止められるものにし、一気には作らない。discussion で問いに答えてくれた方々に感謝する ---- 答えは以下に反映してある。
@@ -43,6 +45,8 @@ flowchart LR
 - **送信**: 変わらない。`send` はデーモンの有無に関係なくメッセージ DB に直接書く。デーモン無しで失うのは自動配達だけ。
 
 この順で出す:
+
+**1.6.0 beta note:** agmsgd is optional and off by default before the 2.0.0 store migration. It only queues inbox notices for Codex sessions against the existing SQLite store. Existing Codex bridges and the remote sync engine remain separate processes; bridge sessions continue until restarted. Use `agmsg daemon enable` for new Codex launches, or `agmsg daemon disable` followed by restarting sessions that have no bridge. If `agmsg` is not found, use `<install>/scripts/agmsg daemon enable|disable`. macOS and Linux are supported; Windows delivery remains unsupported pending measurement, and JSONL storage is unsupported. The beta does not bring forward the 2.0.0 data migration.
 
 1. **1.3.1** — まだ知らないメッセージの項目を読み飛ばせるようにする(出荷済み)。
 2. **古い版が脇によけたものの読み直し** — 上げたあと、以前は理解できなかった保存済みの原文を読み直す(出荷済み)。
