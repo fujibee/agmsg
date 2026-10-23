@@ -40,8 +40,10 @@ export function processStartWitness(pid, onFailure = () => {}) {
           `(Get-Process -Id ${pid}).StartTime.Ticks`,
         ], { encoding: "utf8", windowsHide: true }).trim();
         if (/^\d+$/.test(start)) return `windows:${start}`;
-      } catch {
-        // Try the other supported PowerShell executable.
+        onFailure(`${executable} printed ${start ? "an invalid start time" : "no start time"}`);
+      } catch (error) {
+        const stderr = String(error?.stderr ?? "").trim().replace(/\s+/g, " ").slice(0, 200);
+        onFailure(`${executable} failed: code=${error?.code ?? ""} status=${error?.status ?? ""} signal=${error?.signal ?? ""} stderr=${stderr}`);
       }
     }
   }
@@ -49,10 +51,17 @@ export function processStartWitness(pid, onFailure = () => {}) {
 }
 
 export function captureProcessGroup(pgid, onFailure = () => {}) {
-  const witness = processStartWitness(pgid, onFailure);
+  const failures = [];
+  const witness = processStartWitness(pgid, detail => {
+    failures.push(detail);
+    onFailure(detail);
+  });
   // The group id is kept even without a witness: a later observation can still
   // prove the group is gone (no such group), though never that it is present.
-  if (!witness) return { state: "unreadable", reason: "child_start_witness_unavailable", pgid };
+  if (!witness) return {
+    state: "unreadable", reason: "child_start_witness_unavailable", pgid,
+    ...(failures.length ? { witness_failures: failures } : {}),
+  };
   return {
     state: "complete",
     kind: platform() === "win32" ? "windows-native-process" : "posix-process-group",
@@ -64,9 +73,11 @@ export function captureProcessGroup(pgid, onFailure = () => {}) {
 
 export function observeProcessGroup(record) {
   if (record?.state === "unreadable" && record.reason === "child_start_witness_unavailable"
-      && platform() !== "win32" && Number.isSafeInteger(record.pgid) && record.pgid >= 2) {
+      && Number.isSafeInteger(record.pgid) && record.pgid >= 2) {
     try {
-      process.kill(-record.pgid, 0);
+      // Native Windows has no negative-PGID probe. A missing pid proves absence;
+      // a live or unobservable pid never proves identity without its witness.
+      process.kill(platform() === "win32" ? record.pgid : -record.pgid, 0);
     } catch (error) {
       if (error?.code === "ESRCH") return { state: "absent" };
     }

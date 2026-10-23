@@ -144,7 +144,7 @@ export function readOwnerAndIntentReadOnly(installRoot) {
     }
     let codexPending = [];
     try {
-      codexPending = db.prepare("SELECT seat, created_at FROM beta_codex_queue WHERE state='pending' ORDER BY created_at, id").all();
+      codexPending = db.prepare("SELECT seat, created_at, children FROM beta_codex_queue WHERE state='pending' ORDER BY created_at, id").all();
     } catch (error) {
       if (!String(error?.message ?? "").includes("no such table")) throw error;
     }

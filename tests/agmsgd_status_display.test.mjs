@@ -249,3 +249,15 @@ test('launcher ignores temporary npx PATH entries and still gives the permanent 
   assert.doesNotMatch(output, /currently resolves to|_npx|older npm/);
   assert.match(output, /open a new terminal and run: command -v agmsg/);
 });
+
+test('JSON status exposes persisted child start-witness failure details', t => {
+  const { db, root, status } = fixture(t);
+  const children = { state: 'unreadable', reason: 'child_start_witness_unavailable', pgid: 4242,
+    witness_failures: ['powershell.exe failed: code=ENOENT', 'pwsh.exe failed: code=ENOENT'] };
+  db.prepare("INSERT INTO beta_codex_queue (seat,codex_home,thread,up_to,nonce,state,children,created_at) VALUES (?, ?, ?, '{}', 'witness-unavailable', 'pending', ?, '2020-01-01T00:00:00Z')")
+    .run(JSON.stringify(['test', 'alice']), root, thread, JSON.stringify(children));
+  const pending = JSON.parse(status('--json')).codex_pending;
+  assert.equal(pending.length, 1);
+  assert.deepEqual(JSON.parse(pending[0].children), children);
+  assert.equal(db.prepare('SELECT state FROM beta_codex_queue').get().state, 'pending');
+});
