@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_OUTPUT_CHARS = 64 * 1024;
 export const QUEUE_CONFIRMATION_TTL_MS = 60_000;
+export const QUEUE_KILL_GRACE_MS = 1000;
 
 export function newNonce() {
   return randomUUID();
@@ -100,7 +101,7 @@ export async function runCodexQueue({
   const onAbort = () => {
     aborted = true;
     signalProcessGroup(child, "SIGTERM");
-    killTimers.push(setTimeout(() => signalProcessGroup(child, "SIGKILL"), 1000));
+    killTimers.push(setTimeout(() => signalProcessGroup(child, "SIGKILL"), QUEUE_KILL_GRACE_MS));
   };
   signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) onAbort();
@@ -110,7 +111,7 @@ export async function runCodexQueue({
   }, timeoutMs);
   const hardKill = setTimeout(() => {
     if (timedOut) signalProcessGroup(child, "SIGKILL");
-  }, timeoutMs + 1000);
+  }, timeoutMs + QUEUE_KILL_GRACE_MS);
   let childRecordFailed = false;
   let started = false;
   child.once("spawn", () => {
@@ -121,7 +122,7 @@ export async function runCodexQueue({
     } catch {
       childRecordFailed = true;
       signalProcessGroup(child, "SIGTERM");
-      killTimers.push(setTimeout(() => signalProcessGroup(child, "SIGKILL"), 1000));
+      killTimers.push(setTimeout(() => signalProcessGroup(child, "SIGKILL"), QUEUE_KILL_GRACE_MS));
     }
   });
   const result = await closed;

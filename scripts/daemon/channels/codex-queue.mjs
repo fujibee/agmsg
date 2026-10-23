@@ -17,6 +17,7 @@ import {
   readUnreadSnapshot,
 } from "./codex-queue-store.mjs";
 import {
+  QUEUE_KILL_GRACE_MS,
   classifyCodexSeat,
   inboxNudge,
   newNonce,
@@ -106,9 +107,12 @@ function saveSeat(db, { seat, thread = null, codexHome = null, state, reason = "
   });
 }
 
-function setQueueState(db, id, state, queueItemId = undefined) {
+function setQueueState(db, id, state, queueItemId = undefined, reason = undefined) {
   withImmediateTransaction(db, () => {
-    if (queueItemId === undefined) {
+    if (state === "expired" && reason) {
+      db.prepare("UPDATE beta_codex_queue SET state = ?, children = json_set(children, '$.expiration_reason', ?) WHERE id = ? AND state = 'pending'")
+        .run(state, reason, id);
+    } else if (queueItemId === undefined) {
       db.prepare("UPDATE beta_codex_queue SET state = ? WHERE id = ? AND state = 'pending'").run(state, id);
     } else {
       db.prepare("UPDATE beta_codex_queue SET state = ?, queue_item_id = ? WHERE id = ? AND state = 'pending'")
@@ -242,21 +246,33 @@ function bridgeState(runDir, team, agent, projects) {
   return "stopped";
 }
 
-// This is intentionally fail-closed. A pending reservation left by a daemon
-// crash before the child result was recorded cannot safely be retried here.
-async function pendingObservation(pending, now, observeGroup) {
+// Missing child records remain fail-closed. Only the Windows unwitnessed-child
+// case below permits a bounded duplicate notice without proving process identity.
+async function pendingObservation(pending, now, observeGroup, timeoutMs, hostPlatform) {
   let children;
   try { children = JSON.parse(pending.children); } catch { return { state: "pending", reason: "child_group_record_unreadable", childrenUnresolved: true }; }
+  const createdAt = Date.parse(pending.created_at);
+  const ageMs = Number.isFinite(createdAt) ? now() - createdAt : NaN;
   if (children.state === "incomplete") return { state: "pending", reason: "queue_child_state_incomplete", childrenUnresolved: true };
   if (children.state === "complete" || (children.state === "unreadable" && children.pgid !== undefined)) {
     let group;
     try { group = observeGroup(children); } catch { group = { state: "unreadable", reason: "child_group_observation_failed" }; }
-    if (group?.state !== "absent") return { state: "pending", reason: group?.reason ?? "queue_child_still_running", childrenUnresolved: true };
+    if (group?.state !== "absent") {
+      // A live pid without an original witness may have been reused. Do not
+      // adopt its identity, but do not let it silence notices indefinitely:
+      // after the queue timeout plus hard-kill grace, allow a duplicate nudge.
+      if (hostPlatform === "win32" && children.state === "unreadable"
+          && children.reason === "child_start_witness_unavailable"
+          && Number.isSafeInteger(children.pgid) && children.pgid >= 2
+          && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1
+          && Number.isSafeInteger(ageMs) && ageMs >= timeoutMs + QUEUE_KILL_GRACE_MS) {
+        return { state: "expired", reason: "child_start_witness_timeout" };
+      }
+      return { state: "pending", reason: group?.reason ?? "queue_child_still_running", childrenUnresolved: true };
+    }
   } else if (children.state !== "absent") {
     return { state: "pending", reason: children.reason ?? "child_group_record_unreadable", childrenUnresolved: true };
   }
-  const createdAt = Date.parse(pending.created_at);
-  const ageMs = Number.isFinite(createdAt) ? now() - createdAt : NaN;
   const queueObservation = pending.queue_item_id
     ? readQueuedItem(pending.codex_home, pending.queue_item_id, pending.thread)
     : { state: "absent" };
@@ -302,19 +318,19 @@ export function createCodexQueueChannel({
       // blocked exactly as before.
       const current = readSession(join(installRoot, "run"), team, agent);
       if (current.state === "present" && current.record.thread && current.record.thread !== pending.thread) {
-        const old = await pendingObservation(pending, now, observeGroup);
+        const old = await pendingObservation(pending, now, observeGroup, timeoutMs, hostPlatform);
         if (!old.childrenUnresolved) {
-          setQueueState(db, pending.id, "expired");
+          setQueueState(db, pending.id, "expired", undefined, old.state === "expired" ? old.reason : undefined);
           pending = null;
         }
       }
     }
     if (pending) {
-      const observation = await pendingObservation(pending, now, observeGroup);
+      const observation = await pendingObservation(pending, now, observeGroup, timeoutMs, hostPlatform);
       if (observation.childrenUnresolved && pending.codex_home) blockedCodexHomes.add(pending.codex_home);
       if (!registered) {
         if (observation.state === "confirmed") setQueueState(db, pending.id, "confirmed");
-        else if (observation.state === "expired") setQueueState(db, pending.id, "expired");
+        else if (observation.state === "expired") setQueueState(db, pending.id, "expired", undefined, observation.reason);
         saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "unaddressable", reason: "seat_registration_missing" }, now);
         return;
       }
@@ -322,7 +338,7 @@ export function createCodexQueueChannel({
         const gate = windowsGate({ executable: executable ?? db.prepare('SELECT codex_path FROM meta').get()?.codex_path, env });
         if (gate.state !== "ok") {
           if (observation.state === "confirmed") setQueueState(db, pending.id, "confirmed");
-          else if (observation.state === "expired") setQueueState(db, pending.id, "expired");
+          else if (observation.state === "expired") setQueueState(db, pending.id, "expired", undefined, observation.reason);
           const reason = observation.state === "pending"
             ? `${gate.reason};pending:${observation.reason}`
             : gate.reason;
@@ -336,7 +352,14 @@ export function createCodexQueueChannel({
         saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: !knownBridge ? "blocked" : bridge === "running" ? "bridged" : "addressable", reason: !knownBridge ? "bridge_state_unknown" : bridge === "running" ? "bridge_running" : "" }, now);
         return;
       } else if (observation.state === "expired") {
-        setQueueState(db, pending.id, "expired");
+        setQueueState(db, pending.id, "expired", undefined, observation.reason);
+        if (observation.reason === "child_start_witness_timeout") {
+          const knownBridge = bridge === "stopped" || bridge === "running";
+          saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home,
+            state: !knownBridge ? "blocked" : bridge === "running" ? "bridged" : "addressable",
+            reason: observation.reason }, now);
+          return;
+        }
       } else {
         const knownBridge = bridge === "stopped" || bridge === "running";
         saveSeat(db, {
@@ -495,12 +518,13 @@ export function createCodexQueueChannel({
     }
     if (result.kind === "queued") {
       setQueueState(db, id, "pending", result.queueItemId);
-      const firstCheck = await pendingObservation(readPending(db, seat), now, observeGroup);
+      const firstCheck = await pendingObservation(readPending(db, seat), now, observeGroup, timeoutMs, hostPlatform);
       if (firstCheck.state === "confirmed") {
         setQueueState(db, id, "confirmed");
         saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable" }, now);
         return;
       }
+      if (firstCheck.state === "expired") setQueueState(db, id, "expired", undefined, firstCheck.reason);
       if (firstCheck.childrenUnresolved && record.codex_home) blockedCodexHomes.add(record.codex_home);
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: firstCheck.reason }, now);
       return;

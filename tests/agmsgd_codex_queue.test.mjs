@@ -164,6 +164,70 @@ test('Windows start-witness fallback reports invalid output and accepts pwsh evi
   assert.match(logged[0], /powershell\.exe.*no start time/);
 });
 
+test('a live unwitnessed Windows child expires after its maximum lifetime and permits a later nudge', async (t) => {
+  const { db, options } = executableFixture(t);
+  let clock = Date.parse('2026-10-23T00:00:00Z');
+  let nudges = 0;
+  const channel = createCodexQueueChannel({
+    ...options, now: () => clock, timeoutMs: 100, hostPlatform: 'win32',
+    executable: process.execPath,
+    windowsGate: () => ({ state: 'ok', executable: process.execPath }),
+    captureGroup: pid => ({ state: 'unreadable', reason: 'child_start_witness_unavailable', pgid: pid }),
+    observeGroup: () => ({ state: 'unreadable', reason: 'child_start_witness_unavailable' }),
+    queue: async request => {
+      nudges += 1;
+      request.onChildStart(4242);
+      return { kind: 'queued', queueItemId: itemId };
+    },
+  });
+  t.after(() => channel.stop());
+  await channel.pollOnce();
+  const first = db.prepare('SELECT id FROM beta_codex_queue').get().id;
+  clock += 1099; // queue timeout 100ms plus the existing 1000ms hard-kill grace.
+  await channel.pollOnce();
+  assert.equal(nudges, 1);
+  assert.equal(db.prepare('SELECT state FROM beta_codex_queue WHERE id=?').get(first).state, 'pending');
+  clock += 1;
+  await channel.pollOnce();
+  const expired = db.prepare('SELECT state, children FROM beta_codex_queue WHERE id=?').get(first);
+  assert.equal(expired.state, 'expired');
+  assert.equal(JSON.parse(expired.children).expiration_reason, 'child_start_witness_timeout');
+  assert.equal(db.prepare('SELECT reason FROM beta_codex_seat').get().reason, 'child_start_witness_timeout');
+  await channel.pollOnce();
+  assert.equal(nudges, 2);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM beta_codex_queue WHERE state='pending'").get().n, 1);
+  assert.equal(db.prepare('SELECT state FROM beta_codex_queue WHERE id=?').get(first).state, 'expired');
+});
+
+for (const scenario of [
+  { platform: 'win32', children: { state: 'complete', kind: 'windows-native-process', pgid: 4242, boot_id: 'test', witness: 'windows:123' } },
+  { platform: 'linux', children: { state: 'unreadable', reason: 'child_start_witness_unavailable', pgid: 4242 } },
+]) {
+  test(`the unwitnessed Windows lifetime policy does not expire ${scenario.platform} ${scenario.children.state} evidence`, async (t) => {
+    const { db, options } = executableFixture(t);
+    let clock = Date.parse('2026-10-23T00:00:00Z');
+    let nudges = 0;
+    const channel = createCodexQueueChannel({
+      ...options, now: () => clock, timeoutMs: 100, hostPlatform: scenario.platform,
+      executable: process.execPath,
+      windowsGate: () => ({ state: 'ok', executable: process.execPath }),
+      captureGroup: () => scenario.children,
+      observeGroup: () => ({ state: 'unreadable', reason: 'identity_unknown' }),
+      queue: async request => {
+        nudges += 1;
+        request.onChildStart(4242);
+        return { kind: 'queued', queueItemId: itemId };
+      },
+    });
+    t.after(() => channel.stop());
+    await channel.pollOnce();
+    clock += 60_000;
+    await channel.pollOnce();
+    assert.equal(nudges, 1);
+    assert.equal(db.prepare('SELECT state FROM beta_codex_queue').get().state, 'pending');
+  });
+}
+
 test('recorded absolute Codex runs with an env-node shebang under a minimal service PATH', async (t) => {
   if (process.platform === 'win32') return t.skip('POSIX env-node launcher');
   const { root, db, options } = executableFixture(t);

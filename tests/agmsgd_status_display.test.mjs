@@ -260,4 +260,9 @@ test('JSON status exposes persisted child start-witness failure details', t => {
   assert.equal(pending.length, 1);
   assert.deepEqual(JSON.parse(pending[0].children), children);
   assert.equal(db.prepare('SELECT state FROM beta_codex_queue').get().state, 'pending');
+  children.expiration_reason = 'child_start_witness_timeout';
+  db.prepare("UPDATE beta_codex_queue SET state='expired', children=?").run(JSON.stringify(children));
+  const expired = JSON.parse(status('--json')).codex_expired;
+  assert.equal(expired[0].state, 'expired');
+  assert.deepEqual(JSON.parse(expired[0].children), children);
 });
