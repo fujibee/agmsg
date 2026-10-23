@@ -37,7 +37,7 @@ agmsg_join_type_parse_args() {
 
   local driver_dir
   # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/lib/driver-registry.sh"
+  . "${SCRIPT_DIR:?}/lib/driver-registry.sh"
   if ! driver_dir="$(agmsg_ext_tool_dir "$tool")"; then
     echo "Unknown ext-tool: '$tool' (available: $(agmsg_ext_tool_available))" >&2
     return 1
