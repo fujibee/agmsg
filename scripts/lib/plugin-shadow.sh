@@ -7,6 +7,10 @@
 # then calls agmsg_plugin_shadow_warn with that list, so the person hears that
 # the plugin, not the new built-in, is what runs.
 #
+# Which driver runs is the installed registry's answer, not a reading of
+# db/trusted-plugins here: the registry also checks the search bases, the exact
+# trust row and the manifest, and a second reading of those would drift.
+#
 # Warn only: nothing is untrusted or removed here, and nothing here may fail the
 # install. Sourced by install.sh only.
 
@@ -23,32 +27,54 @@ agmsg_builtin_driver_names() {  # skill-dir
   done | LC_ALL=C sort
 }
 
-# Warn about each trusted plugin driver whose name is a built-in now but was not
-# in <before> (the output of agmsg_builtin_driver_names taken before the copy).
+# Print the directory the installed registry resolves <axis>/<name> to, or
+# nothing. A separate bash, so the registry libs never enter install.sh's shell.
+_agmsg_plugin_shadow_winner() {  # skill-dir axis name
+  local fn
+  case "$2" in
+    types) fn=agmsg_type_dir ;;
+    terminals) fn=agmsg_terminal_dir ;;
+    ext-tools) fn=agmsg_ext_tool_dir ;;
+    *) return 0 ;;
+  esac
+  bash -c '. "$1/scripts/lib/driver-registry.sh" || exit 0
+    case "$2" in
+      agmsg_type_dir) . "$1/scripts/lib/type-registry.sh" || exit 0 ;;
+      agmsg_terminal_dir) . "$1/scripts/lib/terminal-registry.sh" || exit 0 ;;
+    esac
+    "$2" "$3"' _ "$1" "$fn" "$3" 2>/dev/null | head -n 1 || true
+}
+
+# Warn about each built-in that is new since <before> (the output of
+# agmsg_builtin_driver_names taken before the copy) but that the registry does
+# not pick, because a trusted plugin of the same name wins.
 agmsg_plugin_shadow_warn() {  # skill-dir before
-  local skill="$1" before="$2" trust="$1/db/trusted-plugins" ref path src
-  [ -f "$trust" ] || return 0
-  while IFS=$'\t' read -r ref path || [ -n "$ref" ]; do
-    path="${path%$'\r'}"
-    case "$ref" in types/?*|terminals/?*|ext-tools/?*) ;; *) continue ;; esac
-    [ -d "$skill/scripts/drivers/$ref" ] || continue
+  local skill before="$2" ref winner src
+  # The registry names its root with `cd && pwd`; compare in the same spelling.
+  skill="$(cd "$1" 2>/dev/null && pwd)" || return 0
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
     printf '%s\n' "$before" | grep -qxF -- "$ref" && continue
-    [ -d "$path" ] || continue
+    winner="$(_agmsg_plugin_shadow_winner "$skill" "${ref%%/*}" "${ref#*/}")"
+    [ -n "$winner" ] || continue
+    [ "$winner" != "$skill/scripts/drivers/$ref" ] || continue
     echo "  ! this update adds a built-in $ref, but your trusted plugin replaces it:"
-    echo "      $path"
+    echo "      $winner"
     echo "    The plugin keeps running in its place. To use the built-in instead, run"
+    echo "      agmsg plugin untrust $ref"
     src=""
-    case "$path" in
+    case "$winner" in
       "$skill"/plugins/sources/github/*/*/*)
-        src="${path#"$skill"/plugins/sources/github/}"
+        src="${winner#"$skill"/plugins/sources/github/}"
         src="${src%%/*}/$(printf '%s' "${src#*/}" | cut -d/ -f1)"
         ;;
     esac
     if [ -n "$src" ]; then
-      echo "      agmsg plugin remove $src     (or: agmsg plugin untrust $ref)"
-    else
-      echo "      agmsg plugin untrust $ref"
+      echo "    or remove the whole plugin source (every driver it provides):"
+      echo "      agmsg plugin remove $src"
     fi
-  done < "$trust"
+  done <<EOF
+$(agmsg_builtin_driver_names "$skill")
+EOF
   return 0
 }
