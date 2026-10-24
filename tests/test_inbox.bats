@@ -45,6 +45,8 @@ await_barrier_reached() {
 # --- inbox.sh -----------------------------------------------------------
 
 @test "inbox/history: unknown teams fail on stderr before self-name hooks (#1714)" {
+  # Storage sourcing can print daemon notices too; reject before all of it.
+  printf '%s\n' 'echo storage-source-ran >&2; exit 99' > "$SCRIPTS/lib/storage.sh"
   # A hook sentinel proves even a misplaced invocation cannot reach naming.
   printf '%s\n' 'echo naming-hook-ran >&2; exit 99' > "$SCRIPTS/lib/self-name.sh"
   printf '%s\n' 'echo rename-hook-ran >&2; exit 99' > "$SCRIPTS/lib/self-rename.sh"
