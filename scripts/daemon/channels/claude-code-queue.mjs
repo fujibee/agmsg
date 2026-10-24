@@ -45,9 +45,10 @@ const SEND_TIMEOUT_MS = 5_000;
 export const PEER_HELD_REASON = "peer_held: the seat's Claude Code is holding messages from agmsgd (see its crossSessionInbound setting and permission mode)";
 
 function observedSeat(reason) {
-  return reason === "peer_held"
-    ? { state: "blocked", reason: PEER_HELD_REASON }
-    : { state: "addressable", reason };
+  if (reason === "peer_held") return { state: "blocked", reason: PEER_HELD_REASON };
+  // Only a checked socket awaiting transcript confirmation remains addressable.
+  // Failed checks preserve the pending nudge without claiming availability.
+  return { state: reason === "awaiting_confirmation" ? "addressable" : "blocked", reason };
 }
 
 function registrationProjects(teamConfig, agent) {

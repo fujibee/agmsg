@@ -502,3 +502,19 @@ test('a project that chose something other than agmsgd gets no nudge, a waiting 
   await channel.pollOnce();
   assert.equal(db.prepare("SELECT state FROM beta_claude_seat").get().state === 'unaddressable', false, 'choosing agmsgd again puts the seat back');
 });
+
+for (const reason of ['messaging_socket_stat_failed', 'messaging_socket_symlink', 'messaging_socket_not_a_socket', 'messaging_socket_not_owned_by_self', 'transcript_missing', 'transcript_read_failed']) {
+  test(`a pending nudge reports blocked when its check fails: ${reason}`, async (t) => {
+    const { db, channel, state } = channelFixture(t);
+    if (reason.startsWith('transcript_')) state.options.observe = () => ({ state: 'unreadable', reason });
+    const subject = createClaudeCodeQueueChannel(state.options);
+    await subject.pollOnce();
+    if (reason.startsWith('messaging_socket_')) state.alive = { state: 'unreadable', reason };
+    await subject.pollOnce();
+    assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() }, { state: 'blocked', reason });
+    assert.equal(state.sent, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state='pending'").get().n, 1);
+    await subject.stop();
+    await channel.stop();
+  });
+}
