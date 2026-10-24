@@ -21,14 +21,9 @@ import {
   classifyCodexSeat,
   inboxNudge,
   newNonce,
-  readQueuedItem,
-  readRolloutNonce,
-  resolvePendingQueue,
-  rolloutStateOf,
   runCodexQueue,
 } from "./codex-queue-io.mjs";
-import { captureProcessGroup, observeProcessGroup } from "./process-group.mjs";
-import { processStartWitness } from "./process-group.mjs";
+import { captureProcessGroup, observeProcessGroup, processStartWitness } from "./process-group.mjs";
 import { checkWindowsCodexQueueGate } from "./windows-codex-queue.mjs";
 
 const QUEUE_TIMEOUT_MS = 10_000;
@@ -87,9 +82,9 @@ function pendingSeats(db) {
   return seats;
 }
 
-function latestConfirmedCursor(db, seat) {
+function latestNotifiedCursor(db, seat) {
   const row = db.prepare(`
-    SELECT up_to FROM beta_codex_queue WHERE seat = ? AND state = 'confirmed'
+    SELECT up_to FROM beta_codex_queue WHERE seat = ? AND (state = 'confirmed' OR queue_item_id IS NOT NULL OR CASE WHEN json_valid(children) THEN json_extract(children, '$.result') END = 'queued')
     ORDER BY id DESC LIMIT 1
   `).get(seat);
   return row?.up_to ?? "";
@@ -107,16 +102,19 @@ function saveSeat(db, { seat, thread = null, codexHome = null, state, reason = "
   });
 }
 
-function setQueueState(db, id, state, queueItemId = undefined, reason = undefined) {
+function setQueueState(db, id, state, reason = undefined) {
   withImmediateTransaction(db, () => {
     if (state === "expired" && reason) {
-      db.prepare("UPDATE beta_codex_queue SET state = ?, children = json_set(children, '$.expiration_reason', ?) WHERE id = ? AND state = 'pending'")
-        .run(state, reason, id);
-    } else if (queueItemId === undefined) {
-      db.prepare("UPDATE beta_codex_queue SET state = ? WHERE id = ? AND state = 'pending'").run(state, id);
+      const row = db.prepare("SELECT children FROM beta_codex_queue WHERE id = ? AND state = 'pending'").get(id);
+      if (!row) return;
+      let children;
+      try { children = JSON.parse(row.children); } catch { /* preserve a damaged record below */ }
+      if (!children || typeof children !== "object" || Array.isArray(children)) children = { state: "unreadable", record: row.children };
+      children.expiration_reason = reason;
+      db.prepare("UPDATE beta_codex_queue SET state = ?, children = ? WHERE id = ? AND state = 'pending'")
+        .run(state, JSON.stringify(children), id);
     } else {
-      db.prepare("UPDATE beta_codex_queue SET state = ?, queue_item_id = ? WHERE id = ? AND state = 'pending'")
-        .run(state, queueItemId, id);
+      db.prepare("UPDATE beta_codex_queue SET state = ? WHERE id = ? AND state = 'pending'").run(state, id);
     }
   });
 }
@@ -139,15 +137,17 @@ function recordChildResult(db, id, result) {
     const row = db.prepare("SELECT children FROM beta_codex_queue WHERE id = ? AND state = 'pending'").get(id);
     if (!row) return;
     let children;
-    try { children = JSON.parse(row.children); } catch { children = { state: "unreadable", reason: "child_group_record_malformed" }; }
+    try { children = JSON.parse(row.children); } catch { children = null; }
+    if (!children || typeof children !== "object" || Array.isArray(children)) children = { state: "unreadable", reason: "child_group_record_malformed" };
     const failedBeforeStart = result.kind === "failed" && result.started === false;
     if (failedBeforeStart) {
       children = { state: "absent", result: result.kind, reason: result.reason };
     } else {
       children.result = result.kind;
+      children.result_reason = result.reason ?? "";
     }
-    db.prepare("UPDATE beta_codex_queue SET children = ?, state = ? WHERE id = ? AND state = 'pending'")
-      .run(JSON.stringify(children), failedBeforeStart ? "expired" : "pending", id);
+    db.prepare("UPDATE beta_codex_queue SET children = ?, state = ?, queue_item_id = COALESCE(?, queue_item_id) WHERE id = ? AND state = 'pending'")
+      .run(JSON.stringify(children), failedBeforeStart ? "expired" : "pending", result.kind === "queued" ? result.queueItemId : null, id);
   });
 }
 
@@ -181,103 +181,124 @@ function bridgeState(runDir, team, agent, projects) {
   try {
     files = readdirSync(runDir).filter((name) => name.startsWith("codex-bridge.") && name.endsWith(".pid"));
   } catch (error) {
-    if (error?.code === "ENOENT") return "stopped";
-    return "unknown";
+    if (error?.code === "ENOENT") return { state: "stopped", reason: "" };
+    return { state: "unknown", reason: `bridge_state_unknown:${runDir}:directory_read_failed` };
   }
-    const identity = `${team}/${agent}`;
+  const identity = `${team}/${agent}`;
+  let stoppedReason = "";
   for (const pidName of files) {
     const pidPath = join(runDir, pidName);
     const metaPath = `${pidPath.slice(0, -4)}.meta`;
+    const unknown = (file, reason) => ({ state: "unknown", reason: `bridge_state_unknown:${file}:${reason}` });
+    const ownFile = pidName === `codex-bridge.${team}.${agent}.pid`;
     let pidText;
     let metaText;
     try {
-      const pidStat = lstatSync(pidPath);
-      if (!pidStat.isFile() || pidStat.isSymbolicLink()) return "unknown";
       const metaStat = lstatSync(metaPath);
-      if (!metaStat.isFile() || metaStat.isSymbolicLink()) return "unknown";
-      pidText = readFileSync(pidPath, "utf8").trim();
+      if (!metaStat.isFile() || metaStat.isSymbolicLink()) {
+        if (ownFile) return unknown(metaPath, "not_regular_file");
+        continue;
+      }
       metaText = readFileSync(metaPath, "utf8");
-    } catch {
-      return "unknown";
+    } catch (error) {
+      if (ownFile) return unknown(metaPath, `read_failed:${error?.code ?? "unknown"}`);
+      continue;
     }
     const fields = Object.create(null);
     for (const line of metaText.split(/\r?\n/)) {
       const at = line.indexOf("=");
       if (at > 0 && !(line.slice(0, at) in fields)) fields[line.slice(0, at)] = line.slice(at + 1);
     }
-    if (!fields.identities) return "unknown";
-    if (!fields.identities.split(",").includes(identity) || fields.type !== "codex") continue;
-    if (!/^\d+$/.test(pidText) || fields.pid !== pidText) return "unknown";
-    if (!projects.some((project) => sameProject(project, fields.project))) return "unknown";
+    if (!fields.identities) {
+      if (ownFile) return unknown(metaPath, "identities_missing");
+      continue;
+    }
+    if (!fields.identities.split(",").includes(identity)) continue;
+    if (fields.type !== "codex") return unknown(metaPath, "type_missing_or_invalid");
+    try {
+      const pidStat = lstatSync(pidPath);
+      if (!pidStat.isFile() || pidStat.isSymbolicLink()) return unknown(pidPath, "not_regular_file");
+      pidText = readFileSync(pidPath, "utf8").trim();
+    } catch (error) { return unknown(pidPath, `read_failed:${error?.code ?? "unknown"}`); }
+    if (!/^\d+$/.test(pidText) || !Number.isSafeInteger(Number(pidText)) || Number(pidText) < 2 || fields.pid !== pidText) return unknown(metaPath, "pid_missing_or_mismatch");
+    // A dead bridge's stale files cannot retain ownership. Probe before any
+    // lease or start-witness comparison, which necessarily fails for dead PIDs.
+    try { process.kill(Number(pidText), 0); } catch (error) {
+      if (error?.code === "ESRCH") { stoppedReason = `bridge_stopped:${pidPath}:pid_absent`; continue; }
+      if (error?.code !== "EPERM") return unknown(pidPath, `pid_probe_failed:${error?.code ?? "unknown"}`);
+    }
+    if (!projects.some((project) => sameProject(project, fields.project))) return unknown(metaPath, "project_missing_or_mismatch");
     // A live PID alone can be a recycled process. Require the bridge's own
     // per-PID lease, matching its recorded pair/project set and start token.
     const leasePath = join(runDir, `codex-bridge-lease.${pidText}`);
     let leaseText;
     try {
       const leaseStat = lstatSync(leasePath);
-      if (!leaseStat.isFile() || leaseStat.isSymbolicLink()) return "unknown";
+      if (!leaseStat.isFile() || leaseStat.isSymbolicLink()) return unknown(leasePath, "not_regular_file");
       leaseText = readFileSync(leasePath, "utf8");
-    } catch {
-      return "unknown";
+    } catch (error) {
+      return unknown(leasePath, `read_failed:${error?.code ?? "unknown"}`);
     }
     const lease = Object.create(null);
     for (const line of leaseText.split(/\r?\n/)) {
       const at = line.indexOf("=");
       if (at > 0 && !(line.slice(0, at) in lease)) lease[line.slice(0, at)] = line.slice(at + 1);
-      else if (at > 0) return "unknown";
+      else if (at > 0) return unknown(leasePath, "duplicate_field");
     }
     const leaseKeys = Object.keys(lease).sort().join(",");
-    if (leaseKeys !== "host,pairs,pid,project,start,startsrc,v") return "unknown";
+    if (leaseKeys !== "host,pairs,pid,project,start,startsrc,v") return unknown(leasePath, "fields_missing_or_invalid");
     const pairHashes = fields.identities.split(",").map((pair) => createHash("sha1").update(pair.replace("/", "\t")).digest("hex")).sort();
     const expectedPairs = createHash("sha1").update(pairHashes.join("\n")).digest("hex");
     const expectedProject = createHash("sha1").update(fields.project).digest("hex");
-    if (lease.v !== "1" || lease.pid !== pidText || lease.project !== expectedProject || lease.pairs !== expectedPairs || lease.host !== hostname() || !lease.start) return "unknown";
+    if (lease.v !== "1" || lease.pid !== pidText || lease.project !== expectedProject || lease.pairs !== expectedPairs || lease.host !== hostname() || !lease.start) return unknown(leasePath, "identity_mismatch");
     const startPrefix = lease.startsrc === "proc" ? "linux" : lease.startsrc === "ps" ? "darwin" : lease.startsrc === "pwsh" ? "windows" : "";
-    if (!startPrefix || processStartWitness(Number(pidText)) !== `${startPrefix}:${lease.start}`) return "unknown";
+    if (!startPrefix || processStartWitness(Number(pidText)) !== `${startPrefix}:${lease.start}`) return unknown(leasePath, "start_witness_missing_or_mismatch");
     try {
       process.kill(Number(pidText), 0);
-      return "running";
+      return { state: "running", reason: "bridge_running" };
     } catch (error) {
-      if (error?.code === "ESRCH") continue;
-      if (error?.code === "EPERM") return "running";
-      return "unknown";
+      if (error?.code === "ESRCH") { stoppedReason = `bridge_stopped:${pidPath}:pid_absent`; continue; }
+      if (error?.code === "EPERM") return { state: "running", reason: "bridge_running" };
+      return unknown(pidPath, `pid_probe_failed:${error?.code ?? "unknown"}`);
     }
   }
-  return "stopped";
+  return { state: "stopped", reason: stoppedReason };
 }
 
-// Missing child records remain fail-closed. Only the Windows unwitnessed-child
-// case below permits a bounded duplicate notice without proving process identity.
-async function pendingObservation(pending, now, observeGroup, timeoutMs, hostPlatform) {
+// Pending rows reserve a writer, never wait for Codex to consume a nudge.
+// Old 1.6.0 receipts are delivery evidence too. Every unresolved reservation,
+// including a crash before child registration, has the same maximum lifetime.
+function pendingObservation(pending, now, observeGroup, timeoutMs, ages) {
   let children;
-  try { children = JSON.parse(pending.children); } catch { return { state: "pending", reason: "child_group_record_unreadable", childrenUnresolved: true }; }
-  const createdAt = Date.parse(pending.created_at);
-  const ageMs = Number.isFinite(createdAt) ? now() - createdAt : NaN;
-  if (children.state === "incomplete") return { state: "pending", reason: "queue_child_state_incomplete", childrenUnresolved: true };
-  if (children.state === "complete" || (children.state === "unreadable" && children.pgid !== undefined)) {
+  try { children = JSON.parse(pending.children); } catch { /* incomplete or damaged record */ }
+  let reason = "child_group_record_unreadable";
+  if (children?.state === "absent") return {
+    state: pending.queue_item_id || children.result === "queued" ? "confirmed" : "expired",
+    reason: children.result_reason || children.reason || "queue_result_unavailable",
+  };
+  if (children?.state === "complete" || (children?.state === "unreadable" && children.pgid !== undefined)) {
     let group;
     try { group = observeGroup(children); } catch { group = { state: "unreadable", reason: "child_group_observation_failed" }; }
-    if (group?.state !== "absent") {
-      // A live pid without an original witness may have been reused. Do not
-      // adopt its identity, but do not let it silence notices indefinitely:
-      // after the queue timeout plus hard-kill grace, allow a duplicate nudge.
-      if (hostPlatform === "win32" && children.state === "unreadable"
-          && children.reason === "child_start_witness_unavailable"
-          && Number.isSafeInteger(children.pgid) && children.pgid >= 2
-          && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1
-          && Number.isSafeInteger(ageMs) && ageMs >= timeoutMs + QUEUE_KILL_GRACE_MS) {
-        return { state: "expired", reason: "child_start_witness_timeout" };
-      }
-      return { state: "pending", reason: group?.reason ?? "queue_child_still_running", childrenUnresolved: true };
-    }
-  } else if (children.state !== "absent") {
-    return { state: "pending", reason: children.reason ?? "child_group_record_unreadable", childrenUnresolved: true };
+    if (group?.state === "absent") return {
+      state: pending.queue_item_id || children.result === "queued" ? "confirmed" : "expired",
+      reason: children.result_reason || "queue_result_unavailable",
+    };
+    reason = group?.reason ?? "queue_child_still_running";
+  } else if (pending.children === "incomplete" || children?.state === "incomplete") {
+    reason = "queue_child_state_incomplete";
+  } else if (children?.reason) reason = children.reason;
+  const clock = now();
+  // A corrupt/future timestamp must not become a permanent reservation. The
+  // first observation supplies a bounded fallback age for that row.
+  if (!ages.has(pending.id)) {
+    const created = Date.parse(pending.created_at);
+    ages.set(pending.id, Number.isFinite(created) && created <= clock ? created : clock);
   }
-  const queueObservation = pending.queue_item_id
-    ? readQueuedItem(pending.codex_home, pending.queue_item_id, pending.thread)
-    : { state: "absent" };
-  return readRolloutNonce(pending.codex_home, pending.thread, pending.nonce).then((rolloutObservation) =>
-    resolvePendingQueue({ queueObservation, rolloutObservation, ageMs }));
+  const start = ages.get(pending.id);
+  if (clock - start >= timeoutMs + QUEUE_KILL_GRACE_MS) {
+    return { state: "expired", reason: `queue_child_timeout:${reason}` };
+  }
+  return { state: "pending", reason, childrenUnresolved: true };
 }
 
 export function createCodexQueueChannel({
@@ -303,6 +324,8 @@ export function createCodexQueueChannel({
   let stopped = false;
   let activeController = null;
   let activePoll = null;
+  const pendingAges = new Map();
+  const homeKey = (home) => hostPlatform === "win32" ? resolve(home).toLowerCase() : resolve(home);
 
   async function pollSeat(registration, paths, blockedCodexHomes) {
     const { team, agent, teamConfig, registered = true } = registration;
@@ -318,66 +341,38 @@ export function createCodexQueueChannel({
       // blocked exactly as before.
       const current = readSession(join(installRoot, "run"), team, agent);
       if (current.state === "present" && current.record.thread && current.record.thread !== pending.thread) {
-        const old = await pendingObservation(pending, now, observeGroup, timeoutMs, hostPlatform);
+        const old = pendingObservation(pending, now, observeGroup, timeoutMs, pendingAges);
         if (!old.childrenUnresolved) {
-          setQueueState(db, pending.id, "expired", undefined, old.state === "expired" ? old.reason : undefined);
+          setQueueState(db, pending.id, "expired", old.state === "expired" ? old.reason : undefined);
           pending = null;
         }
       }
     }
     if (pending) {
-      const observation = await pendingObservation(pending, now, observeGroup, timeoutMs, hostPlatform);
-      if (observation.childrenUnresolved && pending.codex_home) blockedCodexHomes.add(pending.codex_home);
+      const observation = pendingObservation(pending, now, observeGroup, timeoutMs, pendingAges);
+      if (observation.childrenUnresolved && pending.codex_home) blockedCodexHomes.add(homeKey(pending.codex_home));
+      if (observation.state !== "pending") {
+        setQueueState(db, pending.id, observation.state, observation.reason);
+        pendingAges.delete(pending.id);
+      }
       if (!registered) {
-        if (observation.state === "confirmed") setQueueState(db, pending.id, "confirmed");
-        else if (observation.state === "expired") setQueueState(db, pending.id, "expired", undefined, observation.reason);
         saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "unaddressable", reason: "seat_registration_missing" }, now);
         return;
       }
-      if (hostPlatform === "win32") {
-        const gate = windowsGate({ executable: executable ?? db.prepare('SELECT codex_path FROM meta').get()?.codex_path, env });
-        if (gate.state !== "ok") {
-          if (observation.state === "confirmed") setQueueState(db, pending.id, "confirmed");
-          else if (observation.state === "expired") setQueueState(db, pending.id, "expired", undefined, observation.reason);
-          const reason = observation.state === "pending"
-            ? `${gate.reason};pending:${observation.reason}`
-            : gate.reason;
-          saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: "blocked", reason }, now);
-          return;
-        }
-      }
-      if (observation.state === "confirmed") {
-        setQueueState(db, pending.id, "confirmed");
-        const knownBridge = bridge === "stopped" || bridge === "running";
-        saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home, state: !knownBridge ? "blocked" : bridge === "running" ? "bridged" : "addressable", reason: !knownBridge ? "bridge_state_unknown" : bridge === "running" ? "bridge_running" : "" }, now);
-        return;
-      } else if (observation.state === "expired") {
-        setQueueState(db, pending.id, "expired", undefined, observation.reason);
-        if (observation.reason === "child_start_witness_timeout") {
-          const knownBridge = bridge === "stopped" || bridge === "running";
-          saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home,
-            state: !knownBridge ? "blocked" : bridge === "running" ? "bridged" : "addressable",
-            reason: observation.reason }, now);
-          return;
-        }
-      } else {
-        const knownBridge = bridge === "stopped" || bridge === "running";
-        saveSeat(db, {
-          seat,
-          thread: pending.thread,
-          codexHome: pending.codex_home,
-          state: !knownBridge ? "blocked" : bridge === "running" ? "bridged" : "addressable",
-          reason: !knownBridge ? `bridge_state_unknown;pending:${observation.reason}` : bridge === "running" ? `bridge_running;pending:${observation.reason}` : observation.reason,
-        }, now);
+      // Keep an expiration visible for this poll; retry on the next one.
+      if (observation.state !== "confirmed") {
+        saveSeat(db, { seat, thread: pending.thread, codexHome: pending.codex_home,
+          state: bridge.state === "running" ? "bridged" : bridge.state === "unknown" ? "blocked" : "addressable",
+          reason: bridge.state === "unknown" ? `${bridge.reason};pending:${observation.reason}` : observation.reason }, now);
         return;
       }
     }
     if (!registered) return;
-    if (bridge !== "stopped" && bridge !== "running") {
-      saveSeat(db, { seat, state: "blocked", reason: "bridge_state_unknown" }, now);
+    if (bridge.state !== "stopped" && bridge.state !== "running") {
+      saveSeat(db, { seat, state: "blocked", reason: bridge.reason }, now);
       return;
     }
-    if (bridge === "running") {
+    if (bridge.state === "running") {
       saveSeat(db, { seat, state: "bridged", reason: "bridge_running" }, now);
       return;
     }
@@ -457,7 +452,7 @@ export function createCodexQueueChannel({
 
     let snapshot;
     try {
-      snapshot = readSnapshot(store, team, agent, latestConfirmedCursor(db, seat));
+      snapshot = readSnapshot(store, team, agent, latestNotifiedCursor(db, seat));
     } catch (error) {
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason: `message_store_unreadable:${error.message}` }, now);
       return;
@@ -466,18 +461,19 @@ export function createCodexQueueChannel({
     }
 
     const nonce = newNonce();
-    const rollout = await readRolloutNonce(record.codex_home, record.thread, nonce);
-    const classification = classifyCodexSeat({ roleSession: record, bridgeState: "stopped", rolloutState: rolloutStateOf(rollout) });
+    // The queue CLI owns thread classification; no rollout/queue DB read gates
+    // acceptance or the next unread snapshot.
+    const classification = classifyCodexSeat({ roleSession: record, bridgeState: "stopped" });
     if (classification.state !== "addressable") {
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: classification.state, reason: classification.reason }, now);
       return;
     }
-    if (blockedCodexHomes.has(record.codex_home)) {
+    if (blockedCodexHomes.has(homeKey(record.codex_home))) {
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: "shared_codex_home_queue_pending" }, now);
       return;
     }
     if (!snapshot.unread || stopped) {
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable" }, now);
+      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: bridge.reason }, now);
       return;
     }
 
@@ -510,23 +506,19 @@ export function createCodexQueueChannel({
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: result.reason }, now);
       return;
     }
+    // recordChildResult persisted the receipt atomically with the result. A
+    // pending writer reserves CODEX_HOME, but its snapshot is already notified.
+    const child = pendingObservation(readPending(db, seat), now, observeGroup, timeoutMs, pendingAges);
+    if (child.state !== "pending") setQueueState(db, id, child.state, child.reason);
+    if (child.childrenUnresolved) blockedCodexHomes.add(homeKey(record.codex_home));
     if (result.kind === "archived" || result.kind === "no_rollout") {
-      setQueueState(db, id, "expired");
       const reason = result.kind === "archived" ? "thread_archived" : "codex_home_mismatch";
       saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "blocked", reason }, now);
       return;
     }
+
     if (result.kind === "queued") {
-      setQueueState(db, id, "pending", result.queueItemId);
-      const firstCheck = await pendingObservation(readPending(db, seat), now, observeGroup, timeoutMs, hostPlatform);
-      if (firstCheck.state === "confirmed") {
-        setQueueState(db, id, "confirmed");
-        saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable" }, now);
-        return;
-      }
-      if (firstCheck.state === "expired") setQueueState(db, id, "expired", undefined, firstCheck.reason);
-      if (firstCheck.childrenUnresolved && record.codex_home) blockedCodexHomes.add(record.codex_home);
-      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: firstCheck.reason }, now);
+      saveSeat(db, { seat, thread: record.thread, codexHome: record.codex_home, state: "addressable", reason: child.state === "expired" || child.childrenUnresolved ? child.reason : bridge.reason }, now);
       return;
     }
     saveSeat(db, {
@@ -549,6 +541,12 @@ export function createCodexQueueChannel({
       }
       const paths = storagePaths(installRoot, env);
       const blockedCodexHomes = new Set();
+      const pendingRows = db.prepare("SELECT id, codex_home, queue_item_id, children, created_at FROM beta_codex_queue WHERE state='pending'").all();
+      const activeIds = new Set(pendingRows.map(row => row.id));
+      for (const id of pendingAges.keys()) if (!activeIds.has(id)) pendingAges.delete(id);
+      for (const row of pendingRows) {
+        if (pendingObservation(row, now, observeGroup, timeoutMs, pendingAges).childrenUnresolved && row.codex_home) blockedCodexHomes.add(homeKey(row.codex_home));
+      }
       const seats = [...roster.seats];
       const registeredKeys = new Set(seats.map(({ team, agent }) => seatKey(team, agent)));
       const unsettledSeats = pendingSeats(db);
