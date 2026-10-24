@@ -6,6 +6,7 @@
 // read-only feed, plus the left-hand member list.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -215,11 +216,8 @@ struct StoreInfo {
 /// `api.sh` is the contract; reading the file directly is an optimisation
 /// that only applies when the driver is one this app can parse.
 ///
-/// Anything else — an unknown driver, a failed lookup — falls back to going
-/// through `api.sh`, which is slower and always right. It must never fall
-/// back to showing nothing: "I could not read it" rendered as an empty room
-/// is the same failure as the three this branch fixes, and the room looks
-/// identical in both cases.
+/// Other drivers, and older cores without the store endpoint, go through
+/// `api.sh`. A successful history read is required to initialize that fallback.
 const DIRECTLY_READABLE_DRIVER: &str = "sqlite";
 
 fn store_info(team: &str) -> Result<StoreInfo, String> {
@@ -230,28 +228,16 @@ fn store_info(team: &str) -> Result<StoreInfo, String> {
         .ok_or_else(|| format!("no store info for team {team}"))
 }
 
-/// The store to read directly for `team`, or `None` when the app must go
-/// through `api.sh` instead.
-///
-/// Logs the reason on the way past. Distinguishing "slow but working" from
-/// "fast but wrong" after the fact needs the fallback to leave a mark.
-fn direct_store_path(team: &str) -> Option<PathBuf> {
-    match store_info(team) {
-        Ok(info) if !info.exists => None,
-        Ok(info) if info.driver == DIRECTLY_READABLE_DRIVER => Some(PathBuf::from(info.path)),
-        Ok(info) => {
-            eprintln!(
-                "agmsg: team {team} uses the '{}' driver, which this app cannot read \
-                 directly — falling back to api.sh",
-                info.driver
-            );
-            None
-        }
-        Err(e) => {
-            eprintln!("agmsg: could not resolve the store for team {team} ({e}) — falling back to api.sh");
-            None
-        }
-    }
+/// A missing SQLite store still has a path to watch from cursor zero.
+fn direct_store_path(info: &StoreInfo) -> Option<PathBuf> {
+    (info.driver == DIRECTLY_READABLE_DRIVER).then(|| PathBuf::from(&info.path))
+}
+
+fn api_fallback_store(team: &str, error: &str) -> StoreInfo {
+    eprintln!("agmsg: could not resolve the store for team {team} ({error}); trying API history");
+    // No guessed path: this target can only initialize through a successful
+    // API history read, including on cores predating the store endpoint.
+    StoreInfo { driver: "api".into(), path: String::new(), exists: false }
 }
 
 /// New messages, from the event log and the legacy table together.
@@ -329,6 +315,19 @@ struct Cursors {
     legacy_id: i64,
 }
 
+/// Initial watcher position: history is loaded separately and must not be
+/// replayed as fresh notifications when a store is opened or the app reloads.
+fn current_cursors(conn: &rusqlite::Connection) -> Cursors {
+    Cursors {
+        seq: conn
+            .query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))
+            .unwrap_or(0),
+        legacy_id: conn
+            .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0))
+            .unwrap_or(0),
+    }
+}
+
 /// Reads rows newer than `cursors`, advances both past them, and returns the
 /// messages among them -- a legacy copy of a message whose event is also
 /// there is advanced past but not returned (see [`messages_since_sql`]).
@@ -396,82 +395,242 @@ fn open_ro(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Every distinct store behind the teams this install knows about.
-///
-/// Deduplicated by path, which is what makes one function serve both
-/// partitions: under a shared store every team resolves to the same file and
-/// this yields one connection — today's behaviour exactly — while under
-/// per-team stores it yields one per team. The app does not branch on the
-/// partition because it does not need to know it.
-///
-/// Teams whose driver the app cannot read directly are absent here; their
-/// messages arrive through `api.sh` like everyone's history does.
-/// Live updates for a team the app cannot read directly, via `api.sh`.
-///
-/// Returns the messages after `last_seen` and the new watermark. `last_seen`
-/// is `None` the first time a team is seen, and then nothing is emitted —
-/// only the watermark is taken. The room loads its own history; replaying it
-/// here would duplicate everything already on screen.
-///
-/// Ids are opaque, so "after" cannot be a comparison. The list arrives
-/// oldest-first, so position in it is the only ordering available: find the
-/// watermark and take what follows. If it is not in the window at all —
-/// more than `limit` messages arrived between polls — the tail is emitted
-/// rather than nothing, since dropping messages silently is the failure this
-/// whole branch exists to remove.
-fn fallback_new_messages(team: &str, last_seen: Option<&str>) -> (Vec<Message>, Option<String>) {
-    const WINDOW: usize = 50;
-    let raw = match run_script(
-        "api.sh",
-        &["get", "teams", team, "messages", "--limit", "50"],
-    ) {
-        Ok(raw) => raw,
-        Err(_) => return (Vec::new(), last_seen.map(str::to_string)),
-    };
-    let all: Vec<Message> = parse_jsonl::<ApiMessage>(&raw)
-        .into_iter()
-        .map(|m| Message {
-            id: m.id,
-            team: m.team,
-            from: m.from,
-            to: m.to,
-            body: m.body,
-            created_at: m.created_at,
-        })
-        .collect();
-
+/// `None` is an initialized, empty API baseline. Uninitialized teams have no
+/// entry in WatcherStores, so the first later message must be emitted.
+fn messages_after(all: Vec<Message>, last_seen: Option<&str>) -> (Vec<Message>, Option<String>) {
     let watermark = all.last().map(|m| m.id.clone()).or(last_seen.map(str::to_string));
     let Some(last_seen) = last_seen else {
-        return (Vec::new(), watermark);
+        return (all, watermark);
     };
     let fresh = match all.iter().position(|m| m.id == last_seen) {
         Some(i) => all[i + 1..].to_vec(),
-        // Fell out of the window: everything here is newer than what was
-        // last seen, so all of it is fresh. Capped by WINDOW already.
+        // The watermark fell out of the bounded API window.
         None => all,
     };
-    debug_assert!(fresh.len() <= WINDOW);
     (fresh, watermark)
 }
 
-fn watchable_stores() -> (Vec<PathBuf>, Vec<String>) {
-    let teams = match run_script("api.sh", &["get", "teams"]) {
-        Ok(raw) => parse_jsonl::<ApiTeam>(&raw),
-        Err(_) => return (Vec::new(), Vec::new()),
-    };
-    let mut direct: Vec<PathBuf> = Vec::new();
-    let mut via_api: Vec<String> = Vec::new();
-    for t in teams {
-        match direct_store_path(&t.name) {
-            Some(p) => {
-                if !direct.contains(&p) {
-                    direct.push(p);
+/// The initial history command and the polling thread share this state. The
+/// frontend installs its event listener before requesting initial history.
+#[derive(Clone, Default)]
+pub struct MessageWatcher(Arc<Mutex<WatcherStores>>);
+
+struct DirectStore {
+    path: PathBuf,
+    // None means the resolved path did not exist. Retain cursor zero when it
+    // appears: taking MAX then would silently skip its first message.
+    conn: Option<rusqlite::Connection>,
+    cursors: Cursors,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum WatchRoute {
+    Direct(PathBuf),
+    Api,
+}
+
+#[derive(Default)]
+struct WatcherStores {
+    direct: Vec<DirectStore>,
+    // An entry exists only after a successful API baseline read. Its None
+    // watermark means that successful read was empty, not "not initialized".
+    via_api: Vec<(String, Option<String>)>,
+    routes: Vec<(String, WatchRoute)>,
+    // Route changes reconcile room history, never replay it into live panes.
+    refresh_teams: Vec<String>,
+    revision: u64,
+}
+
+fn open_existing_ro(path: &std::path::Path) -> Result<Option<rusqlite::Connection>, String> {
+    match std::fs::metadata(path) {
+        Ok(_) => open_ro(path).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not inspect {}: {e}", path.display())),
+    }
+}
+
+impl MessageWatcher {
+    fn initial_history_with(
+        &self,
+        team: &str,
+        limit: u32,
+        resolve: impl FnOnce() -> Result<StoreInfo, String>,
+        mut history: impl FnMut(u32) -> Result<Vec<Message>, String>,
+    ) -> Result<Vec<Message>, String> {
+        // Keep the lock through baseline and history. Subprocesses can delay a
+        // poll/another initial load, but no poll can initialize past a history
+        // snapshot and lose a message in the handoff.
+        let mut stores = self.0.lock().map_err(|e| e.to_string())?;
+        let info = match resolve() {
+            Ok(info) => info,
+            // A transient lookup failure must not replace a working route.
+            // Older cores without this endpoint still get the API fallback
+            // when a team has no established watcher yet.
+            Err(_) if stores.routes.iter().any(|(t, _)| t == team) => return history(limit),
+            Err(e) => api_fallback_store(team, &e),
+        };
+        stores.initial_history_with(team, limit, info, history)
+    }
+}
+
+impl WatcherStores {
+    fn knows(&self, team: &str, info: &StoreInfo) -> bool {
+        let route = direct_store_path(info).map(WatchRoute::Direct).unwrap_or(WatchRoute::Api);
+        self.routes.iter().any(|(t, current)| t == team && current == &route)
+    }
+
+    fn commit_route(&mut self, team: &str, route: WatchRoute) {
+        if let Some((_, current)) = self.routes.iter_mut().find(|(t, _)| t == team) {
+            if *current == route { return; }
+            *current = route;
+            if !self.refresh_teams.iter().any(|t| t == team) {
+                self.refresh_teams.push(team.to_string());
+            }
+        } else {
+            self.routes.push((team.to_string(), route));
+        }
+        self.revision = self.revision.wrapping_add(1);
+        self.via_api.retain(|(team, _)| self.routes.iter().any(|(t, r)| t == team && *r == WatchRoute::Api));
+        // A shared connection's cursor belongs to every team still using it.
+        self.direct.retain(|store| self.routes.iter().any(|(_, route)| {
+            matches!(route, WatchRoute::Direct(path) if path == &store.path)
+        }));
+    }
+
+    fn take_refreshes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.refresh_teams)
+    }
+
+    fn discover_if_current(
+        &mut self,
+        team: &str,
+        revision: u64,
+        resolved: Result<StoreInfo, String>,
+        history: impl FnMut(u32) -> Result<Vec<Message>, String>,
+    ) -> Result<(), String> {
+        // A history request may have established a newer route while this
+        // background resolver ran outside the lock. Retry on the next scan.
+        if revision != self.revision { return Ok(()); }
+        let info = match resolved {
+            Ok(info) => info,
+            Err(_) if self.routes.iter().any(|(t, _)| t == team) => return Ok(()),
+            Err(e) => api_fallback_store(team, &e),
+        };
+        if self.knows(team, &info) { return Ok(()); }
+        // This snapshot reconciles the room after a route change. Rows that
+        // predate the new baseline are history, not new pane kickoffs; live
+        // delivery during driver migration remains best effort.
+        self.initial_history_with(team, 50, info, history).map(|_| ())
+    }
+
+    fn initial_history_with(
+        &mut self,
+        team: &str,
+        limit: u32,
+        info: StoreInfo,
+        mut history: impl FnMut(u32) -> Result<Vec<Message>, String>,
+    ) -> Result<Vec<Message>, String> {
+        if let Some(path) = direct_store_path(&info) {
+            if let Some(store) = self.direct.iter_mut().find(|s| s.path == path) {
+                if store.conn.is_none() {
+                    store.conn = open_existing_ro(&path)?;
+                }
+                if info.exists && store.conn.is_none() {
+                    return Err(format!("reported store {} is missing; retry history", path.display()));
+                }
+                let rows = if store.conn.is_some() { history(limit)? } else { Vec::new() };
+                self.commit_route(team, WatchRoute::Direct(path));
+                return Ok(rows);
+            }
+
+            let conn = open_existing_ro(&path)?;
+            if info.exists && conn.is_none() {
+                return Err(format!("reported store {} is missing; retry history", path.display()));
+            }
+            let cursors = match &conn {
+                Some(conn) if info.exists => current_cursors(conn),
+                _ => Cursors::default(),
+            };
+            // A missing store is a valid empty snapshot, without invoking an
+            // API command that might create it. Register its pending path.
+            let rows = if conn.is_some() { history(limit)? } else { Vec::new() };
+            self.direct.push(DirectStore { path: path.clone(), conn, cursors });
+            self.commit_route(team, WatchRoute::Direct(path));
+            return Ok(rows);
+        }
+
+        if self.via_api.iter().any(|(t, _)| t == team) {
+            return history(limit);
+        }
+        let baseline = history(50)?;
+        let watermark = baseline.last().map(|m| m.id.clone());
+        let rows = if limit == 50 { baseline } else { history(limit)? };
+        // Resolver failure alone, or API history failure, installs no marker.
+        self.via_api.push((team.to_string(), watermark));
+        self.commit_route(team, WatchRoute::Api);
+        Ok(rows)
+    }
+
+    fn poll_direct(&mut self) -> Vec<Message> {
+        let mut fresh = Vec::new();
+        let routes = &self.routes;
+        for store in &mut self.direct {
+            if store.conn.is_none() {
+                match open_existing_ro(&store.path) {
+                    Ok(conn) => store.conn = conn,
+                    Err(e) => {
+                        eprintln!("agmsg: could not open watched store: {e}");
+                        continue;
+                    }
                 }
             }
-            None => via_api.push(t.name),
+            if let Some(conn) = &store.conn {
+                match read_new_messages(conn, &mut store.cursors) {
+                    Ok(rows) => fresh.extend(rows.into_iter().filter(|message| {
+                        match routes.iter().find(|(team, _)| team == &message.team) {
+                            // Shared stores can contain a newly created team
+                            // before discovery. Do not consume and drop it.
+                            None => true,
+                            Some((_, WatchRoute::Direct(path))) => path == &store.path,
+                            Some((_, WatchRoute::Api)) => false,
+                        }
+                    })),
+                    Err(e) => eprintln!("agmsg: could not poll {}: {e}", store.path.display()),
+                }
+            }
+        }
+        fresh
+    }
+
+    #[cfg(test)]
+    fn poll_api_with(
+        &mut self,
+        mut history: impl FnMut(&str) -> Result<Vec<Message>, String>,
+    ) -> Vec<Message> {
+        let teams: Vec<_> = self.via_api.iter().map(|(team, _)| team.clone()).collect();
+        teams.into_iter().flat_map(|team| self.poll_api_team_with(&team, || history(&team))).collect()
+    }
+
+    fn poll_api_team_with(
+        &mut self,
+        team: &str,
+        history: impl FnOnce() -> Result<Vec<Message>, String>,
+    ) -> Vec<Message> {
+        let Some((_, seen)) = self.via_api.iter_mut().find(|(t, _)| t == team) else {
+            return Vec::new();
+        };
+        match history() {
+            Ok(rows) => {
+                let (fresh, watermark) = messages_after(rows, seen.as_deref());
+                *seen = watermark;
+                fresh
+            }
+            Err(e) => {
+                eprintln!("agmsg: could not poll team {team}: {e}");
+                Vec::new()
+            }
         }
     }
-    (direct, via_api)
 }
 
 #[derive(Clone, Serialize)]
@@ -869,33 +1028,50 @@ pub fn agmsg_members(team: String) -> Result<Vec<Member>, String> {
 /// no local re-sort needed (see that command's own ordering note).
 #[tauri::command]
 pub fn agmsg_messages(
+    watcher: tauri::State<'_, MessageWatcher>,
     team: String,
     limit: Option<u32>,
     // Opaque, like the id it pages from — `api.sh` deliberately does not
     // numeric-filter this one, "since event-log ids are UUIDs, not numeric".
     before_id: Option<String>,
 ) -> Result<Vec<Message>, String> {
-    let limit_s = limit.unwrap_or(30).to_string();
-    let mut args = vec!["get", "teams", &team, "messages", "--limit", &limit_s];
-    if let Some(id) = before_id.as_deref() {
+    let limit = limit.unwrap_or(30);
+    if before_id.is_some() {
+        return message_history(&team, limit, before_id.as_deref());
+    }
+    watcher.initial_history_with(
+        &team,
+        limit,
+        || store_info(&team),
+        |limit| message_history(&team, limit, None),
+    )
+}
+
+fn message_history(team: &str, limit: u32, before_id: Option<&str>) -> Result<Vec<Message>, String> {
+    let limit_s = limit.to_string();
+    let mut args = vec!["get", "teams", team, "messages", "--limit", &limit_s];
+    if let Some(id) = before_id {
         args.push("--before-id");
         args.push(id);
     }
     let raw = run_script("api.sh", &args)?;
-    // Every row is kept. The previous version parsed the id as an integer
-    // inside a filter_map, so a message whose id was not numeric vanished
-    // rather than surfacing as an error — which is every event-log message.
-    Ok(parse_jsonl::<ApiMessage>(&raw)
-        .into_iter()
-        .map(|m| Message {
+    parse_message_history(&raw)
+}
+
+fn parse_message_history(raw: &str) -> Result<Vec<Message>, String> {
+    // A malformed response must not become a successful empty API baseline.
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<ApiMessage>(line).map_err(|e| e.to_string()))
+        .map(|row| row.map(|m| Message {
             id: m.id,
             team: m.team,
             from: m.from,
             to: m.to,
             body: m.body,
             created_at: m.created_at,
-        })
-        .collect())
+        }))
+        .collect()
 }
 
 /// Run an agmsg script (scripts/<name>) with args. All registry mutations go
@@ -1038,76 +1214,56 @@ pub fn agmsg_delivery_mode(agent_type: String, project: String) -> Result<String
 /// Poll the DB for new rows and emit each as an `agmsg-message` event so the
 /// team room updates live (and so spawned panes can be fed via stdin-inject).
 pub fn start_watcher(app: AppHandle) {
+    let watcher = app.state::<MessageWatcher>().inner().clone();
     thread::spawn(move || {
-        // agmsg may not be installed yet at startup — the first-run flow
-        // installs it (and creates the DB) after this thread has already
-        // started. Retry instead of giving up once, so that session isn't
-        // permanently missing live updates and stdin-inject delivery.
-        // One open connection and cursor pair per store, keyed by path.
-        let mut open: Vec<(PathBuf, rusqlite::Connection, Cursors)> = Vec::new();
-        // Re-enumerating costs a subprocess per team, so it happens on a much
-        // slower beat than the poll. `join` creating a team is an ordinary
-        // action, though, so it cannot be startup-only: "I joined and the app
-        // never showed it, until I restarted" is a bug report nobody can
-        // diagnose.
+        // Discovery and API polling cost subprocesses; direct reads stay on
+        // the fast beat. Initial history also registers its requested team,
+        // so a newly joined team need not wait for this rescan.
         let mut ticks_until_rescan = 0u32;
-        // Teams the app cannot read directly, and how far each has been read.
-        // Polled on the rescan beat, not the fast one: this path costs a
-        // subprocess per team per poll.
-        let mut via_api: Vec<(String, Option<String>)> = Vec::new();
-
         loop {
-            if ticks_until_rescan == 0 {
-                ticks_until_rescan = 12; // ~10s at the poll interval below
-                let (direct, fallback) = watchable_stores();
-                for team in fallback {
-                    if !via_api.iter().any(|(t, _)| t == &team) {
-                        via_api.push((team, None));
-                    }
-                }
-                for (team, seen) in via_api.iter_mut() {
-                    let (fresh, watermark) = fallback_new_messages(team, seen.as_deref());
-                    *seen = watermark;
-                    for m in fresh {
-                        let _ = app.emit("agmsg-message", m);
-                    }
-                }
-                for path in direct {
-                    if open.iter().any(|(p, _, _)| p == &path) {
-                        continue;
-                    }
-                    if let Ok(conn) = open_ro(&path) {
-                        // Start at the current end of both id spaces: the room
-                        // loads its own history separately, so replaying it
-                        // here would double every message already on screen.
-                        let cursors = Cursors {
-                            seq: conn
-                                .query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| {
-                                    r.get(0)
-                                })
-                                .unwrap_or(0),
-                            legacy_id: conn
-                                .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| {
-                                    r.get(0)
-                                })
-                                .unwrap_or(0),
+            let rescan = ticks_until_rescan == 0;
+            if rescan { ticks_until_rescan = 12; }
+            ticks_until_rescan -= 1;
+            let mut fresh = Vec::new();
+            if rescan {
+                // Enumerating and resolving stores can be slow. Do both
+                // outside the mutex; only each team's baseline/history is
+                // serialized with initial loads and cursor advancement.
+                if let Ok(raw) = run_script("api.sh", &["get", "teams"]) {
+                    for team in parse_jsonl::<ApiTeam>(&raw) {
+                        let revision = match watcher.0.lock() {
+                            Ok(stores) => stores.revision,
+                            Err(_) => continue,
                         };
-                        open.push((path, conn, cursors));
+                        let info = store_info(&team.name);
+                        if let Ok(mut stores) = watcher.0.lock() {
+                            if let Err(e) = stores.discover_if_current(&team.name, revision, info, |limit| {
+                                message_history(&team.name, limit, None)
+                            }) {
+                                eprintln!("agmsg: could not initialize watcher for {}: {e}", team.name);
+                            }
+                        }
+                    }
+                }
+                let api_teams: Vec<_> = watcher.0.lock().map(|stores| {
+                    stores.via_api.iter().map(|(team, _)| team.clone()).collect()
+                }).unwrap_or_default();
+                for team in api_teams {
+                    if let Ok(mut stores) = watcher.0.lock() {
+                        fresh.extend(stores.poll_api_team_with(&team, || message_history(&team, 50, None)));
                     }
                 }
             }
-            ticks_until_rescan -= 1;
-
-            // A read failure is transient here (a WAL checkpoint, a store
-            // being recreated), not a reason to end the thread — the previous
-            // version returned on a prepare error and the session went
-            // silently dead for the rest of its life.
-            for (_, conn, cursors) in open.iter_mut() {
-                if let Ok(new_rows) = read_new_messages(conn, cursors) {
-                    for m in new_rows {
-                        let _ = app.emit("agmsg-message", m);
-                    }
-                }
+            let refresh_teams = if let Ok(mut stores) = watcher.0.lock() {
+                fresh.extend(stores.poll_direct());
+                stores.take_refreshes()
+            } else { Vec::new() };
+            // Callbacks can request history; never emit while holding state.
+            for team in refresh_teams {
+                let _ = app.emit("agmsg-history-refresh", team);
+            }
+            for message in fresh {
+                let _ = app.emit("agmsg-message", message);
             }
             thread::sleep(Duration::from_millis(800));
         }
@@ -1531,6 +1687,465 @@ mod tests {
         assert!(again.is_empty(), "already-seen rows must not be re-emitted");
     }
 
+    #[test]
+    fn an_event_store_without_legacy_links_preserves_both_message_sources() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (
+               seq INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL,
+               id TEXT NOT NULL, team TEXT, from_agent TEXT, to_agent TEXT,
+               body TEXT, msg_id TEXT, agent TEXT, at TEXT NOT NULL);
+             CREATE TABLE messages (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, team TEXT NOT NULL,
+               from_agent TEXT NOT NULL, to_agent TEXT NOT NULL, body TEXT NOT NULL,
+               created_at TEXT NOT NULL, read_at TEXT);
+             INSERT INTO messages VALUES
+               (1,'t','leader','worker','legacy','2026-01-01T00:00:00Z',NULL),
+               (2,'t','leader','worker','projected','2026-01-01T00:00:02Z',NULL);
+             INSERT INTO events(seq,type,id,team,from_agent,to_agent,body,at) VALUES
+               (1,'message_sent','event-only','t','leader','worker','event',
+                '2026-01-01T00:00:01Z'),
+               (-1,'message_sent','projected-copy','t','leader','worker','projected',
+                '2026-01-01T00:00:02Z');",
+        )
+        .unwrap();
+        let mut cursors = super::Cursors::default();
+        let got = super::read_new_messages(&conn, &mut cursors).unwrap();
+        assert_eq!(
+            got.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["1", "event-only", "2"],
+            "the middle fallback must retain event-only messages and the legacy \
+             copy of a negative projection when legacy_id does not exist"
+        );
+        assert_eq!((cursors.seq, cursors.legacy_id), (1, 2));
+        assert!(super::read_new_messages(&conn, &mut cursors).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_live_linked_message_arrives_once_after_startup_and_not_again_on_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        store_with(
+            dir.path(),
+            &[("earlier-event", "2026-01-01T00:00:00Z")],
+            &["2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z"],
+        );
+        let conn = super::open_ro(&dir.path().join("db/messages.db")).unwrap();
+        let mut cursors = super::current_cursors(&conn);
+        assert_eq!((cursors.seq, cursors.legacy_id), (1, 2));
+        assert!(super::read_new_messages(&conn, &mut cursors).unwrap().is_empty());
+
+        add_linked(dir.path(), "live-event", "2026-01-01T00:00:02Z", None);
+        let got = super::read_new_messages(&conn, &mut cursors).unwrap();
+        assert_eq!(
+            got.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["live-event"]
+        );
+        assert_eq!((cursors.seq, cursors.legacy_id), (2, 3));
+
+        // A lagging legacy cursor advances over the mirror without repeating
+        // the event that has already been observed.
+        let mut legacy_behind = super::Cursors { seq: 2, legacy_id: 2 };
+        assert!(super::read_new_messages(&conn, &mut legacy_behind).unwrap().is_empty());
+        assert_eq!((legacy_behind.seq, legacy_behind.legacy_id), (2, 3));
+
+        // The opposite skew must still emit the unseen event.
+        let mut event_behind = super::Cursors { seq: 1, legacy_id: 3 };
+        let got = super::read_new_messages(&conn, &mut event_behind).unwrap();
+        assert_eq!(
+            got.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["live-event"]
+        );
+        assert_eq!((event_behind.seq, event_behind.legacy_id), (2, 3));
+
+        let mut reloaded = super::current_cursors(&conn);
+        assert!(super::read_new_messages(&conn, &mut reloaded).unwrap().is_empty());
+    }
+
+    fn sqlite_store_info(path: &std::path::Path, exists: bool) -> super::StoreInfo {
+        super::StoreInfo {
+            driver: "sqlite".into(),
+            path: path.to_string_lossy().into_owned(),
+            exists,
+        }
+    }
+
+    fn api_store_info() -> super::StoreInfo {
+        super::StoreInfo { driver: "jsonl".into(), path: "/unused".into(), exists: true }
+    }
+
+    fn api_message(id: &str) -> super::Message {
+        super::Message {
+            id: id.into(), team: "t".into(), from: "leader".into(), to: "worker".into(),
+            body: id.into(), created_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn watcher_baseline_precedes_history_and_reuses_an_existing_store() {
+        let dir = tempfile::tempdir().unwrap();
+        store_with(dir.path(), &[("old", "2026-01-01T00:00:00Z")], &[]);
+        let path = dir.path().join("db/messages.db");
+        let watcher = super::MessageWatcher::default();
+        let history = watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, true)), |_| {
+            assert!(watcher.0.try_lock().is_err(), "history and polling must share the lock");
+            let snapshot = vec![api_message("old")];
+            // Arrives after the history snapshot but before the command returns.
+            add_linked(dir.path(), "during-history", "2026-01-01T00:00:01Z", None);
+            Ok(snapshot)
+        }).unwrap();
+        assert_eq!(history[0].id, "old");
+        let fresh = watcher.0.lock().unwrap().poll_direct();
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["during-history"]);
+        assert!(watcher.0.lock().unwrap().poll_direct().is_empty());
+
+        add_linked(dir.path(), "before-reload", "2026-01-01T00:00:02Z", None);
+        watcher.initial_history_with("another-team", 30, || Ok(sqlite_store_info(&path, true)), |_| {
+            Ok(vec![api_message("before-reload")])
+        }).unwrap();
+        let mut stores = watcher.0.lock().unwrap();
+        assert_eq!(stores.direct.len(), 1, "shared paths retain one connection and cursor pair");
+        let fresh = stores.poll_direct();
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["before-reload"]);
+    }
+
+    #[test]
+    fn watcher_pending_store_delivers_its_first_message_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db/messages.db");
+        let watcher = super::MessageWatcher::default();
+        let history = watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, false)), |_| {
+            panic!("a missing store must return empty without creating it through the API");
+        }).unwrap();
+        assert!(history.is_empty());
+        assert!(!path.exists());
+        assert!(watcher.0.lock().unwrap().poll_direct().is_empty());
+
+        store_with(dir.path(), &[], &[]);
+        add_linked(dir.path(), "first-send", "2026-01-01T00:00:00Z", None);
+        let mut stores = watcher.0.lock().unwrap();
+        let fresh = stores.poll_direct();
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["first-send"]);
+        assert!(stores.poll_direct().is_empty());
+    }
+
+    #[test]
+    fn watcher_pending_store_reload_retains_its_saved_zero_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db/messages.db");
+        let watcher = super::MessageWatcher::default();
+        watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, false)), |_| {
+            panic!("missing-store history must not run");
+        }).unwrap();
+        store_with(dir.path(), &[], &[]);
+        add_linked(dir.path(), "first-send", "2026-01-01T00:00:00Z", None);
+        watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, true)), |_| {
+            Ok(vec![api_message("first-send")])
+        }).unwrap();
+        let fresh = watcher.0.lock().unwrap().poll_direct();
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["first-send"]);
+    }
+
+    #[test]
+    fn watcher_failed_initialization_leaves_no_marker_and_can_retry() {
+        let watcher = super::MessageWatcher::default();
+        assert!(watcher.initial_history_with("t", 30, || Err("resolver failed".into()), |_| {
+            Err("history also failed".into())
+        }).is_err());
+        assert!(watcher.0.lock().unwrap().direct.is_empty());
+        assert!(watcher.0.lock().unwrap().via_api.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        store_with(dir.path(), &[("old", "2026-01-01T00:00:00Z")], &[]);
+        let path = dir.path().join("db/messages.db");
+        assert!(watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, true)), |_| {
+            Err("history failed".into())
+        }).is_err());
+        assert!(watcher.0.lock().unwrap().direct.is_empty());
+        watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, true)), |_| {
+            Ok(vec![api_message("old")])
+        }).unwrap();
+        assert!(watcher.0.lock().unwrap().poll_direct().is_empty(), "old history is not a notification");
+    }
+
+    #[test]
+    fn watcher_legacy_core_without_store_endpoint_uses_a_successful_api_baseline() {
+        let watcher = super::MessageWatcher::default();
+        let history = watcher.initial_history_with("t", 30, || Err("unknown endpoint: store".into()), |_| {
+            Ok(vec![api_message("old")])
+        }).unwrap();
+        assert_eq!(history[0].id, "old");
+        let mut stores = watcher.0.lock().unwrap();
+        assert!(stores.direct.is_empty(), "resolver failure must not guess a database path");
+        assert_eq!(stores.via_api, vec![("t".to_string(), Some("old".to_string()))]);
+        let fresh = stores.poll_api_with(|_| Ok(vec![api_message("old"), api_message("new")]));
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["new"]);
+    }
+
+    #[test]
+    fn watcher_api_empty_baseline_is_initialized_and_failures_remain_retryable() {
+        let watcher = super::MessageWatcher::default();
+        let mut calls = 0;
+        assert!(watcher.initial_history_with("t", 30, || Ok(api_store_info()), |_| {
+            calls += 1;
+            if calls == 1 { Ok(Vec::new()) } else { Err("history failed".into()) }
+        }).is_err());
+        assert!(watcher.0.lock().unwrap().via_api.is_empty(), "even a successful baseline cannot hide history failure");
+        watcher.initial_history_with("t", 30, || Ok(api_store_info()), |_| Ok(Vec::new())).unwrap();
+        let mut stores = watcher.0.lock().unwrap();
+        assert_eq!(stores.via_api, vec![("t".to_string(), None)]);
+        assert!(stores.poll_api_with(|_| Err("temporary API failure".into())).is_empty());
+        let fresh = stores.poll_api_with(|_| Ok(vec![api_message("first-send")]));
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["first-send"]);
+        assert!(stores.poll_api_with(|_| Ok(vec![api_message("first-send")])).is_empty());
+    }
+
+    #[test]
+    fn watcher_api_baseline_precedes_history_without_replaying_old_rows() {
+        let watcher = super::MessageWatcher::default();
+        let mut limits = Vec::new();
+        watcher.initial_history_with("t", 30, || Ok(api_store_info()), |limit| {
+            limits.push(limit);
+            Ok(vec![api_message("old")])
+        }).unwrap();
+        assert_eq!(limits, [50, 30]);
+        let fresh = watcher.0.lock().unwrap().poll_api_with(|_| {
+            Ok(vec![api_message("old"), api_message("after-history")])
+        });
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["after-history"]);
+    }
+
+    #[test]
+    fn watcher_api_to_sqlite_transition_emits_each_new_message_once() {
+        let dir = tempfile::tempdir().unwrap();
+        store_with(dir.path(), &[], &[]);
+        let path = dir.path().join("db/messages.db");
+        let watcher = super::MessageWatcher::default();
+        watcher.initial_history_with("t", 30, || Ok(api_store_info()), |_| Ok(Vec::new())).unwrap();
+        add_linked(dir.path(), "before-transition", "2026-01-01T00:00:00Z", None);
+        let mut stores = watcher.0.lock().unwrap();
+        let revision = stores.revision;
+        stores.discover_if_current("t", revision, Ok(sqlite_store_info(&path, true)), |_| {
+            Ok(vec![api_message("before-transition")])
+        }).unwrap();
+        assert_eq!(stores.take_refreshes(), ["t"]);
+        assert!(stores.take_refreshes().is_empty(), "refresh notifications are drained once");
+        assert!(stores.via_api.is_empty(), "the obsolete API poller must be retired");
+        assert!(stores.poll_direct().is_empty(), "transition history is not a pane kickoff");
+        add_linked(dir.path(), "after-transition", "2026-01-01T00:00:00Z", None);
+        let mut fresh = stores.poll_api_with(|_| panic!("no obsolete API poll"));
+        fresh.extend(stores.poll_direct());
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["after-transition"]);
+        assert!(stores.poll_direct().is_empty());
+    }
+
+    #[test]
+    fn watcher_route_transitions_refresh_history_without_replaying_it() {
+        for direction in ["api-to-direct", "direct-to-api", "direct-to-direct"] {
+            let old = tempfile::tempdir().unwrap();
+            let new = tempfile::tempdir().unwrap();
+            store_with(old.path(), &[("old", "2026-01-01T00:00:00Z")], &[]);
+            store_with(new.path(), &[("old", "2026-01-01T00:00:00Z")], &[]);
+            let old_path = old.path().join("db/messages.db");
+            let new_path = new.path().join("db/messages.db");
+            let watcher = super::MessageWatcher::default();
+            watcher.initial_history_with("t", 30, || Ok(if direction == "api-to-direct" {
+                api_store_info()
+            } else { sqlite_store_info(&old_path, true) }), |_| Ok(vec![api_message("old")])).unwrap();
+            assert!(watcher.0.lock().unwrap().take_refreshes().is_empty());
+            add_linked(new.path(), "before-transition", "2026-01-01T00:00:01Z", None);
+            let to_api = direction == "direct-to-api";
+            let mut calls = 0;
+            let history = watcher.initial_history_with("t", 30, || Ok(if to_api {
+                api_store_info()
+            } else { sqlite_store_info(&new_path, true) }), |_| {
+                calls += 1;
+                if calls == 1 {
+                    // The direct cursor/API baseline is already established;
+                    // this row is also visible in the returned room history.
+                    add_linked(new.path(), "overlap", "2026-01-01T00:00:02Z", None);
+                }
+                let mut rows = vec![api_message("old"), api_message("before-transition")];
+                if !to_api || calls > 1 { rows.push(api_message("overlap")); }
+                Ok(rows)
+            }).unwrap();
+            assert_eq!(history.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+                ["old", "before-transition", "overlap"], "{direction}");
+            let mut stores = watcher.0.lock().unwrap();
+            assert_eq!(stores.take_refreshes(), ["t"], "{direction}");
+            let mut fresh = stores.poll_api_with(|_| Ok(history.clone()));
+            fresh.extend(stores.poll_direct());
+            assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["overlap"], "{direction}");
+            assert!(stores.poll_api_with(|_| Ok(history.clone())).is_empty());
+            assert!(stores.poll_direct().is_empty());
+            add_linked(new.path(), "after-transition", "2026-01-01T00:00:03Z", None);
+            let later = || { let mut rows = history.clone(); rows.push(api_message("after-transition")); rows };
+            let mut fresh = stores.poll_api_with(|_| Ok(later()));
+            fresh.extend(stores.poll_direct());
+            assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["after-transition"], "{direction}");
+            assert!(stores.poll_api_with(|_| Ok(later())).is_empty());
+            assert!(stores.poll_direct().is_empty());
+            assert!(stores.take_refreshes().is_empty());
+        }
+    }
+
+    #[test]
+    fn watcher_failed_transition_retains_the_previous_route() {
+        for direction in ["api-to-direct", "direct-to-api", "direct-to-direct"] {
+            let old = tempfile::tempdir().unwrap();
+            let new = tempfile::tempdir().unwrap();
+            store_with(old.path(), &[], &[]);
+            store_with(new.path(), &[], &[]);
+            let old_path = old.path().join("db/messages.db");
+            let new_path = new.path().join("db/messages.db");
+            let watcher = super::MessageWatcher::default();
+            let old_info = || if direction == "api-to-direct" { api_store_info() } else { sqlite_store_info(&old_path, true) };
+            watcher.initial_history_with("t", 30, || Ok(old_info()), |_| Ok(Vec::new())).unwrap();
+            let mut stores = watcher.0.lock().unwrap();
+            let revision = stores.revision;
+            assert!(stores.discover_if_current("t", revision, Ok(if direction == "direct-to-api" {
+                api_store_info()
+            } else { sqlite_store_info(&new_path, true) }), |_| Err("history failed".into())).is_err());
+            assert!(stores.knows("t", &old_info()), "{direction}");
+            assert_eq!(stores.revision, revision);
+            assert!(stores.take_refreshes().is_empty());
+            add_linked(old.path(), "still-live", "2026-01-01T00:00:00Z", None);
+            let mut fresh = stores.poll_api_with(|_| Ok(vec![api_message("still-live")]));
+            fresh.extend(stores.poll_direct());
+            assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["still-live"], "{direction}");
+        }
+    }
+
+    #[test]
+    fn watcher_known_route_survives_resolution_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        store_with(dir.path(), &[], &[]);
+        let path = dir.path().join("db/messages.db");
+        let watcher = super::MessageWatcher::default();
+        watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, true)), |_| Ok(Vec::new())).unwrap();
+        let history = watcher.initial_history_with("t", 30, || Err("temporary lookup error".into()), |_| {
+            Ok(vec![api_message("history")])
+        }).unwrap();
+        assert_eq!(history[0].id, "history");
+        assert!(watcher.initial_history_with("t", 30, || Err("lookup failed".into()), |_| Err("history failed".into())).is_err());
+        let mut stores = watcher.0.lock().unwrap();
+        let revision = stores.revision;
+        stores.discover_if_current("t", revision, Err("temporary lookup error".into()), |_| {
+            panic!("background resolution failure must retain the established route");
+        }).unwrap();
+        assert!(stores.knows("t", &sqlite_store_info(&path, true)));
+        assert!(stores.via_api.is_empty());
+        assert!(stores.take_refreshes().is_empty());
+        add_linked(dir.path(), "still-live", "2026-01-01T00:00:00Z", None);
+        assert_eq!(stores.poll_direct()[0].id, "still-live");
+    }
+
+    #[test]
+    fn watcher_shared_store_emits_unknown_team_before_discovery_once() {
+        let dir = tempfile::tempdir().unwrap();
+        store_with(dir.path(), &[], &[]);
+        let path = dir.path().join("db/messages.db");
+        let watcher = super::MessageWatcher::default();
+        watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, true)), |_| Ok(Vec::new())).unwrap();
+        add_linked(dir.path(), "new-team-first-send", "2026-01-01T00:00:00Z", None);
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("UPDATE messages SET team='new-team'; UPDATE events SET team='new-team';").unwrap();
+        let mut stores = watcher.0.lock().unwrap();
+        let fresh = stores.poll_direct();
+        assert_eq!(fresh.iter().map(|m| (m.team.as_str(), m.id.as_str())).collect::<Vec<_>>(), [("new-team", "new-team-first-send")]);
+        let revision = stores.revision;
+        stores.discover_if_current("new-team", revision, Ok(sqlite_store_info(&path, true)), |_| Ok(fresh.clone())).unwrap();
+        assert!(stores.poll_direct().is_empty());
+        assert!(stores.take_refreshes().is_empty(), "first registration needs no route refresh");
+    }
+
+    #[test]
+    fn watcher_shared_path_retains_cursors_and_filters_teams_that_changed_route() {
+        let dir = tempfile::tempdir().unwrap();
+        store_with(dir.path(), &[], &[]);
+        let path = dir.path().join("db/messages.db");
+        let watcher = super::MessageWatcher::default();
+        for team in ["t", "other"] {
+            watcher.initial_history_with(team, 30, || Ok(sqlite_store_info(&path, true)), |_| Ok(Vec::new())).unwrap();
+        }
+        add_linked(dir.path(), "old", "2026-01-01T00:00:00Z", None);
+        assert_eq!(watcher.0.lock().unwrap().poll_direct().len(), 1);
+        watcher.initial_history_with("t", 30, || Ok(api_store_info()), |_| Ok(vec![api_message("old")])).unwrap();
+        let mut stores = watcher.0.lock().unwrap();
+        assert_eq!(stores.direct.len(), 1, "the other team still references the shared path");
+        assert_eq!((stores.direct[0].cursors.seq, stores.direct[0].cursors.legacy_id), (1, 1));
+        add_linked(dir.path(), "new-t", "2026-01-01T00:00:01Z", None);
+        add_linked(dir.path(), "new-other", "2026-01-01T00:00:02Z", None);
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("UPDATE messages SET team='other' WHERE id=3; UPDATE events SET team='other' WHERE seq=3;").unwrap();
+        let mut fresh = stores.poll_direct();
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["new-other"]);
+        fresh.extend(stores.poll_api_with(|_| Ok(vec![api_message("old"), api_message("new-t")])));
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["new-other", "new-t"]);
+        assert_eq!((stores.direct[0].cursors.seq, stores.direct[0].cursors.legacy_id), (3, 3));
+        stores.initial_history_with("other", 30, api_store_info(), |_| Ok(Vec::new())).unwrap();
+        assert!(stores.direct.is_empty(), "the unreferenced direct connection can now retire");
+    }
+
+    #[test]
+    fn watcher_stale_discovery_cannot_replace_a_newer_route() {
+        let dir = tempfile::tempdir().unwrap();
+        store_with(dir.path(), &[], &[]);
+        let path = dir.path().join("db/messages.db");
+        let watcher = super::MessageWatcher::default();
+        watcher.initial_history_with("t", 30, || Ok(api_store_info()), |_| Ok(Vec::new())).unwrap();
+        let revision = watcher.0.lock().unwrap().revision;
+        watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, true)), |_| Ok(Vec::new())).unwrap();
+        let mut stores = watcher.0.lock().unwrap();
+        stores.discover_if_current("t", revision, Ok(api_store_info()), |_| {
+            panic!("a resolver result predating the newer route must be discarded");
+        }).unwrap();
+        assert!(stores.knows("t", &sqlite_store_info(&path, true)));
+        assert!(stores.via_api.is_empty());
+    }
+
+    #[test]
+    fn watcher_open_errors_are_not_treated_as_missing_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = super::MessageWatcher::default();
+        assert!(watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(dir.path(), true)), |_| {
+            panic!("opening a directory as a database must fail before history");
+        }).is_err());
+        assert!(watcher.0.lock().unwrap().direct.is_empty());
+    }
+
+    #[test]
+    fn watcher_reported_existing_store_missing_is_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db/messages.db");
+        let watcher = super::MessageWatcher::default();
+        assert!(watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, true)), |_| {
+            panic!("a vanished reported store must fail before history");
+        }).is_err());
+        assert!(watcher.0.lock().unwrap().direct.is_empty());
+
+        watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, false)), |_| {
+            panic!("a genuinely new store has no history to query");
+        }).unwrap();
+        assert!(watcher.initial_history_with("t", 30, || Ok(sqlite_store_info(&path, true)), |_| {
+            panic!("a pending store reported present but missing is also an error");
+        }).is_err());
+        let mut stores = watcher.0.lock().unwrap();
+        assert_eq!(stores.direct.len(), 1);
+        assert!(stores.direct[0].conn.is_none());
+        assert_eq!((stores.direct[0].cursors.seq, stores.direct[0].cursors.legacy_id), (0, 0));
+        store_with(dir.path(), &[], &[]);
+        add_linked(dir.path(), "first-send", "2026-01-01T00:00:00Z", None);
+        let fresh = stores.poll_direct();
+        assert_eq!(fresh.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["first-send"]);
+    }
+
+    #[test]
+    fn malformed_history_is_not_a_successful_empty_baseline() {
+        assert!(super::parse_message_history("\n  \n").unwrap().is_empty());
+        assert!(super::parse_message_history("not json").is_err());
+        assert!(super::parse_message_history(r#"{"id":"missing-payload"}"#).is_err());
+    }
+
     /// The released layout: a store from before the event log has no `events`
     /// table at all, so the whole UNION fails to prepare. History must still
     /// come through — the machine this was written on has 6,285 such rows.
@@ -1573,7 +2188,7 @@ mod tests {
             r#"echo '{"team":"alpha","driver":"sqlite","partition":"per-team","path":"/somewhere/else/alpha.db","exists":true}'"#,
         )]);
         assert_eq!(
-            super::direct_store_path("alpha"),
+            super::direct_store_path(&super::store_info("alpha").unwrap()),
             Some(std::path::PathBuf::from("/somewhere/else/alpha.db")),
             "the reported path must be used verbatim — a layout the app has \
              never heard of has to work without the app changing"
@@ -1591,7 +2206,7 @@ mod tests {
             r#"echo '{"team":"alpha","driver":"jsonl","partition":"per-team","path":"/x/a.jsonl","exists":true}'"#,
         )]);
         assert_eq!(
-            super::direct_store_path("alpha"),
+            super::direct_store_path(&super::store_info("alpha").unwrap()),
             None,
             "an unknown driver must not be opened as sqlite"
         );
@@ -1621,12 +2236,16 @@ echo '{"type":"message_sent","id":"m2","team":"alpha","from":"a","to":"b","body"
 
         // First sight takes a watermark and emits nothing — the room loads
         // its own history.
-        let (fresh, mark) = super::fallback_new_messages("alpha", None);
+        let mut stores = super::WatcherStores::default();
+        stores.initial_history_with("alpha", 50, super::store_info("alpha").unwrap(), |limit| {
+            super::message_history("alpha", limit, None)
+        }).unwrap();
+        let fresh = stores.poll_api_with(|team| super::message_history(team, 50, None));
         assert!(fresh.is_empty(), "history must not be replayed as live");
-        assert_eq!(mark.as_deref(), Some("m2"));
+        assert_eq!(stores.via_api[0].1.as_deref(), Some("m2"));
 
         // A message the app has not seen is delivered.
-        let (fresh, mark) = super::fallback_new_messages("alpha", Some("m1"));
+        let (fresh, mark) = super::messages_after(super::message_history("alpha", 50, None).unwrap(), Some("m1"));
         assert_eq!(
             fresh.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(),
             vec!["second"],
@@ -1634,7 +2253,7 @@ echo '{"type":"message_sent","id":"m2","team":"alpha","from":"a","to":"b","body"
         assert_eq!(mark.as_deref(), Some("m2"));
 
         // Nothing new means nothing emitted.
-        let (fresh, _) = super::fallback_new_messages("alpha", Some("m2"));
+        let (fresh, _) = super::messages_after(super::message_history("alpha", 50, None).unwrap(), Some("m2"));
         assert!(fresh.is_empty(), "already-seen rows must not be re-emitted");
     }
 
@@ -1647,6 +2266,10 @@ echo '{"type":"message_sent","id":"m2","team":"alpha","from":"a","to":"b","body"
             "api.sh",
             r#"echo '{"team":"alpha","driver":"sqlite","partition":"shared","path":"/x/db.sqlite","exists":false}'"#,
         )]);
-        assert_eq!(super::direct_store_path("alpha"), None);
+        assert_eq!(
+            super::direct_store_path(&super::store_info("alpha").unwrap()),
+            Some(std::path::PathBuf::from("/x/db.sqlite")),
+            "a missing direct store must remain watchable from cursor zero",
+        );
     }
 }
