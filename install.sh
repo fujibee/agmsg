@@ -622,9 +622,7 @@ move_into_place() {
 }
 
 # Adds this install's writable_paths (below) to ONE Codex config.toml.
-# Split out of configure_codex_sandbox() because that function now targets
-# more than one file (see there) and every one of them gets the identical
-# missing-detection/backup/insert treatment.
+# Apply the active profile's sandbox configuration.
 _configure_codex_sandbox_file() {
   local code_config="$1"
   shift
@@ -702,22 +700,8 @@ configure_codex_sandbox() {
   # which failed with `mkdir: .../ext-tools/<team>: Operation not permitted`
   # before this entry existed, and succeeded once it was added.
   #
-  # Codex resolves its own config against $CODEX_HOME (default ~/.codex), not
-  # always ~/.codex -- a machine running more than one Codex identity/account
-  # sets CODEX_HOME per profile, and this function used to only ever write
-  # ~/.codex/config.toml, so a seat actually running under a CODEX_HOME
-  # profile never got these entries at all (measured: `mkdir: .../ext-tools/
-  # <team>: Operation not permitted` persisted for that seat even after this
-  # function reported success, because it had edited a file nothing read).
-  # The reverse also happens on the same machine: the Codex desktop app
-  # (codex-app) uses the plain ~/.codex default regardless of a shell's
-  # CODEX_HOME. Writing to only one when they differ silently breaks
-  # whichever surface wasn't written, so when CODEX_HOME is set and does not
-  # already point at ~/.codex, this configures BOTH -- via
-  # agmsg_codex_config_paths (scripts/lib/codex-config.sh), the one place
-  # this list is computed, shared with uninstall.sh's own cleanup (#1469: the
-  # two used to compute it separately, and drifted apart when only this
-  # function's copy was updated).
+  # Respect CODEX_HOME exclusively when set. The same profile selection is
+  # shared with uninstall and the read-only session notice.
   local codex_configs=()
   local _cfg
   while IFS= read -r _cfg; do

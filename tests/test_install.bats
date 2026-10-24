@@ -11,13 +11,8 @@ setup() {
   export FAKE_HOME="$(mktemp -d)"
   export REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   export SK="$FAKE_HOME/.agents/skills/agmsg"
-  # install.sh's Codex sandbox config now also writes to $CODEX_HOME/config.toml
-  # when CODEX_HOME is set and differs from the default. A developer machine
-  # running Codex under a profile (CODEX_HOME set in the ambient shell) would
-  # otherwise leak every `install.sh --cmd agmsg` run below straight into that
-  # REAL file — caught in review by finding this suite's own tmp-dir paths
-  # accumulated inside a real ~/.codex_profiles/*/config.toml. Only the test
-  # that exercises CODEX_HOME itself sets it, scoped to that one invocation.
+  # Each invocation below uses the existing throwaway HOME fixture. Ignore
+  # ambient profiles; tests for CODEX_HOME select another fixture explicitly.
   unset CODEX_HOME
   # Pin bare instance-id keying (#93) so the watcher self-clean smoke test keys
   # its pidfile on the raw session_id it passes — deterministic in CI and when
@@ -215,12 +210,9 @@ teardown() {
   # literal prefix of "$SK-second". Uninstalling the shorter one must not
   # touch the longer one's own registrations.
   #
-  # #1469: also covers what install.sh writes but uninstall.sh used to leave
-  # behind -- the CODEX_HOME-side Codex config (a second, DIFFERENT throwaway
-  # config dir here, standing in for a real Codex profile), and the OpenCode/
-  # Hermes/Grok Build dedicated skill files. install.sh only ever writes to a
-  # Codex config.toml that already exists (never creates one), so both are
-  # pre-seeded just like the default one already was above.
+  # Both installs select the same throwaway CODEX_HOME profile. The default
+  # config is a sentinel that neither installation nor cleanup may edit.
+  # Also cover the OpenCode/Hermes/Grok Build dedicated skill files.
   mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex" \
     "$FAKE_HOME/.config/opencode" "$FAKE_HOME/.hermes" "$FAKE_HOME/.grok"
   printf 'model = "gpt-test"\n' > "$FAKE_HOME/.codex/config.toml"
@@ -281,8 +273,8 @@ teardown() {
   [ -f "$proj_cmd_second" ]
   grep -qF "$SK/" "$settings"
   grep -qF "$sk_second/" "$settings"
-  grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
-  grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "$SK/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
   grep -qF "$SK/" "$codex_home2/config.toml"
   grep -qF "$sk_second/" "$codex_home2/config.toml"
   [ -f "$opencode_first" ]
@@ -316,13 +308,13 @@ teardown() {
   [ ! -e "$grok_first" ]
   [ ! -f "$grok_rule_first" ]
   # The untouched install: global command, project hook and command file,
-  # writable_roots entry in BOTH Codex configs, its three dedicated skill
+  # writable_roots entry in the selected Codex profile, its dedicated skill
   # files, its Grok rule, and the machine-wide shim it still needs.
   [ -d "$sk_second" ]
   [ -f "$cmd_second" ]
   [ -f "$proj_cmd_second" ]
   grep -qF "$sk_second/" "$settings"
-  grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
+  refute grep -qF "$sk_second/" "$FAKE_HOME/.codex/config.toml"
   grep -qF "$sk_second/" "$codex_home2/config.toml"
   [ -f "$opencode_second" ]
   [ -f "$hermes_second" ]
@@ -1239,28 +1231,56 @@ EOF
   grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
 }
 
-@test "install: honors CODEX_HOME, and also configures the plain ~/.codex default when it differs" {
-  # A machine running more than one Codex identity points CODEX_HOME at a
-  # per-profile dir; that is the file the seat actually reads, not
-  # ~/.codex/config.toml — measured directly: a seat running under such a
-  # profile still got `mkdir: .../ext-tools/<team>: Operation not permitted`
-  # after install.sh reported success, because it had edited a file nothing
-  # read. The Codex desktop app, on the same machine, uses the plain
-  # ~/.codex default regardless of a shell's CODEX_HOME, so both need it
-  # when CODEX_HOME points elsewhere.
+@test "install/update/uninstall: CODEX_HOME isolates the default Codex config (#1718)" {
+  source "$REPO_ROOT/scripts/lib/codex-config.sh"
+  local native_root
+  native_root="$(agmsg_codex_native_path "$SK")"
   local profile_home="$FAKE_HOME/.codex_profiles/work"
   mkdir -p "$FAKE_HOME/.codex" "$profile_home"
-  cat > "$FAKE_HOME/.codex/config.toml" <<'EOF'
-model = "gpt-test"
-EOF
-  cat > "$profile_home/config.toml" <<'EOF'
-model = "gpt-test"
-EOF
+  printf 'model = "default-sentinel"\n' > "$FAKE_HOME/.codex/config.toml"
+  cp "$FAKE_HOME/.codex/config.toml" "$FAKE_HOME/default-before"
+  printf 'model = "profile-test"\n' > "$profile_home/config.toml"
 
   CODEX_HOME="$profile_home" HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  grep -qF "$native_root/ext-tools" "$profile_home/config.toml"
+  cmp "$FAKE_HOME/default-before" "$FAKE_HOME/.codex/config.toml"
+  [ ! -e "$FAKE_HOME/.codex/config.toml.bak" ]
 
-  grep -q "$SK/ext-tools" "$profile_home/config.toml"
-  grep -q "$SK/ext-tools" "$FAKE_HOME/.codex/config.toml"
+  # Simulate an older profile without run/ext-tools, then exercise --update.
+  printf '[sandbox_workspace_write]\nwritable_roots = ["%s/db", "%s/teams"]\n' "$native_root" "$native_root" > "$profile_home/config.toml"
+  CODEX_HOME="$profile_home" HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  grep -qF "$native_root/run" "$profile_home/config.toml"
+  grep -qF "$native_root/ext-tools" "$profile_home/config.toml"
+  cmp "$FAKE_HOME/default-before" "$FAKE_HOME/.codex/config.toml"
+  [ ! -e "$FAKE_HOME/.codex/config.toml.bak" ]
+
+  CODEX_HOME="$profile_home" HOME="$FAKE_HOME" bash "$SK/uninstall.sh" --yes
+  refute grep -qF "$native_root/" "$profile_home/config.toml"
+  cmp "$FAKE_HOME/default-before" "$FAKE_HOME/.codex/config.toml"
+  [ ! -e "$FAKE_HOME/.codex/config.toml.bak" ]
+}
+
+@test "uninstall: matches native Windows roots while preserving sibling installs (#1718)" {
+  local profile_home="$FAKE_HOME/profile" bin="$FAKE_HOME/bin"
+  mkdir -p "$profile_home" "$bin"
+  export CODEX_HOME="$profile_home"
+  cat > "$bin/cygpath" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = -m ] || exit 1
+printf 'C:/%s\n' "${2#/c/}"
+SH
+  chmod +x "$bin/cygpath"
+  export PATH="$bin:$PATH"
+  source "$REPO_ROOT/scripts/lib/codex-config.sh"
+  # Exercise the real cleanup without running unrelated uninstall phases.
+  sed -n '/^_uninstall_clean_codex_config() {/,/^}/p' "$REPO_ROOT/uninstall.sh" > "$FAKE_HOME/cleanup.sh"
+  source "$FAKE_HOME/cleanup.sh"
+  _uninstall_operation_require() { return 0; }
+  local cfg="$profile_home/config.toml"
+  printf '[sandbox_workspace_write]\nwritable_roots = ["C:/Users/Test/skills/agmsg/db", "C:/Users/Test/skills/agmsg/teams", "C:/Users/Test/skills/agmsg/run", "C:/Users/Test/skills/agmsg/ext-tools", "C:/Users/Test/skills/agmsg-second/db"]\n' > "$cfg"
+  _uninstall_clean_codex_config "$cfg" /c/Users/Test/skills/agmsg
+  refute grep -qF '"C:/Users/Test/skills/agmsg/' "$cfg"
+  grep -qF '"C:/Users/Test/skills/agmsg-second/db"' "$cfg"
 }
 
 @test "install --update: adds missing Codex run writable_root for existing installs" {
