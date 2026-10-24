@@ -2394,3 +2394,28 @@ fs.unlinkSync(leasefile);
 NODE
   [ "$status" -eq 0 ]
 }
+
+@test "codex-bridge: stale unknown team is skipped silently without dropping healthy inboxes (#1714)" {
+  # Eligibility can race a team removal. Keep that stale pair eligible here.
+  printf '#!/usr/bin/env bash\nprintf "missing-team\\talice\\nteam\\talice\\n"\n' > "$TYPES/codex/eligible-pairs.sh"
+  bash "$SCRIPTS/send.sh" team bob alice "healthy message" >/dev/null
+  run node - "$TYPES/codex/codex-bridge.js" "$PROJ" <<'JS'
+const fs = require("fs");
+const Module = require("module");
+const filename = process.argv[2];
+const loaded = new Module(filename, module);
+loaded.filename = filename;
+loaded.paths = Module._nodeModulePaths(require("path").dirname(filename));
+loaded._compile(fs.readFileSync(filename, "utf8") + "\nmodule.exports.CodexBridge = CodexBridge;", filename);
+const context = {
+  opts: { project: process.argv[3], type: "codex" },
+  identities: [{ team: "missing-team", name: "alice" }, { team: "team", name: "alice" }],
+};
+const result = loaded.exports.CodexBridge.prototype.readInboxForPrompt.call(context);
+if (!result.includes("healthy message") || result.includes("team not found")) process.exit(1);
+console.log(result);
+JS
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"healthy message"* ]]
+  [[ "$output" != *"inbox.sh failed"* ]]
+}
