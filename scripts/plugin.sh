@@ -564,13 +564,13 @@ EOF
 
 _plugin_cmd_install() {
   _plugin_parse_flags "$@"
-  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: plugin.sh install <owner>/<repo>[@<ref>] [--yes] [--override]"
+  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: agmsg plugin install <owner>/<repo>[@<ref>] [--yes] [--override]"
   _plugin_parse_spec "$PLUGIN_SPEC_ARG"
   local owner="$SPEC_OWNER" repo="$SPEC_REPO" ref="$SPEC_REF" id rec track_ref
   track_ref="$(_plugin_tracking_ref "$ref")" || exit 1
   id="github/$owner/$repo"
   if rec="$(_plugin_record "$id")"; then
-    _plugin_die "$id is already installed (commit $(printf '%s' "$rec" | cut -f3)). Use 'plugin.sh update $owner/$repo', or 'plugin.sh remove $owner/$repo' first."
+    _plugin_die "$id is already installed (commit $(printf '%s' "$rec" | cut -f3)). Use 'agmsg plugin update $owner/$repo', or 'agmsg plugin remove $owner/$repo' first."
   fi
   _plugin_fetch "$owner" "$repo" "$ref"
   _plugin_inspect "$PLUGIN_SRC"
@@ -585,7 +585,7 @@ _plugin_cmd_install() {
     _plugin_die "$id was installed by another command while this one waited (commit $(printf '%s' "$rec" | cut -f3))"
   fi
   _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" install "$ref"
-  [ ! -e "$final" ] || _plugin_die "$final already exists; run 'plugin.sh remove $owner/$repo' and retry"
+  [ ! -e "$final" ] || _plugin_die "$final already exists; run 'agmsg plugin remove $owner/$repo' and retry"
   mkdir -p "$(dirname "$final")"
   mv "$PLUGIN_SRC" "$final"
   _plugin_record_add "$id" "$owner/$repo${track_ref:+@$track_ref}" "$PLUGIN_SHA" "$final"
@@ -609,11 +609,11 @@ _plugin_changes() {  # old new
 
 _plugin_cmd_update() {
   _plugin_parse_flags "$@"
-  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: plugin.sh update <owner>/<repo>[@<ref>] [--yes] [--override]"
+  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: agmsg plugin update <owner>/<repo>[@<ref>] [--yes] [--override]"
   _plugin_parse_spec "$PLUGIN_SPEC_ARG"
   local owner="$SPEC_OWNER" repo="$SPEC_REPO" ref="$SPEC_REF" id rec old_spec old_sha old_dir
   id="github/$owner/$repo"
-  rec="$(_plugin_record "$id")" || _plugin_die "$id is not installed (use 'plugin.sh install $owner/$repo')"
+  rec="$(_plugin_record "$id")" || _plugin_die "$id is not installed (use 'agmsg plugin install $owner/$repo')"
   old_spec="$(printf '%s' "$rec" | cut -f2)"
   old_sha="$(printf '%s' "$rec" | cut -f3)"
   old_dir="$(printf '%s' "$rec" | cut -f4)"
@@ -650,7 +650,7 @@ _plugin_cmd_update() {
   [ "$(printf '%s' "$rec" | cut -f3)" = "$old_sha" ] \
     || _plugin_die "$id was changed by another command while this one waited; run the update again"
   _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" update "$ref" "$old_dir"
-  [ ! -e "$final" ] || _plugin_die "$final already exists; run 'plugin.sh remove $owner/$repo' and retry"
+  [ ! -e "$final" ] || _plugin_die "$final already exists; run 'agmsg plugin remove $owner/$repo' and retry"
   mkdir -p "$(dirname "$final")"
   mv "$PLUGIN_SRC" "$final"
   _plugin_untrust_all "$old_dir"
@@ -668,7 +668,7 @@ _plugin_cmd_update() {
 
 _plugin_cmd_remove() {
   _plugin_parse_flags "$@"
-  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: plugin.sh remove <owner>/<repo>"
+  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: agmsg plugin remove <owner>/<repo>"
   case "$PLUGIN_SPEC_ARG" in *@*) _plugin_die "remove takes <owner>/<repo> without a ref" ;; esac
   _plugin_parse_spec "$PLUGIN_SPEC_ARG"
   local owner="$SPEC_OWNER" repo="$SPEC_REPO" id rec dir drv back=""
@@ -775,7 +775,7 @@ case "$ACTION" in
   update)      _plugin_cmd_update "$@" ;;
   remove|uninstall) _plugin_cmd_remove "$@" ;;
   trust)
-    ref="${1:?Usage: plugin.sh trust <axis/name|name>}"
+    ref="${1:?Usage: agmsg plugin trust <axis/name|name>}"
     res="$(_plugin_resolve_external "$ref")" || exit 1
     IFS=$'\t' read -r axis name dir <<<"$res"
     _plugin_lock
@@ -784,7 +784,7 @@ case "$ACTION" in
     echo "Trusted $axis/$name -> $dir"
     ;;
   untrust)
-    ref="${1:?Usage: plugin.sh untrust <axis/name|name>}"
+    ref="${1:?Usage: agmsg plugin untrust <axis/name|name>}"
     case "$ref" in
       */*) axis="${ref%%/*}"; name="${ref#*/}" ;;
       *)   res="$(_plugin_resolve_external "$ref")" || exit 1

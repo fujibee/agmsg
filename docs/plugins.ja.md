@@ -90,10 +90,10 @@ types/bar                  UNTRUSTED   -                            -           
 types/baz                  trusted     github/acme/baz              9074a92c6404  /…/plugins/sources/github/acme/baz/9074…/types/baz
 ```
 
-> Windows以外のホストでは、`agmsg` コマンドの表面はエージェントのskillフローによって提供される。
-> スクリプトを直接呼び出すこともできる:
+> `agmsg plugin ...` はインストール先の `scripts/plugin.sh` を実行する。`agmsg` コマンドが
+> PATH にない場合は、同じ引数でスクリプトを直接呼び出せる:
 > `~/.agents/skills/<cmd>/scripts/plugin.sh list`。
-> `install`、`update`、`remove` も同じ方法で使えるほか、エージェント内の `/agmsg plugin ...` でも使える
+> エージェント内の `/agmsg plugin ...` でも同じことができる
 > (エージェントは何かをインストールする前にあなたへ確認する)。
 
 ## typesプラグインの作成
