@@ -499,8 +499,8 @@ _uninstall_one() {
     echo ""
     echo "  Removing $SKILL_NAME skill (keeping DB and teams)..."
     _uninstall_checked_rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash" || return 1
-    _uninstall_checked_rm -f "$SKILL_DIR/SKILL.md" || return 1
-    echo "  - removed scripts, templates, SKILL.md"
+    _uninstall_checked_rm -f "$SKILL_DIR/SKILL.md" "$SKILL_DIR/CHANGELOG.md" || return 1
+    echo "  - removed scripts, templates, SKILL.md, CHANGELOG.md"
     echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/"
     REMOVED=true
   else

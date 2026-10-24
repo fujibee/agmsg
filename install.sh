@@ -177,6 +177,11 @@ agmsg_install_restart_guidance() {
   echo '    This installation does not enable agmsgd or switch existing sessions automatically.'
 }
 
+# The running agent may still have the pre-update skill in its context.
+agmsg_install_update_reading_hint() {   # <skill_dir> <release version>
+  printf 'agmsg was updated to %s. This session still has the old skill loaded. Re-read "%s/SKILL.md", read the %s section of "%s/CHANGELOG.md", and tell the user what changed and which settings it recommends.\n' "$2" "$1" "$2" "$1"
+}
+
 # One line pointing at agmsgd, only while it is off. Never turns it on. Kept in
 # one place so the wording, and later a different default, change here only.
 agmsg_install_daemon_hint() {   # <skill_dir>
@@ -1030,6 +1035,7 @@ $_agmsg_running_team"
   # Runs under the install operation lock. The completion manifest is written
   # only after the remaining install updates below are complete.
   agmsg_install_copy_scripts || exit 1
+  agmsg_install_op_run_phase cp "$SCRIPT_DIR/CHANGELOG.md" "$SKILL_DIR/CHANGELOG.md" || exit 1
   echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
   # #1249: drivers/terminals/{herdr,plain,tmux}/SKILL.md used to name each
   # driver's own doc file, and a directory-scanning skill loader (e.g.
@@ -1262,6 +1268,7 @@ $_agmsg_running_team"
   agmsg_install_restart_daemon "$SKILL_DIR"
   echo "  ✓ Update complete"
   echo ""
+  agmsg_install_update_reading_hint "$SKILL_DIR" "$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || printf '%s' "$INSTALLED_VERSION")"
   exit 0
 fi
 
@@ -1316,6 +1323,7 @@ agmsg_install_op_run_phase agmsg_reset_trash "$TRASH_DIR" || exit 1
 # Runs under the install operation lock. The completion manifest is written
 # only after the remaining install updates below are complete.
 agmsg_install_copy_scripts || exit 1
+agmsg_install_op_run_phase cp "$SCRIPT_DIR/CHANGELOG.md" "$SKILL_DIR/CHANGELOG.md" || exit 1
 echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
 # Ship the external-plugin drop-in dir (just its README) so the location exists
 # post-install. A plain cp — not cp -R --delete — preserves any plugins the user

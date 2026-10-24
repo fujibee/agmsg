@@ -2818,3 +2818,54 @@ CYG
     [ "$status" -ne 0 ] || { echo "rendered $type still carries the unwired overlay comment" >&2; return 1; }
   done < <(agmsg_renderable_types "$BATS_TEST_DIRNAME/..")
 }
+
+@test "install --update: a 1.5.1 install receives the changelog and reading instruction (#1741)" {
+  if ! git -C "$REPO_ROOT" rev-parse --verify refs/tags/v1.5.1 >/dev/null 2>&1; then
+    skip 'v1.5.1 source tag is not available in this checkout'
+  fi
+  local old_source="$FAKE_HOME/source-1.5.1" profile="$FAKE_HOME/codex-profile"
+  mkdir -p "$old_source" "$profile" "$FAKE_HOME/.codex"
+  git -C "$REPO_ROOT" archive v1.5.1 | tar -xf - -C "$old_source"
+  printf 'model = "fixture-default"\n' > "$FAKE_HOME/.codex/config.toml"
+  printf 'model = "fixture-profile"\n' > "$profile/config.toml"
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" bash "$old_source/install.sh" --cmd agmsg
+  grep -q '1.5.1' "$SK/VERSION"
+  [ ! -e "$SK/CHANGELOG.md" ]
+
+  local project="$FAKE_HOME/project"
+  mkdir -p "$project"
+  HOME="$FAKE_HOME" bash "$SK/scripts/join.sh" update-team alice claude-code "$project" >/dev/null
+  HOME="$FAKE_HOME" bash "$SK/scripts/join.sh" update-team bob claude-code "$project" >/dev/null
+  HOME="$FAKE_HOME" bash "$SK/scripts/send.sh" update-team bob alice 'message survives update' >/dev/null
+
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" run bash "$REPO_ROOT/install.sh" --update --cmd agmsg
+  [ "$status" -eq 0 ]
+  local version
+  version="$(cat "$REPO_ROOT/VERSION")"
+  grep -Fq "agmsg was updated to $version. This session still has the old skill loaded." <<< "$output"
+  grep -Fq "$SK/SKILL.md" <<< "$output"
+  grep -Fq "read the $version section of \"$SK/CHANGELOG.md\"" <<< "$output"
+  cmp "$REPO_ROOT/CHANGELOG.md" "$SK/CHANGELOG.md"
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" run bash "$SK/scripts/inbox.sh" update-team alice
+  [ "$status" -eq 0 ]
+  grep -Fq 'message survives update' <<< "$output"
+
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" bash "$SK/uninstall.sh" --yes
+  [ ! -e "$SK/CHANGELOG.md" ]
+}
+
+@test "install/update/uninstall: CHANGELOG is copied, refreshed, and removed with --keep-data" {
+  local profile="$FAKE_HOME/codex-profile"
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  cmp "$REPO_ROOT/CHANGELOG.md" "$SK/CHANGELOG.md"
+  printf 'old changelog\n' > "$SK/CHANGELOG.md"
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" run bash "$REPO_ROOT/install.sh" --update --cmd agmsg
+  [ "$status" -eq 0 ]
+  cmp "$REPO_ROOT/CHANGELOG.md" "$SK/CHANGELOG.md"
+  mkdir -p "$SK/teams/fixture-team"
+  printf 'preserved team data\n' > "$SK/teams/fixture-team/kept"
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" bash "$SK/uninstall.sh" --yes --keep-data
+  [ ! -e "$SK/CHANGELOG.md" ]
+  [ -d "$SK/db" ]
+  grep -Fq 'preserved team data' "$SK/teams/fixture-team/kept"
+}
