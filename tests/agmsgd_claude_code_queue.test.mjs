@@ -173,12 +173,12 @@ test('resolvePendingDelivery: nothing but a delivered nonce ends a pending nudge
 });
 
 function channelFixture(t, hostPlatform = 'linux') {
-  const root = temporaryDirectory(t);
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-claude-queue-'));
   mkdirSync(path.join(root, 'run'));
   const db = openInstallDb(path.join(root, 'run', 'install.db'));
   ensureClaudeCodeChannelSchema(db);
   db.exec("UPDATE daemon_intent SET desired='on', op_gen=1");
-  t.after(() => db.close());
+  t.after(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
   const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, hours: 0, alive: { state: 'ok' } };
   const options = {
     db, installRoot: root, expectedOpGen: 1, env: { AGMSG_STORAGE_PATH: root },
@@ -236,6 +236,48 @@ test('a seat whose recorded socket is gone gets no new nudge rows until its reco
   state.socket = '/tmp/cc-socks/2.sock';
   await channel.pollOnce();
   assert.equal(state.sent, 1);
+  await channel.stop();
+});
+
+for (const unread of [false, true]) {
+  test(`a closed seat is unaddressable when unread is ${unread}`, async (t) => {
+    const { db, state } = channelFixture(t);
+    state.alive = { state: 'unreadable', reason: 'messaging_socket_missing' };
+    const channel = createClaudeCodeQueueChannel({
+      ...state.options, readSnapshot: () => ({ state: 'ok', unread, upTo: '{}' }),
+    });
+    await channel.pollOnce();
+    assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() },
+      { state: 'unaddressable', reason: 'messaging_socket_missing' });
+    assert.equal(state.sent, 0);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM beta_claude_queue').get().n, 0);
+    await channel.stop();
+  });
+}
+
+test('an idle seat is addressable only after its socket check succeeds', async (t) => {
+  const { db, state } = channelFixture(t);
+  let checks = 0;
+  const channel = createClaudeCodeQueueChannel({
+    ...state.options, readSnapshot: () => ({ state: 'ok', unread: false, upTo: '{}' }),
+    socketAlive: () => { checks += 1; return { state: 'ok' }; },
+  });
+  await channel.pollOnce();
+  assert.equal(checks, 1);
+  assert.equal(db.prepare('SELECT state FROM beta_claude_seat').get().state, 'addressable');
+  await channel.stop();
+});
+
+test('an idle seat whose socket cannot be checked reports the uncertainty', async (t) => {
+  const { db, state } = channelFixture(t);
+  state.alive = { state: 'unreadable', reason: 'messaging_socket_stat_failed' };
+  const channel = createClaudeCodeQueueChannel({
+    ...state.options, readSnapshot: () => ({ state: 'ok', unread: false, upTo: '{}' }),
+  });
+  await channel.pollOnce();
+  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() },
+    { state: 'blocked', reason: 'messaging_socket_stat_failed' });
+  assert.equal(state.sent, 0);
   await channel.stop();
 });
 
