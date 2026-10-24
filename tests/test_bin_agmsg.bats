@@ -61,3 +61,18 @@ RT
   run node -e 'const r=require(process.argv[1]).resolveRuntime({AGMSG_CMD:"../x"}, process.argv[2]); console.log(JSON.stringify(r))' "$BIN" "$root"
   grep -Fq -- '"error":true' <<<"$output"
 }
+
+@test "bin/agmsg.js: installer progress is visible before the network fetch" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$bin"
+  cat > "$bin/curl" <<'SH'
+#!/usr/bin/env bash
+printf 'fetch-started\n'
+exit 41
+SH
+  chmod +x "$bin/curl"
+  run bash -c 'PATH="$1:$PATH" node "$2" install --update 2>&1' _ "$bin" "$BIN"
+  [ "$status" -eq 41 ]
+  [[ "${lines[0]}" == 'agmsg: downloading installer for '* ]]
+  [ "${lines[1]}" = 'fetch-started' ]
+}

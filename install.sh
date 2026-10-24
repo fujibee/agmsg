@@ -177,6 +177,29 @@ agmsg_install_restart_guidance() {
   echo '    This installation does not enable agmsgd or switch existing sessions automatically.'
 }
 
+# Self-contained for an updater still reading an older installed skill.
+# This is guidance only: it never changes delivery or starts a watcher.
+agmsg_install_update_delivery_hint() {   # <skill_dir> [current type]
+  local skill="$1" type="${2:-}"
+  if [ -z "$type" ]; then
+    type="$(
+      source "$skill/scripts/lib/compat.sh"
+      source "$skill/scripts/lib/type-registry.sh"
+      source "$skill/scripts/lib/detect-cli-type.sh"
+      agmsg_detect_cli_type
+    )"
+  fi
+  echo '  New in 1.6: agmsgd is the recommended background service for message notices.'
+  printf '    Check this project: bash %q delivery status --type %q --project "$(pwd)"\n' "$skill/scripts/agmsg" "$type"
+  echo '    If this project uses monitor (legacy), suggest switching to agmsgd to the user:'
+  printf '      bash %q delivery agmsgd --type %q --project "$(pwd)"\n' "$skill/scripts/agmsg" "$type"
+  echo '    The switch command enables agmsgd and configures this project. This running'
+  echo '    session keeps its current delivery until it runs the messaging skill with'
+  echo "    actas <existing-agent-name>, or restarts. Follow the switch command's current-session"
+  echo '    instructions, including its Monitor fallback; stored unread messages are preserved.'
+  printf '    Check agmsgd afterwards: bash %q daemon status\n' "$skill/scripts/agmsg"
+}
+
 # One line pointing at agmsgd, only while it is off. Never turns it on. Kept in
 # one place so the wording, and later a different default, change here only.
 agmsg_install_daemon_hint() {   # <skill_dir>
@@ -1278,6 +1301,7 @@ $_agmsg_running_team"
   agmsg_install_restart_daemon "$SKILL_DIR"
   echo "  ✓ Update complete"
   echo ""
+  agmsg_install_update_delivery_hint "$SKILL_DIR"
   exit 0
 fi
 

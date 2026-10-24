@@ -208,6 +208,7 @@ function runInstaller(passthroughArgs) {
   const setupPath = toBashPath(path.join(tmpDir, 'setup.sh'));
 
   try {
+    console.error('agmsg: downloading installer for ' + ref + ' …');
     const fetch = spawnSync('curl', ['-fsSL', '-o', setupPath, setupUrl], { stdio: 'inherit' });
     if (fetch.error) {
       console.error('agmsg: failed to launch curl:', fetch.error.message);
