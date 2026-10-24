@@ -148,9 +148,8 @@ EOF
   fi
 
   # Write, then read back: this is the SAME check the daemon itself applies
-  # (messaging_socket/claude_config_dir both present and non-empty) before
-  # it will ever address this seat, so "the record actually took" must be
-  # verified here too, not assumed from the write call returning.
+  # (a published messaging_socket) before it addresses this seat. Verify
+  # the published destination rather than assuming the write succeeded.
   # Only now, holding the lock, may a missing record be created: an existing
   # record belongs to whoever it names, and the claim above is what shows the
   # seat is ours.
@@ -159,10 +158,6 @@ EOF
       "$(agmsg_canonical_path "${PROJECT:-}" 2>/dev/null || printf '%s' "${PROJECT:-}")" "${TYPE:-}" "$my_instance"
   fi
   if agmsg_role_session_publish_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid" "${CLAUDE_CODE_MESSAGING_TOKEN:-}"; then
-    if agmsg_daemon_claude_seat_held "$pair_team" "$pair_agent" "$socket"; then
-      echo "AGMSG delivery: agmsgd's notices are being held by this Claude Code (its crossSessionInbound setting or permission mode), so the native channel is not used. Next: arm the Monitor below."
-      return 0
-    fi
     cat <<EOF
 AGMSG delivery: agmsgd is running and will deliver to this session directly (native channel). No Monitor needed.
 EOF

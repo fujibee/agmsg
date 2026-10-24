@@ -182,8 +182,6 @@ if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
     while IFS= read -r team; do
       [ -z "$team" ] && continue
       agmsg_role_session_publish_messaging "$team" "$NAME" "${_native_target%%$'\t'*}" "${_native_target#*$'\t'}" "$BARE_SID" "${CLAUDE_CODE_MESSAGING_TOKEN:-}" || NATIVE_DELIVERY=0
-      # This Claude Code holds agmsgd's nudges: keep the Monitor path.
-      ! agmsg_daemon_claude_seat_held "$team" "$NAME" "${_native_target%%$'\t'*}" || NATIVE_DELIVERY=0
     done <<< "$TEAMS"
   fi
 fi

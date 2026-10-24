@@ -46,6 +46,9 @@ export function ensureClaudeCodeChannelSchema(db) {
     if (!columns.some((column) => column.name === "tried_modes")) {
       db.exec("ALTER TABLE beta_claude_queue ADD COLUMN tried_modes TEXT NOT NULL DEFAULT ''");
     }
+    // 1.6.0 waited for transcript confirmation. Those rows do not represent
+    // notified cursors and must not survive as an outstanding delivery gate.
+    db.exec("UPDATE beta_claude_queue SET state = 'expired' WHERE state = 'pending';");
     db.exec("COMMIT;");
   } catch (error) {
     try { db.exec("ROLLBACK;"); } catch { /* preserve the schema error */ }
