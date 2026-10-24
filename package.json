@@ -36,6 +36,10 @@
   },
   "files": [
     "bin/",
+    "app/addon-kit/agmsg-addon.js",
+    "app/addon-kit/agmsg-addon-copy.mjs",
+    "app/addon-kit/PORTING-PROMPT.md",
+    "!app/README.md",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
