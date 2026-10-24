@@ -433,13 +433,16 @@ test('Windows pipe: the preflight makes no connection, and an authenticated nudg
 test('a seat whose hook could not publish a destination is reported with that reason, and the record is read from disk', async (t) => {
   const { root, db, state } = (() => { const f = channelFixture(t); return { root: f.state.options.installRoot, db: f.db, state: f.state }; })();
   const record = (extra) => `team=test\nagent=alice\ntype=claude-code\nproject=${root}\nsession=sess-1\n${extra}`;
-  writeFileSync(path.join(root, 'run', 'role-session.test__alice'), record('messaging_blocked=seat_pid_unresolved\n'));
-  const read = readClaudeRoleSession(path.join(root, 'run'), 'test', 'alice');
-  assert.equal(read.record.messaging_blocked, 'seat_pid_unresolved');
-  const channel = createClaudeCodeQueueChannel({ ...state.options, readSession: () => read });
-  await channel.pollOnce();
-  assert.equal(db.prepare("SELECT state || '/' || reason AS r FROM beta_claude_seat").get().r, 'unaddressable/seat_pid_unresolved');
-  assert.equal(state.sent, 0);
+  for (const reason of ['seat_pid_unresolved', 'agmsgd_not_ready_stopped', 'native_storage_not_ready']) {
+    writeFileSync(path.join(root, 'run', 'role-session.test__alice'), record(`messaging_blocked=${reason}\n`));
+    const read = readClaudeRoleSession(path.join(root, 'run'), 'test', 'alice');
+    assert.equal(read.record.messaging_blocked, reason);
+    const channel = createClaudeCodeQueueChannel({ ...state.options, readSession: () => read });
+    await channel.pollOnce();
+    assert.equal(db.prepare("SELECT state || '/' || reason AS r FROM beta_claude_seat").get().r, `unaddressable/${reason}`);
+    assert.equal(state.sent, 0);
+    await channel.stop();
+  }
   // A value that is not a plain word is ignored, not shown.
   writeFileSync(path.join(root, 'run', 'role-session.test__alice'), record('messaging_blocked=bad value;\n'));
   assert.equal(readClaudeRoleSession(path.join(root, 'run'), 'test', 'alice').record.messaging_blocked, '');
