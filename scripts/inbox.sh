@@ -14,6 +14,12 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
+# Refuse unknown teams before storage resolution or self-naming side effects.
+agmsg_validate_team_name "$TEAM" || exit 1
+if [ ! -f "$SCRIPT_DIR/../teams/$TEAM/config.json" ]; then
+  echo "agmsg: team not found: $TEAM" >&2
+  exit 1
+fi
 agmsg_storage_load
 
 # A seat that reads its inbox names its own pane if it is not named
