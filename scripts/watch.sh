@@ -1277,8 +1277,6 @@ _agmsg_watch_native_delivery_active() {
     [ "$(agmsg_role_session_get "$_team" "$_agent" type 2>/dev/null)" = claude-code ] || return 1
     [ -n "$(agmsg_role_session_get "$_team" "$_agent" messaging_socket 2>/dev/null)" ] || return 1
     [ -n "$(agmsg_role_session_get "$_team" "$_agent" claude_config_dir 2>/dev/null)" ] || return 1
-    # A Claude Code that holds agmsgd's nudges is not served by it.
-    ! agmsg_daemon_claude_seat_held "$_team" "$_agent" "$(agmsg_role_session_get "$_team" "$_agent" messaging_socket 2>/dev/null)" || return 1
     [ "$(agmsg_role_session_get "$_team" "$_agent" project 2>/dev/null)" = "$_canon_project" ] || return 1
   done <<< "$PAIRS"
   [ "$_any" -eq 1 ]

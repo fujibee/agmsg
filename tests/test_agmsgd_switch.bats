@@ -355,17 +355,3 @@ WRAPPER
   assert_contains 'unread messages are preserved'
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = off ]
 }
-
-@test "a seat whose Claude Code holds agmsgd's nudges is not counted as natively delivered, for that socket only" {
-  sqlite3 "$TEST_SKILL_DIR/run/install.db" <<'SQL'
-CREATE TABLE beta_claude_seat (seat TEXT PRIMARY KEY, messaging_socket TEXT, state TEXT NOT NULL, reason TEXT NOT NULL, checked_at TEXT NOT NULL);
-INSERT INTO beta_claude_seat VALUES ('["demo","alice"]', '/tmp/cc-socks/1.sock', 'blocked', 'peer_held: holding messages', '2026-10-20');
-SQL
-  run bash -c ". '$SCRIPTS/lib/daemon-state.sh'; agmsg_daemon_claude_seat_held demo alice /tmp/cc-socks/1.sock"
-  [ "$status" -eq 0 ]
-  run bash -c ". '$SCRIPTS/lib/daemon-state.sh'; agmsg_daemon_claude_seat_held demo alice /tmp/cc-socks/2.sock"
-  [ "$status" -ne 0 ]
-  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE beta_claude_seat SET state='addressable', reason='';"
-  run bash -c ". '$SCRIPTS/lib/daemon-state.sh'; agmsg_daemon_claude_seat_held demo alice /tmp/cc-socks/1.sock"
-  [ "$status" -ne 0 ]
-}

@@ -308,8 +308,7 @@ _mark_daemon_ready() {
     agmsg_instance_is_composite() { case "$1" in *.*) return 0 ;; *) return 1 ;; esac; }
     agmsg_daemon_read_state() { AGMSGD_HEALTH=ready; }
     agmsg_claude_code_native_storage_ready() { return 0; }
-    agmsg_daemon_claude_seat_held() { return 1; }
-    _agmsg_platform=msys
+        _agmsg_platform=msys
     _agmsg_detect_platform() { :; }
 
     SKILL_DIR="$SKILL_DIR" . "'"$TEST_SKILL_DIR"'/scripts/drivers/types/claude-code/_session-start.sh"
@@ -373,7 +372,6 @@ agmsg_daemon_read_state() {
   echo probe >> "$AGMSG_TEST_PROBES"
 }
 agmsg_daemon_apply_project_choice() { :; }
-agmsg_daemon_claude_seat_held() { return 1; }
 STUB
   run env AGMSG_TEST_PROBES="$BATS_TEST_TMPDIR/probes" AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET=uds:/tmp/cc-socks/restart.sock \
     bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice sid-restart
@@ -382,4 +380,21 @@ STUB
   [ "$(wc -l < "$BATS_TEST_TMPDIR/probes" | tr -d ' ')" = 2 ]
   source "$SCRIPTS/lib/role-session.sh"
   [ -z "$(agmsg_role_session_get team alice messaging_blocked)" ]
+}
+
+@test "actas and session-start ignore historical peer_held cache rows" {
+  _mark_daemon_ready
+  sqlite3 "$RUN_DIR/install.db" <<'SQL'
+CREATE TABLE beta_claude_seat (seat TEXT PRIMARY KEY, messaging_socket TEXT, state TEXT NOT NULL, reason TEXT NOT NULL, checked_at TEXT NOT NULL);
+INSERT INTO beta_claude_seat VALUES ('["team","alice"]', '/tmp/cc-socks/legacy-held.sock', 'blocked', 'peer_held: holding messages', '2026-10-23');
+SQL
+  run env AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/legacy-held.sock" \
+    bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice legacy-held
+  [ "$status" -eq 0 ]
+  grep -qx 'delivery=native' <<< "$output"
+  run env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/legacy-held.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"legacy-held"}'
+  [ "$status" -eq 0 ]
+  grep -Fq 'agmsgd is running and will deliver' <<< "$output"
+  refute grep -Fq 'invoke the Monitor tool' <<< "$output"
 }

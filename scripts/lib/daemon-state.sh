@@ -123,20 +123,6 @@ agmsg_daemon_read_state() {
   AGMSGD_REASON=""
 }
 
-# rc 0 when agmsgd last saw this seat's Claude Code hold its nudge, for the
-# very socket given: a held nudge never reaches the model, so native delivery
-# must not be claimed for that session. A different socket is a new session
-# that has not been tried yet, so it is not held. Unreadable means not held.
-agmsg_daemon_claude_seat_held() {   # <team> <agent> <socket>
-  local t="${1//\'/\'\'}" a="${2//\'/\'\'}" sock="${3//\'/\'\'}" n
-  [ -f "$_AGMSG_DAEMON_ROOT/run/install.db" ] || return 1
-  n="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" "
-    SELECT count(*) FROM beta_claude_seat WHERE seat = json_array('$t','$a')
-      AND state = 'blocked' AND reason LIKE 'peer_held%' AND messaging_socket = '$sock';
-  " 2>/dev/null | tr -d '\r')" || return 1
-  [ "$n" = 1 ]
-}
-
 agmsg_daemon_recovery_text() {
   if [ "$AGMSGD_HEALTH" = unchecked ]; then
     printf 'agmsgd (Codex notices) could not be checked from this environment (%s). It may be running; nothing needs to be done unless notices stop arriving.\n' "$AGMSGD_REASON"

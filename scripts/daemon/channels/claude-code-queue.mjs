@@ -5,9 +5,8 @@
 // memory/design/2026-10-05-cross-session-messaging-socket-measurement.md for
 // the measurements this channel's gates come from.
 //
-// Deliberately simpler than the Codex channel: there is no CLI child process
-// to spawn and observe, no bridge, and (per plan, 2026-10-05) no Windows
-// support yet — a named-pipe + mandatory-auth-line variant is separate work.
+// No CLI child process or transcript confirmation is needed: a completed
+// socket write advances this seat's notification cursor.
 
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -29,27 +28,12 @@ import {
   checkSocketOwnership,
   inboxNudge,
   newNonce,
-  observeTranscript,
-  transcriptEndPosition,
   resolveTranscriptPath,
-  resolvePendingDelivery,
   sendClaudeCodeMessage,
   latestPermissionMode,
 } from "./claude-code-queue-io.mjs";
 
 const SEND_TIMEOUT_MS = 5_000;
-
-// What the seat's Claude Code did with a nudge it set aside. It is not
-// "addressable": the message is not reaching the model, so the seat must be
-// served some other way (watch.sh checks for this exact reason prefix).
-export const PEER_HELD_REASON = "peer_held: the seat's Claude Code is holding messages from agmsgd (see its crossSessionInbound setting and permission mode)";
-
-function observedSeat(reason) {
-  if (reason === "peer_held") return { state: "blocked", reason: PEER_HELD_REASON };
-  // Only a checked socket awaiting transcript confirmation remains addressable.
-  // Failed checks preserve the pending nudge without claiming availability.
-  return { state: reason === "awaiting_confirmation" ? "addressable" : "blocked", reason };
-}
 
 function registrationProjects(teamConfig, agent) {
   const registrations = teamConfig?.agents?.[agent]?.registrations;
@@ -58,30 +42,8 @@ function registrationProjects(teamConfig, agent) {
     : [];
 }
 
-function readPending(db, seat) {
-  return db.prepare(`
-    SELECT id, messaging_socket, transcript_path, transcript_pos, up_to, nonce, state, created_at, tried_modes
-    FROM beta_claude_queue WHERE seat = ? AND state = 'pending' ORDER BY id DESC LIMIT 1
-  `).get(seat);
-}
-
-function pendingSeats(db) {
-  const rows = db.prepare("SELECT DISTINCT seat FROM beta_claude_queue WHERE state = 'pending'").all();
-  const seats = [];
-  for (const row of rows) {
-    try {
-      const pair = JSON.parse(row.seat);
-      if (!Array.isArray(pair) || pair.length !== 2) continue;
-      const [team, agent] = pair;
-      const validSegment = (value) => typeof value === "string" && value.length > 0 && value !== "." && value !== ".." &&
-        !value.startsWith("-") && !/[\\/\u0000-\u001f\u007f]/.test(value);
-      if (validSegment(team) && validSegment(agent)) seats.push({ team, agent });
-    } catch { /* malformed historical key cannot safely identify a seat */ }
-  }
-  return seats;
-}
-
-function latestConfirmedCursor(db, seat) {
+// Keep the existing schema enum: confirmed now means the socket write completed.
+function latestNotifiedCursor(db, seat) {
   const row = db.prepare(`
     SELECT up_to FROM beta_claude_queue WHERE seat = ? AND state = 'confirmed'
     ORDER BY id DESC LIMIT 1
@@ -106,15 +68,15 @@ function setQueueState(db, id, state) {
   });
 }
 
-function createPending(db, { seat, messagingSocket, transcriptPath, transcriptPos, upTo, nonce, triedModes, expectedOpGen }, now) {
+function createSendAttempt(db, { seat, messagingSocket, transcriptPath, transcriptPos, upTo, nonce, triedModes, expectedOpGen }, now) {
   let rowId;
   withImmediateTransaction(db, () => {
     const intent = db.prepare("SELECT desired, op_gen FROM daemon_intent").get();
     if (intent?.desired !== "on" || intent.op_gen !== expectedOpGen) {
       throw new Error("daemon_intent_changed");
     }
-    const current = db.prepare("SELECT id FROM beta_claude_queue WHERE seat = ? AND state = 'pending'").get(seat);
-    if (current) throw new Error("seat_already_pending");
+    // Old confirmation-gated rows never block a new attempt after upgrade.
+    db.prepare("UPDATE beta_claude_queue SET state = 'expired' WHERE seat = ? AND state = 'pending'").run(seat);
     const result = db.prepare(`
       INSERT INTO beta_claude_queue (seat, messaging_socket, transcript_path, transcript_pos, up_to, nonce, state, created_at, tried_modes)
       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
@@ -131,10 +93,6 @@ function storagePaths(installRoot, env) {
   };
 }
 
-function pendingObservation(pending, observe) {
-  return resolvePendingDelivery({ observation: observe(pending.transcript_path, pending.nonce, pending.transcript_pos) });
-}
-
 export function createClaudeCodeQueueChannel({
   db,
   installRoot,
@@ -149,92 +107,26 @@ export function createClaudeCodeQueueChannel({
   openStore = openMessageStore,
   readSnapshot = readUnreadSnapshot,
   send = sendClaudeCodeMessage,
-  observe = observeTranscript,
   socketAlive = checkSocketOwnership,
   hostPlatform = process.platform,
   readMode = latestPermissionMode,
   transcriptPathOf = resolveTranscriptPath,
 }) {
   let stopped = false;
-  // Sockets a nudge found gone when it connected. A named pipe cannot be
-  // checked beforehand, so without this each poll would add a queue row that
-  // fails at once until the seat records another pipe.
-  const goneSockets = new Set();
   let activePoll = null;
 
   async function pollSeat(registration, paths) {
-    const { team, agent, teamConfig, registered = true } = registration;
+    const { team, agent, teamConfig } = registration;
     const seat = seatKey(team, agent);
-    const pending = readPending(db, seat);
-    // A project that chose something other than agmsgd gets no nudges, including
-    // a re-send of one already waiting.
+    // A project that chose something other than agmsgd gets no nudges.
     const chosen = readSession(join(installRoot, "run"), team, agent);
     const optedOut = chosen.state === "present" && chosen.record.type === "claude-code"
       ? optedOutOfAgmsgd(installRoot, "claude-code", chosen.record.project)
       : "";
     if (optedOut) {
-      if (pending) setQueueState(db, pending.id, "expired");
       saveSeat(db, { seat, messagingSocket: chosen.record.messaging_socket, state: "unaddressable", reason: `delivery_chosen_${optedOut}` }, now);
       return;
     }
-    let retryMode = "";
-    let carriedModes = [];
-    // At most one nudge is outstanding per seat, and an outstanding one is not
-    // re-sent on a timer: Claude Code holds a message received mid-work until
-    // the work pauses, so a long wait is normal, not a loss. It is re-sent only
-    // when the thing it was sent to is gone, or when the seat set it aside and
-    // the other way of sending has not been tried (see below).
-    if (pending) {
-      const observation = pendingObservation(pending, observe);
-      if (observation.state === "confirmed") {
-        setQueueState(db, pending.id, "confirmed");
-        saveSeat(db, { seat, messagingSocket: pending.messaging_socket, state: "addressable" }, now);
-        return;
-      }
-      if (!registered) {
-        setQueueState(db, pending.id, "expired");
-        saveSeat(db, { seat, messagingSocket: pending.messaging_socket, state: "unaddressable", reason: "seat_registration_missing" }, now);
-        return;
-      }
-      const session = readSession(join(installRoot, "run"), team, agent);
-      const record = session.state === "present" ? session.record : null;
-      const transcriptNow = record
-        ? transcriptPathOf(record.claude_config_dir, record.project, record.session, hostPlatform)
-        : "";
-      // The nudge is out of date when its socket is gone, or the seat's record
-      // now names another socket or session (/compact, restart, --resume).
-      // Nothing else makes it stale: not the time that has passed.
-      // Only a socket that is plainly absent counts as gone. A check that merely
-      // could not run (stat failed, wrong owner) proves nothing about the nudge
-      // the seat still holds, and sending another would duplicate it.
-      const socketCheck = socketAlive(pending.messaging_socket);
-      const socketGone = socketCheck.reason === "messaging_socket_missing";
-      const recordMoved = record && (
-        record.messaging_socket !== pending.messaging_socket ||
-        (transcriptNow && transcriptNow !== pending.transcript_path));
-      if (!socketGone && !recordMoved && observation.reason === "peer_held" && socketCheck.state === "ok") {
-        // The seat's Claude Code set the nudge aside. Whatever mode it was sent
-        // under is not accepted there (a bypass seat wants its mode named, a
-        // prompting one wants none), so it is sent once the other way.
-        // The ways tried are kept on the nudge's own row, so a daemon restart
-        // does not give a held nudge a fresh budget.
-        const tried = pending.tried_modes ? pending.tried_modes.split(",") : [];
-        const other = tried[tried.length - 1] === "bypass" ? "plain" : "bypass";
-        if (!tried.includes(other)) {
-          retryMode = other;
-          carriedModes = tried;
-          setQueueState(db, pending.id, "expired");
-        }
-      }
-      if (retryMode === "") {
-        if (!socketGone && !recordMoved) {
-          saveSeat(db, { seat, messagingSocket: pending.messaging_socket, ...observedSeat(socketCheck.state === "ok" ? observation.reason : socketCheck.reason) }, now);
-          return;
-        }
-        setQueueState(db, pending.id, "expired");
-      }
-    }
-    if (!registered) return;
     const session = readSession(join(installRoot, "run"), team, agent);
     if (session.state !== "present") {
       saveSeat(db, { seat, state: "unaddressable", reason: session.reason ?? "role_session_missing" }, now);
@@ -253,7 +145,7 @@ export function createClaudeCodeQueueChannel({
       saveSeat(db, { seat, state: "unaddressable", reason: record.messaging_blocked }, now);
       return;
     }
-    if (!record.messaging_socket || !record.claude_config_dir || !record.session) {
+    if (!record.messaging_socket) {
       saveSeat(db, { seat, state: "unaddressable", reason: "messaging_destination_missing" }, now);
       return;
     }
@@ -293,19 +185,17 @@ export function createClaudeCodeQueueChannel({
     }
     let snapshot;
     try {
-      snapshot = readSnapshot(store, team, agent, latestConfirmedCursor(db, seat));
+      snapshot = readSnapshot(store, team, agent, latestNotifiedCursor(db, seat));
     } catch (error) {
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `message_store_unreadable:${error.message}` }, now);
       return;
     } finally {
       try { store.close(); } catch { /* keep the read result */ }
     }
-    // A record whose socket no longer exists (the seat is restarting and has
-    // not written its new one yet) has nowhere to be nudged. Make no queue
-    // row for it: each poll would add one that expires at once. Once the seat
-    // records a socket that exists, this passes and the nudge goes out.
+    // Check every poll, including idle seats. A socket recreated at the same
+    // path is eligible immediately; there is no persistent absence cache.
     const socketCheck = socketAlive(record.messaging_socket);
-    if (socketCheck.reason === "messaging_socket_missing" || goneSockets.has(record.messaging_socket)) {
+    if (socketCheck.reason === "messaging_socket_missing") {
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
       return;
     }
@@ -318,41 +208,45 @@ export function createClaudeCodeQueueChannel({
       return;
     }
 
-    const transcriptPath = transcriptPathOf(record.claude_config_dir, record.project, record.session, hostPlatform);
-    if (!transcriptPath) {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: "transcript_path_unresolvable" }, now);
-      return;
-    }
-    // Say bypass only for a seat whose conversation is in bypass mode (or, after
-    // a hold, once as the one other try); every other seat gets no claim.
-    const mode = retryMode || (readMode(transcriptPath) === "bypassPermissions" ? "bypass" : "plain");
+    // Preserve the existing wire-mode hint, but never wait for or require a
+    // transcript. This bounded best-effort read is not delivery confirmation.
+    let mode = "plain";
+    let transcriptPath = "";
+    try {
+      if (record.claude_config_dir && record.session) {
+        transcriptPath = transcriptPathOf(record.claude_config_dir, record.project, record.session, hostPlatform) || "";
+        if (transcriptPath && readMode(transcriptPath) === "bypassPermissions") mode = "bypass";
+      }
+    } catch { /* unavailable mode metadata must not prevent a socket send */ }
     const nonce = newNonce();
     let id;
     try {
-      id = createPending(db, { seat, messagingSocket: record.messaging_socket, transcriptPath, transcriptPos: transcriptEndPosition(transcriptPath), upTo: snapshot.upTo, nonce, triedModes: [...carriedModes, mode], expectedOpGen }, now);
+      id = createSendAttempt(db, { seat, messagingSocket: record.messaging_socket, transcriptPath, transcriptPos: null, upTo: snapshot.upTo, nonce, triedModes: [mode], expectedOpGen }, now);
     } catch (error) {
-      if (error.message !== "daemon_intent_changed" && error.message !== "seat_already_pending") throw error;
+      if (error.message !== "daemon_intent_changed") throw error;
       return;
     }
 
-    const result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
+    let result;
+    try {
+      result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
+    } catch (error) {
+      result = { state: "failed", reason: `send_error:${error?.code ?? error?.message ?? String(error)}` };
+    }
     if (result.state !== "sent") {
       setQueueState(db, id, "expired");
-      if (result.reason === "socket_error:ENOENT") {
-        goneSockets.add(record.messaging_socket);
+      if (result.reason === "socket_error:ENOENT" || result.reason === "messaging_socket_missing") {
         saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
-        return;
+      } else {
+        saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` }, now);
       }
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: `send_failed:${result.reason}` }, now);
       return;
     }
-    const firstCheck = pendingObservation(readPending(db, seat), observe);
-    if (firstCheck.state === "confirmed") {
-      setQueueState(db, id, "confirmed");
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
-      return;
-    }
-    saveSeat(db, { seat, messagingSocket: record.messaging_socket, ...observedSeat(firstCheck.reason) }, now);
+    // A completed socket write is delivery. Keep the snapshot cursor on the
+    // existing confirmed row; neither inbox reads nor transcript evidence gate
+    // later nudges for unread messages beyond that cursor.
+    setQueueState(db, id, "confirmed");
+    saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
   }
 
   async function pollOnce() {
@@ -367,15 +261,8 @@ export function createClaudeCodeQueueChannel({
       const paths = storagePaths(installRoot, env);
       const seats = [...roster.seats];
       const registeredKeys = new Set(seats.map(({ team, agent }) => seatKey(team, agent)));
-      const unsettledSeats = pendingSeats(db);
-      const pendingKeys = new Set(unsettledSeats.map(({ team, agent }) => seatKey(team, agent)));
-      for (const { team, agent } of unsettledSeats) {
-        const key = seatKey(team, agent);
-        if (!registeredKeys.has(key)) seats.push({ team, agent, teamConfig: null, registered: false });
-      }
-      const knownKeys = new Set([...registeredKeys, ...pendingKeys]);
       for (const row of db.prepare("SELECT seat FROM beta_claude_seat").all()) {
-        if (!knownKeys.has(row.seat)) {
+        if (!registeredKeys.has(row.seat)) {
           saveSeat(db, { seat: row.seat, state: "unaddressable", reason: "seat_registration_missing" }, now);
         }
       }
