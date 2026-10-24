@@ -67,6 +67,11 @@ codex
 In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
 
+### The project hooks file and the first launch
+
+- `delivery.sh set monitor codex <dir>` writes `<dir>/.codex/hooks.json`. If `<dir>` is a git repository and you do not want the file listed as untracked, add `.codex/hooks.json` to that clone's local exclude file (`.git/info/exclude`; for a git worktree, use the path printed by `git rev-parse --git-path info/exclude`). The file is not meant to be committed.
+- In the observed setup (codex-cli 0.163.0), the first Codex start in a project after the hooks were written showed a `Hooks need review` prompt. Look at the listed hooks and trust them only if they are the ones you expect (for agmsg: `session-start.sh` and `session-end.sh` from your agmsg install). A Codex window started by `spawn.sh` waited at that prompt until it was answered, and during that time `delivery.sh status` showed `no session recorded` for the seat. A changed hooks file may prompt again (reported in #1429; not re-checked here).
+
 ## Optional PATH Shim
 
 If you prefer the previous global PATH shim setup, install it explicitly:
