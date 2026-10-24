@@ -1,6 +1,6 @@
 // Conservative evidence for a short-lived command launched in its own group.
 // If the platform cannot prove the group is empty or still belongs to the
-// recorded leader, callers must treat it as unknown and keep the seat pending.
+// recorded leader, callers treat it as unknown until the writer lifetime bound.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -23,7 +23,7 @@ export function processStartWitness(pid, onFailure = () => {}) {
   }
   if (os === "darwin") {
     try {
-      const start = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim();
+      const start = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 1000, killSignal: "SIGKILL" }).trim();
       if (!start) onFailure("ps printed no start time");
       return start ? `darwin:${start}` : null;
     } catch (error) {
@@ -38,7 +38,7 @@ export function processStartWitness(pid, onFailure = () => {}) {
         const start = execFileSync(executable, [
           "-NoProfile", "-NonInteractive", "-Command",
           `(Get-Process -Id ${pid}).StartTime.Ticks`,
-        ], { encoding: "utf8", windowsHide: true }).trim();
+        ], { encoding: "utf8", windowsHide: true, timeout: 1000, killSignal: "SIGKILL" }).trim();
         if (/^\d+$/.test(start)) return `windows:${start}`;
         onFailure(`${executable} printed ${start ? "an invalid start time" : "no start time"}`);
       } catch (error) {
