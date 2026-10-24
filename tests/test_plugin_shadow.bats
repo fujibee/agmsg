@@ -35,6 +35,16 @@ _trusted_source_driver() {  # owner repo sha axis/name
   [ -z "$output" ]
 }
 
+@test "plugin-shadow: a first install (no skill dir yet) passes both calls under install.sh's set -euo pipefail" {
+  run bash -c 'set -euo pipefail
+    . "$1"
+    before="$(agmsg_builtin_driver_names "$2")"
+    agmsg_plugin_shadow_warn "$2" "$before"
+    printf "reached:[%s]\n" "$before"' _ "$REPO_ROOT/scripts/lib/plugin-shadow.sh" "$BATS_TEST_TMPDIR/not-installed-yet"
+  [ "$status" -eq 0 ]
+  [ "$output" = "reached:[]" ]
+}
+
 @test "plugin-shadow: a new built-in under a trusted source driver's name is named, with remove and untrust" {
   before="$(agmsg_builtin_driver_names "$SKD")"
   _trusted_source_driver acme pack 0123abcd ext-tools/jev
