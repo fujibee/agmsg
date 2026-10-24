@@ -92,10 +92,6 @@ _trusted_source_driver() {  # owner repo sha axis name
   _driver "$BATS_TEST_TMPDIR/elsewhere" terminals newterm
   _trust terminals/newterm "$BATS_TEST_TMPDIR/elsewhere/terminals/newterm"
   _driver "$SKD/scripts/drivers" terminals newterm
-  # New built-in; a trust row with a CR, which the registry's exact match rejects.
-  _driver "$SKD/plugins" terminals crterm
-  printf 'terminals/crterm\t%s\r\n' "$SKD/plugins/terminals/crterm" >> "$SKD/db/trusted-plugins"
-  _driver "$SKD/scripts/drivers" terminals crterm
   # New built-in; a trusted plugin dir with no manifest.
   mkdir -p "$SKD/plugins/ext-tools/nomani"
   _trust ext-tools/nomani "$SKD/plugins/ext-tools/nomani"
@@ -103,6 +99,27 @@ _trusted_source_driver() {  # owner repo sha axis name
   run agmsg_plugin_shadow_warn "$SKD" "$before"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+# Whether a trust row ending in CR counts is the registry's call, and it differs
+# by platform: grep -x rejects it on macOS/Linux, while MSYS grep reads the file
+# in text mode and drops the CR, so on Git Bash the row is trusted. The warning
+# must agree with the registry either way.
+@test "plugin-shadow: a trust row with a CR warns exactly when the registry picks the plugin" {
+  before="$(agmsg_builtin_driver_names "$SKD")"
+  _driver "$SKD/plugins" terminals crterm
+  printf 'terminals/crterm\t%s\r\n' "$SKD/plugins/terminals/crterm" >> "$SKD/db/trusted-plugins"
+  _driver "$SKD/scripts/drivers" terminals crterm
+  winner="$(bash -c '. "$1/scripts/lib/driver-registry.sh"; . "$1/scripts/lib/terminal-registry.sh"; agmsg_terminal_dir crterm' _ "$SKD" 2>/dev/null)"
+  [ -n "$winner" ]
+  run agmsg_plugin_shadow_warn "$SKD" "$before"
+  [ "$status" -eq 0 ]
+  if [ "$winner" = "$SKD/scripts/drivers/terminals/crterm" ]; then
+    [ -z "$output" ]
+  else
+    [ "$winner" = "$SKD/plugins/terminals/crterm" ]
+    grep -Fq -- "adds a built-in terminals/crterm" <<<"$output"
+  fi
 }
 
 @test "plugin-shadow: a trusted hand-placed or AGMSG_PLUGIN_DIRS plugin gets the untrust hint only; no trust file is quiet" {
