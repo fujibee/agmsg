@@ -84,6 +84,10 @@ function executableFixture(t) {
     openStore: () => ({ close() {} }),
     readSnapshot: () => ({ state: 'ok', unread: true, upTo: '{}' }),
     captureGroup: () => ({ state: 'absent' }),
+    // Exercise the Windows gate path on every host without asking the real
+    // Codex binary resolver to accept this suite's Node executable fixture.
+    hostPlatform: 'win32',
+    windowsGate: ({ executable }) => ({ state: 'ok', executable }),
   };
   return { root, db, options };
 }
@@ -463,6 +467,8 @@ test('Codex channel advances accepted snapshots while reserving only active writ
     installRoot: root,
     expectedOpGen: 4,
     env: { AGMSG_STORAGE_PATH: storageDir },
+    hostPlatform: 'win32',
+    windowsGate: ({ executable }) => ({ state: 'ok', executable }),
     readDriver: () => ({ state: 'ok', driver: 'sqlite' }),
     captureGroup: (pid) => ({ state: 'complete', pgid: pid, boot_id: 'test-boot', witness: 'test-start' }),
     observeGroup: () => ({ state: childGroupState }),
@@ -600,6 +606,8 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   let groupState = 'absent';
   const staleChannel = createCodexQueueChannel({
     db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: storageDir },
+    hostPlatform: 'win32',
+    windowsGate: ({ executable }) => ({ state: 'ok', executable }),
     observeGroup: () => ({ state: groupState }),
     log: (message) => logs.push(message),
     captureGroup: (pid, onFailure) => { onFailure('ps failed: status=1'); return { state: 'unreadable', reason: 'child_start_witness_unavailable', pgid: pid }; },
