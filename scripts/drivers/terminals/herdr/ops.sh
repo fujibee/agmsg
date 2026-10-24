@@ -924,7 +924,7 @@ terminal_peek_styled() {
 _herdr_peek_impl() {
   local id="$1" src="$2" lines="$3" format="$4"
   # peek is a READ op: only the pane CONTENT may reach stdout. herdr writes an error
-  # JSON to STDOUT on failure (e.g. {"error":{"code":"pane_not_found",...}}), which the
+  # JSON on stdout or stderr on failure (e.g. {"error":{"code":"pane_not_found",...}}), which the
   # caller would otherwise read as the pane's content — "read" and "could-not-read"
   # returning in the same shape (the third instance of one channel carrying two
   # meanings). ISOLATE it (capture; the error body goes to stderr, never stdout), and
@@ -944,8 +944,8 @@ _herdr_peek_impl() {
   # substitution strips EVERY trailing newline; a following printf '%s\n' then invents
   # exactly one back, so empty content becomes a lone newline and content ending in
   # 0 or 2+ newlines is silently rewritten. Capture to a temp file instead,
-  # decide on rc, then cat the bytes unmodified. herdr writes its error JSON to
-  # STDOUT on failure, so on the failure path that body is a diagnostic -> stderr,
+  # decide on rc, then cat the bytes unmodified. herdr may write its error JSON to
+  # stdout on failure, so on the failure path that body is a diagnostic -> stderr,
   # never the caller's content.
   local tmp rc=0 stderr_body=""
   tmp="$(mktemp)" || { echo "herdr: could not allocate a temp file to peek pane '$id'" >&2; return 12; }
@@ -988,11 +988,19 @@ _herdr_peek_impl() {
     # "unknown" -- the same family as #1158, a failure returning as a different
     # value that looks like an answer. No sqlite3, no JSON, no code, a code
     # about another pane: all of those are 11, with the body forwarded above.
-    local _code="" _pane="" _esc
-    if [ -n "$stdout_body" ] && command -v sqlite3 >/dev/null 2>&1; then
-      _esc="$(printf '%s' "$stdout_body" | sed "s/'/''/g")"
-      _code="$(sqlite3 :memory: "SELECT CASE WHEN json_valid('$_esc') AND json_type('$_esc','\$.error.code')='text' THEN json_extract('$_esc','\$.error.code') ELSE '' END" 2>/dev/null || true)"
-      _pane="$(sqlite3 :memory: "SELECT CASE WHEN json_valid('$_esc') AND json_type('$_esc','\$.error.pane')='text' THEN json_extract('$_esc','\$.error.pane') ELSE '' END" 2>/dev/null || true)"
+    # Preserve stdout precedence; herdr 0.9.1 reports errors on stderr (#1317).
+    # Only fall back when stdout has no code, and take the pane from that same
+    # reply so fields from different channels can never be combined.
+    local _code="" _pane="" _esc _body
+    if command -v sqlite3 >/dev/null 2>&1; then
+      for _body in "$stdout_body" "$stderr_body"; do
+        [ -n "$_body" ] || continue
+        _esc="$(printf '%s' "$_body" | sed "s/'/''/g")"
+        _code="$(sqlite3 :memory: "SELECT CASE WHEN json_valid('$_esc') AND json_type('$_esc','\$.error.code')='text' THEN json_extract('$_esc','\$.error.code') ELSE '' END" 2>/dev/null || true)"
+        [ -n "$_code" ] || continue
+        _pane="$(sqlite3 :memory: "SELECT CASE WHEN json_valid('$_esc') AND json_type('$_esc','\$.error.pane')='text' THEN json_extract('$_esc','\$.error.pane') ELSE '' END" 2>/dev/null || true)"
+        break
+      done
     fi
     if [ "$_code" = pane_not_found ] && { [ -z "$_pane" ] || [ "$_pane" = "$(_herdr_bare_of "$id")" ]; }; then
       echo "herdr: could not read pane '$id': the terminal reports it no longer exists" >&2
