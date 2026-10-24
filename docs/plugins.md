@@ -91,11 +91,11 @@ types/bar                  UNTRUSTED   -                            -           
 types/baz                  trusted     github/acme/baz              9074a92c6404  /…/plugins/sources/github/acme/baz/9074…/types/baz
 ```
 
-> On non-Windows hosts the `agmsg` command surface is provided by your agent's
-> skill flow; you can always invoke the script directly:
+> `agmsg plugin ...` runs the install's `scripts/plugin.sh`. If the `agmsg`
+> command is not on your PATH, invoke the script directly, with the same arguments:
 > `~/.agents/skills/<cmd>/scripts/plugin.sh list`.
-> The `install`, `update` and `remove` commands are available the same way, and as
-> `/agmsg plugin ...` in your agent (the agent asks you before it installs anything).
+> In your agent, `/agmsg plugin ...` does the same (the agent asks you before it
+> installs anything).
 
 ## Installing a plugin from GitHub
 
