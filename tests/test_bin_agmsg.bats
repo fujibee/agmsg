@@ -73,6 +73,6 @@ SH
   chmod +x "$bin/curl"
   run bash -c 'PATH="$1:$PATH" node "$2" install --update 2>&1' _ "$bin" "$BIN"
   [ "$status" -eq 41 ]
-  [[ "${lines[0]}" == 'agmsg: downloading installer for '* ]]
+  grep -q '^agmsg: downloading installer for ' <<< "${lines[0]}"
   [ "${lines[1]}" = 'fetch-started' ]
 }

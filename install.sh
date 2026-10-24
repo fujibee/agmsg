@@ -177,27 +177,9 @@ agmsg_install_restart_guidance() {
   echo '    This installation does not enable agmsgd or switch existing sessions automatically.'
 }
 
-# Self-contained for an updater still reading an older installed skill.
-# This is guidance only: it never changes delivery or starts a watcher.
-agmsg_install_update_delivery_hint() {   # <skill_dir> [current type]
-  local skill="$1" type="${2:-}"
-  if [ -z "$type" ]; then
-    type="$(
-      source "$skill/scripts/lib/compat.sh"
-      source "$skill/scripts/lib/type-registry.sh"
-      source "$skill/scripts/lib/detect-cli-type.sh"
-      agmsg_detect_cli_type
-    )"
-  fi
-  echo '  New in 1.6: agmsgd is the recommended background service for message notices.'
-  printf '    Check this project: bash %q delivery status --type %q --project "$(pwd)"\n' "$skill/scripts/agmsg" "$type"
-  echo '    If this project uses monitor (legacy), suggest switching to agmsgd to the user:'
-  printf '      bash %q delivery agmsgd --type %q --project "$(pwd)"\n' "$skill/scripts/agmsg" "$type"
-  echo '    The switch command enables agmsgd and configures this project. This running'
-  echo '    session keeps its current delivery until it runs the messaging skill with'
-  echo "    actas <existing-agent-name>, or restarts. Follow the switch command's current-session"
-  echo '    instructions, including its Monitor fallback; stored unread messages are preserved.'
-  printf '    Check agmsgd afterwards: bash %q daemon status\n' "$skill/scripts/agmsg"
+# The running agent may still have the pre-update skill in its context.
+agmsg_install_update_reading_hint() {   # <skill_dir> <release version>
+  printf 'agmsg was updated to %s. This session still has the old skill loaded. Re-read "%s/SKILL.md", read the %s section of "%s/CHANGELOG.md", and tell the user what changed and which settings it recommends.\n' "$2" "$1" "$2" "$1"
 }
 
 # One line pointing at agmsgd, only while it is off. Never turns it on. Kept in
@@ -1069,6 +1051,7 @@ $_agmsg_running_team"
   # Runs under the install operation lock. The completion manifest is written
   # only after the remaining install updates below are complete.
   agmsg_install_copy_scripts || exit 1
+  agmsg_install_op_run_phase cp "$SCRIPT_DIR/CHANGELOG.md" "$SKILL_DIR/CHANGELOG.md" || exit 1
   echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
   # #1249: drivers/terminals/{herdr,plain,tmux}/SKILL.md used to name each
   # driver's own doc file, and a directory-scanning skill loader (e.g.
@@ -1301,7 +1284,7 @@ $_agmsg_running_team"
   agmsg_install_restart_daemon "$SKILL_DIR"
   echo "  ✓ Update complete"
   echo ""
-  agmsg_install_update_delivery_hint "$SKILL_DIR"
+  agmsg_install_update_reading_hint "$SKILL_DIR" "$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || printf '%s' "$INSTALLED_VERSION")"
   exit 0
 fi
 
@@ -1356,6 +1339,7 @@ agmsg_install_op_run_phase agmsg_reset_trash "$TRASH_DIR" || exit 1
 # Runs under the install operation lock. The completion manifest is written
 # only after the remaining install updates below are complete.
 agmsg_install_copy_scripts || exit 1
+agmsg_install_op_run_phase cp "$SCRIPT_DIR/CHANGELOG.md" "$SKILL_DIR/CHANGELOG.md" || exit 1
 echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
 # Ship the external-plugin drop-in dir (just its README) so the location exists
 # post-install. A plain cp — not cp -R --delete — preserves any plugins the user

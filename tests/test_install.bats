@@ -2799,7 +2799,7 @@ CYG
   done < <(agmsg_renderable_types "$BATS_TEST_DIRNAME/..")
 }
 
-@test "install --update: a 1.5.1 install receives self-contained agmsgd guidance (#1741)" {
+@test "install --update: a 1.5.1 install receives the changelog and reading instruction (#1741)" {
   if ! git -C "$REPO_ROOT" rev-parse --verify refs/tags/v1.5.1 >/dev/null 2>&1; then
     skip 'v1.5.1 source tag is not available in this checkout'
   fi
@@ -2810,6 +2810,7 @@ CYG
   printf 'model = "fixture-profile"\n' > "$profile/config.toml"
   HOME="$FAKE_HOME" CODEX_HOME="$profile" bash "$old_source/install.sh" --cmd agmsg
   grep -q '1.5.1' "$SK/VERSION"
+  [ ! -e "$SK/CHANGELOG.md" ]
 
   local project="$FAKE_HOME/project"
   mkdir -p "$project"
@@ -2817,32 +2818,34 @@ CYG
   HOME="$FAKE_HOME" bash "$SK/scripts/join.sh" update-team bob claude-code "$project" >/dev/null
   HOME="$FAKE_HOME" bash "$SK/scripts/send.sh" update-team bob alice 'message survives update' >/dev/null
 
-  CLAUDE_CODE_SESSION_ID=fixture-update HOME="$FAKE_HOME" CODEX_HOME="$profile" \
-    run bash "$REPO_ROOT/install.sh" --update --cmd agmsg
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" run bash "$REPO_ROOT/install.sh" --update --cmd agmsg
   [ "$status" -eq 0 ]
-  [[ "$output" == *'Update complete'*'agmsgd is the recommended'* ]]
-  [[ "$output" != *'AGMSG-DIRECTIVE'* ]]
-  [[ "$output" == *'suggest switching to agmsgd to the user'* ]]
-  local check switch
-  check="$(sed -n 's/^    Check this project: //p' <<< "$output")"
-  switch="$(sed -n 's/^      bash /bash /p' <<< "$output" | tail -1)"
-  [[ "$check" == *'delivery status --type claude-code --project "$(pwd)"'* ]]
-  [[ "$switch" == *'delivery agmsgd --type claude-code --project "$(pwd)"'* ]]
-
-  HOME="$FAKE_HOME" CODEX_HOME="$profile" run bash -c 'cd "$1"; bash -c "$2"' _ "$project" "$check"
-  [ "$status" -eq 0 ]
-  # Do not register a real resident service. Keep the real delivery command,
-  # replacing only its service-control dependency for the switch syntax check.
-  cat > "$SK/scripts/daemon.sh" <<'SH'
-#!/usr/bin/env bash
-[ "$1" = offer ] || exit 99
-printf 'agmsgd=on\n'
-SH
-  HOME="$FAKE_HOME" CODEX_HOME="$profile" run bash -c 'cd "$1"; bash -c "$2"' _ "$project" "$switch"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *'until it restarts or runs actas'* ]]
-  [[ "$output" == *'invoke the Monitor tool now'* ]]
+  local version
+  version="$(cat "$REPO_ROOT/VERSION")"
+  grep -Fq "agmsg was updated to $version. This session still has the old skill loaded." <<< "$output"
+  grep -Fq "$SK/SKILL.md" <<< "$output"
+  grep -Fq "read the $version section of \"$SK/CHANGELOG.md\"" <<< "$output"
+  cmp "$REPO_ROOT/CHANGELOG.md" "$SK/CHANGELOG.md"
   HOME="$FAKE_HOME" CODEX_HOME="$profile" run bash "$SK/scripts/inbox.sh" update-team alice
   [ "$status" -eq 0 ]
-  [[ "$output" == *'message survives update'* ]]
+  grep -Fq 'message survives update' <<< "$output"
+
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" bash "$SK/uninstall.sh" --yes
+  [ ! -e "$SK/CHANGELOG.md" ]
+}
+
+@test "install/update/uninstall: CHANGELOG is copied, refreshed, and removed with --keep-data" {
+  local profile="$FAKE_HOME/codex-profile"
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  cmp "$REPO_ROOT/CHANGELOG.md" "$SK/CHANGELOG.md"
+  printf 'old changelog\n' > "$SK/CHANGELOG.md"
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" run bash "$REPO_ROOT/install.sh" --update --cmd agmsg
+  [ "$status" -eq 0 ]
+  cmp "$REPO_ROOT/CHANGELOG.md" "$SK/CHANGELOG.md"
+  mkdir -p "$SK/teams/fixture-team"
+  printf 'preserved team data\n' > "$SK/teams/fixture-team/kept"
+  HOME="$FAKE_HOME" CODEX_HOME="$profile" bash "$SK/uninstall.sh" --yes --keep-data
+  [ ! -e "$SK/CHANGELOG.md" ]
+  [ -d "$SK/db" ]
+  grep -Fq 'preserved team data' "$SK/teams/fixture-team/kept"
 }
