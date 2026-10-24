@@ -45,9 +45,10 @@ const SEND_TIMEOUT_MS = 5_000;
 export const PEER_HELD_REASON = "peer_held: the seat's Claude Code is holding messages from agmsgd (see its crossSessionInbound setting and permission mode)";
 
 function observedSeat(reason) {
-  return reason === "peer_held"
-    ? { state: "blocked", reason: PEER_HELD_REASON }
-    : { state: "addressable", reason };
+  if (reason === "peer_held") return { state: "blocked", reason: PEER_HELD_REASON };
+  // Only a checked socket awaiting transcript confirmation remains addressable.
+  // Failed checks preserve the pending nudge without claiming availability.
+  return { state: reason === "awaiting_confirmation" ? "addressable" : "blocked", reason };
 }
 
 function registrationProjects(teamConfig, agent) {
@@ -299,6 +300,19 @@ export function createClaudeCodeQueueChannel({
     } finally {
       try { store.close(); } catch { /* keep the read result */ }
     }
+    // A record whose socket no longer exists (the seat is restarting and has
+    // not written its new one yet) has nowhere to be nudged. Make no queue
+    // row for it: each poll would add one that expires at once. Once the seat
+    // records a socket that exists, this passes and the nudge goes out.
+    const socketCheck = socketAlive(record.messaging_socket);
+    if (socketCheck.reason === "messaging_socket_missing" || goneSockets.has(record.messaging_socket)) {
+      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
+      return;
+    }
+    if (socketCheck.state !== "ok") {
+      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: socketCheck.reason ?? "messaging_socket_unreadable" }, now);
+      return;
+    }
     if (!snapshot.unread || stopped) {
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
       return;
@@ -307,14 +321,6 @@ export function createClaudeCodeQueueChannel({
     const transcriptPath = transcriptPathOf(record.claude_config_dir, record.project, record.session, hostPlatform);
     if (!transcriptPath) {
       saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "blocked", reason: "transcript_path_unresolvable" }, now);
-      return;
-    }
-    // A record whose socket no longer exists (the seat is restarting and has
-    // not written its new one yet) has nowhere to be nudged. Make no queue
-    // row for it: each poll would add one that expires at once. Once the seat
-    // records a socket that exists, this passes and the nudge goes out.
-    if (socketAlive(record.messaging_socket).reason === "messaging_socket_missing" || goneSockets.has(record.messaging_socket)) {
-      saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "unaddressable", reason: "messaging_socket_missing" }, now);
       return;
     }
     // Say bypass only for a seat whose conversation is in bypass mode (or, after
