@@ -1673,61 +1673,9 @@ fn exec_mode(_meta: &fs::Metadata, fallback: Option<&str>) -> String {
 /// not start the helper when a missing object is read. The app runs this once
 /// per git it finds; on failure `git:read` stays off, with the message as the
 /// reason shown to the user.
-#[cfg(unix)]
 pub fn probe_no_lazy_fetch(env: &GitEnv, scratch: &Path) -> Res<()> {
-    use std::os::unix::fs::PermissionsExt;
     let dir = scratch.join("lazy-fetch-probe");
-    fs::create_dir_all(&dir)
-        .map_err(|e| unavailable(format!("cannot prepare the git probe: {e}")))?;
-    let repo = dir.join("repo");
-    let sentinel = dir.join("helper-ran");
-    let helper = dir.join("helper");
-    let _ = fs::remove_file(&sentinel);
-    fs::write(
-        &helper,
-        format!("#!/bin/sh\nprintf ran > '{}'\nexit 1\n", sentinel.display()),
-    )
-    .map_err(|e| unavailable(format!("cannot prepare the git probe: {e}")))?;
-    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))
-        .map_err(|e| unavailable(e.to_string()))?;
-    fs::create_dir_all(&repo).map_err(|e| unavailable(e.to_string()))?;
-    let init = Runner {
-        env: env.clone(),
-        git_dir: repo.join(".git"),
-        work_tree: repo.clone(),
-        ceiling: dir.clone(),
-    };
-    let (ok, _, err) = {
-        let mut c = init.command();
-        let _ = &mut c;
-        // `init` must not receive --git-dir, so build it by hand.
-        let out = Command::new(&env.git)
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("HOME", &env.empty_dir)
-            .env("GIT_CONFIG_GLOBAL", &env.empty_config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .args(["init", "-q"])
-            .arg(&repo)
-            .output()
-            .map_err(|e| unavailable(format!("cannot start git: {e}")))?;
-        (
-            out.status.success(),
-            out.stdout,
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    };
-    if !ok {
-        return Err(unavailable(format!(
-            "git init failed in the probe: {}",
-            first_line(&err)
-        )));
-    }
-    let cfg = format!(
-        "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tpartialClone = origin\n[remote \"origin\"]\n\tpromisor = true\n\turl = ext::{}\n[protocol \"ext\"]\n\tallow = always\n",
-        helper.display()
-    );
-    fs::write(repo.join(".git/config"), cfg).map_err(|e| unavailable(e.to_string()))?;
+    let (repo, sentinel) = lazy_fetch_fixture(env, &dir)?;
     let r = Runner {
         env: env.clone(),
         git_dir: repo.join(".git"),
@@ -1745,11 +1693,51 @@ pub fn probe_no_lazy_fetch(env: &GitEnv, scratch: &Path) -> Res<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub fn probe_no_lazy_fetch(_env: &GitEnv, _scratch: &Path) -> Res<()> {
-    Err(unavailable(
-        "the lazy-fetch measurement is not implemented on this OS yet; git:read is off",
-    ))
+/// A path as a shell script and git's `ext::` syntax take it: forward slashes, and
+/// `% ` for a space.
+fn ext_word(p: &Path) -> String {
+    super::fslink::plain(p).to_string_lossy().replace('\\', "/").replace('%', "%%").replace(' ', "% ")
+}
+
+/// A repository set up like a partial clone whose remote is an `ext::` helper that
+/// leaves `helper-ran` behind when it is started. Returns the repository and the
+/// sentinel path.
+fn lazy_fetch_fixture(env: &GitEnv, dir: &Path) -> Res<(PathBuf, PathBuf)> {
+    fs::create_dir_all(dir).map_err(|e| unavailable(format!("cannot prepare the git probe: {e}")))?;
+    let repo = dir.join("repo");
+    let sentinel = dir.join("helper-ran");
+    let helper = dir.join("helper");
+    let _ = fs::remove_file(&sentinel);
+    let shell_path = |p: &Path| super::fslink::plain(p).to_string_lossy().replace('\\', "/");
+    fs::write(&helper, format!("#!/bin/sh\nprintf ran > '{}'\nexit 1\n", shell_path(&sentinel)))
+        .map_err(|e| unavailable(format!("cannot prepare the git probe: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).map_err(|e| unavailable(e.to_string()))?;
+    }
+    fs::create_dir_all(&repo).map_err(|e| unavailable(e.to_string()))?;
+    // `init` must not receive --git-dir, so build it by hand.
+    let out = Command::new(&env.git)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", super::fslink::plain(&env.empty_dir))
+        .env("GIT_CONFIG_GLOBAL", super::fslink::plain(&env.empty_config))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["init", "-q"])
+        .arg(super::fslink::plain(&repo))
+        .output()
+        .map_err(|e| unavailable(format!("cannot start git: {e}")))?;
+    if !out.status.success() {
+        return Err(unavailable(format!("git init failed in the probe: {}", first_line(&String::from_utf8_lossy(&out.stderr)))));
+    }
+    // sh runs the script, so the file needs no execute bit (Windows has none)
+    let cfg = format!(
+        "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tpartialClone = origin\n[remote \"origin\"]\n\tpromisor = true\n\turl = ext::sh {}\n[protocol \"ext\"]\n\tallow = always\n",
+        ext_word(&helper)
+    );
+    fs::write(repo.join(".git/config"), cfg).map_err(|e| unavailable(e.to_string()))?;
+    Ok((repo, sentinel))
 }
 
 #[cfg(test)]
@@ -3331,5 +3319,34 @@ mod tests {
         assert_eq!(clean_value("x # comment"), "x");
         assert_eq!(clean_value("x;y"), "x;y");
         assert_eq!(clean_value("\"a # b\""), "a # b");
+    }
+
+    /// The probe only means something if the helper really runs when lazy fetch is allowed.
+    #[test]
+    fn the_lazy_fetch_helper_runs_when_nothing_stops_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let support = tmp.path().join("support");
+        fs::create_dir_all(&support).unwrap();
+        let env = GitEnv::new("git", &support).unwrap();
+        let (repo, sentinel) = lazy_fetch_fixture(&env, &tmp.path().join("fx")).unwrap();
+        let _ = Command::new("git")
+            .current_dir(super::super::fslink::plain(&repo))
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_GLOBAL", super::super::fslink::plain(&env.empty_config))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["cat-file", "-p", "1234567890123456789012345678901234567890"])
+            .output()
+            .unwrap();
+        assert!(sentinel.exists(), "the helper did not run, so the probe could not tell anything");
+    }
+
+    #[test]
+    fn this_git_honours_no_lazy_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let support = tmp.path().join("support");
+        fs::create_dir_all(&support).unwrap();
+        let env = GitEnv::new("git", &support).unwrap();
+        probe_no_lazy_fetch(&env, &support).unwrap();
     }
 }
