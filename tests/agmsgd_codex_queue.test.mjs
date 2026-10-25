@@ -682,6 +682,8 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   assert.doesNotMatch(reusedStart.reason, /^bridge_state_unknown/);
   const damaged = await seatStateAfter(goodLease.replace(/^host=.*\n/m, ''));
   assert.match(damaged.reason, /^bridge_state_unknown/, 'a lease with missing fields stays unknown');
+  const brokenValues = await seatStateAfter(goodLease.replace(/^project=.*$/m, 'project=broken').replace(/^startsrc=.*$/m, 'startsrc=broken'));
+  assert.match(brokenValues.reason, /^bridge_state_unknown/, 'a lease with malformed values is damaged, not a mismatch');
   writeFileSync(leaseFile, goodLease);
   unlinkSync(`${bridgeBase}.pid`);
   unlinkSync(`${bridgeBase}.meta`);

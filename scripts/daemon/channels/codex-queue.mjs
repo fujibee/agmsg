@@ -232,10 +232,9 @@ function bridgeState(runDir, team, agent, projects) {
     // lease or start-witness comparison, which necessarily fails for dead PIDs.
     try { process.kill(Number(pidText), 0); } catch (error) {
       if (error?.code === "ESRCH") { stoppedReason = `bridge_stopped:${pidPath}:pid_absent`; continue; }
-      // The bridge runs as this user, so a PID this user cannot signal now
-      // belongs to someone else's process: the recorded bridge is gone.
-      if (error?.code === "EPERM") { stoppedReason = `bridge_stopped:${pidPath}:pid_reused`; continue; }
-      return unknown(pidPath, `pid_probe_failed:${error?.code ?? "unknown"}`);
+      // EPERM does not prove another owner (an elevated bridge of this user
+      // can also refuse the probe), so the lease decides below.
+      if (error?.code !== "EPERM") return unknown(pidPath, `pid_probe_failed:${error?.code ?? "unknown"}`);
     }
     if (!projects.some((project) => sameProject(project, fields.project))) return unknown(metaPath, "project_missing_or_mismatch");
     // A live PID alone can be a recycled process. Require the bridge's own
@@ -263,13 +262,13 @@ function bridgeState(runDir, team, agent, projects) {
     // A readable, well-formed lease that names a different bridge says the
     // live PID was reused by another process: this pair has no bridge. Only a
     // lease or witness that cannot be read stays unknown.
-    if (lease.v !== "1" || lease.pid !== pidText || !lease.start) return unknown(leasePath, "fields_missing_or_invalid");
+    const sha1 = /^[0-9a-f]{40}$/;
+    const startPrefix = lease.startsrc === "proc" ? "linux" : lease.startsrc === "ps" ? "darwin" : lease.startsrc === "pwsh" ? "windows" : "";
+    if (lease.v !== "1" || lease.pid !== pidText || !lease.start || !sha1.test(lease.project) || !sha1.test(lease.pairs) || !lease.host || !startPrefix) return unknown(leasePath, "fields_missing_or_invalid");
     if (lease.project !== expectedProject || lease.pairs !== expectedPairs || lease.host !== hostname()) {
       stoppedReason = `bridge_stopped:${pidPath}:pid_reused`;
       continue;
     }
-    const startPrefix = lease.startsrc === "proc" ? "linux" : lease.startsrc === "ps" ? "darwin" : lease.startsrc === "pwsh" ? "windows" : "";
-    if (!startPrefix) return unknown(leasePath, "fields_missing_or_invalid");
     const witness = processStartWitness(Number(pidText));
     if (!witness) return unknown(leasePath, "start_witness_unavailable");
     if (witness !== `${startPrefix}:${lease.start}`) {
