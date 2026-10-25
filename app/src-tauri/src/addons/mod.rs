@@ -23,5 +23,7 @@ pub mod index;
 pub mod install;
 pub mod install_cmds;
 pub mod nav;
+#[cfg(windows)]
+pub mod nav_win;
 pub mod panes;
 pub mod server;

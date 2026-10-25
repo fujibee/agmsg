@@ -91,6 +91,39 @@ impl NavPolicy {
     }
 }
 
+/// The rule for one add-on frame on an engine whose native handler tells frames
+/// apart (WebView2's frame navigation events). The first navigation must be to a
+/// live pane; after that the frame may only move within that exact origin
+/// (scheme, host and port), never to the app origin and never elsewhere.
+#[derive(Default)]
+pub struct FrameNav {
+    own: Mutex<Option<Origin>>,
+}
+
+impl FrameNav {
+    pub fn decide(&self, policy: &NavPolicy, url: &Url) -> Decision {
+        let d = policy.decide(url);
+        if !d.is_allow() {
+            return d;
+        }
+        if policy.is_app(url) {
+            return Decision::Deny("a frame may not navigate to the app origin");
+        }
+        let Some(o) = Origin::of(url) else {
+            return Decision::Deny("no host to match");
+        };
+        let mut own = self.own.lock().unwrap();
+        match own.as_ref() {
+            None => {
+                *own = Some(o);
+                Decision::Allow
+            }
+            Some(prev) if *prev == o => Decision::Allow,
+            Some(_) => Decision::Deny("frame leaving its own origin"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +205,31 @@ mod tests {
         let p = NavPolicy::new(Some(&d));
         assert!(p.decide(&u("http://localhost:1420/src/main.tsx")).is_allow());
         assert!(!p.decide(&u("http://localhost:1421/")).is_allow());
+    }
+
+    #[test]
+    fn a_frame_stays_in_its_own_pane_origin() {
+        let p = policy();
+        p.register_pane(5001, "bbbb");
+        let f = FrameNav::default();
+        assert!(f.decide(&p, &u("http://127.0.0.1:5000/aaaa/index.html")).is_allow());
+        assert!(f.decide(&p, &u("http://127.0.0.1:5000/aaaa/other.html")).is_allow());
+        // another live pane, the app, and the outside are all refused
+        assert!(!f.decide(&p, &u("http://127.0.0.1:5001/bbbb/index.html")).is_allow());
+        assert!(!f.decide(&p, &u("tauri://localhost/")).is_allow());
+        assert!(!f.decide(&p, &u("http://tauri.localhost/")).is_allow());
+        assert!(!f.decide(&p, &u("https://example.com/")).is_allow());
+        assert!(!f.decide(&p, &u("about:blank")).is_allow());
+    }
+
+    #[test]
+    fn a_frame_whose_first_navigation_is_not_a_live_pane_is_refused() {
+        let p = policy();
+        for s in ["tauri://localhost/", "https://example.com/", "http://127.0.0.1:5000/zzzz/", "about:blank"] {
+            let f = FrameNav::default();
+            assert!(!f.decide(&p, &u(s)).is_allow(), "{s}");
+            // a refusal records nothing: the frame can still start at a live pane
+            assert!(f.decide(&p, &u("http://127.0.0.1:5000/aaaa/")).is_allow(), "{s}");
+        }
     }
 }

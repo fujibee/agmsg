@@ -63,3 +63,8 @@ serial_test = "3"
 # Engine hardening (WKPreferences) for add-on panes.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+
+# Frame navigation guard for WebView2 (nav_win.rs); same versions tauri/wry resolve to.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows = "0.61"

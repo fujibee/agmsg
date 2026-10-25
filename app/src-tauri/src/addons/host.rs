@@ -126,6 +126,8 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
             }
         })
         .build()?;
+    #[cfg(windows)]
+    super::nav_win::install(&window, host.clone());
     #[cfg(debug_assertions)]
     super::e2e::spawn_driver(handle.clone());
     host.panes.set_app_dirs(app_owned_dirs(&handle));
@@ -165,7 +167,7 @@ fn app_owned_dirs<R: Runtime>(app: &AppHandle<R>) -> Vec<std::path::PathBuf> {
 }
 
 /// Scheme, host and port only: a URL in a log line must not carry a query.
-fn redact(u: &Url) -> String {
+pub(super) fn redact(u: &Url) -> String {
     format!("{}://{}{}", u.scheme(), u.host_str().unwrap_or(""), u.port().map(|p| format!(":{p}")).unwrap_or_default())
 }
 

@@ -37,6 +37,8 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tempfile",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]
