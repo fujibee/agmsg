@@ -684,6 +684,15 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   assert.match(damaged.reason, /^bridge_state_unknown/, 'a lease with missing fields stays unknown');
   const brokenValues = await seatStateAfter(goodLease.replace(/^project=.*$/m, 'project=broken').replace(/^startsrc=.*$/m, 'startsrc=broken'));
   assert.match(brokenValues.reason, /^bridge_state_unknown/, 'a lease with malformed values is damaged, not a mismatch');
+  const realKill = process.kill;
+  process.kill = (pid, signal) => {
+    if (pid === process.pid && signal === 0) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+    return realKill(pid, signal);
+  };
+  try {
+    const refused = await seatStateAfter(goodLease);
+    assert.equal(refused.state, 'bridged', 'a probe refused with EPERM is not proof of a reused PID; a verified lease still holds the seat');
+  } finally { process.kill = realKill; }
   writeFileSync(leaseFile, goodLease);
   unlinkSync(`${bridgeBase}.pid`);
   unlinkSync(`${bridgeBase}.meta`);
