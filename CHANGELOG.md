@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-10-25
+
+This release fixes agmsgd notices that could stop and never resume. If you turned agmsgd on in 1.6.0, update; nothing else is needed, and agmsgd restarts on the new code by itself. If agmsgd is off, it stays off, and the recommended setting is unchanged: agmsgd, chosen with `/agmsg delivery`.
+
+### Fixed
+- agmsgd treats a notice as delivered once it is sent: a successful `codex queue` call for Codex, or a successful socket write for Claude Code. It no longer reads either tool's internal session files to confirm the notice was seen, and no longer withholds later notices while such a check is unanswered. The next notice goes out when new unread messages arrive; a failed send records its reason in `agmsg daemon status` and is retried (#1743, #1744)
+- One stuck check can no longer stop agmsgd notices for every session. Each poll, channel and session has a time limit; work that exceeds it is abandoned with its reason shown in status, and the poll moves on. `agmsg daemon stop` and SIGTERM finish even while a poll is stuck (#1754, #1762)
+- agmsgd.log records delivery events (notices sent, failures, expired attempts, session state changes and overrun polls), never message bodies, and is size-bounded (#1755, #1762)
+- Windows: Codex sessions keep receiving notices when the start time of the `codex queue` child process cannot be read, for example when PowerShell is blocked or `pwsh` is not installed (#1731, #1734)
+- Install, update and uninstall write to the Codex profile selected by `CODEX_HOME` instead of always `~/.codex/config.toml`, and use native `C:/` paths on Windows (#1718, #1738)
+- A closed Claude Code session is no longer reported as addressable; `agmsg daemon status --all` lists sessions that cannot be reached (#1732, #1737)
+- `actas` says why a Claude Code session stayed on the Monitor instead of agmsgd (#1733, #1740)
+- `inbox` and `history` refuse an unknown team instead of reporting an empty inbox (#1714, #1739)
+- herdr: existing agent names are kept when a pane is named (#1676)
+
+### Changed
+- `install --update` copies CHANGELOG.md into the install directory and ends with one line asking the running agent to re-read the skill and tell you what changed in this version and which settings it recommends (#1741, #1742)
+
+[1.6.1]: https://github.com/fujibee/agmsg/compare/v1.6.0...v1.6.1
+
 ## [1.6.0] - 2026-10-23
 
 ### Added
