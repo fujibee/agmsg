@@ -3,6 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createLiveSource } from "./source";
 import { toCtrlView, type CtrlOpened, type CtrlScanView } from "./ctrl";
+import { runCtrlAction } from "./ctrlAction";
 import { latestWins } from "./latestWins";
 import type { BarItem } from "./requests";
 
@@ -81,19 +82,14 @@ export function useCtrlRequests(props: {
       if (!enabled) return;
       const current = scope.snapshot();
       setActionError(null);
-      void (async () => {
-        if (opened) {
-          const r = await source.ctrlOpen(team, item.requestId);
-          if (!current()) return;
-          if (r.ok) onOpened.current(r.value, item);
-          else setActionError(r.error);
-        } else {
-          const r = await source.ctrlDismiss(team, item.requestId);
-          if (!current()) return;
-          if (!r.ok) setActionError(r.error);
-        }
-        await refresh();
-      })();
+      void runCtrlAction(opened, {
+        current,
+        open: () => source.ctrlOpen(team, item.requestId),
+        dismiss: () => source.ctrlDismiss(team, item.requestId),
+        onOpened: (o) => onOpened.current(o, item),
+        setError: setActionError,
+        refresh,
+      });
     },
     [enabled, team, refresh, scope],
   );
