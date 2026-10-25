@@ -960,4 +960,13 @@ test('one unusable team is skipped alone: the other teams are still polled and t
   assert.equal(rows.find(({ seat }) => seat[0] === 'linked' && seat[1] === '')?.reason, 'team_roster_symlink');
   assert.equal(logs.filter((line) => /roster for team broken skipped/.test(line)).length, 1, 'logged when it first appears, not every poll');
   await channel.stop();
+  writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), JSON.stringify(seat('dave')));
+  const restarted = createCodexQueueChannel({
+    db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: root },
+    readDriver: () => ({ state: 'ok', driver: 'sqlite' }), log: () => {},
+  });
+  await restarted.pollOnce();
+  const after = readOwnerAndIntentReadOnly(root).codexSeats.seats.map((row) => JSON.parse(row.seat));
+  assert.equal(after.some((seat) => seat[0] === 'broken' && seat[1] === ''), false, 'the reason goes away once the team is readable, even across a restart');
+  await restarted.stop();
 });
