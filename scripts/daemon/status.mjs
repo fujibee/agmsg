@@ -18,6 +18,7 @@
 //     observe. Prints human-readable text, or JSON with --json; exit code follows the
 //     table's own exit column.
 
+import { readPollTimeout } from './log.mjs';
 import { existsSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { join } from "node:path";
@@ -229,8 +230,10 @@ async function main() {
   // in an interactive terminal (a TTY, where the same write is
   // unbuffered) looked completely fine. Setting exitCode and letting the
   // event loop drain naturally waits for the flush first.
+  const pollTimeout = readPollTimeout(installRoot);
+  const pollText = pollTimeout ? `Last poll timeout: ${pollTimeout.channel ?? 'unknown'} ${pollTimeout.seat ?? ''} ${pollTimeout.reason} (${pollTimeout.at ?? 'unknown time'})\n` : '';
   process.stdout.write(
-    json ? `${JSON.stringify({ ...result, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${formatClaudeSeats(claudeCodeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
+    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${pollText}${formatClaudeSeats(claudeCodeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
   );
   process.exitCode = result.exitCode;
 }

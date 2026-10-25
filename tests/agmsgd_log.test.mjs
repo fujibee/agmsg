@@ -31,3 +31,20 @@ test("logLine appends and rotates at 1 MiB, keeping exactly one prior generation
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('delivery events allow only metadata and oversized lines cannot grow the log past its limit', async () => {
+  const { deliveryEvent, MAX_BYTES } = await import('../scripts/daemon/log.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'agmsgd-log-metadata-'));
+  mkdirSync(join(root, 'run'));
+  try {
+    deliveryEvent(line => logLine(root, line), { event: 'sent', channel: 'codex', seat: '["t","a"]', reason: 'accepted', cursor: '{"eventSeq":3}', body: 'PRIVATE MESSAGE', token: 'SECRET TOKEN' });
+    const text = readFileSync(logPath(root), 'utf8');
+    assert.match(text, /"event":"sent"/);
+    assert.doesNotMatch(text, /PRIVATE MESSAGE|SECRET TOKEN/);
+    writeFileSync(logPath(root), 'x'.repeat(MAX_BYTES - 10));
+    logLine(root, 'multiline\n' + '🐙'.repeat(MAX_BYTES));
+    assert.ok(statSync(logPath(root)).size < 5000);
+    assert.ok(statSync(`${logPath(root)}.1`).size <= MAX_BYTES);
+    assert.equal(readFileSync(logPath(root), 'utf8').split('\n').length, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
