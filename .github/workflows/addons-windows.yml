@@ -49,4 +49,4 @@ jobs:
 
       - name: Add-on host tests
         working-directory: app/src-tauri
-        run: cargo test --lib addons:: -- --test-threads=4
+        run: "cargo test --lib addons:: -- --test-threads=4"
