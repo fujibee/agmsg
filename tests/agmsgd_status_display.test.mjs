@@ -266,3 +266,13 @@ test('JSON status exposes persisted child start-witness failure details', t => {
   assert.equal(expired[0].state, 'expired');
   assert.deepEqual(JSON.parse(expired[0].children), children);
 });
+
+test('status exposes the last poll timeout with channel, seat and reason in text and JSON', (t) => {
+  const { root } = fixture(t);
+  writeFileSync(join(root, 'run/poll-timeout.json'), JSON.stringify({ at: '2026-10-25T00:00:00Z', channel: 'codex', seat: '["test","alice"]', reason: 'seat_poll_deadline' }));
+  const script = join(root, 'scripts/daemon/status.mjs');
+  const result = spawnSync(process.execPath, [script, root, '--json'], { encoding: 'utf8' });
+  assert.equal(JSON.parse(result.stdout).poll_timeout.reason, 'seat_poll_deadline');
+  const plain = spawnSync(process.execPath, [script, root], { encoding: 'utf8' });
+  assert.match(plain.stdout, /Last poll timeout: codex.*alice.*seat_poll_deadline/);
+});

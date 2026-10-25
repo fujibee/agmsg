@@ -1,6 +1,8 @@
 // Polls the existing message stores and nudges registered Codex seats through
 // the local Codex queue. It never writes message data or read cursors.
 
+import { assertPollActive, pollSignal, SEAT_DEADLINE_MS } from '../poll-deadline.mjs';
+import { createSeatPoller } from '../seat-poll.mjs';
 import { createHash } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -91,6 +93,7 @@ function latestNotifiedCursor(db, seat) {
 }
 
 function saveSeat(db, { seat, thread = null, codexHome = null, state, reason = "" }, now) {
+  assertPollActive();
   withImmediateTransaction(db, () => {
     db.prepare(`
       INSERT INTO beta_codex_seat (seat, thread, codex_home, state, reason, checked_at)
@@ -103,6 +106,7 @@ function saveSeat(db, { seat, thread = null, codexHome = null, state, reason = "
 }
 
 function setQueueState(db, id, state, reason = undefined) {
+  assertPollActive();
   withImmediateTransaction(db, () => {
     if (state === "expired" && reason) {
       const row = db.prepare("SELECT children FROM beta_codex_queue WHERE id = ? AND state = 'pending'").get(id);
@@ -120,6 +124,7 @@ function setQueueState(db, id, state, reason = undefined) {
 }
 
 function recordChildStart(db, id, pid, captureGroup, log = () => {}) {
+  assertPollActive();
   let group;
   try {
     group = captureGroup(pid, (detail) => log(`codex queue: child start witness unavailable for pid ${pid}: ${detail}`));
@@ -133,6 +138,7 @@ function recordChildStart(db, id, pid, captureGroup, log = () => {}) {
 }
 
 function recordChildResult(db, id, result) {
+  assertPollActive();
   withImmediateTransaction(db, () => {
     const row = db.prepare("SELECT children FROM beta_codex_queue WHERE id = ? AND state = 'pending'").get(id);
     if (!row) return;
@@ -152,6 +158,7 @@ function recordChildResult(db, id, result) {
 }
 
 function createPending(db, { seat, codexHome, thread, upTo, nonce, expectedOpGen }, now) {
+  assertPollActive();
   let rowId;
   withImmediateTransaction(db, () => {
     const intent = db.prepare("SELECT desired, op_gen FROM daemon_intent").get();
@@ -307,6 +314,7 @@ export function createCodexQueueChannel({
   expectedOpGen,
   env = process.env,
   executable,
+  seatDeadlineMs = SEAT_DEADLINE_MS,
   timeoutMs = QUEUE_TIMEOUT_MS,
   now = Date.now,
   log = (message) => logLine(installRoot, message),
@@ -324,6 +332,12 @@ export function createCodexQueueChannel({
   let stopped = false;
   let activeController = null;
   let activePoll = null;
+  let activePollSignal;
+  let resumeAfter;
+  const seatPoller = createSeatPoller({
+    db, installRoot, channel: 'codex', log, timeoutMs: seatDeadlineMs,
+    saveTimeout: (seat, reason) => saveSeat(db, { seat, state: 'blocked', reason }, now),
+  });
   const pendingAges = new Map();
   const homeKey = (home) => hostPlatform === "win32" ? resolve(home).toLowerCase() : resolve(home);
 
@@ -485,7 +499,8 @@ export function createCodexQueueChannel({
       return;
     }
 
-    activeController = new AbortController();
+    const controller = new AbortController();
+    activeController = controller;
     let result;
     try {
       result = await queue({
@@ -495,11 +510,11 @@ export function createCodexQueueChannel({
         thread: record.thread,
         message: inboxNudge(nonce),
         timeoutMs,
-        signal: activeController.signal,
+        signal: pollSignal() ?? activeController.signal,
         onChildStart: (pid) => recordChildStart(db, id, pid, captureGroup, log),
       });
     } finally {
-      activeController = null;
+      if (activeController === controller) activeController = null;
     }
     recordChildResult(db, id, result);
     if (result.kind === "failed" && result.started === false) {
@@ -530,10 +545,11 @@ export function createCodexQueueChannel({
     }, now);
   }
 
-  async function pollOnce() {
+  async function pollOnce({ signal } = {}) {
     if (stopped) return;
-    if (activePoll) return activePoll;
-    activePoll = (async () => {
+    if (activePoll && !activePollSignal?.aborted) return activePoll;
+    activePollSignal = pollSignal() ?? signal;
+    const operation = (async () => {
       const roster = listSeats(join(installRoot, "teams"));
       if (roster.state !== "ok") {
         log(`channel: Codex roster unavailable (${roster.reason})`);
@@ -558,27 +574,37 @@ export function createCodexQueueChannel({
       const knownKeys = new Set([...registeredKeys, ...pendingKeys]);
       for (const row of db.prepare("SELECT seat FROM beta_codex_seat").all()) {
         if (!knownKeys.has(row.seat)) {
-          saveSeat(db, { seat: row.seat, state: "unaddressable", reason: "seat_registration_missing" }, now);
+          seatPoller.changeState(row.seat, () => saveSeat(db, { seat: row.seat, state: "unaddressable", reason: "seat_registration_missing" }, now));
         }
       }
       // Sequential processing also serializes codex queue writes that share a
       // CODEX_HOME, avoiding Codex's measured concurrent-write loss.
-      for (const seat of seats) {
-        if (stopped) break;
+      // Continue after an interrupted seat so repeated cycle deadlines cannot
+      // starve the tail of a large roster.
+      const start = seats.findIndex(seat => seatKey(seat.team, seat.agent) === resumeAfter) + 1;
+      const ordered = [...seats.slice(start), ...seats.slice(0, start)];
+      for (const seat of ordered) {
+        if (stopped || pollSignal()?.aborted || signal?.aborted) break;
+        resumeAfter = seatKey(seat.team, seat.agent);
         try {
-          await pollSeat(seat, paths, blockedCodexHomes);
+          await seatPoller.poll(seat, () => pollSeat(seat, paths, blockedCodexHomes));
         } catch (error) {
+          if (pollSignal()?.aborted || signal?.aborted) break;
           log(`channel: Codex seat ${seat.team}/${seat.agent} could not be checked (${error.message})`);
         }
       }
-    })().finally(() => { activePoll = null; });
-    return activePoll;
+    })().finally(() => { if (activePoll === operation) activePoll = null; });
+    activePoll = operation;
+    return operation;
   }
 
   return {
+    name: 'codex',
+    reportTimeout: seatPoller.reportTimeout,
     pollOnce,
     async stop() {
       stopped = true;
+      seatPoller.cancel();
       activeController?.abort();
       await activePoll;
     },

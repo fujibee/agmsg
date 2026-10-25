@@ -845,3 +845,88 @@ for (const kind of ['archived', 'no_rollout']) {
     await channel.stop();
   });
 }
+
+test('a stuck seat times out, the next seat sends, and late completion cannot change status', async (t) => {
+  const { options, db } = executableFixture(t);
+  const first = options.listSeats().seats[0];
+  const second = { team: 'test', agent: 'bob', teamConfig: { agents: { bob: { registrations: [{ type: 'codex', project: options.installRoot }] } } } };
+  let release;
+  const logs = [];
+  const channel = createCodexQueueChannel({ ...options, executable: process.execPath, seatDeadlineMs: 20, log: line => logs.push(line),
+    listSeats: () => ({ state: 'ok', seats: [first, second] }),
+    readSession: (_run, _team, agent) => ({ state: 'present', record: { ...options.readSession().record, agent, codex_home: path.join(options.installRoot, agent) } }),
+    queue: async request => {
+      request.onChildStart(4242);
+      if (request.codexHome.endsWith('alice')) return new Promise(resolve => { release = resolve; });
+      return { kind: 'queued', queueItemId: itemId };
+    },
+  });
+  await channel.pollOnce();
+  const alice = () => db.prepare('SELECT state, reason FROM beta_codex_seat WHERE seat=?').get('["test","alice"]');
+  assert.equal(alice().reason, 'seat_poll_deadline');
+  assert.equal(db.prepare('SELECT state FROM beta_codex_seat WHERE seat=?').get('["test","bob"]').state, 'addressable');
+  assert.ok(logs.some(line => line.includes('poll_timeout') && line.includes('alice')));
+  assert.ok(logs.some(line => line.includes('sent') && line.includes('bob')));
+  release({ kind: 'queued', queueItemId: itemId });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(alice().reason, 'seat_poll_deadline');
+  assert.equal(db.prepare('SELECT queue_item_id FROM beta_codex_queue WHERE seat=?').get('["test","alice"]').queue_item_id, null);
+  await channel.stop();
+});
+
+test('stopping a channel cancels a never-settling seat immediately', async (t) => {
+  const { options } = executableFixture(t);
+  let entered;
+  const ready = new Promise(resolve => { entered = resolve; });
+  const channel = createCodexQueueChannel({ ...options, executable: process.execPath,
+    queue: () => { entered(); return new Promise(() => {}); },
+  });
+  const polling = channel.pollOnce();
+  await ready;
+  await channel.stop();
+  await polling;
+});
+
+test('delivery log records sends, failures, expirations and changes without repeating stable states or bodies', async (t) => {
+  const { options } = executableFixture(t);
+  const logs = [];
+  let cursor = 'first';
+  let fail = false;
+  const channel = createCodexQueueChannel({ ...options, executable: process.execPath, log: line => logs.push(JSON.parse(line)),
+    readSnapshot: (_db, _team, _agent, previous) => ({ unread: previous !== cursor, upTo: cursor }),
+    queue: async request => { request.onChildStart(4242); return fail ? { kind: 'failed', started: false, reason: 'fixture_exit_1' } : { kind: 'queued', queueItemId: itemId }; },
+  });
+  await channel.pollOnce();
+  const stableCount = logs.length;
+  await channel.pollOnce();
+  assert.equal(logs.length, stableCount);
+  cursor = 'second'; fail = true;
+  await channel.pollOnce();
+  for (const event of ['sent', 'failed', 'expired', 'seat_state']) assert.ok(logs.some(row => row.event === event), event);
+  assert.equal(logs.find(row => row.event === 'sent').cursor, 'first');
+  assert.ok(logs.every(row => row.channel === 'codex' && row.seat === '["test","alice"]'));
+  assert.ok(logs.every(row => !('body' in row) && !('message' in row)));
+  await channel.stop();
+});
+
+test('a channel cutoff resumes after the interrupted seat on the next cycle', async (t) => {
+  const { pollChannelHooks } = await import('../scripts/daemon/main.mjs');
+  const { options, db } = executableFixture(t);
+  const first = options.listSeats().seats[0];
+  const second = { team: 'test', agent: 'bob', teamConfig: { agents: { bob: { registrations: [{ type: 'codex', project: options.installRoot }] } } } };
+  let sends = 0;
+  const channel = createCodexQueueChannel({ ...options, executable: process.execPath,
+    listSeats: () => ({ state: 'ok', seats: [first, second] }),
+    readSession: (_run, _team, agent) => ({ state: 'present', record: { ...options.readSession().record, agent, codex_home: path.join(options.installRoot, agent) } }),
+    queue: async request => {
+      request.onChildStart(4242);
+      if (request.codexHome.endsWith('alice')) return new Promise(() => {});
+      sends++; return { kind: 'queued', queueItemId: itemId };
+    },
+  });
+  await pollChannelHooks([channel], () => {}, { timeoutMs: 15, installRoot: options.installRoot });
+  assert.equal(db.prepare('SELECT reason FROM beta_codex_seat WHERE seat=?').get('["test","alice"]').reason, 'channel_poll_deadline');
+  await pollChannelHooks([channel], () => {}, { timeoutMs: 15, installRoot: options.installRoot });
+  assert.equal(sends, 1);
+  await channel.stop();
+});
