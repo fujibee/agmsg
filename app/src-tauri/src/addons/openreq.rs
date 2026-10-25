@@ -779,6 +779,15 @@ mod tests {
     use rusqlite::Connection;
     use std::collections::BTreeMap;
 
+    /// An absolute path on this OS (a drive letter is needed on Windows).
+    fn abs(p: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{p}")
+        } else {
+            p.to_string()
+        }
+    }
+
     fn reqs(body: &str) -> Vec<Request> {
         parse(body).into_iter().filter_map(|p| if let Parsed::Request(r) = p { Some(r) } else { None }).collect()
     }
@@ -794,17 +803,17 @@ mod tests {
 
     #[test]
     fn a_whole_line_is_a_request() {
-        let r = reqs("agmsg-app open builtin:fileview fileview path=/Users/me/my project");
-        assert_eq!(r, vec![Request { addon_id: "builtin:fileview".into(), pane: "fileview".into(), path: Some("/Users/me/my project".into()), line: 0 }]);
+        let r = reqs(&format!("agmsg-app open builtin:fileview fileview path={}", abs("/Users/me/my project")));
+        assert_eq!(r, vec![Request { addon_id: "builtin:fileview".into(), pane: "fileview".into(), path: Some(abs("/Users/me/my project")), line: 0 }]);
         let r = reqs("hello,\nplease open it\nagmsg-app open o/r viewer\nthanks");
         assert_eq!(r, vec![Request { addon_id: "o/r".into(), pane: "viewer".into(), path: None, line: 2 }]);
     }
 
     #[test]
     fn crlf_trailing_spaces_and_extra_spaces_between_words_are_fine() {
-        let r = reqs("agmsg-app open  o/r   viewer   path=/a b  \r\nagmsg-app open o/r p\r\n");
+        let r = reqs(&format!("agmsg-app open  o/r   viewer   path={}  \r\nagmsg-app open o/r p\r\n", abs("/a b")));
         assert_eq!(r.len(), 2);
-        assert_eq!(r[0].path.as_deref(), Some("/a b"), "the path is the rest of the line, inner spaces kept, trailing ones dropped");
+        assert_eq!(r[0].path.as_deref(), Some(abs("/a b").as_str()), "the path is the rest of the line, inner spaces kept, trailing ones dropped");
         assert_eq!(r[1].line, 1);
     }
 
@@ -842,7 +851,7 @@ mod tests {
 
     #[test]
     fn several_lines_are_several_requests_with_the_line_index_in_the_id() {
-        let r = reqs("agmsg-app open o/r a\n\nagmsg-app open o/r b path=/x");
+        let r = reqs(&format!("agmsg-app open o/r a\n\nagmsg-app open o/r b path={}", abs("/x")));
         assert_eq!(r.iter().map(|r| r.line).collect::<Vec<_>>(), vec![0, 2]);
         assert_eq!(request_id("m-9", r[1].line), "m-9:2");
     }
@@ -919,8 +928,8 @@ mod tests {
         ]);
         panes.insert(("o/r".into(), "off".into()), PaneState::Unavailable("That add-on is turned off.".into()));
         let mut paths = BTreeMap::new();
-        paths.insert("/proj".into(), PathState::Exists(PathBuf::from("/real/proj")));
-        paths.insert("/ssh".into(), PathState::Denied);
+        paths.insert(abs("/proj"), PathState::Exists(PathBuf::from("/real/proj")));
+        paths.insert(abs("/ssh"), PathState::Denied);
         FakeEnv { panes, paths }
     }
 
@@ -931,15 +940,15 @@ mod tests {
     #[test]
     fn a_request_is_ready_only_when_every_check_passes() {
         let e = env();
-        let ok = evaluate(&req("builtin:fileview", "fileview", Some("/proj")), &e);
+        let ok = evaluate(&req("builtin:fileview", "fileview", Some(&abs("/proj"))), &e);
         assert_eq!(ok.verdict, Verdict::Ready);
         assert_eq!(ok.spec.unwrap().open_args.path.as_deref(), Some("/real/proj"), "the resolved path is what opens");
         let ok = evaluate(&req("o/r", "viewer", None), &e);
         assert_eq!(ok.verdict, Verdict::Ready);
-        assert_eq!(evaluate(&req("builtin:fileview", "fileview", Some("/gone")), &e).verdict, Verdict::NotFoundHere);
-        assert_eq!(evaluate(&req("builtin:fileview", "fileview", Some("/ssh")), &e).verdict, Verdict::DeniedPath);
+        assert_eq!(evaluate(&req("builtin:fileview", "fileview", Some(&abs("/gone"))), &e).verdict, Verdict::NotFoundHere);
+        assert_eq!(evaluate(&req("builtin:fileview", "fileview", Some(&abs("/ssh"))), &e).verdict, Verdict::DeniedPath);
         assert_eq!(evaluate(&req("builtin:fileview", "fileview", None), &e).verdict, Verdict::ArgsNotAllowed);
-        assert_eq!(evaluate(&req("o/r", "viewer", Some("/proj")), &e).verdict, Verdict::ArgsNotAllowed);
+        assert_eq!(evaluate(&req("o/r", "viewer", Some(&abs("/proj"))), &e).verdict, Verdict::ArgsNotAllowed);
         assert_eq!(evaluate(&req("o/r", "webview", None), &e).verdict, Verdict::ArgsNotAllowed);
         assert_eq!(evaluate(&req("o/r", "off", None), &e).verdict, Verdict::Unavailable);
         assert_eq!(evaluate(&req("o/r", "nope", None), &e).verdict, Verdict::NotInstalled);
@@ -962,7 +971,7 @@ mod tests {
     #[test]
     fn rows_carry_what_the_bar_needs_and_handled_ids_are_left_out() {
         let e = env();
-        let cands = [cand("1", "alice", "agmsg-app open builtin:fileview fileview path=/proj\nagmsg-app open o/r viewer")];
+        let cands = [cand("1", "alice", &format!("agmsg-app open builtin:fileview fileview path={}\nagmsg-app open o/r viewer", abs("/proj")))];
         let (rows, found) = assemble(&cands, &HashSet::new(), &e);
         assert_eq!(rows.iter().map(|r| r.request_id.as_str()).collect::<Vec<_>>(), vec!["1:0", "1:1"]);
         assert_eq!(found.len(), 2);
@@ -972,7 +981,7 @@ mod tests {
         assert_eq!(j["team"], "t");
         assert_eq!(j["addonId"], "builtin:fileview");
         assert_eq!(j["pane"], "fileview");
-        assert_eq!(j["path"], "/proj");
+        assert_eq!(j["path"], abs("/proj").as_str());
         assert_eq!(j["pathState"], "exists");
         assert_eq!(j["created_at"], "2026-10-25T00:00:01Z");
         assert!(j.get("body").is_none(), "the message text is not sent to the UI");
