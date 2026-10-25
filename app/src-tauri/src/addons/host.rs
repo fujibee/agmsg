@@ -81,6 +81,10 @@ impl AddonHost {
     }
 }
 
+/// wry's default WebView2 arguments plus the WebRTC policy.
+#[cfg(windows)]
+const WEBVIEW2_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --force-webrtc-ip-handling-policy=disable_non_proxied_udp";
+
 /// Builds the main window (tauri.conf has `create: false` so the handlers can
 /// be attached) and registers the add-on host state. Call first in `setup`.
 pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
@@ -94,7 +98,12 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     let nav_host = host.clone();
     let load_host = host.clone();
     let load_handle = handle.clone();
-    let window = WebviewWindowBuilder::from_config(&handle, &cfg)?
+    let builder = WebviewWindowBuilder::from_config(&handle, &cfg)?;
+    // WebView2: keep wry's own default (it is replaced when arguments are given) and
+    // send WebRTC through the proxy path only, so a pane cannot reach the network over UDP.
+    #[cfg(windows)]
+    let builder = builder.additional_browser_args(WEBVIEW2_ARGS);
+    let window = builder
         .on_navigation(move |url| {
             let d = nav_host.nav.decide(url);
             if !d.is_allow() {
