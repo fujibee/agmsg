@@ -377,9 +377,8 @@ _start_unregistered_launcher() {
   disown 2>/dev/null || true
 }
 
-# NOT YET RUN ON WINDOWS in this environment -- written to the Windows
-# Task Scheduler contract (LogonTrigger + RestartOnFailure via XML, since plain
-# `/Create` flags do not set restart-on-failure) and shellchecked only.
+# Task Scheduler registration uses XML for per-user, headless operation and
+# resident settings that plain /Create flags cannot express.
 # schtasks takes /Create-style switches; without this Git Bash rewrites a
 # leading-slash argument into a path ("C:/Program Files/Git/Create").
 _schtasks() {
@@ -409,34 +408,75 @@ _register_windows() {
   fi
   native_bash="$(cygpath -w "$git_bash" 2>/dev/null || printf '%s' "$git_bash")"
   native_launcher="$(cygpath -w "$LAUNCHER" 2>/dev/null || printf '%s' "$LAUNCHER")"
-  native_bash="$(_xml_escape "$native_bash")"
-  native_launcher="$(_xml_escape "$native_launcher")"
-  local xml_utf8="$xml.utf8"
+  # An unqualified logon trigger means every user and requires elevation.
+  # Do not silently broaden the trigger when the current identity is missing.
+  local task_user system_root native_conhost arguments
+  if [ -z "${USERDOMAIN:-}" ] || [ -z "${USERNAME:-}" ]; then
+    echo "agmsg daemon: cannot determine the Windows task user (USERDOMAIN and USERNAME are required); not registering the scheduled task" >&2
+    return 1
+  fi
+  task_user="$(_xml_escape "$USERDOMAIN\\$USERNAME")"
+  system_root="${SystemRoot:-${SYSTEMROOT:-${WINDIR:-}}}"
+  if [ -z "$system_root" ]; then
+    echo "agmsg daemon: cannot determine the Windows system directory (SystemRoot is required); not registering the scheduled task" >&2
+    return 1
+  fi
+  system_root="${system_root%\\}"
+  system_root="${system_root%/}"
+  native_conhost="$(_xml_escape "$system_root\\System32\\conhost.exe")"
+  arguments="$(_xml_escape "--headless \"$native_bash\" \"$native_launcher\"")"
+  local xml_utf8="$xml.utf8" xml_pending="$xml.pending"
   cat > "$xml_utf8" <<EOF
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
-    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+    <LogonTrigger><Enabled>true</Enabled><UserId>$task_user</UserId></LogonTrigger>
+    <TimeTrigger>
+      <Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+      <StartBoundary>2000-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
   </Triggers>
-  <Actions>
-    <Exec>
-      <Command>$native_bash</Command>
-      <Arguments>"$native_launcher"</Arguments>
-    </Exec>
-  </Actions>
+  <Principals>
+    <Principal id="agmsgd-user">
+      <UserId>$task_user</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
   <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <RestartOnFailure>
       <Interval>PT1M</Interval>
       <Count>3</Count>
     </RestartOnFailure>
   </Settings>
+  <Actions Context="agmsgd-user">
+    <Exec>
+      <Command>$native_conhost</Command>
+      <Arguments>$arguments</Arguments>
+    </Exec>
+  </Actions>
 </Task>
 EOF
-  { printf '\xff\xfe'; iconv -f UTF-8 -t UTF-16LE "$xml_utf8"; } > "$xml"
+  if ! { printf '\xff\xfe'; iconv -f UTF-8 -t UTF-16LE "$xml_utf8"; } > "$xml_pending"; then
+    rm -f "$xml_utf8" "$xml_pending"
+    echo "agmsg daemon: could not encode the scheduled task XML" >&2
+    return 1
+  fi
   rm -f "$xml_utf8"
-  local native_xml
-  native_xml="$(cygpath -w "$xml" 2>/dev/null || printf '%s' "$xml")"
-  _schtasks /Create /TN "$name" /XML "$native_xml" /F
+  local native_xml create_status=0
+  native_xml="$(cygpath -w "$xml_pending" 2>/dev/null || printf '%s' "$xml_pending")"
+  _schtasks /Create /TN "$name" /XML "$native_xml" /F || create_status=$?
+  if [ "$create_status" -ne 0 ]; then
+    # Only a successful registration may leave the service marker behind.
+    rm -f "$xml_pending" "$xml"
+    return "$create_status"
+  fi
+  mv -f "$xml_pending" "$xml"
 }
 
 _unregister_windows() {

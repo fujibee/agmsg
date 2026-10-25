@@ -268,6 +268,8 @@ EOF
 }
 
 _fake_windows_manager() {
+  export USERDOMAIN='DOMAIN & <test>' USERNAME='user & "test"'
+  export SystemRoot='C:\Windows & Root'
   mkdir -p "$TEST_SKILL_DIR/fake-windows"
   cat > "$TEST_SKILL_DIR/fake-windows/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -275,12 +277,14 @@ echo MINGW64_NT-10.0
 EOF
   cat > "$TEST_SKILL_DIR/fake-windows/schtasks" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "${AGMSGD_FAKE_TASK_CALLS:-/dev/null}"
 case "$1" in
   /Create)
     while [ "$#" -gt 0 ]; do
       if [ "$1" = /XML ]; then cp "$2" "${AGMSGD_FAKE_TASK_XML:?}"; fi
       shift
     done
+    [ "${AGMSGD_FAKE_CREATE_FAIL:-0}" != 1 ] || { echo 'ERROR: Access is denied.' >&2; exit 5; }
     touch "${AGMSGD_FAKE_TASK_MARKER:?}"
     ;;
   /Run) bash "${AGMSGD_TEST_LAUNCHER:?}" </dev/null >/dev/null 2>&1 3>&- & ;;
@@ -532,7 +536,23 @@ EOF
   # The task runs Git Bash by full path, not a bare bash.exe that Task
   # Scheduler would resolve to WSL's launcher in System32.
   # A & in the path is escaped in the XML.
-  iconv -f UTF-16LE -t UTF-8 "$capture" | grep -Fq "<Command>${AGMSGD_FAKE_GIT_ROOT//&/&amp;}/bin/bash.exe</Command>"
+  local decoded="$TEST_SKILL_DIR/fake-windows/decoded.xml"
+  iconv -f UTF-16LE -t UTF-8 "$capture" > "$decoded"
+  grep -Fq '<Command>C:\Windows &amp; Root\System32\conhost.exe</Command>' "$decoded"
+  grep -Fq "<Arguments>--headless &quot;${AGMSGD_FAKE_GIT_ROOT//&/&amp;}/bin/bash.exe&quot; &quot;$SCRIPTS/daemon/agmsgd-launch.sh&quot;</Arguments>" "$decoded"
+  grep -Fq '<LogonTrigger><Enabled>true</Enabled><UserId>DOMAIN &amp; &lt;test&gt;\user &amp; &quot;test&quot;</UserId></LogonTrigger>' "$decoded"
+  grep -Fq '<Principal id="agmsgd-user">' "$decoded"
+  grep -Fq '<UserId>DOMAIN &amp; &lt;test&gt;\user &amp; &quot;test&quot;</UserId>' "$decoded"
+  grep -Fq '<LogonType>InteractiveToken</LogonType>' "$decoded"
+  grep -Fq '<RunLevel>LeastPrivilege</RunLevel>' "$decoded"
+  grep -Fq '<Actions Context="agmsgd-user">' "$decoded"
+  grep -Fq '<TimeTrigger>' "$decoded"
+  grep -Fq '<StartBoundary>2000-01-01T00:00:00</StartBoundary>' "$decoded"
+  grep -Fq '<Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>' "$decoded"
+  grep -Fq '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>' "$decoded"
+  grep -Fq '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>' "$decoded"
+  grep -Fq '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>' "$decoded"
+  grep -Fq '<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>' "$decoded"
   # Every path named inside SQL went through the native-path conversion.
   grep -Fq "$TEST_SKILL_DIR/run/install-manifest.json" "$AGMSGD_FAKE_CYGPATH_LOG"
   grep -Fq "$TEST_SKILL_DIR/run/install.db" "$AGMSGD_FAKE_CYGPATH_LOG"
@@ -543,7 +563,7 @@ EOF
     _run_with_deadline 15 bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ ! -f "$marker" ]
-  [ ! -f "$TEST_SKILL_DIR/run/agmsgd-$(_unit_id).xml" ]
+  [ -z "$(ls "$TEST_SKILL_DIR/run/"agmsgd-*.xml 2>/dev/null || true)" ]
 }
 
 # A wrapper named `sqlite3`, placed ahead of the real one on PATH, that
@@ -668,4 +688,61 @@ EOF
     run bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ ! -e "$unit" ]
+}
+
+
+@test "daemon.sh Windows registration: missing user identity refuses any-user registration" {
+  _seed_install_db
+  _write_completion_record
+  _fake_windows_manager
+  export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"
+  export AGMSGD_FAKE_GIT_ROOT="$TEST_SKILL_DIR/fake-windows/Git"
+  export AGMSGD_FAKE_TASK_CALLS="$TEST_SKILL_DIR/fake-windows/calls"
+  mkdir -p "$AGMSGD_FAKE_GIT_ROOT/bin"
+  : > "$AGMSGD_FAKE_GIT_ROOT/bin/bash.exe"
+  local missing
+  for missing in domain user; do
+    if [ "$missing" = domain ]; then export USERDOMAIN='' USERNAME='user'; else export USERDOMAIN='DOMAIN' USERNAME=''; fi
+    PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" \
+      _run_with_deadline 15 bash "$DAEMON" enable
+    [ "$status" -ne 0 ]
+    grep -q 'cannot determine the Windows task user' <<< "$output"
+    [ ! -e "$AGMSGD_FAKE_TASK_CALLS" ]
+    [ -z "$(ls "$TEST_SKILL_DIR/run/"*.xml 2>/dev/null || true)" ]
+  done
+}
+
+@test "daemon.sh Windows registration: failed Create leaves no registration marker or temporary XML" {
+  _seed_install_db
+  _write_completion_record
+  _fake_windows_manager
+  export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"
+  export AGMSGD_FAKE_GIT_ROOT="$TEST_SKILL_DIR/fake-windows/Git"
+  export AGMSGD_FAKE_TASK_CALLS="$TEST_SKILL_DIR/fake-windows/calls"
+  mkdir -p "$AGMSGD_FAKE_GIT_ROOT/bin"
+  : > "$AGMSGD_FAKE_GIT_ROOT/bin/bash.exe"
+  PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_CREATE_FAIL=1 AGMSGD_FAKE_TASK_XML="$TEST_SKILL_DIR/fake-windows/captured.xml" \
+    _run_with_deadline 15 bash "$DAEMON" enable
+  [ "$status" -ne 0 ]
+  grep -q 'Access is denied' <<< "$output"
+  [ -z "$(ls "$TEST_SKILL_DIR/run/"*.xml* 2>/dev/null || true)" ]
+  ! grep -q '^/Run' "$AGMSGD_FAKE_TASK_CALLS"
+}
+
+@test "daemon.sh Windows minute trigger: launcher exits promptly after an explicit stop" {
+  _seed_install_db
+  _write_completion_record
+  _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  _run_with_deadline 15 bash "$DAEMON" stop
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = off ]
+  local probe="$TEST_SKILL_DIR/node-after-stop" invoked="$TEST_SKILL_DIR/node-invoked"
+  printf '#!/usr/bin/env bash\n: > "%s"\nexit 1\n' "$invoked" > "$probe"
+  chmod +x "$probe"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = '$probe';"
+  _run_with_deadline 3 bash "$SCRIPTS/daemon/agmsgd-launch.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$invoked" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT state FROM daemon_owner;')" = none ]
 }
