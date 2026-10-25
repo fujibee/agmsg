@@ -286,8 +286,25 @@ impl GrantCheck {
     }
 }
 
+/// `.env` or `.env.<anything>`, compared as the denylist compares (already folded where it folds).
+fn is_env_name(component: &str) -> bool {
+    component == ".env" || component.starts_with(".env.")
+}
+
+/// A `.env` file or folder by name, whatever the case: the ones the notice about a folder looks for.
+pub fn is_env_file_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    is_env_name(&lower)
+}
+
 /// The message shown when a path is refused.
 pub fn refusal_message(path: &Path) -> String {
+    if path.components().any(|c| c.as_os_str().to_str().is_some_and(is_env_file_name)) {
+        return format!(
+            "{} is an environment file (.env). Add-ons that use the network can't read it.",
+            path.display()
+        );
+    }
     format!(
         "{} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
         path.display()
@@ -298,6 +315,8 @@ pub fn refusal_message(path: &Path) -> String {
 pub struct Denylist {
     fold: bool,
     entries: Vec<Entry>,
+    /// Also refuse `.env` / `.env.*` anywhere (see `with_env_files`). Off for the list every other caller uses.
+    env_files: bool,
 }
 
 impl Denylist {
@@ -331,7 +350,16 @@ impl Denylist {
                 path: extra.clone(),
             });
         }
-        Denylist { fold, entries }
+        Denylist { fold, entries, env_files: false }
+    }
+
+    /// This list plus the rule for a pane that declares `network`: a file or folder
+    /// named `.env` or `.env.*`, at any depth, is refused like a protected location
+    /// (read, stat, listing, and git show/diff of the same path). It is decided on
+    /// the resolved path and on the path as named, so a link to a `.env` is refused
+    /// and a link named `.env` is too. Case is folded where the denylist folds it.
+    pub fn with_env_files(&self) -> Denylist {
+        Denylist { env_files: true, ..self.clone() }
     }
 
     /// Build from the process environment, plus the app's own protected folders.
@@ -353,11 +381,22 @@ impl Denylist {
         Snapshot {
             fold: self.fold,
             entries,
+            env_files: self.env_files,
         }
     }
 
     pub fn is_denied(&self, path: &Path) -> bool {
         self.snapshot().is_denied(path)
+    }
+
+    /// Is any segment of this relative path (as named, links not followed) a `.env` name that this list refuses?
+    /// The path may be one a link would hide from the resolved form, so callers ask this before resolving.
+    pub fn refuses_env_name(&self, rel: &str) -> bool {
+        self.env_files
+            && rel.split(['/', '\\']).any(|seg| {
+                let seg = if self.fold { seg.to_lowercase() } else { seg.to_string() };
+                is_env_name(&seg)
+            })
     }
 
     pub fn check_grant_root(&self, path: &Path) -> GrantCheck {
@@ -419,6 +458,7 @@ fn entry_forms(e: &Entry, fold: bool) -> Vec<Vec<String>> {
 pub struct Snapshot {
     fold: bool,
     entries: Vec<(MatchKind, PathBuf, Vec<Vec<String>>)>,
+    env_files: bool,
 }
 
 impl Snapshot {
@@ -448,6 +488,12 @@ impl Snapshot {
             components(&resolved, self.fold),
             components(&lexical, self.fold),
         ];
+        if self.env_files && candidates.iter().any(|c| c.iter().any(|comp| is_env_name(comp))) {
+            return Some(Reason {
+                entry: PathBuf::from(".env"),
+                kind: MatchKind::File,
+            });
+        }
         for (kind, shown, forms) in &self.entries {
             if *kind == MatchKind::RootOnly && !roots_too {
                 continue;
@@ -930,5 +976,37 @@ mod tests {
         let m = refusal_message(Path::new("/h/.ssh"));
         assert!(m.starts_with("/h/.ssh is on agmsg's list of protected locations"));
         assert!(m.ends_with("Add-ons can't read it."));
+    }
+
+    #[test]
+    fn the_env_rule_is_off_for_the_plain_list_and_on_for_a_network_pane() {
+        let h = home();
+        let plain = Denylist::new(&env(&h, Os::Linux));
+        let net = plain.with_env_files();
+        let proj = h.home.join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        for n in [".env", ".env.local", ".env.production"] {
+            assert!(!plain.is_denied(&proj.join(n)), "{n}: not refused for a pane without network");
+            assert!(net.is_denied(&proj.join(n)), "{n}: refused for a network pane");
+        }
+        for n in [".envrc", "env", "x.env", ".environment"] {
+            assert!(!net.is_denied(&proj.join(n)), "{n}");
+        }
+        // history may name a file that is gone from the disk
+        assert!(net.is_denied_repo_path(&proj, "sub/dir/.env"));
+        assert!(!plain.is_denied_repo_path(&proj, "sub/dir/.env"));
+        assert!(net.refuses_env_name("a/.env.local") && !plain.refuses_env_name("a/.env.local"));
+        assert!(!net.refuses_env_name("a/env"));
+        // a case-sensitive list keeps .ENV a different name; a folding one does not
+        assert!(!net.is_denied(&proj.join(".ENV")));
+        let mac = Denylist::new(&env(&h, Os::MacOs)).with_env_files();
+        assert!(mac.is_denied(&proj.join(".ENV")) && mac.refuses_env_name("x/.Env.Local"));
+    }
+
+    #[test]
+    fn the_refusal_for_an_env_file_says_why() {
+        let m = refusal_message(Path::new("/p/.env.local"));
+        assert!(m.contains(".env") && m.contains("network") && !m.contains("keys, credentials"), "{m}");
+        assert!(refusal_message(Path::new("/p/.ssh/id")).contains("protected locations"));
     }
 }

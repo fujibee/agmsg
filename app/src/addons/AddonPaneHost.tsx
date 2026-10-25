@@ -8,6 +8,7 @@ import { AddonPane } from "./AddonPane";
 import type { FailureAction } from "./FailureCard";
 import type { GrantChoice } from "./GrantCard";
 import { grantChips } from "./model";
+import { envNoticeKey } from "./envNotice";
 import { createOpGuard } from "./opGuard";
 import { listenPaneFailed, type PaneFailedEvent } from "./paneFailed";
 import { pickSavedRoot, pickSavedTeam } from "./savedGrants";
@@ -51,6 +52,12 @@ function LiveAddonPane(props: {
 }) {
   const { t } = useTranslation();
   const tt = t as never;
+  // A line about the folder just allowed (a `.env` file in it); information only, so a failed look says nothing.
+  const envNote = async (paneId: number): Promise<string | undefined> => {
+    const r = await source.folderEnvNotice(paneId);
+    const key = r.ok ? envNoticeKey(r.value) : null;
+    return key ? (t(key) as string) : undefined;
+  };
   const { pane } = props;
   const addon = props.addons.find((a) => a.id === pane.addonId);
   const decl = addon?.panes.find((p) => p.name === pane.paneName);
@@ -113,7 +120,7 @@ function LiveAddonPane(props: {
             if (root !== undefined) {
               const g = await source.grantRoot(a.id, root);
               if (g.ok) {
-                replayed.push({ key: `root:${g.realPath}`, label: g.realPath });
+                replayed.push({ key: `root:${g.realPath}`, label: g.realPath, note: await envNote(a.id) });
                 next.splice(next.indexOf("folder"), 1);
               }
             }
@@ -194,7 +201,7 @@ function LiveAddonPane(props: {
       const g = await source.grantRoot(added.id, need.path);
       if (!g.ok) return { error: g.error };
       const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "files:read", g.realPath, added.id, added.commit) : null;
-      return { chip: { key: `root:${g.realPath}`, label: g.realPath }, saveFailed: saved && !saved.ok ? saved.error.message : undefined };
+      return { chip: { key: `root:${g.realPath}`, label: g.realPath, note: stale() ? undefined : await envNote(added.id) }, saveFailed: saved && !saved.ok ? saved.error.message : undefined };
     });
     if (r.kind !== "done") return; // busy: ignored; stale: the pane was reopened, so nothing here applies to it
     setPending(false);

@@ -299,6 +299,17 @@ pub fn grant_root_path(deny: &Denylist, path: &str) -> Result<PathBuf, BrokerErr
     }
 }
 
+/// What the card says about the folder just allowed for this pane: whether it holds a `.env`
+/// file (a bounded look), and whether this pane declares `network`, which means it will not
+/// be able to read one. Only information; the refusal itself is decided on every read.
+#[tauri::command(async)]
+pub fn addon_folder_env_notice(host: State<'_, Arc<AddonHost>>, id: PaneId) -> Result<Value, BrokerError> {
+    let (root, network) = host.panes.registry.lock().unwrap().root_and_network(id).ok_or_else(|| BrokerError::new("not_granted", "no folder is allowed for this pane"))?;
+    host.panes.refresh_deny();
+    let scan = super::dotenv::scan_folder(&root, &host.panes.deny().snapshot());
+    Ok(json!({ "found": scan.found, "truncated": scan.truncated, "network": network }))
+}
+
 #[tauri::command]
 pub fn addon_revoke_root(host: State<'_, Arc<AddonHost>>, id: PaneId) {
     host.panes.registry.lock().unwrap().revoke_root(id);

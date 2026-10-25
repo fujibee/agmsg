@@ -76,6 +76,9 @@ pub fn handle_with_git(
 }
 
 fn run(a: &Authorized, deny: &Denylist, git: &dyn Fn() -> &'static GitSupport, op: &str, args: &Value) -> Res {
+    // A pane that declares `network` gets the denylist plus the `.env` rule, decided here on every call.
+    let pane_deny = if a.network { std::borrow::Cow::Owned(deny.with_env_files()) } else { std::borrow::Cow::Borrowed(deny) };
+    let deny: &Denylist = &pane_deny;
     match op {
         "open.args" => Ok(serde_json::to_value(&a.open_args).unwrap_or(json!({}))),
         "fs.stat" => {
@@ -137,6 +140,10 @@ fn resolve(a: &Authorized, deny: &Denylist, args: &Value) -> Result<(PathBuf, St
         return Err(BrokerError::new("denied_path", super::denylist::refusal_message(&root_real)));
     }
     let joined = if rel == "." { root_real.clone() } else { root_real.join(&rel) };
+    // a link named `.env` that leads to an ordinary file is still a `.env` as named
+    if deny.refuses_env_name(&rel) {
+        return Err(BrokerError::new("denied_path", super::denylist::refusal_message(&joined)));
+    }
     let real = fs::canonicalize(&joined).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => BrokerError::new("not_found", "not found"),
         _ => BrokerError::new("not_found", "cannot be read"),
@@ -568,6 +575,135 @@ mod tests {
         sh_git(&f.root, &["commit", "-q", "-m", "bin"]);
         let bin = git_call(&f, g, "git.show", json!({"rev": "HEAD", "path": "blob.bin"})).unwrap();
         assert!(bin.get("text").is_none() && bin["bytesBase64"].is_string());
+    }
+
+    // ---- .env files ----
+
+    fn net_files() -> Declared {
+        Declared { files_read: true, network: Some(super::super::csp::Network::Any), ..Default::default() }
+    }
+
+    fn put_env_files(f: &Fx) {
+        fs::write(f.root.join(".env"), "SECRET=1\n").unwrap();
+        fs::write(f.root.join(".env.local"), "SECRET=2\n").unwrap();
+        fs::create_dir_all(f.root.join("src/deep")).unwrap();
+        fs::write(f.root.join("src/deep/.env.production"), "SECRET=3\n").unwrap();
+    }
+
+    #[test]
+    fn a_pane_with_network_cannot_read_stat_or_see_env_files_at_any_depth() {
+        let f = fx(net_files());
+        put_env_files(&f);
+        for p in [".env", ".env.local", "src/deep/.env.production"] {
+            for op in ["fs.read", "fs.stat"] {
+                assert_eq!(code(call(&f, op, json!({"path": p}))), "denied_path", "{op} {p}");
+            }
+        }
+        let msg = call(&f, "fs.read", json!({"path": ".env"})).unwrap_err().message;
+        assert!(msg.contains(".env") && msg.contains("network"), "{msg}");
+        // listings leave the entry out, the way the rest of the denylist does
+        let names = |p: &str| -> Vec<String> {
+            call(&f, "fs.list", json!({"path": p})).unwrap()["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_string()).collect()
+        };
+        let top = names(".");
+        assert!(top.contains(&"README.md".to_string()) && !top.contains(&".env".to_string()) && !top.contains(&".env.local".to_string()), "{top:?}");
+        assert!(!names("src/deep").contains(&".env.production".to_string()));
+        // an ordinary file is still readable
+        assert_eq!(call(&f, "fs.read", json!({"path": "README.md"})).unwrap()["text"], "# hi\n");
+    }
+
+    #[test]
+    fn a_pane_without_network_reads_env_files_like_any_other_file() {
+        let f = fx(files_only());
+        put_env_files(&f);
+        assert_eq!(call(&f, "fs.read", json!({"path": ".env"})).unwrap()["text"], "SECRET=1\n");
+        assert_eq!(call(&f, "fs.read", json!({"path": "src/deep/.env.production"})).unwrap()["text"], "SECRET=3\n");
+        assert!(call(&f, "fs.stat", json!({"path": ".env.local"})).is_ok());
+        let l = call(&f, "fs.list", json!({})).unwrap();
+        assert!(l["entries"].as_array().unwrap().iter().any(|e| e["name"] == ".env"));
+    }
+
+    #[test]
+    fn names_that_only_look_like_env_files_are_not_env_files() {
+        let f = fx(net_files());
+        for n in ["env", ".envrc", "my.env", ".environment", "dot.env.txt", "environment"] {
+            fs::write(f.root.join(n), "x").unwrap();
+            assert!(call(&f, "fs.read", json!({"path": n})).is_ok(), "{n} is an ordinary file");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_an_env_file_and_a_link_named_env_are_refused() {
+        let f = fx(net_files());
+        put_env_files(&f);
+        std::os::unix::fs::symlink(f.root.join(".env"), f.root.join("notes.txt")).unwrap();
+        assert_eq!(code(call(&f, "fs.read", json!({"path": "notes.txt"}))), "denied_path", "judged by where it leads");
+        // a link that is named .env but leads to an ordinary file: refused by the name as given
+        fs::create_dir_all(f.root.join("cfg")).unwrap();
+        std::os::unix::fs::symlink(f.root.join("README.md"), f.root.join("cfg/.env")).unwrap();
+        assert_eq!(code(call(&f, "fs.read", json!({"path": "cfg/.env"}))), "denied_path");
+        assert_eq!(code(call(&f, "fs.stat", json!({"path": "cfg/.env"}))), "denied_path");
+        // a link to a folder that holds an env file: the file inside is refused, the folder lists without it
+        std::os::unix::fs::symlink(f.root.join("src/deep"), f.root.join("shortcut")).unwrap();
+        assert_eq!(code(call(&f, "fs.read", json!({"path": "shortcut/.env.production"}))), "denied_path");
+        let l = call(&f, "fs.list", json!({"path": "shortcut"})).unwrap();
+        assert!(l["entries"].as_array().unwrap().is_empty());
+        // and the same links are plain files to a pane without network
+        let g = fx(files_only());
+        put_env_files(&g);
+        std::os::unix::fs::symlink(g.root.join(".env"), g.root.join("notes.txt")).unwrap();
+        assert_eq!(call(&g, "fs.read", json!({"path": "notes.txt"})).unwrap()["text"], "SECRET=1\n");
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn env_names_are_matched_without_case_where_the_file_system_ignores_case() {
+        let f = fx(net_files());
+        fs::write(f.root.join(".ENV"), "S=1").unwrap();
+        fs::write(f.root.join(".Env.Local"), "S=2").unwrap();
+        for p in [".ENV", ".Env.Local", ".env", ".eNv.local"] {
+            let r = call(&f, "fs.read", json!({"path": p}));
+            assert_eq!(code(r), "denied_path", "{p}");
+        }
+    }
+
+    #[test]
+    fn a_folder_named_env_hides_everything_below_it_from_a_network_pane() {
+        let f = fx(net_files());
+        fs::create_dir_all(f.root.join(".env.d")).unwrap();
+        fs::write(f.root.join(".env.d/a.txt"), "x").unwrap();
+        assert_eq!(code(call(&f, "fs.read", json!({"path": ".env.d/a.txt"}))), "denied_path");
+        assert_eq!(code(call(&f, "fs.list", json!({"path": ".env.d"}))), "denied_path");
+    }
+
+    #[test]
+    fn git_show_diff_and_status_leave_env_files_out_for_a_network_pane() {
+        let f = fx(Declared { files_read: true, git_read: true, network: Some(super::super::csp::Network::Any), ..Default::default() });
+        let g = ready_git(&f);
+        sh_git(&f.root, &["init", "-q", "-b", "main"]);
+        fs::write(f.root.join(".env"), "SECRET=old\n").unwrap();
+        sh_git(&f.root, &["add", "README.md", "src", ".env"]);
+        sh_git(&f.root, &["commit", "-q", "-m", "first"]);
+        fs::write(f.root.join(".env"), "SECRET=new\n").unwrap();
+        fs::write(f.root.join("README.md"), "# changed\n").unwrap();
+        assert_eq!(code_of(git_call(&f, g, "git.show", json!({"rev": "HEAD", "path": ".env"}))), "denied_path");
+        let d = git_call(&f, g, "git.diff", json!({})).unwrap();
+        let text = d.to_string();
+        assert!(!text.contains("SECRET"), "no env content in the diff: {text}");
+        let paths: Vec<&str> = d["files"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
+        assert!(paths.contains(&"README.md") && !paths.contains(&".env"), "{paths:?}");
+        assert_eq!(code_of(git_call(&f, g, "git.diff", json!({"path": ".env"}))), "denied_path");
+        let st = git_call(&f, g, "git.status", json!({})).unwrap().to_string();
+        assert!(!st.contains(".env"), "{st}");
+        // the same repository through a pane without network shows it
+        let h = fx(Declared { files_read: true, git_read: true, ..Default::default() });
+        let gh = ready_git(&h);
+        sh_git(&h.root, &["init", "-q", "-b", "main"]);
+        fs::write(h.root.join(".env"), "SECRET=old\n").unwrap();
+        sh_git(&h.root, &["add", "README.md", "src", ".env"]);
+        sh_git(&h.root, &["commit", "-q", "-m", "first"]);
+        assert_eq!(git_call(&h, gh, "git.show", json!({"rev": "HEAD", "path": ".env"})).unwrap()["text"], "SECRET=old\n");
     }
 
     fn code_of(r: Res) -> &'static str {

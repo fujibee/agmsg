@@ -110,7 +110,8 @@ export type PaneFailure =
   | { code: "pane_closed"; reason: string };
 
 /** A grant chip in the pane header. */
-export type GrantChip = { key: string; label: string };
+/** One thing allowed for the pane, shown in its header; `note` is an extra line about it (a `.env` file in the folder). */
+export type GrantChip = { key: string; label: string; note?: string };
 
 /** The broker's refusal codes, so a card can name one. */
 export type BrokerErrorCode = ErrorCode;

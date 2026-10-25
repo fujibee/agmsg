@@ -127,6 +127,9 @@ async function attempt<T>(fn: () => Promise<T>): Promise<Outcome<T>> {
 /** What addon_pane_add returns: the frame URL and what Rust read from addon.conf. */
 export type AddedPane = { id: number; url: string; port: number; commit: string; title: string; permissions: string[]; network: string };
 
+/** addon_folder_env_notice: the folder holds a `.env` file; `network` means this pane cannot read it. */
+export type EnvNotice = { found: boolean; truncated: boolean; network: boolean };
+
 export type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 /** A refusal from Rust as the screens use it. */
@@ -196,6 +199,10 @@ export function createLiveSource(invoke: Invoke) {
     },
     async revokeTeam(id: number): Promise<void> {
       await invoke("addon_revoke_team", { id });
+    },
+    /** Whether the folder allowed for this pane holds a `.env` file (a bounded look), and whether the pane declares network. Information only. */
+    folderEnvNotice(id: number): Promise<Outcome<EnvNotice>> {
+      return attempt(async () => (await invoke("addon_folder_env_notice", { id })) as EnvNotice);
     },
     async revokeRoot(id: number): Promise<void> {
       await invoke("addon_revoke_root", { id });

@@ -52,6 +52,7 @@
     "allow-addon-revoke-team",
     "allow-addon-grant-root",
     "allow-addon-revoke-root",
+    "allow-addon-folder-env-notice",
     "allow-addon-feed-init",
     "allow-addon-request",
     "allow-addon-list",

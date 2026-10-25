@@ -91,6 +91,8 @@ pub struct Authorized {
     pub root: Option<PathBuf>,
     pub team: Option<String>,
     pub open_args: OpenArgs,
+    /// The pane declares `network`: `.env` files are out of its reach (see `Denylist::with_env_files`).
+    pub network: bool,
     pub inflight: Arc<AtomicUsize>,
 }
 
@@ -282,6 +284,12 @@ impl Registry {
         Ok(())
     }
 
+    /// The folder allowed for this pane and whether the pane declares `network`, for the `.env` notice.
+    pub fn root_and_network(&self, id: PaneId) -> Option<(PathBuf, bool)> {
+        let p = self.panes.get(&id)?;
+        Some((p.root.clone()?, !matches!(p.declared.network, None | Some(Network::None))))
+    }
+
     pub fn revoke_root(&mut self, id: PaneId) {
         if let Some(p) = self.panes.get_mut(&id) {
             p.root = None;
@@ -318,7 +326,7 @@ impl Registry {
                 }
             }
         }
-        Ok(Authorized { id, generation, root: p.root.clone(), team: p.team.clone(), open_args: p.open_args.clone(), inflight: p.inflight.clone() })
+        Ok(Authorized { id, generation, root: p.root.clone(), team: p.team.clone(), open_args: p.open_args.clone(), network: !matches!(p.declared.network, None | Some(Network::None)), inflight: p.inflight.clone() })
     }
 
     /// Reserves a request slot for the pane; `None` when 64 are already queued.

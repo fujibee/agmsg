@@ -41,6 +41,7 @@ export function AddonPane(props: {
         {props.chips.map((c) => (
           <span key={c.key} className="addon-chip">
             {c.label}
+            {c.note && <span className="addon-chip-note"> · {c.note}</span>}
           </span>
         ))}
         {props.askedBy && <span className="addon-asked-by">{t("addons.pane.askedBy", { agent: props.askedBy })}</span>}

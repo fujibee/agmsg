@@ -449,6 +449,10 @@
     },
     "listFailed": "Couldn't read the add-on list: {{message}}",
     "listRetry": "Try again",
-    "grantsFailed": "Couldn't read what you allowed: {{message}}"
+    "grantsFailed": "Couldn't read what you allowed: {{message}}",
+    "env": {
+      "found": "This folder has a .env file.",
+      "foundNetwork": "This folder has a .env file. This add-on uses the network, so it can't read it."
+    }
   }
 }

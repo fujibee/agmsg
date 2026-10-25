@@ -449,6 +449,10 @@
     },
     "listFailed": "アドオンの一覧を読み込めませんでした: {{message}}",
     "listRetry": "再試行",
-    "grantsFailed": "許可した内容を読み込めませんでした: {{message}}"
+    "grantsFailed": "許可した内容を読み込めませんでした: {{message}}",
+    "env": {
+      "found": "このフォルダには .env ファイルがあります。",
+      "foundNetwork": "このフォルダには .env ファイルがあります。このアドオンはネットワークを使うため、読めません。"
+    }
   }
 }

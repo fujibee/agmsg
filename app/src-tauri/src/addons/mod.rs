@@ -9,6 +9,7 @@ pub mod conf;
 pub mod openreq;
 pub mod csp;
 pub mod denylist;
+pub mod dotenv;
 pub mod diff;
 pub mod digest;
 #[cfg(debug_assertions)]
