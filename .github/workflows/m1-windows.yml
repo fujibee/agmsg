@@ -5,7 +5,7 @@ name: m1-windows
 
 on:
   push:
-    branches: [addon-m1]
+    branches: [addon-m1, addon-win-spike]
 
 permissions:
   contents: read
