@@ -35,7 +35,7 @@ scaffold() {
   [ -f scripts/agmsg-addon-copy.mjs ]
   echo keep > agmsg-plugin.conf
   run node "$BIN" addon init demo
-  grep -Fq -- "skip   agmsg-plugin.conf (exists)" <<<"$output"
+  [[ "$output" =~ "skip   agmsg-plugin.conf (exists)" ]]
   [ "$(cat agmsg-plugin.conf)" = keep ]
 }
 
@@ -92,7 +92,7 @@ scaffold() {
   git commit -qam handler
   run node "$BIN" addon check
   [ "$status" -eq 1 ]
-  grep -Fq -- "blocked: app-panes/demo/web/index.html: inline event handlers" <<<"$output"
+  [[ "$output" =~ "blocked: app-panes/demo/web/index.html: inline event handlers" ]]
   [[ "$output" =~ "The app would install this, but 1 thing(s) will be blocked" ]]
 }
 
