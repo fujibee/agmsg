@@ -119,6 +119,7 @@ export function createClaudeCodeQueueChannel({
   transcriptPathOf = resolveTranscriptPath,
 }) {
   let stopped = false;
+  let rosterReasons = new Map();
   let activePoll = null;
   let activePollSignal;
   let resumeAfter;
@@ -261,6 +262,25 @@ export function createClaudeCodeQueueChannel({
     saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
   }
 
+  // A team whose roster entry is unusable is skipped alone. Its reason is kept
+  // as a team-level row (agent "") so `agmsg daemon status` shows it, and logged
+  // only when it first appears or changes.
+  function recordSkippedTeams(skipped) {
+    const current = new Map(skipped.map(({ team, reason }) => [team, reason]));
+    for (const [team, reason] of current) {
+      if (rosterReasons.get(team) === reason) continue;
+      log(`channel: Claude Code roster for team ${team} skipped (${reason})`);
+      saveSeat(db, { seat: seatKey(team, ""), state: "unaddressable", reason }, now);
+    }
+    for (const team of rosterReasons.keys()) {
+      if (!current.has(team)) {
+        assertPollActive();
+        withImmediateTransaction(db, () => db.prepare("DELETE FROM beta_claude_seat WHERE seat = ?").run(seatKey(team, "")));
+      }
+    }
+    rosterReasons = current;
+  }
+
   async function pollOnce({ signal } = {}) {
     if (stopped) return;
     if (activePoll && !activePollSignal?.aborted) return activePoll;
@@ -272,8 +292,10 @@ export function createClaudeCodeQueueChannel({
         return;
       }
       const paths = storagePaths(installRoot, env);
+      recordSkippedTeams(roster.skipped ?? []);
       const seats = [...roster.seats];
       const registeredKeys = new Set(seats.map(({ team, agent }) => seatKey(team, agent)));
+      for (const { team } of roster.skipped ?? []) registeredKeys.add(seatKey(team, ""));
       for (const row of db.prepare("SELECT seat FROM beta_claude_seat").all()) {
         if (!registeredKeys.has(row.seat)) {
           seatPoller.changeState(row.seat, () => saveSeat(db, { seat: row.seat, state: "unaddressable", reason: "seat_registration_missing" }, now));

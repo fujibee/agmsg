@@ -102,7 +102,8 @@ export function readClaudeRoleSession(runDir, team, agent) {
 // Enumerates only roles whose current registration explicitly names
 // claude-code. Mirrors listCodexRegistrations in codex-queue-store.mjs
 // exactly, filtered on a different registration type — small enough that
-// sharing it would cost more indirection than it saves.
+// sharing it would cost more indirection than it saves. A team that cannot be
+// read is listed under `skipped` and does not hide the others.
 export function listClaudeCodeRegistrations(teamsDir) {
   let entries;
   try {
@@ -112,20 +113,29 @@ export function listClaudeCodeRegistrations(teamsDir) {
     return { state: "unreadable", reason: "team_roster_unreadable" };
   }
   const seats = [];
+  const skipped = [];
   for (const entry of entries) {
-    if (entry.isSymbolicLink()) return { state: "unreadable", reason: "team_roster_symlink" };
+    if (entry.isSymbolicLink()) {
+      skipped.push({ team: entry.name, reason: "team_roster_symlink" });
+      continue;
+    }
     if (!entry.isDirectory()) continue;
     let config;
     try {
       const stat = lstatSync(join(teamsDir, entry.name, "config.json"));
-      if (!stat.isFile() || stat.isSymbolicLink()) return { state: "unreadable", reason: "team_roster_symlink" };
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        skipped.push({ team: entry.name, reason: "team_roster_symlink" });
+        continue;
+      }
       config = JSON.parse(readFileSync(join(teamsDir, entry.name, "config.json"), "utf8"));
     } catch (error) {
       if (error?.code === "ENOENT") continue;
-      return { state: "unreadable", reason: "team_roster_malformed" };
+      skipped.push({ team: entry.name, reason: "team_roster_malformed" });
+      continue;
     }
     if (!config || typeof config !== "object" || !config.agents || typeof config.agents !== "object" || Array.isArray(config.agents)) {
-      return { state: "unreadable", reason: "team_roster_malformed" };
+      skipped.push({ team: entry.name, reason: "team_roster_malformed" });
+      continue;
     }
     for (const [agent, value] of Object.entries(config.agents)) {
       const regs = value && Array.isArray(value.registrations) ? value.registrations : [];
@@ -134,5 +144,5 @@ export function listClaudeCodeRegistrations(teamsDir) {
       }
     }
   }
-  return { state: "ok", seats };
+  return { state: "ok", seats, skipped };
 }

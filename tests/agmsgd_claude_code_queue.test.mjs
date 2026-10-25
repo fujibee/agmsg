@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -18,7 +18,7 @@ import {
   checkSocketOwnership,
 } from '../scripts/daemon/channels/claude-code-queue-io.mjs';
 import { createClaudeCodeQueueChannel } from '../scripts/daemon/channels/claude-code-queue.mjs';
-import { ensureClaudeCodeChannelSchema, readClaudeRoleSession } from '../scripts/daemon/channels/claude-code-queue-store.mjs';
+import { ensureClaudeCodeChannelSchema, listClaudeCodeRegistrations, readClaudeRoleSession } from '../scripts/daemon/channels/claude-code-queue-store.mjs';
 import { readOwnerAndIntentReadOnly } from '../scripts/daemon/status.mjs';
 import { openInstallDb } from '../scripts/daemon/db.mjs';
 
@@ -533,4 +533,34 @@ test('a stuck Claude send has a seat deadline and late success cannot publish de
   assert.equal(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, 'seat_poll_deadline');
   await channel.stop();
   await unused.stop();
+});
+
+test('one unusable team is skipped alone: the other teams are still notified and the reason is shown once', async (t) => {
+  const { db, state } = channelFixture(t);
+  const root = state.options.installRoot;
+  const seat = (name) => ({ agents: { [name]: { registrations: [{ type: 'claude-code', project: root }] } } });
+  for (const team of ['one', 'two', 'broken', 'linked']) mkdirSync(path.join(root, 'teams', team), { recursive: true });
+  writeFileSync(path.join(root, 'teams', 'one', 'config.json'), JSON.stringify(seat('alice')));
+  writeFileSync(path.join(root, 'teams', 'two', 'config.json'), JSON.stringify(seat('bob')));
+  writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), '{ not json');
+  writeFileSync(path.join(root, 'elsewhere.json'), JSON.stringify(seat('carol')));
+  symlinkSync(path.join(root, 'elsewhere.json'), path.join(root, 'teams', 'linked', 'config.json'));
+  const logs = [];
+  const channel = createClaudeCodeQueueChannel({
+    ...state.options,
+    listSeats: listClaudeCodeRegistrations,
+    readSession: (_run, team, agent) => ({ state: 'present', record: { team, agent, type: 'claude-code', project: root, claude_config_dir: root, messaging_socket: state.socket, session: `sess-${team}` } }),
+    log: (line) => logs.push(line),
+  });
+  await channel.pollOnce();
+  await channel.pollOnce();
+  assert.equal(state.sent, 2, 'the two healthy teams are notified');
+  const reasons = Object.fromEntries(readOwnerAndIntentReadOnly(root).claudeCodeSeats.seats
+    .filter((row) => JSON.parse(row.seat)[1] === '').map((row) => [JSON.parse(row.seat)[0], row.reason]));
+  assert.deepEqual(reasons, { broken: 'team_roster_malformed', linked: 'team_roster_symlink' });
+  assert.equal(logs.filter((line) => /roster for team broken skipped/.test(line)).length, 1, 'logged when it first appears, not every poll');
+  writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), JSON.stringify(seat('dave')));
+  await channel.pollOnce();
+  assert.equal(readOwnerAndIntentReadOnly(root).claudeCodeSeats.seats.some((row) => JSON.parse(row.seat)[0] === 'broken' && JSON.parse(row.seat)[1] === ''), false, 'the reason goes away once the team is readable');
+  await channel.stop();
 });

@@ -101,7 +101,9 @@ export function readRoleSession(runDir, team, agent) {
 }
 
 // Enumerates only roles whose current registration explicitly names Codex.
-// A malformed team record is reported, not interpreted as an empty roster.
+// A malformed team record is reported, not interpreted as an empty roster: that
+// team alone is listed under `skipped` with its reason, and every other team is
+// still enumerated.
 export function listCodexRegistrations(teamsDir) {
   let entries;
   try {
@@ -111,14 +113,24 @@ export function listCodexRegistrations(teamsDir) {
     return { state: "unreadable", reason: "team_roster_unreadable" };
   }
   const seats = [];
+  const skipped = [];
   for (const entry of entries) {
-    if (entry.isSymbolicLink()) return { state: "unreadable", reason: "team_roster_symlink" };
+    if (entry.isSymbolicLink()) {
+      skipped.push({ team: entry.name, reason: "team_roster_symlink" });
+      continue;
+    }
     if (!entry.isDirectory()) continue;
-    const result = readJson(join(teamsDir, entry.name, "config.json"));
-    if (result.missing) continue;
-    const config = result;
+    let config;
+    try {
+      config = readJson(join(teamsDir, entry.name, "config.json"));
+    } catch (error) {
+      skipped.push({ team: entry.name, reason: error?.message === "not_regular_file" ? "team_roster_symlink" : "team_roster_malformed" });
+      continue;
+    }
+    if (config?.missing) continue;
     if (!config || typeof config !== "object" || !config.agents || typeof config.agents !== "object" || Array.isArray(config.agents)) {
-      return { state: "unreadable", reason: "team_roster_malformed" };
+      skipped.push({ team: entry.name, reason: "team_roster_malformed" });
+      continue;
     }
     for (const [agent, value] of Object.entries(config.agents)) {
       const regs = value && Array.isArray(value.registrations) ? value.registrations : [];
@@ -127,7 +139,7 @@ export function listCodexRegistrations(teamsDir) {
       }
     }
   }
-  return { state: "ok", seats };
+  return { state: "ok", seats, skipped };
 }
 
 export function readStorageDriver(configPath) {
