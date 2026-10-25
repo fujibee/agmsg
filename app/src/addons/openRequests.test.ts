@@ -1,0 +1,111 @@
+import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { createLiveSource, type Invoke } from "./source";
+import { SEAT_INSTRUCTION, toOpenView, type OpenRowRaw, type OpenScanRaw } from "./openRequests";
+import { OpenRequestBar, OpenRequestMessages, OpenRequestNotes } from "./OpenRequestBar";
+
+const t = (key: string, o?: Record<string, unknown>) => `[${key}${o ? " " + JSON.stringify(o) : ""}]`;
+const noop = () => {};
+const row = (n: string, o: Partial<OpenRowRaw> = {}): OpenRowRaw => ({
+  requestId: `${n}:0`, id: n, team: "agmsg", from: "alice", created_at: "2026-10-25T08:40:00Z",
+  addonId: "builtin:diffview", pane: "diffview", path: "/p", verdict: "ready", pathState: "exists", ...o,
+});
+const scan = (rows: OpenRowRaw[], o: Partial<OpenScanRaw> = {}): OpenScanRaw => ({ appUser: "me", rows, truncated: false, ...o });
+
+describe("toOpenView", () => {
+  it("only a ready row gets Open; every other verdict keeps the line with Rust's reason", () => {
+    const v = toOpenView(scan([
+      row("1"),
+      row("2", { verdict: "not_installed", addonId: "o/r", pane: "viewer", path: undefined, installTarget: "o/r" }),
+      row("3", { verdict: "unavailable", detail: "add-ons are off on this computer: x" }),
+      row("4", { verdict: "args_not_allowed" }),
+      row("5", { verdict: "not_found_here", pathState: "missing" }),
+      row("6", { verdict: "denied_path", detail: "/Users/me/.ssh is protected." }),
+    ]));
+    expect(v.items.map((i) => [i.requestId, i.status])).toEqual([
+      ["1:0", "open"], ["2:0", "not_installed"], ["3:0", "unavailable"], ["4:0", "args_not_allowed"], ["5:0", "not_found_here"], ["6:0", "denied_path"],
+    ]);
+    expect(v.items[1].installTarget).toBe("o/r");
+    expect(v.items[2].detail).toBe("add-ons are off on this computer: x");
+    expect(v.items[0]).toMatchObject({ from: "alice", team: "agmsg", addonId: "builtin:diffview", pane: "diffview", path: "/p" });
+  });
+  it("a refused line is a note with Rust's reason, keyed by its request id", () => {
+    const v = toOpenView(scan([
+      row("1", { verdict: "refused", addonId: undefined, pane: undefined, path: undefined, refusal: { reason: "bad_option", detail: "junk" } }),
+    ]));
+    expect(v.items).toEqual([]);
+    expect(v.notes.get("1:0")).toEqual({ kind: "malformed", reason: "bad_option", detail: "junk" });
+  });
+  it("a row the UI does not understand is never shown as openable", () => {
+    const v = toOpenView(scan([row("1", { verdict: "from_the_future" as never }), row("2", { addonId: undefined })]));
+    expect(v.items).toEqual([]);
+    expect(v.notes.size).toBe(2);
+  });
+  it("notice and truncation pass through", () => {
+    const v = toOpenView(scan([row("1")], { notice: "This team has no app-user.", truncated: true }));
+    expect(v.notice).toBe("This team has no app-user.");
+    expect(v.truncated).toBe(true);
+  });
+});
+
+describe("the bar and messages", () => {
+  const items = toOpenView(scan([row("1"), row("2", { verdict: "denied_path", detail: "Protected." })])).items;
+  const bar = (list = items, extra: object = {}) =>
+    renderToStaticMarkup(createElement(OpenRequestBar, { t, items: list, formatTime: (s) => s, onOpen: noop, onDismiss: noop, onInstall: noop, ...extra }));
+  it("names the sender and the team, says the sender is not verified on every line, and shows Rust's reason as it is", () => {
+    const html = bar();
+    expect(html.match(/addons\.request\.unverified/g)?.length).toBe(2);
+    expect(html).toContain("Protected.");
+    expect(html).toContain("&quot;agent&quot;:&quot;alice&quot;");
+    expect(html).toContain("&quot;team&quot;:&quot;agmsg&quot;");
+    expect(html).toContain("builtin:diffview diffview");
+  });
+  it("a denied line has Open disabled", () => {
+    expect(bar([items[1]])).toMatch(/<button type="button" disabled="">\[addons\.request\.open\]/);
+  });
+  it("a refused line is a note with a Dismiss and no Open", () => {
+    const html = renderToStaticMarkup(createElement(OpenRequestNotes, { t, notes: [{ requestId: "1:0", note: { kind: "malformed", reason: "bad_option" } }], onDismiss: noop }));
+    expect(html).toContain("addons.request.reason.bad_option");
+    expect(html).toContain("addons.request.dismiss");
+    expect(html).not.toContain("addons.request.open");
+  });
+  it("a failed read, a host notice, truncation and a refused click are each said", () => {
+    const html = renderToStaticMarkup(createElement(OpenRequestMessages, {
+      t, error: "state_unreadable: broken", actionError: { code: "not_openable", message: "No." }, notice: "No app-user.", truncated: true,
+    }));
+    for (const k of ["readFailed", "actionFailed", "truncated"]) expect(html).toContain(`addons.request.${k}`);
+    expect(html).toContain("No app-user.");
+    expect(renderToStaticMarkup(createElement(OpenRequestMessages, { t, error: null, actionError: null }))).toBe("");
+  });
+});
+
+describe("the text for seats", () => {
+  it("shows the exact line to send, with an example, in English", () => {
+    const lines = SEAT_INSTRUCTION.split("\n");
+    expect(lines).toContain("agmsg-app open <addon-id> <pane> [path=<absolute path>]");
+    expect(lines).toContain("Example: agmsg-app open builtin:fileview fileview path=/Users/me/project");
+    expect(SEAT_INSTRUCTION.length).toBeLessThan(600);
+  });
+});
+
+describe("open-request commands", () => {
+  it("send the names and argument shapes Rust expects and return its refusal words", async () => {
+    const calls: [string, Record<string, unknown> | undefined][] = [];
+    const invoke: Invoke = async (cmd, args) => {
+      calls.push([cmd, args]);
+      if (cmd === "addon_open_requests") throw { code: "state_unreadable", message: "The handled-request record cannot be read." };
+      if (cmd === "addon_open_request_open") return { requestId: "1:0", from: "alice", addonId: "builtin:diffview", pane: "diffview", openArgs: { path: "/p" } };
+      return null;
+    };
+    const s = createLiveSource(invoke);
+    expect(await s.openRequests("agmsg")).toEqual({ ok: false, error: { code: "state_unreadable", message: "The handled-request record cannot be read." } });
+    expect(await s.openRequestOpen("agmsg", "1:0")).toMatchObject({ ok: true, value: { addonId: "builtin:diffview", openArgs: { path: "/p" } } });
+    expect(await s.openRequestDismiss("agmsg", "1:0")).toEqual({ ok: true, value: null });
+    expect(calls).toEqual([
+      ["addon_open_requests", { team: "agmsg" }],
+      ["addon_open_request_open", { spec: { team: "agmsg", requestId: "1:0" } }],
+      ["addon_open_request_dismiss", { spec: { team: "agmsg", requestId: "1:0" } }],
+    ]);
+  });
+});

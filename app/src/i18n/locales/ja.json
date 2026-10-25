@@ -283,7 +283,11 @@
     "openRequests": {
       "label": "seat からの open request",
       "show": "表示",
-      "off": "オフ"
+      "off": "オフ",
+      "copy": "seat 向けの文面をコピー",
+      "copied": "コピーしました。",
+      "copyFailed": "コピーできませんでした。",
+      "copyHint": "seat に貼り付けると、アプリにペインを開くよう頼む書き方が伝わります。"
     },
     "developer": {
       "title": "開発者",
@@ -403,7 +407,7 @@
       "checkingPlain": "ファイルを確認中…"
     },
     "request": {
-      "wants": "{{agent}} が {{pane}} を開きたい: {{args}}",
+      "wants": "{{agent}}（{{team}}）が {{target}} を開こうとしています{{args}}",
       "base": "base {{base}}",
       "open": "開く",
       "dismiss": "閉じる",
@@ -413,27 +417,27 @@
         "open": "",
         "not_installed": "{{pane}} はインストールされていません。",
         "not_found_here": "ここには見つかりません。",
-        "expired": "期限切れです。",
         "args_not_allowed": "このペインには不正な形式です。",
-        "bad_requester": "送信者と依頼者が一致しません。"
+        "unavailable": "{{pane}} は今は開けません。",
+        "denied_path": "その場所は保護されています。"
       },
       "note": {
-        "other_machine": "他のマシンからの control request は表示されません。",
         "malformed": "不正な open request です({{reason}}{{detail}})。"
       },
       "notes": "{{count}} 件のメモ ▾",
       "reason": {
-        "missing_payload": "JSON の行がありません",
-        "extra_content": "JSON の行の後に余分なテキストがあります",
-        "too_large": "JSON の行が 2 KB を超えています",
-        "bad_json": "JSON として読めません",
-        "bad_shape": "リクエストの形が正しくありません",
-        "bad_pane": "不明なペイン",
-        "unknown_arg_key": "不明な引数",
-        "bad_arg_value": "引数の値がテキストではありません",
-        "bad_requester": "依頼者がないか形が正しくありません",
-        "bad_request_id": "リクエスト ID がありません"
-      }
+        "missing_pane": "アドオン名かペイン名がありません",
+        "bad_addon": "アドオン名が正しくありません",
+        "bad_pane": "ペイン名が正しくありません",
+        "bad_option": "ペイン名の後ろに置けるのは path=<絶対パス> だけです",
+        "bad_path": "path は絶対パスでなければいけません",
+        "bad_message_id": "メッセージ ID を記録できません",
+        "unreadable": "要求を読めませんでした"
+      },
+      "unverified": "送り主は未検証",
+      "readFailed": "オープン要求を読めませんでした: {{message}}",
+      "actionFailed": "要求を処理できませんでした: {{message}}",
+      "truncated": "古い要求は表示していません。"
     },
     "menu": {
       "fileViewEntry": "ファイルビュー…",

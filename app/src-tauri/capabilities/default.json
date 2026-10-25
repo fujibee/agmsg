@@ -64,6 +64,9 @@
     "allow-addon-dev-remove",
     "allow-addon-saved-grants",
     "allow-addon-save-grant",
-    "allow-addon-forget-grant"
+    "allow-addon-forget-grant",
+    "allow-addon-open-requests",
+    "allow-addon-open-request-open",
+    "allow-addon-open-request-dismiss"
   ]
 }

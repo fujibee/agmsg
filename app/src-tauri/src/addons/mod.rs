@@ -6,6 +6,7 @@ pub mod broker;
 pub mod catalog;
 pub mod commands;
 pub mod conf;
+pub mod openreq;
 pub mod csp;
 pub mod denylist;
 pub mod diff;

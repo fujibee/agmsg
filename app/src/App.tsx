@@ -17,10 +17,11 @@ import {
 import { TerminalPane } from "./TerminalPane";
 import { AddonPaneHost } from "./addons/AddonPaneHost";
 import type { AddonPaneRef } from "./addons/types";
-import { OpenRequestBar, OpenRequestNotes } from "./addons/OpenRequestBar";
-import { scanRequests, type BarItem } from "./addons/requests";
+import { OpenRequestBar, OpenRequestMessages, OpenRequestNotes } from "./addons/OpenRequestBar";
+import { useOpenRequests } from "./addons/useOpenRequests";
+import { useOpenRequestsSetting } from "./addons/openRequestsSetting";
 import { useAddonCatalog } from "./addons/catalog";
-import { mockRequestContext, mockRequestRows, mockSnapshot } from "./addons/mock";
+import { mockOpenView, mockSnapshot } from "./addons/mock";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
 import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
@@ -1477,35 +1478,55 @@ export default function App() {
 
   const catalog = useAddonCatalog();
   const addonEngine = catalog.engine;
-  // S10: open requests from seats. Nothing opens without the click. Still on
-  // mock rows: in the app there are none until the rows come from the message
-  // store and Rust says which are local.
+  // S10: open requests from seats, sent as ordinary messages to the team's
+  // app-user. Nothing opens without the click, and the click grants nothing:
+  // the pane that opens asks for its own permissions. In the app the rows and
+  // verdicts come from Rust; in a plain browser the mock rows stand in.
+  const [openRequestsSetting] = useOpenRequestsSetting();
   const [handledRequests, setHandledRequests] = useState<ReadonlySet<string>>(new Set());
+  const openRequests = useOpenRequests({
+    enabled: addonEngine.ok && openRequestsSetting === "show",
+    team,
+    onOpened: (o) =>
+      openAddonPane({
+        addonId: o.addonId,
+        paneName: o.pane,
+        title: catalog.addons.find((a) => a.id === o.addonId)?.panes.find((p) => p.name === o.pane)?.title ?? o.pane,
+        askedBy: o.from,
+        openArgs: o.openArgs,
+      }),
+  });
   const requestScan = useMemo(
     () =>
-      !catalog.live && mockSnapshot.openRequests === "show"
-        ? scanRequests(mockRequestRows, { ...mockRequestContext, team, handled: handledRequests })
-        : { items: [], notes: new Map() },
-    [team, handledRequests, catalog.live],
+      catalog.live
+        ? openRequests.view ?? { items: [], notes: new Map() }
+        : mockSnapshot.openRequests === "show" && openRequestsSetting === "show"
+          ? { items: mockOpenView.items.filter((i) => !handledRequests.has(i.requestId)), notes: new Map([...mockOpenView.notes].filter(([k]) => !handledRequests.has(k))) }
+          : { items: [], notes: new Map() },
+    [handledRequests, catalog.live, openRequests.view, openRequestsSetting],
   );
   const requestItems = requestScan.items;
   const requestNotes = useMemo(
-    () => [...requestScan.notes].map(([rowId, note]) => ({ rowId, note })),
+    () => [...requestScan.notes].map(([requestId, note]) => ({ requestId, note })),
     [requestScan],
   );
-  const handleRequest = useCallback((item: BarItem, opened: boolean) => {
-    setHandledRequests((prev) => new Set(prev).add(item.requestId));
+  const handleRequest = useCallback((requestId: string, opened: boolean) => {
+    if (catalog.live) {
+      openRequests.act(requestId, opened);
+      return;
+    }
+    setHandledRequests((prev) => new Set(prev).add(requestId));
     if (!opened) return;
-    const k = item.request.target;
-    const title = k.kind === "fileview" ? "File view" : k.kind === "diffview" ? "Diff view" : item.pane;
+    const item = mockOpenView.items.find((i) => i.requestId === requestId);
+    if (!item) return;
     openAddonPane({
-      addonId: k.kind === "addon" ? `${k.owner}/${k.repo}` : `builtin:${k.kind}`,
-      paneName: k.kind === "addon" ? k.pane : k.kind,
-      title,
+      addonId: item.addonId,
+      paneName: item.pane,
+      title: item.pane,
       askedBy: item.from,
-      openArgs: item.request.args,
+      openArgs: item.path ? { path: item.path } : {},
     });
-  }, [openAddonPane]);
+  }, [openAddonPane, catalog.live, openRequests.act]);
 
   // A tab's "Open shell" context-menu item — splits a shell pane in beside
   // whatever's already in that tab, the same way a sidebar click splits an
@@ -2669,12 +2690,21 @@ export default function App() {
               t={t as never}
               items={requestItems}
               formatTime={(iso) => formatMessageTime(iso, resolveTimeZone(timezone))}
-              onOpen={(i) => handleRequest(i, true)}
-              onDismiss={(i) => handleRequest(i, false)}
+              onOpen={(i) => handleRequest(i.requestId, true)}
+              onDismiss={(i) => handleRequest(i.requestId, false)}
               onInstall={() => setModal({ kind: "settings" })}
             />
           )}
-          {team && <OpenRequestNotes t={t as never} notes={requestNotes} />}
+          {team && <OpenRequestNotes t={t as never} notes={requestNotes} onDismiss={(id) => handleRequest(id, false)} />}
+          {team && catalog.live && (
+            <OpenRequestMessages
+              t={t as never}
+              error={openRequests.error}
+              actionError={openRequests.actionError}
+              notice={openRequests.view?.notice}
+              truncated={openRequests.view?.truncated}
+            />
+          )}
           <section className="stage" hidden={showUserChat && chatPaneState === "maximized"}>
             <div
               className="room"

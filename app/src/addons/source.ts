@@ -5,6 +5,7 @@
 
 import type { AddonPaneDecl, EngineState, InstalledAddon, NetworkScope, Permission, StagedInstall } from "./types";
 import { PERMISSIONS } from "./types";
+import type { OpenedRequest, OpenScanRaw } from "./openRequests";
 
 /** addon_list's rows (camelCase JSON). Rust never returns a path. */
 export type AddonInfoRaw = {
@@ -198,6 +199,20 @@ export function createLiveSource(invoke: Invoke) {
     },
     async revokeRoot(id: number): Promise<void> {
       await invoke("addon_revoke_root", { id });
+    },
+    /** The current team's open requests with Rust's verdict per line. A failure (e.g. state_unreadable) is the caller's to show. */
+    openRequests(team: string): Promise<Outcome<OpenScanRaw>> {
+      return attempt(async () => (await invoke("addon_open_requests", { team })) as OpenScanRaw);
+    },
+    /** The click on Open: Rust re-checks from the store and records it; the result goes to addPane as it is. */
+    openRequestOpen(team: string, requestId: string): Promise<Outcome<OpenedRequest>> {
+      return attempt(async () => (await invoke("addon_open_request_open", { spec: { team, requestId } })) as OpenedRequest);
+    },
+    openRequestDismiss(team: string, requestId: string): Promise<Outcome<null>> {
+      return attempt(async () => {
+        await invoke("addon_open_request_dismiss", { spec: { team, requestId } });
+        return null;
+      });
     },
   };
 }

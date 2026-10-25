@@ -24,6 +24,11 @@ const base: Props = {
 const render = (props: Partial<Props>) => renderToStaticMarkup(createElement(AddonsSettings, { ...base, ...props }));
 
 describe("AddonsSettings", () => {
+  it("has a button that copies the text for seats, with a hint", () => {
+    const html = render({});
+    expect(html).toContain("addons.openRequests.copy]");
+    expect(html).toContain("addons.openRequests.copyHint");
+  });
   it("shows built-ins, installed add-ons with Revoke, and a disabled Install for an empty input", () => {
     const html = render({});
     expect(html).toContain("File view");

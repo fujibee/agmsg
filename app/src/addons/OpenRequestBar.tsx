@@ -8,10 +8,12 @@ import type { Translate } from "./model";
 // without the click.
 
 function describe(t: Translate, item: BarItem): string {
-  const { path, url, base } = item.request.args;
-  const what = path ?? url ?? "";
-  const parts = [what, base ? t("addons.request.base", { base }) : ""].filter(Boolean).join(", ");
-  return t("addons.request.wants", { agent: item.from, pane: item.pane, args: parts });
+  return t("addons.request.wants", {
+    agent: item.from,
+    team: item.team,
+    target: `${item.addonId} ${item.pane}`,
+    args: item.path ? `: ${item.path}` : "",
+  });
 }
 
 function Row(props: {
@@ -27,7 +29,8 @@ function Row(props: {
     <div className={`addon-request addon-request-${item.status}`} role="status">
       <span className="addon-request-text">{describe(t, item)}</span>
       <span className="addon-request-time">{props.formatTime(item.at)}</span>
-      {item.status !== "open" && <span className="addon-request-why">{t(`addons.request.status.${item.status}`, { pane: item.pane })}</span>}
+      <span className="addon-request-unverified">{t("addons.request.unverified")}</span>
+      {item.status !== "open" && <span className="addon-request-why">{item.detail ?? t(`addons.request.status.${item.status}`, { pane: item.pane })}</span>}
       {item.status === "not_installed" && item.installTarget && (
         <button type="button" onClick={() => props.onInstall(item.installTarget!)}>
           {t("addons.request.install")}
@@ -64,22 +67,22 @@ export function OpenRequestBar(props: {
 }
 
 /**
- * Notes for control requests that get no bar: a malformed local request is
- * shown with the reason it was refused, and a request received from another
- * machine says it is not shown. Nothing here has an Open button; nothing fails
- * silently.
+ * Notes for lines that start like a request but cannot be read: each is shown
+ * with the reason it was refused and can be dismissed, so it does not stay
+ * forever. Nothing here has an Open button; nothing fails silently.
  */
-export function OpenRequestNotes(props: { t: Translate; notes: { rowId: string; note: RowNote }[] }) {
+export function OpenRequestNotes(props: { t: Translate; notes: { requestId: string; note: RowNote }[]; onDismiss: (requestId: string) => void }) {
   const { t, notes } = props;
   if (notes.length === 0) return null;
-  const lines = notes.map(({ rowId, note }) => (
-    <div key={rowId} className={`addon-request-note addon-request-note-${note.kind}`} role="status">
-      {note.kind === "other_machine"
-        ? t("addons.request.note.other_machine")
-        : t("addons.request.note.malformed", {
-            reason: t(`addons.request.reason.${note.reason}`),
-            detail: note.detail ? `: ${note.detail}` : "",
-          })}
+  const lines = notes.map(({ requestId, note }) => (
+    <div key={requestId} className="addon-request-note addon-request-note-malformed" role="status">
+      {t("addons.request.note.malformed", {
+        reason: t(`addons.request.reason.${note.reason}`),
+        detail: note.detail ? `: ${note.detail}` : "",
+      })}{" "}
+      <button type="button" onClick={() => props.onDismiss(requestId)}>
+        {t("addons.request.dismiss")}
+      </button>
     </div>
   ));
   if (notes.length === 1) return <div className="addon-request-notes">{lines}</div>;
@@ -88,5 +91,35 @@ export function OpenRequestNotes(props: { t: Translate; notes: { rowId: string; 
       <summary>{t("addons.request.notes", { count: notes.length })}</summary>
       {lines}
     </details>
+  );
+}
+
+/**
+ * What the real rows can say besides the bar: the read failed (no bar, no Open),
+ * the host explains why there is nothing to show, older requests were left out,
+ * or the last click was refused. Rust's own words are shown as they are.
+ */
+export function OpenRequestMessages(props: {
+  t: Translate;
+  error: string | null;
+  actionError: { code: string; message: string } | null;
+  notice?: string;
+  truncated?: boolean;
+}) {
+  const { t } = props;
+  const lines: string[] = [];
+  if (props.error) lines.push(t("addons.request.readFailed", { message: props.error }));
+  if (props.notice) lines.push(props.notice);
+  if (props.truncated) lines.push(t("addons.request.truncated"));
+  if (props.actionError) lines.push(t("addons.request.actionFailed", { message: props.actionError.message }));
+  if (lines.length === 0) return null;
+  return (
+    <div className="addon-request-notes">
+      {lines.map((l, i) => (
+        <div key={i} className="addon-request-note" role="status">
+          {l}
+        </div>
+      ))}
+    </div>
   );
 }

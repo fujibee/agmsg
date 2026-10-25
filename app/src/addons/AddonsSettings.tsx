@@ -1,3 +1,4 @@
+import { SEAT_INSTRUCTION } from "./openRequests";
 import { useState } from "react";
 import type { AddonsSnapshot, EngineState, InstallError, InstalledAddon } from "./types";
 import { declaredPermissions, addonNetwork, grantText, grantsOf, installErrorText, parseRepoInput, permissionRow, shortSha, type Translate } from "./model";
@@ -32,6 +33,30 @@ type Props = {
   /** Developer copies get Reload and Remove here. */
   onDevReload?: (addonId: string) => void;
 };
+
+/** Copies the short instruction a seat needs to ask the app to open a pane. */
+function CopyForSeats(props: { t: Props["t"] }) {
+  const { t } = props;
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  return (
+    <p className="addon-copy-seats">
+      <button
+        type="button"
+        onClick={() => {
+          navigator.clipboard.writeText(SEAT_INSTRUCTION).then(
+            () => setState("copied"),
+            () => setState("failed"),
+          );
+        }}
+      >
+        {t("addons.openRequests.copy")}
+      </button>{" "}
+      <span className="modal-note" role="status">
+        {state === "copied" ? t("addons.openRequests.copied") : state === "failed" ? t("addons.openRequests.copyFailed") : t("addons.openRequests.copyHint")}
+      </span>
+    </p>
+  );
+}
 
 export function AddonsSettings(props: Props) {
   const { t, snapshot, engine } = props;
@@ -115,6 +140,7 @@ export function AddonsSettings(props: Props) {
             <option value="off">{t("addons.openRequests.off")}</option>
           </select>
         </label>
+        <CopyForSeats t={t} />
       </section>
 
       {canInstall && (

@@ -2,7 +2,7 @@
 // design (§3.1 index/grants, §2 permissions). The wiring later swaps this
 // source for the Tauri commands; the screens read only AddonsSnapshot.
 
-import type { RequestContext, RequestRow } from "./requests";
+import type { RequestScan } from "./requests";
 import type { AddonsSnapshot, EngineState, GrantNeed, InstallError, StagedInstall } from "./types";
 
 export const mockSnapshot: AddonsSnapshot = {
@@ -134,29 +134,12 @@ export function mockStage(owner: string, repo: string): StagedInstall {
   };
 }
 
-/** The mocked app-side checks for the S10 bar; the app side replaces each. */
-export const mockRequestContext: RequestContext = {
-  team: "agmsg",
-  appUser: "me",
-  isLocalOrigin: () => true,
-  requesterMatches: () => true,
-  installedPane: (target) =>
-    target.kind === "browser"
-      ? null // the browser pane ships later
-      : target.kind !== "addon"
-        ? "builtin"
-        : mockSnapshot.addons.find((a) => a.id === `${target.owner}/${target.repo}`)?.panes.find((p) => p.name === target.pane) ?? null,
-  pathExists: (path) => !path.includes("missing"),
-  isExpired: () => false,
-  handled: new Set<string>(),
+/** The S10 bar in a plain browser (no Tauri): what the host would hand back for three request lines. */
+export const mockOpenView: RequestScan = {
+  items: [
+    { requestId: "1:0", from: "alice", team: "agmsg", at: "2026-10-22T08:40:00Z", addonId: "builtin:diffview", pane: "diffview", path: "/Users/me/proj/agmsg", status: "open" },
+    { requestId: "2:0", from: "alice", team: "agmsg", at: "2026-10-22T08:41:00Z", addonId: "someone/viewer", pane: "viewer", status: "not_installed", installTarget: "someone/viewer" },
+    { requestId: "3:0", from: "alice", team: "agmsg", at: "2026-10-22T08:42:00Z", addonId: "builtin:fileview", pane: "fileview", path: "/Users/me/missing", status: "not_found_here" },
+  ],
+  notes: new Map([["4:1", { kind: "malformed", reason: "bad_option", detail: "url=https://example.com" }]]),
 };
-
-const ctrl = (o: object) =>
-  `agmsg-ctrl v1 ctrl.app_open_pane\n${JSON.stringify({ requester: { member_id: "m-alice", token: "t" }, ...o })}`;
-const row = (id: string, body: string): RequestRow => ({ id, team: "agmsg", from: "alice", to: "me", body, created_at: "2026-10-22T08:40:00Z" });
-
-export const mockRequestRows: RequestRow[] = [
-  row("1", ctrl({ pane: "diffview", args: { path: "/Users/me/proj/agmsg", base: "main" }, request_id: "r1" })),
-  row("2", ctrl({ pane: "addon:someone/viewer/viewer", args: {}, request_id: "r2" })),
-  row("3", ctrl({ pane: "fileview", args: { path: "/Users/me/missing" }, request_id: "r3" })),
-];

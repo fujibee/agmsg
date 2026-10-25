@@ -1,3 +1,4 @@
+import { useOpenRequestsSetting } from "./openRequestsSetting";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
@@ -28,7 +29,7 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
   const [grants, setGrants] = useState<Grant[]>([]);
   const [grantsError, setGrantsError] = useState<string | null>(null);
   const grantsSeq = useRef(0);
-  const [openRequests, setOpenRequests] = useState<"show" | "off">("show");
+  const [openRequests, setOpenRequests] = useOpenRequestsSetting();
   // The fetch in flight: its progress and result count only while this is still its id.
   const currentOp = useRef<string | null>(null);
   const opSeq = useRef(0);
