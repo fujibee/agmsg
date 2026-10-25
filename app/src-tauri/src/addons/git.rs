@@ -615,23 +615,24 @@ impl Runner {
                 c.env(k, v);
             }
         }
-        c.env("HOME", &self.env.empty_dir)
-            .env("USERPROFILE", &self.env.empty_dir)
-            .env("XDG_CONFIG_HOME", &self.env.empty_dir)
+        c.env("HOME", super::fslink::plain(&self.env.empty_dir))
+            .env("USERPROFILE", super::fslink::plain(&self.env.empty_dir))
+            .env("XDG_CONFIG_HOME", super::fslink::plain(&self.env.empty_dir))
             .env("LC_ALL", "C")
             .env("LANG", "C")
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", &self.env.empty_config)
+            .env("GIT_CONFIG_GLOBAL", super::fslink::plain(&self.env.empty_config))
             .env("GIT_NO_REPLACE_OBJECTS", "1")
             .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("GIT_CEILING_DIRECTORIES", &self.ceiling)
+            .env("GIT_CEILING_DIRECTORIES", super::fslink::plain(&self.ceiling))
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_PROTOCOL_FROM_USER", "0")
             .env("GIT_TERMINAL_PROMPT", "0");
+        // git for Windows does not take the verbatim `\\?\` spelling that canonicalize returns
         c.arg("--git-dir")
-            .arg(&self.git_dir)
+            .arg(super::fslink::plain(&self.git_dir))
             .arg("--work-tree")
-            .arg(&self.work_tree);
+            .arg(super::fslink::plain(&self.work_tree));
         c.args([
             "--no-pager",
             "--no-optional-locks",
@@ -649,7 +650,7 @@ impl Runner {
             "log.showSignature=false",
         ]);
         c.arg("-c")
-            .arg(format!("core.hooksPath={}", self.env.empty_dir.display()));
+            .arg(format!("core.hooksPath={}", super::fslink::plain(&self.env.empty_dir).display()));
         c
     }
 
@@ -1776,9 +1777,11 @@ mod tests {
     }
 
     fn git_in(dir: &Path, args: &[&str]) -> String {
+        // paths in the arguments may be canonical (verbatim on Windows), which git does not take
+        let args: Vec<String> = args.iter().map(|a| crate::addons::fslink::plain(Path::new(a)).to_string_lossy().into_owned()).collect();
         // A cleared environment: another test sets GIT_* variables in this process.
         let out = Command::new("git")
-            .current_dir(dir)
+            .current_dir(crate::addons::fslink::plain(dir))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -1793,7 +1796,7 @@ mod tests {
                 "-c",
                 "commit.gpgsign=false",
             ])
-            .args(args)
+            .args(&args)
             .output()
             .unwrap();
         assert!(

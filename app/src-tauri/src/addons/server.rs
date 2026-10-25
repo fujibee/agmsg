@@ -29,6 +29,10 @@ const MAX_HEAD: usize = 16 * 1024;
 const MAX_FILE: u64 = 50 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// A blocked read or write wakes this often to look at the stop flag. Closing or
+/// shutting down a socket from another thread ends a blocked call on Unix but
+/// not on Windows, so the handler checks for itself.
+const IO_SLICE: Duration = Duration::from_millis(100);
 
 pub enum Payload {
     /// A directory on disk (an installed add-on or a developer copy).
@@ -327,9 +331,9 @@ fn collect_html_hashes(dir: &Path, out: &mut Vec<String>) {
 // --- one connection --------------------------------------------------------
 
 fn handle(ctx: &Ctx, mut stream: TcpStream) {
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let head = match read_head(&mut stream) {
+    let _ = stream.set_read_timeout(Some(IO_SLICE));
+    let _ = stream.set_write_timeout(Some(IO_SLICE));
+    let head = match read_head(ctx, &mut stream) {
         Ok(h) => h,
         Err(status) => {
             if !ctx.stopped.load(Ordering::SeqCst) {
@@ -355,14 +359,27 @@ fn handle(ctx: &Ctx, mut stream: TcpStream) {
     let _ = stream.shutdown(Shutdown::Both);
 }
 
-fn read_head(stream: &mut TcpStream) -> Result<String, u16> {
+fn is_slice_timeout(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+}
+
+fn read_head(ctx: &Ctx, stream: &mut TcpStream) -> Result<String, u16> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 2048];
+    let deadline = std::time::Instant::now() + IO_TIMEOUT;
     loop {
         match stream.read(&mut tmp) {
             Ok(0) => return Err(400),
             Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err(408),
+            Err(e) if is_slice_timeout(&e) => {
+                if ctx.stopped.load(Ordering::SeqCst) {
+                    return Err(400);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(408);
+                }
+                continue;
+            }
             Err(_) => return Err(400),
         }
         if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -666,7 +683,30 @@ fn render(ctx: &Ctx, r: &Reply, head_only: bool) -> Vec<u8> {
 }
 
 fn write_reply(ctx: &Ctx, stream: &mut TcpStream, r: &Reply, head_only: bool) -> std::io::Result<()> {
-    stream.write_all(&render(ctx, r, head_only))
+    let bytes = render(ctx, r, head_only);
+    let mut sent = 0;
+    let mut deadline = std::time::Instant::now() + IO_TIMEOUT;
+    while sent < bytes.len() {
+        if ctx.stopped.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "stopped"));
+        }
+        let end = (sent + 64 * 1024).min(bytes.len());
+        match stream.write(&bytes[sent..end]) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => {
+                sent += n;
+                deadline = std::time::Instant::now() + IO_TIMEOUT;
+            }
+            Err(e) if is_slice_timeout(&e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(e);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

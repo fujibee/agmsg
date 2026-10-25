@@ -23,6 +23,23 @@ pub fn link_count(path: &Path) -> io::Result<u64> {
     Ok(u64::from(info.nNumberOfLinks))
 }
 
+/// The plain spelling of a canonical Windows path for tools that do not take the
+/// verbatim form: `\\?\C:\x` becomes `C:\x` and `\\?\UNC\h\s` becomes `\\h\s`. Any
+/// other path is returned as it is.
+pub fn plain(path: &Path) -> std::path::PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        let b = rest.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return std::path::PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// True when the file has more than one name, or when that cannot be told.
 pub fn has_other_names(path: &Path) -> bool {
     link_count(path).map_or(true, |n| n > 1)
@@ -75,6 +92,16 @@ mod tests {
         assert_eq!(link_count(&a).unwrap(), 2);
         assert!(has_other_names(&a));
         assert!(has_other_names(&b));
+    }
+
+    #[test]
+    fn the_verbatim_prefix_is_dropped_only_where_it_is_plain() {
+        let p = |s: &str| plain(Path::new(s)).to_string_lossy().into_owned();
+        assert_eq!(p(r"\\?\C:\Users\x\repo"), r"C:\Users\x\repo");
+        assert_eq!(p(r"\\?\UNC\host\share\repo"), r"\\host\share\repo");
+        assert_eq!(p(r"\\?\Volume{1234}\repo"), r"\\?\Volume{1234}\repo");
+        assert_eq!(p("/home/x/repo"), "/home/x/repo");
+        assert_eq!(p(r"C:\Users"), r"C:\Users");
     }
 
     #[test]
