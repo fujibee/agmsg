@@ -120,13 +120,11 @@ function printHelp() {
     '  agmsg install [options]   install or update agmsg (runs the canonical setup.sh)',
     '  agmsg daemon <command>    manage the agmsgd beta daemon (start|stop|status|enable|disable)',
     '  agmsg plugin <command>    manage plugin drivers (list|install|update|remove|trust|untrust)',
-    '  agmsg addon init <name>   scaffold an app add-on in this directory',
-    '  agmsg addon check         check this directory the way the app checks an install',
     '  agmsg --version           show this package and the installed runtime version',
     '  agmsg help                show this message',
     '',
-    'Every command other than install and addon is run by the agmsg install on',
-    'this machine (AGMSG_CMD=<name> picks an install made with `--cmd <name>`).',
+    'Every command other than install is run by the agmsg install on this',
+    'machine (AGMSG_CMD=<name> picks an install made with `--cmd <name>`).',
     '',
     'After install, restart your agent (Claude Code / Codex / Gemini CLI /',
     'Copilot CLI / Antigravity / OpenCode) and run the agmsg skill command',
@@ -247,10 +245,6 @@ function main() {
   } else if (args.length === 0 || args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
     printHelp();
     process.exit(args.length === 0 ? 2 : 0);
-  } else if (args[0] === 'addon') {
-    // Authoring tools for app add-ons; they only touch the current directory
-    // and need no install.
-    process.exit(require('./addon.js').main(args.slice(1), process.cwd()));
   } else if (args[0] === '--version' || args[0] === '-v') {
     process.stdout.write('agmsg ' + readVersion() + ' (npm entry)\n');
     const found = resolveRuntime(process.env);
