@@ -493,6 +493,26 @@ EOF
   [ "$(sqlite3 "$db" "SELECT codex_path FROM meta;")" = "/already/recorded/codex" ]
 }
 
+@test "daemon.sh _resolve_codex: on Windows the codex.exe beside an extensionless shim is recorded" {
+  local fake="$TEST_SKILL_DIR/npm-codex" fns="$SCRIPTS/daemon-fns.sh"
+  mkdir -p "$fake"
+  awk '/^case "\$\{1:-\}" in/ {exit} {print}' "$DAEMON" > "$fns"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake/codex"
+  printf 'MZ fixture native binary\n' > "$fake/codex.exe"
+  chmod +x "$fake/codex" "$fake/codex.exe"
+  run bash -c 'set -u; source "$1"; _os() { echo windows; }; AGMSG_REAL_CODEX="$2/codex" _resolve_codex' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(cd "$fake" && pwd -P)/codex.exe" ]
+  rm "$fake/codex.exe"
+  run bash -c 'set -u; source "$1"; _os() { echo windows; }; AGMSG_REAL_CODEX="$2/codex" _resolve_codex' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(cd "$fake" && pwd -P)/codex" ]
+  printf 'MZ fixture native binary\n' > "$fake/codex.exe"
+  chmod +x "$fake/codex.exe"
+  run bash -c 'set -u; source "$1"; _os() { echo linux; }; AGMSG_REAL_CODEX="$2/codex" _resolve_codex' _ "$fns" "$fake"
+  [ "$output" = "$(cd "$fake" && pwd -P)/codex" ]
+}
+
 @test "daemon.sh start --only-if-op-gen: a stop or disable after that op_gen is not undone" {
   _seed_install_db
   _write_completion_record
