@@ -49,7 +49,11 @@ fn guard_frame<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, frame: &IC
             let (h, a, r) = (host.clone(), app.clone(), rule.clone());
             let handler = FrameNavigationStartingEventHandler::create(Box::new(move |_frame, args| {
                 // cancel by default; allow only after the rule says so
-                let Some(args) = args else { return Ok(()) };
+                let Some(args) = args else {
+                    // nothing to cancel with: the guard cannot do its job, so add-ons go off
+                    step(&a, &h, "reading a frame navigation", Err(windows::core::Error::from(windows::Win32::Foundation::E_POINTER)));
+                    return Ok(());
+                };
                 let mut raw = PWSTR::null();
                 let uri = unsafe { args.Uri(&mut raw) }.map(|_| take_pwstr(raw)).map_err(|e| e.to_string());
                 let allow = frame_navigation_allowed(&r, &h.nav, uri, &h.guard);
