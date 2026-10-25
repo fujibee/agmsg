@@ -55,8 +55,80 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
                 false
             });
     }
-    b.build()?;
+    let _w = b.build()?;
+    #[cfg(windows)]
+    if spike && std::env::var("M1_FRAME_GUARD").ok().as_deref() == Some("1") {
+        frame_guard::install(&_w);
+    }
     Ok(())
+}
+
+/// Windows only: cancel a pane frame's navigation unless it stays inside the origin of the live pane.
+#[cfg(windows)]
+mod frame_guard {
+    use super::{live, log};
+    use std::sync::{Arc, Mutex};
+    use tauri::Url;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Frame, ICoreWebView2Frame2, ICoreWebView2_4};
+    use webview2_com::{take_pwstr, FrameCreatedEventHandler, FrameNavigationStartingEventHandler};
+    use windows::core::{Interface, PWSTR};
+
+    fn origin(u: &Url) -> Option<(String, String, Option<u16>)> {
+        Some((u.scheme().to_string(), u.host_str()?.to_ascii_lowercase(), u.port()))
+    }
+
+    fn guard(frame: &ICoreWebView2Frame) {
+        let own: Arc<Mutex<Option<(String, String, Option<u16>)>>> = Arc::new(Mutex::new(None));
+        let Ok(f2) = frame.cast::<ICoreWebView2Frame2>() else {
+            log("FRAMEGUARD frame has no NavigationStarting");
+            return;
+        };
+        let h = FrameNavigationStartingEventHandler::create(Box::new(move |_f, args| {
+            let Some(args) = args else { return Ok(()) };
+            let mut raw = PWSTR::null();
+            unsafe { args.Uri(&mut raw)? };
+            let uri = take_pwstr(raw);
+            let mut allow = false;
+            if let Ok(url) = Url::parse(&uri) {
+                let pane = live().lock().unwrap().as_ref().map(|(p, t)| url.as_str().starts_with(&format!("http://127.0.0.1:{p}/{t}/"))).unwrap_or(false);
+                let o = origin(&url);
+                let mut g = own.lock().unwrap();
+                allow = match (g.as_ref(), pane) {
+                    (None, true) => { *g = o; true }
+                    (Some(prev), _) => Some(prev) == o.as_ref() && pane,
+                    _ => false,
+                };
+            }
+            log(&format!("FRAMENAV {uri} -> {}", if allow { "allow" } else { "CANCEL" }));
+            if !allow {
+                unsafe { args.SetCancel(true)? };
+            }
+            Ok(())
+        }));
+        let mut t = 0i64;
+        let _ = unsafe { f2.add_NavigationStarting(&h, &mut t) };
+    }
+
+    pub fn install(w: &tauri::WebviewWindow) {
+        let r = w.with_webview(|wv| unsafe {
+            let Ok(core) = wv.controller().CoreWebView2() else { return log("FRAMEGUARD no core") };
+            let Ok(c4) = core.cast::<ICoreWebView2_4>() else { return log("FRAMEGUARD no FrameCreated") };
+            let h = FrameCreatedEventHandler::create(Box::new(|_c, args| {
+                if let Some(f) = args.and_then(|a| a.Frame().ok()) {
+                    guard(&f);
+                }
+                Ok(())
+            }));
+            let mut t = 0i64;
+            match c4.add_FrameCreated(&h, &mut t) {
+                Ok(()) => log("FRAMEGUARD installed"),
+                Err(e) => log(&format!("FRAMEGUARD failed {e}")),
+            }
+        });
+        if let Err(e) = r {
+            log(&format!("FRAMEGUARD with_webview failed {e}"));
+        }
+    }
 }
 
 pub fn log(line: &str) {
