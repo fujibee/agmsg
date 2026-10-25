@@ -67,4 +67,4 @@ objc2 = "0.6"
 # Frame navigation guard for WebView2 (nav_win.rs); same versions tauri/wry resolve to.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
-windows = "0.61"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

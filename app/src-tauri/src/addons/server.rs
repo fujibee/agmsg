@@ -535,12 +535,8 @@ fn read_payload_file(ctx: &Ctx, rel: &str) -> Result<Vec<u8>, u16> {
             if !meta.is_file() {
                 return Err(404);
             }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if meta.nlink() > 1 {
-                    return Err(404);
-                }
+            if super::fslink::has_other_names(&cur) {
+                return Err(404);
             }
             if meta.len() > MAX_FILE {
                 return Err(413);
@@ -587,12 +583,8 @@ fn read_exact_file(root: &Path, rel: &str, size: u64) -> Option<Vec<u8>> {
     if !meta.is_file() || meta.len() != size || size > MAX_FILE {
         return None;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if meta.nlink() > 1 {
-            return None;
-        }
+    if super::fslink::has_other_names(&cur) {
+        return None;
     }
     let real = std::fs::canonicalize(&cur).ok()?;
     if !real.starts_with(root) {
@@ -809,6 +801,73 @@ mod tests {
             assert_eq!(st, 404, "{path}");
             assert!(!String::from_utf8_lossy(&body).contains("OUTSIDE-SECRET"));
         }
+    }
+
+    #[cfg(windows)]
+    fn assert_not_served(srv: &PaneServer, paths: &[&str]) {
+        let t = srv.token().to_string();
+        for path in paths {
+            let (st, _, body) = get(srv, &format!("/{t}/{path}"));
+            assert!(st == 404 || st == 503, "{path} -> {st}");
+            assert!(!String::from_utf8_lossy(&body).contains("OUTSIDE-SECRET"), "{path} leaked");
+        }
+    }
+
+    /// Symbolic links need a privilege (or developer mode) on Windows; CI runs as an administrator.
+    #[cfg(windows)]
+    #[test]
+    fn windows_links_are_not_served() {
+        let (r, p) = fixture("wlinks");
+        std::os::windows::fs::symlink_file(r.join("outside.txt"), p.join("link")).expect("create a file symlink (needs administrator or developer mode)");
+        std::os::windows::fs::symlink_dir(&r, p.join("dirlink")).expect("create a directory symlink");
+        super::super::fslink::win_test::junction(&p.join("junc"), &r);
+        fs::hard_link(r.join("outside.txt"), p.join("hard.txt")).unwrap();
+        let srv = start(&p);
+        assert_not_served(&srv, &["link", "dirlink/outside.txt", "junc/outside.txt", "hard.txt"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pinned_file_swapped_for_a_hard_link_turns_the_pane_off() {
+        let (r, p) = fixture("wpin-hard");
+        let (srv, hits) = pinned_server(&p);
+        fs::remove_file(p.join("app.js")).unwrap();
+        fs::hard_link(r.join("outside.txt"), p.join("app.js")).unwrap();
+        let (st, _, body) = get(&srv, &format!("/{}/app.js", srv.token()));
+        assert_eq!(st, 503);
+        assert!(!String::from_utf8_lossy(&body).contains("OUTSIDE-SECRET"));
+        wait_for(&hits, 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// The same bytes under a different name must not pass for the verified file.
+    #[test]
+    fn a_pinned_file_is_matched_by_its_exact_name() {
+        let (_r, p) = fixture("pin-case");
+        let (srv, _h) = pinned_server(&p);
+        let t = srv.token().to_string();
+        assert_eq!(get(&srv, &format!("/{t}/app.js")).0, 200);
+        for other in ["APP.JS", "App.js", "INDEX.HTML"] {
+            assert_eq!(get(&srv, &format!("/{t}/{other}")).0, 404, "{other}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pinned_file_is_not_served_by_its_short_name() {
+        let (_r, p) = fixture("pin-short");
+        fs::write(p.join("longfilename.js"), "var l=1;").unwrap();
+        let m = digest::manifest(&p).unwrap();
+        let srv = PaneServer::start(PaneSpec { payload: Payload::Dir(p.clone()), entry: "index.html".into(), network: Network::None, expected_digest: None, pinned: Some(m.files), on_tamper: None }).unwrap();
+        let t = srv.token().to_string();
+        assert_eq!(get(&srv, &format!("/{t}/longfilename.js")).0, 200);
+        let Some(short) = super::super::fslink::win_test::short_path(&p.join("longfilename.js")) else {
+            eprintln!("8.3 names are off on this volume; nothing to check");
+            return;
+        };
+        let name = short.file_name().unwrap().to_string_lossy().into_owned();
+        assert_ne!(name.to_lowercase(), "longfilename.js");
+        assert_eq!(get(&srv, &format!("/{t}/{name}")).0, 404, "{name}");
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub mod digest;
 pub mod e2e;
 pub mod engine;
 pub mod feed;
+pub mod fslink;
 pub mod gate;
 pub mod git;
 pub mod host;

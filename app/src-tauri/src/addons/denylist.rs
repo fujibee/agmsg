@@ -1009,4 +1009,41 @@ mod tests {
         assert!(m.contains(".env") && m.contains("network") && !m.contains("keys, credentials"), "{m}");
         assert!(refusal_message(Path::new("/p/.ssh/id")).contains("protected locations"));
     }
+
+    #[test]
+    fn windows_matching_ignores_case() {
+        let h = home();
+        let d = list(&h, Os::Windows);
+        for p in [".ssh", ".SSH", ".Ssh/id_rsa", ".AWS"] {
+            assert!(!d.check_grant_root(&h.home.join(p)).is_ok(), "{p}");
+            assert!(d.is_denied(&h.home.join(p)), "{p}");
+        }
+    }
+
+    /// A protected folder reached through its other spellings on a real Windows volume.
+    #[cfg(windows)]
+    #[test]
+    fn windows_aliases_of_a_protected_folder_are_denied() {
+        let h = home();
+        fs::create_dir_all(h.home.join(".ssh")).unwrap();
+        fs::write(h.home.join(".ssh").join("id_ed25519"), "k").unwrap();
+        let d = list(&h, Os::Windows);
+        // another case
+        let upper = PathBuf::from(h.home.join(".SSH").to_string_lossy().to_uppercase());
+        assert!(!d.check_grant_root(&upper).is_ok(), "{upper:?}");
+        // the 8.3 alias of the folder and of the file inside it
+        match super::super::fslink::win_test::short_path(&h.home.join(".ssh").join("id_ed25519")) {
+            Some(short) => {
+                assert!(d.is_denied(&short), "{short:?}");
+                assert!(!d.check_grant_root(&short).is_ok(), "{short:?}");
+            }
+            None => eprintln!("8.3 names are off on this volume; nothing to check"),
+        }
+        // a junction from a granted folder into the protected one
+        let proj = h.home.join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        super::super::fslink::win_test::junction(&proj.join("junc"), &h.home.join(".ssh"));
+        assert!(d.is_denied(&proj.join("junc")));
+        assert!(d.is_denied(&proj.join("junc").join("id_ed25519")));
+    }
 }

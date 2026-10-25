@@ -57,7 +57,7 @@ pub fn check_tree(root: &Path, files: &[String], limits: Limits) -> TreeReport {
             errors.push(format!("Refused: the repository contains a symbolic link at {rel}. Add-ons may contain only plain files."));
         } else if !md.is_file() {
             errors.push(format!("Refused: {rel} is not a plain file."));
-        } else if has_hard_links(&md) {
+        } else if super::super::fslink::has_other_names(&abs) {
             errors.push(format!("Refused: the repository contains a hard link at {rel}. Add-ons may contain only plain files."));
         }
         for part in rel.split('/') {
@@ -89,16 +89,60 @@ pub fn check_tree(root: &Path, files: &[String], limits: Limits) -> TreeReport {
     TreeReport { errors, total, count: files.len(), largest }
 }
 
-#[cfg(unix)]
-fn has_hard_links(md: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    md.nlink() > 1
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[cfg(windows)]
-fn has_hard_links(_md: &fs::Metadata) -> bool {
-    // std exposes the link count only on nightly, so a developer folder is not
-    // checked for hard links on Windows yet (the archive path refuses them
-    // outright). Add-ons stay off on Windows until this is closed.
-    false
+    fn check(root: &Path) -> Vec<String> {
+        let files = list_files(root);
+        check_tree(root, &files, Limits::default()).errors
+    }
+
+    fn folder() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let outside = d.path().join("outside.txt");
+        fs::write(&outside, "x").unwrap();
+        let root = d.path().join("addon");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("index.html"), "<p>x</p>").unwrap();
+        (d, root, outside)
+    }
+
+    #[test]
+    fn a_plain_folder_passes() {
+        let (_d, root, _o) = folder();
+        assert_eq!(check(&root), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_hard_link_is_refused() {
+        let (_d, root, outside) = folder();
+        fs::hard_link(&outside, root.join("hard.txt")).unwrap();
+        let errors = check(&root);
+        assert!(errors.iter().any(|e| e.contains("hard link at hard.txt")), "{errors:?}");
+    }
+
+    #[test]
+    fn the_original_of_a_hard_link_made_inside_the_folder_is_refused_too() {
+        let (_d, root, _o) = folder();
+        fs::hard_link(root.join("index.html"), root.join("copy.html")).unwrap();
+        let errors = check(&root);
+        assert!(errors.iter().any(|e| e.contains("hard link at index.html")), "{errors:?}");
+        assert!(errors.iter().any(|e| e.contains("hard link at copy.html")), "{errors:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_symlinks_and_junctions_are_refused() {
+        let (d, root, outside) = folder();
+        let dir = d.path().join("elsewhere");
+        fs::create_dir_all(&dir).unwrap();
+        std::os::windows::fs::symlink_file(&outside, root.join("flink")).expect("create a file symlink (needs administrator or developer mode)");
+        std::os::windows::fs::symlink_dir(&dir, root.join("dlink")).expect("create a directory symlink");
+        super::super::super::fslink::win_test::junction(&root.join("junc"), &dir);
+        let errors = check(&root);
+        for name in ["flink", "dlink", "junc"] {
+            assert!(errors.iter().any(|e| e.contains(&format!("symbolic link at {name}"))), "{name}: {errors:?}");
+        }
+    }
 }
