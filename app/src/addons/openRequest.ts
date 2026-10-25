@@ -22,7 +22,7 @@ export type OpenRequest = {
   pane: string;
   target: PaneTarget;
   args: Partial<Record<ArgKey, string>>;
-  requester: { memberId: string; token: string };
+  requester: { memberId: string; /** Optional in the interim form: seats without a claim token send none. */ token?: string };
   requestId: string;
 };
 
@@ -36,7 +36,8 @@ export type RefusalReason =
   | "unknown_arg_key"
   | "bad_arg_value"
   | "bad_requester"
-  | "bad_request_id";
+  | "bad_request_id"
+  | "request_id_reused"; // reported by the host when a later message reuses an id with different content
 
 export type ParseResult =
   | { kind: "none" } // an ordinary message
@@ -84,13 +85,13 @@ export function parseOpenRequest(body: string): ParseResult {
   }
 
   const r = json.requester;
-  if (!isObject(r) || !isNonEmptyString(r.member_id) || !isNonEmptyString(r.token)) {
+  if (!isObject(r) || !isNonEmptyString(r.member_id) || (r.token !== undefined && !isNonEmptyString(r.token))) {
     return { kind: "refused", reason: "bad_requester" };
   }
   if (!isNonEmptyString(json.request_id)) return { kind: "refused", reason: "bad_request_id" };
 
   return {
     kind: "request",
-    request: { pane: json.pane, target, args, requester: { memberId: r.member_id, token: r.token }, requestId: json.request_id },
+    request: { pane: json.pane, target, args, requester: { memberId: r.member_id, token: r.token as string | undefined }, requestId: json.request_id },
   };
 }

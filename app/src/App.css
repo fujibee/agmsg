@@ -1618,7 +1618,8 @@ body.resizing-row {
 .addon-fetch { font-size: 12px; margin-top: 6px; }
 .addon-request-bar { padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--panel); font-size: 12px; }
 .addon-request { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.addon-request-time, .addon-request-why { color: var(--muted); }
+.addon-request-time, .addon-request-why, .addon-request-unverified { color: var(--muted); }
+.addon-request-unverified { font-style: italic; }
 .addon-request button { background: var(--panel-2); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
 .addon-request button:disabled { opacity: 0.4; cursor: default; }
 .addon-frame { width: 100%; height: 100%; border: 0; background: #fff; }

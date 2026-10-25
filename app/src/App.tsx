@@ -17,7 +17,8 @@ import {
 import { TerminalPane } from "./TerminalPane";
 import { AddonPaneHost } from "./addons/AddonPaneHost";
 import type { AddonPaneRef } from "./addons/types";
-import { OpenRequestBar, OpenRequestNotes } from "./addons/OpenRequestBar";
+import { OpenRequestBar, OpenRequestMessages, OpenRequestNotes } from "./addons/OpenRequestBar";
+import { useCtrlRequests } from "./addons/useCtrlRequests";
 import { scanRequests, type BarItem } from "./addons/requests";
 import { useAddonCatalog } from "./addons/catalog";
 import { mockRequestContext, mockRequestRows, mockSnapshot } from "./addons/mock";
@@ -1477,16 +1478,31 @@ export default function App() {
 
   const catalog = useAddonCatalog();
   const addonEngine = catalog.engine;
-  // S10: open requests from seats. Nothing opens without the click. Still on
-  // mock rows: in the app there are none until the rows come from the message
-  // store and Rust says which are local.
+  // S10: open requests from seats. Nothing opens without the click, and the
+  // click grants nothing: the pane that opens asks for its own permissions.
+  // In the app the rows and verdicts come from Rust; in a plain browser the
+  // mock rows stand in.
   const [handledRequests, setHandledRequests] = useState<ReadonlySet<string>>(new Set());
+  const ctrlRequests = useCtrlRequests({
+    enabled: addonEngine.ok,
+    team,
+    onOpened: (o, item) =>
+      openAddonPane({
+        addonId: o.addonId,
+        paneName: o.pane,
+        title: catalog.addons.find((a) => a.id === o.addonId)?.panes.find((p) => p.name === o.pane)?.title ?? o.pane,
+        askedBy: o.from || item.from,
+        openArgs: o.openArgs,
+      }),
+  });
   const requestScan = useMemo(
     () =>
-      !catalog.live && mockSnapshot.openRequests === "show"
-        ? scanRequests(mockRequestRows, { ...mockRequestContext, team, handled: handledRequests })
-        : { items: [], notes: new Map() },
-    [team, handledRequests, catalog.live],
+      catalog.live
+        ? ctrlRequests.view ?? { items: [], notes: new Map() }
+        : mockSnapshot.openRequests === "show"
+          ? scanRequests(mockRequestRows, { ...mockRequestContext, team, handled: handledRequests })
+          : { items: [], notes: new Map() },
+    [team, handledRequests, catalog.live, ctrlRequests.view],
   );
   const requestItems = requestScan.items;
   const requestNotes = useMemo(
@@ -1494,6 +1510,10 @@ export default function App() {
     [requestScan],
   );
   const handleRequest = useCallback((item: BarItem, opened: boolean) => {
+    if (catalog.live) {
+      ctrlRequests.act(item, opened);
+      return;
+    }
     setHandledRequests((prev) => new Set(prev).add(item.requestId));
     if (!opened) return;
     const k = item.request.target;
@@ -1505,7 +1525,7 @@ export default function App() {
       askedBy: item.from,
       openArgs: item.request.args,
     });
-  }, [openAddonPane]);
+  }, [openAddonPane, catalog.live, ctrlRequests.act]);
 
   // A tab's "Open shell" context-menu item — splits a shell pane in beside
   // whatever's already in that tab, the same way a sidebar click splits an
@@ -2675,6 +2695,15 @@ export default function App() {
             />
           )}
           {team && <OpenRequestNotes t={t as never} notes={requestNotes} />}
+          {team && catalog.live && (
+            <OpenRequestMessages
+              t={t as never}
+              error={ctrlRequests.error}
+              actionError={ctrlRequests.actionError}
+              notice={ctrlRequests.view?.notice}
+              truncated={ctrlRequests.view?.truncated}
+            />
+          )}
           <section className="stage" hidden={showUserChat && chatPaneState === "maximized"}>
             <div
               className="room"

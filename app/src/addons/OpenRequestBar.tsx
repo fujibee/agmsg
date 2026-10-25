@@ -27,7 +27,8 @@ function Row(props: {
     <div className={`addon-request addon-request-${item.status}`} role="status">
       <span className="addon-request-text">{describe(t, item)}</span>
       <span className="addon-request-time">{props.formatTime(item.at)}</span>
-      {item.status !== "open" && <span className="addon-request-why">{t(`addons.request.status.${item.status}`, { pane: item.pane })}</span>}
+      <span className="addon-request-unverified">{t("addons.request.unverified")}</span>
+      {item.status !== "open" && <span className="addon-request-why">{item.detail ?? t(`addons.request.status.${item.status}`, { pane: item.pane })}</span>}
       {item.status === "not_installed" && item.installTarget && (
         <button type="button" onClick={() => props.onInstall(item.installTarget!)}>
           {t("addons.request.install")}
@@ -76,10 +77,12 @@ export function OpenRequestNotes(props: { t: Translate; notes: { rowId: string; 
     <div key={rowId} className={`addon-request-note addon-request-note-${note.kind}`} role="status">
       {note.kind === "other_machine"
         ? t("addons.request.note.other_machine")
-        : t("addons.request.note.malformed", {
-            reason: t(`addons.request.reason.${note.reason}`),
-            detail: note.detail ? `: ${note.detail}` : "",
-          })}
+        : note.kind === "unproven"
+          ? t("addons.request.note.unproven")
+          : t("addons.request.note.malformed", {
+              reason: t(`addons.request.reason.${note.reason}`),
+              detail: note.detail ? `: ${note.detail}` : "",
+            })}
     </div>
   ));
   if (notes.length === 1) return <div className="addon-request-notes">{lines}</div>;
@@ -88,5 +91,41 @@ export function OpenRequestNotes(props: { t: Translate; notes: { rowId: string; 
       <summary>{t("addons.request.notes", { count: notes.length })}</summary>
       {lines}
     </details>
+  );
+}
+
+/**
+ * What the real rows can say besides the bar: the read failed (no bar, no Open),
+ * the host explains why there is nothing to show, older requests were left out,
+ * or the last click was refused. Rust's own words are shown as they are.
+ */
+export function OpenRequestMessages(props: {
+  t: Translate;
+  error: string | null;
+  actionError: { code: string; message: string } | null;
+  notice?: string;
+  truncated?: boolean;
+}) {
+  const { t } = props;
+  const lines: string[] = [];
+  if (props.error) lines.push(t("addons.request.readFailed", { message: props.error }));
+  if (props.notice) lines.push(props.notice);
+  if (props.truncated) lines.push(t("addons.request.truncated"));
+  if (props.actionError) {
+    lines.push(
+      props.actionError.code === "team_changed"
+        ? t("addons.request.teamChanged")
+        : t("addons.request.actionFailed", { message: props.actionError.message }),
+    );
+  }
+  if (lines.length === 0) return null;
+  return (
+    <div className="addon-request-notes">
+      {lines.map((l, i) => (
+        <div key={i} className="addon-request-note" role="status">
+          {l}
+        </div>
+      ))}
+    </div>
   );
 }

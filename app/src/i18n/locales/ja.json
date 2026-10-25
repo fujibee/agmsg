@@ -415,11 +415,14 @@
         "not_found_here": "ここには見つかりません。",
         "expired": "期限切れです。",
         "args_not_allowed": "このペインには不正な形式です。",
-        "bad_requester": "送信者と依頼者が一致しません。"
+        "bad_requester": "送信者と依頼者が一致しません。",
+        "unavailable": "{{pane}} は今は開けません。",
+        "denied_path": "その場所は保護されています。"
       },
       "note": {
         "other_machine": "他のマシンからの control request は表示されません。",
-        "malformed": "不正な open request です({{reason}}{{detail}})。"
+        "malformed": "不正な open request です({{reason}}{{detail}})。",
+        "unproven": "このコンピューターで送られたと確かめられない要求は表示しません。"
       },
       "notes": "{{count}} 件のメモ ▾",
       "reason": {
@@ -432,8 +435,14 @@
         "unknown_arg_key": "不明な引数",
         "bad_arg_value": "引数の値がテキストではありません",
         "bad_requester": "依頼者がないか形が正しくありません",
-        "bad_request_id": "リクエスト ID がありません"
-      }
+        "bad_request_id": "リクエスト ID がありません",
+        "request_id_reused": "同じ request id が別の内容で再利用されました"
+      },
+      "unverified": "送り主は未検証",
+      "readFailed": "オープン要求を読めませんでした: {{message}}",
+      "actionFailed": "要求を処理できませんでした: {{message}}",
+      "truncated": "古い要求は表示していません。",
+      "teamChanged": "ペインを開く前にチームが切り替わりました。要求は「開いた」として記録されています。"
     },
     "menu": {
       "fileViewEntry": "ファイルビュー…",

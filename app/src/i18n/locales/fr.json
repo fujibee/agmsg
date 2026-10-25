@@ -415,11 +415,14 @@
         "not_found_here": "Not found here.",
         "expired": "Expired.",
         "args_not_allowed": "Malformed for this pane.",
-        "bad_requester": "The sender does not match the requester."
+        "bad_requester": "The sender does not match the requester.",
+        "unavailable": "{{pane}} cannot be opened right now.",
+        "denied_path": "That location is protected."
       },
       "note": {
         "other_machine": "Control requests from other machines are not shown.",
-        "malformed": "Malformed open request ({{reason}}{{detail}})."
+        "malformed": "Malformed open request ({{reason}}{{detail}}).",
+        "unproven": "A request that cannot be shown to have been sent on this computer is not shown."
       },
       "notes": "{{count}} notes ▾",
       "reason": {
@@ -432,8 +435,14 @@
         "unknown_arg_key": "unknown argument",
         "bad_arg_value": "an argument value is not text",
         "bad_requester": "the requester is missing or malformed",
-        "bad_request_id": "the request id is missing"
-      }
+        "bad_request_id": "the request id is missing",
+        "request_id_reused": "the request id was already used by a different request"
+      },
+      "unverified": "sender not verified",
+      "readFailed": "Open requests could not be read: {{message}}",
+      "actionFailed": "The request could not be handled: {{message}}",
+      "truncated": "Older requests are not shown.",
+      "teamChanged": "The team changed before the pane could open. The request was marked as opened."
     },
     "menu": {
       "fileViewEntry": "File view…",

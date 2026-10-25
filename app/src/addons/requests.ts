@@ -33,6 +33,8 @@ export type BarStatus =
   | "not_found_here" // Open disabled
   | "expired" // no Open
   | "args_not_allowed" // malformed for this pane, no Open
+  | "unavailable" // installed but cannot be opened now (off, files changed), no Open
+  | "denied_path" // the path is a protected location, no Open
   | "bad_requester"; // the requester did not match the sender, no Open
 
 export type BarItem = {
@@ -42,13 +44,16 @@ export type BarItem = {
   pane: string;
   request: OpenRequest;
   status: BarStatus;
+  /** The host's own words for why Open is off, when it gave any. */
+  detail?: string;
   /** For not_installed: the add-on to offer to install. */
   installTarget?: string;
 };
 
 export type RowNote =
   | { kind: "malformed"; reason: RefusalReason; detail?: string }
-  | { kind: "other_machine" };
+  | { kind: "other_machine" }
+  | { kind: "unproven" };
 
 export type RequestScan = { items: BarItem[]; notes: Map<string, RowNote> };
 

@@ -5,6 +5,7 @@
 
 import type { AddonPaneDecl, EngineState, InstalledAddon, NetworkScope, Permission, StagedInstall } from "./types";
 import { PERMISSIONS } from "./types";
+import type { CtrlOpened, CtrlScanRaw } from "./ctrl";
 
 /** addon_list's rows (camelCase JSON). Rust never returns a path. */
 export type AddonInfoRaw = {
@@ -198,6 +199,20 @@ export function createLiveSource(invoke: Invoke) {
     },
     async revokeRoot(id: number): Promise<void> {
       await invoke("addon_revoke_root", { id });
+    },
+    /** The team's open requests with Rust's verdict per row. A failure (e.g. state_unreadable) is the caller's to show. */
+    ctrlRows(team: string): Promise<Outcome<CtrlScanRaw>> {
+      return attempt(async () => (await invoke("addon_ctrl_rows", { team })) as CtrlScanRaw);
+    },
+    /** The click on Open: Rust re-checks from the store and records it; the result goes to addPane as it is. */
+    ctrlOpen(team: string, requestId: string): Promise<Outcome<CtrlOpened>> {
+      return attempt(async () => (await invoke("addon_ctrl_open", { spec: { team, requestId } })) as CtrlOpened);
+    },
+    ctrlDismiss(team: string, requestId: string): Promise<Outcome<null>> {
+      return attempt(async () => {
+        await invoke("addon_ctrl_dismiss", { spec: { team, requestId } });
+        return null;
+      });
     },
   };
 }

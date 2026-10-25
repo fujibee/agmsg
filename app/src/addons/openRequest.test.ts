@@ -52,9 +52,15 @@ describe("parseOpenRequest", () => {
     expect(refusal(body({ args: { path: 5 } }))?.reason).toBe("bad_arg_value");
     expect(refusal(body({ args: { path: "" } }))?.reason).toBe("bad_arg_value");
   });
+  it("the requester token is optional", () => {
+    const r = parseOpenRequest(body({ requester: { member_id: "m1" } }));
+    expect(r).toMatchObject({ kind: "request", request: { requester: { memberId: "m1", token: undefined } } });
+  });
   it("requires nested requester and a request_id; the flat form is gone", () => {
     expect(refusal(body({ requester: undefined, requester_member_id: "m1" }))?.reason).toBe("bad_requester");
-    expect(refusal(body({ requester: { member_id: "m1" } }))?.reason).toBe("bad_requester");
+    expect(refusal(body({ requester: { member_id: "m1", token: 5 } }))?.reason).toBe("bad_requester");
+    expect(refusal(body({ requester: { member_id: "m1", token: "" } }))?.reason).toBe("bad_requester");
+    expect(refusal(body({ requester: { token: "t" } }))?.reason).toBe("bad_requester");
     expect(refusal(body({ request_id: "" }))?.reason).toBe("bad_request_id");
     expect(refusal(body({ request_id: undefined }))?.reason).toBe("bad_request_id");
   });
