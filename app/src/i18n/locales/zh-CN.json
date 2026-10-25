@@ -281,13 +281,13 @@
       "later": "Installing from GitHub isn't available in this build yet."
     },
     "openRequests": {
-      "label": "Open requests from seats",
-      "show": "Show",
-      "off": "Off",
-      "copy": "Copy text for your seats",
-      "copied": "Copied.",
-      "copyFailed": "Could not copy.",
-      "copyHint": "Paste it to a seat so it knows how to ask the app to open a pane."
+      "label": "来自 seat 的打开请求",
+      "show": "显示",
+      "off": "关闭",
+      "copy": "复制给 seat 的文字",
+      "copied": "已复制。",
+      "copyFailed": "无法复制。",
+      "copyHint": "把它粘贴给 seat，它就知道如何请求应用打开窗格。"
     },
     "developer": {
       "title": "Developer",
@@ -407,37 +407,37 @@
       "checkingPlain": "Checking the files…"
     },
     "request": {
-      "wants": "{{agent}} in {{team}} wants to open {{target}}{{args}}",
-      "base": "base {{base}}",
-      "open": "Open",
-      "dismiss": "Dismiss",
-      "install": "Install…",
-      "many": "{{count}} open requests ▾",
+      "wants": "{{team}} 中的 {{agent}} 想打开 {{target}}{{args}}",
+      "base": "基准 {{base}}",
+      "open": "打开",
+      "dismiss": "忽略",
+      "install": "安装…",
+      "many": "{{count}} 个打开请求 ▾",
       "status": {
         "open": "",
-        "not_installed": "{{pane}} is not installed.",
-        "not_found_here": "Not found here.",
-        "args_not_allowed": "Malformed for this pane.",
-        "unavailable": "{{pane}} cannot be opened right now.",
-        "denied_path": "That location is protected."
+        "not_installed": "{{pane}} 尚未安装。",
+        "not_found_here": "此处找不到。",
+        "args_not_allowed": "与此窗格不匹配。",
+        "unavailable": "{{pane}} 目前无法打开。",
+        "denied_path": "该位置受保护。"
       },
       "note": {
-        "malformed": "Malformed open request ({{reason}}{{detail}})."
+        "malformed": "打开请求格式有误（{{reason}}{{detail}}）。"
       },
-      "notes": "{{count}} notes ▾",
+      "notes": "{{count}} 条提示 ▾",
       "reason": {
-        "missing_pane": "the add-on or pane name is missing",
-        "bad_addon": "the add-on name is not valid",
-        "bad_pane": "the pane name is not valid",
-        "bad_option": "only path=<absolute path> may follow the pane name",
-        "bad_path": "the path must be an absolute path",
-        "bad_message_id": "the message id cannot be recorded",
-        "unreadable": "the request could not be read"
+        "missing_pane": "缺少加载项或窗格名称",
+        "bad_addon": "加载项名称无效",
+        "bad_pane": "窗格名称无效",
+        "bad_option": "窗格名称后只能跟 path=<绝对路径>",
+        "bad_path": "路径必须是绝对路径",
+        "bad_message_id": "无法记录消息 ID",
+        "unreadable": "无法读取该请求"
       },
-      "unverified": "sender not verified",
-      "readFailed": "Open requests could not be read: {{message}}",
-      "actionFailed": "The request could not be handled: {{message}}",
-      "truncated": "Older requests are not shown."
+      "unverified": "发送者未验证",
+      "readFailed": "无法读取打开请求：{{message}}",
+      "actionFailed": "无法处理该请求：{{message}}",
+      "truncated": "较早的请求不再显示。"
     },
     "menu": {
       "fileViewEntry": "File view…",

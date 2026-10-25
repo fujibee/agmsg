@@ -281,13 +281,13 @@
       "later": "Installing from GitHub isn't available in this build yet."
     },
     "openRequests": {
-      "label": "Open requests from seats",
-      "show": "Show",
-      "off": "Off",
-      "copy": "Copy text for your seats",
-      "copied": "Copied.",
-      "copyFailed": "Could not copy.",
-      "copyHint": "Paste it to a seat so it knows how to ask the app to open a pane."
+      "label": "Öffnen-Anfragen von Seats",
+      "show": "Anzeigen",
+      "off": "Aus",
+      "copy": "Text für deine Seats kopieren",
+      "copied": "Kopiert.",
+      "copyFailed": "Kopieren fehlgeschlagen.",
+      "copyHint": "Füge ihn einem Seat ein, damit er weiß, wie er die App bittet, ein Pane zu öffnen."
     },
     "developer": {
       "title": "Developer",
@@ -407,37 +407,37 @@
       "checkingPlain": "Checking the files…"
     },
     "request": {
-      "wants": "{{agent}} in {{team}} wants to open {{target}}{{args}}",
-      "base": "base {{base}}",
-      "open": "Open",
-      "dismiss": "Dismiss",
-      "install": "Install…",
-      "many": "{{count}} open requests ▾",
+      "wants": "{{agent}} in {{team}} möchte {{target}} öffnen{{args}}",
+      "base": "Basis {{base}}",
+      "open": "Öffnen",
+      "dismiss": "Verwerfen",
+      "install": "Installieren…",
+      "many": "{{count}} offene Anfragen ▾",
       "status": {
         "open": "",
-        "not_installed": "{{pane}} is not installed.",
-        "not_found_here": "Not found here.",
-        "args_not_allowed": "Malformed for this pane.",
-        "unavailable": "{{pane}} cannot be opened right now.",
-        "denied_path": "That location is protected."
+        "not_installed": "{{pane}} ist nicht installiert.",
+        "not_found_here": "Hier nicht gefunden.",
+        "args_not_allowed": "Passt nicht zu diesem Pane.",
+        "unavailable": "{{pane}} kann gerade nicht geöffnet werden.",
+        "denied_path": "Dieser Ort ist geschützt."
       },
       "note": {
-        "malformed": "Malformed open request ({{reason}}{{detail}})."
+        "malformed": "Ungültige Öffnen-Anfrage ({{reason}}{{detail}})."
       },
-      "notes": "{{count}} notes ▾",
+      "notes": "{{count}} Hinweise ▾",
       "reason": {
-        "missing_pane": "the add-on or pane name is missing",
-        "bad_addon": "the add-on name is not valid",
-        "bad_pane": "the pane name is not valid",
-        "bad_option": "only path=<absolute path> may follow the pane name",
-        "bad_path": "the path must be an absolute path",
-        "bad_message_id": "the message id cannot be recorded",
-        "unreadable": "the request could not be read"
+        "missing_pane": "der Add-on- oder Pane-Name fehlt",
+        "bad_addon": "der Add-on-Name ist ungültig",
+        "bad_pane": "der Pane-Name ist ungültig",
+        "bad_option": "nach dem Pane-Namen ist nur path=<absoluter Pfad> erlaubt",
+        "bad_path": "der Pfad muss ein absoluter Pfad sein",
+        "bad_message_id": "die Nachrichten-ID kann nicht gespeichert werden",
+        "unreadable": "die Anfrage konnte nicht gelesen werden"
       },
-      "unverified": "sender not verified",
-      "readFailed": "Open requests could not be read: {{message}}",
-      "actionFailed": "The request could not be handled: {{message}}",
-      "truncated": "Older requests are not shown."
+      "unverified": "Absender nicht verifiziert",
+      "readFailed": "Öffnen-Anfragen konnten nicht gelesen werden: {{message}}",
+      "actionFailed": "Die Anfrage konnte nicht bearbeitet werden: {{message}}",
+      "truncated": "Ältere Anfragen werden nicht angezeigt."
     },
     "menu": {
       "fileViewEntry": "File view…",

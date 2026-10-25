@@ -281,13 +281,13 @@
       "later": "Installing from GitHub isn't available in this build yet."
     },
     "openRequests": {
-      "label": "Open requests from seats",
-      "show": "Show",
-      "off": "Off",
-      "copy": "Copy text for your seats",
-      "copied": "Copied.",
-      "copyFailed": "Could not copy.",
-      "copyHint": "Paste it to a seat so it knows how to ask the app to open a pane."
+      "label": "Demandes d'ouverture des seats",
+      "show": "Afficher",
+      "off": "Désactivé",
+      "copy": "Copier le texte pour vos seats",
+      "copied": "Copié.",
+      "copyFailed": "Copie impossible.",
+      "copyHint": "Collez-le à un seat pour qu'il sache comment demander à l'app d'ouvrir un volet."
     },
     "developer": {
       "title": "Developer",
@@ -407,37 +407,37 @@
       "checkingPlain": "Checking the files…"
     },
     "request": {
-      "wants": "{{agent}} in {{team}} wants to open {{target}}{{args}}",
+      "wants": "{{agent}} dans {{team}} souhaite ouvrir {{target}}{{args}}",
       "base": "base {{base}}",
-      "open": "Open",
-      "dismiss": "Dismiss",
-      "install": "Install…",
-      "many": "{{count}} open requests ▾",
+      "open": "Ouvrir",
+      "dismiss": "Ignorer",
+      "install": "Installer…",
+      "many": "{{count}} demandes d'ouverture ▾",
       "status": {
         "open": "",
-        "not_installed": "{{pane}} is not installed.",
-        "not_found_here": "Not found here.",
-        "args_not_allowed": "Malformed for this pane.",
-        "unavailable": "{{pane}} cannot be opened right now.",
-        "denied_path": "That location is protected."
+        "not_installed": "{{pane}} n'est pas installé.",
+        "not_found_here": "Introuvable ici.",
+        "args_not_allowed": "Ne correspond pas à ce volet.",
+        "unavailable": "{{pane}} ne peut pas être ouvert pour le moment.",
+        "denied_path": "Cet emplacement est protégé."
       },
       "note": {
-        "malformed": "Malformed open request ({{reason}}{{detail}})."
+        "malformed": "Demande d'ouverture mal formée ({{reason}}{{detail}})."
       },
       "notes": "{{count}} notes ▾",
       "reason": {
-        "missing_pane": "the add-on or pane name is missing",
-        "bad_addon": "the add-on name is not valid",
-        "bad_pane": "the pane name is not valid",
-        "bad_option": "only path=<absolute path> may follow the pane name",
-        "bad_path": "the path must be an absolute path",
-        "bad_message_id": "the message id cannot be recorded",
-        "unreadable": "the request could not be read"
+        "missing_pane": "le nom du module ou du volet est manquant",
+        "bad_addon": "le nom du module n'est pas valide",
+        "bad_pane": "le nom du volet n'est pas valide",
+        "bad_option": "seul path=<chemin absolu> peut suivre le nom du volet",
+        "bad_path": "le chemin doit être absolu",
+        "bad_message_id": "l'identifiant du message ne peut pas être enregistré",
+        "unreadable": "la demande n'a pas pu être lue"
       },
-      "unverified": "sender not verified",
-      "readFailed": "Open requests could not be read: {{message}}",
-      "actionFailed": "The request could not be handled: {{message}}",
-      "truncated": "Older requests are not shown."
+      "unverified": "expéditeur non vérifié",
+      "readFailed": "Impossible de lire les demandes d'ouverture : {{message}}",
+      "actionFailed": "La demande n'a pas pu être traitée : {{message}}",
+      "truncated": "Les demandes plus anciennes ne sont pas affichées."
     },
     "menu": {
       "fileViewEntry": "File view…",

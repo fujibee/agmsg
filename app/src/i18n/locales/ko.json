@@ -281,13 +281,13 @@
       "later": "Installing from GitHub isn't available in this build yet."
     },
     "openRequests": {
-      "label": "Open requests from seats",
-      "show": "Show",
-      "off": "Off",
-      "copy": "Copy text for your seats",
-      "copied": "Copied.",
-      "copyFailed": "Could not copy.",
-      "copyHint": "Paste it to a seat so it knows how to ask the app to open a pane."
+      "label": "seat의 열기 요청",
+      "show": "표시",
+      "off": "끔",
+      "copy": "seat용 문구 복사",
+      "copied": "복사했습니다.",
+      "copyFailed": "복사하지 못했습니다.",
+      "copyHint": "seat에 붙여 넣으면 앱에 패널 열기를 요청하는 방법을 알 수 있습니다."
     },
     "developer": {
       "title": "Developer",
@@ -407,37 +407,37 @@
       "checkingPlain": "Checking the files…"
     },
     "request": {
-      "wants": "{{agent}} in {{team}} wants to open {{target}}{{args}}",
-      "base": "base {{base}}",
-      "open": "Open",
-      "dismiss": "Dismiss",
-      "install": "Install…",
-      "many": "{{count}} open requests ▾",
+      "wants": "{{team}}의 {{agent}}님이 {{target}}을(를) 열려고 합니다{{args}}",
+      "base": "기준 {{base}}",
+      "open": "열기",
+      "dismiss": "닫기",
+      "install": "설치…",
+      "many": "열기 요청 {{count}}건 ▾",
       "status": {
         "open": "",
-        "not_installed": "{{pane}} is not installed.",
-        "not_found_here": "Not found here.",
-        "args_not_allowed": "Malformed for this pane.",
-        "unavailable": "{{pane}} cannot be opened right now.",
-        "denied_path": "That location is protected."
+        "not_installed": "{{pane}}이(가) 설치되어 있지 않습니다.",
+        "not_found_here": "여기에서 찾을 수 없습니다.",
+        "args_not_allowed": "이 패널에는 맞지 않는 요청입니다.",
+        "unavailable": "{{pane}}을(를) 지금은 열 수 없습니다.",
+        "denied_path": "보호된 위치입니다."
       },
       "note": {
-        "malformed": "Malformed open request ({{reason}}{{detail}})."
+        "malformed": "잘못된 열기 요청입니다 ({{reason}}{{detail}})."
       },
-      "notes": "{{count}} notes ▾",
+      "notes": "알림 {{count}}건 ▾",
       "reason": {
-        "missing_pane": "the add-on or pane name is missing",
-        "bad_addon": "the add-on name is not valid",
-        "bad_pane": "the pane name is not valid",
-        "bad_option": "only path=<absolute path> may follow the pane name",
-        "bad_path": "the path must be an absolute path",
-        "bad_message_id": "the message id cannot be recorded",
-        "unreadable": "the request could not be read"
+        "missing_pane": "애드온 또는 패널 이름이 없습니다",
+        "bad_addon": "애드온 이름이 올바르지 않습니다",
+        "bad_pane": "패널 이름이 올바르지 않습니다",
+        "bad_option": "패널 이름 뒤에는 path=<절대 경로>만 올 수 있습니다",
+        "bad_path": "경로는 절대 경로여야 합니다",
+        "bad_message_id": "메시지 ID를 기록할 수 없습니다",
+        "unreadable": "요청을 읽을 수 없습니다"
       },
-      "unverified": "sender not verified",
-      "readFailed": "Open requests could not be read: {{message}}",
-      "actionFailed": "The request could not be handled: {{message}}",
-      "truncated": "Older requests are not shown."
+      "unverified": "보낸 사람 미확인",
+      "readFailed": "열기 요청을 읽지 못했습니다: {{message}}",
+      "actionFailed": "요청을 처리하지 못했습니다: {{message}}",
+      "truncated": "오래된 요청은 표시하지 않습니다."
     },
     "menu": {
       "fileViewEntry": "File view…",
