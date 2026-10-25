@@ -44,7 +44,8 @@ use super::denylist::GrantCheck;
 use super::host::AddonHost;
 use super::panes::OpenArgs;
 
-pub const VERB: &str = "agmsg-app open";
+/// The first word of a request line. The second word is `open`; any number of spaces may separate them, so the store is asked for the first word only.
+pub const VERB: &str = "agmsg-app";
 /// How many request-looking messages to a team's app-user one scan reads (the newest).
 pub const SCAN_CAP: usize = 500;
 const TYPE_APP: &str = "agmsg-app";
@@ -101,31 +102,55 @@ fn clip(s: &str) -> String {
     s.chars().take(80).collect()
 }
 
+/// Does a message body possibly hold a request? Cheap, and looser than `parse` on purpose:
+/// the store and the API path both use it to pick candidates, `parse` decides.
+pub fn looks_like_request(body: &str) -> bool {
+    body.contains(VERB)
+}
+
+/// An opening or closing code fence as Markdown reads it: three or more of one
+/// character (a backtick or a tilde) at the start of the line.
+fn fence_run(lead: &str) -> Option<(char, usize, &str)> {
+    let ch = lead.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let len = lead.chars().take_while(|c| *c == ch).count();
+    (len >= 3).then(|| (ch, len, &lead[len..]))
+}
+
 /// Every request-looking line of one message body, in order. A line only counts
 /// when it starts with the verb at column 0 (no indent), is not quoted, and is not
 /// inside a fenced block; a line that is not a request at all is simply not here.
 pub fn parse(body: &str) -> Vec<Parsed> {
     let norm = body.replace("\r\n", "\n");
     let mut out = Vec::new();
-    let mut fence: Option<char> = None;
+    // the fence that is open: its character and how many it opened with
+    let mut fence: Option<(char, usize)> = None;
     for (idx, raw) in norm.split('\n').enumerate() {
         let lead = raw.trim_start();
-        if lead.starts_with("```") || lead.starts_with("~~~") {
-            let ch = lead.chars().next().unwrap();
-            match fence {
-                None => fence = Some(ch),
-                Some(open) if open == ch => fence = None,
-                Some(_) => {}
+        match (fence, fence_run(lead)) {
+            // a closing fence: the same character, at least as long as the opening, nothing after it but spaces
+            (Some((ch, len)), Some((c, n, rest))) if c == ch && n >= len && rest.trim().is_empty() => {
+                fence = None;
+                continue;
             }
-            continue;
+            (Some(_), _) => continue,
+            // an opening fence (a backtick fence's info string has no backtick in it)
+            (None, Some((c, n, rest))) if c == '~' || !rest.contains('`') => {
+                fence = Some((c, n));
+                continue;
+            }
+            _ => {}
         }
-        if fence.is_some() || lead.starts_with('>') {
+        if lead.starts_with('>') {
             continue;
         }
         let line = raw.trim_end();
         let Some(rest) = line.strip_prefix(VERB) else { continue };
-        if !(rest.is_empty() || rest.starts_with(' ')) {
-            continue; // another word that happens to start the same: `agmsg-app opened …`
+        if !rest.starts_with(' ') {
+            continue; // `agmsg-appopen …`, or the word alone
+        }
+        let (word, rest) = next_token(rest);
+        if word != "open" {
+            continue; // another verb, or a word that starts like it: `agmsg-app opened …`
         }
         out.push(parse_line(idx, rest));
     }
@@ -238,7 +263,8 @@ fn state_write(addons: &Path, rows: &[StateRow]) -> io::Result<()> {
 fn state_record(addons: &Path, row: StateRow) -> io::Result<bool> {
     let _g = STATE_LOCK.lock().unwrap();
     let mut all = state_read(addons)?;
-    if all.iter().any(|r| r.request_id == row.request_id) {
+    // a request id is `<message id>:<line>`, and message ids repeat between teams' stores: the team is part of the identity
+    if all.iter().any(|r| r.request_id == row.request_id && r.team == row.team) {
         return Ok(false);
     }
     // never trimmed: a forgotten id could be acted on again (a row is under a hundred bytes)
@@ -638,7 +664,7 @@ fn candidates(team: &str, app_user: &str) -> Result<(Vec<Candidate>, bool), Open
             let msgs = crate::agmsg::api_recent_messages(team, 200).map_err(|e| err("store_failed", e))?;
             let cands = msgs
                 .into_iter()
-                .filter(|m| m.team == team && m.to == app_user && m.body.contains(VERB))
+                .filter(|m| m.team == team && m.to == app_user && looks_like_request(&m.body))
                 .map(|m| Candidate { id: m.id, team: m.team, from: m.from, to: m.to, body: m.body, created_at: m.created_at })
                 .collect();
             Ok((cands, false))
@@ -646,15 +672,15 @@ fn candidates(team: &str, app_user: &str) -> Result<(Vec<Candidate>, bool), Open
     }
 }
 
-fn handled_set(host: &AddonHost) -> Result<HashSet<String>, OpenError> {
+fn handled_set(host: &AddonHost, team: &str) -> Result<HashSet<String>, OpenError> {
     state_read(host.catalog().addons_dir())
-        .map(|rows| rows.into_iter().map(|r| r.request_id).collect())
+        .map(|rows| rows.into_iter().filter(|r| r.team == team).map(|r| r.request_id).collect())
         .map_err(|e| err("state_unreadable", format!("The record of handled requests cannot be read, so requests are not shown: {e}")))
 }
 
 fn scan_with(host: &AddonHost, team: &str, app_user: &str) -> Result<(OpenScan, Vec<Found>), OpenError> {
     let (cands, truncated) = candidates(team, app_user)?;
-    let handled = handled_set(host)?;
+    let handled = handled_set(host, team)?;
     let env = HostEnv::new(host);
     let (rows, found) = assemble(&cands, &handled, &env);
     Ok((OpenScan { app_user: Some(app_user.to_string()), rows, truncated, notice: None }, found))
@@ -837,6 +863,36 @@ mod tests {
         assert_eq!(reason(&format!("agmsg-app open {} viewer", "a".repeat(200))), "bad_addon");
     }
 
+    #[test]
+    fn any_number_of_spaces_may_separate_the_two_verb_words() {
+        let r = reqs("agmsg-app    open   o/r viewer");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].pane, "viewer");
+        assert!(looks_like_request("agmsg-app    open   o/r viewer"));
+        // the other verbs and near misses are still not requests
+        assert!(parse("agmsg-app   opened o/r viewer").is_empty());
+        assert!(parse("agmsg-app\topen o/r viewer").is_empty(), "only spaces separate the words");
+    }
+
+    #[test]
+    fn a_fence_closes_only_the_way_markdown_closes_it() {
+        let line = "agmsg-app open o/r viewer";
+        // a longer opening is not closed by a shorter run, and the text between stays code
+        assert!(parse(&format!("````\n```\n{line}\n````")).is_empty());
+        assert!(parse(&format!("````\n```\n{line}")).is_empty(), "never closed: the rest is code");
+        // a closing fence may be longer and may be followed by spaces
+        assert_eq!(reqs(&format!("```\ncode\n````  \n{line}")).len(), 1);
+        // an info string after the closing run makes it not a closing fence
+        assert!(parse(&format!("```\ncode\n```text\n{line}")).is_empty());
+        // a tilde fence is closed by tildes, not by backticks
+        assert!(parse(&format!("~~~\n```\n{line}")).is_empty());
+        assert_eq!(reqs(&format!("~~~\n```\n~~~\n{line}")).len(), 1);
+        // an info string is fine on an opening fence
+        assert_eq!(reqs(&format!("```sh\ncode\n```\n{line}")).len(), 1);
+        // a backtick run with a backtick later on the line is inline code, not a fence
+        assert_eq!(reqs(&format!("```not a fence```\n{line}")).len(), 1);
+    }
+
     // ---- the checks ----
 
     struct FakeEnv {
@@ -995,6 +1051,17 @@ mod tests {
     }
 
     #[test]
+    fn the_store_finds_a_request_with_extra_spaces_between_the_verb_words() {
+        let c = store(true);
+        event(&c, "e1", "t", "alice", "me", "agmsg-app   open o/r viewer", "2026-10-25T00:00:01Z");
+        c.execute("INSERT INTO messages (team, from_agent, to_agent, body, created_at) VALUES ('t','bob','me','agmsg-app  open o/r viewer','2026-10-25T00:00:02Z')", []).unwrap();
+        let (cands, _) = scan_sqlite(&c, "t", "me", 10).unwrap();
+        assert_eq!(cands.len(), 2);
+        let (rows, _) = assemble(&cands, &HashSet::new(), &env());
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
     fn a_long_history_is_cut_at_the_newest_and_says_so() {
         let c = store(true);
         for i in 0..5 {
@@ -1019,6 +1086,23 @@ mod tests {
         assert!(state_record(d.path(), row("m1:1")).unwrap());
         let ids: HashSet<String> = state_read(d.path()).unwrap().into_iter().map(|r| r.request_id).collect();
         assert_eq!(ids, ["m1:0".to_string(), "m1:1".to_string()].into());
+    }
+
+    #[test]
+    fn the_same_request_id_in_another_team_is_another_request() {
+        let d = tempfile::tempdir().unwrap();
+        let other = |id: &str, team: &str| StateRow { request_id: id.into(), team: team.into(), state: "dismissed".into(), at: "2026-10-25T00:00:00Z".into() };
+        assert!(state_record(d.path(), other("1:0", "team-a")).unwrap());
+        assert!(state_record(d.path(), other("1:0", "team-b")).unwrap(), "team-b's message 1 is not team-a's");
+        assert!(!state_record(d.path(), other("1:0", "team-a")).unwrap());
+        // the filter the scan applies: only the shown team's ids are left out
+        let rows = state_read(d.path()).unwrap();
+        let handled_a: HashSet<String> = rows.iter().filter(|r| r.team == "team-a").map(|r| r.request_id.clone()).collect();
+        let (shown, _) = assemble(&[cand("1", "x", LINE)], &handled_a, &env());
+        assert!(shown.is_empty());
+        let handled_c: HashSet<String> = rows.iter().filter(|r| r.team == "team-c").map(|r| r.request_id.clone()).collect();
+        let (shown, _) = assemble(&[cand("1", "x", LINE)], &handled_c, &env());
+        assert_eq!(shown.len(), 1, "a team with nothing handled still sees its request 1:0");
     }
 
     #[test]
