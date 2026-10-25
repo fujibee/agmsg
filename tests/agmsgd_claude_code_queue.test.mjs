@@ -517,3 +517,20 @@ for (const reason of ['messaging_socket_stat_failed', 'messaging_socket_symlink'
     await channel.stop();
   });
 }
+
+test('a stuck Claude send has a seat deadline and late success cannot publish delivery', async (t) => {
+  const { db, channel: unused, state } = channelFixture(t);
+  let release;
+  const logs = [];
+  const channel = createClaudeCodeQueueChannel({ ...state.options, seatDeadlineMs: 20, log: line => logs.push(line),
+    send: () => new Promise(resolve => { release = resolve; }),
+  });
+  await channel.pollOnce();
+  assert.equal(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, 'seat_poll_deadline');
+  assert.ok(logs.some(line => line.includes('poll_timeout')));
+  release({ state: 'sent' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, 'seat_poll_deadline');
+  await channel.stop();
+  await unused.stop();
+});

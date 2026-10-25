@@ -8,6 +8,8 @@
 // No CLI child process or transcript confirmation is needed: a completed
 // socket write advances this seat's notification cursor.
 
+import { assertPollActive, pollSignal, SEAT_DEADLINE_MS } from '../poll-deadline.mjs';
+import { createSeatPoller } from '../seat-poll.mjs';
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { logLine } from "../log.mjs";
@@ -52,6 +54,7 @@ function latestNotifiedCursor(db, seat) {
 }
 
 function saveSeat(db, { seat, messagingSocket = null, state, reason = "" }, now) {
+  assertPollActive();
   withImmediateTransaction(db, () => {
     db.prepare(`
       INSERT INTO beta_claude_seat (seat, messaging_socket, state, reason, checked_at)
@@ -63,12 +66,14 @@ function saveSeat(db, { seat, messagingSocket = null, state, reason = "" }, now)
 }
 
 function setQueueState(db, id, state) {
+  assertPollActive();
   withImmediateTransaction(db, () => {
     db.prepare("UPDATE beta_claude_queue SET state = ? WHERE id = ? AND state = 'pending'").run(state, id);
   });
 }
 
 function createSendAttempt(db, { seat, messagingSocket, transcriptPath, transcriptPos, upTo, nonce, triedModes, expectedOpGen }, now) {
+  assertPollActive();
   let rowId;
   withImmediateTransaction(db, () => {
     const intent = db.prepare("SELECT desired, op_gen FROM daemon_intent").get();
@@ -98,6 +103,7 @@ export function createClaudeCodeQueueChannel({
   installRoot,
   expectedOpGen,
   env = process.env,
+  seatDeadlineMs = SEAT_DEADLINE_MS,
   timeoutMs = SEND_TIMEOUT_MS,
   now = Date.now,
   log = (message) => logLine(installRoot, message),
@@ -114,6 +120,12 @@ export function createClaudeCodeQueueChannel({
 }) {
   let stopped = false;
   let activePoll = null;
+  let activePollSignal;
+  let resumeAfter;
+  const seatPoller = createSeatPoller({
+    db, installRoot, channel: 'claude-code', log, timeoutMs: seatDeadlineMs,
+    saveTimeout: (seat, reason) => saveSeat(db, { seat, state: 'blocked', reason }, now),
+  });
 
   async function pollSeat(registration, paths) {
     const { team, agent, teamConfig } = registration;
@@ -249,10 +261,11 @@ export function createClaudeCodeQueueChannel({
     saveSeat(db, { seat, messagingSocket: record.messaging_socket, state: "addressable" }, now);
   }
 
-  async function pollOnce() {
+  async function pollOnce({ signal } = {}) {
     if (stopped) return;
-    if (activePoll) return activePoll;
-    activePoll = (async () => {
+    if (activePoll && !activePollSignal?.aborted) return activePoll;
+    activePollSignal = pollSignal() ?? signal;
+    const operation = (async () => {
       const roster = listSeats(join(installRoot, "teams"));
       if (roster.state !== "ok") {
         log(`channel: Claude Code roster unavailable (${roster.reason})`);
@@ -263,25 +276,35 @@ export function createClaudeCodeQueueChannel({
       const registeredKeys = new Set(seats.map(({ team, agent }) => seatKey(team, agent)));
       for (const row of db.prepare("SELECT seat FROM beta_claude_seat").all()) {
         if (!registeredKeys.has(row.seat)) {
-          saveSeat(db, { seat: row.seat, state: "unaddressable", reason: "seat_registration_missing" }, now);
+          seatPoller.changeState(row.seat, () => saveSeat(db, { seat: row.seat, state: "unaddressable", reason: "seat_registration_missing" }, now));
         }
       }
-      for (const seat of seats) {
-        if (stopped) break;
+      // Continue after an interrupted seat so repeated cycle deadlines cannot
+      // starve the tail of a large roster.
+      const start = seats.findIndex(seat => seatKey(seat.team, seat.agent) === resumeAfter) + 1;
+      const ordered = [...seats.slice(start), ...seats.slice(0, start)];
+      for (const seat of ordered) {
+        if (stopped || pollSignal()?.aborted || signal?.aborted) break;
+        resumeAfter = seatKey(seat.team, seat.agent);
         try {
-          await pollSeat(seat, paths);
+          await seatPoller.poll(seat, () => pollSeat(seat, paths));
         } catch (error) {
+          if (pollSignal()?.aborted || signal?.aborted) break;
           log(`channel: Claude Code seat ${seat.team}/${seat.agent} could not be checked (${error.message})`);
         }
       }
-    })().finally(() => { activePoll = null; });
-    return activePoll;
+    })().finally(() => { if (activePoll === operation) activePoll = null; });
+    activePoll = operation;
+    return operation;
   }
 
   return {
+    name: 'claude-code',
+    reportTimeout: seatPoller.reportTimeout,
     pollOnce,
     async stop() {
       stopped = true;
+      seatPoller.cancel();
       await activePoll;
     },
   };

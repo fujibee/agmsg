@@ -14,12 +14,14 @@
 import { takeOwnership, markReady, markStopping, revertToNone, stopNormally } from "./owner.mjs";
 import { createControlServer } from "./control.mjs";
 import { captureWatchState, watchForDrift } from "./lifecycle.mjs";
-import { logLine } from "./log.mjs";
+import { logLine, deliveryEvent, recordPollTimeout } from "./log.mjs";
 import { classify } from "./status.mjs";
 import { createCodexQueueChannel } from "./channels/codex-queue.mjs";
 import { ensureCodexChannelSchema } from "./channels/codex-queue-store.mjs";
 import { createClaudeCodeQueueChannel } from "./channels/claude-code-queue.mjs";
 import { ensureClaudeCodeChannelSchema } from "./channels/claude-code-queue-store.mjs";
+
+import { withDeadline, PollDeadlineError, CHANNEL_DEADLINE_MS, CYCLE_DEADLINE_MS, STOP_DEADLINE_MS } from './poll-deadline.mjs';
 
 export const POLL_INTERVAL_MS = 5000;
 
@@ -30,12 +32,19 @@ export async function prepareClaimWithCodexSchema(prepareClaim) {
   return prepared;
 }
 
-export async function pollChannelHooks(channelHooks, log = () => {}) {
-  for (const hook of channelHooks) {
+export async function pollChannelHooks(channelHooks, log = () => {}, { timeoutMs = CHANNEL_DEADLINE_MS, signal, installRoot } = {}) {
+  for (const [index, hook] of channelHooks.entries()) {
+    if (signal?.aborted) break;
+    const channel = hook.name ?? `channel_${index}`;
     try {
-      await hook.pollOnce();
+      await withDeadline(childSignal => hook.pollOnce({ signal: childSignal }), { timeoutMs, signal, reason: 'channel_poll_deadline' });
     } catch (error) {
-      log(`channel: poll failed: ${error.message}`);
+      if (signal?.aborted) break;
+      if (error instanceof PollDeadlineError) {
+        const seat = hook.reportTimeout?.(error.message);
+        if (!seat) deliveryEvent(log, { event: 'poll_timeout', channel, seat, reason: error.message });
+        if (installRoot && !seat) recordPollTimeout(installRoot, { channel, seat, reason: error.message });
+      } else log(`channel: poll failed: ${error.message}`);
     }
   }
 }
@@ -106,11 +115,24 @@ export function isBusyError(error) {
 // propagates, so the exit is never silent.
 export async function pollCycle(db, installRoot, context, channelHooks) {
   try {
-    const verdict = await pollOnce(db, installRoot, context);
-    if (verdict.action !== "continue") return verdict;
-    await pollChannelHooks(channelHooks, (message) => logLine(installRoot, message));
-    return verdict;
+    return await withDeadline(async signal => {
+      const verdict = await pollOnce(db, installRoot, context);
+      signal.throwIfAborted();
+      if (verdict.action !== "continue") return verdict;
+      await pollChannelHooks(channelHooks, message => logLine(installRoot, message), {
+        timeoutMs: context.channelDeadlineMs ?? CHANNEL_DEADLINE_MS, signal, installRoot,
+      });
+      return verdict;
+    }, { timeoutMs: context.cycleDeadlineMs ?? CYCLE_DEADLINE_MS, signal: context.signal, reason: 'poll_cycle_deadline' });
   } catch (error) {
+    if (context.signal?.aborted) return { action: 'stop', reason: 'normal' };
+    if (error instanceof PollDeadlineError) {
+      let affected = false;
+      for (const hook of channelHooks) affected = Boolean(hook.reportTimeout?.(error.message)) || affected;
+      deliveryEvent(message => logLine(installRoot, message), { event: 'poll_timeout', channel: 'daemon', reason: error.message });
+      if (!affected) recordPollTimeout(installRoot, { channel: 'daemon', reason: error.message });
+      return { action: 'continue' };
+    }
     if (isBusyError(error)) {
       logLine(installRoot, `poll: database busy, retrying next poll (${error.message})`);
       return { action: "continue" };
@@ -125,16 +147,18 @@ export async function pollCycle(db, installRoot, context, channelHooks) {
 // normal stop. `reason` becomes daemon_owner.last_end_reason (status.mjs
 // pattern-matches "stepped_aside_for_update" specifically; anything else
 // falls through to its generic "stopped" text).
-export async function gracefulStop(db, installRoot, gen, controlHandle, channelHooks, reason) {
+export async function gracefulStop(db, installRoot, gen, controlHandle, channelHooks, reason, { timeoutMs = STOP_DEADLINE_MS } = {}) {
   markStopping(db, gen);
   for (const hook of channelHooks) {
     try {
-      await hook.stop();
+      await withDeadline(() => hook.stop(), { timeoutMs, signal: null, reason: 'channel_stop_deadline' });
     } catch (error) {
       logLine(installRoot, `shutdown: a channel's stop() threw: ${error.message}`);
     }
   }
-  await controlHandle.close();
+  try {
+    await withDeadline(() => controlHandle.close(), { timeoutMs, signal: null, reason: 'control_stop_deadline' });
+  } catch (error) { logLine(installRoot, `shutdown: control close failed: ${error.message}`); }
   stopNormally(db, gen, reason);
   logLine(installRoot, `shutdown: gen ${gen} stopped (${reason})`);
 }
@@ -155,17 +179,19 @@ export function stopExitCode(_reason) {
   return 0;
 }
 
-export async function main(db, { installRoot, manifest, manifestText, expectedDesired, expectedOpGen, version, prepareClaim }) {
+export async function main(db, { installRoot, manifest, manifestText, expectedDesired, expectedOpGen, version, prepareClaim, createChannels, pollIntervalMs = POLL_INTERVAL_MS }) {
   const channelHooks = [];
   let controlHandle;
   let gen;
   let stopping = false;
   let timer;
+  const lifetime = new AbortController();
 
   async function doStop(reason) {
     if (stopping) return;
     stopping = true;
     clearInterval(timer);
+    lifetime.abort(new PollDeadlineError('daemon_stopping'));
     await gracefulStop(db, installRoot, gen, controlHandle, channelHooks, reason);
     process.exit(stopExitCode(reason));
   }
@@ -204,21 +230,30 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
   }
   gen = started.gen;
   controlHandle = started.controlHandle;
-  channelHooks.push(createCodexQueueChannel({ db, installRoot, expectedOpGen }));
-  channelHooks.push(createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }));
+  channelHooks.push(...(createChannels ? createChannels({ db, installRoot, expectedOpGen }) : [
+    createCodexQueueChannel({ db, installRoot, expectedOpGen }),
+    createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
+  ]));
 
   process.on("SIGTERM", () => doStop("normal"));
 
   const watchState = await captureWatchState(installRoot, manifest, manifestText);
   let polling = false;
   timer = setInterval(async () => {
-    if (stopping || polling) return;
+    if (stopping) return;
+    if (polling) {
+      deliveryEvent(message => logLine(installRoot, message), { event: 'poll_skipped', channel: 'daemon', reason: 'previous_cycle_running' });
+      return;
+    }
     polling = true;
     try {
-      const verdict = await pollCycle(db, installRoot, { gen, expectedOpGen, watchState }, channelHooks);
+      const verdict = await pollCycle(db, installRoot, { gen, expectedOpGen, watchState, signal: lifetime.signal }, channelHooks);
       if (verdict.action !== "continue") await doStop(verdict.reason);
+    } catch (error) {
+      logLine(installRoot, `poll: timer failed: ${error.message}`);
+      await doStop('poll_failed');
     } finally {
       polling = false;
     }
-  }, POLL_INTERVAL_MS);
+  }, pollIntervalMs);
 }
