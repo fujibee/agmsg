@@ -429,6 +429,11 @@ _wait_exit() {  # <pid> <tenths>
   AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/s-ms-native.sock" \
     bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code erin "s-ms-native" | grep -qx "delivery=native"
 
+  # Historical transcript-held hints do not keep a redundant watch alive.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" <<'SQL'
+CREATE TABLE beta_claude_seat (seat TEXT PRIMARY KEY, messaging_socket TEXT, state TEXT NOT NULL, reason TEXT NOT NULL, checked_at TEXT NOT NULL);
+INSERT INTO beta_claude_seat VALUES ('["team","erin"]', '/tmp/cc-socks/s-ms-native.sock', 'blocked', 'peer_held: historical hint', '2026-10-23');
+SQL
   bash "$SCRIPTS/send.sh" team bob erin "native-delivered probe" >/dev/null
   AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
     bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
@@ -459,9 +464,8 @@ _wait_exit() {  # <pid> <tenths>
 
   # Follow-up to the #1633 review: messaging_socket alone proves the
   # record EXISTS, not that the daemon would treat it as addressable --
-  # claude-code-queue.mjs's own createPending also demands type=claude-code,
-  # a non-empty claude_config_dir, and a project match before it will ever
-  # enqueue. Simulate a stale record left behind by this exact (team, agent)
+  # claude-code-queue.mjs also demands type=claude-code,
+  # and a project match before it will ever enqueue. Simulate a stale record left behind by this exact (team, agent)
   # pair once having been claimed from a DIFFERENT project (the daemon's own
   # role_session_project_mismatch) by corrupting just the project= line; the
   # socket/session/type fields are all still genuinely this seat's own.
@@ -477,7 +481,7 @@ _wait_exit() {  # <pid> <tenths>
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
   wait "$pid"
-  grep -qF 'project-mismatch probe' "$out"
+  grep -qF 'project-mismatch probe' "$out" || { cat "$out"; false; }
   grep -qF 'agmsg watch: re-arm' "$out"
 
   # Review round 2: being looked up BY (team, agent) only proves the

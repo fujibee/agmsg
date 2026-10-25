@@ -44,6 +44,48 @@ await_barrier_reached() {
 
 # --- inbox.sh -----------------------------------------------------------
 
+@test "inbox/history: unknown teams fail on stderr before self-name hooks (#1714)" {
+  # Storage sourcing can print daemon notices too; reject before all of it.
+  printf '%s\n' 'echo storage-source-ran >&2; exit 99' > "$SCRIPTS/lib/storage.sh"
+  # A hook sentinel proves even a misplaced invocation cannot reach naming.
+  printf '%s\n' 'echo naming-hook-ran >&2; exit 99' > "$SCRIPTS/lib/self-name.sh"
+  printf '%s\n' 'echo rename-hook-ran >&2; exit 99' > "$SCRIPTS/lib/self-rename.sh"
+  local script quiet
+  for script in inbox history; do
+    for quiet in '' --quiet; do
+      run bash -c 'bash "$1" missing-team alice ${2:+"$2"} >"$3" 2>"$4"' _ \
+        "$SCRIPTS/$script.sh" "$quiet" "$TEST_SKILL_DIR/stdout" "$TEST_SKILL_DIR/stderr"
+      [ "$status" -eq 1 ]
+      [ ! -s "$TEST_SKILL_DIR/stdout" ]
+      [ "$(cat "$TEST_SKILL_DIR/stderr")" = 'agmsg: team not found: missing-team' ]
+    done
+  done
+}
+
+@test "inbox/history: joined teams without a store retain empty messages (#1714)" {
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/never-written"
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  [ "$status" -eq 0 ]
+  [ "$output" = 'No new messages.' ]
+  run bash "$SCRIPTS/inbox.sh" testteam alice --quiet
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run bash "$SCRIPTS/history.sh" testteam alice
+  [ "$status" -eq 0 ]
+  [ "$output" = 'No message history.' ]
+  [ ! -e "$AGMSG_STORAGE_PATH" ]
+}
+
+@test "inbox/history: wrong argument order never reaches naming hooks (#1714)" {
+  printf '%s\n' 'echo placement-guard-ran >&2; exit 99' > "$SCRIPTS/lib/self-name.sh"
+  local script
+  for script in inbox history; do
+    run bash "$SCRIPTS/$script.sh" session-id /tmp/project
+    [ "$status" -eq 1 ]
+    [ "$output" = 'agmsg: team not found: session-id' ]
+  done
+}
+
 @test "inbox: displays unread messages and marks exactly those as read" {
   bash "$SCRIPTS/send.sh" testteam bob alice "first"
   bash "$SCRIPTS/send.sh" testteam bob alice "second"

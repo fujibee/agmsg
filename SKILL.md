@@ -197,8 +197,9 @@ If argument is "version":
 2. Show the output — the installed version (git-describe provenance recorded at install time).
 
 If asked to update or upgrade agmsg:
-1. Run: `npx agmsg@latest install --update` — add `--cmd <name>` when this machine has more than one agmsg install. It keeps the database and team configs and replaces the scripts.
-2. Tell the user to restart running agent sessions so they pick up the new scripts.
+1. Say "Downloading the agmsg update…" before running `npx agmsg@latest install --update` — add `--cmd <name>` when this machine has more than one agmsg install. It keeps the database and team configs and replaces the scripts.
+2. This session still has the old skill loaded. Re-read the updated installation's `SKILL.md`, read the new version's section of its `CHANGELOG.md`, and tell the user what changed and which settings it recommends. The update output gives the real file paths and version.
+3. Tell the user to restart running agent sessions so they pick up the new scripts.
 
 If argument is "where" (e.g. asked to report this session's own pane or placement):
 1. Run: `~/.agents/skills/agmsg/scripts/where.sh`
