@@ -1,18 +1,18 @@
 'use strict';
-// `npx agmsg addon init <name>` and `npx agmsg addon check` — authoring tools
-// for agmsg app add-ons. Both work only on the current directory: no network,
-// no install, nothing under the agmsg home. Installing and opening add-ons
-// happens in the app.
+// agmsg-addon-check: check an app add-on repository the way the agmsg app
+// checks an install (layout, addon.conf, limits, unsafe entries), so an author
+// sees the same refusal before pushing that the app would show after.
 //
-// `check` mirrors the app's install-time checks (layout, addon.conf, limits,
-// unsafe entries) so an author sees the same refusal before pushing that the
-// app would show after.
+//   node agmsg-addon-check.cjs [dir]      (dir defaults to the current directory)
+//
+// It only reads the directory: no network, no install, nothing under the
+// agmsg home. The app's Rust installer (src-tauri/src/addons/install) and this
+// file run the same fixture corpus (fixtures/install-cases.json), so both
+// refuse exactly the same trees with the same words.
 
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
-
-const KIT_DIR = path.join(__dirname, '..', 'app', 'addon-kit');
 
 const LIMITS = { totalBytes: 200 * 1024 * 1024, files: 5000, fileBytes: 50 * 1024 * 1024 };
 const PERMISSIONS = new Set(['messages:read', 'files:read', 'git:read', 'network']);
@@ -217,7 +217,7 @@ function scanWeb(root, webFiles, conf) {
 }
 
 // The findings without printing: `check` prints them, the shared fixture tests compare them
-// with the app's Rust installer (`app/addon-kit/fixtures/install-cases.json`).
+// with the app's Rust installer (`fixtures/install-cases.json`).
 function collect(root, limits) {
   const errors = [];
   const blocked = [];
@@ -227,7 +227,7 @@ function collect(root, limits) {
     warnings.push('No agmsg-plugin.conf at the repository root (name, description).');
   }
   if (!fs.existsSync(panesDir)) {
-    errors.push('No app add-on here (no app-panes/ folder). Run `npx agmsg addon init <name>` first.');
+    errors.push('No app add-on here (no app-panes/ folder). See https://github.com/fujibee/agmsg-addon-sample for the layout.');
     return { errors, blocked, warnings, t: null };
   }
   const panes = fs.readdirSync(panesDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
@@ -283,54 +283,16 @@ function report(errors, blocked, warnings, t) {
   return errors.length || blocked.length ? 1 : 0;
 }
 
-// ---------- init ----------
+// ---------- command line ----------
 
-function writeNew(root, rel, content, made) {
-  const abs = path.join(root, rel);
-  if (fs.existsSync(abs)) {
-    console.log('skip   ' + rel + ' (exists)');
-    return;
-  }
-  fs.mkdirSync(path.dirname(abs), { recursive: true });
-  fs.writeFileSync(abs, content);
-  made.push(rel);
-  console.log('create ' + rel);
-}
-
-function init(root, name) {
-  if (!name || !NAME_RE.test(name)) {
-    console.error('usage: npx agmsg addon init <name>   (lowercase letters, digits and "-")');
+function main(args) {
+  if (args.length > 1 || (args[0] && args[0].startsWith('-'))) {
+    console.error('usage: node agmsg-addon-check.cjs [dir]');
     return 2;
   }
-  const made = [];
-  writeNew(root, 'agmsg-plugin.conf', 'name = ' + name + '\ndescription = \n', made);
-  writeNew(root, 'app-panes/' + name + '/addon.conf', [
-    '# agmsg app add-on manifest. Data only; see PORTING-PROMPT.md for every key.',
-    'title = ' + name,
-    'entry = index.html',
-    'protocol = 1',
-    'permissions = messages:read',
-    'why.messages:read = ',
-    '',
-  ].join('\n'), made);
-  const helperDir = fs.existsSync(path.join(root, 'src')) ? 'src/' : '';
-  writeNew(root, helperDir + 'agmsg-addon.js', fs.readFileSync(path.join(KIT_DIR, 'agmsg-addon.js'), 'utf8'), made);
-  writeNew(root, 'scripts/agmsg-addon-copy.mjs', fs.readFileSync(path.join(KIT_DIR, 'agmsg-addon-copy.mjs'), 'utf8'), made);
-  writeNew(root, 'PORTING-PROMPT.md', fs.readFileSync(path.join(KIT_DIR, 'PORTING-PROMPT.md'), 'utf8'), made);
-  console.log('');
-  console.log('Next: build your app, then');
-  console.log('  node scripts/agmsg-addon-copy.mjs <build-dir> ' + name);
-  console.log('  npx agmsg addon check');
-  console.log('and open it in the app: Settings → Add-ons → Developer → Load from folder….');
-  return 0;
+  return check(path.resolve(args[0] || '.'));
 }
 
-function main(args, root) {
-  const [verb, name] = args;
-  if (verb === 'init') return init(root, name);
-  if (verb === 'check') return check(root);
-  console.error('usage: npx agmsg addon init <name> | npx agmsg addon check');
-  return 2;
-}
+if (require.main === module) process.exit(main(process.argv.slice(2)));
 
-module.exports = { main, parseConf, checkConf, check, collect, init, LIMITS };
+module.exports = { main, parseConf, checkConf, check, collect, LIMITS };

@@ -17,7 +17,7 @@ if (!existsSync(src)) {
   process.exit(1);
 }
 if (!existsSync(resolve("app-panes", name, "addon.conf"))) {
-  console.error(`app-panes/${name}/addon.conf is missing; run \`npx agmsg addon init ${name}\` first`);
+  console.error(`app-panes/${name}/addon.conf is missing; create it first (see the sample add-on)`);
   process.exit(1);
 }
 
@@ -37,4 +37,4 @@ let count = 0;
 
 rmSync(dest, { recursive: true, force: true });
 cpSync(src, dest, { recursive: true });
-console.log(`copied ${count} files to app-panes/${name}/web/ — commit them, then run \`npx agmsg addon check\``);
+console.log(`copied ${count} files to app-panes/${name}/web/ — commit them, then run \`node scripts/agmsg-addon-check.cjs\``);

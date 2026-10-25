@@ -1,6 +1,6 @@
 {
  "version": 1,
- "description": "Shared by the app's Rust installer (src/addons/install) and `npx agmsg addon check` (bin/addon.js). Each case is a tree (entries) and the exact error list both must produce. 'archiveOnly' cases cannot exist as a directory and are only run through the archive extractor.",
+ "description": "Shared by the app's Rust installer (src/addons/install) and the author check (addon-kit/agmsg-addon-check.cjs). Each case is a tree (entries) and the exact error list both must produce. 'archiveOnly' cases cannot exist as a directory and are only run through the archive extractor.",
  "cases": [
   {
    "name": "a plain layout is accepted",
@@ -342,7 +342,7 @@
    ],
    "expect": {
     "errors": [
-     "No app add-on here (no app-panes/ folder). Run `npx agmsg addon init <name>` first."
+     "No app add-on here (no app-panes/ folder). See https://github.com/fujibee/agmsg-addon-sample for the layout."
     ]
    },
    "extract": "ok"

@@ -6,6 +6,6 @@ import { defineConfig } from "vitest/config";
 // or react plugin is needed.
 export default defineConfig({
   test: {
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "addon-kit/**/*.test.mjs"],
   },
 });

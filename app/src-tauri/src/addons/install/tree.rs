@@ -1,5 +1,5 @@
-//! The same tree checks as `npx agmsg addon check` (`checkTree` in
-//! `bin/addon.js`), on a directory: plain files only, no reserved names, no
+//! The same tree checks as the author check (`checkTree` in
+//! `app/addon-kit/agmsg-addon-check.cjs`), on a directory: plain files only, no reserved names, no
 //! case collisions, and the install limits. Used on a developer folder before
 //! it is copied, and as a second line of defence on an extracted archive. The
 //! wording is the shared one (design 3.2).
@@ -97,7 +97,8 @@ fn has_hard_links(md: &fs::Metadata) -> bool {
 
 #[cfg(windows)]
 fn has_hard_links(_md: &fs::Metadata) -> bool {
-    // std exposes the link count only on nightly; the archive path refuses hard
-    // links outright, and a developer folder is checked with `npx agmsg addon check`.
+    // std exposes the link count only on nightly, so a developer folder is not
+    // checked for hard links on Windows yet (the archive path refuses them
+    // outright). Add-ons stay off on Windows until this is closed.
     false
 }

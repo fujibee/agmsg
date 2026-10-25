@@ -37,7 +37,7 @@ connect-src <own> <net>; frame-src 'none'; worker-src <own>; form-action 'none';
 
 2. **Make the build relative.** For Vite set `base: "./"`; for other bundlers the equivalent (`publicPath: "./"`, `assetPrefix: "./"`). Replace absolute asset paths in code (`"/assets/…"`, `src="/…"`) with relative ones (`"./assets/…"`) or `import.meta.env.BASE_URL`.
 
-3. **Add the helper.** Copy `agmsg-addon.js` (from `npx agmsg addon init`, or from the agmsg repo's `app/addon-kit/`) into the source tree, and connect where the app loads its data:
+3. **Add the helper.** Copy `kit/agmsg-addon.js` from the sample add-on (https://github.com/fujibee/agmsg-addon-sample) into the source tree, and connect where the app loads its data:
 
    ```js
    import { connect } from "./agmsg-addon.js";
@@ -66,9 +66,9 @@ connect-src <own> <net>; frame-src 'none'; worker-src <own>; form-action 'none';
 
 5. **Remove what the sandbox blocks.** Inline handlers → `addEventListener`. Runtime code generation → plain code. Remote scripts/fonts → bundled, or declared under `network` (fonts and images only; scripts never load from the network). Storage → wrap every access in `try/catch` and keep working without it.
 
-6. **Build and copy.** Run the project's build, then copy the output into `app-panes/<name>/web/` (`node scripts/agmsg-addon-copy.mjs <build-dir> <name>` if `init` created it). Commit `web/` — the app installs exactly what is committed.
+6. **Build and copy.** Run the project's build, then copy the output into `app-panes/<name>/web/` (copy the sample's `kit/agmsg-addon-copy.mjs` to `scripts/` and run `node scripts/agmsg-addon-copy.mjs <build-dir> <name>`). Commit `web/` — the app installs exactly what is committed.
 
-7. **Check.** Run `npx agmsg addon check` and fix everything it reports until it is clean.
+7. **Check.** Copy the sample's `kit/agmsg-addon-check.cjs` to `scripts/`, run `node scripts/agmsg-addon-check.cjs`, and fix everything it reports until it is clean. It checks the repository the way the app checks an install.
 
 8. **Tell the author how to see it:** in the agmsg app, Settings → Add-ons → Developer → **Load from folder…**, pick this repository, and open the pane from **＋ New ▾ → Add-on pane**.
 

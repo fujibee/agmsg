@@ -1,8 +1,7 @@
 //! `addon.conf` (design 1): data only, `key = value`, never executed.
 //!
-//! The wording of every message matches `npx agmsg addon check`
-//! (`bin/addon.js`), and the shared corpus in
-//! `app/addon-kit/fixtures/conf-cases.json` is run against both.
+//! The wording of every message matches the author check
+//! (`app/addon-kit/agmsg-addon-check.cjs`).
 
 use std::collections::BTreeMap;
 
@@ -205,7 +204,7 @@ fn is_why_key(k: &str) -> bool {
 }
 
 fn strip_trailing_comment(v: &str) -> &str {
-    // whitespace followed by `#` starts a comment (as in bin/addon.js)
+    // whitespace followed by `#` starts a comment (as in agmsg-addon-check.cjs)
     let b = v.as_bytes();
     for i in 0..b.len() {
         if b[i] == b'#' && i > 0 && b[i - 1].is_ascii_whitespace() {
@@ -221,7 +220,7 @@ fn is_semver3(v: &str) -> bool {
 }
 
 fn is_https_origin(o: &str) -> bool {
-    // https://[a-z0-9.-]+(:\d{1,5})?   (same as bin/addon.js)
+    // https://[a-z0-9.-]+(:\d{1,5})?   (same as agmsg-addon-check.cjs)
     let Some(rest) = o.strip_prefix("https://").or_else(|| o.strip_prefix("HTTPS://")) else { return false };
     let (host, port) = match rest.rsplit_once(':') {
         Some((h, p)) => (h, Some(p)),

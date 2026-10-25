@@ -1,6 +1,6 @@
-//! The add-on layout checks of `npx agmsg addon check` on an extracted tree
+//! The add-on layout checks of `agmsg-addon-check.cjs` on an extracted tree
 //! (design 1): `app-panes/<name>/addon.conf` + `web/` with the entry present,
-//! and a valid `addon.conf` per pane. Same wording as the CLI.
+//! and a valid `addon.conf` per pane. Same wording as the author check.
 
 use std::fs;
 use std::path::Path;
@@ -23,7 +23,7 @@ fn name_ok(n: &str) -> bool {
     !b.is_empty() && b.len() <= 64 && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit()) && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 
-pub const NO_APP_PANES: &str = "No app add-on here (no app-panes/ folder). Run `npx agmsg addon init <name>` first.";
+pub const NO_APP_PANES: &str = "No app add-on here (no app-panes/ folder). See https://github.com/fujibee/agmsg-addon-sample for the layout.";
 
 pub fn check_layout(root: &Path) -> LayoutReport {
     let mut r = LayoutReport::default();

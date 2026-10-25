@@ -1,8 +1,8 @@
 //! Install pipeline for add-ons (design 3.1): checked extraction, layout and
 //! tree checks, staging, atomic activation. Network access lives in `github` only.
 //!
-//! `check_all` is the Rust twin of `npx agmsg addon check` (`collect` in
-//! `bin/addon.js`); `app/addon-kit/fixtures/install-cases.json` is run against
+//! `check_all` is the Rust twin of the author check (`collect` in
+//! `app/addon-kit/agmsg-addon-check.cjs`); `app/addon-kit/fixtures/install-cases.json` is run against
 //! both so an author sees before pushing exactly what the app refuses after.
 
 pub mod dev;

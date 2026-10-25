@@ -3,7 +3,7 @@
 //! outside the staging directory is ever written; limits are enforced on the
 //! bytes actually read, not on the sizes the archive claims.
 //!
-//! The same cases are exercised against `npx agmsg addon check` through the
+//! The same cases are exercised against the author check through the
 //! shared corpus in `app/addon-kit/fixtures/install-cases.json`, so authors see
 //! the refusal before pushing that the app shows after.
 
