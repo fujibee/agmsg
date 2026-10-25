@@ -269,7 +269,7 @@ EOF
 
 _fake_windows_manager() {
   export USERDOMAIN='DOMAIN & <test>' USERNAME='user & "test"'
-  export SystemRoot='C:\Windows & Root'
+  export SystemRoot='C:\Windows & Root' SYSTEMROOT='C:\Windows & Root'
   mkdir -p "$TEST_SKILL_DIR/fake-windows"
   cat > "$TEST_SKILL_DIR/fake-windows/uname" <<'EOF'
 #!/usr/bin/env bash

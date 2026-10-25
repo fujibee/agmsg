@@ -416,7 +416,7 @@ _register_windows() {
     return 1
   fi
   task_user="$(_xml_escape "$USERDOMAIN\\$USERNAME")"
-  system_root="${SystemRoot:-${SYSTEMROOT:-${WINDIR:-}}}"
+  system_root="${SYSTEMROOT:-${SystemRoot:-${WINDIR:-}}}"
   if [ -z "$system_root" ]; then
     echo "agmsg daemon: cannot determine the Windows system directory (SystemRoot is required); not registering the scheduled task" >&2
     return 1
