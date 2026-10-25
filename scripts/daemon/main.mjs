@@ -192,8 +192,19 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
     stopping = true;
     clearInterval(timer);
     lifetime.abort(new PollDeadlineError('daemon_stopping'));
-    await gracefulStop(db, installRoot, gen, controlHandle, channelHooks, reason);
-    process.exit(stopExitCode(reason));
+    let exitCode = stopExitCode(reason);
+    try {
+      await gracefulStop(db, installRoot, gen, controlHandle, channelHooks, reason);
+    } catch (error) {
+      // The install may have disappeared, or its database may no longer be
+      // writable. Never leave a stopped timer and live socket behind because
+      // a second doStop() call sees stopping=true and returns immediately.
+      exitCode = 1;
+      logLine(installRoot, `shutdown: failed: ${error.message}`);
+      process.stderr.write(`agmsgd: shutdown failed: ${error.message}\n`);
+    } finally {
+      process.exit(exitCode);
+    }
   }
 
   const started = await startup(db, {

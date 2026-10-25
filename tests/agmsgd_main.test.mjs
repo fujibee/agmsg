@@ -238,8 +238,8 @@ test('shutdown completes even when a channel stop never settles', async () => {
   } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-for (const mode of ['signal', 'control']) {
-  test(`main exits normally via ${mode} while a poll and channel stop never settle`, { timeout: 8000 }, async (t) => {
+for (const mode of ['signal', 'control', 'timer-shutdown-error']) {
+  test(`main exits ${mode === 'timer-shutdown-error' ? 'with failure' : 'normally'} via ${mode} without leaving a live socket`, { timeout: 8000 }, async (t) => {
     if (mode === 'signal' && process.platform === 'win32') return t.skip('Windows does not deliver POSIX SIGTERM handlers');
     const { spawn } = await import('node:child_process');
     const { once } = await import('node:events');
@@ -249,8 +249,9 @@ for (const mode of ['signal', 'control']) {
       import { main } from ${JSON.stringify(new URL('../scripts/daemon/main.mjs', import.meta.url).href)};
       import { openInstallDb } from ${JSON.stringify(new URL('../scripts/daemon/db.mjs', import.meta.url).href)};
       const db = openInstallDb(${JSON.stringify(join(root, 'run', 'install.db'))});
-      await main(db, { installRoot: ${JSON.stringify(root)}, manifest: ${JSON.stringify(manifest)}, manifestText: ${JSON.stringify(manifestText)}, expectedDesired: null, expectedOpGen: 0, version: 'test', pollIntervalMs: 15,
-        createChannels: () => [{ name: 'stuck', pollOnce: () => { process.send('polling'); return new Promise(() => {}); }, stop: () => new Promise(() => {}) }] });
+      const runtimeDb = ${mode === 'timer-shutdown-error' ? `new Proxy(db, { get(target, key) { if (key === 'prepare') return sql => { if (sql.includes("SET state = 'stopping'")) throw new Error('fixture shutdown database unavailable'); return target.prepare(sql); }; const value = target[key]; return typeof value === 'function' ? value.bind(target) : value; } })` : 'db'};
+      await main(runtimeDb, { installRoot: ${JSON.stringify(root)}, manifest: ${JSON.stringify(manifest)}, manifestText: ${JSON.stringify(manifestText)}, expectedDesired: null, expectedOpGen: 0, version: 'test', pollIntervalMs: 15,
+        createChannels: () => [{ name: 'stuck', pollOnce: () => { process.send('polling'); ${mode === 'timer-shutdown-error' ? `db.prepare('UPDATE daemon_intent SET op_gen = op_gen + 1').run(); return Promise.resolve();` : 'return new Promise(() => {});'} }, stop: () => new Promise(() => {}) }] });
     `;
     const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
       env: { ...process.env, CODEX_HOME: join(root, 'profile') }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
@@ -261,7 +262,7 @@ for (const mode of ['signal', 'control']) {
     const exited = once(child, 'exit');
     await once(child, 'message');
     if (mode === 'signal') child.kill('SIGTERM');
-    else {
+    else if (mode === 'control') {
       const db = openInstallDb(join(root, 'run', 'install.db'));
       const owner = readOwner(db);
       db.close();
@@ -272,9 +273,10 @@ for (const mode of ['signal', 'control']) {
       await once(socket, 'end');
     }
     const [code] = await exited;
-    assert.equal(code, 0, errors);
+    assert.equal(code, mode === 'timer-shutdown-error' ? 1 : 0, errors);
     const db = openInstallDb(join(root, 'run', 'install.db'));
-    assert.equal(readOwner(db).state, 'none');
+    if (mode !== 'timer-shutdown-error') assert.equal(readOwner(db).state, 'none');
+    else assert.match(errors, /fixture shutdown database unavailable/);
     db.close();
     rmSync(root, { recursive: true, force: true });
   });
