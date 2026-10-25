@@ -50,6 +50,7 @@ pub struct AddonHost {
     /// One install, update or removal at a time.
     pub install_lock: Mutex<()>,
     engine: Mutex<EngineReport>,
+    pub guard: super::nav::GuardStatus,
     probe: Mutex<Option<ProbeRun>>,
 }
 
@@ -65,7 +66,7 @@ impl AddonHost {
     }
 
     pub fn new(dev_url: Option<&Url>) -> AddonHost {
-        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), panes: super::commands::Panes::new(), catalog: std::sync::OnceLock::new(), staged: Mutex::new(HashMap::new()), install_lock: Mutex::new(()), engine: Mutex::new(EngineReport::default()), probe: Mutex::new(None) }
+        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), panes: super::commands::Panes::new(), catalog: std::sync::OnceLock::new(), staged: Mutex::new(HashMap::new()), install_lock: Mutex::new(()), engine: Mutex::new(EngineReport::default()), guard: super::nav::GuardStatus::default(), probe: Mutex::new(None) }
     }
 
     fn end_probe(&self) {
@@ -136,7 +137,7 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
         })
         .build()?;
     #[cfg(windows)]
-    super::nav_win::install(&window, host.clone());
+    super::nav_win::install(&window, handle.clone(), host.clone());
     #[cfg(debug_assertions)]
     super::e2e::spawn_driver(handle.clone());
     host.panes.set_app_dirs(app_owned_dirs(&handle));
@@ -325,7 +326,12 @@ pub fn addon_probe_report<R: Runtime>(app: AppHandle<R>, host: tauri::State<'_, 
             None => (0, String::new()),
         }
     };
-    let engine = host.engine.lock().unwrap().clone();
+    #[allow(unused_mut)]
+    let mut engine = host.engine.lock().unwrap().clone();
+    #[cfg(windows)]
+    {
+        engine.frame_guard_problem = host.guard.problem();
+    }
     let verdict = host.gate.report(&report, &engine, udp_hits, Os::host(), Instant::now());
     // The probe is over once its nonce was answered (right or wrong verdict);
     // a stray answer with another nonce leaves it running.

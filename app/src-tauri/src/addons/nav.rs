@@ -124,6 +124,69 @@ impl FrameNav {
     }
 }
 
+/// Whether the frame guard of a window is working. The guard is required on
+/// engines that need it: until `mark_active` and after any `fail`, `problem()`
+/// names why add-ons must stay off.
+#[derive(Default)]
+pub struct GuardStatus {
+    active: std::sync::atomic::AtomicBool,
+    failure: Mutex<Option<String>>,
+}
+
+impl GuardStatus {
+    pub fn mark_active(&self) {
+        self.active.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Records the first failure; returns true when this call was the first.
+    pub fn fail(&self, why: &str) -> bool {
+        let mut f = self.failure.lock().unwrap();
+        if f.is_some() {
+            return false;
+        }
+        *f = Some(why.to_string());
+        true
+    }
+
+    /// Turns a setup step into "did it work": a failure is recorded and returns false.
+    pub fn check(&self, what: &str, r: Result<(), String>) -> bool {
+        match r {
+            Ok(()) => true,
+            Err(e) => {
+                self.fail(&format!("{what}: {e}"));
+                false
+            }
+        }
+    }
+
+    /// `None` when the guard is installed and nothing has gone wrong.
+    pub fn problem(&self) -> Option<String> {
+        if let Some(f) = self.failure.lock().unwrap().clone() {
+            return Some(f);
+        }
+        if !self.active.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some("the frame navigation guard is not installed".to_string());
+        }
+        None
+    }
+}
+
+/// A frame is about to navigate: cancel unless the rule says allow. An address
+/// that could not be read or parsed is cancelled (and a failed read is recorded).
+pub fn frame_navigation_allowed(rule: &FrameNav, policy: &NavPolicy, uri: Result<String, String>, status: &GuardStatus) -> bool {
+    let uri = match uri {
+        Ok(u) => u,
+        Err(e) => {
+            status.fail(&format!("could not read a frame's navigation target: {e}"));
+            return false;
+        }
+    };
+    match Url::parse(&uri) {
+        Ok(url) => rule.decide(policy, &url).is_allow(),
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +294,46 @@ mod tests {
             // a refusal records nothing: the frame can still start at a live pane
             assert!(f.decide(&p, &u("http://127.0.0.1:5000/aaaa/")).is_allow(), "{s}");
         }
+    }
+
+    #[test]
+    fn the_guard_is_a_problem_until_installed_and_after_any_failure() {
+        let g = GuardStatus::default();
+        assert!(g.problem().is_some());
+        g.mark_active();
+        assert_eq!(g.problem(), None);
+        assert!(g.check("a step", Ok(())));
+        assert_eq!(g.problem(), None);
+        assert!(!g.check("watching a frame", Err("no interface".into())));
+        assert_eq!(g.problem().as_deref(), Some("watching a frame: no interface"));
+        // the first failure is the one kept
+        assert!(!g.fail("later"));
+        assert_eq!(g.problem().as_deref(), Some("watching a frame: no interface"));
+    }
+
+    #[test]
+    fn each_setup_step_that_fails_is_recorded() {
+        for step in ["cast to Frame2", "add NavigationStarting", "cast to Frame7", "add child FrameCreated", "cast to Core4", "add FrameCreated"] {
+            let g = GuardStatus::default();
+            g.mark_active();
+            assert!(!g.check(step, Err("E_FAIL".into())), "{step}");
+            assert_eq!(g.problem().unwrap(), format!("{step}: E_FAIL"));
+        }
+    }
+
+    #[test]
+    fn a_target_that_cannot_be_read_or_parsed_is_cancelled() {
+        let p = policy();
+        let g = GuardStatus::default();
+        g.mark_active();
+        let f = FrameNav::default();
+        assert!(!frame_navigation_allowed(&f, &p, Err("E_POINTER".into()), &g));
+        assert!(g.problem().unwrap().contains("could not read"));
+        let g2 = GuardStatus::default();
+        g2.mark_active();
+        assert!(!frame_navigation_allowed(&f, &p, Ok("not a url".into()), &g2));
+        assert!(!frame_navigation_allowed(&f, &p, Ok("tauri://localhost/".into()), &g2));
+        assert!(frame_navigation_allowed(&f, &p, Ok("http://127.0.0.1:5000/aaaa/".into()), &g2));
+        assert_eq!(g2.problem(), None);
     }
 }

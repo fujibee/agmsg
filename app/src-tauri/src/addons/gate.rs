@@ -87,6 +87,8 @@ pub struct EngineReport {
     pub webrtc_setting_present: bool,
     /// ... and was applied and reads back as off.
     pub webrtc_setting_applied: bool,
+    /// Windows: why the frame navigation guard is not working, if it is not.
+    pub frame_guard_problem: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -136,6 +138,9 @@ pub fn evaluate(expected_nonce: &str, expected_target: &str, r: &ProbeReport, en
             }
         }
         Os::Windows => {
+            if let Some(p) = &engine.frame_guard_problem {
+                reasons.push(format!("the frame navigation guard is not working: {p}"));
+            }
             if !WINDOWS_VERIFIED {
                 reasons.push("add-ons are not verified on WebView2 yet".to_string());
             }
@@ -181,6 +186,14 @@ impl AddonGate {
         s.pending = None;
         s.verdict = Verdict { enabled: false, reasons: vec![format!("checking again: {why}")] };
         s.generation
+    }
+
+    /// Something the gate depends on broke while running: off now, with the reason.
+    pub fn force_off(&self, why: &str) {
+        let mut s = self.inner.lock().unwrap();
+        s.generation += 1;
+        s.pending = None;
+        s.verdict = Verdict { enabled: false, reasons: vec![why.to_string()] };
     }
 
     /// Starts a probe for the current generation.
@@ -249,7 +262,7 @@ mod tests {
     }
 
     fn eng() -> EngineReport {
-        EngineReport { webrtc_setting_present: true, webrtc_setting_applied: true }
+        EngineReport { webrtc_setting_present: true, webrtc_setting_applied: true, frame_guard_problem: None }
     }
 
     #[test]
@@ -279,8 +292,8 @@ mod tests {
             assert_eq!(v.reasons.len(), 1, "{name}: {:?}", v.reasons);
         }
         assert!(!evaluate("n", TARGET, &base, &eng(), 1, Os::MacOs).enabled, "udp");
-        assert!(!evaluate("n", TARGET, &base, &EngineReport { webrtc_setting_present: false, webrtc_setting_applied: false }, 0, Os::MacOs).enabled, "no selector");
-        assert!(!evaluate("n", TARGET, &base, &EngineReport { webrtc_setting_present: true, webrtc_setting_applied: false }, 0, Os::MacOs).enabled, "not applied");
+        assert!(!evaluate("n", TARGET, &base, &EngineReport { webrtc_setting_present: false, webrtc_setting_applied: false, frame_guard_problem: None }, 0, Os::MacOs).enabled, "no selector");
+        assert!(!evaluate("n", TARGET, &base, &EngineReport { webrtc_setting_present: true, webrtc_setting_applied: false, frame_guard_problem: None }, 0, Os::MacOs).enabled, "not applied");
         assert!(!evaluate("n", TARGET, &ProbeReport::default(), &eng(), 0, Os::MacOs).enabled, "empty report");
     }
 
@@ -392,6 +405,19 @@ mod tests {
         let g = AddonGate::new();
         let v = g.report(&good("n"), &eng(), 0, Os::MacOs, Instant::now());
         assert!(!v.enabled);
+        assert!(!g.status().enabled);
+    }
+
+    #[test]
+    fn a_broken_frame_guard_keeps_windows_off_and_force_off_sticks_until_checked_again() {
+        let mut e = eng();
+        e.frame_guard_problem = Some("add NavigationStarting: E_FAIL".into());
+        let v = evaluate("n", TARGET, &good("n"), &e, 0, Os::Windows);
+        assert!(!v.enabled);
+        assert!(v.reasons.iter().any(|r| r.contains("frame navigation guard is not working") && r.contains("E_FAIL")), "{:?}", v.reasons);
+        let g = AddonGate::new();
+        g.force_off("the frame guard broke");
+        assert_eq!(g.status().reasons, vec!["the frame guard broke".to_string()]);
         assert!(!g.status().enabled);
     }
 }
