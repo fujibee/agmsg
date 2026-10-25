@@ -559,8 +559,10 @@ test('one unusable team is skipped alone: the other teams are still notified and
     .filter((row) => JSON.parse(row.seat)[1] === '').map((row) => [JSON.parse(row.seat)[0], row.reason]));
   assert.deepEqual(reasons, { broken: 'team_roster_malformed', linked: 'team_roster_symlink' });
   assert.equal(logs.filter((line) => /roster for team broken skipped/.test(line)).length, 1, 'logged when it first appears, not every poll');
-  writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), JSON.stringify(seat('dave')));
-  await channel.pollOnce();
-  assert.equal(readOwnerAndIntentReadOnly(root).claudeCodeSeats.seats.some((row) => JSON.parse(row.seat)[0] === 'broken' && JSON.parse(row.seat)[1] === ''), false, 'the reason goes away once the team is readable');
   await channel.stop();
+  writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), JSON.stringify(seat('dave')));
+  const restarted = createClaudeCodeQueueChannel({ ...state.options, listSeats: listClaudeCodeRegistrations, readSession: () => ({ state: 'absent' }) });
+  await restarted.pollOnce();
+  assert.equal(readOwnerAndIntentReadOnly(root).claudeCodeSeats.seats.some((row) => JSON.parse(row.seat)[0] === 'broken' && JSON.parse(row.seat)[1] === ''), false, 'the reason goes away once the team is readable, even across a restart');
+  await restarted.stop();
 });

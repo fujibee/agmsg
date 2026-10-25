@@ -556,10 +556,14 @@ export function createCodexQueueChannel({
       log(`channel: Codex roster for team ${team} skipped (${reason})`);
       saveSeat(db, { seat: seatKey(team, ""), state: "blocked", reason }, now);
     }
-    for (const team of rosterReasons.keys()) {
-      if (!current.has(team)) {
+    // Compare against the stored rows, not only this process's memory: a row
+    // written before a restart must go once its team is readable again.
+    for (const { seat } of db.prepare("SELECT seat FROM beta_codex_seat").all()) {
+      let parsed;
+      try { parsed = JSON.parse(seat); } catch { continue; }
+      if (Array.isArray(parsed) && parsed[1] === "" && !current.has(parsed[0])) {
         assertPollActive();
-        withImmediateTransaction(db, () => db.prepare("DELETE FROM beta_codex_seat WHERE seat = ?").run(seatKey(team, "")));
+        withImmediateTransaction(db, () => db.prepare("DELETE FROM beta_codex_seat WHERE seat = ?").run(seat));
       }
     }
     rosterReasons = current;
