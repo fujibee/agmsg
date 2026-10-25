@@ -12,6 +12,11 @@ export function latestWins() {
       const mine = ++current;
       return () => mine === current;
     },
+    /** A check tied to the current state without replacing anyone's ticket: false once `next()` or `cancel()` runs. */
+    snapshot(): () => boolean {
+      const mine = current;
+      return () => mine === current;
+    },
     cancel() {
       current++;
     },

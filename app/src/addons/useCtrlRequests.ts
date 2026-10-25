@@ -39,9 +39,10 @@ export function useCtrlRequests(props: {
   const tickets = useMemo(() => latestWins(), []);
   const onOpened = useRef(props.onOpened);
   onOpened.current = props.onOpened;
-  // The team shown now: a click answered after the user moved to another team still opened (Rust recorded it), but must not drop a pane into the wrong team's tab.
-  const teamNow = useRef(team);
-  teamNow.current = team;
+  // Bumped whenever the scope (mount, team, on/off) changes or ends. A click
+  // answered in an older scope still took effect in Rust, but it must not open
+  // a pane, set a message or re-read rows for a team that is no longer shown.
+  const scope = useMemo(() => latestWins(), []);
 
   const refresh = useCallback(async () => {
     const current = tickets.next();
@@ -51,6 +52,7 @@ export function useCtrlRequests(props: {
   }, [team, tickets]);
 
   useEffect(() => {
+    scope.cancel();
     setActionError(null);
     if (!enabled) {
       tickets.cancel();
@@ -70,27 +72,30 @@ export function useCtrlRequests(props: {
       disposed = true;
       unlisten?.();
       tickets.cancel();
+      scope.cancel();
     };
-  }, [enabled, team, refresh, tickets]);
+  }, [enabled, team, refresh, tickets, scope]);
 
   const act = useCallback(
     (item: BarItem, opened: boolean) => {
       if (!enabled) return;
+      const current = scope.snapshot();
       setActionError(null);
       void (async () => {
         if (opened) {
           const r = await source.ctrlOpen(team, item.requestId);
-          if (!r.ok) setActionError(r.error);
-          else if (teamNow.current === team) onOpened.current(r.value, item);
-          else setActionError({ code: "team_changed", message: "" });
+          if (!current()) return;
+          if (r.ok) onOpened.current(r.value, item);
+          else setActionError(r.error);
         } else {
           const r = await source.ctrlDismiss(team, item.requestId);
+          if (!current()) return;
           if (!r.ok) setActionError(r.error);
         }
         await refresh();
       })();
     },
-    [enabled, team, refresh],
+    [enabled, team, refresh, scope],
   );
 
   return { view: state.view, error: state.error, actionError, act };

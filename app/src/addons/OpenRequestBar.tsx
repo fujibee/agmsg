@@ -111,13 +111,7 @@ export function OpenRequestMessages(props: {
   if (props.error) lines.push(t("addons.request.readFailed", { message: props.error }));
   if (props.notice) lines.push(props.notice);
   if (props.truncated) lines.push(t("addons.request.truncated"));
-  if (props.actionError) {
-    lines.push(
-      props.actionError.code === "team_changed"
-        ? t("addons.request.teamChanged")
-        : t("addons.request.actionFailed", { message: props.actionError.message }),
-    );
-  }
+  if (props.actionError) lines.push(t("addons.request.actionFailed", { message: props.actionError.message }));
   if (lines.length === 0) return null;
   return (
     <div className="addon-request-notes">

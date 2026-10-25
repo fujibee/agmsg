@@ -84,7 +84,6 @@ describe("the bar and messages", () => {
     }));
     for (const k of ["readFailed", "actionFailed", "truncated"]) expect(html).toContain(`addons.request.${k}`);
     expect(html).toContain("No app-user.");
-    expect(renderToStaticMarkup(createElement(OpenRequestMessages, { t, error: null, actionError: { code: "team_changed", message: "" } }))).toContain("addons.request.teamChanged");
     expect(renderToStaticMarkup(createElement(OpenRequestMessages, { t, error: null, actionError: null }))).toBe("");
   });
 });

@@ -441,8 +441,7 @@
       "unverified": "sender not verified",
       "readFailed": "Open requests could not be read: {{message}}",
       "actionFailed": "The request could not be handled: {{message}}",
-      "truncated": "Older requests are not shown.",
-      "teamChanged": "The team changed before the pane could open. The request was marked as opened."
+      "truncated": "Older requests are not shown."
     },
     "menu": {
       "fileViewEntry": "File view…",

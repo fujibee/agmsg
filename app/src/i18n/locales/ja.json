@@ -441,8 +441,7 @@
       "unverified": "送り主は未検証",
       "readFailed": "オープン要求を読めませんでした: {{message}}",
       "actionFailed": "要求を処理できませんでした: {{message}}",
-      "truncated": "古い要求は表示していません。",
-      "teamChanged": "ペインを開く前にチームが切り替わりました。要求は「開いた」として記録されています。"
+      "truncated": "古い要求は表示していません。"
     },
     "menu": {
       "fileViewEntry": "ファイルビュー…",
