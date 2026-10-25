@@ -451,8 +451,8 @@
     "listRetry": "Try again",
     "grantsFailed": "Couldn't read what you allowed: {{message}}",
     "env": {
-      "found": "This folder has a .env file.",
-      "foundNetwork": "This folder has a .env file. This add-on uses the network, so it can't read it."
+      "found": "이 폴더에 .env 파일이 있습니다.",
+      "foundNetwork": "이 폴더에 .env 파일이 있습니다. 이 애드온은 네트워크를 사용하므로 읽을 수 없습니다."
     }
   }
 }

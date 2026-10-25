@@ -451,8 +451,8 @@
     "listRetry": "Try again",
     "grantsFailed": "Couldn't read what you allowed: {{message}}",
     "env": {
-      "found": "This folder has a .env file.",
-      "foundNetwork": "This folder has a .env file. This add-on uses the network, so it can't read it."
+      "found": "此資料夾中有 .env 檔案。",
+      "foundNetwork": "此資料夾中有 .env 檔案。此附加元件會使用網路，因此無法讀取它。"
     }
   }
 }
