@@ -40,8 +40,11 @@ if ! agmsg_validate_tool_name "$TOOL" >/dev/null 2>&1; then
   exit 0
 fi
 
-HANDLE="$SCRIPT_DIR/drivers/ext-tools/$TOOL/handle"
-TOOL_CONF="$SCRIPT_DIR/drivers/ext-tools/$TOOL/tool.conf"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/driver-registry.sh"
+TOOL_DIR="$(agmsg_ext_tool_dir "$TOOL" 2>/dev/null || true)"
+HANDLE="${TOOL_DIR:-/nonexistent}/handle"
+TOOL_CONF="${TOOL_DIR:-/nonexistent}/tool.conf"
 CONFIG_PATH="$SKILL_DIR/ext-tools/$TEAM/$TO.conf"
 
 if [ ! -x "$HANDLE" ]; then

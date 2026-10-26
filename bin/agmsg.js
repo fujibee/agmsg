@@ -119,6 +119,7 @@ function printHelp() {
     'Usage:',
     '  agmsg install [options]   install or update agmsg (runs the canonical setup.sh)',
     '  agmsg daemon <command>    manage the agmsgd beta daemon (start|stop|status|enable|disable)',
+    '  agmsg plugin <command>    manage plugin drivers (list|install|update|remove|trust|untrust)',
     '  agmsg --version           show this package and the installed runtime version',
     '  agmsg help                show this message',
     '',

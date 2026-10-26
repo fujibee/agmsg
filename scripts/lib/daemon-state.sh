@@ -132,11 +132,18 @@ agmsg_daemon_recovery_text() {
     printf 'agmsgd (Codex notices) was recorded by an older version, so whether it is still running cannot be checked. Run agmsg daemon stop and then agmsg daemon start to update the record. Unread messages are preserved. If agmsg is not found, use "%s/scripts/agmsg" daemon stop.\n' "$_AGMSG_DAEMON_ROOT"
     return 0
   fi
-  printf 'agmsgd (Codex notices) is stopped while enabled (reason: %s). Run agmsg daemon start (recommended), or agmsg daemon disable and restart your Codex sessions. Unread messages are preserved.' "$AGMSGD_REASON"
-  case "$AGMSGD_REASON" in *Node*|*node*)
-    printf ' Install Node >= 22.13.0 from https://nodejs.org/en/download, then run agmsg daemon enable.' ;;
+  printf 'agmsgd (Codex notices) is stopped while enabled (reason: %s).' "$AGMSGD_REASON"
+  case "$AGMSGD_REASON" in
+    *[Dd]igest*)
+      # A digest mismatch means the installed files and the completion record
+      # disagree -- restarting with the same files only fails again.
+      printf ' Run install.sh --update (or npx agmsg@latest install --update), then agmsg daemon start.' ;;
+    *Node*|*node*)
+      printf ' Run agmsg daemon start (recommended), or agmsg daemon disable and restart your Codex sessions. Install Node >= 22.13.0 from https://nodejs.org/en/download, then run agmsg daemon enable.' ;;
+    *)
+      printf ' Run agmsg daemon start (recommended), or agmsg daemon disable and restart your Codex sessions.' ;;
   esac
-  printf ' If agmsg is not found, use "%s/scripts/agmsg" daemon start (replace start with disable or enable as needed).\n' "$_AGMSG_DAEMON_ROOT"
+  printf ' Unread messages are preserved. If agmsg is not found, use "%s/scripts/agmsg" daemon start (replace start with disable or enable as needed).\n' "$_AGMSG_DAEMON_ROOT"
 }
 
 agmsg_daemon_warn_if_stopped() {

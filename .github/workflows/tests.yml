@@ -991,6 +991,7 @@ jobs:
         if: needs.changes.outputs.app_changed != 'false'
         with:
           node-version: 22
+          check-latest: true
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
 
@@ -1063,6 +1064,7 @@ jobs:
         if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
         with:
           node-version: 22
+          check-latest: true
           cache: npm
           cache-dependency-path: server/package-lock.json
 
@@ -1290,6 +1292,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          check-latest: true
 
       # `none` is written out here on purpose: it is the difference between
       # "we check the shapes" and "nobody configured anything".

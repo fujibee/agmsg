@@ -24,18 +24,11 @@ fi
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 
-# A seat that reads history as itself names its own pane if it is not named
-# (self-name.sh); see send.sh. Only when an agent is given: without one this
-# is a team-wide read by nobody in particular.
-if [ -n "$AGENT" ]; then
-  # shellcheck disable=SC1091
-  source "$SCRIPT_DIR/lib/self-name.sh"
-  agmsg_self_name_on_action "$TEAM" "$AGENT"
-  # Fix its own CLI session name once, early (self-rename.sh, #1081). Best-effort.
-  # shellcheck disable=SC1091
-  source "$SCRIPT_DIR/lib/self-rename.sh"
-  agmsg_self_rename_on_action "$TEAM" "$AGENT"
-fi
+# <agent> here is only a filter on whose messages to show; the caller is not
+# necessarily that seat (a seat reads another seat's history all the time). So
+# this does not name the caller's pane or session after <agent> -- doing so
+# rewrote the other seat's pane record to the reader's pane (#1756). send.sh
+# and inbox.sh take the acting seat's own name and keep the self-naming.
 
 # A history read must not create a store, so a team that has never been written
 # to has no file yet. Since the stores split per team that is the ordinary state

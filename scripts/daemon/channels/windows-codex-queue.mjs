@@ -2,7 +2,7 @@
 // supported release and at 0.160.0; later stable releases use the same policy.
 import { execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 // 0.157.0: native-child measurement 2026-09-28, live rollout 2026-10-01.
 // 0.160.0: native-child observations and live rollout 2026-10-05.
@@ -12,19 +12,24 @@ export function resolveWindowsCodexExe(executable, env = process.env, arch = pro
   if (typeof executable !== "string" || !executable) return null;
   const pathEntry = Object.entries(env).find(([key]) => key.toLowerCase() === "path")?.[1] ?? "";
   const candidates = [];
-  if (isAbsolute(executable)) {
-    candidates.push(executable);
-  } else if (executable === "codex" || executable.toLowerCase() === "codex.exe") {
-    for (const dir of pathEntry.split(";").filter(Boolean)) {
-      candidates.push(join(dir, "codex.exe"));
-      const target = { x64: "x86_64-pc-windows-msvc", arm64: "aarch64-pc-windows-msvc" }[arch];
-      if (target) {
-        // npm's PATH entry is a JS/shell shim. Resolve its native package
-        // directly; never queue through that shim and its extra processes.
-        const packageDir = join(dir, "node_modules", "@openai", "codex", "node_modules", "@openai", `codex-win32-${arch}`);
-        candidates.push(join(packageDir, "vendor", target, "bin", "codex.exe"));
-      }
+  const target = { x64: "x86_64-pc-windows-msvc", arm64: "aarch64-pc-windows-msvc" }[arch];
+  // npm's directory holds a JS/shell shim. Resolve its native package
+  // directly; never queue through that shim and its extra processes.
+  const addDir = (dir) => {
+    candidates.push(join(dir, "codex.exe"));
+    if (target) {
+      const packageDir = join(dir, "node_modules", "@openai", "codex", "node_modules", "@openai", `codex-win32-${arch}`);
+      candidates.push(join(packageDir, "vendor", target, "bin", "codex.exe"));
     }
+  };
+  if (isAbsolute(executable)) {
+    // A recorded shim ("...\\npm\\codex") resolves like the bare name does,
+    // starting from the directory that holds it.
+    const name = basename(executable).toLowerCase();
+    if (name === "codex.exe") candidates.push(executable);
+    if (name === "codex" || name === "codex.exe") addDir(dirname(executable));
+  } else if (executable === "codex" || executable.toLowerCase() === "codex.exe") {
+    for (const dir of pathEntry.split(";").filter(Boolean)) addDir(dir);
   }
   for (const candidate of candidates) {
     if (basename(candidate).toLowerCase() !== "codex.exe") continue;

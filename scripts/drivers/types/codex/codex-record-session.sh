@@ -245,7 +245,7 @@ agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
 # sees, so no observation there is proof.
 rec_owner="${AGMSG_ROLE_SESSION_OWNER:-}"
 case "${MSYSTEM:-}" in
-  MINGW*|MSYS*|CLANGARM*) ;;
+  MINGW*|MSYS*|UCRT*|CLANG*) ;;
   *)
     if agmsg_instance_is_composite "$rec_owner" \
       && [ "$(_agmsg_pid_signal_presence "${rec_owner##*.}")" = gone ] \

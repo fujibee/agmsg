@@ -15,7 +15,8 @@
 # Search bases, in priority order (later overrides earlier among ELIGIBLE ones):
 #   1. <root>/scripts/drivers          in-tree built-ins — always trusted
 #   2. <root>/plugins                  default external plugin dir (install_dir/plugins)
-#   3. each dir in $AGMSG_PLUGIN_DIRS   ':'-separated extra external dirs
+#   3. each abs-dir in <root>/db/plugin-sources   installed plugin sources
+#   4. each dir in $AGMSG_PLUGIN_DIRS   ':'-separated extra external dirs
 #
 # SECURITY: external drivers are shell code that runs with the user's privileges.
 # They are NEVER loaded unless explicitly opted into (`agmsg plugin trust`), so an
@@ -45,6 +46,17 @@ agmsg_driver_bases() {
   [ -n "$root" ] || return 0
   printf 'builtin\t%s\n' "$root/scripts/drivers"
   printf 'external\t%s\n' "$root/plugins"
+  # db/plugin-sources: one installed source per line, TSV
+  # "<source-id> <spec> <commit-or-digest> <abs-dir> <installed-at>". Only the
+  # abs-dir matters here. A plain file read: no git, no subprocess.
+  local _ps="$root/db/plugin-sources" _id _spec _rev _dir _rest
+  if [ -f "$_ps" ]; then
+    while IFS=$'\t' read -r _id _spec _rev _dir _rest || [ -n "$_id" ]; do
+      _dir="${_dir%$'\r'}"
+      case "$_id" in ''|'#'*) continue ;; esac
+      [ -n "$_dir" ] && printf 'external\t%s\n' "$_dir"
+    done < "$_ps"
+  fi
   # AGMSG_PLUGIN_DIRS: ':'-separated extra external bases (override last).
   local IFS=: d
   for d in ${AGMSG_PLUGIN_DIRS:-}; do
@@ -121,4 +133,55 @@ agmsg_driver_for_team() {
     "SELECT COALESCE(json_extract(readfile('$(agmsg_sql_readfile_path "$cfg")'), '\$.drivers.$axis'), '')" \
     2>/dev/null | tr -d '\r')"
   case "$name" in ''|null) printf '%s\n' "$default" ;; *) printf '%s\n' "$name" ;; esac
+}
+
+# ext-tools go through the same bases as every other axis: a built-in tool is
+# always eligible, an external one only once trusted. The tool name becomes a
+# path segment, so it is checked here too (letters, digits, '-', '_').
+_agmsg_ext_tool_name_ok() {
+  case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  return 0
+}
+
+# Echo the tool's driver directory (the last eligible base that has a tool.conf
+# for it); non-zero if there is none. An untrusted external copy is ignored with
+# a warning on stderr (once per copy per process).
+agmsg_ext_tool_dir() {
+  local tool="$1" kind base dir found=""
+  _agmsg_ext_tool_name_ok "$tool" || return 1
+  while IFS=$'\t' read -r kind base; do
+    dir="$base/ext-tools/$tool"
+    [ -f "$dir/tool.conf" ] || continue
+    if [ "$kind" != builtin ] && ! agmsg_driver_is_trusted ext-tools "$tool" "$dir"; then
+      case " ${_AGMSG_EXT_TOOL_WARNED:-} " in *" $tool@$dir "*) ;; *)
+        _AGMSG_EXT_TOOL_WARNED="${_AGMSG_EXT_TOOL_WARNED:-} $tool@$dir"
+        printf "agmsg: external plugin 'ext-tools/%s' found at %s but not trusted (ignored).\n       Opt in if you put it there intentionally: agmsg plugin trust ext-tools/%s\n" \
+          "$tool" "$dir" "$tool" >&2 ;;
+      esac
+      continue
+    fi
+    found="$dir"
+  done <<EOF
+$(agmsg_driver_bases)
+EOF
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+# Names of every usable ext-tool, ", "-joined and sorted ("none" if empty).
+agmsg_ext_tool_available() {
+  local kind base dir name names=""
+  while IFS=$'\t' read -r kind base; do
+    for dir in "$base"/ext-tools/*/; do
+      [ -f "${dir}tool.conf" ] || continue
+      name="$(basename "$dir")"
+      _agmsg_ext_tool_name_ok "$name" || continue
+      [ "$kind" = builtin ] || agmsg_driver_is_trusted ext-tools "$name" "${dir%/}" || continue
+      names="$names$name"$'\n'
+    done
+  done <<EOF
+$(agmsg_driver_bases)
+EOF
+  [ -n "$names" ] || { printf 'none'; return 0; }
+  printf '%s' "$names" | sort -u | paste -sd, - | sed 's/,/, /g'
 }
