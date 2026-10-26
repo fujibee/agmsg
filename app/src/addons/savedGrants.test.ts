@@ -15,8 +15,9 @@ describe("saved grants", () => {
     expect(pickSavedRoot(saved, "/Users/a/other")).toBe("/Users/a/other/");
     expect(pickSavedRoot(saved, "/Users/b")).toBeUndefined();
   });
-  it("with no requested path the first saved folder is used; with none saved, none", () => {
-    expect(pickSavedRoot(saved)).toBe("/Users/a/proj");
+  it("with no requested path (opened from the menu) no saved folder is applied, so the picker shows", () => {
+    expect(pickSavedRoot(saved)).toBeUndefined();
+    expect(pickSavedRoot(saved, "")).toBeUndefined();
     expect(pickSavedRoot([{ permission: "messages:read", scope: "t" }])).toBeUndefined();
   });
   it("a team grant is replayed only for that same team", () => {

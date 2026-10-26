@@ -36,6 +36,15 @@ describe("AddonsSettings", () => {
     expect(html).toContain("addons.grant.revoke");
     expect(html).toMatch(/<button type="submit" disabled=""/);
   });
+  it("a built-in's remembered folder grant is listed with its own Revoke", () => {
+    const html = render({});
+    const builtin = html.slice(html.indexOf("addons.builtin.title"), html.indexOf("addons.installed.title"));
+    expect(builtin).toContain("/Users/me/proj/agmsg");
+    expect(builtin).toContain("addons.grant.revoke");
+    const only = render({ snapshot: { ...mockSnapshot, grants: [] } });
+    const none = only.slice(only.indexOf("addons.builtin.title"), only.indexOf("addons.installed.title"));
+    expect(none).toContain("addons.grant.none");
+  });
   it("keeps Developer collapsed (no open attribute)", () => {
     expect(render({})).toMatch(/<details class="addon-developer">/);
   });

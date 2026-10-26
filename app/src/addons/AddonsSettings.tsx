@@ -91,6 +91,7 @@ export function AddonsSettings(props: Props) {
               <span className="addon-name">{a.panes.map((p) => p.title).join(", ")}</span>
               {a.digestOk === false && <p className="addon-digest-bad" role="alert">{t("addons.failure.digest_mismatch", { title: a.panes[0]?.title ?? a.id })}</p>}
               <PermissionList t={t} addon={a} />
+              <GrantList t={t} snapshot={snapshot} addonId={a.id} onRevoke={props.onRevoke} />
             </li>
           ))}
         </ul>
@@ -220,6 +221,32 @@ function PermissionList(props: { t: Translate; addon: InstalledAddon }) {
   );
 }
 
+// The remembered grants of one add-on, each with Revoke. Built-in and installed rows share it,
+// so a grant saved with "Always" can be taken back from either.
+function GrantList(props: {
+  t: Translate;
+  snapshot: AddonsSnapshot;
+  addonId: string;
+  onRevoke: (addonId: string, grantIndex: number) => void;
+}) {
+  const { t, snapshot, addonId } = props;
+  return (
+    <ul className="addon-grants">
+      {snapshot.grants.map((g, i) =>
+        g.addonId === addonId ? (
+          <li key={i}>
+            {grantText(t, g)}{" "}
+            <button type="button" onClick={() => props.onRevoke(addonId, i)}>
+              {t("addons.grant.revoke")}
+            </button>
+          </li>
+        ) : null,
+      )}
+      {grantsOf(snapshot.grants, addonId).length === 0 && <li className="none">{t("addons.grant.none")}</li>}
+    </ul>
+  );
+}
+
 function InstalledList(props: {
   t: Translate;
   snapshot: AddonsSnapshot;
@@ -244,19 +271,7 @@ function InstalledList(props: {
           </div>
           {a.digestOk === false && <p className="addon-digest-bad" role="alert">{t("addons.failure.digest_mismatch", { title: a.panes[0]?.title ?? a.id })}</p>}
           <PermissionList t={t} addon={a} />
-          <ul className="addon-grants">
-            {snapshot.grants.map((g, i) =>
-              g.addonId === a.id ? (
-                <li key={i}>
-                  {grantText(t, g)}{" "}
-                  <button type="button" onClick={() => props.onRevoke(a.id, i)}>
-                    {t("addons.grant.revoke")}
-                  </button>
-                </li>
-              ) : null,
-            )}
-            {grantsOf(snapshot.grants, a.id).length === 0 && <li className="none">{t("addons.grant.none")}</li>}
-          </ul>
+          <GrantList t={t} snapshot={snapshot} addonId={a.id} onRevoke={props.onRevoke} />
           <div className="addon-actions">
             {!props.readOnly && props.canInstall !== false && (
               <button type="button" onClick={() => props.onCheckUpdate(a.id)}>

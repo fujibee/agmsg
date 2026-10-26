@@ -78,7 +78,7 @@ export const mockSnapshot: AddonsSnapshot = {
       grantedAt: "2026-10-20T09:14:00Z",
     },
     {
-      addonId: "diffview",
+      addonId: "builtin:diffview",
       pane: "diffview",
       permission: "files:read",
       scope: "/Users/me/proj/agmsg",
