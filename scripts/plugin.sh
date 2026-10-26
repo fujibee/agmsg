@@ -642,6 +642,10 @@ _plugin_next_steps() {  # dir drivers
             echo "    It needs setting up first; see what it needs with:"
           fi
           echo "      bash $scripts/ext-tool.sh setup <team> $name $name status"
+        elif [ -f "$d/SETUP.md" ]; then
+          # No settings, but the tool still has first steps to walk through
+          # (for example, checking that it works once it is joined).
+          echo "    It needs no settings; follow $d/SETUP.md for its first steps:"
         fi
         echo "      bash $scripts/join.sh <team> $name ext-tool --tool $name"
         echo "      bash $scripts/send.sh <team> <you> $name \"hello\""
