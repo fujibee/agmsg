@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -929,4 +929,44 @@ test('a channel cutoff resumes after the interrupted seat on the next cycle', as
   await pollChannelHooks([channel], () => {}, { timeoutMs: 15, installRoot: options.installRoot });
   assert.equal(sends, 1);
   await channel.stop();
+});
+
+test('one unusable team is skipped alone: the other teams are still polled and the reason is shown', async (t) => {
+  const root = temporaryDirectory(t);
+  const runDir = path.join(root, 'run');
+  mkdirSync(runDir, { recursive: true });
+  const seat = (name) => ({ agents: { [name]: { registrations: [{ type: 'codex', project: root }] } } });
+  for (const team of ['one', 'two', 'broken', 'linked']) mkdirSync(path.join(root, 'teams', team), { recursive: true });
+  writeFileSync(path.join(root, 'teams', 'one', 'config.json'), JSON.stringify(seat('alice')));
+  writeFileSync(path.join(root, 'teams', 'two', 'config.json'), JSON.stringify(seat('bob')));
+  writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), '{ not json');
+  writeFileSync(path.join(root, 'elsewhere.json'), JSON.stringify(seat('carol')));
+  symlinkSync(path.join(root, 'elsewhere.json'), path.join(root, 'teams', 'linked', 'config.json'));
+  const installDb = openInstallDb(path.join(runDir, 'install.db'));
+  t.after(() => installDb.close());
+  ensureCodexChannelSchema(installDb);
+  installDb.exec("UPDATE daemon_intent SET desired='on', op_gen=4");
+  const logs = [];
+  const channel = createCodexQueueChannel({
+    db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: root },
+    readDriver: () => ({ state: 'ok', driver: 'sqlite' }), log: (line) => logs.push(line),
+  });
+  await channel.pollOnce();
+  await channel.pollOnce();
+  const rows = readOwnerAndIntentReadOnly(root).codexSeats.seats.map((row) => ({ seat: JSON.parse(row.seat), reason: row.reason }));
+  assert.ok(rows.some(({ seat }) => seat[0] === 'one' && seat[1] === 'alice'), 'team one is still polled');
+  assert.ok(rows.some(({ seat }) => seat[0] === 'two' && seat[1] === 'bob'), 'team two is still polled');
+  assert.equal(rows.find(({ seat }) => seat[0] === 'broken' && seat[1] === '')?.reason, 'team_roster_malformed');
+  assert.equal(rows.find(({ seat }) => seat[0] === 'linked' && seat[1] === '')?.reason, 'team_roster_symlink');
+  assert.equal(logs.filter((line) => /roster for team broken skipped/.test(line)).length, 1, 'logged when it first appears, not every poll');
+  await channel.stop();
+  writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), JSON.stringify(seat('dave')));
+  const restarted = createCodexQueueChannel({
+    db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: root },
+    readDriver: () => ({ state: 'ok', driver: 'sqlite' }), log: () => {},
+  });
+  await restarted.pollOnce();
+  const after = readOwnerAndIntentReadOnly(root).codexSeats.seats.map((row) => JSON.parse(row.seat));
+  assert.equal(after.some((seat) => seat[0] === 'broken' && seat[1] === ''), false, 'the reason goes away once the team is readable, even across a restart');
+  await restarted.stop();
 });

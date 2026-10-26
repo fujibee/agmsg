@@ -330,6 +330,7 @@ export function createCodexQueueChannel({
   windowsGate = checkWindowsCodexQueueGate,
 }) {
   let stopped = false;
+  let rosterReasons = new Map();
   let activeController = null;
   let activePoll = null;
   let activePollSignal;
@@ -545,6 +546,29 @@ export function createCodexQueueChannel({
     }, now);
   }
 
+  // A team whose roster entry is unusable is skipped alone. Its reason is kept
+  // as a team-level row (agent "") so `agmsg daemon status` shows it, and logged
+  // only when it first appears or changes.
+  function recordSkippedTeams(skipped) {
+    const current = new Map(skipped.map(({ team, reason }) => [team, reason]));
+    for (const [team, reason] of current) {
+      if (rosterReasons.get(team) === reason) continue;
+      log(`channel: Codex roster for team ${team} skipped (${reason})`);
+      saveSeat(db, { seat: seatKey(team, ""), state: "blocked", reason }, now);
+    }
+    // Compare against the stored rows, not only this process's memory: a row
+    // written before a restart must go once its team is readable again.
+    for (const { seat } of db.prepare("SELECT seat FROM beta_codex_seat").all()) {
+      let parsed;
+      try { parsed = JSON.parse(seat); } catch { continue; }
+      if (Array.isArray(parsed) && parsed[1] === "" && !current.has(parsed[0])) {
+        assertPollActive();
+        withImmediateTransaction(db, () => db.prepare("DELETE FROM beta_codex_seat WHERE seat = ?").run(seat));
+      }
+    }
+    rosterReasons = current;
+  }
+
   async function pollOnce({ signal } = {}) {
     if (stopped) return;
     if (activePoll && !activePollSignal?.aborted) return activePoll;
@@ -563,8 +587,10 @@ export function createCodexQueueChannel({
       for (const row of pendingRows) {
         if (pendingObservation(row, now, observeGroup, timeoutMs, pendingAges).childrenUnresolved && row.codex_home) blockedCodexHomes.add(homeKey(row.codex_home));
       }
+      recordSkippedTeams(roster.skipped ?? []);
       const seats = [...roster.seats];
       const registeredKeys = new Set(seats.map(({ team, agent }) => seatKey(team, agent)));
+      for (const { team } of roster.skipped ?? []) registeredKeys.add(seatKey(team, ""));
       const unsettledSeats = pendingSeats(db);
       const pendingKeys = new Set(unsettledSeats.map(({ team, agent }) => seatKey(team, agent)));
       for (const { team, agent } of unsettledSeats) {
