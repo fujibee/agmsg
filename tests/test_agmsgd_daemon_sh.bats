@@ -268,9 +268,16 @@ EOF
 }
 
 _fake_windows_manager() {
-  export USERDOMAIN='DOMAIN & <test>' USERNAME='user & "test"'
+  export USERDOMAIN='WORKGROUP' USERNAME='environment-user'
+  export AGMSGD_FAKE_IDENTITY='DOMAIN & <test>\user & "test"'
+  export AGMSGD_WHOAMI="$TEST_SKILL_DIR/fake-windows/whoami.exe"
   export SystemRoot='C:\Windows & Root' SYSTEMROOT='C:\Windows & Root'
   mkdir -p "$TEST_SKILL_DIR/fake-windows"
+  cat > "$TEST_SKILL_DIR/fake-windows/whoami.exe" <<'EOF'
+#!/usr/bin/env bash
+[ "${AGMSGD_FAKE_WHOAMI_FAIL:-0}" != 1 ] || exit 1
+printf '%s\r\n' "${AGMSGD_FAKE_IDENTITY-}"
+EOF
   cat > "$TEST_SKILL_DIR/fake-windows/uname" <<'EOF'
 #!/usr/bin/env bash
 echo MINGW64_NT-10.0
@@ -297,9 +304,13 @@ EOF
 #!/usr/bin/env bash
 printf '%s\n' "$2" >> "${AGMSGD_FAKE_CYGPATH_LOG:?}"
 if [ "$1 $2" = "-m /" ]; then printf '%s/\n' "${AGMSGD_FAKE_GIT_ROOT:?}"; exit 0; fi
+if [ "$1" = -u ] && [[ "$2" = *'\System32\whoami.exe' ]]; then
+  printf '%s/whoami.exe\n' "$(dirname "$0")"
+  exit 0
+fi
 printf '%s\n' "$2"
 EOF
-  chmod +x "$TEST_SKILL_DIR/fake-windows/uname" "$TEST_SKILL_DIR/fake-windows/schtasks" "$TEST_SKILL_DIR/fake-windows/cygpath"
+  chmod +x "$TEST_SKILL_DIR/fake-windows/uname" "$TEST_SKILL_DIR/fake-windows/schtasks" "$TEST_SKILL_DIR/fake-windows/cygpath" "$TEST_SKILL_DIR/fake-windows/whoami.exe"
 }
 
 @test "daemon.sh enable/disable: registers a resident unit (via a fake launchctl on macOS) and cleans it up" {
@@ -523,14 +534,14 @@ EOF
   export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"
   export AGMSGD_FAKE_GIT_ROOT="$TEST_SKILL_DIR/fake-windows/Git & Root"
   # Without a Git Bash to name, nothing is registered.
-  PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+  AGMSGD_WHOAMI= PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
     _run_with_deadline 15 bash "$DAEMON" enable
   [ "$status" -ne 0 ]
   grep -q "cannot find Git Bash" <<<"$output"
   [ ! -f "$marker" ]
   mkdir -p "$AGMSGD_FAKE_GIT_ROOT/bin"
   : > "$AGMSGD_FAKE_GIT_ROOT/bin/bash.exe"
-  PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+  AGMSGD_WHOAMI= PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
     _run_with_deadline 15 bash "$DAEMON" enable
   [ "$status" -eq 0 ]
   # The task runs Git Bash by full path, not a bare bash.exe that Task
@@ -556,6 +567,7 @@ EOF
   # Every path named inside SQL went through the native-path conversion.
   grep -Fq "$TEST_SKILL_DIR/run/install-manifest.json" "$AGMSGD_FAKE_CYGPATH_LOG"
   grep -Fq "$TEST_SKILL_DIR/run/install.db" "$AGMSGD_FAKE_CYGPATH_LOG"
+  grep -Fq 'C:\Windows & Root\System32\whoami.exe' "$AGMSGD_FAKE_CYGPATH_LOG"
   [ "$(od -An -tx1 -N2 "$capture" | tr -d ' \n')" = "fffe" ]
   iconv -f UTF-16LE -t UTF-8 "$capture" | grep -q 'encoding="UTF-16"'
 
@@ -700,9 +712,14 @@ EOF
   export AGMSGD_FAKE_TASK_CALLS="$TEST_SKILL_DIR/fake-windows/calls"
   mkdir -p "$AGMSGD_FAKE_GIT_ROOT/bin"
   : > "$AGMSGD_FAKE_GIT_ROOT/bin/bash.exe"
-  local missing
-  for missing in domain user; do
-    if [ "$missing" = domain ]; then export USERDOMAIN='' USERNAME='user'; else export USERDOMAIN='DOMAIN' USERNAME=''; fi
+  local failure
+  for failure in exit empty malformed; do
+    export AGMSGD_FAKE_WHOAMI_FAIL=0
+    case "$failure" in
+      exit) export AGMSGD_FAKE_WHOAMI_FAIL=1 ;;
+      empty) export AGMSGD_FAKE_IDENTITY='' ;;
+      malformed) export AGMSGD_FAKE_IDENTITY='not-a-qualified-user' ;;
+    esac
     PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" \
       _run_with_deadline 15 bash "$DAEMON" enable
     [ "$status" -ne 0 ]

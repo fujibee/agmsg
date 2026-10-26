@@ -41,6 +41,8 @@ _path_hint() {
 AGMSGD_LAUNCHCTL="${AGMSGD_LAUNCHCTL:-launchctl}"
 AGMSGD_SYSTEMCTL="${AGMSGD_SYSTEMCTL:-systemctl}"
 AGMSGD_SCHTASKS="${AGMSGD_SCHTASKS:-schtasks}"
+# Empty selects the absolute native whoami.exe under the Windows system root.
+AGMSGD_WHOAMI="${AGMSGD_WHOAMI:-}"
 
 _usage() {
   cat >&2 <<'EOF'
@@ -391,6 +393,20 @@ _xml_escape() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
 }
 
+# Query the Windows account token, not USERDOMAIN (which can say WORKGROUP).
+# Git Bash's POSIX whoami is deliberately never searched on PATH.
+_windows_task_user() {
+  local identity domain user
+  identity="$("$1" 2>/dev/null)" || return 1
+  identity="${identity%$'\r'}"
+  case "$identity" in ''|*$'\n'*|*$'\r'*) return 1 ;; esac
+  domain="${identity%%\\*}"
+  user="${identity#*\\}"
+  [ "$domain" != "$identity" ] && [ -n "$domain" ] && [ -n "$user" ] || return 1
+  case "$user" in *\\*) return 1 ;; esac
+  printf '%s' "$identity"
+}
+
 _register_windows() {
   local node_path="$1" name xml
   name="$(_schtasks_name)"
@@ -410,12 +426,7 @@ _register_windows() {
   native_launcher="$(cygpath -w "$LAUNCHER" 2>/dev/null || printf '%s' "$LAUNCHER")"
   # An unqualified logon trigger means every user and requires elevation.
   # Do not silently broaden the trigger when the current identity is missing.
-  local task_user system_root native_conhost arguments
-  if [ -z "${USERDOMAIN:-}" ] || [ -z "${USERNAME:-}" ]; then
-    echo "agmsg daemon: cannot determine the Windows task user (USERDOMAIN and USERNAME are required); not registering the scheduled task" >&2
-    return 1
-  fi
-  task_user="$(_xml_escape "$USERDOMAIN\\$USERNAME")"
+  local task_user system_root native_conhost arguments identity_command
   system_root="${SYSTEMROOT:-${SystemRoot:-${WINDIR:-}}}"
   if [ -z "$system_root" ]; then
     echo "agmsg daemon: cannot determine the Windows system directory (SystemRoot is required); not registering the scheduled task" >&2
@@ -423,6 +434,15 @@ _register_windows() {
   fi
   system_root="${system_root%\\}"
   system_root="${system_root%/}"
+  identity_command="$AGMSGD_WHOAMI"
+  if [ -z "$identity_command" ]; then
+    identity_command="$(cygpath -u "$system_root\\System32\\whoami.exe" 2>/dev/null || true)"
+  fi
+  if [ -z "$identity_command" ] || ! task_user="$(_windows_task_user "$identity_command")"; then
+    echo "agmsg daemon: cannot determine the Windows task user from native whoami.exe; not registering the scheduled task" >&2
+    return 1
+  fi
+  task_user="$(_xml_escape "$task_user")"
   native_conhost="$(_xml_escape "$system_root\\System32\\conhost.exe")"
   arguments="$(_xml_escape "--headless \"$native_bash\" \"$native_launcher\"")"
   local xml_utf8="$xml.utf8" xml_pending="$xml.pending"
