@@ -1542,7 +1542,10 @@ export function requestIdentity(url, init = {}) {
         discard: () => response.destroy(),
       });
     });
-    request.once("error", (error) => rejectResponse(signal.aborted ? signal.reason : error));
+    // Preserve fetch's public transport-error shape while retaining the native
+    // diagnosis in cause for sync status and TLS troubleshooting (#726/#744).
+    request.once("error", (error) => rejectResponse(signal.aborted
+      ? signal.reason : new TypeError("fetch failed", { cause: error })));
     try { request.end(init.body); } catch (error) {
       request.destroy();
       rejectResponse(error);

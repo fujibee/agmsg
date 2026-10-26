@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import zlib from "node:zlib";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import { request, requestIdentity, resolveTeam, cycle } from "../scripts/internal/remote-sync.mjs";
 
@@ -129,6 +130,20 @@ for (const status of [300, 301, 302, 303, 304, 307, 308, 399]) {
     await assert.rejects(request({ ...binding, server_url: url }, "/v1/messages"),
       (error) => error.message === `HTTP ${status} redirect is not allowed` && error.retryable === true);
     assert.equal(requests, 1);
+  });
+}
+
+for (const code of ["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "DEPTH_ZERO_SELF_SIGNED_CERT"]) {
+  test(`remote transport preserves fetch failure and ${code} diagnosis`, async (t) => {
+    const cause = Object.assign(new Error(`native transport ${code}`), { code });
+    t.mock.method(http, "request", () => {
+      const outgoing = new EventEmitter();
+      outgoing.end = () => queueMicrotask(() => outgoing.emit("error", cause));
+      return outgoing;
+    });
+    await assert.rejects(request({ ...binding, server_url: "http://127.0.0.1:1" }, "/v1/messages"),
+      (error) => error instanceof TypeError && error.message === "fetch failed"
+        && error.cause === cause && error.retryable === true);
   });
 }
 
