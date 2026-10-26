@@ -107,6 +107,64 @@ agmsg_only_one_install() {
   fi
 }
 
+# True iff the shim's recorded owner (the %q-quoted codex-dir string
+# shim_owner_script_dir returns) is NOT a live, runnable install: either no
+# directory at that install's location exists at all (uninstalled), or one
+# does but its own codex-shim.sh -- the file the shim actually execs into --
+# is missing (installed but broken/partially removed). This is the #553
+# recovery case: claiming a shim nothing can still dispatch through needs
+# neither --force nor a live owner to steal it from.
+#
+# Deliberately does NOT go through agmsg_install_candidates (which requires
+# each candidate's OWN .agmsg marker to be readable): that filtering, applied
+# here, silently dropped a candidate whose root directory had simply become
+# unreadable from the list entirely, before this function ever got a chance
+# to compare it against owner -- falling through to "no candidate matched",
+# i.e. "gone", for an install that was merely inaccessible right now, not
+# actually uninstalled (review finding, reproduced with an install root
+# chmod'd to 000). Scanning skills_dir's immediate children directly, by
+# directory name, still only needs x on skills_dir itself (already checked
+# below) to see that a same-named entry exists at all, independent of
+# whether anything inside it -- the .agmsg marker included -- can be read.
+#
+# Every ambiguous read at any layer (skills_dir, the matched root, or its
+# codex dir) fails CLOSED (not gone) rather than guessing in either
+# direction; only a readable codex dir that is confirmed missing
+# codex-shim.sh counts as positively gone.
+#
+# Never decodes/evals $1: every candidate's OWN codex dir is re-quoted with
+# shell_quote and compared as a string against the given (already-quoted)
+# owner, the same way install's self_owner check does -- so this needs no
+# unquoting of untrusted content at all (see shim_owner_script_dir's own
+# comment on why eval'ing that value is refused).
+owner_install_is_gone() {
+  local owner="$1" skills_dir d root cand_codex_dir
+  [ -n "$owner" ] || return 1
+  # Readable AND searchable, not just present: a skills dir that exists but
+  # cannot be listed (permissions, a transient mount issue) is otherwise
+  # indistinguishable from "genuinely no installs" -- the same ambiguity this
+  # whole guard exists to refuse (review finding, reproduced with the
+  # directory chmod'd to 000).
+  skills_dir="$(dirname "$AGENTS_BIN")/skills"
+  [ -d "$skills_dir" ] && [ -r "$skills_dir" ] && [ -x "$skills_dir" ] || return 1
+  for d in "$skills_dir"/*/; do
+    [ -d "$d" ] || continue  # an unmatched glob (empty dir) stays literal
+    root="${d%/}"
+    cand_codex_dir="$root/scripts/drivers/types/codex"
+    [ "$(shell_quote "$cand_codex_dir")" = "$owner" ] || continue
+    # Matched by directory NAME alone (stat via skills_dir's own x bit, no
+    # read needed on $root itself) -- an install root that physically exists
+    # but cannot currently be read into is "unknown", never "gone".
+    [ -r "$root" ] && [ -x "$root" ] || return 1
+    [ -r "$cand_codex_dir" ] && [ -x "$cand_codex_dir" ] || return 1
+    [ -f "$cand_codex_dir/codex-shim.sh" ] && return 1
+    return 0
+  done
+  # No directory entry matched at all: the owner install's location no
+  # longer exists on this machine.
+  return 0
+}
+
 # Prints the shell-QUOTED (%q) skill script dir baked into the currently-
 # installed shim -- empty if there is none, the shim is not an agmsg shim, or
 # it predates ownership tracking (#553; see below). This is the install that
@@ -182,8 +240,14 @@ EOF
     # to block the routine case they were never meant to touch).
     legacy_but_sole_install=false
     [ -z "$owner" ] && agmsg_only_one_install && legacy_but_sole_install=true
+    # A NAMED owner that is itself gone (uninstalled) or broken (installed,
+    # but its own dispatch script is missing) is the other #553 recovery
+    # case: there is no live install left to steal the shim from, so
+    # claiming it needs no --force either.
+    owner_is_gone=false
+    [ -n "$owner" ] && [ "$owner" != "$self_owner" ] && owner_install_is_gone "$owner" && owner_is_gone=true
     if [ -e "$TARGET" ] && [ "$owner" != "$self_owner" ] && [ "${AGMSG_CODEX_SHIM_FORCE:-}" != "1" ] \
-        && [ "$legacy_but_sole_install" != true ]; then
+        && [ "$legacy_but_sole_install" != true ] && [ "$owner_is_gone" != true ]; then
       if [ -n "$owner" ]; then
         echo "codex-shim-install: $TARGET is owned by a different install:" >&2
         echo "  $owner" >&2
