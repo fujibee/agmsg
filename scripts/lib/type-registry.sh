@@ -42,8 +42,8 @@ _agmsg_type_warn_untrusted() {
       [ -f "${dir}type.conf" ] || continue
       name="$(basename "$dir")"
       agmsg_driver_is_trusted types "$name" "${dir%/}" && continue
-      printf "agmsg: external plugin 'types/%s' found at %s but not trusted (ignored).\n       Opt in if you put it there intentionally: agmsg plugin trust types/%s\n" \
-        "$name" "${dir%/}" "$name" >&2
+      printf "agmsg: external plugin 'types/%s' found at %s but not trusted (ignored).\n       Opt in if you put it there intentionally: %s plugin trust types/%s\n" \
+        "$name" "${dir%/}" "$(agmsg_plugin_cmd "$(_agmsg_driver_root)")" "$name" >&2
     done
   done <<EOF
 $(agmsg_driver_bases)

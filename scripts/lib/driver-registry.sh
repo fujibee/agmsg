@@ -32,6 +32,10 @@ if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
   # shellcheck disable=SC1091
   source "$_AGMSG_DRIVER_LIB_DIR/sqlpath.sh"
 fi
+if ! declare -F agmsg_plugin_cmd >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  source "$_AGMSG_DRIVER_LIB_DIR/plugin-cmd.sh"
+fi
 
 # <skill-root> = up two from scripts/lib/.
 _agmsg_driver_root() {
@@ -155,8 +159,8 @@ agmsg_ext_tool_dir() {
     if [ "$kind" != builtin ] && ! agmsg_driver_is_trusted ext-tools "$tool" "$dir"; then
       case " ${_AGMSG_EXT_TOOL_WARNED:-} " in *" $tool@$dir "*) ;; *)
         _AGMSG_EXT_TOOL_WARNED="${_AGMSG_EXT_TOOL_WARNED:-} $tool@$dir"
-        printf "agmsg: external plugin 'ext-tools/%s' found at %s but not trusted (ignored).\n       Opt in if you put it there intentionally: agmsg plugin trust ext-tools/%s\n" \
-          "$tool" "$dir" "$tool" >&2 ;;
+        printf "agmsg: external plugin 'ext-tools/%s' found at %s but not trusted (ignored).\n       Opt in if you put it there intentionally: %s plugin trust ext-tools/%s\n" \
+          "$tool" "$dir" "$(agmsg_plugin_cmd "$(_agmsg_driver_root)")" "$tool" >&2 ;;
       esac
       continue
     fi

@@ -14,6 +14,9 @@
 # Warn only: nothing is untrusted or removed here, and nothing here may fail the
 # install. Sourced by install.sh only.
 
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/plugin-cmd.sh"
+
 # Print "<axis>/<name>" for each built-in driver directory under
 # <skill-dir>/scripts/drivers, sorted. Prints nothing for a first install.
 agmsg_builtin_driver_names() {  # skill-dir
@@ -49,9 +52,10 @@ _agmsg_plugin_shadow_winner() {  # skill-dir axis name
 # agmsg_builtin_driver_names taken before the copy) but that the registry does
 # not pick, because a trusted plugin of the same name wins.
 agmsg_plugin_shadow_warn() {  # skill-dir before
-  local skill before="$2" ref winner src
+  local skill before="$2" ref winner src cmd
   # The registry names its root with `cd && pwd`; compare in the same spelling.
   skill="$(cd "$1" 2>/dev/null && pwd)" || return 0
+  cmd="$(agmsg_plugin_cmd "$skill")"
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
     printf '%s\n' "$before" | grep -qxF -- "$ref" && continue
@@ -61,7 +65,7 @@ agmsg_plugin_shadow_warn() {  # skill-dir before
     echo "  ! this update adds a built-in $ref, but your trusted plugin replaces it:"
     echo "      $winner"
     echo "    The plugin keeps running in its place. To use the built-in instead, run"
-    echo "      agmsg plugin untrust $ref"
+    echo "      $cmd plugin untrust $ref"
     src=""
     case "$winner" in
       "$skill"/plugins/sources/github/*/*/*)
@@ -71,7 +75,7 @@ agmsg_plugin_shadow_warn() {  # skill-dir before
     esac
     if [ -n "$src" ]; then
       echo "    or remove the whole plugin source (every driver it provides):"
-      echo "      agmsg plugin remove $src"
+      echo "      $cmd plugin remove $src"
     fi
   done <<EOF
 $(agmsg_builtin_driver_names "$skill")

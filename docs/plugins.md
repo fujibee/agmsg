@@ -84,18 +84,23 @@ agmsg plugin: 'codex' is ambiguous across axes:
 `agmsg plugin list` marks each driver `builtin`, `trusted`, or `UNTRUSTED`:
 
 ```
-AXIS/NAME                  STATE       SOURCE                       COMMIT        PATH
-types/codex                builtin     -                            -             /…/scripts/drivers/types/codex
-types/foo                  trusted     -                            -             /…/plugins/types/foo
-types/bar                  UNTRUSTED   -                            -             /…/plugins/types/bar
-types/baz                  trusted     github/acme/baz              9074a92c6404  /…/plugins/sources/github/acme/baz/9074…/types/baz
+AXIS/NAME    STATE      SOURCE           COMMIT        PATH
+types/codex  builtin    -                -             /…/scripts/drivers/types/codex
+types/foo    trusted    -                -             /…/plugins/types/foo
+types/bar    UNTRUSTED  -                -             /…/plugins/types/bar
+types/baz    trusted    github/acme/baz  9074a92c6404  /…/plugins/sources/github/acme/baz/9074…/types/baz
 ```
+
+Each column is as wide as its longest value.
 
 > `agmsg plugin ...` runs the install's `scripts/plugin.sh`. If the `agmsg`
 > command is not on your PATH, invoke the script directly, with the same arguments:
 > `~/.agents/skills/<cmd>/scripts/plugin.sh list`.
 > In your agent, `/agmsg plugin ...` does the same (the agent asks you before it
 > installs anything).
+> The `agmsg` command reaches the install named `agmsg` only. For an install made
+> with `install.sh --cmd <other>`, use `bash ~/.agents/skills/<other>/scripts/agmsg plugin ...`;
+> the commands this install prints in its own hints are spelled that way too.
 
 ## Installing a plugin from GitHub
 
@@ -122,10 +127,11 @@ exits with status 3 ("needs confirmation").
 
 1. Fetches a shallow checkout of `https://github.com/<owner>/<repo>` into a staging
    directory.
-2. Checks it: `agmsg-plugin.conf` is present, only the `ext-tools`, `terminals` and
-   `types` axes are used (anything else is ignored and listed as such), driver names
-   match `[a-z0-9-]+`, no symlinks, `min_core` is not newer than this agmsg, and
-   nothing clashes (see below).
+2. Checks it: `agmsg-plugin.conf` is present and has a `name`, only the `ext-tools`,
+   `terminals` and `types` axes are used (anything else is ignored and listed as
+   such), every driver is named after the plugin (see "One repository, one plugin"
+   below), no symlinks, `min_core` is not newer than this agmsg, and nothing clashes
+   (see below).
 3. Prints the source and commit, every `<axis>/<name>` it adds, every file that can
    run (a shebang or the executable bit), and the at-your-own-risk notice.
 4. Asks `y/N` (or uses `--yes`), then installs and trusts each driver.
@@ -165,23 +171,35 @@ when a built-in is back in use.
 **`agmsg-plugin.conf`** is `key=value` data (never `source`d):
 
 ```
-name=my-plugin
+name=kairan
 description=What it adds
-min_core=1.6.0
+min_core=1.7.0
 ```
 
-`name` and `description` are shown in the report. `min_core` is optional; if it is
-newer than the running agmsg the install is refused.
+`name` is required and uses `[a-z0-9-]+`; it is the plugin's name and the name of
+every driver in the repository. `name` and `description` are shown in the report.
+`min_core` is optional; if it is newer than the running agmsg the install is refused.
+
+**One repository, one plugin.** A repository holds one plugin, and every driver in
+it, on whichever axis, is a part of that plugin and carries its name: a plugin named
+`kairan` may ship `ext-tools/kairan` and `terminals/kairan`, but not
+`ext-tools/kairan` and `ext-tools/desk-notify`. A repository with a driver of any
+other name is refused, with the drivers that do not match listed. If they are parts
+of the same plugin, rename their directories after it; if they are separate plugins,
+publish each from its own repository. This keeps install, update and remove about one
+thing: removing a plugin never takes an unrelated driver with it.
 
 **Repository layout**
 
 ```
 <repo>/
-├── agmsg-plugin.conf
-├── ext-tools/<tool>/...      # same contract as scripts/drivers/ext-tools/README.md
+├── agmsg-plugin.conf         # name=<name>
+├── ext-tools/<name>/...      # same contract as scripts/drivers/ext-tools/README.md
 ├── terminals/<name>/...      # same contract as a built-in terminal driver
 └── types/<name>/...          # same contract as agent-types.md
 ```
+
+Each axis directory is optional; a plugin ships the parts it needs.
 
 `storage` plugins are not accepted from GitHub yet. A plugin agent type is delivered
 by the classic delivery path; it does not get agmsgd's native delivery.

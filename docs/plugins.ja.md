@@ -83,18 +83,23 @@ agmsg plugin: 'codex' is ambiguous across axes:
 `agmsg plugin list` は各ドライバーを `builtin`、`trusted`、`UNTRUSTED` のいずれかで示す:
 
 ```
-AXIS/NAME                  STATE       SOURCE                       COMMIT        PATH
-types/codex                builtin     -                            -             /…/scripts/drivers/types/codex
-types/foo                  trusted     -                            -             /…/plugins/types/foo
-types/bar                  UNTRUSTED   -                            -             /…/plugins/types/bar
-types/baz                  trusted     github/acme/baz              9074a92c6404  /…/plugins/sources/github/acme/baz/9074…/types/baz
+AXIS/NAME    STATE      SOURCE           COMMIT        PATH
+types/codex  builtin    -                -             /…/scripts/drivers/types/codex
+types/foo    trusted    -                -             /…/plugins/types/foo
+types/bar    UNTRUSTED  -                -             /…/plugins/types/bar
+types/baz    trusted    github/acme/baz  9074a92c6404  /…/plugins/sources/github/acme/baz/9074…/types/baz
 ```
+
+各列の幅は、その列でいちばん長い値に合わせる。
 
 > `agmsg plugin ...` はインストール先の `scripts/plugin.sh` を実行する。`agmsg` コマンドが
 > PATH にない場合は、同じ引数でスクリプトを直接呼び出せる:
 > `~/.agents/skills/<cmd>/scripts/plugin.sh list`。
 > エージェント内の `/agmsg plugin ...` でも同じことができる
 > (エージェントは何かをインストールする前にあなたへ確認する)。
+> `agmsg` コマンドが届くのは `agmsg` という名前のインストールだけである。`install.sh --cmd <other>`
+> で入れたものには `bash ~/.agents/skills/<other>/scripts/agmsg plugin ...` を使う。そのインストールが
+> 案内に出すコマンドも、この形で表示される。
 
 ## typesプラグインの作成
 
@@ -144,10 +149,10 @@ agmsg plugin list
 **`install` の動作**
 
 1. `https://github.com/<owner>/<repo>` の浅いチェックアウトをステージング用ディレクトリに取得する。
-2. 検査する: `agmsg-plugin.conf` があること、使えるaxisは `ext-tools` / `terminals` / `types`
-   のみ(それ以外は無視され、その旨が表示される)、ドライバー名が `[a-z0-9-]+` であること、
-   シンボリックリンクがないこと、`min_core` がこのagmsgより新しくないこと、衝突がないこと
-   (後述)。
+2. 検査する: `agmsg-plugin.conf` があり `name` が書かれていること、使えるaxisは `ext-tools` /
+   `terminals` / `types` のみ(それ以外は無視され、その旨が表示される)、すべてのドライバーが
+   プラグインの名前であること(後述の「1 リポジトリ 1 プラグイン」)、シンボリックリンクがないこと、
+   `min_core` がこのagmsgより新しくないこと、衝突がないこと(後述)。
 3. ソースとコミット、追加される `<axis>/<name>`、実行されうるすべてのファイル(shebangまたは
    実行ビットがあるもの)、自己責任の注意を表示する。
 4. `y/N` を尋ね(または `--yes`)、各ドライバーをインストールして信頼する。
@@ -184,23 +189,34 @@ SHAは恒久的な固定になる。
 **`agmsg-plugin.conf`** は `key=value` のデータである(`source` されない):
 
 ```
-name=my-plugin
+name=kairan
 description=What it adds
-min_core=1.6.0
+min_core=1.7.0
 ```
 
-`name` と `description` はレポートに表示される。`min_core` は任意で、実行中のagmsgより新しい
-場合はインストールが拒否される。
+`name` は必須で、`[a-z0-9-]+` で書く。プラグインの名前であり、リポジトリ内のすべてのドライバーの
+名前でもある。`name` と `description` はレポートに表示される。`min_core` は任意で、実行中の
+agmsgより新しい場合はインストールが拒否される。
+
+**1 リポジトリ 1 プラグイン。** 1 つのリポジトリには 1 つのプラグインだけを置く。中のドライバーは
+どのaxisのものでもそのプラグインの部品であり、プラグインの名前を持つ。`kairan` という
+プラグインなら `ext-tools/kairan` と `terminals/kairan` は置けるが、`ext-tools/kairan` と
+`ext-tools/desk-notify` は置けない。ほかの名前のドライバーがあるリポジトリは、合わないドライバーを
+並べて拒否される。同じプラグインの部品ならディレクトリ名をプラグインの名前に変え、別のプラグイン
+ならそれぞれ別のリポジトリで公開する。こうしておけば install / update / remove の対象はいつも
+1 つで、あるプラグインを外したときに関係のないドライバーまで消えることがない。
 
 **リポジトリの構成**
 
 ```
 <repo>/
-├── agmsg-plugin.conf
-├── ext-tools/<tool>/...      # scripts/drivers/ext-tools/README.md と同じ契約
+├── agmsg-plugin.conf         # name=<name>
+├── ext-tools/<name>/...      # scripts/drivers/ext-tools/README.md と同じ契約
 ├── terminals/<name>/...      # 組み込みterminalドライバーと同じ契約
 └── types/<name>/...          # agent-types.md と同じ契約
 ```
+
+axisのディレクトリはどれも任意で、プラグインは必要な部品だけを置く。
 
 `storage` プラグインは、GitHubからはまだ受け付けない。プラグインのagent typeは従来のdelivery
 経路で配信され、agmsgdのネイティブ配信には乗らない。

@@ -40,6 +40,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ---------------------------------------------------------------------------
 
 PLUGIN_ROOT="$(_agmsg_driver_root)"
+# What the hints below tell a person to type to reach this installation.
+PLUGIN_CMD="$(agmsg_plugin_cmd "$PLUGIN_ROOT")"
 PLUGIN_SOURCES_DIR="$PLUGIN_ROOT/plugins/sources"
 PLUGIN_SOURCES_FILE="$PLUGIN_ROOT/db/plugin-sources"
 PLUGIN_ACCEPTED_AXES="ext-tools terminals types"
@@ -240,6 +242,26 @@ _plugin_inspect() {
   done
   [ -n "$PLUGIN_DRIVERS" ] || _plugin_die "this repository adds no driver (expected ext-tools/<name>, terminals/<name> or types/<name>)"
 
+  # One repository is one plugin: every driver in it, on whichever axis, is a
+  # part of the plugin agmsg-plugin.conf names, so it carries that name. Two
+  # unrelated drivers would otherwise be installed, updated and removed as one.
+  case "$PLUGIN_CONF_NAME" in
+    '') _plugin_die "agmsg-plugin.conf has no name. Set name= to the plugin's name; every driver in the repository uses it as its directory name (for example ext-tools/<name>)." ;;
+    *[!a-z0-9-]*) _plugin_die "agmsg-plugin.conf name '$PLUGIN_CONF_NAME' may use only lowercase letters, digits and '-', because it is also the driver directory name" ;;
+  esac
+  local other
+  other="$(printf '%s\n' "$PLUGIN_DRIVERS" | awk -F/ -v n="$PLUGIN_CONF_NAME" '$2 != n')"
+  if [ -n "$other" ]; then
+    {
+      echo "agmsg plugin: a repository holds one plugin, and every driver in it is named after it."
+      echo "  agmsg-plugin.conf names this plugin '$PLUGIN_CONF_NAME', but these drivers have other names:"
+      printf '%s\n' "$other" | sed 's/^/    /'
+      echo "  If they are parts of '$PLUGIN_CONF_NAME', rename their directories to '$PLUGIN_CONF_NAME' (for example ext-tools/$PLUGIN_CONF_NAME and terminals/$PLUGIN_CONF_NAME)."
+      echo "  If they are separate plugins, put each one in its own repository with its own agmsg-plugin.conf."
+    } >&2
+    exit 1
+  fi
+
   PLUGIN_EXEC=""
   for axis in $PLUGIN_ACCEPTED_AXES; do
     [ -d "$dir/$axis" ] || continue
@@ -360,10 +382,10 @@ _plugin_explain_override() {  # owner repo builtin-list action ref
     echo "    code instead of the one shipped with agmsg."
     echo "  - Whatever that driver owns (message delivery, spawning, session handling)"
     echo "    can break, and fixes in agmsg updates will not reach it while it is overridden."
-    echo "  - To go back, run: agmsg plugin remove $1/$2   (the built-in is restored)."
+    echo "  - To go back, run: $PLUGIN_CMD plugin remove $1/$2   (the built-in is restored)."
     echo
     echo "Nothing was installed. If you want this on purpose, run:"
-    echo "  agmsg plugin ${4:-install} $1/$2${5:+@$5} --override"
+    echo "  $PLUGIN_CMD plugin ${4:-install} $1/$2${5:+@$5} --override"
   } >&2
 }
 
@@ -564,20 +586,20 @@ EOF
 
 _plugin_cmd_install() {
   _plugin_parse_flags "$@"
-  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: agmsg plugin install <owner>/<repo>[@<ref>] [--yes] [--override]"
+  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: $PLUGIN_CMD plugin install <owner>/<repo>[@<ref>] [--yes] [--override]"
   _plugin_parse_spec "$PLUGIN_SPEC_ARG"
   local owner="$SPEC_OWNER" repo="$SPEC_REPO" ref="$SPEC_REF" id rec track_ref
   track_ref="$(_plugin_tracking_ref "$ref")" || exit 1
   id="github/$owner/$repo"
   if rec="$(_plugin_record "$id")"; then
-    _plugin_die "$id is already installed (commit $(printf '%s' "$rec" | cut -f3)). Use 'agmsg plugin update $owner/$repo', or 'agmsg plugin remove $owner/$repo' first."
+    _plugin_die "$id is already installed (commit $(printf '%s' "$rec" | cut -f3)). Use '$PLUGIN_CMD plugin update $owner/$repo', or '$PLUGIN_CMD plugin remove $owner/$repo' first."
   fi
   _plugin_fetch "$owner" "$repo" "$ref"
   _plugin_inspect "$PLUGIN_SRC"
   _plugin_prune_ignored "$PLUGIN_SRC"
   _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" install "$ref"
   _plugin_report "$id" "$PLUGIN_SHA"
-  _plugin_confirm "agmsg plugin install $owner/$repo@$PLUGIN_SHA --yes$(_plugin_track_flags "$ref")$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
+  _plugin_confirm "$PLUGIN_CMD plugin install $owner/$repo@$PLUGIN_SHA --yes$(_plugin_track_flags "$ref")$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
   local final="$PLUGIN_SOURCES_DIR/github/$owner/$repo/$PLUGIN_SHA"
   _plugin_lock
   # Everything above ran without the lock; confirm it still holds.
@@ -585,7 +607,7 @@ _plugin_cmd_install() {
     _plugin_die "$id was installed by another command while this one waited (commit $(printf '%s' "$rec" | cut -f3))"
   fi
   _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" install "$ref"
-  [ ! -e "$final" ] || _plugin_die "$final already exists; run 'agmsg plugin remove $owner/$repo' and retry"
+  [ ! -e "$final" ] || _plugin_die "$final already exists; run '$PLUGIN_CMD plugin remove $owner/$repo' and retry"
   mkdir -p "$(dirname "$final")"
   mv "$PLUGIN_SRC" "$final"
   _plugin_record_add "$id" "$owner/$repo${track_ref:+@$track_ref}" "$PLUGIN_SHA" "$final"
@@ -609,11 +631,11 @@ _plugin_changes() {  # old new
 
 _plugin_cmd_update() {
   _plugin_parse_flags "$@"
-  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: agmsg plugin update <owner>/<repo>[@<ref>] [--yes] [--override]"
+  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: $PLUGIN_CMD plugin update <owner>/<repo>[@<ref>] [--yes] [--override]"
   _plugin_parse_spec "$PLUGIN_SPEC_ARG"
   local owner="$SPEC_OWNER" repo="$SPEC_REPO" ref="$SPEC_REF" id rec old_spec old_sha old_dir
   id="github/$owner/$repo"
-  rec="$(_plugin_record "$id")" || _plugin_die "$id is not installed (use 'agmsg plugin install $owner/$repo')"
+  rec="$(_plugin_record "$id")" || _plugin_die "$id is not installed (use '$PLUGIN_CMD plugin install $owner/$repo')"
   old_spec="$(printf '%s' "$rec" | cut -f2)"
   old_sha="$(printf '%s' "$rec" | cut -f3)"
   old_dir="$(printf '%s' "$rec" | cut -f4)"
@@ -642,7 +664,7 @@ _plugin_cmd_update() {
   _plugin_changes "$old_dir" "$PLUGIN_SRC" | sed 's/^/  /'
   echo
   _plugin_report "$id" "$PLUGIN_SHA"
-  _plugin_confirm "agmsg plugin update $owner/$repo@$PLUGIN_SHA --yes$(_plugin_track_flags "$ref")$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
+  _plugin_confirm "$PLUGIN_CMD plugin update $owner/$repo@$PLUGIN_SHA --yes$(_plugin_track_flags "$ref")$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
   local final="$PLUGIN_SOURCES_DIR/github/$owner/$repo/$PLUGIN_SHA"
   _plugin_lock
   # Re-check under the lock: the source must still be at the commit we compared.
@@ -650,7 +672,7 @@ _plugin_cmd_update() {
   [ "$(printf '%s' "$rec" | cut -f3)" = "$old_sha" ] \
     || _plugin_die "$id was changed by another command while this one waited; run the update again"
   _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" update "$ref" "$old_dir"
-  [ ! -e "$final" ] || _plugin_die "$final already exists; run 'agmsg plugin remove $owner/$repo' and retry"
+  [ ! -e "$final" ] || _plugin_die "$final already exists; run '$PLUGIN_CMD plugin remove $owner/$repo' and retry"
   mkdir -p "$(dirname "$final")"
   mv "$PLUGIN_SRC" "$final"
   _plugin_untrust_all "$old_dir"
@@ -668,7 +690,7 @@ _plugin_cmd_update() {
 
 _plugin_cmd_remove() {
   _plugin_parse_flags "$@"
-  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: agmsg plugin remove <owner>/<repo>"
+  [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: $PLUGIN_CMD plugin remove <owner>/<repo>"
   case "$PLUGIN_SPEC_ARG" in *@*) _plugin_die "remove takes <owner>/<repo> without a ref" ;; esac
   _plugin_parse_spec "$PLUGIN_SPEC_ARG"
   local owner="$SPEC_OWNER" repo="$SPEC_REPO" id rec dir drv back=""
@@ -750,7 +772,7 @@ _plugin_resolve_external() {
   if [ "$count" -gt 1 ]; then
     echo "agmsg plugin: '$ref' is ambiguous across axes:" >&2
     printf '%s\n' "$matches" | awk -F'\t' '{print "  "$1"/"$2}' >&2
-    echo "       qualify it, e.g. agmsg plugin $ACTION $(printf '%s' "$matches" | head -1 | awk -F'\t' '{print $1"/"$2}')" >&2
+    echo "       qualify it, e.g. $PLUGIN_CMD plugin $ACTION $(printf '%s' "$matches" | head -1 | awk -F'\t' '{print $1"/"$2}')" >&2
     return 1
   fi
   printf '%s\n' "$matches"
@@ -758,24 +780,36 @@ _plugin_resolve_external() {
 
 case "$ACTION" in
   list)
-    printf '%-26s %-11s %-28s %-13s %s\n' "AXIS/NAME" "STATE" "SOURCE" "COMMIT" "PATH"
-    _plugin_enumerate | while IFS=$'\t' read -r kind axis name dir; do
-      if [ "$kind" = builtin ]; then
-        state="builtin"
-      elif agmsg_driver_is_trusted "$axis" "$name" "$dir"; then
-        state="trusted"
-      else
-        state="UNTRUSTED"
-      fi
-      IFS=$'\t' read -r src commit <<<"$(_plugin_source_of "$dir")"
-      printf '%-26s %-11s %-28s %-13s %s\n' "$axis/$name" "$state" "$src" "$commit" "$dir"
-    done
+    # Rows are collected first so each column can be as wide as its longest
+    # value: a GitHub source name has no fixed length (#1781).
+    {
+      printf 'AXIS/NAME\tSTATE\tSOURCE\tCOMMIT\tPATH\n'
+      _plugin_enumerate | while IFS=$'\t' read -r kind axis name dir; do
+        if [ "$kind" = builtin ]; then
+          state="builtin"
+        elif agmsg_driver_is_trusted "$axis" "$name" "$dir"; then
+          state="trusted"
+        else
+          state="UNTRUSTED"
+        fi
+        IFS=$'\t' read -r src commit <<<"$(_plugin_source_of "$dir")"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$axis/$name" "$state" "$src" "$commit" "$dir"
+      done
+    } | awk -F'\t' '
+      { for (i = 1; i <= NF; i++) { cell[NR, i] = $i; if (i < NF && length($i) > w[i]) w[i] = length($i) } n[NR] = NF }
+      END {
+        for (r = 1; r <= NR; r++) {
+          line = ""
+          for (i = 1; i < n[r]; i++) line = line sprintf("%-" w[i] "s  ", cell[r, i])
+          print line cell[r, n[r]]
+        }
+      }'
     ;;
   install|add) _plugin_cmd_install "$@" ;;
   update)      _plugin_cmd_update "$@" ;;
   remove|uninstall) _plugin_cmd_remove "$@" ;;
   trust)
-    ref="${1:?Usage: agmsg plugin trust <axis/name|name>}"
+    ref="${1:?Usage: $PLUGIN_CMD plugin trust <axis/name|name>}"
     res="$(_plugin_resolve_external "$ref")" || exit 1
     IFS=$'\t' read -r axis name dir <<<"$res"
     _plugin_lock
@@ -784,7 +818,7 @@ case "$ACTION" in
     echo "Trusted $axis/$name -> $dir"
     ;;
   untrust)
-    ref="${1:?Usage: agmsg plugin untrust <axis/name|name>}"
+    ref="${1:?Usage: $PLUGIN_CMD plugin untrust <axis/name|name>}"
     case "$ref" in
       */*) axis="${ref%%/*}"; name="${ref#*/}" ;;
       *)   res="$(_plugin_resolve_external "$ref")" || exit 1
@@ -796,7 +830,7 @@ case "$ACTION" in
     echo "Untrusted $axis/$name"
     ;;
   *)
-    echo "Usage: agmsg plugin list|trust <ref>|untrust <ref>|install <owner>/<repo>[@<ref>]|update <owner>/<repo>|remove <owner>/<repo>" >&2
+    echo "Usage: $PLUGIN_CMD plugin list|trust <ref>|untrust <ref>|install <owner>/<repo>[@<ref>]|update <owner>/<repo>|remove <owner>/<repo>" >&2
     exit 1
     ;;
 esac
