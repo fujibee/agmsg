@@ -213,6 +213,13 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   run PLUGIN install acme/pack --yes
   [ "$status" -eq 1 ]
   grep -Fq "name 'Fx' may use only lowercase letters" <<<"$output"
+  # bash 3.2 under a UTF-8 locale lets [a-z] match uppercase; the check must
+  # not depend on that (macOS /bin/bash, where this first failed).
+  if [ -x /bin/bash ] && locale -a 2>/dev/null | grep -qix 'en_US.UTF-8'; then
+    run env LC_ALL=en_US.UTF-8 /bin/bash "$SCRIPTS/plugin.sh" install acme/pack --yes
+    [ "$status" -eq 1 ]
+    grep -Fq "name 'Fx' may use only lowercase letters" <<<"$output"
+  fi
   [ ! -e "$TEST_SKILL_DIR/db/plugin-sources" ]
 }
 
