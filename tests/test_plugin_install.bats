@@ -698,3 +698,15 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   grep -q "/scripts/ext-tool.sh usage fx$" <<<"$output"
   refute grep -q "Your teams" <<<"$output"
 }
+
+@test "the next step for an ext-tool with a SETUP.md but no setup points at SETUP.md, with no setup command" {
+  w="$(mk_repo acme pack)"
+  printf '# first steps\n' > "$w/ext-tools/fx/SETUP.md"
+  git -C "$w" add -A; git -C "$w" commit -qm setupmd
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 0 ]
+  grep -q "It needs no settings; follow .*/ext-tools/fx/SETUP.md for its first steps:" <<<"$output"
+  refute grep -q "ext-tool.sh setup" <<<"$output"
+  grep -q "/scripts/join.sh <team> fx ext-tool --tool fx$" <<<"$output"
+}
