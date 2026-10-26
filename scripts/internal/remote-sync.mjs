@@ -5,8 +5,9 @@ import { spawn } from "node:child_process";
 import { appendFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
-import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmdirSync,
-  rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync,
+  realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync,
+  writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ageExecutableVersion, CipherStateError, openEnvelope,
@@ -4232,6 +4233,88 @@ async function publicSnapshot(serverUrl, teamId) {
 // this lock too).
 let heldTeamConfigLock = null; // { lockDir, holderPath, token } | null
 
+function teamConfigHolderIsAlive(record) {
+  const pidText = /^pid ([0-9]+)$/m.exec(record)?.[1];
+  const host = /^host (.+)$/m.exec(record)?.[1];
+  if (host !== hostname() || !pidText || !/^[1-9][0-9]{0,9}$/.test(pidText)) return undefined;
+  const pid = Number(pidText);
+  if (!Number.isSafeInteger(pid) || pid > 2_147_483_647) return undefined;
+  // Git Bash records an MSYS PID, outside native Windows Node's PID space.
+  // ESRCH there cannot disprove shell liveness. Only an identified Node writer
+  // may be checked; unknown commands/writers remain fail-closed as well.
+  if (process.platform === "win32") {
+    const command = /^command (.+)$/m.exec(record)?.[1];
+    const writer = /^writer (.+)$/m.exec(record)?.[1];
+    if (command !== "remote-sync.mjs" || (writer && writer !== "remote-sync.mjs")) return undefined;
+  }
+  try { process.kill(pid, 0); return true; }
+  catch (error) {
+    if (error?.code === "ESRCH") return false;
+    // EPERM means the process exists but belongs to another user. Other errors
+    // do not establish that it is gone, so they fail closed as well.
+    return true;
+  }
+}
+
+function restoreClaimedTeamConfigHolder(staged, holderPath) {
+  // linkSync is no-clobber: another recovery attempt may have restored a
+  // holder after our claim, and replacing it would erase that evidence.
+  try { linkSync(staged, holderPath); } catch { return false; }
+  try { unlinkSync(staged); } catch { /* duplicate evidence is inert */ }
+  return true;
+}
+
+function restoreClaimedTeamConfigHolderOrThrow(staged, holderPath) {
+  if (!restoreClaimedTeamConfigHolder(staged, holderPath)) {
+    throw new Error(`could not restore the team registry holder at ${holderPath}; ` +
+      `the claimed record remains at ${staged}`);
+  }
+}
+
+function recoverStaleTeamConfigLock(lockDir, holderPath) {
+  let lockIdentity;
+  try { lockIdentity = statSync(lockDir); } catch { return false; }
+  if (!lockIdentity.isDirectory()) return false;
+  // A `.holder.releasing.*` file is deliberately not a holder record: it can
+  // outlive the lock it came from and be mistaken for a later owner's lock.
+  if (!existsSync(holderPath)) return false;
+  // Avoid disturbing a holder that is plainly alive. This is only a cheap
+  // preflight: after claiming the path below, its contents are read and judged
+  // again before the lock directory can be removed.
+  let initialRecord;
+  try { initialRecord = readFileSync(holderPath, "utf8"); } catch { return false; }
+  if (teamConfigHolderIsAlive(initialRecord) !== false) return false;
+  const claim = `${holderPath}.reclaim.${process.pid}.${randomBytes(12).toString("hex")}`;
+  try { renameSync(holderPath, claim); } catch { return false; }
+  let alive;
+  try { alive = teamConfigHolderIsAlive(readFileSync(claim, "utf8")); }
+  catch { alive = undefined; }
+  if (alive !== false) {
+    restoreClaimedTeamConfigHolderOrThrow(claim, holderPath);
+    return false;
+  }
+  let currentIdentity;
+  try { currentIdentity = statSync(lockDir); } catch {
+    // The original lock disappeared while it was being inspected. Do not
+    // remove a lock another process may have created at the same path.
+    restoreClaimedTeamConfigHolderOrThrow(claim, holderPath);
+    return false;
+  }
+  if (currentIdentity.dev !== lockIdentity.dev || currentIdentity.ino !== lockIdentity.ino) {
+    restoreClaimedTeamConfigHolderOrThrow(claim, holderPath);
+    return false;
+  }
+  try { rmdirSync(lockDir); }
+  catch {
+    // The directory was not ours to clear (for example, it changed while we
+    // inspected it). Keep the evidence available for the next attempt.
+    restoreClaimedTeamConfigHolderOrThrow(claim, holderPath);
+    return false;
+  }
+  try { unlinkSync(claim); } catch { /* inert sibling; best effort */ }
+  return true;
+}
+
 // Same ownership check as the shell side's _agmsg_lock_drop: remove the
 // holder and the directory only when the recorded token is still ours. An
 // operator may have removed a stuck lock and a successor taken the same path
@@ -4281,6 +4364,11 @@ export async function withTeamConfigLock(team, fn) {
   installTeamConfigLockSignalHandlers();
   const lockDir = join(dirname(teamConfigPath(team)), ".config.lock");
   const holderPath = `${lockDir}.holder`;
+  // Prepare every fallible record input before mkdir, matching registry-lock.sh
+  // (#1592). After acquisition only the synchronous record write remains.
+  const token = randomBytes(16).toString("hex");
+  const record = `token ${token}\npid ${process.pid}\ncommand remote-sync.mjs\nhost ${hostname()}\n`;
+  const held = { lockDir, holderPath, token };
   for (let attempt = 0; ; attempt += 1) {
     try {
       mkdirSync(lockDir);
@@ -4291,12 +4379,9 @@ export async function withTeamConfigLock(team, fn) {
     }
     catch (error) {
       if (error?.code !== "EEXIST") throw error;
-      // Same exit as the shell side (registry-lock.sh): a holder that died
-      // without its release trap (SIGKILL, power loss) leaves the directory,
-      // and the way out is bounded failure that NAMES it -- never an
-      // unbounded wait. Nothing sweeps stale locks anywhere in this tree;
-      // matching the existing contract rather than inventing liveness
-      // detection on one side of a shared primitive.
+      // Recheck occasionally: a process may finish while we wait, including
+      // after an earlier recovery attempt found it alive.
+      if (attempt % 100 === 0 && recoverStaleTeamConfigLock(lockDir, holderPath)) continue;
       if (attempt >= 1000) {
         throw new Error(`timed out acquiring the team registry lock at ${lockDir}; ` +
           "if no agmsg command is running against this team, remove that directory and re-run");
@@ -4317,11 +4402,8 @@ export async function withTeamConfigLock(team, fn) {
   // landing between them found heldTeamConfigLock still null and exited over
   // an empty, un-annotated directory, the original bug moved into a
   // narrower window instead of closed.
-  const token = randomBytes(16).toString("hex");
-  const held = { lockDir, holderPath, token };
   try {
-    writeFileSync(holderPath,
-      `token ${token}\npid ${process.pid}\ncommand remote-sync.mjs\nhost ${hostname()}\n`);
+    writeFileSync(holderPath, record);
   } catch { /* best-effort: the lock is held as of the mkdir above regardless */ }
   heldTeamConfigLock = held;
   try {

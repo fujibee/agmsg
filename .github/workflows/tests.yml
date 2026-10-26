@@ -939,6 +939,12 @@ jobs:
           fi
           bats --version
 
+      # The engine suite otherwise runs only on Ubuntu/macOS. Exercise the
+      # shell/native Node PID-space boundary on its actual Windows runtime.
+      - name: Native Windows Node respects a shell registry lock (#1555)
+        if: needs.changes.outputs.docs_only != 'true' && matrix.leg == 'windows runtime (#567)'
+        run: node --test --test-name-pattern='native Windows Node' tests/remote_sync_engine.test.mjs
+
       - name: Run tests
         if: needs.changes.outputs.docs_only != 'true'
         run: |
