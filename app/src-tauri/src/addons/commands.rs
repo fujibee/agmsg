@@ -284,6 +284,15 @@ pub fn addon_grant_root(host: State<'_, Arc<AddonHost>>, id: PaneId, path: Strin
     Ok(real.to_string_lossy().into_owned())
 }
 
+/// The real path a chosen folder would be granted as, with the same checks as `addon_grant_root`
+/// but nothing granted. The UI uses it to see whether a picked folder is one the person already
+/// chose to remember; a refusal here means the card (with its explanation) is the next step.
+#[tauri::command(async)]
+pub fn addon_resolve_folder(host: State<'_, Arc<AddonHost>>, path: String) -> Result<String, BrokerError> {
+    host.panes.refresh_deny();
+    Ok(grant_root_path(&host.panes.deny(), &path)?.to_string_lossy().into_owned())
+}
+
 pub fn grant_root_path(deny: &Denylist, path: &str) -> Result<PathBuf, BrokerError> {
     let p = PathBuf::from(path);
     if !p.is_absolute() {

@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AddonsSettings } from "./AddonsSettings";
 import type { Catalog } from "./catalog";
+import { collectSavedGrants } from "./collectGrants";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
 import { createLiveSource, toCommandError, type Outcome } from "./source";
 import type { FetchProgress, Grant, InstallError, StagedInstall } from "./types";
@@ -55,21 +56,7 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
   // Remembered grants of the installed add-ons, read from Rust whenever the list changes.
   const loadGrants = useCallback(async () => {
     const seq = ++grantsSeq.current;
-    const out: Grant[] = [];
-    let failure: string | null = null;
-    for (const a of catalog.addons) {
-      if (a.builtin || a.dev) continue;
-      for (const p of a.panes) {
-        const r = await source.savedGrants(a.id, p.name);
-        if (!r.ok) {
-          failure ??= r.error.message;
-          continue;
-        }
-        for (const g of r.value)
-          if (g.permission === "files:read" || g.permission === "messages:read")
-            out.push({ addonId: a.id, pane: p.name, permission: g.permission, scope: g.scope, remember: true, grantedAt: g.grantedAt });
-      }
-    }
+    const { grants: out, failure } = await collectSavedGrants(catalog.addons, source.savedGrants);
     if (seq !== grantsSeq.current) return; // a newer load started: this one is out of date
     setGrants(out);
     setGrantsError(failure);

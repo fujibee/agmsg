@@ -11,7 +11,7 @@ import { grantChips } from "./model";
 import { envNoticeKey } from "./envNotice";
 import { createOpGuard } from "./opGuard";
 import { listenPaneFailed, type PaneFailedEvent } from "./paneFailed";
-import { pickSavedRoot, pickSavedTeam } from "./savedGrants";
+import { pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
 import { createLiveSource, parseNetwork, toCommandError, type AddedPane } from "./source";
 import type { AddonPaneRef, GrantChip, GrantNeed, InstalledAddon, PaneState } from "./types";
@@ -158,8 +158,27 @@ function LiveAddonPane(props: {
     });
     if (r === null) return;
     if (r.kind !== "done") return; // another operation is running, or this attempt is gone
-    if (typeof r.value === "string") setFolder(r.value);
-    else props.onClose(); // cancelling the folder choice leaves nothing to show, so the pane closes (same as "Not now" on the team card)
+    if (typeof r.value !== "string") {
+      props.onClose(); // cancelling the folder choice leaves nothing to show, so the pane closes (same as "Not now" on the team card)
+      return;
+    }
+    const picked = r.value;
+    // A folder the person already remembered with "Always" needs no card again (never for a developer copy).
+    if (!isDev && added) {
+      const again = await guard.current.run(async () => {
+        const rep = await replayPickedFolder(source, { addonId: pane.addonId, paneName: pane.paneName, paneId: added.id }, picked);
+        return rep === null ? null : { rep, note: await envNote(added.id) };
+      });
+      if (again.kind !== "done") return;
+      if (again.value !== null) {
+        const { rep, note } = again.value;
+        setChips((cs) => [...cs, { key: `root:${rep.realPath}`, label: rep.realPath, note }]);
+        setFolder(rep.realPath);
+        setSteps((s) => (s[0] === "folder" ? s.slice(1) : s));
+        return;
+      }
+    }
+    setFolder(picked);
   };
 
   // Show the card for the first step still open; with none left the frame runs.

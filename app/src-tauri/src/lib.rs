@@ -674,6 +674,7 @@ pub fn run() {
             addons::commands::addon_grant_team,
             addons::commands::addon_revoke_team,
             addons::commands::addon_grant_root,
+            addons::commands::addon_resolve_folder,
             addons::commands::addon_revoke_root,
             addons::commands::addon_folder_env_notice,
             addons::commands::addon_feed_init,
