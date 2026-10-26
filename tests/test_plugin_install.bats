@@ -19,19 +19,20 @@ teardown() { teardown_test_env; }
 
 PLUGIN() { bash "$SCRIPTS/plugin.sh" "$@"; }
 
-# mk_repo <owner> <repo> [min_core] -- a work tree with one type, one ext-tool
-# and an unrelated docs/ dir, committed, with a bare copy at $GIT_BASE/<o>/<r>.git
+# mk_repo <owner> <repo> [min_core] -- a work tree for the plugin "fx" (a type
+# and an ext-tool, both named after it) and an unrelated docs/ dir, committed,
+# with a bare copy at $GIT_BASE/<o>/<r>.git
 mk_repo() {
   local o="$1" r="$2" min="${3:-}" w="$BATS_TEST_TMPDIR/work-$1-$2"
-  mkdir -p "$w/types/fx" "$w/ext-tools/tq" "$w/docs" "$GIT_BASE/$o"
+  mkdir -p "$w/types/fx" "$w/ext-tools/fx" "$w/docs" "$GIT_BASE/$o"
   git -C "$w" init -q -b main 2>/dev/null || git -C "$w" init -q
-  printf 'name=%s\ndescription=demo plugin\n%s' "$r" "${min:+min_core=$min
+  printf 'name=fx\ndescription=demo plugin\n%s' "${min:+min_core=$min
 }" > "$w/agmsg-plugin.conf"
   printf 'name=fx\ntemplate=template.md\nhooks_file=.x/fx.json\n' > "$w/types/fx/type.conf"
   printf '# t\n' > "$w/types/fx/template.md"
-  printf 'timeout=5\n' > "$w/ext-tools/tq/tool.conf"
-  printf '#!/usr/bin/env bash\necho v1\n' > "$w/ext-tools/tq/handle"
-  chmod +x "$w/ext-tools/tq/handle"
+  printf 'timeout=5\n' > "$w/ext-tools/fx/tool.conf"
+  printf '#!/usr/bin/env bash\necho v1\n' > "$w/ext-tools/fx/handle"
+  chmod +x "$w/ext-tools/fx/handle"
   echo docs > "$w/docs/a.md"
   git -C "$w" add -A
   git -C "$w" commit -qm one
@@ -40,10 +41,21 @@ mk_repo() {
   echo "$w"
 }
 
+# rename_plugin <work-tree> <name> -- rename the plugin and both its drivers
+# (not committed)
+rename_plugin() {
+  local w="$1" n="$2" old
+  old="$(sed -n 's/^name=//p' "$w/agmsg-plugin.conf")"
+  git -C "$w" mv "types/$old" "types/$n"
+  git -C "$w" mv "ext-tools/$old" "ext-tools/$n"
+  sed -i.bak "s/^name=.*/name=$n/" "$w/agmsg-plugin.conf" && rm -f "$w/agmsg-plugin.conf.bak"
+  git -C "$w" add agmsg-plugin.conf
+}
+
 # push a second commit that changes the handle
 bump_repo() {
   local o="$1" r="$2" w="$BATS_TEST_TMPDIR/work-$1-$2"
-  printf '#!/usr/bin/env bash\necho v2\n' > "$w/ext-tools/tq/handle"
+  printf '#!/usr/bin/env bash\necho v2\n' > "$w/ext-tools/fx/handle"
   git -C "$w" commit -qam two
   git -C "$w" push -q "$GIT_BASE/$o/$r.git" HEAD:main 2>/dev/null \
     || git -C "$w" push -q "$GIT_BASE/$o/$r.git" HEAD
@@ -58,7 +70,7 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   grep -q "Plugin source: github/acme/pack" <<<"$output"
   grep -q "$(head_of acme pack)" <<<"$output"
   grep -q "types/fx" <<<"$output"
-  grep -q "ext-tools/tq/handle" <<<"$output"
+  grep -q "ext-tools/fx/handle" <<<"$output"
   grep -q "at your own risk" <<<"$output"
   grep -q "Ignored (not installed.*): docs/" <<<"$output"
   grep -q "plugin install acme/pack@$(head_of acme pack) --yes" <<<"$output"
@@ -80,11 +92,11 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   [ "$(cut -f3 "$TEST_SKILL_DIR/db/plugin-sources")" = "$sha" ]
   [ "$(cut -f4 "$TEST_SKILL_DIR/db/plugin-sources")" = "$d" ]
   grep -qxF "$(printf 'types/fx\t%s' "$d/types/fx")" "$TEST_SKILL_DIR/db/trusted-plugins"
-  grep -qxF "$(printf 'ext-tools/tq\t%s' "$d/ext-tools/tq")" "$TEST_SKILL_DIR/db/trusted-plugins"
+  grep -qxF "$(printf 'ext-tools/fx\t%s' "$d/ext-tools/fx")" "$TEST_SKILL_DIR/db/trusted-plugins"
   # and the registry resolves it
-  run bash -c "source '$SCRIPTS/lib/driver-registry.sh'; agmsg_ext_tool_dir tq"
+  run bash -c "source '$SCRIPTS/lib/driver-registry.sh'; agmsg_ext_tool_dir fx"
   [ "$status" -eq 0 ]
-  [ "$output" = "$d/ext-tools/tq" ]
+  [ "$output" = "$d/ext-tools/fx" ]
   [ ! -d "$TEST_SKILL_DIR/plugins/sources/.staging" ] || [ -z "$(ls -A "$TEST_SKILL_DIR/plugins/sources/.staging")" ]
 }
 
@@ -105,25 +117,25 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   [ "$(head_of acme pack)" != "$old" ]
   run PLUGIN install "acme/pack@$old" --yes
   [ "$status" -eq 0 ]
-  [ -f "$TEST_SKILL_DIR/plugins/sources/github/acme/pack/$old/ext-tools/tq/handle" ]
-  grep -q "echo v1" "$TEST_SKILL_DIR/plugins/sources/github/acme/pack/$old/ext-tools/tq/handle"
+  [ -f "$TEST_SKILL_DIR/plugins/sources/github/acme/pack/$old/ext-tools/fx/handle" ]
+  grep -q "echo v1" "$TEST_SKILL_DIR/plugins/sources/github/acme/pack/$old/ext-tools/fx/handle"
 }
 
 @test "install @<branch> checks out that branch" {
   w="$(mk_repo acme pack)"
   git -C "$w" checkout -q -b other
-  printf '#!/usr/bin/env bash\necho other\n' > "$w/ext-tools/tq/handle"
+  printf '#!/usr/bin/env bash\necho other\n' > "$w/ext-tools/fx/handle"
   git -C "$w" commit -qam other
   git -C "$w" push -q "$GIT_BASE/acme/pack.git" other
   run PLUGIN install acme/pack@other --yes
   [ "$status" -eq 0 ]
-  grep -q "echo other" "$TEST_SKILL_DIR"/plugins/sources/github/acme/pack/*/ext-tools/tq/handle
+  grep -q "echo other" "$TEST_SKILL_DIR"/plugins/sources/github/acme/pack/*/ext-tools/fx/handle
   [ "$(cut -f2 "$TEST_SKILL_DIR/db/plugin-sources")" = "acme/pack@other" ]
 }
 
 @test "the checkout is not CRLF-converted" {
   w="$(mk_repo acme pack)"
-  printf '#!/usr/bin/env bash\necho crlf\n' > "$w/ext-tools/tq/handle"
+  printf '#!/usr/bin/env bash\necho crlf\n' > "$w/ext-tools/fx/handle"
   git -C "$w" commit -qam lf
   git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
   # a user-level autocrlf=true would convert; the install must override it
@@ -131,7 +143,7 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   printf '[core]\n\tautocrlf = true\n\teol = crlf\n' > "$GIT_CONFIG_GLOBAL"
   run PLUGIN install acme/pack --yes
   [ "$status" -eq 0 ]
-  h="$(ls "$TEST_SKILL_DIR"/plugins/sources/github/acme/pack/*/ext-tools/tq/handle)"
+  h="$(ls "$TEST_SKILL_DIR"/plugins/sources/github/acme/pack/*/ext-tools/fx/handle)"
   [ -z "$(grep -c "$(printf '\r')" "$h" | grep -v '^0$')" ]
 }
 
@@ -166,6 +178,72 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   run PLUGIN install acme/pack --yes
   [ "$status" -eq 1 ]
   grep -q "lowercase letters, digits" <<<"$output"
+}
+
+@test "one repository is one plugin: a driver not named after agmsg-plugin.conf's name is refused" {
+  w="$(mk_repo acme pack)"
+  mkdir -p "$w/ext-tools/other"
+  printf 'timeout=5\n' > "$w/ext-tools/other/tool.conf"
+  git -C "$w" add -A; git -C "$w" commit -qm other
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 1 ]
+  grep -Fq "a repository holds one plugin" <<<"$output"
+  grep -Fq "names this plugin 'fx'" <<<"$output"
+  grep -qx "    ext-tools/other" <<<"$output"
+  # the same-named parts (types/fx, ext-tools/fx) are not in the list
+  refute grep -qx "    types/fx" <<<"$output"
+  grep -Fq "rename their directories to 'fx'" <<<"$output"
+  grep -Fq "put each one in its own repository" <<<"$output"
+  [ ! -e "$TEST_SKILL_DIR/db/plugin-sources" ]
+  [ ! -e "$TEST_SKILL_DIR/db/trusted-plugins" ]
+}
+
+@test "agmsg-plugin.conf without a name is refused, and so is a name that cannot be a driver name" {
+  w="$(mk_repo acme pack)"
+  printf 'description=no name\n' > "$w/agmsg-plugin.conf"
+  git -C "$w" commit -qam noname
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 1 ]
+  grep -Fq "agmsg-plugin.conf has no name" <<<"$output"
+  printf 'name=Fx\n' > "$w/agmsg-plugin.conf"
+  git -C "$w" commit -qam upper
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 1 ]
+  grep -Fq "name 'Fx' may use only lowercase letters" <<<"$output"
+  [ ! -e "$TEST_SKILL_DIR/db/plugin-sources" ]
+}
+
+@test "hints name the agmsg command only for the install named agmsg, else this install's script (#1779)" {
+  run bash -c ". '$SCRIPTS/lib/plugin-cmd.sh'; agmsg_plugin_cmd /home/u/.agents/skills/agmsg; echo; agmsg_plugin_cmd /home/u/.agents/skills/agmsg/; echo; agmsg_plugin_cmd '/home/u/.agents/skills/agmsg try'"
+  [ "${lines[0]}" = "agmsg" ]
+  [ "${lines[1]}" = "agmsg" ]
+  [ "${lines[2]}" = 'bash /home/u/.agents/skills/agmsg\ try/scripts/agmsg' ]
+
+  # This suite's install dir is not named agmsg, so the proceed line names it.
+  mk_repo acme pack >/dev/null
+  run PLUGIN install acme/pack
+  [ "$status" -eq 3 ]
+  grep -q "^  bash .*/scripts/agmsg plugin install acme/pack@" <<<"$output"
+  refute grep -q "^  agmsg plugin install" <<<"$output"
+}
+
+@test "plugin list lines its columns up whatever the source name's length (#1781)" {
+  mk_repo acme a-rather-long-plugin-repository-name >/dev/null
+  PLUGIN install acme/a-rather-long-plugin-repository-name --yes >/dev/null
+  run PLUGIN list
+  [ "$status" -eq 0 ]
+  header="${lines[0]}"
+  row="$(grep '^ext-tools/fx ' <<<"$output")"
+  long="$(grep '^ext-tools/slack ' <<<"$output")"
+  # COMMIT starts at the same column on the header, the long row and a short row.
+  col="$(awk -v s="$header" 'BEGIN { print index(s, "COMMIT") }')"
+  [ "$col" -gt 0 ]
+  [ "${row:$((col - 1)):12}" = "$(head_of acme a-rather-long-plugin-repository-name | cut -c1-12)" ]
+  [ "${long:$((col - 1)):1}" = "-" ]
+  [ "${long:$((col - 2)):1}" = " " ]
 }
 
 @test "owner and repo are validated as single path segments" {
@@ -253,7 +331,7 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   [ "$status" -eq 3 ]
   grep -q "from $old" <<<"$output"
   grep -q "to $new" <<<"$output"
-  grep -q "M ext-tools/tq/handle" <<<"$output"
+  grep -q "M ext-tools/fx/handle" <<<"$output"
   [ "$(cut -f3 "$TEST_SKILL_DIR/db/plugin-sources")" = "$old" ]
   [ -d "$TEST_SKILL_DIR/plugins/sources/github/acme/pack/$old" ]
   [ ! -e "$TEST_SKILL_DIR/plugins/sources/github/acme/pack/$new" ]
@@ -272,11 +350,11 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   [ -d "$base/$new" ]
   [ "$(cut -f3 "$TEST_SKILL_DIR/db/plugin-sources")" = "$new" ]
   [ "$(wc -l < "$TEST_SKILL_DIR/db/plugin-sources" | tr -d ' ')" -eq 1 ]
-  grep -qxF "$(printf 'ext-tools/tq\t%s' "$base/$new/ext-tools/tq")" "$TEST_SKILL_DIR/db/trusted-plugins"
+  grep -qxF "$(printf 'ext-tools/fx\t%s' "$base/$new/ext-tools/fx")" "$TEST_SKILL_DIR/db/trusted-plugins"
   run grep -F "$base/$old" "$TEST_SKILL_DIR/db/trusted-plugins"
   [ "$status" -ne 0 ]
-  run bash -c "source '$SCRIPTS/lib/driver-registry.sh'; agmsg_ext_tool_dir tq"
-  [ "$output" = "$base/$new/ext-tools/tq" ]
+  run bash -c "source '$SCRIPTS/lib/driver-registry.sh'; agmsg_ext_tool_dir fx"
+  [ "$output" = "$base/$new/ext-tools/fx" ]
 }
 
 @test "update of a source that is not installed is refused" {
@@ -294,7 +372,7 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   [ ! -e "$TEST_SKILL_DIR/plugins/sources/github/acme/pack" ]
   [ ! -s "$TEST_SKILL_DIR/db/plugin-sources" ]
   [ ! -s "$TEST_SKILL_DIR/db/trusted-plugins" ]
-  run bash -c "source '$SCRIPTS/lib/driver-registry.sh'; agmsg_ext_tool_dir tq"
+  run bash -c "source '$SCRIPTS/lib/driver-registry.sh'; agmsg_ext_tool_dir fx"
   [ "$status" -ne 0 ]
 }
 
@@ -304,6 +382,7 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   w="$BATS_TEST_TMPDIR/work-other-pack2"
   git -C "$w" rm -rq types ext-tools
   mkdir -p "$w/types/gx"; printf 'name=gx\ntemplate=template.md\nhooks_file=.x/g.json\n' > "$w/types/gx/type.conf"
+  printf 'name=gx\n' > "$w/agmsg-plugin.conf"
   git -C "$w" add -A; git -C "$w" commit -qm gx
   git -C "$w" push -q "$GIT_BASE/other/pack2.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/other/pack2.git" HEAD
   PLUGIN install acme/pack --yes >/dev/null
@@ -392,12 +471,14 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   mk_repo acme pack >/dev/null
   PLUGIN install acme/pack@main --yes >/dev/null
   w="$BATS_TEST_TMPDIR/work-acme-pack"
-  mkdir -p "$w/types/core"
-  printf 'name=core\ntemplate=template.md\nhooks_file=.x/c.json\n' > "$w/types/core/type.conf"
-  git -C "$w" add -A; git -C "$w" commit -qm core
+  # The update adds a part of the same plugin on another axis, where a built-in
+  # of that name exists.
+  mkdir -p "$w/terminals/fx"
+  printf 'name=fx\n' > "$w/terminals/fx/terminal.conf"
+  git -C "$w" add -A; git -C "$w" commit -qm terminal
   git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
-  mkdir -p "$SCRIPTS/drivers/types/core"
-  printf 'name=core\n' > "$SCRIPTS/drivers/types/core/type.conf"
+  mkdir -p "$SCRIPTS/drivers/terminals/fx"
+  printf 'name=fx\n' > "$SCRIPTS/drivers/terminals/fx/terminal.conf"
   run PLUGIN update acme/pack --yes
   [ "$status" -eq 1 ]
   grep -q "would replace built-in" <<<"$output"
@@ -412,7 +493,7 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
 @test "concurrent removes of different sources do not resurrect or lose rows" {
   for i in 1 2 3 4 5 6; do
     w="$(mk_repo "o$i" "p$i")"
-    git -C "$w" mv types/fx "types/fx$i"; git -C "$w" mv ext-tools/tq "ext-tools/tq$i"
+    rename_plugin "$w" "fx$i"
     git -C "$w" commit -qam "rename $i"
     git -C "$w" push -q "$GIT_BASE/o$i/p$i.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/o$i/p$i.git" HEAD
     PLUGIN install "o$i/p$i" --yes >/dev/null
@@ -435,7 +516,7 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
 @test "concurrent installs of different sources keep every row and every trust line" {
   for i in 1 2 3 4 5 6; do
     w="$(mk_repo "o$i" "p$i")"
-    git -C "$w" mv types/fx "types/fx$i"; git -C "$w" mv ext-tools/tq "ext-tools/tq$i"
+    rename_plugin "$w" "fx$i"
     git -C "$w" commit -qam "rename $i"
     git -C "$w" push -q "$GIT_BASE/o$i/p$i.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/o$i/p$i.git" HEAD
   done
@@ -520,7 +601,7 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   [ "$(grep '^github/acme/pack	' "$TEST_SKILL_DIR/db/plugin-sources" | cut -f2)" = "acme/pack" ]
   PLUGIN remove acme/pack >/dev/null
   w="$BATS_TEST_TMPDIR/work-other-pin"
-  git -C "$w" mv types/fx types/fy; git -C "$w" mv ext-tools/tq ext-tools/tm; git -C "$w" commit -qm ren
+  rename_plugin "$w" fy; git -C "$w" commit -qm ren
   git -C "$w" push -q "$GIT_BASE/other/pin.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/other/pin.git" HEAD
   # installed from its first commit, so it differs from the branch tip
   first="$(git -C "$w" rev-parse HEAD~1)"

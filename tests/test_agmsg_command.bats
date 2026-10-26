@@ -44,7 +44,7 @@ teardown() {
 @test "agmsg: plugin reaches plugin.sh with the arguments unchanged and is in the usage (#1594)" {
   run bash "$AGMSG" plugin bogus
   [ "$status" -eq 1 ]
-  grep -Fq -- "Usage: agmsg plugin list|trust <ref>" <<<"$output"
+  grep -Fq -- "agmsg plugin list|trust <ref>" <<<"$output"
 
   run bash "$AGMSG" plugin list
   [ "$status" -eq 0 ]
@@ -52,7 +52,7 @@ teardown() {
 
   run bash "$AGMSG" plugin install
   [ "$status" -eq 1 ]
-  grep -Fq -- "usage: agmsg plugin install <owner>/<repo>" <<<"$output"
+  grep -Fq -- "agmsg plugin install <owner>/<repo>" <<<"$output"
 
   run bash "$AGMSG" help
   grep -Fq -- "plugin list|install|update|remove|trust|untrust" <<<"$output"
