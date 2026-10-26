@@ -232,6 +232,15 @@ codex:
   --dangerously-skip-permissions: false  # `false`の値はフラグ自体を出力しない
 ```
 
+`spawn.sh`で起動したCodexのウィンドウは、背景にある間にターンが終わると通知音が鳴ることがあります（codex-cli 0.163.0、macOSのTerminalで確認）。関係するCodex TUIの設定は`tui.notifications`です。agmsgが起動したCodexだけでこれを止めるには（自分で起動する`codex`は変わりません）、spawnオプションのファイルに次を追加します。すでに`codex:`セクションがある場合は、`codex:`の見出しをもう1つ貼らず、その中に行を追加してください。そのセクションにすでに`-c:`の行がある場合、このファイルには2つ目を書けません（フラグごとに値を1つ取る形式のため）。既存の行は残し、代わりに`~/.codex/config.toml`で`tui.notifications`を設定してください（自分で起動する`codex`にも効きます）。
+
+```yaml
+codex:
+  -c: tui.notifications=false
+```
+
+このファイルを保存した後にspawnしたCodexのウィンドウに適用されます。その環境では通知音が止まりました。ほかの種類の通知は確認していません。
+
 10種類のエージェントタイプのうち8つがspawn可能 — `claude-code`、`codex`、`grok-build`、`cursor`、`gemini`、`antigravity`、`copilot`、`opencode`。`hermes` は、初期プロンプトを事前に仕込んだインタラクティブセッションを開始する既知のCLIモードがないためspawn不可（#279）。`devin` は、同等のインタラクティブ起動方法がまだ検証されていないため、現時点ではspawnableとして扱っていない。macOSが主なターゲットで、LinuxとWindowsはベストエフォート（ターミナルが未対応の場合はissueまたはPRを歓迎）。ヘッドレス環境 — tmuxもなく使えるターミナルもない — はエージェントCLIがインタラクティブなターミナルを必要とするためエラーになる。
 
 ### spawnしたエージェントを終了する（`despawn`）
