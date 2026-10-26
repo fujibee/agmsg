@@ -57,8 +57,9 @@ if [ -z "$UNREAD_JSONL" ]; then
   exit 0
 fi
 
-# JSONL -> JSON array -> "from \x1f body \x1f at \x1f id" rows (newlines/tabs in
-# the body escaped so each message stays one display line).
+# JSONL -> JSON array -> "from \x1f body \x1f at \x1f id" rows. The body's line
+# breaks become \x1e so each message stays one row here; the display loop below
+# turns them back into line breaks (#1780). Carriage returns are dropped.
 # The quote is held in a variable, never written as \' in the pattern: bash 3.2
 # (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the inline form
 # doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
@@ -79,7 +80,7 @@ _agmsg_rows_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-inbox-rows.XXXXXX") || exit 13
 trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
 {
   printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
-  printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||"
+  printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(13), ''), char(10), char(30)) || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.id')"
   printf "FROM json_each('"
@@ -96,7 +97,9 @@ echo ""
 IDS=()
 while IFS=$'\x1f' read -r from body ts id; do
   [ -n "$id" ] || continue
-  echo "  [$ts] $from: $body"
+  # A body's line breaks arrive as \x1e (one row per message); show them as
+  # line breaks, indented under the header (#1780).
+  echo "  [$ts] $from: ${body//$'\x1e'/$'\n'      }"
   IDS+=("$id")
 done <<< "$ROWS"
 echo ""

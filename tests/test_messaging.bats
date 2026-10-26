@@ -201,6 +201,14 @@ line3"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "1 new message" ]]
   [[ "$output" =~ "alice" ]]
+  # Line breaks are shown as line breaks, indented under the header (#1780).
+  grep -q "^  \[.*\] alice: line1$" <<<"$output"
+  grep -qx "      line2" <<<"$output"
+  grep -qx "      line3" <<<"$output"
+  refute grep -qF 'line1\nline2' <<<"$output"
+  # Still one message, marked read as one.
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" =~ "No new messages" ]]
 }
 
 @test "inbox: a crafted agent arg cannot inject SQL to delete other messages (#87)" {
@@ -236,6 +244,9 @@ line"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "alice" ]]
   [[ "$output" =~ "bob" ]]
+  grep -q "alice → bob: multi$" <<<"$output"
+  grep -qx "      line" <<<"$output"
+  refute grep -qF 'multi\nline' <<<"$output"
 }
 
 # --- history.sh ---

@@ -63,7 +63,7 @@ trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
 {
   printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.to') || char(31) ||"
-  printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||"
+  printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(13), ''), char(10), char(30)) || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.id')"
   printf "FROM json_each('"
@@ -122,5 +122,7 @@ done <<< "$RECIPIENTS"
 while IFS=$'\x1f' read -r from to body ts id; do
   [ -n "$ts$from$to$body" ] || continue
   if printf '%s\n' "$UNREAD_IDS" | grep -Fxq "$id"; then status='●'; else status='○'; fi
-  echo "  $status [$ts] $from → $to: $body"
+  # A body's line breaks arrive as \x1e (one row per message); show them as
+  # line breaks, indented under the header (#1780).
+  echo "  $status [$ts] $from → $to: ${body//$'\x1e'/$'\n'      }"
 done <<< "$ROWS"
