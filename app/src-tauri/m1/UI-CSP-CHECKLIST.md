@@ -33,7 +33,7 @@ Write down the directive and the blocked URL or kind (`script`, `style`, `image`
 
 Expected and fine: one `frame-src` line about `…/__agmsg_probe_nav__` and one about `eval` from the add-on startup probe, within the first ten seconds. Anything else is a finding.
 
-The terminal line of the process shows `[addons] startup check: enabled=true` a few seconds after launch. If it says `enabled=false`, copy the reason.
+The terminal line of the process shows `[addons] startup check: enabled=true` a few seconds after launch, and `[addons] git:read is available` (or `is off: <why>`). If the check says `enabled=false`, copy the reason.
 
 ## 3. What to use
 
@@ -51,6 +51,9 @@ Tick each one; note "ok" or what broke.
 - [ ] **Chat composer** (the user chat box): type, send a message, send a long one, a multi-line one; the message appears in the room.
 - [ ] Theme / dark mode switch if the UI has one; logo and avatar images render; fonts look normal.
 - [ ] Drag a file onto the window (the window accepts drops); nothing breaks.
+- [ ] **Settings → Add-ons**: the tab opens; "Built in" lists File view and Diff view; "Open requests from seats" shows Show / Off, and "Copy text for your seats" says "Copied." (the install-from-GitHub button only says it is not available yet; that is expected).
+- [ ] **File view / Diff view**: in a team room use "+ New" → File view, then Diff view. The permission card appears (Allow once / Always for this folder / Not now); choose a throwaway folder or git repo (not a real project with secrets). The pane renders its content, no console violations from the pane or the card; try a protected location (for example `~/.ssh`) and check the "protected locations" message.
+- [ ] **Developer → Load from folder…** (Settings → Add-ons): load a copy of `app/addons/fileview` (or `diffview`) made in a throwaway folder; it shows under "Developer add-ons" and in "+ New" with a DEV chip; "Reload from folder" and "Remove" work. Put an empty `.env` file in the folder you let the add-on read: once you have allowed that folder the pane shows the line "This folder has a .env file." (for a network add-on: "…so it can't read it").
 - [ ] Leave it running five minutes with a terminal pane producing output; no new console lines.
 
 ## 4. Report
