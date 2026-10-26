@@ -502,15 +502,18 @@ EOF
   chmod +x "$fake/codex" "$fake/codex.exe"
   run bash -c 'set -u; source "$1"; _os() { echo windows; }; AGMSG_REAL_CODEX="$2/codex" _resolve_codex' _ "$fns" "$fake"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(cd "$fake" && pwd -P)/codex.exe" ]
+  [ "$output" -ef "$fake/codex.exe" ]
+  [ "${output##*/}" = "codex.exe" ]
   rm "$fake/codex.exe"
   run bash -c 'set -u; source "$1"; _os() { echo windows; }; AGMSG_REAL_CODEX="$2/codex" _resolve_codex' _ "$fns" "$fake"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(cd "$fake" && pwd -P)/codex" ]
+  [ "$output" -ef "$fake/codex" ]
+  [ "${output##*/}" = "codex" ]
   printf 'MZ fixture native binary\n' > "$fake/codex.exe"
   chmod +x "$fake/codex.exe"
   run bash -c 'set -u; source "$1"; _os() { echo linux; }; AGMSG_REAL_CODEX="$2/codex" _resolve_codex' _ "$fns" "$fake"
-  [ "$output" = "$(cd "$fake" && pwd -P)/codex" ]
+  [ "$output" -ef "$fake/codex" ]
+  [ "${output##*/}" = "codex" ]
 }
 
 @test "daemon.sh start --only-if-op-gen: a stop or disable after that op_gen is not undone" {
