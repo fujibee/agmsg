@@ -259,6 +259,13 @@ case "$1" in
   kickstart)
     printf '%s\n' "$*" >> "${AGMSGD_FAKE_LAUNCHD_EVENTS:?}"
     if [ "${AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER:-0}" = 1 ]; then exit 1; fi
+    # A launcher that read the intent just before enable bumped it: it
+    # declines the way agmsgd does, and nothing is left running.
+    if [ -n "${AGMSGD_FAKE_LAUNCHD_DECLINE_ONCE:-}" ] && [ ! -f "$AGMSGD_FAKE_LAUNCHD_DECLINE_ONCE" ]; then
+      touch "$AGMSGD_FAKE_LAUNCHD_DECLINE_ONCE"
+      sqlite3 "${AGMSGD_FAKE_INSTALL_DB:?}" "INSERT INTO daemon_start_attempts (at, reason, executor_pid) VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'intent changed since the launcher read it', 1);"
+      exit 0
+    fi
     bash "${AGMSGD_TEST_LAUNCHER:?}" </dev/null >/dev/null 2>&1 3>&- &
     ;;
 esac
@@ -668,4 +675,89 @@ EOF
     run bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ ! -e "$unit" ]
+}
+
+_enable_env() {
+  export AGMSGD_LAUNCHCTL="$(_fake_launchctl)" AGMSGD_FAKE_LAUNCHD_MARKER="$TEST_SKILL_DIR/fake-launchd/registered" AGMSGD_FAKE_LAUNCHD_EVENTS="$TEST_SKILL_DIR/fake-launchd/events" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" AGMSGD_FAKE_INSTALL_DB="$TEST_SKILL_DIR/run/install.db"
+}
+
+@test "daemon.sh enable: a busy install operation lock fails without stopping or unregistering a running daemon" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  _enable_env
+  _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  local pid
+  pid="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT executor_pid FROM daemon_owner;")"
+  kill -0 "$pid"
+  : > "$TEST_SKILL_DIR/fake-launchd/events"
+
+  # Another process holds the operation lock for longer than enable will wait.
+  ( printf 'BEGIN EXCLUSIVE;\n.shell sleep 6\nROLLBACK;\n' | sqlite3 "$TEST_SKILL_DIR/run/install-op.lock.db" >/dev/null 2>&1 ) &
+  local holder=$!
+  sleep 1
+  AGMSGD_LOCK_WAIT_MS=500 _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not acquire the install operation lock"* ]]
+  [[ "$output" == *"Nothing was changed"* ]]
+  wait "$holder" || true
+
+  kill -0 "$pid"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;")" = "ready" ]
+  ! grep -q 'bootout\|unload' "$TEST_SKILL_DIR/fake-launchd/events"
+  [ -f "$TEST_SKILL_DIR/fake-launchd/registered" ]
+  bash "$DAEMON" disable >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh enable: a lock held briefly is waited out" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  _enable_env
+  ( printf 'BEGIN EXCLUSIVE;\n.shell sleep 2\nROLLBACK;\n' | sqlite3 "$TEST_SKILL_DIR/run/install-op.lock.db" >/dev/null 2>&1 ) &
+  local holder=$!
+  sleep 0.5
+  AGMSGD_LOCK_WAIT_MS=8000 _run_with_deadline 40 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"running"* ]]
+  wait "$holder" || true
+  bash "$DAEMON" disable >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh enable: re-enabling with only a different Node path leaves the running daemon and the loaded unit alone" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  _enable_env
+  _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  local pid gen
+  pid="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT executor_pid FROM daemon_owner;")"
+  gen="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT gen FROM daemon_owner;")"
+  : > "$TEST_SKILL_DIR/fake-launchd/events"
+
+  mkdir -p "$TEST_SKILL_DIR/node-other"
+  ln -s "$(command -v node)" "$TEST_SKILL_DIR/node-other/node"
+  PATH="$TEST_SKILL_DIR/node-other:$PATH" _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already running"* ]]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT node_path FROM meta;")" = "$TEST_SKILL_DIR/node-other/node" ]
+  kill -0 "$pid"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT gen FROM daemon_owner;")" = "$gen" ]
+  ! grep -q '^call \(bootout\|unload\|bootstrap\|load\)' "$TEST_SKILL_DIR/fake-launchd/events"
+  bash "$DAEMON" disable >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh enable: a launcher that declined because the intent changed is followed by one more start" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  _enable_env
+  AGMSGD_FAKE_LAUNCHD_DECLINE_ONCE="$TEST_SKILL_DIR/fake-launchd/declined" _run_with_deadline 40 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"running"* ]]
+  [ "$(grep -c '^call kickstart' "$TEST_SKILL_DIR/fake-launchd/events")" -eq 2 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;")" = "ready" ]
+  bash "$DAEMON" disable >/dev/null 2>&1 || true
 }
