@@ -155,6 +155,19 @@ later updates follow while the commit stays exactly the one you approved; the
 report's closing line prints the full command. Without it, an exact SHA is a
 permanent pin.
 
+**Reading the files before you decide.** When `install` or `update` stops for
+confirmation (no terminal, no `--yes`), it keeps a copy of the commit it showed at
+`<skill>/plugins/sources/.review/<owner>/<repo>/<sha>/` and ends the report with
+`Review copy: <dir>` and `Files to read:` (every file that can run; for `update`,
+only the ones that were added or changed). The copy is not a search base and is
+never trusted, so nothing in it runs. An agent can offer to read those files and
+report what it finds (network access, writes outside agmsg's directories, reading
+keys or `.env` files, running received text as code) before you answer; it reports
+what it found in what it read and does not call a plugin safe. When the pinned
+`--yes` run follows, it checks that the files it fetched match the review copy,
+says so, and refuses if they do not. The copy is removed by the next install, update
+or remove of that source.
+
 **Clashes.**
 
 - A driver with the same `<axis>/<name>` as one from another installed source, or

@@ -428,6 +428,80 @@ EOF
   echo "plugins; trusting one lets its code run as you."
 }
 
+# A copy of the fetched commit, kept after a "needs confirmation" exit so the
+# files can be read before anyone says yes: an agent asked to check them reads
+# exactly the commit the report showed. One per source, at
+# plugins/sources/.review/<owner>/<repo>/<sha>; it is not a search base and is
+# never trusted, so nothing in it can run as a driver. Cleared by the next
+# install, update or remove of that source.
+# 0 when .review, .review/<owner> and .review/<owner>/<repo> are each absent or
+# a real directory (never a symlink) and .review resolves inside the sources
+# dir, so nothing done to them can reach outside it.
+_plugin_review_path_ok() {  # owner repo
+  local base="$PLUGIN_SOURCES_DIR/.review" p real_src real_base
+  for p in "$base" "$base/$1" "$base/$1/$2"; do
+    [ ! -L "$p" ] || return 1
+    [ ! -e "$p" ] || [ -d "$p" ] || return 1
+  done
+  [ -d "$base" ] || return 0
+  real_src="$(cd "$PLUGIN_SOURCES_DIR" && pwd -P)" || return 1
+  real_base="$(cd "$base" && pwd -P)" || return 1
+  [ "$real_base" = "$real_src/.review" ]
+}
+
+_plugin_review_clear() {  # owner repo
+  local d="$PLUGIN_SOURCES_DIR/.review/$1/$2"
+  if ! _plugin_review_path_ok "$1" "$2"; then
+    echo "agmsg plugin: not touching $d: a symlink or non-directory is in its path" >&2
+    return 0
+  fi
+  case "$d" in "$PLUGIN_SOURCES_DIR"/.review/?*/?*) rm -rf -- "$d" ;; esac
+  rmdir "$PLUGIN_SOURCES_DIR/.review/$1" "$PLUGIN_SOURCES_DIR/.review" 2>/dev/null || true
+}
+
+# Set by install/update before _plugin_confirm: the source, the commit, and the
+# files an agent should read (one relative path per line).
+PLUGIN_REVIEW_OWNER="" PLUGIN_REVIEW_REPO="" PLUGIN_REVIEW_SHA="" PLUGIN_REVIEW_FILES=""
+
+_plugin_review_keep() {
+  [ -n "$PLUGIN_REVIEW_OWNER" ] && [ -n "$PLUGIN_REVIEW_SHA" ] && [ -d "${PLUGIN_SRC:-}" ] || return 0
+  _plugin_review_path_ok "$PLUGIN_REVIEW_OWNER" "$PLUGIN_REVIEW_REPO" || return 0
+  _plugin_review_clear "$PLUGIN_REVIEW_OWNER" "$PLUGIN_REVIEW_REPO"
+  local d="$PLUGIN_SOURCES_DIR/.review/$PLUGIN_REVIEW_OWNER/$PLUGIN_REVIEW_REPO/$PLUGIN_REVIEW_SHA"
+  mkdir -p "$(dirname "$d")" || return 0
+  # Re-check after creating: a link put in place meanwhile is not followed.
+  _plugin_review_path_ok "$PLUGIN_REVIEW_OWNER" "$PLUGIN_REVIEW_REPO" || return 0
+  mv "$PLUGIN_SRC" "$d" || return 0
+  echo
+  echo "Review copy: $d"
+  echo "Files to read:"
+  if [ -n "$PLUGIN_REVIEW_FILES" ]; then
+    printf '%s\n' "$PLUGIN_REVIEW_FILES" | sed 's/^/  /'
+  else
+    echo "  (none)"
+  fi
+}
+
+# A digest of a checkout's files: path, executable bit and content, sorted.
+_plugin_tree_digest() {  # dir
+  local f
+  ( cd "$1" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
+      printf '%s %s %s\n' "$(shasum -a 256 < "$f" | cut -d' ' -f1)" "$([ -x "$f" ] && echo x || echo -)" "$f"
+    done ) | shasum -a 256 | cut -d' ' -f1
+}
+
+# Proceeding after a review: the commit fetched again must be the one that was
+# read. The SHA makes that so; the digest shows it.
+_plugin_review_verify() {
+  local d="$PLUGIN_SOURCES_DIR/.review/$PLUGIN_REVIEW_OWNER/$PLUGIN_REVIEW_REPO/$PLUGIN_REVIEW_SHA" want got
+  [ -d "$d" ] && _plugin_review_path_ok "$PLUGIN_REVIEW_OWNER" "$PLUGIN_REVIEW_REPO" && [ ! -L "$d" ] || return 0
+  want="$(_plugin_tree_digest "$d")"
+  got="$(_plugin_tree_digest "$PLUGIN_SRC")"
+  [ "$want" = "$got" ] \
+    || _plugin_die "the fetched files differ from the review copy at $d; nothing was installed. Review and confirm again."
+  echo "The files match the review copy that was read (digest ${got:0:12})."
+}
+
 # Ask, or refuse to guess. $1 = the exact command that proceeds on purpose.
 _plugin_confirm() {
   local proceed="$1" ans
@@ -440,6 +514,7 @@ _plugin_confirm() {
     exit 1
   fi
   {
+    _plugin_review_keep
     echo
     echo "Needs confirmation: nothing was installed. Review the above, then run:"
     echo "  $proceed"
@@ -601,7 +676,9 @@ _plugin_cmd_install() {
   _plugin_prune_ignored "$PLUGIN_SRC"
   _plugin_check_clashes "$id" "$PLUGIN_SRC" "$owner" "$repo" install "$ref"
   _plugin_report "$id" "$PLUGIN_SHA"
+  PLUGIN_REVIEW_OWNER="$owner" PLUGIN_REVIEW_REPO="$repo" PLUGIN_REVIEW_SHA="$PLUGIN_SHA" PLUGIN_REVIEW_FILES="$PLUGIN_EXEC"
   _plugin_confirm "$PLUGIN_CMD plugin install $owner/$repo@$PLUGIN_SHA --yes$(_plugin_track_flags "$ref")$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
+  _plugin_review_verify
   local final="$PLUGIN_SOURCES_DIR/github/$owner/$repo/$PLUGIN_SHA"
   _plugin_lock
   # Everything above ran without the lock; confirm it still holds.
@@ -615,6 +692,7 @@ _plugin_cmd_install() {
   _plugin_record_add "$id" "$owner/$repo${track_ref:+@$track_ref}" "$PLUGIN_SHA" "$final"
   _plugin_trust_all "$final"
   _plugin_unlock
+  _plugin_review_clear "$owner" "$repo"
   echo
   echo "Installed $id at $PLUGIN_SHA and trusted its drivers."
   _plugin_next_steps "$final" "$(_plugin_drivers_in "$final")"
@@ -671,7 +749,10 @@ _plugin_changes() {  # old new
   local f
   while IFS= read -r f; do
     if [ ! -e "$1/$f" ] && [ ! -L "$1/$f" ]; then echo "A $f"
-    elif ! cmp -s "$1/$f" "$2/$f"; then echo "M $f"; fi
+    # A file whose executable bit changed counts as modified too: it may run
+    # now where it did not before.
+    elif ! cmp -s "$1/$f" "$2/$f" \
+        || { [ -x "$1/$f" ] && [ ! -x "$2/$f" ]; } || { [ ! -x "$1/$f" ] && [ -x "$2/$f" ]; }; then echo "M $f"; fi
   done < <(cd "$2" && find . \( -type f -o -type l \) | sed 's|^\./||' | sort)
   while IFS= read -r f; do
     if [ ! -e "$2/$f" ] && [ ! -L "$2/$f" ]; then echo "D $f"; fi
@@ -710,10 +791,17 @@ _plugin_cmd_update() {
   echo "    to $PLUGIN_SHA"
   echo
   echo "Changed files:"
-  _plugin_changes "$old_dir" "$PLUGIN_SRC" | sed 's/^/  /'
+  local changes
+  changes="$(_plugin_changes "$old_dir" "$PLUGIN_SRC")"
+  printf '%s\n' "$changes" | sed '/^$/d; s/^/  /'
   echo
   _plugin_report "$id" "$PLUGIN_SHA"
+  # Only what changed needs reading: the added or modified files that can run.
+  PLUGIN_REVIEW_OWNER="$owner" PLUGIN_REVIEW_REPO="$repo" PLUGIN_REVIEW_SHA="$PLUGIN_SHA"
+  PLUGIN_REVIEW_FILES="$(printf '%s\n' "$changes" | awk '$1 == "A" || $1 == "M" { sub(/^[AM] /, ""); print }' \
+    | grep -xF -f <(printf '%s\n' "$PLUGIN_EXEC") || true)"
   _plugin_confirm "$PLUGIN_CMD plugin update $owner/$repo@$PLUGIN_SHA --yes$(_plugin_track_flags "$ref")$([ "$OVERRIDE" -eq 1 ] && printf ' --override')"
+  _plugin_review_verify
   local final="$PLUGIN_SOURCES_DIR/github/$owner/$repo/$PLUGIN_SHA"
   _plugin_lock
   # Re-check under the lock: the source must still be at the commit we compared.
@@ -734,6 +822,7 @@ _plugin_cmd_update() {
   trash="$(_plugin_trash "$owner" "$repo" "$old_dir")"
   _plugin_unlock
   _plugin_trash_rm "$trash"
+  _plugin_review_clear "$owner" "$repo"
   echo
   echo "Updated $id to $PLUGIN_SHA; the previous commit was removed."
   # Only the drivers this update added need a first step.
@@ -765,6 +854,7 @@ EOF
   rmdir "$PLUGIN_SOURCES_DIR/github/$owner" 2>/dev/null || true
   _plugin_unlock
   _plugin_trash_rm "$trash"
+  _plugin_review_clear "$owner" "$repo"
   echo "Removed $id."
   if [ -n "$back" ]; then
     echo "The built-in driver(s) are back in use: $back"
