@@ -48,7 +48,9 @@ TOOL_CONF="${TOOL_DIR:-/nonexistent}/tool.conf"
 CONFIG_PATH="$SKILL_DIR/ext-tools/$TEAM/$TO.conf"
 
 if [ ! -x "$HANDLE" ]; then
-  _reply "$TO: processing failed (no handle for '$TOOL')"
+  # Most often the plugin providing the tool was removed while this member
+  # stayed joined.
+  _reply "$TO: the $TOOL plugin is not installed (removed?). Reinstall it, or remove this member with: bash $(printf '%q' "$SKILL_DIR/scripts/leave.sh") $TEAM $TO"
   rm -f "$BODY_FILE"
   exit 0
 fi

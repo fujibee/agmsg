@@ -710,3 +710,22 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   refute grep -q "ext-tool.sh setup" <<<"$output"
   grep -q "/scripts/join.sh <team> fx ext-tool --tool fx$" <<<"$output"
 }
+
+@test "remove names the members still joined as its ext-tool and how to take them out; reinstall says they work as they are" {
+  mk_repo acme pack >/dev/null
+  PLUGIN install acme/pack --yes >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/teams/alpha"
+  printf '%s\n' '{"name":"alpha","agents":{"desk":{"registrations":[{"type":"ext-tool","project":"(ext-tool:fx)"}]},"me":{"registrations":[{"type":"claude-code","project":"/p"}]}}}' \
+    > "$TEST_SKILL_DIR/teams/alpha/config.json"
+  run PLUGIN remove acme/pack
+  [ "$status" -eq 0 ]
+  grep -Fq "These team members used it and are still joined" <<<"$output"
+  grep -qx "  alpha/desk" <<<"$output"
+  refute grep -qx "  alpha/me" <<<"$output"
+  grep -q "/scripts/leave.sh alpha desk$" <<<"$output"
+
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 0 ]
+  grep -Fq "ext-tools/fx is already joined as: alpha/desk. It works as it is." <<<"$output"
+  grep -Fq "To add it to another team as well:" <<<"$output"
+}
