@@ -109,12 +109,28 @@ agmsg_only_one_install() {
 
 # True iff the shim's recorded owner (the %q-quoted codex-dir string
 # shim_owner_script_dir returns) is NOT a live, runnable install: either no
-# current install candidate's own codex dir matches it at all (uninstalled,
-# or its .agmsg marker is gone), or it matches but that install's own
-# codex-shim.sh -- the file the shim actually execs into -- is missing
-# (installed but broken/partially removed). This is the #553 recovery case:
-# claiming a shim nothing can still dispatch through needs neither --force
-# nor a live owner to steal it from.
+# directory at that install's location exists at all (uninstalled), or one
+# does but its own codex-shim.sh -- the file the shim actually execs into --
+# is missing (installed but broken/partially removed). This is the #553
+# recovery case: claiming a shim nothing can still dispatch through needs
+# neither --force nor a live owner to steal it from.
+#
+# Deliberately does NOT go through agmsg_install_candidates (which requires
+# each candidate's OWN .agmsg marker to be readable): that filtering, applied
+# here, silently dropped a candidate whose root directory had simply become
+# unreadable from the list entirely, before this function ever got a chance
+# to compare it against owner -- falling through to "no candidate matched",
+# i.e. "gone", for an install that was merely inaccessible right now, not
+# actually uninstalled (review finding, reproduced with an install root
+# chmod'd to 000). Scanning skills_dir's immediate children directly, by
+# directory name, still only needs x on skills_dir itself (already checked
+# below) to see that a same-named entry exists at all, independent of
+# whether anything inside it -- the .agmsg marker included -- can be read.
+#
+# Every ambiguous read at any layer (skills_dir, the matched root, or its
+# codex dir) fails CLOSED (not gone) rather than guessing in either
+# direction; only a readable codex dir that is confirmed missing
+# codex-shim.sh counts as positively gone.
 #
 # Never decodes/evals $1: every candidate's OWN codex dir is re-quoted with
 # shell_quote and compared as a string against the given (already-quoted)
@@ -122,42 +138,30 @@ agmsg_only_one_install() {
 # unquoting of untrusted content at all (see shim_owner_script_dir's own
 # comment on why eval'ing that value is refused).
 owner_install_is_gone() {
-  local owner="$1" cand cand_codex_dir skills_dir
+  local owner="$1" skills_dir d root cand_codex_dir
   [ -n "$owner" ] || return 1
-  # Only trust a "no candidate matched at all" verdict when ~/.agents/skills
-  # itself is actually there to scan. Without it, agmsg_install_candidates
-  # always returns empty regardless of whether the owner install is real --
-  # indistinguishable from "truly uninstalled" from this signal alone -- and
-  # defaulting that ambiguity to "gone" would let it reclaim past a live
-  # owner whenever the skills directory is momentarily unreadable or this
-  # runs outside the normal ~/.agents/skills layout. Fail closed instead: no
-  # verdict here, same as before this recovery path existed.
   # Readable AND searchable, not just present: a skills dir that exists but
-  # cannot be listed (permissions, a transient mount issue) makes
-  # agmsg_install_candidates' glob expand to nothing too, which is otherwise
+  # cannot be listed (permissions, a transient mount issue) is otherwise
   # indistinguishable from "genuinely no installs" -- the same ambiguity this
   # whole guard exists to refuse (review finding, reproduced with the
   # directory chmod'd to 000).
   skills_dir="$(dirname "$AGENTS_BIN")/skills"
   [ -d "$skills_dir" ] && [ -r "$skills_dir" ] && [ -x "$skills_dir" ] || return 1
-  while IFS= read -r cand; do
-    [ -n "$cand" ] || continue
-    cand_codex_dir="$cand/scripts/drivers/types/codex"
-    if [ "$(shell_quote "$cand_codex_dir")" = "$owner" ]; then
-      # Matched a candidate that still registers as an install. Only call
-      # its dispatch script missing when its own directory can actually be
-      # read -- the same permissions ambiguity as above, one level down:
-      # an inner access failure must never read as "codex-shim.sh is gone"
-      # (review finding).
-      [ -d "$cand_codex_dir" ] && [ -r "$cand_codex_dir" ] && [ -x "$cand_codex_dir" ] || return 1
-      [ -f "$cand_codex_dir/codex-shim.sh" ] && return 1
-      return 0
-    fi
-  done <<EOF
-$(agmsg_install_candidates)
-EOF
-  # No candidate matched at all: the owner install itself no longer registers
-  # as an agmsg install on this machine.
+  for d in "$skills_dir"/*/; do
+    [ -d "$d" ] || continue  # an unmatched glob (empty dir) stays literal
+    root="${d%/}"
+    cand_codex_dir="$root/scripts/drivers/types/codex"
+    [ "$(shell_quote "$cand_codex_dir")" = "$owner" ] || continue
+    # Matched by directory NAME alone (stat via skills_dir's own x bit, no
+    # read needed on $root itself) -- an install root that physically exists
+    # but cannot currently be read into is "unknown", never "gone".
+    [ -r "$root" ] && [ -x "$root" ] || return 1
+    [ -r "$cand_codex_dir" ] && [ -x "$cand_codex_dir" ] || return 1
+    [ -f "$cand_codex_dir/codex-shim.sh" ] && return 1
+    return 0
+  done
+  # No directory entry matched at all: the owner install's location no
+  # longer exists on this machine.
   return 0
 }
 

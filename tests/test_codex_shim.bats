@@ -483,9 +483,37 @@ EOF
     source '$TYPES/codex/codex-shim-install.sh' >/dev/null
     owner=\"\$(shell_quote '$live')\"
     chmod 000 '$HOME/.agents/skills'
-    owner_install_is_gone \"\$owner\"
-    rc=\$?
+    # The sourced script's own 'set -e' is still active in this shell: a
+    # bare non-zero call here would abort before the chmod restore below
+    # ever runs. Route it through if/else so its status is consumed instead.
+    if owner_install_is_gone \"\$owner\"; then rc=0; else rc=\$?; fi
     chmod 755 '$HOME/.agents/skills'
+    exit \$rc
+  "
+  [ "$status" -ne 0 ]
+}
+
+@test "owner_install_is_gone: an unreadable install ROOT (not just its codex dir) does NOT count as missing" {
+  # One level above the codex-dir case below: a matched directory ENTRY
+  # (visible by name alone, via skills_dir's own x bit) whose own root
+  # cannot be read into must not be read as "uninstalled" either -- the
+  # .agmsg-marker-based candidate scan used to drop a root like this from
+  # consideration entirely before it ever reached the owner comparison,
+  # falling through to "no candidate matched" (review finding, reproduced
+  # with the install root itself chmod'd to 000).
+  export HOME="$TEST_PROJECT/home"
+  local live_root="$HOME/.agents/skills/live"
+  local live="$live_root/scripts/drivers/types/codex"
+  mkdir -p "$live"
+  touch "$live_root/.agmsg" "$live/codex-shim.sh"
+
+  run bash -c "
+    HOME='$HOME'
+    source '$TYPES/codex/codex-shim-install.sh' >/dev/null
+    owner=\"\$(shell_quote '$live')\"
+    chmod 000 '$live_root'
+    if owner_install_is_gone \"\$owner\"; then rc=0; else rc=\$?; fi
+    chmod 755 '$live_root'
     exit \$rc
   "
   [ "$status" -ne 0 ]
@@ -504,8 +532,7 @@ EOF
     source '$TYPES/codex/codex-shim-install.sh' >/dev/null
     owner=\"\$(shell_quote '$live')\"
     chmod 000 '$live'
-    owner_install_is_gone \"\$owner\"
-    rc=\$?
+    if owner_install_is_gone \"\$owner\"; then rc=0; else rc=\$?; fi
     chmod 755 '$live'
     exit \$rc
   "
