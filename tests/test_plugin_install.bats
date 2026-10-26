@@ -717,3 +717,54 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   refute grep -q "ext-tool.sh setup" <<<"$output"
   grep -q "/scripts/join.sh <team> fx ext-tool --tool fx$" <<<"$output"
 }
+
+@test "a needs-confirmation install keeps a review copy of that commit and lists the files to read; --yes checks it is what was read" {
+  mk_repo acme pack >/dev/null
+  sha="$(head_of acme pack)"
+  run PLUGIN install acme/pack
+  [ "$status" -eq 3 ]
+  local rc="$TEST_SKILL_DIR/plugins/sources/.review/acme/pack/$sha"
+  grep -qx "Review copy: $rc" <<<"$output"
+  grep -qx "Files to read:" <<<"$output"
+  grep -qx "  ext-tools/fx/handle" <<<"$output"
+  [ -x "$rc/ext-tools/fx/handle" ]
+  [ -f "$rc/agmsg-plugin.conf" ]
+  # Kept outside every search base: listing does not see it, nothing trusts it.
+  run PLUGIN list
+  refute grep -q "\.review" <<<"$output"
+  [ ! -e "$TEST_SKILL_DIR/db/trusted-plugins" ]
+
+  run PLUGIN install "acme/pack@$sha" --yes --track-default
+  [ "$status" -eq 0 ]
+  grep -Fq "The files match the review copy that was read (digest " <<<"$output"
+  [ ! -e "$TEST_SKILL_DIR/plugins/sources/.review" ]
+}
+
+@test "--yes refuses when the fetched files differ from the review copy" {
+  mk_repo acme pack >/dev/null
+  sha="$(head_of acme pack)"
+  run PLUGIN install acme/pack
+  [ "$status" -eq 3 ]
+  printf '#!/usr/bin/env bash\necho tampered\n' > "$TEST_SKILL_DIR/plugins/sources/.review/acme/pack/$sha/ext-tools/fx/handle"
+  run PLUGIN install "acme/pack@$sha" --yes
+  [ "$status" -eq 1 ]
+  grep -Fq "differ from the review copy" <<<"$output"
+  [ ! -e "$TEST_SKILL_DIR/db/plugin-sources" ]
+}
+
+@test "an update's review lists only the runnable files that changed" {
+  w="$(mk_repo acme pack)"
+  printf '#!/usr/bin/env bash\necho setup\n' > "$w/ext-tools/fx/setup"
+  chmod +x "$w/ext-tools/fx/setup"
+  git -C "$w" add -A; git -C "$w" commit -qm setup
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  PLUGIN install acme/pack --yes >/dev/null
+  bump_repo acme pack
+  run PLUGIN update acme/pack
+  [ "$status" -eq 3 ]
+  files="$(sed -n '/^Files to read:$/,/^$/p' <<<"$output")"
+  grep -qx "  ext-tools/fx/handle" <<<"$files"
+  refute grep -q "setup" <<<"$files"
+  run PLUGIN remove acme/pack
+  [ ! -e "$TEST_SKILL_DIR/plugins/sources/.review" ]
+}
