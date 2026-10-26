@@ -5,10 +5,37 @@ member. Adding one is dropping a directory here:
 
 ```
 scripts/drivers/ext-tools/<tool>/tool.conf   # name, required config keys, default timeout
-scripts/drivers/ext-tools/<tool>/SETUP.md    # for the LLM at the joining seat: what to ask, in what order, common failures
-scripts/drivers/ext-tools/<tool>/USAGE.md    # optional: how to ask it for things, once joined -- ext-tool.sh usage prints it
-scripts/drivers/ext-tools/<tool>/setup       # non-interactive: status | check <item> [args...] | save [args...] | test
 scripts/drivers/ext-tools/<tool>/handle      # processes one message
+scripts/drivers/ext-tools/<tool>/setup       # optional: status | check <item> [args...] | save [args...] | test
+scripts/drivers/ext-tools/<tool>/SETUP.md    # optional: for the LLM at the joining seat: what to ask, in what order, common failures
+scripts/drivers/ext-tools/<tool>/USAGE.md    # optional: how to ask it for things, once joined -- ext-tool.sh usage prints it
+```
+
+`tool.conf` and `handle` are the only required files. A tool with no `setup`
+has no settings: `join.sh <team> <name> ext-tool --tool <tool>` writes the
+member config (just `tool=<tool>`) by itself and joins. Add `setup` (and a
+`SETUP.md` for the seat that runs it) only when a member needs something
+configured, such as a key file or a channel.
+
+## The smallest ext-tool
+
+```
+ext-tools/echo/tool.conf     name=echo
+ext-tools/echo/handle        (below, executable)
+```
+
+```bash
+#!/usr/bin/env bash
+# Reply with the message body, quoted back to the sender.
+body="$(jq -r '.body')"
+printf 'echo: %s\n' "$body"
+```
+
+Join it and send it something; the reply lands in your inbox:
+
+```
+bash <skill>/scripts/join.sh <team> echo ext-tool --tool echo
+bash <skill>/scripts/send.sh <team> <you> echo "hello"
 ```
 
 `USAGE.md` is optional. `ext-tool.sh usage <team> <name>` (once joined) or
@@ -29,7 +56,7 @@ timeout=<seconds>       # handle's per-call budget (default 30 if absent)
 required_config=<keys>  # space-separated keys the member's config must carry
 ```
 
-## `setup`
+## `setup` (optional)
 
 Never interactive — nothing in `setup` talks to a terminal or asks a
 question. The conversation happens at the LLM seat that reads `SETUP.md` and

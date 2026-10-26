@@ -102,6 +102,27 @@ cmd_setup() {
   config_path="$(_ext_tool_config_path "$team" "$name")"
   mkdir -p "$(dirname "$config_path")"
 
+  # A tool with no `setup` has nothing to configure; join writes its member
+  # config by itself. Answer the generic steps instead of failing on a missing
+  # file, so a seat that walks status/save first still lands in the same place.
+  if [ ! -e "$dir/setup" ]; then
+    case "$sub" in
+      status)
+        printf '{"missing":[],"setup":"none"}\n'
+        exit 0
+        ;;
+      save)
+        ( umask 077; printf 'tool=%s\n' "$tool" > "$config_path" )
+        printf '{"ok":true,"config_path":"%s"}\n' "$config_path"
+        exit 0
+        ;;
+      *)
+        echo "agmsg: '$tool' has no setup: it needs no settings. Join it directly: bash \"$SCRIPT_DIR/join.sh\" $team $name ext-tool --tool $tool" >&2
+        exit 1
+        ;;
+    esac
+  fi
+
   case "$sub" in
     save)
       # Whatever extra arguments the caller gave (e.g. a key file path, a

@@ -201,6 +201,29 @@ thing: removing a plugin never takes an unrelated driver with it.
 
 Each axis directory is optional; a plugin ships the parts it needs.
 
+**The smallest plugin** is an ext-tool with two files besides
+`agmsg-plugin.conf`:
+
+```
+<repo>/
+├── agmsg-plugin.conf          # name=echo
+└── ext-tools/echo/
+    ├── tool.conf              # name=echo
+    └── handle                 # executable
+```
+
+```bash
+#!/usr/bin/env bash
+# Reply with the message body, quoted back to the sender.
+body="$(jq -r '.body')"
+printf 'echo: %s\n' "$body"
+```
+
+With no `setup`, the tool has no settings, and `join.sh <team> echo ext-tool --tool echo`
+joins it directly. Add `setup` and `SETUP.md` only when a member needs something
+configured; [scripts/drivers/ext-tools/README.md](../scripts/drivers/ext-tools/README.md)
+has the full contract.
+
 `storage` plugins are not accepted from GitHub yet. A plugin agent type is delivered
 by the classic delivery path; it does not get agmsgd's native delivery.
 

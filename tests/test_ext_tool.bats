@@ -408,3 +408,50 @@ teardown() { teardown_test_env; }
   grep -qF "check:channel /path/key_file C0CHANNEL" <<<"$output"
   refute grep -qF "$config_path" <<<"$output"
 }
+
+@test "ext-tool: a tool with only tool.conf and handle joins with no setup and replies" {
+  # The smallest ext-tool: no setup, no SETUP.md. join writes the member config
+  # (tool= only) by itself; ext-tool.sh setup answers status/save without
+  # failing on the missing file and points check/test at join.
+  local d="$SCRIPTS/drivers/ext-tools/mini"
+  mkdir -p "$d"
+  printf 'name=mini\n' > "$d/tool.conf"
+  printf '%s\n' '#!/usr/bin/env bash' 'body="$(jq -r .body)"' 'printf "mini: %s\n" "$body"' > "$d/handle"
+  chmod +x "$d/handle"
+
+  run bash "$SCRIPTS/ext-tool.sh" setup mt-team m1 mini status
+  [ "$status" -eq 0 ]
+  grep -qF '"setup":"none"' <<<"$output"
+  run bash "$SCRIPTS/ext-tool.sh" setup mt-team m1 mini test
+  [ "$status" -eq 1 ]
+  grep -qF "has no setup" <<<"$output"
+  grep -qF "join.sh\" mt-team m1 ext-tool --tool mini" <<<"$output"
+
+  run bash "$SCRIPTS/join.sh" mt-team mini ext-tool --tool mini
+  [ "$status" -eq 0 ]
+  local member_config="$TEST_SKILL_DIR/ext-tools/mt-team/mini.conf"
+  [ "$(cat "$member_config")" = "tool=mini" ]
+  [ "$(stat -c '%a' "$member_config" 2>/dev/null || stat -f '%Lp' "$member_config")" = "600" ]
+
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" mt-team sender claude-code /tmp/mt-team-proj
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/send.sh" mt-team sender mini "ping-mini"
+  [ "$status" -eq 0 ]
+  local i reply_seen=""
+  for i in $(seq 1 $_WAIT_TICKS); do
+    if bash "$SCRIPTS/history.sh" mt-team sender 2>/dev/null | grep -qF "mini → sender: mini: ping-mini"; then
+      reply_seen=1
+      break
+    fi
+    sleep $_WAIT_INTERVAL
+  done
+  [ -n "$reply_seen" ]
+}
+
+@test "ext-tool: a tool with setup but no SETUP.md is refused with the status and save commands to run" {
+  run bash "$SCRIPTS/join.sh" at-team a1 ext-tool --tool argtool
+  [ "$status" -eq 1 ]
+  refute grep -qF "SETUP.md" <<<"$output"
+  grep -qF "ext-tool.sh\" setup at-team a1 argtool status" <<<"$output"
+  grep -qF "ext-tool.sh\" setup at-team a1 argtool save" <<<"$output"
+}

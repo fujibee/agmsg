@@ -45,9 +45,22 @@ agmsg_join_type_parse_args() {
 
   local member_config="$SKILL_DIR/ext-tools/$TEAM/$AGENT_ID.conf"
   if [ ! -f "$member_config" ]; then
+    # A tool with no `setup` has nothing to configure: the member config only
+    # needs to name the tool, so write that and join (the smallest ext-tool is
+    # tool.conf + handle).
+    if [ ! -e "$driver_dir/setup" ]; then
+      mkdir -p "$(dirname "$member_config")" || return 1
+      ( umask 077; printf 'tool=%s\n' "$tool" > "$member_config" ) || return 1
+      return 0
+    fi
     {
       echo "agmsg: '$tool' is not configured for '$AGENT_ID' in team '$TEAM' yet."
-      echo "  Follow $driver_dir/SETUP.md to configure it, then join again."
+      if [ -f "$driver_dir/SETUP.md" ]; then
+        echo "  Follow $driver_dir/SETUP.md to configure it, then join again."
+      else
+        echo "  See what it still needs: bash \"$SKILL_DIR/scripts/ext-tool.sh\" setup $TEAM $AGENT_ID $tool status"
+        echo "  Save its settings with: bash \"$SKILL_DIR/scripts/ext-tool.sh\" setup $TEAM $AGENT_ID $tool save [args...], then join again."
+      fi
       echo "  See how it's asked for things: bash \"$SKILL_DIR/scripts/ext-tool.sh\" usage $tool"
     } >&2
     return 1
