@@ -199,8 +199,8 @@ line2
 line3"
   run bash "$SCRIPTS/inbox.sh" testteam bob
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "1 new message" ]]
-  [[ "$output" =~ "alice" ]]
+  grep -qF "1 new message" <<<"$output"
+  grep -qF "alice" <<<"$output"
   # Line breaks are shown as line breaks, indented under the header (#1780).
   grep -q "^  \[.*\] alice: line1$" <<<"$output"
   grep -qx "      line2" <<<"$output"
@@ -242,8 +242,8 @@ line3"
 line"
   run bash "$SCRIPTS/history.sh" testteam
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "alice" ]]
-  [[ "$output" =~ "bob" ]]
+  grep -qF "alice" <<<"$output"
+  grep -qF "bob" <<<"$output"
   grep -q "alice → bob: multi$" <<<"$output"
   grep -qx "      line" <<<"$output"
   refute grep -qF 'multi\nline' <<<"$output"
