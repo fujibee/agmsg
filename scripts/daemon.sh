@@ -111,6 +111,9 @@ _with_op_lock() {
   # this shell dying silently on a write to a closed pipe (exit 141).
   trap '' PIPE
   local rc=0
+  # Set by _with_op_lock_run when it gave up before holding the lock, so a
+  # caller can tell "nothing ran" from "the action ran and failed".
+  OP_LOCK_NOT_ACQUIRED=0
   _with_op_lock_run "$@" || rc=$?
   trap - PIPE
   return "$rc"
@@ -148,7 +151,10 @@ _with_op_lock_run() {
     exec 9< "$lock_dir/out"
   fi
   attach_path="$(agmsg_sql_readfile_path "$INSTALL_DB")"
-  printf '%s\n' '.bail on' "ATTACH DATABASE '$attach_path' AS installdb;" 'BEGIN EXCLUSIVE;' '.print LOCKED' >&8
+  # A holder that releases within a short bound (another daemon command, an
+  # installer finishing) is waited out instead of failing on the first
+  # "database is locked".
+  printf '%s\n' '.bail on' ".timeout ${AGMSGD_LOCK_WAIT_MS:-5000}" "ATTACH DATABASE '$attach_path' AS installdb;" 'BEGIN EXCLUSIVE;' '.print LOCKED' >&8
   if ! IFS= read -r -t 10 ready <&9 || [ "${ready%$'\r'}" != "LOCKED" ]; then
     printf 'ROLLBACK;\n.quit\n' >&8 2>/dev/null || true
     exec 8>&-
@@ -156,7 +162,8 @@ _with_op_lock_run() {
     wait "$lock_pid" 2>/dev/null || true
     rm -f "$lock_dir/in" "$lock_dir/out"
     rmdir "$lock_dir"
-    echo "agmsg daemon: could not acquire the install operation lock" >&2
+    OP_LOCK_NOT_ACQUIRED=1
+    echo "agmsg daemon: could not acquire the install operation lock (another agmsg install or daemon command holds it). Nothing was changed; try again in a moment." >&2
     return 1
   fi
   local generation_row generation_marker manifest_sql
@@ -263,7 +270,8 @@ _register_darwin() {
   label="$(_launchd_label)"
   plist="$(_launchd_plist_path)"
   mkdir -p "$(dirname "$plist")"
-  cat > "$plist" <<EOF
+  local plist_new="$plist.new.$$"
+  cat > "$plist_new" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -283,6 +291,17 @@ _register_darwin() {
 </dict>
 </plist>
 EOF
+  # The unit does not name Node or Codex (the launcher reads them from
+  # install.db), so a re-enable that only changes those leaves the loaded unit
+  # as it is: re-registering it would stop a running agmsgd for nothing.
+  # Only when launchd really has it loaded: a plist file can outlive its
+  # registration (bootout, a new login session), and then it must be loaded.
+  if [ -f "$plist" ] && cmp -s "$plist" "$plist_new" \
+    && { "$AGMSGD_LAUNCHCTL" print "gui/$(id -u)/$label" >/dev/null 2>&1 || "$AGMSGD_LAUNCHCTL" list "$label" >/dev/null 2>&1; }; then
+    rm -f "$plist_new"
+    return 0
+  fi
+  mv "$plist_new" "$plist"
   "$AGMSGD_LAUNCHCTL" bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || "$AGMSGD_LAUNCHCTL" load "$plist"
 }
 
@@ -518,14 +537,20 @@ _resolve_codex() {
   done
 }
 
+# Returns 0 when ready, 1 on timeout, 2 when a launcher declined because the
+# intent moved on after it read it (a unit that just registered can launch in
+# the gap before this run's own op_gen bump); the caller starts once more.
 _wait_for_ready() {
-  local target_op_gen="$1" waited=0
+  local target_op_gen="$1" since="${2:-}" waited=0
   while [ "$waited" -lt 100 ]; do
     local state op_gen
     state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
     op_gen="$(agmsg_sqlite "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;" 2>/dev/null || true)"
     if [ "$state" = "ready" ] && [ "$op_gen" = "$target_op_gen" ]; then
       return 0
+    fi
+    if [ -n "$since" ] && [ "$state" != "ready" ] && [ "$(agmsg_sqlite "$INSTALL_DB" "SELECT count(*) FROM daemon_start_attempts WHERE at >= '$since' AND reason = 'intent changed since the launcher read it';" 2>/dev/null || echo 0)" != 0 ]; then
+      return 2
     fi
     waited=$((waited + 1))
     sleep 0.1
@@ -589,15 +614,29 @@ cmd_start() {
     echo "agmsg daemon start: agmsgd was turned off or changed while waiting; left as it is now"
     return 0
   fi
-  if _service_registered; then
-    if ! _start_registered_service; then
-      echo "agmsg daemon start: the registered service manager could not start agmsgd" >&2
-      return 1
+  local attempt=1 ready_rc=0 since
+  while :; do
+    since="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+    if _service_registered; then
+      if ! _start_registered_service; then
+        echo "agmsg daemon start: the registered service manager could not start agmsgd" >&2
+        return 1
+      fi
+    else
+      _start_unregistered_launcher
     fi
-  else
-    _start_unregistered_launcher
-  fi
-  if _wait_for_ready "$new_op_gen"; then
+    ready_rc=0
+    _wait_for_ready "$new_op_gen" "$since" || ready_rc=$?
+    # A launcher that read the intent just before this run bumped it declined;
+    # the intent is final now, so one more start settles it.
+    if [ "$ready_rc" = 2 ] && [ "$attempt" = 1 ]; then
+      attempt=2
+      sleep 1
+      continue
+    fi
+    break
+  done
+  if [ "$ready_rc" = 0 ]; then
     echo "agmsg daemon start: running"
     agmsg_daemon_seat_report start
     _path_hint status
@@ -741,11 +780,23 @@ cmd_enable() {
   if [ -z "$codex_path" ]; then
     echo 'agmsg daemon enable: no usable Codex executable found; Codex seats stay blocked until enabled again with Codex available.' >&2
   fi
+  # Whether a unit was already registered decides what a failure may undo: a
+  # unit that was there before this run (and may be running agmsgd) is left
+  # alone; only one this run created is removed.
+  local was_registered=0
+  ! _service_registered || was_registered=1
   _with_op_lock "
     UPDATE meta SET node_path = '$(printf '%s' "$node_path" | sed "s/'/''/g")', node_version = '$node_version', codex_path = '$(printf '%s' "$codex_path" | sed "s/'/''/g")';
     UPDATE daemon_intent SET desired = 'on';
   " _register "$node_path" || {
-    if ! _with_op_lock "" _unregister; then
+    if [ "$OP_LOCK_NOT_ACQUIRED" = 1 ]; then
+      # Nothing ran, so there is nothing to clean up -- and unregistering now
+      # would stop the daemon that is running.
+      return 1
+    fi
+    if [ "$was_registered" = 1 ]; then
+      echo "agmsg daemon enable: could not update the registered service; the previous registration was left in place" >&2
+    elif ! _with_op_lock "" _unregister; then
       echo "agmsg daemon enable: could not clean up the partially registered service" >&2
     fi
     return 1
