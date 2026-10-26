@@ -768,3 +768,35 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   run PLUGIN remove acme/pack
   [ ! -e "$TEST_SKILL_DIR/plugins/sources/.review" ]
 }
+
+@test "an update that only makes a file executable lists it to read" {
+  w="$(mk_repo acme pack)"
+  printf 'helper text\n' > "$w/ext-tools/fx/helper"
+  git -C "$w" add -A; git -C "$w" commit -qm helper
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  PLUGIN install acme/pack --yes >/dev/null
+  chmod +x "$w/ext-tools/fx/helper"
+  git -C "$w" commit -qam "make helper executable"
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  run PLUGIN update acme/pack
+  [ "$status" -eq 3 ]
+  grep -qx "  M ext-tools/fx/helper" <<<"$output"
+  files="$(sed -n '/^Files to read:$/,/^$/p' <<<"$output")"
+  grep -qx "  ext-tools/fx/helper" <<<"$files"
+}
+
+@test "the review copy is never written or removed through a symlink in its path" {
+  mk_repo acme pack >/dev/null
+  local outside="$BATS_TEST_TMPDIR/outside"
+  mkdir -p "$outside/pack/keep" "$TEST_SKILL_DIR/plugins/sources/.review"
+  echo precious > "$outside/pack/keep/file"
+  ln -s "$outside" "$TEST_SKILL_DIR/plugins/sources/.review/acme"
+  run PLUGIN install acme/pack
+  [ "$status" -eq 3 ]
+  refute grep -q "^Review copy:" <<<"$output"
+  [ "$(cat "$outside/pack/keep/file")" = precious ]
+  [ "$(ls "$outside/pack")" = keep ]
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 0 ]
+  [ "$(cat "$outside/pack/keep/file")" = precious ]
+}

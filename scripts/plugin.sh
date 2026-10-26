@@ -434,8 +434,27 @@ EOF
 # plugins/sources/.review/<owner>/<repo>/<sha>; it is not a search base and is
 # never trusted, so nothing in it can run as a driver. Cleared by the next
 # install, update or remove of that source.
+# 0 when .review, .review/<owner> and .review/<owner>/<repo> are each absent or
+# a real directory (never a symlink) and .review resolves inside the sources
+# dir, so nothing done to them can reach outside it.
+_plugin_review_path_ok() {  # owner repo
+  local base="$PLUGIN_SOURCES_DIR/.review" p real_src real_base
+  for p in "$base" "$base/$1" "$base/$1/$2"; do
+    [ ! -L "$p" ] || return 1
+    [ ! -e "$p" ] || [ -d "$p" ] || return 1
+  done
+  [ -d "$base" ] || return 0
+  real_src="$(cd "$PLUGIN_SOURCES_DIR" && pwd -P)" || return 1
+  real_base="$(cd "$base" && pwd -P)" || return 1
+  [ "$real_base" = "$real_src/.review" ]
+}
+
 _plugin_review_clear() {  # owner repo
   local d="$PLUGIN_SOURCES_DIR/.review/$1/$2"
+  if ! _plugin_review_path_ok "$1" "$2"; then
+    echo "agmsg plugin: not touching $d: a symlink or non-directory is in its path" >&2
+    return 0
+  fi
   case "$d" in "$PLUGIN_SOURCES_DIR"/.review/?*/?*) rm -rf -- "$d" ;; esac
   rmdir "$PLUGIN_SOURCES_DIR/.review/$1" "$PLUGIN_SOURCES_DIR/.review" 2>/dev/null || true
 }
@@ -446,9 +465,13 @@ PLUGIN_REVIEW_OWNER="" PLUGIN_REVIEW_REPO="" PLUGIN_REVIEW_SHA="" PLUGIN_REVIEW_
 
 _plugin_review_keep() {
   [ -n "$PLUGIN_REVIEW_OWNER" ] && [ -n "$PLUGIN_REVIEW_SHA" ] && [ -d "${PLUGIN_SRC:-}" ] || return 0
+  _plugin_review_path_ok "$PLUGIN_REVIEW_OWNER" "$PLUGIN_REVIEW_REPO" || return 0
   _plugin_review_clear "$PLUGIN_REVIEW_OWNER" "$PLUGIN_REVIEW_REPO"
   local d="$PLUGIN_SOURCES_DIR/.review/$PLUGIN_REVIEW_OWNER/$PLUGIN_REVIEW_REPO/$PLUGIN_REVIEW_SHA"
-  mkdir -p "$(dirname "$d")" && mv "$PLUGIN_SRC" "$d" || return 0
+  mkdir -p "$(dirname "$d")" || return 0
+  # Re-check after creating: a link put in place meanwhile is not followed.
+  _plugin_review_path_ok "$PLUGIN_REVIEW_OWNER" "$PLUGIN_REVIEW_REPO" || return 0
+  mv "$PLUGIN_SRC" "$d" || return 0
   echo
   echo "Review copy: $d"
   echo "Files to read:"
@@ -471,7 +494,7 @@ _plugin_tree_digest() {  # dir
 # read. The SHA makes that so; the digest shows it.
 _plugin_review_verify() {
   local d="$PLUGIN_SOURCES_DIR/.review/$PLUGIN_REVIEW_OWNER/$PLUGIN_REVIEW_REPO/$PLUGIN_REVIEW_SHA" want got
-  [ -d "$d" ] || return 0
+  [ -d "$d" ] && _plugin_review_path_ok "$PLUGIN_REVIEW_OWNER" "$PLUGIN_REVIEW_REPO" && [ ! -L "$d" ] || return 0
   want="$(_plugin_tree_digest "$d")"
   got="$(_plugin_tree_digest "$PLUGIN_SRC")"
   [ "$want" = "$got" ] \
@@ -726,7 +749,10 @@ _plugin_changes() {  # old new
   local f
   while IFS= read -r f; do
     if [ ! -e "$1/$f" ] && [ ! -L "$1/$f" ]; then echo "A $f"
-    elif ! cmp -s "$1/$f" "$2/$f"; then echo "M $f"; fi
+    # A file whose executable bit changed counts as modified too: it may run
+    # now where it did not before.
+    elif ! cmp -s "$1/$f" "$2/$f" \
+        || { [ -x "$1/$f" ] && [ ! -x "$2/$f" ]; } || { [ ! -x "$1/$f" ] && [ -x "$2/$f" ]; }; then echo "M $f"; fi
   done < <(cd "$2" && find . \( -type f -o -type l \) | sed 's|^\./||' | sort)
   while IFS= read -r f; do
     if [ ! -e "$2/$f" ] && [ ! -L "$2/$f" ]; then echo "D $f"; fi
