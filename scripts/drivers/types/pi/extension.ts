@@ -22,8 +22,8 @@ async function runScript(script: string, args: string[]): Promise<string> {
 }
 
 function parseWhoami(output: string): { agent: string; teams: string[] } | null {
-  const agent = /(?:^|\n)agent=(\S+)/.exec(output)?.[1];
-  const teams = /(?:^|\n)teams=(\S+)/.exec(output)?.[1];
+  const agent = /(?:^|\s)agent=(\S+)/.exec(output)?.[1];
+  const teams = /(?:^|\s)teams=(\S+)/.exec(output)?.[1];
   if (!agent || !teams) return null;
   return { agent, teams: teams.split(",").filter(Boolean) };
 }

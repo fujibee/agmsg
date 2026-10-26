@@ -3809,6 +3809,20 @@ JSON
   grep -q "agmsg-deliver-as: steer" "$ext_file"
 }
 
+@test "delivery set (pi): parseWhoami matches single-line whoami output" {
+  bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT"
+  local ext_file="$TEST_PROJECT/.pi/extensions/agmsg.ts"
+  grep -q '(?:^|\\s)agent=' "$ext_file"
+  grep -q '(?:^|\\s)teams=' "$ext_file"
+  run node -e '
+    const output = "agent=pi-agent teams=team1,team2 type=pi project=/path";
+    const agent = /(?:^|\s)agent=(\S+)/.exec(output)?.[1];
+    const teams = /(?:^|\s)teams=(\S+)/.exec(output)?.[1];
+    if (agent !== "pi-agent" || teams !== "team1,team2") process.exit(1);
+  '
+  [ "$status" -eq 0 ]
+}
+
 @test "delivery set off (pi): removes the extension" {
   bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT"
   [ -f "$TEST_PROJECT/.pi/extensions/agmsg.ts" ]
