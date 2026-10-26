@@ -656,3 +656,45 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   [ "$status" -eq 3 ]
   grep -q "plugin update acme/pack@$new --yes --track-default" <<<"$output"
 }
+
+@test "install ends with the next step for each driver; update shows it only for drivers it added" {
+  mk_repo acme pack >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/teams/alpha" "$TEST_SKILL_DIR/teams/beta"
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 0 ]
+  grep -qx "Next:" <<<"$output"
+  grep -Fq "ext-tools/fx is a team member: to use it, join it to a team" <<<"$output"
+  grep -q "/scripts/join.sh <team> fx ext-tool --tool fx$" <<<"$output"
+  grep -q "/scripts/send.sh <team> <you> fx \"hello\"$" <<<"$output"
+  grep -Fq "types/fx is an agent type" <<<"$output"
+  grep -Fq "Your teams: alpha, beta" <<<"$output"
+  # the fixture ext-tool has no setup, so no setup step
+  refute grep -q "ext-tool.sh setup" <<<"$output"
+
+  w="$BATS_TEST_TMPDIR/work-acme-pack"
+  mkdir -p "$w/terminals/fx"
+  printf 'name=fx\n' > "$w/terminals/fx/terminal.conf"
+  git -C "$w" add -A; git -C "$w" commit -qm terminal
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  run PLUGIN update acme/pack --yes
+  [ "$status" -eq 0 ]
+  grep -Fq "terminals/fx is a terminal driver" <<<"$output"
+  refute grep -Fq "ext-tools/fx is a team member" <<<"$output"
+  refute grep -Fq "types/fx is an agent type" <<<"$output"
+}
+
+@test "the next step for an ext-tool with setup points at SETUP.md and the status command" {
+  w="$(mk_repo acme pack)"
+  printf '#!/usr/bin/env bash\necho "{}"\n' > "$w/ext-tools/fx/setup"
+  chmod +x "$w/ext-tools/fx/setup"
+  printf '# setup\n' > "$w/ext-tools/fx/SETUP.md"
+  printf '# usage\n' > "$w/ext-tools/fx/USAGE.md"
+  git -C "$w" add -A; git -C "$w" commit -qm setup
+  git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 0 ]
+  grep -q "follow .*/ext-tools/fx/SETUP.md" <<<"$output"
+  grep -q "/scripts/ext-tool.sh setup <team> fx fx status$" <<<"$output"
+  grep -q "/scripts/ext-tool.sh usage fx$" <<<"$output"
+  refute grep -q "Your teams" <<<"$output"
+}

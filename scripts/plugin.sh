@@ -615,6 +615,49 @@ _plugin_cmd_install() {
   _plugin_unlock
   echo
   echo "Installed $id at $PLUGIN_SHA and trusted its drivers."
+  _plugin_next_steps "$final" "$(_plugin_drivers_in "$final")"
+}
+
+# What to do next with each driver just installed, per axis, so the person
+# knows how to put it to use: an ext-tool does nothing until it is joined to a
+# team. <drivers> is a newline list of <axis>/<name>; <dir> the installed
+# checkout.
+_plugin_next_steps() {  # dir drivers
+  local dir="$1" drivers="$2" ref axis name d scripts teams
+  [ -n "$drivers" ] || return 0
+  scripts="$(printf '%q' "$PLUGIN_ROOT/scripts")"
+  teams="$(ls -1 "$PLUGIN_ROOT/teams" 2>/dev/null | paste -sd, - | sed 's/,/, /g' || true)"
+  echo
+  echo "Next:"
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    axis="${ref%%/*}" name="${ref#*/}" d="$dir/$ref"
+    case "$axis" in
+      ext-tools)
+        echo "  $ref is a team member: to use it, join it to a team (the member name, here $name, can be any name)."
+        if [ -e "$d/setup" ]; then
+          if [ -f "$d/SETUP.md" ]; then
+            echo "    It needs setting up first; follow $d/SETUP.md, or start with:"
+          else
+            echo "    It needs setting up first; see what it needs with:"
+          fi
+          echo "      bash $scripts/ext-tool.sh setup <team> $name $name status"
+        fi
+        echo "      bash $scripts/join.sh <team> $name ext-tool --tool $name"
+        echo "      bash $scripts/send.sh <team> <you> $name \"hello\""
+        [ ! -f "$d/USAGE.md" ] || echo "    How to ask it for things: bash $scripts/ext-tool.sh usage $name"
+        ;;
+      terminals)
+        echo "  $ref is a terminal driver: sessions running in that terminal use it from their next start. Check one with: bash $scripts/where.sh"
+        ;;
+      types)
+        echo "  $ref is an agent type: join a session of it with: bash $scripts/join.sh <team> <name> $name <project-dir>"
+        ;;
+    esac
+  done <<EOF
+$drivers
+EOF
+  [ -z "$teams" ] || echo "  Your teams: $teams"
 }
 
 # Files that differ between two checkouts, as "A|M|D <path>".
@@ -680,12 +723,15 @@ _plugin_cmd_update() {
   _plugin_record_add "$id" "$owner/$repo${track_ref:+@$track_ref}" "$PLUGIN_SHA" "$final"
   _plugin_trust_all "$final"
   # Under the lock only rename the old commit away; deleting the tree is the slow part.
-  local trash
+  local trash old_drivers
+  old_drivers="$(_plugin_drivers_in "$old_dir")"
   trash="$(_plugin_trash "$owner" "$repo" "$old_dir")"
   _plugin_unlock
   _plugin_trash_rm "$trash"
   echo
   echo "Updated $id to $PLUGIN_SHA; the previous commit was removed."
+  # Only the drivers this update added need a first step.
+  _plugin_next_steps "$final" "$(_plugin_drivers_in "$final" | grep -vxF -f <(printf '%s\n' "$old_drivers") || true)"
 }
 
 _plugin_cmd_remove() {
