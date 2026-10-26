@@ -662,6 +662,38 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   await bridgedChannel.pollOnce();
   assert.equal(installDb.prepare("SELECT state FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice'])).state, 'bridged');
   await bridgedChannel.stop();
+  const leaseFile = path.join(runDir, `codex-bridge-lease.${bridgePid}`);
+  const goodLease = readFileSync(leaseFile, 'utf8');
+  const seatStateAfter = async (lease) => {
+    writeFileSync(leaseFile, lease);
+    const channel = createCodexQueueChannel({
+      db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: storageDir },
+      queue: async () => ({ kind: 'failed', started: false, reason: 'spawn_failed:test' }),
+    });
+    await channel.pollOnce();
+    await channel.stop();
+    return installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
+  };
+  const reusedPairs = await seatStateAfter(goodLease.replace(/^pairs=.*$/m, `pairs=${'0'.repeat(40)}`));
+  assert.notEqual(reusedPairs.state, 'bridged', 'a live PID whose lease names another bridge is not this seat\'s bridge');
+  assert.doesNotMatch(reusedPairs.reason, /^bridge_state_unknown/, 'a lease that says the process is not ours is a stopped bridge, not an unknown one');
+  const reusedStart = await seatStateAfter(goodLease.replace(/^start=.*$/m, 'start=1'));
+  assert.notEqual(reusedStart.state, 'bridged', 'a live PID with a different start token is a reused PID');
+  assert.doesNotMatch(reusedStart.reason, /^bridge_state_unknown/);
+  const damaged = await seatStateAfter(goodLease.replace(/^host=.*\n/m, ''));
+  assert.match(damaged.reason, /^bridge_state_unknown/, 'a lease with missing fields stays unknown');
+  const brokenValues = await seatStateAfter(goodLease.replace(/^project=.*$/m, 'project=broken').replace(/^startsrc=.*$/m, 'startsrc=broken'));
+  assert.match(brokenValues.reason, /^bridge_state_unknown/, 'a lease with malformed values is damaged, not a mismatch');
+  const realKill = process.kill;
+  process.kill = (pid, signal) => {
+    if (pid === process.pid && signal === 0) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+    return realKill(pid, signal);
+  };
+  try {
+    const refused = await seatStateAfter(goodLease);
+    assert.equal(refused.state, 'bridged', 'a probe refused with EPERM is not proof of a reused PID; a verified lease still holds the seat');
+  } finally { process.kill = realKill; }
+  writeFileSync(leaseFile, goodLease);
   unlinkSync(`${bridgeBase}.pid`);
   unlinkSync(`${bridgeBase}.meta`);
   unlinkSync(path.join(runDir, `codex-bridge-lease.${bridgePid}`));

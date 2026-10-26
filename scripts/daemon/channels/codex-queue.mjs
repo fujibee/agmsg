@@ -232,6 +232,8 @@ function bridgeState(runDir, team, agent, projects) {
     // lease or start-witness comparison, which necessarily fails for dead PIDs.
     try { process.kill(Number(pidText), 0); } catch (error) {
       if (error?.code === "ESRCH") { stoppedReason = `bridge_stopped:${pidPath}:pid_absent`; continue; }
+      // EPERM does not prove another owner (an elevated bridge of this user
+      // can also refuse the probe), so the lease decides below.
       if (error?.code !== "EPERM") return unknown(pidPath, `pid_probe_failed:${error?.code ?? "unknown"}`);
     }
     if (!projects.some((project) => sameProject(project, fields.project))) return unknown(metaPath, "project_missing_or_mismatch");
@@ -257,9 +259,22 @@ function bridgeState(runDir, team, agent, projects) {
     const pairHashes = fields.identities.split(",").map((pair) => createHash("sha1").update(pair.replace("/", "\t")).digest("hex")).sort();
     const expectedPairs = createHash("sha1").update(pairHashes.join("\n")).digest("hex");
     const expectedProject = createHash("sha1").update(fields.project).digest("hex");
-    if (lease.v !== "1" || lease.pid !== pidText || lease.project !== expectedProject || lease.pairs !== expectedPairs || lease.host !== hostname() || !lease.start) return unknown(leasePath, "identity_mismatch");
+    // A readable, well-formed lease that names a different bridge says the
+    // live PID was reused by another process: this pair has no bridge. Only a
+    // lease or witness that cannot be read stays unknown.
+    const sha1 = /^[0-9a-f]{40}$/;
     const startPrefix = lease.startsrc === "proc" ? "linux" : lease.startsrc === "ps" ? "darwin" : lease.startsrc === "pwsh" ? "windows" : "";
-    if (!startPrefix || processStartWitness(Number(pidText)) !== `${startPrefix}:${lease.start}`) return unknown(leasePath, "start_witness_missing_or_mismatch");
+    if (lease.v !== "1" || lease.pid !== pidText || !lease.start || !sha1.test(lease.project) || !sha1.test(lease.pairs) || !lease.host || !startPrefix) return unknown(leasePath, "fields_missing_or_invalid");
+    if (lease.project !== expectedProject || lease.pairs !== expectedPairs || lease.host !== hostname()) {
+      stoppedReason = `bridge_stopped:${pidPath}:pid_reused`;
+      continue;
+    }
+    const witness = processStartWitness(Number(pidText));
+    if (!witness) return unknown(leasePath, "start_witness_unavailable");
+    if (witness !== `${startPrefix}:${lease.start}`) {
+      stoppedReason = `bridge_stopped:${pidPath}:pid_reused`;
+      continue;
+    }
     try {
       process.kill(Number(pidText), 0);
       return { state: "running", reason: "bridge_running" };
