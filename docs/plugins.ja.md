@@ -218,6 +218,28 @@ agmsgより新しい場合はインストールが拒否される。
 
 axisのディレクトリはどれも任意で、プラグインは必要な部品だけを置く。
 
+**最小のプラグイン**は ext-tool で、`agmsg-plugin.conf` のほかにファイルは 2 つだけである:
+
+```
+<repo>/
+├── agmsg-plugin.conf          # name=echo
+└── ext-tools/echo/
+    ├── tool.conf              # name=echo
+    └── handle                 # 実行可能
+```
+
+```bash
+#!/usr/bin/env bash
+# Reply with the message body, quoted back to the sender.
+body="$(jq -r '.body')"
+printf 'echo: %s\n' "$body"
+```
+
+`setup` が無い tool は設定を持たないので、`join.sh <team> echo ext-tool --tool echo` でそのまま
+チームに入る。メンバーごとに設定が要るとき(鍵ファイルやチャンネルなど)だけ `setup` と
+`SETUP.md` を足す。契約の全体は [scripts/drivers/ext-tools/README.md](../scripts/drivers/ext-tools/README.md)
+にある。
+
 `storage` プラグインは、GitHubからはまだ受け付けない。プラグインのagent typeは従来のdelivery
 経路で配信され、agmsgdのネイティブ配信には乗らない。
 
