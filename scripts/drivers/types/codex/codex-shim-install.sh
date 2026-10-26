@@ -132,12 +132,24 @@ owner_install_is_gone() {
   # owner whenever the skills directory is momentarily unreadable or this
   # runs outside the normal ~/.agents/skills layout. Fail closed instead: no
   # verdict here, same as before this recovery path existed.
+  # Readable AND searchable, not just present: a skills dir that exists but
+  # cannot be listed (permissions, a transient mount issue) makes
+  # agmsg_install_candidates' glob expand to nothing too, which is otherwise
+  # indistinguishable from "genuinely no installs" -- the same ambiguity this
+  # whole guard exists to refuse (review finding, reproduced with the
+  # directory chmod'd to 000).
   skills_dir="$(dirname "$AGENTS_BIN")/skills"
-  [ -d "$skills_dir" ] || return 1
+  [ -d "$skills_dir" ] && [ -r "$skills_dir" ] && [ -x "$skills_dir" ] || return 1
   while IFS= read -r cand; do
     [ -n "$cand" ] || continue
     cand_codex_dir="$cand/scripts/drivers/types/codex"
     if [ "$(shell_quote "$cand_codex_dir")" = "$owner" ]; then
+      # Matched a candidate that still registers as an install. Only call
+      # its dispatch script missing when its own directory can actually be
+      # read -- the same permissions ambiguity as above, one level down:
+      # an inner access failure must never read as "codex-shim.sh is gone"
+      # (review finding).
+      [ -d "$cand_codex_dir" ] && [ -r "$cand_codex_dir" ] && [ -x "$cand_codex_dir" ] || return 1
       [ -f "$cand_codex_dir/codex-shim.sh" ] && return 1
       return 0
     fi

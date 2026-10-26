@@ -465,6 +465,66 @@ EOF
   [ ! -e "$sentinel" ]
 }
 
+# --- owner_install_is_gone (#1788 review) ---
+
+@test "owner_install_is_gone: an unreadable ~/.agents/skills is NOT treated as gone" {
+  # A skills dir that exists but cannot be listed (permissions, a transient
+  # mount issue) makes agmsg_install_candidates' glob expand to nothing too --
+  # otherwise indistinguishable from "genuinely uninstalled". Defaulting that
+  # ambiguity to "gone" would let a live owner's shim be reclaimed without
+  # --force, the opposite of this guard's fail-closed intent.
+  export HOME="$TEST_PROJECT/home"
+  local live="$HOME/.agents/skills/live/scripts/drivers/types/codex"
+  mkdir -p "$live"
+  touch "$HOME/.agents/skills/live/.agmsg" "$live/codex-shim.sh"
+
+  run bash -c "
+    HOME='$HOME'
+    source '$TYPES/codex/codex-shim-install.sh' >/dev/null
+    owner=\"\$(shell_quote '$live')\"
+    chmod 000 '$HOME/.agents/skills'
+    owner_install_is_gone \"\$owner\"
+    rc=\$?
+    chmod 755 '$HOME/.agents/skills'
+    exit \$rc
+  "
+  [ "$status" -ne 0 ]
+}
+
+@test "owner_install_is_gone: an unreadable matched candidate directory does NOT count as missing" {
+  # Same ambiguity one level down: once a candidate IS matched, an access
+  # failure reading INTO it must never be read as "codex-shim.sh is absent".
+  export HOME="$TEST_PROJECT/home"
+  local live="$HOME/.agents/skills/live/scripts/drivers/types/codex"
+  mkdir -p "$live"
+  touch "$HOME/.agents/skills/live/.agmsg" "$live/codex-shim.sh"
+
+  run bash -c "
+    HOME='$HOME'
+    source '$TYPES/codex/codex-shim-install.sh' >/dev/null
+    owner=\"\$(shell_quote '$live')\"
+    chmod 000 '$live'
+    owner_install_is_gone \"\$owner\"
+    rc=\$?
+    chmod 755 '$live'
+    exit \$rc
+  "
+  [ "$status" -ne 0 ]
+}
+
+@test "owner_install_is_gone: a truly uninstalled owner (no matching candidate) IS gone" {
+  export HOME="$TEST_PROJECT/home"
+  mkdir -p "$HOME/.agents/skills/other"
+  touch "$HOME/.agents/skills/other/.agmsg"
+
+  run bash -c "
+    HOME='$HOME'
+    source '$TYPES/codex/codex-shim-install.sh' >/dev/null
+    owner_install_is_gone '/some/uninstalled/scripts/drivers/types/codex'
+  "
+  [ "$status" -eq 0 ]
+}
+
 # --- agmsg_install_candidates / agmsg_only_one_install (#553 review): these
 # were split from one function into two (list, then count) so a future #659
 # could call the listing half instead of re-scanning ~/.agents/skills itself.
