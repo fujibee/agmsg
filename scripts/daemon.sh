@@ -523,6 +523,11 @@ _resolve_codex() {
       return 1
     fi
     case "$candidate" in *[[:cntrl:]]*) continue ;; esac
+    # npm puts an extensionless shim beside codex.exe on Windows; the queue
+    # gate only accepts the native executable, so record that when it exists.
+    if [ "$(_os)" = windows ]; then
+      case "$candidate" in *.[eE][xX][eE]) ;; *) [ ! -f "$candidate.exe" ] || candidate="$candidate.exe" ;; esac
+    fi
     [ -f "$candidate" ] && [ -x "$candidate" ] || continue
     if head -c 4096 "$candidate" 2>/dev/null | grep -q 'Optional Codex entrypoint shim for agmsg monitor mode'; then
       continue

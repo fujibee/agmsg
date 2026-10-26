@@ -351,6 +351,13 @@ test('Windows queue requires a native executable and a stable release at or abov
   writeFileSync(path.join(npmRoot, 'codex.cmd'), 'fixture shim, never executed');
   writeFileSync(path.join(vendor, 'codex.exe'), 'fixture native binary, never executed');
   assert.equal(resolveWindowsCodexExe('codex', { Path: npmRoot }, 'x64'), path.join(vendor, 'codex.exe'));
+  // enable records npm's extensionless shim by absolute path; it resolves like the bare name.
+  assert.equal(resolveWindowsCodexExe(path.join(npmRoot, 'codex'), {}, 'x64'), path.join(vendor, 'codex.exe'), 'an absolute shim falls through to the vendor exe');
+  writeFileSync(path.join(npmRoot, 'codex.exe'), 'fixture native binary beside the shim');
+  assert.equal(resolveWindowsCodexExe(path.join(npmRoot, 'codex'), {}, 'x64'), path.join(npmRoot, 'codex.exe'), 'codex.exe beside the shim wins');
+  assert.equal(resolveWindowsCodexExe(path.join(root, 'other', 'codex'), {}, 'x64'), null, 'a shim with no native exe near it stays unresolved');
+  assert.equal(resolveWindowsCodexExe(path.join(npmRoot, 'codex-other'), {}, 'x64'), null, 'only a codex-named file is expanded');
+  rmSync(path.join(npmRoot, 'codex.exe'));
   const probe = (file, args, options) => {
     assert.equal(file, nativeExe);
     assert.deepEqual(args, ['--version']);
