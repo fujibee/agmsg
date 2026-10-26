@@ -226,8 +226,10 @@ _plugin_inspect() {
           [ -d "$d" ] || continue
           name="$(basename "$d")"
           [ ! -L "${d%/}" ] || _plugin_die "$axis/$name is a symlink; refusing"
+          # The letters are spelled out: bash 3.2 (macOS /bin/bash) under a
+          # UTF-8 locale lets [a-z] match uppercase too, so 'Fx' passed.
           case "$name" in
-            ''|*[!a-z0-9-]*) _plugin_die "$axis/$name: driver names may use only lowercase letters, digits and '-'" ;;
+            ''|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*) _plugin_die "$axis/$name: driver names may use only lowercase letters, digits and '-'" ;;
           esac
           case "$axis" in
             ext-tools) [ -f "$d/tool.conf" ] || _plugin_die "$axis/$name has no tool.conf, so it could not load" ;;
@@ -247,7 +249,7 @@ _plugin_inspect() {
   # unrelated drivers would otherwise be installed, updated and removed as one.
   case "$PLUGIN_CONF_NAME" in
     '') _plugin_die "agmsg-plugin.conf has no name. Set name= to the plugin's name; every driver in the repository uses it as its directory name (for example ext-tools/<name>)." ;;
-    *[!a-z0-9-]*) _plugin_die "agmsg-plugin.conf name '$PLUGIN_CONF_NAME' may use only lowercase letters, digits and '-', because it is also the driver directory name" ;;
+    *[!abcdefghijklmnopqrstuvwxyz0123456789-]*) _plugin_die "agmsg-plugin.conf name '$PLUGIN_CONF_NAME' may use only lowercase letters, digits and '-', because it is also the driver directory name" ;;
   esac
   local other
   other="$(printf '%s\n' "$PLUGIN_DRIVERS" | awk -F/ -v n="$PLUGIN_CONF_NAME" '$2 != n')"
