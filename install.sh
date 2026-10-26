@@ -177,6 +177,11 @@ agmsg_install_restart_guidance() {
   echo '    This installation does not enable agmsgd or switch existing sessions automatically.'
 }
 
+# The running agent may still have the pre-update skill in its context.
+agmsg_install_update_reading_hint() {   # <skill_dir> <release version>
+  printf 'agmsg was updated to %s. This session still has the old skill loaded. Re-read "%s/SKILL.md", read the %s section of "%s/CHANGELOG.md", and tell the user what changed and which settings it recommends.\n' "$2" "$1" "$2" "$1"
+}
+
 # One line pointing at agmsgd, only while it is off. Never turns it on. Kept in
 # one place so the wording, and later a different default, change here only.
 agmsg_install_daemon_hint() {   # <skill_dir>
@@ -622,9 +627,7 @@ move_into_place() {
 }
 
 # Adds this install's writable_paths (below) to ONE Codex config.toml.
-# Split out of configure_codex_sandbox() because that function now targets
-# more than one file (see there) and every one of them gets the identical
-# missing-detection/backup/insert treatment.
+# Apply the active profile's sandbox configuration.
 _configure_codex_sandbox_file() {
   local code_config="$1"
   shift
@@ -702,22 +705,8 @@ configure_codex_sandbox() {
   # which failed with `mkdir: .../ext-tools/<team>: Operation not permitted`
   # before this entry existed, and succeeded once it was added.
   #
-  # Codex resolves its own config against $CODEX_HOME (default ~/.codex), not
-  # always ~/.codex -- a machine running more than one Codex identity/account
-  # sets CODEX_HOME per profile, and this function used to only ever write
-  # ~/.codex/config.toml, so a seat actually running under a CODEX_HOME
-  # profile never got these entries at all (measured: `mkdir: .../ext-tools/
-  # <team>: Operation not permitted` persisted for that seat even after this
-  # function reported success, because it had edited a file nothing read).
-  # The reverse also happens on the same machine: the Codex desktop app
-  # (codex-app) uses the plain ~/.codex default regardless of a shell's
-  # CODEX_HOME. Writing to only one when they differ silently breaks
-  # whichever surface wasn't written, so when CODEX_HOME is set and does not
-  # already point at ~/.codex, this configures BOTH -- via
-  # agmsg_codex_config_paths (scripts/lib/codex-config.sh), the one place
-  # this list is computed, shared with uninstall.sh's own cleanup (#1469: the
-  # two used to compute it separately, and drifted apart when only this
-  # function's copy was updated).
+  # Respect CODEX_HOME exclusively when set. The same profile selection is
+  # shared with uninstall and the read-only session notice.
   local codex_configs=()
   local _cfg
   while IFS= read -r _cfg; do
@@ -1046,6 +1035,7 @@ $_agmsg_running_team"
   # Runs under the install operation lock. The completion manifest is written
   # only after the remaining install updates below are complete.
   agmsg_install_copy_scripts || exit 1
+  agmsg_install_op_run_phase cp "$SCRIPT_DIR/CHANGELOG.md" "$SKILL_DIR/CHANGELOG.md" || exit 1
   echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
   # #1249: drivers/terminals/{herdr,plain,tmux}/SKILL.md used to name each
   # driver's own doc file, and a directory-scanning skill loader (e.g.
@@ -1278,6 +1268,7 @@ $_agmsg_running_team"
   agmsg_install_restart_daemon "$SKILL_DIR"
   echo "  ✓ Update complete"
   echo ""
+  agmsg_install_update_reading_hint "$SKILL_DIR" "$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || printf '%s' "$INSTALLED_VERSION")"
   exit 0
 fi
 
@@ -1332,6 +1323,7 @@ agmsg_install_op_run_phase agmsg_reset_trash "$TRASH_DIR" || exit 1
 # Runs under the install operation lock. The completion manifest is written
 # only after the remaining install updates below are complete.
 agmsg_install_copy_scripts || exit 1
+agmsg_install_op_run_phase cp "$SCRIPT_DIR/CHANGELOG.md" "$SKILL_DIR/CHANGELOG.md" || exit 1
 echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
 # Ship the external-plugin drop-in dir (just its README) so the location exists
 # post-install. A plain cp — not cp -R --delete — preserves any plugins the user

@@ -1263,13 +1263,10 @@ _herdr_internal_key() {
 
 # control op: name the pane (scope Naming). Two copies:
 #   VISIBLE:    herdr pane rename <id> <team>:<agent>   (free text, ':' is fine)
-#   RESOLVABLE: herdr agent rename <id> <key>           where <key> is the
-#               collision-resistant SHA-256 derivation above — an INTERNAL key,
-#               never shown; peek/poke go by the recorded pane id, so the user never
-#               meets it. Idempotent. The visible rename is the required one; a
-#               failed agent rename (a live-name collision, or no SHA-256 tool to
-#               derive the key) is non-fatal — the pane id in the record still
-#               resolves.
+#   RESOLVABLE: retain an existing herdr agent name; otherwise assign the
+#               collision-resistant SHA-256 key above with agent rename.
+#               Failure to observe the name, retain its decision, or assign
+#               the fallback key is reported before the visible decoration.
 # <mode> is `key` or absent. Absent means both names; `key` means the resolvable
 # one only, and the caller has already decided that (the registry reads the env
 # var, so the policy lives in one place and this only carries it out).
@@ -1279,7 +1276,7 @@ _herdr_internal_key() {
 # namespace — NOT what this repo's `peek`/`poke` resolve through, which is the
 # placement record's pane id. So under `key` that name is still established and
 # only the decoration is skipped —
-# and a key that cannot be set is an error there, because nothing else happened.
+# and a missing name that cannot be set is an error there.
 # Which panes carry this agmsg label? One pane id per line; no match prints
 # nothing and still returns 0.
 #
@@ -1352,66 +1349,138 @@ terminal_label_of() {   # <id>
   return 0
 }
 
+_herdr_name_record_path() {   # <team> <agent>: companion to the placement record
+  if ! declare -F agmsg_spawn_path >/dev/null 2>&1; then
+    [ -n "${SKILL_DIR:-}" ] || return 1
+    . "$SKILL_DIR/scripts/lib/actas-lock.sh" || return 1
+  fi
+  local rec
+  rec="$(agmsg_spawn_path "$1" "$2")" || return 1
+  # Keep this outside spawn.*: placement enumerators scan that namespace.
+  printf '%s/herdr-name.%s\n' "${rec%/*}" "${rec##*/}"
+}
+
+_herdr_kept_name() {   # <team> <agent> <id>
+  local rec pane instance tid name extra fence
+  rec="$(_herdr_name_record_path "$1" "$2")" || return 1
+  [ -r "$rec" ] || return 1
+  IFS=$'\t' read -r pane instance tid name extra < "$rec" 2>/dev/null || return 1
+  [ -n "$name" ] && [ -z "$extra" ] || return 1
+  [ "$pane" = "$(_herdr_bare_of "$3")" ] || return 1
+  fence="$(terminal_fence "$3")" || return 1
+  [ "$fence" = "$(printf '%s\t%s' "$instance" "$tid")" ] || return 1
+  printf '%s\n' "$name"
+}
+
+_herdr_record_kept_name() {   # <id> <team> <agent> <name>
+  local rec fence
+  rec="$(_herdr_name_record_path "$2" "$3")" || return 1
+  fence="$(terminal_fence "$1")" || return 1
+  if ! declare -F agmsg_write_atomic >/dev/null 2>&1; then
+    [ -n "${SKILL_DIR:-}" ] || return 1
+    . "${SKILL_DIR:-}/scripts/lib/registry-lock.sh" || return 1
+  fi
+  mkdir -p "${rec%/*}" || return 1
+  agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$(_herdr_bare_of "$1")" "$fence" "$4")"
+}
+
 terminal_name() {
-  local id="$1" team="$2" name="$3" mode="${4:-}" label key
+  local id="$1" team="$2" name="$3" mode="${4:-}" label key json esc current rec bare hex byte char
   label="$(_herdr_label "$team" "$name")"
 
-  # THE KEY FIRST, and its failure is fatal.
-  #
-  # The reason is NOT that peek/poke resolve through the key — an earlier
-  # revision of this comment said so and it is false in this tree: those commands
-  # resolve through the placement record's pane id, and `_herdr_internal_key` is
-  # read nowhere outside this driver. The key is the name herdr knows the agent
-  # by, on its side.
-  #
-  # The reason that survives is the one below: the caller writes the placement
-  # record only when this returns 0. Ordering the label first meant a failed
-  # DECORATION returned 13 before the key was attempted and before the record was
-  # written, so a member ended up with neither name and no record — the
-  # requirement this driver serves broke through that door. tmux has always had
-  # this order; herdr was the one driver that put the ornament in front.
-  # Two DIFFERENT failures used to leave the same word and nothing else (#1127):
-  # the key could not be COMPUTED, and the server refused to APPLY it. Both
-  # printed `runtime_error` with herdr's own stderr thrown away, so a naming
-  # failure on a live seat could not be attributed to either -- measured on this
-  # fleet, where a seat's record was repaired in the same action that failed to
-  # name, and the message said only `(runtime_error)`.
-  #
-  # The token on stdout stays `runtime_error`: it is the driver contract and
-  # callers read it. What changes is that the REASON is no longer discarded --
-  # the pattern this file already uses elsewhere, a line on stderr naming which
-  # step failed, and for the server call the server's own words with it.
-  key="$(_herdr_internal_key "$team" "$name")" || {
-    echo runtime_error
-    echo "herdr: cannot compute the internal key for '$team/$name' — the sha256 helper is unavailable, so the pane was not named" >&2
-    return 13
-  }
-  # A pane whose running process just exited and restarted (measured: `codex
-  # resume` after the bridge to agmsgd was lost, #1631) has NO agent entry for
-  # herdr to rename for a few seconds after the new process starts -- herdr's
-  # own detection of it is passive and polled, not instant on the new
-  # process's first byte (measured here: 2-5s on an otherwise idle pane).
-  # `agent rename` on a pane with no agent entry yet fails with
-  # `{"error":{"code":"agent_not_found",...}}` on stderr -- retry only THAT
-  # failure, bounded, the same ~5s (50 * 0.1s) shape terminal_spawn's own
-  # input-readiness wait above uses. Any OTHER rename failure (a live-name
-  # collision, a key the server otherwise refuses) is not a detection race
-  # and still fails on the first try, exactly as before.
+  # Detection is passive: a newly started CLI can be agent_not_found for a
+  # few seconds. Share one bounded retry budget between observation and rename.
+  # Observe again after every failed rename: an external name may have appeared
+  # during the wait, and must be kept rather than overwritten by a stale plan.
   local _err _rc=0 _tries=0
   while :; do
+    # Names chosen outside agmsg are herdr's public addressing surface. Keep
+    # them; only a positively observed unnamed agent needs an internal key.
+    # Unreadable/malformed observations must not authorize an overwrite.
+    if ! json="$(_herdr_cli "$id" agent get "$(_herdr_bare_of "$id")" 2>&1)"; then
+      case "$json" in
+        *'"code":"agent_not_found"'*)
+          if [ "$_tries" -lt 50 ]; then
+            sleep 0.1 2>/dev/null || true
+            _tries=$((_tries + 1))
+            continue
+          fi
+          ;;
+      esac
+      echo runtime_error
+      echo "herdr: 'agent get' for pane '$id' failed${json:+: $json}" >&2
+      return 13
+    fi
+    esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+    bare="$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")"
+    current="$(sqlite3 :memory: "SELECT CASE
+      WHEN json_type('$esc','\$.result.agent')='object'
+        AND json_extract('$esc','\$.result.agent.pane_id')='$bare'
+      THEN CASE
+        WHEN json_type('$esc','\$.result.agent.name') IS NULL
+          OR json_type('$esc','\$.result.agent.name')='null'
+          OR json_extract('$esc','\$.result.agent.name')='' THEN 'unnamed'
+        WHEN json_type('$esc','\$.result.agent.name')='text'
+          THEN 'kept:' || hex(CAST(json_extract('$esc','\$.result.agent.name') AS BLOB))
+        ELSE 'unknown' END
+      ELSE 'unknown' END" 2>/dev/null)" || current=unknown
+    case "$current" in
+      kept:*)
+        # Transport bytes as hex: sqlite's text output and $(...) can truncate
+        # NULs or trailing newlines before a shell-side check ever sees them.
+        hex="${current#kept:}"; key=""
+        while [ -n "$hex" ]; do
+          byte="${hex:0:2}"; hex="${hex:2}"
+          case "$byte" in
+            0?|1?|7F) current=unknown; break ;;
+          esac
+          printf -v char '%b' "\\x$byte"
+          key="$key$char"
+        done
+        case "$key" in *[[:cntrl:]]*) current=unknown ;; esac
+        if [ "$current" != unknown ] && _herdr_record_kept_name "$id" "$team" "$name" "$key"; then
+          if [ "$mode" != key ]; then
+            _herdr_cli "$id" pane rename "$(_herdr_bare_of "$id")" "$label" >/dev/null 2>&1 || true
+          fi
+          echo ok
+          return 0
+        fi
+        ;;
+      unnamed) ;;
+      *) ;;
+    esac
+    if [ "$current" != unnamed ]; then
+      echo runtime_error
+      echo "herdr: cannot observe or record the existing agent name on pane '$id'; its name was left unchanged" >&2
+      return 13
+    fi
+    # An agent that lost its name must not retain the old expected-name mark.
+    if rec="$(_herdr_name_record_path "$team" "$name")"; then
+      rm -f "$rec" || { echo runtime_error; return 13; }
+    fi
+    # peek/poke resolve by placement pane id. team status and fix use
+    # terminal_expected_label below to check the generated or retained name.
+    key="$(_herdr_internal_key "$team" "$name")" || {
+      echo runtime_error
+      echo "herdr: cannot compute the internal key for '$team/$name' — the sha256 helper is unavailable, so the pane was not named" >&2
+      return 13
+    }
     _rc=0
     _err="$(_herdr_cli "$id" agent rename "$(_herdr_bare_of "$id")" "$key" 2>&1 >/dev/null)" || _rc=$?
     [ "$_rc" -eq 0 ] && break
-    case "$_err" in *'"code":"agent_not_found"'*) ;; *) break ;; esac
-    [ "$_tries" -lt 50 ] || break
-    sleep 0.1 2>/dev/null || true
-    _tries=$((_tries + 1))
-  done
-  if [ "$_rc" -ne 0 ]; then
+    case "$_err" in
+      *'"code":"agent_not_found"'*)
+        if [ "$_tries" -lt 50 ]; then
+          sleep 0.1 2>/dev/null || true
+          _tries=$((_tries + 1))
+          continue
+        fi
+        ;;
+    esac
     echo runtime_error
     echo "herdr: 'agent rename' for '$team/$name' on pane '$id' failed (rc=$_rc)${_err:+: $_err}" >&2
     return 13
-  fi
+  done
 
   # The label, and its failure is deliberately NOT fatal — the same shape tmux
   # has. Not merely for symmetry: the caller writes the placement record only
@@ -1425,8 +1494,9 @@ terminal_name() {
   return 0
 }
 
-# The value terminal_name stores as herdr's internal agent key.
-terminal_expected_label() {   # <team> <agent>
+# The name terminal_name established for this exact pane incarnation.
+terminal_expected_label() {   # <team> <agent> [<id>]
+  if [ -n "${3:-}" ] && _herdr_kept_name "$1" "$2" "$3"; then return 0; fi
   _herdr_internal_key "$1" "$2"
 }
 

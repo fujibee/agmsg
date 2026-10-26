@@ -4,14 +4,11 @@
 
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { createReadStream, lstatSync, readdirSync } from "node:fs";
-import { createInterface } from "node:readline";
-import { isAbsolute, join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { isAbsolute } from "node:path";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_OUTPUT_CHARS = 64 * 1024;
-export const QUEUE_CONFIRMATION_TTL_MS = 60_000;
+export const QUEUE_KILL_GRACE_MS = 1000;
 
 export function newNonce() {
   return randomUUID();
@@ -46,7 +43,8 @@ function signalProcessGroup(child, signal) {
 }
 
 // Runs one queue operation without a shell and waits for close (not just exit)
-// so stdout/stderr are fully captured before its result is interpreted.
+// so stdout/stderr are captured before interpretation, bounded by timeout
+// plus the hard-kill grace even if a child never closes its inherited pipes.
 export async function runCodexQueue({
   executable,
   codexHome,
@@ -83,6 +81,7 @@ export async function runCodexQueue({
   child.stdout?.on("data", (chunk) => { stdout = appendBounded(stdout, chunk); });
   child.stderr?.on("data", (chunk) => { stderr = appendBounded(stderr, chunk); });
 
+  let settleClosed;
   const closed = new Promise((resolveClose) => {
     let settled = false;
     const settle = (value) => {
@@ -90,6 +89,7 @@ export async function runCodexQueue({
       settled = true;
       resolveClose(value);
     };
+    settleClosed = settle;
     child.once("error", (error) => settle({ error }));
     child.once("close", (code, signal) => settle({ code, signal }));
   });
@@ -97,10 +97,18 @@ export async function runCodexQueue({
   let timedOut = false;
   let aborted = false;
   const killTimers = [];
+  const finishAtDeadline = () => {
+    signalProcessGroup(child, "SIGKILL");
+    // Even an unobservable child or inherited pipe must not hang the channel.
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.unref?.();
+    settleClosed({ deadline: true });
+  };
   const onAbort = () => {
     aborted = true;
     signalProcessGroup(child, "SIGTERM");
-    killTimers.push(setTimeout(() => signalProcessGroup(child, "SIGKILL"), 1000));
+    killTimers.push(setTimeout(finishAtDeadline, QUEUE_KILL_GRACE_MS));
   };
   signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) onAbort();
@@ -109,8 +117,8 @@ export async function runCodexQueue({
     signalProcessGroup(child, "SIGTERM");
   }, timeoutMs);
   const hardKill = setTimeout(() => {
-    if (timedOut) signalProcessGroup(child, "SIGKILL");
-  }, timeoutMs + 1000);
+    if (timedOut) finishAtDeadline();
+  }, timeoutMs + QUEUE_KILL_GRACE_MS);
   let childRecordFailed = false;
   let started = false;
   child.once("spawn", () => {
@@ -121,7 +129,7 @@ export async function runCodexQueue({
     } catch {
       childRecordFailed = true;
       signalProcessGroup(child, "SIGTERM");
-      killTimers.push(setTimeout(() => signalProcessGroup(child, "SIGKILL"), 1000));
+      killTimers.push(setTimeout(finishAtDeadline, QUEUE_KILL_GRACE_MS));
     }
   });
   const result = await closed;
@@ -149,204 +157,7 @@ export async function runCodexQueue({
   return { kind: "queued", queueItemId: queued[1] };
 }
 
-// Tri-state by design: an unreadable DB is not an empty queue. A row is
-// corroborating evidence only when both its id and thread match.
-export function readQueuedItem(codexHome, queueItemId, thread) {
-  if (!isAbsolute(codexHome ?? "") || !UUID.test(queueItemId ?? "") || !UUID.test(thread ?? "")) {
-    return { state: "unreadable", reason: "invalid_queue_lookup" };
-  }
-  const dbPath = join(codexHome, "queue_1.sqlite");
-  let db;
-  try {
-    if (!lstatSync(dbPath).isFile()) return { state: "unreadable", reason: "queue_db_missing" };
-    db = new DatabaseSync(dbPath, { readOnly: true, allowExtension: false });
-    db.exec("PRAGMA busy_timeout = 1000;");
-    const row = db.prepare("SELECT thread_id FROM queued_items WHERE id = ?").get(queueItemId);
-    if (!row) return { state: "absent" };
-    if (row.thread_id !== thread) return { state: "unreadable", reason: "queue_thread_mismatch" };
-    return { state: "present" };
-  } catch {
-    return { state: "unreadable", reason: "queue_db_read_failed" };
-  } finally {
-    try { db?.close(); } catch { /* the query result already carries the observation */ }
-  }
-}
-
-function matchingRollouts(sessionsDir, thread) {
-  const matches = [];
-  const walk = (dir, depth) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch (error) {
-      if (error?.code === "ENOENT") return;
-      throw error;
-    }
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isSymbolicLink()) throw new Error("symlink_in_sessions");
-      if (entry.isDirectory() && depth < 3) walk(path, depth + 1);
-      else if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(`-${thread}.jsonl`)) matches.push(path);
-    }
-  };
-  walk(sessionsDir, 0);
-  return matches;
-}
-
-function userText(row) {
-  if (row?.type === "event_msg" && row.payload?.type === "user_message") {
-    const value = row.payload.message;
-    return typeof value === "string" ? { kind: "text", text: value } : { kind: "unreadable" };
-  }
-  if (row?.type === "response_item" && row.payload?.type === "message" && row.payload.role === "user") {
-    if (!Array.isArray(row.payload.content) || row.payload.content.length === 0) return { kind: "unreadable" };
-    const pieces = [];
-    for (const part of row.payload.content) {
-      if (typeof part?.text !== "string") return { kind: "unreadable" };
-      pieces.push(part.text);
-    }
-    return { kind: "text", text: pieces.join("\n") };
-  }
-  return { kind: "other" };
-}
-
-async function rolloutHasNonce(path, thread, nonce) {
-  let malformed = false;
-  let first = true;
-  let sawUserRow = false;
-  let sawUnreadableUserRow = false;
-  const input = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
-  try {
-    for await (const line of input) {
-      if (!line) continue;
-      let row;
-      try {
-        row = JSON.parse(line);
-      } catch {
-        malformed = true;
-        continue;
-      }
-      if (first) {
-        first = false;
-        if (row?.type !== "session_meta" || row.payload?.id !== thread) return { state: "unreadable", reason: "rollout_thread_mismatch" };
-      }
-      const observation = userText(row);
-      if (observation.kind === "unreadable") {
-        sawUnreadableUserRow = true;
-      } else if (observation.kind === "text") {
-        sawUserRow = true;
-        if (observation.text.includes(nonce)) return { state: "present" };
-      }
-    }
-  } catch {
-    return { state: "unreadable", reason: "rollout_read_failed" };
-  }
-  if (first) return { state: "unreadable", reason: "rollout_empty" };
-  if (malformed) return { state: "unreadable", reason: "rollout_malformed" };
-  if (sawUnreadableUserRow) return { state: "unreadable", reason: "rollout_user_row_unrecognized" };
-  if (!sawUserRow) return { state: "unreadable", reason: "rollout_user_rows_unrecognized" };
-  return { state: "absent" };
-}
-
-// This observation may not yet be available on unauthenticated runs. Unknown
-// is deliberately separate from absent so callers can leave the row pending.
-export async function readRolloutNonce(codexHome, thread, nonce) {
-  if (!isAbsolute(codexHome ?? "") || !UUID.test(thread ?? "") || !/^[A-Za-z0-9-]{1,80}$/.test(nonce ?? "")) {
-    return { state: "unreadable", reason: "invalid_rollout_lookup" };
-  }
-  const sessionsDir = join(codexHome, "sessions");
-  let matches;
-  try {
-    let sessionsStat;
-    try {
-      sessionsStat = lstatSync(sessionsDir);
-    } catch (error) {
-      if (error?.code === "ENOENT") return { state: "unreadable", reason: "sessions_dir_missing" };
-      throw error;
-    }
-    if (sessionsStat.isSymbolicLink() || !sessionsStat.isDirectory()) {
-      return { state: "unreadable", reason: "sessions_path_not_directory" };
-    }
-    matches = matchingRollouts(sessionsDir, thread);
-  } catch {
-    return { state: "unreadable", reason: "sessions_scan_failed" };
-  }
-  if (matches.length === 0) return { state: "unreadable", reason: "thread_rollout_missing" };
-  if (matches.length !== 1) return { state: "unreadable", reason: "multiple_thread_rollouts" };
-  return rolloutHasNonce(matches[0], thread, nonce);
-}
-
-// A positive observation is enough to confirm. Two readable negative
-// observations wait for the retry window, then expire. Any unreadable or
-// malformed observation remains pending; callers must surface that state
-// instead of treating it as an empty queue or an absent nonce.
-export function resolvePendingQueue({ queueObservation, rolloutObservation, ageMs }) {
-  if (queueObservation?.state === "present") {
-    return { state: "confirmed", reason: "queue_item_present" };
-  }
-  if (rolloutObservation?.state === "present") {
-    return { state: "confirmed", reason: "nonce_observed" };
-  }
-
-  const knownState = (observation) =>
-    observation?.state === "absent" || observation?.state === "unreadable";
-  if (!knownState(queueObservation) || !knownState(rolloutObservation)) {
-    return { state: "pending", reason: "verification_unreadable" };
-  }
-  if (queueObservation.state === "unreadable" || rolloutObservation.state === "unreadable") {
-    return { state: "pending", reason: "verification_unreadable" };
-  }
-  if (!Number.isSafeInteger(ageMs) || ageMs < 0) {
-    return { state: "pending", reason: "pending_age_unreadable" };
-  }
-  if (ageMs >= QUEUE_CONFIRMATION_TTL_MS) {
-    return { state: "expired", reason: "confirmation_timeout" };
-  }
-  return { state: "pending", reason: "awaiting_confirmation" };
-}
-
-// Call immediately after the caller has durably stored queueItemId. Check the
-// queue first: Codex may consume the item before the rollout can be inspected.
-// A present row is already sufficient evidence, so that fast path does not
-// depend on the not-yet-measured processed-message serialization.
-export async function verifyPendingDelivery({
-  codexHome,
-  queueItemId,
-  thread,
-  nonce,
-  ageMs,
-  readQueue = readQueuedItem,
-  readRollout = readRolloutNonce,
-}) {
-  let queueObservation;
-  try {
-    queueObservation = readQueue(codexHome, queueItemId, thread);
-  } catch {
-    queueObservation = { state: "unreadable", reason: "queue_db_read_failed" };
-  }
-  if (queueObservation?.state === "present") {
-    return { state: "confirmed", reason: "queue_item_present" };
-  }
-
-  let rolloutObservation;
-  try {
-    rolloutObservation = await readRollout(codexHome, thread, nonce);
-  } catch {
-    rolloutObservation = { state: "unreadable", reason: "rollout_read_failed" };
-  }
-  return resolvePendingQueue({ queueObservation, rolloutObservation, ageMs });
-}
-
-// A readable profile with no rollout for the thread is a distinct, nameable
-// cause (the recorded profile is not the one this conversation runs in), not a
-// generic failure to observe it.
-export function rolloutStateOf(rollout) {
-  if (rollout?.state === "absent" || rollout?.state === "present") return "valid";
-  if (rollout?.reason === "thread_rollout_missing" || rollout?.reason === "sessions_dir_missing") return "no_rollout";
-  return "invalid";
-}
-
-export function classifyCodexSeat({ roleSession, bridgeState, rolloutState }) {
+export function classifyCodexSeat({ roleSession, bridgeState }) {
   if (bridgeState === "running") return { state: "bridged", reason: "bridge_running" };
   if (!roleSession || !roleSession.thread || !roleSession.codex_home) {
     return { state: "unaddressable", reason: "role_session_missing" };
@@ -354,8 +165,5 @@ export function classifyCodexSeat({ roleSession, bridgeState, rolloutState }) {
   if (!UUID.test(roleSession.thread)) return { state: "unaddressable", reason: "thread_id_invalid" };
   if (!isAbsolute(roleSession.codex_home)) return { state: "unaddressable", reason: "codex_home_invalid" };
   if (bridgeState !== "stopped") return { state: "blocked", reason: "bridge_state_unknown" };
-  if (rolloutState === "valid") return { state: "addressable", reason: "" };
-  if (rolloutState === "archived") return { state: "blocked", reason: "thread_archived" };
-  if (rolloutState === "no_rollout") return { state: "blocked", reason: "codex_home_mismatch" };
-  return { state: "blocked", reason: "thread_observation_failed" };
+  return { state: "addressable", reason: "" };
 }

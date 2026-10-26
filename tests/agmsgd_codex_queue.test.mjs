@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -12,12 +14,7 @@ import {
   classifyCodexSeat,
   inboxNudge,
   newNonce,
-  readQueuedItem,
-  readRolloutNonce,
-  resolvePendingQueue,
-  rolloutStateOf,
   runCodexQueue,
-  verifyPendingDelivery,
 } from '../scripts/daemon/channels/codex-queue-io.mjs';
 import {
   CODEX_CHANNEL_SCHEMA,
@@ -31,7 +28,7 @@ import {
 import { createCodexQueueChannel } from '../scripts/daemon/channels/codex-queue.mjs';
 import { openInstallDb } from '../scripts/daemon/db.mjs';
 import { readOwnerAndIntentReadOnly } from '../scripts/daemon/status.mjs';
-import { processStartWitness } from '../scripts/daemon/channels/process-group.mjs';
+import { captureProcessGroup, observeProcessGroup, processStartWitness } from '../scripts/daemon/channels/process-group.mjs';
 import { checkWindowsCodexQueueGate, resolveWindowsCodexExe } from '../scripts/daemon/channels/windows-codex-queue.mjs';
 
 const thread = '01a0ea97-c011-73f3-8470-fd59db15adba';
@@ -62,7 +59,7 @@ function fakeChild({ stdout, stderr = '', code = 0, autoClose = true }) {
 }
 
 function executableFixture(t) {
-  const root = temporaryDirectory(t);
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-codex-queue-'));
   mkdirSync(path.join(root, 'run'));
   const home = path.join(root, 'profile');
   mkdirSync(path.join(home, 'sessions'), { recursive: true });
@@ -71,9 +68,13 @@ function executableFixture(t) {
     JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'earlier prompt' } }), '',
   ].join('\n'));
   const db = openInstallDb(path.join(root, 'run', 'install.db'));
+  // A single teardown enforces close-before-removal regardless of hook order.
+  t.after(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
   ensureCodexChannelSchema(db);
   db.exec("UPDATE daemon_intent SET desired='on', op_gen=1");
-  t.after(() => db.close());
   const options = {
     db, installRoot: root, expectedOpGen: 1,
     env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', AGMSG_STORAGE_PATH: root },
@@ -83,8 +84,151 @@ function executableFixture(t) {
     openStore: () => ({ close() {} }),
     readSnapshot: () => ({ state: 'ok', unread: true, upTo: '{}' }),
     captureGroup: () => ({ state: 'absent' }),
+    // Exercise the Windows gate path on every host without asking the real
+    // Codex binary resolver to accept this suite's Node executable fixture.
+    hostPlatform: 'win32',
+    windowsGate: ({ executable }) => ({ state: 'ok', executable }),
   };
   return { root, db, options };
+}
+
+function mockProcessEvidence(t, { platform = 'win32', probe = () => {}, execute = () => {
+  throw Object.assign(new Error('executable missing'), { code: 'ENOENT' });
+} } = {}) {
+  t.mock.method(os, 'platform', () => platform);
+  t.mock.method(process, 'kill', probe);
+  t.mock.method(childProcess, 'execFileSync', execute);
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+}
+
+test('an unwitnessed Windows queue child that is gone becomes absent', (t) => {
+  const probes = [];
+  mockProcessEvidence(t, { probe: (pid, signal) => {
+    probes.push([pid, signal]);
+    throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+  } });
+  const captured = captureProcessGroup(4242);
+  assert.equal(captured.reason, 'child_start_witness_unavailable');
+  assert.deepEqual(observeProcessGroup(captured), { state: 'absent' });
+  assert.deepEqual(probes, [[4242, 0]], 'native Windows probes the pid, not a negative POSIX group');
+});
+
+test('an unwitnessed POSIX child still probes the negative process group', (t) => {
+  const probes = [];
+  mockProcessEvidence(t, { platform: 'linux', probe: (pid, signal) => {
+    probes.push([pid, signal]);
+    throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+  } });
+  assert.deepEqual(observeProcessGroup({ state: 'unreadable', reason: 'child_start_witness_unavailable', pgid: 4242 }), { state: 'absent' });
+  assert.deepEqual(probes, [[-4242, 0]]);
+});
+
+for (const code of [null, 'EPERM', 'EIO']) {
+  test(`an unwitnessed Windows queue child stays unknown when its pid probe is ${code ?? 'alive'}`, (t) => {
+    mockProcessEvidence(t, { probe: () => {
+      if (code) throw Object.assign(new Error(code), { code });
+    } });
+    const captured = captureProcessGroup(4242);
+    assert.equal(observeProcessGroup(captured).state, 'unreadable');
+    assert.equal(captured.state, 'unreadable', 'no new witness is adopted for a possibly reused pid');
+  });
+}
+
+test('a witnessed Windows queue child still rejects a reused pid', (t) => {
+  mockProcessEvidence(t, { execute: () => '456\n' });
+  assert.deepEqual(observeProcessGroup({
+    state: 'complete', kind: 'windows-native-process', pgid: 4242,
+    boot_id: 'test-boot', witness: 'windows:123',
+  }), { state: 'unreadable', reason: 'child_process_pid_reused' });
+});
+
+test('a missing Windows start witness records both executable failures', (t) => {
+  const commands = [];
+  mockProcessEvidence(t, { execute: (command) => {
+    commands.push(command);
+    throw Object.assign(new Error('probe failed'), command === 'powershell.exe'
+      ? { status: 1, stderr: Buffer.from('Get-Process: process not found\n') }
+      : { code: 'ENOENT' });
+  } });
+  const logged = [];
+  const captured = captureProcessGroup(4242, detail => logged.push(detail));
+  assert.deepEqual(commands, ['powershell.exe', 'pwsh.exe']);
+  assert.equal(captured.reason, 'child_start_witness_unavailable');
+  assert.match(captured.witness_failures[0], /powershell\.exe failed:.*status=1.*process not found/);
+  assert.match(captured.witness_failures[1], /pwsh\.exe failed:.*code=ENOENT/);
+  assert.deepEqual(logged, captured.witness_failures);
+});
+
+test('Windows start-witness fallback reports invalid output and accepts pwsh evidence', (t) => {
+  mockProcessEvidence(t, { execute: command => command === 'powershell.exe' ? '' : '123\n' });
+  const logged = [];
+  assert.equal(processStartWitness(4242, detail => logged.push(detail)), 'windows:123');
+  assert.match(logged[0], /powershell\.exe.*no start time/);
+});
+
+test('a live unwitnessed Windows child expires after its maximum lifetime and permits a later nudge', async (t) => {
+  const { db, options } = executableFixture(t);
+  let clock = Date.parse('2026-10-23T00:00:00Z');
+  let nudges = 0;
+  const channel = createCodexQueueChannel({
+    ...options, now: () => clock, timeoutMs: 100, hostPlatform: 'win32',
+    executable: process.execPath,
+    windowsGate: () => ({ state: 'ok', executable: process.execPath }),
+    captureGroup: pid => ({ state: 'unreadable', reason: 'child_start_witness_unavailable', pgid: pid }),
+    observeGroup: () => ({ state: 'unreadable', reason: 'child_start_witness_unavailable' }),
+    queue: async request => {
+      nudges += 1;
+      request.onChildStart(4242);
+      return { kind: 'queued', queueItemId: itemId };
+    },
+  });
+  t.after(() => channel.stop());
+  await channel.pollOnce();
+  const first = db.prepare('SELECT id FROM beta_codex_queue').get().id;
+  clock += 1099; // queue timeout 100ms plus the existing 1000ms hard-kill grace.
+  await channel.pollOnce();
+  assert.equal(nudges, 1);
+  assert.equal(db.prepare('SELECT state FROM beta_codex_queue WHERE id=?').get(first).state, 'pending');
+  clock += 1;
+  await channel.pollOnce();
+  const expired = db.prepare('SELECT state, children FROM beta_codex_queue WHERE id=?').get(first);
+  assert.equal(expired.state, 'expired');
+  assert.equal(JSON.parse(expired.children).expiration_reason, 'queue_child_timeout:child_start_witness_unavailable');
+  assert.equal(db.prepare('SELECT reason FROM beta_codex_seat').get().reason, 'queue_child_timeout:child_start_witness_unavailable');
+  await channel.pollOnce();
+  assert.equal(nudges, 2);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM beta_codex_queue WHERE state='pending'").get().n, 1);
+  assert.equal(db.prepare('SELECT state FROM beta_codex_queue WHERE id=?').get(first).state, 'expired');
+});
+
+for (const scenario of [
+  { platform: 'win32', children: { state: 'complete', kind: 'windows-native-process', pgid: 4242, boot_id: 'test', witness: 'windows:123' } },
+  { platform: 'linux', children: { state: 'unreadable', reason: 'child_start_witness_unavailable', pgid: 4242 } },
+]) {
+  test(`the common writer lifetime expires ${scenario.platform} ${scenario.children.state} evidence`, async (t) => {
+    const { db, options } = executableFixture(t);
+    let clock = Date.parse('2026-10-23T00:00:00Z');
+    let nudges = 0;
+    const channel = createCodexQueueChannel({
+      ...options, now: () => clock, timeoutMs: 100, hostPlatform: scenario.platform,
+      executable: process.execPath,
+      windowsGate: () => ({ state: 'ok', executable: process.execPath }),
+      captureGroup: () => scenario.children,
+      observeGroup: () => ({ state: 'unreadable', reason: 'identity_unknown' }),
+      queue: async request => {
+        nudges += 1;
+        request.onChildStart(4242);
+        return { kind: 'queued', queueItemId: itemId };
+      },
+    });
+    t.after(() => channel.stop());
+    await channel.pollOnce();
+    clock += 60_000;
+    await channel.pollOnce();
+    assert.equal(nudges, 1);
+    assert.equal(db.prepare('SELECT state FROM beta_codex_queue').get().state, 'expired');
+  });
 }
 
 test('recorded absolute Codex runs with an env-node shebang under a minimal service PATH', async (t) => {
@@ -101,7 +245,7 @@ test('recorded absolute Codex runs with an env-node shebang under a minimal serv
   await channel.pollOnce();
   const row = db.prepare('SELECT state, queue_item_id FROM beta_codex_queue').get();
   assert.equal(row.queue_item_id, itemId);
-  assert.equal(row.state, 'pending', 'a receipt alone is not delivery confirmation');
+  assert.equal(row.state, 'confirmed', 'a successful receipt is delivery confirmation');
   await channel.stop();
 });
 
@@ -181,128 +325,15 @@ test('queue invocation is shell-free, pins CODEX_HOME, and parses only a success
   assert.equal(timeoutSignal, 'SIGTERM');
 });
 
-test('queue DB and rollout observations distinguish positive, absent, and unreadable evidence', async (t) => {
-  const home = temporaryDirectory(t);
-  const db = new DatabaseSync(path.join(home, 'queue_1.sqlite'));
-  db.exec('CREATE TABLE queued_items (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload_json TEXT NOT NULL)');
-  db.prepare('INSERT INTO queued_items VALUES (?, ?, ?)').run(itemId, thread, '{}');
-  db.close();
-
-  assert.deepEqual(readQueuedItem(home, itemId, thread), { state: 'present' });
-  assert.deepEqual(readQueuedItem(home, '01a0ea98-2235-7f02-b477-7c130e602fce', thread), { state: 'absent' });
-  assert.equal(readQueuedItem(path.join(home, 'missing'), itemId, thread).state, 'unreadable');
-  assert.equal(readQueuedItem(home, itemId, '01a0ea97-c011-73f3-8470-fd59db15adbb').state, 'unreadable');
-
-  const rolloutDir = path.join(home, 'sessions', '2026', '09', '29');
-  mkdirSync(rolloutDir, { recursive: true });
-  const rollout = path.join(rolloutDir, `rollout-2026-09-29T00-00-00-${thread}.jsonl`);
-  const nonce = 'pending-nonce-123';
-  writeFileSync(rollout, [
-    JSON.stringify({ type: 'session_meta', payload: { id: thread } }),
-    JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: inboxNudge(nonce) } }),
-    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: inboxNudge('second-nonce') }] } }),
-    '',
-  ].join('\n'));
-  assert.deepEqual(await readRolloutNonce(home, thread, nonce), { state: 'present' });
-  assert.deepEqual(await readRolloutNonce(home, thread, 'second-nonce'), { state: 'present' });
-  assert.deepEqual(await readRolloutNonce(home, thread, 'not-yet-seen'), { state: 'absent' });
-  assert.deepEqual(await readRolloutNonce(path.join(home, 'missing-profile'), thread, nonce), { state: 'unreadable', reason: 'sessions_dir_missing' });
-
-  writeFileSync(rollout, [
-    JSON.stringify({ type: 'session_meta', payload: { id: thread } }),
-    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'future_text_shape', value: inboxNudge(nonce) }] } }),
-    '',
-  ].join('\n'));
-  assert.deepEqual(await readRolloutNonce(home, thread, nonce), { state: 'unreadable', reason: 'rollout_user_row_unrecognized' });
-
-  writeFileSync(rollout, '{malformed json}\n');
-  assert.equal((await readRolloutNonce(home, thread, nonce)).state, 'unreadable');
-});
-
-test('measured Windows 0.157.0 queued user response proves the rollout nonce is present', async (t) => {
-  const home = temporaryDirectory(t);
-  const sessions = path.join(home, 'sessions');
-  mkdirSync(sessions);
-  // Anonymized measured row; field positions and types are preserved.
-  const row = readFileSync(new URL('./fixtures/codex-windows-0.157.0-queue-response.jsonl', import.meta.url), 'utf8');
-  writeFileSync(path.join(sessions, `rollout-fixture-${thread}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: thread } }) + '\n' + row);
-  assert.deepEqual(await readRolloutNonce(home, thread, 'NONCE'), { state: 'present' });
-});
-
-test('measured Windows 0.160.0 queued user response proves the rollout nonce is present', async (t) => {
-  const home = temporaryDirectory(t);
-  const sessions = path.join(home, 'sessions');
-  mkdirSync(sessions);
-  // Anonymized measured row; field positions and types are preserved.
-  const row = readFileSync(new URL('./fixtures/codex-windows-0.160.0-queue-response.jsonl', import.meta.url), 'utf8');
-  writeFileSync(path.join(sessions, `rollout-fixture-${thread}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: thread } }) + '\n' + row);
-  assert.deepEqual(await readRolloutNonce(home, thread, 'NONCE'), { state: 'present' });
-});
-
-test('pending delivery confirms on either positive witness, expires only on two readable absences, and otherwise stays pending', () => {
-  assert.deepEqual(resolvePendingQueue({
-    queueObservation: { state: 'present' },
-    rolloutObservation: { state: 'unreadable', reason: 'rollout_read_failed' },
-    ageMs: 100,
-  }), { state: 'confirmed', reason: 'queue_item_present' });
-  assert.deepEqual(resolvePendingQueue({
-    queueObservation: { state: 'unreadable', reason: 'queue_db_read_failed' },
-    rolloutObservation: { state: 'present' },
-    ageMs: 100,
-  }), { state: 'confirmed', reason: 'nonce_observed' });
-  assert.deepEqual(resolvePendingQueue({
-    queueObservation: { state: 'absent' }, rolloutObservation: { state: 'absent' }, ageMs: 59_999,
-  }), { state: 'pending', reason: 'awaiting_confirmation' });
-  assert.deepEqual(resolvePendingQueue({
-    queueObservation: { state: 'absent' }, rolloutObservation: { state: 'absent' }, ageMs: 60_000,
-  }), { state: 'expired', reason: 'confirmation_timeout' });
-  assert.deepEqual(resolvePendingQueue({
-    queueObservation: { state: 'absent' },
-    rolloutObservation: { state: 'unreadable', reason: 'thread_rollout_missing' },
-    ageMs: 120_000,
-  }), { state: 'pending', reason: 'verification_unreadable' });
-  assert.deepEqual(resolvePendingQueue({
-    queueObservation: { state: 'absent' }, rolloutObservation: { state: 'absent' }, ageMs: -1,
-  }), { state: 'pending', reason: 'pending_age_unreadable' });
-});
-
-test('immediate post-receipt check confirms a still-queued item before rollout inspection', async () => {
-  const events = ['queue_item_id_persisted'];
-  const result = await verifyPendingDelivery({
-    codexHome: '/tmp/profile', queueItemId: itemId, thread, nonce: 'pending-nonce', ageMs: 5,
-    readQueue: () => {
-      events.push('queue_read');
-      return { state: 'present' };
-    },
-    readRollout: async () => {
-      events.push('rollout_read');
-      return { state: 'unreadable', reason: 'rollout_not_ready' };
-    },
-  });
-  assert.deepEqual(result, { state: 'confirmed', reason: 'queue_item_present' });
-  assert.deepEqual(events, ['queue_item_id_persisted', 'queue_read']);
-
-  const consumedEarly = await verifyPendingDelivery({
-    codexHome: '/tmp/profile', queueItemId: itemId, thread, nonce: 'pending-nonce', ageMs: 60_000,
-    readQueue: () => ({ state: 'absent' }),
-    readRollout: async () => ({ state: 'unreadable', reason: 'rollout_user_row_unrecognized' }),
-  });
-  assert.deepEqual(consumedEarly, { state: 'pending', reason: 'verification_unreadable' });
-});
-
 test('seat classification never treats an uncertain destination or bridge as addressable', () => {
   // A profile with no rollout for the thread is named as such, not as an unobservable conversation.
-  assert.equal(rolloutStateOf({ state: 'unreadable', reason: 'thread_rollout_missing' }), 'no_rollout');
-  assert.equal(rolloutStateOf({ state: 'unreadable', reason: 'rollout_read_failed' }), 'invalid');
   const record = { thread, codex_home: '/tmp/profile' };
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'valid' }), { state: 'addressable', reason: '' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'running' }), { state: 'bridged', reason: 'bridge_running' });
   assert.deepEqual(classifyCodexSeat({ roleSession: null }), { state: 'unaddressable', reason: 'role_session_missing' });
-  assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'archived' }), { state: 'blocked', reason: 'thread_archived' });
-  assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped', rolloutState: 'no_rollout' }), { state: 'blocked', reason: 'codex_home_mismatch' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'unknown' }), { state: 'blocked', reason: 'bridge_state_unknown' });
   assert.deepEqual(classifyCodexSeat({ roleSession: record }), { state: 'blocked', reason: 'bridge_state_unknown' });
-  assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped' }), { state: 'blocked', reason: 'thread_observation_failed' });
+  assert.deepEqual(classifyCodexSeat({ roleSession: record, bridgeState: 'stopped' }), { state: 'addressable', reason: '' });
 });
 
 test('Windows queue requires a native executable and a stable release at or above the measured minimum', (t) => {
@@ -390,7 +421,7 @@ test('store discovery is fail-closed and unread snapshots advance both event and
   readDb.close();
 });
 
-test('Codex channel queues one unread snapshot and confirms it before advancing that seat', async (t) => {
+test('Codex channel advances accepted snapshots while reserving only active writers', async (t) => {
   const root = temporaryDirectory(t);
   const teamsDir = path.join(root, 'teams');
   const runDir = path.join(root, 'run');
@@ -436,6 +467,8 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
     installRoot: root,
     expectedOpGen: 4,
     env: { AGMSG_STORAGE_PATH: storageDir },
+    hostPlatform: 'win32',
+    windowsGate: ({ executable }) => ({ state: 'ok', executable }),
     readDriver: () => ({ state: 'ok', driver: 'sqlite' }),
     captureGroup: (pid) => ({ state: 'complete', pgid: pid, boot_id: 'test-boot', witness: 'test-start' }),
     observeGroup: () => ({ state: childGroupState }),
@@ -489,8 +522,8 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
   await windowsChannel.pollOnce();
   const windowsSeat = installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
   assert.equal(windowsSeat.state, 'blocked');
-  assert.equal(windowsSeat.reason, 'windows_codex_version_below_minimum:0.156.0;pending:awaiting_confirmation');
-  assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ? ORDER BY id DESC LIMIT 1").get(JSON.stringify(['alpha', 'alice'])).state, 'pending');
+  assert.equal(windowsSeat.reason, 'windows_codex_version_below_minimum:0.156.0');
+  assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ? ORDER BY id DESC LIMIT 1").get(JSON.stringify(['alpha', 'alice'])).state, 'confirmed');
   const windowsQueueDb = new DatabaseSync(path.join(codexHome, 'queue_1.sqlite'));
   windowsQueueDb.prepare('INSERT INTO queued_items VALUES (?, ?, ?)').run(notYetVisibleItemId, thread, '{}');
   windowsQueueDb.close();
@@ -573,6 +606,8 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
   let groupState = 'absent';
   const staleChannel = createCodexQueueChannel({
     db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: storageDir },
+    hostPlatform: 'win32',
+    windowsGate: ({ executable }) => ({ state: 'ok', executable }),
     observeGroup: () => ({ state: groupState }),
     log: (message) => logs.push(message),
     captureGroup: (pid, onFailure) => { onFailure('ps failed: status=1'); return { state: 'unreadable', reason: 'child_start_witness_unavailable', pgid: pid }; },
@@ -580,7 +615,9 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
   });
   insertPending(thread, 'unwitnessed-nonce', itemId);
   await staleChannel.pollOnce();
-  assert.equal(latestState(), 'confirmed', 'a gone group with no start witness still resolves from the queue evidence');
+  assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE nonce='unwitnessed-nonce'").get().state, 'confirmed', 'a gone group settles the accepted receipt without consumption evidence');
+  assert.deepEqual(sentThreads, [thread], 'new unread can be queued once the old writer is gone');
+  sentThreads.length = 0;
   insertPending('01a0ea97-c011-73f3-8470-fd59db15adbb', 'old-thread-nonce', null);
   groupState = 'present';
   await staleChannel.pollOnce();
@@ -629,4 +666,267 @@ test('Codex channel queues one unread snapshot and confirms it before advancing 
   unlinkSync(`${bridgeBase}.meta`);
   unlinkSync(path.join(runDir, `codex-bridge-lease.${bridgePid}`));
   installDb.close();
+});
+
+test('a queue receipt advances the notified cursor without a queue DB or readable rollout', async (t) => {
+  const { db, options, root } = executableFixture(t);
+  let calls = 0;
+  let latest = '{"eventSeq":1,"legacyId":0}';
+  const cursors = [];
+  // No queue_1.sqlite exists, and the rollout cannot establish consumption.
+  writeFileSync(path.join(root, 'profile', 'sessions', `rollout-test-${thread}.jsonl`), 'malformed\n');
+  const channel = createCodexQueueChannel({ ...options, executable: process.execPath,
+    readSnapshot: (_store, _team, _agent, cursor) => {
+      cursors.push(cursor);
+      return { state: 'ok', unread: cursor !== latest, upTo: latest };
+    },
+    queue: async (request) => { calls++; request.onChildStart(4242); return { kind: 'queued', queueItemId: itemId }; },
+  });
+  await channel.pollOnce();
+  await channel.pollOnce();
+  assert.equal(calls, 1);
+  assert.equal(cursors.at(-1), latest);
+  latest = '{"eventSeq":2,"legacyId":0}';
+  await channel.pollOnce();
+  assert.equal(calls, 2, 'only new unread prompts a new nudge');
+  assert.equal(db.prepare("SELECT count(*) AS n FROM beta_codex_queue WHERE state='confirmed'").get().n, 2);
+  await channel.stop();
+});
+
+for (const platform of ['linux', 'darwin', 'win32']) {
+  for (const children of ['incomplete', '{broken', JSON.stringify({ state: 'complete', pgid: 4242, witness: 'old', boot_id: 'test' }), JSON.stringify({ state: 'unreadable', reason: 'child_record_failed' })]) {
+    test(`every unresolved ${platform} child reservation has a lifetime bound: ${children}`, async (t) => {
+      const { db, options } = executableFixture(t);
+      let clock = Date.parse('2026-10-23T00:00:00Z');
+      let calls = 0;
+      db.prepare(`INSERT INTO beta_codex_queue (seat,codex_home,thread,up_to,nonce,state,children,created_at)
+        VALUES (?,?,?,?,?,'pending',?,?)`).run('["test","alice"]', options.readSession().record.codex_home, thread, '{}', 'old', children, new Date(clock).toISOString());
+      const channel = createCodexQueueChannel({ ...options, executable: process.execPath, hostPlatform: platform,
+        windowsGate: () => ({ state: 'ok', executable: process.execPath }), timeoutMs: 100, now: () => clock,
+        observeGroup: () => ({ state: 'unreadable', reason: 'child_group_leader_reused' }),
+        queue: async request => { calls++; request.onChildStart(4242); return { kind: 'queued', queueItemId: itemId }; },
+      });
+      clock += 1099;
+      await channel.pollOnce();
+      assert.equal(calls, 0);
+      clock++;
+      await channel.pollOnce();
+      assert.equal(db.prepare('SELECT state FROM beta_codex_queue WHERE id=1').get().state, 'expired');
+      assert.match(JSON.parse(db.prepare('SELECT children FROM beta_codex_queue WHERE id=1').get().children).expiration_reason, /timeout/);
+      await channel.pollOnce();
+      assert.equal(calls, 1);
+      await channel.stop();
+    });
+  }
+}
+
+for (const failure of [{ kind: 'failed', reason: 'queue_exit_1' }, { kind: 'failed', reason: 'queue_output_unrecognized' }, { kind: 'timeout' }, { kind: 'failed', reason: 'child_record_failed' }]) {
+  test(`a queue failure is visible and retries next poll: ${failure.reason ?? failure.kind}`, async (t) => {
+    const { db, options } = executableFixture(t);
+    let calls = 0;
+    const channel = createCodexQueueChannel({ ...options, executable: process.execPath,
+      queue: async request => { calls++; request.onChildStart(4242); return failure; },
+    });
+    await channel.pollOnce();
+    assert.match(readOwnerAndIntentReadOnly(options.installRoot).codexSeats.seats[0].reason, new RegExp(failure.reason ?? failure.kind));
+    await channel.pollOnce();
+    assert.equal(calls, 2);
+    await channel.stop();
+  });
+}
+
+for (const scenario of ['dead bridge', 'another seat malformed meta', 'own malformed meta']) {
+  test(`bridge ownership: ${scenario}`, async (t) => {
+    const { options, root, db } = executableFixture(t);
+    let calls = 0;
+    const own = scenario !== 'another seat malformed meta';
+    const base = path.join(root, 'run', `codex-bridge.test.${own ? 'alice' : 'bob'}`);
+    writeFileSync(`${base}.pid`, '4242\n');
+    writeFileSync(`${base}.meta`, scenario === 'dead bridge'
+      ? `pid=4242\nidentities=test/alice\ntype=codex\nproject=${root}\n` : 'pid=4242\n');
+    if (scenario === 'dead bridge') {
+      t.mock.method(process, 'kill', () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); });
+    }
+    const channel = createCodexQueueChannel({ ...options, executable: process.execPath,
+      queue: async request => { calls++; request.onChildStart(4242); return { kind: 'queued', queueItemId: itemId }; },
+    });
+    await channel.pollOnce();
+    const seat = db.prepare('SELECT state, reason FROM beta_codex_seat').get();
+    if (scenario === 'own malformed meta') {
+      assert.equal(calls, 0);
+      assert.match(seat.reason, /codex-bridge.test.alice.meta.*identities_missing/);
+    } else {
+      assert.equal(calls, 1);
+      assert.equal(seat.state, 'addressable');
+    }
+    await channel.stop();
+  });
+}
+
+for (const recordFailure of [false, true]) {
+  test(`a queue child that never emits close still returns within the hard deadline (record failure: ${recordFailure})`, async (t) => {
+    t.mock.method(process, 'kill', () => true);
+    let child;
+    const start = Date.now();
+    const result = await runCodexQueue({ executable: process.execPath, codexHome: os.tmpdir(), thread,
+      message: 'test', timeoutMs: 10,
+      spawnProcess: () => {
+        child = fakeChild({ stdout: '', autoClose: false });
+        setImmediate(() => child.emit('spawn'));
+        return child;
+      },
+      onChildStart: () => { if (recordFailure) throw new Error('record failed'); },
+    });
+    assert.equal(result.kind, recordFailure ? 'failed' : 'timeout');
+    if (recordFailure) assert.equal(result.reason, 'child_record_failed');
+    assert.ok(Date.now() - start < 5000);
+    assert.equal(child.stdout.destroyed, true);
+  });
+}
+
+for (const retired of [false, true]) {
+  test(`a writer from a later or retired seat reserves a shared CODEX_HOME before roster traversal (retired: ${retired})`, async (t) => {
+    const { options, db } = executableFixture(t);
+    const home = options.readSession().record.codex_home;
+    let calls = 0;
+    let groupState = 'present';
+    db.prepare(`INSERT INTO beta_codex_queue (seat,codex_home,thread,up_to,nonce,state,children,created_at)
+      VALUES (?,?,?,?,?,'pending',?,?)`).run('["test","bob"]', home, thread, '{}', 'other-writer', JSON.stringify({ state: 'complete', pgid: 4242 }), new Date().toISOString());
+    const alice = options.listSeats().seats[0];
+    const bob = { team: 'test', agent: 'bob', teamConfig: { agents: { bob: { registrations: [{ type: 'codex', project: options.installRoot }] } } } };
+    const channel = createCodexQueueChannel({ ...options, executable: process.execPath,
+      listSeats: () => ({ state: 'ok', seats: retired ? [alice] : [alice, bob] }),
+      readSession: (_run, _team, agent) => ({ state: 'present', record: { ...options.readSession().record, agent } }),
+      observeGroup: () => ({ state: groupState }),
+      queue: async request => { calls++; request.onChildStart(4242); return { kind: 'failed', started: false, reason: 'spawn_failed:test' }; },
+    });
+    await channel.pollOnce();
+    assert.equal(calls, 0);
+    assert.equal(db.prepare('SELECT reason FROM beta_codex_seat WHERE seat=?').get('["test","alice"]').reason, 'shared_codex_home_queue_pending');
+    groupState = 'absent';
+    await channel.pollOnce();
+    assert.ok(calls >= 1);
+    await channel.stop();
+  });
+}
+
+for (const receipt of [true, false]) {
+  test(`upgrade releases old pending rows without consumption checks (receipt: ${receipt})`, async (t) => {
+    const { options, db } = executableFixture(t);
+    let calls = 0;
+    const cursor = '{"eventSeq":1,"legacyId":0}';
+    db.prepare(`INSERT INTO beta_codex_queue (seat,codex_home,thread,up_to,nonce,queue_item_id,state,children,created_at)
+      VALUES (?,?,?,?,?,?,'pending',?,?)`).run('["test","alice"]', options.readSession().record.codex_home, thread, cursor, 'legacy', receipt ? itemId : null,
+      JSON.stringify({ state: 'complete', pgid: 4242, result: receipt ? 'queued' : 'failed' }), '2026-09-01T00:00:00Z');
+    const channel = createCodexQueueChannel({ ...options, executable: process.execPath,
+      observeGroup: () => ({ state: 'unreadable', reason: 'child_group_leader_unreadable' }),
+      readSnapshot: (_db, _team, _agent, previous) => ({ unread: previous !== cursor, upTo: cursor }),
+      queue: async request => { calls++; request.onChildStart(4243); return { kind: 'queued', queueItemId: itemId }; },
+    });
+    await channel.pollOnce();
+    assert.equal(db.prepare('SELECT state FROM beta_codex_queue WHERE id=1').get().state, 'expired');
+    await channel.pollOnce();
+    assert.equal(calls, receipt ? 0 : 1, 'accepted snapshots stay notified even when their old writer reservation expires');
+    await channel.stop();
+  });
+}
+
+for (const kind of ['archived', 'no_rollout']) {
+  test(`queue CLI owns thread classification and retries next poll: ${kind}`, async (t) => {
+    const { options, db } = executableFixture(t);
+    let calls = 0;
+    const channel = createCodexQueueChannel({ ...options, executable: process.execPath,
+      queue: async request => { calls++; request.onChildStart(4242); return { kind }; },
+    });
+    await channel.pollOnce();
+    assert.equal(db.prepare('SELECT reason FROM beta_codex_seat').get().reason, kind === 'archived' ? 'thread_archived' : 'codex_home_mismatch');
+    await channel.pollOnce();
+    assert.equal(calls, 2);
+    await channel.stop();
+  });
+}
+
+test('a stuck seat times out, the next seat sends, and late completion cannot change status', async (t) => {
+  const { options, db } = executableFixture(t);
+  const first = options.listSeats().seats[0];
+  const second = { team: 'test', agent: 'bob', teamConfig: { agents: { bob: { registrations: [{ type: 'codex', project: options.installRoot }] } } } };
+  let release;
+  const logs = [];
+  const channel = createCodexQueueChannel({ ...options, executable: process.execPath, seatDeadlineMs: 20, log: line => logs.push(line),
+    listSeats: () => ({ state: 'ok', seats: [first, second] }),
+    readSession: (_run, _team, agent) => ({ state: 'present', record: { ...options.readSession().record, agent, codex_home: path.join(options.installRoot, agent) } }),
+    queue: async request => {
+      request.onChildStart(4242);
+      if (request.codexHome.endsWith('alice')) return new Promise(resolve => { release = resolve; });
+      return { kind: 'queued', queueItemId: itemId };
+    },
+  });
+  await channel.pollOnce();
+  const alice = () => db.prepare('SELECT state, reason FROM beta_codex_seat WHERE seat=?').get('["test","alice"]');
+  assert.equal(alice().reason, 'seat_poll_deadline');
+  assert.equal(db.prepare('SELECT state FROM beta_codex_seat WHERE seat=?').get('["test","bob"]').state, 'addressable');
+  assert.ok(logs.some(line => line.includes('poll_timeout') && line.includes('alice')));
+  assert.ok(logs.some(line => line.includes('sent') && line.includes('bob')));
+  release({ kind: 'queued', queueItemId: itemId });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(alice().reason, 'seat_poll_deadline');
+  assert.equal(db.prepare('SELECT queue_item_id FROM beta_codex_queue WHERE seat=?').get('["test","alice"]').queue_item_id, null);
+  await channel.stop();
+});
+
+test('stopping a channel cancels a never-settling seat immediately', async (t) => {
+  const { options } = executableFixture(t);
+  let entered;
+  const ready = new Promise(resolve => { entered = resolve; });
+  const channel = createCodexQueueChannel({ ...options, executable: process.execPath,
+    queue: () => { entered(); return new Promise(() => {}); },
+  });
+  const polling = channel.pollOnce();
+  await ready;
+  await channel.stop();
+  await polling;
+});
+
+test('delivery log records sends, failures, expirations and changes without repeating stable states or bodies', async (t) => {
+  const { options } = executableFixture(t);
+  const logs = [];
+  let cursor = 'first';
+  let fail = false;
+  const channel = createCodexQueueChannel({ ...options, executable: process.execPath, log: line => logs.push(JSON.parse(line)),
+    readSnapshot: (_db, _team, _agent, previous) => ({ unread: previous !== cursor, upTo: cursor }),
+    queue: async request => { request.onChildStart(4242); return fail ? { kind: 'failed', started: false, reason: 'fixture_exit_1' } : { kind: 'queued', queueItemId: itemId }; },
+  });
+  await channel.pollOnce();
+  const stableCount = logs.length;
+  await channel.pollOnce();
+  assert.equal(logs.length, stableCount);
+  cursor = 'second'; fail = true;
+  await channel.pollOnce();
+  for (const event of ['sent', 'failed', 'expired', 'seat_state']) assert.ok(logs.some(row => row.event === event), event);
+  assert.equal(logs.find(row => row.event === 'sent').cursor, 'first');
+  assert.ok(logs.every(row => row.channel === 'codex' && row.seat === '["test","alice"]'));
+  assert.ok(logs.every(row => !('body' in row) && !('message' in row)));
+  await channel.stop();
+});
+
+test('a channel cutoff resumes after the interrupted seat on the next cycle', async (t) => {
+  const { pollChannelHooks } = await import('../scripts/daemon/main.mjs');
+  const { options, db } = executableFixture(t);
+  const first = options.listSeats().seats[0];
+  const second = { team: 'test', agent: 'bob', teamConfig: { agents: { bob: { registrations: [{ type: 'codex', project: options.installRoot }] } } } };
+  let sends = 0;
+  const channel = createCodexQueueChannel({ ...options, executable: process.execPath,
+    listSeats: () => ({ state: 'ok', seats: [first, second] }),
+    readSession: (_run, _team, agent) => ({ state: 'present', record: { ...options.readSession().record, agent, codex_home: path.join(options.installRoot, agent) } }),
+    queue: async request => {
+      request.onChildStart(4242);
+      if (request.codexHome.endsWith('alice')) return new Promise(() => {});
+      sends++; return { kind: 'queued', queueItemId: itemId };
+    },
+  });
+  await pollChannelHooks([channel], () => {}, { timeoutMs: 15, installRoot: options.installRoot });
+  assert.equal(db.prepare('SELECT reason FROM beta_codex_seat WHERE seat=?').get('["test","alice"]').reason, 'channel_poll_deadline');
+  await pollChannelHooks([channel], () => {}, { timeoutMs: 15, installRoot: options.installRoot });
+  assert.equal(sends, 1);
+  await channel.stop();
 });

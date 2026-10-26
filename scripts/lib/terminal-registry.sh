@@ -69,6 +69,10 @@
 #                                       or unknown:<reason>; environment only
 #   terminal_epoch                       optional, no args: generation value,
 #                                       n/a:<reason>, or unknown:<reason>
+#   terminal_expected_label <team> <agent> [id]
+#                                       Expected terminal agent name. The id
+#                                       lets a driver validate a retained name
+#                                       against this pane's placement metadata.
 #
 # Terminal identity is a driver FUNCTION (not a manifest datum like the types
 # axis's detect=) because a driver's environment contract is logic, not just a
@@ -1555,9 +1559,10 @@ agmsg_terminal_name_self() {
   #
   # Narrower than an earlier revision of this comment claimed, and the difference
   # matters: `peek`, `poke` and `despawn` in THIS repo resolve through the
-  # placement record's pane id, and `_herdr_internal_key` is read nowhere outside
-  # its own driver (counted). So dropping the key does not make a member
-  # unreachable to agmsg. Saying it did pointed at the wrong thing to protect.
+  # placement record's pane id. team status and fix also verify the terminal's
+  # expected name; herdr may retain a name chosen outside agmsg. Dropping its
+  # key does not make a member unreachable to agmsg. Saying it did pointed at
+  # the wrong thing to protect.
   # A caller that genuinely wants no terminal writes at all is describing the
   # `plain` terminal.
   #

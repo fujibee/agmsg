@@ -88,6 +88,12 @@ if [ "\$1" = agent ] && [ "\$2" = list ]; then
   printf '{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wC:p4","display_agent":"team:alice","name":"a-key"}]}}\n' "$sid"
 elif [ "\$1" = pane ] && [ "\$2" = split ]; then
   echo '{"result":{"pane":{"pane_id":"wC:p9"}}}'
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  if [ "\${HERDR_AGENT_GET_FAIL:-}" = 1 ]; then echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1; fi
+  if [ -n "\${HERDR_AGENT_GET_JSON:-}" ]; then printf '%s\n' "\$HERDR_AGENT_GET_JSON"; exit 0; fi
+  printf '{"result":{"agent":{"pane_id":"%s","name":"%s"}}}\n' "\$3" "\${HERDR_AGENT_NAME:-}"
+elif [ "\$1" = pane ] && [ "\$2" = get ]; then
+  echo '{"result":{"pane":{"terminal_id":"term_naming"}}}'
 elif [ "\$1" = tab ] && [ "\$2" = create ]; then
   echo '{"result":{"root_pane":{"pane_id":"wD:p1"}}}'
 elif [ "\$1" = pane ] && [ "\$2" = read ]; then
@@ -217,7 +223,15 @@ _fake_herdr_list_two_sessions() {   # <sid1> <pane1> <sid2> <pane2>
   if [ -n "$sid2" ]; then
     entries="$entries$sep{\"agent\":\"b\",\"agent_session\":{\"agent\":\"b\",\"kind\":\"id\",\"source\":\"herdr:b\",\"value\":\"$sid2\"},\"pane_id\":\"$pane2\"}"
   fi
-  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[%s]}}'\''; exit 0; }\nexit 0\n' "$entries" > "$FAKEBIN/herdr"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = agent ] && [ "\$2" = list ]; then
+  printf '%s\n' '{"id":"1","result":{"type":"list","agents":[$entries]}}'
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "\$3"
+fi
+exit 0
+EOF
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
 
@@ -2821,6 +2835,7 @@ case "$1/$2" in
   pane/rename)
     [ "$3" != wA:p1 ] || printf '%s' "$4" > "$LABEL_STATE" ;;
   agent/list) printf '{"result":{"agents":[]}}\n' ;;
+  agent/get) printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "$3" ;;
   agent/rename) : ;;
   *) exit 1 ;;
 esac
@@ -2916,15 +2931,58 @@ STUB
   refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
 }
 
-@test "naming ON by default (herdr): both renames (#1044)" {
+@test "naming ON by default (herdr): keeps existing names and records placement (#1631)" {
   _install_fake_herdr "sess-on"
+  agmsg_terminal_load herdr
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   export HERDR_ENV=1
   unset AGMSG_TERMINAL_NAMING
 
-  run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code
+  export HERDR_AGENT_NAME=reviewer
+  run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
   [ "$status" -eq 0 ]
   grep -Fq 'herdr [pane] [rename] [wC:p4] [onteam:alice]' "$ARGV_LOG"
+  refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  local rec; rec="$(agmsg_spawn_path onteam alice)"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:wC:p4" "$rec"
+  [ "$(terminal_expected_label onteam alice "$HERDR_SOCKET_PATH:wC:p4")" = reviewer ]
+  : > "$ARGV_LOG"
+  AGMSG_TERMINAL_NAMING=off run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+
+  # A readable but unnamed agent still gets the internal key and placement.
+  : > "$ARGV_LOG"
+  unset HERDR_AGENT_NAME
+  run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
+  [ "$status" -eq 0 ]
   grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  grep -Fq 'herdr [pane] [rename] [wC:p4] [onteam:alice]' "$ARGV_LOG"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:wC:p4" "$rec"
+  [ "$(terminal_expected_label onteam alice "$HERDR_SOCKET_PATH:wC:p4")" = "$(_herdr_internal_key onteam alice)" ]
+
+  # Unknown is not unnamed: malformed replies and replies about another pane
+  # cannot authorize either rename or turn a retained name into a hash.
+  local reply
+  local kept_record; kept_record="$(_herdr_name_record_path onteam alice)"
+  for reply in 'not json' '{}' '{"result":{"agent":{"pane_id":"w9:p9","name":"reviewer"}}}' \
+    '{"result":{"agent":{"pane_id":"wC:p4","name":"reviewer\n"}}}' \
+    '{"result":{"agent":{"pane_id":"wC:p4","name":"reviewer\u0000hidden"}}}'; do
+    : > "$ARGV_LOG"
+    printf 'existing decision\n' > "$kept_record"
+    HERDR_AGENT_GET_JSON="$reply" run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
+    [ "$status" -ne 0 ]
+    refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+    refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+    [ "$(cat "$kept_record")" = 'existing decision' ]
+  done
+  : > "$ARGV_LOG"
+  HERDR_AGENT_GET_FAIL=1 run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code record
+  [ "$status" -ne 0 ]
+  grep -Fq agent_not_found <<< "$output"
+  refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  [ "$(cat "$kept_record")" = 'existing decision' ]
 }
 
 # --- a failed KEY is a failure, in the mode everybody uses (#1044) ------------
@@ -3038,14 +3096,32 @@ STUB
 # own passive detection of the new process takes a few seconds and has not
 # caught up yet. Everything else matches _install_fake_herdr.
 _install_fake_herdr_rename_recovers_from_not_found() {
-  local sid="${1:-}" fail_times="${2:-1}"
+  local sid="${1:-}" fail_times="${2:-1}" get_fail_times="${3:-0}"
   printf '%s' "$fail_times" > "$TEST_SKILL_DIR/rename-not-found-remaining"
+  printf '%s' "$get_fail_times" > "$TEST_SKILL_DIR/get-not-found-remaining"
   cat > "$FAKEBIN/herdr" <<EOF
 #!/usr/bin/env bash
 { printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
 counter="$TEST_SKILL_DIR/rename-not-found-remaining"
+get_counter="$TEST_SKILL_DIR/get-not-found-remaining"
 if [ "\$1" = agent ] && [ "\$2" = list ]; then
   printf '{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wC:p4","display_agent":"team:alice","name":"a-key"}]}}\n' "$sid"
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  if [ "\${HERDR_QUERY_OTHER_ERROR:-}" = 1 ]; then
+    echo '{"error":{"code":"permission_denied"}}' >&2; exit 1
+  fi
+  remaining="\$(cat "\$get_counter")"
+  if [ "\$remaining" -gt 0 ]; then
+    echo "\$((remaining - 1))" > "\$get_counter"
+    echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1
+  fi
+  kept="\${HERDR_AFTER_DETECTION_NAME:-}"
+  if [ -n "\${HERDR_AFTER_RENAME_NAME:-}" ] && [ "\$(cat "\$counter")" = 0 ]; then
+    kept="\$HERDR_AFTER_RENAME_NAME"
+  fi
+  printf '{"result":{"agent":{"pane_id":"%s","name":"%s"}}}\n' "\$3" "\$kept"
+elif [ "\$1" = pane ] && [ "\$2" = get ]; then
+  echo '{"result":{"pane":{"terminal_id":"term_retry"}}}'
 elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
   exit 0
 elif [ "\$1" = agent ] && [ "\$2" = rename ]; then
@@ -3079,6 +3155,41 @@ EOF
   [ "$output" = ok ]
   # Three agent_not_found answers, then the one that actually renamed it.
   [ "$(grep -c '\[agent\] \[rename\]' "$ARGV_LOG")" -eq 4 ]
+
+  # A real not-yet-detected agent makes get fail too, rather than returning
+  # empty successful output. Keep a name that appears when detection catches up.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_rename_recovers_from_not_found sess-retry 0 3
+  HERDR_AFTER_DETECTION_NAME=reviewer run terminal_name wC:p9 teamx alice
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  [ "$(grep -c '\[agent\] \[get\]' "$ARGV_LOG")" -eq 4 ]
+  refute grep -q '\[agent\] \[rename\]' "$ARGV_LOG"
+  [ "$(terminal_expected_label teamx alice wC:p9)" = reviewer ]
+
+  # Re-observe after rename fails: a newly registered, externally named agent
+  # is not permission to retry the stale plan to overwrite its name.
+  : > "$ARGV_LOG"
+  _install_fake_herdr_rename_recovers_from_not_found sess-retry 1
+  HERDR_AFTER_RENAME_NAME=reviewer run terminal_name wC:p9 teamx alice
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '\[agent\] \[rename\]' "$ARGV_LOG")" -eq 1 ]
+  [ "$(grep -c '\[agent\] \[get\]' "$ARGV_LOG")" -eq 2 ]
+  [ "$(terminal_expected_label teamx alice wC:p9)" = reviewer ]
+
+  : > "$ARGV_LOG"
+  _install_fake_herdr_rename_recovers_from_not_found sess-retry 0 99
+  run terminal_name wC:p9 teamx alice
+  [ "$status" -eq 13 ]
+  [ "$(grep -c '\[agent\] \[get\]' "$ARGV_LOG")" -eq 51 ]
+  refute grep -q '\[agent\] \[rename\]' "$ARGV_LOG"
+
+  # Unrelated observation failures are refused immediately, not retried.
+  : > "$ARGV_LOG"
+  HERDR_QUERY_OTHER_ERROR=1 run terminal_name wC:p9 teamx alice
+  [ "$status" -eq 13 ]
+  [ "$(grep -c '\[agent\] \[get\]' "$ARGV_LOG")" -eq 1 ]
+  refute grep -q '\[agent\] \[rename\]' "$ARGV_LOG"
 }
 
 # The retry is bounded and specific to agent_not_found: a rename that never
@@ -3975,6 +4086,8 @@ $(for pair in "$@"; do id="${pair%%=*}"; label="${pair#*=}"
   esac
 elif [ "\$1" = agent ] && [ "\$2" = list ]; then
   printf '{"id":"1","result":{"type":"list","agents":[]}}\n'
+elif [ "\$1" = agent ] && [ "\$2" = get ]; then
+  printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "\$3"
 elif [ "\$1" = pane ] && [ "\$2" = rename ]; then exit 0
 elif [ "\$1" = agent ] && [ "\$2" = rename ]; then exit 0
 fi
@@ -4525,6 +4638,9 @@ if [ "$1" = agent ] && [ "$2" = rename ]; then
   echo 'herdr: pane w1:pX is gone' >&2
   exit 4
 fi
+if [ "$1" = agent ] && [ "$2" = get ]; then
+  echo '{"result":{"agent":{"pane_id":"w1:pX"}}}'
+fi
 exit 0
 EOF
   chmod +x "$FAKEBIN/herdr"
@@ -4545,6 +4661,9 @@ EOF
   # -- which is the state #1127 is about.
   cat > "$FAKEBIN/herdr" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = agent ] && [ "$2" = get ]; then
+  echo '{"result":{"agent":{"pane_id":"w1:pX"}}}'
+fi
 exit 0
 EOF
   chmod +x "$FAKEBIN/herdr"

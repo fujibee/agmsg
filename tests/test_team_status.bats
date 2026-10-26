@@ -360,6 +360,28 @@ _herdr_observe_stub() {   # <entries-json>
   run terminal_team_observe 'w2:p3'
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | cut -f3)" = 'team:alice' ]
+
+  # The driver's retained-name decision is persisted, not inferred from the
+  # current observation: changing the name afterward must still be a mismatch.
+  export SKILL_DIR="$TEST_SKILL_DIR" HERDR_SOCKET_PATH=/tmp/status.sock
+  source "$SCRIPTS/lib/actas-lock.sh"
+  source "$SCRIPTS/lib/registry-lock.sh"
+  terminal_fence() { printf '/tmp/status.sock\tterm_status\n'; }
+  local rec; rec="$(_herdr_name_record_path team alice)"
+  mkdir -p "${rec%/*}"
+  printf 'w2:p3\t/tmp/status.sock\tterm_status\treviewer\n' > "$rec"
+  terminal_team_observe() { printf 'idle\tteam:alice\treviewer\tx\n'; }
+  agmsg_type_get() { return 0; }
+  run agmsg_team_identity_loaded team alice codex herdr w2:p3
+  [ "$status" -eq 0 ]
+  grep -Fq 'ok(actual=reviewer)' <<< "$output"
+  terminal_team_observe() { printf 'idle\tteam:alice\tchanged\tx\n'; }
+  run agmsg_team_identity_loaded team alice codex herdr w2:p3
+  grep -Fq 'mismatch(expected=reviewer,actual=changed)' <<< "$output"
+  # Neither a different pane nor a new terminal incarnation trusts the mark.
+  [ "$(terminal_expected_label team alice w2:p4)" != reviewer ]
+  terminal_fence() { printf '/tmp/status.sock\tterm_restarted\n'; }
+  [ "$(terminal_expected_label team alice w2:p3)" != reviewer ]
 }
 
 # --- orca observation: the tab-level title, not the per-pane one ----------------

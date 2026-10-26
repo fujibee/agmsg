@@ -135,12 +135,8 @@ _uninstall_checked_rm() {
   _uninstall_operation_require
 }
 
-# Removes this install's own writable_roots entries (SKILL_DIR's db/,
-# teams/, run/, ext-tools/) from ONE Codex config.toml, if it exists and
-# actually mentions them. Split out of _uninstall_one so it can be applied
-# to every path agmsg_codex_config_paths names (#1469), not just the plain
-# ~/.codex/config.toml default -- the logic itself is unchanged from before
-# that split.
+# Removes this install's own writable_roots from the selected Codex config,
+# matching the native path spelling used by installation on Windows.
 #
 # review: the old entry-match pattern ("$SKILL_DIR followed by any
 # characters up to the closing quote") had no boundary at all, so it also
@@ -162,7 +158,9 @@ _uninstall_clean_codex_config() {
   local CODEX_CONFIG="$1" SKILL_DIR="$2"
   [ -f "$CODEX_CONFIG" ] || return 0
   # Remove matching entries from writable_roots (handles multiline arrays)
-  awk -v pattern="$SKILL_DIR" '
+  local match_dir
+  match_dir="$(agmsg_codex_native_path "$SKILL_DIR")"
+  awk -v pattern="$match_dir" '
     function ere_escape(s,    i, c, out, special) {
       special = "\\.[]()*+?{}|^$"
       out = ""
@@ -501,8 +499,8 @@ _uninstall_one() {
     echo ""
     echo "  Removing $SKILL_NAME skill (keeping DB and teams)..."
     _uninstall_checked_rm -rf "$SKILL_DIR/scripts" "$SKILL_DIR/templates" "$SKILL_DIR/agents" "$SKILL_DIR/.trash" || return 1
-    _uninstall_checked_rm -f "$SKILL_DIR/SKILL.md" || return 1
-    echo "  - removed scripts, templates, SKILL.md"
+    _uninstall_checked_rm -f "$SKILL_DIR/SKILL.md" "$SKILL_DIR/CHANGELOG.md" || return 1
+    echo "  - removed scripts, templates, SKILL.md, CHANGELOG.md"
     echo "  ~ preserved $SKILL_DIR/db/ and $SKILL_DIR/teams/"
     REMOVED=true
   else
@@ -547,11 +545,7 @@ _uninstall_one() {
   fi
 
   # --- Clean up Codex writable_roots (this install's own path only) ---
-  # Every config install.sh could have written to (#1469: install.sh writes
-  # to both the plain ~/.codex/config.toml default and $CODEX_HOME's own
-  # config.toml when CODEX_HOME is set and different -- this used to clean
-  # only the first, one canonical list shared with install.sh via
-  # agmsg_codex_config_paths, scripts/lib/codex-config.sh).
+  # Clean only the active profile, using the same selection as installation.
   local _codex_cfg
   while IFS= read -r _codex_cfg; do
     _uninstall_clean_codex_config "$_codex_cfg" "$SKILL_DIR" || return 1

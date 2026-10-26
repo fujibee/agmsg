@@ -249,3 +249,30 @@ test('launcher ignores temporary npx PATH entries and still gives the permanent 
   assert.doesNotMatch(output, /currently resolves to|_npx|older npm/);
   assert.match(output, /open a new terminal and run: command -v agmsg/);
 });
+
+test('JSON status exposes persisted child start-witness failure details', t => {
+  const { db, root, status } = fixture(t);
+  const children = { state: 'unreadable', reason: 'child_start_witness_unavailable', pgid: 4242,
+    witness_failures: ['powershell.exe failed: code=ENOENT', 'pwsh.exe failed: code=ENOENT'] };
+  db.prepare("INSERT INTO beta_codex_queue (seat,codex_home,thread,up_to,nonce,state,children,created_at) VALUES (?, ?, ?, '{}', 'witness-unavailable', 'pending', ?, '2020-01-01T00:00:00Z')")
+    .run(JSON.stringify(['test', 'alice']), root, thread, JSON.stringify(children));
+  const pending = JSON.parse(status('--json')).codex_pending;
+  assert.equal(pending.length, 1);
+  assert.deepEqual(JSON.parse(pending[0].children), children);
+  assert.equal(db.prepare('SELECT state FROM beta_codex_queue').get().state, 'pending');
+  children.expiration_reason = 'child_start_witness_timeout';
+  db.prepare("UPDATE beta_codex_queue SET state='expired', children=?").run(JSON.stringify(children));
+  const expired = JSON.parse(status('--json')).codex_expired;
+  assert.equal(expired[0].state, 'expired');
+  assert.deepEqual(JSON.parse(expired[0].children), children);
+});
+
+test('status exposes the last poll timeout with channel, seat and reason in text and JSON', (t) => {
+  const { root } = fixture(t);
+  writeFileSync(join(root, 'run/poll-timeout.json'), JSON.stringify({ at: '2026-10-25T00:00:00Z', channel: 'codex', seat: '["test","alice"]', reason: 'seat_poll_deadline' }));
+  const script = join(root, 'scripts/daemon/status.mjs');
+  const result = spawnSync(process.execPath, [script, root, '--json'], { encoding: 'utf8' });
+  assert.equal(JSON.parse(result.stdout).poll_timeout.reason, 'seat_poll_deadline');
+  const plain = spawnSync(process.execPath, [script, root], { encoding: 'utf8' });
+  assert.match(plain.stdout, /Last poll timeout: codex.*alice.*seat_poll_deadline/);
+});

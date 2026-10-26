@@ -14,6 +14,13 @@ LIMIT="${3:-20}"
 case "$LIMIT" in ''|*[!0-9]*) LIMIT=20 ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/validate.sh"
+# Refuse unknown teams before storage resolution or self-naming side effects.
+agmsg_validate_team_name "$TEAM" || exit 1
+if [ ! -f "$SCRIPT_DIR/../teams/$TEAM/config.json" ]; then
+  echo "agmsg: team not found: $TEAM" >&2
+  exit 1
+fi
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 

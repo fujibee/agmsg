@@ -206,6 +206,7 @@ teardown() {
 printf '%s\n' "\$*" >> "$log"
 case "\$1/\$2" in
   agent/list) echo '{"result":{"agents":[]}}' ;;
+  agent/get) printf '{"result":{"agent":{"pane_id":"%s"}}}\n' "\$3" ;;
   *) echo '{"result":{"type":"ok"}}' ;;
 esac
 STUB

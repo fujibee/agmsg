@@ -46,13 +46,9 @@ if [ "$1" = pane ] && [ "$2" = get ]; then
   printf '{"result":{"pane":{"agent_status":"%s","label":"%s","terminal_title":"%s","terminal_id":"%s"}}}\n' \
     "$(fx status)" "$(fx label)" "$(fx title)" "$(fx terminal_id)"
 elif [ "$1" = agent ] && [ "$2" = list ]; then
-  if [ -n "$(fx key)" ]; then
     printf '{"id":"1","result":{"type":"list","agents":[{"pane_id":"w1:pB","name":"%s"}]}}\n' "$(fx key)"
-  else
-    printf '{"id":"1","result":{"type":"list","agents":[]}}\n'
-  fi
 elif [ "$1" = agent ] && [ "$2" = get ]; then
-  printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "$(fx kind)" "$(fx status)"
+  printf '{"result":{"agent":{"pane_id":"w1:pB","name":"%s","agent":"%s","agent_status":"%s"}}}\n' "$(fx key)" "$(fx kind)" "$(fx status)"
 elif [ "$1" = pane ] && [ "$2" = rename ]; then
   # the label lands: the fixture now shows it
   sed -i '' -e "s/^label=.*/label=$4/" "$FIX" 2>/dev/null || sed -i "s/^label=.*/label=$4/" "$FIX"
@@ -129,6 +125,19 @@ _rec()  { cat "$(agmsg_spawn_path T alice)"; }
   diff <(printf '%s\n' "$output") "$(agmsg_self_write_done_path T alice)"
   # the lock is released
   [ ! -e "$(agmsg_self_write_lock_path T alice)" ]
+
+  # A later fix preserves an operator's name, and verifies it rather than
+  # reporting a hash mismatch. The placement remains reachable.
+  _fixture terminal_id term_AAA title "◐ T-alice" label "" key reviewer status idle kind claude
+  : > "$ARGV_LOG"
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line key)" = "key attempt=ok readback=verified" ]
+  [ "$(_line record)" = "record attempt=ok readback=verified" ]
+  [ "$(_line policy)" = "policy=accepted" ]
+  [ "$(_fx key)" = reviewer ]
+  refute grep -q 'herdr \[agent\] \[rename\]' "$ARGV_LOG"
+  grep -q 'herdr \[pane\] \[rename\]' "$ARGV_LOG"
 }
 
 @test "accepted: a session already named gets ONE unconditional rename and reads matched_no_delta (no pre-read skip)" {

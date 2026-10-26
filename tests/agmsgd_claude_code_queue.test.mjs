@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { EventEmitter } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
+import { readUnreadSnapshot } from '../scripts/daemon/channels/codex-queue-store.mjs';
 
 import { createServer } from 'node:net';
 import {
-  observeTranscript,
   sendClaudeCodeMessage,
   resolveTranscriptPath,
-  resolvePendingDelivery,
   latestPermissionMode,
   encodeClaudeProjectDir,
   nativePath,
@@ -18,6 +19,7 @@ import {
 } from '../scripts/daemon/channels/claude-code-queue-io.mjs';
 import { createClaudeCodeQueueChannel } from '../scripts/daemon/channels/claude-code-queue.mjs';
 import { ensureClaudeCodeChannelSchema, readClaudeRoleSession } from '../scripts/daemon/channels/claude-code-queue-store.mjs';
+import { readOwnerAndIntentReadOnly } from '../scripts/daemon/status.mjs';
 import { openInstallDb } from '../scripts/daemon/db.mjs';
 
 function temporaryDirectory(t) {
@@ -26,172 +28,28 @@ function temporaryDirectory(t) {
   return dir;
 }
 
-// Load-bearing property: a `queue-operation`/`enqueue` line fires on mere
-// receipt, Held or not, so it must NEVER by itself cause a seat to be marked
-// delivered -- never notify on evidence that could just as well be a hold.
-// Only the `type:"user"` line whose `origin.body` carries the nonce, or the
-// mid-turn `queued_command` attachment whose `prompt` carries it, counts.
-// This reproduces both line shapes measured against a live Claude Code
-// transcript in one file and asserts the queue-operation line alone is not
-// enough, while the user/origin.body line is.
-test('observeTranscript: a queue-operation enqueue line is not delivery evidence; the user/origin.body line and a mid-turn queued_command attachment are', (t) => {
-  const dir = temporaryDirectory(t);
-  const transcriptPath = path.join(dir, 'session.jsonl');
-  const nonce = 'abc123-test-nonce';
-  const marker = `[agmsg:${nonce}] New messages are waiting. Check your agmsg inbox.`;
-
-  // Only the enqueue line present (held, or not yet acted on) — must read as
-  // absent, not delivered.
-  writeFileSync(transcriptPath, `${JSON.stringify({
-    type: 'queue-operation',
-    operation: 'enqueue',
-    content: `<cross-session-message from="agmsgd">${marker}</cross-session-message>`,
-  })}\n`);
-  let observation = observeTranscript(transcriptPath, nonce);
-  assert.equal(observation.state, 'absent');
-  let resolved = resolvePendingDelivery({ observation });
-  assert.equal(resolved.state, 'pending');
-
-  // The real delivered record appended afterward (as the genuine sequence
-  // measured: enqueue first, then the delivered user line) — now it must
-  // read as delivered/confirmed.
-  writeFileSync(transcriptPath, `${JSON.stringify({
-    type: 'queue-operation',
-    operation: 'enqueue',
-    content: `<cross-session-message from="agmsgd">${marker}</cross-session-message>`,
-  })}\n${JSON.stringify({
-    type: 'user',
-    isMeta: true,
-    message: { role: 'user', content: 'Another Claude session sent a message...' },
-    origin: { kind: 'peer', from: 'agmsgd', verifiedPeerPid: 12345, name: 'agmsgd', fromMode: 'bypass', body: marker },
-  })}\n`);
-  observation = observeTranscript(transcriptPath, nonce);
-  assert.equal(observation.state, 'delivered');
-  resolved = resolvePendingDelivery({ observation });
-  assert.equal(resolved.state, 'confirmed');
-
-  // Absorbed mid-turn: enqueue, remove, then a queued_command attachment and
-  // no user line at all. The model read it, so it is delivered.
-  writeFileSync(transcriptPath, `${JSON.stringify({
-    type: 'queue-operation',
-    operation: 'enqueue',
-    content: `<cross-session-message from="agmsgd">${marker}</cross-session-message>`,
-  })}\n${JSON.stringify({
-    type: 'queue-operation',
-    operation: 'remove',
-    reason: 'absorbed_mid_turn',
-    content: `<cross-session-message from="agmsgd">${marker}</cross-session-message>`,
-  })}\n${JSON.stringify({
-    type: 'attachment',
-    attachment: { type: 'queued_command', prompt: `<cross-session-message from="agmsgd">${marker}</cross-session-message>` },
-  })}\n`);
-  assert.equal(observeTranscript(transcriptPath, nonce).state, 'delivered');
-
-  // #1644: the delivered line scrolls out of the 512 KiB tail under later
-  // output. A position recorded before the send still finds it; a transcript
-  // that has become shorter than the position is read from the start.
-  const before = statSync(transcriptPath).size;
-  const delivered = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: marker } });
-  const filler = `${JSON.stringify({ type: 'assistant', text: 'x'.repeat(1000) })}\n`.repeat(800);
-  writeFileSync(transcriptPath, `${'y'.repeat(before)}\n${delivered}\n${filler}`);
-  // No recorded position (a pending row from before positions): searched from the start, however far back.
-  assert.equal(observeTranscript(transcriptPath, nonce).state, 'delivered');
-  assert.equal(observeTranscript(transcriptPath, nonce, before + 1).state, 'delivered');
-  assert.equal(observeTranscript(transcriptPath, nonce, statSync(transcriptPath).size + 10).state, 'delivered');
-  assert.equal(observeTranscript(transcriptPath, nonce, statSync(transcriptPath).size).state, 'absent');
-});
-
-// A position recorded while a row was half written lands mid-row: the rest of
-// that row is a fragment, not a line, so evidence inside it is never read.
-test('observeTranscript: a recorded position inside a half-written row discards that fragment', (t) => {
-  const dir = temporaryDirectory(t);
-  const transcriptPath = path.join(dir, 'session.jsonl');
-  const nonce = 'mid-row-nonce';
-  const row = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: `[agmsg:${nonce}] x` } });
-  writeFileSync(transcriptPath, `unfinished-prefix${row}\n`);
-  assert.equal(observeTranscript(transcriptPath, nonce, 'unfinished-prefix'.length).state, 'absent');
-  writeFileSync(transcriptPath, `unfinished-prefix${row}\n${row}\n`);
-  assert.equal(observeTranscript(transcriptPath, nonce, 'unfinished-prefix'.length).state, 'delivered');
-});
-
-// The file is rewritten while a read is in flight: the first read sees a
-// delivery row that no complete version of the file ever held. The row must
-// read back unchanged before it counts.
-test('observeTranscript: a delivery row that changes between two reads is not confirmed', (t) => {
-  const dir = temporaryDirectory(t);
-  const transcriptPath = path.join(dir, 'session.jsonl');
-  const nonce = 'rewrite-nonce';
-  const row = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: `[agmsg:${nonce}]` } });
-  writeFileSync(transcriptPath, `${row}\n`);
-  let calls = 0;
-  const io = {
-    readSync(fd, buffer, offset, length, position) {
-      const read = readSync(fd, buffer, offset, length, position);
-      if (++calls === 1) writeFileSync(transcriptPath, `${JSON.stringify({ type: 'tool', origin: { body: `[agmsg:${nonce}]` } })}\n`);
-      return read;
-    },
-  };
-  assert.equal(observeTranscript(transcriptPath, nonce, 0, io).state, 'absent');
-  assert.equal(observeTranscript(transcriptPath, nonce, 0).state, 'absent');
-});
-
-// The line boundary is part of what must read back unchanged, and a short
-// read must not make a stable row look changed.
-test('observeTranscript: a rewritten line boundary is not confirmed, and short reads still confirm a stable row', (t) => {
-  const dir = temporaryDirectory(t);
-  const transcriptPath = path.join(dir, 'session.jsonl');
-  const nonce = 'boundary-nonce';
-  const row = JSON.stringify({ type: 'user', origin: { kind: 'peer', body: `[agmsg:${nonce}]` } });
-  writeFileSync(transcriptPath, `{}\n${row}\n`);
-  let calls = 0;
-  const rewrite = {
-    readSync(fd, buffer, offset, length, position) {
-      const read = readSync(fd, buffer, offset, length, position);
-      if (++calls === 2) writeFileSync(transcriptPath, `bad${row}\n`);
-      return read;
-    },
-  };
-  assert.equal(observeTranscript(transcriptPath, nonce, 3, rewrite).state, 'absent');
-  writeFileSync(transcriptPath, `{}\n${row}\n`);
-  const short = { readSync: (fd, buffer, offset, length, position) => readSync(fd, buffer, offset, Math.min(length, 14), position) };
-  assert.equal(observeTranscript(transcriptPath, nonce, 3, short).state, 'delivered');
-});
-
-// No clock decides a pending nudge: whatever the transcript shows (or fails to
-// show), it stays pending until the channel itself sees the socket or the
-// seat's record change.
-test('resolvePendingDelivery: nothing but a delivered nonce ends a pending nudge', () => {
-  for (const observation of [
-    { state: 'absent' },
-    { state: 'held' },
-    { state: 'unreadable', reason: 'transcript_missing' },
-    { state: 'unreadable', reason: 'transcript_read_failed' },
-  ]) {
-    assert.equal(resolvePendingDelivery({ observation, ageMs: 10 ** 9 }).state, 'pending');
-  }
-  assert.equal(resolvePendingDelivery({ observation: { state: 'delivered' } }).state, 'confirmed');
-});
-
 function channelFixture(t, hostPlatform = 'linux') {
-  const root = temporaryDirectory(t);
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agmsgd-claude-queue-'));
   mkdirSync(path.join(root, 'run'));
   const db = openInstallDb(path.join(root, 'run', 'install.db'));
   ensureClaudeCodeChannelSchema(db);
   db.exec("UPDATE daemon_intent SET desired='on', op_gen=1");
-  t.after(() => db.close());
-  const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, hours: 0, alive: { state: 'ok' } };
+  t.after(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
+  const state = { session: 'sess-1', socket: '/tmp/cc-socks/1.sock', sent: 0, sequence: 1, hours: 0, alive: { state: 'ok' } };
   const options = {
     db, installRoot: root, expectedOpGen: 1, env: { AGMSG_STORAGE_PATH: root },
     now: () => Date.UTC(2026, 9, 14) + state.hours * 3_600_000,
     log: () => {},
     listSeats: () => ({ state: 'ok', seats: [{ team: 'test', agent: 'alice', teamConfig: { agents: { alice: { registrations: [{ type: 'claude-code', project: root }] } } } }] }),
-    readSession: () => ({ state: 'present', record: { team: 'test', agent: 'alice', type: 'claude-code', project: root, claude_config_dir: root, messaging_socket: state.socket, session: state.session } }),
+    readSession: () => ({ state: 'present', record: { team: 'test', agent: 'alice', type: 'claude-code', project: root, claude_config_dir: root, messaging_socket: state.socket, session: state.session, ...state.record } }),
     readDriver: () => ({ state: 'ok', driver: 'sqlite' }),
     openStore: () => ({ close() {} }),
-    readSnapshot: () => ({ state: 'ok', unread: true, upTo: '{}' }),
+    readSnapshot: (_store, _team, _agent, cursor = '') => ({
+      state: 'ok', unread: state.unread !== false && state.sequence > (cursor ? JSON.parse(cursor).eventSeq : 0),
+      upTo: JSON.stringify({ eventSeq: state.sequence, legacyId: 0 }),
+    }),
     send: async (args) => { state.sent += 1; (state.modes ??= []).push(args.fromMode); return { state: 'sent' }; },
     readMode: () => state.mode ?? '',
-    observe: () => (state.hold ? { state: 'held' } : { state: 'absent' }),
     socketAlive: () => state.alive,
     hostPlatform,
     transcriptPathOf: hostPlatform === 'win32' ? () => path.join(root, 'session.jsonl') : undefined,
@@ -201,28 +59,33 @@ function channelFixture(t, hostPlatform = 'linux') {
   return { db, channel, state };
 }
 
-test('an unconfirmed nudge is not sent again, however long the same session and socket stay up', async (t) => {
+test('socket send success immediately advances the notified cursor and suppresses the same unread', async (t) => {
   const { db, channel, state } = channelFixture(t);
   await channel.pollOnce();
-  for (const hours of [1, 9, 40]) {
-    state.hours = hours;
-    await channel.pollOnce();
-  }
-  // A check that could not run is not evidence the socket is gone.
-  state.alive = { state: 'unreadable', reason: 'messaging_socket_stat_failed' };
-  await channel.pollOnce();
+  const row = db.prepare('SELECT state, up_to FROM beta_claude_queue').get();
+  assert.equal(row.state, 'confirmed');
+  assert.deepEqual(JSON.parse(row.up_to), { eventSeq: 1, legacyId: 0 });
+  assert.equal(db.prepare("SELECT count(*) AS n FROM beta_claude_queue WHERE state='pending'").get().n, 0);
+  for (const hours of [1, 9, 40]) { state.hours = hours; await channel.pollOnce(); }
   assert.equal(state.sent, 1);
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state='pending'").get().n, 1);
+  state.sequence = 2;
+  await channel.pollOnce();
+  assert.equal(state.sent, 2, 'new unread past the notified cursor gets another nudge');
+  assert.equal(JSON.parse(db.prepare('SELECT up_to FROM beta_claude_queue ORDER BY id DESC LIMIT 1').get().up_to).eventSeq, 2);
   await channel.stop();
 });
 
-test('a nudge is sent again once the seat record names another session', async (t) => {
+test('changing a session or socket does not resend old unread, and new unread still gets nudged', async (t) => {
   const { db, channel, state } = channelFixture(t);
   await channel.pollOnce();
   state.session = 'sess-2';
+  state.socket = '/tmp/cc-socks/2.sock';
+  await channel.pollOnce();
+  assert.equal(state.sent, 1);
+  state.sequence += 1;
   await channel.pollOnce();
   assert.equal(state.sent, 2);
-  assert.deepEqual(db.prepare('SELECT state FROM beta_claude_queue ORDER BY id').all().map((row) => row.state), ['expired', 'pending']);
+  assert.deepEqual(db.prepare('SELECT state FROM beta_claude_queue ORDER BY id').all().map((row) => row.state), ['confirmed', 'confirmed']);
   await channel.stop();
 });
 
@@ -236,6 +99,48 @@ test('a seat whose recorded socket is gone gets no new nudge rows until its reco
   state.socket = '/tmp/cc-socks/2.sock';
   await channel.pollOnce();
   assert.equal(state.sent, 1);
+  await channel.stop();
+});
+
+for (const unread of [false, true]) {
+  test(`a closed seat is unaddressable when unread is ${unread}`, async (t) => {
+    const { db, state } = channelFixture(t);
+    state.alive = { state: 'unreadable', reason: 'messaging_socket_missing' };
+    const channel = createClaudeCodeQueueChannel({
+      ...state.options, readSnapshot: () => ({ state: 'ok', unread, upTo: '{}' }),
+    });
+    await channel.pollOnce();
+    assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() },
+      { state: 'unaddressable', reason: 'messaging_socket_missing' });
+    assert.equal(state.sent, 0);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM beta_claude_queue').get().n, 0);
+    await channel.stop();
+  });
+}
+
+test('an idle seat is addressable only after its socket check succeeds', async (t) => {
+  const { db, state } = channelFixture(t);
+  let checks = 0;
+  const channel = createClaudeCodeQueueChannel({
+    ...state.options, readSnapshot: () => ({ state: 'ok', unread: false, upTo: '{}' }),
+    socketAlive: () => { checks += 1; return { state: 'ok' }; },
+  });
+  await channel.pollOnce();
+  assert.equal(checks, 1);
+  assert.equal(db.prepare('SELECT state FROM beta_claude_seat').get().state, 'addressable');
+  await channel.stop();
+});
+
+test('an idle seat whose socket cannot be checked reports the uncertainty', async (t) => {
+  const { db, state } = channelFixture(t);
+  state.alive = { state: 'unreadable', reason: 'messaging_socket_stat_failed' };
+  const channel = createClaudeCodeQueueChannel({
+    ...state.options, readSnapshot: () => ({ state: 'ok', unread: false, upTo: '{}' }),
+  });
+  await channel.pollOnce();
+  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() },
+    { state: 'blocked', reason: 'messaging_socket_stat_failed' });
+  assert.equal(state.sent, 0);
   await channel.stop();
 });
 
@@ -299,50 +204,37 @@ test('a bypass seat is told from-mode=bypass; any other mode, or none readable, 
   assert.match(JSON.parse((await received).trim()).message.content, /^<cross-session-message from="agmsgd" from-name="agmsgd" from-mode="bypass">/);
 });
 
-test('a held nudge is sent once the other way (claim, or no claim) and then left alone', async (t) => {
-  // Not in bypass by its transcript, held anyway (it was switched): claim bypass.
-  let { db, channel, state } = channelFixture(t);
+test('transcript evidence is not read and cannot block subsequent nudges', async (t) => {
+  const { db, state } = channelFixture(t);
+  const channel = createClaudeCodeQueueChannel({ ...state.options, observe: () => { throw new Error('must not observe'); } });
   await channel.pollOnce();
-  state.hold = true;
-  for (let i = 0; i < 4; i += 1) await channel.pollOnce();
-  assert.deepEqual(state.modes, ['', 'bypass'], 'each way once, then no more');
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state='pending'").get().n, 1);
-  assert.match(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, /^peer_held/);
-  await channel.stop();
-  // A restarted daemon (a new channel on the same database) does not give the held nudge a new budget.
-  const again = createClaudeCodeQueueChannel({ ...state.options });
-  for (let i = 0; i < 3; i += 1) await again.pollOnce();
-  assert.deepEqual(state.modes, ['', 'bypass'], 'a restart adds no send');
-  await again.stop();
-
-  // A bypass seat that holds it anyway (switched to a prompting mode): no claim next.
-  ({ db, channel, state } = channelFixture(t));
-  state.mode = 'bypassPermissions';
+  state.sequence += 1;
   await channel.pollOnce();
-  state.hold = true;
-  for (let i = 0; i < 4; i += 1) await channel.pollOnce();
-  assert.deepEqual(state.modes, ['bypass', '']);
-
+  assert.equal(state.sent, 2);
+  assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() }, { state: 'addressable', reason: '' });
   await channel.stop();
 });
 
-test('a nudge the seat holds is seen from the preview that drops the brackets, and the seat is not called addressable', async (t) => {
-  const dir = temporaryDirectory(t);
-  const transcriptPath = path.join(dir, 'session.jsonl');
-  writeFileSync(transcriptPath, `${JSON.stringify({
-    type: 'system',
-    subtype: 'informational',
-    content: 'Held peer message \u2014 from an unidentified session; preview: \u00abagmsg:held-nonce New messages are waiting.\u00bb',
-  })}\n`);
-  assert.equal(observeTranscript(transcriptPath, 'held-nonce').state, 'held');
+for (const [name, override] of [
+  ['unreadable mode', { readMode() { throw new Error('unreadable transcript'); } }],
+  ['missing path', { transcriptPathOf() { return ''; } }],
+  ['unreadable path', { transcriptPathOf() { throw new Error('no transcript path'); } }],
+]) {
+  test(`permission metadata is best effort: ${name}`, async (t) => {
+    const { state } = channelFixture(t);
+    const channel = createClaudeCodeQueueChannel({ ...state.options, ...override });
+    await channel.pollOnce();
+    assert.equal(state.sent, 1);
+    assert.deepEqual(state.modes, ['']);
+    await channel.stop();
+  });
+}
 
-  const { db, channel, state } = channelFixture(t);
+test('missing transcript metadata does not prevent a socket send', async (t) => {
+  const { channel, state } = channelFixture(t);
+  state.record = { claude_config_dir: '', session: '' };
   await channel.pollOnce();
-  state.hold = true;
-  await channel.pollOnce();
-  const seat = db.prepare('SELECT state, reason FROM beta_claude_seat').get();
-  assert.equal(seat.state, 'blocked');
-  assert.match(seat.reason, /^peer_held/);
+  assert.equal(state.sent, 1);
   await channel.stop();
 });
 
@@ -391,21 +283,24 @@ test('Windows: a seat is no longer blocked as unsupported', async (t) => {
   await channel.stop();
 });
 
-test('a nudge that finds its socket gone (ENOENT on connect) ends the row and is not retried for that socket', async (t) => {
-  const { db, channel, state } = channelFixture(t, 'win32');
-  const options = state.options;
-  let calls = 0;
-  const gone = createClaudeCodeQueueChannel({ ...options, send: async () => { calls += 1; return { state: 'failed', reason: 'socket_error:ENOENT' }; } });
-  for (let i = 0; i < 4; i += 1) await gone.pollOnce();
-  assert.equal(calls, 1, 'one attempt, then the seat waits for a new socket');
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue").get().n, 1);
-  assert.equal(db.prepare("SELECT reason FROM beta_claude_seat").get().reason, 'messaging_socket_missing');
-  state.socket = '/tmp/cc-socks/9.sock';
-  await gone.pollOnce();
-  assert.equal(calls, 2);
-  await gone.stop();
-  await channel.stop();
-});
+for (const reason of ['socket_error:ENOENT', 'messaging_socket_missing', 'connect_failed', 'socket_write_error:EPIPE', 'send_timeout', 'socket_error:ECONNREFUSED']) {
+  test(`send failure records its reason and retries the same socket on the next poll: ${reason}`, async (t) => {
+    const { db, state } = channelFixture(t, 'win32');
+    let calls = 0;
+    const channel = createClaudeCodeQueueChannel({ ...state.options, send: async () => ++calls === 1 ? { state: 'failed', reason } : { state: 'sent' } });
+    await channel.pollOnce();
+    const missing = ['socket_error:ENOENT', 'messaging_socket_missing'].includes(reason);
+    assert.equal(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, missing ? 'messaging_socket_missing' : `send_failed:${reason}`);
+    assert.equal(readOwnerAndIntentReadOnly(state.options.installRoot).claudeCodeSeats.seats[0].reason, missing ? 'messaging_socket_missing' : `send_failed:${reason}`, 'daemon status exposes the failure reason');
+    assert.equal(db.prepare('SELECT state FROM beta_claude_queue').get().state, 'expired');
+    await channel.pollOnce();
+    assert.equal(calls, 2, 'the same path is retried without a new destination record');
+    assert.deepEqual(db.prepare('SELECT state FROM beta_claude_queue ORDER BY id').all().map((row) => row.state), ['expired', 'confirmed']);
+    await channel.pollOnce();
+    assert.equal(calls, 2, 'success suppresses the already-notified unread');
+    await channel.stop();
+  });
+}
 
 // Only on a Windows machine: a real pipe, probed by the preflight, then nudged.
 test('Windows pipe: the preflight makes no connection, and an authenticated nudge is delivered', { skip: process.platform !== 'win32' }, async (t) => {
@@ -433,30 +328,209 @@ test('Windows pipe: the preflight makes no connection, and an authenticated nudg
 test('a seat whose hook could not publish a destination is reported with that reason, and the record is read from disk', async (t) => {
   const { root, db, state } = (() => { const f = channelFixture(t); return { root: f.state.options.installRoot, db: f.db, state: f.state }; })();
   const record = (extra) => `team=test\nagent=alice\ntype=claude-code\nproject=${root}\nsession=sess-1\n${extra}`;
-  writeFileSync(path.join(root, 'run', 'role-session.test__alice'), record('messaging_blocked=seat_pid_unresolved\n'));
-  const read = readClaudeRoleSession(path.join(root, 'run'), 'test', 'alice');
-  assert.equal(read.record.messaging_blocked, 'seat_pid_unresolved');
-  const channel = createClaudeCodeQueueChannel({ ...state.options, readSession: () => read });
-  await channel.pollOnce();
-  assert.equal(db.prepare("SELECT state || '/' || reason AS r FROM beta_claude_seat").get().r, 'unaddressable/seat_pid_unresolved');
-  assert.equal(state.sent, 0);
+  for (const reason of ['seat_pid_unresolved', 'agmsgd_not_ready_stopped', 'native_storage_not_ready']) {
+    writeFileSync(path.join(root, 'run', 'role-session.test__alice'), record(`messaging_blocked=${reason}\n`));
+    const read = readClaudeRoleSession(path.join(root, 'run'), 'test', 'alice');
+    assert.equal(read.record.messaging_blocked, reason);
+    const channel = createClaudeCodeQueueChannel({ ...state.options, readSession: () => read });
+    await channel.pollOnce();
+    assert.equal(db.prepare("SELECT state || '/' || reason AS r FROM beta_claude_seat").get().r, `unaddressable/${reason}`);
+    assert.equal(state.sent, 0);
+    await channel.stop();
+  }
   // A value that is not a plain word is ignored, not shown.
   writeFileSync(path.join(root, 'run', 'role-session.test__alice'), record('messaging_blocked=bad value;\n'));
   assert.equal(readClaudeRoleSession(path.join(root, 'run'), 'test', 'alice').record.messaging_blocked, '');
 });
 
-test('a project that chose something other than agmsgd gets no nudge, a waiting one is dropped, and a project that never chose is unchanged', async (t) => {
+test('a project that opts out gets no new nudges, and choosing agmsgd again resumes new unread', async (t) => {
   const { db, channel, state } = channelFixture(t);
   const root = state.options.installRoot;
   await channel.pollOnce();
   assert.equal(state.sent, 1, 'no choice recorded: agmsgd delivers as before');
+  state.sequence += 1;
   writeFileSync(path.join(root, 'run', 'delivery-choice'), `claude-code\t${root}\tmonitor\n`);
   for (let i = 0; i < 3; i += 1) await channel.pollOnce();
   assert.equal(state.sent, 1, 'no further nudge for an opted-out project');
   assert.equal(db.prepare("SELECT state || '/' || reason AS r FROM beta_claude_seat").get().r, 'unaddressable/delivery_chosen_monitor');
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state = 'pending'").get().n, 0);
   writeFileSync(path.join(root, 'run', 'delivery-choice'), `claude-code\t${root}\tagmsgd\n`);
-  state.hold = false;
   await channel.pollOnce();
-  assert.equal(db.prepare("SELECT state FROM beta_claude_seat").get().state === 'unaddressable', false, 'choosing agmsgd again puts the seat back');
+  assert.equal(db.prepare("SELECT state FROM beta_claude_seat").get().state, 'addressable');
+  assert.equal(state.sent, 2, 'the previously opted-out new unread gets a nudge');
+});
+
+for (const prepareSchema of [false, true]) {
+  test(`a 1.6.0 pending row never blocks delivery after upgrade (schema preparation: ${prepareSchema})`, async (t) => {
+    const { db, channel, state } = channelFixture(t);
+    db.prepare(`INSERT INTO beta_claude_queue
+      (seat, messaging_socket, transcript_path, up_to, nonce, state, created_at, tried_modes)
+      VALUES (?, ?, ?, ?, ?, 'pending', ?, 'plain,bypass')`)
+      .run('["test","alice"]', state.socket, '/old/transcript', '{"eventSeq":1,"legacyId":0}', 'old-nonce', '2026-10-23');
+    if (prepareSchema) {
+      ensureClaudeCodeChannelSchema(db);
+      assert.equal(db.prepare('SELECT state FROM beta_claude_queue').get().state, 'expired');
+    }
+    await channel.pollOnce();
+    assert.equal(state.sent, 1);
+    assert.deepEqual(db.prepare('SELECT state FROM beta_claude_queue ORDER BY id').all().map((row) => row.state), ['expired', 'confirmed']);
+    assert.equal(db.prepare('SELECT transcript_path FROM beta_claude_queue ORDER BY id LIMIT 1').get().transcript_path, '/old/transcript', 'historical columns and data are retained');
+    await channel.stop();
+  });
+}
+
+test('a daemon restart keeps the notified cursor, and a new snapshot gets a new nudge', async (t) => {
+  const { db, channel, state } = channelFixture(t);
+  await channel.pollOnce();
+  await channel.stop();
+  ensureClaudeCodeChannelSchema(db);
+  const restarted = createClaudeCodeQueueChannel(state.options);
+  await restarted.pollOnce();
+  assert.equal(state.sent, 1);
+  state.sequence += 1;
+  await restarted.pollOnce();
+  assert.equal(state.sent, 2);
+  await restarted.stop();
+});
+
+test('the notified cursor advances only to the snapshot sent, preserving arrivals during the write', async (t) => {
+  const { db, state } = channelFixture(t);
+  const channel = createClaudeCodeQueueChannel({ ...state.options, send: async () => {
+    state.sent += 1;
+    if (state.sent === 1) state.sequence += 1;
+    return { state: 'sent' };
+  } });
+  await channel.pollOnce();
+  assert.equal(JSON.parse(db.prepare('SELECT up_to FROM beta_claude_queue').get().up_to).eventSeq, 1);
+  await channel.pollOnce();
+  assert.equal(state.sent, 2);
+  assert.equal(JSON.parse(db.prepare('SELECT up_to FROM beta_claude_queue ORDER BY id DESC LIMIT 1').get().up_to).eventSeq, 2);
+  await channel.stop();
+});
+
+test('real unread snapshots suppress already-notified messages without marking the inbox read', async (t) => {
+  const { db, state } = channelFixture(t);
+  const store = new DatabaseSync(':memory:');
+  t.after(() => store.close());
+  store.exec(`
+    CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, type TEXT, team TEXT, to_agent TEXT, agent TEXT, msg_id TEXT, legacy_id INTEGER);
+    CREATE TABLE messages (id INTEGER PRIMARY KEY, team TEXT, to_agent TEXT, read_at TEXT);
+    CREATE TABLE read_cursors (team TEXT, agent TEXT, local_position INTEGER);
+    INSERT INTO events (id,type,team,to_agent) VALUES ('first','message_sent','test','alice');
+  `);
+  const channel = createClaudeCodeQueueChannel({ ...state.options,
+    openStore: () => ({ exec: store.exec.bind(store), prepare: store.prepare.bind(store), close() {} }),
+    readSnapshot: readUnreadSnapshot,
+  });
+  await channel.pollOnce();
+  await channel.pollOnce();
+  assert.equal(state.sent, 1);
+  store.exec("INSERT INTO events (id,type,team,to_agent) VALUES ('second','message_sent','test','alice');");
+  await channel.pollOnce();
+  assert.equal(state.sent, 2);
+  assert.equal(store.prepare("SELECT count(*) AS n FROM events WHERE type='message_read'").get().n, 0);
+  assert.equal(store.prepare('SELECT count(*) AS n FROM read_cursors').get().n, 0);
+  assert.deepEqual(JSON.parse(db.prepare('SELECT up_to FROM beta_claude_queue ORDER BY id DESC LIMIT 1').get().up_to), { eventSeq: 2, legacyId: 0 });
+  await channel.stop();
+});
+
+test('a Unix socket recreated at the same recorded path is used again', { skip: process.platform === 'win32', timeout: 5000 }, async (t) => {
+  const { state } = channelFixture(t);
+  state.socket = path.join(state.options.installRoot, 'seat.sock');
+  const received = new EventEmitter();
+  let server;
+  const listen = async () => {
+    server = createServer((connection) => {
+      connection.resume();
+      connection.on('end', () => received.emit('message'));
+    });
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(state.socket, resolve); });
+  };
+  const close = async () => {
+    if (server?.listening) await new Promise((resolve) => server.close(resolve));
+  };
+  const channel = createClaudeCodeQueueChannel({ ...state.options,
+    socketAlive: checkSocketOwnership,
+    send: async (options) => { state.sent += 1; return sendClaudeCodeMessage(options); },
+  });
+  try {
+    await channel.pollOnce();
+    assert.equal(state.sent, 0);
+    await listen();
+    let notice = new Promise((resolve) => received.once('message', resolve));
+    await channel.pollOnce();
+    await notice;
+    assert.equal(state.sent, 1);
+    await close();
+    state.sequence += 1;
+    await channel.pollOnce();
+    assert.equal(state.sent, 1);
+    await listen();
+    notice = new Promise((resolve) => received.once('message', resolve));
+    await channel.pollOnce();
+    await notice;
+    assert.equal(state.sent, 2);
+  } finally {
+    await channel.stop();
+    await close();
+  }
+});
+
+for (const failure of ['throw', 'callback']) {
+  test(`socket write ${failure} is a failure rather than delivery`, async () => {
+    const result = await sendClaudeCodeMessage({ socketPath: '/fixture/socket', nonce: 'n', body: 'notice',
+      checkOwnership: () => ({ state: 'ok' }),
+      connect: () => {
+        const socket = new EventEmitter();
+        socket.destroy = () => {};
+        socket.end = (_line, callback) => {
+          const error = Object.assign(new Error('write failed'), { code: 'EPIPE' });
+          if (failure === 'throw') throw error;
+          callback(error);
+        };
+        queueMicrotask(() => socket.emit('connect'));
+        return socket;
+      },
+    });
+    assert.deepEqual(result, { state: 'failed', reason: 'socket_write_error:EPIPE' });
+  });
+}
+
+test('a connection that never becomes writable times out', async () => {
+  const result = await sendClaudeCodeMessage({ socketPath: '/fixture/socket', nonce: 'n', body: 'notice', timeoutMs: 1,
+    checkOwnership: () => ({ state: 'ok' }),
+    connect: () => Object.assign(new EventEmitter(), { destroy() {} }),
+  });
+  assert.deepEqual(result, { state: 'failed', reason: 'send_timeout' });
+});
+
+for (const reason of ['messaging_socket_stat_failed', 'messaging_socket_symlink', 'messaging_socket_not_a_socket', 'messaging_socket_not_owned_by_self']) {
+  test(`a notified seat reports blocked when its next socket check fails: ${reason}`, async (t) => {
+    const { db, channel, state } = channelFixture(t);
+    await channel.pollOnce();
+    state.alive = { state: 'unreadable', reason };
+    await channel.pollOnce();
+    assert.deepEqual({ ...db.prepare('SELECT state, reason FROM beta_claude_seat').get() }, { state: 'blocked', reason });
+    assert.equal(state.sent, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state='pending'").get().n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM beta_claude_queue WHERE state='confirmed'").get().n, 1);
+    await channel.stop();
+  });
+}
+
+test('a stuck Claude send has a seat deadline and late success cannot publish delivery', async (t) => {
+  const { db, channel: unused, state } = channelFixture(t);
+  let release;
+  const logs = [];
+  const channel = createClaudeCodeQueueChannel({ ...state.options, seatDeadlineMs: 20, log: line => logs.push(line),
+    send: () => new Promise(resolve => { release = resolve; }),
+  });
+  await channel.pollOnce();
+  assert.equal(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, 'seat_poll_deadline');
+  assert.ok(logs.some(line => line.includes('poll_timeout')));
+  release({ state: 'sent' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(db.prepare('SELECT reason FROM beta_claude_seat').get().reason, 'seat_poll_deadline');
+  await channel.stop();
+  await unused.stop();
 });

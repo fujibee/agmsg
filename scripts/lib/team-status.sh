@@ -183,7 +183,7 @@ $raw
 EOF
   expected_label="$team:$agent"
   if declare -F terminal_expected_label >/dev/null 2>&1; then
-    expected_key="$(terminal_expected_label "$team" "$agent" 2>/dev/null)" \
+    expected_key="$(terminal_expected_label "$team" "$agent" "$pane" 2>/dev/null)" \
       || expected_key=unknown:expected_label_failed
     case "$expected_key" in
       ''|*$'\t'*|*$'\n'*|*$'\r'*) expected_key=unknown:expected_label_malformed ;;
