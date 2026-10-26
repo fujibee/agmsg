@@ -109,10 +109,26 @@ first_non_option() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --cd|--cwd|-C)
-        shift 2 || true
+        # Skip the option and its value; with the option as the last argument
+        # there is no value, and `shift 2` would fail without consuming it,
+        # which loops forever here.
+        if [ "$#" -gt 1 ]; then shift 2; else shift; fi
         ;;
       --cd=*|--cwd=*)
         shift
+        ;;
+      # Global options that take their value as a separate argument. Skip the
+      # value too, or `codex -c key=value mcp list` reads `key=value` as the
+      # subcommand: the non-remote pass-through below is missed and `--remote`
+      # is added to a command that does not support it. Kept next to the
+      # `--help`/`--*` arms on purpose; add a new valued global option here.
+      -c|--config|-m|--model|-p|--profile|-s|--sandbox|-a|--ask-for-approval|\
+      -i|--image|--enable|--disable|--add-dir|--local-provider|--remote|\
+      --remote-auth-token-env)
+        # Skip the option and its value; with the option as the last argument
+        # there is no value, and `shift 2` would fail without consuming it,
+        # which loops forever here.
+        if [ "$#" -gt 1 ]; then shift 2; else shift; fi
         ;;
       --help|--version|-h|-V)
         printf '%s\n' "$1"
