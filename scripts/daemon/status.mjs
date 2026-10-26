@@ -47,8 +47,14 @@ export function classify({ owner, intent, alive, reachable, lastAttempt }, now =
       (owner.state === "ready" ? "executor or control socket unavailable" : owner.state);
     const detail = owner.last_end_reason === "bind_failed" ? "failed to start" :
       owner.last_end_reason === "stepped_aside_for_update" ? "stopped for an update; the new version has not started yet" : "stopped";
+    // A digest mismatch means the installed files and the completion record
+    // disagree -- restarting with the same files only fails again. Only
+    // install.sh --update (or the npx installer) writes a fresh record.
+    const advice = /digest/i.test(reason)
+      ? "Run install.sh --update (or npx agmsg@latest install --update), then agmsg daemon start."
+      : "Run agmsg daemon start (recommended), or agmsg daemon disable and restart Codex.";
     return {
-      text: `agmsgd is ${detail} (intent is on; reason: ${reason}${owner.state === "ready" && !reachable ? "; does not answer on its control socket" : ""}). Run agmsg daemon start (recommended), or agmsg daemon disable and restart Codex. Unread messages are preserved.`,
+      text: `agmsgd is ${detail} (intent is on; reason: ${reason}${owner.state === "ready" && !reachable ? "; does not answer on its control socket" : ""}). ${advice} Unread messages are preserved.`,
       exitCode: 1,
       gen: owner.gen,
     };
