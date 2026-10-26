@@ -698,6 +698,21 @@ _plugin_cmd_install() {
   _plugin_next_steps "$final" "$(_plugin_drivers_in "$final")"
 }
 
+# "<team>/<member>" for each member joined as ext-tool <tool> on this machine,
+# one per line; nothing when there are none (or jq is missing, where it says
+# nothing rather than guessing).
+_plugin_tool_members() {  # tool
+  local tool="$1" cfg team
+  command -v jq >/dev/null 2>&1 || return 0
+  for cfg in "$PLUGIN_ROOT"/teams/*/config.json; do
+    [ -f "$cfg" ] || continue
+    team="$(basename "$(dirname "$cfg")")"
+    jq -r --arg p "(ext-tool:$tool)" --arg t "$team" \
+      '(.agents // {}) | to_entries[] | select(any(.value.registrations[]?; .project == $p)) | "\($t)/\(.key)"' \
+      "$cfg" 2>/dev/null || true
+  done
+}
+
 # What to do next with each driver just installed, per axis, so the person
 # knows how to put it to use: an ext-tool does nothing until it is joined to a
 # team. <drivers> is a newline list of <axis>/<name>; <dir> the installed
@@ -714,7 +729,16 @@ _plugin_next_steps() {  # dir drivers
     axis="${ref%%/*}" name="${ref#*/}" d="$dir/$ref"
     case "$axis" in
       ext-tools)
-        echo "  $ref is a team member: to use it, join it to a team (the member name, here $name, can be any name)."
+        # Members joined before (kept through a remove and reinstall) work as
+        # they are; say so before the steps for a new one.
+        local joined
+        joined="$(_plugin_tool_members "$name" | paste -sd, - | sed 's/,/, /g')"
+        if [ -n "$joined" ]; then
+          echo "  $ref is already joined as: $joined. It works as it is."
+          echo "    To add it to another team as well:"
+        else
+          echo "  $ref is a team member: to use it, join it to a team (the member name, here $name, can be any name)."
+        fi
         if [ -e "$d/setup" ]; then
           if [ -f "$d/SETUP.md" ]; then
             echo "    It needs setting up first; follow $d/SETUP.md, or see what it needs with:"
@@ -838,7 +862,7 @@ _plugin_cmd_remove() {
   [ -n "$PLUGIN_SPEC_ARG" ] || _plugin_die "usage: $PLUGIN_CMD plugin remove <owner>/<repo>"
   case "$PLUGIN_SPEC_ARG" in *@*) _plugin_die "remove takes <owner>/<repo> without a ref" ;; esac
   _plugin_parse_spec "$PLUGIN_SPEC_ARG"
-  local owner="$SPEC_OWNER" repo="$SPEC_REPO" id rec dir drv back=""
+  local owner="$SPEC_OWNER" repo="$SPEC_REPO" id rec dir drv back="" members=""
   id="github/$owner/$repo"
   _plugin_lock
   rec="$(_plugin_record "$id")" || _plugin_die "$id is not installed"
@@ -847,6 +871,11 @@ _plugin_cmd_remove() {
     [ -n "$drv" ] || continue
     if [ -d "$PLUGIN_ROOT/scripts/drivers/$drv" ]; then
       back="${back:+$back, }$drv"
+    # A member joined as this ext-tool stays in its team; with no built-in of
+    # the same name to fall back to, it can no longer answer.
+    elif [ "${drv%%/*}" = ext-tools ]; then
+      members="${members:+$members
+}$(_plugin_tool_members "${drv#*/}")"
     fi
   done <<EOF
 $(_plugin_drivers_in "$dir")
@@ -862,6 +891,17 @@ EOF
   echo "Removed $id."
   if [ -n "$back" ]; then
     echo "The built-in driver(s) are back in use: $back"
+  fi
+  members="$(printf '%s\n' "$members" | sed '/^$/d')"
+  if [ -n "$members" ]; then
+    echo
+    echo "These team members used it and are still joined; messages sent to them now get a reply that the plugin is not installed:"
+    printf '%s\n' "$members" | sed 's/^/  /'
+    echo "To take one out of its team:"
+    printf '%s\n' "$members" | while IFS=/ read -r t m; do
+      printf '  bash %q %s %s\n' "$PLUGIN_ROOT/scripts/leave.sh" "$t" "$m"
+    done
+    echo "Or install the plugin again and they work as before."
   fi
 }
 
