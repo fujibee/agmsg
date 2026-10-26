@@ -43,11 +43,11 @@ write_node_launcher_fixtures() {
   printf '// stub node launcher fixture\n' > "$nd/nodetype-launcher.mjs"
 }
 
-@test "type-registry: known_types lists the twelve built-ins" {
+@test "type-registry: known_types lists the thirteen built-ins" {
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; agmsg_known_types | sort -u | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "agmsg-app,antigravity,claude-code,codex,copilot,cursor,devin,ext-tool,gemini,grok-build,hermes,opencode" ]
+  [ "$output" = "agmsg-app,antigravity,claude-code,codex,copilot,cursor,devin,ext-tool,gemini,grok-build,hermes,opencode,pi" ]
 }
 
 @test "type-registry: sourcing alone does not compute the renderable-types list (#631)" {
@@ -298,8 +298,8 @@ EOF
   done <<<"$renderable_types"
 }
 
-@test "type-registry: spawnable set is exactly eight of the eleven built-ins (#277, #279)" {
-  # hermes and devin deliberately stay out (#279): no known CLI mode starts them
+@test "type-registry: spawnable set is exactly nine of the thirteen built-ins (#277, #279)" {
+  # hermes, devin, ext-tool, and agmsg-app deliberately stay out (#279): no known CLI mode starts them
   # interactive with a seeded initial prompt. agmsg-app also stays out: it's
   # the desktop app itself (spawnable=no), not a spawnable agent type.
   run env -i PATH="$PATH" bash -c \
@@ -309,7 +309,7 @@ EOF
        [ \"\$(agmsg_type_get \"\$t\" spawnable)\" = yes ] && echo \"\$t\"
      done <<< \"\$(agmsg_known_types | sort -u)\" | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,opencode" ]
+  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,opencode,pi" ]
 }
 
 @test "type-registry: detection manifests carry the expected env / proc keys" {
@@ -322,6 +322,7 @@ EOF
   [ "$(g antigravity detect)" = "explicit" ]
   [ "$(g copilot detect)" = "explicit" ]
   [ "$(g opencode detect_proc)" = "opencode opencode-*" ]
+  [ "$(g pi detect_proc)" = "pi pi-*" ]
 }
 
 @test "type-registry: no manifest key is named 'monitor' -- delivery_modes alone answers mode support (#1214)" {

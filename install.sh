@@ -78,7 +78,7 @@ agmsg_load_renderable_skill_types
 # Adding a new type's OWN dedicated file at a new site below means adding
 # that type here too, or it will keep silently retyping the shared file the
 # way #1449 describes.
-AGMSG_TYPES_WITH_OWN_SKILL_FILE="claude-code copilot opencode hermes grok-build antigravity"
+AGMSG_TYPES_WITH_OWN_SKILL_FILE="claude-code copilot opencode hermes grok-build antigravity pi"
 
 # Resolve a provenance version for the source being installed, so an installed
 # copy is uniquely identifiable even between tagged releases (the canonical
@@ -848,7 +848,7 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --cmd <name>      Command & skill folder name (default: agmsg)"
       echo "                    Claude Code: /<cmd>, Codex/Gemini/Antigravity: \$<cmd>"
-      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity, opencode, hermes, cursor, grok-build, devin"
+      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity, opencode, hermes, cursor, grok-build, devin, pi"
       echo "                    codex, gemini, cursor, devin: selects the template the"
       echo "                    shared SKILL.md is rendered from. Other types leave the"
       echo "                    shared SKILL.md's type unchanged (codex on a fresh install);"
@@ -1095,6 +1095,14 @@ $_agmsg_running_team"
   if [ -d "$HOME/.grok" ]; then
     mkdir -p "$GROK_SKILL_DIR" || exit 1
     agmsg_render_skill grok-build "$SKILL_NAME" "$GROK_SKILL_DIR/SKILL.md" || exit 1
+  fi
+  # Refresh / install the Pi skill. Pi auto-discovers ~/.pi/agent/skills and
+  # ~/.agents/skills; the shared SKILL.md is Codex-typed, so keep a Pi-typed
+  # copy in Pi's own skills dir (later locations win on name collision).
+  PI_SKILL_DIR="$HOME/.pi/agent/skills/$SKILL_NAME"
+  if [ -d "$HOME/.pi" ]; then
+    mkdir -p "$PI_SKILL_DIR" || exit 1
+    agmsg_render_skill pi "$SKILL_NAME" "$PI_SKILL_DIR/SKILL.md" || exit 1
   fi
   install_antigravity_skill || exit 1
   agmsg_install_op_phase_end || exit 1
@@ -1451,6 +1459,18 @@ if [ -d "$HOME/.grok" ]; then
   echo "  + installed /$CMD_NAME skill to ~/.grok/skills/"
 fi
 
+# --- Install Pi skill ---
+# Pi auto-discovers ~/.pi/agent/skills/<name>/SKILL.md (and ~/.agents/skills as
+# a fallback). The shared ~/.agents/skills/<name>/SKILL.md is Codex-typed and
+# would mis-identify a Pi session — keep the Pi copy separate. Delivery writes
+# a project-local extension at <project>/.pi/extensions/agmsg.ts.
+PI_SKILL_DIR="$HOME/.pi/agent/skills/$CMD_NAME"
+if [ -d "$HOME/.pi" ]; then
+  mkdir -p "$PI_SKILL_DIR"
+  agmsg_render_skill pi "$CMD_NAME" "$PI_SKILL_DIR/SKILL.md"
+  echo "  + installed /$CMD_NAME skill to ~/.pi/agent/skills/"
+fi
+
 # --- Install Antigravity skill ---
 # Antigravity (agy) reads global skills from ~/.gemini/config/skills/<name>/.
 # Its CLI may create ~/.gemini/antigravity-cli before the config directory, so
@@ -1481,6 +1501,7 @@ echo "       Gemini CLI:   \$$CMD_NAME"
 echo "       Antigravity:  \$$CMD_NAME"
 echo "       Copilot CLI:  /$CMD_NAME"
 echo "       OpenCode:     \$$CMD_NAME"
+echo "       Pi:           /$CMD_NAME"
 echo "       It will prompt for team name and agent name on first run."
 echo ""
 echo "  Docs: https://agmsg.cc/"
