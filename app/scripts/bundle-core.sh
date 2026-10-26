@@ -56,6 +56,7 @@ PACK_PATHS=(
   install.sh
   uninstall.sh
   VERSION
+  CHANGELOG.md
   SKILL.md
   plugins/README.md
   openai.yaml
@@ -97,6 +98,9 @@ done
 # If this ever names a path that is relative to scripts/ at runtime rather
 # than to the installer (a `$SCRIPT_DIR/...` inside scripts/lib that means the
 # scripts directory), narrow the scan instead of adding the path to the pack.
+# `run/` is the same kind of case: uninstall.sh reads run/install-op-* from the
+# installed skill directory, where the installer writes them at run time; they
+# are never part of a release, so the scan skips them.
 closure_missing=0
 while IFS= read -r rel; do
   rel="${rel%/.}"
@@ -106,7 +110,7 @@ while IFS= read -r rel; do
   fi
 done < <(grep -rhoE '\$\{?SCRIPT_DIR(:-)?\}?/[A-Za-z0-9_.][A-Za-z0-9_./-]*' \
            "$DEST/install.sh" "$DEST/uninstall.sh" "$DEST/scripts/lib" \
-         | sed -E 's#^\$\{?SCRIPT_DIR(:-)?\}?/##' | sort -u)
+         | sed -E 's#^\$\{?SCRIPT_DIR(:-)?\}?/##' | grep -v '^run/' | sort -u)
 [ "$closure_missing" -eq 0 ] || exit 1
 
 # Render check: run the function that failed in the field, from the packed
