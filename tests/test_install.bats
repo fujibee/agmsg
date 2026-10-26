@@ -110,6 +110,26 @@ teardown() {
   [[ "$output" =~ "hello from install" ]]
 }
 
+@test "install: missing sqlite3 fails with per-OS install advice including Windows (#1798)" {
+  # A PATH holding only the tools install.sh needs to reach its dependency
+  # check, deliberately excluding sqlite3 -- symlinks, not copies, so each
+  # keeps its real executable bit (see test_hash.bats's pathbox for the same
+  # pattern and why).
+  local box; box="$(mktemp -d)"
+  local tool src
+  for tool in bash dirname cd pwd echo cat paste grep sed mkdir rm mktemp \
+      basename tr cut sort uniq find chmod touch awk; do
+    src="$(command -v "$tool")" || continue
+    ln -sf "$src" "$box/$tool"
+  done
+
+  run env PATH="$box" HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qF "macOS: included by default"
+  echo "$output" | grep -qF "Linux: sudo apt install sqlite3"
+  [[ "$output" =~ "Windows (Git Bash): winget install SQLite.SQLite" ]]
+}
+
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
   skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
