@@ -294,7 +294,10 @@ EOF
   # The unit does not name Node or Codex (the launcher reads them from
   # install.db), so a re-enable that only changes those leaves the loaded unit
   # as it is: re-registering it would stop a running agmsgd for nothing.
-  if [ -f "$plist" ] && cmp -s "$plist" "$plist_new"; then
+  # Only when launchd really has it loaded: a plist file can outlive its
+  # registration (bootout, a new login session), and then it must be loaded.
+  if [ -f "$plist" ] && cmp -s "$plist" "$plist_new" \
+    && { "$AGMSGD_LAUNCHCTL" print "gui/$(id -u)/$label" >/dev/null 2>&1 || "$AGMSGD_LAUNCHCTL" list "$label" >/dev/null 2>&1; }; then
     rm -f "$plist_new"
     return 0
   fi

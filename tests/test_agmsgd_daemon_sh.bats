@@ -255,7 +255,7 @@ case "$1" in
     [ "${AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER:-0}" != 1 ] || exit 1
     rm -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}"
     ;;
-  list) [ -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}" ] ;;
+  list|print) [ -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}" ] ;;
   kickstart)
     printf '%s\n' "$*" >> "${AGMSGD_FAKE_LAUNCHD_EVENTS:?}"
     if [ "${AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER:-0}" = 1 ]; then exit 1; fi
@@ -699,13 +699,13 @@ _enable_env() {
   sleep 1
   AGMSGD_LOCK_WAIT_MS=500 _run_with_deadline 30 bash "$DAEMON" enable
   [ "$status" -ne 0 ]
-  [[ "$output" == *"could not acquire the install operation lock"* ]]
-  [[ "$output" == *"Nothing was changed"* ]]
+  printf '%s' "$output" | grep -qF "could not acquire the install operation lock"
+  printf '%s' "$output" | grep -qF "Nothing was changed"
   wait "$holder" || true
 
   kill -0 "$pid"
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;")" = "ready" ]
-  ! grep -q 'bootout\|unload' "$TEST_SKILL_DIR/fake-launchd/events"
+  refute grep -q 'bootout\|unload' "$TEST_SKILL_DIR/fake-launchd/events"
   [ -f "$TEST_SKILL_DIR/fake-launchd/registered" ]
   bash "$DAEMON" disable >/dev/null 2>&1 || true
 }
@@ -720,7 +720,7 @@ _enable_env() {
   sleep 0.5
   AGMSGD_LOCK_WAIT_MS=8000 _run_with_deadline 40 bash "$DAEMON" enable
   [ "$status" -eq 0 ]
-  [[ "$output" == *"running"* ]]
+  printf '%s' "$output" | grep -qF "running"
   wait "$holder" || true
   bash "$DAEMON" disable >/dev/null 2>&1 || true
 }
@@ -741,11 +741,11 @@ _enable_env() {
   ln -s "$(command -v node)" "$TEST_SKILL_DIR/node-other/node"
   PATH="$TEST_SKILL_DIR/node-other:$PATH" _run_with_deadline 30 bash "$DAEMON" enable
   [ "$status" -eq 0 ]
-  [[ "$output" == *"already running"* ]]
+  printf '%s' "$output" | grep -qF "already running"
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT node_path FROM meta;")" = "$TEST_SKILL_DIR/node-other/node" ]
   kill -0 "$pid"
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT gen FROM daemon_owner;")" = "$gen" ]
-  ! grep -q '^call \(bootout\|unload\|bootstrap\|load\)' "$TEST_SKILL_DIR/fake-launchd/events"
+  refute grep -q '^call \(bootout\|unload\|bootstrap\|load\)' "$TEST_SKILL_DIR/fake-launchd/events"
   bash "$DAEMON" disable >/dev/null 2>&1 || true
 }
 
@@ -756,8 +756,25 @@ _enable_env() {
   _enable_env
   AGMSGD_FAKE_LAUNCHD_DECLINE_ONCE="$TEST_SKILL_DIR/fake-launchd/declined" _run_with_deadline 40 bash "$DAEMON" enable
   [ "$status" -eq 0 ]
-  [[ "$output" == *"running"* ]]
+  printf '%s' "$output" | grep -qF "running"
   [ "$(grep -c '^call kickstart' "$TEST_SKILL_DIR/fake-launchd/events")" -eq 2 ]
   [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;")" = "ready" ]
+  bash "$DAEMON" disable >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh enable: an identical plist that launchd no longer has loaded is bootstrapped again" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  _enable_env
+  _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+  rm -f "$TEST_SKILL_DIR/fake-launchd/registered"
+  : > "$TEST_SKILL_DIR/fake-launchd/events"
+  _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  grep -q '^call bootstrap' "$TEST_SKILL_DIR/fake-launchd/events"
+  [ -f "$TEST_SKILL_DIR/fake-launchd/registered" ]
   bash "$DAEMON" disable >/dev/null 2>&1 || true
 }
