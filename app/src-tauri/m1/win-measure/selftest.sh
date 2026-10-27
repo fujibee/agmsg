@@ -65,6 +65,19 @@ expect PASS S3-realm-nested "nested child passes when its parent was refused"
 } > "$T/in"; run < "$T/in"
 expect FAIL S3-realm-nested "a loaded, silent nested child fails"
 
+# 7b. frames that are allowed to run script and are WebRTC-free: both measured, both pass
+{ base
+  R NET_attempt srcdoc; R NET_realm 'srcdoc|absent'; R NET_done srcdoc
+  R NET_attempt nested; R NET_realm 'nested|absent'; R NET_loaded 'nested|true'; R NET_done nested
+} > "$T/in"; run < "$T/in"
+expect PASS S3-realm-srcdoc "an allowed, clean srcdoc child passes"
+expect PASS S3-realm-nested "an allowed, clean nested child passes"
+{ base
+  R NET_attempt srcdoc; R NET_realm 'srcdoc|absent'; R NET_done srcdoc
+  R NET_attempt nested; R NET_realm 'nested|PRESENT:RTCPeerConnection'; R NET_done nested
+} > "$T/in"; run < "$T/in"
+expect FAIL S3-realm-nested "an allowed nested child exposing WebRTC fails"
+
 # 8. egress: went through, blocked with the matching report, blocked without any report
 { base; R NET_attempt fetch_lan_like; R NET_outcome 'fetch_lan_like|sent'; R NET_done fetch_lan_like; } > "$T/in"; run < "$T/in"
 expect FAIL S3-egress-fetch_lan_like "a request that went through fails"

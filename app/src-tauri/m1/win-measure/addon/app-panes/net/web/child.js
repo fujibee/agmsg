@@ -2,6 +2,8 @@
 // which WebRTC names exist here, the violations it sees, and (from the srcdoc child) a nested child of its own.
 var RTC_NAMES = ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCSessionDescription', 'RTCDataChannel', 'RTCIceCandidate', 'RTCDataChannelEvent', 'RTCRtpSender', 'RTCRtpReceiver', 'RTCDtlsTransport', 'RTCIceTransport', 'RTCSctpTransport', 'RTCCertificate'];
 (function () {
+  // inside a srcdoc frame location.href is about:srcdoc, so every URL is built from this script's own address
+  var SELF = (document.currentScript && document.currentScript.src) || '';
   function present() { return RTC_NAMES.filter(function (n) { return typeof window[n] !== 'undefined' || n in window; }).join(','); }
   var atStart = present();
   var me = window.name || 'child';
@@ -21,7 +23,7 @@ var RTC_NAMES = ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCSessionDesc
       var f = document.createElement('iframe');
       f.name = 'nested';
       f.onload = function () { loaded = true; };
-      f.srcdoc = '<script src="' + new URL('child.js', location.href).href + '?n=' + n + '"></' + 'script>';
+      f.srcdoc = '<script src="' + new URL('child.js', SELF).href + '?n=' + n + '"></' + 'script>';
       document.body.appendChild(f);
     } catch (e) { up({ kind: 'realm', label: 'nested', present: 'threw ' + e.name }); }
     setTimeout(function () { up({ kind: 'loaded', label: 'nested', loaded: loaded }); up({ kind: 'done', label: 'nested' }); }, 2000);

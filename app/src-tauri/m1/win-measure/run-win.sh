@@ -48,6 +48,9 @@ snapshot > "$OUT/real-home-before.txt"
 [ -d "$CORE/scripts" ] && [ -f "$CORE/scripts/api.sh" ] || { verdict FAIL S0 "the bundled core is missing next to the executables ($CORE)"; exit 3; }
 
 
+# ---- S0 refuse to start next to a run in progress (this script stops processes by image name)
+if tasklist 2>/dev/null | grep -qi 'agmsg-app-win-measure'; then echo "FAIL S0 an agmsg-app-win-measure-*.exe is already running; stop it first (not touching it)" | tee -a "$SUM"; exit 3; fi
+
 # ---- S0 environment
 {
   echo "date: $(date -u +%FT%TZ)"; echo "user: $(whoami)"
@@ -118,6 +121,7 @@ sed -e "s|__TEAM__|$TEAM|g" -e "s|__FIXTURE__|$(nat "$FIX")|g" -e "s|__ADDON__|$
 SINK="$OUT/sink-hits.txt"; SINKN=$(nat "$SINK")
 ( powershell -NoProfile -ExecutionPolicy Bypass -File "$(nat "$HERE/sink.ps1")" -Port 47931 -Seconds 900 -Out "$SINKN" > "$OUT/sink.log" 2>&1 & )
 for _ in $(seq 1 20); do grep -q '^udp=\|^ERROR' "$SINK" 2>/dev/null && break; sleep 0.5; done
+if tr -d '\r' < "$SINK" 2>/dev/null | grep -q '^udp='; then verdict PASS S3-sink-start "the sink is listening on 127.0.0.1:47931"; fi
 if ! tr -d '\r' < "$SINK" 2>/dev/null | grep -q '^udp='; then
   verdict FAIL S3-sink-start "the sink could not start (port 47931 busy or PowerShell blocked): $(tr -d '\r' < "$SINK" 2>/dev/null | head -1)"
   stop_sink; echo "== counts: $(grep -c '^PASS' "$SUM") PASS, $(grep -c '^FAIL' "$SUM") FAIL" | tee -a "$SUM"
