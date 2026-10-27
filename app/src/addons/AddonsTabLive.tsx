@@ -4,12 +4,12 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { AddonsSettings } from "./AddonsSettings";
+import { AddonsSettings, type InstalledNotice } from "./AddonsSettings";
 import type { Catalog } from "./catalog";
 import { collectSavedGrants } from "./collectGrants";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
 import { createLiveSource, toCommandError, type Outcome } from "./source";
-import type { FetchProgress, Grant, InstallError, StagedInstall } from "./types";
+import type { AddonPaneRef, FetchProgress, Grant, InstallError, StagedInstall } from "./types";
 
 const source = createLiveSource((cmd, args) => invoke(cmd, args));
 
@@ -18,12 +18,13 @@ type Notice = { kind: "info" | "error"; text: string };
 // Settings → Add-ons on the real commands: install and update through the
 // fetch / confirm steps, remove, developer folders, and the remembered grants.
 // Rust does the work and says why it refuses; this shows its words.
-export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: string) => number }) {
+export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: string) => number; onOpenPane?: (ref: AddonPaneRef) => void }) {
   const { catalog } = props;
   const { t } = useTranslation();
   const tt = t as never;
   const [installError, setInstallError] = useState<InstallError | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [installedNotice, setInstalledNotice] = useState<InstalledNotice | null>(null);
   const [staged, setStaged] = useState<StagedInstall | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [progress, setProgress] = useState<FetchProgress | null>(null);
@@ -73,6 +74,7 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
     currentOp.current = opId;
     setInstallError(null);
     setNotice(null);
+    setInstalledNotice(null);
     setProgress({ step: "resolving" });
     const r = await run(opId);
     if (currentOp.current !== opId) {
@@ -98,6 +100,7 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
     setStaged(null);
     const r = await source.installConfirm(s.stagingId);
     if (!r.ok) setNotice({ kind: "error", text: r.error.message });
+    else setInstalledNotice({ kind: s.from ? "updated" : "installed", addonId: s.addonId, title: s.title, paneName: s.panes[0]?.name });
     catalog.reload();
   };
   const cancelConfirm = () => {
@@ -109,6 +112,7 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
   const doRemove = async () => {
     const a = removingAddon;
     setRemoving(null);
+    setInstalledNotice(null);
     if (!a) return;
     const r = a.dev ? await source.devRemove(a.id) : await source.remove(a.id);
     if (!r.ok) setNotice({ kind: "error", text: r.error.message });
@@ -159,6 +163,8 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
         onOpenRequestsChange={setOpenRequests}
         onLoadFromFolder={() => void loadFolder()}
         onDevReload={(id) => void loadFolder(devFolders.current.get(id))}
+        installedNotice={installedNotice}
+        onOpenNow={(n) => n.paneName !== undefined && props.onOpenPane?.({ addonId: n.addonId, paneName: n.paneName, title: n.title })}
       />
       {progress && <FetchProgressView t={tt} progress={progress} onCancel={cancelFetch} />}
       {staged && <ConfirmInstallDialog t={tt} staged={staged} onCancel={cancelConfirm} onInstall={() => void confirm()} />}

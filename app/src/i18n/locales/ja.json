@@ -266,28 +266,34 @@
     "engineOff": "このコンピュータではまだアドオンを使えません。このシステムの Web エンジンで安全性チェックに通りませんでした。ほかの機能には影響しません。",
     "engineReasons": "理由: {{reasons}}",
     "builtin": {
-      "title": "内蔵"
+      "title": "内蔵",
+      "source": "内蔵"
     },
     "installed": {
       "title": "インストール済み",
       "empty": "インストール済みのアドオンはありません。",
       "checkUpdates": "更新を確認",
-      "remove": "削除"
+      "remove": "削除",
+      "doneNotice": "{{title}} をインストールしました。＋ 新規 ▸ アドオンペイン から開けます。",
+      "updatedNotice": "{{title}} を更新しました。",
+      "openNow": "今すぐ開く"
     },
     "install": {
-      "label": "アドオンのリポジトリ",
-      "placeholder": "owner/repo または owner/repo@ref",
+      "placeholder": "例: fujibee/agmsg-addon-sample",
       "button": "インストール…",
-      "later": "GitHub からのインストールは、このビルドではまだ使えません。"
+      "later": "GitHub からのインストールは、このビルドではまだ使えません。",
+      "heading": "GitHub からインストール",
+      "help": "agmsg アドオンのリポジトリを入力します: owner/repo、バージョンを固定するなら owner/repo@tag。"
     },
     "openRequests": {
-      "label": "seat からの open request",
-      "show": "表示",
       "off": "オフ",
-      "copy": "seat 向けの文面をコピー",
+      "copy": "エージェント向けの案内をコピー",
       "copied": "コピーしました。",
       "copyFailed": "コピーできませんでした。",
-      "copyHint": "seat に貼り付けると、アプリにペインを開くよう頼む書き方が伝わります。"
+      "title": "エージェントからのリクエスト",
+      "explain": "チームのエージェントが、たとえば自分の作業の diff など、ペインを開くようアプリに頼めるようにします。リクエストはバーに表示され、「開く」を押すまで何も開きません。",
+      "on": "オン",
+      "copyHelp": "エージェントはリクエストの書き方を知る必要があります。コピーして、一度貼り付けて伝えてください。"
     },
     "developer": {
       "title": "開発者",
@@ -295,7 +301,8 @@
       "loaded": "開発用アドオン",
       "none": "読み込んだ開発用アドオンはありません。",
       "reload": "フォルダから再読み込み",
-      "remove": "削除"
+      "remove": "削除",
+      "explain": "自分のアドオンを作っていますか？ このコンピューター上のフォルダから読み込めます。インストールはされず、フォルダのまま動き、再読み込みで編集が反映されます。"
     },
     "permission": {
       "none": "権限なしで動作します",
@@ -309,8 +316,7 @@
       "messages": "メッセージを読む: {{scope}}",
       "files": "ファイルを読む: {{scope}}",
       "remembered": "(記憶済み)",
-      "revoke": "取り消す",
-      "none": "まだ許可した権限はありません。"
+      "revoke": "取り消す"
     },
     "card": {
       "grantAria": "権限のリクエスト",
@@ -323,7 +329,10 @@
       "notNow": "今はしない",
       "denied": "{{path}} は agmsg の保護対象(鍵・認証情報・ブラウザデータ)です。アドオンは読めません。",
       "chooseAnother": "別のものを選ぶ…",
-      "allowAlwaysLater": "まだ使えません"
+      "allowAlwaysLater": "まだ使えません",
+      "can": "できること",
+      "allowed": "許可済み",
+      "nothingYet": "まだありません"
     },
     "installError": {
       "repo_not_found": "github.com/{{owner}}/{{repo}} が見つかりません。名前を確認してください。非公開リポジトリはまだ未対応です。",
@@ -376,12 +385,11 @@
       "details": "詳細",
       "fullSha": "Commit: {{sha}}",
       "archive": "アーカイブ SHA-256: {{hash}}",
-      "panes": "追加されるもの: {{names}}",
-      "canTitle": "このアドオンができること:",
+      "canTitle": "このアドオンができること",
       "new": "新規:",
       "sends": "読み取った内容を {{hosts}} に送れます。",
       "sendsAny": "読み取った内容をインターネット上の任意のサイトに送れます。",
-      "never": "できないこと: プログラムの実行、アプリの操作、あなたが選んでいないものの読み取り。",
+      "never": "プログラムの実行、アプリの操作、あなたが選んでいないものの読み取り。",
       "noReview": "agmsg はアドオンの審査も署名も行いません。信頼できる人のものだけインストールしてください。",
       "asksAgain": "この更新でアドオンができることが変わります。変わった項目の許可は改めて確認します。",
       "install": "インストール",
@@ -391,7 +399,10 @@
       "paneWider": "{{pane}} が、より多くのサイトに接続できるようになります",
       "paneCombined": "{{pane}} が、読み取った内容をネットワークへ送れるようになります",
       "paneAsksAgain": "{{pane}} は、フォルダやチームへのアクセスを改めて確認します",
-      "paneRemoved": "{{pane}} は削除されます(保存済みのアクセスも破棄されます)"
+      "paneRemoved": "{{pane}} は削除されます(保存済みのアクセスも破棄されます)",
+      "neverTitle": "絶対にできないこと",
+      "source": "{{repo}} から · {{sha}} · ペイン {{count}} 件を追加",
+      "sourceUpdate": "{{repo}} から · {{from}} → {{to}} · ペイン {{count}} 件"
     },
     "remove": {
       "title": "{{title}} を削除しますか?",
@@ -453,6 +464,7 @@
     "env": {
       "found": "このフォルダには .env ファイルがあります。",
       "foundNetwork": "このフォルダには .env ファイルがあります。このアドオンはネットワークを使うため、読めません。"
-    }
+    },
+    "intro": "アドオンはアプリにペインを追加します。許可したものしか読めず、許可はここでいつでも取り消せます。"
   }
 }

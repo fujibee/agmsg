@@ -22,50 +22,56 @@ export function ConfirmInstallDialog(props: {
   const sends = staged.panes.some(canSendWhatItReads);
   const isNew = (p: Permission) => diff?.added.includes(p) || (p === "network" && diff?.networkWider) || false;
   return (
-    <Modal title={t(diff ? "addons.confirm.updateTitle" : "addons.confirm.installTitle", { title: staged.title })} onClose={props.onCancel}>
-      <p className="modal-note">
-        {staged.addonId}{" "}
-        {diff && staged.from
-          ? t("addons.confirm.fromTo", { from: shortSha(staged.from.sha), to: shortSha(staged.sha) })
-          : shortSha(staged.sha)}
-      </p>
-      <details className="addon-details">
-        <summary>{t("addons.confirm.details")}</summary>
-        <div>{t("addons.confirm.fullSha", { sha: staged.sha })}</div>
-        <div>{t("addons.confirm.archive", { hash: staged.archiveSha256 })}</div>
-      </details>
-      <div className="addon-confirm-panes">{t("addons.confirm.panes", { names: staged.panes.map((p) => p.title).join(", ") })}</div>
-      <div className="addon-confirm-can">{t("addons.confirm.canTitle")}</div>
-      <ul className="addon-perms">
-        {perms.size === 0 && <li>{t("addons.permission.none")}</li>}
-        {[...perms.keys()].map((p) => {
-          const row = permissionRow(p, net);
-          const why = staged.panes.map((x) => x.why[p]).find(Boolean);
-          return (
-            <li key={p} className={isNew(p) ? "addon-perm-new" : ""}>
-              {isNew(p) && <strong>{t("addons.confirm.new")} </strong>}
-              {t(row.key, row.params)}
-              {why && <span className="addon-why"> — {why}</span>}
-            </li>
-          );
-        })}
-      </ul>
-      {sends && (
-        <p className="modal-note addon-sends" role="note">
-          {t(net.kind === "any" ? "addons.confirm.sendsAny" : "addons.confirm.sends", {
-            hosts: net.kind === "origins" ? net.origins.map((o) => o.replace(/^https?:\/\//, "")).join(", ") : "",
-          })}
+    <Modal title={t(diff ? "addons.confirm.updateTitle" : "addons.confirm.installTitle", { title: staged.title })} onClose={props.onCancel} wide>
+      <div className="modal-body">
+        <p className="addon-dlg-source">
+          {diff && staged.from
+            ? t("addons.confirm.sourceUpdate", { repo: staged.addonId, from: shortSha(staged.from.sha), to: shortSha(staged.sha), count: staged.panes.length })
+            : t("addons.confirm.source", { repo: staged.addonId, sha: shortSha(staged.sha), count: staged.panes.length })}
         </p>
-      )}
-      <p className="modal-note">{t("addons.confirm.never")}</p>
-      <p className="modal-note">{t("addons.confirm.noReview")}</p>
-      {diff && <PaneChanges t={t} staged={staged} />}
-      {diff?.asksAgain && <p className="modal-note addon-asks-again">{t("addons.confirm.asksAgain")}</p>}
+        <div className="addon-block">
+          <h4>{t("addons.confirm.canTitle")}</h4>
+          {perms.size === 0 && <p className="addon-never">{t("addons.permission.none")}</p>}
+          {[...perms.keys()].map((p) => {
+            const row = permissionRow(p, net);
+            const why = staged.panes.map((x) => x.why[p]).find(Boolean);
+            return (
+              <div key={p} className={`addon-perm-row${isNew(p) ? " addon-perm-new" : ""}`}>
+                <span className="ico">◉</span>
+                <b>
+                  {isNew(p) && <>{t("addons.confirm.new")} </>}
+                  {t(row.key, row.params)}
+                </b>
+                {why && <span className="addon-why">{why}</span>}
+              </div>
+            );
+          })}
+          {sends && (
+            <p className="addon-never addon-sends" role="note">
+              {t(net.kind === "any" ? "addons.confirm.sendsAny" : "addons.confirm.sends", {
+                hosts: net.kind === "origins" ? net.origins.map((o) => o.replace(/^https?:\/\//, "")).join(", ") : "",
+              })}
+            </p>
+          )}
+        </div>
+        <div className="addon-block">
+          <h4>{t("addons.confirm.neverTitle")}</h4>
+          <p className="addon-never">{t("addons.confirm.never")}</p>
+        </div>
+        {diff && <PaneChanges t={t} staged={staged} />}
+        {diff?.asksAgain && <p className="addon-warn addon-asks-again">{t("addons.confirm.asksAgain")}</p>}
+        <p className="addon-warn">{t("addons.confirm.noReview")}</p>
+        <details className="addon-details">
+          <summary>{t("addons.confirm.details")}</summary>
+          <div>{t("addons.confirm.fullSha", { sha: staged.sha })}</div>
+          <div>{t("addons.confirm.archive", { hash: staged.archiveSha256 })}</div>
+        </details>
+      </div>
       <div className="modal-actions">
         <button type="button" autoFocus onClick={props.onCancel}>
           {t("common.cancel")}
         </button>
-        <button type="button" onClick={props.onInstall}>
+        <button type="button" className="primary" onClick={props.onInstall}>
           {t(diff ? "addons.confirm.update" : "addons.confirm.install")}
         </button>
       </div>
@@ -129,8 +135,8 @@ function PaneChanges(props: { t: Translate; staged: StagedInstall }) {
   for (const pane of staged.removedPanes ?? []) lines.push(t("addons.confirm.paneRemoved", { pane }));
   if (lines.length === 0) return null;
   return (
-    <div className="addon-pane-changes">
-      <div className="addon-confirm-can">{t("addons.confirm.changesTitle")}</div>
+    <div className="addon-block addon-pane-changes">
+      <h4>{t("addons.confirm.changesTitle")}</h4>
       <ul className="addon-perms">
         {lines.map((l, i) => (
           <li key={i}>{l}</li>

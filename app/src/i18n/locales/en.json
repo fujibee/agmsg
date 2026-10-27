@@ -266,28 +266,34 @@
     "engineOff": "Add-ons are not available on this computer yet. A safety check did not pass with this system's web engine. Your other features are not affected.",
     "engineReasons": "Reason: {{reasons}}",
     "builtin": {
-      "title": "Built in"
+      "title": "Built in",
+      "source": "built in"
     },
     "installed": {
       "title": "Installed",
       "empty": "No add-ons installed.",
       "checkUpdates": "Check for updates",
-      "remove": "Remove"
+      "remove": "Remove",
+      "doneNotice": "Installed {{title}}. Open it from ＋ New ▸ Add-on pane.",
+      "updatedNotice": "Updated {{title}}.",
+      "openNow": "Open now"
     },
     "install": {
-      "label": "Add-on repository",
-      "placeholder": "owner/repo or owner/repo@ref",
+      "placeholder": "e.g. fujibee/agmsg-addon-sample",
       "button": "Install…",
-      "later": "Installing from GitHub isn't available in this build yet."
+      "later": "Installing from GitHub isn't available in this build yet.",
+      "heading": "Install from GitHub",
+      "help": "Type the repository of an agmsg add-on: owner/repo, or owner/repo@tag for a fixed version."
     },
     "openRequests": {
-      "label": "Open requests from seats",
-      "show": "Show",
       "off": "Off",
-      "copy": "Copy text for your seats",
+      "copy": "Copy instructions for agents",
       "copied": "Copied.",
       "copyFailed": "Could not copy.",
-      "copyHint": "Paste it to a seat so it knows how to ask the app to open a pane."
+      "title": "Requests from agents",
+      "explain": "Let agents in your teams ask the app to open a pane, for example a diff of their work. A bar shows the request; nothing opens until you click Open.",
+      "on": "On",
+      "copyHelp": "Agents need to know the request format. Copy it and paste it to them once."
     },
     "developer": {
       "title": "Developer",
@@ -295,7 +301,8 @@
       "loaded": "Developer add-ons",
       "none": "No developer add-ons loaded.",
       "reload": "Reload from folder",
-      "remove": "Remove"
+      "remove": "Remove",
+      "explain": "Building your own add-on? Load it from a folder on this computer. It is not installed: it runs from the folder, and Reload picks up your edits."
     },
     "permission": {
       "none": "Runs with no permissions",
@@ -309,8 +316,7 @@
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke",
-      "none": "No permissions given yet."
+      "revoke": "Revoke"
     },
     "card": {
       "grantAria": "Permission request",
@@ -323,7 +329,10 @@
       "notNow": "Not now",
       "denied": "{{path}} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
       "chooseAnother": "Choose another…",
-      "allowAlwaysLater": "Not available yet"
+      "allowAlwaysLater": "Not available yet",
+      "can": "Can",
+      "allowed": "Allowed",
+      "nothingYet": "nothing yet"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -376,12 +385,11 @@
       "details": "Details",
       "fullSha": "Commit: {{sha}}",
       "archive": "Archive SHA-256: {{hash}}",
-      "panes": "Adds: {{names}}",
-      "canTitle": "This add-on can:",
+      "canTitle": "This add-on can",
       "new": "New:",
       "sends": "It can send what it reads to {{hosts}}.",
       "sendsAny": "It can send what it reads to any site on the internet.",
-      "never": "It can never: run programs, use the app's controls, or read anything you have not chosen.",
+      "never": "Run programs, use the app's controls, or read anything you have not chosen.",
       "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
       "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
       "install": "Install",
@@ -391,7 +399,10 @@
       "paneWider": "{{pane}} can reach more sites",
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
-      "paneRemoved": "{{pane}} is removed (its saved access is dropped)"
+      "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
+      "neverTitle": "It can never",
+      "source": "from {{repo}} · {{sha}} · adds {{count}} pane(s)",
+      "sourceUpdate": "from {{repo}} · {{from}} → {{to}} · {{count}} pane(s)"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -453,6 +464,7 @@
     "env": {
       "found": "This folder has a .env file.",
       "foundNetwork": "This folder has a .env file. This add-on uses the network, so it can't read it."
-    }
+    },
+    "intro": "Add-ons add panes to the app. They can only read what you allow, and you can take it back here."
   }
 }

@@ -266,28 +266,34 @@
     "engineOff": "Add-ons are not available on this computer yet. A safety check did not pass with this system's web engine. Your other features are not affected.",
     "engineReasons": "Reason: {{reasons}}",
     "builtin": {
-      "title": "Built in"
+      "title": "Built in",
+      "source": "内置"
     },
     "installed": {
       "title": "Installed",
       "empty": "No add-ons installed.",
       "checkUpdates": "Check for updates",
-      "remove": "Remove"
+      "remove": "Remove",
+      "doneNotice": "已安装 {{title}}。可从 ＋ 新建 ▸ 附加组件面板 打开。",
+      "updatedNotice": "已更新 {{title}}。",
+      "openNow": "立即打开"
     },
     "install": {
-      "label": "Add-on repository",
-      "placeholder": "owner/repo or owner/repo@ref",
+      "placeholder": "例如 fujibee/agmsg-addon-sample",
       "button": "Install…",
-      "later": "Installing from GitHub isn't available in this build yet."
+      "later": "Installing from GitHub isn't available in this build yet.",
+      "heading": "从 GitHub 安装",
+      "help": "输入 agmsg 附加组件的仓库：owner/repo，或用 owner/repo@tag 固定版本。"
     },
     "openRequests": {
-      "label": "来自 seat 的打开请求",
-      "show": "显示",
       "off": "关闭",
-      "copy": "复制给 seat 的文字",
+      "copy": "复制给智能体的说明",
       "copied": "已复制。",
       "copyFailed": "无法复制。",
-      "copyHint": "把它粘贴给 seat，它就知道如何请求应用打开窗格。"
+      "title": "来自智能体的请求",
+      "explain": "允许你团队中的智能体请求应用打开面板，例如它们工作的 diff。请求会显示在一个栏中；在你点击“打开”之前不会打开任何内容。",
+      "on": "开启",
+      "copyHelp": "智能体需要知道请求的格式。复制后一次性粘贴给它们即可。"
     },
     "developer": {
       "title": "Developer",
@@ -295,7 +301,8 @@
       "loaded": "Developer add-ons",
       "none": "No developer add-ons loaded.",
       "reload": "Reload from folder",
-      "remove": "Remove"
+      "remove": "Remove",
+      "explain": "正在开发自己的附加组件？可以从这台电脑上的文件夹加载。它不会被安装：直接从文件夹运行，重新加载即可应用你的修改。"
     },
     "permission": {
       "none": "Runs with no permissions",
@@ -309,8 +316,7 @@
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke",
-      "none": "No permissions given yet."
+      "revoke": "Revoke"
     },
     "card": {
       "grantAria": "Permission request",
@@ -323,7 +329,10 @@
       "notNow": "Not now",
       "denied": "{{path}} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
       "chooseAnother": "Choose another…",
-      "allowAlwaysLater": "Not available yet"
+      "allowAlwaysLater": "Not available yet",
+      "can": "可以",
+      "allowed": "已允许",
+      "nothingYet": "暂无"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -376,12 +385,11 @@
       "details": "Details",
       "fullSha": "Commit: {{sha}}",
       "archive": "Archive SHA-256: {{hash}}",
-      "panes": "Adds: {{names}}",
-      "canTitle": "This add-on can:",
+      "canTitle": "此附加组件可以",
       "new": "New:",
       "sends": "It can send what it reads to {{hosts}}.",
       "sendsAny": "It can send what it reads to any site on the internet.",
-      "never": "It can never: run programs, use the app's controls, or read anything you have not chosen.",
+      "never": "运行程序、使用应用的控件，或读取你没有选择的任何内容。",
       "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
       "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
       "install": "Install",
@@ -391,7 +399,10 @@
       "paneWider": "{{pane}} can reach more sites",
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
-      "paneRemoved": "{{pane}} is removed (its saved access is dropped)"
+      "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
+      "neverTitle": "它永远不能",
+      "source": "来自 {{repo}} · {{sha}} · 添加 {{count}} 个面板",
+      "sourceUpdate": "来自 {{repo}} · {{from}} → {{to}} · {{count}} 个面板"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -453,6 +464,7 @@
     "env": {
       "found": "此文件夹中有 .env 文件。",
       "foundNetwork": "此文件夹中有 .env 文件。此加载项会使用网络，因此无法读取它。"
-    }
+    },
+    "intro": "附加组件会为应用添加面板。它们只能读取你允许的内容，你可以随时在这里收回。"
   }
 }
