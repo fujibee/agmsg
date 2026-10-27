@@ -55,7 +55,8 @@
     "roomLabel": "# sala da equipe",
     "close": "×",
     "newShell": "Nova aba de shell",
-    "shellLabel": "Shell"
+    "shellLabel": "Shell",
+    "newMenu": "Nova aba ou painel"
   },
   "room": {
     "loadingMore": "Carregando mais…",
@@ -274,7 +275,7 @@
       "empty": "No add-ons installed.",
       "checkUpdates": "Check for updates",
       "remove": "Remove",
-      "doneNotice": "{{title}} foi instalado. Abra em ＋ Novo ▸ Painel de complemento.",
+      "doneNotice": "{{title}} foi instalado. Abra pelo + no topo dos painéis.",
       "updatedNotice": "{{title}} foi atualizado.",
       "openNow": "Abrir agora"
     },
@@ -462,7 +463,7 @@
       "fileView": "File view",
       "diffView": "Diff view",
       "addonPane": "Add-on pane ▸ {{title}}",
-      "install": "Install an add-on…"
+      "install": "Instalar complementos…"
     },
     "listFailed": "Couldn't read the add-on list: {{message}}",
     "listRetry": "Try again",

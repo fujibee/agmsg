@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { AddonsSettings, type InstalledNotice } from "./AddonsSettings";
+import { AddonsSettings, openNowRef, type InstalledNotice } from "./AddonsSettings";
 import type { Catalog } from "./catalog";
 import { collectSavedGrants } from "./collectGrants";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
@@ -164,7 +164,10 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
         onLoadFromFolder={() => void loadFolder()}
         onDevReload={(id) => void loadFolder(devFolders.current.get(id))}
         installedNotice={installedNotice}
-        onOpenNow={(n) => n.paneName !== undefined && props.onOpenPane?.({ addonId: n.addonId, paneName: n.paneName, title: n.title })}
+        onOpenNow={(n) => {
+          const ref = openNowRef(n);
+          if (ref) props.onOpenPane?.(ref);
+        }}
       />
       {progress && <FetchProgressView t={tt} progress={progress} onCancel={cancelFetch} />}
       {staged && <ConfirmInstallDialog t={tt} staged={staged} onCancel={cancelConfirm} onInstall={() => void confirm()} />}

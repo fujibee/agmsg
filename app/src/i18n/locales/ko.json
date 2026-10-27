@@ -55,7 +55,8 @@
     "roomLabel": "# 팀 채팅방",
     "close": "×",
     "newShell": "새 셸 탭",
-    "shellLabel": "셸"
+    "shellLabel": "셸",
+    "newMenu": "새 탭 또는 패널"
   },
   "room": {
     "loadingMore": "더 불러오는 중…",
@@ -274,7 +275,7 @@
       "empty": "No add-ons installed.",
       "checkUpdates": "Check for updates",
       "remove": "Remove",
-      "doneNotice": "{{title}} 설치를 마쳤습니다. ＋ 새로 만들기 ▸ 애드온 패널에서 여세요.",
+      "doneNotice": "{{title}} 설치를 마쳤습니다. 패널 위쪽의 +에서 여세요.",
       "updatedNotice": "{{title}} 업데이트를 마쳤습니다.",
       "openNow": "지금 열기"
     },
@@ -458,7 +459,7 @@
       "fileView": "File view",
       "diffView": "Diff view",
       "addonPane": "Add-on pane ▸ {{title}}",
-      "install": "Install an add-on…"
+      "install": "애드온 설치…"
     },
     "listFailed": "Couldn't read the add-on list: {{message}}",
     "listRetry": "Try again",

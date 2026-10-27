@@ -643,6 +643,8 @@ export function stepFontSize(
 }
 
 export function SettingsModal(props: {
+  /** The tab shown first; "Install add-ons…" in the + menu opens it on Add-ons. */
+  initialTab?: "general" | "addons";
   onClose: () => void;
   terminalFontSize: number;
   onTerminalFontSizeChange: (size: number) => void;
@@ -701,7 +703,7 @@ export function SettingsModal(props: {
     // timezoneText/props.timezone are read via closure, not deps, so this
     // doesn't re-fire on every keystroke or timezone change.
   }, [autoLabel]);
-  const [tab, setTab] = useState<"general" | "addons">("general");
+  const [tab, setTab] = useState<"general" | "addons">(props.initialTab ?? "general");
   return (
     <Modal title={t("modal.settings.title")} onClose={props.onClose} wide>
       <div className="settings-tabs" role="tablist">

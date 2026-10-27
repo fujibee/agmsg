@@ -197,8 +197,8 @@ select:focus {
   border-color: var(--accent);
 }
 
-/* + New menu (collapsed-rail only — the expanded sidebar has its own
-   direct + buttons per section instead, see .section-add-btn) */
+/* ＋ New menu: the collapsed rail's +, the expanded sidebar's ＋ New ▾ and the tab bar's ▾
+   (one component, NewMenu.tsx). The sidebar sections also keep their own direct + buttons. */
 .new-wrap {
   position: relative;
 }
@@ -227,10 +227,21 @@ select:focus {
 .new-menu button:hover {
   background: var(--bg);
 }
+.new-menu button:focus-visible {
+  background: var(--bg);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
 .new-menu button:disabled {
   opacity: 0.4;
   cursor: default;
 }
+.new-menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 0;
+}
+.new-menu-tabs { min-width: 200px; }
 
 /* Right-click context menus (member row: Spawn/Rename/Leave; pane header:
    Close/Move to). overflow is visible (not hidden) so the Move-to submenu can

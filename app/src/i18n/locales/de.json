@@ -55,7 +55,8 @@
     "roomLabel": "# Team-Room",
     "close": "×",
     "newShell": "Neuer Shell-Tab",
-    "shellLabel": "Shell"
+    "shellLabel": "Shell",
+    "newMenu": "Neuer Tab oder Pane"
   },
   "room": {
     "loadingMore": "Weitere werden geladen…",
@@ -274,7 +275,7 @@
       "empty": "No add-ons installed.",
       "checkUpdates": "Check for updates",
       "remove": "Remove",
-      "doneNotice": "{{title}} wurde installiert. Öffne es über ＋ Neu ▸ Add-on-Pane.",
+      "doneNotice": "{{title}} wurde installiert. Öffne es über das + oben bei den Panes.",
       "updatedNotice": "{{title}} wurde aktualisiert.",
       "openNow": "Jetzt öffnen"
     },
@@ -460,7 +461,7 @@
       "fileView": "File view",
       "diffView": "Diff view",
       "addonPane": "Add-on pane ▸ {{title}}",
-      "install": "Install an add-on…"
+      "install": "Add-ons installieren…"
     },
     "listFailed": "Couldn't read the add-on list: {{message}}",
     "listRetry": "Try again",

@@ -55,7 +55,8 @@
     "roomLabel": "# チームルーム",
     "close": "×",
     "newShell": "新規シェルタブ",
-    "shellLabel": "シェル"
+    "shellLabel": "シェル",
+    "newMenu": "新しいタブ / ペイン"
   },
   "room": {
     "loadingMore": "さらに読み込み中…",
@@ -274,7 +275,7 @@
       "empty": "インストール済みのアドオンはありません。",
       "checkUpdates": "更新を確認",
       "remove": "削除",
-      "doneNotice": "{{title}} をインストールしました。＋ 新規 ▸ アドオンペイン から開けます。",
+      "doneNotice": "{{title}} をインストールしました。ペイン上部の + から開けます。",
       "updatedNotice": "{{title}} を更新しました。",
       "openNow": "今すぐ開く"
     },

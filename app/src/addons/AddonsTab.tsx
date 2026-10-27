@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AddonsSettings, type InstalledNotice } from "./AddonsSettings";
+import { AddonsSettings, openNowRef, type InstalledNotice } from "./AddonsSettings";
 import { AddonsTabLive } from "./AddonsTabLive";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
 import type { Catalog } from "./catalog";
@@ -83,7 +83,10 @@ function MockAddonsTab(props: { catalog: Catalog; onOpenPane?: (ref: AddonPaneRe
         onOpenRequestsChange={(v) => setSnapshot((s) => ({ ...s, openRequests: v }))}
         onLoadFromFolder={() => {}}
         installedNotice={installedNotice}
-        onOpenNow={(n) => n.paneName !== undefined && props.onOpenPane?.({ addonId: n.addonId, paneName: n.paneName, title: n.title })}
+        onOpenNow={(n) => {
+          const ref = openNowRef(n);
+          if (ref) props.onOpenPane?.(ref);
+        }}
       />
       {progress && <FetchProgressView t={tt} progress={progress} onCancel={cancelFetch} />}
       {staged && (

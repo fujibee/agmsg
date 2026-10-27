@@ -55,7 +55,8 @@
     "roomLabel": "# 团队聊天室",
     "close": "×",
     "newShell": "新建 Shell 标签",
-    "shellLabel": "Shell"
+    "shellLabel": "Shell",
+    "newMenu": "新建标签页或面板"
   },
   "room": {
     "loadingMore": "正在加载更多…",
@@ -274,7 +275,7 @@
       "empty": "No add-ons installed.",
       "checkUpdates": "Check for updates",
       "remove": "Remove",
-      "doneNotice": "已安装 {{title}}。可从 ＋ 新建 ▸ 附加组件面板 打开。",
+      "doneNotice": "已安装 {{title}}。可从面板顶部的 + 打开。",
       "updatedNotice": "已更新 {{title}}。",
       "openNow": "立即打开"
     },
@@ -458,7 +459,7 @@
       "fileView": "File view",
       "diffView": "Diff view",
       "addonPane": "Add-on pane ▸ {{title}}",
-      "install": "Install an add-on…"
+      "install": "安装附加组件…"
     },
     "listFailed": "Couldn't read the add-on list: {{message}}",
     "listRetry": "Try again",

@@ -13,6 +13,9 @@ import { declaredPermissions, addonNetwork, grantText, grantsOf, installErrorTex
 /** What the green notice after an install or update says, and what "Open now" opens. */
 export type InstalledNotice = { kind: "installed" | "updated"; addonId: string; title: string; paneName?: string };
 
+/** What "Open now" opens: the first pane of the add-on just installed, or nothing when it declared none. */
+export const openNowRef = (n: InstalledNotice) => (n.paneName === undefined ? null : { addonId: n.addonId, paneName: n.paneName, title: n.title });
+
 type Props = {
   t: Translate;
   snapshot: AddonsSnapshot;
