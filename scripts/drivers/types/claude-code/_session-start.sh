@@ -139,18 +139,29 @@ EOF
   # share a bare sid (same hazard class as #1568) can never both end up
   # "owning" the same pair, while a real --resume (new pid, old pid now
   # dead) correctly reclaims.
-  local publish_result
-  if publish_result="$(agmsg_claude_code_native_publish_seat "$pair_team" "$pair_agent" "$my_instance" "${PROJECT:-}" "${TYPE:-}" "$socket" "$config_dir" "${CLAUDE_CODE_MESSAGING_TOKEN:-}")"; then
+  local claim_result
+  claim_result="$(actas_lock_claim "$pair_team" "$pair_agent" "$my_instance" 2>/dev/null || true)"
+  [ -n "$claim_result" ] || claim_result="unknown:claim_failed"
+  if [ "$claim_result" != ok ]; then
+    echo "AGMSG delivery: agmsgd is running, but seat $pair_agent@$pair_team could not be claimed ($claim_result), so the native channel is not used. Next: arm the Monitor below."
+    return 0
+  fi
+
+  # Write, then read back: this is the SAME check the daemon itself applies
+  # (a published messaging_socket) before it addresses this seat. Verify
+  # the published destination rather than assuming the write succeeded.
+  # Only now, holding the lock, may a missing record be created: an existing
+  # record belongs to whoever it names, and the claim above is what shows the
+  # seat is ours.
+  if [ -z "$(agmsg_role_session_get "$pair_team" "$pair_agent" type 2>/dev/null || true)" ]; then
+    agmsg_role_session_record "$pair_team" "$pair_agent" "$bare_sid" \
+      "$(agmsg_canonical_path "${PROJECT:-}" 2>/dev/null || printf '%s' "${PROJECT:-}")" "${TYPE:-}" "$my_instance"
+  fi
+  if agmsg_role_session_publish_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid" "${CLAUDE_CODE_MESSAGING_TOKEN:-}"; then
     cat <<EOF
 AGMSG delivery: agmsgd is running and will deliver to this session directly (native channel). No Monitor needed.
 EOF
     exit 0
   fi
-  case "$publish_result" in
-    claim:*)
-      echo "AGMSG delivery: agmsgd is running, but seat $pair_agent@$pair_team could not be claimed (${publish_result#claim:}), so the native channel is not used. Next: arm the Monitor below."
-      return 0
-      ;;
-  esac
   echo "AGMSG delivery: agmsgd is running, but the delivery record for $pair_agent@$pair_team did not take, so the native channel is not used. Next: arm the Monitor below, then run agmsg doctor."
 }

@@ -606,39 +606,6 @@ agmsg_role_session_publish_messaging() {   # <team> <agent> <socket> <config_dir
     && [ "$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)" = "$bare_sid" ]
 }
 
-# Take <team>/<agent> for this session and publish its messaging destination:
-# the claim (the write gate), the record when none exists yet, then the publish
-# with its read-back. Shared by the SessionStart plug and by a running Monitor
-# watch moving over to the native channel (#1807), so both follow one order.
-# The caller has already checked every other precondition (agmsgd ready, usable
-# storage, a destination, the seat chosen) BEFORE this touches a lock.
-# rc 0 = published; rc 1 prints "claim:<result>" or "publish_failed".
-agmsg_claude_code_native_publish_seat() {   # <team> <agent> <instance> <project> <type> <socket> <config_dir> [<token>]
-  local team="$1" agent="$2" instance="$3" project="$4" type="$5" socket="$6" config_dir="$7" token="${8:-}"
-  local bare_sid claim_result
-  bare_sid="$(agmsg_instance_bare_sid "$instance" 2>/dev/null || true)"
-  [ -n "$bare_sid" ] || { echo "publish_failed"; return 1; }
-  if ! command -v actas_lock_claim >/dev/null 2>&1; then
-    # shellcheck disable=SC1091
-    . "${SKILL_DIR:-}/scripts/lib/actas-lock.sh"
-  fi
-  claim_result="$(actas_lock_claim "$team" "$agent" "$instance" 2>/dev/null || true)"
-  [ -n "$claim_result" ] || claim_result="unknown:claim_failed"
-  if [ "$claim_result" != ok ]; then
-    echo "claim:$claim_result"
-    return 1
-  fi
-  if [ -z "$(agmsg_role_session_get "$team" "$agent" type 2>/dev/null || true)" ]; then
-    agmsg_role_session_record "$team" "$agent" "$bare_sid" \
-      "$(agmsg_canonical_path "$project" 2>/dev/null || printf '%s' "$project")" "$type" "$instance"
-  fi
-  if agmsg_role_session_publish_messaging "$team" "$agent" "$socket" "$config_dir" "$bare_sid" "$token"; then
-    return 0
-  fi
-  echo "publish_failed"
-  return 1
-}
-
 # rc 0 only when agmsgd's Claude channel will accept this install's storage.
 # The answer comes from the daemon's own reader (storage-gate.mjs calls
 # readStorageDriver), run with the node the daemon itself runs on (the

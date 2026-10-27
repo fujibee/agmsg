@@ -1282,47 +1282,10 @@ _agmsg_watch_native_delivery_active() {
   [ "$_any" -eq 1 ]
 }
 
-# A session that armed this watch while agmsgd was down never runs SessionStart
-# again, so nothing publishes its messaging destination once agmsgd is back, and
-# the watch re-arms itself forever (#1807). This watch runs in the session's own
-# environment and can read CLAUDE_CODE_MESSAGING_SOCKET, so at renewal it
-# publishes the destination the way the SessionStart plug does (the same shared
-# function, the same order: every other precondition first, the seat lock last).
-# rc 0 only when every pair of this watch now has a verified destination.
-_agmsg_watch_try_native_handover() {
-  [ "$AGENT_TYPE" = claude-code ] && [ -n "$ACTIVE_NAME" ] || return 1
-  declare -F agmsg_claude_code_native_target >/dev/null 2>&1 || return 1
-  declare -F agmsg_claude_code_native_publish_seat >/dev/null 2>&1 || return 1
-  # shellcheck disable=SC1091
-  declare -F agmsg_daemon_read_state >/dev/null 2>&1 \
-    || { [ -r "$SCRIPT_DIR/lib/daemon-state.sh" ] && . "$SCRIPT_DIR/lib/daemon-state.sh"; } \
-    || return 1
-  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON target socket config_dir
-  target="$(agmsg_claude_code_native_target)" || return 1
-  socket="${target%%$'\t'*}"
-  config_dir="${target#*$'\t'}"
-  agmsg_daemon_read_state
-  agmsg_daemon_apply_project_choice claude-code "$PROJECT_PATH"
-  [ "${AGMSGD_DESIRED:-}" = on ] && [ "${AGMSGD_HEALTH:-}" = ready ] || return 1
-  declare -F _agmsg_detect_platform >/dev/null 2>&1 && _agmsg_detect_platform
-  declare -F agmsg_claude_code_native_storage_ready >/dev/null 2>&1 || return 1
-  agmsg_claude_code_native_storage_ready || return 1
-  # An instance id without a process id cannot hold the seat's lock.
-  agmsg_instance_is_composite "$SESSION_ID" || return 1
-  local _team _agent _any=0
-  while IFS=$'\t' read -r _team _agent; do
-    [ -z "$_team" ] && continue
-    _any=1
-    agmsg_claude_code_native_publish_seat "$_team" "$_agent" "$SESSION_ID" "$PROJECT_PATH" "$AGENT_TYPE" \
-      "$socket" "$config_dir" "${CLAUDE_CODE_MESSAGING_TOKEN:-}" >/dev/null || return 1
-  done <<< "$PAIRS"
-  [ "$_any" -eq 1 ]
-}
-
 _watch_renew_or_stop() {
   local elapsed=$((SECONDS + _WATCH_ELAPSED_BASE)) cmd desc arg
   [ "$elapsed" -ge "$WATCH_MAX_SECONDS" ] || return 0
-  if _agmsg_watch_native_delivery_active || { _agmsg_watch_try_native_handover && _agmsg_watch_native_delivery_active; }; then
+  if _agmsg_watch_native_delivery_active; then
     watch_report "stopping - this seat's delivery has moved to agmsgd's native channel, so this watch is not re-armed"
     exit 0
   fi
