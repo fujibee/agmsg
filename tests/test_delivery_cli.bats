@@ -38,13 +38,14 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   grep -Fq "delivery" <<<"$output"
 }
 
-@test "delivery status: agmsgd on shows the install state and the project's fallback as monitor (legacy)" {
+@test "delivery status: agmsgd on shows the install state and no fallback (#1810)" {
   _mark_daemon_ready
   bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJECT" >/dev/null
   run bash "$SCRIPTS/agmsg" delivery status --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
   grep -Fq "delivery: agmsgd (on) — notices are delivered directly" <<<"$output"
-  grep -Fq "this project's fallback: monitor (legacy)" <<<"$output"
+  grep -Fq "this project: agmsgd — no Monitor is armed here" <<<"$output"
+  refute grep -Fq "fallback" <<<"$output"
 }
 
 @test "delivery status: agmsgd off but available says how to turn it on; no arguments mean status" {
@@ -69,10 +70,9 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   _mark_daemon_ready
   run bash "$SCRIPTS/agmsg" delivery agmsgd --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
-  # The explanation comes before the Monitor instruction, which stays.
-  explain="$(grep -n "keeps receiving through a Monitor watch until it restarts or runs actas; agmsgd can take over once it confirms this session's destination" <<<"$output" | head -1 | cut -d: -f1)"
-  directive="$(grep -n "AGMSG-DIRECTIVE" <<<"$output" | head -1 | cut -d: -f1)"
-  [ -n "$explain" ] && [ -n "$directive" ] && [ "$explain" -lt "$directive" ]
+  # No Monitor instruction: the project receives through agmsgd only (#1810).
+  grep -Fq "agmsgd delivers to this project. This session moves to it when it restarts or runs actas; no Monitor is armed for it." <<<"$output"
+  refute grep -Fq "AGMSG-DIRECTIVE" <<<"$output"
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
   grep -Fq "mode: monitor" <<<"$output"
 }
@@ -100,7 +100,8 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   [ "$status" -eq 0 ]
   [ "$(grep -c . "$TEST_SKILL_DIR/run/delivery-choice")" -eq 1 ]
   run bash "$SCRIPTS/agmsg" delivery status --type claude-code --project "$PROJECT"
-  grep -Fq "this project's fallback: monitor (legacy)" <<<"$output"
+  grep -Fq "this project: agmsgd — no Monitor is armed here" <<<"$output"
+  refute grep -Fq "fallback" <<<"$output"
 }
 
 @test "delivery choice: a project that never chose is untouched; agmsgd and other choices apply to their own project only" {
