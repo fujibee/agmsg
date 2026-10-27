@@ -87,7 +87,7 @@ _agmsg_pid_valid() {
   # DWORD, and the liveness path there queries the native process table via
   # tasklist rather than kill(1)'s signed pid_t — applying the POSIX bound to it
   # would call a legitimate native pid dead and its live watcher stale.
-  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) max=4294967295 ;; esac
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|UCRT*|CLANG*) max=4294967295 ;; esac
   # And it has to fit whichever of those the platform uses. The POSIX ceiling is
   # what makes the rest of this library safe: past INT32_MAX, kill(1) rejects the
   # ARGUMENT ("not a pid or valid job spec") rather than reporting ESRCH — and
@@ -312,7 +312,7 @@ _agmsg_pid_alive() {
   local pid="$1"
   _agmsg_pid_valid "$pid" || return 1
   case "${MSYSTEM:-}" in
-    MINGW*|MSYS*|CLANGARM*)
+    MINGW*|MSYS*|UCRT*|CLANG*)
       MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $pid" 2>/dev/null | grep -q "$pid"
       return $?
       ;;

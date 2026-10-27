@@ -47,8 +47,14 @@ export function classify({ owner, intent, alive, reachable, lastAttempt }, now =
       (owner.state === "ready" ? "executor or control socket unavailable" : owner.state);
     const detail = owner.last_end_reason === "bind_failed" ? "failed to start" :
       owner.last_end_reason === "stepped_aside_for_update" ? "stopped for an update; the new version has not started yet" : "stopped";
+    // A digest mismatch means the installed files and the completion record
+    // disagree -- restarting with the same files only fails again. Only
+    // install.sh --update (or the npx installer) writes a fresh record.
+    const advice = /digest/i.test(reason)
+      ? "Run install.sh --update (or npx agmsg@latest install --update), then agmsg daemon start."
+      : "Run agmsg daemon start (recommended), or agmsg daemon disable and restart Codex.";
     return {
-      text: `agmsgd is ${detail} (intent is on; reason: ${reason}${owner.state === "ready" && !reachable ? "; does not answer on its control socket" : ""}). Run agmsg daemon start (recommended), or agmsg daemon disable and restart Codex. Unread messages are preserved.`,
+      text: `agmsgd is ${detail} (intent is on; reason: ${reason}${owner.state === "ready" && !reachable ? "; does not answer on its control socket" : ""}). ${advice} Unread messages are preserved.`,
       exitCode: 1,
       gen: owner.gen,
     };
@@ -233,7 +239,7 @@ async function main() {
   const pollTimeout = readPollTimeout(installRoot);
   const pollText = pollTimeout ? `Last poll timeout: ${pollTimeout.channel ?? 'unknown'} ${pollTimeout.seat ?? ''} ${pollTimeout.reason} (${pollTimeout.at ?? 'unknown time'})\n` : '';
   process.stdout.write(
-    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${pollText}${formatClaudeSeats(claudeCodeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
+    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${pollText}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
   );
   process.exitCode = result.exitCode;
 }
@@ -257,10 +263,25 @@ function formatUnregisteredPending(installRoot, pending, all) {
   return text;
 }
 
+// A team skipped because its roster entry is unusable is stored as a
+// team-level row (agent ""); it is always shown, never folded into "hidden".
+function formatSkippedTeams(label, inventory) {
+  let text = "";
+  for (const seat of inventory?.seats ?? []) {
+    let parsed;
+    try { parsed = JSON.parse(seat.seat); } catch { continue; }
+    if (Array.isArray(parsed) && parsed[1] === "" && /^team_roster_/.test(seat.reason ?? "")) {
+      text += `${label} team ${parsed[0]}: skipped (${seat.reason}); other teams are unaffected\n`;
+    }
+  }
+  return text;
+}
+
 function formatClaudeSeats(inventory, all) {
   let omitted = 0;
   const lines = [];
   for (const seat of inventory?.seats ?? []) {
+    if (/^team_roster_/.test(seat.reason ?? "") && seat.seat.endsWith(',""]')) continue;
     const chosen = /^delivery_chosen_([a-z]+)$/.exec(seat.reason ?? "")?.[1];
     if (chosen) {
       let label;

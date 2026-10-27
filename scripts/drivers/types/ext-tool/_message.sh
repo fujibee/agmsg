@@ -41,7 +41,7 @@ agmsg_type_on_message() {
       # check as every other path built from a tool name (lib/validate.sh),
       # not just the existence check below.
       fail_reason="its config names an invalid tool '$tool_name'"
-    elif [ ! -x "$SCRIPT_DIR/drivers/ext-tools/$tool_name/handle" ]; then
+    elif ! { . "$SCRIPT_DIR/lib/driver-registry.sh"; _td="$(agmsg_ext_tool_dir "$tool_name" 2>/dev/null)" && [ -x "$_td/handle" ]; }; then
       fail_reason="unknown tool '$tool_name'"
     fi
   fi

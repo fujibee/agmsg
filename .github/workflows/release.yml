@@ -72,6 +72,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          check-latest: true
         # Intentionally NOT setting `registry-url` — that injects a
         # `_authToken=${NODE_AUTH_TOKEN}` line into a generated .npmrc and
         # sets NODE_AUTH_TOKEN to a placeholder. npm then sees a non-empty

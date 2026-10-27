@@ -41,6 +41,23 @@ teardown() {
   grep -Fq -- "agmsg daemon start|stop|status|enable|disable" <<<"$output"
 }
 
+@test "agmsg: plugin reaches plugin.sh with the arguments unchanged and is in the usage (#1594)" {
+  run bash "$AGMSG" plugin bogus
+  [ "$status" -eq 1 ]
+  grep -Fq -- "agmsg plugin list|trust <ref>" <<<"$output"
+
+  run bash "$AGMSG" plugin list
+  [ "$status" -eq 0 ]
+  grep -Eq -- "builtin" <<<"$output"
+
+  run bash "$AGMSG" plugin install
+  [ "$status" -eq 1 ]
+  grep -Fq -- "agmsg plugin install <owner>/<repo>" <<<"$output"
+
+  run bash "$AGMSG" help
+  grep -Fq -- "plugin list|install|update|remove|trust|untrust" <<<"$output"
+}
+
 @test "launcher: placed into the chosen dir, reaches the runtime, and uninstall removes only that" {
   run bash -c 'source "$1"; agmsg_launcher_install "$2"' _ "$LIB" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]

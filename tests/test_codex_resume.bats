@@ -118,6 +118,16 @@ recorded_uuid() {
   SKILL_DIR="$SKILL_DIR" bash -c 'source "$1/scripts/lib/role-session.sh"; agmsg_role_session_record team alice t0 "$2" codex "t0.$3"' _ "$SKILL_DIR" "$proj" "$dead"
   MSYSTEM=MINGW64 CODEX_THREAD_ID="t3" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
   [ "$(agmsg_role_session_get team alice owner)" = "t0.$dead" ]
+
+  # Same thing under UCRT64 and CLANG64 (#1752): Git for Windows 2.56 defaults
+  # new MSYS2 installs to MSYSTEM=UCRT64, which is neither MINGW* nor MSYS*,
+  # so this guard used to fall through and (wrongly) treat the host as
+  # non-Git-Bash, asking kill(2) about a pid it has no business reading.
+  for sys in UCRT64 CLANG64; do
+    SKILL_DIR="$SKILL_DIR" bash -c 'source "$1/scripts/lib/role-session.sh"; agmsg_role_session_record team alice t0 "$2" codex "t0.$3"' _ "$SKILL_DIR" "$proj" "$dead"
+    MSYSTEM="$sys" CODEX_THREAD_ID="t4-$sys" bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+    [ "$(agmsg_role_session_get team alice owner)" = "t0.$dead" ]
+  done
 }
 
 @test "codex record: adds the effective profile path without changing the thread" {

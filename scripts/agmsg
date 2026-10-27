@@ -16,6 +16,7 @@ commands:
     status --all                           include older destination records
     status --json                          machine-readable status
   delivery [status|agmsgd|monitor|turn|both|off]   how messages reach this agent
+  plugin list|install|update|remove|trust|untrust   manage plugin drivers
   --version                                 print the installed version
   help                                      show this message
 
@@ -31,6 +32,10 @@ case "${1:-}" in
   delivery)
     shift
     exec bash "$SCRIPT_DIR/delivery-cli.sh" "$@"
+    ;;
+  plugin)
+    shift
+    exec bash "$SCRIPT_DIR/plugin.sh" "$@"
     ;;
   --version|-v)
     printf 'agmsg %s (install: %s)\n' "$(bash "$SCRIPT_DIR/version.sh")" "$(cd "$SCRIPT_DIR/.." && pwd)"

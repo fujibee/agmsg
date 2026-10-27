@@ -43,23 +43,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/driver-registry.sh"
 
 _ext_tool_available() {
-  local dir name found=""
-  for dir in "$SCRIPT_DIR"/drivers/ext-tools/*/; do
-    [ -f "${dir}tool.conf" ] || continue
-    name="$(basename "$dir")"
-    found="${found:+$found, }$name"
-  done
-  printf '%s' "${found:-none}"
+  agmsg_ext_tool_available
 }
 
 # Echoes the tool's driver directory, or refuses and exits.
 _ext_tool_dir() {
   local tool="$1" dir
   agmsg_validate_tool_name "$tool" || exit 1
-  dir="$SCRIPT_DIR/drivers/ext-tools/$tool"
-  if [ ! -f "$dir/tool.conf" ]; then
+  if ! dir="$(agmsg_ext_tool_dir "$tool")"; then
     echo "Unknown ext-tool: '$tool' (available: $(_ext_tool_available))" >&2
     exit 1
   fi
@@ -106,6 +101,27 @@ cmd_setup() {
   dir="$(_ext_tool_dir "$tool")"
   config_path="$(_ext_tool_config_path "$team" "$name")"
   mkdir -p "$(dirname "$config_path")"
+
+  # A tool with no `setup` has nothing to configure; join writes its member
+  # config by itself. Answer the generic steps instead of failing on a missing
+  # file, so a seat that walks status/save first still lands in the same place.
+  if [ ! -e "$dir/setup" ]; then
+    case "$sub" in
+      status)
+        printf '{"missing":[],"setup":"none"}\n'
+        exit 0
+        ;;
+      save)
+        ( umask 077; printf 'tool=%s\n' "$tool" > "$config_path" )
+        printf '{"ok":true,"config_path":"%s"}\n' "$config_path"
+        exit 0
+        ;;
+      *)
+        echo "agmsg: '$tool' has no setup: it needs no settings. Join it directly: bash \"$SCRIPT_DIR/join.sh\" $team $name ext-tool --tool $tool" >&2
+        exit 1
+        ;;
+    esac
+  fi
 
   case "$sub" in
     save)

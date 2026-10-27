@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -351,6 +351,13 @@ test('Windows queue requires a native executable and a stable release at or abov
   writeFileSync(path.join(npmRoot, 'codex.cmd'), 'fixture shim, never executed');
   writeFileSync(path.join(vendor, 'codex.exe'), 'fixture native binary, never executed');
   assert.equal(resolveWindowsCodexExe('codex', { Path: npmRoot }, 'x64'), path.join(vendor, 'codex.exe'));
+  // enable records npm's extensionless shim by absolute path; it resolves like the bare name.
+  assert.equal(resolveWindowsCodexExe(path.join(npmRoot, 'codex'), {}, 'x64'), path.join(vendor, 'codex.exe'), 'an absolute shim falls through to the vendor exe');
+  writeFileSync(path.join(npmRoot, 'codex.exe'), 'fixture native binary beside the shim');
+  assert.equal(resolveWindowsCodexExe(path.join(npmRoot, 'codex'), {}, 'x64'), path.join(npmRoot, 'codex.exe'), 'codex.exe beside the shim wins');
+  assert.equal(resolveWindowsCodexExe(path.join(root, 'other', 'codex'), {}, 'x64'), null, 'a shim with no native exe near it stays unresolved');
+  assert.equal(resolveWindowsCodexExe(path.join(npmRoot, 'codex-other'), {}, 'x64'), null, 'only a codex-named file is expanded');
+  rmSync(path.join(npmRoot, 'codex.exe'));
   const probe = (file, args, options) => {
     assert.equal(file, nativeExe);
     assert.deepEqual(args, ['--version']);
@@ -662,6 +669,38 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   await bridgedChannel.pollOnce();
   assert.equal(installDb.prepare("SELECT state FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice'])).state, 'bridged');
   await bridgedChannel.stop();
+  const leaseFile = path.join(runDir, `codex-bridge-lease.${bridgePid}`);
+  const goodLease = readFileSync(leaseFile, 'utf8');
+  const seatStateAfter = async (lease) => {
+    writeFileSync(leaseFile, lease);
+    const channel = createCodexQueueChannel({
+      db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: storageDir },
+      queue: async () => ({ kind: 'failed', started: false, reason: 'spawn_failed:test' }),
+    });
+    await channel.pollOnce();
+    await channel.stop();
+    return installDb.prepare("SELECT state, reason FROM beta_codex_seat WHERE seat = ?").get(JSON.stringify(['alpha', 'alice']));
+  };
+  const reusedPairs = await seatStateAfter(goodLease.replace(/^pairs=.*$/m, `pairs=${'0'.repeat(40)}`));
+  assert.notEqual(reusedPairs.state, 'bridged', 'a live PID whose lease names another bridge is not this seat\'s bridge');
+  assert.doesNotMatch(reusedPairs.reason, /^bridge_state_unknown/, 'a lease that says the process is not ours is a stopped bridge, not an unknown one');
+  const reusedStart = await seatStateAfter(goodLease.replace(/^start=.*$/m, 'start=1'));
+  assert.notEqual(reusedStart.state, 'bridged', 'a live PID with a different start token is a reused PID');
+  assert.doesNotMatch(reusedStart.reason, /^bridge_state_unknown/);
+  const damaged = await seatStateAfter(goodLease.replace(/^host=.*\n/m, ''));
+  assert.match(damaged.reason, /^bridge_state_unknown/, 'a lease with missing fields stays unknown');
+  const brokenValues = await seatStateAfter(goodLease.replace(/^project=.*$/m, 'project=broken').replace(/^startsrc=.*$/m, 'startsrc=broken'));
+  assert.match(brokenValues.reason, /^bridge_state_unknown/, 'a lease with malformed values is damaged, not a mismatch');
+  const realKill = process.kill;
+  process.kill = (pid, signal) => {
+    if (pid === process.pid && signal === 0) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+    return realKill(pid, signal);
+  };
+  try {
+    const refused = await seatStateAfter(goodLease);
+    assert.equal(refused.state, 'bridged', 'a probe refused with EPERM is not proof of a reused PID; a verified lease still holds the seat');
+  } finally { process.kill = realKill; }
+  writeFileSync(leaseFile, goodLease);
   unlinkSync(`${bridgeBase}.pid`);
   unlinkSync(`${bridgeBase}.meta`);
   unlinkSync(path.join(runDir, `codex-bridge-lease.${bridgePid}`));
@@ -929,4 +968,44 @@ test('a channel cutoff resumes after the interrupted seat on the next cycle', as
   await pollChannelHooks([channel], () => {}, { timeoutMs: 15, installRoot: options.installRoot });
   assert.equal(sends, 1);
   await channel.stop();
+});
+
+test('one unusable team is skipped alone: the other teams are still polled and the reason is shown', async (t) => {
+  const root = temporaryDirectory(t);
+  const runDir = path.join(root, 'run');
+  mkdirSync(runDir, { recursive: true });
+  const seat = (name) => ({ agents: { [name]: { registrations: [{ type: 'codex', project: root }] } } });
+  for (const team of ['one', 'two', 'broken', 'linked']) mkdirSync(path.join(root, 'teams', team), { recursive: true });
+  writeFileSync(path.join(root, 'teams', 'one', 'config.json'), JSON.stringify(seat('alice')));
+  writeFileSync(path.join(root, 'teams', 'two', 'config.json'), JSON.stringify(seat('bob')));
+  writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), '{ not json');
+  writeFileSync(path.join(root, 'elsewhere.json'), JSON.stringify(seat('carol')));
+  symlinkSync(path.join(root, 'elsewhere.json'), path.join(root, 'teams', 'linked', 'config.json'));
+  const installDb = openInstallDb(path.join(runDir, 'install.db'));
+  t.after(() => installDb.close());
+  ensureCodexChannelSchema(installDb);
+  installDb.exec("UPDATE daemon_intent SET desired='on', op_gen=4");
+  const logs = [];
+  const channel = createCodexQueueChannel({
+    db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: root },
+    readDriver: () => ({ state: 'ok', driver: 'sqlite' }), log: (line) => logs.push(line),
+  });
+  await channel.pollOnce();
+  await channel.pollOnce();
+  const rows = readOwnerAndIntentReadOnly(root).codexSeats.seats.map((row) => ({ seat: JSON.parse(row.seat), reason: row.reason }));
+  assert.ok(rows.some(({ seat }) => seat[0] === 'one' && seat[1] === 'alice'), 'team one is still polled');
+  assert.ok(rows.some(({ seat }) => seat[0] === 'two' && seat[1] === 'bob'), 'team two is still polled');
+  assert.equal(rows.find(({ seat }) => seat[0] === 'broken' && seat[1] === '')?.reason, 'team_roster_malformed');
+  assert.equal(rows.find(({ seat }) => seat[0] === 'linked' && seat[1] === '')?.reason, 'team_roster_symlink');
+  assert.equal(logs.filter((line) => /roster for team broken skipped/.test(line)).length, 1, 'logged when it first appears, not every poll');
+  await channel.stop();
+  writeFileSync(path.join(root, 'teams', 'broken', 'config.json'), JSON.stringify(seat('dave')));
+  const restarted = createCodexQueueChannel({
+    db: installDb, installRoot: root, expectedOpGen: 4, env: { AGMSG_STORAGE_PATH: root },
+    readDriver: () => ({ state: 'ok', driver: 'sqlite' }), log: () => {},
+  });
+  await restarted.pollOnce();
+  const after = readOwnerAndIntentReadOnly(root).codexSeats.seats.map((row) => JSON.parse(row.seat));
+  assert.equal(after.some((seat) => seat[0] === 'broken' && seat[1] === ''), false, 'the reason goes away once the team is readable, even across a restart');
+  await restarted.stop();
 });

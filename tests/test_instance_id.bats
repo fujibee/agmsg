@@ -773,6 +773,22 @@ require_eperm_pid() {
   run _agmsg_pid_valid 4294967295; [ "$status" -ne 0 ]
 }
 
+@test "instance-id: the DWORD ceiling also applies under UCRT64 and CLANG64 (#1752)" {
+  # Git for Windows 2.56 defaults new MSYS2 installs to MSYSTEM=UCRT64, and
+  # CLANG64 is another live MSYS2 environment -- neither is MINGW*/MSYS*, so
+  # a pattern that only names those two silently falls back to the POSIX
+  # pid_t ceiling on exactly the hosts #1752 was filed about.
+  for sys in UCRT64 CLANG64 CLANGARM64; do
+    run env MSYSTEM="$sys" bash -c \
+      'SKILL_DIR="'"$SKILL_DIR"'"; . "$SKILL_DIR/scripts/lib/instance-id.sh"
+       _agmsg_pid_valid 2147483648 || exit 1
+       _agmsg_pid_valid 4294967295 || exit 2
+       _agmsg_pid_valid 4294967296 && exit 3
+       exit 0'
+    [ "$status" -eq 0 ]
+  done
+}
+
 @test "instance-id: liveness answers alive on the builtin, before any subshell" {
   # The launcher polls liveness in loops that were deliberately made fork-free
   # (#466/#496). Routing them through a helper is only acceptable while the
@@ -811,6 +827,23 @@ require_eperm_pid() {
   # The counterpart, pinned so the split is not a distinction without a
   # difference: the same live pid reads as dead through the plain helper.
   ! MSYSTEM=MINGW64 PATH="$stub:$PATH" _agmsg_pid_alive $$
+}
+
+@test "pid_alive: UCRT64 and CLANG64 also route through tasklist, not kill -0 (#1752)" {
+  skip_on_windows "stubs tasklist; the real one is authoritative on Windows"
+  local stub="$BATS_TEST_TMPDIR/stub-bin"
+  mkdir -p "$stub"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stub/tasklist"
+  chmod +x "$stub/tasklist"
+
+  for sys in UCRT64 CLANG64; do
+    MSYSTEM="$sys" PATH="$stub:$PATH" _agmsg_pid_alive_local $$
+    # Before #1752's fix, UCRT64/CLANG64 fell through to the plain kill -0
+    # path and read a live pid as alive here too -- which hid the bug. Pin
+    # the actual symptom: under the real tasklist stub (exit 0, no match),
+    # the tasklist-routed check reports dead.
+    ! MSYSTEM="$sys" PATH="$stub:$PATH" _agmsg_pid_alive $$
+  done
 }
 
 @test "pid_alive_local: an oversized pid is dead on Windows too" {
