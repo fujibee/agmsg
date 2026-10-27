@@ -7,8 +7,9 @@
 # It only calls daemon.sh (the install-wide agmsgd) and delivery.sh (this
 # project's hooks). The mode values handed to delivery.sh are unchanged:
 # `monitor` is only SHOWN as "monitor (legacy)". Choosing agmsgd runs
-# `daemon enable` (when it is not on yet) and leaves the project on `monitor` as
-# the fallback for a seat whose destination is not confirmed yet.
+# `daemon enable` (when it is not on yet) and installs the project's SessionStart
+# hook (the same hook as monitor mode); session-start.sh reads the recorded choice
+# and never arms a Monitor for a project on agmsgd, so there is no fallback.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,12 +90,10 @@ case "$ACTION" in
     chosen="$(agmsg_delivery_choice_get "$TYPE" "$PROJECT")"
     if [ -n "$chosen" ] && [ "$chosen" != agmsgd ]; then
       echo "this project: $(_mode_label "$chosen") chosen — agmsgd does not deliver here"
+    elif [ "$chosen" = agmsgd ] || { [ -z "$chosen" ] && [ "$offer" = agmsgd=on ]; }; then
+      echo "this project: agmsgd — no Monitor is armed here; the session hooks only start agmsgd's delivery"
     elif [ -n "$mode" ]; then
-      if [ "$offer" = agmsgd=on ]; then
-        echo "this project's fallback: $(_mode_label "$mode")"
-      else
-        echo "this project: $(_mode_label "$mode")"
-      fi
+      echo "this project: $(_mode_label "$mode")"
     fi
     printf '%s\n' "$out"
     ;;
@@ -113,15 +112,17 @@ case "$ACTION" in
         ;;
       *) echo "agmsg delivery: could not tell whether agmsgd is available" >&2; exit 1 ;;
     esac
-    # This session published no destination yet (that happens at the next
-    # SessionStart or actas), so it keeps the Monitor the directive below starts.
-    # Say so first, so the Monitor instruction does not read as contradicting the choice.
+    # The session hook that starts agmsgd's delivery is the same hook monitor mode
+    # installs; session-start.sh reads the recorded choice and arms no Monitor for
+    # a project on agmsgd. Say what happens to this session, without a Monitor
+    # directive (monitor mode's own output is for monitor mode).
     if [ "$TYPE" = claude-code ]; then
-      echo "This session keeps receiving through a Monitor watch until it restarts or runs actas; agmsgd can take over once it confirms this session's destination."
+      bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT" >/dev/null
+      echo "agmsgd delivers to this project. This session moves to it when it restarts or runs actas; no Monitor is armed for it."
     else
       echo "This session keeps its current delivery until it restarts or runs actas; agmsgd can take over once it confirms this session's destination."
+      bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT"
     fi
-    bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT"
     _record_choice agmsgd
     ;;
   *)

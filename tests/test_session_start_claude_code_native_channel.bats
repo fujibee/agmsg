@@ -168,6 +168,91 @@ _mark_daemon_ready() {
   grep -qx "delivery=native" <<<"$output"
 }
 
+# #1810: a project on agmsgd receives through agmsgd only. agmsgd enabled but not
+# running is reported with its reason and the way back; no Monitor is armed, and
+# the session's destination is recorded so agmsgd delivers to it once it starts.
+_mark_daemon_enabled_stopped() {
+  sqlite3 "$RUN_DIR/install.db" < "$SCRIPTS/daemon/schema.sql"
+  sqlite3 "$RUN_DIR/install.db" "UPDATE meta SET node_path='$(command -v node)'; UPDATE daemon_intent SET desired='on';"
+}
+
+_choose() {   # <value>
+  mkdir -p "$PROJ"
+  printf 'claude-code\t%s\t%s\n' "$(cd "$PROJ" && pwd -P)" "$1" > "$RUN_DIR/delivery-choice"
+}
+
+_session_start_with_pid() {   # <sid>
+  env AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/$1.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< "{\"session_id\":\"$1\"}"
+}
+
+@test "session-start: choice agmsgd and agmsgd stopped -> a stopped notice, no Monitor directive, destination recorded (#1810)" {
+  _mark_daemon_enabled_stopped
+  _choose agmsgd
+  run _session_start_with_pid "sid-stopped"
+  [ "$status" -eq 0 ]
+  refute grep -qF "AGMSG monitor mode" <<<"$output"
+  refute grep -q "invoke the Monitor tool" <<<"$output"
+  grep -qF "agmsgd is not running" <<<"$output"
+  grep -qF "agmsg daemon start" <<<"$output"
+  source "$SCRIPTS/lib/role-session.sh"
+  [ "$(agmsg_role_session_get team alice messaging_socket)" = "/tmp/cc-socks/sid-stopped.sock" ]
+}
+
+@test "session-start: no recorded choice, agmsgd enabled but stopped -> the same, agmsgd is the default (#1810)" {
+  _mark_daemon_enabled_stopped
+  run _session_start_with_pid "sid-default"
+  [ "$status" -eq 0 ]
+  refute grep -qF "AGMSG monitor mode" <<<"$output"
+  grep -qF "agmsg daemon start" <<<"$output"
+}
+
+@test "session-start: choice agmsgd but no usable messaging destination -> reported, no Monitor, no lock (#1810)" {
+  _mark_daemon_enabled_stopped
+  _choose agmsgd
+  local sock
+  for sock in "" "not-a-socket" "uds:relative/path.sock"; do
+    run env -u CLAUDE_CODE_MESSAGING_SOCKET ${sock:+CLAUDE_CODE_MESSAGING_SOCKET="$sock"} AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 \
+      bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-nosock"}'
+    [ "$status" -eq 0 ]
+    refute grep -qF "AGMSG monitor mode" <<<"$output"
+    grep -qF "no usable messaging destination" <<<"$output"
+  done
+  run env CLAUDE_CONFIG_DIR="relative/dir" AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-nosock.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-nosock"}'
+  refute grep -qF "AGMSG monitor mode" <<<"$output"
+  grep -qF "no usable messaging destination" <<<"$output"
+  source "$SCRIPTS/lib/actas-lock.sh"
+  [ ! -e "$(actas_lock_path team alice)" ]
+}
+
+@test "session-start: choice monitor and no usable messaging destination -> the Monitor directive as before (#1810)" {
+  _mark_daemon_enabled_stopped
+  _choose monitor
+  run env -u CLAUDE_CODE_MESSAGING_SOCKET AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-nosock-monitor"}'
+  [ "$status" -eq 0 ]
+  grep -qF "AGMSG monitor mode" <<<"$output"
+}
+
+@test "session-start: choice monitor and agmsgd stopped -> the Monitor directive as before (#1810)" {
+  _mark_daemon_enabled_stopped
+  _choose monitor
+  run _session_start_with_pid "sid-monitor-choice"
+  [ "$status" -eq 0 ]
+  grep -qF "AGMSG monitor mode" <<<"$output"
+  refute grep -qF "agmsgd is not running" <<<"$output"
+}
+
+@test "session-start: choice agmsgd and agmsgd running -> native delivery as before (#1810)" {
+  _mark_daemon_ready
+  _choose agmsgd
+  run _session_start_with_pid "sid-running"
+  [ "$status" -eq 0 ]
+  refute grep -qF "AGMSG monitor mode" <<<"$output"
+  grep -qF "agmsgd is running and will deliver" <<<"$output"
+}
+
 @test "session-start: agmsgd not running -> the usual Monitor directive still fires" {
   run _run_session_start "sid-no-daemon"
   [ "$status" -eq 0 ]
@@ -227,7 +312,9 @@ _mark_daemon_ready() {
   [ "$(agmsg_role_session_get team alice messaging_blocked)" = native_storage_not_ready ]
   run env AGMSG_CONFIG="$BATS_TEST_TMPDIR/config.json" AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-jsonl.sock" \
     bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-jsonl"}'
-  grep -qF "AGMSG monitor mode" <<<"$output"
+  # agmsgd is on and the project did not choose another mode: no Monitor either.
+  refute grep -qF "AGMSG monitor mode" <<<"$output"
+  grep -qF "no Monitor is armed" <<<"$output"
   refute grep -q "agmsgd is running and will deliver" <<<"$output"
 }
 
@@ -306,7 +393,8 @@ _mark_daemon_ready() {
     agmsg_instance_bare_sid() { printf "%s" "$1"; }
     agmsg_normalize_instance_id() { echo "sid-1.4242"; }
     agmsg_instance_is_composite() { case "$1" in *.*) return 0 ;; *) return 1 ;; esac; }
-    agmsg_daemon_read_state() { AGMSGD_HEALTH=ready; }
+    agmsg_daemon_read_state() { AGMSGD_DESIRED=on; AGMSGD_HEALTH=ready; }
+    agmsg_daemon_apply_project_choice() { :; }
     agmsg_claude_code_native_storage_ready() { return 0; }
         _agmsg_platform=msys
     _agmsg_detect_platform() { :; }

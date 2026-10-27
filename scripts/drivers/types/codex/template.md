@@ -20,7 +20,7 @@ Do not use POSIX `'"'"'` quote splicing in PowerShell, and do not use escaped do
      - `agmsgd=unavailable reason=...`: do not offer agmsgd; say the reason in one line, then ask for `monitor (legacy)`, `turn`, or `off` (empty input means `monitor`).
 
      To apply the choice, run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery <choice> --type __AGENT_TYPE__ --project "$(pwd)"` with `<choice>` = `agmsgd`, `monitor`, `turn` or `off` (`monitor (legacy)` is the value `monitor`) and show its output:
-     - `agmsgd` turns the background service on (`daemon enable`) and leaves the project on `monitor` as the fallback for a seat whose destination is not confirmed yet. If it fails, say so and offer the other choices.
+     - `agmsgd` turns the background service on (`daemon enable`) and records the choice; the project then receives through agmsgd only, with no Monitor fallback, and a stopped agmsgd is reported with how to restart it. If it fails, say so and offer the other choices.
      - Keep using agmsgd (it is on or turned on but not running): run `agmsg delivery agmsgd` the same way; it also records that this project uses agmsgd.
      - `monitor (legacy)` (and `turn`, `both`, `off`) is a real opt-out: the CLI records that this project does not use agmsgd, so agmsgd stops delivering here and the project keeps the old path. agmsgd stays on for the install's other projects; when it says so, pass on its line that `agmsg daemon disable` turns agmsgd off for all of them.
 <!-- /agmsg:slot delivery -->
@@ -55,7 +55,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 <!-- /agmsg:slot spawn -->
 
 <!-- agmsg:slot mode -->
-If argument is "delivery" (or its alias "mode") with nothing after it, run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery status --type __AGENT_TYPE__ --project "$(pwd)"`. It shows both the install-wide agmsgd state (for example "delivery: agmsgd (on) — notices are delivered directly") and this project's own delivery ("this project's fallback: monitor (legacy)"). When agmsgd is off but available, tell the user that `/agmsg delivery agmsgd` turns direct delivery on.
+If argument is "delivery" (or its alias "mode") with nothing after it, run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery status --type __AGENT_TYPE__ --project "$(pwd)"`. It shows both the install-wide agmsgd state (for example "delivery: agmsgd (on) — notices are delivered directly") and this project's own delivery (for example "this project: agmsgd"). When agmsgd is off but available, tell the user that `/agmsg delivery agmsgd` turns direct delivery on.
 
-For `delivery agmsgd|monitor|turn|off` (and the same values after the alias `mode`), run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery <value> --type __AGENT_TYPE__ --project "$(pwd)"`; `both` is unsupported. `agmsgd` runs `daemon enable` and leaves the project on `monitor` as the fallback; the other values are exactly `delivery.sh set <value>`. `monitor` is always shown as `monitor (legacy)` on the choice screen, but its value stays `monitor`. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
+For `delivery agmsgd|monitor|turn|off` (and the same values after the alias `mode`), run `~/.agents/skills/__SKILL_NAME__/scripts/agmsg delivery <value> --type __AGENT_TYPE__ --project "$(pwd)"`; `both` is unsupported. `agmsgd` runs `daemon enable` and records the choice (no Monitor fallback); the other values are exactly `delivery.sh set <value>`. `monitor` is always shown as `monitor (legacy)` on the choice screen, but its value stays `monitor`. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
 <!-- /agmsg:slot mode -->
