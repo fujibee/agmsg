@@ -207,6 +207,34 @@ _session_start_with_pid() {   # <sid>
   grep -qF "agmsg daemon start" <<<"$output"
 }
 
+@test "session-start: choice agmsgd but no usable messaging destination -> reported, no Monitor, no lock (#1810)" {
+  _mark_daemon_enabled_stopped
+  _choose agmsgd
+  local sock
+  for sock in "" "not-a-socket" "uds:relative/path.sock"; do
+    run env -u CLAUDE_CODE_MESSAGING_SOCKET ${sock:+CLAUDE_CODE_MESSAGING_SOCKET="$sock"} AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 \
+      bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-nosock"}'
+    [ "$status" -eq 0 ]
+    refute grep -qF "AGMSG monitor mode" <<<"$output"
+    grep -qF "no usable messaging destination" <<<"$output"
+  done
+  run env CLAUDE_CONFIG_DIR="relative/dir" AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/sid-nosock.sock" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-nosock"}'
+  refute grep -qF "AGMSG monitor mode" <<<"$output"
+  grep -qF "no usable messaging destination" <<<"$output"
+  source "$SCRIPTS/lib/actas-lock.sh"
+  [ ! -e "$(actas_lock_path team alice)" ]
+}
+
+@test "session-start: choice monitor and no usable messaging destination -> the Monitor directive as before (#1810)" {
+  _mark_daemon_enabled_stopped
+  _choose monitor
+  run env -u CLAUDE_CODE_MESSAGING_SOCKET AGMSG_AGENT_PID=$$ AGMSG_RESOLVE_PROJECT=0 \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"sid-nosock-monitor"}'
+  [ "$status" -eq 0 ]
+  grep -qF "AGMSG monitor mode" <<<"$output"
+}
+
 @test "session-start: choice monitor and agmsgd stopped -> the Monitor directive as before (#1810)" {
   _mark_daemon_enabled_stopped
   _choose monitor

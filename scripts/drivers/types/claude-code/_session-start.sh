@@ -23,13 +23,6 @@ agmsg_session_start() {
     . "${SKILL_DIR:-}/scripts/lib/role-session.sh"
   fi
 
-  # A malformed or missing destination is never published (see
-  # agmsg_claude_code_native_target).
-  local target socket config_dir
-  target="$(agmsg_claude_code_native_target)" || return 0
-  socket="${target%%$'\t'*}"
-  config_dir="${target#*$'\t'}"
-
   # Check every OTHER precondition FIRST, before ever touching a lock
   # (#1577 re-review): a session that cannot possibly use the native path
   # (daemon not ready, Windows, no usable socket) must claim NOTHING. The
@@ -57,6 +50,17 @@ agmsg_session_start() {
   # project choosing another mode, which apply_project_choice turns into off)
   # leaves the Monitor path to session-start.sh.
   [ "${AGMSGD_DESIRED:-}" = on ] || return 0
+  # A malformed or missing destination is never published (see
+  # agmsg_claude_code_native_target). The project's mode is decided first: for a
+  # project on agmsgd an unusable destination is reported, not turned into a
+  # Monitor, and no lock is claimed.
+  local target socket config_dir
+  if ! target="$(agmsg_claude_code_native_target)"; then
+    echo "AGMSG delivery: this project's delivery is agmsgd, but this session has no usable messaging destination (CLAUDE_CODE_MESSAGING_SOCKET is missing or invalid, or the Claude config directory is not usable), so agmsgd cannot deliver to it and no Monitor is armed. Next: use Claude Code 2.1.302 or later, or choose another mode with: agmsg delivery monitor"
+    exit 0
+  fi
+  socket="${target%%$'\t'*}"
+  config_dir="${target#*$'\t'}"
   local stopped=0
   if [ "${AGMSGD_HEALTH:-}" != ready ]; then
     stopped=1
