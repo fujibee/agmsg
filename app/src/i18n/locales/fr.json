@@ -332,7 +332,8 @@
       "allowAlwaysLater": "Not available yet",
       "can": "Peut",
       "allowed": "Autorisé",
-      "nothingYet": "rien pour l'instant"
+      "nothingYet": "rien pour l'instant",
+      "installedOn": "installé le {{date}}"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -406,7 +407,8 @@
       "source_other": "depuis {{repo}} · {{sha}} · ajoute {{count}} panneaux",
       "sourceUpdate_one": "depuis {{repo}} · {{from}} → {{to}} · {{count}} panneau",
       "sourceUpdate_many": "depuis {{repo}} · {{from}} → {{to}} · {{count}} panneaux",
-      "sourceUpdate_other": "depuis {{repo}} · {{from}} → {{to}} · {{count}} panneaux"
+      "sourceUpdate_other": "depuis {{repo}} · {{from}} → {{to}} · {{count}} panneaux",
+      "panes": "Ajoute : {{names}}"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -469,6 +471,11 @@
       "found": "Ce dossier contient un fichier .env.",
       "foundNetwork": "Ce dossier contient un fichier .env. Ce module complémentaire utilise le réseau et ne pourra donc pas le lire."
     },
-    "intro": "Les modules ajoutent des panneaux à l'app. Ils ne peuvent lire que ce que vous autorisez, et vous pouvez le retirer ici."
+    "intro": "Les modules ajoutent des panneaux à l'app. Ils ne peuvent lire que ce que vous autorisez, et vous pouvez le retirer ici.",
+    "group": {
+      "problems_one": "{{count}} problème",
+      "problems_many": "{{count}} problèmes",
+      "problems_other": "{{count}} problèmes"
+    }
   }
 }

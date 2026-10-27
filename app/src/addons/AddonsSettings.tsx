@@ -72,12 +72,15 @@ function CopyForAgents(props: { t: Translate }) {
 }
 
 /** A collapsible group with a count (or a short state word) next to its title. */
-function Group(props: { id: string; title: string; badge?: string | number; defaultOpen?: boolean; children: ReactNode }) {
+function Group(props: { id: string; title: string; badge?: string | number; defaultOpen?: boolean; problems?: number; t: Translate; children: ReactNode }) {
+  const problems = props.problems ?? 0;
+  // A failure inside the group must not hide behind a closed heading: the group opens by itself and the summary says so.
   return (
-    <details className={`addon-group addon-group-${props.id}`} open={props.defaultOpen}>
+    <details className={`addon-group addon-group-${props.id}${problems > 0 ? " has-problem" : ""}`} open={props.defaultOpen || problems > 0}>
       <summary>
         <span className="addon-group-title">{props.title}</span>
         {props.badge !== undefined && <span className="addon-count">{props.badge}</span>}
+        {problems > 0 && <span className="addon-problem">{props.t("addons.group.problems", { count: problems })}</span>}
       </summary>
       <div className="addon-group-body">{props.children}</div>
     </details>
@@ -92,6 +95,7 @@ export function AddonsSettings(props: Props) {
   const builtins = snapshot.addons.filter((a) => a.builtin);
   const installed = snapshot.addons.filter((a) => !a.builtin && !a.dev);
   const devs = snapshot.addons.filter((a) => a.dev);
+  const bad = (list: InstalledAddon[]) => list.filter((a) => a.digestOk === false).length;
   const newId = props.installedNotice?.addonId;
   // A finished install empties the field, so the next one starts blank.
   const installedKey = props.installedNotice?.kind === "installed" ? props.installedNotice.addonId : null;
@@ -107,7 +111,7 @@ export function AddonsSettings(props: Props) {
           {t("addons.engineOff")}{" "}
           {engine.reasons.length > 0 && t("addons.engineReasons", { reasons: engine.reasons.join("; ") })}
         </p>
-        <Group id="installed" title={t("addons.installed.title")} badge={installed.length} defaultOpen>
+        <Group id="installed" t={t} problems={bad(installed)} title={t("addons.installed.title")} badge={installed.length} defaultOpen>
           <InstalledList {...props} installed={installed} readOnly />
         </Group>
       </div>
@@ -162,11 +166,11 @@ export function AddonsSettings(props: Props) {
         )}
       </form>
 
-      <Group id="installed" title={t("addons.installed.title")} badge={installed.length} defaultOpen>
+      <Group id="installed" t={t} problems={bad(installed)} title={t("addons.installed.title")} badge={installed.length} defaultOpen>
         <InstalledList {...props} installed={installed} newId={newId} />
       </Group>
 
-      <Group id="builtin" title={t("addons.builtin.title")} badge={builtins.length}>
+      <Group id="builtin" t={t} problems={bad(builtins)} title={t("addons.builtin.title")} badge={builtins.length}>
         <ul className="addon-list">
           {builtins.map((a) => (
             <AddonCard key={a.id} t={t} addon={a} snapshot={snapshot} source={t("addons.builtin.source")} onRevoke={props.onRevoke} />
@@ -174,7 +178,7 @@ export function AddonsSettings(props: Props) {
         </ul>
       </Group>
 
-      <Group id="requests" title={t("addons.openRequests.title")} badge={t(snapshot.openRequests === "off" ? "addons.openRequests.off" : "addons.openRequests.on")}>
+      <Group id="requests" t={t} title={t("addons.openRequests.title")} badge={t(snapshot.openRequests === "off" ? "addons.openRequests.off" : "addons.openRequests.on")}>
         <div className="addon-switch-line">
           <p className="addon-help addon-help-main">{t("addons.openRequests.explain")}</p>
           <button
@@ -191,7 +195,7 @@ export function AddonsSettings(props: Props) {
       </Group>
 
       {canInstall && (
-        <Group id="developer" title={t("addons.developer.title")} badge={devs.length > 0 ? devs.length : undefined}>
+        <Group id="developer" t={t} problems={bad(devs)} title={t("addons.developer.title")} badge={devs.length > 0 ? devs.length : undefined}>
           <p className="addon-help">{t("addons.developer.explain")}</p>
           <div className="addon-row-line">
             <button type="button" className="addon-btn" onClick={props.onLoadFromFolder}>
@@ -350,7 +354,7 @@ function InstalledList(props: {
           t={t}
           addon={a}
           snapshot={snapshot}
-          source={`${a.id} · ${shortSha(a.sha)}`}
+          source={[a.id, shortSha(a.sha), a.installedAt ? t("addons.card.installedOn", { date: a.installedAt.slice(0, 10) }) : ""].filter(Boolean).join(" · ")}
           isNew={a.id === props.newId}
           onRevoke={props.onRevoke}
           actions={

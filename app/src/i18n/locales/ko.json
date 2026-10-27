@@ -332,7 +332,8 @@
       "allowAlwaysLater": "Not available yet",
       "can": "가능한 것",
       "allowed": "허용됨",
-      "nothingYet": "아직 없음"
+      "nothingYet": "아직 없음",
+      "installedOn": "{{date}} 설치"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -402,7 +403,8 @@
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
       "neverTitle": "절대 할 수 없는 것",
       "source_other": "{{repo}} 에서 · {{sha}} · 패널 {{count}}개 추가",
-      "sourceUpdate_other": "{{repo}} 에서 · {{from}} → {{to}} · 패널 {{count}}개"
+      "sourceUpdate_other": "{{repo}} 에서 · {{from}} → {{to}} · 패널 {{count}}개",
+      "panes": "추가되는 패널: {{names}}"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -465,6 +467,9 @@
       "found": "이 폴더에 .env 파일이 있습니다.",
       "foundNetwork": "이 폴더에 .env 파일이 있습니다. 이 애드온은 네트워크를 사용하므로 읽을 수 없습니다."
     },
-    "intro": "애드온은 앱에 패널을 추가합니다. 허용한 것만 읽을 수 있고, 허용은 여기서 언제든 취소할 수 있습니다."
+    "intro": "애드온은 앱에 패널을 추가합니다. 허용한 것만 읽을 수 있고, 허용은 여기서 언제든 취소할 수 있습니다.",
+    "group": {
+      "problems_other": "문제 {{count}}개"
+    }
   }
 }

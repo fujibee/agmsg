@@ -332,7 +332,8 @@
       "allowAlwaysLater": "まだ使えません",
       "can": "できること",
       "allowed": "許可済み",
-      "nothingYet": "まだありません"
+      "nothingYet": "まだありません",
+      "installedOn": "{{date}} にインストール"
     },
     "installError": {
       "repo_not_found": "github.com/{{owner}}/{{repo}} が見つかりません。名前を確認してください。非公開リポジトリはまだ未対応です。",
@@ -402,7 +403,8 @@
       "paneRemoved": "{{pane}} は削除されます(保存済みのアクセスも破棄されます)",
       "neverTitle": "絶対にできないこと",
       "source_other": "{{repo}} から · {{sha}} · ペイン {{count}} 件を追加",
-      "sourceUpdate_other": "{{repo}} から · {{from}} → {{to}} · ペイン {{count}} 件"
+      "sourceUpdate_other": "{{repo}} から · {{from}} → {{to}} · ペイン {{count}} 件",
+      "panes": "追加されるペイン: {{names}}"
     },
     "remove": {
       "title": "{{title}} を削除しますか?",
@@ -465,6 +467,9 @@
       "found": "このフォルダには .env ファイルがあります。",
       "foundNetwork": "このフォルダには .env ファイルがあります。このアドオンはネットワークを使うため、読めません。"
     },
-    "intro": "アドオンはアプリにペインを追加します。許可したものしか読めず、許可はここでいつでも取り消せます。"
+    "intro": "アドオンはアプリにペインを追加します。許可したものしか読めず、許可はここでいつでも取り消せます。",
+    "group": {
+      "problems_other": "問題 {{count}} 件"
+    }
   }
 }

@@ -66,6 +66,24 @@ describe("AddonsSettings", () => {
     const none = only.slice(only.indexOf("addon-group-builtin"), only.indexOf("addon-group-requests"));
     expect(none).toContain("addons.card.nothingYet");
   });
+  it("a failing add-on is visible while its group is closed: the group opens and the summary says how many", () => {
+    const bad = (id: string) => mockSnapshot.addons.map((a) => (a.id === id ? { ...a, digestOk: false } : a));
+    const builtin = render({ snapshot: { ...mockSnapshot, addons: bad("builtin:fileview") } });
+    expect(builtin).toMatch(/<details class="addon-group addon-group-builtin has-problem" open="">/);
+    expect(builtin).toMatch(/addon-group-builtin[^]*?<span class="addon-problem">\[addons\.group\.problems \{&quot;count&quot;:1\}\]<\/span><\/summary>/);
+    const installed = render({ snapshot: { ...mockSnapshot, addons: bad("shinshin86/agmsg-office") } });
+    expect(installed).toMatch(/addon-group-installed has-problem[^>]*>[^]*?addon-problem/);
+    // nothing wrong: no badge, Built in stays closed
+    expect(render({})).not.toContain("addon-problem");
+    expect(render({})).toMatch(/<details class="addon-group addon-group-builtin">/);
+  });
+  it("the card's source line carries the installed date for an installed add-on, not for a built-in", () => {
+    const html = render({});
+    expect(html).toContain("addons.card.installedOn");
+    expect(html).toContain("2026-10-20");
+    const builtin = html.slice(html.indexOf("addon-group-builtin"), html.indexOf("addon-group-requests"));
+    expect(builtin).not.toContain("addons.card.installedOn");
+  });
   it("Requests from agents is a switch on the stored setting, not a select", () => {
     const on = render({});
     expect(on).toContain('role="switch"');

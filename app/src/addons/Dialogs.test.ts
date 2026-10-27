@@ -38,6 +38,11 @@ describe("ConfirmInstallDialog", () => {
     expect(html).toMatch(/<b>(<!-- -->)?[^<]*messagesRead[^<]*<\/b><span class="addon-why">/);
     expect(html).toMatch(/<p class="addon-warn">\[addons\.confirm\.noReview\]/);
   });
+  it("lists the pane names before installing", () => {
+    const html = renderToStaticMarkup(createElement(ConfirmInstallDialog, { t, staged: staged(), onInstall: noop, onCancel: noop }));
+    expect(html).toContain("addons.confirm.panes");
+    expect(html).toContain("agmsg office");
+  });
   it("Details start closed, Install is the primary button and Cancel is not", () => {
     const html = renderToStaticMarkup(createElement(ConfirmInstallDialog, { t, staged: staged(), onInstall: noop, onCancel: noop }));
     expect(html).toMatch(/<details class="addon-details"><summary>/);

@@ -332,7 +332,8 @@
       "allowAlwaysLater": "Not available yet",
       "can": "Kann",
       "allowed": "Erlaubt",
-      "nothingYet": "noch nichts"
+      "nothingYet": "noch nichts",
+      "installedOn": "installiert am {{date}}"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -404,7 +405,8 @@
       "source_one": "von {{repo}} · {{sha}} · fügt {{count}} Pane hinzu",
       "source_other": "von {{repo}} · {{sha}} · fügt {{count}} Panes hinzu",
       "sourceUpdate_one": "von {{repo}} · {{from}} → {{to}} · {{count}} Pane",
-      "sourceUpdate_other": "von {{repo}} · {{from}} → {{to}} · {{count}} Panes"
+      "sourceUpdate_other": "von {{repo}} · {{from}} → {{to}} · {{count}} Panes",
+      "panes": "Fügt hinzu: {{names}}"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -467,6 +469,10 @@
       "found": "Dieser Ordner enthält eine .env-Datei.",
       "foundNetwork": "Dieser Ordner enthält eine .env-Datei. Dieses Add-on nutzt das Netzwerk und kann sie daher nicht lesen."
     },
-    "intro": "Add-ons fügen der App Panes hinzu. Sie können nur lesen, was du erlaubst, und du kannst das hier jederzeit zurücknehmen."
+    "intro": "Add-ons fügen der App Panes hinzu. Sie können nur lesen, was du erlaubst, und du kannst das hier jederzeit zurücknehmen.",
+    "group": {
+      "problems_one": "{{count}} Problem",
+      "problems_other": "{{count}} Probleme"
+    }
   }
 }

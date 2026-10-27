@@ -332,7 +332,8 @@
       "allowAlwaysLater": "Not available yet",
       "can": "可以",
       "allowed": "已允许",
-      "nothingYet": "暂无"
+      "nothingYet": "暂无",
+      "installedOn": "安装于 {{date}}"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -402,7 +403,8 @@
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
       "neverTitle": "它永远不能",
       "source_other": "来自 {{repo}} · {{sha}} · 添加 {{count}} 个面板",
-      "sourceUpdate_other": "来自 {{repo}} · {{from}} → {{to}} · {{count}} 个面板"
+      "sourceUpdate_other": "来自 {{repo}} · {{from}} → {{to}} · {{count}} 个面板",
+      "panes": "将添加：{{names}}"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -465,6 +467,9 @@
       "found": "此文件夹中有 .env 文件。",
       "foundNetwork": "此文件夹中有 .env 文件。此加载项会使用网络，因此无法读取它。"
     },
-    "intro": "附加组件会为应用添加面板。它们只能读取你允许的内容，你可以随时在这里收回。"
+    "intro": "附加组件会为应用添加面板。它们只能读取你允许的内容，你可以随时在这里收回。",
+    "group": {
+      "problems_other": "{{count}} 个问题"
+    }
   }
 }

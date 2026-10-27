@@ -29,6 +29,7 @@ export function ConfirmInstallDialog(props: {
             ? t("addons.confirm.sourceUpdate", { repo: staged.addonId, from: shortSha(staged.from.sha), to: shortSha(staged.sha), count: staged.panes.length })
             : t("addons.confirm.source", { repo: staged.addonId, sha: shortSha(staged.sha), count: staged.panes.length })}
         </p>
+        <p className="addon-dlg-source addon-dlg-panes">{t("addons.confirm.panes", { names: staged.panes.map((p) => p.title).join(", ") })}</p>
         <div className="addon-block">
           <h4>{t("addons.confirm.canTitle")}</h4>
           {perms.size === 0 && <p className="addon-never">{t("addons.permission.none")}</p>}

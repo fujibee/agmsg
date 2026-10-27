@@ -332,7 +332,8 @@
       "allowAlwaysLater": "Not available yet",
       "can": "Can",
       "allowed": "Allowed",
-      "nothingYet": "nothing yet"
+      "nothingYet": "nothing yet",
+      "installedOn": "installed {{date}}"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -404,7 +405,8 @@
       "source_one": "from {{repo}} · {{sha}} · adds {{count}} pane",
       "source_other": "from {{repo}} · {{sha}} · adds {{count}} panes",
       "sourceUpdate_one": "from {{repo}} · {{from}} → {{to}} · {{count}} pane",
-      "sourceUpdate_other": "from {{repo}} · {{from}} → {{to}} · {{count}} panes"
+      "sourceUpdate_other": "from {{repo}} · {{from}} → {{to}} · {{count}} panes",
+      "panes": "Adds: {{names}}"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -467,6 +469,10 @@
       "found": "This folder has a .env file.",
       "foundNetwork": "This folder has a .env file. This add-on uses the network, so it can't read it."
     },
-    "intro": "Add-ons add panes to the app. They can only read what you allow, and you can take it back here."
+    "intro": "Add-ons add panes to the app. They can only read what you allow, and you can take it back here.",
+    "group": {
+      "problems_one": "{{count}} problem",
+      "problems_other": "{{count}} problems"
+    }
   }
 }

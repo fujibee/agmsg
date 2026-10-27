@@ -332,7 +332,8 @@
       "allowAlwaysLater": "Not available yet",
       "can": "可以",
       "allowed": "已允許",
-      "nothingYet": "尚無"
+      "nothingYet": "尚無",
+      "installedOn": "安裝於 {{date}}"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -402,7 +403,8 @@
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
       "neverTitle": "它永遠不能",
       "source_other": "來自 {{repo}} · {{sha}} · 新增 {{count}} 個面板",
-      "sourceUpdate_other": "來自 {{repo}} · {{from}} → {{to}} · {{count}} 個面板"
+      "sourceUpdate_other": "來自 {{repo}} · {{from}} → {{to}} · {{count}} 個面板",
+      "panes": "將新增：{{names}}"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -465,6 +467,9 @@
       "found": "此資料夾中有 .env 檔案。",
       "foundNetwork": "此資料夾中有 .env 檔案。此附加元件會使用網路，因此無法讀取它。"
     },
-    "intro": "附加元件會為應用程式新增面板。它們只能讀取你允許的內容，你可以隨時在這裡收回。"
+    "intro": "附加元件會為應用程式新增面板。它們只能讀取你允許的內容，你可以隨時在這裡收回。",
+    "group": {
+      "problems_other": "{{count}} 個問題"
+    }
   }
 }

@@ -332,7 +332,8 @@
       "allowAlwaysLater": "Not available yet",
       "can": "Puede",
       "allowed": "Permitido",
-      "nothingYet": "nada todavía"
+      "nothingYet": "nada todavía",
+      "installedOn": "instalado el {{date}}"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -406,7 +407,8 @@
       "source_other": "de {{repo}} · {{sha}} · añade {{count}} paneles",
       "sourceUpdate_one": "de {{repo}} · {{from}} → {{to}} · {{count}} panel",
       "sourceUpdate_many": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles",
-      "sourceUpdate_other": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles"
+      "sourceUpdate_other": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles",
+      "panes": "Añade: {{names}}"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -469,6 +471,11 @@
       "found": "Esta carpeta contiene un archivo .env.",
       "foundNetwork": "Esta carpeta contiene un archivo .env. Este complemento usa la red, por lo que no puede leerlo."
     },
-    "intro": "Los complementos añaden paneles a la app. Solo pueden leer lo que tú permitas, y puedes retirarlo aquí."
+    "intro": "Los complementos añaden paneles a la app. Solo pueden leer lo que tú permitas, y puedes retirarlo aquí.",
+    "group": {
+      "problems_one": "{{count}} problema",
+      "problems_many": "{{count}} problemas",
+      "problems_other": "{{count}} problemas"
+    }
   }
 }

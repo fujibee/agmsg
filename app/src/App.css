@@ -1620,6 +1620,9 @@ body.resizing-row {
 .addon-group > summary::before { content: "\25B8"; color: var(--muted); font-size: 11px; transition: transform 0.15s; }
 .addon-group[open] > summary::before { transform: rotate(90deg); }
 .addon-count { font-weight: 500; font-size: 11px; color: var(--muted); background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; }
+.addon-group.has-problem { border-color: var(--red-line); }
+.addon-problem { font-weight: 500; font-size: 11px; color: var(--red); border: 1px solid var(--red-line); border-radius: 10px; padding: 0 7px; }
+.addon-dlg-panes { margin-top: -10px; }
 .addon-group-body { padding: 0 12px 12px; display: grid; gap: 8px; }
 .addon-acard { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; }
 .addon-acard.new { border-color: var(--green); }
