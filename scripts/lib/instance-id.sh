@@ -615,7 +615,7 @@ agmsg_instance_alive() {
   # The pid layer below is already conservative in the right direction —
   # _agmsg_pid_alive_local treats EPERM and any unrecognised kill(2) error as
   # ALIVE — so only this layer needed the extra value.
-  local token="$1"
+  local token="$1" except="${2:-}"
   [ -n "$token" ] || return 1
   if agmsg_instance_is_composite "$token"; then
     local pid="${token##*.}"
@@ -681,6 +681,9 @@ agmsg_instance_alive() {
     esac
     s="${_m#*$'\t'}"
     if [ -z "$s" ]; then undecided=1; continue; fi
+    # The asking session's own marker is not evidence about the previous owner
+    # of a bare lock (#1807): after a resume it would make that owner look alive.
+    [ -n "$except" ] && [ "$s" = "$except" ] && continue
     [ "$s" = "$token" ] && return 0
     # upgrade compat: cc-instance stores "<sid>.<pid>" but the lock holds "<sid>"
     if agmsg_instance_is_composite "$s" && [ "${s%.*}" = "$token" ]; then

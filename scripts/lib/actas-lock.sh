@@ -462,6 +462,20 @@ actas_lock_sid_alive() {
   agmsg_instance_alive "$1"
 }
 
+# Liveness of a lock's owner as seen by <asker>. A bare owner naming the asker's
+# own session is the previous process of a resumed session (#1807): the asker's
+# own marker must not count as that owner being alive, or the session is refused
+# its own seat. Another live process of the same session still counts.
+_actas_owner_alive() {   # <owner> <asker>
+  local owner="$1" asker="$2"
+  if agmsg_instance_is_composite "$asker" && ! agmsg_instance_is_composite "$owner" \
+      && [ "$(agmsg_instance_bare_sid "$asker")" = "$owner" ]; then
+    agmsg_instance_alive "$owner" "$asker"
+  else
+    agmsg_instance_alive "$owner"
+  fi
+}
+
 # The verdict for one lock, shared by every producer.
 #
 # Review found the SAME empty lock answered `free` by actas_lock_observe and
@@ -505,7 +519,7 @@ _actas_lock_verdict() {   # <sid> <read> <owner>
     printf 'mine\t%s\n' "$owner"
     return 0
   fi
-  agmsg_instance_alive "$owner" || arc=$?
+  _actas_owner_alive "$owner" "$sid" || arc=$?
   case "$arc" in
     0) printf 'other:%s\t%s\n' "$owner" "$owner" ;;
     1) printf 'free\t%s\n' "$owner" ;;
@@ -647,7 +661,7 @@ agmsg_lock_claim_at() {   # <lock-path> <owner>
               _owner="${_r#*$'\t'}"
               if [ -n "$_owner" ]; then
                 _alive_rc=0
-                agmsg_instance_alive "$_owner" || _alive_rc=$?
+                _actas_owner_alive "$_owner" "$sid" || _alive_rc=$?
                 if [ "$_alive_rc" -eq 1 ]; then
                   rm -f "$lock_path"
                 fi
