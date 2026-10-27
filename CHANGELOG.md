@@ -4,6 +4,37 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-10-27
+
+This release adds plugins from GitHub: `agmsg plugin install <owner>/<repo>` adds a third-party ext-tool, terminal or agent type after showing you every file it can run (and, in chat, offering to have the agent read them first), and keeps it pinned to the commit you approved. It also hardens remote sync against compressed responses from a sync server (CVE-2026-111497); if you use remote sync, update.
+
+### Security
+- Remote sync asks sync servers for uncompressed responses and refuses any other `Content-Encoding` before reading the body, so a compressed response never reaches Node's decoders (CVE-2026-111497, Brotli decoder out-of-bounds write). This protects only agmsg's own remote sync; update Node.js itself to 22.23.4, 24.22.1, 26.12.1 or later. CI and the release job use the newest Node 22 patch (#1774, #1766)
+
+### Added
+- Plugins from GitHub: `agmsg plugin install | update | remove <owner>/<repo>[@<ref>]`. Install shows the commit, the drivers it adds and every file that can run, and installs only after you confirm. Each install is pinned to its commit; `update` shows what changed and asks again, and nothing updates on its own. A plugin driver that replaces a built-in needs `--override` (#1702, #1703, #1713, #1783)
+- Before you confirm an install or update in chat, the agent offers to read the files that will run, from a review copy of the exact commit shown, and reports what it finds. The confirmed install refuses to proceed if the fetched files differ from the copy that was read (#1794)
+- `agmsg plugin` is a verb of the `agmsg` command, and `/agmsg plugin` walks through install and update in chat (#1746, #1703)
+- One repository is one plugin: `name` in `agmsg-plugin.conf` is required, and `plugin install` ends with the next step for each new driver, including its `SETUP.md` and, for an ext-tool with setup, the save step before join (#1783, #1785, #1787, #1802)
+- ext-tools resolve through the driver registry like the other plugin axes; the smallest ext-tool is `tool.conf` plus a `handle` script (#1700, #1784)
+- Install and update warn when a new built-in is now replaced by a trusted plugin, and name the command that brings the built-in back (#1748)
+
+### Fixed
+- agmsgd: one unusable team no longer stops every team's notices (#1773)
+- `agmsg daemon enable` keeps an agmsgd that is already running (#1776)
+- agmsgd advises `install --update`, not `daemon start`, on a digest mismatch (#1769)
+- Windows: agmsgd registers a per-user task that runs without a console window (#1771)
+- Windows: UCRT64 and CLANG64 shells are recognized, and npm's extensionless Codex shim is accepted (#1772, #1768)
+- A reused bridge PID is treated as a stopped bridge (#1767)
+- Reading another agent's `history` no longer moves that agent's pane record to the reader's pane (#1770)
+- `inbox` and `history` show a multi-line body as lines instead of a literal `\n` (#1786)
+- Hints for an install with a different `--cmd` name use that install's own command (#1779)
+- `install --update --cmd <name>` no longer takes over the shared Codex shim from another install on its own (#1790)
+- Plugin and driver names with uppercase letters are refused on macOS too, where bash 3.2 under a UTF-8 locale let them through (#1793)
+
+### Documentation
+- `docs/plugins.md` and `docs/plugins.ja.md` describe installing plugins from GitHub (#1703)
+
 ## [1.6.1] - 2026-10-25
 
 This release fixes agmsgd notices that could stop and never resume. If you turned agmsgd on in 1.6.0, update; nothing else is needed, and agmsgd restarts on the new code by itself. If agmsgd is off, it stays off, and the recommended setting is unchanged: agmsgd, chosen with `/agmsg delivery`.
@@ -22,6 +53,7 @@ This release fixes agmsgd notices that could stop and never resume. If you turne
 ### Changed
 - `install --update` copies CHANGELOG.md into the install directory and ends with one line asking the running agent to re-read the skill and tell you what changed in this version and which settings it recommends (#1741, #1742)
 
+[1.7.0]: https://github.com/fujibee/agmsg/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/fujibee/agmsg/compare/v1.6.0...v1.6.1
 
 ## [1.6.0] - 2026-10-23
