@@ -27,8 +27,27 @@ describe("ConfirmInstallDialog", () => {
     const html = renderToStaticMarkup(createElement(ConfirmInstallDialog, { t, staged: staged(), onInstall: noop, onCancel: noop }));
     expect(html).toContain("messages as an office.");
     expect(html).toContain("addons.confirm.sends");
-    expect(html).toContain("addons.confirm.never");
+    expect(html).toContain("addons.confirm.neverTitle");
+    expect(html).toContain("addons.confirm.never]");
     expect(html).toContain("addons.confirm.noReview");
+  });
+  it("names the source on its own line, puts the author's why under a bold permission, and shows the trust warning amber", () => {
+    const html = renderToStaticMarkup(createElement(ConfirmInstallDialog, { t, staged: staged(), onInstall: noop, onCancel: noop }));
+    expect(html).toContain("addons.confirm.source");
+    expect(html).toContain('&quot;count&quot;:' + office.panes.length);
+    expect(html).toMatch(/<b>(<!-- -->)?[^<]*messagesRead[^<]*<\/b><span class="addon-why">/);
+    expect(html).toMatch(/<p class="addon-warn">\[addons\.confirm\.noReview\]/);
+  });
+  it("lists the pane names before installing", () => {
+    const html = renderToStaticMarkup(createElement(ConfirmInstallDialog, { t, staged: staged(), onInstall: noop, onCancel: noop }));
+    expect(html).toContain("addons.confirm.panes");
+    expect(html).toContain("agmsg office");
+  });
+  it("Details start closed, Install is the primary button and Cancel is not", () => {
+    const html = renderToStaticMarkup(createElement(ConfirmInstallDialog, { t, staged: staged(), onInstall: noop, onCancel: noop }));
+    expect(html).toMatch(/<details class="addon-details"><summary>/);
+    expect(html).toMatch(/<button type="button" class="primary">\[addons\.confirm\.install\]/);
+    expect(html).toMatch(/<button type="button" autofocus="">\[common\.cancel\]/);
   });
   it("an update highlights the new permission and says it asks again", () => {
     const from = { sha: "c".repeat(40), panes: [pane(["messages:read"])] };

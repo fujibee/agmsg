@@ -55,7 +55,8 @@
     "roomLabel": "# 團隊聊天室",
     "close": "×",
     "newShell": "新增 Shell 分頁",
-    "shellLabel": "Shell"
+    "shellLabel": "Shell",
+    "newMenu": "新增分頁或面板"
   },
   "room": {
     "loadingMore": "載入更多…",
@@ -266,28 +267,34 @@
     "engineOff": "Add-ons are not available on this computer yet. A safety check did not pass with this system's web engine. Your other features are not affected.",
     "engineReasons": "Reason: {{reasons}}",
     "builtin": {
-      "title": "Built in"
+      "title": "Built in",
+      "source": "內建"
     },
     "installed": {
       "title": "Installed",
       "empty": "No add-ons installed.",
       "checkUpdates": "Check for updates",
-      "remove": "Remove"
+      "remove": "Remove",
+      "doneNotice": "已安裝 {{title}}。可從面板頂部的 + 開啟。",
+      "updatedNotice": "已更新 {{title}}。",
+      "openNow": "立即開啟"
     },
     "install": {
-      "label": "Add-on repository",
-      "placeholder": "owner/repo or owner/repo@ref",
+      "placeholder": "例如 fujibee/agmsg-addon-sample",
       "button": "Install…",
-      "later": "Installing from GitHub isn't available in this build yet."
+      "later": "Installing from GitHub isn't available in this build yet.",
+      "heading": "從 GitHub 安裝",
+      "help": "輸入 agmsg 附加元件的儲存庫：owner/repo，或用 owner/repo@tag 固定版本。"
     },
     "openRequests": {
-      "label": "來自 seat 的開啟請求",
-      "show": "顯示",
       "off": "關閉",
-      "copy": "複製給 seat 的文字",
+      "copy": "複製給代理的說明",
       "copied": "已複製。",
       "copyFailed": "無法複製。",
-      "copyHint": "把它貼給 seat，它就知道如何請求應用程式開啟窗格。"
+      "title": "來自代理的請求",
+      "explain": "允許你團隊中的代理請求應用程式開啟面板，例如它們工作的 diff。請求會顯示在一個列中；在你按下「開啟」之前不會開啟任何內容。",
+      "on": "開啟",
+      "copyHelp": "代理需要知道請求的格式。複製後一次貼給它們即可。"
     },
     "developer": {
       "title": "Developer",
@@ -295,7 +302,8 @@
       "loaded": "Developer add-ons",
       "none": "No developer add-ons loaded.",
       "reload": "Reload from folder",
-      "remove": "Remove"
+      "remove": "Remove",
+      "explain": "正在開發自己的附加元件？可以從這台電腦上的資料夾載入。它不會被安裝：直接從資料夾執行，重新載入即可套用你的修改。"
     },
     "permission": {
       "none": "Runs with no permissions",
@@ -309,8 +317,7 @@
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke",
-      "none": "No permissions given yet."
+      "revoke": "Revoke"
     },
     "card": {
       "grantAria": "Permission request",
@@ -323,7 +330,11 @@
       "notNow": "Not now",
       "denied": "{{path}} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
       "chooseAnother": "Choose another…",
-      "allowAlwaysLater": "Not available yet"
+      "allowAlwaysLater": "Not available yet",
+      "can": "可以",
+      "allowed": "已允許",
+      "nothingYet": "尚無",
+      "installedOn": "安裝於 {{date}}"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -376,12 +387,11 @@
       "details": "Details",
       "fullSha": "Commit: {{sha}}",
       "archive": "Archive SHA-256: {{hash}}",
-      "panes": "Adds: {{names}}",
-      "canTitle": "This add-on can:",
+      "canTitle": "此附加元件可以",
       "new": "New:",
       "sends": "It can send what it reads to {{hosts}}.",
       "sendsAny": "It can send what it reads to any site on the internet.",
-      "never": "It can never: run programs, use the app's controls, or read anything you have not chosen.",
+      "never": "執行程式、使用應用程式的控制項，或讀取你沒有選擇的任何內容。",
       "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
       "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
       "install": "Install",
@@ -391,7 +401,11 @@
       "paneWider": "{{pane}} can reach more sites",
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
-      "paneRemoved": "{{pane}} is removed (its saved access is dropped)"
+      "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
+      "neverTitle": "它永遠不能",
+      "source_other": "來自 {{repo}} · {{sha}} · 新增 {{count}} 個面板",
+      "sourceUpdate_other": "來自 {{repo}} · {{from}} → {{to}} · {{count}} 個面板",
+      "panes": "將新增：{{names}}"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -445,7 +459,7 @@
       "fileView": "File view",
       "diffView": "Diff view",
       "addonPane": "Add-on pane ▸ {{title}}",
-      "install": "Install an add-on…"
+      "install": "安裝附加元件…"
     },
     "listFailed": "Couldn't read the add-on list: {{message}}",
     "listRetry": "Try again",
@@ -453,6 +467,10 @@
     "env": {
       "found": "此資料夾中有 .env 檔案。",
       "foundNetwork": "此資料夾中有 .env 檔案。此附加元件會使用網路，因此無法讀取它。"
+    },
+    "intro": "附加元件會為應用程式新增面板。它們只能讀取你允許的內容，你可以隨時在這裡收回。",
+    "group": {
+      "problems_other": "{{count}} 個問題"
     }
   }
 }

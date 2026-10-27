@@ -9,7 +9,6 @@ import {
   Minimize2,
   Minus,
   PanelLeftClose,
-  Plus,
   RectangleHorizontal,
   Settings,
   Users,
@@ -17,6 +16,7 @@ import {
 import { TerminalPane } from "./TerminalPane";
 import { AddonPaneHost } from "./addons/AddonPaneHost";
 import type { AddonPaneRef } from "./addons/types";
+import { NewMenu, type NewMenuVariant } from "./NewMenu";
 import { OpenRequestBar, OpenRequestMessages, OpenRequestNotes } from "./addons/OpenRequestBar";
 import { useOpenRequests } from "./addons/useOpenRequests";
 import { useOpenRequestsSetting } from "./addons/openRequestsSetting";
@@ -291,7 +291,7 @@ type Modal =
   | { kind: "renameTeam"; current: string }
   | { kind: "deleteTeam"; name: string }
   | { kind: "purgeMessages"; name: string }
-  | { kind: "settings" }
+  | { kind: "settings"; tab?: "general" | "addons" }
   | { kind: "closeWindow"; windowId: string }
   | { kind: "closePane"; paneId: string }
   | null;
@@ -543,7 +543,7 @@ export default function App() {
     }, 3000);
     return () => window.clearTimeout(timer);
   }, [completionNotice]);
-  const [newMenu, setNewMenu] = useState(false);
+  const [newMenu, setNewMenu] = useState<NewMenuVariant | null>(null);
   const [cmdName, setCmdName] = useState("agmsg");
   const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState(200);
@@ -647,7 +647,7 @@ export default function App() {
   // a completely separate element being interacted with). Every
   // menu-opening handler below calls this first.
   const closeAllMenus = useCallback(() => {
-    setNewMenu(false);
+    setNewMenu(null);
     setMemberMenu(null);
     setPaneMenu(null);
     setWindowMenu(null);
@@ -661,13 +661,16 @@ export default function App() {
   // their OWN button — closeAllMenus alone would fight that (it'd close
   // then the plain !v toggle would immediately reopen it), so these check
   // "is it already open" first and only close-all-others when opening fresh.
-  const toggleNewMenu = useCallback(() => {
-    if (newMenu) setNewMenu(false);
-    else {
-      closeAllMenus();
-      setNewMenu(true);
-    }
-  }, [newMenu, closeAllMenus]);
+  const toggleNewMenu = useCallback(
+    (variant: NewMenuVariant) => {
+      if (newMenu === variant) setNewMenu(null);
+      else {
+        closeAllMenus();
+        setNewMenu(variant);
+      }
+    },
+    [newMenu, closeAllMenus],
+  );
   const toggleRailTeamMenu = useCallback(() => {
     if (railTeamMenu) setRailTeamMenu(false);
     else {
@@ -1478,6 +1481,29 @@ export default function App() {
 
   const catalog = useAddonCatalog();
   const addonEngine = catalog.engine;
+  // The ＋ New menu, offered in the collapsed rail, the expanded sidebar and the tab bar: one component, so the entries match everywhere.
+  const renderNewMenu = (variant: NewMenuVariant) => (
+    <NewMenu
+      variant={variant}
+      t={t as never}
+      open={newMenu === variant}
+      onToggle={() => toggleNewMenu(variant)}
+      onClose={() => setNewMenu(null)}
+      team={team || null}
+      addonEngine={addonEngine}
+      addons={catalog.addons}
+      onTeam={() => setModal({ kind: "team", firstRun: false })}
+      onAgent={() => {
+        setModal({ kind: "agent" });
+        invoke<AgentType[]>("agmsg_spawnable_types")
+          .then(setSpawnTypes)
+          .catch(() => {});
+      }}
+      onShell={() => void openShellTab()}
+      onOpenAddon={openAddonPane}
+      onInstall={() => setModal({ kind: "settings", tab: "addons" })}
+    />
+  );
   // S10: open requests from seats, sent as ordinary messages to the team's
   // app-user. Nothing opens without the click, and the click grants nothing:
   // the pane that opens asks for its own permissions. In the app the rows and
@@ -2319,78 +2345,7 @@ export default function App() {
                 <img className="rail-logo-mark" src="/agmsg-mark.png" alt={t("sidebar.logoAlt")} />
               </button>
 
-              <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
-                <button className="rail-icon-btn" title={t("sidebar.newMenu.trigger")} onClick={toggleNewMenu}>
-                  +
-                </button>
-                {newMenu && (
-                  <div className="new-menu rail-popup">
-                    <button
-                      onClick={() => {
-                        setNewMenu(false);
-                        setModal({ kind: "team", firstRun: false });
-                      }}
-                    >
-                      {t("sidebar.newMenu.team")}
-                    </button>
-                    <button
-                      disabled={!team}
-                      onClick={() => {
-                        setNewMenu(false);
-                        setModal({ kind: "agent" });
-                        invoke<AgentType[]>("agmsg_spawnable_types")
-                          .then(setSpawnTypes)
-                          .catch(() => {});
-                      }}
-                    >
-                      {t("sidebar.newMenu.agent")}
-                    </button>
-                    <button
-                      disabled={!team || !addonEngine.ok}
-                      title={addonEngine.ok ? undefined : addonEngine.reasons.join("; ")}
-                      onClick={() => {
-                        setNewMenu(false);
-                        openAddonPane({ addonId: "builtin:fileview", paneName: "fileview", title: t("addons.menu.fileView") });
-                      }}
-                    >
-                      {t("addons.menu.fileViewEntry")}
-                    </button>
-                    <button
-                      disabled={!team || !addonEngine.ok}
-                      title={addonEngine.ok ? undefined : addonEngine.reasons.join("; ")}
-                      onClick={() => {
-                        setNewMenu(false);
-                        openAddonPane({ addonId: "builtin:diffview", paneName: "diffview", title: t("addons.menu.diffView") });
-                      }}
-                    >
-                      {t("addons.menu.diffViewEntry")}
-                    </button>
-                    {catalog.addons
-                      .filter((a) => !a.builtin && a.enabled)
-                      .flatMap((a) => a.panes.map((p) => ({ a, p })))
-                      .map(({ a, p }) => (
-                        <button
-                          key={`${a.id}/${p.name}`}
-                          disabled={!team || !addonEngine.ok}
-                          onClick={() => {
-                            setNewMenu(false);
-                            openAddonPane({ addonId: a.id, paneName: p.name, title: p.title });
-                          }}
-                        >
-                          {t("addons.menu.addonPane", { title: p.title })}
-                        </button>
-                      ))}
-                    <button
-                      onClick={() => {
-                        setNewMenu(false);
-                        setModal({ kind: "settings" });
-                      }}
-                    >
-                      {t("addons.menu.install")}
-                    </button>
-                  </div>
-                )}
-              </div>
+              {renderNewMenu("rail")}
 
               {team && (
                 <div className="rail-menu-wrap" onClick={(e) => e.stopPropagation()}>
@@ -2668,14 +2623,7 @@ export default function App() {
                 </button>
               </span>
             ))}
-            <button
-              className="tab-new-shell"
-              title={t("tabs.newShell")}
-              aria-label={t("tabs.newShell")}
-              onClick={openShellTab}
-            >
-              <Plus size={13} />
-            </button>
+            {renderNewMenu("tabs")}
             {/* Tabs are all clickable buttons, so they eat the drag region
                 the <nav> itself claims — this dedicated strip is always
                 empty and always draggable, regardless of tab count. */}
@@ -3102,6 +3050,7 @@ export default function App() {
       )}
       {modal?.kind === "settings" && (
         <SettingsModal
+          initialTab={modal.tab}
           onClose={() => setModal(null)}
           terminalFontSize={terminalFontSize}
           onTerminalFontSizeChange={setTerminalFontSize}
@@ -3109,6 +3058,7 @@ export default function App() {
           onTimezoneChange={setTimezone}
           catalog={catalog}
           openAddonPanesOf={(addonId) => panes.filter((p) => p.kind === "addon" && p.addon?.addonId === addonId).length}
+          onOpenAddonPane={openAddonPane}
         />
       )}
       {modal?.kind === "closeWindow" &&

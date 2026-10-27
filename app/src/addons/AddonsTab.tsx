@@ -1,21 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AddonsSettings } from "./AddonsSettings";
+import { AddonsSettings, openNowRef, type InstalledNotice } from "./AddonsSettings";
 import { AddonsTabLive } from "./AddonsTabLive";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
 import type { Catalog } from "./catalog";
 import { mockSnapshot, mockStage } from "./mock";
-import type { AddonsSnapshot, FetchProgress, InstallError, StagedInstall } from "./types";
+import type { AddonPaneRef, AddonsSnapshot, FetchProgress, InstallError, StagedInstall } from "./types";
 
 // Container for Settings → Add-ons. Holds the snapshot in local state seeded
 // from the mock module; the wiring later replaces the seed and the callbacks
 // with the Tauri commands, and the screens do not change.
-export function AddonsTab(props: { catalog: Catalog; openPanesOf: (addonId: string) => number }) {
-  return props.catalog.live ? <AddonsTabLive catalog={props.catalog} openPanesOf={props.openPanesOf} /> : <MockAddonsTab catalog={props.catalog} />;
+export function AddonsTab(props: { catalog: Catalog; openPanesOf: (addonId: string) => number; onOpenPane?: (ref: AddonPaneRef) => void }) {
+  return props.catalog.live ? (
+    <AddonsTabLive catalog={props.catalog} openPanesOf={props.openPanesOf} onOpenPane={props.onOpenPane} />
+  ) : (
+    <MockAddonsTab catalog={props.catalog} onOpenPane={props.onOpenPane} />
+  );
 }
 
-function MockAddonsTab(props: { catalog: Catalog }) {
+function MockAddonsTab(props: { catalog: Catalog; onOpenPane?: (ref: AddonPaneRef) => void }) {
   const { catalog } = props;
+  const [installedNotice, setInstalledNotice] = useState<InstalledNotice | null>(null);
   const { t } = useTranslation();
   const tt = t as never;
   const [local, setSnapshot] = useState<AddonsSnapshot>(mockSnapshot);
@@ -77,6 +82,11 @@ function MockAddonsTab(props: { catalog: Catalog }) {
         onRemove={setRemoving}
         onOpenRequestsChange={(v) => setSnapshot((s) => ({ ...s, openRequests: v }))}
         onLoadFromFolder={() => {}}
+        installedNotice={installedNotice}
+        onOpenNow={(n) => {
+          const ref = openNowRef(n);
+          if (ref) props.onOpenPane?.(ref);
+        }}
       />
       {progress && <FetchProgressView t={tt} progress={progress} onCancel={cancelFetch} />}
       {staged && (
@@ -101,6 +111,7 @@ function MockAddonsTab(props: { catalog: Catalog }) {
                 },
               ],
             }));
+            setInstalledNotice({ kind: staged.from ? "updated" : "installed", addonId: staged.addonId, title: staged.title, paneName: staged.panes[0]?.name });
             setStaged(null);
           }}
         />

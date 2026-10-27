@@ -43,6 +43,8 @@ export function Modal(props: {
   children: React.ReactNode;
   onClose?: () => void;
   busy?: boolean;
+  /** A wider card whose direct `.modal-body` child scrolls while the title and `.modal-actions` stay put. */
+  wide?: boolean;
 }) {
   const { onClose } = props;
   useEffect(() => {
@@ -56,7 +58,7 @@ export function Modal(props: {
 
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
-      <div className={props.busy ? "modal busy" : "modal"} onClick={(e) => e.stopPropagation()}>
+      <div className={`modal${props.busy ? " busy" : ""}${props.wide ? " wide" : ""}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal-title">{props.title}</div>
         {props.children}
       </div>
@@ -641,6 +643,8 @@ export function stepFontSize(
 }
 
 export function SettingsModal(props: {
+  /** The tab shown first; "Install add-ons…" in the + menu opens it on Add-ons. */
+  initialTab?: "general" | "addons";
   onClose: () => void;
   terminalFontSize: number;
   onTerminalFontSizeChange: (size: number) => void;
@@ -648,6 +652,8 @@ export function SettingsModal(props: {
   onTimezoneChange: (timezone: string) => void;
   catalog: Catalog;
   openAddonPanesOf: (addonId: string) => number;
+  /** "Open now" after an install: opens the pane through the normal grant flow. */
+  onOpenAddonPane?: (ref: { addonId: string; paneName: string; title: string }) => void;
 }) {
   const { t, i18n } = useTranslation();
   // Local draft text, not a number bound directly to props.terminalFontSize
@@ -697,9 +703,9 @@ export function SettingsModal(props: {
     // timezoneText/props.timezone are read via closure, not deps, so this
     // doesn't re-fire on every keystroke or timezone change.
   }, [autoLabel]);
-  const [tab, setTab] = useState<"general" | "addons">("general");
+  const [tab, setTab] = useState<"general" | "addons">(props.initialTab ?? "general");
   return (
-    <Modal title={t("modal.settings.title")} onClose={props.onClose}>
+    <Modal title={t("modal.settings.title")} onClose={props.onClose} wide>
       <div className="settings-tabs" role="tablist">
         {(["general", "addons"] as const).map((k) => (
           <button
@@ -714,8 +720,20 @@ export function SettingsModal(props: {
           </button>
         ))}
       </div>
+      <div className="modal-body">
       {tab === "addons" ? (
-        <AddonsTab catalog={props.catalog} openPanesOf={props.openAddonPanesOf} />
+        <AddonsTab
+          catalog={props.catalog}
+          openPanesOf={props.openAddonPanesOf}
+          onOpenPane={
+            props.onOpenAddonPane
+              ? (ref) => {
+                  props.onOpenAddonPane?.(ref);
+                  props.onClose();
+                }
+              : undefined
+          }
+        />
       ) : (
       <>
       <label>
@@ -821,6 +839,7 @@ export function SettingsModal(props: {
       </label>
       </>
       )}
+      </div>
       <div className="modal-actions">
         <button type="button" className="primary" onClick={props.onClose}>
           {t("common.close")}

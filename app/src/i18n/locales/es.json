@@ -55,7 +55,8 @@
     "roomLabel": "# sala del equipo",
     "close": "×",
     "newShell": "Nueva pestaña de shell",
-    "shellLabel": "Shell"
+    "shellLabel": "Shell",
+    "newMenu": "Nueva pestaña o panel"
   },
   "room": {
     "loadingMore": "Cargando más…",
@@ -266,28 +267,34 @@
     "engineOff": "Add-ons are not available on this computer yet. A safety check did not pass with this system's web engine. Your other features are not affected.",
     "engineReasons": "Reason: {{reasons}}",
     "builtin": {
-      "title": "Built in"
+      "title": "Built in",
+      "source": "integrado"
     },
     "installed": {
       "title": "Installed",
       "empty": "No add-ons installed.",
       "checkUpdates": "Check for updates",
-      "remove": "Remove"
+      "remove": "Remove",
+      "doneNotice": "Se instaló {{title}}. Ábrelo desde el + de la parte superior de los paneles.",
+      "updatedNotice": "Se actualizó {{title}}.",
+      "openNow": "Abrir ahora"
     },
     "install": {
-      "label": "Add-on repository",
-      "placeholder": "owner/repo or owner/repo@ref",
+      "placeholder": "p. ej. fujibee/agmsg-addon-sample",
       "button": "Install…",
-      "later": "Installing from GitHub isn't available in this build yet."
+      "later": "Installing from GitHub isn't available in this build yet.",
+      "heading": "Instalar desde GitHub",
+      "help": "Escribe el repositorio de un complemento de agmsg: owner/repo, o owner/repo@tag para una versión fija."
     },
     "openRequests": {
-      "label": "Solicitudes de apertura de los seats",
-      "show": "Mostrar",
       "off": "Desactivado",
-      "copy": "Copiar el texto para tus seats",
+      "copy": "Copiar instrucciones para agentes",
       "copied": "Copiado.",
       "copyFailed": "No se pudo copiar.",
-      "copyHint": "Pégalo en un seat para que sepa cómo pedir a la app que abra un panel."
+      "title": "Solicitudes de agentes",
+      "explain": "Permite que los agentes de tus equipos pidan a la app abrir un panel, por ejemplo un diff de su trabajo. Una barra muestra la solicitud; no se abre nada hasta que pulses Abrir.",
+      "on": "Activado",
+      "copyHelp": "Los agentes necesitan conocer el formato de la solicitud. Cópialo y pégaselo una vez."
     },
     "developer": {
       "title": "Developer",
@@ -295,7 +302,8 @@
       "loaded": "Developer add-ons",
       "none": "No developer add-ons loaded.",
       "reload": "Reload from folder",
-      "remove": "Remove"
+      "remove": "Remove",
+      "explain": "¿Creas tu propio complemento? Cárgalo desde una carpeta de este equipo. No se instala: se ejecuta desde la carpeta y Recargar aplica tus cambios."
     },
     "permission": {
       "none": "Runs with no permissions",
@@ -309,8 +317,7 @@
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke",
-      "none": "No permissions given yet."
+      "revoke": "Revoke"
     },
     "card": {
       "grantAria": "Permission request",
@@ -323,7 +330,11 @@
       "notNow": "Not now",
       "denied": "{{path}} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
       "chooseAnother": "Choose another…",
-      "allowAlwaysLater": "Not available yet"
+      "allowAlwaysLater": "Not available yet",
+      "can": "Puede",
+      "allowed": "Permitido",
+      "nothingYet": "nada todavía",
+      "installedOn": "instalado el {{date}}"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -376,12 +387,11 @@
       "details": "Details",
       "fullSha": "Commit: {{sha}}",
       "archive": "Archive SHA-256: {{hash}}",
-      "panes": "Adds: {{names}}",
-      "canTitle": "This add-on can:",
+      "canTitle": "Este complemento puede",
       "new": "New:",
       "sends": "It can send what it reads to {{hosts}}.",
       "sendsAny": "It can send what it reads to any site on the internet.",
-      "never": "It can never: run programs, use the app's controls, or read anything you have not chosen.",
+      "never": "Ejecutar programas, usar los controles de la app o leer nada que no hayas elegido.",
       "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
       "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
       "install": "Install",
@@ -391,7 +401,15 @@
       "paneWider": "{{pane}} can reach more sites",
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
-      "paneRemoved": "{{pane}} is removed (its saved access is dropped)"
+      "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
+      "neverTitle": "Nunca puede",
+      "source_one": "de {{repo}} · {{sha}} · añade {{count}} panel",
+      "source_many": "de {{repo}} · {{sha}} · añade {{count}} paneles",
+      "source_other": "de {{repo}} · {{sha}} · añade {{count}} paneles",
+      "sourceUpdate_one": "de {{repo}} · {{from}} → {{to}} · {{count}} panel",
+      "sourceUpdate_many": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles",
+      "sourceUpdate_other": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles",
+      "panes": "Añade: {{names}}"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -445,7 +463,7 @@
       "fileView": "File view",
       "diffView": "Diff view",
       "addonPane": "Add-on pane ▸ {{title}}",
-      "install": "Install an add-on…"
+      "install": "Instalar complementos…"
     },
     "listFailed": "Couldn't read the add-on list: {{message}}",
     "listRetry": "Try again",
@@ -453,6 +471,12 @@
     "env": {
       "found": "Esta carpeta contiene un archivo .env.",
       "foundNetwork": "Esta carpeta contiene un archivo .env. Este complemento usa la red, por lo que no puede leerlo."
+    },
+    "intro": "Los complementos añaden paneles a la app. Solo pueden leer lo que tú permitas, y puedes retirarlo aquí.",
+    "group": {
+      "problems_one": "{{count}} problema",
+      "problems_many": "{{count}} problemas",
+      "problems_other": "{{count}} problemas"
     }
   }
 }

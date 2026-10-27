@@ -55,7 +55,8 @@
     "roomLabel": "# salle d'équipe",
     "close": "×",
     "newShell": "Nouvel onglet shell",
-    "shellLabel": "Shell"
+    "shellLabel": "Shell",
+    "newMenu": "Nouvel onglet ou panneau"
   },
   "room": {
     "loadingMore": "Chargement…",
@@ -266,28 +267,34 @@
     "engineOff": "Add-ons are not available on this computer yet. A safety check did not pass with this system's web engine. Your other features are not affected.",
     "engineReasons": "Reason: {{reasons}}",
     "builtin": {
-      "title": "Built in"
+      "title": "Built in",
+      "source": "intégré"
     },
     "installed": {
       "title": "Installed",
       "empty": "No add-ons installed.",
       "checkUpdates": "Check for updates",
-      "remove": "Remove"
+      "remove": "Remove",
+      "doneNotice": "{{title}} est installé. Ouvrez-le depuis le + en haut des panneaux.",
+      "updatedNotice": "{{title}} est mis à jour.",
+      "openNow": "Ouvrir maintenant"
     },
     "install": {
-      "label": "Add-on repository",
-      "placeholder": "owner/repo or owner/repo@ref",
+      "placeholder": "p. ex. fujibee/agmsg-addon-sample",
       "button": "Install…",
-      "later": "Installing from GitHub isn't available in this build yet."
+      "later": "Installing from GitHub isn't available in this build yet.",
+      "heading": "Installer depuis GitHub",
+      "help": "Saisissez le dépôt d'un module agmsg : owner/repo, ou owner/repo@tag pour une version fixe."
     },
     "openRequests": {
-      "label": "Demandes d'ouverture des seats",
-      "show": "Afficher",
       "off": "Désactivé",
-      "copy": "Copier le texte pour vos seats",
+      "copy": "Copier les instructions pour les agents",
       "copied": "Copié.",
       "copyFailed": "Copie impossible.",
-      "copyHint": "Collez-le à un seat pour qu'il sache comment demander à l'app d'ouvrir un volet."
+      "title": "Demandes des agents",
+      "explain": "Permet aux agents de vos équipes de demander à l'app d'ouvrir un panneau, par exemple un diff de leur travail. Une barre affiche la demande ; rien ne s'ouvre tant que vous ne cliquez pas sur Ouvrir.",
+      "on": "Activé",
+      "copyHelp": "Les agents doivent connaître le format de la demande. Copiez-le et collez-le-leur une fois."
     },
     "developer": {
       "title": "Developer",
@@ -295,7 +302,8 @@
       "loaded": "Developer add-ons",
       "none": "No developer add-ons loaded.",
       "reload": "Reload from folder",
-      "remove": "Remove"
+      "remove": "Remove",
+      "explain": "Vous créez votre propre module ? Chargez-le depuis un dossier de cet ordinateur. Il n'est pas installé : il s'exécute depuis le dossier, et Recharger prend en compte vos modifications."
     },
     "permission": {
       "none": "Runs with no permissions",
@@ -309,8 +317,7 @@
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke",
-      "none": "No permissions given yet."
+      "revoke": "Revoke"
     },
     "card": {
       "grantAria": "Permission request",
@@ -323,7 +330,11 @@
       "notNow": "Not now",
       "denied": "{{path}} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
       "chooseAnother": "Choose another…",
-      "allowAlwaysLater": "Not available yet"
+      "allowAlwaysLater": "Not available yet",
+      "can": "Peut",
+      "allowed": "Autorisé",
+      "nothingYet": "rien pour l'instant",
+      "installedOn": "installé le {{date}}"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
@@ -376,12 +387,11 @@
       "details": "Details",
       "fullSha": "Commit: {{sha}}",
       "archive": "Archive SHA-256: {{hash}}",
-      "panes": "Adds: {{names}}",
-      "canTitle": "This add-on can:",
+      "canTitle": "Ce module peut",
       "new": "New:",
       "sends": "It can send what it reads to {{hosts}}.",
       "sendsAny": "It can send what it reads to any site on the internet.",
-      "never": "It can never: run programs, use the app's controls, or read anything you have not chosen.",
+      "never": "Exécuter des programmes, utiliser les commandes de l'app ou lire quoi que ce soit que vous n'avez pas choisi.",
       "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
       "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
       "install": "Install",
@@ -391,7 +401,15 @@
       "paneWider": "{{pane}} can reach more sites",
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
-      "paneRemoved": "{{pane}} is removed (its saved access is dropped)"
+      "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
+      "neverTitle": "Il ne peut jamais",
+      "source_one": "depuis {{repo}} · {{sha}} · ajoute {{count}} panneau",
+      "source_many": "depuis {{repo}} · {{sha}} · ajoute {{count}} panneaux",
+      "source_other": "depuis {{repo}} · {{sha}} · ajoute {{count}} panneaux",
+      "sourceUpdate_one": "depuis {{repo}} · {{from}} → {{to}} · {{count}} panneau",
+      "sourceUpdate_many": "depuis {{repo}} · {{from}} → {{to}} · {{count}} panneaux",
+      "sourceUpdate_other": "depuis {{repo}} · {{from}} → {{to}} · {{count}} panneaux",
+      "panes": "Ajoute : {{names}}"
     },
     "remove": {
       "title": "Remove {{title}}?",
@@ -445,7 +463,7 @@
       "fileView": "File view",
       "diffView": "Diff view",
       "addonPane": "Add-on pane ▸ {{title}}",
-      "install": "Install an add-on…"
+      "install": "Installer des modules…"
     },
     "listFailed": "Couldn't read the add-on list: {{message}}",
     "listRetry": "Try again",
@@ -453,6 +471,12 @@
     "env": {
       "found": "Ce dossier contient un fichier .env.",
       "foundNetwork": "Ce dossier contient un fichier .env. Ce module complémentaire utilise le réseau et ne pourra donc pas le lire."
+    },
+    "intro": "Les modules ajoutent des panneaux à l'app. Ils ne peuvent lire que ce que vous autorisez, et vous pouvez le retirer ici.",
+    "group": {
+      "problems_one": "{{count}} problème",
+      "problems_many": "{{count}} problèmes",
+      "problems_other": "{{count}} problèmes"
     }
   }
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AddonsSettings } from "./AddonsSettings";
+import { AddonsSettings, nextOpenRequests } from "./AddonsSettings";
 import { GrantCard } from "./GrantCard";
 import { mockEngine, mockEngineOff, mockGrantNeeds, mockSnapshot } from "./mock";
 import en from "../i18n/locales/en.json";
@@ -24,29 +24,95 @@ const base: Props = {
 const render = (props: Partial<Props>) => renderToStaticMarkup(createElement(AddonsSettings, { ...base, ...props }));
 
 describe("AddonsSettings", () => {
-  it("has a button that copies the text for seats, with a hint", () => {
+  it("has a copy button styled like the other buttons, with a help line above it", () => {
     const html = render({});
-    expect(html).toContain("addons.openRequests.copy]");
-    expect(html).toContain("addons.openRequests.copyHint");
+    expect(html).toMatch(/<button type="button" class="addon-btn">\[addons\.openRequests\.copy\]/);
+    expect(html).toContain("addons.openRequests.copyHelp");
+    expect(html).toContain("addons.openRequests.explain");
+  });
+  it("starts with one intro line and a labelled install field with help, example placeholder and a primary button", () => {
+    const html = render({});
+    expect(html.indexOf("addons.intro")).toBeLessThan(html.indexOf("addons.install.heading"));
+    expect(html).toContain('<label for="addon-install-input">[addons.install.heading]');
+    expect(html).toContain("addons.install.help");
+    expect(html).toContain('placeholder="[addons.install.placeholder]"');
+    expect(html).toMatch(/<button type="submit" class="addon-btn primary" disabled=""/);
   });
   it("shows built-ins, installed add-ons with Revoke, and a disabled Install for an empty input", () => {
     const html = render({});
     expect(html).toContain("File view");
     expect(html).toContain("shinshin86/agmsg-office");
     expect(html).toContain("addons.grant.revoke");
-    expect(html).toMatch(/<button type="submit" disabled=""/);
+  });
+  it("each card has labelled Can and Allowed rows, with chips for permissions and grants", () => {
+    const html = render({});
+    expect(html).toContain("addons.card.can]");
+    expect(html).toContain("addons.card.allowed]");
+    expect(html).toContain('class="addon-chip"');
+    expect(html).toContain('class="addon-chip ok"');
+  });
+  it("groups: Installed is open, Built in / Requests / Developer start closed, each with a count", () => {
+    const html = render({});
+    expect(html).toMatch(/<details class="addon-group addon-group-installed" open="">/);
+    for (const g of ["builtin", "requests", "developer"]) expect(html).toMatch(new RegExp(`<details class="addon-group addon-group-${g}">`));
+    expect(html).toMatch(/addons\.builtin\.title\]<\/span><span class="addon-count">2</);
   });
   it("a built-in's remembered folder grant is listed with its own Revoke", () => {
     const html = render({});
-    const builtin = html.slice(html.indexOf("addons.builtin.title"), html.indexOf("addons.installed.title"));
+    const builtin = html.slice(html.indexOf("addon-group-builtin"), html.indexOf("addon-group-requests"));
     expect(builtin).toContain("/Users/me/proj/agmsg");
     expect(builtin).toContain("addons.grant.revoke");
     const only = render({ snapshot: { ...mockSnapshot, grants: [] } });
-    const none = only.slice(only.indexOf("addons.builtin.title"), only.indexOf("addons.installed.title"));
-    expect(none).toContain("addons.grant.none");
+    const none = only.slice(only.indexOf("addon-group-builtin"), only.indexOf("addon-group-requests"));
+    expect(none).toContain("addons.card.nothingYet");
   });
-  it("keeps Developer collapsed (no open attribute)", () => {
-    expect(render({})).toMatch(/<details class="addon-developer">/);
+  it("a failing add-on is visible while its group is closed: the group opens and the summary says how many", () => {
+    const bad = (id: string) => mockSnapshot.addons.map((a) => (a.id === id ? { ...a, digestOk: false } : a));
+    const builtin = render({ snapshot: { ...mockSnapshot, addons: bad("builtin:fileview") } });
+    expect(builtin).toMatch(/<details class="addon-group addon-group-builtin has-problem" open="">/);
+    expect(builtin).toMatch(/addon-group-builtin[^]*?<span class="addon-problem">\[addons\.group\.problems \{&quot;count&quot;:1\}\]<\/span><\/summary>/);
+    const installed = render({ snapshot: { ...mockSnapshot, addons: bad("shinshin86/agmsg-office") } });
+    expect(installed).toMatch(/addon-group-installed has-problem[^>]*>[^]*?addon-problem/);
+    // nothing wrong: no badge, Built in stays closed
+    expect(render({})).not.toContain("addon-problem");
+    expect(render({})).toMatch(/<details class="addon-group addon-group-builtin">/);
+  });
+  it("the card's source line carries the installed date for an installed add-on, not for a built-in", () => {
+    const html = render({});
+    expect(html).toContain("addons.card.installedOn");
+    expect(html).toContain("2026-10-20");
+    const builtin = html.slice(html.indexOf("addon-group-builtin"), html.indexOf("addon-group-requests"));
+    expect(builtin).not.toContain("addons.card.installedOn");
+  });
+  it("Requests from agents is a switch on the stored setting, not a select", () => {
+    const on = render({});
+    expect(on).toContain('role="switch"');
+    expect(on).toContain('aria-checked="true"');
+    expect(on).toContain("addons.openRequests.on]");
+    expect(on).not.toContain("<select");
+    const off = render({ snapshot: { ...mockSnapshot, openRequests: "off" } });
+    expect(off).toContain('aria-checked="false"');
+    expect(off).toContain("addons.openRequests.off]");
+    expect(nextOpenRequests("show")).toBe("off");
+    expect(nextOpenRequests("off")).toBe("show");
+  });
+  it("Developer explains itself and lists loaded folders inside the same group", () => {
+    const dev = { ...mockSnapshot.addons[0], id: "dev:x", builtin: false, dev: { label: "my-folder", copy: "dev copy 1" } };
+    const html = render({ snapshot: { ...mockSnapshot, addons: [...mockSnapshot.addons, dev] } });
+    const group = html.slice(html.indexOf("addon-group-developer"));
+    expect(group).toContain("addons.developer.explain");
+    expect(group).toContain("my-folder");
+    expect(group).not.toContain("addons.developer.loaded");
+  });
+  it("right after an install: a green notice with Open now, and that add-on's card outlined green", () => {
+    const id = "shinshin86/agmsg-office";
+    const html = render({ installedNotice: { kind: "installed", addonId: id, title: "Office", paneName: "office" }, onOpenNow: noop });
+    expect(html).toContain('class="addon-toast"');
+    expect(html).toContain("addons.installed.doneNotice");
+    expect(html).toContain("addons.installed.openNow");
+    expect(html.match(/addon-acard new/g)?.length).toBe(1);
+    expect(render({})).not.toContain("addon-acard new");
+    expect(render({ installedNotice: { kind: "updated", addonId: id, title: "Office" } })).toContain("addons.installed.updatedNotice");
   });
   it("shows an install error inline", () => {
     const html = render({ installError: { code: "ref_not_found", repo: "a/b", ref: "v9" } });

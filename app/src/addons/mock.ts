@@ -114,17 +114,20 @@ export const mockInstallErrors: InstallError[] = [
   { code: "already_installed", sha: "67722c2" },
 ];
 
+/** The add-on's own title (its conf), which is not the repository name: "agmsg-addon-sample" → "Sample". */
+const mockTitle = (repo: string) => repo.replace(/^agmsg-(addon-)?/, "").replace(/^./, (c) => c.toUpperCase()) || repo;
+
 /** What a successful fetch of `owner/repo` stages, on mock data. */
 export function mockStage(owner: string, repo: string): StagedInstall {
   return {
     addonId: `${owner}/${repo}`,
-    title: repo,
+    title: mockTitle(repo),
     sha: "d41d8cd98f00b204e9800998ecf8427e1a2b3c4d",
     archiveSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     panes: [
       {
         name: repo,
-        title: repo,
+        title: mockTitle(repo),
         permissions: ["files:read"],
         network: { kind: "none" },
         opens: "path",
