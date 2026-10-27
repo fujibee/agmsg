@@ -120,7 +120,13 @@ compat_get_cmdline() {
       fi
       ;;
     *)
-      ps -o args= -p "$pid" 2>/dev/null
+      # -ww: without it procps-ng (Linux) ps cuts `args` to $COLUMNS even
+      # when stdout is a pipe, and Claude Code hands every hook the
+      # terminal width in COLUMNS. A truncated argv no longer names the
+      # script or ends with its arguments, so a live engine read as
+      # "unknown". -ww (unlimited width) is also accepted by BSD/macOS ps.
+      # The other `ps ... args=` readers pass -ww too.
+      ps -ww -o args= -p "$pid" 2>/dev/null
       ;;
   esac
 }

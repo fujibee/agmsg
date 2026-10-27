@@ -1019,3 +1019,52 @@ legacy_skip_systemd_probe_name() {
   printf '%s\n' "$output" | grep -q -F -- "engine inactive under systemd"
   printf '%s\n' "$output" | grep -q -F -- "systemctl --user restart agmsg-remote-sync-testteam.service"
 }
+
+# A narrow COLUMNS must not truncate the argv we authenticate the engine by.
+#
+# Claude Code exports the terminal width as COLUMNS into every hook, and
+# procps-ng `ps -o args=` cuts its output to that width even into a pipe. The
+# cut argv no longer named the engine script nor ended with ` run --team
+# <team>`, so a healthy systemd engine read as `unknown` and `sync start`
+# refused with rc=1. These use the REAL ps -- a ps fixture would answer in
+# full whatever flags it was given and hide exactly this.
+narrow_columns_precondition() {
+  # Without the fix this width really does cut this engine's argv; if it ever
+  # stops doing so the tests below prove nothing, so say that instead.
+  local full narrow
+  full="$(ps -ww -o args= -p "$ENGINE_PID")"
+  narrow="$(COLUMNS=40 ps -o args= -p "$ENGINE_PID")"
+  [ "${#full}" -gt 40 ] && [ "$narrow" != "$full" ]
+}
+
+@test "compat_get_cmdline returns the full argv under a narrow COLUMNS" {
+  start_matching_engine
+  narrow_columns_precondition || skip "ps here does not truncate args to COLUMNS"
+  run env COLUMNS=40 bash -c '. "$1/lib/compat.sh"; compat_get_cmdline "$2"' _ "$SCRIPTS" "$ENGINE_PID"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$SCRIPTS/internal/remote-sync.mjs run --team testteam" ]]
+}
+
+@test "status: a narrow COLUMNS does not turn a systemd engine into unknown" {
+  start_matching_engine
+  narrow_columns_precondition || skip "ps here does not truncate args to COLUMNS"
+  rm -f "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+  local fake_systemctl
+  fake_systemctl="$(write_systemd_show_fixture active "$ENGINE_PID")"
+
+  run env COLUMNS=40 AGMSG_SYSTEMCTL="$fake_systemctl" bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "connected (engine running, pid $ENGINE_PID)"
+
+  run env COLUMNS=40 AGMSG_SYSTEMCTL="$fake_systemctl" bash "$SCRIPTS/remote.sh" sync start testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "already running (pid $ENGINE_PID)"
+}
+
+@test "status: a narrow COLUMNS does not turn a pidfile engine into stale" {
+  start_matching_engine
+  narrow_columns_precondition || skip "ps here does not truncate args to COLUMNS"
+  run env COLUMNS=40 bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"connected (engine running, pid $ENGINE_PID)"* ]]
+}
