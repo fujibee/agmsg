@@ -158,7 +158,9 @@ teardown() {
   printf '%s\n' '#!/usr/bin/env bash' 'echo user-owned' > "$shim"
   local before; before="$(cat "$shim")"
 
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  refute grep -qF "agy-tui" <(printf '%s' "$output")
   [ "$(cat "$shim")" = "$before" ]
 
   rm "$shim"
@@ -176,6 +178,18 @@ teardown() {
   local owned_before; owned_before="$(cat "$shim")"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
   [ "$(cat "$shim")" = "$owned_before" ]
+}
+
+@test "install: a second install's Antigravity TUI shim left owned by the first prints no line about it (#1815)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  local before; before="$(cat "$shim")"
+  grep -Fq "# agmsg-shim-owner: $SK/scripts/drivers/types/antigravity/agy-tui.sh" "$shim"
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  [ "$status" -eq 0 ]
+  refute grep -qF "agy-tui" <(printf '%s' "$output")
+  [ "$(cat "$shim")" = "$before" ]  # still the first install's, untouched
 }
 
 @test "install: Antigravity TUI shim replaces its symlink without writing through it" {
