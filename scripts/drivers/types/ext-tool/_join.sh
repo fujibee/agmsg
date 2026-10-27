@@ -55,12 +55,10 @@ agmsg_join_type_parse_args() {
     fi
     {
       echo "agmsg: '$tool' is not configured for '$AGENT_ID' in team '$TEAM' yet."
-      if [ -f "$driver_dir/SETUP.md" ]; then
-        echo "  Follow $driver_dir/SETUP.md to configure it, then join again."
-      else
-        echo "  See what it still needs: bash \"$SKILL_DIR/scripts/ext-tool.sh\" setup $TEAM $AGENT_ID $tool status"
-        echo "  Save its settings with: bash \"$SKILL_DIR/scripts/ext-tool.sh\" setup $TEAM $AGENT_ID $tool save [args...], then join again."
-      fi
+      [ ! -f "$driver_dir/SETUP.md" ] || echo "  Follow $driver_dir/SETUP.md to configure it, or:"
+      echo "  See what it still needs: bash \"$SKILL_DIR/scripts/ext-tool.sh\" setup $TEAM $AGENT_ID $tool status"
+      echo "  Save its settings, adding any values status lists as missing: bash \"$SKILL_DIR/scripts/ext-tool.sh\" setup $TEAM $AGENT_ID $tool save"
+      echo "  Then join again."
       echo "  See how it's asked for things: bash \"$SKILL_DIR/scripts/ext-tool.sh\" usage $tool"
     } >&2
     return 1

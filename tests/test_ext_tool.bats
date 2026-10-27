@@ -136,6 +136,8 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 1 ]
   grep -qF "SETUP.md" <<<"$output"
   grep -qF "not configured for 'bot'" <<<"$output"
+  # Names the save step too, so a reader who skips SETUP.md is not stuck.
+  grep -qF "setup et-team bot faketool save" <<<"$output"
   grep -qF "ext-tool.sh\" usage faketool" <<<"$output"
   # Refused, not partially joined: no registration was written.
   [ ! -f "$TEST_SKILL_DIR/teams/et-team/config.json" ] || \
