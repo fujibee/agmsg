@@ -154,7 +154,6 @@ NATIVE_MONITOR_REASON=""
 NATIVE_AGMSGD_STATE=""
 NATIVE_AGMSGD_REASON=""
 if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
-   && _native_target="$(agmsg_claude_code_native_target 2>/dev/null)" \
    && [ -r "$SKILL_DIR/scripts/lib/daemon-state.sh" ]; then
   # shellcheck source=scripts/lib/daemon-state.sh
   . "$SKILL_DIR/scripts/lib/daemon-state.sh"
@@ -173,11 +172,17 @@ if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
   _native_health="${AGMSGD_HEALTH:-unknown}"
   case "$_native_health" in *[!a-z_]*|'') _native_health=unknown ;; esac
   if [ "${AGMSGD_DESIRED:-}" != on ]; then
-    # agmsgd turned off, or this project chose another mode: the project's own
-    # mode decides (the skill reads delivery.sh status).
-    if [ "${AGMSGD_HEALTH:-}" != ready ]; then
+    # agmsgd turned off (even while the owner is still shutting down), or this
+    # project chose another mode: the project's own mode decides (the skill reads
+    # delivery.sh status), whatever the daemon's health.
+    if [ "${AGMSGD_HEALTH:-}" = ready ]; then
+      NATIVE_MONITOR_REASON=agmsgd_not_enabled
+    else
       NATIVE_MONITOR_REASON="agmsgd_not_ready_$_native_health"
     fi
+  elif ! _native_target="$(agmsg_claude_code_native_target 2>/dev/null)"; then
+    NATIVE_AGMSGD_STATE=blocked
+    NATIVE_AGMSGD_REASON=messaging_destination_unusable
   elif ! agmsg_claude_code_native_storage_ready; then
     NATIVE_AGMSGD_STATE=blocked
     NATIVE_AGMSGD_REASON=native_storage_not_ready
@@ -188,8 +193,9 @@ if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
       agmsg_role_session_mark_messaging_blocked "$team" "$NAME" "${NATIVE_MONITOR_REASON:-$NATIVE_AGMSGD_REASON}" "$BARE_SID" || true
     done <<< "$TEAMS"
   else
-    # agmsgd is on. Record the destination whether or not it is running: a
-    # stopped agmsgd delivers to it as soon as it starts, with no restart.
+    # agmsgd is on and this session has a usable destination. Record it whether
+    # or not agmsgd is running: a stopped agmsgd delivers to it as soon as it
+    # starts, with no restart.
     NATIVE_DELIVERY=1
     while IFS= read -r team; do
       [ -z "$team" ] && continue

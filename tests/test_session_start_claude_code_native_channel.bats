@@ -380,6 +380,30 @@ STUB
   [ "$(agmsg_role_session_get team alice messaging_blocked)" = agmsgd_not_ready_stopped ]
 }
 
+@test "actas-claim: agmsgd on but no usable messaging destination -> delivery=agmsgd state=blocked, no Monitor (#1810)" {
+  _mark_daemon_ready
+  run env -u CLAUDE_CODE_MESSAGING_SOCKET AGMSG_AGENT_PID=$$ \
+    bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice sid-nosock
+  [ "$status" -eq 0 ]
+  grep -qx 'delivery=agmsgd state=blocked reason=messaging_destination_unusable' <<< "$output"
+  refute grep -q 'delivery=monitor' <<< "$output"
+  run env CLAUDE_CODE_MESSAGING_SOCKET="not-a-socket" AGMSG_AGENT_PID=$$ \
+    bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice sid-nosock
+  grep -qx 'delivery=agmsgd state=blocked reason=messaging_destination_unusable' <<< "$output"
+}
+
+@test "actas-claim: agmsgd turned off while its owner is still ready never declares native delivery (#1810)" {
+  _mark_daemon_ready
+  sqlite3 "$RUN_DIR/install.db" "UPDATE daemon_intent SET desired='off';"
+  run env AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET=uds:/tmp/cc-socks/disabling.sock \
+    bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice sid-disabling
+  [ "$status" -eq 0 ]
+  refute grep -qx 'delivery=native' <<< "$output"
+  grep -qx 'delivery=monitor reason=agmsgd_not_enabled' <<< "$output"
+  source "$SCRIPTS/lib/role-session.sh"
+  [ "$(agmsg_role_session_get team alice messaging_blocked)" = agmsgd_not_enabled ]
+}
+
 @test "actas-claim: a restart becoming ready on the bounded recheck uses native delivery" {
   _mark_daemon_ready
   cat > "$SCRIPTS/lib/daemon-state.sh" <<'STUB'
