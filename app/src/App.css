@@ -227,7 +227,7 @@ select:focus {
 .new-menu button:hover {
   background: var(--bg);
 }
-.new-menu button:focus-visible {
+.new-menu button.is-active {
   background: var(--bg);
   outline: 1px solid var(--accent);
   outline-offset: -1px;

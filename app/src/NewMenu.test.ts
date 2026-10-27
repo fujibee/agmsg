@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { NewMenu, newMenuEntries, nextIndex, type NewMenuVariant } from "./NewMenu";
+import { NewMenu, newMenuEntries, nextIndex, placeMenu, type NewMenuVariant } from "./NewMenu";
 import { openNowRef } from "./addons/AddonsSettings";
 import { mockEngine, mockEngineOff, mockSnapshot } from "./addons/mock";
 
@@ -81,6 +81,26 @@ describe("the + menu in the tab bar", () => {
     expect(nextIndex(enabled, 0, -1)).toBe(3);
     expect(nextIndex(enabled, -1, 1)).toBe(0);
     expect(nextIndex([false, false], 0, 1)).toBe(-1);
+  });
+});
+
+describe("where the tab-bar menu goes", () => {
+  const vp = { w: 1000, h: 700 };
+  it("sits under its button when there is room", () => {
+    expect(placeMenu({ left: 120, bottom: 40 }, 220, vp)).toEqual({ left: 120, top: 42, maxHeight: 700 - 42 - 8 });
+  });
+  it("is pulled left so its right edge stays inside the window (+ near the right edge)", () => {
+    const p = placeMenu({ left: 950, bottom: 40 }, 220, vp);
+    expect(p.left).toBe(1000 - 220 - 8);
+    expect(p.left + 220).toBeLessThanOrEqual(1000 - 8);
+  });
+  it("never starts left of the window edge, even for a menu wider than the window", () => {
+    expect(placeMenu({ left: -30, bottom: 40 }, 220, vp).left).toBe(8);
+    expect(placeMenu({ left: 10, bottom: 40 }, 2000, vp).left).toBe(8);
+  });
+  it("is no taller than the space below it, with a floor so it stays usable in a very short window", () => {
+    expect(placeMenu({ left: 0, bottom: 300 }, 220, vp).maxHeight).toBe(700 - 302 - 8);
+    expect(placeMenu({ left: 0, bottom: 690 }, 220, vp).maxHeight).toBe(120);
   });
 });
 
