@@ -262,14 +262,35 @@ fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &st
       if (!f || ev.source !== f.contentWindow) return;
       var d = ev.data;
       if (!d || d.agmsgProbe !== 1) return;
-      f.remove();
       var rep = d.report || {{}};
+      if (!d.final) {{
+        // Stage B is about to attempt the forbidden navigation. If that navigation is
+        // cancelled the frame's document may be replaced and never send the final answer:
+        // then this interim report goes in after the wait, marked as such.
+        window.__agmsgInterim = rep;
+        clearTimeout(window.__agmsgInterimTimer);
+        window.__agmsgInterimTimer = setTimeout(function () {{
+          var fr = document.getElementById('agmsg-probe-frame');
+          if (!fr || !window.__agmsgInterim) return;
+          var r0 = window.__agmsgInterim; window.__agmsgInterim = null;
+          fr.remove();
+          r0.finalMissing = true;
+          finish(r0);
+        }}, 3500);
+        return;
+      }}
+      clearTimeout(window.__agmsgInterimTimer);
+      window.__agmsgInterim = null;
+      f.remove();
+      finish(rep);
+    }});
+    function finish(rep) {{
       var target = {target:?};
       var hit = window.__agmsgViolations.filter(function (v) {{ return (v[0] === 'frame-src' || v[0] === 'child-src') && v[1] === target; }})[0];
       rep.navViolationDirective = hit ? hit[0] : '';
       rep.navViolationUri = hit ? hit[1] : '';
       window.__TAURI_INTERNALS__.invoke('addon_probe_report', {{ report: rep }}).catch(function () {{}});
-    }});
+    }}
   }}
   var old = document.getElementById('agmsg-probe-frame');
   if (old) old.remove();
@@ -336,7 +357,12 @@ pub fn addon_probe_report<R: Runtime>(app: AppHandle<R>, host: tauri::State<'_, 
     #[cfg(windows)]
     {
         engine.frame_guard_problem = host.guard.problem();
+        engine.frame_nav_cancelled = host.guard.cancelled();
     }
+    eprintln!(
+        "[addons] probe answer: started={} control_nav_ok={} nav_refused={} final_missing={} violation={}|{} webrtc_absent={} udp_hits={udp_hits} guard_cancelled={:?}",
+        report.started, report.control_nav_ok, report.nav_refused, report.final_missing, report.nav_violation_directive, report.nav_violation_uri, report.webrtc_absent, engine.frame_nav_cancelled
+    );
     let verdict = host.gate.report(&report, &engine, udp_hits, Os::host(), Instant::now());
     // The probe is over once its nonce was answered (right or wrong verdict);
     // a stray answer with another nonce leaves it running.

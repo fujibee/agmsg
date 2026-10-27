@@ -89,6 +89,10 @@ pub struct ProbeReport {
     /// Informational: the bridge globals present in the frame (macOS: none;
     /// WebView2 injects them into subframes).
     pub bridge_in_frame: bool,
+    /// Stage B announced itself and then never sent its final answer: its document
+    /// was replaced (WebView2 shows an error page in a frame whose navigation was
+    /// cancelled), so the "document survived" half of the refusal cannot be seen.
+    pub final_missing: bool,
 }
 
 /// What the app itself did to the engine before the probe.
@@ -101,6 +105,8 @@ pub struct EngineReport {
     pub webrtc_setting_applied: bool,
     /// Windows: why the frame navigation guard is not working, if it is not.
     pub frame_guard_problem: Option<String>,
+    /// Windows: the targets the frame guard cancelled.
+    pub frame_nav_cancelled: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -127,7 +133,11 @@ pub fn evaluate(expected_nonce: &str, expected_target: &str, r: &ProbeReport, en
     if !r.control_nav_ok {
         reasons.push("the probe could not tell a refused navigation from a slow one (its allowed navigation did not complete)".to_string());
     }
-    if !r.nav_refused {
+    // On Windows the guard is the refusal and it is required: when the frame's document was replaced
+    // by the cancelled navigation's error page, the guard's own record of the exact cancelled target
+    // stands in for "the document survived". The CSP violation below is still required.
+    let guard_refused = os == Os::Windows && r.final_missing && engine.frame_nav_cancelled.iter().any(|u| u == expected_target);
+    if !r.nav_refused && !guard_refused {
         reasons.push("the probe frame was able to navigate itself to the app origin".to_string());
     }
     // A refusal must be *seen*: the page's CSP reported blocking exactly that
@@ -270,11 +280,28 @@ mod tests {
     const TARGET: &str = "tauri://localhost/__agmsg_probe_nav__/n";
 
     fn good(nonce: &str) -> ProbeReport {
-        ProbeReport { nonce: nonce.into(), nav_violation_directive: "frame-src".into(), nav_violation_uri: TARGET.into(), started: true, opaque_origin: true, csp_blocks_eval: true, nav_refused: true, control_nav_ok: true, webrtc_absent: true, bridge_in_frame: false }
+        ProbeReport { nonce: nonce.into(), nav_violation_directive: "frame-src".into(), nav_violation_uri: TARGET.into(), started: true, opaque_origin: true, csp_blocks_eval: true, nav_refused: true, control_nav_ok: true, webrtc_absent: true, bridge_in_frame: false, final_missing: false }
     }
 
     fn eng() -> EngineReport {
-        EngineReport { webrtc_setting_present: true, webrtc_setting_applied: true, frame_guard_problem: None }
+        EngineReport { webrtc_setting_present: true, webrtc_setting_applied: true, frame_guard_problem: None, frame_nav_cancelled: vec![] }
+    }
+
+    #[test]
+    fn a_replaced_frame_document_counts_as_refused_on_windows_only_with_the_guards_own_record() {
+        // WebView2: the cancelled navigation replaces the probe's document, so no final answer comes.
+        let replaced = ProbeReport { nav_refused: false, final_missing: true, ..good("n") };
+        let cancelled = EngineReport { frame_nav_cancelled: vec![TARGET.into()], ..eng() };
+        assert!(evaluate("n", TARGET, &replaced, &cancelled, 0, Os::Windows).reasons.iter().all(|r| r.contains("not verified")), "guard record + violation");
+        let other = EngineReport { frame_nav_cancelled: vec!["tauri://localhost/other".into()], ..eng() };
+        assert!(evaluate("n", TARGET, &replaced, &other, 0, Os::Windows).reasons.iter().any(|r| r.contains("able to navigate")), "cancelled another target");
+        assert!(evaluate("n", TARGET, &replaced, &eng(), 0, Os::Windows).reasons.iter().any(|r| r.contains("able to navigate")), "nothing cancelled");
+        let no_violation = ProbeReport { nav_violation_uri: String::new(), nav_violation_directive: String::new(), ..replaced.clone() };
+        assert!(evaluate("n", TARGET, &no_violation, &cancelled, 0, Os::Windows).reasons.iter().any(|r| r.contains("frame-src violation")), "the CSP violation is still required");
+        let missing = ProbeReport { final_missing: false, ..replaced };
+        assert!(evaluate("n", TARGET, &missing, &cancelled, 0, Os::Windows).reasons.iter().any(|r| r.contains("able to navigate")), "no interim marker, no stand-in");
+        let mac = ProbeReport { nav_refused: false, final_missing: true, ..good("n") };
+        assert!(!evaluate("n", TARGET, &mac, &cancelled, 0, Os::MacOs).enabled, "never on macOS");
     }
 
     #[test]
@@ -304,8 +331,8 @@ mod tests {
             assert_eq!(v.reasons.len(), 1, "{name}: {:?}", v.reasons);
         }
         assert!(!evaluate("n", TARGET, &base, &eng(), 1, Os::MacOs).enabled, "udp");
-        assert!(!evaluate("n", TARGET, &base, &EngineReport { webrtc_setting_present: false, webrtc_setting_applied: false, frame_guard_problem: None }, 0, Os::MacOs).enabled, "no selector");
-        assert!(!evaluate("n", TARGET, &base, &EngineReport { webrtc_setting_present: true, webrtc_setting_applied: false, frame_guard_problem: None }, 0, Os::MacOs).enabled, "not applied");
+        assert!(!evaluate("n", TARGET, &base, &EngineReport { webrtc_setting_present: false, webrtc_setting_applied: false, frame_guard_problem: None, frame_nav_cancelled: vec![] }, 0, Os::MacOs).enabled, "no selector");
+        assert!(!evaluate("n", TARGET, &base, &EngineReport { webrtc_setting_present: true, webrtc_setting_applied: false, frame_guard_problem: None, frame_nav_cancelled: vec![] }, 0, Os::MacOs).enabled, "not applied");
         assert!(!evaluate("n", TARGET, &ProbeReport::default(), &eng(), 0, Os::MacOs).enabled, "empty report");
     }
 

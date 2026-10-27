@@ -66,7 +66,7 @@ snapshot > "$OUT/real-home-before.txt"
   echo "== query session"; query session 2>&1
   echo "== WebView2 runtime"; reg query "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" //v pv 2>&1
   echo "== git"; git --version
-  echo "== BUILD-INFO"; cat "$BIN/BUILD-INFO.md" 2>&1
+  echo "== BUILD-INFO"; cat "$(dirname "$BIN")/BUILD-INFO.md" 2>&1
   echo "== sha256"; sha256sum "$BIN"/agmsg-app-win-measure-*.exe
   echo "== AV/process check"; tasklist //FI "IMAGENAME eq agmsg-app*" 2>&1
 } > "$OUT/s0-env.log" 2>&1
@@ -77,11 +77,15 @@ DBG="$BIN/agmsg-app-win-measure-debug.exe"; REL="$BIN/agmsg-app-win-measure-rele
 [ -f "$DBG" ] && [ -f "$REL" ] || { verdict FAIL S0 "executables missing in $BIN"; exit 3; }
 
 # launch <exe> <logfile> <seconds-or-0> [env assignments...]: starts the exe, waits, leaves it running when seconds=0
-run_for() { # run_for <exe> <log> <seconds> -- env...
-  local exe=$1 log=$2 secs=$3; shift 4
-  launch "$log" "$exe" "$@"
+# A process that cannot be started under its real Windows id, or survives its stop, ends the run:
+# the next step would otherwise run next to it (single instance) and every later result would be noise.
+stop_or_abort() { stop_launched 2>>"$OUT/procs.err" || { verdict FAIL "$1" "a process of this step could not be stopped (procs.err); not going on"; exit 3; }; }
+launch_or_abort() { local step=$1; shift; launch "$@" 2>>"$OUT/procs.err" || { verdict FAIL "$step" "could not find the Windows id of the process just started (procs.err); not going on"; exit 3; }; }
+run_for() { # run_for <step> <exe> <log> <seconds> -- env...
+  local step=$1 exe=$2 log=$3 secs=$4; shift 5
+  launch_or_abort "$step" "$log" "$exe" "$@"
   sleep "$secs"
-  stop_launched
+  stop_or_abort "$step"
 }
 
 # ---- S1 startup check, both profiles, no override: the only reason left must be "not verified"
@@ -89,7 +93,7 @@ for prof in debug release; do
   exe=$BIN/agmsg-app-win-measure-$prof.exe
   base=$OUT/base-s1-$prof; seed_base "$base" || { verdict FAIL "S1-$prof" "could not seed the base"; continue; }
   mark_session "S1-$prof before"
-  run_for "$exe" "$OUT/s1-$prof.log" 40 -- AGMSG_APP_BASE="$(nat "$base")"
+  run_for "S1-$prof" "$exe" "$OUT/s1-$prof.log" 40 -- AGMSG_APP_BASE="$(nat "$base")"
   mark_session "S1-$prof after"
   line=$(grep -F '[addons] startup check:' "$OUT/s1-$prof.log" | tail -1)
   guard=$(grep -c 'frame guard installed' "$OUT/s1-$prof.log")
@@ -104,7 +108,7 @@ done
 # ---- S1b: the measuring switch must do nothing in the release build
 base=$OUT/base-s1-release-switch; seed_base "$base" || verdict FAIL S1-release-switch "could not seed the base"
 mark_session "S1b before"
-run_for "$REL" "$OUT/s1-release-switch.log" 40 -- AGMSG_APP_BASE="$(nat "$base")" AGMSG_WINDOWS_MEASURE=1
+run_for S1-release-switch "$REL" "$OUT/s1-release-switch.log" 40 -- AGMSG_APP_BASE="$(nat "$base")" AGMSG_WINDOWS_MEASURE=1
 mark_session "S1b after"
 line=$(grep -F '[addons] startup check:' "$OUT/s1-release-switch.log" | tail -1)
 if [ "${EXPECT_VERIFIED:-0}" = 1 ]; then want='enabled=true *$'; else want='enabled=false add-ons are not verified on WebView2 yet$'; fi
@@ -118,9 +122,9 @@ BASE=$OUT/base-main; seed_base "$BASE" || verdict FAIL S2 "could not seed the ba
 TEAM=win-measure-tmp
 sed -e "s|__TEAM__|$TEAM|g" -e "s|__FIXTURE__|$(nat "$FIX")|g" "$HERE/bootstrap.js" > "$OUT/bootstrap.js"
 mark_session "S2 before"
-launch "$OUT/s2-bootstrap.log" "$DBG" AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_ADDON_E2E="$(nat "$OUT/bootstrap.js")" AGMSG_ADDON_E2E_DELAY=8
+launch_or_abort S2 "$OUT/s2-bootstrap.log" "$DBG" AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_ADDON_E2E="$(nat "$OUT/bootstrap.js")" AGMSG_ADDON_E2E_DELAY=8
 for _ in $(seq 1 90); do grep -qE '"(FAILED|finished)' "$OUT/s2-bootstrap.log" 2>/dev/null && break; sleep 2; done
-stop_launched
+stop_or_abort S2
 mark_session "S2 after"
 if grep -q '"finished' "$OUT/s2-bootstrap.log"; then verdict PASS S2 "throwaway base seeded from the bundled scripts, team joined"; else verdict FAIL S2 "bootstrap did not finish: $(grep -E 'addons-e2e' "$OUT/s2-bootstrap.log" | tail -2 | tr '\n' ' ')"; fi
 
@@ -139,11 +143,11 @@ powershell -NoProfile -Command '$c=New-Object System.Net.Sockets.UdpClient; [voi
 sleep 2
 if tr -d '\r' < "$SINK" 2>/dev/null | grep -q '^udp=1 tcp=1$'; then verdict PASS S3-sink-control "the UDP/TCP sink saw the control packet and connection"; else verdict FAIL S3-sink-control "the sink did not see its control traffic: $(tr -d '\r' < "$SINK" 2>/dev/null)"; fi
 mark_session "S3 before"
-launch "$OUT/s3-main.log" "$DBG" AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_WINDOWS_MEASURE=1 AGMSG_ADDON_TRACE=1 AGMSG_ADDON_E2E="$(nat "$OUT/driver.js")" AGMSG_ADDON_E2E_DELAY=15
+launch_or_abort S3 "$OUT/s3-main.log" "$DBG" AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_WINDOWS_MEASURE=1 AGMSG_ADDON_TRACE=1 AGMSG_ADDON_E2E="$(nat "$OUT/driver.js")" AGMSG_ADDON_E2E_DELAY=15
 for _ in $(seq 1 120); do grep -qE '"(FAILED|finished)' "$OUT/s3-main.log" 2>/dev/null && break; sleep 2; done
 sleep 8
 mark_session "S3 after"
-stop_launched
+stop_or_abort S3
 L="$OUT/s3-main.log"
 grep -q '"finished' "$L" && verdict PASS S3-driver "the driver finished" || verdict FAIL S3-driver "the driver did not finish: $(grep -E 'addons-e2e.*FAILED' "$L" | head -1 | cut -c1-300)"
 grep -q 'ASK FAIL' "$L" && verdict FAIL S3-answers "a direct broker answer was not what was expected" || verdict PASS S3-answers "every direct broker answer as expected"

@@ -131,6 +131,8 @@ impl FrameNav {
 pub struct GuardStatus {
     active: std::sync::atomic::AtomicBool,
     failure: Mutex<Option<String>>,
+    /// Targets of the frame navigations the guard cancelled (normalized, newest last, capped).
+    cancelled: Mutex<Vec<String>>,
 }
 
 impl GuardStatus {
@@ -159,6 +161,18 @@ impl GuardStatus {
         }
     }
 
+    pub fn note_cancelled(&self, uri: &str) {
+        let mut c = self.cancelled.lock().unwrap();
+        if c.len() >= 64 {
+            c.remove(0);
+        }
+        c.push(uri.to_string());
+    }
+
+    pub fn cancelled(&self) -> Vec<String> {
+        self.cancelled.lock().unwrap().clone()
+    }
+
     /// `None` when the guard is installed and nothing has gone wrong.
     pub fn problem(&self) -> Option<String> {
         if let Some(f) = self.failure.lock().unwrap().clone() {
@@ -182,7 +196,13 @@ pub fn frame_navigation_allowed(rule: &FrameNav, policy: &NavPolicy, uri: Result
         }
     };
     match Url::parse(&uri) {
-        Ok(url) => rule.decide(policy, &url).is_allow(),
+        Ok(url) => {
+            let allow = rule.decide(policy, &url).is_allow();
+            if !allow {
+                status.note_cancelled(url.as_str());
+            }
+            allow
+        }
         Err(_) => false,
     }
 }
@@ -333,6 +353,7 @@ mod tests {
         g2.mark_active();
         assert!(!frame_navigation_allowed(&f, &p, Ok("not a url".into()), &g2));
         assert!(!frame_navigation_allowed(&f, &p, Ok("tauri://localhost/".into()), &g2));
+        assert_eq!(g2.cancelled(), vec!["tauri://localhost/".to_string()]);
         assert!(frame_navigation_allowed(&f, &p, Ok("http://127.0.0.1:5000/aaaa/".into()), &g2));
         assert_eq!(g2.problem(), None);
     }

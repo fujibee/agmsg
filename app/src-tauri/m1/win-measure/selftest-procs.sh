@@ -17,7 +17,7 @@ S
 cat > "$T/stubs/taskkill" <<'S'
 #!/bin/bash
 echo "$*" >> "$STUB_LOG"
-while [ $# -gt 0 ]; do if [ "$1" = "//PID" ]; then kill "$2" 2>/dev/null; fi; shift; done
+while [ $# -gt 0 ]; do if [ "$1" = "//PID" ] && [ "$2" != "${NOKILL:-}" ]; then kill "$2" 2>/dev/null; sed -i.bak "/^$2 /d" "$STUB_MAP"; fi; shift; done
 S
 chmod +x "$T/stubs/tasklist" "$T/stubs/taskkill"
 fake_exe() { printf '#!/bin/bash\nexec sleep 120\n' > "$T/bin/$1"; chmod +x "$T/bin/$1"; }
@@ -39,6 +39,7 @@ grep -q "already running" "$T/run1.out" && ok "the refusal is reported" || no "n
 # 2. a normal run: launch two, with an unrelated process of the same image name present
 export TRACK="$T/pids.txt"; : > "$TRACK"
 . "$HERE/procs.sh"
+find_launched_pid() { echo "$1"; }   # the stand-in "exe" is its own process
 other_run_present && no "nothing running yet but other_run_present said yes" || ok "no other run when the task list is empty"
 sleep 120 & other=$!; echo "$other" >> "$T/spawned"
 echo "$other agmsg-app-win-measure-debug.exe" >> "$STUB_MAP"      # looks like another run's debug exe
@@ -61,5 +62,18 @@ echo "$reuse notepad.exe" > "$STUB_MAP"
 : > "$STUB_LOG"
 stop_launched
 kill -0 "$reuse" 2>/dev/null && [ ! -s "$STUB_LOG" ] && ok "a reused id is not killed" || no "reused id handling: $(cat "$STUB_LOG")"
+
+# 4. a process that survives taskkill is reported (the run then stops instead of going on)
+sleep 120 & stuck=$!; echo "$stuck" >> "$T/spawned"
+echo "$stuck agmsg-app-win-measure-debug.exe" > "$STUB_MAP"; echo "$stuck agmsg-app-win-measure-debug.exe" > "$TRACK"
+NOKILL=$stuck stop_launched 2> "$T/left.err"; code=$?
+[ "$code" = 1 ] && grep -q "still running" "$T/left.err" && ok "a survivor makes stop_launched fail and is named" || no "survivor not reported (code $code)"
+[ -s "$TRACK" ] && ok "the survivor stays recorded so the exit trap tries again" || no "the survivor was forgotten"
+
+# 5. when the real id cannot be found, launch fails and records the stub for the trap
+find_launched_pid() { return 1; }
+: > "$TRACK"; echo "x agmsg-app-win-measure-debug.exe" > "$STUB_MAP"
+launch "$T/c.log" "$T/bin/agmsg-app-win-measure-debug.exe" Z=1 2> "$T/lf.err"; code=$?
+[ "$code" = 1 ] && grep -q "cannot find the Windows id" "$T/lf.err" && ok "launch fails loudly when the id is unknown" || no "launch did not fail (code $code)"
 
 [ "$bad" = 0 ] && echo "selftest-procs: all expectations hold" || { echo "selftest-procs: FAILED"; exit 1; }
