@@ -890,6 +890,7 @@ if ! command -v sqlite3 &>/dev/null; then
   echo "Error: sqlite3 is required but not found." >&2
   echo "  macOS: included by default" >&2
   echo "  Linux: sudo apt install sqlite3  (or equivalent)" >&2
+  echo "  Windows (Git Bash): winget install SQLite.SQLite  (or: choco install sqlite), then reopen Git Bash" >&2
   exit 1
 fi
 
