@@ -813,11 +813,6 @@ install_antigravity_tui_shim() {
   agmsg_install_op_require || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$target"
   agmsg_install_op_require || return 1
-  if [ -n "$expected_owner" ]; then
-    echo "  + refreshed Antigravity TUI shim (~/.agents/bin/agy-tui)"
-  else
-    echo "  + installed Antigravity TUI shim (~/.agents/bin/agy-tui)"
-  fi
 }
 
 install_antigravity_skill() {
@@ -1216,9 +1211,6 @@ $_agmsg_running_team"
   if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
     CODEX_SHIM_FORCE="${AGMSG_CODEX_SHIM_FORCE:-}"
     agmsg_install_refresh_codex_shim || exit 1
-    if [ "$AGMSG_CODEX_SHIM_REFRESHED" = true ]; then
-      echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
-    fi
   fi
   install_windows_helpers || exit 1
   agmsg_install_op_phase_end || exit 1
@@ -1364,9 +1356,6 @@ if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
   # different from what actually happens.
   CODEX_SHIM_FORCE=""
   agmsg_install_refresh_codex_shim || exit 1
-  if [ "$AGMSG_CODEX_SHIM_REFRESHED" = true ]; then
-    echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
-  fi
 fi
 install_windows_helpers || exit 1
 agmsg_install_op_phase_end || exit 1

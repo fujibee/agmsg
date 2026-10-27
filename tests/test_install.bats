@@ -110,6 +110,25 @@ teardown() {
   [[ "$output" =~ "hello from install" ]]
 }
 
+@test "install: a fresh install places the Antigravity TUI shim but prints no line about it (#1815)" {
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  refute grep -qF "Antigravity TUI shim" <(printf '%s' "$output")
+  [ -f "$FAKE_HOME/.agents/bin/agy-tui" ]
+}
+
+@test "install: --update refreshes an owned Antigravity TUI shim but prints no line about it (#1815)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  local before; before="$(cat "$shim")"
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  refute grep -qF "Antigravity TUI shim" <(printf '%s' "$output")
+  local after; after="$(cat "$shim")"
+  [ "$before" = "$after" ]
+}
+
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
   skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
@@ -1590,7 +1609,7 @@ EOF
 
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   [ "$status" -eq 0 ]
-  printf '%s' "$output" | grep -qF "refreshed Codex monitor shim"
+  refute grep -qF "refreshed Codex monitor shim" <(printf '%s' "$output")
   grep -q "/skills/agmsg/" "$shim"
 }
 
@@ -1605,7 +1624,7 @@ EOF
 
   run env HOME="$FAKE_HOME" AGMSG_CODEX_SHIM_FORCE=1 bash "$REPO_ROOT/install.sh" --cmd agmsg-dfr --update
   [ "$status" -eq 0 ]
-  printf '%s' "$output" | grep -qF "refreshed Codex monitor shim"
+  refute grep -qF "refreshed Codex monitor shim" <(printf '%s' "$output")
   grep -q "/skills/agmsg-dfr/" "$shim"
 }
 
@@ -1668,7 +1687,7 @@ EOF
 
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
   [ "$status" -eq 0 ]
-  printf '%s' "$output" | grep -qF "refreshed Codex monitor shim"
+  refute grep -qF "refreshed Codex monitor shim" <(printf '%s' "$output")
   grep -q "agmsg-shim-owner" "$shim"
   grep -q "/skills/agmsg/scripts/drivers/types/codex" "$shim"
   refute grep -q "/some/stale/pre-move/path" "$shim"
