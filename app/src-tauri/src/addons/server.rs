@@ -1015,8 +1015,9 @@ mod tests {
         assert_eq!(get(&srv, &format!("/{}/missing.js", srv.token())).0, 404);
     }
 
+    /// After `stop()` the server answers no request. (It does not promise that a connect is refused: see below.)
     #[test]
-    fn stopping_closes_the_listener() {
+    fn stopped_server_answers_nothing() {
         let (_r, p) = fixture("stop");
         let srv = start(&p);
         let port = srv.port();
