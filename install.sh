@@ -578,11 +578,8 @@ agmsg_install_optional_codex_chmod() {
 }
 
 agmsg_install_refresh_codex_shim() {
-  AGMSG_CODEX_SHIM_REFRESHED=false
-  if env AGMSG_CODEX_SHIM_INSTALL_QUIET=1 AGMSG_CODEX_SHIM_FORCE="${CODEX_SHIM_FORCE:-}" \
-      "$CODEX_SHIM" install >/dev/null; then
-    AGMSG_CODEX_SHIM_REFRESHED=true
-  fi
+  env AGMSG_CODEX_SHIM_INSTALL_QUIET=1 AGMSG_CODEX_SHIM_FORCE="${CODEX_SHIM_FORCE:-}" \
+      "$CODEX_SHIM" install >/dev/null
   return 0
 }
 
@@ -792,11 +789,9 @@ install_antigravity_tui_shim() {
   if [ -e "$target" ] || [ -L "$target" ]; then
     expected_owner="$(grep '^# agmsg-shim-owner: ' "$target" 2>/dev/null || true)"
     if ! grep -q '^# agmsg Antigravity TUI launcher shim$' "$target" 2>/dev/null; then
-      echo "  ~ left existing ~/.agents/bin/agy-tui untouched"
       return 0
     fi
     if [ "$expected_owner" != "$owner" ]; then
-      echo "  ~ left ~/.agents/bin/agy-tui owned by a different or legacy install untouched"
       return 0
     fi
   fi
@@ -813,11 +808,6 @@ install_antigravity_tui_shim() {
   agmsg_install_op_require || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$target"
   agmsg_install_op_require || return 1
-  if [ -n "$expected_owner" ]; then
-    echo "  + refreshed Antigravity TUI shim (~/.agents/bin/agy-tui)"
-  else
-    echo "  + installed Antigravity TUI shim (~/.agents/bin/agy-tui)"
-  fi
 }
 
 install_antigravity_skill() {
@@ -1216,9 +1206,6 @@ $_agmsg_running_team"
   if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
     CODEX_SHIM_FORCE="${AGMSG_CODEX_SHIM_FORCE:-}"
     agmsg_install_refresh_codex_shim || exit 1
-    if [ "$AGMSG_CODEX_SHIM_REFRESHED" = true ]; then
-      echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
-    fi
   fi
   install_windows_helpers || exit 1
   agmsg_install_op_phase_end || exit 1
@@ -1364,9 +1351,6 @@ if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
   # different from what actually happens.
   CODEX_SHIM_FORCE=""
   agmsg_install_refresh_codex_shim || exit 1
-  if [ "$AGMSG_CODEX_SHIM_REFRESHED" = true ]; then
-    echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
-  fi
 fi
 install_windows_helpers || exit 1
 agmsg_install_op_phase_end || exit 1
