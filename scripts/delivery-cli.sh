@@ -90,7 +90,9 @@ case "$ACTION" in
     chosen="$(agmsg_delivery_choice_get "$TYPE" "$PROJECT")"
     if [ -n "$chosen" ] && [ "$chosen" != agmsgd ]; then
       echo "this project: $(_mode_label "$chosen") chosen — agmsgd does not deliver here"
-    elif [ "$chosen" = agmsgd ] || { [ -z "$chosen" ] && [ "$offer" = agmsgd=on ]; }; then
+    elif [ "$mode" = agmsgd ] || { [ "$TYPE" != claude-code ] && { [ "$chosen" = agmsgd ] || { [ -z "$chosen" ] && [ "$offer" = agmsgd=on ]; }; }; }; then
+      # For Claude Code delivery.sh decides (agmsgd only while it is on), so this
+      # line cannot say agmsgd where SessionStart and actas use the Monitor.
       echo "this project: agmsgd — no Monitor is armed here; the session hooks only start agmsgd's delivery"
     elif [ -n "$mode" ]; then
       echo "this project: $(_mode_label "$mode")"
