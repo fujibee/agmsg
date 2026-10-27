@@ -130,6 +130,8 @@ export function NewMenu(props: Props) {
     const move = (to: number) => {
       if (to < 0) return;
       items[to]?.focus({ preventScroll: true });
+      // focus() alone would not bring a row below the fold into view; the menu's own scrolling does not close it
+      items[to]?.scrollIntoView({ block: "nearest", inline: "nearest" });
       setActive(items[to]?.dataset.key ?? null);
     };
     if (e.key === "ArrowDown") move(nextIndex(items.map((b) => !b.disabled), at, 1));
