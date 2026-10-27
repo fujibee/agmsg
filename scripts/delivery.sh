@@ -965,18 +965,26 @@ print_terminal_status() {
   [ "$errf" = /dev/null ] || rm -f "$errf"
 }
 
-# 0 when this project's delivery is agmsgd: it recorded that choice, or it has
-# no recorded choice and agmsgd is on for the install. Reads install.db and
-# run/delivery-choice directly (no Node), so it cannot disagree with the
-# session hooks. Sets STATUS_AGMSGD_NOTE to what to say about it.
+# 0 when this project's delivery is agmsgd: agmsgd is on for the install and
+# this project either recorded the agmsgd choice or has no recorded choice.
+# That is the case the session hooks treat as agmsgd (they go back to the
+# Monitor when agmsgd is off, so status reports the hooks' mode then, plus a
+# note when the project chose agmsgd). Reads install.db and
+# run/delivery-choice directly, so the mode needs no Node. Sets
+# STATUS_AGMSGD_NOTE to what to say.
 _status_project_on_agmsgd() {   # <type> <project>
   local chosen AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  STATUS_AGMSGD_NOTE=""
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/lib/daemon-state.sh"
   chosen="$(agmsg_delivery_choice_get "$1" "$2")"
   agmsg_daemon_read_state
-  if [ "$chosen" = agmsgd ] || { [ -z "$chosen" ] && [ "${AGMSGD_DESIRED:-}" = on ]; }; then
-    if [ "${AGMSGD_DESIRED:-}" = on ] && [ "${AGMSGD_HEALTH:-}" = ready ]; then
+  if [ "${AGMSGD_DESIRED:-}" != on ]; then
+    [ "$chosen" != agmsgd ] || STATUS_AGMSGD_NOTE="this project chose agmsgd, but agmsgd is turned off, so sessions use the delivery above; turn it on with: agmsg delivery agmsgd"
+    return 1
+  fi
+  if [ "$chosen" = agmsgd ] || [ -z "$chosen" ]; then
+    if [ "${AGMSGD_HEALTH:-}" = ready ]; then
       STATUS_AGMSGD_NOTE="agmsgd delivers to this project directly; no Monitor is started"
     else
       STATUS_AGMSGD_NOTE="this project receives through agmsgd, which is not confirmed running (${AGMSGD_REASON:-unknown}); no Monitor is started"
@@ -1008,6 +1016,7 @@ do_status() {
       printf '%s\n' "$hooks_out" | sed '1{/^mode: /d;}'
     else
       agmsg_delivery_status "$TYPE" "$PROJECT"
+      [ -z "${STATUS_AGMSGD_NOTE:-}" ] || echo "note: $STATUS_AGMSGD_NOTE"
     fi
     case "$TYPE" in
       claude-code)

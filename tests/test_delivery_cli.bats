@@ -158,6 +158,8 @@ STUB
   run bash "$SCRIPTS/agmsg" delivery agmsgd --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
   [ "$(grep -c start "$STUB_LOG")" -eq 2 ]
+  # The stand-in start leaves the intent as a real start would.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
   grep -Fq "mode: agmsgd" <<<"$output"
   refute grep -Fq "mode: monitor" <<<"$output"
@@ -176,9 +178,18 @@ STUB
 @test "delivery.sh status: a recorded agmsgd choice reads as agmsgd even while agmsgd is stopped, and says so" {
   bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJECT" >/dev/null
   printf 'claude-code\t%s\tagmsgd\n' "$(cd "$PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';"
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
   [ "$(printf '%s\n' "$output" | sed -n 1p | cut -c1-13)" = "mode: agmsgd " ]
   grep -Fq "not confirmed running" <<<"$output"
+}
+
+@test "delivery.sh status: agmsgd chosen but turned off reports the hooks' mode, as the session does, with a note (#1820)" {
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJECT" >/dev/null
+  printf 'claude-code\t%s\tagmsgd\n' "$(cd "$PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
+  [ "$(printf '%s\n' "$output" | sed -n 1p)" = "mode: monitor" ]
+  grep -Fq "note: this project chose agmsgd, but agmsgd is turned off" <<<"$output"
 }
 
 @test "delivery.sh status: monitor, turn, both and off choices keep their own mode while agmsgd is on" {
