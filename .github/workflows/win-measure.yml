@@ -12,6 +12,16 @@ permissions:
   contents: read
 
 jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verdict logic and process rules of the run script
+        working-directory: app/src-tauri/m1/win-measure
+        run: |
+          bash selftest.sh
+          bash selftest-procs.sh
+
   build:
     runs-on: windows-latest
     defaults:

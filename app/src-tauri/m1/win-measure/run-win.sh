@@ -17,15 +17,26 @@ mkdir "$OUT" || exit 2; OUT=$(cd "$OUT" && pwd)
 HERE="$(cd "$(dirname "$0")" && pwd)"
 nat() { cygpath -m "$1" 2>/dev/null || echo "$1"; }
 SUM="$OUT/summary.txt"; : > "$SUM"
+TRACK="$OUT/pids.txt"; : > "$TRACK"
+. "$HERE/procs.sh"
+# ---- preflight: nothing is launched and no trap is set until this passes
+if other_run_present; then echo "FAIL S0 an agmsg-app-win-measure-*.exe is already running (another run?); nothing was started or stopped" | tee -a "$SUM"; exit 3; fi
 note() { echo "$(date -u +%FT%TZ) $*" >> "$SUM"; }
 verdict() { # verdict PASS|FAIL <step> <text>
   echo "$1 $2 $3" | tee -a "$SUM"
 }
 session_state() { query session 2>&1 | tr -s ' ' | grep -i "$(whoami | sed 's/.*\\//')" | head -3; }
 mark_session() { echo "[$(date -u +%T)] $1: $(session_state | tr '\n' ';')" >> "$OUT/session.log"; }
-stop_exe() { taskkill //F //IM "$1" > /dev/null 2>&1; sleep 2; }
-stop_sink() { [ -n "${SINK:-}" ] || return 0; touch "$SINK.stop"; if [ -f "$SINK.pid" ]; then sleep 1; taskkill //F //PID "$(tr -d '\r\n ' < "$SINK.pid")" > /dev/null 2>&1; fi; }
-trap 'stop_sink; stop_exe agmsg-app-win-measure-debug.exe; stop_exe agmsg-app-win-measure-release.exe; note "run ended (trap)"' EXIT
+stop_sink() { # only the PowerShell this run started, by its own id, and only while that id is still a PowerShell
+  [ -n "${SINK:-}" ] || return 0
+  touch "$SINK.stop"
+  if [ -f "$SINK.pid" ]; then
+    sleep 1
+    local p; p=$(tr -d '\r\n ' < "$SINK.pid")
+    if [ -n "$p" ] && tasklist //FI "PID eq $p" //FO CSV //NH 2>/dev/null | grep -qi '"powershell.exe"'; then taskkill //F //PID "$p" > /dev/null 2>&1; fi
+  fi
+}
+trap 'stop_sink; stop_launched; note "run ended (trap)"' EXIT
 # ---- isolation: every launch gets these, none of them changes HOME
 CORE="$HERE/../core"
 export AGMSG_CONFIG="$(nat "$OUT/iso/config.json")" AGMSG_STORAGE_PATH="$(nat "$OUT/iso/storage")" \
@@ -48,9 +59,6 @@ snapshot > "$OUT/real-home-before.txt"
 [ -d "$CORE/scripts" ] && [ -f "$CORE/scripts/api.sh" ] || { verdict FAIL S0 "the bundled core is missing next to the executables ($CORE)"; exit 3; }
 
 
-# ---- S0 refuse to start next to a run in progress (this script stops processes by image name)
-if tasklist 2>/dev/null | grep -qi 'agmsg-app-win-measure'; then echo "FAIL S0 an agmsg-app-win-measure-*.exe is already running; stop it first (not touching it)" | tee -a "$SUM"; exit 3; fi
-
 # ---- S0 environment
 {
   echo "date: $(date -u +%FT%TZ)"; echo "user: $(whoami)"
@@ -71,9 +79,9 @@ DBG="$BIN/agmsg-app-win-measure-debug.exe"; REL="$BIN/agmsg-app-win-measure-rele
 # launch <exe> <logfile> <seconds-or-0> [env assignments...]: starts the exe, waits, leaves it running when seconds=0
 run_for() { # run_for <exe> <log> <seconds> -- env...
   local exe=$1 log=$2 secs=$3; shift 4
-  ( env "$@" "$exe" > "$log" 2>&1 < /dev/null & echo $! > "$log.pid" )
+  launch "$log" "$exe" "$@"
   sleep "$secs"
-  stop_exe "$(basename "$exe")"
+  stop_launched
 }
 
 # ---- S1 startup check, both profiles, no override: the only reason left must be "not verified"
@@ -110,9 +118,9 @@ BASE=$OUT/base-main; seed_base "$BASE" || verdict FAIL S2 "could not seed the ba
 TEAM=win-measure-tmp
 sed -e "s|__TEAM__|$TEAM|g" -e "s|__FIXTURE__|$(nat "$FIX")|g" "$HERE/bootstrap.js" > "$OUT/bootstrap.js"
 mark_session "S2 before"
-( AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_ADDON_E2E="$(nat "$OUT/bootstrap.js")" AGMSG_ADDON_E2E_DELAY=8 "$DBG" > "$OUT/s2-bootstrap.log" 2>&1 < /dev/null & )
+launch "$OUT/s2-bootstrap.log" "$DBG" AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_ADDON_E2E="$(nat "$OUT/bootstrap.js")" AGMSG_ADDON_E2E_DELAY=8
 for _ in $(seq 1 90); do grep -qE '"(FAILED|finished)' "$OUT/s2-bootstrap.log" 2>/dev/null && break; sleep 2; done
-stop_exe agmsg-app-win-measure-debug.exe
+stop_launched
 mark_session "S2 after"
 if grep -q '"finished' "$OUT/s2-bootstrap.log"; then verdict PASS S2 "throwaway base seeded from the bundled scripts, team joined"; else verdict FAIL S2 "bootstrap did not finish: $(grep -E 'addons-e2e' "$OUT/s2-bootstrap.log" | tail -2 | tr '\n' ' ')"; fi
 
@@ -131,11 +139,11 @@ powershell -NoProfile -Command '$c=New-Object System.Net.Sockets.UdpClient; [voi
 sleep 2
 if tr -d '\r' < "$SINK" 2>/dev/null | grep -q '^udp=1 tcp=1$'; then verdict PASS S3-sink-control "the UDP/TCP sink saw the control packet and connection"; else verdict FAIL S3-sink-control "the sink did not see its control traffic: $(tr -d '\r' < "$SINK" 2>/dev/null)"; fi
 mark_session "S3 before"
-( AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_WINDOWS_MEASURE=1 AGMSG_ADDON_TRACE=1 AGMSG_ADDON_E2E="$(nat "$OUT/driver.js")" AGMSG_ADDON_E2E_DELAY=15 "$DBG" > "$OUT/s3-main.log" 2>&1 < /dev/null & )
+launch "$OUT/s3-main.log" "$DBG" AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_WINDOWS_MEASURE=1 AGMSG_ADDON_TRACE=1 AGMSG_ADDON_E2E="$(nat "$OUT/driver.js")" AGMSG_ADDON_E2E_DELAY=15
 for _ in $(seq 1 120); do grep -qE '"(FAILED|finished)' "$OUT/s3-main.log" 2>/dev/null && break; sleep 2; done
 sleep 8
 mark_session "S3 after"
-stop_exe agmsg-app-win-measure-debug.exe
+stop_launched
 L="$OUT/s3-main.log"
 grep -q '"finished' "$L" && verdict PASS S3-driver "the driver finished" || verdict FAIL S3-driver "the driver did not finish: $(grep -E 'addons-e2e.*FAILED' "$L" | head -1 | cut -c1-300)"
 grep -q 'ASK FAIL' "$L" && verdict FAIL S3-answers "a direct broker answer was not what was expected" || verdict PASS S3-answers "every direct broker answer as expected"
@@ -159,6 +167,6 @@ if diff "$OUT/real-home-before.txt" "$OUT/real-home-after.txt" > "$OUT/real-home
 
 # ---- wrap up
 mark_session end
-stop_exe agmsg-app-win-measure-debug.exe; stop_exe agmsg-app-win-measure-release.exe
+stop_launched
 echo "== counts: $(grep -c '^PASS' "$SUM") PASS, $(grep -c '^FAIL' "$SUM") FAIL" | tee -a "$SUM"
 ( cd "$(dirname "$OUT")" && tar czf "$OUT.tgz" "$(basename "$OUT")" ) && echo "archive: $OUT.tgz" | tee -a "$SUM"

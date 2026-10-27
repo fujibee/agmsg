@@ -5,7 +5,7 @@
 ## Evidence required
 
 1. **Windows unit tests.** The `addons-windows` workflow is green at the candidate head (links, hard links, 8.3 names, junctions, case, denylist, real server on Windows paths).
-2. **Verdict logic.** `selftest.sh` passes in the `win-measure` workflow (it feeds made-up logs to the same functions the run uses: a frame that loaded and said nothing, another step's violation, a report-only violation and a missing record must all FAIL).
+2. **Verdict logic and process rules.** `selftest.sh` and `selftest-procs.sh` pass in the `win-measure` workflow (the second one proves the run script exits without a single `taskkill` when another run's executables are present, stops only the process ids it launched, never by image name, and leaves a reused id alone; the first one (it feeds made-up logs to the same functions the run uses: a frame that loaded and said nothing, another step's violation, a report-only violation and a missing record must all FAIL).
 3. **Product build.** The `win-measure` workflow built that same head (the artifact's `BUILD-INFO.md` names the commit and the sha256 of both executables; the run used those hashes).
 4. **Run on a real Windows machine** with `run-win.sh`, inside an Active desktop session (`session.log` shows the session Active at the start and end of every step). `summary.txt` has no `FAIL` line and these `PASS` lines:
    - `S0` an Active session exists; `GUARD` the real agmsg home (scripts, skills, commands, teams) is byte-for-byte unchanged by the run (the run never runs install.sh and never changes HOME).
