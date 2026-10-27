@@ -781,6 +781,9 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
   PLUGIN install acme/pack --yes >/dev/null
   chmod +x "$w/ext-tools/fx/helper"
+  # Git for Windows keeps core.fileMode off, so a mode-only change is not
+  # recorded there; whether a file runs is then decided by its first bytes.
+  ! git -C "$w" diff --quiet || skip "git does not record mode changes here"
   git -C "$w" commit -qam "make helper executable"
   git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD:main 2>/dev/null || git -C "$w" push -q "$GIT_BASE/acme/pack.git" HEAD
   run PLUGIN update acme/pack
@@ -796,6 +799,8 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   mkdir -p "$outside/pack/keep" "$TEST_SKILL_DIR/plugins/sources/.review"
   echo precious > "$outside/pack/keep/file"
   ln -s "$outside" "$TEST_SKILL_DIR/plugins/sources/.review/acme"
+  # Some Git Bash setups make ln -s copy the directory; there is no link to refuse then.
+  [ -L "$TEST_SKILL_DIR/plugins/sources/.review/acme" ] || skip "ln -s does not create a real symlink here"
   run PLUGIN install acme/pack
   [ "$status" -eq 3 ]
   refute grep -q "^Review copy:" <<<"$output"
