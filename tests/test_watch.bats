@@ -503,6 +503,56 @@ SQL
   grep -qF 'agmsg watch: re-arm' "$out"
 }
 
+_published_socket() {   # <agent>
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c 'source "$1/lib/role-session.sh"; agmsg_role_session_get team "$2" messaging_socket 2>/dev/null || true' _ "$SCRIPTS" "$1"
+}
+
+# #1807: a session that armed this watch while agmsgd was down never runs
+# SessionStart again. When agmsgd becomes ready during the run, the renewal point
+# publishes the session's messaging destination, so delivery moves to the native
+# channel and the watch stops instead of asking to be re-armed.
+@test "watch: agmsgd becoming ready mid-run publishes the destination at renewal and stops instead of re-arming (#1807)" {
+  local out="$BATS_TEST_TMPDIR/handover.out" pid boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  bash "$SCRIPTS/join.sh" team fay claude-code "$PROJ" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path='$(command -v node)'"
+  bash "$SCRIPTS/send.sh" team bob fay "handover probe" >/dev/null
+  AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/s-handover.sock" \
+    bash "$SCRIPTS/watch.sh" s-handover "$PROJ" claude-code fay --max-seconds=4 >"$out" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _bg_track "$pid"
+  sleep 1
+  # agmsgd comes up after the watch started.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  _wait_exit "$pid" 200 || { _stop_watcher "$pid"; false; }
+  wait "$pid"
+  grep -qF 'handover probe' "$out"
+  grep -qF "moved to agmsgd's native channel" "$out"
+  refute grep -qF 'agmsg watch: re-arm' "$out"
+  [ "$(_published_socket fay)" = "/tmp/cc-socks/s-handover.sock" ]
+}
+
+@test "watch: no handover while agmsgd is down, or without a messaging socket (#1807)" {
+  local out="$BATS_TEST_TMPDIR/nohandover.out" pid
+  bash "$SCRIPTS/join.sh" team gus claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/send.sh" team bob gus "stay on the monitor" >/dev/null
+  AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/s-nohandover.sock" \
+    bash "$SCRIPTS/watch.sh" s-nohandover "$PROJ" claude-code gus --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _bg_track "$pid"
+  _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
+  wait "$pid"
+  grep -qF 'agmsg watch: re-arm' "$out"
+  [ -z "$(_published_socket gus)" ]
+}
+
 @test "watch: restart delivers messages that arrived while the watcher was down" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local sid="sess-restart"
