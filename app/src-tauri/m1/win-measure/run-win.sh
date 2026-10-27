@@ -3,6 +3,7 @@
 #   usage: run-win.sh <folder holding agmsg-app-win-measure-debug.exe / -release.exe and m1/>  <out-folder>
 # Everything goes to files under <out-folder>: one log per step, summary.txt with PASS/FAIL lines
 # written as each step ends (a partial run still leaves evidence), and an archive at the end.
+# EXPECT_VERIFIED=1 for a build whose WINDOWS_VERIFIED is on (S1 then expects enabled=true).
 # Only the executables named above are started and stopped. The installed agmsg app, the real agmsg
 # home and agmsgd are not touched: the executables use their own identifier (cc.agmsg.win-measure) and a
 # throwaway base folder inside <out-folder>.
@@ -56,8 +57,9 @@ for prof in debug release; do
   mark_session "S1-$prof after"
   line=$(grep -F '[addons] startup check:' "$OUT/s1-$prof.log" | tail -1)
   guard=$(grep -c 'frame guard installed' "$OUT/s1-$prof.log")
-  if [ "$guard" -ge 1 ] && echo "$line" | grep -q 'enabled=false add-ons are not verified on WebView2 yet$'; then
-    verdict PASS "S1-$prof" "probe passed on the product build (only the not-verified reason remains); guard installed"
+  if [ "${EXPECT_VERIFIED:-0}" = 1 ]; then want='enabled=true *$'; what="enabled (the build has WINDOWS_VERIFIED on)"; else want='enabled=false add-ons are not verified on WebView2 yet$'; what="only the not-verified reason remains"; fi
+  if [ "$guard" -ge 1 ] && echo "$line" | grep -q "$want"; then
+    verdict PASS "S1-$prof" "probe passed on the product build ($what); guard installed"
   else
     verdict FAIL "S1-$prof" "startup check line: ${line:-<none>}; guard-installed lines: $guard"
   fi
