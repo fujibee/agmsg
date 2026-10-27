@@ -401,8 +401,10 @@
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
       "neverTitle": "It can never",
-      "source": "from {{repo}} · {{sha}} · adds {{count}} pane(s)",
-      "sourceUpdate": "from {{repo}} · {{from}} → {{to}} · {{count}} pane(s)"
+      "source_one": "from {{repo}} · {{sha}} · adds {{count}} pane",
+      "source_other": "from {{repo}} · {{sha}} · adds {{count}} panes",
+      "sourceUpdate_one": "from {{repo}} · {{from}} → {{to}} · {{count}} pane",
+      "sourceUpdate_other": "from {{repo}} · {{from}} → {{to}} · {{count}} panes"
     },
     "remove": {
       "title": "Remove {{title}}?",

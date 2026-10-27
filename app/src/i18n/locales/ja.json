@@ -401,8 +401,8 @@
       "paneAsksAgain": "{{pane}} は、フォルダやチームへのアクセスを改めて確認します",
       "paneRemoved": "{{pane}} は削除されます(保存済みのアクセスも破棄されます)",
       "neverTitle": "絶対にできないこと",
-      "source": "{{repo}} から · {{sha}} · ペイン {{count}} 件を追加",
-      "sourceUpdate": "{{repo}} から · {{from}} → {{to}} · ペイン {{count}} 件"
+      "source_other": "{{repo}} から · {{sha}} · ペイン {{count}} 件を追加",
+      "sourceUpdate_other": "{{repo}} から · {{from}} → {{to}} · ペイン {{count}} 件"
     },
     "remove": {
       "title": "{{title}} を削除しますか?",

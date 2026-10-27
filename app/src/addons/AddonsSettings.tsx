@@ -1,5 +1,5 @@
 import { SEAT_INSTRUCTION } from "./openRequests";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { AddonsSnapshot, EngineState, InstallError, InstalledAddon } from "./types";
 import { declaredPermissions, addonNetwork, grantText, grantsOf, installErrorText, parseRepoInput, permissionRow, shortSha, type Translate } from "./model";
@@ -93,6 +93,11 @@ export function AddonsSettings(props: Props) {
   const installed = snapshot.addons.filter((a) => !a.builtin && !a.dev);
   const devs = snapshot.addons.filter((a) => a.dev);
   const newId = props.installedNotice?.addonId;
+  // A finished install empties the field, so the next one starts blank.
+  const installedKey = props.installedNotice?.kind === "installed" ? props.installedNotice.addonId : null;
+  useEffect(() => {
+    if (installedKey) setInput("");
+  }, [installedKey]);
 
   if (!engine.ok) {
     return (

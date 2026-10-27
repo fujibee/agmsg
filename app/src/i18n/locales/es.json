@@ -401,8 +401,12 @@
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
       "neverTitle": "Nunca puede",
-      "source": "de {{repo}} · {{sha}} · añade {{count}} panel(es)",
-      "sourceUpdate": "de {{repo}} · {{from}} → {{to}} · {{count}} panel(es)"
+      "source_one": "de {{repo}} · {{sha}} · añade {{count}} panel",
+      "source_many": "de {{repo}} · {{sha}} · añade {{count}} paneles",
+      "source_other": "de {{repo}} · {{sha}} · añade {{count}} paneles",
+      "sourceUpdate_one": "de {{repo}} · {{from}} → {{to}} · {{count}} panel",
+      "sourceUpdate_many": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles",
+      "sourceUpdate_other": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles"
     },
     "remove": {
       "title": "Remove {{title}}?",
