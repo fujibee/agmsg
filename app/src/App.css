@@ -1629,9 +1629,10 @@ body.resizing-row {
 .addon-kv { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .addon-lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; min-width: 58px; }
 .addon-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
-.addon-chip { font-size: 11px; border-radius: 10px; padding: 1px 8px; background: var(--accent-soft); color: var(--strong); }
-.addon-chip.ok { background: var(--green-soft); color: var(--green); }
-.addon-chip.none { background: none; color: var(--muted); border: 1px dashed var(--border); }
+/* Scoped to .addon-chips: the pane header chip further down shares the .addon-chip name and sets its own muted colour. */
+.addon-chips .addon-chip { font-size: 11px; border: 0; border-radius: 10px; padding: 1px 8px; background: var(--accent-soft); color: var(--strong); }
+.addon-chips .addon-chip.ok { background: var(--green-soft); color: var(--green); }
+.addon-chips .addon-chip.none { background: none; color: var(--muted); border: 1px dashed var(--border); }
 .addon-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 .addon-switch-line { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
 .addon-switch { flex: none; width: 34px; height: 20px; border-radius: 10px; border: 0; padding: 0; background: var(--border); position: relative; cursor: pointer; margin-top: 2px; }
