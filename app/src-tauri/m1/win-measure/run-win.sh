@@ -24,7 +24,8 @@ verdict() { # verdict PASS|FAIL <step> <text>
 session_state() { query session 2>&1 | tr -s ' ' | grep -i "$(whoami | sed 's/.*\\//')" | head -3; }
 mark_session() { echo "[$(date -u +%T)] $1: $(session_state | tr '\n' ';')" >> "$OUT/session.log"; }
 stop_exe() { taskkill //F //IM "$1" > /dev/null 2>&1; sleep 2; }
-trap 'stop_exe agmsg-app-win-measure-debug.exe; stop_exe agmsg-app-win-measure-release.exe; note "run ended (trap)"' EXIT
+stop_sink() { [ -n "${SINK:-}" ] || return 0; touch "$SINK.stop"; if [ -f "$SINK.pid" ]; then sleep 1; taskkill //F //PID "$(tr -d '\r\n ' < "$SINK.pid")" > /dev/null 2>&1; fi; }
+trap 'stop_sink; stop_exe agmsg-app-win-measure-debug.exe; stop_exe agmsg-app-win-measure-release.exe; note "run ended (trap)"' EXIT
 # ---- isolation: every launch gets these, none of them changes HOME
 CORE="$HERE/../core"
 export AGMSG_CONFIG="$(nat "$OUT/iso/config.json")" AGMSG_STORAGE_PATH="$(nat "$OUT/iso/storage")" \
@@ -116,10 +117,15 @@ if grep -q '"finished' "$OUT/s2-bootstrap.log"; then verdict PASS S2 "throwaway 
 sed -e "s|__TEAM__|$TEAM|g" -e "s|__FIXTURE__|$(nat "$FIX")|g" -e "s|__ADDON__|$(nat "$HERE/addon")|g" "$HERE/driver.js" > "$OUT/driver.js"
 SINK="$OUT/sink-hits.txt"; SINKN=$(nat "$SINK")
 ( powershell -NoProfile -ExecutionPolicy Bypass -File "$(nat "$HERE/sink.ps1")" -Port 47931 -Seconds 900 -Out "$SINKN" > "$OUT/sink.log" 2>&1 & )
-sleep 4
+for _ in $(seq 1 20); do grep -q '^udp=\|^ERROR' "$SINK" 2>/dev/null && break; sleep 0.5; done
+if ! tr -d '\r' < "$SINK" 2>/dev/null | grep -q '^udp='; then
+  verdict FAIL S3-sink-start "the sink could not start (port 47931 busy or PowerShell blocked): $(tr -d '\r' < "$SINK" 2>/dev/null | head -1)"
+  stop_sink; echo "== counts: $(grep -c '^PASS' "$SUM") PASS, $(grep -c '^FAIL' "$SUM") FAIL" | tee -a "$SUM"
+  ( cd "$(dirname "$OUT")" && tar czf "$OUT.tgz" "$(basename "$OUT")" ) && echo "archive: $OUT.tgz" | tee -a "$SUM"; exit 4
+fi
 powershell -NoProfile -Command '$c=New-Object System.Net.Sockets.UdpClient; [void]$c.Send([byte[]](1,2,3),3,"127.0.0.1",47931); $c.Close(); $t=New-Object System.Net.Sockets.TcpClient("127.0.0.1",47931); $t.Close()' > "$OUT/sink-control.log" 2>&1
 sleep 2
-if grep -q 'udp=1 tcp=1' "$SINK" 2>/dev/null; then verdict PASS S3-sink-control "the UDP/TCP sink saw the control packet and connection"; else verdict FAIL S3-sink-control "the sink did not see its control traffic: $(cat "$SINK" 2>/dev/null)"; fi
+if tr -d '\r' < "$SINK" 2>/dev/null | grep -q '^udp=1 tcp=1$'; then verdict PASS S3-sink-control "the UDP/TCP sink saw the control packet and connection"; else verdict FAIL S3-sink-control "the sink did not see its control traffic: $(tr -d '\r' < "$SINK" 2>/dev/null)"; fi
 mark_session "S3 before"
 ( AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_WINDOWS_MEASURE=1 AGMSG_ADDON_TRACE=1 AGMSG_ADDON_E2E="$(nat "$OUT/driver.js")" AGMSG_ADDON_E2E_DELAY=15 "$DBG" > "$OUT/s3-main.log" 2>&1 < /dev/null & )
 for _ in $(seq 1 120); do grep -qE '"(FAILED|finished)' "$OUT/s3-main.log" 2>/dev/null && break; sleep 2; done
@@ -137,36 +143,11 @@ for c in app_tauri app_tauri_localhost_http app_https replace meta_refresh; do
   if grep -q "\"k\":\"NAV_alive_after_3s\",\"v\":\"$c http://127.0.0.1:" "$L"; then verdict PASS "S3-nav-$c" "the pane was still itself 3 s after the attempt"; else verdict FAIL "S3-nav-$c" "no alive report: the frame may have become the app"; fi
 done
 grep -c 'cancelled a frame navigation' "$L" | sed 's/^/INFO S3-nav cancelled-frame-navigation lines: /' | tee -a "$SUM"
-net() { grep -o "\"k\":\"$1\",\"v\":\"[^\"]*\"" "$L" | head -1 | sed 's/.*"v":"//; s/"$//'; }
-net_cancels=$(awk '/opening dev pane net probe/{f=1} f && (/cancelled a frame navigation/ || /cancelled navigation to/)' "$L" | wc -l | tr -d ' ')
-realm() { # realm <label> <key>: absent passes; blocked passes only with its evidence; anything else fails
-  local w; w=$(net NET_realm_$2)
-  case "$w" in
-    absent) verdict PASS "S3-realm-$1" "no WebRTC name in this realm (script ran here)" ;;
-    "blocked:no load event"*|"blocked:its parent frame"*) if [ "$net_cancels" -ge 1 ]; then verdict PASS "S3-realm-$1" "$w; the app logged $net_cancels refused navigation(s) while the net pane ran"; else verdict FAIL "S3-realm-$1" "$w, but the app logged no refused navigation"; fi ;;
-    "blocked:frame-src violation seen"|"blocked:worker-src violation seen"|"blocked:script-src violation seen"|"blocked:document SecurityError / eval SecurityError"|"blocked:worker error"|"blocked:threw "*) verdict PASS "S3-realm-$1" "$w (no script could run in it)" ;;
-    *) verdict FAIL "S3-realm-$1" "${w:-<no report>}" ;;
-  esac
-}
-realm top-first-script top_first_script; realm top top; realm srcdoc-child srcdoc; realm nested-child nested
-realm about-blank-child blank; realm blob-child blob; realm data-child data; realm dedicated-worker worker; realm shared-worker sharedworker
-w=$(net NET_webrtc_globals); echo "$w" | grep -q 'RTCPeerConnection=undefined webkitRTCPeerConnection=undefined RTCSessionDescription=undefined RTCDataChannel=undefined RTCIceCandidate=undefined' && verdict PASS S3-webrtc-pane "no WebRTC API in the pane" || verdict FAIL S3-webrtc-pane "pane: ${w:-<none>}"
-touch "$SINK.stop"; sleep 2
-hits=$(cat "$SINK" 2>/dev/null)
+. "$HERE/evaluate.sh"
+eval_net 2>&1 | while IFS= read -r line; do case "$line" in INFO*) echo "$line" | tee -a "$SUM" ;; *) echo "$line" ;; esac; done
+stop_sink; sleep 1
+hits=$(tr -d '\r' < "$SINK" 2>/dev/null)
 if [ "$hits" = "udp=1 tcp=1" ]; then verdict PASS S3-sink-hits "no UDP datagram or TCP connection reached the sink beyond the control ($hits)"; else verdict FAIL S3-sink-hits "sink counts: ${hits:-<none>} (control alone is udp=1 tcp=1)"; fi
-echo "INFO S3-live-attempt $(net NET_live_attempt)" | tee -a "$SUM"
-echo "INFO S3-csp-violations $(net NET_csp_violations)" | tee -a "$SUM"
-w=$(net NET_eval); echo "$w" | grep -q '^blocked' && verdict PASS S3-eval "eval blocked by the pane CSP" || verdict FAIL S3-eval "eval: ${w:-<none>}"
-# egress: the oracle is the enforced CSP report (directive + blocked address) where the address cannot be a sink, and the sink's own counters for the local ones
-viol=$(net NET_csp_violations)
-for want in "connect-src http://192.0.2.1/x" "connect-src https://example.com/" "img-src http://192.0.2.1/x.png"; do
-  case "$viol" in *"$want"*) verdict PASS "S3-csp-report" "enforced CSP report seen: $want" ;; *) verdict FAIL "S3-csp-report" "no CSP report for: $want (reports: ${viol:-<none>})" ;; esac
-done
-for k in fetch_sink xhr_sink websocket_sink eventsource_sink beacon_sink image_sink fetch_lan_like fetch_https image_lan_like; do
-  w=$(net NET_$k)
-  case "$w" in sent|answered|OPEN|loaded) verdict FAIL "S3-egress-$k" "the request went through: $w" ;; *) echo "INFO S3-egress-$k outcome: ${w:-<none>}" | tee -a "$SUM" ;; esac
-done
-w=$(net NET_alive); [ "$w" = "yes" ] && verdict PASS S3-net-finished "the net pane ran to the end" || verdict FAIL S3-net-finished "no end report"
 
 # ---- the real home must be unchanged
 snapshot > "$OUT/real-home-after.txt"

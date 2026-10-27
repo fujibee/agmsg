@@ -61,6 +61,10 @@ jobs:
           cargo build --release --features tauri/custom-protocol
           cp target/release/agmsg-app.exe ../../out/win-measure/bin/agmsg-app-win-measure-release.exe
 
+      - name: Self-test the run verdicts
+        working-directory: app/src-tauri/m1/win-measure
+        run: bash selftest.sh
+
       - name: Assemble the artifact
         working-directory: .
         run: |

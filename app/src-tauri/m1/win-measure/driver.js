@@ -88,7 +88,7 @@
       const item = await waitFor(() => [...document.querySelectorAll(".new-wrap button")].find((b) => b.textContent.includes(title) && !b.disabled), "menu item " + title);
       report("opening dev pane " + title);
       item.click();
-      await sleep(9000); // one pane at a time: a pane in a background tab does not run
+      await sleep(title === "net probe" ? 45000 : 9000); // one pane at a time: a pane in a background tab does not run
     }
     await sleep(3000);
     if (mismatches > 0) throw new Error(mismatches + " answer(s) were not what was expected");

@@ -7,11 +7,19 @@ var RTC_AT_START = RTC_NAMES.filter(function (n) { return typeof window[n] !== '
 (function () {
   var K = document.currentScript.getAttribute('data-case');
   var port = null, id = 1, queue = [];
+  var ports = 0, started = false;
+  var waiting = {};
+  function onResponse(ev) {
+    var d = ev.data;
+    if (d && d.type === 'response' && waiting[d.id]) { waiting[d.id](); delete waiting[d.id]; }
+  }
+  // Returns a promise that settles when the app has answered (its trace line is printed before the answer leaves).
   function report(k, v) {
     var m = { agmsg: 1, type: 'request', id: id++, op: 'open.args', args: { k: k, v: String(v).slice(0, 200) } };
+    var p = new Promise(function (res) { waiting[m.id] = res; });
     if (port) port.postMessage(m); else queue.push(m);
+    return p;
   }
-  var ports = 0, started = false;
   window.addEventListener('message', function (ev) {
     if (ev.source !== window.parent) return;
     var d = ev.data;
@@ -19,15 +27,13 @@ var RTC_AT_START = RTC_NAMES.filter(function (n) { return typeof window[n] !== '
     // The app sends a new port whenever this frame loads again (a refused navigation can count as a load),
     // and answers only the newest one: always switch to it.
     port = ev.ports[0];
+    port.onmessage = onResponse;
     port.start();
     ports++;
     while (queue.length) port.postMessage(queue.shift());
     if (ports > 1) report('PORT_AGAIN', ports);
     if (!started) { started = true; start(); }
   });
-  var violations = [];
-  document.addEventListener('securitypolicyviolation', function (e) { violations.push(e.effectiveDirective + ' ' + e.blockedURI); });
-
   function nav() {
     var go = {
       app_tauri: function () { location.href = 'tauri://localhost/'; },
@@ -45,74 +51,97 @@ var RTC_AT_START = RTC_NAMES.filter(function (n) { return typeof window[n] !== '
   }
 
   function present(w) { try { return RTC_NAMES.filter(function (n) { return typeof w[n] !== 'undefined' || n in w; }).join(','); } catch (e) { return 'threw ' + e.name; } }
+  // Everything the net pane reports is one small record: no truncation, no dependence on order. A record names
+  // the step (label) it belongs to; the steps run one after the other, each between an attempt and a done marker.
   function net() {
-    var realms = {};
-    var loaded = {};
-    function setRealm(k, v) { if (!(k in realms)) realms[k] = v; }
-    report('NET_realm_top_first_script', RTC_AT_START === '' ? 'absent' : 'PRESENT:' + RTC_AT_START);
-    report('NET_realm_top', present(window) === '' ? 'absent' : 'PRESENT:' + present(window));
-
-    // a child frame that runs a pane script (srcdoc inherits the pane CSP, so its script-src allows pane files)
+    var current = '-';
+    var nonces = {};
+    function nonce(label) { nonces[label] = Math.random().toString(36).slice(2, 10); report('NET_nonce', label + '|' + nonces[label]); return nonces[label]; }
+    document.addEventListener('securitypolicyviolation', function (e) {
+      report('NET_viol', current + '|' + e.disposition + '|' + e.effectiveDirective + '|' + String(e.blockedURI).slice(0, 110));
+    });
     window.addEventListener('message', function (ev) {
       var d = ev.data;
-      if (d && d.realm) setRealm(d.realm, d.present === '' ? 'absent' : 'PRESENT:' + d.present);
+      if (!d || !d.agmsg_net) return;
+      if (d.kind === 'realm') report('NET_realm', d.label + '|' + (d.present === '' ? 'absent' : 'PRESENT:' + d.present));
+      else if (d.kind === 'viol') report('NET_viol', d.label + '|' + d.disposition + '|' + d.directive + '|' + String(d.uri).slice(0, 110));
+      else if (d.kind === 'attempt') report('NET_attempt', d.label).then(function () { try { ev.source.postMessage({ agmsg_ack: true }, '*'); } catch (e) { /* the child is gone */ } });
+      else if (d.kind === 'done') report('NET_done', d.label);
+      else if (d.kind === 'loaded') report('NET_loaded', d.label + '|' + d.loaded);
+      else if (d.kind === 'nonce') report('NET_nonce', d.label + '|' + d.nonce);
     });
-    try {
-      var g = document.createElement('iframe');
-      g.name = 'srcdoc';
-      g.onload = function () { loaded.srcdoc = true; };
-      g.srcdoc = '<script src="child.js"></' + 'script>';
-      document.body.appendChild(g);
-    } catch (e) { setRealm('srcdoc', 'blocked:threw ' + e.name); }
-    // an about:blank child: this page may not reach into it, and it has no way to run script of its own
-    try {
+    function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+    function ack(p) { return Promise.race([p, sleep(1500)]); }
+    function step(label, fn, wait) {
+      current = label;
+      return ack(report('NET_attempt', label)).then(function () {
+        var r;
+        try { r = fn(); } catch (e) { report('NET_outcome', label + '|threw ' + e.name); }
+        Promise.resolve(r).then(function (v) { if (v !== undefined) report('NET_outcome', label + '|' + v); });
+        return sleep(wait);
+      }).then(function () { return ack(report('NET_done', label)); });
+    }
+    function childFrame(label, how) { // a child frame that runs child.js; its load event is recorded
+      var f = document.createElement('iframe');
+      f.name = label;
+      var n = nonce(label);
+      var src = new URL('child.js', location.href).href + '?n=' + n;
+      var page = '<script src="' + src + '"></' + 'script>';
+      var loaded = false;
+      f.onload = function () { loaded = true; };
+      if (how === 'srcdoc') f.srcdoc = page;
+      else if (how === 'blob') f.src = URL.createObjectURL(new Blob([page], { type: 'text/html' }));
+      else f.src = 'data:text/html,' + encodeURIComponent(page);
+      document.body.appendChild(f);
+      return function () { report('NET_loaded', label + '|' + loaded); };
+    }
+    var chain = Promise.resolve();
+    function add(label, fn, wait) { chain = chain.then(function () { return step(label, fn, wait); }); }
+
+    add('top_first_script', function () { return RTC_AT_START === '' ? 'absent' : 'PRESENT:' + RTC_AT_START; }, 100);
+    add('top', function () { var p = present(window); return p === '' ? 'absent' : 'PRESENT:' + p; }, 100);
+    ['srcdoc', 'blob', 'data'].forEach(function (how) {
+      var done;
+      add(how, function () { done = childFrame(how, how); }, how === 'srcdoc' ? 4500 : 2500);
+      chain = chain.then(function () { if (done) done(); });
+    });
+    add('blank', function () {
       var f = document.createElement('iframe');
       document.body.appendChild(f);
       var how = [];
       try { f.contentWindow.document; how.push('document reachable'); } catch (e) { how.push('document ' + e.name); }
       try { f.contentWindow.eval('1'); how.push('eval ran'); } catch (e) { how.push('eval ' + e.name); }
-      realms.blank_detail = how.join(' / ');
-      setRealm('blank', how.some(function (h) { return h.indexOf('reachable') >= 0 || h.indexOf('eval ran') >= 0; }) ? 'PRESENT:reachable ' + present(f.contentWindow) : 'blocked:' + how.join(' / '));
-    } catch (e) { setRealm('blank', 'blocked:threw ' + e.name); }
-    // blob: and data: children
-    try {
-      var b = document.createElement('iframe');
-      b.name = 'blob';
-      b.onload = function () { loaded.blob = true; };
-      b.src = URL.createObjectURL(new Blob(['<script src="' + location.origin + location.pathname + 'child.js"></' + 'script>'], { type: 'text/html' }));
-      document.body.appendChild(b);
-    } catch (e) { setRealm('blob', 'blocked:threw ' + e.name); }
-    try {
-      var dd = document.createElement('iframe');
-      dd.name = 'data';
-      dd.onload = function () { loaded.data = true; };
-      dd.src = 'data:text/html,' + encodeURIComponent('<script src="' + location.origin + location.pathname + 'child.js"></' + 'script>');
-      document.body.appendChild(dd);
-    } catch (e) { setRealm('data', 'blocked:threw ' + e.name); }
-    // workers
-    try {
-      var w = new Worker('worker.js');
-      w.onmessage = function (ev) { setRealm('worker', ev.data === '' ? 'absent' : 'PRESENT:' + ev.data); };
-      w.onerror = function () { setRealm('worker', 'blocked:worker error'); };
-    } catch (e) { setRealm('worker', 'blocked:threw ' + e.name); }
-    try {
-      var sw = new SharedWorker('worker.js');
-      sw.port.onmessage = function (ev) { setRealm('sharedworker', ev.data === '' ? 'absent' : 'PRESENT:' + ev.data); };
-      sw.onerror = function () { setRealm('sharedworker', 'blocked:worker error'); };
-    } catch (e) { setRealm('sharedworker', 'blocked:threw ' + e.name); }
+      var reach = how.some(function (h) { return h.indexOf('reachable') >= 0 || h.indexOf('eval ran') >= 0; });
+      return reach ? 'PRESENT:reachable ' + present(f.contentWindow) : 'blocked:' + how.join(' / ');
+    }, 300);
+    add('worker', function () {
+      return new Promise(function (r) {
+        try {
+          var w = new Worker('worker.js');
+          w.onmessage = function (ev) { r(ev.data === '' ? 'absent' : 'PRESENT:' + ev.data); };
+          w.onerror = function () { r('blocked:worker error'); };
+        } catch (e) { r('blocked:threw ' + e.name); }
+        setTimeout(function () { r('noreport'); }, 1800);
+      });
+    }, 2000);
+    add('sharedworker', function () {
+      return new Promise(function (r) {
+        try {
+          var sw = new SharedWorker('worker.js');
+          sw.port.onmessage = function (ev) { r(ev.data === '' ? 'absent' : 'PRESENT:' + ev.data); };
+          sw.onerror = function () { r('blocked:worker error'); };
+        } catch (e) { r('blocked:threw ' + e.name); }
+        setTimeout(function () { r('noreport'); }, 1800);
+      });
+    }, 2000);
+    add('live_attempt', function () {
+      if (typeof RTCPeerConnection === 'undefined') return 'no API to use';
+      var pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:47931' }, { urls: 'turn:127.0.0.1:47931?transport=tcp', username: 'u', credential: 'c' }] });
+      pc.createDataChannel('x'); pc.createOffer().then(function (o) { return pc.setLocalDescription(o); });
+      return 'RTCPeerConnection existed and was used';
+    }, 800);
+    add('eval', function () { try { new Function('return 1')(); return 'ALLOWED'; } catch (e) { return 'blocked ' + e.name; } }, 300);
 
-    // a live attempt in every realm that still has the API (none should): points at a local UDP+TCP sink
-    try {
-      if (typeof RTCPeerConnection !== 'undefined') {
-        var pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:47931' }, { urls: 'turn:127.0.0.1:47931?transport=tcp', username: 'u', credential: 'c' }] });
-        pc.createDataChannel('x'); pc.createOffer().then(function (o) { return pc.setLocalDescription(o); });
-        report('NET_live_attempt', 'RTCPeerConnection existed and was used');
-      } else { report('NET_live_attempt', 'no API to use'); }
-    } catch (e) { report('NET_live_attempt', 'threw ' + e.name); }
-
-    var names = ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCSessionDescription', 'RTCDataChannel', 'RTCIceCandidate'];
-    report('NET_webrtc_globals', names.map(function (n) { return n + '=' + typeof window[n]; }).join(' '));
-    try { new Function('return 1')(); report('NET_eval', 'ALLOWED'); } catch (e) { report('NET_eval', 'blocked ' + e.name); }
     var SINK = '127.0.0.1:47931';
     var tries = {
       fetch_sink: function () { return fetch('http://' + SINK + '/fetch', { mode: 'no-cors' }).then(function () { return 'sent'; }, function () { return 'failed'; }); },
@@ -125,29 +154,8 @@ var RTC_AT_START = RTC_NAMES.filter(function (n) { return typeof window[n] !== '
       fetch_https: function () { return fetch('https://example.com/', { mode: 'no-cors' }).then(function () { return 'sent'; }, function () { return 'failed'; }); },
       image_lan_like: function () { return new Promise(function (r) { var i = new Image(); i.onload = function () { r('loaded'); }; i.onerror = function () { r('error'); }; i.src = 'http://192.0.2.1/x.png'; }); }
     };
-    Object.keys(tries).forEach(function (k) {
-      var done = false;
-      var tm = setTimeout(function () { if (!done) report('NET_' + k, 'no answer in 4s'); }, 4000);
-      tries[k]().then(function (v) { done = true; clearTimeout(tm); report('NET_' + k, v); });
-    });
-    // settle: every realm either answered or the CSP says why it cannot
-    setTimeout(function () {
-      var viol = violations.join(' | ');
-      ['srcdoc', 'nested', 'blob', 'data', 'worker', 'sharedworker'].forEach(function (k) {
-        if (k in realms) return;
-        var why = '';
-        if ((k === 'blob' || k === 'data') && /frame-src/.test(viol)) why = 'frame-src violation seen';
-        else if (/worker/.test(k) && /worker-src/.test(viol)) why = 'worker-src violation seen';
-        else if ((k === 'srcdoc' || k === 'blob' || k === 'data') && !loaded[k]) why = 'no load event: the frame never loaded (navigation refused)';
-        else if (k === 'nested' && !loaded.srcdoc) why = 'its parent frame never loaded';
-        else if (/script-src/.test(viol)) why = 'script-src violation seen';
-        realms[k] = why ? 'blocked:' + why : 'noreport';
-      });
-      report('NET_loaded', JSON.stringify(loaded));
-      Object.keys(realms).forEach(function (k) { if (k !== 'blank_detail') report('NET_realm_' + k, realms[k]); });
-      report('NET_csp_violations', violations.length + ' ' + viol);
-      report('NET_alive', 'yes');
-    }, 6000);
+    Object.keys(tries).forEach(function (k) { add(k, tries[k], 1200); });
+    chain.then(function () { report('NET_alive', 'yes'); });
   }
 
   function start() {
