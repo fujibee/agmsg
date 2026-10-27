@@ -1021,8 +1021,19 @@ mod tests {
         let srv = start(&p);
         let port = srv.port();
         assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
+        let token = srv.token().to_string();
         srv.stop();
-        assert!(TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), Duration::from_millis(500)).is_err());
+        // What matters is that nothing answers any more. A refused connect is the usual outcome, but a connect can
+        // still complete for a moment: on macOS a socket gets its close-on-exec flag a moment after it is created,
+        // so a child process another test forks in that instant keeps a copy of the listening socket until it exits,
+        // and the kernel completes handshakes for it. Nobody accepts on that copy, so no request is ever answered.
+        if let Ok(mut c) = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), Duration::from_millis(500)) {
+            let _ = c.set_read_timeout(Some(Duration::from_millis(300)));
+            let _ = c.write_all(format!("GET /{token}/index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes());
+            let mut buf = [0u8; 64];
+            let got = c.read(&mut buf).unwrap_or(0);
+            assert_eq!(got, 0, "a stopped server answered a request");
+        }
     }
 
     /// Reads whatever arrives until the peer closes or errors.
