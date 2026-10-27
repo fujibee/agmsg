@@ -66,6 +66,7 @@ jobs:
         run: |
           mkdir -p out/win-measure
           cp -R app/src-tauri/m1/win-measure out/win-measure/win-measure
+          cp -R app/src-tauri/resources/agmsg-core out/win-measure/core
           {
             echo "## win-measure build"
             echo '```'

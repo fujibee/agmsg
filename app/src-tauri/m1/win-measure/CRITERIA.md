@@ -7,7 +7,7 @@
 1. **Windows unit tests.** The `addons-windows` workflow is green at the candidate head (links, hard links, 8.3 names, junctions, case, denylist, real server on Windows paths).
 2. **Product build.** The `win-measure` workflow built that same head (the artifact's `BUILD-INFO.md` names the commit and the sha256 of both executables; the run used those hashes).
 3. **Run on a real Windows machine** with `run-win.sh`, inside an Active desktop session (`session.log` shows the session Active at the start and end of every step). `summary.txt` has no `FAIL` line and these `PASS` lines:
-   - `S0` an Active session exists.
+   - `S0` an Active session exists; `GUARD` the real agmsg home (scripts, skills, commands, teams) is byte-for-byte unchanged by the run (the run never runs install.sh and never changes HOME).
    - `S1-debug` and `S1-release`: the startup check ends with only the "not verified" reason, and the frame guard was installed. That means, on the product build itself: the probe frame is opaque and under the pane CSP, a navigation to the app origin was refused and the refusal was seen as a `frame-src` violation, WebRTC is absent, and the UDP sentinel received nothing.
    - `S2`, `S3-driver`, `S3-answers`, five `S3-positive` lines: the built-in File view and Diff view open, are granted a throwaway folder, and answer every permitted read; every refused request is refused with the expected code.
    - `S3-nav-*` for all five self-navigations (tauri://, http://tauri.localhost, https://tauri.localhost, location.replace, meta refresh): the pane is still itself three seconds after the attempt.

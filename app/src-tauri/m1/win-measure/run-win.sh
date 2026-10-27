@@ -5,8 +5,10 @@
 # written as each step ends (a partial run still leaves evidence), and an archive at the end.
 # EXPECT_VERIFIED=1 for a build whose WINDOWS_VERIFIED is on (S1 then expects enabled=true).
 # Only the executables named above are started and stopped. The installed agmsg app, the real agmsg
-# home and agmsgd are not touched: the executables use their own identifier (cc.agmsg.win-measure) and a
-# throwaway base folder inside <out-folder>.
+# home and agmsgd are not touched: the executables use their own identifier (cc.agmsg.win-measure), a
+# throwaway base folder seeded from the bundled scripts (install.sh is never run, HOME is never changed) and
+# config/storage/spawn/codex paths inside <out-folder>. A before/after check of the real home fails the run
+# if anything the installer or the scripts would write there changed.
 set -u
 BIN=$(cd "${1:?folder with the executables}" && pwd)
 OUT=${2:?out folder}
@@ -22,6 +24,27 @@ session_state() { query session 2>&1 | tr -s ' ' | grep -i "$(whoami | sed 's/.*
 mark_session() { echo "[$(date -u +%T)] $1: $(session_state | tr '\n' ';')" >> "$OUT/session.log"; }
 stop_exe() { taskkill //F //IM "$1" > /dev/null 2>&1; sleep 2; }
 trap 'stop_exe agmsg-app-win-measure-debug.exe; stop_exe agmsg-app-win-measure-release.exe; note "run ended (trap)"' EXIT
+# ---- isolation: every launch gets these, none of them changes HOME
+CORE="$HERE/../core"
+export AGMSG_CONFIG="$(nat "$OUT/iso/config.json")" AGMSG_STORAGE_PATH="$(nat "$OUT/iso/storage")" \
+  AGMSG_SPAWN_OPTIONS_FILE="$(nat "$OUT/iso/spawn_options.yaml")" CODEX_HOME="$(nat "$OUT/iso/codex-home")"
+mkdir -p "$OUT/iso/storage" "$OUT/iso/codex-home"
+seed_base() { # seed_base <dir>: lay the bundled scripts out the way an install would, without running the installer
+  mkdir -p "$1" && cp -R "$CORE/scripts" "$1/scripts" && cp "$CORE/VERSION" "$CORE/SKILL.md" "$1/" 2>/dev/null; [ -f "$1/scripts/api.sh" ]
+}
+REAL="$HOME/.agents/skills/agmsg"
+snapshot() { # what an install or a script run would change in the real home (live data like messages is left out)
+  {
+    echo "== real files"; ( cd "$REAL" 2>/dev/null && find scripts SKILL.md VERSION uninstall.sh types templates plugins -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null )
+    echo "== real top level"; ls -A "$REAL" 2>/dev/null
+    echo "== skills"; ls -A "$HOME/.agents/skills" 2>/dev/null
+    echo "== claude commands"; ls -A "$HOME/.claude/commands" 2>/dev/null
+    echo "== our team name in the real install"; ls -A "$REAL/teams" "$REAL/db/teams" 2>/dev/null | grep -c "win-measure-tmp"
+  } 2>&1
+}
+snapshot > "$OUT/real-home-before.txt"
+[ -d "$CORE/scripts" ] && [ -f "$CORE/scripts/api.sh" ] || { verdict FAIL S0 "the bundled core is missing next to the executables ($CORE)"; exit 3; }
+
 
 # ---- S0 environment
 {
@@ -51,7 +74,7 @@ run_for() { # run_for <exe> <log> <seconds> -- env...
 # ---- S1 startup check, both profiles, no override: the only reason left must be "not verified"
 for prof in debug release; do
   exe=$BIN/agmsg-app-win-measure-$prof.exe
-  base=$OUT/base-s1-$prof; mkdir -p "$base"
+  base=$OUT/base-s1-$prof; seed_base "$base" || { verdict FAIL "S1-$prof" "could not seed the base"; continue; }
   mark_session "S1-$prof before"
   run_for "$exe" "$OUT/s1-$prof.log" 40 -- AGMSG_APP_BASE="$(nat "$base")"
   mark_session "S1-$prof after"
@@ -65,8 +88,8 @@ for prof in debug release; do
   fi
 done
 
-# ---- S2 bootstrap: first run installs the bundled core, then a throwaway team is joined
-BASE=$OUT/base-main; mkdir -p "$BASE"; FIX=$OUT/fixture; mkdir -p "$FIX/src"
+# ---- S2 bootstrap: the throwaway base is seeded from the bundled scripts (no installer), then a throwaway team is joined
+BASE=$OUT/base-main; seed_base "$BASE" || verdict FAIL S2 "could not seed the base"; FIX=$OUT/fixture; mkdir -p "$FIX/src"
 ( cd "$FIX" && git init -q -b main && printf '# E2E project\n\nHello **world**.\n' > README.md && printf 'export const a = 1;\nexport const b = 2;\n' > src/main.ts \
   && printf '\x89PNG\r\n\x1a\n\0\0\0\rIHDR' > logo.png && git add -A && git -c user.name=T -c user.email=t@example.com commit -q -m first \
   && printf '# E2E project\n\nHello **there**.\n' > README.md && printf 'untracked file\n' > new.txt ) > "$OUT/s2-fixture.log" 2>&1
@@ -77,7 +100,7 @@ mark_session "S2 before"
 for _ in $(seq 1 90); do grep -qE '"(FAILED|finished)' "$OUT/s2-bootstrap.log" 2>/dev/null && break; sleep 2; done
 stop_exe agmsg-app-win-measure-debug.exe
 mark_session "S2 after"
-if grep -q '"finished' "$OUT/s2-bootstrap.log"; then verdict PASS S2 "bundled core installed, team joined"; else verdict FAIL S2 "bootstrap did not finish: $(grep -E 'addons-e2e' "$OUT/s2-bootstrap.log" | tail -2 | tr '\n' ' ')"; fi
+if grep -q '"finished' "$OUT/s2-bootstrap.log"; then verdict PASS S2 "throwaway base seeded from the bundled scripts, team joined"; else verdict FAIL S2 "bootstrap did not finish: $(grep -E 'addons-e2e' "$OUT/s2-bootstrap.log" | tail -2 | tr '\n' ' ')"; fi
 
 # ---- S3 main run (debug build, measuring switch on): panes, reads, the five self-navigations, net probes
 sed -e "s|__TEAM__|$TEAM|g" -e "s|__FIXTURE__|$(nat "$FIX")|g" -e "s|__ADDON__|$(nat "$HERE/addon")|g" "$HERE/driver.js" > "$OUT/driver.js"
@@ -110,6 +133,10 @@ for k in fetch_loopback fetch_lan_like fetch_https; do w=$(net NET_$k); [ "$w" =
 w=$(net NET_websocket); [ "$w" = "error" ] && verdict PASS S3-websocket "blocked" || verdict FAIL S3-websocket "answer: ${w:-<none>}"
 w=$(net NET_image); [ "$w" = "error" ] && verdict PASS S3-image "blocked" || verdict FAIL S3-image "answer: ${w:-<none>}"
 w=$(net NET_alive); [ "$w" = "yes" ] && verdict PASS S3-net-finished "the net pane ran to the end" || verdict FAIL S3-net-finished "no end report"
+
+# ---- the real home must be unchanged
+snapshot > "$OUT/real-home-after.txt"
+if diff "$OUT/real-home-before.txt" "$OUT/real-home-after.txt" > "$OUT/real-home.diff"; then verdict PASS GUARD "the real agmsg home is unchanged (scripts, skills, commands, teams)"; else verdict FAIL GUARD "the real agmsg home changed during the run; see real-home.diff"; fi
 
 # ---- wrap up
 mark_session end
