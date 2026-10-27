@@ -702,6 +702,11 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   [ "$status" -eq 0 ]
   grep -q "follow .*/ext-tools/fx/SETUP.md" <<<"$output"
   grep -q "/scripts/ext-tool.sh setup <team> fx fx status$" <<<"$output"
+  # join refuses an unsaved member, so the save step comes before join.
+  save_line="$(grep -n "/scripts/ext-tool.sh setup <team> fx fx save$" <<<"$output" | cut -d: -f1)"
+  join_line="$(grep -n "/scripts/join.sh <team> fx ext-tool --tool fx$" <<<"$output" | cut -d: -f1)"
+  [ -n "$save_line" ]
+  [ "$save_line" -lt "$join_line" ]
   grep -q "/scripts/ext-tool.sh usage fx$" <<<"$output"
   refute grep -q "Your teams" <<<"$output"
 }

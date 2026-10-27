@@ -717,11 +717,15 @@ _plugin_next_steps() {  # dir drivers
         echo "  $ref is a team member: to use it, join it to a team (the member name, here $name, can be any name)."
         if [ -e "$d/setup" ]; then
           if [ -f "$d/SETUP.md" ]; then
-            echo "    It needs setting up first; follow $d/SETUP.md, or start with:"
+            echo "    It needs setting up first; follow $d/SETUP.md, or see what it needs with:"
           else
             echo "    It needs setting up first; see what it needs with:"
           fi
           echo "      bash $scripts/ext-tool.sh setup <team> $name $name status"
+          # join refuses a member with no saved config, so the save step is
+          # shown too, even when status lists nothing.
+          echo "    then save its settings, adding any values status lists as missing, and join it:"
+          echo "      bash $scripts/ext-tool.sh setup <team> $name $name save"
         elif [ -f "$d/SETUP.md" ]; then
           # No settings, but the tool still has first steps to walk through
           # (for example, checking that it works once it is joined).
