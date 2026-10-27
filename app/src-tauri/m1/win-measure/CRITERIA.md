@@ -11,14 +11,16 @@
    - `S1-debug` and `S1-release`: the startup check ends with only the "not verified" reason, and the frame guard was installed. That means, on the product build itself: the probe frame is opaque and under the pane CSP, a navigation to the app origin was refused and the refusal was seen as a `frame-src` violation, WebRTC is absent, and the UDP sentinel received nothing.
    - `S2`, `S3-driver`, `S3-answers`, five `S3-positive` lines: the built-in File view and Diff view open, are granted a throwaway folder, and answer every permitted read; every refused request is refused with the expected code.
    - `S3-nav-*` for all five self-navigations (tauri://, http://tauri.localhost, https://tauri.localhost, location.replace, meta refresh): the pane is still itself three seconds after the attempt.
-   - `S3-webrtc-pane`, `S3-webrtc-child`, `S3-eval`, `S3-fetch_*` (three), `S3-websocket`, `S3-image`, `S3-net-finished`.
+   - WebRTC, in every realm a pane can reach: `S3-realm-*` for the first script of the pane page (before anything else ran), the pane page, a srcdoc child, a nested child, an about:blank child, a blob: child, a data: child, a dedicated worker and a shared worker. Each passes only if a script ran there and found no WebRTC name, or if the evidence shows no script can run there (the frame never loaded and the app logged the refused navigation; an enforced `frame-src`/`worker-src`/`script-src` report; a worker that failed to start; an unreachable about:blank document). A realm that loaded and said nothing, or that exposes any WebRTC name, fails. `S3-sink-hits`: a local UDP+TCP sink received nothing from the panes (`S3-sink-control` proves the sink counts).
+   - Egress: `S3-csp-report` (enforced CSP reports with directive and blocked address for the LAN-like and public addresses), `S3-egress-*` (nothing went through; the loopback attempts at the sink are covered by `S3-sink-hits`), `S3-eval`, `S3-net-finished`.
+   - `S1-release-switch`: the release build with `AGMSG_WINDOWS_MEASURE=1` still reports the not-verified reason (the measuring switch is compiled out).
 4. **Twice.** Two complete runs, each passing item 3 (a flaky pass is not a pass). Both on a machine whose WebView2 Runtime version is recorded in `s0-env.log`.
 5. **Review.** The two reviewers have cleared the candidate head, including `nav_win.rs` (required, fail-closed frame guard) and `no_webrtc.js` plus its wiring in `host.rs`.
 
 ## Flip and re-check
 
 6. The flip commit changes only `WINDOWS_VERIFIED` and its comments. A new `win-measure` build of that commit is run once more with `EXPECT_VERIFIED=1`: `S1-debug` and `S1-release` must show `enabled=true`, and the rest still passes.
-7. The debug-only measuring switch (`AGMSG_WINDOWS_MEASURE`) stays debug-only: the release executable of the flip commit is the one checked in `S1-release`, and it has no way to waive a reason.
+7. The debug-only measuring switch (`AGMSG_WINDOWS_MEASURE`) stays debug-only: after the flip, `S1-release-switch` is kept as a check that the switch has no effect in the release build (the not-verified reason cannot come back, and nothing else can be waived).
 
 ## Not claimed
 
