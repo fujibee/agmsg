@@ -107,9 +107,60 @@ _write_completion_record() {
   _seed_install_db
   local no_node_path
   no_node_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -E '/(node|nodejs)([^/]*)?$' | while read -r d; do [ -x "$d/node" ] || printf '%s\n' "$d"; done | paste -sd: -)"
-  PATH="$no_node_path" run bash "$DAEMON" status
+  # A bogus AGMSG_NODE and no recorded Node leave nothing to run (system
+  # locations like /opt/homebrew/bin are searched too, so PATH alone cannot).
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = NULL;"
+  AGMSG_NODE="$TEST_SKILL_DIR/no-such-node" PATH="$no_node_path" run bash "$DAEMON" status
   [ "$status" -eq 0 ]
   [[ "$output" == *"no usable Node"* ]]
+}
+
+# Fake nodes: one that fails the version check (too old), one that is the real
+# node under another path.
+_node_fixture() {
+  mkdir -p "$TEST_SKILL_DIR/old-bin" "$TEST_SKILL_DIR/good-a" "$TEST_SKILL_DIR/good-b"
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_SKILL_DIR/old-bin/node"
+  chmod +x "$TEST_SKILL_DIR/old-bin/node"
+  ln -sf "$(command -v node)" "$TEST_SKILL_DIR/good-a/node"
+  ln -sf "$(command -v node)" "$TEST_SKILL_DIR/good-b/node"
+}
+
+@test "daemon.sh status: an older Node first on PATH still runs the Node recorded at enable" {
+  _seed_install_db
+  _node_fixture
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = '$TEST_SKILL_DIR/good-a/node';"
+  PATH="$TEST_SKILL_DIR/old-bin:$PATH" run bash "$DAEMON" status
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "never been started"
+}
+
+@test "daemon.sh status: with the recorded Node gone, AGMSG_NODE is used" {
+  _seed_install_db
+  _node_fixture
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = '$TEST_SKILL_DIR/gone/node';"
+  AGMSG_NODE="$TEST_SKILL_DIR/good-b/node" PATH="$TEST_SKILL_DIR/old-bin:$PATH" run bash "$DAEMON" status
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "never been started"
+}
+
+@test "daemon.sh status: with neither recorded nor AGMSG_NODE usable, the Node on PATH is used" {
+  _seed_install_db
+  _node_fixture
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = '$TEST_SKILL_DIR/gone/node';"
+  PATH="$TEST_SKILL_DIR/good-a:$PATH" run bash "$DAEMON" status
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "never been started"
+}
+
+@test "daemon.sh start: a recorded Node that fails the check is replaced by a usable one and recorded" {
+  _seed_install_db
+  _write_completion_record
+  _node_fixture
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = '$TEST_SKILL_DIR/old-bin/node';"
+  AGMSG_NODE="$TEST_SKILL_DIR/good-b/node" _run_with_deadline 20 bash "$DAEMON" start
+  _assert_start_result 'running'
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT node_path FROM meta;")" = "$TEST_SKILL_DIR/good-b/node" ]
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 
 # A bare `run` has no ceiling of its own: a real hang in the command

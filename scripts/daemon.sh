@@ -25,6 +25,8 @@ source "$SCRIPT_DIR/lib/daemon-seats.sh"
 source "$SCRIPT_DIR/lib/install-db.sh"
 # shellcheck source=lib/sqlpath.sh
 source "$SCRIPT_DIR/lib/sqlpath.sh"
+# shellcheck source=lib/node.sh
+source "$SCRIPT_DIR/lib/node.sh"
 # shellcheck source=lib/hash.sh
 source "$SCRIPT_DIR/lib/hash.sh"
 
@@ -557,15 +559,42 @@ _unregister() {
 # Confirms Node by actually running it, the same check
 # agmsgd-launch.sh itself does -- enable/start both need this before
 # recording node_path/node_version.
-_resolve_node() {
-  local candidate="${1:-node}" resolved
-  resolved="$(command -v "$candidate" 2>/dev/null)" || return 1
+_node_usable() {
+  local resolved="$1"
+  [ -n "$resolved" ] && [ -x "$resolved" ] || return 1
   "$resolved" --disable-warning=ExperimentalWarning -e '
     const [maj, min] = process.versions.node.split(".").map(Number);
     if (maj < 22 || (maj === 22 && min < 13)) process.exit(1);
     require("node:sqlite");
   ' 2>/dev/null || return 1
-  printf '%s' "$resolved"
+}
+
+# Prints the first Node that passes _node_usable. Candidates, in order:
+# the node_path recorded in install.db, AGMSG_NODE, then what
+# agmsg_resolve_node finds (PATH, then version-manager and system
+# locations). A shell whose PATH starts with an older Node still reaches the
+# Node agmsgd was enabled with. `fresh-first` puts the recorded path last, for
+# enable, which must record the Node it is run with rather than the old one.
+_resolve_node() {
+  local order="${1:-recorded-first}" recorded="" fresh candidate
+  recorded="$(agmsg_sqlite "$INSTALL_DB" "SELECT node_path FROM meta;" 2>/dev/null || true)"
+  recorded="${recorded%$'\r'}"
+  fresh="$(agmsg_resolve_node 2>/dev/null || true)"
+  if [ "$order" = fresh-first ]; then
+    set -- "${AGMSG_NODE:-}" "$fresh" "$recorded"
+  else
+    set -- "$recorded" "${AGMSG_NODE:-}" "$fresh"
+  fi
+  for candidate in "$@"; do
+    [ -n "$candidate" ] || continue
+    # A bare name (agmsg_resolve_node's last resort) is looked up on PATH.
+    case "$candidate" in */*) ;; *) candidate="$(command -v "$candidate" 2>/dev/null)" || continue ;; esac
+    if _node_usable "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
 }
 
 _resolve_codex() {
@@ -638,7 +667,9 @@ cmd_start() {
   _ensure_install_db_schema
   local state
   state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
-  if [ "$state" = "ready" ] && node "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
+  local running_node
+  running_node="$(_resolve_node 2>/dev/null || true)"
+  if [ "$state" = "ready" ] && [ -n "$running_node" ] && "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
     echo "agmsg daemon start: already running"
     agmsg_daemon_seat_report start
     _path_hint status
@@ -651,8 +682,8 @@ cmd_start() {
   # intent when there is none.
   local recorded_node found_node found_version record_node_sql=""
   recorded_node="$(agmsg_sqlite "$INSTALL_DB" "SELECT node_path FROM meta;" 2>/dev/null || true)"
-  if [ -z "$recorded_node" ] || [ ! -x "$recorded_node" ]; then
-    found_node="$(_resolve_node node)" || {
+  if ! _node_usable "$recorded_node"; then
+    found_node="$(_resolve_node)" || {
       echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed. Install Node from https://nodejs.org/en/download, then run agmsg daemon start." >&2
       _path_hint start >&2
       return 1
@@ -727,7 +758,10 @@ cmd_start() {
 _request_stop_over_socket() {
   local socket="$1"
   [ -n "$socket" ] || return 0
-  node -e '
+  local stop_node
+  stop_node="$(_resolve_node 2>/dev/null || true)"
+  [ -n "$stop_node" ] || return 0
+  "$stop_node" -e '
     const net = require("node:net");
     const s = net.createConnection(process.argv[1]);
     const done = () => { try { s.destroy(); } catch {} process.exit(0); };
@@ -785,7 +819,7 @@ cmd_status() {
     return 0
   fi
   local node_path
-  node_path="$(_resolve_node node 2>/dev/null || true)"
+  node_path="$(_resolve_node 2>/dev/null || true)"
   if [ -n "$node_path" ]; then
     local status_rc=0
     if [ "$json" = true ]; then
@@ -832,7 +866,7 @@ cmd_enable() {
     return 1
   fi
   local node_path
-  node_path="$(_resolve_node node)" || {
+  node_path="$(_resolve_node fresh-first)" || {
     echo "agmsg daemon enable: no usable Node found (need >= 22.13.0 with node:sqlite). Install one and try again." >&2
     echo 'Install Node from https://nodejs.org/en/download, then run agmsg daemon enable.' >&2
     _path_hint enable >&2
@@ -1010,7 +1044,7 @@ cmd_offer() {
     echo "agmsgd=unavailable reason=systemd user services are not available here, so agmsgd cannot start on its own"
     return 0
   fi
-  node_path="$(_resolve_node node)" || {
+  node_path="$(_resolve_node)" || {
     echo "agmsgd=unavailable reason=agmsgd needs Node 22.13 or newer with node:sqlite, and none was found"
     return 0
   }
