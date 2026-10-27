@@ -462,7 +462,7 @@ agmsg_grok_instance_id() {
   #    (a fresh grok) key on the project's newest session id.
   grok_pid=$(agmsg_grok_ancestor_pid 2>/dev/null || true)
   if [ -n "$grok_pid" ]; then
-    gargs=$(ps -o args= -p "$grok_pid" 2>/dev/null || true)
+    gargs=$(ps -ww -o args= -p "$grok_pid" 2>/dev/null || true)
     gid=""
     case "$gargs" in
       *--resume*) gid=$(printf '%s' "$gargs" | sed -n 's/.*--resume[ =]*\([0-9A-Za-z][0-9A-Za-z-]*\).*/\1/p') ;;
@@ -481,7 +481,7 @@ agmsg_grok_instance_id() {
   #    no grok in its process tree). Best-effort — find any live `grok --resume
   #    <id>` whose <id> is in this project's dir.
   for gp in $(pgrep -x grok 2>/dev/null || true); do
-    gargs=$(ps -o args= -p "$gp" 2>/dev/null || true)
+    gargs=$(ps -ww -o args= -p "$gp" 2>/dev/null || true)
     case "$gargs" in *--resume*) ;; *) continue ;; esac
     gid=$(printf '%s' "$gargs" | sed -n 's/.*--resume[ =]*\([0-9A-Za-z][0-9A-Za-z-]*\).*/\1/p')
     [ -n "$gid" ] || continue
@@ -547,7 +547,7 @@ agmsg_reap_orphan_grok_watchers() {
     agmsg_grok_ancestor_pid "$pid" >/dev/null 2>&1 && continue
     kill "$pid" 2>/dev/null || true
   done <<EOF
-$(ps -eo pid=,args= 2>/dev/null)
+$(ps -ww -eo pid=,args= 2>/dev/null)
 EOF
 }
 

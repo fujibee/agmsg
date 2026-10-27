@@ -1018,7 +1018,7 @@ EOF
   # process behind it changes, and the argv stops matching.
   #
   # A pid cannot be recycled on demand, so the OBSERVATION is driven instead:
-  # `compat_get_cmdline` reads `ps -o args= -p` off Windows, and a `ps` stub
+  # `compat_get_cmdline` reads `ps -ww -o args= -p` off Windows, and a `ps` stub
   # answers truthfully until a marker appears and with a decoy afterwards. The
   # fake node traps TERM and drops that marker from inside the handler, so the
   # transition lands exactly between TERM and KILL. It does not exit from the
@@ -1044,11 +1044,11 @@ EOF
   chmod +x "$shimdir/mktemp"
 
   # The seam: truthful until the marker exists, a decoy afterwards. Only the
-  # `-o args=` form is intercepted, so nothing else that shells out to `ps` --
+  # `-ww -o args=` form is intercepted, so nothing else that shells out to `ps` --
   # `_agmsg_pid_alive_local`'s own cross-check among them -- is affected.
   {
     printf '%s\n' '#!/bin/sh'
-    printf '%s\n' 'if [ "$1" = "-o" ] && [ "$2" = "args=" ] && [ -e "$AGMSG_TEST_TERMED" ]; then'
+    printf '%s\n' 'if [ "$1" = "-ww" ] && [ "$2" = "-o" ] && [ "$3" = "args=" ] && [ -e "$AGMSG_TEST_TERMED" ]; then'
     printf '%s\n' '  printf "%s\\n" "some-unrelated-process --after-recycle"'
     printf '%s\n' '  exit 0'
     printf '%s\n' 'fi'
@@ -1147,7 +1147,7 @@ EOF
   chmod +x "$shimdir/mktemp"
   {
     printf '%s\n' '#!/bin/sh'
-    printf '%s\n' 'if [ "$1" = "-o" ] && [ "$2" = "args=" ]; then'
+    printf '%s\n' 'if [ "$1" = "-ww" ] && [ "$2" = "-o" ] && [ "$3" = "args=" ]; then'
     printf '%s\n' '  n=$(cat "$AGMSG_TEST_PS_CALLS" 2>/dev/null || echo 0)'
     printf '%s\n' '  n=$((n + 1)); printf %s "$n" > "$AGMSG_TEST_PS_CALLS"'
     printf '%s\n' '  if [ "$n" -eq 1 ]; then'
