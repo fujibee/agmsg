@@ -965,6 +965,27 @@ print_terminal_status() {
   [ "$errf" = /dev/null ] || rm -f "$errf"
 }
 
+# 0 when this project's delivery is agmsgd: it recorded that choice, or it has
+# no recorded choice and agmsgd is on for the install. Reads install.db and
+# run/delivery-choice directly (no Node), so it cannot disagree with the
+# session hooks. Sets STATUS_AGMSGD_NOTE to what to say about it.
+_status_project_on_agmsgd() {   # <type> <project>
+  local chosen AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/lib/daemon-state.sh"
+  chosen="$(agmsg_delivery_choice_get "$1" "$2")"
+  agmsg_daemon_read_state
+  if [ "$chosen" = agmsgd ] || { [ -z "$chosen" ] && [ "${AGMSGD_DESIRED:-}" = on ]; }; then
+    if [ "${AGMSGD_DESIRED:-}" = on ] && [ "${AGMSGD_HEALTH:-}" = ready ]; then
+      STATUS_AGMSGD_NOTE="agmsgd delivers to this project directly; no Monitor is started"
+    else
+      STATUS_AGMSGD_NOTE="this project receives through agmsgd, which is not confirmed running (${AGMSGD_REASON:-unknown}); no Monitor is started"
+    fi
+    return 0
+  fi
+  return 1
+}
+
 do_status() {
   local TYPE="${1:-}"
   local PROJECT="${2:-}"
@@ -978,7 +999,16 @@ do_status() {
   # (agmsg_delivery_status); default is JSON event-hooks, rule-file types override.
   if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
     agmsg_delivery_load_plug "$TYPE"
-    agmsg_delivery_status "$TYPE" "$PROJECT"
+    if [ "$TYPE" = claude-code ] && _status_project_on_agmsgd "$TYPE" "$PROJECT"; then
+      # The hooks file can still hold Monitor hooks from before the project
+      # went to agmsgd; reporting them as the mode made a session start a Monitor.
+      local hooks_out
+      hooks_out="$(agmsg_delivery_status "$TYPE" "$PROJECT")"
+      printf 'mode: agmsgd (%s)\n' "$STATUS_AGMSGD_NOTE"
+      printf '%s\n' "$hooks_out" | sed '1{/^mode: /d;}'
+    else
+      agmsg_delivery_status "$TYPE" "$PROJECT"
+    fi
     case "$TYPE" in
       claude-code)
         cat <<'EOF'

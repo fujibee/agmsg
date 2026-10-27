@@ -66,7 +66,7 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   grep -Fq "mode: turn" <<<"$output"
 }
 
-@test "delivery agmsgd: with agmsgd already on it leaves the project on monitor and does not enable again" {
+@test "delivery agmsgd: with agmsgd already on it leaves the project on agmsgd (hooks stay installed) and does not enable again" {
   _mark_daemon_ready
   run bash "$SCRIPTS/agmsg" delivery agmsgd --type claude-code --project "$PROJECT"
   [ "$status" -eq 0 ]
@@ -74,7 +74,8 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   grep -Fq "agmsgd delivers to this project. This session moves to it when it restarts or runs actas; no Monitor is armed for it." <<<"$output"
   refute grep -Fq "AGMSG-DIRECTIVE" <<<"$output"
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
-  grep -Fq "mode: monitor" <<<"$output"
+  grep -Fq "mode: agmsgd" <<<"$output"
+  refute grep -Fq "mode: monitor" <<<"$output"
 }
 
 @test "delivery <mode>: the other modes are delivery.sh set plus a recorded choice; agmsgd stays on for the install" {
@@ -135,7 +136,7 @@ teardown() { rm -rf "$TEST_SKILL_DIR"; }
   refute grep -Fq "notices are delivered directly" <<<"$output"
   grep -Fq "agmsgd (on, but not running" <<<"$output"
   grep -Fq "start it with: agmsg delivery agmsgd" <<<"$output"
-  grep -Fq "this project: monitor (legacy)" <<<"$output"
+  grep -Fq "this project: agmsgd" <<<"$output"
 }
 
 @test "delivery agmsgd: turned on but not running starts it instead of only setting monitor; a failed start changes nothing" {
@@ -158,5 +159,58 @@ STUB
   [ "$status" -eq 0 ]
   [ "$(grep -c start "$STUB_LOG")" -eq 2 ]
   run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
-  grep -Fq "mode: monitor" <<<"$output"
+  grep -Fq "mode: agmsgd" <<<"$output"
+  refute grep -Fq "mode: monitor" <<<"$output"
+}
+
+@test "delivery.sh status: leftover Monitor hooks on a project with no choice, agmsgd on, read as agmsgd (#1819)" {
+  _mark_daemon_ready
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | sed -n 1p | cut -c1-13)" = "mode: agmsgd " ]
+  refute grep -Fq "mode: monitor" <<<"$output"
+  grep -Fq "no Monitor is started" <<<"$output"
+}
+
+@test "delivery.sh status: a recorded agmsgd choice reads as agmsgd even while agmsgd is stopped, and says so" {
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJECT" >/dev/null
+  printf 'claude-code\t%s\tagmsgd\n' "$(cd "$PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
+  [ "$(printf '%s\n' "$output" | sed -n 1p | cut -c1-13)" = "mode: agmsgd " ]
+  grep -Fq "not confirmed running" <<<"$output"
+}
+
+@test "delivery.sh status: monitor, turn, both and off choices keep their own mode while agmsgd is on" {
+  _mark_daemon_ready
+  local m
+  for m in monitor turn both; do
+    bash "$SCRIPTS/delivery.sh" set "$m" claude-code "$PROJECT" >/dev/null
+    printf 'claude-code\t%s\t%s\n' "$(cd "$PROJECT" && pwd -P)" "$m" > "$TEST_SKILL_DIR/run/delivery-choice"
+    run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
+    [ "$(printf '%s\n' "$output" | sed -n 1p)" = "mode: $m" ]
+  done
+  bash "$SCRIPTS/delivery.sh" set off claude-code "$PROJECT" >/dev/null
+  printf 'claude-code\t%s\toff\n' "$(cd "$PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
+  [ "$(printf '%s\n' "$output" | sed -n 1p | cut -c1-9)" = "mode: off" ]
+}
+
+@test "delivery.sh status: agmsgd off and no choice keeps the hooks file's mode" {
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJECT"
+  [ "$(printf '%s\n' "$output" | sed -n 1p)" = "mode: monitor" ]
+}
+
+@test "claude-code SKILL: the default action names the deciding command and never starts a Monitor on agmsgd or native delivery (#1819)" {
+  local f
+  for f in "$BATS_TEST_DIRNAME/../SKILL.md"; do
+    line="$(grep -F 'Ensure monitor is running first.' "$f")"
+    grep -Fq 'agmsg delivery status' <<<"$line"
+    grep -Fq 'this project:' <<<"$line"
+    grep -Fq 'Start no Monitor when it says `agmsgd`' <<<"$line"
+    grep -Fq 'native delivery' <<<"$line"
+  done
+  # actas step 5d and the drop variant both handle `mode: agmsgd`.
+  [ "$(grep -c '\*\*`mode: agmsgd ...`\*\*' "$BATS_TEST_DIRNAME/../SKILL.md")" -eq 2 ]
 }

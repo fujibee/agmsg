@@ -127,7 +127,7 @@ Asked about a *teammate's* placement or status, or what can be done to one, that
 3. If there are messages, read and respond appropriately. To reply:
    `~/.agents/skills/agmsg/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
-**Ensure monitor is running first.** In `monitor` or `both` mode, keep one persistent `watch.sh` task for this session. Switch that watcher when `actas` changes the active role.
+**Ensure monitor is running first.** What decides is `~/.agents/skills/agmsg/scripts/agmsg delivery status --type claude-code --project "$(pwd)"`, its `this project:` line (not the hooks file, and not a leftover Monitor from an earlier session). Keep one persistent `watch.sh` task for this session only when that line says `monitor (legacy)` or `both`. Start no Monitor when it says `agmsgd`, or when SessionStart or `actas` reported native delivery (`agmsgd is running and will deliver to this session directly`). Switch that watcher when `actas` changes the active role.
 
 If asked, in ordinary language and in either English or Japanese, to re-arm this session's own agmsg monitor (no fixed trigger word — read the request as it is phrased): invoke Monitor with the standard command and description for this seat, and say nothing else.
 
@@ -221,6 +221,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
    b. **If you have such a task_id**: TaskStop it.
    c. **If you have none** (typical when /agmsg actas runs as the first command of a fresh session — SessionStart hasn't fired the Monitor directive yet, or you're invoking actas before the agent acted on it): skip TaskStop. Do NOT attempt TaskStop with a guessed or empty task_id — it will fail with "Invalid tool parameters" and confuse the flow. Starting a new watcher for this session in step d replaces any previous one.
    d. **If the step 4 output had a `delivery=native` line**: agmsgd now delivers to this session directly, so start no Monitor and skip the rest of this step. **If it had a `delivery=agmsgd state=stopped` line**: this project receives through agmsgd only, which is not running; start no Monitor, skip the rest of this step, and tell the user that agmsgd is not running (give the `reason=` value), that unread messages are kept and this session's destination is recorded so agmsgd delivers to it once started, and that `agmsg daemon start` brings it back. **If it had a `delivery=agmsgd state=blocked` line**: start no Monitor either, skip the rest of this step, and tell the user the native channel cannot be used (give the `reason=` value) and to run `agmsg doctor`. Otherwise run `~/.agents/skills/agmsg/scripts/delivery.sh status claude-code "$(pwd)"` and read its **first line**.
+      - **`mode: agmsgd ...`**: this project receives through agmsgd, so start no Monitor and leave it stopped. If the text says agmsgd is not confirmed running, tell the user and give the reason it names.
       - **`mode: monitor` or `mode: both`**: invoke a fresh Monitor, regardless of whether step b or c applied:
         - command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code <name> --max-seconds=1750`
         - description: `agmsg inbox stream (acting as <name>)`
@@ -244,6 +245,7 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
    b. **If you have such a task_id**: TaskStop it.
    c. **If you have none**: skip TaskStop. Do NOT attempt TaskStop with a guessed or empty task_id.
    d. Run `~/.agents/skills/agmsg/scripts/delivery.sh status claude-code "$(pwd)"` and read its **first line**.
+      - **`mode: agmsgd ...`**: this project receives through agmsgd, so start no Monitor and leave it stopped. If the text says agmsgd is not confirmed running, tell the user and give the reason it names.
       - **`mode: monitor` or `mode: both`**: invoke a fresh Monitor with the default subscription (no `actas` name filter — receives every (team, agent) pair currently registered for this project that isn't held by another session):
         - command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code --max-seconds=1750`
         - description: `agmsg inbox stream`
