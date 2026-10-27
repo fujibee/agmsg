@@ -1,0 +1,85 @@
+# Windows measurement build of the app itself (branch-only, unsigned, never released): the debug and
+# release executables the add-on checks run against on a Windows machine, with the run scripts.
+# The debug build has the e2e seam in the frontend and the driver hooks; the release build is the
+# product as shipped (no driver, no trace, no measuring switch).
+name: win-measure
+
+on:
+  push:
+    branches: [addon-win-measure]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Bundle pinned agmsg-core
+        run: app/scripts/bundle-core.sh
+        working-directory: .
+
+      - name: Debug build (e2e frontend)
+        run: |
+          pnpm exec vite build --mode e2e
+          cd src-tauri
+          export TAURI_CONFIG='{"identifier":"cc.agmsg.win-measure"}'
+          cargo build --features tauri/custom-protocol
+          mkdir -p ../../out/win-measure/bin
+          cp target/debug/agmsg-app.exe ../../out/win-measure/bin/agmsg-app-win-measure-debug.exe
+
+      - name: Release build (product frontend)
+        run: |
+          pnpm exec vite build
+          cd src-tauri
+          export TAURI_CONFIG='{"identifier":"cc.agmsg.win-measure"}'
+          cargo build --release --features tauri/custom-protocol
+          cp target/release/agmsg-app.exe ../../out/win-measure/bin/agmsg-app-win-measure-release.exe
+
+      - name: Assemble the artifact
+        working-directory: .
+        run: |
+          mkdir -p out/win-measure
+          cp -R app/src-tauri/m1/win-measure out/win-measure/win-measure
+          {
+            echo "## win-measure build"
+            echo '```'
+            rustc --version
+            cargo --version
+            grep -A1 -E '^name = "(tauri|wry|tauri-runtime-wry|webview2-com|tao)"$' app/src-tauri/Cargo.lock | grep -v '^--'
+            echo "commit: $GITHUB_SHA"
+            echo "core pin: $(cat app/AGMSG_CORE_REF)"
+            (cd out/win-measure/bin && sha256sum *.exe)
+            echo '```'
+          } | tee out/win-measure/BUILD-INFO.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-measure
+          path: out/win-measure
+          retention-days: 14

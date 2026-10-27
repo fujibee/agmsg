@@ -65,6 +65,10 @@ pub fn handle_with_git(
     #[cfg(debug_assertions)]
     if std::env::var_os("AGMSG_ADDON_TRACE").is_some() {
         match &out {
+            // `open.args` ignores its arguments, so the measurement panes use them to report; shown only in this trace.
+            Ok(v) if op == "open.args" && !args.is_null() && args.as_object().is_some_and(|o| !o.is_empty()) => {
+                eprintln!("[addons-trace] pane={id} gen={generation} op={op} ok {}B report={}", v.to_string().len(), args.to_string().chars().take(300).collect::<String>())
+            }
             Ok(v) => eprintln!("[addons-trace] pane={id} gen={generation} op={op} ok {}B", v.to_string().len()),
             Err(e) => eprintln!("[addons-trace] pane={id} gen={generation} op={op} err {}", e.code),
         }

@@ -25,6 +25,18 @@ use std::time::{Duration, Instant};
 /// the macOS settings are in place and probed.
 pub const WINDOWS_VERIFIED: bool = false;
 
+/// Debug builds only: `AGMSG_WINDOWS_MEASURE=1` lets the Windows measurement runs open panes while
+/// `WINDOWS_VERIFIED` is still false. Every other check stays in force (the probe, the frame guard);
+/// only the "not verified yet" reason is waived. A release build has no such switch.
+#[cfg(debug_assertions)]
+fn measuring() -> bool {
+    std::env::var_os("AGMSG_WINDOWS_MEASURE").is_some()
+}
+#[cfg(not(debug_assertions))]
+fn measuring() -> bool {
+    false
+}
+
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +153,7 @@ pub fn evaluate(expected_nonce: &str, expected_target: &str, r: &ProbeReport, en
             if let Some(p) = &engine.frame_guard_problem {
                 reasons.push(format!("the frame navigation guard is not working: {p}"));
             }
-            if !WINDOWS_VERIFIED {
+            if !WINDOWS_VERIFIED && !measuring() {
                 reasons.push("add-ons are not verified on WebView2 yet".to_string());
             }
         }

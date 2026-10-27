@@ -86,6 +86,11 @@ impl AddonHost {
 #[cfg(windows)]
 const WEBVIEW2_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --force-webrtc-ip-handling-policy=disable_non_proxied_udp";
 
+/// Removes WebRTC from every frame at document start. The flag above does not remove the API, so this is
+/// what makes the startup probe see it absent; the probe is still the proof, and add-ons stay off without it.
+#[cfg(windows)]
+const NO_WEBRTC_JS: &str = include_str!("no_webrtc.js");
+
 /// Builds the main window (tauri.conf has `create: false` so the handlers can
 /// be attached) and registers the add-on host state. Call first in `setup`.
 pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
@@ -101,9 +106,9 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     let load_handle = handle.clone();
     let builder = WebviewWindowBuilder::from_config(&handle, &cfg)?;
     // WebView2: keep wry's own default (it is replaced when arguments are given) and
-    // send WebRTC through the proxy path only, so a pane cannot reach the network over UDP.
+    // send WebRTC through the proxy path only, and remove the WebRTC API from every frame.
     #[cfg(windows)]
-    let builder = builder.additional_browser_args(WEBVIEW2_ARGS);
+    let builder = builder.additional_browser_args(WEBVIEW2_ARGS).initialization_script_for_all_frames(NO_WEBRTC_JS);
     let window = builder
         .on_navigation(move |url| {
             let d = nav_host.nav.decide(url);
@@ -347,4 +352,20 @@ pub fn addon_probe_report<R: Runtime>(app: AppHandle<R>, host: tauri::State<'_, 
 #[tauri::command]
 pub fn addon_gate_status(host: tauri::State<'_, Arc<AddonHost>>) -> Verdict {
     host.gate.status()
+}
+
+#[cfg(test)]
+mod no_webrtc_tests {
+    /// The names the startup probe checks must all be removed by the Windows script.
+    #[test]
+    fn the_windows_script_covers_every_name_the_probe_checks() {
+        let probe = include_str!("probe/probe.js");
+        let line = probe.lines().find(|l| l.contains("var names = [")).expect("the probe lists the names");
+        let names: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
+        assert!(names.len() >= 4, "{names:?}");
+        let script = include_str!("no_webrtc.js");
+        for n in names {
+            assert!(script.contains(&format!("'{n}'")), "{n} is not removed");
+        }
+    }
 }
