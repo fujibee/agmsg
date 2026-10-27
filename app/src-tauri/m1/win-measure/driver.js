@@ -5,38 +5,41 @@
   const report = (m) => { try { real("plugin:event|emit", { event: "e2e-report", payload: String(m) }).catch(() => {}); } catch (_) {} return Promise.resolve(); };
   const waitFor = async (fn, what, ms = 30000) => {
     const t = Date.now();
-    let n = 0; while (Date.now() - t < ms) { const v = fn(); if (v) return v; if (++n % 20 === 0) report("waiting for " + what + " " + Math.round((Date.now() - t) / 1000) + "s; buttons: " + [...document.querySelectorAll("button")].map((b) => (b.textContent.trim() || b.title) + (b.disabled ? "(disabled)" : "")).join(" | ").slice(-400)); await sleep(250); }
+    let n = 0; while (Date.now() - t < ms) { const v = fn(); if (v) return v; if (++n % 20 === 0) report("waiting for " + what + " " + Math.round((Date.now() - t) / 1000) + "s; buttons: " + [...document.querySelectorAll("button")].map((b) => (b.textContent.trim() || b.title || b.getAttribute("aria-label") || b.className) + (b.disabled ? "(disabled)" : "")).join(" | ").slice(-400)); await sleep(250); }
     throw new Error("timeout waiting for " + what);
   };
-  const byLabel = (labels) => [...document.querySelectorAll("button")].find((b) => labels.includes(b.textContent.trim()) && !b.disabled);
-  const FILE = ["File view…", "ファイルビュー…"];
-  const DIFF = ["Diff view…", "差分ビュー…"];
-  const ONCE = ["Allow once", "今回だけ許可"];
-  const trigger = () => document.querySelector(".new-wrap > button");
+  // Nothing here depends on the UI language (the app follows the OS language): the tab bar's + is
+  // `.new-wrap-tabs > button`, menu entries carry `data-key`, and in a permission card the first
+  // button is "Allow once" (files cards) or "Allow" (messages cards).
+  const menuItems = () => [...document.querySelectorAll(".new-menu [role=menuitem]")];
+  const byKey = (key) => menuItems().find((b) => b.dataset.key === key && !b.disabled);
+  const byPane = (pane) => menuItems().find((b) => (b.dataset.key || "").endsWith("/" + pane) && !b.disabled);
+  const ONCE = () => document.querySelector(".addon-grant-card .addon-card-actions button:first-child:not(:disabled)");
+  const trigger = () => document.querySelector(".new-wrap-tabs > button");
   let folder = null;
-  const openMenu = async () => { (await waitFor(trigger, "the New button")).click(); await sleep(500); };
+  const openMenu = async () => {
+    if (!menuItems().length) { (await waitFor(trigger, "the + of the tab bar")).click(); await sleep(500); }
+    await waitFor(() => menuItems().length > 0, "the open menu", 5000);
+  };
   try {
     await report("driver started; buttons: " + [...document.querySelectorAll("button")].map((b) => b.textContent.trim() || b.title).slice(0, 25).join(" | "));
-    // select a team (the New menu needs one), then collapse the sidebar: the New menu lives on the rail
+    // select a team (the add-on entries of the tab bar menu need one)
     const teamBtn = [...document.querySelectorAll("button")].find((b) => ((b.title || "").startsWith("__TEAM__:") || b.textContent.trim() === "__TEAM__"));
     report("team button: " + (teamBtn ? "found" : "none"));
     if (teamBtn) teamBtn.click();
     await sleep(800);
-    const collapse = [...document.querySelectorAll("button")].find((b) => b.title === "Collapse sidebar" || b.textContent.trim() === "Collapse sidebar");
-    if (collapse) collapse.click();
-    await sleep(800);
     await openMenu();
-    report("menu: " + [...document.querySelectorAll(".new-wrap button")].map((b) => b.textContent.trim() + (b.disabled ? "(disabled)" : "")).join(" | "));
+    report("menu: " + menuItems().map((b) => (b.dataset.key || "?") + (b.disabled ? "(disabled)" : "")).join(" | "));
     window.__AGMSG_E2E_FOLDER__ = "__FIXTURE__";
     await report("opening File view");
-    (await waitFor(() => byLabel(FILE), "File view menu item")).click();
-    (await waitFor(() => byLabel(ONCE), "the folder grant card")).click();
+    (await waitFor(() => byKey("fileview"), "File view menu item")).click();
+    (await waitFor(ONCE, "the folder grant card")).click();
     await report("file view granted");
     await sleep(8000);
     await openMenu();
     await report("opening Diff view");
-    (await waitFor(() => byLabel(DIFF), "Diff view menu item")).click();
-    (await waitFor(() => byLabel(ONCE), "the second grant card")).click();
+    (await waitFor(() => byKey("diffview"), "Diff view menu item")).click();
+    (await waitFor(ONCE, "the second grant card")).click();
     await report("diff view granted");
     await sleep(12000);
     // Straight requests through the same command the frames use, for the pane ids and generations seen in the trace.
@@ -82,13 +85,13 @@
     } catch (e) { report("DEV load FAILED " + JSON.stringify(e)); throw e; }
     try { await real("plugin:event|emit", { event: "addon-updated", payload: null }); } catch (_) {}
     await sleep(2000);
-    const devTitles = ["nav-1 tauri", "nav-2 http", "nav-3 https", "nav-4 replace", "nav-5 meta", "net probe"];
-    for (const title of devTitles) {
+    const devPanes = ["app-tauri", "app-tauri-localhost-http", "app-https", "replace", "meta-refresh", "net"];
+    for (const pane of devPanes) {
       await openMenu();
-      const item = await waitFor(() => [...document.querySelectorAll(".new-wrap button")].find((b) => b.textContent.includes(title) && !b.disabled), "menu item " + title);
-      report("opening dev pane " + title);
+      const item = await waitFor(() => byPane(pane), "menu item for pane " + pane);
+      report("opening dev pane " + pane);
       item.click();
-      await sleep(title === "net probe" ? 45000 : 9000); // one pane at a time: a pane in a background tab does not run
+      await sleep(pane === "net" ? 45000 : 9000); // one pane at a time: a pane in a background tab does not run
     }
     await sleep(3000);
     if (mismatches > 0) throw new Error(mismatches + " answer(s) were not what was expected");

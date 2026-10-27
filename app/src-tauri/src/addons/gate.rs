@@ -89,9 +89,9 @@ pub struct ProbeReport {
     /// Informational: the bridge globals present in the frame (macOS: none;
     /// WebView2 injects them into subframes).
     pub bridge_in_frame: bool,
-    /// Stage B announced itself and then never sent its final answer: its document
-    /// was replaced (WebView2 shows an error page in a frame whose navigation was
-    /// cancelled), so the "document survived" half of the refusal cannot be seen.
+    /// Stage B announced itself but its final answer was not received afterwards;
+    /// the document may have been replaced (observed on WebView2 after a cancelled
+    /// frame navigation), so the "document survived" half of the refusal cannot be seen.
     pub final_missing: bool,
 }
 
@@ -133,9 +133,9 @@ pub fn evaluate(expected_nonce: &str, expected_target: &str, r: &ProbeReport, en
     if !r.control_nav_ok {
         reasons.push("the probe could not tell a refused navigation from a slow one (its allowed navigation did not complete)".to_string());
     }
-    // On Windows the guard is the refusal and it is required: when the frame's document was replaced
-    // by the cancelled navigation's error page, the guard's own record of the exact cancelled target
-    // stands in for "the document survived". The CSP violation below is still required.
+    // On Windows the guard is the refusal and it is required: when the final answer never arrives after
+    // the interim one, the guard's own record of the exact cancelled target stands in for "the document
+    // survived". The CSP violation below is still required.
     let guard_refused = os == Os::Windows && r.final_missing && engine.frame_nav_cancelled.iter().any(|u| u == expected_target);
     if !r.nav_refused && !guard_refused {
         reasons.push("the probe frame was able to navigate itself to the app origin".to_string());
