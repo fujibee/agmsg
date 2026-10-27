@@ -225,3 +225,13 @@ STUB
   # actas step 5d and the drop variant both handle `mode: agmsgd`.
   [ "$(grep -c '\*\*`mode: agmsgd ...`\*\*' "$BATS_TEST_DIRNAME/../SKILL.md")" -eq 2 ]
 }
+
+@test "delivery status (CLI): agmsgd chosen but turned off says what the session does, not agmsgd (#1820)" {
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJECT" >/dev/null
+  printf 'claude-code\t%s\tagmsgd\n' "$(cd "$PROJECT" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
+  run bash "$SCRIPTS/agmsg" delivery status --type claude-code --project "$PROJECT"
+  [ "$status" -eq 0 ]
+  grep -Fq "this project: monitor (legacy)" <<<"$output"
+  refute grep -Fq "this project: agmsgd" <<<"$output"
+  grep -Fq "note: this project chose agmsgd, but agmsgd is turned off" <<<"$output"
+}
