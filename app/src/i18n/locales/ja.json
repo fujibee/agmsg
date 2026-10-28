@@ -266,6 +266,8 @@
     },
     "engineOff": "このコンピュータではまだアドオンを使えません。このシステムの Web エンジンで安全性チェックに通りませんでした。ほかの機能には影響しません。",
     "engineReasons": "理由: {{reasons}}",
+    "checking": "確認中…",
+    "checkAgain": "もう一度確認",
     "builtin": {
       "title": "内蔵",
       "source": "内蔵"

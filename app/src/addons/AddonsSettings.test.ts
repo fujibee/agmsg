@@ -119,6 +119,16 @@ describe("AddonsSettings", () => {
     expect(html).toContain("addons.installError.ref_not_found");
     expect(html).toContain('role="alert"');
   });
+  it("engine off: Check again only after a failure or timeout, disabled while checking, absent for 'not verified'", () => {
+    const off = (reasons: string[]) => render({ engine: { ok: false, reasons }, onRecheck: () => {} });
+    expect(off(["the startup check did not finish (timeout)"])).toContain("addons.checkAgain");
+    expect(off(["add-ons are not verified on WebView2 yet"])).not.toContain("addons.checkAgain");
+    const running = off(["checking again: asked by the user"]);
+    expect(running).toContain("addons.checkAgain");
+    expect(running).toMatch(/<button type="button" class="addon-btn" disabled="">\[addons\.checkAgain\]/);
+    expect(running).toContain("addons.checking");
+    expect(render({ engine: { ok: false, reasons: ["the startup check did not finish (timeout)"] } })).not.toContain("addons.checkAgain");
+  });
   it("engine off: reason shown, no install form, installed list still removable", () => {
     const html = render({ engine: mockEngineOff });
     expect(html).toContain("addons.engineOff");

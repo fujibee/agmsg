@@ -245,6 +245,11 @@ fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &st
     host.gate.begin(&n, &target, Instant::now());
     *host.probe.lock().unwrap() = Some(ProbeRun { nonce: n.clone(), server, udp_hits, udp_stop, udp_port });
 
+    // How long the relay waits for stage B's final answer after its interim one. The final answer
+    // arrives 2 s after the interim one when the frame survives (macOS); on Windows it normally
+    // never comes, so the wait only costs time there.
+    let final_wait_ms: u32 = if cfg!(windows) { 2600 } else { 3500 };
+
     // The only code the app runs in the main page for this: relay the probe
     // frame's postMessage to the command, and create the frame.
     let js = format!(
@@ -276,7 +281,7 @@ fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &st
           fr.remove();
           r0.finalMissing = true;
           finish(r0);
-        }}, 2600);
+        }}, {final_wait_ms});
         return;
       }}
       clearTimeout(window.__agmsgInterimTimer);
@@ -372,6 +377,20 @@ pub fn addon_probe_report<R: Runtime>(app: AppHandle<R>, host: tauri::State<'_, 
     eprintln!("[addons] startup check: enabled={} {}", verdict.enabled, verdict.reasons.join("; "));
     let _ = app.emit(GATE_EVENT, verdict.clone());
     verdict
+}
+
+/// "Check again" in Settings → Add-ons: what a page load does for the gate, on request. It closes
+/// no pane and grants nothing; while a probe is running it does nothing.
+#[tauri::command]
+pub fn addon_recheck<R: Runtime>(app: AppHandle<R>, host: tauri::State<'_, Arc<AddonHost>>) -> Verdict {
+    let host = host.inner().clone();
+    if host.gate.try_recheck().is_some() {
+        let _ = app.emit(GATE_EVENT, host.gate.status());
+        start_probe(&app, &host, "main");
+        host.gate.start_failed();
+        let _ = app.emit(GATE_EVENT, host.gate.status());
+    }
+    host.gate.status()
 }
 
 /// Current verdict for the UI (the engine-off screen reads `reasons`).

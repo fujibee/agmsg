@@ -681,6 +681,7 @@ pub fn run() {
             addons::commands::addon_request,
             addons::host::addon_probe_report,
             addons::host::addon_gate_status,
+            addons::host::addon_recheck,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

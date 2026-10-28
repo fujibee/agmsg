@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { AddonsSnapshot, EngineState, InstallError, InstalledAddon } from "./types";
 import { declaredPermissions, addonNetwork, grantText, grantsOf, installErrorText, parseRepoInput, permissionRow, shortSha, type Translate } from "./model";
+import { isChecking, offersRecheck } from "./recheck";
 
 // Settings → Add-ons (S1, S4). One intro line, the install field, then
 // collapsible groups: Installed, Built in, Requests from agents, Developer.
@@ -44,6 +45,8 @@ type Props = {
   installedNotice?: InstalledNotice | null;
   /** "Open now": opens the add-on's first pane through the normal grant flow. */
   onOpenNow?: (notice: InstalledNotice) => void;
+  /** "Check again" on the engine-off screen: runs the startup check once more. */
+  onRecheck?: () => void;
 };
 
 /** The switch flips the stored Show/Off setting; the stored values are unchanged. */
@@ -112,8 +115,15 @@ export function AddonsSettings(props: Props) {
         <Alerts {...props} />
         <p className="addon-engine-off" role="status">
           {t("addons.engineOff")}{" "}
-          {engine.reasons.length > 0 && t("addons.engineReasons", { reasons: engine.reasons.join("; ") })}
+          {isChecking(engine.reasons)
+            ? t("addons.checking")
+            : engine.reasons.length > 0 && t("addons.engineReasons", { reasons: engine.reasons.join("; ") })}
         </p>
+        {(offersRecheck(engine.reasons) || isChecking(engine.reasons)) && props.onRecheck && (
+          <button type="button" className="addon-btn" disabled={isChecking(engine.reasons)} onClick={() => props.onRecheck?.()}>
+            {t("addons.checkAgain")}
+          </button>
+        )}
         <Group id="installed" t={t} problems={bad(installed)} title={t("addons.installed.title")} badge={installed.length} defaultOpen>
           <InstalledList {...props} installed={installed} readOnly />
         </Group>

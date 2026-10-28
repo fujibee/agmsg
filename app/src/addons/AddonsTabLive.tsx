@@ -164,6 +164,7 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
         onLoadFromFolder={() => void loadFolder()}
         onDevReload={(id) => void loadFolder(devFolders.current.get(id))}
         installedNotice={installedNotice}
+        onRecheck={() => void source.recheck()}
         onOpenNow={(n) => {
           const ref = openNowRef(n);
           if (ref) props.onOpenPane?.(ref);

@@ -15,6 +15,7 @@
     "process:default",
     "allow-addon-probe-report",
     "allow-addon-gate-status",
+    "allow-addon-recheck",
     "allow-pty-spawn",
     "allow-pty-write",
     "allow-pty-resize",

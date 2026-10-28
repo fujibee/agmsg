@@ -197,6 +197,8 @@ export function createLiveSource(invoke: Invoke) {
         return { ok: false, error: toCommandError(e) };
       }
     },
+    /** addon_recheck: run the startup check again (does nothing while one is running). */
+    recheck: () => attempt(async () => (await invoke("addon_recheck")) as { enabled: boolean; reasons: string[] }),
     /** addon_resolve_folder: the real path a picked folder would be granted as; nothing is granted. */
     resolveFolder: (path: string) => attempt(async () => (await invoke("addon_resolve_folder", { path })) as string),
     async revokeTeam(id: number): Promise<void> {

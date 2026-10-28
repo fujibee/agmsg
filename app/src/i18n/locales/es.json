@@ -266,6 +266,8 @@
     },
     "engineOff": "Add-ons are not available on this computer yet. A safety check did not pass with this system's web engine. Your other features are not affected.",
     "engineReasons": "Reason: {{reasons}}",
+    "checking": "Checking…",
+    "checkAgain": "Check again",
     "builtin": {
       "title": "Built in",
       "source": "integrado"

@@ -184,6 +184,8 @@ struct Pending {
 struct State {
     generation: u64,
     pending: Option<Pending>,
+    /// A recheck was started and its probe has not begun yet (so two cannot start at once).
+    starting: bool,
     verdict: Verdict,
 }
 
@@ -206,8 +208,32 @@ impl AddonGate {
         let mut s = self.inner.lock().unwrap();
         s.generation += 1;
         s.pending = None;
+        s.starting = false;
         s.verdict = Verdict { enabled: false, reasons: vec![format!("checking again: {why}")] };
         s.generation
+    }
+
+    /// The user asked to run the startup check again. Refused (`None`) while a probe is running or
+    /// about to begin, so two never run at once; otherwise everything proven so far is void and the
+    /// caller starts the probe.
+    pub fn try_recheck(&self) -> Option<u64> {
+        let mut s = self.inner.lock().unwrap();
+        if s.pending.is_some() || s.starting {
+            return None;
+        }
+        s.generation += 1;
+        s.starting = true;
+        s.verdict = Verdict { enabled: false, reasons: vec!["checking again: asked by the user".into()] };
+        Some(s.generation)
+    }
+
+    /// A recheck whose probe could not be started ends off, with the reason.
+    pub fn start_failed(&self) {
+        let mut s = self.inner.lock().unwrap();
+        if s.starting && s.pending.is_none() {
+            s.starting = false;
+            s.verdict = Verdict { enabled: false, reasons: vec!["the startup check could not be started".into()] };
+        }
     }
 
     /// Something the gate depends on broke while running: off now, with the reason.
@@ -215,6 +241,7 @@ impl AddonGate {
         let mut s = self.inner.lock().unwrap();
         s.generation += 1;
         s.pending = None;
+        s.starting = false;
         s.verdict = Verdict { enabled: false, reasons: vec![why.to_string()] };
     }
 
@@ -222,6 +249,7 @@ impl AddonGate {
     pub fn begin(&self, nonce: &str, target: &str, now: Instant) -> u64 {
         let mut s = self.inner.lock().unwrap();
         let generation = s.generation;
+        s.starting = false;
         s.pending = Some(Pending { nonce: nonce.to_string(), target: target.to_string(), deadline: now + PROBE_TIMEOUT, generation });
         generation
     }
@@ -302,6 +330,36 @@ mod tests {
         assert!(evaluate("n", TARGET, &missing, &cancelled, 0, Os::Windows).reasons.iter().any(|r| r.contains("able to navigate")), "no interim marker, no stand-in");
         let mac = ProbeReport { nav_refused: false, final_missing: true, ..good("n") };
         assert!(!evaluate("n", TARGET, &mac, &cancelled, 0, Os::MacOs).enabled, "never on macOS");
+    }
+
+    #[test]
+    fn a_recheck_never_runs_two_probes_and_voids_an_old_answer() {
+        let g = AddonGate::new();
+        let t0 = Instant::now();
+        g.invalidate("startup");
+        g.begin("n1", TARGET, t0);
+        assert!(g.try_recheck().is_none(), "a probe is running");
+        assert!(g.expire(t0 + PROBE_TIMEOUT + Duration::from_millis(1)));
+        assert!(g.try_recheck().is_some(), "after a timeout the user can ask again");
+        assert!(g.try_recheck().is_none(), "the second probe has not begun but is already on its way");
+        // the answer of the first probe arrives late: refused, and it does not end the new check
+        let late = g.report(&good("n1"), &eng(), 0, Os::MacOs, t0 + PROBE_TIMEOUT + Duration::from_secs(1));
+        assert!(!late.enabled);
+        g.begin("n2", TARGET, t0 + Duration::from_secs(40));
+        assert!(g.try_recheck().is_none());
+        let old = g.report(&good("n1"), &eng(), 0, Os::MacOs, t0 + Duration::from_secs(41));
+        assert!(!old.enabled, "an answer for the old nonce does not enable");
+        let v = g.report(&good("n2"), &eng(), 0, Os::MacOs, t0 + Duration::from_secs(42));
+        assert!(v.enabled, "{:?}", v.reasons);
+    }
+
+    #[test]
+    fn a_recheck_that_cannot_start_a_probe_ends_off_with_a_reason() {
+        let g = AddonGate::new();
+        assert!(g.try_recheck().is_some());
+        g.start_failed();
+        assert!(g.status().reasons[0].contains("could not be started"));
+        assert!(g.try_recheck().is_some(), "and the user can try again");
     }
 
     #[test]
