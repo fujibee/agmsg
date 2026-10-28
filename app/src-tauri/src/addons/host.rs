@@ -250,64 +250,12 @@ fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &st
     // never comes, so the wait only costs time there.
     let final_wait_ms: u32 = if cfg!(windows) { 2600 } else { 3500 };
 
-    // The only code the app runs in the main page for this: relay the probe
-    // frame's postMessage to the command, and create the frame.
-    let js = format!(
-        r#"(function () {{
-  if (!window.__agmsgProbeRelay) {{
-    window.__agmsgProbeRelay = true;
-    window.__agmsgViolations = [];
-    // The refusal has to be seen here, in the embedding page: an enforced CSP
-    // violation, with the blocked URI and the directive.
-    document.addEventListener('securitypolicyviolation', function (e) {{
-      if (e.disposition === 'enforce') window.__agmsgViolations.push([e.effectiveDirective, e.blockedURI]);
-    }});
-    window.addEventListener('message', function (ev) {{
-      var f = document.getElementById('agmsg-probe-frame');
-      if (!f || ev.source !== f.contentWindow) return;
-      var d = ev.data;
-      if (!d || d.agmsgProbe !== 1) return;
-      var rep = d.report || {{}};
-      if (!d.final) {{
-        // Stage B is about to attempt the forbidden navigation. If that navigation is
-        // cancelled the frame's document may be replaced and never send the final answer:
-        // then this interim report goes in after the wait, marked as such.
-        window.__agmsgInterim = rep;
-        clearTimeout(window.__agmsgInterimTimer);
-        window.__agmsgInterimTimer = setTimeout(function () {{
-          var fr = document.getElementById('agmsg-probe-frame');
-          if (!fr || !window.__agmsgInterim) return;
-          var r0 = window.__agmsgInterim; window.__agmsgInterim = null;
-          fr.remove();
-          r0.finalMissing = true;
-          finish(r0);
-        }}, {final_wait_ms});
-        return;
-      }}
-      clearTimeout(window.__agmsgInterimTimer);
-      window.__agmsgInterim = null;
-      f.remove();
-      finish(rep);
-    }});
-    function finish(rep) {{
-      var target = {target:?};
-      var hit = window.__agmsgViolations.filter(function (v) {{ return (v[0] === 'frame-src' || v[0] === 'child-src') && v[1] === target; }})[0];
-      rep.navViolationDirective = hit ? hit[0] : '';
-      rep.navViolationUri = hit ? hit[1] : '';
-      window.__TAURI_INTERNALS__.invoke('addon_probe_report', {{ report: rep }}).catch(function () {{}});
-    }}
-  }}
-  var old = document.getElementById('agmsg-probe-frame');
-  if (old) old.remove();
-  var f = document.createElement('iframe');
-  f.id = 'agmsg-probe-frame';
-  f.setAttribute('sandbox', 'allow-scripts');
-  f.setAttribute('aria-hidden', 'true');
-  f.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;border:0;opacity:0;pointer-events:none';
-  f.src = {src:?};
-  document.body.appendChild(f);
-}})();"#
-    );
+    // The only code the app runs in the main page for this: create the probe frame and relay its
+    // answers (probe/relay.js, one closure per probe; a new start stops the previous one).
+    let js = include_str!("probe/relay.js")
+        .replace("__TARGET__", &serde_json::to_string(&target).unwrap_or_else(|_| "\"\"".into()))
+        .replace("__SRC__", &serde_json::to_string(&src).unwrap_or_else(|_| "\"\"".into()))
+        .replace("__FINAL_WAIT_MS__", &final_wait_ms.to_string());
     if window.eval(&js).is_err() {
         host.end_probe();
         return;
