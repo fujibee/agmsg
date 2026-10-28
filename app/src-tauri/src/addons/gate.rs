@@ -14,16 +14,16 @@
 //!   and a UDP sentinel the app opened must have received nothing.
 //! - The gate is cleared for every new webview, reload and update; a window
 //!   whose settings cannot be confirmed does not enable add-ons.
-//! - Windows stays off until the same negative and positive tests have passed
-//!   there (`WINDOWS_VERIFIED`).
+//! - Windows is on only with a working frame navigation guard on top of the
+//!   probe (`WINDOWS_VERIFIED`: the same negative and positive tests passed there).
 
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Flip only when M1's Windows rows have passed and the WebView2 equivalents of
-/// the macOS settings are in place and probed.
-pub const WINDOWS_VERIFIED: bool = false;
+/// The Windows measurement runs on the product build passed (the criteria in `m1/win-measure/CRITERIA.md`):
+/// the probe, the required frame navigation guard, the WebRTC removal, the egress and read checks.
+pub const WINDOWS_VERIFIED: bool = true;
 
 /// Debug builds only: `AGMSG_WINDOWS_MEASURE=1` lets the Windows measurement runs open panes while
 /// `WINDOWS_VERIFIED` is still false. Every other check stays in force (the probe, the frame guard);
@@ -320,7 +320,7 @@ mod tests {
         // WebView2: the cancelled navigation replaces the probe's document, so no final answer comes.
         let replaced = ProbeReport { nav_refused: false, final_missing: true, ..good("n") };
         let cancelled = EngineReport { frame_nav_cancelled: vec![TARGET.into()], ..eng() };
-        assert!(evaluate("n", TARGET, &replaced, &cancelled, 0, Os::Windows).reasons.iter().all(|r| r.contains("not verified")), "guard record + violation");
+        assert!(evaluate("n", TARGET, &replaced, &cancelled, 0, Os::Windows).enabled, "guard record + violation");
         let other = EngineReport { frame_nav_cancelled: vec!["tauri://localhost/other".into()], ..eng() };
         assert!(evaluate("n", TARGET, &replaced, &other, 0, Os::Windows).reasons.iter().any(|r| r.contains("able to navigate")), "cancelled another target");
         assert!(evaluate("n", TARGET, &replaced, &eng(), 0, Os::Windows).reasons.iter().any(|r| r.contains("able to navigate")), "nothing cancelled");
@@ -407,12 +407,14 @@ mod tests {
     }
 
     #[test]
-    fn windows_and_other_platforms_stay_off_until_verified() {
-        let verified = WINDOWS_VERIFIED;
-        assert!(!verified);
+    fn windows_is_on_with_the_probe_and_the_guard_and_other_platforms_stay_off() {
+        assert!(WINDOWS_VERIFIED);
         let v = evaluate("n", TARGET, &good("n"), &eng(), 0, Os::Windows);
-        assert!(!v.enabled);
-        assert!(v.reasons.iter().any(|r| r.contains("WebView2")));
+        assert!(v.enabled, "{:?}", v.reasons);
+        let broken = EngineReport { frame_guard_problem: Some("watching a frame's navigation: E_FAIL".into()), ..eng() };
+        let v = evaluate("n", TARGET, &good("n"), &broken, 0, Os::Windows);
+        assert!(!v.enabled && v.reasons.iter().any(|r| r.contains("frame navigation guard")), "{:?}", v.reasons);
+        assert!(!evaluate("n", TARGET, &ProbeReport { webrtc_absent: false, ..good("n") }, &eng(), 0, Os::Windows).enabled);
         assert!(!evaluate("n", TARGET, &good("n"), &eng(), 0, Os::Other).enabled);
     }
 
