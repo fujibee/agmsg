@@ -182,7 +182,10 @@ impl Catalog {
             Ok(m) if m.digest == expected => true,
             // one line that says how it differs (relative names and sizes only, no absolute path)
             Ok(m) => {
-                let files: Vec<String> = m.files.iter().map(|(k, (_, n))| format!("{k}:{n}")).collect();
+                let mut files: Vec<String> = m.files.iter().take(20).map(|(k, (_, n))| format!("{k}:{n}")).collect();
+                if m.files.len() > 20 {
+                    files.push(format!("...and {} more", m.files.len() - 20));
+                }
                 eprintln!("[addons] builtin {name}: digest {} expected {} files [{}]", &m.digest[..12], &expected[..12], files.join(" "));
                 false
             }
