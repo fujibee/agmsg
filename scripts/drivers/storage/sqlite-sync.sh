@@ -252,7 +252,7 @@ _sqlite_sync_require_jq_binary() {
   } < <(
     {
       local _stderr_text _rc=0 _restore_e=0
-      case $- in *e*) _restore_e=1 ;; esac
+      if [[ $- == *e* ]]; then _restore_e=1; fi
       set +e
       _stderr_text="$(printf '{}\n' | jq -b -r '"agmsg-probe"' 2>&1 1>&3)"
       _rc=$?
