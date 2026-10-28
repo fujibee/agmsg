@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Runtime, WebviewWindow};
 use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Frame, ICoreWebView2Frame2, ICoreWebView2Frame7, ICoreWebView2_4};
-use webview2_com::{take_pwstr, FrameChildFrameCreatedEventHandler, FrameCreatedEventHandler, FrameNavigationStartingEventHandler};
+use webview2_com::{take_pwstr, FrameChildFrameCreatedEventHandler, FrameCreatedEventHandler, FrameNavigationCompletedEventHandler, FrameNavigationStartingEventHandler};
 use windows::core::{Interface, PWSTR};
 
 use super::host::{AddonHost, GATE_EVENT};
@@ -56,7 +56,18 @@ fn guard_frame<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, frame: &IC
                 };
                 let mut raw = PWSTR::null();
                 let uri = unsafe { args.Uri(&mut raw) }.map(|_| take_pwstr(raw)).map_err(|e| e.to_string());
+                let target = uri.as_ref().ok().and_then(|u| tauri::Url::parse(u).ok());
                 let allow = frame_navigation_allowed(&r, &h.nav, uri, &h.guard);
+                // What the measurement needs to show that no frame ever became the app: the class of every
+                // frame navigation (never the address) and whether the guard let it start.
+                let class = match &target {
+                    Some(u) if h.nav.is_app(u) => "app",
+                    Some(_) if allow => "pane",
+                    _ => "other",
+                };
+                let mut id = 0u64;
+                let _ = unsafe { args.NavigationId(&mut id) };
+                eprintln!("[addons] frame nav {id} start target={class} allowed={allow}");
                 if !allow {
                     eprintln!("[addons] cancelled a frame navigation");
                     step(&a, &h, "cancelling a frame navigation", unsafe { args.SetCancel(true) });
@@ -68,6 +79,23 @@ fn guard_frame<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, frame: &IC
             }));
             let mut token = 0i64;
             step(app, host, "watching a frame's navigation", unsafe { frame2.add_NavigationStarting(&handler, &mut token) });
+            // How each frame navigation ended: a cancelled one never commits a document.
+            let done = FrameNavigationCompletedEventHandler::create(Box::new(move |_frame, args| {
+                if let Some(args) = args {
+                    let mut id = 0u64;
+                    let mut ok = Default::default();
+                    let mut status = Default::default();
+                    let read = unsafe { (args.NavigationId(&mut id), args.IsSuccess(&mut ok), args.WebErrorStatus(&mut status)) };
+                    if read.0.is_ok() && read.1.is_ok() && read.2.is_ok() {
+                        eprintln!("[addons] frame nav {id} done success={} status={}", ok.as_bool(), status.0);
+                    } else {
+                        eprintln!("[addons] frame nav done: could not read the result");
+                    }
+                }
+                Ok(())
+            }));
+            let mut done_token = 0i64;
+            step(app, host, "watching how a frame's navigation ends", unsafe { frame2.add_NavigationCompleted(&done, &mut done_token) });
         }
         Err(e) => {
             step(app, host, "this WebView2 runtime cannot watch frame navigation", Err(e));

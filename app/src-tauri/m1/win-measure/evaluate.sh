@@ -14,6 +14,55 @@ cancels_in() { # refusals the app logged between a step's attempt and done marke
     'index($0,a){f=1;next} index($0,d){f=0} f && (/cancelled a frame navigation/ || /cancelled navigation to/)' "$L" | wc -l | tr -d ' '
 }
 
+# ---- Windows evidence (only the WebView2 guard writes these lines, so on macOS none exist and nothing below applies)
+#   [addons] frame nav <id> start target=<app|pane|other> allowed=<bool>
+#   [addons] frame nav <id> done success=<bool> status=<n>
+# A cancelled navigation can replace the frame's document with an error page, so the pane's own script may
+# never say "I am still here". What shows the frame did not become the app is the guard's own record: every
+# navigation to the app origin was refused at its start and none of them ever completed successfully.
+win_guard_present() { grep -q '^\[addons\] frame nav [0-9]* start ' "$L"; }
+app_navs_ids() { sed -n 's/^\[addons\] frame nav \([0-9]*\) start target=app allowed=\(.*\)$/\1 \2/p' "$L"; }
+nav_done_of() { sed -n "s/^\[addons\] frame nav $1 done success=\([a-z]*\) status=\(.*\)\$/\1 \2/p" "$L" | head -1; }   # "<success> <status>" or nothing
+# ids of the frame navigations to the app origin that started inside one nav case (from its NAV_case_start to the next pane's START)
+case_app_ids() {
+  awk -v c="\"k\":\"NAV_case_start\",\"v\":\"$1\"}" 'index($0,c){f=1;next} f && /"k":"START"/{f=0} f && /^\[addons\] frame nav [0-9]+ start target=app /{print $4}' "$L"
+}
+# every navigation to the app origin in the whole log: refused, never completed successfully
+app_navs_never_committed() {
+  local line id allowed d bad=0 n=0
+  while read -r id allowed; do
+    [ -n "$id" ] || continue
+    n=$((n + 1))
+    [ "$allowed" = "false" ] || bad=1
+    d=$(nav_done_of "$id"); case "$d" in true*) bad=1 ;; esac
+  done < <(app_navs_ids)
+  [ "$bad" = 0 ] && [ "$n" -ge 1 ]
+}
+
+# eval_nav <case>: the pane was still itself 3 s after the attempt (macOS), or the guard's record shows the
+# navigation to the app was refused and ended unsuccessfully and no navigation to the app ever committed (Windows)
+eval_nav() {
+  local c=$1
+  if ! grep -q "\"k\":\"NAV_case_start\",\"v\":\"$c\"" "$L"; then verdict FAIL "S3-nav-$c" "the case never started"; return; fi
+  if grep -q "\"k\":\"NAV_alive_after_3s\",\"v\":\"$c http://127.0.0.1:" "$L"; then verdict PASS "S3-nav-$c" "the pane was still itself 3 s after the attempt"; return; fi
+  if win_guard_present; then
+    local ids id d ok=0 seen=0 why=""
+    ids=$(case_app_ids "$c")
+    for id in $ids; do
+      seen=1; d=$(nav_done_of "$id")
+      case "$d" in
+        false*) ok=1; why="the guard refused the navigation to the app origin and it ended without success (status ${d#false })" ;;
+        true*) verdict FAIL "S3-nav-$c" "a navigation to the app origin COMPLETED successfully (id $id)"; return ;;
+        *) ok=1; why="the guard refused the navigation to the app origin at its start (no completion event followed)" ;;
+      esac
+    done
+    if [ "$seen" = 0 ]; then verdict FAIL "S3-nav-$c" "the pane did not report and the guard recorded no navigation to the app origin in this case"; return; fi
+    if [ "$ok" = 1 ] && app_navs_never_committed; then verdict PASS "S3-nav-$c" "$why; no navigation to the app origin completed in any frame (the pane itself did not report after the attempt)"; return; fi
+    verdict FAIL "S3-nav-$c" "${why:-no evidence}; not proven that no frame became the app"; return
+  fi
+  verdict FAIL "S3-nav-$c" "no alive report: the frame may have become the app"
+}
+
 direct_realm() { # direct_realm <label> <what>: the step ran its own code in that realm
   local v; v=$(rec_of NET_outcome "$1")
   case "$v" in
@@ -33,7 +82,12 @@ frame_status() {
   esac
   loaded=$(rec_of NET_loaded "$label")
   case "$label" in blob|data)
-    if viol_has "$label" frame-src "$label"; then echo "blocked:an enforced frame-src report names the $label: address"; return; fi ;;
+    if viol_has "$label" frame-src "$label"; then echo "blocked:an enforced frame-src report names the $label: address"; return; fi
+    # WebView2 raises the enforced report with an empty address for blob:/data: frames. The step made exactly one
+    # frame, the report carries its label, and the guard's own cancellation is logged inside the step window.
+    if win_guard_present && viol_has "$label" frame-src "" && [ "$(cancels_in "$label")" -ge 1 ]; then
+      echo "blocked:an enforced frame-src report for this step (no address given by the engine) and the guard cancelled the frame navigation"; return
+    fi ;;
   esac
   n=$(cancels_in "$label")
   if [ "$loaded" = false ] && [ "$n" -ge 1 ]; then echo "blocked:the frame never loaded and the app logged $n refused navigation(s) during this step"; return; fi

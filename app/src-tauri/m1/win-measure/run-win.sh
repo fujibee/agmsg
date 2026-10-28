@@ -174,12 +174,9 @@ grep -q 'ASK FAIL' "$L" && verdict FAIL S3-answers "a direct broker answer was n
 for need in 'pane=1 gen=1 op=open.args ok' 'pane=1 gen=1 op=fs.stat ok' 'pane=1 gen=1 op=fs.list ok' 'pane=1 gen=1 op=fs.read ok' 'pane=2 gen=1 op=git.diff ok'; do
   grep -q "$need" "$L" && verdict PASS S3-positive "frames made: $need" || verdict FAIL S3-positive "the frames never made: $need"
 done
-for c in app_tauri app_tauri_localhost_http app_https replace meta_refresh; do
-  if ! grep -q "\"k\":\"NAV_case_start\",\"v\":\"$c\"" "$L"; then verdict FAIL "S3-nav-$c" "the case never started"; continue; fi
-  if grep -q "\"k\":\"NAV_alive_after_3s\",\"v\":\"$c http://127.0.0.1:" "$L"; then verdict PASS "S3-nav-$c" "the pane was still itself 3 s after the attempt"; else verdict FAIL "S3-nav-$c" "no alive report: the frame may have become the app"; fi
-done
-grep -c 'cancelled a frame navigation' "$L" | sed 's/^/INFO S3-nav cancelled-frame-navigation lines: /' | tee -a "$SUM"
 . "$HERE/evaluate.sh"
+for c in app_tauri app_tauri_localhost_http app_https replace meta_refresh; do eval_nav "$c"; done
+grep -c 'cancelled a frame navigation' "$L" | sed 's/^/INFO S3-nav cancelled-frame-navigation lines: /' | tee -a "$SUM"
 eval_net 2>&1 | while IFS= read -r line; do case "$line" in INFO*) echo "$line" | tee -a "$SUM" ;; *) echo "$line" ;; esac; done
 stop_sink
 sink_verdict

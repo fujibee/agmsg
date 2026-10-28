@@ -93,4 +93,46 @@ expect FAIL S3-egress-fetch_lan_like "another request's report does not count"
 expect FAIL S3-egress-fetch_sink "a missing egress record fails"
 expect FAIL S3-realm-top "a missing realm record fails"
 
+
+# ---- navigation cases: the pane's own report on macOS, the guard's record on Windows (never one for the other)
+runnav() { L="$T/log"; cat > "$L"; OUTV=""; eval_nav "$1"; }
+NS() { R NAV_case_start "$1"; }
+NA() { R NAV_alive_after_3s "$1 http://127.0.0.1:5/x"; }
+GS() { echo "[addons] frame nav $1 start target=$2 allowed=$3"; }
+GD() { echo "[addons] frame nav $1 done success=$2 status=$3"; }
+ST() { R START "$1 http://127.0.0.1:5/x"; }
+{ ST replace; NS replace; NA replace; } > "$T/in"; runnav replace < "$T/in"
+expect PASS S3-nav-replace "macOS: the pane alive after the attempt passes"
+{ ST replace; NS replace; echo '[addons] cancelled navigation to tauri://localhost/'; } > "$T/in"; runnav replace < "$T/in"
+expect FAIL S3-nav-replace "macOS: no alive report and no guard record fails, as before"
+{ ST replace; NS replace; R NAV_call_returned replace; GS 7 app false; echo '[addons] cancelled a frame navigation'; GD 7 false 1; ST next; } > "$T/in"; runnav replace < "$T/in"
+expect PASS S3-nav-replace "Windows: refused at start, ended unsuccessfully, nothing ever committed to the app passes"
+{ ST replace; NS replace; GS 7 app false; echo '[addons] cancelled a frame navigation'; ST next; } > "$T/in"; runnav replace < "$T/in"
+expect PASS S3-nav-replace "Windows: refused at start with no completion event passes"
+{ ST replace; NS replace; GS 7 app false; GD 7 true 0; ST next; } > "$T/in"; runnav replace < "$T/in"
+expect FAIL S3-nav-replace "Windows: a navigation to the app that completed successfully fails"
+{ ST replace; NS replace; GS 7 app true; ST next; } > "$T/in"; runnav replace < "$T/in"
+expect FAIL S3-nav-replace "Windows: a navigation to the app that the guard allowed fails"
+{ ST replace; NS replace; GS 3 pane true; ST next; } > "$T/in"; runnav replace < "$T/in"
+expect FAIL S3-nav-replace "Windows: no navigation to the app recorded in this case fails (nothing shown)"
+{ GS 1 app false; GD 1 false 1; ST a; NS a; GS 2 app false; ST b; NS b; GS 9 app false; GD 9 true 0; } > "$T/in"; runnav a < "$T/in"
+expect FAIL S3-nav-a "Windows: another case's app navigation that completed makes every case fail"
+{ ST replace; NS replace; GS 7 other false; ST next; } > "$T/in"; runnav replace < "$T/in"
+expect FAIL S3-nav-replace "Windows: a refused navigation to somewhere else is not the app's"
+{ ST replace; GS 7 app false; GD 7 false 1; ST x; NS x; } > "$T/in"; runnav replace < "$T/in"
+expect FAIL S3-nav-replace "Windows: an app navigation from before the case does not count for it"
+
+# ---- blob/data: WebView2 raises the enforced report with an empty address
+winblob() { echo '[addons] frame nav 5 start target=other allowed=false'; }
+{ base; R NET_attempt blob; winblob; echo '[addons] cancelled a frame navigation'; R NET_viol 'blob|enforce|frame-src|'; R NET_loaded 'blob|true'; R NET_done blob; } > "$T/in"; run < "$T/in"
+expect PASS S3-realm-blob "Windows: enforced frame-src report without an address + the guard's cancellation in the step passes"
+{ base; R NET_attempt blob; echo '[addons] cancelled navigation to blob:'; R NET_viol 'blob|enforce|frame-src|'; R NET_loaded 'blob|true'; R NET_done blob; } > "$T/in"; run < "$T/in"
+expect FAIL S3-realm-blob "an empty address without the Windows guard record does not pass (macOS judgement unchanged)"
+{ base; R NET_attempt blob; winblob; R NET_viol 'blob|enforce|frame-src|'; R NET_loaded 'blob|true'; R NET_done blob; } > "$T/in"; run < "$T/in"
+expect FAIL S3-realm-blob "an empty address with no cancellation inside the step window fails"
+{ base; R NET_attempt blob; winblob; echo '[addons] cancelled a frame navigation'; R NET_viol 'blob|report|frame-src|'; R NET_loaded 'blob|true'; R NET_done blob; } > "$T/in"; run < "$T/in"
+expect FAIL S3-realm-blob "an empty address on a report-only violation fails"
+{ base; R NET_attempt data; winblob; echo '[addons] cancelled a frame navigation'; R NET_viol 'data|enforce|frame-src|'; R NET_loaded 'data|true'; R NET_done data; } > "$T/in"; run < "$T/in"
+expect PASS S3-realm-data "Windows: the same for a data: child"
+
 [ "$bad" = 0 ] && echo "selftest: all expectations hold" || { echo "selftest: FAILED"; exit 1; }
