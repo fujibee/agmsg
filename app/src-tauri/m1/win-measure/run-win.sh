@@ -28,6 +28,7 @@ verdict() { # verdict PASS|FAIL <step> <text>
 session_state() { query session 2>&1 | tr -s ' ' | grep -i "$(whoami | sed 's/.*\\//')" | head -3; }
 mark_session() { echo "[$(date -u +%T)] $1: $(session_state | tr '\n' ';')" >> "$OUT/session.log"; }
 . "$HERE/sink.sh"
+. "$HERE/archive.sh"
 # end_run: the one way every run ends, normal or early, once: stop what this run started, say so, then the
 # real-home guard, the counts and the archive (the archive line is written BEFORE the archive is made, so the
 # summary inside the archive is the same as the one in the output folder and ends with it)
@@ -40,7 +41,7 @@ end_run() {
   if diff "$OUT/real-home-before.txt" "$OUT/real-home-after.txt" > "$OUT/real-home.diff"; then verdict PASS GUARD "the real agmsg home is unchanged (scripts, skills, commands, teams)"; else verdict FAIL GUARD "the real agmsg home changed during the run; see real-home.diff"; fi
   echo "== counts: $(grep -c '^PASS' "$SUM") PASS, $(grep -c '^FAIL' "$SUM") FAIL" | tee -a "$SUM"
   echo "archive: $OUT.tgz" | tee -a "$SUM"
-  ( cd "$(dirname "$OUT")" && tar czf "$OUT.tgz" "$(basename "$OUT")" ) || echo "archive FAILED" >> "$SUM"
+  make_archive
 }
 trap end_run EXIT
 # ---- isolation: every launch gets these, none of them changes HOME

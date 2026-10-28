@@ -57,7 +57,34 @@ stop_sink; sink_verdict
 
 # the end of a run: one path for normal and early exits, and the archive line is in the archived summary
 grep -q "^trap end_run EXIT" run-win.sh && ok "the exit trap is end_run" || no "trap is not end_run"
-awk '/echo "archive: /{a=NR} /tar czf/{t=NR} END{exit !(a && t && a<t)}' run-win.sh && ok "the archive line is written before the archive is made" || no "archive line after tar"
+awk '/echo "archive: /{a=NR} /make_archive$/{t=NR} END{exit !(a && t && a<t)}' run-win.sh && ok "the archive line is written before the archive is made" || no "archive line after the archive"
+. "$HERE/archive.sh"
+# the final name appears only when tar has finished: a slow tar is watched, a failing tar leaves no final name
+mkdir -p "$T/ar/out"; echo x > "$T/ar/out/f"; OUT="$T/ar/out"; SUM="$T/ar/summary.txt"; : > "$SUM"
+cat > "$T/stubs/tar" <<'S'
+#!/bin/bash
+# stand-in tar: writes the file named after "czf", slowly, or fails when STUB_TAR_FAIL is set
+f=$2; echo partial > "$f"; sleep 1; [ -n "${STUB_TAR_FAIL:-}" ] && exit 1; echo complete >> "$f"
+S
+chmod +x "$T/stubs/tar"
+make_archive & mp=$!; echo "$mp" >> "$T/spawned"
+sleep 0.4
+if [ ! -e "$OUT.tgz" ] && [ -e "$OUT.tgz.partial" ]; then ok "while tar still writes there is no final name"; else no "final name present during tar"; fi
+wait "$mp"
+[ -e "$OUT.tgz" ] && [ ! -e "$OUT.tgz.partial" ] && grep -q complete "$OUT.tgz" && ok "the final name appears, complete, when tar succeeded" || no "no complete archive after success"
+rm -f "$OUT.tgz"
+STUB_TAR_FAIL=1 make_archive > /dev/null 2>&1
+[ ! -e "$OUT.tgz" ] && grep -q "^FAIL archive" "$SUM" && ok "a failing tar makes no final name and reports FAIL" || no "failing tar: $(ls "$T/ar"; cat "$SUM")"
 [ "$(grep -c 'run ended' run-win.sh)" = 1 ] && ok "one end note" || no "end note count"
+# end_run, taken from run-win.sh as written, runs its steps once whether the normal end and the trap both call it or not
+eval "$(awk '/^ENDED=0/{f=1} f{print} f&&/^}/{exit}' run-win.sh)"
+calls="$T/endcalls"; : > "$calls"
+stop_sink() { echo stop_sink >> "$calls"; }; stop_launched() { echo stop_launched >> "$calls"; }; note() { echo note >> "$calls"; }
+snapshot() { echo snap; }; make_archive() { echo archive >> "$calls"; }
+OUT="$T/endout"; mkdir -p "$OUT"; echo b > "$OUT/real-home-before.txt"; SUM="$T/end.sum"; : > "$SUM"
+verdict() { :; }
+end_run > /dev/null; end_run > /dev/null   # the normal end, then the exit trap
+[ "$(grep -c . "$calls")" = 4 ] && [ "$(grep -c '^archive$' "$calls")" = 1 ] && [ "$(grep -c '^note$' "$calls")" = 1 ] && ok "end_run runs once even when called twice (normal end + trap)" || no "end_run calls: $(tr '\n' ' ' < "$calls")"
+grep -q 'archive.tgz.partial\|\.tgz\.partial' archive.sh && ! grep -q 'tgz.partial.*\$OUT/' archive.sh && ok "the temporary archive name is outside the output folder" || no "temporary name inside OUT"
 
 [ "$bad" = 0 ] && echo "selftest-sink: all expectations hold" || { echo "selftest-sink: FAILED"; exit 1; }
