@@ -47,6 +47,14 @@ bash "$T/pkg/win-measure/run-win.sh" "$T/pkg/bin" "$T/out1b" > "$T/run1b.out" 2>
 [ "$code" = 3 ] && grep -q "FAIL S0 stray macOS metadata" "$T/run1b.out" && grep -q "\._addon.conf" "$T/run1b.out" && ok "a ._ file in the package stops the run at S0 and is named" || no "AppleDouble check: code $code: $(tail -3 "$T/run1b.out")"
 [ ! -s "$STUB_LOG" ] && ok "and nothing was stopped" || no "taskkill called: $(cat "$STUB_LOG")"
 
+# 1c. no builtin-addons in the package: the environment log must not inventory whatever is in the working folder
+mkdir -p "$T/pkg2/bin" "$T/pkg2/win-measure" "$T/pkg2/core/scripts" "$T/cwd"
+cp "$T/pkg/bin/agmsg-app-win-measure-debug.exe" "$T/pkg/bin/agmsg-app-win-measure-release.exe" "$T/pkg2/bin/"; touch "$T/pkg2/core/scripts/api.sh"; cp "$HERE"/*.sh "$T/pkg2/win-measure/"
+echo "sentinel-content-$$" > "$T/cwd/sentinel-$$.txt"
+( cd "$T/cwd" && bash "$T/pkg2/win-measure/run-win.sh" "$T/pkg2/bin" "$T/out1c" > "$T/run1c.out" 2>&1 ); code=$?
+[ "$code" = 3 ] && grep -q "FAIL S0 builtin-addons/ is missing" "$T/run1c.out" && ok "a package without builtin-addons stops at S0" || no "missing builtin-addons: code $code: $(tail -3 "$T/run1c.out")"
+grep -rq "sentinel-$$" "$T/out1c" && no "the inventory read a file outside the package: $(grep -r "sentinel-$$" "$T/out1c" | head -1)" || ok "nothing outside the package was inventoried"
+
 # 2. a normal run: launch two, with an unrelated process of the same image name present
 export TRACK="$T/pids.txt"; : > "$TRACK"
 . "$HERE/procs.sh"
