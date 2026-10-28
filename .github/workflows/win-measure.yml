@@ -71,6 +71,9 @@ jobs:
           export TAURI_CONFIG='{"identifier":"cc.agmsg.win-measure"}'
           cargo build --release --features tauri/custom-protocol
           cp target/release/agmsg-app.exe ../../out/win-measure/bin/agmsg-app-win-measure-release.exe
+          # a plain cargo build is not bundled: the built-in add-ons are resources the app looks for next to its exe
+          test -d target/release/builtin-addons/fileview && test -d target/release/builtin-addons/diffview
+          cp -R target/release/builtin-addons ../../out/win-measure/bin/builtin-addons
 
       - name: Self-test the run verdicts
         working-directory: app/src-tauri/m1/win-measure

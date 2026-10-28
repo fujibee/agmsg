@@ -193,13 +193,33 @@ pub fn validate_open_args(a: OpenArgs, conf: &AddonConf) -> Result<OpenArgs, Str
     Ok(a)
 }
 
+/// Opening a pane failed: one line in the log with the step and a fixed code, never the message or a path,
+/// so a failure on a user's machine leaves something to go on.
+fn log_open_failed(step: &str, code: &str) {
+    eprintln!("[addons] open failed: {step} {code}");
+}
+
 #[tauri::command(async)]
 pub fn addon_pane_add<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<AddonHost>>, spec: PaneAddIn) -> Result<PaneAddOut, String> {
+    pane_add(app, host, spec).map_err(|(code, message)| {
+        log_open_failed("pane_add", code);
+        message
+    })
+}
+
+fn pane_add<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<AddonHost>>, spec: PaneAddIn) -> Result<PaneAddOut, (&'static str, String)> {
     if !host.gate.status().enabled {
-        return Err(off(&host));
+        return Err(("gate_off", off(&host)));
     }
-    let resolved = host.catalog().resolve(&spec.addon_id, &spec.pane).map_err(|e| e.to_string())?;
-    let open_args = validate_open_args(spec.open_args, &resolved.conf)?;
+    let resolved = host.catalog().resolve(&spec.addon_id, &spec.pane).map_err(|e| {
+        let code = match &e {
+            super::catalog::CatalogError::Unknown(_) => "unknown",
+            super::catalog::CatalogError::Changed(_) => "changed",
+            super::catalog::CatalogError::Invalid(_) => "invalid",
+        };
+        (code, e.to_string())
+    })?;
+    let open_args = validate_open_args(spec.open_args, &resolved.conf).map_err(|e| ("open_args", e))?;
     host.panes.refresh_deny();
     // If a served file stops matching what was verified, the pane is closed and the UI told why.
     let on_tamper: Arc<dyn Fn(u16, String, String) + Send + Sync> = {
@@ -233,7 +253,7 @@ pub fn addon_pane_add<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<AddonHo
             pinned: Some(resolved.pinned.clone()),
             on_tamper: Some(on_tamper),
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ("start", e.to_string()))?;
     host.nav.register_pane(added.port, &added.token);
     Ok(PaneAddOut {
         id: added.id,
@@ -279,9 +299,17 @@ pub fn addon_revoke_team(host: State<'_, Arc<AddonHost>>, id: PaneId) {
 #[tauri::command(async)]
 pub fn addon_grant_root(host: State<'_, Arc<AddonHost>>, id: PaneId, path: String) -> Result<String, BrokerError> {
     host.panes.refresh_deny();
-    let real = grant_root_path(&host.panes.deny(), &path)?;
-    host.panes.registry.lock().unwrap().grant_root(id, real.clone())?;
-    Ok(real.to_string_lossy().into_owned())
+    let r = grant_root_path(&host.panes.deny(), &path).and_then(|real| {
+        host.panes.registry.lock().unwrap().grant_root(id, real.clone())?;
+        Ok(real.to_string_lossy().into_owned())
+    });
+    // a refused or vanished folder is an ordinary answer with its own card; anything else is logged
+    if let Err(e) = &r {
+        if e.code != "denied_path" && e.code != "not_found" {
+            log_open_failed("grant_root", &e.code);
+        }
+    }
+    r
 }
 
 /// The real path a chosen folder would be granted as, with the same checks as `addon_grant_root`

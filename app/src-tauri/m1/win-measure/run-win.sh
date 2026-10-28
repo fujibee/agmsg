@@ -82,6 +82,8 @@ if session_state | grep -qi active; then verdict PASS S0 "an Active desktop sess
 
 DBG="$BIN/agmsg-app-win-measure-debug.exe"; REL="$BIN/agmsg-app-win-measure-release.exe"
 [ -f "$DBG" ] && [ -f "$REL" ] || { verdict FAIL S0 "executables missing in $BIN"; exit 3; }
+# the built-in add-ons are resources the app looks for next to its exe (a plain build is not bundled)
+[ -d "$BIN/builtin-addons/fileview" ] && [ -d "$BIN/builtin-addons/diffview" ] || { verdict FAIL S0 "builtin-addons/ is missing next to the executables in $BIN: File view and Diff view cannot open"; exit 3; }
 
 # launch <exe> <logfile> <seconds-or-0> [env assignments...]: starts the exe, waits, leaves it running when seconds=0
 # A process that cannot be started under its real Windows id, or survives its stop, ends the run:
@@ -107,6 +109,7 @@ for prof in debug release; do
   mark_session "S1-$prof after"
   line=$(grep -F '[addons] startup check:' "$OUT/s1-$prof.log" | tail -1)
   guard=$(grep -c 'frame guard installed' "$OUT/s1-$prof.log")
+  if grep -q '\[addons\] add-ons: builtin:diffview(ok) builtin:fileview(ok)' "$OUT/s1-$prof.log"; then verdict PASS "S1-$prof-builtins" "both built-in add-ons were found and match their digests"; else verdict FAIL "S1-$prof-builtins" "built-in add-ons: $(grep -F '[addons] add-ons:' "$OUT/s1-$prof.log" | head -1)"; fi
   if [ "${EXPECT_VERIFIED:-0}" = 1 ]; then want='enabled=true *$'; what="enabled (the build has WINDOWS_VERIFIED on)"; else want='enabled=false add-ons are not verified on WebView2 yet$'; what="only the not-verified reason remains"; fi
   if [ "$guard" -ge 1 ] && echo "$line" | grep -q "$want"; then
     verdict PASS "S1-$prof" "probe passed on the product build ($what); guard installed"

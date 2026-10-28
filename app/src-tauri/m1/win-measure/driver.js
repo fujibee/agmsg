@@ -35,6 +35,8 @@
   const byPane = (pane) => pick((k) => k.endsWith("/" + pane), "menu entry for pane " + pane);
   const ONCE = () => {
     if (document.querySelector(".addon-grant-card.denied")) throw new Error("the permission card says the folder is denied");
+    const failed = document.querySelector(".addon-failure-card");
+    if (failed) throw new Error("the pane shows a failure card: " + (failed.dataset.code || "?"));
     return document.querySelector(".addon-grant-card:not(.denied) .addon-card-actions button:first-child:not(:disabled)");
   };
   // Waiting for a permission card: when it does not come, say what the page shows instead (is this the
