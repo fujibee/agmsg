@@ -416,6 +416,55 @@ STUB
   echo "$output" | grep -qx 'cached_after_second=yes'
 }
 
+# A jq that fails to start on its FIRST invocation (no output, exit 1 -- the
+# shape a transient fork failure leaves behind) and then runs cleanly on every
+# invocation after that. Same binary throughout, unlike stub_jq_cannot_run's
+# test above (which swaps PATH to the real jq for its second call) -- this
+# pins that classification never reuses one jq attempt's result for another:
+# the SECOND attempt's own clean LF + rc 0 must be judged on its own, not
+# folded together with the first attempt's failure into a cached NO (review
+# finding on an earlier version of this fix, which re-ran jq inside a single
+# probe call and cached whichever run it saw last).
+stub_jq_fails_once_then_clean() {
+  local bin="$TEST_SKILL_DIR/jq-fails-once"
+  mkdir -p "$bin"
+  local counter="$TEST_SKILL_DIR/jq-fails-once.count"
+  printf '0' > "$counter"
+  cat > "$bin/jq" <<STUB
+#!/usr/bin/env bash
+counter="$counter"
+n=\$(cat "\$counter")
+n=\$((n + 1))
+printf '%s' "\$n" > "\$counter"
+if [ "\$n" -eq 1 ]; then
+  echo "jq: fatal: could not allocate memory" >&2
+  exit 1
+fi
+exec "$(command -v jq)" "\$@"
+STUB
+  chmod +x "$bin/jq"
+  printf '%s' "$bin"
+}
+
+@test "sync: a first attempt that fails to start does not poison a later, clean attempt (#1822)" {
+  local bin; bin="$(stub_jq_fails_once_then_clean)"
+
+  run env PATH="$bin:$PATH" bash -c '
+    . "$1/drivers/storage/sqlite-sync.sh"
+    { _sqlite_sync_require_jq_binary; } 2>err1
+    echo "first_cached=$_AGMSG_JQ_BINARY_OK"
+    _sqlite_sync_require_jq_binary
+    echo "second_cached=$_AGMSG_JQ_BINARY_OK"
+  ' _ "$SCRIPTS"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'first_cached='
+  # The second, genuinely clean attempt must be accepted on its own merits --
+  # never left as a cached NO because of what the first, unrelated attempt saw.
+  echo "$output" | grep -qx 'second_cached=yes'
+  refute grep -q 'requires a jq whose -b (binary output) produces LF-terminated lines' <<< "$output"
+}
+
 @test "sync: a missing jq is reported as missing, not as a jq without -b (#1822)" {
   # A PATH with the tools bash -c itself needs but no jq anywhere on it --
   # same pathbox idea as test_hash.bats, see its own comment for why symlinks

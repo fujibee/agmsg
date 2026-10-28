@@ -198,73 +198,92 @@ _sqlite_sync_require_jq_binary() {
     _sqlite_sync_jq_binary_probe_error "jq was not found on PATH"
     return 1
   fi
-  local probe="" ok=""
-  # BOTH HALVES, AND NO SHARED FILE.
+  # ONE jq INVOCATION. ONE ATTEMPT CLASSIFIED, NEVER TWO JUDGED AS IF THEY
+  # WERE THE SAME ONE.
   #
-  # Probing with `jq -b -r 'empty'` tested option parsing only -- it emits
-  # nothing, so a jq that accepts `-b` and still writes CRLF passed. Reading a
-  # sentinel fixes that half; the other half is that a jq can print the right
-  # bytes and still fail, and through a process substitution that status is
-  # unreachable (both raised in review).
+  # An earlier version of this function ran jq a second time, after the first
+  # attempt's content check failed, purely to read its exit status and stderr
+  # for the diagnostic. That is wrong whenever the FIRST attempt is the one
+  # that actually failed to start (a transient fork failure, #829's field
+  # report) and the SECOND, separate attempt happens to succeed cleanly: the
+  # content check sees the second attempt's correct LF output, but nothing
+  # about the first attempt's failure was real information about this jq's
+  # `-b` support at all -- and the result still got cached as a flat NO
+  # (review finding). A probe may only classify the one jq run it actually
+  # made.
   #
-  # The first attempt at getting both wrote jq's output to
-  # `${TMPDIR}/agmsg-jq-probe.$$` and took the status from the pipeline. `$$` is
-  # the PARENT's pid inside a subshell, so concurrent sealers in one process tree
-  # shared that path: one removed it while another was still reading, and the
-  # driver refused a jq that was fine. `concurrent age-v1 sealers` caught it.
-  # This is the same reasoning about `$$` that was wrong once already (#804).
+  # So everything this needs -- the sentinel bytes (CR-exactness matters, see
+  # below), whether jq exited 0, and its stderr text if it did not -- comes out
+  # of a SINGLE jq call, through a SINGLE stream, with no shared file:
   #
-  # So the status travels in the stream instead of in a file. jq writes the
-  # sentinel; `&&` appends a second line only if jq exited 0. Two `read`s, no
-  # shared name, nothing to clean up -- and still `read` rather than `$( )`,
-  # because command substitution on MSYS drops the byte this is looking for.
-  { IFS= read -r probe; IFS= read -r ok; } < <(
-    printf '{}\n' | { jq -b -r '"agmsg-probe"' && printf 'agmsg-ok\n'; } 2>/dev/null
+  # The first attempt at getting byte-exact output and a reachable exit status
+  # together wrote jq's output to `${TMPDIR}/agmsg-jq-probe.$$` and took the
+  # status from the pipeline. `$$` is the PARENT's pid inside a subshell, so
+  # concurrent sealers in one process tree shared that path: one removed it
+  # while another was still reading, and the driver refused a jq that was
+  # fine. `concurrent age-v1 sealers` caught it. Same reasoning about `$$`
+  # that was wrong once already (#804).
+  #
+  # fd 3 carries jq's own stdout through untouched (so the sentinel's bytes,
+  # CRLF included if that is what a broken jq writes, survive to the `read`
+  # below) while `$( )` on fd 1/2 captures only jq's stderr -- which is plain
+  # diagnostic prose, not something that needs byte-exact preservation, so
+  # the MSYS `$( )` trailing-CR-drop this file measured does not apply to it.
+  # `read`, not `$( )`, is still what jq's own output travels through.
+  #
+  # Reading it by FIXED POSITION (sentinel line, then ok line, then the
+  # marker) breaks the moment jq writes NOTHING: with zero pre-marker lines,
+  # a fixed-position read puts the `AGMSG_RC=` marker itself into the
+  # "sentinel" slot instead of leaving it empty (measured). So this instead
+  # reads lines in a loop and keeps them until it SEES the marker -- which
+  # cannot collide with anything jq itself could print, since nothing this
+  # probe asks jq to emit starts with that prefix.
+  local pre1="" pre2="" n_pre=0 rc_marker="" err_rest="" line
+  { while IFS= read -r line; do
+      case "$line" in
+        AGMSG_RC=*) rc_marker="$line"; break ;;
+        *)
+          n_pre=$((n_pre + 1))
+          if [ "$n_pre" -eq 1 ]; then pre1="$line"; else pre2="$line"; fi
+          ;;
+      esac
+    done
+    err_rest="$(cat)"
+  } < <(
+    {
+      local _stderr_text _rc=0 _restore_e=0
+      case $- in *e*) _restore_e=1 ;; esac
+      set +e
+      _stderr_text="$(printf '{}\n' | jq -b -r '"agmsg-probe"' 2>&1 1>&3)"
+      _rc=$?
+      [ "$_restore_e" = 1 ] && set -e
+      [ "$_rc" -eq 0 ] && printf 'agmsg-ok\n' >&3
+      printf 'AGMSG_RC=%d\n' "$_rc" >&3
+      printf '%s' "$_stderr_text" >&3
+    } 3>&1
   )
-  if [ "$probe" = "agmsg-probe" ] && [ "$ok" = "agmsg-ok" ]; then
+  if [ "$rc_marker" = "AGMSG_RC=0" ] && [ "$pre1" = "agmsg-probe" ] && [ "$pre2" = "agmsg-ok" ]; then
     _AGMSG_JQ_BINARY_OK=yes
     return 0
   fi
-  # Reaching here only says the sentinel-and-ok pair above didn't come back as
-  # expected -- that is true whether jq ran and produced wrong bytes (CRLF),
-  # ran and printed the sentinel fine but still exited non-zero, ran and
-  # refused `-b` outright with no output at all (an unknown-option exit,
-  # measured rc 2 on jq-1.7.1-apple -- see the block comment above
-  # _AGMSG_JQ_BINARY_OK), or never ran at all (missing, killed, or the process
-  # itself could not start -- this file's own #829 bug report: a Git Bash
-  # shutting down could not fork at all, and the ORIGINAL version of this
-  # function treated that identically to "no -b support" and cached it, so
-  # every later push failed with a message about a jq flag that was never the
-  # problem).
-  #
-  # A second jq run tells those apart. Plain `$( )` is fine here even on MSYS
-  # for THIS capture: the trailing-CR concern above is about preserving the
-  # exact bytes a WORKING jq writes for the values this driver sends, not
-  # about whether any output came back at all.
-  local probe_out probe_rc=0 _restore_e=0
-  case $- in *e*) _restore_e=1 ;; esac
-  set +e
-  probe_out="$(printf '{}\n' | jq -b -r '"agmsg-probe"' 2>/dev/null)"
-  probe_rc=$?
-  [ "$_restore_e" = 1 ] && set -e
-  if [ -n "$probe_out" ] || [ "$probe_rc" -eq 2 ]; then
+  local rc="${rc_marker#AGMSG_RC=}"
+  if [ -n "$pre1" ] || [ "$rc" = "2" ]; then
     # Output present (jq ran -- whatever came out, correct or CRLF-mangled,
     # proves it executed and wrote something) or rc 2 (jq ran long enough to
-    # reject the option and wrote nothing at all). Either way the probe RAN
-    # and jq's own behavior is what failed it -- the #829 refusal, cached, is
-    # correct here.
+    # reject `-b` as an unknown option, measured on jq-1.7.1-apple -- see the
+    # block comment above _AGMSG_JQ_BINARY_OK -- and wrote nothing at all).
+    # Either way THIS attempt ran and jq's own behavior is what failed it --
+    # the #829 refusal, cached, is correct here.
     _AGMSG_JQ_BINARY_OK=no
     _sqlite_sync_jq_binary_refusal
     return 1
   fi
-  # No output and not the known rejection code: jq could not even be started,
-  # was killed, or exited some other way the two expected cases above don't
-  # cover -- "the probe itself did not run", not "this jq lacks -b". Never
-  # cached: whatever stopped the probe from running may be gone by the next
-  # call. One more run, just for the stderr text this diagnostic names.
-  local probe_err
-  probe_err="$(printf '{}\n' | jq -b -r '"agmsg-probe"' 2>&1 1>/dev/null)"
-  _sqlite_sync_jq_binary_probe_error "jq -b probe exited ${probe_rc}: ${probe_err:-no output}"
+  # No output and not the known rejection code: THIS attempt could not even
+  # start, was killed, or exited some other way the two expected cases above
+  # don't cover -- "the probe itself did not run", not "this jq lacks -b".
+  # Never cached: whatever stopped it may be gone by the next call, which gets
+  # its own fresh attempt rather than reusing this one's verdict.
+  _sqlite_sync_jq_binary_probe_error "jq -b probe exited ${rc:-unknown}: ${err_rest:-no output}"
   return 1
 }
 
