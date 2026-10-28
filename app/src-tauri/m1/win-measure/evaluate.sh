@@ -27,38 +27,49 @@ nav_done_of() { sed -n "s/^\[addons\] frame nav $1 done success=\([a-z]*\) statu
 case_app_ids() {
   awk -v c="\"k\":\"NAV_case_start\",\"v\":\"$1\"}" 'index($0,c){f=1;next} f && /"k":"START"/{f=0} f && /^\[addons\] frame nav [0-9]+ start target=app /{print $4}' "$L"
 }
-# every navigation to the app origin in the whole log: refused, never completed successfully
-app_navs_never_committed() {
-  local line id allowed d bad=0 n=0
+# any completion with success=true for this navigation id (all records of the id are looked at, not the first)
+nav_committed() { grep -q "^\[addons\] frame nav $1 done success=true " "$L"; }
+# what is wrong with the navigations to the app origin anywhere in the log (empty = nothing): one that the guard
+# allowed, or any of them that completed successfully
+app_navs_problem() {
+  local id allowed
   while read -r id allowed; do
     [ -n "$id" ] || continue
-    n=$((n + 1))
-    [ "$allowed" = "false" ] || bad=1
-    d=$(nav_done_of "$id"); case "$d" in true*) bad=1 ;; esac
+    [ "$allowed" = "false" ] || { echo "a navigation to the app origin was allowed (id $id)"; return; }
+    nav_committed "$id" && { echo "a navigation to the app origin completed successfully (id $id)"; return; }
   done < <(app_navs_ids)
-  [ "$bad" = 0 ] && [ "$n" -ge 1 ]
 }
+# the frame navigations the guard saw between a net step's attempt and done markers (start lines)
+frame_navs_in() {
+  awk -v a="\"k\":\"NET_attempt\",\"v\":\"$1\"}" -v d="\"k\":\"NET_done\",\"v\":\"$1\"}" \
+    'index($0,a){f=1;next} index($0,d){f=0} f && /^\[addons\] frame nav [0-9]+ start /' "$L"
+}
+# the addresses of the enforced reports of one directive for one step ("<empty>" for an empty one), one per line
+viol_addrs() { recs NET_viol | awk -F'|' -v l="$1" -v dir="$2" '$1==l && $2=="enforce" && $3==dir {a=$4; for(i=5;i<=NF;i++) a=a "|" $i; print (a==""?"<empty>":a)}'; }
 
 # eval_nav <case>: the pane was still itself 3 s after the attempt (macOS), or the guard's record shows the
 # navigation to the app was refused and ended unsuccessfully and no navigation to the app ever committed (Windows)
 eval_nav() {
   local c=$1
   if ! grep -q "\"k\":\"NAV_case_start\",\"v\":\"$c\"" "$L"; then verdict FAIL "S3-nav-$c" "the case never started"; return; fi
+  # with the Windows guard record, an allowed or completed navigation to the app origin fails the case whatever the pane said
+  if win_guard_present; then
+    local problem; problem=$(app_navs_problem)
+    if [ -n "$problem" ]; then verdict FAIL "S3-nav-$c" "$problem"; return; fi
+  fi
   if grep -q "\"k\":\"NAV_alive_after_3s\",\"v\":\"$c http://127.0.0.1:" "$L"; then verdict PASS "S3-nav-$c" "the pane was still itself 3 s after the attempt"; return; fi
   if win_guard_present; then
-    local ids id d ok=0 seen=0 why=""
+    local ids id d seen=0 why=""
     ids=$(case_app_ids "$c")
     for id in $ids; do
       seen=1; d=$(nav_done_of "$id")
       case "$d" in
-        false*) ok=1; why="the guard refused the navigation to the app origin and it ended without success (status ${d#false })" ;;
-        true*) verdict FAIL "S3-nav-$c" "a navigation to the app origin COMPLETED successfully (id $id)"; return ;;
-        *) ok=1; why="the guard refused the navigation to the app origin at its start (no completion event followed)" ;;
+        false*) why="the guard refused the navigation to the app origin and it ended without success (status ${d#false })" ;;
+        *) why="the guard refused the navigation to the app origin at its start (no completion event followed)" ;;
       esac
     done
     if [ "$seen" = 0 ]; then verdict FAIL "S3-nav-$c" "the pane did not report and the guard recorded no navigation to the app origin in this case"; return; fi
-    if [ "$ok" = 1 ] && app_navs_never_committed; then verdict PASS "S3-nav-$c" "$why; no navigation to the app origin completed in any frame (the pane itself did not report after the attempt)"; return; fi
-    verdict FAIL "S3-nav-$c" "${why:-no evidence}; not proven that no frame became the app"; return
+    verdict PASS "S3-nav-$c" "$why; no navigation to the app origin was allowed or completed anywhere in the log (the pane itself did not report after the attempt)"; return
   fi
   verdict FAIL "S3-nav-$c" "no alive report: the frame may have become the app"
 }
@@ -85,8 +96,14 @@ frame_status() {
     if viol_has "$label" frame-src "$label"; then echo "blocked:an enforced frame-src report names the $label: address"; return; fi
     # WebView2 raises the enforced report with an empty address for blob:/data: frames. The step made exactly one
     # frame, the report carries its label, and the guard's own cancellation is logged inside the step window.
-    if win_guard_present && viol_has "$label" frame-src "" && [ "$(cancels_in "$label")" -ge 1 ]; then
-      echo "blocked:an enforced frame-src report for this step (no address given by the engine) and the guard cancelled the frame navigation"; return
+    # Exact: every enforced frame-src report of the step has an empty address (another address is not this case),
+    # and the guard saw exactly one frame navigation in the step window, refused (a second one would be ambiguous).
+    if win_guard_present; then
+      local addrs navs
+      addrs=$(viol_addrs "$label" frame-src); navs=$(frame_navs_in "$label")
+      if [ -n "$addrs" ] && [ "$(echo "$addrs" | grep -vc '^<empty>$')" = 0 ] && [ "$(echo "$navs" | grep -c .)" = 1 ] && echo "$navs" | grep -q 'allowed=false$'; then
+        echo "blocked:an enforced frame-src report for this step (no address given by the engine) and the guard refused the one frame navigation of the step"; return
+      fi
     fi ;;
   esac
   n=$(cancels_in "$label")
