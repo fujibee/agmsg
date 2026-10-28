@@ -35,6 +35,17 @@
     if (document.querySelector(".addon-grant-card.denied")) throw new Error("the permission card says the folder is denied");
     return document.querySelector(".addon-grant-card:not(.denied) .addon-card-actions button:first-child:not(:disabled)");
   };
+  // Waiting for a permission card: when it does not come, say what the page shows instead (is this the
+  // e2e build, did the folder seam have a value, which add-on elements exist and what do they say).
+  const card = async (what) => {
+    try {
+      return await waitFor(ONCE, what, 30000);
+    } catch (e) {
+      const els = [...document.querySelectorAll("[class*=addon]")].slice(0, 12).map((x) => x.className + ": " + String(x.innerText || "").replace(/\s+/g, " ").slice(0, 160));
+      report("DIAG e2e-build=" + window.__AGMSG_E2E_BUILD__ + " folder-seam=" + window.__AGMSG_E2E_FOLDER__ + " frames=" + document.querySelectorAll("iframe").length + " | " + els.join(" || "));
+      throw e;
+    }
+  };
   const trigger = () => document.querySelector(".new-wrap-tabs > button");
   let folder = null;
   const openMenu = async () => {
@@ -53,13 +64,13 @@
     window.__AGMSG_E2E_FOLDER__ = "__FIXTURE__";
     await report("opening File view");
     (await byKey("fileview")).click();
-    (await waitFor(ONCE, "the folder grant card")).click();
+    (await card("the folder grant card")).click();
     await report("file view granted");
     await sleep(8000);
     await openMenu();
     await report("opening Diff view");
     (await byKey("diffview")).click();
-    (await waitFor(ONCE, "the second grant card")).click();
+    (await card("the second grant card")).click();
     await report("diff view granted");
     await sleep(12000);
     // Straight requests through the same command the frames use, for the pane ids and generations seen in the trace.

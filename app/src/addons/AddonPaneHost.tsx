@@ -21,6 +21,7 @@ const source = createLiveSource((cmd, args) => invoke(cmd, args));
 // End-to-end seam, present only in a build made with `vite build --mode e2e`
 // (constant-folded away otherwise): lets a scripted run answer the native folder
 // picker, which nothing can click from outside.
+if (import.meta.env.MODE === "e2e") (window as unknown as { __AGMSG_E2E_BUILD__?: boolean }).__AGMSG_E2E_BUILD__ = true; // lets the driver tell this build from a product build
 const e2eFolder = (): Promise<string> | null => {
   if (import.meta.env.MODE !== "e2e") return null;
   const f = (window as unknown as { __AGMSG_E2E_FOLDER__?: string }).__AGMSG_E2E_FOLDER__;
