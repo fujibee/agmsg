@@ -179,11 +179,25 @@ _sqlite_sync_jq_binary_refusal() {
   echo "agmsg:   the values this sends, which the server rejects (#829)." >&2
 }
 
+# Said every retry, same as the refusal above: a probe that cannot run is not
+# cached in `_AGMSG_JQ_BINARY_OK` (see below), so this also fires every time
+# until whatever stopped the probe from running at all is gone.
+_sqlite_sync_jq_binary_probe_error() {
+  echo "agmsg: could not check whether jq supports -b (binary output); not sending yet" >&2
+  echo "agmsg:   $1" >&2
+}
+
 _sqlite_sync_require_jq_binary() {
   case "$_AGMSG_JQ_BINARY_OK" in
     yes) return 0 ;;
     no)  _sqlite_sync_jq_binary_refusal; return 1 ;;
   esac
+  if ! command -v jq >/dev/null 2>&1; then
+    # Not cached: jq showing up later (PATH fixed, disk back) must be re-probed,
+    # not stuck behind a stale "no".
+    _sqlite_sync_jq_binary_probe_error "jq was not found on PATH"
+    return 1
+  fi
   local probe="" ok=""
   # BOTH HALVES, AND NO SHARED FILE.
   #
@@ -211,8 +225,46 @@ _sqlite_sync_require_jq_binary() {
     _AGMSG_JQ_BINARY_OK=yes
     return 0
   fi
-  _AGMSG_JQ_BINARY_OK=no
-  _sqlite_sync_jq_binary_refusal
+  # Reaching here only says the sentinel-and-ok pair above didn't come back as
+  # expected -- that is true whether jq ran and produced wrong bytes (CRLF),
+  # ran and printed the sentinel fine but still exited non-zero, ran and
+  # refused `-b` outright with no output at all (an unknown-option exit,
+  # measured rc 2 on jq-1.7.1-apple -- see the block comment above
+  # _AGMSG_JQ_BINARY_OK), or never ran at all (missing, killed, or the process
+  # itself could not start -- this file's own #829 bug report: a Git Bash
+  # shutting down could not fork at all, and the ORIGINAL version of this
+  # function treated that identically to "no -b support" and cached it, so
+  # every later push failed with a message about a jq flag that was never the
+  # problem).
+  #
+  # A second jq run tells those apart. Plain `$( )` is fine here even on MSYS
+  # for THIS capture: the trailing-CR concern above is about preserving the
+  # exact bytes a WORKING jq writes for the values this driver sends, not
+  # about whether any output came back at all.
+  local probe_out probe_rc=0 _restore_e=0
+  case $- in *e*) _restore_e=1 ;; esac
+  set +e
+  probe_out="$(printf '{}\n' | jq -b -r '"agmsg-probe"' 2>/dev/null)"
+  probe_rc=$?
+  [ "$_restore_e" = 1 ] && set -e
+  if [ -n "$probe_out" ] || [ "$probe_rc" -eq 2 ]; then
+    # Output present (jq ran -- whatever came out, correct or CRLF-mangled,
+    # proves it executed and wrote something) or rc 2 (jq ran long enough to
+    # reject the option and wrote nothing at all). Either way the probe RAN
+    # and jq's own behavior is what failed it -- the #829 refusal, cached, is
+    # correct here.
+    _AGMSG_JQ_BINARY_OK=no
+    _sqlite_sync_jq_binary_refusal
+    return 1
+  fi
+  # No output and not the known rejection code: jq could not even be started,
+  # was killed, or exited some other way the two expected cases above don't
+  # cover -- "the probe itself did not run", not "this jq lacks -b". Never
+  # cached: whatever stopped the probe from running may be gone by the next
+  # call. One more run, just for the stderr text this diagnostic names.
+  local probe_err
+  probe_err="$(printf '{}\n' | jq -b -r '"agmsg-probe"' 2>&1 1>/dev/null)"
+  _sqlite_sync_jq_binary_probe_error "jq -b probe exited ${probe_rc}: ${probe_err:-no output}"
   return 1
 }
 

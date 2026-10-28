@@ -362,6 +362,85 @@ STUB
   [ "$status_seen" -eq 0 ]
 }
 
+# A jq that cannot even run the probe -- not "lacks -b", just dead: no
+# output at all, and an exit code that is neither 0 (ran fine) nor 2 (ran and
+# rejected -b). Stands in for the field report's fork failure (Git Bash could
+# not create a child process while Windows was shutting down) without trying
+# to reproduce a real fork failure in CI.
+stub_jq_cannot_run() {
+  local bin="$TEST_SKILL_DIR/jq-dead"
+  mkdir -p "$bin"
+  cat > "$bin/jq" <<'STUB'
+#!/usr/bin/env bash
+echo "jq: fatal: could not allocate memory" >&2
+exit 1
+STUB
+  chmod +x "$bin/jq"
+  printf '%s' "$bin"
+}
+
+@test "sync: a jq -b probe that cannot run is reported as that, not as a jq without -b (#1822)" {
+  local bin; bin="$(stub_jq_cannot_run)"
+
+  run env PATH="$bin:$PATH" bash -c '
+    . "$1/drivers/storage/sqlite-sync.sh"
+    _sqlite_sync_require_jq_binary
+  ' _ "$SCRIPTS"
+
+  [ "$status" -ne 0 ]
+  # NOT the -b refusal -- that would send the operator to replace a jq that
+  # was never the problem (#1822's field report).
+  refute grep -q 'requires a jq whose -b (binary output) produces LF-terminated lines' <<< "$output"
+  echo "$output" | grep -q 'could not check whether jq supports -b'
+  echo "$output" | grep -q 'jq -b probe exited 1'
+  echo "$output" | grep -q 'could not allocate memory'
+}
+
+@test "sync: a jq -b probe that cannot run is not cached as a NO (#1822)" {
+  # Re-running after the stub is gone must re-probe, not repeat a cached
+  # refusal for a jq that was never actually checked.
+  local bin; bin="$(stub_jq_cannot_run)"
+
+  run env REAL_PATH="$PATH" PATH="$bin:$PATH" bash -c '
+    cd "$2"
+    . "$1/drivers/storage/sqlite-sync.sh"
+    { _sqlite_sync_require_jq_binary; } 2>err1
+    echo "cached_after_first=$_AGMSG_JQ_BINARY_OK"
+    PATH="$REAL_PATH"
+    _sqlite_sync_require_jq_binary
+    echo "cached_after_second=$_AGMSG_JQ_BINARY_OK"
+  ' _ "$SCRIPTS" "$BATS_TEST_TMPDIR"
+
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'cached_after_first='
+  echo "$output" | grep -qx 'cached_after_second=yes'
+}
+
+@test "sync: a missing jq is reported as missing, not as a jq without -b (#1822)" {
+  # A PATH with the tools bash -c itself needs but no jq anywhere on it --
+  # same pathbox idea as test_hash.bats, see its own comment for why symlinks
+  # rather than a plain directory removal (this repo has no single "the jq
+  # dir" to subtract: jq and bash/cat/etc. can share a directory on some
+  # systems).
+  local bin="$TEST_SKILL_DIR/no-jq"
+  mkdir -p "$bin"
+  local tool src
+  for tool in bash cat grep sed; do
+    src="$(command -v "$tool")" || continue
+    ln -sf "$src" "$bin/$tool"
+  done
+
+  run env PATH="$bin" bash -c '
+    . "$1/drivers/storage/sqlite-sync.sh"
+    _sqlite_sync_require_jq_binary
+  ' _ "$SCRIPTS"
+
+  [ "$status" -ne 0 ]
+  refute grep -q 'requires a jq whose -b (binary output) produces LF-terminated lines' <<< "$output"
+  echo "$output" | grep -q 'could not check whether jq supports -b'
+  echo "$output" | grep -q 'not found on PATH'
+}
+
 @test "sync: a missing node still answers 10, even when the jq also lacks -b (#829)" {
   # TWO REFUSALS, AND THE ORDER BETWEEN THEM IS A CONTRACT.
   #
