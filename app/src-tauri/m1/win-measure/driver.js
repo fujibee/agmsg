@@ -25,6 +25,8 @@
       if (it && !it.disabled) return it;
       const off = await gateOff();
       if (off) throw new Error(what + " is disabled; add-ons are off: " + off);
+      // add-ons are on but the entry stays disabled: no team selected in the UI
+      if (it && it.disabled && Date.now() - t > 15000) throw new Error(what + " stays disabled although add-ons are on (no team selected?)");
       await sleep(250);
     }
     throw new Error("timeout waiting for " + what);
@@ -65,6 +67,8 @@
     await sleep(800);
     await openMenu();
     report("menu: " + menuItems().map((b) => (b.dataset.key || "?") + (b.disabled ? "(disabled)" : "")).join(" | "));
+    // Without the e2e frontend the folder picker is the native dialog, which nothing here can answer: stop now.
+    if (window.__AGMSG_E2E_BUILD__ !== true) throw new Error("this is not the e2e frontend build: File view would open the native folder dialog");
     window.__AGMSG_E2E_FOLDER__ = "__FIXTURE__";
     await report("opening File view");
     (await byKey("fileview")).click();
@@ -126,7 +130,7 @@
       const item = await byPane(pane);
       report("opening dev pane " + pane);
       item.click();
-      await sleep(pane === "net" ? 45000 : 9000); // one pane at a time: a pane in a background tab does not run
+      await sleep(pane === "net" ? 70000 : 9000); // one pane at a time: a pane in a background tab does not run
     }
     await sleep(3000);
     if (mismatches > 0) throw new Error(mismatches + " answer(s) were not what was expected");
