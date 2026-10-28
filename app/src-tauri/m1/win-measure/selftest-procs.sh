@@ -36,6 +36,17 @@ bash "$HERE/run-win.sh" "$T/binarg" "$T/out1" > "$T/run1.out" 2>&1; code=$?
 grep -q "already running" "$T/run1.out" && ok "the refusal is reported" || no "no refusal message"
 : > "$STUB_TASKS"
 
+# 1b. a package with a macOS AppleDouble file (._*) is refused at S0 with its name, before anything starts
+mkdir -p "$T/pkg/bin/builtin-addons/fileview" "$T/pkg/bin/builtin-addons/diffview" "$T/pkg/win-measure" "$T/pkg/core/scripts"
+cp "$T/bin/agmsg-app-win-measure-debug.exe" "$T/bin/agmsg-app-win-measure-release.exe" "$T/pkg/bin/" 2>/dev/null || { fake_exe agmsg-app-win-measure-debug.exe; fake_exe agmsg-app-win-measure-release.exe; cp "$T/bin/"*.exe "$T/pkg/bin/"; }
+touch "$T/pkg/core/scripts/api.sh" "$T/pkg/bin/builtin-addons/fileview/._addon.conf"
+printf '#!/bin/bash\necho ">rdp-tcp#0 %s 2 Active"\n' "$(whoami | sed 's/.*\\//')" > "$T/stubs/query"; chmod +x "$T/stubs/query"
+cp "$HERE"/*.sh "$T/pkg/win-measure/"
+: > "$STUB_LOG"
+bash "$T/pkg/win-measure/run-win.sh" "$T/pkg/bin" "$T/out1b" > "$T/run1b.out" 2>&1; code=$?
+[ "$code" = 3 ] && grep -q "FAIL S0 stray macOS metadata" "$T/run1b.out" && grep -q "\._addon.conf" "$T/run1b.out" && ok "a ._ file in the package stops the run at S0 and is named" || no "AppleDouble check: code $code: $(tail -3 "$T/run1b.out")"
+[ ! -s "$STUB_LOG" ] && ok "and nothing was stopped" || no "taskkill called: $(cat "$STUB_LOG")"
+
 # 2. a normal run: launch two, with an unrelated process of the same image name present
 export TRACK="$T/pids.txt"; : > "$TRACK"
 . "$HERE/procs.sh"

@@ -83,6 +83,9 @@ if session_state | grep -qi active; then verdict PASS S0 "an Active desktop sess
 
 DBG="$BIN/agmsg-app-win-measure-debug.exe"; REL="$BIN/agmsg-app-win-measure-release.exe"
 [ -f "$DBG" ] && [ -f "$REL" ] || { verdict FAIL S0 "executables missing in $BIN"; exit 3; }
+# macOS AppleDouble files (._name) from a tar made on a Mac: Windows extracts them as real files and a digest then counts them
+stray=$(find "$BIN" "$HERE" -name '._*' 2>/dev/null | head -5 | tr '\n' ' ')
+[ -z "$stray" ] || { verdict FAIL S0 "stray macOS metadata files in the package (._*): $stray; the archive was made without COPYFILE_DISABLE=1"; exit 3; }
 # the built-in add-ons are resources the app looks for next to its exe (a plain build is not bundled)
 [ -d "$BIN/builtin-addons/fileview" ] && [ -d "$BIN/builtin-addons/diffview" ] || { verdict FAIL S0 "builtin-addons/ is missing next to the executables in $BIN: File view and Diff view cannot open"; exit 3; }
 
