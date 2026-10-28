@@ -36,7 +36,17 @@ stop_sink() { # only the PowerShell this run started, by its own id, and only wh
     if [ -n "$p" ] && tasklist //FI "PID eq $p" //FO CSV //NH 2>/dev/null | grep -qi '"powershell.exe"'; then taskkill //F //PID "$p" > /dev/null 2>&1; fi
   fi
 }
-trap 'stop_sink; stop_launched; note "run ended (trap)"' EXIT
+# finish: the real-home guard, the counts and the archive, once, however the run ends (an early exit included)
+FINISHED=0
+finish() {
+  [ "$FINISHED" = 0 ] || return 0
+  FINISHED=1
+  snapshot > "$OUT/real-home-after.txt"
+  if diff "$OUT/real-home-before.txt" "$OUT/real-home-after.txt" > "$OUT/real-home.diff"; then verdict PASS GUARD "the real agmsg home is unchanged (scripts, skills, commands, teams)"; else verdict FAIL GUARD "the real agmsg home changed during the run; see real-home.diff"; fi
+  echo "== counts: $(grep -c '^PASS' "$SUM") PASS, $(grep -c '^FAIL' "$SUM") FAIL" | tee -a "$SUM"
+  ( cd "$(dirname "$OUT")" && tar czf "$OUT.tgz" "$(basename "$OUT")" ) && echo "archive: $OUT.tgz" | tee -a "$SUM"
+}
+trap 'stop_sink; stop_launched; note "run ended (trap)"; finish' EXIT
 # ---- isolation: every launch gets these, none of them changes HOME
 CORE="$HERE/../core"
 export AGMSG_CONFIG="$(nat "$OUT/iso/config.json")" AGMSG_STORAGE_PATH="$(nat "$OUT/iso/storage")" \
@@ -132,16 +142,18 @@ if grep -q '"finished' "$OUT/s2-bootstrap.log"; then verdict PASS S2 "throwaway 
 sed -e "s|__TEAM__|$TEAM|g" -e "s|__FIXTURE__|$(nat "$FIX")|g" -e "s|__ADDON__|$(nat "$HERE/addon")|g" "$HERE/driver.js" > "$OUT/driver.js"
 SINK="$OUT/sink-hits.txt"; SINKN=$(nat "$SINK")
 ( powershell -NoProfile -ExecutionPolicy Bypass -File "$(nat "$HERE/sink.ps1")" -Port 47931 -Seconds 900 -Out "$SINKN" > "$OUT/sink.log" 2>&1 & )
-for _ in $(seq 1 20); do grep -q '^udp=\|^ERROR' "$SINK" 2>/dev/null && break; sleep 0.5; done
-if tr -d '\r' < "$SINK" 2>/dev/null | grep -q '^udp='; then verdict PASS S3-sink-start "the sink is listening on 127.0.0.1:47931"; fi
-if ! tr -d '\r' < "$SINK" 2>/dev/null | grep -q '^udp='; then
-  verdict FAIL S3-sink-start "the sink could not start (port 47931 busy or PowerShell blocked): $(tr -d '\r' < "$SINK" 2>/dev/null | head -1)"
-  stop_sink; echo "== counts: $(grep -c '^PASS' "$SUM") PASS, $(grep -c '^FAIL' "$SUM") FAIL" | tee -a "$SUM"
-  ( cd "$(dirname "$OUT")" && tar czf "$OUT.tgz" "$(basename "$OUT")" ) && echo "archive: $OUT.tgz" | tee -a "$SUM"; exit 4
-fi
+# read the sink's counter file: it is replaced by the writer, so a read can hit the instant of the swap; try again
+sink_val() { local v i; for i in 1 2 3 4 5; do v=$(tr -d '\r' < "$SINK" 2>/dev/null | head -1); [ -n "$v" ] && break; sleep 0.2; done; echo "$v"; }
+for _ in $(seq 1 20); do case "$(sink_val)" in udp=*|ERROR*) break ;; esac; sleep 0.5; done
+v=$(sink_val)
+case "$v" in
+  udp=*) verdict PASS S3-sink-start "the sink is listening on 127.0.0.1:47931" ;;
+  *) verdict FAIL S3-sink-start "the sink did not report a count (${v:-no output}); sink.log: $(tr -d '\r' < "$OUT/sink.log" 2>/dev/null | tail -2 | tr '\n' ' ')"
+     stop_sink; exit 4 ;;
+esac
 powershell -NoProfile -Command '$c=New-Object System.Net.Sockets.UdpClient; [void]$c.Send([byte[]](1,2,3),3,"127.0.0.1",47931); $c.Close(); $t=New-Object System.Net.Sockets.TcpClient("127.0.0.1",47931); $t.Close()' > "$OUT/sink-control.log" 2>&1
 sleep 2
-if tr -d '\r' < "$SINK" 2>/dev/null | grep -q '^udp=1 tcp=1$'; then verdict PASS S3-sink-control "the UDP/TCP sink saw the control packet and connection"; else verdict FAIL S3-sink-control "the sink did not see its control traffic: $(tr -d '\r' < "$SINK" 2>/dev/null)"; fi
+if [ "$(sink_val)" = "udp=1 tcp=1" ]; then verdict PASS S3-sink-control "the UDP/TCP sink saw the control packet and connection"; else verdict FAIL S3-sink-control "the sink did not see its control traffic: $(sink_val)"; fi
 mark_session "S3 before"
 launch_or_abort S3 "$OUT/s3-main.log" "$DBG" AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_WINDOWS_MEASURE=1 AGMSG_ADDON_TRACE=1 AGMSG_ADDON_E2E="$(nat "$OUT/driver.js")" AGMSG_ADDON_E2E_DELAY=15
 for _ in $(seq 1 120); do grep -qE '"(FAILED|finished)' "$OUT/s3-main.log" 2>/dev/null && break; sleep 2; done
@@ -162,15 +174,10 @@ grep -c 'cancelled a frame navigation' "$L" | sed 's/^/INFO S3-nav cancelled-fra
 . "$HERE/evaluate.sh"
 eval_net 2>&1 | while IFS= read -r line; do case "$line" in INFO*) echo "$line" | tee -a "$SUM" ;; *) echo "$line" ;; esac; done
 stop_sink; sleep 1
-hits=$(tr -d '\r' < "$SINK" 2>/dev/null)
+hits=$(sink_val)
 if [ "$hits" = "udp=1 tcp=1" ]; then verdict PASS S3-sink-hits "no UDP datagram or TCP connection reached the sink beyond the control ($hits)"; else verdict FAIL S3-sink-hits "sink counts: ${hits:-<none>} (control alone is udp=1 tcp=1)"; fi
 
-# ---- the real home must be unchanged
-snapshot > "$OUT/real-home-after.txt"
-if diff "$OUT/real-home-before.txt" "$OUT/real-home-after.txt" > "$OUT/real-home.diff"; then verdict PASS GUARD "the real agmsg home is unchanged (scripts, skills, commands, teams)"; else verdict FAIL GUARD "the real agmsg home changed during the run; see real-home.diff"; fi
-
-# ---- wrap up
+# ---- wrap up (the real-home guard, counts and archive come from finish, which also runs on any early exit)
 mark_session end
 stop_launched
-echo "== counts: $(grep -c '^PASS' "$SUM") PASS, $(grep -c '^FAIL' "$SUM") FAIL" | tee -a "$SUM"
-( cd "$(dirname "$OUT")" && tar czf "$OUT.tgz" "$(basename "$OUT")" ) && echo "archive: $OUT.tgz" | tee -a "$SUM"
+finish

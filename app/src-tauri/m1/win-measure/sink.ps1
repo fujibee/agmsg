@@ -10,12 +10,25 @@ try {
   Set-Content -Path $Out -Value "ERROR cannot listen on $Port : $($_.Exception.Message)" -Encoding ascii
   exit 1
 }
+# The reader (the run script) may have the file open at this moment: write a temp file and swap it in,
+# try a few times, and never let a failed write stop the sink (the next turn writes again).
+function Write-Hits {
+  for ($i = 0; $i -lt 5; $i++) {
+    try {
+      "udp=$u tcp=$t" | Set-Content -Path "$Out.tmp" -Encoding ascii -ErrorAction Stop
+      Move-Item -Path "$Out.tmp" -Destination $Out -Force -ErrorAction Stop
+      return
+    } catch { Start-Sleep -Milliseconds 30 }
+  }
+}
 $u = 0; $t = 0
+Write-Hits
 $end = (Get-Date).AddSeconds($Seconds)
 while ((Get-Date) -lt $end -and -not (Test-Path "$Out.stop")) {
   if ($udp.Available -gt 0) { $ep = New-Object System.Net.IPEndPoint ([System.Net.IPAddress]::Any, 0); [void]$udp.Receive([ref]$ep); $u++ }
   if ($tcp.Pending()) { $c = $tcp.AcceptTcpClient(); $c.Close(); $t++ }
-  "udp=$u tcp=$t" | Set-Content -Path $Out -Encoding ascii
+  Write-Hits
   Start-Sleep -Milliseconds 100
 }
+Write-Hits; Write-Hits   # the final count must land even if the reader had the file just now
 $udp.Close(); $tcp.Stop()
