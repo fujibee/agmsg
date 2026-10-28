@@ -75,6 +75,7 @@ snapshot > "$OUT/real-home-before.txt"
   echo "== git"; git --version
   echo "== BUILD-INFO"; cat "$(dirname "$BIN")/BUILD-INFO.md" 2>&1
   echo "== sha256"; sha256sum "$BIN"/agmsg-app-win-measure-*.exe
+  echo "== builtin-addons (name size mode, then sha256): compare with the digests pinned in the exe"; ( cd "$BIN/builtin-addons" && find . -printf '%p %s %m %y\n' | sort; find . -type f | sort | xargs sha256sum ) 2>&1
   echo "== AV/process check"; tasklist //FI "IMAGENAME eq agmsg-app*" 2>&1
 } > "$OUT/s0-env.log" 2>&1
 mark_session start
