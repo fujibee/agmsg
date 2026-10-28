@@ -177,9 +177,23 @@ impl Catalog {
     }
 
     fn builtin_digest_ok(&self, name: &str, expected: &str) -> bool {
-        match self.builtin_pane_root(name) {
-            Some(dir) => digest::payload_digest(&dir).map(|d| d == expected).unwrap_or(false),
-            None => false,
+        let Some(dir) = self.builtin_pane_root(name) else { return false };
+        match digest::manifest(&dir) {
+            Ok(m) if m.digest == expected => true,
+            // one line that says how it differs (relative names and sizes only, no absolute path)
+            Ok(m) => {
+                let files: Vec<String> = m.files.iter().map(|(k, (_, n))| format!("{k}:{n}")).collect();
+                eprintln!("[addons] builtin {name}: digest {} expected {} files [{}]", &m.digest[..12], &expected[..12], files.join(" "));
+                false
+            }
+            Err(e) => {
+                let why = match &e {
+                    digest::DigestError::Io(io) => format!("io {:?} os={:?}", io.kind(), io.raw_os_error()),
+                    digest::DigestError::NotPlain(_) => "an entry is not a plain file or folder".to_string(),
+                };
+                eprintln!("[addons] builtin {name}: cannot hash its files: {why}");
+                false
+            }
         }
     }
 
@@ -296,6 +310,24 @@ mod tests {
         assert!(names.contains(&"fileview") && names.contains(&"diffview"), "{names:?}");
         for (_, d) in BUILTIN_DIGESTS {
             assert_eq!(d.len(), 64);
+        }
+    }
+
+    /// What tauri-build places next to the test executable (target/<profile>/builtin-addons) is what a plain
+    /// cargo build ships: its digests must equal the ones build.rs pinned. A mismatch lists every file.
+    #[test]
+    fn the_resources_placed_next_to_the_executable_match_their_build_time_digest() {
+        let exe = std::env::current_exe().unwrap();
+        let root = exe.parent().and_then(|d| d.parent()).map(|d| d.join("builtin-addons")).unwrap();
+        if !root.is_dir() {
+            assert!(std::env::var("AGMSG_REQUIRE_RESOURCES").is_err(), "no builtin-addons at {}", root.display());
+            eprintln!("skipped: no {}", root.display());
+            return;
+        }
+        for (name, expected) in BUILTIN_DIGESTS {
+            let m = digest::manifest(&root.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let files: Vec<String> = m.files.iter().map(|(k, (h, n))| format!("{k} {n} {}", &h[..12])).collect();
+            assert_eq!(&m.digest, expected, "{name}: its files are\n{}", files.join("\n"));
         }
     }
 
