@@ -37,7 +37,7 @@ fn measuring() -> bool {
     false
 }
 
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {

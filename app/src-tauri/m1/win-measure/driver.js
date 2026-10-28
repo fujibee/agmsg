@@ -12,9 +12,29 @@
   // `.new-wrap-tabs > button`, menu entries carry `data-key`, and in a permission card the first
   // button is "Allow once" (files cards) or "Allow" (messages cards).
   const menuItems = () => [...document.querySelectorAll(".new-menu [role=menuitem]")];
-  const byKey = (key) => menuItems().find((b) => b.dataset.key === key && !b.disabled);
-  const byPane = (pane) => menuItems().find((b) => (b.dataset.key || "").endsWith("/" + pane) && !b.disabled);
-  const ONCE = () => document.querySelector(".addon-grant-card .addon-card-actions button:first-child:not(:disabled)");
+  // A disabled entry is waited for only while the startup check is still running; once it has ended
+  // "off", fail at once with its reasons instead of waiting for a menu that cannot enable.
+  const gateOff = async () => {
+    const v = await real("addon_gate_status");
+    return v && !v.enabled && !/^(checking again|the startup check has not run)/.test((v.reasons || [""])[0]) ? v.reasons.join("; ") : null;
+  };
+  const pick = async (match, what) => {
+    const t = Date.now();
+    while (Date.now() - t < 60000) {
+      const it = menuItems().find((b) => match(b.dataset.key || ""));
+      if (it && !it.disabled) return it;
+      const off = await gateOff();
+      if (off) throw new Error(what + " is disabled; add-ons are off: " + off);
+      await sleep(250);
+    }
+    throw new Error("timeout waiting for " + what);
+  };
+  const byKey = (key) => pick((k) => k === key, "menu entry " + key);
+  const byPane = (pane) => pick((k) => k.endsWith("/" + pane), "menu entry for pane " + pane);
+  const ONCE = () => {
+    if (document.querySelector(".addon-grant-card.denied")) throw new Error("the permission card says the folder is denied");
+    return document.querySelector(".addon-grant-card:not(.denied) .addon-card-actions button:first-child:not(:disabled)");
+  };
   const trigger = () => document.querySelector(".new-wrap-tabs > button");
   let folder = null;
   const openMenu = async () => {
@@ -32,13 +52,13 @@
     report("menu: " + menuItems().map((b) => (b.dataset.key || "?") + (b.disabled ? "(disabled)" : "")).join(" | "));
     window.__AGMSG_E2E_FOLDER__ = "__FIXTURE__";
     await report("opening File view");
-    (await waitFor(() => byKey("fileview"), "File view menu item")).click();
+    (await byKey("fileview")).click();
     (await waitFor(ONCE, "the folder grant card")).click();
     await report("file view granted");
     await sleep(8000);
     await openMenu();
     await report("opening Diff view");
-    (await waitFor(() => byKey("diffview"), "Diff view menu item")).click();
+    (await byKey("diffview")).click();
     (await waitFor(ONCE, "the second grant card")).click();
     await report("diff view granted");
     await sleep(12000);
@@ -88,7 +108,7 @@
     const devPanes = ["app-tauri", "app-tauri-localhost-http", "app-https", "replace", "meta-refresh", "net"];
     for (const pane of devPanes) {
       await openMenu();
-      const item = await waitFor(() => byPane(pane), "menu item for pane " + pane);
+      const item = await byPane(pane);
       report("opening dev pane " + pane);
       item.click();
       await sleep(pane === "net" ? 45000 : 9000); // one pane at a time: a pane in a background tab does not run

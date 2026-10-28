@@ -276,7 +276,7 @@ fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &st
           fr.remove();
           r0.finalMissing = true;
           finish(r0);
-        }}, 3500);
+        }}, 2600);
         return;
       }}
       clearTimeout(window.__agmsgInterimTimer);
