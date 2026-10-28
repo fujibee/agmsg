@@ -21,6 +21,7 @@ jobs:
         run: |
           bash selftest.sh
           bash selftest-procs.sh
+          bash selftest-sink.sh
 
   build:
     runs-on: windows-latest
