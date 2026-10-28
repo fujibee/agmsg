@@ -41,8 +41,12 @@
     try {
       return await waitFor(ONCE, what, 30000);
     } catch (e) {
-      const els = [...document.querySelectorAll("[class*=addon]")].slice(0, 12).map((x) => x.className + ": " + String(x.innerText || "").replace(/\s+/g, " ").slice(0, 160));
-      report("DIAG e2e-build=" + window.__AGMSG_E2E_BUILD__ + " folder-seam=" + window.__AGMSG_E2E_FOLDER__ + " frames=" + document.querySelectorAll("iframe").length + " | " + els.join(" || "));
+      // Structured facts only, no page text (it can carry real paths): the build flag, whether the seam holds
+      // the fixture this run put there, the number of frames, the innermost permission/failure cards with
+      // their kind and error code, and the add-on class names present.
+      const cards = [...document.querySelectorAll(".addon-card")].filter((c) => !c.querySelector(".addon-card")).map((c) => c.className.replace(/\s+/g, ".") + (c.dataset.code ? "[" + c.dataset.code + "]" : "") + " buttons=" + c.querySelectorAll("button").length);
+      const classes = [...new Set([...document.querySelectorAll("[class*=addon]")].flatMap((x) => [...x.classList].filter((k) => k.startsWith("addon"))))].sort();
+      report("DIAG e2e-build=" + (window.__AGMSG_E2E_BUILD__ === true) + " seam-is-fixture=" + (window.__AGMSG_E2E_FOLDER__ === "__FIXTURE__") + " frames=" + document.querySelectorAll("iframe").length + " cards=[" + cards.join("; ") + "] classes=" + classes.join(","));
       throw e;
     }
   };

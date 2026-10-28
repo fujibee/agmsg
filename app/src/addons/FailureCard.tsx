@@ -41,7 +41,7 @@ export function FailureCard(props: {
           ? t("addons.failure.open_failed", { title, message: failure.message })
           : t(`addons.failure.${failure.code}`, { title });
   return (
-    <div className="addon-card addon-failure-card" role="alert">
+    <div className="addon-card addon-failure-card" role="alert" data-code={failure.code}>
       <p>{text}</p>
       <div className="addon-card-actions">
         {failureActions(failure).map((a) => (
