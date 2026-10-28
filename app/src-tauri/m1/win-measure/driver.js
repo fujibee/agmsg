@@ -98,6 +98,20 @@
       if (!pass) mismatches++;
       report((pass ? "ASK PASS " : "ASK FAIL(expected " + expect + ") ") + "pane" + id + " " + op + " " + JSON.stringify(args) + " -> " + body);
     };
+    // The frames load on their own time (slower on a busy machine): a direct request is made only once the
+    // pane's frame is the current one, i.e. its first answer is no longer "not_granted" (not yet loaded).
+    const ready = async (id) => {
+      const t = Date.now();
+      for (;;) {
+        let code = "ok";
+        try { const r = await real("addon_request", { id, generation: 1, op: "open.args", args: {} }); if (!r.ok) code = r.error.code; } catch (e) { code = "threw"; }
+        if (code === "ok") { report("pane" + id + " frame is current after " + Math.round((Date.now() - t) / 1000) + " s"); return; }
+        if (Date.now() - t > 60000) throw new Error("the frame of pane " + id + " never became current (last answer: " + code + ")");
+        await sleep(500);
+      }
+    };
+    await ready(1);
+    await ready(2);
     await ask(1, "open.args", {}, "ok");
     await ask(1, "fs.stat", { path: "." }, "ok");
     await ask(1, "fs.list", { path: "." }, "ok");
