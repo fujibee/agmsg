@@ -298,9 +298,10 @@ EOF
   done <<<"$renderable_types"
 }
 
-@test "type-registry: spawnable set is exactly eight of the eleven built-ins (#277, #279)" {
-  # hermes and devin deliberately stay out (#279): no known CLI mode starts them
-  # interactive with a seeded initial prompt. agmsg-app also stays out: it's
+@test "type-registry: spawnable set is exactly nine of the eleven built-ins (#277, #279)" {
+  # hermes deliberately stays out (#279): no known CLI mode starts it
+  # interactive with a seeded initial prompt. devin is in: `devin -- <prompt>`
+  # starts an interactive session seeded with one. agmsg-app also stays out: it's
   # the desktop app itself (spawnable=no), not a spawnable agent type.
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'
@@ -309,7 +310,7 @@ EOF
        [ \"\$(agmsg_type_get \"\$t\" spawnable)\" = yes ] && echo \"\$t\"
      done <<< \"\$(agmsg_known_types | sort -u)\" | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,opencode" ]
+  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,devin,gemini,grok-build,opencode" ]
 }
 
 @test "type-registry: detection manifests carry the expected env / proc keys" {
