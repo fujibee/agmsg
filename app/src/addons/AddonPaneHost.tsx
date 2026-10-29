@@ -10,6 +10,7 @@ import type { GrantChoice } from "./GrantCard";
 import { grantChips } from "./model";
 import { envNoticeKey } from "./envNotice";
 import { createOpGuard } from "./opGuard";
+import { NOTICE_MS } from "./OpenRequestBar";
 import { listenPaneFailed, type PaneFailedEvent } from "./paneFailed";
 import { pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
@@ -72,6 +73,12 @@ function LiveAddonPane(props: {
   const [attempt, setAttempt] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [pending, setPending] = useState(false);
+  // A refusal is a one-off notice: it goes by itself after a few seconds (or on ×).
+  useEffect(() => {
+    if (!blocked) return;
+    const id = setTimeout(() => setBlocked(undefined), NOTICE_MS);
+    return () => clearTimeout(id);
+  }, [blocked]);
   // One grant call or folder dialog at a time; invalidated when the pane is reopened or goes away.
   const guard = useRef(createOpGuard());
   const addonsRef = useRef(props.addons);
@@ -257,6 +264,7 @@ function LiveAddonPane(props: {
       chips={[...chips, ...grantChips([], decl?.network ?? network, tt)]}
       askedBy={pane.askedBy}
       blocked={blocked}
+      onClearBlocked={() => setBlocked(undefined)}
       canRemember={!isDev}
       devFolder={addon?.dev?.label}
       pending={pending}

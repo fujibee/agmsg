@@ -22,6 +22,7 @@ export type OpenRequests = {
   error: string | null;
   /** Rust's words when the last Open or Dismiss was refused. */
   actionError: { code: string; message: string } | null;
+  clearActionError: () => void;
   /** Open (true) or dismiss (false) one request line by its id. */
   act: (requestId: string, opened: boolean) => void;
 };
@@ -94,5 +95,7 @@ export function useOpenRequests(props: {
     [enabled, team, refresh, scope],
   );
 
-  return { view: state.view, error: state.error, actionError, act };
+  const clearActionError = useCallback(() => setActionError(null), []);
+
+  return { view: state.view, error: state.error, actionError, clearActionError, act };
 }

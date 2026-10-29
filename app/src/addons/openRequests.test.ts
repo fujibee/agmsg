@@ -3,7 +3,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createLiveSource, type Invoke } from "./source";
 import { SEAT_INSTRUCTION, toOpenView, type OpenRowRaw, type OpenScanRaw } from "./openRequests";
-import { OpenRequestBar, OpenRequestMessages, OpenRequestNotes } from "./OpenRequestBar";
+import { OpenRequestBar, OpenRequestMessages, OpenRequestNotes, messageLines } from "./OpenRequestBar";
+import { relativeTime } from "./relativeTime";
 
 const t = (key: string, o?: Record<string, unknown>) => `[${key}${o ? " " + JSON.stringify(o) : ""}]`;
 const noop = () => {};
@@ -52,7 +53,7 @@ describe("toOpenView", () => {
 describe("the bar and messages", () => {
   const items = toOpenView(scan([row("1"), row("2", { verdict: "denied_path", detail: "Protected." })])).items;
   const bar = (list = items, extra: object = {}) =>
-    renderToStaticMarkup(createElement(OpenRequestBar, { t, items: list, formatTime: (s) => s, onOpen: noop, onDismiss: noop, onInstall: noop, ...extra }));
+    renderToStaticMarkup(createElement(OpenRequestBar, { t, items: list, timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop, ...extra }));
   it("names the sender and the team, says the sender is not verified on every line, and shows Rust's reason as it is", () => {
     const html = bar();
     expect(html.match(/addons\.request\.unverified/g)?.length).toBe(2);
@@ -77,6 +78,68 @@ describe("the bar and messages", () => {
     for (const k of ["readFailed", "actionFailed", "truncated"]) expect(html).toContain(`addons.request.${k}`);
     expect(html).toContain("No app-user.");
     expect(renderToStaticMarkup(createElement(OpenRequestMessages, { t, error: null, actionError: null }))).toBe("");
+  });
+});
+
+describe("the lines under the bar", () => {
+  const base = { t, error: null, actionError: null };
+  const all = { ...base, error: "state_unreadable: broken", actionError: { code: "not_openable", message: "No." }, notice: "No app-user.", truncated: true };
+  it("every line has a × to close it", () => {
+    const html = renderToStaticMarkup(createElement(OpenRequestMessages, all));
+    expect(html.match(/class="addon-request-note-close"/g)?.length).toBe(4);
+    expect(html).toContain("addons.request.close");
+  });
+  it("only the refused click is a one-off; a read that keeps failing, a host notice and truncation stay until closed", () => {
+    expect(messageLines(all).map((l) => [l.key, l.sticky])).toEqual([
+      ["readFailed", true],
+      ["notice", true],
+      ["truncated", true],
+      ["actionFailed", false],
+    ]);
+  });
+  it("shows nothing when there is nothing to say", () => {
+    expect(renderToStaticMarkup(createElement(OpenRequestMessages, base))).toBe("");
+  });
+  it("a request that was opened or dismissed is not in the next read, so it has no row", () => {
+    const next = toOpenView(scan([row("2")])).items;
+    const html = renderToStaticMarkup(createElement(OpenRequestBar, { t, items: next, timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop }));
+    expect(html.match(/addon-request-unverified/g)?.length).toBe(1);
+    expect(renderToStaticMarkup(createElement(OpenRequestBar, { t, items: [], timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop }))).toBe("");
+  });
+});
+
+describe("how old a request is", () => {
+  const at = "2026-10-29T08:00:00Z";
+  const ms = Date.parse(at);
+  const age = (delta: number, tz = "UTC") => relativeTime(at, ms + delta, tz, t);
+  it("says just now, minutes, hours, then a date", () => {
+    expect(age(0).text).toBe("[addons.request.ago.now]");
+    expect(age(59_000).text).toBe("[addons.request.ago.now]");
+    expect(age(3 * 60_000).text).toBe('[addons.request.ago.minutes {"count":3}]');
+    expect(age(59 * 60_000).text).toBe('[addons.request.ago.minutes {"count":59}]');
+    expect(age(2 * 3_600_000).text).toBe('[addons.request.ago.hours {"count":2}]');
+    expect(age(23 * 3_600_000 + 59 * 60_000).text).toBe('[addons.request.ago.hours {"count":23}]');
+    expect(age(24 * 3_600_000).text).toContain("2026");
+    expect(age(24 * 3_600_000).text).not.toContain("ago");
+  });
+  it("a clock ahead of ours reads as just now", () => {
+    expect(age(-5 * 60_000).text).toBe("[addons.request.ago.now]");
+  });
+  it("the title is the local date and time in the chosen timezone", () => {
+    const utc = age(0, "UTC").title;
+    const tokyo = age(0, "Asia/Tokyo").title;
+    expect(utc).toMatch(/8:00:00/);
+    expect(tokyo).toMatch(/5:00:00/); // 17:00 in Tokyo; 12- or 24-hour clocks both contain "5:00:00" / "17:00:00"
+    expect(tokyo).not.toBe(utc);
+  });
+  it("an unreadable time is shown as it came, an unknown zone does not throw", () => {
+    expect(relativeTime("not-a-date", ms, "UTC", t)).toEqual({ text: "not-a-date", title: "not-a-date" });
+    expect(() => age(0, "Not/AZone")).not.toThrow();
+  });
+  it("the bar shows the relative text and keeps the exact time in title", () => {
+    const html = renderToStaticMarkup(createElement(OpenRequestBar, { t, items: toOpenView(scan([row("1")])).items, timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop }));
+    expect(html).toMatch(/class="addon-request-time" title="[^"]+"/);
+    expect(html).not.toMatch(/08:40:00/);
   });
 });
 

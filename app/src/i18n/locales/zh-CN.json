@@ -453,7 +453,13 @@
       "unverified": "发送者未验证",
       "readFailed": "无法读取打开请求：{{message}}",
       "actionFailed": "无法处理该请求：{{message}}",
-      "truncated": "较早的请求不再显示。"
+      "truncated": "较早的请求不再显示。",
+      "ago": {
+        "now": "just now",
+        "minutes": "{{count}} min ago",
+        "hours": "{{count}} h ago"
+      },
+      "close": "Close"
     },
     "menu": {
       "fileViewEntry": "File view…",

@@ -40,6 +40,24 @@ describe("AddonPane", () => {
     expect(render({ kind: "frame" })).not.toContain("askedBy");
     expect(render({ kind: "frame" }, { askedBy: "alice", devFolder: "/x" })).toContain("addons.pane.askedBy");
   });
+  it("the add-on's own bar is at the bottom, under the body, and is not an app pane header", () => {
+    const html = render({ kind: "frame" }, { askedBy: "alice", devFolder: "/x", blocked: "read (denied)" });
+    expect(html).not.toContain("pane-header ");
+    expect(html).not.toContain('class="pane-header');
+    expect(html.indexOf("addon-pane-body")).toBeLessThan(html.indexOf("addon-pane-status"));
+    const bar = html.slice(html.indexOf("addon-pane-status"));
+    for (const x of ["~/proj", "addons.pane.dev", "addons.pane.askedBy", "addons.pane.blocked", "addons.pane.reload", "pane.closeTitle"]) expect(bar).toContain(x);
+  });
+  it("the bar is still there, with ⟳, when it has nothing else to say", () => {
+    const html = render({ kind: "frame" }, { chips: [], hideTitle: true, hideClose: true });
+    expect(html).toContain("addon-pane-status");
+    expect(html.slice(html.indexOf("addon-pane-status"))).toContain("addons.pane.reload");
+    expect(html.slice(html.indexOf("addon-pane-status"))).not.toContain("pane.closeTitle");
+  });
+  it("a refusal notice has a × when the host can clear it", () => {
+    expect(render({ kind: "frame" }, { blocked: "x" })).not.toContain("addon-blocked-close");
+    expect(render({ kind: "frame" }, { blocked: "x", onClearBlocked: noop })).toContain("addon-blocked-close");
+  });
   it("the host-drawn header variant omits the title and ×", () => {
     const html = render({ kind: "frame" }, { hideTitle: true, hideClose: true });
     expect(html).not.toContain("addon-pane-title");

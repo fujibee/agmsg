@@ -2637,7 +2637,7 @@ export default function App() {
             <OpenRequestBar
               t={t as never}
               items={requestItems}
-              formatTime={(iso) => formatMessageTime(iso, resolveTimeZone(timezone))}
+              timeZone={resolveTimeZone(timezone)}
               onOpen={(i) => handleRequest(i.requestId, true)}
               onDismiss={(i) => handleRequest(i.requestId, false)}
               onInstall={() => setModal({ kind: "settings" })}
@@ -2649,6 +2649,7 @@ export default function App() {
               t={t as never}
               error={openRequests.error}
               actionError={openRequests.actionError}
+              onClearAction={openRequests.clearActionError}
               notice={openRequests.view?.notice}
               truncated={openRequests.view?.truncated}
             />

@@ -457,7 +457,13 @@
       "unverified": "expéditeur non vérifié",
       "readFailed": "Impossible de lire les demandes d'ouverture : {{message}}",
       "actionFailed": "La demande n'a pas pu être traitée : {{message}}",
-      "truncated": "Les demandes plus anciennes ne sont pas affichées."
+      "truncated": "Les demandes plus anciennes ne sont pas affichées.",
+      "ago": {
+        "now": "just now",
+        "minutes": "{{count}} min ago",
+        "hours": "{{count}} h ago"
+      },
+      "close": "Close"
     },
     "menu": {
       "fileViewEntry": "File view…",

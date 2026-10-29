@@ -455,7 +455,13 @@
       "unverified": "Absender nicht verifiziert",
       "readFailed": "Öffnen-Anfragen konnten nicht gelesen werden: {{message}}",
       "actionFailed": "Die Anfrage konnte nicht bearbeitet werden: {{message}}",
-      "truncated": "Ältere Anfragen werden nicht angezeigt."
+      "truncated": "Ältere Anfragen werden nicht angezeigt.",
+      "ago": {
+        "now": "just now",
+        "minutes": "{{count}} min ago",
+        "hours": "{{count}} h ago"
+      },
+      "close": "Close"
     },
     "menu": {
       "fileViewEntry": "File view…",
