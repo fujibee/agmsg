@@ -216,6 +216,26 @@ _break_only_this_teams_store() {
 
 # --- check-inbox.sh ------------------------------------------------------
 
+@test "check-inbox.sh: an unregistered type is a usage error, not a silent empty inbox (#1829)" {
+  # The bug this pins: identities.sh treats the type argument as an opaque SQL
+  # filter value, so an unregistered one (most often an agent NAME passed
+  # where a type belongs) just matches zero rows -- indistinguishable, before
+  # this fix, from a real agent of a real type with nothing to deliver.
+  run bash -c 'bash "$1/check-inbox.sh" alice "$2" </dev/null 2>&1 1>/dev/null' \
+    _ "$SCRIPTS" /tmp/project-a
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -qF "'alice' is not a registered agent type"
+  [[ "$output" == *"inbox.sh <team> <agent>"* ]]
+}
+
+@test "check-inbox.sh: a registered type with nothing registered for this project stays silent (#1829)" {
+  # The negative control: #1829's fix must not turn the ordinary, harmless
+  # "no identity here" case into an error too.
+  run bash "$SCRIPTS/check-inbox.sh" claude-code /tmp/nothing-registered-here </dev/null
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 # What the hook runtimes actually do with a Stop-hook run, applied to a real
 # invocation of check-inbox.sh.
 #

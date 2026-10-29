@@ -21,6 +21,31 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"  # agmsg_agent_pid, for instance-id 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/type-registry.sh"
 
+# An unknown type is a usage error, not an empty inbox (#1829). Every hook
+# entry passes a registered type (its own manifest's name), so this path is
+# reached only by a manual call -- most often someone passing an agent NAME
+# where a type belongs. Left unchecked, identities.sh below treats the
+# argument as an opaque SQL filter value: an unregistered type just matches
+# zero rows, and the script falls through its normal "nothing to deliver"
+# exit 0 with no output at all, indistinguishable from a genuinely empty
+# inbox. That silence cost a real session hours of an unread message (#1829).
+#
+# Exit 1, matching this script's own `${1:?...}`/`${2:?...}` usage-error
+# convention two lines above it -- not the delivery exit-code question lower
+# in this file (see the long #658 comment there): nothing has been attempted
+# yet at this point, so there is no payload whose exit code could discard it,
+# and this message never goes through a hook runtime's stdout-JSON contract
+# at all (stderr only, nothing on stdout). Hooks never reach this branch, so
+# its exit code cannot affect hook behavior either way.
+if ! agmsg_is_known_type "$TYPE"; then
+  echo "agmsg: check-inbox.sh: '$TYPE' is not a registered agent type" >&2
+  echo "agmsg: to read an inbox by hand, use: inbox.sh <team> <agent>" >&2
+  echo "agmsg: check-inbox.sh is the per-turn hook entry point, not a way to read one" >&2
+  echo "agmsg: agent's inbox -- even with a valid type it reads the FIRST agent" >&2
+  echo "agmsg: registered for (project, type), which may not be the one you want" >&2
+  exit 1
+fi
+
 # Which hook event fired. The Stop entry runs `check-inbox.sh <type> <project>`
 # (EVENT defaults to Stop); the mid-turn PostToolUse entry (#1003) appends the
 # event as a 3rd arg so this script emits the shape that event's runtime accepts,
