@@ -47,17 +47,19 @@ export function AddonPane(props: {
       </div>
       <div className="addon-pane-status">
         {!props.hideTitle && <span className="addon-pane-title">{props.title}</span>}
-        {props.devFolder && <span className="addon-badge">{t("addons.pane.dev", { folder: props.devFolder })}</span>}
+        {props.devFolder && <span className="addon-badge" title={t("addons.pane.dev", { folder: props.devFolder })}>{t("addons.pane.dev", { folder: props.devFolder })}</span>}
         {props.chips.map((c) => (
-          <span key={c.key} className="addon-chip">
+          <span key={c.key} className="addon-chip" title={c.note ? `${c.label} · ${c.note}` : c.label}>
             {c.label}
             {c.note && <span className="addon-chip-note"> · {c.note}</span>}
           </span>
         ))}
-        {props.askedBy && <span className="addon-asked-by">{t("addons.pane.askedBy", { agent: props.askedBy })}</span>}
+        {props.askedBy && <span className="addon-asked-by" title={t("addons.pane.askedBy", { agent: props.askedBy })}>{t("addons.pane.askedBy", { agent: props.askedBy })}</span>}
         {props.blocked && (
           <span className="addon-blocked">
-            {t("addons.pane.blocked", { what: props.blocked })}
+            <span className="addon-blocked-text" title={t("addons.pane.blocked", { what: props.blocked })}>
+              {t("addons.pane.blocked", { what: props.blocked })}
+            </span>
             {props.onClearBlocked && (
               <button type="button" className="addon-blocked-close" title={t("addons.request.close")} aria-label={t("addons.request.close")} onClick={props.onClearBlocked}>
                 ×

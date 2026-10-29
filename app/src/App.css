@@ -1682,14 +1682,19 @@ body.resizing-row {
 .addon-pane-body { flex: 1; min-height: 0; overflow: auto; }
 /* The bar under the pane body: lower and smaller than the app's pane header, on the body's colour with a hairline above. */
 .addon-pane-status { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: 22px; max-height: 22px; overflow: hidden; padding: 0 8px; font-size: 10px; line-height: 1; color: var(--muted); background: var(--bg); border-top: 1px solid var(--border); white-space: nowrap; }
-.addon-pane-status-fill { flex: 1; }
-.addon-pane-status-btn { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 2px; font-size: 12px; line-height: 1; }
+.addon-pane-status-fill { flex: 1 0 0; min-width: 0; }
+/* The text can shrink and is cut with an ellipsis (the full text is in title); the buttons never shrink, so ⟳ and × stay reachable. */
+.addon-pane-status > :not(.addon-pane-status-btn):not(.addon-pane-status-fill) { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.addon-pane-status > .addon-pane-title { flex-shrink: 0; max-width: 40%; }
+.addon-pane-status-btn { flex-shrink: 0; background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 2px; font-size: 12px; line-height: 1; }
 .addon-pane-status-btn:hover { color: var(--fg); }
 .addon-blocked-close, .addon-request-note-close { background: none; border: 0; color: inherit; cursor: pointer; padding: 0 0 0 6px; font-size: 12px; line-height: 1; }
 .addon-pane-title { font-weight: 600; }
 .addon-chip, .addon-badge { font-size: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 0 6px; color: var(--muted); }
 .addon-asked-by { font-size: 10px; color: var(--muted); }
-.addon-blocked { font-size: 10px; color: var(--red); }
+.addon-blocked { display: flex; align-items: center; font-size: 10px; color: var(--red); }
+.addon-blocked-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.addon-blocked-close { flex-shrink: 0; }
 .addon-frame-placeholder { padding: 16px; color: var(--muted); }
 .addon-perm-new { background: var(--accent-soft); border-radius: 4px; padding: 2px 4px; }
 .addon-why { color: var(--muted); }

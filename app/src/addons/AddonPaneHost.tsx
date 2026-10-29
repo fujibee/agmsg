@@ -11,6 +11,7 @@ import { grantChips } from "./model";
 import { envNoticeKey } from "./envNotice";
 import { createOpGuard } from "./opGuard";
 import { NOTICE_MS } from "./OpenRequestBar";
+import { clearIf, expireAfter, raise, type Notice } from "./notice";
 import { listenPaneFailed, type PaneFailedEvent } from "./paneFailed";
 import { pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
@@ -69,16 +70,18 @@ function LiveAddonPane(props: {
   const [steps, setSteps] = useState<Step[]>([]);
   const [folder, setFolder] = useState<string | null>(pane.openArgs?.path ?? null);
   const [chips, setChips] = useState<GrantChip[]>([]);
-  const [blocked, setBlocked] = useState<string | undefined>();
+  const [blocked, setBlocked] = useState<Notice | undefined>();
+  const raiseBlocked = (text: string) => setBlocked((cur) => raise(cur, text));
   const [attempt, setAttempt] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [pending, setPending] = useState(false);
   // A refusal is a one-off notice: it goes by itself after a few seconds (or on ×).
+  // Keyed by the notice's own number: the same refusal again restarts the timer, and an old timer never removes a newer notice.
+  const blockedSeq = blocked?.seq;
   useEffect(() => {
-    if (!blocked) return;
-    const id = setTimeout(() => setBlocked(undefined), NOTICE_MS);
-    return () => clearTimeout(id);
-  }, [blocked]);
+    if (blockedSeq === undefined) return;
+    return expireAfter(blockedSeq, NOTICE_MS, (n) => setBlocked((cur) => clearIf(cur, n)));
+  }, [blockedSeq]);
   // One grant call or folder dialog at a time; invalidated when the pane is reopened or goes away.
   const guard = useRef(createOpGuard());
   const addonsRef = useRef(props.addons);
@@ -241,7 +244,7 @@ function LiveAddonPane(props: {
     const chip = r.value.chip;
     setChips((cs) => [...cs, chip]);
     // Allowed for now, but it could not be remembered: say so, never pretend.
-    if (r.value.saveFailed) setBlocked(r.value.saveFailed);
+    if (r.value.saveFailed) raiseBlocked(r.value.saveFailed);
     // Only the step this card was for is done; another step stays.
     setSteps((s) => (s[0] === step ? s.slice(1) : s));
   };
@@ -263,8 +266,8 @@ function LiveAddonPane(props: {
       title={title}
       chips={[...chips, ...grantChips([], decl?.network ?? network, tt)]}
       askedBy={pane.askedBy}
-      blocked={blocked}
-      onClearBlocked={() => setBlocked(undefined)}
+      blocked={blocked?.text}
+      onClearBlocked={() => setBlocked((cur) => clearIf(cur, cur?.seq ?? -1))}
       canRemember={!isDev}
       devFolder={addon?.dev?.label}
       pending={pending}
@@ -280,7 +283,7 @@ function LiveAddonPane(props: {
             title={title}
             declaresMessages={added.permissions.includes("messages:read")}
             reloadKey={reloadKey}
-            onRefused={(op, code) => setBlocked(`${op} (${code})`)}
+            onRefused={(op, code) => raiseBlocked(`${op} (${code})`)}
             onFeedFailed={(code, message) =>
               setState({ kind: "failure", failure: code === "init_too_large" ? { code } : { code: "open_failed", message } })
             }

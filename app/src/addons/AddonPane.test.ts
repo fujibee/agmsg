@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+// vitest blanks .css modules, so the stylesheet is read through a node built-in.
+const fs = (globalThis as unknown as { process: { getBuiltinModule(n: string): { readFileSync(p: URL, e: string): string } } }).process.getBuiltinModule("node:fs");
+const css = fs.readFileSync(new URL("../App.css", import.meta.url), "utf8");
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AddonPane } from "./AddonPane";
@@ -57,6 +60,18 @@ describe("AddonPane", () => {
   it("a refusal notice has a × when the host can clear it", () => {
     expect(render({ kind: "frame" }, { blocked: "x" })).not.toContain("addon-blocked-close");
     expect(render({ kind: "frame" }, { blocked: "x", onClearBlocked: noop })).toContain("addon-blocked-close");
+  });
+  it("long text can be cut but the buttons cannot: the bar has the shrink rules and every cut text has its full text in title", () => {
+    expect(css).toMatch(/\.addon-pane-status-btn \{[^}]*flex-shrink: 0/);
+    expect(css).toMatch(/\.addon-pane-status > :not\(\.addon-pane-status-btn\)[^{]*\{[^}]*min-width: 0[^}]*overflow: hidden[^}]*text-overflow: ellipsis/);
+    expect(css).toMatch(/\.addon-blocked-text \{[^}]*text-overflow: ellipsis/);
+    const html = render({ kind: "frame" }, { chips: [{ key: "a", label: "~/a/very/long/path", note: "read" }], askedBy: "alice", devFolder: "/x", blocked: "read (denied)", onClearBlocked: noop });
+    expect(html).toContain('class="addon-chip" title="~/a/very/long/path · read"');
+    expect(html).toMatch(/class="addon-badge" title="/);
+    expect(html).toMatch(/class="addon-asked-by" title="/);
+    expect(html).toMatch(/class="addon-blocked-text" title="/);
+    // the reload and close buttons are the shrink-proof class
+    expect(html.match(/class="addon-pane-status-btn"/g)?.length).toBe(2);
   });
   it("the host-drawn header variant omits the title and ×", () => {
     const html = render({ kind: "frame" }, { hideTitle: true, hideClose: true });
