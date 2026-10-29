@@ -3,9 +3,15 @@
 
 export type Notice = { seq: number; text: string };
 
-/** The notice after `text` happens again (or for the first time): always a new one. */
-export function raise(current: Notice | undefined, text: string): Notice {
-  return { seq: (current?.seq ?? 0) + 1, text };
+/** A counter that only goes up, owned by whoever shows notices (not derived from what is on screen, so clearing never rewinds it). */
+export function counter(): () => number {
+  let n = 0;
+  return () => ++n;
+}
+
+/** A new notice with the given number: the same words again are still a different notice. */
+export function raise(seq: number, text: string): Notice {
+  return { seq, text };
 }
 
 /** Clears the notice only if it is still the one that was meant (the timer's or the × 's own). */

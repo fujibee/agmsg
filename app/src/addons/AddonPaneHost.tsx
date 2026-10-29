@@ -11,7 +11,7 @@ import { grantChips } from "./model";
 import { envNoticeKey } from "./envNotice";
 import { createOpGuard } from "./opGuard";
 import { NOTICE_MS } from "./OpenRequestBar";
-import { clearIf, expireAfter, raise, type Notice } from "./notice";
+import { clearIf, counter, expireAfter, raise, type Notice } from "./notice";
 import { listenPaneFailed, type PaneFailedEvent } from "./paneFailed";
 import { pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
@@ -71,7 +71,11 @@ function LiveAddonPane(props: {
   const [folder, setFolder] = useState<string | null>(pane.openArgs?.path ?? null);
   const [chips, setChips] = useState<GrantChip[]>([]);
   const [blocked, setBlocked] = useState<Notice | undefined>();
-  const raiseBlocked = (text: string) => setBlocked((cur) => raise(cur, text));
+  const noticeSeq = useRef(counter());
+  const raiseBlocked = (text: string) => {
+    const seq = noticeSeq.current();
+    setBlocked(raise(seq, text));
+  };
   const [attempt, setAttempt] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [pending, setPending] = useState(false);
@@ -267,7 +271,7 @@ function LiveAddonPane(props: {
       chips={[...chips, ...grantChips([], decl?.network ?? network, tt)]}
       askedBy={pane.askedBy}
       blocked={blocked?.text}
-      onClearBlocked={() => setBlocked((cur) => clearIf(cur, cur?.seq ?? -1))}
+      onClearBlocked={blockedSeq === undefined ? undefined : () => setBlocked((cur) => clearIf(cur, blockedSeq))}
       canRemember={!isDev}
       devFolder={addon?.dev?.label}
       pending={pending}
