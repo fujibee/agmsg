@@ -524,7 +524,7 @@ export function createCodexQueueChannel({
         env: queueEnv,
         codexHome: record.codex_home,
         thread: record.thread,
-        message: inboxNudge(nonce),
+        message: inboxNudge(nonce, { installRoot, team, agent }),
         timeoutMs,
         signal: pollSignal() ?? activeController.signal,
         onChildStart: (pid) => recordChildStart(db, id, pid, captureGroup, log),

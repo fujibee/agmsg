@@ -14,11 +14,27 @@ export function newNonce() {
   return randomUUID();
 }
 
-export function inboxNudge(nonce) {
+const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./~-]+$/;
+
+function shellWord(value) {
+  return SHELL_SAFE.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+// `command` is { installRoot, team, agent }: the notice's own addressee and the
+// install it was sent from, so the seat is told the exact command to run
+// instead of having to work out its team, name and skill path.
+export function inboxNudge(nonce, command) {
   if (typeof nonce !== "string" || !/^[A-Za-z0-9-]{1,80}$/.test(nonce)) {
     throw new TypeError("nonce must be a short token");
   }
-  return `[agmsg:${nonce}] New messages are waiting. Check your agmsg inbox.`;
+  const head = `[agmsg:${nonce}] New messages are waiting.`;
+  if (!command) return `${head} Check your agmsg inbox.`;
+  const { installRoot, team, agent } = command;
+  for (const value of [installRoot, team, agent]) {
+    if (typeof value !== "string" || value.length === 0) throw new TypeError("inbox command needs installRoot, team and agent");
+  }
+  const script = `${installRoot.replace(/[\\/]+$/, "")}/scripts/inbox.sh`;
+  return `${head} Read them with: bash ${shellWord(script)} ${shellWord(team)} ${shellWord(agent)}`;
 }
 
 function appendBounded(current, chunk) {

@@ -48,7 +48,7 @@ function channelFixture(t, hostPlatform = 'linux') {
       state: 'ok', unread: state.unread !== false && state.sequence > (cursor ? JSON.parse(cursor).eventSeq : 0),
       upTo: JSON.stringify({ eventSeq: state.sequence, legacyId: 0 }),
     }),
-    send: async (args) => { state.sent += 1; (state.modes ??= []).push(args.fromMode); return { state: 'sent' }; },
+    send: async (args) => { state.sent += 1; (state.modes ??= []).push(args.fromMode); (state.bodies ??= []).push(args.body); return { state: 'sent' }; },
     readMode: () => state.mode ?? '',
     socketAlive: () => state.alive,
     hostPlatform,
@@ -68,6 +68,8 @@ test('socket send success immediately advances the notified cursor and suppresse
   assert.equal(db.prepare("SELECT count(*) AS n FROM beta_claude_queue WHERE state='pending'").get().n, 0);
   for (const hours of [1, 9, 40]) { state.hours = hours; await channel.pollOnce(); }
   assert.equal(state.sent, 1);
+  assert.match(state.bodies[0], new RegExp(`^\\[agmsg:[A-Za-z0-9-]+\\] New messages are waiting\\. Read them with: bash .*/scripts/inbox\\.sh test alice$`), 'the notice carries the exact inbox command for its addressee');
+  assert.ok(state.bodies[0].includes(`${state.options.installRoot}/scripts/inbox.sh`));
   state.sequence = 2;
   await channel.pollOnce();
   assert.equal(state.sent, 2, 'new unread past the notified cursor gets another nudge');

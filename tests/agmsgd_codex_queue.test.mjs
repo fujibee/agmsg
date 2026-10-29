@@ -277,6 +277,15 @@ test('a pre-spawn failure expires its reservation and allows the next poll to re
   await channel.stop();
 });
 
+test('inboxNudge names the inbox command for the addressee and quotes what a shell would split', () => {
+  assert.equal(inboxNudge('n1', { installRoot: '/home/u/.agents/skills/agmsg/', team: 'dev', agent: 'cc1' }),
+    '[agmsg:n1] New messages are waiting. Read them with: bash /home/u/.agents/skills/agmsg/scripts/inbox.sh dev cc1');
+  assert.equal(inboxNudge('n1', { installRoot: '/Users/a b/skill', team: 'dev', agent: "o'x" }),
+    "[agmsg:n1] New messages are waiting. Read them with: bash '/Users/a b/skill/scripts/inbox.sh' dev 'o'\\''x'");
+  assert.equal(inboxNudge('n1'), '[agmsg:n1] New messages are waiting. Check your agmsg inbox.');
+  assert.throws(() => inboxNudge('n1', { installRoot: '/x', team: '', agent: 'a' }), TypeError);
+});
+
 test('queue invocation is shell-free, pins CODEX_HOME, and parses only a successful matching receipt', async () => {
   const calls = [];
   const nonce = newNonce();
@@ -492,7 +501,7 @@ test('Codex channel advances accepted snapshots while reserving only active writ
   await channel.pollOnce();
   assert.equal(queued.length, 1);
   assert.equal(queued[0].thread, thread);
-  assert.match(queued[0].message, /^\[agmsg:[A-Za-z0-9-]+\] New messages are waiting\./);
+  assert.match(queued[0].message, /^\[agmsg:[A-Za-z0-9-]+\] New messages are waiting\. Read them with: bash .*\/scripts\/inbox\.sh alpha alice$/);
   assert.doesNotMatch(queued[0].message, /do not include this/);
   assert.equal(installDb.prepare("SELECT state FROM beta_codex_queue WHERE seat = ?").get(JSON.stringify(['alpha', 'alice'])).state, 'pending');
   await channel.pollOnce();
