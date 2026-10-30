@@ -833,3 +833,19 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   grep -Fq "ext-tools/fx is already joined as: alpha/desk, beta/board. It works as it is." <<<"$output"
   grep -Fq "To add it to another team as well:" <<<"$output"
 }
+
+@test "remove says when the members joined as its ext-tool could not be checked" {
+  mk_repo acme pack >/dev/null
+  PLUGIN install acme/pack --yes >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/teams/alpha"
+  printf 'not json\n' > "$TEST_SKILL_DIR/teams/alpha/config.json"
+  run PLUGIN remove acme/pack
+  [ "$status" -eq 0 ]
+  grep -Fq "Could not check which team members are joined as its ext-tool" <<<"$output"
+  refute grep -Fq "These team members used it" <<<"$output"
+
+  run PLUGIN install acme/pack --yes
+  [ "$status" -eq 0 ]
+  grep -Fq "Whether it is already joined could not be checked" <<<"$output"
+  refute grep -Fq "is already joined as:" <<<"$output"
+}

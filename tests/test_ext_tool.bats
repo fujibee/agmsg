@@ -468,7 +468,8 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 0 ]
   run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" gt-team sender claude-code /tmp/gt-team-proj
   [ "$status" -eq 0 ]
-  rm -rf "$d"
+  # What a remove leaves: the tool's directory is gone, the member is not.
+  mv "$d" "$BATS_TEST_TMPDIR/gone-removed"
   run bash "$SCRIPTS/send.sh" gt-team sender gone "ping"
   [ "$status" -eq 0 ]
   local i seen=""
