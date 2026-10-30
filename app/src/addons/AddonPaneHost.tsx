@@ -87,9 +87,18 @@ function LiveAddonPane(props: {
   // The frame must load in time: otherwise the pane says it did not load (with Reload) instead of covering it for ever.
   // Started per frame instance, ended by its load, a reload, a new instance or leaving the page.
   const mountedFrame = added && steps.length === 0 ? frameKey(added.id, reloadKey) : "";
+  const mountedRef = useRef(mountedFrame);
+  mountedRef.current = mountedFrame;
+  const loadedRef = useRef(loadedFrame);
+  loadedRef.current = loadedFrame;
   useEffect(() => {
     if (!watchLoad(mountedFrame, loadedFrame, state.kind)) return;
-    return expireAfter(0, FRAME_LOAD_TIMEOUT_MS, () => setState((s) => (s.kind === "frame" ? { kind: "failure", failure: { code: "load_timeout" } } : s)));
+    const mine = mountedFrame;
+    return expireAfter(0, FRAME_LOAD_TIMEOUT_MS, () => {
+      // Only if this very frame is still the one shown and still not loaded.
+      if (mountedRef.current !== mine || loadedRef.current === mine) return;
+      setState((s) => (s.kind === "frame" ? { kind: "failure", failure: { code: "load_timeout" } } : s));
+    });
   }, [mountedFrame, loadedFrame, state.kind]);
   // A refusal is a one-off notice: it goes by itself after a few seconds (or on ×).
   // Keyed by the notice's own number: the same refusal again restarts the timer, and an old timer never removes a newer notice.

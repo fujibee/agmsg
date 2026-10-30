@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { SUPPORTED_LANGUAGES } from "./i18n";
 import { AddonsTab } from "./addons/AddonsTab";
+import { escapeCloses, modalStack, newModalId } from "./modalStack";
 import type { Catalog } from "./addons/catalog";
 import { AUTO_TIMEZONE, detectTimeZone, isValidTimeZone, listTimeZones } from "./time";
 
@@ -47,17 +48,25 @@ export function Modal(props: {
   wide?: boolean;
 }) {
   const { onClose } = props;
+  // Only the top modal answers Escape and backdrop clicks: a dialog over Settings is closed alone, and a
+  // dialog that cannot be closed (busy) keeps the ones under it from closing too.
+  const id = useRef(0);
+  if (id.current === 0) id.current = newModalId();
   useEffect(() => {
-    if (!onClose) return;
+    const mine = id.current;
+    modalStack.push(mine);
+    return () => modalStack.remove(mine);
+  }, []);
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (shouldCloseOnEscape(e)) onClose();
+      if (shouldCloseOnEscape(e)) escapeCloses(modalStack, id.current, onClose);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
+    <div className="modal-backdrop" onClick={() => escapeCloses(modalStack, id.current, onClose)}>
       <div className={`modal${props.busy ? " busy" : ""}${props.wide ? " wide" : ""}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal-title">{props.title}</div>
         {props.children}
