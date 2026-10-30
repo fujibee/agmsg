@@ -297,12 +297,23 @@ fn stores() -> Option<std::sync::Arc<Stores>> {
     if let Some(c) = hit() {
         return Some(c);
     }
-    // One fetch at a time: callers that missed together wait here and then find the answer the first one made
-    static FETCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one_at_a_time = FETCH.lock().unwrap_or_else(|e| e.into_inner());
+    // One fetch at a time, and callers that missed together share it. A fetch is numbered when it starts; a caller
+    // that was waiting while a fetch that STARTED AFTER it arrived finished uses that fetch's answer (so a change
+    // made before the call is in it), even when the configuration is one whose answer is not kept for later.
+    static FETCH: std::sync::Mutex<(u64, Option<(u64, std::sync::Arc<Stores>)>)> = std::sync::Mutex::new((0, None));
+    static STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let arrived_after = STARTED.load(std::sync::atomic::Ordering::SeqCst);
+    let mut fetching = FETCH.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(c) = hit() {
         return Some(c);
     }
+    if let Some((n, shared)) = &fetching.1 {
+        if *n > arrived_after {
+            return Some(shared.clone());
+        }
+    }
+    let mine = STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    fetching.0 = mine;
     let (teams, infos) = match fetch_stores_in_one_process() {
         Ok(all) => all,
         Err(why) => {
@@ -326,7 +337,36 @@ fn stores() -> Option<std::sync::Arc<Stores>> {
     if before.is_some() && whole && after == before && agrees {
         *STORES.lock().unwrap() = Some(s.clone());
     }
+    fetching.1 = Some((mine, s.clone()));
     Some(s)
+}
+
+/// How long the timer may reuse its last look at a configuration whose answer cannot be kept, while the teams'
+/// own files have not changed.
+const TIMER_REUSE: Duration = Duration::from_secs(60);
+
+/// `watchable_stores` for the timer. Where the answer is kept (agmsg's own drivers) this is the same free call.
+/// Where it is not (an external driver in play), a fetch every ten seconds would start a bash on a timer, so the
+/// last look is reused for up to `TIMER_REUSE` while the list of teams and their config files look the same
+/// (a team added, removed or changed shows on the next tick); what only the driver's own code could notice is
+/// seen within that minute. Opening a folder does not use this: it always looks.
+fn watchable_stores_timed() -> (Vec<PathBuf>, Vec<String>) {
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, String, (Vec<PathBuf>, Vec<String>))>> = std::sync::Mutex::new(None);
+    let base = agmsg_base();
+    if crate::store_fp::base_part(&base, &crate::store_fp::Env::from_process()).is_some() {
+        return watchable_stores();
+    }
+    let stamp = crate::store_fp::teams_stamp(&base);
+    if let (Some(st), Some((at, was, answer))) = (&stamp, LAST.lock().unwrap().as_ref()) {
+        if was == st && at.elapsed() < TIMER_REUSE {
+            return answer.clone();
+        }
+    }
+    let answer = watchable_stores();
+    if let Some(st) = stamp {
+        *LAST.lock().unwrap() = Some((std::time::Instant::now(), st, answer.clone()));
+    }
+    answer
 }
 
 /// The script that asks agmsg-core, once, where every team's store is (see stores.sh).
@@ -1281,7 +1321,7 @@ pub fn start_watcher(app: AppHandle) {
         loop {
             if ticks_until_rescan == 0 {
                 ticks_until_rescan = 12; // ~10s at the poll interval below
-                let (direct, fallback) = watchable_stores();
+                let (direct, fallback) = watchable_stores_timed();
                 for team in fallback {
                     if !via_api.iter().any(|(t, _)| t == &team) {
                         via_api.push((team, None));
@@ -1341,7 +1381,7 @@ mod tests {
     use super::{
         agmsg_base, msys_to_native, parse_semver, pinned_core_version, run_script,
         protected_locations, running_core_version, store_info, to_bash_slashes, watchable_stores,
-        fetch_stores_in_one_process, note_batch_failure, parse_stores, BATCH_LOG,
+        fetch_stores_in_one_process, note_batch_failure, parse_stores, watchable_stores_timed, BATCH_LOG,
     };
     use std::path::PathBuf;
     use serial_test::serial;
@@ -1843,6 +1883,58 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         BATCH_LOG.lock().unwrap().clear();
         note_batch_failure(&parse_stores(b"a\0b\0").unwrap_err());
         assert!(BATCH_LOG.lock().unwrap().join("\n").contains("(batch_parse)"));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn callers_that_miss_together_share_one_fetch_even_where_the_answer_is_not_kept() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        add_real_team(&base, "a", "{}", true);
+        add_real_team(&base, "b", r#"{"drivers":{"partition":"per-team"}}"#, true);
+        std::fs::create_dir_all(root.join("plugins/p")).unwrap(); // nothing is kept
+        let (_path, log) = counting_bash(&root);
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    watchable_stores().0.len()
+                })
+            })
+            .collect();
+        let lens: Vec<usize> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(lens.iter().all(|&n| n == 2), "{lens:?}");
+        // eight callers arrived together: a fetch started after the last of them arrived can be shared, but a
+        // caller never gets an answer older than its own arrival, so more than one is possible and eight is not
+        let n = starts(&log);
+        assert!((1..8).contains(&n), "{n} fetches for eight simultaneous callers");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn the_timer_does_not_start_a_bash_every_tick_where_the_answer_is_not_kept() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        add_real_team(&base, "a", "{}", true);
+        std::fs::create_dir_all(root.join("plugins/p")).unwrap();
+        let (_path, log) = counting_bash(&root);
+        let first = watchable_stores_timed();
+        assert_eq!(starts(&log), 1);
+        for _ in 0..6 {
+            assert_eq!(watchable_stores_timed(), first, "ticks within the minute reuse the last look");
+        }
+        assert_eq!(starts(&log), 1, "six more ticks, no bash");
+        // a team added shows on the very next tick
+        let added = add_real_team(&base, "b", r#"{"drivers":{"partition":"per-team"}}"#, true);
+        assert!(watchable_stores_timed().0.contains(&added));
+        assert_eq!(starts(&log), 2);
+        // opening a folder always looks
+        let _ = protected_locations();
+        assert_eq!(starts(&log), 3);
     }
 
     #[test]

@@ -206,6 +206,17 @@ pub fn base_part(base: &Path, env: &Env) -> Option<String> {
     Some(out)
 }
 
+/// The list of teams and each team's config file as the fingerprint sees them, for a timer that wants to know
+/// cheaply whether to look again. `None` when something could not be read.
+pub fn teams_stamp(base: &Path) -> Option<String> {
+    let teams = base.join("teams");
+    let mut out = String::new();
+    for name in names(&teams)? {
+        out.push_str(&format!("{name} {}\n", stat(&teams.join(&name).join("config.json"))?));
+    }
+    Some(out)
+}
+
 /// Whether each store path exists right now (the `exists` field of the answer follows it).
 pub fn exists_part(paths: &[PathBuf]) -> String {
     paths.iter().map(|p| format!("{}={}\n", p.display(), p.exists())).collect()
