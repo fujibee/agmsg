@@ -3608,14 +3608,52 @@ const idleDrivers = (overrides = {}) => ({
   },
 });
 
-test("cycle: a drained, eligible prepare arms a checkpoint carrying the driver-reported paths", async () => {
-  const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null },
+test("cycle: a single drained, eligible prepare only PENDS -- arming needs a second prepare that confirms it (#1836 review)", async () => {
+  // A single post-prepare stat cannot rule out a concurrent writer acting
+  // DURING `prepare`'s own execution (an unrelated `send.sh` process is not
+  // confined to a gap this file's code leaves open). Two real `prepare`
+  // calls bracketed by matching stats are required before anything arms.
+  const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: null },
     idleCycleBaseDeps({ extra: idleDrivers() }));
-  assert.deepEqual(result.checkpoint, {
+  assert.equal(result.checkpoint, null);
+  assert.deepEqual(result.pendingCheckpoint, {
+    paths: ["/db/messages.db", "/db/messages.db-wal", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"],
+    fingerprint: ["/db/messages.db", "/db/messages.db-wal", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"].join("|"),
+  });
+});
+
+test("cycle: a SECOND prepare that confirms the pending candidate (same paths, stable before/after stats) arms the checkpoint", async () => {
+  const first = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: null },
+    idleCycleBaseDeps({ extra: idleDrivers() }));
+  const second = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: first.pendingCheckpoint },
+    idleCycleBaseDeps({ extra: idleDrivers() }));
+  assert.deepEqual(second.checkpoint, {
     paths: ["/db/messages.db", "/db/messages.db-wal", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"],
     fingerprint: ["/db/messages.db", "/db/messages.db-wal", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"].join("|"),
     eligible: true, cursor: "9", armedAt: 1000,
   });
+});
+
+test("cycle: a write landing DURING the second prepare's own execution (pre-stat matches, post-stat does not) is never confirmed (#1836 review)", async () => {
+  // The exact gap the review flagged: a concurrent writer acting while
+  // `prepare` itself is running, strictly between the pre- and
+  // post-prepare stats -- not in any gap this file's own code leaves open.
+  const first = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: null },
+    idleCycleBaseDeps({ extra: idleDrivers() }));
+  let fingerprintCalls = 0;
+  const localStoreFingerprintCall = async (paths) => {
+    fingerprintCalls += 1;
+    // Call 1: the pre-prepare stat of the pending candidate's paths --
+    // still matches (nothing changed yet). Call 2: the post-prepare stat
+    // of the SAME paths -- a write happened while `prepare` was running.
+    return fingerprintCalls === 1 ? first.pendingCheckpoint.fingerprint : "CHANGED-DURING-PREPARE";
+  };
+  const second = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null, pendingCheckpoint: first.pendingCheckpoint },
+    idleCycleBaseDeps({ localStoreFingerprintCall, extra: idleDrivers() }));
+  assert.equal(second.checkpoint, null);
+  // Not thrown away either -- it becomes the new candidate for a THIRD
+  // prepare to confirm, so the engine keeps trying rather than giving up.
+  assert.equal(second.pendingCheckpoint.fingerprint, "CHANGED-DURING-PREPARE");
 });
 
 test("cycle: a driver that does not report db_path (an older build, or a custom driver) never arms a checkpoint", async () => {
@@ -3649,7 +3687,6 @@ test("cycle: an unchanged checkpoint (matching paths, matching eligibility, with
 });
 
 test("cycle: a changed fingerprint on the checkpoint's own watched paths runs prepare for real", async () => {
-  let prepareCalls = 0;
   const watchedPaths = ["/db/messages.db"];
   const idleCheckpoint = { paths: watchedPaths, fingerprint: "OLD", eligible: true, cursor: "7", armedAt: 1000 };
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
@@ -3658,7 +3695,11 @@ test("cycle: a changed fingerprint on the checkpoint's own watched paths runs pr
     extra: idleDrivers(),
   }));
   assert.equal(result.cursor, "9"); // from a real prepare, not the checkpoint's stale cursor
-  assert.notEqual(result.checkpoint.fingerprint, "OLD");
+  // Not re-armed on the spot (no pendingCheckpoint was passed to bracket
+  // against) -- it becomes the new pending candidate for a confirming
+  // second prepare instead.
+  assert.equal(result.checkpoint, null);
+  assert.notEqual(result.pendingCheckpoint.fingerprint, "OLD");
 });
 
 test("cycle: write eligibility flipping disarms a checkpoint that still matches on fingerprint (#1836 review point 3)", async () => {
@@ -3673,11 +3714,19 @@ test("cycle: write eligibility flipping disarms a checkpoint that still matches 
   assert.equal(result.checkpoint, null);
 });
 
-test("cycle: the 60s safety net forces a real prepare even with a perfectly matching checkpoint", async () => {
+test("cycle: the 60s safety net forces a real prepare, and re-arms immediately when the old checkpoint is handed back as the bracket anchor", async () => {
+  // This is what runLoop actually does (its own `effectivePending`
+  // fallback): a safety-net-forced re-prepare of an already-armed
+  // checkpoint re-verifies that SAME checkpoint's paths/fingerprint as
+  // its bracket anchor, so it does not lose the skip for an extra cycle
+  // when nothing has actually changed.
   let prepareCalls = 0;
-  const watchedPaths = ["/db/messages.db"];
+  // Matches exactly what the driver mocks below report, so the pending
+  // bracket's path-equality check (same axes, same order) actually holds.
+  const watchedPaths = ["/db/messages.db", "/db/messages.db-wal", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"];
   const idleCheckpoint = { paths: watchedPaths, fingerprint: watchedPaths.join("|"), eligible: true, cursor: "7", armedAt: 1000 };
-  const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
+  const pendingCheckpoint = { paths: idleCheckpoint.paths, fingerprint: idleCheckpoint.fingerprint };
+  const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint, pendingCheckpoint }, idleCycleBaseDeps({
     clockCall: () => 1000 + 60000, // exactly at the 60s boundary -- no longer "fresh"
     localStoreFingerprintCall: async (paths) => paths.join("|"), // would have matched, if asked
     extra: {
@@ -3692,6 +3741,27 @@ test("cycle: the 60s safety net forces a real prepare even with a perfectly matc
   assert.equal(prepareCalls, 2);
   // Re-armed with a fresh armedAt, not the stale one.
   assert.equal(result.checkpoint.armedAt, 1000 + 60000);
+});
+
+test("cycle: the 60s safety net WITHOUT a bracket anchor only pends -- the skip is lost for one extra cycle rather than re-armed blindly", async () => {
+  let prepareCalls = 0;
+  const watchedPaths = ["/db/messages.db"];
+  const idleCheckpoint = { paths: watchedPaths, fingerprint: watchedPaths.join("|"), eligible: true, cursor: "7", armedAt: 1000 };
+  const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint, pendingCheckpoint: null }, idleCycleBaseDeps({
+    clockCall: () => 1000 + 60000,
+    localStoreFingerprintCall: async (paths) => paths.join("|"),
+    extra: {
+      driverCall: async (operation) => {
+        if (operation === "prepare") { prepareCalls += 1; return [{ type: "sync_state", driver_generation: "g", transport_cursor: "9", db_path: "/db/messages.db" }]; }
+        return [];
+      },
+      rosterDriverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return [{ type: "roster_sync_state", transport_cursor: "0",
+        config_path: "/conn/teams/t/config.json", journal_path: "/conn/teams/t/roster.jsonl" }]; },
+    },
+  }));
+  assert.equal(prepareCalls, 2);
+  assert.equal(result.checkpoint, null);
+  assert.notEqual(result.pendingCheckpoint, null);
 });
 
 test("cycle: a prepare that finds something to push never arms a checkpoint", async () => {
@@ -3709,47 +3779,6 @@ test("cycle: a drained, eligible prepare never arms a checkpoint when the ROSTER
   // arming only on the storage side would stop re-checking the roster
   // axis the moment its driver does not report a path.
   assert.equal(result.checkpoint, null);
-});
-
-test("cycle: a local write landing between prepare returning and the apply/read-state work below is NOT absorbed into the armed checkpoint", async () => {
-  // Reproduces the review's exact scenario: `prepare` returns, finds
-  // nothing to push, and the paths it reports resolve to fingerprint "A".
-  // While this SAME cycle's pull/apply/read-state work is still running,
-  // a local write happens, moving the real fingerprint to "B". If the
-  // checkpoint's fingerprint were taken only at the very end of the
-  // cycle (after that work), it would read "B" and arm AS IF "B" were the
-  // settled, already-verified state -- silently treating the write that
-  // just happened as something `prepare` had already accounted for, when
-  // it had not. Taken immediately after `prepare` instead, the armed
-  // fingerprint is "A", so the NEXT cycle correctly sees it differs from
-  // the real "B" and runs `prepare` for real again.
-  let fingerprintCalls = 0;
-  const localStoreFingerprintCall = async (paths) => {
-    fingerprintCalls += 1;
-    // First call: right after prepare, before any of this cycle's own
-    // pull/apply/read-state work has run -- still "A". Any LATER call
-    // (a second cycle re-checking the checkpoint, or a wrongly-late stat
-    // within the same cycle) sees "B", as if the write already happened.
-    return fingerprintCalls === 1 ? "A" : "B";
-  };
-  const deps = idleCycleBaseDeps({ localStoreFingerprintCall, extra: idleDrivers() });
-  const first = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null }, deps);
-  // Called exactly once -- the armed fingerprint is the first (and only)
-  // call's answer, never re-fetched later in the same cycle after the
-  // pull/apply/read-state work below had a chance to run.
-  assert.equal(fingerprintCalls, 1);
-  assert.equal(first.checkpoint.fingerprint, "A");
-  let prepareCalls = 0;
-  const second = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: first.checkpoint },
-    idleCycleBaseDeps({
-      localStoreFingerprintCall: async (paths) => "B", // the checkpoint's own re-check call
-      extra: {
-        driverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return idleDrivers().driverCall(operation); },
-        rosterDriverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return idleDrivers().rosterDriverCall(operation); },
-      },
-    }));
-  assert.equal(prepareCalls, 2); // "B" != "A" -> never skipped
-  void second;
 });
 
 test("runLoop: a cycle's returned checkpoint is handed to the very next cycle, unchanged, and a null checkpoint clears it", async () => {

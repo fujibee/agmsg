@@ -3379,7 +3379,7 @@ async function postCandidates(config, candidates, requestCall, eventCall) {
 // a long sleep begins go unchecked for close to double this value.
 export const IDLE_SAFETY_NET_MS = 60000;
 
-export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = null },
+export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = null, pendingCheckpoint = null },
   dependencies = {}) {
   const healthCall = dependencies.healthCall ?? health;
   const requestCall = dependencies.requestCall ?? request;
@@ -3451,6 +3451,22 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
   let candidates = [];
   let reportedPaths = null;
   let armFingerprint = null;
+  // Taken RIGHT BEFORE `prepare` is called below, of whatever paths the
+  // PRECEDING real `prepare` call (the one that produced `pendingCheckpoint`,
+  // if any) reported. This is the other half of the bracket that closes the
+  // review's remaining gap: an in-process `await` between `prepare`
+  // returning and this cycle's own stat cannot be the only thing considered,
+  // because an UNRELATED, concurrent writer (another `send.sh` process) can
+  // write at any point, including DURING `prepare`'s own execution -- not
+  // just in a gap this file's own code leaves open. Comparing a stat taken
+  // right before this cycle's `prepare` call against one taken right after
+  // it returns -- both of the SAME paths -- catches a write landing at ANY
+  // point across that whole span, including inside `prepare` itself,
+  // because `prepare` read the store at some moment strictly between the
+  // two stats: if that read saw different data, the two surrounding stats
+  // cannot both still match the recorded checkpoint value.
+  const preprepareFingerprint = pendingCheckpoint !== null ?
+    await localStoreFingerprintCall(pendingCheckpoint.paths).catch(() => null) : null;
   if (skipPrepare) {
     if (idleCheckpoint.cursor === null) throw new Error("cycle: an idle checkpoint must carry a cursor");
     await eventCall("push.skipped", { reason: "idle-no-local-change" });
@@ -3507,15 +3523,14 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
     // engine, not merely a single sqlite3 CLI call in isolation).
     reportedPaths = (dbPath === null || configPath === null || journalPath === null) ? null :
       [dbPath, `${dbPath}-wal`, configPath, journalPath];
-    // Fingerprinted HERE, immediately after `prepare` returned these paths
-    // and before anything else in this cycle runs (#1836 review: taking
-    // this later -- after the pull/apply/read-state work below -- would
-    // let a local write that happened in between get silently absorbed
-    // into the "armed" baseline, since it already landed before this stat
-    // sees it. Nothing between `prepare` returning and this line can write
-    // to the local store on the pushEmpty path this is only used for: the
-    // push/reconcile section below never runs when there is nothing to
-    // push.
+    // Fingerprinted HERE, immediately after `prepare` returned these paths,
+    // before any of this cycle's own pull/apply/read-state work runs. This
+    // is only the END of the bracket -- see `preprepareFingerprint` above
+    // for why a single stat, however early, is not enough on its own: an
+    // unrelated concurrent writer is not confined to a gap this file's code
+    // leaves open, so a write during `prepare`'s own execution has to be
+    // caught too, which is what comparing against `preprepareFingerprint`
+    // (below) does.
     armFingerprint = reportedPaths !== null ?
       await localStoreFingerprintCall(reportedPaths).catch(() => null) : null;
   }
@@ -3689,24 +3704,46 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
   // in the gap between the two would already be reflected in the later
   // stat and never trigger an early wake).
   let checkpoint = null;
+  // The NEXT cycle's `pendingCheckpoint` input: a NOT-YET-ARMED candidate,
+  // meaning a real `prepare` found nothing and was eligible, but has not
+  // yet been bracketed by a stat taken before IT ran too. Arming straight
+  // off a single post-`prepare` stat (an earlier revision did exactly
+  // this) cannot rule out a write landing DURING that same `prepare`
+  // call's own execution -- an unrelated, concurrent writer (another
+  // `send.sh` process) is not confined to a gap this file's own code
+  // leaves open, so narrowing the gap around the stat is not enough
+  // (#1836 review). Two REAL `prepare` calls in a row, bracketed by stats
+  // of the SAME paths that all agree (before this one -- see
+  // `preprepareFingerprint` above -- and after it), is what proves
+  // nothing wrote across the whole span, including inside either
+  // `prepare`'s own execution.
+  let nextPendingCheckpoint = null;
   if (skipPrepare) {
     // Nothing changed; carry the SAME paths/fingerprint/eligibility
     // forward untouched, including `armedAt` -- the 60s safety net counts
-    // from the last REAL `prepare`, not from every skip.
+    // from the last REAL `prepare`, not from every skip. No `prepare` ran,
+    // so there is nothing new to bracket; the pending slot stays empty
+    // (it is only meaningful again once skip ever stops).
     checkpoint = { ...idleCheckpoint, cursor };
   } else if (pushEmpty && writeProfile.eligible && reportedPaths !== null && armFingerprint !== null) {
-    // Reuses `armFingerprint`, taken right after `prepare` returned these
-    // paths -- not re-fetched here, after the pull/apply/read-state work
-    // above has already run. Re-fetching at this point would stat the
-    // store AFTER that work had every chance to write to it, so a local
-    // write landing during that window would already be reflected and
-    // silently treated as part of the "nothing changed" baseline (#1836
-    // review: reproduced as two cycle() calls where a write between
-    // prepare returning and the OLD late stat left prepareCalls at 1
-    // where 2 were expected).
-    checkpoint = { paths: reportedPaths, fingerprint: armFingerprint, eligible: true, cursor, armedAt: clockCall() };
+    const samePathsAsPending = pendingCheckpoint !== null &&
+      pendingCheckpoint.paths.length === reportedPaths.length &&
+      pendingCheckpoint.paths.every((path, index) => path === reportedPaths[index]);
+    const confirmed = samePathsAsPending && preprepareFingerprint !== null &&
+      preprepareFingerprint === pendingCheckpoint.fingerprint && preprepareFingerprint === armFingerprint;
+    if (confirmed) {
+      // Bracketed and proven stable across BOTH this prepare and the one
+      // before it: arm for real.
+      checkpoint = { paths: reportedPaths, fingerprint: armFingerprint, eligible: true, cursor, armedAt: clockCall() };
+    } else {
+      // Not confirmed yet (the very first real prepare ever, a path
+      // change, or an actual write) -- becomes the candidate the NEXT
+      // cycle's own prepare will try to confirm against.
+      nextPendingCheckpoint = { paths: reportedPaths, fingerprint: armFingerprint };
+    }
   }
-  return { pushSaturated, cursor, hadActivity: !pushEmpty || pulledCount > 0, checkpoint };
+  return { pushSaturated, cursor, hadActivity: !pushEmpty || pulledCount > 0, checkpoint,
+    pendingCheckpoint: nextPendingCheckpoint };
 }
 
 // Adaptive catch-up loop (adaptive-sync-catchup design). Steady state is
@@ -3835,6 +3872,11 @@ export async function runLoop(config, options, dependencies = {}) {
   // a quiet cycle that still had to run `prepare` for real (e.g. the very
   // first one) and resets on any activity either way.
   let idleCheckpoint = null;
+  // The not-yet-confirmed candidate `cycle()` is trying to bracket across
+  // two consecutive real `prepare` calls (#1836 review) -- see its own
+  // comment on `pendingCheckpoint`/`nextPendingCheckpoint` for why a single
+  // post-`prepare` stat cannot arm `idleCheckpoint` by itself.
+  let pendingCheckpoint = null;
   let idleStreak = 0;
   for (;;) {
     // Checked at the cycle boundary, BEFORE any driver can be spawned: past
@@ -3866,9 +3908,19 @@ export async function runLoop(config, options, dependencies = {}) {
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);
     const pullLimit = ceiling ?? LARGE_LIMIT;
     try {
-      const result = await cycleCall(config, { pushLimit, pullLimit, idleCheckpoint }, dependencies);
+      // A safety-net-forced re-prepare of an already-armed checkpoint
+      // (idleCheckpoint non-null, but stale enough that cycle() will not
+      // skip) re-verifies that SAME checkpoint's own paths/fingerprint as
+      // its bracket anchor when nothing else is pending -- otherwise it
+      // would fall back to the cold-start two-call confirmation and drop
+      // the skip for an extra cycle even though nothing may have changed.
+      const effectivePending = pendingCheckpoint ??
+        (idleCheckpoint !== null ? { paths: idleCheckpoint.paths, fingerprint: idleCheckpoint.fingerprint } : null);
+      const result = await cycleCall(config,
+        { pushLimit, pullLimit, idleCheckpoint, pendingCheckpoint: effectivePending }, dependencies);
       consecutiveFailures = 0;
       idleCheckpoint = result?.checkpoint ?? null;
+      pendingCheckpoint = result?.pendingCheckpoint ?? null;
       // hadActivity defaults to "yes" (keeping the streak at 0, the
       // steadyIntervalMs cadence) whenever a caller's result does not say --
       // unsure favors the normal interval, not a stretched-out one.
@@ -3957,8 +4009,11 @@ export async function runLoop(config, options, dependencies = {}) {
     } catch (error) {
       // A failed cycle is not a confirmed-idle one: whether `prepare` ran,
       // and what it saw, is now unknown. Disarm the #1836 skip rather than
-      // trust a checkpoint taken before whatever just went wrong.
+      // trust a checkpoint taken before whatever just went wrong -- and
+      // the bracket a pending candidate was waiting to be confirmed against
+      // is broken too, so it cannot be trusted either.
       idleCheckpoint = null;
+      pendingCheckpoint = null;
       // Best-effort: a logging failure must not abort failure handling or the
       // backoff below (event() can throw when AGMSG_SYNC_LOG_FILE append fails).
       try {
