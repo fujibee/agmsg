@@ -54,15 +54,19 @@ teardown() {
 
 @test "teardown helper: leaves a pid whose argv is not this test's engine alone" {
   sleep 30 &
-  local foreign=$!
+  local foreign=$! real_teardown_env
   printf '%s\n' "$foreign" > "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
   ENGINE_PIDS="$foreign"
-  _stop_owned_engine "$foreign"
+  # Run the real teardown with both inputs naming the foreign pid, minus the
+  # directory removal (restored right after, for this test's own teardown).
+  real_teardown_env="$(declare -f teardown_test_env)"
+  teardown_test_env() { :; }
+  teardown
+  eval "$real_teardown_env"
   kill -0 "$foreign"
   kill "$foreign"
   wait "$foreign" 2>/dev/null || true
   ENGINE_PIDS=""
-  rm -f "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
 }
 
 @test "teardown helper: stops an engine whose argv names this test's directory" {
