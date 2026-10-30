@@ -39,6 +39,9 @@ import {
   collectInstallBaseline,
   installChangedAgainst,
   localStoreFingerprint,
+  resolveRealMessageDbPath,
+  defaultDbPathSpawn,
+  cachedRealMessageDbPath,
   runLoop,
   loadConfig,
   nextLocalAgeSnapshot,
@@ -3711,7 +3714,7 @@ test("runLoop: consecutive idle cycles stretch the steady interval towards 60s, 
     collectInstallBaselineCall: async () => null,
     cycleCall: async () => {
       if (i >= script.length) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
-      return { pushSaturated: false, hadActivity: script[i++] };
+      return { pushSaturated: false, hadActivity: script[i++], fingerprint: "fp-stable" };
     },
     sleepCall: async (ms) => { sleeps.push(ms); },
     isRetryableCall: (error) => error.retryable === true,
@@ -3739,7 +3742,7 @@ test("runLoop: the idle interval never exceeds 60s", async () => {
     cycleCall: async () => {
       i += 1;
       if (i > 8) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
-      return { pushSaturated: false, hadActivity: false };
+      return { pushSaturated: false, hadActivity: false, fingerprint: "fp-stable" };
     },
     sleepCall: async (ms) => { sleeps.push(ms); },
     isRetryableCall: (error) => error.retryable === true,
@@ -3752,6 +3755,58 @@ test("runLoop: the idle interval never exceeds 60s", async () => {
   const totalsPerCycle = [5000, 10000, 20000, 40000, 60000, 60000, 60000, 60000];
   assert.equal(sleeps.length, totalsPerCycle.reduce((sum, ms) => sum + ms / 5000, 0));
   assert.equal(sleeps.reduce((sum, ms) => sum + ms, 0), totalsPerCycle.reduce((sum, ms) => sum + ms, 0));
+});
+
+// #1836 review point A: an unknown fingerprint (a custom driver, or an
+// unresolvable real store path) must never be stretched past the floor --
+// there is no way to wake early for it, so stretching it would leave that
+// configuration's outbound side waiting up to the full backoff too.
+test("runLoop: an unknown fingerprint (e.g. a custom driver) never stretches the interval past the floor, even across many idle cycles", async () => {
+  const sleeps = [];
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    cycleCall: async () => {
+      i += 1;
+      if (i > 6) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      return { pushSaturated: false, hadActivity: false, fingerprint: null };
+    },
+    sleepCall: async (ms) => { sleeps.push(ms); },
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  assert.deepEqual(sleeps, [5000, 5000, 5000, 5000, 5000, 5000]);
+});
+
+test("runLoop: a write that already landed by the time the sleep begins still wakes it early, because the baseline is the cycle's OWN pre-prepare fingerprint", async () => {
+  // Cycle 2 is idle and reports fingerprint "fp-2" (taken at ITS top, before
+  // prepare). By the time the sleep's first in-sleep poll runs, the real
+  // store has already moved to "fp-3" (a write landed in the gap). A
+  // baseline taken FRESH at sleep-start would also read "fp-3" and see no
+  // difference on that first poll -- exactly the swallow #1836 review point
+  // A flagged. Using the cycle's own "fp-2" as the baseline instead, the
+  // very first poll ("fp-3" vs "fp-2") differs and wakes the sleep
+  // immediately, well short of the full stretched wait.
+  const sleeps = [];
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    localStoreFingerprintCall: async () => "fp-3",
+    cycleCall: async () => {
+      i += 1;
+      if (i === 1) return { pushSaturated: false, hadActivity: false, fingerprint: "fp-1" };
+      if (i === 2) return { pushSaturated: false, hadActivity: false, fingerprint: "fp-2" };
+      const stop = new Error("stop"); stop.retryable = false; throw stop;
+    },
+    sleepCall: async (ms) => { sleeps.push(ms); },
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  // Cycle 1 (streak 1) sleeps its single 5000ms floor chunk, no polling.
+  // Cycle 2 (streak 2 -> a 10000ms, two-chunk wait) sleeps its first 5000ms
+  // chunk, polls, sees "fp-3" != its own baseline "fp-2", and wakes --
+  // never reaching a second chunk.
+  assert.deepEqual(sleeps, [5000, 5000]);
 });
 
 // t.after() hooks elsewhere in this file (e.g. the roster-driver residue
@@ -3873,6 +3928,78 @@ test("localStoreFingerprint: resolves the real per-team store through the shared
     if (previous.roster === undefined) delete process.env.AGMSG_SYNC_ROSTER_DRIVER; else process.env.AGMSG_SYNC_ROSTER_DRIVER = previous.roster;
     if (previous.storage === undefined) delete process.env.AGMSG_SYNC_STORAGE_DIR; else process.env.AGMSG_SYNC_STORAGE_DIR = previous.storage;
     await rm(storageDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveRealMessageDbPath: the team is passed positionally, never interpolated, and the exact path round-trips byte-for-byte (#1836 review point C)", async () => {
+  // A team name carrying shell metacharacters -- `$()`, a backtick -- would
+  // be re-interpreted as syntax if it were interpolated into the command
+  // string instead of passed as a positional argument. The stub below
+  // asserts the SAME string arrives as its second positional arg, verbatim,
+  // and returns a path chosen to exercise the NUL-framing/no-trim guarantee:
+  // leading/trailing spaces, embedded quotes, a trailing newline -- none of
+  // which may be altered on the way back.
+  const dangerousTeam = "team-$(rm -rf /)-`whoami`";
+  const weirdPath = '  /weird path with "quotes" and $(danger) and `backticks`  \n';
+  const stubSpawn = async (_command, args) => {
+    assert.equal(args.length, 2);
+    assert.equal(args[1], dangerousTeam);
+    return Buffer.from(`${weirdPath}\0`, "utf8");
+  };
+  const path = await resolveRealMessageDbPath(dangerousTeam, stubSpawn);
+  assert.equal(path, weirdPath);
+});
+
+test("defaultDbPathSpawn: a hung resolver is killed and rejected within its timeout, not left to block the loop forever (#1836 review point B)", async () => {
+  const start = Date.now();
+  await assert.rejects(
+    defaultDbPathSpawn("sleep 300", []),
+    /timed out/,
+  );
+  // Bounded at the 5s timeout itself, with a generous margin for a loaded
+  // CI runner -- nowhere near the 300s the hung resolver actually asked for.
+  assert.ok(Date.now() - start < 8000);
+});
+
+test("defaultDbPathSpawn: stderr is drained so a resolver that floods it does not stall or crash the caller (#1836 review point B)", async () => {
+  const { stdout } = await (async () => {
+    const buf = await defaultDbPathSpawn(
+      'head -c 200000 /dev/zero | tr "\\0" "e" >&2; printf "ok\\0"', []);
+    return { stdout: buf };
+  })();
+  const nul = stdout.indexOf(0);
+  assert.equal(stdout.subarray(0, nul).toString("utf8"), "ok");
+});
+
+test("defaultDbPathSpawn: a non-zero exit is rejected, not read as an empty success", async () => {
+  await assert.rejects(defaultDbPathSpawn("exit 3", []), /exited 3/);
+});
+
+test("cachedRealMessageDbPath: resolves once per team-config fingerprint, re-resolving only when config.json actually changes (#1836 review point B/tl2)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-dbcache-"));
+  const previousConn = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  const configDir = join(root, "teams", "cache-team");
+  await mkdir(configDir, { recursive: true });
+  const configPath = join(configDir, "config.json");
+  await writeFile(configPath, JSON.stringify({ name: "cache-team" }));
+  let resolveCalls = 0;
+  const resolveDbPathCall = async () => { resolveCalls += 1; return `/resolved/${resolveCalls}`; };
+  try {
+    const first = await cachedRealMessageDbPath("cache-team", { resolveDbPathCall });
+    const second = await cachedRealMessageDbPath("cache-team", { resolveDbPathCall });
+    assert.equal(resolveCalls, 1); // the second call hit the cache -- no spawn
+    assert.equal(first, second);
+    // A real migration writes config.json -- mtime/size moves, so the next
+    // call must re-resolve rather than keep serving the stale path.
+    await writeFile(configPath, JSON.stringify({ name: "cache-team", drivers: { partition: "per-team" } }));
+    const third = await cachedRealMessageDbPath("cache-team", { resolveDbPathCall });
+    assert.equal(resolveCalls, 2);
+    assert.notEqual(third, first);
+  } finally {
+    if (previousConn === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = previousConn;
+    await rm(root, { recursive: true, force: true });
   }
 });
 

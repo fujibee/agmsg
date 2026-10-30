@@ -161,39 +161,119 @@ function builtinRosterDriverPath() {
 // asked of it with its OWN resolver (`lib/storage.sh`'s `agmsg_db_path`),
 // never guessed from AGMSG_SYNC_STORAGE_DIR + "messages.db" (#1836 review):
 // a team's partition driver (`shared`, one file for every team, vs
-// `per-team`, one file per team) decides that path, is chosen per team, and
-// can change under a RUNNING engine via an ordinary migration
-// (storage.sh's own comment on `_agmsg_partition_load` names exactly that
-// hazard). A guessed path that migration leaves behind would keep reporting
-// the old, now-static file as "unchanged" forever while real writes landed
-// somewhere else entirely -- silently stalling sending, permanently, which
-// is the one failure this whole mechanism exists to rule out. So this is
-// re-asked fresh on every call (one cheap `bash -c` spawning a handful of
-// small processes, not the ~46 a `prepare` call costs) rather than cached
-// for the engine's lifetime.
-async function resolveRealMessageDbPath(team, spawnCall = defaultDbPathSpawn) {
+// `per-team`, one file per team) is recorded in the team's own config.json
+// (`agmsg_driver_for_team`'s own comment) and can change under a RUNNING
+// engine via an ordinary migration (storage.sh's own comment on
+// `_agmsg_partition_load` names exactly that hazard). A guessed path that
+// migration leaves behind would keep reporting the old, now-static file as
+// "unchanged" forever while real writes landed somewhere else entirely --
+// silently stalling sending, permanently, which is the one failure this
+// whole mechanism exists to rule out.
+//
+// Resolved exactly ONCE per engine lifetime, not every cycle -- see
+// `cachedRealMessageDbPath` below, which is the thing every caller actually
+// uses. This function is the one-shot resolver that caller re-invokes only
+// when its cache decides to.
+const SCRIPT = ['source "$1/storage.sh"', 'agmsg_storage_load', 'out="$(agmsg_db_path "$2")" || exit 1',
+  // A trailing NUL frames the exact bytes for the caller to read back
+  // losslessly -- no trim() on either side, so a path with meaningful
+  // leading/trailing whitespace (unusual, but the shared resolver does not
+  // forbid it) is not silently rewritten into a DIFFERENT path to watch.
+  'printf \'%s\\0\' "$out"'].join(' && ');
+export async function resolveRealMessageDbPath(team, spawnCall = defaultDbPathSpawn) {
   const script = builtinStorageDriverPath();
   const libDir = join(dirname(script), "..", "lib");
-  const command = `source "${libDir}/storage.sh" && agmsg_storage_load && agmsg_db_path "$1"`;
   try {
-    const { stdout } = await spawnCall(command, team);
-    const path = stdout.trim();
+    // libDir and team are passed as POSITIONAL arguments ($1, $2), never
+    // interpolated into the script text: a team name or an install path
+    // containing `$()`, backticks or a stray quote would otherwise be
+    // re-interpreted as shell syntax rather than read as a literal value
+    // (#1836 review).
+    const stdout = await spawnCall(SCRIPT, [libDir, team]);
+    const nul = stdout.indexOf(0);
+    const path = (nul === -1 ? stdout : stdout.subarray(0, nul)).toString("utf8");
     return path.length > 0 ? path : null;
   } catch {
     return null;
   }
 }
 
-function defaultDbPathSpawn(command, team) {
+// Bounded exactly like `runDriver`'s own child, for the same reason: a
+// resolver that hangs, or that is replaced by a custom partition driver
+// that hangs or floods stderr, must not take the whole sync loop down with
+// it -- including the 5s wake-check guarantee the idle-prepare skip's sleep
+// depends on (#1836 review point B). stderr is drained and discarded (a
+// resolver's diagnostics are not useful here -- its only job is one path on
+// stdout); stdout is capped so a runaway script cannot grow this process's
+// memory. Settlement is on 'close', not 'exit', so a grandchild still
+// holding the pipes cannot report success before every byte is actually in
+// hand.
+const DB_PATH_RESOLVE_TIMEOUT_MS = 5000;
+const DB_PATH_RESOLVE_MAX_BYTES = 4096;
+export function defaultDbPathSpawn(command, args) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const resolverProcess = spawn("bash", ["-c", command, "bash", team], { windowsHide: true });
-    let stdout = "";
-    resolverProcess.stdout?.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
-    resolverProcess.on("error", rejectPromise);
-    resolverProcess.on("exit", (code) => {
-      if (code === 0) resolvePromise({ stdout }); else rejectPromise(new Error(`exit ${code}`));
+    const resolverProcess = spawn("bash", ["-c", command, "bash", ...args], { windowsHide: true });
+    const chunks = [];
+    let total = 0;
+    let settled = false;
+    let timer = null;
+    const settle = (error, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      if (error) rejectPromise(error); else resolvePromise(value);
+    };
+    timer = setTimeout(() => {
+      try { resolverProcess.kill("SIGKILL"); } catch { /* already gone */ }
+      settle(new Error("db path resolver timed out"));
+    }, DB_PATH_RESOLVE_TIMEOUT_MS);
+    timer.unref?.();
+    resolverProcess.stdout?.on("data", (chunk) => {
+      if (total >= DB_PATH_RESOLVE_MAX_BYTES) return;
+      total += chunk.length;
+      chunks.push(chunk);
+    });
+    resolverProcess.stderr?.resume(); // drained and discarded, never buffered
+    resolverProcess.on("error", (error) => settle(error, null));
+    let exitCode = null;
+    resolverProcess.on("exit", (code) => { exitCode = code; });
+    resolverProcess.on("close", () => {
+      if (exitCode === 0) settle(null, Buffer.concat(chunks));
+      else settle(new Error(`db path resolver exited ${exitCode}`), null);
     });
   });
+}
+
+// `resolveRealMessageDbPath` costs one `bash -c` spawn (plus a handful of
+// small processes inside it) -- cheap next to the ~46 a `prepare` call
+// costs, but still a cost worth paying only when the answer could actually
+// have changed. The only thing that changes it is a migration, and a
+// migration is recorded by writing the team's own config.json (the same
+// file `_agmsg_partition_load` reads the partition choice from) -- so the
+// cache is invalidated by watching THAT file's (mtime, size), which this
+// module already stats for the roster axis (`localStoreWatchPaths` below),
+// at zero extra cost. The driver env vars are also part of the cache key:
+// not expected to change mid-process, but checking three string
+// comparisons is far cheaper than assuming it.
+const _dbPathCache = new Map();
+export async function cachedRealMessageDbPath(team, { resolveDbPathCall = resolveRealMessageDbPath, statCall = stat } = {}) {
+  let configFingerprint;
+  try {
+    const info = await statCall(teamConfigPath(team));
+    configFingerprint = `${info.mtimeMs}:${info.size}`;
+  } catch {
+    // No connection root, or the config does not exist yet (not connected):
+    // nothing to compare future calls against, so this call's answer is
+    // never cached -- resolved fresh every time, favoring correctness over
+    // the (here, inapplicable) cache.
+    return resolveDbPathCall(team);
+  }
+  const key = `${team}\u0000${process.env.AGMSG_SYNC_DRIVER}\u0000${process.env.AGMSG_SYNC_ROSTER_DRIVER}`;
+  const cached = _dbPathCache.get(key);
+  if (cached && cached.configFingerprint === configFingerprint) return cached.path;
+  const path = await resolveDbPathCall(team);
+  _dbPathCache.set(key, { configFingerprint, path });
+  return path;
 }
 
 // Every on-disk file a local write that `prepare` would need to see could
@@ -215,11 +295,12 @@ function defaultDbPathSpawn(command, team) {
 // pointed somewhere other than its own built-in script: a custom driver's
 // storage is not something this function can name, and guessing would be
 // exactly the hazard #1836's review flagged.
-async function localStoreWatchPaths(team, { resolveDbPathCall = resolveRealMessageDbPath } = {}) {
+async function localStoreWatchPaths(team, options = {}) {
   if (process.env.AGMSG_SYNC_DRIVER !== builtinStorageDriverPath()) return null;
   const rosterDriverEnv = process.env.AGMSG_SYNC_ROSTER_DRIVER;
   if (rosterDriverEnv !== undefined && rosterDriverEnv !== builtinRosterDriverPath()) return null;
-  const dbPath = await resolveDbPathCall(team);
+  const cachedDbPathCall = options.cachedDbPathCall ?? cachedRealMessageDbPath;
+  const dbPath = await cachedDbPathCall(team, options);
   if (dbPath === null) return null;
   const paths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
   const rosterOverride = process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE;
@@ -3702,7 +3783,18 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
   const pushEmpty = skipPrepare || candidates.length === 0;
   const checkpoint = (pushEmpty && writeProfile.eligible && fingerprint !== null) ?
     { fingerprint, eligible: true, cursor } : null;
-  return { pushSaturated, cursor, hadActivity: !pushEmpty || pulledCount > 0, checkpoint };
+  // `fingerprint` is handed back too (#1836 review point A): it was taken at
+  // the TOP of this cycle, before `prepare` (or the decision to skip it) and
+  // before the pull below -- the same moment runLoop needs as the baseline
+  // for its wake-on-write check during a stretched-out sleep. A freshly
+  // re-stat'd value taken only once the sleep itself begins would silently
+  // absorb any write that landed in the gap between this cycle ending and
+  // that later stat, since such a write is already "baked into" a baseline
+  // measured after it happened -- exactly the stall this whole mechanism
+  // exists to prevent. null here (unknown: a custom driver, or the real
+  // path could not be resolved) tells runLoop early-wake cannot be offered
+  // AT ALL for this cycle, which is why it also gates the backoff itself.
+  return { pushSaturated, cursor, hadActivity: !pushEmpty || pulledCount > 0, checkpoint, fingerprint };
 }
 
 // Adaptive catch-up loop (adaptive-sync-catchup design). Steady state is
@@ -3888,21 +3980,40 @@ export async function runLoop(config, options, dependencies = {}) {
       if (!catchUp) {
         // A single idle cycle stays at the floor (a RUN of them is what
         // stretches it, not a one-off); only the SECOND and later
-        // consecutive idle cycles double the wait, capped at MAX_IDLE_INTERVAL_MS.
-        const intervalMs = idleStreak <= 1 ? steadyIntervalMs :
+        // consecutive idle cycles double the wait, capped at
+        // MAX_IDLE_INTERVAL_MS. But ONLY when this cycle's own fingerprint
+        // is known (#1836 review point A): an unknown fingerprint (a custom
+        // driver, or the real store path could not be resolved) means a
+        // local write cannot be detected early at all during the wait, so
+        // stretching it would leave THAT configuration's outbound side
+        // waiting up to the stretched interval too, with no way to
+        // compensate -- the backoff is only safe to offer where the
+        // early-wake check below can actually back it up.
+        const fingerprintKnown = result?.fingerprint !== undefined && result.fingerprint !== null;
+        const intervalMs = !fingerprintKnown || idleStreak <= 1 ? steadyIntervalMs :
           Math.min(MAX_IDLE_INTERVAL_MS, steadyIntervalMs * 2 ** (idleStreak - 1));
         const waitMs = Math.max(steadyIntervalMs, intervalMs);
         if (waitMs <= steadyIntervalMs) {
           await sleepCall(waitMs);
         } else {
           // A stretched-out wait is slept in steadyIntervalMs-sized chunks,
-          // re-checking the local store (a stat -- no subprocess) between
-          // them, so a LOCAL write still gets sent within steadyIntervalMs
-          // regardless of how far the interval has backed off (#1836 review
-          // point 2: the outbound side must not inherit the receive-side
-          // delay). `startFingerprint` null (unknown) means every chunk is
-          // slept out in full -- no early wake, but also no false one.
-          const startFingerprint = await localStoreFingerprintCall(config.local_team).catch(() => null);
+          // re-checking the local store (a stat; the real db path itself is
+          // cached and so costs no subprocess once resolved -- see
+          // cachedRealMessageDbPath) between them, so a LOCAL write still
+          // gets sent within steadyIntervalMs regardless of how far the
+          // interval has backed off.
+          //
+          // The baseline is `result.fingerprint` -- taken by `cycle()` at
+          // the TOP of the cycle that JUST finished, not a fresh stat taken
+          // only now. A write landing between that cycle ending and a
+          // freshly-taken baseline would already be reflected in a fresh
+          // stat, so comparing against it would swallow that write as
+          // "already known" and never wake early for it (#1836 review point
+          // A). Comparing against the cycle's OWN pre-prepare fingerprint
+          // instead means any write after that moment -- including one in
+          // that exact gap -- shows up as a difference on the very first
+          // poll.
+          const startFingerprint = result.fingerprint;
           let waited = 0;
           while (waited < waitMs) {
             const chunk = Math.min(steadyIntervalMs, waitMs - waited);
@@ -3911,7 +4022,7 @@ export async function runLoop(config, options, dependencies = {}) {
             if (waited >= waitMs) break;
             let fp = null;
             try { fp = await localStoreFingerprintCall(config.local_team); } catch { fp = null; }
-            if (startFingerprint !== null && fp !== null && fp !== startFingerprint) break;
+            if (fp !== null && fp !== startFingerprint) break;
           }
         }
       }
