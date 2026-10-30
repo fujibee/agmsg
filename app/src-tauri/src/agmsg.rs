@@ -286,18 +286,33 @@ static STORES: std::sync::Mutex<Option<std::sync::Arc<Stores>>> = std::sync::Mut
 fn stores() -> Option<std::sync::Arc<Stores>> {
     let base = agmsg_base();
     let env = crate::store_fp::Env::from_process();
-    let before = crate::store_fp::base_part(&base, &env)?;
-    if let Some(c) = STORES.lock().unwrap().clone() {
-        if c.base_part == before && c.exists_part == crate::store_fp::exists_part(&c.paths) {
-            return Some(c);
+    // `None` here is a configuration the answer cannot be kept for (an external driver, or inputs that cannot be read):
+    // it is fetched every time, but still in one process
+    let before = crate::store_fp::base_part(&base, &env);
+    let hit = || -> Option<std::sync::Arc<Stores>> {
+        let b = before.as_ref()?;
+        let c = STORES.lock().unwrap().clone()?;
+        (&c.base_part == b && c.exists_part == crate::store_fp::exists_part(&c.paths)).then_some(c)
+    };
+    if let Some(c) = hit() {
+        return Some(c);
+    }
+    // One fetch at a time: callers that missed together wait here and then find the answer the first one made
+    static FETCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = FETCH.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = hit() {
+        return Some(c);
+    }
+    let (teams, infos) = match fetch_stores_in_one_process() {
+        Some(all) => all,
+        None => {
+            // not answerable in one go: ask for the list and then each team, as before
+            let raw = run_script("api.sh", &["get", "teams"]).ok()?;
+            let teams: Vec<String> = parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect();
+            let infos = teams.iter().map(|t| (t.clone(), store_info_from_script(t))).collect();
+            (teams, infos)
         }
-    }
-    let raw = run_script("api.sh", &["get", "teams"]).ok()?;
-    let teams: Vec<String> = parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect();
-    let mut infos = std::collections::HashMap::new();
-    for t in &teams {
-        infos.insert(t.clone(), store_info_from_script(t));
-    }
+    };
     let ok: Vec<&StoreInfo> = infos.values().filter_map(|i| i.as_ref().ok()).collect();
     let whole = ok.len() == infos.len();
     let paths: Vec<PathBuf> = ok.iter().map(|i| PathBuf::from(&i.path)).collect();
@@ -306,11 +321,36 @@ fn stores() -> Option<std::sync::Arc<Stores>> {
     let exists_part = crate::store_fp::exists_part(&paths);
     let after = crate::store_fp::base_part(&base, &env);
     let agrees = ok.iter().all(|i| i.exists == PathBuf::from(&i.path).exists());
-    let s = std::sync::Arc::new(Stores { base_part: before.clone(), exists_part, paths, teams, infos });
-    if whole && after.as_deref() == Some(before.as_str()) && agrees {
+    let s = std::sync::Arc::new(Stores { base_part: before.clone().unwrap_or_default(), exists_part, paths, teams, infos });
+    if before.is_some() && whole && after == before && agrees {
         *STORES.lock().unwrap() = Some(s.clone());
     }
     Some(s)
+}
+
+/// The script that asks agmsg-core, once, where every team's store is (see stores.sh).
+const STORES_SH: &str = include_str!("stores.sh");
+
+/// Every team and its store from ONE `bash`, however many teams there are. `None` when that did not work out
+/// (the script failed, or a line was not what it should be): the caller then asks the old way, team by team.
+fn fetch_stores_in_one_process() -> Option<(Vec<String>, std::collections::HashMap<String, Result<StoreInfo, String>>)> {
+    let out = bash_command().ok()?.arg("-c").arg(STORES_SH).arg("agmsg-stores").arg(bash_path(&agmsg_base())).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let mut teams = Vec::new();
+    let mut infos = std::collections::HashMap::new();
+    for line in text.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        let [team, driver, path, exists] = f[..] else { return None };
+        if team.is_empty() || (exists != "true" && exists != "false") {
+            return None;
+        }
+        teams.push(team.to_string());
+        infos.insert(team.to_string(), Ok(StoreInfo { driver: driver.to_string(), path: path.to_string(), exists: exists == "true" }));
+    }
+    Some((teams, infos))
 }
 
 /// The store to read directly for `team`, or `None` when the app must go
@@ -319,7 +359,11 @@ fn stores() -> Option<std::sync::Arc<Stores>> {
 /// Logs the reason on the way past. Distinguishing "slow but working" from
 /// "fast but wrong" after the fact needs the fallback to leave a mark.
 fn direct_store_path(team: &str) -> Option<PathBuf> {
-    match store_info(team) {
+    direct_from(team, store_info(team))
+}
+
+fn direct_from(team: &str, answer: Result<StoreInfo, String>) -> Option<PathBuf> {
+    match answer {
         Ok(info) if !info.exists => None,
         Ok(info) if info.driver == DIRECTLY_READABLE_DRIVER => Some(PathBuf::from(info.path)),
         Ok(info) => {
@@ -565,7 +609,9 @@ fn fallback_new_messages(team: &str, last_seen: Option<&str>) -> (Vec<Message>, 
 }
 
 fn watchable_stores() -> (Vec<PathBuf>, Vec<String>) {
-    let teams: Vec<String> = match stores() {
+    // One look at every team (one process at most); each team's answer is read from it, not asked for again
+    let looked = stores();
+    let teams: Vec<String> = match &looked {
         Some(s) => s.teams.clone(),
         None => match run_script("api.sh", &["get", "teams"]) {
             Ok(raw) => parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect(),
@@ -575,14 +621,17 @@ fn watchable_stores() -> (Vec<PathBuf>, Vec<String>) {
     let mut direct: Vec<PathBuf> = Vec::new();
     let mut via_api: Vec<String> = Vec::new();
     for name in teams {
-        let t = ApiTeam { name };
-        match direct_store_path(&t.name) {
+        let found = match looked.as_ref().and_then(|s| s.infos.get(&name).cloned()) {
+            Some(answer) => direct_from(&name, answer),
+            None => direct_store_path(&name),
+        };
+        match found {
             Some(p) => {
                 if !direct.contains(&p) {
                     direct.push(p);
                 }
             }
-            None => via_api.push(t.name),
+            None => via_api.push(name),
         }
     }
     (direct, via_api)
@@ -1551,6 +1600,127 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         std::fs::remove_file(base._dir.path().join("fail-a")).unwrap();
         touch_store(&base, "messages.db");
         assert_eq!(watchable_stores().0, vec![base._dir.path().join("db/messages.db")]);
+    }
+
+    /// An install with agmsg's real scripts (this repository ships them), and the environment pointed at it
+    /// and away from the machine's own settings.
+    #[cfg(unix)]
+    struct RealBase {
+        dir: tempfile::TempDir,
+        _guards: Vec<EnvGuard>,
+    }
+
+    #[cfg(unix)]
+    fn real_base() -> RealBase {
+        fn copy(from: &std::path::Path, to: &std::path::Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for e in std::fs::read_dir(from).unwrap() {
+                let e = e.unwrap();
+                if e.file_type().unwrap().is_dir() {
+                    copy(&e.path(), &to.join(e.file_name()));
+                } else {
+                    std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        copy(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts"), &root.join("scripts"));
+        std::fs::create_dir_all(root.join("teams")).unwrap();
+        let guards = vec![
+            EnvGuard::set("AGMSG_APP_BASE", &root.to_string_lossy()),
+            EnvGuard::set("AGMSG_STORAGE_PATH", ""),
+            EnvGuard::set("AGMSG_STORAGE_DRIVER", ""),
+            EnvGuard::set("AGMSG_PLUGIN_DIRS", ""),
+            EnvGuard::set("AGMSG_CONFIG", &root.join("no-such-config.json").to_string_lossy()),
+        ];
+        RealBase { dir, _guards: guards }
+    }
+
+    #[cfg(unix)]
+    fn add_real_team(base: &RealBase, name: &str, config: &str, with_store: bool) -> PathBuf {
+        let root = base.dir.path().canonicalize().unwrap();
+        let d = root.join("teams").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("config.json"), config).unwrap();
+        let store = if config.contains("per-team") { root.join("db/teams").join(name).join("messages.db") } else { root.join("db/messages.db") };
+        if with_store {
+            std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+            std::fs::write(&store, "x").unwrap();
+        }
+        store
+    }
+
+    /// `bash` that logs each start and then runs the real one, put first on PATH.
+    #[cfg(unix)]
+    fn counting_bash(dir: &std::path::Path) -> (EnvGuard, PathBuf) {
+        let real = String::from_utf8(std::process::Command::new("sh").args(["-c", "command -v bash"]).output().unwrap().stdout).unwrap();
+        let shim = dir.join("shim");
+        std::fs::create_dir_all(&shim).unwrap();
+        let log = dir.join("bash-starts");
+        let body = format!("#!/bin/sh\necho x >> '{}'\nexec '{}' \"$@\"\n", log.display(), real.trim());
+        std::fs::write(shim.join("bash"), body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(shim.join("bash"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap_or_default());
+        (EnvGuard::set("PATH", &path), log)
+    }
+
+    #[cfg(unix)]
+    fn starts(log: &std::path::Path) -> usize {
+        std::fs::read_to_string(log).map(|s| s.lines().count()).unwrap_or(0)
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn a_cold_or_changed_look_is_one_bash_whatever_the_number_of_teams_and_a_warm_look_is_none() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        let mut stores = Vec::new();
+        for i in 0..8 {
+            let cfg = if i % 2 == 0 { "{}" } else { r#"{"drivers":{"partition":"per-team"}}"# };
+            stores.push(add_real_team(&base, &format!("team{i}"), cfg, true));
+        }
+        let (_path, log) = counting_bash(&root);
+        let p = protected_locations();
+        for s in &stores {
+            assert!(p.contains(s), "{s:?} protected");
+        }
+        assert_eq!(starts(&log), 1, "cold: one bash for all eight teams");
+        for _ in 0..4 {
+            let _ = protected_locations();
+            let _ = watchable_stores();
+        }
+        assert_eq!(starts(&log), 1, "warm: none");
+        // a change: one more, and the new store is protected
+        let added = add_real_team(&base, "late", r#"{"drivers":{"partition":"per-team"}}"#, true);
+        assert!(protected_locations().contains(&added));
+        assert_eq!(starts(&log), 2, "changed: one bash");
+        let _ = protected_locations();
+        assert_eq!(starts(&log), 2);
+        // callers that miss together: one fetch, the rest wait and use its answer
+        add_real_team(&base, "later", "{}", true);
+        let threads: Vec<_> = (0..8).map(|_| std::thread::spawn(|| protected_locations().len())).collect();
+        let lens: Vec<usize> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(lens.windows(2).all(|w| w[0] == w[1]));
+        assert_eq!(starts(&log), 3, "eight at once, one bash");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn an_external_driver_configuration_is_fetched_in_one_bash_each_time() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        add_real_team(&base, "a", "{}", true);
+        add_real_team(&base, "b", "{}", true);
+        std::fs::create_dir_all(root.join("plugins/p")).unwrap(); // a folder in plugins: nothing is kept
+        let (_path, log) = counting_bash(&root);
+        let _ = protected_locations();
+        assert_eq!(starts(&log), 1, "one bash for two teams, not three");
+        let _ = protected_locations();
+        assert_eq!(starts(&log), 2, "not kept");
     }
 
     #[test]
