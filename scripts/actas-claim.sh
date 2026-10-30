@@ -148,8 +148,12 @@ done <<< "$TEAMS"
 # the Monitor path as it was.
 NATIVE_DELIVERY=0
 NATIVE_MONITOR_REASON=""
+# A project on agmsgd (agmsgd on, no explicit other mode) receives through agmsgd
+# only (#1810): when agmsgd cannot deliver yet, the session is told why and no
+# Monitor is suggested. NATIVE_AGMSGD_STATE/REASON carry that answer.
+NATIVE_AGMSGD_STATE=""
+NATIVE_AGMSGD_REASON=""
 if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
-   && _native_target="$(agmsg_claude_code_native_target 2>/dev/null)" \
    && [ -r "$SKILL_DIR/scripts/lib/daemon-state.sh" ]; then
   # shellcheck source=scripts/lib/daemon-state.sh
   . "$SKILL_DIR/scripts/lib/daemon-state.sh"
@@ -165,24 +169,46 @@ if [ "$TYPE" = claude-code ] && [ -n "${SKILL_DIR:-}" ] \
     agmsg_daemon_read_state
     agmsg_daemon_apply_project_choice claude-code "$PROJECT_PHYS"
   fi
-  if [ "${AGMSGD_HEALTH:-}" != ready ]; then
-    _native_health="${AGMSGD_HEALTH:-unknown}"
-    case "$_native_health" in *[!a-z_]*|'') _native_health=unknown ;; esac
-    NATIVE_MONITOR_REASON="agmsgd_not_ready_$_native_health"
+  _native_health="${AGMSGD_HEALTH:-unknown}"
+  case "$_native_health" in *[!a-z_]*|'') _native_health=unknown ;; esac
+  if [ "${AGMSGD_DESIRED:-}" != on ]; then
+    # agmsgd turned off (even while the owner is still shutting down), or this
+    # project chose another mode: the project's own mode decides (the skill reads
+    # delivery.sh status), whatever the daemon's health.
+    if [ "${AGMSGD_HEALTH:-}" = ready ]; then
+      NATIVE_MONITOR_REASON=agmsgd_not_enabled
+    else
+      NATIVE_MONITOR_REASON="agmsgd_not_ready_$_native_health"
+    fi
+  elif ! _native_target="$(agmsg_claude_code_native_target 2>/dev/null)"; then
+    NATIVE_AGMSGD_STATE=blocked
+    NATIVE_AGMSGD_REASON=messaging_destination_unusable
   elif ! agmsg_claude_code_native_storage_ready; then
-    NATIVE_MONITOR_REASON=native_storage_not_ready
+    NATIVE_AGMSGD_STATE=blocked
+    NATIVE_AGMSGD_REASON=native_storage_not_ready
   fi
-  if [ -n "$NATIVE_MONITOR_REASON" ]; then
+  if [ -n "$NATIVE_MONITOR_REASON" ] || [ -n "$NATIVE_AGMSGD_REASON" ]; then
     while IFS= read -r team; do
       [ -z "$team" ] && continue
-      agmsg_role_session_mark_messaging_blocked "$team" "$NAME" "$NATIVE_MONITOR_REASON" "$BARE_SID" || true
+      agmsg_role_session_mark_messaging_blocked "$team" "$NAME" "${NATIVE_MONITOR_REASON:-$NATIVE_AGMSGD_REASON}" "$BARE_SID" || true
     done <<< "$TEAMS"
   else
+    # agmsgd is on and this session has a usable destination. Record it whether
+    # or not agmsgd is running: a stopped agmsgd delivers to it as soon as it
+    # starts, with no restart.
     NATIVE_DELIVERY=1
     while IFS= read -r team; do
       [ -z "$team" ] && continue
       agmsg_role_session_publish_messaging "$team" "$NAME" "${_native_target%%$'\t'*}" "${_native_target#*$'\t'}" "$BARE_SID" "${CLAUDE_CODE_MESSAGING_TOKEN:-}" || NATIVE_DELIVERY=0
     done <<< "$TEAMS"
+    if [ "$NATIVE_DELIVERY" -eq 0 ]; then
+      NATIVE_AGMSGD_STATE=blocked
+      NATIVE_AGMSGD_REASON=delivery_record_did_not_take
+    elif [ "${AGMSGD_HEALTH:-}" != ready ]; then
+      NATIVE_DELIVERY=0
+      NATIVE_AGMSGD_STATE=stopped
+      NATIVE_AGMSGD_REASON="agmsgd_not_ready_$_native_health"
+    fi
   fi
 fi
 
@@ -309,6 +335,8 @@ done <<< "$TEAMS"
 printf '\n'
 if [ "$NATIVE_DELIVERY" -eq 1 ]; then
   echo "delivery=native"
+elif [ -n "$NATIVE_AGMSGD_REASON" ]; then
+  printf 'delivery=agmsgd state=%s reason=%s\n' "$NATIVE_AGMSGD_STATE" "$NATIVE_AGMSGD_REASON"
 elif [ -n "$NATIVE_MONITOR_REASON" ]; then
   printf 'delivery=monitor reason=%s\n' "$NATIVE_MONITOR_REASON"
 fi

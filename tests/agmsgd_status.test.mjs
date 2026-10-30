@@ -15,6 +15,15 @@ test("enabled intent never reports a never-started or dead executor as healthy",
   }
 });
 
+test("a digest-mismatch start failure advises --update instead of daemon start (#1761)", () => {
+  const r = classify({ owner: { ...baseOwner, state: "none" }, intent: { desired: "on" }, alive: false, reachable: true,
+    lastAttempt: { reason: "digest verification failed: digest mismatch: scripts/daemon/schema.sql" } });
+  assert.equal(r.exitCode, 1);
+  assert.match(r.text, /install\.sh --update/);
+  assert.match(r.text, /npx agmsg@latest install --update/);
+  assert.doesNotMatch(r.text, /\(recommended\)/);
+});
+
 test("ready + reachable -> running, exit 0", () => {
   const r = classify({ owner: { ...baseOwner, state: "ready" }, intent: { desired: "on" }, alive: true, reachable: true });
   assert.equal(r.exitCode, 0);

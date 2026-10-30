@@ -23,13 +23,6 @@ agmsg_session_start() {
     . "${SKILL_DIR:-}/scripts/lib/role-session.sh"
   fi
 
-  # A malformed or missing destination is never published (see
-  # agmsg_claude_code_native_target).
-  local target socket config_dir
-  target="$(agmsg_claude_code_native_target)" || return 0
-  socket="${target%%$'\t'*}"
-  config_dir="${target#*$'\t'}"
-
   # Check every OTHER precondition FIRST, before ever touching a lock
   # (#1577 re-review): a session that cannot possibly use the native path
   # (daemon not ready, Windows, no usable socket) must claim NOTHING. The
@@ -49,10 +42,37 @@ agmsg_session_start() {
   agmsg_daemon_read_state
   # A project that chose something other than agmsgd keeps the Monitor path.
   agmsg_daemon_apply_project_choice claude-code "${PROJECT:-}"
-  [ "${AGMSGD_HEALTH:-}" = ready ] || return 0
+  # A project that has agmsgd turned on and did not choose another mode receives
+  # through agmsgd only: there is no silent fallback to the Monitor (#1810). An
+  # agmsgd that is not running is reported, with its reason and the way back, and
+  # this session's destination is still recorded below so agmsgd can deliver to
+  # it as soon as it starts, without a restart. Only agmsgd turned off (or this
+  # project choosing another mode, which apply_project_choice turns into off)
+  # leaves the Monitor path to session-start.sh.
+  [ "${AGMSGD_DESIRED:-}" = on ] || return 0
+  # A malformed or missing destination is never published (see
+  # agmsg_claude_code_native_target). The project's mode is decided first: for a
+  # project on agmsgd an unusable destination is reported, not turned into a
+  # Monitor, and no lock is claimed.
+  local target socket config_dir
+  if ! target="$(agmsg_claude_code_native_target)"; then
+    echo "AGMSG delivery: this project's delivery is agmsgd, but this session has no usable messaging destination (CLAUDE_CODE_MESSAGING_SOCKET is missing or invalid, or the Claude config directory is not usable), so agmsgd cannot deliver to it and no Monitor is armed. Next: use Claude Code 2.1.302 or later, or choose another mode with: agmsg delivery monitor"
+    exit 0
+  fi
+  socket="${target%%$'\t'*}"
+  config_dir="${target#*$'\t'}"
+  local stopped=0
+  if [ "${AGMSGD_HEALTH:-}" != ready ]; then
+    stopped=1
+    if [ "${AGMSGD_HEALTH:-}" = unchecked ]; then
+      echo "AGMSG delivery: this project's delivery is agmsgd, but agmsgd could not be checked from this session (${AGMSGD_REASON:-no reason given}). No Monitor is armed; if notices do not arrive, run: agmsg daemon status"
+    else
+      echo "AGMSG delivery: this project's delivery is agmsgd, but agmsgd is not running (${AGMSGD_REASON:-no reason given}). No Monitor is armed, and unread messages are kept. Start it with: agmsg daemon start"
+    fi
+  fi
   if ! agmsg_claude_code_native_storage_ready; then
-    echo "AGMSG delivery: agmsgd is running, but its Claude channel only reads the sqlite storage and this install's storage config is not usable for it, so the native channel is not used. Next: arm the Monitor below."
-    return 0
+    echo "AGMSG delivery: its Claude channel only reads the sqlite storage and this install's storage config is not usable for it, so the native channel is not used and no Monitor is armed. Next: run agmsg doctor."
+    exit 0
   fi
 
   # Claim ONLY the single role this session is actually resuming as -- never
@@ -76,7 +96,7 @@ agmsg_session_start() {
   local bare_sid my_instance pair_team="" pair_agent=""
   bare_sid="$(agmsg_instance_bare_sid "${SESSION_ID:-}" 2>/dev/null || true)"
   my_instance="$(agmsg_normalize_instance_id "${SESSION_ID:-}" "${TYPE:-}" 2>/dev/null || true)"
-  [ -n "$bare_sid" ] || return 0
+  [ -n "$bare_sid" ] || exit 0
   # An instance id without a process id cannot claim the seat's lock; that is
   # reported below, once the seat is known, rather than skipped silently.
   local pid_unresolved=0
@@ -107,12 +127,12 @@ EOF
 ${PAIRS:-}
 EOF
     else
-      echo "AGMSG delivery: agmsgd is running, but this project has several registered seats and none is recorded for this session, so the native channel is not used. Next: run /agmsg actas <name> (it switches to direct delivery), or arm the Monitor below."
-      return 0
+      echo "AGMSG delivery: this project has several registered seats and none is recorded for this session, so the native channel is not used and no Monitor is armed. Next: run /agmsg actas <name> (it switches to direct delivery)."
+      exit 0
     fi
   elif [ "$_n" -gt 1 ]; then
-    echo "AGMSG delivery: agmsgd is running, but this session is recorded under $_n registered seats, so the native channel is not used. Next: arm the Monitor below; the extra records stay until they are cleaned up."
-    return 0
+    echo "AGMSG delivery: this session is recorded under $_n registered seats, so the native channel is not used and no Monitor is armed. Next: run /agmsg actas <name> for the seat to use; the extra records stay until they are cleaned up."
+    exit 0
   fi
 
   if [ "$pid_unresolved" = 1 ]; then
@@ -122,11 +142,11 @@ EOF
     # under the write lock): a seat held by another live session keeps its own
     # destination.
     if agmsg_role_session_mark_messaging_blocked "$pair_team" "$pair_agent" seat_pid_unresolved "$bare_sid"; then
-      echo "AGMSG delivery: agmsgd is running, but this session's own process could not be identified, so the native channel is not used and the old delivery record for $pair_agent@$pair_team was cleared (agmsg daemon status shows seat_pid_unresolved). Next: arm the Monitor below."
+      echo "AGMSG delivery: this session's own process could not be identified, so the native channel is not used, no Monitor is armed, and the old delivery record for $pair_agent@$pair_team was cleared (agmsg daemon status shows seat_pid_unresolved). Next: run agmsg doctor."
     else
-      echo "AGMSG delivery: agmsgd is running, but this session's own process could not be identified, so the native channel is not used. Next: arm the Monitor below."
+      echo "AGMSG delivery: this session's own process could not be identified, so the native channel is not used and no Monitor is armed. Next: run agmsg doctor."
     fi
-    return 0
+    exit 0
   fi
 
   # actas_lock_claim is the write gate -- the SAME primitive watch.sh uses to
@@ -143,8 +163,8 @@ EOF
   claim_result="$(actas_lock_claim "$pair_team" "$pair_agent" "$my_instance" 2>/dev/null || true)"
   [ -n "$claim_result" ] || claim_result="unknown:claim_failed"
   if [ "$claim_result" != ok ]; then
-    echo "AGMSG delivery: agmsgd is running, but seat $pair_agent@$pair_team could not be claimed ($claim_result), so the native channel is not used. Next: arm the Monitor below."
-    return 0
+    echo "AGMSG delivery: seat $pair_agent@$pair_team could not be claimed ($claim_result), so the native channel is not used and no Monitor is armed. Next: run agmsg doctor."
+    exit 0
   fi
 
   # Write, then read back: this is the SAME check the daemon itself applies
@@ -158,10 +178,15 @@ EOF
       "$(agmsg_canonical_path "${PROJECT:-}" 2>/dev/null || printf '%s' "${PROJECT:-}")" "${TYPE:-}" "$my_instance"
   fi
   if agmsg_role_session_publish_messaging "$pair_team" "$pair_agent" "$socket" "$config_dir" "$bare_sid" "${CLAUDE_CODE_MESSAGING_TOKEN:-}"; then
-    cat <<EOF
+    if [ "$stopped" = 1 ]; then
+      echo "AGMSG delivery: this session's destination is recorded for $pair_agent@$pair_team; agmsgd will deliver to it directly once it is running."
+    else
+      cat <<EOF
 AGMSG delivery: agmsgd is running and will deliver to this session directly (native channel). No Monitor needed.
 EOF
+    fi
     exit 0
   fi
-  echo "AGMSG delivery: agmsgd is running, but the delivery record for $pair_agent@$pair_team did not take, so the native channel is not used. Next: arm the Monitor below, then run agmsg doctor."
+  echo "AGMSG delivery: the delivery record for $pair_agent@$pair_team did not take, so the native channel is not used and no Monitor is armed. Next: run agmsg doctor."
+  exit 0
 }

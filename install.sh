@@ -53,6 +53,9 @@ agmsg_load_renderable_skill_types
 . "$SCRIPT_DIR/scripts/lib/codex-config.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/stale-outcome-files.sh"
+# Warning when an update adds a built-in that a trusted plugin already replaces.
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/plugin-shadow.sh"
 
 # Types that already get their OWN dedicated skill file, written elsewhere in
 # this script -- always in that type's own format, unconditionally, gated
@@ -575,11 +578,8 @@ agmsg_install_optional_codex_chmod() {
 }
 
 agmsg_install_refresh_codex_shim() {
-  AGMSG_CODEX_SHIM_REFRESHED=false
-  if env AGMSG_CODEX_SHIM_INSTALL_QUIET=1 AGMSG_CODEX_SHIM_FORCE="${CODEX_SHIM_FORCE:-}" \
-      "$CODEX_SHIM" install >/dev/null; then
-    AGMSG_CODEX_SHIM_REFRESHED=true
-  fi
+  env AGMSG_CODEX_SHIM_INSTALL_QUIET=1 AGMSG_CODEX_SHIM_FORCE="${CODEX_SHIM_FORCE:-}" \
+      "$CODEX_SHIM" install >/dev/null
   return 0
 }
 
@@ -789,11 +789,9 @@ install_antigravity_tui_shim() {
   if [ -e "$target" ] || [ -L "$target" ]; then
     expected_owner="$(grep '^# agmsg-shim-owner: ' "$target" 2>/dev/null || true)"
     if ! grep -q '^# agmsg Antigravity TUI launcher shim$' "$target" 2>/dev/null; then
-      echo "  ~ left existing ~/.agents/bin/agy-tui untouched"
       return 0
     fi
     if [ "$expected_owner" != "$owner" ]; then
-      echo "  ~ left ~/.agents/bin/agy-tui owned by a different or legacy install untouched"
       return 0
     fi
   fi
@@ -810,11 +808,6 @@ install_antigravity_tui_shim() {
   agmsg_install_op_require || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$target"
   agmsg_install_op_require || return 1
-  if [ -n "$expected_owner" ]; then
-    echo "  + refreshed Antigravity TUI shim (~/.agents/bin/agy-tui)"
-  else
-    echo "  + installed Antigravity TUI shim (~/.agents/bin/agy-tui)"
-  fi
 }
 
 install_antigravity_skill() {
@@ -898,11 +891,6 @@ echo ""
 
 # --- Update mode ---
 if [ "$UPDATE_ONLY" = true ]; then
-  # Captured before CMD_NAME gets defaulted/resolved below, so it still means
-  # "the caller typed --cmd" specifically (#553's shim-force decision needs
-  # exactly that, not "we ended up with some skill name one way or another").
-  CMD_WAS_EXPLICIT=false
-  [ -n "$CMD_NAME" ] && CMD_WAS_EXPLICIT=true
   # Find existing install. If --cmd was passed, update exactly that skill.
   # Otherwise, scan for installs and require exactly one: a glob expands in
   # collation order, not installation order, and nothing records which
@@ -1034,9 +1022,11 @@ $_agmsg_running_team"
   # live under scripts/drivers/types/ now, so this single copy carries them too.
   # Runs under the install operation lock. The completion manifest is written
   # only after the remaining install updates below are complete.
+  AGMSG_BUILTINS_BEFORE="$(agmsg_builtin_driver_names "$SKILL_DIR")"
   agmsg_install_copy_scripts || exit 1
   agmsg_install_op_run_phase cp "$SCRIPT_DIR/CHANGELOG.md" "$SKILL_DIR/CHANGELOG.md" || exit 1
   echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
+  agmsg_plugin_shadow_warn "$SKILL_DIR" "$AGMSG_BUILTINS_BEFORE"
   # #1249: drivers/terminals/{herdr,plain,tmux}/SKILL.md used to name each
   # driver's own doc file, and a directory-scanning skill loader (e.g.
   # codex's) treated it as a standalone skill missing YAML frontmatter,
@@ -1182,20 +1172,22 @@ $_agmsg_running_team"
   # the new path; install is idempotent and overwrites only an agmsg shim (a
   # user's own codex binary fails is_agmsg_shim and is left untouched).
   #
-  # Forced ONLY when the caller typed --cmd (CMD_WAS_EXPLICIT, captured above
-  # before CMD_NAME could be defaulted/resolved to anything else): that is
-  # the documented recovery path for #553 (a different install's --cmd having
-  # clobbered the shim), and naming the target explicitly is what makes
-  # reclaiming it safe. Bare `--update` (no --cmd) resolves SKILL_DIR by
-  # scanning for an existing install WITHOUT failing closed on more than one
-  # candidate on this base (#599; the fail-closed fix is PR #659, not yet
-  # merged here) -- so on a multi-install machine, bare `--update` today can
-  # land on an install the caller never named at all. Forcing unconditionally
-  # would let THAT arbitrarily-selected install steal the shim from another
-  # one, compounding #599 with a #553-shaped consequence (review finding).
-  # Not forcing means bare `--update` still refreshes a shim this SAME
-  # install already owns (the common single-install case, unaffected either
-  # way) but no longer silently reaches past a shim someone else owns.
+  # Never forced just because the caller typed --cmd:
+  # naming the target explicitly says which install this update is for, not
+  # that its operator means to take over some OTHER, still-live install's
+  # shim (#1788 -- a second-named install's routine `--update --cmd` was
+  # silently stealing the shim from a first, still-working install). The only
+  # auto-force this still does is reading the caller's own
+  # AGMSG_CODEX_SHIM_FORCE=1, the documented explicit-override env var
+  # codex-shim-install.sh already honors directly.
+  #
+  # The #553 recovery path (reclaiming a shim whose recorded owner install no
+  # longer exists, or does not even have the dispatch script to run) stays
+  # available WITHOUT setting force at all: codex-shim-install.sh's own
+  # `install` logic checks the owner's liveness itself (see
+  # owner_install_is_gone there) before refusing. A shim owned by a live,
+  # different install is left alone either way; the update itself still
+  # succeeds, it just does not touch the shim.
   #
   # Capture status into a variable rather than piping it straight into
   # `grep -q` (measured, not theoretical): status now prints a second "owner:"
@@ -1212,12 +1204,8 @@ $_agmsg_running_team"
   CODEX_SHIM_STATUS=""
   [ -x "$CODEX_SHIM" ] && CODEX_SHIM_STATUS="$(AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null || true)"
   if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
-    CODEX_SHIM_FORCE=""
-    [ "$CMD_WAS_EXPLICIT" = true ] && CODEX_SHIM_FORCE=1
+    CODEX_SHIM_FORCE="${AGMSG_CODEX_SHIM_FORCE:-}"
     agmsg_install_refresh_codex_shim || exit 1
-    if [ "$AGMSG_CODEX_SHIM_REFRESHED" = true ]; then
-      echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
-    fi
   fi
   install_windows_helpers || exit 1
   agmsg_install_op_phase_end || exit 1
@@ -1322,9 +1310,11 @@ agmsg_install_op_run_phase agmsg_reset_trash "$TRASH_DIR" || exit 1
 # under scripts/drivers/types/ now, so this single copy carries them too.
 # Runs under the install operation lock. The completion manifest is written
 # only after the remaining install updates below are complete.
+AGMSG_BUILTINS_BEFORE="$(agmsg_builtin_driver_names "$SKILL_DIR")"
 agmsg_install_copy_scripts || exit 1
 agmsg_install_op_run_phase cp "$SCRIPT_DIR/CHANGELOG.md" "$SKILL_DIR/CHANGELOG.md" || exit 1
 echo "  ~ $AGMSG_TRASH_COUNT file(s) backed up to .trash/ (cleared on next upgrade)"
+agmsg_plugin_shadow_warn "$SKILL_DIR" "$AGMSG_BUILTINS_BEFORE"
 # Ship the external-plugin drop-in dir (just its README) so the location exists
 # post-install. A plain cp — not cp -R --delete — preserves any plugins the user
 # dropped in and their db/trusted-plugins opt-ins.
@@ -1361,9 +1351,6 @@ if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
   # different from what actually happens.
   CODEX_SHIM_FORCE=""
   agmsg_install_refresh_codex_shim || exit 1
-  if [ "$AGMSG_CODEX_SHIM_REFRESHED" = true ]; then
-    echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
-  fi
 fi
 install_windows_helpers || exit 1
 agmsg_install_op_phase_end || exit 1

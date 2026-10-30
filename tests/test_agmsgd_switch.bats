@@ -339,6 +339,17 @@ WRAPPER
   done
 }
 
+@test "a digest-mismatch failure advises --update instead of daemon start (#1761)" {
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','digest verification failed: digest mismatch: scripts/daemon/schema.sql',0);"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  assert_contains 'digest verification failed'
+  assert_contains 'install.sh --update'
+  assert_contains 'npx agmsg@latest install --update'
+  assert_contains 'Unread messages are preserved'
+  assert_lacks 'daemon start (recommended)'
+}
+
 @test "disable inventory distinguishes bridge sessions and warns about JSONL" {
   printf '{"storage":"jsonl"}\n' > "$AGMSG_CONFIG"
   # Match delivery.sh's current pid/metadata liveness contract.

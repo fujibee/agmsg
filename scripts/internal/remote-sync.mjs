@@ -5,6 +5,8 @@ import { spawn } from "node:child_process";
 import { appendFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
+import http from "node:http";
+import https from "node:https";
 import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmdirSync,
   rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -1490,6 +1492,67 @@ function endpoint(base, path) {
   return root;
 }
 
+// Raw HTTP never selects a content decoder. Reject an encoded response in
+// the headers callback, before attaching any body consumer. fetch cannot do
+// this: its decoder can receive bytes before its response promise resolves.
+export function requestIdentity(url, init = {}) {
+  const target = new URL(url);
+  const transport = target.protocol === "https:" ? https : http;
+  const signal = init.signal ?? AbortSignal.timeout(15_000);
+  const headers = { ...init.headers };
+  for (const name of Object.keys(headers)) {
+    if (name.toLowerCase() === "accept-encoding") delete headers[name];
+  }
+  headers["Accept-Encoding"] = "identity";
+  return new Promise((resolveResponse, rejectResponse) => {
+    const request = transport.request(target, {
+      method: init.method ?? "GET", headers, signal,
+    }, (response) => {
+      const encoding = response.headers["content-encoding"];
+      if (encoding !== undefined && String(encoding).trim().toLowerCase() !== "identity") {
+        response.destroy();
+        rejectResponse(new Error("response Content-Encoding is not identity; encoded responses are refused"));
+        return;
+      }
+      if (response.statusCode >= 300 && response.statusCode < 400) {
+        response.destroy();
+        rejectResponse(new Error(`HTTP ${response.statusCode} redirect is not allowed`));
+        return;
+      }
+      // Leave accepted bodies paused until the caller asks for text/JSON.
+      // A header/protocol refusal can discard the response without buffering it.
+      response.once("error", () => {});
+      let text;
+      const readText = () => text ??= (async () => {
+        const chunks = [];
+        try {
+          for await (const chunk of response) chunks.push(chunk);
+        } catch (error) { throw signal.aborted ? signal.reason : error; }
+        return new TextDecoder().decode(Buffer.concat(chunks));
+      })();
+      resolveResponse({
+        status: response.statusCode,
+        ok: response.statusCode >= 200 && response.statusCode < 300,
+        headers: { get(name) {
+          const value = response.headers[name.toLowerCase()];
+          return Array.isArray(value) ? value.join(", ") : value ?? null;
+        } },
+        text: readText,
+        json: async () => JSON.parse(await readText()),
+        discard: () => response.destroy(),
+      });
+    });
+    // Preserve fetch's public transport-error shape while retaining the native
+    // diagnosis in cause for sync status and TLS troubleshooting (#726/#744).
+    request.once("error", (error) => rejectResponse(signal.aborted
+      ? signal.reason : new TypeError("fetch failed", { cause: error })));
+    try { request.end(init.body); } catch (error) {
+      request.destroy();
+      rejectResponse(error);
+    }
+  });
+}
+
 export async function request(config, path, init = {}) {
   // The data plane no longer authenticates per request — reaching the server is
   // the permission (docs/design/remote-sync.md and the server's scopedTeamId).
@@ -1517,8 +1580,8 @@ async function send(config, path, init, authHeaders) {
   const url = endpoint(config.server_url, path);
   let response;
   try {
-    response = await fetch(url, {
-      ...init, headers, redirect: "error", signal: AbortSignal.timeout(15_000),
+    response = await requestIdentity(url, {
+      ...init, headers, signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
     error.retryable = true;
@@ -1632,15 +1695,16 @@ export function validateErrorBinding(config, status, body) {
 async function health(serverUrl, teamId) {
   let response;
   try {
-    response = await fetch(endpoint(serverUrl, "/v1/health"), {
+    response = await requestIdentity(endpoint(serverUrl, "/v1/health"), {
       headers: { "Agmsg-Team-ID": teamId, "Agmsg-Client-Version": clientVersion() },
-      redirect: "error", signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
     error.retryable = true;
     throw error;
   }
   if (response.headers.get("agmsg-protocol-version") !== PROTOCOL) {
+    response.discard();
     // AN ERROR PAGE IS NOT A PROTOCOL MISMATCH.
     //
     // A gateway that is down answers 502/503/504 with its own body and none of
@@ -4162,15 +4226,16 @@ export async function resolveTeam(args) {
 async function publicGet(serverUrl, path) {
   let response;
   try {
-    response = await fetch(endpoint(serverUrl, path), {
+    response = await requestIdentity(endpoint(serverUrl, path), {
       headers: { "Agmsg-Protocol-Version": PROTOCOL, "Agmsg-Client-Version": clientVersion() },
-      redirect: "error", signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
     error.retryable = true;
     throw error;
   }
   if (response.headers.get("agmsg-protocol-version") !== PROTOCOL) {
+    response.discard();
     throw new Error("response protocol version mismatch");
   }
   // Parsed from the raw text and the parse failure collapsed to a fixed

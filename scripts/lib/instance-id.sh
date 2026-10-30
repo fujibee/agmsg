@@ -87,7 +87,7 @@ _agmsg_pid_valid() {
   # DWORD, and the liveness path there queries the native process table via
   # tasklist rather than kill(1)'s signed pid_t — applying the POSIX bound to it
   # would call a legitimate native pid dead and its live watcher stale.
-  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) max=4294967295 ;; esac
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|UCRT*|CLANG*) max=4294967295 ;; esac
   # And it has to fit whichever of those the platform uses. The POSIX ceiling is
   # what makes the rest of this library safe: past INT32_MAX, kill(1) rejects the
   # ARGUMENT ("not a pid or valid job spec") rather than reporting ESRCH — and
@@ -312,7 +312,7 @@ _agmsg_pid_alive() {
   local pid="$1"
   _agmsg_pid_valid "$pid" || return 1
   case "${MSYSTEM:-}" in
-    MINGW*|MSYS*|CLANGARM*)
+    MINGW*|MSYS*|UCRT*|CLANG*)
       MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $pid" 2>/dev/null | grep -q "$pid"
       return $?
       ;;
@@ -462,7 +462,7 @@ agmsg_grok_instance_id() {
   #    (a fresh grok) key on the project's newest session id.
   grok_pid=$(agmsg_grok_ancestor_pid 2>/dev/null || true)
   if [ -n "$grok_pid" ]; then
-    gargs=$(ps -o args= -p "$grok_pid" 2>/dev/null || true)
+    gargs=$(ps -ww -o args= -p "$grok_pid" 2>/dev/null || true)
     gid=""
     case "$gargs" in
       *--resume*) gid=$(printf '%s' "$gargs" | sed -n 's/.*--resume[ =]*\([0-9A-Za-z][0-9A-Za-z-]*\).*/\1/p') ;;
@@ -481,7 +481,7 @@ agmsg_grok_instance_id() {
   #    no grok in its process tree). Best-effort — find any live `grok --resume
   #    <id>` whose <id> is in this project's dir.
   for gp in $(pgrep -x grok 2>/dev/null || true); do
-    gargs=$(ps -o args= -p "$gp" 2>/dev/null || true)
+    gargs=$(ps -ww -o args= -p "$gp" 2>/dev/null || true)
     case "$gargs" in *--resume*) ;; *) continue ;; esac
     gid=$(printf '%s' "$gargs" | sed -n 's/.*--resume[ =]*\([0-9A-Za-z][0-9A-Za-z-]*\).*/\1/p')
     [ -n "$gid" ] || continue
@@ -547,7 +547,7 @@ agmsg_reap_orphan_grok_watchers() {
     agmsg_grok_ancestor_pid "$pid" >/dev/null 2>&1 && continue
     kill "$pid" 2>/dev/null || true
   done <<EOF
-$(ps -eo pid=,args= 2>/dev/null)
+$(ps -ww -eo pid=,args= 2>/dev/null)
 EOF
 }
 
@@ -615,7 +615,7 @@ agmsg_instance_alive() {
   # The pid layer below is already conservative in the right direction —
   # _agmsg_pid_alive_local treats EPERM and any unrecognised kill(2) error as
   # ALIVE — so only this layer needed the extra value.
-  local token="$1"
+  local token="$1" except="${2:-}"
   [ -n "$token" ] || return 1
   if agmsg_instance_is_composite "$token"; then
     local pid="${token##*.}"
@@ -681,6 +681,9 @@ agmsg_instance_alive() {
     esac
     s="${_m#*$'\t'}"
     if [ -z "$s" ]; then undecided=1; continue; fi
+    # The asking session's own marker is not evidence about the previous owner
+    # of a bare lock (#1807): after a resume it would make that owner look alive.
+    [ -n "$except" ] && [ "$s" = "$except" ] && continue
     [ "$s" = "$token" ] && return 0
     # upgrade compat: cc-instance stores "<sid>.<pid>" but the lock holds "<sid>"
     if agmsg_instance_is_composite "$s" && [ "${s%.*}" = "$token" ]; then

@@ -36,12 +36,12 @@ _step5() {   # <file>: the delivery step of the join flow
   done
 }
 
-@test "choice screen: the choice is applied through agmsg delivery; agmsgd enables the service and keeps monitor as the fallback" {
+@test "choice screen: the choice is applied through agmsg delivery; agmsgd enables the service and has no Monitor fallback" {
   for file in "$BATS_TEST_TMPDIR/claude-code.md" "$BATS_TEST_TMPDIR/codex.md" "$ROOT/SKILL.md"; do
     screen="$(_step5 "$file")"
     grep -Fq 'agmsg delivery <choice>' <<<"$screen"
     grep -Fq 'daemon enable' <<<"$screen"
-    grep -Fq 'leaves the project on `monitor`' <<<"$screen"
+    grep -Fq 'no Monitor fallback' <<<"$screen"
     grep -Fq 'agmsg daemon disable' <<<"$screen"
   done
 }
@@ -50,7 +50,7 @@ _step5() {   # <file>: the delivery step of the join flow
   for file in "$BATS_TEST_TMPDIR/claude-code.md" "$BATS_TEST_TMPDIR/codex.md" "$ROOT/SKILL.md"; do
     grep -Fq 'If argument is "delivery" (or its alias "mode")' "$file"
     grep -Fq 'agmsg delivery status' "$file"
-    grep -Fq "this project's fallback: monitor (legacy)" "$file"
+    grep -Fq '"this project: agmsgd"' "$file"
   done
   grep -Fq 'delivery agmsgd|monitor|turn|both|off' "$BATS_TEST_TMPDIR/claude-code.md"
   grep -Fq 'delivery agmsgd|monitor|turn|off' "$BATS_TEST_TMPDIR/codex.md"

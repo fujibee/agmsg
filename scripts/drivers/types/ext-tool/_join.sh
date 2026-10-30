@@ -35,22 +35,30 @@ agmsg_join_type_parse_args() {
     FORCE=1
   fi
 
-  local driver_dir="$SCRIPT_DIR/drivers/ext-tools/$tool"
-  if [ ! -f "$driver_dir/tool.conf" ]; then
-    local available="" d
-    for d in "$SCRIPT_DIR"/drivers/ext-tools/*/; do
-      [ -f "${d}tool.conf" ] || continue
-      available="${available:+$available, }$(basename "$d")"
-    done
-    echo "Unknown ext-tool: '$tool' (available: ${available:-none})" >&2
+  local driver_dir
+  # shellcheck disable=SC1091
+  . "${SCRIPT_DIR:?}/lib/driver-registry.sh"
+  if ! driver_dir="$(agmsg_ext_tool_dir "$tool")"; then
+    echo "Unknown ext-tool: '$tool' (available: $(agmsg_ext_tool_available))" >&2
     return 1
   fi
 
   local member_config="$SKILL_DIR/ext-tools/$TEAM/$AGENT_ID.conf"
   if [ ! -f "$member_config" ]; then
+    # A tool with no `setup` has nothing to configure: the member config only
+    # needs to name the tool, so write that and join (the smallest ext-tool is
+    # tool.conf + handle).
+    if [ ! -e "$driver_dir/setup" ]; then
+      mkdir -p "$(dirname "$member_config")" || return 1
+      ( umask 077; printf 'tool=%s\n' "$tool" > "$member_config" ) || return 1
+      return 0
+    fi
     {
       echo "agmsg: '$tool' is not configured for '$AGENT_ID' in team '$TEAM' yet."
-      echo "  Follow $driver_dir/SETUP.md to configure it, then join again."
+      [ ! -f "$driver_dir/SETUP.md" ] || echo "  Follow $driver_dir/SETUP.md to configure it, or:"
+      echo "  See what it still needs: bash \"$SKILL_DIR/scripts/ext-tool.sh\" setup $TEAM $AGENT_ID $tool status"
+      echo "  Save its settings, adding any values status lists as missing: bash \"$SKILL_DIR/scripts/ext-tool.sh\" setup $TEAM $AGENT_ID $tool save"
+      echo "  Then join again."
       echo "  See how it's asked for things: bash \"$SKILL_DIR/scripts/ext-tool.sh\" usage $tool"
     } >&2
     return 1

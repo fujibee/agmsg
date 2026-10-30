@@ -18,7 +18,7 @@
 #   - order independence: a boot path first, then the action; the action
 #     first, then a boot path -- same key, one terminal call in total
 #   - herdr identifies its pane from HERDR_PANE_ID with no session id
-#   - the action commands (send / inbox / history) run the hook, and a failure
+#   - the action commands (send / inbox) run the hook, and a failure
 #     to name never fails the command
 
 setup() {
@@ -616,7 +616,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   [ "$status" -eq 0 ]
 }
 
-@test "inbox.sh and history.sh (with an agent) name the reader's pane; history without an agent does not" {
+@test "inbox.sh names the reader's pane; history.sh never does, with or without an agent" {
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   _join_unnamed team alice
   : > "$ARGV_LOG"
@@ -626,9 +626,29 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   : > "$ARGV_LOG"
   _under_tmux /tmp/s 4242 %4
   bash "$SKILL_DIR/scripts/history.sh" team alice 5 >/dev/null 2>&1 || true
-  grep -q '\[-t\] \[%4\] \[@agmsg_agent\] \[team:alice\]' "$ARGV_LOG"
+  [ "$(_terminal_calls)" -eq 0 ]
   : > "$ARGV_LOG"
   bash "$SKILL_DIR/scripts/history.sh" team >/dev/null 2>&1 || true
+  [ "$(_terminal_calls)" -eq 0 ]
+}
+
+# #1756: history's <agent> is a filter. Reading another seat's history from a
+# different pane used to rewrite that seat's pane record to the reader's pane.
+@test "history.sh <team> <other-agent> from another pane leaves the other seat's records alone" {
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  _join_unnamed team alice
+  _join_unnamed team bob
+  bash "$SKILL_DIR/scripts/inbox.sh" team alice >/dev/null 2>&1 || true
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+  before_mark="$(_mark team alice)"
+  [ -n "$before_mark" ]
+  : > "$ARGV_LOG"
+  _under_tmux /tmp/s 4242 %7
+  run bash "$SKILL_DIR/scripts/history.sh" team alice 5
+  [ "$status" -eq 0 ]
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+  [ "$(_mark team alice)" = "$before_mark" ]
+  [ -z "$(_placement team bob)" ]
   [ "$(_terminal_calls)" -eq 0 ]
 }
 

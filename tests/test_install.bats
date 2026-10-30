@@ -110,6 +110,25 @@ teardown() {
   [[ "$output" =~ "hello from install" ]]
 }
 
+@test "install: a fresh install places the Antigravity TUI shim but prints no line about it (#1815)" {
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  refute grep -qF "Antigravity TUI shim" <(printf '%s' "$output")
+  [ -f "$FAKE_HOME/.agents/bin/agy-tui" ]
+}
+
+@test "install: --update refreshes an owned Antigravity TUI shim but prints no line about it (#1815)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  local before; before="$(cat "$shim")"
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  refute grep -qF "Antigravity TUI shim" <(printf '%s' "$output")
+  local after; after="$(cat "$shim")"
+  [ "$before" = "$after" ]
+}
+
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
   skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
@@ -139,7 +158,9 @@ teardown() {
   printf '%s\n' '#!/usr/bin/env bash' 'echo user-owned' > "$shim"
   local before; before="$(cat "$shim")"
 
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  refute grep -qF "agy-tui" <(printf '%s' "$output")
   [ "$(cat "$shim")" = "$before" ]
 
   rm "$shim"
@@ -157,6 +178,18 @@ teardown() {
   local owned_before; owned_before="$(cat "$shim")"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
   [ "$(cat "$shim")" = "$owned_before" ]
+}
+
+@test "install: a second install's Antigravity TUI shim left owned by the first prints no line about it (#1815)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  local before; before="$(cat "$shim")"
+  grep -Fq "# agmsg-shim-owner: $SK/scripts/drivers/types/antigravity/agy-tui.sh" "$shim"
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  [ "$status" -eq 0 ]
+  refute grep -qF "agy-tui" <(printf '%s' "$output")
+  [ "$(cat "$shim")" = "$before" ]  # still the first install's, untouched
 }
 
 @test "install: Antigravity TUI shim replaces its symlink without writing through it" {
@@ -1540,21 +1573,72 @@ EOF
   [ -d "$sk2" ]  # the second install itself still succeeded
 }
 
-@test "install: --update --cmd can reclaim a Codex shim owned by a different install (#553)" {
+@test "install: --update --cmd does NOT steal a Codex shim owned by another LIVE install (#1788)" {
+  # Before #1788's fix, naming --cmd explicitly during --update unconditionally
+  # forced the shim reclaim (the documented #553 recovery path), so updating a
+  # second, differently-named install this way silently stole the shim from a
+  # first install that was still perfectly alive and working -- the opposite
+  # of what --cmd being explicit actually proves.
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+  HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
+  local shim="$FAKE_HOME/.agents/bin/codex"
+  local before; before="$(grep AGMSG_CODEX_SHIM_SCRIPT_DIR "$shim")"
+  printf '%s' "$before" | grep -qF "/skills/agmsg/"
+
+  local sk2="$FAKE_HOME/.agents/skills/agmsg-dfr"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-dfr --agent-type codex >/dev/null
+  grep -q "/skills/agmsg/" "$shim"  # still the first install's, per the test above
+
+  # The second install is still alive and complete (its own codex-shim.sh
+  # exists), so --update --cmd for it must leave the shim alone -- same
+  # declination as the fresh-install case -- while the update itself succeeds.
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-dfr --update
+  [ "$status" -eq 0 ]
+  refute grep -qF "refreshed Codex monitor shim" <(printf '%s' "$output")
+  local after; after="$(grep AGMSG_CODEX_SHIM_SCRIPT_DIR "$shim")"
+  [ "$before" = "$after" ]
+  [ -d "$sk2" ]  # the update itself still succeeded
+}
+
+@test "install: --update --cmd DOES reclaim a Codex shim whose owner install is gone (#1788)" {
+  # The #553 recovery case survives #1788's fix: when the install that
+  # actually owns the shim no longer exists at all, there is nothing left to
+  # steal it from, so --update --cmd may still take it over without --force.
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
 
   local sk2="$FAKE_HOME/.agents/skills/agmsg-dfr"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-dfr --agent-type codex >/dev/null
-  grep -q "/skills/agmsg/" "$shim"  # still the first install's, per the test above
+  grep -q "/skills/agmsg/" "$shim"
+  HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
+  grep -q "/skills/agmsg/" "$shim"
 
-  # --update --cmd names a specific, already-registered install explicitly --
-  # that explicit targeting is the documented recovery path, so it is allowed
-  # to reclaim the shim rather than being blocked like the fresh install above.
-  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-dfr --update
+  # Reclaim the shim for the second install first (so it genuinely owns it),
+  # then remove that second install entirely -- the state #1788 is about.
+  run env HOME="$FAKE_HOME" AGMSG_CODEX_SHIM_FORCE=1 bash "$REPO_ROOT/install.sh" --cmd agmsg-dfr --update
   [ "$status" -eq 0 ]
-  printf '%s' "$output" | grep -qF "refreshed Codex monitor shim"
+  grep -q "/skills/agmsg-dfr/" "$shim"
+  rm -rf "$sk2"
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  refute grep -qF "refreshed Codex monitor shim" <(printf '%s' "$output")
+  grep -q "/skills/agmsg/" "$shim"
+}
+
+@test "install: AGMSG_CODEX_SHIM_FORCE=1 --update --cmd reclaims a Codex shim owned by another LIVE install (#1788)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+  HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
+  local shim="$FAKE_HOME/.agents/bin/codex"
+
+  local sk2="$FAKE_HOME/.agents/skills/agmsg-dfr"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-dfr --agent-type codex >/dev/null
+  grep -q "/skills/agmsg/" "$shim"  # still the first install's, both alive
+
+  run env HOME="$FAKE_HOME" AGMSG_CODEX_SHIM_FORCE=1 bash "$REPO_ROOT/install.sh" --cmd agmsg-dfr --update
+  [ "$status" -eq 0 ]
+  refute grep -qF "refreshed Codex monitor shim" <(printf '%s' "$output")
   grep -q "/skills/agmsg-dfr/" "$shim"
 }
 
@@ -1617,7 +1701,7 @@ EOF
 
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
   [ "$status" -eq 0 ]
-  printf '%s' "$output" | grep -qF "refreshed Codex monitor shim"
+  refute grep -qF "refreshed Codex monitor shim" <(printf '%s' "$output")
   grep -q "agmsg-shim-owner" "$shim"
   grep -q "/skills/agmsg/scripts/drivers/types/codex" "$shim"
   refute grep -q "/some/stale/pre-move/path" "$shim"

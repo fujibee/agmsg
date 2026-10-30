@@ -597,7 +597,7 @@ _read_lease() {
 # (the pid is only killable in this shell's pid namespace; Windows is the #458
 # mismatch) and a no-op with no process lister.
 _reap_orphan_bridges() {
-  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) return 0 ;; esac
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|UCRT*|CLANG*) return 0 ;; esac
   command -v pgrep >/dev/null 2>&1 || return 0
   local myhost pid lease cur killed="" waited
   local lproj lpairs lhost lpid lstart lstartsrc

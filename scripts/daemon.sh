@@ -25,6 +25,8 @@ source "$SCRIPT_DIR/lib/daemon-seats.sh"
 source "$SCRIPT_DIR/lib/install-db.sh"
 # shellcheck source=lib/sqlpath.sh
 source "$SCRIPT_DIR/lib/sqlpath.sh"
+# shellcheck source=lib/node.sh
+source "$SCRIPT_DIR/lib/node.sh"
 # shellcheck source=lib/hash.sh
 source "$SCRIPT_DIR/lib/hash.sh"
 
@@ -41,6 +43,8 @@ _path_hint() {
 AGMSGD_LAUNCHCTL="${AGMSGD_LAUNCHCTL:-launchctl}"
 AGMSGD_SYSTEMCTL="${AGMSGD_SYSTEMCTL:-systemctl}"
 AGMSGD_SCHTASKS="${AGMSGD_SCHTASKS:-schtasks}"
+# Empty selects the absolute native whoami.exe under the Windows system root.
+AGMSGD_WHOAMI="${AGMSGD_WHOAMI:-}"
 
 _usage() {
   cat >&2 <<'EOF'
@@ -111,6 +115,9 @@ _with_op_lock() {
   # this shell dying silently on a write to a closed pipe (exit 141).
   trap '' PIPE
   local rc=0
+  # Set by _with_op_lock_run when it gave up before holding the lock, so a
+  # caller can tell "nothing ran" from "the action ran and failed".
+  OP_LOCK_NOT_ACQUIRED=0
   _with_op_lock_run "$@" || rc=$?
   trap - PIPE
   return "$rc"
@@ -148,7 +155,10 @@ _with_op_lock_run() {
     exec 9< "$lock_dir/out"
   fi
   attach_path="$(agmsg_sql_readfile_path "$INSTALL_DB")"
-  printf '%s\n' '.bail on' "ATTACH DATABASE '$attach_path' AS installdb;" 'BEGIN EXCLUSIVE;' '.print LOCKED' >&8
+  # A holder that releases within a short bound (another daemon command, an
+  # installer finishing) is waited out instead of failing on the first
+  # "database is locked".
+  printf '%s\n' '.bail on' ".timeout ${AGMSGD_LOCK_WAIT_MS:-5000}" "ATTACH DATABASE '$attach_path' AS installdb;" 'BEGIN EXCLUSIVE;' '.print LOCKED' >&8
   if ! IFS= read -r -t 10 ready <&9 || [ "${ready%$'\r'}" != "LOCKED" ]; then
     printf 'ROLLBACK;\n.quit\n' >&8 2>/dev/null || true
     exec 8>&-
@@ -156,7 +166,8 @@ _with_op_lock_run() {
     wait "$lock_pid" 2>/dev/null || true
     rm -f "$lock_dir/in" "$lock_dir/out"
     rmdir "$lock_dir"
-    echo "agmsg daemon: could not acquire the install operation lock" >&2
+    OP_LOCK_NOT_ACQUIRED=1
+    echo "agmsg daemon: could not acquire the install operation lock (another agmsg install or daemon command holds it). Nothing was changed; try again in a moment." >&2
     return 1
   fi
   local generation_row generation_marker manifest_sql
@@ -263,7 +274,8 @@ _register_darwin() {
   label="$(_launchd_label)"
   plist="$(_launchd_plist_path)"
   mkdir -p "$(dirname "$plist")"
-  cat > "$plist" <<EOF
+  local plist_new="$plist.new.$$"
+  cat > "$plist_new" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -283,6 +295,17 @@ _register_darwin() {
 </dict>
 </plist>
 EOF
+  # The unit does not name Node or Codex (the launcher reads them from
+  # install.db), so a re-enable that only changes those leaves the loaded unit
+  # as it is: re-registering it would stop a running agmsgd for nothing.
+  # Only when launchd really has it loaded: a plist file can outlive its
+  # registration (bootout, a new login session), and then it must be loaded.
+  if [ -f "$plist" ] && cmp -s "$plist" "$plist_new" \
+    && { "$AGMSGD_LAUNCHCTL" print "gui/$(id -u)/$label" >/dev/null 2>&1 || "$AGMSGD_LAUNCHCTL" list "$label" >/dev/null 2>&1; }; then
+    rm -f "$plist_new"
+    return 0
+  fi
+  mv "$plist_new" "$plist"
   "$AGMSGD_LAUNCHCTL" bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || "$AGMSGD_LAUNCHCTL" load "$plist"
 }
 
@@ -377,9 +400,8 @@ _start_unregistered_launcher() {
   disown 2>/dev/null || true
 }
 
-# NOT YET RUN ON WINDOWS in this environment -- written to the Windows
-# Task Scheduler contract (LogonTrigger + RestartOnFailure via XML, since plain
-# `/Create` flags do not set restart-on-failure) and shellchecked only.
+# Task Scheduler registration uses XML for per-user, headless operation and
+# resident settings that plain /Create flags cannot express.
 # schtasks takes /Create-style switches; without this Git Bash rewrites a
 # leading-slash argument into a path ("C:/Program Files/Git/Create").
 _schtasks() {
@@ -390,6 +412,20 @@ _schtasks() {
 # make the task impossible to create.
 _xml_escape() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
+# Query the Windows account token, not USERDOMAIN (which can say WORKGROUP).
+# Git Bash's POSIX whoami is deliberately never searched on PATH.
+_windows_task_user() {
+  local identity domain user
+  identity="$("$1" 2>/dev/null)" || return 1
+  identity="${identity%$'\r'}"
+  case "$identity" in ''|*$'\n'*|*$'\r'*) return 1 ;; esac
+  domain="${identity%%\\*}"
+  user="${identity#*\\}"
+  [ "$domain" != "$identity" ] && [ -n "$domain" ] && [ -n "$user" ] || return 1
+  case "$user" in *\\*) return 1 ;; esac
+  printf '%s' "$identity"
 }
 
 _register_windows() {
@@ -409,34 +445,79 @@ _register_windows() {
   fi
   native_bash="$(cygpath -w "$git_bash" 2>/dev/null || printf '%s' "$git_bash")"
   native_launcher="$(cygpath -w "$LAUNCHER" 2>/dev/null || printf '%s' "$LAUNCHER")"
-  native_bash="$(_xml_escape "$native_bash")"
-  native_launcher="$(_xml_escape "$native_launcher")"
-  local xml_utf8="$xml.utf8"
+  # An unqualified logon trigger means every user and requires elevation.
+  # Do not silently broaden the trigger when the current identity is missing.
+  local task_user system_root native_conhost arguments identity_command
+  system_root="${SYSTEMROOT:-${SystemRoot:-${WINDIR:-}}}"
+  if [ -z "$system_root" ]; then
+    echo "agmsg daemon: cannot determine the Windows system directory (SystemRoot is required); not registering the scheduled task" >&2
+    return 1
+  fi
+  system_root="${system_root%\\}"
+  system_root="${system_root%/}"
+  identity_command="$AGMSGD_WHOAMI"
+  if [ -z "$identity_command" ]; then
+    identity_command="$(cygpath -u "$system_root\\System32\\whoami.exe" 2>/dev/null || true)"
+  fi
+  if [ -z "$identity_command" ] || ! task_user="$(_windows_task_user "$identity_command")"; then
+    echo "agmsg daemon: cannot determine the Windows task user from native whoami.exe; not registering the scheduled task" >&2
+    return 1
+  fi
+  task_user="$(_xml_escape "$task_user")"
+  native_conhost="$(_xml_escape "$system_root\\System32\\conhost.exe")"
+  arguments="$(_xml_escape "--headless \"$native_bash\" \"$native_launcher\"")"
+  local xml_utf8="$xml.utf8" xml_pending="$xml.pending"
   cat > "$xml_utf8" <<EOF
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
-    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+    <LogonTrigger><Enabled>true</Enabled><UserId>$task_user</UserId></LogonTrigger>
+    <TimeTrigger>
+      <Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+      <StartBoundary>2000-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
   </Triggers>
-  <Actions>
-    <Exec>
-      <Command>$native_bash</Command>
-      <Arguments>"$native_launcher"</Arguments>
-    </Exec>
-  </Actions>
+  <Principals>
+    <Principal id="agmsgd-user">
+      <UserId>$task_user</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
   <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <RestartOnFailure>
       <Interval>PT1M</Interval>
       <Count>3</Count>
     </RestartOnFailure>
   </Settings>
+  <Actions Context="agmsgd-user">
+    <Exec>
+      <Command>$native_conhost</Command>
+      <Arguments>$arguments</Arguments>
+    </Exec>
+  </Actions>
 </Task>
 EOF
-  { printf '\xff\xfe'; iconv -f UTF-8 -t UTF-16LE "$xml_utf8"; } > "$xml"
+  if ! { printf '\xff\xfe'; iconv -f UTF-8 -t UTF-16LE "$xml_utf8"; } > "$xml_pending"; then
+    rm -f "$xml_utf8" "$xml_pending"
+    echo "agmsg daemon: could not encode the scheduled task XML" >&2
+    return 1
+  fi
   rm -f "$xml_utf8"
-  local native_xml
-  native_xml="$(cygpath -w "$xml" 2>/dev/null || printf '%s' "$xml")"
-  _schtasks /Create /TN "$name" /XML "$native_xml" /F
+  local native_xml create_status=0
+  native_xml="$(cygpath -w "$xml_pending" 2>/dev/null || printf '%s' "$xml_pending")"
+  _schtasks /Create /TN "$name" /XML "$native_xml" /F || create_status=$?
+  if [ "$create_status" -ne 0 ]; then
+    # Only a successful registration may leave the service marker behind.
+    rm -f "$xml_pending" "$xml"
+    return "$create_status"
+  fi
+  mv -f "$xml_pending" "$xml"
 }
 
 _unregister_windows() {
@@ -478,15 +559,42 @@ _unregister() {
 # Confirms Node by actually running it, the same check
 # agmsgd-launch.sh itself does -- enable/start both need this before
 # recording node_path/node_version.
-_resolve_node() {
-  local candidate="${1:-node}" resolved
-  resolved="$(command -v "$candidate" 2>/dev/null)" || return 1
+_node_usable() {
+  local resolved="$1"
+  [ -n "$resolved" ] && [ -x "$resolved" ] || return 1
   "$resolved" --disable-warning=ExperimentalWarning -e '
     const [maj, min] = process.versions.node.split(".").map(Number);
     if (maj < 22 || (maj === 22 && min < 13)) process.exit(1);
     require("node:sqlite");
   ' 2>/dev/null || return 1
-  printf '%s' "$resolved"
+}
+
+# Prints the first Node that passes _node_usable. Candidates, in order:
+# the node_path recorded in install.db, AGMSG_NODE, then what
+# agmsg_resolve_node finds (PATH, then version-manager and system
+# locations). A shell whose PATH starts with an older Node still reaches the
+# Node agmsgd was enabled with. `fresh-first` puts the recorded path last, for
+# enable, which must record the Node it is run with rather than the old one.
+_resolve_node() {
+  local order="${1:-recorded-first}" recorded="" fresh candidate
+  recorded="$(agmsg_sqlite "$INSTALL_DB" "SELECT node_path FROM meta;" 2>/dev/null || true)"
+  recorded="${recorded%$'\r'}"
+  fresh="$(agmsg_resolve_node 2>/dev/null || true)"
+  if [ "$order" = fresh-first ]; then
+    set -- "${AGMSG_NODE:-}" "$fresh" "$recorded"
+  else
+    set -- "$recorded" "${AGMSG_NODE:-}" "$fresh"
+  fi
+  for candidate in "$@"; do
+    [ -n "$candidate" ] || continue
+    # A bare name (agmsg_resolve_node's last resort) is looked up on PATH.
+    case "$candidate" in */*) ;; *) candidate="$(command -v "$candidate" 2>/dev/null)" || continue ;; esac
+    if _node_usable "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
 }
 
 _resolve_codex() {
@@ -504,6 +612,11 @@ _resolve_codex() {
       return 1
     fi
     case "$candidate" in *[[:cntrl:]]*) continue ;; esac
+    # npm puts an extensionless shim beside codex.exe on Windows; the queue
+    # gate only accepts the native executable, so record that when it exists.
+    if [ "$(_os)" = windows ]; then
+      case "$candidate" in *.[eE][xX][eE]) ;; *) [ ! -f "$candidate.exe" ] || candidate="$candidate.exe" ;; esac
+    fi
     [ -f "$candidate" ] && [ -x "$candidate" ] || continue
     if head -c 4096 "$candidate" 2>/dev/null | grep -q 'Optional Codex entrypoint shim for agmsg monitor mode'; then
       continue
@@ -518,14 +631,20 @@ _resolve_codex() {
   done
 }
 
+# Returns 0 when ready, 1 on timeout, 2 when a launcher declined because the
+# intent moved on after it read it (a unit that just registered can launch in
+# the gap before this run's own op_gen bump); the caller starts once more.
 _wait_for_ready() {
-  local target_op_gen="$1" waited=0
+  local target_op_gen="$1" since="${2:-}" waited=0
   while [ "$waited" -lt 100 ]; do
     local state op_gen
     state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
     op_gen="$(agmsg_sqlite "$INSTALL_DB" "SELECT op_gen FROM daemon_intent;" 2>/dev/null || true)"
     if [ "$state" = "ready" ] && [ "$op_gen" = "$target_op_gen" ]; then
       return 0
+    fi
+    if [ -n "$since" ] && [ "$state" != "ready" ] && [ "$(agmsg_sqlite "$INSTALL_DB" "SELECT count(*) FROM daemon_start_attempts WHERE at >= '$since' AND reason = 'intent changed since the launcher read it';" 2>/dev/null || echo 0)" != 0 ]; then
+      return 2
     fi
     waited=$((waited + 1))
     sleep 0.1
@@ -548,7 +667,9 @@ cmd_start() {
   _ensure_install_db_schema
   local state
   state="$(agmsg_sqlite "$INSTALL_DB" "SELECT state FROM daemon_owner;")"
-  if [ "$state" = "ready" ] && node "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
+  local running_node
+  running_node="$(_resolve_node 2>/dev/null || true)"
+  if [ "$state" = "ready" ] && [ -n "$running_node" ] && "$running_node" "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" >/dev/null 2>&1; then
     echo "agmsg daemon start: already running"
     agmsg_daemon_seat_report start
     _path_hint status
@@ -561,8 +682,8 @@ cmd_start() {
   # intent when there is none.
   local recorded_node found_node found_version record_node_sql=""
   recorded_node="$(agmsg_sqlite "$INSTALL_DB" "SELECT node_path FROM meta;" 2>/dev/null || true)"
-  if [ -z "$recorded_node" ] || [ ! -x "$recorded_node" ]; then
-    found_node="$(_resolve_node node)" || {
+  if ! _node_usable "$recorded_node"; then
+    found_node="$(_resolve_node)" || {
       echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed. Install Node from https://nodejs.org/en/download, then run agmsg daemon start." >&2
       _path_hint start >&2
       return 1
@@ -589,15 +710,29 @@ cmd_start() {
     echo "agmsg daemon start: agmsgd was turned off or changed while waiting; left as it is now"
     return 0
   fi
-  if _service_registered; then
-    if ! _start_registered_service; then
-      echo "agmsg daemon start: the registered service manager could not start agmsgd" >&2
-      return 1
+  local attempt=1 ready_rc=0 since
+  while :; do
+    since="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+    if _service_registered; then
+      if ! _start_registered_service; then
+        echo "agmsg daemon start: the registered service manager could not start agmsgd" >&2
+        return 1
+      fi
+    else
+      _start_unregistered_launcher
     fi
-  else
-    _start_unregistered_launcher
-  fi
-  if _wait_for_ready "$new_op_gen"; then
+    ready_rc=0
+    _wait_for_ready "$new_op_gen" "$since" || ready_rc=$?
+    # A launcher that read the intent just before this run bumped it declined;
+    # the intent is final now, so one more start settles it.
+    if [ "$ready_rc" = 2 ] && [ "$attempt" = 1 ]; then
+      attempt=2
+      sleep 1
+      continue
+    fi
+    break
+  done
+  if [ "$ready_rc" = 0 ]; then
     echo "agmsg daemon start: running"
     agmsg_daemon_seat_report start
     _path_hint status
@@ -623,7 +758,10 @@ cmd_start() {
 _request_stop_over_socket() {
   local socket="$1"
   [ -n "$socket" ] || return 0
-  node -e '
+  local stop_node
+  stop_node="$(_resolve_node 2>/dev/null || true)"
+  [ -n "$stop_node" ] || return 0
+  "$stop_node" -e '
     const net = require("node:net");
     const s = net.createConnection(process.argv[1]);
     const done = () => { try { s.destroy(); } catch {} process.exit(0); };
@@ -681,7 +819,7 @@ cmd_status() {
     return 0
   fi
   local node_path
-  node_path="$(_resolve_node node 2>/dev/null || true)"
+  node_path="$(_resolve_node 2>/dev/null || true)"
   if [ -n "$node_path" ]; then
     local status_rc=0
     if [ "$json" = true ]; then
@@ -728,7 +866,7 @@ cmd_enable() {
     return 1
   fi
   local node_path
-  node_path="$(_resolve_node node)" || {
+  node_path="$(_resolve_node fresh-first)" || {
     echo "agmsg daemon enable: no usable Node found (need >= 22.13.0 with node:sqlite). Install one and try again." >&2
     echo 'Install Node from https://nodejs.org/en/download, then run agmsg daemon enable.' >&2
     _path_hint enable >&2
@@ -741,11 +879,23 @@ cmd_enable() {
   if [ -z "$codex_path" ]; then
     echo 'agmsg daemon enable: no usable Codex executable found; Codex seats stay blocked until enabled again with Codex available.' >&2
   fi
+  # Whether a unit was already registered decides what a failure may undo: a
+  # unit that was there before this run (and may be running agmsgd) is left
+  # alone; only one this run created is removed.
+  local was_registered=0
+  ! _service_registered || was_registered=1
   _with_op_lock "
     UPDATE meta SET node_path = '$(printf '%s' "$node_path" | sed "s/'/''/g")', node_version = '$node_version', codex_path = '$(printf '%s' "$codex_path" | sed "s/'/''/g")';
     UPDATE daemon_intent SET desired = 'on';
   " _register "$node_path" || {
-    if ! _with_op_lock "" _unregister; then
+    if [ "$OP_LOCK_NOT_ACQUIRED" = 1 ]; then
+      # Nothing ran, so there is nothing to clean up -- and unregistering now
+      # would stop the daemon that is running.
+      return 1
+    fi
+    if [ "$was_registered" = 1 ]; then
+      echo "agmsg daemon enable: could not update the registered service; the previous registration was left in place" >&2
+    elif ! _with_op_lock "" _unregister; then
       echo "agmsg daemon enable: could not clean up the partially registered service" >&2
     fi
     return 1
@@ -894,7 +1044,7 @@ cmd_offer() {
     echo "agmsgd=unavailable reason=systemd user services are not available here, so agmsgd cannot start on its own"
     return 0
   fi
-  node_path="$(_resolve_node node)" || {
+  node_path="$(_resolve_node)" || {
     echo "agmsgd=unavailable reason=agmsgd needs Node 22.13 or newer with node:sqlite, and none was found"
     return 0
   }

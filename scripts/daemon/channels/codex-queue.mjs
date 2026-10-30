@@ -232,6 +232,8 @@ function bridgeState(runDir, team, agent, projects) {
     // lease or start-witness comparison, which necessarily fails for dead PIDs.
     try { process.kill(Number(pidText), 0); } catch (error) {
       if (error?.code === "ESRCH") { stoppedReason = `bridge_stopped:${pidPath}:pid_absent`; continue; }
+      // EPERM does not prove another owner (an elevated bridge of this user
+      // can also refuse the probe), so the lease decides below.
       if (error?.code !== "EPERM") return unknown(pidPath, `pid_probe_failed:${error?.code ?? "unknown"}`);
     }
     if (!projects.some((project) => sameProject(project, fields.project))) return unknown(metaPath, "project_missing_or_mismatch");
@@ -257,9 +259,22 @@ function bridgeState(runDir, team, agent, projects) {
     const pairHashes = fields.identities.split(",").map((pair) => createHash("sha1").update(pair.replace("/", "\t")).digest("hex")).sort();
     const expectedPairs = createHash("sha1").update(pairHashes.join("\n")).digest("hex");
     const expectedProject = createHash("sha1").update(fields.project).digest("hex");
-    if (lease.v !== "1" || lease.pid !== pidText || lease.project !== expectedProject || lease.pairs !== expectedPairs || lease.host !== hostname() || !lease.start) return unknown(leasePath, "identity_mismatch");
+    // A readable, well-formed lease that names a different bridge says the
+    // live PID was reused by another process: this pair has no bridge. Only a
+    // lease or witness that cannot be read stays unknown.
+    const sha1 = /^[0-9a-f]{40}$/;
     const startPrefix = lease.startsrc === "proc" ? "linux" : lease.startsrc === "ps" ? "darwin" : lease.startsrc === "pwsh" ? "windows" : "";
-    if (!startPrefix || processStartWitness(Number(pidText)) !== `${startPrefix}:${lease.start}`) return unknown(leasePath, "start_witness_missing_or_mismatch");
+    if (lease.v !== "1" || lease.pid !== pidText || !lease.start || !sha1.test(lease.project) || !sha1.test(lease.pairs) || !lease.host || !startPrefix) return unknown(leasePath, "fields_missing_or_invalid");
+    if (lease.project !== expectedProject || lease.pairs !== expectedPairs || lease.host !== hostname()) {
+      stoppedReason = `bridge_stopped:${pidPath}:pid_reused`;
+      continue;
+    }
+    const witness = processStartWitness(Number(pidText));
+    if (!witness) return unknown(leasePath, "start_witness_unavailable");
+    if (witness !== `${startPrefix}:${lease.start}`) {
+      stoppedReason = `bridge_stopped:${pidPath}:pid_reused`;
+      continue;
+    }
     try {
       process.kill(Number(pidText), 0);
       return { state: "running", reason: "bridge_running" };
@@ -330,6 +345,7 @@ export function createCodexQueueChannel({
   windowsGate = checkWindowsCodexQueueGate,
 }) {
   let stopped = false;
+  let rosterReasons = new Map();
   let activeController = null;
   let activePoll = null;
   let activePollSignal;
@@ -545,6 +561,29 @@ export function createCodexQueueChannel({
     }, now);
   }
 
+  // A team whose roster entry is unusable is skipped alone. Its reason is kept
+  // as a team-level row (agent "") so `agmsg daemon status` shows it, and logged
+  // only when it first appears or changes.
+  function recordSkippedTeams(skipped) {
+    const current = new Map(skipped.map(({ team, reason }) => [team, reason]));
+    for (const [team, reason] of current) {
+      if (rosterReasons.get(team) === reason) continue;
+      log(`channel: Codex roster for team ${team} skipped (${reason})`);
+      saveSeat(db, { seat: seatKey(team, ""), state: "blocked", reason }, now);
+    }
+    // Compare against the stored rows, not only this process's memory: a row
+    // written before a restart must go once its team is readable again.
+    for (const { seat } of db.prepare("SELECT seat FROM beta_codex_seat").all()) {
+      let parsed;
+      try { parsed = JSON.parse(seat); } catch { continue; }
+      if (Array.isArray(parsed) && parsed[1] === "" && !current.has(parsed[0])) {
+        assertPollActive();
+        withImmediateTransaction(db, () => db.prepare("DELETE FROM beta_codex_seat WHERE seat = ?").run(seat));
+      }
+    }
+    rosterReasons = current;
+  }
+
   async function pollOnce({ signal } = {}) {
     if (stopped) return;
     if (activePoll && !activePollSignal?.aborted) return activePoll;
@@ -563,8 +602,10 @@ export function createCodexQueueChannel({
       for (const row of pendingRows) {
         if (pendingObservation(row, now, observeGroup, timeoutMs, pendingAges).childrenUnresolved && row.codex_home) blockedCodexHomes.add(homeKey(row.codex_home));
       }
+      recordSkippedTeams(roster.skipped ?? []);
       const seats = [...roster.seats];
       const registeredKeys = new Set(seats.map(({ team, agent }) => seatKey(team, agent)));
+      for (const { team } of roster.skipped ?? []) registeredKeys.add(seatKey(team, ""));
       const unsettledSeats = pendingSeats(db);
       const pendingKeys = new Set(unsettledSeats.map(({ team, agent }) => seatKey(team, agent)));
       for (const { team, agent } of unsettledSeats) {

@@ -107,9 +107,60 @@ _write_completion_record() {
   _seed_install_db
   local no_node_path
   no_node_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -E '/(node|nodejs)([^/]*)?$' | while read -r d; do [ -x "$d/node" ] || printf '%s\n' "$d"; done | paste -sd: -)"
-  PATH="$no_node_path" run bash "$DAEMON" status
+  # A bogus AGMSG_NODE and no recorded Node leave nothing to run (system
+  # locations like /opt/homebrew/bin are searched too, so PATH alone cannot).
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = NULL;"
+  AGMSG_NODE="$TEST_SKILL_DIR/no-such-node" PATH="$no_node_path" run bash "$DAEMON" status
   [ "$status" -eq 0 ]
   [[ "$output" == *"no usable Node"* ]]
+}
+
+# Fake nodes: one that fails the version check (too old), one that is the real
+# node under another path.
+_node_fixture() {
+  mkdir -p "$TEST_SKILL_DIR/old-bin" "$TEST_SKILL_DIR/good-a" "$TEST_SKILL_DIR/good-b"
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_SKILL_DIR/old-bin/node"
+  chmod +x "$TEST_SKILL_DIR/old-bin/node"
+  ln -sf "$(command -v node)" "$TEST_SKILL_DIR/good-a/node"
+  ln -sf "$(command -v node)" "$TEST_SKILL_DIR/good-b/node"
+}
+
+@test "daemon.sh status: an older Node first on PATH still runs the Node recorded at enable" {
+  _seed_install_db
+  _node_fixture
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = '$TEST_SKILL_DIR/good-a/node';"
+  PATH="$TEST_SKILL_DIR/old-bin:$PATH" run bash "$DAEMON" status
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "never been started"
+}
+
+@test "daemon.sh status: with the recorded Node gone, AGMSG_NODE is used" {
+  _seed_install_db
+  _node_fixture
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = '$TEST_SKILL_DIR/gone/node';"
+  AGMSG_NODE="$TEST_SKILL_DIR/good-b/node" PATH="$TEST_SKILL_DIR/old-bin:$PATH" run bash "$DAEMON" status
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "never been started"
+}
+
+@test "daemon.sh status: with neither recorded nor AGMSG_NODE usable, the Node on PATH is used" {
+  _seed_install_db
+  _node_fixture
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = '$TEST_SKILL_DIR/gone/node';"
+  PATH="$TEST_SKILL_DIR/good-a:$PATH" run bash "$DAEMON" status
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "never been started"
+}
+
+@test "daemon.sh start: a recorded Node that fails the check is replaced by a usable one and recorded" {
+  _seed_install_db
+  _write_completion_record
+  _node_fixture
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = '$TEST_SKILL_DIR/old-bin/node';"
+  AGMSG_NODE="$TEST_SKILL_DIR/good-b/node" _run_with_deadline 20 bash "$DAEMON" start
+  _assert_start_result 'running'
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT node_path FROM meta;")" = "$TEST_SKILL_DIR/good-b/node" ]
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
 }
 
 # A bare `run` has no ceiling of its own: a real hang in the command
@@ -255,10 +306,17 @@ case "$1" in
     [ "${AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER:-0}" != 1 ] || exit 1
     rm -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}"
     ;;
-  list) [ -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}" ] ;;
+  list|print) [ -f "${AGMSGD_FAKE_LAUNCHD_MARKER:?}" ] ;;
   kickstart)
     printf '%s\n' "$*" >> "${AGMSGD_FAKE_LAUNCHD_EVENTS:?}"
     if [ "${AGMSGD_FAKE_LAUNCHD_FAIL_UNREGISTER:-0}" = 1 ]; then exit 1; fi
+    # A launcher that read the intent just before enable bumped it: it
+    # declines the way agmsgd does, and nothing is left running.
+    if [ -n "${AGMSGD_FAKE_LAUNCHD_DECLINE_ONCE:-}" ] && [ ! -f "$AGMSGD_FAKE_LAUNCHD_DECLINE_ONCE" ]; then
+      touch "$AGMSGD_FAKE_LAUNCHD_DECLINE_ONCE"
+      sqlite3 "${AGMSGD_FAKE_INSTALL_DB:?}" "INSERT INTO daemon_start_attempts (at, reason, executor_pid) VALUES (strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'intent changed since the launcher read it', 1);"
+      exit 0
+    fi
     bash "${AGMSGD_TEST_LAUNCHER:?}" </dev/null >/dev/null 2>&1 3>&- &
     ;;
 esac
@@ -268,19 +326,30 @@ EOF
 }
 
 _fake_windows_manager() {
+  export USERDOMAIN='WORKGROUP' USERNAME='environment-user'
+  export AGMSGD_FAKE_IDENTITY='DOMAIN & <test>\user & "test"'
+  export AGMSGD_WHOAMI="$TEST_SKILL_DIR/fake-windows/whoami.exe"
+  export SystemRoot='C:\Windows & Root' SYSTEMROOT='C:\Windows & Root'
   mkdir -p "$TEST_SKILL_DIR/fake-windows"
+  cat > "$TEST_SKILL_DIR/fake-windows/whoami.exe" <<'EOF'
+#!/usr/bin/env bash
+[ "${AGMSGD_FAKE_WHOAMI_FAIL:-0}" != 1 ] || exit 1
+printf '%s\r\n' "${AGMSGD_FAKE_IDENTITY-}"
+EOF
   cat > "$TEST_SKILL_DIR/fake-windows/uname" <<'EOF'
 #!/usr/bin/env bash
 echo MINGW64_NT-10.0
 EOF
   cat > "$TEST_SKILL_DIR/fake-windows/schtasks" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "${AGMSGD_FAKE_TASK_CALLS:-/dev/null}"
 case "$1" in
   /Create)
     while [ "$#" -gt 0 ]; do
       if [ "$1" = /XML ]; then cp "$2" "${AGMSGD_FAKE_TASK_XML:?}"; fi
       shift
     done
+    [ "${AGMSGD_FAKE_CREATE_FAIL:-0}" != 1 ] || { echo 'ERROR: Access is denied.' >&2; exit 5; }
     touch "${AGMSGD_FAKE_TASK_MARKER:?}"
     ;;
   /Run) bash "${AGMSGD_TEST_LAUNCHER:?}" </dev/null >/dev/null 2>&1 3>&- & ;;
@@ -293,9 +362,13 @@ EOF
 #!/usr/bin/env bash
 printf '%s\n' "$2" >> "${AGMSGD_FAKE_CYGPATH_LOG:?}"
 if [ "$1 $2" = "-m /" ]; then printf '%s/\n' "${AGMSGD_FAKE_GIT_ROOT:?}"; exit 0; fi
+if [ "$1" = -u ] && [[ "$2" = *'\System32\whoami.exe' ]]; then
+  printf '%s/whoami.exe\n' "$(dirname "$0")"
+  exit 0
+fi
 printf '%s\n' "$2"
 EOF
-  chmod +x "$TEST_SKILL_DIR/fake-windows/uname" "$TEST_SKILL_DIR/fake-windows/schtasks" "$TEST_SKILL_DIR/fake-windows/cygpath"
+  chmod +x "$TEST_SKILL_DIR/fake-windows/uname" "$TEST_SKILL_DIR/fake-windows/schtasks" "$TEST_SKILL_DIR/fake-windows/cygpath" "$TEST_SKILL_DIR/fake-windows/whoami.exe"
 }
 
 @test "daemon.sh enable/disable: registers a resident unit (via a fake launchctl on macOS) and cleans it up" {
@@ -493,6 +566,29 @@ EOF
   [ "$(sqlite3 "$db" "SELECT codex_path FROM meta;")" = "/already/recorded/codex" ]
 }
 
+@test "daemon.sh _resolve_codex: on Windows the codex.exe beside an extensionless shim is recorded" {
+  local fake="$TEST_SKILL_DIR/npm-codex" fns="$SCRIPTS/daemon-fns.sh"
+  mkdir -p "$fake"
+  awk '/^case "\$\{1:-\}" in/ {exit} {print}' "$DAEMON" > "$fns"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake/codex"
+  printf 'MZ fixture native binary\n' > "$fake/codex.exe"
+  chmod +x "$fake/codex" "$fake/codex.exe"
+  run bash -c 'set -u; source "$1"; _os() { echo windows; }; AGMSG_REAL_CODEX="$2/codex" _resolve_codex' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ "$output" -ef "$fake/codex.exe" ]
+  [ "${output##*/}" = "codex.exe" ]
+  rm "$fake/codex.exe"
+  run bash -c 'set -u; source "$1"; _os() { echo windows; }; AGMSG_REAL_CODEX="$2/codex" _resolve_codex' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ "$output" -ef "$fake/codex" ]
+  [ "${output##*/}" = "codex" ]
+  printf 'MZ fixture native binary\n' > "$fake/codex.exe"
+  chmod +x "$fake/codex.exe"
+  run bash -c 'set -u; source "$1"; _os() { echo linux; }; AGMSG_REAL_CODEX="$2/codex" _resolve_codex' _ "$fns" "$fake"
+  [ "$output" -ef "$fake/codex" ]
+  [ "${output##*/}" = "codex" ]
+}
+
 @test "daemon.sh start --only-if-op-gen: a stop or disable after that op_gen is not undone" {
   _seed_install_db
   _write_completion_record
@@ -519,23 +615,40 @@ EOF
   export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"
   export AGMSGD_FAKE_GIT_ROOT="$TEST_SKILL_DIR/fake-windows/Git & Root"
   # Without a Git Bash to name, nothing is registered.
-  PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+  AGMSGD_WHOAMI= PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
     _run_with_deadline 15 bash "$DAEMON" enable
   [ "$status" -ne 0 ]
   grep -q "cannot find Git Bash" <<<"$output"
   [ ! -f "$marker" ]
   mkdir -p "$AGMSGD_FAKE_GIT_ROOT/bin"
   : > "$AGMSGD_FAKE_GIT_ROOT/bin/bash.exe"
-  PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
+  AGMSGD_WHOAMI= PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_TASK_XML="$capture" AGMSGD_FAKE_TASK_MARKER="$marker" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" \
     _run_with_deadline 15 bash "$DAEMON" enable
   [ "$status" -eq 0 ]
   # The task runs Git Bash by full path, not a bare bash.exe that Task
   # Scheduler would resolve to WSL's launcher in System32.
   # A & in the path is escaped in the XML.
-  iconv -f UTF-16LE -t UTF-8 "$capture" | grep -Fq "<Command>${AGMSGD_FAKE_GIT_ROOT//&/&amp;}/bin/bash.exe</Command>"
+  local decoded="$TEST_SKILL_DIR/fake-windows/decoded.xml"
+  iconv -f UTF-16LE -t UTF-8 "$capture" > "$decoded"
+  grep -Fq '<Command>C:\Windows &amp; Root\System32\conhost.exe</Command>' "$decoded"
+  grep -Fq "<Arguments>--headless &quot;${AGMSGD_FAKE_GIT_ROOT//&/&amp;}/bin/bash.exe&quot; &quot;$SCRIPTS/daemon/agmsgd-launch.sh&quot;</Arguments>" "$decoded"
+  grep -Fq '<LogonTrigger><Enabled>true</Enabled><UserId>DOMAIN &amp; &lt;test&gt;\user &amp; &quot;test&quot;</UserId></LogonTrigger>' "$decoded"
+  grep -Fq '<Principal id="agmsgd-user">' "$decoded"
+  grep -Fq '<UserId>DOMAIN &amp; &lt;test&gt;\user &amp; &quot;test&quot;</UserId>' "$decoded"
+  grep -Fq '<LogonType>InteractiveToken</LogonType>' "$decoded"
+  grep -Fq '<RunLevel>LeastPrivilege</RunLevel>' "$decoded"
+  grep -Fq '<Actions Context="agmsgd-user">' "$decoded"
+  grep -Fq '<TimeTrigger>' "$decoded"
+  grep -Fq '<StartBoundary>2000-01-01T00:00:00</StartBoundary>' "$decoded"
+  grep -Fq '<Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>' "$decoded"
+  grep -Fq '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>' "$decoded"
+  grep -Fq '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>' "$decoded"
+  grep -Fq '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>' "$decoded"
+  grep -Fq '<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>' "$decoded"
   # Every path named inside SQL went through the native-path conversion.
   grep -Fq "$TEST_SKILL_DIR/run/install-manifest.json" "$AGMSGD_FAKE_CYGPATH_LOG"
   grep -Fq "$TEST_SKILL_DIR/run/install.db" "$AGMSGD_FAKE_CYGPATH_LOG"
+  grep -Fq 'C:\Windows & Root\System32\whoami.exe' "$AGMSGD_FAKE_CYGPATH_LOG"
   [ "$(od -An -tx1 -N2 "$capture" | tr -d ' \n')" = "fffe" ]
   iconv -f UTF-16LE -t UTF-8 "$capture" | grep -q 'encoding="UTF-16"'
 
@@ -543,7 +656,7 @@ EOF
     _run_with_deadline 15 bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ ! -f "$marker" ]
-  [ ! -f "$TEST_SKILL_DIR/run/agmsgd-$(_unit_id).xml" ]
+  [ -z "$(ls "$TEST_SKILL_DIR/run/"agmsgd-*.xml 2>/dev/null || true)" ]
 }
 
 # A wrapper named `sqlite3`, placed ahead of the real one on PATH, that
@@ -668,4 +781,168 @@ EOF
     run bash "$DAEMON" disable
   [ "$status" -eq 0 ]
   [ ! -e "$unit" ]
+}
+
+
+@test "daemon.sh Windows registration: missing user identity refuses any-user registration" {
+  _seed_install_db
+  _write_completion_record
+  _fake_windows_manager
+  export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"
+  export AGMSGD_FAKE_GIT_ROOT="$TEST_SKILL_DIR/fake-windows/Git"
+  export AGMSGD_FAKE_TASK_CALLS="$TEST_SKILL_DIR/fake-windows/calls"
+  mkdir -p "$AGMSGD_FAKE_GIT_ROOT/bin"
+  : > "$AGMSGD_FAKE_GIT_ROOT/bin/bash.exe"
+  local failure
+  for failure in exit empty malformed; do
+    export AGMSGD_FAKE_WHOAMI_FAIL=0
+    case "$failure" in
+      exit) export AGMSGD_FAKE_WHOAMI_FAIL=1 ;;
+      empty) export AGMSGD_FAKE_IDENTITY='' ;;
+      malformed) export AGMSGD_FAKE_IDENTITY='not-a-qualified-user' ;;
+    esac
+    PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" \
+      _run_with_deadline 15 bash "$DAEMON" enable
+    [ "$status" -ne 0 ]
+    grep -q 'cannot determine the Windows task user' <<< "$output"
+    [ ! -e "$AGMSGD_FAKE_TASK_CALLS" ]
+    [ -z "$(ls "$TEST_SKILL_DIR/run/"*.xml 2>/dev/null || true)" ]
+  done
+}
+
+@test "daemon.sh Windows registration: failed Create leaves no registration marker or temporary XML" {
+  _seed_install_db
+  _write_completion_record
+  _fake_windows_manager
+  export AGMSGD_FAKE_CYGPATH_LOG="$TEST_SKILL_DIR/fake-windows/cygpath.log"
+  export AGMSGD_FAKE_GIT_ROOT="$TEST_SKILL_DIR/fake-windows/Git"
+  export AGMSGD_FAKE_TASK_CALLS="$TEST_SKILL_DIR/fake-windows/calls"
+  mkdir -p "$AGMSGD_FAKE_GIT_ROOT/bin"
+  : > "$AGMSGD_FAKE_GIT_ROOT/bin/bash.exe"
+  PATH="$TEST_SKILL_DIR/fake-windows:$PATH" AGMSGD_SCHTASKS="$TEST_SKILL_DIR/fake-windows/schtasks" AGMSGD_FAKE_CREATE_FAIL=1 AGMSGD_FAKE_TASK_XML="$TEST_SKILL_DIR/fake-windows/captured.xml" \
+    _run_with_deadline 15 bash "$DAEMON" enable
+  [ "$status" -ne 0 ]
+  grep -q 'Access is denied' <<< "$output"
+  [ -z "$(ls "$TEST_SKILL_DIR/run/"*.xml* 2>/dev/null || true)" ]
+  ! grep -q '^/Run' "$AGMSGD_FAKE_TASK_CALLS"
+}
+
+@test "daemon.sh Windows minute trigger: launcher exits promptly after an explicit stop" {
+  _seed_install_db
+  _write_completion_record
+  _run_with_deadline 15 bash "$DAEMON" start
+  _assert_start_result 'running'
+  _run_with_deadline 15 bash "$DAEMON" stop
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT desired FROM daemon_intent;')" = off ]
+  local probe="$TEST_SKILL_DIR/node-after-stop" invoked="$TEST_SKILL_DIR/node-invoked"
+  printf '#!/usr/bin/env bash\n: > "%s"\nexit 1\n' "$invoked" > "$probe"
+  chmod +x "$probe"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path = '$probe';"
+  _run_with_deadline 3 bash "$SCRIPTS/daemon/agmsgd-launch.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$invoked" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" 'SELECT state FROM daemon_owner;')" = none ]
+}
+
+_enable_env() {
+  export AGMSGD_LAUNCHCTL="$(_fake_launchctl)" AGMSGD_FAKE_LAUNCHD_MARKER="$TEST_SKILL_DIR/fake-launchd/registered" AGMSGD_FAKE_LAUNCHD_EVENTS="$TEST_SKILL_DIR/fake-launchd/events" AGMSGD_TEST_LAUNCHER="$SCRIPTS/daemon/agmsgd-launch.sh" AGMSGD_FAKE_INSTALL_DB="$TEST_SKILL_DIR/run/install.db"
+}
+
+@test "daemon.sh enable: a busy install operation lock fails without stopping or unregistering a running daemon" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  _enable_env
+  _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  local pid
+  pid="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT executor_pid FROM daemon_owner;")"
+  kill -0 "$pid"
+  : > "$TEST_SKILL_DIR/fake-launchd/events"
+
+  # Another process holds the operation lock for longer than enable will wait.
+  ( printf 'BEGIN EXCLUSIVE;\n.shell sleep 6\nROLLBACK;\n' | sqlite3 "$TEST_SKILL_DIR/run/install-op.lock.db" >/dev/null 2>&1 ) &
+  local holder=$!
+  sleep 1
+  AGMSGD_LOCK_WAIT_MS=500 _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -qF "could not acquire the install operation lock"
+  printf '%s' "$output" | grep -qF "Nothing was changed"
+  wait "$holder" || true
+
+  kill -0 "$pid"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;")" = "ready" ]
+  refute grep -q 'bootout\|unload' "$TEST_SKILL_DIR/fake-launchd/events"
+  [ -f "$TEST_SKILL_DIR/fake-launchd/registered" ]
+  bash "$DAEMON" disable >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh enable: a lock held briefly is waited out" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  _enable_env
+  ( printf 'BEGIN EXCLUSIVE;\n.shell sleep 2\nROLLBACK;\n' | sqlite3 "$TEST_SKILL_DIR/run/install-op.lock.db" >/dev/null 2>&1 ) &
+  local holder=$!
+  sleep 0.5
+  AGMSGD_LOCK_WAIT_MS=8000 _run_with_deadline 40 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "running"
+  wait "$holder" || true
+  bash "$DAEMON" disable >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh enable: re-enabling with only a different Node path leaves the running daemon and the loaded unit alone" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  _enable_env
+  _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  local pid gen
+  pid="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT executor_pid FROM daemon_owner;")"
+  gen="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT gen FROM daemon_owner;")"
+  : > "$TEST_SKILL_DIR/fake-launchd/events"
+
+  mkdir -p "$TEST_SKILL_DIR/node-other"
+  ln -s "$(command -v node)" "$TEST_SKILL_DIR/node-other/node"
+  PATH="$TEST_SKILL_DIR/node-other:$PATH" _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "already running"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT node_path FROM meta;")" = "$TEST_SKILL_DIR/node-other/node" ]
+  kill -0 "$pid"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT gen FROM daemon_owner;")" = "$gen" ]
+  refute grep -q '^call \(bootout\|unload\|bootstrap\|load\)' "$TEST_SKILL_DIR/fake-launchd/events"
+  bash "$DAEMON" disable >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh enable: a launcher that declined because the intent changed is followed by one more start" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  _enable_env
+  AGMSGD_FAKE_LAUNCHD_DECLINE_ONCE="$TEST_SKILL_DIR/fake-launchd/declined" _run_with_deadline 40 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF "running"
+  [ "$(grep -c '^call kickstart' "$TEST_SKILL_DIR/fake-launchd/events")" -eq 2 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT state FROM daemon_owner;")" = "ready" ]
+  bash "$DAEMON" disable >/dev/null 2>&1 || true
+}
+
+@test "daemon.sh enable: an identical plist that launchd no longer has loaded is bootstrapped again" {
+  [ "$(uname -s)" = "Darwin" ] || skip "this test's fake stands in for launchd specifically"
+  _seed_install_db
+  _write_completion_record
+  _enable_env
+  _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  bash "$DAEMON" stop >/dev/null 2>&1 || true
+  rm -f "$TEST_SKILL_DIR/fake-launchd/registered"
+  : > "$TEST_SKILL_DIR/fake-launchd/events"
+  _run_with_deadline 30 bash "$DAEMON" enable
+  [ "$status" -eq 0 ]
+  grep -q '^call bootstrap' "$TEST_SKILL_DIR/fake-launchd/events"
+  [ -f "$TEST_SKILL_DIR/fake-launchd/registered" ]
+  bash "$DAEMON" disable >/dev/null 2>&1 || true
 }
