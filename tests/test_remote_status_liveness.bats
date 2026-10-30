@@ -24,7 +24,22 @@ setup() {
 }
 
 teardown() {
-  local pid
+  local pid pidfile="$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+  # An engine `sync start` detached is not a child of this shell, so a test that
+  # forgot remember_engine_pid would leave it running for days. Its pidfile names
+  # it; stop that pid, but only when its argv still names this test's own
+  # directory (the pid could have been recycled).
+  if [ -r "$pidfile" ]; then
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    case "$pid" in
+      ""|*[!0-9]*) ;;
+      *)
+        case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
+          *"$TEST_SKILL_DIR/"*) kill "$pid" 2>/dev/null || true ;;
+        esac
+        ;;
+    esac
+  fi
   for pid in $ENGINE_PIDS; do
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -727,6 +742,10 @@ write_windows_spelling_fixtures() {
     AGMSG_TEST_LOG_READY_FILE="$ready_file" \
     AGMSG_TEST_SYNC_START_READY_CEILING=0 \
     bash "$SCRIPTS/remote.sh" sync start testteam
+  # Registered before any assertion, so a failure here still stops the engine
+  # it started: it is detached (parent pid 1) and its sleep loop would
+  # otherwise run on after the test.
+  remember_engine_pid
   [ "$status" -eq 0 ]
   refute grep -qF "did not become ready" <<<"$output"
 }
