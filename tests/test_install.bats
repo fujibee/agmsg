@@ -129,6 +129,64 @@ teardown() {
   [ "$before" = "$after" ]
 }
 
+# A `mv` that fails only for the Antigravity shim, so the Codex shim next to it
+# in ~/.agents/bin is written normally.
+_agy_failing_mv() {
+  local dir="$BATS_TEST_TMPDIR/failing-mv"
+  mkdir -p "$dir"
+  printf '%s\n' '#!/bin/sh' \
+    'for last; do :; done' \
+    'case "$last" in */agy-tui) exit 1 ;; esac' \
+    'exec /bin/mv "$@"' > "$dir/mv"
+  chmod +x "$dir/mv"
+  printf '%s\n' "$dir"
+}
+
+@test "install: a failing Antigravity shim step warns once and the install finishes" {
+  local fake_bin; fake_bin="$(_agy_failing_mv)"
+  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'could not install the Antigravity' <<<"$output")" -eq 1 ]
+  grep -qF "could not install the Antigravity TUI launcher shim" <<<"$output"
+  grep -qF "installs that do not use Antigravity are unaffected" <<<"$output"
+  grep -qF "Docs: https://agmsg.cc/" <<<"$output"
+  [ -f "$SK/SKILL.md" ]
+  [ ! -e "$FAKE_HOME/.agents/bin/agy-tui" ]
+  # No half-written temp file is left in the shim directory.
+  [ -z "$(ls -A "$FAKE_HOME/.agents/bin" | grep '^\.agy-tui\.' || true)" ]
+}
+
+@test "install --update: a failing Antigravity shim step warns once, and the Codex shim is still refreshed" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
+  local shim="$FAKE_HOME/.agents/bin/codex" tmp; tmp="$BATS_TEST_TMPDIR/codex-shim.stale"
+  sed 's#/scripts/drivers/types/codex/#/scripts/codex/#g' "$shim" > "$tmp"
+  cp "$tmp" "$shim"
+  grep -q '/scripts/codex/codex-shim.sh' "$shim"
+  # An agy-tui shim this install does not own is left alone, so remove it to
+  # make the update write a new one -- through the failing mv.
+  rm -f "$FAKE_HOME/.agents/bin/agy-tui"
+
+  local fake_bin; fake_bin="$(_agy_failing_mv)"
+  run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'could not install the Antigravity' <<<"$output")" -eq 1 ]
+  grep -q '/scripts/drivers/types/codex/codex-shim.sh' "$shim"
+}
+
+@test "install: a failing Antigravity skill step warns once and the rest of the install is unaffected" {
+  mkdir -p "$FAKE_HOME/.gemini/config"
+  # A file where the skills directory belongs, so creating the skill folder fails.
+  : > "$FAKE_HOME/.gemini/config/skills"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'could not install the Antigravity' <<<"$output")" -eq 1 ]
+  grep -qF "could not install the Antigravity skill" <<<"$output"
+  refute grep -qF "+ installed /agmsg skill to ~/.gemini/config/skills/" <(printf '%s' "$output")
+  [ -f "$SK/SKILL.md" ]
+  [ -f "$FAKE_HOME/.agents/bin/agy-tui" ]
+}
+
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
   skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
