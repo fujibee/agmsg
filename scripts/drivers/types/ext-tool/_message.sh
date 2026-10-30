@@ -47,7 +47,15 @@ agmsg_type_on_message() {
   fi
 
   if [ -n "$fail_reason" ]; then
-    storage_send "$team" "$to" "$from" "$to: processing failed ($fail_reason)" >/dev/null 2>&1 || true
+    local reply="$to: processing failed ($fail_reason)"
+    # The commonest way here: the plugin that provided the tool was removed
+    # while this member stayed joined. Say that, and both ways out.
+    case "$fail_reason" in
+      "unknown tool "*)
+        reply="$to: the $tool_name plugin is not installed (removed?). Reinstall it, or remove this member with: bash $(printf '%q' "${SCRIPT_DIR:?}/leave.sh") $team $to"
+        ;;
+    esac
+    storage_send "$team" "$to" "$from" "$reply" >/dev/null 2>&1 || true
     return 0
   fi
 

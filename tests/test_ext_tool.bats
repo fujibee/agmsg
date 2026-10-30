@@ -457,3 +457,29 @@ teardown() { teardown_test_env; }
   grep -qF "ext-tool.sh\" setup at-team a1 argtool status" <<<"$output"
   grep -qF "ext-tool.sh\" setup at-team a1 argtool save" <<<"$output"
 }
+
+@test "ext-tool: a member whose tool is gone (plugin removed) replies that the plugin is not installed and how to leave" {
+  local d="$SCRIPTS/drivers/ext-tools/gone"
+  mkdir -p "$d"
+  printf 'name=gone\n' > "$d/tool.conf"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo ok' > "$d/handle"
+  chmod +x "$d/handle"
+  run bash "$SCRIPTS/join.sh" gt-team gone ext-tool --tool gone
+  [ "$status" -eq 0 ]
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" gt-team sender claude-code /tmp/gt-team-proj
+  [ "$status" -eq 0 ]
+  # What a remove leaves: the tool's directory is gone, the member is not.
+  mv "$d" "$BATS_TEST_TMPDIR/gone-removed"
+  run bash "$SCRIPTS/send.sh" gt-team sender gone "ping"
+  [ "$status" -eq 0 ]
+  local i seen=""
+  for i in $(seq 1 $_WAIT_TICKS); do
+    if bash "$SCRIPTS/history.sh" gt-team sender 2>/dev/null | grep -qF "gone: the gone plugin is not installed (removed?)"; then
+      seen=1
+      break
+    fi
+    sleep $_WAIT_INTERVAL
+  done
+  [ -n "$seen" ]
+  bash "$SCRIPTS/history.sh" gt-team sender | grep -q "remove this member with: bash .*/leave.sh gt-team gone"
+}
