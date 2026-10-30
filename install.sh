@@ -803,7 +803,7 @@ install_antigravity_tui_shim() {
     printf '%s\n' '# agmsg Antigravity TUI launcher shim'
     printf '%s\n' "$owner"
     printf 'exec bash %s "$@"\n' "$quoted_source"
-  } > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 2; }
+  } 2>/dev/null > "$tmp" || { rm -f "$tmp"; return 2; }
   chmod +x "$tmp" 2>/dev/null || { rm -f "$tmp"; return 2; }
   agmsg_install_op_require || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$target" 2>/dev/null || { rm -f "$tmp"; return 2; }
