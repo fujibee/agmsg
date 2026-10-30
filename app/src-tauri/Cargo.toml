@@ -1,6 +1,6 @@
 [package]
 name = "agmsg-app"
-version = "0.5.0"
+version = "0.6.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -16,6 +16,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Built-in add-ons are pinned by a digest computed at build time.
+sha2 = "0.10"
 
 [dependencies]
 tauri = { version = "2", features = ["image-png"] }
@@ -35,6 +37,21 @@ anyhow = "1"
 # PTY output is raw bytes (TUI box-drawing etc.); ship it to the webview as
 # base64 so multibyte sequences split across reads render correctly in xterm.
 base64 = "0.22"
+# Add-on panes: content hashes for the per-pane CSP and the payload digest, and
+# random pane tokens.
+sha2 = "0.10"
+getrandom = "0.2"
+# Add-on install: read the GitHub tarball of one commit.
+flate2 = "1"
+tar = "0.4"
+# GitHub API and tarball download (public repositories only). TLS is rustls with the
+# ring provider, installed the same way tauri-plugin-updater does.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# Myers line diff for the add-on git.diff result (addons/diff.rs).
+similar = "2"
+# Blob ids of working-tree files, to tell unchanged files from changed ones (addons/git.rs).
+sha1 = "0.10"
 
 [dev-dependencies]
 # Fake-script harness: a temp install base of stub scripts the command layer runs.
@@ -42,3 +59,12 @@ tempfile = "3"
 # The command layer reads process env (AGMSG_APP_BASE / HOME / PATH); serialize
 # the tests that mutate it so they don't race under the default parallel runner.
 serial_test = "3"
+
+# Engine hardening (WKPreferences) for add-on panes.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
+# Frame navigation guard for WebView2 (nav_win.rs); same versions tauri/wry resolve to.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

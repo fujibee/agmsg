@@ -1,0 +1,54 @@
+# Add-on host tests on Windows: the pane server, the install tree check and the
+# folder denylist against real Windows paths (symlinks, junctions, hard links,
+# 8.3 names, case). Branch-only; nothing is built for release here.
+name: addons-windows
+
+on:
+  push:
+    branches: [addon-win]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Build the frontend (tauri's build script wants the dist folder)
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Stub the bundled core resource
+        working-directory: app/src-tauri
+        run: |
+          mkdir -p resources/agmsg-core
+          echo stub > resources/agmsg-core/PLACEHOLDER
+
+      - name: Add-on host tests
+        working-directory: app/src-tauri
+        env:
+          AGMSG_REQUIRE_RESOURCES: "1"
+        run: "cargo test --lib addons:: -- --test-threads=4"

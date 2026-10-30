@@ -1,4 +1,6 @@
+pub mod addons;
 mod agmsg;
+mod store_fp;
 mod agent_state;
 mod menu_i18n;
 mod pty;
@@ -613,6 +615,9 @@ pub fn run() {
         })
         .manage(PtyManager::default())
         .setup(|app| {
+            // The main window is built here (tauri.conf.json has create=false) so the
+            // add-on navigation controls and the startup probe are attached to it.
+            addons::host::init(app)?;
             // A Finder/LaunchServices-launched GUI app gets the OS's minimal
             // default PATH, missing anything a login shell adds (Homebrew,
             // ~/.claude/local, etc.) — every agent spawn (pty::pty_spawn)
@@ -623,6 +628,12 @@ pub fn run() {
             // registry regardless of launch method), hence unix-only.
             #[cfg(unix)]
             import_login_shell_path();
+            // Measure git only now: a Finder launch has a minimal PATH until the login
+            // shell's PATH is imported, and the measurement is kept for the whole run.
+            std::thread::spawn(|| match addons::broker::prepare_git() {
+                None => eprintln!("[addons] git:read is available"),
+                Some(why) => eprintln!("[addons] git:read is off: {why}"),
+            });
 
             // Restore the zoom level saved on the last quit/change — .manage()
             // above only had 1.0 to work with (no AppHandle yet to read the
@@ -644,6 +655,34 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            addons::commands::addon_list,
+            addons::install_cmds::addon_install_start,
+            addons::install_cmds::addon_check_update,
+            addons::install_cmds::addon_install_confirm,
+            addons::install_cmds::addon_install_cancel,
+            addons::install_cmds::addon_remove,
+            addons::install_cmds::addon_dev_load,
+            addons::install_cmds::addon_dev_remove,
+            addons::install_cmds::addon_saved_grants,
+            addons::install_cmds::addon_save_grant,
+            addons::install_cmds::addon_forget_grant,
+            addons::openreq::addon_open_requests,
+            addons::openreq::addon_open_request_open,
+            addons::openreq::addon_open_request_dismiss,
+            addons::commands::addon_pane_add,
+            addons::commands::addon_pane_remove,
+            addons::commands::addon_pane_loaded,
+            addons::commands::addon_grant_team,
+            addons::commands::addon_revoke_team,
+            addons::commands::addon_grant_root,
+            addons::commands::addon_resolve_folder,
+            addons::commands::addon_revoke_root,
+            addons::commands::addon_folder_env_notice,
+            addons::commands::addon_feed_init,
+            addons::commands::addon_request,
+            addons::host::addon_probe_report,
+            addons::host::addon_gate_status,
+            addons::host::addon_recheck,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
@@ -669,6 +708,7 @@ pub fn run() {
             agmsg::agmsg_delivery_mode,
             agmsg::agmsg_default_project,
             agmsg::agmsg_command_name,
+            agmsg::agmsg_scripts_dir,
             agmsg::agmsg_spawnable_types,
             set_menu_language,
             set_team_room_visible,
@@ -677,4 +717,57 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod acl_parity {
+    //! `build.rs` gates every command named in `generate_handler!`; the main
+    //! window must be granted each one, and nothing else may be granted by name.
+    use std::collections::BTreeSet;
+
+    fn registered() -> BTreeSet<String> {
+        let src = include_str!("lib.rs");
+        let start = src.find("generate_handler![").unwrap() + "generate_handler![".len();
+        let end = start + src[start..].find(']').unwrap();
+        src[start..end]
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .flat_map(|l| l.split(','))
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.rsplit("::").next().unwrap().to_string())
+            .collect()
+    }
+
+    fn granted() -> BTreeSet<String> {
+        let cap: serde_json::Value = serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .filter_map(|p| p.strip_prefix("allow-"))
+            .map(|p| p.replace('-', "_"))
+            .collect()
+    }
+
+    #[test]
+    fn every_registered_command_is_granted_to_the_main_window_and_nothing_else() {
+        let (r, g) = (registered(), granted());
+        assert!(!r.is_empty());
+        let missing: Vec<_> = r.difference(&g).collect();
+        let extra: Vec<_> = g.difference(&r).collect();
+        assert!(missing.is_empty(), "registered but not granted in capabilities/default.json: {missing:?}");
+        assert!(extra.is_empty(), "granted but not registered: {extra:?}");
+    }
+
+    #[test]
+    fn the_capability_is_for_the_main_window_only_and_has_no_remote_urls() {
+        let cap: serde_json::Value = serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert_eq!(cap["windows"], serde_json::json!(["main"]));
+        assert!(cap.get("remote").is_none(), "no remote capability may exist: add-on frames are served from 127.0.0.1");
+        let dir = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/capabilities")).unwrap();
+        let files: Vec<_> = dir.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(files, vec!["default.json".to_string()], "any extra capability file must be reviewed against the add-on isolation rules");
+    }
 }

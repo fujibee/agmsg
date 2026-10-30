@@ -1,0 +1,364 @@
+//! Window-side wiring of add-on panes: the main window with its native
+//! navigation controls, the engine hardening, and the startup probe that
+//! decides whether add-ons may run on this machine.
+//!
+//! Layers (each measured in M1; none is enough alone):
+//! - the command ACL (`build.rs`, `capabilities/`) keeps every app command away
+//!   from anything but the main UI;
+//! - the main-window CSP `frame-src http://127.0.0.1:*` (`tauri.conf.json`)
+//!   keeps an add-on frame from navigating itself to the app origin, which the
+//!   native handler cannot tell apart from the app reloading itself;
+//! - the native handlers below cancel every other navigation, new window and
+//!   download;
+//! - the engine settings (`engine`) switch off what CSP does not govern;
+//! - the probe confirms all of it, for every page load, with an app-owned frame.
+
+use std::collections::HashMap;
+use std::net::UdpSocket;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use tauri::webview::{NewWindowResponse, PageLoadEvent};
+use tauri::{AppHandle, Emitter, Manager, Runtime, Url, WebviewWindowBuilder};
+
+use super::csp::Network;
+use super::engine;
+use super::gate::{AddonGate, EngineReport, Os, ProbeReport, Verdict, PROBE_TIMEOUT};
+use super::nav::NavPolicy;
+use super::server::{PaneServer, PaneSpec, Payload};
+
+/// Event the UI listens to; the payload is the `Verdict`.
+pub const GATE_EVENT: &str = "addon-gate";
+
+/// One probe in flight.
+struct ProbeRun {
+    nonce: String,
+    server: PaneServer,
+    udp_hits: Arc<AtomicUsize>,
+    udp_stop: Arc<AtomicBool>,
+    udp_port: u16,
+}
+
+pub struct AddonHost {
+    pub gate: AddonGate,
+    pub nav: NavPolicy,
+    pub panes: super::commands::Panes,
+    catalog: std::sync::OnceLock<super::catalog::Catalog>,
+    /// Installs waiting for the user's decision (staging id -> staged files).
+    pub staged: Mutex<HashMap<String, super::install::stage::Staged>>,
+    /// One install, update or removal at a time.
+    pub install_lock: Mutex<()>,
+    engine: Mutex<EngineReport>,
+    pub guard: super::nav::GuardStatus,
+    probe: Mutex<Option<ProbeRun>>,
+}
+
+impl AddonHost {
+    #[cfg(test)]
+    pub fn set_catalog_for_test(&self, c: super::catalog::Catalog) {
+        let _ = self.catalog.set(c);
+    }
+
+    /// The built-in and installed add-ons. Set once at startup.
+    pub fn catalog(&self) -> &super::catalog::Catalog {
+        self.catalog.get().expect("the add-on catalog is set at startup")
+    }
+
+    pub fn new(dev_url: Option<&Url>) -> AddonHost {
+        AddonHost { gate: AddonGate::new(), nav: NavPolicy::new(dev_url), panes: super::commands::Panes::new(), catalog: std::sync::OnceLock::new(), staged: Mutex::new(HashMap::new()), install_lock: Mutex::new(()), engine: Mutex::new(EngineReport::default()), guard: super::nav::GuardStatus::default(), probe: Mutex::new(None) }
+    }
+
+    fn end_probe(&self) {
+        if let Some(run) = self.probe.lock().unwrap().take() {
+            run.udp_stop.store(true, Ordering::SeqCst);
+            // wake the UDP reader so it exits
+            if let Ok(s) = UdpSocket::bind("127.0.0.1:0") {
+                let _ = s.send_to(b"x", ("127.0.0.1", run.udp_port));
+            }
+            self.nav.unregister_pane(run.server.port(), run.server.token());
+            run.server.stop();
+        }
+    }
+}
+
+/// wry's default WebView2 arguments plus the WebRTC policy.
+#[cfg(windows)]
+const WEBVIEW2_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --force-webrtc-ip-handling-policy=disable_non_proxied_udp";
+
+/// Removes WebRTC from every frame at document start. The flag above does not remove the API, so this is
+/// what makes the startup probe see it absent; the probe is still the proof, and add-ons stay off without it.
+#[cfg(windows)]
+const NO_WEBRTC_JS: &str = include_str!("no_webrtc.js");
+
+/// Builds the main window (tauri.conf has `create: false` so the handlers can
+/// be attached) and registers the add-on host state. Call first in `setup`.
+pub fn init<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+    let handle = app.handle().clone();
+    let cfg = app.config().app.windows.first().cloned().expect("tauri.conf.json defines the main window");
+    let dev_url = app.config().build.dev_url.clone();
+    let dev_url = if cfg!(dev) { dev_url } else { None };
+    let host = Arc::new(AddonHost::new(dev_url.as_ref()));
+    app.manage(host.clone());
+
+    let nav_host = host.clone();
+    let load_host = host.clone();
+    let load_handle = handle.clone();
+    let builder = WebviewWindowBuilder::from_config(&handle, &cfg)?;
+    // WebView2: keep wry's own default (it is replaced when arguments are given) and
+    // send WebRTC through the proxy path only, and remove the WebRTC API from every frame.
+    #[cfg(windows)]
+    let builder = builder.additional_browser_args(WEBVIEW2_ARGS).initialization_script_for_all_frames(NO_WEBRTC_JS);
+    let window = builder
+        .on_navigation(move |url| {
+            let d = nav_host.nav.decide(url);
+            if !d.is_allow() {
+                eprintln!("[addons] cancelled navigation to {} ({:?})", redact(url), d);
+            }
+            d.is_allow()
+        })
+        .on_new_window(|url, _features| {
+            eprintln!("[addons] denied new window to {}", redact(&url));
+            NewWindowResponse::Deny
+        })
+        .on_download(|_webview, _event| false)
+        .on_page_load(move |webview, payload| {
+            let is_app = load_host.nav.is_app(payload.url());
+            match payload.event() {
+                PageLoadEvent::Started => {
+                    // a new page voids every pane: servers stop, tokens die, feeds go
+                    for (port, token) in load_host.panes.close_all() {
+                        load_host.nav.unregister_pane(port, &token);
+                    }
+                    load_host.end_probe();
+                    load_host.gate.invalidate("page load");
+                    let _ = load_handle.emit(GATE_EVENT, load_host.gate.status());
+                }
+                PageLoadEvent::Finished if is_app => {
+                    start_probe(&load_handle, &load_host, webview.label());
+                }
+                _ => {}
+            }
+        })
+        .build()?;
+    #[cfg(windows)]
+    super::nav_win::install(&window, handle.clone(), host.clone());
+    #[cfg(debug_assertions)]
+    super::e2e::spawn_driver(handle.clone());
+    host.panes.set_app_dirs(app_owned_dirs(&handle));
+    let builtin_root = super::catalog::Catalog::locate_builtin_root(handle.path().resource_dir().ok());
+    super::install::stage::gc_staging(&crate::agmsg::base_dir().join("addons"));
+    super::install::dev::clear(&crate::agmsg::base_dir().join("addons"));
+    let _ = host.catalog.set(super::catalog::Catalog::new(builtin_root, crate::agmsg::base_dir().join("addons")));
+    {
+        let list: Vec<String> = host.catalog().list().iter().map(|a| format!("{}({})", a.id, if a.digest_ok { "ok" } else { "CHANGED" })).collect();
+        eprintln!("[addons] add-ons: {}", if list.is_empty() { "none".to_string() } else { list.join(" ") });
+    }
+    // One line at startup naming the agmsg base and every store this app resolved,
+    // so a tester can see that nothing outside the folder they pointed it at is in play.
+    std::thread::spawn(|| {
+        let places: Vec<String> = crate::agmsg::protected_locations().iter().map(|p| p.display().to_string()).collect();
+        eprintln!("[agmsg-app] resolved: {}", places.join(" | "));
+    });
+    *host.engine.lock().unwrap() = engine::harden(&window);
+    super::commands::listen_for_live_messages(&handle, host.clone());
+    Ok(())
+}
+
+/// The app's own bundle, data, config, cache and log folders, and the folder the
+/// executable lives in: never readable by an add-on, whatever folder is granted.
+fn app_owned_dirs<R: Runtime>(app: &AppHandle<R>) -> Vec<std::path::PathBuf> {
+    let p = app.path();
+    let mut v: Vec<std::path::PathBuf> = [p.app_data_dir(), p.app_config_dir(), p.app_local_data_dir(), p.app_cache_dir(), p.app_log_dir(), p.resource_dir()]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
+        v.push(dir);
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Scheme, host and port only: a URL in a log line must not carry a query.
+pub(super) fn redact(u: &Url) -> String {
+    format!("{}://{}{}", u.scheme(), u.host_str().unwrap_or(""), u.port().map(|p| format!(":{p}")).unwrap_or_default())
+}
+
+fn nonce() -> String {
+    let mut b = [0u8; 16];
+    getrandom::getrandom(&mut b).expect("the OS random source is unavailable");
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Starts the app-owned probe frame in the main page. Add-ons stay off unless
+/// the frame answers, correctly, before the deadline.
+fn start_probe<R: Runtime>(app: &AppHandle<R>, host: &Arc<AddonHost>, label: &str) {
+    host.end_probe();
+    let Some(window) = app.get_webview_window(label) else { return };
+    let mut files = HashMap::new();
+    files.insert("index.html".to_string(), include_bytes!("probe/index.html").to_vec());
+    files.insert("probe.js".to_string(), include_bytes!("probe/probe.js").to_vec());
+    files.insert("control.html".to_string(), include_bytes!("probe/control.html").to_vec());
+    files.insert("control.js".to_string(), include_bytes!("probe/control.js").to_vec());
+    let server = match PaneServer::start(PaneSpec { payload: Payload::Embedded(files), entry: "index.html".into(), network: Network::None, expected_digest: None, pinned: None, on_tamper: None }) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[addons] cannot start the probe server: {e}");
+            return;
+        }
+    };
+    let udp = match UdpSocket::bind("127.0.0.1:0") {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("[addons] cannot open the probe's UDP sentinel: {e}");
+            return;
+        }
+    };
+    let udp_port = udp.local_addr().map(|a| a.port()).unwrap_or(0);
+    let udp_hits = Arc::new(AtomicUsize::new(0));
+    let udp_stop = Arc::new(AtomicBool::new(false));
+    {
+        let (hits, stop) = (udp_hits.clone(), udp_stop.clone());
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, _)) = udp.recv_from(&mut buf) {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                if n > 0 {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+    }
+    let n = nonce();
+    host.nav.register_pane(server.port(), server.token());
+    let url = server.url();
+    // The forbidden navigation: the app origin (unique per probe so a violation can be tied to it).
+    let target = format!("{}/__agmsg_probe_nav__/{n}", app_origin(&window));
+    #[cfg(debug_assertions)]
+    let target = std::env::var("AGMSG_PROBE_TEST_TARGET").unwrap_or(target); // negative controls only; absent in release
+    let hash = serde_json::json!({ "nonce": n, "udp": udp_port, "target": target }).to_string();
+    let src = format!("{url}#{}", percent_encode(&hash));
+    host.gate.begin(&n, &target, Instant::now());
+    *host.probe.lock().unwrap() = Some(ProbeRun { nonce: n.clone(), server, udp_hits, udp_stop, udp_port });
+
+    // How long the relay waits for stage B's final answer after its interim one. The final answer
+    // arrives 2 s after the interim one when the frame survives (macOS); on Windows it normally
+    // never comes, so the wait only costs time there.
+    let final_wait_ms: u32 = if cfg!(windows) { 2600 } else { 3500 };
+
+    // The only code the app runs in the main page for this: create the probe frame and relay its
+    // answers (probe/relay.js, one closure per probe; a new start stops the previous one).
+    let js = include_str!("probe/relay.js")
+        .replace("__TARGET__", &serde_json::to_string(&target).unwrap_or_else(|_| "\"\"".into()))
+        .replace("__SRC__", &serde_json::to_string(&src).unwrap_or_else(|_| "\"\"".into()))
+        .replace("__FINAL_WAIT_MS__", &final_wait_ms.to_string());
+    if window.eval(&js).is_err() {
+        host.end_probe();
+        return;
+    }
+
+    // Deadline: no answer means off.
+    let (app2, host2) = (app.clone(), host.clone());
+    let generation = host.gate.generation();
+    std::thread::spawn(move || {
+        std::thread::sleep(PROBE_TIMEOUT + Duration::from_millis(500));
+        if host2.gate.generation() == generation && host2.gate.expire(Instant::now()) {
+            host2.end_probe();
+            let v = host2.gate.status();
+            eprintln!("[addons] startup check: enabled={} {}", v.enabled, v.reasons.join("; "));
+            let _ = app2.emit(GATE_EVENT, v);
+        }
+    });
+}
+
+fn app_origin<R: Runtime>(window: &tauri::WebviewWindow<R>) -> String {
+    match window.url() {
+        Ok(u) => format!("{}://{}{}", u.scheme(), u.host_str().unwrap_or("localhost"), u.port().map(|p| format!(":{p}")).unwrap_or_default()),
+        Err(_) => "tauri://localhost".into(),
+    }
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Relayed by the main UI from the probe frame. Only the main UI can call this
+/// (ACL); the nonce ties the answer to the probe that was started.
+#[tauri::command]
+pub fn addon_probe_report<R: Runtime>(app: AppHandle<R>, host: tauri::State<'_, Arc<AddonHost>>, report: ProbeReport) -> Verdict {
+    let (udp_hits, expected) = {
+        let p = host.probe.lock().unwrap();
+        match p.as_ref() {
+            Some(run) => (run.udp_hits.load(Ordering::SeqCst), run.nonce.clone()),
+            None => (0, String::new()),
+        }
+    };
+    #[allow(unused_mut)]
+    let mut engine = host.engine.lock().unwrap().clone();
+    #[cfg(windows)]
+    {
+        engine.frame_guard_problem = host.guard.problem();
+        engine.frame_nav_cancelled = host.guard.cancelled();
+    }
+    eprintln!(
+        "[addons] probe answer: started={} control_nav_ok={} nav_refused={} final_missing={} violation={}|{} webrtc_absent={} udp_hits={udp_hits} guard_cancelled={:?}",
+        report.started, report.control_nav_ok, report.nav_refused, report.final_missing, report.nav_violation_directive, report.nav_violation_uri, report.webrtc_absent, engine.frame_nav_cancelled
+    );
+    let verdict = host.gate.report(&report, &engine, udp_hits, Os::host(), Instant::now());
+    // The probe is over once its nonce was answered (right or wrong verdict);
+    // a stray answer with another nonce leaves it running.
+    if !expected.is_empty() && report.nonce == expected {
+        host.end_probe();
+    }
+    eprintln!("[addons] startup check: enabled={} {}", verdict.enabled, verdict.reasons.join("; "));
+    let _ = app.emit(GATE_EVENT, verdict.clone());
+    verdict
+}
+
+/// "Check again" in Settings → Add-ons: what a page load does for the gate, on request. It closes
+/// no pane and grants nothing; while a probe is running it does nothing.
+#[tauri::command]
+pub fn addon_recheck<R: Runtime>(app: AppHandle<R>, host: tauri::State<'_, Arc<AddonHost>>) -> Verdict {
+    let host = host.inner().clone();
+    if host.gate.try_recheck().is_some() {
+        let _ = app.emit(GATE_EVENT, host.gate.status());
+        start_probe(&app, &host, "main");
+        host.gate.start_failed();
+        let _ = app.emit(GATE_EVENT, host.gate.status());
+    }
+    host.gate.status()
+}
+
+/// Current verdict for the UI (the engine-off screen reads `reasons`).
+#[tauri::command]
+pub fn addon_gate_status(host: tauri::State<'_, Arc<AddonHost>>) -> Verdict {
+    host.gate.status()
+}
+
+#[cfg(test)]
+mod no_webrtc_tests {
+    /// The names the startup probe checks must all be removed by the Windows script.
+    #[test]
+    fn the_windows_script_covers_every_name_the_probe_checks() {
+        let probe = include_str!("probe/probe.js");
+        let line = probe.lines().find(|l| l.contains("var names = [")).expect("the probe lists the names");
+        let names: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
+        assert!(names.len() >= 4, "{names:?}");
+        let script = include_str!("no_webrtc.js");
+        for n in names {
+            assert!(script.contains(&format!("'{n}'")), "{n} is not removed");
+        }
+    }
+}

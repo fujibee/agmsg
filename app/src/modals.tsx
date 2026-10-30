@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { SUPPORTED_LANGUAGES } from "./i18n";
+import { AddonsTab } from "./addons/AddonsTab";
+import { escapeCloses, modalStack, newModalId } from "./modalStack";
+import type { Catalog } from "./addons/catalog";
 import { AUTO_TIMEZONE, detectTimeZone, isValidTimeZone, listTimeZones } from "./time";
 
 type BrowseDir = (current: string) => Promise<string | null>;
@@ -36,25 +39,35 @@ export function shouldCloseOnEscape(e: Pick<KeyboardEvent, "key" | "isComposing"
  * round 2) — closing here only dismisses the dialog, not the invoke() call
  * already in flight.
  */
-function Modal(props: {
+export function Modal(props: {
   title: string;
   children: React.ReactNode;
   onClose?: () => void;
   busy?: boolean;
+  /** A wider card whose direct `.modal-body` child scrolls while the title and `.modal-actions` stay put. */
+  wide?: boolean;
 }) {
   const { onClose } = props;
+  // Only the top modal answers Escape and backdrop clicks: a dialog over Settings is closed alone, and a
+  // dialog that cannot be closed (busy) keeps the ones under it from closing too.
+  const id = useRef(0);
+  if (id.current === 0) id.current = newModalId();
   useEffect(() => {
-    if (!onClose) return;
+    const mine = id.current;
+    modalStack.push(mine);
+    return () => modalStack.remove(mine);
+  }, []);
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (shouldCloseOnEscape(e)) onClose();
+      if (shouldCloseOnEscape(e)) escapeCloses(modalStack, id.current, onClose);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <div className={props.busy ? "modal busy" : "modal"} onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop" onClick={() => escapeCloses(modalStack, id.current, onClose)}>
+      <div className={`modal${props.busy ? " busy" : ""}${props.wide ? " wide" : ""}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal-title">{props.title}</div>
         {props.children}
       </div>
@@ -639,11 +652,20 @@ export function stepFontSize(
 }
 
 export function SettingsModal(props: {
+  /** The tab shown first; "Install add-ons…" in the + menu opens it on Add-ons. */
+  initialTab?: "general" | "addons";
   onClose: () => void;
   terminalFontSize: number;
   onTerminalFontSizeChange: (size: number) => void;
   timezone: string;
   onTimezoneChange: (timezone: string) => void;
+  catalog: Catalog;
+  openAddonPanesOf: (addonId: string) => number;
+  /** "Open now" after an install: opens the pane through the normal grant flow. */
+  onOpenAddonPane?: (ref: { addonId: string; paneName: string; title: string }) => void;
+  /** The team on screen and its app user: the text copied for agents names them. */
+  team?: string;
+  appUser?: string;
 }) {
   const { t, i18n } = useTranslation();
   // Local draft text, not a number bound directly to props.terminalFontSize
@@ -693,8 +715,41 @@ export function SettingsModal(props: {
     // timezoneText/props.timezone are read via closure, not deps, so this
     // doesn't re-fire on every keystroke or timezone change.
   }, [autoLabel]);
+  const [tab, setTab] = useState<"general" | "addons">(props.initialTab ?? "general");
   return (
-    <Modal title={t("modal.settings.title")} onClose={props.onClose}>
+    <Modal title={t("modal.settings.title")} onClose={props.onClose} wide>
+      <div className="settings-tabs" role="tablist">
+        {(["general", "addons"] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            role="tab"
+            aria-selected={tab === k}
+            className={tab === k ? "active" : ""}
+            onClick={() => setTab(k)}
+          >
+            {t(`addons.tab.${k}`)}
+          </button>
+        ))}
+      </div>
+      <div className="modal-body">
+      {tab === "addons" ? (
+        <AddonsTab
+          catalog={props.catalog}
+          openPanesOf={props.openAddonPanesOf}
+          team={props.team}
+          appUser={props.appUser}
+          onOpenPane={
+            props.onOpenAddonPane
+              ? (ref) => {
+                  props.onOpenAddonPane?.(ref);
+                  props.onClose();
+                }
+              : undefined
+          }
+        />
+      ) : (
+      <>
       <label>
         {t("language.label")}
         <select
@@ -796,6 +851,9 @@ export function SettingsModal(props: {
           ))}
         </datalist>
       </label>
+      </>
+      )}
+      </div>
       <div className="modal-actions">
         <button type="button" className="primary" onClick={props.onClose}>
           {t("common.close")}

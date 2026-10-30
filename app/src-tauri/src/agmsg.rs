@@ -43,6 +43,37 @@ fn agmsg_base() -> PathBuf {
     PathBuf::from(home).join(".agents/skills/agmsg")
 }
 
+/// The agmsg base (`AGMSG_APP_BASE` or `~/.agents/skills/agmsg`).
+pub(crate) fn base_dir() -> PathBuf {
+    agmsg_base()
+}
+
+/// Places add-on panes must never read, however a folder is granted: the agmsg
+/// base (its db/, teams/, addons/, scripts/ and config), where `AGMSG_APP_BASE`
+/// moves it, any separately configured storage or config location, and the
+/// store files the app reads directly (with the sidecar files SQLite keeps next
+/// to them).
+pub(crate) fn protected_locations() -> Vec<PathBuf> {
+    let mut v = vec![agmsg_base()];
+    for var in ["AGMSG_STORAGE_PATH", "AGMSG_CONFIG"] {
+        if let Ok(p) = std::env::var(var) {
+            if !p.is_empty() {
+                v.push(PathBuf::from(p));
+            }
+        }
+    }
+    for store in watchable_stores().0 {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut s = store.clone().into_os_string();
+            s.push(suffix);
+            v.push(PathBuf::from(s));
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
 /// Converts to the full POSIX form Git Bash/MSYS resolve internally
 /// ("C:/Users/name" -> "/c/Users/name"), matching `cygpath -u` — one step
 /// further than agmsg-core's own scripts/lib/storage.sh convention
@@ -203,7 +234,7 @@ fn bash_command() -> Result<std::process::Command, String> {
 /// The app used to join `db/messages.db` itself, which is why a storage
 /// layout change broke it with nothing to notice: a hardcoded path cannot go
 /// stale loudly. Asking means the answer follows the layout.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Debug)]
 struct StoreInfo {
     driver: String,
     path: String,
@@ -223,11 +254,191 @@ struct StoreInfo {
 const DIRECTLY_READABLE_DRIVER: &str = "sqlite";
 
 fn store_info(team: &str) -> Result<StoreInfo, String> {
+    match stores().and_then(|s| s.infos.get(team).cloned()) {
+        Some(answer) => answer,
+        None => store_info_from_script(team),
+    }
+}
+
+fn store_info_from_script(team: &str) -> Result<StoreInfo, String> {
     let raw = run_script("api.sh", &["get", "teams", team, "store"])?;
     parse_jsonl::<StoreInfo>(&raw)
         .into_iter()
         .next()
         .ok_or_else(|| format!("no store info for team {team}"))
+}
+
+/// Every team and where its store is, as of one fingerprint (see `store_fp`).
+struct Stores {
+    base_part: String,
+    exists_part: String,
+    paths: Vec<PathBuf>,
+    teams: Vec<String>,
+    /// A team whose lookup failed keeps its error, so the failure is seen as before and the answer is not kept.
+    infos: std::collections::HashMap<String, Result<StoreInfo, String>>,
+}
+
+static STORES: std::sync::Mutex<Option<std::sync::Arc<Stores>>> = std::sync::Mutex::new(None);
+
+/// The teams and their stores, without starting a process while nothing they depend on has changed.
+/// `None` when the fingerprint cannot be taken or the answer is not whole (a script failed): the callers
+/// then ask agmsg directly, as they always did, and nothing stale is ever kept for them.
+fn stores() -> Option<std::sync::Arc<Stores>> {
+    let base = agmsg_base();
+    let env = crate::store_fp::Env::from_process();
+    // `None` here is a configuration the answer cannot be kept for (an external driver, or inputs that cannot be read):
+    // it is fetched every time, but still in one process
+    let before = crate::store_fp::base_part(&base, &env);
+    let hit = || -> Option<std::sync::Arc<Stores>> {
+        let b = before.as_ref()?;
+        let c = STORES.lock().unwrap().clone()?;
+        (&c.base_part == b && c.exists_part == crate::store_fp::exists_part(&c.paths)).then_some(c)
+    };
+    if let Some(c) = hit() {
+        return Some(c);
+    }
+    // One fetch at a time, and callers that missed together share it. A fetch is numbered when it starts; a caller
+    // that was waiting while a fetch that STARTED AFTER it arrived finished uses that fetch's answer (so a change
+    // made before the call is in it), even when the configuration is one whose answer is not kept for later.
+    static FETCH: std::sync::Mutex<(u64, Option<(u64, std::sync::Arc<Stores>)>)> = std::sync::Mutex::new((0, None));
+    static STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let arrived_after = STARTED.load(std::sync::atomic::Ordering::SeqCst);
+    let mut fetching = FETCH.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = hit() {
+        return Some(c);
+    }
+    if let Some((n, shared)) = &fetching.1 {
+        if *n > arrived_after {
+            return Some(shared.clone());
+        }
+    }
+    let mine = STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    fetching.0 = mine;
+    let (teams, infos) = match fetch_stores_in_one_process() {
+        Ok(all) => all,
+        Err(why) => {
+            note_batch_failure(&why);
+            // not answerable in one go: ask for the list and then each team, as before
+            let raw = run_script("api.sh", &["get", "teams"]).ok()?;
+            let teams: Vec<String> = parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect();
+            let infos = teams.iter().map(|t| (t.clone(), store_info_from_script(t))).collect();
+            (teams, infos)
+        }
+    };
+    let ok: Vec<&StoreInfo> = infos.values().filter_map(|i| i.as_ref().ok()).collect();
+    let whole = ok.len() == infos.len();
+    let paths: Vec<PathBuf> = ok.iter().map(|i| PathBuf::from(&i.path)).collect();
+    // Only a whole answer that nothing changed under is kept: not if the files moved while the scripts ran,
+    // and not if a store appeared or vanished between the script's look and ours.
+    let exists_part = crate::store_fp::exists_part(&paths);
+    let after = crate::store_fp::base_part(&base, &env);
+    let agrees = ok.iter().all(|i| i.exists == PathBuf::from(&i.path).exists());
+    let s = std::sync::Arc::new(Stores { base_part: before.clone().unwrap_or_default(), exists_part, paths, teams, infos });
+    if before.is_some() && whole && after == before && agrees {
+        *STORES.lock().unwrap() = Some(s.clone());
+    }
+    fetching.1 = Some((mine, s.clone()));
+    Some(s)
+}
+
+/// How long the timer may reuse its last look at a configuration whose answer cannot be kept, while the teams'
+/// own files have not changed.
+const TIMER_REUSE: Duration = Duration::from_secs(60);
+
+/// `watchable_stores` for the timer. Where the answer is kept (agmsg's own drivers) this is the same free call.
+/// Where it is not (an external driver in play), a fetch every ten seconds would start a bash on a timer, so the
+/// last look is reused for up to `TIMER_REUSE` while the list of teams and their config files look the same
+/// (a team added, removed or changed shows on the next tick); what only the driver's own code could notice is
+/// seen within that minute. Opening a folder does not use this: it always looks.
+fn watchable_stores_timed() -> (Vec<PathBuf>, Vec<String>) {
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, String, (Vec<PathBuf>, Vec<String>))>> = std::sync::Mutex::new(None);
+    let base = agmsg_base();
+    if crate::store_fp::base_part(&base, &crate::store_fp::Env::from_process()).is_some() {
+        return watchable_stores();
+    }
+    let stamp = crate::store_fp::teams_stamp(&base);
+    if let (Some(st), Some((at, was, answer))) = (&stamp, LAST.lock().unwrap().as_ref()) {
+        if was == st && at.elapsed() < TIMER_REUSE {
+            return answer.clone();
+        }
+    }
+    let (answer, whole) = watchable_stores_checked();
+    match (stamp, whole) {
+        // only a whole look is kept; a failed or partial one is asked for again on the next tick
+        (Some(st), true) => *LAST.lock().unwrap() = Some((std::time::Instant::now(), st, answer.clone())),
+        _ => *LAST.lock().unwrap() = None,
+    }
+    answer
+}
+
+/// The script that asks agmsg-core, once, where every team's store is (see stores.sh).
+const STORES_SH: &str = include_str!("stores.sh");
+
+/// Why the one-process look gave no answer: a fixed code for the log, and a short detail (never a path).
+#[derive(Debug)]
+struct BatchFailure {
+    code: &'static str,
+    detail: String,
+}
+
+fn fail(code: &'static str, detail: impl Into<String>) -> BatchFailure {
+    BatchFailure { code, detail: detail.into() }
+}
+
+#[cfg(test)]
+static BATCH_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn note_batch_failure(f: &BatchFailure) {
+    let line = format!("[agmsg-app] one-process store lookup failed ({}): {}; asking team by team", f.code, f.detail);
+    eprintln!("{line}");
+    #[cfg(test)]
+    BATCH_LOG.lock().unwrap().push(line);
+}
+
+/// Every team and its store from ONE `bash`, however many teams there are. `Err` says why that did not work
+/// out (the script failed, or the output was not exactly what it should be): the caller logs it and then asks
+/// the old way, team by team. A value is never split or merged: fields end with NUL, so a TAB or a newline in
+/// a path stays in that path, and the output must be whole records with no repeated team.
+fn fetch_stores_in_one_process() -> Result<(Vec<String>, std::collections::HashMap<String, Result<StoreInfo, String>>), BatchFailure> {
+    // Only fixed words and numbers reach the log: what a script or the OS says can hold the person's paths.
+    let mut cmd = bash_command().map_err(|_| fail("batch_spawn", "no bash to run"))?;
+    let out = cmd.arg("-c").arg(STORES_SH).arg("agmsg-stores").arg(bash_path(&agmsg_base())).output().map_err(|e| fail("batch_spawn", format!("os error {}", e.raw_os_error().map_or("none".to_string(), |c| c.to_string()))))?;
+    if !out.status.success() {
+        return Err(fail("batch_exit", format!("exit status {}", out.status.code().map_or("none (signal)".to_string(), |c| c.to_string()))));
+    }
+    parse_stores(&out.stdout)
+}
+
+fn parse_stores(stdout: &[u8]) -> Result<(Vec<String>, std::collections::HashMap<String, Result<StoreInfo, String>>), BatchFailure> {
+    if stdout.is_empty() {
+        return Ok((Vec::new(), Default::default()));
+    }
+    let Some(body) = stdout.strip_suffix(&[0u8]) else {
+        return Err(fail("batch_parse", "output does not end with a field terminator"));
+    };
+    let fields: Vec<&[u8]> = body.split(|&b| b == 0).collect();
+    if fields.len() % 4 != 0 {
+        return Err(fail("batch_parse", format!("{} fields, not a whole number of records", fields.len())));
+    }
+    let text = |b: &[u8]| String::from_utf8(b.to_vec()).map_err(|_| fail("batch_parse", "a value is not text"));
+    let mut teams = Vec::new();
+    let mut infos = std::collections::HashMap::new();
+    for rec in fields.chunks(4) {
+        let (team, driver, path) = (text(rec[0])?, text(rec[1])?, text(rec[2])?);
+        let exists = match rec[3] {
+            b"true" => true,
+            b"false" => false,
+            _ => return Err(fail("batch_parse", "exists is neither true nor false")),
+        };
+        if team.is_empty() || driver.is_empty() || path.is_empty() {
+            return Err(fail("batch_parse", "an empty team, driver or path"));
+        }
+        if infos.insert(team.clone(), Ok(StoreInfo { driver, path, exists })).is_some() {
+            return Err(fail("batch_mismatch", "a team appears twice"));
+        }
+        teams.push(team);
+    }
+    Ok((teams, infos))
 }
 
 /// The store to read directly for `team`, or `None` when the app must go
@@ -236,7 +447,11 @@ fn store_info(team: &str) -> Result<StoreInfo, String> {
 /// Logs the reason on the way past. Distinguishing "slow but working" from
 /// "fast but wrong" after the fact needs the fallback to leave a mark.
 fn direct_store_path(team: &str) -> Option<PathBuf> {
-    match store_info(team) {
+    direct_from(team, store_info(team))
+}
+
+fn direct_from(team: &str, answer: Result<StoreInfo, String>) -> Option<PathBuf> {
+    match answer {
         Ok(info) if !info.exists => None,
         Ok(info) if info.driver == DIRECTLY_READABLE_DRIVER => Some(PathBuf::from(info.path)),
         Ok(info) => {
@@ -252,6 +467,33 @@ fn direct_store_path(team: &str) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// How the open-request scan may read one team's messages.
+pub(crate) enum TeamStore {
+    /// A store file this app can read directly (the plain and the sync driver share the layout).
+    Sqlite(PathBuf),
+    /// The team has never been written to.
+    Empty,
+    /// Anything else, or a failed lookup: only `api.sh` can answer, and it cannot say where a row came from.
+    Api,
+}
+
+pub(crate) fn team_store(team: &str) -> TeamStore {
+    match store_info(team) {
+        Ok(info) if !info.exists => TeamStore::Empty,
+        Ok(info) if info.driver == DIRECTLY_READABLE_DRIVER || info.driver == "sqlite-sync" => TeamStore::Sqlite(PathBuf::from(info.path)),
+        _ => TeamStore::Api,
+    }
+}
+
+pub(crate) fn open_store_ro(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
+    open_ro(path)
+}
+
+/// The newest `limit` messages of a team through `api.sh`, oldest first.
+pub(crate) fn api_recent_messages(team: &str, limit: u32) -> Result<Vec<Message>, String> {
+    agmsg_messages(team.to_string(), Some(limit), None)
 }
 
 /// New messages, from the event log and the legacy table together.
@@ -455,23 +697,39 @@ fn fallback_new_messages(team: &str, last_seen: Option<&str>) -> (Vec<Message>, 
 }
 
 fn watchable_stores() -> (Vec<PathBuf>, Vec<String>) {
-    let teams = match run_script("api.sh", &["get", "teams"]) {
-        Ok(raw) => parse_jsonl::<ApiTeam>(&raw),
-        Err(_) => return (Vec::new(), Vec::new()),
+    watchable_stores_checked().0
+}
+
+/// `watchable_stores`, and whether the look was whole: the list of teams came, and so did every team's store.
+/// A look that was not whole is still the best answer there is, but nothing should keep it.
+fn watchable_stores_checked() -> ((Vec<PathBuf>, Vec<String>), bool) {
+    // One look at every team (one process at most); each team's answer is read from it, not asked for again
+    let looked = stores();
+    let teams: Vec<String> = match &looked {
+        Some(s) => s.teams.clone(),
+        None => match run_script("api.sh", &["get", "teams"]) {
+            Ok(raw) => parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect(),
+            Err(_) => return ((Vec::new(), Vec::new()), false),
+        },
     };
+    let whole = looked.as_ref().is_some_and(|s| s.infos.values().all(|i| i.is_ok()));
     let mut direct: Vec<PathBuf> = Vec::new();
     let mut via_api: Vec<String> = Vec::new();
-    for t in teams {
-        match direct_store_path(&t.name) {
+    for name in teams {
+        let found = match looked.as_ref().and_then(|s| s.infos.get(&name).cloned()) {
+            Some(answer) => direct_from(&name, answer),
+            None => direct_store_path(&name),
+        };
+        match found {
             Some(p) => {
                 if !direct.contains(&p) {
                     direct.push(p);
                 }
             }
-            None => via_api.push(t.name),
+            None => via_api.push(name),
         }
     }
-    (direct, via_api)
+    ((direct, via_api), whole)
 }
 
 #[derive(Clone, Serialize)]
@@ -934,6 +1192,14 @@ pub fn agmsg_command_name() -> String {
         .to_string()
 }
 
+/// The scripts folder of the agmsg install the app is using (where `send.sh` is), as an absolute path.
+/// Shown in the text the app copies for agents, so it names the install the app really runs against
+/// (`AGMSG_APP_BASE` included) rather than a fixed location.
+#[tauri::command]
+pub fn agmsg_scripts_dir() -> String {
+    agmsg_base().join("scripts").to_string_lossy().into_owned()
+}
+
 /// Default project dir for a freshly-added agent: <HOME>/agmsg-agents/<name>.
 #[tauri::command]
 pub fn agmsg_default_project(name: String) -> Result<String, String> {
@@ -1059,7 +1325,7 @@ pub fn start_watcher(app: AppHandle) {
         loop {
             if ticks_until_rescan == 0 {
                 ticks_until_rescan = 12; // ~10s at the poll interval below
-                let (direct, fallback) = watchable_stores();
+                let (direct, fallback) = watchable_stores_timed();
                 for team in fallback {
                     if !via_api.iter().any(|(t, _)| t == &team) {
                         via_api.push((team, None));
@@ -1118,8 +1384,10 @@ pub fn start_watcher(app: AppHandle) {
 mod tests {
     use super::{
         agmsg_base, msys_to_native, parse_semver, pinned_core_version, run_script,
-        running_core_version, to_bash_slashes,
+        protected_locations, running_core_version, store_info, to_bash_slashes, watchable_stores,
+        fetch_stores_in_one_process, note_batch_failure, parse_stores, watchable_stores_timed, BATCH_LOG,
     };
+    use std::path::PathBuf;
     use serial_test::serial;
     use std::io::Write;
 
@@ -1282,12 +1550,453 @@ mod tests {
         FakeBase { _dir: dir, _env: env }
     }
 
+    /// A fake install whose `api.sh` answers like the real one from the files under it and logs every call.
+    #[cfg(not(target_os = "windows"))]
+    fn counting_base() -> FakeBase {
+        let b = fake_base(&[(
+            "api.sh",
+            r#"B="$(cd "$(dirname "$0")/.." && pwd)"
+echo "$*" >> "$B/calls"
+if [ "$*" = "get teams" ]; then
+  for d in "$B"/teams/*/; do [ -f "${d}config.json" ] && printf '{"name":"%s"}\n' "$(basename "$d")"; done
+  exit 0
+fi
+t="$3"
+[ -f "$B/fail-$t" ] && { echo boom >&2; exit 1; }
+if grep -q per-team "$B/teams/$t/config.json" 2>/dev/null; then p="$B/db/teams/$t/messages.db"; else p="$B/db/messages.db"; fi
+if [ -e "$p" ]; then e=true; else e=false; fi
+printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\n' "$t" "$p" "$e"
+"#,
+        )]);
+        // the built-in drivers the fingerprint expects to find
+        for (dir, name) in [("partition", "shared"), ("partition", "per-team"), ("storage", "sqlite")] {
+            let d = b._dir.path().join("scripts/drivers").join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(format!("{name}.sh")), name).unwrap();
+        }
+        b
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn calls(base: &FakeBase) -> usize {
+        std::fs::read_to_string(base._dir.path().join("calls")).map(|s| s.lines().count()).unwrap_or(0)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn add_team(base: &FakeBase, name: &str, config: &str) {
+        let d = base._dir.path().join("teams").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("config.json"), config).unwrap();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn touch_store(base: &FakeBase, rel: &str) -> PathBuf {
+        let p = base._dir.path().join("db").join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "x").unwrap();
+        p
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(not(target_os = "windows"))]
+    fn nothing_is_started_while_nothing_the_stores_depend_on_has_changed() {
+        let base = counting_base();
+        add_team(&base, "a", "{}");
+        add_team(&base, "b", "{}");
+        touch_store(&base, "messages.db");
+        let first = protected_locations();
+        assert_eq!(calls(&base), 3, "the list and one lookup per team, once");
+        for _ in 0..5 {
+            assert_eq!(protected_locations(), first);
+            let _ = watchable_stores();
+            let _ = store_info("a");
+        }
+        assert_eq!(calls(&base), 3, "no further script run");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(not(target_os = "windows"))]
+    fn a_new_team_a_moved_store_and_a_store_that_appears_are_seen_on_the_next_look() {
+        let base = counting_base();
+        add_team(&base, "a", "{}");
+        let shared = base._dir.path().join("db/messages.db");
+        assert!(!protected_locations().contains(&shared), "no store yet");
+        touch_store(&base, "messages.db");
+        assert!(protected_locations().contains(&shared), "a store that appeared is protected");
+        let per_team = base._dir.path().join("db/teams/b/messages.db");
+        add_team(&base, "b", r#"{"drivers":{"partition":"per-team"}}"#);
+        touch_store(&base, "teams/b/messages.db");
+        assert!(protected_locations().contains(&per_team), "a new team's own store");
+        // the team moves to its own store: the shared file is no longer a's, the new file is
+        let a_own = base._dir.path().join("db/teams/a/messages.db");
+        add_team(&base, "a", r#"{"drivers":{"partition":"per-team"}}"#);
+        touch_store(&base, "teams/a/messages.db");
+        assert!(protected_locations().contains(&a_own), "{:?}", protected_locations());
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(not(target_os = "windows"))]
+    fn a_driver_from_outside_agmsg_or_new_resolution_code_sends_the_next_call_back_to_the_script() {
+        let base = counting_base();
+        add_team(&base, "a", "{}");
+        touch_store(&base, "messages.db");
+        let _ = protected_locations();
+        let warm = calls(&base);
+        let _ = protected_locations();
+        assert_eq!(calls(&base), warm, "kept while nothing changed");
+
+        // the resolution code itself changed (a core update): asked again, and kept again afterwards
+        std::fs::create_dir_all(base._dir.path().join("scripts/lib")).unwrap();
+        std::fs::write(base._dir.path().join("scripts/lib/driver-registry.sh"), "# new rules").unwrap();
+        let _ = protected_locations();
+        assert!(calls(&base) > warm, "the code changed");
+        let again = calls(&base);
+        let _ = protected_locations();
+        assert_eq!(calls(&base), again);
+
+        // an external driver folder: never kept, and a store it moves is seen
+        let plugin = base._dir.path().join("plugins/p/partition");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("mine.sh"), "# arbitrary").unwrap();
+        let n = calls(&base);
+        let _ = protected_locations();
+        let _ = protected_locations();
+        assert!(calls(&base) >= n + 4, "every call asks");
+        let moved = touch_store(&base, "moved/messages.db");
+        std::fs::write(base._dir.path().join("teams/a/config.json"), r#"{"drivers":{"partition":"mine"}}"#).unwrap();
+        let _ = moved;
+
+        // the plugin folders named in the environment: never kept
+        std::fs::remove_dir_all(base._dir.path().join("plugins")).unwrap();
+        std::fs::write(base._dir.path().join("teams/a/config.json"), "{}").unwrap();
+        let _ = protected_locations();
+        let kept = calls(&base);
+        let _ = protected_locations();
+        assert_eq!(calls(&base), kept, "back to built-in drivers: kept");
+        let _env = EnvGuard::set("AGMSG_PLUGIN_DIRS", "/somewhere");
+        let _ = protected_locations();
+        let _ = protected_locations();
+        assert!(calls(&base) >= kept + 4, "AGMSG_PLUGIN_DIRS: every call asks");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(not(target_os = "windows"))]
+    fn a_failed_lookup_is_never_kept() {
+        let base = counting_base();
+        add_team(&base, "a", "{}");
+        std::fs::write(base._dir.path().join("fail-a"), "").unwrap();
+        let _ = watchable_stores();
+        let after_one = calls(&base);
+        let _ = watchable_stores();
+        assert!(calls(&base) > after_one, "asked again, not answered from a failure");
+        std::fs::remove_file(base._dir.path().join("fail-a")).unwrap();
+        touch_store(&base, "messages.db");
+        assert_eq!(watchable_stores().0, vec![base._dir.path().join("db/messages.db")]);
+    }
+
+    /// An install with agmsg's real scripts (this repository ships them), and the environment pointed at it
+    /// and away from the machine's own settings.
+    #[cfg(unix)]
+    struct RealBase {
+        dir: tempfile::TempDir,
+        _guards: Vec<EnvGuard>,
+    }
+
+    #[cfg(unix)]
+    fn real_base() -> RealBase {
+        fn copy(from: &std::path::Path, to: &std::path::Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for e in std::fs::read_dir(from).unwrap() {
+                let e = e.unwrap();
+                if e.file_type().unwrap().is_dir() {
+                    copy(&e.path(), &to.join(e.file_name()));
+                } else {
+                    std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        copy(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts"), &root.join("scripts"));
+        std::fs::create_dir_all(root.join("teams")).unwrap();
+        let guards = vec![
+            EnvGuard::set("AGMSG_APP_BASE", &root.to_string_lossy()),
+            EnvGuard::set("AGMSG_STORAGE_PATH", ""),
+            EnvGuard::set("AGMSG_STORAGE_DRIVER", ""),
+            EnvGuard::set("AGMSG_PLUGIN_DIRS", ""),
+            EnvGuard::set("AGMSG_CONFIG", &root.join("no-such-config.json").to_string_lossy()),
+        ];
+        RealBase { dir, _guards: guards }
+    }
+
+    #[cfg(unix)]
+    fn add_real_team(base: &RealBase, name: &str, config: &str, with_store: bool) -> PathBuf {
+        let root = base.dir.path().canonicalize().unwrap();
+        let d = root.join("teams").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("config.json"), config).unwrap();
+        let store = if config.contains("per-team") { root.join("db/teams").join(name).join("messages.db") } else { root.join("db/messages.db") };
+        if with_store {
+            std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+            std::fs::write(&store, "x").unwrap();
+        }
+        store
+    }
+
+    /// `bash` that logs each start and then runs the real one, put first on PATH.
+    #[cfg(unix)]
+    fn counting_bash(dir: &std::path::Path) -> (EnvGuard, PathBuf) {
+        let real = String::from_utf8(std::process::Command::new("sh").args(["-c", "command -v bash"]).output().unwrap().stdout).unwrap();
+        let shim = dir.join("shim");
+        std::fs::create_dir_all(&shim).unwrap();
+        let log = dir.join("bash-starts");
+        let body = format!("#!/bin/sh\necho x >> '{}'\n[ -e '{}' ] && exit 1\nexec '{}' \"$@\"\n", log.display(), dir.join("bash-fails").display(), real.trim());
+        std::fs::write(shim.join("bash"), body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(shim.join("bash"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap_or_default());
+        (EnvGuard::set("PATH", &path), log)
+    }
+
+    #[cfg(unix)]
+    fn starts(log: &std::path::Path) -> usize {
+        std::fs::read_to_string(log).map(|s| s.lines().count()).unwrap_or(0)
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn a_cold_or_changed_look_is_one_bash_whatever_the_number_of_teams_and_a_warm_look_is_none() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        let mut stores = Vec::new();
+        for i in 0..8 {
+            let cfg = if i % 2 == 0 { "{}" } else { r#"{"drivers":{"partition":"per-team"}}"# };
+            stores.push(add_real_team(&base, &format!("team{i}"), cfg, true));
+        }
+        let (_path, log) = counting_bash(&root);
+        let p = protected_locations();
+        for s in &stores {
+            assert!(p.contains(s), "{s:?} protected");
+        }
+        assert_eq!(starts(&log), 1, "cold: one bash for all eight teams");
+        for _ in 0..4 {
+            let _ = protected_locations();
+            let _ = watchable_stores();
+        }
+        assert_eq!(starts(&log), 1, "warm: none");
+        // a change: one more, and the new store is protected
+        let added = add_real_team(&base, "late", r#"{"drivers":{"partition":"per-team"}}"#, true);
+        assert!(protected_locations().contains(&added));
+        assert_eq!(starts(&log), 2, "changed: one bash");
+        let _ = protected_locations();
+        assert_eq!(starts(&log), 2);
+        // callers that miss together: one fetch, the rest wait and use its answer
+        add_real_team(&base, "later", "{}", true);
+        let threads: Vec<_> = (0..8).map(|_| std::thread::spawn(|| protected_locations().len())).collect();
+        let lens: Vec<usize> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(lens.windows(2).all(|w| w[0] == w[1]));
+        assert_eq!(starts(&log), 3, "eight at once, one bash");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn an_external_driver_configuration_is_fetched_in_one_bash_each_time() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        add_real_team(&base, "a", "{}", true);
+        add_real_team(&base, "b", "{}", true);
+        std::fs::create_dir_all(root.join("plugins/p")).unwrap(); // a folder in plugins: nothing is kept
+        let (_path, log) = counting_bash(&root);
+        let _ = protected_locations();
+        assert_eq!(starts(&log), 1, "one bash for two teams, not three");
+        let _ = protected_locations();
+        assert_eq!(starts(&log), 2, "not kept");
+    }
+
+    #[test]
+    fn a_value_with_a_tab_or_a_newline_stays_one_value_and_a_malformed_output_is_refused() {
+        let nasty = "/outside/first\tfalse\nfake\tsqlite\t/outside/second\r";
+        let mut out = Vec::new();
+        for f in ["team\tone\n", "sqlite", nasty, "true"] {
+            out.extend_from_slice(f.as_bytes());
+            out.push(0);
+        }
+        let (teams, infos) = parse_stores(&out).unwrap();
+        assert_eq!(teams, vec!["team\tone\n".to_string()]);
+        assert_eq!(infos["team\tone\n"].as_ref().unwrap().path, nasty, "one path, intact, no second record");
+        assert!(parse_stores(b"").unwrap().0.is_empty());
+        let code = |b: &[u8]| parse_stores(b).unwrap_err().code;
+        assert_eq!(code(b"a\0sqlite\0/p\0true"), "batch_parse", "no terminator");
+        assert_eq!(code(b"a\0sqlite\0/p\0\0"), "batch_parse", "exists is empty");
+        assert_eq!(code(b"a\0sqlite\0/p\0maybe\0"), "batch_parse", "exists is neither");
+        assert_eq!(code(b"a\0sqlite\0/p\0true\0b\0"), "batch_parse", "a record cut short");
+        assert_eq!(code(b"\0sqlite\0/p\0true\0"), "batch_parse", "an empty team");
+        assert_eq!(code(b"a\0sqlite\0\0true\0"), "batch_parse", "an empty path");
+        assert_eq!(code(b"a\0sqlite\0/p\0true\0a\0sqlite\0/q\0true\0"), "batch_mismatch", "a team twice");
+        assert_eq!(code(b"a\0sqlite\0/p\xff\0true\0"), "batch_parse", "not text");
+    }
+
+    /// An install whose core functions answer with the given store path, so the real stores.sh runs end to end.
+    #[cfg(unix)]
+    fn stub_core_base(path_expr: &str) -> FakeBase {
+        let b = fake_base(&[]);
+        let root = b._dir.path();
+        std::fs::create_dir_all(root.join("scripts/lib")).unwrap();
+        std::fs::write(
+            root.join("scripts/lib/storage.sh"),
+            format!("agmsg_storage_load() {{ :; }}\nagmsg_storage_driver() {{ echo sqlite; }}\nagmsg_db_path() {{ printf '%s' {path_expr}; }}\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join("scripts/lib/validate.sh"), ":\n").unwrap();
+        std::fs::create_dir_all(root.join("teams/alpha")).unwrap();
+        std::fs::write(root.join("teams/alpha/config.json"), "{}").unwrap();
+        b
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn a_path_with_tab_newline_and_carriage_return_comes_through_the_real_script_as_one_path() {
+        let b = stub_core_base(r#"$'/outside/first\tfalse\nfake\tsqlite\t/outside/second\r'"#);
+        let (teams, infos) = fetch_stores_in_one_process().unwrap();
+        assert_eq!(teams, vec!["alpha".to_string()]);
+        assert_eq!(infos["alpha"].as_ref().unwrap().path, "/outside/first\tfalse\nfake\tsqlite\t/outside/second\r");
+        let _ = b;
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn when_the_one_process_look_fails_the_reason_is_logged_with_a_fixed_code_and_no_path() {
+        BATCH_LOG.lock().unwrap().clear();
+        // the core's own function fails and says where, in its error output
+        let b = fake_base(&[("api.sh", "exit 1\n")]);
+        std::fs::create_dir_all(b._dir.path().join("scripts/lib")).unwrap();
+        std::fs::write(b._dir.path().join("scripts/lib/storage.sh"), "echo 'open /Users/example/private/config failed' >&2\nreturn 1\n").unwrap();
+        let r = fetch_stores_in_one_process();
+        assert_eq!(r.unwrap_err().code, "batch_exit");
+        let _ = watchable_stores();
+        let log = BATCH_LOG.lock().unwrap().join("\n");
+        assert!(log.contains("(batch_exit)") && log.contains("exit status 1") && log.contains("asking team by team"), "{log}");
+        assert!(!log.contains("/Users/example") && !log.contains("private") && !log.contains(&*b._dir.path().to_string_lossy()), "no path in the log: {log}");
+        // an answer that is not whole records
+        BATCH_LOG.lock().unwrap().clear();
+        note_batch_failure(&parse_stores(b"a\0b\0").unwrap_err());
+        assert!(BATCH_LOG.lock().unwrap().join("\n").contains("(batch_parse)"));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn the_timer_keeps_only_a_whole_look_and_asks_again_after_a_failed_one() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        let store = add_real_team(&base, "a", "{}", true);
+        std::fs::create_dir_all(root.join("plugins/p")).unwrap(); // nothing is kept by the cache
+        let (_path, log) = counting_bash(&root);
+        std::fs::write(root.join("bash-fails"), "").unwrap();
+        let failed = watchable_stores_timed();
+        assert!(failed.0.is_empty(), "nothing could be learned");
+        let after_failure = starts(&log);
+        assert!(after_failure >= 1);
+        // still failing: the failed look was not kept, so the next tick asks again
+        let _ = watchable_stores_timed();
+        assert!(starts(&log) > after_failure, "asked again");
+        // recovered: the right answer, kept from then on
+        std::fs::remove_file(root.join("bash-fails")).unwrap();
+        let recovered = watchable_stores_timed();
+        assert_eq!(recovered.0, vec![store]);
+        let kept = starts(&log);
+        for _ in 0..4 {
+            assert_eq!(watchable_stores_timed(), recovered);
+        }
+        assert_eq!(starts(&log), kept, "a whole look is kept");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn callers_that_miss_together_share_one_fetch_even_where_the_answer_is_not_kept() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        add_real_team(&base, "a", "{}", true);
+        add_real_team(&base, "b", r#"{"drivers":{"partition":"per-team"}}"#, true);
+        std::fs::create_dir_all(root.join("plugins/p")).unwrap(); // nothing is kept
+        let (_path, log) = counting_bash(&root);
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    watchable_stores().0.len()
+                })
+            })
+            .collect();
+        let lens: Vec<usize> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(lens.iter().all(|&n| n == 2), "{lens:?}");
+        // eight callers arrived together: a fetch started after the last of them arrived can be shared, but a
+        // caller never gets an answer older than its own arrival, so more than one is possible and eight is not
+        let n = starts(&log);
+        assert!((1..8).contains(&n), "{n} fetches for eight simultaneous callers");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn the_timer_does_not_start_a_bash_every_tick_where_the_answer_is_not_kept() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        add_real_team(&base, "a", "{}", true);
+        std::fs::create_dir_all(root.join("plugins/p")).unwrap();
+        let (_path, log) = counting_bash(&root);
+        let first = watchable_stores_timed();
+        assert_eq!(starts(&log), 1);
+        for _ in 0..6 {
+            assert_eq!(watchable_stores_timed(), first, "ticks within the minute reuse the last look");
+        }
+        assert_eq!(starts(&log), 1, "six more ticks, no bash");
+        // a team added shows on the very next tick
+        let added = add_real_team(&base, "b", r#"{"drivers":{"partition":"per-team"}}"#, true);
+        assert!(watchable_stores_timed().0.contains(&added));
+        assert_eq!(starts(&log), 2);
+        // opening a folder always looks
+        let _ = protected_locations();
+        assert_eq!(starts(&log), 3);
+    }
+
+    #[test]
+    #[serial]
+    fn protected_locations_cover_the_base_and_configured_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        let storage = dir.path().join("elsewhere");
+        let _s = EnvGuard::set("AGMSG_STORAGE_PATH", &storage.to_string_lossy());
+        let p = crate::agmsg::protected_locations();
+        assert!(p.contains(&dir.path().to_path_buf()), "{p:?}");
+        assert!(p.contains(&storage), "{p:?}");
+    }
+
     #[test]
     #[serial]
     fn agmsg_base_honors_the_env_override() {
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
         assert_eq!(agmsg_base(), dir.path());
+    }
+
+    #[test]
+    #[serial]
+    fn scripts_dir_is_the_scripts_folder_of_the_base_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        assert_eq!(std::path::PathBuf::from(crate::agmsg::agmsg_scripts_dir()), dir.path().join("scripts"));
     }
 
     #[test]

@@ -55,7 +55,8 @@
     "roomLabel": "# 團隊聊天室",
     "close": "×",
     "newShell": "新增 Shell 分頁",
-    "shellLabel": "Shell"
+    "shellLabel": "Shell",
+    "newMenu": "新增分頁或面板"
   },
   "room": {
     "loadingMore": "載入更多…",
@@ -257,5 +258,227 @@
   },
   "stage": {
     "emptyHint": "點擊左側的成員以啟動代理。"
+  },
+  "addons": {
+    "tab": {
+      "general": "General",
+      "addons": "Add-ons"
+    },
+    "engineOff": "Add-ons are not available on this computer yet. A safety check did not pass with this system's web engine. Your other features are not affected.",
+    "engineReasons": "Reason: {{reasons}}",
+    "checking": "Checking…",
+    "checkAgain": "Check again",
+    "builtin": {
+      "title": "Built in",
+      "source": "內建"
+    },
+    "installed": {
+      "title": "Installed",
+      "empty": "No add-ons installed.",
+      "checkUpdates": "Check for updates",
+      "remove": "Remove",
+      "doneNotice": "已安裝 {{title}}。可從面板頂部的 + 開啟。",
+      "updatedNotice": "已更新 {{title}}。",
+      "openNow": "立即開啟"
+    },
+    "install": {
+      "placeholder": "例如 fujibee/agmsg-addon-sample",
+      "button": "Install…",
+      "later": "Installing from GitHub isn't available in this build yet.",
+      "heading": "從 GitHub 安裝",
+      "help": "輸入 agmsg 附加元件的儲存庫：owner/repo，或用 owner/repo@tag 固定版本。"
+    },
+    "openRequests": {
+      "off": "關閉",
+      "copy": "複製給代理的說明",
+      "copied": "已複製。",
+      "copyFailed": "無法複製。",
+      "title": "來自代理的請求",
+      "explain": "允許你團隊中的代理請求應用程式開啟面板，例如它們工作的 diff。請求會顯示在一個列中；在你按下「開啟」之前不會開啟任何內容。",
+      "on": "開啟",
+      "copyHelp": "Agents need to know the request format. Copy it for the team you are in and paste it to that team's agents once; the text names this team and its app user.",
+      "seatText": "This is not a shell command. `agmsg-app open ...` is the text of a request: send it as an agmsg message to {{appUser}} in team {{team}}. The app shows it to the user as a request bar; the user has to click Open, nothing opens by itself.\nThe message body is exactly this one line, not quoted, not in a code block, with nothing else in it:\nagmsg-app open <addon-id> <pane> [path=<absolute path>]\nSend it with the agmsg send script (where it says <your seat name>, put your own seat name in this team):\n{{command}}\nIf your shell is not bash (PowerShell on Windows), run it as bash -lc with the whole command quoted, as the agmsg instructions say.\nBuilt-in panes: builtin:fileview fileview, builtin:diffview diffview.",
+      "copyNoTeam": "Choose a team first. The text names the team and its app user, so it is copied per team.",
+      "copyNoAppUser": "This team has no app user, so agents have nobody to send the request to. Copy it from a team that has one.",
+      "copyNoScripts": "Could not find the agmsg scripts folder this app uses, so there is no send command to copy."
+    },
+    "developer": {
+      "title": "Developer",
+      "loadFromFolder": "Load from folder…",
+      "loaded": "Developer add-ons",
+      "none": "No developer add-ons loaded.",
+      "reload": "Reload from folder",
+      "remove": "Remove",
+      "explain": "正在開發自己的附加元件？可以從這台電腦上的資料夾載入。它不會被安裝：直接從資料夾執行，重新載入即可套用你的修改。"
+    },
+    "permission": {
+      "none": "Runs with no permissions",
+      "messagesRead": "Read messages of a team you choose",
+      "filesRead": "Read files in a folder you choose",
+      "gitRead": "Read git history and changes in that folder",
+      "network": "Connect to {{hosts}}",
+      "networkAny": "Connect to any site on the internet"
+    },
+    "grant": {
+      "messages": "Reads messages: {{scope}}",
+      "files": "Reads files: {{scope}}",
+      "remembered": "(remembered)",
+      "revoke": "Revoke"
+    },
+    "card": {
+      "grantAria": "Permission request",
+      "messagesWant": "{{title}} wants to read messages of team {{team}}.",
+      "filesWant": "{{title}} wants to read {{path}} (folder, {{count}} files).",
+      "filesWantOne": "{{title}} wants to read {{path}}.",
+      "allow": "Allow",
+      "allowOnce": "Allow once",
+      "allowAlways": "Always for this folder",
+      "notNow": "Not now",
+      "denied": "{{path}} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
+      "chooseAnother": "Choose another…",
+      "allowAlwaysLater": "Not available yet",
+      "can": "可以",
+      "allowed": "已允許",
+      "nothingYet": "尚無",
+      "installedOn": "安裝於 {{date}}"
+    },
+    "installError": {
+      "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
+      "ref_not_found": "{{repo}} has no branch, tag or commit named {{ref}}.",
+      "no_app_panes": "{{repo}} has no app add-on (no app-panes/ folder). If it is an agmsg CLI plugin, it is installed from the CLI, not here.",
+      "conf_invalid": "app-panes/{{pane}}/addon.conf line {{line}}: {{problem}}.",
+      "entry_missing": "app-panes/{{pane}}/web/{{entry}} is missing. Add-ons must commit their built web/ folder.",
+      "min_app": "Needs agmsg app {{minApp}} or newer; this is {{appVersion}}.",
+      "protocol_unknown": "Made for a newer app (protocol {{protocol}}). Update the app to use it.",
+      "too_large": "Too large to install: {{measured}} (limit {{limit}}). Largest file: {{largest}}.",
+      "unsafe_entry": {
+        "symlink": "Refused: the repository contains a symbolic link at {{path}}. Add-ons may contain only plain files.",
+        "hardlink": "Refused: the repository contains a hard link at {{path}}. Add-ons may contain only plain files.",
+        "outside_path": "Refused: the repository contains a path outside the folder at {{path}}. Add-ons may contain only plain files.",
+        "reserved_name": "Refused: the repository contains a reserved file name at {{path}}. Add-ons may contain only plain files."
+      },
+      "github_error": "GitHub didn't answer: {{status}}. Try again.",
+      "rate_limited": "GitHub limits unauthenticated downloads; try again after {{time}}.",
+      "already_installed": "Already installed ({{sha}}).",
+      "message": "{{message}}"
+    },
+    "pane": {
+      "reload": "Reload",
+      "askedBy": "asked by {{agent}}",
+      "blocked": "blocked: {{what}}",
+      "dev": "DEV · {{folder}}",
+      "networkChip": "network: {{hosts}}",
+      "networkAnyChip": "network: any site",
+      "framePlaceholder": "Add-on frame",
+      "opening": "Opening {{title}}…",
+      "loading": "Loading {{title}}…"
+    },
+    "failure": {
+      "digest_mismatch": "{{title}} can't open: its files are incomplete or were changed after install.",
+      "load_timeout": "{{title}} didn't finish loading.",
+      "path_missing": "{{path}} no longer exists.",
+      "revoked": "Not reading {{scope}}.",
+      "action": {
+        "reinstall": "Reinstall",
+        "remove": "Remove",
+        "reload": "Reload",
+        "chooseAnother": "Choose another…",
+        "allowAgain": "Allow again"
+      },
+      "init_too_large": "{{title}} was given more than it can take at once (the starting data is too large).",
+      "open_failed": "{{title}} can't open: {{message}}"
+    },
+    "confirm": {
+      "installTitle": "Install {{title}}?",
+      "updateTitle": "Update {{title}}?",
+      "fromTo": "{{from}} → {{to}}",
+      "details": "Details",
+      "fullSha": "Commit: {{sha}}",
+      "archive": "Archive SHA-256: {{hash}}",
+      "canTitle": "此附加元件可以",
+      "new": "New:",
+      "sends": "It can send what it reads to {{hosts}}.",
+      "sendsAny": "It can send what it reads to any site on the internet.",
+      "never": "執行程式、使用應用程式的控制項，或讀取你沒有選擇的任何內容。",
+      "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
+      "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
+      "install": "Install",
+      "update": "Update",
+      "changesTitle": "What changes, pane by pane:",
+      "paneAdds": "{{pane}} gains: {{perms}}",
+      "paneWider": "{{pane}} can reach more sites",
+      "paneCombined": "{{pane}} can now send what it reads over the network",
+      "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
+      "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
+      "neverTitle": "它永遠不能",
+      "source_other": "來自 {{repo}} · {{sha}} · 新增 {{count}} 個面板",
+      "sourceUpdate_other": "來自 {{repo}} · {{from}} → {{to}} · {{count}} 個面板",
+      "panes": "將新增：{{names}}"
+    },
+    "remove": {
+      "title": "Remove {{title}}?",
+      "body": "Closes its {{count}} open panes, deletes its files, and forgets every permission you gave it.",
+      "confirm": "Remove"
+    },
+    "fetch": {
+      "resolving": "Resolving the commit…",
+      "resolved": "Commit {{sha}}",
+      "downloading": "Downloading {{done}} MB of {{total}} MB…",
+      "checking": "Checking files: {{files}} files, {{size}} MB",
+      "downloadingPlain": "Downloading…",
+      "checkingPlain": "Checking the files…"
+    },
+    "request": {
+      "wants": "{{team}} 中的 {{agent}} 想開啟 {{target}}{{args}}",
+      "base": "基準 {{base}}",
+      "open": "開啟",
+      "dismiss": "略過",
+      "install": "安裝…",
+      "many": "{{count}} 個開啟請求 ▾",
+      "status": {
+        "open": "",
+        "not_installed": "尚未安裝 {{pane}}。",
+        "not_found_here": "此處找不到。",
+        "args_not_allowed": "與此窗格不相符。",
+        "unavailable": "目前無法開啟 {{pane}}。",
+        "denied_path": "該位置受保護。"
+      },
+      "note": {
+        "malformed": "開啟請求格式有誤（{{reason}}{{detail}}）。"
+      },
+      "notes": "{{count}} 則提示 ▾",
+      "reason": {
+        "missing_pane": "缺少附加元件或窗格名稱",
+        "bad_addon": "附加元件名稱無效",
+        "bad_pane": "窗格名稱無效",
+        "bad_option": "窗格名稱後只能接 path=<絕對路徑>",
+        "bad_path": "路徑必須是絕對路徑",
+        "bad_message_id": "無法記錄訊息 ID",
+        "unreadable": "無法讀取該請求"
+      },
+      "readFailed": "無法讀取開啟請求：{{message}}",
+      "actionFailed": "無法處理該請求：{{message}}",
+      "truncated": "較舊的請求不再顯示。",
+      "close": "Close"
+    },
+    "menu": {
+      "fileViewEntry": "File view…",
+      "diffViewEntry": "Diff view…",
+      "fileView": "File view",
+      "diffView": "Diff view",
+      "addonPane": "Add-on pane ▸ {{title}}",
+      "install": "安裝附加元件…"
+    },
+    "listFailed": "Couldn't read the add-on list: {{message}}",
+    "listRetry": "Try again",
+    "grantsFailed": "Couldn't read what you allowed: {{message}}",
+    "env": {
+      "found": "此資料夾中有 .env 檔案。",
+      "foundNetwork": "此資料夾中有 .env 檔案。此附加元件會使用網路，因此無法讀取它。"
+    },
+    "intro": "附加元件會為應用程式新增面板。它們只能讀取你允許的內容，你可以隨時在這裡收回。",
+    "group": {
+      "problems_other": "{{count}} 個問題"
+    }
   }
 }

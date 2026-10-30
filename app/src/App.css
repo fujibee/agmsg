@@ -12,6 +12,16 @@
   --muted: #6b7280;
   --accent: #7aa2f7;
   --green: #9ece6a;
+  --strong: #e6e8ec;
+  --accent-soft: rgba(122, 162, 247, 0.14);
+  --green-soft: rgba(158, 206, 106, 0.14);
+  --green-line: rgba(158, 206, 106, 0.4);
+  --amber: #e0af68;
+  --amber-soft: rgba(224, 175, 104, 0.12);
+  --amber-line: rgba(224, 175, 104, 0.35);
+  --red: #f7768e;
+  --red-line: rgba(247, 118, 142, 0.4);
+  --on-accent: #0b0e14;
 }
 
 * {
@@ -187,8 +197,8 @@ select:focus {
   border-color: var(--accent);
 }
 
-/* + New menu (collapsed-rail only — the expanded sidebar has its own
-   direct + buttons per section instead, see .section-add-btn) */
+/* ＋ New menu: the collapsed rail's +, the expanded sidebar's ＋ New ▾ and the tab bar's ▾
+   (one component, NewMenu.tsx). The sidebar sections also keep their own direct + buttons. */
 .new-wrap {
   position: relative;
 }
@@ -217,10 +227,21 @@ select:focus {
 .new-menu button:hover {
   background: var(--bg);
 }
+.new-menu button.is-active {
+  background: var(--bg);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
 .new-menu button:disabled {
   opacity: 0.4;
   cursor: default;
 }
+.new-menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 0;
+}
+.new-menu-tabs { min-width: 200px; }
 
 /* Right-click context menus (member row: Spawn/Rename/Leave; pane header:
    Close/Move to). overflow is visible (not hidden) so the Move-to submenu can
@@ -1583,3 +1604,135 @@ body.resizing-row {
   opacity: 0.4;
   cursor: default;
 }
+
+/* Add-ons: Settings tab and the in-pane cards */
+.settings-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.settings-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 4px 8px; cursor: pointer; }
+.settings-tabs button.active { color: var(--fg); border-bottom-color: var(--accent); }
+.addon-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.addon-perms, .addon-grants { list-style: none; margin: 0; padding: 0; }
+.addon-perms li, .addon-grants li { font-size: 12px; color: var(--muted); }
+.addons-settings { display: grid; gap: 10px; }
+.addon-intro { color: var(--muted); font-size: 12px; margin: 0; }
+.addon-help { color: var(--muted); font-size: 12px; margin: 0; }
+.addon-help-main { color: var(--fg); }
+.addon-btn { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; white-space: nowrap; }
+.addon-btn.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 600; }
+.addon-btn.danger { background: transparent; color: var(--red); border-color: var(--red-line); }
+.addon-btn:disabled { opacity: 0.4; cursor: default; }
+.addon-link { background: none; border: 0; color: var(--accent); padding: 0 0 0 6px; font: inherit; cursor: pointer; }
+.addon-install-form { display: grid; gap: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: 12px; }
+.addon-install-form label { color: var(--strong); font-weight: 600; font-size: 12px; margin: 0; }
+.addon-row-line { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.addon-row-line input { flex: 1; min-width: 0; }
+.addon-group { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+.addon-group > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 10px 12px; color: var(--strong); font-weight: 600; }
+.addon-group > summary::-webkit-details-marker { display: none; }
+.addon-group > summary::before { content: "\25B8"; color: var(--muted); font-size: 11px; transition: transform 0.15s; }
+.addon-group[open] > summary::before { transform: rotate(90deg); }
+.addon-count { font-weight: 500; font-size: 11px; color: var(--muted); background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; }
+.addon-group.has-problem { border-color: var(--red-line); }
+.addon-problem { font-weight: 500; font-size: 11px; color: var(--red); border: 1px solid var(--red-line); border-radius: 10px; padding: 0 7px; }
+.addon-dlg-source.addon-dlg-panes { margin-top: -8px; }
+.addon-group-body { padding: 0 12px 12px; display: grid; gap: 8px; }
+.addon-acard { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; }
+.addon-acard.new { border-color: var(--green); }
+.addon-acard-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.addon-name { color: var(--strong); font-weight: 600; font-size: 14px; }
+.addon-src { color: var(--muted); font-size: 11px; font-family: ui-monospace, Menlo, monospace; word-break: break-all; }
+.addon-kv { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.addon-lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; min-width: 58px; }
+.addon-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
+/* Scoped to .addon-chips: the pane header chip further down shares the .addon-chip name and sets its own muted colour. */
+.addon-chips .addon-chip { font-size: 11px; border: 0; border-radius: 10px; padding: 1px 8px; background: var(--accent-soft); color: var(--strong); }
+.addon-chips .addon-chip.ok { background: var(--green-soft); color: var(--green); }
+.addon-chips .addon-chip.none { background: none; color: var(--muted); border: 1px dashed var(--border); }
+.addon-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.addon-switch-line { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.addon-switch { flex: none; width: 34px; height: 20px; border-radius: 10px; border: 0; padding: 0; background: var(--border); position: relative; cursor: pointer; margin-top: 2px; }
+.addon-switch::after { content: ""; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--on-accent); transition: transform 0.15s; }
+.addon-switch[aria-checked="true"] { background: var(--accent); }
+.addon-switch[aria-checked="true"]::after { transform: translateX(14px); }
+.addon-copy-state { font-size: 12px; color: var(--green); }
+.addon-copy-state.failed { color: var(--red); }
+.addon-toast { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: var(--green-soft); border: 1px solid var(--green-line); color: var(--strong); border-radius: 8px; padding: 8px 12px; font-size: 12px; }
+.addon-install-error, .addon-engine-off { color: var(--red); font-size: 12px; margin-top: 6px; }
+.addon-digest-bad { color: var(--red); font-size: 12px; margin: 0; }
+.addon-list-error { color: var(--red); font-size: 12px; margin: 0; }
+.addon-notice { font-size: 12px; margin: 0; color: var(--muted); }
+.addon-notice.error { color: var(--red); }
+.modal.wide { width: 560px; max-height: 88vh; display: flex; flex-direction: column; }
+.modal-body { overflow-y: auto; min-height: 0; flex: 1; padding-right: 2px; }
+.modal.wide > .modal-actions { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.addon-block { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--panel-2); }
+.addon-block h4 { margin: 0 0 6px; color: var(--strong); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+.addon-perm-row { display: grid; grid-template-columns: 18px 1fr; gap: 2px 8px; margin: 6px 0; }
+.addon-perm-row b { color: var(--strong); font-weight: 600; }
+.addon-perm-row .addon-why { grid-column: 2; font-size: 12px; }
+.addon-perm-row .ico { color: var(--accent); }
+.addon-never { color: var(--muted); font-size: 12px; margin: 0; }
+.addon-warn { background: var(--amber-soft); border: 1px solid var(--amber-line); color: var(--amber); border-radius: 8px; padding: 8px 12px; font-size: 12px; margin-bottom: 10px; }
+.addon-dlg-source { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
+.addon-dlg-source b { color: var(--fg); font-weight: 600; }
+.addon-card { margin: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.addon-card.denied { border-color: var(--red); }
+.addon-card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.addon-card-actions button { background: var(--panel-2); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+.addon-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.addon-pane-body { flex: 1; min-height: 0; overflow: auto; }
+/* The bar under the pane body: lower and smaller than the app's pane header, on the body's colour with a hairline above. */
+.addon-pane-status { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: 22px; max-height: 22px; overflow: hidden; padding: 0 8px; font-size: 10px; line-height: 1; color: var(--muted); background: var(--bg); border-top: 1px solid var(--border); white-space: nowrap; }
+.addon-pane-status-fill { flex: 1 0 0; min-width: 0; }
+/* The text can shrink and is cut with an ellipsis (the full text is in title); the buttons never shrink, so ⟳ and × stay reachable. */
+.addon-pane-status > :not(.addon-pane-status-btn):not(.addon-pane-status-fill) { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.addon-pane-status > .addon-pane-title { flex-shrink: 0; max-width: 40%; }
+.addon-pane-status-btn { flex-shrink: 0; background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 2px; font-size: 12px; line-height: 1; }
+.addon-pane-status-btn:hover { color: var(--fg); }
+.addon-blocked-close, .addon-request-note-close { background: none; border: 0; color: inherit; cursor: pointer; padding: 0 0 0 6px; font-size: 12px; line-height: 1; }
+.addon-pane-title { font-weight: 600; }
+.addon-chip, .addon-badge { font-size: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 0 6px; color: var(--muted); }
+.addon-asked-by { font-size: 10px; color: var(--muted); }
+.addon-blocked { display: flex; align-items: center; font-size: 10px; color: var(--red); }
+.addon-blocked-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.addon-blocked-close { flex-shrink: 0; }
+.addon-frame-placeholder { padding: 16px; color: var(--muted); }
+.addon-perm-new { background: var(--accent-soft); border-radius: 4px; padding: 2px 4px; }
+.addon-why { color: var(--muted); }
+.addon-details { color: var(--muted); margin: 6px 0; }
+.addon-details summary { font-size: 12px; cursor: pointer; }
+.addon-details div { font-size: 11px; font-family: ui-monospace, Menlo, monospace; word-break: break-all; margin-top: 4px; }
+.addon-asks-again { color: var(--amber); }
+.addon-fetch { font-size: 12px; margin-top: 6px; }
+.addon-request-bar { padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--panel); font-size: 12px; }
+.addon-request { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.addon-request-why { color: var(--muted); }
+.addon-request button { background: var(--panel-2); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+.addon-request button:disabled { opacity: 0.4; cursor: default; }
+.addon-chip-note { color: var(--muted); }
+.addon-frame { width: 100%; height: 100%; border: 0; background: #fff; }
+.addon-request-note { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.addon-request-notes { padding: 4px 10px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
+
+/* Busy: a spinner that stays invisible for the first 150 ms, so work that ends at once does not flicker. */
+.busy-spinner {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  margin-left: 6px;
+  vertical-align: -0.12em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  opacity: 0;
+  animation: busy-in 0s linear 150ms forwards, busy-spin 0.8s linear infinite;
+}
+@keyframes busy-in { to { opacity: 0.7; } }
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .busy-spinner { animation: busy-in 0s linear 150ms forwards; border-right-color: currentColor; border-style: dotted; }
+}
+.addon-loading { display: flex; align-items: center; justify-content: center; gap: 4px; height: 100%; min-height: 80px; padding: 16px; color: var(--muted); font-size: 12px; }
+.addon-loading .busy-spinner { margin-left: 0; margin-right: 6px; }
+button[aria-busy="true"] { cursor: progress; }
+.addon-frame-wrap { position: relative; width: 100%; height: 100%; }
+.addon-frame-loading { position: absolute; inset: 0; pointer-events: none; background: var(--bg); }

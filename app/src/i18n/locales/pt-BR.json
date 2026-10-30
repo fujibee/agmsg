@@ -55,7 +55,8 @@
     "roomLabel": "# sala da equipe",
     "close": "×",
     "newShell": "Nova aba de shell",
-    "shellLabel": "Shell"
+    "shellLabel": "Shell",
+    "newMenu": "Nova aba ou painel"
   },
   "room": {
     "loadingMore": "Carregando mais…",
@@ -257,5 +258,233 @@
   },
   "stage": {
     "emptyHint": "Clique em um membro à esquerda para iniciar um agente."
+  },
+  "addons": {
+    "tab": {
+      "general": "General",
+      "addons": "Add-ons"
+    },
+    "engineOff": "Add-ons are not available on this computer yet. A safety check did not pass with this system's web engine. Your other features are not affected.",
+    "engineReasons": "Reason: {{reasons}}",
+    "checking": "Checking…",
+    "checkAgain": "Check again",
+    "builtin": {
+      "title": "Built in",
+      "source": "integrado"
+    },
+    "installed": {
+      "title": "Installed",
+      "empty": "No add-ons installed.",
+      "checkUpdates": "Check for updates",
+      "remove": "Remove",
+      "doneNotice": "{{title}} foi instalado. Abra pelo + no topo dos painéis.",
+      "updatedNotice": "{{title}} foi atualizado.",
+      "openNow": "Abrir agora"
+    },
+    "install": {
+      "placeholder": "ex.: fujibee/agmsg-addon-sample",
+      "button": "Install…",
+      "later": "Installing from GitHub isn't available in this build yet.",
+      "heading": "Instalar do GitHub",
+      "help": "Digite o repositório de um complemento do agmsg: owner/repo, ou owner/repo@tag para uma versão fixa."
+    },
+    "openRequests": {
+      "off": "Desligado",
+      "copy": "Copiar instruções para agentes",
+      "copied": "Copiado.",
+      "copyFailed": "Não foi possível copiar.",
+      "title": "Solicitações de agentes",
+      "explain": "Permite que os agentes das suas equipes peçam ao app para abrir um painel, por exemplo um diff do trabalho deles. Uma barra mostra a solicitação; nada abre até você clicar em Abrir.",
+      "on": "Ativado",
+      "copyHelp": "Agents need to know the request format. Copy it for the team you are in and paste it to that team's agents once; the text names this team and its app user.",
+      "seatText": "This is not a shell command. `agmsg-app open ...` is the text of a request: send it as an agmsg message to {{appUser}} in team {{team}}. The app shows it to the user as a request bar; the user has to click Open, nothing opens by itself.\nThe message body is exactly this one line, not quoted, not in a code block, with nothing else in it:\nagmsg-app open <addon-id> <pane> [path=<absolute path>]\nSend it with the agmsg send script (where it says <your seat name>, put your own seat name in this team):\n{{command}}\nIf your shell is not bash (PowerShell on Windows), run it as bash -lc with the whole command quoted, as the agmsg instructions say.\nBuilt-in panes: builtin:fileview fileview, builtin:diffview diffview.",
+      "copyNoTeam": "Choose a team first. The text names the team and its app user, so it is copied per team.",
+      "copyNoAppUser": "This team has no app user, so agents have nobody to send the request to. Copy it from a team that has one.",
+      "copyNoScripts": "Could not find the agmsg scripts folder this app uses, so there is no send command to copy."
+    },
+    "developer": {
+      "title": "Developer",
+      "loadFromFolder": "Load from folder…",
+      "loaded": "Developer add-ons",
+      "none": "No developer add-ons loaded.",
+      "reload": "Reload from folder",
+      "remove": "Remove",
+      "explain": "Está criando seu próprio complemento? Carregue-o de uma pasta deste computador. Ele não é instalado: roda a partir da pasta, e Recarregar aplica suas edições."
+    },
+    "permission": {
+      "none": "Runs with no permissions",
+      "messagesRead": "Read messages of a team you choose",
+      "filesRead": "Read files in a folder you choose",
+      "gitRead": "Read git history and changes in that folder",
+      "network": "Connect to {{hosts}}",
+      "networkAny": "Connect to any site on the internet"
+    },
+    "grant": {
+      "messages": "Reads messages: {{scope}}",
+      "files": "Reads files: {{scope}}",
+      "remembered": "(remembered)",
+      "revoke": "Revoke"
+    },
+    "card": {
+      "grantAria": "Permission request",
+      "messagesWant": "{{title}} wants to read messages of team {{team}}.",
+      "filesWant": "{{title}} wants to read {{path}} (folder, {{count}} files).",
+      "filesWantOne": "{{title}} wants to read {{path}}.",
+      "allow": "Allow",
+      "allowOnce": "Allow once",
+      "allowAlways": "Always for this folder",
+      "notNow": "Not now",
+      "denied": "{{path}} is on agmsg's list of protected locations (keys, credentials, browser data). Add-ons can't read it.",
+      "chooseAnother": "Choose another…",
+      "allowAlwaysLater": "Not available yet",
+      "can": "Pode",
+      "allowed": "Permitido",
+      "nothingYet": "nada ainda",
+      "installedOn": "instalado em {{date}}"
+    },
+    "installError": {
+      "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",
+      "ref_not_found": "{{repo}} has no branch, tag or commit named {{ref}}.",
+      "no_app_panes": "{{repo}} has no app add-on (no app-panes/ folder). If it is an agmsg CLI plugin, it is installed from the CLI, not here.",
+      "conf_invalid": "app-panes/{{pane}}/addon.conf line {{line}}: {{problem}}.",
+      "entry_missing": "app-panes/{{pane}}/web/{{entry}} is missing. Add-ons must commit their built web/ folder.",
+      "min_app": "Needs agmsg app {{minApp}} or newer; this is {{appVersion}}.",
+      "protocol_unknown": "Made for a newer app (protocol {{protocol}}). Update the app to use it.",
+      "too_large": "Too large to install: {{measured}} (limit {{limit}}). Largest file: {{largest}}.",
+      "unsafe_entry": {
+        "symlink": "Refused: the repository contains a symbolic link at {{path}}. Add-ons may contain only plain files.",
+        "hardlink": "Refused: the repository contains a hard link at {{path}}. Add-ons may contain only plain files.",
+        "outside_path": "Refused: the repository contains a path outside the folder at {{path}}. Add-ons may contain only plain files.",
+        "reserved_name": "Refused: the repository contains a reserved file name at {{path}}. Add-ons may contain only plain files."
+      },
+      "github_error": "GitHub didn't answer: {{status}}. Try again.",
+      "rate_limited": "GitHub limits unauthenticated downloads; try again after {{time}}.",
+      "already_installed": "Already installed ({{sha}}).",
+      "message": "{{message}}"
+    },
+    "pane": {
+      "reload": "Reload",
+      "askedBy": "asked by {{agent}}",
+      "blocked": "blocked: {{what}}",
+      "dev": "DEV · {{folder}}",
+      "networkChip": "network: {{hosts}}",
+      "networkAnyChip": "network: any site",
+      "framePlaceholder": "Add-on frame",
+      "opening": "Opening {{title}}…",
+      "loading": "Loading {{title}}…"
+    },
+    "failure": {
+      "digest_mismatch": "{{title}} can't open: its files are incomplete or were changed after install.",
+      "load_timeout": "{{title}} didn't finish loading.",
+      "path_missing": "{{path}} no longer exists.",
+      "revoked": "Not reading {{scope}}.",
+      "action": {
+        "reinstall": "Reinstall",
+        "remove": "Remove",
+        "reload": "Reload",
+        "chooseAnother": "Choose another…",
+        "allowAgain": "Allow again"
+      },
+      "init_too_large": "{{title}} was given more than it can take at once (the starting data is too large).",
+      "open_failed": "{{title}} can't open: {{message}}"
+    },
+    "confirm": {
+      "installTitle": "Install {{title}}?",
+      "updateTitle": "Update {{title}}?",
+      "fromTo": "{{from}} → {{to}}",
+      "details": "Details",
+      "fullSha": "Commit: {{sha}}",
+      "archive": "Archive SHA-256: {{hash}}",
+      "canTitle": "Este complemento pode",
+      "new": "New:",
+      "sends": "It can send what it reads to {{hosts}}.",
+      "sendsAny": "It can send what it reads to any site on the internet.",
+      "never": "Executar programas, usar os controles do app ou ler qualquer coisa que você não escolheu.",
+      "noReview": "agmsg does not review or sign add-ons. Install only from people you trust.",
+      "asksAgain": "This update changes what the add-on can do. Permissions it had for the changed items will be asked again.",
+      "install": "Install",
+      "update": "Update",
+      "changesTitle": "What changes, pane by pane:",
+      "paneAdds": "{{pane}} gains: {{perms}}",
+      "paneWider": "{{pane}} can reach more sites",
+      "paneCombined": "{{pane}} can now send what it reads over the network",
+      "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
+      "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
+      "neverTitle": "Ele nunca pode",
+      "source_one": "de {{repo}} · {{sha}} · adiciona {{count}} painel",
+      "source_many": "de {{repo}} · {{sha}} · adiciona {{count}} painéis",
+      "source_other": "de {{repo}} · {{sha}} · adiciona {{count}} painéis",
+      "sourceUpdate_one": "de {{repo}} · {{from}} → {{to}} · {{count}} painel",
+      "sourceUpdate_many": "de {{repo}} · {{from}} → {{to}} · {{count}} painéis",
+      "sourceUpdate_other": "de {{repo}} · {{from}} → {{to}} · {{count}} painéis",
+      "panes": "Adiciona: {{names}}"
+    },
+    "remove": {
+      "title": "Remove {{title}}?",
+      "body": "Closes its {{count}} open panes, deletes its files, and forgets every permission you gave it.",
+      "confirm": "Remove"
+    },
+    "fetch": {
+      "resolving": "Resolving the commit…",
+      "resolved": "Commit {{sha}}",
+      "downloading": "Downloading {{done}} MB of {{total}} MB…",
+      "checking": "Checking files: {{files}} files, {{size}} MB",
+      "downloadingPlain": "Downloading…",
+      "checkingPlain": "Checking the files…"
+    },
+    "request": {
+      "wants": "{{agent}} em {{team}} quer abrir {{target}}{{args}}",
+      "base": "base {{base}}",
+      "open": "Abrir",
+      "dismiss": "Dispensar",
+      "install": "Instalar…",
+      "many": "{{count}} solicitações de abertura ▾",
+      "status": {
+        "open": "",
+        "not_installed": "{{pane}} não está instalado.",
+        "not_found_here": "Não encontrado aqui.",
+        "args_not_allowed": "Não serve para este painel.",
+        "unavailable": "{{pane}} não pode ser aberto agora.",
+        "denied_path": "Esse local é protegido."
+      },
+      "note": {
+        "malformed": "Solicitação de abertura inválida ({{reason}}{{detail}})."
+      },
+      "notes": "{{count}} avisos ▾",
+      "reason": {
+        "missing_pane": "falta o nome do complemento ou do painel",
+        "bad_addon": "o nome do complemento não é válido",
+        "bad_pane": "o nome do painel não é válido",
+        "bad_option": "depois do nome do painel só é permitido path=<caminho absoluto>",
+        "bad_path": "o caminho deve ser absoluto",
+        "bad_message_id": "o id da mensagem não pode ser registrado",
+        "unreadable": "não foi possível ler a solicitação"
+      },
+      "readFailed": "Não foi possível ler as solicitações de abertura: {{message}}",
+      "actionFailed": "Não foi possível tratar a solicitação: {{message}}",
+      "truncated": "As solicitações mais antigas não são exibidas.",
+      "close": "Close"
+    },
+    "menu": {
+      "fileViewEntry": "File view…",
+      "diffViewEntry": "Diff view…",
+      "fileView": "File view",
+      "diffView": "Diff view",
+      "addonPane": "Add-on pane ▸ {{title}}",
+      "install": "Instalar complementos…"
+    },
+    "listFailed": "Couldn't read the add-on list: {{message}}",
+    "listRetry": "Try again",
+    "grantsFailed": "Couldn't read what you allowed: {{message}}",
+    "env": {
+      "found": "Esta pasta contém um arquivo .env.",
+      "foundNetwork": "Esta pasta contém um arquivo .env. Este complemento usa a rede, então não consegue lê-lo."
+    },
+    "intro": "Os complementos adicionam painéis ao app. Eles só leem o que você permitir, e você pode retirar a permissão aqui.",
+    "group": {
+      "problems_one": "{{count}} problema",
+      "problems_many": "{{count}} problemas",
+      "problems_other": "{{count}} problemas"
+    }
   }
 }

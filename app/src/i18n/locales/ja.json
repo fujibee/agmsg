@@ -55,7 +55,8 @@
     "roomLabel": "# チームルーム",
     "close": "×",
     "newShell": "新規シェルタブ",
-    "shellLabel": "シェル"
+    "shellLabel": "シェル",
+    "newMenu": "新しいタブ / ペイン"
   },
   "room": {
     "loadingMore": "さらに読み込み中…",
@@ -257,5 +258,227 @@
   },
   "stage": {
     "emptyHint": "左のメンバーをクリックしてエージェントを起動してください。"
+  },
+  "addons": {
+    "tab": {
+      "general": "一般",
+      "addons": "アドオン"
+    },
+    "engineOff": "このコンピュータではまだアドオンを使えません。このシステムの Web エンジンで安全性チェックに通りませんでした。ほかの機能には影響しません。",
+    "engineReasons": "理由: {{reasons}}",
+    "checking": "確認中…",
+    "checkAgain": "もう一度確認",
+    "builtin": {
+      "title": "内蔵",
+      "source": "内蔵"
+    },
+    "installed": {
+      "title": "インストール済み",
+      "empty": "インストール済みのアドオンはありません。",
+      "checkUpdates": "更新を確認",
+      "remove": "削除",
+      "doneNotice": "{{title}} をインストールしました。ペイン上部の + から開けます。",
+      "updatedNotice": "{{title}} を更新しました。",
+      "openNow": "今すぐ開く"
+    },
+    "install": {
+      "placeholder": "例: fujibee/agmsg-addon-sample",
+      "button": "インストール…",
+      "later": "GitHub からのインストールは、このビルドではまだ使えません。",
+      "heading": "GitHub からインストール",
+      "help": "agmsg アドオンのリポジトリを入力します: owner/repo、バージョンを固定するなら owner/repo@tag。"
+    },
+    "openRequests": {
+      "off": "オフ",
+      "copy": "エージェント向けの案内をコピー",
+      "copied": "コピーしました。",
+      "copyFailed": "コピーできませんでした。",
+      "title": "エージェントからのリクエスト",
+      "explain": "チームのエージェントが、たとえば自分の作業の diff など、ペインを開くようアプリに頼めるようにします。リクエストはバーに表示され、「開く」を押すまで何も開きません。",
+      "on": "オン",
+      "copyHelp": "エージェントに依頼の形式を伝えます。今のチームの文面をコピーして、そのチームの席に一度貼ってください。文面にはこのチームとそのアプリのユーザーの名前が入っています。",
+      "seatText": "これはシェルのコマンドではありません。`agmsg-app open ...` は依頼の文面です。チーム {{team}} の {{appUser}} 宛ての agmsg メッセージとして送ってください。アプリは依頼バーとして表示し、ユーザーが Open を押すまで何も開きません。\nメッセージ本文は次の 1 行だけです。引用やコードブロックに入れず、ほかの文字も入れないでください:\nagmsg-app open <addon-id> <pane> [path=<absolute path>]\nagmsg の send スクリプトで送ります（<your seat name> には、このチームでのあなた自身の席名を入れる）:\n{{command}}\nシェルが bash でない場合（Windows の PowerShell など）は、agmsg の手順どおり bash -lc でコマンド全体を引用して実行してください。\n組み込みのペイン: builtin:fileview fileview, builtin:diffview diffview。",
+      "copyNoTeam": "先にチームを選んでください。文面にはチームとそのアプリのユーザーの名前が入るので、チームごとにコピーします。",
+      "copyNoAppUser": "このチームにはアプリのユーザーがいないため、依頼の送り先がありません。アプリのユーザーがいるチームでコピーしてください。",
+      "copyNoScripts": "このアプリが使っている agmsg の scripts フォルダが見つからないため、コピーできる send コマンドがありません。"
+    },
+    "developer": {
+      "title": "開発者",
+      "loadFromFolder": "フォルダから読み込み…",
+      "loaded": "開発用アドオン",
+      "none": "読み込んだ開発用アドオンはありません。",
+      "reload": "フォルダから再読み込み",
+      "remove": "削除",
+      "explain": "自分のアドオンを作っていますか？ このコンピューター上のフォルダから読み込めます。インストールはされず、フォルダのまま動き、再読み込みで編集が反映されます。"
+    },
+    "permission": {
+      "none": "権限なしで動作します",
+      "messagesRead": "選んだチームのメッセージを読む",
+      "filesRead": "選んだフォルダのファイルを読む",
+      "gitRead": "そのフォルダの git 履歴と変更を読む",
+      "network": "{{hosts}} に接続する",
+      "networkAny": "インターネット上の任意のサイトに接続する"
+    },
+    "grant": {
+      "messages": "メッセージを読む: {{scope}}",
+      "files": "ファイルを読む: {{scope}}",
+      "remembered": "(記憶済み)",
+      "revoke": "取り消す"
+    },
+    "card": {
+      "grantAria": "権限のリクエスト",
+      "messagesWant": "{{title}} がチーム {{team}} のメッセージを読もうとしています。",
+      "filesWant": "{{title}} が {{path}} を読もうとしています(フォルダ、{{count}} ファイル)。",
+      "filesWantOne": "{{title}} が {{path}} を読もうとしています。",
+      "allow": "許可",
+      "allowOnce": "今回だけ許可",
+      "allowAlways": "このフォルダは常に許可",
+      "notNow": "今はしない",
+      "denied": "{{path}} は agmsg の保護対象(鍵・認証情報・ブラウザデータ)です。アドオンは読めません。",
+      "chooseAnother": "別のものを選ぶ…",
+      "allowAlwaysLater": "まだ使えません",
+      "can": "できること",
+      "allowed": "許可済み",
+      "nothingYet": "まだありません",
+      "installedOn": "{{date}} にインストール"
+    },
+    "installError": {
+      "repo_not_found": "github.com/{{owner}}/{{repo}} が見つかりません。名前を確認してください。非公開リポジトリはまだ未対応です。",
+      "ref_not_found": "{{repo}} に {{ref}} という branch・tag・commit はありません。",
+      "no_app_panes": "{{repo}} にはアプリ用アドオンがありません(app-panes/ フォルダなし)。agmsg CLI の plugin なら、ここではなく CLI からインストールします。",
+      "conf_invalid": "app-panes/{{pane}}/addon.conf の {{line}} 行目: {{problem}}。",
+      "entry_missing": "app-panes/{{pane}}/web/{{entry}} がありません。アドオンはビルド済みの web/ フォルダを commit する必要があります。",
+      "min_app": "agmsg アプリ {{minApp}} 以上が必要です。現在は {{appVersion}} です。",
+      "protocol_unknown": "より新しいアプリ向けです(protocol {{protocol}})。アプリを更新してください。",
+      "too_large": "大きすぎてインストールできません: {{measured}}(上限 {{limit}})。最大のファイル: {{largest}}。",
+      "unsafe_entry": {
+        "symlink": "拒否しました: リポジトリの {{path}} にシンボリックリンクがあります。アドオンに含められるのは通常のファイルだけです。",
+        "hardlink": "拒否しました: リポジトリの {{path}} にハードリンクがあります。アドオンに含められるのは通常のファイルだけです。",
+        "outside_path": "拒否しました: リポジトリの {{path}} がフォルダの外を指しています。アドオンに含められるのは通常のファイルだけです。",
+        "reserved_name": "拒否しました: リポジトリの {{path}} に予約済みのファイル名があります。アドオンに含められるのは通常のファイルだけです。"
+      },
+      "github_error": "GitHub から応答がありません: {{status}}。もう一度試してください。",
+      "rate_limited": "GitHub は未認証のダウンロードを制限しています。{{time}} 以降に再試行してください。",
+      "already_installed": "インストール済みです({{sha}})。",
+      "message": "{{message}}"
+    },
+    "pane": {
+      "reload": "再読み込み",
+      "askedBy": "{{agent}} の依頼",
+      "blocked": "ブロック: {{what}}",
+      "dev": "DEV · {{folder}}",
+      "networkChip": "ネットワーク: {{hosts}}",
+      "networkAnyChip": "ネットワーク: 任意のサイト",
+      "framePlaceholder": "アドオンのフレーム",
+      "opening": "{{title}} を開いています…",
+      "loading": "{{title}} を読み込んでいます…"
+    },
+    "failure": {
+      "digest_mismatch": "{{title}} を開けません。ファイルが不完全か、インストール後に変更されています。",
+      "load_timeout": "{{title}} の読み込みが終わりませんでした。",
+      "path_missing": "{{path}} はもう存在しません。",
+      "revoked": "{{scope}} は読んでいません。",
+      "action": {
+        "reinstall": "再インストール",
+        "remove": "削除",
+        "reload": "再読み込み",
+        "chooseAnother": "別のものを選ぶ…",
+        "allowAgain": "もう一度許可"
+      },
+      "init_too_large": "{{title}} に渡すデータが大きすぎて、開けません。",
+      "open_failed": "{{title}} を開けません: {{message}}"
+    },
+    "confirm": {
+      "installTitle": "{{title}} をインストールしますか?",
+      "updateTitle": "{{title}} を更新しますか?",
+      "fromTo": "{{from}} → {{to}}",
+      "details": "詳細",
+      "fullSha": "Commit: {{sha}}",
+      "archive": "アーカイブ SHA-256: {{hash}}",
+      "canTitle": "このアドオンができること",
+      "new": "新規:",
+      "sends": "読み取った内容を {{hosts}} に送れます。",
+      "sendsAny": "読み取った内容をインターネット上の任意のサイトに送れます。",
+      "never": "プログラムの実行、アプリの操作、あなたが選んでいないものの読み取り。",
+      "noReview": "agmsg はアドオンの審査も署名も行いません。信頼できる人のものだけインストールしてください。",
+      "asksAgain": "この更新でアドオンができることが変わります。変わった項目の許可は改めて確認します。",
+      "install": "インストール",
+      "update": "更新",
+      "changesTitle": "ペインごとの変更:",
+      "paneAdds": "{{pane}} に追加: {{perms}}",
+      "paneWider": "{{pane}} が、より多くのサイトに接続できるようになります",
+      "paneCombined": "{{pane}} が、読み取った内容をネットワークへ送れるようになります",
+      "paneAsksAgain": "{{pane}} は、フォルダやチームへのアクセスを改めて確認します",
+      "paneRemoved": "{{pane}} は削除されます(保存済みのアクセスも破棄されます)",
+      "neverTitle": "絶対にできないこと",
+      "source_other": "{{repo}} から · {{sha}} · ペイン {{count}} 件を追加",
+      "sourceUpdate_other": "{{repo}} から · {{from}} → {{to}} · ペイン {{count}} 件",
+      "panes": "追加されるペイン: {{names}}"
+    },
+    "remove": {
+      "title": "{{title}} を削除しますか?",
+      "body": "開いている {{count}} 個のペインを閉じ、ファイルを削除し、与えた権限をすべて取り消します。",
+      "confirm": "削除"
+    },
+    "fetch": {
+      "resolving": "commit を解決しています…",
+      "resolved": "Commit {{sha}}",
+      "downloading": "ダウンロード中 {{done}} MB / {{total}} MB…",
+      "checking": "ファイルを確認中: {{files}} ファイル、{{size}} MB",
+      "downloadingPlain": "ダウンロード中…",
+      "checkingPlain": "ファイルを確認中…"
+    },
+    "request": {
+      "wants": "{{agent}}（{{team}}）が {{target}} を開こうとしています{{args}}",
+      "base": "base {{base}}",
+      "open": "開く",
+      "dismiss": "閉じる",
+      "install": "インストール…",
+      "many": "{{count}} 件の open request ▾",
+      "status": {
+        "open": "",
+        "not_installed": "{{pane}} はインストールされていません。",
+        "not_found_here": "ここには見つかりません。",
+        "args_not_allowed": "このペインには不正な形式です。",
+        "unavailable": "{{pane}} は今は開けません。",
+        "denied_path": "その場所は保護されています。"
+      },
+      "note": {
+        "malformed": "不正な open request です({{reason}}{{detail}})。"
+      },
+      "notes": "{{count}} 件のメモ ▾",
+      "reason": {
+        "missing_pane": "アドオン名かペイン名がありません",
+        "bad_addon": "アドオン名が正しくありません",
+        "bad_pane": "ペイン名が正しくありません",
+        "bad_option": "ペイン名の後ろに置けるのは path=<絶対パス> だけです",
+        "bad_path": "path は絶対パスでなければいけません",
+        "bad_message_id": "メッセージ ID を記録できません",
+        "unreadable": "要求を読めませんでした"
+      },
+      "readFailed": "オープン要求を読めませんでした: {{message}}",
+      "actionFailed": "要求を処理できませんでした: {{message}}",
+      "truncated": "古い要求は表示していません。",
+      "close": "閉じる"
+    },
+    "menu": {
+      "fileViewEntry": "ファイルビュー…",
+      "diffViewEntry": "差分ビュー…",
+      "fileView": "ファイルビュー",
+      "diffView": "差分ビュー",
+      "addonPane": "アドオンペイン ▸ {{title}}",
+      "install": "アドオンをインストール…"
+    },
+    "listFailed": "アドオンの一覧を読み込めませんでした: {{message}}",
+    "listRetry": "再試行",
+    "grantsFailed": "許可した内容を読み込めませんでした: {{message}}",
+    "env": {
+      "found": "このフォルダには .env ファイルがあります。",
+      "foundNetwork": "このフォルダには .env ファイルがあります。このアドオンはネットワークを使うため、読めません。"
+    },
+    "intro": "アドオンはアプリにペインを追加します。許可したものしか読めず、許可はここでいつでも取り消せます。",
+    "group": {
+      "problems_other": "問題 {{count}} 件"
+    }
   }
 }

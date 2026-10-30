@@ -1,0 +1,1098 @@
+{
+ "version": 1,
+ "description": "Shared by the app's Rust installer (src/addons/install) and the author check (addon-kit/agmsg-addon-check.cjs). Each case is a tree (entries) and the exact error list both must produce. 'archiveOnly' cases cannot exist as a directory and are only run through the archive extractor.",
+ "cases": [
+  {
+   "name": "a plain layout is accepted",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "a symbolic link is refused",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/link",
+     "type": "symlink",
+     "target": "/etc/hosts"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "Refused: the repository contains a symbolic link at app-panes/x/web/link. Add-ons may contain only plain files."
+    ]
+   },
+   "extract": {
+    "error": "Refused: the repository contains a symbolic link at app-panes/x/web/link. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "a hard link is refused (both names in a directory, the link entry in an archive)",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/a.txt",
+     "type": "file",
+     "text": "same"
+    },
+    {
+     "path": "app-panes/x/web/b.txt",
+     "type": "hardlink",
+     "of": "app-panes/x/web/a.txt"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "Refused: the repository contains a hard link at app-panes/x/web/a.txt. Add-ons may contain only plain files.",
+     "Refused: the repository contains a hard link at app-panes/x/web/b.txt. Add-ons may contain only plain files."
+    ]
+   },
+   "extract": {
+    "error": "Refused: the repository contains a hard link at app-panes/x/web/b.txt. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "a Windows device name is refused",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/CON.txt",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "Refused: the repository contains a reserved file name at app-panes/x/web/CON.txt. Add-ons may contain only plain files."
+    ]
+   },
+   "extract": {
+    "error": "Refused: the repository contains a reserved file name at app-panes/x/web/CON.txt. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "a name ending in a dot is refused",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/x.",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "Refused: the repository contains a reserved file name at app-panes/x/web/x.. Add-ons may contain only plain files."
+    ]
+   },
+   "extract": {
+    "error": "Refused: the repository contains a reserved file name at app-panes/x/web/x.. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "an alternate data stream name is refused",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/a:b",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "Refused: the repository contains a reserved file name at app-panes/x/web/a:b. Add-ons may contain only plain files."
+    ]
+   },
+   "extract": {
+    "error": "Refused: the repository contains a reserved file name at app-panes/x/web/a:b. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "too many files",
+   "limits": {
+    "files": 4
+   },
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/1.js",
+     "type": "file",
+     "text": "1"
+    },
+    {
+     "path": "app-panes/x/web/2.js",
+     "type": "file",
+     "text": "2"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "Too large to install: 5 files (limit 4)."
+    ]
+   },
+   "extract": {
+    "contains": [
+     "Too large to install:",
+     "files (limit 4)."
+    ]
+   }
+  },
+  {
+   "name": "a file over the per-file limit",
+   "limits": {
+    "fileBytes": 1048576
+   },
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/big.bin",
+     "type": "file",
+     "size": 2097152
+    }
+   ],
+   "expect": {
+    "errors": [
+     "Too large to install: app-panes/x/web/big.bin is 2.0 MB (limit 1.0 MB per file)."
+    ]
+   },
+   "extract": {
+    "contains": [
+     "Too large to install:",
+     "app-panes/x/web/big.bin",
+     "(limit 1.0 MB per file)."
+    ]
+   }
+  },
+  {
+   "name": "over the total limit names the largest file",
+   "limits": {
+    "totalBytes": 3145728
+   },
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/a.bin",
+     "type": "file",
+     "size": 2097152
+    },
+    {
+     "path": "app-panes/x/web/b.bin",
+     "type": "file",
+     "size": 2097153
+    }
+   ],
+   "expect": {
+    "errors": [
+     "Too large to install: 4.0 MB (limit 3.0 MB). Largest file: app-panes/x/web/b.bin (2.0 MB)."
+    ]
+   },
+   "extract": {
+    "contains": [
+     "Too large to install:",
+     "(limit 3.0 MB).",
+     "Largest file"
+    ]
+   }
+  },
+  {
+   "name": "no app-panes folder",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "README.md",
+     "type": "file",
+     "text": "hi"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "No app add-on here (no app-panes/ folder). See https://github.com/fujibee/agmsg-addon-sample for the layout."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "an unknown permission is refused, never ignored",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\npermissions = files:read, root\nwhy.files:read = r\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 3: unknown permission \"root\"."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "an unknown key",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\nwidth = 3\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 3: unknown key \"width\"."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "an unknown protocol",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 2\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 2: protocol 2 is not known to this version (1)."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "title and protocol are required",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "entry = index.html\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf: \"title\" is required.",
+     "app-panes/x/addon.conf: \"protocol\" is required (protocol = 1)."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "git:read needs files:read",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\npermissions = git:read\nwhy.git:read = r\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 3: git:read needs files:read too."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "network needs an origin list",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\npermissions = network\nwhy.network = r\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 3: network is declared but \"network = *\" or a list of origins is missing."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "a network origin must be https",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\npermissions = network\nnetwork = http://a.test\nwhy.network = r\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 4: \"http://a.test\" is not an origin like https://api.example.com."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "network without the permission",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\nnetwork = *\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 3: \"network\" is set but the network permission is not declared."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "min_app must look like a version",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\nmin_app = 0.6\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 3: min_app must look like 0.6.0."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "the entry file must be committed",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\nentry = main.html\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/web/main.html is missing. Add-ons must commit their built web/ folder."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "a pane name must be lowercase",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/Bad_Name/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/Bad_Name/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/Bad_Name: names are lowercase letters, digits and \"-\"."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "a pane folder without addon.conf",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf is missing."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "[archive] an absolute path",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "/etc/evil",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at /etc/evil. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a parent-directory path",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/../../evil",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at app-panes/x/../../evil. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a backslash path",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes\\x\\web\\evil.js",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at app-panes\\x\\web\\evil.js. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a drive-letter path",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "C:/Windows/evil.js",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at C:/Windows/evil.js. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a device node",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/dev",
+     "type": "char"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a device or pipe at app-panes/x/web/dev. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a named pipe",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/pipe",
+     "type": "fifo"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a device or pipe at app-panes/x/web/pipe. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] two files that differ only in case",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/A.txt",
+     "type": "file",
+     "text": "1"
+    },
+    {
+     "path": "app-panes/x/web/a.txt",
+     "type": "file",
+     "text": "2"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: app-panes/x/web/a.txt and app-panes/x/web/A.txt differ only in case."
+   }
+  },
+  {
+   "name": "[archive] the same path twice",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/dup.js",
+     "type": "file",
+     "text": "1"
+    },
+    {
+     "path": "app-panes/x/web/dup.js",
+     "type": "file",
+     "text": "2"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: app-panes/x/web/dup.js appears twice in the archive."
+   }
+  },
+  {
+   "name": "[archive] a symlink named like a plain file in a deep folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    },
+    {
+     "path": "app-panes/x/web/a/b/c/ok.js",
+     "type": "symlink",
+     "target": "../../../../../../etc/passwd"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a symbolic link at app-panes/x/web/a/b/c/ok.js. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] an absolute path with no top folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "/app-panes/main/web/index.html",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at /app-panes/main/web/index.html. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a parent-directory top folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "../x/app-panes/main/addon.conf",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at ../x/app-panes/main/addon.conf. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a drive letter as the top folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "C:/x/app-panes/main/addon.conf",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at C:/x/app-panes/main/addon.conf. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] a backslash in the top folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "o-r\\\\x/app-panes/main/addon.conf",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a path outside the folder at o-r\\\\x/app-panes/main/addon.conf. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] two different top folders",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "a-top/app-panes/main/addon.conf",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    },
+    {
+     "path": "b-top/app-panes/main/web/index.html",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a file outside the top-level folder at b-top/app-panes/main/web/index.html. Add-ons may contain only plain files."
+   }
+  },
+  {
+   "name": "[archive] folders that differ only in case",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "app-panes/Main/web/a.js",
+     "type": "file",
+     "text": "x"
+    },
+    {
+     "path": "app-panes/main/web/b.js",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: app-panes/main and app-panes/Main differ only in case."
+   }
+  },
+  {
+   "name": "[archive] a file and a folder with the same name",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "app-panes/main/web/thing",
+     "type": "file",
+     "text": "x"
+    },
+    {
+     "path": "app-panes/main/web/thing/inside.js",
+     "type": "file",
+     "text": "x"
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: app-panes/main/web/thing is both a file and a folder."
+   }
+  },
+  {
+   "name": "[archive] a file outside any top folder",
+   "archiveOnly": true,
+   "entries": [
+    {
+     "path": "loose-file.txt",
+     "type": "file",
+     "text": "x",
+     "raw": true
+    }
+   ],
+   "expect": {
+    "errors": []
+   },
+   "extract": {
+    "error": "Refused: the repository contains a file outside the top-level folder at loose-file.txt. Add-ons may contain only plain files."
+   }
+  }
+ ]
+}

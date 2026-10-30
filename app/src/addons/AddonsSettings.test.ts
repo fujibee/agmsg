@@ -1,0 +1,225 @@
+import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { AddonsSettings, nextOpenRequests } from "./AddonsSettings";
+import { GrantCard } from "./GrantCard";
+import { mockEngine, mockEngineOff, mockGrantNeeds, mockSnapshot } from "./mock";
+import en from "../i18n/locales/en.json";
+
+const t = (key: string, o?: Record<string, unknown>) => `[${key}${o ? " " + JSON.stringify(o) : ""}]`;
+const noop = () => {};
+type Props = Parameters<typeof AddonsSettings>[0];
+const base: Props = {
+  t,
+  snapshot: mockSnapshot,
+  engine: mockEngine,
+  installError: null,
+  onInstall: noop,
+  onRevoke: noop,
+  onCheckUpdate: noop,
+  onRemove: noop,
+  onOpenRequestsChange: noop,
+  onLoadFromFolder: noop,
+};
+const render = (props: Partial<Props>) => renderToStaticMarkup(createElement(AddonsSettings, { ...base, ...props }));
+
+describe("AddonsSettings", () => {
+  it("has a copy button styled like the other buttons, with a help line above it", () => {
+    const html = render({});
+    expect(html).toMatch(/<button type="button" class="addon-btn">\[addons\.openRequests\.copy\]/);
+    expect(html).toContain("addons.openRequests.copyHelp");
+    expect(html).toContain("addons.openRequests.explain");
+  });
+  it("starts with one intro line and a labelled install field with help, example placeholder and a primary button", () => {
+    const html = render({});
+    expect(html.indexOf("addons.intro")).toBeLessThan(html.indexOf("addons.install.heading"));
+    expect(html).toContain('<label for="addon-install-input">[addons.install.heading]');
+    expect(html).toContain("addons.install.help");
+    expect(html).toContain('placeholder="[addons.install.placeholder]"');
+    expect(html).toMatch(/<button type="submit" class="addon-btn primary" disabled=""/);
+  });
+  it("shows built-ins, installed add-ons with Revoke, and a disabled Install for an empty input", () => {
+    const html = render({});
+    expect(html).toContain("File view");
+    expect(html).toContain("shinshin86/agmsg-office");
+    expect(html).toContain("addons.grant.revoke");
+  });
+  it("each card has labelled Can and Allowed rows, with chips for permissions and grants", () => {
+    const html = render({});
+    expect(html).toContain("addons.card.can]");
+    expect(html).toContain("addons.card.allowed]");
+    expect(html).toContain('class="addon-chip"');
+    expect(html).toContain('class="addon-chip ok"');
+  });
+  it("groups: Installed is open, Built in / Requests / Developer start closed, each with a count", () => {
+    const html = render({});
+    expect(html).toMatch(/<details class="addon-group addon-group-installed" open="">/);
+    for (const g of ["builtin", "requests", "developer"]) expect(html).toMatch(new RegExp(`<details class="addon-group addon-group-${g}">`));
+    expect(html).toMatch(/addons\.builtin\.title\]<\/span><span class="addon-count">2</);
+  });
+  it("a built-in's remembered folder grant is listed with its own Revoke", () => {
+    const html = render({});
+    const builtin = html.slice(html.indexOf("addon-group-builtin"), html.indexOf("addon-group-requests"));
+    expect(builtin).toContain("/Users/me/proj/agmsg");
+    expect(builtin).toContain("addons.grant.revoke");
+    const only = render({ snapshot: { ...mockSnapshot, grants: [] } });
+    const none = only.slice(only.indexOf("addon-group-builtin"), only.indexOf("addon-group-requests"));
+    expect(none).toContain("addons.card.nothingYet");
+  });
+  it("a failing add-on is visible while its group is closed: the group opens and the summary says how many", () => {
+    const bad = (id: string) => mockSnapshot.addons.map((a) => (a.id === id ? { ...a, digestOk: false } : a));
+    const builtin = render({ snapshot: { ...mockSnapshot, addons: bad("builtin:fileview") } });
+    expect(builtin).toMatch(/<details class="addon-group addon-group-builtin has-problem" open="">/);
+    expect(builtin).toMatch(/addon-group-builtin[^]*?<span class="addon-problem">\[addons\.group\.problems \{&quot;count&quot;:1\}\]<\/span><\/summary>/);
+    const installed = render({ snapshot: { ...mockSnapshot, addons: bad("shinshin86/agmsg-office") } });
+    expect(installed).toMatch(/addon-group-installed has-problem[^>]*>[^]*?addon-problem/);
+    // nothing wrong: no badge, Built in stays closed
+    expect(render({})).not.toContain("addon-problem");
+    expect(render({})).toMatch(/<details class="addon-group addon-group-builtin">/);
+  });
+  it("the card's source line carries the installed date for an installed add-on, not for a built-in", () => {
+    const html = render({});
+    expect(html).toContain("addons.card.installedOn");
+    expect(html).toContain("2026-10-20");
+    const builtin = html.slice(html.indexOf("addon-group-builtin"), html.indexOf("addon-group-requests"));
+    expect(builtin).not.toContain("addons.card.installedOn");
+  });
+  it("Requests from agents is a switch on the stored setting, not a select", () => {
+    const on = render({});
+    expect(on).toContain('role="switch"');
+    expect(on).toContain('aria-checked="true"');
+    expect(on).toContain("addons.openRequests.on]");
+    expect(on).not.toContain("<select");
+    const off = render({ snapshot: { ...mockSnapshot, openRequests: "off" } });
+    expect(off).toContain('aria-checked="false"');
+    expect(off).toContain("addons.openRequests.off]");
+    expect(nextOpenRequests("show")).toBe("off");
+    expect(nextOpenRequests("off")).toBe("show");
+  });
+  it("Developer explains itself and lists loaded folders inside the same group", () => {
+    const dev = { ...mockSnapshot.addons[0], id: "dev:x", builtin: false, dev: { label: "my-folder", copy: "dev copy 1" } };
+    const html = render({ snapshot: { ...mockSnapshot, addons: [...mockSnapshot.addons, dev] } });
+    const group = html.slice(html.indexOf("addon-group-developer"));
+    expect(group).toContain("addons.developer.explain");
+    expect(group).toContain("my-folder");
+    expect(group).not.toContain("addons.developer.loaded");
+  });
+  it("right after an install: a green notice with Open now, and that add-on's card outlined green", () => {
+    const id = "shinshin86/agmsg-office";
+    const html = render({ installedNotice: { kind: "installed", addonId: id, title: "Office", paneName: "office" }, onOpenNow: noop });
+    expect(html).toContain('class="addon-toast"');
+    expect(html).toContain("addons.installed.doneNotice");
+    expect(html).toContain("addons.installed.openNow");
+    expect(html.match(/addon-acard new/g)?.length).toBe(1);
+    expect(render({})).not.toContain("addon-acard new");
+    expect(render({ installedNotice: { kind: "updated", addonId: id, title: "Office" } })).toContain("addons.installed.updatedNotice");
+  });
+  it("shows an install error inline", () => {
+    const html = render({ installError: { code: "ref_not_found", repo: "a/b", ref: "v9" } });
+    expect(html).toContain("addons.installError.ref_not_found");
+    expect(html).toContain('role="alert"');
+  });
+  it("engine off: Check again only after a failure or timeout, disabled while checking, absent for 'not verified'", () => {
+    const off = (reasons: string[]) => render({ engine: { ok: false, reasons }, onRecheck: () => {} });
+    expect(off(["the startup check did not finish (timeout)"])).toContain("addons.checkAgain");
+    expect(off(["add-ons are not verified on WebView2 yet"])).not.toContain("addons.checkAgain");
+    const running = off(["checking again: asked by the user"]);
+    expect(running).toContain("addons.checkAgain");
+    expect(running).toMatch(/<button type="button" class="addon-btn" disabled="" aria-busy="true">\[addons\.checkAgain\]/);
+    expect(running).toContain("addons.checking");
+    expect(render({ engine: { ok: false, reasons: ["the startup check did not finish (timeout)"] } })).not.toContain("addons.checkAgain");
+  });
+  it("engine off: reason shown, no install form, installed list still removable", () => {
+    const html = render({ engine: mockEngineOff });
+    expect(html).toContain("addons.engineOff");
+    expect(html).toContain("navigation control");
+    expect(html).not.toContain("addon-install-form");
+    expect(html).toContain("addons.installed.remove");
+    expect(html).not.toContain("addons.installed.checkUpdates");
+  });
+});
+
+describe("GrantCard", () => {
+  const card = (need: keyof typeof mockGrantNeeds) =>
+    renderToStaticMarkup(createElement(GrantCard, { t, title: "T", need: mockGrantNeeds[need], onChoose: noop }));
+  it("messages: Allow and Not now only", () => {
+    const html = card("messages");
+    expect(html).toContain("addons.card.allow]");
+    expect(html).not.toContain("allowAlways");
+  });
+  it("files: once, always, not now", () => {
+    const html = card("files");
+    for (const k of ["allowOnce", "allowAlways", "notNow"]) expect(html).toContain(`addons.card.${k}`);
+  });
+  it("denied path: refusal with no Allow button", () => {
+    const html = card("filesDenied");
+    expect(html).toContain("addons.card.denied");
+    expect(html).not.toContain("addons.card.allow");
+  });
+});
+
+describe("locale keys", () => {
+  it("every key the screens use exists in en", () => {
+    const flat = (o: unknown, p = ""): string[] =>
+      typeof o === "object" && o ? Object.entries(o).flatMap(([k, v]) => flat(v, p ? `${p}.${k}` : k)) : [p];
+    const keys = flat(en.addons, "addons");
+    for (const k of ["addons.tab.addons", "addons.card.allowOnce", "addons.installError.unsafe_entry.symlink", "addons.engineOff"]) {
+      expect(keys).toContain(k);
+    }
+  });
+
+  it("without an install pipeline the input is disabled with a note, and no Remove / Check / Developer", () => {
+    const html = render({ canInstall: false });
+    expect(html).toContain("addons.install.later");
+    expect(html).toMatch(/<input[^>]*disabled/);
+    expect(html).not.toContain("addons.installed.remove");
+    expect(html).not.toContain("addons.developer.title");
+  });
+  it("an add-on whose files changed after install says it can't open", () => {
+    const addons = mockSnapshot.addons.map((a) => (a.id === "builtin:fileview" ? { ...a, digestOk: false } : a));
+    const html = render({ snapshot: { ...mockSnapshot, addons } });
+    expect(html).toContain("addon-digest-bad");
+    expect(html).toContain("addons.failure.digest_mismatch");
+  });
+  it("Always for this folder is disabled while grants cannot persist", () => {
+    const need = { permission: "files:read" as const, path: "/p", fileCount: null, denied: false };
+    const off = renderToStaticMarkup(createElement(GrantCard, { t, title: "X", need, canRemember: false, onChoose: noop }));
+    expect(off).toMatch(/<button[^>]*disabled[^>]*>\[addons\.card\.allowAlways\]/);
+    expect(renderToStaticMarkup(createElement(GrantCard, { t, title: "X", need, onChoose: noop }))).not.toMatch(/disabled/);
+  });
+  it("a failed add-on list is shown with a retry, not as an empty list with no reason", () => {
+    const html = render({ listError: "LIST SENTINEL FAILURE", onRetryList: noop });
+    expect(html).toContain("addons.listFailed");
+    expect(html).toContain("LIST SENTINEL FAILURE");
+    expect(html).toContain("addons.listRetry");
+    expect(render({})).not.toContain("addons.listFailed");
+  });
+  it("shows a notice above the installed list, and developer copies with a DEV badge, Reload and Remove", () => {
+    const dev = { ...mockSnapshot.addons[0], id: "dev:x", builtin: false, dev: { label: "my-folder", copy: "dev copy 1" } };
+    const html = render({
+      notice: { kind: "info", text: "Up to date (abc1234)." },
+      snapshot: { ...mockSnapshot, addons: [...mockSnapshot.addons, dev] },
+    });
+    expect(html).toContain("Up to date (abc1234).");
+    expect(html).toContain("&quot;folder&quot;:&quot;my-folder&quot;");
+    expect(html).toContain("addons.developer.reload");
+    // a dev copy is not in the installed list (no updates, no saved grants)
+    expect(html.split("addons.developer.title")[0]).not.toContain("dev:x");
+  });
+  it("a failed grants read is shown with a retry instead of an empty grants list", () => {
+    const html = render({ grantsError: "GRANTS SENTINEL FAILURE", onRetryGrants: noop });
+    expect(html).toContain("addons.grantsFailed");
+    expect(html).toContain("GRANTS SENTINEL FAILURE");
+  });
+  it("while add-ons are off, a failed grants read and a failed Remove still show their reasons", () => {
+    const html = render({
+      engine: mockEngineOff,
+      grantsError: "GRANTS OFF SENTINEL",
+      notice: { kind: "error", text: "REMOVE OFF SENTINEL" },
+      listError: "LIST OFF SENTINEL",
+    });
+    expect(html).toContain("GRANTS OFF SENTINEL");
+    expect(html).toContain("REMOVE OFF SENTINEL");
+    expect(html).toContain("LIST OFF SENTINEL");
+  });
+});
