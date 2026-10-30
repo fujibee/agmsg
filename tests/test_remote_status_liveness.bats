@@ -23,28 +23,54 @@ setup() {
   ENGINE_PIDS=""
 }
 
+# Stops <pid> only when its argv still names this test's own directory, so a pid
+# that was recycled to somebody else's process is left alone. Every path that
+# stops an engine goes through here. -ww keeps a long path from being cut short.
+_stop_owned_engine() {   # <pid>
+  local pid="$1"
+  case "$pid" in ""|*[!0-9]*) return 0 ;; esac
+  case "$(ps -ww -o args= -p "$pid" 2>/dev/null || true)" in
+    *"$TEST_SKILL_DIR/"*)
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      ;;
+  esac
+}
+
 teardown() {
-  local pid pidfile="$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+  local pid pidfile="$TEST_SKILL_DIR/run/remote-sync.testteam.pid" seen=" "
   # An engine `sync start` detached is not a child of this shell, so a test that
   # forgot remember_engine_pid would leave it running for days. Its pidfile names
-  # it; stop that pid, but only when its argv still names this test's own
-  # directory (the pid could have been recycled).
-  if [ -r "$pidfile" ]; then
-    pid="$(cat "$pidfile" 2>/dev/null || true)"
-    case "$pid" in
-      ""|*[!0-9]*) ;;
-      *)
-        case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
-          *"$TEST_SKILL_DIR/"*) kill "$pid" 2>/dev/null || true ;;
-        esac
-        ;;
-    esac
-  fi
-  for pid in $ENGINE_PIDS; do
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+  # it, as do the pids the tests registered; each one is stopped once.
+  pid=""
+  [ ! -r "$pidfile" ] || pid="$(cat "$pidfile" 2>/dev/null || true)"
+  for pid in $pid $ENGINE_PIDS; do
+    case "$seen" in *" $pid "*) continue ;; esac
+    seen="$seen$pid "
+    _stop_owned_engine "$pid"
   done
   teardown_test_env
+}
+
+@test "teardown helper: leaves a pid whose argv is not this test's engine alone" {
+  sleep 30 &
+  local foreign=$!
+  printf '%s\n' "$foreign" > "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+  ENGINE_PIDS="$foreign"
+  _stop_owned_engine "$foreign"
+  kill -0 "$foreign"
+  kill "$foreign"
+  wait "$foreign" 2>/dev/null || true
+  ENGINE_PIDS=""
+  rm -f "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+}
+
+@test "teardown helper: stops an engine whose argv names this test's directory" {
+  start_matching_engine
+  kill -0 "$ENGINE_PID"
+  _stop_owned_engine "$ENGINE_PID"
+  run kill -0 "$ENGINE_PID"
+  [ "$status" -ne 0 ]
 }
 
 start_matching_engine() {
