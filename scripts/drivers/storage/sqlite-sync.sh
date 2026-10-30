@@ -925,8 +925,15 @@ storage_sync_prepare_push() {
     [ "$sealed" -eq "$pending" ] || { _sqlite_sync_why; return 13; }
   fi
 
+  # db_path: the store THIS call actually opened, reported back rather than
+  # re-derived by the caller (#1836 review) -- this is the one place that
+  # already knows the team's chosen partition driver, so a caller watching
+  # for the next local change does not need its own copy of that
+  # resolution. Escaped at the point of use, like every other value
+  # interpolated into this SQL text that was not already escaped at
+  # assignment.
   _sqlite_data "$team" "SELECT json_object('type','sync_state','driver_generation',
-      '$generation','transport_cursor',transport_cursor)
+      '$generation','transport_cursor',transport_cursor,'db_path','$(_sqlite_lit "$db")')
     FROM sync_bindings WHERE local_team='$tl' AND server_instance_id='$server'
       AND remote_team_id='$remote' AND protocol_version=$protocol
       AND driver_generation='$generation';

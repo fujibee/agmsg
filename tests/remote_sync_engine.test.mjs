@@ -39,9 +39,6 @@ import {
   collectInstallBaseline,
   installChangedAgainst,
   localStoreFingerprint,
-  resolveRealMessageDbPath,
-  defaultDbPathSpawn,
-  cachedRealMessageDbPath,
   runLoop,
   loadConfig,
   nextLocalAgeSnapshot,
@@ -3547,63 +3544,18 @@ test("runLoop: an explicit --limit caps both push and pull page sizes, even in c
   }
 });
 
+
 // #1836: an idle engine's cycle used to call the storage/roster drivers'
 // `prepare` on every tick regardless of whether anything local had changed,
-// spawning on the order of 50 processes for nothing. `cycle()` now decides
-// (and these runLoop-level tests just confirm the plumbing): whatever
-// `checkpoint` a cycle returns is EXACTLY what the next cycle receives as
-// its `idleCheckpoint` -- the skip DECISION itself lives in `cycle()` and is
-// covered by the direct `cycle()` tests below (checkpoint-arming/skip).
-test("runLoop: a cycle's returned checkpoint is handed to the very next cycle, unchanged, and a null checkpoint clears it", async () => {
-  const seen = [];
-  const checkpointA = { fingerprint: "fp-a", eligible: true, cursor: "c1" };
-  let i = 0;
-  await assert.rejects(() => runLoop(config, {}, {
-    collectInstallBaselineCall: async () => null,
-    cycleCall: async (_config, { idleCheckpoint }) => {
-      seen.push(idleCheckpoint);
-      i += 1;
-      if (i === 1) return { pushSaturated: false, cursor: "c1", hadActivity: false, checkpoint: checkpointA };
-      if (i === 2) return { pushSaturated: false, cursor: "c2", hadActivity: false, checkpoint: null };
-      const stop = new Error("stop"); stop.retryable = false; throw stop;
-    },
-    sleepCall: async () => {},
-    isRetryableCall: (error) => error.retryable === true,
-    eventCall: async () => {},
-  }), /stop/);
-  assert.equal(seen[0], null); // nothing armed yet
-  assert.deepEqual(seen[1], checkpointA); // cycle 1's checkpoint, verbatim
-  assert.equal(seen[2], null); // cycle 2 disarmed it
-});
-
-test("runLoop: a failed cycle disarms the idle-prepare checkpoint for the next one", async () => {
-  const seen = [];
-  const checkpointA = { fingerprint: "fp-a", eligible: true, cursor: "c1" };
-  let i = 0;
-  await assert.rejects(() => runLoop(config, {}, {
-    collectInstallBaselineCall: async () => null,
-    cycleCall: async (_config, { idleCheckpoint }) => {
-      seen.push(idleCheckpoint);
-      i += 1;
-      if (i === 1) return { pushSaturated: false, cursor: "c1", hadActivity: false, checkpoint: checkpointA };
-      if (i === 2) { const net = new Error("net"); net.retryable = true; throw net; }
-      const stop = new Error("stop"); stop.retryable = false; throw stop;
-    },
-    sleepCall: async () => {},
-    isRetryableCall: (error) => error.retryable === true,
-    eventCall: async () => {},
-  }), /stop/);
-  assert.deepEqual(seen[1], checkpointA);
-  // Cycle 2 failed, so cycle 3 must see the checkpoint cleared rather than
-  // the one cycle 1 armed, even though cycle 2 never got to say otherwise.
-  assert.equal(seen[2], null);
-});
-
-// Direct `cycle()` tests for the #1836 skip decision itself: the decision
-// needs capabilities-derived write eligibility alongside the fingerprint
-// (review point 3 -- a server-side eligibility change must not be masked by
-// an unmoved local store), so it has to be exercised at this level rather
-// than through runLoop's opaque cycleCall mock above.
+// spawning on the order of 50 processes for nothing. The watched paths are
+// the ones the drivers themselves report back on a real `prepare` call
+// (storage-sync-driver.sh's `db_path`, roster-sync.mjs's
+// `config_path`/`journal_path`) -- never re-derived or re-resolved by this
+// file, after three rounds of review finding another way a self-resolved
+// path could go stale. `cycle()` owns the skip decision; these runLoop-level
+// tests confirm the plumbing (whatever `checkpoint` a cycle returns is
+// exactly what the next cycle receives as `idleCheckpoint`), and the direct
+// `cycle()` tests below cover the decision itself.
 const idleCapabilities = {
   protocol_version: 1, server_instance_id: config.server_instance_id,
   team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
@@ -3631,90 +3583,177 @@ const idleCycleBaseDeps = (overrides = {}) => ({
   logApplyCall: async () => {},
   eventCall: async () => {},
   readStateCycleCall: async () => {},
-  localStoreFingerprintCall: overrides.localStoreFingerprintCall ?? (async () => "fp-1"),
+  localStoreFingerprintCall: overrides.localStoreFingerprintCall ?? (async (paths) => paths.join("|")),
+  nowCall: overrides.nowCall ?? (() => 1000),
   ...overrides.extra,
 });
+// A driver double that reports db_path/config_path/journal_path, like the
+// real storage/roster drivers now do.
+const idleDrivers = (overrides = {}) => ({
+  driverCall: async (operation) => {
+    if (operation === "prepare") {
+      return [{ type: "sync_state", driver_generation: "g", transport_cursor: overrides.cursor ?? "9",
+        db_path: overrides.dbPath === undefined ? "/db/messages.db" : overrides.dbPath },
+      ...(overrides.candidates ?? [])];
+    }
+    return [{ type: "sync_apply_result", transport_cursor: overrides.cursor ?? "9", corrupt_count: 0 }];
+  },
+  rosterDriverCall: async (operation) => {
+    if (operation === "prepare") {
+      return [{ type: "roster_sync_state", transport_cursor: "0",
+        config_path: overrides.configPath === undefined ? "/conn/teams/t/config.json" : overrides.configPath,
+        journal_path: overrides.journalPath === undefined ? "/conn/teams/t/roster.jsonl" : overrides.journalPath }];
+    }
+    return [];
+  },
+});
 
-test("cycle: a matching fingerprint and eligibility skip both drivers' prepare entirely", async () => {
+test("cycle: a drained, eligible prepare arms a checkpoint carrying the driver-reported paths", async () => {
+  const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null },
+    idleCycleBaseDeps({ extra: idleDrivers() }));
+  assert.deepEqual(result.checkpoint, {
+    paths: ["/db/messages.db", "/db/messages.db-wal", "/db/messages.db-shm", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"],
+    fingerprint: ["/db/messages.db", "/db/messages.db-wal", "/db/messages.db-shm", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"].join("|"),
+    eligible: true, cursor: "9", armedAt: 1000,
+  });
+});
+
+test("cycle: a driver that does not report db_path (an older build, or a custom driver) never arms a checkpoint", async () => {
+  // The driver's own output simply omits the field entirely (as a real
+  // older-build JSON record would), not a key present with value undefined.
+  const noFieldDeps = idleCycleBaseDeps({ extra: {
+    driverCall: async (operation) => operation === "prepare" ?
+      [{ type: "sync_state", driver_generation: "g", transport_cursor: "9" }] :
+      [{ type: "sync_apply_result", transport_cursor: "9", corrupt_count: 0 }],
+    rosterDriverCall: async (operation) => operation === "prepare" ?
+      [{ type: "roster_sync_state", transport_cursor: "0" }] : [],
+  } });
+  const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null }, noFieldDeps);
+  assert.equal(result.checkpoint, null);
+});
+
+test("cycle: an unchanged checkpoint (matching paths, matching eligibility, within the safety-net window) skips both drivers' prepare", async () => {
   let prepareCalls = 0;
-  const idleCheckpoint = { fingerprint: "fp-1", eligible: true, cursor: "7" };
+  const watchedPaths = ["/db/messages.db", "/db/messages.db-wal", "/db/messages.db-shm"];
+  const idleCheckpoint = { paths: watchedPaths, fingerprint: watchedPaths.join("|"), eligible: true, cursor: "7", armedAt: 1000 };
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
+    nowCall: () => 1000 + 10000, // well under the 60s safety net
     extra: {
       driverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return []; },
       rosterDriverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return []; },
     },
   }));
   assert.equal(prepareCalls, 0);
-  assert.equal(result.cursor, "7"); // the checkpoint's cursor, not a fresh one
-  assert.deepEqual(result.checkpoint, { fingerprint: "fp-1", eligible: true, cursor: "7" });
+  assert.equal(result.cursor, "7");
+  assert.deepEqual(result.checkpoint, { ...idleCheckpoint, cursor: "7" });
 });
 
-test("cycle: a changed fingerprint runs prepare for real even though eligibility still matches", async () => {
+test("cycle: a changed fingerprint on the checkpoint's own watched paths runs prepare for real", async () => {
   let prepareCalls = 0;
-  const idleCheckpoint = { fingerprint: "fp-OLD", eligible: true, cursor: "7" };
+  const watchedPaths = ["/db/messages.db"];
+  const idleCheckpoint = { paths: watchedPaths, fingerprint: "OLD", eligible: true, cursor: "7", armedAt: 1000 };
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
-    localStoreFingerprintCall: async () => "fp-NEW",
-    extra: {
-      driverCall: async (operation) => {
-        if (operation === "prepare") { prepareCalls += 1; return [{ type: "sync_state", driver_generation: "g", transport_cursor: "9" }]; }
-        return [];
-      },
-      rosterDriverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return []; },
-    },
+    nowCall: () => 1000 + 10000,
+    localStoreFingerprintCall: async (paths) => `NEW:${paths.join("|")}`,
+    extra: idleDrivers(),
   }));
-  assert.equal(prepareCalls, 2);
-  assert.equal(result.cursor, "9");
-  assert.deepEqual(result.checkpoint, { fingerprint: "fp-NEW", eligible: true, cursor: "9" });
+  assert.equal(result.cursor, "9"); // from a real prepare, not the checkpoint's stale cursor
+  assert.notEqual(result.checkpoint.fingerprint, "OLD");
 });
 
-test("cycle: a server-side eligibility flip runs prepare for real even with an unchanged fingerprint (#1836 review point 3)", async () => {
-  let prepareCalls = 0;
-  // Armed earlier while eligible; capabilities now say writes are not allowed.
-  const idleCheckpoint = { fingerprint: "fp-1", eligible: true, cursor: "7" };
+test("cycle: write eligibility flipping disarms a checkpoint that still matches on fingerprint (#1836 review point 3)", async () => {
+  const watchedPaths = ["/db/messages.db"];
+  const idleCheckpoint = { paths: watchedPaths, fingerprint: watchedPaths.join("|"), eligible: true, cursor: "7", armedAt: 1000 };
   const ineligibleCapabilities = { ...idleCapabilities, write_allowed_ciphers: [],
     policy_history: [{ ...idleCapabilities.policy_history[0], write_allowed_ciphers: [] }] };
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
-    capabilities: ineligibleCapabilities,
+    nowCall: () => 1000 + 10000, capabilities: ineligibleCapabilities, extra: idleDrivers(),
+  }));
+  // Ran for real despite a matching fingerprint; ineligible + drained never arms.
+  assert.equal(result.checkpoint, null);
+});
+
+test("cycle: the 60s safety net forces a real prepare even with a perfectly matching checkpoint (tl2)", async () => {
+  let prepareCalls = 0;
+  const watchedPaths = ["/db/messages.db"];
+  const idleCheckpoint = { paths: watchedPaths, fingerprint: watchedPaths.join("|"), eligible: true, cursor: "7", armedAt: 1000 };
+  const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
+    nowCall: () => 1000 + 60000, // exactly at the 60s boundary -- no longer "fresh"
+    localStoreFingerprintCall: async (paths) => paths.join("|"), // would have matched, if asked
     extra: {
       driverCall: async (operation) => {
-        if (operation === "prepare") { prepareCalls += 1; return [{ type: "sync_state", driver_generation: "g", transport_cursor: "9" }]; }
+        if (operation === "prepare") { prepareCalls += 1; return [{ type: "sync_state", driver_generation: "g", transport_cursor: "9", db_path: "/db/messages.db" }]; }
         return [];
       },
-      rosterDriverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return []; },
+      rosterDriverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return [{ type: "roster_sync_state", transport_cursor: "0" }]; },
     },
   }));
   assert.equal(prepareCalls, 2);
-  // Ineligible AND drained is not a confirmed idle state -- never arm.
-  assert.equal(result.checkpoint, null);
+  // Re-armed with a fresh armedAt, not the stale one.
+  assert.equal(result.checkpoint.armedAt, 1000 + 60000);
 });
 
 test("cycle: a prepare that finds something to push never arms a checkpoint", async () => {
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null }, idleCycleBaseDeps({
-    extra: {
-      driverCall: async (operation) => {
-        if (operation === "prepare") {
-          return [{ type: "sync_state", driver_generation: "g", transport_cursor: "9" },
-            { type: "sync_push_candidate", local_position: "1", id: "550e8400-e29b-41d4-a716-446655440001" }];
-        }
-        return [{ type: "sync_apply_result", transport_cursor: "9", corrupt_count: 0 }];
-      },
-      rosterDriverCall: async () => [],
-    },
+    extra: idleDrivers({ candidates: [{ type: "sync_push_candidate", local_position: "1", id: "550e8400-e29b-41d4-a716-446655440001" }] }),
   }));
   assert.equal(result.checkpoint, null);
 });
 
-// #1836's other half: a run of empty cycles stretches the steady-state wait
-// from the floor towards 60s, and any activity collapses it straight back.
-test("runLoop: consecutive idle cycles stretch the steady interval towards 60s, and activity collapses it", async () => {
-  const sleeps = [];
-  const script = [false, false, false, false, true, false]; // idle x4, then active, then idle again
+test("runLoop: a cycle's returned checkpoint is handed to the very next cycle, unchanged, and a null checkpoint clears it", async () => {
+  const seen = [];
+  const checkpointA = { paths: ["/p"], fingerprint: "fp-a", eligible: true, cursor: "c1", armedAt: 1000 };
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
     collectInstallBaselineCall: async () => null,
+    cycleCall: async (_config, { idleCheckpoint }) => {
+      seen.push(idleCheckpoint);
+      i += 1;
+      if (i === 1) return { pushSaturated: false, cursor: "c1", hadActivity: false, checkpoint: checkpointA };
+      if (i === 2) return { pushSaturated: false, cursor: "c2", hadActivity: false, checkpoint: null };
+      const stop = new Error("stop"); stop.retryable = false; throw stop;
+    },
+    sleepCall: async () => {},
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  assert.equal(seen[0], null);
+  assert.deepEqual(seen[1], checkpointA);
+  assert.equal(seen[2], null);
+});
+
+test("runLoop: a failed cycle disarms the idle-prepare checkpoint for the next one", async () => {
+  const seen = [];
+  const checkpointA = { paths: ["/p"], fingerprint: "fp-a", eligible: true, cursor: "c1", armedAt: 1000 };
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    cycleCall: async (_config, { idleCheckpoint }) => {
+      seen.push(idleCheckpoint);
+      i += 1;
+      if (i === 1) return { pushSaturated: false, cursor: "c1", hadActivity: false, checkpoint: checkpointA };
+      if (i === 2) { const net = new Error("net"); net.retryable = true; throw net; }
+      const stop = new Error("stop"); stop.retryable = false; throw stop;
+    },
+    sleepCall: async () => {},
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  assert.deepEqual(seen[1], checkpointA);
+  assert.equal(seen[2], null);
+});
+
+test("runLoop: consecutive idle cycles stretch the steady interval towards 60s, and activity collapses it", async () => {
+  const sleeps = [];
+  const script = [false, false, false, false, true, false];
+  const stableCheckpoint = { paths: ["/p"], fingerprint: "fp-stable", eligible: true, cursor: "c", armedAt: 1000 };
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    localStoreFingerprintCall: async () => "fp-stable", // no local write during any sleep in this script
     cycleCall: async () => {
       if (i >= script.length) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
-      return { pushSaturated: false, hadActivity: script[i++], fingerprint: "fp-stable" };
+      return { pushSaturated: false, hadActivity: script[i++], checkpoint: stableCheckpoint };
     },
     sleepCall: async (ms) => { sleeps.push(ms); },
     isRetryableCall: (error) => error.retryable === true,
@@ -3724,11 +3763,9 @@ test("runLoop: consecutive idle cycles stretch the steady interval towards 60s, 
   // later consecutive ones double: 5s, 10s, 20s, 40s. The active cycle
   // resets the streak, so its own wait (and the lone idle cycle right
   // after it) are both back at the floor. A wait over the 5s floor is slept
-  // in 5s-sized chunks (#1836 review point 2, so a local write during a
-  // stretched-out wait still gets sent within 5s); the default
-  // localStoreFingerprintCall here resolves to null (no AGMSG_SYNC_DRIVER
-  // set in this test env), so no chunk ever wakes early and every wait
-  // sleeps out in full, in 5000ms pieces.
+  // in 5s-sized chunks, each re-checking the checkpoint's own paths; none
+  // of them differ from "fp-stable" in this script, so nothing ever wakes
+  // early and every wait sleeps out in full.
   const expected = [5000, 10000, 20000, 40000, 5000, 5000]
     .flatMap((total) => Array(total / 5000).fill(5000));
   assert.deepEqual(sleeps, expected);
@@ -3736,32 +3773,30 @@ test("runLoop: consecutive idle cycles stretch the steady interval towards 60s, 
 
 test("runLoop: the idle interval never exceeds 60s", async () => {
   const sleeps = [];
+  const stableCheckpoint = { paths: ["/p"], fingerprint: "fp-stable", eligible: true, cursor: "c", armedAt: 1000 };
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
     collectInstallBaselineCall: async () => null,
+    localStoreFingerprintCall: async () => "fp-stable",
     cycleCall: async () => {
       i += 1;
       if (i > 8) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
-      return { pushSaturated: false, hadActivity: false, fingerprint: "fp-stable" };
+      return { pushSaturated: false, hadActivity: false, checkpoint: stableCheckpoint };
     },
     sleepCall: async (ms) => { sleeps.push(ms); },
     isRetryableCall: (error) => error.retryable === true,
     eventCall: async () => {},
   }), /stop/);
-  // Every individual sleep chunk is at most the 5s floor; the stretched
-  // intervals themselves (summed per cycle: 5s,10s,20s,40s,60s,60s,60s,60s)
-  // are what the 60s cap bounds, not any single sleepCall.
   assert.ok(sleeps.every((ms) => ms === 5000));
   const totalsPerCycle = [5000, 10000, 20000, 40000, 60000, 60000, 60000, 60000];
   assert.equal(sleeps.length, totalsPerCycle.reduce((sum, ms) => sum + ms / 5000, 0));
   assert.equal(sleeps.reduce((sum, ms) => sum + ms, 0), totalsPerCycle.reduce((sum, ms) => sum + ms, 0));
 });
 
-// #1836 review point A: an unknown fingerprint (a custom driver, or an
-// unresolvable real store path) must never be stretched past the floor --
-// there is no way to wake early for it, so stretching it would leave that
-// configuration's outbound side waiting up to the full backoff too.
-test("runLoop: an unknown fingerprint (e.g. a custom driver) never stretches the interval past the floor, even across many idle cycles", async () => {
+// #1836 review point A: no checkpoint (a driver that never reported its
+// paths, or one that is currently busy/ineligible) must never be stretched
+// past the floor -- there is no way to wake early for it.
+test("runLoop: no checkpoint (unknown paths) never stretches the interval past the floor, even across many idle cycles", async () => {
   const sleeps = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
@@ -3769,7 +3804,7 @@ test("runLoop: an unknown fingerprint (e.g. a custom driver) never stretches the
     cycleCall: async () => {
       i += 1;
       if (i > 6) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
-      return { pushSaturated: false, hadActivity: false, fingerprint: null };
+      return { pushSaturated: false, hadActivity: false, checkpoint: null };
     },
     sleepCall: async (ms) => { sleeps.push(ms); },
     isRetryableCall: (error) => error.retryable === true,
@@ -3778,15 +3813,14 @@ test("runLoop: an unknown fingerprint (e.g. a custom driver) never stretches the
   assert.deepEqual(sleeps, [5000, 5000, 5000, 5000, 5000, 5000]);
 });
 
-test("runLoop: a write that already landed by the time the sleep begins still wakes it early, because the baseline is the cycle's OWN pre-prepare fingerprint", async () => {
-  // Cycle 2 is idle and reports fingerprint "fp-2" (taken at ITS top, before
-  // prepare). By the time the sleep's first in-sleep poll runs, the real
-  // store has already moved to "fp-3" (a write landed in the gap). A
-  // baseline taken FRESH at sleep-start would also read "fp-3" and see no
-  // difference on that first poll -- exactly the swallow #1836 review point
-  // A flagged. Using the cycle's own "fp-2" as the baseline instead, the
-  // very first poll ("fp-3" vs "fp-2") differs and wakes the sleep
-  // immediately, well short of the full stretched wait.
+test("runLoop: a write that already landed by the time the sleep begins still wakes it early, because the baseline is the cycle's OWN checkpoint fingerprint", async () => {
+  // Cycle 2 arms fingerprint "fp-2" (as of ITS own prepare). By the time the
+  // sleep's first in-sleep poll runs, the real store has already moved to
+  // "fp-3" (a write landed in the gap). A baseline taken FRESH at
+  // sleep-start would also read "fp-3" and see no difference on that first
+  // poll -- exactly the swallow #1836 review point A flagged. Using the
+  // checkpoint's own "fp-2" as the baseline instead, the very first poll
+  // ("fp-3" vs "fp-2") differs and wakes the sleep immediately.
   const sleeps = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
@@ -3794,8 +3828,10 @@ test("runLoop: a write that already landed by the time the sleep begins still wa
     localStoreFingerprintCall: async () => "fp-3",
     cycleCall: async () => {
       i += 1;
-      if (i === 1) return { pushSaturated: false, hadActivity: false, fingerprint: "fp-1" };
-      if (i === 2) return { pushSaturated: false, hadActivity: false, fingerprint: "fp-2" };
+      if (i === 1) return { pushSaturated: false, hadActivity: false,
+        checkpoint: { paths: ["/p"], fingerprint: "fp-1", eligible: true, cursor: "c", armedAt: 1000 } };
+      if (i === 2) return { pushSaturated: false, hadActivity: false,
+        checkpoint: { paths: ["/p"], fingerprint: "fp-2", eligible: true, cursor: "c", armedAt: 1000 } };
       const stop = new Error("stop"); stop.retryable = false; throw stop;
     },
     sleepCall: async (ms) => { sleeps.push(ms); },
@@ -3804,202 +3840,94 @@ test("runLoop: a write that already landed by the time the sleep begins still wa
   }), /stop/);
   // Cycle 1 (streak 1) sleeps its single 5000ms floor chunk, no polling.
   // Cycle 2 (streak 2 -> a 10000ms, two-chunk wait) sleeps its first 5000ms
-  // chunk, polls, sees "fp-3" != its own baseline "fp-2", and wakes --
-  // never reaching a second chunk.
+  // chunk, polls, sees "fp-3" != its own baseline "fp-2", and wakes.
   assert.deepEqual(sleeps, [5000, 5000]);
 });
 
-// t.after() hooks elsewhere in this file (e.g. the roster-driver residue
-// test) run at FILE teardown, not after that one test, so
-// AGMSG_SYNC_ROSTER_DRIVER can still be some other test's leftover mock path
-// by the time these run. Pin both driver env vars explicitly rather than
-// only AGMSG_SYNC_DRIVER, or that ambient leftover reads as "a custom
-// driver" and this test is testing the wrong thing.
-const builtinRosterDriverForTest = () => join(dirname(fileURLToPath(
-  new URL("../scripts/internal/remote-sync.mjs", import.meta.url))), "roster-sync-driver.sh");
-
-test("localStoreFingerprint: a custom driver (AGMSG_SYNC_DRIVER not the built-in script) is unknown, never fingerprinted (#1836 review point 1)", async () => {
-  const previous = { driver: process.env.AGMSG_SYNC_DRIVER, roster: process.env.AGMSG_SYNC_ROSTER_DRIVER };
-  process.env.AGMSG_SYNC_DRIVER = "/some/custom/driver.sh";
-  process.env.AGMSG_SYNC_ROSTER_DRIVER = builtinRosterDriverForTest();
-  try {
-    assert.equal(await localStoreFingerprint("team-x"), null);
-  } finally {
-    if (previous.driver === undefined) delete process.env.AGMSG_SYNC_DRIVER; else process.env.AGMSG_SYNC_DRIVER = previous.driver;
-    if (previous.roster === undefined) delete process.env.AGMSG_SYNC_ROSTER_DRIVER; else process.env.AGMSG_SYNC_ROSTER_DRIVER = previous.roster;
-  }
+test("runLoop: a null poll mid-sleep (#1836 review point 4) wakes immediately rather than sleeping out the rest of the wait", async () => {
+  const sleeps = [];
+  const fingerprints = [null]; // the very first in-sleep poll is already unknown
+  let poll = 0;
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    localStoreFingerprintCall: async () => fingerprints[Math.min(poll++, fingerprints.length - 1)],
+    cycleCall: async () => {
+      i += 1;
+      if (i === 1) return { pushSaturated: false, hadActivity: false,
+        checkpoint: { paths: ["/p"], fingerprint: "fp-1", eligible: true, cursor: "c", armedAt: 1000 } };
+      if (i === 2) return { pushSaturated: false, hadActivity: false,
+        checkpoint: { paths: ["/p"], fingerprint: "fp-2", eligible: true, cursor: "c", armedAt: 1000 } };
+      const stop = new Error("stop"); stop.retryable = false; throw stop;
+    },
+    sleepCall: async (ms) => { sleeps.push(ms); },
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  assert.deepEqual(sleeps, [5000, 5000]);
 });
 
-test("localStoreFingerprint: unchanged files produce the same fingerprint; a write changes it; an unresolvable db path returns null", async () => {
+test("localStoreFingerprint: stable across repeated reads, moves on a write, and returns null on a non-ENOENT stat failure", async () => {
   const dir = await mkdtemp(join(tmpdir(), "agmsg-fp-"));
-  const builtinDriver = join(dirname(fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url))), "storage-sync-driver.sh");
-  const previous = { driver: process.env.AGMSG_SYNC_DRIVER, roster: process.env.AGMSG_SYNC_ROSTER_DRIVER };
-  process.env.AGMSG_SYNC_DRIVER = builtinDriver;
-  process.env.AGMSG_SYNC_ROSTER_DRIVER = builtinRosterDriverForTest();
-  const dbPath = join(dir, "messages.db");
-  const resolveDbPathCall = async () => dbPath;
+  const filePath = join(dir, "messages.db");
   try {
-    const before = await localStoreFingerprint("team-x", { resolveDbPathCall });
-    const again = await localStoreFingerprint("team-x", { resolveDbPathCall });
-    assert.equal(before, again);
-    await writeFile(dbPath, "x");
-    const afterWrite = await localStoreFingerprint("team-x", { resolveDbPathCall });
+    const before = await localStoreFingerprint([filePath]);
+    const again = await localStoreFingerprint([filePath]);
+    assert.equal(before, again); // both "absent" -- the file does not exist yet
+    await writeFile(filePath, "x");
+    const afterWrite = await localStoreFingerprint([filePath]);
     assert.notEqual(before, afterWrite);
-    // A stat failure other than ENOENT (here: every path, since statCall
-    // itself fails) disarms the whole fingerprint, not just one path.
     const failingStat = async () => { const error = new Error("denied"); error.code = "EACCES"; throw error; };
-    assert.equal(await localStoreFingerprint("team-x", { resolveDbPathCall, statCall: failingStat }), null);
-    // The db path itself could not be resolved -- also null, not a guess.
-    assert.equal(await localStoreFingerprint("team-x", { resolveDbPathCall: async () => null }), null);
+    assert.equal(await localStoreFingerprint([filePath], failingStat), null);
   } finally {
-    if (previous.driver === undefined) delete process.env.AGMSG_SYNC_DRIVER; else process.env.AGMSG_SYNC_DRIVER = previous.driver;
-    if (previous.roster === undefined) delete process.env.AGMSG_SYNC_ROSTER_DRIVER; else process.env.AGMSG_SYNC_ROSTER_DRIVER = previous.roster;
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("localStoreFingerprint: a custom roster driver (AGMSG_SYNC_ROSTER_DRIVER not the built-in script) is unknown, never fingerprinted (#1836 review point 1)", async () => {
-  const builtinDriver = join(dirname(fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url))), "storage-sync-driver.sh");
-  const previous = { driver: process.env.AGMSG_SYNC_DRIVER, roster: process.env.AGMSG_SYNC_ROSTER_DRIVER };
-  process.env.AGMSG_SYNC_DRIVER = builtinDriver;
-  process.env.AGMSG_SYNC_ROSTER_DRIVER = "/some/custom/roster-driver.sh";
+test("storage-sync-driver.sh prepare: the real driver reports the db_path it actually opened (#1836)", async () => {
+  const storageDir = await mkdtemp(join(tmpdir(), "agmsg-dbpath-real-"));
+  const script = join(dirname(fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url))), "storage-sync-driver.sh");
+  const input = JSON.stringify({ type: "sync_prepare", envelope_v: 1, cipher: "none", key_id: null,
+    recipients: [], max_blob_bytes: 1000000, allow_new: true });
   try {
-    assert.equal(await localStoreFingerprint("team-x", { resolveDbPathCall: async () => "/dev/null" }), null);
+    const result = spawnSync("bash", [script, "prepare", "realteam",
+      "018f3f7e-0000-7000-8000-000000000002", "018f3f7e-0000-7000-8000-000000000001", "1", "100"],
+      { input: `${input}\n`, env: { ...process.env, AGMSG_STORAGE_PATH: storageDir } });
+    assert.equal(result.status, 0, result.stderr?.toString());
+    const line = result.stdout.toString().trim().split("\n")[0];
+    const record = JSON.parse(line);
+    assert.equal(record.type, "sync_state");
+    assert.equal(record.db_path, join(storageDir, "messages.db"));
   } finally {
-    if (previous.driver === undefined) delete process.env.AGMSG_SYNC_DRIVER; else process.env.AGMSG_SYNC_DRIVER = previous.driver;
-    if (previous.roster === undefined) delete process.env.AGMSG_SYNC_ROSTER_DRIVER; else process.env.AGMSG_SYNC_ROSTER_DRIVER = previous.roster;
-  }
-});
-
-test("localStoreFingerprint: an AGMSG_SYNC_LOCAL_ROSTER_FILE override is watched directly, and a write to it changes the fingerprint (#1836 review point 1)", async () => {
-  const builtinDriver = join(dirname(fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url))), "storage-sync-driver.sh");
-  const dir = await mkdtemp(join(tmpdir(), "agmsg-fp-roster-"));
-  const rosterFile = join(dir, "roster-override.json");
-  const previous = { driver: process.env.AGMSG_SYNC_DRIVER, roster: process.env.AGMSG_SYNC_ROSTER_DRIVER,
-    rosterFile: process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE };
-  process.env.AGMSG_SYNC_DRIVER = builtinDriver;
-  process.env.AGMSG_SYNC_ROSTER_DRIVER = builtinRosterDriverForTest();
-  process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE = rosterFile;
-  const resolveDbPathCall = async () => "/dev/null";
-  try {
-    const before = await localStoreFingerprint("team-x", { resolveDbPathCall });
-    await writeFile(rosterFile, "{}");
-    const after = await localStoreFingerprint("team-x", { resolveDbPathCall });
-    assert.notEqual(before, after);
-  } finally {
-    for (const [key, value] of [
-      ["AGMSG_SYNC_DRIVER", previous.driver],
-      ["AGMSG_SYNC_ROSTER_DRIVER", previous.roster],
-      ["AGMSG_SYNC_LOCAL_ROSTER_FILE", previous.rosterFile],
-    ]) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("localStoreFingerprint: resolves the real per-team store through the shared storage.sh resolver, not a guessed path (#1836 review point 1)", async () => {
-  // Drives the DEFAULT resolver (no resolveDbPathCall override) end to end:
-  // the one small `bash -c agmsg_db_path` spend, against a real team joined
-  // under a throwaway AGMSG_STORAGE_PATH -- proving this does not depend on
-  // messages.db living directly under the storage root (the guess #1836
-  // review flagged), only on whatever lib/storage.sh itself resolves.
-  const builtinDriver = join(dirname(fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url))), "storage-sync-driver.sh");
-  const storageDir = await mkdtemp(join(tmpdir(), "agmsg-fp-realpath-"));
-  const previous = { driver: process.env.AGMSG_SYNC_DRIVER, roster: process.env.AGMSG_SYNC_ROSTER_DRIVER,
-    storage: process.env.AGMSG_SYNC_STORAGE_DIR };
-  process.env.AGMSG_SYNC_DRIVER = builtinDriver;
-  process.env.AGMSG_SYNC_ROSTER_DRIVER = builtinRosterDriverForTest();
-  process.env.AGMSG_SYNC_STORAGE_DIR = storageDir;
-  try {
-    const skillDir = join(dirname(builtinDriver), "..", "..");
-    const joinResult = spawnSync("bash", [join(skillDir, "scripts", "join.sh"), "fp-real", "alice", "claude-code", join(storageDir, "proj")],
-      { env: { ...process.env, AGMSG_STORAGE_PATH: storageDir } });
-    assert.equal(joinResult.status, 0, joinResult.stderr?.toString());
-    const before = await localStoreFingerprint("fp-real");
-    assert.notEqual(before, null);
-    // A real local write (the one join.sh itself just made) is already
-    // reflected -- fetched twice in a row must agree, since nothing wrote
-    // again in between.
-    const again = await localStoreFingerprint("fp-real");
-    assert.equal(before, again);
-  } finally {
-    if (previous.driver === undefined) delete process.env.AGMSG_SYNC_DRIVER; else process.env.AGMSG_SYNC_DRIVER = previous.driver;
-    if (previous.roster === undefined) delete process.env.AGMSG_SYNC_ROSTER_DRIVER; else process.env.AGMSG_SYNC_ROSTER_DRIVER = previous.roster;
-    if (previous.storage === undefined) delete process.env.AGMSG_SYNC_STORAGE_DIR; else process.env.AGMSG_SYNC_STORAGE_DIR = previous.storage;
     await rm(storageDir, { recursive: true, force: true });
   }
 });
 
-test("resolveRealMessageDbPath: the team is passed positionally, never interpolated, and the exact path round-trips byte-for-byte (#1836 review point C)", async () => {
-  // A team name carrying shell metacharacters -- `$()`, a backtick -- would
-  // be re-interpreted as syntax if it were interpolated into the command
-  // string instead of passed as a positional argument. The stub below
-  // asserts the SAME string arrives as its second positional arg, verbatim,
-  // and returns a path chosen to exercise the NUL-framing/no-trim guarantee:
-  // leading/trailing spaces, embedded quotes, a trailing newline -- none of
-  // which may be altered on the way back.
-  const dangerousTeam = "team-$(rm -rf /)-`whoami`";
-  const weirdPath = '  /weird path with "quotes" and $(danger) and `backticks`  \n';
-  const stubSpawn = async (_command, args) => {
-    assert.equal(args.length, 2);
-    assert.equal(args[1], dangerousTeam);
-    return Buffer.from(`${weirdPath}\0`, "utf8");
-  };
-  const path = await resolveRealMessageDbPath(dangerousTeam, stubSpawn);
-  assert.equal(path, weirdPath);
-});
-
-test("defaultDbPathSpawn: a hung resolver is killed and rejected within its timeout, not left to block the loop forever (#1836 review point B)", async () => {
-  const start = Date.now();
-  await assert.rejects(
-    defaultDbPathSpawn("sleep 300", []),
-    /timed out/,
-  );
-  // Bounded at the 5s timeout itself, with a generous margin for a loaded
-  // CI runner -- nowhere near the 300s the hung resolver actually asked for.
-  assert.ok(Date.now() - start < 8000);
-});
-
-test("defaultDbPathSpawn: stderr is drained so a resolver that floods it does not stall or crash the caller (#1836 review point B)", async () => {
-  const { stdout } = await (async () => {
-    const buf = await defaultDbPathSpawn(
-      'head -c 200000 /dev/zero | tr "\\0" "e" >&2; printf "ok\\0"', []);
-    return { stdout: buf };
-  })();
-  const nul = stdout.indexOf(0);
-  assert.equal(stdout.subarray(0, nul).toString("utf8"), "ok");
-});
-
-test("defaultDbPathSpawn: a non-zero exit is rejected, not read as an empty success", async () => {
-  await assert.rejects(defaultDbPathSpawn("exit 3", []), /exited 3/);
-});
-
-test("cachedRealMessageDbPath: resolves once per team-config fingerprint, re-resolving only when config.json actually changes (#1836 review point B/tl2)", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agmsg-dbcache-"));
-  const previousConn = process.env.AGMSG_SYNC_CONNECTION_DIR;
-  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
-  const configDir = join(root, "teams", "cache-team");
-  await mkdir(configDir, { recursive: true });
-  const configPath = join(configDir, "config.json");
-  await writeFile(configPath, JSON.stringify({ name: "cache-team" }));
-  let resolveCalls = 0;
-  const resolveDbPathCall = async () => { resolveCalls += 1; return `/resolved/${resolveCalls}`; };
+test("roster-sync-driver.sh prepare: the real driver reports the config_path/journal_path it actually used (#1836)", async () => {
+  // AGMSG_SYNC_LOCAL_ROSTER_FILE, not AGMSG_SYNC_CONNECTION_DIR: the driver
+  // itself only ever reads the former (see its own comment on `config=`);
+  // resolving a connection root into that one file is remote-sync.mjs's
+  // own job (`rosterFileFor`), done before the driver is ever invoked.
+  const connectionDir = await mkdtemp(join(tmpdir(), "agmsg-rosterpath-real-"));
+  const teamDir = join(connectionDir, "teams", "realteam");
+  await mkdir(teamDir, { recursive: true });
+  const configPath = join(teamDir, "config.json");
+  await writeFile(configPath, JSON.stringify({ name: "realteam", agents: {} }));
+  const script = join(dirname(fileURLToPath(new URL("../scripts/internal/remote-sync.mjs", import.meta.url))), "roster-sync-driver.sh");
+  const input = JSON.stringify({ type: "sync_prepare", envelope_v: 1, cipher: "none", key_id: null,
+    recipients: [], max_blob_bytes: 1000000, allow_new: true });
   try {
-    const first = await cachedRealMessageDbPath("cache-team", { resolveDbPathCall });
-    const second = await cachedRealMessageDbPath("cache-team", { resolveDbPathCall });
-    assert.equal(resolveCalls, 1); // the second call hit the cache -- no spawn
-    assert.equal(first, second);
-    // A real migration writes config.json -- mtime/size moves, so the next
-    // call must re-resolve rather than keep serving the stale path.
-    await writeFile(configPath, JSON.stringify({ name: "cache-team", drivers: { partition: "per-team" } }));
-    const third = await cachedRealMessageDbPath("cache-team", { resolveDbPathCall });
-    assert.equal(resolveCalls, 2);
-    assert.notEqual(third, first);
+    const result = spawnSync("bash", [script, "prepare", "realteam",
+      "018f3f7e-0000-7000-8000-000000000002", "018f3f7e-0000-7000-8000-000000000001", "1", "100"],
+      { input: `${input}\n`, env: { ...process.env, AGMSG_SYNC_LOCAL_ROSTER_FILE: configPath } });
+    assert.equal(result.status, 0, result.stderr?.toString());
+    const line = result.stdout.toString().trim().split("\n")[0];
+    const record = JSON.parse(line);
+    assert.equal(record.type, "roster_sync_state");
+    assert.equal(record.config_path, configPath);
+    assert.equal(record.journal_path, join(teamDir, "roster.jsonl"));
   } finally {
-    if (previousConn === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
-    else process.env.AGMSG_SYNC_CONNECTION_DIR = previousConn;
-    await rm(root, { recursive: true, force: true });
+    await rm(connectionDir, { recursive: true, force: true });
   }
 });
 
