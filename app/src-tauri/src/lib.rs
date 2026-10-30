@@ -1,5 +1,6 @@
 pub mod addons;
 mod agmsg;
+mod store_fp;
 mod agent_state;
 mod menu_i18n;
 mod pty;
