@@ -1,6 +1,7 @@
 import "./style.css";
 import { app, errorText } from "../../_shared/kit";
 import { h } from "../../_shared/dom";
+import { rootLabel } from "../../_shared/format";
 import { Tree } from "./tree";
 import { Viewer } from "./viewer";
 
@@ -15,8 +16,6 @@ async function main(): Promise<void> {
     root.replaceChildren(h("div", { class: "notice error" }, h("h2", null, "Can't open"), h("div", null, errorText(e))));
     return;
   }
-  const label = args.path ?? ".";
-
   let top;
   try {
     top = await app.fs.stat(".");
@@ -24,6 +23,8 @@ async function main(): Promise<void> {
     root.replaceChildren(h("div", { class: "notice error" }, h("h2", null, "Can't read this location"), h("div", null, errorText(e))));
     return;
   }
+  // A folder picked in the app's dialog arrives without a path: call it by the name of the granted root.
+  const label = rootLabel(args.path, top.name, ".");
 
   const viewer = new Viewer();
   const bar = h("div", { class: "bar" }, h("span", { class: "path", title: label }, label));

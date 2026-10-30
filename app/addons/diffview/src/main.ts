@@ -2,7 +2,7 @@ import "./style.css";
 import { app, errorText } from "../../_shared/kit";
 import type { DiffFile, DiffHunk, DiffLine, DiffResult, DiffStatus } from "../../../addon-kit/protocol";
 import { h } from "../../_shared/dom";
-import { baseName } from "../../_shared/format";
+import { baseName, rootLabel } from "../../_shared/format";
 import { gapBefore, initialBase, sideBySide, wordDiff, type Range } from "./diff";
 
 type Mode = "unified" | "split";
@@ -285,7 +285,9 @@ async function main(): Promise<void> {
     return;
   }
   state.base = initialBase(args.base);
-  const label = args.path ? baseName(args.path.replace(/\/+$/, "")) || args.path : "repository";
+  // No path when the folder was chosen in the app's dialog: use the granted root's own name.
+  const rootName = args.path ? undefined : await app.fs.stat(".").then((e) => e.name, () => undefined);
+  const label = args.path ? baseName(args.path.replace(/\/+$/, "")) || args.path : rootLabel(undefined, rootName, "repository");
   document.title = `Diff view: ${label}`;
 
   const baseInput = h("input", { class: "rev", type: "text", value: state.base, placeholder: "HEAD",
@@ -311,7 +313,7 @@ async function main(): Promise<void> {
   search.addEventListener("keydown", (e) => e.stopPropagation());
 
   const bar = h("div", { class: "bar" },
-    h("span", { class: "title" }, label),
+    h("span", { class: "title", title: label }, label),
     h("label", null, "Base", baseInput), reload,
     compare, h("span", { class: "spacer" }), totals,
     h("span", { class: "group" }, uni, spl),

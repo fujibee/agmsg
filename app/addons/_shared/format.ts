@@ -24,3 +24,13 @@ export function dirName(p: string): string {
   const i = p.lastIndexOf("/");
   return i < 0 ? "." : p.slice(0, i);
 }
+
+/**
+ * What to call the folder a pane was opened on. A path given at open time wins; when the
+ * folder was chosen in the app's own dialog no path is passed, so the granted root's own
+ * name (what fs.stat(".") returns) is used. `fallback` is for a root with no name.
+ */
+export function rootLabel(openPath: string | undefined, rootName: string | undefined, fallback: string): string {
+  if (openPath) return openPath;
+  return rootName || fallback;
+}
