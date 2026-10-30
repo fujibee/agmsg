@@ -111,7 +111,7 @@ setup_install_db() {
 @test "agmsgd-launch: intent on, completion record present, but no usable Node recorded -> exits 0, records a start attempt" {
   setup_install_db
   sqlite3 "$SKILLDIR_INSTALL_DB" "UPDATE daemon_intent SET desired = 'on';"
-  echo '{"bootstrap_version":1}' > "$TEST_SKILL_DIR/run/install-manifest.json"
+  echo '{"bootstrap_version":2}' > "$TEST_SKILL_DIR/run/install-manifest.json"
   run bash "$LAUNCH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"no usable Node"* ]]
@@ -122,7 +122,7 @@ setup_install_db() {
   local real_node
   real_node="$(command -v node)"
   sqlite3 "$SKILLDIR_INSTALL_DB" "UPDATE daemon_intent SET desired = 'on', op_gen = 7; UPDATE meta SET node_path = '$real_node';"
-  echo '{"bootstrap_version":1}' > "$TEST_SKILL_DIR/run/install-manifest.json"
+  echo '{"bootstrap_version":2}' > "$TEST_SKILL_DIR/run/install-manifest.json"
   # Stub the Node entrypoint so this test exercises only the launcher's
   # own decision to hand off, not agmsgd itself (a separate component with
   # its own tests).
@@ -135,4 +135,35 @@ EOF
   run bash "$LAUNCH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"\"$TEST_SKILL_DIR\",\"on\",\"7\""* ]]
+}
+
+# A PATH holding only what the launcher itself needs (bash builtins aside:
+# dirname and sed), the way a resident manager's minimal PATH might.
+_minimal_path_without_sqlite3() {
+  MIN_BIN="$TEST_SKILL_DIR/min-bin"
+  mkdir -p "$MIN_BIN"
+  ln -s "$(command -v dirname)" "$MIN_BIN/dirname"
+  ln -s "$(command -v sed)" "$MIN_BIN/sed"
+}
+
+@test "agmsgd-launch: sqlite3 not on PATH -> says so and shows the PATH it searched, not 'could not be read'" {
+  setup_install_db
+  sqlite3 "$SKILLDIR_INSTALL_DB" "UPDATE daemon_intent SET desired = 'on';"
+  _minimal_path_without_sqlite3
+  PATH="$MIN_BIN" run /bin/bash "$LAUNCH"
+  [ "$status" -eq 0 ]
+  grep -Fq 'sqlite3 not found' <<<"$output"
+  grep -Fq "searched: $MIN_BIN" <<<"$output"
+  refute grep -q 'could not be read' <<<"$output"
+}
+
+@test "agmsgd-launch: a minimal PATH that includes sqlite3's directory gets past the sqlite3 step" {
+  setup_install_db
+  sqlite3 "$SKILLDIR_INSTALL_DB" "UPDATE daemon_intent SET desired = 'on';"
+  _minimal_path_without_sqlite3
+  ln -s "$(command -v sqlite3)" "$MIN_BIN/sqlite3"
+  PATH="$MIN_BIN" run /bin/bash "$LAUNCH"
+  [ "$status" -eq 0 ]
+  grep -Fq 'no completion record' <<<"$output"
+  refute grep -q 'sqlite3 not found' <<<"$output"
 }
