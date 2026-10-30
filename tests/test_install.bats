@@ -14,6 +14,9 @@ setup() {
   # Each invocation below uses the existing throwaway HOME fixture. Ignore
   # ambient profiles; tests for CODEX_HOME select another fixture explicitly.
   unset CODEX_HOME
+  # Same for the storage and config overrides: an ambient one would send the
+  # installer's database init to a real store instead of FAKE_HOME.
+  unset AGMSG_STORAGE_PATH AGMSG_CONFIG AGMSG_STORAGE_DRIVER AGMSG_APP_BASE AGMSG_SPAWN_OPTIONS_FILE
   # Pin bare instance-id keying (#93) so the watcher self-clean smoke test keys
   # its pidfile on the raw session_id it passes — deterministic in CI and when
   # the suite runs under an agent process.
@@ -171,7 +174,7 @@ _fake_home_is_scratch() {
   [ -n "${FAKE_HOME:-}" ] && [ -d "$FAKE_HOME" ] || return 1
   case "$FAKE_HOME" in /|"$HOME") return 1 ;; esac
   [ "$(dirname "$FAKE_HOME")" = "$(dirname "$(mktemp -u)")" ] || return 1
-  [ -n "${CODEX_HOME:-}" ] && return 1
+  [ -z "${CODEX_HOME:-}${AGMSG_STORAGE_PATH:-}${AGMSG_CONFIG:-}${AGMSG_STORAGE_DRIVER:-}" ] || return 1
   return 0
 }
 
