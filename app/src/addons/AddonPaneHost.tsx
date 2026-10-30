@@ -9,6 +9,7 @@ import type { FailureAction } from "./FailureCard";
 import type { GrantChoice } from "./GrantCard";
 import { grantChips } from "./model";
 import { LoadingView } from "../busy";
+import { FRAME_LOAD_TIMEOUT_MS, frameKey, watchLoad } from "./frameLoad";
 import { envNoticeKey } from "./envNotice";
 import { createOpGuard } from "./opGuard";
 import { NOTICE_MS } from "./OpenRequestBar";
@@ -83,6 +84,13 @@ function LiveAddonPane(props: {
   const [pendingChoice, setPendingChoice] = useState<GrantChoice | undefined>();
   // Which frame has finished loading ("<pane instance>:<reload key>"): until then a cover says it is loading.
   const [loadedFrame, setLoadedFrame] = useState("");
+  // The frame must load in time: otherwise the pane says it did not load (with Reload) instead of covering it for ever.
+  // Started per frame instance, ended by its load, a reload, a new instance or leaving the page.
+  const mountedFrame = added && steps.length === 0 ? frameKey(added.id, reloadKey) : "";
+  useEffect(() => {
+    if (!watchLoad(mountedFrame, loadedFrame, state.kind)) return;
+    return expireAfter(0, FRAME_LOAD_TIMEOUT_MS, () => setState((s) => (s.kind === "frame" ? { kind: "failure", failure: { code: "load_timeout" } } : s)));
+  }, [mountedFrame, loadedFrame, state.kind]);
   // A refusal is a one-off notice: it goes by itself after a few seconds (or on ×).
   // Keyed by the notice's own number: the same refusal again restarts the timer, and an old timer never removes a newer notice.
   const blockedSeq = blocked?.seq;
@@ -303,13 +311,13 @@ function LiveAddonPane(props: {
               title={title}
               declaresMessages={added.permissions.includes("messages:read")}
               reloadKey={reloadKey}
-              onLoaded={() => setLoadedFrame(`${added.id}:${reloadKey}`)}
+              onLoaded={() => setLoadedFrame(frameKey(added.id, reloadKey))}
               onRefused={(op, code) => raiseBlocked(`${op} (${code})`)}
               onFeedFailed={(code, message) =>
                 setState({ kind: "failure", failure: code === "init_too_large" ? { code } : { code: "open_failed", message } })
               }
             />
-            {loadedFrame !== `${added.id}:${reloadKey}` && (
+            {loadedFrame !== frameKey(added.id, reloadKey) && (
               <div className="addon-frame-loading">
                 <LoadingView text={t("addons.pane.loading", { title }) as string} />
               </div>

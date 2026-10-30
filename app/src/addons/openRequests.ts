@@ -85,6 +85,24 @@ export function toOpenView(raw: OpenScanRaw): OpenScanView {
 /** Where a copied instruction cannot be built, and why (said to the person at the Copy button). */
 export type SeatTextFailure = "noTeam" | "noAppUser" | "noScripts";
 
+/** Single-quotes a word for bash; a quote inside it is closed, escaped and reopened. */
+export function shellQuote(word: string): string {
+  return `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+/** A folder path in a form bash accepts: a Windows path (C:\\Users\\me or \\\\host\\share) gets forward slashes, which Git Bash reads; others are left as they are. */
+export function bashPath(p: string): string {
+  const trimmed = p.replace(/[\\/]+$/, "");
+  return /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\") ? trimmed.replace(/\\/g, "/") : trimmed;
+}
+
+/** The ready-to-run send command for one team: every word that came from outside is quoted, so spaces and quotes cannot split it. */
+export function sendCommand(seat: { team: string; appUser: string; scriptsDir: string }): string {
+  const script = `${bashPath(seat.scriptsDir)}/send.sh`;
+  const body = "agmsg-app open builtin:fileview fileview path=/absolute/path/to/folder";
+  return ["bash", shellQuote(script), shellQuote(seat.team), "'<your seat name>'", shellQuote(seat.appUser), shellQuote(body)].join(" ");
+}
+
 /**
  * What the "copy instructions for agents" button copies: the request line, and the send command for it
  * with this team, its app user and the scripts folder the app really uses already filled in.
@@ -97,5 +115,5 @@ export function seatInstruction(
   if (!seat.team) return { ok: false, reason: "noTeam" };
   if (!seat.appUser) return { ok: false, reason: "noAppUser" };
   if (!seat.scriptsDir) return { ok: false, reason: "noScripts" };
-  return { ok: true, text: t("addons.openRequests.seatText", { team: seat.team, appUser: seat.appUser, scripts: seat.scriptsDir.replace(/[\\/]+$/, "") }) };
+  return { ok: true, text: t("addons.openRequests.seatText", { team: seat.team, appUser: seat.appUser, command: sendCommand(seat) }) };
 }

@@ -297,7 +297,7 @@
       "explain": "チームのエージェントが、たとえば自分の作業の diff など、ペインを開くようアプリに頼めるようにします。リクエストはバーに表示され、「開く」を押すまで何も開きません。",
       "on": "オン",
       "copyHelp": "エージェントに依頼の形式を伝えます。今のチームの文面をコピーして、そのチームの席に一度貼ってください。文面にはこのチームとそのアプリのユーザーの名前が入っています。",
-      "seatText": "これはシェルのコマンドではありません。`agmsg-app open ...` は依頼の文面です。チーム {{team}} の {{appUser}} 宛ての agmsg メッセージとして送ってください。アプリは依頼バーとして表示し、ユーザーが Open を押すまで何も開きません。\nメッセージ本文は次の 1 行だけです。引用やコードブロックに入れず、ほかの文字も入れないでください:\nagmsg-app open <addon-id> <pane> [path=<absolute path>]\nagmsg の send スクリプトで送ります（<your seat name> には、このチームでのあなた自身の席名を入れる）:\n{{scripts}}/send.sh {{team}} <your seat name> {{appUser}} \"agmsg-app open builtin:fileview fileview path=/absolute/path/to/folder\"\n組み込みのペイン: builtin:fileview fileview, builtin:diffview diffview。",
+      "seatText": "これはシェルのコマンドではありません。`agmsg-app open ...` は依頼の文面です。チーム {{team}} の {{appUser}} 宛ての agmsg メッセージとして送ってください。アプリは依頼バーとして表示し、ユーザーが Open を押すまで何も開きません。\nメッセージ本文は次の 1 行だけです。引用やコードブロックに入れず、ほかの文字も入れないでください:\nagmsg-app open <addon-id> <pane> [path=<absolute path>]\nagmsg の send スクリプトで送ります（<your seat name> には、このチームでのあなた自身の席名を入れる）:\n{{command}}\nシェルが bash でない場合（Windows の PowerShell など）は、agmsg の手順どおり bash -lc でコマンド全体を引用して実行してください。\n組み込みのペイン: builtin:fileview fileview, builtin:diffview diffview。",
       "copyNoTeam": "先にチームを選んでください。文面にはチームとそのアプリのユーザーの名前が入るので、チームごとにコピーします。",
       "copyNoAppUser": "このチームにはアプリのユーザーがいないため、依頼の送り先がありません。アプリのユーザーがいるチームでコピーしてください。",
       "copyNoScripts": "このアプリが使っている agmsg の scripts フォルダが見つからないため、コピーできる send コマンドがありません。"

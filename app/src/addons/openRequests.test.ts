@@ -2,11 +2,18 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createLiveSource, type Invoke } from "./source";
-import { seatInstruction, toOpenView, type OpenRowRaw, type OpenScanRaw } from "./openRequests";
+import { bashPath, sendCommand, seatInstruction, shellQuote, toOpenView, type OpenRowRaw, type OpenScanRaw } from "./openRequests";
 import { OpenRequestBar, OpenRequestMessages, OpenRequestNotes, messageLines } from "./OpenRequestBar";
 import { relativeTime } from "./relativeTime";
 import en from "../i18n/locales/en.json";
 import ja from "../i18n/locales/ja.json";
+import de from "../i18n/locales/de.json";
+import es from "../i18n/locales/es.json";
+import fr from "../i18n/locales/fr.json";
+import ko from "../i18n/locales/ko.json";
+import ptBR from "../i18n/locales/pt-BR.json";
+import zhCN from "../i18n/locales/zh-CN.json";
+import zhTW from "../i18n/locales/zh-TW.json";
 
 const t = (key: string, o?: Record<string, unknown>) => `[${key}${o ? " " + JSON.stringify(o) : ""}]`;
 const noop = () => {};
@@ -152,9 +159,9 @@ describe("the text for seats", () => {
   const seat = { team: "agmsg", appUser: "me-app", scriptsDir: "/Users/me/.agents/skills/agmsg/scripts" };
   const made = seatInstruction(fill, seat);
   const text = made.ok ? made.text : "";
-  it("fills in the team, the app user and the scripts folder in a ready-to-run send command", () => {
+  it("fills in the team, the app user and the scripts folder in a ready-to-run, quoted bash command", () => {
     expect(made.ok).toBe(true);
-    expect(text).toContain('/Users/me/.agents/skills/agmsg/scripts/send.sh agmsg <your seat name> me-app "agmsg-app open builtin:fileview fileview path=/absolute/path/to/folder"');
+    expect(text).toContain("bash '/Users/me/.agents/skills/agmsg/scripts/send.sh' 'agmsg' '<your seat name>' 'me-app' 'agmsg-app open builtin:fileview fileview path=/absolute/path/to/folder'");
     expect(text).not.toContain("{{");
   });
   it("says it is not a shell command and that the body is one line, not quoted", () => {
@@ -162,22 +169,41 @@ describe("the text for seats", () => {
     expect(text).toContain("send it as an agmsg message to me-app in team agmsg");
     expect(text).toContain("exactly this one line, not quoted, not in a code block");
     expect(text.split("\n")).toContain("agmsg-app open <addon-id> <pane> [path=<absolute path>]");
+    expect(text).toContain("bash -lc");
   });
   it("uses the scripts folder it is given, not a fixed one, and drops a trailing slash", () => {
     const r = seatInstruction(fill, { ...seat, scriptsDir: "/tmp/base/scripts/" });
-    expect(r.ok && r.text).toContain("/tmp/base/scripts/send.sh agmsg");
+    expect(r.ok && r.text).toContain("bash '/tmp/base/scripts/send.sh' 'agmsg'");
     expect(r.ok && r.text).not.toContain(".agents");
+  });
+  it("a folder with spaces stays one word", () => {
+    expect(sendCommand({ ...seat, scriptsDir: "/Users/A B/.agents/skills/agmsg/scripts" })).toContain("bash '/Users/A B/.agents/skills/agmsg/scripts/send.sh' 'agmsg'");
+  });
+  it("a Windows path is made a path bash reads (forward slashes, Git Bash style) and kept in one word", () => {
+    expect(bashPath("C:\\Users\\A B\\.agents\\skills\\agmsg\\scripts")).toBe("C:/Users/A B/.agents/skills/agmsg/scripts");
+    expect(bashPath("C:\\Users\\me\\scripts\\")).toBe("C:/Users/me/scripts");
+    expect(bashPath("\\\\host\\share\\scripts")).toBe("//host/share/scripts");
+    expect(bashPath("/Users/me/odd\\name/scripts")).toBe("/Users/me/odd\\name/scripts"); // a backslash in a Mac path is a character, not a separator
+    expect(sendCommand({ ...seat, scriptsDir: "C:\\Users\\A B\\scripts" })).toContain("bash 'C:/Users/A B/scripts/send.sh' 'agmsg'");
+  });
+  it("a quote in any name cannot end the word it is in", () => {
+    expect(shellQuote("it's")).toBe("'it'\\''s'");
+    const c = sendCommand({ team: "a'b", appUser: "x; rm", scriptsDir: "/s'x/scripts" });
+    expect(c).toContain("'/s'\\''x/scripts/send.sh'");
+    expect(c).toContain("'a'\\''b'");
+    expect(c).toContain("'x; rm'");
   });
   it("gives a reason, and no text, without a team, an app user or the scripts folder", () => {
     expect(seatInstruction(fill, { ...seat, team: "" })).toEqual({ ok: false, reason: "noTeam" });
     expect(seatInstruction(fill, { ...seat, appUser: "" })).toEqual({ ok: false, reason: "noAppUser" });
     expect(seatInstruction(fill, { ...seat, scriptsDir: "" })).toEqual({ ok: false, reason: "noScripts" });
   });
-  it("Japanese has the same placeholders and the same command line", () => {
-    const en_ = en.addons.openRequests.seatText, ja_ = ja.addons.openRequests.seatText;
+  it("every language has the same placeholders, and the command is one placeholder in all of them", () => {
     const ph = (x: string) => (x.match(/\{\{\w+\}\}/g) ?? []).sort().join();
-    expect(ph(ja_)).toBe(ph(en_));
-    expect(ja_.split("\n").filter((l) => l.includes("send.sh"))).toEqual(en_.split("\n").filter((l) => l.includes("send.sh")));
+    for (const l of [ja, de, es, fr, ko, ptBR, zhCN, zhTW]) {
+      expect(ph(l.addons.openRequests.seatText)).toBe(ph(en.addons.openRequests.seatText));
+    }
+    expect(ph(en.addons.openRequests.seatText)).toBe("{{appUser}},{{command}},{{team}}");
   });
 });
 

@@ -68,3 +68,11 @@ export function useBusy(): { busy: ReadonlySet<string>; run: <T>(key: string, wo
   const run = useCallback(<T,>(key: string, work: () => Promise<T>) => tracker.current!.run(key, work), []);
   return { busy, run };
 }
+
+/**
+ * What a dialog's answer may close: only the dialog it was started for. A reply that arrives after another
+ * dialog was opened leaves that one alone (`same` compares the operation / staging id / add-on id).
+ */
+export function closeIfStill<T>(current: T | null, mine: T, same: (a: T, b: T) => boolean): T | null {
+  return current !== null && same(current, mine) ? null : current;
+}

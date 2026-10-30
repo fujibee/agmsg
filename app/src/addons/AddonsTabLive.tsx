@@ -7,7 +7,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AddonsSettings, openNowRef, type InstalledNotice } from "./AddonsSettings";
 import type { Catalog } from "./catalog";
 import { collectSavedGrants } from "./collectGrants";
-import { useBusy } from "../busy";
+import { closeIfStill, useBusy } from "../busy";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
 import { createLiveSource, toCommandError, type Outcome } from "./source";
 import type { AddonPaneRef, FetchProgress, Grant, InstallError, StagedInstall } from "./types";
@@ -111,7 +111,8 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
       if (!r.ok) setNotice({ kind: "error", text: r.error.message });
       else setInstalledNotice({ kind: s.from ? "updated" : "installed", addonId: s.addonId, title: s.title, paneName: s.panes[0]?.name });
     } finally {
-      setStaged(null);
+      // Only the dialog this answer is for: another install may have been staged meanwhile.
+      setStaged((cur) => closeIfStill(cur, s, (a, b) => a.stagingId === b.stagingId));
     }
     catalog.reload();
   };
@@ -130,7 +131,7 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
       const r = a.dev ? await source.devRemove(a.id) : await source.remove(a.id);
       if (!r.ok) setNotice({ kind: "error", text: r.error.message });
     } finally {
-      setRemoving(null);
+      setRemoving((cur) => closeIfStill(cur, a.id, (x, y) => x === y));
     }
     catalog.reload();
   };

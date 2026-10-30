@@ -7,6 +7,8 @@ import { GrantCard } from "./GrantCard";
 import { ConfirmInstallDialog, RemoveDialog } from "./Dialogs";
 import { OpenRequestBar, OpenRequestNotes } from "./OpenRequestBar";
 import { toOpenView, type OpenRowRaw } from "./openRequests";
+import { closeIfStill } from "../busy";
+import { FRAME_LOAD_TIMEOUT_MS, frameKey, watchLoad } from "./frameLoad";
 import { mockEngine, mockGrantNeeds, mockSnapshot, mockStage } from "./mock";
 
 const t = (key: string, o?: Record<string, unknown>) => `[${key}${o ? " " + JSON.stringify(o) : ""}]`;
@@ -75,5 +77,44 @@ describe("buttons that wait for Rust are busy", () => {
   it("a pane that is still opening says so with a spinner instead of an empty frame", () => {
     const html = renderToStaticMarkup(createElement(AddonPane, { t, title: "File view", chips: [], state: { kind: "frame" }, onReload: noop, onClose: noop, onGrant: noop, onFailure: noop }));
     expect(html).toMatch(/addon-frame-placeholder[^>]*><div class="addon-loading" role="status"[^>]*><span class="busy-spinner"[^>]*><\/span><span>\[addons\.pane\.opening/);
+  });
+});
+
+describe("a dialog that is busy cannot be closed from outside, and a late answer closes only its own dialog", () => {
+  const onClose = (el: unknown) => (el as { props: { onClose?: () => void } }).props.onClose;
+  it("busy: Escape and a click on the backdrop (both go to the Modal's onClose) do nothing", () => {
+    const cancel = () => {};
+    expect(onClose(ConfirmInstallDialog({ t, staged: mockStage("o", "r"), onInstall: noop, onCancel: cancel, busy: true }))).toBeUndefined();
+    expect(onClose(ConfirmInstallDialog({ t, staged: mockStage("o", "r"), onInstall: noop, onCancel: cancel }))).toBe(cancel);
+    expect(onClose(RemoveDialog({ t, title: "X", openPanes: 0, onRemove: noop, onCancel: cancel, busy: true }))).toBeUndefined();
+    expect(onClose(RemoveDialog({ t, title: "X", openPanes: 0, onRemove: noop, onCancel: cancel }))).toBe(cancel);
+  });
+  it("an answer closes the dialog it was started for and leaves a newer one open", () => {
+    const first = { stagingId: "s1" };
+    const second = { stagingId: "s2" };
+    const same = (a: { stagingId: string }, b: { stagingId: string }) => a.stagingId === b.stagingId;
+    expect(closeIfStill(first, first, same)).toBeNull();
+    expect(closeIfStill(second, first, same)).toBe(second);
+    expect(closeIfStill(null, first, same)).toBeNull();
+    expect(closeIfStill("B", "A", (a, b) => a === b)).toBe("B");
+  });
+});
+
+describe("the frame's load deadline", () => {
+  it("runs for a mounted frame that has not loaded while the pane shows it; not otherwise", () => {
+    const k = frameKey(7, 0);
+    expect(watchLoad(k, "", "frame")).toBe(true);
+    expect(watchLoad(k, k, "frame")).toBe(false); // loaded
+    expect(watchLoad("", "", "frame")).toBe(false); // no frame yet
+    expect(watchLoad(k, "", "failure")).toBe(false); // the pane already shows a card
+    expect(watchLoad(k, "", "grant")).toBe(false);
+  });
+  it("a reload or a new pane instance is a different frame, so an old load does not stand in for it", () => {
+    expect(frameKey(7, 0)).not.toBe(frameKey(7, 1));
+    expect(frameKey(7, 0)).not.toBe(frameKey(8, 0));
+    expect(watchLoad(frameKey(7, 1), frameKey(7, 0), "frame")).toBe(true);
+  });
+  it("is 15 seconds", () => {
+    expect(FRAME_LOAD_TIMEOUT_MS).toBe(15_000);
   });
 });

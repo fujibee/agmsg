@@ -25,7 +25,7 @@ export function ConfirmInstallDialog(props: {
   const sends = staged.panes.some(canSendWhatItReads);
   const isNew = (p: Permission) => diff?.added.includes(p) || (p === "network" && diff?.networkWider) || false;
   return (
-    <Modal title={t(diff ? "addons.confirm.updateTitle" : "addons.confirm.installTitle", { title: staged.title })} onClose={props.onCancel} wide busy={props.busy}>
+    <Modal title={t(diff ? "addons.confirm.updateTitle" : "addons.confirm.installTitle", { title: staged.title })} onClose={props.busy ? undefined : props.onCancel} wide busy={props.busy}>
       <div className="modal-body">
         <p className="addon-dlg-source">
           {diff && staged.from
@@ -87,7 +87,7 @@ export function ConfirmInstallDialog(props: {
 export function RemoveDialog(props: { t: Translate; title: string; openPanes: number; onRemove: () => void; onCancel: () => void; busy?: boolean }) {
   const { t } = props;
   return (
-    <Modal title={t("addons.remove.title", { title: props.title })} onClose={props.onCancel} busy={props.busy}>
+    <Modal title={t("addons.remove.title", { title: props.title })} onClose={props.busy ? undefined : props.onCancel} busy={props.busy}>
       <p className="modal-note">{t("addons.remove.body", { title: props.title, count: props.openPanes })}</p>
       <div className="modal-actions">
         <button type="button" autoFocus disabled={props.busy} onClick={props.onCancel}>
