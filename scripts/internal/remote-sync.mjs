@@ -140,39 +140,111 @@ function rosterJournalPath(team) {
   return join(dirname(teamConfigPath(team)), "roster.jsonl");
 }
 
+// The built-in storage driver's own path, next to this module -- the ONLY
+// one `localStoreWatchPaths` below knows how to find the real message store
+// for. remote-sync.sh always points AGMSG_SYNC_DRIVER here; a caller that
+// points it somewhere else (a test, or in the future a third-party driver)
+// is trusted for the sync it asked for, but NOT for what paths it writes to
+// -- a custom driver could keep its data anywhere, under any name, with no
+// -wal/-shm convention at all. That is why this is checked by exact path,
+// not merely "is AGMSG_SYNC_DRIVER set": an env var pointing at exactly this
+// file is still the built-in driver.
+function builtinStorageDriverPath() {
+  return join(dirname(fileURLToPath(import.meta.url)), "storage-sync-driver.sh");
+}
+
+function builtinRosterDriverPath() {
+  return join(dirname(fileURLToPath(import.meta.url)), "roster-sync-driver.sh");
+}
+
+// The storage driver's own, authoritative message-store path for `team` --
+// asked of it with its OWN resolver (`lib/storage.sh`'s `agmsg_db_path`),
+// never guessed from AGMSG_SYNC_STORAGE_DIR + "messages.db" (#1836 review):
+// a team's partition driver (`shared`, one file for every team, vs
+// `per-team`, one file per team) decides that path, is chosen per team, and
+// can change under a RUNNING engine via an ordinary migration
+// (storage.sh's own comment on `_agmsg_partition_load` names exactly that
+// hazard). A guessed path that migration leaves behind would keep reporting
+// the old, now-static file as "unchanged" forever while real writes landed
+// somewhere else entirely -- silently stalling sending, permanently, which
+// is the one failure this whole mechanism exists to rule out. So this is
+// re-asked fresh on every call (one cheap `bash -c` spawning a handful of
+// small processes, not the ~46 a `prepare` call costs) rather than cached
+// for the engine's lifetime.
+async function resolveRealMessageDbPath(team, spawnCall = defaultDbPathSpawn) {
+  const script = builtinStorageDriverPath();
+  const libDir = join(dirname(script), "..", "lib");
+  const command = `source "${libDir}/storage.sh" && agmsg_storage_load && agmsg_db_path "$1"`;
+  try {
+    const { stdout } = await spawnCall(command, team);
+    const path = stdout.trim();
+    return path.length > 0 ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultDbPathSpawn(command, team) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const resolverProcess = spawn("bash", ["-c", command, "bash", team], { windowsHide: true });
+    let stdout = "";
+    resolverProcess.stdout?.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    resolverProcess.on("error", rejectPromise);
+    resolverProcess.on("exit", (code) => {
+      if (code === 0) resolvePromise({ stdout }); else rejectPromise(new Error(`exit ${code}`));
+    });
+  });
+}
+
 // Every on-disk file a local write that `prepare` would need to see could
 // possibly land in, for the ONE purpose of telling "nothing changed" apart
-// from "something might have" without spawning anything (#1836). Listed
-// generously on purpose: a write this list omitted would silently stall
-// sending, forever, the moment the engine decided to skip `prepare` on it --
-// so every axis `prepare` itself reads is named here, not just the common
-// one. messages.db (+ its -wal/-shm siblings, since a write under
-// journal_mode=WAL lands there first) is the message axis; the team's
-// config.json (agents, and the remote_key epochs a rotation advances) and
-// roster.jsonl (the key-rotation journal) are the roster axis.
-function localStoreWatchPaths(team) {
-  const storageDir = process.env.AGMSG_SYNC_STORAGE_DIR;
-  const paths = [];
-  if (storageDir) {
-    const dbPath = join(storageDir, "messages.db");
-    paths.push(dbPath, `${dbPath}-wal`, `${dbPath}-shm`);
-  }
+// from "something might have", as cheaply as that can be told (#1836).
+// Listed generously on purpose: a write this list omitted would silently
+// stall sending, forever, the moment the engine decided to skip `prepare`
+// on it -- so every axis `prepare` itself reads is named here, not just the
+// common one. messages.db (+ its -wal/-shm siblings, since a write under
+// journal_mode=WAL lands there first) is the message axis, resolved by the
+// real driver rather than guessed (see resolveRealMessageDbPath). The
+// roster axis is the team's config.json (agents, and the remote_key epochs
+// a rotation advances) and roster.jsonl (the key-rotation journal) -- plus
+// AGMSG_SYNC_LOCAL_ROSTER_FILE when a caller overrides the roster file the
+// driver is handed (rosterFileFor), since that override, not config.json,
+// is what the roster driver actually reads.
+//
+// Returns null -- "unknown, never skip" -- whenever EITHER driver has been
+// pointed somewhere other than its own built-in script: a custom driver's
+// storage is not something this function can name, and guessing would be
+// exactly the hazard #1836's review flagged.
+async function localStoreWatchPaths(team, { resolveDbPathCall = resolveRealMessageDbPath } = {}) {
+  if (process.env.AGMSG_SYNC_DRIVER !== builtinStorageDriverPath()) return null;
+  const rosterDriverEnv = process.env.AGMSG_SYNC_ROSTER_DRIVER;
+  if (rosterDriverEnv !== undefined && rosterDriverEnv !== builtinRosterDriverPath()) return null;
+  const dbPath = await resolveDbPathCall(team);
+  if (dbPath === null) return null;
+  const paths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
+  const rosterOverride = process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE;
+  if (rosterOverride) paths.push(rosterOverride);
   try { paths.push(teamConfigPath(team)); } catch { /* no connection root: nothing to add */ }
   try { paths.push(rosterJournalPath(team)); } catch { /* no connection root: nothing to add */ }
   return paths;
 }
 
 // A fingerprint of every watched path's (mtime, size), or null the instant
-// ANY of them cannot even be stat'd -- a permission error, a store mid-
-// recreate, something this list did not anticipate. null is treated by the
-// caller exactly like "changed": run the driver rather than guess (#1836,
-// "判定が不確かなら driver を起動する側に倒す"). A missing file (ENOENT --
+// the watch list itself is unknown (a custom driver, or the real db path
+// could not be resolved) or ANY listed path cannot even be stat'd -- a
+// permission error, a store mid-recreate, something this list did not
+// anticipate. null is treated by the caller exactly like "changed": run the
+// driver rather than guess (#1836 -- when unsure, favor running it). A
+// missing file (ENOENT --
 // ordinary before the store or the roster journal is first created) is not
 // that: it is a definite, stable fact, so it is fingerprinted as "absent"
 // rather than disarming the whole check.
-export async function localStoreFingerprint(team, statCall = stat) {
+export async function localStoreFingerprint(team, options = {}) {
+  const statCall = options.statCall ?? stat;
+  const paths = await localStoreWatchPaths(team, options);
+  if (paths === null) return null;
   const parts = [];
-  for (const path of localStoreWatchPaths(team)) {
+  for (const path of paths) {
     try {
       const info = await statCall(path);
       parts.push(`${path}:${info.mtimeMs}:${info.size}`);
@@ -3381,7 +3453,7 @@ async function postCandidates(config, candidates, requestCall, eventCall) {
 // `{ pushSaturated }`: true when a FULL push page was prepared (more remains
 // to push), which is the loop's catch-up signal. Dependency-injectable for
 // tests (adaptive-sync-catchup design).
-export async function cycle(config, { pushLimit, pullLimit, skipPrepare = false, lastCursor = null },
+export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = null },
   dependencies = {}) {
   const healthCall = dependencies.healthCall ?? health;
   const requestCall = dependencies.requestCall ?? request;
@@ -3394,6 +3466,7 @@ export async function cycle(config, { pushLimit, pullLimit, skipPrepare = false,
   const logApplyCall = dependencies.logApplyCall ?? logApplyOutcomes;
   const readStateCycleCall = dependencies.readStateCycleCall ?? readStateCycle;
   const activateKeyRotationsCall = dependencies.activateKeyRotationsCall ?? activateKeyRotations;
+  const localStoreFingerprintCall = dependencies.localStoreFingerprintCall ?? localStoreFingerprint;
 
   const ready = await healthCall(config.server_url, config.remote_team_id);
   if (ready.server_instance_id !== config.server_instance_id) throw new Error("health server instance changed");
@@ -3408,25 +3481,35 @@ export async function cycle(config, { pushLimit, pullLimit, skipPrepare = false,
     policy_revision: capabilities.policy_revision,
     startup_nonce: process.env.AGMSG_SYNC_START_NONCE || undefined });
 
-  // skipPrepare (#1836): runLoop has already established, from a plain stat of
-  // the local store -- no sqlite3, no subprocess -- that nothing has changed
-  // there since the last cycle that actually ran the storage/roster drivers'
-  // `prepare`, AND that cycle found nothing to push. Both drivers together
-  // spawn on the order of 200 processes per `prepare` on an idle engine, every
-  // few seconds, for nothing: there is nothing new to prepare. Skipping the
-  // call entirely (not just its candidates) is what removes that cost; the
-  // pull side below is untouched, so an inbound message is never delayed by
-  // this. `lastCursor` carries the transport cursor from that last real
-  // `prepare` forward -- correct exactly because nothing has written to the
-  // store since, so the stored cursor cannot have moved either.
+  // writeProfile is pure JS over `capabilities` -- no spawn -- so it is
+  // ALWAYS computed, skip or not. Server-side eligibility (a quota, a cipher
+  // rotation) can change with the local store's own fingerprint never
+  // moving at all (#1836 review point 3), so the skip decision below checks
+  // both, not the fingerprint alone.
+  const writeProfile = selectWriteProfile(config, capabilities);
+
+  // idle skip (#1836): a plain stat of the local store (fingerprint), no
+  // sqlite3/jq -- just the one small `bash -c agmsg_db_path` spend needed to
+  // ask the real driver where its store actually lives, never guessed (see
+  // localStoreWatchPaths). null means "unknown" (a custom driver, or the
+  // real path could not be resolved) and is treated exactly like "changed":
+  // never skip. Skipped only when BOTH the fingerprint AND write eligibility
+  // match the checkpoint recorded the last time `prepare` actually ran,
+  // found nothing, AND was eligible to push if there had been something --
+  // that call still spawns on the order of 50 processes between the storage
+  // and roster drivers, every few seconds, for nothing on an idle engine.
+  // The pull side below is untouched either way (still plain HTTP every
+  // cycle), so an inbound message is never delayed by this.
+  const fingerprint = await localStoreFingerprintCall(config.local_team).catch(() => null);
+  const skipPrepare = idleCheckpoint !== null && fingerprint !== null &&
+    fingerprint === idleCheckpoint.fingerprint && writeProfile.eligible === idleCheckpoint.eligible;
+
   let state = null;
   let candidates = [];
-  let writeProfile = null;
   if (skipPrepare) {
-    if (lastCursor === null) throw new Error("cycle: skipPrepare requires a lastCursor from a prior prepare");
+    if (idleCheckpoint.cursor === null) throw new Error("cycle: an idle checkpoint must carry a cursor");
     await eventCall("push.skipped", { reason: "idle-no-local-change" });
   } else {
-    writeProfile = selectWriteProfile(config, capabilities);
     const prepareInput = [{ type: "sync_prepare", envelope_v: 1,
       cipher: writeProfile.profile, key_id: writeProfile.key_id ?? null,
       recipients: writeProfile.recipients ?? [], max_blob_bytes: Number(capabilities.max_blob_bytes),
@@ -3455,7 +3538,7 @@ export async function cycle(config, { pushLimit, pullLimit, skipPrepare = false,
       wire_ids: candidates.map((item) => item.id) });
   }
 
-  if (writeProfile && !writeProfile.eligible) {
+  if (!writeProfile.eligible) {
     await eventCall("push.blocked", { reason: writeProfile.reason });
   } else if (candidates.length > 0) {
     // Record whatever the server acknowledged, then let the failure through.
@@ -3544,7 +3627,7 @@ export async function cycle(config, { pushLimit, pullLimit, skipPrepare = false,
   // safe. Not eligible, or a short page, = push is drained.
   const pushSaturated = !skipPrepare && writeProfile.eligible && candidates.length === pushLimit;
 
-  let cursor = skipPrepare ? lastCursor : state.transport_cursor;
+  let cursor = skipPrepare ? idleCheckpoint.cursor : state.transport_cursor;
   let pulledCount = 0;
   let pullCapabilities = capabilities;
   for (;;) {
@@ -3608,12 +3691,18 @@ export async function cycle(config, { pushLimit, pullLimit, skipPrepare = false,
     if (!page.has_more) break;
   }
   await readStateCycleCall(config, pullLimit, dependencies);
-  // pushEmpty/hadActivity feed runLoop's two #1836 decisions: pushEmpty, together
-  // with an unchanged local-store fingerprint, is what lets the NEXT cycle skip
-  // `prepare` again; hadActivity (a push, or a pulled message) is what resets
-  // the adaptive steady-state interval back down to its floor.
+  // pushEmpty/hadActivity feed runLoop's two #1836 decisions: hadActivity (a
+  // push, or a pulled message) is what resets the adaptive steady-state
+  // interval back down to its floor. `checkpoint` is the ONLY thing that
+  // arms or carries forward the idle-prepare skip -- non-null exactly when
+  // this cycle PROVED the store empty with a real, eligible `prepare` (or
+  // carried that proof forward unchanged while skipping); null otherwise,
+  // which disarms the skip for the next cycle (busy, ineligible, or the
+  // fingerprint could not be resolved).
   const pushEmpty = skipPrepare || candidates.length === 0;
-  return { pushSaturated, pushEmpty, cursor, hadActivity: !pushEmpty || pulledCount > 0 };
+  const checkpoint = (pushEmpty && writeProfile.eligible && fingerprint !== null) ?
+    { fingerprint, eligible: true, cursor } : null;
+  return { pushSaturated, cursor, hadActivity: !pushEmpty || pulledCount > 0, checkpoint };
 }
 
 // Adaptive catch-up loop (adaptive-sync-catchup design). Steady state is
@@ -3727,19 +3816,17 @@ export async function runLoop(config, options, dependencies = {}) {
 
   let catchUp = false; // start steady; the first cycle reveals any backlog
   let consecutiveFailures = 0;
-  // #1836 idle-skip state. idleCheckpoint is the local-store fingerprint
-  // taken right before the last cycle whose `prepare` actually ran AND found
-  // nothing to push -- null whenever that has never happened yet, or the
-  // last real `prepare` found something, so the next cycle always runs
-  // `prepare` for real until this is set. lastCursor is that cycle's
-  // transport cursor, carried forward for a skipped cycle's pull to resume
-  // from (prepare is the only thing that reads it off the store; skipping it
-  // is only valid because nothing has written a new one since). idleStreak
-  // drives the adaptive interval above, independently of idleCheckpoint: it
-  // also counts a quiet cycle that still had to run `prepare` for real
-  // (e.g. the very first one) and resets on any activity either way.
+  // #1836 idle-skip state. idleCheckpoint ({ fingerprint, eligible, cursor })
+  // is produced BY `cycle()` itself (it is the one place that already has
+  // both the fingerprint and the write-eligibility capabilities gave it) --
+  // non-null exactly when the most recent cycle PROVED the store drained
+  // with a real, eligible `prepare`, or carried that proof forward unchanged
+  // while skipping; null disarms the skip (busy, ineligible, a failed cycle,
+  // or the real store path could not be resolved). idleStreak drives the
+  // adaptive interval below, independently of idleCheckpoint: it also counts
+  // a quiet cycle that still had to run `prepare` for real (e.g. the very
+  // first one) and resets on any activity either way.
   let idleCheckpoint = null;
-  let lastCursor = null;
   let idleStreak = 0;
   for (;;) {
     // Checked at the cycle boundary, BEFORE any driver can be spawned: past
@@ -3770,23 +3857,10 @@ export async function runLoop(config, options, dependencies = {}) {
     }
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);
     const pullLimit = ceiling ?? LARGE_LIMIT;
-    // Stat only -- no sqlite3, no subprocess. null (a stat failed for a
-    // reason other than ENOENT) is treated the same as "different from the
-    // checkpoint": run `prepare` for real (#1836, favor running when unsure).
-    let fingerprint = null;
-    try { fingerprint = await localStoreFingerprintCall(config.local_team); }
-    catch { fingerprint = null; }
-    const skipPrepare = idleCheckpoint !== null && lastCursor !== null &&
-      fingerprint !== null && fingerprint === idleCheckpoint;
     try {
-      const result = await cycleCall(config, { pushLimit, pullLimit, skipPrepare, lastCursor }, dependencies);
+      const result = await cycleCall(config, { pushLimit, pullLimit, idleCheckpoint }, dependencies);
       consecutiveFailures = 0;
-      lastCursor = result?.cursor ?? lastCursor;
-      // Only a cycle that actually ran `prepare` may move the checkpoint: a
-      // skipped cycle learned nothing new about the store, so it must leave
-      // the checkpoint exactly as it was, for the SAME reason it was allowed
-      // to skip in the first place.
-      if (!skipPrepare) idleCheckpoint = result?.pushEmpty === true ? fingerprint : null;
+      idleCheckpoint = result?.checkpoint ?? null;
       // hadActivity defaults to "yes" (keeping the streak at 0, the
       // steadyIntervalMs cadence) whenever a caller's result does not say --
       // unsure favors the normal interval, not a stretched-out one.
@@ -3812,12 +3886,34 @@ export async function runLoop(config, options, dependencies = {}) {
       // cycles; steady keeps the interval. --interval never applies in
       // catch-up (a saturated cycle is moving real data, not empty-polling).
       if (!catchUp) {
-        // A single idle cycle stays at the floor ("空振りが続いたら" -- a
-        // run, not a one-off); only the SECOND and later consecutive idle
-        // cycles double the wait, capped at MAX_IDLE_INTERVAL_MS.
+        // A single idle cycle stays at the floor (a RUN of them is what
+        // stretches it, not a one-off); only the SECOND and later
+        // consecutive idle cycles double the wait, capped at MAX_IDLE_INTERVAL_MS.
         const intervalMs = idleStreak <= 1 ? steadyIntervalMs :
           Math.min(MAX_IDLE_INTERVAL_MS, steadyIntervalMs * 2 ** (idleStreak - 1));
-        await sleepCall(Math.max(steadyIntervalMs, intervalMs));
+        const waitMs = Math.max(steadyIntervalMs, intervalMs);
+        if (waitMs <= steadyIntervalMs) {
+          await sleepCall(waitMs);
+        } else {
+          // A stretched-out wait is slept in steadyIntervalMs-sized chunks,
+          // re-checking the local store (a stat -- no subprocess) between
+          // them, so a LOCAL write still gets sent within steadyIntervalMs
+          // regardless of how far the interval has backed off (#1836 review
+          // point 2: the outbound side must not inherit the receive-side
+          // delay). `startFingerprint` null (unknown) means every chunk is
+          // slept out in full -- no early wake, but also no false one.
+          const startFingerprint = await localStoreFingerprintCall(config.local_team).catch(() => null);
+          let waited = 0;
+          while (waited < waitMs) {
+            const chunk = Math.min(steadyIntervalMs, waitMs - waited);
+            await sleepCall(chunk);
+            waited += chunk;
+            if (waited >= waitMs) break;
+            let fp = null;
+            try { fp = await localStoreFingerprintCall(config.local_team); } catch { fp = null; }
+            if (startFingerprint !== null && fp !== null && fp !== startFingerprint) break;
+          }
+        }
       }
     } catch (error) {
       // A failed cycle is not a confirmed-idle one: whether `prepare` ran,
