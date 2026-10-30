@@ -140,6 +140,50 @@ function rosterJournalPath(team) {
   return join(dirname(teamConfigPath(team)), "roster.jsonl");
 }
 
+// Every on-disk file a local write that `prepare` would need to see could
+// possibly land in, for the ONE purpose of telling "nothing changed" apart
+// from "something might have" without spawning anything (#1836). Listed
+// generously on purpose: a write this list omitted would silently stall
+// sending, forever, the moment the engine decided to skip `prepare` on it --
+// so every axis `prepare` itself reads is named here, not just the common
+// one. messages.db (+ its -wal/-shm siblings, since a write under
+// journal_mode=WAL lands there first) is the message axis; the team's
+// config.json (agents, and the remote_key epochs a rotation advances) and
+// roster.jsonl (the key-rotation journal) are the roster axis.
+function localStoreWatchPaths(team) {
+  const storageDir = process.env.AGMSG_SYNC_STORAGE_DIR;
+  const paths = [];
+  if (storageDir) {
+    const dbPath = join(storageDir, "messages.db");
+    paths.push(dbPath, `${dbPath}-wal`, `${dbPath}-shm`);
+  }
+  try { paths.push(teamConfigPath(team)); } catch { /* no connection root: nothing to add */ }
+  try { paths.push(rosterJournalPath(team)); } catch { /* no connection root: nothing to add */ }
+  return paths;
+}
+
+// A fingerprint of every watched path's (mtime, size), or null the instant
+// ANY of them cannot even be stat'd -- a permission error, a store mid-
+// recreate, something this list did not anticipate. null is treated by the
+// caller exactly like "changed": run the driver rather than guess (#1836,
+// "判定が不確かなら driver を起動する側に倒す"). A missing file (ENOENT --
+// ordinary before the store or the roster journal is first created) is not
+// that: it is a definite, stable fact, so it is fingerprinted as "absent"
+// rather than disarming the whole check.
+export async function localStoreFingerprint(team, statCall = stat) {
+  const parts = [];
+  for (const path of localStoreWatchPaths(team)) {
+    try {
+      const info = await statCall(path);
+      parts.push(`${path}:${info.mtimeMs}:${info.size}`);
+    } catch (error) {
+      if (error?.code === "ENOENT") { parts.push(`${path}:absent`); continue; }
+      return null;
+    }
+  }
+  return parts.join("|");
+}
+
 // Where the engine records that a cycle has actually completed.
 //
 // `status` could report `connected (engine running, pid N)` forever while every
@@ -3337,7 +3381,8 @@ async function postCandidates(config, candidates, requestCall, eventCall) {
 // `{ pushSaturated }`: true when a FULL push page was prepared (more remains
 // to push), which is the loop's catch-up signal. Dependency-injectable for
 // tests (adaptive-sync-catchup design).
-export async function cycle(config, { pushLimit, pullLimit }, dependencies = {}) {
+export async function cycle(config, { pushLimit, pullLimit, skipPrepare = false, lastCursor = null },
+  dependencies = {}) {
   const healthCall = dependencies.healthCall ?? health;
   const requestCall = dependencies.requestCall ?? request;
   const driverCall = dependencies.driverCall ?? driver;
@@ -3363,35 +3408,54 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
     policy_revision: capabilities.policy_revision,
     startup_nonce: process.env.AGMSG_SYNC_START_NONCE || undefined });
 
-  const writeProfile = selectWriteProfile(config, capabilities);
-  const prepareInput = [{ type: "sync_prepare", envelope_v: 1,
-    cipher: writeProfile.profile, key_id: writeProfile.key_id ?? null,
-    recipients: writeProfile.recipients ?? [], max_blob_bytes: Number(capabilities.max_blob_bytes),
-    allow_new: writeProfile.eligible }];
-  const [prepared, rosterPrepared] = await Promise.all([
-    driverCall("prepare", config, prepareInput, [String(pushLimit)]),
-    rosterDriverCall("prepare", config, prepareInput, [String(pushLimit)]),
-  ]);
-  const state = prepared.find((record) => record.type === "sync_state");
-  // Registry mutations lead the page. They establish the identity needed to
-  // interpret every following message, and UUIDv7 values minted in the same
-  // millisecond are not a reliable cross-axis ordering key.
-  const rosterCandidates = rosterPrepared
-    .filter((record) => record.type === "roster_sync_push_candidate")
-    .map((record) => ({ ...record, sync_axis: "roster" }));
-  const rotationIndex = rosterCandidates.findIndex((record) =>
-    record.projection?.kind === "key_rotated");
-  const candidates = (rotationIndex === -1 ? [
-    ...rosterCandidates,
-    ...prepared.filter((record) => record.type === "sync_push_candidate")
-      .map((record) => ({ ...record, sync_axis: "messages" })),
-  ] : rosterCandidates.slice(0, rotationIndex + 1)).slice(0, pushLimit);
-  if (!state) throw new Error("driver omitted sync_state");
-  sequence(state.transport_cursor, "transport_cursor");
-  await eventCall("push.prepared", { count: candidates.length, local_positions: candidates.map((item) => item.local_position),
-    wire_ids: candidates.map((item) => item.id) });
+  // skipPrepare (#1836): runLoop has already established, from a plain stat of
+  // the local store -- no sqlite3, no subprocess -- that nothing has changed
+  // there since the last cycle that actually ran the storage/roster drivers'
+  // `prepare`, AND that cycle found nothing to push. Both drivers together
+  // spawn on the order of 200 processes per `prepare` on an idle engine, every
+  // few seconds, for nothing: there is nothing new to prepare. Skipping the
+  // call entirely (not just its candidates) is what removes that cost; the
+  // pull side below is untouched, so an inbound message is never delayed by
+  // this. `lastCursor` carries the transport cursor from that last real
+  // `prepare` forward -- correct exactly because nothing has written to the
+  // store since, so the stored cursor cannot have moved either.
+  let state = null;
+  let candidates = [];
+  let writeProfile = null;
+  if (skipPrepare) {
+    if (lastCursor === null) throw new Error("cycle: skipPrepare requires a lastCursor from a prior prepare");
+    await eventCall("push.skipped", { reason: "idle-no-local-change" });
+  } else {
+    writeProfile = selectWriteProfile(config, capabilities);
+    const prepareInput = [{ type: "sync_prepare", envelope_v: 1,
+      cipher: writeProfile.profile, key_id: writeProfile.key_id ?? null,
+      recipients: writeProfile.recipients ?? [], max_blob_bytes: Number(capabilities.max_blob_bytes),
+      allow_new: writeProfile.eligible }];
+    const [prepared, rosterPrepared] = await Promise.all([
+      driverCall("prepare", config, prepareInput, [String(pushLimit)]),
+      rosterDriverCall("prepare", config, prepareInput, [String(pushLimit)]),
+    ]);
+    state = prepared.find((record) => record.type === "sync_state");
+    // Registry mutations lead the page. They establish the identity needed to
+    // interpret every following message, and UUIDv7 values minted in the same
+    // millisecond are not a reliable cross-axis ordering key.
+    const rosterCandidates = rosterPrepared
+      .filter((record) => record.type === "roster_sync_push_candidate")
+      .map((record) => ({ ...record, sync_axis: "roster" }));
+    const rotationIndex = rosterCandidates.findIndex((record) =>
+      record.projection?.kind === "key_rotated");
+    candidates = (rotationIndex === -1 ? [
+      ...rosterCandidates,
+      ...prepared.filter((record) => record.type === "sync_push_candidate")
+        .map((record) => ({ ...record, sync_axis: "messages" })),
+    ] : rosterCandidates.slice(0, rotationIndex + 1)).slice(0, pushLimit);
+    if (!state) throw new Error("driver omitted sync_state");
+    sequence(state.transport_cursor, "transport_cursor");
+    await eventCall("push.prepared", { count: candidates.length, local_positions: candidates.map((item) => item.local_position),
+      wire_ids: candidates.map((item) => item.id) });
+  }
 
-  if (!writeProfile.eligible) {
+  if (writeProfile && !writeProfile.eligible) {
     await eventCall("push.blocked", { reason: writeProfile.reason });
   } else if (candidates.length > 0) {
     // Record whatever the server acknowledged, then let the failure through.
@@ -3478,9 +3542,10 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
   // so the loop treats it as "more remains" and stays in catch-up. An exactly-
   // full page (remainder 0) costs one extra probe cycle that finds nothing —
   // safe. Not eligible, or a short page, = push is drained.
-  const pushSaturated = writeProfile.eligible && candidates.length === pushLimit;
+  const pushSaturated = !skipPrepare && writeProfile.eligible && candidates.length === pushLimit;
 
-  let cursor = state.transport_cursor;
+  let cursor = skipPrepare ? lastCursor : state.transport_cursor;
+  let pulledCount = 0;
   let pullCapabilities = capabilities;
   for (;;) {
     // Trap 1: the request param AND this validation must both use pullLimit —
@@ -3519,6 +3584,7 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
       }
     }
     records.push({ type: "sync_pull_cursor", next_after: page.next_after });
+    pulledCount += page.messages.length;
     await eventCall("pull.received", { after: cursor, next_after: page.next_after,
       messages: page.messages.map((message) => ({ id: message.id, server_seq: message.server_seq })) });
     const cursorRecord = records.at(-1);
@@ -3542,7 +3608,12 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
     if (!page.has_more) break;
   }
   await readStateCycleCall(config, pullLimit, dependencies);
-  return { pushSaturated };
+  // pushEmpty/hadActivity feed runLoop's two #1836 decisions: pushEmpty, together
+  // with an unchanged local-store fingerprint, is what lets the NEXT cycle skip
+  // `prepare` again; hadActivity (a push, or a pulled message) is what resets
+  // the adaptive steady-state interval back down to its floor.
+  const pushEmpty = skipPrepare || candidates.length === 0;
+  return { pushSaturated, pushEmpty, cursor, hadActivity: !pushEmpty || pulledCount > 0 };
 }
 
 // Adaptive catch-up loop (adaptive-sync-catchup design). Steady state is
@@ -3628,6 +3699,7 @@ export async function runLoop(config, options, dependencies = {}) {
   const installChangedCall = dependencies.installChangedCall ?? installChangedAgainst;
   const scriptsRoot = dependencies.scriptsRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const restartCall = dependencies.restartCall ?? restartAfterStandDown;
+  const localStoreFingerprintCall = dependencies.localStoreFingerprintCall ?? localStoreFingerprint;
 
   // An explicit --limit is a ceiling for BOTH push and pull (request size /
   // memory / slow-link timeout); only the default lets the loop go large.
@@ -3637,6 +3709,13 @@ export async function runLoop(config, options, dependencies = {}) {
   const LARGE_LIMIT = 1000;
   const BASE_BACKOFF_MS = 1000;
   const MAX_BACKOFF_MS = 60000;
+  // The adaptive steady-state interval (#1836): a run of empty cycles (no
+  // push, nothing pulled) stretches the wait out from steadyIntervalMs
+  // towards this cap, and any cycle with real activity -- a push, or a
+  // pulled message -- collapses it straight back to steadyIntervalMs. Capped
+  // at 60s regardless of steadyIntervalMs, matching the idle-prepare skip's
+  // own worst case below.
+  const MAX_IDLE_INTERVAL_MS = 60000;
 
   // Taken once, before the loop: the reference the update check diffs
   // against. null means the tree could not be observed COMPLETELY, and an
@@ -3648,6 +3727,20 @@ export async function runLoop(config, options, dependencies = {}) {
 
   let catchUp = false; // start steady; the first cycle reveals any backlog
   let consecutiveFailures = 0;
+  // #1836 idle-skip state. idleCheckpoint is the local-store fingerprint
+  // taken right before the last cycle whose `prepare` actually ran AND found
+  // nothing to push -- null whenever that has never happened yet, or the
+  // last real `prepare` found something, so the next cycle always runs
+  // `prepare` for real until this is set. lastCursor is that cycle's
+  // transport cursor, carried forward for a skipped cycle's pull to resume
+  // from (prepare is the only thing that reads it off the store; skipping it
+  // is only valid because nothing has written a new one since). idleStreak
+  // drives the adaptive interval above, independently of idleCheckpoint: it
+  // also counts a quiet cycle that still had to run `prepare` for real
+  // (e.g. the very first one) and resets on any activity either way.
+  let idleCheckpoint = null;
+  let lastCursor = null;
+  let idleStreak = 0;
   for (;;) {
     // Checked at the cycle boundary, BEFORE any driver can be spawned: past
     // this point the loop executes scripts from disk, and executing updated
@@ -3677,9 +3770,27 @@ export async function runLoop(config, options, dependencies = {}) {
     }
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);
     const pullLimit = ceiling ?? LARGE_LIMIT;
+    // Stat only -- no sqlite3, no subprocess. null (a stat failed for a
+    // reason other than ENOENT) is treated the same as "different from the
+    // checkpoint": run `prepare` for real (#1836, favor running when unsure).
+    let fingerprint = null;
+    try { fingerprint = await localStoreFingerprintCall(config.local_team); }
+    catch { fingerprint = null; }
+    const skipPrepare = idleCheckpoint !== null && lastCursor !== null &&
+      fingerprint !== null && fingerprint === idleCheckpoint;
     try {
-      const result = await cycleCall(config, { pushLimit, pullLimit }, dependencies);
+      const result = await cycleCall(config, { pushLimit, pullLimit, skipPrepare, lastCursor }, dependencies);
       consecutiveFailures = 0;
+      lastCursor = result?.cursor ?? lastCursor;
+      // Only a cycle that actually ran `prepare` may move the checkpoint: a
+      // skipped cycle learned nothing new about the store, so it must leave
+      // the checkpoint exactly as it was, for the SAME reason it was allowed
+      // to skip in the first place.
+      if (!skipPrepare) idleCheckpoint = result?.pushEmpty === true ? fingerprint : null;
+      // hadActivity defaults to "yes" (keeping the streak at 0, the
+      // steadyIntervalMs cadence) whenever a caller's result does not say --
+      // unsure favors the normal interval, not a stretched-out one.
+      idleStreak = result?.hadActivity === false ? idleStreak + 1 : 0;
       // Here, and nowhere earlier: this is the one point at which a cycle is
       // known to have finished rather than to have been attempted.
       //
@@ -3700,8 +3811,19 @@ export async function runLoop(config, options, dependencies = {}) {
       // catch-up removes the wait ONLY between successful, progress-making
       // cycles; steady keeps the interval. --interval never applies in
       // catch-up (a saturated cycle is moving real data, not empty-polling).
-      if (!catchUp) await sleepCall(steadyIntervalMs);
+      if (!catchUp) {
+        // A single idle cycle stays at the floor ("空振りが続いたら" -- a
+        // run, not a one-off); only the SECOND and later consecutive idle
+        // cycles double the wait, capped at MAX_IDLE_INTERVAL_MS.
+        const intervalMs = idleStreak <= 1 ? steadyIntervalMs :
+          Math.min(MAX_IDLE_INTERVAL_MS, steadyIntervalMs * 2 ** (idleStreak - 1));
+        await sleepCall(Math.max(steadyIntervalMs, intervalMs));
+      }
     } catch (error) {
+      // A failed cycle is not a confirmed-idle one: whether `prepare` ran,
+      // and what it saw, is now unknown. Disarm the #1836 skip rather than
+      // trust a checkpoint taken before whatever just went wrong.
+      idleCheckpoint = null;
       // Best-effort: a logging failure must not abort failure handling or the
       // backoff below (event() can throw when AGMSG_SYNC_LOG_FILE append fails).
       try {

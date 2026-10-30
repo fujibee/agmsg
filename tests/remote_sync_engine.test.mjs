@@ -38,6 +38,7 @@ import {
   isRefusal,
   collectInstallBaseline,
   installChangedAgainst,
+  localStoreFingerprint,
   runLoop,
   loadConfig,
   nextLocalAgeSnapshot,
@@ -3540,6 +3541,163 @@ test("runLoop: an explicit --limit caps both push and pull page sizes, even in c
   for (const limits of limitsSeen) {
     assert.equal(limits.pushLimit, 50);
     assert.equal(limits.pullLimit, 50);
+  }
+});
+
+// #1836: an idle engine's cycle used to call the storage/roster drivers'
+// `prepare` on every tick regardless of whether anything local had changed,
+// spawning on the order of 200 processes for nothing. runLoop now skips that
+// call once a cycle's `prepare` has already found nothing to push AND the
+// local store's fingerprint has not moved since.
+test("runLoop: an idle store skips prepare on the next cycle, and a changed fingerprint un-skips it", async () => {
+  const skipSeen = [];
+  // Read once per iteration, before that iteration's cycleCall; index k is
+  // what cycle k+1 sees.
+  const fingerprints = ["same", "same", "same", "different", "different"];
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    localStoreFingerprintCall: async () => fingerprints[Math.min(i, fingerprints.length - 1)],
+    cycleCall: async (_config, { skipPrepare, lastCursor }) => {
+      skipSeen.push({ skipPrepare, lastCursor });
+      i += 1;
+      if (i > fingerprints.length) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      return { pushSaturated: false, pushEmpty: true, cursor: `c${i}`, hadActivity: false };
+    },
+    sleepCall: async () => {},
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  // Cycle 1: no checkpoint yet -- never skipped, regardless of fingerprint.
+  // Its prepare ran for real and found nothing, so its own fingerprint
+  // ("same") becomes the checkpoint.
+  assert.equal(skipSeen[0].skipPrepare, false);
+  assert.equal(skipSeen[0].lastCursor, null);
+  // Cycle 2: fingerprint still "same" as the checkpoint -> skip.
+  assert.equal(skipSeen[1].skipPrepare, true);
+  assert.equal(skipSeen[1].lastCursor, "c1");
+  // Cycle 3: cycle 2 was skipped, so the checkpoint is unchanged ("same");
+  // cycle 3's own fingerprint is still "same" -> skip again.
+  assert.equal(skipSeen[2].skipPrepare, true);
+  assert.equal(skipSeen[2].lastCursor, "c2");
+  // Cycle 4: fingerprint moved to "different" -> never skip on a changed
+  // fingerprint, no matter how many quiet cycles preceded it.
+  assert.equal(skipSeen[3].skipPrepare, false);
+  assert.equal(skipSeen[3].lastCursor, "c3");
+  // Cycle 5: cycle 4 ran prepare for real and recorded "different" as the new
+  // checkpoint; cycle 5 sees "different" again -> skip.
+  assert.equal(skipSeen[4].skipPrepare, true);
+  assert.equal(skipSeen[4].lastCursor, "c4");
+});
+
+test("runLoop: a cycle that found something to push is never skipped on the next tick, even with an unchanged fingerprint", async () => {
+  const skipSeen = [];
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    localStoreFingerprintCall: async () => "same",
+    cycleCall: async (_config, { skipPrepare }) => {
+      skipSeen.push(skipPrepare);
+      i += 1;
+      if (i > 2) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      // Cycle 1 pushed something real; its own prepare is never "idle".
+      return { pushSaturated: false, pushEmpty: false, cursor: "c", hadActivity: true };
+    },
+    sleepCall: async () => {},
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  assert.deepEqual(skipSeen, [false, false, false]);
+});
+
+test("runLoop: a failed cycle disarms the idle-prepare skip for the next one", async () => {
+  const skipSeen = [];
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    localStoreFingerprintCall: async () => "same",
+    cycleCall: async (_config, { skipPrepare }) => {
+      skipSeen.push(skipPrepare);
+      i += 1;
+      if (i === 1) return { pushSaturated: false, pushEmpty: true, cursor: "c1", hadActivity: false };
+      if (i === 2) { const net = new Error("net"); net.retryable = true; throw net; }
+      if (i === 3) return { pushSaturated: false, pushEmpty: true, cursor: "c3", hadActivity: false };
+      const stop = new Error("stop"); stop.retryable = false; throw stop;
+    },
+    sleepCall: async () => {},
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  // Cycle 1 establishes the checkpoint; cycle 2 would have skipped on a bare
+  // fingerprint match, but cycle 1 never completed cleanly where it mattered
+  // here -- cycle 2 itself fails, which is what cycle 3 must recover from.
+  assert.equal(skipSeen[0], false);
+  assert.equal(skipSeen[1], true);
+  // Cycle 2's failure disarmed the checkpoint, so cycle 3 runs prepare for
+  // real even though the fingerprint never changed.
+  assert.equal(skipSeen[2], false);
+});
+
+// #1836's other half: a run of empty cycles stretches the steady-state wait
+// from the floor towards 60s, and any activity collapses it straight back.
+test("runLoop: consecutive idle cycles stretch the steady interval towards 60s, and activity collapses it", async () => {
+  const sleeps = [];
+  const script = [false, false, false, false, true, false]; // idle x4, then active, then idle again
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    cycleCall: async () => {
+      if (i >= script.length) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      return { pushSaturated: false, hadActivity: script[i++] };
+    },
+    sleepCall: async (ms) => { sleeps.push(ms); },
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  // The first idle cycle in any run stays at the 5s floor; the second and
+  // later consecutive ones double: 5s, 10s, 20s, 40s. The active cycle
+  // resets the streak, so its own wait (and the lone idle cycle right
+  // after it) are both back at the floor.
+  assert.deepEqual(sleeps, [5000, 10000, 20000, 40000, 5000, 5000]);
+});
+
+test("runLoop: the idle interval never exceeds 60s", async () => {
+  const sleeps = [];
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    cycleCall: async () => {
+      i += 1;
+      if (i > 8) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      return { pushSaturated: false, hadActivity: false };
+    },
+    sleepCall: async (ms) => { sleeps.push(ms); },
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  assert.ok(sleeps.every((ms) => ms <= 60000));
+  assert.equal(sleeps.at(-1), 60000);
+});
+
+test("localStoreFingerprint: unchanged files produce the same fingerprint; a write changes it; a stat failure other than ENOENT returns null", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agmsg-fp-"));
+  const previousEnv = { storage: process.env.AGMSG_SYNC_STORAGE_DIR, conn: process.env.AGMSG_SYNC_CONNECTION_DIR };
+  process.env.AGMSG_SYNC_STORAGE_DIR = dir;
+  delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+  try {
+    const before = await localStoreFingerprint("team-x");
+    const again = await localStoreFingerprint("team-x");
+    assert.equal(before, again);
+    await writeFile(join(dir, "messages.db"), "x");
+    const afterWrite = await localStoreFingerprint("team-x");
+    assert.notEqual(before, afterWrite);
+    const failing = async () => { const error = new Error("denied"); error.code = "EACCES"; throw error; };
+    assert.equal(await localStoreFingerprint("team-x", failing), null);
+  } finally {
+    if (previousEnv.storage === undefined) delete process.env.AGMSG_SYNC_STORAGE_DIR;
+    else process.env.AGMSG_SYNC_STORAGE_DIR = previousEnv.storage;
+    if (previousEnv.conn !== undefined) process.env.AGMSG_SYNC_CONNECTION_DIR = previousEnv.conn;
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
