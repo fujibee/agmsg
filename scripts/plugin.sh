@@ -702,15 +702,17 @@ _plugin_cmd_install() {
 # one per line; nothing when there are none (or jq is missing, where it says
 # nothing rather than guessing).
 _plugin_tool_members() {  # tool
-  local tool="$1" cfg team
+  local tool="$1" cfg cfgs=()
   command -v jq >/dev/null 2>&1 || return 0
   for cfg in "$PLUGIN_ROOT"/teams/*/config.json; do
-    [ -f "$cfg" ] || continue
-    team="$(basename "$(dirname "$cfg")")"
-    jq -r --arg p "(ext-tool:$tool)" --arg t "$team" \
-      '(.agents // {}) | to_entries[] | select(any(.value.registrations[]?; .project == $p)) | "\($t)/\(.key)"' \
-      "$cfg" 2>/dev/null || true
+    [ -f "$cfg" ] && cfgs+=("$cfg")
   done
+  [ "${#cfgs[@]}" -gt 0 ] || return 0
+  # One jq for every team; the team is the config's parent directory.
+  jq -r --arg p "(ext-tool:$tool)" \
+    '(input_filename | split("/") | .[-2]) as $t
+     | (.agents // {}) | to_entries[] | select(any(.value.registrations[]?; .project == $p)) | "\($t)/\(.key)"' \
+    "${cfgs[@]}" 2>/dev/null || true
 }
 
 # What to do next with each driver just installed, per axis, so the person

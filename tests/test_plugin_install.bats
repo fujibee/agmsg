@@ -817,15 +817,19 @@ head_of() { git -C "$GIT_BASE/$1/$2.git" rev-parse HEAD; }
   mkdir -p "$TEST_SKILL_DIR/teams/alpha"
   printf '%s\n' '{"name":"alpha","agents":{"desk":{"registrations":[{"type":"ext-tool","project":"(ext-tool:fx)"}]},"me":{"registrations":[{"type":"claude-code","project":"/p"}]}}}' \
     > "$TEST_SKILL_DIR/teams/alpha/config.json"
+  mkdir -p "$TEST_SKILL_DIR/teams/beta"
+  printf '%s\n' '{"name":"beta","agents":{"board":{"registrations":[{"type":"ext-tool","project":"(ext-tool:fx)"}]}}}' \
+    > "$TEST_SKILL_DIR/teams/beta/config.json"
   run PLUGIN remove acme/pack
   [ "$status" -eq 0 ]
   grep -Fq "These team members used it and are still joined" <<<"$output"
   grep -qx "  alpha/desk" <<<"$output"
+  grep -qx "  beta/board" <<<"$output"
   refute grep -qx "  alpha/me" <<<"$output"
   grep -q "/scripts/leave.sh alpha desk$" <<<"$output"
 
   run PLUGIN install acme/pack --yes
   [ "$status" -eq 0 ]
-  grep -Fq "ext-tools/fx is already joined as: alpha/desk. It works as it is." <<<"$output"
+  grep -Fq "ext-tools/fx is already joined as: alpha/desk, beta/board. It works as it is." <<<"$output"
   grep -Fq "To add it to another team as well:" <<<"$output"
 }
