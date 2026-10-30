@@ -234,7 +234,7 @@ fn bash_command() -> Result<std::process::Command, String> {
 /// The app used to join `db/messages.db` itself, which is why a storage
 /// layout change broke it with nothing to notice: a hardcoded path cannot go
 /// stale loudly. Asking means the answer follows the layout.
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug)]
 struct StoreInfo {
     driver: String,
     path: String,
@@ -304,8 +304,9 @@ fn stores() -> Option<std::sync::Arc<Stores>> {
         return Some(c);
     }
     let (teams, infos) = match fetch_stores_in_one_process() {
-        Some(all) => all,
-        None => {
+        Ok(all) => all,
+        Err(why) => {
+            note_batch_failure(&why);
             // not answerable in one go: ask for the list and then each team, as before
             let raw = run_script("api.sh", &["get", "teams"]).ok()?;
             let teams: Vec<String> = parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect();
@@ -331,26 +332,76 @@ fn stores() -> Option<std::sync::Arc<Stores>> {
 /// The script that asks agmsg-core, once, where every team's store is (see stores.sh).
 const STORES_SH: &str = include_str!("stores.sh");
 
-/// Every team and its store from ONE `bash`, however many teams there are. `None` when that did not work out
-/// (the script failed, or a line was not what it should be): the caller then asks the old way, team by team.
-fn fetch_stores_in_one_process() -> Option<(Vec<String>, std::collections::HashMap<String, Result<StoreInfo, String>>)> {
-    let out = bash_command().ok()?.arg("-c").arg(STORES_SH).arg("agmsg-stores").arg(bash_path(&agmsg_base())).output().ok()?;
+/// Why the one-process look gave no answer: a fixed code for the log, and a short detail (never a path).
+#[derive(Debug)]
+struct BatchFailure {
+    code: &'static str,
+    detail: String,
+}
+
+fn fail(code: &'static str, detail: impl Into<String>) -> BatchFailure {
+    BatchFailure { code, detail: detail.into() }
+}
+
+#[cfg(test)]
+static BATCH_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn note_batch_failure(f: &BatchFailure) {
+    let line = format!("[agmsg-app] one-process store lookup failed ({}): {}; asking team by team", f.code, f.detail);
+    eprintln!("{line}");
+    #[cfg(test)]
+    BATCH_LOG.lock().unwrap().push(line);
+}
+
+/// The first part of a script's stderr on one short line (control characters become spaces; the install
+/// folder is written `<base>` so the log holds no path of the person's).
+fn head_of(stderr: &[u8], base: &str) -> String {
+    String::from_utf8_lossy(stderr).replace(base, "<base>").chars().map(|c| if c.is_control() { ' ' } else { c }).take(160).collect::<String>().trim().to_string()
+}
+
+/// Every team and its store from ONE `bash`, however many teams there are. `Err` says why that did not work
+/// out (the script failed, or the output was not exactly what it should be): the caller logs it and then asks
+/// the old way, team by team. A value is never split or merged: fields end with NUL, so a TAB or a newline in
+/// a path stays in that path, and the output must be whole records with no repeated team.
+fn fetch_stores_in_one_process() -> Result<(Vec<String>, std::collections::HashMap<String, Result<StoreInfo, String>>), BatchFailure> {
+    let mut cmd = bash_command().map_err(|e| fail("batch_spawn", e))?;
+    let out = cmd.arg("-c").arg(STORES_SH).arg("agmsg-stores").arg(bash_path(&agmsg_base())).output().map_err(|e| fail("batch_spawn", e.to_string()))?;
     if !out.status.success() {
-        return None;
+        return Err(fail("batch_exit", format!("{} stderr: {}", out.status, head_of(&out.stderr, &bash_path(&agmsg_base())))));
     }
-    let text = String::from_utf8(out.stdout).ok()?;
+    parse_stores(&out.stdout)
+}
+
+fn parse_stores(stdout: &[u8]) -> Result<(Vec<String>, std::collections::HashMap<String, Result<StoreInfo, String>>), BatchFailure> {
+    if stdout.is_empty() {
+        return Ok((Vec::new(), Default::default()));
+    }
+    let Some(body) = stdout.strip_suffix(&[0u8]) else {
+        return Err(fail("batch_parse", "output does not end with a field terminator"));
+    };
+    let fields: Vec<&[u8]> = body.split(|&b| b == 0).collect();
+    if fields.len() % 4 != 0 {
+        return Err(fail("batch_parse", format!("{} fields, not a whole number of records", fields.len())));
+    }
+    let text = |b: &[u8]| String::from_utf8(b.to_vec()).map_err(|_| fail("batch_parse", "a value is not text"));
     let mut teams = Vec::new();
     let mut infos = std::collections::HashMap::new();
-    for line in text.lines() {
-        let f: Vec<&str> = line.split('\t').collect();
-        let [team, driver, path, exists] = f[..] else { return None };
-        if team.is_empty() || (exists != "true" && exists != "false") {
-            return None;
+    for rec in fields.chunks(4) {
+        let (team, driver, path) = (text(rec[0])?, text(rec[1])?, text(rec[2])?);
+        let exists = match rec[3] {
+            b"true" => true,
+            b"false" => false,
+            _ => return Err(fail("batch_parse", "exists is neither true nor false")),
+        };
+        if team.is_empty() || driver.is_empty() || path.is_empty() {
+            return Err(fail("batch_parse", "an empty team, driver or path"));
         }
-        teams.push(team.to_string());
-        infos.insert(team.to_string(), Ok(StoreInfo { driver: driver.to_string(), path: path.to_string(), exists: exists == "true" }));
+        if infos.insert(team.clone(), Ok(StoreInfo { driver, path, exists })).is_some() {
+            return Err(fail("batch_mismatch", "a team appears twice"));
+        }
+        teams.push(team);
     }
-    Some((teams, infos))
+    Ok((teams, infos))
 }
 
 /// The store to read directly for `team`, or `None` when the app must go
@@ -1290,6 +1341,7 @@ mod tests {
     use super::{
         agmsg_base, msys_to_native, parse_semver, pinned_core_version, run_script,
         protected_locations, running_core_version, store_info, to_bash_slashes, watchable_stores,
+        fetch_stores_in_one_process, note_batch_failure, parse_stores, BATCH_LOG,
     };
     use std::path::PathBuf;
     use serial_test::serial;
@@ -1721,6 +1773,76 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         assert_eq!(starts(&log), 1, "one bash for two teams, not three");
         let _ = protected_locations();
         assert_eq!(starts(&log), 2, "not kept");
+    }
+
+    #[test]
+    fn a_value_with_a_tab_or_a_newline_stays_one_value_and_a_malformed_output_is_refused() {
+        let nasty = "/outside/first\tfalse\nfake\tsqlite\t/outside/second\r";
+        let mut out = Vec::new();
+        for f in ["team\tone\n", "sqlite", nasty, "true"] {
+            out.extend_from_slice(f.as_bytes());
+            out.push(0);
+        }
+        let (teams, infos) = parse_stores(&out).unwrap();
+        assert_eq!(teams, vec!["team\tone\n".to_string()]);
+        assert_eq!(infos["team\tone\n"].as_ref().unwrap().path, nasty, "one path, intact, no second record");
+        assert!(parse_stores(b"").unwrap().0.is_empty());
+        let code = |b: &[u8]| parse_stores(b).unwrap_err().code;
+        assert_eq!(code(b"a\0sqlite\0/p\0true"), "batch_parse", "no terminator");
+        assert_eq!(code(b"a\0sqlite\0/p\0\0"), "batch_parse", "exists is empty");
+        assert_eq!(code(b"a\0sqlite\0/p\0maybe\0"), "batch_parse", "exists is neither");
+        assert_eq!(code(b"a\0sqlite\0/p\0true\0b\0"), "batch_parse", "a record cut short");
+        assert_eq!(code(b"\0sqlite\0/p\0true\0"), "batch_parse", "an empty team");
+        assert_eq!(code(b"a\0sqlite\0\0true\0"), "batch_parse", "an empty path");
+        assert_eq!(code(b"a\0sqlite\0/p\0true\0a\0sqlite\0/q\0true\0"), "batch_mismatch", "a team twice");
+        assert_eq!(code(b"a\0sqlite\0/p\xff\0true\0"), "batch_parse", "not text");
+    }
+
+    /// An install whose core functions answer with the given store path, so the real stores.sh runs end to end.
+    #[cfg(unix)]
+    fn stub_core_base(path_expr: &str) -> FakeBase {
+        let b = fake_base(&[]);
+        let root = b._dir.path();
+        std::fs::create_dir_all(root.join("scripts/lib")).unwrap();
+        std::fs::write(
+            root.join("scripts/lib/storage.sh"),
+            format!("agmsg_storage_load() {{ :; }}\nagmsg_storage_driver() {{ echo sqlite; }}\nagmsg_db_path() {{ printf '%s' {path_expr}; }}\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join("scripts/lib/validate.sh"), ":\n").unwrap();
+        std::fs::create_dir_all(root.join("teams/alpha")).unwrap();
+        std::fs::write(root.join("teams/alpha/config.json"), "{}").unwrap();
+        b
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn a_path_with_tab_newline_and_carriage_return_comes_through_the_real_script_as_one_path() {
+        let b = stub_core_base(r#"$'/outside/first\tfalse\nfake\tsqlite\t/outside/second\r'"#);
+        let (teams, infos) = fetch_stores_in_one_process().unwrap();
+        assert_eq!(teams, vec!["alpha".to_string()]);
+        assert_eq!(infos["alpha"].as_ref().unwrap().path, "/outside/first\tfalse\nfake\tsqlite\t/outside/second\r");
+        let _ = b;
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn when_the_one_process_look_fails_the_reason_is_logged_with_a_fixed_code() {
+        BATCH_LOG.lock().unwrap().clear();
+        // no core functions at all: the script exits non-zero
+        let _b = fake_base(&[("api.sh", "exit 1\n")]);
+        let r = fetch_stores_in_one_process();
+        assert_eq!(r.unwrap_err().code, "batch_exit");
+        let _ = watchable_stores();
+        let log = BATCH_LOG.lock().unwrap().join("\n");
+        assert!(log.contains("(batch_exit)") && log.contains("asking team by team"), "{log}");
+        assert!(!log.contains(&*_b._dir.path().to_string_lossy()), "no raw paths in the log: {log}");
+        // an answer that is not whole records
+        BATCH_LOG.lock().unwrap().clear();
+        note_batch_failure(&parse_stores(b"a\0b\0").unwrap_err());
+        assert!(BATCH_LOG.lock().unwrap().join("\n").contains("(batch_parse)"));
     }
 
     #[test]
