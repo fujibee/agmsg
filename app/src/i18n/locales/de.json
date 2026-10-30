@@ -296,7 +296,11 @@
       "title": "Anfragen von Agents",
       "explain": "Agents in deinen Teams dürfen die App bitten, ein Pane zu öffnen, zum Beispiel einen Diff ihrer Arbeit. Eine Leiste zeigt die Anfrage; erst nach deinem Klick auf Öffnen öffnet sich etwas.",
       "on": "An",
-      "copyHelp": "Agents müssen das Anfrageformat kennen. Kopiere es und füge es ihnen einmal ein."
+      "copyHelp": "Agents need to know the request format. Copy it for the team you are in and paste it to that team's agents once; the text names this team and its app user.",
+      "seatText": "This is not a shell command. `agmsg-app open ...` is the text of a request: send it as an agmsg message to {{appUser}} in team {{team}}. The app shows it to the user as a request bar; the user has to click Open, nothing opens by itself.\nThe message body is exactly this one line, not quoted, not in a code block, with nothing else in it:\nagmsg-app open <addon-id> <pane> [path=<absolute path>]\nSend it with the agmsg send script (where it says <your seat name>, put your own seat name in this team):\n{{scripts}}/send.sh {{team}} <your seat name> {{appUser}} \"agmsg-app open builtin:fileview fileview path=/absolute/path/to/folder\"\nBuilt-in panes: builtin:fileview fileview, builtin:diffview diffview.",
+      "copyNoTeam": "Choose a team first. The text names the team and its app user, so it is copied per team.",
+      "copyNoAppUser": "This team has no app user, so agents have nobody to send the request to. Copy it from a team that has one.",
+      "copyNoScripts": "Could not find the agmsg scripts folder this app uses, so there is no send command to copy."
     },
     "developer": {
       "title": "Developer",

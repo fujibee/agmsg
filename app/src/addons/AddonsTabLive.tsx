@@ -18,7 +18,7 @@ type Notice = { kind: "info" | "error"; text: string };
 // Settings → Add-ons on the real commands: install and update through the
 // fetch / confirm steps, remove, developer folders, and the remembered grants.
 // Rust does the work and says why it refuses; this shows its words.
-export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: string) => number; onOpenPane?: (ref: AddonPaneRef) => void }) {
+export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: string) => number; onOpenPane?: (ref: AddonPaneRef) => void; team?: string; appUser?: string }) {
   const { catalog } = props;
   const { t } = useTranslation();
   const tt = t as never;
@@ -36,6 +36,11 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
   const currentOp = useRef<string | null>(null);
   const opSeq = useRef(0);
   const devFolders = useRef(new Map<string, string>());
+  // The scripts folder of the agmsg this app runs against, for the text copied for agents.
+  const [scriptsDir, setScriptsDir] = useState("");
+  useEffect(() => {
+    invoke<string>("agmsg_scripts_dir").then(setScriptsDir, () => setScriptsDir(""));
+  }, []);
 
   useEffect(() => {
     const un = listen<{ opId: string | null; step: string; detail: string }>("addon-install-progress", (e) => {
@@ -143,6 +148,7 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
         t={tt}
         snapshot={{ addons: catalog.addons, grants, openRequests }}
         engine={catalog.engine}
+        seat={{ team: props.team ?? "", appUser: props.appUser ?? "", scriptsDir }}
         listError={catalog.listError}
         onRetryList={catalog.reload}
         installError={installError}

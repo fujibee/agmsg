@@ -296,7 +296,11 @@
       "title": "에이전트의 요청",
       "explain": "팀의 에이전트가 앱에 패널을 열어 달라고 요청할 수 있게 합니다. 예를 들어 작업 diff 같은 것입니다. 요청은 막대에 표시되며, 열기를 누르기 전에는 아무것도 열리지 않습니다.",
       "on": "켜짐",
-      "copyHelp": "에이전트는 요청 형식을 알아야 합니다. 복사해서 한 번 붙여 넣어 알려 주세요."
+      "copyHelp": "Agents need to know the request format. Copy it for the team you are in and paste it to that team's agents once; the text names this team and its app user.",
+      "seatText": "This is not a shell command. `agmsg-app open ...` is the text of a request: send it as an agmsg message to {{appUser}} in team {{team}}. The app shows it to the user as a request bar; the user has to click Open, nothing opens by itself.\nThe message body is exactly this one line, not quoted, not in a code block, with nothing else in it:\nagmsg-app open <addon-id> <pane> [path=<absolute path>]\nSend it with the agmsg send script (where it says <your seat name>, put your own seat name in this team):\n{{scripts}}/send.sh {{team}} <your seat name> {{appUser}} \"agmsg-app open builtin:fileview fileview path=/absolute/path/to/folder\"\nBuilt-in panes: builtin:fileview fileview, builtin:diffview diffview.",
+      "copyNoTeam": "Choose a team first. The text names the team and its app user, so it is copied per team.",
+      "copyNoAppUser": "This team has no app user, so agents have nobody to send the request to. Copy it from a team that has one.",
+      "copyNoScripts": "Could not find the agmsg scripts folder this app uses, so there is no send command to copy."
     },
     "developer": {
       "title": "Developer",

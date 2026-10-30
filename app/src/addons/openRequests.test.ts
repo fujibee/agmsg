@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createLiveSource, type Invoke } from "./source";
-import { SEAT_INSTRUCTION, toOpenView, type OpenRowRaw, type OpenScanRaw } from "./openRequests";
+import { seatInstruction, toOpenView, type OpenRowRaw, type OpenScanRaw } from "./openRequests";
 import { OpenRequestBar, OpenRequestMessages, OpenRequestNotes, messageLines } from "./OpenRequestBar";
 import { relativeTime } from "./relativeTime";
+import en from "../i18n/locales/en.json";
+import ja from "../i18n/locales/ja.json";
 
 const t = (key: string, o?: Record<string, unknown>) => `[${key}${o ? " " + JSON.stringify(o) : ""}]`;
 const noop = () => {};
@@ -144,11 +146,38 @@ describe("how old a request is", () => {
 });
 
 describe("the text for seats", () => {
-  it("shows the exact line to send, with an example, in English", () => {
-    const lines = SEAT_INSTRUCTION.split("\n");
-    expect(lines).toContain("agmsg-app open <addon-id> <pane> [path=<absolute path>]");
-    expect(lines).toContain("Example: agmsg-app open builtin:fileview fileview path=/Users/me/project");
-    expect(SEAT_INSTRUCTION.length).toBeLessThan(600);
+  // The real English text, with {{x}} filled in the way i18next does.
+  const fill = (key: string, o?: Record<string, unknown>) =>
+    String((en.addons.openRequests as Record<string, string>)[key.split(".").pop()!]).replace(/\{\{(\w+)\}\}/g, (_, k) => String(o?.[k]));
+  const seat = { team: "agmsg", appUser: "me-app", scriptsDir: "/Users/me/.agents/skills/agmsg/scripts" };
+  const made = seatInstruction(fill, seat);
+  const text = made.ok ? made.text : "";
+  it("fills in the team, the app user and the scripts folder in a ready-to-run send command", () => {
+    expect(made.ok).toBe(true);
+    expect(text).toContain('/Users/me/.agents/skills/agmsg/scripts/send.sh agmsg <your seat name> me-app "agmsg-app open builtin:fileview fileview path=/absolute/path/to/folder"');
+    expect(text).not.toContain("{{");
+  });
+  it("says it is not a shell command and that the body is one line, not quoted", () => {
+    expect(text.startsWith("This is not a shell command.")).toBe(true);
+    expect(text).toContain("send it as an agmsg message to me-app in team agmsg");
+    expect(text).toContain("exactly this one line, not quoted, not in a code block");
+    expect(text.split("\n")).toContain("agmsg-app open <addon-id> <pane> [path=<absolute path>]");
+  });
+  it("uses the scripts folder it is given, not a fixed one, and drops a trailing slash", () => {
+    const r = seatInstruction(fill, { ...seat, scriptsDir: "/tmp/base/scripts/" });
+    expect(r.ok && r.text).toContain("/tmp/base/scripts/send.sh agmsg");
+    expect(r.ok && r.text).not.toContain(".agents");
+  });
+  it("gives a reason, and no text, without a team, an app user or the scripts folder", () => {
+    expect(seatInstruction(fill, { ...seat, team: "" })).toEqual({ ok: false, reason: "noTeam" });
+    expect(seatInstruction(fill, { ...seat, appUser: "" })).toEqual({ ok: false, reason: "noAppUser" });
+    expect(seatInstruction(fill, { ...seat, scriptsDir: "" })).toEqual({ ok: false, reason: "noScripts" });
+  });
+  it("Japanese has the same placeholders and the same command line", () => {
+    const en_ = en.addons.openRequests.seatText, ja_ = ja.addons.openRequests.seatText;
+    const ph = (x: string) => (x.match(/\{\{\w+\}\}/g) ?? []).sort().join();
+    expect(ph(ja_)).toBe(ph(en_));
+    expect(ja_.split("\n").filter((l) => l.includes("send.sh"))).toEqual(en_.split("\n").filter((l) => l.includes("send.sh")));
   });
 });
 

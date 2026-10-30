@@ -41,6 +41,7 @@
     "allow-agmsg-delivery-mode",
     "allow-agmsg-default-project",
     "allow-agmsg-command-name",
+    "allow-agmsg-scripts-dir",
     "allow-agmsg-spawnable-types",
     "allow-set-menu-language",
     "allow-set-team-room-visible",

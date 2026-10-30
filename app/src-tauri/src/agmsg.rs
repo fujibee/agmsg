@@ -992,6 +992,14 @@ pub fn agmsg_command_name() -> String {
         .to_string()
 }
 
+/// The scripts folder of the agmsg install the app is using (where `send.sh` is), as an absolute path.
+/// Shown in the text the app copies for agents, so it names the install the app really runs against
+/// (`AGMSG_APP_BASE` included) rather than a fixed location.
+#[tauri::command]
+pub fn agmsg_scripts_dir() -> String {
+    agmsg_base().join("scripts").to_string_lossy().into_owned()
+}
+
 /// Default project dir for a freshly-added agent: <HOME>/agmsg-agents/<name>.
 #[tauri::command]
 pub fn agmsg_default_project(name: String) -> Result<String, String> {
@@ -1358,6 +1366,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
         assert_eq!(agmsg_base(), dir.path());
+    }
+
+    #[test]
+    #[serial]
+    fn scripts_dir_is_the_scripts_folder_of_the_base_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        assert_eq!(std::path::PathBuf::from(crate::agmsg::agmsg_scripts_dir()), dir.path().join("scripts"));
     }
 
     #[test]

@@ -296,7 +296,11 @@
       "title": "来自智能体的请求",
       "explain": "允许你团队中的智能体请求应用打开面板，例如它们工作的 diff。请求会显示在一个栏中；在你点击“打开”之前不会打开任何内容。",
       "on": "开启",
-      "copyHelp": "智能体需要知道请求的格式。复制后一次性粘贴给它们即可。"
+      "copyHelp": "Agents need to know the request format. Copy it for the team you are in and paste it to that team's agents once; the text names this team and its app user.",
+      "seatText": "This is not a shell command. `agmsg-app open ...` is the text of a request: send it as an agmsg message to {{appUser}} in team {{team}}. The app shows it to the user as a request bar; the user has to click Open, nothing opens by itself.\nThe message body is exactly this one line, not quoted, not in a code block, with nothing else in it:\nagmsg-app open <addon-id> <pane> [path=<absolute path>]\nSend it with the agmsg send script (where it says <your seat name>, put your own seat name in this team):\n{{scripts}}/send.sh {{team}} <your seat name> {{appUser}} \"agmsg-app open builtin:fileview fileview path=/absolute/path/to/folder\"\nBuilt-in panes: builtin:fileview fileview, builtin:diffview diffview.",
+      "copyNoTeam": "Choose a team first. The text names the team and its app user, so it is copied per team.",
+      "copyNoAppUser": "This team has no app user, so agents have nobody to send the request to. Copy it from a team that has one.",
+      "copyNoScripts": "Could not find the agmsg scripts folder this app uses, so there is no send command to copy."
     },
     "developer": {
       "title": "Developer",

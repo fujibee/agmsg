@@ -654,6 +654,9 @@ export function SettingsModal(props: {
   openAddonPanesOf: (addonId: string) => number;
   /** "Open now" after an install: opens the pane through the normal grant flow. */
   onOpenAddonPane?: (ref: { addonId: string; paneName: string; title: string }) => void;
+  /** The team on screen and its app user: the text copied for agents names them. */
+  team?: string;
+  appUser?: string;
 }) {
   const { t, i18n } = useTranslation();
   // Local draft text, not a number bound directly to props.terminalFontSize
@@ -725,6 +728,8 @@ export function SettingsModal(props: {
         <AddonsTab
           catalog={props.catalog}
           openPanesOf={props.openAddonPanesOf}
+          team={props.team}
+          appUser={props.appUser}
           onOpenPane={
             props.onOpenAddonPane
               ? (ref) => {

@@ -707,6 +707,7 @@ pub fn run() {
             agmsg::agmsg_delivery_mode,
             agmsg::agmsg_default_project,
             agmsg::agmsg_command_name,
+            agmsg::agmsg_scripts_dir,
             agmsg::agmsg_spawnable_types,
             set_menu_language,
             set_team_room_visible,

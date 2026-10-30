@@ -3060,6 +3060,8 @@ export default function App() {
           catalog={catalog}
           openAddonPanesOf={(addonId) => panes.filter((p) => p.kind === "addon" && p.addon?.addonId === addonId).length}
           onOpenAddonPane={openAddonPane}
+          team={team}
+          appUser={appUser}
         />
       )}
       {modal?.kind === "closeWindow" &&

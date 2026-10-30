@@ -82,10 +82,20 @@ export function toOpenView(raw: OpenScanRaw): OpenScanView {
   return { items, notes, notice: raw.notice, truncated: raw.truncated };
 }
 
-/** What the "copy text for your seats" button copies: how a seat asks the app to open a pane. */
-export const SEAT_INSTRUCTION = [
-  "To ask the agmsg app to open an add-on pane for the user, send a message to the app user with this on a line of its own (not quoted, not in a code block):",
-  "agmsg-app open <addon-id> <pane> [path=<absolute path>]",
-  "Example: agmsg-app open builtin:fileview fileview path=/Users/me/project",
-  "Built-in panes: builtin:fileview fileview, builtin:diffview diffview. The user has to click Open in the app; nothing opens by itself.",
-].join("\n");
+/** Where a copied instruction cannot be built, and why (said to the person at the Copy button). */
+export type SeatTextFailure = "noTeam" | "noAppUser" | "noScripts";
+
+/**
+ * What the "copy instructions for agents" button copies: the request line, and the send command for it
+ * with this team, its app user and the scripts folder the app really uses already filled in.
+ * Without a team, an app user in it, or the scripts folder there is nothing true to copy, so it says why instead.
+ */
+export function seatInstruction(
+  t: (key: string, o?: Record<string, unknown>) => string,
+  seat: { team: string; appUser: string; scriptsDir: string },
+): { ok: true; text: string } | { ok: false; reason: SeatTextFailure } {
+  if (!seat.team) return { ok: false, reason: "noTeam" };
+  if (!seat.appUser) return { ok: false, reason: "noAppUser" };
+  if (!seat.scriptsDir) return { ok: false, reason: "noScripts" };
+  return { ok: true, text: t("addons.openRequests.seatText", { team: seat.team, appUser: seat.appUser, scripts: seat.scriptsDir.replace(/[\\/]+$/, "") }) };
+}

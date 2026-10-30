@@ -1,4 +1,4 @@
-import { SEAT_INSTRUCTION } from "./openRequests";
+import { seatInstruction } from "./openRequests";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { AddonsSnapshot, EngineState, InstallError, InstalledAddon } from "./types";
@@ -45,6 +45,8 @@ type Props = {
   installedNotice?: InstalledNotice | null;
   /** "Open now": opens the add-on's first pane through the normal grant flow. */
   onOpenNow?: (notice: InstalledNotice) => void;
+  /** The team on screen and its app user, for the text copied for agents. */
+  seat?: SeatContext;
   /** "Check again" on the engine-off screen: runs the startup check once more. */
   onRecheck?: () => void;
 };
@@ -52,17 +54,22 @@ type Props = {
 /** The switch flips the stored Show/Off setting; the stored values are unchanged. */
 export const nextOpenRequests = (current: "show" | "off"): "show" | "off" => (current === "off" ? "show" : "off");
 
-/** Copies the short instruction an agent needs to ask the app to open a pane. */
-function CopyForAgents(props: { t: Translate }) {
+/** Where the copy button takes the instruction's names from: the team on screen, its app user, and the scripts folder in use. */
+export type SeatContext = { team: string; appUser: string; scriptsDir: string };
+
+/** Copies the instruction an agent needs to ask the app to open a pane; says why when it cannot be filled in for a team. */
+function CopyForAgents(props: { t: Translate; seat?: SeatContext }) {
   const { t } = props;
-  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const [state, setState] = useState<"idle" | "copied" | "failed" | "noTeam" | "noAppUser" | "noScripts">("idle");
   return (
     <div className="addon-row-line">
       <button
         type="button"
         className="addon-btn"
         onClick={() => {
-          navigator.clipboard.writeText(SEAT_INSTRUCTION).then(
+          const made = seatInstruction(t, props.seat ?? { team: "", appUser: "", scriptsDir: "" });
+          if (!made.ok) return setState(made.reason);
+          navigator.clipboard.writeText(made.text).then(
             () => setState("copied"),
             () => setState("failed"),
           );
@@ -71,7 +78,7 @@ function CopyForAgents(props: { t: Translate }) {
         {t("addons.openRequests.copy")}
       </button>
       <span className={`addon-copy-state ${state}`} role="status">
-        {state === "copied" ? t("addons.openRequests.copied") : state === "failed" ? t("addons.openRequests.copyFailed") : ""}
+        {state === "idle" ? "" : state === "copied" ? t("addons.openRequests.copied") : state === "failed" ? t("addons.openRequests.copyFailed") : t(`addons.openRequests.copy${state[0].toUpperCase()}${state.slice(1)}`)}
       </span>
     </div>
   );
@@ -204,7 +211,7 @@ export function AddonsSettings(props: Props) {
           />
         </div>
         <p className="addon-help">{t("addons.openRequests.copyHelp")}</p>
-        <CopyForAgents t={t} />
+        <CopyForAgents t={t} seat={props.seat} />
       </Group>
 
       {canInstall && (

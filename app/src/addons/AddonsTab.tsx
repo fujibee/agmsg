@@ -10,9 +10,9 @@ import type { AddonPaneRef, AddonsSnapshot, FetchProgress, InstallError, StagedI
 // Container for Settings → Add-ons. Holds the snapshot in local state seeded
 // from the mock module; the wiring later replaces the seed and the callbacks
 // with the Tauri commands, and the screens do not change.
-export function AddonsTab(props: { catalog: Catalog; openPanesOf: (addonId: string) => number; onOpenPane?: (ref: AddonPaneRef) => void }) {
+export function AddonsTab(props: { catalog: Catalog; openPanesOf: (addonId: string) => number; onOpenPane?: (ref: AddonPaneRef) => void; team?: string; appUser?: string }) {
   return props.catalog.live ? (
-    <AddonsTabLive catalog={props.catalog} openPanesOf={props.openPanesOf} onOpenPane={props.onOpenPane} />
+    <AddonsTabLive catalog={props.catalog} openPanesOf={props.openPanesOf} onOpenPane={props.onOpenPane} team={props.team} appUser={props.appUser} />
   ) : (
     <MockAddonsTab catalog={props.catalog} onOpenPane={props.onOpenPane} />
   );
