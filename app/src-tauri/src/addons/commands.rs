@@ -432,6 +432,7 @@ fn strip_to_feed(payload: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use crate::addons::panes::Declared;
     use std::fs;
     use crate::addons::broker;
@@ -529,6 +530,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn revoke_voids_the_live_grant_closes_the_pane_and_reports_each_pane_once() {
         let nav = crate::addons::nav::NavPolicy::new(None);
         let panes = Panes::new();
@@ -562,6 +564,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn revoking_a_team_stops_pushes_and_closes_the_pane() {
         let nav = crate::addons::nav::NavPolicy::new(None);
         let panes = Panes::new();
@@ -577,6 +580,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn a_grant_for_another_scope_or_pane_name_revokes_nothing() {
         let nav = crate::addons::nav::NavPolicy::new(None);
         let panes = Panes::new();
@@ -590,6 +594,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn close_all_voids_panes_and_feeds() {
         use std::collections::HashMap;
         let panes = Panes::new();

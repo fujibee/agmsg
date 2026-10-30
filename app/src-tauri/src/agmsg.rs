@@ -1423,6 +1423,12 @@ if [ -e "$p" ]; then e=true; else e=false; fi
 printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\n' "$t" "$p" "$e"
 "#,
         )]);
+        // the built-in drivers the fingerprint expects to find
+        for (dir, name) in [("partition", "shared"), ("partition", "per-team"), ("storage", "sqlite")] {
+            let d = b._dir.path().join("scripts/drivers").join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(format!("{name}.sh")), name).unwrap();
+        }
         b
     }
 
@@ -1483,6 +1489,52 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         add_team(&base, "a", r#"{"drivers":{"partition":"per-team"}}"#);
         touch_store(&base, "teams/a/messages.db");
         assert!(protected_locations().contains(&a_own), "{:?}", protected_locations());
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(not(target_os = "windows"))]
+    fn a_driver_from_outside_agmsg_or_new_resolution_code_sends_the_next_call_back_to_the_script() {
+        let base = counting_base();
+        add_team(&base, "a", "{}");
+        touch_store(&base, "messages.db");
+        let _ = protected_locations();
+        let warm = calls(&base);
+        let _ = protected_locations();
+        assert_eq!(calls(&base), warm, "kept while nothing changed");
+
+        // the resolution code itself changed (a core update): asked again, and kept again afterwards
+        std::fs::create_dir_all(base._dir.path().join("scripts/lib")).unwrap();
+        std::fs::write(base._dir.path().join("scripts/lib/driver-registry.sh"), "# new rules").unwrap();
+        let _ = protected_locations();
+        assert!(calls(&base) > warm, "the code changed");
+        let again = calls(&base);
+        let _ = protected_locations();
+        assert_eq!(calls(&base), again);
+
+        // an external driver folder: never kept, and a store it moves is seen
+        let plugin = base._dir.path().join("plugins/p/partition");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("mine.sh"), "# arbitrary").unwrap();
+        let n = calls(&base);
+        let _ = protected_locations();
+        let _ = protected_locations();
+        assert!(calls(&base) >= n + 4, "every call asks");
+        let moved = touch_store(&base, "moved/messages.db");
+        std::fs::write(base._dir.path().join("teams/a/config.json"), r#"{"drivers":{"partition":"mine"}}"#).unwrap();
+        let _ = moved;
+
+        // the plugin folders named in the environment: never kept
+        std::fs::remove_dir_all(base._dir.path().join("plugins")).unwrap();
+        std::fs::write(base._dir.path().join("teams/a/config.json"), "{}").unwrap();
+        let _ = protected_locations();
+        let kept = calls(&base);
+        let _ = protected_locations();
+        assert_eq!(calls(&base), kept, "back to built-in drivers: kept");
+        let _env = EnvGuard::set("AGMSG_PLUGIN_DIRS", "/somewhere");
+        let _ = protected_locations();
+        let _ = protected_locations();
+        assert!(calls(&base) >= kept + 4, "AGMSG_PLUGIN_DIRS: every call asks");
     }
 
     #[test]

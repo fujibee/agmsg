@@ -349,6 +349,7 @@ pub fn addon_forget_grant<R: Runtime>(app: AppHandle<R>, host: State<'_, Arc<Add
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use crate::addons::catalog::Catalog;
     use crate::addons::install::testutil::tarball;
     use crate::addons::panes::{AddPane, Declared, OpenArgs};
@@ -398,6 +399,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn a_save_is_bound_to_the_pane_instance_the_commit_and_what_it_holds() {
         let d = tempfile::tempdir().unwrap();
         install(d.path(), SHA1);
@@ -418,6 +420,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn consent_given_under_an_old_commit_cannot_be_attached_to_the_new_one() {
         let d = tempfile::tempdir().unwrap();
         install(d.path(), SHA1);
@@ -439,6 +442,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn an_update_between_the_check_and_the_write_cannot_leave_an_old_row() {
         // the update takes the install lock first and holds it while it activates;
         // the save, started meanwhile, waits and then sees the new commit
@@ -460,6 +464,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn a_revoke_that_finished_cannot_be_undone_by_a_save_that_started_before_it() {
         let d = tempfile::tempdir().unwrap();
         install(d.path(), SHA1);
@@ -479,6 +484,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn saved_grants_of_an_older_commit_are_never_replayed() {
         let d = tempfile::tempdir().unwrap();
         install(d.path(), SHA1);
@@ -491,6 +497,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn a_closed_pane_cannot_save() {
         let d = tempfile::tempdir().unwrap();
         install(d.path(), SHA1);
