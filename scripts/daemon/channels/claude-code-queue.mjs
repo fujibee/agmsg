@@ -242,7 +242,7 @@ export function createClaudeCodeQueueChannel({
 
     let result;
     try {
-      result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce, { installRoot, team, agent }), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
+      result = await send({ socketPath: record.messaging_socket, nonce, body: inboxNudge(nonce), token: record.messaging_token, fromMode: mode === "bypass" ? "bypass" : "", timeoutMs });
     } catch (error) {
       result = { state: "failed", reason: `send_error:${error?.code ?? error?.message ?? String(error)}` };
     }
