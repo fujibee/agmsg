@@ -362,9 +362,11 @@ fn watchable_stores_timed() -> (Vec<PathBuf>, Vec<String>) {
             return answer.clone();
         }
     }
-    let answer = watchable_stores();
-    if let Some(st) = stamp {
-        *LAST.lock().unwrap() = Some((std::time::Instant::now(), st, answer.clone()));
+    let (answer, whole) = watchable_stores_checked();
+    match (stamp, whole) {
+        // only a whole look is kept; a failed or partial one is asked for again on the next tick
+        (Some(st), true) => *LAST.lock().unwrap() = Some((std::time::Instant::now(), st, answer.clone())),
+        _ => *LAST.lock().unwrap() = None,
     }
     answer
 }
@@ -393,21 +395,16 @@ fn note_batch_failure(f: &BatchFailure) {
     BATCH_LOG.lock().unwrap().push(line);
 }
 
-/// The first part of a script's stderr on one short line (control characters become spaces; the install
-/// folder is written `<base>` so the log holds no path of the person's).
-fn head_of(stderr: &[u8], base: &str) -> String {
-    String::from_utf8_lossy(stderr).replace(base, "<base>").chars().map(|c| if c.is_control() { ' ' } else { c }).take(160).collect::<String>().trim().to_string()
-}
-
 /// Every team and its store from ONE `bash`, however many teams there are. `Err` says why that did not work
 /// out (the script failed, or the output was not exactly what it should be): the caller logs it and then asks
 /// the old way, team by team. A value is never split or merged: fields end with NUL, so a TAB or a newline in
 /// a path stays in that path, and the output must be whole records with no repeated team.
 fn fetch_stores_in_one_process() -> Result<(Vec<String>, std::collections::HashMap<String, Result<StoreInfo, String>>), BatchFailure> {
-    let mut cmd = bash_command().map_err(|e| fail("batch_spawn", e))?;
-    let out = cmd.arg("-c").arg(STORES_SH).arg("agmsg-stores").arg(bash_path(&agmsg_base())).output().map_err(|e| fail("batch_spawn", e.to_string()))?;
+    // Only fixed words and numbers reach the log: what a script or the OS says can hold the person's paths.
+    let mut cmd = bash_command().map_err(|_| fail("batch_spawn", "no bash to run"))?;
+    let out = cmd.arg("-c").arg(STORES_SH).arg("agmsg-stores").arg(bash_path(&agmsg_base())).output().map_err(|e| fail("batch_spawn", format!("os error {}", e.raw_os_error().map_or("none".to_string(), |c| c.to_string()))))?;
     if !out.status.success() {
-        return Err(fail("batch_exit", format!("{} stderr: {}", out.status, head_of(&out.stderr, &bash_path(&agmsg_base())))));
+        return Err(fail("batch_exit", format!("exit status {}", out.status.code().map_or("none (signal)".to_string(), |c| c.to_string()))));
     }
     parse_stores(&out.stdout)
 }
@@ -700,15 +697,22 @@ fn fallback_new_messages(team: &str, last_seen: Option<&str>) -> (Vec<Message>, 
 }
 
 fn watchable_stores() -> (Vec<PathBuf>, Vec<String>) {
+    watchable_stores_checked().0
+}
+
+/// `watchable_stores`, and whether the look was whole: the list of teams came, and so did every team's store.
+/// A look that was not whole is still the best answer there is, but nothing should keep it.
+fn watchable_stores_checked() -> ((Vec<PathBuf>, Vec<String>), bool) {
     // One look at every team (one process at most); each team's answer is read from it, not asked for again
     let looked = stores();
     let teams: Vec<String> = match &looked {
         Some(s) => s.teams.clone(),
         None => match run_script("api.sh", &["get", "teams"]) {
             Ok(raw) => parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect(),
-            Err(_) => return (Vec::new(), Vec::new()),
+            Err(_) => return ((Vec::new(), Vec::new()), false),
         },
     };
+    let whole = looked.as_ref().is_some_and(|s| s.infos.values().all(|i| i.is_ok()));
     let mut direct: Vec<PathBuf> = Vec::new();
     let mut via_api: Vec<String> = Vec::new();
     for name in teams {
@@ -725,7 +729,7 @@ fn watchable_stores() -> (Vec<PathBuf>, Vec<String>) {
             None => via_api.push(name),
         }
     }
-    (direct, via_api)
+    ((direct, via_api), whole)
 }
 
 #[derive(Clone, Serialize)]
@@ -1750,7 +1754,7 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         let shim = dir.join("shim");
         std::fs::create_dir_all(&shim).unwrap();
         let log = dir.join("bash-starts");
-        let body = format!("#!/bin/sh\necho x >> '{}'\nexec '{}' \"$@\"\n", log.display(), real.trim());
+        let body = format!("#!/bin/sh\necho x >> '{}'\n[ -e '{}' ] && exit 1\nexec '{}' \"$@\"\n", log.display(), dir.join("bash-fails").display(), real.trim());
         std::fs::write(shim.join("bash"), body).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(shim.join("bash"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1869,20 +1873,50 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
     #[test]
     #[serial]
     #[cfg(unix)]
-    fn when_the_one_process_look_fails_the_reason_is_logged_with_a_fixed_code() {
+    fn when_the_one_process_look_fails_the_reason_is_logged_with_a_fixed_code_and_no_path() {
         BATCH_LOG.lock().unwrap().clear();
-        // no core functions at all: the script exits non-zero
-        let _b = fake_base(&[("api.sh", "exit 1\n")]);
+        // the core's own function fails and says where, in its error output
+        let b = fake_base(&[("api.sh", "exit 1\n")]);
+        std::fs::create_dir_all(b._dir.path().join("scripts/lib")).unwrap();
+        std::fs::write(b._dir.path().join("scripts/lib/storage.sh"), "echo 'open /Users/example/private/config failed' >&2\nreturn 1\n").unwrap();
         let r = fetch_stores_in_one_process();
         assert_eq!(r.unwrap_err().code, "batch_exit");
         let _ = watchable_stores();
         let log = BATCH_LOG.lock().unwrap().join("\n");
-        assert!(log.contains("(batch_exit)") && log.contains("asking team by team"), "{log}");
-        assert!(!log.contains(&*_b._dir.path().to_string_lossy()), "no raw paths in the log: {log}");
+        assert!(log.contains("(batch_exit)") && log.contains("exit status 1") && log.contains("asking team by team"), "{log}");
+        assert!(!log.contains("/Users/example") && !log.contains("private") && !log.contains(&*b._dir.path().to_string_lossy()), "no path in the log: {log}");
         // an answer that is not whole records
         BATCH_LOG.lock().unwrap().clear();
         note_batch_failure(&parse_stores(b"a\0b\0").unwrap_err());
         assert!(BATCH_LOG.lock().unwrap().join("\n").contains("(batch_parse)"));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn the_timer_keeps_only_a_whole_look_and_asks_again_after_a_failed_one() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        let store = add_real_team(&base, "a", "{}", true);
+        std::fs::create_dir_all(root.join("plugins/p")).unwrap(); // nothing is kept by the cache
+        let (_path, log) = counting_bash(&root);
+        std::fs::write(root.join("bash-fails"), "").unwrap();
+        let failed = watchable_stores_timed();
+        assert!(failed.0.is_empty(), "nothing could be learned");
+        let after_failure = starts(&log);
+        assert!(after_failure >= 1);
+        // still failing: the failed look was not kept, so the next tick asks again
+        let _ = watchable_stores_timed();
+        assert!(starts(&log) > after_failure, "asked again");
+        // recovered: the right answer, kept from then on
+        std::fs::remove_file(root.join("bash-fails")).unwrap();
+        let recovered = watchable_stores_timed();
+        assert_eq!(recovered.0, vec![store]);
+        let kept = starts(&log);
+        for _ in 0..4 {
+            assert_eq!(watchable_stores_timed(), recovered);
+        }
+        assert_eq!(starts(&log), kept, "a whole look is kept");
     }
 
     #[test]
