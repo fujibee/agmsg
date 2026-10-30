@@ -3371,6 +3371,14 @@ async function postCandidates(config, candidates, requestCall, eventCall) {
 // `{ pushSaturated }`: true when a FULL push page was prepared (more remains
 // to push), which is the loop's catch-up signal. Dependency-injectable for
 // tests (adaptive-sync-catchup design).
+// How long an idle-prepare checkpoint may go between real `prepare` calls
+// before it is forced to re-verify itself, regardless of how perfectly it
+// still matches (#1836 review): shared between `cycle()`'s own entry check
+// and `runLoop`'s sleep, which clamps its wait so the two cannot drift --
+// checking only at a cycle's entry would let a checkpoint armed just before
+// a long sleep begins go unchecked for close to double this value.
+export const IDLE_SAFETY_NET_MS = 60000;
+
 export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = null },
   dependencies = {}) {
   const healthCall = dependencies.healthCall ?? health;
@@ -3385,7 +3393,11 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
   const readStateCycleCall = dependencies.readStateCycleCall ?? readStateCycle;
   const activateKeyRotationsCall = dependencies.activateKeyRotationsCall ?? activateKeyRotations;
   const localStoreFingerprintCall = dependencies.localStoreFingerprintCall ?? localStoreFingerprint;
-  const nowCall = dependencies.nowCall ?? (() => Date.now());
+  // Numeric milliseconds -- named `clockCall`, not `nowCall`, specifically
+  // so it cannot collide with runLoop's own `nowCall` dependency (an ISO
+  // string, for its unrelated logging timestamps) when both read from the
+  // SAME `dependencies` object runLoop forwards to this function unchanged.
+  const clockCall = dependencies.clockCall ?? Date.now;
 
   const ready = await healthCall(config.server_url, config.remote_team_id);
   if (ready.server_instance_id !== config.server_instance_id) throw new Error("health server instance changed");
@@ -3417,9 +3429,7 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
   //
   //   1. A checkpoint exists at all.
   //   2. It is not yet IDLE_SAFETY_NET_MS old. Even a correctly-armed
-  //      checkpoint is forced to re-verify itself this often (tl2, after
-  //      three rounds pointing at the SAME root cause in the path-resolver
-  //      this replaced -- see localStoreFingerprint's comment): whatever
+  //      checkpoint is forced to re-verify itself this often: whatever
   //      could make the checkpoint's remembered paths stale (a plugin
   //      partition driver swapped out, AGMSG_STORAGE_PATH changed by some
   //      means this file cannot enumerate) is bounded in how long it can go
@@ -3429,9 +3439,8 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
   //   4. Write eligibility (capabilities-derived, pure JS, no spawn) still
   //      matches too (#1836 review point 3: a server-side change with the
   //      local store never moving must still disarm it).
-  const IDLE_SAFETY_NET_MS = 60000;
   const checkpointFresh = idleCheckpoint !== null &&
-    (nowCall() - idleCheckpoint.armedAt) < IDLE_SAFETY_NET_MS;
+    (clockCall() - idleCheckpoint.armedAt) < IDLE_SAFETY_NET_MS;
   const checkpointFingerprint = checkpointFresh ?
     await localStoreFingerprintCall(idleCheckpoint.paths).catch(() => null) : null;
   const skipPrepare = checkpointFresh && checkpointFingerprint !== null &&
@@ -3441,6 +3450,7 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
   let state = null;
   let candidates = [];
   let reportedPaths = null;
+  let armFingerprint = null;
   if (skipPrepare) {
     if (idleCheckpoint.cursor === null) throw new Error("cycle: an idle checkpoint must carry a cursor");
     await eventCall("push.skipped", { reason: "idle-no-local-change" });
@@ -3474,17 +3484,32 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
       wire_ids: candidates.map((item) => item.id) });
     // The paths THIS call actually used, reported back by the drivers
     // themselves (storage-sync-driver.sh's `db_path`, roster-sync.mjs's
-    // `config_path`/`journal_path`) -- never re-derived here. A driver that
-    // does not report them (an older build, or a custom one that has not
-    // adopted the field) leaves this null, which disarms the checkpoint
-    // below exactly like any other "unknown": never guess.
+    // `config_path`/`journal_path`) -- never re-derived here. ALL THREE are
+    // required: a driver that skips `prepare` based on a checkpoint also
+    // skips its OWN axis's roster/storage prepare, so arming on only the
+    // storage side (say) would silently stop re-checking the roster axis
+    // the moment a roster driver that does not report its path -- an older
+    // build, or a custom one -- is in play (#1836 review). Any one missing
+    // leaves this null, which disarms the checkpoint below exactly like any
+    // other "unknown": never guess.
     const dbPath = typeof state.db_path === "string" && state.db_path.length > 0 ? state.db_path : null;
     const configPath = typeof rosterState?.config_path === "string" && rosterState.config_path.length > 0 ?
       rosterState.config_path : null;
     const journalPath = typeof rosterState?.journal_path === "string" && rosterState.journal_path.length > 0 ?
       rosterState.journal_path : null;
-    reportedPaths = dbPath === null ? null : [dbPath, `${dbPath}-wal`, `${dbPath}-shm`,
-      ...(configPath !== null ? [configPath] : []), ...(journalPath !== null ? [journalPath] : [])];
+    reportedPaths = (dbPath === null || configPath === null || journalPath === null) ? null :
+      [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, configPath, journalPath];
+    // Fingerprinted HERE, immediately after `prepare` returned these paths
+    // and before anything else in this cycle runs (#1836 review: taking
+    // this later -- after the pull/apply/read-state work below -- would
+    // let a local write that happened in between get silently absorbed
+    // into the "armed" baseline, since it already landed before this stat
+    // sees it. Nothing between `prepare` returning and this line can write
+    // to the local store on the pushEmpty path this is only used for: the
+    // push/reconcile section below never runs when there is nothing to
+    // push.
+    armFingerprint = reportedPaths !== null ?
+      await localStoreFingerprintCall(reportedPaths).catch(() => null) : null;
   }
 
   if (!writeProfile.eligible) {
@@ -3661,11 +3686,17 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
     // forward untouched, including `armedAt` -- the 60s safety net counts
     // from the last REAL `prepare`, not from every skip.
     checkpoint = { ...idleCheckpoint, cursor };
-  } else if (pushEmpty && writeProfile.eligible && reportedPaths !== null) {
-    const freshFingerprint = await localStoreFingerprintCall(reportedPaths).catch(() => null);
-    if (freshFingerprint !== null) {
-      checkpoint = { paths: reportedPaths, fingerprint: freshFingerprint, eligible: true, cursor, armedAt: nowCall() };
-    }
+  } else if (pushEmpty && writeProfile.eligible && reportedPaths !== null && armFingerprint !== null) {
+    // Reuses `armFingerprint`, taken right after `prepare` returned these
+    // paths -- not re-fetched here, after the pull/apply/read-state work
+    // above has already run. Re-fetching at this point would stat the
+    // store AFTER that work had every chance to write to it, so a local
+    // write landing during that window would already be reflected and
+    // silently treated as part of the "nothing changed" baseline (#1836
+    // review: reproduced as two cycle() calls where a write between
+    // prepare returning and the OLD late stat left prepareCalls at 1
+    // where 2 were expected).
+    checkpoint = { paths: reportedPaths, fingerprint: armFingerprint, eligible: true, cursor, armedAt: clockCall() };
   }
   return { pushSaturated, cursor, hadActivity: !pushEmpty || pulledCount > 0, checkpoint };
 }
@@ -3749,6 +3780,10 @@ export async function runLoop(config, options, dependencies = {}) {
   const recordRefusalCall = dependencies.recordRefusalCall ?? recordRefusal;
   const isRefusalCall = dependencies.isRefusalCall ?? isRefusal;
   const nowCall = dependencies.nowCall ?? (() => new Date().toISOString());
+  // Numeric milliseconds, distinct from `nowCall` above (an ISO string, for
+  // logging) -- needed to clamp a sleep against `idleCheckpoint.armedAt`,
+  // which `cycle()` also stamps with this same `clockCall` dependency.
+  const clockCall = dependencies.clockCall ?? Date.now;
   const collectInstallBaselineCall = dependencies.collectInstallBaselineCall ?? collectInstallBaseline;
   const installChangedCall = dependencies.installChangedCall ?? installChangedAgainst;
   const scriptsRoot = dependencies.scriptsRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -3862,7 +3897,21 @@ export async function runLoop(config, options, dependencies = {}) {
         // interval too, with no way to compensate.
         const intervalMs = idleCheckpoint === null || idleStreak <= 1 ? steadyIntervalMs :
           Math.min(MAX_IDLE_INTERVAL_MS, steadyIntervalMs * 2 ** (idleStreak - 1));
-        const waitMs = Math.max(steadyIntervalMs, intervalMs);
+        // Clamped to what remains of the checkpoint's OWN 60s safety-net
+        // budget (#1836 review point 3): checked only at cycle() entry, a
+        // checkpoint armed just before a long sleep begins could otherwise
+        // go unverified for close to double IDLE_SAFETY_NET_MS -- once for
+        // the sleep itself, again for the cycle it wakes into reading a
+        // still-fresh-by-a-hair checkpoint. Clamping here means the NEXT
+        // cycle entry is always within budget of this one's armedAt.
+        const safetyRemainingMs = idleCheckpoint === null ? Infinity :
+          Math.max(0, IDLE_SAFETY_NET_MS - (clockCall() - idleCheckpoint.armedAt));
+        // No floor on the safety-net side: once its budget is exhausted,
+        // the next cycle entry must happen at or before it, even if that
+        // means sleeping for LESS than steadyIntervalMs (down to 0ms).
+        // Flooring it at steadyIntervalMs here, as the interval side does,
+        // would let the very last sleep before the deadline overshoot it.
+        const waitMs = Math.min(Math.max(steadyIntervalMs, intervalMs), safetyRemainingMs);
         if (waitMs <= steadyIntervalMs) {
           await sleepCall(waitMs);
         } else {

@@ -3584,7 +3584,7 @@ const idleCycleBaseDeps = (overrides = {}) => ({
   eventCall: async () => {},
   readStateCycleCall: async () => {},
   localStoreFingerprintCall: overrides.localStoreFingerprintCall ?? (async (paths) => paths.join("|")),
-  nowCall: overrides.nowCall ?? (() => 1000),
+  clockCall: overrides.clockCall ?? (() => 1000),
   ...overrides.extra,
 });
 // A driver double that reports db_path/config_path/journal_path, like the
@@ -3637,7 +3637,7 @@ test("cycle: an unchanged checkpoint (matching paths, matching eligibility, with
   const watchedPaths = ["/db/messages.db", "/db/messages.db-wal", "/db/messages.db-shm"];
   const idleCheckpoint = { paths: watchedPaths, fingerprint: watchedPaths.join("|"), eligible: true, cursor: "7", armedAt: 1000 };
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
-    nowCall: () => 1000 + 10000, // well under the 60s safety net
+    clockCall: () => 1000 + 10000, // well under the 60s safety net
     extra: {
       driverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return []; },
       rosterDriverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return []; },
@@ -3653,7 +3653,7 @@ test("cycle: a changed fingerprint on the checkpoint's own watched paths runs pr
   const watchedPaths = ["/db/messages.db"];
   const idleCheckpoint = { paths: watchedPaths, fingerprint: "OLD", eligible: true, cursor: "7", armedAt: 1000 };
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
-    nowCall: () => 1000 + 10000,
+    clockCall: () => 1000 + 10000,
     localStoreFingerprintCall: async (paths) => `NEW:${paths.join("|")}`,
     extra: idleDrivers(),
   }));
@@ -3667,25 +3667,26 @@ test("cycle: write eligibility flipping disarms a checkpoint that still matches 
   const ineligibleCapabilities = { ...idleCapabilities, write_allowed_ciphers: [],
     policy_history: [{ ...idleCapabilities.policy_history[0], write_allowed_ciphers: [] }] };
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
-    nowCall: () => 1000 + 10000, capabilities: ineligibleCapabilities, extra: idleDrivers(),
+    clockCall: () => 1000 + 10000, capabilities: ineligibleCapabilities, extra: idleDrivers(),
   }));
   // Ran for real despite a matching fingerprint; ineligible + drained never arms.
   assert.equal(result.checkpoint, null);
 });
 
-test("cycle: the 60s safety net forces a real prepare even with a perfectly matching checkpoint (tl2)", async () => {
+test("cycle: the 60s safety net forces a real prepare even with a perfectly matching checkpoint", async () => {
   let prepareCalls = 0;
   const watchedPaths = ["/db/messages.db"];
   const idleCheckpoint = { paths: watchedPaths, fingerprint: watchedPaths.join("|"), eligible: true, cursor: "7", armedAt: 1000 };
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
-    nowCall: () => 1000 + 60000, // exactly at the 60s boundary -- no longer "fresh"
+    clockCall: () => 1000 + 60000, // exactly at the 60s boundary -- no longer "fresh"
     localStoreFingerprintCall: async (paths) => paths.join("|"), // would have matched, if asked
     extra: {
       driverCall: async (operation) => {
         if (operation === "prepare") { prepareCalls += 1; return [{ type: "sync_state", driver_generation: "g", transport_cursor: "9", db_path: "/db/messages.db" }]; }
         return [];
       },
-      rosterDriverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return [{ type: "roster_sync_state", transport_cursor: "0" }]; },
+      rosterDriverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return [{ type: "roster_sync_state", transport_cursor: "0",
+        config_path: "/conn/teams/t/config.json", journal_path: "/conn/teams/t/roster.jsonl" }]; },
     },
   }));
   assert.equal(prepareCalls, 2);
@@ -3698,6 +3699,57 @@ test("cycle: a prepare that finds something to push never arms a checkpoint", as
     extra: idleDrivers({ candidates: [{ type: "sync_push_candidate", local_position: "1", id: "550e8400-e29b-41d4-a716-446655440001" }] }),
   }));
   assert.equal(result.checkpoint, null);
+});
+
+test("cycle: a drained, eligible prepare never arms a checkpoint when the ROSTER driver omits config_path/journal_path, even though storage reported db_path", async () => {
+  const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null }, idleCycleBaseDeps({
+    extra: idleDrivers({ configPath: null, journalPath: null }),
+  }));
+  // Skipping `prepare` next time would skip BOTH drivers' prepare, so
+  // arming only on the storage side would stop re-checking the roster
+  // axis the moment its driver does not report a path.
+  assert.equal(result.checkpoint, null);
+});
+
+test("cycle: a local write landing between prepare returning and the apply/read-state work below is NOT absorbed into the armed checkpoint", async () => {
+  // Reproduces the review's exact scenario: `prepare` returns, finds
+  // nothing to push, and the paths it reports resolve to fingerprint "A".
+  // While this SAME cycle's pull/apply/read-state work is still running,
+  // a local write happens, moving the real fingerprint to "B". If the
+  // checkpoint's fingerprint were taken only at the very end of the
+  // cycle (after that work), it would read "B" and arm AS IF "B" were the
+  // settled, already-verified state -- silently treating the write that
+  // just happened as something `prepare` had already accounted for, when
+  // it had not. Taken immediately after `prepare` instead, the armed
+  // fingerprint is "A", so the NEXT cycle correctly sees it differs from
+  // the real "B" and runs `prepare` for real again.
+  let fingerprintCalls = 0;
+  const localStoreFingerprintCall = async (paths) => {
+    fingerprintCalls += 1;
+    // First call: right after prepare, before any of this cycle's own
+    // pull/apply/read-state work has run -- still "A". Any LATER call
+    // (a second cycle re-checking the checkpoint, or a wrongly-late stat
+    // within the same cycle) sees "B", as if the write already happened.
+    return fingerprintCalls === 1 ? "A" : "B";
+  };
+  const deps = idleCycleBaseDeps({ localStoreFingerprintCall, extra: idleDrivers() });
+  const first = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null }, deps);
+  // Called exactly once -- the armed fingerprint is the first (and only)
+  // call's answer, never re-fetched later in the same cycle after the
+  // pull/apply/read-state work below had a chance to run.
+  assert.equal(fingerprintCalls, 1);
+  assert.equal(first.checkpoint.fingerprint, "A");
+  let prepareCalls = 0;
+  const second = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: first.checkpoint },
+    idleCycleBaseDeps({
+      localStoreFingerprintCall: async (paths) => "B", // the checkpoint's own re-check call
+      extra: {
+        driverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return idleDrivers().driverCall(operation); },
+        rosterDriverCall: async (operation) => { if (operation === "prepare") prepareCalls += 1; return idleDrivers().rosterDriverCall(operation); },
+      },
+    }));
+  assert.equal(prepareCalls, 2); // "B" != "A" -> never skipped
+  void second;
 });
 
 test("runLoop: a cycle's returned checkpoint is handed to the very next cycle, unchanged, and a null checkpoint clears it", async () => {
@@ -3751,6 +3803,7 @@ test("runLoop: consecutive idle cycles stretch the steady interval towards 60s, 
   await assert.rejects(() => runLoop(config, {}, {
     collectInstallBaselineCall: async () => null,
     localStoreFingerprintCall: async () => "fp-stable", // no local write during any sleep in this script
+    clockCall: () => 1000, // matches stableCheckpoint.armedAt -- the 60s safety net is not under test here
     cycleCall: async () => {
       if (i >= script.length) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
       return { pushSaturated: false, hadActivity: script[i++], checkpoint: stableCheckpoint };
@@ -3778,6 +3831,7 @@ test("runLoop: the idle interval never exceeds 60s", async () => {
   await assert.rejects(() => runLoop(config, {}, {
     collectInstallBaselineCall: async () => null,
     localStoreFingerprintCall: async () => "fp-stable",
+    clockCall: () => 1000, // matches stableCheckpoint.armedAt -- the 60s safety net is not under test here
     cycleCall: async () => {
       i += 1;
       if (i > 8) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -3791,6 +3845,44 @@ test("runLoop: the idle interval never exceeds 60s", async () => {
   const totalsPerCycle = [5000, 10000, 20000, 40000, 60000, 60000, 60000, 60000];
   assert.equal(sleeps.length, totalsPerCycle.reduce((sum, ms) => sum + ms / 5000, 0));
   assert.equal(sleeps.reduce((sum, ms) => sum + ms, 0), totalsPerCycle.reduce((sum, ms) => sum + ms, 0));
+});
+
+// #1836 review point 3: checked only at cycle() entry, a checkpoint armed
+// just before a long sleep begins could go unverified for close to double
+// IDLE_SAFETY_NET_MS. The sleep itself must clamp against the remaining
+// budget so the NEXT cycle entry is never more than 60s past armedAt.
+test("runLoop: a stretched-out sleep is clamped so the next cycle entry is never more than 60s past armedAt", async () => {
+  const sleeps = [];
+  const stableCheckpoint = { paths: ["/p"], fingerprint: "fp-stable", eligible: true, cursor: "c", armedAt: 0 };
+  let elapsed = 0; // a simple simulated clock: advances by whatever was just slept
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null,
+    localStoreFingerprintCall: async () => "fp-stable",
+    clockCall: () => elapsed,
+    cycleCall: async () => {
+      i += 1;
+      if (i > 5) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      return { pushSaturated: false, hadActivity: false, checkpoint: stableCheckpoint };
+    },
+    sleepCall: async (ms) => { sleeps.push(ms); elapsed += ms; },
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+  }), /stop/);
+  // Unclamped, streak 1..5 would ask for totals 5000,10000,20000,40000,60000
+  // -- a cumulative 135000ms, well past armedAt+60000. Clamped against the
+  // remaining budget each time, no cycle entry is ever more than 60000ms
+  // (IDLE_SAFETY_NET_MS) after armedAt=0: the running total of sleeps,
+  // measured right before each cycle entry, never exceeds 60000.
+  let total = 0;
+  for (const ms of sleeps) {
+    total += ms;
+    assert.ok(total <= 60000, `cumulative sleep ${total}ms exceeded the 60s safety-net budget`);
+  }
+  // And the clamp actually DID bind somewhere (the unclamped schedule would
+  // have exceeded 60000 well before the 5th cycle) -- otherwise this test
+  // would pass trivially without the fix ever running.
+  assert.ok(sleeps.some((ms, index) => ms !== [5000, 10000, 20000, 40000, 60000][index]));
 });
 
 // #1836 review point A: no checkpoint (a driver that never reported its
@@ -3826,6 +3918,7 @@ test("runLoop: a write that already landed by the time the sleep begins still wa
   await assert.rejects(() => runLoop(config, {}, {
     collectInstallBaselineCall: async () => null,
     localStoreFingerprintCall: async () => "fp-3",
+    clockCall: () => 1000, // matches armedAt -- the 60s safety net is not under test here
     cycleCall: async () => {
       i += 1;
       if (i === 1) return { pushSaturated: false, hadActivity: false,
@@ -3852,6 +3945,7 @@ test("runLoop: a null poll mid-sleep (#1836 review point 4) wakes immediately ra
   await assert.rejects(() => runLoop(config, {}, {
     collectInstallBaselineCall: async () => null,
     localStoreFingerprintCall: async () => fingerprints[Math.min(poll++, fingerprints.length - 1)],
+    clockCall: () => 1000, // matches armedAt -- the 60s safety net is not under test here
     cycleCall: async () => {
       i += 1;
       if (i === 1) return { pushSaturated: false, hadActivity: false,
