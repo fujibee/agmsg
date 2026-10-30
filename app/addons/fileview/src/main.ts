@@ -2,12 +2,13 @@ import "./style.css";
 import { app, errorText } from "../../_shared/kit";
 import { h } from "../../_shared/dom";
 import { rootLabel } from "../../_shared/format";
+import { loadingView } from "../../_shared/busy";
 import { Tree } from "./tree";
 import { Viewer } from "./viewer";
 
 async function main(): Promise<void> {
   const root = document.getElementById("root")!;
-  root.append(h("div", { class: "empty" }, "Loading…"));
+  root.append(loadingView("Loading…"));
 
   let args;
   try {

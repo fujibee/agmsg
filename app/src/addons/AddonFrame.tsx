@@ -21,6 +21,8 @@ export function AddonFrame(props: {
   reloadKey: number;
   onRefused?: (op: string, code: string) => void;
   onFeedFailed?: (code: string, message: string) => void;
+  /** The frame's document finished loading (every load, first or reload). Only for a "loading" cover; the relay is not involved. */
+  onLoaded?: () => void;
 }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const relayRef = useRef<PaneRelay | null>(null);
@@ -56,7 +58,10 @@ export function AddonFrame(props: {
       title={props.title}
       src={props.url}
       sandbox={ADDON_FRAME_SANDBOX}
-      onLoad={() => void relayRef.current?.onFrameLoad()}
+      onLoad={() => {
+        void relayRef.current?.onFrameLoad();
+        props.onLoaded?.();
+      }}
     />
   );
 }

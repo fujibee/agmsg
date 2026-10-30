@@ -369,7 +369,9 @@
       "dev": "DEV · {{folder}}",
       "networkChip": "ネットワーク: {{hosts}}",
       "networkAnyChip": "ネットワーク: 任意のサイト",
-      "framePlaceholder": "アドオンのフレーム"
+      "framePlaceholder": "アドオンのフレーム",
+      "opening": "{{title}} を開いています…",
+      "loading": "{{title}} を読み込んでいます…"
     },
     "failure": {
       "digest_mismatch": "{{title}} を開けません。ファイルが不完全か、インストール後に変更されています。",

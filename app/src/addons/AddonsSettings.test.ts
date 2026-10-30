@@ -125,7 +125,7 @@ describe("AddonsSettings", () => {
     expect(off(["add-ons are not verified on WebView2 yet"])).not.toContain("addons.checkAgain");
     const running = off(["checking again: asked by the user"]);
     expect(running).toContain("addons.checkAgain");
-    expect(running).toMatch(/<button type="button" class="addon-btn" disabled="">\[addons\.checkAgain\]/);
+    expect(running).toMatch(/<button type="button" class="addon-btn" disabled="" aria-busy="true">\[addons\.checkAgain\]/);
     expect(running).toContain("addons.checking");
     expect(render({ engine: { ok: false, reasons: ["the startup check did not finish (timeout)"] } })).not.toContain("addons.checkAgain");
   });

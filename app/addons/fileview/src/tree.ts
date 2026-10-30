@@ -1,6 +1,7 @@
 import { app, errorText } from "../../_shared/kit";
 import type { FsEntry } from "../../../addon-kit/protocol";
 import { h } from "../../_shared/dom";
+import { spinner } from "../../_shared/busy";
 import { formatBytes, joinPath } from "../../_shared/format";
 
 export function sortEntries(entries: FsEntry[]): FsEntry[] {
@@ -47,13 +48,18 @@ export class Tree {
   }
 
   private async loadChildren(dir: string, into: HTMLUListElement): Promise<void> {
+    // Waiting for the listing: say so in the list itself (the spinner only appears if it takes a moment).
+    into.replaceChildren(h("li", { class: "child-note", role: "none" }, "Loading…", spinner()));
+    into.setAttribute("aria-busy", "true");
     let list;
     try {
       list = await app.fs.list(dir);
     } catch (e) {
+      into.removeAttribute("aria-busy");
       into.replaceChildren(h("li", { class: "child-note", role: "none" }, `Could not list: ${errorText(e)}`));
       throw e;
     }
+    into.removeAttribute("aria-busy");
     into.replaceChildren();
     for (const entry of sortEntries(list.entries)) into.append(this.makeNode(dir, entry));
     if (list.truncated) {

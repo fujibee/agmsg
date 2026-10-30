@@ -2,6 +2,7 @@ import type { GrantChip, PaneState } from "./types";
 import type { Translate } from "./model";
 import { GrantCard, type GrantChoice } from "./GrantCard";
 import { FailureCard, type FailureAction } from "./FailureCard";
+import { LoadingView } from "../busy";
 
 // The add-on pane (S5): a body that is the grant card (S6), a failure card, or
 // the frame, and a status bar under it with the title, one chip per active
@@ -21,6 +22,8 @@ export function AddonPane(props: {
   canRemember?: boolean;
   /** A grant is being asked of Rust: the card disables its choices. */
   pending?: boolean;
+  /** Which choice of the grant card is running (it shows the spinner; the others are only disabled). */
+  pendingChoice?: GrantChoice;
   /** Header badge for a developer pane, e.g. the folder. */
   devFolder?: string;
   /** A refusal the broker just returned, shown briefly in the header. */
@@ -39,11 +42,11 @@ export function AddonPane(props: {
   return (
     <div className="addon-pane">
       <div className="addon-pane-body">
-        {state.kind === "grant" && <GrantCard t={t} title={props.title} need={state.need} canRemember={props.canRemember} pending={props.pending} onChoose={props.onGrant} />}
+        {state.kind === "grant" && <GrantCard t={t} title={props.title} need={state.need} canRemember={props.canRemember} pending={props.pending} pendingChoice={props.pendingChoice} onChoose={props.onGrant} />}
         {state.kind === "failure" && (
           <FailureCard t={t} title={props.title} failure={state.failure} onAction={props.onFailure} />
         )}
-        {state.kind === "frame" && (props.frame ?? <div className="addon-frame-placeholder">{t("addons.pane.framePlaceholder")}</div>)}
+        {state.kind === "frame" && (props.frame ?? <div className="addon-frame-placeholder"><LoadingView text={t("addons.pane.opening", { title: props.title })} /></div>)}
       </div>
       <div className="addon-pane-status">
         {!props.hideTitle && <span className="addon-pane-title">{props.title}</span>}

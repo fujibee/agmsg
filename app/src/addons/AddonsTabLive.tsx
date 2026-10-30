@@ -7,6 +7,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AddonsSettings, openNowRef, type InstalledNotice } from "./AddonsSettings";
 import type { Catalog } from "./catalog";
 import { collectSavedGrants } from "./collectGrants";
+import { useBusy } from "../busy";
 import { ConfirmInstallDialog, FetchProgressView, RemoveDialog } from "./Dialogs";
 import { createLiveSource, toCommandError, type Outcome } from "./source";
 import type { AddonPaneRef, FetchProgress, Grant, InstallError, StagedInstall } from "./types";
@@ -32,6 +33,8 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
   const [grantsError, setGrantsError] = useState<string | null>(null);
   const grantsSeq = useRef(0);
   const [openRequests, setOpenRequests] = useOpenRequestsSetting();
+  // Everything a click starts and Rust answers later: its button shows it until the answer, success or not.
+  const { busy, run } = useBusy();
   // The fetch in flight: its progress and result count only while this is still its id.
   const currentOp = useRef<string | null>(null);
   const opSeq = useRef(0);
@@ -102,10 +105,14 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
   const confirm = async () => {
     const s = staged;
     if (!s?.stagingId) return;
-    setStaged(null);
-    const r = await source.installConfirm(s.stagingId);
-    if (!r.ok) setNotice({ kind: "error", text: r.error.message });
-    else setInstalledNotice({ kind: s.from ? "updated" : "installed", addonId: s.addonId, title: s.title, paneName: s.panes[0]?.name });
+    // The dialog stays up, with Install busy, until Rust has answered.
+    try {
+      const r = await source.installConfirm(s.stagingId);
+      if (!r.ok) setNotice({ kind: "error", text: r.error.message });
+      else setInstalledNotice({ kind: s.from ? "updated" : "installed", addonId: s.addonId, title: s.title, paneName: s.panes[0]?.name });
+    } finally {
+      setStaged(null);
+    }
     catalog.reload();
   };
   const cancelConfirm = () => {
@@ -116,11 +123,15 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
   const removingAddon = catalog.addons.find((a) => a.id === removing);
   const doRemove = async () => {
     const a = removingAddon;
-    setRemoving(null);
     setInstalledNotice(null);
-    if (!a) return;
-    const r = a.dev ? await source.devRemove(a.id) : await source.remove(a.id);
-    if (!r.ok) setNotice({ kind: "error", text: r.error.message });
+    if (!a) return setRemoving(null);
+    // The dialog stays up, with Remove busy, until Rust has answered.
+    try {
+      const r = a.dev ? await source.devRemove(a.id) : await source.remove(a.id);
+      if (!r.ok) setNotice({ kind: "error", text: r.error.message });
+    } finally {
+      setRemoving(null);
+    }
     catalog.reload();
   };
 
@@ -148,27 +159,29 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
         t={tt}
         snapshot={{ addons: catalog.addons, grants, openRequests }}
         engine={catalog.engine}
+        busy={busy}
         seat={{ team: props.team ?? "", appUser: props.appUser ?? "", scriptsDir }}
         listError={catalog.listError}
         onRetryList={catalog.reload}
         installError={installError}
         notice={notice}
         grantsError={grantsError ?? undefined}
-        onRetryGrants={() => void loadGrants()}
-        onInstall={({ owner, repo, ref }) => void stage((opId) => source.installStart(`${owner}/${repo}${ref ? `@${ref}` : ""}`, opId), false)}
-        onCheckUpdate={(id) => void stage((opId) => source.checkUpdate(id, opId), true)}
+        onRetryGrants={() => void run("grants", loadGrants)}
+        onInstall={({ owner, repo, ref }) => void run("install", () => stage((opId) => source.installStart(`${owner}/${repo}${ref ? `@${ref}` : ""}`, opId), false))}
+        onCheckUpdate={(id) => void run(`check:${id}`, () => stage((opId) => source.checkUpdate(id, opId), true))}
         onRevoke={(addonId, i) => {
           const g = grants[i];
           if (!g || g.addonId !== addonId) return;
-          void source.forgetGrant(g.addonId, g.pane, g.permission, g.scope).then((r) => {
+          void run(`revoke:${addonId}:${i}`, async () => {
+            const r = await source.forgetGrant(g.addonId, g.pane, g.permission, g.scope);
             if (!r.ok) setNotice({ kind: "error", text: r.error.message });
-            void loadGrants();
+            await loadGrants();
           });
         }}
         onRemove={setRemoving}
         onOpenRequestsChange={setOpenRequests}
-        onLoadFromFolder={() => void loadFolder()}
-        onDevReload={(id) => void loadFolder(devFolders.current.get(id))}
+        onLoadFromFolder={() => void run("load", () => loadFolder())}
+        onDevReload={(id) => void run(`reload:${id}`, () => loadFolder(devFolders.current.get(id)))}
         installedNotice={installedNotice}
         onRecheck={() => void source.recheck()}
         onOpenNow={(n) => {
@@ -177,14 +190,15 @@ export function AddonsTabLive(props: { catalog: Catalog; openPanesOf: (addonId: 
         }}
       />
       {progress && <FetchProgressView t={tt} progress={progress} onCancel={cancelFetch} />}
-      {staged && <ConfirmInstallDialog t={tt} staged={staged} onCancel={cancelConfirm} onInstall={() => void confirm()} />}
+      {staged && <ConfirmInstallDialog t={tt} staged={staged} busy={busy.has("confirm")} onCancel={cancelConfirm} onInstall={() => void run("confirm", confirm)} />}
       {removingAddon && (
         <RemoveDialog
           t={tt}
           title={removingAddon.panes[0]?.title ?? removingAddon.id}
           openPanes={props.openPanesOf(removingAddon.id)}
+          busy={busy.has("remove")}
           onCancel={() => setRemoving(null)}
-          onRemove={() => void doRemove()}
+          onRemove={() => void run("remove", doRemove)}
         />
       )}
     </>

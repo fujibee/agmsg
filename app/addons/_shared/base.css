@@ -31,3 +31,12 @@ input { font: inherit; color: inherit; background: var(--bg); border: 1px solid 
 .notice.error { border-color: var(--err); }
 .notice h2 { margin: 0 0 6px; font-size: 14px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.spinner { display: inline-block; width: 0.9em; height: 0.9em; margin-left: 6px; vertical-align: -0.12em;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  opacity: 0; animation: spinner-in 0s linear 150ms forwards, spinner-spin 0.8s linear infinite; }
+@keyframes spinner-in { to { opacity: 0.7; } }
+@keyframes spinner-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: spinner-in 0s linear 150ms forwards; border-right-color: currentColor; border-style: dotted; } }
+.loading { display: flex; align-items: center; justify-content: center; gap: 4px; }
+.loading .spinner { margin-left: 0; margin-right: 4px; }
+button[aria-busy="true"] { cursor: progress; }

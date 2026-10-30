@@ -1,6 +1,7 @@
 import { app, errorText } from "../../_shared/kit";
 import type { FsEntry } from "../../../addon-kit/protocol";
 import { clear, h } from "../../_shared/dom";
+import { loadingView, spinner } from "../../_shared/busy";
 import { baseName, dirName, formatBytes, toBytes } from "../../_shared/format";
 import { highlight, imageType, isMarkdown, languageFor } from "./lang";
 import { LineBuffer, looksBinary, splitHighlighted } from "./lines";
@@ -71,7 +72,7 @@ export class Viewer {
     const token = this.token;
     this.current = { path, entry, name };
     this.bar.replaceChildren(h("span", { class: "path", title: name }, name), h("span", { class: "dim" }, formatBytes(entry.size)));
-    this.body.replaceChildren(h("div", { class: "empty" }, "Loading…"));
+    this.body.replaceChildren(loadingView("Loading…"));
     this.body.scrollTop = 0;
     try {
       const img = imageType(name);
@@ -205,6 +206,15 @@ export class Viewer {
     const loadMore = async () => {
       if (loading || done) return;
       loading = true;
+      // Busy: the button (when it was clicked) or a line (when the end scrolled into view) shows the page is coming.
+      const btn = more.querySelector("button");
+      if (btn) {
+        btn.disabled = true;
+        btn.setAttribute("aria-busy", "true");
+        btn.append(spinner());
+      } else {
+        more.replaceChildren(h("span", { class: "dim", role: "status" }, "Loading more…", spinner()));
+      }
       try {
         const next = await readChunk(path, offset, CHUNK);
         if (token !== this.token) return;

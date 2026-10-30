@@ -5,6 +5,7 @@ import { createLiveSource } from "./source";
 import { toOpenView, type OpenedRequest, type OpenScanView } from "./openRequests";
 import { runOpenRequestAction } from "./openRequestAction";
 import { latestWins } from "./latestWins";
+import { useBusy } from "../busy";
 
 // S10 on the real rows. The rows are read from Rust when the tab opens and on
 // every new message to the team, and again after each click. While add-ons are
@@ -23,6 +24,8 @@ export type OpenRequests = {
   /** Rust's words when the last Open or Dismiss was refused. */
   actionError: { code: string; message: string } | null;
   clearActionError: () => void;
+  /** Keys `open:<requestId>` / `dismiss:<requestId>` of the clicks still waiting for Rust. */
+  busy: ReadonlySet<string>;
   /** Open (true) or dismiss (false) one request line by its id. */
   act: (requestId: string, opened: boolean) => void;
 };
@@ -38,6 +41,7 @@ export function useOpenRequests(props: {
   const enabled = props.enabled && live && team !== "";
   const [state, setState] = useState<{ view: OpenScanView | null; error: string | null }>({ view: null, error: null });
   const [actionError, setActionError] = useState<{ code: string; message: string } | null>(null);
+  const { busy, run } = useBusy();
   const tickets = useMemo(() => latestWins(), []);
   const onOpened = useRef(props.onOpened);
   onOpened.current = props.onOpened;
@@ -83,19 +87,19 @@ export function useOpenRequests(props: {
       if (!enabled) return;
       const current = scope.snapshot();
       setActionError(null);
-      void runOpenRequestAction(opened, {
+      void run(`${opened ? "open" : "dismiss"}:${requestId}`, () => runOpenRequestAction(opened, {
         current,
         open: () => source.openRequestOpen(team, requestId),
         dismiss: () => source.openRequestDismiss(team, requestId),
         onOpened: (o) => onOpened.current(o),
         setError: setActionError,
         refresh,
-      });
+      }));
     },
-    [enabled, team, refresh, scope],
+    [enabled, team, refresh, scope, run],
   );
 
   const clearActionError = useCallback(() => setActionError(null), []);
 
-  return { view: state.view, error: state.error, actionError, clearActionError, act };
+  return { view: state.view, error: state.error, actionError, clearActionError, busy, act };
 }

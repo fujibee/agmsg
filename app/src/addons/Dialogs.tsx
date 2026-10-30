@@ -1,4 +1,5 @@
 import { Modal } from "../modals";
+import { BusyButton } from "../busy";
 import type { FetchProgress, StagedInstall } from "./types";
 import { addonNetwork, canSendWhatItReads, permissionDiff, permissionRow, shortSha, type Translate } from "./model";
 import type { InstalledAddon, Permission } from "./types";
@@ -13,6 +14,8 @@ export function ConfirmInstallDialog(props: {
   staged: StagedInstall;
   onInstall: () => void;
   onCancel: () => void;
+  /** The install is running: Install shows the spinner and both buttons wait. */
+  busy?: boolean;
 }) {
   const { t, staged } = props;
   const diff = staged.diff ?? (staged.from ? permissionDiff(staged.from.panes, staged.panes) : null);
@@ -22,7 +25,7 @@ export function ConfirmInstallDialog(props: {
   const sends = staged.panes.some(canSendWhatItReads);
   const isNew = (p: Permission) => diff?.added.includes(p) || (p === "network" && diff?.networkWider) || false;
   return (
-    <Modal title={t(diff ? "addons.confirm.updateTitle" : "addons.confirm.installTitle", { title: staged.title })} onClose={props.onCancel} wide>
+    <Modal title={t(diff ? "addons.confirm.updateTitle" : "addons.confirm.installTitle", { title: staged.title })} onClose={props.onCancel} wide busy={props.busy}>
       <div className="modal-body">
         <p className="addon-dlg-source">
           {diff && staged.from
@@ -69,30 +72,30 @@ export function ConfirmInstallDialog(props: {
         </details>
       </div>
       <div className="modal-actions">
-        <button type="button" autoFocus onClick={props.onCancel}>
+        <button type="button" autoFocus disabled={props.busy} onClick={props.onCancel}>
           {t("common.cancel")}
         </button>
-        <button type="button" className="primary" onClick={props.onInstall}>
+        <BusyButton type="button" className="primary" busy={props.busy} onClick={props.onInstall}>
           {t(diff ? "addons.confirm.update" : "addons.confirm.install")}
-        </button>
+        </BusyButton>
       </div>
     </Modal>
   );
 }
 
 /** S9. */
-export function RemoveDialog(props: { t: Translate; title: string; openPanes: number; onRemove: () => void; onCancel: () => void }) {
+export function RemoveDialog(props: { t: Translate; title: string; openPanes: number; onRemove: () => void; onCancel: () => void; busy?: boolean }) {
   const { t } = props;
   return (
-    <Modal title={t("addons.remove.title", { title: props.title })} onClose={props.onCancel}>
+    <Modal title={t("addons.remove.title", { title: props.title })} onClose={props.onCancel} busy={props.busy}>
       <p className="modal-note">{t("addons.remove.body", { title: props.title, count: props.openPanes })}</p>
       <div className="modal-actions">
-        <button type="button" autoFocus onClick={props.onCancel}>
+        <button type="button" autoFocus disabled={props.busy} onClick={props.onCancel}>
           {t("common.cancel")}
         </button>
-        <button type="button" className="primary danger" onClick={props.onRemove}>
+        <BusyButton type="button" className="primary danger" busy={props.busy} onClick={props.onRemove}>
           {t("addons.remove.confirm")}
-        </button>
+        </BusyButton>
       </div>
     </Modal>
   );

@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import type { AddonsSnapshot, EngineState, InstallError, InstalledAddon } from "./types";
 import { declaredPermissions, addonNetwork, grantText, grantsOf, installErrorText, parseRepoInput, permissionRow, shortSha, type Translate } from "./model";
 import { isChecking, offersRecheck } from "./recheck";
+import { BusyButton } from "../busy";
 
 // Settings → Add-ons (S1, S4). One intro line, the install field, then
 // collapsible groups: Installed, Built in, Requests from agents, Developer.
@@ -29,6 +30,8 @@ type Props = {
   onRemove: (addonId: string) => void;
   onOpenRequestsChange: (v: "show" | "off") => void;
   onLoadFromFolder: () => void;
+  /** What is waiting for Rust: `install`, `load`, `grants`, `reload:<addonId>`, `check:<addonId>`, `revoke:<addonId>:<n>`. */
+  busy?: ReadonlySet<string>;
   /** False while Rust has no install pipeline: the input is shown disabled with a note instead of faking an install. */
   canInstall?: boolean;
   /** addon_list failed: shown with a retry instead of an empty list. */
@@ -127,9 +130,9 @@ export function AddonsSettings(props: Props) {
             : engine.reasons.length > 0 && t("addons.engineReasons", { reasons: engine.reasons.join("; ") })}
         </p>
         {(offersRecheck(engine.reasons) || isChecking(engine.reasons)) && props.onRecheck && (
-          <button type="button" className="addon-btn" disabled={isChecking(engine.reasons)} onClick={() => props.onRecheck?.()}>
+          <BusyButton type="button" className="addon-btn" busy={isChecking(engine.reasons)} onClick={() => props.onRecheck?.()}>
             {t("addons.checkAgain")}
-          </button>
+          </BusyButton>
         )}
         <Group id="installed" t={t} problems={bad(installed)} title={t("addons.installed.title")} badge={installed.length} defaultOpen>
           <InstalledList {...props} installed={installed} readOnly />
@@ -171,9 +174,9 @@ export function AddonsSettings(props: Props) {
             disabled={!canInstall}
             onChange={(e) => setInput(e.target.value)}
           />
-          <button type="submit" className="addon-btn primary" disabled={!parsed || !canInstall}>
+          <BusyButton type="submit" className="addon-btn primary" busy={props.busy?.has("install")} disabled={!parsed || !canInstall}>
             {t("addons.install.button")}
-          </button>
+          </BusyButton>
         </div>
         {!canInstall && <p className="addon-help">{t("addons.install.later")}</p>}
         {props.installError && (
@@ -193,7 +196,7 @@ export function AddonsSettings(props: Props) {
       <Group id="builtin" t={t} problems={bad(builtins)} title={t("addons.builtin.title")} badge={builtins.length}>
         <ul className="addon-list">
           {builtins.map((a) => (
-            <AddonCard key={a.id} t={t} addon={a} snapshot={snapshot} source={t("addons.builtin.source")} onRevoke={props.onRevoke} />
+            <AddonCard key={a.id} t={t} addon={a} snapshot={snapshot} busy={props.busy} source={t("addons.builtin.source")} onRevoke={props.onRevoke} />
           ))}
         </ul>
       </Group>
@@ -218,9 +221,9 @@ export function AddonsSettings(props: Props) {
         <Group id="developer" t={t} problems={bad(devs)} title={t("addons.developer.title")} badge={devs.length > 0 ? devs.length : undefined}>
           <p className="addon-help">{t("addons.developer.explain")}</p>
           <div className="addon-row-line">
-            <button type="button" className="addon-btn" onClick={props.onLoadFromFolder}>
+            <BusyButton type="button" className="addon-btn" busy={props.busy?.has("load")} onClick={props.onLoadFromFolder}>
               {t("addons.developer.loadFromFolder")}
-            </button>
+            </BusyButton>
           </div>
           {devs.length === 0 && <p className="addon-help">{t("addons.developer.none")}</p>}
           <ul className="addon-list">
@@ -230,13 +233,14 @@ export function AddonsSettings(props: Props) {
                 t={t}
                 addon={a}
                 snapshot={snapshot}
+                busy={props.busy}
                 source={t("addons.pane.dev", { folder: a.dev?.label ?? a.id })}
                 onRevoke={props.onRevoke}
                 actions={
                   <>
-                    <button type="button" className="addon-btn" onClick={() => props.onDevReload?.(a.id)}>
+                    <BusyButton type="button" className="addon-btn" busy={props.busy?.has(`reload:${a.id}`)} onClick={() => props.onDevReload?.(a.id)}>
                       {t("addons.developer.reload")}
-                    </button>
+                    </BusyButton>
                     <button type="button" className="addon-btn danger" onClick={() => props.onRemove(a.id)}>
                       {t("addons.developer.remove")}
                     </button>
@@ -251,7 +255,7 @@ export function AddonsSettings(props: Props) {
   );
 }
 
-function Alerts(props: { t: Translate } & Pick<Props, "listError" | "onRetryList" | "grantsError" | "onRetryGrants" | "notice">) {
+function Alerts(props: { t: Translate } & Pick<Props, "listError" | "onRetryList" | "grantsError" | "onRetryGrants" | "notice" | "busy">) {
   const { t } = props;
   return (
     <>
@@ -266,9 +270,9 @@ function Alerts(props: { t: Translate } & Pick<Props, "listError" | "onRetryList
       {props.grantsError !== undefined && (
         <p className="addon-list-error" role="alert">
           {t("addons.grantsFailed", { message: props.grantsError })}{" "}
-          <button type="button" className="addon-btn" onClick={props.onRetryGrants}>
+          <BusyButton type="button" className="addon-btn" busy={props.busy?.has("grants")} onClick={props.onRetryGrants}>
             {t("addons.listRetry")}
-          </button>
+          </BusyButton>
         </p>
       )}
       {props.notice && (
@@ -304,7 +308,7 @@ function CanRow(props: { t: Translate; addon: InstalledAddon }) {
 }
 
 /** "Allowed": what the user granted and remembered, one green chip each with Revoke. */
-function AllowedRow(props: { t: Translate; snapshot: AddonsSnapshot; addonId: string; onRevoke: (addonId: string, grantIndex: number) => void }) {
+function AllowedRow(props: { t: Translate; snapshot: AddonsSnapshot; addonId: string; busy?: ReadonlySet<string>; onRevoke: (addonId: string, grantIndex: number) => void }) {
   const { t, snapshot, addonId } = props;
   const none = grantsOf(snapshot.grants, addonId).length === 0;
   return (
@@ -316,9 +320,9 @@ function AllowedRow(props: { t: Translate; snapshot: AddonsSnapshot; addonId: st
           g.addonId === addonId ? (
             <span key={i} className="addon-chip ok">
               {grantText(t, g)}
-              <button type="button" className="addon-link" onClick={() => props.onRevoke(addonId, i)}>
+              <BusyButton type="button" className="addon-link" busy={props.busy?.has(`revoke:${addonId}:${i}`)} onClick={() => props.onRevoke(addonId, i)}>
                 {t("addons.grant.revoke")}
-              </button>
+              </BusyButton>
             </span>
           ) : null,
         )}
@@ -331,6 +335,7 @@ function AddonCard(props: {
   t: Translate;
   addon: InstalledAddon;
   snapshot: AddonsSnapshot;
+  busy?: ReadonlySet<string>;
   /** The small mono line next to the name: `owner/repo · sha`, "built in" or the developer folder. */
   source: string;
   isNew?: boolean;
@@ -347,7 +352,7 @@ function AddonCard(props: {
       </div>
       {a.digestOk === false && <p className="addon-digest-bad" role="alert">{t("addons.failure.digest_mismatch", { title: a.panes[0]?.title ?? a.id })}</p>}
       <CanRow t={t} addon={a} />
-      <AllowedRow t={t} snapshot={props.snapshot} addonId={a.id} onRevoke={props.onRevoke} />
+      <AllowedRow t={t} snapshot={props.snapshot} addonId={a.id} busy={props.busy} onRevoke={props.onRevoke} />
       {props.actions && <div className="addon-actions">{props.actions}</div>}
     </li>
   );
@@ -360,6 +365,7 @@ function InstalledList(props: {
   readOnly?: boolean;
   canInstall?: boolean;
   newId?: string;
+  busy?: ReadonlySet<string>;
   onRevoke: (addonId: string, grantIndex: number) => void;
   onCheckUpdate: (addonId: string) => void;
   onRemove: (addonId: string) => void;
@@ -376,13 +382,14 @@ function InstalledList(props: {
           snapshot={snapshot}
           source={[a.id, shortSha(a.sha), a.installedAt ? t("addons.card.installedOn", { date: a.installedAt.slice(0, 10) }) : ""].filter(Boolean).join(" · ")}
           isNew={a.id === props.newId}
+          busy={props.busy}
           onRevoke={props.onRevoke}
           actions={
             <>
               {!props.readOnly && props.canInstall !== false && (
-                <button type="button" className="addon-btn" onClick={() => props.onCheckUpdate(a.id)}>
+                <BusyButton type="button" className="addon-btn" busy={props.busy?.has(`check:${a.id}`)} onClick={() => props.onCheckUpdate(a.id)}>
                   {t("addons.installed.checkUpdates")}
-                </button>
+                </BusyButton>
               )}
               {props.canInstall !== false && (
                 <button type="button" className="addon-btn danger" onClick={() => props.onRemove(a.id)}>

@@ -369,7 +369,9 @@
       "dev": "DEV · {{folder}}",
       "networkChip": "network: {{hosts}}",
       "networkAnyChip": "network: any site",
-      "framePlaceholder": "Add-on frame"
+      "framePlaceholder": "Add-on frame",
+      "opening": "Opening {{title}}…",
+      "loading": "Loading {{title}}…"
     },
     "failure": {
       "digest_mismatch": "{{title}} can't open: its files are incomplete or were changed after install.",

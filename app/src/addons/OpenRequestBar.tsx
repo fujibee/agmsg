@@ -3,6 +3,7 @@ import { canOpen } from "./requests";
 import type { Translate } from "./model";
 import { relativeTime, TICK_MS } from "./relativeTime";
 import { useEffect, useState } from "react";
+import { BusyButton } from "../busy";
 
 // S10: the bar at the top of the team's tab. One request is a single line with
 // Open / Dismiss; several collapse into "N open requests ▾". Refused states
@@ -33,12 +34,17 @@ function Row(props: {
   item: BarItem;
   now: number;
   timeZone: string;
+  /** Clicks waiting for Rust: `open:<requestId>` / `dismiss:<requestId>`. */
+  busy?: ReadonlySet<string>;
   onOpen: (i: BarItem) => void;
   onDismiss: (i: BarItem) => void;
   onInstall: (target: string) => void;
 }) {
   const { t, item } = props;
   const when = relativeTime(item.at, props.now, props.timeZone, t);
+  const opening = props.busy?.has(`open:${item.requestId}`) ?? false;
+  const dismissing = props.busy?.has(`dismiss:${item.requestId}`) ?? false;
+  const working = opening || dismissing; // one click at a time on a row
   return (
     <div className={`addon-request addon-request-${item.status}`} role="status">
       <span className="addon-request-text">{describe(t, item)}</span>
@@ -51,12 +57,12 @@ function Row(props: {
           {t("addons.request.install")}
         </button>
       )}
-      <button type="button" disabled={!canOpen(item)} onClick={() => props.onOpen(item)}>
+      <BusyButton type="button" busy={opening} disabled={!canOpen(item) || working} onClick={() => props.onOpen(item)}>
         {t("addons.request.open")}
-      </button>
-      <button type="button" onClick={() => props.onDismiss(item)}>
+      </BusyButton>
+      <BusyButton type="button" busy={dismissing} disabled={working} onClick={() => props.onDismiss(item)}>
         {t("addons.request.dismiss")}
-      </button>
+      </BusyButton>
     </div>
   );
 }
@@ -66,6 +72,7 @@ export function OpenRequestBar(props: {
   items: BarItem[];
   /** The timezone setting, already resolved to a real zone. */
   timeZone: string;
+  busy?: ReadonlySet<string>;
   onOpen: (i: BarItem) => void;
   onDismiss: (i: BarItem) => void;
   onInstall: (target: string) => void;
@@ -88,7 +95,7 @@ export function OpenRequestBar(props: {
  * with the reason it was refused and can be dismissed, so it does not stay
  * forever. Nothing here has an Open button; nothing fails silently.
  */
-export function OpenRequestNotes(props: { t: Translate; notes: { requestId: string; note: RowNote }[]; onDismiss: (requestId: string) => void }) {
+export function OpenRequestNotes(props: { t: Translate; notes: { requestId: string; note: RowNote }[]; busy?: ReadonlySet<string>; onDismiss: (requestId: string) => void }) {
   const { t, notes } = props;
   if (notes.length === 0) return null;
   const lines = notes.map(({ requestId, note }) => (
@@ -97,9 +104,9 @@ export function OpenRequestNotes(props: { t: Translate; notes: { requestId: stri
         reason: t(`addons.request.reason.${note.reason}`),
         detail: note.detail ? `: ${note.detail}` : "",
       })}{" "}
-      <button type="button" onClick={() => props.onDismiss(requestId)}>
+      <BusyButton type="button" busy={props.busy?.has(`dismiss:${requestId}`)} onClick={() => props.onDismiss(requestId)}>
         {t("addons.request.dismiss")}
-      </button>
+      </BusyButton>
     </div>
   ));
   if (notes.length === 1) return <div className="addon-request-notes">{lines}</div>;

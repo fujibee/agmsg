@@ -8,6 +8,7 @@ import { AddonPane } from "./AddonPane";
 import type { FailureAction } from "./FailureCard";
 import type { GrantChoice } from "./GrantCard";
 import { grantChips } from "./model";
+import { LoadingView } from "../busy";
 import { envNoticeKey } from "./envNotice";
 import { createOpGuard } from "./opGuard";
 import { NOTICE_MS } from "./OpenRequestBar";
@@ -79,6 +80,9 @@ function LiveAddonPane(props: {
   const [attempt, setAttempt] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [pending, setPending] = useState(false);
+  const [pendingChoice, setPendingChoice] = useState<GrantChoice | undefined>();
+  // Which frame has finished loading ("<pane instance>:<reload key>"): until then a cover says it is loading.
+  const [loadedFrame, setLoadedFrame] = useState("");
   // A refusal is a one-off notice: it goes by itself after a few seconds (or on ×).
   // Keyed by the notice's own number: the same refusal again restarts the timer, and an old timer never removes a newer notice.
   const blockedSeq = blocked?.seq;
@@ -223,22 +227,32 @@ function LiveAddonPane(props: {
       return;
     }
     setPending(true);
-    const r = await guard.current.run(async ({ stale }): Promise<{ error: { code: string; message: string } } | { chip: GrantChip; saveFailed?: string }> => {
-      const remember = !isDev && (c === "always" || need.permission === "messages:read");
-      if (need.permission === "messages:read") {
-        const g = await source.grantTeam(added.id, need.team);
+    setPendingChoice(c);
+    let r;
+    try {
+      r = await guard.current.run(async ({ stale }): Promise<{ error: { code: string; message: string } } | { chip: GrantChip; saveFailed?: string }> => {
+        const remember = !isDev && (c === "always" || need.permission === "messages:read");
+        if (need.permission === "messages:read") {
+          const g = await source.grantTeam(added.id, need.team);
+          if (!g.ok) return { error: g.error };
+          // The pane was reopened or its add-on updated while the grant ran: that consent must not be saved.
+          const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "messages:read", need.team, added.id, added.commit) : null;
+          return { chip: { key: `team:${need.team}`, label: need.team }, saveFailed: saved && !saved.ok ? saved.error.message : undefined };
+        }
+        const g = await source.grantRoot(added.id, need.path);
         if (!g.ok) return { error: g.error };
-        // The pane was reopened or its add-on updated while the grant ran: that consent must not be saved.
-        const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "messages:read", need.team, added.id, added.commit) : null;
-        return { chip: { key: `team:${need.team}`, label: need.team }, saveFailed: saved && !saved.ok ? saved.error.message : undefined };
-      }
-      const g = await source.grantRoot(added.id, need.path);
-      if (!g.ok) return { error: g.error };
-      const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "files:read", g.realPath, added.id, added.commit) : null;
-      return { chip: { key: `root:${g.realPath}`, label: g.realPath, note: stale() ? undefined : await envNote(added.id) }, saveFailed: saved && !saved.ok ? saved.error.message : undefined };
-    });
+        const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, "files:read", g.realPath, added.id, added.commit) : null;
+        return { chip: { key: `root:${g.realPath}`, label: g.realPath, note: stale() ? undefined : await envNote(added.id) }, saveFailed: saved && !saved.ok ? saved.error.message : undefined };
+      });
+    } catch (e) {
+      // A call that threw must not leave the card busy for ever: end it and say why.
+      setPending(false);
+      setPendingChoice(undefined);
+      return setState({ kind: "failure", failure: { code: "open_failed", message: toCommandError(e).message } });
+    }
     if (r.kind !== "done") return; // busy: ignored; stale: the pane was reopened, so nothing here applies to it
     setPending(false);
+    setPendingChoice(undefined);
     if ("error" in r.value) {
       const e = r.value.error;
       if (need.permission === "files:read" && e.code === "denied_path") return setState({ kind: "grant", need: { ...need, denied: true } });
@@ -275,23 +289,32 @@ function LiveAddonPane(props: {
       canRemember={!isDev}
       devFolder={addon?.dev?.label}
       pending={pending}
+      pendingChoice={pendingChoice}
       hideTitle
       hideClose
       state={state}
       frame={
         // No frame until every grant card is answered: a frame that loads early would start a generation for nothing.
         added && steps.length === 0 ? (
-          <AddonFrame
-            paneInstance={added.id}
-            url={added.url}
-            title={title}
-            declaresMessages={added.permissions.includes("messages:read")}
-            reloadKey={reloadKey}
-            onRefused={(op, code) => raiseBlocked(`${op} (${code})`)}
-            onFeedFailed={(code, message) =>
-              setState({ kind: "failure", failure: code === "init_too_large" ? { code } : { code: "open_failed", message } })
-            }
-          />
+          <div className="addon-frame-wrap">
+            <AddonFrame
+              paneInstance={added.id}
+              url={added.url}
+              title={title}
+              declaresMessages={added.permissions.includes("messages:read")}
+              reloadKey={reloadKey}
+              onLoaded={() => setLoadedFrame(`${added.id}:${reloadKey}`)}
+              onRefused={(op, code) => raiseBlocked(`${op} (${code})`)}
+              onFeedFailed={(code, message) =>
+                setState({ kind: "failure", failure: code === "init_too_large" ? { code } : { code: "open_failed", message } })
+              }
+            />
+            {loadedFrame !== `${added.id}:${reloadKey}` && (
+              <div className="addon-frame-loading">
+                <LoadingView text={t("addons.pane.loading", { title }) as string} />
+              </div>
+            )}
+          </div>
         ) : undefined
       }
       onReload={() => (state.kind === "frame" ? setReloadKey((n) => n + 1) : setAttempt((n) => n + 1))}
@@ -328,6 +351,7 @@ function MockAddonPane(props: { pane: AddonPaneRef; onClose: () => void }) {
       hideTitle
       hideClose
       state={state}
+      frame={<div className="addon-frame-placeholder">{t("addons.pane.framePlaceholder")}</div>}
       onReload={() => setState((s) => (s.kind === "failure" ? { kind: "frame" } : s))}
       onClose={props.onClose}
       onGrant={(c) => {

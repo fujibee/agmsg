@@ -2,6 +2,7 @@ import "./style.css";
 import { app, errorText } from "../../_shared/kit";
 import type { DiffFile, DiffHunk, DiffLine, DiffResult, DiffStatus } from "../../../addon-kit/protocol";
 import { h } from "../../_shared/dom";
+import { loadingView, setBusy, withBusy } from "../../_shared/busy";
 import { baseName, rootLabel } from "../../_shared/format";
 import { gapBefore, initialBase, sideBySide, wordDiff, type Range } from "./diff";
 
@@ -27,6 +28,7 @@ const compare = h("span", { class: "dim" });
 const fileList = h("div", { class: "files", role: "listbox", tabindex: "0", "aria-label": "Changed files" });
 const fhead = h("div", { class: "fhead" });
 const diffEl = h("div", { class: "diff", tabindex: "0" });
+let reloadBtn: HTMLButtonElement | null = null; // the ⟳ button: busy while a comparison is running
 
 function notice(title: string, text: string, error = false): HTMLElement {
   return h("div", { class: `notice${error ? " error" : ""}` }, h("h2", null, title), h("div", null, text));
@@ -142,7 +144,7 @@ function renderFile(): void {
   const name = f.oldPath && f.oldPath !== f.path ? `${f.oldPath} → ${f.path}` : f.path;
   const whole = h("button", { "aria-pressed": String(state.whole.has(f.path)), title: "Show every line of this file, not just the changes" },
     "Whole file");
-  whole.addEventListener("click", () => void toggleWhole(f));
+  whole.addEventListener("click", () => void withBusy(whole, () => toggleWhole(f)));
   fhead.replaceChildren(
     h("span", { class: `st ${f.status}`, title: f.status }, LETTER[f.status]),
     h("span", null, name),
@@ -245,7 +247,8 @@ function req() {
 
 async function load(): Promise<void> {
   const seq = ++state.loadSeq;
-  diffEl.replaceChildren(h("div", { class: "empty" }, "Loading…"));
+  diffEl.replaceChildren(loadingView("Loading…"));
+  if (reloadBtn) setBusy(reloadBtn, true);
   state.whole.clear();
   state.wholeSeq.clear();
   try {
@@ -271,6 +274,9 @@ async function load(): Promise<void> {
     fileList.replaceChildren();
     fhead.replaceChildren();
     diffEl.replaceChildren(notice("Can't compare", errorText(e), true));
+  } finally {
+    // Busy ends with the newest comparison, whether it worked or not (an older one finishing leaves it on).
+    if (seq === state.loadSeq && reloadBtn) setBusy(reloadBtn, false);
   }
 }
 
@@ -295,6 +301,7 @@ async function main(): Promise<void> {
   const apply = () => { state.base = baseInput.value; void load(); };
   baseInput.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); e.stopPropagation(); });
   const reload = h("button", { title: "Compare again" }, "⟳");
+  reloadBtn = reload;
   reload.addEventListener("click", apply);
 
   const uni = h("button", { "aria-pressed": "true" }, "Unified");

@@ -2637,13 +2637,14 @@ export default function App() {
             <OpenRequestBar
               t={t as never}
               items={requestItems}
+              busy={openRequests.busy}
               timeZone={resolveTimeZone(timezone)}
               onOpen={(i) => handleRequest(i.requestId, true)}
               onDismiss={(i) => handleRequest(i.requestId, false)}
               onInstall={() => setModal({ kind: "settings" })}
             />
           )}
-          {team && <OpenRequestNotes t={t as never} notes={requestNotes} onDismiss={(id) => handleRequest(id, false)} />}
+          {team && <OpenRequestNotes t={t as never} notes={requestNotes} busy={openRequests.busy} onDismiss={(id) => handleRequest(id, false)} />}
           {team && catalog.live && (
             <OpenRequestMessages
               t={t as never}

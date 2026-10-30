@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
-// vitest blanks .css modules, so the stylesheet is read through a node built-in.
-const fs = (globalThis as unknown as { process: { getBuiltinModule(n: string): { readFileSync(p: URL, e: string): string } } }).process.getBuiltinModule("node:fs");
-const css = fs.readFileSync(new URL("../App.css", import.meta.url), "utf8");
+const css = readSource("../App.css", import.meta.url);
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readSource } from "../readSource";
 import { AddonPane } from "./AddonPane";
 import { failureActions } from "./FailureCard";
 import { grantChips } from "./model";
