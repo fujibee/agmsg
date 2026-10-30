@@ -65,7 +65,7 @@ describe("buttons that wait for Rust are busy", () => {
       addonId: "builtin:diffview", pane: "diffview", path: "/p", verdict: "ready", pathState: "exists",
     };
     const items = toOpenView({ appUser: "me", rows: [row], truncated: false }).items;
-    const bar = (busy: string[]) => renderToStaticMarkup(createElement(OpenRequestBar, { t, items, timeZone: "UTC", busy: new Set(busy), onOpen: noop, onDismiss: noop, onInstall: noop }));
+    const bar = (busy: string[]) => renderToStaticMarkup(createElement(OpenRequestBar, { t, items, busy: new Set(busy), onOpen: noop, onDismiss: noop, onInstall: noop }));
     expect(busyCount(bar([]))).toBe(0);
     const opening = bar(["open:1:0"]);
     expect(opening).toMatch(/aria-busy="true">\[addons\.request\.open\]/);

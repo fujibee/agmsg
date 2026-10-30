@@ -461,11 +461,6 @@
       "readFailed": "Open requests could not be read: {{message}}",
       "actionFailed": "The request could not be handled: {{message}}",
       "truncated": "Older requests are not shown.",
-      "ago": {
-        "now": "just now",
-        "minutes": "{{count}} min ago",
-        "hours": "{{count}} h ago"
-      },
       "close": "Close"
     },
     "menu": {

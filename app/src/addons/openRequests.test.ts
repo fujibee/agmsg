@@ -4,7 +4,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createLiveSource, type Invoke } from "./source";
 import { bashPath, sendCommand, seatInstruction, shellQuote, toOpenView, type OpenRowRaw, type OpenScanRaw } from "./openRequests";
 import { OpenRequestBar, OpenRequestMessages, OpenRequestNotes, messageLines } from "./OpenRequestBar";
-import { relativeTime } from "./relativeTime";
 import en from "../i18n/locales/en.json";
 import ja from "../i18n/locales/ja.json";
 import de from "../i18n/locales/de.json";
@@ -62,7 +61,7 @@ describe("toOpenView", () => {
 describe("the bar and messages", () => {
   const items = toOpenView(scan([row("1"), row("2", { verdict: "denied_path", detail: "Protected." })])).items;
   const bar = (list = items, extra: object = {}) =>
-    renderToStaticMarkup(createElement(OpenRequestBar, { t, items: list, timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop, ...extra }));
+    renderToStaticMarkup(createElement(OpenRequestBar, { t, items: list, onOpen: noop, onDismiss: noop, onInstall: noop, ...extra }));
   it("names the sender and the team, has no sender-verification note, and shows Rust's reason as it is", () => {
     const html = bar();
     expect(html).not.toMatch(/unverified/i);
@@ -111,44 +110,19 @@ describe("the lines under the bar", () => {
   });
   it("a request that was opened or dismissed is not in the next read, so it has no row", () => {
     const next = toOpenView(scan([row("2")])).items;
-    const html = renderToStaticMarkup(createElement(OpenRequestBar, { t, items: next, timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop }));
+    const html = renderToStaticMarkup(createElement(OpenRequestBar, { t, items: next, onOpen: noop, onDismiss: noop, onInstall: noop }));
     expect(html.match(/addon-request /g)?.length).toBe(1);
-    expect(renderToStaticMarkup(createElement(OpenRequestBar, { t, items: [], timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop }))).toBe("");
+    expect(renderToStaticMarkup(createElement(OpenRequestBar, { t, items: [], onOpen: noop, onDismiss: noop, onInstall: noop }))).toBe("");
   });
 });
 
-describe("how old a request is", () => {
-  const at = "2026-10-29T08:00:00Z";
-  const ms = Date.parse(at);
-  const age = (delta: number, tz = "UTC") => relativeTime(at, ms + delta, tz, t);
-  it("says just now, minutes, hours, then a date", () => {
-    expect(age(0).text).toBe("[addons.request.ago.now]");
-    expect(age(59_000).text).toBe("[addons.request.ago.now]");
-    expect(age(3 * 60_000).text).toBe('[addons.request.ago.minutes {"count":3}]');
-    expect(age(59 * 60_000).text).toBe('[addons.request.ago.minutes {"count":59}]');
-    expect(age(2 * 3_600_000).text).toBe('[addons.request.ago.hours {"count":2}]');
-    expect(age(23 * 3_600_000 + 59 * 60_000).text).toBe('[addons.request.ago.hours {"count":23}]');
-    expect(age(24 * 3_600_000).text).toContain("2026");
-    expect(age(24 * 3_600_000).text).not.toContain("ago");
-  });
-  it("a clock ahead of ours reads as just now", () => {
-    expect(age(-5 * 60_000).text).toBe("[addons.request.ago.now]");
-  });
-  it("the title is the local date and time in the chosen timezone", () => {
-    const utc = age(0, "UTC").title;
-    const tokyo = age(0, "Asia/Tokyo").title;
-    expect(utc).toMatch(/8:00:00/);
-    expect(tokyo).toMatch(/5:00:00/); // 17:00 in Tokyo; 12- or 24-hour clocks both contain "5:00:00" / "17:00:00"
-    expect(tokyo).not.toBe(utc);
-  });
-  it("an unreadable time is shown as it came, an unknown zone does not throw", () => {
-    expect(relativeTime("not-a-date", ms, "UTC", t)).toEqual({ text: "not-a-date", title: "not-a-date" });
-    expect(() => age(0, "Not/AZone")).not.toThrow();
-  });
-  it("the bar shows the relative text and keeps the exact time in title", () => {
-    const html = renderToStaticMarkup(createElement(OpenRequestBar, { t, items: toOpenView(scan([row("1")])).items, timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop }));
-    expect(html).toMatch(/class="addon-request-time" title="[^"]+"/);
-    expect(html).not.toMatch(/08:40:00/);
+describe("the bar shows no time", () => {
+  it("a line has no time text and no title with a date", () => {
+    const html = renderToStaticMarkup(createElement(OpenRequestBar, { t, items: toOpenView(scan([row("1")])).items, onOpen: noop, onDismiss: noop, onInstall: noop }));
+    expect(html).not.toContain("addon-request-time");
+    expect(html).not.toContain("addons.request.ago");
+    expect(html).not.toMatch(/08:40/);
+    expect(html).not.toContain("title=");
   });
 });
 

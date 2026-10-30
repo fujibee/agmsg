@@ -2638,7 +2638,6 @@ export default function App() {
               t={t as never}
               items={requestItems}
               busy={openRequests.busy}
-              timeZone={resolveTimeZone(timezone)}
               onOpen={(i) => handleRequest(i.requestId, true)}
               onDismiss={(i) => handleRequest(i.requestId, false)}
               onInstall={() => setModal({ kind: "settings" })}

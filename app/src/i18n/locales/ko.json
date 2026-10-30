@@ -459,11 +459,6 @@
       "readFailed": "열기 요청을 읽지 못했습니다: {{message}}",
       "actionFailed": "요청을 처리하지 못했습니다: {{message}}",
       "truncated": "오래된 요청은 표시하지 않습니다.",
-      "ago": {
-        "now": "just now",
-        "minutes": "{{count}} min ago",
-        "hours": "{{count}} h ago"
-      },
       "close": "Close"
     },
     "menu": {

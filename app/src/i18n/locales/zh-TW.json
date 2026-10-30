@@ -459,11 +459,6 @@
       "readFailed": "無法讀取開啟請求：{{message}}",
       "actionFailed": "無法處理該請求：{{message}}",
       "truncated": "較舊的請求不再顯示。",
-      "ago": {
-        "now": "just now",
-        "minutes": "{{count}} min ago",
-        "hours": "{{count}} h ago"
-      },
       "close": "Close"
     },
     "menu": {

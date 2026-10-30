@@ -463,11 +463,6 @@
       "readFailed": "Não foi possível ler as solicitações de abertura: {{message}}",
       "actionFailed": "Não foi possível tratar a solicitação: {{message}}",
       "truncated": "As solicitações mais antigas não são exibidas.",
-      "ago": {
-        "now": "just now",
-        "minutes": "{{count}} min ago",
-        "hours": "{{count}} h ago"
-      },
       "close": "Close"
     },
     "menu": {

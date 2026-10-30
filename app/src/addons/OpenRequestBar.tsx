@@ -1,7 +1,6 @@
 import type { BarItem, RowNote } from "./requests";
 import { canOpen } from "./requests";
 import type { Translate } from "./model";
-import { relativeTime, TICK_MS } from "./relativeTime";
 import { useEffect, useState } from "react";
 import { BusyButton } from "../busy";
 
@@ -19,21 +18,9 @@ function describe(t: Translate, item: BarItem): string {
   });
 }
 
-/** The clock the bar's relative times read; it moves every 30 s. */
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), TICK_MS);
-    return () => clearInterval(id);
-  }, []);
-  return now;
-}
-
 function Row(props: {
   t: Translate;
   item: BarItem;
-  now: number;
-  timeZone: string;
   /** Clicks waiting for Rust: `open:<requestId>` / `dismiss:<requestId>`. */
   busy?: ReadonlySet<string>;
   onOpen: (i: BarItem) => void;
@@ -41,16 +28,12 @@ function Row(props: {
   onInstall: (target: string) => void;
 }) {
   const { t, item } = props;
-  const when = relativeTime(item.at, props.now, props.timeZone, t);
   const opening = props.busy?.has(`open:${item.requestId}`) ?? false;
   const dismissing = props.busy?.has(`dismiss:${item.requestId}`) ?? false;
   const working = opening || dismissing; // one click at a time on a row
   return (
     <div className={`addon-request addon-request-${item.status}`} role="status">
       <span className="addon-request-text">{describe(t, item)}</span>
-      <span className="addon-request-time" title={when.title}>
-        {when.text}
-      </span>
       {item.status !== "open" && <span className="addon-request-why">{item.detail ?? t(`addons.request.status.${item.status}`, { pane: item.pane })}</span>}
       {item.status === "not_installed" && item.installTarget && (
         <button type="button" onClick={() => props.onInstall(item.installTarget!)}>
@@ -70,17 +53,14 @@ function Row(props: {
 export function OpenRequestBar(props: {
   t: Translate;
   items: BarItem[];
-  /** The timezone setting, already resolved to a real zone. */
-  timeZone: string;
   busy?: ReadonlySet<string>;
   onOpen: (i: BarItem) => void;
   onDismiss: (i: BarItem) => void;
   onInstall: (target: string) => void;
 }) {
   const { t, items } = props;
-  const now = useNow();
   if (items.length === 0) return null;
-  const rows = items.map((item) => <Row key={item.requestId} {...props} now={now} item={item} />);
+  const rows = items.map((item) => <Row key={item.requestId} {...props} item={item} />);
   if (items.length === 1) return <div className="addon-request-bar">{rows}</div>;
   return (
     <details className="addon-request-bar">
