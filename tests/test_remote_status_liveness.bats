@@ -23,13 +23,58 @@ setup() {
   ENGINE_PIDS=""
 }
 
+# Stops <pid> only when its argv still names this test's own directory, so a pid
+# that was recycled to somebody else's process is left alone. Every path that
+# stops an engine goes through here. -ww keeps a long path from being cut short.
+_stop_owned_engine() {   # <pid>
+  local pid="$1"
+  case "$pid" in ""|*[!0-9]*) return 0 ;; esac
+  case "$(ps -ww -o args= -p "$pid" 2>/dev/null || true)" in
+    *"$TEST_SKILL_DIR/"*)
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      ;;
+  esac
+}
+
 teardown() {
-  local pid
-  for pid in $ENGINE_PIDS; do
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+  local pid pidfile="$TEST_SKILL_DIR/run/remote-sync.testteam.pid" seen=" "
+  # An engine `sync start` detached is not a child of this shell, so a test that
+  # forgot remember_engine_pid would leave it running for days. Its pidfile names
+  # it, as do the pids the tests registered; each one is stopped once.
+  pid=""
+  [ ! -r "$pidfile" ] || pid="$(cat "$pidfile" 2>/dev/null || true)"
+  for pid in $pid $ENGINE_PIDS; do
+    case "$seen" in *" $pid "*) continue ;; esac
+    seen="$seen$pid "
+    _stop_owned_engine "$pid"
   done
   teardown_test_env
+}
+
+@test "teardown helper: leaves a pid whose argv is not this test's engine alone" {
+  sleep 30 &
+  local foreign=$! real_teardown_env
+  printf '%s\n' "$foreign" > "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
+  ENGINE_PIDS="$foreign"
+  # Run the real teardown with both inputs naming the foreign pid, minus the
+  # directory removal (restored right after, for this test's own teardown).
+  real_teardown_env="$(declare -f teardown_test_env)"
+  teardown_test_env() { :; }
+  teardown
+  eval "$real_teardown_env"
+  kill -0 "$foreign"
+  kill "$foreign"
+  wait "$foreign" 2>/dev/null || true
+  ENGINE_PIDS=""
+}
+
+@test "teardown helper: stops an engine whose argv names this test's directory" {
+  start_matching_engine
+  kill -0 "$ENGINE_PID"
+  _stop_owned_engine "$ENGINE_PID"
+  run kill -0 "$ENGINE_PID"
+  [ "$status" -ne 0 ]
 }
 
 start_matching_engine() {
@@ -727,6 +772,10 @@ write_windows_spelling_fixtures() {
     AGMSG_TEST_LOG_READY_FILE="$ready_file" \
     AGMSG_TEST_SYNC_START_READY_CEILING=0 \
     bash "$SCRIPTS/remote.sh" sync start testteam
+  # Registered before any assertion, so a failure here still stops the engine
+  # it started: it is detached (parent pid 1) and its sleep loop would
+  # otherwise run on after the test.
+  remember_engine_pid
   [ "$status" -eq 0 ]
   refute grep -qF "did not become ready" <<<"$output"
 }
