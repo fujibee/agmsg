@@ -454,7 +454,6 @@
         "bad_message_id": "無法記錄訊息 ID",
         "unreadable": "無法讀取該請求"
       },
-      "unverified": "寄件者未驗證",
       "readFailed": "無法讀取開啟請求：{{message}}",
       "actionFailed": "無法處理該請求：{{message}}",
       "truncated": "較舊的請求不再顯示。",

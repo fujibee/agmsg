@@ -454,7 +454,6 @@
         "bad_message_id": "메시지 ID를 기록할 수 없습니다",
         "unreadable": "요청을 읽을 수 없습니다"
       },
-      "unverified": "보낸 사람 미확인",
       "readFailed": "열기 요청을 읽지 못했습니다: {{message}}",
       "actionFailed": "요청을 처리하지 못했습니다: {{message}}",
       "truncated": "오래된 요청은 표시하지 않습니다.",

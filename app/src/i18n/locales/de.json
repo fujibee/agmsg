@@ -456,7 +456,6 @@
         "bad_message_id": "die Nachrichten-ID kann nicht gespeichert werden",
         "unreadable": "die Anfrage konnte nicht gelesen werden"
       },
-      "unverified": "Absender nicht verifiziert",
       "readFailed": "Öffnen-Anfragen konnten nicht gelesen werden: {{message}}",
       "actionFailed": "Die Anfrage konnte nicht bearbeitet werden: {{message}}",
       "truncated": "Ältere Anfragen werden nicht angezeigt.",

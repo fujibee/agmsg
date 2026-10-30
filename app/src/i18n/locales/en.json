@@ -456,7 +456,6 @@
         "bad_message_id": "the message id cannot be recorded",
         "unreadable": "the request could not be read"
       },
-      "unverified": "sender not verified",
       "readFailed": "Open requests could not be read: {{message}}",
       "actionFailed": "The request could not be handled: {{message}}",
       "truncated": "Older requests are not shown.",

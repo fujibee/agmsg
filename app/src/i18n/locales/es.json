@@ -458,7 +458,6 @@
         "bad_message_id": "no se puede registrar el id del mensaje",
         "unreadable": "no se pudo leer la solicitud"
       },
-      "unverified": "remitente no verificado",
       "readFailed": "No se pudieron leer las solicitudes de apertura: {{message}}",
       "actionFailed": "No se pudo procesar la solicitud: {{message}}",
       "truncated": "No se muestran las solicitudes más antiguas.",

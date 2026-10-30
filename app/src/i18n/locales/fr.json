@@ -458,7 +458,6 @@
         "bad_message_id": "l'identifiant du message ne peut pas être enregistré",
         "unreadable": "la demande n'a pas pu être lue"
       },
-      "unverified": "expéditeur non vérifié",
       "readFailed": "Impossible de lire les demandes d'ouverture : {{message}}",
       "actionFailed": "La demande n'a pas pu être traitée : {{message}}",
       "truncated": "Les demandes plus anciennes ne sont pas affichées.",

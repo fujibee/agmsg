@@ -45,7 +45,6 @@ function Row(props: {
       <span className="addon-request-time" title={when.title}>
         {when.text}
       </span>
-      <span className="addon-request-unverified">{t("addons.request.unverified")}</span>
       {item.status !== "open" && <span className="addon-request-why">{item.detail ?? t(`addons.request.status.${item.status}`, { pane: item.pane })}</span>}
       {item.status === "not_installed" && item.installTarget && (
         <button type="button" onClick={() => props.onInstall(item.installTarget!)}>

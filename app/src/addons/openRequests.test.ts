@@ -56,9 +56,9 @@ describe("the bar and messages", () => {
   const items = toOpenView(scan([row("1"), row("2", { verdict: "denied_path", detail: "Protected." })])).items;
   const bar = (list = items, extra: object = {}) =>
     renderToStaticMarkup(createElement(OpenRequestBar, { t, items: list, timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop, ...extra }));
-  it("names the sender and the team, says the sender is not verified on every line, and shows Rust's reason as it is", () => {
+  it("names the sender and the team, has no sender-verification note, and shows Rust's reason as it is", () => {
     const html = bar();
-    expect(html.match(/addons\.request\.unverified/g)?.length).toBe(2);
+    expect(html).not.toMatch(/unverified/i);
     expect(html).toContain("Protected.");
     expect(html).toContain("&quot;agent&quot;:&quot;alice&quot;");
     expect(html).toContain("&quot;team&quot;:&quot;agmsg&quot;");
@@ -105,7 +105,7 @@ describe("the lines under the bar", () => {
   it("a request that was opened or dismissed is not in the next read, so it has no row", () => {
     const next = toOpenView(scan([row("2")])).items;
     const html = renderToStaticMarkup(createElement(OpenRequestBar, { t, items: next, timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop }));
-    expect(html.match(/addon-request-unverified/g)?.length).toBe(1);
+    expect(html.match(/addon-request /g)?.length).toBe(1);
     expect(renderToStaticMarkup(createElement(OpenRequestBar, { t, items: [], timeZone: "UTC", onOpen: noop, onDismiss: noop, onInstall: noop }))).toBe("");
   });
 });

@@ -17,7 +17,7 @@
 //!
 //! What is read: messages of the team being shown, addressed to its app-user.
 //! Other recipients and other teams are never looked at. The sender is whatever
-//! the store says; it is not verified, and the bar says so.
+//! the store says; it is not verified.
 //!
 //! What is checked, in order, for every request (a refusal is shown, never silent):
 //! 1. the add-on is installed (or built in), enabled, and its files match what was pinned;

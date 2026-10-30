@@ -458,7 +458,6 @@
         "bad_message_id": "o id da mensagem não pode ser registrado",
         "unreadable": "não foi possível ler a solicitação"
       },
-      "unverified": "remetente não verificado",
       "readFailed": "Não foi possível ler as solicitações de abertura: {{message}}",
       "actionFailed": "Não foi possível tratar a solicitação: {{message}}",
       "truncated": "As solicitações mais antigas não são exibidas.",
