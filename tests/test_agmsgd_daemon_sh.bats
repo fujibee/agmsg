@@ -946,3 +946,100 @@ _enable_env() {
   [ -f "$TEST_SKILL_DIR/fake-launchd/registered" ]
   bash "$DAEMON" disable >/dev/null 2>&1 || true
 }
+
+# daemon.sh without its trailing dispatch, so single steps can be called.
+_daemon_fns() {
+  local fns="$SCRIPTS/daemon-fns.sh"
+  awk '/^case "\$\{1:-\}" in/ {exit} {print}' "$DAEMON" > "$fns"
+  printf '%s' "$fns"
+}
+
+# A fake uname/systemctl/sqlite3 on a PATH of their own, and a Node in another directory.
+_fake_linux_unit_env() {
+  FAKE_LINUX="$TEST_SKILL_DIR/fake-linux"
+  FAKE_SQLITE_DIR="$TEST_SKILL_DIR/sqlite-home/bin"
+  FAKE_NODE_DIR="$TEST_SKILL_DIR/node-home/bin"
+  mkdir -p "$FAKE_LINUX" "$FAKE_SQLITE_DIR" "$FAKE_NODE_DIR"
+  printf '#!/usr/bin/env bash\necho Linux\n' > "$FAKE_LINUX/uname"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LINUX/systemctl"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_SQLITE_DIR/sqlite3"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_NODE_DIR/node"
+  chmod +x "$FAKE_LINUX/uname" "$FAKE_LINUX/systemctl" "$FAKE_SQLITE_DIR/sqlite3" "$FAKE_NODE_DIR/node"
+}
+
+# The one unit this test's enable wrote. Found by glob, not recomputed: the id
+# hashes the physical install path, which differs from $TEST_SKILL_DIR when the
+# temp root is a symlink (macOS /var -> /private/var).
+_unit_file() {
+  local f
+  for f in "$HOME"/.config/systemd/user/agmsgd-*.service; do
+    printf '%s' "$f"
+    return 0
+  done
+}
+
+@test "daemon.sh enable (linux): the unit gets a PATH with the sqlite3 and Node directories ahead of systemd's default" {
+  _seed_install_db
+  _fake_linux_unit_env
+  local fns unit
+  fns="$(_daemon_fns)"
+  PATH="$FAKE_SQLITE_DIR:$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _register_linux "$2"' _ "$fns" "$FAKE_NODE_DIR/node"
+  [ "$status" -eq 0 ]
+  unit="$(_unit_file)"
+  grep -Fxq "Environment=\"PATH=$FAKE_SQLITE_DIR:$FAKE_NODE_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"" "$unit"
+  grep -Fxq "ExecStart=$SCRIPTS/daemon/agmsgd-launch.sh" "$unit"
+}
+
+@test "daemon.sh enable (linux): enabling again rewrites a unit that has no PATH" {
+  _seed_install_db
+  _fake_linux_unit_env
+  local fns unit
+  fns="$(_daemon_fns)"
+  PATH="$FAKE_SQLITE_DIR:$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    bash -c 'set -u; source "$1"; _register_linux "$2"' _ "$fns" "$FAKE_NODE_DIR/node"
+  unit="$(_unit_file)"
+  printf '[Service]\nExecStart=/old/launcher\n' > "$unit"
+  PATH="$FAKE_SQLITE_DIR:$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _register_linux "$2"' _ "$fns" "$FAKE_NODE_DIR/node"
+  [ "$status" -eq 0 ]
+  grep -q '^Environment="PATH=' "$unit"
+  refute grep -q '/old/launcher' "$unit"
+}
+
+@test "daemon.sh enable (linux): a directory systemd would misread is escaped or left out of the unit PATH" {
+  _seed_install_db
+  _fake_linux_unit_env
+  local fns pct_dir quote_dir out
+  fns="$(_daemon_fns)"
+  pct_dir="$TEST_SKILL_DIR/100%/bin"
+  quote_dir="$TEST_SKILL_DIR/we\"ird/bin"
+  mkdir -p "$pct_dir" "$quote_dir"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$pct_dir/node"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$quote_dir/sqlite3"
+  chmod +x "$pct_dir/node" "$quote_dir/sqlite3"
+  PATH="$quote_dir:$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _register_linux "$2"' _ "$fns" "$pct_dir/node"
+  [ "$status" -eq 0 ]
+  out="$(grep '^Environment=' "$(_unit_file)")"
+  case "$out" in *"100%%/bin"*) ;; *) return 1 ;; esac
+  case "$out" in *'we"ird'*) return 1 ;; esac
+}
+
+@test "daemon.sh enable: no Codex warning when no Codex seat is registered, one when a Codex seat is" {
+  _seed_install_db
+  local fns
+  fns="$(_daemon_fns)"
+  mkdir -p "$TEST_SKILL_DIR/teams/t"
+  printf '{"name":"t","agents":{"a":{"registrations":[{"type":"claude-code","project":"/p"}]}}}' > "$TEST_SKILL_DIR/teams/t/config.json"
+  # Only the warning's own condition is under test: every later step is stubbed.
+  local stubs='_ensure_install_db_schema() { :; }; _systemd_user_usable() { return 0; }; _resolve_node() { printf %s "$NODE"; }
+    _resolve_codex() { return 1; }; _service_registered() { return 1; }; _with_op_lock() { return 0; }; cmd_start() { :; }'
+  NODE="$(command -v node)" run bash -c 'set -u; source "$1"; eval "$2"; cmd_enable' _ "$fns" "$stubs"
+  [ "$status" -eq 0 ]
+  refute grep -q 'no usable Codex' <<<"$output"
+  printf '{"name":"t","agents":{"a":{"registrations":[{"type":"codex","project":"/p"}]}}}' > "$TEST_SKILL_DIR/teams/t/config.json"
+  NODE="$(command -v node)" run bash -c 'set -u; source "$1"; eval "$2"; cmd_enable' _ "$fns" "$stubs"
+  [ "$status" -eq 0 ]
+  grep -q 'no usable Codex' <<<"$output"
+}
