@@ -195,7 +195,13 @@ function prepare() {
   }
   writeState(state);
   process.stdout.write(`${JSON.stringify({
+    // config_path/journal_path: the paths this run ACTUALLY used, reported
+    // back rather than re-derived by the caller (#1836 review) -- this is
+    // the one place that already knows AGMSG_SYNC_LOCAL_ROSTER_FILE's
+    // fallback and any future override, so a caller watching for the next
+    // local change does not need its own copy of that resolution logic.
     type: "roster_sync_state", transport_cursor: target.transport_cursor,
+    config_path: configPath, journal_path: journalPath,
   })}\n`);
   for (const record of mutations) {
     const reserved = target.reservations[record.id];

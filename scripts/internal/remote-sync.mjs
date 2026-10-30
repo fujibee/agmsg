@@ -140,6 +140,40 @@ function rosterJournalPath(team) {
   return join(dirname(teamConfigPath(team)), "roster.jsonl");
 }
 
+// A fingerprint of every path in `paths` as (mtime, size), or null the
+// instant ANY of them cannot even be stat'd -- a permission error, a store
+// mid-recreate, something unanticipated. null is treated by the caller
+// exactly like "changed": run the driver rather than guess (#1836 -- when
+// unsure, favor running it). A missing file (ENOENT -- ordinary before the
+// store or the roster journal is first created) is not that: it is a
+// definite, stable fact, so it is fingerprinted as "absent" rather than
+// disarming the whole check.
+//
+// Takes the paths rather than resolving them: an earlier version of this
+// resolved the real message-store path itself, with its own `bash -c
+// agmsg_db_path` call and its own cache, and every round of review on it
+// found another way that guess (or its cache invalidation) could miss a
+// real partition/driver change (#1836 review, three rounds). The storage
+// and roster drivers already resolve their own paths correctly on every
+// `prepare` call they make regardless -- see `db_path` on the storage
+// driver's `sync_state` record and `config_path`/`journal_path` on the
+// roster driver's -- so `cycle()` below reads the paths back from THAT,
+// never re-derives them, and this function is reduced to the one thing it
+// cannot get wrong: stat the paths it was handed.
+export async function localStoreFingerprint(paths, statCall = stat) {
+  const parts = [];
+  for (const path of paths) {
+    try {
+      const info = await statCall(path);
+      parts.push(`${path}:${info.mtimeMs}:${info.size}`);
+    } catch (error) {
+      if (error?.code === "ENOENT") { parts.push(`${path}:absent`); continue; }
+      return null;
+    }
+  }
+  return parts.join("|");
+}
+
 // Where the engine records that a cycle has actually completed.
 //
 // `status` could report `connected (engine running, pid N)` forever while every
@@ -3337,7 +3371,16 @@ async function postCandidates(config, candidates, requestCall, eventCall) {
 // `{ pushSaturated }`: true when a FULL push page was prepared (more remains
 // to push), which is the loop's catch-up signal. Dependency-injectable for
 // tests (adaptive-sync-catchup design).
-export async function cycle(config, { pushLimit, pullLimit }, dependencies = {}) {
+// How long an idle-prepare checkpoint may go between real `prepare` calls
+// before it is forced to re-verify itself, regardless of how perfectly it
+// still matches (#1836 review): shared between `cycle()`'s own entry check
+// and `runLoop`'s sleep, which clamps its wait so the two cannot drift --
+// checking only at a cycle's entry would let a checkpoint armed just before
+// a long sleep begins go unchecked for close to double this value.
+export const IDLE_SAFETY_NET_MS = 60000;
+
+export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = null, pendingCheckpoint = null },
+  dependencies = {}) {
   const healthCall = dependencies.healthCall ?? health;
   const requestCall = dependencies.requestCall ?? request;
   const driverCall = dependencies.driverCall ?? driver;
@@ -3349,6 +3392,12 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
   const logApplyCall = dependencies.logApplyCall ?? logApplyOutcomes;
   const readStateCycleCall = dependencies.readStateCycleCall ?? readStateCycle;
   const activateKeyRotationsCall = dependencies.activateKeyRotationsCall ?? activateKeyRotations;
+  const localStoreFingerprintCall = dependencies.localStoreFingerprintCall ?? localStoreFingerprint;
+  // Numeric milliseconds -- named `clockCall`, not `nowCall`, specifically
+  // so it cannot collide with runLoop's own `nowCall` dependency (an ISO
+  // string, for its unrelated logging timestamps) when both read from the
+  // SAME `dependencies` object runLoop forwards to this function unchanged.
+  const clockCall = dependencies.clockCall ?? Date.now;
 
   const ready = await healthCall(config.server_url, config.remote_team_id);
   if (ready.server_instance_id !== config.server_instance_id) throw new Error("health server instance changed");
@@ -3363,33 +3412,128 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
     policy_revision: capabilities.policy_revision,
     startup_nonce: process.env.AGMSG_SYNC_START_NONCE || undefined });
 
+  // writeProfile is pure JS over `capabilities` -- no spawn -- so it is
+  // ALWAYS computed, skip or not. Server-side eligibility (a quota, a cipher
+  // rotation) can change with the local store's own fingerprint never
+  // moving at all (#1836 review point 3), so the skip decision below checks
+  // both, not the fingerprint alone.
   const writeProfile = selectWriteProfile(config, capabilities);
-  const prepareInput = [{ type: "sync_prepare", envelope_v: 1,
-    cipher: writeProfile.profile, key_id: writeProfile.key_id ?? null,
-    recipients: writeProfile.recipients ?? [], max_blob_bytes: Number(capabilities.max_blob_bytes),
-    allow_new: writeProfile.eligible }];
-  const [prepared, rosterPrepared] = await Promise.all([
-    driverCall("prepare", config, prepareInput, [String(pushLimit)]),
-    rosterDriverCall("prepare", config, prepareInput, [String(pushLimit)]),
-  ]);
-  const state = prepared.find((record) => record.type === "sync_state");
-  // Registry mutations lead the page. They establish the identity needed to
-  // interpret every following message, and UUIDv7 values minted in the same
-  // millisecond are not a reliable cross-axis ordering key.
-  const rosterCandidates = rosterPrepared
-    .filter((record) => record.type === "roster_sync_push_candidate")
-    .map((record) => ({ ...record, sync_axis: "roster" }));
-  const rotationIndex = rosterCandidates.findIndex((record) =>
-    record.projection?.kind === "key_rotated");
-  const candidates = (rotationIndex === -1 ? [
-    ...rosterCandidates,
-    ...prepared.filter((record) => record.type === "sync_push_candidate")
-      .map((record) => ({ ...record, sync_axis: "messages" })),
-  ] : rosterCandidates.slice(0, rotationIndex + 1)).slice(0, pushLimit);
-  if (!state) throw new Error("driver omitted sync_state");
-  sequence(state.transport_cursor, "transport_cursor");
-  await eventCall("push.prepared", { count: candidates.length, local_positions: candidates.map((item) => item.local_position),
-    wire_ids: candidates.map((item) => item.id) });
+
+  // idle skip (#1836): skipped only when ALL of the following hold against
+  // the checkpoint recorded the last time `prepare` actually ran, found
+  // nothing, and was eligible to push if there had been something -- that
+  // call still spawns on the order of 50 processes between the storage and
+  // roster drivers, every few seconds, for nothing on an idle engine. The
+  // pull side below is untouched either way (still plain HTTP every cycle),
+  // so an inbound message is never delayed by this.
+  //
+  //   1. A checkpoint exists at all.
+  //   2. It is not yet IDLE_SAFETY_NET_MS old. Even a correctly-armed
+  //      checkpoint is forced to re-verify itself this often: whatever
+  //      could make the checkpoint's remembered paths stale (a plugin
+  //      partition driver swapped out, AGMSG_STORAGE_PATH changed by some
+  //      means this file cannot enumerate) is bounded in how long it can go
+  //      unnoticed, without this file having to name every such cause.
+  //   3. A fresh stat of the checkpoint's own remembered paths (no spawn --
+  //      see localStoreFingerprint) still matches what it saw when armed.
+  //   4. Write eligibility (capabilities-derived, pure JS, no spawn) still
+  //      matches too (#1836 review point 3: a server-side change with the
+  //      local store never moving must still disarm it).
+  const checkpointFresh = idleCheckpoint !== null &&
+    (clockCall() - idleCheckpoint.armedAt) < IDLE_SAFETY_NET_MS;
+  const checkpointFingerprint = checkpointFresh ?
+    await localStoreFingerprintCall(idleCheckpoint.paths).catch(() => null) : null;
+  const skipPrepare = checkpointFresh && checkpointFingerprint !== null &&
+    checkpointFingerprint === idleCheckpoint.fingerprint &&
+    writeProfile.eligible === idleCheckpoint.eligible;
+
+  let state = null;
+  let candidates = [];
+  let reportedPaths = null;
+  let armFingerprint = null;
+  // Taken RIGHT BEFORE `prepare` is called below, of whatever paths the
+  // PRECEDING real `prepare` call (the one that produced `pendingCheckpoint`,
+  // if any) reported. This is the other half of the bracket that closes the
+  // review's remaining gap: an in-process `await` between `prepare`
+  // returning and this cycle's own stat cannot be the only thing considered,
+  // because an UNRELATED, concurrent writer (another `send.sh` process) can
+  // write at any point, including DURING `prepare`'s own execution -- not
+  // just in a gap this file's own code leaves open. Comparing a stat taken
+  // right before this cycle's `prepare` call against one taken right after
+  // it returns -- both of the SAME paths -- catches a write landing at ANY
+  // point across that whole span, including inside `prepare` itself,
+  // because `prepare` read the store at some moment strictly between the
+  // two stats: if that read saw different data, the two surrounding stats
+  // cannot both still match the recorded checkpoint value.
+  const preprepareFingerprint = pendingCheckpoint !== null ?
+    await localStoreFingerprintCall(pendingCheckpoint.paths).catch(() => null) : null;
+  if (skipPrepare) {
+    if (idleCheckpoint.cursor === null) throw new Error("cycle: an idle checkpoint must carry a cursor");
+    await eventCall("push.skipped", { reason: "idle-no-local-change" });
+  } else {
+    const prepareInput = [{ type: "sync_prepare", envelope_v: 1,
+      cipher: writeProfile.profile, key_id: writeProfile.key_id ?? null,
+      recipients: writeProfile.recipients ?? [], max_blob_bytes: Number(capabilities.max_blob_bytes),
+      allow_new: writeProfile.eligible }];
+    const [prepared, rosterPrepared] = await Promise.all([
+      driverCall("prepare", config, prepareInput, [String(pushLimit)]),
+      rosterDriverCall("prepare", config, prepareInput, [String(pushLimit)]),
+    ]);
+    state = prepared.find((record) => record.type === "sync_state");
+    const rosterState = rosterPrepared.find((record) => record.type === "roster_sync_state");
+    // Registry mutations lead the page. They establish the identity needed to
+    // interpret every following message, and UUIDv7 values minted in the same
+    // millisecond are not a reliable cross-axis ordering key.
+    const rosterCandidates = rosterPrepared
+      .filter((record) => record.type === "roster_sync_push_candidate")
+      .map((record) => ({ ...record, sync_axis: "roster" }));
+    const rotationIndex = rosterCandidates.findIndex((record) =>
+      record.projection?.kind === "key_rotated");
+    candidates = (rotationIndex === -1 ? [
+      ...rosterCandidates,
+      ...prepared.filter((record) => record.type === "sync_push_candidate")
+        .map((record) => ({ ...record, sync_axis: "messages" })),
+    ] : rosterCandidates.slice(0, rotationIndex + 1)).slice(0, pushLimit);
+    if (!state) throw new Error("driver omitted sync_state");
+    sequence(state.transport_cursor, "transport_cursor");
+    await eventCall("push.prepared", { count: candidates.length, local_positions: candidates.map((item) => item.local_position),
+      wire_ids: candidates.map((item) => item.id) });
+    // The paths THIS call actually used, reported back by the drivers
+    // themselves (storage-sync-driver.sh's `db_path`, roster-sync.mjs's
+    // `config_path`/`journal_path`) -- never re-derived here. ALL THREE are
+    // required: a driver that skips `prepare` based on a checkpoint also
+    // skips its OWN axis's roster/storage prepare, so arming on only the
+    // storage side (say) would silently stop re-checking the roster axis
+    // the moment a roster driver that does not report its path -- an older
+    // build, or a custom one -- is in play (#1836 review). Any one missing
+    // leaves this null, which disarms the checkpoint below exactly like any
+    // other "unknown": never guess.
+    const dbPath = typeof state.db_path === "string" && state.db_path.length > 0 ? state.db_path : null;
+    const configPath = typeof rosterState?.config_path === "string" && rosterState.config_path.length > 0 ?
+      rosterState.config_path : null;
+    const journalPath = typeof rosterState?.journal_path === "string" && rosterState.journal_path.length > 0 ?
+      rosterState.journal_path : null;
+    // -wal, not -shm: a write under journal_mode=WAL lands in -wal (measured
+    // stable mtime/size across repeated read-only opens), while -shm is a
+    // per-connection shared-memory index whose mtime moved between two
+    // otherwise-identical idle cycles on a real engine with no write
+    // anywhere in between -- watching it would make the fingerprint differ
+    // every cycle regardless of whether the store actually changed,
+    // defeating the skip this exists for (measured against the real
+    // engine, not merely a single sqlite3 CLI call in isolation).
+    reportedPaths = (dbPath === null || configPath === null || journalPath === null) ? null :
+      [dbPath, `${dbPath}-wal`, configPath, journalPath];
+    // Fingerprinted HERE, immediately after `prepare` returned these paths,
+    // before any of this cycle's own pull/apply/read-state work runs. This
+    // is only the END of the bracket -- see `preprepareFingerprint` above
+    // for why a single stat, however early, is not enough on its own: an
+    // unrelated concurrent writer is not confined to a gap this file's code
+    // leaves open, so a write during `prepare`'s own execution has to be
+    // caught too, which is what comparing against `preprepareFingerprint`
+    // (below) does.
+    armFingerprint = reportedPaths !== null ?
+      await localStoreFingerprintCall(reportedPaths).catch(() => null) : null;
+  }
 
   if (!writeProfile.eligible) {
     await eventCall("push.blocked", { reason: writeProfile.reason });
@@ -3478,9 +3622,10 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
   // so the loop treats it as "more remains" and stays in catch-up. An exactly-
   // full page (remainder 0) costs one extra probe cycle that finds nothing —
   // safe. Not eligible, or a short page, = push is drained.
-  const pushSaturated = writeProfile.eligible && candidates.length === pushLimit;
+  const pushSaturated = !skipPrepare && writeProfile.eligible && candidates.length === pushLimit;
 
-  let cursor = state.transport_cursor;
+  let cursor = skipPrepare ? idleCheckpoint.cursor : state.transport_cursor;
+  let pulledCount = 0;
   let pullCapabilities = capabilities;
   for (;;) {
     // Trap 1: the request param AND this validation must both use pullLimit —
@@ -3519,6 +3664,7 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
       }
     }
     records.push({ type: "sync_pull_cursor", next_after: page.next_after });
+    pulledCount += page.messages.length;
     await eventCall("pull.received", { after: cursor, next_after: page.next_after,
       messages: page.messages.map((message) => ({ id: message.id, server_seq: message.server_seq })) });
     const cursorRecord = records.at(-1);
@@ -3542,7 +3688,62 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
     if (!page.has_more) break;
   }
   await readStateCycleCall(config, pullLimit, dependencies);
-  return { pushSaturated };
+  // pushEmpty/hadActivity feed runLoop's two #1836 decisions: hadActivity (a
+  // push, or a pulled message) is what resets the adaptive steady-state
+  // interval back down to its floor. `checkpoint` is the ONLY thing that
+  // arms or carries forward the idle-prepare skip -- non-null exactly when
+  // this cycle PROVED the store empty with a real, eligible `prepare` (or
+  // carried that proof forward unchanged while skipping); null otherwise,
+  // which disarms the skip for the next cycle (busy, ineligible, or the
+  // fingerprint could not be resolved).
+  const pushEmpty = skipPrepare || candidates.length === 0;
+  // The checkpoint runLoop both reuses for its NEXT skip decision and, via
+  // its own fingerprint, as the wake-baseline for a stretched-out sleep
+  // (#1836 review point A -- that baseline has to be taken at this exact
+  // moment, not re-fetched once the sleep itself begins, or a write landing
+  // in the gap between the two would already be reflected in the later
+  // stat and never trigger an early wake).
+  let checkpoint = null;
+  // The NEXT cycle's `pendingCheckpoint` input: a NOT-YET-ARMED candidate,
+  // meaning a real `prepare` found nothing and was eligible, but has not
+  // yet been bracketed by a stat taken before IT ran too. Arming straight
+  // off a single post-`prepare` stat (an earlier revision did exactly
+  // this) cannot rule out a write landing DURING that same `prepare`
+  // call's own execution -- an unrelated, concurrent writer (another
+  // `send.sh` process) is not confined to a gap this file's own code
+  // leaves open, so narrowing the gap around the stat is not enough
+  // (#1836 review). Two REAL `prepare` calls in a row, bracketed by stats
+  // of the SAME paths that all agree (before this one -- see
+  // `preprepareFingerprint` above -- and after it), is what proves
+  // nothing wrote across the whole span, including inside either
+  // `prepare`'s own execution.
+  let nextPendingCheckpoint = null;
+  if (skipPrepare) {
+    // Nothing changed; carry the SAME paths/fingerprint/eligibility
+    // forward untouched, including `armedAt` -- the 60s safety net counts
+    // from the last REAL `prepare`, not from every skip. No `prepare` ran,
+    // so there is nothing new to bracket; the pending slot stays empty
+    // (it is only meaningful again once skip ever stops).
+    checkpoint = { ...idleCheckpoint, cursor };
+  } else if (pushEmpty && writeProfile.eligible && reportedPaths !== null && armFingerprint !== null) {
+    const samePathsAsPending = pendingCheckpoint !== null &&
+      pendingCheckpoint.paths.length === reportedPaths.length &&
+      pendingCheckpoint.paths.every((path, index) => path === reportedPaths[index]);
+    const confirmed = samePathsAsPending && preprepareFingerprint !== null &&
+      preprepareFingerprint === pendingCheckpoint.fingerprint && preprepareFingerprint === armFingerprint;
+    if (confirmed) {
+      // Bracketed and proven stable across BOTH this prepare and the one
+      // before it: arm for real.
+      checkpoint = { paths: reportedPaths, fingerprint: armFingerprint, eligible: true, cursor, armedAt: clockCall() };
+    } else {
+      // Not confirmed yet (the very first real prepare ever, a path
+      // change, or an actual write) -- becomes the candidate the NEXT
+      // cycle's own prepare will try to confirm against.
+      nextPendingCheckpoint = { paths: reportedPaths, fingerprint: armFingerprint };
+    }
+  }
+  return { pushSaturated, cursor, hadActivity: !pushEmpty || pulledCount > 0, checkpoint,
+    pendingCheckpoint: nextPendingCheckpoint };
 }
 
 // Adaptive catch-up loop (adaptive-sync-catchup design). Steady state is
@@ -3624,10 +3825,15 @@ export async function runLoop(config, options, dependencies = {}) {
   const recordRefusalCall = dependencies.recordRefusalCall ?? recordRefusal;
   const isRefusalCall = dependencies.isRefusalCall ?? isRefusal;
   const nowCall = dependencies.nowCall ?? (() => new Date().toISOString());
+  // Numeric milliseconds, distinct from `nowCall` above (an ISO string, for
+  // logging) -- needed to clamp a sleep against `idleCheckpoint.armedAt`,
+  // which `cycle()` also stamps with this same `clockCall` dependency.
+  const clockCall = dependencies.clockCall ?? Date.now;
   const collectInstallBaselineCall = dependencies.collectInstallBaselineCall ?? collectInstallBaseline;
   const installChangedCall = dependencies.installChangedCall ?? installChangedAgainst;
   const scriptsRoot = dependencies.scriptsRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const restartCall = dependencies.restartCall ?? restartAfterStandDown;
+  const localStoreFingerprintCall = dependencies.localStoreFingerprintCall ?? localStoreFingerprint;
 
   // An explicit --limit is a ceiling for BOTH push and pull (request size /
   // memory / slow-link timeout); only the default lets the loop go large.
@@ -3637,6 +3843,13 @@ export async function runLoop(config, options, dependencies = {}) {
   const LARGE_LIMIT = 1000;
   const BASE_BACKOFF_MS = 1000;
   const MAX_BACKOFF_MS = 60000;
+  // The adaptive steady-state interval (#1836): a run of empty cycles (no
+  // push, nothing pulled) stretches the wait out from steadyIntervalMs
+  // towards this cap, and any cycle with real activity -- a push, or a
+  // pulled message -- collapses it straight back to steadyIntervalMs. Capped
+  // at 60s regardless of steadyIntervalMs, matching the idle-prepare skip's
+  // own worst case below.
+  const MAX_IDLE_INTERVAL_MS = 60000;
 
   // Taken once, before the loop: the reference the update check diffs
   // against. null means the tree could not be observed COMPLETELY, and an
@@ -3648,6 +3861,23 @@ export async function runLoop(config, options, dependencies = {}) {
 
   let catchUp = false; // start steady; the first cycle reveals any backlog
   let consecutiveFailures = 0;
+  // #1836 idle-skip state. idleCheckpoint ({ fingerprint, eligible, cursor })
+  // is produced BY `cycle()` itself (it is the one place that already has
+  // both the fingerprint and the write-eligibility capabilities gave it) --
+  // non-null exactly when the most recent cycle PROVED the store drained
+  // with a real, eligible `prepare`, or carried that proof forward unchanged
+  // while skipping; null disarms the skip (busy, ineligible, a failed cycle,
+  // or the real store path could not be resolved). idleStreak drives the
+  // adaptive interval below, independently of idleCheckpoint: it also counts
+  // a quiet cycle that still had to run `prepare` for real (e.g. the very
+  // first one) and resets on any activity either way.
+  let idleCheckpoint = null;
+  // The not-yet-confirmed candidate `cycle()` is trying to bracket across
+  // two consecutive real `prepare` calls (#1836 review) -- see its own
+  // comment on `pendingCheckpoint`/`nextPendingCheckpoint` for why a single
+  // post-`prepare` stat cannot arm `idleCheckpoint` by itself.
+  let pendingCheckpoint = null;
+  let idleStreak = 0;
   for (;;) {
     // Checked at the cycle boundary, BEFORE any driver can be spawned: past
     // this point the loop executes scripts from disk, and executing updated
@@ -3678,8 +3908,23 @@ export async function runLoop(config, options, dependencies = {}) {
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);
     const pullLimit = ceiling ?? LARGE_LIMIT;
     try {
-      const result = await cycleCall(config, { pushLimit, pullLimit }, dependencies);
+      // A safety-net-forced re-prepare of an already-armed checkpoint
+      // (idleCheckpoint non-null, but stale enough that cycle() will not
+      // skip) re-verifies that SAME checkpoint's own paths/fingerprint as
+      // its bracket anchor when nothing else is pending -- otherwise it
+      // would fall back to the cold-start two-call confirmation and drop
+      // the skip for an extra cycle even though nothing may have changed.
+      const effectivePending = pendingCheckpoint ??
+        (idleCheckpoint !== null ? { paths: idleCheckpoint.paths, fingerprint: idleCheckpoint.fingerprint } : null);
+      const result = await cycleCall(config,
+        { pushLimit, pullLimit, idleCheckpoint, pendingCheckpoint: effectivePending }, dependencies);
       consecutiveFailures = 0;
+      idleCheckpoint = result?.checkpoint ?? null;
+      pendingCheckpoint = result?.pendingCheckpoint ?? null;
+      // hadActivity defaults to "yes" (keeping the streak at 0, the
+      // steadyIntervalMs cadence) whenever a caller's result does not say --
+      // unsure favors the normal interval, not a stretched-out one.
+      idleStreak = result?.hadActivity === false ? idleStreak + 1 : 0;
       // Here, and nowhere earlier: this is the one point at which a cycle is
       // known to have finished rather than to have been attempted.
       //
@@ -3700,8 +3945,75 @@ export async function runLoop(config, options, dependencies = {}) {
       // catch-up removes the wait ONLY between successful, progress-making
       // cycles; steady keeps the interval. --interval never applies in
       // catch-up (a saturated cycle is moving real data, not empty-polling).
-      if (!catchUp) await sleepCall(steadyIntervalMs);
+      if (!catchUp) {
+        // A single idle cycle stays at the floor (a RUN of them is what
+        // stretches it, not a one-off); only the SECOND and later
+        // consecutive idle cycles double the wait, capped at
+        // MAX_IDLE_INTERVAL_MS. But ONLY when this cycle armed (or carried
+        // forward) a checkpoint (#1836 review point A): no checkpoint means
+        // no remembered paths to re-check during the wait, so a local write
+        // cannot be detected early at all -- stretching the interval would
+        // leave THAT situation's outbound side waiting up to the stretched
+        // interval too, with no way to compensate.
+        const intervalMs = idleCheckpoint === null || idleStreak <= 1 ? steadyIntervalMs :
+          Math.min(MAX_IDLE_INTERVAL_MS, steadyIntervalMs * 2 ** (idleStreak - 1));
+        // Clamped to what remains of the checkpoint's OWN 60s safety-net
+        // budget (#1836 review point 3): checked only at cycle() entry, a
+        // checkpoint armed just before a long sleep begins could otherwise
+        // go unverified for close to double IDLE_SAFETY_NET_MS -- once for
+        // the sleep itself, again for the cycle it wakes into reading a
+        // still-fresh-by-a-hair checkpoint. Clamping here means the NEXT
+        // cycle entry is always within budget of this one's armedAt.
+        const safetyRemainingMs = idleCheckpoint === null ? Infinity :
+          Math.max(0, IDLE_SAFETY_NET_MS - (clockCall() - idleCheckpoint.armedAt));
+        // No floor on the safety-net side: once its budget is exhausted,
+        // the next cycle entry must happen at or before it, even if that
+        // means sleeping for LESS than steadyIntervalMs (down to 0ms).
+        // Flooring it at steadyIntervalMs here, as the interval side does,
+        // would let the very last sleep before the deadline overshoot it.
+        const waitMs = Math.min(Math.max(steadyIntervalMs, intervalMs), safetyRemainingMs);
+        if (waitMs <= steadyIntervalMs) {
+          await sleepCall(waitMs);
+        } else {
+          // A stretched-out wait is slept in steadyIntervalMs-sized chunks,
+          // re-checking the checkpoint's own remembered paths (a stat --
+          // no subprocess; see localStoreFingerprint) between them, so a
+          // LOCAL write still gets sent within steadyIntervalMs regardless
+          // of how far the interval has backed off.
+          //
+          // The baseline is `idleCheckpoint.fingerprint` -- taken by
+          // `cycle()` at the moment it just finished arming or carrying
+          // this checkpoint forward, not a fresh stat taken only now. A
+          // write landing in the gap between that moment and a
+          // freshly-taken baseline would already be reflected in the
+          // fresh stat, so comparing against it would swallow that write as
+          // "already known" and never wake early for it (#1836 review
+          // point A).
+          const { paths: watchPaths, fingerprint: startFingerprint } = idleCheckpoint;
+          let waited = 0;
+          while (waited < waitMs) {
+            const chunk = Math.min(steadyIntervalMs, waitMs - waited);
+            await sleepCall(chunk);
+            waited += chunk;
+            if (waited >= waitMs) break;
+            let fp = null;
+            try { fp = await localStoreFingerprintCall(watchPaths); } catch { fp = null; }
+            // null (#1836 review point 4) is "unknown now", not "unchanged
+            // -- keep sleeping": go back to the top of the loop, where a
+            // null checkpoint fingerprint already means cycle() will not
+            // skip `prepare`.
+            if (fp === null || fp !== startFingerprint) break;
+          }
+        }
+      }
     } catch (error) {
+      // A failed cycle is not a confirmed-idle one: whether `prepare` ran,
+      // and what it saw, is now unknown. Disarm the #1836 skip rather than
+      // trust a checkpoint taken before whatever just went wrong -- and
+      // the bracket a pending candidate was waiting to be confirmed against
+      // is broken too, so it cannot be trusted either.
+      idleCheckpoint = null;
+      pendingCheckpoint = null;
       // Best-effort: a logging failure must not abort failure handling or the
       // backoff below (event() can throw when AGMSG_SYNC_LOG_FILE append fails).
       try {
