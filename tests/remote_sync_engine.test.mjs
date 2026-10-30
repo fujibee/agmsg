@@ -3612,8 +3612,8 @@ test("cycle: a drained, eligible prepare arms a checkpoint carrying the driver-r
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint: null },
     idleCycleBaseDeps({ extra: idleDrivers() }));
   assert.deepEqual(result.checkpoint, {
-    paths: ["/db/messages.db", "/db/messages.db-wal", "/db/messages.db-shm", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"],
-    fingerprint: ["/db/messages.db", "/db/messages.db-wal", "/db/messages.db-shm", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"].join("|"),
+    paths: ["/db/messages.db", "/db/messages.db-wal", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"],
+    fingerprint: ["/db/messages.db", "/db/messages.db-wal", "/conn/teams/t/config.json", "/conn/teams/t/roster.jsonl"].join("|"),
     eligible: true, cursor: "9", armedAt: 1000,
   });
 });
@@ -3634,7 +3634,7 @@ test("cycle: a driver that does not report db_path (an older build, or a custom 
 
 test("cycle: an unchanged checkpoint (matching paths, matching eligibility, within the safety-net window) skips both drivers' prepare", async () => {
   let prepareCalls = 0;
-  const watchedPaths = ["/db/messages.db", "/db/messages.db-wal", "/db/messages.db-shm"];
+  const watchedPaths = ["/db/messages.db", "/db/messages.db-wal"];
   const idleCheckpoint = { paths: watchedPaths, fingerprint: watchedPaths.join("|"), eligible: true, cursor: "7", armedAt: 1000 };
   const result = await cycle(config, { pushLimit: 100, pullLimit: 1000, idleCheckpoint }, idleCycleBaseDeps({
     clockCall: () => 1000 + 10000, // well under the 60s safety net

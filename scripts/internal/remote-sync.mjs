@@ -3497,8 +3497,16 @@ export async function cycle(config, { pushLimit, pullLimit, idleCheckpoint = nul
       rosterState.config_path : null;
     const journalPath = typeof rosterState?.journal_path === "string" && rosterState.journal_path.length > 0 ?
       rosterState.journal_path : null;
+    // -wal, not -shm: a write under journal_mode=WAL lands in -wal (measured
+    // stable mtime/size across repeated read-only opens), while -shm is a
+    // per-connection shared-memory index whose mtime moved between two
+    // otherwise-identical idle cycles on a real engine with no write
+    // anywhere in between -- watching it would make the fingerprint differ
+    // every cycle regardless of whether the store actually changed,
+    // defeating the skip this exists for (measured against the real
+    // engine, not merely a single sqlite3 CLI call in isolation).
     reportedPaths = (dbPath === null || configPath === null || journalPath === null) ? null :
-      [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, configPath, journalPath];
+      [dbPath, `${dbPath}-wal`, configPath, journalPath];
     // Fingerprinted HERE, immediately after `prepare` returned these paths
     // and before anything else in this cycle runs (#1836 review: taking
     // this later -- after the pull/apply/read-state work below -- would
