@@ -254,8 +254,10 @@ struct StoreInfo {
 const DIRECTLY_READABLE_DRIVER: &str = "sqlite";
 
 fn store_info(team: &str) -> Result<StoreInfo, String> {
-    match stores().and_then(|s| s.infos.get(team).cloned()) {
-        Some(answer) => answer,
+    // agmsg's own drivers: worked out here, no process started; anything else is asked of agmsg as before
+    match crate::store_local::store(&agmsg_base(), &crate::store_local::Env::from_process(), team) {
+        Some(Ok(s)) => Ok(StoreInfo { driver: s.driver, path: s.path, exists: s.exists }),
+        Some(Err(e)) => Err(e),
         None => store_info_from_script(team),
     }
 }
@@ -266,51 +268,6 @@ fn store_info_from_script(team: &str) -> Result<StoreInfo, String> {
         .into_iter()
         .next()
         .ok_or_else(|| format!("no store info for team {team}"))
-}
-
-/// Every team and where its store is, as of one fingerprint (see `store_fp`).
-struct Stores {
-    base_part: String,
-    exists_part: String,
-    paths: Vec<PathBuf>,
-    teams: Vec<String>,
-    /// A team whose lookup failed keeps its error, so the failure is seen as before and the answer is not kept.
-    infos: std::collections::HashMap<String, Result<StoreInfo, String>>,
-}
-
-static STORES: std::sync::Mutex<Option<std::sync::Arc<Stores>>> = std::sync::Mutex::new(None);
-
-/// The teams and their stores, without starting a process while nothing they depend on has changed.
-/// `None` when the fingerprint cannot be taken or the answer is not whole (a script failed): the callers
-/// then ask agmsg directly, as they always did, and nothing stale is ever kept for them.
-fn stores() -> Option<std::sync::Arc<Stores>> {
-    let base = agmsg_base();
-    let env = crate::store_fp::Env::from_process();
-    let before = crate::store_fp::base_part(&base, &env)?;
-    if let Some(c) = STORES.lock().unwrap().clone() {
-        if c.base_part == before && c.exists_part == crate::store_fp::exists_part(&c.paths) {
-            return Some(c);
-        }
-    }
-    let raw = run_script("api.sh", &["get", "teams"]).ok()?;
-    let teams: Vec<String> = parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect();
-    let mut infos = std::collections::HashMap::new();
-    for t in &teams {
-        infos.insert(t.clone(), store_info_from_script(t));
-    }
-    let ok: Vec<&StoreInfo> = infos.values().filter_map(|i| i.as_ref().ok()).collect();
-    let whole = ok.len() == infos.len();
-    let paths: Vec<PathBuf> = ok.iter().map(|i| PathBuf::from(&i.path)).collect();
-    // Only a whole answer that nothing changed under is kept: not if the files moved while the scripts ran,
-    // and not if a store appeared or vanished between the script's look and ours.
-    let exists_part = crate::store_fp::exists_part(&paths);
-    let after = crate::store_fp::base_part(&base, &env);
-    let agrees = ok.iter().all(|i| i.exists == PathBuf::from(&i.path).exists());
-    let s = std::sync::Arc::new(Stores { base_part: before.clone(), exists_part, paths, teams, infos });
-    if whole && after.as_deref() == Some(before.as_str()) && agrees {
-        *STORES.lock().unwrap() = Some(s.clone());
-    }
-    Some(s)
 }
 
 /// The store to read directly for `team`, or `None` when the app must go
@@ -565,8 +522,8 @@ fn fallback_new_messages(team: &str, last_seen: Option<&str>) -> (Vec<Message>, 
 }
 
 fn watchable_stores() -> (Vec<PathBuf>, Vec<String>) {
-    let teams: Vec<String> = match stores() {
-        Some(s) => s.teams.clone(),
+    let teams: Vec<String> = match crate::store_local::teams(&agmsg_base(), &crate::store_local::Env::from_process()) {
+        Some(t) => t,
         None => match run_script("api.sh", &["get", "teams"]) {
             Ok(raw) => parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect(),
             Err(_) => return (Vec::new(), Vec::new()),
@@ -1452,102 +1409,106 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         p
     }
 
-    #[test]
-    #[serial]
-    #[cfg(not(target_os = "windows"))]
-    fn nothing_is_started_while_nothing_the_stores_depend_on_has_changed() {
-        let base = counting_base();
-        add_team(&base, "a", "{}");
-        add_team(&base, "b", "{}");
-        touch_store(&base, "messages.db");
-        let first = protected_locations();
-        assert_eq!(calls(&base), 3, "the list and one lookup per team, once");
-        for _ in 0..5 {
-            assert_eq!(protected_locations(), first);
-            let _ = watchable_stores();
-            let _ = store_info("a");
+    /// An install with agmsg's real scripts (this repository ships them), and the environment pointed at it
+    /// and away from the machine's own settings.
+    #[cfg(unix)]
+    struct RealBase {
+        dir: tempfile::TempDir,
+        _guards: Vec<EnvGuard>,
+    }
+
+    #[cfg(unix)]
+    fn real_base() -> RealBase {
+        fn copy(from: &std::path::Path, to: &std::path::Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for e in std::fs::read_dir(from).unwrap() {
+                let e = e.unwrap();
+                if e.file_type().unwrap().is_dir() {
+                    copy(&e.path(), &to.join(e.file_name()));
+                } else {
+                    std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+                }
+            }
         }
-        assert_eq!(calls(&base), 3, "no further script run");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        copy(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts"), &root.join("scripts"));
+        std::fs::create_dir_all(root.join("teams")).unwrap();
+        let guards = vec![
+            EnvGuard::set("AGMSG_APP_BASE", &root.to_string_lossy()),
+            EnvGuard::set("AGMSG_STORAGE_PATH", ""),
+            EnvGuard::set("AGMSG_STORAGE_DRIVER", ""),
+            EnvGuard::set("AGMSG_PLUGIN_DIRS", ""),
+            EnvGuard::set("AGMSG_CONFIG", &root.join("no-such-config.json").to_string_lossy()),
+        ];
+        RealBase { dir, _guards: guards }
+    }
+
+    #[cfg(unix)]
+    fn add_real_team(base: &RealBase, name: &str, config: &str) {
+        let d = base.dir.path().canonicalize().unwrap().join("teams").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("config.json"), config).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn with_agmsgs_own_drivers_no_process_is_started_and_changes_show_on_the_next_look() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        add_real_team(&base, "alpha", "{}");
+        add_real_team(&base, "beta", r#"{"drivers":{"partition":"per-team"}}"#);
+        std::fs::create_dir_all(root.join("db/teams/beta")).unwrap();
+        std::fs::write(root.join("db/teams/beta/messages.db"), "x").unwrap();
+        // no `bash` can be found: any attempt to ask agmsg fails, so a right answer was not asked for
+        let _no_path = EnvGuard::set("PATH", "");
+        let beta = root.join("db/teams/beta/messages.db");
+        let (direct, via_api) = watchable_stores();
+        assert_eq!(direct, vec![beta.clone()]);
+        assert_eq!(via_api, vec!["alpha".to_string()], "no store yet for alpha: left to the fallback, as before");
+        assert!(protected_locations().contains(&beta));
+        assert_eq!(store_info("alpha").unwrap().path, root.join("db/messages.db").to_string_lossy());
+        // a team added, a team moved to its own store, a store that appears: seen at once
+        add_real_team(&base, "gamma", r#"{"drivers":{"partition":"per-team"}}"#);
+        std::fs::create_dir_all(root.join("db/teams/gamma")).unwrap();
+        std::fs::write(root.join("db/teams/gamma/messages.db"), "x").unwrap();
+        assert!(protected_locations().contains(&root.join("db/teams/gamma/messages.db")));
+        std::fs::write(root.join("db/messages.db"), "x").unwrap();
+        assert!(protected_locations().contains(&root.join("db/messages.db")));
+        add_real_team(&base, "alpha", r#"{"drivers":{"partition":"per-team"}}"#);
+        std::fs::create_dir_all(root.join("db/teams/alpha")).unwrap();
+        std::fs::write(root.join("db/teams/alpha/messages.db"), "x").unwrap();
+        assert!(protected_locations().contains(&root.join("db/teams/alpha/messages.db")));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn a_team_on_a_driver_agmsg_does_not_ship_is_the_scripts_to_answer_and_the_rest_are_not() {
+        let base = real_base();
+        let root = base.dir.path().canonicalize().unwrap();
+        add_real_team(&base, "alpha", "{}");
+        add_real_team(&base, "ext", r#"{"drivers":{"partition":"mine"}}"#);
+        let env = crate::store_local::Env::from_process();
+        assert!(crate::store_local::store(&root, &env, "ext").is_none(), "left to the script");
+        assert!(crate::store_local::store(&root, &env, "alpha").is_some(), "answered here");
     }
 
     #[test]
     #[serial]
     #[cfg(not(target_os = "windows"))]
-    fn a_new_team_a_moved_store_and_a_store_that_appears_are_seen_on_the_next_look() {
+    fn scripts_this_was_not_checked_against_are_asked_every_time_and_a_failed_lookup_is_never_kept() {
         let base = counting_base();
         add_team(&base, "a", "{}");
-        let shared = base._dir.path().join("db/messages.db");
-        assert!(!protected_locations().contains(&shared), "no store yet");
-        touch_store(&base, "messages.db");
-        assert!(protected_locations().contains(&shared), "a store that appeared is protected");
-        let per_team = base._dir.path().join("db/teams/b/messages.db");
-        add_team(&base, "b", r#"{"drivers":{"partition":"per-team"}}"#);
-        touch_store(&base, "teams/b/messages.db");
-        assert!(protected_locations().contains(&per_team), "a new team's own store");
-        // the team moves to its own store: the shared file is no longer a's, the new file is
-        let a_own = base._dir.path().join("db/teams/a/messages.db");
-        add_team(&base, "a", r#"{"drivers":{"partition":"per-team"}}"#);
-        touch_store(&base, "teams/a/messages.db");
-        assert!(protected_locations().contains(&a_own), "{:?}", protected_locations());
-    }
-
-    #[test]
-    #[serial]
-    #[cfg(not(target_os = "windows"))]
-    fn a_driver_from_outside_agmsg_or_new_resolution_code_sends_the_next_call_back_to_the_script() {
-        let base = counting_base();
-        add_team(&base, "a", "{}");
-        touch_store(&base, "messages.db");
-        let _ = protected_locations();
-        let warm = calls(&base);
-        let _ = protected_locations();
-        assert_eq!(calls(&base), warm, "kept while nothing changed");
-
-        // the resolution code itself changed (a core update): asked again, and kept again afterwards
-        std::fs::create_dir_all(base._dir.path().join("scripts/lib")).unwrap();
-        std::fs::write(base._dir.path().join("scripts/lib/driver-registry.sh"), "# new rules").unwrap();
-        let _ = protected_locations();
-        assert!(calls(&base) > warm, "the code changed");
-        let again = calls(&base);
-        let _ = protected_locations();
-        assert_eq!(calls(&base), again);
-
-        // an external driver folder: never kept, and a store it moves is seen
-        let plugin = base._dir.path().join("plugins/p/partition");
-        std::fs::create_dir_all(&plugin).unwrap();
-        std::fs::write(plugin.join("mine.sh"), "# arbitrary").unwrap();
-        let n = calls(&base);
-        let _ = protected_locations();
-        let _ = protected_locations();
-        assert!(calls(&base) >= n + 4, "every call asks");
-        let moved = touch_store(&base, "moved/messages.db");
-        std::fs::write(base._dir.path().join("teams/a/config.json"), r#"{"drivers":{"partition":"mine"}}"#).unwrap();
-        let _ = moved;
-
-        // the plugin folders named in the environment: never kept
-        std::fs::remove_dir_all(base._dir.path().join("plugins")).unwrap();
-        std::fs::write(base._dir.path().join("teams/a/config.json"), "{}").unwrap();
-        let _ = protected_locations();
-        let kept = calls(&base);
-        let _ = protected_locations();
-        assert_eq!(calls(&base), kept, "back to built-in drivers: kept");
-        let _env = EnvGuard::set("AGMSG_PLUGIN_DIRS", "/somewhere");
-        let _ = protected_locations();
-        let _ = protected_locations();
-        assert!(calls(&base) >= kept + 4, "AGMSG_PLUGIN_DIRS: every call asks");
-    }
-
-    #[test]
-    #[serial]
-    #[cfg(not(target_os = "windows"))]
-    fn a_failed_lookup_is_never_kept() {
-        let base = counting_base();
-        add_team(&base, "a", "{}");
+        let _ = watchable_stores();
+        let one = calls(&base);
+        assert_eq!(one, 2, "the list and one lookup");
+        let _ = watchable_stores();
+        assert_eq!(calls(&base), 2 * one, "asked again, never answered from before");
         std::fs::write(base._dir.path().join("fail-a"), "").unwrap();
         let _ = watchable_stores();
-        let after_one = calls(&base);
         let _ = watchable_stores();
-        assert!(calls(&base) > after_one, "asked again, not answered from a failure");
         std::fs::remove_file(base._dir.path().join("fail-a")).unwrap();
         touch_store(&base, "messages.db");
         assert_eq!(watchable_stores().0, vec![base._dir.path().join("db/messages.db")]);
