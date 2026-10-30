@@ -93,6 +93,8 @@ Asked about a *teammate's* placement or status, or what can be done to one, that
 3. If there are messages, read and respond appropriately. To reply:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
+**An agmsgd notice is the same request.** When a message arrives that reads `[agmsg:<nonce>] New messages are waiting. Check your agmsg inbox.`, it came from agmsgd and means the same as invoking this command with no arguments: run `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT` for each of your TEAMS and read your inbox there. `check-inbox.sh` is the per-turn hook's script; do not run it by hand for this. (A type that says otherwise below, such as a TUI monitor that owns the inbox, keeps its own rule.)
+
 <!-- agmsg:slot execute-extra -->
 <!-- /agmsg:slot execute-extra -->
 

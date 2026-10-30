@@ -127,6 +127,8 @@ Asked about a *teammate's* placement or status, or what can be done to one, that
 3. If there are messages, read and respond appropriately. To reply:
    `~/.agents/skills/agmsg/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
+**An agmsgd notice is the same request.** When a message arrives that reads `[agmsg:<nonce>] New messages are waiting. Check your agmsg inbox.`, it came from agmsgd and means the same as invoking this command with no arguments: run `~/.agents/skills/agmsg/scripts/inbox.sh $TEAM $AGENT` for each of your TEAMS and read your inbox there. `check-inbox.sh` is the per-turn hook's script; do not run it by hand for this. (A type that says otherwise below, such as a TUI monitor that owns the inbox, keeps its own rule.)
+
 **Ensure monitor is running first.** What decides is `~/.agents/skills/agmsg/scripts/agmsg delivery status --type claude-code --project "$(pwd)"`, its `this project:` line (not the hooks file, and not a leftover Monitor from an earlier session). Keep one persistent `watch.sh` task for this session only when that line says `monitor (legacy)` or `both`. Start no Monitor when it says `agmsgd`, or when SessionStart or `actas` reported native delivery (`agmsgd is running and will deliver to this session directly`). Switch that watcher when `actas` changes the active role.
 
 If asked, in ordinary language and in either English or Japanese, to re-arm this session's own agmsg monitor (no fixed trigger word — read the request as it is phrased): invoke Monitor with the standard command and description for this seat, and say nothing else.
