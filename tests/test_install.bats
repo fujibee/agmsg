@@ -129,9 +129,55 @@ teardown() {
   [ "$before" = "$after" ]
 }
 
+# The Antigravity steps are run as extracted functions with their own
+# AGENTS_DIR, so no test here has to point HOME at anything. `mv` is wrapped to
+# fail only for the Antigravity shim.
+_agy_step_harness() {   # <what> <function> [args...]; prints "after" when the run goes on
+  local dir="$BATS_TEST_TMPDIR/failing-mv" fn
+  mkdir -p "$dir"
+  printf '%s\n' '#!/bin/sh' \
+    'for last; do :; done' \
+    'case "$last" in */agy-tui) exit 1 ;; esac' \
+    'exec /bin/mv "$@"' > "$dir/mv"
+  chmod +x "$dir/mv"
+  fn="$(sed -n '/^install_antigravity_tui_shim() {/,/^}/p;/^install_antigravity_step() {/,/^}/p' "$REPO_ROOT/install.sh")"
+  PATH="$dir:$PATH" AGENTS_DIR="$BATS_TEST_TMPDIR/agents" FN="$fn" \
+    bash -c 'agmsg_install_op_require() { return "${LOCK_RC:-0}"; }; eval "$FN"; install_antigravity_step "$@"; echo after' _ "$@"
+}
+
+@test "install: a failing Antigravity shim step warns once and the run goes on" {
+  run _agy_step_harness "TUI launcher shim (~/.agents/bin/agy-tui)" install_antigravity_tui_shim "$BATS_TEST_TMPDIR/agy-tui.sh"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'could not install the Antigravity' <<<"$output")" -eq 1 ]
+  grep -qF "could not install the Antigravity TUI launcher shim" <<<"$output"
+  grep -qF "installs that do not use Antigravity are unaffected" <<<"$output"
+  [ "${lines[${#lines[@]}-1]}" = after ]
+  [ ! -e "$BATS_TEST_TMPDIR/agents/bin/agy-tui" ]
+  # No half-written temp file is left in the shim directory.
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/agents/bin" | grep '^\.agy-tui\.' || true)" ]
+}
+
+@test "install: a lost install lock still stops the run instead of warning" {
+  LOCK_RC=1 run _agy_step_harness "TUI launcher shim (~/.agents/bin/agy-tui)" install_antigravity_tui_shim "$BATS_TEST_TMPDIR/agy-tui.sh"
+  [ "$status" -eq 1 ]
+  refute grep -qF "after" <(printf '%s' "$output")
+  refute grep -qF "could not install the Antigravity" <(printf '%s' "$output")
+}
+
+# FAKE_HOME is the throwaway mktemp -d from setup(). Refuse to remove anything
+# unless it is non-empty, a real directory, and under the temp root, so a
+# mis-set variable can never aim the rm below at a real home.
+_fake_home_is_scratch() {
+  [ -n "${FAKE_HOME:-}" ] && [ -d "$FAKE_HOME" ] || return 1
+  case "$FAKE_HOME" in /|"$HOME") return 1 ;; esac
+  [ "$(dirname "$FAKE_HOME")" = "$(dirname "$(mktemp -u)")" ] || return 1
+  [ -n "${CODEX_HOME:-}" ] && return 1
+  return 0
+}
+
 # A `mv` that fails only for the Antigravity shim, so the Codex shim next to it
 # in ~/.agents/bin is written normally.
-_agy_failing_mv() {
+_agy_failing_mv_fixture() {
   local dir="$BATS_TEST_TMPDIR/failing-mv"
   mkdir -p "$dir"
   printf '%s\n' '#!/bin/sh' \
@@ -143,7 +189,7 @@ _agy_failing_mv() {
 }
 
 @test "install: a failing Antigravity shim step warns once and the install finishes" {
-  local fake_bin; fake_bin="$(_agy_failing_mv)"
+  local fake_bin; fake_bin="$(_agy_failing_mv_fixture)"
   run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ "$status" -eq 0 ]
   [ "$(grep -c 'could not install the Antigravity' <<<"$output")" -eq 1 ]
@@ -165,9 +211,10 @@ _agy_failing_mv() {
   grep -q '/scripts/codex/codex-shim.sh' "$shim"
   # An agy-tui shim this install does not own is left alone, so remove it to
   # make the update write a new one -- through the failing mv.
+  _fake_home_is_scratch
   rm -f "$FAKE_HOME/.agents/bin/agy-tui"
 
-  local fake_bin; fake_bin="$(_agy_failing_mv)"
+  local fake_bin; fake_bin="$(_agy_failing_mv_fixture)"
   run env HOME="$FAKE_HOME" PATH="$fake_bin:$PATH" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   [ "$status" -eq 0 ]
   [ "$(grep -c 'could not install the Antigravity' <<<"$output")" -eq 1 ]
