@@ -9,7 +9,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
 
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
-  local row state pid boot recorded_start current_boot process_start started_epoch
+  local row state pid boot recorded_start current_boot process_start started_epoch boot_epoch start_unreliable=""
   [ -f "$_AGMSG_DAEMON_ROOT/run/install.db" ] || return 0
   # One sqlite invocation, read-only, bounded when another writer is busy.
   row="$(sqlite3 -readonly -cmd '.timeout 100' -separator $'\t' "$_AGMSG_DAEMON_ROOT/run/install.db" "
@@ -32,14 +32,25 @@ agmsg_daemon_read_state() {
       started_epoch="$(LC_ALL=C date -j -f '%a %b %e %T %Y' "$process_start" +%s 2>/dev/null)" || started_epoch=""
       ;;
     Linux)
-      current_boot="$(sed -n 's/^btime //p' /proc/stat 2>/dev/null)"
+      # The kernel's boot_id is fixed for the whole boot. btime is "now minus
+      # uptime", which a stepped wall clock (WSL2's host time sync) moves, so it
+      # only stands in for the id when that cannot be read, and gives the boot
+      # time that the process start time below is counted from.
+      boot_epoch="$(sed -n 's/^btime //p' /proc/stat 2>/dev/null)"
+      current_boot="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id 2>/dev/null)" || current_boot=""
+      [ -n "$current_boot" ] || current_boot="$boot_epoch"
       local proc_stat ticks hz
       proc_stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || proc_stat=""
       ticks="$(printf '%s' "${proc_stat##*) }" | awk '{print $20}')"
       hz="$(getconf CLK_TCK 2>/dev/null)" || hz=""
       started_epoch=""
-      case "$ticks:$hz:$current_boot" in *[!0-9:]*|:*|*::*|*:) ;; *)
-        [ "$hz" -gt 0 ] && started_epoch=$((current_boot + ticks / hz)) ;;
+      case "$ticks:$hz:$boot_epoch" in *[!0-9:]*|:*|*::*|*:) ;; *)
+        [ "$hz" -gt 0 ] && started_epoch=$((boot_epoch + ticks / hz)) ;;
+      esac
+      # A stepped clock also moves that start time, by as much as the step, so
+      # there it cannot say a pid was reused after the owner's claim.
+      case "$(cat /proc/sys/kernel/osrelease 2>/dev/null)" in
+        *[Mm]icrosoft*) start_unreliable=1 ;;
       esac
       ;;
     MINGW*|MSYS*|CYGWIN*)
@@ -64,10 +75,13 @@ agmsg_daemon_read_state() {
     *) AGMSGD_REASON="platform liveness check unavailable"; return 0 ;;
   esac
   # A macOS record written before the boot id became kern.bootsessionuuid
-  # holds kern.boottime seconds, which the kernel shifts when the clock is
+  # holds kern.boottime seconds, and a Linux record written before it became
+  # boot_id holds btime seconds; the kernel shifts both when the clock is
   # stepped. While its pid still exists it can be neither confirmed nor
   # refuted.
-  if [ "$(uname -s)" = Darwin ] && [ -n "$current_boot" ] && [ "$current_boot" != "$boot" ]; then
+  local id_is_uuid=""
+  case "$current_boot" in ''|*[!0-9]*) id_is_uuid=1 ;; esac
+  if { [ "$(uname -s)" = Darwin ] || { [ "$(uname -s)" = Linux ] && [ -n "$id_is_uuid" ]; }; } && [ -n "$current_boot" ] && [ "$current_boot" != "$boot" ]; then
     case "$boot" in ''|*[!0-9]*) ;; *)
       if _agmsg_pid_alive "$pid"; then
         AGMSGD_HEALTH=unverifiable
@@ -95,11 +109,11 @@ agmsg_daemon_read_state() {
       esac ;;
     *) claim_epoch="" ;;
   esac
-  if [ -n "$started_epoch" ] && [ -n "$claim_epoch" ] && [ "$started_epoch" -gt "$claim_epoch" ]; then
+  if [ -z "$start_unreliable" ] && [ -n "$started_epoch" ] && [ -n "$claim_epoch" ] && [ "$started_epoch" -gt "$claim_epoch" ]; then
     AGMSGD_REASON="executor start evidence does not match ($AGMSGD_REASON)"
     return 0
   fi
-  if [ -z "$current_boot" ] || [ -z "$started_epoch" ]; then
+  if [ -z "$current_boot" ] || { [ -z "$started_epoch" ] && [ -z "$start_unreliable" ]; }; then
     case "$(_agmsg_pid_signal_presence "$pid")" in
       gone) ;;
       *)
@@ -108,11 +122,11 @@ agmsg_daemon_read_state() {
         return 0 ;;
     esac
   fi
-  if [ -z "$current_boot" ] || [ "$current_boot" != "$boot" ] || [ -z "$started_epoch" ]; then
+  if [ -z "$current_boot" ] || [ "$current_boot" != "$boot" ] || { [ -z "$started_epoch" ] && [ -z "$start_unreliable" ]; }; then
     AGMSGD_REASON="executor missing or boot/start evidence does not match ($AGMSGD_REASON)"
     return 0
   fi
-  if [ -z "$claim_epoch" ] || [ "$started_epoch" -gt "$claim_epoch" ]; then
+  if [ -z "$start_unreliable" ] && { [ -z "$claim_epoch" ] || [ "$started_epoch" -gt "$claim_epoch" ]; }; then
     AGMSGD_REASON="executor start evidence does not match ($AGMSGD_REASON)"
     return 0
   fi
