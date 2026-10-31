@@ -1173,6 +1173,14 @@ _AGMSG_EXIT_TEARDOWN_INCOMPLETE=76
 STUCK_MAP=""
 source "$SCRIPT_DIR/lib/watch-stuck-map.sh"
 
+# #1842: per-pair idle-skip checkpoint (fingerprint + safety-net maps, and
+# the per-team db-path cache). See lib/watch-idle-skip.sh for the full
+# design note -- kept in its own file, same reasoning as watch-stuck-map.sh
+# above, so its correctness properties can be unit-tested directly rather
+# than only through a timing-dependent end-to-end run.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/watch-idle-skip.sh"
+
 # Self-managed renewal, for hosts that cap how long a watch may run (Claude Code's
 # Monitor kills one at 30 minutes and leaves no completion record, which piles up
 # as "background shell command tasks did not finish" on every resume).
@@ -1362,6 +1370,40 @@ while true; do
     watch_log "session $SESSION_ID is no longer alive; stopping."
     exit 0
   fi
+  # #1842 review round 2: one `stat` for every pair's idle-skip paths this
+  # cycle, not one per pair -- a per-pair call scales with how many pairs a
+  # broad subscription serves, which measurement showed dominates the gap
+  # against a real multi-member report far more than the two sqlite3 calls
+  # this feature actually set out to remove. Teams are deduped (their
+  # db/db-wal paths are shared by every agent in them); a team whose path
+  # cannot be resolved yet (its safety net never fired, so
+  # _watch_db_path_for has nothing cached) simply contributes nothing to
+  # this batch -- every pair of that team then takes the unknown-never-skip
+  # fallback below, exactly as if this cycle's batch had failed outright.
+  _agmsg_watch_batch_paths=()
+  _agmsg_watch_batch_seen_teams=""
+  while IFS=$'\t' read -r _agmsg_wbt _agmsg_wba; do
+    [ -z "$_agmsg_wbt" ] && continue
+    case "$_agmsg_watch_batch_seen_teams" in
+      *" $_agmsg_wbt "*) continue ;;
+    esac
+    _agmsg_watch_batch_seen_teams="$_agmsg_watch_batch_seen_teams $_agmsg_wbt "
+    _watch_db_path_for "$_agmsg_wbt" || continue
+    _agmsg_watch_batch_paths+=("$_WATCH_DB_PATH")
+    [ -e "${_WATCH_DB_PATH}-wal" ] && _agmsg_watch_batch_paths+=("${_WATCH_DB_PATH}-wal")
+  done <<< "$PAIRS"
+  if [ "${#_agmsg_watch_batch_paths[@]}" -gt 0 ]; then
+    _watch_fingerprint_batch "${_agmsg_watch_batch_paths[@]}"
+  else
+    _AGMSG_WATCH_PATH_FP=""
+  fi
+  # #1842 review round 3: "now", for the idle-skip checkpoint's coarse-mtime
+  # safety check -- once per CYCLE, not once per pair (that check's whole
+  # tolerance is "within one second", so a value at most one cycle stale
+  # cannot change its answer). Empty on failure; every caller treats that
+  # the same as "unknown", which _watch_mtime_too_recent's own fallback
+  # already does.
+  _agmsg_watch_now_epoch="$(date +%s 2>/dev/null)" || _agmsg_watch_now_epoch=""
   while IFS=$'\t' read -r pair_team pair_agent; do
     [ -z "$pair_team" ] && continue
     # Warm both per-cycle caches as PLAIN STATEMENTS, never via $(...): a
@@ -1505,6 +1547,34 @@ EOF
       HELD_ELSEWHERE="$(_held_elsewhere_without "${pair_team}/${pair_agent}")"
       echo "agmsg watch: ${pair_team}/${pair_agent} is unheld again; serving it here." >&2
     fi
+    # #1842: skip the real store read entirely when THIS PAIR's own fresh
+    # fingerprint still matches the one its last clean read armed. A failed
+    # path resolution, an empty fingerprint, or no armed entry yet all fall
+    # through to the real check below (unknown -> never skip, favor
+    # running) -- the skip only ever fires on a definite, observed
+    # "unchanged". $_WATCH_FP_BEFORE is computed unconditionally (one `stat`
+    # call) because it is also this cycle's pre-read snapshot if a real
+    # check does end up running.
+    _agmsg_pair_key="$pair_team:$pair_agent"
+    _agmsg_watch_force=0
+    if _watch_safety_due "$_agmsg_pair_key"; then
+      _agmsg_watch_force=1
+      _watch_db_path_forget "$pair_team"
+    fi
+    _WATCH_FP_BEFORE=""
+    _agmsg_fp_before_db_mtime=""
+    _agmsg_fp_before_wal_mtime=""
+    if _watch_db_path_for "$pair_team" && _watch_pair_fingerprint "$_WATCH_DB_PATH" "${_WATCH_DB_PATH}-wal"; then
+      _WATCH_FP_BEFORE="$_WATCH_FP"
+      _agmsg_fp_before_db_mtime="$_WATCH_FP_DB_MTIME"
+      _agmsg_fp_before_wal_mtime="$_WATCH_FP_WAL_MTIME"
+    fi
+    if [ "$_agmsg_watch_force" -eq 0 ] \
+       && [ -n "$_WATCH_FP_BEFORE" ] \
+       && _watch_armed_fp_get "$_agmsg_pair_key" \
+       && [ "$_WATCH_FP_BEFORE" = "$_WATCH_ARMED_FP" ]; then
+      continue
+    fi
     # Read this pair's delivery state -- its read frontier, then the messages
     # past it -- and KEEP THE STATUS separate from the output. A failed read must
     # not collapse to "" and fall into the caught-up arm below: that arm drops the
@@ -1533,6 +1603,11 @@ EOF
       cleanup
       exit "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
     fi
+    # #1842: a real check just ran for this pair -- reset ITS OWN safety-net
+    # clock (never the whole team's, see the review note above the maps).
+    # Whether this cycle's checkpoint ARMS is decided below, once the read's
+    # own outcome (nothing pending vs. something still waiting) is known.
+    _watch_safety_mark "$_agmsg_pair_key"
     # fix 2 (#1045): update this pair's stuck-cursor tracker (see the block comment
     # before the loop). "Pending" here means real undelivered MESSAGE rows -- not a
     # non-empty OUT. storage_watch_after also emits a trailing "cursor" high-water
@@ -1547,7 +1622,7 @@ EOF
     # count that; at the threshold say why on stdout and exit. With no message row
     # waiting the pair is caught up, so drop its tracker and a future backlog starts
     # a fresh count.
-    _agmsg_pair_key="$pair_team:$pair_agent"
+    #
     # _agmsg_has_new_message, set here alongside the stuck-tracker's own read
     # of the same fact, gates the formatting pass below (#1321 first-stage
     # follow-up: watch.sh process-count reduction) -- one case statement,
@@ -1556,6 +1631,12 @@ EOF
     case "$OUT" in
       *'"type":"message_sent"'*)
         _agmsg_has_new_message=1
+        # #1842: something is pending for this pair this cycle -- never arm
+        # on that, whatever happens to the store's bytes (review: arming on
+        # a cycle with an unread backlog, or one that is about to hit the
+        # STUCK exit below, would make the NEXT cycle skip re-trying a
+        # delivery that has not actually succeeded).
+        _watch_armed_fp_drop "$_agmsg_pair_key"
         IFS=$'\x1f' read -r _agmsg_prev_c _agmsg_prev_n <<< "$(_stuck_get "$_agmsg_pair_key")"
         [ -n "$_agmsg_prev_n" ] || _agmsg_prev_n=0
         if [ "$_agmsg_prev_c" = "$READ_CURSOR" ]; then
@@ -1574,6 +1655,25 @@ EOF
         ;;
       *)
         _stuck_drop "$_agmsg_pair_key"
+        # #1842: nothing was pending for this pair this cycle -- arm with
+        # the fingerprint taken BEFORE this read (see the maps' own comment
+        # for why pre-read, not post-read), so a write landing anywhere from
+        # that moment on, including mid-read, is caught by a later cycle's
+        # fresh comparison rather than silently folded into "unchanged".
+        #
+        # Unless subsecond precision has never actually been confirmed on
+        # this filesystem/stat combination (review round 2): a same-second,
+        # same-size overwrite is then indistinguishable from no write at
+        # all, so arming on an mtime that reads as "now" would risk hiding
+        # exactly that write for up to the 60s safety net. Refuse to arm in
+        # that narrow case instead -- the pair simply tries again next
+        # cycle, same as any other "unknown" outcome.
+        if [ -n "$_WATCH_FP_BEFORE" ] \
+           && ! _watch_fp_unsafe_to_arm "$_agmsg_watch_now_epoch" "$_agmsg_fp_before_db_mtime" "$_agmsg_fp_before_wal_mtime"; then
+          _watch_armed_fp_set "$_agmsg_pair_key" "$_WATCH_FP_BEFORE"
+        else
+          _watch_armed_fp_drop "$_agmsg_pair_key"
+        fi
         ;;
     esac
     if [ "$_agmsg_has_new_message" -eq 1 ]; then
