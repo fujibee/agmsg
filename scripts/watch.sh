@@ -1283,9 +1283,10 @@ _agmsg_watch_native_delivery_active() {
 }
 
 # What a stop message adds when this watch is the last thing delivering to a
-# session that agmsgd cannot yet address (#1848): agmsgd is on for this project
-# (chosen, or no choice recorded) but has no destination for this session, so
-# once the watch ends nothing delivers. Prints nothing otherwise. Read only on
+# session that agmsgd is not yet delivering to (#1848): agmsgd is on for this
+# project (chosen, or no choice recorded) but the native-delivery check fails
+# (no destination registered for this session, or agmsgd not ready), so once
+# the watch ends nothing delivers. The cause is not diagnosed here, only named. Prints nothing otherwise. Read only on
 # a stop path, once; it changes no stop condition.
 _agmsg_watch_agmsgd_note() {
   [ "$AGENT_TYPE" = claude-code ] || return 0
@@ -1300,7 +1301,7 @@ _agmsg_watch_agmsgd_note() {
   agmsg_daemon_apply_project_choice claude-code "$PROJECT_PATH"
   [ "${AGMSGD_DESIRED:-}" = on ] || return 0
   _agmsg_watch_native_delivery_active && return 0
-  printf ' agmsgd is on for this project but has no destination for this session yet, so nothing will be delivered to it after this. Run /agmsg actas <name> (or restart this session) to register it.'
+  printf ' agmsgd is on for this project but is not delivering to this session yet (no destination registered for it, or agmsgd is not ready), so nothing will be delivered to it after this. Run /agmsg actas <name> (or restart this session) to register it, and /agmsg daemon status --all shows why if it still is not.'
 }
 
 _watch_renew_or_stop() {

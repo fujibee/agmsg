@@ -58,11 +58,11 @@ _run_unfinished_update_watch() {
   wait "$pid" || true
 }
 
-@test "watch stop (no deliveries): agmsgd on and no destination for this session -> the message says nothing will be delivered and how to register" {
+@test "watch stop (no deliveries): agmsgd on and no destination for this session -> the message says nothing will be delivered and how to register, without claiming which cause" {
   _agmsgd_desired on
   _run_idle_watch
   grep -qF 'agmsg watch: stopping - no messages were delivered' "$OUT"
-  grep -qF 'agmsgd is on for this project but has no destination for this session' "$OUT"
+  grep -qF 'agmsgd is on for this project but is not delivering to this session yet' "$OUT"
   grep -qF '/agmsg actas <name>' "$OUT"
 }
 
@@ -92,7 +92,7 @@ _run_unfinished_update_watch() {
   _agmsgd_desired on
   _run_unfinished_update_watch
   grep -qF 'installation was updated while this watcher was running' "$OUT"
-  grep -qF 'to resume delivery. agmsgd is on for this project but has no destination' "$OUT"
+  grep -qF 'to resume delivery. agmsgd is on for this project but is not delivering' "$OUT"
 
   _agmsgd_desired off
   _run_unfinished_update_watch
