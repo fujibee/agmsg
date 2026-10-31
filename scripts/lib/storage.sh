@@ -176,6 +176,23 @@ _AGMSG_PARTITION_LOADED=""
 _AGMSG_PARTITION_TEAM_KEYS=()
 _AGMSG_PARTITION_TEAM_VALS=()
 _AGMSG_PARTITION_TEAM_EPOCH=()
+# team -> the config.json fingerprint (mtime+size) that was current the
+# last time this team's name was ACTUALLY resolved via agmsg_driver_for_team
+# (#1849). Unlike _AGMSG_PARTITION_TEAM_EPOCH, this is never reset to "no
+# longer valid" just because a new poll cycle started -- it stays valid for
+# the rest of the process's life, UNTIL the config file it was taken from
+# actually changes. That is deliberately not the same guarantee the epoch
+# cache makes (same-cycle only): #1330's own reasoning for re-reading every
+# cycle was to notice migrate-team-store.sh's mid-run switch "on the very
+# next poll" -- and that switch is exactly a write to this team's
+# config.json (confirmed by reading migrate-team-store.sh itself, which
+# writes the new `drivers.partition` value through agmsg_write_atomic), so
+# comparing THIS file's own fingerprint keeps that same one-poll bound
+# without re-deriving the name from scratch every single cycle regardless
+# of whether anything happened. An unresolvable path, or a config that
+# cannot be stat'd, makes the fingerprint empty, which never matches a
+# cached one -- unknown always falls through to a fresh resolution.
+_AGMSG_PARTITION_TEAM_CFGFP=()
 _AGMSG_PARTITION_TEAM_MAX=64
 _agmsg_partition_load() {
   # The registry may not be sourced yet — agmsg_db_path is reachable without
@@ -185,6 +202,14 @@ _agmsg_partition_load() {
     _lib="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
     # shellcheck disable=SC1091
     [ -n "$_lib" ] && . "$_lib/driver-registry.sh"
+  fi
+  # Plain statement, not $(...): warms _agmsg_driver_root's own
+  # process-lifetime cache (#1849) so the config-fingerprint check below,
+  # and every other driver-registry caller for the rest of this process,
+  # stop paying its `cd`+`pwd` fork on every single call. Same reasoning,
+  # same pattern, as agmsg_storage_dir's own warm call in watch.sh.
+  if declare -F _agmsg_driver_root >/dev/null 2>&1; then
+    _agmsg_driver_root >/dev/null 2>&1
   fi
   local name team="$1" _i _n _slot=-1
   _n=${#_AGMSG_PARTITION_TEAM_KEYS[@]}
@@ -209,14 +234,44 @@ _agmsg_partition_load() {
     fi
   done
   if [ -z "$name" ]; then
-    name="$(agmsg_driver_for_team partition "$team" shared)"
+    # #1849: before forking agmsg_driver_for_team's own sqlite3 lookup,
+    # check whether this team's config.json has changed since the LAST
+    # time that lookup actually ran for it. A fingerprint match reuses the
+    # name from that earlier resolution (which may be from a previous
+    # cycle, not just this one -- see the array's own comment for why
+    # that is still correct). Any failure to resolve or stat the config
+    # (empty fingerprint) always falls through to the real lookup below.
+    local _cfg_fp="" _cfg_root _cfg_path
+    if declare -F _agmsg_driver_root >/dev/null 2>&1 && _cfg_root="$(_agmsg_driver_root 2>/dev/null)" && [ -n "$_cfg_root" ]; then
+      _cfg_path="$_cfg_root/teams/$team/config.json"
+      if [ -f "$_cfg_path" ]; then
+        _agmsg_detect_platform
+        case "$_agmsg_platform" in
+          macos) _cfg_fp="$(stat -f '%Fm %z' "$_cfg_path" 2>/dev/null)" ;;
+          *)     _cfg_fp="$(stat -c '%.9Y %s' "$_cfg_path" 2>/dev/null)" ;;
+        esac
+      fi
+    fi
+    if [ "$_slot" -ge 0 ]; then
+      echo "DBGP slot=$_slot cfgfp=[$_cfg_fp] cached=[${_AGMSG_PARTITION_TEAM_CFGFP[$_slot]:-}] cachedname=[${_AGMSG_PARTITION_TEAM_VALS[$_slot]:-}]" >> /tmp/dbgp.log
+    else
+      echo "DBGP slot=$_slot (new team) cfgfp=[$_cfg_fp]" >> /tmp/dbgp.log
+    fi
+    if [ -n "$_cfg_fp" ] && [ "$_slot" -ge 0 ] && [ "$_cfg_fp" = "${_AGMSG_PARTITION_TEAM_CFGFP[$_slot]:-}" ] \
+       && [ -n "${_AGMSG_PARTITION_TEAM_VALS[$_slot]:-}" ]; then
+      name="${_AGMSG_PARTITION_TEAM_VALS[$_slot]}"
+    else
+      name="$(agmsg_driver_for_team partition "$team" shared)"
+    fi
     if [ "$_slot" -ge 0 ]; then
       _AGMSG_PARTITION_TEAM_VALS[$_slot]="$name"
       _AGMSG_PARTITION_TEAM_EPOCH[$_slot]="$_AGMSG_POLL_CYCLE_EPOCH"
+      [ -n "$_cfg_fp" ] && _AGMSG_PARTITION_TEAM_CFGFP[$_slot]="$_cfg_fp"
     elif [ "$_n" -lt "$_AGMSG_PARTITION_TEAM_MAX" ]; then
       _AGMSG_PARTITION_TEAM_KEYS[$_n]="$team"
       _AGMSG_PARTITION_TEAM_VALS[$_n]="$name"
       _AGMSG_PARTITION_TEAM_EPOCH[$_n]="$_AGMSG_POLL_CYCLE_EPOCH"
+      [ -n "$_cfg_fp" ] && _AGMSG_PARTITION_TEAM_CFGFP[$_n]="$_cfg_fp"
     fi
   fi
   [ "$name" = "$_AGMSG_PARTITION_LOADED" ] && return 0

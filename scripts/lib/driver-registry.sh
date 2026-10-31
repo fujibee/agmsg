@@ -37,9 +37,23 @@ if ! declare -F agmsg_plugin_cmd >/dev/null 2>&1; then
   source "$_AGMSG_DRIVER_LIB_DIR/plugin-cmd.sh"
 fi
 
-# <skill-root> = up two from scripts/lib/.
+# <skill-root> = up two from scripts/lib/. Memoized for the life of the
+# process (#1849): this path cannot change for as long as this process
+# runs (it is this install's own on-disk location), so a long-lived caller
+# -- watch.sh's poll loop, calling this several times per cycle through
+# agmsg_driver_for_team/agmsg_ext_tool_dir -- pays the `cd`+`pwd` fork
+# exactly once instead of every single call. A one-shot script still pays
+# it once, same as before; this only removes REPEAT payments within one
+# process.
+_AGMSG_DRIVER_ROOT_CACHE=""
 _agmsg_driver_root() {
-  cd "$_AGMSG_DRIVER_LIB_DIR/../.." 2>/dev/null && pwd
+  if [ -n "$_AGMSG_DRIVER_ROOT_CACHE" ]; then
+    printf '%s\n' "$_AGMSG_DRIVER_ROOT_CACHE"
+    return 0
+  fi
+  _AGMSG_DRIVER_ROOT_CACHE="$(cd "$_AGMSG_DRIVER_LIB_DIR/../.." 2>/dev/null && pwd)" || return 1
+  [ -n "$_AGMSG_DRIVER_ROOT_CACHE" ] || return 1
+  printf '%s\n' "$_AGMSG_DRIVER_ROOT_CACHE"
 }
 
 # Echo the search bases as "<kind>\t<dir>" lines, in priority order. <kind> is
