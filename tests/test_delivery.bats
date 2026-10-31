@@ -480,6 +480,12 @@ eperm_pid() {
   run bash -c 'source "$1/lib/daemon-state.sh"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS"
   [ "${lines[-1]}" = unverifiable ]
 
+  # boot_id cannot be read now (btime stands in) against a record that holds the
+  # UUID: an unreadable file is no evidence of another boot.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_boot_id='$boot';"
+  run bash -c 'source "$1/lib/daemon-state.sh"; _AGMSG_BOOT_ID_FILE=/nonexistent; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS"
+  [ "${lines[-1]}" = unverifiable ]
+
   # A different boot_id is still another boot.
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_boot_id='0b7e9d34-5c21-4a6f-8d13-7e4a2c9b1f58';"
   run bash -c 'source "$1/lib/daemon-state.sh"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS"

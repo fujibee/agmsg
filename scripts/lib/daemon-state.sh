@@ -3,6 +3,8 @@
 # Resolve from this install, never from the message-storage override.
 [ -n "${_AGMSG_DAEMON_STATE_SH:-}" ] && return 0
 _AGMSG_DAEMON_STATE_SH=1
+# Where the Linux boot id is read from; a test points it at a file it can remove.
+_AGMSG_BOOT_ID_FILE=/proc/sys/kernel/random/boot_id
 _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
@@ -37,7 +39,8 @@ agmsg_daemon_read_state() {
       # only stands in for the id when that cannot be read, and gives the boot
       # time that the process start time below is counted from.
       boot_epoch="$(sed -n 's/^btime //p' /proc/stat 2>/dev/null)"
-      current_boot="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id 2>/dev/null)" || current_boot=""
+      current_boot=""
+      read -r current_boot 2>/dev/null < "$_AGMSG_BOOT_ID_FILE" || true
       [ -n "$current_boot" ] || current_boot="$boot_epoch"
       local proc_stat ticks hz
       proc_stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || proc_stat=""
@@ -49,7 +52,9 @@ agmsg_daemon_read_state() {
       esac
       # A stepped clock also moves that start time, by as much as the step, so
       # there it cannot say a pid was reused after the owner's claim.
-      case "$(cat /proc/sys/kernel/osrelease 2>/dev/null)" in
+      local osrelease=""
+      read -r osrelease 2>/dev/null < /proc/sys/kernel/osrelease || true
+      case "$osrelease" in
         *[Mm]icrosoft*) start_unreliable=1 ;;
       esac
       ;;
@@ -79,15 +84,20 @@ agmsg_daemon_read_state() {
   # boot_id holds btime seconds; the kernel shifts both when the clock is
   # stepped. While its pid still exists it can be neither confirmed nor
   # refuted.
-  local id_is_uuid=""
-  case "$current_boot" in ''|*[!0-9]*) id_is_uuid=1 ;; esac
-  if { [ "$(uname -s)" = Darwin ] || { [ "$(uname -s)" = Linux ] && [ -n "$id_is_uuid" ]; }; } && [ -n "$current_boot" ] && [ "$current_boot" != "$boot" ]; then
-    case "$boot" in ''|*[!0-9]*) ;; *)
-      if _agmsg_pid_alive "$pid"; then
-        AGMSGD_HEALTH=unverifiable
-        return 0
-      fi ;;
-    esac
+  # On Linux the same holds the other way round when boot_id cannot be read
+  # now and btime stands in for it, against a record that holds the UUID.
+  local ids_mixed="" boot_numeric="" current_numeric=""
+  case "$boot" in ''|*[!0-9]*) ;; *) boot_numeric=1 ;; esac
+  case "$current_boot" in ''|*[!0-9]*) ;; *) current_numeric=1 ;; esac
+  case "$(uname -s)" in
+    Darwin) ids_mixed="$boot_numeric" ;;
+    Linux) [ "$boot_numeric" = "$current_numeric" ] || ids_mixed=1 ;;
+  esac
+  if [ -n "$ids_mixed" ] && [ -n "$current_boot" ] && [ "$current_boot" != "$boot" ]; then
+    if _agmsg_pid_alive "$pid"; then
+      AGMSGD_HEALTH=unverifiable
+      return 0
+    fi
   fi
   # Evidence that could not be gathered is not evidence of a mismatch. A
   # sandboxed caller (an app that runs commands in its own sandbox) may be
