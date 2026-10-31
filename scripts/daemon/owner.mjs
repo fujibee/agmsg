@@ -73,11 +73,11 @@ export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen,
     const startedAt = new Date().toISOString();
     db.prepare(
       `UPDATE daemon_owner SET gen = ?, state = 'starting',
-         executor_pid = ?, executor_started_at = ?, executor_boot_id = ?,
+         executor_pid = ?, executor_started_at = ?, executor_boot_id = ?, executor_pid_ns = ?,
          socket = ?, version = ?, started_at = ?,
          last_end_reason = NULL, last_end_at = NULL, last_end_gen = NULL
        WHERE gen = ?`,
-    ).run(gen, executor.pid, startedAt, executor.bootId, socket, version, startedAt, owner.gen);
+    ).run(gen, executor.pid, startedAt, executor.bootId, executor.pidNs, socket, version, startedAt, owner.gen);
     return { ok: true, gen, socket };
   });
 }

@@ -9,6 +9,17 @@ _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
 
+# True when this shell is in a different PID namespace than the recorded
+# executor's. Linux only; read lazily because only a pid that cannot be found
+# needs it. An older record (no namespace kept) or an unreadable one is not "other".
+_agmsg_daemon_in_other_pid_namespace() {
+  [ "$(uname -s)" = Linux ] || return 1
+  local mine recorded
+  mine="$(readlink /proc/self/ns/pid 2>/dev/null)" || return 1
+  recorded="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" "SELECT COALESCE(executor_pid_ns,'') FROM daemon_owner;" 2>/dev/null)" || return 1
+  [ -n "$mine" ] && [ -n "$recorded" ] && [ "$mine" != "$recorded" ]
+}
+
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
   local row state pid boot recorded_start current_boot process_start started_epoch boot_epoch start_unreliable=""
@@ -125,7 +136,15 @@ agmsg_daemon_read_state() {
   fi
   if [ -z "$current_boot" ] || { [ -z "$started_epoch" ] && [ -z "$start_unreliable" ]; }; then
     case "$(_agmsg_pid_signal_presence "$pid")" in
-      gone) ;;
+      gone)
+        # Seen from another PID namespace (a Codex sandbox) the executor's pid
+        # is simply not there. The record names the namespace it was started
+        # in; a record without one is read as before.
+        if _agmsg_daemon_in_other_pid_namespace; then
+          AGMSGD_HEALTH=unchecked
+          AGMSGD_REASON="the daemon runs in another PID namespace, so its process cannot be seen from here"
+          return 0
+        fi ;;
       *)
         AGMSGD_HEALTH=unchecked
         AGMSGD_REASON="the boot id or process start time cannot be read from here"
