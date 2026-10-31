@@ -192,32 +192,69 @@ agmsg_driver_for_team_confirmed() {   # <axis> <team> <default>
   cfg="$root/teams/$team/config.json"
   [ -f "$cfg" ] || return 0
   rf="$(agmsg_sql_readfile_path "$cfg")"
-  # One statement, three distinguishable outcomes: the read itself failed
-  # (readfile() -> NULL -- permissions, I/O), the read succeeded but the
-  # key is genuinely absent/null (a legitimate default), or a real value.
-  # Malformed JSON makes json_extract itself raise an error -- sqlite3
-  # exits non-zero with nothing useful on stdout, caught below by the rc
-  # check rather than needing its own branch in the SQL.
+  # One statement, two COLUMNS (joined by char(31), the unit separator --
+  # already this codebase's own convention for an internal field
+  # delimiter that cannot appear in a name, e.g. the roster journal's
+  # own records) rather than a single magic-string result (review round
+  # 5: a sentinel folded into the VALUE column collides with a config
+  # that happens to be configured with that exact string -- found by the
+  # same review as the bug below, same root cause: inventing a new
+  # vocabulary instead of asking sqlite for the fact directly). The first
+  # field is whether the read itself failed (readfile() -> NULL --
+  # permissions, I/O); the second is the raw extracted value, exactly as
+  # agmsg_driver_for_team's own query returns it -- including whatever
+  # agmsg_driver_for_team's own COALESCE-to-empty-string already does for
+  # a genuinely absent/null key, so the two functions read the identical
+  # byte stream for "no explicit value" and the normalization below can
+  # match agmsg_driver_for_team's own rule exactly instead of inventing a
+  # second one. Malformed JSON makes json_extract itself raise an error --
+  # sqlite3 exits non-zero with nothing useful on stdout, caught below by
+  # the rc check rather than needing its own branch in the SQL. The CTE
+  # reads the file ONCE or (review round 5, suggested, not required)
+  # whatever the whole connection would otherwise do: a bare two-call
+  # `readfile('$rf')` repeated in the same statement already isn't
+  # guaranteed to be two separate filesystem reads in SQLite's own
+  # execution model, but routing both references through one CTE removes
+  # any doubt rather than relying on that.
+  #
   # `|| rc=$?`, not a bare assignment: a caller running under `set -e`
   # (bats own test bodies do) would otherwise have THIS statement's own
   # failure abort the whole function the instant sqlite3 exits non-zero,
   # before the rc/output checks below ever run -- caught by this
   # function's own malformed-JSON regression test, which exercises
   # exactly that exit code.
+  # sqlite3 >= 3.50 caret-escapes control bytes in its default text output
+  # (the same #143 behavior storage.sh's own agmsg_sqlite already works
+  # around), which would otherwise turn the char(31) separator above into
+  # the two literal characters "^_" and break the field split below.
+  # `agmsg_sqlite_warm`/`_agmsg_escape_flag` (storage.sh, already sourced
+  # by the time this runs -- see this file's own callers) probe and
+  # memoize whether `-escape off` is a real option on this build, the
+  # same way every other direct sqlite3 call in this tree does.
+  if declare -F agmsg_sqlite_warm >/dev/null 2>&1; then
+    agmsg_sqlite_warm
+  fi
   rc=0
-  out="$(sqlite3 :memory: \
-    "SELECT CASE WHEN readfile('$rf') IS NULL THEN '__AGMSG_READFAIL__'
-            ELSE COALESCE(json_extract(readfile('$rf'), '\$.drivers.$axis'), '__AGMSG_NULLKEY__')
-       END;" 2>/dev/null)" || rc=$?
+  out="$(sqlite3 ${_AGMSG_ESCAPE_FLAG:-} :memory: \
+    "WITH f AS (SELECT readfile('$rf') AS c)
+     SELECT (CASE WHEN c IS NULL THEN '1' ELSE '0' END) || char(31) ||
+            COALESCE(json_extract(c, '\$.drivers.$axis'), '')
+       FROM f;" 2>/dev/null)" || rc=$?
   out="$(printf '%s' "$out" | tr -d '\r')"
-  if [ "$rc" -ne 0 ] || [ -z "$out" ] || [ "$out" = '__AGMSG_READFAIL__' ]; then
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
     return 0
   fi
+  local readfail="${out%%$'\x1f'*}" raw="${out#*$'\x1f'}"
+  [ "$readfail" = 1 ] && return 0
   _AGMSG_DRIVER_CONFIRMED=1
-  case "$out" in
-    __AGMSG_NULLKEY__) ;;
-    *) _AGMSG_DRIVER_RESOLVED_NAME="$out" ;;
-  esac
+  # Identical normalization to agmsg_driver_for_team's own
+  # `case "$name" in ''|null) ... esac` -- an empty extraction (the key is
+  # absent, or JSON null) AND the literal string "null" (review round 5:
+  # a config holding that string, which the old function has always
+  # treated as "unset", must resolve the same way here, or a
+  # previously-working config starts failing to find a driver file named
+  # literally "null").
+  case "$raw" in ''|null) ;; *) _AGMSG_DRIVER_RESOLVED_NAME="$raw" ;; esac
 }
 
 # ext-tools go through the same bases as every other axis: a built-in tool is

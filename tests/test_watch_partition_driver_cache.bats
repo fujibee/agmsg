@@ -198,6 +198,12 @@ EOF
 @test "partition cache: a readable config whose sqlite lookup fails recovers on the next cycle, not poisoned (review round 4)" {
   bash "$SCRIPTS/join.sh" sqlfailteam alice claude-code "$BATS_TEST_TMPDIR/proj6" >/dev/null
   _set_partition sqlfailteam per-team
+  # Warm the `-escape off` probe against the REAL binary before the
+  # failing shim goes on PATH below -- a real long-running process would
+  # already have it warmed long before hitting its first transient
+  # failure; probing for the first time DURING the simulated failure
+  # would otherwise memoize "no escape flag" for the rest of this test.
+  agmsg_sqlite_warm
 
   local real_sqlite3="$(command -v sqlite3)"
   local shim="$BATS_TEST_TMPDIR/shim5"
@@ -244,5 +250,55 @@ EOF
   source "$SCRIPTS/lib/driver-registry.sh"
   agmsg_driver_for_team_confirmed partition nodriverskeyteam shared
   [ "$_AGMSG_DRIVER_RESOLVED_NAME" = shared ]
+  [ "$_AGMSG_DRIVER_CONFIRMED" = 1 ]
+}
+
+@test "partition cache: the confirmed resolver normalizes an empty extraction exactly like the original (review round 5)" {
+  bash "$SCRIPTS/join.sh" normteam alice claude-code "$BATS_TEST_TMPDIR/proj7" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/teams/normteam"
+  printf '{"other":1}' > "$TEST_SKILL_DIR/teams/normteam/config.json"
+  source "$SCRIPTS/lib/driver-registry.sh"
+  local old_result new_result
+  old_result="$(agmsg_driver_for_team partition normteam shared)"
+  agmsg_driver_for_team_confirmed partition normteam shared
+  new_result="$_AGMSG_DRIVER_RESOLVED_NAME"
+  [ "$old_result" = "$new_result" ]
+  [ "$new_result" = shared ]
+}
+
+@test "partition cache: the confirmed resolver normalizes a literal 'null' VALUE exactly like the original (review round 5)" {
+  # The exact bug reproduced in review: drivers.partition set to the
+  # literal STRING "null" (not absent, not JSON null -- a real value a
+  # config can hold) has always resolved to the default via
+  # agmsg_driver_for_team's own `case "$name" in ''|null) ...`. A version
+  # of the confirmed resolver that only recognized a genuinely absent key
+  # as "default" would instead confirm "null" as a real driver name here,
+  # and storage.sh would then fail to find a partition driver literally
+  # named "null" for a config that used to work fine.
+  bash "$SCRIPTS/join.sh" nullstrteam alice claude-code "$BATS_TEST_TMPDIR/proj8" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/teams/nullstrteam"
+  printf '{"drivers":{"partition":"null"}}' > "$TEST_SKILL_DIR/teams/nullstrteam/config.json"
+  source "$SCRIPTS/lib/driver-registry.sh"
+  local old_result new_result
+  old_result="$(agmsg_driver_for_team partition nullstrteam shared)"
+  agmsg_driver_for_team_confirmed partition nullstrteam shared
+  new_result="$_AGMSG_DRIVER_RESOLVED_NAME"
+  [ "$old_result" = "shared" ]
+  [ "$new_result" = "$old_result" ]
+  [ "$_AGMSG_DRIVER_CONFIRMED" = 1 ]
+}
+
+@test "partition cache: a configured driver value is never confused with the sentinel separator byte" {
+  # Defends the char(31)-joined two-column result itself: a value that
+  # happened to CONTAIN a unit-separator byte would misparse. Team/agent
+  # names are restricted (no control bytes), but the resolved DRIVER value
+  # comes straight from the config's own JSON string and is not validated
+  # the same way, so this is worth pinning directly rather than assuming.
+  bash "$SCRIPTS/join.sh" weirdteam alice claude-code "$BATS_TEST_TMPDIR/proj9" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/teams/weirdteam"
+  printf '{"drivers":{"partition":"per-team"}}' > "$TEST_SKILL_DIR/teams/weirdteam/config.json"
+  source "$SCRIPTS/lib/driver-registry.sh"
+  agmsg_driver_for_team_confirmed partition weirdteam shared
+  [ "$_AGMSG_DRIVER_RESOLVED_NAME" = per-team ]
   [ "$_AGMSG_DRIVER_CONFIRMED" = 1 ]
 }
