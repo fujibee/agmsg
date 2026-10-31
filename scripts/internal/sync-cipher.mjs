@@ -800,9 +800,11 @@ export async function openEnvelope(input) {
 }
 
 async function readStdin() {
-  let input = "";
-  for await (const chunk of process.stdin) input += chunk;
-  return input;
+  // Collect the bytes and decode once: converting each chunk on its own splits a
+  // multi-byte character that straddles a chunk boundary into U+FFFD.
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 // Human-facing progress for the bulk path only. A steady-state page is a

@@ -3,6 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { evaluatePull } from "../scripts/internal/remote-sync.mjs";
 import { nativeAgeIdentity, openEnvelope, sealEnvelope,
   validateAgeHeader } from "../scripts/internal/sync-cipher.mjs";
@@ -512,4 +514,23 @@ test("receive tolerates an unknown message field but still rejects a duplicate k
     envelope: { v: 1, cipher: "none", key_id: null, blob: withDuplicateKey },
     max_blob_bytes: 1_048_576,
   }), (error) => error.state === "malformed");
+});
+
+test("seal reads a multi-byte character that straddles a stdin chunk boundary intact", async () => {
+  const body = "日本語のメッセージ";
+  const request = Buffer.from(JSON.stringify({ type: "sync_seal", envelope_v: 1, cipher: "none", key_id: null,
+    recipients: [], max_blob_bytes: 1_048_576, wire_id: "5d8a6f3e-8a3b-4e2a-9d1c-0a1b2c3d4e5f",
+    team_id: "018f3f7e-0000-7000-8000-000000000001", protocol_version: 1,
+    projection: { body, created_at: "2026-07-27T00:00:00.000000Z", from_agent: "alice", to_agent: "bob" } }));
+  const cut = request.indexOf(Buffer.from(body)) + 1;
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../scripts/internal/sync-cipher.mjs", import.meta.url)), "seal"],
+    { stdio: ["pipe", "pipe", "pipe"] });
+  let stdout = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stdin.write(request.subarray(0, cut));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  child.stdin.end(request.subarray(cut));
+  await new Promise((resolve) => child.on("close", resolve));
+  const sealed = JSON.parse(stdout);
+  assert.ok(Buffer.from(sealed.blob, "base64").toString("utf8").includes(body));
 });
