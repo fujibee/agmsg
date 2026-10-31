@@ -902,7 +902,7 @@ _handle_install_changed() {
       watch_report "exec of the updated watch.sh failed; exiting instead of running stale code."
       exit 1
     fi
-    watch_report "the agmsg installation kept changing across $restarts restart(s) in a row; exiting rather than looping. Restart this session (or run /agmsg actas <name>) to resume delivery."
+    watch_report "the agmsg installation kept changing across $restarts restart(s) in a row; exiting rather than looping. Restart this session (or run /agmsg actas <name>) to resume delivery.$(_agmsg_watch_agmsgd_note)"
     exit 0
   fi
 
@@ -915,7 +915,7 @@ _handle_install_changed() {
     return 0
   fi
 
-  watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. Exiting rather than appearing to work. Restart this session (or run /agmsg actas <name>) to resume delivery."
+  watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. Exiting rather than appearing to work. Restart this session (or run /agmsg actas <name>) to resume delivery.$(_agmsg_watch_agmsgd_note)"
   exit 0
 }
 
@@ -1282,6 +1282,28 @@ _agmsg_watch_native_delivery_active() {
   [ "$_any" -eq 1 ]
 }
 
+# What a stop message adds when this watch is the last thing delivering to a
+# session that agmsgd is not yet delivering to (#1848): agmsgd is on for this
+# project (chosen, or no choice recorded) but the native-delivery check fails
+# (no destination registered for this session, or agmsgd not ready), so once
+# the watch ends nothing delivers. The cause is not diagnosed here, only named. Prints nothing otherwise. Read only on
+# a stop path, once; it changes no stop condition.
+_agmsg_watch_agmsgd_note() {
+  [ "$AGENT_TYPE" = claude-code ] || return 0
+  declare -F agmsg_role_session_uuid >/dev/null 2>&1 || return 0
+  # shellcheck disable=SC1091
+  declare -F agmsg_daemon_read_state >/dev/null 2>&1 \
+    || { [ -r "$SCRIPT_DIR/lib/daemon-state.sh" ] && . "$SCRIPT_DIR/lib/daemon-state.sh"; } \
+    || return 0
+  # shellcheck disable=SC2034  # AGMSGD_REASON is set by the readers below, kept local
+  local AGMSGD_DESIRED AGMSGD_HEALTH AGMSGD_REASON
+  agmsg_daemon_read_state
+  agmsg_daemon_apply_project_choice claude-code "$PROJECT_PATH"
+  [ "${AGMSGD_DESIRED:-}" = on ] || return 0
+  _agmsg_watch_native_delivery_active && return 0
+  printf ' agmsgd is on for this project but is not delivering to this session yet (no destination registered for it, or agmsgd is not ready), so nothing will be delivered to it after this. Run /agmsg actas <name> (or restart this session) to register it, and /agmsg daemon status --all shows why if it still is not.'
+}
+
 _watch_renew_or_stop() {
   local elapsed=$((SECONDS + _WATCH_ELAPSED_BASE)) cmd desc arg
   [ "$elapsed" -ge "$WATCH_MAX_SECONDS" ] || return 0
@@ -1298,7 +1320,7 @@ _watch_renew_or_stop() {
     [ -n "$ACTIVE_NAME" ] && desc="$desc (acting as $ACTIVE_NAME)"
     watch_report "re-arm - this watch is about to reach the host's time cap; invoke the Monitor tool again with command: $cmd description: $desc persistent: true timeout_ms: 1800000"
   else
-    watch_report "stopping - no messages were delivered in the last ${elapsed}s, so this watch is not re-armed (set AGMSG_CC_MONITOR_KEEP_ALIVE to keep it running)"
+    watch_report "stopping - no messages were delivered in the last ${elapsed}s, so this watch is not re-armed (set AGMSG_CC_MONITOR_KEEP_ALIVE to keep it running)$(_agmsg_watch_agmsgd_note)"
   fi
   exit 0
 }
