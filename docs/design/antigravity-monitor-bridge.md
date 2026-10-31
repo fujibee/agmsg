@@ -1,303 +1,302 @@
-# Antigravity monitor bridge 実装計画
+# Antigravity Monitor Bridge Implementation Plan
 
-状態: 提案・レビュー待ち。実装、commit、push、既存インストールへの反映は未承認・未実施。
-作成者: luna。作成日: 2026-09-05（JST）。
+Status: Proposed, pending review. Implementation, commit, push, and deployment to existing installs are unapproved and pending.
+Author: luna. Date: 2026-09-05 (JST).
 
-## 1. 対象と調査基準
+## 1. Scope and Investigation Baseline
 
-専用の `agy` headless 常駐子プロセスへ agmsg の未読を中継する。
-到着したメッセージは会話の次のターンとして処理し、同じ `conversation_id` の文脈を維持する。
-既に動いている対話 TUI への注入、TUI の画面・対話承認の再実装、Gemini ドライバーの変更は対象外とする。
+Relays unread agmsg messages to a dedicated headless `agy` resident child process.
+Incoming messages are processed as the next turn in the conversation, preserving the context of the same `conversation_id`.
+Injecting into already-running interactive TUIs, re-implementing TUI screen/interactive approval flows, and modifying the Gemini driver are out of scope.
 
-正規クローンは `/home/joel/projects/agmsg`。
-調査開始時のブランチは `main`、HEAD は `e0f10a87ed07561812a5cff89b85fcf934573e7c`、作業ツリーはクリーンだった。
-`origin` は `fujibee/agmsg`、fork のリモート名は `joelmitz` である。
-依頼文の基準 `e1eb933` とは異なるため、本書は上記ローカル HEAD のソースを基準とし、実装前に差分を再確認する。
-この計画作成では fetch、checkout、merge は行わない。
+The canonical clone is `~/projects/agmsg`.
+At the start of investigation, the branch was `main`, HEAD was `e0f10a87ed07561812a5cff89b85fcf934573e7c`, and the working tree was clean.
+`origin` is `fujibee/agmsg`, and the fork remote is `joelmitz`.
+Because this differed from the baseline `e1eb933` in the request prompt, this document uses the local HEAD source as its baseline, re-verifying diffs prior to implementation.
+No fetch, checkout, or merge operations are performed during the creation of this plan.
 
-文書配置は既存の [docs/design/remote-sync.md](remote-sync.md) と同じ `docs/design/` に合わせた。
-`ref/` は採用に向けた計画の置き場ではないため使わない。
+Document placement matches `docs/design/`, aligned with [docs/design/remote-sync.md](remote-sync.md).
+`ref/` is not used as it is not intended for active implementation plans.
 
-根拠の区別:
+Evidence classifications:
 
-- ローカルコードで確認: Antigravity は `monitor=no`、`delivery_modes=turn off`、配信 plug は rule-file 方式。
-- luna が実機の version/help で確認: `agy 1.1.26` は双方向 stream-json と `--conversation` を提供する。
-- agy の担当者による実機検証として依頼文から受領: 1ターン後もプロセスが生存し、次の stdin 入力で文脈を維持して会話を継続できる。
-- 公式仕様で確認: user 入力、init/step_update/result 出力、result 待ち、EOF 終了、control_request/control_response 非対応。
-  参照: [Headless mode](https://antigravity.google/docs/cli/headless)。
-- 本書では未実測: エラー・再起動・承認拒否・Windows の全組合せ、stream-json と明示 conversation 再開の組合せ。
+- Confirmed via local code: Antigravity specifies `monitor=no`, `delivery_modes=turn off`, and uses rule-file based delivery plugs.
+- Confirmed via real CLI version/help by luna: `agy 1.1.26` provides bidirectional stream-json and `--conversation`.
+- Received via request description as real-device verification by agy maintainer: The process survives after one turn and maintains context across subsequent turns via stdin.
+- Confirmed via official documentation: User input, init/step_update/result outputs, waiting for result, EOF termination, and lack of support for control_request/control_response.
+  Reference: [Headless mode](https://antigravity.google/docs/cli/headless).
+- Unverified in this document: Full combinations of errors, restarts, approval refusals, Windows platform support, and combining stream-json with explicit conversation resumption.
 
-## 2. 最初の実装の範囲
+## 2. Initial Implementation Scope
 
-最初の利用形態は、端末から明示起動する単一ロールの headless worker とする。
-人間は別の agmsg セッションからメッセージを送り、bridge の端末に処理結果を見る。
-自由入力を読む新しい対話 UI やシステム常駐サービスは追加しない。
-Node.js と Bash を用い、別の WebSocket サーバーは立てない。
+The initial operating model is a single-role headless worker explicitly started from a terminal.
+Human users send messages from a separate agmsg session and observe results in the bridge terminal.
+No arbitrary-input interactive UI or system daemon services are added.
+Uses Node.js and Bash, avoiding standalone WebSocket server daemons.
 
-提案する起動インターフェース:
+Proposed invocation interface:
 
 ```text
 bash scripts/drivers/types/antigravity/antigravity-monitor.sh \
   --project <absolute-project> --team <team> --name <registered-role>
 ```
 
-`delivery.sh set monitor antigravity <project>` は設定と起動方法の案内だけを行う。
-モード変更だけで課金を伴う会話を自動開始しない。
-起動時は登録済みのロールを必須とし、他の生存セッションが所有していれば拒否する。
-既存の agy TUI と同じロールを奪い合わないよう、初回は headless 用の別ロールで試す。
-モードは project/type 単位だが、実プロセスは project/team/role 単位で管理する。
+`delivery.sh set monitor antigravity <project>` merely records settings and displays launch instructions; it does not automatically spawn billable conversations upon mode changes alone.
+Startup strictly requires a registered role and aborts if already held by another live session.
+To avoid competing with existing agy TUIs for the same role, initial testing uses a dedicated headless role.
+While delivery mode is tracked per project/type, running processes are managed per project/team/role.
 
-## 3. 既存 Codex 方式との差分
+## 3. Differences from the Existing Codex Mechanism
 
-| 責務 | 既存実装 | Antigravity での扱い |
+| Responsibility | Existing Implementation | Handling in Antigravity |
 |---|---|---|
-| 未読の検出 | `codex/watch-once.sh`、storage facade | 共通の storage/subscription API を利用する。初期版では専用 Bash ヘルパで検出と取得をまとめ、Codex の既存動作は変更しない |
-| ロール排他 | `scripts/lib/actas-lock.sh`、`subscription.sh` | 同じ所有権判定・エンコード・所有者限定解放を利用 |
-| 会話記録 | `scripts/lib/role-session.sh` | advisory な再開先として利用。配信中の記録は別に持つ |
-| 実行環境 | app-server と TUI が同じ WebSocket endpoint を共有 | bridge が `agy` 子プロセスの stdin/stdout を直接所有 |
-| 新規入力 | `codex-bridge.js` の `turn/start` | NDJSON の user イベントを1行投入 |
-| busy/idle | turn/thread 通知、watchdog | 入力投入後から result までを busy とする |
-| 起動監督 | `codex-bridge-launcher.sh` | 小さな専用 launcher と bridge 内の再起動方針。Codex launcher 全体は複製しない |
-| 本文取得 | inline モードは `inbox.sh` を turn/start 前に呼ぶ | 未読取得と既読確定を分離する。既存 inbox の意味は変更しない |
-| Monitor 能力 | Codex も manifest 上は `readiness_sentinel=no`（#1214 改名前は `monitor=no`） | native Monitor は無いため `readiness_sentinel=no` を維持する |
+| Unread detection | `codex/watch-once.sh`, storage facade | Reuses common storage/subscription APIs. The initial version encapsulates detection and retrieval in a dedicated Bash helper, preserving existing Codex behavior. |
+| Role exclusivity | `scripts/lib/actas-lock.sh`, `subscription.sh` | Reuses identical ownership verification, name encoding, and owner-restricted release mechanisms. |
+| Conversation tracking | `scripts/lib/role-session.sh` | Used as an advisory resumption target. In-flight delivery tracking is maintained separately. |
+| Runtime environment | app-server and TUI share the same WebSocket endpoint | The bridge directly owns the stdin/stdout of the child `agy` process. |
+| New turn input | `turn/start` in `codex-bridge.js` | Emits a single NDJSON user event line. |
+| Busy/idle state | turn/thread notifications, watchdog | Defined as busy from input injection until result reception. |
+| Process supervision | `codex-bridge-launcher.sh` | Small dedicated launcher paired with internal bridge restart logic. Avoids replicating the entire Codex launcher. |
+| Message body fetch | Inline mode calls `inbox.sh` prior to turn/start | Decouples unread retrieval from read acknowledgement. Preserves standard inbox semantics. |
+| Monitor capability | Codex manifest specifies `readiness_sentinel=no` (renamed from `monitor=no` in #1214) | Maintains `readiness_sentinel=no` due to absence of a native Monitor. |
 
-参照コードは `scripts/drivers/types/codex/{codex-monitor.sh,codex-bridge.js,codex-bridge-launcher.sh,watch-once.sh,eligible-pairs.sh}`。
-Codex の RPC、thread 探索、TUI 接続、process/spawn は流用しない。
-未読集合の比較、排他、再試行上限、診断の方針を利用する。
+Reference code: `scripts/drivers/types/codex/{codex-monitor.sh,codex-bridge.js,codex-bridge-launcher.sh,watch-once.sh,eligible-pairs.sh}`.
+Codex RPC, thread discovery, TUI attach, and process/spawn primitives are not reused.
+We adopt Codex's unread set comparison, exclusivity locking, retry bounds, and diagnostic patterns.
 
-## 4. プロセスとターンのライフサイクル
+## 4. Process and Turn Lifecycle
 
 ```text
-送信元 → 既存 agmsg store（remote 同期は既存機構）
-                        ↓ 未読 snapshot
-                 Antigravity bridge
-                        ↓ stdin: user NDJSON
-                 agy headless 子プロセス
-                        ↓ init / step_update / result
-             状態・表示・受領IDの既読確定
+Sender → Existing agmsg store (remote sync via existing engine)
+                       ↓ Unread snapshot
+                Antigravity bridge
+                       ↓ stdin: user NDJSON
+                agy headless child process
+                       ↓ init / step_update / result
+            State update, display, and ack of received IDs
 ```
 
-bridge の stdout は人間向けの起動状態と回答表示、stderr は診断とする。
-子プロセスの stdout は機械可読専用として読み、stderr は継続的に drain して詰まりを防ぐ。
+Bridge stdout presents human-facing startup and response outputs, while stderr carries diagnostics.
+Child stdout is parsed strictly as machine-readable stream-json; child stderr is continuously drained to prevent buffer stalls.
 
-| 状態 | 動作・遷移 |
+| State | Behavior / Transition |
 |---|---|
-| STARTING | 設定、実行ファイル、ロール所有権、ローカル状態を確認。`agy --input-format stream-json --output-format stream-json` を shell 無しで起動 |
-| INITIALIZING | 初期の固定コンテキストを user イベントとして投入。type/project/team/role と返信方法だけを知らせる。未読本文はまだ送らない |
-| IDLE | 初期ターンまたは配信ターンが完了し、受領確定も済んだ状態。既定2秒間隔で未読を確認 |
-| BUSY | 1バッチを投入済み。次の入力は送らず、後続メッセージは store に残す |
-| ACK_PENDING | SUCCESS の result とバッチの対応を保存済み。受領したIDだけを既読化し、成功後に IDLE へ戻す |
-| STOPPING | 新しい未読を取らず stdin を閉じる。現在のターンを待って所有するプロセスだけを終了 |
-| NEEDS_ATTENTION | 処理結果不明、プロトコル違反、ロール変更、再開不能など。理由を表示し自動配信を停止 |
+| STARTING | Verifies settings, binaries, role ownership, and local state. Spawns `agy --input-format stream-json --output-format stream-json` directly without an intermediate shell. |
+| INITIALIZING | Sends initial fixed context as a user event. Communicates only type/project/team/role and reply instructions; unread bodies are deferred. |
+| IDLE | The initial or delivery turn completed, and read acknowledgement finished. Polls unread messages every 2 seconds by default. |
+| BUSY | A batch has been injected. New inputs are held; incoming messages remain in storage. |
+| ACK_PENDING | Association between a SUCCESS result and the batch is persisted. Acknowledges only the received message IDs, returning to IDLE on success. |
+| STOPPING | Closes stdin without taking new messages. Awaits current turn completion and terminates only owned processes. |
+| NEEDS_ATTENTION | Unclear result, protocol error, role mutation, or unrecoverable state. Logs reason and suspends automatic delivery. |
 
-init が最初の user 入力まで出ない実装でも起動が循環待ちにならないよう、初期コンテキスト入力を先に許す。
-初期ターンは agmsg のIDを持たず、既読処理をしない。
-会話が初期化され、IDが保存され、初期ターンが正常完了して初めて ready とする。
+To prevent circular initialization stalls where `init` is withheld until the first user input, initial context injection is permitted prior to `init`.
+The initial turn carries no agmsg IDs and performs no read acknowledgements.
+The bridge reports ready only after the conversation initializes, its ID is stored, and the initial turn completes successfully.
 
-NDJSON の取り扱い:
+NDJSON handling rules:
 
-- 入力は JSON serializer で生成し、改行を含む本文も必ず1つの JSON 行にする。`-p` や対話用 `--prompt-interactive` は併用しない。
-- 部分行・複数行チャンクをバッファし、1行ずつ parse する。初期上限案は1行8 MiB、超過は理由付き停止とする。
-- init の `conversation_id` を保存し、以降IDがあるイベントは一致を検査する。別会話への切替を暗黙に許さない。
-- step_update の text_delta は増分表示、result.response は完了回答として扱い、重複表示を避ける。
-- result は1入力に1件。成功は `SUCCESS` のみとし、ERROR/CANCELED/INTERRUPTED/WAITING 等を成功扱いしない。
-- 未知のイベント名は診断して読み飛ばす。壊れたJSON、結果の重複、対応する入力のないresultは停止する。
-- stdin の backpressure を待ち、全行を書けたことを確認する。ただし書込成功をモデルの受領完了とはみなさない。
-- 初期化上限は60秒、通常ターンは CLI の print-timeout と bridge の上限を整合させる。初期案は5分と追加30秒。時間超過は未完了扱いで停止し、次ターンを同じ会話に重ねない。
+- Inputs are formatted via a JSON serializer, ensuring multi-line bodies form a single NDJSON line. `-p` and `--prompt-interactive` are prohibited.
+- Buffers partial and multi-line chunks, parsing line by line. Proposed initial line limit is 8 MiB; exceeding this stops delivery with diagnostics.
+- Persists the `conversation_id` from `init`, asserting match on subsequent ID-bearing events. Silent switching to foreign conversations is forbidden.
+- `step_update.text_delta` provides incremental streaming display; `result.response` represents final output, avoiding duplicated logs.
+- Exactly one `result` is expected per input. Only `SUCCESS` denotes success; ERROR, CANCELED, INTERRUPTED, and WAITING are never treated as success.
+- Unknown event types are logged to diagnostics and ignored. Malformed JSON, duplicated results, or unsolicited results trigger an immediate halt.
+- Monitors stdin backpressure to verify full write completion. Successful writes do not imply model task completion.
+- Initialization timeout is 60 seconds; normal turn timeouts align CLI print-timeout with bridge limits (proposed: 5 minutes plus 30 seconds buffer). Timeouts halt as incomplete, preventing piggybacking subsequent turns into the same conversation.
 
-## 5. 未読取得・既読確定・クラッシュ時の扱い
+## 5. Unread Message Fetching, Read Acknowledgement, and Crash Handling
 
-bridge 用 Bash ヘルパ `antigravity/inbox-transport.sh` を新設する案とする。
-既存 `scripts/inbox.sh` は表示と既読化をまとめて行うため、配信前の取得には使わない。
-新ヘルパは `agmsg_storage_load` と storage facade の `storage_list_unread` / `storage_mark_read_batch` を利用し、DBやteamデータを直接読む別実装を作らない。
+Proposes a new Bash helper: `antigravity/inbox-transport.sh`.
+Because existing `scripts/inbox.sh` bundles display and marking read, it cannot be used for pre-delivery retrieval.
+The helper uses `agmsg_storage_load` and the storage facade's `storage_list_unread` / `storage_mark_read_batch`, avoiding ad-hoc DB/team queries.
 
-ヘルパの契約:
+Helper contract:
 
-- `peek`: project/type/team/role と所有者を確認し、未読の `{id, from, to, body, at}` を既読化せず返す。取得不能と未読0件を別の終了結果にする。
-- `ack`: bridge が保存したバッチID集合を stdin JSON で受け取り、所有権と宛先を再確認してそのIDだけ既読化する。後着メッセージは含めない。
-- 列名は storage facade の既存レスポンスに適合させる。上記は新ヘルパの外部形であり、保存スキーマ変更を意味しない。
-- 初期バッチ上限案は20件・本文合計64 KiB。単独で上限を超えるメッセージは切り詰めず、そのIDと理由を表示して停止する。
+- `peek`: Checks project/type/team/role and ownership, returning unread `{id, from, to, body, at}` without marking read. Distinguishes retrieval errors from zero unread messages via exit codes.
+- `ack`: Accepts a JSON array of batch IDs via stdin, re-verifies ownership and recipient, and acknowledges strictly those IDs. Newly arrived messages are excluded.
+- Column names conform to existing storage facade responses; this defines the helper's external interface without modifying storage schemas.
+- Proposed batch limits: up to 20 messages or 64 KiB total body size. Messages exceeding limits individually are not truncated; the bridge logs their IDs and halts.
 
-bridge は最大1件のバッチ記録を、インストールの `run/` 配下に atomic replace で保持する。
-既存 actas の名前エンコードを利用した `antigravity-bridge.<project-key>.<team-key>.<role-key>.state.json` を提案する。
-ファイル権限は所有者のみとし、本文を通常ログへ複写しない。
-状態には schemaVersion、所有者、project、team、role、conversation_id、バッチID、各メッセージIDと本文、phase を含める。
-phase は prepared / sent / completed / uncertain とし、投入前に prepared を永続化する。
-role-session は advisory なので、この状態ファイルの代わりにはしない。
+The bridge maintains at most one in-flight batch record under the installation's `run/` directory via atomic replace.
+We propose `antigravity-bridge.<project-key>.<team-key>.<role-key>.state.json` using existing actas name encoding.
+Permissions are restricted to the owner; bodies are omitted from regular logs.
+State fields include schemaVersion, owner, project, team, role, conversation_id, batch ID, message IDs, bodies, and phase.
+Phase progresses through prepared / sent / completed / uncertain, persisting prepared prior to input injection.
+Because role-session is purely advisory, it does not replace this state file.
 
-通常の順序は「peek → バッチ保存 → user投入 → SUCCESS受信 → completed保存 → ack → バッチ解除」とする。
-既読はモデルのターン完了を意味し、依頼された業務の完了・返信済みを意味しない。
-返信は agent が既存 `send.sh` を明示的に実行する。
-headless の受領管理は bridge に限定する。
-初期コンテキストに加え、`antigravity/template.md` に monitor worker 専用の分岐を追加する。
-この分岐では引数なし `$agmsg` は既読を伴う取得を行わず、bridge の状態表示だけを案内する。
-`inbox.sh` / `check-inbox.sh` を受領に使わないことと、返信には `send.sh` を使うことを明示する。
-通常の turn/off セッションの既定動作は維持する。
+Normal sequencing: `peek → save batch → inject user event → receive SUCCESS → save completed → ack → clear batch`.
+Marking read denotes completion of the model's turn, not business task completion or sent replies.
+Replies must be explicitly executed by the agent via `send.sh`.
+Headless receipt tracking is handled exclusively by the bridge.
+In addition to the initial context, `antigravity/template.md` adds a branch dedicated to monitor workers.
+Under this branch, argumentless `$agmsg` avoids marking read and prints bridge status instead.
+It explicitly warns against using `inbox.sh` / `check-inbox.sh` for message consumption, directing replies through `send.sh`.
+Standard turn/off session defaults remain untouched.
 
-### 5.1. 既読の第二書き手を防ぐ機械的な境界
+### 5.1. Mechanical Guard Against Secondary Readers
 
-template の禁止文だけでは、既存 skill を読んだ worker の呼び出しを防げない。
-そのため、monitor worker が所有する team/role には「bridge が既読管理中」という予約を保存し、既読化を行う共有入口で検査する。
-予約は actas の所有者と対応付けるが、不明バッチがある限り PID の死亡だけで解除しない。
+Documentation warnings alone cannot stop a worker from executing existing skills that invoke inbox scripts.
+Therefore, the team/role owned by a monitor worker reserves a "bridge managing read" latch, validated at all shared read entry points.
+The reservation binds to the actas owner and is not cleared by PID death alone while unresolved batches persist.
 
-- 新設する `scripts/lib/bridge-read-guard.sh` を storage facade のロード後に接続し、`storage_mark_read_batch` と `storage_read_cursor_consume` の双方を保護する。
-  `inbox.sh` と `check-inbox.sh` が同じ保護を通ることを実装テストで示す。
-- 予約中の team/role への通常の既読化は、store を変える前に拒否する。
-  worker の環境変数だけを判定材料にせず、予約と所有者を参照するので、環境変数を落とした呼び出しも拒否する。
-- 例外は所有者を照合した `inbox-transport.sh ack` の completed バッチだけとする。
-  許可の判定は親 bridge の保持する予約・バッチID・保存済みID集合に拘束し、任意の `ALLOW_ACK=1` のような環境変数では解除できない設計にする。
-  具体的な親プロセスから ack ヘルパへの認可受け渡しは実装前にレビューし、worker 子プロセスへ継承しない。
-- 拒否した試行は本文を含めず予約に紐づく違反記録へ残す。
-  既存 inbox が facade の失敗を非致命として扱っても検知できるよう、bridge は投入前・BUSY中・result処理前に違反記録を確認する。
-  検出時は NEEDS_ATTENTION にし、SUCCESS が出ても completed保存・ack・次ターン投入を行わない。
-- 違反記録の追記成功を親が読めた場合、または当該ターンの stream-json の tool step に `inbox.sh` / `check-inbox.sh` 相当の実コマンドが現れた場合に、親は NEEDS_ATTENTION として扱う。追記失敗かつ stream にも該当 tool が現れない場合は、guard による既読拒否と state 保持を硬い保証とし、親の違反検知までは保証しない（任意コードや stream 外の既読化は脅威モデル外）。
-- 人間の手動 inbox も予約中は既読化を拒否する。
-  読む必要があれば peek を使い、予約を無断で解除して cursor を進めない。
-  予約解除は worker停止・バッチ解決・ロール所有権の確認後に行う。
+- Introduces `scripts/lib/bridge-read-guard.sh`, hooked after storage facade loading to protect both `storage_mark_read_batch` and `storage_read_cursor_consume`.
+  Implementation tests verify that `inbox.sh` and `check-inbox.sh` traverse this guard.
+- Standard attempts to mark messages read for a reserved team/role are rejected prior to altering storage.
+  Validation inspects the reservation and owner rather than relying on worker environment variables, rejecting calls even if environment variables are stripped.
+- The sole exception is `inbox-transport.sh ack` for completed batches matching the verified owner.
+  Authorization is bound to the parent bridge's reservation, batch ID, and stored ID set, resisting bypass via environment variables like `ALLOW_ACK=1`.
+  Passing authorization from parent to ack helper is reviewed prior to implementation and is never inherited by worker child processes.
+- Rejected attempts are recorded in a violation log tied to the reservation (omitting bodies).
+  To catch violations even if existing callers treat facade failures as non-fatal, the bridge checks the violation log before injection, during BUSY, and prior to result processing.
+  Detecting violations forces `NEEDS_ATTENTION`, inhibiting completed state writes, acks, and subsequent turns even if `SUCCESS` arrives.
+- If the parent successfully reads a logged violation, or if tool steps in stream-json invoke commands equivalent to `inbox.sh` / `check-inbox.sh`, the parent transitions to `NEEDS_ATTENTION`. If logging fails and no matching tool appears in the stream, the guard's read rejection and state preservation act as hard guarantees, though parent violation detection is not guaranteed (arbitrary code execution outside stream-json is out of scope).
+- Manual human inbox commands are also rejected while reservations are active.
+  Reading messages requires `peek` to avoid clearing reservations and advancing cursors unannounced.
+  Reservations clear only after worker termination, batch resolution, and role ownership checks.
 
-ここで閉じるのは、同一インストールの通常スクリプトによる偶発的な第二の既読化である。
-悪意ある任意コード、DB直接操作、別インストールや別端末からの既読化を防ぐセキュリティ境界ではない。
-専用roleを別端末の自動受信に共有しないことを出荷前の運用条件にする。
-外部の既読化があっても、保存済みバッチは次節の復旧対象として保持する。
+This boundary guards against accidental secondary consumption by standard scripts within the same installation.
+It is not a security boundary against malicious arbitrary code, direct DB manipulation, or external installs.
+Operating policy requires that dedicated roles are not shared across automated receivers.
+Even if external consumption occurs, stored batches are preserved for recovery as detailed below.
 
-### 5.2. 未読状態から独立したバッチ復旧
+### 5.2. State-Based Batch Recovery Independent of Unread State
 
-| 異常終了時の記録 | 再起動時の扱い |
+| Recorded State on Abnormal Exit | Handling upon Restart |
 |---|---|
-| バッチ無し、記録済み会話あり | 同じIDで再開を試せる。明示会話再開の実機検証を出荷条件とする |
-| prepared / sent / uncertain | 実際に送られたか、toolの副作用があったか断定できない。未読を残し NEEDS_ATTENTION。自動再投入しない |
-| completed | 同じID集合への ack のみ再試行。モデルをもう一度動かさない |
-| 状態ファイル破損・書込不可 | 既読を進めず停止。新規会話への無言の切替をしない |
+| No batch, recorded conversation present | Attempts resumption using the same conversation ID. Real-device verification of explicit resumption is a release prerequisite. |
+| prepared / sent / uncertain | Transmission status and tool side-effects are indeterminate. Preserves unread state, enters `NEEDS_ATTENTION`, and prohibits automatic re-injection. |
+| completed | Retries ack strictly for the same ID set. Does not re-run the model. |
+| Corrupted / unwritable state file | Halts without advancing cursors. Avoids silently creating fresh conversations. |
 
-この設計は exactly-once の副作用実行を保証しない。
-成功後・completed保存前のクラッシュも不明状態になる。
-不明状態は履歴と会話を確認して明示的に解決する。
-復旧対象の正本は state に保存したメッセージIDと本文であり、現在の未読一覧から再構成しない。
-store 側が既読でも prepared/sent/uncertain を完了とみなさず、stateを消さない。
-明示再投入では保存済み本文を同じバッチIDと元ID付きで投入し、重複した副作用の可能性を確認してから行う。
-明示ackでは保存済みIDだけを対象とし、既に既読のIDを含んでも冪等に解決する。
-state未保存の後着を第二書き手が消すことは、5.1の機械的拒否によって防ぐ。
-実装時には状態を表示する `status` と、既読確定または再投入を明示選択する復旧コマンドを設計し、その操作対象のIDを確認表示する。
-自動的なロール移譲は不明バッチがある間は行わない。
+This design does not guarantee exactly-once side-effect execution.
+Crashing after model success but before saving `completed` results in an indeterminate state.
+Indeterminate states must be resolved explicitly by inspecting logs and conversations.
+The source of truth for recovery is the stored message IDs and bodies in the state file, never reconstructed from current unread queries.
+Even if external storage marks messages read, prepared/sent/uncertain states are not considered complete, and state files are preserved.
+Explicit replay reinjects stored bodies with the original batch and message IDs, performed only after assessing potential duplicate side-effects.
+Explicit ack targets strictly stored IDs, resolving idempotently even if IDs are already marked read.
+Section 5.1's mechanical guard prevents secondary readers from discarding subsequent messages that were never saved in the state.
+Implementation includes a `status` command and explicit recovery commands to choose between acknowledgement and replay, confirming target IDs.
+Automated role transfer is prohibited while unresolved batches persist.
 
-## 6. 再起動、停止、ロール所有権
+## 6. Restart, Teardown, and Role Ownership
 
-IDLE で子プロセスが異常終了した場合だけ、同一会話を 1秒・5秒・15秒後の最大3回再起動する。
-再開失敗を新規会話作成に置き換えない。
-再起動予算は1ターンの正常完了でリセットし、起動失敗だけの無限ループを防ぐ。
-bridge 自体の死亡は初期版では自動daemon化せず、端末に終了が見え、次の明示起動で状態を回復する。
+If the child process crashes while IDLE, the bridge restarts the same conversation up to 3 times (at 1s, 5s, and 15s intervals).
+Failed resumptions never fall back to silent conversation creation.
+The restart budget resets upon one successful turn completion, preventing infinite restart loops on persistent launch failures.
+Bridge crashes in the initial version do not auto-daemonize; the exit is visible in the terminal, recovering state upon the next explicit launch.
 
-起動時に既存の actas 所有権を取得し、peek前・stdin投入直前・ack前に再確認する。
-所有権を失ったら次の入力を止め、BUSYなら不明状態を記録する。
-他者の PID を kill せず、自分の子プロセスとプロセス開始識別子を照合して停止する。
+Startup acquires existing actas ownership, re-verifying it prior to peek, stdin injection, and ack.
+Losing ownership suspends subsequent input, recording indeterminate state if currently BUSY.
+Processes never kill foreign PIDs; teardown matches the child PID against recorded process start tokens.
 
-SIGINT/SIGTERM、monitor→turn/off では新規取得を止め、stdinを閉じて最大30秒終了を待つ。
-残る子は自分のものと照合して終了させ、未完了バッチを残す。
-通常停止では自分の readiness/PID とロックだけを片付け、conversation記録と不明バッチを消さない。
-mode切替の停止処理が完了しなければ、その失敗を表示し turn の自動取得を開始しない。
+On SIGINT/SIGTERM or switching from monitor to turn/off, the bridge stops new peeks, closes stdin, and waits up to 30 seconds for graceful exit.
+Remaining child processes are terminated only after verifying identity, preserving incomplete batches.
+Normal shutdown cleans up its own readiness/PID files and locks without deleting conversation records or indeterminate batches.
+If mode-switch teardown fails, the failure is reported, inhibiting automatic turn retrieval.
 
-## 7. delivery.sh と type.conf の統合
+## 7. Integration with delivery.sh and type.conf
 
-`delivery_modes=monitor turn off` を追加する。
-`both` は初期版で提供しない。
-`readiness_sentinel=no`（#1214 改名前は `monitor=no`）は native Monitor がない事実と spawn の ready 待ち判定に使われているため維持する。
+Adds `delivery_modes=monitor turn off`.
+`both` is omitted from the initial release.
+`readiness_sentinel=no` (renamed from `monitor=no` in #1214) is maintained, reflecting the lack of a native Monitor and preserving spawn ready checks.
 
-| 操作 | 設計する挙動 |
+| Operation | Designed Behavior |
 |---|---|
-| set monitor | headless用設定を保存。既存turnルールを停止し、起動例を表示。CLIプロセスはまだ起動しない |
-| status | configured mode と runtime状態を別々に表示。停止中・ready・busy・要確認を区別 |
-| set turn | 対象project/typeのbridgeを停止後、従来のrulefile_apply turnへ委譲 |
-| set off | 対象bridgeを停止し自動取得を解除。不明バッチ・会話記録は保持 |
-| monitor起動 | mode、登録、ロール所有権、実行ファイル、状態保存先を検査し起動 |
+| set monitor | Saves headless configuration. Disables existing turn rules and displays launch instructions. Does not spawn CLI processes. |
+| status | Displays configured mode and runtime status independently, distinguishing stopped, ready, busy, and needs-attention states. |
+| set turn | Stops the bridge for target project/type, then delegates to standard `rulefile_apply turn`. |
+| set off | Stops target bridge and disables automatic retrieval, preserving unresolved batches and conversation records. |
+| monitor launch | Verifies mode, registration, role ownership, binaries, and state storage paths before spawning. |
 
-`antigravity/_delivery.sh` の apply/status/on_enable/on_disable/runtime_status と停止案内を専用化する。
-現在の rulefile_status はファイル有無だけでturn/offを判定するため、そのまま流用しない。
-新モード設定は `hooks_file` の既存領域に明示マーカーとして保存し、他のルールは上書きしない。
-保存マーカーの具体形は既存 rulefile 構造を壊さない最小形式として、実装差分レビューで確定する。
-設定の読取はマーカーを正本とし、PIDの有無を設定値として使わない。
-`set turn` に既存の専用停止callbackが足りない場合は、共通dispatcherの `apply_settings` より前に小さな停止callbackを追加し、他typeは既定no-opとする。
-停止と不明バッチの解決が完了するまでは turn 用rulefileを書かず、第二の自動取得を開始しない。
+Specializes `antigravity/_delivery.sh` for apply, status, on_enable, on_disable, runtime_status, and teardown guidance.
+Because existing `rulefile_status` checks turn/off purely by file presence, it cannot be reused as-is.
+New mode configuration is stored as an explicit marker within the existing `hooks_file` region without overwriting other rules.
+The marker format will be finalized during implementation review to minimize diff footprint while preserving rulefile structure.
+Mode detection treats the marker as the canonical source of truth, avoiding treating PID presence as configuration state.
+If `set turn` lacks dedicated teardown callbacks, a minimal hook is added prior to `apply_settings` in the common dispatcher, defaulting to no-op for other types.
+Turn rulefiles are withheld until bridge shutdown and batch resolution succeed, preventing secondary auto-retrieval.
 
-通常の `spawn antigravity` は既存TUI動作を維持する。
-初期版のmonitor起動は専用コマンドに限定し、既存 `--prompt-interactive` 経路へ stream-json を混ぜない。
-spawn統合は後続とし、採用する場合はmanifestのspawn plugまたはdriver callbackを通じて専用起動に接続する。
-headless起動コマンド自体が ready を待って成否を表示するので、native Monitor のsentinel契約を偽装する必要はない。
+Standard `spawn antigravity` retains its interactive TUI behavior.
+Initial monitor execution is confined to dedicated commands, avoiding mingling stream-json with existing `--prompt-interactive` paths.
+Future spawn integration will connect via manifest spawn plugs or driver callbacks.
+Because the headless launch command waits for readiness and reports success directly, masquerading behind native Monitor sentinel contracts is unnecessary.
 
-## 8. 承認と表示
+## 8. Approvals and User Presentation
 
-`control_request` / `control_response` は送信しない。
-承認不能のtoolがsoft-denyされてもプロセスが正常終了し得るため、SUCCESSを業務成功の判定には使わない。
-初期検証は読み取り・定型返信の限定タスクで行う。
-`send.sh` 等の許可は既存のユーザー承認方針に従って対象を限定し、権限一括解除フラグを付けない。
-対話承認が必要な依頼は別の対話セッションへ判断を戻す。
+Does not transmit `control_request` or `control_response`.
+Because unapprovable tools may soft-deny while the process exits cleanly, `SUCCESS` is not equated with business task success.
+Initial validation uses bounded read and templated reply tasks.
+Tool permissions such as `send.sh` follow existing user approval policies with bounded scopes, avoiding global bypass flags.
+Requests requiring interactive confirmation yield control back to dedicated interactive sessions.
 
-人間向けログにはJST、role、conversation_id、バッチID、状態、終了理由を表示する。
-本文やtool出力は必要な端末表示に限定し、認証情報を診断ファイルへ記録しない。
-headlessの回答表示とagmsg返信は別であり、bridgeから送信先への自動返信は追加しない。
+Human-facing logs present JST timestamps, role, conversation_id, batch ID, state, and exit reasons.
+Message bodies and tool outputs are limited to necessary terminal display; credentials are never written to diagnostic files.
+Headless response display is decoupled from agmsg replies; the bridge never automatically replies to senders.
 
-## 9. 変更予定ファイルと実装順序
+## 9. Target Files and Implementation Order
 
-以下は予定パスであり、今回新設するのは本計画書だけである。
+Proposed path layout (this document is the only file created at this stage):
 
-| 段階 | 対象 | 完了条件 |
+| Phase | Scope | Completion Criteria |
 |---|---|---|
-| A | `tests/` の偽agy・隔離store用fixture、Antigravity契約テスト | init遅延、複数ターン、異常終了、壊れたJSONを任意に再現できる |
-| B | `antigravity/antigravity-bridge.js`、`inbox-transport.sh` | 1ロール、未読取得、1ターンずつ投入、result対応、ID単位ackが成立 |
-| C | `antigravity/antigravity-monitor.sh`、state/status/停止ヘルパ | 明示起動、排他、終了、再開と不明状態停止が成立 |
-| D | `antigravity/type.conf`、`_delivery.sh`、必要時 `scripts/delivery.sh` | monitor/turn/off設定、状態表示、解除、既存type回帰が成立 |
-| E | `antigravity/template.md`、`docs/agent-types.md`、利用手順 | TUIとの違い、起動、返信、承認、復旧を説明 |
+| A | Test fixtures for fake agy and isolated stores under `tests/`; Antigravity contract tests | Recreates init delays, multiple turns, abnormal exits, and corrupted JSON on demand. |
+| B | `antigravity/antigravity-bridge.js`, `inbox-transport.sh` | Supports single role, unread peek, turn-by-turn injection, result handling, and ID-level acks. |
+| C | `antigravity/antigravity-monitor.sh`, state/status/teardown helpers | Supports explicit launch, exclusivity, termination, resumption, and indeterminate halts. |
+| D | `antigravity/type.conf`, `_delivery.sh`, and `scripts/delivery.sh` as needed | Supports monitor/turn/off configuration, status reporting, teardown, and passes regression tests on other types. |
+| E | `antigravity/template.md`, `docs/agent-types.md`, operational guide | Explains differences from TUI, startup, replies, approvals, and recovery procedures. |
 
-Antigravity相対パスの基点は `scripts/drivers/types/antigravity/`。
-storage facade の変更は5.1の予約中のteam/roleに対する既読guard接続に限定する。
-予約のない既存利用はそのまま通し、Codex bridgeとGemini設定は変更しない。
-段階Bの対象に `scripts/lib/bridge-read-guard.sh` と facade の接続箇所を含める。
-既存部品の抽出が必要になった場合は、必要性と影響を実装前レビューへ追加する。
+Base path for Antigravity-specific relative paths is `scripts/drivers/types/antigravity/`.
+Storage facade changes are strictly limited to wiring Section 5.1's read guard for reserved teams/roles.
+Standard unreserved operations proceed untouched; Codex bridge and Gemini configurations remain unaltered.
+Phase B includes `scripts/lib/bridge-read-guard.sh` and facade hook integration points.
+If extracting existing components becomes necessary, rationale and impact will be submitted for pre-implementation review.
 
-## 10. 検証と出荷条件
+## 10. Verification and Release Criteria
 
-実装テストは別インストール・別チーム・偽agyで行い、稼働中の `airsurf` や通常のCLI認証を利用しない。
-単なる環境変数の差し替えだけで隔離したとみなさず、既存の別インストール手順に従う。
+Tests run against separate installations, isolated teams, and fake agy processes, avoiding active `airsurf` or normal CLI credentials.
+Testing in separate installations follows established isolation procedures rather than relying on environment variable overrides alone.
 
-1. 到着前はIDLE、到着後は1ターンが始まり、2通目はresult後に同じ会話へ入る。
-2. バッファ分割、複数行、改行を含む本文、未知イベント、stderr大量出力を正しく扱う。
-3. stdin途中切断、result前後、completed保存前後、ack前後に終了させ、未読消失と自動二重投入が起きない。
-4. ack失敗はモデルを再実行せず、対象IDだけ再処理する。後着IDは未読のまま残る。
-5. 二重起動・他role・別project・所有権移動・PID再利用・不明バッチ付き再起動を検査する。
-6. monitor→turn/offでbridgeだけが止まり、他typeや他projectの監視は継続する。
-7. ready未成立、busyのまま終了、承認拒否、再開不能を「正常配信」と表示しない。
-8. Codex/Claude/Geminiの既存delivery・spawn・role-sessionテストを通す。
-9. 実agyの限定試験では、専用roleで2通の文脈継続、idle再開、明示返信の履歴を確認する。実行は別途承認後とする。
-10. 偽agyがBUSY中に実際の隔離 `inbox.sh` / `check-inbox.sh` を呼ぶケースと、引数なし `$agmsg` 相当の取得を試みるケースを追加する。
-    バッチA投入後に後着Bを作り、両方のIDが未読のまま残り、違反が記録され、bridgeがNEEDS_ATTENTIONになることを確認する。
-    worker側の終了コードだけを根拠にせず、その後SUCCESSやcrashが起きてもackされないことを調べる。
-    同じ隔離storeで予約なしなら既読が進む陽性対照を置き、検査が空振りしていないことを示す。
-11. 隔離fixtureでstore側だけを先に既読化したuncertain状態を作り、stateのID/本文から明示再投入・明示ackを選べることを検査する。
-    自動再投入も「未読0だから解決済み」という判定も行わない。
-12. Linuxを初回対応環境とし、Windows/macOSはパス・プロセス・Bash差分を検証するまで対応済みと記載しない。
+1. Starts IDLE before arrival; first turn initiates upon arrival; second message enters the same conversation after result.
+2. Correctly handles split buffers, multi-line chunks, bodies containing newlines, unknown events, and large stderr bursts.
+3. Terminating before/after result, before/after completed state save, and before/after ack causes no unread message loss or duplicate auto-injections.
+4. Ack failures do not re-execute the model; only target IDs are re-processed. Subsequent IDs remain unread.
+5. Verifies rejection of duplicate launches, conflicting roles, foreign projects, ownership transfers, PID reuse, and restarts with unresolved batches.
+6. Switching from monitor to turn/off halts only the target bridge, preserving monitors for other types and projects.
+7. Unmet readiness, exiting while busy, rejected approvals, and unrecoverable resumptions are never reported as "successful delivery".
+8. Passes existing delivery, spawn, and role-session test suites for Codex, Claude, and Gemini.
+9. Real agy smoke testing verifies context preservation across two messages, idle resumption, and explicit reply history using a dedicated role. Executed only upon separate approval.
+10. Adds test cases where fake agy invokes real isolated `inbox.sh` / `check-inbox.sh` during BUSY, or attempts argumentless `$agmsg` consumption.
+    Verifies that after injecting batch A and creating subsequent message B, both IDs remain unread, a violation is recorded, and the bridge enters `NEEDS_ATTENTION`.
+    Does not rely on worker exit codes alone; asserts that no ack occurs even if followed by SUCCESS or a crash.
+    Includes positive controls where unreserved stores mark messages read, demonstrating tests are not false negatives.
+11. Creates uncertain states in isolated fixtures where storage is pre-marked read, verifying that explicit replay or explicit ack can be chosen from state IDs/bodies.
+    Neither auto-replays nor infers resolution from "zero unread messages".
+12. Linux is the initial supported target; Windows and macOS are not documented as supported until path, process, and Bash variations are verified.
 
-## 11. リスク、保留事項、レビュー観点
+## 11. Risks, Deferred Items, and Review Perspectives
 
-初期版でも中規模の追加となる。
-プロセスadapterだけなら小さいが、既読確定と異常終了の境界が信頼性を決める。
-新しい永続キューや汎用bridgeフレームワークは作らず、単一バッチ状態に限定する。
+This represents a medium-scale addition even in its initial form.
+While the process adapter itself is compact, boundaries governing read acknowledgement and abnormal exits dictate overall reliability.
+We deliberately avoid introducing new persistent queues or generalized bridge frameworks, constraining state strictly to single batches.
 
-実装前に解決する点:
+Items to resolve prior to implementation:
 
-- `--conversation` とstream-jsonでの再開が同じ会話を維持すること。できなければ自動再起動を無効化し、明示停止を仕様にする。
-- 初期コンテキストで必要なtoolが使え、承認拒否を運用者が理解できること。
-- 単一バッチstateの保存とID単位ack、および第二書き手の機械的拒否が既存storage driver双方で成立すること。
-- ack認可の親限定受け渡し、違反記録の保存不能時の停止、予約の解除順序を実装前レビューで具体化すること。
-- mode設定マーカー、復旧コマンドの引数、上限値の妥当性。これらは提案値で、採用済み恒久仕様ではない。
+- Confirming that `--conversation` and stream-json maintain the identical conversation across resumptions. If unverified, automated restarts will be disabled in favor of explicit stops.
+- Ensuring required tools function within the initial context, and operational impacts of approval rejections are documented.
+- Verifying single-batch state persistence, ID-level acks, and mechanical rejection of secondary readers across both storage drivers.
+- Finalizing the parent-only authorization handover for acks, handling log failures, and reservation release ordering during pre-implementation review.
+- Assessing proposed mode markers, recovery command arguments, and threshold bounds (treated as proposals, not permanent specifications).
 
-grokには、状態遷移・再送判断・mode解除・ロール排他・既存typeへの影響を中心にPASS/BLOCKERのレビューを依頼する。
-計画PASSは実装・commit・push・既存インストール更新の承認ではない。
+Grok will be requested to provide a PASS/BLOCKER review focusing on state transitions, retransmission heuristics, mode release, role exclusivity, and impact on existing agent types.
+Plan approval does not constitute authorization for implementation, commit, push, or deployment to existing installations.
 
-## 12. 計画レビュー履歴
+## 12. Plan Review History
 
-2026-09-05 18:50 JST、grokが初版をBLOCKERと判定した。
-初版SHA-256は `7727c4a8573219f89f0a1fc33f11da1b3464304e3877946a9b96af816965ab43`。
-指摘は「workerが既存inbox経由で既読を先に進める第二書き手を閉じていない」の1件。
-5.1のtemplate分岐と共有既読入口の機械的guard、5.2のstateを正本とする復旧、検証10・11を追加した。
-初版の「初期コンテキストだけで防ぐ」「予約中も手動inboxを許す」という設計を撤回し、予約中の既読はbridge ackに限定した。
-再レビューは未完了。
-agyの版は初回luna実測1.1.26として記録を維持し、grokから1.1.27への更新報告を受領したことを付記する。
+On 2026-09-05 18:50 JST, grok evaluated the initial revision as BLOCKER.
+Initial SHA-256: `7727c4a8573219f89f0a1fc33f11da1b3464304e3877946a9b96af816965ab43`.
+The sole objection was: "The plan fails to close the secondary reader where the worker advances read state prematurely via existing inbox commands."
+Additions made: Section 5.1 template branch and shared mechanical read guard, Section 5.2 state-as-source-of-truth recovery, and verification criteria 10 and 11.
+Withdrew initial assumptions that "initial context alone prevents secondary reads" and "manual inbox commands are permitted during active reservations", restricting active read acknowledgements strictly to bridge acks.
+Re-review pending.
+Maintains the record of initial luna measurements on `agy 1.1.26`, noting subsequent receipt of grok's update report to `1.1.27`.
