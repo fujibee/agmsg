@@ -682,6 +682,10 @@ cleanup() {
     done <<< "$READY_FILES"
   fi
   [ -n "${INSTALL_STAMP:-}" ] && rm -f "$INSTALL_STAMP" 2>/dev/null || true
+  # #1842: this process's own store-change stamp files. Scoped to this
+  # SESSION_ID (the glob can only ever match files this same process created),
+  # so it never touches another watcher's stamps.
+  rm -f "$RUN_DIR"/watch."$SESSION_ID".store-stamp.* 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 0' INT TERM HUP
@@ -1173,6 +1177,108 @@ _AGMSG_EXIT_TEARDOWN_INCOMPLETE=76
 STUCK_MAP=""
 source "$SCRIPT_DIR/lib/watch-stuck-map.sh"
 
+# #1842: per-team "did the local store change at all" check, so an idle cycle
+# with nothing new can skip storage_read_cursor_get/storage_watch_after
+# entirely -- each of those forks a real sqlite3 process (plus a `tr`
+# pipeline), the single largest source of this watcher's idle process spawns.
+#
+# A plain bash `[ -nt ]` comparison does the check with no subprocess at all:
+# it compares two files' modification times without spawning anything, unlike
+# every alternative (`stat`, `date -r`, a `find -newer` subshell). The
+# reference side is a stamp file this watcher touches (a bash builtin
+# redirect, also no subprocess) right after every real check.
+#
+# Watched: the db file AND its '-wal' sibling, not just the former -- WAL-mode
+# writes land in the -wal file and are not folded back into the main db's own
+# mtime until a checkpoint, so watching only the main file would never notice
+# a write that stays in the WAL (the #1836/#1837 lesson, reproduced here
+# rather than assumed). A non-sqlite driver has no '-wal' file, so that half
+# of the test is simply always false there -- harmless, and the main file's
+# own mtime still carries every write directly.
+#
+# Safety net: a real check is forced at least once every
+# AGMSG_WATCH_SKIP_SAFETY_NET_SECONDS regardless of how long the store has
+# looked unchanged, bounding exposure to anything this mtime comparison
+# cannot see (a plugin or partition change, a clock oddity). $SECONDS, not
+# `date`: no subprocess, with the same wall-clock (non-monotonic) caveat this
+# file already accepts for _INSTALL_INCOMPLETE_SINCE above.
+AGMSG_WATCH_SKIP_SAFETY_NET_SECONDS=60
+
+# A literal tab, for building the maps below. `$'\t'` only expands inside an
+# otherwise-double-quoted string when it sits directly inside a `${var:+...}`
+# alternate-value word (bash gives that word its own expansion pass); typed
+# bare between two other expansions in the SAME double-quoted string, as a
+# per-field separator naturally ends up, it is not special at all and stays
+# the four literal characters `$`, `'`, `\`, `t`. A plain variable expansion
+# has no such special case, so holding the real byte here and expanding
+# "$_WATCH_TAB" is correct in every position. (Caught by this feature's own
+# first run: it silently forced every cycle, because the map it reads back
+# never actually contained a tab to split on.)
+_WATCH_TAB=$'\t'
+
+# <team> -> "<db_path><TAB><stamp_path>", resolved once per team and reused with
+# no subprocess for the rest of this process's life. Re-resolved only when the
+# safety net below forces a real check, so a store migrated mid-run (see
+# lib/storage.sh's own epoch-cache comment for the same concern) is noticed
+# within one safety-net window, not never.
+_AGMSG_WATCH_DB_PATH_MAP=""
+
+_watch_db_path_for() {   # <team> -- sets $_WATCH_DB_PATH / $_WATCH_STAMP_PATH
+  local want="$1" k v s
+  if [ -n "$_AGMSG_WATCH_DB_PATH_MAP" ]; then
+    while IFS=$'\t' read -r k v s; do
+      [ "$k" = "$want" ] || continue
+      _WATCH_DB_PATH="$v"; _WATCH_STAMP_PATH="$s"
+      return 0
+    done <<< "$_AGMSG_WATCH_DB_PATH_MAP"
+  fi
+  _WATCH_DB_PATH="$(agmsg_db_path "$want" 2>/dev/null)" || return 1
+  [ -n "$_WATCH_DB_PATH" ] || return 1
+  local enc
+  enc="$(_actas_lock_encode "$want" 2>/dev/null)" || enc="$want"
+  _WATCH_STAMP_PATH="$RUN_DIR/watch.$SESSION_ID.store-stamp.$enc"
+  _AGMSG_WATCH_DB_PATH_MAP="${_AGMSG_WATCH_DB_PATH_MAP:+$_AGMSG_WATCH_DB_PATH_MAP$'\n'}${want}${_WATCH_TAB}${_WATCH_DB_PATH}${_WATCH_TAB}${_WATCH_STAMP_PATH}"
+  return 0
+}
+
+_watch_db_path_forget() {   # <team> -- drop the cached entry so it is re-resolved
+  local drop="$1" k v s out=""
+  [ -n "$_AGMSG_WATCH_DB_PATH_MAP" ] || return 0
+  while IFS=$'\t' read -r k v s; do
+    [ -z "$k" ] && continue
+    [ "$k" = "$drop" ] && continue
+    out="${out:+$out$'\n'}$k${_WATCH_TAB}$v${_WATCH_TAB}$s"
+  done <<< "$_AGMSG_WATCH_DB_PATH_MAP"
+  _AGMSG_WATCH_DB_PATH_MAP="$out"
+}
+
+# <team> -> seconds (from $SECONDS) of the last real check, so the safety net
+# above can tell how long it has been since one actually ran.
+_AGMSG_WATCH_FORCE_AT_MAP=""
+
+_watch_safety_due() {   # <team> -- 0 (true) if a real check is due
+  local want="$1" k v
+  [ -n "$_AGMSG_WATCH_FORCE_AT_MAP" ] || return 0
+  while IFS=$'\t' read -r k v; do
+    [ "$k" = "$want" ] || continue
+    [ $((SECONDS - v)) -ge "$AGMSG_WATCH_SKIP_SAFETY_NET_SECONDS" ]
+    return $?
+  done <<< "$_AGMSG_WATCH_FORCE_AT_MAP"
+  return 0
+}
+
+_watch_safety_mark() {   # <team> -- record that a real check just ran
+  local want="$1" k v out=""
+  if [ -n "$_AGMSG_WATCH_FORCE_AT_MAP" ]; then
+    while IFS=$'\t' read -r k v; do
+      [ -z "$k" ] && continue
+      [ "$k" = "$want" ] && continue
+      out="${out:+$out$'\n'}$k${_WATCH_TAB}$v"
+    done <<< "$_AGMSG_WATCH_FORCE_AT_MAP"
+  fi
+  _AGMSG_WATCH_FORCE_AT_MAP="${out:+$out$'\n'}$want${_WATCH_TAB}$SECONDS"
+}
+
 # Self-managed renewal, for hosts that cap how long a watch may run (Claude Code's
 # Monitor kills one at 30 minutes and leaves no completion record, which piles up
 # as "background shell command tasks did not finish" on every resume).
@@ -1505,6 +1611,23 @@ EOF
       HELD_ELSEWHERE="$(_held_elsewhere_without "${pair_team}/${pair_agent}")"
       echo "agmsg watch: ${pair_team}/${pair_agent} is unheld again; serving it here." >&2
     fi
+    # #1842: skip the real store read entirely when nothing has changed since
+    # the last one. A failed or not-yet-cached path resolution, or a stamp
+    # file that does not exist yet, both fall through to the real check below
+    # (unknown -> never skip, favor running) -- the skip only ever fires on a
+    # definite, observed "unchanged".
+    _agmsg_watch_force=0
+    if _watch_safety_due "$pair_team"; then
+      _agmsg_watch_force=1
+      _watch_db_path_forget "$pair_team"
+    fi
+    if [ "$_agmsg_watch_force" -eq 0 ] \
+       && _watch_db_path_for "$pair_team" \
+       && [ -f "$_WATCH_STAMP_PATH" ] \
+       && [ ! "$_WATCH_DB_PATH" -nt "$_WATCH_STAMP_PATH" ] \
+       && [ ! "${_WATCH_DB_PATH}-wal" -nt "$_WATCH_STAMP_PATH" ]; then
+      continue
+    fi
     # Read this pair's delivery state -- its read frontier, then the messages
     # past it -- and KEEP THE STATUS separate from the output. A failed read must
     # not collapse to "" and fall into the caught-up arm below: that arm drops the
@@ -1532,6 +1655,14 @@ EOF
         "$pair_team:$pair_agent" "$(basename "$SKILL_DIR")"
       cleanup
       exit "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+    fi
+    # #1842: a real check just ran -- reset the safety-net clock and move the
+    # stamp file's mtime to now, so the NEXT cycle's `[ -nt ]` comparison
+    # above is against this moment, not a stale one. `: >` is a bash builtin
+    # redirect (truncate-or-create), not a `touch` subprocess.
+    _watch_safety_mark "$pair_team"
+    if _watch_db_path_for "$pair_team"; then
+      : > "$_WATCH_STAMP_PATH" 2>/dev/null || true
     fi
     # fix 2 (#1045): update this pair's stuck-cursor tracker (see the block comment
     # before the loop). "Pending" here means real undelivered MESSAGE rows -- not a
