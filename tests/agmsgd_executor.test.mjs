@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -71,4 +71,20 @@ test("the approximate (win32) boot id tolerates drift and never proves death by 
   const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
   assert.equal(isAlive({ pid: dead.pid, bootId: "99900" }, { plat: "win32", current: "99000" }), false, "a pid that is gone is dead");
   assert.equal(sameBoot("another-boot", "win32", "99900"), false, "a record in another form is a plain mismatch");
+});
+
+test("linux: the boot id is the kernel boot_id, and a btime record is not read as another boot", () => {
+  const uuid = "6f1c3a52-0e8b-4d7a-9a41-2b7c5d8e9f10";
+  const other = "0b7e9d34-5c21-4a6f-8d13-7e4a2c9b1f58";
+  assert.equal(sameBoot(uuid, "linux", uuid), true);
+  assert.equal(sameBoot(uuid, "linux", other), false, "two different boot ids are another boot");
+  // A record written when the id was btime seconds, which a stepped clock moves.
+  assert.equal(sameBoot("1792989040", "linux", uuid), null);
+  assert.equal(sameBoot(uuid, "linux", "1793025813"), null, "the id could not be read now: cannot tell");
+  assert.equal(sameBoot("1792989040", "linux", "1793025813"), false, "two btime values keep the plain comparison");
+  const self = currentExecutor();
+  assert.equal(isAlive({ pid: self.pid, bootId: "1792989040" }, { plat: "linux", current: uuid }), null);
+  if (process.platform === "linux" && existsSync("/proc/sys/kernel/random/boot_id")) {
+    assert.equal(bootId(), readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim());
+  }
 });
