@@ -3,8 +3,8 @@
 # lib/watch-stuck-map.sh: watch.sh runs on source, so its inline helpers could
 # only ever be exercised through a timing-dependent end-to-end test, and the
 # correctness properties here (per-pair isolation, pre-read vs. post-read
-# fingerprint timing) are exactly the kind of thing that needs a direct,
-# deterministic unit test rather than a real poll loop.
+# fingerprint timing, same-second writes) are exactly the kind of thing that
+# needs a direct, deterministic unit test rather than a real poll loop.
 #
 # What this buys: skipping storage_read_cursor_get/storage_watch_after on a
 # cycle where the local store provably has not changed since the PAIR's own
@@ -40,9 +40,7 @@
 # writes land in the -wal file and are not folded back into the main db's own
 # mtime until a checkpoint, so watching only the main file would never notice
 # a write that stays in the WAL (the #1836/#1837 lesson, reproduced here
-# rather than assumed). A non-sqlite driver has no '-wal' file; `stat` simply
-# reports that one path as absent and still prints the rest, so the
-# fingerprint still reflects the main file's own mtime+size.
+# rather than assumed).
 #
 # Safety net: a real check is forced at least once every
 # AGMSG_WATCH_SKIP_SAFETY_NET_SECONDS regardless of how long a pair has
@@ -98,34 +96,109 @@ _watch_db_path_forget() {   # <team> -- drop the cached entry so it is re-resolv
   _AGMSG_WATCH_DB_PATH_MAP="$out"
 }
 
-# One `stat` call, covering every path given, regardless of count -- the
-# platform split mirrors lib/compat.sh's own compat_file_mtime/
-# compat_file_size (mtime+size together, in one invocation, is not one of
-# their existing forms). A path that does not exist (a non-WAL driver's
-# missing '-wal' sibling, or a store not yet created) makes `stat` exit
-# nonzero and say so on stderr, suppressed here, but it still PRINTS every
-# surviving path's line first -- confirmed against both `stat` dialects --
-# so the fingerprint still reflects whichever paths are actually there.
+# --- batched, subsecond fingerprinting (#1846 review round 2) --------------
 #
-# Flattened to one line (internal newlines -> '|', a pure bash parameter
-# expansion, no extra fork): every map in this file separates its records by
-# newline, so a multi-path fingerprint's own newlines -- one per stat'd
-# path -- would otherwise be indistinguishable from a second map record and
-# silently truncate this value to its first line (caught by this feature's
-# own first run: the '-wal' path's line vanished from the armed value,
-# comparing clean against a fingerprint that never carried it).
-_watch_fingerprint() {   # <path> [<path> ...] -- prints the fingerprint
+# Two defects found against the first version of this file:
+#
+# 1. `stat -f '%m'` (macOS) / `stat -c '%Y'` (GNU) truncate to whole SECONDS.
+#    A same-second, same-size overwrite is then INDISTINGUISHABLE from no
+#    write at all -- reproduced independently by both reviewers against a
+#    real store. Fixed by asking for subsecond precision (`%Fm` / `%.9Y`,
+#    confirmed to actually return it on both dialects) -- but a filesystem
+#    that genuinely only has second resolution would still collide, so
+#    _WATCH_FP_SUBSECOND_CONFIRMED tracks whether ANY fingerprint this
+#    process has taken so far actually carried a nonzero fractional part.
+#    Until one does, callers must treat an mtime that reads as "now" (within
+#    one second, checked with a single `date +%s` -- the one fork this whole
+#    design otherwise avoids, paid only in this narrow, increasingly rare
+#    fallback) as too close to call and refuse to arm on it.
+#
+# 2. One `stat` invocation per PAIR per cycle still scales with how many
+#    pairs a broad watcher serves, which is most of what a real report's gap
+#    from this measurement turned out to be. `_watch_fingerprint_batch` asks
+#    for every distinct path ACROSS EVERY PAIR this cycle serves in ONE
+#    call; `_watch_fingerprint_lookup`/`_watch_pair_fingerprint` then read
+#    back out of that single result with no further subprocess at all.
+_WATCH_FP_SUBSECOND_CONFIRMED=0
+
+# <path> -> "<mtime> <size>", rebuilt fresh every cycle by
+# _watch_fingerprint_batch (never carried over -- a stale entry would be
+# exactly the kind of "looks unchanged" false negative this feature exists
+# to avoid).
+_AGMSG_WATCH_PATH_FP=""
+
+_watch_fingerprint_batch() {   # <path> [<path> ...] -- one `stat` call
+  _AGMSG_WATCH_PATH_FP=""
+  [ $# -gt 0 ] || return 0
   _agmsg_detect_platform
-  local out
+  local out rc=0
   case "$_agmsg_platform" in
-    macos) out="$(stat -f '%m %z %N' "$@" 2>/dev/null)" ;;
-    *)     out="$(stat -c '%Y %s %n' "$@" 2>/dev/null)" ;;
+    macos) out="$(stat -f '%Fm %z %N' "$@" 2>/dev/null)" ;;
+    *)     out="$(stat -c '%.9Y %s %n' "$@" 2>/dev/null)" ;;
   esac
-  printf '%s' "${out//$'\n'/|}"
+  rc=$?
+  local line mt rest sz
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    mt="${line%% *}"; rest="${line#* }"
+    sz="${rest%% *}"; rest="${rest#* }"
+    # rest is now the path (may itself contain spaces; everything after the
+    # first two fields belongs to it, per the `%N`/`%n` format above).
+    _AGMSG_WATCH_PATH_FP="${_AGMSG_WATCH_PATH_FP:+$_AGMSG_WATCH_PATH_FP$'\n'}${rest}${_WATCH_TAB}${mt} ${sz}"
+    case "$mt" in *.*[1-9]*) _WATCH_FP_SUBSECOND_CONFIRMED=1 ;; esac
+  done <<< "$out"
+  return "$rc"
+}
+
+_watch_fingerprint_lookup() {   # <path> -- sets $_WATCH_PATH_FP, rc 1 if absent from the last batch
+  local want="$1" k v
+  [ -n "$_AGMSG_WATCH_PATH_FP" ] || return 1
+  while IFS=$'\t' read -r k v; do
+    [ "$k" = "$want" ] || continue
+    _WATCH_PATH_FP="$v"
+    return 0
+  done <<< "$_AGMSG_WATCH_PATH_FP"
+  return 1
+}
+
+# <db_path> <wal_path> -- sets $_WATCH_FP from the current batch. rc 1
+# (unknown -- never skip, never arm) when the db's own line is missing
+# (a real stat failure: permission, a vanished file past the caller's own
+# existence check) or when the wal path EXISTS on disk but its line is
+# missing too (exists-but-unreadable, never confused with the ordinary
+# "no -wal sibling" case, which this checks with `[ -e ]` -- a builtin, no
+# fork -- rather than trusting an absent stat line to mean "absent").
+_watch_pair_fingerprint() {
+  local db="$1" wal="$2" db_fp wal_fp
+  _watch_fingerprint_lookup "$db" || return 1
+  db_fp="$_WATCH_PATH_FP"
+  if [ -e "$wal" ]; then
+    _watch_fingerprint_lookup "$wal" || return 1
+    wal_fp="$_WATCH_PATH_FP"
+  else
+    wal_fp="absent"
+  fi
+  _WATCH_FP="${db_fp}|${wal_fp}"
   return 0
 }
 
-# <team:agent> -> the fingerprint (see _watch_fingerprint) this pair's
+# True (rc 0) when <fingerprint>'s own mtime is too close to "now" to trust
+# as a stable, confirmed-unchanged value -- ONLY meaningful, and only ever
+# called, while _WATCH_FP_SUBSECOND_CONFIRMED is still 0. The one `date +%s`
+# fork in this whole file: paid only in that fallback, which real
+# filesystems leave almost as soon as this process takes its first
+# fingerprint at all.
+_watch_fp_too_recent() {   # <fingerprint> (the db field, "<mtime> <size>|...")
+  local fp="$1" mt now
+  mt="${fp%% *}"
+  mt="${mt%%.*}"
+  case "$mt" in ''|*[!0-9]*) return 0 ;; esac
+  now="$(date +%s 2>/dev/null)" || return 0
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  [ $((now - mt)) -le 1 ]
+}
+
+# <team:agent> -> the fingerprint (see _watch_pair_fingerprint) this pair's
 # checkpoint was armed with.
 _AGMSG_WATCH_ARMED_FP=""
 

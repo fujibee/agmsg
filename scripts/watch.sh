@@ -1370,6 +1370,33 @@ while true; do
     watch_log "session $SESSION_ID is no longer alive; stopping."
     exit 0
   fi
+  # #1842 review round 2: one `stat` for every pair's idle-skip paths this
+  # cycle, not one per pair -- a per-pair call scales with how many pairs a
+  # broad subscription serves, which measurement showed dominates the gap
+  # against a real multi-member report far more than the two sqlite3 calls
+  # this feature actually set out to remove. Teams are deduped (their
+  # db/db-wal paths are shared by every agent in them); a team whose path
+  # cannot be resolved yet (its safety net never fired, so
+  # _watch_db_path_for has nothing cached) simply contributes nothing to
+  # this batch -- every pair of that team then takes the unknown-never-skip
+  # fallback below, exactly as if this cycle's batch had failed outright.
+  _agmsg_watch_batch_paths=()
+  _agmsg_watch_batch_seen_teams=""
+  while IFS=$'\t' read -r _agmsg_wbt _agmsg_wba; do
+    [ -z "$_agmsg_wbt" ] && continue
+    case "$_agmsg_watch_batch_seen_teams" in
+      *" $_agmsg_wbt "*) continue ;;
+    esac
+    _agmsg_watch_batch_seen_teams="$_agmsg_watch_batch_seen_teams $_agmsg_wbt "
+    _watch_db_path_for "$_agmsg_wbt" || continue
+    _agmsg_watch_batch_paths+=("$_WATCH_DB_PATH")
+    [ -e "${_WATCH_DB_PATH}-wal" ] && _agmsg_watch_batch_paths+=("${_WATCH_DB_PATH}-wal")
+  done <<< "$PAIRS"
+  if [ "${#_agmsg_watch_batch_paths[@]}" -gt 0 ]; then
+    _watch_fingerprint_batch "${_agmsg_watch_batch_paths[@]}"
+  else
+    _AGMSG_WATCH_PATH_FP=""
+  fi
   while IFS=$'\t' read -r pair_team pair_agent; do
     [ -z "$pair_team" ] && continue
     # Warm both per-cycle caches as PLAIN STATEMENTS, never via $(...): a
@@ -1528,8 +1555,8 @@ EOF
       _watch_db_path_forget "$pair_team"
     fi
     _WATCH_FP_BEFORE=""
-    if _watch_db_path_for "$pair_team"; then
-      _WATCH_FP_BEFORE="$(_watch_fingerprint "$_WATCH_DB_PATH" "${_WATCH_DB_PATH}-wal")"
+    if _watch_db_path_for "$pair_team" && _watch_pair_fingerprint "$_WATCH_DB_PATH" "${_WATCH_DB_PATH}-wal"; then
+      _WATCH_FP_BEFORE="$_WATCH_FP"
     fi
     if [ "$_agmsg_watch_force" -eq 0 ] \
        && [ -n "$_WATCH_FP_BEFORE" ] \
@@ -1622,7 +1649,16 @@ EOF
         # for why pre-read, not post-read), so a write landing anywhere from
         # that moment on, including mid-read, is caught by a later cycle's
         # fresh comparison rather than silently folded into "unchanged".
-        if [ -n "$_WATCH_FP_BEFORE" ]; then
+        #
+        # Unless subsecond precision has never actually been confirmed on
+        # this filesystem/stat combination (review round 2): a same-second,
+        # same-size overwrite is then indistinguishable from no write at
+        # all, so arming on an mtime that reads as "now" would risk hiding
+        # exactly that write for up to the 60s safety net. Refuse to arm in
+        # that narrow case instead -- the pair simply tries again next
+        # cycle, same as any other "unknown" outcome.
+        if [ -n "$_WATCH_FP_BEFORE" ] \
+           && { [ "$_WATCH_FP_SUBSECOND_CONFIRMED" -eq 1 ] || ! _watch_fp_too_recent "$_WATCH_FP_BEFORE"; }; then
           _watch_armed_fp_set "$_agmsg_pair_key" "$_WATCH_FP_BEFORE"
         else
           _watch_armed_fp_drop "$_agmsg_pair_key"
