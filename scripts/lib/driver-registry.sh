@@ -37,9 +37,23 @@ if ! declare -F agmsg_plugin_cmd >/dev/null 2>&1; then
   source "$_AGMSG_DRIVER_LIB_DIR/plugin-cmd.sh"
 fi
 
-# <skill-root> = up two from scripts/lib/.
+# <skill-root> = up two from scripts/lib/. Memoized for the life of the
+# process (#1849): this path cannot change for as long as this process
+# runs (it is this install's own on-disk location), so a long-lived caller
+# -- watch.sh's poll loop, calling this several times per cycle through
+# agmsg_driver_for_team/agmsg_ext_tool_dir -- pays the `cd`+`pwd` fork
+# exactly once instead of every single call. A one-shot script still pays
+# it once, same as before; this only removes REPEAT payments within one
+# process.
+_AGMSG_DRIVER_ROOT_CACHE=""
 _agmsg_driver_root() {
-  cd "$_AGMSG_DRIVER_LIB_DIR/../.." 2>/dev/null && pwd
+  if [ -n "$_AGMSG_DRIVER_ROOT_CACHE" ]; then
+    printf '%s\n' "$_AGMSG_DRIVER_ROOT_CACHE"
+    return 0
+  fi
+  _AGMSG_DRIVER_ROOT_CACHE="$(cd "$_AGMSG_DRIVER_LIB_DIR/../.." 2>/dev/null && pwd)" || return 1
+  [ -n "$_AGMSG_DRIVER_ROOT_CACHE" ] || return 1
+  printf '%s\n' "$_AGMSG_DRIVER_ROOT_CACHE"
 }
 
 # Echo the search bases as "<kind>\t<dir>" lines, in priority order. <kind> is
@@ -137,6 +151,126 @@ agmsg_driver_for_team() {
     "SELECT COALESCE(json_extract(readfile('$(agmsg_sql_readfile_path "$cfg")'), '\$.drivers.$axis'), '')" \
     2>/dev/null | tr -d '\r')"
   case "$name" in ''|null) printf '%s\n' "$default" ;; *) printf '%s\n' "$name" ;; esac
+}
+
+# Same resolution and default-fallback behavior as agmsg_driver_for_team
+# above (#1849), plus $_AGMSG_DRIVER_CONFIRMED: 1 when THIS call's own
+# read of config.json and parse of its JSON definitively succeeded --
+# whether that found a real configured value or confirmed the key is
+# legitimately unset (a team with no `drivers.<axis>` key at all is
+# correctly defaulting, not failing) -- 0 when it could not tell (the
+# file could not be read, or its content could not be parsed as JSON).
+#
+# agmsg_driver_for_team's own ordinary contract has no way to tell these
+# apart: it swallows every failure into the same <default> an ordinary,
+# legitimate default produces, which is exactly right for its existing
+# callers (never stop delivery over a config hiccup) but wrong for a
+# caller deciding whether to CACHE the answer -- a cached fallback from a
+# transient read/parse failure would keep returning that fallback long
+# after the failure passed, since nothing about the file's own mtime/size
+# changes when only the ability to read it does (confirmed directly: a
+# chmod 000 file still `stat`s fine). This is a separate function, not a
+# new argument/output mode on agmsg_driver_for_team itself, so every
+# existing caller's behavior is completely unchanged.
+# Sets $_AGMSG_DRIVER_RESOLVED_NAME and $_AGMSG_DRIVER_CONFIRMED in the
+# CALLER's shell -- this must be invoked as a PLAIN STATEMENT, never via
+# $(...): a command substitution runs the function body in a subshell,
+# and a global written there is discarded the instant that subshell exits
+# (the exact hazard _agmsg_driver_root's own cache, and watch.sh's
+# "plain-statement warm" calls throughout this codebase, exist to avoid --
+# caught here in review before it shipped: an earlier version of this
+# function printed its result for a `name="$(...)"` caller to capture,
+# which made $_AGMSG_DRIVER_CONFIRMED unreadable in the caller's own shell
+# by construction, not merely by omission).
+agmsg_driver_for_team_confirmed() {   # <axis> <team> <default>
+  local axis="$1" team="$2" default="$3"
+  _AGMSG_DRIVER_RESOLVED_NAME="$default"
+  _AGMSG_DRIVER_CONFIRMED=0
+  case "$axis" in *[!a-z-]*|'') return 0 ;; esac
+  local root cfg rf out rc=0 status raw
+  root="$(_agmsg_driver_root)" || return 0
+  cfg="$root/teams/$team/config.json"
+  [ -f "$cfg" ] || return 0
+  rf="$(agmsg_sql_readfile_path "$cfg")"
+  # TWO separate statements, each its own LINE of output, rather than one
+  # row with an in-band separator byte (review round 6: a `char(31)`
+  # field separator depends on sqlite3's `-escape off` actually being in
+  # effect; if the ONE-TIME probe for that (`agmsg_sqlite_warm`) happens
+  # to hit a transient failure itself -- the exact class of failure this
+  # whole function exists to tolerate -- its negative result is memoized
+  # for the rest of the process, every later separator comes back
+  # caret-escaped into the two literal characters "^_", and naive field
+  # splitting on a BYTE THAT IS NO LONGER THERE silently returns the
+  # whole corrupted string as if it were the real value, confirmed red
+  # with sqlite3's own real escaping behavior and a cold probe). Line 1
+  # is a FIXED ASCII status word, never escape-sensitive and never
+  # dependent on any probe; line 2 is the raw extracted value, exactly as
+  # agmsg_driver_for_team's own query returns it -- including whatever
+  # its own COALESCE-to-empty-string already does for a genuinely
+  # absent/null key, so the two functions read the identical byte stream
+  # for "no explicit value" and the normalization below can match
+  # agmsg_driver_for_team's own rule exactly instead of inventing a
+  # second one. Malformed JSON makes the SECOND statement's own
+  # json_extract raise an error -- sqlite3 exits non-zero with nothing
+  # useful on stdout, caught below by the rc check.
+  #
+  # `|| rc=$?`, not a bare assignment: a caller running under `set -e`
+  # (bats own test bodies do) would otherwise have THIS statement's own
+  # failure abort the whole function the instant sqlite3 exits non-zero,
+  # before the rc/output checks below ever run -- caught by this
+  # function's own malformed-JSON regression test, which exercises
+  # exactly that exit code.
+  # Line 2 is prefixed with a fixed, non-empty marker ("v:") rather than
+  # printing the bare extracted value: command substitution strips ALL
+  # trailing newlines from sqlite3's output, and when the extracted value
+  # is itself empty (the ordinary "no explicit value" case), the raw
+  # output is "ok\n\n" -- EVERY trailing newline, including the one that
+  # separates the two lines, gets stripped down to a bare "ok" with no
+  # separator left at all (caught by this function's own no-drivers-key
+  # test, which this exact scenario reproduces). The marker guarantees a
+  # non-newline byte always follows the separator, so only sqlite3's own
+  # single final newline is ever trailing.
+  # Both lines are derived from the SAME readfile() call, read once into a
+  # TEMP TABLE, rather than two independent SELECTs each calling readfile()
+  # on its own (review round 7: reproduced a torn read -- the first
+  # readfile() call succeeding and the second, independent one returning
+  # NULL a moment later -- which still produced a well-formed "ok\nv:shared"
+  # line pair, confirming the stale per-team fingerprint's own fallback
+  # value as if it had been freshly, successfully resolved). Reading once
+  # and branching on that single stored result means the status word and
+  # the value can never disagree about what was actually read.
+  rc=0
+  out="$(sqlite3 :memory: \
+    "CREATE TEMP TABLE r AS SELECT readfile('$rf') AS c;
+     SELECT CASE WHEN c IS NULL THEN 'fail' ELSE 'ok' END FROM r;
+     SELECT 'v:' || COALESCE(json_extract(c, '\$.drivers.$axis'), '') FROM r;" \
+    2>/dev/null)" || rc=$?
+  out="${out//$'\r'/}"
+  [ "$rc" -eq 0 ] || return 0
+  # Both the exact status word AND a real newline separating it from the
+  # value, followed by the "v:" marker, are required before trusting ANY
+  # of this as a confirmed resolution (review round 6's own ask: never
+  # adopt malformed output as a confirmed name). Truncated or otherwise
+  # unexpected output -- no second line at all, an unrecognized first
+  # line, a second line missing its marker -- is "could not tell", the
+  # same as a read failure, and falls through to the ordinary,
+  # never-cached default below.
+  case "$out" in
+    ok$'\n'v:*) status=ok ;;
+    fail$'\n'v:*) status=fail ;;
+    *) return 0 ;;
+  esac
+  [ "$status" = fail ] && return 0
+  raw="${out#*$'\n'v:}"
+  _AGMSG_DRIVER_CONFIRMED=1
+  # Identical normalization to agmsg_driver_for_team's own
+  # `case "$name" in ''|null) ... esac` -- an empty extraction (the key is
+  # absent, or JSON null) AND the literal string "null" (review round 5:
+  # a config holding that string, which the old function has always
+  # treated as "unset", must resolve the same way here, or a
+  # previously-working config starts failing to find a driver file named
+  # literally "null").
+  case "$raw" in ''|null) ;; *) _AGMSG_DRIVER_RESOLVED_NAME="$raw" ;; esac
 }
 
 # ext-tools go through the same bases as every other axis: a built-in tool is

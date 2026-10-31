@@ -176,7 +176,74 @@ _AGMSG_PARTITION_LOADED=""
 _AGMSG_PARTITION_TEAM_KEYS=()
 _AGMSG_PARTITION_TEAM_VALS=()
 _AGMSG_PARTITION_TEAM_EPOCH=()
+# team -> the config.json fingerprint (mtime+size) that was current the
+# last time this team's name was ACTUALLY resolved via agmsg_driver_for_team
+# (#1849), and the $SECONDS reading from that same moment. Unlike
+# _AGMSG_PARTITION_TEAM_EPOCH, these are never reset just because a new poll
+# cycle started -- they stay valid across cycles, UNTIL the config file
+# changes or the safety net below expires them. #1330's own reasoning for
+# re-reading every cycle was to notice migrate-team-store.sh's mid-run
+# switch "on the very next poll" -- and that switch is exactly a write to
+# this team's config.json (confirmed by reading migrate-team-store.sh
+# itself, which writes the new `drivers.partition` value through
+# agmsg_write_atomic), so comparing THIS file's own fingerprint keeps that
+# same one-poll bound without re-deriving the name from scratch every
+# single cycle regardless of whether anything happened.
+#
+# Trusted ONLY when the fingerprint's own mtime carries a confirmed nonzero
+# fractional part (review round 1: a filesystem/stat combination that only
+# reports whole seconds can produce the identical fingerprint for two
+# genuinely different writes landing in the same second at the same final
+# size -- there is no bound on how long such a collision could otherwise be
+# trusted, unlike #1846's own "within the last second" tolerance, because an
+# entry here can live for many cycles, not just the one right after it was
+# taken). A coarse mtime is never cached at all and every call for that team
+# re-resolves for real -- see _agmsg_partition_cfg_fingerprint.
+#
+# Bounded ALSO by AGMSG_PARTITION_CFG_SAFETY_NET_SECONDS regardless of
+# precision, the same defense-in-depth #1846 already applies to its own
+# idle-skip checkpoint, so nothing here is ever trusted indefinitely.
+#
+# Review round 1's own reproduction: a resolution that could not get a
+# fingerprint AT ALL (config transiently unreadable) must not leave a STALE
+# fingerprint/age pair in place from an earlier successful resolution --
+# resolving on THAT stale pair's match later, once the config becomes
+# readable again, would wrongly reuse whatever fallback name the transient
+# failure produced instead of ever re-deriving the real one. So every
+# resolution that does NOT get a fresh, trustworthy fingerprint this call
+# EXPLICITLY clears any previously cached one for that team (see the
+# unset calls below) rather than leaving it to be matched against later.
+_AGMSG_PARTITION_TEAM_CFGFP=()
+_AGMSG_PARTITION_TEAM_CFGFP_AT=()
 _AGMSG_PARTITION_TEAM_MAX=64
+AGMSG_PARTITION_CFG_SAFETY_NET_SECONDS=60
+
+# <team> -- prints "<fingerprint>\t<has_subsecond>" for its config.json, or
+# nothing (both fields empty) if it cannot be resolved/stat'd. One `stat`
+# call. The subsecond judgment looks ONLY at the mtime field's own
+# fractional part (review round 3: an earlier version matched against the
+# whole "<mtime> <size>" fingerprint string, so a non-zero SIZE digit --
+# "100.000000000 42", a perfectly coarse mtime next to an ordinary size --
+# was wrongly read as confirmed subsecond precision). Judged on this ONE
+# reading alone, never latched across teams or calls (the same lesson
+# #1846 round 3 already learned for its own fingerprint).
+_agmsg_partition_cfg_fingerprint() {   # <team>
+  local team="$1" root path fp="" mtime sub=0
+  declare -F _agmsg_driver_root >/dev/null 2>&1 || return 0
+  root="$(_agmsg_driver_root 2>/dev/null)" || return 0
+  [ -n "$root" ] || return 0
+  path="$root/teams/$team/config.json"
+  [ -f "$path" ] || return 0
+  _agmsg_detect_platform
+  case "$_agmsg_platform" in
+    macos) fp="$(stat -f '%Fm %z' "$path" 2>/dev/null)" ;;
+    *)     fp="$(stat -c '%.9Y %s' "$path" 2>/dev/null)" ;;
+  esac
+  [ -n "$fp" ] || return 0
+  mtime="${fp%% *}"
+  case "$mtime" in *.*[1-9]*) sub=1 ;; esac
+  printf '%s\t%s\n' "$fp" "$sub"
+}
 _agmsg_partition_load() {
   # The registry may not be sourced yet — agmsg_db_path is reachable without
   # going through agmsg_storage_load. Same guarded pull-in that uses.
@@ -185,6 +252,14 @@ _agmsg_partition_load() {
     _lib="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
     # shellcheck disable=SC1091
     [ -n "$_lib" ] && . "$_lib/driver-registry.sh"
+  fi
+  # Plain statement, not $(...): warms _agmsg_driver_root's own
+  # process-lifetime cache (#1849) so the config-fingerprint check below,
+  # and every other driver-registry caller for the rest of this process,
+  # stop paying its `cd`+`pwd` fork on every single call. Same reasoning,
+  # same pattern, as agmsg_storage_dir's own warm call in watch.sh.
+  if declare -F _agmsg_driver_root >/dev/null 2>&1; then
+    _agmsg_driver_root >/dev/null 2>&1
   fi
   local name team="$1" _i _n _slot=-1
   _n=${#_AGMSG_PARTITION_TEAM_KEYS[@]}
@@ -209,14 +284,76 @@ _agmsg_partition_load() {
     fi
   done
   if [ -z "$name" ]; then
-    name="$(agmsg_driver_for_team partition "$team" shared)"
+    # #1849: before forking agmsg_driver_for_team's own sqlite3 lookup,
+    # check whether this team's config.json has changed since the LAST
+    # time that lookup actually ran for it. A fingerprint match reuses the
+    # name from that earlier resolution (which may be from a previous
+    # cycle, not just this one -- see the arrays' own comment for why
+    # that is still correct) -- but ONLY when that fingerprint carries
+    # confirmed subsecond precision AND is still within the safety-net
+    # window; see _agmsg_partition_cfg_fingerprint and the arrays' own
+    # comment for both reasons. Any other outcome (coarse mtime, expired
+    # safety net, unresolvable/unreadable config) falls through to the
+    # real lookup below.
+    local _cfg_rd _cfg_fp="" _cfg_sub=0 _cfg_now="$SECONDS" _cache_hit=0
+    _cfg_rd="$(_agmsg_partition_cfg_fingerprint "$team")"
+    if [ -n "$_cfg_rd" ]; then
+      _cfg_fp="${_cfg_rd%%$'\t'*}"
+      _cfg_sub="${_cfg_rd##*$'\t'}"
+    fi
+    if [ "$_cfg_sub" = 1 ] && [ -n "$_cfg_fp" ] && [ "$_slot" -ge 0 ] \
+       && [ "$_cfg_fp" = "${_AGMSG_PARTITION_TEAM_CFGFP[$_slot]:-}" ] \
+       && [ -n "${_AGMSG_PARTITION_TEAM_VALS[$_slot]:-}" ] \
+       && [ -n "${_AGMSG_PARTITION_TEAM_CFGFP_AT[$_slot]:-}" ] \
+       && [ $((_cfg_now - _AGMSG_PARTITION_TEAM_CFGFP_AT[$_slot])) -lt "$AGMSG_PARTITION_CFG_SAFETY_NET_SECONDS" ]; then
+      _cache_hit=1
+      name="${_AGMSG_PARTITION_TEAM_VALS[$_slot]}"
+    else
+      # #1849 review round 4: NOT agmsg_driver_for_team -- that function's
+      # own contract swallows a read/parse failure into the very same
+      # <default> a legitimate, intentionally-unconfigured team produces,
+      # which a caller deciding whether to CACHE the answer cannot tell
+      # apart from outside (a `stat` success, or even this process's own
+      # separate ability to read the file's bytes a moment earlier, both
+      # proved true in exactly that failure case too -- confirmed
+      # directly). agmsg_driver_for_team_confirmed does the identical
+      # resolution and sets $_AGMSG_DRIVER_CONFIRMED to say whether this
+      # read+parse actually succeeded, so caching can be gated on THAT
+      # fact instead of inferring it from a side channel.
+      #
+      # Called as a PLAIN STATEMENT, not $(...) -- see that function's own
+      # comment for why a command substitution here would silently lose
+      # $_AGMSG_DRIVER_CONFIRMED the instant it set it.
+      agmsg_driver_for_team_confirmed partition "$team" shared
+      name="$_AGMSG_DRIVER_RESOLVED_NAME"
+    fi
     if [ "$_slot" -ge 0 ]; then
       _AGMSG_PARTITION_TEAM_VALS[$_slot]="$name"
       _AGMSG_PARTITION_TEAM_EPOCH[$_slot]="$_AGMSG_POLL_CYCLE_EPOCH"
+      if [ "$_cache_hit" -eq 0 ]; then
+        # A fresh (non-cached) resolution. Record the new fingerprint only
+        # if THIS call's resolution was itself confirmed. Otherwise
+        # explicitly drop whatever was cached before (review round 1:
+        # leaving a STALE fingerprint/age pair in place here is what let a
+        # later, genuinely successful read match against it and wrongly
+        # reuse the name a transient failure had just produced, instead
+        # of ever re-deriving the real one).
+        if [ "$_cfg_sub" = 1 ] && [ -n "$_cfg_fp" ] && [ "${_AGMSG_DRIVER_CONFIRMED:-0}" = 1 ]; then
+          _AGMSG_PARTITION_TEAM_CFGFP[$_slot]="$_cfg_fp"
+          _AGMSG_PARTITION_TEAM_CFGFP_AT[$_slot]="$_cfg_now"
+        else
+          unset "_AGMSG_PARTITION_TEAM_CFGFP[$_slot]"
+          unset "_AGMSG_PARTITION_TEAM_CFGFP_AT[$_slot]"
+        fi
+      fi
     elif [ "$_n" -lt "$_AGMSG_PARTITION_TEAM_MAX" ]; then
       _AGMSG_PARTITION_TEAM_KEYS[$_n]="$team"
       _AGMSG_PARTITION_TEAM_VALS[$_n]="$name"
       _AGMSG_PARTITION_TEAM_EPOCH[$_n]="$_AGMSG_POLL_CYCLE_EPOCH"
+      if [ "$_cfg_sub" = 1 ] && [ -n "$_cfg_fp" ] && [ "$_cache_hit" -eq 0 ] && [ "${_AGMSG_DRIVER_CONFIRMED:-0}" = 1 ]; then
+        _AGMSG_PARTITION_TEAM_CFGFP[$_n]="$_cfg_fp"
+        _AGMSG_PARTITION_TEAM_CFGFP_AT[$_n]="$_cfg_now"
+      fi
     fi
   fi
   [ "$name" = "$_AGMSG_PARTITION_LOADED" ] && return 0
