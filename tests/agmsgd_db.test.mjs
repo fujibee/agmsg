@@ -21,6 +21,8 @@ test("openInstallDb applies the schema idempotently; readOnly never migrates or 
     );
     // Simulate rc.1 without the additive Codex executable column.
     db.exec("ALTER TABLE meta DROP COLUMN codex_path; UPDATE meta SET node_path='/saved/node'");
+    // And a record from before the executor's PID namespace was kept.
+    db.exec("ALTER TABLE daemon_owner DROP COLUMN executor_pid_ns");
     db.close();
 
     // Re-opening (a second component, or a restart) must not add rows or
@@ -29,6 +31,7 @@ test("openInstallDb applies the schema idempotently; readOnly never migrates or 
     assert.equal(db2.prepare("SELECT count(*) AS n FROM daemon_owner").get().n, 1);
     assert.equal(db2.prepare("SELECT node_path, codex_path FROM meta").get().node_path, '/saved/node');
     assert.equal(db2.prepare("SELECT codex_path FROM meta").get().codex_path, null);
+    assert.equal(db2.prepare("SELECT executor_pid_ns FROM daemon_owner").get().executor_pid_ns, null, "the column is added empty");
     db2.close();
 
     // A readOnly open of a DB that was never created must not create it

@@ -247,7 +247,7 @@ WRAPPER
   local boot
   case "$(uname -s)" in
     Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
-    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
     *) skip 'POSIX beta executor evidence' ;;
   esac
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
@@ -307,7 +307,7 @@ WRAPPER
   local boot node
   case "$(uname -s)" in
     Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
-    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
     *) skip 'POSIX beta executor evidence' ;;
   esac
   node="$(command -v node)"
