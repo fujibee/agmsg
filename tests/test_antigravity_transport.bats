@@ -232,7 +232,10 @@ PY
     > "$run_dir/antigravity-reservation.legacy-missing.json"
   printf '{"type":null,"state":"%s/missing-invalid.json"}\n' "$run_dir" \
     > "$run_dir/antigravity-reservation.legacy-invalid.json"
-  printf '{"type":"antigravity","pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$$" "$state" \
+  # Like a real reservation, name the violations sidecar: without it the guard
+  # below has nowhere legitimate to record its refusal.
+  printf '{"type":"antigravity","pid":%s,"start":"x","state":"%s","kind":"tui-pty","violations":"%s"}\n' \
+    "$$" "$state" "$run_dir/read-reservation.fixture__worker.json.violations" \
     > "$run_dir/read-reservation.fixture__worker.json"
 
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
@@ -244,9 +247,30 @@ PY
   # failure is now distinguished from an unsupported host.
   # read the same whether the check failed or could never run on this host, and
   # the operator's next move differs. Exit 13 is left alone; callers branch on it.
-  run node "$SCRIPTS/drivers/types/antigravity/bridge-read-guard.mjs" check "$run_dir/read-reservation.fixture__worker.json" 1 fixture worker
+  run node "$SCRIPTS/drivers/types/antigravity/bridge-read-guard.mjs" check "$run_dir/read-reservation.fixture__worker.json" 1 fixture worker </dev/null
   [ "$status" -eq 13 ]
   refute grep -q 'unsupported' <<<"$output"
+}
+
+@test "the mjs read-guard: a reservation without an absolute violations path refuses and writes nothing" {
+  # The refusal path appends to reservation.violations (and locks it). A
+  # reservation that omits it, or names a relative path, used to make the guard
+  # write `undefined` / `undefined.lock` into whatever directory it ran from.
+  local run_dir="$TEST_SKILL_DIR/run"
+  local state="$run_dir/antigravity-noviol.state.json"
+  local cwd="$BATS_TEST_TMPDIR/guard-cwd"
+  mkdir -p "$cwd"
+  printf '{"project":"%s","team":"fixture","role":"worker"}\n' "$PROJ" > "$state"
+  local body
+  for body in \
+    "{\"type\":\"antigravity\",\"pid\":$$,\"start\":\"x\",\"state\":\"$state\"}" \
+    "{\"type\":\"antigravity\",\"pid\":$$,\"start\":\"x\",\"state\":\"$state\",\"violations\":\"rel.violations\"}"; do
+    printf '%s\n' "$body" > "$run_dir/read-reservation.noviol.json"
+    run bash -c 'cd "$1" && node "$2" check "$3" 1 fixture worker </dev/null' _ \
+      "$cwd" "$SCRIPTS/drivers/types/antigravity/bridge-read-guard.mjs" "$run_dir/read-reservation.noviol.json"
+    [ "$status" -eq 13 ]
+    [ -z "$(ls -A "$cwd")" ]
+  done
 }
 
 @test "the mjs read-guard: an unreadable process identity refuses with a reason" {
