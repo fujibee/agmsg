@@ -153,6 +153,73 @@ agmsg_driver_for_team() {
   case "$name" in ''|null) printf '%s\n' "$default" ;; *) printf '%s\n' "$name" ;; esac
 }
 
+# Same resolution and default-fallback behavior as agmsg_driver_for_team
+# above (#1849), plus $_AGMSG_DRIVER_CONFIRMED: 1 when THIS call's own
+# read of config.json and parse of its JSON definitively succeeded --
+# whether that found a real configured value or confirmed the key is
+# legitimately unset (a team with no `drivers.<axis>` key at all is
+# correctly defaulting, not failing) -- 0 when it could not tell (the
+# file could not be read, or its content could not be parsed as JSON).
+#
+# agmsg_driver_for_team's own ordinary contract has no way to tell these
+# apart: it swallows every failure into the same <default> an ordinary,
+# legitimate default produces, which is exactly right for its existing
+# callers (never stop delivery over a config hiccup) but wrong for a
+# caller deciding whether to CACHE the answer -- a cached fallback from a
+# transient read/parse failure would keep returning that fallback long
+# after the failure passed, since nothing about the file's own mtime/size
+# changes when only the ability to read it does (confirmed directly: a
+# chmod 000 file still `stat`s fine). This is a separate function, not a
+# new argument/output mode on agmsg_driver_for_team itself, so every
+# existing caller's behavior is completely unchanged.
+# Sets $_AGMSG_DRIVER_RESOLVED_NAME and $_AGMSG_DRIVER_CONFIRMED in the
+# CALLER's shell -- this must be invoked as a PLAIN STATEMENT, never via
+# $(...): a command substitution runs the function body in a subshell,
+# and a global written there is discarded the instant that subshell exits
+# (the exact hazard _agmsg_driver_root's own cache, and watch.sh's
+# "plain-statement warm" calls throughout this codebase, exist to avoid --
+# caught here in review before it shipped: an earlier version of this
+# function printed its result for a `name="$(...)"` caller to capture,
+# which made $_AGMSG_DRIVER_CONFIRMED unreadable in the caller's own shell
+# by construction, not merely by omission).
+agmsg_driver_for_team_confirmed() {   # <axis> <team> <default>
+  local axis="$1" team="$2" default="$3"
+  _AGMSG_DRIVER_RESOLVED_NAME="$default"
+  _AGMSG_DRIVER_CONFIRMED=0
+  case "$axis" in *[!a-z-]*|'') return 0 ;; esac
+  local root cfg rf out rc=0
+  root="$(_agmsg_driver_root)" || return 0
+  cfg="$root/teams/$team/config.json"
+  [ -f "$cfg" ] || return 0
+  rf="$(agmsg_sql_readfile_path "$cfg")"
+  # One statement, three distinguishable outcomes: the read itself failed
+  # (readfile() -> NULL -- permissions, I/O), the read succeeded but the
+  # key is genuinely absent/null (a legitimate default), or a real value.
+  # Malformed JSON makes json_extract itself raise an error -- sqlite3
+  # exits non-zero with nothing useful on stdout, caught below by the rc
+  # check rather than needing its own branch in the SQL.
+  # `|| rc=$?`, not a bare assignment: a caller running under `set -e`
+  # (bats own test bodies do) would otherwise have THIS statement's own
+  # failure abort the whole function the instant sqlite3 exits non-zero,
+  # before the rc/output checks below ever run -- caught by this
+  # function's own malformed-JSON regression test, which exercises
+  # exactly that exit code.
+  rc=0
+  out="$(sqlite3 :memory: \
+    "SELECT CASE WHEN readfile('$rf') IS NULL THEN '__AGMSG_READFAIL__'
+            ELSE COALESCE(json_extract(readfile('$rf'), '\$.drivers.$axis'), '__AGMSG_NULLKEY__')
+       END;" 2>/dev/null)" || rc=$?
+  out="$(printf '%s' "$out" | tr -d '\r')"
+  if [ "$rc" -ne 0 ] || [ -z "$out" ] || [ "$out" = '__AGMSG_READFAIL__' ]; then
+    return 0
+  fi
+  _AGMSG_DRIVER_CONFIRMED=1
+  case "$out" in
+    __AGMSG_NULLKEY__) ;;
+    *) _AGMSG_DRIVER_RESOLVED_NAME="$out" ;;
+  esac
+}
+
 # ext-tools go through the same bases as every other axis: a built-in tool is
 # always eligible, an external one only once trusted. The tool name becomes a
 # path segment, so it is checked here too (letters, digits, '-', '_').

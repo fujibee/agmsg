@@ -218,13 +218,17 @@ _AGMSG_PARTITION_TEAM_CFGFP_AT=()
 _AGMSG_PARTITION_TEAM_MAX=64
 AGMSG_PARTITION_CFG_SAFETY_NET_SECONDS=60
 
-# <team> -- prints "<fingerprint>\t<has_subsecond>\t<content_readable>" for
-# its config.json, or nothing (all fields empty) if it cannot be
-# resolved/stat'd. One `stat` call; the subsecond judgment is on this ONE
+# <team> -- prints "<fingerprint>\t<has_subsecond>" for its config.json, or
+# nothing (both fields empty) if it cannot be resolved/stat'd. One `stat`
+# call. The subsecond judgment looks ONLY at the mtime field's own
+# fractional part (review round 3: an earlier version matched against the
+# whole "<mtime> <size>" fingerprint string, so a non-zero SIZE digit --
+# "100.000000000 42", a perfectly coarse mtime next to an ordinary size --
+# was wrongly read as confirmed subsecond precision). Judged on this ONE
 # reading alone, never latched across teams or calls (the same lesson
 # #1846 round 3 already learned for its own fingerprint).
 _agmsg_partition_cfg_fingerprint() {   # <team>
-  local team="$1" root path fp="" sub=0 readable=0 raw
+  local team="$1" root path fp="" mtime sub=0
   declare -F _agmsg_driver_root >/dev/null 2>&1 || return 0
   root="$(_agmsg_driver_root 2>/dev/null)" || return 0
   [ -n "$root" ] || return 0
@@ -236,25 +240,9 @@ _agmsg_partition_cfg_fingerprint() {   # <team>
     *)     fp="$(stat -c '%.9Y %s' "$path" 2>/dev/null)" ;;
   esac
   [ -n "$fp" ] || return 0
-  case "$fp" in *.*[1-9]*) sub=1 ;; esac
-  # Content readability, independent of the stat metadata above (review
-  # round 2): `stat` succeeds on a file whose permissions block reading
-  # its CONTENT (confirmed directly: a chmod 000 file still stats fine),
-  # so a trustworthy fingerprint alone does not prove
-  # agmsg_driver_for_team actually read this team's real configured
-  # driver rather than silently falling back to its own default on a
-  # read/parse failure it swallows and returns as an ordinary, rc-0
-  # answer -- indistinguishable, from outside, from a team genuinely
-  # configured with that same default value. A plain bash `read`
-  # (builtin, no fork) answers the one question that matters: could THIS
-  # process read the bytes just now. `-d ''` reads to EOF, which bash
-  # treats as a failed read even when it captured the whole file (no
-  # trailing NUL delimiter in an ordinary JSON file) -- so success is
-  # judged by whether anything came back, not by read's own exit status.
-  raw=""
-  IFS= read -r -d '' raw < "$path" 2>/dev/null
-  [ -n "$raw" ] && readable=1
-  printf '%s\t%s\t%s\n' "$fp" "$sub" "$readable"
+  mtime="${fp%% *}"
+  case "$mtime" in *.*[1-9]*) sub=1 ;; esac
+  printf '%s\t%s\n' "$fp" "$sub"
 }
 _agmsg_partition_load() {
   # The registry may not be sourced yet — agmsg_db_path is reachable without
@@ -307,12 +295,11 @@ _agmsg_partition_load() {
     # comment for both reasons. Any other outcome (coarse mtime, expired
     # safety net, unresolvable/unreadable config) falls through to the
     # real lookup below.
-    local _cfg_rd _cfg_fp="" _cfg_sub=0 _cfg_readable=0 _cfg_now="$SECONDS" _cache_hit=0
+    local _cfg_rd _cfg_fp="" _cfg_sub=0 _cfg_now="$SECONDS" _cache_hit=0
     _cfg_rd="$(_agmsg_partition_cfg_fingerprint "$team")"
     if [ -n "$_cfg_rd" ]; then
       _cfg_fp="${_cfg_rd%%$'\t'*}"
-      _cfg_sub="${_cfg_rd#*$'\t'}"; _cfg_sub="${_cfg_sub%%$'\t'*}"
-      _cfg_readable="${_cfg_rd##*$'\t'}"
+      _cfg_sub="${_cfg_rd##*$'\t'}"
     fi
     if [ "$_cfg_sub" = 1 ] && [ -n "$_cfg_fp" ] && [ "$_slot" -ge 0 ] \
        && [ "$_cfg_fp" = "${_AGMSG_PARTITION_TEAM_CFGFP[$_slot]:-}" ] \
@@ -322,28 +309,36 @@ _agmsg_partition_load() {
       _cache_hit=1
       name="${_AGMSG_PARTITION_TEAM_VALS[$_slot]}"
     else
-      name="$(agmsg_driver_for_team partition "$team" shared)"
+      # #1849 review round 4: NOT agmsg_driver_for_team -- that function's
+      # own contract swallows a read/parse failure into the very same
+      # <default> a legitimate, intentionally-unconfigured team produces,
+      # which a caller deciding whether to CACHE the answer cannot tell
+      # apart from outside (a `stat` success, or even this process's own
+      # separate ability to read the file's bytes a moment earlier, both
+      # proved true in exactly that failure case too -- confirmed
+      # directly). agmsg_driver_for_team_confirmed does the identical
+      # resolution and sets $_AGMSG_DRIVER_CONFIRMED to say whether this
+      # read+parse actually succeeded, so caching can be gated on THAT
+      # fact instead of inferring it from a side channel.
+      #
+      # Called as a PLAIN STATEMENT, not $(...) -- see that function's own
+      # comment for why a command substitution here would silently lose
+      # $_AGMSG_DRIVER_CONFIRMED the instant it set it.
+      agmsg_driver_for_team_confirmed partition "$team" shared
+      name="$_AGMSG_DRIVER_RESOLVED_NAME"
     fi
     if [ "$_slot" -ge 0 ]; then
       _AGMSG_PARTITION_TEAM_VALS[$_slot]="$name"
       _AGMSG_PARTITION_TEAM_EPOCH[$_slot]="$_AGMSG_POLL_CYCLE_EPOCH"
       if [ "$_cache_hit" -eq 0 ]; then
         # A fresh (non-cached) resolution. Record the new fingerprint only
-        # if THIS call both got a trustworthy one AND could actually read
-        # the config's own CONTENT just now (review round 2: `stat`
-        # succeeding proves nothing about whether agmsg_driver_for_team's
-        # own content read/parse succeeded too -- a permission-blocked
-        # file still stats fine, and a read/parse failure there silently
-        # returns the ordinary default with no distinguishable signal, so
-        # caching on stat success alone could cache that fallback for up
-        # to the safety-net window even though nothing about the TEAM's
-        # real configuration ever changed). Otherwise explicitly drop
-        # whatever was cached before (review round 1: leaving a STALE
-        # fingerprint/age pair in place here is what let a later,
-        # genuinely successful read match against it and wrongly reuse
-        # the name a transient failure had just produced, instead of ever
-        # re-deriving the real one).
-        if [ "$_cfg_sub" = 1 ] && [ -n "$_cfg_fp" ] && [ "$_cfg_readable" = 1 ]; then
+        # if THIS call's resolution was itself confirmed. Otherwise
+        # explicitly drop whatever was cached before (review round 1:
+        # leaving a STALE fingerprint/age pair in place here is what let a
+        # later, genuinely successful read match against it and wrongly
+        # reuse the name a transient failure had just produced, instead
+        # of ever re-deriving the real one).
+        if [ "$_cfg_sub" = 1 ] && [ -n "$_cfg_fp" ] && [ "${_AGMSG_DRIVER_CONFIRMED:-0}" = 1 ]; then
           _AGMSG_PARTITION_TEAM_CFGFP[$_slot]="$_cfg_fp"
           _AGMSG_PARTITION_TEAM_CFGFP_AT[$_slot]="$_cfg_now"
         else
@@ -355,7 +350,7 @@ _agmsg_partition_load() {
       _AGMSG_PARTITION_TEAM_KEYS[$_n]="$team"
       _AGMSG_PARTITION_TEAM_VALS[$_n]="$name"
       _AGMSG_PARTITION_TEAM_EPOCH[$_n]="$_AGMSG_POLL_CYCLE_EPOCH"
-      if [ "$_cfg_sub" = 1 ] && [ -n "$_cfg_fp" ] && [ "$_cfg_readable" = 1 ]; then
+      if [ "$_cfg_sub" = 1 ] && [ -n "$_cfg_fp" ] && [ "$_cache_hit" -eq 0 ] && [ "${_AGMSG_DRIVER_CONFIRMED:-0}" = 1 ]; then
         _AGMSG_PARTITION_TEAM_CFGFP[$_n]="$_cfg_fp"
         _AGMSG_PARTITION_TEAM_CFGFP_AT[$_n]="$_cfg_now"
       fi

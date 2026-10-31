@@ -174,3 +174,75 @@ EOF
   local sub="${out#*$'\t'}"; sub="${sub%%$'\t'*}"
   [ "$sub" = 0 ]
 }
+
+@test "partition cache: an all-zero fraction next to a non-zero SIZE is still judged coarse (review round 3)" {
+  source "$SCRIPTS/lib/compat.sh"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/driver-registry.sh"
+  local shim="$BATS_TEST_TMPDIR/shim4"
+  mkdir -p "$shim"
+  # A coarse mtime (".000000000") paired with an ORDINARY, non-zero file
+  # size -- the exact shape that made an earlier version's whole-string
+  # match ("*.*[1-9]*" against "<mtime> <size>") wrongly see the SIZE's
+  # own digits as subsecond precision in the MTIME.
+  printf '#!/usr/bin/env bash\necho "1793480000.000000000 42"\n' > "$shim/stat"
+  chmod +x "$shim/stat"
+  mkdir -p "$TEST_SKILL_DIR/teams/coarsesizeteam"
+  printf '{"drivers":{"partition":"shared"}}' > "$TEST_SKILL_DIR/teams/coarsesizeteam/config.json"
+  local out
+  out="$(PATH="$shim:$PATH" _agmsg_partition_cfg_fingerprint coarsesizeteam)"
+  local sub="${out#*$'\t'}"
+  [ "$sub" = 0 ]
+}
+
+@test "partition cache: a readable config whose sqlite lookup fails recovers on the next cycle, not poisoned (review round 4)" {
+  bash "$SCRIPTS/join.sh" sqlfailteam alice claude-code "$BATS_TEST_TMPDIR/proj6" >/dev/null
+  _set_partition sqlfailteam per-team
+
+  local real_sqlite3="$(command -v sqlite3)"
+  local shim="$BATS_TEST_TMPDIR/shim5"
+  mkdir -p "$shim"
+  # Simulate a decisive, confirmable SQL lookup failure (not a permission
+  # issue -- the content is perfectly readable) on the team's FIRST-EVER
+  # resolution: the shim exits non-zero while a marker file exists, exactly
+  # as a transient sqlite3 failure (resource limits, a locked :memory:
+  # handle, etc.) would. Removing the marker lets the SECOND call
+  # (recovery) go through to the real binary.
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'if [ -e %q ]; then exit 1; fi\n' "$BATS_TEST_TMPDIR/fail-once"
+    printf 'exec %q "$@"\n' "$real_sqlite3"
+  } > "$shim/sqlite3"
+  chmod +x "$shim/sqlite3"
+  : > "$BATS_TEST_TMPDIR/fail-once"
+
+  PATH="$shim:$PATH" _agmsg_partition_load sqlfailteam
+  [ "$_AGMSG_PARTITION_LOADED" = shared ] || skip "the sqlite3 shim's failure was not exercised as expected"
+
+  rm -f "$BATS_TEST_TMPDIR/fail-once"
+  _AGMSG_POLL_CYCLE_EPOCH=$((_AGMSG_POLL_CYCLE_EPOCH + 1))
+  PATH="$shim:$PATH" _agmsg_partition_load sqlfailteam
+  [ "$_AGMSG_PARTITION_LOADED" = per-team ]
+}
+
+@test "partition cache: malformed JSON is never confused with a legitimate default (review round 4)" {
+  mkdir -p "$TEST_SKILL_DIR/teams/malformedteam"
+  printf 'not valid json{{{' > "$TEST_SKILL_DIR/teams/malformedteam/config.json"
+  source "$SCRIPTS/lib/compat.sh"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/driver-registry.sh"
+  agmsg_driver_for_team_confirmed partition malformedteam shared
+  [ "$_AGMSG_DRIVER_RESOLVED_NAME" = shared ]
+  [ "$_AGMSG_DRIVER_CONFIRMED" = 0 ]
+}
+
+@test "partition cache: a team with no drivers key at all is a CONFIRMED legitimate default" {
+  mkdir -p "$TEST_SKILL_DIR/teams/nodriverskeyteam"
+  printf '{"other":1}' > "$TEST_SKILL_DIR/teams/nodriverskeyteam/config.json"
+  source "$SCRIPTS/lib/compat.sh"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/driver-registry.sh"
+  agmsg_driver_for_team_confirmed partition nodriverskeyteam shared
+  [ "$_AGMSG_DRIVER_RESOLVED_NAME" = shared ]
+  [ "$_AGMSG_DRIVER_CONFIRMED" = 1 ]
+}
