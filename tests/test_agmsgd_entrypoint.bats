@@ -239,24 +239,46 @@ _stop_daemon() {
   _stop_daemon
 }
 
-@test "a clean start shows no mismatch warning, and clears one left by an earlier run (#1821)" {
+@test "a clean start shows no mismatch warning, and removes the file of a process that is gone (#1821)" {
   _write_completion_record
-  printf '{"pid":1,"at":"x","problems":[{"kind":"unexpected","path":"scripts/old"}]}\n' > "$TEST_SKILL_DIR/run/install-verify-warning.json"
+  printf '{"pid":999999,"at":"x","problems":[{"kind":"unexpected","path":"scripts/old"}]}\n' > "$TEST_SKILL_DIR/run/install-verify-warning.999999.json"
   _start_daemon_ready
-  [ ! -e "$TEST_SKILL_DIR/run/install-verify-warning.json" ]
+  [ ! -e "$TEST_SKILL_DIR/run/install-verify-warning.999999.json" ]
   run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]
   refute grep -qF -- "Warning:" <<<"$output"
   _stop_daemon
 }
 
-@test "a warning left by an earlier process is not shown for the running one (#1821)" {
+@test "a second agmsgd that loses the claim does not hide the running one's warning (#1821)" {
+  _write_completion_record
+  : > "$TEST_SKILL_DIR/scripts/.DS_Store"
+  _start_daemon_ready
+  run node "$SCRIPTS/daemon/agmsgd" "$TEST_SKILL_DIR" on 0
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  grep -qF -- "scripts/.DS_Store (not in the record)" <<<"$output"
+  _stop_daemon
+}
+
+@test "a warning file of another process is not shown for the running one (#1821)" {
   _write_completion_record
   _start_daemon_ready
-  printf '{"pid":1,"at":"x","problems":[{"kind":"unexpected","path":"scripts/old"}]}\n' > "$TEST_SKILL_DIR/run/install-verify-warning.json"
+  printf '{"pid":1,"at":"x","problems":[{"kind":"unexpected","path":"scripts/old"}]}\n' > "$TEST_SKILL_DIR/run/install-verify-warning.1.json"
   run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
   refute grep -qF -- "Warning:" <<<"$output"
   _stop_daemon
+}
+
+@test "agmsgd that cannot load because a module is missing records that and the mismatch, and status shows it (#1821)" {
+  _write_completion_record
+  rm "$TEST_SKILL_DIR/scripts/daemon/poll-deadline.mjs"
+  run node "$SCRIPTS/daemon/agmsgd" "$TEST_SKILL_DIR" on 0
+  [ "$status" -eq 1 ]
+  grep -qF -- "could not load agmsgd; scripts/ does not match the completion record (missing: scripts/daemon/poll-deadline.mjs)" <<<"$output"
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 1 ]
+  grep -qF -- "reason: could not load agmsgd; scripts/ does not match the completion record (missing: scripts/daemon/poll-deadline.mjs)" <<<"$output"
 }
 
 @test "agmsgd entrypoint waits for a CLI read lock before marking ready" {

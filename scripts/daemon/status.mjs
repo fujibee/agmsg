@@ -247,12 +247,13 @@ async function main() {
 
 // What agmsgd found different between scripts/ and the install record when it
 // started (written by the entrypoint; see recordVerifyProblems there). Only
-// read for the running process that wrote it: a file left by an earlier run
-// says nothing about this one.
+// read for the running process's own file (named by its pid): a file left by
+// an earlier run says nothing about this one.
 export function readInstallVerifyWarning(installRoot, owner, alive) {
+  if (alive !== true || owner?.executor_pid == null) return null;
   let warning;
-  try { warning = JSON.parse(readFileSync(join(installRoot, 'run', 'install-verify-warning.json'), 'utf8')); } catch { return null; }
-  if (alive !== true || owner?.executor_pid == null || warning?.pid !== owner.executor_pid) return null;
+  try { warning = JSON.parse(readFileSync(join(installRoot, 'run', `install-verify-warning.${owner.executor_pid}.json`), 'utf8')); } catch { return null; }
+  if (warning?.pid !== owner.executor_pid) return null;
   if (!Array.isArray(warning.problems) || warning.problems.length === 0) return null;
   return warning;
 }

@@ -87,23 +87,36 @@ function collectScriptFiles(installRoot) {
   return { files, links };
 }
 
-const VERIFY_WARNING_FILE = "install-verify-warning.json";
+const VERIFY_WARNING_PREFIX = "install-verify-warning.";
 
-// Leaves the scripts/ mismatches where `agmsg daemon status` reads them, tagged
-// with this process's pid so a later reader ignores a file left by an earlier
-// run. A clean start removes any previous file. Also printed to stderr (the
-// resident manager's log). Best-effort: a failed write never stops the start.
-function recordVerifyProblems(installRoot, problems) {
-  const target = join(installRoot, "run", VERIFY_WARNING_FILE);
+function processAlive(pid) {
   try {
-    if (problems.length === 0) {
-      rmSync(target, { force: true });
-      return;
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+// Leaves the scripts/ mismatches where `agmsg daemon status` reads them, in a
+// file named for THIS process's pid. One file per pid, because this runs before
+// ownership is claimed: a second agmsgd that loses the claim must not overwrite
+// or remove what the running one left. Files of processes that are gone are
+// removed here, so a clean start leaves nothing behind. Also printed to stderr
+// (the resident manager's log). Best-effort: a failure never stops the start.
+function recordVerifyProblems(installRoot, problems) {
+  const dir = join(installRoot, "run");
+  try {
+    for (const name of readdirSync(dir)) {
+      const m = /^install-verify-warning\.(\d+)\.json$/.exec(name);
+      if (m && Number(m[1]) !== process.pid && !processAlive(Number(m[1]))) rmSync(join(dir, name), { force: true });
     }
+    if (problems.length === 0) return;
     const summary = problems.map((p) => `${p.kind}: ${p.path}`).join(", ");
     process.stderr.write(`agmsgd: continuing; scripts/ does not match the completion record (${summary})\n`);
-    mkdirSync(dirname(target), { recursive: true });
-    const tmp = `${target}.${process.pid}.tmp`;
+    mkdirSync(dir, { recursive: true });
+    const target = join(dir, `${VERIFY_WARNING_PREFIX}${process.pid}.json`);
+    const tmp = `${target}.tmp`;
     writeFileSync(tmp, `${JSON.stringify({ pid: process.pid, at: new Date().toISOString(), problems })}\n`);
     renameSync(tmp, target);
   } catch (error) {
@@ -216,8 +229,17 @@ async function main() {
     // component. main.mjs's own module graph (owner/control/lifecycle/
     // log/status) is loaded here, still under the lock; release it only
     // after the component is fully loaded.
-    mainModule = await import("./main.mjs");
-    ({ openInstallDb } = await import("./db.mjs"));
+    try {
+      mainModule = await import("./main.mjs");
+      ({ openInstallDb } = await import("./db.mjs"));
+    } catch (error) {
+      // Not a new stop: the import failing was already fatal. When scripts/ did
+      // not match the record, say so in the start attempt `agmsg daemon status`
+      // shows for a daemon that is not running, instead of an unhandled error.
+      if (verified.problems.length === 0) throw error;
+      const summary = verified.problems.map((p) => `${p.kind}: ${p.path}`).join(", ");
+      fail(1, `could not load agmsgd; scripts/ does not match the completion record (${summary}): ${error.message}`);
+    }
   } finally {
     lockDb.exec("COMMIT;");
     lockDb.close();
