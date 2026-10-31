@@ -234,6 +234,15 @@ codex:
   --dangerously-skip-permissions: false  # a `false` value suppresses the flag entirely
 ```
 
+A Codex window started by `spawn.sh` can make a notification sound when a turn ends while the window is in the background (seen with codex-cli 0.163.0 on macOS Terminal). The Codex TUI setting involved is `tui.notifications`. To turn it off for agmsg-launched Codex only (a `codex` you start yourself is unchanged), add this to the spawn options file. If you already have a `codex:` section, add the line inside it instead of pasting a second `codex:` header. If that section already has a `-c:` line, this file cannot hold a second one (the format takes one value per flag): keep your existing line and set `tui.notifications` in `~/.codex/config.toml` instead, which also affects a `codex` you start yourself.
+
+```yaml
+codex:
+  -c: tui.notifications=false
+```
+
+It applies to Codex windows spawned after you save the file. In that setup the sound stopped; other kinds of notification were not checked.
+
 Eight of the ten agent types are spawnable — `claude-code`, `codex`, `grok-build`, `cursor`, `gemini`, `antigravity`, `copilot`, `opencode`. `hermes` is not spawnable because its CLI has no known mode that starts an interactive session pre-seeded with an initial prompt (#279). `devin` is currently not marked spawnable because an equivalent interactive boot mode has not yet been verified. macOS is the primary target; Linux and Windows are best-effort (please open an issue/PR if your terminal isn't handled). Headless environments — no tmux **and** no usable terminal — error out, since the agent CLIs need an interactive terminal.
 
 ### Tear down a spawned agent (`despawn`)
