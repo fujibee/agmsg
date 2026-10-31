@@ -18,7 +18,6 @@ setup() {
   _AGMSG_WATCH_FORCE_AT_MAP=""
   _AGMSG_WATCH_DB_PATH_MAP=""
   _AGMSG_WATCH_PATH_FP=""
-  _WATCH_FP_SUBSECOND_CONFIRMED=0
 }
 
 @test "idle-skip: an armed fingerprint for one pair is invisible to another pair of the same team" {
@@ -40,15 +39,52 @@ setup() {
   [ "${fp2#* }" = "2" ]
 }
 
-@test "idle-skip: subsecond precision is confirmed as soon as any fingerprint carries a nonzero fraction" {
+@test "idle-skip: a real fingerprint's mtime is judged to have subsecond precision" {
   local f="$BATS_TEST_TMPDIR/c"
   printf 'x' > "$f"
   _watch_fingerprint_batch "$f"
   _watch_fingerprint_lookup "$f"
-  case "$_WATCH_PATH_FP" in
-    *.0000000\ *) echo "mtime had no fractional precision at all: [$_WATCH_PATH_FP]" >&3; skip "this filesystem/stat combination reports no subsecond precision" ;;
+  local mt="${_WATCH_PATH_FP%% *}"
+  case "$mt" in
+    *.0000000\ *|*.000000000) echo "mtime had no fractional precision at all: [$mt]" >&3; skip "this filesystem/stat combination reports no subsecond precision" ;;
   esac
-  [ "$_WATCH_FP_SUBSECOND_CONFIRMED" -eq 1 ]
+  _watch_mtime_has_subsecond "$mt"
+}
+
+@test "idle-skip: an all-zero fraction is judged to lack subsecond precision" {
+  refute _watch_mtime_has_subsecond "1793400000.000000000"
+}
+
+@test "idle-skip: a bare integer mtime (no fraction at all) is judged to lack subsecond precision" {
+  refute _watch_mtime_has_subsecond "1793400000"
+}
+
+@test "idle-skip: precision is judged per mtime value, not latched process-wide" {
+  # The exact round-3 bug: a fractional reading from one path must not make
+  # a DIFFERENT, genuinely coarse value look trustworthy.
+  _watch_mtime_has_subsecond "1793400000.123456789"
+  refute _watch_mtime_has_subsecond "1793400000.000000000"
+}
+
+@test "idle-skip: unsafe-to-arm fires on the WAL's mtime even when the db's own mtime is old" {
+  local now; now="$(date +%s)"
+  # db: old, integer-second only. wal: "now", integer-second only. The
+  # round-3 bug checked only the first field of the fingerprint (the db)
+  # and would have armed here.
+  _watch_fp_unsafe_to_arm "$now" "100" "$now"
+}
+
+@test "idle-skip: unsafe-to-arm does not fire when the only recent mtime has real subsecond precision" {
+  local now; now="$(date +%s)"
+  refute _watch_fp_unsafe_to_arm "$now" "100" "${now}.5"
+}
+
+@test "idle-skip: unsafe-to-arm does not fire when every mtime is well in the past" {
+  refute _watch_fp_unsafe_to_arm "$(date +%s)" "1" "2"
+}
+
+@test "idle-skip: unsafe-to-arm tolerates an absent (empty) wal mtime" {
+  refute _watch_fp_unsafe_to_arm "$(date +%s)" "1" ""
 }
 
 @test "idle-skip: a pair fingerprint treats a missing -wal sibling as a known absence, not a failure" {
@@ -106,11 +142,3 @@ setup() {
   _watch_safety_due "team:never-checked"
 }
 
-@test "idle-skip: an mtime within the last second is 'too recent' to trust" {
-  local now; now="$(date +%s)"
-  _watch_fp_too_recent "${now} 4 /x"
-}
-
-@test "idle-skip: an mtime well in the past is not 'too recent'" {
-  refute _watch_fp_too_recent "1 4 /x"
-}

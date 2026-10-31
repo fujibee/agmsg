@@ -96,30 +96,40 @@ _watch_db_path_forget() {   # <team> -- drop the cached entry so it is re-resolv
   _AGMSG_WATCH_DB_PATH_MAP="$out"
 }
 
-# --- batched, subsecond fingerprinting (#1846 review round 2) --------------
+# --- batched, subsecond fingerprinting (#1846 review round 2/3) ------------
 #
-# Two defects found against the first version of this file:
+# Defects found against earlier versions of this file:
 #
 # 1. `stat -f '%m'` (macOS) / `stat -c '%Y'` (GNU) truncate to whole SECONDS.
 #    A same-second, same-size overwrite is then INDISTINGUISHABLE from no
-#    write at all -- reproduced independently by both reviewers against a
-#    real store. Fixed by asking for subsecond precision (`%Fm` / `%.9Y`,
-#    confirmed to actually return it on both dialects) -- but a filesystem
-#    that genuinely only has second resolution would still collide, so
-#    _WATCH_FP_SUBSECOND_CONFIRMED tracks whether ANY fingerprint this
-#    process has taken so far actually carried a nonzero fractional part.
-#    Until one does, callers must treat an mtime that reads as "now" (within
-#    one second, checked with a single `date +%s` -- the one fork this whole
-#    design otherwise avoids, paid only in this narrow, increasingly rare
-#    fallback) as too close to call and refuse to arm on it.
+#    write at all -- reproduced independently against a real store. Fixed
+#    by asking for subsecond precision (`%Fm` / `%.9Y`, confirmed to
+#    actually return it on both dialects) -- but a filesystem that
+#    genuinely only has second resolution would still collide. Round 2
+#    tracked "has subsecond precision ever been seen" as a single process-
+#    lifetime flag; round 3 found that wrong twice over: (a) it is a
+#    property of ONE path/filesystem, not the whole process -- a single
+#    fractional reading from an unrelated path on a different volume
+#    wrongly vouched for every store, including a genuinely coarse one; and
+#    (b) only the DB's own mtime was checked for "too recent to trust", so
+#    a WAL-mode write that lands only in the `-wal` file (the main db
+#    staying untouched) on a coarse filesystem went unnoticed. Fixed by
+#    judging each mtime VALUE on its own fractional part (see
+#    _watch_mtime_has_subsecond), and checking BOTH the db's and, when it
+#    exists, the wal's mtime for recency before arming.
 #
-# 2. One `stat` invocation per PAIR per cycle still scales with how many
-#    pairs a broad watcher serves, which is most of what a real report's gap
-#    from this measurement turned out to be. `_watch_fingerprint_batch` asks
-#    for every distinct path ACROSS EVERY PAIR this cycle serves in ONE
-#    call; `_watch_fingerprint_lookup`/`_watch_pair_fingerprint` then read
-#    back out of that single result with no further subprocess at all.
-_WATCH_FP_SUBSECOND_CONFIRMED=0
+# 2. `date +%s` was forked once per PAIR to get "now" for that recency
+#    check. Hoisted to the caller (watch.sh calls it once per CYCLE and
+#    passes the result into every pair's check this file makes) -- the
+#    value does not need to be fresher than once a cycle for a check whose
+#    whole tolerance is "within one second".
+#
+# 3. One `stat` invocation per PAIR per cycle still scales with how many
+#    pairs a broad watcher serves, which is most of what a real report's
+#    gap from this measurement turned out to be. `_watch_fingerprint_batch`
+#    asks for every distinct path ACROSS EVERY PAIR this cycle serves in
+#    ONE call; `_watch_fingerprint_lookup`/`_watch_pair_fingerprint` then
+#    read back out of that single result with no further subprocess.
 
 # <path> -> "<mtime> <size>", rebuilt fresh every cycle by
 # _watch_fingerprint_batch (never carried over -- a stale entry would be
@@ -145,7 +155,6 @@ _watch_fingerprint_batch() {   # <path> [<path> ...] -- one `stat` call
     # rest is now the path (may itself contain spaces; everything after the
     # first two fields belongs to it, per the `%N`/`%n` format above).
     _AGMSG_WATCH_PATH_FP="${_AGMSG_WATCH_PATH_FP:+$_AGMSG_WATCH_PATH_FP$'\n'}${rest}${_WATCH_TAB}${mt} ${sz}"
-    case "$mt" in *.*[1-9]*) _WATCH_FP_SUBSECOND_CONFIRMED=1 ;; esac
   done <<< "$out"
   return "$rc"
 }
@@ -161,8 +170,10 @@ _watch_fingerprint_lookup() {   # <path> -- sets $_WATCH_PATH_FP, rc 1 if absent
   return 1
 }
 
-# <db_path> <wal_path> -- sets $_WATCH_FP from the current batch. rc 1
-# (unknown -- never skip, never arm) when the db's own line is missing
+# <db_path> <wal_path> -- sets $_WATCH_FP from the current batch, plus
+# $_WATCH_FP_DB_MTIME and $_WATCH_FP_WAL_MTIME (the latter empty when the
+# wal does not exist) for _watch_fp_unsafe_to_arm to judge each on its own.
+# rc 1 (unknown -- never skip, never arm) when the db's own line is missing
 # (a real stat failure: permission, a vanished file past the caller's own
 # existence check) or when the wal path EXISTS on disk but its line is
 # missing too (exists-but-unreadable, never confused with the ordinary
@@ -172,30 +183,57 @@ _watch_pair_fingerprint() {
   local db="$1" wal="$2" db_fp wal_fp
   _watch_fingerprint_lookup "$db" || return 1
   db_fp="$_WATCH_PATH_FP"
+  _WATCH_FP_DB_MTIME="${db_fp%% *}"
   if [ -e "$wal" ]; then
     _watch_fingerprint_lookup "$wal" || return 1
     wal_fp="$_WATCH_PATH_FP"
+    _WATCH_FP_WAL_MTIME="${wal_fp%% *}"
   else
     wal_fp="absent"
+    _WATCH_FP_WAL_MTIME=""
   fi
   _WATCH_FP="${db_fp}|${wal_fp}"
   return 0
 }
 
-# True (rc 0) when <fingerprint>'s own mtime is too close to "now" to trust
-# as a stable, confirmed-unchanged value -- ONLY meaningful, and only ever
-# called, while _WATCH_FP_SUBSECOND_CONFIRMED is still 0. The one `date +%s`
-# fork in this whole file: paid only in that fallback, which real
-# filesystems leave almost as soon as this process takes its first
-# fingerprint at all.
-_watch_fp_too_recent() {   # <fingerprint> (the db field, "<mtime> <size>|...")
-  local fp="$1" mt now
-  mt="${fp%% *}"
-  mt="${mt%%.*}"
+# True (rc 0) when <mtime> (as stat printed it: "<secs>.<frac>") carries no
+# confirmed subsecond precision -- an all-zero or absent fractional part.
+# Judged on THIS value alone, never latched process-wide (review round 3: a
+# single fractional reading from one path/filesystem does not vouch for a
+# different path that may sit on a genuinely coarser one).
+_watch_mtime_has_subsecond() {   # <mtime>
+  case "$1" in *.*[1-9]*) return 0 ;; *) return 1 ;; esac
+}
+
+# True (rc 0) when <mtime>'s whole-second component is within one second of
+# <now_epoch> -- both plain integers, no fork: <now_epoch> is computed ONCE
+# per CYCLE by the caller (watch.sh), not once per pair/path (review round
+# 3), since this check's whole tolerance is "within one second" and a
+# value at most one cycle stale cannot change that.
+_watch_mtime_too_recent() {   # <mtime> <now_epoch>
+  local mt="${1%%.*}" now="$2"
   case "$mt" in ''|*[!0-9]*) return 0 ;; esac
-  now="$(date +%s 2>/dev/null)" || return 0
   case "$now" in ''|*[!0-9]*) return 0 ;; esac
   [ $((now - mt)) -le 1 ]
+}
+
+# True (rc 0, "unsafe to arm") when ANY of the given mtimes both lacks
+# confirmed subsecond precision AND reads as within one second of
+# <now_epoch> -- a value with real subsecond precision is trusted outright
+# regardless of how recent it is; one without it is trusted only once it is
+# old enough that a same-second collision is no longer possible. Checked
+# over every mtime a pair's fingerprint actually carries (review round 3:
+# checking only the db's own mtime missed a WAL-mode write that lands only
+# in the `-wal` file, leaving the main db's mtime untouched).
+_watch_fp_unsafe_to_arm() {   # <now_epoch> <mtime> [<mtime> ...]
+  local now="$1" mt; shift
+  for mt in "$@"; do
+    [ -n "$mt" ] || continue
+    if ! _watch_mtime_has_subsecond "$mt" && _watch_mtime_too_recent "$mt" "$now"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 # <team:agent> -> the fingerprint (see _watch_pair_fingerprint) this pair's

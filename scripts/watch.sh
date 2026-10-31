@@ -1397,6 +1397,13 @@ while true; do
   else
     _AGMSG_WATCH_PATH_FP=""
   fi
+  # #1842 review round 3: "now", for the idle-skip checkpoint's coarse-mtime
+  # safety check -- once per CYCLE, not once per pair (that check's whole
+  # tolerance is "within one second", so a value at most one cycle stale
+  # cannot change its answer). Empty on failure; every caller treats that
+  # the same as "unknown", which _watch_mtime_too_recent's own fallback
+  # already does.
+  _agmsg_watch_now_epoch="$(date +%s 2>/dev/null)" || _agmsg_watch_now_epoch=""
   while IFS=$'\t' read -r pair_team pair_agent; do
     [ -z "$pair_team" ] && continue
     # Warm both per-cycle caches as PLAIN STATEMENTS, never via $(...): a
@@ -1555,8 +1562,12 @@ EOF
       _watch_db_path_forget "$pair_team"
     fi
     _WATCH_FP_BEFORE=""
+    _agmsg_fp_before_db_mtime=""
+    _agmsg_fp_before_wal_mtime=""
     if _watch_db_path_for "$pair_team" && _watch_pair_fingerprint "$_WATCH_DB_PATH" "${_WATCH_DB_PATH}-wal"; then
       _WATCH_FP_BEFORE="$_WATCH_FP"
+      _agmsg_fp_before_db_mtime="$_WATCH_FP_DB_MTIME"
+      _agmsg_fp_before_wal_mtime="$_WATCH_FP_WAL_MTIME"
     fi
     if [ "$_agmsg_watch_force" -eq 0 ] \
        && [ -n "$_WATCH_FP_BEFORE" ] \
@@ -1658,7 +1669,7 @@ EOF
         # that narrow case instead -- the pair simply tries again next
         # cycle, same as any other "unknown" outcome.
         if [ -n "$_WATCH_FP_BEFORE" ] \
-           && { [ "$_WATCH_FP_SUBSECOND_CONFIRMED" -eq 1 ] || ! _watch_fp_too_recent "$_WATCH_FP_BEFORE"; }; then
+           && ! _watch_fp_unsafe_to_arm "$_agmsg_watch_now_epoch" "$_agmsg_fp_before_db_mtime" "$_agmsg_fp_before_wal_mtime"; then
           _watch_armed_fp_set "$_agmsg_pair_key" "$_WATCH_FP_BEFORE"
         else
           _watch_armed_fp_drop "$_agmsg_pair_key"
