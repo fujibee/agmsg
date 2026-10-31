@@ -5,6 +5,7 @@
 _AGMSG_DAEMON_STATE_SH=1
 # Where the Linux boot id is read from; a test points it at a file it can remove.
 _AGMSG_BOOT_ID_FILE=/proc/sys/kernel/random/boot_id
+_AGMSG_OSRELEASE_FILE=/proc/sys/kernel/osrelease
 _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
@@ -64,7 +65,7 @@ agmsg_daemon_read_state() {
       # A stepped clock also moves that start time, by as much as the step, so
       # there it cannot say a pid was reused after the owner's claim.
       local osrelease=""
-      read -r osrelease 2>/dev/null < /proc/sys/kernel/osrelease || true
+      read -r osrelease 2>/dev/null < "$_AGMSG_OSRELEASE_FILE" || true
       case "$osrelease" in
         *[Mm]icrosoft*) start_unreliable=1 ;;
       esac
@@ -132,6 +133,14 @@ agmsg_daemon_read_state() {
   esac
   if [ -z "$start_unreliable" ] && [ -n "$started_epoch" ] && [ -n "$claim_epoch" ] && [ "$started_epoch" -gt "$claim_epoch" ]; then
     AGMSGD_REASON="executor start evidence does not match ($AGMSGD_REASON)"
+    return 0
+  fi
+  # The start time is not used on WSL, so the branch below is not reached there;
+  # an executor that cannot be seen from another PID namespace must still read
+  # as not checkable rather than as an exited process.
+  if [ -n "$start_unreliable" ] && [ -n "$current_boot" ] && [ "$(_agmsg_pid_signal_presence "$pid")" = gone ] && _agmsg_daemon_in_other_pid_namespace; then
+    AGMSGD_HEALTH=unchecked
+    AGMSGD_REASON="the daemon runs in another PID namespace, so its process cannot be seen from here"
     return 0
   fi
   if [ -z "$current_boot" ] || { [ -z "$started_epoch" ] && [ -z "$start_unreliable" ]; }; then

@@ -514,6 +514,15 @@ eperm_pid() {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_pid_ns=NULL;"
   run bash -c 'source "$1/lib/daemon-state.sh"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS"
   [ "${lines[-1]}" = stopped ]
+
+  # WSL skips the start-time comparison; the namespace check must still be reached.
+  printf '5.15.0-microsoft-standard-WSL2\n' > "$TEST_SKILL_DIR/osrelease"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_pid_ns='pid:[1]';"
+  run bash -c 'source "$1/lib/daemon-state.sh"; _AGMSG_OSRELEASE_FILE="$2"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS" "$TEST_SKILL_DIR/osrelease"
+  [ "${lines[-1]}" = unchecked ]
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_pid_ns='$mine';"
+  run bash -c 'source "$1/lib/daemon-state.sh"; _AGMSG_OSRELEASE_FILE="$2"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS" "$TEST_SKILL_DIR/osrelease"
+  [ "${lines[-1]}" = stopped ]
 }
 
 @test "delivery status: a settings file that exists but is not valid JSON is also unrecognized, not deliberate off (review)" {
