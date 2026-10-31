@@ -152,19 +152,111 @@ NODE
 # control socket unavailable" text.
 @test "agmsgd records a digest-mismatch start attempt, and daemon status surfaces that reason (#1631)" {
   _write_completion_record
-  printf 'tampered\n' >> "$TEST_SKILL_DIR/scripts/daemon/schema.sql"
+  # Its own bytes differ from the record: still a refusal to start.
+  printf '\n// tampered\n' >> "$TEST_SKILL_DIR/scripts/daemon/agmsgd"
 
   run node "$SCRIPTS/daemon/agmsgd" "$TEST_SKILL_DIR" on 0
   [ "$status" -eq 75 ]
-  grep -qF -- "digest verification failed: digest mismatch: scripts/daemon/schema.sql" <<<"$output"
+  grep -qF -- "this file's own digest does not match the completion record" <<<"$output"
 
   local recorded_reason
   recorded_reason="$(sqlite3 "$TEST_SKILL_DIR/run/install.db" "SELECT reason FROM daemon_start_attempts;")"
-  [ "$recorded_reason" = "digest verification failed: digest mismatch: scripts/daemon/schema.sql" ]
+  [ "$recorded_reason" = "this file's own digest does not match the completion record" ]
 
   run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
   [ "$status" -eq 1 ]
-  grep -qF -- "reason: digest verification failed: digest mismatch: scripts/daemon/schema.sql" <<<"$output"
+  grep -qF -- "reason: this file's own digest does not match the completion record" <<<"$output"
+}
+
+# Starts agmsgd in the background and waits for it to be ready (or fails).
+_start_daemon_ready() {
+  DAEMON_LOG="$TEST_SKILL_DIR/run/mismatch.log"
+  node "$SCRIPTS/daemon/agmsgd" "$TEST_SKILL_DIR" on 0 > "$DAEMON_LOG" 2>&1 &
+  DAEMON_PID=$!
+  local state="" waited=0
+  while [ "$waited" -lt 100 ]; do
+    state="$(sqlite3 -cmd '.timeout 5000' "$TEST_SKILL_DIR/run/install.db" 'SELECT state FROM daemon_owner;' 2>/dev/null || true)"
+    [ "$state" = ready ] && return 0
+    kill -0 "$DAEMON_PID" 2>/dev/null || break
+    waited=$((waited + 1))
+    sleep 0.05
+  done
+  cat "$DAEMON_LOG" >&2
+  kill "$DAEMON_PID" 2>/dev/null || true
+  wait "$DAEMON_PID" 2>/dev/null || true
+  return 1
+}
+
+_stop_daemon() {
+  bash "$SCRIPTS/daemon.sh" stop >/dev/null 2>&1
+  wait "$DAEMON_PID"
+}
+
+# #1821: a scripts/ tree that differs from the completion record used to stop
+# agmsgd with exit 75 (and a stray .DS_Store was enough). It now starts, and
+# says what differed.
+@test "agmsgd starts with a file the completion record does not list, and status says which (#1821)" {
+  _write_completion_record
+  : > "$TEST_SKILL_DIR/scripts/.DS_Store"
+  _start_daemon_ready
+  grep -qF -- "continuing; scripts/ does not match the completion record (unexpected: scripts/.DS_Store)" "$DAEMON_LOG"
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  grep -qF -- "agmsgd is running" <<<"$output"
+  grep -qF -- "Warning: agmsgd started although scripts/ does not match its install record: scripts/.DS_Store (not in the record)" <<<"$output"
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR" --json
+  grep -qF -- '"install_verify_warning":{' <<<"$output"
+  _stop_daemon
+}
+
+@test "agmsgd starts with a recorded file whose bytes differ, and status says which (#1821)" {
+  _write_completion_record
+  printf '# edited\n' >> "$TEST_SKILL_DIR/scripts/lib/daemon-seats.sh"
+  _start_daemon_ready
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  grep -qF -- "scripts/lib/daemon-seats.sh (differs from the record)" <<<"$output"
+  _stop_daemon
+}
+
+@test "agmsgd starts with a recorded file missing, and status says which (#1821)" {
+  _write_completion_record
+  rm "$TEST_SKILL_DIR/scripts/delivery-cli.sh"
+  _start_daemon_ready
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  grep -qF -- "scripts/delivery-cli.sh (missing)" <<<"$output"
+  _stop_daemon
+}
+
+@test "agmsgd reports a symlink under scripts/ and still starts (#1821)" {
+  _write_completion_record
+  ln -s /dev/null "$TEST_SKILL_DIR/scripts/stray-link"
+  _start_daemon_ready
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  grep -qF -- "scripts/stray-link (symlink)" <<<"$output"
+  _stop_daemon
+}
+
+@test "a clean start shows no mismatch warning, and clears one left by an earlier run (#1821)" {
+  _write_completion_record
+  printf '{"pid":1,"at":"x","problems":[{"kind":"unexpected","path":"scripts/old"}]}\n' > "$TEST_SKILL_DIR/run/install-verify-warning.json"
+  _start_daemon_ready
+  [ ! -e "$TEST_SKILL_DIR/run/install-verify-warning.json" ]
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  refute grep -qF -- "Warning:" <<<"$output"
+  _stop_daemon
+}
+
+@test "a warning left by an earlier process is not shown for the running one (#1821)" {
+  _write_completion_record
+  _start_daemon_ready
+  printf '{"pid":1,"at":"x","problems":[{"kind":"unexpected","path":"scripts/old"}]}\n' > "$TEST_SKILL_DIR/run/install-verify-warning.json"
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  refute grep -qF -- "Warning:" <<<"$output"
+  _stop_daemon
 }
 
 @test "agmsgd entrypoint waits for a CLI read lock before marking ready" {
