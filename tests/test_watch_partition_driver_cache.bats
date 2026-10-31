@@ -198,12 +198,6 @@ EOF
 @test "partition cache: a readable config whose sqlite lookup fails recovers on the next cycle, not poisoned (review round 4)" {
   bash "$SCRIPTS/join.sh" sqlfailteam alice claude-code "$BATS_TEST_TMPDIR/proj6" >/dev/null
   _set_partition sqlfailteam per-team
-  # Warm the `-escape off` probe against the REAL binary before the
-  # failing shim goes on PATH below -- a real long-running process would
-  # already have it warmed long before hitting its first transient
-  # failure; probing for the first time DURING the simulated failure
-  # would otherwise memoize "no escape flag" for the rest of this test.
-  agmsg_sqlite_warm
 
   local real_sqlite3="$(command -v sqlite3)"
   local shim="$BATS_TEST_TMPDIR/shim5"
@@ -301,4 +295,55 @@ EOF
   agmsg_driver_for_team_confirmed partition weirdteam shared
   [ "$_AGMSG_DRIVER_RESOLVED_NAME" = per-team ]
   [ "$_AGMSG_DRIVER_CONFIRMED" = 1 ]
+}
+
+@test "partition cache: a poisoned escape-probe (cold, no prewarm) does not corrupt a successful resolution (review round 6)" {
+  # The exact scenario review found: the FIRST-EVER sqlite3 call this
+  # process makes is itself a transient failure. If that call happened to
+  # be the `-escape off` capability probe, its negative result used to be
+  # memoized for the rest of the process, after which the OLD design's
+  # in-band char(31) separator came back caret-escaped and unparseable.
+  # Deliberately NOT warming the probe first (unlike earlier regressions
+  # in this file) -- this one exists specifically to NOT assume that.
+  bash "$SCRIPTS/join.sh" coldprobeteam alice claude-code "$BATS_TEST_TMPDIR/proj10" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/teams/coldprobeteam"
+  printf '{"drivers":{"partition":"per-team"}}' > "$TEST_SKILL_DIR/teams/coldprobeteam/config.json"
+
+  local real_sqlite3="$(command -v sqlite3)"
+  local shim="$BATS_TEST_TMPDIR/shim6"
+  mkdir -p "$shim"
+  # Fails every call made WITH `-escape` (exactly what the capability
+  # probe itself passes), succeeds otherwise -- so the probe's own call
+  # fails and memoizes "no flag", while this function's real lookup call
+  # (which never passes `-escape` at all in the fixed design) goes
+  # through to the real binary.
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'for a in "$@"; do if [ "$a" = -escape ]; then exit 1; fi; done\n'
+    printf 'exec %q "$@"\n' "$real_sqlite3"
+  } > "$shim/sqlite3"
+  chmod +x "$shim/sqlite3"
+
+  source "$SCRIPTS/lib/driver-registry.sh"
+  PATH="$shim:$PATH" agmsg_driver_for_team_confirmed partition coldprobeteam shared
+  [ "$_AGMSG_DRIVER_RESOLVED_NAME" = per-team ]
+  [ "$_AGMSG_DRIVER_CONFIRMED" = 1 ]
+}
+
+@test "partition cache: truncated sqlite3 output is never adopted as a confirmed name" {
+  source "$SCRIPTS/lib/driver-registry.sh"
+  local shim="$BATS_TEST_TMPDIR/shim7"
+  mkdir -p "$shim"
+  # Prints only the status line, as a corrupted/killed-mid-output sqlite3
+  # invocation might -- there is no second line, and the exact status/
+  # separator check must refuse rather than treat "ok" itself as if it
+  # were both the status and a (wrong) confirmed value.
+  printf '#!/usr/bin/env bash\nprintf "ok"\n' > "$shim/sqlite3"
+  chmod +x "$shim/sqlite3"
+  bash "$SCRIPTS/join.sh" truncteam alice claude-code "$BATS_TEST_TMPDIR/proj11" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/teams/truncteam"
+  printf '{"drivers":{"partition":"per-team"}}' > "$TEST_SKILL_DIR/teams/truncteam/config.json"
+  PATH="$shim:$PATH" agmsg_driver_for_team_confirmed partition truncteam shared
+  [ "$_AGMSG_DRIVER_CONFIRMED" = 0 ]
+  [ "$_AGMSG_DRIVER_RESOLVED_NAME" = shared ]
 }
