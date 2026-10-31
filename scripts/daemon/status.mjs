@@ -166,7 +166,7 @@ export function readOwnerAndIntentReadOnly(installRoot) {
     const alive =
       owner.state === "none" || owner.executor_pid == null
         ? null
-        : isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id, startedAt: owner.executor_started_at });
+        : isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id, pidNs: owner.executor_pid_ns, startedAt: owner.executor_started_at });
     return { owner, intent, alive, codexSeats, claudeCodeSeats, codexPending, codexExpired, lastAttempt };
   } finally {
     db.close();

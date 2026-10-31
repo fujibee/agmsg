@@ -14,7 +14,7 @@ import {
   stopNormally,
   takeOwnership,
 } from "../scripts/daemon/owner.mjs";
-import { bootId } from "../scripts/daemon/executor.mjs";
+import { bootId, pidNamespace } from "../scripts/daemon/executor.mjs";
 
 function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), "agmsgd-owner-test-"));
@@ -34,6 +34,7 @@ test("takeOwnership: none -> starting -> ready is a clean run", () => {
     assert.equal(r.ok, true);
     assert.equal(r.gen, 1);
     assert.equal(readOwner(db).state, "starting");
+    assert.equal(readOwner(db).executor_pid_ns, pidNamespace(), "the executor records the PID namespace it runs in");
     const installId = db.prepare("SELECT install_id FROM meta").get().install_id;
     assert.equal(readOwner(db).socket, controlSocketPath(dir, 1, installId));
     assert.equal(controlSocketPath(dir, 1, installId, "linux"), join(dir, "run", "agmsgd.1.sock"));

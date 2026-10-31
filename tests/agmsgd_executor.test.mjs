@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { bootId, currentExecutor, isAlive, sameBoot } from "../scripts/daemon/executor.mjs";
+import { bootId, currentExecutor, isAlive, pidNamespace, sameBoot } from "../scripts/daemon/executor.mjs";
 
 test("bootId is stable across calls and isAlive tells living/dead/wrong-boot apart", () => {
   assert.equal(bootId(), bootId(), "bootId must not change within the same boot");
@@ -87,4 +87,18 @@ test("linux: the boot id is the kernel boot_id, and a btime record is not read a
   if (process.platform === "linux" && existsSync("/proc/sys/kernel/random/boot_id")) {
     assert.equal(bootId(), readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim());
   }
+});
+
+test("a pid that is not visible is dead only when the record's PID namespace is the caller's or unknown", () => {
+  const dead = spawnSync(process.execPath, ["-e", "0"]);
+  const here = "pid:[4026531836]";
+  const other = "pid:[4026532693]";
+  const id = bootId();
+  assert.equal(isAlive({ pid: dead.pid, bootId: id, pidNs: here }, { currentPidNs: here }), false, "same namespace: gone is dead");
+  assert.equal(isAlive({ pid: dead.pid, bootId: id, pidNs: other }, { currentPidNs: here }), null, "another namespace: cannot tell");
+  assert.equal(isAlive({ pid: dead.pid, bootId: id, pidNs: null }, { currentPidNs: here }), false, "a record without a namespace reads as before");
+  assert.equal(isAlive({ pid: dead.pid, bootId: id, pidNs: other }, { currentPidNs: null }), false, "this caller's namespace is unknown: as before");
+  assert.equal(isAlive({ pid: process.pid, bootId: id, pidNs: other }, { currentPidNs: here }), true, "a visible pid is alive whatever the namespace");
+  if (process.platform === "linux") assert.match(pidNamespace(), /^pid:\[\d+\]$/);
+  else assert.equal(pidNamespace(), null);
 });

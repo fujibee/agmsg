@@ -24,6 +24,11 @@ export function openInstallDb(path, { readonly = false } = {}) {
       if (!db.prepare("SELECT 1 FROM pragma_table_info('meta') WHERE name='codex_path'").get()) {
         db.exec("ALTER TABLE meta ADD COLUMN codex_path TEXT");
       }
+      // The PID namespace the executor runs in; empty on a record from before it
+      // was kept, which readers treat as "namespace not known".
+      if (!db.prepare("SELECT 1 FROM pragma_table_info('daemon_owner') WHERE name='executor_pid_ns'").get()) {
+        db.exec("ALTER TABLE daemon_owner ADD COLUMN executor_pid_ns TEXT");
+      }
     });
   }
   return db;

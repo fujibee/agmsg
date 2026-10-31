@@ -492,6 +492,30 @@ eperm_pid() {
   [ "${lines[-1]}" = stopped ]
 }
 
+@test "daemon state: an executor in another PID namespace is unchecked from here, not stopped" {
+  [ "$(uname -s)" = Linux ] || skip 'PID namespaces'
+  [ -r /proc/sys/kernel/random/boot_id ] && [ -L /proc/self/ns/pid ] || skip 'no readable boot id or PID namespace here'
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" < "$SCRIPTS/daemon/schema.sql"
+  local boot mine gone
+  boot="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id)"
+  mine="$(readlink /proc/self/ns/pid)"
+  sleep 0 & gone=$!
+  wait "$gone"
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='on';
+    UPDATE daemon_owner SET state='ready', executor_pid=$gone, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), executor_pid_ns='pid:[1]';"
+  run bash -c 'source "$1/lib/daemon-state.sh"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS"
+  [ "${lines[-1]}" = unchecked ]
+
+  # The same namespace, or a record that does not name one, is a pid that is gone.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_pid_ns='$mine';"
+  run bash -c 'source "$1/lib/daemon-state.sh"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS"
+  [ "${lines[-1]}" = stopped ]
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET executor_pid_ns=NULL;"
+  run bash -c 'source "$1/lib/daemon-state.sh"; agmsg_daemon_read_state; echo "$AGMSGD_HEALTH"' _ "$SCRIPTS"
+  [ "${lines[-1]}" = stopped ]
+}
+
 @test "delivery status: a settings file that exists but is not valid JSON is also unrecognized, not deliberate off (review)" {
   # A third way has_ss/has_st both land on 0: not "missing" and not "genuinely
   # empty of agmsg entries" but unreadable/malformed, which the has_ss/has_st
