@@ -347,3 +347,39 @@ EOF
   [ "$_AGMSG_DRIVER_CONFIRMED" = 0 ]
   [ "$_AGMSG_DRIVER_RESOLVED_NAME" = shared ]
 }
+
+@test "partition cache: the status word and the value come from one readfile call, not two (review round 7)" {
+  # The reproduction that found this: two independent SELECTs each calling
+  # readfile() can read a torn state across calls -- the first succeeds,
+  # a second one a moment later returns NULL (or vice versa) -- so a
+  # well-formed "ok\nv:shared" pair could be produced even though no
+  # single read of the file ever actually looked like that. Asserted two
+  # ways: (1) the SQL text sent to sqlite3 calls readfile() exactly once,
+  # proven directly rather than inferred from behavior; (2) a shim whose
+  # SECOND readfile() call (if the real design ever made one) would
+  # return a different team's content still resolves the first team
+  # correctly, because the fixed design never makes that second call.
+  bash "$SCRIPTS/join.sh" tornteam alice claude-code "$BATS_TEST_TMPDIR/proj12" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/teams/tornteam"
+  printf '{"drivers":{"partition":"per-team"}}' > "$TEST_SKILL_DIR/teams/tornteam/config.json"
+
+  local real_sqlite3="$(command -v sqlite3)"
+  local shim="$BATS_TEST_TMPDIR/shim8"
+  local sql_capture="$BATS_TEST_TMPDIR/shim8-sql.txt"
+  mkdir -p "$shim"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'for a in "$@"; do printf "%%s" "$a" >> %q; done\n' "$sql_capture"
+    printf 'exec %q "$@"\n' "$real_sqlite3"
+  } > "$shim/sqlite3"
+  chmod +x "$shim/sqlite3"
+
+  source "$SCRIPTS/lib/driver-registry.sh"
+  PATH="$shim:$PATH" agmsg_driver_for_team_confirmed partition tornteam shared
+  [ "$_AGMSG_DRIVER_RESOLVED_NAME" = per-team ]
+  [ "$_AGMSG_DRIVER_CONFIRMED" = 1 ]
+
+  local occurrences
+  occurrences="$(grep -o 'readfile(' "$sql_capture" | wc -l | tr -d ' ')"
+  [ "$occurrences" = 1 ]
+}

@@ -230,10 +230,20 @@ agmsg_driver_for_team_confirmed() {   # <axis> <team> <default>
   # test, which this exact scenario reproduces). The marker guarantees a
   # non-newline byte always follows the separator, so only sqlite3's own
   # single final newline is ever trailing.
+  # Both lines are derived from the SAME readfile() call, read once into a
+  # TEMP TABLE, rather than two independent SELECTs each calling readfile()
+  # on its own (review round 7: reproduced a torn read -- the first
+  # readfile() call succeeding and the second, independent one returning
+  # NULL a moment later -- which still produced a well-formed "ok\nv:shared"
+  # line pair, confirming the stale per-team fingerprint's own fallback
+  # value as if it had been freshly, successfully resolved). Reading once
+  # and branching on that single stored result means the status word and
+  # the value can never disagree about what was actually read.
   rc=0
   out="$(sqlite3 :memory: \
-    "SELECT CASE WHEN readfile('$rf') IS NULL THEN 'fail' ELSE 'ok' END;
-     SELECT 'v:' || COALESCE(json_extract(readfile('$rf'), '\$.drivers.$axis'), '');" \
+    "CREATE TEMP TABLE r AS SELECT readfile('$rf') AS c;
+     SELECT CASE WHEN c IS NULL THEN 'fail' ELSE 'ok' END FROM r;
+     SELECT 'v:' || COALESCE(json_extract(c, '\$.drivers.$axis'), '') FROM r;" \
     2>/dev/null)" || rc=$?
   out="${out//$'\r'/}"
   [ "$rc" -eq 0 ] || return 0
