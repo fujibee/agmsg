@@ -1,0 +1,59 @@
+# shellcheck over every tracked .sh, ratcheted against a recorded baseline.
+#
+# Until this job existed no linter ran over the shell scripts in CI, so every
+# "shellcheck clean" was a claim about an unknown local setup -- once made on
+# a machine that had no shellcheck at all (#1068). Here the tool is pinned by
+# version and digest, its version is printed by the check itself, and before
+# the tree is judged the job proves the checker fires on a deliberately broken
+# script. A job that has never gone red is indistinguishable from one that
+# never ran; this one goes red on purpose first.
+#
+# The baseline (.github/shellcheck-baseline: version, then count) only goes
+# down. Lowering it is a separate PR per area; see the script's header.
+#
+# Same trigger set as verify-versions: main and every integration branch,
+# on push and on pull_request.
+
+name: shellcheck
+
+on:
+  push:
+    branches: [main, 'integration/**']
+  pull_request:
+    branches: [main, 'integration/**']
+
+permissions:
+  contents: read
+
+env:
+  # Pinned three ways: the version is what the baseline was measured with,
+  # the URL is derived from it, and the digest is the measured sha256 of that
+  # exact tarball (2026-09-08). Bumping the version means re-measuring the
+  # baseline in the same change.
+  SHELLCHECK_VERSION: '0.10.0'
+  SHELLCHECK_SHA256: '6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87'
+
+jobs:
+  check:
+    name: shellcheck at or below the baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the pinned shellcheck and verify its digest
+        run: |
+          set -eu
+          curl -sSL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          echo "SHELLCHECK=${GITHUB_WORKSPACE}/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" >> "$GITHUB_ENV"
+
+      # The control runs BEFORE the verdict, with the same binary: a green
+      # verdict from a checker that was never shown to go red proves nothing.
+      - name: Prove the checker fires on a broken script
+        run: .github/scripts/check-shellcheck.sh --positive-control
+
+      - name: No new shellcheck findings above the baseline
+        run: .github/scripts/check-shellcheck.sh
