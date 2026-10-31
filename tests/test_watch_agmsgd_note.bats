@@ -99,3 +99,39 @@ _run_unfinished_update_watch() {
   grep -qF 'installation was updated while this watcher was running' "$OUT"
   refute grep -qF 'agmsgd is on for this project' "$OUT"
 }
+
+@test "watch stop (no deliveries): a registered destination with agmsgd not ready still gets the note, and it names both causes" {
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  _agmsgd_desired on
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path='$(command -v node)';
+    UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  AGMSG_AGENT_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="uds:/tmp/cc-socks/s-note-reg.sock" \
+    bash "$SCRIPTS/actas-claim.sh" "$PROJ" claude-code alice "sid-note-reg" | grep -qx "delivery=native"
+
+  # Registered and ready: the watch stops because delivery moved to agmsgd, with no note.
+  OUT="$BATS_TEST_TMPDIR/native.txt"
+  : > "$OUT"
+  AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" --max-seconds=2 sid-note-reg "$PROJ" claude-code alice >"$OUT" 2>/dev/null 3>&- 4>&- &
+  local pid=$!
+  _wait_exit "$pid" || { kill "$pid" 2>/dev/null || true; false; }
+  wait "$pid" || true
+  grep -qF 'delivery has moved to agmsgd' "$OUT"
+  refute grep -qF 'agmsgd is on for this project' "$OUT"
+
+  # The same registration with agmsgd no longer ready: the destination is still
+  # there, so the note must not claim there is none.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET state='stopped';"
+  OUT="$BATS_TEST_TMPDIR/notready.txt"
+  : > "$OUT"
+  AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" --max-seconds=2 sid-note-reg "$PROJ" claude-code alice >"$OUT" 2>/dev/null 3>&- 4>&- &
+  pid=$!
+  _wait_exit "$pid" || { kill "$pid" 2>/dev/null || true; false; }
+  wait "$pid" || true
+  grep -qF 'agmsgd is on for this project but is not delivering to this session yet' "$OUT"
+  grep -qF 'or agmsgd is not ready' "$OUT"
+}
