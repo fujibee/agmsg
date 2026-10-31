@@ -1,0 +1,87 @@
+---
+import "../styles/global.css";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+
+// Renders the repo-root PRINCIPLES.md so the site and the doc never drift.
+// PRINCIPLES.md is EN-only for now (see the doc itself), so this page is
+// unprefixed at "/principles" only -- no [lang] variants yet.
+const principlesPath = fileURLToPath(new URL("../../../PRINCIPLES.md", import.meta.url));
+const raw = fs.readFileSync(principlesPath, "utf8");
+
+// Minimal structural parse, not a general markdown renderer -- PRINCIPLES.md
+// has a fixed shape (H1 title, one intro paragraph, numbered "## " sections,
+// a closing "---" + one italic paragraph) and rendering it structurally
+// keeps this page's logic auditable without adding a markdown dependency.
+const withoutTitle = raw.replace(/^#\s+agmsg principles\s*\n+/, "");
+const [body, closing] = withoutTitle.split(/\n---\n/);
+const [intro, ...sectionChunks] = body.trim().split(/\n##\s+/);
+const sections = sectionChunks.map((chunk) => {
+  const newlineIndex = chunk.indexOf("\n");
+  return {
+    heading: chunk.slice(0, newlineIndex).trim(),
+    body: chunk.slice(newlineIndex).trim(),
+  };
+});
+const closingText = (closing || "").trim().replace(/^\*|\*$/g, "");
+
+const siteUrl = "https://agmsg.cc";
+const pageTitle = "Principles — agmsg";
+const pageDesc = "The commitments agmsg holds itself to as the project grows: local-first, an open protocol, no lock-in, structural encryption.";
+const canonicalUrl = `${siteUrl}/principles`;
+---
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{pageTitle}</title>
+  <meta name="description" content={pageDesc} />
+  <link rel="canonical" href={canonicalUrl} />
+  <meta name="theme-color" content="#0d1117" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/brand/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/brand/favicon-16.png" />
+  <link rel="apple-touch-icon" href="/brand/apple-touch-icon-180.png" />
+  <link rel="manifest" href="/site.webmanifest" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="agmsg" />
+  <meta property="og:title" content={pageTitle} />
+  <meta property="og:description" content={pageDesc} />
+  <meta property="og:url" content={canonicalUrl} />
+  <meta property="og:image" content={`${siteUrl}/og.png`} />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={pageTitle} />
+  <meta name="twitter:description" content={pageDesc} />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <main class="mx-auto max-w-2xl px-6 py-16 sm:py-24">
+    <a href="/" class="text-sm text-muted hover:text-accent transition-colors">&larr; agmsg</a>
+
+    <h1 class="mt-6 text-3xl sm:text-4xl font-bold tracking-tight">Principles</h1>
+    <p class="mt-4 text-muted leading-relaxed">{intro.trim()}</p>
+
+    <div class="mt-10 space-y-8 border-t border-border pt-8">
+      {sections.map((s) => (
+        <section>
+          <h2 class="text-lg font-semibold text-fg">{s.heading}</h2>
+          <p class="mt-2 text-muted leading-relaxed">{s.body}</p>
+        </section>
+      ))}
+    </div>
+
+    {closingText && (
+      <p class="mt-10 border-t border-border pt-8 text-sm italic text-muted">{closingText}</p>
+    )}
+
+    <p class="mt-10 text-sm text-muted">
+      Source: <a class="text-accent hover:underline" href="https://github.com/fujibee/agmsg/blob/main/PRINCIPLES.md">PRINCIPLES.md</a> in the repo.
+    </p>
+  </main>
+</body>
+</html>
