@@ -410,7 +410,7 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "절대 할 수 없는 것",
+      "neverTitle": "이 애드온이 할 수 없는 것",
       "source_other": "{{repo}} 에서 · {{sha}} · 패널 {{count}}개 추가",
       "sourceUpdate_other": "{{repo}} 에서 · {{from}} → {{to}} · 패널 {{count}}개",
       "panes": "추가되는 패널: {{names}}"

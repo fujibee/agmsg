@@ -410,7 +410,7 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "Nunca puede",
+      "neverTitle": "Lo que no puede hacer",
       "source_one": "de {{repo}} · {{sha}} · añade {{count}} panel",
       "source_many": "de {{repo}} · {{sha}} · añade {{count}} paneles",
       "source_other": "de {{repo}} · {{sha}} · añade {{count}} paneles",

@@ -410,7 +410,7 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "它永远不能",
+      "neverTitle": "它不能做的事",
       "source_other": "来自 {{repo}} · {{sha}} · 添加 {{count}} 个面板",
       "sourceUpdate_other": "来自 {{repo}} · {{from}} → {{to}} · {{count}} 个面板",
       "panes": "将添加：{{names}}"
