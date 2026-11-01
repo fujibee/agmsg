@@ -410,7 +410,7 @@
       "paneCombined": "{{pane}} が、読み取った内容をネットワークへ送れるようになります",
       "paneAsksAgain": "{{pane}} は、フォルダやチームへのアクセスを改めて確認します",
       "paneRemoved": "{{pane}} は削除されます(保存済みのアクセスも破棄されます)",
-      "neverTitle": "絶対にできないこと",
+      "neverTitle": "このアドオンができないこと",
       "source_other": "{{repo}} から · {{sha}} · ペイン {{count}} 件を追加",
       "sourceUpdate_other": "{{repo}} から · {{from}} → {{to}} · ペイン {{count}} 件",
       "panes": "追加されるペイン: {{names}}"
