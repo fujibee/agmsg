@@ -19,7 +19,7 @@
 //     table's own exit column.
 
 import { readPollTimeout } from './log.mjs';
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -236,12 +236,33 @@ async function main() {
   // in an interactive terminal (a TTY, where the same write is
   // unbuffered) looked completely fine. Setting exitCode and letting the
   // event loop drain naturally waits for the flush first.
+  const installVerifyWarning = readInstallVerifyWarning(installRoot, owner, alive);
   const pollTimeout = readPollTimeout(installRoot);
   const pollText = pollTimeout ? `Last poll timeout: ${pollTimeout.channel ?? 'unknown'} ${pollTimeout.seat ?? ''} ${pollTimeout.reason} (${pollTimeout.at ?? 'unknown time'})\n` : '';
   process.stdout.write(
-    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${pollText}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
+    json ? `${JSON.stringify({ ...result, poll_timeout: pollTimeout, install_verify_warning: installVerifyWarning, codex_seats: codexSeats, claude_code_seats: claudeCodeSeats, codex_pending: codexPending, codex_expired: codexExpired, node_sqlite_experimental: true, node_version: process.version })}\n` : `${result.text}\n${formatInstallVerifyWarning(installVerifyWarning)}${pollText}${formatSkippedTeams("Claude Code", claudeCodeSeats)}${formatSkippedTeams("Codex", codexSeats)}${formatClaudeSeats(claudeCodeSeats, all)}${formatUnregisteredPending(installRoot, codexPending, all)}`,
   );
   process.exitCode = result.exitCode;
+}
+
+// What agmsgd found different between scripts/ and the install record when it
+// started (written by the entrypoint; see recordVerifyProblems there). Only
+// read for the running process's own file (named by its pid): a file left by
+// an earlier run says nothing about this one.
+export function readInstallVerifyWarning(installRoot, owner, alive) {
+  if (alive !== true || owner?.executor_pid == null) return null;
+  let warning;
+  try { warning = JSON.parse(readFileSync(join(installRoot, 'run', `install-verify-warning.${owner.executor_pid}.json`), 'utf8')); } catch { return null; }
+  if (warning?.pid !== owner.executor_pid) return null;
+  if (!Array.isArray(warning.problems) || warning.problems.length === 0) return null;
+  return warning;
+}
+
+function formatInstallVerifyWarning(warning) {
+  if (!warning) return '';
+  const wording = { missing: 'missing', unexpected: 'not in the record', digest_mismatch: 'differs from the record', symlink: 'symlink', unreadable: 'unreadable' };
+  const list = warning.problems.map((p) => `${p.path} (${wording[p.kind] ?? p.kind})`).join(', ');
+  return `Warning: agmsgd started although scripts/ does not match its install record: ${list}. Run install.sh --update (or npx agmsg@latest install --update) to refresh the record.\n`;
 }
 
 function formatUnregisteredPending(installRoot, pending, all) {
