@@ -113,7 +113,7 @@ test("takeOwnership takes over when the recorded owner is confirmed dead", () =>
 });
 
 for (const missingExecutor of [false, true]) {
-  test(`takeOwnership replaces an ${missingExecutor ? "unrecorded" : "undeterminable"} executor`, () => {
+  test(`takeOwnership refuses an ${missingExecutor ? "unrecorded" : "undeterminable"} executor until it stops`, () => {
     const { dir, db } = freshDb();
     try {
       const options = { installRoot: dir, expectedDesired: null, expectedOpGen: 0, version: "test" };
@@ -125,6 +125,15 @@ for (const missingExecutor of [false, true]) {
         process.kill = () => { throw Object.assign(new Error("probe unavailable"), { code: "ENOSYS" }); };
         if (missingExecutor) db.exec("UPDATE daemon_owner SET executor_pid = NULL");
         else assert.equal(isAlive({ pid: process.pid, bootId: bootId() }), null);
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const refused = takeOwnership(db, options);
+          assert.equal(refused.ok, false);
+          assert.match(refused.reason, /Run agmsg daemon stop, confirm it stopped, then run agmsg daemon start/);
+          assert.equal(readOwner(db).gen, first.gen, "repeated launchers cannot replace an unchecked owner");
+          assert.equal(readOwner(db).state, "ready");
+        }
+        // The old executor's normal shutdown completes before the retry.
+        assert.equal(stopNormally(db, first.gen), true);
         const second = takeOwnership(db, options);
         assert.equal(second.ok, true);
         assert.equal(second.gen, first.gen + 1);

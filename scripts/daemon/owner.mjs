@@ -36,7 +36,7 @@ export function controlSocketPath(installRoot, gen, installId, platform = proces
 }
 
 // Read daemon_owner, and if the current owner is
-// state='none' or not positively alive, take the next gen and move to
+// state='none' or confirmed dead, take the next gen and move to
 // 'starting' -- ALSO requiring, in the same read, that daemon_intent still
 // matches what the caller (the launcher) already observed. Returns
 // `{ok: true, gen, socket}` for the caller to go bind, or
@@ -54,12 +54,18 @@ export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen,
     }
 
     const owner = readOwner(db);
-    if (owner.state !== "none" && owner.executor_pid != null) {
+    if (owner.state !== "none") {
+      if (owner.executor_pid == null) {
+        return { ok: false, reason: "current owner has no recorded executor; ownership cannot be checked. Run agmsg daemon stop, confirm it stopped, then run agmsg daemon start" };
+      }
       const alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id });
       if (alive === true) return { ok: false, reason: "current owner is alive" };
+      if (alive === null) {
+        // Unknown is not proof of exit. Replacing this owner could leave two
+        // delivery loops running, including outside an update or repeatedly.
+        return { ok: false, reason: "current owner's liveness cannot be determined; taking over could duplicate delivery. Run agmsg daemon stop, confirm it stopped, then run agmsg daemon start" };
+      }
     }
-    // Missing, dead, or undeterminable executors do not block startup.
-    // Advancing gen fences older lifecycle writes, not their delivery work.
 
     const gen = owner.gen + 1;
     const executor = currentExecutor();
