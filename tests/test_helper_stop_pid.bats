@@ -14,16 +14,20 @@ setup() {
 }
 
 teardown() {
-  local p
+  local p failed=0
   while IFS= read -r p; do
     case "$p" in ''|*[!0-9]*) continue ;; esac
     case "$(ps -ww -o args= -p "$p" 2>/dev/null || true)" in
       *"$FIXTURE_MARK"*)
         kill -9 "$p" 2>/dev/null || true
-        wait_for_pid_exit "$p" || echo "teardown: fixture pid $p still running" >&2
+        if ! wait_for_pid_exit "$p"; then
+          echo "teardown: fixture pid $p still running" >&2
+          failed=1
+        fi
         ;;
     esac
   done < "$FIXTURE_PIDS"
+  return "$failed"
 }
 
 @test "agmsg_stop_pid: stops this shell's own job, escalating to KILL when TERM is ignored" {
