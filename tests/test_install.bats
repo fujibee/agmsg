@@ -224,6 +224,69 @@ _agy_failing_mv_fixture() {
   grep -q '/scripts/drivers/types/codex/codex-shim.sh' "$shim"
 }
 
+# A stand-in for a running agmsgd: listens on a socket recorded in install.db,
+# and on a stop request (obeying it unless told to hang) notes whether the
+# installed scripts were still the old ones, marks the owner "none" and exits.
+_fake_agmsgd() {   # <obey|hang>
+  local sock="$FAKE_HOME/d.sock" db="$SK/run/install.db"
+  rm -f "$sock"
+  node -e '
+    const net = require("node:net"); const fs = require("node:fs");
+    const { DatabaseSync } = require("node:sqlite");
+    const [sock, db, mode, marker, log] = process.argv.slice(1);
+    net.createServer((c) => { let b = "";
+      c.on("data", (d) => { b += d; if (!b.includes("\"stop\"")) return;
+        fs.appendFileSync(log, fs.readFileSync(marker, "utf8").includes("OLD-SCRIPT") ? "stop-before-swap\n" : "stop-after-swap\n");
+        if (mode === "obey") { const x = new DatabaseSync(db); x.exec("PRAGMA busy_timeout=5000; UPDATE daemon_owner SET state=\"none\", socket=NULL, executor_pid=NULL;"); x.close(); process.exit(0); }
+      });
+    }).listen(sock, () => fs.writeFileSync(log + ".up", "1"));
+  ' "$sock" "$db" "$1" "$SK/scripts/daemon.sh" "$FAKE_HOME/fake.log" &
+  FAKE_PID=$!
+  local i=0
+  while [ ! -e "$FAKE_HOME/fake.log.up" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
+  sqlite3 "$db" "UPDATE daemon_intent SET desired='on'; UPDATE meta SET node_path='$(command -v node)'; UPDATE daemon_owner SET state='ready', socket='$sock', executor_pid=$FAKE_PID;"
+}
+
+@test "install --update: a running agmsgd is stopped, and gone, before any script is replaced" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  printf '\n# OLD-SCRIPT\n' >> "$SK/scripts/daemon.sh"
+  _fake_agmsgd obey
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  kill "$FAKE_PID" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  grep -Fq "agmsgd stopped before the update (exit confirmed)" <<<"$output"
+  [ "$(cat "$FAKE_HOME/fake.log")" = "stop-before-swap" ]
+  refute grep -q "OLD-SCRIPT" "$SK/scripts/daemon.sh"
+  [ "$(sqlite3 "$SK/run/install.db" 'SELECT desired FROM daemon_intent;')" = on ]
+}
+
+@test "install --update: an agmsgd that does not exit within the bound is reported, and the update still finishes" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _fake_agmsgd hang
+  run env HOME="$FAKE_HOME" AGMSG_UPDATE_STOP_WAIT=2 bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  kill "$FAKE_PID" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  grep -Fq "agmsgd has not exited within 2s; the update goes on." <<<"$output"
+  grep -Fq "daemon stop, then daemon start" <<<"$output"
+  grep -Fq "Update complete" <<<"$output"
+}
+
+@test "install --update: a record that says ready for a process that is gone does not hold the update" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='on'; UPDATE daemon_owner SET state='ready', socket='$FAKE_HOME/none.sock', executor_pid=999999;"
+  run env HOME="$FAKE_HOME" AGMSG_UPDATE_STOP_WAIT=20 bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  grep -Fq "agmsgd stopped before the update (exit confirmed)" <<<"$output"
+}
+
+@test "install --update: with no agmsgd running nothing about stopping is printed" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  refute grep -Fq "agmsgd stopped before the update" <(printf '%s' "$output")
+  refute grep -Fq "agmsgd has not exited" <(printf '%s' "$output")
+}
+
 @test "install: a failing Antigravity skill step warns once and the rest of the install is unaffected" {
   mkdir -p "$FAKE_HOME/.gemini/config"
   # A file where the skills directory belongs, so creating the skill folder fails.
