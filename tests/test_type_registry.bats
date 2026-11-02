@@ -575,10 +575,10 @@ YAML
 
   run bash "$SCRIPTS/spawn.sh" app-addon chess --project "$proj" --team team
   [ "$status" -ne 0 ]
-  [[ "$output" == *"not supported by spawn"* ]]
+  grep -Fq "not supported by spawn" <<<"$output"
 
   run bash "$SCRIPTS/doctor.sh" --project "$proj" --type app-addon
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no warnings."* ]]
-  [[ "$output" != *"delivery.sh status exited"* ]]
+  grep -Fq "no warnings." <<<"$output"
+  refute grep -Fq "delivery.sh status exited" <<<"$output"
 }
