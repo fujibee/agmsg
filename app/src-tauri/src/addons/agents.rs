@@ -1152,7 +1152,7 @@ mod tests {
         let r = call(&f, "agents.spawn", json!({"type": "claude-code", "name": "w", "folder": "sub"})).unwrap();
         assert_eq!(r["state"], "running");
         let ms = f.world.members.lock().unwrap();
-        assert_eq!(ms.iter().find(|m| m.name == "w").unwrap().project, f.granted.join("sub").to_string_lossy());
+        assert_eq!(ms.iter().find(|m| m.name == "w").unwrap().project, plain_path_str(&f.granted.join("sub").to_string_lossy()));
         drop(ms);
         std::fs::write(f.granted.join("file.txt"), "x").unwrap();
         for folder in ["file.txt", "/etc", "C:/Windows", "sub/..", "a\\b"] {

@@ -164,8 +164,10 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let home = t.path().canonicalize().unwrap();
         let f = agents_folder(&home).unwrap();
-        assert_eq!(f, home.join("agmsg-agents"));
-        assert_ne!(f, home);
+        // on Windows `canonicalize` gives the verbatim form, which is dropped from what the app names
+        let plain = |p: &Path| PathBuf::from(crate::addons::agents::plain_path_str(&p.to_string_lossy()));
+        assert_eq!(f, plain(&home.join("agmsg-agents")));
+        assert_ne!(f, plain(&home));
     }
 
     #[test]
