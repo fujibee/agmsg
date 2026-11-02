@@ -524,11 +524,16 @@ impl Manager {
             return Err(BrokerError::new("bad_args", "`to` and `body` must not be empty"));
         }
         let me = self.member_of(&a.addon, tid).ok_or_else(|| BrokerError::new("not_granted", "the add-on has not joined the team (call team.join first)"))?;
-        let ms = phase("send: members", || self.world.members(team)).map_err(|e| BrokerError::new("not_available", e))?;
-        if !ms.iter().any(|m| m.name == to) {
-            return Err(BrokerError::new("bad_args", format!("{to} is not a member of the team")));
-        }
-        phase("send: send.sh", || self.world.send(team, &me.name, &to, &body)).map_err(|e| BrokerError::new("not_available", e))?;
+        // No member list is read first: send.sh refuses a recipient that is not registered (and the app never passes
+        // --force), which saves one api.sh run per send. That refusal is the add-on's mistake (`bad_args`); any other
+        // failure of the script is not.
+        phase("send: send.sh", || self.world.send(team, &me.name, &to, &body)).map_err(|e| {
+            if e.contains("is not registered in team") {
+                BrokerError::new("bad_args", format!("{to} is not a member of the team"))
+            } else {
+                BrokerError::new("not_available", e)
+            }
+        })?;
         Ok(json!({ "to": to }))
     }
 
@@ -876,6 +881,10 @@ mod tests {
             Ok(())
         }
         fn send(&self, team: &str, from: &str, to: &str, body: &str) -> Result<(), String> {
+            // like send.sh: a recipient that is not registered is refused
+            if !self.members.lock().unwrap().iter().any(|m| m.name == to) {
+                return Err(format!("Error: to agent '{to}' is not registered in team '{team}' (registered: ...). Use --force to bypass."));
+            }
             self.sent.lock().unwrap().push((team.into(), from.into(), to.into(), body.into()));
             Ok(())
         }
