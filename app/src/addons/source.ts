@@ -151,7 +151,7 @@ export function createLiveSource(invoke: Invoke) {
     async engine(): Promise<EngineState> {
       try {
         const g = (await invoke("addon_gate_status")) as { enabled: boolean; reasons: string[]; codes?: string[] };
-        return g.enabled ? { ok: true } : { ok: false, reasons: g.reasons, codes: g.codes ?? [] };
+        return g.enabled ? { ok: true } : { ok: false, reasons: g.reasons, codes: g.codes?.length ? g.codes : ["unavailable"] };
       } catch (e) {
         return { ok: false, reasons: [toCommandError(e).message], codes: ["unavailable"] };
       }

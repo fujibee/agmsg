@@ -272,7 +272,7 @@
       "notVerified": "Les modules complémentaires ne sont pas encore pris en charge sur cette version de Windows.",
       "platform": "Les modules complémentaires ne sont pas disponibles sur ce système d'exploitation.",
       "network": "Le moteur web de ce système ne peut pas bloquer l'accès réseau des modules complémentaires, ils restent donc désactivés.",
-      "navigation": "Le moteur web de ce système ne peut pas empêcher les modules complémentaires de quitter leur volet, ils restent donc désactivés.",
+      "navigation": "Le moteur web de ce système n'a pas pu confirmer que les modules complémentaires restent dans leur volet, ils restent donc désactivés.",
       "isolation": "Le moteur web de ce système n'a pas pu confirmer que les modules complémentaires s'exécutent de façon isolée, ils restent donc désactivés.",
       "unfinished": "La vérification de sécurité ne s'est pas terminée. Réessayez.",
       "generic": "La vérification de sécurité n'a pas abouti, les modules complémentaires restent donc désactivés sur cet ordinateur."

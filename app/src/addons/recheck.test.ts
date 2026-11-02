@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isChecking, offersRecheck, reasonKeys } from "./recheck";
+import { engineOffText, isChecking, offersRecheck, reasonKeys } from "./recheck";
 
 describe("Check again", () => {
   it("is offered after a timeout or a failed check", () => {
@@ -21,6 +21,15 @@ describe("Check again", () => {
     expect(isChecking(["checking"])).toBe(true);
     expect(isChecking(["check-pending"])).toBe(true);
     expect(isChecking(["check-timeout"])).toBe(false);
+  });
+});
+
+describe("engine off text", () => {
+  const t = (k: string) => `[${k}]`;
+  it("says Checking while a check runs, else the localized reasons", () => {
+    expect(engineOffText(["checking"], t)).toBe("[addons.checking]");
+    expect(engineOffText(["check-pending"], t)).toBe("[addons.checking]");
+    expect(engineOffText(["frame-guard", "webrtc-udp"], t)).toBe("[addons.reason.navigation] [addons.reason.network]");
   });
 });
 

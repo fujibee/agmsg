@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { AddonsSnapshot, EngineState, InstallError, InstalledAddon } from "./types";
 import { declaredPermissions, addonNetwork, grantText, grantsOf, installErrorText, parseRepoInput, permissionRow, shortSha, type Translate } from "./model";
-import { isChecking, offersRecheck, reasonKeys } from "./recheck";
+import { engineOffText, isChecking, offersRecheck } from "./recheck";
 import { BusyButton } from "../busy";
 
 // Settings → Add-ons (S1, S4). One intro line, the install field, then
@@ -127,7 +127,7 @@ export function AddonsSettings(props: Props) {
           {t("addons.engineOff")}{" "}
           {isChecking(engine.codes)
             ? t("addons.checking")
-            : engine.codes.length > 0 && t("addons.engineReasons", { reasons: reasonKeys(engine.codes).map((k) => t(k)).join(" ") })}
+            : engine.codes.length > 0 && t("addons.engineReasons", { reasons: engineOffText(engine.codes, t) })}
         </p>
         {(offersRecheck(engine.codes) || isChecking(engine.codes)) && props.onRecheck && (
           <BusyButton type="button" className="addon-btn" busy={isChecking(engine.codes)} onClick={() => props.onRecheck?.()}>

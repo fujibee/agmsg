@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import type { AddonPaneRef, EngineState, InstalledAddon } from "./addons/types";
-import { reasonKeys } from "./addons/recheck";
+import { engineOffText } from "./addons/recheck";
 
 // The two "new" menus, one component. The tab bar's + opens a menu of what can fill a pane: Shell first,
 // then File view…, Diff view…, every enabled installed or developer add-on pane, and Install add-ons….
@@ -46,7 +46,7 @@ export function newMenuEntries(props: Omit<Props, "open" | "onToggle">): MenuEnt
     ];
   }
   const off = !props.team || !addonEngine.ok;
-  const why = addonEngine.ok ? undefined : reasonKeys(addonEngine.codes).map((k) => t(k)).join(" ");
+  const why = addonEngine.ok ? undefined : engineOffText(addonEngine.codes, t);
   const pane = (key: string, label: string, ref: AddonPaneRef): MenuEntry => ({ key, label, disabled: off, title: why, run: go(() => props.onOpenAddon(ref)) });
   return [
     { key: "shell", label: t("tabs.shellLabel"), disabled: false, run: go(props.onShell) },
@@ -174,7 +174,7 @@ export function NewMenu(props: Props) {
           )}
           {variant === "tabs" && !props.addonEngine.ok && (
             <div className="new-menu-note" role="note">
-              {reasonKeys(props.addonEngine.codes).map((k) => props.t(k)).join(" ")}
+              {engineOffText(props.addonEngine.codes, props.t)}
             </div>
           )}
         </div>

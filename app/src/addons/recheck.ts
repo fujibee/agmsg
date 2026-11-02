@@ -36,6 +36,11 @@ const REASON_KEYS: Record<string, string> = {
   "check-start-failed": "addons.reason.unfinished",
 };
 
+/** The one line to show for an off engine: "Checking…" while a check runs, else the localized reasons. */
+export function engineOffText(codes: string[], t: (key: string) => string): string {
+  return isChecking(codes) ? t("addons.checking") : reasonKeys(codes).map((k) => t(k)).join(" ");
+}
+
 /** Distinct message keys for the codes, in order (several codes can share one message). */
 export function reasonKeys(codes: string[]): string[] {
   const keys = codes.map((c) => REASON_KEYS[c] ?? "addons.reason.generic");
