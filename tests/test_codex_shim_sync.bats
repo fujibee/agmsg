@@ -145,3 +145,18 @@ _choose() {   # <value>
   grep -Fq "installed: $SHIM" <<<"$output"
   [ -x "$SHIM" ]
 }
+
+@test "sync: a dangling symlink in the shim's place is not written through when restoring" {
+  AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
+  _agmsgd on
+  bash "$INSTALLER" sync >/dev/null
+  ln -s "$TEST_SKILL_DIR/nowhere" "$SHIM"
+  _agmsgd off
+  run bash "$INSTALLER" sync
+  [ "$status" -eq 0 ]
+  grep -Fq "kept: $SHIM (already present)" <<<"$output"
+  [ -L "$SHIM" ]
+  [ "$(readlink "$SHIM")" = "$TEST_SKILL_DIR/nowhere" ]
+  [ ! -e "$TEST_SKILL_DIR/nowhere" ]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-shim-retired" ]
+}

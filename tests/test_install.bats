@@ -243,6 +243,26 @@ _agy_failing_mv_fixture() {
   grep -q '/scripts/drivers/types/codex/codex-shim.sh' "$shim"
 }
 
+@test "install --update: a Codex shim that cannot be put back is reported with the command to repeat, and the update still finishes" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
+  sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='on';"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  grep -Fq "Codex shim: removed:" <<<"$output"
+  [ -f "$SK/run/codex-shim-retired" ]
+
+  sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  # A file where the shim directory belongs: restoring cannot create the shim.
+  rm -rf "$FAKE_HOME/.agents/bin"
+  : > "$FAKE_HOME/.agents/bin"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  grep -Fq "could not update the Codex shim" <<<"$output"
+  grep -Fq "repeat with: $SK/scripts/drivers/types/codex/codex-shim-install.sh sync" <<<"$output"
+  [ -f "$SK/run/codex-shim-retired" ]
+}
+
 @test "install --update: with agmsgd off an owned Codex shim is refreshed as before" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null

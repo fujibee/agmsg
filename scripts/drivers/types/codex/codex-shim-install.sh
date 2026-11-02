@@ -354,7 +354,7 @@ EOF
     fi
     if [ "$agmsgd_on" = true ] && [ "$needs_bridge" = false ]; then
       if ! is_agmsg_shim; then
-        if [ -e "$TARGET" ]; then echo "kept: $TARGET (not an agmsg shim)"; else echo "not installed: $TARGET"; fi
+        if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then echo "kept: $TARGET (not an agmsg shim)"; else echo "not installed: $TARGET"; fi
         exit 0
       fi
       owner="$(shim_owner_script_dir)"
@@ -371,7 +371,7 @@ EOF
       # Put back a shim this script removed, once it is wanted again. Only the
       # shim this install removed (the marker), and only into an empty place.
       if [ -f "$retired_marker" ]; then
-        if [ -e "$TARGET" ]; then
+        if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
           rm -f "$retired_marker"
           echo "kept: $TARGET (already present)"
         elif AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$0" install >/dev/null 2>&1; then

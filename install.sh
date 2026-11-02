@@ -577,6 +577,21 @@ agmsg_install_optional_codex_chmod() {
   chmod +x "$SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
 }
 
+# Runs `codex-shim-install.sh sync` and shows what it did. A shim that was
+# removed or put back is reported; a failure is shown with the command that
+# repeats it, and never fails the install.
+agmsg_install_sync_codex_shim() {
+  local out
+  [ -x "$CODEX_SHIM" ] || return 0
+  if out="$(AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" sync 2>&1)"; then
+    case "$out" in removed:*|installed:*) echo "  ~ Codex shim: $out" ;; esac
+  else
+    echo "  ! could not update the Codex shim: $out" >&2
+    echo "    repeat with: $CODEX_SHIM sync" >&2
+  fi
+  return 0
+}
+
 agmsg_install_refresh_codex_shim() {
   env AGMSG_CODEX_SHIM_INSTALL_QUIET=1 AGMSG_CODEX_SHIM_FORCE="${CODEX_SHIM_FORCE:-}" \
       "$CODEX_SHIM" install >/dev/null
@@ -1219,7 +1234,7 @@ $_agmsg_running_team"
   # While agmsgd delivers Codex notices the shim is not needed: `sync` removes
   # an agmsg shim owned by this install (and puts it back when agmsgd is off),
   # so the refresh below then finds nothing to refresh.
-  [ -x "$CODEX_SHIM" ] && AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" sync >/dev/null 2>&1 || true
+  agmsg_install_sync_codex_shim
   CODEX_SHIM_STATUS=""
   [ -x "$CODEX_SHIM" ] && CODEX_SHIM_STATUS="$(AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null || true)"
   if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
@@ -1360,7 +1375,7 @@ install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" install_ant
 # whichever install already owns it. codex-shim-install.sh itself refuses that
 # and says whose it is; surface that here instead of swallowing it.
 CODEX_SHIM="$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh"
-[ -x "$CODEX_SHIM" ] && AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" sync >/dev/null 2>&1 || true
+agmsg_install_sync_codex_shim
 CODEX_SHIM_STATUS=""
 [ -x "$CODEX_SHIM" ] && CODEX_SHIM_STATUS="$(AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null || true)"
 if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
