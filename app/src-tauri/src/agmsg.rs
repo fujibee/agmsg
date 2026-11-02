@@ -1167,6 +1167,10 @@ fn run_script(name: &str, args: &[&str]) -> Result<String, String> {
     let output = bash_command()?
         .arg(bash_path(&script))
         .args(args)
+        // The app is not a seat. Core's self-naming (a seat names its own terminal pane when it sends or reads)
+        // would otherwise ask the terminal the app was started from, which costs about two seconds per send when
+        // that terminal is herdr or tmux, and can bind the sending member to that pane.
+        .env("AGMSG_SELF_NAME", "off")
         .output()
         .map_err(|e| e.to_string())?;
     if output.status.success() {
@@ -1992,6 +1996,18 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
         assert_eq!(agmsg_base(), dir.path());
+    }
+
+    /// Every script the app runs is told not to self-name, whatever the app's own environment says.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    #[serial]
+    fn scripts_run_by_the_app_are_told_not_to_name_a_terminal_pane() {
+        let _b = fake_base(&[("probe.sh", "printf '%s' \"${AGMSG_SELF_NAME-unset}\"\n")]);
+        let _on = EnvGuard::set("AGMSG_SELF_NAME", "on");
+        assert_eq!(run_script("probe.sh", &[]).unwrap(), "off", "the app's own setting does not reach the script");
+        drop(_on);
+        assert_eq!(run_script("probe.sh", &[]).unwrap(), "off");
     }
 
     #[test]
