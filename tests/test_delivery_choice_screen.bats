@@ -73,3 +73,23 @@ _step5() {   # <file>: the delivery step of the join flow
     grep -Fq '/agmsg delivery agmsgd' <<<"$section"
   done
 }
+
+@test "delivery setup: existing seats never prompt and an active daemon is reused without a choice" {
+  for file in "$BATS_TEST_TMPDIR/claude-code.md" "$BATS_TEST_TMPDIR/codex.md" "$ROOT/SKILL.md"; do
+    screen="$(_step5 "$file")"
+    grep -Fq 'Ask about delivery only on a human-initiated first join' <<<"$screen"
+    grep -Fq 'Never ask on `actas`, `spawn`, or rejoin of an existing seat' <<<"$screen"
+    grep -Fq 'even if `join.sh` must restore its registration' <<<"$screen"
+    on="$(grep -F '`agmsgd=on`:' <<<"$screen")"
+    grep -Fq 'ask nothing. Run' <<<"$on"
+    grep -Fq 'agmsg delivery agmsgd --type' <<<"$on"
+    grep -Fq 'and continue' <<<"$on"
+    ! grep -Fq 'keep using it or switch' <<<"$screen"
+    ! grep -Fq 'Show this screen every time' <<<"$screen"
+    grep -Fq 'preserve the configured delivery and continue without asking or changing it' <<<"$screen"
+    for offer in available not-running unavailable; do
+      line="$(grep -F "agmsgd=$offer" <<<"$screen" | head -1)"
+      grep -Fq 'only on a human-initiated first join' <<<"$line"
+    done
+  done
+}
