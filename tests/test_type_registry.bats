@@ -43,11 +43,11 @@ write_node_launcher_fixtures() {
   printf '// stub node launcher fixture\n' > "$nd/nodetype-launcher.mjs"
 }
 
-@test "type-registry: known_types lists the twelve built-ins" {
+@test "type-registry: known_types lists the thirteen built-ins" {
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; agmsg_known_types | sort -u | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "agmsg-app,antigravity,claude-code,codex,copilot,cursor,devin,ext-tool,gemini,grok-build,hermes,opencode" ]
+  [ "$output" = "agmsg-app,antigravity,app-addon,claude-code,codex,copilot,cursor,devin,ext-tool,gemini,grok-build,hermes,opencode" ]
 }
 
 @test "type-registry: sourcing alone does not compute the renderable-types list (#631)" {
@@ -298,10 +298,10 @@ EOF
   done <<<"$renderable_types"
 }
 
-@test "type-registry: spawnable set is exactly eight of the eleven built-ins (#277, #279)" {
+@test "type-registry: spawnable set is exactly eight of the thirteen built-ins (#277, #279)" {
   # hermes and devin deliberately stay out (#279): no known CLI mode starts them
-  # interactive with a seeded initial prompt. agmsg-app also stays out: it's
-  # the desktop app itself (spawnable=no), not a spawnable agent type.
+  # interactive with a seeded initial prompt. agmsg-app and app-addon also stay out: they
+  # are members of the desktop app (spawnable=no), not spawnable agent types.
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'
      while IFS= read -r t; do
@@ -554,4 +554,31 @@ YAML
   before_flag=$(grep -n -- "--extra-flag" "$boot" | head -1 | cut -d: -f1)
   before_input=$(grep -n -- "--initial-input" "$boot" | head -1 | cut -d: -f1)
   [ "$before_flag" -lt "$before_input" ]
+}
+
+@test "type-registry: app-addon is data only -- joinable, never spawnable, no delivery" {
+  local d="$SCRIPTS/drivers/types/app-addon"
+  [ "$(ls "$d")" = "type.conf" ]
+  run env -i PATH="$PATH" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'
+     for k in spawnable readiness_sentinel delivery_modes; do printf '%s=%s\n' \$k \"\$(agmsg_type_get app-addon \$k)\"; done"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'spawnable=no\nreadiness_sentinel=no\ndelivery_modes=off' ]
+}
+
+@test "join: type app-addon is accepted, and spawn.sh and doctor leave it alone" {
+  local proj="$TEST_SKILL_DIR/addon-proj"
+  mkdir -p "$proj"
+  run bash "$SCRIPTS/join.sh" team chess app-addon "$proj"
+  [ "$status" -eq 0 ]
+  grep -q '"type": *"app-addon"' "$TEST_SKILL_DIR/teams/team/config.json"
+
+  run bash "$SCRIPTS/spawn.sh" app-addon chess --project "$proj" --team team
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not supported by spawn"* ]]
+
+  run bash "$SCRIPTS/doctor.sh" --project "$proj" --type app-addon
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no warnings."* ]]
+  [[ "$output" != *"delivery.sh status exited"* ]]
 }
