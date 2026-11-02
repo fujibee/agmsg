@@ -462,7 +462,7 @@ impl Manager {
         if let Some(e) = self.find(&a.addon, tid, Kind::Member, "").filter(|e| e.state != State::Claimed) {
             return self.member_reply(&e, false);
         }
-        let lock = self.team_lock(team);
+        let lock = self.team_lock(tid);
         let _held = lock.lock().unwrap();
         // another pane of the same add-on may have joined while this one waited
         if let Some(e) = self.find(&a.addon, tid, Kind::Member, "") {
@@ -574,9 +574,11 @@ impl Manager {
             Some(f) => Some(super::broker::resolve_dir(a, deny, f)?),
             None => None,
         };
-        let lock = self.team_lock(team);
-        let _held = lock.lock().unwrap();
+        let lock = self.team_lock(tid);
+        let held = lock.lock().unwrap();
         if let Some(e) = self.find(&a.addon, tid, Kind::Agent, &wanted) {
+            // `retry` may open a terminal, which takes this lock for a moment: not held across it
+            drop(held);
             return self.retry(&e, model);
         }
         let before = phase("spawn: members", || self.world.members(team)).map_err(|e| BrokerError::new("not_available", e))?;
@@ -600,6 +602,10 @@ impl Manager {
             return Err(BrokerError::new("conflict", why));
         }
         self.set_state(&key, State::Joined, None)?;
+        // The team lock covers the name decision, the journal claim, join.sh, the check after it and the `joined`
+        // record. It is released here: opening the terminal and waiting for it concern this entry only, and another
+        // spawn into the same team must not wait for it.
+        drop(held);
         self.open(&key)
     }
 
@@ -647,7 +653,17 @@ impl Manager {
     /// through `pty_started` once the pane has one.
     fn open(&self, key: &str) -> Res {
         let e = self.by_key(key).ok_or_else(|| BrokerError::new("not_available", "the entry is gone"))?;
-        self.set_state(key, State::Opening, None)?;
+        // Taking the entry from `joined` to `opening` is the one step that must not happen twice for it: two calls
+        // that both see `joined` would open two terminals. It is done under the team lock; the rest is not.
+        {
+            let lock = self.team_lock(&e.team_id);
+            let _held = lock.lock().unwrap();
+            match self.by_key(key) {
+                Some(cur) if cur.state == State::Joined => self.set_state(key, State::Opening, None)?,
+                Some(cur) => return Ok(summary(&cur)),
+                None => return Err(BrokerError::new("not_available", "the entry is gone")),
+            }
+        }
         let req = OpenPane { key: key.to_string(), team: e.team.clone(), name: e.name.clone(), agent_type: e.agent_type.clone(), project: e.project.clone(), model: e.model.clone() };
         if let Err(why) = phase("spawn: emit open", || self.world.open_pane(&req)) {
             // the member stays joined and recorded; the add-on may ask again
@@ -1479,5 +1495,94 @@ mod tests {
         println!("{ms:?}");
         assert!(ms.iter().any(|m| m.name == "white" && m.types == [first.clone()]));
         assert_eq!(w.opened.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn two_spawns_into_one_team_do_not_wait_for_each_others_terminal() {
+        let f = Arc::new(fx(all_powers()));
+        // the window takes 400 ms to report a process
+        let m = f.mgr.clone();
+        *f.world.on_open.lock().unwrap() = Some(Box::new(move |req: &OpenPane| {
+            let (m, key) = (m.clone(), req.key.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                m.pty_started(&key, 777);
+            });
+        }));
+        let t0 = std::time::Instant::now();
+        let hs: Vec<_> = ["white", "black"]
+            .iter()
+            .map(|n| {
+                let f = f.clone();
+                let n = n.to_string();
+                std::thread::spawn(move || call(&f, "agents.spawn", json!({"type": "claude-code", "name": n})).unwrap())
+            })
+            .collect();
+        let rs: Vec<Value> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(t0.elapsed() < std::time::Duration::from_millis(780), "the two waits overlapped: {:?}", t0.elapsed());
+        let mut names: Vec<&str> = rs.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        names.sort();
+        assert_eq!(names, ["black", "white"]);
+        assert!(rs.iter().all(|r| r["state"] == "running"));
+        assert_eq!(f.world.joins.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn two_spawns_of_one_name_get_distinct_members_and_a_retry_in_flight_opens_nothing_twice() {
+        let f = Arc::new(fx(all_powers()));
+        let m = f.mgr.clone();
+        *f.world.on_open.lock().unwrap() = Some(Box::new(move |req: &OpenPane| {
+            let (m, key) = (m.clone(), req.key.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                m.pty_started(&key, 778);
+            });
+        }));
+        // the same name asked by two panes at once is one entry (the second call is a retry of the first)
+        let hs: Vec<_> = (0..3)
+            .map(|_| {
+                let f = f.clone();
+                std::thread::spawn(move || call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap())
+            })
+            .collect();
+        let rs: Vec<Value> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(rs.iter().all(|r| r["name"] == "white"), "{rs:?}");
+        assert_eq!(f.world.joins.load(Ordering::SeqCst), 1, "one join");
+        assert_eq!(f.world.opened.lock().unwrap().len(), 1, "one terminal");
+        // different names asked at once are distinct members
+        let hs: Vec<_> = (0..3)
+            .map(|i| {
+                let f = f.clone();
+                std::thread::spawn(move || call(&f, "agents.spawn", json!({"type": "claude-code", "name": format!("p{i}")})).unwrap())
+            })
+            .collect();
+        let mut names: Vec<String> = hs.into_iter().map(|h| h.join().unwrap()["name"].as_str().unwrap().to_string()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 3);
+        assert_eq!(f.world.opened.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_retry_while_the_terminal_is_opening_returns_the_entry_in_flight() {
+        let f = Arc::new(fx(all_powers()));
+        let m = f.mgr.clone();
+        *f.world.on_open.lock().unwrap() = Some(Box::new(move |req: &OpenPane| {
+            let (m, key) = (m.clone(), req.key.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                m.pty_started(&key, 779);
+            });
+        }));
+        let first = {
+            let f = f.clone();
+            std::thread::spawn(move || call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let retry = call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap();
+        assert_eq!(retry["state"], "opening", "the in-flight entry, not a second terminal: {retry}");
+        assert_eq!(first.join().unwrap()["state"], "running");
+        assert_eq!(f.world.opened.lock().unwrap().len(), 1);
+        assert_eq!(f.world.joins.load(Ordering::SeqCst), 1);
     }
 }
