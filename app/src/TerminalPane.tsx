@@ -21,6 +21,8 @@ type Props = {
    * comment in App.tsx), so this drives WebGL context attach/detach — see
    * the dedicated effect below — rather than mount/unmount. */
   active: boolean;
+  /** The journal entry of an agent an add-on started; passed to the backend so it learns the process. */
+  agentKey?: string;
   onAgentState?: (id: string, state: "idle" | "working" | "blocked" | "unknown") => void;
   /** Reported on every fit — the pane's current cell size in CSS px, so a
    * divider drag elsewhere can snap to whole terminal rows/cols. */
@@ -53,6 +55,7 @@ export function TerminalPane({
   cwd,
   fontSize = 12,
   active,
+  agentKey,
   onAgentState,
   onCellSize,
   onFocusPane,
@@ -173,7 +176,7 @@ export function TerminalPane({
       term.onData((data) => void invoke("pty_write", { id, data }));
       fitNow(); // size the PTY to the pane if it's already laid out
       try {
-        await invoke("pty_spawn", { id, cmd, args, cwd, rows: term.rows, cols: term.cols });
+        await invoke("pty_spawn", { id, cmd, args, cwd, rows: term.rows, cols: term.cols, agentKey: agentKey ?? null });
       } catch (err) {
         // A failed spawn (missing CLI on PATH, bad cwd, ...) would otherwise
         // leave this pane blank forever with zero indication anything went
