@@ -224,7 +224,7 @@ mutex_of() { printf '%s.reclaim' "$(agmsg_self_write_lock_path "$1" "$2")"; }
 }
 
 @test "mutex crash-between-take-and-release: a reclaimer killed while HOLDING the mutex (published by the real path) does not stop later claims" {
-  # The path tl named: die after taking the mutex and before releasing it. The
+  # The case that matters: die after taking the mutex and before releasing it. The
   # mutex here is produced by the code under test, not written by hand: a child
   # process takes it through _agmsg_lock_mutex_take, reports, and is then
   # killed mid-hold. Its token dies with it, so the next claimant must find a

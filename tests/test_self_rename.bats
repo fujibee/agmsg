@@ -194,7 +194,7 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
 }
 
 # The header line begins with the prefix, but the rest of it is still screen text
-# (#1102 review, tl follow-up). A real session name is short and has no control
+# (#1102 review follow-up). A real session name is short and has no control
 # bytes; a value carrying a TAB would corrupt the TAB-separated records this feeds,
 # so a control byte reads malformed rather than being passed through as the name.
 @test "codex screen parse: a value with a control byte is malformed, not a name (#1102)" {
