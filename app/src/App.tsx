@@ -733,6 +733,7 @@ export default function App() {
   const renameDraftRef = useRef("");
   renameDraftRef.current = renameDraft;
   const seq = useRef(0);
+  const deliveryCache = useRef(new Map<string, boolean>());
   const feedRef = useRef<HTMLDivElement>(null);
   // Set right before prepending an older history page, so the scroll-to-
   // bottom effect below skips that render (loadOlderMessages restores the
@@ -1247,10 +1248,17 @@ export default function App() {
       // NOT self-delivering, the app's PTY stdin-inject universal monitor is
       // this pane's only way to receive agmsg messages.
       let monitors = false;
-      if (type && m.project) {
+      // An agent an add-on starts is a fresh folder under ~/agmsg-agents, set up the same way every time for a
+      // type, so its answer is asked of agmsg once per type and spawn options for this run of the app (the
+      // second chess player does not ask again). An agent added by hand is always asked.
+      const deliveryKey = fromAddon && type ? `${type}|${options.join(" ")}` : null;
+      if (deliveryKey && deliveryCache.current.has(deliveryKey)) {
+        monitors = deliveryCache.current.get(deliveryKey)!;
+      } else if (type && m.project) {
         try {
           const mode = await invoke<string>("agmsg_delivery_mode", { agentType: type, project: m.project });
           monitors = mode === "monitor" || mode === "both";
+          if (deliveryKey) deliveryCache.current.set(deliveryKey, monitors);
         } catch (err) {
           console.error(err);
         }
@@ -1293,8 +1301,8 @@ export default function App() {
   const spawnMemberRef = useRef(spawnMember);
   spawnMemberRef.current = spawnMember;
   useEffect(() => {
-    const p = listen<{ key: string; team: string; name: string; model: string | null }>("addon-agent-open", (e) => {
-      const { key, team: agentTeam, name, model } = e.payload;
+    const p = listen<{ key: string; team: string; name: string; type: string; project: string; model: string | null }>("addon-agent-open", (e) => {
+      const { key, team: agentTeam, name, type: agentType, project, model } = e.payload;
       const fail = (reason: string) => void invoke("addon_agent_open_failed", { key, reason }).catch(() => {});
       // the agent's own pane is already open (a repeated request): nothing to do, it reports its process itself
       const open = panesRef.current.find((p) => p.label === name);
@@ -1302,13 +1310,9 @@ export default function App() {
         if (open.agentKey !== key) fail(`A pane named ${name} is already open.`);
         return;
       }
-      void invoke<Member[]>("agmsg_members", { team: agentTeam })
-        .then((ms) => {
-          const m = ms.find((x) => x.name === name);
-          if (!m) return fail(`${name} is not a member of the team.`);
-          return spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined });
-        })
-        .catch((err) => fail(String(err)));
+      // The member as the backend just joined it (name, type, folder): agmsg is not asked for the member list again.
+      const m: Member = { name, types: [agentType], project };
+      void spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined }).catch((err) => fail(String(err)));
     });
     return () => void p.then((unlisten) => unlisten());
   }, []);
