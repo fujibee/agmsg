@@ -170,7 +170,7 @@ agmsg_delivery_apply_default() {
   # error names that file rather than the temp copy below.
   if [ -f "$hooks_file" ]; then
     local chk_event
-    for chk_event in SessionStart SessionEnd Stop PostToolUse; do
+    for chk_event in SessionStart SessionEnd Stop PostToolUse UserPromptSubmit; do
       _agmsg_hooks_event_is_array "$hooks_file" "$chk_event" || return 1
     done
   fi
@@ -193,6 +193,8 @@ agmsg_delivery_apply_default() {
   # the mid-turn entry alongside Stop. Unconditional: a type that never installed
   # one has nothing to remove.
   strip_agmsg_event_file "$tmp_state" "PostToolUse"
+  # And the per-prompt seat reminder (monitor/both only), for the same reason.
+  strip_agmsg_event_file "$tmp_state" "UserPromptSubmit"
 
   # 2) Re-add what this mode wants.
   #
@@ -204,12 +206,20 @@ agmsg_delivery_apply_default() {
   # next SessionStart/SessionEnd/Stop event. The JSON-string escaping
   # add_event_entry_file applies below only keeps the *JSON* well-formed; it
   # says nothing about the shell that later executes the "command" value.
+  # A type whose manifest says prompt_reminder=yes gets the per-prompt "pick your
+  # seat" reminder (seat-reminder.sh) in the modes that start a watcher at
+  # SessionStart: a session that stands down there is otherwise never told again.
+  local pr_cmd=""
+  if [ "$(agmsg_type_get "$type" prompt_reminder 2>/dev/null || true)" = yes ]; then
+    pr_cmd="$(_agmsg_shq "$SKILL_DIR/scripts/seat-reminder.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
+  fi
   case "$mode" in
     monitor)
       local ss="$(_agmsg_shq "$SKILL_DIR/scripts/session-start.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
       local se="$(_agmsg_shq "$SKILL_DIR/scripts/session-end.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
       add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$ww"
       add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$ww"
+      [ -z "$pr_cmd" ] || add_event_entry_file "$tmp_state" "UserPromptSubmit" "$pr_cmd" "$ww"
       ;;
     turn)
       local cmd="$(_agmsg_shq "$SKILL_DIR/scripts/check-inbox.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
@@ -228,6 +238,7 @@ agmsg_delivery_apply_default() {
       add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$ww"
       add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$ww"
       add_event_entry_file "$tmp_state" "Stop"         "$st" "$ww"
+      [ -z "$pr_cmd" ] || add_event_entry_file "$tmp_state" "UserPromptSubmit" "$pr_cmd" "$ww"
       if [ "$pt_install" = 1 ]; then
         add_event_entry_file "$tmp_state" "PostToolUse" "$st $(_agmsg_shq "PostToolUse")" "$ww"
       fi
