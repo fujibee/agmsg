@@ -16,7 +16,7 @@
 # change without install.sh's own extraction changing with it.
 set -euo pipefail
 
-BOOTSTRAP_VERSION=1
+BOOTSTRAP_VERSION=2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -74,6 +74,14 @@ _agmsgd_launch_check_bootstrap_version() {
 # 1. install.db must be readable, or we must not assume `on`.
 if [ ! -f "$INSTALL_DB" ]; then
   echo "agmsgd-launch: run/install.db does not exist -- nothing to start" >&2
+  exit 0
+fi
+# A resident manager starts this with its own minimal PATH, which may not
+# include where sqlite3 lives (systemd --user has no ~/.local/bin). Say so
+# plainly rather than letting every sqlite3 call below fail as "could not be
+# read". `agmsg daemon enable` records the directories into the unit's PATH.
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  echo "agmsgd-launch: sqlite3 not found on PATH (searched: ${PATH:-<empty>}); run 'agmsg daemon enable' again so the service is registered with a PATH that includes it" >&2
   exit 0
 fi
 DESIRED="$(sqlite3 "$INSTALL_DB" "SELECT desired FROM daemon_intent;" 2>/dev/null)" || {

@@ -17,7 +17,7 @@
 // PR 2, 2026-09-29) and cross-checks it against agmsgd-launch.sh's own
 // `^BOOTSTRAP_VERSION=` line before writing either into the completion
 // record's bootstrap_version field.
-const BOOTSTRAP_VERSION = 1;
+const BOOTSTRAP_VERSION = 2;
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";

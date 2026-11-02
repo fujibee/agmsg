@@ -2431,7 +2431,7 @@ CYG
   # later PR) to check against under the operation lock.
   local bv
   bv="$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$manifest")'), '\$.bootstrap_version');")"
-  [ "$bv" = "1" ]
+  [ "$bv" = "2" ]
 
   # install_id's one source of truth is install.db's meta row; the manifest
   # only carries a copy of it.

@@ -328,13 +328,35 @@ _systemd_user_usable() { "$AGMSGD_SYSTEMCTL" --user show-environment >/dev/null 
 
 _systemd_unit_path() { printf '%s/.config/systemd/user/agmsgd-%s.service' "$HOME" "$(_unit_id)"; }
 
+# The PATH a systemd --user service gets: the directories holding sqlite3 and
+# the recorded Node, then systemd's own default. systemd --user starts units
+# with a minimal PATH (no ~/.local/bin, no version-manager shims), and the
+# launcher needs sqlite3 before it can read anything. Directories that cannot
+# be written into a quoted unit line (a quote, backslash or control character)
+# are left out. $1 is the Node enable resolved.
+_systemd_unit_path_dirs() {
+  local node_path="$1" dir out="" tool
+  for tool in "$(command -v sqlite3 2>/dev/null || true)" "$node_path"; do
+    case "$tool" in */*) dir="${tool%/*}" ;; *) continue ;; esac
+    [ -n "$dir" ] || dir=/
+    case "$dir" in /*) ;; *) continue ;; esac
+    case "$dir" in *[\\\"[:cntrl:]]*) continue ;; esac
+    case ":$out:" in *":$dir:"*) continue ;; esac
+    out="${out:+$out:}$dir"
+  done
+  printf '%s' "${out:+$out:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+}
+
 # NOT YET RUN ON LINUX in this environment -- configured with
 # (Restart=on-failure, RestartSec=30s, StartLimitIntervalSec=600,
 # StartLimitBurst=5) and shellchecked only.
 _register_linux() {
-  local unit_path unit_name
+  local node_path="$1" unit_path unit_name unit_env
   unit_path="$(_systemd_unit_path)"
   unit_name="$(basename "$unit_path")"
+  # systemd expands %-specifiers in Environment= values.
+  unit_env="$(_systemd_unit_path_dirs "$node_path")"
+  unit_env="${unit_env//%/%%}"
   mkdir -p "$(dirname "$unit_path")"
   cat > "$unit_path" <<EOF
 [Unit]
@@ -344,6 +366,7 @@ StartLimitBurst=5
 
 [Service]
 ExecStart=$LAUNCHER
+Environment="PATH=$unit_env"
 Restart=on-failure
 RestartSec=30s
 
@@ -858,6 +881,19 @@ cmd_status() {
   return "$health_rc"
 }
 
+# Is any Codex seat registered? Only then does a missing Codex executable
+# matter. An unreadable inventory counts as yes, so the warning is not lost.
+_has_codex_seat() {
+  local cfg cfg_sql n
+  for cfg in "$SKILL_DIR/teams/"*/config.json; do
+    [ -f "$cfg" ] || continue
+    cfg_sql="$(agmsg_sql_readfile_path "$cfg")"
+    n="$(sqlite3 :memory: "SELECT count(*) FROM json_each(CAST(readfile('$cfg_sql') AS TEXT),'\$.agents') a, json_each(a.value,'\$.registrations') r WHERE json_extract(r.value,'\$.type')='codex';" 2>/dev/null)" || return 0
+    [ "${n%$'\r'}" = 0 ] || return 0
+  done
+  return 1
+}
+
 cmd_enable() {
   _ensure_install_db_schema
   if [ "$(_os)" = linux ] && ! _systemd_user_usable; then
@@ -876,7 +912,7 @@ cmd_enable() {
   node_version="$("$node_path" -e 'console.log(process.versions.node)')"
   local codex_path
   codex_path="$(_resolve_codex 2>/dev/null || true)"
-  if [ -z "$codex_path" ]; then
+  if [ -z "$codex_path" ] && _has_codex_seat; then
     echo 'agmsg daemon enable: no usable Codex executable found; Codex seats stay blocked until enabled again with Codex available.' >&2
   fi
   # Whether a unit was already registered decides what a failure may undo: a
