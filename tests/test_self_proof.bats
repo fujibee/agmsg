@@ -551,21 +551,21 @@ w1:pX	$PANE_PID"
 # --- the recorded owner is verified, not just parsed ---------------------------
 
 @test "an owner whose process is gone is undetermined, not a proof about it (#1152)" {
-  skip_on_ci "flaky pid-reuse race under CI's shared runners (#1187)"
   # A lock outlives the process that wrote it. Parsing a pid out of the file says
   # the file holds a number, not that the number is still this session.
-  sleep 60 >/dev/null 2>&1 3>&- & local dead=$!
-  # `|| true` on BOTH calls, not just wait's: bats runs test bodies under
-  # errexit by default, and kill returns non-zero (ESRCH) if $dead has
-  # already exited on its own by the time this runs. Left bare, that aborts
-  # the test here -- before the pid-reuse guard below ever gets to decide
-  # whether this run is even measuring what it claims to (#1187).
-  kill "$dead" 2>/dev/null || true; wait "$dead" 2>/dev/null || true
-  # The precondition is that the pid is GONE. On a loaded runner the number can
-  # be handed to a new process between the wait and the read below (#1187,
-  # seen twice on macOS); then this test is not measuring what it says, and a
-  # red here would be about the fixture, not the classifier. Say so and skip.
-  if kill -0 "$dead" 2>/dev/null; then skip "pid $dead was reused by another process before the read (#1187)"; fi
+  #
+  # The owner is a pid that no process can have: it is a valid pid_t (below
+  # _agmsg_pid_valid's 2147483647 bound) but far above every platform's pid
+  # range (Linux pid_max is at most 4194304, macOS stays below 100000), so
+  # kill(2) answers ESRCH for it everywhere. This used to start a `sleep`, kill
+  # it and use its pid; on a loaded runner that number was sometimes handed to
+  # a new process before the read, so the test measured the wrong process and
+  # was skipped on CI altogether (#1187).
+  local dead=2147483646
+  if kill -0 "$dead" 2>/dev/null; then
+    echo "pid $dead is running on this machine; the fixture assumes it cannot be" >&2
+    false
+  fi
   _own agmsg seat "sid-1.$dead"
   _edge "$$" "$dead"; _edge "$dead" "$PANE_PID"
   run agmsg_self_proof agmsg seat w1:p9
