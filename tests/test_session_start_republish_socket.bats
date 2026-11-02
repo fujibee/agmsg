@@ -63,15 +63,23 @@ _run_session_start_as() {   # <type> <sid> [extra env already exported by caller
   [ "$got" = "/tmp/cc-socks/alice-fresh.sock" ]
 }
 
-@test "republish socket: a proven narrowed (actas-lock-only) seat also gets it written" {
+@test "republish socket: a proven, narrowed (actas-lock-only) seat writes nothing -- record basis only (review round 1)" {
+  # #339's narrowing path has only an actas lock, no role-session record yet
+  # (creating one here is actas-claim.sh's job, never session-start.sh's --
+  # see the comment above agmsg_role_session_set_messaging in role-session.sh
+  # and this fix's own comment in session-start.sh). Deliberately NOT covered:
+  # the alternative (session-start.sh calling agmsg_role_session_record) was
+  # found, in review, to widen a TOCTOU window where a different session that
+  # reclaimed this exact role in between would have its fresh record stomped
+  # by this one's stale claim.
   _mark_sid_alive "sid-bob"
   _seed_actas_lock team bob "sid-bob"
-  export CLAUDE_CODE_MESSAGING_SOCKET="/tmp/cc-socks/bob-fresh.sock"
+  export CLAUDE_CODE_MESSAGING_SOCKET="/tmp/cc-socks/bob-should-not-land.sock"
   export CLAUDE_CONFIG_DIR="$TEST_SKILL_DIR/claude-config-bob"
   run _run_session_start_as claude-code "sid-bob"
   [ "$status" -eq 0 ]
-  local got; got="$(_messaging_socket_of team bob)"
-  [ "$got" = "/tmp/cc-socks/bob-fresh.sock" ]
+  grep -qF "acting as bob" <<<"$output"
+  [ -z "$(_messaging_socket_of team bob)" ]
 }
 
 @test "republish socket: a resumed, dead-socket record is overwritten by the new one, not left stale" {
@@ -115,4 +123,58 @@ _run_session_start_as() {   # <type> <sid> [extra env already exported by caller
   export CLAUDE_CONFIG_DIR="$TEST_SKILL_DIR/claude-config-carol"
   run _run_session_start_as codex "sid-carol"
   [ -z "$(_messaging_socket_of team carol)" ]
+}
+
+@test "republish socket: a different session's record won by the time of the write is never stomped (review round 1 BLOCKING)" {
+  # The exact race review found: this session's role lookup, far above the
+  # write, observed itself as the owner of (team, alice) -- but by the time
+  # the write actually runs, a DIFFERENT session has claimed and re-recorded
+  # that same pair (the shape a real actas-claim.sh run from another seat
+  # would produce). The write must see THAT fact, not the stale observation,
+  # and refuse rather than overwrite the newer owner's socket with its own.
+  _seed_role_record team alice "sid-alice" "$PROJ" claude-code
+
+  # Simulate the race by re-recording the pair under a DIFFERENT session,
+  # with its OWN already-published socket, between the lookup and the write --
+  # done here via a PATH shim on agmsg_role_session_lookup_by_sid's own
+  # backing read is impractical from a black-box test, so this test instead
+  # asserts the CAS primitive session-start.sh now calls directly: the write
+  # must refuse once the record's session= no longer matches.
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_record team alice sid-newowner "$2" claude-code
+    agmsg_role_session_publish_messaging team alice /tmp/cc-socks/newowner.sock "$2/claude-config-newowner" sid-newowner ""
+  ' _ "$SCRIPTS" "$PROJ"
+  [ "$(_messaging_socket_of team alice)" = /tmp/cc-socks/newowner.sock ]
+
+  run env SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_publish_messaging_if_owner team alice /tmp/cc-socks/old-resumer.sock "$2/claude-config-oldresumer" sid-alice sid-alice ""
+  ' _ "$SCRIPTS" "$PROJ"
+  [ "$status" -ne 0 ]
+  [ "$(_messaging_socket_of team alice)" = /tmp/cc-socks/newowner.sock ]
+}
+
+@test "republish socket: a resume with an already-alive watcher still refreshes the socket (review round 1 NEEDS FIX)" {
+  # /compact (and similar same-process re-fires) hit the "watcher already
+  # streaming" early exit (WATCHER_PIDFILE), which used to sit BEFORE the
+  # republish block -- so the exact re-fire this whole fix targets never
+  # reached it. The republish now runs before that early exit.
+  _seed_role_record team alice "sid-alice" "$PROJ" claude-code
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_publish_messaging team alice /tmp/cc-socks/dead-before-compact.sock "$2/claude-config-alice" sid-alice ""
+  ' _ "$SCRIPTS" "$TEST_SKILL_DIR"
+
+  # Seed a live watcher pidfile for this exact instance id (sid-alice, no pid
+  # suffix -- AGMSG_AGENT_PID is "" in setup, matching agmsg_instance_id_from_pid's
+  # bare-sid fallback), owned by this test process itself so it reads alive.
+  echo "$$" > "$RUN_DIR/watch.sid-alice.pid"
+
+  export CLAUDE_CODE_MESSAGING_SOCKET="/tmp/cc-socks/alice-after-compact.sock"
+  export CLAUDE_CONFIG_DIR="$TEST_SKILL_DIR/claude-config-alice"
+  run _run_session_start_as claude-code "sid-alice"
+  [ "$status" -eq 0 ]
+  grep -qF "already streaming" <<<"$output"
+  [ "$(_messaging_socket_of team alice)" = /tmp/cc-socks/alice-after-compact.sock ]
 }

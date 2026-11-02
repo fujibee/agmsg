@@ -606,6 +606,61 @@ agmsg_role_session_publish_messaging() {   # <team> <agent> <socket> <config_dir
     && [ "$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)" = "$bare_sid" ]
 }
 
+# The same publish, but refusing under the SAME lock as the write (#1872
+# review) when the record's current session= is not <expected_bare_sid> --
+# mirrors agmsg_role_session_mark_messaging_blocked's own CAS shape exactly.
+# A caller that only OBSERVED this (team, agent) pair as its own earlier (a
+# role lookup, an actas lock read) and acts on that observation later is
+# racing a different session that claims/records the same pair in between; a
+# pre-check re-read right before the write has the identical race, just a
+# smaller window, because the check and the write are still two separate
+# operations. Tying the check to the write inside ONE locked critical section
+# is what actually closes it: by the time this returns 0, the record still
+# named <expected_bare_sid> at the instant the new fields were written, never
+# "a moment before". rc 1 means nothing was changed, the same as
+# mark_messaging_blocked's own refusal -- never papered over by the caller.
+agmsg_role_session_publish_messaging_if_owner() {   # <team> <agent> <socket> <config_dir> <bare_sid> <expected_bare_sid> [<token>]
+  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="$5" expected="$6" token="${7:-}"
+  _agmsg_role_session_write _agmsg_role_session_set_messaging_cas_unlocked \
+    "$team" "$agent" "$socket" "$config_dir" "$bare_sid" "$token" "$expected" || return 1
+  [ "$(agmsg_role_session_get "$team" "$agent" messaging_socket 2>/dev/null || true)" = "$socket" ] \
+    && [ "$(agmsg_role_session_get "$team" "$agent" claude_config_dir 2>/dev/null || true)" = "$config_dir" ] \
+    && [ "$(agmsg_role_session_uuid "$team" "$agent" 2>/dev/null || true)" = "$bare_sid" ]
+}
+
+_agmsg_role_session_set_messaging_cas_unlocked() {   # <team> <agent> <socket> <config_dir> <bare_sid> <token> <expected_bare_sid>
+  local team="$1" agent="$2" socket="$3" config_dir="$4" bare_sid="${5:-}" token="${6:-}" expected="${7:-}"
+  [ -n "$expected" ] || return 1
+  case "$token" in ''|*[!A-Za-z0-9._-]*) token="" ;; esac
+  [ -n "$team" ] && [ -n "$agent" ] || return 1
+  local path dir tmp line current=""
+  _agmsg_role_session_path_into "$team" "$agent"
+  path="$_AGMSG_ROLE_SESSION_PATH"
+  [ -f "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in session=*) current="${line#session=}"; break ;; esac
+  done < "$path"
+  [ "$current" = "$expected" ] || return 1
+  dir="$(_actas_lock_dir)"
+  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 1
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        messaging_socket=*|claude_config_dir=*|messaging_token=*|messaging_blocked=*) ;;
+        session=*) [ -z "$bare_sid" ] && printf '%s\n' "$line" ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$path"
+    [ -z "$bare_sid" ] || printf 'session=%s\n' "$bare_sid"
+    [ -z "$socket" ] || printf 'messaging_socket=%s\n' "$socket"
+    [ -z "$config_dir" ] || printf 'claude_config_dir=%s\n' "$config_dir"
+    [ -z "$token" ] || printf 'messaging_token=%s\n' "$token"
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  return 0
+}
+
 # rc 0 only when agmsgd's Claude channel will accept this install's storage.
 # The answer comes from the daemon's own reader (storage-gate.mjs calls
 # readStorageDriver), run with the node the daemon itself runs on (the
