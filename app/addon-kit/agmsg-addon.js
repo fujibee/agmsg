@@ -117,6 +117,19 @@ export function connect(options = {}) {
       list: (path = ".") => request("fs.list", { path }),
       read: (path, range) => request("fs.read", range ? { path, range } : { path }),
     },
+    // Needs team:join (and messages:send / agents:spawn for the rest). The app decides the team and the sender.
+    team: {
+      join: () => request("team.join"),
+    },
+    messages: {
+      // Not de-duplicated: a retried send is a second message.
+      send: (to, body) => request("messages.send", { to, body }),
+    },
+    agents: {
+      types: () => request("agents.types"),
+      spawn: (type, name, opts = {}) => request("agents.spawn", { type, name, ...opts }),
+      list: () => request("agents.list"),
+    },
     git: {
       status: () => request("git.status"),
       log: (opts = {}) => request("git.log", opts),
@@ -196,6 +209,16 @@ function sampleRequest(op, args) {
   switch (op) {
     case "open.args":
       return { path: "sample-project", base: "main" };
+    case "team.join":
+      return { name: "sample-addon", type: "app-addon", created: false };
+    case "messages.send":
+      return { to: args.to };
+    case "agents.types":
+      return { types: [{ type: "claude-code", models: true }] };
+    case "agents.spawn":
+      return { name: args.name, type: args.type, state: "running", pid: 1 };
+    case "agents.list":
+      return { agents: [] };
     case "fs.list": {
       const dir = norm(args.path);
       const seen = new Map();
