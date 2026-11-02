@@ -89,7 +89,9 @@ export type UnsafeEntryKind = "symlink" | "hardlink" | "outside_path" | "reserve
 /** The grant a pane is waiting for (S6). */
 export type GrantNeed =
   | { permission: "messages:read"; team: string; why?: string }
-  | { permission: "files:read"; path: string; fileCount: number | null; denied: boolean; why?: string };
+  | { permission: "files:read"; path: string; fileCount: number | null; denied: boolean; why?: string }
+  /** The team powers the add-on declared (team:join and, with it, messages:send and agents:spawn), asked together for one team. */
+  | { permission: "powers"; team: string; send: boolean; spawn: boolean; why?: string };
 
 /** What an open pane shows instead of (or before) its frame. */
 export type PaneState =
