@@ -11,64 +11,80 @@
 # the seat to that TUI:
 #
 #   1. CODEX_THREAD_ID (set by the daemon per thread) names this seat's thread.
-#   2. thread -> TUI, strongest first:
-#        a. a process whose argv is `codex resume <thread>` (the seat was
-#           started or restarted by resuming);
-#        b. else the one TUI (the `codex` binary run with no subcommand) whose
-#           cwd is the thread's cwd and whose start time is within
+#   2. thread -> TUI. Two kinds of evidence, both collected:
+#        a. a process whose argv is `codex resume <thread>` (the launcher and
+#           the TUI it starts are one);
+#        b. the `codex` TUIs (the binary run with no subcommand) whose cwd is
+#           the thread's cwd and whose start time is within
 #           AGMSG_CODEX_START_SKEW seconds of the thread's created_at in
 #           Codex's state_*.sqlite. A fresh launch creates its thread at start.
+#      Exactly one distinct process across both must remain. Neither kind proves
+#      the TUI STILL holds the thread (a `/clear` moves it to a new thread and
+#      leaves the argv behind), so two candidates are never resolved by picking
+#      one: more than one -> unknown. A single stale candidate cannot be told
+#      from a live one (there is no TUI -> thread link to read); a remembered
+#      pane is therefore dropped after AGMSG_CODEX_PANE_TTL and the scan repeated.
 #   3. TUI -> pane: that TUI's own HERDR_* / TMUX* environment.
 #
 # Anything that does not settle to exactly one TUI is "unknown": the caller
 # gets no pane rather than the daemon starter's. This file only decides; the
 # terminal drivers still turn the environment it returns into an id.
 #
+# SECRETS. A TUI's environment is the user's whole shell environment. No shell
+# variable in this file ever holds a process's full command line or environment:
+# the lines of `ps` are filtered by `awk` inside a pipeline, and only the five
+# terminal variables (or pids/seconds) come out. So `bash -x` has nothing to
+# print (tests/test_codex_own_pane.bats runs it with sentinels to prove that).
+#
 # Output of agmsg_codex_own_pane (stdout, always exit 0):
 #   (empty)                  the environment is believable (not a Codex seat,
 #                            not under the shared daemon, or no terminal env)
 #   env\nKEY=VALUE...        use exactly these terminal variables instead
 #   unknown\t<reason>        the pane cannot be proven; write nothing for it
-#
-# Cost: a verdict is remembered per thread in $SKILL_DIR/run/, so the process
-# scan is paid once per thread, not per send/inbox. A remembered pane is
-# re-checked with one `ps` (the TUI pid still has the start time recorded).
 
 [ -n "${_AGMSG_CODEX_OWN_PANE_SH:-}" ] && return 0
 _AGMSG_CODEX_OWN_PANE_SH=1
 
 : "${AGMSG_CODEX_START_SKEW:=3}"      # seconds between TUI start and thread created_at
 : "${AGMSG_CODEX_TRUSTED_TTL:=300}"   # how long "env is believable" is remembered
+: "${AGMSG_CODEX_PANE_TTL:=300}"      # how long a proven pane is remembered
 : "${AGMSG_CODEX_UNKNOWN_TTL:=15}"    # how long "cannot prove it" is remembered
 
-_AGMSG_COP_VARS="HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID TMUX TMUX_PANE"
-
-# Is this process a descendant of a `--managed-daemon` app-server? Walks parents
-# with one `ps` per hop; any failure (no such ps, Windows) answers "no", which
-# leaves the environment in charge exactly as before.
+# Is this process under a `--managed-daemon` app-server?
+#   0  yes        1  no (the walk reached the top of the tree)
+#   2  cannot tell (ps failed, the process vanished, or 16 hops were not enough)
+# "Cannot tell" is never folded into "no": that would trust the daemon starter's
+# pane on a transient failure. Only Darwin and Linux have the `ps` this relies
+# on; elsewhere (Windows) the environment stays in charge as before.
 _agmsg_cop_under_managed_daemon() {
-  local pid=$$ hop=0 line ppid cmd
-  while [ "$hop" -lt 16 ] && [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
-    line="$(ps -o ppid=,command= -p "$pid" 2>/dev/null)" || return 1
-    line="${line#"${line%%[![:space:]]*}"}"
-    [ -n "$line" ] || return 1
-    ppid="${line%%[[:space:]]*}"
-    cmd="${line#*[[:space:]]}"
-    case "$cmd" in *--managed-daemon*) return 0 ;; esac
+  local pid=$$ hop=0 out ppid flag
+  if [ -z "${_AGMSG_COP_PLATFORM:-}" ]; then
+    _AGMSG_COP_PLATFORM="$(uname -s 2>/dev/null)" || _AGMSG_COP_PLATFORM=other
+  fi
+  case "$_AGMSG_COP_PLATFORM" in Darwin|Linux) ;; *) return 1 ;; esac
+  while [ "$hop" -lt 16 ]; do
+    out="$(ps -o ppid=,command= -p "$pid" 2>/dev/null \
+      | awk 'NR==1 { print $1, (index($0, "--managed-daemon") ? "D" : "-") }')"
+    [ -n "$out" ] || return 2
+    ppid="${out% *}"; flag="${out#* }"
+    [ "$flag" = D ] && return 0
+    case "$ppid" in ''|*[!0-9]*) return 2 ;; esac
+    [ "$ppid" -gt 1 ] || return 1
     pid="$ppid"; hop=$((hop + 1))
   done
-  return 1
+  return 2
 }
 
-# KEY=VALUE lines for the terminal variables in <pid>'s environment.
+# KEY=VALUE lines for the five terminal variables in <pid>'s environment, and
+# nothing else. The environment never reaches a shell variable.
 _agmsg_cop_env_of() {   # <pid>
-  local line key tok
-  line="$(ps eww -p "$1" -o command= 2>/dev/null)" || return 1
-  for key in $_AGMSG_COP_VARS; do
-    case "$line" in *" $key="*) ;; *) continue ;; esac
-    tok="${line##* "$key"=}"
-    printf '%s=%s\n' "$key" "${tok%% *}"
-  done
+  ps eww -p "$1" -o command= 2>/dev/null | awk '
+    BEGIN { n = split("HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID TMUX TMUX_PANE", k, " ")
+            for (i = 1; i <= n; i++) want[k[i]] = 1 }
+    { for (i = 1; i <= NF; i++) {
+        p = index($i, "=")
+        if (p > 1 && substr($i, 1, p - 1) in want) val[substr($i, 1, p - 1)] = substr($i, p + 1) } }
+    END { for (i = 1; i <= n; i++) if (k[i] in val) print k[i] "=" val[k[i]] }'
 }
 
 _agmsg_cop_cwd_of() {   # <pid>
@@ -101,7 +117,7 @@ _agmsg_cop_cache() {   # <thread>
   printf '%s/run/codex-own-pane.%s\n' "$SKILL_DIR" "$1"
 }
 
-# <kind> <thread> [pid lstart reason] then env lines on stdin for kind=pane.
+# <kind> <thread> [pid lstart reason], then KEY=VALUE lines on stdin.
 _agmsg_cop_remember() {
   local f tmp
   f="$(_agmsg_cop_cache "$2")" || return 0
@@ -114,58 +130,60 @@ _agmsg_cop_remember() {
   return 0
 }
 
-# Process scan -> candidate. Prints "ok <pid>" or "no <reason>"; always returns 0
+# One pass over the process table. Prints only numbers:
+#   R <pid> <ppid>      argv is `codex resume <thread>`
+#   T <pid> <seconds>   the codex binary run with no subcommand, running <seconds>
+_agmsg_cop_scan() {   # <thread>
+  ps -axo pid=,ppid=,etime=,command= 2>/dev/null | awk -v t="$1" '
+    function secs(e,   d, a, k, p, i, s) {
+      d = 0
+      if (e ~ /-/) { split(e, a, "-"); d = a[1]; e = a[2] }
+      k = split(e, p, ":"); s = 0
+      for (i = 1; i <= k; i++) s = s * 60 + p[i]
+      return d * 86400 + s }
+    { cmd = $4; for (i = 5; i <= NF; i++) cmd = cmd " " $i
+      n = split(cmd, w, " ")
+      if (n >= 3 && w[n] == t && w[n-1] == "resume" && w[n-2] ~ /(^|\/)codex$/) print "R", $1, $2
+      else if (NF == 4 && $4 ~ /(^|\/)codex$/) print "T", $1, secs($3) }'
+}
+
+# thread -> the one TUI pid. Prints "ok <pid>" or "no <reason>"; always returns 0
 # (it runs in a command substitution, so a variable could not carry the reason).
 _agmsg_cop_find_tui() {   # <thread> <thread-cwd> <created_at>
-  local tid="$1" tcwd="$2" created="$3" now rows resume n=0 pid="" secs start c matches=0
+  local tcwd="$2" created="$3" scan now kind a b c leaves p pids="" count=0 only=""
   now="$(date +%s)"
-  rows="$(ps -axo pid=,ppid=,etime=,command= 2>/dev/null)" || rows=""
-  [ -n "$rows" ] || { echo "no process_list_unavailable"; return 0; }
-  # a. `codex resume <thread>` in argv.
-  resume="$(printf '%s\n' "$rows" | awk -v t="$tid" '
-    { cmd=$4; for (i=5;i<=NF;i++) cmd=cmd " " $i
-      n=split(cmd, w, " ")
-      if (n>=3 && w[n]==t && w[n-1]=="resume" && w[n-2] ~ /(^|\/)codex$/) print $1, $2 }' \
-    | awk '{ p[$1]=1; q[$2]=1 } END { for (k in p) if (!(k in q)) print k }')"
-  # The npm launcher (node ... codex resume <id>) and the TUI it starts carry the
-  # same argv: they are one seat, so a match whose parent is also a match is dropped.
-  if [ -n "$resume" ]; then
-    n="$(printf '%s\n' "$resume" | wc -l | tr -d ' ')"
-    if [ "$n" -eq 1 ]; then echo "ok $resume"; else echo "no several_processes_resume_this_thread"; fi
-    return 0
-  fi
-  # b. the TUI started at the thread's creation, in the thread's cwd.
-  while read -r pid secs; do
-    [ -n "$pid" ] || continue
-    start=$((now - secs))
-    [ "$((start - created))" -le "$AGMSG_CODEX_START_SKEW" ] \
-      && [ "$((created - start))" -le "$AGMSG_CODEX_START_SKEW" ] || continue
-    c="$(_agmsg_cop_cwd_of "$pid")" || continue
+  scan="$(_agmsg_cop_scan "$1")"
+  [ -n "$scan" ] || { echo "no no_codex_process_listed"; return 0; }
+  # a. resume argv; a match whose parent is also a match is the launcher, dropped.
+  leaves="$(printf '%s\n' "$scan" | awk '$1 == "R" { p[$2] = 1; q[$3] = 1 } END { for (k in p) if (!(k in q)) print k }')"
+  for p in $leaves; do pids="$pids $p"; done
+  # b. started at the thread's creation, in the thread's cwd.
+  while read -r kind a b; do
+    [ "$kind" = T ] || continue
+    [ "$((now - b - created))" -le "$AGMSG_CODEX_START_SKEW" ] \
+      && [ "$((created - (now - b)))" -le "$AGMSG_CODEX_START_SKEW" ] || continue
+    c="$(_agmsg_cop_cwd_of "$a")" || continue
     [ "$(_agmsg_cop_real "$c")" = "$(_agmsg_cop_real "$tcwd")" ] || continue
-    matches=$((matches + 1)); n="$pid"
+    pids="$pids $a"
   done <<EOF
-$(printf '%s\n' "$rows" | awk '
-  # the codex binary run with no subcommand: exactly one word, basename codex
-  NF==4 && $4 ~ /(^|\/)codex$/ {
-    e=$3; d=0; if (e ~ /-/) { split(e, a, "-"); d=a[1]; e=a[2] }
-    k=split(e, p, ":"); s=0
-    for (i=1;i<=k;i++) s=s*60+p[i]
-    print $1, d*86400+s }')
+$scan
 EOF
-  case "$matches" in
-    1) echo "ok $n" ;;
-    0) echo "no no_codex_tui_started_with_this_thread" ;;
-    *) echo "no several_codex_tuis_match_this_thread" ;;
+  for p in $(printf '%s\n' $pids | sort -u); do count=$((count + 1)); only="$p"; done
+  case "$count" in
+    1) echo "ok $only" ;;
+    0) echo "no no_codex_tui_holds_this_thread" ;;
+    *) echo "no several_codex_tuis_may_hold_this_thread" ;;
   esac
 }
 
 agmsg_codex_own_pane() {
-  local tid="${CODEX_THREAD_ID:-}" f kind ts pid lstart reason now cur env
+  local tid="${CODEX_THREAD_ID:-}" f kind ts pid lstart reason now cur env found rc
   [ -n "$tid" ] || return 0
   [ -n "${HERDR_ENV:-}${TMUX:-}${TMUX_PANE:-}${HERDR_PANE_ID:-}" ] || return 0
   case "$tid" in *[!A-Za-z0-9-]*) return 0 ;; esac
 
   if f="$(_agmsg_cop_cache "$tid")" && [ -f "$f" ]; then
+    kind=""
     IFS='|' read -r kind ts pid lstart reason <"$f" || kind=""
     now="$(date +%s)"
     case "$kind" in
@@ -173,21 +191,31 @@ agmsg_codex_own_pane() {
       unknown) [ "$((now - ts))" -lt "$AGMSG_CODEX_UNKNOWN_TTL" ] \
                  && { printf 'unknown\t%s\n' "$reason"; return 0; } ;;
       pane)
-        cur="$(ps -o lstart= -p "$pid" 2>/dev/null)" || cur=""
-        if [ -n "$cur" ] && [ "$cur" = "$lstart" ]; then
-          printf 'env\n'
-          { IFS= read -r _; while IFS= read -r _l; do printf '%s\n' "$_l"; done; } <"$f"
-          return 0
+        # The pid still being that process proves it is alive, not that it still
+        # holds this thread; hence the TTL, after which the scan is repeated.
+        if [ "$((now - ts))" -lt "$AGMSG_CODEX_PANE_TTL" ]; then
+          cur="$(ps -o lstart= -p "$pid" 2>/dev/null)" || cur=""
+          if [ -n "$cur" ] && [ "$cur" = "$lstart" ]; then
+            printf 'env\n'
+            { IFS= read -r _; while IFS= read -r _l; do printf '%s\n' "$_l"; done; } <"$f"
+            return 0
+          fi
         fi ;;
     esac
   fi
 
-  if ! _agmsg_cop_under_managed_daemon; then
-    printf '' | _agmsg_cop_remember trusted "$tid"
-    return 0
-  fi
+  rc=0; _agmsg_cop_under_managed_daemon || rc=$?
+  case "$rc" in
+    0) ;;
+    1) printf '' | _agmsg_cop_remember trusted "$tid"; return 0 ;;
+    *) # Could not tell: that is not "no". Trusting the environment here would
+       # write the daemon starter's pane on a transient ps failure.
+       reason="cannot_tell_whether_under_shared_daemon"
+       printf '' | _agmsg_cop_remember unknown "$tid" "" "" "$reason"
+       printf 'unknown\t%s\n' "$reason"; return 0 ;;
+  esac
 
-  local db row tcwd created found
+  local db row tcwd created
   reason=""
   db="$(_agmsg_cop_state_db)" || db=""
   if [ -z "$db" ] || ! command -v sqlite3 >/dev/null 2>&1; then
@@ -201,7 +229,7 @@ agmsg_codex_own_pane() {
     created="${row%%$'\t'*}"; tcwd="${row#*$'\t'}"
     case "$created" in ''|*[!0-9]*) reason="thread_not_in_codex_state_db"; created="" ;; esac
   fi
-  if [ -z "${reason:-}" ] && [ -n "$created" ]; then
+  if [ -z "$reason" ] && [ -n "$created" ]; then
     found="$(_agmsg_cop_find_tui "$tid" "$tcwd" "$created")"
     if [ "${found%% *}" = ok ]; then
       pid="${found#ok }"

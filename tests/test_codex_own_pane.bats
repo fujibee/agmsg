@@ -29,7 +29,10 @@ setup() {
 # Fixture-driven ps: only the four shapes agmsg uses.
 echo "ps $*" >> "$PSDIR/calls"
 case "$*" in
-  "-o ppid=,command= -p "*) f="$PSDIR/chain/$4"; [ -f "$f" ] && cat "$f" || exit 1 ;;
+  "-o ppid=,command= -p "*)
+    [ -f "$PSDIR/fail_chain" ] && exit 1
+    f="$PSDIR/chain/$4"; [ -f "$f" ] || f="$PSDIR/chain/default"
+    [ -f "$f" ] && cat "$f" || exit 1 ;;
   "-axo pid=,ppid=,etime=,command=") echo "LIST" >> "$PSDIR/calls"; cat "$PSDIR/list" ;;
   "eww -p "*) f="$PSDIR/env/$3"; [ -f "$f" ] && cat "$f" || exit 1 ;;
   "-o lstart= -p "*) f="$PSDIR/lstart/$4"; [ -f "$f" ] && cat "$f" || exit 1 ;;
@@ -53,12 +56,12 @@ EOF
 teardown() { teardown_test_env; }
 
 # --- fixture helpers -------------------------------------------------------
-_under_daemon() {   # the test shell's ancestry: shell -> managed daemon
-  echo "5000 bash -c something" > "$PSDIR/chain/$$"
+_under_daemon() {   # any process's ancestry: shell -> managed daemon
+  echo "5000 bash -c something" > "$PSDIR/chain/default"
   echo "1 /x/codex app-server --listen unix:// --managed-daemon" > "$PSDIR/chain/5000"
 }
 _not_under_daemon() {
-  echo "5000 bash -c something" > "$PSDIR/chain/$$"
+  echo "5000 bash -c something" > "$PSDIR/chain/default"
   echo "1 /sbin/launchd" > "$PSDIR/chain/5000"
 }
 _thread() {   # <id> <cwd> <age-seconds>
@@ -121,10 +124,10 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   _seat t-aaa
   run agmsg_terminal_self_env
   [ "$status" -eq 0 ]
-  case "$output" in unknown:codex:shared_daemon_pane_unproven:several_codex_tuis_match_this_thread) ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in unknown:codex:shared_daemon_pane_unproven:several_codex_tuis_may_hold_this_thread) ;; *) echo "$output"; return 1 ;; esac
   run agmsg_terminal_resolve_name ""
   [ "$status" -eq 1 ]
-  case "$output" in *"could not be proven"*"several_codex_tuis_match_this_thread"*) ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"could not be proven"*"several_codex_tuis_may_hold_this_thread"*) ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "no TUI started near the thread's creation (a thread made later in the same TUI): unknown" {
@@ -133,7 +136,7 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   _tui 91001 10:00 /work/a w1:pC
   _seat t-late
   run agmsg_terminal_self_env
-  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:no_codex_tui_started_with_this_thread" ]
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:no_codex_tui_holds_this_thread" ]
 }
 
 @test "a TUI in another cwd is not a match even at the same second" {
@@ -142,7 +145,7 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   _tui 91001 10:00 /work/other w1:pC
   _seat t-aaa
   run agmsg_terminal_self_env
-  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:no_codex_tui_started_with_this_thread" ]
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:no_codex_tui_holds_this_thread" ]
 }
 
 @test "a thread missing from Codex's table is unknown, not guessed" {
@@ -198,7 +201,7 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   echo "Sun Nov  1 17:00:00 2026" > "$PSDIR/lstart/91001"   # pid reused
   echo "777 1 00:05 /bin/sleep 5" > "$PSDIR/list"            # and the TUI is gone
   run agmsg_terminal_self_env
-  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:no_codex_tui_started_with_this_thread" ]
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:no_codex_process_listed" ]
 }
 
 @test "an unknown verdict is remembered only briefly, so a later start can settle it" {
@@ -222,4 +225,69 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   export CODEX_THREAD_ID=t-aaa TMUX=/tmp/tmux-1/default,4321,0 TMUX_PANE='%1'
   run agmsg_terminal_self_env
   [ "$output" = "$(printf 'tmux\t/tmp/tmux-1/default:%%7\tpid=4321')" ]
+}
+
+# --- review fixes -------------------------------------------------------------
+
+@test "bash -x never prints the TUI's environment or other processes' command lines" {
+  _under_daemon
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  # sentinels: a secret in the TUI's environment and one in another process's argv
+  printf '/v/bin/codex GH_TOKEN=SENTINEL_ENV_SECRET HERDR_ENV=1 HERDR_SOCKET_PATH=%s HERDR_PANE_ID=w1:pC AWS_SECRET=SENTINEL_ENV_SECRET2 TMUX_PANE=%%3\n' "$HERDR_SOCKET_PATH" > "$PSDIR/env/91001"
+  printf '93000 1 01:00 /bin/tool --token=SENTINEL_ARGV_SECRET\n' >> "$PSDIR/list"
+  echo "5000 bash --password=SENTINEL_CHAIN_SECRET" > "$PSDIR/chain/default"
+  export CODEX_THREAD_ID=t-aaa HERDR_ENV=1 HERDR_PANE_ID=w1:p17
+  local out="$TEST_SKILL_DIR/xtrace.out" err="$TEST_SKILL_DIR/xtrace.err"
+  bash -x -c '. "$SKILL_DIR/scripts/lib/codex-own-pane.sh"; agmsg_codex_own_pane' >"$out" 2>"$err"
+  grep -q 'HERDR_PANE_ID=w1:pC' "$out"
+  ! grep -rq SENTINEL "$out" "$err" "$SKILL_DIR/run"
+}
+
+@test "a failed ancestry check is unknown, never the daemon starter's pane" {
+  _under_daemon
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  : > "$PSDIR/fail_chain"
+  _seat t-aaa
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:cannot_tell_whether_under_shared_daemon" ]
+  run agmsg_terminal_resolve_name ""
+  [ "$status" -eq 1 ]
+  # and it is not remembered as trusted: once ps works, the real answer comes
+  rm -f "$PSDIR/fail_chain"
+  AGMSG_CODEX_UNKNOWN_TTL=0 run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "an ancestry walk cut off at 16 hops is unknown, not trusted" {
+  local i
+  for i in $(seq 1 40); do echo "$((i + 1)) bash" > "$PSDIR/chain/$i"; done
+  echo "2 bash" > "$PSDIR/chain/default"
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-aaa
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:cannot_tell_whether_under_shared_daemon" ]
+}
+
+@test "a thread that a resume argv and a start-time match place on two screens is unknown" {
+  _under_daemon
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC                       # started with the thread
+  printf '92001 1 40:00 /v/bin/codex resume t-aaa\n' >> "$PSDIR/list"   # and another screen resumed it
+  printf '/v/bin/codex HERDR_ENV=1 HERDR_SOCKET_PATH=%s HERDR_PANE_ID=w1:p9\n' "$HERDR_SOCKET_PATH" > "$PSDIR/env/92001"
+  _seat t-aaa
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:several_codex_tuis_may_hold_this_thread" ]
+}
+
+@test "a proven pane is only trusted for the pane TTL, then the scan is repeated" {
+  _under_daemon
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-aaa
+  agmsg_terminal_self_env >/dev/null
+  AGMSG_CODEX_PANE_TTL=0 agmsg_terminal_self_env >/dev/null
+  [ "$(grep -c '^LIST$' "$PSDIR/calls")" -eq 2 ]
 }
