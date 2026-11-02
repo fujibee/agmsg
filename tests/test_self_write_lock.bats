@@ -233,9 +233,12 @@ mutex_of() { printf '%s.reclaim' "$(agmsg_self_write_lock_path "$1" "$2")"; }
   gone="$(dead_token)"; mark_alive "$gone"; tok="$(me_token)"; mark_alive "$tok"
   mx="$(mutex_of T alice)"
   printf '%s\n' "$gone" > "$(agmsg_self_write_lock_path T alice)"
+  # 3>&-: the `sleep 30` outlives the subshell (kill -9 does not reach it, and
+  # by the time `pkill -P` runs it has been reparented), and with bats' fd 3
+  # open it kept this file running for ~25s after its last test.
   ( ctok="sid-child.$BASHPID"; printf '%s\n' "$ctok" > "$RUN_DIR/cc-instance.$BASHPID"
     _agmsg_lock_mutex_take "$mx" "$ctok" > "$RUN_DIR/child-take"
-    sleep 30 ) &
+    sleep 30 ) 3>&- &
   child=$!
   local i=0; while [ ! -s "$RUN_DIR/child-take" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i+1)); done
   [ "$(cat "$RUN_DIR/child-take")" = ok ]

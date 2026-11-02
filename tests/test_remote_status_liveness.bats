@@ -52,7 +52,7 @@ teardown() {
 }
 
 @test "teardown helper: leaves a pid whose argv is not this test's engine alone" {
-  sleep 30 &
+  sleep 30 3>&- &
   local foreign=$! real_teardown_env
   printf '%s\n' "$foreign" > "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
   ENGINE_PIDS="$foreign"
@@ -372,7 +372,7 @@ write_windows_spelling_fixtures() {
 }
 
 @test "status: rejects a live foreign process behind a recycled pidfile" {
-  sleep 30 &
+  sleep 30 3>&- &
   local foreign_pid=$!
   ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$foreign_pid"
   printf '%s\n' "$foreign_pid" > "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
@@ -462,7 +462,7 @@ write_windows_spelling_fixtures() {
   local fake_node fake_bin foreign_pid stamp
   stamp="$TEST_SKILL_DIR/run/remote-sync.testteam.cycles.json"
   fake_node="$(write_fake_node)"
-  sleep 30 &
+  sleep 30 3>&- &
   foreign_pid=$!
   fake_bin="$(write_fake_node_ps_fixture "$fake_node" "$foreign_pid")"
   ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$foreign_pid"
@@ -561,7 +561,7 @@ write_windows_spelling_fixtures() {
 @test "sync start: replaces stale ownership without signalling a foreign process" {
   local fake_node fake_bin foreign_pid
   fake_node="$(write_fake_node)"
-  sleep 30 &
+  sleep 30 3>&- &
   foreign_pid=$!
   fake_bin="$(write_fake_node_ps_fixture "$fake_node" "$foreign_pid")"
   ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$foreign_pid"
@@ -579,7 +579,7 @@ write_windows_spelling_fixtures() {
 }
 
 @test "disconnect removes stale ownership without signalling a foreign process" {
-  sleep 30 &
+  sleep 30 3>&- &
   local foreign_pid=$!
   ENGINE_PIDS="${ENGINE_PIDS:+$ENGINE_PIDS }$foreign_pid"
   printf '%s\n' "$foreign_pid" > "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
@@ -907,7 +907,7 @@ write_unownable_ps_fixture() {
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fake_bin/tasklist"
   chmod +x "$fake_bin/tasklist"
 
-  sleep 30 &
+  sleep 30 3>&- &
   local minted=$!
 
   # The premise, checked rather than assumed: the process really is alive.
@@ -1041,7 +1041,7 @@ legacy_skip_systemd_probe_name() {
 }
 
 @test "sync start: refuses an active systemd unit with unverified identity (#894)" {
-  sleep 30 &
+  sleep 30 3>&- &
   local foreign_pid=$!
   ENGINE_PIDS="$ENGINE_PIDS $foreign_pid"
   local fake_bin fake_systemctl
