@@ -317,13 +317,19 @@
       "filesRead": "Read files in a folder you choose",
       "gitRead": "Read git history and changes in that folder",
       "network": "Connect to {{hosts}}",
-      "networkAny": "Connect to any site on the internet"
+      "networkAny": "Connect to any site on the internet",
+      "teamJoin": "以成員身分加入你選擇的團隊",
+      "messagesSend": "向該團隊的成員傳送訊息",
+      "agentsSpawn": "在該團隊中啟動代理"
     },
     "grant": {
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke"
+      "revoke": "Revoke",
+      "join": "團隊成員：{{scope}}",
+      "send": "傳送訊息：{{scope}}",
+      "spawn": "啟動代理：{{scope}}"
     },
     "card": {
       "grantAria": "Permission request",
@@ -410,10 +416,14 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "它不能做的事",
+      "neverTitle": "附加元件本身不能做的事",
       "source_other": "來自 {{repo}} · {{sha}} · 新增 {{count}} 個面板",
       "sourceUpdate_other": "來自 {{repo}} · {{from}} → {{to}} · {{count}} 個面板",
-      "panes": "將新增：{{names}}"
+      "panes": "將新增：{{names}}",
+      "agentsTitle": "它與之交談或由它啟動的代理",
+      "agentsBody": "代理使用它們自己的權限運作，不受此附加元件的限制：在它們自身設定允許的範圍內，可以寫入和刪除檔案、讀取其他資料夾並使用網路。",
+      "agentsMode": "它啟動的代理使用此權限模式：agmsg 預設值，或你在 spawn_options.yaml 中為該 CLI 設定的值。",
+      "agentsFolder": "它們的工作資料夾是 ~/agmsg-agents/<name>，或你授予此附加元件的資料夾中的某個資料夾。"
     },
     "remove": {
       "title": "Remove {{title}}?",

@@ -317,13 +317,19 @@
       "filesRead": "Read files in a folder you choose",
       "gitRead": "Read git history and changes in that folder",
       "network": "Connect to {{hosts}}",
-      "networkAny": "Connect to any site on the internet"
+      "networkAny": "Connect to any site on the internet",
+      "teamJoin": "Join the team you choose as a member",
+      "messagesSend": "Send messages to members of that team",
+      "agentsSpawn": "Start agents in that team"
     },
     "grant": {
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke"
+      "revoke": "Revoke",
+      "join": "Member of team: {{scope}}",
+      "send": "Sends messages: {{scope}}",
+      "spawn": "Starts agents: {{scope}}"
     },
     "card": {
       "grantAria": "Permission request",
@@ -410,12 +416,16 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "What it cannot do",
+      "neverTitle": "What the add-on itself cannot do",
       "source_one": "from {{repo}} · {{sha}} · adds {{count}} pane",
       "source_other": "from {{repo}} · {{sha}} · adds {{count}} panes",
       "sourceUpdate_one": "from {{repo}} · {{from}} → {{to}} · {{count}} pane",
       "sourceUpdate_other": "from {{repo}} · {{from}} → {{to}} · {{count}} panes",
-      "panes": "Adds: {{names}}"
+      "panes": "Adds: {{names}}",
+      "agentsTitle": "Agents it talks to or starts",
+      "agentsBody": "They work with their own permissions. They do not get this add-on's limits: they can write and delete files, read other folders and use the network, as far as their own settings allow.",
+      "agentsMode": "Agents it starts use this permission mode: the agmsg default, or your spawn_options.yaml setting for that CLI.",
+      "agentsFolder": "Their working folder is ~/agmsg-agents/<name>, or a folder inside one you gave this add-on."
     },
     "remove": {
       "title": "Remove {{title}}?",

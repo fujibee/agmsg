@@ -317,13 +317,19 @@
       "filesRead": "Read files in a folder you choose",
       "gitRead": "Read git history and changes in that folder",
       "network": "Connect to {{hosts}}",
-      "networkAny": "Connect to any site on the internet"
+      "networkAny": "Connect to any site on the internet",
+      "teamJoin": "Unirse como miembro al equipo que elijas",
+      "messagesSend": "Enviar mensajes a los miembros de ese equipo",
+      "agentsSpawn": "Iniciar agentes en ese equipo"
     },
     "grant": {
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke"
+      "revoke": "Revoke",
+      "join": "Miembro del equipo: {{scope}}",
+      "send": "Envía mensajes: {{scope}}",
+      "spawn": "Inicia agentes: {{scope}}"
     },
     "card": {
       "grantAria": "Permission request",
@@ -410,14 +416,18 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "Lo que no puede hacer",
+      "neverTitle": "Lo que el complemento en sí no puede hacer",
       "source_one": "de {{repo}} · {{sha}} · añade {{count}} panel",
       "source_many": "de {{repo}} · {{sha}} · añade {{count}} paneles",
       "source_other": "de {{repo}} · {{sha}} · añade {{count}} paneles",
       "sourceUpdate_one": "de {{repo}} · {{from}} → {{to}} · {{count}} panel",
       "sourceUpdate_many": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles",
       "sourceUpdate_other": "de {{repo}} · {{from}} → {{to}} · {{count}} paneles",
-      "panes": "Añade: {{names}}"
+      "panes": "Añade: {{names}}",
+      "agentsTitle": "Agentes con los que habla o que inicia",
+      "agentsBody": "Trabajan con sus propios permisos. No heredan los límites de este complemento: pueden escribir y borrar archivos, leer otras carpetas y usar la red, hasta donde lo permitan sus propios ajustes.",
+      "agentsMode": "Los agentes que inicia usan este modo de permisos: el predeterminado de agmsg, o tu ajuste en spawn_options.yaml para esa CLI.",
+      "agentsFolder": "Su carpeta de trabajo es ~/agmsg-agents/<name>, o una carpeta dentro de una que diste a este complemento."
     },
     "remove": {
       "title": "Remove {{title}}?",

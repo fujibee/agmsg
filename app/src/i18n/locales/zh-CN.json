@@ -317,13 +317,19 @@
       "filesRead": "Read files in a folder you choose",
       "gitRead": "Read git history and changes in that folder",
       "network": "Connect to {{hosts}}",
-      "networkAny": "Connect to any site on the internet"
+      "networkAny": "Connect to any site on the internet",
+      "teamJoin": "以成员身份加入你选择的团队",
+      "messagesSend": "向该团队的成员发送消息",
+      "agentsSpawn": "在该团队中启动代理"
     },
     "grant": {
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke"
+      "revoke": "Revoke",
+      "join": "团队成员：{{scope}}",
+      "send": "发送消息：{{scope}}",
+      "spawn": "启动代理：{{scope}}"
     },
     "card": {
       "grantAria": "Permission request",
@@ -410,10 +416,14 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "它不能做的事",
+      "neverTitle": "加载项本身不能做的事",
       "source_other": "来自 {{repo}} · {{sha}} · 添加 {{count}} 个面板",
       "sourceUpdate_other": "来自 {{repo}} · {{from}} → {{to}} · {{count}} 个面板",
-      "panes": "将添加：{{names}}"
+      "panes": "将添加：{{names}}",
+      "agentsTitle": "它与之交流或由它启动的代理",
+      "agentsBody": "代理使用它们自己的权限运行，不受此加载项的限制：在它们自身设置允许的范围内，可以写入和删除文件、读取其他文件夹并使用网络。",
+      "agentsMode": "它启动的代理使用此权限模式：agmsg 默认值，或你在 spawn_options.yaml 中为该 CLI 设置的值。",
+      "agentsFolder": "它们的工作文件夹是 ~/agmsg-agents/<name>，或你授予此加载项的文件夹中的某个文件夹。"
     },
     "remove": {
       "title": "Remove {{title}}?",

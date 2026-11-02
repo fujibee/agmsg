@@ -317,13 +317,19 @@
       "filesRead": "Read files in a folder you choose",
       "gitRead": "Read git history and changes in that folder",
       "network": "Connect to {{hosts}}",
-      "networkAny": "Connect to any site on the internet"
+      "networkAny": "Connect to any site on the internet",
+      "teamJoin": "Rejoindre en tant que membre l'équipe que vous choisissez",
+      "messagesSend": "Envoyer des messages aux membres de cette équipe",
+      "agentsSpawn": "Démarrer des agents dans cette équipe"
     },
     "grant": {
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke"
+      "revoke": "Revoke",
+      "join": "Membre de l'équipe : {{scope}}",
+      "send": "Envoie des messages : {{scope}}",
+      "spawn": "Démarre des agents : {{scope}}"
     },
     "card": {
       "grantAria": "Permission request",
@@ -410,14 +416,18 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "Ce qu'il ne peut pas faire",
+      "neverTitle": "Ce que le module lui-même ne peut pas faire",
       "source_one": "depuis {{repo}} · {{sha}} · ajoute {{count}} panneau",
       "source_many": "depuis {{repo}} · {{sha}} · ajoute {{count}} panneaux",
       "source_other": "depuis {{repo}} · {{sha}} · ajoute {{count}} panneaux",
       "sourceUpdate_one": "depuis {{repo}} · {{from}} → {{to}} · {{count}} panneau",
       "sourceUpdate_many": "depuis {{repo}} · {{from}} → {{to}} · {{count}} panneaux",
       "sourceUpdate_other": "depuis {{repo}} · {{from}} → {{to}} · {{count}} panneaux",
-      "panes": "Ajoute : {{names}}"
+      "panes": "Ajoute : {{names}}",
+      "agentsTitle": "Agents avec lesquels il échange ou qu'il démarre",
+      "agentsBody": "Ils travaillent avec leurs propres permissions. Ils n'héritent pas des limites de ce module : ils peuvent écrire et supprimer des fichiers, lire d'autres dossiers et utiliser le réseau, dans la mesure où leurs propres réglages le permettent.",
+      "agentsMode": "Les agents qu'il démarre utilisent ce mode de permissions : celui par défaut d'agmsg, ou votre réglage spawn_options.yaml pour cette CLI.",
+      "agentsFolder": "Leur dossier de travail est ~/agmsg-agents/<name>, ou un dossier à l'intérieur d'un dossier que vous avez donné à ce module."
     },
     "remove": {
       "title": "Remove {{title}}?",

@@ -7,9 +7,9 @@ export type * from "../../addon-kit/protocol";
 import type { PermissionDiff } from "./model";
 import type { ErrorCode } from "../../addon-kit/protocol";
 
-export type Permission = "messages:read" | "files:read" | "git:read" | "network";
+export type Permission = "messages:read" | "files:read" | "git:read" | "network" | "team:join" | "messages:send" | "agents:spawn";
 
-export const PERMISSIONS: readonly Permission[] = ["messages:read", "files:read", "git:read", "network"];
+export const PERMISSIONS: readonly Permission[] = ["messages:read", "files:read", "git:read", "network", "team:join", "messages:send", "agents:spawn"];
 
 /** `network` in addon.conf: nothing, any site (`*`), or a list of https origins. */
 export type NetworkScope = { kind: "none" } | { kind: "any" } | { kind: "origins"; origins: string[] };

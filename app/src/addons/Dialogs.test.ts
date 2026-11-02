@@ -38,6 +38,20 @@ describe("ConfirmInstallDialog", () => {
     expect(html).toMatch(/<b>(<!-- -->)?[^<]*messagesRead[^<]*<\/b><span class="addon-why">/);
     expect(html).toMatch(/<p class="addon-warn">\[addons\.confirm\.noReview\]/);
   });
+  it("adds the agents block only when it can send or start", () => {
+    const render = (p: AddonPaneDecl["permissions"]) =>
+      renderToStaticMarkup(createElement(ConfirmInstallDialog, { t, staged: staged({ panes: [pane(p)] }), onInstall: noop, onCancel: noop }));
+    expect(render(["messages:read"])).not.toContain("addons.confirm.agentsTitle");
+    expect(render(["team:join"])).not.toContain("addons.confirm.agentsTitle");
+    const send = render(["team:join", "messages:send"]);
+    expect(send).toContain("addons.confirm.agentsTitle");
+    expect(send).toContain("addons.confirm.agentsBody");
+    expect(send).not.toContain("addons.confirm.agentsMode");
+    const spawn = render(["team:join", "agents:spawn"]);
+    expect(spawn).toContain("addons.confirm.agentsMode");
+    expect(spawn).toContain("addons.confirm.agentsFolder");
+    expect(spawn).toContain("addons.permission.agentsSpawn");
+  });
   it("lists the pane names before installing", () => {
     const html = renderToStaticMarkup(createElement(ConfirmInstallDialog, { t, staged: staged(), onInstall: noop, onCancel: noop }));
     expect(html).toContain("addons.confirm.panes");

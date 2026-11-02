@@ -317,13 +317,19 @@
       "filesRead": "選んだフォルダのファイルを読む",
       "gitRead": "そのフォルダの git 履歴と変更を読む",
       "network": "{{hosts}} に接続する",
-      "networkAny": "インターネット上の任意のサイトに接続する"
+      "networkAny": "インターネット上の任意のサイトに接続する",
+      "teamJoin": "あなたが選んだチームにメンバーとして参加する",
+      "messagesSend": "そのチームのメンバーにメッセージを送る",
+      "agentsSpawn": "そのチームでエージェントを起動する"
     },
     "grant": {
       "messages": "メッセージを読む: {{scope}}",
       "files": "ファイルを読む: {{scope}}",
       "remembered": "(記憶済み)",
-      "revoke": "取り消す"
+      "revoke": "取り消す",
+      "join": "チームのメンバー: {{scope}}",
+      "send": "メッセージを送信: {{scope}}",
+      "spawn": "エージェントを起動: {{scope}}"
     },
     "card": {
       "grantAria": "権限のリクエスト",
@@ -410,10 +416,14 @@
       "paneCombined": "{{pane}} が、読み取った内容をネットワークへ送れるようになります",
       "paneAsksAgain": "{{pane}} は、フォルダやチームへのアクセスを改めて確認します",
       "paneRemoved": "{{pane}} は削除されます(保存済みのアクセスも破棄されます)",
-      "neverTitle": "このアドオンができないこと",
+      "neverTitle": "このアドオン自身ができないこと",
       "source_other": "{{repo}} から · {{sha}} · ペイン {{count}} 件を追加",
       "sourceUpdate_other": "{{repo}} から · {{from}} → {{to}} · ペイン {{count}} 件",
-      "panes": "追加されるペイン: {{names}}"
+      "panes": "追加されるペイン: {{names}}",
+      "agentsTitle": "やり取りする、または起動するエージェント",
+      "agentsBody": "エージェントは自分の権限で動きます。このアドオンの制限は引き継がれません。エージェント自身の設定が許す範囲で、ファイルの書き込みや削除、ほかのフォルダの読み取り、ネットワークの利用ができます。",
+      "agentsMode": "起動したエージェントの権限モードは、agmsg の既定値、またはその CLI について spawn_options.yaml に書いたあなたの設定です。",
+      "agentsFolder": "作業フォルダは ~/agmsg-agents/<name>、またはこのアドオンに許可したフォルダの中のフォルダです。"
     },
     "remove": {
       "title": "{{title}} を削除しますか?",

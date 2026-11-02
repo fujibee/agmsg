@@ -1,7 +1,7 @@
 import { Modal } from "../modals";
 import { BusyButton } from "../busy";
 import type { FetchProgress, StagedInstall } from "./types";
-import { addonNetwork, canSendWhatItReads, permissionDiff, permissionRow, shortSha, type Translate } from "./model";
+import { addonNetwork, canSendWhatItReads, permissionDiff, permissionRow, reachesAgents, shortSha, type Translate } from "./model";
 import type { InstalledAddon, Permission } from "./types";
 
 // S3 confirm (install), S8 confirm (update, with the difference highlighted),
@@ -23,6 +23,7 @@ export function ConfirmInstallDialog(props: {
   for (const pane of staged.panes) for (const p of pane.permissions) perms.set(p, { panes: [...(perms.get(p)?.panes ?? []), pane.name] });
   const net = addonNetwork({ panes: staged.panes } as InstalledAddon);
   const sends = staged.panes.some(canSendWhatItReads);
+  const agents = reachesAgents(perms.keys());
   const isNew = (p: Permission) => diff?.added.includes(p) || (p === "network" && diff?.networkWider) || false;
   return (
     <Modal title={t(diff ? "addons.confirm.updateTitle" : "addons.confirm.installTitle", { title: staged.title })} onClose={props.busy ? undefined : props.onCancel} wide busy={props.busy}>
@@ -62,6 +63,14 @@ export function ConfirmInstallDialog(props: {
           <h4>{t("addons.confirm.neverTitle")}</h4>
           <p className="addon-never">{t("addons.confirm.never")}</p>
         </div>
+        {(agents.send || agents.spawn) && (
+          <div className="addon-block" role="note">
+            <h4>{t("addons.confirm.agentsTitle")}</h4>
+            <p className="addon-never">{t("addons.confirm.agentsBody")}</p>
+            {agents.spawn && <p className="addon-never">{t("addons.confirm.agentsMode")}</p>}
+            {agents.spawn && <p className="addon-never">{t("addons.confirm.agentsFolder")}</p>}
+          </div>
+        )}
         {diff && <PaneChanges t={t} staged={staged} />}
         {diff?.asksAgain && <p className="addon-warn addon-asks-again">{t("addons.confirm.asksAgain")}</p>}
         <p className="addon-warn">{t("addons.confirm.noReview")}</p>
