@@ -523,6 +523,13 @@
       "openNew": "Open new",
       "leave": "Leave it",
       "open": "Open"
+    },
+    "trust": {
+      "label": "Trust ~/agmsg-agents in Claude Code so the agents it starts don't stop at \"Do you trust this folder?\"",
+      "note": "This writes one setting to Claude Code's config: the trust flag for that folder. Nothing else in it changes.",
+      "trusted": "~/agmsg-agents is already trusted in Claude Code.",
+      "notFound": "Claude Code's config was not found, so nothing can be set. The agents may stop at \"Do you trust this folder?\"; press Enter in their pane.",
+      "failed": "Could not trust ~/agmsg-agents: {{error}}"
     }
   }
 }

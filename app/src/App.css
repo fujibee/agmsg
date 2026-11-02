@@ -1748,3 +1748,7 @@ button[aria-busy="true"] { cursor: progress; }
   border-radius: 8px;
   font-size: 10px;
 }
+.addon-trust { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; margin: 6px 0 0; }
+.addon-trust input { margin-top: 3px; }
+.addon-trust-note { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.addon-trust-state { color: var(--muted); font-size: 12px; margin: 6px 0 0; }

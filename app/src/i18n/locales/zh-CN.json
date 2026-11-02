@@ -516,6 +516,13 @@
       "openNew": "打开新的",
       "leave": "保持现状",
       "open": "打开"
+    },
+    "trust": {
+      "label": "在 Claude Code 中信任 ~/agmsg-agents,这样它启动的 agent 不会停在“Do you trust this folder?”",
+      "note": "这只会向 Claude Code 的配置写入一项设置:该文件夹的信任标记。其他内容不会改变。",
+      "trusted": "~/agmsg-agents 在 Claude Code 中已被信任。",
+      "notFound": "未找到 Claude Code 的配置,因此无法设置。如果 agent 停在“Do you trust this folder?”,请在它的 pane 中按 Enter。",
+      "failed": "无法信任 ~/agmsg-agents:{{error}}"
     }
   }
 }

@@ -17,7 +17,7 @@ import { clearIf, counter, expireAfter, raise, type Notice } from "./notice";
 import { listenPaneFailed, type PaneFailedEvent } from "./paneFailed";
 import { pickSavedPowers, pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
-import { createLiveSource, parseNetwork, toCommandError, type AddedPane, type TeamPower } from "./source";
+import { createLiveSource, parseNetwork, toCommandError, type AddedPane, type FolderTrust, type TeamPower } from "./source";
 import type { AddonPaneRef, GrantChip, GrantNeed, InstalledAddon, PaneState } from "./types";
 
 const source = createLiveSource((cmd, args) => invoke(cmd, args));
@@ -87,6 +87,9 @@ function LiveAddonPane(props: {
   const [attempt, setAttempt] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [pending, setPending] = useState(false);
+  // The opt-in to trust ~/agmsg-agents in Claude Code (agents:spawn only): read once when the card shows, unticked by default.
+  const [trustState, setTrustState] = useState<FolderTrust | null>(null);
+  const [trustChecked, setTrustChecked] = useState(false);
   const [pendingChoice, setPendingChoice] = useState<GrantChoice | undefined>();
   // Which frame has finished loading ("<pane instance>:<reload key>"): until then a cover says it is loading.
   const [loadedFrame, setLoadedFrame] = useState("");
@@ -258,6 +261,16 @@ function LiveAddonPane(props: {
     }
   }, [added, steps, folder, props.team]);
 
+  const wantsTrust = state.kind === "grant" && state.need.permission === "powers" && state.need.spawn;
+  useEffect(() => {
+    if (!wantsTrust) return;
+    let live = true;
+    void source.agentsFolderTrust().then((r) => live && setTrustState(r.ok ? r.value : "config not found"));
+    return () => {
+      live = false;
+    };
+  }, [wantsTrust]);
+
   const onGrant = async (c: GrantChoice) => {
     if (!added || state.kind !== "grant" || guard.current.isBusy()) return;
     const need = state.need;
@@ -288,6 +301,12 @@ function LiveAddonPane(props: {
             // The pane was reopened or its add-on updated while the grant ran: that consent must not be saved.
             const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, p, need.team, added.id, added.commit) : null;
             if (saved && !saved.ok) saveFailed ??= saved.error.message;
+          }
+          // The ticked box writes that one flag, from the consent just saved; a failure is shown, the grant stands.
+          if (need.spawn && trustChecked && trustState === "not trusted" && !stale()) {
+            const tr = await source.trustAgentsFolder(pane.addonId);
+            if (!tr.ok) saveFailed ??= t("addons.trust.failed", { error: tr.error.message }) as string;
+            else if (tr.value === "config not found") saveFailed ??= t("addons.trust.notFound") as string;
           }
           return { chip: { key: `team:${need.team}`, label: need.team }, saveFailed };
         }
@@ -349,6 +368,7 @@ function LiveAddonPane(props: {
       devFolder={addon?.dev?.label}
       pending={pending}
       pendingChoice={pendingChoice}
+      trust={{ state: trustState, checked: trustChecked, onChange: setTrustChecked }}
       hideTitle
       hideClose
       state={state}

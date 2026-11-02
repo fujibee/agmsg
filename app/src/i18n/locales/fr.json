@@ -522,6 +522,13 @@
       "openNew": "Ouvrir un nouveau",
       "leave": "Laisser",
       "open": "Ouvrir"
+    },
+    "trust": {
+      "label": "Faire confiance à ~/agmsg-agents dans Claude Code pour que les agents lancés ne s'arrêtent pas sur « Do you trust this folder? »",
+      "note": "Cela écrit un seul réglage dans la configuration de Claude Code : l'indicateur de confiance de ce dossier. Rien d'autre ne change.",
+      "trusted": "~/agmsg-agents est déjà approuvé dans Claude Code.",
+      "notFound": "La configuration de Claude Code est introuvable, rien ne peut donc être défini. Si les agents s'arrêtent sur « Do you trust this folder? », appuyez sur Entrée dans leur pane.",
+      "failed": "Impossible d'approuver ~/agmsg-agents : {{error}}"
     }
   }
 }

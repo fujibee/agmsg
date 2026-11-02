@@ -114,6 +114,8 @@ export type InstallDone = { id: string; repo: string; sha: string; previousSha: 
 export type DevEntryRaw = { id: string; label: string; panes: string[]; copy: number };
 export type SavedGrantRaw = { permission: string; scope: string; grantedAt: string };
 
+export type FolderTrust = "trusted" | "not trusted" | "config not found";
+
 export type Outcome<T> = { ok: true; value: T } | { ok: false; error: CommandError };
 
 async function attempt<T>(fn: () => Promise<T>): Promise<Outcome<T>> {
@@ -212,6 +214,10 @@ export function createLiveSource(invoke: Invoke) {
     setPower: (id: number, power: TeamPower, on: boolean) => attempt(async () => void (await invoke("addon_set_power", { id, power, on }))),
     /** addon_members_state: the members and agents add-ons made, with their state. */
     membersState: () => attempt(async () => (await invoke("addon_members_state")) as MemberState[]),
+    /** addon_agents_folder_trust: read-only; whether ~/agmsg-agents is trusted in Claude Code's config. */
+    agentsFolderTrust: () => attempt(async () => (await invoke("addon_agents_folder_trust")) as FolderTrust),
+    /** addon_trust_agents_folder: writes that one trust flag, from the saved consent, for an add-on that declared agents:spawn. */
+    trustAgentsFolder: (addon: string) => attempt(async () => (await invoke("addon_trust_agents_folder", { addon })) as FolderTrust),
     /** addon_agent_reopen: the person's choice for an agent that is orphaned, unknown or only joined. */
     agentReopen: (key: string) => attempt(async () => void (await invoke("addon_agent_reopen", { key }))),
     async grantRoot(id: number, path: string): Promise<GrantRootResult> {

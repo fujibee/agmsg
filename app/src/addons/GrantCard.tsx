@@ -1,12 +1,16 @@
 import type { GrantNeed } from "./types";
 import type { Translate } from "./model";
 import { BusyButton } from "../busy";
+import type { FolderTrust } from "./source";
 
 // S6: the grant card inside the pane (not a modal; the rest of the app stays
 // usable). Messages: Allow / Not now. Files: Allow once / Always for this
 // folder / Not now. A denied path is refused in the card, with no Allow.
 
 export type GrantChoice = "allow" | "once" | "always" | "notNow";
+
+/** The opt-in to trust ~/agmsg-agents in Claude Code, shown with the agents:spawn grant. `state` null = not read yet. */
+export type TrustOption = { state: FolderTrust | null; checked: boolean; onChange: (on: boolean) => void };
 
 export function GrantCard(props: {
   t: Translate;
@@ -19,6 +23,8 @@ export function GrantCard(props: {
   pending?: boolean;
   /** The choice that started the running call: its button shows the spinner. */
   pendingChoice?: GrantChoice;
+  /** Only given with agents:spawn. */
+  trust?: TrustOption;
 }) {
   const { t, title, need, onChoose } = props;
   const canRemember = props.canRemember ?? true;
@@ -58,6 +64,7 @@ export function GrantCard(props: {
             {need.spawn && <p className="addon-never">{t("addons.confirm.agentsFolder")}</p>}
           </>
         )}
+        {need.spawn && props.trust && <TrustRow t={t} trust={props.trust} pending={pending} />}
         <div className="addon-card-actions">
           <BusyButton type="button" disabled={pending} busy={spin("allow")} onClick={() => onChoose("allow")}>
             {t("addons.card.allow")}
@@ -107,5 +114,21 @@ export function GrantCard(props: {
         </BusyButton>
       </div>
     </div>
+  );
+}
+
+function TrustRow(props: { t: Translate; trust: TrustOption; pending: boolean }) {
+  const { t, trust } = props;
+  if (trust.state === "trusted") return <p className="addon-trust-state">{t("addons.trust.trusted")}</p>;
+  if (trust.state === "config not found") return <p className="addon-trust-state">{t("addons.trust.notFound")}</p>;
+  if (trust.state === null) return null;
+  return (
+    <label className="addon-trust">
+      <input type="checkbox" checked={trust.checked} disabled={props.pending} onChange={(e) => trust.onChange(e.target.checked)} />
+      <span>
+        {t("addons.trust.label")}
+        <small className="addon-trust-note">{t("addons.trust.note")}</small>
+      </span>
+    </label>
   );
 }

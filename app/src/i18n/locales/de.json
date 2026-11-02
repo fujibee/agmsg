@@ -519,6 +519,13 @@
       "openNew": "Neu öffnen",
       "leave": "Belassen",
       "open": "Öffnen"
+    },
+    "trust": {
+      "label": "~/agmsg-agents in Claude Code als vertrauenswürdig markieren, damit die gestarteten Agents nicht bei „Do you trust this folder?“ hängen bleiben",
+      "note": "Das schreibt eine einzige Einstellung in die Konfiguration von Claude Code: das Vertrauens-Flag für diesen Ordner. Sonst ändert sich nichts.",
+      "trusted": "~/agmsg-agents ist in Claude Code bereits als vertrauenswürdig markiert.",
+      "notFound": "Die Konfiguration von Claude Code wurde nicht gefunden, daher lässt sich nichts setzen. Bleiben die Agents bei „Do you trust this folder?“ stehen, drücken Sie in ihrem Pane die Eingabetaste.",
+      "failed": "~/agmsg-agents konnte nicht als vertrauenswürdig markiert werden: {{error}}"
     }
   }
 }

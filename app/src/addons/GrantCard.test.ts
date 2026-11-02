@@ -26,4 +26,24 @@ describe("GrantCard powers", () => {
     expect(spawn).toContain("addons.confirm.agentsMode");
     expect(spawn).toContain("addons.confirm.agentsFolder");
   });
+
+  const withTrust = (state: "trusted" | "not trusted" | "config not found" | null, spawn = true, checked = false) =>
+    renderToStaticMarkup(
+      createElement(GrantCard, { t, title: "Chess", need: { permission: "powers", team: "t1", send: true, spawn }, trust: { state, checked, onChange: () => {} }, onChoose: () => {} }),
+    );
+  it("offers the folder-trust box only for agents:spawn, only when the folder is not trusted yet, unticked", () => {
+    const html = withTrust("not trusted");
+    expect(html).toContain("addons.trust.label");
+    expect(html).toContain("addons.trust.note");
+    expect(html).toContain('type="checkbox"');
+    expect(html).not.toMatch(/checked=""/);
+    expect(withTrust("not trusted", false)).not.toContain("addons.trust");
+    expect(withTrust("not trusted", true, true)).toMatch(/checked=""/);
+  });
+  it("says so instead of offering the box when the folder is trusted, the config is missing, or it is not read yet", () => {
+    expect(withTrust("trusted")).toContain("addons.trust.trusted");
+    expect(withTrust("trusted")).not.toContain('type="checkbox"');
+    expect(withTrust("config not found")).toContain("addons.trust.notFound");
+    expect(withTrust(null)).not.toContain("addons.trust");
+  });
 });

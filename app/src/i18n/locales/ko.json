@@ -516,6 +516,13 @@
       "openNew": "새로 열기",
       "leave": "그대로 두기",
       "open": "열기"
+    },
+    "trust": {
+      "label": "Claude Code에서 ~/agmsg-agents를 신뢰하여, 시작된 agent가 \"Do you trust this folder?\"에서 멈추지 않게 합니다",
+      "note": "Claude Code 설정에 이 폴더의 신뢰 플래그 하나만 기록합니다. 다른 항목은 바뀌지 않습니다.",
+      "trusted": "~/agmsg-agents는 Claude Code에서 이미 신뢰하고 있습니다.",
+      "notFound": "Claude Code 설정을 찾지 못해 아무것도 설정할 수 없습니다. agent가 \"Do you trust this folder?\"에서 멈추면 해당 pane에서 Enter를 누르세요.",
+      "failed": "~/agmsg-agents를 신뢰하지 못했습니다: {{error}}"
     }
   }
 }
