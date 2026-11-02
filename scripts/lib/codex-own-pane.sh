@@ -50,6 +50,16 @@ _AGMSG_CODEX_OWN_PANE_SH=1
 : "${AGMSG_CODEX_PANE_TTL:=300}"      # how long a proven pane is remembered
 : "${AGMSG_CODEX_UNKNOWN_TTL:=15}"    # how long "cannot prove it" is remembered
 
+# A pane was just proven by a scan: put herdr's record of the thread on it too
+# (codex-herdr-report.sh). Best effort; never changes what this file answers.
+_agmsg_cop_report() {   # <thread>, the KEY=VALUE lines on stdin
+  if ! declare -F agmsg_codex_report_own_session >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$(dirname "${BASH_SOURCE[0]}")/codex-herdr-report.sh" 2>/dev/null || { cat >/dev/null; return 0; }
+  fi
+  agmsg_codex_report_own_session "$1"
+}
+
 # Is this process under a `--managed-daemon` app-server?
 #   0  yes        1  no (the walk reached the top of the tree)
 #   2  cannot tell (ps failed, the process vanished, or 16 hops were not enough)
@@ -276,6 +286,7 @@ agmsg_codex_own_pane() {
         *HERDR_PANE_ID=*|*TMUX_PANE=*)
           lstart="$(ps -o lstart= -p "$pid" 2>/dev/null)" || lstart=""
           [ -n "$lstart" ] && printf '%s\n' "$env" | _agmsg_cop_remember pane "$tid" "$pid" "$lstart"
+          printf '%s\n' "$env" | _agmsg_cop_report "$tid"
           printf 'env\n%s\n' "$env"
           return 0 ;;
         *) reason="codex_tui_environment_has_no_pane" ;;
