@@ -14,13 +14,13 @@ import { platform, uptime } from "node:os";
 // A boot-scoped id: the same value for every process on this machine
 // started since the current boot, and a DIFFERENT value after a reboot --
 // the property needed to tell "this executor" from "a later process
-// that reused the same pid" across a restart. It is a boot EPOCH TIMESTAMP
-// (seconds), not the UUID form some platforms also expose; either serves
-// the same comparison purpose.
+// that reused the same pid" across a restart. It is the kernel's UUID where
+// one exists, and an approximate boot EPOCH TIMESTAMP (seconds) elsewhere;
+// either serves the same comparison purpose.
 //
-// linux: /proc/stat's `btime` line is the kernel's own authoritative boot
-// epoch. darwin: `sysctl -n kern.bootsessionuuid`, a UUID fixed for the
-// boot. Neither drifts between calls.
+// linux: /proc/sys/kernel/random/boot_id, fixed for the boot (btime from
+// /proc/stat only when it cannot be read). darwin: `sysctl -n
+// kern.bootsessionuuid`, likewise fixed for the boot.
 //
 // Anything else (win32 included): no simple authoritative file to read
 // without shelling out to something heavier (wmic/PowerShell) for every
@@ -34,6 +34,15 @@ import { platform, uptime } from "node:os";
 export function bootId() {
   const plat = platform();
   if (plat === "linux") {
+    // The kernel's per-boot random id never changes within a boot. btime does:
+    // it is "now minus uptime", so a stepped wall clock (WSL2's host time sync)
+    // moves it while the machine stays up.
+    try {
+      const id = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      if (id) return id;
+    } catch {
+      // fall through to btime
+    }
     const stat = readFileSync("/proc/stat", "utf8");
     const line = stat.split("\n").find((l) => l.startsWith("btime "));
     if (line) {
@@ -72,6 +81,10 @@ export function sameBoot(recorded, plat = platform(), current = bootId()) {
   // be read, bootId() falls back to a number, which must not make an
   // old-format record look like an exact match.
   if (plat === "darwin" && /^\d+$/.test(String(recorded))) return null;
+  // Linux records written before the boot id became the kernel's boot_id hold
+  // btime seconds, which a stepped clock moves. Neither side can then say it is
+  // the same boot, so a live pid is "cannot tell", not another boot.
+  if (plat === "linux" && /^\d+$/.test(String(recorded)) !== /^\d+$/.test(String(current))) return null;
   // The approximate id proves nothing by differing: a gap beyond the tolerance
   // (a sleep, a clock step) is "cannot tell", never "another boot". Only a
   // record in some other form is a plain mismatch.
