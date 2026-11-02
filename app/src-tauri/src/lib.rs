@@ -681,6 +681,8 @@ pub fn run() {
             addons::commands::addon_set_power,
             addons::agents::addon_members_state,
             addons::agents::addon_agent_reopen,
+            addons::trust::addon_trust_agents_folder,
+            addons::trust::addon_agents_folder_trust,
             addons::agents::addon_agent_open_failed,
             addons::commands::addon_revoke_team,
             addons::commands::addon_grant_root,

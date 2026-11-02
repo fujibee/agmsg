@@ -55,6 +55,8 @@
     "allow-addon-set-power",
     "allow-addon-members-state",
     "allow-addon-agent-reopen",
+    "allow-addon-trust-agents-folder",
+    "allow-addon-agents-folder-trust",
     "allow-addon-agent-open-failed",
     "allow-addon-grant-root",
     "allow-addon-resolve-folder",

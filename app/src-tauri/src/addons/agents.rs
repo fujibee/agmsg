@@ -88,6 +88,34 @@ pub fn validate_model(model: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Runs `f` and, in a debug build with `AGMSG_ADDON_TRACE` set, logs how long it took (the measurement runs read it).
+fn phase<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var_os("AGMSG_ADDON_TRACE").is_some() {
+            let t = std::time::Instant::now();
+            let r = f();
+            eprintln!("[addons-trace] agents phase={label} {} ms", t.elapsed().as_millis());
+            return r;
+        }
+    }
+    let _ = label;
+    f()
+}
+
+/// A path as a user would type it: the `\\?\` form `canonicalize` returns on Windows is dropped (`\\?\UNC\` kept),
+/// because the folder goes into the team registry, a script argument and the terminal's working folder.
+pub fn plain_path_str(p: &str) -> String {
+    match p.strip_prefix("\\\\?\\") {
+        Some(rest) if !rest.starts_with("UNC\\") => rest.to_string(),
+        _ => p.to_string(),
+    }
+}
+
+fn plain(p: PathBuf) -> PathBuf {
+    PathBuf::from(plain_path_str(&p.to_string_lossy()))
+}
+
 fn random_id() -> String {
     let mut b = [0u8; 8];
     let _ = getrandom::getrandom(&mut b);
@@ -440,7 +468,7 @@ impl Manager {
         }
         let wanted = a.member.clone().unwrap_or_else(|| member_from_pane(&a.pane));
         validate_name(&wanted).map_err(|w| BrokerError::new("bad_args", format!("member name {w}")))?;
-        let before = self.world.members(team).map_err(|e| BrokerError::new("not_available", e))?;
+        let before = phase("join: members", || self.world.members(team)).map_err(|e| BrokerError::new("not_available", e))?;
         let name = free_name(&wanted, &|n| before.iter().any(|m| m.name == n));
         let claim = random_id();
         let project = self.world.members_root().join(&claim);
@@ -450,11 +478,11 @@ impl Manager {
         self.update(|es| {
             es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Member, requested: String::new(), name: name.clone(), agent_type: MEMBER_TYPE.into(), project: project_s.clone(), claim: claim.clone(), model: None, state: State::Claimed, pid: None, start: None, reason: None })
         })?;
-        if let Err(e) = self.world.join(team, &name, MEMBER_TYPE, &project_s) {
+        if let Err(e) = phase("join: join.sh", || self.world.join(team, &name, MEMBER_TYPE, &project_s)) {
             self.set_state(&key, State::Failed, Some(e.clone()))?;
             return Err(BrokerError::new("not_available", format!("could not join the team: {e}")));
         }
-        match self.confirm_ours(team, &name, MEMBER_TYPE, &project_s) {
+        match phase("join: confirm", || self.confirm_ours(team, &name, MEMBER_TYPE, &project_s)) {
             Ok(()) => self.set_state(&key, State::Joined, None)?,
             Err(why) => {
                 self.set_state(&key, State::Failed, Some(why.clone()))?;
@@ -494,11 +522,11 @@ impl Manager {
             return Err(BrokerError::new("bad_args", "`to` and `body` must not be empty"));
         }
         let me = self.member_of(&a.addon, tid).ok_or_else(|| BrokerError::new("not_granted", "the add-on has not joined the team (call team.join first)"))?;
-        let ms = self.world.members(team).map_err(|e| BrokerError::new("not_available", e))?;
+        let ms = phase("send: members", || self.world.members(team)).map_err(|e| BrokerError::new("not_available", e))?;
         if !ms.iter().any(|m| m.name == to) {
             return Err(BrokerError::new("bad_args", format!("{to} is not a member of the team")));
         }
-        self.world.send(team, &me.name, &to, &body).map_err(|e| BrokerError::new("not_available", e))?;
+        phase("send: send.sh", || self.world.send(team, &me.name, &to, &body)).map_err(|e| BrokerError::new("not_available", e))?;
         Ok(json!({ "to": to }))
     }
 
@@ -512,7 +540,7 @@ impl Manager {
         let agent_type = str_arg(args, "type")?;
         let wanted = str_arg(args, "name")?;
         validate_name(&wanted).map_err(|w| BrokerError::new("bad_args", format!("name {w}")))?;
-        let types = self.world.spawnable().map_err(|e| BrokerError::new("not_available", e))?;
+        let types = phase("spawn: types", || self.world.spawnable()).map_err(|e| BrokerError::new("not_available", e))?;
         let t = types.iter().find(|t| t.name == agent_type).ok_or_else(|| BrokerError::new("bad_args", format!("`{agent_type}` is not a type the app can start")))?;
         let model = match args.get("model") {
             None | Some(Value::Null) => None,
@@ -544,10 +572,10 @@ impl Manager {
         if let Some(e) = self.find(&a.addon, tid, Kind::Agent, &wanted) {
             return self.retry(&e, model);
         }
-        let before = self.world.members(team).map_err(|e| BrokerError::new("not_available", e))?;
+        let before = phase("spawn: members", || self.world.members(team)).map_err(|e| BrokerError::new("not_available", e))?;
         let name = free_name(&wanted, &|n| before.iter().any(|m| m.name == n) || self.name_in_journal(tid, n));
         let folder = match given {
-            Some(f) => f,
+            Some(f) => plain(f),
             None => self.default_folder(deny, &name)?,
         };
         let folder_s = folder.to_string_lossy().into_owned();
@@ -556,11 +584,11 @@ impl Manager {
         self.update(|es| {
             es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Agent, requested: wanted.clone(), name: name.clone(), agent_type: agent_type.clone(), project: folder_s.clone(), claim: claim.clone(), model: model.clone(), state: State::Claimed, pid: None, start: None, reason: None })
         })?;
-        if let Err(e) = self.world.join(team, &name, &agent_type, &folder_s) {
+        if let Err(e) = phase("spawn: join.sh", || self.world.join(team, &name, &agent_type, &folder_s)) {
             self.set_state(&key, State::Failed, Some(e.clone()))?;
             return Err(BrokerError::new("not_available", format!("could not join the team: {e}")));
         }
-        if let Err(why) = self.confirm_agent(team, &name, &agent_type, &folder_s, &before) {
+        if let Err(why) = phase("spawn: confirm", || self.confirm_agent(team, &name, &agent_type, &folder_s, &before)) {
             self.set_state(&key, State::Failed, Some(why.clone()))?;
             return Err(BrokerError::new("conflict", why));
         }
@@ -593,7 +621,7 @@ impl Manager {
         if deny.is_denied(&real) {
             return Err(BrokerError::new("denied_path", super::denylist::refusal_message(&real)));
         }
-        Ok(real)
+        Ok(plain(real))
     }
 
     fn retry(&self, e: &Entry, model: Option<String>) -> Res {
@@ -614,7 +642,7 @@ impl Manager {
         let e = self.by_key(key).ok_or_else(|| BrokerError::new("not_available", "the entry is gone"))?;
         self.set_state(key, State::Opening, None)?;
         let req = OpenPane { key: key.to_string(), team: e.team.clone(), name: e.name.clone(), agent_type: e.agent_type.clone(), model: e.model.clone() };
-        if let Err(why) = self.world.open_pane(&req) {
+        if let Err(why) = phase("spawn: emit open", || self.world.open_pane(&req)) {
             // the member stays joined and recorded; the add-on may ask again
             self.set_state(key, State::Joined, Some(why.clone()))?;
             return Err(BrokerError::new("not_available", format!("{} joined the team but its terminal did not open: {why}", e.name)));
@@ -622,12 +650,17 @@ impl Manager {
         // The window answers through `pty_started` or `open_failed`. No entry stays `opening` after this returns:
         // silence means the process may still start, so the entry is `unknown` and the user decides (koit Q7); a
         // late `pty_started` moves it to `running`.
-        let deadline = std::time::Instant::now() + self.open_wait;
+        let waited = std::time::Instant::now();
+        let deadline = waited + self.open_wait;
         loop {
             match self.by_key(key) {
                 Some(cur) if cur.state == State::Opening && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(25)),
                 _ => break,
             }
+        }
+        #[cfg(debug_assertions)]
+        if std::env::var_os("AGMSG_ADDON_TRACE").is_some() {
+            eprintln!("[addons-trace] agents phase=spawn: wait for the terminal {} ms", waited.elapsed().as_millis());
         }
         if self.by_key(key).is_some_and(|c| c.state == State::Opening) {
             self.set_state(key, State::Unknown, Some(format!("The terminal for {} did not report within {} s; it may still start.", e.name, self.open_wait.as_secs())))?;
@@ -652,7 +685,7 @@ impl Manager {
 
     /// The pane's process started. Stored the moment `pty_spawn` returns.
     pub fn pty_started(&self, key: &str, pid: u32) {
-        let start = self.world.process_start(pid);
+        let start = phase("pty: process start time", || self.world.process_start(pid));
         let _ = self.update(|es| {
             if let Some(e) = es.iter_mut().find(|e| e.key == key) {
                 e.state = State::Running;
@@ -940,6 +973,16 @@ mod tests {
 
     /// The Rust rules and `agmsg_validate_agent_name` give the same answer for the same names.
     #[test]
+    fn a_verbatim_windows_prefix_is_dropped_from_a_folder() {
+        assert_eq!(plain_path_str("\\\\?\\C:\\Users\\a\\agmsg-agents\\w"), "C:\\Users\\a\\agmsg-agents\\w");
+        assert_eq!(plain_path_str("\\\\?\\UNC\\srv\\share\\w"), "\\\\?\\UNC\\srv\\share\\w");
+        assert_eq!(plain_path_str("/home/a"), "/home/a");
+        assert_eq!(plain_path_str("C:\\x"), "C:\\x");
+    }
+
+    /// (Unix only: on Windows `bash` may be the WSL launcher; the bats suites cover core's validator there.)
+    #[cfg(unix)]
+    #[test]
     fn names_agree_with_the_shell_validator() {
         let lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/lib/validate.sh");
         if !lib.is_file() {
@@ -1064,7 +1107,8 @@ mod tests {
         assert_eq!((o.team.as_str(), o.name.as_str(), o.agent_type.as_str(), o.model.as_deref()), ("t", "white", "claude-code", Some("opus")));
         let ms = f.world.members.lock().unwrap();
         let w = ms.iter().find(|m| m.name == "white").unwrap();
-        assert!(w.project.ends_with("agmsg-agents/white"), "default folder: {}", w.project);
+        assert!(Path::new(&w.project).ends_with(Path::new("agmsg-agents").join("white")), "default folder: {}", w.project);
+        assert!(!w.project.starts_with("\\\\?\\"), "no verbatim prefix: {}", w.project);
         drop(ms);
         let list = call(&f, "agents.list", json!({})).unwrap();
         assert_eq!(list["agents"][0]["state"], "running");
