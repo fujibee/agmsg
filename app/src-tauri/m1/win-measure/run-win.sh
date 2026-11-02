@@ -181,6 +181,49 @@ eval_net 2>&1 | while IFS= read -r line; do case "$line" in INFO*) echo "$line" 
 stop_sink
 sink_verdict
 
+# ---- S4 agent powers on the real window path (debug build, measuring switch): the pane asks the broker, the app
+# opens a real terminal pane for the spawned agent. The agent CLI is a stand-in (stubs/claude.cmd) found first on PATH.
+STUBS=$OUT/stubs; mkdir -p "$STUBS"; cp "$HERE/stubs/claude.cmd" "$STUBS/claude.cmd"
+sed -e "s|__TEAM__|$TEAM|g" -e "s|__ADDON__|$(nat "$HERE/addon")|g" "$HERE/driver-powers.js" > "$OUT/driver-powers.js"
+mark_session "S4 before"
+launch_or_abort S4 "$OUT/s4-powers.log" "$DBG" AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_WINDOWS_MEASURE=1 AGMSG_ADDON_TRACE=1 AGMSG_ADDON_E2E="$(nat "$OUT/driver-powers.js")" AGMSG_ADDON_E2E_DELAY=15 PATH="$STUBS:$PATH"
+for _ in $(seq 1 120); do grep -qE '"(FAILED|finished)' "$OUT/s4-powers.log" 2>/dev/null && break; sleep 2; done
+mark_session "S4 after"
+tr -d '\r' < "$OUT/s4-powers.log" > "$OUT/s4-powers.clean.log"; P="$OUT/s4-powers.clean.log"
+grep -q '"finished' "$P" && verdict PASS S4-driver "the powers driver finished" || verdict FAIL S4-driver "the powers driver did not finish: $(grep -E 'addons-e2e.*FAILED' "$P" | head -1 | cut -c1-300)"
+grep 'POW \(PASS\|FAIL\)' "$P" | sed -e 's/.*POW PASS /PASS S4-powers /' -e 's/.*POW FAIL /FAIL S4-powers /' | tee -a "$SUM"
+grep -q 'POW \(PASS\|FAIL\)' "$P" || verdict FAIL S4-powers "the driver reported no result lines"
+
+# ---- S5 (M-5 on Windows): kill the app with the agent running; does the agent CLI outlive it, and what does the next start say?
+AGENT=$(sed -n 's/.*POW SPAWNED pid=\([0-9]*\).*/\1/p' "$P" | head -1)
+APPPID=$(tail -1 "$TRACK" | cut -d' ' -f1)
+if [ -n "$AGENT" ] && [ "$(image_of "$AGENT")" != "" ]; then
+  KIDS=$(powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"ParentProcessId=$AGENT\" | Select-Object -ExpandProperty ProcessId" 2>/dev/null | tr -d '\r')
+  echo "$AGENT $(image_of "$AGENT")" >> "$TRACK"
+  for k in $KIDS; do echo "$k $(image_of "$k")" >> "$TRACK"; done   # so the end of the run stops any leftover, by id and image
+  echo "S5: agent pid $AGENT image $(image_of "$AGENT") children: ${KIDS:-none}; app pid $APPPID" >> "$OUT/s5.log"
+  cp "$BASE/addons/agents-journal.json" "$OUT/s5-journal-before-kill.json" 2>/dev/null
+  taskkill //F //PID "$APPPID" >> "$OUT/s5.log" 2>&1
+  sleep 4
+  survivors=""; for p in $AGENT $KIDS; do [ -n "$(image_of "$p")" ] && survivors="$survivors $p"; done
+  cp "$BASE/addons/agents-journal.json" "$OUT/s5-journal-after-kill.json" 2>/dev/null
+  if [ -n "$survivors" ]; then expect_state=orphaned; verdict PASS S5-child "after the app was killed the agent process(es) survive:$survivors (so a terminal child can outlive the app; opening stays unknown after a restart)"
+  else expect_state=joined; verdict PASS S5-child "after the app was killed no agent process was left (the child died with the app)"; fi
+  # restart: recovery settles the journal
+  mark_session "S5 restart before"
+  launch_or_abort S5 "$OUT/s5-restart.log" "$DBG" AGMSG_APP_BASE="$(nat "$BASE")" AGMSG_WINDOWS_MEASURE=1 PATH="$STUBS:$PATH"
+  for _ in $(seq 1 60); do grep -q '\[addons\] startup check:' "$OUT/s5-restart.log" 2>/dev/null && break; sleep 1; done
+  sleep 8
+  cp "$BASE/addons/agents-journal.json" "$OUT/s5-journal-after-restart.json" 2>/dev/null
+  mark_session "S5 restart after"
+  st=$(tr -d '\r' < "$OUT/s5-journal-after-restart.json" 2>/dev/null | grep -A12 '"requested": "white"' | sed -n 's/.*"state": "\([a-z]*\)".*/\1/p' | head -1)
+  if [ "$st" = "$expect_state" ]; then verdict PASS S5-recovery "after the restart the agent entry is $st, as it should be (survivors:${survivors:- none})"; else verdict FAIL S5-recovery "after the restart the agent entry is '${st:-<none>}', expected $expect_state (survivors:${survivors:- none})"; fi
+  stop_or_abort S5
+else
+  verdict FAIL S5 "no agent process to test (S4 did not spawn one; pid '${AGENT:-none}')"
+  stop_or_abort S4
+fi
+
 # ---- wrap up (the real-home guard, counts and archive come from finish, which also runs on any early exit)
 mark_session end
 end_run

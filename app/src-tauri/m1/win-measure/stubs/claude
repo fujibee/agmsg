@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stand-in for an agent CLI (macOS / Linux): stays alive for ten minutes, prints what it was given.
+echo "win-measure-stub started $*"
+sleep 600
