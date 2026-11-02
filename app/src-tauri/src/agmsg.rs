@@ -2078,6 +2078,23 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
 
     #[test]
     #[serial]
+    fn an_installed_release_candidate_is_offered_the_matching_release() {
+        // #1845: the pinned core is a release; an installed rc of it must be outdated,
+        // the release itself must not be, and a describe-suffixed build stays as before.
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        let pinned = pinned_core_version();
+        let status = |installed: &str| {
+            std::fs::write(dir.path().join("VERSION"), format!("{installed}\n")).unwrap();
+            super::agmsg_core_version_status().outdated
+        };
+        assert!(status(&format!("{pinned}-rc.1")), "rc install of the pinned release is outdated");
+        assert!(!status(&pinned), "the release itself is current");
+        assert!(!status(&format!("{pinned}-3-gabc1234")), "a describe build is not outdated");
+    }
+
+    #[test]
+    #[serial]
     #[cfg(not(target_os = "windows"))]
     fn run_script_returns_stdout_on_success() {
         let _base = fake_base(&[("ok.sh", "echo hello-from-fake")]);
