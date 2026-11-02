@@ -695,9 +695,11 @@ trap 'exit 0' INT TERM HUP
 # nothing was written to stderr. Liveness is exactly what made it invisible.
 #
 # The guard is a timestamp rather than a version comparison, so it does not
-# only catch the table that moved this time. ANY file under scripts/ being
-# newer than this watcher's start means the code it is running is no longer the
-# code on disk, whatever changed -- which is the class, not the instance.
+# only catch the table that moved this time: an install that finished after this
+# watcher started (VERSION, its last write, is newer than the start) means the
+# code it is running is no longer the code on disk, whatever changed -- which is
+# the class, not the instance. A file changed under scripts/ without an install
+# finishing does not count: the watcher keeps running (#1863).
 #
 # `run/` is deliberately outside the watched tree: pidfiles and readiness
 # sentinels are written by watchers themselves and would trip it immediately.
@@ -718,12 +720,14 @@ trap 'exit 0' INT TERM HUP
 INSTALL_STAMP="$RUN_DIR/.watch-start.$SESSION_ID.$$"
 : > "$INSTALL_STAMP" 2>/dev/null || true
 
-# True when anything under scripts/ was written after this watcher started.
-# `-print -quit` stops at the first hit, so the common case is one stat-walk
-# that exits early rather than a full tree scan every cycle.
+# True once an install has finished writing VERSION after this watcher started.
+# VERSION is install.sh's last write (see _install_complete), so this is the
+# install finishing, not a file appearing: a file added or edited under scripts/
+# by hand leaves it false and the watcher keeps running (#1863). It is a single
+# test with no process spawned, where a tree walk used to run every cycle.
 _install_changed() {
   [ -f "$INSTALL_STAMP" ] || return 1
-  [ -n "$(find "$SCRIPT_DIR" -newer "$INSTALL_STAMP" -print -quit 2>/dev/null)" ]
+  _install_complete
 }
 
 # True only once the install that touched scripts/ has FINISHED, not merely

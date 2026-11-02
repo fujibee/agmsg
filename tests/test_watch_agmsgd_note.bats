@@ -53,9 +53,12 @@ _run_unfinished_update_watch() {
     bash "$SCRIPTS/watch.sh" sid-note-u "$PROJ" claude-code alice >"$OUT" 2>/dev/null 3>&- 4>&- &
   local pid=$!
   sleep 2
-  touch "$SCRIPTS/config.sh"
-  _wait_exit "$pid" || { kill "$pid" 2>/dev/null || true; false; }
+  # A finished install (VERSION written) whose new watch.sh cannot be exec'd.
+  chmod -x "$SCRIPTS/watch.sh"
+  printf 'new-version\n' > "$TEST_SKILL_DIR/VERSION"
+  _wait_exit "$pid" || { kill "$pid" 2>/dev/null || true; chmod +x "$SCRIPTS/watch.sh"; false; }
   wait "$pid" || true
+  chmod +x "$SCRIPTS/watch.sh"
 }
 
 @test "watch stop (no deliveries): agmsgd on and no destination for this session -> the message says nothing will be delivered and how to register, without claiming which cause" {

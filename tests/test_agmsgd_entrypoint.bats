@@ -203,7 +203,7 @@ _stop_daemon() {
   run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]
   grep -qF -- "agmsgd is running" <<<"$output"
-  grep -qF -- "Warning: agmsgd started although scripts/ does not match its install record: scripts/.DS_Store (not in the record)" <<<"$output"
+  grep -qF -- "Warning: agmsgd is running although scripts/ does not match its install record: scripts/.DS_Store (not in the record)" <<<"$output"
   run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR" --json
   grep -qF -- '"install_verify_warning":{' <<<"$output"
   _stop_daemon
@@ -236,6 +236,46 @@ _stop_daemon() {
   run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]
   grep -qF -- "scripts/stray-link (symlink)" <<<"$output"
+  _stop_daemon
+}
+
+# #1863: a file added or edited under scripts/ after the start is not an update.
+# The daemon keeps running through a poll cycle (5 s) and status shows the
+# difference; only the completion record moving (an install) makes it step aside.
+@test "a running agmsgd keeps running when a file under scripts/ changes, and status says which (#1863)" {
+  _write_completion_record
+  _start_daemon_ready
+  : > "$TEST_SKILL_DIR/scripts/stray-data-file"
+  printf '# edited\n' >> "$TEST_SKILL_DIR/scripts/lib/daemon-seats.sh"
+  echo "other" > "$TEST_SKILL_DIR/VERSION"
+  local waited=0
+  while [ "$waited" -lt 70 ]; do
+    kill -0 "$DAEMON_PID" 2>/dev/null || { cat "$DAEMON_LOG" >&2; return 1; }
+    waited=$((waited + 1))
+    sleep 0.1
+  done
+  [ "$(sqlite3 -cmd '.timeout 5000' "$TEST_SKILL_DIR/run/install.db" 'SELECT state FROM daemon_owner;')" = ready ]
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  grep -qF -- "scripts/stray-data-file (not in the record)" <<<"$output"
+  grep -qF -- "scripts/lib/daemon-seats.sh (differs from the record)" <<<"$output"
+  # The record moving is what makes it leave.
+  mv "$TEST_SKILL_DIR/run/install-manifest.json" "$TEST_SKILL_DIR/run/install-manifest.json.prev"
+  wait "$DAEMON_PID"
+}
+
+@test "status stops warning once scripts/ matches the record again, including a warning recorded at start (#1863)" {
+  _write_completion_record
+  : > "$TEST_SKILL_DIR/scripts/.DS_Store"
+  _start_daemon_ready
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  grep -qF -- "scripts/.DS_Store (not in the record)" <<<"$output"
+  rm "$TEST_SKILL_DIR/scripts/.DS_Store"
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  refute grep -qF -- "Warning:" <<<"$output"
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR" --json
+  grep -qF -- '"install_verify_warning":null' <<<"$output"
   _stop_daemon
 }
 
