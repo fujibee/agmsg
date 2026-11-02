@@ -183,8 +183,7 @@ RUN
     if [ -n "$committed" ] && [ "$committed" -gt 0 ]; then break; fi
     sleep 0.1; waited=$((waited + 1))
   done
-  kill -TERM "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
 
   before=$(agmsg_sqlite "$db" \
     "SELECT local_position||':'||wire_id FROM sync_messages ORDER BY local_position;")

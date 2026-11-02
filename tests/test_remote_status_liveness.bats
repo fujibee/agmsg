@@ -31,8 +31,7 @@ _stop_owned_engine() {   # <pid>
   case "$pid" in ""|*[!0-9]*) return 0 ;; esac
   case "$(ps -ww -o args= -p "$pid" 2>/dev/null || true)" in
     *"$TEST_SKILL_DIR/"*)
-      kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
+      agmsg_stop_pid "$pid"
       ;;
   esac
 }

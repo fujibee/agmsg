@@ -544,9 +544,16 @@ _pid_gone() {
 # Wait for a process to actually be gone. Writing a pidfile and dying are not
 # atomic, so asserting `! kill -0 $pid` the instant a pidfile disappears races
 # the TERM trap (#124).
+#
+# Three times the shared ceiling (30s by default). A stopped watch.sh whose
+# TERM trap did not run still exits, but only at the top of its next cycle
+# (its pidfile ownership guard), and the delivery tests that stop watchers run
+# them with AGMSG_WATCH_INTERVAL=10, so one cycle alone can use the whole of a
+# 10s ceiling. A process that exits promptly returns as soon as it is gone, so
+# only a real failure pays the longer wait.
 wait_for_pid_exit() {
   local pid="$1" i
-  for i in $(seq 1 $_WAIT_TICKS); do
+  for i in $(seq 1 $((_WAIT_TICKS * 3))); do
     # Reap finished children first: an unreaped zombie still answers `kill -0`,
     # so without this a process that HAS exited can keep looking alive for the
     # whole timeout. `jobs` is what makes bash collect them.
@@ -555,6 +562,44 @@ wait_for_pid_exit() {
     sleep $_WAIT_INTERVAL
   done
   return 1
+}
+
+# Stop a background process a test started: signal it (TERM unless told
+# otherwise), wait for it to be gone -- bounded -- and escalate to KILL if it
+# is still there, then reap it. Use this instead of `kill "$pid"; wait "$pid"`.
+#
+# A bare `wait` has no bound. When the process does not act on the signal it
+# blocks until the CI job's 30-minute cap, and the log then shows nothing but
+# a silent shard. Ubuntu shards hit the cap that way 14 times between
+# 2026-09-17 and 2026-10-20; the hang sampler showed a watch.sh still in its
+# sleep loop under a test that was waiting for it (bash 5.2.21 has also
+# logged this watcher's TERM trap failing to parse). This helper turns the
+# same event into a few seconds of delay and a line on stderr, and the test
+# goes on to report on what it was actually checking.
+#
+# Polls quickly at first (most processes are gone within a few ms of TERM),
+# then at the shared interval, up to _STOP_PID_TICKS. Not for asserting that a
+# process exits on TERM -- use wait_for_pid_exit and an assertion for that.
+_STOP_PID_TICKS=100   # 20 x 0.01s, then 80 x 0.1s: about 8s before KILL
+agmsg_stop_pid() {   # <pid> [signal name, default TERM]
+  local pid="$1" sig="${2:-TERM}" i
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  kill "-$sig" "$pid" 2>/dev/null || true
+  for i in $(seq 1 $_STOP_PID_TICKS); do
+    jobs >/dev/null 2>&1 || true
+    _pid_gone "$pid" && break
+    if [ "$i" -le 20 ]; then sleep 0.01; else sleep $_WAIT_INTERVAL; fi
+  done
+  if ! _pid_gone "$pid"; then
+    echo "agmsg_stop_pid: pid $pid still running after SIG$sig; sending KILL" >&2
+    kill -9 "$pid" 2>/dev/null || true
+    if ! wait_for_pid_exit "$pid"; then
+      echo "agmsg_stop_pid: pid $pid still running after KILL" >&2
+      return 1
+    fi
+  fi
+  wait "$pid" 2>/dev/null || true
+  return 0
 }
 
 # Wait for <file> to contain exactly <expected>, for pidfile handoffs where the

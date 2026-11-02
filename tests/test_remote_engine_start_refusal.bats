@@ -484,8 +484,7 @@ skip_if_root() {
   # helper's ten-second condition wait leaves headroom for a loaded runner;
   # without the wall-clock bound the finite 300-attempt ceiling exceeds it.
   if ! wait_for_file_contains "$err" 'could not retake the registry lock'; then
-    kill "$starter" 2>/dev/null || true
-    wait "$starter" 2>/dev/null || true
+    agmsg_stop_pid "$starter"
     kill "$engine" 2>/dev/null || true
     rmdir "$lock" 2>/dev/null || true
     false

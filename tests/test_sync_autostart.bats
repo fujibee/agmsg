@@ -38,8 +38,7 @@ setup() {
 teardown() {
   local pid
   for pid in $ENGINE_PIDS; do
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    agmsg_stop_pid "$pid"
   done
   # The "does not wait" cases leave a `sync start` child running ON PURPOSE —
   # that is the behaviour under test. It must not outlive the test: a CI shard
