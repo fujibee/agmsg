@@ -148,30 +148,43 @@ agmsg_source_version() {
 # manager does not schedule a restart of its own) and nothing starts it again. When the install had the daemon turned on, wait for that step-aside
 # (bounded) and start the new version, so an enabled daemon comes back by
 # itself. A failure here never fails the update; it says how to start it.
-# Stops a running agmsgd before the update touches any file, and waits until it
-# has really gone, so the old executor and the new one can never both be
-# delivering. It asks the daemon to stop over its control socket -- the request
-# `agmsg daemon stop` sends -- and leaves the on/off intent alone, so the start
-# after the update still comes back by itself. Runs after the operation has
-# begun: from then on the completion record is not complete, so nothing can
-# start a daemon on a half-written tree (the launcher and agmsgd both refuse).
-# It never refuses the update: if the daemon has not gone within the bound
-# (AGMSG_UPDATE_STOP_WAIT seconds, default 30) the update goes on and says what
-# to do. Reads the installed (old) install.db only; uses no installed script.
+# True only when the OS says the process does not exist (ESRCH). A process that
+# exists but cannot be signalled (EPERM), or any other failure, is NOT gone:
+# "cannot tell" stays unknown and goes the timeout way.
+agmsg_install_pid_gone() {   # <pid>
+  local out
+  out="$(LC_ALL=C kill -0 "$1" 2>&1)" && return 1
+  case "$out" in *"No such process"*) return 0 ;; esac
+  return 1
+}
+
+# Asks a running agmsgd to stop before the update touches any file, and waits
+# until it has gone (or a bound passes), so that in the normal case the old
+# executor has left before the new files are written and the new one starts.
+# It asks over the control socket -- the request `agmsg daemon stop` sends --
+# and leaves the on/off intent alone, so the start after the update still
+# comes back by itself. Runs after the operation has begun: from then on the
+# completion record is not complete, so the launcher and agmsgd both refuse to
+# start on a half-written tree. It never refuses the update: if the daemon has
+# not gone after about AGMSG_UPDATE_STOP_WAIT seconds (default 30, measured on
+# the clock, the stop request included) the update goes on, the old executor
+# may still be running while the new files are written, and the message says
+# what to do. Reads the installed (old) install.db only; uses no installed
+# script.
 agmsg_install_stop_daemon() {   # <skill_dir>
-  local skill="$1" db="$1/run/install.db" state socket node pid waited=0 bound steps
+  local skill="$1" db="$1/run/install.db" state socket node pid bound deadline
   [ -f "$db" ] || return 0
-  state="$(sqlite3 "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
-  case "$state" in ready|starting|stopping) ;; *) return 0 ;; esac
+  state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+  case "${state%$'\r'}" in ready|starting|stopping) ;; *) return 0 ;; esac
   # Tells the "stopped while enabled" warning that this gap is the update's own;
   # it expires by age, so a killed update cannot silence it for good.
   date +%s > "$skill/run/agmsgd-updating" 2>/dev/null || true
   bound="${AGMSG_UPDATE_STOP_WAIT:-30}"
   case "$bound" in ''|*[!0-9]*) bound=30 ;; esac
-  steps=$((bound * 5))
-  socket="$(sqlite3 "$db" "SELECT COALESCE(socket,'') FROM daemon_owner;" 2>/dev/null || true)"
-  node="$(sqlite3 "$db" "SELECT COALESCE(node_path,'') FROM meta;" 2>/dev/null || true)"
-  pid="$(sqlite3 "$db" "SELECT COALESCE(executor_pid,0) FROM daemon_owner;" 2>/dev/null || true)"
+  deadline=$((SECONDS + bound))
+  socket="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT COALESCE(socket,'') FROM daemon_owner;" 2>/dev/null || true)"
+  node="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT COALESCE(node_path,'') FROM meta;" 2>/dev/null || true)"
+  pid="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT COALESCE(executor_pid,0) FROM daemon_owner;" 2>/dev/null || true)"
   node="${node%$'\r'}"; socket="${socket%$'\r'}"; pid="${pid%$'\r'}"
   if [ -n "$socket" ] && [ -n "$node" ] && [ -x "$node" ]; then
     "$node" -e '
@@ -187,22 +200,23 @@ agmsg_install_stop_daemon() {   # <skill_dir>
       s.on("error", done);
     ' "$socket" >/dev/null 2>&1 || true
   fi
-  while [ "$waited" -lt "$steps" ]; do
-    state="$(sqlite3 "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
+  while :; do
+    state="$(sqlite3 -cmd '.timeout 1000' "$db" "SELECT state FROM daemon_owner;" 2>/dev/null || true)"
     [ "${state%$'\r'}" = none ] && break
     # A record that still says ready for a process that is gone (it was killed)
-    # is exited too. Only where kill -0 can see the process (not Git Bash).
+    # is exited too -- only when the OS says there is no such process, and only
+    # where kill -0 can see it (not Git Bash).
     case "$(uname -s)" in
       MINGW*|MSYS*|CYGWIN*) ;;
-      *) case "$pid" in ''|*[!0-9]*|0|1) ;; *) kill -0 "$pid" 2>/dev/null || { state=none; break; } ;; esac ;;
+      *) case "$pid" in ''|*[!0-9]*|0|1) ;; *) if agmsg_install_pid_gone "$pid"; then state=none; break; fi ;; esac ;;
     esac
-    waited=$((waited + 1))
+    [ "$SECONDS" -lt "$deadline" ] || break
     sleep 0.2
   done
   if [ "${state%$'\r'}" = none ]; then
     echo "  ~ agmsgd stopped before the update (exit confirmed)"
   else
-    echo "  ! agmsgd has not exited within ${bound}s; the update goes on." >&2
+    echo "  ! agmsgd has not exited after about ${bound}s; the update goes on, and the old one may still be running while the files are replaced." >&2
     echo "    If it is still running afterwards, run: bash $(printf '%q' "$skill/scripts/agmsg") daemon stop, then daemon start" >&2
   fi
   return 0
