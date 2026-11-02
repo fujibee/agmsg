@@ -570,13 +570,32 @@ wait_for_pid_exit() {
 # same event into a few seconds of delay and a line on stderr, and the test
 # goes on to report on what it was actually checking.
 #
+# Only a background job of the calling shell is signalled: the pid must be
+# listed by `jobs -p` (a builtin, so the same on Git Bash), checked again
+# right before KILL. A number read from a pidfile can be stale or reused by
+# another process, so such a pid gets no signal at all and the helper returns
+# 1; stop those with an ownership check of their own (see
+# test_remote_status_liveness.bats's _stop_owned_engine).
+#
 # Polls quickly at first (most processes are gone within a few ms of TERM),
 # then at the shared interval, up to _STOP_PID_TICKS. Not for asserting that a
 # process exits on TERM -- use wait_for_pid_exit and an assertion for that.
 _STOP_PID_TICKS=100   # 20 x 0.01s, then 80 x 0.1s: about 8s before KILL
+_agmsg_stop_pid_is_job() {   # <pid>
+  local j
+  for j in $(jobs -p 2>/dev/null); do
+    [ "$j" = "$1" ] && return 0
+  done
+  return 1
+}
 agmsg_stop_pid() {   # <pid> [signal name, default TERM]
   local pid="$1" sig="${2:-TERM}" i
-  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$pid" in ''|*[!0-9]*|0|1) return 0 ;; esac
+  if ! _agmsg_stop_pid_is_job "$pid"; then
+    _pid_gone "$pid" && return 0
+    echo "agmsg_stop_pid: pid $pid is not a background job of this shell; not signalling it" >&2
+    return 1
+  fi
   kill "-$sig" "$pid" 2>/dev/null || true
   for i in $(seq 1 $_STOP_PID_TICKS); do
     jobs >/dev/null 2>&1 || true
@@ -584,6 +603,10 @@ agmsg_stop_pid() {   # <pid> [signal name, default TERM]
     if [ "$i" -le 20 ]; then sleep 0.01; else sleep $_WAIT_INTERVAL; fi
   done
   if ! _pid_gone "$pid"; then
+    if ! _agmsg_stop_pid_is_job "$pid"; then
+      echo "agmsg_stop_pid: pid $pid is no longer a background job of this shell; not sending KILL" >&2
+      return 1
+    fi
     echo "agmsg_stop_pid: pid $pid still running after SIG$sig; sending KILL" >&2
     kill -9 "$pid" 2>/dev/null || true
     if ! wait_for_pid_exit "$pid"; then
