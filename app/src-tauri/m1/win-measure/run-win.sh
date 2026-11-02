@@ -224,6 +224,37 @@ else
   stop_or_abort S4
 fi
 
+# ---- S6 how long the bundled scripts take on this machine (the broker's ops are these scripts): a bare bash, api.sh,
+# send.sh and join.sh, 5 runs each from the same Git Bash, with the number of external programs each starts
+# (counted from an xtrace of one run: command words that resolve to files; subshell forks of $(...) are not in it)
+ms_now() { date +%s%3N; }
+forks_of() { SHELLOPTS=xtrace PS4='+X ' bash "$@" 2>&1 >/dev/null | sed -n 's/^+*X \([^ ]*\).*/\1/p' | while read -r w; do [ "$(type -t "$w" 2>/dev/null)" = file ] && echo "$w"; done | wc -l | tr -d ' '; }
+s6() { # s6 <label> <runs> -- command...
+  local label=$1 runs=$2; shift 3; local i t0 t1 all=""
+  for i in $(seq 1 "$runs"); do t0=$(ms_now); "$@" > /dev/null 2>&1; t1=$(ms_now); all="$all $((t1 - t0))"; done
+  echo "$label ms:$all" | tee -a "$OUT/s6.log"
+}
+mark_session "S6 before"
+(
+  export AGMSG_APP_BASE="$(nat "$BASE")"
+  SC="$BASE/scripts"
+  s6 "bash -c true" 5 -- bash -c true
+  s6 "api.sh get teams $TEAM members" 5 -- bash "$SC/api.sh" get teams "$TEAM" members
+  s6 "send.sh" 5 -- bash "$SC/send.sh" "$TEAM" tester powers-measure "s6 timing"
+  n=0; s6 "join.sh" 5 -- bash -c 'n=$((RANDOM)); bash "$0" "$1" "s6-$n" agmsg-app "$2"' "$SC/join.sh" "$TEAM" "$(nat "$FIX")"
+  echo "external programs started (xtrace): api.sh=$(forks_of "$SC/api.sh" get teams "$TEAM" members) send.sh=$(forks_of "$SC/send.sh" "$TEAM" tester powers-measure "s6 count") join.sh=$(forks_of "$SC/join.sh" "$TEAM" "s6-count" agmsg-app "$(nat "$FIX")")" | tee -a "$OUT/s6.log"
+) 2>>"$OUT/s6.err"
+mark_session "S6 after"
+verdict PASS S6-scripts "script timings recorded in s6.log (information, no threshold)"
+
+# ---- S7 the startup check of the release build, repeated: does it ever time out on this machine, and why
+for i in 1 2 3 4 5; do
+  b=$OUT/base-s7-$i; seed_base "$b" || { verdict FAIL "S7-$i" "could not seed the base"; continue; }
+  run_for "S7-$i" "$REL" "$OUT/s7-$i.log" 70 -- AGMSG_APP_BASE="$(nat "$b")"
+  l=$(grep -F '[addons] startup check:' "$OUT/s7-$i.log" | tail -1)
+  if echo "$l" | grep -q 'enabled=true'; then verdict PASS "S7-$i" "release startup check passed"; else verdict FAIL "S7-$i" "release startup check: ${l:-<none>}; refusals: $(grep -c 'refused:' "$OUT/s7-$i.log")"; fi
+done
+
 # ---- wrap up (the real-home guard, counts and archive come from finish, which also runs on any early exit)
 mark_session end
 end_run
