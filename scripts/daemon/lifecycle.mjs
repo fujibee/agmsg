@@ -11,7 +11,6 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { collectInstallBaseline, installChangedAgainst } from "../internal/install-baseline.mjs";
 
 const MANIFEST_NAME = "install-manifest.json";
 const LOCK_NAME = "install-op.lock.db";
@@ -147,41 +146,45 @@ function completionRecordChanged(installRoot, lastKnownManifestText) {
 
 // Captured once, right after a successful startup verification, and handed
 // to watchForDrift() every cycle thereafter.
-// `scriptsBaseline` is null when collectInstallBaseline itself could not
-// observe the tree (see that function's own doc) -- watchForDrift treats a
-// null baseline the same way collectInstallBaseline's own caller always
-// has: the digest half of the check is simply off, not a false positive.
 export async function captureWatchState(installRoot, manifest, manifestText) {
-  return {
-    manifestText,
-    version: manifest.version,
-    scriptsBaseline: await collectInstallBaseline(join(installRoot, "scripts")),
-  };
+  return { manifestText };
 }
 
-// The running daemon's per-cycle re-check: stand
-// aside if EITHER (a) the completion record stopped being 'complete' (an
-// install/uninstall started), OR (b) the VERSION string or any file under
-// scripts/ changed IN PLACE without the manifest moving at all -- the #963
-// case, detected via install-baseline.mjs against the baseline
-// captureWatchState took at startup. Returns {changed: false} or
-// {changed: true, reason}.
+// The running daemon's per-cycle re-check: stand aside only when the
+// completion record stopped being 'complete' or moved, which is what an
+// install/uninstall does first (install.sh --update rotates the record aside
+// under the install-op lock before it touches scripts/). A file under scripts/
+// that changed without the record moving is not an update: the daemon keeps
+// running and `agmsg daemon status` reports the difference (scriptsMismatches).
+// Returns {changed: false} or {changed: true, reason}.
 export async function watchForDrift(installRoot, watchState) {
   if (completionRecordChanged(installRoot, watchState.manifestText)) {
     return { changed: true, reason: "completion record is no longer complete" };
   }
-  let currentVersion;
-  try {
-    currentVersion = readFileSync(join(installRoot, "VERSION"), "utf8").trim();
-  } catch {
-    return { changed: true, reason: "VERSION file could not be read" };
-  }
-  if (currentVersion !== watchState.version) {
-    return { changed: true, reason: `VERSION changed: ${watchState.version} -> ${currentVersion}` };
-  }
-  if (watchState.scriptsBaseline) {
-    const changedPath = await installChangedAgainst(join(installRoot, "scripts"), watchState.scriptsBaseline);
-    if (changedPath) return { changed: true, reason: `scripts/ changed in place: ${changedPath}` };
-  }
   return { changed: false };
+}
+
+// Every way scripts/ differs from the completion record, as the entrypoint's
+// startup check lists them: [{kind, path}], empty when it matches. Read-only;
+// used by `agmsg daemon status`. An unreadable tree comes back as one
+// {kind: "unreadable"} entry, not as a match.
+export function scriptsMismatches(installRoot, manifest) {
+  let onDisk;
+  try {
+    onDisk = collectScriptFiles(installRoot);
+  } catch (error) {
+    const path = /^symlink under scripts\/: (.*)$/.exec(error.message)?.[1] ?? "scripts";
+    return [{ kind: /^symlink/.test(error.message) ? "symlink" : "unreadable", path }];
+  }
+  const problems = [];
+  const expected = new Map(manifest.files.map((f) => [f.path, f.digest]));
+  const present = new Set(onDisk);
+  for (const path of expected.keys()) if (!present.has(path)) problems.push({ kind: "missing", path });
+  for (const path of onDisk) {
+    if (!expected.has(path)) { problems.push({ kind: "unexpected", path }); continue; }
+    let actual;
+    try { actual = sha256File(installRoot, path); } catch { problems.push({ kind: "unreadable", path }); continue; }
+    if (actual !== expected.get(path)) problems.push({ kind: "digest_mismatch", path });
+  }
+  return problems;
 }

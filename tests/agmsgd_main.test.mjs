@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -72,7 +72,7 @@ test("startup: a refused takeOwnership never touches the control socket, and rep
   }
 });
 
-test("pollOnce: continues when nothing changed, steps aside on drift, stops on an intent change", async () => {
+test("pollOnce: continues when nothing changed, keeps running through a stray file, steps aside when the record moves, stops on an intent change", async () => {
   const { root, manifest, manifestText } = makeInstall();
   try {
     const db = openInstallDb(join(root, "run", "install.db"));
@@ -99,9 +99,16 @@ test("pollOnce: continues when nothing changed, steps aside on drift, stops on a
     assert.match(log, /database busy, retrying next poll/);
     assert.match(log, /unexpected error, exiting: Error: boom/);
 
-    // Case: an in-place edit under scripts/ (the #963 case) with neither
-    // the manifest nor the op_gen touched.
-    writeFileSync(join(root, "scripts", "x.sh"), "tampered\n");
+    // Case: a file added or edited under scripts/ with the record untouched is
+    // not an update: the daemon keeps running (status reports the difference).
+    writeFileSync(join(root, "scripts", "x.sh"), "stray\n");
+    writeFileSync(join(root, "scripts", "team.sh"), "edited in place\n");
+    writeFileSync(join(root, "VERSION"), "0.0.1-different\n");
+    verdict = await pollOnce(db, root, { gen: 1, expectedOpGen: 0, watchState });
+    assert.deepEqual(verdict, { action: "continue" });
+
+    // Case: the record moves (what install.sh does first, under its lock).
+    renameSync(join(root, "run", "install-manifest.json"), join(root, "run", "install-manifest.json.prev"));
     verdict = await pollOnce(db, root, { gen: 1, expectedOpGen: 0, watchState });
     assert.equal(verdict.action, "step_aside");
     assert.equal(verdict.reason, "stepped_aside_for_update");
