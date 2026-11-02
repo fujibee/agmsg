@@ -2,12 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-AGENTS_BIN="$HOME/.agents/bin"
+# AGMSG_AGENTS_BIN stands in for ~/.agents/bin (a side install, a test).
+AGENTS_BIN="${AGMSG_AGENTS_BIN:-$HOME/.agents/bin}"
 TARGET="$AGENTS_BIN/codex"
 
 usage() {
   cat <<EOF
-Usage: codex-shim-install.sh [function|install|remove|status]
+Usage: codex-shim-install.sh [function|install|remove|status|sync]
 
 Prints the recommended shell function for agmsg Codex monitor mode.
 With no subcommand, prints the function.
@@ -17,6 +18,13 @@ The optional global PATH shim can still be installed at:
 
 The function and PATH shim both route only interactive Codex launches through
 agmsg's monitor bridge when the current project is in Codex monitor mode.
+
+sync   Keeps the PATH shim in step with who delivers Codex notices: while agmsgd
+       is turned on and no project chose the monitor, the shim is not needed
+       (Codex runs as the plain binary) and an agmsg shim owned by this install
+       is removed; when that stops being true it is put back. Never touches a
+       file that is not an agmsg shim, a shim owned by another install, or a
+       shim on Windows. Prints one line saying what it did.
 EOF
 }
 
@@ -318,6 +326,65 @@ EOF
       fi
     else
       echo "not installed: $TARGET"
+    fi
+    ;;
+  sync)
+    # What decides whether the PATH shim is wanted: agmsgd is turned on for this
+    # install AND no Codex project chose monitor/both (those still enter the
+    # bridge through the shim). Windows keeps the shim: on an elevated shell the
+    # shim is what adds --no-daemon to a plain launch.
+    skill_root="${SCRIPT_DIR%/scripts/drivers/types/codex}"
+    retired_marker="$skill_root/run/codex-shim-retired"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*) echo "kept: $TARGET (Windows keeps the Codex shim)"; exit 0 ;;
+    esac
+    if [ "$skill_root" = "$SCRIPT_DIR" ]; then
+      echo "kept: $TARGET (this is not a standard install layout)"; exit 0
+    fi
+    agmsgd_on=false
+    if [ -f "$skill_root/run/install.db" ] && command -v sqlite3 >/dev/null 2>&1; then
+      [ "$(sqlite3 -readonly -cmd '.timeout 100' "$skill_root/run/install.db" 'SELECT desired FROM daemon_intent;' 2>/dev/null || true)" = on ] && agmsgd_on=true
+    fi
+    needs_bridge=false
+    if [ -r "$skill_root/run/delivery-choice" ]; then
+      while IFS=$'\t' read -r c_type c_project c_value || [ -n "${c_type:-}" ]; do
+        if [ "$c_type" = codex ]; then
+          case "$c_value" in monitor|both) needs_bridge=true ;; esac
+        fi
+      done < "$skill_root/run/delivery-choice"
+    fi
+    if [ "$agmsgd_on" = true ] && [ "$needs_bridge" = false ]; then
+      if ! is_agmsg_shim; then
+        if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then echo "kept: $TARGET (not an agmsg shim)"; else echo "not installed: $TARGET"; fi
+        exit 0
+      fi
+      owner="$(shim_owner_script_dir)"
+      self_owner="$(shell_quote "$SCRIPT_DIR")"
+      if [ "$owner" = "$self_owner" ] || { [ -z "$owner" ] && agmsg_only_one_install; }; then
+        mkdir -p "$skill_root/run" 2>/dev/null || { echo "kept: $TARGET (could not record it for restoring)"; exit 0; }
+        printf '%s\n' "$self_owner" > "$retired_marker" || { echo "kept: $TARGET (could not record it for restoring)"; exit 0; }
+        rm -f "$TARGET"
+        echo "removed: $TARGET (agmsgd delivers Codex notices; Codex runs as the plain binary. 'agmsg daemon disable' puts the shim back)"
+      else
+        echo "kept: $TARGET (owned by a different install)"
+      fi
+    else
+      # Put back a shim this script removed, once it is wanted again. Only the
+      # shim this install removed (the marker), and only into an empty place.
+      if [ -f "$retired_marker" ]; then
+        if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
+          rm -f "$retired_marker"
+          echo "kept: $TARGET (already present)"
+        elif AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$0" install >/dev/null 2>&1; then
+          rm -f "$retired_marker"
+          echo "installed: $TARGET (restored: the Codex monitor needs it again)"
+        else
+          echo "codex-shim-install: could not restore $TARGET; run: $SCRIPT_DIR/codex-shim-install.sh install" >&2
+          exit 1
+        fi
+      else
+        echo "unchanged: $TARGET"
+      fi
     fi
     ;;
   *)
