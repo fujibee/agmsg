@@ -141,7 +141,9 @@ pub struct OpenPane {
 
 /// The real thing: agmsg's scripts, the process table, the window.
 pub struct RealWorld {
-    pub app: Mutex<Option<tauri::AppHandle>>,
+    /// Asks the window to open a terminal. Set by `init_global`; kept as a closure so that nothing in this file
+    /// that the unit tests reach names the window runtime (a test binary that links it cannot start on Windows).
+    pub opener: Mutex<Option<Box<dyn Fn(&OpenPane) -> Result<(), String> + Send + Sync>>>,
 }
 
 impl World for RealWorld {
@@ -169,9 +171,10 @@ impl World for RealWorld {
         process_start_token(pid)
     }
     fn open_pane(&self, req: &OpenPane) -> Result<(), String> {
-        use tauri::Emitter;
-        let app = self.app.lock().unwrap().clone().ok_or("the app window is not ready")?;
-        app.emit(OPEN_EVENT, req).map_err(|e| e.to_string())
+        match self.opener.lock().unwrap().as_ref() {
+            Some(open) => open(req),
+            None => Err("the app window is not ready".into()),
+        }
     }
     fn members_root(&self) -> PathBuf {
         crate::agmsg::base_dir().join("addons").join("addon-members")
@@ -302,7 +305,13 @@ static GLOBAL: OnceLock<Manager> = OnceLock::new();
 
 /// The app's one manager. Set once at startup.
 pub fn init_global(app: tauri::AppHandle) -> &'static Manager {
-    GLOBAL.get_or_init(|| Manager::new(Arc::new(RealWorld { app: Mutex::new(Some(app)) }), crate::agmsg::base_dir().join("addons").join("agents-journal.json")))
+    GLOBAL.get_or_init(|| {
+        let opener: Box<dyn Fn(&OpenPane) -> Result<(), String> + Send + Sync> = Box::new(move |req| {
+            use tauri::Emitter;
+            app.emit(OPEN_EVENT, req).map_err(|e| e.to_string())
+        });
+        Manager::new(Arc::new(RealWorld { opener: Mutex::new(Some(opener)) }), crate::agmsg::base_dir().join("addons").join("agents-journal.json"))
+    })
 }
 
 pub fn global() -> Option<&'static Manager> {
@@ -1372,7 +1381,7 @@ mod tests {
         let team = std::env::var("AGMSG_REAL_TEAM").expect("AGMSG_REAL_TEAM names a throwaway team");
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().canonicalize().unwrap();
-        let w = Arc::new(Real { inner: RealWorld { app: Mutex::new(None) }, root: base.join("members"), home: base.join("agmsg-agents"), opened: Mutex::new(vec![]) });
+        let w = Arc::new(Real { inner: RealWorld { opener: Mutex::new(None) }, root: base.join("members"), home: base.join("agmsg-agents"), opened: Mutex::new(vec![]) });
         std::fs::create_dir_all(&w.home).unwrap();
         let mut m = Manager::new(w.clone(), base.join("journal.json"));
         m.open_wait = std::time::Duration::from_millis(100);
