@@ -317,13 +317,19 @@
       "filesRead": "Read files in a folder you choose",
       "gitRead": "Read git history and changes in that folder",
       "network": "Connect to {{hosts}}",
-      "networkAny": "Connect to any site on the internet"
+      "networkAny": "Connect to any site on the internet",
+      "teamJoin": "Als Mitglied dem von dir gewählten Team beitreten",
+      "messagesSend": "Nachrichten an Mitglieder dieses Teams senden",
+      "agentsSpawn": "Agenten in diesem Team starten"
     },
     "grant": {
       "messages": "Reads messages: {{scope}}",
       "files": "Reads files: {{scope}}",
       "remembered": "(remembered)",
-      "revoke": "Revoke"
+      "revoke": "Revoke",
+      "join": "Mitglied im Team: {{scope}}",
+      "send": "Sendet Nachrichten: {{scope}}",
+      "spawn": "Startet Agenten: {{scope}}"
     },
     "card": {
       "grantAria": "Permission request",
@@ -410,12 +416,16 @@
       "paneCombined": "{{pane}} can now send what it reads over the network",
       "paneAsksAgain": "{{pane}} will ask for its folder or team access again",
       "paneRemoved": "{{pane}} is removed (its saved access is dropped)",
-      "neverTitle": "Was es nicht kann",
+      "neverTitle": "Was das Add-on selbst nicht kann",
       "source_one": "von {{repo}} · {{sha}} · fügt {{count}} Pane hinzu",
       "source_other": "von {{repo}} · {{sha}} · fügt {{count}} Panes hinzu",
       "sourceUpdate_one": "von {{repo}} · {{from}} → {{to}} · {{count}} Pane",
       "sourceUpdate_other": "von {{repo}} · {{from}} → {{to}} · {{count}} Panes",
-      "panes": "Fügt hinzu: {{names}}"
+      "panes": "Fügt hinzu: {{names}}",
+      "agentsTitle": "Agenten, mit denen es spricht oder die es startet",
+      "agentsBody": "Sie arbeiten mit ihren eigenen Berechtigungen. Die Einschränkungen dieses Add-ons gelten für sie nicht: Sie können Dateien schreiben und löschen, andere Ordner lesen und das Netzwerk nutzen, soweit ihre eigenen Einstellungen es erlauben.",
+      "agentsMode": "Gestartete Agenten nutzen diesen Berechtigungsmodus: den agmsg-Standard oder deine Einstellung in spawn_options.yaml für diese CLI.",
+      "agentsFolder": "Ihr Arbeitsordner ist ~/agmsg-agents/<name> oder ein Ordner innerhalb eines Ordners, den du diesem Add-on gegeben hast."
     },
     "remove": {
       "title": "Remove {{title}}?",

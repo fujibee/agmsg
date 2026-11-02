@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addonNetwork, canSendWhatItReads, declaredPermissions, grantText, installErrorText, parseRepoInput, permissionRow } from "./model";
+import { addonNetwork, canSendWhatItReads, declaredPermissions, grantText, installErrorText, parseRepoInput, permissionRow, reachesAgents } from "./model";
 import { mockInstallErrors, mockSnapshot } from "./mock";
 
 describe("parseRepoInput", () => {
@@ -49,5 +49,19 @@ describe("installErrorText", () => {
     expect(installErrorText({ code: "unsafe_entry", what: "hardlink", path: "p" }).key).toBe(
       "addons.installError.unsafe_entry.hardlink",
     );
+  });
+});
+
+describe("agent powers", () => {
+  it("names a row for each new permission", () => {
+    const none = { kind: "none" } as const;
+    expect(permissionRow("team:join", none).key).toBe("addons.permission.teamJoin");
+    expect(permissionRow("messages:send", none).key).toBe("addons.permission.messagesSend");
+    expect(permissionRow("agents:spawn", none).key).toBe("addons.permission.agentsSpawn");
+  });
+  it("reachesAgents is true only for send and spawn", () => {
+    expect(reachesAgents(["messages:read", "team:join"])).toEqual({ send: false, spawn: false });
+    expect(reachesAgents(["messages:send"])).toEqual({ send: true, spawn: false });
+    expect(reachesAgents(["agents:spawn"])).toEqual({ send: false, spawn: true });
   });
 });
