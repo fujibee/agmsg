@@ -44,6 +44,7 @@ EOF
 #!/usr/bin/env bash
 # pgrep -f <pattern>: pids of list lines whose command matches; pgrep -P <ppid>: children
 echo "pgrep $*" >> "$PSDIR/calls"
+[ -f "$PSDIR/pgrep_fail" ] && exit "$(cat "$PSDIR/pgrep_fail")"
 if [ "$1" = -P ]; then awk -v pp="$2" '$2 == pp { print $1 }' "$PSDIR/list"
 else awk -v pat="$2" '{ c = $4; for (i = 5; i <= NF; i++) c = c " " $i; if (index(c, pat)) print $1 }' "$PSDIR/list"; fi
 EOF
@@ -193,11 +194,13 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
   [ "$(grep -c '^LIST$' "$PSDIR/calls")" -eq 1 ]
   # and a repeat costs one ps (the TUI pid still has the recorded start time)
-  local before after
-  before="$(grep -c '^ps ' "$PSDIR/calls")"
+  # and one pgrep (is there another `codex resume <thread>`?), nothing else
+  local before after pbefore pafter
+  before="$(grep -c '^ps ' "$PSDIR/calls")"; pbefore="$(grep -c '^pgrep ' "$PSDIR/calls")"
   agmsg_terminal_self_env >/dev/null
-  after="$(grep -c '^ps ' "$PSDIR/calls")"
+  after="$(grep -c '^ps ' "$PSDIR/calls")"; pafter="$(grep -c '^pgrep ' "$PSDIR/calls")"
   [ "$((after - before))" -eq 1 ]
+  [ "$((pafter - pbefore))" -eq 1 ]
 }
 
 @test "a remembered pane is dropped when its TUI pid now has a different start time" {
@@ -326,4 +329,22 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   run agmsg_terminal_self_env
   case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:p9"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
   [ "$(grep -c '^LIST$' "$PSDIR/calls")" -eq 1 ]
+}
+
+@test "pgrep exiting 2 on a cache hit is unknown: neither the remembered pane nor 'none'" {
+  _under_daemon
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC
+  _seat t-aaa
+  run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+  # exit 1 is the ordinary "no match": the remembered pane stands, no rescan
+  echo 1 > "$PSDIR/pgrep_fail"
+  run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+  [ "$(grep -c '^LIST$' "$PSDIR/calls")" -eq 1 ]
+  # any other exit is not an answer
+  echo 2 > "$PSDIR/pgrep_fail"
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:cannot_check_for_another_resume_of_this_thread" ]
 }

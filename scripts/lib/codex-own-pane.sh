@@ -153,16 +153,27 @@ _agmsg_cop_scan() {   # <thread>
 # common case for a fresh launch); only when something else matches is its
 # relation to the remembered pid read (its parent, one ps; its children, one pgrep). The remembered pid's own launcher/TUI
 # pair is not "another".
+#   0  no other process: the remembered pane stands
+#   1  another one exists (or pgrep is not installed): drop it and scan again
+#   2  the check itself failed: neither "none" nor "some" is known
+# pgrep exits 1 for "no match", which is an answer; any other failure (2, 3, 127)
+# is not, and is never read as "no match".
 _agmsg_cop_no_other_resume() {   # <thread> <remembered pid>
-  local others p parent kids
-  others="$(pgrep -f "codex resume $1" 2>/dev/null)" || others=""
-  others="$(printf '%s\n' $others | grep -vx "$2")" || others=""
+  local out rc=0 others="" p parent kids
+  command -v pgrep >/dev/null 2>&1 || return 1
+  out="$(pgrep -f "codex resume $1" 2>/dev/null)" || rc=$?
+  [ "$rc" -le 1 ] || return 2
+  for p in $out; do [ "$p" = "$2" ] || others="$others $p"; done
   [ -n "$others" ] || return 0
-  parent="$(ps -o ppid= -p "$2" 2>/dev/null | tr -d ' ')"
-  kids="$(pgrep -P "$2" 2>/dev/null)" || kids=""
+  rc=0; parent="$(ps -o ppid= -p "$2" 2>/dev/null)" || rc=$?
+  parent="${parent//[[:space:]]/}"
+  { [ "$rc" -eq 0 ] && [ -n "$parent" ]; } || return 2
+  rc=0; kids="$(pgrep -P "$2" 2>/dev/null)" || rc=$?
+  [ "$rc" -le 1 ] || return 2
+  kids=" ${kids//$'\n'/ } "
   for p in $others; do
     [ "$p" = "$parent" ] && continue
-    case " $(printf '%s ' $kids)" in *" $p "*) continue ;; esac
+    case "$kids" in *" $p "*) continue ;; esac
     return 1
   done
   return 0
@@ -216,10 +227,16 @@ agmsg_codex_own_pane() {
         # holds this thread; hence the TTL, after which the scan is repeated.
         if [ "$((now - ts))" -lt "$AGMSG_CODEX_PANE_TTL" ]; then
           cur="$(ps -o lstart= -p "$pid" 2>/dev/null)" || cur=""
-          if [ -n "$cur" ] && [ "$cur" = "$lstart" ] && _agmsg_cop_no_other_resume "$tid" "$pid"; then
-            printf 'env\n'
-            { IFS= read -r _; while IFS= read -r _l; do printf '%s\n' "$_l"; done; } <"$f"
-            return 0
+          if [ -n "$cur" ] && [ "$cur" = "$lstart" ]; then
+            rc=0; _agmsg_cop_no_other_resume "$tid" "$pid" || rc=$?
+            case "$rc" in
+              0) printf 'env\n'
+                 { IFS= read -r _; while IFS= read -r _l; do printf '%s\n' "$_l"; done; } <"$f"
+                 return 0 ;;
+              2) reason="cannot_check_for_another_resume_of_this_thread"
+                 printf '' | _agmsg_cop_remember unknown "$tid" "" "" "$reason"
+                 printf 'unknown\t%s\n' "$reason"; return 0 ;;
+            esac
           fi
         fi ;;
     esac
