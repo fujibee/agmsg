@@ -20,6 +20,14 @@ setup() {
 
 teardown() { teardown_test_env; }
 
+# `sync` keeps the shim on Windows (it adds --no-daemon on an elevated shell), so
+# the cases that watch it being removed or restored only make sense elsewhere.
+_posix_only() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) skip "sync keeps the Codex shim on Windows; this case is POSIX-only" ;;
+  esac
+}
+
 _agmsgd() {   # on|off
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='$1';"
 }
@@ -29,6 +37,7 @@ _choose() {   # <value>
 }
 
 @test "sync: agmsgd off leaves the shim alone" {
+  _posix_only
   AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
   _agmsgd off
   run bash "$INSTALLER" sync
@@ -38,6 +47,7 @@ _choose() {   # <value>
 }
 
 @test "sync: agmsgd on removes this install's shim, and codex then resolves to the real binary" {
+  _posix_only
   AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
   _agmsgd on
   run bash "$INSTALLER" sync
@@ -49,6 +59,7 @@ _choose() {   # <value>
 }
 
 @test "sync: turning agmsgd off puts the removed shim back, and only once" {
+  _posix_only
   AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
   _agmsgd on
   bash "$INSTALLER" sync >/dev/null
@@ -71,6 +82,7 @@ _choose() {   # <value>
 }
 
 @test "sync: a project that chose the monitor keeps the shim, and choosing agmsgd again lets it go" {
+  _posix_only
   AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
   _agmsgd on
   _choose monitor
@@ -88,6 +100,7 @@ _choose() {   # <value>
 }
 
 @test "sync: a codex that is not an agmsg shim is never removed" {
+  _posix_only
   mkdir -p "$HOME/.agents/bin"
   printf '#!/bin/sh\necho mine\n' > "$SHIM"
   chmod +x "$SHIM"
@@ -100,6 +113,7 @@ _choose() {   # <value>
 }
 
 @test "sync: a shim owned by a different install is not removed" {
+  _posix_only
   AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
   sed -i.bak 's#^\# agmsg-shim-owner: .*#\# agmsg-shim-owner: /somewhere/else/scripts/drivers/types/codex#' "$SHIM"
   rm -f "$SHIM.bak"
@@ -123,6 +137,7 @@ _choose() {   # <value>
 }
 
 @test "sync: a place that was filled meanwhile is not overwritten when restoring" {
+  _posix_only
   AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
   _agmsgd on
   bash "$INSTALLER" sync >/dev/null
@@ -136,6 +151,7 @@ _choose() {   # <value>
 }
 
 @test "delivery: choosing the monitor for Codex brings the shim back, choosing agmsgd removes it" {
+  _posix_only
   AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
   _agmsgd on
   bash "$INSTALLER" sync >/dev/null
@@ -147,6 +163,7 @@ _choose() {   # <value>
 }
 
 @test "sync: a dangling symlink in the shim's place is not written through when restoring" {
+  _posix_only
   AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
   _agmsgd on
   bash "$INSTALLER" sync >/dev/null
@@ -162,6 +179,7 @@ _choose() {   # <value>
 }
 
 @test "AGMSG_AGENTS_BIN moves the shim's place, and sync works there" {
+  _posix_only
   export AGMSG_AGENTS_BIN="$TEST_SKILL_DIR/side-bin"
   AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
   [ -x "$AGMSG_AGENTS_BIN/codex" ]
