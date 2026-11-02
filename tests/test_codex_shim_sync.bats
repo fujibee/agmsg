@@ -160,3 +160,15 @@ _choose() {   # <value>
   [ ! -e "$TEST_SKILL_DIR/nowhere" ]
   [ ! -e "$TEST_SKILL_DIR/run/codex-shim-retired" ]
 }
+
+@test "AGMSG_AGENTS_BIN moves the shim's place, and sync works there" {
+  export AGMSG_AGENTS_BIN="$TEST_SKILL_DIR/side-bin"
+  AGMSG_CODEX_SHIM_INSTALL_QUIET=1 bash "$INSTALLER" install
+  [ -x "$AGMSG_AGENTS_BIN/codex" ]
+  [ ! -e "$SHIM" ]
+  _agmsgd on
+  run bash "$INSTALLER" sync
+  grep -Fq "removed: $AGMSG_AGENTS_BIN/codex" <<<"$output"
+  [ ! -e "$AGMSG_AGENTS_BIN/codex" ]
+}
+

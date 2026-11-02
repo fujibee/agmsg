@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-AGENTS_BIN="$HOME/.agents/bin"
+# AGMSG_AGENTS_BIN stands in for ~/.agents/bin (a side install, a test).
+AGENTS_BIN="${AGMSG_AGENTS_BIN:-$HOME/.agents/bin}"
 TARGET="$AGENTS_BIN/codex"
 
 usage() {
