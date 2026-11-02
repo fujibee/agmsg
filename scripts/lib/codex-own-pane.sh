@@ -147,6 +147,27 @@ _agmsg_cop_scan() {   # <thread>
       else if (NF == 4 && $4 ~ /(^|\/)codex$/) print "T", $1, secs($3) }'
 }
 
+# A remembered pane must not outlive the "exactly one candidate" rule: another
+# process started with `codex resume <thread>` since the pane was proven makes
+# two candidates. One pgrep answers it (no match: no other resume exists, the
+# common case for a fresh launch); only when something else matches is its
+# relation to the remembered pid read (its parent, one ps; its children, one pgrep). The remembered pid's own launcher/TUI
+# pair is not "another".
+_agmsg_cop_no_other_resume() {   # <thread> <remembered pid>
+  local others p parent kids
+  others="$(pgrep -f "codex resume $1" 2>/dev/null)" || others=""
+  others="$(printf '%s\n' $others | grep -vx "$2")" || others=""
+  [ -n "$others" ] || return 0
+  parent="$(ps -o ppid= -p "$2" 2>/dev/null | tr -d ' ')"
+  kids="$(pgrep -P "$2" 2>/dev/null)" || kids=""
+  for p in $others; do
+    [ "$p" = "$parent" ] && continue
+    case " $(printf '%s ' $kids)" in *" $p "*) continue ;; esac
+    return 1
+  done
+  return 0
+}
+
 # thread -> the one TUI pid. Prints "ok <pid>" or "no <reason>"; always returns 0
 # (it runs in a command substitution, so a variable could not carry the reason).
 _agmsg_cop_find_tui() {   # <thread> <thread-cwd> <created_at>
@@ -195,7 +216,7 @@ agmsg_codex_own_pane() {
         # holds this thread; hence the TTL, after which the scan is repeated.
         if [ "$((now - ts))" -lt "$AGMSG_CODEX_PANE_TTL" ]; then
           cur="$(ps -o lstart= -p "$pid" 2>/dev/null)" || cur=""
-          if [ -n "$cur" ] && [ "$cur" = "$lstart" ]; then
+          if [ -n "$cur" ] && [ "$cur" = "$lstart" ] && _agmsg_cop_no_other_resume "$tid" "$pid"; then
             printf 'env\n'
             { IFS= read -r _; while IFS= read -r _l; do printf '%s\n' "$_l"; done; } <"$f"
             return 0

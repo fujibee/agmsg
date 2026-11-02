@@ -35,9 +35,17 @@ case "$*" in
     [ -f "$f" ] && cat "$f" || exit 1 ;;
   "-axo pid=,ppid=,etime=,command=") echo "LIST" >> "$PSDIR/calls"; cat "$PSDIR/list" ;;
   "eww -p "*) f="$PSDIR/env/$3"; [ -f "$f" ] && cat "$f" || exit 1 ;;
+  "-o ppid= -p "*) awk -v want="$4" '$1 == want { print $2 }' "$PSDIR/list" ;;
   "-o lstart= -p "*) f="$PSDIR/lstart/$4"; [ -f "$f" ] && cat "$f" || exit 1 ;;
   *) exit 1 ;;
 esac
+EOF
+  cat > "$FAKEBIN/pgrep" <<'EOF'
+#!/usr/bin/env bash
+# pgrep -f <pattern>: pids of list lines whose command matches; pgrep -P <ppid>: children
+echo "pgrep $*" >> "$PSDIR/calls"
+if [ "$1" = -P ]; then awk -v pp="$2" '$2 == pp { print $1 }' "$PSDIR/list"
+else awk -v pat="$2" '{ c = $4; for (i = 5; i <= NF; i++) c = c " " $i; if (index(c, pat)) print $1 }' "$PSDIR/list"; fi
 EOF
   cat > "$FAKEBIN/lsof" <<'EOF'
 #!/usr/bin/env bash
@@ -45,7 +53,7 @@ EOF
 f="$PSDIR/cwd/$3"; [ -f "$f" ] || exit 1
 printf 'p%s\nn%s\n' "$3" "$(cat "$f")"
 EOF
-  chmod +x "$FAKEBIN/ps" "$FAKEBIN/lsof"
+  chmod +x "$FAKEBIN/ps" "$FAKEBIN/lsof" "$FAKEBIN/pgrep"
   export PATH="$FAKEBIN:$PATH"
 
   sqlite3 "$CODEX_HOME/state_5.sqlite" "create table threads(id text primary key, cwd text, created_at integer);"
@@ -290,4 +298,32 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   agmsg_terminal_self_env >/dev/null
   AGMSG_CODEX_PANE_TTL=0 agmsg_terminal_self_env >/dev/null
   [ "$(grep -c '^LIST$' "$PSDIR/calls")" -eq 2 ]
+}
+
+@test "a remembered pane is dropped when another screen starts resuming the same thread" {
+  _under_daemon
+  _thread t-aaa /work/a 600
+  _tui 91001 10:00 /work/a w1:pC                      # P1: started with A, cached
+  _seat t-aaa
+  run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pC"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+  # P1 does /clear (still alive, argv unchanged); P2 resumes A
+  printf '92001 1 01:00 /v/bin/codex resume t-aaa\n' >> "$PSDIR/list"
+  printf '/v/bin/codex HERDR_ENV=1 HERDR_SOCKET_PATH=%s HERDR_PANE_ID=w1:p9\n' "$HERDR_SOCKET_PATH" > "$PSDIR/env/92001"
+  echo "Sun Nov  1 16:20:00 2026" > "$PSDIR/lstart/92001"
+  run agmsg_terminal_self_env
+  [ "$output" = "unknown:codex:shared_daemon_pane_unproven:several_codex_tuis_may_hold_this_thread" ]
+}
+
+@test "a resumed seat's own launcher and TUI do not invalidate its remembered pane" {
+  _under_daemon
+  _thread t-old /work/a 90000
+  printf '92000 1 03:00 node /n/bin/codex resume t-old\n92001 92000 03:00 /v/bin/codex resume t-old\n' >> "$PSDIR/list"
+  printf '/v/bin/codex HERDR_ENV=1 HERDR_SOCKET_PATH=%s HERDR_PANE_ID=w1:p9\n' "$HERDR_SOCKET_PATH" > "$PSDIR/env/92001"
+  echo "Sun Nov  1 16:10:00 2026" > "$PSDIR/lstart/92001"
+  _seat t-old
+  agmsg_terminal_self_env >/dev/null
+  run agmsg_terminal_self_env
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:p9"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+  [ "$(grep -c '^LIST$' "$PSDIR/calls")" -eq 1 ]
 }
