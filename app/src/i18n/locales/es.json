@@ -275,7 +275,7 @@
       "navigation": "El motor web de este sistema no puede impedir que los complementos salgan de su panel, por lo que siguen desactivados.",
       "isolation": "El motor web de este sistema no pudo confirmar que los complementos se ejecuten aislados, por lo que siguen desactivados.",
       "unfinished": "La comprobación de seguridad no terminó. Inténtalo de nuevo.",
-      "generic": "La comprobación de seguridad no se superó."
+      "generic": "La comprobación de seguridad no se superó, por lo que los complementos siguen desactivados en este equipo."
     },
     "builtin": {
       "title": "Built in",

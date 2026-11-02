@@ -275,7 +275,7 @@
       "navigation": "This system's web engine cannot stop add-ons from navigating away from their pane, so they stay off.",
       "isolation": "This system's web engine could not confirm that add-ons run in isolation, so they stay off.",
       "unfinished": "The safety check did not finish. Try again.",
-      "generic": "The safety check did not pass."
+      "generic": "The safety check did not pass, so add-ons stay off on this computer."
     },
     "builtin": {
       "title": "Built in",

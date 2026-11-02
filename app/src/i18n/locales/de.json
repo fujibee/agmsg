@@ -275,7 +275,7 @@
       "navigation": "Die Web-Engine dieses Systems kann nicht verhindern, dass Add-ons ihren Bereich verlassen, daher bleiben Add-ons ausgeschaltet.",
       "isolation": "Die Web-Engine dieses Systems konnte nicht bestätigen, dass Add-ons isoliert laufen, daher bleiben Add-ons ausgeschaltet.",
       "unfinished": "Die Sicherheitsprüfung wurde nicht abgeschlossen. Bitte versuche es erneut.",
-      "generic": "Die Sicherheitsprüfung wurde nicht bestanden."
+      "generic": "Die Sicherheitsprüfung wurde nicht bestanden, daher bleiben Add-ons auf diesem Computer ausgeschaltet."
     },
     "builtin": {
       "title": "Built in",

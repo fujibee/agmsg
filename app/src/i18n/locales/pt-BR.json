@@ -275,7 +275,7 @@
       "navigation": "O mecanismo web deste sistema não consegue impedir que os complementos saiam do seu painel, então eles continuam desativados.",
       "isolation": "O mecanismo web deste sistema não conseguiu confirmar que os complementos rodam isolados, então eles continuam desativados.",
       "unfinished": "A verificação de segurança não terminou. Tente novamente.",
-      "generic": "A verificação de segurança não foi aprovada."
+      "generic": "A verificação de segurança não foi aprovada, então os complementos continuam desativados neste computador."
     },
     "builtin": {
       "title": "Built in",
