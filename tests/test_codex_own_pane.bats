@@ -499,3 +499,14 @@ _proven_seat() {
   [ "$(_calls)" -eq 0 ]
 }
 
+
+@test "report: an apostrophe anywhere in herdr's agent list does not stop the report (bash 3.2 too)" {
+  _proven_seat
+  printf '{"id":"x","result":{"agents":[{"pane_id":"w1:p3","agent":"claude","terminal_title":"O'"'"'Brien","cwd":"/a/it'"'"'s"},%s]}}\n' "$(_rec w1:p17 t-bbb)" > "$PSDIR/herdr_list"
+  run agmsg_terminal_self_env
+  grep -q "report-agent-session w1:pN" "$PSDIR/herdr_calls"
+  # the same code under the system bash (3.2 on macOS)
+  : > "$PSDIR/herdr_calls"
+  run /bin/bash -c '. "$1"; printf "env\nHERDR_ENV=1\nHERDR_SOCKET_PATH=%s\nHERDR_PANE_ID=w1:pN\n" "$2" | agmsg_codex_report_own_session t-bbb' _ "$SKILL_DIR/scripts/lib/codex-herdr-report.sh" "$HERDR_SOCKET_PATH"
+  grep -q "report-agent-session w1:pN" "$PSDIR/herdr_calls"
+}

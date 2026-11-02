@@ -55,7 +55,7 @@ _AGMSG_CODEX_OWN_PANE_SH=1
 _agmsg_cop_report() {   # <thread>, the KEY=VALUE lines on stdin
   if ! declare -F agmsg_codex_report_own_session >/dev/null 2>&1; then
     # shellcheck disable=SC1091
-    . "$(dirname "${BASH_SOURCE[0]}")/codex-herdr-report.sh" 2>/dev/null || { cat >/dev/null; return 0; }
+    . "${BASH_SOURCE[0]%/*}/codex-herdr-report.sh" 2>/dev/null || { cat >/dev/null; return 0; }
   fi
   agmsg_codex_report_own_session "$1"
 }

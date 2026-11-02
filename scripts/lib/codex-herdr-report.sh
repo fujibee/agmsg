@@ -44,14 +44,15 @@ _agmsg_chr_pane_ok() {
 }
 
 # seq in the hook's unit. `date` has no %N on macOS, so the end of the current
-# second is used: later than any report made earlier, which is the only order
-# that matters (the hook's report is what this one follows).
+# second is used: later than a report from an earlier second. Not strictly newer
+# than one from the same second, nor under a clock stepping back; herdr then
+# ignores this report and it is made again after the next cache expiry.
 _agmsg_chr_seq() { printf '%s999999999\n' "$(date +%s)"; }
 
 # <socket> <thread> <own pane>
 _agmsg_chr_run() {
   local sock="$1" tid="$2" own="$3" json rc=0 rows row pane sess src
-  local own_ok=0 seq
+  local own_ok=0 seq q="'" qq="''"
   json="$(HERDR_SOCKET_PATH="$sock" herdr agent list 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] && [ -n "$json" ] || return 0
   command -v sqlite3 >/dev/null 2>&1 || return 0
@@ -59,7 +60,7 @@ _agmsg_chr_run() {
     "select json_extract(value,'\$.pane_id'),
             coalesce(json_extract(value,'\$.agent_session.value'),''),
             coalesce(json_extract(value,'\$.agent_session.source'),'')
-       from json_each('${json//\'/\'\'}', '\$.result.agents')" 2>/dev/null)" || return 0
+       from json_each('${json//$q/$qq}', '\$.result.agents')" 2>/dev/null)" || return 0
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     pane="${row%%|*}"; row="${row#*|}"; sess="${row%%|*}"; src="${row#*|}"
