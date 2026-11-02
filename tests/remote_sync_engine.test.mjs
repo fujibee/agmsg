@@ -2312,8 +2312,16 @@ test("SIGTERM while this process holds the team config lock releases it before e
   const child = spawn(process.execPath, [scriptPath],
     { env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: root }, stdio: "ignore" });
   try {
-    // Bounded: taking the lock is this child's first async step.
-    for (let attempt = 0; attempt < 200 && !existsSync(lockDir); attempt += 1) {
+    // Wait for all three paths, not just the directory. The child creates them
+    // in one synchronous run (mkdir, then .owner, then the holder), but this
+    // process watches from outside: it can see the directory while the child
+    // is still between the mkdir and the holder write, and asserting the
+    // holder at that moment failed intermittently on loaded runners. The
+    // budget (20 s) also covers a cold import of remote-sync.mjs on a slow
+    // macOS runner; the test's own timeout is 30 s.
+    const lockFullyTaken = () => existsSync(lockDir) &&
+      existsSync(join(lockDir, ".owner")) && existsSync(holderPath);
+    for (let attempt = 0; attempt < 800 && !lockFullyTaken(); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     assert.ok(existsSync(lockDir), "child never took the team config lock");
