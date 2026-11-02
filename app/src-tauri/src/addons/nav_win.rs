@@ -37,7 +37,7 @@ fn fail_closed<R: Runtime>(app: &AppHandle<R>, host: &AddonHost) {
     for (port, token) in host.panes.close_all() {
         host.nav.unregister_pane(port, &token);
     }
-    host.gate.force_off(&format!("the frame navigation guard is not working: {why}"));
+    host.gate.force_off("frame-guard", &format!("the frame navigation guard is not working: {why}"));
     let _ = app.emit(GATE_EVENT, host.gate.status());
 }
 

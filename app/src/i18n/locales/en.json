@@ -268,6 +268,15 @@
     "engineReasons": "Reason: {{reasons}}",
     "checking": "Checking…",
     "checkAgain": "Check again",
+    "reason": {
+      "notVerified": "Add-ons are not supported on this version of Windows yet.",
+      "platform": "Add-ons are not available on this operating system.",
+      "network": "This system's web engine cannot block network access for add-ons, so they stay off.",
+      "navigation": "This system's web engine cannot stop add-ons from navigating away from their pane, so they stay off.",
+      "isolation": "This system's web engine could not confirm that add-ons run in isolation, so they stay off.",
+      "unfinished": "The safety check did not finish. Try again.",
+      "generic": "The safety check did not pass."
+    },
     "builtin": {
       "title": "Built in",
       "source": "built in"

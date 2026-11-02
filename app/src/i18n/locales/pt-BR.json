@@ -268,6 +268,15 @@
     "engineReasons": "Reason: {{reasons}}",
     "checking": "Checking…",
     "checkAgain": "Check again",
+    "reason": {
+      "notVerified": "Os complementos ainda não são compatíveis com esta versão do Windows.",
+      "platform": "Os complementos não estão disponíveis neste sistema operacional.",
+      "network": "O mecanismo web deste sistema não consegue bloquear o acesso à rede dos complementos, então eles continuam desativados.",
+      "navigation": "O mecanismo web deste sistema não consegue impedir que os complementos saiam do seu painel, então eles continuam desativados.",
+      "isolation": "O mecanismo web deste sistema não conseguiu confirmar que os complementos rodam isolados, então eles continuam desativados.",
+      "unfinished": "A verificação de segurança não terminou. Tente novamente.",
+      "generic": "A verificação de segurança não foi aprovada."
+    },
     "builtin": {
       "title": "Built in",
       "source": "integrado"

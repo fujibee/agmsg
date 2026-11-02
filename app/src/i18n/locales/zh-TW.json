@@ -268,6 +268,15 @@
     "engineReasons": "Reason: {{reasons}}",
     "checking": "Checking…",
     "checkAgain": "Check again",
+    "reason": {
+      "notVerified": "此 Windows 版本尚未支援附加元件。",
+      "platform": "此作業系統無法使用附加元件。",
+      "network": "此系統的網頁引擎無法阻擋附加元件存取網路,因此附加元件維持關閉。",
+      "navigation": "此系統的網頁引擎無法阻止附加元件離開其窗格,因此附加元件維持關閉。",
+      "isolation": "此系統的網頁引擎無法確認附加元件在隔離環境中執行,因此附加元件維持關閉。",
+      "unfinished": "安全檢查未完成,請重試。",
+      "generic": "安全檢查未通過。"
+    },
     "builtin": {
       "title": "Built in",
       "source": "內建"

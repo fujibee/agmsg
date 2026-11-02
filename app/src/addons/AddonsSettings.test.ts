@@ -120,19 +120,20 @@ describe("AddonsSettings", () => {
     expect(html).toContain('role="alert"');
   });
   it("engine off: Check again only after a failure or timeout, disabled while checking, absent for 'not verified'", () => {
-    const off = (reasons: string[]) => render({ engine: { ok: false, reasons }, onRecheck: () => {} });
-    expect(off(["the startup check did not finish (timeout)"])).toContain("addons.checkAgain");
-    expect(off(["add-ons are not verified on WebView2 yet"])).not.toContain("addons.checkAgain");
-    const running = off(["checking again: asked by the user"]);
+    const off = (codes: string[]) => render({ engine: { ok: false, reasons: [], codes }, onRecheck: () => {} });
+    expect(off(["check-timeout"])).toContain("addons.checkAgain");
+    expect(off(["not-verified"])).not.toContain("addons.checkAgain");
+    const running = off(["checking"]);
     expect(running).toContain("addons.checkAgain");
     expect(running).toMatch(/<button type="button" class="addon-btn" disabled="" aria-busy="true">\[addons\.checkAgain\]/);
     expect(running).toContain("addons.checking");
-    expect(render({ engine: { ok: false, reasons: ["the startup check did not finish (timeout)"] } })).not.toContain("addons.checkAgain");
+    expect(render({ engine: { ok: false, reasons: [], codes: ["check-timeout"] } })).not.toContain("addons.checkAgain");
   });
   it("engine off: reason shown, no install form, installed list still removable", () => {
     const html = render({ engine: mockEngineOff });
     expect(html).toContain("addons.engineOff");
-    expect(html).toContain("navigation control");
+    expect(html).toContain("addons.reason.navigation");
+    expect(html).not.toContain("navigation control"); // the English diagnostic is never shown
     expect(html).not.toContain("addon-install-form");
     expect(html).toContain("addons.installed.remove");
     expect(html).not.toContain("addons.installed.checkUpdates");

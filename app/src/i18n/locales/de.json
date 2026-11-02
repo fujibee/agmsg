@@ -268,6 +268,15 @@
     "engineReasons": "Reason: {{reasons}}",
     "checking": "Checking…",
     "checkAgain": "Check again",
+    "reason": {
+      "notVerified": "Add-ons werden von dieser Windows-Version noch nicht unterstützt.",
+      "platform": "Add-ons sind auf diesem Betriebssystem nicht verfügbar.",
+      "network": "Die Web-Engine dieses Systems kann den Netzwerkzugriff von Add-ons nicht blockieren, daher bleiben Add-ons ausgeschaltet.",
+      "navigation": "Die Web-Engine dieses Systems kann nicht verhindern, dass Add-ons ihren Bereich verlassen, daher bleiben Add-ons ausgeschaltet.",
+      "isolation": "Die Web-Engine dieses Systems konnte nicht bestätigen, dass Add-ons isoliert laufen, daher bleiben Add-ons ausgeschaltet.",
+      "unfinished": "Die Sicherheitsprüfung wurde nicht abgeschlossen. Bitte versuche es erneut.",
+      "generic": "Die Sicherheitsprüfung wurde nicht bestanden."
+    },
     "builtin": {
       "title": "Built in",
       "source": "integriert"

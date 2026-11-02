@@ -66,7 +66,7 @@ describe("the + menu in the tab bar", () => {
     expect(noTeam.find((e) => e.key === "fileview")?.disabled).toBe(true);
     const off = entries("tabs", { addonEngine: mockEngineOff });
     expect(off.find((e) => e.key === "diffview")?.disabled).toBe(true);
-    expect(off.find((e) => e.key === "diffview")?.title).toContain("navigation control");
+    expect(off.find((e) => e.key === "diffview")?.title).toContain("addons.reason.navigation");
     expect(off.find((e) => e.key === "shell")?.disabled).toBe(false);
     expect(off.find((e) => e.key === "install")?.disabled).toBe(false);
   });

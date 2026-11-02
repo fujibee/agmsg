@@ -114,62 +114,78 @@ pub struct EngineReport {
 pub struct Verdict {
     pub enabled: bool,
     pub reasons: Vec<String>,
+    /// One stable code per entry of `reasons`, same order. The UI localizes by code and never reads
+    /// the English text (which stays for logs and diagnostics).
+    pub codes: Vec<String>,
+}
+
+impl Verdict {
+    /// An off verdict with a single reason.
+    pub fn off(code: &str, reason: impl Into<String>) -> Verdict {
+        Verdict { enabled: false, reasons: vec![reason.into()], codes: vec![code.to_string()] }
+    }
+}
+
+fn add(reasons: &mut Vec<String>, codes: &mut Vec<String>, code: &str, reason: impl Into<String>) {
+    reasons.push(reason.into());
+    codes.push(code.to_string());
 }
 
 pub fn evaluate(expected_nonce: &str, expected_target: &str, r: &ProbeReport, engine: &EngineReport, udp_hits: usize, os: Os) -> Verdict {
     let mut reasons = Vec::new();
+    let mut codes = Vec::new();
     if r.nonce != expected_nonce {
-        reasons.push("the probe answered with the wrong nonce".to_string());
+        add(&mut reasons, &mut codes, "probe-wrong-nonce", "the probe answered with the wrong nonce".to_string());
     }
     if !r.started {
-        reasons.push("the probe frame did not run".to_string());
+        add(&mut reasons, &mut codes, "probe-not-run", "the probe frame did not run".to_string());
     }
     if !r.opaque_origin {
-        reasons.push("the probe frame does not have an opaque origin".to_string());
+        add(&mut reasons, &mut codes, "probe-origin", "the probe frame does not have an opaque origin".to_string());
     }
     if !r.csp_blocks_eval {
-        reasons.push("the pane CSP is not in force in the probe frame".to_string());
+        add(&mut reasons, &mut codes, "probe-csp", "the pane CSP is not in force in the probe frame".to_string());
     }
     if !r.control_nav_ok {
-        reasons.push("the probe could not tell a refused navigation from a slow one (its allowed navigation did not complete)".to_string());
+        add(&mut reasons, &mut codes, "probe-nav-unproven", "the probe could not tell a refused navigation from a slow one (its allowed navigation did not complete)".to_string());
     }
     // On Windows the guard is the refusal and it is required: when the final answer never arrives after
     // the interim one, the guard's own record of the exact cancelled target stands in for "the document
     // survived". The CSP violation below is still required.
     let guard_refused = os == Os::Windows && r.final_missing && engine.frame_nav_cancelled.iter().any(|u| u == expected_target);
     if !r.nav_refused && !guard_refused {
-        reasons.push("the probe frame was able to navigate itself to the app origin".to_string());
+        add(&mut reasons, &mut codes, "probe-self-navigation", "the probe frame was able to navigate itself to the app origin".to_string());
     }
     // A refusal must be *seen*: the page's CSP reported blocking exactly that
     // navigation. Surviving for two seconds is not evidence.
     if !(matches!(r.nav_violation_directive.as_str(), "frame-src" | "child-src") && !expected_target.is_empty() && r.nav_violation_uri == expected_target) {
-        reasons.push("no enforced frame-src violation was observed for the forbidden navigation, so a refusal cannot be told from a navigation that is pending or failed".to_string());
+        add(&mut reasons, &mut codes, "probe-no-violation", "no enforced frame-src violation was observed for the forbidden navigation, so a refusal cannot be told from a navigation that is pending or failed".to_string());
     }
     if !r.webrtc_absent {
-        reasons.push("WebRTC is available in the probe frame".to_string());
+        add(&mut reasons, &mut codes, "webrtc-available", "WebRTC is available in the probe frame".to_string());
     }
     if udp_hits > 0 {
-        reasons.push(format!("the probe frame sent {udp_hits} UDP packets to the sentinel"));
+        add(&mut reasons, &mut codes, "webrtc-udp", format!("the probe frame sent {udp_hits} UDP packets to the sentinel"));
     }
     match os {
         Os::MacOs => {
             if !engine.webrtc_setting_present {
-                reasons.push("this WebKit has no WebRTC-off setting".to_string());
+                add(&mut reasons, &mut codes, "webrtc-no-setting", "this WebKit has no WebRTC-off setting".to_string());
             } else if !engine.webrtc_setting_applied {
-                reasons.push("the WebRTC-off setting could not be applied".to_string());
+                add(&mut reasons, &mut codes, "webrtc-setting-failed", "the WebRTC-off setting could not be applied".to_string());
             }
         }
         Os::Windows => {
             if let Some(p) = &engine.frame_guard_problem {
-                reasons.push(format!("the frame navigation guard is not working: {p}"));
+                add(&mut reasons, &mut codes, "frame-guard", format!("the frame navigation guard is not working: {p}"));
             }
             if !WINDOWS_VERIFIED && !measuring() {
-                reasons.push("add-ons are not verified on WebView2 yet".to_string());
+                add(&mut reasons, &mut codes, "not-verified", "add-ons are not verified on WebView2 yet".to_string());
             }
         }
-        Os::Other => reasons.push("add-ons are not available on this platform".to_string()),
+        Os::Other => add(&mut reasons, &mut codes, "platform-unsupported", "add-ons are not available on this platform"),
     }
-    Verdict { enabled: reasons.is_empty(), reasons }
+    Verdict { enabled: reasons.is_empty(), reasons, codes }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,7 +214,7 @@ pub struct AddonGate {
 impl AddonGate {
     pub fn new() -> AddonGate {
         let g = AddonGate::default();
-        g.inner.lock().unwrap().verdict = Verdict { enabled: false, reasons: vec!["the startup check has not run yet".into()] };
+        g.inner.lock().unwrap().verdict = Verdict::off("check-pending", "the startup check has not run yet");
         g
     }
 
@@ -209,7 +225,7 @@ impl AddonGate {
         s.generation += 1;
         s.pending = None;
         s.starting = false;
-        s.verdict = Verdict { enabled: false, reasons: vec![format!("checking again: {why}")] };
+        s.verdict = Verdict::off("checking", format!("checking again: {why}"));
         s.generation
     }
 
@@ -223,7 +239,7 @@ impl AddonGate {
         }
         s.generation += 1;
         s.starting = true;
-        s.verdict = Verdict { enabled: false, reasons: vec!["checking again: asked by the user".into()] };
+        s.verdict = Verdict::off("checking", "checking again: asked by the user");
         Some(s.generation)
     }
 
@@ -232,17 +248,17 @@ impl AddonGate {
         let mut s = self.inner.lock().unwrap();
         if s.starting && s.pending.is_none() {
             s.starting = false;
-            s.verdict = Verdict { enabled: false, reasons: vec!["the startup check could not be started".into()] };
+            s.verdict = Verdict::off("check-start-failed", "the startup check could not be started");
         }
     }
 
     /// Something the gate depends on broke while running: off now, with the reason.
-    pub fn force_off(&self, why: &str) {
+    pub fn force_off(&self, code: &str, why: &str) {
         let mut s = self.inner.lock().unwrap();
         s.generation += 1;
         s.pending = None;
         s.starting = false;
-        s.verdict = Verdict { enabled: false, reasons: vec![why.to_string()] };
+        s.verdict = Verdict::off(code, why);
     }
 
     /// Starts a probe for the current generation.
@@ -267,12 +283,12 @@ impl AddonGate {
         }
         if now > p.deadline {
             s.pending = None;
-            s.verdict = Verdict { enabled: false, reasons: vec!["the startup check took too long".into()] };
+            s.verdict = Verdict::off("check-timeout", "the startup check took too long");
             return s.verdict.clone();
         }
         if r.nonce != p.nonce {
             // a stray or forged answer does not end the probe; the real one may still come
-            return Verdict { enabled: false, reasons: vec!["ignored an answer with the wrong nonce".into()] };
+            return Verdict::off("probe-wrong-nonce", "ignored an answer with the wrong nonce");
         }
         s.pending = None;
         s.verdict = evaluate(&p.nonce, &p.target, r, engine, udp_hits, os);
@@ -285,7 +301,7 @@ impl AddonGate {
         match &s.pending {
             Some(p) if p.generation == s.generation && now > p.deadline => {
                 s.pending = None;
-                s.verdict = Verdict { enabled: false, reasons: vec!["the startup check did not finish (timeout)".into()] };
+                s.verdict = Verdict::off("check-timeout", "the startup check did not finish (timeout)");
                 true
             }
             _ => false,
@@ -425,6 +441,22 @@ mod tests {
     }
 
     #[test]
+    fn every_reason_carries_one_stable_code() {
+        let bad = ProbeReport { started: false, webrtc_absent: false, nonce: "x".into(), ..good("n") };
+        let v = evaluate("n", TARGET, &bad, &eng(), 3, Os::Other);
+        assert_eq!(v.reasons.len(), v.codes.len());
+        for c in ["probe-wrong-nonce", "probe-not-run", "webrtc-available", "webrtc-udp", "platform-unsupported"] {
+            assert!(v.codes.iter().any(|x| x == c), "{c} in {:?}", v.codes);
+        }
+        let g = AddonGate::new();
+        assert_eq!(g.status().codes, vec!["check-pending".to_string()]);
+        assert!(g.try_recheck().is_some());
+        assert_eq!(g.status().codes, vec!["checking".to_string()]);
+        g.force_off("frame-guard", "the frame guard broke");
+        assert_eq!(g.status().codes, vec!["frame-guard".to_string()]);
+    }
+
+    #[test]
     fn starts_off() {
         let g = AddonGate::new();
         assert!(!g.status().enabled);
@@ -515,7 +547,7 @@ mod tests {
         assert!(!v.enabled);
         assert!(v.reasons.iter().any(|r| r.contains("frame navigation guard is not working") && r.contains("E_FAIL")), "{:?}", v.reasons);
         let g = AddonGate::new();
-        g.force_off("the frame guard broke");
+        g.force_off("frame-guard", "the frame guard broke");
         assert_eq!(g.status().reasons, vec!["the frame guard broke".to_string()]);
         assert!(!g.status().enabled);
     }

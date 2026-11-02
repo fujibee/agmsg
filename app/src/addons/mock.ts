@@ -90,7 +90,7 @@ export const mockSnapshot: AddonsSnapshot = {
 };
 
 export const mockEngine: EngineState = { ok: true };
-export const mockEngineOff: EngineState = { ok: false, reasons: ["WebView2 128.0: navigation control could not be verified"] };
+export const mockEngineOff: EngineState = { ok: false, reasons: ["WebView2 128.0: navigation control could not be verified"], codes: ["frame-guard"] };
 
 export const mockGrantNeeds: Record<string, GrantNeed> = {
   messages: { permission: "messages:read", team: "agmsg" },

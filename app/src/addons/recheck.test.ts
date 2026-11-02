@@ -1,24 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { isChecking, offersRecheck } from "./recheck";
+import { isChecking, offersRecheck, reasonKeys } from "./recheck";
 
 describe("Check again", () => {
   it("is offered after a timeout or a failed check", () => {
-    expect(offersRecheck(["the startup check did not finish (timeout)"])).toBe(true);
-    expect(offersRecheck(["the pane CSP is not in force in the probe frame"])).toBe(true);
-    expect(offersRecheck(["the startup check could not be started"])).toBe(true);
+    expect(offersRecheck(["check-timeout"])).toBe(true);
+    expect(offersRecheck(["probe-csp"])).toBe(true);
+    expect(offersRecheck(["check-start-failed"])).toBe(true);
   });
-  it("is not offered when the only reason is that this engine is not verified yet", () => {
-    expect(offersRecheck(["add-ons are not verified on WebView2 yet"])).toBe(false);
+  it("is not offered when asking again cannot change the answer", () => {
+    expect(offersRecheck(["not-verified"])).toBe(false);
+    expect(offersRecheck(["platform-unsupported"])).toBe(false);
   });
-  it("is offered when that reason comes with a real one", () => {
-    expect(offersRecheck(["the startup check did not finish (timeout)", "add-ons are not verified on WebView2 yet"])).toBe(true);
+  it("is offered when such a reason comes with a real one", () => {
+    expect(offersRecheck(["check-timeout", "not-verified"])).toBe(true);
   });
   it("is not offered while a check runs or before it has run, and not without reasons", () => {
-    expect(offersRecheck(["checking again: asked by the user"])).toBe(false);
-    expect(offersRecheck(["checking again: page load"])).toBe(false);
-    expect(offersRecheck(["the startup check has not run yet"])).toBe(false);
+    expect(offersRecheck(["checking"])).toBe(false);
+    expect(offersRecheck(["check-pending"])).toBe(false);
     expect(offersRecheck([])).toBe(false);
-    expect(isChecking(["checking again: startup"])).toBe(true);
-    expect(isChecking(["the startup check did not finish (timeout)"])).toBe(false);
+    expect(isChecking(["checking"])).toBe(true);
+    expect(isChecking(["check-pending"])).toBe(true);
+    expect(isChecking(["check-timeout"])).toBe(false);
+  });
+});
+
+describe("reason messages", () => {
+  it("maps codes to message keys, once each, in order", () => {
+    expect(reasonKeys(["webrtc-udp", "webrtc-available", "frame-guard"])).toEqual(["addons.reason.network", "addons.reason.navigation"]);
+  });
+  it("gives an unknown or unavailable code the general message", () => {
+    expect(reasonKeys(["unavailable", "something-new"])).toEqual(["addons.reason.generic"]);
   });
 });
