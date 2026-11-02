@@ -432,8 +432,15 @@ CREATE TABLE beta_claude_seat (seat TEXT PRIMARY KEY, messaging_socket TEXT, sta
 INSERT INTO beta_claude_seat VALUES ('["team","erin"]', '/tmp/cc-socks/s-ms-native.sock', 'blocked', 'peer_held: historical hint', '2026-10-23');
 SQL
   bash "$SCRIPTS/send.sh" team bob erin "native-delivered probe" >/dev/null
+  # The four runs below each have to DELIVER a message before the cap ends
+  # them, and the cap counts from the watcher's own start. With 2s, a slow
+  # startup on a loaded macOS runner (this seat's native-delivery checks read
+  # install.db and the role-session record first) reached the cap before
+  # the first poll, so the probe was never delivered (failed twice in CI,
+  # 2026-10-27 and 10-30). 5s leaves room for that startup; the quiet runs
+  # above keep 2s because they assert that nothing is delivered.
   AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
-    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=5 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
@@ -451,7 +458,7 @@ SQL
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
   bash "$SCRIPTS/send.sh" team bob erin "disable-window probe" >/dev/null
   AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
-    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=5 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
@@ -473,7 +480,7 @@ SQL
   sed -i.bak 's#^project=.*#project=/tmp/agmsg-some-other-project#' "$rs_file"
   bash "$SCRIPTS/send.sh" team bob erin "project-mismatch probe" >/dev/null
   AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
-    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=5 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
@@ -491,7 +498,7 @@ SQL
   sed -i.bak 's#^agent=.*#agent=some-other-seat#' "$rs_file"
   bash "$SCRIPTS/send.sh" team bob erin "identity-mismatch probe" >/dev/null
   AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
-    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=5 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
