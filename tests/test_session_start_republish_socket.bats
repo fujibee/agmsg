@@ -53,6 +53,13 @@ _run_session_start_as() {   # <type> <sid> [extra env already exported by caller
   env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" "$1" "$PROJ" <<< "{\"session_id\":\"$2\"}"
 }
 
+_registry_lock_dir() {
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/actas-lock.sh"
+    _actas_lock_dir
+  ' _ "$SCRIPTS"
+}
+
 @test "republish socket: a proven record-basis seat gets the live socket written" {
   _seed_role_record team alice "sid-alice" "$PROJ" claude-code
   export CLAUDE_CODE_MESSAGING_SOCKET="/tmp/cc-socks/alice-fresh.sock"
@@ -153,6 +160,35 @@ _run_session_start_as() {   # <type> <sid> [extra env already exported by caller
   ' _ "$SCRIPTS" "$PROJ"
   [ "$status" -ne 0 ]
   [ "$(_messaging_socket_of team alice)" = /tmp/cc-socks/newowner.sock ]
+}
+
+@test "republish socket: a fully contended registry lock does not add a seconds-scale wait to the hook (review round 2 BLOCKING, performance)" {
+  # The default registry-lock budget is AGMSG_LOCK_SECONDS (10s) -- fine for a
+  # background writer, wrong for a SessionStart hook a person is waiting on.
+  # This call overrides it to 0 for its own write only: exactly one mkdir
+  # attempt, no sleep, so losing the race costs microseconds, not seconds.
+  # Seize the lock in THIS test process for the whole call, the same shape a
+  # genuinely contended write would see, and assert on WALL TIME, not just
+  # that the call eventually returned.
+  _seed_role_record team alice "sid-alice" "$PROJ" claude-code
+  local lockdir; lockdir="$(_registry_lock_dir)/.config.lock"
+  mkdir -p "$lockdir"
+  export CLAUDE_CODE_MESSAGING_SOCKET="/tmp/cc-socks/alice-contended.sock"
+  export CLAUDE_CONFIG_DIR="$TEST_SKILL_DIR/claude-config-alice"
+  local start end elapsed
+  start="$(date +%s)"
+  run _run_session_start_as claude-code "sid-alice"
+  end="$(date +%s)"
+  rmdir "$lockdir" 2>/dev/null || true
+  elapsed=$((end - start))
+  [ "$status" -eq 0 ]
+  # Generous ceiling (bats/CI overhead, not the lock): a genuine wait for the
+  # default 10s budget would clear this easily; losing a single-mkdir probe
+  # should not.
+  [ "$elapsed" -le 3 ]
+  # And the write genuinely lost the race (lock was held the whole time), so
+  # this is really exercising the contended path, not an accidental free lock.
+  [ -z "$(_messaging_socket_of team alice)" ]
 }
 
 @test "republish socket: a resume with an already-alive watcher still refreshes the socket (review round 1 NEEDS FIX)" {

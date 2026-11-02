@@ -445,10 +445,25 @@ fi
 # new failure mode for THIS hook to report; it is the same "could not tell,
 # so don't write" a stale record already left in place before this change
 # existed.
+#
+# AGMSG_LOCK_SECONDS=0 for this one call only (review round 2 BLOCKING,
+# performance): the registry lock's own default budget is 10s, and this is a
+# SessionStart hook -- a user-facing wait, not a background job, so the
+# existing per-writer default that every OTHER role-session write in this
+# file still uses is wrong for this call specifically. A budget of 0 makes
+# agmsg_lock_acquire try exactly ONE mkdir and return immediately (rc 1, no
+# sleep) when the lock is already held, instead of spinning out its budget --
+# measured directly (see this PR's own body) at under a second even under
+# full contention. The write still happens -- atomically, CAS-protected,
+# exactly as above -- whenever the lock happens to be free; a seat that loses
+# this one race is no worse off than before this whole feature existed (the
+# stale socket it already had), and the very next resume/compact/clear tries
+# again. This does not change AGMSG_LOCK_SECONDS for any other writer in this
+# file or elsewhere -- the override is scoped to this one subshell command.
 if [ "$TYPE" = claude-code ] && [ "$ROLE_BASIS" = record ] && [ -n "$ROLE_NAME" ] && [ -n "$ROLE_TEAM" ]; then
   _agmsg_ss_native_target=""
   if _agmsg_ss_native_target="$(agmsg_claude_code_native_target 2>/dev/null)"; then
-    agmsg_role_session_publish_messaging_if_owner "$ROLE_TEAM" "$ROLE_NAME" \
+    AGMSG_LOCK_SECONDS=0 agmsg_role_session_publish_messaging_if_owner "$ROLE_TEAM" "$ROLE_NAME" \
       "${_agmsg_ss_native_target%%$'\t'*}" "${_agmsg_ss_native_target#*$'\t'}" \
       "$_bare_sid" "$_bare_sid" "${CLAUDE_CODE_MESSAGING_TOKEN:-}" >/dev/null 2>&1 || true
   fi
