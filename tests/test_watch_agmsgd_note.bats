@@ -104,7 +104,7 @@ _run_unfinished_update_watch() {
   local boot
   case "$(uname -s)" in
     Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
-    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    Linux) boot="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n 's/^btime //p' /proc/stat)" ;;
     *) skip 'POSIX beta executor evidence' ;;
   esac
   _agmsgd_desired on

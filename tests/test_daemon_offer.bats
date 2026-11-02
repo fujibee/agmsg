@@ -18,7 +18,7 @@ _mark_daemon_ready() {
   local boot
   case "$(uname -s)" in
     Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
-    Linux) boot="$(sed -n 's/^btime //p' /proc/stat)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
     *) skip 'POSIX beta executor evidence' ;;
   esac
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE meta SET node_path='$(command -v node)'; UPDATE daemon_intent SET desired='on';
