@@ -60,7 +60,9 @@ EOF
 # answers the fixture, `pane report-agent-session` / `release-agent` succeed.
 echo "herdr[$HERDR_SOCKET_PATH] $*" >> "$PSDIR/herdr_calls"
 case "$1 $2" in
-  "agent list") [ -f "$PSDIR/herdr_list_fail" ] && exit 1; cat "$PSDIR/herdr_list" ;;
+  "agent list") [ -f "$PSDIR/herdr_list_fail" ] && exit 1; cat "$PSDIR/herdr_list"
+                # another seat's SessionStart lands right after we looked
+                [ -f "$PSDIR/herdr_list_next" ] && mv "$PSDIR/herdr_list_next" "$PSDIR/herdr_list"; exit 0 ;;
   "pane report-agent-session"|"pane release-agent") [ -f "$PSDIR/herdr_write_fail" ] && exit 1; exit 0 ;;
   *) exit 1 ;;
 esac
@@ -378,18 +380,16 @@ _proven_seat() {
   _seat t-bbb
 }
 
-@test "report: the wrong starter record is moved to the seat's own pane" {
+@test "report: the seat's thread is reported on its own pane and the starter is left alone" {
   _proven_seat
   _herdr_has "$(_rec w1:p17 t-bbb),$(_rec_bare w1:pN)"
   run agmsg_terminal_self_env
   [ "$status" -eq 0 ]
   grep -q "^herdr\[$HERDR_SOCKET_PATH\] pane report-agent-session w1:pN --source herdr:codex --agent codex --seq [0-9]*999999999 --agent-session-id t-bbb --session-start-source resume$" "$PSDIR/herdr_calls"
-  grep -q "^herdr\[$HERDR_SOCKET_PATH\] pane release-agent w1:p17 --source herdr:codex --agent codex --seq " "$PSDIR/herdr_calls"
-  # report first, so the thread always has a holder
-  [ "$(grep -n "report-agent-session" "$PSDIR/herdr_calls" | head -1 | cut -d: -f1)" -lt "$(grep -n "release-agent" "$PSDIR/herdr_calls" | head -1 | cut -d: -f1)" ]
+  refute grep -q "release-agent" "$PSDIR/herdr_calls"
 }
 
-@test "report: a starter record that names another seat's thread is never released" {
+@test "report: nothing is ever released, whatever the starter pane holds" {
   _proven_seat
   _herdr_has "$(_rec w1:p17 t-other),$(_rec_bare w1:pN)"
   run agmsg_terminal_self_env
@@ -403,14 +403,6 @@ _proven_seat() {
   run agmsg_terminal_self_env
   [ "$(_calls)" -eq 1 ]
   grep -q "agent list" "$PSDIR/herdr_calls"
-}
-
-@test "report: the own pane already right but the starter still names the thread: only the release" {
-  _proven_seat
-  _herdr_has "$(_rec w1:pN t-bbb),$(_rec w1:p17 t-bbb)"
-  run agmsg_terminal_self_env
-  refute grep -q "report-agent-session" "$PSDIR/herdr_calls"
-  grep -q "release-agent w1:p17" "$PSDIR/herdr_calls"
 }
 
 @test "report: a record under another source is not mistaken for herdr's" {
@@ -440,7 +432,17 @@ _proven_seat() {
   _herdr_has "$(_rec w1:p17 t-bbb),$(_rec w1:pN t-old)"
   run agmsg_terminal_self_env
   grep -q "report-agent-session w1:pN" "$PSDIR/herdr_calls"
-  grep -q "release-agent w1:p17" "$PSDIR/herdr_calls"
+  refute grep -q "release-agent" "$PSDIR/herdr_calls"
+}
+
+@test "report: another seat's record landing on the starter after the list is never deleted" {
+  _proven_seat
+  _herdr_has "$(_rec w1:p17 t-bbb)"
+  printf '{"id":"x","result":{"agents":[%s]}}\n' "$(_rec w1:p17 t-other)" > "$PSDIR/herdr_list_next"
+  run agmsg_terminal_self_env
+  grep -q "report-agent-session w1:pN" "$PSDIR/herdr_calls"
+  refute grep -q "release-agent" "$PSDIR/herdr_calls"
+  grep -q t-other "$PSDIR/herdr_list"
 }
 
 @test "report: unknown pane means no herdr call at all" {
@@ -497,10 +499,3 @@ _proven_seat() {
   [ "$(_calls)" -eq 0 ]
 }
 
-@test "report: a starter on another herdr instance is not looked at" {
-  _proven_seat
-  export HERDR_SOCKET_PATH="$TEST_SKILL_DIR/other.sock"
-  _herdr_has "$(_rec w1:p17 t-bbb)"
-  run agmsg_terminal_self_env
-  refute grep -q "release-agent" "$PSDIR/herdr_calls"
-}

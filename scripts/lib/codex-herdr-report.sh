@@ -8,13 +8,16 @@
 # starter's pane, and after a herdr restart that pane is resumed into the wrong
 # thread (or loses the race against the right pane, depending on pane order).
 #
-# Once codex-own-pane.sh has PROVEN a seat's own pane, this puts the record right:
+# Once codex-own-pane.sh has PROVEN a seat's own pane, this reports (own pane,
+# thread) with pane.report_agent_session under herdr's own Codex source,
+# session_start_source=resume, and a seq in the same unit the hook uses
+# (nanoseconds since the epoch), so it is newer than the hook's.
 #
-#   1. report (own pane, thread) with pane.report_agent_session under herdr's own
-#      Codex source, session_start_source=resume, and a seq in the same unit the
-#      hook uses (nanoseconds since the epoch), so it is newer than the hook's;
-#   2. release the starter's pane only when herdr holds THIS seat's thread there.
-#      A record naming any other thread is never touched.
+# The starter's pane is NOT touched. herdr's release-agent matches only the
+# pane's source and agent label, never the session id, and takes effect only
+# with a seq newer than the pane's last one, so a release would also delete a
+# record another seat's SessionStart wrote after we looked. No conditional form
+# exists, so the stale claim on the starter's pane is left alone.
 #
 # It runs only where a pane was just proven (a fresh scan, at most once per
 # AGMSG_CODEX_PANE_TTL per thread), never on a cache hit, so a call that hits the
@@ -45,10 +48,10 @@ _agmsg_chr_pane_ok() {
 # that matters (the hook's report is what this one follows).
 _agmsg_chr_seq() { printf '%s999999999\n' "$(date +%s)"; }
 
-# <socket> <thread> <own pane> <starter pane>
+# <socket> <thread> <own pane>
 _agmsg_chr_run() {
-  local sock="$1" tid="$2" own="$3" starter="$4" json rc=0 rows row pane sess src
-  local own_ok=0 starter_names_tid=0 seq
+  local sock="$1" tid="$2" own="$3" json rc=0 rows row pane sess src
+  local own_ok=0 seq
   json="$(HERDR_SOCKET_PATH="$sock" herdr agent list 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] && [ -n "$json" ] || return 0
   command -v sqlite3 >/dev/null 2>&1 || return 0
@@ -63,9 +66,6 @@ _agmsg_chr_run() {
     if [ "$pane" = "$own" ] && [ "$sess" = "$tid" ] && [ "$src" = "$_AGMSG_CHR_SOURCE" ]; then
       own_ok=1
     fi
-    if [ "$pane" = "$starter" ] && [ "$sess" = "$tid" ] && [ "$src" = "$_AGMSG_CHR_SOURCE" ]; then
-      starter_names_tid=1
-    fi
   done <<ROWS
 $rows
 ROWS
@@ -76,19 +76,12 @@ ROWS
       --source "$_AGMSG_CHR_SOURCE" --agent "$_AGMSG_CHR_AGENT" --seq "$seq" \
       --agent-session-id "$tid" --session-start-source resume >/dev/null 2>&1 || return 0
   fi
-  # Release after the report, so the thread always has a holder in between.
-  if [ "$starter_names_tid" -eq 1 ] && [ "$starter" != "$own" ]; then
-    seq="$(_agmsg_chr_seq)"
-    HERDR_SOCKET_PATH="$sock" herdr pane release-agent "$starter" \
-      --source "$_AGMSG_CHR_SOURCE" --agent "$_AGMSG_CHR_AGENT" --seq "$seq" >/dev/null 2>&1 || true
-  fi
   return 0
 }
 
 # <thread> <KEY=VALUE lines of the proven TUI environment, on stdin>
-# The ambient HERDR_* variables are still the daemon starter's here.
 agmsg_codex_report_own_session() {
-  local tid="$1" line sock="" own="" starter="${HERDR_PANE_ID:-}" env1=""
+  local tid="$1" line sock="" own="" env1=""
   [ "${AGMSG_CODEX_HERDR_REPORT:-1}" = 0 ] && { cat >/dev/null; return 0; }
   while IFS= read -r line; do
     case "$line" in
@@ -100,9 +93,6 @@ agmsg_codex_report_own_session() {
   [ "$env1" = 1 ] && [ -n "$sock" ] && [ -n "$tid" ] || return 0
   command -v herdr >/dev/null 2>&1 || return 0
   _agmsg_chr_pane_ok "$own" || return 0
-  # Only a starter in the same herdr instance is looked at; its pane id means
-  # nothing in another one.
-  if [ "${HERDR_SOCKET_PATH:-}" != "$sock" ] || ! _agmsg_chr_pane_ok "$starter"; then starter=""; fi
-  _agmsg_chr_run "$sock" "$tid" "$own" "$starter"
+  _agmsg_chr_run "$sock" "$tid" "$own"
   return 0
 }
