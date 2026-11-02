@@ -254,7 +254,7 @@ _agy_failing_mv_fixture() {
 
   sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='off';"
   # A file where the shim directory belongs: restoring cannot create the shim.
-  rm -rf "$FAKE_HOME/.agents/bin"
+  mv "$FAKE_HOME/.agents/bin" "$FAKE_HOME/.agents/bin.moved"
   : > "$FAKE_HOME/.agents/bin"
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   [ "$status" -eq 0 ]
