@@ -87,12 +87,12 @@ Four possible outputs:
   > - `/agmsg history` — message history
 
 <!-- agmsg:render-overlay claude-code -->
-  5. **REQUIRED — Respect the existing delivery choice.** Ask about delivery only on a human-initiated first join, and only when there is a real choice. Never ask on `actas`, `spawn`, or rejoin of an existing seat, even if `join.sh` must restore its registration. First run `~/.agents/skills/agmsg/scripts/agmsg daemon offer claude-code`; it only reads and prints one line:
+  5. **REQUIRED — Respect the existing delivery choice.** Decided 11-02, following #1810: a running agmsgd is the default; only an explicit delivery switch overrides it. Ask about delivery only on a human-initiated first join, and only when there is a real choice. Never ask on `actas`, `spawn`, or rejoin of an existing seat, even if `join.sh` must restore its registration. First run `~/.agents/skills/agmsg/scripts/agmsg delivery status --type claude-code --project "$(pwd)"`. If its `this project:` line says a mode was `chosen — agmsgd does not deliver here`, preserve that explicit choice and continue without asking or running `delivery agmsgd`. Otherwise run `~/.agents/skills/agmsg/scripts/agmsg daemon offer claude-code`; it only reads and prints one line:
      - `agmsgd=available`: only on a human-initiated first join, ask the user to pick one, in this order:
        1. `agmsgd` — notices delivered directly by a background service (recommended). Choosing it registers a background service that starts at login; `agmsg daemon disable` stops and removes it. Empty input means this one.
        2. `monitor (legacy)` — the Claude Code Monitor tool streams the inbox (the `monitor` mode value).
        3. `turn`, 4. `both`, 5. `off` — as before.
-     - `agmsgd=on`: ask nothing. Run `~/.agents/skills/agmsg/scripts/agmsg delivery agmsgd --type claude-code --project "$(pwd)"`, say "agmsgd is on: notices are delivered directly", and continue. For Claude Code, also follow any printed `AGMSG-DIRECTIVE` block.
+     - `agmsgd=on`: ask nothing. Run `~/.agents/skills/agmsg/scripts/agmsg delivery agmsgd --type claude-code --project "$(pwd)"`. Only if it succeeds, say "agmsgd is on: notices are delivered directly", and continue. On failure, report the failure and continue without a delivery question or a claim that notices are delivered. For Claude Code, also follow any printed `AGMSG-DIRECTIVE` block.
      - `agmsgd=not-running reason=...`: agmsgd is turned on but is not running, so do not say notices are delivered directly. Say so with the reason; only on a human-initiated first join, ask whether to start it (`agmsg delivery agmsgd` starts it) or switch to `monitor (legacy)`.
      - `agmsgd=unavailable reason=...`: do not offer agmsgd; say the reason in one line; only on a human-initiated first join, ask for `monitor (legacy)`, `turn`, `both`, or `off` (empty input means `monitor`).
 

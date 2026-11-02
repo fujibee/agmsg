@@ -3,6 +3,11 @@
 # "monitor (legacy)", asks `agmsg daemon offer` before showing agmsgd, and
 # keeps the mode values as they were.
 
+refute() {
+  if "$@"; then return 1; fi
+  return 0
+}
+
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   for type in claude-code codex; do
@@ -60,7 +65,7 @@ _step5() {   # <file>: the delivery step of the join flow
 @test "choice screen: other types are unchanged (no agmsgd offer)" {
   for type in gemini copilot cursor; do
     bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill "$2" agmsg "$3"' _ "$ROOT" "$type" "$BATS_TEST_TMPDIR/$type.md"
-    ! grep -Fq 'agmsg daemon offer' "$BATS_TEST_TMPDIR/$type.md"
+    refute grep -Fq 'agmsg daemon offer' "$BATS_TEST_TMPDIR/$type.md"
   done
 }
 
@@ -83,9 +88,12 @@ _step5() {   # <file>: the delivery step of the join flow
     on="$(grep -F '`agmsgd=on`:' <<<"$screen")"
     grep -Fq 'ask nothing. Run' <<<"$on"
     grep -Fq 'agmsg delivery agmsgd --type' <<<"$on"
-    grep -Fq 'and continue' <<<"$on"
-    ! grep -Fq 'keep using it or switch' <<<"$screen"
-    ! grep -Fq 'Show this screen every time' <<<"$screen"
+    grep -Fq 'Only if it succeeds' <<<"$on"
+    grep -Fq 'On failure, report the failure' <<<"$on"
+    grep -Fq 'preserve that explicit choice and continue without asking or running' <<<"$screen"
+    grep -Fq 'chosen — agmsgd does not deliver here' <<<"$screen"
+    refute grep -Fq 'keep using it or switch' <<<"$screen"
+    refute grep -Fq 'Show this screen every time' <<<"$screen"
     grep -Fq 'preserve the configured delivery and continue without asking or changing it' <<<"$screen"
     for offer in available not-running unavailable; do
       line="$(grep -F "agmsgd=$offer" <<<"$screen" | head -1)"
