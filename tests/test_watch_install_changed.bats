@@ -34,12 +34,12 @@ teardown() {
   teardown_test_env
 }
 
-# Wait until <condition> holds, up to ~15s. Returns non-zero if it never did, so
+# Wait until <condition> holds, up to ~40s (a loaded runner took over 15 s to deliver the first message). Returns non-zero if it never did, so
 # a failure names the thing that did not happen rather than surfacing later as a
 # missing grep. Same reasoning as the helpers in test_watch.bats.
 _wait_for() {
   local i=0
-  while [ "$i" -lt 150 ]; do
+  while [ "$i" -lt 400 ]; do
     if eval "$1"; then return 0; fi
     i=$((i + 1))
     sleep 0.1
