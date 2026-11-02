@@ -346,7 +346,8 @@
       "can": "Kann",
       "allowed": "Erlaubt",
       "nothingYet": "noch nichts",
-      "installedOn": "installiert am {{date}}"
+      "installedOn": "installiert am {{date}}",
+      "powersWant": "{{title}} möchte im Team {{team}} Folgendes tun:"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",

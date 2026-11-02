@@ -346,7 +346,8 @@
       "can": "できること",
       "allowed": "許可済み",
       "nothingYet": "まだありません",
-      "installedOn": "{{date}} にインストール"
+      "installedOn": "{{date}} にインストール",
+      "powersWant": "{{title}} がチーム {{team}} で次のことをしようとしています:"
     },
     "installError": {
       "repo_not_found": "github.com/{{owner}}/{{repo}} が見つかりません。名前を確認してください。非公開リポジトリはまだ未対応です。",

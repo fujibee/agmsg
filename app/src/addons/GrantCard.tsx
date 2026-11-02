@@ -40,6 +40,35 @@ export function GrantCard(props: {
       </div>
     );
   }
+  if (need.permission === "powers") {
+    const rows = ["teamJoin", ...(need.send ? ["messagesSend"] : []), ...(need.spawn ? ["agentsSpawn"] : [])];
+    return (
+      <div className="addon-card addon-grant-card" role="group" aria-label={t("addons.card.grantAria")}>
+        <p>{t("addons.card.powersWant", { title, team: need.team })}</p>
+        <ul className="addon-powers">
+          {rows.map((r) => (
+            <li key={r}>{t(`addons.permission.${r}`)}</li>
+          ))}
+        </ul>
+        {need.why && <p className="addon-why">{need.why}</p>}
+        {(need.send || need.spawn) && (
+          <>
+            <p className="addon-never">{t("addons.confirm.agentsBody")}</p>
+            {need.spawn && <p className="addon-never">{t("addons.confirm.agentsMode")}</p>}
+            {need.spawn && <p className="addon-never">{t("addons.confirm.agentsFolder")}</p>}
+          </>
+        )}
+        <div className="addon-card-actions">
+          <BusyButton type="button" disabled={pending} busy={spin("allow")} onClick={() => onChoose("allow")}>
+            {t("addons.card.allow")}
+          </BusyButton>
+          <BusyButton type="button" disabled={pending} busy={spin("notNow")} onClick={() => onChoose("notNow")}>
+            {t("addons.card.notNow")}
+          </BusyButton>
+        </div>
+      </div>
+    );
+  }
   if (need.denied) {
     return (
       <div className="addon-card addon-grant-card denied" role="alert">

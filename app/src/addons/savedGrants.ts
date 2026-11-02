@@ -22,6 +22,12 @@ export function pickSavedTeam(saved: Saved[], team: string): string | undefined 
   return saved.find((g) => g.permission === "messages:read" && g.scope === team)?.scope;
 }
 
+/** Which team powers were remembered for exactly this team. */
+export function pickSavedPowers(saved: Saved[], team: string): { join: boolean; send: boolean; spawn: boolean } {
+  const has = (p: string) => saved.some((g) => g.permission === p && g.scope === team);
+  return { join: has("team:join"), send: has("messages:send"), spawn: has("agents:spawn") };
+}
+
 /** The saved folder grant for exactly this real path (a folder picked from the menu; a saved parent does not count). */
 export function pickSavedFolder(saved: Saved[], real: string): string | undefined {
   const want = trimSlash(real);

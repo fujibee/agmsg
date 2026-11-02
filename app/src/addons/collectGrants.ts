@@ -1,6 +1,8 @@
 import type { Grant, InstalledAddon } from "./types";
 import type { Outcome, SavedGrantRaw } from "./source";
 
+const SAVABLE: ReadonlySet<string> = new Set(["files:read", "messages:read", "team:join", "messages:send", "agents:spawn"]);
+
 /** The remembered grants of every add-on that keeps them: built-ins and installed ones (a developer copy never saves any). */
 export async function collectSavedGrants(
   addons: InstalledAddon[],
@@ -17,8 +19,8 @@ export async function collectSavedGrants(
         continue;
       }
       for (const g of r.value)
-        if (g.permission === "files:read" || g.permission === "messages:read")
-          grants.push({ addonId: a.id, pane: p.name, permission: g.permission, scope: g.scope, remember: true, grantedAt: g.grantedAt });
+        if (SAVABLE.has(g.permission))
+          grants.push({ addonId: a.id, pane: p.name, permission: g.permission as Grant["permission"], scope: g.scope, remember: true, grantedAt: g.grantedAt });
     }
   }
   return { grants, failure };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
+import { pickSavedPowers, pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
 
 const saved = [
   { permission: "files:read", scope: "/Users/a/proj" },
@@ -66,5 +66,18 @@ describe("a folder picked from the menu", () => {
     expect(await replayPickedFolder({ ...m.source, resolveFolder: async () => ({ ok: false as const }) }, pane, "/p")).toBeNull();
     expect(await replayPickedFolder({ ...m.source, savedGrants: async () => ({ ok: false as const }) }, pane, "/p")).toBeNull();
     expect(await replayPickedFolder({ ...m.source, grantRoot: async () => ({ ok: false as const }) }, pane, "/p")).toBeNull();
+  });
+});
+
+describe("pickSavedPowers", () => {
+  const rows = [
+    { permission: "team:join", scope: "t1" },
+    { permission: "agents:spawn", scope: "t1" },
+    { permission: "messages:send", scope: "t2" },
+  ];
+  it("counts a power only for exactly the same team", () => {
+    expect(pickSavedPowers(rows, "t1")).toEqual({ join: true, send: false, spawn: true });
+    expect(pickSavedPowers(rows, "t2")).toEqual({ join: false, send: true, spawn: false });
+    expect(pickSavedPowers(rows, "t3")).toEqual({ join: false, send: false, spawn: false });
   });
 });

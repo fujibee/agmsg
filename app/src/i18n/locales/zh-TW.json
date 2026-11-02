@@ -346,7 +346,8 @@
       "can": "可以",
       "allowed": "已允許",
       "nothingYet": "尚無",
-      "installedOn": "安裝於 {{date}}"
+      "installedOn": "安裝於 {{date}}",
+      "powersWant": "{{title}} 想在團隊 {{team}} 中執行以下操作："
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",

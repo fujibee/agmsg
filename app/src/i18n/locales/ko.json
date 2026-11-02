@@ -346,7 +346,8 @@
       "can": "가능한 것",
       "allowed": "허용됨",
       "nothingYet": "아직 없음",
-      "installedOn": "{{date}} 설치"
+      "installedOn": "{{date}} 설치",
+      "powersWant": "{{title}}이(가) 팀 {{team}}에서 다음을 하려고 합니다:"
     },
     "installError": {
       "repo_not_found": "Couldn't find github.com/{{owner}}/{{repo}}. Check the name. Private repositories aren't supported yet.",

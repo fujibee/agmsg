@@ -67,9 +67,17 @@ export function grantsOf(grants: Grant[], addonId: string): Grant[] {
   return grants.filter((g) => g.addonId === addonId);
 }
 
+const GRANT_KEY = {
+  "messages:read": "addons.grant.messages",
+  "files:read": "addons.grant.files",
+  "team:join": "addons.grant.join",
+  "messages:send": "addons.grant.send",
+  "agents:spawn": "addons.grant.spawn",
+} as const;
+
 /** "Reads messages: team-a" / "Reads files: ~/proj (remembered)". */
 export function grantText(t: Translate, g: Grant): string {
-  const key = g.permission === "messages:read" ? "addons.grant.messages" : "addons.grant.files";
+  const key = GRANT_KEY[g.permission as keyof typeof GRANT_KEY] ?? "addons.grant.files";
   const base = t(key, { scope: g.scope });
   return g.remember && g.permission === "files:read" ? `${base} ${t("addons.grant.remembered")}` : base;
 }

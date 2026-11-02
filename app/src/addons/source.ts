@@ -125,6 +125,24 @@ async function attempt<T>(fn: () => Promise<T>): Promise<Outcome<T>> {
 }
 
 /** What addon_pane_add returns: the frame URL and what Rust read from addon.conf. */
+/** What a remembered grant can be: the folder, the team, or one of the team powers (scope is the team id). */
+export type SavablePermission = "files:read" | "messages:read" | "team:join" | "messages:send" | "agents:spawn";
+
+export type TeamPower = "team:join" | "messages:send" | "agents:spawn";
+
+/** One row of addon_members_state. `key` names the entry for addon_agent_reopen. */
+export type MemberState = {
+  key: string;
+  addon: string;
+  team: string;
+  kind: "member" | "agent";
+  name: string;
+  type: string;
+  state: "claimed" | "joined" | "opening" | "running" | "failed" | "orphaned" | "unknown";
+  pid?: number;
+  reason?: string;
+};
+
 export type AddedPane = { id: number; url: string; port: number; commit: string; title: string; permissions: string[]; network: string };
 
 /** addon_folder_env_notice: the folder holds a `.env` file; `network` means this pane cannot read it. */
@@ -175,7 +193,7 @@ export function createLiveSource(invoke: Invoke) {
     savedGrants: (id: string, pane: string) =>
       attempt(async () => (await invoke("addon_saved_grants", { spec: { id, pane } })) as SavedGrantRaw[]),
     /** Remember a grant the user just gave: bound to the pane instance they clicked Allow in and the commit it runs, so Rust refuses it if either changed. */
-    saveGrant: (id: string, pane: string, permission: "files:read" | "messages:read", scope: string, paneId: number, commit: string) =>
+    saveGrant: (id: string, pane: string, permission: SavablePermission, scope: string, paneId: number, commit: string) =>
       attempt(async () => void (await invoke("addon_save_grant", { spec: { id, pane, permission, scope, paneId, commit } }))),
     forgetGrant: (id: string, pane: string, permission: string, scope: string) =>
       attempt(async () => (await invoke("addon_forget_grant", { spec: { id, pane, permission, scope } })) as { forgotten: boolean; closedPanes: number[] }),
@@ -190,6 +208,12 @@ export function createLiveSource(invoke: Invoke) {
         return { ok: false, error: toCommandError(e) };
       }
     },
+    /** addon_set_power: allow (or take back) one team power for this pane. Called from the saved or just-given consent, after the team is granted. */
+    setPower: (id: number, power: TeamPower, on: boolean) => attempt(async () => void (await invoke("addon_set_power", { id, power, on }))),
+    /** addon_members_state: the members and agents add-ons made, with their state. */
+    membersState: () => attempt(async () => (await invoke("addon_members_state")) as MemberState[]),
+    /** addon_agent_reopen: the person's choice for an agent that is orphaned, unknown or only joined. */
+    agentReopen: (key: string) => attempt(async () => void (await invoke("addon_agent_reopen", { key }))),
     async grantRoot(id: number, path: string): Promise<GrantRootResult> {
       try {
         return { ok: true, realPath: (await invoke("addon_grant_root", { id, path })) as string };

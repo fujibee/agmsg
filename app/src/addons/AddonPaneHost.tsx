@@ -15,9 +15,9 @@ import { createOpGuard } from "./opGuard";
 import { NOTICE_MS } from "./OpenRequestBar";
 import { clearIf, counter, expireAfter, raise, type Notice } from "./notice";
 import { listenPaneFailed, type PaneFailedEvent } from "./paneFailed";
-import { pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
+import { pickSavedPowers, pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
-import { createLiveSource, parseNetwork, toCommandError, type AddedPane } from "./source";
+import { createLiveSource, parseNetwork, toCommandError, type AddedPane, type TeamPower } from "./source";
 import type { AddonPaneRef, GrantChip, GrantNeed, InstalledAddon, PaneState } from "./types";
 
 const source = createLiveSource((cmd, args) => invoke(cmd, args));
@@ -46,7 +46,13 @@ export function AddonPaneHost(props: {
   return props.live ? <LiveAddonPane {...props} /> : <MockAddonPane pane={props.pane} onClose={props.onClose} />;
 }
 
-type Step = "team" | "folder";
+type Step = "team" | "powers" | "folder";
+
+/** The team powers a pane declared, in the order they are applied (messages:send and agents:spawn need team:join). */
+function declaredPowers(permissions: string[]): TeamPower[] {
+  if (!permissions.includes("team:join")) return [];
+  return (["team:join", "messages:send", "agents:spawn"] as const).filter((p) => permissions.includes(p));
+}
 
 function LiveAddonPane(props: {
   pane: AddonPaneRef;
@@ -140,6 +146,8 @@ function LiveAddonPane(props: {
         openedId = a.id;
         const next: Step[] = [];
         if (a.permissions.includes("messages:read")) next.push("team");
+        const powers = declaredPowers(a.permissions);
+        if (powers.length > 0) next.push("powers");
         if (a.permissions.includes("files:read") || a.permissions.includes("git:read")) next.push("folder");
         // Replay what the user chose to remember; Rust checks each one again as if new. Not for developer copies.
         const replayed: GrantChip[] = [];
@@ -151,6 +159,18 @@ function LiveAddonPane(props: {
             if (team !== undefined && (await source.grantTeam(a.id, team)).ok) {
               replayed.push({ key: `team:${team}`, label: team });
               next.splice(next.indexOf("team"), 1);
+            }
+            if (powers.length > 0) {
+              const have = pickSavedPowers(saved.value, teamRef.current);
+              const all = powers.every((p) => (p === "team:join" ? have.join : p === "messages:send" ? have.send : have.spawn));
+              if (all && (await source.grantTeam(a.id, teamRef.current)).ok) {
+                let ok = true;
+                for (const p of powers) if (ok) ok = (await source.setPower(a.id, p, true)).ok;
+                if (ok) {
+                  if (!replayed.some((c) => c.key === `team:${teamRef.current}`)) replayed.push({ key: `team:${teamRef.current}`, label: teamRef.current });
+                  next.splice(next.indexOf("powers"), 1);
+                }
+              }
             }
             const root = next.includes("folder") ? pickSavedRoot(saved.value, pane.openArgs?.path) : undefined;
             if (root !== undefined) {
@@ -225,6 +245,12 @@ function LiveAddonPane(props: {
       setState({ kind: "frame" });
     } else if (step === "team") {
       setState({ kind: "grant", need: { permission: "messages:read", team: props.team, why: decl?.why["messages:read"] } });
+    } else if (step === "powers") {
+      const p = declaredPowers(added.permissions);
+      setState({
+        kind: "grant",
+        need: { permission: "powers", team: props.team, send: p.includes("messages:send"), spawn: p.includes("agents:spawn"), why: decl?.why["team:join"] },
+      });
     } else if (folder === null) {
       void chooseFolder();
     } else {
@@ -235,7 +261,7 @@ function LiveAddonPane(props: {
   const onGrant = async (c: GrantChoice) => {
     if (!added || state.kind !== "grant" || guard.current.isBusy()) return;
     const need = state.need;
-    const step: Step = need.permission === "messages:read" ? "team" : "folder";
+    const step: Step = need.permission === "messages:read" ? "team" : need.permission === "powers" ? "powers" : "folder";
     if (c === "notNow") {
       // "Not now" declines: the pane closes. On the denied card the same button reads "Choose another…" and picks again;
       // dropping the folder is what makes the effect above launch the picker (its only owner).
@@ -248,7 +274,23 @@ function LiveAddonPane(props: {
     let r;
     try {
       r = await guard.current.run(async ({ stale }): Promise<{ error: { code: string; message: string } } | { chip: GrantChip; saveFailed?: string }> => {
-        const remember = !isDev && (c === "always" || need.permission === "messages:read");
+        const remember = !isDev && (c === "always" || need.permission === "messages:read" || need.permission === "powers");
+        if (need.permission === "powers") {
+          const g = await source.grantTeam(added.id, need.team);
+          if (!g.ok) return { error: g.error };
+          const powers = declaredPowers(added.permissions);
+          for (const p of powers) {
+            const s = await source.setPower(added.id, p, true);
+            if (!s.ok) return { error: s.error };
+          }
+          let saveFailed: string | undefined;
+          for (const p of powers) {
+            // The pane was reopened or its add-on updated while the grant ran: that consent must not be saved.
+            const saved = remember && !stale() ? await source.saveGrant(pane.addonId, pane.paneName, p, need.team, added.id, added.commit) : null;
+            if (saved && !saved.ok) saveFailed ??= saved.error.message;
+          }
+          return { chip: { key: `team:${need.team}`, label: need.team }, saveFailed };
+        }
         if (need.permission === "messages:read") {
           const g = await source.grantTeam(added.id, need.team);
           if (!g.ok) return { error: g.error };
@@ -277,7 +319,7 @@ function LiveAddonPane(props: {
       return setState({ kind: "failure", failure: { code: "open_failed", message: e.message } });
     }
     const chip = r.value.chip;
-    setChips((cs) => [...cs, chip]);
+    setChips((cs) => (cs.some((c) => c.key === chip.key) ? cs : [...cs, chip]));
     // Allowed for now, but it could not be remembered: say so, never pretend.
     if (r.value.saveFailed) raiseBlocked(r.value.saveFailed);
     // Only the step this card was for is done; another step stays.
@@ -373,7 +415,7 @@ function MockAddonPane(props: { pane: AddonPaneRef; onClose: () => void }) {
       onClose={props.onClose}
       onGrant={(c) => {
         if (c === "notNow" || state.kind !== "grant") return;
-        const scope = state.need.permission === "messages:read" ? state.need.team : state.need.path;
+        const scope = state.need.permission === "files:read" ? state.need.path : state.need.team;
         setChips([{ key: scope, label: scope }]);
         setState({ kind: "frame" });
       }}
