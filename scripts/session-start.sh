@@ -446,6 +446,42 @@ if [ -n "$ROLE_NAME" ] && [ -n "$ROLE_TEAM" ]; then
   fi
 fi
 
+# Re-publish this seat's messaging_socket for the role just re-established
+# (#1872): Claude Code hands every process a fresh CLAUDE_CODE_MESSAGING_SOCKET,
+# so a resume, restart, /compact, or /clear -- anything that re-fires THIS hook
+# -- leaves the role-session record pointing at the PREVIOUS process's now-dead
+# socket unless something republishes it. Before this, the only call site that
+# ever wrote `messaging_socket` was actas-claim.sh:202, reached only when the
+# model explicitly re-runs `/agmsg actas <name>` -- so a seat that never does
+# that again (and whose project has no SessionStart hook to even reach this far
+# in the first place) could sit unaddressable to agmsgd (daemon status reason
+# `messaging_socket_missing`) indefinitely with nothing to notice or recover it.
+#
+# Mirrors actas-claim.sh:183-202 exactly, and only for the seat THIS session was
+# just proven/re-taken as (ROLE_NAME/ROLE_TEAM non-empty, from either basis
+# above): an ambiguous or unestablished role gets nothing written here, the same
+# fail-closed direction the narrowing block already takes -- never guessed at.
+# Best-effort and silent either way: a missing/unusable native target (plain
+# emulator, no messaging socket in this environment, Windows named-pipe case not
+# yet resolvable, etc.) is not a new failure mode for THIS hook to report; it is
+# the same "could not tell, so don't write" a stale record already left in
+# place before this change existed.
+if [ "$TYPE" = claude-code ] && [ -n "$ROLE_NAME" ] && [ -n "$ROLE_TEAM" ]; then
+  _agmsg_ss_native_target=""
+  if _agmsg_ss_native_target="$(agmsg_claude_code_native_target 2>/dev/null)"; then
+    # _agmsg_role_session_set_messaging_unlocked only writes into a record
+    # that already EXISTS ([ -f "$path" ] || return 0, role-session.sh) -- true
+    # for the `record` basis (that is how ROLE_NAME got set at all), but never
+    # true for the `actas` (narrowing) basis, which has only a lock, no record
+    # yet. Ensure the record exists first, the same order actas-claim.sh:140
+    # then :202 already uses for a fresh claim, so both bases land the socket.
+    agmsg_role_session_record "$ROLE_TEAM" "$ROLE_NAME" "$_bare_sid" "$PROJECT" "$TYPE" "$SESSION_ID" || true
+    agmsg_role_session_publish_messaging "$ROLE_TEAM" "$ROLE_NAME" \
+      "${_agmsg_ss_native_target%%$'\t'*}" "${_agmsg_ss_native_target#*$'\t'}" \
+      "$_bare_sid" "${CLAUDE_CODE_MESSAGING_TOKEN:-}" >/dev/null 2>&1 || true
+  fi
+fi
+
 WATCH="$SKILL_DIR/scripts/watch.sh"
 # The watch renews itself (scripts/watch.sh, _watch_renew_or_stop): when it was
 # launched with --max-seconds it prints one "re-arm" or "stopping" line
