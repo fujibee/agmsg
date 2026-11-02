@@ -479,6 +479,110 @@
    "extract": "ok"
   },
   {
+   "name": "messages:send needs team:join",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\npermissions = messages:send\nwhy.messages:send = r\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 3: messages:send needs team:join too."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "agents:spawn needs team:join",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\npermissions = agents:spawn\nwhy.agents:spawn = r\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 3: agents:spawn needs team:join too."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "member needs team:join",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\nmember = ref\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 3: \"member\" is set but the team:join permission is not declared."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
+   "name": "member name follows the core rules",
+   "entries": [
+    {
+     "path": "agmsg-plugin.conf",
+     "type": "file",
+     "text": "name = x\n"
+    },
+    {
+     "path": "app-panes/x/addon.conf",
+     "type": "file",
+     "text": "title = X\nprotocol = 1\npermissions = team:join\nwhy.team:join = r\nmember = a.b\n"
+    },
+    {
+     "path": "app-panes/x/web/index.html",
+     "type": "file",
+     "text": "<div></div>"
+    }
+   ],
+   "expect": {
+    "errors": [
+     "app-panes/x/addon.conf line 5: member must not contain . / \\ \" [ ] or control characters."
+    ]
+   },
+   "extract": "ok"
+  },
+  {
    "name": "network needs an origin list",
    "entries": [
     {

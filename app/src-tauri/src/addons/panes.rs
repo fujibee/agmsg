@@ -38,6 +38,11 @@ pub struct Declared {
     pub messages_read: bool,
     pub files_read: bool,
     pub git_read: bool,
+    pub team_join: bool,
+    pub messages_send: bool,
+    pub agents_spawn: bool,
+    /// The member name `addon.conf` asks for (`member`), for `team:join`.
+    pub member: Option<String>,
     #[serde(skip)]
     pub network: Option<Network>,
 }
@@ -63,6 +68,38 @@ pub enum Need {
     /// `git:read` plus `files:read` on the repo root.
     FilesAndGit,
     Messages,
+    /// `team:join`, granted for the pane's team.
+    Join,
+    /// `messages:send` (and `team:join`).
+    Send,
+    /// `agents:spawn` (and `team:join`).
+    Spawn,
+}
+
+/// The three powers that act on a team, each allowed by the user separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Power {
+    Join,
+    Send,
+    Spawn,
+}
+
+impl Power {
+    pub fn parse(s: &str) -> Option<Power> {
+        match s {
+            "team:join" => Some(Power::Join),
+            "messages:send" => Some(Power::Send),
+            "agents:spawn" => Some(Power::Spawn),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Powers {
+    pub join: bool,
+    pub send: bool,
+    pub spawn: bool,
 }
 
 pub struct Pane {
@@ -76,6 +113,8 @@ pub struct Pane {
     pub generation: u64,
     /// The one team this pane may read (granted at first open per team).
     pub team: Option<String>,
+    /// Which of the team powers the user allowed (each needs the team too).
+    pub powers: Powers,
     /// The real path of the one folder this pane may read.
     pub root: Option<PathBuf>,
     pub server: PaneServer,
@@ -88,6 +127,11 @@ pub struct Pane {
 pub struct Authorized {
     pub id: PaneId,
     pub generation: u64,
+    /// `owner/repo` or the built-in name: who is asking, taken from the pane and never from the request.
+    pub addon: String,
+    pub pane: String,
+    /// The member name `addon.conf` asked for, when it did.
+    pub member: Option<String>,
     pub root: Option<PathBuf>,
     pub team: Option<String>,
     pub open_args: OpenArgs,
@@ -172,6 +216,7 @@ impl Registry {
                 open_args: spec.open_args,
                 generation: 0,
                 team: None,
+                powers: Powers::default(),
                 root: None,
                 server,
                 inflight: Arc::new(AtomicUsize::new(0)),
@@ -249,8 +294,8 @@ impl Registry {
     /// The user allowed this pane to read `team`. Only declared permissions can be granted.
     pub fn grant_team(&mut self, id: PaneId, team: &str) -> Result<(), BrokerError> {
         let p = self.panes.get_mut(&id).ok_or_else(gone)?;
-        if !p.declared.messages_read {
-            return Err(BrokerError::new("not_declared", "this add-on did not declare messages:read"));
+        if !(p.declared.messages_read || p.declared.team_join) {
+            return Err(BrokerError::new("not_declared", "this add-on did not declare messages:read or team:join"));
         }
         // Changing an existing scope (team A -> B) voids the frame exactly like a
         // revoke: whatever was authorized under A can no longer be answered under B.
@@ -261,9 +306,25 @@ impl Registry {
         Ok(())
     }
 
+    /// The user allowed (or took back) one of the team powers for this pane. Only declared ones can be allowed.
+    pub fn set_power(&mut self, id: PaneId, power: Power, on: bool) -> Result<(), BrokerError> {
+        let p = self.panes.get_mut(&id).ok_or_else(gone)?;
+        let (declared, slot, what) = match power {
+            Power::Join => (p.declared.team_join, &mut p.powers.join, "team:join"),
+            Power::Send => (p.declared.messages_send, &mut p.powers.send, "messages:send"),
+            Power::Spawn => (p.declared.agents_spawn, &mut p.powers.spawn, "agents:spawn"),
+        };
+        if on && !declared {
+            return Err(BrokerError::new("not_declared", format!("this add-on did not declare {what}")));
+        }
+        *slot = on;
+        Ok(())
+    }
+
     pub fn revoke_team(&mut self, id: PaneId) {
         if let Some(p) = self.panes.get_mut(&id) {
             p.team = None;
+            p.powers = Powers::default();
             // a revoked frame is torn down by the caller; the generation bump
             // makes any answer still on its way a stale one
             p.generation += 1;
@@ -314,6 +375,25 @@ impl Registry {
                     return Err(BrokerError::new("not_granted", "no team is allowed for this pane"));
                 }
             }
+            Need::Join | Need::Send | Need::Spawn => {
+                let (declared, allowed, what) = match need {
+                    Need::Join => (p.declared.team_join, p.powers.join, "team:join"),
+                    Need::Send => (p.declared.messages_send, p.powers.send, "messages:send"),
+                    _ => (p.declared.agents_spawn, p.powers.spawn, "agents:spawn"),
+                };
+                if !declared {
+                    return Err(BrokerError::new("not_declared", format!("this add-on did not declare {what}")));
+                }
+                if need != Need::Join && !p.declared.team_join {
+                    return Err(BrokerError::new("not_declared", "this add-on did not declare team:join"));
+                }
+                if p.team.is_none() {
+                    return Err(BrokerError::new("not_granted", "no team is allowed for this pane"));
+                }
+                if !allowed || (need != Need::Join && !p.powers.join) {
+                    return Err(BrokerError::new("not_granted", format!("{what} is not allowed for this pane")));
+                }
+            }
             Need::Files | Need::FilesAndGit => {
                 if need == Need::FilesAndGit && !p.declared.git_read {
                     return Err(BrokerError::new("not_declared", "this add-on did not declare git:read"));
@@ -326,7 +406,7 @@ impl Registry {
                 }
             }
         }
-        Ok(Authorized { id, generation, root: p.root.clone(), team: p.team.clone(), open_args: p.open_args.clone(), network: !matches!(p.declared.network, None | Some(Network::None)), inflight: p.inflight.clone() })
+        Ok(Authorized { id, generation, addon: p.addon.clone(), pane: p.name.clone(), member: p.declared.member.clone(), root: p.root.clone(), team: p.team.clone(), open_args: p.open_args.clone(), network: !matches!(p.declared.network, None | Some(Network::None)), inflight: p.inflight.clone() })
     }
 
     /// Reserves a request slot for the pane; `None` when 64 are already queued.
@@ -383,7 +463,7 @@ mod tests {
     }
 
     fn all() -> Declared {
-        Declared { messages_read: true, files_read: true, git_read: true, network: None }
+        Declared { messages_read: true, files_read: true, git_read: true, network: None, ..Default::default() }
     }
 
     #[test]

@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// matching a stray leftover directory from an earlier broken run instead
 /// of erroring outright). USERPROFILE is Windows' own always-set
 /// equivalent, set by the OS itself regardless of what launched the process.
-fn home_dir_string() -> Option<String> {
+pub(crate) fn home_dir_string() -> Option<String> {
     std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())
 }
 
@@ -786,6 +786,8 @@ pub struct AgentType {
     /// prompt is passed positionally (claude-code). Mirrors the prompt half
     /// of scripts/lib/boot-command.sh's agmsg_role_cli_args.
     pub prompt_arg: Option<String>,
+    /// The flag that carries a model name (manifest `model_arg=`), when the CLI takes one.
+    pub model_arg: Option<String>,
 }
 
 /// Read one key from a type.conf manifest (read-only key=value data, never
@@ -887,7 +889,8 @@ pub fn agmsg_spawnable_types() -> Result<Vec<AgentType>, String> {
             let options = spawn_options_tokens(&name);
             let cmd_prefix = manifest_get(&conf, "cmd_prefix");
             let prompt_arg = manifest_get(&conf, "prompt_arg");
-            types.push(AgentType { name, cli, options, cmd_prefix, prompt_arg });
+            let model_arg = manifest_get(&conf, "model_arg").filter(|m| !m.is_empty());
+            types.push(AgentType { name, cli, options, cmd_prefix, prompt_arg, model_arg });
         }
     }
     types.sort_by(|a, b| a.name.cmp(&b.name));

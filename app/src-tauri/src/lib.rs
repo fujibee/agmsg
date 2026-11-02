@@ -645,6 +645,11 @@ pub fn run() {
             }
             // Start the agmsg DB watcher so the team room updates live.
             agmsg::start_watcher(app.handle().clone());
+            // Members and agents add-ons made before the app last stopped: settle what a crash left half done.
+            {
+                let mgr = addons::agents::init_global(app.handle().clone());
+                std::thread::spawn(move || mgr.recover());
+            }
             app.state::<PtyManager>().start_detection_tick(app.handle().clone());
             // Quiet startup check — only surfaces a dialog when an update is
             // actually available (see check_for_updates's user_initiated flag).
@@ -673,6 +678,9 @@ pub fn run() {
             addons::commands::addon_pane_remove,
             addons::commands::addon_pane_loaded,
             addons::commands::addon_grant_team,
+            addons::commands::addon_set_power,
+            addons::agents::addon_members_state,
+            addons::agents::addon_agent_reopen,
             addons::commands::addon_revoke_team,
             addons::commands::addon_grant_root,
             addons::commands::addon_resolve_folder,

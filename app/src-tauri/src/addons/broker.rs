@@ -35,6 +35,33 @@ pub fn need_for(op: &str) -> Option<Need> {
     }
 }
 
+/// The ops that act on a team (`team:join`, `messages:send`, `agents:spawn`). They run through
+/// `handle_power`, which has the manager; `need_for` does not know them.
+pub fn power_need(op: &str) -> Option<Need> {
+    match op {
+        "team.join" => Some(Need::Join),
+        "messages.send" => Some(Need::Send),
+        "agents.types" | "agents.spawn" | "agents.list" => Some(Need::Spawn),
+        _ => None,
+    }
+}
+
+/// Runs one team op. The grant is checked once at the start (that is the point after which the op runs to the
+/// end); the answer is dropped only if the pane was closed or reloaded meanwhile, not because a power was
+/// revoked after the effect happened.
+pub fn handle_power(reg: &std::sync::Mutex<Registry>, deny: &Denylist, mgr: &super::agents::Manager, id: u64, generation: u64, op: &str, args: &Value) -> Res {
+    let need = power_need(op).ok_or_else(|| BrokerError::new("bad_args", format!("unknown op `{op}`")))?;
+    let (auth, _slot) = {
+        let r = reg.lock().unwrap();
+        let auth = r.authorize(id, generation, need)?;
+        let slot = r.slot(id).ok_or_else(|| BrokerError::new("not_available", "too many requests are waiting"))?;
+        (auth, slot)
+    };
+    let out = mgr.run(&auth, deny, op, args);
+    reg.lock().unwrap().authorize(id, generation, Need::Current)?;
+    out
+}
+
 /// Runs one request. `reg` is locked only while authorizing and while checking
 /// again before the answer is returned; the op itself runs unlocked.
 pub fn handle(reg: &std::sync::Mutex<Registry>, deny: &Denylist, id: u64, generation: u64, op: &str, args: &Value) -> Res {
@@ -95,6 +122,18 @@ fn run(a: &Authorized, deny: &Denylist, git: &dyn Fn() -> &'static GitSupport, o
         "git.status" | "git.log" | "git.diff" | "git.show" => git_op(git(), a, deny, op, args),
         _ => Err(BrokerError::new("bad_args", "unknown op")),
     }
+}
+
+/// A folder inside the granted one, for the working folder of an agent: the same resolution `fs.*` uses
+/// (relative form, canonicalize, root containment, the denylist), and it must already be a directory.
+pub fn resolve_dir(a: &Authorized, deny: &Denylist, folder: &str) -> Result<PathBuf, BrokerError> {
+    let pane_deny = if a.network { std::borrow::Cow::Owned(deny.with_env_files()) } else { std::borrow::Cow::Borrowed(deny) };
+    let (real, _) = resolve(a, &pane_deny, &json!({ "path": folder }))?;
+    let md = fs::metadata(&real).map_err(io_err)?;
+    if !md.is_dir() {
+        return Err(BrokerError::new("bad_args", "`folder` is not a folder"));
+    }
+    Ok(real)
 }
 
 fn arg_path(args: &Value) -> Result<String, BrokerError> {

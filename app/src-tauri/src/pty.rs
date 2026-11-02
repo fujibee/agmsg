@@ -149,6 +149,8 @@ pub fn pty_spawn(
     cwd: Option<String>,
     rows: Option<u16>,
     cols: Option<u16>,
+    // The journal entry of an agent an add-on started (the window passes the key it was told in the open event).
+    agent_key: Option<String>,
 ) -> Result<(), String> {
     let pty_system = portable_pty::native_pty_system();
     let size = PtySize {
@@ -212,6 +214,7 @@ pub fn pty_spawn(
         .to_ascii_lowercase();
     let detection = Arc::new(Mutex::new(DetectionTracker::new(agent_type)));
 
+    let exit_key = agent_key.clone();
     // Reader thread: stream output to the webview.
     {
         let app = app.clone();
@@ -232,6 +235,11 @@ pub fn pty_spawn(
             }
             // Reap the child and notify the webview the pane is gone.
             let _ = child.wait();
+            if let Some(key) = &exit_key {
+                if let Some(m) = crate::addons::agents::global() {
+                    m.pty_ended(key);
+                }
+            }
             let _ = app.emit("pty-exit", ExitEvent { id: id.clone() });
         });
     }
@@ -240,6 +248,11 @@ pub fn pty_spawn(
         id,
         PtySession { master: pair.master, writer, pid, tail, detection },
     );
+    if let (Some(key), Some(pid)) = (&agent_key, pid) {
+        if let Some(m) = crate::addons::agents::global() {
+            m.pty_started(key, pid);
+        }
+    }
     Ok(())
 }
 
