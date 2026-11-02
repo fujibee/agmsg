@@ -498,6 +498,30 @@
       "problems_one": "{{count}} problème",
       "problems_many": "{{count}} problèmes",
       "problems_other": "{{count}} problèmes"
+    },
+    "agents": {
+      "title": "Membres et agents des modules",
+      "refresh": "Actualiser",
+      "none": "Aucun module n'a rejoint une équipe ni démarré d'agent.",
+      "kind": {
+        "member": "membre",
+        "agent": "agent"
+      },
+      "state": {
+        "claimed": "adhésion",
+        "joined": "rejoint",
+        "opening": "démarrage",
+        "running": "en cours",
+        "failed": "échec",
+        "orphaned": "tourne peut-être encore",
+        "unknown": "a peut-être démarré"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "Il a continué de tourner après l'arrêt de l'app. agmsg ne démarrera pas une autre copie avant votre choix.",
+      "unknownHelp": "L'app s'est arrêtée pendant le démarrage ; on ignore s'il tourne. agmsg ne démarrera pas une autre copie avant votre choix.",
+      "openNew": "Ouvrir un nouveau",
+      "leave": "Laisser",
+      "open": "Ouvrir"
     }
   }
 }

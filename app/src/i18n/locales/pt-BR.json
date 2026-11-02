@@ -498,6 +498,30 @@
       "problems_one": "{{count}} problema",
       "problems_many": "{{count}} problemas",
       "problems_other": "{{count}} problemas"
+    },
+    "agents": {
+      "title": "Membros e agentes de complementos",
+      "refresh": "Atualizar",
+      "none": "Nenhum complemento entrou em uma equipe nem iniciou um agente.",
+      "kind": {
+        "member": "membro",
+        "agent": "agente"
+      },
+      "state": {
+        "claimed": "entrando",
+        "joined": "entrou",
+        "opening": "iniciando",
+        "running": "em execução",
+        "failed": "falhou",
+        "orphaned": "pode ainda estar em execução",
+        "unknown": "pode ter iniciado"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "Continuou em execução depois que o app parou. O agmsg não iniciará outra cópia até você escolher.",
+      "unknownHelp": "O app parou enquanto o iniciava, então não se sabe se está em execução. O agmsg não iniciará outra cópia até você escolher.",
+      "openNew": "Abrir novo",
+      "leave": "Deixar",
+      "open": "Abrir"
     }
   }
 }

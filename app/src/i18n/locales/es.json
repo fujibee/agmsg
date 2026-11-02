@@ -498,6 +498,30 @@
       "problems_one": "{{count}} problema",
       "problems_many": "{{count}} problemas",
       "problems_other": "{{count}} problemas"
+    },
+    "agents": {
+      "title": "Miembros y agentes de complementos",
+      "refresh": "Actualizar",
+      "none": "Ningún complemento se ha unido a un equipo ni ha iniciado un agente.",
+      "kind": {
+        "member": "miembro",
+        "agent": "agente"
+      },
+      "state": {
+        "claimed": "uniéndose",
+        "joined": "unido",
+        "opening": "iniciando",
+        "running": "en ejecución",
+        "failed": "falló",
+        "orphaned": "puede seguir en ejecución",
+        "unknown": "puede haberse iniciado"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "Siguió en ejecución después de que la app se detuviera. agmsg no iniciará otra copia hasta que elijas.",
+      "unknownHelp": "La app se detuvo mientras lo iniciaba, así que no se sabe si se está ejecutando. agmsg no iniciará otra copia hasta que elijas.",
+      "openNew": "Abrir uno nuevo",
+      "leave": "Dejarlo",
+      "open": "Abrir"
     }
   }
 }

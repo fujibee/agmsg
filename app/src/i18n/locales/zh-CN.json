@@ -492,6 +492,30 @@
     "intro": "附加组件会为应用添加面板。它们只能读取你允许的内容，你可以随时在这里收回。",
     "group": {
       "problems_other": "{{count}} 个问题"
+    },
+    "agents": {
+      "title": "加载项创建的成员和代理",
+      "refresh": "刷新",
+      "none": "没有加载项加入团队或启动代理。",
+      "kind": {
+        "member": "成员",
+        "agent": "代理"
+      },
+      "state": {
+        "claimed": "正在加入",
+        "joined": "已加入",
+        "opening": "正在启动",
+        "running": "运行中",
+        "failed": "失败",
+        "orphaned": "可能仍在运行",
+        "unknown": "可能已启动"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "应用停止后它仍在运行。在你选择之前，agmsg 不会再启动另一个副本。",
+      "unknownHelp": "启动时应用停止了，不知道它是否在运行。在你选择之前，agmsg 不会再启动另一个副本。",
+      "openNew": "打开新的",
+      "leave": "保持现状",
+      "open": "打开"
     }
   }
 }

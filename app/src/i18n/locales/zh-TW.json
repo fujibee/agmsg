@@ -492,6 +492,30 @@
     "intro": "附加元件會為應用程式新增面板。它們只能讀取你允許的內容，你可以隨時在這裡收回。",
     "group": {
       "problems_other": "{{count}} 個問題"
+    },
+    "agents": {
+      "title": "附加元件建立的成員和代理",
+      "refresh": "重新整理",
+      "none": "沒有附加元件加入團隊或啟動代理。",
+      "kind": {
+        "member": "成員",
+        "agent": "代理"
+      },
+      "state": {
+        "claimed": "正在加入",
+        "joined": "已加入",
+        "opening": "正在啟動",
+        "running": "執行中",
+        "failed": "失敗",
+        "orphaned": "可能仍在執行",
+        "unknown": "可能已啟動"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "應用程式停止後它仍在執行。在你選擇之前，agmsg 不會再啟動另一個副本。",
+      "unknownHelp": "啟動時應用程式停止了，不知道它是否在執行。在你選擇之前，agmsg 不會再啟動另一個副本。",
+      "openNew": "開啟新的",
+      "leave": "保持原狀",
+      "open": "開啟"
     }
   }
 }
