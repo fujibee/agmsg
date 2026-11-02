@@ -49,7 +49,8 @@ export type ErrorCode =
   | "too_large"
   | "not_found"
   | "bad_args"
-  | "not_available";
+  | "not_available"
+  | "conflict";
 
 /** fs.list result. `truncated` is true when the folder has more than the broker's cap of entries. */
 export interface FsList {
@@ -192,3 +193,85 @@ export interface GitLog {
 
 /** git.show(rev, path): a file at a revision. Same shape as fs.read, always the whole file (at most 10 MB). */
 export type GitShowResult = FsReadResult;
+
+// ---- Agent powers (permissions team:join, messages:send, agents:spawn) ----------
+//
+// The team, the sender and everything about the process (executable, CLI options,
+// permission mode, boot prompt) are decided by the app from the pane's identity and
+// grants. Frame arguments carry only the fields named below; anything else is ignored.
+// messages:send and agents:spawn need team:join. Each op answers `not_declared` /
+// `not_granted` like the others.
+
+/** team.join: no arguments. Joins the add-on to the granted team as an `app-addon` member, once. */
+export interface TeamJoinResult {
+  /** The member name, as it appears in the team. */
+  name: string;
+  type: "app-addon";
+  /** false when the add-on was already a member (a retry, a reload, another pane of the same add-on). */
+  created: boolean;
+}
+
+/** messages.send: one message from the add-on's member. Not de-duplicated: a retried send is a second message. */
+export interface SendRequest {
+  /** A member name of the granted team, or "all". */
+  to: string;
+  body: string;
+}
+
+export interface SendResult {
+  to: string;
+}
+
+/** agents.types: the CLI types the app can start. */
+export interface SpawnableType {
+  type: string;
+  /** The type accepts a `model` in agents.spawn. */
+  models: boolean;
+}
+
+export interface AgentTypes {
+  types: SpawnableType[];
+}
+
+/** agents.spawn */
+export interface SpawnRequest {
+  type: string;
+  /** The wanted member name. A taken name becomes a free one (chess, chess-2, ...); see `name` in the answer. */
+  name: string;
+  /** A folder inside the folder granted with files:read, relative to it. Omitted: ~/agmsg-agents/<name>. */
+  folder?: string;
+  /** Passed to the type's model option after validation. Omitted: the type's default. */
+  model?: string;
+}
+
+/**
+ * Where an agent this add-on started stands.
+ *  - joined:   a team member, no terminal pane open (yet)
+ *  - opening:  the terminal pane is being started
+ *  - running:  the pane is open; `pid` is the CLI's process id
+ *  - failed:   see `reason`
+ *  - orphaned: the app restarted while it ran and the process is still alive (`pid`); the app does not reopen it
+ *  - unknown:  the app stopped while the pane was starting; the app does not reopen it until the user chooses
+ */
+export type AgentState = "joined" | "opening" | "running" | "failed" | "orphaned" | "unknown";
+
+export interface AgentEntry {
+  /** The member name actually used. */
+  name: string;
+  /** The name that was asked for, when a free one was used instead. */
+  requested?: string;
+  type: string;
+  state: AgentState;
+  /** The CLI's process id (running, orphaned). */
+  pid?: number;
+  /** Why it failed or is unknown. Plain text for the user. */
+  reason?: string;
+}
+
+/** agents.spawn answer: the entry, `state` showing how far it got. Calling again with the same name returns the entry and resumes only a `joined` one. */
+export type SpawnResult = AgentEntry;
+
+/** agents.list: every agent this add-on started in the granted team. */
+export interface AgentList {
+  agents: AgentEntry[];
+}
