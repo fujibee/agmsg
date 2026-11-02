@@ -22,7 +22,7 @@
     const card = await waitFor(() => document.querySelector(".addon-grant-card:not(.denied) .addon-card-actions button:first-child:not(:disabled)"), "the team grant card", 30000);
     card.click();
     // the frame must be current before the broker answers
-    const ask = async (op, args) => { const r = await real("addon_request", { id: 1, generation: 1, op, args }); return r; };
+    const ask = async (op, args) => { const t = Date.now(); const r = await real("addon_request", { id: 1, generation: 1, op, args }); report("POW TIME " + op + " " + (Date.now() - t) + " ms " + (r.ok ? "ok" : r.error.code)); return r; };
     for (let t = Date.now(); ; ) {
       const r = await ask("open.args", {}).catch(() => ({ ok: false }));
       if (r.ok) break;
