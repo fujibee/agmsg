@@ -228,7 +228,7 @@ fi
 # send.sh and join.sh, 5 runs each from the same Git Bash, with the number of external programs each starts
 # (counted from an xtrace of one run: command words that resolve to files; subshell forks of $(...) are not in it)
 ms_now() { date +%s%3N; }
-forks_of() { SHELLOPTS=xtrace PS4='+X ' bash "$@" 2>&1 >/dev/null | sed -n 's/^+*X \([^ ]*\).*/\1/p' | while read -r w; do [ "$(type -t "$w" 2>/dev/null)" = file ] && echo "$w"; done | wc -l | tr -d ' '; }
+forks_of() { env SHELLOPTS=xtrace PS4='+X ' bash "$@" 2>&1 >/dev/null | sed -n 's/^+*X \([^ ]*\).*/\1/p' | while read -r w; do [ "$(type -t "$w" 2>/dev/null)" = file ] && echo "$w"; done | wc -l | tr -d ' '; }
 s6() { # s6 <label> <runs> -- command...
   local label=$1 runs=$2; shift 3; local i t0 t1 all=""
   for i in $(seq 1 "$runs"); do t0=$(ms_now); "$@" > /dev/null 2>&1; t1=$(ms_now); all="$all $((t1 - t0))"; done
