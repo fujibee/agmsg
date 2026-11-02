@@ -43,7 +43,9 @@
       "titleRunning": "ya está en ejecución — haga clic para enfocar",
       "titleSpawn": "iniciar en un panel PTY",
       "noTypes": "—",
-      "emptyState": "Aún no hay agentes. Use el botón ＋ de arriba para añadir uno."
+      "emptyState": "Aún no hay agentes. Use el botón ＋ de arriba para añadir uno.",
+      "addonBadge": "complemento",
+      "titleAddon": "Un complemento, no un agente. Se gestiona en la pestaña Add-ons de los ajustes."
     },
     "user": {
       "title": "app-user en {{team}}",

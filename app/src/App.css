@@ -1742,3 +1742,9 @@ button[aria-busy="true"] { cursor: progress; }
   font-size: 11px;
   opacity: 0.75;
 }
+.member-addon-badge {
+  padding: 0 5px;
+  border: 1px solid var(--border, currentColor);
+  border-radius: 8px;
+  font-size: 10px;
+}
