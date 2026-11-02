@@ -244,7 +244,7 @@ mutex_of() { printf '%s.reclaim' "$(agmsg_self_write_lock_path "$1" "$2")"; }
   local i=0; while [ ! -s "$RUN_DIR/child-take" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i+1)); done
   [ "$(cat "$RUN_DIR/child-take")" = ok ]
   kill -9 "$child" 2>/dev/null; wait "$child" 2>/dev/null || true
-  ! kill -0 "$child" 2>/dev/null                     # the holder is gone, nothing left behind
+  refute kill -0 "$child"                            # the holder is gone, nothing left behind
   [ -e "$mx" ]                                       # died holding it
   run agmsg_self_write_lock_acquire T alice "$tok"
   [ "$status" -eq 0 ]
