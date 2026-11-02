@@ -410,7 +410,7 @@ agmsg_terminal_resolve_by_capability() {   # <capability> [exclude, space-separa
 # for which the caller (name_self) decides "skipped" by plain's missing `name`
 # capability.
 #   $1 = session_id (may be empty)   $2 = optional override terminal name
-agmsg_terminal_resolve_name() {
+_agmsg_terminal_resolve_name_raw() {
   local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name id rc errf reason
   local reasons="" saw_present_unnamed=0 plain_present=0 plain_name=""
   errf="$(mktemp "${TMPDIR:-/tmp}/agmsg-detect.XXXXXX")" || errf=/dev/null
@@ -635,7 +635,7 @@ agmsg_terminal_epoch() {   # <terminal>
 # key controls nesting precedence without changing the resolver's global order.
 # This is the fast half of self-naming on action: a matching mark avoids a
 # terminal round trip. Drivers without this optional hook are skipped.
-agmsg_terminal_self_env() {
+_agmsg_terminal_self_env_raw() {
   local name out rc id epoch
   for name in $(agmsg_terminal_self_env_candidates); do
     rc=0; out="$(_agmsg_terminal_self_env_one "$name")" || rc=$?
@@ -1300,6 +1300,61 @@ EOF
   return 0
 }
 
+# --- Codex seats under the shared app-server daemon (#1736) -----------------
+# The two entry points below answer "which pane am I in" from the environment.
+# For a Codex seat under the shared daemon that environment is the pane that
+# STARTED the daemon, so it is replaced by the seat's own TUI environment
+# (codex-own-pane.sh) or, when that cannot be proven, not used at all. Every
+# other process (Claude Code, a Codex outside the daemon, no terminal) takes the
+# original path unchanged.
+_agmsg_codex_own_pane() {
+  if ! declare -F agmsg_codex_own_pane >/dev/null 2>&1; then
+    local d="${SKILL_DIR:-}"
+    [ -r "$d/scripts/lib/codex-own-pane.sh" ] || d="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    # shellcheck disable=SC1091
+    . "$d/scripts/lib/codex-own-pane.sh" 2>/dev/null || return 0
+  fi
+  agmsg_codex_own_pane
+}
+
+# Run "$@" with the terminal variables replaced by the KEY=VALUE lines in $1.
+_agmsg_with_terminal_env() {   # <own-pane output> <command...>
+  local own="$1" line; shift
+  (
+    unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID TMUX TMUX_PANE
+    while IFS= read -r line; do
+      case "$line" in
+        HERDR_ENV=*|HERDR_SOCKET_PATH=*|HERDR_PANE_ID=*|TMUX=*|TMUX_PANE=*) export "${line%%=*}=${line#*=}" ;;
+      esac
+    done <<ENVLINES
+${own#env}
+ENVLINES
+    "$@"
+  )
+}
+
+agmsg_terminal_resolve_name() {
+  local own
+  own="$(_agmsg_codex_own_pane)" || own=""
+  case "$own" in
+    '') _agmsg_terminal_resolve_name_raw "$@" ;;
+    unknown*)
+      echo "agmsg: this Codex seat runs under the shared app-server daemon, whose environment names another seat's pane, and its own pane could not be proven (${own#unknown$'\t'}) — nothing was written for it" >&2
+      return 1 ;;
+    *) _agmsg_with_terminal_env "$own" _agmsg_terminal_resolve_name_raw "$@" ;;
+  esac
+}
+
+agmsg_terminal_self_env() {
+  local own
+  own="$(_agmsg_codex_own_pane)" || own=""
+  case "$own" in
+    '') _agmsg_terminal_self_env_raw "$@" ;;
+    unknown*) printf 'unknown:codex:shared_daemon_pane_unproven:%s\n' "${own#unknown$'\t'}" ;;
+    *) _agmsg_with_terminal_env "$own" _agmsg_terminal_self_env_raw "$@" ;;
+  esac
+}
+
 agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
   local write_record="${6:-}" retire="${7:-}" instance="${8:-}"
@@ -1346,7 +1401,9 @@ agmsg_terminal_name_self() {
   # #1112: the label first, when it settles the question. Falls through silently
   # when it does not -- zero matches is the ordinary state before anything has
   # named this seat, and more than one means the label is not identifying here.
-  if [ -z "$_excl" ]; then
+  # A Codex seat under the shared daemon skips it too: the labels written there
+  # were derived from the daemon starter's pane and are not evidence (#1736).
+  if [ -z "$_excl" ] && [ -z "$(_agmsg_codex_own_pane 2>/dev/null)" ]; then
     resolved="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || resolved=""
   fi
   if [ -n "$resolved" ]; then
