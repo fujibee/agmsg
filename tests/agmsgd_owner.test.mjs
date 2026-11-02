@@ -14,7 +14,7 @@ import {
   stopNormally,
   takeOwnership,
 } from "../scripts/daemon/owner.mjs";
-import { bootId } from "../scripts/daemon/executor.mjs";
+import { bootId, isAlive } from "../scripts/daemon/executor.mjs";
 
 function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), "agmsgd-owner-test-"));
@@ -111,6 +111,36 @@ test("takeOwnership takes over when the recorded owner is confirmed dead", () =>
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+for (const missingExecutor of [false, true]) {
+  test(`takeOwnership replaces an ${missingExecutor ? "unrecorded" : "undeterminable"} executor`, () => {
+    const { dir, db } = freshDb();
+    try {
+      const options = { installRoot: dir, expectedDesired: null, expectedOpGen: 0, version: "test" };
+      const first = takeOwnership(db, options);
+      markReady(db, first.gen);
+      // Force an indeterminate probe on every platform, without a real daemon.
+      const originalKill = process.kill;
+      try {
+        process.kill = () => { throw Object.assign(new Error("probe unavailable"), { code: "ENOSYS" }); };
+        if (missingExecutor) db.exec("UPDATE daemon_owner SET executor_pid = NULL");
+        else assert.equal(isAlive({ pid: process.pid, bootId: bootId() }), null);
+        const second = takeOwnership(db, options);
+        assert.equal(second.ok, true);
+        assert.equal(second.gen, first.gen + 1);
+        assert.notEqual(second.socket, first.socket);
+        assert.equal(stopNormally(db, first.gen), false, "old gen cannot clear the new owner");
+        assert.equal(markReady(db, second.gen), true);
+        assert.equal(readOwner(db).gen, second.gen);
+      } finally {
+        process.kill = originalKill;
+      }
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("takeOwnership refuses when the intent changed since the launcher observed it", () => {
   const { dir, db } = freshDb();

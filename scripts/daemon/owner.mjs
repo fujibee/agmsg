@@ -36,7 +36,7 @@ export function controlSocketPath(installRoot, gen, installId, platform = proces
 }
 
 // Read daemon_owner, and if the current owner is
-// state='none' or confirmed dead, take the next gen and move to
+// state='none' or not positively alive, take the next gen and move to
 // 'starting' -- ALSO requiring, in the same read, that daemon_intent still
 // matches what the caller (the launcher) already observed. Returns
 // `{ok: true, gen, socket}` for the caller to go bind, or
@@ -54,18 +54,12 @@ export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen,
     }
 
     const owner = readOwner(db);
-    let refuse = null;
-    if (owner.state !== "none") {
-      if (owner.executor_pid == null) {
-        refuse = "owner state is not none but has no recorded executor";
-      } else {
-        const alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id });
-        if (alive === true) refuse = "current owner is alive";
-        else if (alive === null) refuse = "current owner's liveness cannot be determined; if agmsgd is not running, run agmsg daemon disable and then agmsg daemon enable";
-        // alive === false (confirmed dead): fall through, this call takes over.
-      }
+    if (owner.state !== "none" && owner.executor_pid != null) {
+      const alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id });
+      if (alive === true) return { ok: false, reason: "current owner is alive" };
     }
-    if (refuse) return { ok: false, reason: refuse };
+    // Missing, dead, or undeterminable executors do not block startup.
+    // Advancing gen fences older lifecycle writes, not their delivery work.
 
     const gen = owner.gen + 1;
     const executor = currentExecutor();
