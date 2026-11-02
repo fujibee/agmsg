@@ -191,7 +191,7 @@ _reap_test_skill_dir_procs() {
       # it as a pattern: a pattern assembled from an empty prefix ("${TMPDIR:+…}" with
       # TMPDIR unset, or "${TMPDIR%/}" with TMPDIR="/") degenerates to match ANY non-empty
       # dir. This guards a KILL, so the loose failure kills EXTRA processes, not nothing
-      # (co2 BLOCKING). Strip the trailing slash first, then require the result non-empty,
+      # (review finding). Strip the trailing slash first, then require the result non-empty,
       # so unset / "" / "/" all fail closed. Only then is "$_tmp" safe as a pattern prefix.
       local _tmp="${TMPDIR:-}"; _tmp="${_tmp%/}"
       [ -n "$_tmp" ] || return 0

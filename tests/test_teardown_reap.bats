@@ -105,8 +105,8 @@ _wait_for_holder_ready() {
   kill "$other" 2>/dev/null || true
 }
 
-@test "teardown reaper fails closed on a NON-temp TEST_SKILL_DIR for a degenerate TMPDIR: unset / empty / root (#662, co2 BLOCKING)" {
-  # utildev measured that ubuntu-latest's `mktemp -d` uses /tmp with TMPDIR UNSET, so a
+@test "teardown reaper fails closed on a NON-temp TEST_SKILL_DIR for a degenerate TMPDIR: unset / empty / root (#662)" {
+  # Measured: ubuntu-latest's `mktemp -d` uses /tmp with TMPDIR UNSET, so a
   # guard pattern assembled from $TMPDIR degenerates to ?* there and would turn this KILL
   # loose on CI Linux. Prove fail-closed: with a NON-temp TEST_SKILL_DIR and TMPDIR unset,
   # "", or "/", a probe whose argv carries that dir must SURVIVE. A bare `sleep` cannot

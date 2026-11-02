@@ -1952,7 +1952,7 @@ EOF
 # ships, but whose installed copy a user (or their agent) had edited, is
 # backed up with THAT edited content before being overwritten; user data
 # (ext-tools config + secret, db/, teams/) survives byte-for-byte; the
-# newline-in-filename escape onto a real ext-tools secret (co1's review of
+# newline-in-filename escape onto a real ext-tools secret (a review of
 # the first version of this prune) stays closed; and a second --update
 # clears the first generation's .trash/ before writing its own.
 @test "install --update: moves removed/overwritten scripts/ files to .trash/ (one generation), never touches user data, and closes the newline escape" {
@@ -1982,7 +1982,7 @@ EOF
   printf '%s\n' 'team config' > "$SK/teams/myteam/config.json"
   printf '%s\n' 'sqlite bytes, not really' > "$SK/db/agmsg.sqlite3"
 
-  # co1's finding on the first version: `find | while read` split on
+  # A review finding on the first version: `find | while read` split on
   # newline lets an embedded newline forge a fake second "line". A real
   # entry at scripts/<LF>../ext-tools/myteam/mytool.secret (one directory
   # named the four bytes x, LF, ., .) prints as one find record but reads
