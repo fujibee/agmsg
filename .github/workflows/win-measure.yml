@@ -6,7 +6,7 @@ name: win-measure
 
 on:
   push:
-    branches: [addon-win-measure]
+    branches: [addon-win-measure, addon-powers-measure]
 
 permissions:
   contents: read
@@ -85,6 +85,10 @@ jobs:
           mkdir -p out/win-measure
           cp -R app/src-tauri/m1/win-measure out/win-measure/win-measure
           cp -R app/src-tauri/resources/agmsg-core out/win-measure/core
+          # The pinned core predates the app-addon member type (core PR, not yet released): lay it in from this checkout.
+          mkdir -p out/win-measure/core/scripts/drivers/types
+          cp -R scripts/drivers/types/app-addon out/win-measure/core/scripts/drivers/types/app-addon
+          test -f out/win-measure/core/scripts/drivers/types/app-addon/type.conf
           {
             echo "## win-measure build"
             echo '```'
