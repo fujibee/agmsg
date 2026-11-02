@@ -43,7 +43,9 @@
       "titleRunning": "läuft bereits — klicken zum Fokussieren",
       "titleSpawn": "in einem PTY-Bereich starten",
       "noTypes": "—",
-      "emptyState": "Noch keine Agenten. Mit der ＋-Schaltfläche oben einen hinzufügen."
+      "emptyState": "Noch keine Agenten. Mit der ＋-Schaltfläche oben einen hinzufügen.",
+      "addonBadge": "Add-on",
+      "titleAddon": "Ein Add-on, kein Agent. Verwaltung in den Einstellungen unter Add-ons."
     },
     "user": {
       "title": "app-user in {{team}}",

@@ -43,7 +43,9 @@
       "titleRunning": "実行中 — クリックしてフォーカス",
       "titleSpawn": "PTYペインで起動",
       "noTypes": "—",
-      "emptyState": "エージェントはまだありません。上の＋ボタンから追加してください。"
+      "emptyState": "エージェントはまだありません。上の＋ボタンから追加してください。",
+      "addonBadge": "アドオン",
+      "titleAddon": "アドオンです(エージェントではありません)。設定 → アドオンで管理します。"
     },
     "user": {
       "title": "{{team}} のapp-user",

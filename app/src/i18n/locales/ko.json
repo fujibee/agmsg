@@ -43,7 +43,9 @@
       "titleRunning": "실행 중 — 클릭하면 포커스",
       "titleSpawn": "PTY 창에서 실행",
       "noTypes": "—",
-      "emptyState": "아직 에이전트가 없습니다. 위의 ＋ 버튼을 사용해 추가하세요."
+      "emptyState": "아직 에이전트가 없습니다. 위의 ＋ 버튼을 사용해 추가하세요.",
+      "addonBadge": "애드온",
+      "titleAddon": "에이전트가 아닌 애드온입니다. 설정의 Add-ons 탭에서 관리합니다."
     },
     "user": {
       "title": "{{team}}의 app-user",

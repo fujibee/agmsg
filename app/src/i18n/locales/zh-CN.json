@@ -43,7 +43,9 @@
       "titleRunning": "已在运行 — 点击以聚焦",
       "titleSpawn": "在 PTY 面板中启动",
       "noTypes": "—",
-      "emptyState": "暂无智能体。使用上方的 ＋ 按钮添加。"
+      "emptyState": "暂无智能体。使用上方的 ＋ 按钮添加。",
+      "addonBadge": "加载项",
+      "titleAddon": "这是加载项，不是代理。请在设置的 Add-ons 标签页中管理。"
     },
     "user": {
       "title": "{{team}} 中的 app-user",

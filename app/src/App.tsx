@@ -14,6 +14,7 @@ import {
   Users,
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
+import { isAddonMember } from "./addons/addonMember";
 import { AddonPaneHost } from "./addons/AddonPaneHost";
 import type { AddonPaneRef } from "./addons/types";
 import { NewMenu, type NewMenuVariant } from "./NewMenu";
@@ -2525,6 +2526,7 @@ export default function App() {
                       ),
                   );
                   const status = pane ? (paneStatus[pane.id]?.state ?? "unknown") : null;
+                  const addonMember = isAddonMember(m);
                   return (
                     <li
                       key={m.name}
@@ -2559,16 +2561,25 @@ export default function App() {
                       )}
                       <button
                         className="member"
-                        onClick={() => spawnMember(m, spawnTargetWindowId(windows, active, team))}
+                        onClick={() => {
+                          // An add-on is not an agent: there is no CLI to start for it.
+                          if (!addonMember) spawnMember(m, spawnTargetWindowId(windows, active, team));
+                        }}
                         title={
-                          pane
-                            ? t("sidebar.member.titleRunning")
-                            : t("sidebar.member.titleSpawn")
+                          addonMember
+                            ? t("sidebar.member.titleAddon")
+                            : pane
+                              ? t("sidebar.member.titleRunning")
+                              : t("sidebar.member.titleSpawn")
                         }
                       >
                         <span className="member-name">{m.name}</span>
                         <span className="member-types">
-                          {m.types.join(", ") || t("sidebar.member.noTypes")}
+                          {addonMember ? (
+                            <span className="member-addon-badge">{t("sidebar.member.addonBadge")}</span>
+                          ) : (
+                            m.types.join(", ") || t("sidebar.member.noTypes")
+                          )}
                         </span>
                       </button>
                     </li>

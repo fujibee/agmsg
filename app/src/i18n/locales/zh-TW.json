@@ -43,7 +43,9 @@
       "titleRunning": "已在執行中 — 點選以切換至該面板",
       "titleSpawn": "在 PTY 面板中啟動",
       "noTypes": "—",
-      "emptyState": "尚無代理。請使用上方的「＋」按鈕新增。"
+      "emptyState": "尚無代理。請使用上方的「＋」按鈕新增。",
+      "addonBadge": "附加元件",
+      "titleAddon": "這是附加元件，不是代理。請在設定的 Add-ons 分頁中管理。"
     },
     "user": {
       "title": "{{team}} 的 app-user",

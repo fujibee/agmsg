@@ -1736,3 +1736,9 @@ body.resizing-row {
 button[aria-busy="true"] { cursor: progress; }
 .addon-frame-wrap { position: relative; width: 100%; height: 100%; }
 .addon-frame-loading { position: absolute; inset: 0; pointer-events: none; background: var(--bg); }
+.member-addon-badge {
+  padding: 0 5px;
+  border: 1px solid var(--border, currentColor);
+  border-radius: 8px;
+  font-size: 10px;
+}

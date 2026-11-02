@@ -53,7 +53,9 @@
       "titleRunning": "already running — click to focus",
       "titleSpawn": "spawn in a PTY pane",
       "noTypes": "—",
-      "emptyState": "No agents yet. Use the + button above to add one."
+      "emptyState": "No agents yet. Use the + button above to add one.",
+      "addonBadge": "add-on",
+      "titleAddon": "An add-on, not an agent. Manage it in Settings → Add-ons."
     },
     "user": {
       "title": "app-user in {{team}}",
