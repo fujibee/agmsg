@@ -485,11 +485,9 @@ impl Manager {
             return Err(BrokerError::new("bad_args", "`to` and `body` must not be empty"));
         }
         let me = self.member_of(&a.addon, tid).ok_or_else(|| BrokerError::new("not_granted", "the add-on has not joined the team (call team.join first)"))?;
-        if to != "all" {
-            let ms = self.world.members(team).map_err(|e| BrokerError::new("not_available", e))?;
-            if !ms.iter().any(|m| m.name == to) {
-                return Err(BrokerError::new("bad_args", format!("{to} is not a member of the team")));
-            }
+        let ms = self.world.members(team).map_err(|e| BrokerError::new("not_available", e))?;
+        if !ms.iter().any(|m| m.name == to) {
+            return Err(BrokerError::new("bad_args", format!("{to} is not a member of the team")));
         }
         self.world.send(team, &me.name, &to, &body).map_err(|e| BrokerError::new("not_available", e))?;
         Ok(json!({ "to": to }))
@@ -613,7 +611,8 @@ impl Manager {
             return Err(BrokerError::new("not_available", format!("{} joined the team but its terminal did not open: {why}", e.name)));
         }
         // The window answers through `pty_started` or `open_failed`. No entry stays `opening` after this returns:
-        // silence is recorded as a failure (a late `pty_started` still moves it to `running`).
+        // silence means the process may still start, so the entry is `unknown` and the user decides (koit Q7); a
+        // late `pty_started` moves it to `running`.
         let deadline = std::time::Instant::now() + self.open_wait;
         loop {
             match self.by_key(key) {
@@ -622,7 +621,7 @@ impl Manager {
             }
         }
         if self.by_key(key).is_some_and(|c| c.state == State::Opening) {
-            self.set_state(key, State::Failed, Some(format!("The terminal for {} did not report within {} s.", e.name, self.open_wait.as_secs())))?;
+            self.set_state(key, State::Unknown, Some(format!("The terminal for {} did not report within {} s; it may still start.", e.name, self.open_wait.as_secs())))?;
         }
         Ok(summary(&self.by_key(key).expect("entry exists")))
     }
@@ -1007,7 +1006,7 @@ mod tests {
         let r = call(&f, "messages.send", json!({"to": "lead", "body": "hi", "from": "lead", "team": "other", "sender": "lead"})).unwrap();
         assert_eq!(r["to"], "lead");
         assert_eq!(*f.world.sent.lock().unwrap(), vec![("t".to_string(), "chess".to_string(), "lead".to_string(), "hi".to_string())]);
-        call(&f, "messages.send", json!({"to": "all", "body": "hello"})).unwrap();
+        assert_eq!(code(call(&f, "messages.send", json!({"to": "all", "body": "hello"}))), "bad_args", "core has no broadcast");
         assert_eq!(code(call(&f, "messages.send", json!({"to": "nobody", "body": "x"}))), "bad_args");
         assert_eq!(code(call(&f, "messages.send", json!({"to": "lead", "body": ""}))), "bad_args");
         assert_eq!(code(call(&f, "messages.send", json!({"to": 3, "body": "x"}))), "bad_args");
@@ -1015,7 +1014,7 @@ mod tests {
         for _ in 0..20 {
             call(&f, "messages.send", json!({"to": "lead", "body": "again"})).unwrap();
         }
-        assert_eq!(f.world.sent.lock().unwrap().len(), 22);
+        assert_eq!(f.world.sent.lock().unwrap().len(), 21);
     }
 
     #[test]
@@ -1302,10 +1301,16 @@ mod tests {
         let g = fx(all_powers());
         *g.world.on_open.lock().unwrap() = None;
         let r = call(&g, "agents.spawn", json!({"type": "claude-code", "name": "black"})).unwrap();
-        assert_eq!(r["state"], "failed");
+        assert_eq!(r["state"], "unknown", "may be running: not failed, not reopened by itself");
         assert!(r["reason"].as_str().unwrap().contains("did not report"), "{r}");
+        // a terminal that starts late is the agent: unknown becomes running with its pid
+        let key = g.mgr.all_entries()[0].key.clone();
+        g.mgr.pty_started(&key, 555);
+        assert_eq!(g.mgr.all_entries()[0].state, State::Running);
+        assert_eq!(g.mgr.all_entries()[0].pid, Some(555));
+        g.mgr.pty_ended(&key);
         assert!(g.mgr.all_entries().iter().all(|e| e.state != State::Opening));
-        // the user can open a failed agent again from the settings
+        // the user can open an agent again from the settings
         *g.world.on_open.lock().unwrap() = Some(Box::new({
             let m = g.mgr.clone();
             move |req: &OpenPane| {
@@ -1315,5 +1320,99 @@ mod tests {
         }));
         let key = g.mgr.all_entries()[0].key.clone();
         assert_eq!(g.mgr.reopen(&key).unwrap()["state"], "running");
+    }
+
+    /// The real agmsg scripts on a throwaway base (AGMSG_APP_BASE seeded with the scripts of a core that has the
+    /// `app-addon` type), the real process table, a fake window. Run by hand:
+    /// `AGMSG_APP_BASE=... AGMSG_REAL_TEAM=... cargo test real_scripts -- --ignored --nocapture`.
+    /// Prints the time of each op.
+    struct Real {
+        inner: RealWorld,
+        root: PathBuf,
+        home: PathBuf,
+        opened: Mutex<Vec<OpenPane>>,
+    }
+    impl World for Real {
+        fn members(&self, t: &str) -> Result<Vec<MemberInfo>, String> {
+            self.inner.members(t)
+        }
+        fn team_id(&self, t: &str) -> Option<String> {
+            self.inner.team_id(t)
+        }
+        fn team_name(&self, id: &str) -> Option<String> {
+            self.inner.team_name(id)
+        }
+        fn join(&self, t: &str, n: &str, ty: &str, p: &str) -> Result<(), String> {
+            self.inner.join(t, n, ty, p)
+        }
+        fn send(&self, t: &str, f: &str, to: &str, b: &str) -> Result<(), String> {
+            self.inner.send(t, f, to, b)
+        }
+        fn spawnable(&self) -> Result<Vec<SpawnType>, String> {
+            self.inner.spawnable()
+        }
+        fn process_start(&self, pid: u32) -> Option<String> {
+            self.inner.process_start(pid)
+        }
+        fn open_pane(&self, req: &OpenPane) -> Result<(), String> {
+            self.opened.lock().unwrap().push(req.clone());
+            Ok(())
+        }
+        fn members_root(&self) -> PathBuf {
+            self.root.clone()
+        }
+        fn agents_home(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn real_scripts_roundtrip() {
+        let team = std::env::var("AGMSG_REAL_TEAM").expect("AGMSG_REAL_TEAM names a throwaway team");
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let w = Arc::new(Real { inner: RealWorld { app: Mutex::new(None) }, root: base.join("members"), home: base.join("agmsg-agents"), opened: Mutex::new(vec![]) });
+        std::fs::create_dir_all(&w.home).unwrap();
+        let mut m = Manager::new(w.clone(), base.join("journal.json"));
+        m.open_wait = std::time::Duration::from_millis(100);
+        let mgr = m;
+        let mut reg = Registry::new();
+        let mut files = HashMap::new();
+        files.insert("index.html".to_string(), b"x".to_vec());
+        let id = reg
+            .add(AddPane { addon: "o/chess".into(), commit: "c".into(), name: "chess".into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared: all_powers(), open_args: OpenArgs::default(), expected_digest: None, pinned: None, on_tamper: None })
+            .unwrap()
+            .id;
+        let gen = reg.begin_generation(id).unwrap();
+        reg.grant_team(id, &team).unwrap();
+        for p in [Power::Join, Power::Send, Power::Spawn] {
+            reg.set_power(id, p, true).unwrap();
+        }
+        let reg = Mutex::new(reg);
+        let deny = Denylist::from_process_env(vec![]);
+        let run = |op: &str, args: Value| {
+            let t = std::time::Instant::now();
+            let r = crate::addons::broker::handle_power(&reg, &deny, &mgr, id, gen, op, &args);
+            println!("{op:14} {:>6} ms  {}", t.elapsed().as_millis(), match &r { Ok(v) => v.to_string(), Err(e) => format!("ERR {} {}", e.code, e.message) });
+            r
+        };
+        let types = run("agents.types", json!({})).unwrap();
+        let first = types["types"][0]["type"].as_str().unwrap().to_string();
+        let j = run("team.join", json!({})).unwrap();
+        assert_eq!(j["created"], true);
+        run("team.join", json!({})).unwrap();
+        run("messages.send", json!({"to": "app-me", "body": "hello from the add-on"})).unwrap();
+
+        assert_eq!(run("messages.send", json!({"to": "ghost", "body": "x"})).unwrap_err().code, "bad_args");
+        let s = run("agents.spawn", json!({"type": first, "name": "white"})).unwrap();
+        println!("(no window in this test, so the entry is {})", s["state"]);
+        run("agents.list", json!({})).unwrap();
+        let m = mgr.member_of("o/chess", &w.team_id(&team).unwrap()).unwrap();
+        assert_eq!(m.agent_type, MEMBER_TYPE);
+        let ms = w.members(&team).unwrap();
+        println!("{ms:?}");
+        assert!(ms.iter().any(|m| m.name == "white" && m.types == [first.clone()]));
+        assert_eq!(w.opened.lock().unwrap().len(), 1);
     }
 }

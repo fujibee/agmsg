@@ -213,7 +213,7 @@ export interface TeamJoinResult {
 
 /** messages.send: one message from the add-on's member. Not de-duplicated: a retried send is a second message. */
 export interface SendRequest {
-  /** A member name of the granted team, or "all". */
+  /** A member name of the granted team. */
   to: string;
   body: string;
 }
@@ -251,7 +251,7 @@ export interface SpawnRequest {
  *  - running:  the pane is open; `pid` is the CLI's process id
  *  - failed:   see `reason`
  *  - orphaned: the app restarted while it ran and the process is still alive (`pid`); the app does not reopen it
- *  - unknown:  the app stopped while the pane was starting; the app does not reopen it until the user chooses
+ *  - unknown:  the pane may be running or may still start (it did not report in time, or the app stopped while it was starting); the app does not reopen it until the user chooses
  */
 export type AgentState = "joined" | "opening" | "running" | "failed" | "orphaned" | "unknown";
 
