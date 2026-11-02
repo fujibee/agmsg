@@ -327,6 +327,9 @@ fi
 
 # Print a line describing each claimed team. One team per most projects but
 # the underlying model allows multi-team same-name registrations.
+# The session now has a seat: stop the per-prompt "pick your seat" reminder.
+rm -f "$SKILL_DIR/run/seat-pending.${BARE_SID//[^A-Za-z0-9._-]/_}"
+
 printf 'status=ok'
 while IFS= read -r team; do
   [ -z "$team" ] && continue
