@@ -495,6 +495,30 @@
     "group": {
       "problems_one": "{{count}} problem",
       "problems_other": "{{count}} problems"
+    },
+    "agents": {
+      "title": "Members and agents from add-ons",
+      "refresh": "Refresh",
+      "none": "No add-on has joined a team or started an agent.",
+      "kind": {
+        "member": "member",
+        "agent": "agent"
+      },
+      "state": {
+        "claimed": "joining",
+        "joined": "joined",
+        "opening": "starting",
+        "running": "running",
+        "failed": "failed",
+        "orphaned": "may still be running",
+        "unknown": "may have started"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "It kept running after the app stopped. agmsg will not start another copy until you choose.",
+      "unknownHelp": "The app stopped while starting it, so it is not known whether it is running. agmsg will not start another copy until you choose.",
+      "openNew": "Open new",
+      "leave": "Leave it",
+      "open": "Open"
     }
   }
 }

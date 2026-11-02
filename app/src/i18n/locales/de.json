@@ -495,6 +495,30 @@
     "group": {
       "problems_one": "{{count}} Problem",
       "problems_other": "{{count}} Probleme"
+    },
+    "agents": {
+      "title": "Mitglieder und Agenten von Add-ons",
+      "refresh": "Aktualisieren",
+      "none": "Kein Add-on ist einem Team beigetreten oder hat einen Agenten gestartet.",
+      "kind": {
+        "member": "Mitglied",
+        "agent": "Agent"
+      },
+      "state": {
+        "claimed": "tritt bei",
+        "joined": "beigetreten",
+        "opening": "startet",
+        "running": "läuft",
+        "failed": "fehlgeschlagen",
+        "orphaned": "läuft möglicherweise noch",
+        "unknown": "wurde möglicherweise gestartet"
+      },
+      "pid": "pid {{pid}}",
+      "orphanedHelp": "Er lief nach dem Beenden der App weiter. agmsg startet keine weitere Kopie, bis du entscheidest.",
+      "unknownHelp": "Die App wurde beim Start beendet; es ist unbekannt, ob er läuft. agmsg startet keine weitere Kopie, bis du entscheidest.",
+      "openNew": "Neu öffnen",
+      "leave": "Belassen",
+      "open": "Öffnen"
     }
   }
 }
