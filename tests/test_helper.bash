@@ -544,16 +544,9 @@ _pid_gone() {
 # Wait for a process to actually be gone. Writing a pidfile and dying are not
 # atomic, so asserting `! kill -0 $pid` the instant a pidfile disappears races
 # the TERM trap (#124).
-#
-# Three times the shared ceiling (30s by default). A stopped watch.sh whose
-# TERM trap did not run still exits, but only at the top of its next cycle
-# (its pidfile ownership guard), and the delivery tests that stop watchers run
-# them with AGMSG_WATCH_INTERVAL=10, so one cycle alone can use the whole of a
-# 10s ceiling. A process that exits promptly returns as soon as it is gone, so
-# only a real failure pays the longer wait.
 wait_for_pid_exit() {
   local pid="$1" i
-  for i in $(seq 1 $((_WAIT_TICKS * 3))); do
+  for i in $(seq 1 $_WAIT_TICKS); do
     # Reap finished children first: an unreaped zombie still answers `kill -0`,
     # so without this a process that HAS exited can keep looking alive for the
     # whole timeout. `jobs` is what makes bash collect them.
