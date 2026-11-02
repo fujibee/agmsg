@@ -55,6 +55,7 @@
     "allow-addon-set-power",
     "allow-addon-members-state",
     "allow-addon-agent-reopen",
+    "allow-addon-agent-open-failed",
     "allow-addon-grant-root",
     "allow-addon-resolve-folder",
     "allow-addon-revoke-root",

@@ -1295,12 +1295,20 @@ export default function App() {
   useEffect(() => {
     const p = listen<{ key: string; team: string; name: string; model: string | null }>("addon-agent-open", (e) => {
       const { key, team: agentTeam, name, model } = e.payload;
+      const fail = (reason: string) => void invoke("addon_agent_open_failed", { key, reason }).catch(() => {});
+      // the agent's own pane is already open (a repeated request): nothing to do, it reports its process itself
+      const open = panesRef.current.find((p) => p.label === name);
+      if (open) {
+        if (open.agentKey !== key) fail(`A pane named ${name} is already open.`);
+        return;
+      }
       void invoke<Member[]>("agmsg_members", { team: agentTeam })
         .then((ms) => {
           const m = ms.find((x) => x.name === name);
-          if (m) void spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined });
+          if (!m) return fail(`${name} is not a member of the team.`);
+          return spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined });
         })
-        .catch((err) => console.error(err));
+        .catch((err) => fail(String(err)));
     });
     return () => void p.then((unlisten) => unlisten());
   }, []);

@@ -149,6 +149,29 @@ pub fn pty_spawn(
     cwd: Option<String>,
     rows: Option<u16>,
     cols: Option<u16>,
+    agent_key: Option<String>,
+) -> Result<(), String> {
+    let key = agent_key.clone();
+    let out = pty_spawn_inner(app, manager, id, cmd, args, cwd, rows, cols, agent_key);
+    // an agent an add-on started that did not start must not stay `opening`
+    if let (Err(e), Some(key)) = (&out, &key) {
+        if let Some(m) = crate::addons::agents::global() {
+            m.open_failed(key, e);
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pty_spawn_inner(
+    app: AppHandle,
+    manager: State<'_, PtyManager>,
+    id: String,
+    cmd: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    rows: Option<u16>,
+    cols: Option<u16>,
     // The journal entry of an agent an add-on started (the window passes the key it was told in the open event).
     agent_key: Option<String>,
 ) -> Result<(), String> {

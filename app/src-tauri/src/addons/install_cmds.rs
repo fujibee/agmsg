@@ -284,7 +284,7 @@ pub fn check_save(host: &AddonHost, spec: &SaveGrantIn) -> Result<SavedGrant, Fa
     }
     let gone = || Failure { code: "pane_gone", message: "That pane is closed, so its permission was not saved.".into() };
     let v = host.panes.registry.lock().unwrap().consent_view(spec.pane_id).ok_or_else(gone)?;
-    let (addon, pane, commit, team, root) = (v.addon, v.pane, v.commit, v.team, v.root);
+    let (addon, pane, commit, team, root, powers) = (v.addon, v.pane, v.commit, v.team, v.root, v.powers);
     if addon != spec.id || pane != spec.pane {
         return Err(Failure { code: "pane_gone", message: "That pane is not this add-on's pane.".into() });
     }
@@ -303,6 +303,9 @@ pub fn check_save(host: &AddonHost, spec: &SaveGrantIn) -> Result<SavedGrant, Fa
     let held = match spec.permission.as_str() {
         "files:read" => root.as_deref() == Some(spec.scope.as_str()),
         "messages:read" => team.as_deref() == Some(spec.scope.as_str()),
+        "team:join" => powers.join && team.as_deref() == Some(spec.scope.as_str()),
+        "messages:send" => powers.send && team.as_deref() == Some(spec.scope.as_str()),
+        "agents:spawn" => powers.spawn && team.as_deref() == Some(spec.scope.as_str()),
         _ => false,
     };
     if !held {

@@ -162,6 +162,7 @@ pub struct ConsentView {
     pub commit: String,
     pub team: Option<String>,
     pub root: Option<String>,
+    pub powers: Powers,
 }
 
 pub struct Registry {
@@ -256,6 +257,9 @@ impl Registry {
             .filter(|p| match permission {
                 "files:read" => p.root.as_ref().is_some_and(|r| r.to_string_lossy() == scope),
                 "messages:read" => p.team.as_deref() == Some(scope),
+                "team:join" => p.team.as_deref() == Some(scope) && p.powers.join,
+                "messages:send" => p.team.as_deref() == Some(scope) && p.powers.send,
+                "agents:spawn" => p.team.as_deref() == Some(scope) && p.powers.spawn,
                 _ => false,
             })
             .map(|p| p.id)
@@ -266,7 +270,7 @@ impl Registry {
 
     /// What a pane instance is and holds, for binding a saved consent to it.
     pub fn consent_view(&self, id: PaneId) -> Option<ConsentView> {
-        self.panes.get(&id).map(|p| ConsentView { addon: p.addon.clone(), pane: p.name.clone(), commit: p.commit.clone(), team: p.team.clone(), root: p.root.as_ref().map(|r| r.to_string_lossy().into_owned()) })
+        self.panes.get(&id).map(|p| ConsentView { addon: p.addon.clone(), pane: p.name.clone(), commit: p.commit.clone(), team: p.team.clone(), root: p.root.as_ref().map(|r| r.to_string_lossy().into_owned()), powers: p.powers })
     }
 
     pub fn contains(&self, id: PaneId) -> bool {
@@ -629,5 +633,33 @@ mod tests {
         let (mut r, id) = reg_with(all());
         r.grant_team(id, "t").unwrap();
         assert!(r.panes_reading_team("t").is_empty(), "no frame has loaded");
+    }
+
+    #[test]
+    fn team_powers_are_held_per_pane_and_taken_back_one_by_one() {
+        let (mut r, id) = reg_with(Declared { team_join: true, messages_send: true, agents_spawn: true, ..Default::default() });
+        let g = r.begin_generation(id).unwrap();
+        assert_eq!(r.authorize(id, g, Need::Join).unwrap_err().code, "not_granted", "no team yet");
+        r.grant_team(id, "t").unwrap();
+        assert_eq!(r.authorize(id, g, Need::Join).unwrap_err().code, "not_granted", "the team alone is not the power");
+        for p in [Power::Join, Power::Send, Power::Spawn] {
+            r.set_power(id, p, true).unwrap();
+        }
+        assert!(r.authorize(id, g, Need::Spawn).is_ok());
+        assert_eq!(r.holders("o/r", "n", "agents:spawn", "t"), vec![id]);
+        assert!(r.holders("o/r", "n", "agents:spawn", "other").is_empty());
+        r.set_power(id, Power::Spawn, false).unwrap();
+        assert_eq!(r.authorize(id, g, Need::Spawn).unwrap_err().code, "not_granted");
+        assert!(r.authorize(id, g, Need::Send).is_ok(), "the others stay");
+        // joining is the base of the other two
+        r.set_power(id, Power::Join, false).unwrap();
+        assert_eq!(r.authorize(id, g, Need::Send).unwrap_err().code, "not_granted");
+        // a power that was not declared cannot be allowed
+        let (mut q, qid) = reg_with(Declared { team_join: true, ..Default::default() });
+        assert_eq!(q.set_power(qid, Power::Spawn, true).unwrap_err().code, "not_declared");
+        // revoking the team takes every power with it
+        r.set_power(id, Power::Join, true).unwrap();
+        r.revoke_team(id);
+        assert_eq!(r.consent_view(id).unwrap().powers, Powers::default());
     }
 }

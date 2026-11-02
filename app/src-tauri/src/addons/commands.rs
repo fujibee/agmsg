@@ -107,6 +107,14 @@ impl Panes {
         let ids = {
             let mut reg = self.registry.lock().unwrap();
             let ids = reg.holders(addon, pane, permission, scope);
+            // The team powers are taken back one by one: the pane keeps running (and the agents it started are
+            // normal panes); its next op of that kind is answered `not_granted`.
+            if let Some(power) = super::panes::Power::parse(permission) {
+                for id in &ids {
+                    let _ = reg.set_power(*id, power, false);
+                }
+                return Vec::new();
+            }
             for id in &ids {
                 match permission {
                     "files:read" => reg.revoke_root(*id),

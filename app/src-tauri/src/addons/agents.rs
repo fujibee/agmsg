@@ -111,6 +111,10 @@ pub struct SpawnType {
 
 pub trait World: Send + Sync {
     fn members(&self, team: &str) -> Result<Vec<MemberInfo>, String>;
+    /// The team's stable id (`team_id` in its config); a rename keeps it.
+    fn team_id(&self, team: &str) -> Option<String>;
+    /// The team's current name, from its id.
+    fn team_name(&self, team_id: &str) -> Option<String>;
     fn join(&self, team: &str, name: &str, agent_type: &str, project: &str) -> Result<(), String>;
     fn send(&self, team: &str, from: &str, to: &str, body: &str) -> Result<(), String>;
     fn spawnable(&self) -> Result<Vec<SpawnType>, String>;
@@ -145,6 +149,13 @@ impl World for RealWorld {
         let ms = crate::agmsg::agmsg_members(team.to_string())?;
         Ok(ms.into_iter().map(|m| MemberInfo { name: m.name, types: m.types, project: m.project }).collect())
     }
+    fn team_id(&self, team: &str) -> Option<String> {
+        read_team_id(&crate::agmsg::base_dir().join("teams").join(team).join("config.json"))
+    }
+    fn team_name(&self, team_id: &str) -> Option<String> {
+        let dir = std::fs::read_dir(crate::agmsg::base_dir().join("teams")).ok()?;
+        dir.flatten().find(|e| read_team_id(&e.path().join("config.json")).as_deref() == Some(team_id)).and_then(|e| e.file_name().to_str().map(str::to_string))
+    }
     fn join(&self, team: &str, name: &str, agent_type: &str, project: &str) -> Result<(), String> {
         crate::agmsg::agmsg_join(team.to_string(), name.to_string(), agent_type.to_string(), project.to_string())
     }
@@ -168,6 +179,11 @@ impl World for RealWorld {
     fn agents_home(&self) -> Option<PathBuf> {
         crate::agmsg::home_dir_string().map(|h| PathBuf::from(h).join("agmsg-agents"))
     }
+}
+
+fn read_team_id(config: &Path) -> Option<String> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(config).ok()?).ok()?;
+    v.get("team_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
 /// The window opens a terminal pane for the entry named in the payload (`OpenPane`).
@@ -231,6 +247,9 @@ pub enum Kind {
 pub struct Entry {
     pub key: String,
     pub addon: String,
+    /// The team's stable id; entries are matched by it, so a rename does not orphan them.
+    pub team_id: String,
+    /// The team's name as last seen, for display and for the scripts.
     pub team: String,
     pub kind: Kind,
     /// The name asked for; the lookup key of a retry.
@@ -268,7 +287,11 @@ fn store(path: &Path, j: &Journal) -> Result<(), BrokerError> {
 
 // ---- the manager -----------------------------------------------------------------
 
+/// How long `agents.spawn` waits for the window to report the process (or a failure) before it records one.
+const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub struct Manager {
+    open_wait: std::time::Duration,
     world: Arc<dyn World>,
     journal_path: PathBuf,
     journal: Mutex<Journal>,
@@ -319,7 +342,7 @@ fn state_name(s: State) -> &'static str {
 impl Manager {
     pub fn new(world: Arc<dyn World>, journal_path: PathBuf) -> Manager {
         let journal = load(&journal_path);
-        Manager { world, journal_path, journal: Mutex::new(journal), team_locks: Mutex::new(HashMap::new()) }
+        Manager { open_wait: OPEN_WAIT, world, journal_path, journal: Mutex::new(journal), team_locks: Mutex::new(HashMap::new()) }
     }
 
     fn team_lock(&self, team: &str) -> Arc<Mutex<()>> {
@@ -334,8 +357,19 @@ impl Manager {
         Ok(out)
     }
 
-    fn find(&self, addon: &str, team: &str, kind: Kind, requested: &str) -> Option<Entry> {
-        self.journal.lock().unwrap().entries.iter().find(|e| e.addon == addon && e.team == team && e.kind == kind && e.requested == requested).cloned()
+    fn find(&self, addon: &str, tid: &str, kind: Kind, requested: &str) -> Option<Entry> {
+        self.journal.lock().unwrap().entries.iter().find(|e| e.addon == addon && e.team_id == tid && e.kind == kind && e.requested == requested).cloned()
+    }
+
+    /// The id entries of this team are filed under, and the name they show: the name is refreshed on every op.
+    fn team_key(&self, team: &str) -> String {
+        let tid = self.world.team_id(team).unwrap_or_else(|| team.to_string());
+        let _ = self.update(|es| {
+            for e in es.iter_mut().filter(|e| e.team_id == tid && e.team != team) {
+                e.team = team.to_string();
+            }
+        });
+        tid
     }
 
     fn by_key(&self, key: &str) -> Option<Entry> {
@@ -356,13 +390,13 @@ impl Manager {
     }
 
     /// The member the add-on joined as in this team, if it has.
-    pub fn member_of(&self, addon: &str, team: &str) -> Option<Entry> {
-        self.journal.lock().unwrap().entries.iter().find(|e| e.addon == addon && e.team == team && e.kind == Kind::Member && e.state == State::Joined).cloned()
+    pub fn member_of(&self, addon: &str, tid: &str) -> Option<Entry> {
+        self.journal.lock().unwrap().entries.iter().find(|e| e.addon == addon && e.team_id == tid && e.kind == Kind::Member && e.state == State::Joined).cloned()
     }
 
     /// Every entry of one add-on in one team, for the add-on's own `agents.list` and the app's settings.
-    pub fn entries_for(&self, addon: &str, team: &str) -> Vec<Entry> {
-        self.journal.lock().unwrap().entries.iter().filter(|e| e.addon == addon && e.team == team).cloned().collect()
+    pub fn entries_for(&self, addon: &str, tid: &str) -> Vec<Entry> {
+        self.journal.lock().unwrap().entries.iter().filter(|e| e.addon == addon && e.team_id == tid).cloned().collect()
     }
 
     pub fn all_entries(&self) -> Vec<Entry> {
@@ -373,24 +407,26 @@ impl Manager {
 
     pub fn run(&self, a: &Authorized, deny: &Denylist, op: &str, args: &Value) -> Res {
         let team = a.team.clone().ok_or_else(|| BrokerError::new("not_granted", "no team is allowed for this pane"))?;
+        let tid = self.team_key(&team);
         match op {
-            "team.join" => self.team_join(a, &team),
-            "messages.send" => self.messages_send(a, &team, args),
+            "team.join" => self.team_join(a, &team, &tid),
+            "messages.send" => self.messages_send(a, &team, &tid, args),
             "agents.types" => self.agents_types(),
-            "agents.spawn" => self.agents_spawn(a, deny, &team, args),
-            "agents.list" => Ok(json!({ "agents": self.entries_for(&a.addon, &team).iter().filter(|e| e.kind == Kind::Agent).map(summary).collect::<Vec<_>>() })),
+            "agents.spawn" => self.agents_spawn(a, deny, &team, &tid, args),
+            "agents.list" => Ok(json!({ "agents": self.entries_for(&a.addon, &tid).iter().filter(|e| e.kind == Kind::Agent).map(summary).collect::<Vec<_>>() })),
             _ => Err(BrokerError::new("bad_args", "unknown op")),
         }
     }
 
-    fn team_join(&self, a: &Authorized, team: &str) -> Res {
-        if let Some(e) = self.find(&a.addon, team, Kind::Member, "") {
+    fn team_join(&self, a: &Authorized, team: &str, tid: &str) -> Res {
+        // a join still in progress (claimed) is waited for under the lock, not answered half done
+        if let Some(e) = self.find(&a.addon, tid, Kind::Member, "").filter(|e| e.state != State::Claimed) {
             return self.member_reply(&e, false);
         }
         let lock = self.team_lock(team);
         let _held = lock.lock().unwrap();
         // another pane of the same add-on may have joined while this one waited
-        if let Some(e) = self.find(&a.addon, team, Kind::Member, "") {
+        if let Some(e) = self.find(&a.addon, tid, Kind::Member, "") {
             return self.member_reply(&e, false);
         }
         let wanted = a.member.clone().unwrap_or_else(|| member_from_pane(&a.pane));
@@ -403,7 +439,7 @@ impl Manager {
         let project_s = project.to_string_lossy().into_owned();
         let key = format!("m-{claim}");
         self.update(|es| {
-            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team: team.to_string(), kind: Kind::Member, requested: String::new(), name: name.clone(), agent_type: MEMBER_TYPE.into(), project: project_s.clone(), claim: claim.clone(), model: None, state: State::Claimed, pid: None, start: None, reason: None })
+            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Member, requested: String::new(), name: name.clone(), agent_type: MEMBER_TYPE.into(), project: project_s.clone(), claim: claim.clone(), model: None, state: State::Claimed, pid: None, start: None, reason: None })
         })?;
         if let Err(e) = self.world.join(team, &name, MEMBER_TYPE, &project_s) {
             self.set_state(&key, State::Failed, Some(e.clone()))?;
@@ -442,13 +478,13 @@ impl Manager {
         Ok(())
     }
 
-    fn messages_send(&self, a: &Authorized, team: &str, args: &Value) -> Res {
+    fn messages_send(&self, a: &Authorized, team: &str, tid: &str, args: &Value) -> Res {
         let to = str_arg(args, "to")?;
         let body = str_arg(args, "body")?;
         if to.is_empty() || body.is_empty() {
             return Err(BrokerError::new("bad_args", "`to` and `body` must not be empty"));
         }
-        let me = self.member_of(&a.addon, team).ok_or_else(|| BrokerError::new("not_granted", "the add-on has not joined the team (call team.join first)"))?;
+        let me = self.member_of(&a.addon, tid).ok_or_else(|| BrokerError::new("not_granted", "the add-on has not joined the team (call team.join first)"))?;
         if to != "all" {
             let ms = self.world.members(team).map_err(|e| BrokerError::new("not_available", e))?;
             if !ms.iter().any(|m| m.name == to) {
@@ -464,7 +500,7 @@ impl Manager {
         Ok(json!({ "types": ts.iter().map(|t| json!({ "type": t.name, "models": t.model_arg.is_some() })).collect::<Vec<_>>() }))
     }
 
-    fn agents_spawn(&self, a: &Authorized, deny: &Denylist, team: &str, args: &Value) -> Res {
+    fn agents_spawn(&self, a: &Authorized, deny: &Denylist, team: &str, tid: &str, args: &Value) -> Res {
         // 1. validate everything before any side effect
         let agent_type = str_arg(args, "type")?;
         let wanted = str_arg(args, "name")?;
@@ -488,7 +524,7 @@ impl Manager {
             Some(_) => return Err(BrokerError::new("bad_args", "`folder` must be a string")),
         };
         // 2. a retry: the entry for this requested name decides
-        if let Some(e) = self.find(&a.addon, team, Kind::Agent, &wanted) {
+        if let Some(e) = self.find(&a.addon, tid, Kind::Agent, &wanted) {
             return self.retry(&e, model);
         }
         // 3. a given folder is resolved before the lock; the default needs the final name, so it waits
@@ -498,11 +534,11 @@ impl Manager {
         };
         let lock = self.team_lock(team);
         let _held = lock.lock().unwrap();
-        if let Some(e) = self.find(&a.addon, team, Kind::Agent, &wanted) {
+        if let Some(e) = self.find(&a.addon, tid, Kind::Agent, &wanted) {
             return self.retry(&e, model);
         }
         let before = self.world.members(team).map_err(|e| BrokerError::new("not_available", e))?;
-        let name = free_name(&wanted, &|n| before.iter().any(|m| m.name == n) || self.name_in_journal(team, n));
+        let name = free_name(&wanted, &|n| before.iter().any(|m| m.name == n) || self.name_in_journal(tid, n));
         let folder = match given {
             Some(f) => f,
             None => self.default_folder(deny, &name)?,
@@ -511,7 +547,7 @@ impl Manager {
         let claim = random_id();
         let key = format!("a-{claim}");
         self.update(|es| {
-            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team: team.to_string(), kind: Kind::Agent, requested: wanted.clone(), name: name.clone(), agent_type: agent_type.clone(), project: folder_s.clone(), claim: claim.clone(), model: model.clone(), state: State::Claimed, pid: None, start: None, reason: None })
+            es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Agent, requested: wanted.clone(), name: name.clone(), agent_type: agent_type.clone(), project: folder_s.clone(), claim: claim.clone(), model: model.clone(), state: State::Claimed, pid: None, start: None, reason: None })
         })?;
         if let Err(e) = self.world.join(team, &name, &agent_type, &folder_s) {
             self.set_state(&key, State::Failed, Some(e.clone()))?;
@@ -525,8 +561,8 @@ impl Manager {
         self.open(&key)
     }
 
-    fn name_in_journal(&self, team: &str, name: &str) -> bool {
-        self.journal.lock().unwrap().entries.iter().any(|e| e.team == team && e.name == name && !matches!(e.state, State::Failed))
+    fn name_in_journal(&self, tid: &str, name: &str) -> bool {
+        self.journal.lock().unwrap().entries.iter().any(|e| e.team_id == tid && e.name == name && !matches!(e.state, State::Failed))
     }
 
     /// For a spawned agent "ours" is the registration with our type and folder, made when the member did
@@ -576,7 +612,32 @@ impl Manager {
             self.set_state(key, State::Joined, Some(why.clone()))?;
             return Err(BrokerError::new("not_available", format!("{} joined the team but its terminal did not open: {why}", e.name)));
         }
+        // The window answers through `pty_started` or `open_failed`. No entry stays `opening` after this returns:
+        // silence is recorded as a failure (a late `pty_started` still moves it to `running`).
+        let deadline = std::time::Instant::now() + self.open_wait;
+        loop {
+            match self.by_key(key) {
+                Some(cur) if cur.state == State::Opening && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(25)),
+                _ => break,
+            }
+        }
+        if self.by_key(key).is_some_and(|c| c.state == State::Opening) {
+            self.set_state(key, State::Failed, Some(format!("The terminal for {} did not report within {} s.", e.name, self.open_wait.as_secs())))?;
+        }
         Ok(summary(&self.by_key(key).expect("entry exists")))
+    }
+
+    /// The window could not open the terminal (no such member, a pane with that name is already open, the process
+    /// did not start). The member stays; the user may open it again from the settings.
+    pub fn open_failed(&self, key: &str, reason: &str) {
+        let _ = self.update(|es| {
+            if let Some(e) = es.iter_mut().find(|e| e.key == key && matches!(e.state, State::Opening | State::Joined)) {
+                e.state = State::Failed;
+                e.reason = Some(reason.chars().take(300).collect());
+                e.pid = None;
+                e.start = None;
+            }
+        });
     }
 
     // ---- reports from the terminal ------------------------------------------------
@@ -608,7 +669,7 @@ impl Manager {
     /// The user chose to open a new pane for an `orphaned` or `unknown` entry.
     pub fn reopen(&self, key: &str) -> Res {
         match self.by_key(key) {
-            Some(e) if matches!(e.state, State::Orphaned | State::Unknown | State::Joined) => {
+            Some(e) if e.kind == Kind::Agent && matches!(e.state, State::Orphaned | State::Unknown | State::Joined | State::Failed) => {
                 self.set_state(key, State::Joined, None)?;
                 self.open(key)
             }
@@ -648,7 +709,8 @@ impl Manager {
     }
 
     fn recover_claimed(&self, e: &Entry) -> Option<(State, Option<String>)> {
-        let ms = self.world.members(&e.team).ok()?;
+        let team = self.world.team_name(&e.team_id).unwrap_or_else(|| e.team.clone());
+        let ms = self.world.members(&team).ok()?;
         match ms.iter().find(|m| m.name == e.name) {
             None => None,
             Some(m) => {
@@ -706,6 +768,14 @@ pub fn addon_members_state() -> Vec<EntryView> {
     global().map(|m| m.all_entries().into_iter().map(EntryView::from).collect()).unwrap_or_default()
 }
 
+/// The window could not open the terminal for an agent an add-on started.
+#[tauri::command]
+pub fn addon_agent_open_failed(key: String, reason: String) {
+    if let Some(m) = global() {
+        m.open_failed(&key, &reason);
+    }
+}
+
 /// The user chose to open a new terminal for an agent that was `orphaned` or `unknown`.
 #[tauri::command(async)]
 pub fn addon_agent_reopen(key: String) -> Result<(), BrokerError> {
@@ -729,6 +799,9 @@ mod tests {
         /// a hook run inside `join`, standing for a `join.sh` somebody else runs at the same moment
         outside: Mutex<Option<Box<dyn Fn(&Fake) + Send>>>,
         alive: Mutex<HashMap<u32, String>>,
+        /// what the window does when asked to open a pane (default: nothing answers)
+        on_open: Mutex<Option<Box<dyn Fn(&OpenPane) + Send>>>,
+        renamed: Mutex<HashMap<String, String>>,
         root: PathBuf,
         home: PathBuf,
     }
@@ -736,6 +809,14 @@ mod tests {
     impl World for Fake {
         fn members(&self, _team: &str) -> Result<Vec<MemberInfo>, String> {
             Ok(self.members.lock().unwrap().clone())
+        }
+        fn team_id(&self, team: &str) -> Option<String> {
+            let r = self.renamed.lock().unwrap();
+            Some(format!("id-{}", r.iter().find(|(_, new)| new.as_str() == team).map(|(old, _)| old.as_str()).unwrap_or(team)))
+        }
+        fn team_name(&self, id: &str) -> Option<String> {
+            let old = id.strip_prefix("id-")?;
+            Some(self.renamed.lock().unwrap().get(old).cloned().unwrap_or_else(|| old.to_string()))
         }
         fn join(&self, _team: &str, name: &str, t: &str, project: &str) -> Result<(), String> {
             self.joins.fetch_add(1, Ordering::SeqCst);
@@ -766,6 +847,9 @@ mod tests {
                 return Err("no window".into());
             }
             self.opened.lock().unwrap().push(req.clone());
+            if let Some(f) = self.on_open.lock().unwrap().as_ref() {
+                f(req);
+            }
             Ok(())
         }
         fn members_root(&self) -> PathBuf {
@@ -779,7 +863,7 @@ mod tests {
     struct Fx {
         _tmp: tempfile::TempDir,
         world: Arc<Fake>,
-        mgr: Manager,
+        mgr: Arc<Manager>,
         reg: Mutex<Registry>,
         id: u64,
         gen: u64,
@@ -801,7 +885,18 @@ mod tests {
         std::fs::create_dir_all(&world.home).unwrap();
         world.members.lock().unwrap().push(MemberInfo { name: "lead".into(), types: vec!["claude-code".into()], project: "/x".into() });
         let journal = base.join("journal.json");
-        let mgr = Manager::new(world.clone(), journal.clone());
+        let mut m = Manager::new(world.clone(), journal.clone());
+        m.open_wait = std::time::Duration::from_millis(600);
+        let mgr = Arc::new(m);
+        // the window answers a moment after it is asked: a process id for the pane
+        let for_window = mgr.clone();
+        *world.on_open.lock().unwrap() = Some(Box::new(move |req: &OpenPane| {
+            let (m, key) = (for_window.clone(), req.key.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                m.pty_started(&key, 4242);
+            });
+        }));
         let mut reg = Registry::new();
         let mut files = HashMap::new();
         files.insert("index.html".to_string(), b"x".to_vec());
@@ -954,7 +1049,7 @@ mod tests {
     fn spawn_joins_records_and_opens_a_pane_with_server_owned_fields() {
         let f = fx(all_powers());
         let r = call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white", "model": "opus", "team": "other", "cmd": "rm", "args": ["-rf"], "permission_mode": "bypass"})).unwrap();
-        assert_eq!((r["name"].as_str().unwrap(), r["state"].as_str().unwrap()), ("white", "opening"));
+        assert_eq!((r["name"].as_str().unwrap(), r["state"].as_str().unwrap(), r["pid"].as_u64().unwrap()), ("white", "running", 4242));
         let opened = f.world.opened.lock().unwrap().clone();
         assert_eq!(opened.len(), 1);
         let o = &opened[0];
@@ -963,9 +1058,6 @@ mod tests {
         let w = ms.iter().find(|m| m.name == "white").unwrap();
         assert!(w.project.ends_with("agmsg-agents/white"), "default folder: {}", w.project);
         drop(ms);
-        // the window reports the process
-        f.world.alive.lock().unwrap().insert(4242, "Mon Nov  2 00:00:00 2026".into());
-        f.mgr.pty_started(&o.key, 4242);
         let list = call(&f, "agents.list", json!({})).unwrap();
         assert_eq!(list["agents"][0]["state"], "running");
         assert_eq!(list["agents"][0]["pid"], 4242);
@@ -998,7 +1090,7 @@ mod tests {
         assert!(f.world.members.lock().unwrap().iter().any(|m| m.name == "black"));
         *f.world.fail_open.lock().unwrap() = false;
         let r = call(&f, "agents.spawn", json!({"type": "claude-code", "name": "black"})).unwrap();
-        assert_eq!(r["state"], "opening");
+        assert_eq!(r["state"], "running");
         assert_eq!(f.world.joins.load(Ordering::SeqCst), 1);
     }
 
@@ -1006,7 +1098,7 @@ mod tests {
     fn a_folder_comes_only_from_inside_the_granted_one() {
         let f = fx(all_powers());
         let r = call(&f, "agents.spawn", json!({"type": "claude-code", "name": "w", "folder": "sub"})).unwrap();
-        assert_eq!(r["state"], "opening");
+        assert_eq!(r["state"], "running");
         let ms = f.world.members.lock().unwrap();
         assert_eq!(ms.iter().find(|m| m.name == "w").unwrap().project, f.granted.join("sub").to_string_lossy());
         drop(ms);
@@ -1015,7 +1107,7 @@ mod tests {
             let c = code(call(&f, "agents.spawn", json!({"type": "claude-code", "name": "z", "folder": folder})));
             assert!(matches!(c, "bad_args" | "not_found"), "{folder}: {c}");
         }
-        assert!(f.mgr.entries_for("o/chess", "t").iter().all(|e| e.name != "z"));
+        assert!(f.mgr.entries_for("o/chess", "id-t").iter().all(|e| e.name != "z"));
     }
 
     #[cfg(unix)]
@@ -1069,12 +1161,14 @@ mod tests {
     // ---- recovery -------------------------------------------------------------------
 
     fn entry(state: State, kind: Kind) -> Entry {
-        Entry { key: "k1".into(), addon: "o/chess".into(), team: "t".into(), kind, requested: "w".into(), name: "w".into(), agent_type: "claude-code".into(), project: "/p".into(), claim: "c".into(), model: None, state, pid: None, start: None, reason: None }
+        Entry { key: "k1".into(), addon: "o/chess".into(), team_id: "id-t".into(), team: "t".into(), kind, requested: "w".into(), name: "w".into(), agent_type: "claude-code".into(), project: "/p".into(), claim: "c".into(), model: None, state, pid: None, start: None, reason: None }
     }
 
     fn with_entries(f: &Fx, es: Vec<Entry>) -> Manager {
         std::fs::write(&f.journal, serde_json::to_vec(&Journal { entries: es }).unwrap()).unwrap();
-        Manager::new(f.world.clone(), f.journal.clone())
+        let mut m = Manager::new(f.world.clone(), f.journal.clone());
+        m.open_wait = std::time::Duration::from_millis(200);
+        m
     }
 
     #[test]
@@ -1083,7 +1177,7 @@ mod tests {
         call(&f, "agents.spawn", json!({"type": "claude-code", "name": "w"})).unwrap();
         let again = Manager::new(f.world.clone(), f.journal.clone());
         assert_eq!(again.all_entries().len(), 1);
-        assert_eq!(again.all_entries()[0].state, State::Opening);
+        assert_eq!(again.all_entries()[0].state, State::Running);
     }
 
     #[test]
@@ -1148,7 +1242,7 @@ mod tests {
         e.start = Some("s".into());
         let m = with_entries(&f, vec![e]);
         m.recover();
-        let f2 = Fx { mgr: m, ..f };
+        let f2 = Fx { mgr: Arc::new(m), ..f };
         let r = call(&f2, "agents.spawn", json!({"type": "claude-code", "name": "w"})).unwrap();
         assert_eq!((r["state"].as_str().unwrap(), r["pid"].as_u64().unwrap()), ("orphaned", 77));
         assert!(f2.world.opened.lock().unwrap().is_empty());
@@ -1174,8 +1268,52 @@ mod tests {
         // two panes of two add-ons in two teams: each op lands in its own pane's team and member
         let f = fx(all_powers());
         call(&f, "team.join", json!({"team": "other"})).unwrap();
-        assert!(f.mgr.member_of("o/chess", "t").is_some());
-        assert!(f.mgr.member_of("o/chess", "other").is_none());
-        assert!(f.mgr.member_of("o/other-addon", "t").is_none());
+        assert!(f.mgr.member_of("o/chess", "id-t").is_some());
+        assert!(f.mgr.member_of("o/chess", "id-other").is_none());
+        assert!(f.mgr.member_of("o/other-addon", "id-t").is_none());
+    }
+
+    #[test]
+    fn a_team_rename_does_not_orphan_the_entries() {
+        let f = fx(all_powers());
+        let j = call(&f, "team.join", json!({})).unwrap();
+        call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap();
+        // the team is renamed t -> table: same id, new name; the grant follows the pane's team name
+        f.world.renamed.lock().unwrap().insert("t".into(), "table".into());
+        f.reg.lock().unwrap().grant_team(f.id, "table").unwrap();
+        let gen = f.reg.lock().unwrap().generation(f.id).unwrap();
+        let again = crate::addons::broker::handle_power(&f.reg, &f.deny, &f.mgr, f.id, gen, "team.join", &json!({})).unwrap();
+        assert_eq!((again["name"].as_str().unwrap(), again["created"].as_bool().unwrap()), (j["name"].as_str().unwrap(), false));
+        let list = crate::addons::broker::handle_power(&f.reg, &f.deny, &f.mgr, f.id, gen, "agents.list", &json!({})).unwrap();
+        assert_eq!(list["agents"].as_array().unwrap().len(), 1);
+        assert!(f.mgr.all_entries().iter().all(|e| e.team_id == "id-t" && e.team == "table"), "the name shown follows the rename");
+        assert_eq!(f.world.joins.load(Ordering::SeqCst), 2, "no second join, no second agent");
+    }
+
+    #[test]
+    fn no_entry_stays_opening_after_the_op_returns() {
+        // the window says it could not open the pane
+        let f = fx(all_powers());
+        let m = f.mgr.clone();
+        *f.world.on_open.lock().unwrap() = Some(Box::new(move |req: &OpenPane| m.open_failed(&req.key, "a pane named white is already open")));
+        let r = call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap();
+        assert_eq!((r["state"].as_str().unwrap(), r["reason"].as_str().unwrap()), ("failed", "a pane named white is already open"));
+        // the window never answers
+        let g = fx(all_powers());
+        *g.world.on_open.lock().unwrap() = None;
+        let r = call(&g, "agents.spawn", json!({"type": "claude-code", "name": "black"})).unwrap();
+        assert_eq!(r["state"], "failed");
+        assert!(r["reason"].as_str().unwrap().contains("did not report"), "{r}");
+        assert!(g.mgr.all_entries().iter().all(|e| e.state != State::Opening));
+        // the user can open a failed agent again from the settings
+        *g.world.on_open.lock().unwrap() = Some(Box::new({
+            let m = g.mgr.clone();
+            move |req: &OpenPane| {
+                let (m, key) = (m.clone(), req.key.clone());
+                std::thread::spawn(move || m.pty_started(&key, 99));
+            }
+        }));
+        let key = g.mgr.all_entries()[0].key.clone();
+        assert_eq!(g.mgr.reopen(&key).unwrap()["state"], "running");
     }
 }
