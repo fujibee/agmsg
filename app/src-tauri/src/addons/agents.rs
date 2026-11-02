@@ -164,6 +164,8 @@ pub struct OpenPane {
     pub name: String,
     #[serde(rename = "type")]
     pub agent_type: String,
+    /// The member's working folder, as joined: the window does not ask agmsg for it again.
+    pub project: String,
     pub model: Option<String>,
 }
 
@@ -641,7 +643,7 @@ impl Manager {
     fn open(&self, key: &str) -> Res {
         let e = self.by_key(key).ok_or_else(|| BrokerError::new("not_available", "the entry is gone"))?;
         self.set_state(key, State::Opening, None)?;
-        let req = OpenPane { key: key.to_string(), team: e.team.clone(), name: e.name.clone(), agent_type: e.agent_type.clone(), model: e.model.clone() };
+        let req = OpenPane { key: key.to_string(), team: e.team.clone(), name: e.name.clone(), agent_type: e.agent_type.clone(), project: e.project.clone(), model: e.model.clone() };
         if let Err(why) = phase("spawn: emit open", || self.world.open_pane(&req)) {
             // the member stays joined and recorded; the add-on may ask again
             self.set_state(key, State::Joined, Some(why.clone()))?;
@@ -1105,6 +1107,7 @@ mod tests {
         assert_eq!(opened.len(), 1);
         let o = &opened[0];
         assert_eq!((o.team.as_str(), o.name.as_str(), o.agent_type.as_str(), o.model.as_deref()), ("t", "white", "claude-code", Some("opus")));
+        assert!(Path::new(&o.project).ends_with(Path::new("agmsg-agents").join("white")), "the window gets the folder: {}", o.project);
         let ms = f.world.members.lock().unwrap();
         let w = ms.iter().find(|m| m.name == "white").unwrap();
         assert!(Path::new(&w.project).ends_with(Path::new("agmsg-agents").join("white")), "default folder: {}", w.project);
