@@ -86,6 +86,8 @@ export type Pane = {
    *  False for actas-booted types with no monitor of their own (codex,
    *  grok-build, hermes, ...): the app's stdin-inject IS their only delivery. */
   native: boolean;
+  /** The journal entry of an agent an add-on started: the backend learns the process from it. */
+  agentKey?: string;
   /** A free login shell (the "+" tab, or a tab's "Open shell" context menu
    *  item) — unattached to any agent. Drives the sidebar-click "spawn beside
    *  the shell instead of a new tab" behavior below: it has to be an
@@ -361,6 +363,8 @@ export type AgentType = {
   options: string[];
   cmd_prefix: string | null;
   prompt_arg: string | null;
+  /** The flag that carries a model name, when the CLI takes one. */
+  model_arg: string | null;
 };
 
 // The trailing spawn args that hand a freshly launched CLI its identity:
@@ -1208,7 +1212,7 @@ export default function App() {
   const spawnMember = useCallback(
     // targetWindowId: spawn straight into an existing tab as an extra
     // side-by-side pane, instead of opening a new tab (the default).
-    async (m: Member, targetWindowId?: string) => {
+    async (m: Member, targetWindowId?: string, fromAddon?: { key: string; team: string; model?: string }) => {
       // Don't spawn a second pane for a member that's already running — just
       // focus its window (one live agent per identity).
       const existing = panesRef.current.find((p) => p.label === m.name);
@@ -1225,6 +1229,7 @@ export default function App() {
       const freshOptionsFor = new Map(types.map((t) => [t.name, t.options]));
       const freshCmdPrefixFor = new Map(types.map((t) => [t.name, t.cmd_prefix]));
       const freshPromptArgFor = new Map(types.map((t) => [t.name, t.prompt_arg]));
+      const freshModelArgFor = new Map(types.map((t) => [t.name, t.model_arg]));
       setSpawnTypes(types);
 
       const type = m.types.find((t) => freshCliFor.has(t));
@@ -1232,6 +1237,7 @@ export default function App() {
       const options = type ? (freshOptionsFor.get(type) ?? []) : [];
       const cmdPrefix = type ? freshCmdPrefixFor.get(type) : undefined;
       const promptArg = type ? freshPromptArgFor.get(type) : undefined;
+      const modelArg = type ? freshModelArgFor.get(type) : undefined;
       // `native` = "this (type, project) actually self-delivers agmsg
       // messages" — asked from agmsg's own delivery.sh status (mode derived
       // from the project's real hooks file), NOT a static type.conf flag.
@@ -1261,9 +1267,10 @@ export default function App() {
             id,
             label: m.name,
             cmd: cli,
-            args: [...options, ...actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg)],
+            args: [...options, ...(fromAddon?.model && modelArg ? [modelArg, fromAddon.model] : []), ...actasSpawnArgs(cmdName, m.name, cmdPrefix, promptArg)],
             cwd: m.project || undefined,
             native: monitors,
+            agentKey: fromAddon?.key,
           }
         : { id, label: m.name, cmd: "bash", args: [], cwd: m.project || undefined, native: false };
       setPanes((prev) => [...prev, pane]);
@@ -1274,12 +1281,37 @@ export default function App() {
         setActive(targetWindowId);
       } else {
         const winId = `w-${seq.current++}`;
-        setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: id }, team }]);
+        setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: id }, team: fromAddon?.team ?? team }]);
         setActive(winId);
       }
     },
     [cmdName, spawnTypes, team],
   );
+
+  // An add-on asked for a terminal for an agent it started. Only the member and the type cross: the command,
+  // the spawn options and the actas prompt come from the same code as "add agent", from the member as agmsg has it.
+  const spawnMemberRef = useRef(spawnMember);
+  spawnMemberRef.current = spawnMember;
+  useEffect(() => {
+    const p = listen<{ key: string; team: string; name: string; model: string | null }>("addon-agent-open", (e) => {
+      const { key, team: agentTeam, name, model } = e.payload;
+      const fail = (reason: string) => void invoke("addon_agent_open_failed", { key, reason }).catch(() => {});
+      // the agent's own pane is already open (a repeated request): nothing to do, it reports its process itself
+      const open = panesRef.current.find((p) => p.label === name);
+      if (open) {
+        if (open.agentKey !== key) fail(`A pane named ${name} is already open.`);
+        return;
+      }
+      void invoke<Member[]>("agmsg_members", { team: agentTeam })
+        .then((ms) => {
+          const m = ms.find((x) => x.name === name);
+          if (!m) return fail(`${name} is not a member of the team.`);
+          return spawnMemberRef.current(m, undefined, { key, team: agentTeam, model: model ?? undefined });
+        })
+        .catch((err) => fail(String(err)));
+    });
+    return () => void p.then((unlisten) => unlisten());
+  }, []);
 
   // Close one pane (from its header's × or the context menu). If it was the
   // last pane in its window, the window/tab disappears too.
@@ -2812,6 +2844,7 @@ export default function App() {
                     cmd={p.cmd}
                     args={p.args}
                     cwd={p.cwd}
+                    agentKey={p.agentKey}
                     fontSize={terminalFontSize}
                     active={isActiveWindow}
                     onAgentState={applyAgentState}

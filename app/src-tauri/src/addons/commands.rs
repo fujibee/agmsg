@@ -107,6 +107,14 @@ impl Panes {
         let ids = {
             let mut reg = self.registry.lock().unwrap();
             let ids = reg.holders(addon, pane, permission, scope);
+            // The team powers are taken back one by one: the pane keeps running (and the agents it started are
+            // normal panes); its next op of that kind is answered `not_granted`.
+            if let Some(power) = super::panes::Power::parse(permission) {
+                for id in &ids {
+                    let _ = reg.set_power(*id, power, false);
+                }
+                return Vec::new();
+            }
             for id in &ids {
                 match permission {
                     "files:read" => reg.revoke_root(*id),
@@ -289,6 +297,14 @@ pub fn addon_grant_team(host: State<'_, Arc<AddonHost>>, id: PaneId, team: Strin
     host.panes.registry.lock().unwrap().grant_team(id, &team)
 }
 
+/// The user allowed (or took back) one of `team:join`, `messages:send`, `agents:spawn` for this pane. Each
+/// needs the team too; the app calls this from the saved consent, never from the frame.
+#[tauri::command]
+pub fn addon_set_power(host: State<'_, Arc<AddonHost>>, id: PaneId, power: String, on: bool) -> Result<(), BrokerError> {
+    let p = super::panes::Power::parse(&power).ok_or_else(|| BrokerError::new("bad_args", "unknown power"))?;
+    host.panes.registry.lock().unwrap().set_power(id, p, on)
+}
+
 #[tauri::command]
 pub fn addon_revoke_team(host: State<'_, Arc<AddonHost>>, id: PaneId) {
     host.panes.registry.lock().unwrap().revoke_team(id);
@@ -396,6 +412,22 @@ fn feed_init_inner(host: &AddonHost, id: PaneId, generation: u64) -> Result<Valu
 /// One request from the pane's port. The answer is ready to post back.
 #[tauri::command(async)]
 pub fn addon_request(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: u64, op: String, args: Value) -> Value {
+    let out = if broker::power_need(&op).is_some() {
+        match super::agents::global() {
+            Some(mgr) => broker::handle_power(&host.panes.registry, &host.panes.deny(), mgr, id, generation, &op, &args),
+            None => Err(BrokerError::new("not_available", "the app is still starting")),
+        }
+    } else {
+        broker::handle(&host.panes.registry, &host.panes.deny(), id, generation, &op, &args)
+    };
+    match out {
+        Ok(result) => json!({ "agmsg": 1, "type": "response", "ok": true, "result": result }),
+        Err(e) => json!({ "agmsg": 1, "type": "response", "ok": false, "error": { "code": e.code, "message": e.message } }),
+    }
+}
+
+#[allow(dead_code)]
+fn addon_request_plain(host: State<'_, Arc<AddonHost>>, id: PaneId, generation: u64, op: String, args: Value) -> Value {
     match broker::handle(&host.panes.registry, &host.panes.deny(), id, generation, &op, &args) {
         Ok(result) => json!({ "agmsg": 1, "type": "response", "ok": true, "result": result }),
         Err(e) => json!({ "agmsg": 1, "type": "response", "ok": false, "error": { "code": e.code, "message": e.message } }),
