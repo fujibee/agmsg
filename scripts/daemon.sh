@@ -894,6 +894,20 @@ _has_codex_seat() {
   return 1
 }
 
+# Keeps ~/.agents/bin/codex in step with who delivers Codex notices (see
+# codex-shim-install.sh sync): not needed while agmsgd delivers, put back when
+# it stops. Reports what it did; a failure is shown and never fails the command.
+_codex_shim_sync() {
+  local installer="$SCRIPT_DIR/drivers/types/codex/codex-shim-install.sh" out
+  [ -f "$installer" ] || return 0
+  if out="$(bash "$installer" sync 2>&1)"; then
+    case "$out" in removed:*|installed:*) printf 'agmsg daemon: %s\n' "$out" ;; esac
+  else
+    printf 'agmsg daemon: could not update the Codex shim: %s\n' "$out" >&2
+  fi
+  return 0
+}
+
 cmd_enable() {
   _ensure_install_db_schema
   if [ "$(_os)" = linux ] && ! _systemd_user_usable; then
@@ -936,6 +950,7 @@ cmd_enable() {
     fi
     return 1
   }
+  _codex_shim_sync
   cmd_start
 }
 
@@ -1043,6 +1058,7 @@ cmd_disable() {
     echo "agmsg daemon disable: service was unregistered but agmsgd has not confirmed stopping -- check 'agmsg daemon status'" >&2
     return 1
   fi
+  _codex_shim_sync
   echo 'agmsg daemon disable: agmsgd turned off. Existing bridges continue to deliver notices; new Codex launches get a bridge.'
   echo 'Codex sessions without a bridge must be restarted. Until then they receive no new notices; unread messages are preserved. Restart with codex resume, then enter $agmsg actas <name> in that Codex session.'
   echo 'Notices already accepted by the Codex queue are not cancelled and may appear once more.'

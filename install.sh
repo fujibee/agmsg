@@ -1216,6 +1216,10 @@ $_agmsg_running_team"
   # how many lines it prints, so growing its output again later can't reopen
   # this.
   CODEX_SHIM="$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh"
+  # While agmsgd delivers Codex notices the shim is not needed: `sync` removes
+  # an agmsg shim owned by this install (and puts it back when agmsgd is off),
+  # so the refresh below then finds nothing to refresh.
+  [ -x "$CODEX_SHIM" ] && AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" sync >/dev/null 2>&1 || true
   CODEX_SHIM_STATUS=""
   [ -x "$CODEX_SHIM" ] && CODEX_SHIM_STATUS="$(AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null || true)"
   if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
@@ -1356,6 +1360,7 @@ install_antigravity_step "TUI launcher shim (~/.agents/bin/agy-tui)" install_ant
 # whichever install already owns it. codex-shim-install.sh itself refuses that
 # and says whose it is; surface that here instead of swallowing it.
 CODEX_SHIM="$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh"
+[ -x "$CODEX_SHIM" ] && AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" sync >/dev/null 2>&1 || true
 CODEX_SHIM_STATUS=""
 [ -x "$CODEX_SHIM" ] && CODEX_SHIM_STATUS="$(AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null || true)"
 if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then

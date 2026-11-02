@@ -224,6 +224,36 @@ _agy_failing_mv_fixture() {
   grep -q '/scripts/drivers/types/codex/codex-shim.sh' "$shim"
 }
 
+@test "install --update: an owned Codex shim is removed while agmsgd is on, and put back once it is off" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
+  local shim="$FAKE_HOME/.agents/bin/codex"
+  [ -x "$shim" ]
+  [ -f "$SK/run/install.db" ]
+  sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='on';"
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [ ! -e "$shim" ]
+
+  sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [ -x "$shim" ]
+  grep -q '/scripts/drivers/types/codex/codex-shim.sh' "$shim"
+}
+
+@test "install --update: with agmsgd off an owned Codex shim is refreshed as before" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
+  local shim="$FAKE_HOME/.agents/bin/codex"
+  sed 's#/scripts/drivers/types/codex/#/scripts/codex/#g' "$shim" > "$BATS_TEST_TMPDIR/stale"
+  cp "$BATS_TEST_TMPDIR/stale" "$shim"
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  grep -q '/scripts/drivers/types/codex/codex-shim.sh' "$shim"
+}
+
 @test "install: a failing Antigravity skill step warns once and the rest of the install is unaffected" {
   mkdir -p "$FAKE_HOME/.gemini/config"
   # A file where the skills directory belongs, so creating the skill folder fails.
