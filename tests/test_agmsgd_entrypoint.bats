@@ -264,6 +264,21 @@ _stop_daemon() {
   wait "$DAEMON_PID"
 }
 
+@test "status stops warning once scripts/ matches the record again, including a warning recorded at start (#1863)" {
+  _write_completion_record
+  : > "$TEST_SKILL_DIR/scripts/.DS_Store"
+  _start_daemon_ready
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  grep -qF -- "scripts/.DS_Store (not in the record)" <<<"$output"
+  rm "$TEST_SKILL_DIR/scripts/.DS_Store"
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  refute grep -qF -- "Warning:" <<<"$output"
+  run node "$SCRIPTS/daemon/status.mjs" "$TEST_SKILL_DIR" --json
+  grep -qF -- '"install_verify_warning":null' <<<"$output"
+  _stop_daemon
+}
+
 @test "a clean start shows no mismatch warning, and removes the file of a process that is gone (#1821)" {
   _write_completion_record
   printf '{"pid":999999,"at":"x","problems":[{"kind":"unexpected","path":"scripts/old"}]}\n' > "$TEST_SKILL_DIR/run/install-verify-warning.999999.json"

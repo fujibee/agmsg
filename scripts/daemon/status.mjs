@@ -237,7 +237,8 @@ async function main() {
   // in an interactive terminal (a TTY, where the same write is
   // unbuffered) looked completely fine. Setting exitCode and letting the
   // event loop drain naturally waits for the flush first.
-  const installVerifyWarning = currentInstallVerifyWarning(installRoot, owner, alive) ?? readInstallVerifyWarning(installRoot, owner, alive);
+  let installVerifyWarning = currentInstallVerifyWarning(installRoot, owner, alive);
+  if (installVerifyWarning === undefined) installVerifyWarning = readInstallVerifyWarning(installRoot, owner, alive);
   const pollTimeout = readPollTimeout(installRoot);
   const pollText = pollTimeout ? `Last poll timeout: ${pollTimeout.channel ?? 'unknown'} ${pollTimeout.seat ?? ''} ${pollTimeout.reason} (${pollTimeout.at ?? 'unknown time'})\n` : '';
   process.stdout.write(
@@ -260,17 +261,20 @@ export function readInstallVerifyWarning(installRoot, owner, alive) {
 }
 
 // What differs between scripts/ and the install record right now, for a running
-// agmsgd. A running agmsgd does not stop for such a difference (only an install
-// or uninstall moving the record stops it), so this is where it shows. null when
-// the tree matches, or when there is no complete record to compare against.
+// agmsgd. A running agmsgd does not stop for such a difference (only the
+// completion record moving stops it), so this is where it shows. Returns the
+// warning, null when the tree matches the record NOW (the start-time warning is
+// then out of date and must not be shown), or undefined when the comparison
+// could not be made (no running pid, no complete record, unreadable): the
+// caller may then fall back to the start-time warning.
 export function currentInstallVerifyWarning(installRoot, owner, alive) {
-  if (alive !== true || owner?.executor_pid == null) return null;
+  if (alive !== true || owner?.executor_pid == null) return undefined;
   let problems;
   try {
     const state = readCompletionState(installRoot);
-    if (state.state !== 'complete') return null;
+    if (state.state !== 'complete') return undefined;
     problems = scriptsMismatches(installRoot, state.manifest);
-  } catch { return null; }
+  } catch { return undefined; }
   if (problems.length === 0) return null;
   return { pid: owner.executor_pid, at: new Date().toISOString(), problems, current: true };
 }
