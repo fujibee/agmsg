@@ -141,7 +141,7 @@ export type MemberState = {
   name: string;
   type: string;
   state: "claimed" | "joined" | "opening" | "running" | "failed" | "orphaned" | "unknown";
-  pid?: number;
+  pid?: number | null;
   reason?: string;
 };
 

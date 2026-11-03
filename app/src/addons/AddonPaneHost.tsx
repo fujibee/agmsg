@@ -89,6 +89,7 @@ function LiveAddonPane(props: {
   const [pending, setPending] = useState(false);
   // The opt-in to trust ~/agmsg-agents in Claude Code (agents:spawn only): read once when the card shows, unticked by default.
   const [trustState, setTrustState] = useState<FolderTrust | null>(null);
+  const [trustError, setTrustError] = useState<string | undefined>();
   const [trustChecked, setTrustChecked] = useState(false);
   const [pendingChoice, setPendingChoice] = useState<GrantChoice | undefined>();
   // Which frame has finished loading ("<pane instance>:<reload key>"): until then a cover says it is loading.
@@ -265,7 +266,14 @@ function LiveAddonPane(props: {
   useEffect(() => {
     if (!wantsTrust) return;
     let live = true;
-    void source.agentsFolderTrust().then((r) => live && setTrustState(r.ok ? r.value : "config not found"));
+    // Each time the card appears the box starts off again and the state is read afresh.
+    setTrustChecked(false);
+    setTrustError(undefined);
+    void source.agentsFolderTrust().then((r) => {
+      if (!live) return;
+      setTrustState(r.ok ? r.value : null);
+      if (!r.ok) setTrustError(r.error.message);
+    });
     return () => {
       live = false;
     };
@@ -368,7 +376,7 @@ function LiveAddonPane(props: {
       devFolder={addon?.dev?.label}
       pending={pending}
       pendingChoice={pendingChoice}
-      trust={{ state: trustState, checked: trustChecked, onChange: setTrustChecked }}
+      trust={{ state: trustState, checked: trustChecked, onChange: setTrustChecked, error: trustError }}
       hideTitle
       hideClose
       state={state}

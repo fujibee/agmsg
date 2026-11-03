@@ -34,7 +34,7 @@ export function AddonAgents(props: {
             <b>{e.name}</b>{" "}
             <span className="addon-why">
               {t(`addons.agents.kind.${e.kind}`)} · {e.type} · {e.team} · {t(`addons.agents.state.${e.state}`)}
-              {e.pid !== undefined && <> · {t("addons.agents.pid", { pid: e.pid })}</>}
+              {e.pid != null && <> · {t("addons.agents.pid", { pid: e.pid })}</>}
               {e.reason && <> · {e.reason}</>}
             </span>
             {choice === "choose" && (

@@ -13,6 +13,9 @@ describe("AddonAgents", () => {
   it("says so when there is nothing", () => {
     expect(render([])).toContain("addons.agents.none");
   });
+  it("leaves the pid out when the host reports none (null)", () => {
+    expect(render([e({ state: "orphaned", pid: null })])).not.toContain("addons.agents.pid");
+  });
   it("shows the pid and the open-new / leave choice for an orphaned agent", () => {
     const html = render([e({ state: "orphaned", pid: 4242 })]);
     expect(html).toContain("&quot;pid&quot;:4242");

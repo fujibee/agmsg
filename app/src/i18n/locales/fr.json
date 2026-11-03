@@ -528,6 +528,7 @@
       "note": "Cela écrit un seul réglage dans la configuration de Claude Code : l'indicateur de confiance de ce dossier. Rien d'autre ne change.",
       "trusted": "~/agmsg-agents est déjà approuvé dans Claude Code.",
       "notFound": "La configuration de Claude Code est introuvable, rien ne peut donc être défini. Si les agents s'arrêtent sur « Do you trust this folder? », appuyez sur Entrée dans leur pane.",
+      "readFailed": "Impossible de lire la configuration de Claude Code : {{error}} Les agents peuvent s'arrêter sur \"Do you trust this folder?\" ; appuyez sur Entrée dans leur panneau.",
       "failed": "Impossible d'approuver ~/agmsg-agents : {{error}}"
     }
   }

@@ -528,6 +528,7 @@
       "note": "Esto escribe un solo ajuste en la configuración de Claude Code: el indicador de confianza de esa carpeta. Nada más cambia.",
       "trusted": "~/agmsg-agents ya es de confianza en Claude Code.",
       "notFound": "No se encontró la configuración de Claude Code, así que no se puede establecer nada. Si los agents se detienen en «Do you trust this folder?», pulsa Intro en su pane.",
+      "readFailed": "No se pudo leer la configuración de Claude Code: {{error}} Los agentes pueden detenerse en \"Do you trust this folder?\"; pulsa Enter en su panel.",
       "failed": "No se pudo confiar en ~/agmsg-agents: {{error}}"
     }
   }

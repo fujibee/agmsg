@@ -10,7 +10,7 @@ import type { FolderTrust } from "./source";
 export type GrantChoice = "allow" | "once" | "always" | "notNow";
 
 /** The opt-in to trust ~/agmsg-agents in Claude Code, shown with the agents:spawn grant. `state` null = not read yet. */
-export type TrustOption = { state: FolderTrust | null; checked: boolean; onChange: (on: boolean) => void };
+export type TrustOption = { state: FolderTrust | null; checked: boolean; onChange: (on: boolean) => void; /** Why reading the trust state failed; the grant is not held back. */ error?: string };
 
 export function GrantCard(props: {
   t: Translate;
@@ -121,6 +121,7 @@ function TrustRow(props: { t: Translate; trust: TrustOption; pending: boolean })
   const { t, trust } = props;
   if (trust.state === "trusted") return <p className="addon-trust-state">{t("addons.trust.trusted")}</p>;
   if (trust.state === "config not found") return <p className="addon-trust-state">{t("addons.trust.notFound")}</p>;
+  if (trust.error) return <p className="addon-trust-state">{t("addons.trust.readFailed", { error: trust.error })}</p>;
   if (trust.state === null) return null;
   return (
     <label className="addon-trust">

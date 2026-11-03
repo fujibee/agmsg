@@ -46,4 +46,12 @@ describe("GrantCard powers", () => {
     expect(withTrust("config not found")).toContain("addons.trust.notFound");
     expect(withTrust(null)).not.toContain("addons.trust");
   });
+  it("shows why the trust state could not be read, not 'not found', and still offers Allow", () => {
+    const html = renderToStaticMarkup(
+      createElement(GrantCard, { t, title: "Chess", need: { permission: "powers", team: "t1", send: true, spawn: true }, trust: { state: null, checked: false, onChange: () => {}, error: "EACCES" }, onChoose: () => {} }),
+    );
+    expect(html).toContain("addons.trust.readFailed");
+    expect(html).not.toContain("addons.trust.notFound");
+    expect(html).toContain("addons.card.allow");
+  });
 });

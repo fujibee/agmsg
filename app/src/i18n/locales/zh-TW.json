@@ -522,6 +522,7 @@
       "note": "這只會向 Claude Code 的設定寫入一項設定:該資料夾的信任標記。其他內容不會改變。",
       "trusted": "~/agmsg-agents 在 Claude Code 中已被信任。",
       "notFound": "找不到 Claude Code 的設定,因此無法設定。如果 agent 停在「Do you trust this folder?」,請在它的 pane 中按 Enter。",
+      "readFailed": "無法讀取 Claude Code 的設定：{{error}} 代理可能會停在「Do you trust this folder?」；請在其窗格中按 Enter。",
       "failed": "無法信任 ~/agmsg-agents:{{error}}"
     }
   }

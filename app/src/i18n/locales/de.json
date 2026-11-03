@@ -525,6 +525,7 @@
       "note": "Das schreibt eine einzige Einstellung in die Konfiguration von Claude Code: das Vertrauens-Flag für diesen Ordner. Sonst ändert sich nichts.",
       "trusted": "~/agmsg-agents ist in Claude Code bereits als vertrauenswürdig markiert.",
       "notFound": "Die Konfiguration von Claude Code wurde nicht gefunden, daher lässt sich nichts setzen. Bleiben die Agents bei „Do you trust this folder?“ stehen, drücken Sie in ihrem Pane die Eingabetaste.",
+      "readFailed": "Die Konfiguration von Claude Code konnte nicht gelesen werden: {{error}} Die Agenten bleiben evtl. bei \"Do you trust this folder?\" stehen; drücke Enter in ihrem Pane.",
       "failed": "~/agmsg-agents konnte nicht als vertrauenswürdig markiert werden: {{error}}"
     }
   }

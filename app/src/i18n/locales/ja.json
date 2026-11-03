@@ -526,6 +526,7 @@
       "note": "Claude Code の設定に 1 つだけ書き込みます(そのフォルダの信頼フラグ)。ほかの項目は変わりません。",
       "trusted": "~/agmsg-agents は Claude Code ですでに信頼済みです。",
       "notFound": "Claude Code の設定が見つからないため、何も設定できません。agent が「このフォルダを信頼しますか？」で止まったら、その pane で Enter を押してください。",
+      "readFailed": "Claude Code の設定を読めませんでした: {{error}} エージェントが「Do you trust this folder?」で止まることがあります。その場合は、ペインで Enter を押してください。",
       "failed": "~/agmsg-agents を信頼済みにできませんでした: {{error}}"
     }
   }
