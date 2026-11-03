@@ -462,16 +462,26 @@ impl Manager {
         if let Some(e) = self.find(&a.addon, tid, Kind::Member, "").filter(|e| e.state != State::Claimed) {
             return self.member_reply(&e, false);
         }
-        let lock = self.team_lock(team);
-        let _held = lock.lock().unwrap();
-        // another pane of the same add-on may have joined while this one waited
+        let lock = self.team_lock(tid);
+        let held = lock.lock().unwrap();
+        // another pane of the same add-on may have claimed or joined while this one waited for the lock
         if let Some(e) = self.find(&a.addon, tid, Kind::Member, "") {
+            drop(held);
+            // join.sh runs outside the lock, so the other pane's join may still be running: wait for its outcome
+            let key = e.key.clone();
+            let e = loop {
+                match self.by_key(&key) {
+                    Some(cur) if cur.state == State::Claimed => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    Some(cur) => break cur,
+                    None => return Err(BrokerError::new("not_available", "the entry is gone")),
+                }
+            };
             return self.member_reply(&e, false);
         }
         let wanted = a.member.clone().unwrap_or_else(|| member_from_pane(&a.pane));
         validate_name(&wanted).map_err(|w| BrokerError::new("bad_args", format!("member name {w}")))?;
         let before = phase("join: members", || self.world.members(team)).map_err(|e| BrokerError::new("not_available", e))?;
-        let name = free_name(&wanted, &|n| before.iter().any(|m| m.name == n));
+        let name = free_name(&wanted, &|n| before.iter().any(|m| m.name == n) || self.name_in_journal(tid, n));
         let claim = random_id();
         let project = self.world.members_root().join(&claim);
         std::fs::create_dir_all(&project).map_err(|e| BrokerError::new("not_available", format!("cannot create the member folder: {e}")))?;
@@ -480,6 +490,9 @@ impl Manager {
         self.update(|es| {
             es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Member, requested: String::new(), name: name.clone(), agent_type: MEMBER_TYPE.into(), project: project_s.clone(), claim: claim.clone(), model: None, state: State::Claimed, pid: None, start: None, reason: None })
         })?;
+        // The lock covers the name decision and the claim. join.sh runs outside it: it takes core's own registry
+        // lock for its read-modify-write of the team config, and the names are already distinct.
+        drop(held);
         if let Err(e) = phase("join: join.sh", || self.world.join(team, &name, MEMBER_TYPE, &project_s)) {
             self.set_state(&key, State::Failed, Some(e.clone()))?;
             return Err(BrokerError::new("not_available", format!("could not join the team: {e}")));
@@ -524,11 +537,18 @@ impl Manager {
             return Err(BrokerError::new("bad_args", "`to` and `body` must not be empty"));
         }
         let me = self.member_of(&a.addon, tid).ok_or_else(|| BrokerError::new("not_granted", "the add-on has not joined the team (call team.join first)"))?;
-        let ms = phase("send: members", || self.world.members(team)).map_err(|e| BrokerError::new("not_available", e))?;
-        if !ms.iter().any(|m| m.name == to) {
-            return Err(BrokerError::new("bad_args", format!("{to} is not a member of the team")));
-        }
-        phase("send: send.sh", || self.world.send(team, &me.name, &to, &body)).map_err(|e| BrokerError::new("not_available", e))?;
+        // No member list is read first: send.sh refuses a recipient that is not registered (and the app never passes
+        // --force), which saves one api.sh run per send. That refusal is the add-on's mistake (`bad_args`); any other
+        // failure of the script is not.
+        phase("send: send.sh", || self.world.send(team, &me.name, &to, &body)).map_err(|e| {
+            // send.sh words the recipient and the sender check alike except for the role; only a missing recipient is the
+            // add-on's mistake. A sender that was removed from outside keeps the script's own text.
+            if e.contains(&format!("to agent '{to}' is not registered in team")) {
+                BrokerError::new("bad_args", format!("{to} is not a member of the team"))
+            } else {
+                BrokerError::new("not_available", e)
+            }
+        })?;
         Ok(json!({ "to": to }))
     }
 
@@ -569,9 +589,11 @@ impl Manager {
             Some(f) => Some(super::broker::resolve_dir(a, deny, f)?),
             None => None,
         };
-        let lock = self.team_lock(team);
-        let _held = lock.lock().unwrap();
+        let lock = self.team_lock(tid);
+        let held = lock.lock().unwrap();
         if let Some(e) = self.find(&a.addon, tid, Kind::Agent, &wanted) {
+            // `retry` may open a terminal, which takes this lock for a moment: not held across it
+            drop(held);
             return self.retry(&e, model);
         }
         let before = phase("spawn: members", || self.world.members(team)).map_err(|e| BrokerError::new("not_available", e))?;
@@ -586,6 +608,9 @@ impl Manager {
         self.update(|es| {
             es.push(Entry { key: key.clone(), addon: a.addon.clone(), team_id: tid.to_string(), team: team.to_string(), kind: Kind::Agent, requested: wanted.clone(), name: name.clone(), agent_type: agent_type.clone(), project: folder_s.clone(), claim: claim.clone(), model: model.clone(), state: State::Claimed, pid: None, start: None, reason: None })
         })?;
+        // The lock covers the name decision and the journal claim. join.sh runs outside it (core's registry lock
+        // serialises the config writes themselves); the check after it is per name.
+        drop(held);
         if let Err(e) = phase("spawn: join.sh", || self.world.join(team, &name, &agent_type, &folder_s)) {
             self.set_state(&key, State::Failed, Some(e.clone()))?;
             return Err(BrokerError::new("not_available", format!("could not join the team: {e}")));
@@ -642,7 +667,17 @@ impl Manager {
     /// through `pty_started` once the pane has one.
     fn open(&self, key: &str) -> Res {
         let e = self.by_key(key).ok_or_else(|| BrokerError::new("not_available", "the entry is gone"))?;
-        self.set_state(key, State::Opening, None)?;
+        // Taking the entry from `joined` to `opening` is the one step that must not happen twice for it: two calls
+        // that both see `joined` would open two terminals. It is done under the team lock; the rest is not.
+        {
+            let lock = self.team_lock(&e.team_id);
+            let _held = lock.lock().unwrap();
+            match self.by_key(key) {
+                Some(cur) if cur.state == State::Joined => self.set_state(key, State::Opening, None)?,
+                Some(cur) => return Ok(summary(&cur)),
+                None => return Err(BrokerError::new("not_available", "the entry is gone")),
+            }
+        }
         let req = OpenPane { key: key.to_string(), team: e.team.clone(), name: e.name.clone(), agent_type: e.agent_type.clone(), project: e.project.clone(), model: e.model.clone() };
         if let Err(why) = phase("spawn: emit open", || self.world.open_pane(&req)) {
             // the member stays joined and recorded; the add-on may ask again
@@ -845,6 +880,8 @@ mod tests {
         /// what the window does when asked to open a pane (default: nothing answers)
         on_open: Mutex<Option<Box<dyn Fn(&OpenPane) + Send>>>,
         renamed: Mutex<HashMap<String, String>>,
+        /// how long `join` takes (join.sh is slow on some machines)
+        join_delay: Mutex<std::time::Duration>,
         root: PathBuf,
         home: PathBuf,
     }
@@ -863,6 +900,8 @@ mod tests {
         }
         fn join(&self, _team: &str, name: &str, t: &str, project: &str) -> Result<(), String> {
             self.joins.fetch_add(1, Ordering::SeqCst);
+            let delay = *self.join_delay.lock().unwrap();
+            std::thread::sleep(delay);
             if let Some(f) = self.outside.lock().unwrap().take() {
                 f(self);
             }
@@ -876,6 +915,12 @@ mod tests {
             Ok(())
         }
         fn send(&self, team: &str, from: &str, to: &str, body: &str) -> Result<(), String> {
+            // like send.sh: the sender and the recipient must both be registered
+            for (role, name) in [("from", from), ("to", to)] {
+                if !self.members.lock().unwrap().iter().any(|m| m.name == name) {
+                    return Err(format!("Error: {role} agent '{name}' is not registered in team '{team}' (registered: ...). Use --force to bypass."));
+                }
+            }
             self.sent.lock().unwrap().push((team.into(), from.into(), to.into(), body.into()));
             Ok(())
         }
@@ -1069,6 +1114,20 @@ mod tests {
             call(&f, "messages.send", json!({"to": "lead", "body": "again"})).unwrap();
         }
         assert_eq!(f.world.sent.lock().unwrap().len(), 21);
+    }
+
+    #[test]
+    fn a_missing_recipient_is_the_add_ons_mistake_but_a_missing_sender_is_not() {
+        let f = fx(all_powers());
+        call(&f, "team.join", json!({})).unwrap();
+        let e = call(&f, "messages.send", json!({"to": "nobody", "body": "x"})).unwrap_err();
+        assert_eq!((e.code, e.message.as_str()), ("bad_args", "nobody is not a member of the team"));
+        // the add-on's own member leaves the team from outside; the recipient is still there
+        f.world.members.lock().unwrap().retain(|m| m.name != "chess");
+        let e = call(&f, "messages.send", json!({"to": "lead", "body": "x"})).unwrap_err();
+        assert_eq!(e.code, "not_available");
+        assert!(e.message.contains("from agent 'chess' is not registered in team"), "{}", e.message);
+        assert!(f.world.sent.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1470,5 +1529,158 @@ mod tests {
         println!("{ms:?}");
         assert!(ms.iter().any(|m| m.name == "white" && m.types == [first.clone()]));
         assert_eq!(w.opened.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn two_spawns_into_one_team_do_not_wait_for_each_others_terminal() {
+        let f = Arc::new(fx(all_powers()));
+        // the window takes 400 ms to report a process
+        let m = f.mgr.clone();
+        *f.world.on_open.lock().unwrap() = Some(Box::new(move |req: &OpenPane| {
+            let (m, key) = (m.clone(), req.key.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                m.pty_started(&key, 777);
+            });
+        }));
+        let t0 = std::time::Instant::now();
+        let hs: Vec<_> = ["white", "black"]
+            .iter()
+            .map(|n| {
+                let f = f.clone();
+                let n = n.to_string();
+                std::thread::spawn(move || call(&f, "agents.spawn", json!({"type": "claude-code", "name": n})).unwrap())
+            })
+            .collect();
+        let rs: Vec<Value> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(t0.elapsed() < std::time::Duration::from_millis(780), "the two waits overlapped: {:?}", t0.elapsed());
+        let mut names: Vec<&str> = rs.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        names.sort();
+        assert_eq!(names, ["black", "white"]);
+        assert!(rs.iter().all(|r| r["state"] == "running"));
+        assert_eq!(f.world.joins.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn two_spawns_of_one_name_get_distinct_members_and_a_retry_in_flight_opens_nothing_twice() {
+        let f = Arc::new(fx(all_powers()));
+        let m = f.mgr.clone();
+        *f.world.on_open.lock().unwrap() = Some(Box::new(move |req: &OpenPane| {
+            let (m, key) = (m.clone(), req.key.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                m.pty_started(&key, 778);
+            });
+        }));
+        // the same name asked by two panes at once is one entry (the second call is a retry of the first)
+        let hs: Vec<_> = (0..3)
+            .map(|_| {
+                let f = f.clone();
+                std::thread::spawn(move || call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap())
+            })
+            .collect();
+        let rs: Vec<Value> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(rs.iter().all(|r| r["name"] == "white"), "{rs:?}");
+        assert_eq!(f.world.joins.load(Ordering::SeqCst), 1, "one join");
+        assert_eq!(f.world.opened.lock().unwrap().len(), 1, "one terminal");
+        // different names asked at once are distinct members
+        let hs: Vec<_> = (0..3)
+            .map(|i| {
+                let f = f.clone();
+                std::thread::spawn(move || call(&f, "agents.spawn", json!({"type": "claude-code", "name": format!("p{i}")})).unwrap())
+            })
+            .collect();
+        let mut names: Vec<String> = hs.into_iter().map(|h| h.join().unwrap()["name"].as_str().unwrap().to_string()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 3);
+        assert_eq!(f.world.opened.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_retry_while_the_terminal_is_opening_returns_the_entry_in_flight() {
+        let f = Arc::new(fx(all_powers()));
+        let m = f.mgr.clone();
+        *f.world.on_open.lock().unwrap() = Some(Box::new(move |req: &OpenPane| {
+            let (m, key) = (m.clone(), req.key.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                m.pty_started(&key, 779);
+            });
+        }));
+        let first = {
+            let f = f.clone();
+            std::thread::spawn(move || call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let retry = call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap();
+        assert_eq!(retry["state"], "opening", "the in-flight entry, not a second terminal: {retry}");
+        assert_eq!(first.join().unwrap()["state"], "running");
+        assert_eq!(f.world.opened.lock().unwrap().len(), 1);
+        assert_eq!(f.world.joins.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn two_spawns_into_one_team_run_join_sh_at_the_same_time() {
+        let f = Arc::new(fx(all_powers()));
+        *f.world.join_delay.lock().unwrap() = std::time::Duration::from_millis(500);
+        let t0 = std::time::Instant::now();
+        let hs: Vec<_> = ["white", "black", "white"]
+            .iter()
+            .map(|n| {
+                let f = f.clone();
+                let n = n.to_string();
+                std::thread::spawn(move || call(&f, "agents.spawn", json!({"type": "claude-code", "name": n})).unwrap())
+            })
+            .collect();
+        let rs: Vec<Value> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(t0.elapsed() < std::time::Duration::from_millis(950), "the two 500 ms joins overlapped: {:?}", t0.elapsed());
+        // the repeated "white" is the same request asked twice: one entry, one join
+        let mut names: Vec<&str> = rs.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names, ["black", "white"]);
+        assert_eq!(f.world.joins.load(Ordering::SeqCst), 2);
+        let ms = f.world.members.lock().unwrap();
+        for n in ["white", "black"] {
+            let m = ms.iter().find(|m| m.name == n).unwrap();
+            assert_eq!(m.types, ["claude-code"], "{n} confirmed with exactly its own registration");
+        }
+    }
+
+    #[test]
+    fn concurrent_spawns_of_the_same_free_name_by_two_add_ons_get_distinct_names() {
+        // two add-ons (two entries keyed by add-on) ask for "white" in one team at the same time
+        let f = Arc::new(fx(all_powers()));
+        *f.world.join_delay.lock().unwrap() = std::time::Duration::from_millis(300);
+        let other = {
+            let mut reg = f.reg.lock().unwrap();
+            let mut files = HashMap::new();
+            files.insert("index.html".to_string(), b"x".to_vec());
+            let id = reg
+                .add(AddPane { addon: "o/other".into(), commit: "c".into(), name: "n".into(), payload: Payload::Embedded(files), entry: "index.html".into(), declared: all_powers(), open_args: OpenArgs::default(), expected_digest: None, pinned: None, on_tamper: None })
+                .unwrap()
+                .id;
+            let gen = reg.begin_generation(id).unwrap();
+            reg.grant_root(id, f.granted.clone()).ok();
+            reg.grant_team(id, "t").ok();
+            for p in [Power::Join, Power::Send, Power::Spawn] {
+                reg.set_power(id, p, true).ok();
+            }
+            (id, gen)
+        };
+        let a = {
+            let f = f.clone();
+            std::thread::spawn(move || call(&f, "agents.spawn", json!({"type": "claude-code", "name": "white"})).unwrap())
+        };
+        let b = {
+            let f = f.clone();
+            std::thread::spawn(move || crate::addons::broker::handle_power(&f.reg, &f.deny, &f.mgr, other.0, other.1, "agents.spawn", &json!({"type": "claude-code", "name": "white"})).unwrap())
+        };
+        let (ra, rb) = (a.join().unwrap(), b.join().unwrap());
+        assert_ne!(ra["name"], rb["name"], "{ra} {rb}");
+        let mut names = vec![ra["name"].as_str().unwrap().to_string(), rb["name"].as_str().unwrap().to_string()];
+        names.sort();
+        assert_eq!(names, ["white", "white-2"]);
     }
 }
