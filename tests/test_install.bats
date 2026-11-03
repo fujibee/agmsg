@@ -4,8 +4,8 @@
 # the packaged artifact (not a hand-built tree like test_helper builds) is what
 # gets validated. Catches packaging drift — e.g. a new scripts/lib/ helper that
 # the installer forgets to copy, which would make every command die at `source`.
-# Tests that only need an install to start from copy one built for real once
-# per file (_restore_install below).
+# Tests that only need an install to start from use a copy of one built for
+# real once per file (_restore_install below).
 
 load test_helper  # for setup_live_owner
 
@@ -105,7 +105,7 @@ teardown() {
 #
 # 65 tests below start from one of a few installs as arrange-only work, and a
 # fresh install costs about 3 s on macOS and 1 s on ubuntu (locally the whole
-# file went from 362 s to 294 s once the repeats were gone). The first test that
+# file went from 388 s to 300 s once the repeats were gone). The first test that
 # asks for a given install builds it for real -- from this tree, with that
 # test's environment, into an empty HOME under $BATS_FILE_TMPDIR -- and later
 # tests copy that tree, so what they assert on is still the real installer's
