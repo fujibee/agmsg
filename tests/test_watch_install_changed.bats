@@ -49,17 +49,20 @@ _wait_for() {
 
 # When the expected line never arrived, say what the watcher looked like, so a
 # red CI run shows whether it died, was still starting, or was alive and silent.
+# Every step is best-effort and read-only: history.sh lists messages without
+# marking anything read (inbox.sh would consume the message under test), and a
+# missing file or directory must not abort before the caller's own assertion.
 _explain_if_missing() {   # <out-file> <pid> <needle>
-  grep -q "$3" "$1" && return 0
+  grep -q "$3" "$1" 2>/dev/null && return 0
   {
     echo "--- watcher output ($1) ---"
-    cat "$1"
+    cat "$1" 2>&1 || true
     if kill -0 "$2" 2>/dev/null; then echo "--- pid $2 alive ---"; else echo "--- pid $2 gone ---"; fi
     echo "--- run dir ---"
-    ls -la "$TEST_SKILL_DIR/run" 2>&1
-    echo "--- unread ---"
-    bash "$SCRIPTS/inbox.sh" team alice 2>&1 | head -5
-  } >&3
+    ls -la "$TEST_SKILL_DIR/run" 2>&1 || true
+    echo "--- recent messages (read-only) ---"
+    bash "$SCRIPTS/history.sh" team alice 5 2>&1 | head -10 || true
+  } >&3 2>/dev/null || true
   return 0
 }
 
@@ -244,4 +247,12 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
 
   kill "$second" 2>/dev/null || true
   wait "$second" 2>/dev/null || true
+}
+
+@test "watch test diagnostic: lists what the watcher saw without reading the unread message, and survives a missing file" {
+  bash "$SCRIPTS/send.sh" team bob alice "still-unread" >/dev/null
+  _explain_if_missing "$BATS_TEST_TMPDIR/does-not-exist.txt" 999999 'never-there'
+  run bash "$SCRIPTS/inbox.sh" team alice
+  [ "$status" -eq 0 ]
+  case "$output" in *still-unread*) ;; *) false ;; esac
 }
