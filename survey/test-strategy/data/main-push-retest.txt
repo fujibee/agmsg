@@ -1,0 +1,40 @@
+pull_request runs since cutoff: 152 (merge-tree conflict/fail: 1; head already contained the main tip: 73)
+push runs since cutoff: 35 {'success': 11, 'cancelled': 22, 'failure': 2}
+push runs re-testing a tree an earlier green PR run had tested: 15 of 35
+  of the 31 push runs that ran the suite (>= 180 s): 13 re-tests
+run_id	conclusion	wall_s	retest	title
+40468366947	success	4048	yes	feat: install, update and remove plugins from GitHub (#1778)
+40522856619	success	1740	no	Let a resumed session take back its own bare-sid seat lock (
+40561557938	success	4358	no	Stop falling back to the Monitor when a project is on agmsgd
+40581169851	cancelled	796	no	Stop suggesting the Monitor from actas when a project is on 
+40582870388	success	2780	no	fix: read process argv with ps -ww so a narrow COLUMNS canno
+40605303552	cancelled	201	yes	install: stop announcing shim installs/refreshes on every ru
+40605556056	cancelled	18	no	daemon: find Node from the recorded path first, then AGMSG_N
+40605585822	cancelled	992	no	delivery: a project on agmsgd never reads as monitor (#1820)
+40607260581	cancelled	3335	no	tests: skip two plugin review-copy cases where Git Bash cann
+40617664518	success	1423	yes	sqlite-sync: tell a jq -b probe that cannot run apart from o
+40975711587	success	1757	yes	check-inbox.sh: reject an unregistered agent type instead of
+41006551175	success	1804	yes	SKILL: say what an agmsgd notice asks for (#1831)
+41013410271	cancelled	2506	yes	plugin remove: name the members left joined; say why they st
+41017329365	cancelled	4716	no	App 0.6.0: add-on panes (#1833)
+41093210515	cancelled	193	no	tests: stop the sync engine a status-liveness test leaves be
+41093530505	cancelled	3691	no	sync engine: skip idle-cycle driver prepare, adaptive backof
+41137016879	success	1742	yes	install: a failing Antigravity setup step no longer stops in
+41244421444	cancelled	941	yes	fix(sync): decode the seal request from stdin once, not per 
+41245542629	success	2515	no	watch: say so when a stopping watch leaves a session agmsgd 
+41340868975	cancelled	114	no	app: state what an add-on cannot do without an absolute (#18
+41340976866	success	1749	no	agmsgd: start when scripts/ differs from the install record,
+41365622600	cancelled	2404	no	daemon: give the systemd unit a PATH that reaches sqlite3 an
+41401568723	cancelled	11	yes	A Codex seat under the shared daemon finds its own pane from
+41401574825	cancelled	1068	no	Add the app-addon member type (data only) (#1860)
+41403273066	cancelled	6770	no	fix(daemon): use the kernel boot_id as the Linux boot id (#1
+41477325662	cancelled	128	yes	Do not stop agmsgd or the Monitor watcher for a file change 
+41477544597	cancelled	187	no	fix(delivery): install opted-in hooks and explain unknown-ow
+41477930505	cancelled	308	no	fix(session-start): keep showing the seat list on every prom
+41478456294	cancelled	1916	no	fix: ask about delivery only on a first human join (#1873)
+41483471072	cancelled	4081	yes	tests: drop internal reviewer names from test comments (#187
+41494315522	failure	4482	yes	Do not keep the Codex PATH shim while agmsgd delivers Codex 
+41592413586	failure	1868	yes	tests: bounded process stops and five flake fixes (#1867)
+41607512279	success	2658	yes	ci: re-measure the macOS seconds table and run bats in 6 sha
+41693412521	cancelled	208	yes	Sync engine: stand down for an install update, not for a fil
+41693862994	cancelled	182	no	tests: wait out the same-second VERSION tie in the watch ins
