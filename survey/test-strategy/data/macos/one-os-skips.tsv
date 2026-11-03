@@ -1,0 +1,23 @@
+file	test_num	skipped_on	other_os_status	reason	title
+test_agmsgd_daemon_sh.bats	13	ubuntu-latest	ok	this test's fake stands in for launchd specifically	daemon.sh enable/disable: registers a resident unit (via a fake launchctl on macOS) and cleans it up
+test_agmsgd_daemon_sh.bats	14	ubuntu-latest	ok	this test's fake stands in for launchd specifically	daemon.sh: an install.db with only the 2-column meta -- status only reads, enable and disable bring it up to date
+test_agmsgd_daemon_sh.bats	15	ubuntu-latest	ok	this test's fake stands in for launchd specifically	daemon.sh start: stale ready state asks the registered manager to start the service
+test_agmsgd_daemon_sh.bats	16	ubuntu-latest	ok	this test's fake stands in for launchd specifically	daemon.sh disable: unregister failure is reported and preserves registration
+test_agmsgd_daemon_sh.bats	24	ubuntu-latest	ok	this test's fake stands in for launchd specifically	daemon.sh enable: _install_generation's manifest read survives a bash whose process substitution inherits IFS
+test_agmsgd_daemon_sh.bats	29	ubuntu-latest	ok	this test's fake stands in for launchd specifically	daemon.sh enable: a busy install operation lock fails without stopping or unregistering a running daemon
+test_agmsgd_daemon_sh.bats	30	ubuntu-latest	ok	this test's fake stands in for launchd specifically	daemon.sh enable: a lock held briefly is waited out
+test_agmsgd_daemon_sh.bats	31	ubuntu-latest	ok	this test's fake stands in for launchd specifically	daemon.sh enable: re-enabling with only a different Node path leaves the running daemon and the loaded unit alone
+test_agmsgd_daemon_sh.bats	32	ubuntu-latest	ok	this test's fake stands in for launchd specifically	daemon.sh enable: a launcher that declined because the intent changed is followed by one more start
+test_agmsgd_daemon_sh.bats	33	ubuntu-latest	ok	this test's fake stands in for launchd specifically	daemon.sh enable: an identical plist that launchd no longer has loaded is bootstrapped again
+test_antigravity_transport.bats	10	ubuntu-latest	ok	macOS libproc layout check	macOS process-info helper agrees with the system start time
+test_antigravity_transport.bats	11	ubuntu-latest	ok	this asserts the behaviour on a host that is NOT Linux	the mjs read-guard: turning delivery OFF still works on a non-Linux host
+test_compat_posix.bats	5	ubuntu-latest	ok	this platform's ps reports a bare comm ([]); the space-splitting path is unreachable here	compat_get_comm matches the real ps for a binary under a space-containing path
+test_delivery.bats	24	macos-latest	ok	the Linux boot id	daemon state: on Linux the boot id is the kernel boot_id, and a record holding btime is unverifiable rather than stopped
+test_install.bats	12	macos-latest	ok	Antigravity TUI monitor is Linux-only	install: Antigravity TUI shim resolves installed launcher and forwards actions first
+test_install.bats	16	macos-latest	ok	Antigravity TUI monitor is Linux-only	install: Antigravity TUI launcher resolves one registered identity
+test_local_quoting.bats	2	ubuntu-latest	ok	/bin/bash is 5.3.9(1)-release; the 3.2 replacement-backslash difference cannot appear here	local quoting: it agrees under /bin/bash too, which is 3.2 on macOS (#897)
+test_local_quoting.bats	5	ubuntu-latest	ok	/bin/bash is 5.3.9(1)-release; the 3.2 replacement-backslash difference cannot appear here	local quoting: the operator every site uses is correct under /bin/bash (#897)
+test_remote_status_liveness.bats	42	macos-latest	ok	ps here does not truncate args to COLUMNS	compat_get_cmdline returns the full argv under a narrow COLUMNS
+test_remote_status_liveness.bats	43	macos-latest	ok	ps here does not truncate args to COLUMNS	status: a narrow COLUMNS does not turn a systemd engine into unknown
+test_remote_status_liveness.bats	44	macos-latest	ok	ps here does not truncate args to COLUMNS	status: a narrow COLUMNS does not turn a pidfile engine into stale
+test_spawn.bats	55	ubuntu-latest	ok	launch_macos_terminal() is Darwin-only	spawn: macOS terminal launch does not steal focus (Terminal and iTerm)

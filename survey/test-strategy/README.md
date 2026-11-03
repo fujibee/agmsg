@@ -1,7 +1,7 @@
 # Test strategy survey: where agmsg CI time goes
 
 Scratch survey, not documentation. Branch `test-strategy-survey`, not for merge.
-Status: in progress. Sections 2-5 are filled in as the measurements finish.
+Status: Step 1 complete (sections 1-5). Proposed order of work at the end.
 
 Data sources (all reproducible with the scripts in `tools/`):
 
@@ -262,16 +262,119 @@ PR's own bats-timings artifact will measure it.
 
 ## 5. Which files need macOS
 
-In progress. Key fact already measured: macOS runners execute the suite
-with bash 3.2.57, ubuntu with bash 5.3. "OS-dependent" therefore has two
-axes: Darwin/BSD userland, and bash 3.2 semantics. The second could be
-covered on a Linux runner with a bash 3.2 build, which would leave macOS
-only the first.
+Full write-up: `macos.md`; per-file classification with file:line evidence:
+`data/macos/classification.tsv`; the proposed subset:
+`data/macos/macos-subset.tsv`.
+
+macOS runners execute the suite with bash 3.2.57 (`/bin/bash`), ubuntu
+with bash 5.3.9. So "needs macOS" has two separate axes:
+
+- **A. Darwin/BSD**: the test, or a script it exercises, takes an
+  OS-specific branch (uname/OSTYPE, launchctl/plist, libproc, `/proc`
+  absence), relies on BSD vs GNU tool behaviour (ps fields and argv
+  truncation, stat -f/-c, date, sed -i, base64, mktemp), or skips on one OS.
+- **B. bash 3.2**: the scripts it exercises use constructs whose behaviour
+  differs between bash 3.2 and 5.x.
+
+Classification (conservative: "no" only with positive evidence that
+nothing OS-specific or bash-3.2-sensitive is reached):
+
+| macOS needed | files | macOS s |
+|---|---:|---:|
+| yes | 119 | 6975 (97 %) |
+| uncertain | 17 | 193 |
+| no | 19 | 27 |
+
+An adversarial second pass tried to refute the 19 "no" rows: 18 held, 1
+was left uncertain (its evidence was wrong but it runs no product code),
+none flipped (`data/macos/verify.tsv`).
+
+What the CI history says (run 41607512279): 16 tests run only on macOS
+(they skip on ubuntu: launchd fakes, libproc, ps comm layout, the bash 3.2
+replacement-backslash difference, the macOS Terminal launcher) and 6 run
+only on ubuntu (Linux boot id, the Antigravity TUI monitor, ps not
+truncating argv) (`data/macos/one-os-skips.tsv`).
+
+**So almost every file touches something OS-divergent, but mostly by
+accident**: 63 files (2132 s) reach Darwin/BSD code only deep inside shared
+libraries (ps liveness probes, compat.sh, terminal dispatch), and 108 files
+are bash-3.2-sensitive because the shared libraries are. Dropping only the
+"no"/"uncertain" files saves about 6 %.
+
+**The real lever is a coverage-preserving subset plus a Linux bash 3.2
+leg.** Keeping every file that has macOS-only tests or a real per-OS branch
+in the test, then greedily adding the cheapest files until every
+OS-divergent product function that any test reaches is reached by a kept
+file, gives **24 files, 2257 s (31 % of today's macOS time)**. That model
+keeps everything today's macOS leg exercises on the Darwin/BSD side;
+bash 3.2 coverage then has to come from a Linux job that puts a bash
+3.2.57 build first on PATH and runs the full suite (cheap ubuntu minutes).
+
+Building bash 3.2 for that leg: the `bash:3.2` Docker image is Alpine
+(musl, BusyBox), so its binary cannot be copied onto the glibc runner and
+running the suite inside it adds a third userland. Compiling bash-3.2.57
+from the GNU tarball on ubuntu (`--without-bash-malloc --disable-nls`),
+cached with actions/cache and pinned by checksum, is the recommended
+route; modern GCC makes old K&R-style code fail on implicit declarations,
+so it needs relaxed warning flags. Not verified locally: building
+downloaded source was blocked by this environment's permission policy,
+so this must be proven in CI.
+
+Caveat: the subset is a model built from static reach plus Linux traces.
+A safe rollout keeps the full macOS run on main pushes and a nightly
+schedule, and uses the subset on PR pushes first, with the subset's own
+misses (anything red on the full macOS run but not on the PR) tracked.
+
+## 6. Proposed order of work
+
+Test-only changes first (they need no workflow change), then the CI changes
+in order of risk. Every workflow change (tests.yml) goes through a GO.
+
+**(a) Test-only PRs, one theme each** (estimates per full run):
+1. test_install.bats install templates: implemented on
+   `tests/install-shared-base` (about -170 s macOS / -50 s ubuntu).
+2. Pin `AGMSG_AGENT_PID=""` in the setup of files that do not test
+   agent-pid resolution (up to -600 s / -450 s; each file checked).
+3. Per-file template for the `setup_test_env` skill dir (-300 s / -125 s).
+4. Per-file shared joined fixtures: test_migrate_team_store, test_remote,
+   test_watch, test_codex_bridge (about -300 s / -200 s together).
+5. Keep the sandbox library copy out of bats' DEBUG trap; the smaller
+   wait/timeout items from `deepdive/`.
+
+**(b) Reuse results that already passed** (workflow change):
+1. Whole tree: when a push to main tests a tree a green PR run already
+   tested (15 of 35 main pushes in the window), skip the heavy jobs and
+   report green, as a docs-only diff does. Mechanism: the PR run uploads a
+   tiny `green-tree-<tree hash>` artifact after every shard passes; the push
+   run's `changes` job looks it up through the Actions API (artifacts are
+   visible repo-wide with `actions: read`). actions/cache cannot do this:
+   a cache written on a PR's merge ref is not readable from main.
+2. Per file: key each test file's result by the hash of its dependency
+   closure plus OS, bash and bats versions and the workflow file; about
+   half of all macOS seconds in the window were such repeats (section 2).
+   Needs the dependency map maintained in the tree (union of static and
+   dynamic, "always" triggers for the fixture core) and the full runs in (d).
+
+**(c) macOS only where it adds coverage** (workflow change): a Linux leg
+running the full suite under a bash 3.2.57 build, and the 24-file macOS
+subset on PR pushes (-69 % of macOS time on PRs); the full macOS run stays
+on main pushes and nightly.
+
+**(d) Impact selection** (workflow change): run the test files whose
+closure intersects the diff; always run everything for a release PR and
+once a day on a schedule. About -40 % per commit on its own (section 3),
+more combined with (b2).
 
 ## What could not be obtained
 
 - Runner queue wait per job (job-level listings are large through the
-  GitHub MCP; collected only where needed).
-- The exact merge-ref commit a pull_request run tested (runs report the PR
-  head SHA; the merge with the base at that moment is approximated by the
-  head).
+  GitHub MCP; collected only where needed). Run wall times include queue
+  waits: main push runs took up to 6770 s.
+- The exact merge-ref commit a pull_request run tested (runs report the
+  head SHA); reconstructed with `git merge-tree` (section 2).
+- Per-file pass/fail of red runs (not in the run listing; red runs were
+  counted as not green for every file).
+- strace read-sets for 21 files (the sweep stopped at its 2-hour limit);
+  those use the static closure.
+- A local bash 3.2.57 build (blocked by this environment's permission
+  policy for building downloaded source).

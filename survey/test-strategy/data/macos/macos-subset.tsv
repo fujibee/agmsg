@@ -1,0 +1,25 @@
+file	macos_s	strength	reason
+test_spawn.bats	653	direct	must-keep (macOS-only CI tests [55])
+test_watch.bats	384	direct	must-keep (real uname//proc branch in test L[419])
+test_delivery.bats	306	direct	must-keep (real uname//proc branch in test L[444, 466])
+test_codex_bridge_launcher.bats	268	direct	must-keep (real uname//proc branch in test L[76])
+test_agmsgd_daemon_sh.bats	220	direct	must-keep (macOS-only CI tests [13, 14, 15, 16, 24, 29, 30, 31, 32, 33])
+test_remote_status_liveness.bats	95	direct	covers directly: s/remote.sh:_remote_systemd_engine_status
+test_dispatch.bats	67	direct-userland	covers directly: s/windows/dispatch.sh:<top>
+test_session_start_claude_code_native_channel.bats	55	direct	must-keep (real uname//proc branch in test L[35])
+test_self_proof.bats	47	direct-userland	covers directly: s/lib/self-proof.sh:_agmsg_proof_ancestry, s/lib/self-proof.sh:_agmsg_proof_identify
+test_watch_agmsgd_note.bats	37	direct	must-keep (real uname//proc branch in test L[108])
+test_antigravity_transport.bats	28	direct	must-keep (macOS-only CI tests [10, 11])
+test_delivery_cli.bats	21	direct	must-keep (real uname//proc branch in test L[25])
+test_helper_stop_pid.bats	19	via-shared-lib	only incidental cover for: tests/test_helper.bash:_pid_gone
+test_agmsgd_switch.bats	16	direct	must-keep (real uname//proc branch in test L[248, 282])
+test_codex_own_pane.bats	15	direct	covers directly: s/lib/codex-own-pane.sh:_agmsg_cop_cwd_of, s/lib/codex-own-pane.sh:_agmsg_cop_no_other_resume, s/lib/codex-own-pane.sh:_agmsg_cop_scan, s/lib/codex-own-pane.sh:
+test_plugin_registry.bats	10	direct	covers directly: s/ext-tool.sh:_ext_tool_read_clipboard
+test_require_python3.bats	4	direct	covers directly: s/lib/require-python3.sh:agmsg_python3_usable
+test_capability_docs.bats	3	direct	covers directly: s/drivers/terminals/tmux/ops.sh:terminal_team_input_ready
+test_teardown_reap.bats	3	via-shared-lib	only incidental cover for: tests/test_helper.bash:_pids_referencing_dir, tests/test_helper.bash:_reap_test_skill_dir_procs
+test_compat_posix.bats	2	direct	must-keep (macOS-only CI tests [5])
+test_daemon_offer.bats	2	direct	must-keep (real uname//proc branch in test L[19])
+test_local_quoting.bats	1	direct	must-keep (macOS-only CI tests [2, 5])
+test_agmsgd_claude_code_queue.bats	1	direct	covers directly: s/daemon/channels/codex-queue.mjs:<top>, s/daemon/channels/process-group.mjs:<top>, s/daemon/executor.mjs:<top>
+test_node_resolve.bats	0	direct	covers directly: s/lib/node.sh:agmsg_resolve_node
