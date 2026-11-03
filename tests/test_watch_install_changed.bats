@@ -47,6 +47,22 @@ _wait_for() {
   return 1
 }
 
+# When the expected line never arrived, say what the watcher looked like, so a
+# red CI run shows whether it died, was still starting, or was alive and silent.
+_explain_if_missing() {   # <out-file> <pid> <needle>
+  grep -q "$3" "$1" && return 0
+  {
+    echo "--- watcher output ($1) ---"
+    cat "$1"
+    if kill -0 "$2" 2>/dev/null; then echo "--- pid $2 alive ---"; else echo "--- pid $2 gone ---"; fi
+    echo "--- run dir ---"
+    ls -la "$TEST_SKILL_DIR/run" 2>&1
+    echo "--- unread ---"
+    bash "$SCRIPTS/inbox.sh" team alice 2>&1 | head -5
+  } >&3
+  return 0
+}
+
 @test "watch: restarts on the new code and keeps delivering, one process, no duplicate, when its own installation is replaced (#684)" {
   local out="$BATS_TEST_TMPDIR/out.txt"
   : > "$out"
@@ -145,6 +161,7 @@ _wait_for() {
 
   bash "$SCRIPTS/send.sh" team bob alice "before-broken-update" >/dev/null
   _wait_for "grep -q 'before-broken-update' '$out'" || true
+  _explain_if_missing "$out" "$pid" 'before-broken-update'
   grep -q 'before-broken-update' "$out"
 
   chmod -x "$SCRIPTS/watch.sh"
