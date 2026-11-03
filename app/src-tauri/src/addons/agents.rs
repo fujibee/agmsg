@@ -541,7 +541,9 @@ impl Manager {
         // --force), which saves one api.sh run per send. That refusal is the add-on's mistake (`bad_args`); any other
         // failure of the script is not.
         phase("send: send.sh", || self.world.send(team, &me.name, &to, &body)).map_err(|e| {
-            if e.contains("is not registered in team") {
+            // send.sh words the recipient and the sender check alike except for the role; only a missing recipient is the
+            // add-on's mistake. A sender that was removed from outside keeps the script's own text.
+            if e.contains(&format!("to agent '{to}' is not registered in team")) {
                 BrokerError::new("bad_args", format!("{to} is not a member of the team"))
             } else {
                 BrokerError::new("not_available", e)
@@ -913,9 +915,11 @@ mod tests {
             Ok(())
         }
         fn send(&self, team: &str, from: &str, to: &str, body: &str) -> Result<(), String> {
-            // like send.sh: a recipient that is not registered is refused
-            if !self.members.lock().unwrap().iter().any(|m| m.name == to) {
-                return Err(format!("Error: to agent '{to}' is not registered in team '{team}' (registered: ...). Use --force to bypass."));
+            // like send.sh: the sender and the recipient must both be registered
+            for (role, name) in [("from", from), ("to", to)] {
+                if !self.members.lock().unwrap().iter().any(|m| m.name == name) {
+                    return Err(format!("Error: {role} agent '{name}' is not registered in team '{team}' (registered: ...). Use --force to bypass."));
+                }
             }
             self.sent.lock().unwrap().push((team.into(), from.into(), to.into(), body.into()));
             Ok(())
@@ -1110,6 +1114,20 @@ mod tests {
             call(&f, "messages.send", json!({"to": "lead", "body": "again"})).unwrap();
         }
         assert_eq!(f.world.sent.lock().unwrap().len(), 21);
+    }
+
+    #[test]
+    fn a_missing_recipient_is_the_add_ons_mistake_but_a_missing_sender_is_not() {
+        let f = fx(all_powers());
+        call(&f, "team.join", json!({})).unwrap();
+        let e = call(&f, "messages.send", json!({"to": "nobody", "body": "x"})).unwrap_err();
+        assert_eq!((e.code, e.message.as_str()), ("bad_args", "nobody is not a member of the team"));
+        // the add-on's own member leaves the team from outside; the recipient is still there
+        f.world.members.lock().unwrap().retain(|m| m.name != "chess");
+        let e = call(&f, "messages.send", json!({"to": "lead", "body": "x"})).unwrap_err();
+        assert_eq!(e.code, "not_available");
+        assert!(e.message.contains("from agent 'chess' is not registered in team"), "{}", e.message);
+        assert!(f.world.sent.lock().unwrap().is_empty());
     }
 
     #[test]
