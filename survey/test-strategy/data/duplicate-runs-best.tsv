@@ -1,0 +1,141 @@
+run_id	event	conclusion	head	wall_s	weight	redundant_files	redundant_mac_s	redundant_lin_s	tree_already_green	title
+40468366947	push	success	809be25847	4048	1.00	0	0	0	no	feat: install, update and remove plugins from GitHub (#1778)
+40470920849	pull_request	cancelled	24627ffbca	482	0.23	0	0	0	no	Stop falling back to the Monitor when a project is on agmsgd
+40471421268	pull_request	success	aedf666b96	4224	1.00	0	0	0	no	Stop falling back to the Monitor when a project is on agmsgd
+40472612043	pull_request	cancelled	a93c84ee22	337	0.16	0	0	0	no	Stop suggesting the Monitor from actas when a project is on 
+40473091106	pull_request	success	23c3d41b1b	4036	1.00	0	0	0	no	Stop suggesting the Monitor from actas when a project is on 
+40522856619	push	success	bcad914e12	1740	1.00	45	513	315	no	Let a resumed session take back its own bare-sid seat lock (
+40539594727	pull_request	success	2f12cfcfe6	1731	1.00	27	230	158	no	fix: read process argv with ps -ww so a narrow COLUMNS canno
+40559913161	pull_request	cancelled	e4a614e2e0	808	0.38	146	2413	1438	no	install: stop announcing shim installs/refreshes on every ru
+40561458352	pull_request	success	a77ed1b426	3514	1.00	136	5600	3335	no	daemon: find Node from the recorded path first, then AGMSG_N
+40561557938	push	success	abc89d77e7	4358	1.00	121	3781	2320	no	Stop falling back to the Monitor when a project is on agmsgd
+40558614469	pull_request	success	7433c3937a	1565	1.00	149	6336	3776	no	tests: skip two plugin review-copy cases where Git Bash cann
+40581169851	push	cancelled	aed3d49fc4	796	0.37	119	1331	821	no	Stop suggesting the Monitor from actas when a project is on 
+40582870388	push	success	ca587b3ff4	2780	1.00	112	3203	1999	no	fix: read process argv with ps -ww so a narrow COLUMNS canno
+40561824011	pull_request	success	cd48a55cc3	1190	1.00	111	3202	1998	no	install: stop announcing shim installs/refreshes on every ru
+40588091800	pull_request	cancelled	73d60d30e5	534	0.25	118	939	594	no	delivery: a project on agmsgd never reads as monitor
+40589092966	pull_request	cancelled	e2e99562e3	573	0.27	118	1007	637	no	delivery: a project on agmsgd never reads as monitor
+40590162609	pull_request	success	70b1143359	1912	1.00	118	3763	2380	no	delivery: a project on agmsgd never reads as monitor
+40605303552	push	cancelled	84da4f3e3a	201	0.09	155	675	382	yes	install: stop announcing shim installs/refreshes on every ru
+40605585822	push	cancelled	65a522870e	992	0.46	135	2595	1545	no	delivery: a project on agmsgd never reads as monitor (#1820)
+40606784716	pull_request	success	3c4b7ae331	2010	1.00	30	234	159	no	fix(antigravity): refuse a read reservation that names no ab
+40607116702	pull_request	cancelled	cfd112b751	573	0.27	87	469	306	no	sqlite-sync: tell a jq -b probe that cannot run apart from o
+40607260581	push	cancelled	48fab9740b	3335	1.00	134	5523	3289	no	tests: skip two plugin review-copy cases where Git Bash cann
+40608025572	pull_request	cancelled	d4f8a5dbc7	282	0.13	86	220	145	no	sqlite-sync: tell a jq -b probe that cannot run apart from o
+40608386673	pull_request	success	4490560672	3867	1.00	86	1674	1100	no	sqlite-sync: tell a jq -b probe that cannot run apart from o
+40617664518	push	success	7082fc03f3	1423	1.00	155	7195	4069	yes	sqlite-sync: tell a jq -b probe that cannot run apart from o
+40715828005	pull_request	cancelled	bd00ffadcb	3005	1.00	154	6431	3831	no	chore(deps): bump the all group across 1 directory with 4 up
+40715861999	pull_request	failure	ff11b44d48	3293	1.00	153	6428	3829	no	chore(deps): bump the all group across 1 directory with 3 up
+40715957528	pull_request	success	adfdfa160f	4432	1.00	0	0	0	no	chore(deps): bump the all group across 1 directory with 10 u
+40716047079	pull_request	success	e058d7b9a4	2755	1.00	152	6427	3828	no	chore(deps): bump the all group across 1 directory with 18 u
+40802215751	pull_request	success	0c22a6f981	1767	1.00	124	3373	2182	no	devin: make the type spawnable with --model and a -- seeded 
+40894252221	pull_request	success	5075e567b4	1856	1.00	143	6090	3651	no	SKILL: say what an agmsgd notice asks for
+40895860980	pull_request	success	98c1f55be0	317	1.00	129	3873	2390	no	check-inbox.sh: reject an unregistered agent type instead of
+40975711587	push	success	234aa3b11f	1757	1.00	155	7195	4069	yes	check-inbox.sh: reject an unregistered agent type instead of
+41000092121	pull_request	success	8d52c37a6e	1657	1.00	141	6065	3632	no	SKILL: say what an agmsgd notice asks for
+41006551175	push	success	def7b4c21d	1804	1.00	155	7195	4069	yes	SKILL: say what an agmsgd notice asks for (#1831)
+41006981075	pull_request	cancelled	e35ace8873	2563	1.00	148	6112	3666	no	App 0.6.0: add-on panes
+41007746226	pull_request	cancelled	0a53ebf10c	568	0.27	126	1096	678	no	plugin remove: name the members left joined; say why they st
+41008507812	pull_request	success	479ba7df2f	3089	1.00	126	4131	2557	no	plugin remove: name the members left joined; say why they st
+41010811859	pull_request	success	b256eb3083	2965	1.00	148	6112	3666	no	App 0.6.0: add-on panes
+41012844093	pull_request	cancelled	eb4b6c400d	1351	0.63	101	1348	921	no	sync engine: skip idle-cycle driver prepare, adaptive backof
+41012934746	pull_request	cancelled	ecc6c8b310	509	0.24	149	1502	893	no	tests: stop the sync engine a status-liveness test leaves be
+41013410271	push	cancelled	17b457b884	2506	1.00	155	7195	4069	yes	plugin remove: name the members left joined; say why they st
+41013630920	pull_request	cancelled	64bc683347	356	0.17	149	1051	625	no	tests: stop the sync engine a status-liveness test leaves be
+41014095466	pull_request	success	e12e8f0750	4440	1.00	149	6318	3758	no	tests: stop the sync engine a status-liveness test leaves be
+41014661723	pull_request	cancelled	29b431f37d	262	0.12	146	782	466	no	install: a failing Antigravity setup step no longer stops in
+41014961396	pull_request	cancelled	be4db5546e	1118	0.52	101	1116	762	no	sync engine: skip idle-cycle driver prepare, adaptive backof
+41014987929	pull_request	cancelled	7766810874	337	0.16	146	1006	600	no	install: a failing Antigravity setup step no longer stops in
+41015410202	pull_request	cancelled	e2bbe69ea4	347	0.16	146	1036	618	no	install: a failing Antigravity setup step no longer stops in
+41016588719	pull_request	cancelled	a111ac5321	1167	0.55	101	1165	795	no	sync engine: skip idle-cycle driver prepare, adaptive backof
+41017329365	push	cancelled	1c01c3898b	4716	1.00	149	6113	3667	no	App 0.6.0: add-on panes (#1833)
+41017757816	pull_request	success	beaeb1f575	3537	1.00	148	6112	3666	no	chore(deps): bump the all group across 1 directory with 18 u
+41018445299	pull_request	cancelled	2886d64d1f	917	0.43	70	406	242	no	sync engine: skip idle-cycle driver prepare, adaptive backof
+41019940844	pull_request	cancelled	11159a2607	1100	0.51	70	487	290	no	sync engine: skip idle-cycle driver prepare, adaptive backof
+41021804424	pull_request	cancelled	1e65dba8a9	711	0.33	70	315	188	no	sync engine: skip idle-cycle driver prepare, adaptive backof
+41022894968	pull_request	success	e2227deea0	3158	1.00	70	948	565	no	sync engine: skip idle-cycle driver prepare, adaptive backof
+41093210515	push	cancelled	e365336daf	193	0.09	153	579	345	no	tests: stop the sync engine a status-liveness test leaves be
+41093530505	push	cancelled	2b91babdf0	3691	1.00	149	6318	3758	no	sync engine: skip idle-cycle driver prepare, adaptive backof
+41015835175	pull_request	success	15c19798f9	1564	1.00	145	6298	3748	no	install: a failing Antigravity setup step no longer stops in
+41128283177	pull_request	cancelled	d04a5a9752	2152	1.00	134	5503	3270	no	daemon: give the systemd unit a PATH that reaches sqlite3 an
+41137016879	push	success	8269d88059	1742	1.00	155	7195	4069	yes	install: a failing Antigravity setup step no longer stops in
+41150625052	pull_request	cancelled	7d63a48a29	1774	0.83	125	3106	1926	no	watch.sh: skip the real store read on an idle cycle that has
+41153129774	pull_request	success	b2904d9b77	1947	1.00	125	3748	2325	no	watch.sh: skip the real store read on an idle cycle that has
+41156283207	pull_request	cancelled	51661defa9	801	0.37	125	1402	870	no	watch.sh: skip the real store read on an idle cycle that has
+41157236913	pull_request	success	f073fd22e7	1716	1.00	125	3748	2325	no	watch.sh: skip the real store read on an idle cycle that has
+41132636742	pull_request	success	bf692cab37	1672	1.00	135	5598	3333	no	daemon: give the systemd unit a PATH that reaches sqlite3 an
+41236926599	pull_request	cancelled	34d6b49ed2	437	0.20	135	1221	730	no	agmsgd: start when scripts/ differs from the install record,
+41237314008	pull_request	success	f277a5928e	1988	1.00	115	2970	2004	no	fix(sync): decode the seal request from stdin once, not per 
+41238146267	pull_request	cancelled	5fc981ad7b	229	0.11	95	302	188	no	fix(daemon): use the kernel boot_id as the Linux boot id
+41238153025	pull_request	cancelled	bf40a57ca1	218	0.10	125	382	237	no	watch: say so when a stopping watch leaves a session agmsgd 
+41238343996	pull_request	success	a8ce2c6b7c	5803	1.00	95	2827	1756	no	fix(daemon): use the kernel boot_id as the Linux boot id
+41238386084	pull_request	success	7beea55fb1	5268	1.00	125	3748	2325	no	watch: say so when a stopping watch leaves a session agmsgd 
+41238939204	pull_request	failure	f65b62e699	6494	1.00	93	2825	1754	no	fix(daemon): do not report an executor in another PID namesp
+41244421444	push	cancelled	261e37b68f	941	0.44	155	3162	1788	yes	fix(sync): decode the seal request from stdin once, not per 
+41245542629	push	success	318b082b86	2515	1.00	134	4109	2574	no	watch: say so when a stopping watch leaves a session agmsgd 
+41340976866	push	success	a8e56861af	1749	1.00	135	5981	3576	no	agmsgd: start when scripts/ differs from the install record,
+41365622600	push	cancelled	d1e4d1ccec	2404	1.00	135	5598	3333	no	daemon: give the systemd unit a PATH that reaches sqlite3 an
+41365714643	pull_request	failure	7657e0b9b8	3581	1.00	110	3669	2271	no	fix(daemon): use the kernel boot_id as the Linux boot id
+41369448079	pull_request	success	721594de40	2564	1.00	122	3983	2481	no	Add the app-addon member type (data only)
+41369707685	pull_request	failure	967c1a7425	1449	1.00	135	5598	3333	no	App add-ons: join a team, send messages and start agents
+41371245100	pull_request	success	2baebe1747	2972	1.00	110	3669	2271	no	fix(daemon): use the kernel boot_id as the Linux boot id
+41372436338	pull_request	cancelled	07e9b1bf34	409	0.19	82	267	161	no	A Codex seat under the shared daemon finds its own pane from
+41372965717	pull_request	cancelled	48f8ea56f9	717	0.33	82	468	283	no	A Codex seat under the shared daemon finds its own pane from
+41373887188	pull_request	cancelled	bd871ae0d7	675	0.32	85	443	268	no	A Codex seat under the shared daemon finds its own pane from
+41374758103	pull_request	success	1b9e8a85c5	2187	1.00	85	1405	850	no	A Codex seat under the shared daemon finds its own pane from
+41401574825	push	cancelled	7ace2f17d6	1068	0.50	132	2045	1278	no	Add the app-addon member type (data only) (#1860)
+41402623363	pull_request	cancelled	f41f306ec6	2141	1.00	114	3394	2128	no	Do not stop agmsgd or the Monitor watcher for a file change 
+41403032354	pull_request	cancelled	a3354ff4ed	547	0.26	110	795	521	no	Do not keep the Codex PATH shim while agmsgd delivers Codex 
+41403273066	push	cancelled	0e7d6f4102	6770	1.00	104	2800	1726	no	fix(daemon): use the kernel boot_id as the Linux boot id (#1
+41403448421	pull_request	success	ea84430101	5436	1.00	92	2769	1705	no	fix(daemon): do not report an executor in another PID namesp
+41403852762	pull_request	cancelled	cbd2692963	1511	0.71	101	1971	1213	no	fix(delivery): install opted-in hooks and explain unknown-ow
+41403871861	pull_request	cancelled	917da261aa	1712	0.80	104	2239	1380	no	App add-ons: join a team, send messages and start agents
+41404136871	pull_request	cancelled	a4002cf9da	730	0.34	93	809	508	no	Do not keep the Codex PATH shim while agmsgd delivers Codex 
+41405074810	pull_request	cancelled	2385f8358b	563	0.26	0	0	0	no	tests: bounded process stops and five flake fixes
+41405208912	pull_request	cancelled	874642473b	915	0.43	85	600	363	no	codex: tell herdr which pane holds a Codex seat's thread
+41405341000	pull_request	cancelled	c846b651f2	1572	0.73	93	1742	1095	no	Do not keep the Codex PATH shim while agmsgd delivers Codex 
+41405936060	pull_request	cancelled	d1f51fefcb	188	0.09	0	0	0	no	tests: bounded process stops and five flake fixes
+41406254702	pull_request	success	0a2ab52ff8	9366	1.00	100	2790	1717	no	Do not stop agmsgd or the Monitor watcher for a file change 
+41406277642	pull_request	cancelled	5cb3fdf718	267	0.12	0	0	0	no	tests: bounded process stops and five flake fixes
+41406427951	pull_request	success	0405fe2aee	13349	1.00	101	2793	1719	no	fix(delivery): install opted-in hooks and explain unknown-ow
+41406540197	pull_request	failure	ef77a64866	11646	1.00	95	1835	1247	no	Sync engine: stand down for an install update, not for a fil
+41406613447	pull_request	cancelled	0cc7cf83cf	330	0.15	0	0	0	no	tests: bounded process stops and five flake fixes
+41406690364	pull_request	cancelled	c49f75847c	572	0.27	85	375	227	no	codex: tell herdr which pane holds a Codex seat's thread
+41406956533	pull_request	cancelled	84d8f9816e	860	0.40	103	1124	693	no	App add-ons: join a team, send messages and start agents
+41407743574	pull_request	cancelled	22eee004c1	402	0.19	100	522	321	no	fix: ask about delivery only on a first human join
+41407758194	pull_request	cancelled	69dd2e3369	4258	1.00	104	2800	1726	no	fix(app): treat an installed release candidate as older than
+41407769391	pull_request	cancelled	123cf6fde4	412	0.19	104	539	332	no	feat(app): say why add-ons are off, in the user's language
+41407999014	pull_request	cancelled	acd53511fc	3687	1.00	93	2373	1491	no	Do not keep the Codex PATH shim while agmsgd delivers Codex 
+41408352945	pull_request	cancelled	cf64b118ac	1564	0.73	103	2045	1260	no	App add-ons: join a team, send messages and start agents
+41408503407	pull_request	cancelled	a38810743e	3842	1.00	104	2800	1726	no	feat(app): say why add-ons are off, in the user's language
+41408687787	pull_request	success	4897f35205	14825	1.00	100	2780	1710	no	fix: ask about delivery only on a first human join
+41409351031	pull_request	cancelled	a325bb678c	299	0.14	102	391	241	no	install --update: stop a running agmsgd and confirm it is go
+41409876502	pull_request	cancelled	b66cccdd32	3062	1.00	102	2799	1724	no	install --update: stop a running agmsgd and confirm it is go
+41410628658	pull_request	cancelled	f32b128247	1406	0.66	104	1839	1133	no	session-start: re-publish messaging_socket on a proven resum
+41411235437	pull_request	cancelled	d13ab345cc	182	0.09	103	238	147	no	App add-ons: join a team, send messages and start agents
+41411602158	pull_request	cancelled	02582ae325	2179	1.00	103	2799	1725	no	App add-ons: join a team, send messages and start agents
+41413437490	pull_request	cancelled	2c77e8240b	1131	0.53	78	716	434	no	session-start: re-publish messaging_socket on a proven resum
+41415543600	pull_request	cancelled	e35a3228b8	289	0.13	78	183	111	no	session-start: re-publish messaging_socket on a proven resum
+41407720312	pull_request	cancelled	388bf92bb5	12003	1.00	85	1405	850	no	codex: tell herdr which pane holds a Codex seat's thread
+41405239697	pull_request	success	4a830c33f5	8757	1.00	78	985	640	no	fix(session-start): keep showing the seat list on every prom
+41477544597	push	cancelled	fef4fbfbb2	187	0.09	126	354	221	no	fix(delivery): install opted-in hooks and explain unknown-ow
+41477930505	push	cancelled	0607e8f314	308	0.14	114	500	313	no	fix(session-start): keep showing the seat list on every prom
+41478456294	push	cancelled	b8aa246a41	1916	0.89	112	3110	1947	no	fix: ask about delivery only on a first human join (#1873)
+41407191316	pull_request	success	2e9fb11f94	1655	1.00	0	0	0	no	tests: bounded process stops and five flake fixes
+41408066971	pull_request	success	f4a4c7d988	1634	1.00	0	0	0	no	tests: drop internal reviewer names from test comments
+41483471072	push	cancelled	7622347d6c	4081	1.00	155	7195	4069	yes	tests: drop internal reviewer names from test comments (#187
+41415158811	pull_request	success	ae13a21bf1	1801	1.00	99	2214	1307	no	Do not keep the Codex PATH shim while agmsgd delivers Codex 
+41494315522	push	failure	581f1bdf30	4482	1.00	155	7195	4069	yes	Do not keep the Codex PATH shim while agmsgd delivers Codex 
+41486605221	pull_request	failure	df9d576ab6	1836	1.00	149	6376	3793	no	tests: give the watch install-changed waits 40 s instead of 
+41483878932	pull_request	success	031f40db4e	626	1.00	0	0	0	no	tests: bounded process stops and five flake fixes
+41592413586	push	failure	eff8d41f57	1868	1.00	155	7195	4069	yes	tests: bounded process stops and five flake fixes (#1867)
+41594877205	pull_request	failure	d082ae2899	3440	1.00	153	6278	3719	no	ci: re-measure the macOS seconds table and run bats in 6 sha
+41602725731	pull_request	success	859d392a1d	2159	1.00	0	0	0	no	ci: re-measure the macOS seconds table and run bats in 6 sha
+41594954132	pull_request	success	9186e2cc75	1801	1.00	149	6376	3793	no	tests: give the watch install-changed waits 40 s instead of 
+41607512279	push	success	64723d66c0	2658	1.00	155	7195	4069	yes	ci: re-measure the macOS seconds table and run bats in 6 sha
+41478637577	pull_request	success	2b5be8cbb9	2141	1.00	127	3200	2139	no	Sync engine: stand down for an install update, not for a fil
+41608787252	pull_request	failure	712f92a5ca	3311	1.00	149	6376	3793	no	tests: give the watch install-changed waits 40 s instead of 
+41616575673	pull_request	success	8d144de402	1972	1.00	149	6376	3793	no	tests: give the watch install-changed waits 40 s instead of 
+41693412521	push	cancelled	713894feb5	208	0.10	155	699	395	yes	Sync engine: stand down for an install update, not for a fil
+41693862994	push	cancelled	551764e0be	182	0.09	150	545	325	no	tests: wait out the same-second VERSION tie in the watch ins
+41694221323	pull_request	success	11684f0c1f	634	1.00	133	4953	3007	no	release: 1.7.1

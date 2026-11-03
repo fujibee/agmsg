@@ -102,17 +102,95 @@ high there. See section 4.
 
 ## 2. Duplicate executions since v1.7.0
 
-In progress (needs the run inventory and the dependency graph).
+Window: v1.7.0 (809be25, 2026-10-27 07:38 UTC) to 2026-11-03 18:30 UTC.
+Run inventory from the GitHub MCP: `data/tests-yml-runs-2026-10-23_2026-11-03.tsv`.
+
+| | runs | ran the suite (wall >= 180 s) |
+|---|---:|---:|
+| pull_request | 152 (82 green, 62 cancelled, 8 red) | 109 |
+| push to main | 35 (11 green, 22 cancelled, 2 red) | 31 |
+
+Those runs executed about 100 full-suite equivalents in 7 days: about
+725,000 macOS bats seconds (201 h) and 410,000 ubuntu bats seconds (114 h),
+cancelled runs counted by the share of a full run's wall time they lasted.
+
+**Headline: about half of that re-ran a test file whose inputs had already
+passed.** A test file's execution is counted redundant when the content of
+every file it depends on is byte-identical to what an earlier run had
+already tested green (that run finished before this one started).
+
+| estimate | executions redundant | macOS seconds | ubuntu seconds |
+|---|---:|---:|---:|
+| best: strace read-set + static source/exec propagation | 70 % | 53 % (384,000 s) | 56 % |
+| conservative floor: union with the full static closure | 52 % | 36 % (262,000 s) | 38 % |
+| push to main only (best) | 84 % | 74 % | |
+| pull_request only (best) | 66 % | 47 % | |
+
+Per-file and per-run detail: `data/duplicate-files-best.tsv`,
+`data/duplicate-runs-best.tsv` (and `-conservative`).
+
+**Whole-tree re-tests on main.** A pull_request run tests GitHub's merge
+ref (the head merged into main at that moment). Reconstructing it with
+`git merge-tree --write-tree <main tip at run start> <head>`: 15 of the 35
+push-to-main runs (13 of the 31 that ran the suite) tested a tree that was
+byte-identical to the merge ref of a PR run that had already passed. 73 of
+152 PR runs had a head that already contained the main tip. Detail:
+`data/main-push-retest.txt`.
+
+Method and limits:
+- Dependencies of a test file: the files it executed, read or probed under
+  strace on Linux (section 3), plus everything those scripts source or
+  execute according to the static analyzer, plus `tests/test_helper.bash`
+  and `.github/workflows/tests.yml` (a workflow change invalidates
+  everything). The 21 files the strace sweep did not reach (it stopped at
+  its 2-hour limit) use the static closure.
+- "Green" is per run (a red run contributes nothing; the listing has no
+  per-file result). Cancelled runs are weighted by wall time.
+- The tree a PR run tested is the reconstructed merge ref; when the merge
+  conflicts, the head.
+- Not modelled: runner-image or tool drift between runs (a nightly full run
+  covers that), and flaky tests (reusing a green result also hides a flake
+  that would have failed this time).
 
 ## 3. Dependency graph
 
-In progress. Method: every test file is run under
-`strace -f -e trace=execve,openat` (`tools/strace_sweep.sh`) and the files
-it actually executed or read are mapped back to repo paths
-(`tools/extract_reads.py`; reads by cp/find/ls etc. are ignored so the
-`cp -R scripts/` in the fixture does not count as reading every script).
-That is compared with a static source/exec analysis to find where each
-approach misses.
+**Verdict: changed files -> affected test files can be computed mechanically,
+but the shared fixture core limits what it saves.** Full write-up:
+`deps.md`; data in `data/deps/`.
+
+- Dynamic read-sets: every test file run under
+  `strace -f -e trace=execve,openat` (`tools/strace_sweep.sh`), opened paths
+  mapped back to repo files (`tools/extract_reads.py`; reads by cp/find/ls
+  are ignored so the fixture's `cp -R scripts/` does not count). 134 of 155
+  files traced (`data/deps/strace-read-sets.tsv`); a traced test file opens
+  20 repo files on average.
+- Static closure (`tools/deps/static_deps.py`, regex-based, follows
+  `source`/exec/helper calls, data-driven registries as all matches):
+  recall 0.996 against the strace sets (all misses are top-level non-code
+  files), but low precision: 94 files per test on average against 20
+  opened. Over-approximation comes from all storage drivers, all type
+  templates, ext-tool manifests, macOS-only helpers.
+- Where the static side breaks (counts and file:line in `deps.md`):
+  data-driven registries (driver/type/terminal dirs chosen at runtime,
+  `template=` in type.conf), paths passed through variables or `bash -c
+  'source "$1"' _ PATH`, whole-tree readers (git grep, CI scanners, node
+  fixtures that copy `scripts/`), OS branches a Linux trace never takes,
+  files generated at test time (rendered SKILL.md, install manifests).
+- Where the dynamic side breaks: Linux only (macOS branches absent), stat
+  checks (`[ -f X ]`) are invisible, the first extractor dropped paths with
+  `..` (patched by the static source/exec propagation used in section 2).
+- **The shared core**: 107 files call `setup_test_env`, which runs
+  `scripts/internal/init-db.sh` -> `scripts/lib/storage.sh`, `compat.sh`,
+  `validate.sh`, `sqlpath.sh`. A change to any of them selects 130-133 test
+  files, 97 % of CI seconds. Replaying the last 300 main commits through a
+  robust selector (union of static and dynamic), the mean commit needs 60 %
+  of CI seconds (median 78 %); the distribution is bimodal: 35 % of
+  commits (docs, app, test-only) need under 20 %, 62 % need 70 % or more,
+  27 % need 95 % or more.
+- So impact selection alone saves about 40 % on average; result reuse
+  (section 2, keyed by the content of each file's dependencies) catches the
+  repeats that selection does not: a PR's later pushes, re-runs, and the
+  push to main after a merge.
 
 ## 4. Shortening candidates (15 slowest files)
 

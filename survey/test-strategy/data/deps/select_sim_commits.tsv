@@ -1,0 +1,301 @@
+commit	n_files	strict_tests	strict_frac	call_tests	call_frac	calldyn_tests	calldyn_frac	run_all_reason	subject
+551764e	1	4	0.030	4	0.030	4	0.030		551764e 2026-11-03 tests: wait out the same-second VERSION tie in the watch install-changed tests (#
+713894f	2	45	0.442	70	0.728	70	0.728		713894f 2026-11-03 Sync engine: stand down for an install update, not for a file change under script
+64723d6	3	155	1.000	155	1.000	155	1.000	ci-config	64723d6 2026-11-03 ci: re-measure the macOS seconds table and run bats in 6 shards (#1884)
+eff8d41	19	126	0.984	126	0.984	126	0.984		eff8d41 2026-11-02 tests: bounded process stops and five flake fixes (#1867)
+581f1bd	8	89	0.932	101	0.938	101	0.938		581f1bd 2026-11-02 Do not keep the Codex PATH shim while agmsgd delivers Codex notices (#1865)
+7622347	5	122	0.979	122	0.979	122	0.979		7622347 2026-11-02 tests: drop internal reviewer names from test comments (#1876)
+b8aa246	4	89	0.932	101	0.938	101	0.938		b8aa246 2026-11-02 fix: ask about delivery only on a first human join (#1873)
+0607e8f	7	89	0.932	100	0.938	100	0.938		0607e8f 2026-11-02 fix(session-start): keep showing the seat list on every prompt until a seat is ch
+fef4fbf	4	38	0.465	74	0.752	74	0.752		fef4fbf 2026-11-02 fix(delivery): install opted-in hooks and explain unknown-owner recovery (#1866)
+097b178	8	51	0.544	78	0.779	78	0.779		097b178 2026-11-02 Do not stop agmsgd or the Monitor watcher for a file change under scripts/ (#1864
+0e7d6f4	10	132	0.990	135	0.990	135	0.990		0e7d6f4 2026-11-01 fix(daemon): use the kernel boot_id as the Linux boot id (#1853)
+7ace2f1	3	87	0.932	100	0.938	100	0.938		7ace2f1 2026-11-01 Add the app-addon member type (data only) (#1860)
+25ac5ae	3	72	0.857	95	0.916	95	0.916		25ac5ae 2026-11-01 A Codex seat under the shared daemon finds its own pane from its thread (#1862)
+d1e4d1c	6	26	0.275	26	0.275	26	0.275		d1e4d1c 2026-11-01 daemon: give the systemd unit a PATH that reaches sqlite3 and Node (#1844)
+a8e5686	3	25	0.211	27	0.220	27	0.220		a8e5686 2026-11-01 agmsgd: start when scripts/ differs from the install record, and say what differe
+a3b306d	9	1	0.000	1	0.000	1	0.000		a3b306d 2026-11-01 app: state what an add-on cannot do without an absolute (#1857)
+318b082	2	45	0.542	75	0.777	75	0.777		318b082 2026-10-31 watch: say so when a stopping watch leaves a session agmsgd cannot yet address (#
+261e37b	2	48	0.461	132	0.966	132	0.966		261e37b 2026-10-31 fix(sync): decode the seal request from stdin once, not per chunk (#1852)
+8269d88	2	11	0.176	11	0.176	11	0.176		8269d88 2026-10-30 install: a failing Antigravity setup step no longer stops install or update (#184
+2b91bab	4	130	0.966	132	0.966	132	0.966		2b91bab 2026-10-30 sync engine: skip idle-cycle driver prepare, adaptive backoff when quiet (#1837)
+e365336	1	5	0.040	5	0.040	5	0.040		e365336 2026-10-30 tests: stop the sync engine a status-liveness test leaves behind (#1838)
+1c01c38	220	5	0.012	9	0.139	9	0.139		1c01c38 2026-10-29 App 0.6.0: add-on panes (#1833)
+17b457b	5	56	0.781	88	0.904	88	0.904		17b457b 2026-10-29 plugin remove: name the members left joined; say why they stop answering (#1834)
+def7b4c	2	21	0.188	21	0.188	21	0.188		def7b4c 2026-10-29 SKILL: say what an agmsgd notice asks for (#1831)
+234aa3b	2	35	0.492	74	0.780	74	0.780		234aa3b 2026-10-29 check-inbox.sh: reject an unregistered agent type instead of exiting silently (#1
+7082fc0	2	130	0.989	133	0.989	133	0.989		7082fc0 2026-10-27 sqlite-sync: tell a jq -b probe that cannot run apart from one that lacks -b (#18
+48fab97	1	4	0.035	4	0.035	4	0.035		48fab97 2026-10-27 tests: skip two plugin review-copy cases where Git Bash cannot set them up (#1809
+65a5228	5	90	0.932	101	0.938	101	0.938		65a5228 2026-10-27 delivery: a project on agmsgd never reads as monitor (#1820)
+887d8d3	2	25	0.275	25	0.275	25	0.275		887d8d3 2026-10-27 daemon: find Node from the recorded path first, then AGMSG_NODE, then PATH (#1818
+84da4f3	2	11	0.176	11	0.176	11	0.176		84da4f3 2026-10-27 install: stop announcing shim installs/refreshes on every run (#1816)
+ca587b3	4	128	0.989	131	0.989	131	0.989		ca587b3 2026-10-28 fix: read process argv with ps -ww so a narrow COLUMNS cannot truncate it (#1813)
+aed3d49	4	90	0.932	101	0.938	101	0.938		aed3d49 2026-10-27 Stop suggesting the Monitor from actas when a project is on agmsgd (#1812)
+abc89d7	8	90	0.932	101	0.938	101	0.938		abc89d7 2026-10-27 Stop falling back to the Monitor when a project is on agmsgd (#1811)
+bcad914	3	128	0.989	131	0.989	131	0.989		bcad914 2026-10-27 Let a resumed session take back its own bare-sid seat lock (#1808)
+809be25	59	155	1.000	155	1.000	155	1.000	ci-config	809be25 2026-10-27 feat: install, update and remove plugins from GitHub (#1778)
+e58bb31	4	36	0.479	73	0.774	73	0.774		e58bb31 2026-10-26 install: do not auto-force a Codex shim reclaim on --update --cmd (#1790)
+a5339b4	4	13	0.131	14	0.131	15	0.157		a5339b4 2026-10-25 release: 1.6.1 (#1764)
+d6a75d3	12	25	0.188	27	0.197	27	0.197		d6a75d3 2026-10-25 fix(daemon): bound polling and record delivery events (#1762)
+a708201	11	131	0.990	134	0.990	134	0.990		a708201 2026-10-24 fix(daemon): finish Claude Code nudges on socket send (#1744)
+bb061bd	8	24	0.235	24	0.235	24	0.235		bb061bd 2026-10-24 fix(update): reload the installed skill and changelog (#1742)
+47a5c6e	4	24	0.188	26	0.197	26	0.197		47a5c6e 2026-10-24 fix(daemon): accept Codex queue receipts without consumption checks (#1743)
+53409c4	3	30	0.422	30	0.422	30	0.422		53409c4 2026-10-24 fix(actas): explain native delivery readiness fallback (#1740)
+b08b7ad	5	55	0.757	84	0.862	84	0.862		b08b7ad 2026-10-24 fix(inbox): refuse unknown teams before naming hooks (#1739)
+9bcf93d	4	28	0.362	73	0.774	73	0.774		9bcf93d 2026-10-24 fix(install): respect the selected Codex profile (#1738)
+2cd68f2	2	24	0.188	26	0.197	26	0.197		2cd68f2 2026-10-24 fix(daemon): check idle Claude Code seat sockets before reporting availability (#
+6f6568a	1	4	0.065	4	0.065	4	0.065		6f6568a 2026-10-23 test(delivery): reap the FIFO reproduction writer (#1735)
+ea298bd	12	73	0.857	95	0.916	95	0.916		ea298bd 2026-10-23 fix(herdr): preserve existing agent names (#1676)
+3d8b22c	2	155	1.000	155	1.000	155	1.000	ci-config	3d8b22c 2026-10-24 ci: run app build and tests on Node 22 (Node 20 is EOL) (#1590)
+c889a43	6	24	0.188	26	0.197	26	0.197		c889a43 2026-10-23 fix(codex): recover Windows queue notices without start witnesses (#1734)
+6e03154	5	13	0.131	14	0.131	15	0.157		6e03154 2026-10-23 release: 1.6.0 (#1727)
+1a59590	155	145	0.991	145	0.991	145	0.991		1a59590 2026-10-23 feat(agmsgd): agmsgd beta, opt-in notice delivery for Claude Code and Codex (#152
+183e4f4	2	2	0.006	2	0.006	2	0.006		183e4f4 2026-10-21 fix(server): refresh vulnerable dependencies, keeping @types/node on Node 22 (#16
+ae29617	6	72	0.911	75	0.914	75	0.914		ae29617 2026-10-21 fix(join): avoid renaming the caller during proxy registration (#1672)
+bfc9fb9	1	4	0.106	4	0.106	4	0.106		bfc9fb9 2026-10-21 test(spawn): reap the fake codex app-server in teardown (#1669)
+93ba547	1	4	0.026	4	0.026	4	0.026		93ba547 2026-10-20 test(codex): skip the unwritable-run case where chmod 555 does not block writes (
+6d42581	9	90	0.927	93	0.927	93	0.927		6d42581 2026-10-20 fix(json): keep JSON arrays as arrays when a subquery result is written with json
+9ef1d9e	4	7	0.155	7	0.155	7	0.155		9ef1d9e 2026-10-20 test: make negated assertions catch failures everywhere but the last line (#1660)
+a19bb20	2	129	0.966	131	0.966	131	0.966		a19bb20 2026-10-20 fix(storage): SQLite 3.53.4/3.54.0 CLI compatibility for init rollback and busy d
+68d906b	2	45	0.542	75	0.777	75	0.777		68d906b 2026-10-20 perf(watch): skip unchanged idle cursor consumption (#1652)
+6d1f7ad	1	121	0.979	121	0.979	121	0.979		6d1f7ad 2026-10-20 test: clear the Codex Desktop originator marker from the test environment (#1649)
+bcede53	4	14	0.169	14	0.169	14	0.169		bcede53 2026-10-20 perf(jev): start a handful of processes per call instead of about 40 (#1630)
+f11b3eb	2	55	0.776	88	0.898	88	0.898		f11b3eb 2026-10-20 fix(input-box): accept Codex's typing-state footer as a live widget (#1629)
+b5faae2	2	129	0.966	132	0.966	132	0.966		b5faae2 2026-10-20 fix(jev): raise the ext-tool timeout to 30s (#1628)
+9ba9cf4	4	36	0.464	72	0.751	72	0.751		9ba9cf4 2026-10-20 perf(codex): skip needless delivery status and set monitor at launch (#1627)
+4c0fec5	3	122	0.979	122	0.979	122	0.979		4c0fec5 2026-10-20 test(windows): reap leftover watchers and listeners on Git Bash (#1626)
+c65d806	3	23	0.330	73	0.770	73	0.770		c65d806 2026-10-20 fix(rename): carry a member's placement record to the new name (#1625)
+3317243	3	88	0.932	100	0.938	100	0.938		3317243 2026-10-20 fix(spawn): preserve the caller's Codex profile (#1624)
+9c3dd04	2	77	0.903	94	0.919	94	0.919		9c3dd04 2026-10-20 fix(windows): use CLAUDE_PID as the Claude Code agent pid (#1622)
+e3a9325	1	8	0.128	8	0.128	8	0.128		e3a9325 2026-10-15 docs(changelog): add recovery steps to 1.5.3 for machines already affected by the
+d691019	2	31	0.459	71	0.751	71	0.751		d691019 2026-10-15 sync-autostart: remove the two temp files once the slow child finishes (#1580)
+c18532d	3	106	0.957	131	0.989	131	0.989		c18532d 2026-10-15 lock: leave no window between taking a registry lock and recording its holder (#1
+652bc15	3	72	0.857	95	0.916	95	0.916		652bc15 2026-10-14 fix(plain): read the owner start time with LC_ALL=C so non-English locales can sp
+46e364d	4	13	0.131	14	0.131	15	0.157		46e364d 2026-10-05 release: 1.5.3 (#1579)
+ae237f3	5	128	0.984	128	0.984	128	0.984		ae237f3 2026-10-05 fix(sync): clean up outcome files leaked before #1572 on update and in doctor (#1
+ea2a5fc	3	21	0.188	21	0.188	22	0.189		ea2a5fc 2026-10-05 docs(skill): ask before creating a team when remote is in use; point at delete an
+fecdd8a	2	47	0.468	73	0.754	73	0.754		fecdd8a 2026-10-04 fix(sync): remove the storage driver's outcome file on every exit (#1572)
+37aee11	7	90	0.932	101	0.938	101	0.938		37aee11 2026-10-04 fix(monitor): stop treating a missing TaskList entry as a failed watch (#1571)
+bb153a0	3	74	0.861	95	0.916	95	0.916		bb153a0 2026-10-04 fix(actas): drop the previous name's placement record for this pane on a switch (
+e1da158	7	90	0.932	101	0.938	101	0.938		e1da158 2026-10-04 fix(watch): end the Claude Code watch at 1750 seconds, not 1790 (#1561)
+ab83d33	4	72	0.867	96	0.927	96	0.927		ab83d33 2026-10-03 feat(terminal): add a codex-app driver for the Codex desktop app (#1565)
+47295f6	6	73	0.867	96	0.927	96	0.927		47295f6 2026-10-03 feat(terminal): add a claude-desktop driver for the Claude desktop app (#1563)
+0ce2f3d	4	106	0.957	131	0.989	131	0.989		0ce2f3d 2026-10-02 fix(lock): break a registry lock only when its recorded holder is gone (#1556)
+997e22a	5	13	0.131	14	0.131	15	0.157		997e22a 2026-10-02 release: 1.5.2 (#1554)
+0e4e4c1	9	91	0.932	102	0.938	102	0.938		0e4e4c1 2026-10-02 fix(watch): renew or stop by itself shortly before the Monitor 30-minute cap (#15
+4fef8f3	2	5	0.052	5	0.052	5	0.052		4fef8f3 2026-10-02 test: write two code comments in English (#1552)
+ca70e42	5	95	0.946	107	0.952	107	0.952		ca70e42 2026-10-02 fix: record optional Codex profile metadata without changing delivery (#1549)
+07a67a3	2	20	0.263	72	0.751	72	0.751		07a67a3 2026-10-02 fix(codex): pass the launcher flag to the app-server so SessionStart sees it (#15
+bb94ebe	1	1	0.000	1	0.000	1	0.000		bb94ebe 2026-10-01 fix(app): emit each message once when events and legacy rows are linked (#1542)
+11f7fee	1	2	0.037	2	0.037	2	0.037		11f7fee 2026-10-01 docs(privacy): state the policy as principles that match current behavior (#1546)
+c163d9d	5	1	0.000	1	0.000	1	0.000		c163d9d 2026-10-02 fix(site): bump Astro for GHSA-26w7-cxv4-gfx2 (#1458)
+c867ca6	2	20	0.263	72	0.751	72	0.751		c867ca6 2026-10-01 fix(codex): pass the seat key to app-server tool commands under a restricted shel
+8ca3f9a	2	29	0.422	29	0.422	29	0.422		8ca3f9a 2026-10-01 fix(actas): reclaim a role held by the same live process after /clear (#1540)
+5e2b42c	2	57	0.597	73	0.753	73	0.753		5e2b42c 2026-10-01 fix(remote): restart the sync engine when set-endpoint is refused by the adopt ch
+609796f	2	39	0.559	73	0.780	73	0.780		609796f 2026-10-02 fix(codex): normalize the project path before hashing the Windows bridge lease (#
+ac131c6	5	35	0.456	72	0.751	72	0.751		ac131c6 2026-10-01 fix(codex): start Codex with --no-daemon when a plain launch runs in an elevated 
+2971913	2	18	0.197	18	0.197	18	0.197		2971913 2026-09-30 feat(doctor): report run/ records of a team that no longer exists; remove them wi
+7f33f39	13	1	0.000	1	0.000	1	0.000		7f33f39 2026-09-30 fix(app): keep the sidebar user block and settings gear in teams without an app-u
+75ee57f	1	4	0.040	4	0.040	4	0.040		75ee57f 2026-09-30 test(inbox): give the mark-read lock holder its own busy timeout (#1535)
+57750c5	1	2	0.024	2	0.024	2	0.024		57750c5 2026-09-29 ci(tests): refresh bats-file-seconds.tsv from a current full macOS run (#1527)
+27a82e2	1	4	0.066	4	0.066	4	0.066		27a82e2 2026-09-29 test(codex): synchronize the replacement-dispatcher check (#1518) (#1519)
+469f431	7	23	0.267	23	0.267	23	0.267		469f431 2026-09-29 fix(plugin): ship a rendered repo-root SKILL.md with a first-run bootstrap (#1286
+f39f34a	1	1	0.000	1	0.000	1	0.000		f39f34a 2026-09-28 fix(app): bundle SKILL.md and the other files the installer reads with the core (
+a25cad3	5	2	0.001	2	0.001	2	0.001		a25cad3 2026-09-28 chore(app): bump version to 0.5.0, pin agmsg-core to v1.5.1 (#1503)
+4a712f2	5	13	0.131	14	0.131	15	0.157		4a712f2 2026-09-28 release: 1.5.1 (#1502)
+79c739c	3	13	0.144	13	0.144	13	0.144		79c739c 2026-09-28 app: universal (Intel + Apple Silicon) macOS build (#1491)
+0aede97	2	1	0.000	1	0.000	1	0.000		0aede97 2026-09-28 fix(app): keep a renamed team's open tabs (#1500)
+2e79244	12	1	0.000	1	0.000	1	0.000		2e79244 2026-09-28 fix(app): open a clicked agent in the tab being viewed, and dim placeholder text 
+f3a3264	16	1	0.000	1	0.000	1	0.000		f3a3264 2026-09-28 app: rename and delete a team from the sidebar context menu (#1479) (#1484)
+e9763a8	6	65	0.649	75	0.770	76	0.771		e9763a8 2026-09-28 feat(team): add --force to team.sh --delete for teams with members (#1493) (#1494
+19e1671	4	1	0.000	1	0.000	1	0.000		19e1671 2026-09-28 docs(agmsgd): update the RFC to the approved design and add the architecture desi
+7d81f43	3	1	0.000	1	0.000	1	0.000		7d81f43 2026-09-27 fix(app): build the spawn prompt from each type's own cmd_prefix/prompt_arg (#149
+98eebb3	2	1	0.000	1	0.000	1	0.000		98eebb3 2026-09-27 fix(app): About shows the core actually running, not the bundled ref (#1496)
+bc32f7b	1	1	0.000	1	0.000	1	0.000		bc32f7b 2026-09-27 feat(app): allow Option-drag native text selection in embedded terminals (#1495)
+64ae13f	6	130	0.989	133	0.989	133	0.989		64ae13f 2026-09-27 fix(remote-sync): name a missing age binary, and surface the last fatal on status
+8580059	4	77	0.860	99	0.919	99	0.919		8580059 2026-09-27 fix(terminal-registry): let a live seat take a pane a dead session's record still
+6c472fc	4	31	0.445	74	0.775	74	0.775		6c472fc 2026-09-27 codex: report when a Codex config is missing this install's writable_roots (#1477
+c064bbc	6	65	0.649	75	0.770	76	0.771		c064bbc 2026-09-26 feat(team): add --delete and --purge-messages to team.sh (#1475) (#1482)
+f5a72de	2	1	0.000	1	0.000	1	0.000		f5a72de 2026-09-25 fix(app): bound the sidebar's team list so it scrolls instead of overflowing (#14
+c487be2	4	13	0.131	14	0.131	15	0.157		c487be2 2026-09-25 release: 1.5.0 (#1473)
+3cfc72e	6	85	0.887	104	0.942	104	0.942		3cfc72e 2026-09-25 fix(self-fix): re-bind a codex seat stranded on its pre-/clear thread (#1470)
+8125809	4	28	0.362	73	0.774	73	0.774		8125809 2026-09-25 fix(uninstall): clean the CODEX_HOME Codex config and the OpenCode/Hermes/Grok fi
+2b01680	27	76	0.869	98	0.928	99	0.929		2b01680 2026-09-25 feat(orca): Orca terminal driver (1.5.0) (#1453)
+a991401	2	11	0.176	11	0.176	11	0.176		a991401 2026-09-24 fix(install): don't retype the shared SKILL.md for a type with its own file (#146
+1c29174	7	102	0.943	105	0.943	105	0.943		1c29174 2026-09-24 fix(self-fix): find a seat's actas lock from its registration, and name a sandbox
+133ef20	2	155	1.000	155	1.000	155	1.000	ci-config	133ef20 2026-09-24 ci: skip the heavy matrix when a release PR also carries a cliff.toml change (#14
+e94ca9e	5	13	0.131	14	0.131	15	0.157		e94ca9e 2026-09-24 release: 1.4.2 (#1459)
+da17a0c	3	13	0.114	13	0.114	13	0.114		da17a0c 2026-09-24 fix(jev): recognize OpenRouter's wrapped max_tokens_exceeded 400 (#1460)
+c1518e1	5	22	0.231	28	0.332	28	0.332		c1518e1 2026-09-24 feat(jev): one line per question in a batch, tolerate a malformed row, name max_t
+b054b8e	1	4	0.080	4	0.080	4	0.080		b054b8e 2026-09-24 test(watch): reap each test's own background processes in teardown, unquarantine 
+8f71cf2	3	105	0.957	131	0.989	131	0.989		8f71cf2 2026-09-23 fix(lock): stage the holder before rmdir so a release cannot delete the next owne
+a08356c	4	128	0.989	131	0.989	131	0.989		a08356c 2026-09-23 fix(delivery): skip a no-op hooks_file rewrite, preserve format and mode (#1442)
+f0b55b2	4	9	0.151	9	0.151	11	0.156		f0b55b2 2026-09-23 fix(uninstall): remove only the install being uninstalled, add --all for every in
+8a1cebb	4	87	0.932	100	0.938	100	0.938		8a1cebb 2026-09-23 codex: read the session name from session_index.jsonl (#1437)
+c801e16	3	88	0.932	100	0.938	100	0.938		c801e16 2026-09-24 fix(codex): restore <team> <name> in the actas record step, and say so when they 
+a57cea6	2	77	0.903	94	0.919	94	0.919		a57cea6 2026-09-24 fix(resolve): detect a type's agent process from its manifest, not a fixed list (
+5a2d190	1	1	0.000	1	0.000	1	0.000		5a2d190 2026-09-23 Group Dependabot updates into one PR per location (#1426)
+e2e59ed	3	122	0.979	122	0.979	122	0.979		e2e59ed 2026-09-23 test: quarantine two CI-flaky tests, keep them running locally (#1425)
+f9fb4f1	4	13	0.131	14	0.131	15	0.157		f9fb4f1 2026-09-23 release: 1.4.1 (#1427)
+e73b55d	3	79	0.860	100	0.919	100	0.919		e73b55d 2026-09-23 fix(codex): arm the bridge request on resume when the thread has an exact role ma
+c7e0b67	9	86	0.920	98	0.927	98	0.927		c7e0b67 2026-09-23 fix(self-name): stop guessing a seat's type into its placement record (#1402)
+e709839	2	2	0.037	2	0.037	2	0.037		e709839 2026-09-23 Add SECURITY.md and Dependabot config (#1404)
+302adb5	3	128	0.989	131	0.989	131	0.989		302adb5 2026-09-23 fix(instance-id): distinguish a failed ps observation from proof of death (#970)
+2fd959c	2	34	0.464	71	0.751	71	0.751		2fd959c 2026-09-23 fix(delivery): fail loudly when a hooks_file write is refused (#1396)
+f4e81b1	3	71	0.856	95	0.916	95	0.916		f4e81b1 2026-09-22 feat(tmux): add terminal_peek_styled so poke's real-draft check covers tmux (#139
+984c352	4	15	0.173	17	0.182	17	0.182		984c352 2026-09-22 fix(fix): split the emit-and-observe fallback across two calls (#1386) (#1397)
+2a642c9	10	74	0.858	96	0.917	96	0.917		2a642c9 2026-09-22 poke(herdr): use focus to deliver past an abandoned draft, not just refuse (#1384
+5194e86	2	155	1.000	155	1.000	155	1.000	ci-config	5194e86 2026-09-22 ci: make the bats aggregate survive gh run rerun --failed (#1388)
+e762eb2	1	4	0.113	4	0.113	4	0.113		e762eb2 2026-09-22 test(install): confirm a reaped sync-engine fake actually exits, don't trust wait
+f006bec	1	1	0.000	1	0.000	1	0.000		f006bec 2026-09-22 docs(ext-tool): the JA preview page said the send waits for the adapter; it does 
+4d3cf95	7	75	0.858	96	0.917	96	0.917		4d3cf95 2026-09-22 fix(poke): protect a real, stalled draft the two-snapshot check let through (#137
+e353ddc	2	11	0.176	11	0.176	11	0.176		e353ddc 2026-09-22 install: add ext-tools/ to Codex sandbox writable_roots (#1380)
+1121d44	2	27	0.386	27	0.386	27	0.386		1121d44 2026-09-23 fix(history): use sqlite batch mode for redirected queries (#1343)
+0cdfeb7	2	3	0.024	3	0.024	3	0.024		0cdfeb7 2026-09-22 ci(tests): refresh bats-file-seconds.tsv against a current green run (#1372)
+d58d51d	2	155	1.000	155	1.000	155	1.000	ci-config	d58d51d 2026-09-22 ci(tests): cancel a superseded main-push run, not just PR/integration ones (#1379
+a43fc26	3	11	0.176	11	0.176	11	0.176		a43fc26 2026-09-21 install: prune scripts/ files a prior release no longer ships (#1375)
+9520ab5	3	57	0.776	88	0.898	88	0.898		9520ab5 2026-09-21 fix(poke): refuse only when the input box actually changes (#1322) (#1376)
+2d998a2	3	57	0.597	73	0.753	73	0.753		2d998a2 2026-09-22 fix(remote): let an e2ee team use an address the plaintext check refuses (#1019)
+d59791f	2	55	0.595	71	0.751	71	0.751		d59791f 2026-09-22 fix(remote): bound the sync readiness wait by wall clock, not attempts alone (#83
+1122bb0	2	155	1.000	155	1.000	155	1.000	ci-config	1122bb0 2026-09-21 ci(tests): stop CI running on a merged/closed PR branch (#1373)
+fdab094	5	13	0.131	14	0.131	15	0.157		fdab094 2026-09-21 release: 1.4.0 (#1374)
+8abe912	39	137	0.993	138	0.993	138	0.993		8abe912 2026-09-21 Merge pull request #1370 from fujibee/integration/ext-tool
+bc94d06	4	135	0.989	138	0.991	138	0.991		bc94d06 2026-09-21 perf(types): defer the renderable-types scan out of source time (#1366)
+4e74b8a	1	44	0.518	74	0.754	74	0.754		4e74b8a 2026-09-20 docs(watch): point the three stale source comments at #983 (#989)
+bacf9ae	2	2	0.037	2	0.037	2	0.037		bacf9ae 2026-09-20 docs(architecture): document the terminal axis and the terminal driver interface 
+ac00fbe	1	5	0.040	5	0.040	5	0.040		ac00fbe 2026-09-19 test(remote-status): make the fake ps answer only for a pid that is actually aliv
+1cdf5d7	1	4	0.031	4	0.031	4	0.031		1cdf5d7 2026-09-19 test(self-proof): let the fixture's kill of an already-gone pid fail without abor
+8ade0fb	3	130	0.989	132	0.989	132	0.989		8ade0fb 2026-09-19 perf(watch): cache a team's storage driver per cycle and the storage dir per proc
+adb1302	2	45	0.442	70	0.728	70	0.728		adb1302 2026-09-19 fix(remote-sync): bound the scoped reprocess pending-count walk (#1332)
+fcf7440	4	130	0.989	132	0.989	132	0.989		fcf7440 2026-09-18 perf(watch): cache lock-path invariants and skip idle-cycle reformatting (#1329)
+bd232c2	4	89	0.932	100	0.938	100	0.938		bd232c2 2026-09-18 feat(delivery): re-arm the Claude Code Monitor by default when its expiry notice 
+5dab54b	1	4	0.065	4	0.065	4	0.065		5dab54b 2026-09-18 tests(delivery): wait for watcher conditions instead of a flat sleep (#1327)
+751adcd	11	155	1.000	155	1.000	155	1.000	unknown-file	751adcd 2026-09-18 fix(poke): refuse to type over a live draft, and drop rearm.sh for a template pro
+7f10704	2	45	0.542	75	0.777	75	0.777		7f10704 2026-09-18 fix(watch): restart on the new code when the installation changes (#1320)
+8e899f7	10	130	0.989	133	0.989	133	0.989		8e899f7 2026-09-18 feat(remote): reprocess quarantine rows a newer parser can now understand (#1323)
+1939642	2	45	0.442	70	0.728	70	0.728		1939642 2026-09-18 fix(remote-sync): release the team config lock on SIGTERM/SIGINT (#1325)
+62b2fdb	1	4	0.048	4	0.048	4	0.048		62b2fdb 2026-09-18 tests(self-name): stop the #1137 detect walk from shelling out to a real ps (#132
+6da6926	54	155	1.000	155	1.000	155	1.000	unknown-file	6da6926 2026-09-18 release: 1.3.1 (merge integration/1.3.1) (#1310)
+63f37a0	2	13	0.093	13	0.093	13	0.093		63f37a0 2026-09-18 fix(antigravity): say what holds the role and how to release it (#1301)
+c50d092	2	19	0.296	72	0.751	72	0.751		c50d092 2026-09-18 fix(codex-bridge): ignore a stale app-server URL in the request file (#1293)
+03023ec	19	88	0.932	101	0.938	101	0.938		03023ec 2026-09-18 feat(types): add the devin agent type (#898)
+76f7d17	5	89	0.932	100	0.938	100	0.938		76f7d17 2026-09-17 docs(delivery): say that mode: monitor means configured, and how to confirm the M
+e70f258	2	72	0.857	95	0.916	95	0.916		e70f258 2026-09-17 fix(terminal-registry): stop percent-decode from mangling backslash-bearing herdr
+2aa9e42	1	3	0.003	3	0.003	3	0.003		2aa9e42 2026-09-17 test: clean up the leaked driver fixture temp dir in the residue test (#1170)
+5949daf	1	129	0.966	132	0.966	132	0.966		5949daf 2026-09-17 fix(sqlite-sync): stop a backtick in a SQL comment from running as command substi
+2029bb0	3	57	0.619	73	0.774	73	0.774		2029bb0 2026-09-17 fix(install): restart a running sync engine on the new code during --update (#128
+8bc1590	6	49	0.469	132	0.966	132	0.966		8bc1590 2026-09-16 sync-cipher: tolerate unknown message fields on receive (#1282)
+56dc29c	11	51	0.648	74	0.780	74	0.780		56dc29c 2026-09-16 codex: one app-server per seat, never shared (#1254) (#1273)
+0a116fb	14	129	0.989	131	0.989	131	0.989		0a116fb 2026-09-16 refactor: isolate Antigravity read reservation guard (#1271)
+b8650f6	2	8	0.128	8	0.128	8	0.128		b8650f6 2026-09-16 docs: describe server-side work in neutral terms
+3e7e113	2	56	0.597	72	0.753	72	0.753		3e7e113 2026-09-16 fix(#894): detect systemd-supervised sync engines (#1006)
+e1d13b9	10	155	1.000	155	1.000	155	1.000	unknown-file	e1d13b9 2026-09-15 fix: support Antigravity monitors on macOS (#1253)
+aeb6942	7	131	0.988	134	0.991	134	0.991		aeb6942 2026-09-15 plain driver: an agent-native substitute for peek/poke with no pane (#1256)
+14d214f	4	87	0.932	100	0.938	100	0.938		14d214f 2026-09-15 ci: shorten the two slowest test_codex_bridge* files' production/test waits (#126
+9e2dc81	1	129	0.966	132	0.966	132	0.966		9e2dc81 2026-09-15 ci: remove per-roster-entry forking in the 10,000-bound sequence check (1.3.1) (#
+cae1e52	3	56	0.597	72	0.753	72	0.753		cae1e52 2026-09-15 ci: shorten the two slowest tests' production readiness wait (1.3.1) (#1252)
+faeb638	1	121	0.979	121	0.979	121	0.979		faeb638 2026-09-15 test(ci): batch bulk_send_direct's inserts to speed up test_watch.bats (#1258)
+4ce7e7a	1	4	0.106	4	0.106	4	0.106		4ce7e7a 2026-09-15 ci: stop the quoted-path spawn test from paying the full readiness wait (1.3.1) (
+621ef96	1	4	0.031	4	0.031	4	0.031		621ef96 2026-09-15 test: close bats' fd 3 on test_self_proof's background jobs (#1264)
+1fd2b34	2	1	0.000	1	0.000	1	0.000		1fd2b34 2026-09-15 docs(rfc): the daemon delivers through the driver, and poke is not how it does it
+a986662	2	1	0.000	1	0.000	1	0.000		a986662 2026-09-15 docs(rfc): subscribe to tags, and resolve the identity at session start (#1251)
+3fc7d2b	4	13	0.131	14	0.131	15	0.157		3fc7d2b 2026-09-14 release: 1.3.0 (#1250)
+f9061f0	187	155	1.000	155	1.000	155	1.000	ci-config	f9061f0 2026-09-14 feat: terminal driver v1 (integration/terminal-driver-v1 into main) (#1240)
+ff4a0e4	3	34	0.455	71	0.751	71	0.751		ff4a0e4 2026-09-15 fix(codex-shim): pass non-remote subcommands through (#590)
+7c1547f	11	135	0.992	136	0.992	136	0.992		7c1547f 2026-09-14 fix(#777): the remaining argv-to-stdin sites, plus a Windows CRLF row-separator b
+3ab9e31	3	41	0.559	74	0.780	74	0.780		3ab9e31 2026-09-13 fix(codex-bridge): give the identity lease a start token on Windows (#978)
+d354ae8	1	3	0.003	3	0.003	3	0.003		d354ae8 2026-09-12 test(remote): drain stdin in the third driver stub with the #755 EPIPE race (#117
+4851c63	2	39	0.559	73	0.780	73	0.780		4851c63 2026-09-13 fix(codex-bridge): one wake, one turn — attribute mid-start turn-end signals by t
+a4fc81f	2	155	1.000	155	1.000	155	1.000	ci-config	a4fc81f 2026-09-12 ci(tests): seed pinned bats files by measured cost, not @test count (#847) (#1175
+ebb6b61	1	4	0.065	4	0.065	4	0.065		ebb6b61 2026-09-12 test(codex): pin the ws:// port-file fallback in the SessionStart plug (#1056) (#
+99a3e9e	5	155	1.000	155	1.000	155	1.000	ci-config	99a3e9e 2026-09-12 ci: record per-file bats timings (#1159)
+a8c7d28	1	24	0.308	71	0.728	71	0.728		a8c7d28 2026-09-13 fix(codex): discover a ws:// app-server in the SessionStart plug (#1057)
+9cec2d4	2	128	0.966	131	0.966	131	0.966		9cec2d4 2026-09-12 perf(codex): batch the rollout mtime scan (#1035) (#1037)
+59dc385	2	155	1.000	155	1.000	155	1.000	ci-config	59dc385 2026-09-11 ci(tests): shard the bats suite 5 ways, not 4 — the main twin of the #1107 fix (#
+a336005	2	122	0.979	122	0.979	122	0.979		a336005 2026-09-10 test(teardown): bound the holder wait, and stop the probe from counting itself (#
+948b100	2	130	0.989	133	0.989	133	0.989		948b100 2026-09-06 fix(sync): refuse a non-string envelope.blob/cipher instead of storing "null" (#1
+e58dbaf	8	130	0.989	133	0.989	133	0.989		e58dbaf 2026-09-05 Reduce repeated ciphertext literals in pull apply (#1043)
+0444bae	2	155	1.000	155	1.000	155	1.000	ci-config	0444bae 2026-09-05 ci: test the merged shape, not only each PR against the base it was opened on (#1
+225a788	2	155	1.000	155	1.000	155	1.000	ci-config	225a788 2026-09-05 ci: run tests and version checks on every integration branch, not a named list (#
+c1b52f8	4	131	0.989	133	0.989	133	0.989		c1b52f8 2026-08-31 fix(sync): count roster mutations as held so the read frontier can advance (#968)
+6878ec8	2	47	0.639	82	0.848	82	0.848		6878ec8 2026-08-31 feat(inbox): report a mark-read that lost to a concurrent writer (#1011) (#1013)
+660f67b	5	130	0.989	132	0.989	132	0.989		660f67b 2026-08-30 fix(storage): a store at the current schema revision skips init's write batch (#1
+5a8e928	1	4	0.080	4	0.080	4	0.080		5a8e928 2026-08-30 test(watch): say what the file held when a delivery wait times out (#1000) (#1008
+e127b06	5	89	0.932	101	0.938	101	0.938		e127b06 2026-08-29 feat(codex): deliver the inbox mid-turn via a PostToolUse hook, not only at Stop 
+27d1f7e	2	155	1.000	155	1.000	155	1.000	ci-config	27d1f7e 2026-08-28 ci: a docs-only skip and a passing suite are no longer the same green (#798) (#10
+13bd5ea	5	131	0.989	133	0.989	133	0.989		13bd5ea 2026-08-28 fix(storage): probe before the pipe, not inside it (#462) (#904)
+ad5c13f	1	4	0.080	4	0.080	4	0.080		ad5c13f 2026-08-27 fix(tests): widen _wait_pidfile's window and name what it saw (#595) (#797)
+8085cd6	2	4	0.042	4	0.042	4	0.042		8085cd6 2026-08-27 test(despawn): enforce the ctrl:despawn read-state assertion with refute, not a n
+de22619	2	39	0.498	71	0.751	71	0.751		de22619 2026-08-27 fix(session-start): stand down instead of an unfiltered watcher when a resumed se
+0d08381	3	11	0.176	11	0.176	11	0.176		0d08381 2026-08-26 fix(install): refuse to guess between multiple installs on --update with no --cmd
+5801f42	2	11	0.176	11	0.176	11	0.176		5801f42 2026-08-25 fix(install): write Codex writable_roots through a symlinked config.toml instead 
+867f02a	2	130	0.989	133	0.989	133	0.989		867f02a 2026-08-25 fix(sync): stop the apply failure path from discarding the shell's stderr (#974)
+e18d8b1	1	4	0.066	4	0.066	4	0.066		e18d8b1 2026-08-25 test: count a role's bridges by pair set, and return the value that was waited fo
+debffbe	3	8	0.165	8	0.165	8	0.165		debffbe 2026-08-25 test: correct the (#683) tag on eight tests, and audit the rest (#985) (#987)
+b2ff579	1	4	0.033	4	0.033	4	0.033		b2ff579 2026-08-25 test(sync): take the lock by retrying, not by assuming it is free (#972)
+3d06318	3	47	0.466	72	0.751	72	0.751		3d06318 2026-08-22 fix(engine): stand down when the installation is updated underneath (#963) (#965)
+44633f3	4	13	0.131	14	0.131	15	0.157		44633f3 2026-08-22 release: 1.2.3 (#966)
+6436f38	1	9	0.152	9	0.152	9	0.152		6436f38 2026-08-22 fix(install): name the sync engine in the update warning, not just watch.sh (#964
+1a4d37c	3	41	0.559	74	0.780	74	0.780		1a4d37c 2026-08-22 fix(codex-bridge-launcher): reap a same-(project,role) orphan before spawning (#9
+a70def4	4	130	0.989	133	0.989	133	0.989		a70def4 2026-08-22 perf(storage): index the two lookups that made import scale with the store (#956)
+1a12fd6	8	131	0.990	134	0.990	134	0.990		1a12fd6 2026-08-22 perf(local): quote SQL literals with a bash expansion, not a fork (#948)
+883338f	2	155	1.000	155	1.000	155	1.000	ci-config	883338f 2026-08-21 perf(ci): a release PR is a version bump, not a third full matrix (#945)
+e5bf245	2	35	0.492	74	0.780	74	0.780		e5bf245 2026-08-22 fix(delivery): preserve exact identity pairs in check-inbox (#721)
+12480d6	2	39	0.559	73	0.780	73	0.780		12480d6 2026-08-21 fix(codex-bridge): exit when another writer owns the thread (#906 link 1) (#935)
+88a9a27	2	130	0.989	133	0.989	133	0.989		88a9a27 2026-08-21 perf(sync): parse a pull page with one jq, framed by NUL, with no eval (#908, #94
+f6d44d3	2	39	0.559	73	0.780	73	0.780		f6d44d3 2026-08-21 fix(codex-bridge): make the failure cap reach and bound the re-arm rate (#906 lin
+a0cf52e	2	130	0.989	133	0.989	133	0.989		a0cf52e 2026-08-21 perf(sync): check a pulled wire id without a process (#939)
+50c503f	1	155	1.000	155	1.000	155	1.000	ci-config	50c503f 2026-08-21 ci: cancel a PR's superseded test run when its head moves (#848) (#933)
+321164c	5	4	0.026	4	0.026	4	0.026		321164c 2026-08-21 test(perf): the unlock scenario — quarantine, unlock, reprocess on age-v1 (#916) 
+8aca138	2	130	0.989	133	0.989	133	0.989		8aca138 2026-08-21 perf(sync): find the first gap once, not once per candidate (#932)
+37f175e	2	45	0.442	70	0.728	70	0.728		37f175e 2026-08-21 fix(sync): retry a busy apply that races EPIPE, keeping the hung-driver bound (#9
+e223459	5	46	0.466	71	0.751	71	0.751		e223459 2026-08-21 feat(sync): emit push.posted when the POST is over, before the acks are written (
+6d00a96	2	130	0.989	133	0.989	133	0.989		6d00a96 2026-08-21 fix(sync): a pulled field that is an array must not become shell words (#930)
+3538e0f	2	130	0.989	133	0.989	133	0.989		3538e0f 2026-08-21 perf(sync): one jq per acknowledgement, not six forks (#927)
+2ac27f2	6	7	0.102	7	0.102	7	0.102		2ac27f2 2026-08-21 test(perf): a harness that measures a history-proportional join, stage by stage (
+b2f7f61	2	130	0.989	133	0.989	133	0.989		b2f7f61 2026-08-21 perf(sync): quote each pulled message's fields once, not at 42 fork sites (#908) 
+15082f1	2	129	0.989	132	0.989	132	0.989		15082f1 2026-08-21 perf(storage): index events.legacy_id, looked up by value everywhere (#926)
+3376bfe	6	132	0.989	133	0.989	133	0.989		3376bfe 2026-08-21 fix(sync): report a busy store as busy, not as a failed check, and wait for it (#
+ac30d1a	2	130	0.989	133	0.989	133	0.989		ac30d1a 2026-08-21 fix(sync): say which check returned 13 (#911)
+55546ae	4	13	0.131	14	0.131	15	0.157		55546ae 2026-08-20 release: 1.2.2 (#905)
+698dc05	2	55	0.595	71	0.751	71	0.751		698dc05 2026-08-20 fix(remote): keep curl's stderr on the GET path, in the shape the POST side ended
+dcb1d39	4	48	0.489	73	0.774	73	0.774		dcb1d39 2026-08-20 fix(#804): correct a binding an older release left writable, and say what to run 
+b1e3e05	2	55	0.595	71	0.751	71	0.751		b1e3e05 2026-08-19 fix(remote): keep curl's stderr, and hold the temporaries in one condemned direct
+dd61c04	1	26	0.363	26	0.363	26	0.363		dd61c04 2026-08-20 fix(history): pass the history and unread-marker SQL on stdin (#777) (#899)
+acdaf5d	2	5	0.025	5	0.025	5	0.025		acdaf5d 2026-08-19 test(remote): two tests on main can fail on a correct code — they read a merged s
+be65c94	5	131	0.989	133	0.989	133	0.989		be65c94 2026-08-19 fix(remote): pull a team larger than a command line, and say what it is doing (#8
+dced4f9	5	58	0.602	73	0.753	73	0.753		dced4f9 2026-08-19 fix(remote): keep the binding a re-point replaces instead of destroying it (#884)
+d077a87	3	155	1.000	155	1.000	155	1.000	ci-config	d077a87 2026-08-19 fix(ci): pin count-invisible heavy test files apart, raise the shard timeout with
+7397131	1	4	0.025	4	0.025	4	0.025		7397131 2026-08-19 test(compat): make the space-containing-path premise able to fail (#887)
+2910722	2	11	0.176	11	0.176	11	0.176		2910722 2026-08-18 fix(install): derive --update's type re-detection from the same list as TPL_TYPE 
+fa826b7	2	128	0.989	131	0.989	131	0.989		fa826b7 2026-08-19 fix(compat): take the basename of the whole ps comm path (#770) (#771)
+df4c597	2	77	0.903	94	0.919	94	0.919		df4c597 2026-08-19 fix(resolve): map grok-build to grok in the pid walk (#860)
+626a625	2	45	0.542	75	0.777	75	0.777		626a625 2026-08-19 fix(watch): fold sentinel '-' into the empty session-id path (#857)
+67a1252	2	2	0.037	2	0.037	2	0.037		67a1252 2026-08-18 docs(contributing): say that main takes squash commits only (#845)
+d6b741b	5	13	0.131	14	0.131	15	0.157		d6b741b 2026-08-18 release: 1.2.1 (#872)
+3259d58	9	155	1.000	155	1.000	155	1.000	ci-config	3259d58 2026-08-18 Windows can use the hosted service: connect reaches the server, the fingerprint i
+f7de22a	3	102	0.943	105	0.943	105	0.943		f7de22a 2026-08-16 fix(roster): bound the wait on the local child without spawning anything to do it
+121d27b	2	11	0.176	11	0.176	11	0.176		121d27b 2026-08-16 fix(install): record provenance when git answers in another path space (#830) (#8
+9dc668e	12	100	0.938	101	0.938	101	0.938		9dc668e 2026-08-16 Stop telling every agent that key rotate is unavailable (#841)
+4c448cb	1	155	1.000	155	1.000	155	1.000	ci-config	4c448cb 2026-08-16 Merge pull request #827 from fujibee/fix/824-a-feed-outage-must-not-look-like-a-t
+3c537a5	4	13	0.131	14	0.131	15	0.157		3c537a5 2026-08-15 Merge pull request #837 from fujibee/release/v1.2.0
+17d0ba7	244	155	1.000	155	1.000	155	1.000	ci-config	17d0ba7 2026-08-15 Merge pull request #836 from fujibee/integration/remote
+f271cd4	2	35	0.492	74	0.780	74	0.780		f271cd4 2026-08-10 fix(check-inbox): deliver with exit 0 when the poll failed part-way (#658) (#745)
+4d3202d	3	128	0.989	131	0.989	131	0.989		4d3202d 2026-08-07 feat(doctor): default to the whole installation, narrow with --project/--type/--t
+236001b	2	35	0.492	74	0.780	74	0.780		236001b 2026-08-07 fix(check-inbox): stop losing earlier teams' messages when a later team's query f
+9a223fb	2	39	0.498	71	0.751	71	0.751		9a223fb 2026-08-08 fix(liveness): probe watcher pidfiles with the local pid probe (#613)
+3a38479	2	18	0.197	18	0.197	18	0.197		3a38479 2026-08-07 feat(doctor): show who holds which lock, watcher, and bridge for a project (#640)
+e684ad9	2	36	0.543	73	0.780	73	0.780		e684ad9 2026-08-04 feat(subscription): name the lock and its cc-instance when an exclusion empties t
+691b35d	1	4	0.066	4	0.066	4	0.066		691b35d 2026-08-04 test(codex-bridge-launcher): run the default bridge path instead of the override 
+4779145	2	5	0.033	5	0.033	5	0.033		4779145 2026-08-02 fix(tests): drop a hardcoded pid and wait for a killed child in the bats suite (#
+4c97a9c	2	77	0.860	99	0.919	99	0.919		4c97a9c 2026-08-02 fix(role-session): don't let a failed mkdir -p abort the seat write (#602)
+545973d	4	13	0.131	14	0.131	15	0.157		545973d 2026-08-01 release: 1.1.13 (#594)
+870938e	7	48	0.638	74	0.780	74	0.780		870938e 2026-08-01 fix(codex): resolve the app-server from the port file when the variable is absent
+1c7efbc	12	155	1.000	155	1.000	155	1.000	ci-config	1c7efbc 2026-08-01 fix(liveness): route every shell-minted pid through the local probe (#567) (#584)
+cfa1a03	6	78	0.860	99	0.919	99	0.919		cfa1a03 2026-07-31 fix(codex): seat a role from the app-server's loaded threads, not rollout files (
+303125f	4	129	0.989	132	0.989	132	0.989		303125f 2026-07-31 fix(codex): probe the app-server with the local-pid helper, not the tasklist one 
+9140515	5	2	0.001	2	0.001	2	0.001		9140515 2026-07-31 release(app): 0.4.0, bundling core v1.1.12 (#577)
+6248bb0	4	13	0.131	14	0.131	15	0.157		6248bb0 2026-07-31 release: 1.1.12 (#576)
+39197bb	15	3	0.037	3	0.037	5	0.042		39197bb 2026-07-31 docs(site): add agmsg-bubblelog and agmsg-tui to the showcase and README (#571)
+8101d6d	5	32	0.454	72	0.751	73	0.752		8101d6d 2026-07-30 fix(opencode): quote the project path into the generated monitor commands
+a32136d	1	1	0.000	1	0.000	1	0.000		a32136d 2026-07-30 docs(opencode): describe the monitor fallback as instructed, not enforced

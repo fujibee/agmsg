@@ -1,0 +1,947 @@
+{
+ "n_commits": 300,
+ "range": [
+  "a32136d",
+  "551764e"
+ ],
+ "total_seconds": {
+  "macos": 7195.0,
+  "ubuntu": 4069.0
+ },
+ "whole_tree_readers": [
+  "tests/test_agmsgd_daemon_sh.bats",
+  "tests/test_agmsgd_entrypoint.bats",
+  "tests/test_agmsgd_status.bats",
+  "tests/test_capability_docs.bats",
+  "tests/test_enforced_assertions.bats",
+  "tests/test_herdr_cli_routing.bats",
+  "tests/test_unguarded_env_reads.bats"
+ ],
+ "whole_tree_seconds": {
+  "macos": 317.0,
+  "ubuntu": 166.0
+ },
+ "stats": {
+  "strict": {
+   "commits": 300,
+   "mean": 0.5412,
+   "median": 0.5416,
+   "p75": 0.9657,
+   "p90": 0.9896,
+   "share_zero": 0.0,
+   "share_ge_80pct": 0.41,
+   "share_ge_95pct": 0.263
+  },
+  "call": {
+   "commits": 300,
+   "mean": 0.6006,
+   "median": 0.7745,
+   "p75": 0.9659,
+   "p90": 0.9902,
+   "share_zero": 0.0,
+   "share_ge_80pct": 0.433,
+   "share_ge_95pct": 0.273
+  },
+  "call+dyn": {
+   "commits": 300,
+   "mean": 0.602,
+   "median": 0.7745,
+   "p75": 0.9659,
+   "p90": 0.9902,
+   "share_zero": 0.0,
+   "share_ge_80pct": 0.433,
+   "share_ge_95pct": 0.273
+  }
+ },
+ "commits_run_all": {
+  "strict": 24,
+  "call": 24,
+  "call+dyn": 24
+ },
+ "blast_radius": {
+  ".github/workflows/tests.yml": {
+   "changed_in_commits": 20,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 155,
+    "frac": 1.0
+   },
+   "call": {
+    "n_tests": 155,
+    "frac": 1.0
+   },
+   "call+dyn": {
+    "n_tests": 155,
+    "frac": 1.0
+   }
+  },
+  "tests/test_helper.bash": {
+   "changed_in_commits": 15,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 121,
+    "frac": 0.979
+   },
+   "call": {
+    "n_tests": 121,
+    "frac": 0.979
+   },
+   "call+dyn": {
+    "n_tests": 121,
+    "frac": 0.979
+   }
+  },
+  "scripts/drivers/storage/sqlite.sh": {
+   "changed_in_commits": 9,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 128,
+    "frac": 0.966
+   },
+   "call": {
+    "n_tests": 131,
+    "frac": 0.966
+   },
+   "call+dyn": {
+    "n_tests": 131,
+    "frac": 0.966
+   }
+  },
+  "scripts/lib/validate.sh": {
+   "changed_in_commits": 2,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 127,
+    "frac": 0.966
+   },
+   "call": {
+    "n_tests": 130,
+    "frac": 0.966
+   },
+   "call+dyn": {
+    "n_tests": 130,
+    "frac": 0.966
+   }
+  },
+  "scripts/drivers/storage/sqlite-sync.sh": {
+   "changed_in_commits": 23,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 129,
+    "frac": 0.966
+   },
+   "call": {
+    "n_tests": 132,
+    "frac": 0.966
+   },
+   "call+dyn": {
+    "n_tests": 132,
+    "frac": 0.966
+   }
+  },
+  "scripts/lib/driver-registry.sh": {
+   "changed_in_commits": 2,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 129,
+    "frac": 0.966
+   },
+   "call": {
+    "n_tests": 132,
+    "frac": 0.966
+   },
+   "call+dyn": {
+    "n_tests": 132,
+    "frac": 0.966
+   }
+  },
+  "scripts/lib/storage.sh": {
+   "changed_in_commits": 10,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 128,
+    "frac": 0.966
+   },
+   "call": {
+    "n_tests": 130,
+    "frac": 0.966
+   },
+   "call+dyn": {
+    "n_tests": 130,
+    "frac": 0.966
+   }
+  },
+  "scripts/internal/init-db.sh": {
+   "changed_in_commits": 1,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 127,
+    "frac": 0.966
+   },
+   "call": {
+    "n_tests": 130,
+    "frac": 0.966
+   },
+   "call+dyn": {
+    "n_tests": 130,
+    "frac": 0.966
+   }
+  },
+  "scripts/lib/sqlpath.sh": {
+   "changed_in_commits": 2,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 130,
+    "frac": 0.966
+   },
+   "call": {
+    "n_tests": 133,
+    "frac": 0.966
+   },
+   "call+dyn": {
+    "n_tests": 133,
+    "frac": 0.966
+   }
+  },
+  "scripts/lib/registry-lock.sh": {
+   "changed_in_commits": 5,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 104,
+    "frac": 0.934
+   },
+   "call": {
+    "n_tests": 130,
+    "frac": 0.966
+   },
+   "call+dyn": {
+    "n_tests": 130,
+    "frac": 0.966
+   }
+  },
+  "scripts/lib/instance-id.sh": {
+   "changed_in_commits": 7,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 127,
+    "frac": 0.966
+   },
+   "call": {
+    "n_tests": 130,
+    "frac": 0.966
+   },
+   "call+dyn": {
+    "n_tests": 130,
+    "frac": 0.966
+   }
+  },
+  "scripts/lib/compat.sh": {
+   "changed_in_commits": 5,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 127,
+    "frac": 0.966
+   },
+   "call": {
+    "n_tests": 130,
+    "frac": 0.966
+   },
+   "call+dyn": {
+    "n_tests": 130,
+    "frac": 0.966
+   }
+  },
+  "scripts/lib/actas-lock.sh": {
+   "changed_in_commits": 6,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 81,
+    "frac": 0.863
+   },
+   "call": {
+    "n_tests": 102,
+    "frac": 0.918
+   },
+   "call+dyn": {
+    "n_tests": 102,
+    "frac": 0.918
+   }
+  },
+  "scripts/drivers/types/claude-code/template.md": {
+   "changed_in_commits": 15,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 86,
+    "frac": 0.908
+   },
+   "call": {
+    "n_tests": 99,
+    "frac": 0.915
+   },
+   "call+dyn": {
+    "n_tests": 99,
+    "frac": 0.915
+   }
+  },
+  "scripts/lib/type-registry.sh": {
+   "changed_in_commits": 3,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 86,
+    "frac": 0.908
+   },
+   "call": {
+    "n_tests": 99,
+    "frac": 0.915
+   },
+   "call+dyn": {
+    "n_tests": 99,
+    "frac": 0.915
+   }
+  },
+  "scripts/lib/resolve-project.sh": {
+   "changed_in_commits": 6,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 76,
+    "frac": 0.879
+   },
+   "call": {
+    "n_tests": 93,
+    "frac": 0.896
+   },
+   "call+dyn": {
+    "n_tests": 93,
+    "frac": 0.896
+   }
+  },
+  "scripts/lib/terminal-registry.sh": {
+   "changed_in_commits": 10,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 71,
+    "frac": 0.833
+   },
+   "call": {
+    "n_tests": 94,
+    "frac": 0.892
+   },
+   "call+dyn": {
+    "n_tests": 94,
+    "frac": 0.892
+   }
+  },
+  "scripts/join.sh": {
+   "changed_in_commits": 5,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 71,
+    "frac": 0.887
+   },
+   "call": {
+    "n_tests": 74,
+    "frac": 0.891
+   },
+   "call+dyn": {
+    "n_tests": 74,
+    "frac": 0.891
+   }
+  },
+  "scripts/send.sh": {
+   "changed_in_commits": 4,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 56,
+    "frac": 0.758
+   },
+   "call": {
+    "n_tests": 88,
+    "frac": 0.88
+   },
+   "call+dyn": {
+    "n_tests": 88,
+    "frac": 0.88
+   }
+  },
+  "scripts/check-inbox.sh": {
+   "changed_in_commits": 11,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 34,
+    "frac": 0.468
+   },
+   "call": {
+    "n_tests": 73,
+    "frac": 0.757
+   },
+   "call+dyn": {
+    "n_tests": 73,
+    "frac": 0.757
+   }
+  },
+  "scripts/drivers/types/codex/codex-record-session.sh": {
+   "changed_in_commits": 9,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 34,
+    "frac": 0.504
+   },
+   "call": {
+    "n_tests": 72,
+    "frac": 0.756
+   },
+   "call+dyn": {
+    "n_tests": 72,
+    "frac": 0.756
+   }
+  },
+  "scripts/drivers/types/codex/codex-bridge.js": {
+   "changed_in_commits": 11,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 38,
+    "frac": 0.536
+   },
+   "call": {
+    "n_tests": 72,
+    "frac": 0.756
+   },
+   "call+dyn": {
+    "n_tests": 72,
+    "frac": 0.756
+   }
+  },
+  "scripts/watch.sh": {
+   "changed_in_commits": 16,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 44,
+    "frac": 0.518
+   },
+   "call": {
+    "n_tests": 74,
+    "frac": 0.754
+   },
+   "call+dyn": {
+    "n_tests": 74,
+    "frac": 0.754
+   }
+  },
+  "scripts/drivers/types/codex/codex-bridge-launcher.sh": {
+   "changed_in_commits": 9,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 18,
+    "frac": 0.273
+   },
+   "call": {
+    "n_tests": 71,
+    "frac": 0.728
+   },
+   "call+dyn": {
+    "n_tests": 71,
+    "frac": 0.728
+   }
+  },
+  "scripts/remote.sh": {
+   "changed_in_commits": 18,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 54,
+    "frac": 0.572
+   },
+   "call": {
+    "n_tests": 70,
+    "frac": 0.728
+   },
+   "call+dyn": {
+    "n_tests": 70,
+    "frac": 0.728
+   }
+  },
+  "scripts/drivers/types/codex/codex-monitor.sh": {
+   "changed_in_commits": 11,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 19,
+    "frac": 0.239
+   },
+   "call": {
+    "n_tests": 71,
+    "frac": 0.728
+   },
+   "call+dyn": {
+    "n_tests": 71,
+    "frac": 0.728
+   }
+  },
+  "scripts/delivery.sh": {
+   "changed_in_commits": 19,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 33,
+    "frac": 0.44
+   },
+   "call": {
+    "n_tests": 70,
+    "frac": 0.728
+   },
+   "call+dyn": {
+    "n_tests": 70,
+    "frac": 0.728
+   }
+  },
+  "scripts/internal/remote-sync.mjs": {
+   "changed_in_commits": 17,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 44,
+    "frac": 0.442
+   },
+   "call": {
+    "n_tests": 70,
+    "frac": 0.728
+   },
+   "call+dyn": {
+    "n_tests": 70,
+    "frac": 0.728
+   }
+  },
+  "scripts/session-start.sh": {
+   "changed_in_commits": 15,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 38,
+    "frac": 0.474
+   },
+   "call": {
+    "n_tests": 70,
+    "frac": 0.728
+   },
+   "call+dyn": {
+    "n_tests": 70,
+    "frac": 0.728
+   }
+  },
+  "scripts/drivers/types/codex/_session-start.sh": {
+   "changed_in_commits": 9,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 24,
+    "frac": 0.308
+   },
+   "call": {
+    "n_tests": 71,
+    "frac": 0.728
+   },
+   "call+dyn": {
+    "n_tests": 71,
+    "frac": 0.728
+   }
+  },
+  "scripts/actas-claim.sh": {
+   "changed_in_commits": 10,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 28,
+    "frac": 0.398
+   },
+   "call": {
+    "n_tests": 28,
+    "frac": 0.398
+   },
+   "call+dyn": {
+    "n_tests": 28,
+    "frac": 0.398
+   }
+  },
+  "install.sh": {
+   "changed_in_commits": 27,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 9,
+    "frac": 0.152
+   },
+   "call": {
+    "n_tests": 9,
+    "frac": 0.152
+   },
+   "call+dyn": {
+    "n_tests": 9,
+    "frac": 0.152
+   }
+  },
+  "SKILL.md": {
+   "changed_in_commits": 19,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 11,
+    "frac": 0.136
+   },
+   "call": {
+    "n_tests": 11,
+    "frac": 0.136
+   },
+   "call+dyn": {
+    "n_tests": 11,
+    "frac": 0.136
+   }
+  },
+  "VERSION": {
+   "changed_in_commits": 20,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 11,
+    "frac": 0.131
+   },
+   "call": {
+    "n_tests": 12,
+    "frac": 0.131
+   },
+   "call+dyn": {
+    "n_tests": 13,
+    "frac": 0.131
+   }
+  },
+  "CHANGELOG.md": {
+   "changed_in_commits": 22,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 8,
+    "frac": 0.128
+   },
+   "call": {
+    "n_tests": 8,
+    "frac": 0.128
+   },
+   "call+dyn": {
+    "n_tests": 8,
+    "frac": 0.128
+   }
+  },
+  "tests/test_install.bats": {
+   "changed_in_commits": 26,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.113
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.113
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.113
+   }
+  },
+  "tests/test_spawn.bats": {
+   "changed_in_commits": 11,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.106
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.106
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.106
+   }
+  },
+  "tests/test_watch.bats": {
+   "changed_in_commits": 14,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.08
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.08
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.08
+   }
+  },
+  "tests/test_codex_bridge_launcher.bats": {
+   "changed_in_commits": 13,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.066
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.066
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.066
+   }
+  },
+  "tests/test_delivery.bats": {
+   "changed_in_commits": 29,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.065
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.065
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.065
+   }
+  },
+  "package.json": {
+   "changed_in_commits": 20,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.037
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.037
+   },
+   "call+dyn": {
+    "n_tests": 6,
+    "frac": 0.063
+   }
+  },
+  "tests/test_remote_sync.bats": {
+   "changed_in_commits": 16,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 5,
+    "frac": 0.062
+   },
+   "call": {
+    "n_tests": 5,
+    "frac": 0.062
+   },
+   "call+dyn": {
+    "n_tests": 5,
+    "frac": 0.062
+   }
+  },
+  "tests/test_terminal_registry.bats": {
+   "changed_in_commits": 10,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.052
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.052
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.052
+   }
+  },
+  "tests/test_codex_bridge.bats": {
+   "changed_in_commits": 9,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.05
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.05
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.05
+   }
+  },
+  "README.md": {
+   "changed_in_commits": 14,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 3,
+    "frac": 0.037
+   },
+   "call": {
+    "n_tests": 3,
+    "frac": 0.037
+   },
+   "call+dyn": {
+    "n_tests": 5,
+    "frac": 0.042
+   }
+  },
+  "tests/test_inbox.bats": {
+   "changed_in_commits": 11,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.04
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.04
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.04
+   }
+  },
+  "cliff.toml": {
+   "changed_in_commits": 9,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 2,
+    "frac": 0.037
+   },
+   "call": {
+    "n_tests": 2,
+    "frac": 0.037
+   },
+   "call+dyn": {
+    "n_tests": 2,
+    "frac": 0.037
+   }
+  },
+  "tests/test_type_registry.bats": {
+   "changed_in_commits": 9,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.029
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.029
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.029
+   }
+  },
+  "tests/test_codex_resume.bats": {
+   "changed_in_commits": 9,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.027
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.027
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.027
+   }
+  },
+  "tests/test_codex_monitor.bats": {
+   "changed_in_commits": 16,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 4,
+    "frac": 0.026
+   },
+   "call": {
+    "n_tests": 4,
+    "frac": 0.026
+   },
+   "call+dyn": {
+    "n_tests": 4,
+    "frac": 0.026
+   }
+  },
+  "tests/remote_sync_engine.test.mjs": {
+   "changed_in_commits": 18,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 3,
+    "frac": 0.003
+   },
+   "call": {
+    "n_tests": 3,
+    "frac": 0.003
+   },
+   "call+dyn": {
+    "n_tests": 3,
+    "frac": 0.003
+   }
+  },
+  ".claude-plugin/plugin.json": {
+   "changed_in_commits": 20,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 3,
+    "frac": 0.001
+   },
+   "call": {
+    "n_tests": 3,
+    "frac": 0.001
+   },
+   "call+dyn": {
+    "n_tests": 3,
+    "frac": 0.001
+   }
+  },
+  "app/src/App.tsx": {
+   "changed_in_commits": 9,
+   "exists_at_head": true,
+   "strict": {
+    "n_tests": 1,
+    "frac": 0.0
+   },
+   "call": {
+    "n_tests": 1,
+    "frac": 0.0
+   },
+   "call+dyn": {
+    "n_tests": 1,
+    "frac": 0.0
+   }
+  }
+ },
+ "restricted_to_dyn_covered": {
+  "tests": 66,
+  "ci_seconds": 2762.0,
+  "stats": {
+   "static_call": {
+    "commits": 300,
+    "mean": 0.5457,
+    "median": 0.5634,
+    "p75": 0.9247,
+    "p90": 0.9841,
+    "share_zero": 0.083,
+    "share_ge_80pct": 0.427,
+    "share_ge_95pct": 0.243
+   },
+   "dyn_only": {
+    "commits": 300,
+    "mean": 0.3245,
+    "median": 0.1423,
+    "p75": 0.7017,
+    "p90": 0.9649,
+    "share_zero": 0.203,
+    "share_ge_80pct": 0.2,
+    "share_ge_95pct": 0.123
+   },
+   "union": {
+    "commits": 300,
+    "mean": 0.5515,
+    "median": 0.5666,
+    "p75": 0.9247,
+    "p90": 0.9841,
+    "share_zero": 0.083,
+    "share_ge_80pct": 0.427,
+    "share_ge_95pct": 0.243
+   }
+  }
+ }
+}

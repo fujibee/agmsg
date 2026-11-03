@@ -1,0 +1,535 @@
+{
+ "tests_total": 155,
+ "tests_with_dyn": 72,
+ "whole_tree_readers": {
+  "tests/test_agmsgd_daemon_sh.bats": {
+   "n_dyn_raw": 259,
+   "n_dyn_clean": 259,
+   "n_call": 195
+  },
+  "tests/test_agmsgd_entrypoint.bats": {
+   "n_dyn_raw": 259,
+   "n_dyn_clean": 109,
+   "n_call": 195
+  },
+  "tests/test_agmsgd_status.bats": {
+   "n_dyn_raw": 261,
+   "n_dyn_clean": 46,
+   "n_call": 198
+  },
+  "tests/test_capability_docs.bats": {
+   "n_dyn_raw": 483,
+   "n_dyn_clean": 29,
+   "n_call": 958
+  },
+  "tests/test_enforced_assertions.bats": {
+   "n_dyn_raw": 157,
+   "n_dyn_clean": 157,
+   "n_call": 157
+  }
+ },
+ "tests_compared": 67,
+ "dyn_norm": 26,
+ "tests_with_copy_noise": 0,
+ "avg_n_dyn_raw": 20.253731343283583,
+ "avg_n_dyn": 20.253731343283583,
+ "avg_n_union_call": 93.68656716417911,
+ "strict": {
+  "avg_size_on_covered": 69.86567164179104,
+  "avg_size_all": 82.03870967741935,
+  "micro_precision": 0.2858363597521897,
+  "micro_recall": 0.9859985261606485,
+  "macro_precision": 0.4140184889864402,
+  "macro_recall": 0.9848180574208752,
+  "tests_recall_1": 58,
+  "top_miss": [
+   [
+    "README.md",
+    2
+   ],
+   [
+    "package.json",
+    2
+   ],
+   [
+    "scripts/lib/operator-guidance.sh",
+    2
+   ],
+   [
+    "scripts/lib/require-python3.sh",
+    2
+   ],
+   [
+    "scripts/lib/shquote.sh",
+    2
+   ],
+   [
+    "VERSION",
+    1
+   ],
+   [
+    "scripts/lib/watch-stuck-map.sh",
+    1
+   ],
+   [
+    "scripts/lib/node.sh",
+    1
+   ],
+   [
+    "scripts/lib/sqlite-output.sh",
+    1
+   ],
+   [
+    "scripts/internal/jsonl-sync.mjs",
+    1
+   ],
+   [
+    "scripts/internal/strict-jsonl.mjs",
+    1
+   ],
+   [
+    "scripts/lib/registry-lock.sh",
+    1
+   ],
+   [
+    "scripts/internal/sync-cipher.mjs",
+    1
+   ],
+   [
+    "scripts/internal/wire-kinds.mjs",
+    1
+   ]
+  ],
+  "top_static_only": [
+   [
+    "scripts/drivers/ext-tools/slack/tool.conf",
+    50
+   ],
+   [
+    "scripts/drivers/ext-tools/jev/tool.conf",
+    50
+   ],
+   [
+    "scripts/drivers/types/antigravity/mac-process-info.py",
+    48
+   ],
+   [
+    "scripts/agmsg",
+    48
+   ],
+   [
+    "scripts/drivers/partition/per-team.sh",
+    47
+   ],
+   [
+    "scripts/drivers/types/antigravity/bridge-read-guard.sh",
+    47
+   ],
+   [
+    "scripts/drivers/types/antigravity/bridge-read-guard.mjs",
+    47
+   ],
+   [
+    "scripts/drivers/storage/jsonl.sh",
+    47
+   ],
+   [
+    "scripts/daemon/liveness.mjs",
+    47
+   ],
+   [
+    "scripts/daemon/executor.mjs",
+    46
+   ],
+   [
+    "scripts/lib/daemon-state.sh",
+    38
+   ],
+   [
+    "scripts/drivers/storage/sqlite-sync.sh",
+    38
+   ],
+   [
+    "scripts/drivers/storage/sqlite.sh",
+    37
+   ],
+   [
+    "scripts/lib/bridge-read-guard.sh",
+    36
+   ],
+   [
+    "scripts/drivers/types/grok-build/template.md",
+    34
+   ],
+   [
+    "scripts/drivers/types/devin/template.md",
+    34
+   ],
+   [
+    "scripts/drivers/types/antigravity/template.md",
+    34
+   ],
+   [
+    "scripts/drivers/types/opencode/template.md",
+    34
+   ],
+   [
+    "scripts/drivers/types/hermes/template.md",
+    34
+   ],
+   [
+    "scripts/drivers/partition/shared.sh",
+    34
+   ],
+   [
+    "scripts/drivers/types/grok-build/type.conf",
+    33
+   ],
+   [
+    "scripts/drivers/types/cursor/template.md",
+    33
+   ],
+   [
+    "scripts/drivers/types/app-addon/type.conf",
+    33
+   ],
+   [
+    "scripts/drivers/types/gemini/template.md",
+    33
+   ],
+   [
+    "scripts/drivers/types/hermes/type.conf",
+    33
+   ],
+   [
+    "scripts/drivers/types/devin/type.conf",
+    33
+   ],
+   [
+    "scripts/drivers/types/copilot/template.md",
+    33
+   ],
+   [
+    "scripts/drivers/types/ext-tool/type.conf",
+    33
+   ],
+   [
+    "scripts/drivers/types/opencode/type.conf",
+    33
+   ],
+   [
+    "scripts/drivers/types/copilot/type.conf",
+    32
+   ]
+  ]
+ },
+ "call": {
+  "avg_size_on_covered": 93.61194029850746,
+  "avg_size_all": 115.65806451612903,
+  "micro_precision": 0.21556122448979592,
+  "micro_recall": 0.9963154016212233,
+  "macro_precision": 0.36872791258413523,
+  "macro_recall": 0.9937737781679835,
+  "tests_recall_1": 63,
+  "top_miss": [
+   [
+    "README.md",
+    2
+   ],
+   [
+    "package.json",
+    2
+   ],
+   [
+    "VERSION",
+    1
+   ]
+  ],
+  "top_static_only": [
+   [
+    "scripts/drivers/ext-tools/slack/tool.conf",
+    50
+   ],
+   [
+    "scripts/drivers/ext-tools/jev/tool.conf",
+    50
+   ],
+   [
+    "scripts/drivers/storage/jsonl-read-cursor.jq",
+    48
+   ],
+   [
+    "scripts/drivers/storage/jsonl-unread.duckdb.sql",
+    48
+   ],
+   [
+    "scripts/drivers/types/antigravity/mac-process-info.py",
+    48
+   ],
+   [
+    "scripts/agmsg",
+    48
+   ],
+   [
+    "scripts/drivers/partition/per-team.sh",
+    47
+   ],
+   [
+    "scripts/drivers/types/antigravity/bridge-read-guard.sh",
+    47
+   ],
+   [
+    "scripts/drivers/types/antigravity/bridge-read-guard.mjs",
+    47
+   ],
+   [
+    "scripts/drivers/storage/jsonl.sh",
+    47
+   ],
+   [
+    "scripts/internal/jsonl-sync.mjs",
+    47
+   ],
+   [
+    "scripts/daemon/liveness.mjs",
+    47
+   ],
+   [
+    "scripts/daemon/executor.mjs",
+    46
+   ],
+   [
+    "scripts/internal/sync-cipher.mjs",
+    46
+   ],
+   [
+    "scripts/internal/wire-kinds.mjs",
+    46
+   ],
+   [
+    "scripts/internal/strict-jsonl.mjs",
+    44
+   ],
+   [
+    "scripts/drivers/types/grok-build/template.md",
+    38
+   ],
+   [
+    "scripts/drivers/types/devin/template.md",
+    38
+   ],
+   [
+    "scripts/drivers/types/antigravity/template.md",
+    38
+   ],
+   [
+    "scripts/drivers/types/opencode/template.md",
+    38
+   ],
+   [
+    "scripts/drivers/types/hermes/template.md",
+    38
+   ],
+   [
+    "scripts/lib/daemon-state.sh",
+    38
+   ],
+   [
+    "scripts/drivers/storage/sqlite-sync.sh",
+    38
+   ],
+   [
+    "scripts/drivers/types/grok-build/type.conf",
+    37
+   ],
+   [
+    "scripts/drivers/types/cursor/template.md",
+    37
+   ],
+   [
+    "scripts/drivers/types/app-addon/type.conf",
+    37
+   ],
+   [
+    "scripts/drivers/types/gemini/template.md",
+    37
+   ],
+   [
+    "scripts/drivers/types/hermes/type.conf",
+    37
+   ],
+   [
+    "scripts/drivers/types/devin/type.conf",
+    37
+   ],
+   [
+    "scripts/drivers/types/copilot/template.md",
+    37
+   ]
+  ]
+ },
+ "loose": {
+  "avg_size_on_covered": 170.92537313432837,
+  "avg_size_all": 196.5741935483871,
+  "micro_precision": 0.11814530213063221,
+  "micro_recall": 0.9970523212969786,
+  "macro_precision": 0.26283035193964915,
+  "macro_recall": 0.995017559262511,
+  "tests_recall_1": 64,
+  "top_miss": [
+   [
+    "package.json",
+    2
+   ],
+   [
+    "README.md",
+    1
+   ],
+   [
+    "VERSION",
+    1
+   ]
+  ],
+  "top_static_only": [
+   [
+    "scripts/drivers/types/cursor/_delivery.sh",
+    52
+   ],
+   [
+    "scripts/lib/self-proof.sh",
+    52
+   ],
+   [
+    "scripts/drivers/ext-tools/slack/SETUP.md",
+    52
+   ],
+   [
+    "scripts/drivers/terminals/plain/README.md",
+    52
+   ],
+   [
+    "scripts/internal/bounded-copy.py",
+    52
+   ],
+   [
+    "scripts/drivers/types/grok-build/template.md",
+    52
+   ],
+   [
+    "scripts/drivers/types/antigravity/antigravity-monitor.sh",
+    52
+   ],
+   [
+    "scripts/drivers/terminals/codex-app/README.md",
+    52
+   ],
+   [
+    "scripts/lib/safe-poke.sh",
+    52
+   ],
+   [
+    "scripts/drivers/terminals/orca/README.md",
+    52
+   ],
+   [
+    "scripts/drivers/types/devin/_delivery.sh",
+    52
+   ],
+   [
+    "scripts/drivers/types/antigravity/_delivery.sh",
+    52
+   ],
+   [
+    "scripts/drivers/types/devin/template.md",
+    52
+   ],
+   [
+    "scripts/drivers/types/copilot/_delivery.sh",
+    52
+   ],
+   [
+    "scripts/lib/input-box.sh",
+    52
+   ],
+   [
+    "scripts/internal/rename-sync-config.mjs",
+    52
+   ],
+   [
+    "scripts/drivers/ext-tools/jev/setup",
+    52
+   ],
+   [
+    "scripts/drivers/types/grok-build/_delivery.sh",
+    52
+   ],
+   [
+    "scripts/drivers/types/ext-tool/_row.sh",
+    52
+   ],
+   [
+    "scripts/drivers/types/antigravity/template.md",
+    52
+   ],
+   [
+    "scripts/drivers/terminals/tmux/README.md",
+    52
+   ],
+   [
+    "scripts/drivers/storage/jsonl-read-cursor.jq",
+    52
+   ],
+   [
+    "scripts/lib/windows-elevation.sh",
+    52
+   ],
+   [
+    "scripts/drivers/types/antigravity/antigravity-bridge.mjs",
+    52
+   ],
+   [
+    "scripts/drivers/storage/jsonl-unread.duckdb.sql",
+    52
+   ],
+   [
+    "scripts/drivers/types/antigravity/legacy-pre1248-notes-path.sh",
+    52
+   ],
+   [
+    "scripts/internal/storage-sync-driver.sh",
+    52
+   ],
+   [
+    "scripts/drivers/ext-tools/slack/USAGE.md",
+    52
+   ],
+   [
+    "scripts/drivers/ext-tools/jev/USAGE.md",
+    52
+   ],
+   [
+    "scripts/drivers/terminals/herdr/README.md",
+    52
+   ]
+  ]
+ },
+ "probes": {
+  "tests/test_agmsgd_codex_queue.bats": [
+   "package.json"
+  ],
+  "tests/test_agmsgd_launch.bats": [
+   "package.json"
+  ],
+  "tests/test_codex_bridge.bats": [
+   "VERSION",
+   "package.json"
+  ],
+  "tests/test_codex_monitor.bats": [
+   "VERSION"
+  ],
+  "tests/test_cut_release.bats": [
+   ".gitattributes",
+   ".gitignore"
+  ]
+ }
+}
