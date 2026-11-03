@@ -4,6 +4,8 @@
 # the packaged artifact (not a hand-built tree like test_helper builds) is what
 # gets validated. Catches packaging drift — e.g. a new scripts/lib/ helper that
 # the installer forgets to copy, which would make every command die at `source`.
+# Tests that only need an install to start from copy one built for real once
+# per file (_restore_install below).
 
 load test_helper  # for setup_live_owner
 
@@ -101,58 +103,70 @@ teardown() {
 # Put the result of a real `install.sh [args]` into $FAKE_HOME without running
 # the installer again for every test that only needs an install to exist.
 #
-# Most tests below start from the same plain install as arrange-only work, and
-# that install is about 90 % of this file's time (about 3 s each on macOS). The
-# first test that asks for a given install builds it for real -- from this
-# tree, with this test's environment -- into $BATS_FILE_TMPDIR; later tests
-# copy that tree. What they assert on is still the output of the real
-# installer; only the repeats are gone. Tests about the install's own output or
-# behaviour keep running install.sh themselves (test 1 is the fresh-install
-# smoke test).
+# 65 tests below start from one of a few installs as arrange-only work, and a
+# fresh install costs about 3 s on macOS and 1 s on ubuntu (locally the whole
+# file went from 362 s to 294 s once the repeats were gone). The first test that
+# asks for a given install builds it for real -- from this tree, with that
+# test's environment, into an empty HOME under $BATS_FILE_TMPDIR -- and later
+# tests copy that tree, so what they assert on is still the real installer's
+# output. Tests about what install.sh prints, and test 1 (the fresh-install
+# smoke test), still run it themselves.
 #
 #   --marker <dir>  create $HOME/<dir> before installing, as the tests for the
 #                   per-agent skills do (the marker is part of the copy).
 #
-# A copy is only equivalent if nothing in it points back at the template. A
-# default install writes its own HOME path into a few text files (the launcher,
-# the Antigravity shim, run/agmsg-launcher.path); those are rewritten, and the
-# final check fails the test if the template path is left anywhere, binary
-# files included -- an installer that starts recording its path somewhere new
-# turns this red instead of letting a test act on the template. Windows (Git
-# Bash) writes paths in another form, so there it installs for real every time.
+# A copy is only equivalent if nothing in it points back at the template. An
+# install writes its own HOME path into exactly three text files: the launcher
+# (~/.local/bin/<cmd>), the Antigravity shim (~/.agents/bin/agy-tui) and
+# run/agmsg-launcher.path. Only those are rewritten. The final check looks for
+# the template directory's name anywhere in the copy -- any file, any quoting
+# -- so an installer that starts writing its path somewhere else turns the test
+# red instead of letting it act on the template (add the new file to the list
+# once it is understood). Paths that need shell quoting (the installer writes
+# some through printf %q) and Windows (Git Bash writes another path form)
+# install for real every time.
 _restore_install() {   # [--marker <dir>] [install.sh args...]; default args: --cmd agmsg
-  local marker="" key ref src f files esc
+  local marker="" cmd=agmsg prev="" a copy=1 key ref tmp src f esc
   if [ "${1:-}" = "--marker" ]; then
     marker="$2"
     shift 2
   fi
   [ "$#" -gt 0 ] || set -- --cmd agmsg
-  case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-      if [ -n "$marker" ]; then mkdir -p "$FAKE_HOME/$marker" || return 1; fi
-      HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" "$@"
-      return
-      ;;
-  esac
+  for a in "$@"; do
+    [ "$prev" = "--cmd" ] && cmd="$a"
+    prev="$a"
+  done
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) copy=0 ;; esac
+  [ "$(printf '%q' "$FAKE_HOME")" = "$FAKE_HOME" ] || copy=0
+  [ "$(printf '%q' "$BATS_FILE_TMPDIR")" = "$BATS_FILE_TMPDIR" ] || copy=0
+  if [ "$copy" -eq 0 ]; then
+    if [ -n "$marker" ]; then mkdir -p "$FAKE_HOME/$marker" || return 1; fi
+    HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" "$@"
+    return
+  fi
   key="$(printf '%s_' "$marker" "$@" | tr -c 'A-Za-z0-9_' '_')"
   ref="$BATS_FILE_TMPDIR/install-template-$key"
   if [ ! -s "$ref" ]; then
     src="$(mktemp -d "$BATS_FILE_TMPDIR/install-template.XXXXXX")" || return 1
     if [ -n "$marker" ]; then mkdir -p "$src/$marker" || return 1; fi
     HOME="$src" bash "$REPO_ROOT/install.sh" "$@" || return 1
-    printf '%s\n' "$src" > "$ref" || return 1
+    # Published by rename, so a test running in parallel (bats --jobs) never
+    # reads a half-written path.
+    tmp="$(mktemp "$ref.XXXXXX")" || return 1
+    printf '%s\n' "$src" > "$tmp" || return 1
+    mv -f "$tmp" "$ref" || return 1
   fi
   src="$(cat "$ref")"
+  [ -n "$src" ] && [ -d "$src/.agents/skills/$cmd" ] || return 1
   cp -Rp "$src/." "$FAKE_HOME/" || return 1
   esc="$(printf '%s' "$src" | sed 's/[][\.*^$|]/\\&/g')"
-  files="$(grep -rlIF -- "$src" "$FAKE_HOME" || true)"
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
+  for f in ".local/bin/$cmd" .agents/bin/agy-tui ".agents/skills/$cmd/run/agmsg-launcher.path"; do
+    [ -f "$FAKE_HOME/$f" ] || continue
     # cat into the existing file keeps its mode (the launcher is 0711).
-    sed "s|$esc|$FAKE_HOME|g" "$f" > "$BATS_TEST_TMPDIR/restore-rewrite" || return 1
-    cat "$BATS_TEST_TMPDIR/restore-rewrite" > "$f" || return 1
-  done <<< "$files"
-  refute grep -rqF -- "$src" "$FAKE_HOME"
+    sed "s|$esc|$FAKE_HOME|g" "$FAKE_HOME/$f" > "$BATS_TEST_TMPDIR/restore-rewrite" || return 1
+    cat "$BATS_TEST_TMPDIR/restore-rewrite" > "$FAKE_HOME/$f" || return 1
+  done
+  refute grep -rqF -- "${src##*/}" "$FAKE_HOME"
 }
 
 @test "install: fresh install ships scripts/lib and the commands actually run" {
@@ -983,8 +997,6 @@ wait_for_pidfile_pid() {
 }
 
 @test "install: skips Copilot skill when ~/.copilot is absent" {
-  # Make sure ~/.copilot isn't there
-  rm -rf "$FAKE_HOME/.copilot"
   _restore_install
   [ ! -d "$FAKE_HOME/.copilot" ]
 }
@@ -1028,7 +1040,6 @@ wait_for_pidfile_pid() {
 }
 
 @test "install: skips OpenCode skill when ~/.config/opencode is absent" {
-  rm -rf "$FAKE_HOME/.config/opencode"
   _restore_install
   [ ! -d "$FAKE_HOME/.config/opencode/skills/agmsg" ]
 }
@@ -1965,7 +1976,6 @@ EOF
 }
 
 @test "install: skips Grok Build skill when ~/.grok is absent" {
-  rm -rf "$FAKE_HOME/.grok"
   _restore_install
   [ ! -d "$FAKE_HOME/.grok" ]
 }
