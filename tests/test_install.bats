@@ -1262,8 +1262,7 @@ SH
   run kill -0 "$first"
   [ "$status" -ne 0 ]
 
-  kill "$second" 2>/dev/null || true
-  wait 2>/dev/null || true
+  _agmsg_kill_confirmed "$second"
 }
 
 # --- Pipe-stdin guard: simulate a curl|bash entry path (#98) ---

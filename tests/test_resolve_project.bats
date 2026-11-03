@@ -430,8 +430,7 @@ JSON
   # already exited.
   local alive=0
   kill -0 "$wpid" 2>/dev/null && alive=1
-  kill "$wpid" 2>/dev/null || true
-  wait "$wpid" 2>/dev/null || true
+  agmsg_stop_pid "$wpid"
 
   [ "$alive" -eq 1 ]
   run cat "$BATS_TEST_TMPDIR/w.out"

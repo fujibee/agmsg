@@ -1819,8 +1819,7 @@ JSON
   # forbidden one gets the chance to (review on #1327). Nothing here is a
   # condition to poll for.
   sleep 3
-  kill -TERM "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
 
   grep -q "new-for-bob"   /tmp/agmsg-as-bob
   ! grep -q "new-for-alice" /tmp/agmsg-as-bob \
@@ -1940,8 +1939,7 @@ JSON
   # forbidden one gets the chance to (review on #1327). Nothing here is a
   # condition to poll for.
   sleep 3
-  kill -TERM "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
 
   grep -q "for-alice-static" /tmp/agmsg-static
   refute grep -q "for-bob-static" /tmp/agmsg-static
@@ -3673,8 +3671,7 @@ JSON
   run kill -0 "$watch_pid"
   [ "$status" -eq 0 ]
 
-  kill "$watch_pid" 2>/dev/null || true
-  wait 2>/dev/null || true
+  agmsg_stop_pid "$watch_pid"
 }
 
 # --- devin (manual-only: delivery_modes=off, no automatic hook) ---

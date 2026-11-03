@@ -169,8 +169,7 @@ fake_session() {
   # still be resolving a pair's lock when the old 1s window fired the kill
   # (measured: 1 flake in 3 runs at 1s, 0 in several at 2s).
   sleep 2
-  kill "$wpid" 2>/dev/null || true
-  wait "$wpid" 2>/dev/null || true
+  agmsg_stop_pid "$wpid"
 
   # The header no longer says "held by other sessions": the same list also
   # carries pairs whose lock could not be READ, and those have no holder to name
@@ -202,8 +201,7 @@ _watch_briefly() {   # <sid>
     >"$BATS_TEST_TMPDIR/watch.out" 2>&1 3>&- &
   local wpid=$!
   sleep 3
-  kill "$wpid" 2>/dev/null || true
-  wait "$wpid" 2>/dev/null || true
+  agmsg_stop_pid "$wpid"
 }
 
 # #1807: after a resume or reboot the same session runs under a new process.
@@ -247,8 +245,7 @@ _watch_briefly() {   # <sid>
   # Should now own the lock.
   [ "$(_owner_only T alice)" = "sid-me" ]
 
-  kill "$wpid" 2>/dev/null || true
-  wait "$wpid" 2>/dev/null || true
+  agmsg_stop_pid "$wpid"
 }
 
 # --- watch.sh releasing a pair it no longer owns (#983) ---
@@ -339,8 +336,7 @@ _watch_briefly() {   # <sid>
   [ "$left" -eq 1 ]
 
   kill "$newpid" 2>/dev/null || true
-  kill "$old" 2>/dev/null || true
-  wait "$old" 2>/dev/null || true
+  agmsg_stop_pid "$old"
 }
 
 # The other half, and the one that decides whether this fix is safe: a watcher
@@ -380,8 +376,7 @@ _watch_briefly() {   # <sid>
   run cat "$BATS_TEST_TMPDIR/broad.err"
   [[ "$output" == *"T/alice"* ]]
 
-  kill "$broad" 2>/dev/null || true
-  wait "$broad" 2>/dev/null || true
+  agmsg_stop_pid "$broad"
 }
 
 # Stepping aside is for as long as someone else holds the role, not forever.
@@ -435,8 +430,7 @@ _watch_briefly() {   # <sid>
   [[ "$output" == *"while they hold it"* ]]
   [[ "$output" == *"unheld again"* ]]
 
-  kill "$broad" 2>/dev/null || true
-  wait "$broad" 2>/dev/null || true
+  agmsg_stop_pid "$broad"
 }
 
 # Names are arbitrary UTF-8 minus a deny-list (validate.sh): a team name may
@@ -487,8 +481,7 @@ _watch_briefly() {   # <sid>
   claims="$(grep -c 'txm/alice was claimed' "$BATS_TEST_TMPDIR/n.err" || true)"
   [ "$claims" -eq 1 ]
 
-  kill "$broad" 2>/dev/null || true
-  wait "$broad" 2>/dev/null || true
+  agmsg_stop_pid "$broad"
 }
 
 # The tree deliberately has no owner-only reader any more (#983): every lock read

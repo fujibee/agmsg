@@ -168,8 +168,7 @@ run_watcher_for() {
   local pid=$!
   _bg_track "$pid"
   sleep "$secs"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
 }
 
 # Run watch.sh in the background until <condition> holds, capturing stdout to
@@ -194,8 +193,7 @@ run_watcher_for() {
 # function call is not a subshell, so launching here keeps the test process as
 # the watcher's parent, exactly as the fixed-sleep version did.
 _stop_watcher() {
-  kill "$1" 2>/dev/null || true
-  wait "$1" 2>/dev/null || true
+  agmsg_stop_pid "$1"
 }
 
 # Stop once <file> exists.
@@ -237,8 +235,7 @@ run_watcher_until() {
     done
     [ "${cursor:-0}" -gt "${before:-0}" ] || found=1
   fi
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
   return "$found"
 }
 
@@ -435,8 +432,15 @@ CREATE TABLE beta_claude_seat (seat TEXT PRIMARY KEY, messaging_socket TEXT, sta
 INSERT INTO beta_claude_seat VALUES ('["team","erin"]', '/tmp/cc-socks/s-ms-native.sock', 'blocked', 'peer_held: historical hint', '2026-10-23');
 SQL
   bash "$SCRIPTS/send.sh" team bob erin "native-delivered probe" >/dev/null
+  # The four runs below each have to DELIVER a message before the cap ends
+  # them, and the cap counts from the watcher's own start. With 2s, a slow
+  # startup on a loaded macOS runner (this seat's native-delivery checks read
+  # install.db and the role-session record first) reached the cap before
+  # the first poll, so the probe was never delivered (failed twice in CI,
+  # 2026-10-27 and 10-30). 5s leaves room for that startup; the quiet runs
+  # above keep 2s because they assert that nothing is delivered.
   AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
-    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=5 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
@@ -454,7 +458,7 @@ SQL
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
   bash "$SCRIPTS/send.sh" team bob erin "disable-window probe" >/dev/null
   AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
-    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=5 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
@@ -476,7 +480,7 @@ SQL
   sed -i.bak 's#^project=.*#project=/tmp/agmsg-some-other-project#' "$rs_file"
   bash "$SCRIPTS/send.sh" team bob erin "project-mismatch probe" >/dev/null
   AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
-    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=5 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
@@ -494,7 +498,7 @@ SQL
   sed -i.bak 's#^agent=.*#agent=some-other-seat#' "$rs_file"
   bash "$SCRIPTS/send.sh" team bob erin "identity-mismatch probe" >/dev/null
   AGMSG_AGENT_PID=$$ AGMSG_WATCH_INTERVAL=1 \
-    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+    bash "$SCRIPTS/watch.sh" s-ms-native "$PROJ" claude-code erin --max-seconds=5 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
@@ -630,8 +634,7 @@ SQL
   bash "$SCRIPTS/send.sh" team bob alice "M-after-closed-stdout" >/dev/null
 
   _wait_for_missing "$pf" || {
-    kill "$w" 2>/dev/null || true
-    wait "$w" 2>/dev/null || true
+    agmsg_stop_pid "$w"
     false
   }
   wait "$w" 2>/dev/null || true
@@ -665,8 +668,7 @@ SQL
     sleep 0.5
   done
   [ -e "$ready" ]
-  kill "$w" 2>/dev/null || true
-  wait "$w" 2>/dev/null || true
+  agmsg_stop_pid "$w"
   # Removed on exit (sentinel tracks a live watcher).
   [ ! -e "$ready" ]
 }
@@ -724,8 +726,7 @@ SQL
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$ready" ] && break; sleep 0.5; done
   # watch.sh stamps the instance id (composite under an agent ancestor).
   [ "$(cat "$ready")" = "$(_iid sess-own)" ]
-  kill "$w" 2>/dev/null || true
-  wait "$w" 2>/dev/null || true
+  agmsg_stop_pid "$w"
 }
 
 @test "watch: cleanup leaves a sentinel that a successor session re-owned" {
@@ -737,8 +738,7 @@ SQL
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$ready" ] && break; sleep 0.5; done
   # A successor watcher overwrites the sentinel with its own id.
   printf 'sess-new\n' > "$ready"
-  kill "$w" 2>/dev/null || true
-  wait "$w" 2>/dev/null || true
+  agmsg_stop_pid "$w"
   # The old watcher must NOT delete the successor's live sentinel.
   [ -f "$ready" ]
   [ "$(cat "$ready")" = "sess-new" ]
@@ -776,8 +776,7 @@ SQL
   # The original watcher must still be alive.
   kill -0 "$wpid" 2>/dev/null
 
-  kill "$wpid" 2>/dev/null || true
-  wait "$wpid" 2>/dev/null || true
+  agmsg_stop_pid "$wpid"
 }
 
 @test "session-start: GCs a stale ready sentinel but keeps a live one" {
@@ -1278,8 +1277,7 @@ _record_handover_events() {
 
   # Wait for the last one to arrive, then assert EVERY message is present.
   _wait_for_file_contains "$out" "BURST-8" || { kill "$w" 2>/dev/null || true; false; }
-  kill "$w" 2>/dev/null || true
-  wait "$w" 2>/dev/null || true
+  agmsg_stop_pid "$w"
 
   for n in 1 2 3 4 5 6 7 8; do
     grep -q "BURST-$n" "$out"
@@ -1325,8 +1323,7 @@ _record_handover_events() {
     [ "${cursor:-0}" -gt 0 ] && break
     sleep 0.1
   done
-  kill "$w" 2>/dev/null || true
-  wait "$w" 2>/dev/null || true
+  agmsg_stop_pid "$w"
 
   grep -q "WBIG-0-" "$out"
   grep -q "WBIG-99-" "$out"

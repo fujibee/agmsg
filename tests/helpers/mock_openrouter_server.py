@@ -13,6 +13,7 @@ import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import TCPServer
 
 REQUEST_LOG = os.environ.get("MOCK_OPENROUTER_REQUEST_LOG", "")
 # 200 is the default "real decision" response; 401/429 are the two error
@@ -71,7 +72,24 @@ MOCK_OPENROUTER_SINGLE_ANSWER = os.environ.get("MOCK_OPENROUTER_SINGLE_ANSWER", 
 
 
 class LoopbackHTTPServer(HTTPServer):
+    """HTTPServer without a reverse-DNS lookup during fixture startup.
+
+    HTTPServer.server_bind() resolves the bound address with
+    socket.getfqdn() before the port line is printed.
+    test_ext_tool_jev_handle.bats, which starts this fixture, ran ~90x
+    slower on macOS runners than on ubuntu (~605 s vs ~6.6 s, steady across
+    15 runs; the slack handle test and its mock_slack_server.py the same
+    way, ~216 s vs ~4.5 s), while the test_remote*.bats files, whose
+    mock_remote_server.py already skips the lookup, ran at the usual ~2x.
+    Same override as mock_remote_server.py.
+    """
     allow_reuse_address = True
+
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
 
 class Handler(BaseHTTPRequestHandler):

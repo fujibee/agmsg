@@ -95,8 +95,7 @@ _wait_for() {
   run grep -c 'after-the-update' "$out"
   [ "$output" = "1" ]
 
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
 }
 
 # #1863: only a finished install (VERSION written after the watcher started) is
@@ -127,8 +126,7 @@ _wait_for() {
   _wait_for "grep -q 'after-stray' '$out'" || true
   local was_alive=0
   kill -0 "$pid" 2>/dev/null && was_alive=1
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
   rm -f "$SCRIPTS/stray-data-file"
 
   [ "$was_alive" -eq 1 ]
@@ -153,8 +151,7 @@ _wait_for() {
   _wait_for "! kill -0 $pid 2>/dev/null" || true
   local was_alive=0
   kill -0 "$pid" 2>/dev/null && was_alive=1
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
   chmod +x "$SCRIPTS/watch.sh"
 
   [ "$was_alive" -eq 0 ]
@@ -181,8 +178,7 @@ _wait_for() {
   # Same ordering as above: reap first, assert on what was captured.
   local was_alive=0
   kill -0 "$pid" 2>/dev/null && was_alive=1
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
 
   [ "$was_alive" -eq 1 ]
   run grep -c 'installation was updated' "$out"
@@ -208,8 +204,7 @@ _wait_for() {
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" shared-sid "$PROJ" claude-code >"$out2" 2>/dev/null 3>&- 4>&- &
   local second=$!
   _wait_for "! kill -0 $first 2>/dev/null" || true
-  kill "$first" 2>/dev/null || true
-  wait "$first" 2>/dev/null || true
+  agmsg_stop_pid "$first"
 
   # The successor must still be armed.
   bash "$SCRIPTS/send.sh" team bob alice "successor-control" >/dev/null
@@ -225,6 +220,5 @@ _wait_for() {
   kill -0 "$second"
   grep -q 'successor-after-update' "$out2"
 
-  kill "$second" 2>/dev/null || true
-  wait "$second" 2>/dev/null || true
+  agmsg_stop_pid "$second"
 }

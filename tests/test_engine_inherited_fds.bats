@@ -85,9 +85,12 @@ _write_self_reporter() {
     # harness holds. 143 is the shape seen in the captured hang; 10 is low and
     # arbitrary, so a pass cannot come from something particular about 143.
     : > "$FD_REPORT"
+    # The readers are `cat`, not `sleep 20`: cat exits once every write end is
+    # closed, while a sleep kept bats' fd 3 open for its full 20s, so the file
+    # sat idle for 20s after its last test on every run (both OSes).
     (
-      exec 143> >(sleep 20)
-      exec 10> >(sleep 20)
+      exec 143> >(cat >/dev/null)
+      exec 10> >(cat >/dev/null)
       "$sh" "$SCRIPTS/remote-sync.sh" probe </dev/null >/dev/null 2>/dev/null || true
     )
     local measured; measured="$(cat "$FD_REPORT")"
