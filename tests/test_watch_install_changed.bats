@@ -34,12 +34,12 @@ teardown() {
   teardown_test_env
 }
 
-# Wait until <condition> holds, up to ~40s (a loaded runner took over 15 s to deliver the first message). Returns non-zero if it never did, so
+# Wait until <condition> holds, up to ~15s. Returns non-zero if it never did, so
 # a failure names the thing that did not happen rather than surfacing later as a
 # missing grep. Same reasoning as the helpers in test_watch.bats.
 _wait_for() {
   local i=0
-  while [ "$i" -lt 400 ]; do
+  while [ "$i" -lt 150 ]; do
     if eval "$1"; then return 0; fi
     i=$((i + 1))
     sleep 0.1
@@ -167,6 +167,12 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
   _explain_if_missing "$out" "$pid" 'before-broken-update'
   grep -q 'before-broken-update' "$out"
 
+  # VERSION must be strictly newer than the watcher's start stamp (see
+  # _install_complete). bash 3.2 compares whole seconds, so a VERSION written in
+  # the same second as the stamp is a tie and reads as "not finished": a fast
+  # runner delivers the first message and gets here inside that second. A real
+  # install takes longer than that; the test has to wait it out.
+  sleep 2
   chmod -x "$SCRIPTS/watch.sh"
   printf 'new-version\n' > "$TEST_SKILL_DIR/VERSION"
 
@@ -236,6 +242,7 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
   _wait_for "grep -q 'successor-control' '$out2'" || true
 
   touch "$SCRIPTS/config.sh"
+  sleep 2   # VERSION must be strictly newer than the stamp; see test 3
   printf '0.0.0-test\n' > "$TEST_SKILL_DIR/VERSION"
   bash "$SCRIPTS/send.sh" team bob alice "successor-after-update" >/dev/null
   _wait_for "grep -q 'successor-after-update' '$out2'" || true
