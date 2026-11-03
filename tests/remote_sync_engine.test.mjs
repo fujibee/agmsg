@@ -7,7 +7,7 @@ import https from "node:https";
 import { Readable } from "node:stream";
 import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
-  utimes, writeFile } from "node:fs/promises";
+  writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { before, after } from "node:test";
@@ -3411,77 +3411,67 @@ test("runLoop: an incomplete baseline disarms the detector entirely -- the check
   assert.equal(cycles, 1);
 });
 
-test("install baseline: a pre-existing FUTURE mtime is what the tree looked like, not an update (#963)", async () => {
-  // The first review counterexample against comparing mtimes to the
-  // engine's start clock: a file that already carried a future mtime at
-  // start (clock skew, an archive with preserved timestamps) must not
-  // stand every fresh engine down. Against the baseline it is unchanged.
-  const root = await mkdtemp(join(tmpdir(), "agmsg-963-"));
+async function installTree() {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-1863-"));
+  await mkdir(join(root, "scripts", "internal"), { recursive: true });
+  await mkdir(join(root, "run"), { recursive: true });
+  await writeFile(join(root, "VERSION"), "1.0.0\n");
+  await writeFile(join(root, "run", "install-manifest.json"), '{"gen":1}\n');
+  await writeFile(join(root, "scripts", "internal", "driver.sh"), "echo stable\n");
+  return { root, scripts: join(root, "scripts") };
+}
+
+test("install baseline: a file added, edited or removed under scripts/ is not an update (#1863)", async () => {
+  const { root, scripts } = await installTree();
   try {
-    await mkdir(join(root, "internal"), { recursive: true });
-    const future = new Date(Date.now() + 3600_000);
-    await writeFile(join(root, "internal", "from-the-future.sh"), "echo hi\n");
-    await utimes(join(root, "internal", "from-the-future.sh"), future, future);
-    const baseline = await collectInstallBaseline(root);
-    assert.ok(baseline instanceof Map);
-    assert.equal(await installChangedAgainst(root, baseline), null);
+    const baseline = await collectInstallBaseline(scripts);
+    assert.equal(await installChangedAgainst(scripts, baseline), null);
+    await writeFile(join(scripts, "internal", "stray-data-file"), "x\n");
+    await writeFile(join(scripts, "internal", "driver.sh"), "echo edited\n");
+    assert.equal(await installChangedAgainst(scripts, baseline), null);
+    await unlink(join(scripts, "internal", "driver.sh"));
+    assert.equal(await installChangedAgainst(scripts, baseline), null);
   } finally {
     await rm(root, { recursive: true });
   }
 });
 
-test("install baseline: an mtime change with UNCHANGED content is a touch, not an update (#963)", async () => {
-  // The second review counterexample: mtime change does not prove content
-  // change, and a false stand-down is a stopped sync engine. A touch, a
-  // metadata-only correction, a same-content re-copy must all keep the
-  // engine running; only different bytes are proof.
-  const root = await mkdtemp(join(tmpdir(), "agmsg-963t-"));
+test("install baseline: the completion record moving, or VERSION changing, is an update (#1863)", async () => {
+  const { root, scripts } = await installTree();
   try {
-    await mkdir(join(root, "internal"), { recursive: true });
-    const file = join(root, "internal", "driver.sh");
-    await writeFile(file, "echo stable\n");
-    const baseline = await collectInstallBaseline(root);
-    // touch: same bytes, new mtime
-    const later = new Date(Date.now() + 60_000);
-    await utimes(file, later, later);
-    assert.equal(await installChangedAgainst(root, baseline), null);
-    // The benign touch is remembered: the next sweep takes the cheap path
-    // and does not re-read the file.
-    let reads = 0;
-    const countingRead = async (path) => { reads += 1; return readFile(path); };
-    assert.equal(await installChangedAgainst(root, baseline, { readFileCall: countingRead }), null);
-    assert.equal(reads, 0);
-    // A rewrite with DIFFERENT bytes (and a new mtime) is proof.
-    const evenLater = new Date(Date.now() + 120_000);
-    await writeFile(file, "echo rewritten\n");
-    await utimes(file, evenLater, evenLater);
-    assert.equal(await installChangedAgainst(root, baseline), file);
+    const baseline = await collectInstallBaseline(scripts);
+    const record = join(root, "run", "install-manifest.json");
+    // install.sh moves the record aside first.
+    await rename(record, `${record}.prev`);
+    assert.equal(await installChangedAgainst(scripts, baseline), record);
+    // ...and writes a new one when done.
+    await writeFile(record, '{"gen":2}\n');
+    assert.equal(await installChangedAgainst(scripts, baseline), record);
+    const second = await collectInstallBaseline(scripts);
+    assert.equal(await installChangedAgainst(scripts, second), null);
+    await writeFile(join(root, "VERSION"), "1.0.1\n");
+    assert.equal(await installChangedAgainst(scripts, second), join(root, "VERSION"));
   } finally {
     await rm(root, { recursive: true });
   }
 });
 
-test("install baseline: a file appearing after start is proof; missing roots observe nothing (#963)", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agmsg-963b-"));
+test("install baseline: unobservable inputs disarm the detector or prove nothing (#1863)", async () => {
+  const { root, scripts } = await installTree();
   try {
-    await mkdir(join(root, "internal"), { recursive: true });
-    await writeFile(join(root, "internal", "old.sh"), "echo old\n");
-    const baseline = await collectInstallBaseline(root);
-    assert.equal(await installChangedAgainst(root, baseline), null);
-    await writeFile(join(root, "internal", "added-by-update.sh"), "echo new\n");
-    assert.equal(await installChangedAgainst(root, baseline),
-      join(root, "internal", "added-by-update.sh"));
-    // A root that cannot be read at baseline time disables the detector (null)...
-    assert.equal(await collectInstallBaseline(join(root, "no-such-dir")), null);
-    // ...and one that cannot be read at check time yields no evidence.
-    assert.equal(await installChangedAgainst(join(root, "no-such-dir"), baseline), null);
-    // A file whose bytes cannot be re-read after an mtime change proves nothing.
-    await unlink(join(root, "internal", "added-by-update.sh")); // clear the standing proof first
-    const target = join(root, "internal", "old.sh");
-    const later = new Date(Date.now() + 60_000);
-    await utimes(target, later, later);
-    const failingRead = async () => { throw new Error("EACCES"); };
-    assert.equal(await installChangedAgainst(root, baseline, { readFileCall: failingRead }), null);
+    const failingRead = async () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); };
+    assert.equal(await collectInstallBaseline(scripts, { readFileCall: failingRead }), null);
+    assert.equal(await collectInstallBaseline(join(root, "no-such-dir", "scripts")), null);
+    const baseline = await collectInstallBaseline(scripts);
+    assert.equal(await installChangedAgainst(scripts, baseline, { readFileCall: failingRead }), null);
+    // An install older than the record: absent at start is a valid baseline,
+    // and the record appearing later is the install finishing.
+    await rm(join(root, "run", "install-manifest.json"));
+    const old = await collectInstallBaseline(scripts);
+    assert.deepEqual(old, { version: "1.0.0\n", record: null });
+    assert.equal(await installChangedAgainst(scripts, old), null);
+    await writeFile(join(root, "run", "install-manifest.json"), '{"gen":1}\n');
+    assert.equal(await installChangedAgainst(scripts, old), join(root, "run", "install-manifest.json"));
   } finally {
     await rm(root, { recursive: true });
   }
