@@ -250,11 +250,17 @@ that hold it, and fails the test if the template path is left anywhere.
 65 tests switched: 48 default installs, 7 `--agent-type codex`, 10 with an
 agent marker directory. Windows installs for real every time.
 
-| measured locally (Linux, 4 cores) | before | after | change |
+| measured locally (Linux, 4 cores, idle; final code after review) | before | after | change |
 |---|---:|---:|---:|
-| wall time, 3 runs each (mean) | 362 s | 294 s | -19 % |
-| processes created (own PID namespace, exact) | 158,956 | 120,281 | -24 % |
+| wall time, 2 runs each (mean) | 388 s | 300 s | -23 % |
+| processes created (own PID namespace, exact) | 159,010 | 120,259 | -24 % |
 | tests | 118 ok | 118 ok | |
+
+An independent review (3 lenses, each finding re-checked) found 5 minor
+issues, all fixed before the PR: the copy check missed paths the installer
+writes through `printf %q` (only with a TMPDIR that needs quoting), the
+template key file could be read half-written under `bats --jobs`, and
+three comments overstated what the helper does.
 
 Expected in CI: 59 installs avoided x ~3.2 s macOS / ~0.95 s ubuntu, minus
 65 restores at ~0.3 s / ~0.07 s: about -170 s macOS and -50 s ubuntu. The
