@@ -194,7 +194,71 @@ but the shared fixture core limits what it saves.** Full write-up:
 
 ## 4. Shortening candidates (15 slowest files)
 
-In progress.
+One analysis per file in `deepdive/` (where the time goes per test, cost
+drivers, proposals with estimates and their basis, risks); all 93
+proposals in `data/shortening-proposals.tsv`. Estimates are per full run,
+derived from the per-test CI seconds; overlapping proposals are not
+additive, so the totals below are upper bounds.
+
+| file | macOS s | test-only, low risk: macOS / ubuntu s | product change: macOS s | largest test-only item |
+|---|---:|---:|---:|---|
+| test_install.bats | 762 | 182 / 60 | 109 | build the default install once per file, copy it per test (**implemented**, see below) |
+| test_spawn.bats | 653 | 184 / 102 | 68 | drop arrange-only `join.sh` calls that exist only to make team resolution succeed |
+| test_remote.bats | 555 | 228 / 143 | 0 | pin `AGMSG_AGENT_PID=""` in setup (skips the ancestor `ps` walk in join.sh); joined fixture once per file |
+| test_watch.bats | 383 | 208 / 134 | 31 | pin `AGMSG_AGENT_PID=""`; build the alice/bob team once per file |
+| test_delivery.bats | 304 | 18 / 12 | 27 | (already pins the agent pid) cache init-db output per file |
+| test_remote_sync.bats | 273 | 122 / 72 | 0 | run the #968 read-prepare in a fresh process; keep the sandbox copy out of bats' DEBUG trap |
+| test_codex_bridge_launcher.bats | 268 | 119 / 108 | 0 | event-driven waits instead of fixed lifetimes |
+| test_agmsgd_daemon_sh.bats | 220 | 68 / 31 | 130 | end unasserted cleanup stops with TERM (product fix: the 42 s macOS-only launchd wait) |
+| test_team.bats | 212 | 66 / 51 | 25 | pin `AGMSG_AGENT_PID=""` |
+| test_terminal_registry.bats | 204 | 50 / 36 | 0 | keep library frames out of bats' DEBUG trap; per-file fixture |
+| test_self_name.bats | 192 | 61 / 35 | 45 | DEBUG-trap exclusion; fold duplicate-arrange tests |
+| test_migrate_team_store.bats | 167 | 113 / 71 | 0 | produce the four registrations once per file (4 joins per test today) |
+| test_ci_sharding.bats | 152 | 81 / 60 | 140 | test-only: compute each shard once; product: one awk pass in shard-tests.sh (1.5 s -> 0.03 s per call) |
+| test_codex_bridge.bats | 145 | 63 / 85 | 10 | fixed per-file project dir so the two setup joins are done once |
+| test_roster_journal.bats | 108 | 14 / 14 | 10 | shorter FIFO budgets, kill -9 straight away in cleanup |
+| **total** | **4598** | **1577 / 1014** | **595** | |
+
+Suite-wide items (`deepdive/_fixture_overhead.md`):
+
+- **Per-test fixture.** Floor per test is about 0.20 s on macOS and
+  0.09 s on ubuntu. Building the `setup_test_env` skill dir (scripts copy,
+  chmods, init-db) once per file in `$BATS_FILE_TMPDIR` and copying it per
+  test saves about 300 s macOS / 125 s ubuntu per full run, test-only
+  (`tests/test_helper.bash`), low risk; a diff sketch is in
+  `deepdive/fixture-template-proposed.diff`.
+- **join.sh's ancestor walk.** With no agent process above it (CI), join.sh
+  walks the process tree to pid 1 with 3 `ps` calls per hop (10-11 hops on
+  the runners). 14 files already pin `AGMSG_AGENT_PID=""` in setup to skip
+  it; doing that in every file that does not test agent-pid resolution is
+  worth up to ~600 s macOS / 450 s ubuntu (medium risk: each file must be
+  checked for tests that depend on the walk).
+- **bats' DEBUG trap.** bats traces every command for its failure stack
+  trace, including the agmsg libraries the tests source; excluding the
+  sandbox copy (`bats_add_debug_exclude_path`) is worth tens of seconds in
+  the library-heavy files.
+- **shard-tests.sh** (CI script): one awk pass instead of a basename + awk
+  per file; byte-identical partition. Speeds up CI's shard step and
+  test_ci_sharding.bats (~140 s macOS / 104 s ubuntu). Not test-only.
+
+### Implemented: test_install.bats (branch `tests/install-shared-base`)
+
+`_restore_install [--marker <dir>] [install.sh args]` builds each kind of
+install for real once per file (the first test that asks for it), copies
+it into later tests' HOME, rewrites the HOME path in the three text files
+that hold it, and fails the test if the template path is left anywhere.
+65 tests switched: 48 default installs, 7 `--agent-type codex`, 10 with an
+agent marker directory. Windows installs for real every time.
+
+| measured locally (Linux, 4 cores) | before | after | change |
+|---|---:|---:|---:|
+| wall time, 3 runs each (mean) | 362 s | 294 s | -19 % |
+| processes created (own PID namespace, exact) | 158,956 | 120,281 | -24 % |
+| tests | 118 ok | 118 ok | |
+
+Expected in CI: 59 installs avoided x ~3.2 s macOS / ~0.95 s ubuntu, minus
+65 restores at ~0.3 s / ~0.07 s: about -170 s macOS and -50 s ubuntu. The
+PR's own bats-timings artifact will measure it.
 
 ## 5. Which files need macOS
 

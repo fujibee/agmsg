@@ -1,0 +1,94 @@
+file	file_macos_s	title	kind	est_macos_saving_s	est_ubuntu_saving_s	test_only	coverage_risk
+tests/test_install.bats	762.1	Install the plain default once in setup_file and restore a copy per test (cp -Rp, rewrite the 3 files that embed HOME, refute grep guard)	shared_setup	150	47	True	low
+tests/test_install.bats	762.1	Keyed templates per marker-dir set (copilot, opencode, hermes, gemini/config) for the drop/refresh skill tests	shared_setup	16	5	True	low
+tests/test_install.bats	762.1	Merge the five 'installs X skill for upgraders without prior skill' tests into one update with all five markers	merge_duplicate	17	4.5	True	medium
+tests/test_install.bats	762.1	Test 94: rm the x\n.. fixture after the first update's assertions, so the second update hashes in batch	remove_redundant	14.5	6.5	True	low
+tests/test_install.bats	762.1	Test 97: run the 10 per-type install + bare --update pairs as concurrent jobs, each in its own HOME	other	41	12	True	medium
+tests/test_install.bats	762.1	Test 32: replace the fixed sleep 1 (L828) with a <=1 s poll, and make the fake engine respond to TERM (sleep 1 & wait $!)	shorter_wait	1.5	1.5	True	low
+tests/test_install.bats	762.1	install.sh: replace 256 per-file cmp in agmsg_stage_overwrite_backups (L232-247) with one batched comparison	fewer_spawns	50	7	False	low
+tests/test_install.bats	762.1	install.sh: prune membership via one newline-delimited string + case instead of the nested loop (L299-305)	other	30	10	False	low
+tests/test_install.bats	762.1	install-manifest.sh: batch the safe names and fall back to per-file agmsg_sha256 only for unsafe ones (L253-276)	fewer_spawns	29	13	False	low
+tests/test_ci_sharding.bats	151.9	shard-tests.sh: weight all files in one awk pass (getline the table) and use ${f##*/} for basenames	fewer_spawns	140	104	False	low
+tests/test_ci_sharding.bats	151.9	Test-only alternative: compute each (index,total) once in setup_file and read the cached shard lists	shared_setup	76	57	True	low
+tests/test_ci_sharding.bats	151.9	Cut the test file's own forks: all_test_files via find|sed computed once, shard_seconds as one awk join, case instead of grep <<<	fewer_spawns	5	3	True	none
+tests/test_roster_journal.bats	108.4	In the per-test cleanup, go straight to kill -9 (drop TERM + sleep 1) at L801-803, L877-879, L1108-1110, L1204-1206, L1360-1362	shorter_wait	5	5	True	none
+tests/test_roster_journal.bats	108.4	Lower the FIFO-mode budgets to 2 s (L784, L863, L1314: 4->2; L1071, L1173: 3->2)	shorter_wait	8	8	True	low
+tests/test_roster_journal.bats	108.4	Teardown: poll up to 1 s for stragglers instead of sleep 1 (L31), and make test 9's fake respond to TERM (sleep 1 & wait $!, L363)	shorter_wait	1	1	True	none
+tests/test_roster_journal.bats	108.4	Production knobs AGMSG_ROSTER_SYNC_GRACE_S (default 2, driver :458) and AGMSG_ROSTER_SYNC_CONFIRM_S (default 5, :545); tests use 1	shorter_wait	9.5	9.5	False	medium
+tests/test_roster_journal.bats	108.4	Build teams/demo (join + append_left) once in setup_file and copy it into each test's TEST_SKILL_DIR	shared_setup	5	5	True	medium
+tests/test_spawn.bats	653	P1: #47 builds the tmux-less PATH with one `ln -s dir/* target/` per directory instead of a per-file basename+ln loop	fewer_spawns	17.5	24.5	True	none
+tests/test_spawn.bats	653	P2: Drop arrange join.sh calls whose only job is to make team auto-resolution succeed; pass --team <same team> to spawn.sh instead (#6, #7, #99: delete the join; it is dead today)	remove_redundant	136	62	True	low
+tests/test_spawn.bats	653	P3: Readiness tests: --ready-timeout 1 -> 0 in #60-#64 and 2 -> 1 in #58	shorter_wait	6	6	True	low
+tests/test_spawn.bats	653	P4: Pin AGMSG_AGENT_PID="" for the arrange joins that remain (helper or setup export, as 14 other files already do)	fewer_spawns	15	7	True	low
+tests/test_spawn.bats	653	P5: Teardown reaps only when the test installed the fake codex stack (flag set in _install_fake_codex_bridge_stack)	fewer_spawns	6	1	True	low
+tests/test_spawn.bats	653	P6: setup() writes all stubs, then runs one chmod +x over them instead of 10 chmod execs	fewer_spawns	4	1.3	True	none
+tests/test_spawn.bats	653	P7 (optional): Companion file whose setup_file runs the shared spawn once for tests that only read its boot script, output or placement record	shared_setup	55	17	True	medium
+tests/test_spawn.bats	653	P8 (product): spawn.sh builds SUPPORTED_LIST lazily, only inside the two die messages that print it	other	38	19	False	none
+tests/test_spawn.bats	653	P9 (product): Fewer forks in the type registry: parameter expansion instead of $(basename) (type-registry.sh:43, :80) and a builtin read loop instead of grep|head in agmsg_type_get (:103-121)	other	30	12	False	medium
+tests/test_migrate_team_store.bats	167	M1: Produce the four registrations once per file (lazy template in $BATS_FILE_TMPDIR, or setup_file) and cp -R them into each test's teams/	shared_setup	110	69	True	low
+tests/test_migrate_team_store.bats	167	M2: export AGMSG_AGENT_PID="" in setup (the existing convention in 14 files); this is the saving on top of M1	fewer_spawns	2.8	1.7	True	low
+tests/test_codex_bridge.bats	145	C1: Fixed per-file PROJ ($BATS_FILE_TMPDIR/proj, re-created each test); run the two setup joins once and cp -R the teams/ template into each test	shared_setup	50	72	True	low
+tests/test_codex_bridge.bats	145	C1-lite (alternative to C1, not additive): export AGMSG_AGENT_PID="" in setup; the saving listed is what remains on top of C1	fewer_spawns	0.4	0.6	True	low
+tests/test_codex_bridge.bats	145	C2: #44 runs its three override cases concurrently (own socket/log each) under one 2 s window instead of three sequential windows	shorter_wait	4.8	4.5	True	low
+tests/test_codex_bridge.bats	145	C3: #45 shortens the flood window from sleep 6 to sleep 3 and the ceiling from 20 to 10 arms	shorter_wait	3	3	True	low
+tests/test_codex_bridge.bats	145	C4: #33 lowers --request-timeout-ms from 3000 to 1000	shorter_wait	2	2	True	low
+tests/test_codex_bridge.bats	145	C5: #27 lowers --loaded-timeout from 1500 to 500 (still one retry of the 1000 ms poll)	shorter_wait	1	1	True	none
+tests/test_codex_bridge.bats	145	C6 (product): strictly validated test override for MIN_ARM_INTERVAL_MS (same pattern as AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS), used only by count/order tests	shorter_wait	10	10	False	low
+tests/test_codex_bridge.bats	145	C7: Run the node capability probes once per file (cached verdict) instead of once per test	fewer_spawns	2	2	True	none
+tests/test_remote.bats	554.6	Pin AGMSG_AGENT_PID="" in setup() so join.sh skips the process-tree ps walk	fewer_spawns	110	90	True	none
+tests/test_remote.bats	554.6	Build the joined fixture once per file (setup_file) and cp -Rp it per test	shared_setup	75	27	True	low
+tests/test_remote.bats	554.6	Merge tests that rebuild the same two-connect / truncated-config / re-point arrange	merge_duplicate	30	12	True	low
+tests/test_remote.bats	554.6	Move the 43 tests that never contact the mock server into their own file without it	split_file	8	5	True	low
+tests/test_remote.bats	554.6	Faster mock-port wait (builtin read, 0.02 s) and fast-first engine reap in teardown	shorter_wait	5	9	True	none
+tests/test_remote.bats	554.6	Runtime mock knobs (/_test endpoint) instead of ~30 restart_mock_server restarts	fewer_spawns	7	3.5	True	medium
+tests/test_self_name.bats	192.5	Exclude the sandbox's library frames from bats' DEBUG trap (bats_add_debug_exclude_path in setup)	other	38	26	True	none
+tests/test_self_name.bats	192.5	Fold duplicate-arrange tests into their twins: 11 into 1, 9 into 10	merge_duplicate	11	4	True	none
+tests/test_self_name.bats	192.5	Optional: merge 3+4 (tmux) and 16+17 (herdr), which share their first naming	merge_duplicate	11	4	True	low
+tests/test_self_name.bats	192.5	Test 16: replace sleep 1 with a wait until the clock passes the old socket's ctime second	shorter_wait	1	1	True	none
+tests/test_self_name.bats	192.5	Production: make driver/type/terminal registry readers fork-free	fewer_spawns	45	12	False	medium
+tests/test_terminal_registry.bats	203.6	Counting sleep stub for the herdr retry pauses in tests 142 and 148	shorter_wait	11.5	10.9	True	none
+tests/test_terminal_registry.bats	203.6	Exclude the sandbox's library frames from bats' DEBUG trap (bats_add_debug_exclude_path in setup)	other	18	14	True	none
+tests/test_terminal_registry.bats	203.6	Cache an initialised fixture per file in setup_test_env instead of re-running init-db.sh + chmod per test	shared_setup	17	8	True	low
+tests/test_terminal_registry.bats	203.6	Pin AGMSG_AGENT_PID="" in setup() to skip the ps walk in join.sh / actas-claim.sh	fewer_spawns	4	3	True	none
+test_watch.bats	383.2	Pin AGMSG_AGENT_PID="" in setup() to skip the futile ancestor ps walk (as test_delivery.bats:9 does)	fewer_spawns	95	70	True	low
+test_watch.bats	383.2	Build alice/bob (and +leader) team once in setup_file and copy per test; drop 12 redundant re-joins	shared_setup	70	40	True	low
+test_watch.bats	383.2	Test #1: run the four independent renewal cases (s-ms1..s-ms4) concurrently	shorter_wait	9	9	True	low
+test_watch.bats	383.2	Replace sleep 1/2 after barrier release with a wait for the refusal line	shorter_wait	6	6	True	low
+test_watch.bats	383.2	Test #26: build the >ARG_MAX backlog with bulk_send_direct instead of count x send.sh	fewer_spawns	7.5	6	True	low
+test_watch.bats	383.2	Test #22: skip on macOS (cannot discriminate #777 there), or drop as subsumed by #26	remove_redundant	17	0	True	low
+test_watch.bats	383.2	Test #1 erin runs: two concurrent batches using separate roles for the corrupted-record cases	other	8	9	True	medium
+test_watch.bats	383.2	Test #21: write the 8-message burst with one bulk_send_direct	fewer_spawns	4.5	1.5	True	medium
+test_watch.bats	383.2	watch.sh: honour --max-seconds only after one completed poll; test #1 uses 1 s caps	shorter_wait	16	16	False	low
+test_watch.bats	383.2	watch.sh: accept fractional AGMSG_WATCH_INTERVAL from env; tests poll at 0.2-0.5 s	shorter_wait	15	15	False	low
+test_watch.bats	383.2	Test #29: end the not-stuck window after STUCK_THRESHOLD+2 observed pending scans instead of 7 s	shorter_wait	1.5	1.5	True	none
+test_watch.bats	383.2	Test #17: replace three 2 s absence windows with progress evidence (ready sentinel, delivered probe)	shorter_wait	2	2	True	low
+test_team.bats	211.9	Pin AGMSG_AGENT_PID="" in setup() (as test_delivery.bats:9, test_reset_role_session.bats:14)	fewer_spawns	55	45	True	low
+test_team.bats	211.9	Test #5: 6 concurrent joins instead of 12	smaller_n	7	3	True	medium
+test_team.bats	211.9	Production: remove ~40 replaceable execs from join.sh's non-walk path (basename, sed quote escapes, tr -d '\r', per-subshell uname)	fewer_spawns	25	15	False	low
+test_team.bats	211.9	Cache init-db.sh output per bats file in setup_test_env	shared_setup	4	2	True	low
+test_team.bats	211.9	Optional: share the common arrange 'join myteam alice claude-code /tmp/proj' via a setup_file snapshot	shared_setup	7	4	True	low
+test_delivery.bats	303.9	Cache init-db.sh output per bats file in setup_test_env	shared_setup	10	4.5	True	low
+test_delivery.bats	303.9	#44: give only the third session-start a 1 s autostart budget (AGMSG_SYNC_AUTOSTART_TIMEOUT_S=1 at :883)	shorter_wait	4	4	True	low
+test_delivery.bats	303.9	#183: set mtimes with touch -t instead of sleep 1	shorter_wait	0.9	0.9	True	none
+test_delivery.bats	303.9	#103/#107: end the absence window one poll after the allowed message instead of flat sleep 3	shorter_wait	2	2	True	low
+test_delivery.bats	303.9	#102: AGMSG_HOOK_STDIN_TIMEOUT=0.3 instead of 1	shorter_wait	0.7	0.7	True	low
+test_delivery.bats	303.9	Optional: #205 with AGMSG_CODEX_STATUS_PROBE_TIMEOUT_MS=300	shorter_wait	1.2	1.2	True	medium
+test_delivery.bats	303.9	Profile delivery.sh on macOS (bash 3.2 parse time, per-exec cost, shasum/node in codex status)	other	27	0	False	none
+tests/test_remote_sync.bats	273	Run the #968 read-prepare through storage-sync-driver.sh read-prepare (fresh process, no inherited DEBUG trap)	other	77	41	True	none
+tests/test_remote_sync.bats	273	Exclude the per-test scripts copy from bats' DEBUG trap in setup() (guarded bats_add_debug_exclude_path "$TEST_SKILL_DIR/")	other	41	28	True	none
+tests/test_remote_sync.bats	273	Test 44: build each pull page with one jq -R over printf-generated lines instead of one jq per message	fewer_spawns	1.3	0.4	True	none
+tests/test_remote_sync.bats	273	Test 45: event-driven lock holder (wait until the lock is held, release it via a FIFO) instead of sleep 3 / sleep 0.5	shorter_wait	2.7	2.5	True	low
+tests/test_codex_bridge_launcher.bats	268	Make the positive run_launcher callers event-driven (long lifetime, stop the parent once the asserted file or capture line appears)	shorter_wait	47	45	True	low
+tests/test_codex_bridge_launcher.bats	268	Tests 4/5: wait for K=4 'waiting without dispatch' decisions on the dispatcher's stderr instead of a 6 s lifetime plus a 3 s absent-capture wait	shorter_wait	21	14	True	low
+tests/test_codex_bridge_launcher.bats	268	Tests 11/12: stop the sleep 10 parents right after the singleton assertion and re-assert the single capture line once the dispatchers exit	shorter_wait	17	16	True	none
+tests/test_codex_bridge_launcher.bats	268	Test 14: wait for the thread-after launch line, then stop the 6 s parent	shorter_wait	3.75	3.5	True	none
+tests/test_codex_bridge_launcher.bats	268	Tests 27-32: replace the fixed sleep 3 with a bounded gate on the launcher's own bridge (CAPTURE line with --thread thread-alice), then kill -0 the victim	shorter_wait	15.5	17.3	True	none
+tests/test_codex_bridge_launcher.bats	268	Teardown: after kill, also pkill -TERM -P <launcher> -x sleep so the deferred trap 'exit 0' runs immediately	shorter_wait	9.5	9.5	True	none
+tests/test_codex_bridge_launcher.bats	268	Move the lease-schema/start-token unit tests (33-39) to their own file whose setup does not run join.sh	split_file	5	3	True	none
+tests/test_agmsgd_daemon_sh.bats	220	Fix _request_stop_over_socket's client to consume the reply (s.resume() or a data handler), keeping the 5 s ceiling	shorter_wait	108	61	False	none
+tests/test_agmsgd_daemon_sh.bats	220	Fallback if the product fix is deferred: end unasserted cleanup stops/disables with kill -TERM of executor_pid plus a wait for state none	shorter_wait	52	23.5	True	low
+tests/test_agmsgd_daemon_sh.bats	220	Test 12: two start/stop cycles instead of three	smaller_n	2.2	1.4	True	low
+tests/test_agmsgd_daemon_sh.bats	220	Optionally drop or merge tests 8, 9, 11, which are strict subsets of test 12's first iteration	merge_duplicate	6	4.5	True	low
+tests/test_agmsgd_daemon_sh.bats	220	Tests 29/30: on-demand lock holder (.print LOCKED readiness, FIFO-controlled release) instead of .shell sleep 6 + sleep 1 + wait, and sleep 0.5	shorter_wait	4.9	0	True	none
+tests/test_agmsgd_daemon_sh.bats	220	Add a test-only override for _wait_owner_none's 100-tick budget (validated like AGMSG_TEST_SYNC_START_READY_CEILING) and use it in test 13's unverifiable-record disable	shorter_wait	22	0	False	low
+tests/test_agmsgd_daemon_sh.bats	220	Compute the install manifest once per file (setup_file) and copy it per test instead of node-hashing 257 scripts in each test	shared_setup	3	1.5	True	low
