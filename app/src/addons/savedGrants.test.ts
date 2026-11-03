@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pickSavedPowers, pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
+import { pickSavedPowers, pickSavedRoot, pickSavedTeam, replayPickedFolder, replaySavedPowers } from "./savedGrants";
 
 const saved = [
   { permission: "files:read", scope: "/Users/a/proj" },
@@ -79,5 +79,35 @@ describe("pickSavedPowers", () => {
     expect(pickSavedPowers(rows, "t1")).toEqual({ join: true, send: false, spawn: true });
     expect(pickSavedPowers(rows, "t2")).toEqual({ join: false, send: true, spawn: false });
     expect(pickSavedPowers(rows, "t3")).toEqual({ join: false, send: false, spawn: false });
+  });
+});
+
+describe("replaySavedPowers", () => {
+  const all = ["team:join", "messages:send", "agents:spawn"] as const;
+  const rows = all.map((permission) => ({ permission, scope: "t1" }));
+  const fake = (failOn?: string) => {
+    const calls: string[] = [];
+    return {
+      calls,
+      grantTeam: async (id: number, team: string) => (calls.push(`team:${id}:${team}`), { ok: true }),
+      setPower: async (_id: number, power: string, on: boolean) => (calls.push(`${power}:${on}`), { ok: power !== failOn }),
+    };
+  };
+  it("grants the team and sets every remembered power again, so the card is not asked", async () => {
+    const f = fake();
+    expect(await replaySavedPowers(f, 7, "t1", [...all], rows)).toBe(true);
+    expect(f.calls).toEqual(["team:7:t1", "team:join:true", "messages:send:true", "agents:spawn:true"]);
+  });
+  it("asks when a power was not remembered, when it was remembered for another team, or when one fails", async () => {
+    const f = fake();
+    expect(await replaySavedPowers(f, 7, "t1", [...all], rows.slice(0, 2))).toBe(false);
+    expect(await replaySavedPowers(f, 7, "t2", [...all], rows)).toBe(false);
+    expect(f.calls).toEqual([]);
+    expect(await replaySavedPowers(fake("messages:send"), 7, "t1", [...all], rows)).toBe(false);
+  });
+  it("replays only what the add-on declares", async () => {
+    const f = fake();
+    expect(await replaySavedPowers(f, 7, "t1", ["team:join"], rows.slice(0, 1))).toBe(true);
+    expect(f.calls).toEqual(["team:7:t1", "team:join:true"]);
   });
 });

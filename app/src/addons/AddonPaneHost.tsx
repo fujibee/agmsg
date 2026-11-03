@@ -15,7 +15,7 @@ import { createOpGuard } from "./opGuard";
 import { NOTICE_MS } from "./OpenRequestBar";
 import { clearIf, counter, expireAfter, raise, type Notice } from "./notice";
 import { listenPaneFailed, type PaneFailedEvent } from "./paneFailed";
-import { pickSavedPowers, pickSavedRoot, pickSavedTeam, replayPickedFolder } from "./savedGrants";
+import { pickSavedRoot, pickSavedTeam, replayPickedFolder, replaySavedPowers } from "./savedGrants";
 import { mockGrantNeeds, mockSnapshot } from "./mock";
 import { createLiveSource, parseNetwork, toCommandError, type AddedPane, type FolderTrust, type TeamPower } from "./source";
 import type { AddonPaneRef, GrantChip, GrantNeed, InstalledAddon, PaneState } from "./types";
@@ -165,15 +165,9 @@ function LiveAddonPane(props: {
               next.splice(next.indexOf("team"), 1);
             }
             if (powers.length > 0) {
-              const have = pickSavedPowers(saved.value, teamRef.current);
-              const all = powers.every((p) => (p === "team:join" ? have.join : p === "messages:send" ? have.send : have.spawn));
-              if (all && (await source.grantTeam(a.id, teamRef.current)).ok) {
-                let ok = true;
-                for (const p of powers) if (ok) ok = (await source.setPower(a.id, p, true)).ok;
-                if (ok) {
-                  if (!replayed.some((c) => c.key === `team:${teamRef.current}`)) replayed.push({ key: `team:${teamRef.current}`, label: teamRef.current });
-                  next.splice(next.indexOf("powers"), 1);
-                }
+              if (await replaySavedPowers(source, a.id, teamRef.current, powers, saved.value)) {
+                if (!replayed.some((c) => c.key === `team:${teamRef.current}`)) replayed.push({ key: `team:${teamRef.current}`, label: teamRef.current });
+                next.splice(next.indexOf("powers"), 1);
               }
             }
             const root = next.includes("folder") ? pickSavedRoot(saved.value, pane.openArgs?.path) : undefined;
