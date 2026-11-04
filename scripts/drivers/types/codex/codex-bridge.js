@@ -89,9 +89,9 @@ Options:
   --max-wakes <n>         Stop after n wakeups, useful for tests.
   --stale-wake-limit <n>  Stop after n repeated unchanged wakeups (default: 1).
   --connect-timeout-ms <ms>
-                          Max wait for direct app-server connect/upgrade (default: 10000).
+                          Max wait per connect/upgrade attempt (default: 10000); recovery retries.
   --request-timeout-ms <ms>
-                          Max wait for each app-server request (default: 30000).
+                          Max wait per request (default: 30000); unknown effects are never replayed.
   --watch-failure-limit <n>
                           Stop after n consecutive watch-once failures; 0 disables (default: 3).
   --app-server <url>      Connect through an existing app-server endpoint.
@@ -100,7 +100,7 @@ Options:
                           Resume an existing app-server thread. "current" uses
                           CODEX_THREAD_ID; "loaded" discovers the live TUI thread
                           via thread/loaded/list (codex 0.141+, see #170).
-  --loaded-timeout <ms>   Max wait for a loaded thread to appear (default: 30000).
+  --loaded-timeout <ms>   Report degraded discovery after this wait; keep retrying (default: 30000).
   --turn-timeout <sec>    Idle watchdog: assume a turn ended after this many
                           seconds with no app-server activity for it at all
                           (default: 60; 0 disables). Re-armed on any
@@ -419,9 +419,18 @@ class AppServerClient {
 
     this.child.on("exit", (code, signal) => {
       for (const { reject } of this.pending.values()) {
-        reject(new Error(`app-server exited (${code || signal})`));
+        reject(new Error(`app-server exited (${code ?? signal})`));
       }
       this.pending.clear();
+      const handler = this.handlers.get("connection/closed");
+      if (handler) handler({ message: `app-server exited (${code ?? signal})` });
+    });
+
+    this.child.stdin.on("error", (error) => {
+      for (const { reject } of this.pending.values()) reject(error);
+      this.pending.clear();
+      const handler = this.handlers.get("connection/closed");
+      if (handler) handler({ message: error.message });
     });
 
     this.child.stderr.on("data", (chunk) => {
@@ -674,21 +683,19 @@ class WebSocketAppServerClient {
         finish(error);
       });
       this.socket.on("close", () => {
+        this.connected = false;
         const error = new Error(`app-server connection closed (${this.label})`);
         this.rejectAll(error);
         if (!this.handshakeComplete) {
           finish(error);
           return;
         }
-        // The app-server went away after we were connected (e.g. it was killed
-        // and recreated on a codex upgrade). A bridge that lingers here keeps a
-        // live pidfile, so the launcher reuses this now-dead bridge and never
-        // starts a fresh one against the new app-server — delivery silently
-        // stops. Exit instead; the launcher then relaunches a fresh bridge bound
-        // to the current app-server. Skipped when WE closed the socket.
+        // Keep this resident armed when its connection disappears. Recovery
+        // replaces only the bridge-owned socket, not the shared app-server.
+        // An explicit stop remains an explicit stop.
         if (!this.intentionalStop) {
-          console.error(`codex-bridge: ${error.message}; exiting so a fresh bridge can attach`);
-          process.exit(1);
+          const handler = this.handlers.get("connection/closed");
+          if (handler) handler({ message: error.message });
         }
       });
     });
@@ -768,8 +775,7 @@ class WebSocketAppServerClient {
         const high = this.buffer.readUInt32BE(offset);
         const low = this.buffer.readUInt32BE(offset + 4);
         if (high !== 0) {
-          this.stop();
-          this.rejectAll(new Error("app-server websocket frame is too large"));
+          this.socket.destroy(new Error("app-server websocket frame is too large"));
           return;
         }
         length = low;
@@ -789,7 +795,7 @@ class WebSocketAppServerClient {
       if (opcode === 0x1) {
         this.handleLine(payload.toString("utf8"));
       } else if (opcode === 0x8) {
-        this.stop();
+        this.socket.destroy();
         return;
       } else if (opcode === 0x9) {
         this.sendFrame(0x0a, payload);
@@ -1001,6 +1007,23 @@ class CodexBridge {
     this.lastArmAt = 0;
     this.inlineInboxText = "";
     this.stopping = false;
+    this.recoveryPromise = null;
+    this.lastRecoveryAttempt = 0;
+    this.clientStarted = false;
+    this.initialized = false;
+    this.uncertainTurn = false;
+    this.requireTurnProof = false;
+    this.uncertainThread = false;
+    this.watchExpiresAt = 0;
+    this.noticeSignature = null;
+    this.turnIntentToken = null;
+    let physicalProject = opts.project;
+    try { physicalProject = fs.realpathSync(opts.project); } catch (_) { /* preserve the supplied path when unavailable */ }
+    this.projectKey = toPosixPath(physicalProject);
+    this.identityKey = identities.map((pair) => JSON.stringify([pair.team, pair.name])).sort();
+    const noticeProject = crypto.createHash("sha1").update(this.projectKey).digest("hex");
+    this.noticeComponent = `codex-bridge.${noticeProject}.${crypto.createHash("sha1")
+      .update(JSON.stringify(this.identityKey)).digest("hex")}`;
     const key = identities.length === 1
       ? `${identities[0].team}.${identities[0].name}`
       : crypto.createHash("sha1").update(identities.map((p) => `${p.team}\t${p.name}`).join("\n")).digest("hex");
@@ -1020,13 +1043,22 @@ class CodexBridge {
     this.ensureSingleInstance();
     this.writeMeta();
     this.installSignals();
+    this.bindClientHandlers();
+    await this.recoverConnection(new Error("connecting to the Codex app-server"));
+  }
+
+  bindClientHandlers() {
+    const boundClient = this.client;
+    this.client.on("connection/closed", this.clientHandler("connection/closed", (params) => {
+      return this.recoverConnection(new Error(params.message));
+    }));
     // Any thread-scoped app-server activity for OUR active turn re-arms the
     // idle watchdog -- reasoning, tool-call/command progress, agent-message
     // deltas, all of it, not just one specific notification type. See
     // startTurnWatchdog()'s comment for why a fixed-from-start ceiling was
     // wrong here.
     this.client.onThreadActivity = (threadId) => {
-      if (threadId === this.threadId && this.turnActive) this.startTurnWatchdog();
+      if (boundClient === this.client && threadId === this.threadId && this.turnActive) this.startTurnWatchdog();
     };
     this.client.on("process/exited", this.clientHandler("process/exited", (params) => this.onProcessExited(params)));
     this.client.on("error", this.clientHandler("error", (params) => this.onServerError(params)));
@@ -1043,6 +1075,7 @@ class CodexBridge {
       // while the request is in flight (see onTurnCompleted).
       if (this.startInFlight) {
         this.inFlightTurnId = (params && params.turn && params.turn.id) || null;
+        this.writeTurnIntent(this.inFlightTurnId);
       }
       this.turnActive = true;
       this.threadIdle = false;
@@ -1069,14 +1102,158 @@ class CodexBridge {
     this.client.onRequest("execCommandApproval", () => this.denyLegacyApproval());
     this.client.onRequest("applyPatchApproval", () => this.denyLegacyApproval());
 
-    this.client.start();
-    await this.client.ready?.();
-    await this.initialize();
-    await this.ensureThread();
-    await this.armWatch();
-    // After armWatch, not before: the seat is a claim that this role is being
-    // delivered to, and until the watch is armed that is not yet true.
-    this.recordSeat();
+  }
+
+  // Use the shared shell helper; values cross as argv, never shell source.
+  // Writes happen only on transitions, not on every retry or healthy tick.
+  notice(state, reason, recovery = "agmsg doctor") {
+    const signature = JSON.stringify([state, reason, recovery]);
+    if (signature === this.noticeSignature) return;
+    this.noticeSignature = signature;
+    const helper = path.join(SCRIPTS_DIR, "lib", "down-notice.sh");
+    const command = state
+      ? 'source "$1"; down_notice_set "$2" "$3" "$4" "$5"'
+      : 'source "$1"; down_notice_clear "$2"';
+    const args = ["-c", command, "_", toPosixPath(helper), this.noticeComponent];
+    if (state) args.push(state, reason, recovery);
+    const result = spawnSync(BASH_BIN, args, { cwd: SKILL_DIR, encoding: "utf8" });
+    if (result.error || result.status !== 0) {
+      console.error(`codex-bridge: could not publish recovery notice: ${result.error?.message || result.stderr || result.status}`);
+    }
+  }
+
+  turnIntentFile() {
+    const key = crypto.createHash("sha1").update(JSON.stringify([
+      this.projectKey, this.threadId, this.identityKey,
+    ])).digest("hex");
+    return path.join(RUN_DIR, `codex-turn-intent.${key}.json`);
+  }
+
+  writeTurnIntent(turnId = null) {
+    const file = this.turnIntentFile();
+    if (!this.turnIntentToken) {
+      this.turnIntentToken = crypto.randomUUID();
+      // Exclusive create also blocks a concurrent bridge generation from
+      // sending while a prior effect is unresolved. A partial record is
+      // conservatively unreadable, never permission to replay.
+      fs.writeFileSync(file, JSON.stringify({ token: this.turnIntentToken, turnId }), { flag: "wx" });
+      return;
+    }
+    const temporary = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify({ token: this.turnIntentToken, turnId }));
+    fs.renameSync(temporary, file);
+  }
+
+  loadTurnIntent() {
+    const file = this.turnIntentFile();
+    try {
+      const record = JSON.parse(fs.readFileSync(file, "utf8"));
+      this.turnIntentToken = record.token;
+      this.inFlightTurnId = record.turnId || null;
+      this.uncertainTurn = true;
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      this.uncertainTurn = true;
+      console.error(`codex-bridge: cannot prove prior turn intent: ${error.message}`);
+    }
+  }
+
+  clearTurnIntent() {
+    const file = this.turnIntentFile();
+    try {
+      const record = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (!this.turnIntentToken || record.token !== this.turnIntentToken) {
+        throw new Error("prior turn intent belongs to another bridge generation");
+      }
+      fs.unlinkSync(file);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    this.turnIntentToken = null;
+  }
+
+  recoverConnection(error) {
+    if (this.stopping) return Promise.resolve();
+    if (this.recoveryPromise) return this.recoveryPromise;
+    this.clearWatchRearmTimer();
+    this.clearTurnWatchdog();
+    this.requireTurnProof = this.requireTurnProof || this.turnActive || this.startInFlight || this.uncertainTurn;
+    this.notice("degraded", `Codex connection recovery: ${error.message}`);
+    this.recoveryPromise = this.recoverConnectionLoop().finally(() => {
+      this.recoveryPromise = null;
+      if (!this.stopping && !this.uncertainTurn && !this.uncertainThread) {
+        if (this.pendingWake) {
+          this.tryStartTurn().catch((failure) => this.failClientHandler("pending wake", failure));
+        } else if (!this.watchHandle) {
+          this.scheduleWatchRearm();
+        }
+      }
+    });
+    return this.recoveryPromise;
+  }
+
+  async recoverConnectionLoop() {
+    while (!this.stopping) {
+      const wait = WATCH_REARM_MS - (Date.now() - this.lastRecoveryAttempt);
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      if (this.stopping) return;
+      this.lastRecoveryAttempt = Date.now();
+      try {
+        if (this.clientStarted && (this.client instanceof WebSocketAppServerClient ||
+            (this.client.child && (!this.client.child.pid || this.client.child.exitCode !== null || this.client.child.signalCode)))) {
+          // Closing a bridge-owned socket never stops the shared app-server.
+          // A stdio child is replaced only after it exited, never on a timer.
+          if (this.client instanceof WebSocketAppServerClient) this.client.stop();
+          this.client = createAppServerClient(this.opts);
+          this.bindClientHandlers();
+          this.clientStarted = false;
+          this.initialized = false;
+        }
+        if (!this.clientStarted) {
+          this.clientStarted = true;
+          this.client.start();
+        }
+        await this.client.ready?.();
+        if (!this.initialized) {
+          await this.initialize();
+          this.initialized = true;
+        }
+        // Never replay an effect whose RPC outcome became unknown. Stay
+        // resident and visible; only an attributable completion can release
+        // an uncertain turn. A fresh connection is not proof of completion.
+        if (this.uncertainThread) {
+          this.notice("down", "Codex thread creation outcome is unknown; automatic replay is paused");
+          return;
+        }
+        await this.ensureThread();
+        this.loadTurnIntent();
+        if (this.watchHandle) {
+          try {
+            await this.client.request("process/kill", { processHandle: this.watchHandle });
+          } catch (error) {
+            // The finite watch child has a host-enforced deadline. Until its
+            // kill is acknowledged or that deadline passes, no replacement
+            // is started beside an unproven old child.
+            if (Date.now() < this.watchExpiresAt) throw error;
+          }
+          this.watchHandle = null;
+        }
+        if (this.uncertainTurn) {
+          this.notice("down", "Codex turn/start outcome is unknown; waiting for an attributable completion",
+            `After confirming the turn outcome in Codex, remove ${this.turnIntentFile()} and restart this bridge`);
+          return;
+        }
+        await this.armWatch(true);
+        this.recordSeat();
+        this.notice(null, "");
+        return;
+      } catch (error) {
+        if (this.stopping) return;
+        console.error(`codex-bridge: recovery pending: ${error.message}`);
+        this.notice("down", `Codex connection recovery pending: ${error.message}`);
+        await new Promise((resolve) => setTimeout(resolve, WATCH_REARM_MS));
+      }
+    }
   }
 
   // Write the seat from the thread the bridge actually armed on (#579). Seating
@@ -1103,9 +1280,13 @@ class CodexBridge {
   }
 
   clientHandler(method, handler) {
+    const boundClient = this.client;
     return (params) => {
+      if (boundClient !== this.client) return;
       try {
-        Promise.resolve(handler(params)).catch((error) => this.failClientHandler(method, error));
+        Promise.resolve(handler(params)).catch((error) => {
+          if (boundClient === this.client) this.failClientHandler(method, error);
+        });
       } catch (error) {
         this.failClientHandler(method, error);
       }
@@ -1114,7 +1295,10 @@ class CodexBridge {
 
   failClientHandler(method, error) {
     console.error(`codex-bridge: ${method} handler failed: ${error.message}`);
-    this.shutdown().finally(() => process.exit(1));
+    this.recoverConnection(error).catch((failure) => {
+      this.notice("down", `Codex recovery failed: ${failure.message}`);
+      console.error(`codex-bridge: recovery failed: ${failure.message}`);
+    });
   }
 
   writeMeta() {
@@ -1279,7 +1463,9 @@ class CodexBridge {
     // for --remote sessions, so the thread id cannot be resolved out-of-band.
     // Ask the app-server which thread the live TUI has loaded instead. See #170.
     const deadline = Date.now() + (this.opts.loadedTimeout || 30000);
+    let reported = false;
     for (;;) {
+      if (this.stopping) throw new Error("bridge stopped during thread discovery");
       const response = await this.client.request("thread/loaded/list", {});
       const ids = response && Array.isArray(response.data) ? response.data : [];
       if (ids.length > 0) {
@@ -1290,8 +1476,10 @@ class CodexBridge {
         }
         return ids[0];
       }
-      if (Date.now() >= deadline) {
-        die("no loaded codex thread found via thread/loaded/list");
+      if (Date.now() >= deadline && !reported) {
+        reported = true;
+        console.error("codex-bridge: no loaded codex thread yet; discovery remains armed");
+        this.notice("degraded", "No loaded Codex thread is available; discovery is retrying");
       }
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
@@ -1333,19 +1521,26 @@ class CodexBridge {
         // Match the message, not the JSON-RPC code alone (-32600 is the generic
         // "invalid request", carried here now for diagnostics): the message is
         // the condition, and a rewording that kept the code would not be this.
-        // Exit non-zero so a bridge that cannot own its thread does not linger.
+        // Stay visibly pending without arming a watcher for a thread owned
+        // elsewhere. Recovery retries with backoff instead of exiting.
         if (/already has an active writer/iu.test(err && err.message ? err.message : "")) {
-          die(`thread/resume failed: ${err.message}`);
+          throw new Error(`thread/resume failed: ${err.message}`);
         }
+        if (!/rollout/iu.test(err.message || "")) throw err;
+        if (this.uncertainTurn || this.requireTurnProof) throw err;
         console.error(`codex-bridge: thread/resume failed (${err.message}); proceeding without resume`);
         this.threadIdle = true;
         this.turnActive = false;
         return;
       }
       if (!response.thread || response.thread.id !== this.threadId) {
-        die("thread/resume did not return the requested thread id");
+        throw new Error("thread/resume did not return the requested thread id");
       }
       const type = response.thread.status && response.thread.status.type;
+      if (this.requireTurnProof && type !== "idle" && type !== "active") {
+        throw new Error("Codex turn state cannot be proven after reconnect");
+      }
+      this.requireTurnProof = false;
       this.threadIdle = type !== "active";
       this.turnActive = type === "active";
       // The thread can already be active on resume (e.g. a stuck approval
@@ -1356,19 +1551,29 @@ class CodexBridge {
       console.error(`codex-bridge: resumed thread ${this.threadId}`);
       return;
     }
-    const response = await this.client.request("thread/start", {
-      cwd: this.opts.project,
-      runtimeWorkspaceRoots: this.opts.workspaceRoots,
-      ephemeral: false,
-    });
+    let response;
+    try {
+      response = await this.client.request("thread/start", {
+        cwd: this.opts.project,
+        runtimeWorkspaceRoots: this.opts.workspaceRoots,
+        ephemeral: false,
+      });
+    } catch (error) {
+      this.uncertainThread = true;
+      throw error;
+    }
     this.threadId = response.thread && response.thread.id;
-    if (!this.threadId) die("thread/start did not return a thread id");
+    if (!this.threadId) {
+      this.uncertainThread = true;
+      throw new Error("thread/start did not return a thread id");
+    }
     console.error(`codex-bridge: started thread ${this.threadId}`);
   }
 
-  async armWatch() {
+  async armWatch(fromRecovery = false) {
     this.clearWatchRearmTimer();
-    if (this.stopping || this.watchHandle) return;
+    if (this.stopping || this.watchHandle || this.uncertainTurn || this.uncertainThread ||
+        (this.recoveryPromise && !fromRecovery)) return;
     // The rate ceiling, on the one path every re-arm goes through. If the last
     // arm was too recent, defer this one to fill the interval rather than spawn
     // now; the watchHandle guard above and clearWatchRearmTimer keep a single
@@ -1384,6 +1589,7 @@ class CodexBridge {
     this.lastArmAt = Date.now();
     const handle = `agmsg-watch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     this.watchHandle = handle;
+    this.watchExpiresAt = Date.now() + (this.opts.timeout + this.opts.interval + 10) * 1000;
     const command = [
       BASH_BIN,
       path.join(SCRIPT_DIR, "watch-once.sh"),
@@ -1408,7 +1614,8 @@ class CodexBridge {
         timeoutMs: (this.opts.timeout + this.opts.interval + 10) * 1000,
       });
     } catch (error) {
-      if (this.watchHandle === handle) this.watchHandle = null;
+      // Keep the caller-generated handle until recovery proves the child is
+      // gone; a timed-out spawn may already have started it.
       throw error;
     }
     console.error(`codex-bridge: armed ${this.identity.team}/${this.identity.name}`);
@@ -1520,6 +1727,13 @@ class CodexBridge {
       }
       return;
     }
+    if (this.uncertainTurn) {
+      const completedId = params.turn && params.turn.id;
+      if (!completedId || !this.inFlightTurnId || completedId !== this.inFlightTurnId) return;
+      this.clearTurnIntent();
+      this.uncertainTurn = false;
+      this.notice(null, "");
+    }
     await this.onTurnEnded();
   }
 
@@ -1539,7 +1753,7 @@ class CodexBridge {
     // first read consumed the rows — was empty. Drop them; a genuinely-ended
     // new turn that only signalled ambiguously is closed by the idle
     // watchdog (#41).
-    if (this.startInFlight) return;
+    if (this.startInFlight || this.uncertainTurn) return;
     this.clearTurnWatchdog();
     this.turnActive = false;
     this.threadIdle = true;
@@ -1564,7 +1778,7 @@ class CodexBridge {
   }
 
   async tryStartTurn() {
-    if (!this.pendingWake || this.turnActive || !this.threadIdle) return;
+    if (!this.pendingWake || this.turnActive || !this.threadIdle || this.uncertainTurn || this.recoveryPromise) return;
     if (this.opts.inlineInbox) {
       this.inlineInboxText = this.readInboxForPrompt();
       if (!this.inlineInboxText.trim()) {
@@ -1580,30 +1794,39 @@ class CodexBridge {
     // Claim the wake BEFORE the request goes out, not after it succeeds. With
     // the claim left set across the await, a turn-end signal arriving mid-
     // request re-entered this method with the same wake and started a second
-    // turn. The claim is restored on failure so the wake fires again (the
-    // inline inbox rows are already marked read by then, so the retry
-    // re-delivers the wake, not the payload — unchanged from before).
+    // turn. A durable intent preserves this claim across reconnect or bridge
+    // restart. A missing acknowledgement is never permission to replay it.
     this.pendingWake = false;
     this.startInFlight = true;
     this.inFlightTurnId = null;
     this.inFlightTurnEnded = false;
     try {
+      this.writeTurnIntent();
       await this.client.request("turn/start", {
         threadId: this.threadId,
         input: [{ type: "text", text: prompt, text_elements: [] }],
         cwd: this.opts.project,
         runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
+      this.clearTurnIntent();
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
       // Bound how long we treat the turn as active. The real app-server may
       // never send turn/completed; the watchdog (and thread/status idle) drive
       // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
       this.startTurnWatchdog();
     } catch (error) {
-      this.pendingWake = true;
-      this.turnActive = false;
-      this.threadIdle = true;
+      this.uncertainTurn = true;
+      if (this.inFlightTurnEnded) {
+        try {
+          this.clearTurnIntent();
+          this.uncertainTurn = false;
+        } catch (_) { /* retain uncertainty when the durable intent cannot be cleared */ }
+      }
+      this.turnActive = this.uncertainTurn;
+      this.threadIdle = !this.uncertainTurn;
       this.clearTurnWatchdog();
+      // The wake was claimed before send. Do not replay it when the server
+      // may have accepted the turn but lost its acknowledgement.
       throw error;
     } finally {
       this.startInFlight = false;

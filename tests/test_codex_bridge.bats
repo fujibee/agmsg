@@ -9,6 +9,10 @@ setup() {
   # nothing anyway, at about 30 ps calls per join.sh. Deterministic under an
   # agent process too.
   export AGMSG_AGENT_PID=""
+  unset AGMSG_CODEX_BRIDGE_APP_SERVER AGMSG_CODEX_BRIDGE_LAUNCHER AGMSG_CODEX_SEAT_KEY
+  unset AGMSG_CODEX_APP_SERVER_CMD AGMSG_CODEX_BRIDGE_CMD AGMSG_CODEX_OWNER_ID
+  export CODEX_HOME="$TEST_SKILL_DIR/codex-profile"
+  mkdir -p "$CODEX_HOME"
   export PROJ="$TEST_SKILL_DIR/proj"
   mkdir -p "$PROJ"
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
@@ -30,12 +34,12 @@ const command = process.argv[3];
 const args = process.argv.slice(4);
 let timedOut = false;
 let exited = false;
-let stdout = "";
-let stderr = "";
+const stdout = [];
+const stderr = [];
 
 const child = spawn(command, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
-child.stdout.on("data", (chunk) => { stdout += chunk; });
-child.stderr.on("data", (chunk) => { stderr += chunk; });
+child.stdout.on("data", (chunk) => { stdout.push(chunk); });
+child.stderr.on("data", (chunk) => { stderr.push(chunk); });
 child.on("error", (error) => {
   process.stderr.write(error.message);
   process.exit(127);
@@ -52,8 +56,8 @@ const timer = setTimeout(() => {
 child.on("close", (code) => {
   exited = true;
   clearTimeout(timer);
-  process.stdout.write(stdout);
-  process.stderr.write(stderr);
+  process.stdout.write(Buffer.concat(stdout));
+  process.stderr.write(Buffer.concat(stderr));
   process.exit(timedOut ? 124 : (code ?? 1));
 });
 EOF
@@ -150,7 +154,7 @@ setTimeout(() => {
 }, 20);
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run bash -c 'node "$1" --project "$2" --team team --name alice --timeout 1 --interval 1 --max-wakes 1 2>&1 >/dev/null' _ "$TYPES/codex/codex-bridge.js" "$PROJ"
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run bash -c 'node "$3" 2500 node "$1" --project "$2" --team team --name alice --timeout 1 --interval 1 --max-wakes 1 2>&1 >/dev/null' _ "$TYPES/codex/codex-bridge.js" "$PROJ" "$(write_bridge_timeout_runner)"
   printf '%s\n' "$output" | grep -q '日本語'
   # `refute`, not `!`: a bare `! cmd` does not trip errexit on either bash.
   refute grep -q $'\ufffd' <<<"$output"
@@ -554,7 +558,7 @@ EOF
 
   kill "$server_pid" 2>/dev/null || true
 
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 124 ]
   [[ "$output" =~ "websocket handshake timed out" ]]
   grep -q "accepted" "$log"
   grep -q "received-handshake" "$log"
@@ -622,7 +626,7 @@ EOF
 
   kill "$server_pid" 2>/dev/null || true
 
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 124 ]
   [[ "$output" =~ "app-server request 'initialize' timed out" ]]
   grep -q "upgraded" "$log"
   grep -q "ignored-frame" "$log"
@@ -657,7 +661,7 @@ EOF
     --project "$PROJ" --team team --name alice --thread thread-existing \
     --request-timeout-ms 500 --timeout 1 --interval 1
 
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 124 ]
   [[ "$output" =~ "app-server request 'initialize' timed out" ]]
   grep -q "initialize" "$log"
 }
@@ -685,11 +689,11 @@ exec "$@"
 EOF
   chmod +x "$wrapper"
 
-  AGMSG_CODEX_APP_SERVER_CMD="exit 1" run "$wrapper" \
+  AGMSG_CODEX_APP_SERVER_CMD="exit 1" run node "$(write_bridge_timeout_runner)" 3000 "$wrapper" \
     "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid" \
     node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice
 
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 124 ]
   [[ ! "$output" =~ "bridge already running" ]]
 }
 
@@ -796,10 +800,10 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$(write_bridge_timeout_runner)" 3500 node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-existing --timeout 20
 
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 124 ]
   grep -q "thread/resume" "$log"
   ! grep -q "thread/start" "$log"
 }
@@ -855,7 +859,7 @@ EOF
   [[ "$output" =~ "started turn" ]]
 }
 
-@test "codex-bridge: still dies when thread/resume succeeds but returns the wrong thread id (#276)" {
+@test "codex-bridge: keeps an invalid resume visible without attaching to a different thread (#276)" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -880,10 +884,10 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$(write_bridge_timeout_runner)" 3500 node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-expected --timeout 20
 
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 124 ]
   [[ "$output" =~ "did not return the requested thread id" ]]
   [[ "$output" != *"proceeding without resume"* ]]
 }
@@ -928,16 +932,16 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$(write_bridge_timeout_runner)" 3500 node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread loaded --loaded-timeout 5000 --timeout 20
 
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 124 ]
   grep -q "thread/loaded/list" "$log"
   grep -q "thread/resume" "$log"
   ! grep -q "thread/start" "$log"
 }
 
-@test "codex-bridge: --thread loaded errors when no thread is loaded in time" {
+@test "codex-bridge: --thread loaded stays armed beyond the discovery budget" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -962,11 +966,12 @@ rl.on("line", (line) => {
 });
 EOF
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$(write_bridge_timeout_runner)" 7000 node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread loaded --loaded-timeout 1500 --timeout 20
 
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "no loaded codex thread" ]]
+  printf '%s\n' "$output"
+  [ "$status" -eq 124 ]
+  grep -Fq "no loaded codex thread" <<<"$output"
 }
 
 @test "codex-bridge: inline-inbox includes unread message text in turn input" {
@@ -1230,7 +1235,7 @@ EOF
   [[ "$output" != *"stopping after"* ]]
 }
 
-@test "codex-bridge: re-arm spawn request timeout exits without a phantom watch" {
+@test "codex-bridge: re-arm spawn request timeout keeps the bridge resident and recoverable" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -1278,11 +1283,12 @@ EOF
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1 \
     --request-timeout-ms 500 --watch-failure-limit 1
 
-  [ "$status" -eq 1 ]
+  printf '%s\n' "$output"
+  [ "$status" -eq 124 ]
   [[ "$output" =~ "process/exited handler failed: app-server request 'process/spawn' timed out" ]]
 }
 
-@test "codex-bridge: delayed re-arm after sub-limit watch failure times out fatally" {
+@test "codex-bridge: delayed re-arm after sub-limit watch failure remains recoverable after timeout" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -1342,7 +1348,7 @@ EOF
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1 \
     --request-timeout-ms 3000 --watch-failure-limit 2
 
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 124 ]
   [[ "$output" =~ "watch-once failed with exit 1: fake transient watch failure" ]]
   [[ "$output" =~ "process/exited handler failed: app-server request 'process/spawn' timed out" ]]
   [[ "$output" != *"stopping after 2 consecutive watch-once failure"* ]]
@@ -1970,7 +1976,7 @@ EOF
   [ "$arms" -ge 1 ]
   [ "$arms" -le 20 ]
 }
-@test "codex-bridge: a thread owned by another writer is fatal, not proceed-without-resume (#906)" {
+@test "codex-bridge: a thread owned by another writer stays visibly pending without arming (#906)" {
   run node -e 'const net = require("net"); const crypto = require("crypto"); if (!net || !crypto) process.exit(1);'
   if [ "$status" -ne 0 ]; then
     skip "node net/crypto modules are not available in this sandbox"
@@ -2057,7 +2063,7 @@ EOF
   local server_pid="$!"
   for _ in {1..50}; do [ -S "$sock" ] && break; sleep 0.1; done
 
-  run node "$TYPES/codex/codex-bridge.js" \
+  run node "$(write_bridge_timeout_runner)" 3500 node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-owned-elsewhere \
     --app-server "unix://$sock" --timeout 1 --interval 1 --max-wakes 1
 
@@ -2065,7 +2071,7 @@ EOF
 
   # The bridge exits non-zero, says why, and NEVER armed a watcher: a bridge
   # that cannot own its thread is exactly what accumulates in #906.
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 124 ]
   grep -q "already has an active writer" <<<"$output"
   [ "$(grep -c "codex-bridge: armed" <<<"$output")" -eq 0 ]
   [ "$(grep -c "proceeding without resume" <<<"$output")" -eq 0 ]
@@ -2230,12 +2236,13 @@ EOF
   local runner
   runner=$(write_bridge_timeout_runner)
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$runner" 5000 node "$TYPES/codex/codex-bridge.js" \
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$runner" 15000 node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-fast \
     --timeout 1 --interval 1 --turn-timeout 30 --max-wakes 1 --inline-inbox
 
   # `grep -q` rather than `[[ ]]` in the non-last positions: on bash 3.2,
   # which is what macOS CI runs, a false `[[ ]]` there reports ok.
+  printf '%s\n' "$output"
   [ "$status" -eq 0 ]                 # not 124: ended via the deferred end, not a hang
   printf '%s\n' "$output" | grep -Fq "started turn"
   printf '%s\n' "$output" | grep -Fq "turn completed"
@@ -2432,4 +2439,89 @@ JS
   [ "$status" -eq 0 ]
   [[ "$output" == *"healthy message"* ]]
   [[ "$output" != *"inbox.sh failed"* ]]
+}
+
+@test "codex recovery: a live stdio server survives an initialize timeout and later delivers" {
+  local fixture="$BATS_TEST_DIRNAME/fixtures/codex-recovery-server.js"
+  local log="$TEST_SKILL_DIR/recovery.log" runner
+  runner="$(write_bridge_timeout_runner)"
+  AGMSG_CODEX_APP_SERVER_CMD="node $fixture stdio-init $log" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$runner" 10000 node "$TYPES/codex/codex-bridge.js" \
+      --project "$PROJ" --team team --name alice --thread thread-existing \
+      --request-timeout-ms 300 --max-wakes 1
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^pid=' "$log")" -eq 1 ]
+  [ "$(grep -c '^initialize$' "$log")" -ge 2 ]
+  [ "$(grep -c '^turn/start$' "$log")" -eq 1 ]
+}
+
+@test "codex recovery: loaded-thread discovery delivers after its original budget" {
+  local fixture="$BATS_TEST_DIRNAME/fixtures/codex-recovery-server.js"
+  local log="$TEST_SKILL_DIR/recovery.log" runner
+  runner="$(write_bridge_timeout_runner)"
+  AGMSG_CODEX_APP_SERVER_CMD="node $fixture stdio-loaded $log" \
+    run node "$runner" 10000 node "$TYPES/codex/codex-bridge.js" \
+      --project "$PROJ" --team team --name alice --thread loaded \
+      --loaded-timeout 100 --request-timeout-ms 1000 --max-wakes 1
+  [ "$status" -eq 0 ]
+  grep -Fq 'discovery remains armed' <<<"$output"
+  [ "$(grep -c '^pid=' "$log")" -eq 1 ]
+  [ "$(grep -c '^thread/loaded/list$' "$log")" -ge 3 ]
+  [ "$(grep -c '^turn/start$' "$log")" -eq 1 ]
+}
+
+@test "codex recovery: a lost turn acknowledgement never replays across idle tails or bridge restart" {
+  local fixture="$BATS_TEST_DIRNAME/fixtures/codex-recovery-server.js"
+  local log="$TEST_SKILL_DIR/recovery.log" runner
+  runner="$(write_bridge_timeout_runner)"
+  AGMSG_CODEX_APP_SERVER_CMD="node $fixture stdio-uncertain $log" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$runner" 10000 node "$TYPES/codex/codex-bridge.js" \
+      --project "$PROJ" --team team --name alice --thread thread-existing --request-timeout-ms 300
+  [ "$status" -eq 124 ]
+  [ "$(grep -c '^turn/start$' "$log")" -eq 1 ]
+  run bash "$SCRIPTS/delivery.sh" status codex "$PROJ"
+  [ "$status" -eq 0 ]
+  grep -Fq 'turn/start outcome is unknown' <<<"$output"
+  AGMSG_CODEX_APP_SERVER_CMD="node $fixture stdio-basic $log" \
+    run node "$runner" 3000 node "$TYPES/codex/codex-bridge.js" \
+      --project "$PROJ" --team team --name alice --thread thread-existing --request-timeout-ms 1000
+  [ "$status" -eq 124 ]
+  [ "$(grep -c '^turn/start$' "$log")" -eq 1 ]
+  [ "$(grep -c '^process/spawn$' "$log")" -eq 1 ]
+}
+
+@test "codex recovery: delayed handshake and a dropped socket recover on the same external server" {
+  local fixture="$BATS_TEST_DIRNAME/fixtures/codex-recovery-server.js"
+  local log="$TEST_SKILL_DIR/recovery.log" portfile="$TEST_SKILL_DIR/server.port" runner
+  runner="$(write_bridge_timeout_runner)"
+  node "$fixture" ws-reconnect "$log" "$portfile" 3>&- & local server_pid=$!
+  local i
+  for i in {1..100}; do [ -s "$portfile" ] && break; sleep 0.1; done
+  [ -s "$portfile" ]
+  AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 run node "$runner" 12000 node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-existing \
+    --app-server "ws://127.0.0.1:$(cat "$portfile")" --connect-timeout-ms 300 --request-timeout-ms 1000 --max-wakes 1
+  agmsg_stop_pid "$server_pid"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^pid=' "$log")" -eq 1 ]
+  [ "$(grep -c '^connection=' "$log")" -ge 3 ]
+  [ "$(grep -c '^turn/start$' "$log")" -eq 1 ]
+  grep -Fxq 'process/kill' "$log"
+}
+
+@test "codex recovery: an attributable completion releases a timed-out turn without replay" {
+  local fixture="$BATS_TEST_DIRNAME/fixtures/codex-recovery-server.js"
+  local log="$TEST_SKILL_DIR/recovery.log" runner
+  runner="$(write_bridge_timeout_runner)"
+  AGMSG_CODEX_APP_SERVER_CMD="node $fixture stdio-late-completion $log" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$runner" 10000 node "$TYPES/codex/codex-bridge.js" \
+      --project "$PROJ" --team team --name alice --thread thread-existing \
+      --request-timeout-ms 300 --max-wakes 1
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^turn/start$' "$log")" -eq 1 ]
+  local intent count=0
+  for intent in "$TEST_SKILL_DIR/run"/codex-turn-intent.*.json; do
+    [ ! -f "$intent" ] || count=$((count + 1))
+  done
+  [ "$count" -eq 0 ]
 }
