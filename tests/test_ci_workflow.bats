@@ -175,7 +175,6 @@
 _reuse_lookup() {   # <curl stdout> [curl exit status]
   local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
   local dir="$BATS_TEST_TMPDIR/reuse" start run_line end
-  rm -rf "$dir"
   mkdir -p "$dir/bin"
   start=$(grep -n '^      - id: reuse$' "$workflow" | cut -d: -f1)
   [ -n "$start" ]
@@ -214,7 +213,10 @@ GIT
   grep -Fq 'actions/artifacts?name=green-tree-4b825dc642cb6eb9a060e54bf8d69288fbee4904&per_page=20' "$BATS_TEST_TMPDIR/reuse/curl-args"
   # A fork's run cannot vouch for main, even listed first.
   [ "$(_reuse_lookup "{\"artifacts\":[$fork]}")" = "" ]
-  [ "$(_reuse_lookup "{\"artifacts\":[$fork,$own]}")" = "4242" ]
+  # (assigned first: bash 3.2 brace-expands "[$fork,$own]" inside a nested
+  # quoted substitution)
+  local both="{\"artifacts\":[$fork,$own]}"
+  [ "$(_reuse_lookup "$both")" = "4242" ]
   # An expired record, no record, a failed or malformed answer, or an id that
   # is not a number: run the suite.
   [ "$(_reuse_lookup "{\"artifacts\":[$old]}")" = "" ]
