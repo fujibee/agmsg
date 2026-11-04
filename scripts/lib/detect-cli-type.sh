@@ -33,7 +33,7 @@ _agmsg_detect_order() {
 # Preserve stdout as a single type token. The shared helper makes a fallback
 # visible even when a caller captures or suppresses this function's stderr.
 _agmsg_type_fallback_notice() {
-  local action="$1" reason="${2:-}" root="${BASH_SOURCE[0]%/*}/../.." key component
+  local action="$1" reason="${2:-}" root="${BASH_SOURCE[0]%/*}/../.." component
   if [ "$action" = set ]; then printf 'agmsg: %s\n' "$reason" >&2; fi
   [ -n "$root" ] && [ -r "$root/scripts/lib/down-notice.sh" ] || return 0
   . "$root/scripts/lib/down-notice.sh"
