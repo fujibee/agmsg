@@ -639,7 +639,7 @@ fi
 READY_FILES=""
 cleanup() {
   # This watcher's own install-state notice goes with it.
-  down_notice_clear "watch-install.$$" 2>/dev/null || true
+  [ -n "${_INSTALL_KEEP_NOTICE:-}" ] || down_notice_clear "watch-install.$$" 2>/dev/null || true
   # EXIT only removes the pidfile if it still records our pid. A successor
   # watcher (Monitor re-invoked for the same session_id) overwrites $PIDFILE
   # with its own pid before signalling us, so this read sees the successor's
@@ -772,7 +772,7 @@ _install_ready() {
 
 # How long an install that has started (changed files exist) but not yet
 # finished (not _install_ready) is tolerated before falling back to the
-# visible exit (review finding, round 4, #684 follow-up). install.sh writes
+# reported state (review finding, round 4, #684 follow-up). install.sh writes
 # scripts/ over many separate file operations before its own last write
 # (VERSION); a watcher's poll can land in that window on essentially any real
 # install, not just a rare half-written one, so committing to the visible
@@ -859,7 +859,16 @@ _install_notice_clear() {
 # process image has lived this long: an install that never stops looking changed
 # (a VERSION stamped in the future, a clock that stepped back) then costs one
 # restart a minute instead of a tight exec loop, and delivery goes on between them.
-_WATCH_INSTALL_RESTART_MIN_AGE=60
+# Lower-only, like the install grace above: the environment can shorten it (tests),
+# never lengthen it or remove it.
+_WATCH_INSTALL_RESTART_MIN_AGE="${AGMSG_WATCH_INSTALL_RESTART_MIN_AGE:-60}"
+case "$_WATCH_INSTALL_RESTART_MIN_AGE" in
+  [1-9]|[1-5][0-9]|60) ;;
+  *) _WATCH_INSTALL_RESTART_MIN_AGE=60 ;;
+esac
+# Set just before the exec of a restart that is past the cap: the record that says
+# the install is not settling must survive the hand-over to the next image.
+_INSTALL_KEEP_NOTICE=""
 
 # Restart on the new code in place of exiting (#684 follow-up). `exec` replaces
 # this process image without forking, so there is never a moment with two
@@ -897,15 +906,16 @@ _WATCH_INSTALL_RESTART_MIN_AGE=60
 # message delivery, the sleep -- to run exactly as it would have if nothing
 # had changed. Delivery keeps working while an install is still in flight;
 # only once AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT seconds have passed
-# without ever becoming ready does this fall back to the ORIGINAL, unchanged
-# exit -- a still-changing-past-the-timeout or genuinely broken install still
-# produces the same clear stop it always has, rather than an indefinite wait.
+# without ever becoming ready does this say so (once, plus a degraded record) --
+# and it still keeps delivering with the code it has and re-asks every cycle, so
+# the restart onto the new code happens as soon as the install is complete and
+# watch.sh is executable. Nothing is exec'd before that.
 #
 # A negative elapsed reading (round 5: only possible if the system clock was
 # moved backward mid-wait, since $SECONDS is wall-clock-based, not monotonic
 # -- confirmed against bash's own manual) is treated the same as "timeout
 # elapsed", not as "keep waiting": an elapsed time that cannot be trusted is
-# exactly the case the visible exit exists for, the same reasoning as an
+# exactly the case the report exists for, the same reasoning as an
 # install that is taking implausibly long.
 _handle_install_changed() {
   local new_watch="$SCRIPT_DIR/watch.sh" restarts elapsed
@@ -919,6 +929,8 @@ _handle_install_changed() {
     restarts="$(_install_restart_count)"
     if [ "$restarts" -lt "$_WATCH_INSTALL_RESTART_LIMIT" ] || [ "$SECONDS" -ge "$_WATCH_INSTALL_RESTART_MIN_AGE" ]; then
       watch_log "the agmsg installation was updated while this watcher was running; restarting on the new code (same process, same subscription)."
+      # A restart past the cap keeps the "not settling" record across the exec.
+      [ "$restarts" -lt "$_WATCH_INSTALL_RESTART_LIMIT" ] || _INSTALL_KEEP_NOTICE=1
       cleanup
       AGMSG_WATCH_RESTART_COUNT=$((restarts + 1))
       AGMSG_WATCH_RESTART_CHAIN="$_WATCH_INSTALL_RESTART_CHAIN"
@@ -939,9 +951,13 @@ _handle_install_changed() {
     # Too many restarts in a row, and this image is young: keep delivering with the
     # code it has and try again later (at most one restart a minute). Said once, in
     # the image that reaches the cap.
-    if [ "$restarts" -eq "$_WATCH_INSTALL_RESTART_LIMIT" ] && [ -z "$_INSTALL_CHURN_REPORTED" ]; then
+    if [ "$restarts" -ge "$_WATCH_INSTALL_RESTART_LIMIT" ] && [ -z "$_INSTALL_CHURN_REPORTED" ]; then
       _INSTALL_CHURN_REPORTED=1
-      watch_report "the agmsg installation kept changing across $restarts restart(s) in a row. This watcher keeps delivering with the code it has and will try to restart onto the new code again, at most once a minute. If it keeps happening, restart this session (or run /agmsg actas <name>).$(_agmsg_watch_agmsgd_note)"
+      # The line only when the cap is first reached; the record in every image that
+      # is still past it (an image that restarted after the cap starts here again).
+      if [ "$restarts" -eq "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
+        watch_report "the agmsg installation kept changing across $restarts restart(s) in a row. This watcher keeps delivering with the code it has and will try to restart onto the new code again, at most once a minute. If it keeps happening, restart this session (or run /agmsg actas <name>).$(_agmsg_watch_agmsgd_note)"
+      fi
       _install_notice_set "the installation kept changing across $restarts restarts in a row; the inbox watcher keeps delivering with older code and retries a restart at most once a minute" "restart this session or run /agmsg actas <name> if it does not settle"
     fi
     return 0

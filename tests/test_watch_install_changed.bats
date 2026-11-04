@@ -210,7 +210,8 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
 @test "watch: an installation that never stops looking changed does not end the watcher after the restart cap (#684)" {
   local out="$BATS_TEST_TMPDIR/out5.txt"
   : > "$out"
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" sid-684d "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_RESTART_MIN_AGE=3 \
+    bash "$SCRIPTS/watch.sh" sid-684d "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
   local pid=$!
 
   bash "$SCRIPTS/send.sh" team bob alice "before-churn" >/dev/null
@@ -234,9 +235,30 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
   [ "$output" = "1" ]
   bash "$SCRIPTS/send.sh" team bob alice "after-churn" >/dev/null
   _wait_for "grep -q 'after-churn' '$out'" || true
+  grep -q 'after-churn' "$out"
+
+  # Past the cap a restart is still tried once the image is old enough (3 s here),
+  # and the record that says the install is not settling survives that hand-over.
+  local rec="$TEST_SKILL_DIR/run/down/watch-install.$pid.json" since_before since_after n
+  since_before="$(sed -n 's/.*"since":"\([^"]*\)".*/\1/p' "$rec")"
+  [ -n "$since_before" ]
+  _wait_for "[ \"\$(grep -c 'restarting on the new code' '$TEST_SKILL_DIR/run/watch.sid-684d.log')\" -ge 7 ]" || true
+  n="$(grep -c 'restarting on the new code' "$TEST_SKILL_DIR/run/watch.sid-684d.log")"
+  [ "$n" -ge 7 ]
+  kill -0 "$pid"
+  grep -q '"state":"degraded"' "$rec"
+  since_after="$(sed -n 's/.*"since":"\([^"]*\)".*/\1/p' "$rec")"
+  [ "$since_after" = "$since_before" ]
+  run grep -c 'kept changing across 5 restart' "$out"
+  [ "$output" = "1" ]
+
+  # The install settles (VERSION no longer newer than the watcher): the run of
+  # restarts ends and the record goes.
+  touch -t 202001010000 "$TEST_SKILL_DIR/VERSION"
+  _wait_for "[ ! -e '$rec' ]" || true
+  [ ! -e "$rec" ]
   local was_alive=0
   kill -0 "$pid" 2>/dev/null && was_alive=1
-  grep -q 'after-churn' "$out"
   agmsg_stop_pid "$pid"
   [ "$was_alive" -eq 1 ]
 }
