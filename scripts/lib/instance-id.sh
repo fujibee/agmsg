@@ -354,10 +354,40 @@ agmsg_instance_is_composite() {
 agmsg_instance_bare_sid() {
   local token="$1"
   if agmsg_instance_is_composite "$token"; then
+    _agmsg_instance_notice clear "${token%.*}" "$type"
     printf '%s' "${token%.*}"
   else
     printf '%s' "$token"
   fi
+}
+
+# The token stays machine-readable even when stderr is captured by a hook.
+# Persist degraded identity through the shared notice interface, scoped to the
+# type/session pair so another healthy session cannot clear it.
+_agmsg_instance_notice() {
+  local action="$1" sid="$2" type="$3" root="${SKILL_DIR:-}" key
+  [ -n "$root" ] && [ -r "$root/scripts/lib/down-notice.sh" ] || return 0
+  . "$root/scripts/lib/down-notice.sh"
+  key="$(down_notice_key instance-id "$type"$'\n'"$sid")"
+  if [ "$action" = set ]; then
+    down_notice_set "$key" degraded "Agent PID unresolved for $type; using bare session_id, so parallel resume isolation is degraded. Restart the agent session from its own terminal to retry PID resolution" 'agmsg doctor' >&2 || true
+  else
+    down_notice_clear "$key" >&2 || true
+  fi
+}
+
+# The caller already resolved a PID (SessionStart), so do not walk its ancestry
+# a second time just to report whether composition used a fallback.
+agmsg_instance_id_for_pid() {
+  local sid="$1" type="$2" pid="$3"
+  case "$pid" in
+    ''|*[!0-9]*)
+      printf 'agmsg: instance-id falling back to bare session_id (agent pid unresolved for type=%s); parallel --continue/--resume isolation is degraded\n' "$type" >&2
+      _agmsg_instance_notice set "$sid" "$type"
+      ;;
+    *) _agmsg_instance_notice clear "$sid" "$type" ;;
+  esac
+  agmsg_instance_id_from_pid "$sid" "$pid"
 }
 
 # Derive an instance id for <session_id> from the enclosing agent <type>.
@@ -369,12 +399,7 @@ agmsg_instance_bare_sid() {
 agmsg_instance_id() {
   local sid="$1" type="$2" pid=""
   pid="$(agmsg_agent_pid "$type" 2>/dev/null || true)"
-  if [ -z "$pid" ]; then
-    printf 'agmsg: instance-id falling back to bare session_id (agent pid unresolved for type=%s); parallel --continue/--resume isolation is degraded\n' "$type" >&2
-    printf '%s' "$sid"
-    return 0
-  fi
-  agmsg_instance_id_from_pid "$sid" "$pid"
+  agmsg_instance_id_for_pid "$sid" "$type" "$pid"
 }
 
 # Idempotent normalize: a token already in composite form is returned as-is; a
@@ -385,6 +410,7 @@ agmsg_instance_id() {
 agmsg_normalize_instance_id() {
   local token="$1" type="$2"
   if agmsg_instance_is_composite "$token"; then
+    _agmsg_instance_notice clear "${token%.*}" "$type"
     printf '%s' "$token"
     return 0
   fi
