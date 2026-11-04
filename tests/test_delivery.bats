@@ -1754,7 +1754,7 @@ EOF
     [ ! -s "$out" ]
     grep -q 'captured payload, which may be incomplete' "$err"
     [ "$(head -1 "$TEST_SKILL_DIR/run/input-notice-set")" = "hook-input.$key" ]
-    grep -q 'delivery.sh' "$TEST_SKILL_DIR/run/input-notice-set"
+    grep -q 'agmsg doctor' "$TEST_SKILL_DIR/run/input-notice-set"
   done
   run env PATH="$bindir:$PATH" HOOK_READ_EXIT=0 bash -c 'bash "$1" codex "$2" </dev/null >"$3" 2>"$4"' _ "$SCRIPTS/check-inbox.sh" "$TEST_PROJECT" "$out" "$err"
   [ "$status" -eq 0 ]
