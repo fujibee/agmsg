@@ -1728,6 +1728,71 @@ EOF
   [[ "$output" =~ "ping copilot" ]]
 }
 
+@test "check-inbox: degraded stdin reports and records without adding stdout, then clears on a complete read" {
+  local bindir="$TEST_SKILL_DIR/input-bin"
+  mkdir -p "$bindir"
+  cat > "$bindir/timeout" <<'EOF'
+#!/bin/sh
+printf '%s' '{"stop_hook_active":true}'
+exit "${HOOK_READ_EXIT:-0}"
+EOF
+  chmod +x "$bindir/timeout"
+  source "$SCRIPTS/lib/down-notice.sh"
+  local rc out="$TEST_PROJECT/hook.stdout" err="$TEST_PROJECT/hook.stderr" key
+  key="$(down_notice_key hook-input "codex"$'\n'"$TEST_PROJECT")"
+  for rc in 124 1; do
+    run env PATH="$bindir:$PATH" HOOK_READ_EXIT="$rc" bash -c 'bash "$1" codex "$2" </dev/null >"$3" 2>"$4"' _ "$SCRIPTS/check-inbox.sh" "$TEST_PROJECT" "$out" "$err"
+    [ "$status" -eq 0 ]
+    [ ! -s "$out" ]
+    grep -q 'captured payload, which may be incomplete' "$err"
+    local component state since reason recovery
+    IFS=$'\t' read -r component state since reason recovery <<<"$(down_notice_list)"
+    [ "$component" = "$key" ]
+    [ "$state" = degraded ]
+    [ "$recovery" = 'agmsg doctor' ]
+  done
+  run env PATH="$bindir:$PATH" HOOK_READ_EXIT=0 bash -c 'bash "$1" codex "$2" </dev/null >"$3" 2>"$4"' _ "$SCRIPTS/check-inbox.sh" "$TEST_PROJECT" "$out" "$err"
+  [ "$status" -eq 0 ]
+  [ ! -s "$out" ]
+  [ ! -s "$err" ]
+  [ -z "$(down_notice_list)" ]
+}
+
+@test "check-inbox: notice I/O failures cannot stop degraded or healthy reads" {
+  local bindir="$TEST_SKILL_DIR/failing-notice-bin"
+  mkdir -p "$bindir"
+  cat > "$bindir/timeout" <<'EOF'
+#!/bin/sh
+printf '%s' '{"stop_hook_active":true}'
+exit "${HOOK_READ_EXIT:-0}"
+EOF
+  chmod +x "$bindir/timeout"
+  cat >> "$SCRIPTS/lib/down-notice.sh" <<'EOF'
+down_notice_set() { printf 'injected notice I/O failure\n' >&2; return 1; }
+down_notice_clear() { printf 'injected notice I/O failure\n' >&2; return 1; }
+EOF
+  local rc out="$TEST_PROJECT/failure.stdout" err="$TEST_PROJECT/failure.stderr"
+  for rc in 124 0; do
+    run env PATH="$bindir:$PATH" HOOK_READ_EXIT="$rc" bash -c 'bash -e "$1" codex "$2" </dev/null >"$3" 2>"$4"' _ "$SCRIPTS/check-inbox.sh" "$TEST_PROJECT" "$out" "$err"
+    [ "$status" -eq 0 ]
+    [ ! -s "$out" ]
+    grep -q 'injected notice I/O failure' "$err"
+  done
+}
+
+@test "delivery status: shows only this project's degraded hook input record" {
+  source "$SCRIPTS/lib/down-notice.sh"
+  local key
+  key="$(down_notice_key hook-input "codex"$'\n'"$TEST_PROJECT")"
+  down_notice_set "$key" degraded 'stdin timed out' 'agmsg doctor'
+  down_notice_set hook-input.other-project degraded 'foreign reason' 'agmsg doctor'
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -q 'hook input degraded: stdin timed out' <<<"$output"
+  grep -q 'inspect with: agmsg doctor' <<<"$output"
+  if [[ "$output" == *'foreign reason'* ]]; then return 1; fi
+}
+
 @test "check-inbox: does not hang when stdin is a non-TTY pipe that never reaches EOF (#381)" {
   # A minimal `timeout` shim so this test exercises check-inbox.sh's own
   # `command -v timeout` code path deterministically, regardless of whether
