@@ -1443,18 +1443,25 @@ class CodexBridge {
   }
 
   async initialize() {
-    await this.client.request("initialize", {
-      clientInfo: {
-        name: "agmsg-codex-bridge",
-        title: "agmsg Codex bridge",
-        version: readVersion(),
-      },
-      capabilities: {
-        experimentalApi: true,
-        requestAttestation: false,
-        optOutNotificationMethods: [],
-      },
-    });
+    try {
+      await this.client.request("initialize", {
+        clientInfo: {
+          name: "agmsg-codex-bridge",
+          title: "agmsg Codex bridge",
+          version: readVersion(),
+        },
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
+          optOutNotificationMethods: [],
+        },
+      });
+    } catch (error) {
+      // Codex commits per-connection initialization before replying. A lost
+      // acknowledgement can therefore make our retry prove it is already ready.
+      if (error.code !== -32600 || error.message !== "Already initialized") throw error;
+      console.error(`[${process.pid}] codex-bridge: app-server confirms initialization`);
+    }
     this.client.notify("initialized");
   }
 

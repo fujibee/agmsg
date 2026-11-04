@@ -2452,7 +2452,23 @@ JS
   [ "$status" -eq 0 ]
   [ "$(grep -c '^pid=' "$log")" -eq 1 ]
   [ "$(grep -c '^initialize$' "$log")" -ge 2 ]
+  grep -Fxq 'already-initialized-rejection' "$log"
+  grep -Fxq 'late-initialize-ack' "$log"
   [ "$(grep -c '^turn/start$' "$log")" -eq 1 ]
+}
+
+@test "codex recovery: an unrelated error cannot prove initialization" {
+  local fixture="$BATS_TEST_DIRNAME/fixtures/codex-recovery-server.js"
+  local log="$TEST_SKILL_DIR/recovery.log" runner
+  runner="$(write_bridge_timeout_runner)"
+  AGMSG_CODEX_APP_SERVER_CMD="node $fixture stdio-init-wrong-code $log" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$runner" 3000 node "$TYPES/codex/codex-bridge.js" \
+      --project "$PROJ" --team team --name alice --thread thread-existing --request-timeout-ms 300
+  [ "$status" -eq 124 ]
+  [ "$(grep -c '^pid=' "$log")" -eq 1 ]
+  grep -Fxq 'already-initialized-rejection' "$log"
+  refute grep -Fxq 'turn/start' "$log"
+  refute grep -Fxq 'process/spawn' "$log"
 }
 
 @test "codex recovery: loaded-thread discovery delivers after its original budget" {
