@@ -54,6 +54,22 @@ EOF
 f="$PSDIR/cwd/$3"; [ -f "$f" ] || exit 1
 printf 'p%s\nn%s\n' "$3" "$(cat "$f")"
 EOF
+  cat > "$FAKEBIN/herdr" <<'EOF'
+#!/usr/bin/env bash
+# Fake herdr: logs every call (with the socket it was routed to); `agent list`
+# answers the fixture, `pane report-agent-session` / `release-agent` succeed.
+echo "herdr[$HERDR_SOCKET_PATH] $*" >> "$PSDIR/herdr_calls"
+case "$1 $2" in
+  "agent list") [ -f "$PSDIR/herdr_list_fail" ] && exit 1; cat "$PSDIR/herdr_list"
+                # another seat's SessionStart lands right after we looked
+                [ -f "$PSDIR/herdr_list_next" ] && mv "$PSDIR/herdr_list_next" "$PSDIR/herdr_list"; exit 0 ;;
+  "pane report-agent-session"|"pane release-agent") [ -f "$PSDIR/herdr_write_fail" ] && exit 1; exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  : > "$PSDIR/herdr_calls"
+  echo '{"id":"x","result":{"agents":[]}}' > "$PSDIR/herdr_list"
   chmod +x "$FAKEBIN/ps" "$FAKEBIN/lsof" "$FAKEBIN/pgrep"
   export PATH="$FAKEBIN:$PATH"
 
@@ -172,7 +188,7 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   _seat t-aaa
   run agmsg_terminal_self_env
   case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:p17"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
-  ! grep -q '^LIST$' "$PSDIR/calls"
+  refute grep -q '^LIST$' "$PSDIR/calls"
 }
 
 @test "not a Codex seat (no CODEX_THREAD_ID): no ps at all" {
@@ -347,4 +363,150 @@ _seat() {   # the tool shell the seat runs: the daemon's env, the starter's pane
   echo 2 > "$PSDIR/pgrep_fail"
   run agmsg_terminal_self_env
   [ "$output" = "unknown:codex:shared_daemon_pane_unproven:cannot_check_for_another_resume_of_this_thread" ]
+}
+
+# --- reporting the proven pane back to herdr --------------------------------
+_herdr_has() {   # <agent records, comma-separated>: what `herdr agent list` holds
+  printf '{"id":"x","result":{"agents":[%s]}}\n' "$1" > "$PSDIR/herdr_list"
+}
+_rec() { printf '{"pane_id":"%s","agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"%s","value":"%s"}}' "$1" "${3:-herdr:codex}" "$2"; }
+_rec_bare() { printf '{"pane_id":"%s","agent":"shell"}' "$1"; }
+_calls() { grep -c "^herdr\[" "$PSDIR/herdr_calls" || true; }
+
+_proven_seat() {
+  _under_daemon
+  _thread t-bbb /work/a 300
+  _tui 91002 05:00 /work/a w1:pN
+  _seat t-bbb
+}
+
+@test "report: the seat's thread is reported on its own pane and the starter is left alone" {
+  _proven_seat
+  _herdr_has "$(_rec w1:p17 t-bbb),$(_rec_bare w1:pN)"
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ]
+  grep -q "^herdr\[$HERDR_SOCKET_PATH\] pane report-agent-session w1:pN --source herdr:codex --agent codex --seq [0-9]*999999999 --agent-session-id t-bbb --session-start-source resume$" "$PSDIR/herdr_calls"
+  refute grep -q "release-agent" "$PSDIR/herdr_calls"
+}
+
+@test "report: nothing is ever released, whatever the starter pane holds" {
+  _proven_seat
+  _herdr_has "$(_rec w1:p17 t-other),$(_rec_bare w1:pN)"
+  run agmsg_terminal_self_env
+  grep -q "report-agent-session w1:pN" "$PSDIR/herdr_calls"
+  refute grep -q "release-agent" "$PSDIR/herdr_calls"
+}
+
+@test "report: already right (own pane holds the thread, starter does not): nothing is written" {
+  _proven_seat
+  _herdr_has "$(_rec w1:pN t-bbb),$(_rec w1:p17 t-other)"
+  run agmsg_terminal_self_env
+  [ "$(_calls)" -eq 1 ]
+  grep -q "agent list" "$PSDIR/herdr_calls"
+}
+
+@test "report: a record under another source is not mistaken for herdr's" {
+  _proven_seat
+  _herdr_has "$(_rec w1:p17 t-bbb agmsg:codex)"
+  run agmsg_terminal_self_env
+  grep -q "report-agent-session w1:pN" "$PSDIR/herdr_calls"
+  refute grep -q "release-agent" "$PSDIR/herdr_calls"
+}
+
+@test "report: a cache hit launches no herdr; the first scan launched one list" {
+  _proven_seat
+  _herdr_has "$(_rec w1:pN t-bbb)"
+  run agmsg_terminal_self_env
+  [ "$(_calls)" -eq 1 ]
+  run agmsg_terminal_self_env
+  run agmsg_terminal_self_env
+  [ "$(_calls)" -eq 1 ]
+}
+
+@test "report: a broken record is repaired when the verdict is next refreshed" {
+  _proven_seat
+  export AGMSG_CODEX_PANE_TTL=0
+  _herdr_has "$(_rec w1:pN t-bbb)"
+  run agmsg_terminal_self_env
+  : > "$PSDIR/herdr_calls"
+  _herdr_has "$(_rec w1:p17 t-bbb),$(_rec w1:pN t-old)"
+  run agmsg_terminal_self_env
+  grep -q "report-agent-session w1:pN" "$PSDIR/herdr_calls"
+  refute grep -q "release-agent" "$PSDIR/herdr_calls"
+}
+
+@test "report: another seat's record landing on the starter after the list is never deleted" {
+  _proven_seat
+  _herdr_has "$(_rec w1:p17 t-bbb)"
+  printf '{"id":"x","result":{"agents":[%s]}}\n' "$(_rec w1:p17 t-other)" > "$PSDIR/herdr_list_next"
+  run agmsg_terminal_self_env
+  grep -q "report-agent-session w1:pN" "$PSDIR/herdr_calls"
+  refute grep -q "release-agent" "$PSDIR/herdr_calls"
+  grep -q t-other "$PSDIR/herdr_list"
+}
+
+@test "report: unknown pane means no herdr call at all" {
+  _under_daemon
+  _thread t-bbb /work/a 300
+  _seat t-bbb
+  run agmsg_terminal_self_env
+  case "$output" in unknown:*) ;; *) echo "$output"; return 1 ;; esac
+  [ "$(_calls)" -eq 0 ]
+}
+
+@test "report: not under the daemon means no herdr call at all" {
+  _not_under_daemon
+  _seat t-bbb
+  run agmsg_terminal_self_env
+  [ "$(_calls)" -eq 0 ]
+}
+
+@test "report: herdr failing leaves the answer unchanged and nothing else is attempted" {
+  _proven_seat
+  touch "$PSDIR/herdr_list_fail"
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ]
+  case "$output" in "herdr"$'\t'"$HERDR_SOCKET_PATH:w1:pN"$'\t'*) ;; *) echo "$output"; return 1 ;; esac
+  [ "$(_calls)" -eq 1 ]
+  rm -f "$PSDIR/herdr_list_fail"
+}
+
+@test "report: a refused write leaves the answer unchanged and releases nothing" {
+  _proven_seat
+  _herdr_has "$(_rec w1:p17 t-bbb)"
+  touch "$PSDIR/herdr_write_fail"
+  run agmsg_terminal_self_env
+  [ "$status" -eq 0 ]
+  refute grep -q "release-agent" "$PSDIR/herdr_calls"
+  rm -f "$PSDIR/herdr_write_fail"
+}
+
+@test "report: AGMSG_CODEX_HERDR_REPORT=0 turns it off" {
+  _proven_seat
+  _herdr_has "$(_rec w1:p17 t-bbb)"
+  export AGMSG_CODEX_HERDR_REPORT=0
+  run agmsg_terminal_self_env
+  [ "$(_calls)" -eq 0 ]
+}
+
+@test "report: tmux has nothing to report" {
+  _under_daemon
+  _thread t-bbb /work/a 300
+  _tui 91002 05:00 /work/a w1:pN
+  printf '/v/bin/codex TMUX=/t/s,1,0 TMUX_PANE=%%7 HOME=/h\n' > "$PSDIR/env/91002"
+  _seat t-bbb
+  run agmsg_terminal_self_env
+  [ "$(_calls)" -eq 0 ]
+}
+
+
+@test "report: an apostrophe anywhere in herdr's agent list does not stop the report (bash 3.2 too)" {
+  _proven_seat
+  printf '{"id":"x","result":{"agents":[{"pane_id":"w1:p3","agent":"claude","terminal_title":"O'"'"'Brien","cwd":"/a/it'"'"'s"},%s]}}\n' "$(_rec w1:p17 t-bbb)" > "$PSDIR/herdr_list"
+  run agmsg_terminal_self_env
+  grep -q "report-agent-session w1:pN" "$PSDIR/herdr_calls"
+  # the same code under the system bash (3.2 on macOS)
+  : > "$PSDIR/herdr_calls"
+  run /bin/bash -c '. "$1"; printf "env\nHERDR_ENV=1\nHERDR_SOCKET_PATH=%s\nHERDR_PANE_ID=w1:pN\n" "$2" | agmsg_codex_report_own_session t-bbb' _ "$SKILL_DIR/scripts/lib/codex-herdr-report.sh" "$HERDR_SOCKET_PATH"
+  grep -q "report-agent-session w1:pN" "$PSDIR/herdr_calls"
 }
