@@ -101,6 +101,12 @@ EOF
   chmod +x "$SCRIPTS/drivers/types/codex/codex-bridge.js"
   export AGMSG_NODE="$(command -v bash)"
   export LAUNCHER="$SCRIPTS/drivers/types/codex/codex-bridge-launcher.sh"
+  # Isolate the notice transport; these tests exercise launcher recovery and
+  # the shared helper calls, not the helper's persistence implementation.
+  cat > "$SCRIPTS/lib/down-notice.sh" <<'EOF'
+down_notice_set() { printf '%s\n' "$3" > "$RUN_DIR/test-down.$1"; }
+down_notice_clear() { rm -f "$RUN_DIR/test-down.$1"; }
+EOF
 }
 
 # PIDs of live per-role child launchers for this test's project: any process
@@ -564,7 +570,7 @@ EOF
   # the mock lifetime below wait_for_child_count's 10-second ceiling so this
   # test measures deregistration, not the intentionally blocking test adapter.
   export MOCK_BRIDGE_SLEEP=2
-  sleep 20 3>&- & local parent=$!
+  sleep 180 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
   local dispatcher=$!
   [ "$(wait_for_child_count 1)" -eq 1 ]
@@ -1063,4 +1069,82 @@ _run_start_token() { # <pid> -> runs _start_token in a subshell
   [ "${output%%"$tab"*}" = pwsh ]
   local tok="${output#*"$tab"}"
   case "$tok" in ''|*[!0-9]*) false ;; esac
+}
+
+@test "launcher: startup identity discovery retries beyond twenty empty observations" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=60
+  mv "$SCRIPTS/identities.sh" "$SCRIPTS/identities-real.sh"
+  cat > "$SCRIPTS/identities.sh" <<'EOF'
+#!/usr/bin/env bash
+n=0
+[ ! -f "$RUN_DIR/identity-attempts" ] || read -r n < "$RUN_DIR/identity-attempts"
+n=$((n + 1)); printf '%s\n' "$n" > "$RUN_DIR/identity-attempts"
+[ "$n" -gt 21 ] || exit 0
+exec "$SCRIPTS/identities-real.sh" "$@"
+EOF
+  chmod +x "$SCRIPTS/identities.sh"
+  # Compress only the fixture's retry sleeps, preserving the attempt count.
+  mkdir -p "$TEST_SKILL_DIR/bin"
+  local real_sleep
+  real_sleep="$(command -v sleep)"
+  printf '#!/usr/bin/env bash\nexec "%s" 0.01\n' "$real_sleep" > "$TEST_SKILL_DIR/bin/sleep"
+  chmod +x "$TEST_SKILL_DIR/bin/sleep"
+  sleep 180 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  PATH="$TEST_SKILL_DIR/bin:$PATH" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" $'team\talice' >"$TEST_SKILL_DIR/startup-launcher.log" 2>&1 3>&- &
+  local attempt seen=0
+  for attempt in {1..300}; do
+    if [ -f "$CAPTURE" ]; then seen=1; break; fi
+    sleep 0.1
+  done
+  if [ "$seen" -ne 1 ]; then cat "$TEST_SKILL_DIR/startup-launcher.log"; fi
+  [ "$seen" -eq 1 ]
+  [ "$(cat "$RUN_DIR/identity-attempts")" -gt 21 ]
+}
+
+@test "launcher: repeated empty observations do not retire a registered live bridge" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=60
+  sleep 180 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  wait_for_bridge_capture
+  local bridge_pid
+  bridge_pid="$(cat "$RUN_DIR"/codex-bridge.*.pid)"
+  # Force valid-but-empty discovery without changing the authoritative config.
+  cp "$SCRIPTS/identities.sh" "$SCRIPTS/identities-saved.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$SCRIPTS/identities.sh"
+  touch "$TEST_SKILL_DIR/teams/team/config.json"
+  local i pending=0
+  for i in {1..100}; do
+    if grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then pending=1; break; fi
+    sleep 0.1
+  done
+  [ "$pending" -eq 1 ]
+  sleep 3
+  kill -0 "$bridge_pid"
+  [ "$(wait_for_stable_child_count 1)" -eq 1 ]
+  cp "$SCRIPTS/identities-saved.sh" "$SCRIPTS/identities.sh"
+  local recovered=0
+  for i in {1..100}; do
+    if ! grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then recovered=1; break; fi
+    sleep 0.1
+  done
+  [ "$recovered" -eq 1 ]
+  kill -0 "$bridge_pid"
+}
+
+@test "launcher: invalid registry data is unknown and recovers without another config change" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=60
+  cp "$TEST_SKILL_DIR/teams/team/config.json" "$TEST_SKILL_DIR/saved-config.json"
+  printf '{' > "$TEST_SKILL_DIR/teams/team/config.json"
+  sleep 180 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" $'team\talice' >/dev/null 2>&1 3>&- &
+  sleep 2
+  [ ! -f "$CAPTURE" ]
+  cp "$TEST_SKILL_DIR/saved-config.json" "$TEST_SKILL_DIR/teams/team/config.json"
+  wait_for_bridge_capture
 }
