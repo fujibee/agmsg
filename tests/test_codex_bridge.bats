@@ -2525,3 +2525,16 @@ JS
   done
   [ "$count" -eq 0 ]
 }
+
+@test "codex recovery: a dead bridge-owned stdio server is replaced with backoff" {
+  local fixture="$BATS_TEST_DIRNAME/fixtures/codex-recovery-server.js"
+  local log="$TEST_SKILL_DIR/recovery.log" runner
+  runner="$(write_bridge_timeout_runner)"
+  AGMSG_CODEX_APP_SERVER_CMD="node $fixture stdio-exit-once $log" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$runner" 10000 node "$TYPES/codex/codex-bridge.js" \
+      --project "$PROJ" --team team --name alice --thread thread-existing \
+      --request-timeout-ms 1000 --max-wakes 1
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^pid=' "$log")" -eq 2 ]
+  [ "$(grep -c '^turn/start$' "$log")" -eq 1 ]
+}
