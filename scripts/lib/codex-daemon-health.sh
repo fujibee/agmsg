@@ -57,12 +57,13 @@ _agmsg_codex_daemon_bytes_mb() {
   printf '%s\n' $(( $1 / 1048576 ))
 }
 
-# kill -0 alone reads EPERM as "gone"; the shared helper tells the two apart and
-# only a proven ESRCH counts as gone.
+# Liveness through the shared helper (instance-id.sh), which tells EPERM from
+# ESRCH and cross-checks ps: only a proven ESRCH counts as gone. If the helper
+# cannot be loaded nothing can be proven, so the pid counts as alive.
 _agmsg_cdh_pid_alive() {
   if ! command -v _agmsg_pid_alive_local >/dev/null 2>&1; then
     # shellcheck disable=SC1091
-    . "$(dirname "${BASH_SOURCE[0]}")/instance-id.sh" 2>/dev/null || { kill -0 "$1" 2>/dev/null; return; }
+    . "$(dirname "${BASH_SOURCE[0]}")/instance-id.sh" 2>/dev/null || return 0
   fi
   _agmsg_pid_alive_local "$1"
 }
@@ -140,13 +141,23 @@ agmsg_codex_daemon_scan() {   # <run_dir> <callback>
     "$cb" "${profiles[$i]}"
   done
   if [ -n "${_AGMSG_CDH_TMP:-}" ]; then
-    rm -f "$_AGMSG_CDH_TMP"
+    rm -f "$_AGMSG_CDH_TMP" "$_AGMSG_CDH_TMP.jobs"
     _AGMSG_CDH_TMP=""
   fi
 }
 
 _agmsg_cdh_reset() {
   CDH_STATE=absent CDH_REASON="" CDH_PID="" CDH_START="" CDH_AGE_SECONDS="" CDH_FOOTPRINT_MB="" CDH_PEAK_MB="" CDH_OVER=0 CDH_CLIENTS=""
+}
+
+# Is the read this shell started still running? The shell's own job table answers
+# (`jobs -r` into a file: no fork, no signal, no ps), which is the right question
+# for a pid this shell spawned -- a signal probe would call a not-yet-reaped child
+# alive and a reused pid alive.
+_agmsg_cdh_child_running() {
+  [ -n "${_AGMSG_CDH_TMP:-}" ] || return 1
+  jobs -r > "$_AGMSG_CDH_TMP.jobs" 2>/dev/null
+  [ -s "$_AGMSG_CDH_TMP.jobs" ]
 }
 
 # Runs <cmd...> with its stdout in <outfile>, giving up on it after the read limit
@@ -157,9 +168,9 @@ _agmsg_cdh_bounded() {   # <outfile> <cmd...>
   local out="$1" limit="${AGMSG_CODEX_DAEMON_READ_SECONDS:-5}" ticks=0 rc=0
   shift
   case "$limit" in ''|*[!0-9]*|0) limit=5 ;; esac
-  "$@" > "$out" 2>/dev/null &
+  "$@" > "$out" 2>/dev/null 3>&- 4>&- &
   _AGMSG_CDH_CHILD=$!
-  while kill -0 "$_AGMSG_CDH_CHILD" 2>/dev/null; do
+  while _agmsg_cdh_child_running; do
     if [ "$ticks" -ge $(( limit * 10 )) ]; then
       _agmsg_cdh_stop_child "$_AGMSG_CDH_CHILD"
       _AGMSG_CDH_CHILD=""
@@ -178,11 +189,11 @@ _agmsg_cdh_bounded() {   # <outfile> <cmd...>
 _agmsg_cdh_stop_child() {   # <pid>
   local pid="$1" i=0
   kill "$pid" 2>/dev/null || true
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 10 ]; do
+  while _agmsg_cdh_child_running && [ "$i" -lt 10 ]; do
     sleep 0.1
     i=$(( i + 1 ))
   done
-  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  ! _agmsg_cdh_child_running || kill -9 "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null || true
   return 0
 }
