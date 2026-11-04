@@ -1091,7 +1091,6 @@ class CodexBridge {
   watchNotice(state, reason) {
     const signature = JSON.stringify([state, reason]);
     if (signature === this.watchNoticeSignature) return;
-    this.watchNoticeSignature = signature;
     const helper = toPosixPath(path.join(SCRIPTS_DIR, "lib", "down-notice.sh"));
     const command = state
       ? 'source "$1"; down_notice_set "$2" "$3" "$4" "$5"'
@@ -1101,7 +1100,9 @@ class CodexBridge {
     const result = spawnSync(BASH_BIN, args, { cwd: SKILL_DIR, encoding: "utf8" });
     if (result.error || result.status !== 0) {
       console.error(`codex-bridge: could not publish watch recovery notice: ${result.error?.message || result.stderr || result.status}`);
+      return;
     }
+    this.watchNoticeSignature = signature;
   }
 
   watchBackoff(excess) {
