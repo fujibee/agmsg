@@ -231,6 +231,17 @@ resolve_identity() {  # prints "team<TAB>name" lines for the project's codex rol
     | sort -u
 }
 
+# A readable row with an empty, one-sided or malformed pair is still an
+# observation failure. Only a validated pair can prove a role switch.
+source "$SCRIPT_DIR/../../../lib/validate.sh"
+parsed_request_pair_valid() {
+  [ "${AGMSG_CODEX_REQUEST_TYPE:-}" = "$TYPE" ] || return 1
+  [ -n "${AGMSG_CODEX_REQUEST_THREAD:-}" ] || return 1
+  [ -n "${AGMSG_CODEX_REQUEST_TEAM:-}" ] && [ -n "${AGMSG_CODEX_REQUEST_NAME:-}" ] || return 1
+  agmsg_validate_team_name "${AGMSG_CODEX_REQUEST_TEAM:-}" >/dev/null 2>&1 || return 1
+  agmsg_validate_agent_name "${AGMSG_CODEX_REQUEST_NAME:-}" >/dev/null 2>&1 || return 1
+}
+
 # Read the seat's own request record. SessionStart writes the already-narrowed
 # role pair after the TUI claims it; a missing or ambiguous pair is not a
 # reason to consult the project-wide identity list.
@@ -242,6 +253,7 @@ read_seat_request() {
   [ -f "$REQUEST_FILE" ] || return 1
   IFS= read -r request_line < "$REQUEST_FILE" 2>/dev/null || return 1
   _agmsg_codex_request_parse "$request_line" || return 1
+  parsed_request_pair_valid || return 1
   request_type="${AGMSG_CODEX_REQUEST_TYPE:-}"
   REQUEST_THREAD="${AGMSG_CODEX_REQUEST_THREAD:-}"
   REQUEST_APP_SERVER="${AGMSG_CODEX_REQUEST_APP_SERVER:-}"
@@ -888,8 +900,9 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   if [ -f "$REQUEST_FILE" ]; then
     _request_line=""
     if ! IFS= read -r _request_line < "$REQUEST_FILE" 2>/dev/null \
-      || ! _agmsg_codex_request_parse "$_request_line"; then
-      identity_pending "Codex seat request cannot be read; launcher is retrying"
+      || ! _agmsg_codex_request_parse "$_request_line" \
+      || ! parsed_request_pair_valid; then
+      identity_pending "Codex seat request has no proven pair; launcher is retrying"
       poll_sleep
       continue
     fi
@@ -911,6 +924,7 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   fi
   if [ "$request_pair" != "$ROLE_PAIR" ]; then
     retire_recorded_bridge
+    identity_ready
     exit 0
   fi
 
@@ -1069,8 +1083,9 @@ EOF
       if [ -f "$REQUEST_FILE" ]; then
         _bridge_request_line=""
         if ! IFS= read -r _bridge_request_line < "$REQUEST_FILE" 2>/dev/null \
-          || ! _agmsg_codex_request_parse "$_bridge_request_line"; then
-          identity_pending "Codex seat request cannot be read; launcher is retrying"
+          || ! _agmsg_codex_request_parse "$_bridge_request_line" \
+          || ! parsed_request_pair_valid; then
+          identity_pending "Codex seat request has no proven pair; launcher is retrying"
           poll_sleep
           continue
         fi
@@ -1090,6 +1105,7 @@ EOF
       if [ "$_bridge_request_pair" != "$ROLE_PAIR" ]; then
         retire_recorded_bridge
       fi
+      identity_ready
       sleep 0.2
     done
     wait "$launched_pid" 2>/dev/null || true

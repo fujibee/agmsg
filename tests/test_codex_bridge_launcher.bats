@@ -94,8 +94,13 @@ _pairs_hash="$(printf '%s' "$(printf '%s' "$_ph" | LC_ALL=C sort | sed '/^$/d')"
     "$(printf '%s' "$_proj" | agmsg_sha1)" \
     "$_pairs_hash" \
     "$(hostname)" "$$" "$_start" "$_ssrc" ; } > "$_lease.tmp" && mv "$_lease.tmp" "$_lease"
-trap 'rm -f "$_lease"' EXIT
-[ -z "${MOCK_BRIDGE_SLEEP:-}" ] || sleep "$MOCK_BRIDGE_SLEEP"
+_sleep_pid=""
+trap '[ -z "$_sleep_pid" ] || kill "$_sleep_pid" 2>/dev/null || true; rm -f "$_lease"' EXIT
+trap 'exit 0' TERM INT
+if [ -n "${MOCK_BRIDGE_SLEEP:-}" ]; then
+  sleep "$MOCK_BRIDGE_SLEEP" & _sleep_pid=$!
+  wait "$_sleep_pid" || true
+fi
 exit 0
 EOF
   chmod +x "$SCRIPTS/drivers/types/codex/codex-bridge.js"
@@ -1215,4 +1220,53 @@ done
 EOF
   [ "$status" -eq 0 ]
   [ "$output" = $'0.3\n0.6\n1.2\n2\n2' ]
+}
+
+unknown_requests_keep_bridge() {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=180
+  sleep 240 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  wait_for_bridge_capture
+  local bridge_pid request="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  bridge_pid="$(cat "$RUN_DIR"/codex-bridge.*.pid)"
+  local row i pending recovered
+  for row in \
+    $'codex\tthread-alice\tws://127.0.0.1:1\t' \
+    $'codex\tthread-alice\tws://127.0.0.1:1\tteam\t' \
+    $'codex\tthread-alice\tws://127.0.0.1:1\t\talice' \
+    $'codex\tthread-alice\tws://127.0.0.1:1\tteam\tbad.name'; do
+    printf '%s\n' "$row" > "$request"
+    pending=0
+    for i in {1..100}; do
+      if grep -l 'no proven pair' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then pending=1; break; fi
+      sleep 0.1
+    done
+    [ "$pending" -eq 1 ] || return 1
+    kill -0 "$bridge_pid" || return 1
+    write_request thread-alice team alice
+    recovered=0
+    for i in {1..100}; do
+      if ! grep -l 'no proven pair' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then recovered=1; break; fi
+      sleep 0.1
+    done
+    [ "$recovered" -eq 1 ] || return 1
+    kill -0 "$bridge_pid" || return 1
+  done
+  # A positively different, registered pair still retires the old bridge.
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team bob thread-bob "$PROJ" codex
+  write_request thread-bob team bob
+  wait_for_pid_exit "$bridge_pid" || return 1
+
+}
+
+@test "launcher: unknown request pairs preserve the normal bridge and recover in place" {
+  unknown_requests_keep_bridge
+}
+
+@test "launcher: unknown request pairs preserve a custom bridge and recover in place" {
+  export AGMSG_CODEX_BRIDGE_CMD="$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  unknown_requests_keep_bridge
 }
