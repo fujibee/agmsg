@@ -12,6 +12,7 @@
 # leak into detection.
 
 load test_helper
+bats_require_minimum_version 1.5.0
 
 setup() {
   setup_test_env
@@ -376,7 +377,7 @@ EOF
   [ "$(detect)" = claude-code ]
 }
 
-@test "type-registry: agmsg_detect_cli_type's default fallback still returns 0, and signals the fallback on a side channel only (#1402 review)" {
+@test "type-registry: agmsg_detect_cli_type's default fallback still returns 0, and signals the fallback on a side channel and visible notice (#1402 review)" {
   # #1402 review: an earlier version of this change made the default
   # branch `return 1` to distinguish it from a real detection, reasoning
   # that no existing caller checked the status. True, but irrelevant --
@@ -389,15 +390,16 @@ EOF
   # own return value and stdout must stay exactly what they always were;
   # only the side channel added for self-name.sh (#1391) may say "this was
   # a guess, not evidence".
-  run env -i PATH="$PATH" bash -c \
+  run --separate-stderr env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; agmsg_detect_cli_type; echo rc=\$?"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'claude-code\nrc=0')" ]
+  grep -q 'CLI type fallback:.*compatibility default claude-code' <<<"$stderr"
 
   # The exact regression shape: a `set -e` script assigning the call's
   # output directly must not abort when detection falls all the way through
   # to the default.
-  run env -i PATH="$PATH" bash -c \
+  run --separate-stderr env -i PATH="$PATH" bash -c \
     "set -euo pipefail; source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; AGENT_TYPE=\"\$(agmsg_detect_cli_type)\"; echo \"AGENT_TYPE=\$AGENT_TYPE\""
   [ "$status" -eq 0 ]
   [ "$output" = "AGENT_TYPE=claude-code" ]
@@ -407,12 +409,12 @@ EOF
   # actually uses (a command-substitution call discards it, same reason
   # _AGMSG_AGENT_BINARIES_OUT is read the same way elsewhere in this file's
   # sibling resolve-project.sh).
-  run env -i PATH="$PATH" bash -c \
+  run --separate-stderr env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; agmsg_detect_cli_type >/dev/null; echo \"defaulted=\$_AGMSG_DETECT_CLI_TYPE_DEFAULTED out=\$_AGMSG_DETECT_CLI_TYPE_OUT\""
   [ "$status" -eq 0 ]
   [ "$output" = "defaulted=1 out=claude-code" ]
 
-  run env -i PATH="$PATH" CODEX_THREAD_ID=x bash -c \
+  run --separate-stderr env -i PATH="$PATH" CODEX_THREAD_ID=x bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { :; }; compat_get_ppid() { :; }; agmsg_detect_cli_type >/dev/null; echo \"defaulted=\$_AGMSG_DETECT_CLI_TYPE_DEFAULTED out=\$_AGMSG_DETECT_CLI_TYPE_OUT\""
   [ "$status" -eq 0 ]
   [ "$output" = "defaulted=0 out=codex" ]
@@ -423,6 +425,29 @@ EOF
     "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { echo opencode; }; compat_get_ppid() { echo 1; }; agmsg_detect_cli_type"
   [ "$status" -eq 0 ]
   [ "$output" = opencode ]
+}
+
+@test "type-registry: weak/default notices persist off stdout and clear on strong detection" {
+  source "$SCRIPTS/lib/down-notice.sh"
+  local script='source "$1/lib/type-registry.sh"; source "$1/lib/compat.sh"; source "$1/lib/detect-cli-type.sh"; compat_get_comm() { :; }; compat_get_ppid() { echo 1; }; agmsg_detect_cli_type'
+  run --separate-stderr env -i PATH="$PATH" SKILL_DIR="$TEST_SKILL_DIR" GEMINI_API_KEY=never-print-this-value bash -c "$script" _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = gemini ]
+  grep -q 'weak environment key GEMINI_API_KEY' <<<"$stderr"
+  if [[ "$stderr" == *never-print-this-value* ]]; then return 1; fi
+  down_notice_list | grep -Fq 'weak environment key GEMINI_API_KEY'
+  local component
+  component="$(down_notice_key cli-type "$PWD")"
+  down_notice_list | grep -Fq "$component"$'\tdegraded\t'
+  run --separate-stderr env -i PATH="$PATH" SKILL_DIR="$TEST_SKILL_DIR" bash -c "$script" _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = claude-code ]
+  grep -q 'compatibility default claude-code' <<<"$stderr"
+  run --separate-stderr env -i PATH="$PATH" SKILL_DIR="$TEST_SKILL_DIR" CODEX_THREAD_ID=test-thread bash -c "$script" _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = codex ]
+  [ -z "$stderr" ]
+  [ -z "$(down_notice_list)" ]
 }
 
 @test "type-registry: manifests are DATA — never executed" {
@@ -581,4 +606,11 @@ YAML
   [ "$status" -eq 0 ]
   grep -Fq "no warnings." <<<"$output"
   refute grep -Fq "delivery.sh status exited" <<<"$output"
+}
+
+@test "notice I/O failures cannot stop fallback or recovery under errexit" {
+  local script='source "$1/lib/down-notice.sh"; down_notice_set() { return 1; }; down_notice_clear() { return 1; }; source "$1/lib/type-registry.sh"; source "$1/lib/compat.sh"; source "$1/lib/detect-cli-type.sh"; compat_get_comm() { :; }; compat_get_ppid() { echo 1; }; GEMINI_API_KEY=fixture; agmsg_detect_cli_type; CODEX_THREAD_ID=fixture; agmsg_detect_cli_type'
+  run --separate-stderr bash -e -c "$script" _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'gemini\ncodex')" ]
 }
