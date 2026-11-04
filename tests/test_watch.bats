@@ -1431,6 +1431,16 @@ _record_handover_events() {
   grep -q "WEND${last}" "$TEST_SKILL_DIR/wbig.log"
 }
 
+# Wait (up to ~10s) for a path to disappear.
+_wait_for_file_gone() {
+  local i
+  for i in $(seq 1 100); do
+    [ ! -e "$1" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 @test "watch: a cursor stuck N cycles with pending rows reports once on stdout, stays up, and resumes when it clears (#1045)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   # Force the delivery query -- the ONLY sqlite call in the loop whose last arg is
@@ -1464,11 +1474,48 @@ STUB
   [ "$(grep -c "is STUCK" "$out")" -eq 1 ]
   # the report is a plain "agmsg watch:" line, never mistaken for a "team | from → to" message
   grep -q "agmsg watch: delivery for team:alice is STUCK" "$out"
+  # The degraded record is written while it lasts (just after the line) ...
+  _wait_for_file_contains "$TEST_SKILL_DIR/run/down/watch.$w.json" '"state":"degraded"' || { kill "$w" 2>/dev/null || true; false; }
+  grep -q '"state":"degraded"' "$TEST_SKILL_DIR/run/down/watch.$w.json"
+  grep -q 'read cursor stuck for team:alice' "$TEST_SKILL_DIR/run/down/watch.$w.json"
   # (3) The cause clears: the pending message is delivered and the episode is closed.
   : > "$stub/clear"
   if ! _wait_for_file_contains "$out" "team:alice resumed"; then kill "$w" 2>/dev/null || true; false; fi
   grep -q "STUCKMSG" "$out"
+  # ... and removed when it does (the line is printed just before the record is cleared).
+  _wait_for_file_gone "$TEST_SKILL_DIR/run/down/watch.$w.json" || { kill "$w" 2>/dev/null || true; false; }
   kill -0 "$w" 2>/dev/null
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+}
+
+@test "watch: a failing pair that another session takes over leaves no degraded record and no false 'resumed' (#1045)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # A broad watcher (no actas) serves alice and bob. alice's delivery is stuck, then
+  # another session claims alice: this watcher stops observing her. Her entry must
+  # leave the state lists without being called a recovery, and the record must go
+  # (bob is healthy, so nothing else keeps it alive).
+  local realsqlite; realsqlite="$(command -v sqlite3)"
+  local stub="$TEST_SKILL_DIR/sqstub6"; mkdir -p "$stub"
+  cat > "$stub/sqlite3" <<STUB
+#!/usr/bin/env bash
+if [ "\${@: -1}" = ":memory:" ]; then cat >/dev/null 2>&1; exit 0; fi
+exec "$realsqlite" "\$@"
+STUB
+  chmod +x "$stub/sqlite3"
+  bash "$SCRIPTS/send.sh" team bob alice "TAKEN" >/dev/null
+  local out="$TEST_SKILL_DIR/takeover.log"
+  AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
+    sess-takeover "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  _bg_track "$w"
+  if ! _wait_for_file_contains "$out" "team:alice is STUCK"; then kill "$w" 2>/dev/null || true; false; fi
+  _wait_for_file_contains "$TEST_SKILL_DIR/run/down/watch.$w.json" '"state":"degraded"' || { kill "$w" 2>/dev/null || true; false; }
+  # Another live session takes alice.
+  echo "other-session" > "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  echo "other-session" > "$TEST_SKILL_DIR/run/cc-instance.$$"
+  _wait_for_file_gone "$TEST_SKILL_DIR/run/down/watch.$w.json" || { kill "$w" 2>/dev/null || true; false; }
+  kill -0 "$w" 2>/dev/null
+  refute grep -q "team:alice resumed" "$out"
   kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 }
 
@@ -1582,10 +1629,13 @@ STUB
   [ "$(grep -c "cannot read delivery state" "$out")" -eq 1 ]
   # Non-delivery-shaped diagnostic (a plain "agmsg watch:" line, not "ts | team | from → to | body").
   grep -q "agmsg watch: cannot read delivery state for team:alice" "$out"
+  _wait_for_file_contains "$TEST_SKILL_DIR/run/down/watch.$w.json" '"state":"degraded"' || { kill "$w" 2>/dev/null || true; false; }
+  grep -q 'store read failing for team:alice' "$TEST_SKILL_DIR/run/down/watch.$w.json"
   # When the store reads again the watcher says so and delivers what waited.
   : > "$stub/clear"
   if ! _wait_for_file_contains "$out" "can be read again"; then kill "$w" 2>/dev/null || true; false; fi
   if ! _wait_for_file_contains "$out" "SEED"; then kill "$w" 2>/dev/null || true; false; fi
+  _wait_for_file_gone "$TEST_SKILL_DIR/run/down/watch.$w.json" || { kill "$w" 2>/dev/null || true; false; }
   kill -0 "$w" 2>/dev/null
   kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 }

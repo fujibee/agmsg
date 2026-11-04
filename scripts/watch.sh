@@ -68,7 +68,7 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 export AGMSG_DAEMON_NOTICE_SKIP=1
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
-[ ! -f "$SCRIPT_DIR/lib/down-notice.sh" ] || source "$SCRIPT_DIR/lib/down-notice.sh"
+source "$SCRIPT_DIR/lib/down-notice.sh"
 agmsg_storage_load
 # Warm agmsg_storage_dir's own process-lifetime cache as a PLAIN STATEMENT,
 # not via $(...): every real caller (agmsg_db_path -> ... -> _agmsg_db_file)
@@ -639,7 +639,7 @@ fi
 READY_FILES=""
 cleanup() {
   # This watcher's own down notice goes with it.
-  if declare -F down_notice_clear >/dev/null 2>&1; then down_notice_clear "watch.$$" 2>/dev/null || true; fi
+  down_notice_clear "watch.$$" 2>/dev/null || true
   # EXIT only removes the pidfile if it still records our pid. A successor
   # watcher (Monitor re-invoked for the same session_id) overwrites $PIDFILE
   # with its own pid before signalling us, so this read sees the successor's
@@ -1148,14 +1148,14 @@ _held_elsewhere_without() {
 # the number of CONSECUTIVE poll cycles the cursor stayed at the same value while a
 # pending batch waited -- an EVENT count, not elapsed time, which fires the same on a
 # slow and a fast machine (time would misfire on one and never fire on the other). At
-# the threshold, print WHY and exit. The report goes to STDOUT deliberately: the
+# the threshold, print WHY (once per episode) and keep running -- ending the watcher would leave the session deaf. The report goes to STDOUT deliberately: the
 # watcher's stderr is /dev/null in every launcher we ship (#691) and the Monitor tool
 # surfaces only stdout as an event, so a reason on stderr would share the fate of the
 # delivery it reports on -- exactly the invisibility being fixed. It is a plain
 # "agmsg watch:" line, NOT the "ts | team | from -> to | body" delivery shape, so a
-# reader does not mistake it for a message. Exiting (rather than looping) makes "the
-# monitor stopped" visible; a watcher that ends without a reason cannot be told from a
-# crash (#983). The threshold is FIXED, not an env knob -- an empty/0/non-numeric knob
+# reader does not mistake it for a message. Saying it once and then retrying every cycle
+# keeps the problem visible without ending the watcher (a watcher that ends without a
+# reason cannot be told from a crash, #983). The threshold is FIXED, not an env knob -- an empty/0/non-numeric knob
 # would silently disable the very guard against silence.
 STUCK_THRESHOLD=3
 # A failed store read or a wedged cursor does not end the watcher: the next cycle
@@ -1173,11 +1173,19 @@ _flag_without() {
   done <<< "$1"
   printf '%s' "$out"
 }
+# A pair this watcher no longer serves (another session took the role, or its store
+# is gone) is no longer observed: drop it from both state lists without calling that
+# a recovery, and keep the notice while another pair is still failing.
+_watch_pair_not_observed() {   # <team:agent>
+  local key="$1" changed=0
+  if _flag_has "$READ_FAILING" "$key"; then READ_FAILING="$(_flag_without "$READ_FAILING" "$key")"; changed=1; fi
+  if _flag_has "$STUCK_REPORTED" "$key"; then STUCK_REPORTED="$(_flag_without "$STUCK_REPORTED" "$key")"; changed=1; fi
+  [ "$changed" -eq 0 ] || _watch_notice_sync
+}
+
 # Down/degraded notice (shown by doctor, status and the session-start hook) while
-# any pair is in one of those states; cleared when none is. A no-op until
-# lib/down-notice.sh is installed.
+# any pair is in one of those states; cleared when none is.
 _watch_notice_sync() {
-  declare -F down_notice_set >/dev/null 2>&1 || return 0
   if [ -n "$READ_FAILING$STUCK_REPORTED" ]; then
     down_notice_set "watch.$$" degraded "the inbox watcher is running but cannot deliver: ${READ_FAILING:+store read failing for ${READ_FAILING//$'\n'/ }}${STUCK_REPORTED:+ read cursor stuck for ${STUCK_REPORTED//$'\n'/ }}; it retries every cycle" "restart this session or run /agmsg actas <name> if it does not clear" || true
   else
@@ -1518,6 +1526,7 @@ EOF
 }${pair_team}/${pair_agent}"
           echo "agmsg watch: ${pair_team}/${pair_agent} was claimed by session ${PAIR_VERDICT#held:}; not serving it while they hold it." >&2
         fi
+        _watch_pair_not_observed "$pair_team:$pair_agent"
         continue
         ;;
       unverified:*)
@@ -1540,6 +1549,7 @@ EOF
           *) NO_STORE_REPORTED="$NO_STORE_REPORTED $pair_team:$pair_agent"
              watch_log "${pair_team}/${pair_agent}: no store yet; skipping this pair until one exists." ;;
         esac
+        _watch_pair_not_observed "$pair_team:$pair_agent"
         continue
         ;;
     esac
@@ -1557,8 +1567,8 @@ EOF
     # catch, one level earlier. The stuck guard cannot see this one -- a failed
     # scan returns no message_sent row to count, so the pair looks caught up
     # forever. So on a failed observation, say why on stdout (a plain
-    # "agmsg watch:" line, not the delivery shape) and exit: a bounded, visible
-    # stop, never silent continuation. This is the same failure-is-not-empty
+    # "agmsg watch:" line, not the delivery shape), once, and retry next cycle:
+    # visible, never silent continuation, and the watcher stays up. This is the same failure-is-not-empty
     # collapse the cursor-only fix above closed, at the read itself.
     #
     # The two OTHER reads in this cycle that also fall back to empty are the
@@ -1601,7 +1611,7 @@ EOF
     # perfectly healthy watcher. So track a pair only while a message_sent row is
     # actually waiting for it; a glob avoids forking grep in the poll loop. When
     # READ_CURSOR is UNCHANGED from the previous cycle delivery did not advance it --
-    # count that; at the threshold say why on stdout and exit. With no message row
+    # count that; at the threshold say why on stdout (once) and keep retrying. With no message row
     # waiting the pair is caught up, so drop its tracker and a future backlog starts
     # a fresh count.
     _agmsg_pair_key="$pair_team:$pair_agent"
