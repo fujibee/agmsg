@@ -97,11 +97,11 @@ _run_unfinished_update_watch() {
   refute grep -qF 'agmsgd is on for this project' "$OUT"
 }
 
-@test "watch stop (update never finished): agmsgd on -> same note after the existing restart advice; agmsgd off -> plain" {
+@test "watch stop (update never finished): agmsgd on -> same note after the restart advice; agmsgd off -> plain" {
   _agmsgd_desired on
   _run_unfinished_update_watch
   grep -qF 'installation was updated while this watcher was running' "$OUT"
-  grep -qF 'to resume delivery. agmsgd is on for this project but is not delivering' "$OUT"
+  grep -qF '/agmsg actas <name>). agmsgd is on for this project but is not delivering' "$OUT"
 
   _agmsgd_desired off
   _run_unfinished_update_watch
