@@ -169,13 +169,13 @@ NOTICE_REASON="unobserved"
 IDENTITY_PROJECT_SQL_IN="$(agmsg_project_sql_in_list "$PROJECT")"
 identity_ready() {
   [ -n "$NOTICE_REASON" ] || return 0
-  down_notice_clear "$NOTICE_COMPONENT"
-  NOTICE_REASON=""
+  if down_notice_clear "$NOTICE_COMPONENT"; then NOTICE_REASON=""; fi
+  return 0
 }
 identity_pending() {
   [ "$NOTICE_REASON" != "$1" ] || return 0
-  down_notice_set "$NOTICE_COMPONENT" degraded "$1" "agmsg doctor"
-  NOTICE_REASON="$1"
+  if down_notice_set "$NOTICE_COMPONENT" degraded "$1" "agmsg doctor"; then NOTICE_REASON="$1"; fi
+  return 0
 }
 
 # Positive removal proof: a valid local config explicitly lacks this role.

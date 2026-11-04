@@ -1270,3 +1270,33 @@ unknown_requests_keep_bridge() {
   export AGMSG_CODEX_BRIDGE_CMD="$SCRIPTS/drivers/types/codex/codex-bridge.js"
   unknown_requests_keep_bridge
 }
+
+@test "launcher: identity notices retry real helper I/O failures without failing discovery" {
+  run bash - "$SCRIPTS/lib/down-notice.sh" "$TYPES/codex/codex-bridge-launcher.sh" "$TEST_SKILL_DIR" <<'SH'
+set -e
+source "$1"
+source <(sed -n '/^identity_ready() {/,/^# Positive removal proof:/ { /^# Positive removal proof:/!p; }' "$2")
+AGMSG_DOWN_NOTICE_ROOT="$3/identity-notice-io"
+mkdir -p "$AGMSG_DOWN_NOTICE_ROOT"
+printf blocked > "$AGMSG_DOWN_NOTICE_ROOT/run"
+NOTICE_COMPONENT=fixture
+NOTICE_REASON=unobserved
+identity_pending pending
+[ "$NOTICE_REASON" = unobserved ]
+mv "$AGMSG_DOWN_NOTICE_ROOT/run" "$AGMSG_DOWN_NOTICE_ROOT/blocked"
+identity_pending pending
+[ "$NOTICE_REASON" = pending ]
+record="$AGMSG_DOWN_NOTICE_ROOT/run/down/fixture.json"
+[ -f "$record" ]
+mv "$record" "$AGMSG_DOWN_NOTICE_ROOT/previous"
+mkdir "$record"
+identity_ready
+[ "$NOTICE_REASON" = pending ]
+rmdir "$record"
+mv "$AGMSG_DOWN_NOTICE_ROOT/previous" "$record"
+identity_ready
+[ -z "$NOTICE_REASON" ]
+[ ! -e "$record" ]
+SH
+  [ "$status" -eq 0 ]
+}

@@ -165,11 +165,11 @@ agmsg_session_start() {
     # The finite hook does not guess a destination or end the resident launcher.
     # Recovery needs this session to publish a trustworthy thread via actas.
     down_notice_set "$destination_notice" degraded \
-      "Codex thread destination is missing; delivery cannot attach" 'In Codex: $agmsg actas <name>'
+      "Codex thread destination is missing; delivery cannot attach" 'In Codex: $agmsg actas <name>' || :
     agmsg_codex_unseated_notice
     exit 0
   fi
-  down_notice_clear "$destination_notice"
+  down_notice_clear "$destination_notice" || :
   # A recorded role belongs to its recorded Codex thread. The in-sandbox
   # fallback has no launcher to arbitrate this, so exclude a mismatched role
   # rather than ever injecting it into this session's thread (#150/#350).
