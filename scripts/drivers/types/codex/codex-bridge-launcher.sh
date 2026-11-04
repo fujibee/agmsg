@@ -165,6 +165,7 @@ if ! declare -F down_notice_set >/dev/null 2>&1; then
 fi
 NOTICE_COMPONENT="codex-identity.${PROJECT_HASH:0:8}.$(printf '%s\n%s' "$SEAT_KEY" "$ROLE_PAIR" | agmsg_sha1)"
 NOTICE_REASON="unobserved"
+IDENTITY_PROJECT_SQL_IN="$(agmsg_project_sql_in_list "$PROJECT")"
 identity_ready() {
   [ -n "$NOTICE_REASON" ] || return 0
   down_notice_clear "$NOTICE_COMPONENT"
@@ -184,13 +185,24 @@ role_removed() {
   config="$TEAMS_DIR/$team/config.json"
   [ -f "$config" ] || return 1
   local config_sql name_sql
+  [ -n "$IDENTITY_PROJECT_SQL_IN" ] || return 1
   config_sql="$(printf '%s' "$config" | sed "s/'/''/g")"
   name_sql="$(printf '%s' "$name" | sed "s/'/''/g")"
   answer="$(sqlite3 :memory: "
     WITH raw(j) AS (SELECT CAST(readfile('$config_sql') AS TEXT)),
-    valid(j) AS (SELECT j FROM raw WHERE json_valid(j))
-    SELECT count(*) FROM valid, json_each(json_extract(j, '$.agents'))
-    WHERE key='$name_sql'
+    valid(j) AS (SELECT j FROM raw WHERE json_valid(j)),
+    target(value) AS (
+      SELECT value FROM valid, json_each(json_extract(j, '$.agents')) WHERE key='$name_sql'
+    ),
+    registrations(regs) AS (
+      SELECT CASE WHEN json_type(value, '$.registrations')='array'
+        THEN json_extract(value, '$.registrations')
+        ELSE json_array(json_object('type',json_extract(value,'$.type'),'project',json_extract(value,'$.project')))
+        END FROM target
+    )
+    SELECT count(*) FROM registrations, json_each(regs)
+    WHERE json_extract(value,'$.type')='codex'
+      AND json_extract(value,'$.project') IN ($IDENTITY_PROJECT_SQL_IN)
     HAVING (SELECT json_type(j, '$.agents') FROM valid)='object';
   " 2>/dev/null)" || return 1
   [ "$answer" = 0 ]
