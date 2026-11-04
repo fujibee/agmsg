@@ -58,22 +58,27 @@ _agmsg_populate_skill_dir() {   # <dir>
   bash "$1/scripts/internal/init-db.sh"
 }
 
-# Copy this bats file's template skill dir into <dir>, building the template
-# first if this is the file's first test. The template lives in
-# BATS_FILE_TMPDIR, which no test writes to, and every test gets its own copy
-# (plain cp: fresh inodes and mtimes, as a first-hand copy would have), so a
-# test that edits its scripts or db reaches neither the template nor another
-# test. init-db.sh's output is byte-identical from run to run (schema and WAL
-# flag only; no path, no timestamp), so the copy is what init-db.sh would
-# have written.
+# Copy the template skill dir into <dir>, building the template first if no
+# test of this bats run has built it yet. Its content depends only on
+# tests/../scripts and init-db.sh, which are the same for every tests/*.bats
+# file, so it is built once per bats run: once per file in CI (one bats run
+# per file, .github/scripts/run-bats-timed.sh) and once in total for a local
+# `bats tests/`. It lives in BATS_RUN_TMPDIR (BATS_FILE_TMPDIR if that is
+# unset), which no test writes to and bats removes when the run exits; a
+# per-file template would instead stay until then too, about 4 MB per file.
+# Every test gets its own copy (plain cp: fresh inodes and mtimes, as a
+# first-hand copy would have), so a test that edits its scripts or db reaches
+# neither the template nor another test. init-db.sh's output is
+# byte-identical from run to run (schema and WAL flag only; no path, no
+# timestamp), so the copy is what init-db.sh would have written.
 #
 # Returns 1 -- the caller then builds <dir> itself, as before -- when there is
-# no BATS_FILE_TMPDIR (helper sourced outside bats), when AGMSG_STORAGE_PATH is
+# no bats temp dir (helper sourced outside bats), when AGMSG_STORAGE_PATH is
 # set (init-db.sh would write the db there, not into the skill dir), or when
-# another test of the same file is building the template right now (bats
-# --jobs): mkdir is the lock, and the loser does not wait for it.
+# another test is building the template right now (bats --jobs): mkdir is the
+# lock, and the loser does not wait for it.
 _agmsg_copy_skill_template() {   # <dir>
-  local tpl="${BATS_FILE_TMPDIR:-}"
+  local tpl="${BATS_RUN_TMPDIR:-${BATS_FILE_TMPDIR:-}}"
   [ -n "$tpl" ] && [ -z "${AGMSG_STORAGE_PATH:-}" ] || return 1
   tpl="$tpl/agmsg-skill-template"
   if [ ! -f "$tpl.ready" ]; then
@@ -110,9 +115,10 @@ setup_test_env() {
   export TEST_SKILL_DIR="$(TMPDIR="$AGMSG_TEST_REAL_TMPDIR" mktemp -d)"
 
   # The tree every test starts from (scripts/ with its exec bits, the db that
-  # init-db.sh creates, empty teams/ and home/) is the same for every test in a
-  # file, so it is built once per file and each test gets its own copy of it:
-  # one cp instead of cp + three chmod + init-db.sh (13 execs, 22 forks).
+  # init-db.sh creates, empty teams/ and home/) is the same for every test, so
+  # it is built once per bats run (once per file in CI) and each test gets its
+  # own copy of it: one cp instead of cp + three chmod + init-db.sh (13 execs,
+  # 22 forks).
   _agmsg_copy_skill_template "$TEST_SKILL_DIR" ||
     _agmsg_populate_skill_dir "$TEST_SKILL_DIR"
 
