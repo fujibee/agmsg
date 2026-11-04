@@ -4647,3 +4647,22 @@ SH
   [ -f "$GATE_LOG" ]
   refute grep -q 'agmsgd delivers notices' <<<"$GATE_OUT"
 }
+
+@test "codex discovery: a missing thread leaves a durable degraded notice visible in status" {
+  local project="$TEST_SKILL_DIR/discovery-project"
+  mkdir -p "$project" "$TEST_SKILL_DIR/codex-empty" "$TEST_SKILL_DIR/run"
+  run env CODEX_HOME="$TEST_SKILL_DIR/codex-empty" SKILL_DIR="$TEST_SKILL_DIR" \
+    PROJECT="$project" RUN_DIR="$TEST_SKILL_DIR/run" TYPE=codex SESSION_ID=unresolved \
+    bash -c '
+      source "$SKILL_DIR/scripts/lib/hash.sh"
+      source "$SKILL_DIR/scripts/drivers/types/codex/_session-start.sh"
+      agmsg_codex_writable_roots_notice() { :; }
+      agmsg_session_start
+    '
+  [ "$status" -eq 0 ]
+  grep -Fq 'not connected to a seat' <<<"$output"
+  run bash "$SCRIPTS/delivery.sh" status codex "$project"
+  [ "$status" -eq 0 ]
+  grep -Fq 'Codex delivery: degraded: Codex thread destination is missing' <<<"$output"
+  grep -Fq 'In Codex: $agmsg actas <name>' <<<"$output"
+}

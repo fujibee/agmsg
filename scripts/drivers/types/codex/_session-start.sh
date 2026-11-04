@@ -164,7 +164,7 @@ agmsg_session_start() {
     # The finite hook does not guess a destination or end the resident launcher.
     # Recovery needs this session to publish a trustworthy thread via actas.
     down_notice_set "$destination_notice" degraded \
-      "Codex thread destination is missing; the launcher remains armed" "agmsg actas <name>"
+      "Codex thread destination is missing; delivery cannot attach" 'In Codex: $agmsg actas <name>'
     agmsg_codex_unseated_notice
     exit 0
   fi
