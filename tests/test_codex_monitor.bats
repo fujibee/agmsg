@@ -4,6 +4,7 @@ load test_helper
 
 setup() {
   setup_test_env
+  export CODEX_HOME="$TEST_SKILL_DIR/test-codex-home"
   export TEST_PROJECT="$(mktemp -d)"
   export CALL_LOG="$TEST_PROJECT/calls.log"
   export APP_SERVER_ARGV_LOG="$TEST_PROJECT/app-server-argv.log"
@@ -33,7 +34,12 @@ case "${1:-}" in
   app-server)
     for a in "$@"; do printf ' <%s>' "$a" >> "$APP_SERVER_ARGV_LOG"; done
     printf '\n' >> "$APP_SERVER_ARGV_LOG"
+    printf 'pid=%s\n' "$$" >> "$APP_SERVER_ENV_LOG"
     printf 'flag=%s\n' "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" >> "$APP_SERVER_ENV_LOG"
+    if [ "${FAKE_CODEX_MODE:-listen}" = "once" ] && [ ! -f "$TEST_PROJECT/attempted" ]; then
+      : > "$TEST_PROJECT/attempted"
+      exit 2
+    fi
     if [ "${FAKE_CODEX_MODE:-listen}" = "broken" ]; then
       echo "error: unexpected argument '--listen' found" >&2
       exit 2
@@ -44,10 +50,22 @@ case "${1:-}" in
     # forwarded to it: native Python on Windows never sees its parent change
     # (os.getppid() stays put), so the loop below cannot be what ends it (#1612).
     python3 - <<'PY' &
-import socket, sys, os
+import socket, sys, os, glob, time, hashlib
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", 0)); s.listen(16); s.settimeout(0.2)
+s.bind(("127.0.0.1", 0))
+if os.environ.get("FAKE_CODEX_MODE") in ("delayed-port", "blocked-port"):
+    pending_port = s.getsockname()[1]
+    s.close()
+    print("  listening on: ws://127.0.0.1:%d" % pending_port); sys.stdout.flush()
+    for _ in range(600):
+        if os.environ.get("FAKE_CODEX_MODE") != "blocked-port" and glob.glob(os.path.join(os.environ["TEST_SKILL_DIR"], "run/down/codex-monitor.*." + hashlib.sha1(os.environ["AGMSG_CODEX_SEAT_KEY"].encode()).hexdigest() + ".json")):
+            break
+        time.sleep(0.05)
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", pending_port))
+s.listen(16); s.settimeout(0.2)
 print("codex app-server (WebSockets)")
 print("  listening on: ws://127.0.0.1:%d" % s.getsockname()[1]); sys.stdout.flush()
 ppid = os.getppid()
@@ -108,25 +126,101 @@ teardown() {
   teardown_test_env
 }
 
-# --- fail-open (A) ---
-
-@test "codex-monitor: fails open to plain codex when the app-server won't start (#170)" {
-  run env FAKE_CODEX_MODE=broken AGMSG_REAL_CODEX="$FAKE_CODEX" \
-    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --foo
-  [ "$status" -eq 0 ]
-  # Handed off to a plain codex (no --remote bridge), preserving the args.
-  grep -qx 'plain-codex <--foo>' "$CALL_LOG"
-  # And it did NOT exec the bridged form.
-  refute grep -q -- '--remote' "$CALL_LOG"
-  # The fallback is LOUD: the user is told real-time delivery is off.
-  [[ "$output" == *"Real-time agmsg delivery is OFF"* ]]
+# Pending startup is cancellable; only fixture children are involved.
+run_pending_startup() {
+  local monitor_pid result=0
+  env FAKE_CODEX_MODE="${MONITOR_PENDING_MODE:-broken}" AGMSG_REAL_CODEX="$FAKE_CODEX" "$@" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex \
+    >"$TEST_PROJECT/pending.log" 2>&1 &
+  monitor_pid=$!
+  wait_for_file_contains "$TEST_PROJECT/pending.log" 'retrying' || result=1
+  bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT" >"$TEST_PROJECT/pending.status" || result=1
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+  cat "$TEST_PROJECT/pending.log"
+  return "$result"
 }
 
-@test "codex-monitor: fail-open preserves the resume command" {
-  run env FAKE_CODEX_MODE=broken AGMSG_REAL_CODEX="$FAKE_CODEX" \
-    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume --
+@test "codex-monitor: an exited app-server remains pending with down status and no plain fallback" {
+  run run_pending_startup
   [ "$status" -eq 0 ]
-  grep -qx 'plain-codex <resume>' "$CALL_LOG"
+  [ ! -e "$CALL_LOG" ]
+  grep -Fq 'Codex app-server exited before readiness' "$TEST_PROJECT/pending.status"
+}
+
+@test "codex-monitor: a confirmed exited server is retried and preserves resume arguments" {
+  run env FAKE_CODEX_MODE=once AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume -- --foo
+  [ "$status" -eq 0 ]
+  grep -q 'plain-codex <resume> <--remote> <ws://127.0.0.1:[0-9][0-9]*> <--foo>' "$CALL_LOG"
+  [ "$(wc -l < "$APP_SERVER_ARGV_LOG" | tr -d ' ')" -eq 2 ]
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'Codex app-server exited before readiness' <<<"$output"
+}
+
+@test "codex-monitor: a live server survives more than one hundred empty banner observations" {
+  skip_on_windows "uses POSIX shell command shims for a deterministic observation barrier"
+  local stubdir="$TEST_PROJECT/slow-bin" real_sed real_sleep
+  real_sed="$(command -v sed)"
+  real_sleep="$(command -v sleep)"
+  mkdir -p "$stubdir"
+  export MONITOR_SCAN_COUNT="$TEST_PROJECT/scans"
+  cat > "$stubdir/sed" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *"listening on"*)
+    n=0
+    [ ! -r "\$MONITOR_SCAN_COUNT" ] || read -r n < "\$MONITOR_SCAN_COUNT"
+    n=\$((n + 1))
+    printf '%s\n' "\$n" > "\$MONITOR_SCAN_COUNT"
+    [ "\$n" -gt 105 ] || exit 0
+    ;;
+esac
+exec "$real_sed" "\$@"
+EOF
+  cat > "$stubdir/sleep" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = 0.1 ]; then exec "$real_sleep" 0.001; fi
+exec "$real_sleep" "\$@"
+EOF
+  chmod +x "$stubdir/sed" "$stubdir/sleep"
+  PATH="$stubdir:$PATH" AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    run bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex
+  [ "$status" -eq 0 ]
+  [ "$(cat "$MONITOR_SCAN_COUNT")" -gt 100 ]
+  [ "$(wc -l < "$APP_SERVER_ARGV_LOG" | tr -d ' ')" -eq 1 ]
+  grep -Fq 'keeping the live server and retrying' <<<"$output"
+  grep -q -- '<--remote> <ws://' "$CALL_LOG"
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'has not reported a listening port' <<<"$output"
+}
+
+@test "codex-monitor: a temporarily unreachable port recovers on the same live server" {
+  run env FAKE_CODEX_MODE=delayed-port AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex
+  [ "$status" -eq 0 ]
+  grep -Fq 'port is not reachable yet' <<<"$output"
+  [ "$(wc -l < "$APP_SERVER_ARGV_LOG" | tr -d ' ')" -eq 1 ]
+  grep -q -- '<--remote> <ws://' "$CALL_LOG"
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'port is not reachable yet' <<<"$output"
+}
+
+@test "codex-monitor: cancelling pending startup stops only its owned live child" {
+  export MONITOR_PENDING_MODE=blocked-port
+  run run_pending_startup
+  [ "$status" -eq 0 ]
+  [ ! -e "$CALL_LOG" ]
+  local child_pid
+  child_pid="$(sed -n 's/^pid=//p' "$APP_SERVER_ENV_LOG" | head -1)"
+  [ -n "$child_pid" ]
+  wait_for_pid_exit "$child_pid"
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'port is not reachable yet' <<<"$output"
 }
 
 # --- #1537: the seat key must reach tool commands under any shell_environment_policy ---
@@ -462,44 +556,17 @@ EOF
 
 # --- fail-closed for a spawned seat ---
 
-@test "codex-monitor: a spawned seat (AGMSG_SPAWNED=1) fails CLOSED when the bridge cannot start" {
-  # Fail-open exists for a person at the keyboard. A seat spawned by agmsg has
-  # nobody at its pane, and a plain codex there never receives a message -- the
-  # same outcome as the shim bypass spawn was fixed to close. So with the
-  # spawn marker set, a broken bridge must refuse to start codex at all.
-  run env FAKE_CODEX_MODE=broken AGMSG_SPAWNED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" \
-    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --foo
-  [ "$status" -ne 0 ]
-  # No plain codex was started, bridged or not.
+@test "codex-monitor: a spawned seat keeps startup recovery armed" {
+  run run_pending_startup AGMSG_SPAWNED=1
+  [ "$status" -eq 0 ]
   [ ! -e "$CALL_LOG" ]
-  # And the refusal says why, and that the session was spawned.
-  printf '%s\n' "$output" | grep -qF 'Refusing to start a plain Codex'
-  printf '%s\n' "$output" | grep -qF 'AGMSG_SPAWNED=1'
+  grep -Fq 'Codex app-server exited before readiness' "$TEST_PROJECT/pending.status"
 }
 
-@test "codex-monitor: the fail-open plain launch adds --no-daemon on an elevated Windows shell" {
-  run env FAKE_CODEX_MODE=broken AGMSG_WINDOWS_ELEVATED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" \
-    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --foo
+@test "codex-monitor: elevation does not turn a startup failure into plain Codex" {
+  run run_pending_startup AGMSG_WINDOWS_ELEVATED=1
   [ "$status" -eq 0 ]
-  grep -qx 'plain-codex <--no-daemon> <--foo>' "$CALL_LOG"
-
-  # Arguments that already carry --no-daemon or --remote are not given a second flag.
-  : > "$CALL_LOG"
-  run env FAKE_CODEX_MODE=broken AGMSG_WINDOWS_ELEVATED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" \
-    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --no-daemon --foo
-  grep -qx 'plain-codex <--no-daemon> <--foo>' "$CALL_LOG"
-  : > "$CALL_LOG"
-  run env FAKE_CODEX_MODE=broken AGMSG_WINDOWS_ELEVATED=1 AGMSG_REAL_CODEX="$FAKE_CODEX" \
-    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --remote=ws://127.0.0.1:1
-  grep -qx 'plain-codex <--remote=ws://127.0.0.1:1>' "$CALL_LOG"
-}
-
-@test "codex-monitor: without the spawn marker the same failure still fails open (a person keeps a codex)" {
-  # The control for the test above: the ONLY difference is the marker.
-  run env FAKE_CODEX_MODE=broken AGMSG_REAL_CODEX="$FAKE_CODEX" \
-    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- --foo
-  [ "$status" -eq 0 ]
-  grep -qx 'plain-codex <--foo>' "$CALL_LOG"
+  [ ! -e "$CALL_LOG" ]
 }
 
 # --- #1401: a resumed seat arms its own bridge request when it can (without guessing) ---
@@ -606,5 +673,5 @@ SPYEOF
   [ "$(sed -n '1p' "$record_spy_out")" = "$record_script" ]
   [ "$(sed -n '2p' "$record_spy_out")" = team ]
   [ "$(sed -n '3p' "$record_spy_out")" = bob ]
-  [ "$(sed -n '4p' "$record_spy_out")" = "$TEST_PROJECT" ]
+  [ "$(sed -n '4p' "$record_spy_out")" = "$(cd "$TEST_PROJECT" && pwd -P)" ]
 }
