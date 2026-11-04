@@ -19,19 +19,29 @@ setup() {
 
 teardown() {
   # A stub child recorded by a test that may have failed half-way is never left
-  # behind: kill it by the pid the stub itself wrote, and only if that pid is still
-  # one of ours (its argv names this test's stub dir or the marker sleep).
-  local f pid cmd
+  # behind: kill it by the pid the stub itself wrote, only while that pid is still
+  # one of ours (its argv names this test's own stub dir), then confirm it is gone.
+  # A child that survives fails the teardown, after everything else is cleaned up.
+  local f pid cmd i leaked=0
   for f in "$BATS_TEST_TMPDIR/stubborn-pid" "$BATS_TEST_TMPDIR/child-pid"; do
     [ -s "$f" ] || continue
     pid="$(cat "$f")"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || cmd=""
     case "$cmd" in
-      *"$BATS_TEST_TMPDIR"*|*"sleep 3141"*) kill -9 "$pid" 2>/dev/null || true ;;
+      *"$BATS_TEST_TMPDIR"*)
+        kill -9 "$pid" 2>/dev/null || true
+        i=0
+        while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do i=$((i + 1)); sleep 0.1; done
+        if kill -0 "$pid" 2>/dev/null; then
+          echo "teardown: stub child $pid survived kill -9" >&2
+          leaked=1
+        fi
+        ;;
     esac
   done
   teardown_test_env
+  [ "$leaked" -eq 0 ]
 }
 
 _stub() {   # <name> <body>
@@ -190,7 +200,8 @@ _field() {   # <n>  (1-based tab field of the first line)
 }
 
 @test "health: stopping the reader mid-read takes its footprint child down with it" {
-  _stub footprint 'echo $$ > '"$BATS_TEST_TMPDIR"'/child-pid; exec sleep 3141'
+  # No exec: the recorded pid is the stub's own shell, whose argv carries this test's stub dir.
+  _stub footprint 'echo $$ > '"$BATS_TEST_TMPDIR"'/child-pid; while :; do sleep 1; done'
   _stub_ps "5-00:00:00" "$START"
   PATH="$BATS_TEST_TMPDIR/stubs:$PATH" bash "$SCRIPTS/codex-daemon-health.sh" > /dev/null 2>&1 3>&- 4>&- &
   local reader=$!
