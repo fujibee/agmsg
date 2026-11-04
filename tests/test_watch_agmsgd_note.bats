@@ -61,33 +61,36 @@ _run_unfinished_update_watch() {
   chmod +x "$SCRIPTS/watch.sh"
 }
 
-@test "watch stop (no deliveries): agmsgd on and no destination for this session -> the message says nothing will be delivered and how to register, without claiming which cause" {
+@test "watch renewal (no deliveries): agmsgd on and no destination for this session -> the watch re-arms, it does not stop and say nothing will be delivered" {
   _agmsgd_desired on
   _run_idle_watch
-  grep -qF 'agmsg watch: stopping - no messages were delivered' "$OUT"
-  grep -qF 'agmsgd is on for this project but is not delivering to this session yet' "$OUT"
-  grep -qF '/agmsg actas <name>' "$OUT"
+  grep -qF 'agmsg watch: re-arm' "$OUT"
+  refute grep -qF 'agmsg watch: stopping' "$OUT"
+  refute grep -qF 'nothing will be delivered' "$OUT"
 }
 
-@test "watch stop (no deliveries): agmsgd off -> the message is the plain one" {
+@test "watch renewal (no deliveries): agmsgd off -> re-arms, no agmsgd text" {
   _agmsgd_desired off
   _run_idle_watch
-  grep -qF 'agmsg watch: stopping - no messages were delivered' "$OUT"
+  grep -qF 'agmsg watch: re-arm' "$OUT"
+  refute grep -qF 'agmsg watch: stopping' "$OUT"
   refute grep -qF 'agmsgd is on for this project' "$OUT"
 }
 
-@test "watch stop (no deliveries): no agmsgd install.db at all -> the message is the plain one" {
+@test "watch renewal (no deliveries): no agmsgd install.db at all -> re-arms, no agmsgd text" {
   _run_idle_watch
-  grep -qF 'agmsg watch: stopping - no messages were delivered' "$OUT"
+  grep -qF 'agmsg watch: re-arm' "$OUT"
+  refute grep -qF 'agmsg watch: stopping' "$OUT"
   refute grep -qF 'agmsgd' "$OUT"
 }
 
-@test "watch stop (no deliveries): the project chose monitor -> the message is the plain one" {
+@test "watch renewal (no deliveries): the project chose monitor -> re-arms, no agmsgd text" {
   _agmsgd_desired on
   mkdir -p "$TEST_SKILL_DIR/run"
   printf 'claude-code\t%s\tmonitor\n' "$(cd "$PROJ" && pwd -P)" > "$TEST_SKILL_DIR/run/delivery-choice"
   _run_idle_watch
-  grep -qF 'agmsg watch: stopping - no messages were delivered' "$OUT"
+  grep -qF 'agmsg watch: re-arm' "$OUT"
+  refute grep -qF 'agmsg watch: stopping' "$OUT"
   refute grep -qF 'agmsgd is on for this project' "$OUT"
 }
 
@@ -103,7 +106,7 @@ _run_unfinished_update_watch() {
   refute grep -qF 'agmsgd is on for this project' "$OUT"
 }
 
-@test "watch stop (no deliveries): a registered destination with agmsgd not ready still gets the note, and it names both causes" {
+@test "watch renewal: a registered destination stops the watch only while agmsgd is ready; once it is not ready the watch re-arms" {
   local boot
   case "$(uname -s)" in
     Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
@@ -126,8 +129,8 @@ _run_unfinished_update_watch() {
   grep -qF 'delivery has moved to agmsgd' "$OUT"
   refute grep -qF 'agmsgd is on for this project' "$OUT"
 
-  # The same registration with agmsgd no longer ready: the destination is still
-  # there, so the note must not claim there is none.
+  # The same registration with agmsgd no longer ready: native delivery is not
+  # confirmed any more, so the watch renews instead of leaving the seat deaf.
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET state='stopped';"
   OUT="$BATS_TEST_TMPDIR/notready.txt"
   : > "$OUT"
@@ -135,6 +138,6 @@ _run_unfinished_update_watch() {
   pid=$!
   _wait_exit "$pid" || { kill "$pid" 2>/dev/null || true; false; }
   wait "$pid" || true
-  grep -qF 'agmsgd is on for this project but is not delivering to this session yet' "$OUT"
-  grep -qF 'or agmsgd is not ready' "$OUT"
+  grep -qF 'agmsg watch: re-arm' "$OUT"
+  refute grep -qF 'agmsg watch: stopping' "$OUT"
 }

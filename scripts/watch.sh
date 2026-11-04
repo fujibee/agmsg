@@ -1185,10 +1185,11 @@ source "$SCRIPT_DIR/lib/watch-stuck-map.sh"
 # Shortly before the cap, at the top of a cycle (so nothing is mid-delivery and
 # the read cursor has already been consumed), the watcher decides for itself and
 # prints one line on stdout -- one notification per cycle:
-#   - it delivered something this run, or AGMSG_CC_MONITOR_KEEP_ALIVE is set:
-#     "agmsg watch: re-arm ..." naming the command and description to hand back
-#     to Monitor unchanged;
-#   - otherwise "agmsg watch: stopping ...": nothing to renew.
+#   - "agmsg watch: re-arm ..." naming the command and description to hand back
+#     to Monitor unchanged, whether or not anything was delivered: listening is
+#     meant to continue through a quiet stretch;
+#   - except when agmsgd has confirmed it now delivers to this seat natively, in
+#     which case "agmsg watch: stopping ...": the native channel took over.
 # Then it exits 0. A restart resumes from the persistent read cursor, so the gap
 # before the host re-arms loses nothing.
 case "$WATCH_MAX_SECONDS" in ''|*[!0-9]*) WATCH_MAX_SECONDS="" ;; esac
@@ -1315,17 +1316,13 @@ _watch_renew_or_stop() {
     watch_report "stopping - this seat's delivery has moved to agmsgd's native channel, so this watch is not re-armed"
     exit 0
   fi
-  if [ "$_WATCH_DELIVERED" -gt 0 ] || [ -n "${AGMSG_CC_MONITOR_KEEP_ALIVE:-}" ]; then
-    cmd="$(printf '%q' "$SCRIPT_DIR/watch.sh")"
-    for arg in "${ORIG_ARGS[@]}"; do
-      cmd="$cmd $(printf '%q' "$arg")"
-    done
-    desc="agmsg inbox stream"
-    [ -n "$ACTIVE_NAME" ] && desc="$desc (acting as $ACTIVE_NAME)"
-    watch_report "re-arm - this watch is about to reach the host's time cap; invoke the Monitor tool again with command: $cmd description: $desc persistent: true timeout_ms: 1800000"
-  else
-    watch_report "stopping - no messages were delivered in the last ${elapsed}s, so this watch is not re-armed (set AGMSG_CC_MONITOR_KEEP_ALIVE to keep it running)$(_agmsg_watch_agmsgd_note)"
-  fi
+  cmd="$(printf '%q' "$SCRIPT_DIR/watch.sh")"
+  for arg in "${ORIG_ARGS[@]}"; do
+    cmd="$cmd $(printf '%q' "$arg")"
+  done
+  desc="agmsg inbox stream"
+  [ -n "$ACTIVE_NAME" ] && desc="$desc (acting as $ACTIVE_NAME)"
+  watch_report "re-arm - this watch is about to reach the host's time cap; invoke the Monitor tool again with command: $cmd description: $desc persistent: true timeout_ms: 1800000"
   exit 0
 }
 
