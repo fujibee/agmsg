@@ -812,6 +812,10 @@ _INSTALL_INCOMPLETE_SINCE=""
 _INSTALL_STALL_REPORTED=""
 # Same, for the consecutive-restart cap.
 _INSTALL_CHURN_REPORTED=""
+# Set only once the matching degraded record is verified written, so a failed write
+# is tried again on the next pass while the report line above still appears once.
+_INSTALL_STALL_NOTICED=""
+_INSTALL_CHURN_NOTICED=""
 
 # Fixed, internal, non-negotiable (review finding: an env-supplied limit can
 # be forged or inherited from an unrelated process). Tagged with this exact
@@ -848,8 +852,10 @@ _install_restart_count_reset() {
 # Degraded notice for an install that is not settling (shown by doctor, status
 # and the session-start hook). Keyed on the pid, which an exec keeps, so the
 # image that clears it is the one that set it.
+# Returns the helper's status (0 only when the record is verified written), so a
+# caller records "written" only on 0 and tries again on the next pass otherwise.
 _install_notice_set() {   # <reason> <recovery>
-  down_notice_set "watch-install.$$" degraded "$1" "$2" || true
+  down_notice_set "watch-install.$$" degraded "$1" "$2"
 }
 _install_notice_clear() {
   down_notice_clear "watch-install.$$" || true
@@ -922,8 +928,9 @@ _handle_install_changed() {
 
   if _install_ready; then
     _INSTALL_INCOMPLETE_SINCE=""
-    if [ -n "$_INSTALL_STALL_REPORTED" ]; then
+    if [ -n "$_INSTALL_STALL_REPORTED$_INSTALL_STALL_NOTICED" ]; then
       _INSTALL_STALL_REPORTED=""
+      _INSTALL_STALL_NOTICED=""
       _install_notice_clear
     fi
     restarts="$(_install_restart_count)"
@@ -951,14 +958,21 @@ _handle_install_changed() {
     # Too many restarts in a row, and this image is young: keep delivering with the
     # code it has and try again later (at most one restart a minute). Said once, in
     # the image that reaches the cap.
-    if [ "$restarts" -ge "$_WATCH_INSTALL_RESTART_LIMIT" ] && [ -z "$_INSTALL_CHURN_REPORTED" ]; then
-      _INSTALL_CHURN_REPORTED=1
-      # The line only when the cap is first reached; the record in every image that
-      # is still past it (an image that restarted after the cap starts here again).
-      if [ "$restarts" -eq "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
-        watch_report "the agmsg installation kept changing across $restarts restart(s) in a row. This watcher keeps delivering with the code it has and will try to restart onto the new code again, at most once a minute. If it keeps happening, restart this session (or run /agmsg actas <name>).$(_agmsg_watch_agmsgd_note)"
+    if [ "$restarts" -ge "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
+      # The line only when the cap is first reached, and once per image.
+      if [ -z "$_INSTALL_CHURN_REPORTED" ]; then
+        _INSTALL_CHURN_REPORTED=1
+        if [ "$restarts" -eq "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
+          watch_report "the agmsg installation kept changing across $restarts restart(s) in a row. This watcher keeps delivering with the code it has and will try to restart onto the new code again, at most once a minute. If it keeps happening, restart this session (or run /agmsg actas <name>).$(_agmsg_watch_agmsgd_note)"
+        fi
       fi
-      _install_notice_set "the installation kept changing across $restarts restarts in a row; the inbox watcher keeps delivering with older code and retries a restart at most once a minute" "restart this session or run /agmsg actas <name> if it does not settle"
+      # The record in every image that is still past the cap (an image that
+      # restarted after the cap starts here again); retried until it is written.
+      if [ -z "$_INSTALL_CHURN_NOTICED" ]; then
+        if _install_notice_set "the installation kept changing across $restarts restarts in a row; the inbox watcher keeps delivering with older code and retries a restart at most once a minute" "restart this session or run /agmsg actas <name> if it does not settle"; then
+          _INSTALL_CHURN_NOTICED=1
+        fi
+      fi
     fi
     return 0
   fi
@@ -979,7 +993,11 @@ _handle_install_changed() {
   if [ -z "$_INSTALL_STALL_REPORTED" ]; then
     _INSTALL_STALL_REPORTED=1
     watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. It keeps delivering, and restarts onto the new code once the install is complete and watch.sh is runnable. If that does not happen, restart this session (or run /agmsg actas <name>).$(_agmsg_watch_agmsgd_note)"
-    _install_notice_set "the installation was updated but the new watch.sh is not runnable or the install did not finish; the inbox watcher keeps delivering with older code" "repair the install (re-run the installer), then it restarts by itself; or restart this session / run /agmsg actas <name>"
+  fi
+  if [ -z "$_INSTALL_STALL_NOTICED" ]; then
+    if _install_notice_set "the installation was updated but the new watch.sh is not runnable or the install did not finish; the inbox watcher keeps delivering with older code" "repair the install (re-run the installer), then it restarts by itself; or restart this session / run /agmsg actas <name>"; then
+      _INSTALL_STALL_NOTICED=1
+    fi
   fi
   return 0
 }
