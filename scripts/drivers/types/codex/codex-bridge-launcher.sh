@@ -380,7 +380,7 @@ build_safety_state() {
   while IFS="$TAB" read -r team name; do
     [ -n "$team" ] || continue
     agmsg_role_session_load "$team" "$name" 2>/dev/null || return 1
-    [ -n "$AGMSG_ROLE_SESSION_UUID" ] && [ -n "$AGMSG_ROLE_SESSION_PROJECT" ] || return 1
+    [ -n "${AGMSG_ROLE_SESSION_UUID:-}" ] && [ -n "${AGMSG_ROLE_SESSION_PROJECT:-}" ] || return 1
     SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER"
   done <<< "$identity"
 }
