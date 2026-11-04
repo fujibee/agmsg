@@ -82,6 +82,7 @@ _agmsg_cdh_pid_alive() {
 # one that is over; a footprint or lsof that takes over AGMSG_CODEX_DAEMON_READ_SECONDS
 # (5) is killed and that profile reads unchecked, so a slow one cannot starve the
 # profiles after it. A temp file (mktemp, rm) is used once the first footprint runs. uname once per process, one sed for all seat records.
+# AGMSG_CODEX_DAEMON_START_AT rotates which profile is read first.
 # The callback runs as each profile is finished, so a caller that is cut off
 # part-way still has the earlier profiles.
 agmsg_codex_daemon_scan() {   # <run_dir> <callback>
@@ -125,8 +126,14 @@ agmsg_codex_daemon_scan() {   # <run_dir> <callback>
   for pid in $pids; do
     _AGMSG_CDH_PS="${_AGMSG_CDH_PS}$(ps -o pid=,etime=,lstart= -p "$pid" 2>/dev/null)"$'\n'
   done
-  # Phase 2: age, pid reuse, footprint (only from the age limit on).
-  for ((i = 0; i < n; i++)); do
+  # Phase 2: age, pid reuse, footprint (only from the age limit on). Starting at
+  # AGMSG_CODEX_DAEMON_START_AT (mod the profile count) lets the caller rotate
+  # the order between checks, so profiles after a slow one still get their turn
+  # when the whole read is cut short.
+  local start="${AGMSG_CODEX_DAEMON_START_AT:-0}" k
+  case "$start" in ''|*[!0-9]*) start=0 ;; esac
+  for ((k = 0; k < n; k++)); do
+    i=$(( (k + start) % n ))
     _agmsg_cdh_reset
     CDH_STATE="${st[$i]}" CDH_REASON="${rs[$i]}" CDH_PID="${pd[$i]}" CDH_START="${sr[$i]}"
     [ "$CDH_STATE" != alive ] || _agmsg_cdh_finish "${profiles[$i]}"
@@ -154,8 +161,7 @@ _agmsg_cdh_bounded() {   # <outfile> <cmd...>
   _AGMSG_CDH_CHILD=$!
   while kill -0 "$_AGMSG_CDH_CHILD" 2>/dev/null; do
     if [ "$ticks" -ge $(( limit * 10 )) ]; then
-      kill "$_AGMSG_CDH_CHILD" 2>/dev/null
-      wait "$_AGMSG_CDH_CHILD" 2>/dev/null
+      _agmsg_cdh_stop_child "$_AGMSG_CDH_CHILD"
       _AGMSG_CDH_CHILD=""
       return 1
     fi
@@ -167,9 +173,23 @@ _agmsg_cdh_bounded() {   # <outfile> <cmd...>
   return "$rc"
 }
 
-# Kills the read in flight, if any. For a caller's TERM/INT trap.
+# TERM, a grace of up to 1 s, then KILL, then reap -- a child that ignores TERM
+# must not hold the read (or the caller) forever.
+_agmsg_cdh_stop_child() {   # <pid>
+  local pid="$1" i=0
+  kill "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 10 ]; do
+    sleep 0.1
+    i=$(( i + 1 ))
+  done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null || true
+  return 0
+}
+
+# Stops the read in flight, if any. For a caller's TERM/INT trap.
 agmsg_codex_daemon_reap_child() {
-  [ -z "${_AGMSG_CDH_CHILD:-}" ] || kill "$_AGMSG_CDH_CHILD" 2>/dev/null
+  [ -z "${_AGMSG_CDH_CHILD:-}" ] || _agmsg_cdh_stop_child "$_AGMSG_CDH_CHILD"
   return 0
 }
 

@@ -145,3 +145,39 @@ test("the real reader cut short by its timeout still yields the profiles it fini
   assert.equal(record.daemons.size, 1, "the finished profile was recorded");
   rmSync(root, { recursive: true });
 });
+
+test("each check resumes after the profiles the previous read finished", async () => {
+  const root = makeInstall();
+  const starts = [];
+  const rows = [line(), line({ pid: "200" })];
+  let t = 1_000_000;
+  const ch = createCodexDaemonHealthChannel({
+    installRoot: root, now: () => t,
+    read: async (_root, _signal, _timeout, startAt) => { starts.push(startAt); return starts.length === 2 ? rows[0] : rows.join(""); },
+  });
+  for (let i = 0; i < 3; i++) { await ch.pollOnce(); await ch.settled(); t += 10 * 60 * 1000; }
+  // first read finished 2 profiles, the second only 1 (cut short), the third resumes after it
+  assert.deepEqual(starts, [0, 2, 3]);
+  rmSync(root, { recursive: true });
+});
+
+test("fairness: with leading profiles hanging and a read that reaches only two profiles, the over one is read and noticed within a bounded number of checks", async () => {
+  const root = makeInstall();
+  const profiles = ["/p/a", "/p/b", "/p/c", "/p/d", "/p/over"];
+  const row = (p, i) => (p === "/p/over"
+    ? `${p}\trunning\t900\tS\t50000\t7000\t1\t2\t\t8000\n`
+    : `${p}\tunchecked\t${100 + i}\tS\t\t\t0\t\tfootprint hung\t\n`);
+  let t = 1_000_000;
+  const ch = createCodexDaemonHealthChannel({
+    installRoot: root, now: () => t,
+    // The whole-read budget lets the reader finish only two profiles, starting where it is told to.
+    read: async (_root, _signal, _timeout, startAt) => [0, 1]
+      .map(k => (startAt + k) % profiles.length)
+      .map(i => row(profiles[i], i)).join(""),
+  });
+  let checks = 0;
+  while (noticeCount(root) === 0 && checks < 10) { await ch.pollOnce(); await ch.settled(); t += 10 * 60 * 1000; checks++; }
+  assert.equal(noticeCount(root), 1, "the over daemon was noticed");
+  assert.ok(checks <= 6, `noticed within a bounded number of checks (took ${checks})`);
+  rmSync(root, { recursive: true });
+});

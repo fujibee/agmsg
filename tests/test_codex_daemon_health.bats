@@ -197,3 +197,36 @@ _wait_child_pid() {
   while [ ! -s "$BATS_TEST_TMPDIR/child-pid" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
   [ -s "$BATS_TEST_TMPDIR/child-pid" ]
 }
+
+@test "health: a footprint that ignores TERM is killed after the read limit and the next profile is read" {
+  mkdir -p "$BATS_TEST_TMPDIR/p2/app-server-daemon" "$TEST_SKILL_DIR/run"
+  cp "$CODEX_HOME/app-server-daemon/daemon.pid" "$BATS_TEST_TMPDIR/p2/app-server-daemon/daemon.pid"
+  printf 'codex_home=%s\n' "$BATS_TEST_TMPDIR/p2" > "$TEST_SKILL_DIR/run/role-session.x"
+  # The first call ignores TERM and records its pid; the second answers.
+  _stub footprint 'if [ ! -e '"$BATS_TEST_TMPDIR"'/first-done ]; then : > '"$BATS_TEST_TMPDIR"'/first-done; echo $$ > '"$BATS_TEST_TMPDIR"'/stubborn-pid; trap "" TERM; while :; do sleep 1; done; fi; printf "phys_footprint: 1048576 B\n"'
+  _stub_ps "5-00:00:00" "$START"
+  AGMSG_CODEX_DAEMON_READ_SECONDS=1 _health
+  local child
+  child="$(cat "$BATS_TEST_TMPDIR/stubborn-pid")"
+  # Whatever the outcome, never leave the stub behind.
+  kill -9 "$child" 2>/dev/null || true
+  [ "$(printf '%s\n' "$output" | sed -n 1p | cut -f2)" = unchecked ]
+  [ "$(printf '%s\n' "$output" | sed -n 2p | cut -f2)" = running ]
+}
+
+@test "health: AGMSG_CODEX_DAEMON_START_AT rotates which profile is read first" {
+  local i
+  mkdir -p "$TEST_SKILL_DIR/run"
+  for i in 1 2; do
+    mkdir -p "$BATS_TEST_TMPDIR/p$i/app-server-daemon"
+    cp "$CODEX_HOME/app-server-daemon/daemon.pid" "$BATS_TEST_TMPDIR/p$i/app-server-daemon/daemon.pid"
+    printf 'codex_home=%s\n' "$BATS_TEST_TMPDIR/p$i" >> "$TEST_SKILL_DIR/run/role-session.x"
+  done
+  _health
+  [ "$(printf '%s\n' "$output" | sed -n 1p | cut -f1)" = "$CODEX_HOME" ]
+  AGMSG_CODEX_DAEMON_START_AT=1 _health
+  [ "$(printf '%s\n' "$output" | sed -n 1p | cut -f1)" = "$BATS_TEST_TMPDIR/p1" ]
+  AGMSG_CODEX_DAEMON_START_AT=5 _health   # 5 mod 3 = 2
+  [ "$(printf '%s\n' "$output" | sed -n 1p | cut -f1)" = "$BATS_TEST_TMPDIR/p2" ]
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 3 ]
+}
