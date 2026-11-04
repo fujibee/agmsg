@@ -10,6 +10,7 @@
 #   - entry scripts (whoami/actas-claim/join) resolving end-to-end from a subdir
 
 load test_helper
+bats_require_minimum_version 1.5.0
 
 setup() {
   setup_test_env
@@ -573,4 +574,11 @@ setup_git_repo() {
   ' _ "$SKILL_DIR"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'first=claude codex gemini\nsecond=claude codex gemini')" ]
+}
+
+@test "notice I/O failures cannot stop fallback or recovery under errexit" {
+  local script='source "$1/lib/down-notice.sh"; down_notice_set() { return 1; }; down_notice_clear() { return 1; }; source "$1/lib/resolve-project.sh"; agmsg_agent_pid() { return 1; }; agmsg_ancestor_project() { return 1; }; agmsg_gitcommon_project() { return 1; }; agmsg_resolve_project /fixture codex; printf "\n"; AGMSG_RESOLVE_PROJECT=0 agmsg_resolve_project /fixture codex'
+  run --separate-stderr bash -e -c "$script" _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '/fixture\n/fixture')" ]
 }

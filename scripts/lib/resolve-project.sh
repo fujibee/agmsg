@@ -709,9 +709,9 @@ _agmsg_project_fallback_notice() {
   . "$root/scripts/lib/down-notice.sh"
   key="$(down_notice_key project "$type"$'\n'"$input")"
   if [ "$action" = set ]; then
-    down_notice_set "$key" degraded "$reason" 'agmsg doctor' >&2 || true
+    down_notice_set "$key" degraded "$reason" 'agmsg doctor' >&2 || :
   else
-    down_notice_clear "$key" >&2 || true
+    down_notice_clear "$key" >&2 || :
   fi
 }
 
