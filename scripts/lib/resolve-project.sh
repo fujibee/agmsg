@@ -700,6 +700,21 @@ agmsg_ancestor_project() {
   return 1
 }
 
+# Keep the chosen project as the only stdout datum. Persist the reason for an
+# inferred fallback so stderr capture in an entry point cannot hide it.
+_agmsg_project_fallback_notice() {
+  local action="$1" input="$2" type="$3" reason="${4:-}" key root="${BASH_SOURCE[0]%/*}/../.."
+  if [ "$action" = set ]; then printf 'agmsg: %s\n' "$reason" >&2; fi
+  [ -r "$root/scripts/lib/down-notice.sh" ] || return 0
+  . "$root/scripts/lib/down-notice.sh"
+  key="$(down_notice_key project "$type"$'\n'"$input")"
+  if [ "$action" = set ]; then
+    down_notice_set "$key" degraded "$reason" 'agmsg doctor' >&2 || :
+  else
+    down_notice_clear "$key" >&2 || :
+  fi
+}
+
 # Resolve the real project root for a slash-command invocation.
 # Usage: agmsg_resolve_project <pwd_path> <type> [team]
 # An optional <team> scopes the registry-based fallbacks (ancestor / git-common)
@@ -711,25 +726,34 @@ agmsg_resolve_project() {
   local pwd_path="$1" type="$2" team="${3:-}" pid marker anc gitc
   # Explicit opt-out: caller passed a deliberate, possibly-unregistered path.
   if [ "${AGMSG_RESOLVE_PROJECT:-1}" = "0" ]; then
+    _agmsg_project_fallback_notice clear "$pwd_path" "$type"
     printf '%s' "$pwd_path"; return 0
   fi
   # 1) Per-process SessionStart marker (precise). Written only by session-start
   #    (cc monitor/both); codex never installs it, so codex relies on 2)/3).
   if pid="$(agmsg_agent_pid "$type")" && [ -n "$pid" ]; then
     if marker="$(agmsg_read_project_marker "$pid" "$type")" && [ -n "$marker" ]; then
+      _agmsg_project_fallback_notice clear "$pwd_path" "$type"
       printf '%s' "$marker"; return 0
     fi
   fi
   # 2) Nearest registered ancestor of pwd (git-independent; covers nested
   #    subdirs and worktrees that live under the registered project).
   if anc="$(agmsg_ancestor_project "$pwd_path" "$type" "$team")" && [ -n "$anc" ]; then
+    if [ "$anc" = "$pwd_path" ]; then
+      _agmsg_project_fallback_notice clear "$pwd_path" "$type"
+    else
+      _agmsg_project_fallback_notice set "$pwd_path" "$type" "Project fallback for $type: no valid live session marker; using registered ancestor $anc instead of invocation directory $pwd_path"
+    fi
     printf '%s' "$anc"; return 0
   fi
   # 3) Registered main checkout of pwd's git repo (recovers a SIBLING worktree
   #    the ancestor walk cannot reach). Validated against the registry.
   if gitc="$(agmsg_gitcommon_project "$pwd_path" "$type" "$team")" && [ -n "$gitc" ]; then
+    _agmsg_project_fallback_notice set "$pwd_path" "$type" "Project fallback for $type: no live session marker or registered ancestor; using registered main checkout $gitc for invocation directory $pwd_path"
     printf '%s' "$gitc"; return 0
   fi
-  # 4) Unchanged fallback.
+  # 4) Unchanged fallback, now visible.
+  _agmsg_project_fallback_notice set "$pwd_path" "$type" "Project fallback for $type: no live session marker, registered ancestor or matching main checkout; using invocation directory $pwd_path"
   printf '%s' "$pwd_path"
 }
