@@ -7,6 +7,10 @@ const readline = require("readline");
 const [mode, log, portfile] = process.argv.slice(2);
 const record = (text) => fs.appendFileSync(log, `${text}\n`);
 record(`pid=${process.pid}`);
+let exitOnInitialize = false;
+if (mode === "stdio-exit-once") {
+  try { fs.writeFileSync(`${log}.failed-once`, "", { flag: "wx" }); exitOnInitialize = true; } catch (_) {}
+}
 let initializations = 0, discoveries = 0, arms = 0, connections = 0;
 function handler(send, disconnect = () => {}) {
   return (message) => {
@@ -14,6 +18,7 @@ function handler(send, disconnect = () => {}) {
     const answer = (result) => send({ jsonrpc: "2.0", id: message.id, result });
     if (message.method === "initialize") {
       initializations += 1;
+      if (exitOnInitialize) process.exit(1);
       if (mode === "stdio-init" && initializations === 1) return;
       answer({});
     } else if (message.method === "thread/loaded/list") {
