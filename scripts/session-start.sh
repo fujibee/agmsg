@@ -340,26 +340,6 @@ if [ -x "$SKILL_DIR/scripts/remote.sh" ] && [ -r "$SKILL_DIR/scripts/lib/sync-au
   fi
 fi
 
-# --- Skip directive when a watcher is already alive for this instance. ---
-# /compact re-fires SessionStart within the same CC process and session_id, so
-# INSTANCE_ID is identical to the already-running watcher's.  Without this
-# guard the agent spawns a second Monitor whose watch.sh kills the incumbent,
-# the old Monitor task emits "stream ended", and the agent loops trying to
-# restart.  Mirrors emit_monitor_directive in delivery.sh.
-WATCHER_PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
-if [ -f "$WATCHER_PIDFILE" ]; then
-  existing=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
-  if [ -n "$existing" ] && _agmsg_pid_alive_local "$existing"; then
-    cat <<EOF
-$TERMINAL_LINE
-$TEAM_LINE
-AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
-No action needed — the existing watcher is the active one.
-EOF
-    exit 0
-  fi
-fi
-
 # --- Role-aware resume (#339). ---
 # If this session's bare sid was recorded as a role's seat (by actas-claim, or
 # codex actas), and that (team, agent) is registered for THIS project, emit the
@@ -423,6 +403,97 @@ $PAIRS
 EOF
   if [ "$_narrow_n" -eq 1 ]; then
     ROLE_NAME="$_narrow_agent"; ROLE_TEAM="$_narrow_team"; ROLE_BASIS=actas
+  fi
+fi
+
+# Re-publish this seat's messaging_socket for the role just re-established
+# (#1872): Claude Code hands every process a fresh CLAUDE_CODE_MESSAGING_SOCKET,
+# so a resume, restart, /compact, or /clear -- anything that re-fires THIS hook
+# -- leaves the role-session record pointing at the PREVIOUS process's now-dead
+# socket unless something republishes it. Before this, the only call site that
+# ever wrote `messaging_socket` was actas-claim.sh:202, reached only when the
+# model explicitly re-runs `/agmsg actas <name>` -- so a seat that never does
+# that again (and whose project has no SessionStart hook to even reach this far
+# in the first place) could sit unaddressable to agmsgd (daemon status reason
+# `messaging_socket_missing`) indefinitely with nothing to notice or recover it.
+#
+# Placed HERE, before the "watcher already alive" early exit a little below
+# (review round 1 NEEDS FIX): /compact re-fires this hook within the SAME
+# process and INSTANCE_ID (that early exit's own comment says so), so a
+# republish placed after it -- where this code used to sit -- would never run
+# on exactly the re-fire this fix exists for.
+#
+# RECORD basis only (review round 1 BLOCKING): the narrowing/actas basis has
+# no role-session record yet -- only an actas lock -- and creating one here
+# via agmsg_role_session_record would stomp a DIFFERENT session's legitimate,
+# freshly-written record if that session claimed this exact (team, agent)
+# pair in the window between the lookup above and this write. role-session.sh's
+# own comment above agmsg_role_session_set_messaging already states the rule:
+# "#339 stays actas-claim's job" -- session-start.sh never originates a
+# record, only refreshes fields on one actas-claim.sh already wrote.
+#
+# Tied to ownership INSIDE the write's own lock, not a pre-check re-read
+# (review round 1 BLOCKING, reproduced): a plain "observe, then act" step --
+# re-reading the record just before writing -- still leaves a window between
+# that re-read and the write itself for a different session to claim/record
+# the same pair; the CAS refusal has to live INSIDE the same locked critical
+# section as the write for there to be no gap at all.
+# agmsg_role_session_publish_messaging_if_owner (role-session.sh) does
+# exactly that, mirroring agmsg_role_session_mark_messaging_blocked's own
+# shape: it refuses (rc 1, nothing written) unless the record's session= is
+# still $_bare_sid at the instant it holds the write lock.
+#
+# Only for a proven, RECORD-basis seat; everything else writes nothing here,
+# the same fail-closed direction the narrowing block already takes -- never
+# guessed at. Best-effort and silent either way: a missing/unusable native
+# target (plain emulator, no messaging socket in this environment, Windows
+# named-pipe case not yet resolvable, etc.), or losing the CAS race, is not a
+# new failure mode for THIS hook to report; it is the same "could not tell,
+# so don't write" a stale record already left in place before this change
+# existed.
+#
+# AGMSG_LOCK_SECONDS=0 for this one call only (review round 2 BLOCKING,
+# performance): the registry lock's own default budget is 10s, and this is a
+# SessionStart hook -- a user-facing wait, not a background job, so the
+# existing per-writer default that every OTHER role-session write in this
+# file still uses is wrong for this call specifically. A budget of 0 makes
+# agmsg_lock_acquire try exactly ONE mkdir and return immediately (rc 1, no
+# sleep) when the lock is already held, instead of spinning out its budget --
+# measured directly (see this PR's own body) at under a second even under
+# full contention. The write still happens -- atomically, CAS-protected,
+# exactly as above -- whenever the lock happens to be free; a seat that loses
+# this one race is no worse off than before this whole feature existed (the
+# stale socket it already had), and the very next resume/compact/clear tries
+# again. This does not change AGMSG_LOCK_SECONDS for any other writer in this
+# file or elsewhere -- the override is scoped to this one subshell command.
+if [ "$TYPE" = claude-code ] && [ "$ROLE_BASIS" = record ] && [ -n "$ROLE_NAME" ] && [ -n "$ROLE_TEAM" ]; then
+  _agmsg_ss_native_target=""
+  if _agmsg_ss_native_target="$(agmsg_claude_code_native_target 2>/dev/null)"; then
+    AGMSG_LOCK_SECONDS=0 agmsg_role_session_publish_messaging_if_owner "$ROLE_TEAM" "$ROLE_NAME" \
+      "${_agmsg_ss_native_target%%$'\t'*}" "${_agmsg_ss_native_target#*$'\t'}" \
+      "$_bare_sid" "$_bare_sid" "${CLAUDE_CODE_MESSAGING_TOKEN:-}" >/dev/null 2>&1 || true
+  fi
+fi
+
+# --- Skip directive when a watcher is already alive for this instance. ---
+# /compact re-fires SessionStart within the same CC process and session_id, so
+# INSTANCE_ID is identical to the already-running watcher's.  Without this
+# guard the agent spawns a second Monitor whose watch.sh kills the incumbent,
+# the old Monitor task emits "stream ended", and the agent loops trying to
+# restart.  Mirrors emit_monitor_directive in delivery.sh. Moved to AFTER the
+# socket republish above (review round 1 NEEDS FIX) so that early exit no
+# longer skips the refresh too.
+WATCHER_PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
+if [ -f "$WATCHER_PIDFILE" ]; then
+  existing=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
+  if [ -n "$existing" ] && _agmsg_pid_alive_local "$existing"; then
+    cat <<EOF
+$TERMINAL_LINE
+$TEAM_LINE
+AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
+No action needed — the existing watcher is the active one.
+EOF
+    exit 0
   fi
 fi
 
