@@ -4,6 +4,8 @@
 # the packaged artifact (not a hand-built tree like test_helper builds) is what
 # gets validated. Catches packaging drift — e.g. a new scripts/lib/ helper that
 # the installer forgets to copy, which would make every command die at `source`.
+# Tests that only need an install to start from use a copy of one built for
+# real once per file (_restore_install below).
 
 load test_helper  # for setup_live_owner
 
@@ -98,6 +100,75 @@ teardown() {
   return "$rc"
 }
 
+# Put the result of a real `install.sh [args]` into $FAKE_HOME without running
+# the installer again for every test that only needs an install to exist.
+#
+# 65 tests below start from one of a few installs as arrange-only work, and a
+# fresh install costs about 3 s on macOS and 1 s on ubuntu (locally the whole
+# file went from 388 s to 300 s once the repeats were gone). The first test that
+# asks for a given install builds it for real -- from this tree, with that
+# test's environment, into an empty HOME under $BATS_FILE_TMPDIR -- and later
+# tests copy that tree, so what they assert on is still the real installer's
+# output. Tests about what install.sh prints, and test 1 (the fresh-install
+# smoke test), still run it themselves.
+#
+#   --marker <dir>  create $HOME/<dir> before installing, as the tests for the
+#                   per-agent skills do (the marker is part of the copy).
+#
+# A copy is only equivalent if nothing in it points back at the template. An
+# install writes its own HOME path into exactly three text files: the launcher
+# (~/.local/bin/<cmd>), the Antigravity shim (~/.agents/bin/agy-tui) and
+# run/agmsg-launcher.path. Only those are rewritten. The final check looks for
+# the template directory's name anywhere in the copy -- any file, any quoting
+# -- so an installer that starts writing its path somewhere else turns the test
+# red instead of letting it act on the template (add the new file to the list
+# once it is understood). Paths that need shell quoting (the installer writes
+# some through printf %q) and Windows (Git Bash writes another path form)
+# install for real every time.
+_restore_install() {   # [--marker <dir>] [install.sh args...]; default args: --cmd agmsg
+  local marker="" cmd=agmsg prev="" a copy=1 key ref tmp src f esc
+  if [ "${1:-}" = "--marker" ]; then
+    marker="$2"
+    shift 2
+  fi
+  [ "$#" -gt 0 ] || set -- --cmd agmsg
+  for a in "$@"; do
+    [ "$prev" = "--cmd" ] && cmd="$a"
+    prev="$a"
+  done
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) copy=0 ;; esac
+  [ "$(printf '%q' "$FAKE_HOME")" = "$FAKE_HOME" ] || copy=0
+  [ "$(printf '%q' "$BATS_FILE_TMPDIR")" = "$BATS_FILE_TMPDIR" ] || copy=0
+  if [ "$copy" -eq 0 ]; then
+    if [ -n "$marker" ]; then mkdir -p "$FAKE_HOME/$marker" || return 1; fi
+    HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" "$@"
+    return
+  fi
+  key="$(printf '%s_' "$marker" "$@" | tr -c 'A-Za-z0-9_' '_')"
+  ref="$BATS_FILE_TMPDIR/install-template-$key"
+  if [ ! -s "$ref" ]; then
+    src="$(mktemp -d "$BATS_FILE_TMPDIR/install-template.XXXXXX")" || return 1
+    if [ -n "$marker" ]; then mkdir -p "$src/$marker" || return 1; fi
+    HOME="$src" bash "$REPO_ROOT/install.sh" "$@" || return 1
+    # Published by rename, so a test running in parallel (bats --jobs) never
+    # reads a half-written path.
+    tmp="$(mktemp "$ref.XXXXXX")" || return 1
+    printf '%s\n' "$src" > "$tmp" || return 1
+    mv -f "$tmp" "$ref" || return 1
+  fi
+  src="$(cat "$ref")"
+  [ -n "$src" ] && [ -d "$src/.agents/skills/$cmd" ] || return 1
+  cp -Rp "$src/." "$FAKE_HOME/" || return 1
+  esc="$(printf '%s' "$src" | sed 's/[][\.*^$|]/\\&/g')"
+  for f in ".local/bin/$cmd" .agents/bin/agy-tui ".agents/skills/$cmd/run/agmsg-launcher.path"; do
+    [ -f "$FAKE_HOME/$f" ] || continue
+    # cat into the existing file keeps its mode (the launcher is 0711).
+    sed "s|$esc|$FAKE_HOME|g" "$FAKE_HOME/$f" > "$BATS_TEST_TMPDIR/restore-rewrite" || return 1
+    cat "$BATS_TEST_TMPDIR/restore-rewrite" > "$FAKE_HOME/$f" || return 1
+  done
+  refute grep -rqF -- "${src##*/}" "$FAKE_HOME"
+}
+
 @test "install: fresh install ships scripts/lib and the commands actually run" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ -f "$SK/scripts/lib/storage.sh" ]
@@ -121,7 +192,7 @@ teardown() {
 }
 
 @test "install: --update refreshes an owned Antigravity TUI shim but prints no line about it (#1815)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   local before; before="$(cat "$shim")"
 
@@ -206,7 +277,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install --update: a failing Antigravity shim step warns once, and the Codex shim is still refreshed" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex" tmp; tmp="$BATS_TEST_TMPDIR/codex-shim.stale"
   sed 's#/scripts/drivers/types/codex/#/scripts/codex/#g' "$shim" > "$tmp"
@@ -225,7 +296,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install --update: an owned Codex shim is removed while agmsgd is on, and put back once it is off" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
   [ -x "$shim" ]
@@ -244,7 +315,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install --update: a Codex shim that cannot be put back is reported with the command to repeat, and the update still finishes" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   sqlite3 "$SK/run/install.db" "UPDATE daemon_intent SET desired='on';"
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
@@ -264,7 +335,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install --update: with agmsgd off an owned Codex shim is refreshed as before" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
   sed 's#/scripts/drivers/types/codex/#/scripts/codex/#g' "$shim" > "$BATS_TEST_TMPDIR/stale"
@@ -289,7 +360,7 @@ _agy_failing_mv_fixture() {
 
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
   skip_unless_linux
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   [ -x "$shim" ]
   grep -Fq "# agmsg-shim-owner: $SK/scripts/drivers/types/antigravity/agy-tui.sh" "$shim"
@@ -339,7 +410,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install: a second install's Antigravity TUI shim left owned by the first prints no line about it (#1815)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   local before; before="$(cat "$shim")"
   grep -Fq "# agmsg-shim-owner: $SK/scripts/drivers/types/antigravity/agy-tui.sh" "$shim"
@@ -351,7 +422,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install: Antigravity TUI shim replaces its symlink without writing through it" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   local linked="$FAKE_HOME/linked-agy-tui"
   cp "$shim" "$linked"
@@ -366,7 +437,7 @@ _agy_failing_mv_fixture() {
 
 @test "install: Antigravity TUI launcher resolves one registered identity" {
   skip_unless_linux
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   local project="$FAKE_HOME/project"
   local fake_agy="$FAKE_HOME/bin/agy"
   mkdir -p "$project" "$(dirname "$fake_agy")"
@@ -381,7 +452,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "uninstall: removes only the owned Antigravity TUI shim" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   [ -f "$shim" ]
 
@@ -581,7 +652,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install: --update restores scripts/lib even if it went missing" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-update-projA
   bash "$SK/scripts/join.sh" demo bob   claude-code /tmp/install-update-projB
   rm -rf "$SK/scripts/lib"
@@ -592,7 +663,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install: --update starts an agmsgd that was turned on again, instead of leaving it stopped" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on';"
   [ "$(sqlite3 "$SK/run/install.db" "SELECT state FROM daemon_owner;")" = "none" ]
   HOME="$FAKE_HOME" run bash "$REPO_ROOT/install.sh" --update
@@ -607,13 +678,13 @@ _agy_failing_mv_fixture() {
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
   # setup.sh's temp checkout is deleted right after install, so a copy inside
   # the skill dir is the only uninstaller npx/curl-installed users ever have.
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ -x "$SK/uninstall.sh" ]
   diff "$REPO_ROOT/uninstall.sh" "$SK/uninstall.sh"
 }
 
 @test "install: --update refreshes uninstall.sh even if it went missing" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   rm -f "$SK/uninstall.sh"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
   [ -x "$SK/uninstall.sh" ]
@@ -626,7 +697,7 @@ _agy_failing_mv_fixture() {
 # before this rename would keep the stale SKILL.md forever without an
 # explicit cleanup on --update.
 @test "install --update: removes a pre-rename drivers/terminals/{herdr,plain,tmux}/SKILL.md, leaving only README.md" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   for d in herdr plain tmux; do
     cp "$SK/scripts/drivers/terminals/$d/README.md" "$SK/scripts/drivers/terminals/$d/SKILL.md"
   done
@@ -644,7 +715,7 @@ _agy_failing_mv_fixture() {
 # sanctioned AGMSG_PLUGIN_DIRS mechanism), and a glob-based cleanup would
 # delete a SKILL.md this install does not own.
 @test "install --update: does NOT touch a user-added driver's own SKILL.md under drivers/terminals/" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   mkdir -p "$SK/scripts/drivers/terminals/mycustom"
   echo "user's own driver doc" > "$SK/scripts/drivers/terminals/mycustom/SKILL.md"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
@@ -653,7 +724,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install: --update --cmd updates the named skill even when a backup skill exists" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   local backup="$FAKE_HOME/.agents/skills/agmsg.backup-keep"
   mkdir -p "$backup/scripts" "$backup/templates" "$backup/db" "$backup/agents"
   touch "$backup/.agmsg"
@@ -669,7 +740,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install: --update with no --cmd refuses to guess between two real installs (#599)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
   # Distinct per-install sentinels, not just each install's VERSION (which is
   # the same source-derived string for both and would not distinguish "one of
@@ -698,7 +769,7 @@ _agy_failing_mv_fixture() {
   # not special-case names at all. A directory that still carries the .agmsg
   # marker is just another candidate, and more than one candidate is exactly
   # the ambiguity this fix already refuses to guess through.
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   local leftover="$FAKE_HOME/.agents/skills/agmsg.bak-20260731"
   mkdir -p "$leftover/scripts" "$leftover/templates" "$leftover/db" "$leftover/agents"
   touch "$leftover/.agmsg"
@@ -744,7 +815,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install: --update warns to re-register delivery hooks (#133)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   [ "$status" -eq 0 ]
   # Surface the silent-delivery-loss footgun: an upgrade can drop a project's
@@ -763,7 +834,7 @@ _agy_failing_mv_fixture() {
 # technique test_remote_status_liveness.bats uses; entirely within
 # FAKE_HOME, so this never touches a real installed engine.
 @test "install --update: replaces a running sync engine with one on the new code (#963)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" testteam alice claude-code /tmp/install-963-proj
 
   local cfg="$SK/teams/testteam/config.json" escaped updated
@@ -868,7 +939,7 @@ _agy_failing_mv_fixture() {
 }
 
 @test "install: AGMSG_STORAGE_PATH override works against the installed skill" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-override-projA
   bash "$SK/scripts/join.sh" demo bob   claude-code /tmp/install-override-projB
   local store="$FAKE_HOME/override-store"
@@ -886,7 +957,7 @@ _agy_failing_mv_fixture() {
 # any directly-invoked script — invoke via `env -i` so nothing from the
 # bats environment leaks into the child shell.
 @test "install: actas-claim runs in a fresh shell with no inherited env" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-projA
 
   run env -i PATH=/usr/bin:/bin:/usr/local/bin HOME="$FAKE_HOME" \
@@ -914,8 +985,7 @@ wait_for_pidfile_pid() {
 }
 
 @test "install: drops a Copilot SKILL.md when ~/.copilot exists" {
-  mkdir -p "$FAKE_HOME/.copilot"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install --marker .copilot
   local copilot_skill="$FAKE_HOME/.copilot/skills/agmsg/SKILL.md"
   [ -f "$copilot_skill" ]
   # The Copilot SKILL.md must drive whoami with type=copilot, not codex,
@@ -927,15 +997,12 @@ wait_for_pidfile_pid() {
 }
 
 @test "install: skips Copilot skill when ~/.copilot is absent" {
-  # Make sure ~/.copilot isn't there
-  rm -rf "$FAKE_HOME/.copilot"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ ! -d "$FAKE_HOME/.copilot" ]
 }
 
 @test "install --update: refreshes the Copilot skill if it was previously installed" {
-  mkdir -p "$FAKE_HOME/.copilot"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install --marker .copilot
   local copilot_skill="$FAKE_HOME/.copilot/skills/agmsg/SKILL.md"
   [ -f "$copilot_skill" ]
   # Mutate the file so we can verify --update overwrites.
@@ -952,7 +1019,7 @@ wait_for_pidfile_pid() {
 @test "install --update: installs Copilot skill for upgraders without prior skill" {
   # First install without ~/.copilot, simulating a Copilot-less environment
   # at the time the user originally installed agmsg.
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ ! -d "$FAKE_HOME/.copilot/skills/agmsg" ]
   # User then installs Copilot CLI and runs --update.
   mkdir -p "$FAKE_HOME/.copilot"
@@ -962,8 +1029,7 @@ wait_for_pidfile_pid() {
 }
 
 @test "install: drops an OpenCode SKILL.md when ~/.config/opencode exists" {
-  mkdir -p "$FAKE_HOME/.config/opencode"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install --marker .config/opencode
   local opencode_skill="$FAKE_HOME/.config/opencode/skills/agmsg/SKILL.md"
   [ -f "$opencode_skill" ]
   # The OpenCode SKILL.md must drive whoami with type=opencode, not codex,
@@ -974,14 +1040,12 @@ wait_for_pidfile_pid() {
 }
 
 @test "install: skips OpenCode skill when ~/.config/opencode is absent" {
-  rm -rf "$FAKE_HOME/.config/opencode"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ ! -d "$FAKE_HOME/.config/opencode/skills/agmsg" ]
 }
 
 @test "install --update: refreshes the OpenCode skill if it was previously installed" {
-  mkdir -p "$FAKE_HOME/.config/opencode"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install --marker .config/opencode
   local opencode_skill="$FAKE_HOME/.config/opencode/skills/agmsg/SKILL.md"
   [ -f "$opencode_skill" ]
   echo "tampered" > "$opencode_skill"
@@ -991,7 +1055,7 @@ wait_for_pidfile_pid() {
 }
 
 @test "install --update: installs OpenCode skill for upgraders without prior skill" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ ! -d "$FAKE_HOME/.config/opencode/skills/agmsg" ]
   mkdir -p "$FAKE_HOME/.config/opencode"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
@@ -1234,7 +1298,7 @@ SH
 }
 
 @test "install: watch.sh self-cleans a prior watcher on re-invocation for the same sid" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-projA
   local sid="resue-sid-$$"
 
@@ -1314,7 +1378,7 @@ SH
 }
 
 @test "install: records a git-describe provenance VERSION and /version prints it" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   # install.sh runs from a git checkout here, so the recorded version is a
   # `git describe` string: a tag (v1.2.3-N-gSHA) when tags are present, or — in
   # a tag-less checkout like CI's shallow clone — the bare abbreviated commit
@@ -1366,7 +1430,7 @@ SH
 }
 
 @test "install: --update refreshes the recorded VERSION" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   echo "stale-marker" > "$SK/VERSION"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
   run cat "$SK/VERSION"
@@ -1374,7 +1438,7 @@ SH
 }
 
 @test "version.sh falls back gracefully when no VERSION was recorded" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   rm -f "$SK/VERSION"
   run bash "$SK/scripts/version.sh"
   [ "$status" -eq 0 ]
@@ -1587,8 +1651,7 @@ EOF
 # --- hermes Agent skill (~/.hermes/skills/<name>/SKILL.md) ---
 
 @test "install: drops a Hermes skill when ~/.hermes exists" {
-  mkdir -p "$FAKE_HOME/.hermes"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install --marker .hermes
   local hermes_skill="$FAKE_HOME/.hermes/skills/agmsg/SKILL.md"
   [ -f "$hermes_skill" ]
   grep -q "whoami.sh \"\$(pwd)\" hermes" "$hermes_skill"
@@ -1597,8 +1660,7 @@ EOF
 }
 
 @test "install: Hermes skill no longer advertises 'spawn hermes' as a valid example (#279)" {
-  mkdir -p "$FAKE_HOME/.hermes"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install --marker .hermes
   local hermes_skill="$FAKE_HOME/.hermes/skills/agmsg/SKILL.md"
   [ -f "$hermes_skill" ]
   refute grep -q "spawn hermes reviewer" "$hermes_skill"
@@ -1651,8 +1713,7 @@ EOF
 }
 
 @test "install --update: refreshes the Hermes skill if it was previously installed" {
-  mkdir -p "$FAKE_HOME/.hermes"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install --marker .hermes
   local hermes_skill="$FAKE_HOME/.hermes/skills/agmsg/SKILL.md"
   [ -f "$hermes_skill" ]
   echo "tampered" > "$hermes_skill"
@@ -1662,7 +1723,7 @@ EOF
 }
 
 @test "install --update: installs Hermes skill for upgraders without prior skill" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ ! -d "$FAKE_HOME/.hermes/skills/agmsg" ]
   mkdir -p "$FAKE_HOME/.hermes"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
@@ -1671,7 +1732,7 @@ EOF
 }
 
 @test "install: --update re-points an existing Codex monitor shim to the new path" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   # Install the shim the way enabling Codex monitor mode would.
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
@@ -1693,7 +1754,7 @@ EOF
 }
 
 @test "install: --update does NOT create a Codex shim when none was installed" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ ! -e "$FAKE_HOME/.agents/bin/codex" ]
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
   # The refresh is gated on an existing agmsg shim — it must not opt the user in.
@@ -1707,7 +1768,7 @@ EOF
 # as if it were a routine "refreshed" no-op.
 
 @test "install: a second, differently-named install does NOT clobber the first's Codex shim (#553)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+  _restore_install --cmd agmsg --agent-type codex
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
   [ -f "$shim" ]
@@ -1736,7 +1797,7 @@ EOF
   # second, differently-named install this way silently stole the shim from a
   # first install that was still perfectly alive and working -- the opposite
   # of what --cmd being explicit actually proves.
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+  _restore_install --cmd agmsg --agent-type codex
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
   local before; before="$(grep AGMSG_CODEX_SHIM_SCRIPT_DIR "$shim")"
@@ -1761,7 +1822,7 @@ EOF
   # The #553 recovery case survives #1788's fix: when the install that
   # actually owns the shim no longer exists at all, there is nothing left to
   # steal it from, so --update --cmd may still take it over without --force.
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+  _restore_install --cmd agmsg --agent-type codex
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
 
@@ -1785,7 +1846,7 @@ EOF
 }
 
 @test "install: AGMSG_CODEX_SHIM_FORCE=1 --update --cmd reclaims a Codex shim owned by another LIVE install (#1788)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+  _restore_install --cmd agmsg --agent-type codex
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
 
@@ -1813,7 +1874,7 @@ EOF
   # refusal is asserted, and the shim's owner line is asserted unchanged
   # across it. The single-install case, where a bare --update does proceed,
   # is the next test.
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+  _restore_install --cmd agmsg --agent-type codex
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
   local before; before="$(grep AGMSG_CODEX_SHIM_SCRIPT_DIR "$shim")"
@@ -1839,7 +1900,7 @@ EOF
   # (review finding). Provably only one agmsg install existing at all is what
   # makes that safe without needing --cmd or --force: there is no other
   # install the shim could actually belong to.
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+  _restore_install --cmd agmsg --agent-type codex
   local shim="$FAKE_HOME/.agents/bin/codex"
   mkdir -p "$FAKE_HOME/.agents/bin"
   # A legacy shim: real marker, but written before this PR added the owner
@@ -1875,7 +1936,7 @@ EOF
   # owner-unknown legacy shim without --force. This pins that a second,
   # differently-named install must not benefit from that allowance just
   # because its own marker hasn't been written yet.
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+  _restore_install --cmd agmsg --agent-type codex
   local shim="$FAKE_HOME/.agents/bin/codex"
   mkdir -p "$FAKE_HOME/.agents/bin"
   # A legacy shim: real marker, but no owner comment -- same shape as any
@@ -1915,13 +1976,12 @@ EOF
 }
 
 @test "install: skips Grok Build skill when ~/.grok is absent" {
-  rm -rf "$FAKE_HOME/.grok"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ ! -d "$FAKE_HOME/.grok" ]
 }
 
 @test "install --update: installs Grok Build skill for upgraders without prior skill" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ ! -d "$FAKE_HOME/.grok/skills/agmsg" ]
   mkdir -p "$FAKE_HOME/.grok"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
@@ -1932,8 +1992,7 @@ EOF
 # --- Antigravity skill (~/.gemini/config/skills/<name>/SKILL.md) ---
 
 @test "install: drops an Antigravity SKILL.md when ~/.gemini/config exists" {
-  mkdir -p "$FAKE_HOME/.gemini/config"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install --marker .gemini/config
   local antigravity_skill="$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md"
   [ -f "$antigravity_skill" ]
   grep -q "whoami.sh \"\$(pwd)\" antigravity" "$antigravity_skill"
@@ -1947,12 +2006,12 @@ EOF
 }
 
 @test "install: skips Antigravity skill when its markers are absent" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ ! -d "$FAKE_HOME/.gemini/config/skills/agmsg" ]
 }
 
 @test "install --update: installs Antigravity skill for upgraders without prior skill" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ ! -d "$FAKE_HOME/.gemini/config/skills/agmsg" ]
   mkdir -p "$FAKE_HOME/.gemini/config"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
@@ -1961,8 +2020,7 @@ EOF
 }
 
 @test "install --update: refreshes the Antigravity skill" {
-  mkdir -p "$FAKE_HOME/.gemini/config"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install --marker .gemini/config
   local antigravity_skill="$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md"
   printf '%s\n' tampered > "$antigravity_skill"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
@@ -1971,7 +2029,7 @@ EOF
 }
 
 @test "install --update: removes the legacy top-level Antigravity resume helper" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   local old="$SK/scripts/antigravity-resume.sh"
   local current="$SK/scripts/drivers/types/antigravity/antigravity-resume.sh"
   [ ! -e "$old" ]
@@ -2005,7 +2063,7 @@ EOF
 # the first version of this prune) stays closed; and a second --update
 # clears the first generation's .trash/ before writing its own.
 @test "install --update: moves removed/overwritten scripts/ files to .trash/ (one generation), never touches user data, and closes the newline escape" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   local trash="$SK/.trash"
 
   local pure_leftover="$SK/scripts/hook.sh"
@@ -2087,8 +2145,7 @@ EOF
 }
 
 @test "uninstall: removes the Antigravity skill" {
-  mkdir -p "$FAKE_HOME/.gemini/config"
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install --marker .gemini/config
   [ -d "$FAKE_HOME/.gemini/config/skills/agmsg" ]
   HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
   [ ! -e "$FAKE_HOME/.gemini/config/skills/agmsg" ]
@@ -2154,7 +2211,7 @@ EOF
 # this bug, where the team directory appears and the membership does not. So
 # this asserts the membership is actually there afterwards.
 @test "install: on Windows too, join.sh writes the membership it just announced" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
 
   run bash "$SK/scripts/join.sh" wteam alice claude-code /tmp/install-wteam
   [ "$status" -eq 0 ]
@@ -2254,7 +2311,7 @@ CYG
 # so without the store walk the upgrade we tell people to run leaves them exactly
 # as stuck as before -- having done what we asked.
 @test "install --update: clears group-write on a binding an older release left 0664 (#804)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" upg alice claude-code /tmp/install-804-a
 
   local cfg before after
@@ -2286,7 +2343,7 @@ CYG
 }
 
 @test "install --update: leaves a binding the readers already accept alone (#804)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" keep alice claude-code /tmp/install-804-b
 
   local cfg before after
@@ -2314,7 +2371,7 @@ CYG
 # half needs its own row, or deleting either one stays green. 0664 is the
 # reported shape; this is the other.
 @test "install --update: clears other-write on a binding left 0646 (#804)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" oth alice claude-code /tmp/install-804-c
 
   local cfg before after
@@ -2340,7 +2397,7 @@ CYG
 # changed a file OUTSIDE the store and announced a repair that repaired nothing,
 # because the binding stays refused either way.
 @test "install --update: does not follow a symlinked binding to something outside the store (#804)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" lnk alice claude-code /tmp/install-804-d
 
   local cfg outside before after
@@ -2385,7 +2442,7 @@ CYG
 # does not match it -- silently, which is the whole failure mode of this issue
 # repeated one level up.
 @test "install --update: corrects a binding under a dot-leading team name (#804)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" .dotteam alice claude-code /tmp/install-804-e
 
   local cfg before after
@@ -2411,7 +2468,7 @@ CYG
 # with -- on every update, on the one platform where that sentence cannot be
 # true.
 @test "install --update: does not touch or announce bindings on Windows (#804)" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   bash "$SK/scripts/join.sh" win alice claude-code /tmp/install-804-f
 
   local cfg before after
@@ -2872,7 +2929,7 @@ CYG
 }
 
 @test "uninstall keeps run/install-op.lock.db while removing everything else" {
-  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  _restore_install
   [ -f "$SK/run/install-op.lock.db" ]
   [ -f "$SK/run/install.db" ]
   [ -f "$SK/scripts/team.sh" ]
