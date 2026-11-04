@@ -210,7 +210,6 @@ teardown() { teardown_test_env; }
 @test "every control character in free text becomes a space, so the record is valid JSON" {
   local sh
   for sh in /bin/bash bash; do
-    rm -rf "$TEST_SKILL_DIR/run/down"
     "$sh" -c '. "$1"; down_notice_set esc degraded $'"'"'colored\033[31m error\bx\001y'"'"' "agmsg doctor"' _ "$SCRIPTS/lib/down-notice.sh"
     run sqlite_mem "SELECT json_valid(CAST(readfile('$TEST_SKILL_DIR/run/down/esc.json') AS TEXT));"
     [ "$output" = 1 ]
