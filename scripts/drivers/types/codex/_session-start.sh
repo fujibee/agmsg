@@ -73,7 +73,7 @@ agmsg_resolve_codex_thread() {
     printf '%s' "${SESSION_ID:-}"
     return 0
   fi
-  local sessions_dir="$HOME/.codex/sessions"
+  local sessions_dir="${CODEX_HOME:-$HOME/.codex}/sessions"
   [ -d "$sessions_dir" ] || return 0
   # Compare PHYSICAL paths. agmsg may open the project via a symlinked/logical
   # path (e.g. a workspace under a symlinked home) while Codex records the
@@ -154,11 +154,21 @@ agmsg_session_start() {
     . "$SKILL_DIR/scripts/lib/codex-config.sh"
   fi
   agmsg_codex_writable_roots_notice "$SKILL_DIR"
+  if ! declare -F down_notice_set >/dev/null 2>&1; then
+    source "${SKILL_DIR:-}/scripts/lib/down-notice.sh"
+  fi
+  local destination_notice
+  destination_notice="codex-thread.$(printf '%s\n%s\n%s' "${PROJECT:-}" "${AGMSG_CODEX_SEAT_KEY:-}" "${SESSION_ID:-}" | agmsg_sha1)"
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
   if [ -z "$thread_id" ]; then
+    # The finite hook does not guess a destination or end the resident launcher.
+    # Recovery needs this session to publish a trustworthy thread via actas.
+    down_notice_set "$destination_notice" degraded \
+      "Codex thread destination is missing; the launcher remains armed" "agmsg actas <name>"
     agmsg_codex_unseated_notice
     exit 0
   fi
+  down_notice_clear "$destination_notice"
   # A recorded role belongs to its recorded Codex thread. The in-sandbox
   # fallback has no launcher to arbitrate this, so exclude a mismatched role
   # rather than ever injecting it into this session's thread (#150/#350).

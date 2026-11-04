@@ -3465,7 +3465,7 @@ EOF
   printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"rollout-thread-999\",\"cwd\":\"$TEST_PROJECT\"}}" \
     > "$rollout_dir/rollout-2026-06-17T00-00-00-rollout-thread-999.jsonl"
 
-  HOME="$TEST_SKILL_DIR/home" \
+  CODEX_HOME="$TEST_SKILL_DIR/home/.codex" \
   AGMSG_CODEX_BRIDGE=1 \
   AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
   AGMSG_CODEX_BRIDGE_CMD="$fake" \
@@ -3506,7 +3506,7 @@ EOF
   sleep 1
   touch "$rollout_dir/rollout-2020-01-01T00-00-00-stale-by-name-uuid.jsonl"
 
-  HOME="$TEST_SKILL_DIR/home" \
+  CODEX_HOME="$TEST_SKILL_DIR/home/.codex" \
   AGMSG_CODEX_BRIDGE=1 \
   AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
   AGMSG_CODEX_BRIDGE_CMD="$fake" \
