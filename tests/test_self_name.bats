@@ -315,7 +315,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   agmsg_write_atomic "$(agmsg_spawn_path team2 alice)" "$(printf 'tmux:/tmp/s:%%9\t/tmp/p\tclaude-code')"
   agmsg_write_atomic "$(agmsg_spawn_path team eve)" "$(printf 'tmux:/tmp/s:%%5\t/tmp/p\tclaude-code')"
-  printf 'other-session.99999\n' > "$(actas_lock_path team eve)"
+  printf 'other-session.%s\n' "$$" > "$(actas_lock_path team eve)"
 
   run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code bob sid-bob
   [ "$status" -eq 0 ]
@@ -336,12 +336,26 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   _join_unnamed team gina
   _join_unnamed team hank
   agmsg_write_atomic "$(agmsg_spawn_path team gina)" "$(printf 'tmux:/tmp/s:%%6\t/tmp/p\tclaude-code')"
-  printf 'sid-hank.12345\n' > "$(actas_lock_path team gina)"
+  printf 'sid-hank.%s\n' "$$" > "$(actas_lock_path team gina)"
   _under_tmux /tmp/s 4242 %6
   run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code hank sid-hank
   grep -q 'already recorded as' <<<"$output"
   [ -z "$(_placement team hank)" ]
   [ "$(_placement team gina)" = 'tmux:/tmp/s:%6' ]
+
+  # An owner whose process is gone (#1910): the session ended and left its pane
+  # record behind, so it does not block the live seat that took the pane.
+  _join_unnamed team olga
+  _join_unnamed team pia
+  agmsg_write_atomic "$(agmsg_spawn_path team olga)" "$(printf 'tmux:/tmp/s:%%10\t/tmp/p\tclaude-code')"
+  ( : ) & _gone=$!
+  wait "$_gone"
+  printf 'sid-olga.%s\n' "$_gone" > "$(actas_lock_path team olga)"
+  _under_tmux /tmp/s 4242 %10
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p claude-code pia sid-pia
+  ! grep -q 'already recorded as' <<<"$output"
+  [ -z "$(_placement team olga)" ]
+  [ "$(_placement team pia)" = 'tmux:/tmp/s:%10' ]
 
   # A record of another team for the same pane, no lock: not this team's, so not
   # retired, and it still refuses.
