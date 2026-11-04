@@ -258,3 +258,17 @@ _wait_child_pid() {
   [ "$(printf '%s\n' "$output" | sed -n 1p | cut -f1)" = "$BATS_TEST_TMPDIR/p2" ]
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 3 ]
 }
+
+@test "bounded read: an unrelated background job of the caller does not make a finished read look running" {
+  run bash -c '
+    source "$1/lib/codex-daemon-health.sh"
+    _AGMSG_CDH_TMP="$2/out"
+    sleep 4 3>&- 4>&- &
+    unrelated=$!
+    AGMSG_CODEX_DAEMON_READ_SECONDS=1 _agmsg_cdh_bounded "$_AGMSG_CDH_TMP" /usr/bin/true
+    rc=$?
+    kill "$unrelated" 2>/dev/null
+    exit "$rc"
+  ' _ "$SCRIPTS" "$BATS_TEST_TMPDIR"
+  [ "$status" -eq 0 ]
+}

@@ -151,13 +151,18 @@ _agmsg_cdh_reset() {
 }
 
 # Is the read this shell started still running? The shell's own job table answers
-# (`jobs -r` into a file: no fork, no signal, no ps), which is the right question
+# (`jobs -pr` into a file, compared with the pid: no fork, no signal, no ps), which is the right question
 # for a pid this shell spawned -- a signal probe would call a not-yet-reaped child
 # alive and a reused pid alive.
-_agmsg_cdh_child_running() {
-  [ -n "${_AGMSG_CDH_TMP:-}" ] || return 1
-  jobs -r > "$_AGMSG_CDH_TMP.jobs" 2>/dev/null
-  [ -s "$_AGMSG_CDH_TMP.jobs" ]
+_agmsg_cdh_child_running() {   # <pid>
+  local want="${1:-}" p
+  [ -n "${_AGMSG_CDH_TMP:-}" ] && [ -n "$want" ] || return 1
+  jobs -pr > "$_AGMSG_CDH_TMP.jobs" 2>/dev/null
+  # Only THIS pid counts: any other background job of the caller is not ours.
+  while IFS= read -r p; do
+    [ "$p" != "$want" ] || return 0
+  done < "$_AGMSG_CDH_TMP.jobs"
+  return 1
 }
 
 # Runs <cmd...> with its stdout in <outfile>, giving up on it after the read limit
@@ -170,7 +175,7 @@ _agmsg_cdh_bounded() {   # <outfile> <cmd...>
   case "$limit" in ''|*[!0-9]*|0) limit=5 ;; esac
   "$@" > "$out" 2>/dev/null 3>&- 4>&- &
   _AGMSG_CDH_CHILD=$!
-  while _agmsg_cdh_child_running; do
+  while _agmsg_cdh_child_running "$_AGMSG_CDH_CHILD"; do
     if [ "$ticks" -ge $(( limit * 10 )) ]; then
       _agmsg_cdh_stop_child "$_AGMSG_CDH_CHILD"
       _AGMSG_CDH_CHILD=""
@@ -189,11 +194,11 @@ _agmsg_cdh_bounded() {   # <outfile> <cmd...>
 _agmsg_cdh_stop_child() {   # <pid>
   local pid="$1" i=0
   kill "$pid" 2>/dev/null || true
-  while _agmsg_cdh_child_running && [ "$i" -lt 10 ]; do
+  while _agmsg_cdh_child_running "$pid" && [ "$i" -lt 10 ]; do
     sleep 0.1
     i=$(( i + 1 ))
   done
-  ! _agmsg_cdh_child_running || kill -9 "$pid" 2>/dev/null
+  ! _agmsg_cdh_child_running "$pid" || kill -9 "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null || true
   return 0
 }
