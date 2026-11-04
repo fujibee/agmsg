@@ -843,6 +843,9 @@ _install_restart_count() {
 }
 
 _install_restart_count_reset() {
+  if [ -n "$_INSTALL_CLEAR_PENDING" ] && [ "$SECONDS" -ge "$_INSTALL_NOTICE_RETRY_AT" ]; then
+    _install_notice_clear
+  fi
   [ -z "${AGMSG_WATCH_RESTART_COUNT:-}" ] && [ -z "${AGMSG_WATCH_RESTART_CHAIN:-}" ] && return 0
   unset AGMSG_WATCH_RESTART_COUNT AGMSG_WATCH_RESTART_CHAIN
   # A run of restarts just ended: any "keeps changing" notice from it is over.
@@ -852,13 +855,30 @@ _install_restart_count_reset() {
 # Degraded notice for an install that is not settling (shown by doctor, status
 # and the session-start hook). Keyed on the pid, which an exec keeps, so the
 # image that clears it is the one that set it.
-# Returns the helper's status (0 only when the record is verified written), so a
-# caller records "written" only on 0 and tries again on the next pass otherwise.
+# A write or removal that did not verifiably happen (the helper returns non-zero) is
+# tried again, but not on every poll: no sooner than _INSTALL_NOTICE_RETRY seconds
+# after the last failure. Nothing here ever stops the watcher.
+_INSTALL_NOTICE_RETRY=10
+_INSTALL_NOTICE_RETRY_AT=0
+_INSTALL_CLEAR_PENDING=""
+# Returns 0 only when the record is verified written; 1 when it was not (or when it
+# is too soon to try again), so a caller records "written" only on 0.
 _install_notice_set() {   # <reason> <recovery>
-  down_notice_set "watch-install.$$" degraded "$1" "$2"
+  [ "$SECONDS" -ge "$_INSTALL_NOTICE_RETRY_AT" ] || return 1
+  down_notice_set "watch-install.$$" degraded "$1" "$2" && return 0
+  _INSTALL_NOTICE_RETRY_AT=$((SECONDS + _INSTALL_NOTICE_RETRY))
+  return 1
 }
+# Removes the record; if that fails the removal stays pending and is retried from
+# the clean-cycle hook below until it works.
 _install_notice_clear() {
-  down_notice_clear "watch-install.$$" || true
+  if down_notice_clear "watch-install.$$"; then
+    _INSTALL_CLEAR_PENDING=""
+  else
+    _INSTALL_CLEAR_PENDING=1
+    _INSTALL_NOTICE_RETRY_AT=$((SECONDS + _INSTALL_NOTICE_RETRY))
+  fi
+  return 0
 }
 
 # Past the consecutive-restart cap a restart is still allowed, but only once this

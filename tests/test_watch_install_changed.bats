@@ -254,13 +254,51 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
 
   # The install settles (VERSION no longer newer than the watcher): the run of
   # restarts ends and the record goes.
+  # The record cannot be removed at first (its directory is read-only): the removal
+  # stays pending, the watcher keeps running, and it is retried until it works.
+  chmod 555 "$TEST_SKILL_DIR/run/down"
   touch -t 202001010000 "$TEST_SKILL_DIR/VERSION"
+  sleep 3
+  kill -0 "$pid"
+  [ -e "$rec" ]
+  chmod 755 "$TEST_SKILL_DIR/run/down"
   _wait_for "[ ! -e '$rec' ]" || true
   [ ! -e "$rec" ]
   local was_alive=0
   kill -0 "$pid" 2>/dev/null && was_alive=1
   agmsg_stop_pid "$pid"
   [ "$was_alive" -eq 1 ]
+}
+
+@test "watch: a degraded record that could not be written is tried again, and the report line still appears once (#684)" {
+  local out="$BATS_TEST_TMPDIR/out6.txt" down="$TEST_SKILL_DIR/run/down"
+  : > "$out"
+  mkdir -p "$down"
+  chmod 555 "$down"
+  AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=2 \
+    bash "$SCRIPTS/watch.sh" sid-684e "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local pid=$!
+  bash "$SCRIPTS/send.sh" team bob alice "before-unwritable" >/dev/null
+  _wait_for "grep -q 'before-unwritable' '$out'" || true
+  sleep 2
+  chmod -x "$SCRIPTS/watch.sh"
+  printf 'new-version\n' > "$TEST_SKILL_DIR/VERSION"
+  _wait_for "grep -q 'still executing the code from before the update' '$out'" || true
+  grep -q 'still executing the code from before the update' "$out"
+  sleep 2
+  # The record directory is not writable, so nothing is there yet ...
+  [ -z "$(ls "$down" 2>/dev/null)" ]
+  # ... and once it is, the next pass writes it, without a second report line.
+  chmod 755 "$down"
+  _wait_for "grep -q '\"state\":\"degraded\"' '$down/watch-install.$pid.json'" || true
+  local ok=0
+  grep -q '"state":"degraded"' "$down/watch-install.$pid.json" 2>/dev/null && ok=1
+  run grep -c 'still executing the code from before the update' "$out"
+  local reports="$output"
+  chmod +x "$SCRIPTS/watch.sh"
+  agmsg_stop_pid "$pid"
+  [ "$ok" -eq 1 ]
+  [ "$reports" = "1" ]
 }
 
 @test "watch: keeps running when nothing in the installation changes (#684)" {
