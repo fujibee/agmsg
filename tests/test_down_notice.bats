@@ -226,3 +226,18 @@ teardown() { teardown_test_env; }
     [ "${lines[1]}" = "sync.----------4da668f2" ]
   done
 }
+
+# doctor runs on a PATH with no python3, and so no awk, cat or anything else: the
+# readers are shell builtins, and with no record they return at once.
+@test "list, print and print_once work on an empty PATH, with and without a record" {
+  local lib="$SCRIPTS/lib/down-notice.sh" out
+  out="$(env -i PATH=/nonexistent /bin/bash -c '. "$1"; down_notice_list; down_notice_print; down_notice_print sync.; down_notice_print_once; echo rc=$?' _ "$lib" 2>&1)"
+  [ "$out" = "rc=0" ]
+  down_notice_set sync.t1 down "the engine is down" "bash remote.sh sync start t1"
+  down_notice_set watch.s1 degraded "slow" "restart it"
+  out="$(env -i PATH=/nonexistent /bin/bash -c '. "$1"; down_notice_list; down_notice_print sync.; down_notice_print_once' _ "$lib" 2>&1)"
+  printf '%s\n' "$out" | grep -qF "sync.t1	down	"
+  printf '%s\n' "$out" | grep -qF "AGMSG: sync.t1 is down since"
+  printf '%s\n' "$out" | grep -qF "recover with: bash remote.sh sync start t1"
+  refute grep -qF "command not found" <<<"$out"
+}

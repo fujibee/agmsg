@@ -25,12 +25,10 @@
 # Process launches (programs started; the `$( )` substitutions around builtins are
 # shell forks that start no program):
 #   source          none; one shell fork to find the install root
-#   set             `date` + `mv`, plus `cat` when the record exists and `mkdir`
-#                   the first time
+#   set             `date` + `mv`, and `mkdir` the first time
 #   clear           `rm`
-#   list / print    `cat` once per record (none when there is no record); print
-#                   adds `awk` in a pipeline
-#   print_once      `cat` once or twice per record, none when there is no record
+#   list / print    none (records are read with `$(<file)`)
+#   print_once      none
 #   key             none (the hash is shell arithmetic)
 # No locking: one writer per key by construction.
 #
@@ -127,7 +125,7 @@ down_notice_set() {   # <component> <down|degraded> <reason> <recovery>
   tmp="$dir/.$key.json.$$"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if [ -f "$f" ]; then
-    old="$(cat "$f" 2>/dev/null)" || old=""
+    old="$(<"$f")" 2>/dev/null || old=""
     # "since" is when it first went into THIS state; a change of state restarts it.
     if [ "$(_down_notice_field "$old" state)" = "$state" ]; then since="$(_down_notice_field "$old" since)"; fi
   fi
@@ -164,7 +162,7 @@ down_notice_list() {
   dir="$(_down_notice_dir)" || return 0
   for f in "$dir"/*.json; do
     [ -f "$f" ] || continue
-    json="$(cat "$f" 2>/dev/null)" || continue
+    json="$(<"$f")" 2>/dev/null || continue
     _down_notice_row "$json"
   done
   return 0
@@ -179,10 +177,16 @@ _down_notice_text() {   # records on stdin
   done
 }
 
-# An optional prefix limits it to one component family (`sync.`).
+# An optional prefix limits it to one component family (`sync.`). Builtins only:
+# it must work on a PATH with no awk, and with no record it returns at once.
 down_notice_print() {
-  local prefix="${1-}"
-  down_notice_list | awk -F'\t' -v p="$prefix" 'index($1, p) == 1' | _down_notice_text
+  local prefix="${1-}" component state since reason recovery
+  while IFS=$'\t' read -r component state since reason recovery; do
+    [ -n "$component" ] || continue
+    case "$component" in "$prefix"*) ;; *) continue ;; esac
+    printf 'AGMSG: %s is %s since %s: %s\n' "$component" "$state" "$since" "$reason"
+    [ -z "$recovery" ] || printf '  recover with: %s\n' "$recovery"
+  done < <(down_notice_list)
   return 0
 }
 
@@ -195,10 +199,10 @@ down_notice_print_once() {
   dir="$(_down_notice_dir)" || return 0
   for f in "$dir"/*.json; do
     [ -f "$f" ] || continue
-    json="$(cat "$f" 2>/dev/null)" || continue
+    json="$(<"$f")" 2>/dev/null || continue
     [ -n "$json" ] || continue
     row="$(_down_notice_row "$json")"
-    if [ -f "$f.shown" ] && [ "$(cat "$f.shown" 2>/dev/null)" = "$row" ]; then continue; fi
+    if [ -f "$f.shown" ] && [ "$(<"$f.shown")" = "$row" ] 2>/dev/null; then continue; fi
     printf '%s\n' "$row" | _down_notice_text
     printf '%s\n' "$row" >"$f.shown" 2>/dev/null || true
   done
