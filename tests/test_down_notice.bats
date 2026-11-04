@@ -66,6 +66,9 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 2 ]
   run down_notice_set "Upper" down "r" "c"
   [ "$status" -eq 2 ]
+  # the same under a collating locale, where a-z can match uppercase
+  LC_ALL=en_US.UTF-8 run down_notice_set "Upper" down "r" "c"
+  [ "$status" -eq 2 ]
   run down_notice_set "a b" down "r" "c"
   [ "$status" -eq 2 ]
   run down_notice_set ".hidden" down "r" "c"

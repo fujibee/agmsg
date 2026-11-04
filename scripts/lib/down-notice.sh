@@ -55,6 +55,9 @@ _down_notice_dir() {
 }
 
 _down_notice_key_ok() {
+  # Ranges follow the collation order outside the C locale (on macOS a-z can match
+  # an uppercase letter), so the check pins it.
+  local LC_ALL=C
   case "$1" in
     '') return 1 ;;
     [!a-z0-9]*) return 1 ;;
