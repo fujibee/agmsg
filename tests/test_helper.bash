@@ -39,6 +39,51 @@ unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
 unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE
 export AGMSG_SELF_NAME=off
 
+# Build a fresh skill dir in <dir>: a copy of scripts/, the exec bits the
+# scripts need, and the db init-db.sh creates. Chained with && so a failure is
+# this function's status in any context (errexit does not reach into a function
+# called from `||` or `if`).
+_agmsg_populate_skill_dir() {   # <dir>
+  mkdir -p "$1"/{scripts,db,teams,home} &&
+  # Copy all scripts to isolated skill dir. Recursive so nested helper dirs
+  # (scripts/lib/) come along without enumerating files.
+  cp -R "$BATS_TEST_DIRNAME"/../scripts/. "$1/scripts/" &&
+  chmod +x "$1/scripts/"*.sh &&
+  { chmod +x "$1/scripts/"*.js 2>/dev/null || true; } &&
+  # Agent-type manifests + per-type runtimes now live under scripts/drivers/types/
+  # (the type registry reads <skill-root>/scripts/drivers/types/<name>/type.conf),
+  # so the recursive scripts/ copy above already brings them along — no separate
+  # copy is needed. Just ensure codex's folded runtime scripts stay executable.
+  { chmod +x "$1/scripts/drivers/types/codex/"*.sh 2>/dev/null || true; } &&
+  bash "$1/scripts/internal/init-db.sh"
+}
+
+# Copy this bats file's template skill dir into <dir>, building the template
+# first if this is the file's first test. The template lives in
+# BATS_FILE_TMPDIR, which no test writes to, and every test gets its own copy
+# (plain cp: fresh inodes and mtimes, as a first-hand copy would have), so a
+# test that edits its scripts or db reaches neither the template nor another
+# test. init-db.sh's output is byte-identical from run to run (schema and WAL
+# flag only; no path, no timestamp), so the copy is what init-db.sh would
+# have written.
+#
+# Returns 1 -- the caller then builds <dir> itself, as before -- when there is
+# no BATS_FILE_TMPDIR (helper sourced outside bats), when AGMSG_STORAGE_PATH is
+# set (init-db.sh would write the db there, not into the skill dir), or when
+# another test of the same file is building the template right now (bats
+# --jobs): mkdir is the lock, and the loser does not wait for it.
+_agmsg_copy_skill_template() {   # <dir>
+  local tpl="${BATS_FILE_TMPDIR:-}"
+  [ -n "$tpl" ] && [ -z "${AGMSG_STORAGE_PATH:-}" ] || return 1
+  tpl="$tpl/agmsg-skill-template"
+  if [ ! -f "$tpl.ready" ]; then
+    mkdir "$tpl" 2>/dev/null || return 1
+    _agmsg_populate_skill_dir "$tpl" || { rm -rf "$tpl"; return 1; }
+    : > "$tpl.ready"
+  fi
+  cp -R "$tpl/." "$1/"
+}
+
 setup_test_env() {
   # A test never inherits the developer's terminal. The terminal drivers
   # identify "this pane" from the environment (tmux: $TMUX/$TMUX_PANE; herdr:
@@ -63,22 +108,13 @@ setup_test_env() {
   : "${AGMSG_TEST_REAL_TMPDIR:=${TMPDIR:-/tmp}}"
   export AGMSG_TEST_REAL_TMPDIR
   export TEST_SKILL_DIR="$(TMPDIR="$AGMSG_TEST_REAL_TMPDIR" mktemp -d)"
-  mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
-  # Copy all scripts to isolated skill dir. Recursive so nested helper dirs
-  # (scripts/lib/) come along without enumerating files.
-  cp -R "$BATS_TEST_DIRNAME"/../scripts/. "$TEST_SKILL_DIR/scripts/"
-  chmod +x "$TEST_SKILL_DIR/scripts/"*.sh
-  chmod +x "$TEST_SKILL_DIR/scripts/"*.js 2>/dev/null || true
-
-  # Agent-type manifests + per-type runtimes now live under scripts/drivers/types/
-  # (the type registry reads <skill-root>/scripts/drivers/types/<name>/type.conf),
-  # so the recursive scripts/ copy above already brings them along — no separate
-  # copy is needed. Just ensure codex's folded runtime scripts stay executable.
-  chmod +x "$TEST_SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
-
-  # Initialize DB
-  bash "$TEST_SKILL_DIR/scripts/internal/init-db.sh"
+  # The tree every test starts from (scripts/ with its exec bits, the db that
+  # init-db.sh creates, empty teams/ and home/) is the same for every test in a
+  # file, so it is built once per file and each test gets its own copy of it:
+  # one cp instead of cp + three chmod + init-db.sh (13 execs, 22 forks).
+  _agmsg_copy_skill_template "$TEST_SKILL_DIR" ||
+    _agmsg_populate_skill_dir "$TEST_SKILL_DIR"
 
   # Convenience vars
   export SCRIPTS="$TEST_SKILL_DIR/scripts"
@@ -91,7 +127,7 @@ setup_test_env() {
   # temp dir is torn down). bats runs each test in its own subshell, so the
   # export is scoped to the test and needs no restore. See #41.
   export HOME="$TEST_SKILL_DIR/home"
-  mkdir -p "$HOME"
+  [ -d "$HOME" ] || mkdir -p "$HOME"
 
   # Same reasoning as HOME above, now needed for a second path: doctor.sh's
   # leaked-outcome-file check (#1572 cleanup) scans ${TMPDIR:-/tmp} directly,
