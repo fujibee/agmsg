@@ -458,8 +458,8 @@ WATCH="$SKILL_DIR/scripts/watch.sh"
 # a little before Claude Code's 30-minute Monitor cap and exits, so the decision
 # is made by the watcher, not by the model reading an expiry notification later.
 # timeout_ms: 1800000 always stays in both directives below (the Monitor tool
-# caps every watch there regardless); AGMSG_CC_MONITOR_KEEP_ALIVE is read by the
-# watcher itself. Kept word-for-word identical to scripts/delivery.sh's
+# caps every watch there regardless). The watcher always hands back "re-arm"
+# (AGMSG_CC_MONITOR_KEEP_ALIVE no longer changes that). Kept word-for-word identical to scripts/delivery.sh's
 # emit_monitor_directive and scripts/drivers/types/claude-code/template.md's
 # overlays -- the surfaces must never disagree with each other.
 REARM_NOTE="
