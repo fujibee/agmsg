@@ -59,6 +59,8 @@ if os.environ.get("FAKE_CODEX_MODE") in ("delayed-port", "blocked-port"):
     s.close()
     print("  listening on: ws://127.0.0.1:%d" % pending_port); sys.stdout.flush()
     for _ in range(600):
+        if os.path.exists(os.path.join(os.environ["TEST_PROJECT"], "release-port")):
+            break
         if os.environ.get("FAKE_CODEX_MODE") != "blocked-port" and glob.glob(os.path.join(os.environ["TEST_SKILL_DIR"], "run/down/codex-monitor.*." + hashlib.sha1(os.environ["AGMSG_CODEX_SEAT_KEY"].encode()).hexdigest() + ".json")):
             break
         time.sleep(0.05)
@@ -221,6 +223,44 @@ EOF
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   refute grep -Fq 'port is not reachable yet' <<<"$output"
+}
+
+@test "codex-monitor: real notice I/O failure keeps startup alive and retries set and clear" {
+  local notice_root="$TEST_PROJECT/notice-io" monitor_pid record child_pid result=0
+  mkdir "$notice_root"
+  printf blocked > "$notice_root/run"
+  env AGMSG_DOWN_NOTICE_ROOT="$notice_root" FAKE_CODEX_MODE=blocked-port \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex \
+    >"$TEST_PROJECT/io.log" 2>&1 &
+  monitor_pid=$!
+  if ! wait_for_file_contains "$TEST_PROJECT/io.log" 'could not record'; then result=1; fi
+  kill -0 "$monitor_pid" 2>/dev/null || result=1
+  mv "$notice_root/run" "$notice_root/blocked"
+  # Wait for the same pending reason to publish after storage recovers.
+  local i
+  for i in $(seq 1 100); do
+    for record in "$notice_root"/run/down/codex-monitor.*.json; do [ -f "$record" ] && break 2; done
+    sleep 0.1
+  done
+  if [ -f "$record" ]; then
+    mv "$record" "$notice_root/previous"
+    mkdir "$record"
+    : > "$TEST_PROJECT/release-port"
+    if ! wait_for_file_contains "$TEST_PROJECT/io.log" 'could not clear'; then result=1; fi
+    kill -0 "$monitor_pid" 2>/dev/null || result=1
+    rmdir "$record"
+    mv "$notice_root/previous" "$record"
+    if ! wait_for_file_contains "$CALL_LOG" '<--remote>'; then result=1; fi
+  else
+    result=1
+  fi
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+  cat "$TEST_PROJECT/io.log"
+  [ "$result" -eq 0 ]
+  [ ! -e "$record" ]
+  grep -q -- '<--remote> <ws://' "$CALL_LOG"
 }
 
 # --- #1537: the seat key must reach tool commands under any shell_environment_policy ---

@@ -231,8 +231,9 @@ NOTICE_COMPONENT="codex-monitor.$PROJECT_HASH.$(printf '%s' "$SEAT_KEY" | agmsg_
 startup_signature=""
 startup_notice() {
   [ "$startup_signature" != "$1:$2" ] || return 0
-  startup_signature="$1:$2"
-  down_notice_set "$NOTICE_COMPONENT" "$1" "$2" "Check $SEAT_LOG; startup keeps retrying. Cancel this launch to stop it."
+  if down_notice_set "$NOTICE_COMPONENT" "$1" "$2" "Check $SEAT_LOG; startup keeps retrying. Cancel this launch to stop it."; then
+    startup_signature="$1:$2"
+  fi
   echo "codex-monitor: $2; see $SEAT_LOG" >&2
 }
 # Only an explicit cancellation stops our own still-running startup child.
@@ -242,7 +243,7 @@ cancel_startup() {
   for job_pid in $(jobs -pr); do
     if [ "$job_pid" = "$server_bg" ]; then kill "$server_bg" 2>/dev/null || true; fi
   done
-  down_notice_clear "$NOTICE_COMPONENT"
+  down_notice_clear "$NOTICE_COMPONENT" || :
   exit 130
 }
 server_bg=""
@@ -265,7 +266,12 @@ while :; do
   fi
   PORT="$(sed -n -e "s/${ansi_esc}\[[0-9;]*m//g" -e 's#.*listening on: ws://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p' "$SEAT_LOG" | head -1)"
   if [ -n "$PORT" ]; then
-    if port_alive "$PORT"; then break; fi
+    if port_alive "$PORT"; then
+      if down_notice_clear "$NOTICE_COMPONENT"; then break; fi
+      echo "codex-monitor: readiness notice could not be cleared; keeping the live server and retrying" >&2
+      sleep 2
+      continue
+    fi
     startup_notice degraded "Codex app-server port is not reachable yet; keeping the live server and retrying"
   fi
   startup_checks=$((startup_checks + 1))
@@ -277,7 +283,6 @@ while :; do
   fi
   sleep "$startup_poll"
 done
-down_notice_clear "$NOTICE_COMPONENT"
 trap - INT TERM
 SOCKET_URL="ws://127.0.0.1:$PORT"
 
