@@ -19,8 +19,8 @@
 # <component> matches ^[a-z0-9][a-z0-9._-]{0,99}$; anything else is refused
 # (return 2) and nothing is written. Callers scope their key (`sync.<team>`) so
 # one healthy caller never clears another's record. Every other outcome returns
-# 0: a notice that cannot be written must never fail the command that tried to
-# write it (one line on stderr says so).
+# 0 (set: done and verified, clear: gone), 1 (an I/O failure, one line on stderr),
+# 2 (invalid input). A caller never lets a failed notice fail its own path.
 #
 # Process launches (programs started; the `$( )` substitutions around builtins are
 # shell forks that start no program):
@@ -112,14 +112,19 @@ down_notice_key() {   # <prefix> <free text> -> prefix.slug-<8 hex>
   printf '%s.%s-%s\n' "$1" "$slug" "$hex"
 }
 
+# 0 = done and verified (the record exists with the new content), 1 = an I/O
+# failure (one line on stderr), 2 = an invalid key or state (nothing written).
+# A caller never lets this fail its own path (`down_notice_set ... || :`); it
+# looks at the status only to decide whether to try again later, and a caller that
+# remembers "already written" remembers it only on 0.
 down_notice_set() {   # <component> <down|degraded> <reason> <recovery>
-  local key="${1-}" state="${2-}" dir f tmp since="" old="" now
+  local key="${1-}" state="${2-}" dir f tmp since="" old="" now line
   _down_notice_key_ok "$key" || return 2
   case "$state" in down|degraded) ;; *) return 2 ;; esac
-  dir="$(_down_notice_dir)" || return 0
+  dir="$(_down_notice_dir)" || { echo "agmsg: could not record that $key is $state (no install root)" >&2; return 1; }
   if [ ! -d "$dir" ] && ! mkdir -p "$dir" 2>/dev/null; then
     echo "agmsg: could not record that $key is $state (cannot create $dir)" >&2
-    return 0
+    return 1
   fi
   f="$dir/$key.json"
   tmp="$dir/.$key.json.$$"
@@ -130,25 +135,38 @@ down_notice_set() {   # <component> <down|degraded> <reason> <recovery>
     if [ "$(_down_notice_field "$old" state)" = "$state" ]; then since="$(_down_notice_field "$old" since)"; fi
   fi
   [ -n "$since" ] || since="$now"
-  if printf '{"component":"%s","state":"%s","reason":"%s","recovery":"%s","since":"%s","updated":"%s"}\n' \
-      "$key" "$state" "$(_down_notice_clean "${3-}")" "$(_down_notice_clean "${4-}")" "$since" "$now" \
-      >"$tmp" 2>/dev/null; then
-    if ! mv -f "$tmp" "$f" 2>/dev/null; then
-      rm -f "$tmp" 2>/dev/null
-      echo "agmsg: could not record that $key is $state" >&2
-    fi
-  else
+  line="$(printf '{"component":"%s","state":"%s","reason":"%s","recovery":"%s","since":"%s","updated":"%s"}' \
+    "$key" "$state" "$(_down_notice_clean "${3-}")" "$(_down_notice_clean "${4-}")" "$since" "$now")"
+  if ! printf '%s\n' "$line" >"$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null
     echo "agmsg: could not record that $key is $state (cannot write in $dir)" >&2
+    return 1
+  fi
+  if ! mv -f "$tmp" "$f" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    echo "agmsg: could not record that $key is $state" >&2
+    return 1
+  fi
+  # Verified, not assumed: the record is there with the content just written.
+  if [ ! -f "$f" ] || [ "$(<"$f")" != "$line" ] 2>/dev/null; then
+    echo "agmsg: could not record that $key is $state (the record did not read back)" >&2
+    return 1
   fi
   return 0
 }
 
+# 0 = the record is gone (or never existed), 1 = it could not be removed,
+# 2 = an invalid key.
 down_notice_clear() {   # <component>
   local dir
   _down_notice_key_ok "${1-}" || return 2
   dir="$(_down_notice_dir)" || return 0
-  rm -f "$dir/$1.json" "$dir/$1.json.shown" 2>/dev/null
+  rm -f "$dir/$1.json.shown" 2>/dev/null
+  rm -f "$dir/$1.json" 2>/dev/null
+  if [ -e "$dir/$1.json" ]; then
+    echo "agmsg: could not clear the record for $1 (cannot remove $dir/$1.json)" >&2
+    return 1
+  fi
   return 0
 }
 

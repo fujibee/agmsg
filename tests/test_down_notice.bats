@@ -138,14 +138,53 @@ teardown() { teardown_test_env; }
   [ -z "$output" ]
 }
 
-@test "an unwritable run directory is not an error for the caller" {
-  mkdir -p "$TEST_SKILL_DIR/run"
+@test "set and clear return 0 when done and verified, 1 on an I/O failure, 2 on invalid input" {
+  run down_notice_set ok1 down "r" "c"
+  [ "$status" -eq 0 ]
+  [ -f "$DIR/ok1.json" ]
+  run down_notice_clear ok1
+  [ "$status" -eq 0 ]
+  [ ! -e "$DIR/ok1.json" ]
+  run down_notice_clear never-there
+  [ "$status" -eq 0 ]
+  run down_notice_set "Bad Key" down "r" "c"
+  [ "$status" -eq 2 ]
+  run down_notice_clear "Bad Key"
+  [ "$status" -eq 2 ]
+}
+
+@test "set returns 1, with one line on stderr, when the run directory cannot be created" {
   : > "$TEST_SKILL_DIR/run/down"      # a file where the directory should be
   run down_notice_set c4 down "r" "c"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   printf '%s\n' "$output" | grep -qF "could not record that c4 is down"
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 1 ]
   run down_notice_print
   [ "$status" -eq 0 ]
+}
+
+@test "set returns 1 when the directory exists but cannot be written" {
+  [ "$(id -u)" -ne 0 ] || skip "root can write anywhere"
+  mkdir -p "$DIR"
+  chmod 500 "$DIR"
+  run down_notice_set c6 down "r" "c"
+  chmod 700 "$DIR"
+  [ "$status" -eq 1 ]
+  [ ! -e "$DIR/c6.json" ]
+}
+
+@test "clear returns 1 when the record cannot be removed" {
+  mkdir -p "$DIR/c7.json/inside"      # rm -f cannot remove a non-empty directory
+  run down_notice_clear c7
+  [ "$status" -eq 1 ]
+  printf '%s\n' "$output" | grep -qF "could not clear the record for c7"
+}
+
+@test "a caller that guards the call with || : keeps going on a failed write" {
+  : > "$TEST_SKILL_DIR/run/down"
+  run bash -c '. "$1"; down_notice_set c8 down r c 2>/dev/null || :; echo after' _ "$SCRIPTS/lib/down-notice.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = after ]
 }
 
 @test "agmsg doctor lists every record as a warning, and exits 1" {
