@@ -8,6 +8,11 @@ load test_helper
 
 setup() {
   setup_test_env
+  # Pin bare instance-id keying (#93): no test here is about agent-pid
+  # resolution, and with no agent ancestor (CI) the ps walk to pid 1 finds
+  # nothing anyway, at about 30 ps calls per join.sh. Deterministic under an
+  # agent process too.
+  export AGMSG_AGENT_PID=""
   # Never inherit a real herdr environment from the test runner. A watcher
   # started here that keeps the host's HERDR_PANE_ID will, on ctrl:despawn,
   # close the developer's own pane — the suite kills the session running it.

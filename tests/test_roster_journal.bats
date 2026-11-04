@@ -6,6 +6,11 @@ UUID7_RE='^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
 
 setup() {
   setup_test_env
+  # Pin bare instance-id keying (#93): no test here is about agent-pid
+  # resolution, and with no agent ancestor (CI) the ps walk to pid 1 finds
+  # nothing anyway, at about 30 ps calls per join.sh. Deterministic under an
+  # agent process too.
+  export AGMSG_AGENT_PID=""
 }
 
 teardown() {
