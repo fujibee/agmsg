@@ -19,13 +19,17 @@ setup() {
 
 teardown() {
   # A stub child recorded by a test that may have failed half-way is never left
-  # behind: kill it by the pid the stub itself wrote, and only if it is still there.
-  local f pid
+  # behind: kill it by the pid the stub itself wrote, and only if that pid is still
+  # one of ours (its argv names this test's stub dir or the marker sleep).
+  local f pid cmd
   for f in "$BATS_TEST_TMPDIR/stubborn-pid" "$BATS_TEST_TMPDIR/child-pid"; do
     [ -s "$f" ] || continue
     pid="$(cat "$f")"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    kill -9 "$pid" 2>/dev/null || true
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || cmd=""
+    case "$cmd" in
+      *"$BATS_TEST_TMPDIR"*|*"sleep 3141"*) kill -9 "$pid" 2>/dev/null || true ;;
+    esac
   done
   teardown_test_env
 }
