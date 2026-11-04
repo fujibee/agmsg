@@ -1431,44 +1431,48 @@ _record_handover_events() {
   grep -q "WEND${last}" "$TEST_SKILL_DIR/wbig.log"
 }
 
-@test "watch: a cursor stuck N cycles with pending rows reports on stdout and exits (#1045)" {
+@test "watch: a cursor stuck N cycles with pending rows reports once on stdout, stays up, and resumes when it clears (#1045)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   # Force the delivery query -- the ONLY sqlite call in the loop whose last arg is
   # ':memory:' (SQL on stdin) -- to return nothing, while the store queries (a real DB
   # file as the last arg) keep working. So OUT stays non-empty, ROWS is empty, the
   # cursor never advances, and the SAME batch returns every cycle: the exact silent
-  # self-lock. The stuck guard must notice after STUCK_THRESHOLD cycles, say why on
-  # STDOUT (stderr is /dev/null here), and EXIT rather than loop in silence.
+  # self-lock. The stuck guard must notice after STUCK_THRESHOLD cycles and say why on
+  # STDOUT (stderr is /dev/null here) -- once -- and the watcher must STAY UP and keep
+  # retrying: ending it would leave the session deaf. When the cause clears, the
+  # backlog is delivered and the watcher says delivery resumed.
   local realsqlite; realsqlite="$(command -v sqlite3)"
   local stub="$TEST_SKILL_DIR/sqstub"; mkdir -p "$stub"
   cat > "$stub/sqlite3" <<STUB
 #!/usr/bin/env bash
-if [ "\${@: -1}" = ":memory:" ]; then cat >/dev/null 2>&1; exit 0; fi
+if [ "\${@: -1}" = ":memory:" ] && [ ! -e "$stub/clear" ]; then cat >/dev/null 2>&1; exit 0; fi
 exec "$realsqlite" "\$@"
 STUB
   chmod +x "$stub/sqlite3"
   bash "$SCRIPTS/send.sh" team bob alice "STUCKMSG" >/dev/null   # pending; delivery will fail
   local out="$TEST_SKILL_DIR/stuck.log"
   AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
-    sess-stuck "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+    sess-stuck "$PROJ" claude-code >"$out" 2>"$out.err" 3>&- 4>&- &
   local w=$!
   _bg_track "$w"
   # (1) the report must appear...
   if ! _wait_for_file_contains "$out" "is STUCK"; then kill "$w" 2>/dev/null || true; false; fi
-  # (2) ...and the watcher must EXIT on its own, not keep looping.
-  local i alive=1
-  for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
-  if [ "$alive" -ne 0 ]; then kill "$w" 2>/dev/null || true; false; fi
-  # (3) ...and it must report FAILURE at the process contract (the defined
-  # unhealthy code, 75), not exit 0 -- a supervisor must not read a wedged
-  # watcher as a clean shutdown. Reverting the arm to `exit 0` turns this red.
-  local st=0; wait "$w" || st=$?
-  [ "$st" -eq 75 ]
+  # (2) ...the watcher must still be running well after the threshold, and must
+  # not repeat the report every cycle.
+  sleep 4
+  kill -0 "$w" 2>/dev/null
+  [ "$(grep -c "is STUCK" "$out")" -eq 1 ]
   # the report is a plain "agmsg watch:" line, never mistaken for a "team | from → to" message
   grep -q "agmsg watch: delivery for team:alice is STUCK" "$out"
+  # (3) The cause clears: the pending message is delivered and the episode is closed.
+  : > "$stub/clear"
+  if ! _wait_for_file_contains "$out" "team:alice resumed"; then kill "$w" 2>/dev/null || true; false; fi
+  grep -q "STUCKMSG" "$out"
+  kill -0 "$w" 2>/dev/null
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 }
 
-@test "watch: the stuck guard fires for a pair whose agent name has a space (#1045)" {
+@test "watch: the stuck guard reports a pair whose agent name has a space (#1045)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   # End-to-end companion to test_watch_stuck_map.bats: the tracker keys on the
   # "<team>:<agent>" pair, and identities.sh emits a spaced agent as one
@@ -1495,11 +1499,9 @@ STUB
   local w=$!
   _bg_track "$w"
   if ! _wait_for_file_contains "$out" "is STUCK"; then kill "$w" 2>/dev/null || true; false; fi
-  local i alive=1
-  for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
-  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
-  [ "$alive" -eq 0 ]
   grep -q "agmsg watch: delivery for team:sp aced is STUCK" "$out"
+  kill -0 "$w" 2>/dev/null
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 }
 
 @test "watch: an idle pair seeing only a cursor high-water is not treated as stuck (#1045)" {
@@ -1544,7 +1546,7 @@ STUB
   ! grep -q "is STUCK" "$out"
 }
 
-@test "watch: a failed pending-scan is surfaced and exits, not collapsed to caught-up (#1045)" {
+@test "watch: a failed pending-scan is surfaced once and retried, not collapsed to caught-up (#1045)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   # The loop reads whether messages are waiting with storage_watch_after. If that
   # READ fails and the failure collapses to "" (the old `|| true`), the caught-up
@@ -1562,7 +1564,7 @@ STUB
   local stub="$TEST_SKILL_DIR/sqstub4"; mkdir -p "$stub"
   cat > "$stub/sqlite3" <<STUB
 #!/usr/bin/env bash
-for _a in "\$@"; do case "\$_a" in *message_sent*) exit 1 ;; esac; done
+[ -e "$stub/clear" ] || for _a in "\$@"; do case "\$_a" in *message_sent*) exit 1 ;; esac; done
 exec "$realsqlite" "\$@"
 STUB
   chmod +x "$stub/sqlite3"
@@ -1573,18 +1575,19 @@ STUB
   _bg_track "$w"
   # The failed read must be surfaced...
   if ! _wait_for_file_contains "$out" "cannot read delivery state"; then kill "$w" 2>/dev/null || true; false; fi
-  # ...and the watcher must EXIT, not loop in silence. (Reverting the read to
-  # `|| true` makes the message never appear and the watcher never exit -> red.)
-  local i alive=1
-  for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
-  if [ "$alive" -ne 0 ]; then kill "$w" 2>/dev/null || true; false; fi
-  # ...with the defined unhealthy exit code (75), not exit 0: a failed store read
-  # is unhealthy, and the process contract must say so. Reverting the arm to
-  # `exit 0` turns this red.
-  local st=0; wait "$w" || st=$?
-  [ "$st" -eq 75 ]
+  # ...the watcher must stay up and say it once, not every cycle. (Reverting the
+  # read to `|| true` makes the message never appear -> red.)
+  sleep 4
+  kill -0 "$w" 2>/dev/null
+  [ "$(grep -c "cannot read delivery state" "$out")" -eq 1 ]
   # Non-delivery-shaped diagnostic (a plain "agmsg watch:" line, not "ts | team | from → to | body").
   grep -q "agmsg watch: cannot read delivery state for team:alice" "$out"
+  # When the store reads again the watcher says so and delivers what waited.
+  : > "$stub/clear"
+  if ! _wait_for_file_contains "$out" "can be read again"; then kill "$w" 2>/dev/null || true; false; fi
+  if ! _wait_for_file_contains "$out" "SEED"; then kill "$w" 2>/dev/null || true; false; fi
+  kill -0 "$w" 2>/dev/null
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 }
 
 # --- the watcher re-asserts this pane's name (#1044) --------------------------

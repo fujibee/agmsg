@@ -67,6 +67,8 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Polling and its child operations must never run the user-operation notice.
 export AGMSG_DAEMON_NOTICE_SKIP=1
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+[ ! -f "$SCRIPT_DIR/lib/down-notice.sh" ] || source "$SCRIPT_DIR/lib/down-notice.sh"
 agmsg_storage_load
 # Warm agmsg_storage_dir's own process-lifetime cache as a PLAIN STATEMENT,
 # not via $(...): every real caller (agmsg_db_path -> ... -> _agmsg_db_file)
@@ -636,6 +638,8 @@ fi
 # watcher is currently receiving for that role.
 READY_FILES=""
 cleanup() {
+  # This watcher's own down notice goes with it.
+  if declare -F down_notice_clear >/dev/null 2>&1; then down_notice_clear "watch.$$" 2>/dev/null || true; fi
   # EXIT only removes the pidfile if it still records our pid. A successor
   # watcher (Monitor re-invoked for the same session_id) overwrites $PIDFILE
   # with its own pid before signalling us, so this read sees the successor's
@@ -1154,19 +1158,34 @@ _held_elsewhere_without() {
 # crash (#983). The threshold is FIXED, not an env knob -- an empty/0/non-numeric knob
 # would silently disable the very guard against silence.
 STUCK_THRESHOLD=3
-# Exit status for a watcher that STOPS because delivery is unhealthy -- the store
-# read failed, or a cursor is wedged behind a pending batch. These print a reason
-# and exit, but the exit must not read as success: a supervisor or launcher that
-# only sees the process end would otherwise treat an unhealthy watcher as a clean
-# shutdown, indistinguishable from the intentional exits (install-changed,
-# session-ended, role-moved) that DO mean "done, nothing wrong". A defined
-# non-zero keeps "visible failure" visible at the process contract too. Distinct
-# from the startup exit 1 (usage / DB path / DB-open, #197) so "started, then
-# delivery broke" can be told from "never started"; the value matters only that
-# it is non-zero and stable, which the tests pin.
-_AGMSG_EXIT_DELIVERY_UNHEALTHY=75
+# A failed store read or a wedged cursor does not end the watcher: the next cycle
+# asks again, and the state is reported once per episode (and once more when it
+# clears), not once per cycle. These lists hold the "<team>:<agent>" keys now in
+# each state, newline-separated so a name with a space stays one entry.
+READ_FAILING=""
+STUCK_REPORTED=""
+_flag_has() { case $'\n'"$1"$'\n' in *$'\n'"$2"$'\n'*) return 0 ;; esac; return 1; }
+_flag_add() { printf '%s' "${1:+$1$'\n'}$2"; }
+_flag_without() {
+  local line out="" 
+  while IFS= read -r line; do
+    [ -n "$line" ] && [ "$line" != "$2" ] && out="${out:+$out$'\n'}$line"
+  done <<< "$1"
+  printf '%s' "$out"
+}
+# Down/degraded notice (shown by doctor, status and the session-start hook) while
+# any pair is in one of those states; cleared when none is. A no-op until
+# lib/down-notice.sh is installed.
+_watch_notice_sync() {
+  declare -F down_notice_set >/dev/null 2>&1 || return 0
+  if [ -n "$READ_FAILING$STUCK_REPORTED" ]; then
+    down_notice_set "watch.$$" degraded "the inbox watcher is running but cannot deliver: ${READ_FAILING:+store read failing for ${READ_FAILING//$'\n'/ }}${STUCK_REPORTED:+ read cursor stuck for ${STUCK_REPORTED//$'\n'/ }}; it retries every cycle" "restart this session or run /agmsg actas <name> if it does not clear" || true
+  else
+    down_notice_clear "watch.$$" || true
+  fi
+}
 # The watcher was told to fold itself, released its role, and the pane is STILL
-# THERE. Distinct from 75 (delivery is unhealthy) because the operator's next
+# THERE. A distinct code, because the operator's next
 # move is different: the placement record is deliberately left in place and
 # `despawn --force` works from it.
 _AGMSG_EXIT_TEARDOWN_INCOMPLETE=76
@@ -1554,10 +1573,22 @@ EOF
        && OUT="$(storage_watch_after "$READ_CURSOR" "$pair_team:$pair_agent" 2>/dev/null)"; then
       [ -n "$READ_CURSOR" ] || READ_CURSOR=0
     else
-      printf 'agmsg watch: cannot read delivery state for %s — the store read failed, so whether messages are waiting is unknown. Treating "unknown" as "no messages" would leave this watcher alive and silent, so it is exiting instead; restart this session (or run /%s actas <name>) to resume delivery (#1045/#777).\n' \
-        "$pair_team:$pair_agent" "$(basename "$SKILL_DIR")"
-      cleanup
-      exit "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+      # Not "no messages", and not the end of the watcher either: whether mail is
+      # waiting is unknown, so say so once and ask again next cycle. The store
+      # that failed to read (busy, locked, briefly unreachable) usually comes
+      # back; ending the process would leave the session deaf until someone
+      # noticed (#1045/#777).
+      if ! _flag_has "$READ_FAILING" "$pair_team:$pair_agent"; then
+        READ_FAILING="$(_flag_add "$READ_FAILING" "$pair_team:$pair_agent")"
+        watch_report "cannot read delivery state for $pair_team:$pair_agent — the store read failed, so whether messages are waiting is unknown. This watcher stays up and tries again every cycle; it will say when the read works again. If it keeps failing, restart this session (or run /$(basename "$SKILL_DIR") actas <name>) (#1045/#777)."
+        _watch_notice_sync
+      fi
+      continue
+    fi
+    if _flag_has "$READ_FAILING" "$pair_team:$pair_agent"; then
+      READ_FAILING="$(_flag_without "$READ_FAILING" "$pair_team:$pair_agent")"
+      watch_report "delivery state for $pair_team:$pair_agent can be read again; delivery continues."
+      _watch_notice_sync
     fi
     # fix 2 (#1045): update this pair's stuck-cursor tracker (see the block comment
     # before the loop). "Pending" here means real undelivered MESSAGE rows -- not a
@@ -1589,12 +1620,13 @@ EOF
         else
           _agmsg_n=1
         fi
-        if [ "$_agmsg_n" -ge "$STUCK_THRESHOLD" ]; then
+        if [ "$_agmsg_n" -ge "$STUCK_THRESHOLD" ] && ! _flag_has "$STUCK_REPORTED" "$_agmsg_pair_key"; then
+          # Said once per episode, then the watcher keeps trying: ending it would
+          # leave the session deaf, and the same batch is simply retried next cycle.
           _agmsg_bytes="$(printf '%s' "$OUT" | wc -c | tr -d ' ')"
-          printf 'agmsg watch: delivery for %s is STUCK — its read cursor (%s) has not advanced for %s poll cycles while %s bytes of messages wait behind it, so nothing is being delivered and nothing is being marked read. This watcher is exiting rather than looping in silence; restart this session (or run /%s actas <name>) to resume delivery. If it recurs, the pending batch may be hitting a system limit (#1045/#777).\n' \
-            "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n" "$_agmsg_bytes" "$(basename "$SKILL_DIR")"
-          cleanup
-          exit "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
+          STUCK_REPORTED="$(_flag_add "$STUCK_REPORTED" "$_agmsg_pair_key")"
+          watch_report "delivery for $_agmsg_pair_key is STUCK — its read cursor ($READ_CURSOR) has not advanced for $_agmsg_n poll cycles while $_agmsg_bytes bytes of messages wait behind it, so nothing is being delivered and nothing is being marked read. This watcher stays up and retries every cycle; it will say when delivery resumes. If it recurs, the pending batch may be hitting a system limit; restart this session (or run /$(basename "$SKILL_DIR") actas <name>) if it does not clear (#1045/#777)."
+          _watch_notice_sync
         fi
         _stuck_set "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n"
         ;;
@@ -1602,6 +1634,13 @@ EOF
         _stuck_drop "$_agmsg_pair_key"
         ;;
     esac
+    # Delivery resumed (the cursor moved, or the batch is gone): close the episode.
+    if _flag_has "$STUCK_REPORTED" "$_agmsg_pair_key" \
+       && { [ "$_agmsg_has_new_message" -eq 0 ] || [ "${_agmsg_n:-0}" -lt "$STUCK_THRESHOLD" ]; }; then
+      STUCK_REPORTED="$(_flag_without "$STUCK_REPORTED" "$_agmsg_pair_key")"
+      watch_report "delivery for $_agmsg_pair_key resumed."
+      _watch_notice_sync
+    fi
     if [ "$_agmsg_has_new_message" -eq 1 ]; then
     # The quote is held in a variable, never written as \' in the pattern: bash 3.2
     # (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the inline form
