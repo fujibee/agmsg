@@ -53,11 +53,17 @@ _run_unfinished_update_watch() {
     bash "$SCRIPTS/watch.sh" sid-note-u "$PROJ" claude-code alice >"$OUT" 2>/dev/null 3>&- 4>&- &
   local pid=$!
   sleep 2
-  # A finished install (VERSION written) whose new watch.sh cannot be exec'd.
+  # A finished install (VERSION written) whose new watch.sh cannot be exec'd. The
+  # watcher stays up and says so; stop it once the line is out.
   chmod -x "$SCRIPTS/watch.sh"
   printf 'new-version\n' > "$TEST_SKILL_DIR/VERSION"
-  _wait_exit "$pid" || { kill "$pid" 2>/dev/null || true; chmod +x "$SCRIPTS/watch.sh"; false; }
-  wait "$pid" || true
+  local i
+  for i in $(seq 1 100); do
+    grep -qF 'installation was updated while this watcher was running' "$OUT" 2>/dev/null && break
+    sleep 0.1
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   chmod +x "$SCRIPTS/watch.sh"
 }
 

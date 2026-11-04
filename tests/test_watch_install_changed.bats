@@ -153,7 +153,7 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
   refute grep -q 'installation was updated' "$out"
 }
 
-@test "watch: a finished install whose watch.sh is not runnable keeps the original exit after the timeout (#684)" {
+@test "watch: a finished install whose watch.sh is not runnable keeps the watcher delivering, says so once, and restarts when it is repaired (#684)" {
   local out="$BATS_TEST_TMPDIR/out4.txt"
   : > "$out"
   AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=2 \
@@ -174,14 +174,71 @@ _explain_if_missing() {   # <out-file> <pid> <needle>
   chmod -x "$SCRIPTS/watch.sh"
   printf 'new-version\n' > "$TEST_SKILL_DIR/VERSION"
 
-  _wait_for "! kill -0 $pid 2>/dev/null" || true
+  # Past the grace the watcher says so, once, and does NOT stop.
+  _wait_for "grep -q 'still executing the code from before the update' '$out'" || true
+  _explain_if_missing "$out" "$pid" 'still executing the code from before the update'
+  grep -q 'still executing the code from before the update' "$out"
+  # The degraded record is written (just after the line) and names the way out.
+  _wait_for "grep -q '\"state\":\"degraded\"' '$TEST_SKILL_DIR/run/down/watch-install.$pid.json'" || true
+  grep -q '"state":"degraded"' "$TEST_SKILL_DIR/run/down/watch-install.$pid.json"
+  sleep 2
+  kill -0 "$pid"
+  run grep -c 'still executing the code from before the update' "$out"
+  [ "$output" = "1" ]
+
+  # It still delivers with the code it has.
+  bash "$SCRIPTS/send.sh" team bob alice "while-broken" >/dev/null
+  _wait_for "grep -q 'while-broken' '$out'" || true
+  grep -q 'while-broken' "$out"
+
+  # Repaired: it restarts onto the new code by itself (same pid, exec), no manual re-arm.
+  awk 'NR==1 { print; print "echo watch-test-repaired-marker"; next } { print }' \
+    "$SCRIPTS/watch.sh" > "$SCRIPTS/watch.sh.new"
+  chmod +x "$SCRIPTS/watch.sh.new"
+  mv "$SCRIPTS/watch.sh.new" "$SCRIPTS/watch.sh"
+  _wait_for "grep -q 'watch-test-repaired-marker' '$out'" || true
+  # The record goes away once the watcher has restarted onto the repaired install.
+  _wait_for "[ ! -e '$TEST_SKILL_DIR/run/down/watch-install.$pid.json' ]" || true
+  [ ! -e "$TEST_SKILL_DIR/run/down/watch-install.$pid.json" ]
   local was_alive=0
   kill -0 "$pid" 2>/dev/null && was_alive=1
+  grep -q 'watch-test-repaired-marker' "$out"
   agmsg_stop_pid "$pid"
-  chmod +x "$SCRIPTS/watch.sh"
+  [ "$was_alive" -eq 1 ]
+}
 
-  [ "$was_alive" -eq 0 ]
-  grep -q 'installation was updated' "$out"
+@test "watch: an installation that never stops looking changed does not end the watcher after the restart cap (#684)" {
+  local out="$BATS_TEST_TMPDIR/out5.txt"
+  : > "$out"
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" sid-684d "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local pid=$!
+
+  bash "$SCRIPTS/send.sh" team bob alice "before-churn" >/dev/null
+  _wait_for "grep -q 'before-churn' '$out'" || true
+  grep -q 'before-churn' "$out"
+
+  # A VERSION stamped in the future reads as newer than every watcher start, so
+  # each restarted image sees "changed" again -- the loop the cap exists for.
+  printf 'future-version\n' > "$TEST_SKILL_DIR/VERSION"
+  touch -t 203801010000 "$TEST_SKILL_DIR/VERSION"
+
+  _wait_for "grep -q 'kept changing across 5 restart' '$out'" || true
+  _explain_if_missing "$out" "$pid" 'kept changing across 5 restart'
+  grep -q 'kept changing across 5 restart' "$out"
+  _wait_for "grep -q '\"state\":\"degraded\"' '$TEST_SKILL_DIR/run/down/watch-install.$pid.json'" || true
+  grep -q '"state":"degraded"' "$TEST_SKILL_DIR/run/down/watch-install.$pid.json"
+  sleep 2
+  # Still the same process, still serving the subscription, and it said so once.
+  kill -0 "$pid"
+  run grep -c 'kept changing across 5 restart' "$out"
+  [ "$output" = "1" ]
+  bash "$SCRIPTS/send.sh" team bob alice "after-churn" >/dev/null
+  _wait_for "grep -q 'after-churn' '$out'" || true
+  local was_alive=0
+  kill -0 "$pid" 2>/dev/null && was_alive=1
+  grep -q 'after-churn' "$out"
+  agmsg_stop_pid "$pid"
+  [ "$was_alive" -eq 1 ]
 }
 
 @test "watch: keeps running when nothing in the installation changes (#684)" {

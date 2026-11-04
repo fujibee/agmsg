@@ -67,6 +67,8 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Polling and its child operations must never run the user-operation notice.
 export AGMSG_DAEMON_NOTICE_SKIP=1
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/down-notice.sh"
 agmsg_storage_load
 # Warm agmsg_storage_dir's own process-lifetime cache as a PLAIN STATEMENT,
 # not via $(...): every real caller (agmsg_db_path -> ... -> _agmsg_db_file)
@@ -636,6 +638,8 @@ fi
 # watcher is currently receiving for that role.
 READY_FILES=""
 cleanup() {
+  # This watcher's own install-state notice goes with it.
+  down_notice_clear "watch-install.$$" 2>/dev/null || true
   # EXIT only removes the pidfile if it still records our pid. A successor
   # watcher (Monitor re-invoked for the same session_id) overwrites $PIDFILE
   # with its own pid before signalling us, so this read sees the successor's
@@ -804,6 +808,10 @@ esac
 # clock change moves it exactly as it would move `date +%s`. The negative-
 # elapsed handling below stays in place because of this, not despite it.
 _INSTALL_INCOMPLETE_SINCE=""
+# Set once the grace has run out and that was said, so the line appears once.
+_INSTALL_STALL_REPORTED=""
+# Same, for the consecutive-restart cap.
+_INSTALL_CHURN_REPORTED=""
 
 # Fixed, internal, non-negotiable (review finding: an env-supplied limit can
 # be forged or inherited from an unrelated process). Tagged with this exact
@@ -833,7 +841,25 @@ _install_restart_count() {
 _install_restart_count_reset() {
   [ -z "${AGMSG_WATCH_RESTART_COUNT:-}" ] && [ -z "${AGMSG_WATCH_RESTART_CHAIN:-}" ] && return 0
   unset AGMSG_WATCH_RESTART_COUNT AGMSG_WATCH_RESTART_CHAIN
+  # A run of restarts just ended: any "keeps changing" notice from it is over.
+  _install_notice_clear
 }
+
+# Degraded notice for an install that is not settling (shown by doctor, status
+# and the session-start hook). Keyed on the pid, which an exec keeps, so the
+# image that clears it is the one that set it.
+_install_notice_set() {   # <reason> <recovery>
+  down_notice_set "watch-install.$$" degraded "$1" "$2" || true
+}
+_install_notice_clear() {
+  down_notice_clear "watch-install.$$" || true
+}
+
+# Past the consecutive-restart cap a restart is still allowed, but only once this
+# process image has lived this long: an install that never stops looking changed
+# (a VERSION stamped in the future, a clock that stepped back) then costs one
+# restart a minute instead of a tight exec loop, and delivery goes on between them.
+_WATCH_INSTALL_RESTART_MIN_AGE=60
 
 # Restart on the new code in place of exiting (#684 follow-up). `exec` replaces
 # this process image without forking, so there is never a moment with two
@@ -886,8 +912,12 @@ _handle_install_changed() {
 
   if _install_ready; then
     _INSTALL_INCOMPLETE_SINCE=""
+    if [ -n "$_INSTALL_STALL_REPORTED" ]; then
+      _INSTALL_STALL_REPORTED=""
+      _install_notice_clear
+    fi
     restarts="$(_install_restart_count)"
-    if [ "$restarts" -lt "$_WATCH_INSTALL_RESTART_LIMIT" ]; then
+    if [ "$restarts" -lt "$_WATCH_INSTALL_RESTART_LIMIT" ] || [ "$SECONDS" -ge "$_WATCH_INSTALL_RESTART_MIN_AGE" ]; then
       watch_log "the agmsg installation was updated while this watcher was running; restarting on the new code (same process, same subscription)."
       cleanup
       AGMSG_WATCH_RESTART_COUNT=$((restarts + 1))
@@ -906,8 +936,15 @@ _handle_install_changed() {
       watch_report "exec of the updated watch.sh failed; exiting instead of running stale code."
       exit 1
     fi
-    watch_report "the agmsg installation kept changing across $restarts restart(s) in a row; exiting rather than looping. Restart this session (or run /agmsg actas <name>) to resume delivery.$(_agmsg_watch_agmsgd_note)"
-    exit 0
+    # Too many restarts in a row, and this image is young: keep delivering with the
+    # code it has and try again later (at most one restart a minute). Said once, in
+    # the image that reaches the cap.
+    if [ "$restarts" -eq "$_WATCH_INSTALL_RESTART_LIMIT" ] && [ -z "$_INSTALL_CHURN_REPORTED" ]; then
+      _INSTALL_CHURN_REPORTED=1
+      watch_report "the agmsg installation kept changing across $restarts restart(s) in a row. This watcher keeps delivering with the code it has and will try to restart onto the new code again, at most once a minute. If it keeps happening, restart this session (or run /agmsg actas <name>).$(_agmsg_watch_agmsgd_note)"
+      _install_notice_set "the installation kept changing across $restarts restarts in a row; the inbox watcher keeps delivering with older code and retries a restart at most once a minute" "restart this session or run /agmsg actas <name> if it does not settle"
+    fi
+    return 0
   fi
 
   if [ -z "$_INSTALL_INCOMPLETE_SINCE" ]; then
@@ -919,8 +956,16 @@ _handle_install_changed() {
     return 0
   fi
 
-  watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. Exiting rather than appearing to work. Restart this session (or run /agmsg actas <name>) to resume delivery.$(_agmsg_watch_agmsgd_note)"
-  exit 0
+  # Still not ready after the grace: keep delivering with the code it has (it works
+  # for everything it does today) and keep asking every cycle, so the restart onto
+  # the new code happens the moment the install is complete and watch.sh is
+  # runnable. Said once. Nothing is exec'd until it is ready.
+  if [ -z "$_INSTALL_STALL_REPORTED" ]; then
+    _INSTALL_STALL_REPORTED=1
+    watch_report "the agmsg installation was updated while this watcher was running, so it is still executing the code from before the update. It keeps delivering, and restarts onto the new code once the install is complete and watch.sh is runnable. If that does not happen, restart this session (or run /agmsg actas <name>).$(_agmsg_watch_agmsgd_note)"
+    _install_notice_set "the installation was updated but the new watch.sh is not runnable or the install did not finish; the inbox watcher keeps delivering with older code" "repair the install (re-run the installer), then it restarts by itself; or restart this session / run /agmsg actas <name>"
+  fi
+  return 0
 }
 
 # Resolve subscription set.
