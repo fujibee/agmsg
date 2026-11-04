@@ -7,6 +7,7 @@
 # the fix turns on.
 
 load test_helper
+bats_require_minimum_version 1.5.0
 
 setup() {
   setup_test_env
@@ -431,6 +432,20 @@ gone_pid() {
     agmsg_normalize_instance_id sess claude-code 2>&1 1>/dev/null
   '
   [[ "$output" == *"falling back to bare session_id"* ]]
+}
+
+@test "normalize: a suppressed fallback warning still records degradation, and strong identity clears only that session" {
+  source "$SKILL_DIR/scripts/lib/down-notice.sh"
+  agmsg_agent_pid() { return 1; }
+  [ "$(agmsg_normalize_instance_id sess claude-code 2>/dev/null)" = sess ]
+  local component
+  component="$(down_notice_key instance-id $'claude-code\nsess')"
+  down_notice_list | grep -Fq "$component"$'\tdegraded\t'
+  down_notice_list | grep -Fq 'parallel resume isolation is degraded'
+  [ "$(agmsg_instance_id_for_pid other claude-code 4242)" = other.4242 ]
+  down_notice_list | grep -Fq "$component"$'\tdegraded\t'
+  [ "$(agmsg_normalize_instance_id sess.4242 claude-code)" = sess.4242 ]
+  [ -z "$(down_notice_list)" ]
 }
 
 # --- AGMSG_AGENT_PID override ---
@@ -1040,4 +1055,11 @@ require_eperm_pid() {
   comp=0; agmsg_instance_alive "sid-live.$$"          || comp=$?
   [ "$bare" -eq 0 ]
   [ "$comp" -eq 0 ]
+}
+
+@test "notice I/O failures cannot stop fallback or recovery under errexit" {
+  local script='source "$1/lib/down-notice.sh"; down_notice_set() { return 1; }; down_notice_clear() { return 1; }; source "$1/lib/instance-id.sh"; agmsg_instance_id_for_pid sess codex ""; printf "\n"; agmsg_instance_id_for_pid sess codex 4242'
+  run --separate-stderr bash -e -c "$script" _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'sess\nsess.4242')" ]
 }

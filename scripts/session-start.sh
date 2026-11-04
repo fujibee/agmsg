@@ -171,8 +171,7 @@ CC_PID=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
 # what keys the watcher pidfile / watermark / actas owner, so parallel
 # --continue/--resume processes that share a session_id stay isolated (#93).
 # The cc-instance dedup record and the emitted watch.sh directive both use it.
-INSTANCE_ID="$(agmsg_instance_id_from_pid "$SESSION_ID" "$CC_PID")"
-
+INSTANCE_ID="$(agmsg_instance_id_for_pid "$SESSION_ID" "$TYPE" "$CC_PID")"
 # --- Cleanup of stale cc-instance files and their orphan watchers. ---
 # A cc-instance.<pid> whose CC pid is dead is left over from a previous CC.
 # Before removing it, optionally kill the watcher bound to its last
@@ -340,11 +339,12 @@ if [ -x "$SKILL_DIR/scripts/remote.sh" ] && [ -r "$SKILL_DIR/scripts/lib/sync-au
   fi
 fi
 
-# A component that is down or degraded and could not recover itself: said once.
+# A component that could not recover itself: said once after the terminal context.
+DOWN_NOTICE_CONTEXT=""
 if [ -r "$SKILL_DIR/scripts/lib/down-notice.sh" ]; then
   # shellcheck source=scripts/lib/down-notice.sh
   . "$SKILL_DIR/scripts/lib/down-notice.sh"
-  down_notice_print_once || true
+  DOWN_NOTICE_CONTEXT="$(down_notice_print_once || true)"
 fi
 
 # --- Skip directive when a watcher is already alive for this instance. ---
@@ -360,7 +360,8 @@ if [ -f "$WATCHER_PIDFILE" ]; then
     cat <<EOF
 $TERMINAL_LINE
 $TEAM_LINE
-AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
+${DOWN_NOTICE_CONTEXT:+$DOWN_NOTICE_CONTEXT
+}AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
 No action needed — the existing watcher is the active one.
 EOF
     exit 0
@@ -492,7 +493,8 @@ if [ -n "$ROLE_NAME" ]; then
   cat <<EOF
 $TERMINAL_LINE
 $TEAM_LINE
-AGMSG monitor mode (resumed role \`$ROLE_NAME\` in team \`$ROLE_TEAM\`):
+${DOWN_NOTICE_CONTEXT:+$DOWN_NOTICE_CONTEXT
+}AGMSG monitor mode (resumed role \`$ROLE_NAME\` in team \`$ROLE_TEAM\`):
 $SEAT_CLAIM, so invoke the Monitor tool now with the following parameters, before
 any other action in this session.
 
@@ -549,7 +551,8 @@ if [ "${_pair_count:-0}" -le 1 ]; then
   cat <<EOF
 $TERMINAL_LINE
 $TEAM_LINE
-AGMSG monitor mode: invoke the Monitor tool now with the following parameters,
+${DOWN_NOTICE_CONTEXT:+$DOWN_NOTICE_CONTEXT
+}AGMSG monitor mode: invoke the Monitor tool now with the following parameters,
 before any other action in this session.
 
   command: $WATCH_COMMAND
@@ -610,7 +613,8 @@ esac
 cat <<EOF
 $TERMINAL_LINE
 $TEAM_LINE
-AGMSG monitor mode: standing down — no inbox watcher was started for this session.
+${DOWN_NOTICE_CONTEXT:+$DOWN_NOTICE_CONTEXT
+}AGMSG monitor mode: standing down — no inbox watcher was started for this session.
 
 This resumed session could not be matched to a seat (no role-session record, and
 no actas lock it owns), and this project has more than one registered seat. An
