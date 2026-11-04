@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 
-# #1886: a read-only health check of the Codex app-server daemon. ps, top, lsof
+# #1886: a read-only health check of the Codex app-server daemon. ps, footprint, lsof
 # and uname are stubbed on PATH for the command under test only, and CODEX_HOME
 # is a throwaway directory; no real daemon is ever read, stopped or restarted.
 
@@ -14,7 +14,7 @@ setup() {
   printf '{"pid":%s,"processStartTime":"%s"}\n' "$$" "$START" > "$CODEX_HOME/app-server-daemon/daemon.pid"
   _stub_uname Darwin
   _stub_ps "5-00:00:00" "$START"
-  _stub_top "1.5G"
+  _stub_footprint 1536
 }
 
 teardown() {
@@ -26,8 +26,9 @@ _stub() {   # <name> <body>
   chmod +x "$BATS_TEST_TMPDIR/stubs/$1"
 }
 _stub_uname() { _stub uname "echo $1"; }
-_stub_ps() { _stub ps "echo '$1 $2'"; }       # <etime> <lstart>
-_stub_top() { _stub top "printf 'MEM \\n%s\\n' '$1'"; }
+_stub_ps() { _stub ps "echo '$$ $1 $2'"; }     # <etime> <lstart>, for the daemon.pid pid
+# <MB>; phys_footprint in bytes as `footprint -f bytes` prints it, peak twice that
+_stub_footprint() { _stub footprint "printf 'Auxiliary data:\\n    phys_footprint: %s B\\n    phys_footprint_peak: %s B\\n' $(( $1 * 1048576 )) $(( $1 * 2097152 ))"; }
 
 _health() {
   PATH="$BATS_TEST_TMPDIR/stubs:$PATH" run bash "$SCRIPTS/codex-daemon-health.sh"
@@ -46,19 +47,19 @@ _field() {   # <n>  (1-based tab field of the first line)
   [ "$(_field 7)" = 0 ]
 }
 
-@test "health: a daemon younger than 12 h is not over, and top is not run for it" {
-  _stub_top "9.0G"
-  _stub top 'echo top-was-called >> '"$BATS_TEST_TMPDIR"'/spawned'
+@test "health: a daemon younger than 12 h is not over, and its footprint is not read" {
+  _stub footprint 'echo footprint-was-called >> '"$BATS_TEST_TMPDIR"'/spawned'
   _stub_ps "11:59:59" "$START"
   _health
   [ "$(_field 2)" = running ]
   [ "$(_field 5)" = 43199 ]
+  [ "$(_field 6)" = "" ]
   [ "$(_field 7)" = 0 ]
   [ ! -e "$BATS_TEST_TMPDIR/spawned" ]
 }
 
 @test "health: 6 GB and 12 h is over, and the client count is read only then" {
-  _stub_top "6.0G"
+  _stub_footprint 6144
   _stub_ps "12:00:00" "$START"
   mkdir -p "$CODEX_HOME/app-server-control"
   ln -s "$BATS_TEST_TMPDIR/ctl.sock" "$CODEX_HOME/app-server-control/app-server-control.sock"
@@ -69,17 +70,18 @@ _field() {   # <n>  (1-based tab field of the first line)
 }
 
 @test "health: just under 6 GB with a long age is not over" {
-  _stub_top "6143M"
+  _stub_footprint 6143
   _stub_ps "30-00:00:00" "$START"
   _health
   [ "$(_field 7)" = 0 ]
   [ "$(_field 8)" = "" ]
 }
 
-@test "health: a pid that is not running is stale, and nothing is read from ps or top" {
+@test "health: a pid that is not running is stale, and footprint is not read" {
   printf '{"pid":999999,"processStartTime":"%s"}\n' "$START" > "$CODEX_HOME/app-server-daemon/daemon.pid"
-  _stub ps 'echo ps-was-called >> '"$BATS_TEST_TMPDIR"'/spawned'
-  _stub top 'echo top-was-called >> '"$BATS_TEST_TMPDIR"'/spawned'
+  # The liveness helper cross-checks with the real ps, so the ps stub goes.
+  rm -f "$BATS_TEST_TMPDIR/stubs/ps"
+  _stub footprint 'echo footprint-was-called >> '"$BATS_TEST_TMPDIR"'/spawned'
   _health
   [ "$(_field 2)" = stale ]
   [ ! -e "$BATS_TEST_TMPDIR/spawned" ]
@@ -115,7 +117,7 @@ _field() {   # <n>  (1-based tab field of the first line)
 }
 
 @test "doctor: prints the daemon line, warns over the limit with the restart command, and does not touch the daemon" {
-  _stub_top "7.0G"
+  _stub_footprint 7168
   _stub_ps "13:00:00" "$START"
   PATH="$BATS_TEST_TMPDIR/stubs:$PATH" run bash "$SCRIPTS/doctor.sh"
   [ "$status" -eq 1 ]
@@ -125,16 +127,37 @@ _field() {   # <n>  (1-based tab field of the first line)
   kill -0 $$
 }
 
-@test "doctor: a young daemon still shows its footprint (doctor always reads it)" {
-  _stub_top "3.0G"
+@test "doctor: shows footprint and peak for an old daemon; a young one is not read" {
+  _stub_footprint 3072
+  _stub_ps "13:00:00" "$START"
+  PATH="$BATS_TEST_TMPDIR/stubs:$PATH" run bash "$SCRIPTS/doctor.sh"
+  [ "$status" -eq 0 ]
+  case "$output" in *"footprint 3.0 GB, peak 6.0 GB"*) ;; *) false ;; esac
+  _stub footprint 'echo footprint-was-called >> '"$BATS_TEST_TMPDIR"'/spawned'
   _stub_ps "01:00:00" "$START"
   PATH="$BATS_TEST_TMPDIR/stubs:$PATH" run bash "$SCRIPTS/doctor.sh"
   [ "$status" -eq 0 ]
-  case "$output" in *"footprint 3.0 GB"*) ;; *) false ;; esac
+  case "$output" in *"footprint is read from 12 h on"*) ;; *) false ;; esac
+  [ ! -e "$BATS_TEST_TMPDIR/spawned" ]
 }
 
 @test "doctor: a healthy daemon adds no warning" {
   PATH="$BATS_TEST_TMPDIR/stubs:$PATH" run bash "$SCRIPTS/doctor.sh"
   [ "$status" -eq 0 ]
   case "$output" in *"Codex app-server daemon:"*"footprint 1.5 GB"*) ;; *) false ;; esac
+}
+
+@test "health: several profiles cost one single-pid ps each, and footprint only for the old daemons" {
+  local i
+  for i in 1 2 3; do
+    mkdir -p "$BATS_TEST_TMPDIR/p$i/app-server-daemon"
+    cp "$CODEX_HOME/app-server-daemon/daemon.pid" "$BATS_TEST_TMPDIR/p$i/app-server-daemon/daemon.pid"
+    printf 'codex_home=%s\n' "$BATS_TEST_TMPDIR/p$i" >> "$TEST_SKILL_DIR/run/role-session.x" 2>/dev/null || { mkdir -p "$TEST_SKILL_DIR/run"; printf 'codex_home=%s\n' "$BATS_TEST_TMPDIR/p$i" >> "$TEST_SKILL_DIR/run/role-session.x"; }
+  done
+  _stub ps "echo ps >> '$BATS_TEST_TMPDIR/ps-calls'; echo '$$ 5-00:00:00 $START'"
+  _stub footprint "echo fp >> '$BATS_TEST_TMPDIR/fp-calls'; printf 'phys_footprint: 1048576 B\\nphys_footprint_peak: 2097152 B\\n'"
+  _health
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 4 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/ps-calls" | tr -d ' ')" = 4 ]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/fp-calls" | tr -d ' ')" = 4 ]
 }

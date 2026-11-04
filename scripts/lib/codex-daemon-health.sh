@@ -7,7 +7,8 @@
 # restarts or kills any process. The remediation is printed for a person to run.
 #
 # Reading is cheap and needs no root: daemon.pid for the pid, one `ps` for age
-# and start time, one `top` for the memory footprint. Footprint, not RSS (RSS
+# and start time, one `footprint` for the memory footprint (0.1-0.2 s; `top -l 1`
+# took 5-7 s and several seconds of system CPU). Footprint, not RSS (RSS
 # swings with paging). There is no CPU signal on purpose: CPU comes in bursts
 # unrelated to memory.
 #
@@ -20,15 +21,14 @@ AGMSG_CODEX_DAEMON_AGE_LIMIT_SECONDS=43200
 # ~/.codex) plus every codex_home= recorded for a seat in <run_dir>. Only
 # existing directories, each once.
 agmsg_codex_daemon_profiles() {   # <run_dir>
-  local run_dir="${1:-}" own seen="" dir f
+  local run_dir="${1:-}" own seen="" dir
   own="${CODEX_HOME:-${HOME:+$HOME/.codex}}"
   {
     [ -z "$own" ] || printf '%s\n' "$own"
     if [ -n "$run_dir" ]; then
-      for f in "$run_dir"/role-session.*; do
-        [ -f "$f" ] || continue
-        sed -n 's/^codex_home=//p' "$f" 2>/dev/null
-      done
+      set -- "$run_dir"/role-session.*
+      # One sed for every record, however many seats there are.
+      [ ! -e "$1" ] || sed -n 's/^codex_home=//p' "$@" 2>/dev/null
     fi
   } | while IFS= read -r dir; do
     case "$dir" in /*) ;; *) continue ;; esac
@@ -51,78 +51,125 @@ _agmsg_codex_daemon_etime_seconds() {
   printf '%s\n' $(( 10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s ))
 }
 
-# "2464K", "12M+", "2.7G" (top -stats mem) -> whole MB. Empty on anything else.
-_agmsg_codex_daemon_mem_mb() {
-  local v="${1:-}" unit num int frac=0
-  v="${v%[+-]}"
-  unit="${v: -1}"
-  num="${v%?}"
-  case "$num" in ''|*[!0-9.]*|*.*.*) return 1 ;; esac
-  int="${num%%.*}"
-  case "$num" in *.*) frac="${num#*.}"; frac="${frac:0:1}" ;; esac
-  [ -n "$int" ] || int=0
-  case "$unit" in
-    K) printf '%s\n' $(( int / 1024 )) ;;
-    M) printf '%s\n' "$int" ;;
-    G) printf '%s\n' $(( int * 1024 + 10#${frac:-0} * 1024 / 10 )) ;;
-    T) printf '%s\n' $(( int * 1048576 + 10#${frac:-0} * 1048576 / 10 )) ;;
-    *) return 1 ;;
-  esac
+# Bytes -> whole MB (rounded down). Empty on anything but digits.
+_agmsg_codex_daemon_bytes_mb() {
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' $(( $1 / 1048576 ))
 }
 
-# Probe one profile. Sets, and prints nothing:
+# kill -0 alone reads EPERM as "gone"; the shared helper tells the two apart and
+# only a proven ESRCH counts as gone.
+_agmsg_cdh_pid_alive() {
+  if ! command -v _agmsg_pid_alive_local >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$(dirname "${BASH_SOURCE[0]}")/instance-id.sh" 2>/dev/null || { kill -0 "$1" 2>/dev/null; return; }
+  fi
+  _agmsg_pid_alive_local "$1"
+}
+
+# Scan every profile under <run_dir> and call <callback> <profile> for each, after
+# setting (and printing nothing):
 #   CDH_STATE      absent | stale | running | unchecked
 #   CDH_REASON     why, for stale / unchecked
 #   CDH_PID CDH_START  (running or stale)
-#   CDH_AGE_SECONDS CDH_FOOTPRINT_MB CDH_OVER (running; OVER is 1 or 0)
+#   CDH_AGE_SECONDS    (running)
+#   CDH_FOOTPRINT_MB CDH_PEAK_MB   (running AND at least the age limit old; empty
+#                                    for a younger daemon, which cannot be over)
+#   CDH_OVER       1 or 0
 #   CDH_CLIENTS    only when over the limit; empty when it could not be counted
-# Spawns: ps 1 + top 1 for a live daemon; readlink/lsof/grep only when over.
-# A daemon younger than the age limit can never be over, so `top` (the slow
-# read: several seconds of system CPU on a busy machine) is skipped for it unless
-# <always> is given -- doctor passes it to show the footprint.
-agmsg_codex_daemon_probe() {   # <profile dir> [always]
-  local profile="${1:-}" always="${2:-}" pidfile json pid start psout etime lstart topout mem sock n
-  CDH_STATE=absent CDH_REASON="" CDH_PID="" CDH_START="" CDH_AGE_SECONDS="" CDH_FOOTPRINT_MB="" CDH_OVER=0 CDH_CLIENTS=""
-  case "$(uname -s)" in
-    Darwin) ;;
-    *) CDH_STATE=unchecked CDH_REASON="not checked on this platform"; return 0 ;;
-  esac
-  pidfile="$profile/app-server-daemon/daemon.pid"
-  [ -f "$pidfile" ] || return 0
-  json="$(cat "$pidfile" 2>/dev/null)" || json=""
-  [[ "$json" =~ \"pid\"[[:space:]]*:[[:space:]]*([0-9]+) ]] || { CDH_STATE=stale CDH_REASON="daemon.pid has no pid"; return 0; }
-  pid="${BASH_REMATCH[1]}"
-  start=""
-  # shellcheck disable=SC2086  # splitting collapses the date's padding spaces
-  [[ "$json" =~ \"processStartTime\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] && { set -f; set -- ${BASH_REMATCH[1]}; set +f; start="$*"; }
-  CDH_PID="$pid" CDH_START="$start"
-  if ! kill -0 "$pid" 2>/dev/null; then
-    CDH_STATE=stale CDH_REASON="pid $pid is not running"; return 0
+# Spawns: one single-pid ps per live daemon, plus per daemon at least 12 h old one
+# footprint, and readlink/lsof/grep only for
+# one that is over. uname once per process, one sed for all seat records.
+# The callback runs as each profile is finished, so a caller that is cut off
+# part-way still has the earlier profiles.
+agmsg_codex_daemon_scan() {   # <run_dir> <callback>
+  local run_dir="${1:-}" cb="${2:-}" profile i n=0 pids="" pid json pidfile
+  local -a profiles=() st=() rs=() pd=() sr=()
+  while IFS= read -r profile; do
+    [ -z "$profile" ] || profiles+=("$profile")
+  done <<< "$(agmsg_codex_daemon_profiles "$run_dir")"
+  n="${#profiles[@]}"
+  [ "$n" -gt 0 ] || return 0
+  [ -n "${_AGMSG_CDH_OS:-}" ] || _AGMSG_CDH_OS="$(uname -s)"
+  if [ "$_AGMSG_CDH_OS" != Darwin ]; then
+    for ((i = 0; i < n; i++)); do
+      _agmsg_cdh_reset; CDH_STATE=unchecked CDH_REASON="not checked on this platform"
+      "$cb" "${profiles[$i]}"
+    done
+    return 0
   fi
-  psout="$(ps -o etime=,lstart= -p "$pid" 2>/dev/null)" || psout=""
-  set -f
-  # shellcheck disable=SC2086
-  set -- $psout
-  set +f
-  etime="${1:-}"; shift 2>/dev/null || true
-  lstart="$*"
-  if [ -n "$start" ] && [ -n "$lstart" ] && [ "$lstart" != "$start" ]; then
+  # Phase 1: each pid file, and whether its pid is alive. No process is spawned.
+  for ((i = 0; i < n; i++)); do
+    st[i]=absent; rs[i]=""; pd[i]=""; sr[i]=""
+    pidfile="${profiles[$i]}/app-server-daemon/daemon.pid"
+    [ -f "$pidfile" ] || continue
+    json="$(<"$pidfile")" 2>/dev/null || json=""
+    if ! [[ "$json" =~ \"pid\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+      st[i]=stale; rs[i]="daemon.pid has no pid"; continue
+    fi
+    pd[i]="${BASH_REMATCH[1]}"
+    # shellcheck disable=SC2086  # splitting collapses the date's padding spaces
+    if [[ "$json" =~ \"processStartTime\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then set -f; set -- ${BASH_REMATCH[1]}; set +f; sr[i]="$*"; fi
+    if _agmsg_cdh_pid_alive "${pd[$i]}"; then
+      st[i]=alive; pids="${pids:+$pids }${pd[$i]}"
+    else
+      st[i]=stale; rs[i]="pid ${pd[$i]} is not running"
+    fi
+  done
+  # One ps per live daemon, not one for all together: measured on macOS, a ps
+  # naming two pids takes about 0.55 s (it walks the whole process table), while
+  # a ps naming one takes about 8 ms, so two single-pid calls are 30x cheaper.
+  _AGMSG_CDH_PS=""
+  for pid in $pids; do
+    _AGMSG_CDH_PS="${_AGMSG_CDH_PS}$(ps -o pid=,etime=,lstart= -p "$pid" 2>/dev/null)"$'\n'
+  done
+  # Phase 2: age, pid reuse, footprint (only from the age limit on).
+  for ((i = 0; i < n; i++)); do
+    _agmsg_cdh_reset
+    CDH_STATE="${st[$i]}" CDH_REASON="${rs[$i]}" CDH_PID="${pd[$i]}" CDH_START="${sr[$i]}"
+    [ "$CDH_STATE" != alive ] || _agmsg_cdh_finish "${profiles[$i]}"
+    "$cb" "${profiles[$i]}"
+  done
+}
+
+_agmsg_cdh_reset() {
+  CDH_STATE=absent CDH_REASON="" CDH_PID="" CDH_START="" CDH_AGE_SECONDS="" CDH_FOOTPRINT_MB="" CDH_PEAK_MB="" CDH_OVER=0 CDH_CLIENTS=""
+}
+
+# A live pid: match it to the shared ps output, then read its footprint if it is
+# old enough to matter.
+_agmsg_cdh_finish() {   # <profile dir>
+  local profile="${1:-}" line pid etime lstart fpout bytes peak sock n
+  etime="" lstart=""
+  while IFS= read -r line; do
+    set -f
+    # shellcheck disable=SC2086
+    set -- $line
+    set +f
+    [ "${1:-}" = "$CDH_PID" ] || continue
+    etime="${2:-}"; shift 2 2>/dev/null || true; lstart="$*"
+    break
+  done <<< "${_AGMSG_CDH_PS:-}"
+  pid="$CDH_PID"
+  if [ -z "$etime" ]; then
+    CDH_STATE=unchecked CDH_REASON="could not read the daemon's age"; return 0
+  fi
+  if [ -n "$CDH_START" ] && [ -n "$lstart" ] && [ "$lstart" != "$CDH_START" ]; then
     CDH_STATE=stale CDH_REASON="pid $pid now belongs to a different process"; return 0
   fi
   CDH_AGE_SECONDS="$(_agmsg_codex_daemon_etime_seconds "$etime")" || {
     CDH_STATE=unchecked CDH_REASON="could not read the daemon's age"; return 0
   }
   CDH_STATE=running
-  if [ -z "$always" ] && [ "$CDH_AGE_SECONDS" -lt "$AGMSG_CODEX_DAEMON_AGE_LIMIT_SECONDS" ]; then
-    return 0
-  fi
-  topout="$(top -l 1 -pid "$pid" -stats mem 2>/dev/null | tail -n 1)" || topout=""
-  mem="${topout//[[:space:]]/}"
-  CDH_FOOTPRINT_MB="$(_agmsg_codex_daemon_mem_mb "$mem")" || {
+  [ "$CDH_AGE_SECONDS" -ge "$AGMSG_CODEX_DAEMON_AGE_LIMIT_SECONDS" ] || return 0
+  fpout="$(footprint -p "$pid" --noCategories -f bytes 2>/dev/null)" || fpout=""
+  [[ "$fpout" =~ phys_footprint:[[:space:]]*([0-9]+) ]] && bytes="${BASH_REMATCH[1]}" || bytes=""
+  CDH_FOOTPRINT_MB="$(_agmsg_codex_daemon_bytes_mb "$bytes")" || {
     CDH_STATE=unchecked CDH_REASON="could not read the daemon's memory footprint"; return 0
   }
-  if [ "${CDH_FOOTPRINT_MB:-}" -ge "$AGMSG_CODEX_DAEMON_FOOTPRINT_LIMIT_MB" ] \
-     && [ "${CDH_AGE_SECONDS:-}" -ge "$AGMSG_CODEX_DAEMON_AGE_LIMIT_SECONDS" ]; then
+  [[ "$fpout" =~ phys_footprint_peak:[[:space:]]*([0-9]+) ]] && peak="${BASH_REMATCH[1]}" || peak=""
+  CDH_PEAK_MB="$(_agmsg_codex_daemon_bytes_mb "$peak")" || CDH_PEAK_MB=""
+  if [ "$CDH_FOOTPRINT_MB" -ge "$AGMSG_CODEX_DAEMON_FOOTPRINT_LIMIT_MB" ]; then
     CDH_OVER=1
     sock="$(readlink "$profile/app-server-control/app-server-control.sock" 2>/dev/null)" || sock=""
     if [ -n "$sock" ]; then

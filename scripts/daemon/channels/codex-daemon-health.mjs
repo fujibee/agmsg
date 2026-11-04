@@ -1,8 +1,8 @@
 // Notify-only health check of the Codex app-server daemon (#1886).
 //
 // At most once per CHECK_INTERVAL_MS it runs scripts/codex-daemon-health.sh (a
-// read-only reader: one ps and one top per profile) in the background, so a
-// slow `top` never holds a poll tick. A daemon that is over the limit (6 GB
+// read-only reader: one ps and one footprint per profile) in the background, so a
+// slow read never holds a poll tick. A daemon that is over the limit (6 GB
 // footprint AND 12 h old) on two consecutive checks gets ONE notice: a line in
 // agmsgd.log and a record in run/codex-daemon-health that doctor prints. The
 // "already noticed" state is keyed on pid + process start time and lives in
@@ -63,9 +63,20 @@ export function parseHealthLines(output) {
 }
 
 // Folds one check's readings into the record. Returns the notices to send.
+//
+// The noticed flag belongs to a pid + start time and stays until that daemon is
+// proven gone: its profile reads stale/absent, or runs another pid. A reading that
+// proves nothing (unchecked, or the profile missing from a cut-short read) keeps
+// the entry, only restarting the consecutive count, so a passing failure cannot
+// make the same daemon noticed twice.
 export function foldReadings(previous, rows) {
   const daemons = new Map();
   const notices = [];
+  const byProfile = new Map(rows.map(row => [row.profile, row]));
+  for (const [key, before] of previous.daemons) {
+    const row = byProfile.get(key.split("\t")[0]);
+    if (!row || row.state === "unchecked") daemons.set(key, { over: 0, noticed: before.noticed });
+  }
   for (const row of rows) {
     if (row.state !== "running") continue;
     const key = `${row.profile}\t${row.pid}\t${row.start}`;
@@ -88,21 +99,31 @@ function noticeText(row) {
   return `Codex app-server daemon pid ${row.pid} for ${row.profile} has run ${hours}h${clients} and holds ${gb} GB, over the 6 GB / 12 h limit on two checks in a row. It keeps running. To restart it: CODEX_HOME=${row.profile} codex app-server daemon restart`;
 }
 
-function runReader(installRoot, signal) {
+// Runs the reader. Profiles are printed as each is finished, so a read cut short
+// by the timeout still returns the profiles before the one that was slow; only a
+// read that produced nothing is an error.
+function runReader(installRoot, signal, timeoutMs = CHECK_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    execFile("bash", [join(installRoot, "scripts", "codex-daemon-health.sh")], { encoding: "utf8", timeout: CHECK_TIMEOUT_MS, signal, env: { ...process.env, SKILL_DIR: installRoot } },
-      (error, stdout) => (error ? reject(error) : resolve(stdout)));
+    execFile("bash", [join(installRoot, "scripts", "codex-daemon-health.sh")], { encoding: "utf8", timeout: timeoutMs, signal, env: { ...process.env, SKILL_DIR: installRoot } },
+      (error, stdout) => {
+        if (!error) return resolve(stdout);
+        if (stdout && !signal?.aborted) {
+          logLine(installRoot, `codex daemon health: reader cut short (${error.message}); using the profiles it finished`);
+          return resolve(stdout);
+        }
+        reject(error);
+      });
   });
 }
 
-export function createCodexDaemonHealthChannel({ installRoot, intervalMs = CHECK_INTERVAL_MS, now = Date.now, read = runReader } = {}) {
+export function createCodexDaemonHealthChannel({ installRoot, intervalMs = CHECK_INTERVAL_MS, timeoutMs = CHECK_TIMEOUT_MS, now = Date.now, read = runReader } = {}) {
   let lastStart = null;
   let inFlight = null;
   const lifetime = new AbortController();
 
   async function check() {
     try {
-      const rows = parseHealthLines(await read(installRoot, lifetime.signal));
+      const rows = parseHealthLines(await read(installRoot, lifetime.signal, timeoutMs));
       const previous = readHealthRecord(installRoot);
       const { daemons, notices } = foldReadings(previous, rows);
       let notice = previous.notice;

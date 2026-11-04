@@ -521,26 +521,30 @@ _team_filter_lines() {
 
 # --- Codex app-server daemon health (#1886) --------------------------------
 CODEX_DAEMON_LINES=""
+_doctor_codex_daemon_profile() {   # <profile dir>; the scan's callback
+  local profile="$1" shown
+  shown="$(_redact_text "$profile" "$SKILL_DIR")"
+  case "${CDH_STATE:-}" in
+    absent) CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: no daemon"$'\n' ;;
+    stale) CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: daemon.pid is stale (${CDH_REASON:-})"$'\n' ;;
+    unchecked) CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: ${CDH_REASON:-}"$'\n' ;;
+    running)
+      if [ -n "${CDH_FOOTPRINT_MB:-}" ]; then
+        CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: pid ${CDH_PID:-}, age $(agmsg_codex_daemon_age_text "${CDH_AGE_SECONDS:-}"), footprint $(agmsg_codex_daemon_footprint_text "${CDH_FOOTPRINT_MB:-}")${CDH_PEAK_MB:+, peak $(agmsg_codex_daemon_footprint_text "$CDH_PEAK_MB")}"$'\n'
+      else
+        CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: pid ${CDH_PID:-}, age $(agmsg_codex_daemon_age_text "${CDH_AGE_SECONDS:-}") (footprint is read from 12 h on)"$'\n'
+      fi
+      if [ "${CDH_OVER:-}" = 1 ]; then
+        _warn "$(_redact_text "$(agmsg_codex_daemon_warning_text "$profile")" "$SKILL_DIR")"
+      fi
+      ;;
+  esac
+}
+
 _doctor_scan_codex_daemons() {
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/lib/codex-daemon-health.sh"
-  local profile shown
-  while IFS= read -r profile; do
-    [ -n "$profile" ] || continue
-    shown="$(_redact_text "$profile" "$SKILL_DIR")"
-    agmsg_codex_daemon_probe "$profile" always
-    case "${CDH_STATE:-}" in
-      absent) CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: no daemon"$'\n' ;;
-      stale) CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: daemon.pid is stale (${CDH_REASON:-})"$'\n' ;;
-      unchecked) CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: ${CDH_REASON:-}"$'\n' ;;
-      running)
-        CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: pid ${CDH_PID:-}, age $(agmsg_codex_daemon_age_text "${CDH_AGE_SECONDS:-}"), footprint $(agmsg_codex_daemon_footprint_text "${CDH_FOOTPRINT_MB:-}")"$'\n'
-        if [ "${CDH_OVER:-}" = 1 ]; then
-          _warn "$(_redact_text "$(agmsg_codex_daemon_warning_text "$profile")" "$SKILL_DIR")"
-        fi
-        ;;
-    esac
-  done <<< "$(agmsg_codex_daemon_profiles "$RUN_DIR")"
+  agmsg_codex_daemon_scan "$RUN_DIR" _doctor_codex_daemon_profile
   if [ -f "$RUN_DIR/codex-daemon-health" ]; then
     CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}$(sed -n 's/^notice\t/  last agmsgd notice: /p' "$RUN_DIR/codex-daemon-health" | tail -n 1)"$'\n'
   fi

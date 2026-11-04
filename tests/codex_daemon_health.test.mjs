@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -113,4 +113,35 @@ test("foldReadings drops daemons that are gone and sends no notice for a non-run
   const { daemons, notices } = foldReadings(prev, parseHealthLines(line({ state: "absent", over: 0 })));
   assert.equal(daemons.size, 0);
   assert.deepEqual(notices, []);
+});
+
+test("an unchecked reading keeps the noticed entry: the same daemon is not noticed twice", async () => {
+  const h = harness([line(), line(), line({ state: "unchecked", over: 0, mb: "", clients: "" }), line(), line()]);
+  const ch = h.make();
+  for (let i = 0; i < 5; i++) { await ch.pollOnce(); await ch.settled(); h.advance(10 * 60 * 1000); }
+  assert.equal(noticeCount(h.root), 1);
+  rmSync(h.root, { recursive: true });
+});
+
+test("a profile missing from a cut-short read keeps its entry; a stale one clears it", async () => {
+  const h = harness([line(), line(), "", line(), line({ state: "stale", over: 0 }), line(), line()]);
+  const ch = h.make();
+  for (let i = 0; i < 7; i++) { await ch.pollOnce(); await ch.settled(); h.advance(10 * 60 * 1000); }
+  // notice 1 after reads 1-2; reads 3-4 keep it; read 5 proves the daemon gone; reads 6-7 notice it again
+  assert.equal(noticeCount(h.root), 2);
+  rmSync(h.root, { recursive: true });
+});
+
+test("the real reader cut short by its timeout still yields the profiles it finished", async () => {
+  const root = makeInstall();
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  const script = join(root, "scripts", "codex-daemon-health.sh");
+  writeFileSync(script, `#!/bin/bash\nprintf '${PROFILE}\\trunning\\t100\\tS\\t50000\\t7000\\t1\\t\\t\\t\\n'\nexec sleep 30\n`);
+  chmodSync(script, 0o755);
+  const ch = createCodexDaemonHealthChannel({ installRoot: root, timeoutMs: 600 });
+  await ch.pollOnce(); await ch.settled();
+  assert.match(logText(root), /reader cut short/);
+  const record = readHealthRecord(root);
+  assert.equal(record.daemons.size, 1, "the finished profile was recorded");
+  rmSync(root, { recursive: true });
 });
