@@ -439,10 +439,10 @@ gone_pid() {
   [ "$(agmsg_normalize_instance_id sess claude-code 2>/dev/null)" = sess ]
   local component
   component="$(down_notice_key instance-id $'claude-code\nsess')"
-  [[ "$(down_notice_list)" == "$component"$'\tdegraded\t'* ]]
-  [[ "$(down_notice_list)" == *'parallel resume isolation is degraded'* ]]
+  down_notice_list | grep -Fq "$component"$'\tdegraded\t'
+  down_notice_list | grep -Fq 'parallel resume isolation is degraded'
   [ "$(agmsg_instance_id_for_pid other claude-code 4242)" = other.4242 ]
-  [[ "$(down_notice_list)" == "$component"$'\tdegraded\t'* ]]
+  down_notice_list | grep -Fq "$component"$'\tdegraded\t'
   [ "$(agmsg_normalize_instance_id sess.4242 claude-code)" = sess.4242 ]
   [ -z "$(down_notice_list)" ]
 }

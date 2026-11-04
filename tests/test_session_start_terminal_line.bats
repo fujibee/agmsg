@@ -8,6 +8,7 @@
 # still visible (never silently dropped) when where.sh itself fails.
 
 load test_helper
+bats_require_minimum_version 1.5.0
 
 setup() {
   setup_test_env
@@ -33,22 +34,23 @@ _run_session_start() {
 }
 
 @test "session-start: plain environment leads with the plain terminal line" {
-  run _run_session_start "sid-plain"
+  run --separate-stderr _run_session_start "sid-plain"
   [ "$status" -eq 0 ]
   # the terminal line must be the FIRST line — before the Monitor directive.
   [ "$(head -1 <<<"$output")" = "AGMSG terminal: plain (no addressable pane) capabilities=spawn despawn peek poke; notes: $TEST_SKILL_DIR/scripts/drivers/terminals/plain/README.md" ]
   grep -qF "AGMSG monitor mode" <<<"$output"
+  grep -qF "parallel resume isolation is degraded" <<<"$output"
 }
 
 @test "session-start: the team.sh pointer line follows immediately after the terminal line" {
-  run _run_session_start "sid-plain-team-line"
+  run --separate-stderr _run_session_start "sid-plain-team-line"
   [ "$status" -eq 0 ]
   [ "$(sed -n '2p' <<<"$output")" = "AGMSG team.sh <team>: shows every teammate's placement and status. To act on one, run peek.sh/poke.sh/arrange.sh <team> <name> directly — its exit code says whether it worked and why not (see each driver's own SKILL.md), so there is no need to guess reachability first." ]
 }
 
 @test "session-start: herdr environment leads with the herdr terminal line, own pane id" {
   export HERDR_ENV=1 HERDR_PANE_ID=w1:p9
-  run _run_session_start "sid-herdr"
+  run --separate-stderr _run_session_start "sid-herdr"
   [ "$status" -eq 0 ]
   [ "$(head -1 <<<"$output")" = "AGMSG terminal: herdr (pane $TEST_SKILL_DIR/herdr.sock:w1:p9) capabilities=spawn despawn peek poke where arrange name; notes: $TEST_SKILL_DIR/scripts/drivers/terminals/herdr/README.md" ]
 }
@@ -56,7 +58,7 @@ _run_session_start() {
 @test "session-start: tmux environment leads with the tmux terminal line, socket-qualified pane id" {
   agmsg_install_fake_tmux
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%3"
-  run _run_session_start "sid-tmux"
+  run --separate-stderr _run_session_start "sid-tmux"
   [ "$status" -eq 0 ]
   [ "$(head -1 <<<"$output")" = "AGMSG terminal: tmux (pane /tmp/sock:%3) capabilities=spawn despawn peek poke where arrange name; notes: $TEST_SKILL_DIR/scripts/drivers/terminals/tmux/README.md" ]
 }
@@ -67,7 +69,7 @@ _run_session_start() {
 # "silent = can't tell waiting from broken" hazard, reapplied to this line).
 @test "session-start: a where.sh failure is visible at the top of the output, never silence" {
   export AGMSG_TERMINAL_DRIVER=bogus
-  run _run_session_start "sid-broken-terminal"
+  run --separate-stderr _run_session_start "sid-broken-terminal"
   [ "$status" -eq 0 ]
   [ -n "$(head -1 <<<"$output")" ]
   grep -qF 'AGMSG terminal: could not be determined' <<<"$output"
