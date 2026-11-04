@@ -41,6 +41,31 @@ reg() {
   AGMSG_RESOLVE_PROJECT=0 bash "$SKILL_DIR/scripts/join.sh" "$1" "$2" "${4:-claude-code}" "$3"
 }
 
+@test "resolve: fallback notice survives suppressed stderr, stays scoped, and explicit selection clears it" {
+  source "$SKILL_DIR/scripts/lib/down-notice.sh"
+  agmsg_agent_pid() { return 1; }
+  agmsg_ancestor_project() { return 1; }
+  agmsg_gitcommon_project() { return 1; }
+  [ "$(agmsg_resolve_project "$ROOT" claude-code 2>/dev/null)" = "$ROOT" ]
+  local component
+  component="$(down_notice_key project "claude-code"$'\n'"$ROOT")"
+  [[ "$(down_notice_list)" == "$component"$'\tdegraded\t'* ]]
+  [[ "$(down_notice_list)" == *'using invocation directory'* ]]
+  [ "$(AGMSG_RESOLVE_PROJECT=0 agmsg_resolve_project "$ROOT/sub" claude-code)" = "$ROOT/sub" ]
+  [[ "$(down_notice_list)" == "$component"$'\tdegraded\t'* ]]
+  [ "$(AGMSG_RESOLVE_PROJECT=0 agmsg_resolve_project "$ROOT" claude-code)" = "$ROOT" ]
+  [ -z "$(down_notice_list)" ]
+}
+
+@test "resolve: registered ancestor fallback explains the selected destination on stderr only" {
+  agmsg_agent_pid() { return 1; }
+  agmsg_ancestor_project() { printf '%s' "$ROOT"; }
+  local stdout="$ROOT/resolved.out" stderr="$ROOT/resolved.err"
+  agmsg_resolve_project "$ROOT/sub" claude-code >"$stdout" 2>"$stderr"
+  [ "$(cat "$stdout")" = "$ROOT" ]
+  grep -q "using registered ancestor $ROOT instead of invocation directory $ROOT/sub" "$stderr"
+}
+
 # --- ancestor walk ---
 
 @test "resolve: subdir resolves to the registered ancestor project" {
