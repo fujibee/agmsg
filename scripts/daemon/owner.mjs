@@ -54,18 +54,18 @@ export function takeOwnership(db, { installRoot, expectedDesired, expectedOpGen,
     }
 
     const owner = readOwner(db);
-    let refuse = null;
     if (owner.state !== "none") {
       if (owner.executor_pid == null) {
-        refuse = "owner state is not none but has no recorded executor";
-      } else {
-        const alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id });
-        if (alive === true) refuse = "current owner is alive";
-        else if (alive === null) refuse = "current owner's liveness cannot be determined; if agmsgd is not running, run agmsg daemon disable and then agmsg daemon enable";
-        // alive === false (confirmed dead): fall through, this call takes over.
+        return { ok: false, reason: "current owner has no recorded executor; ownership cannot be checked. Run agmsg daemon stop, confirm it stopped, then run agmsg daemon start" };
+      }
+      const alive = isAlive({ pid: owner.executor_pid, bootId: owner.executor_boot_id });
+      if (alive === true) return { ok: false, reason: "current owner is alive" };
+      if (alive === null) {
+        // Unknown is not proof of exit. Replacing this owner could leave two
+        // delivery loops running, including outside an update or repeatedly.
+        return { ok: false, reason: "current owner's liveness cannot be determined; taking over could duplicate delivery. Run agmsg daemon stop, confirm it stopped, then run agmsg daemon start" };
       }
     }
-    if (refuse) return { ok: false, reason: refuse };
 
     const gen = owner.gen + 1;
     const executor = currentExecutor();

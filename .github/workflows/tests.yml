@@ -156,6 +156,15 @@ env:
   # other five of its own run, inflating the wall clock past what a lighter
   # shard buys.
   #
+  # 5 -> 6 (2026-11-03). Re-measured, the suite's macOS total is about 6900 s
+  # of slow-runner time: about 1380 s per shard at 5, and a real 5-shard run
+  # on that partition (41594877205) had a 1527 s shard -- under the cap, but
+  # with little margin. At 6 the plan is about 1150 s per shard. The sixth
+  # macOS bats job still waits for a slot, but the other macOS job in a run
+  # (the jsonl storage contract) takes about 2 minutes, so the wait is short
+  # and the run as a whole finishes sooner than at 5 when it is the only run
+  # holding macOS slots.
+  #
   # shard-tests.sh weights every file (pinned or not) by its own real measured
   # macOS seconds from .github/scripts/bats-file-seconds.tsv (#1243) rather
   # than @test count or a count-equivalent fit -- count was never more than a
@@ -166,7 +175,7 @@ env:
   # enough that tests/test_ci_sharding.bats's balance-ratio assertion goes
   # red, the same way #1107 itself was tracked: a constant sized against an
   # older system stays right only as long as the system does.
-  SHARD_TOTAL: 5
+  SHARD_TOTAL: 6
   # The Windows legs' sqlite3, pinned three ways (#824).
   #
   # This comment used to end "one trip to chocolatey, which is the only time
@@ -350,7 +359,7 @@ jobs:
     # the required contexts are `bats` (the aggregate) and the Windows install
     # leg, and neither is renamed, so branch protection sees exactly what it
     # saw. `needs` is one of the contexts a job name may read.
-    name: bats (${{ matrix.os }} ${{ matrix.shard }}/5)${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}
+    name: bats (${{ matrix.os }} ${{ matrix.shard }}/6)${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}
     needs: changes
     # Run even if `changes` somehow failed/was skipped — fail open to the full
     # suite rather than leaving this REQUIRED check unreported (which would
@@ -389,7 +398,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
 

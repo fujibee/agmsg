@@ -53,6 +53,7 @@ fi
 # artifacts); we deliberately do NOT glob-delete "<sid>.*", which would kill a
 # living sibling — those are left to session-start's liveness GC instead.
 INSTANCE_ID="$(agmsg_instance_id "$SESSION_ID" "$TYPE")"
+rm -f "$RUN_DIR/seat-pending.${SESSION_ID//[^A-Za-z0-9._-]/_}"
 
 PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
 if [ -f "$PIDFILE" ]; then

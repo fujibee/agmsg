@@ -27,8 +27,14 @@ setup() {
   [ -n "$last" ]
   body="$(sed -n "${first},${last}p" "${SCRIPTS}/drivers/storage/sqlite-sync.sh")"
 
+  # The function ends with `rm -f "$sql_file" "$jq_err"`, so these must be
+  # files of the test's own. Pointing them at /dev/null deletes the device
+  # node when the suite runs as root.
+  local jq_err_file="$BATS_TEST_TMPDIR/jq.err" sql_out_file="$BATS_TEST_TMPDIR/apply.sql"
+  : > "$jq_err_file"; : > "$sql_out_file"
+
   run bash -c "
-    jq_err=/dev/null; sql_file=/dev/null
+    jq_err='$jq_err_file'; sql_file='$sql_out_file'
     $body
     _sqlite_sync_apply_fail
     echo 'stderr-after-close' >&2

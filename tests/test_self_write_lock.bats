@@ -224,7 +224,7 @@ mutex_of() { printf '%s.reclaim' "$(agmsg_self_write_lock_path "$1" "$2")"; }
 }
 
 @test "mutex crash-between-take-and-release: a reclaimer killed while HOLDING the mutex (published by the real path) does not stop later claims" {
-  # The path tl named: die after taking the mutex and before releasing it. The
+  # The case that matters: die after taking the mutex and before releasing it. The
   # mutex here is produced by the code under test, not written by hand: a child
   # process takes it through _agmsg_lock_mutex_take, reports, and is then
   # killed mid-hold. Its token dies with it, so the next claimant must find a
@@ -233,14 +233,18 @@ mutex_of() { printf '%s.reclaim' "$(agmsg_self_write_lock_path "$1" "$2")"; }
   gone="$(dead_token)"; mark_alive "$gone"; tok="$(me_token)"; mark_alive "$tok"
   mx="$(mutex_of T alice)"
   printf '%s\n' "$gone" > "$(agmsg_self_write_lock_path T alice)"
+  # `exec sleep`: the holder keeps its pid while it waits, so the kill -9 below
+  # reaches the process itself. A plain `sleep 30` child outlived the kill
+  # (reparented before `pkill -P` ran) and, holding bats' fd 3, kept this file
+  # running for ~25s after its last test.
   ( ctok="sid-child.$BASHPID"; printf '%s\n' "$ctok" > "$RUN_DIR/cc-instance.$BASHPID"
     _agmsg_lock_mutex_take "$mx" "$ctok" > "$RUN_DIR/child-take"
-    sleep 30 ) &
+    exec sleep 30 ) 3>&- &
   child=$!
   local i=0; while [ ! -s "$RUN_DIR/child-take" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i+1)); done
   [ "$(cat "$RUN_DIR/child-take")" = ok ]
   kill -9 "$child" 2>/dev/null; wait "$child" 2>/dev/null || true
-  pkill -P "$child" 2>/dev/null || true
+  refute kill -0 "$child"                            # the holder is gone, nothing left behind
   [ -e "$mx" ]                                       # died holding it
   run agmsg_self_write_lock_acquire T alice "$tok"
   [ "$status" -eq 0 ]

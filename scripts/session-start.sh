@@ -88,6 +88,12 @@ fi
 # Fallback so the instruction is still actionable even outside a hook flow.
 [ -z "$SESSION_ID" ] && SESSION_ID="unknown-$$"
 
+# A seat-pending marker from an earlier start of this session (a /clear or
+# --resume re-fire) is stale the moment this run decides again. The stand-down
+# branch below writes it afresh if the session still has no seat.
+_pending_sid="${SESSION_ID//[^A-Za-z0-9._-]/_}"
+rm -f "$RUN_DIR/seat-pending.$_pending_sid"
+
 # Type-specific SessionStart behaviour (Template Method). A type may ship
 # scripts/drivers/types/<type>/_session-start.sh defining agmsg_session_start to override the
 # default no-op — codex uses it to hand the session off to the bridge. The plug
@@ -577,6 +583,23 @@ fi
 # other seat's mail can be consumed — and explain the state so it is not mistaken
 # for silence.
 _seat_list="$(printf '%s\n' "$PAIRS" | awk -F'\t' 'NF>=2 && $2!="" {print "  - /agmsg actas "$2}')"
+# The prompt hook (seat-reminder.sh) repeats this on every turn until a seat is
+# chosen, so a session without a seat cannot go unnoticed. It only prints; it
+# starts no watcher and reads no mail. An unknown-* id means this did not come
+# from a hook, so no later prompt could be matched to it.
+case "$SESSION_ID" in
+  unknown-*) ;;
+  *)
+    if [ -d "$RUN_DIR" ]; then
+      printf '%s\n' \
+        "AGMSG: this session has no seat, so it is NOT receiving agmsg messages (no inbox watcher is running)." \
+        "Pick your seat by running one of:" \
+        "$_seat_list" \
+        "This reminder repeats on every prompt until a seat is chosen. If you are none of these seats, no watcher is the correct state." \
+        > "$RUN_DIR/seat-pending.$_pending_sid" 2>/dev/null || true
+    fi
+    ;;
+esac
 cat <<EOF
 $TERMINAL_LINE
 $TEAM_LINE
@@ -595,6 +618,9 @@ To start receiving as your seat, claim it explicitly — this re-fires the monit
 directive on the role-filtered path:
 
 $_seat_list
+
+Until a seat is chosen, this list is shown again on every prompt in this
+session, so the missing watcher is not mistaken for an empty inbox.
 
 If you are not any of these seats, no watcher is the correct state.
 EOF

@@ -191,7 +191,7 @@ _reap_test_skill_dir_procs() {
       # it as a pattern: a pattern assembled from an empty prefix ("${TMPDIR:+…}" with
       # TMPDIR unset, or "${TMPDIR%/}" with TMPDIR="/") degenerates to match ANY non-empty
       # dir. This guards a KILL, so the loose failure kills EXTRA processes, not nothing
-      # (co2 BLOCKING). Strip the trailing slash first, then require the result non-empty,
+      # (review finding). Strip the trailing slash first, then require the result non-empty,
       # so unset / "" / "/" all fail closed. Only then is "$_tmp" safe as a pattern prefix.
       local _tmp="${TMPDIR:-}"; _tmp="${_tmp%/}"
       [ -n "$_tmp" ] || return 0
@@ -555,6 +555,67 @@ wait_for_pid_exit() {
     sleep $_WAIT_INTERVAL
   done
   return 1
+}
+
+# Stop a background process a test started: signal it (TERM unless told
+# otherwise), wait for it to be gone -- bounded -- and escalate to KILL if it
+# is still there, then reap it. Use this instead of `kill "$pid"; wait "$pid"`.
+#
+# A bare `wait` has no bound. When the process does not act on the signal it
+# blocks until the CI job's 30-minute cap, and the log then shows nothing but
+# a silent shard. Ubuntu shards hit the cap that way 14 times between
+# 2026-09-17 and 2026-10-20; the hang sampler showed a watch.sh still in its
+# sleep loop under a test that was waiting for it (bash 5.2.21 has also
+# logged this watcher's TERM trap failing to parse). This helper turns the
+# same event into a few seconds of delay and a line on stderr, and the test
+# goes on to report on what it was actually checking.
+#
+# Only a background job of the calling shell is signalled: the pid must be
+# listed by `jobs -p` (a builtin, so the same on Git Bash), checked again
+# right before KILL. A number read from a pidfile can be stale or reused by
+# another process, so such a pid gets no signal at all and the helper returns
+# 1; stop those with an ownership check of their own (see
+# test_remote_status_liveness.bats's _stop_owned_engine).
+#
+# Polls quickly at first (most processes are gone within a few ms of TERM),
+# then at the shared interval, up to _STOP_PID_TICKS. Not for asserting that a
+# process exits on TERM -- use wait_for_pid_exit and an assertion for that.
+_STOP_PID_TICKS=100   # 20 x 0.01s, then 80 x 0.1s: about 8s before KILL
+_agmsg_stop_pid_is_job() {   # <pid>
+  local j
+  for j in $(jobs -p 2>/dev/null); do
+    [ "$j" = "$1" ] && return 0
+  done
+  return 1
+}
+agmsg_stop_pid() {   # <pid> [signal name, default TERM]
+  local pid="$1" sig="${2:-TERM}" i
+  case "$pid" in ''|*[!0-9]*|0|1) return 0 ;; esac
+  if ! _agmsg_stop_pid_is_job "$pid"; then
+    _pid_gone "$pid" && return 0
+    echo "agmsg_stop_pid: pid $pid is not a background job of this shell; not signalling it" >&2
+    return 1
+  fi
+  kill "-$sig" "$pid" 2>/dev/null || true
+  for i in $(seq 1 $_STOP_PID_TICKS); do
+    jobs >/dev/null 2>&1 || true
+    _pid_gone "$pid" && break
+    if [ "$i" -le 20 ]; then sleep 0.01; else sleep $_WAIT_INTERVAL; fi
+  done
+  if ! _pid_gone "$pid"; then
+    if ! _agmsg_stop_pid_is_job "$pid"; then
+      echo "agmsg_stop_pid: pid $pid is no longer a background job of this shell; not sending KILL" >&2
+      return 1
+    fi
+    echo "agmsg_stop_pid: pid $pid still running after SIG$sig; sending KILL" >&2
+    kill -9 "$pid" 2>/dev/null || true
+    if ! wait_for_pid_exit "$pid"; then
+      echo "agmsg_stop_pid: pid $pid still running after KILL" >&2
+      return 1
+    fi
+  fi
+  wait "$pid" 2>/dev/null || true
+  return 0
 }
 
 # Wait for <file> to contain exactly <expected>, for pidfile handoffs where the

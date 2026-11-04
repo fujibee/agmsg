@@ -74,6 +74,15 @@ _record_choice() {   # <value>
   _agmsg_role_session_write _choice_write_unlocked "$1" || { echo "agmsg delivery: could not record the choice for this project" >&2; return 1; }
 }
 
+# Choosing the monitor for Codex needs the PATH shim back; choosing agmsgd again
+# lets it go (codex-shim-install.sh sync decides). Reported, never fatal.
+_codex_shim_sync() {
+  [ "$TYPE" = codex ] || return 0
+  local out
+  out="$(bash "$SCRIPT_DIR/drivers/types/codex/codex-shim-install.sh" sync 2>&1)" || { printf 'agmsg delivery: could not update the Codex shim: %s\n' "$out" >&2; return 0; }
+  case "$out" in removed:*|installed:*) printf 'agmsg delivery: %s\n' "$out" ;; esac
+}
+
 _mode_label() { case "$1" in monitor) printf 'monitor (legacy)' ;; *) printf '%s' "$1" ;; esac; }
 
 case "$ACTION" in
@@ -126,10 +135,12 @@ case "$ACTION" in
       bash "$SCRIPT_DIR/delivery.sh" set monitor "$TYPE" "$PROJECT"
     fi
     _record_choice agmsgd
+    _codex_shim_sync
     ;;
   *)
     bash "$SCRIPT_DIR/delivery.sh" set "$ACTION" "$TYPE" "$PROJECT"
     _record_choice "$ACTION"
+    _codex_shim_sync
     case "$offer" in
       agmsgd=on|agmsgd=not-running*)
         echo "agmsgd does not deliver to this project now ($(_mode_label "$ACTION") chosen). agmsgd itself stays on for the other projects of this install; to turn it off for all of them: agmsg daemon disable"

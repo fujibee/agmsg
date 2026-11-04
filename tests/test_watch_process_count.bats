@@ -69,8 +69,7 @@ teardown() {
     >"$BATS_TEST_TMPDIR/watch.out" 2>"$BATS_TEST_TMPDIR/watch.err" &
   local wpid=$!
   sleep 14
-  kill "$wpid" 2>/dev/null
-  wait "$wpid" 2>/dev/null
+  agmsg_stop_pid "$wpid"
 
   # Divide by the OBSERVED sleep count, not an assumed wall-clock/interval
   # division: `sleep` is itself shimmed above, so this is the same cycle a

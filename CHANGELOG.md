@@ -4,6 +4,41 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-11-03
+
+This release keeps agmsgd running through changes it used to stop for. A file added, edited or removed under the installed `scripts/` no longer stops agmsgd or the remote sync engine; they leave only when an update replaces the install record, and `agmsg daemon status` shows what differs while they keep running. On Linux, agmsgd identifies the boot by the kernel's boot id, so a clock step (WSL2 after the host sleeps) no longer makes a running agmsgd read as stopped. Update to get both; nothing else is needed.
+
+### Fixed
+- agmsgd and the remote sync engine no longer stop when a file under the installed `scripts/` is added, edited or removed; they step aside only when an update replaces the install record. `agmsg daemon status` lists the files that differ from the record and says agmsgd keeps running. A watcher re-executes only after an install finishes (#1864, #1870)
+- agmsgd starts even when `scripts/` differs from its install record, and says what differed (#1850)
+- Linux: agmsgd uses the kernel boot id, so a clock step after a host sleep or time sync no longer reports a running agmsgd as stopped; on WSL the start-time check against pid reuse is skipped (#1853)
+- Linux: the agmsgd systemd unit gets a PATH that reaches sqlite3 and Node (#1844)
+- agmsgd finds Node from the path recorded at install first, then `AGMSG_NODE`, then `PATH` (#1818)
+- A project on agmsgd never falls back to the Monitor, and `actas` no longer suggests it there (#1811, #1812, #1820)
+- A Codex seat under the shared Codex app-server finds its own terminal pane from its thread instead of the pane named in the server's environment; when its pane cannot be proven, nothing is written to another seat's pane (#1862)
+- A resumed session can take back its own seat lock (#1808)
+- Process command lines are read with `ps -ww`, so a narrow terminal cannot truncate them (#1813)
+- `check-inbox.sh` reports an unregistered agent type instead of exiting silently (#1832)
+- `plugin remove` names the members still joined and says why they stop answering (#1834)
+- A failing optional setup step no longer stops install or update (#1840)
+- Install and update no longer announce the Codex shim on every run (#1816)
+- Remote sync: the seal request is decoded once, not per chunk; idle cycles skip driver preparation and back off when quiet; a `jq -b` probe that cannot run is told apart from one that lacks `-b` (#1852, #1837, #1825)
+- A stopping watch says so when agmsgd cannot yet address the session (#1854)
+- A seat restored with `actas`, a spawned seat or a rejoin no longer asks about delivery again; the choice is offered only on a first human join, and a running agmsgd is kept (#1873)
+- A resumed Claude Code session that cannot tell which seat it is shows the "pick your seat" list on every prompt until a seat is chosen, instead of once; no watcher is started and no message is read meanwhile. A project picks this up after its delivery mode is set again (#1869)
+- Codex: `agmsg delivery turn` writes the PostToolUse hook even when the Codex version cannot be read. When agmsgd cannot tell whether the previous executor is still running, the refusal explains the risk and the recovery: `agmsg daemon stop`, confirm it stopped, then `agmsg daemon start` (#1866)
+
+### Changed
+- With agmsgd on and no Codex project on the Monitor, the `~/.agents/bin/codex` shim this install owns is removed, and Codex runs as the plain binary. `agmsg daemon disable`, or choosing the Monitor for a Codex project, puts it back. Windows keeps the shim, which adds `--no-daemon` on an elevated shell (#1865)
+
+### Added
+- The `app-addon` member type (data only), used by the desktop app's add-ons (#1860)
+
+### Documentation
+- SKILL.md says what an agmsgd notice asks the agent to do (#1831)
+
+[1.7.1]: https://github.com/fujibee/agmsg/compare/v1.7.0...v1.7.1
+
 ## [1.7.0] - 2026-10-27
 
 This release adds plugins from GitHub: `agmsg plugin install <owner>/<repo>` adds a third-party ext-tool, terminal or agent type after showing you every file it can run (and, in chat, offering to have the agent read them first), and keeps it pinned to the commit you approved. It also hardens remote sync against compressed responses from a sync server (CVE-2026-111497); if you use remote sync, update.

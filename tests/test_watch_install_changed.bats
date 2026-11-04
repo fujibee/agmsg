@@ -14,10 +14,11 @@
 #   1.2.0-rc.1 -> rc.3     nothing observable
 #
 # That spread is why the guard here is not tied to a table or a schema: the
-# symptom moves between releases, the cause does not. Any file under scripts/
-# being newer than the watcher's own start means it is running code that is no
-# longer on disk, whatever changed -- and now that is a restart trigger, not
-# just an exit trigger.
+# symptom moves between releases, the cause does not. An install that finished
+# after the watcher's own start (VERSION, its last write, newer than the start)
+# means it is running code that is no longer on disk, whatever changed -- and
+# that is a restart trigger, not just an exit trigger. A file changed under
+# scripts/ without an install finishing is not (#1863).
 
 load test_helper
 
@@ -44,6 +45,25 @@ _wait_for() {
     sleep 0.1
   done
   return 1
+}
+
+# When the expected line never arrived, say what the watcher looked like, so a
+# red CI run shows whether it died, was still starting, or was alive and silent.
+# Every step is best-effort and read-only: history.sh lists messages without
+# marking anything read (inbox.sh would consume the message under test), and a
+# missing file or directory must not abort before the caller's own assertion.
+_explain_if_missing() {   # <out-file> <pid> <needle>
+  grep -q "$3" "$1" 2>/dev/null && return 0
+  {
+    echo "--- watcher output ($1) ---"
+    cat "$1" 2>&1 || true
+    if kill -0 "$2" 2>/dev/null; then echo "--- pid $2 alive ---"; else echo "--- pid $2 gone ---"; fi
+    echo "--- run dir ---"
+    ls -la "$TEST_SKILL_DIR/run" 2>&1 || true
+    echo "--- recent messages (read-only) ---"
+    bash "$SCRIPTS/history.sh" team alice 5 2>&1 | head -10 || true
+  } >&3 2>/dev/null || true
+  return 0
 }
 
 @test "watch: restarts on the new code and keeps delivering, one process, no duplicate, when its own installation is replaced (#684)" {
@@ -94,109 +114,74 @@ _wait_for() {
   run grep -c 'after-the-update' "$out"
   [ "$output" = "1" ]
 
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
 }
 
-@test "watch: a scripts change with no completed VERSION keeps the original exit, never execs a half-finished install (#684)" {
+# #1863: only a finished install (VERSION written after the watcher started) is
+# an update. A file added or edited under scripts/ by hand, mid-copy or not,
+# never stops the watcher or re-execs it.
+@test "watch: a change under scripts/ with no VERSION write keeps the watcher running (#1863)" {
   local out="$BATS_TEST_TMPDIR/out3.txt"
   : > "$out"
-  # Real installs finish within a couple of seconds at most; the incomplete-
-  # generation timeout is a production safety net measured in tens of
-  # seconds, not something this test should sit through at full length just
-  # to observe the fallback. Shortened here only.
   AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=2 \
-    bash "$SCRIPTS/watch.sh" sid-684c "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+    bash "$SCRIPTS/watch.sh" sid-1863a "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
   local pid=$!
 
-  bash "$SCRIPTS/send.sh" team bob alice "before-half-update" >/dev/null
-  _wait_for "grep -q 'before-half-update' '$out'" || true
-  grep -q 'before-half-update' "$out"
+  bash "$SCRIPTS/send.sh" team bob alice "before-stray" >/dev/null
+  _wait_for "grep -q 'before-stray' '$out'" || true
+  grep -q 'before-stray' "$out"
 
-  # A change under scripts/ with no matching VERSION write -- what install.sh's
-  # own rewrite window looks like mid-copy (#963): some files already
-  # rewritten, the completion marker not yet published. Must not be exec'd as
-  # a finished generation, and must fall back to the original exit only once
-  # the (shortened, above) incomplete-generation timeout elapses -- not
-  # immediately, since a real install may still be about to finish.
   touch "$SCRIPTS/config.sh"
-
-  # Same load-bearing `|| true` as the exit-path tests: a timeout here must
-  # not skip the reap below and leave a live watcher holding the runner open.
-  _wait_for "! kill -0 $pid 2>/dev/null" || true
-
-  local was_alive=0
-  kill -0 "$pid" 2>/dev/null && was_alive=1
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-
-  [ "$was_alive" -eq 0 ]
-  grep -q 'installation was updated' "$out"
-
-  # Second lifecycle, same test (#684 review round 3): a STALE VERSION whose
-  # timestamp happens to TIE with this watcher's own start -- a coarse
-  # filesystem clock can produce this by coincidence -- must not be read as
-  # proof of completion either. A tie proves nothing either way, so only a
-  # VERSION strictly newer than the watcher's own start may count; otherwise
-  # an old, unrelated VERSION could make a still-mid-copy install look
-  # finished the moment its first scripts write lands.
-  local out2="$BATS_TEST_TMPDIR/out4.txt"
-  : > "$out2"
-  AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=2 \
-    bash "$SCRIPTS/watch.sh" sid-684d "$PROJ" claude-code >"$out2" 2>/dev/null 3>&- 4>&- &
-  local pid2=$!
-
-  bash "$SCRIPTS/send.sh" team bob alice "before-tie-update" >/dev/null
-  _wait_for "grep -q 'before-tie-update' '$out2'" || true
-  grep -q 'before-tie-update' "$out2"
-
+  : > "$SCRIPTS/stray-data-file"
+  # A stale VERSION that only ties with the watcher's start is not a finish either.
   local stamp
   stamp="$(ls "$TEST_SKILL_DIR"/run/.watch-start.* 2>/dev/null | head -1)"
   [ -n "$stamp" ]
   printf 'stale-unrelated-version\n' > "$TEST_SKILL_DIR/VERSION"
   touch -r "$stamp" "$TEST_SKILL_DIR/VERSION"
-
-  touch "$SCRIPTS/config.sh"
-
-  _wait_for "! kill -0 $pid2 2>/dev/null" || true
-
-  local was_alive2=0
-  kill -0 "$pid2" 2>/dev/null && was_alive2=1
-  kill "$pid2" 2>/dev/null || true
-  wait "$pid2" 2>/dev/null || true
-
-  [ "$was_alive2" -eq 0 ]
-  grep -q 'installation was updated' "$out2"
-
-  # Third lifecycle (#684 review round 5): an out-of-range override must be
-  # rejected back to the fixed 60s production ceiling, not honored as-is.
-  # "0" (below the valid 1-60 range) is used rather than a huge value
-  # precisely because it is fast to disprove: if it were wrongly honored,
-  # the watcher would exit within about one poll cycle of the change, while
-  # a wrongly-honored huge value would look identical to correct behavior
-  # within any short test window. Staying alive well past that window is
-  # what proves the override was rejected -- this test does not wait out
-  # the full 60s ceiling itself, only long enough to rule out "0" having
-  # taken effect.
-  local out3="$BATS_TEST_TMPDIR/out5.txt"
-  : > "$out3"
-  AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=0 \
-    bash "$SCRIPTS/watch.sh" sid-684e "$PROJ" claude-code >"$out3" 2>/dev/null 3>&- 4>&- &
-  local pid3=$!
-
-  bash "$SCRIPTS/send.sh" team bob alice "before-invalid-override" >/dev/null
-  _wait_for "grep -q 'before-invalid-override' '$out3'" || true
-  grep -q 'before-invalid-override' "$out3"
-
-  touch "$SCRIPTS/config.sh"
   sleep 5
 
-  local was_alive3=0
-  kill -0 "$pid3" 2>/dev/null && was_alive3=1
-  kill "$pid3" 2>/dev/null || true
-  wait "$pid3" 2>/dev/null || true
+  bash "$SCRIPTS/send.sh" team bob alice "after-stray" >/dev/null
+  _wait_for "grep -q 'after-stray' '$out'" || true
+  local was_alive=0
+  kill -0 "$pid" 2>/dev/null && was_alive=1
+  agmsg_stop_pid "$pid"
+  rm -f "$SCRIPTS/stray-data-file"
 
-  [ "$was_alive3" -eq 1 ]
+  [ "$was_alive" -eq 1 ]
+  grep -q 'after-stray' "$out"
+  refute grep -q 'installation was updated' "$out"
+}
+
+@test "watch: a finished install whose watch.sh is not runnable keeps the original exit after the timeout (#684)" {
+  local out="$BATS_TEST_TMPDIR/out4.txt"
+  : > "$out"
+  AGMSG_WATCH_INTERVAL=1 AGMSG_WATCH_INSTALL_INCOMPLETE_TIMEOUT=2 \
+    bash "$SCRIPTS/watch.sh" sid-684c "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local pid=$!
+
+  bash "$SCRIPTS/send.sh" team bob alice "before-broken-update" >/dev/null
+  _wait_for "grep -q 'before-broken-update' '$out'" || true
+  _explain_if_missing "$out" "$pid" 'before-broken-update'
+  grep -q 'before-broken-update' "$out"
+
+  # VERSION must be strictly newer than the watcher's start stamp (see
+  # _install_complete). bash 3.2 compares whole seconds, so a VERSION written in
+  # the same second as the stamp is a tie and reads as "not finished": a fast
+  # runner delivers the first message and gets here inside that second. A real
+  # install takes longer than that; the test has to wait it out.
+  sleep 2
+  chmod -x "$SCRIPTS/watch.sh"
+  printf 'new-version\n' > "$TEST_SKILL_DIR/VERSION"
+
+  _wait_for "! kill -0 $pid 2>/dev/null" || true
+  local was_alive=0
+  kill -0 "$pid" 2>/dev/null && was_alive=1
+  agmsg_stop_pid "$pid"
+  chmod +x "$SCRIPTS/watch.sh"
+
+  [ "$was_alive" -eq 0 ]
+  grep -q 'installation was updated' "$out"
 }
 
 @test "watch: keeps running when nothing in the installation changes (#684)" {
@@ -219,8 +204,7 @@ _wait_for() {
   # Same ordering as above: reap first, assert on what was captured.
   local was_alive=0
   kill -0 "$pid" 2>/dev/null && was_alive=1
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  agmsg_stop_pid "$pid"
 
   [ "$was_alive" -eq 1 ]
   run grep -c 'installation was updated' "$out"
@@ -246,14 +230,14 @@ _wait_for() {
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" shared-sid "$PROJ" claude-code >"$out2" 2>/dev/null 3>&- 4>&- &
   local second=$!
   _wait_for "! kill -0 $first 2>/dev/null" || true
-  kill "$first" 2>/dev/null || true
-  wait "$first" 2>/dev/null || true
+  agmsg_stop_pid "$first"
 
   # The successor must still be armed.
   bash "$SCRIPTS/send.sh" team bob alice "successor-control" >/dev/null
   _wait_for "grep -q 'successor-control' '$out2'" || true
 
   touch "$SCRIPTS/config.sh"
+  sleep 2   # VERSION must be strictly newer than the stamp; see test 3
   printf '0.0.0-test\n' > "$TEST_SKILL_DIR/VERSION"
   bash "$SCRIPTS/send.sh" team bob alice "successor-after-update" >/dev/null
   _wait_for "grep -q 'successor-after-update' '$out2'" || true
@@ -263,6 +247,13 @@ _wait_for() {
   kill -0 "$second"
   grep -q 'successor-after-update' "$out2"
 
-  kill "$second" 2>/dev/null || true
-  wait "$second" 2>/dev/null || true
+  agmsg_stop_pid "$second"
+}
+
+@test "watch test diagnostic: lists what the watcher saw without reading the unread message, and survives a missing file" {
+  bash "$SCRIPTS/send.sh" team bob alice "still-unread" >/dev/null
+  _explain_if_missing "$BATS_TEST_TMPDIR/does-not-exist.txt" 999999 'never-there'
+  run bash "$SCRIPTS/inbox.sh" team alice
+  [ "$status" -eq 0 ]
+  case "$output" in *still-unread*) ;; *) false ;; esac
 }

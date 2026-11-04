@@ -1005,6 +1005,36 @@ fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
+/// Orderable form of a version: "X.Y.Z" plus its pre-release, so that an
+/// installed release candidate sorts BELOW the release it precedes
+/// (1.7.0-rc.1 < 1.7.0). Only an explicit alpha/beta/rc tag counts as a
+/// pre-release; git-describe suffixes ("-3-gabc1234", "-dirty") and build
+/// metadata keep comparing equal to their base X.Y.Z, as before.
+/// The last three fields order the pre-release: (is_release, tag rank, number).
+fn parse_version(s: &str) -> Option<(u64, u64, u64, u8, u8, u64)> {
+    let (major, minor, patch) = parse_semver(s)?;
+    let s = s.trim().trim_start_matches('v');
+    let s = s.split('+').next().unwrap_or(s);
+    let pre = s.split_once('-').map(|(_, rest)| rest).unwrap_or("");
+    let tag = pre.split(['.', '-']).next().unwrap_or("");
+    let (rank, rest) = if let Some(r) = tag.strip_prefix("alpha") {
+        (0u8, r)
+    } else if let Some(r) = tag.strip_prefix("beta") {
+        (1, r)
+    } else if let Some(r) = tag.strip_prefix("rc") {
+        (2, r)
+    } else {
+        return Some((major, minor, patch, 1, 0, 0));
+    };
+    // "rc.2" and "rc2" both carry the number; a bare "rc" is number 0.
+    let num = if rest.is_empty() {
+        pre.split(['.', '-']).nth(1).and_then(|n| n.parse().ok()).unwrap_or(0)
+    } else {
+        rest.parse().unwrap_or(0)
+    };
+    Some((major, minor, patch, 0, rank, num))
+}
+
 #[derive(Serialize)]
 pub struct CoreVersionStatus {
     installed: Option<String>,
@@ -1045,8 +1075,8 @@ pub fn agmsg_core_version_status() -> CoreVersionStatus {
     let pinned = pinned_core_version();
     let installed = read_installed_core_version();
 
-    let outdated = match (&installed, parse_semver(&pinned)) {
-        (Some(v), Some(pinned_v)) => match parse_semver(v) {
+    let outdated = match (&installed, parse_version(&pinned)) {
+        (Some(v), Some(pinned_v)) => match parse_version(v) {
             Some(installed_v) => installed_v < pinned_v,
             None => true,
         },
@@ -1383,7 +1413,7 @@ pub fn start_watcher(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        agmsg_base, msys_to_native, parse_semver, pinned_core_version, run_script,
+        agmsg_base, msys_to_native, parse_semver, parse_version, pinned_core_version, run_script,
         protected_locations, running_core_version, store_info, to_bash_slashes, watchable_stores,
         fetch_stores_in_one_process, note_batch_failure, parse_stores, watchable_stores_timed, BATCH_LOG,
     };
@@ -1495,6 +1525,27 @@ mod tests {
         assert!(parse_semver("1.1.10") > parse_semver("1.1.9"));
         assert!(parse_semver("1.1.4") < parse_semver("1.2.0"));
         assert!(parse_semver("1.1.4") < parse_semver("2.0.0"));
+    }
+
+    #[test]
+    fn release_candidate_sorts_below_its_release() {
+        assert!(parse_version("1.7.0-rc.1") < parse_version("1.7.0"));
+        assert!(parse_version("v1.7.0-rc.1") < parse_version("1.7.0"));
+        assert!(parse_version("1.7.0-rc.2") < parse_version("1.7.0-rc.10"));
+        assert!(parse_version("1.7.0-rc2") < parse_version("1.7.0-rc10"));
+        assert!(parse_version("1.7.0-alpha.1") < parse_version("1.7.0-beta.1"));
+        assert!(parse_version("1.7.0-beta.3") < parse_version("1.7.0-rc.1"));
+        // An rc of the next release is still newer than the previous release.
+        assert!(parse_version("1.6.9") < parse_version("1.7.0-rc.1"));
+        assert!(parse_version("1.7.0") > parse_version("1.7.0-rc.9"));
+    }
+
+    #[test]
+    fn describe_suffixes_and_build_metadata_are_not_pre_releases() {
+        assert_eq!(parse_version("1.7.0-3-gabc1234"), parse_version("1.7.0"));
+        assert_eq!(parse_version("1.7.0-dirty"), parse_version("1.7.0"));
+        assert_eq!(parse_version("1.7.0+build.5"), parse_version("1.7.0"));
+        assert_eq!(parse_version("unknown"), None);
     }
 
     // --- command-layer harness (fake agmsg-core scripts) ---
@@ -2023,6 +2074,23 @@ printf '{"team":"%s","driver":"sqlite","partition":"x","path":"%s","exists":%s}\
         // user would actually act on.
         std::fs::write(dir.path().join("VERSION"), "9.9.9\n").unwrap();
         assert_eq!(running_core_version(), "9.9.9");
+    }
+
+    #[test]
+    #[serial]
+    fn an_installed_release_candidate_is_offered_the_matching_release() {
+        // #1845: the pinned core is a release; an installed rc of it must be outdated,
+        // the release itself must not be, and a describe-suffixed build stays as before.
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        let pinned = pinned_core_version();
+        let status = |installed: &str| {
+            std::fs::write(dir.path().join("VERSION"), format!("{installed}\n")).unwrap();
+            super::agmsg_core_version_status().outdated
+        };
+        assert!(status(&format!("{pinned}-rc.1")), "rc install of the pinned release is outdated");
+        assert!(!status(&pinned), "the release itself is current");
+        assert!(!status(&format!("{pinned}-3-gabc1234")), "a describe build is not outdated");
     }
 
     #[test]

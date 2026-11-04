@@ -19,6 +19,7 @@ import {
   verifyDigest,
   verifyInstallId,
   watchForDrift,
+  scriptsMismatches,
 } from "../scripts/daemon/lifecycle.mjs";
 import { openInstallDb } from "../scripts/daemon/db.mjs";
 
@@ -138,7 +139,7 @@ test("verifyInstallId: matches, mismatches, and a never-set install.db all repor
   }
 });
 
-test("watchForDrift: quiet when nothing changed; catches a moved manifest, a VERSION bump, and an in-place edit", async () => {
+test("watchForDrift: quiet when nothing changed; steps aside only for a moved manifest, not for a VERSION bump, an edit or a stray file", async () => {
   const { root, manifest } = makeInstall();
   try {
     const first = readCompletionState(root);
@@ -158,19 +159,17 @@ test("watchForDrift: quiet when nothing changed; catches a moved manifest, a VER
       join(root, "run", "install-manifest.json"),
     );
 
-    // Case 2: VERSION changed without the manifest moving at all.
+    // Not updates: VERSION changed, a file edited in place, a file added. The
+    // record has not moved, so the daemon keeps running.
     writeFileSync(join(root, "VERSION"), "0.0.1-different\n");
-    r = await watchForDrift(root, state);
-    assert.equal(r.changed, true);
-    assert.match(r.reason, /VERSION/);
-    writeFileSync(join(root, "VERSION"), `${manifest.version}\n`);
-
-    // Case 3: a file under scripts/ edited in place -- the #963 case --
-    // with neither the manifest nor VERSION touched.
     writeFileSync(join(root, "scripts", "team.sh"), "tampered in place\n");
-    r = await watchForDrift(root, state);
-    assert.equal(r.changed, true);
-    assert.match(r.reason, /scripts\/ changed in place/);
+    writeFileSync(join(root, "scripts", "stray.txt"), "stray\n");
+    assert.deepEqual(await watchForDrift(root, state), { changed: false });
+
+    // ...and scriptsMismatches names each difference for `agmsg daemon status`.
+    const problems = scriptsMismatches(root, manifest);
+    assert.ok(problems.some((p) => p.kind === "digest_mismatch" && p.path === "scripts/team.sh"));
+    assert.ok(problems.some((p) => p.kind === "unexpected" && p.path === "scripts/stray.txt"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

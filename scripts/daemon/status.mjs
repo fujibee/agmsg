@@ -24,6 +24,7 @@ import { createConnection } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAlive } from "./executor.mjs";
+import { readCompletionState, scriptsMismatches } from "./lifecycle.mjs";
 import { openInstallDb } from "./db.mjs";
 import { PROTOCOL_VERSION } from "./control.mjs";
 import { listCodexRegistrations } from "./channels/codex-queue-store.mjs";
@@ -236,7 +237,8 @@ async function main() {
   // in an interactive terminal (a TTY, where the same write is
   // unbuffered) looked completely fine. Setting exitCode and letting the
   // event loop drain naturally waits for the flush first.
-  const installVerifyWarning = readInstallVerifyWarning(installRoot, owner, alive);
+  let installVerifyWarning = currentInstallVerifyWarning(installRoot, owner, alive);
+  if (installVerifyWarning === undefined) installVerifyWarning = readInstallVerifyWarning(installRoot, owner, alive);
   const pollTimeout = readPollTimeout(installRoot);
   const pollText = pollTimeout ? `Last poll timeout: ${pollTimeout.channel ?? 'unknown'} ${pollTimeout.seat ?? ''} ${pollTimeout.reason} (${pollTimeout.at ?? 'unknown time'})\n` : '';
   process.stdout.write(
@@ -258,11 +260,30 @@ export function readInstallVerifyWarning(installRoot, owner, alive) {
   return warning;
 }
 
+// What differs between scripts/ and the install record right now, for a running
+// agmsgd. A running agmsgd does not stop for such a difference (only the
+// completion record moving stops it), so this is where it shows. Returns the
+// warning, null when the tree matches the record NOW (the start-time warning is
+// then out of date and must not be shown), or undefined when the comparison
+// could not be made (no running pid, no complete record, unreadable): the
+// caller may then fall back to the start-time warning.
+export function currentInstallVerifyWarning(installRoot, owner, alive) {
+  if (alive !== true || owner?.executor_pid == null) return undefined;
+  let problems;
+  try {
+    const state = readCompletionState(installRoot);
+    if (state.state !== 'complete') return undefined;
+    problems = scriptsMismatches(installRoot, state.manifest);
+  } catch { return undefined; }
+  if (problems.length === 0) return null;
+  return { pid: owner.executor_pid, at: new Date().toISOString(), problems, current: true };
+}
+
 function formatInstallVerifyWarning(warning) {
   if (!warning) return '';
   const wording = { missing: 'missing', unexpected: 'not in the record', digest_mismatch: 'differs from the record', symlink: 'symlink', unreadable: 'unreadable' };
   const list = warning.problems.map((p) => `${p.path} (${wording[p.kind] ?? p.kind})`).join(', ');
-  return `Warning: agmsgd started although scripts/ does not match its install record: ${list}. Run install.sh --update (or npx agmsg@latest install --update) to refresh the record.\n`;
+  return `Warning: agmsgd is running although scripts/ does not match its install record: ${list}. It keeps running. If this is not a change you made on purpose, run install.sh --update (or npx agmsg@latest install --update) to refresh the record.\n`;
 }
 
 function formatUnregisteredPending(installRoot, pending, all) {
