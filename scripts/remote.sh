@@ -74,6 +74,9 @@ source "$SCRIPT_DIR/lib/instance-id.sh"
 # `shasum` is absent in Git for Windows' Git Bash.
 # shellcheck source=lib/hash.sh
 source "$SCRIPT_DIR/lib/hash.sh"
+# The durable "down or degraded" record shown by doctor and at session start.
+# shellcheck source=lib/down-notice.sh
+source "$SCRIPT_DIR/lib/down-notice.sh"
 
 TEAMS_DIR="$CONNECTION_ROOT/teams"
 CRED_ROOT="$CONNECTION_ROOT/run/remote-credentials"
@@ -338,6 +341,7 @@ cmd_doctor() {
   local team="${1:-}"
   echo "Checking prerequisites${team:+ for team '$team'}..."
   echo
+  down_notice_print
   local failed=0
   # age is optional, and the wording has to say so. Remote sync defaults to
   # cipher "none"; end-to-end encryption is a capability, not a prerequisite.

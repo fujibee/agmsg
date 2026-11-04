@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# down-notice.sh — a durable "this component is down or degraded" record.
+#
+# A resident part of agmsg (the sync engine, the watcher, a bridge) that stops
+# and cannot bring itself back must not do so silently. It writes one small file
+# under <install>/run/down/, through this helper, and the places a person already
+# looks show it: the component's own `status`, `doctor`, and once at the start of
+# a session. The record carries the state, the reason and the command that
+# recovers it. It is not a message to members and not an OS notification.
+#
+#   down_notice_set <component> <down|degraded> <reason> <recovery command>
+#   down_notice_clear <component>
+#   down_notice_list    "<component>\t<state>\t<since>\t<reason>\t<recovery>" per record
+#   down_notice_key <prefix> <value>   a valid component key built from free text
+#   down_notice_print   the records as text for a person; nothing when none
+#   down_notice_print_once  the same, once per record per session start
+#
+# <component> matches ^[a-z0-9][a-z0-9._-]{0,99}$; anything else is refused
+# (return 2) and nothing is written. Callers scope their key (`sync.<team>`) so
+# one healthy caller never clears another's record. Every other outcome returns
+# 0: a notice that cannot be written must never fail the command that tried to
+# write it (one line on stderr says so).
+#
+# Process launches: set = `date` + `mv` (+ `mkdir` the first time), clear = `rm`,
+# list/print/key = none. No locking: one writer per key by construction.
+#
+# The record is JSON, written without any escaping logic: `"` and `\` in free
+# text become `'` and `/`, newlines and tabs become a space, so every field is a
+# plain string and is read back with parameter expansion.
+
+[ -n "${_AGMSG_DOWN_NOTICE_SH:-}" ] && return 0
+_AGMSG_DOWN_NOTICE_SH=1
+
+# The install this file ships in, not the caller's cwd or an ambient SKILL_DIR:
+# tests get their sandbox copy for free.
+_AGMSG_DOWN_NOTICE_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." 2>/dev/null && pwd)"
+
+_down_notice_dir() {
+  local root="${AGMSG_SYNC_CONNECTION_DIR:-$_AGMSG_DOWN_NOTICE_ROOT}"
+  [ -n "$root" ] || return 1
+  printf '%s/run/down\n' "$root"
+}
+
+_down_notice_key_ok() {
+  case "$1" in
+    '') return 1 ;;
+    [!a-z0-9]*) return 1 ;;
+    *[!a-z0-9._-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 100 ]
+}
+
+_down_notice_clean() {   # free text -> one line, no quote, no backslash, no tab
+  local v="${1-}"
+  v="${v//\"/\'}"; v="${v//\\//}"; v="${v//$'\n'/ }"; v="${v//$'\r'/ }"; v="${v//$'\t'/ }"
+  printf '%s' "$v"
+}
+
+# <json text> <field> -> the field's string value
+_down_notice_field() {
+  local rest="${1#*\""$2"\":\"}"
+  [ "$rest" != "$1" ] || return 1
+  printf '%s' "${rest%%\"*}"
+}
+
+down_notice_key() {   # <prefix> <free text> -> prefix.text as a valid key
+  local v="${2-}" out="" i ch
+  v="${v//A/a}"; v="${v//B/b}"; v="${v//C/c}"; v="${v//D/d}"; v="${v//E/e}"; v="${v//F/f}"
+  v="${v//G/g}"; v="${v//H/h}"; v="${v//I/i}"; v="${v//J/j}"; v="${v//K/k}"; v="${v//L/l}"
+  v="${v//M/m}"; v="${v//N/n}"; v="${v//O/o}"; v="${v//P/p}"; v="${v//Q/q}"; v="${v//R/r}"
+  v="${v//S/s}"; v="${v//T/t}"; v="${v//U/u}"; v="${v//V/v}"; v="${v//W/w}"; v="${v//X/x}"
+  v="${v//Y/y}"; v="${v//Z/z}"
+  for ((i = 0; i < ${#v}; i++)); do
+    ch="${v:i:1}"
+    case "$ch" in [a-z0-9._-]) out="$out$ch" ;; *) out="$out-" ;; esac
+  done
+  printf '%s.%s\n' "$1" "$out"
+}
+
+down_notice_set() {   # <component> <down|degraded> <reason> <recovery>
+  local key="${1-}" state="${2-}" dir f tmp since="" old="" now
+  _down_notice_key_ok "$key" || return 2
+  case "$state" in down|degraded) ;; *) return 2 ;; esac
+  dir="$(_down_notice_dir)" || return 0
+  if [ ! -d "$dir" ] && ! mkdir -p "$dir" 2>/dev/null; then
+    echo "agmsg: could not record that $key is $state (cannot create $dir)" >&2
+    return 0
+  fi
+  f="$dir/$key.json"
+  tmp="$dir/.$key.json.$$"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [ -f "$f" ]; then
+    old="$(cat "$f" 2>/dev/null)" || old=""
+    # "since" is when it first went into THIS state; a change of state restarts it.
+    if [ "$(_down_notice_field "$old" state)" = "$state" ]; then since="$(_down_notice_field "$old" since)"; fi
+  fi
+  [ -n "$since" ] || since="$now"
+  if printf '{"component":"%s","state":"%s","reason":"%s","recovery":"%s","since":"%s","updated":"%s"}\n' \
+      "$key" "$state" "$(_down_notice_clean "${3-}")" "$(_down_notice_clean "${4-}")" "$since" "$now" \
+      >"$tmp" 2>/dev/null; then
+    if ! mv -f "$tmp" "$f" 2>/dev/null; then
+      rm -f "$tmp" 2>/dev/null
+      echo "agmsg: could not record that $key is $state" >&2
+    fi
+  else
+    rm -f "$tmp" 2>/dev/null
+    echo "agmsg: could not record that $key is $state (cannot write in $dir)" >&2
+  fi
+  return 0
+}
+
+down_notice_clear() {   # <component>
+  local dir
+  _down_notice_key_ok "${1-}" || return 2
+  dir="$(_down_notice_dir)" || return 0
+  rm -f "$dir/$1.json" "$dir/$1.json.shown" 2>/dev/null
+  return 0
+}
+
+_down_notice_row() {   # <json> -> one list line
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(_down_notice_field "$1" component)" "$(_down_notice_field "$1" state)" \
+    "$(_down_notice_field "$1" since)" "$(_down_notice_field "$1" reason)" "$(_down_notice_field "$1" recovery)"
+}
+
+down_notice_list() {
+  local dir f json
+  dir="$(_down_notice_dir)" || return 0
+  for f in "$dir"/*.json; do
+    [ -f "$f" ] || continue
+    json="$(cat "$f" 2>/dev/null)" || continue
+    _down_notice_row "$json"
+  done
+  return 0
+}
+
+_down_notice_text() {   # records on stdin
+  local component state since reason recovery
+  while IFS=$'\t' read -r component state since reason recovery; do
+    [ -n "$component" ] || continue
+    printf 'AGMSG: %s is %s since %s: %s\n' "$component" "$state" "$since" "$reason"
+    [ -z "$recovery" ] || printf '  recover with: %s\n' "$recovery"
+  done
+}
+
+down_notice_print() {
+  down_notice_list | _down_notice_text
+  return 0
+}
+
+# Shown once per record: the marker holds the record it was shown for, so a
+# changed record (new state, new reason) is shown again.
+down_notice_print_once() {
+  local dir f json
+  dir="$(_down_notice_dir)" || return 0
+  for f in "$dir"/*.json; do
+    [ -f "$f" ] || continue
+    json="$(cat "$f" 2>/dev/null)" || continue
+    [ -n "$json" ] || continue
+    if [ -f "$f.shown" ] && [ "$(cat "$f.shown" 2>/dev/null)" = "$json" ]; then continue; fi
+    _down_notice_row "$json" | _down_notice_text
+    printf '%s\n' "$json" >"$f.shown" 2>/dev/null || true
+  done
+  return 0
+}
