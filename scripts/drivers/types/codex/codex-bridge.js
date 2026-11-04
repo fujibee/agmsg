@@ -1109,7 +1109,6 @@ class CodexBridge {
   notice(state, reason, recovery = "agmsg doctor") {
     const signature = JSON.stringify([state, reason, recovery]);
     if (signature === this.noticeSignature) return;
-    this.noticeSignature = signature;
     const helper = path.join(SCRIPTS_DIR, "lib", "down-notice.sh");
     const command = state
       ? 'source "$1"; down_notice_set "$2" "$3" "$4" "$5"'
@@ -1119,7 +1118,9 @@ class CodexBridge {
     const result = spawnSync(BASH_BIN, args, { cwd: SKILL_DIR, encoding: "utf8" });
     if (result.error || result.status !== 0) {
       console.error(`codex-bridge: could not publish recovery notice: ${result.error?.message || result.stderr || result.status}`);
+      return;
     }
+    this.noticeSignature = signature;
   }
 
   turnIntentFile() {

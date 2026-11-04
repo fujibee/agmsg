@@ -2554,3 +2554,29 @@ JS
   [ "$(grep -c '^pid=' "$log")" -eq 2 ]
   [ "$(grep -c '^turn/start$' "$log")" -eq 1 ]
 }
+
+@test "codex-bridge: failed notice adapters retry before successful transitions are deduplicated" {
+  run node - "$TYPES/codex/codex-bridge.js" <<'JS'
+const fs = require("fs");
+const vm = require("vm");
+const assert = require("assert");
+const source = fs.readFileSync(process.argv[2], "utf8");
+const method = source.match(/  notice\(state, reason, recovery = "agmsg doctor"\) \{[\s\S]*?\n  \}/)[0];
+let attempts = 0;
+const instance = vm.runInNewContext(`({${method}})`, {
+  path: require("path"), toPosixPath: (value) => value,
+  SCRIPTS_DIR: "/fixture/scripts", SKILL_DIR: "/fixture", BASH_BIN: "bash",
+  console: { error() {} },
+  spawnSync: () => ({ status: ++attempts % 2 ? 1 : 0 }),
+});
+instance.noticeComponent = "fixture";
+for (const state of [null, "degraded"]) {
+  const before = attempts;
+  instance.notice(state, "reason");
+  instance.notice(state, "reason");
+  instance.notice(state, "reason");
+  assert.strictEqual(attempts - before, 2);
+}
+JS
+  [ "$status" -eq 0 ]
+}
