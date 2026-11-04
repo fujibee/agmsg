@@ -50,8 +50,22 @@
     check(!r.ok && ["bad_args", "not_granted"].includes(r.error.code), "agents.spawn with a folder escape -> " + (r.ok ? "ok" : r.error.code));
     const t0 = Date.now();
     r = await ask("agents.spawn", { type: "claude-code", name: "white" });
-    check(r.ok && r.result.state === "running" && r.result.pid > 0, "agents.spawn -> " + JSON.stringify(r.ok ? r.result : r.error) + " in " + (Date.now() - t0) + " ms");
-    report("POW SPAWNED pid=" + (r.ok ? r.result.pid : "none"));
+    const spawnMs = Date.now() - t0;
+    let agent = r.ok ? r.result : null;
+    check(r.ok && ["running", "unknown"].includes(r.result.state), "agents.spawn -> " + JSON.stringify(r.ok ? r.result : r.error) + " in " + spawnMs + " ms");
+    // After the 15 s wait the app hands over with state=unknown; the terminal then reports and the entry becomes running.
+    // Wait for that through agents.list (no new spawn) before the later steps need a pid.
+    if (agent && agent.state === "unknown") {
+      report("POW SPAWN state=unknown after " + spawnMs + " ms; waiting for agents.list to show running");
+      for (let i = 0; i < 60 && !(agent.state === "running" && agent.pid > 0); i++) {
+        await sleep(1000);
+        const l = await ask("agents.list", {});
+        const e = l.ok ? l.result.agents.find((x) => x.name === agent.name) : null;
+        if (e) agent = e;
+      }
+    }
+    check(!!agent && agent.state === "running" && agent.pid > 0, "the spawned agent is running with a pid -> " + JSON.stringify(agent));
+    report("POW SPAWNED pid=" + (agent ? agent.pid : "none"));
     r = await ask("agents.spawn", { type: "claude-code", name: "white" });
     check(r.ok && r.result.state === "running", "agents.spawn again returns the running agent, no second pane");
     r = await ask("agents.list", {});
