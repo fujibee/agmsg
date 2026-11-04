@@ -22,12 +22,22 @@
 # 0: a notice that cannot be written must never fail the command that tried to
 # write it (one line on stderr says so).
 #
-# Process launches: set = `date` + `mv` (+ `mkdir` the first time), clear = `rm`,
-# list/print/key = none (the key's hash is shell arithmetic). No locking: one writer per key by construction.
+# Process launches (programs started; the `$( )` substitutions around builtins are
+# shell forks that start no program):
+#   source          none; one shell fork to find the install root
+#   set             `date` + `mv`, plus `cat` when the record exists and `mkdir`
+#                   the first time
+#   clear           `rm`
+#   list / print    `cat` once per record (none when there is no record); print
+#                   adds `awk` in a pipeline
+#   print_once      `cat` once or twice per record, none when there is no record
+#   key             none (the hash is shell arithmetic)
+# No locking: one writer per key by construction.
 #
 # The record is JSON, written without any escaping logic: `"` and `\` in free
-# text become `'` and `/`, newlines and tabs become a space, so every field is a
-# plain string and is read back with parameter expansion.
+# text become `'` and `/`, and every control character (newline, tab, ESC, ...)
+# becomes a space, so every field is a plain string that is valid JSON and is read
+# back with parameter expansion.
 
 [ -n "${_AGMSG_DOWN_NOTICE_SH:-}" ] && return 0
 _AGMSG_DOWN_NOTICE_SH=1
@@ -55,9 +65,15 @@ _down_notice_key_ok() {
   [ "${#1}" -le 100 ]
 }
 
-_down_notice_clean() {   # free text -> one line, no quote, no backslash, no tab
-  local v="${1-}"
-  v="${v//\"/\'}"; v="${v//\\//}"; v="${v//$'\n'/ }"; v="${v//$'\r'/ }"; v="${v//$'\t'/ }"
+# The replacements go through variables: on bash 3.2 a quoted or backslashed
+# literal on the replacement side keeps its backslash, which turned a recovery
+# command's quoted path into a different path.
+_down_notice_clean() {   # free text -> one line of printable text, no quote, no backslash
+  # shellcheck disable=SC1003  # a lone backslash is the point
+  local LC_ALL=C v="${1-}" dq='"' sq="'" bs='\' sl='/' sp=' '
+  v="${v//$dq/$sq}"
+  v="${v//"$bs"/$sl}"
+  v="${v//[[:cntrl:]]/$sp}"
   printf '%s' "$v"
 }
 
@@ -77,6 +93,8 @@ down_notice_key() {   # <prefix> <free text> -> prefix.slug-<8 hex>
   for ((i = 0; i < ${#v}; i++)); do
     ch="${v:i:1}"
     printf -v n '%d' "'$ch"
+    # bash 3.2 reads a byte above 0x7f as a negative number, bash 5 as 128..255.
+    n=$(( n & 255 ))
     h=$(( ((h ^ n) * 16777619) & 4294967295 ))
   done
   printf -v hex '%08x' "$h"

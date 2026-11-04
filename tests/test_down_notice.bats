@@ -196,3 +196,34 @@ teardown() { teardown_test_env; }
   run bash -c 'printf "{\"session_id\":\"sid-three\"}" | bash "$1" claude-code /tmp/project-a' _ "$SCRIPTS/session-start.sh"
   printf '%s\n' "$output" | grep -qF "now for another reason"
 }
+
+# Run on the system bash too: bash 3.2 differs from bash 5 in replacement
+# quoting and in how it reads a byte above 0x7f.
+@test "free text keeps a quoted recovery command intact (system bash and this bash)" {
+  local sh
+  for sh in /bin/bash bash; do
+    run "$sh" -c '. "$1"; _down_notice_clean "bash \"/tmp/a b/tool.sh\" restart"' _ "$SCRIPTS/lib/down-notice.sh"
+    [ "$output" = "bash '/tmp/a b/tool.sh' restart" ]
+  done
+}
+
+@test "every control character in free text becomes a space, so the record is valid JSON" {
+  local sh
+  for sh in /bin/bash bash; do
+    rm -rf "$TEST_SKILL_DIR/run/down"
+    "$sh" -c '. "$1"; down_notice_set esc degraded $'"'"'colored\033[31m error\bx\001y'"'"' "agmsg doctor"' _ "$SCRIPTS/lib/down-notice.sh"
+    run sqlite_mem "SELECT json_valid(CAST(readfile('$TEST_SKILL_DIR/run/down/esc.json') AS TEXT));"
+    [ "$output" = 1 ]
+    run sqlite_mem "SELECT json_extract(CAST(readfile('$TEST_SKILL_DIR/run/down/esc.json') AS TEXT), '\$.reason');"
+    [ "$output" = "colored [31m error x y" ]
+  done
+}
+
+@test "down_notice_key gives the same key on every bash: known FNV-1a vectors, ASCII and non-ASCII" {
+  local sh
+  for sh in /bin/bash bash; do
+    run "$sh" -c '. "$1"; down_notice_key sync "My Team"; down_notice_key sync "チーム"' _ "$SCRIPTS/lib/down-notice.sh"
+    [ "${lines[0]}" = "sync.my-team-8a879198" ]
+    [ "${lines[1]}" = "sync.----------4da668f2" ]
+  done
+}
