@@ -354,7 +354,6 @@ agmsg_instance_is_composite() {
 agmsg_instance_bare_sid() {
   local token="$1"
   if agmsg_instance_is_composite "$token"; then
-    _agmsg_instance_notice clear "${token%.*}" "$type"
     printf '%s' "${token%.*}"
   else
     printf '%s' "$token"
@@ -365,7 +364,7 @@ agmsg_instance_bare_sid() {
 # Persist degraded identity through the shared notice interface, scoped to the
 # type/session pair so another healthy session cannot clear it.
 _agmsg_instance_notice() {
-  local action="$1" sid="$2" type="$3" root="${SKILL_DIR:-}" key
+  local action="$1" sid="$2" type="$3" root="${BASH_SOURCE[0]%/*}/../.." key
   [ -n "$root" ] && [ -r "$root/scripts/lib/down-notice.sh" ] || return 0
   . "$root/scripts/lib/down-notice.sh"
   key="$(down_notice_key instance-id "$type"$'\n'"$sid")"

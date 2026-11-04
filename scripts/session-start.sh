@@ -172,13 +172,6 @@ CC_PID=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
 # --continue/--resume processes that share a session_id stay isolated (#93).
 # The cc-instance dedup record and the emitted watch.sh directive both use it.
 INSTANCE_ID="$(agmsg_instance_id_for_pid "$SESSION_ID" "$TYPE" "$CC_PID")"
-# Also present a newly recorded identity fallback in this hook invocation;
-# shared once-per-session presentation keeps prior notices from repeating.
-if [ -r "$SCRIPT_DIR/lib/down-notice.sh" ]; then
-  . "$SCRIPT_DIR/lib/down-notice.sh"
-  down_notice_print_once
-fi
-
 # --- Cleanup of stale cc-instance files and their orphan watchers. ---
 # A cc-instance.<pid> whose CC pid is dead is left over from a previous CC.
 # Before removing it, optionally kill the watcher bound to its last
