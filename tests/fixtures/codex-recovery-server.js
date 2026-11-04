@@ -12,6 +12,7 @@ if (mode === "stdio-exit-once") {
   try { fs.writeFileSync(`${log}.failed-once`, "", { flag: "wx" }); exitOnInitialize = true; } catch (_) {}
 }
 let initializations = 0, discoveries = 0, arms = 0, connections = 0;
+let acceptedInitializeId = null, lateInitializeAckSent = false;
 function handler(send, disconnect = () => {}) {
   return (message) => {
     record(message.method);
@@ -19,7 +20,26 @@ function handler(send, disconnect = () => {}) {
     if (message.method === "initialize") {
       initializations += 1;
       if (exitOnInitialize) process.exit(1);
-      if (mode === "stdio-init" && initializations === 1) return;
+      if (mode === "stdio-init" || mode === "stdio-init-wrong-code") {
+        if (acceptedInitializeId === null) {
+          acceptedInitializeId = message.id;
+          // Real Codex commits the per-connection initialized state before ACK.
+          return;
+        }
+        record("already-initialized-rejection");
+        send({ jsonrpc: "2.0", id: message.id, error: {
+          code: mode === "stdio-init-wrong-code" ? -32000 : -32600,
+          message: "Already initialized",
+        } });
+        if (!lateInitializeAckSent) {
+          lateInitializeAckSent = true;
+          setTimeout(() => {
+            record("late-initialize-ack");
+            send({ jsonrpc: "2.0", id: acceptedInitializeId, result: {} });
+          }, 100);
+        }
+        return;
+      }
       answer({});
     } else if (message.method === "thread/loaded/list") {
       discoveries += 1;
@@ -33,7 +53,7 @@ function handler(send, disconnect = () => {}) {
       setTimeout(() => send({ jsonrpc: "2.0", method: "process/exited", params: {
         processHandle: message.params.processHandle, exitCode: 0,
         stdout: `pending max_id=frontier-${arms}`, stderr: "",
-      } }), 20);
+      } }), mode === "stdio-init" ? 200 : 20);
     } else if (message.method === "turn/start") {
       const threadId = message.params.threadId;
       if (mode === "stdio-uncertain" || mode === "stdio-late-completion") {
