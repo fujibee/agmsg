@@ -403,17 +403,20 @@ _linux_recover_if_failed() {
   [ -f "$unit_path" ] || return 0
   unit_name="$(basename "$unit_path")"
   if [ "$("$AGMSGD_SYSTEMCTL" --user is-active "$unit_name" 2>/dev/null)" = active ]; then
-    down_notice_clear agmsgd
+    # A notice is diagnostic, not load-bearing: an I/O failure here
+    # (rc 1, per the shared down-notice.sh contract) must never abort
+    # this function or the command that called it.
+    down_notice_clear agmsgd || :
     return 0
   fi
   [ "$("$AGMSGD_SYSTEMCTL" --user is-failed "$unit_name" 2>/dev/null)" = failed ] || return 0
   "$AGMSGD_SYSTEMCTL" --user reset-failed "$unit_name" >/dev/null 2>&1 || true
   if "$AGMSGD_SYSTEMCTL" --user start "$unit_name" >/dev/null 2>&1; then
-    down_notice_clear agmsgd
+    down_notice_clear agmsgd || :
   else
     down_notice_set agmsgd down \
       "systemd gave up restarting agmsgd and the automatic reset-failed + start retry also failed" \
-      "systemctl --user reset-failed $unit_name && agmsg daemon start"
+      "systemctl --user reset-failed $unit_name && agmsg daemon start" || :
   fi
 }
 
