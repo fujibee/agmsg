@@ -1737,46 +1737,37 @@ printf '%s' '{"stop_hook_active":true}'
 exit "${HOOK_READ_EXIT:-0}"
 EOF
   chmod +x "$bindir/timeout"
-  # The shared helper's interface, not a second persistence implementation.
-  # Capture arguments separately from hook stdout so a warning cannot pass as
-  # valid hook output and another project's healthy read cannot clear this one.
-  cat > "$SCRIPTS/lib/down-notice.sh" <<'EOF'
-down_notice_set() { printf '%s\n' "$@" > "$SKILL_DIR/run/input-notice-set"; }
-down_notice_clear() { printf '%s\n' "$1" > "$SKILL_DIR/run/input-notice-clear"; }
-EOF
-  mkdir -p "$TEST_SKILL_DIR/run"
+  source "$SCRIPTS/lib/down-notice.sh"
   local rc out="$TEST_PROJECT/hook.stdout" err="$TEST_PROJECT/hook.stderr" key
-  source "$SCRIPTS/lib/hash.sh"
-  key="$(printf '%s\n%s' codex "$TEST_PROJECT" | agmsg_sha1)"
+  key="$(down_notice_key hook-input "codex"$'\n'"$TEST_PROJECT")"
   for rc in 124 1; do
     run env PATH="$bindir:$PATH" HOOK_READ_EXIT="$rc" bash -c 'bash "$1" codex "$2" </dev/null >"$3" 2>"$4"' _ "$SCRIPTS/check-inbox.sh" "$TEST_PROJECT" "$out" "$err"
     [ "$status" -eq 0 ]
     [ ! -s "$out" ]
     grep -q 'captured payload, which may be incomplete' "$err"
-    [ "$(head -1 "$TEST_SKILL_DIR/run/input-notice-set")" = "hook-input.$key" ]
-    grep -q 'agmsg doctor' "$TEST_SKILL_DIR/run/input-notice-set"
+    local component state since reason recovery
+    IFS=$'\t' read -r component state since reason recovery <<<"$(down_notice_list)"
+    [ "$component" = "$key" ]
+    [ "$state" = degraded ]
+    [ "$recovery" = 'agmsg doctor' ]
   done
   run env PATH="$bindir:$PATH" HOOK_READ_EXIT=0 bash -c 'bash "$1" codex "$2" </dev/null >"$3" 2>"$4"' _ "$SCRIPTS/check-inbox.sh" "$TEST_PROJECT" "$out" "$err"
   [ "$status" -eq 0 ]
   [ ! -s "$out" ]
   [ ! -s "$err" ]
-  [ "$(cat "$TEST_SKILL_DIR/run/input-notice-clear")" = "hook-input.$key" ]
+  [ -z "$(down_notice_list)" ]
 }
 
 @test "delivery status: shows only this project's degraded hook input record" {
-  cat > "$SCRIPTS/lib/down-notice.sh" <<'EOF'
-down_notice_list() {
-  printf '%s\t%s\t%s\t%s\t%s\n' "$HOOK_COMPONENT" degraded 'test-time' 'stdin timed out' 'check the hook runtime'
-  printf '%s\t%s\t%s\t%s\t%s\n' 'hook-input.other-project' degraded 'test-time' 'foreign reason' 'foreign recovery'
-}
-EOF
-  source "$SCRIPTS/lib/hash.sh"
+  source "$SCRIPTS/lib/down-notice.sh"
   local key
-  key="$(printf '%s\n%s' codex "$TEST_PROJECT" | agmsg_sha1)"
-  run env HOOK_COMPONENT="hook-input.$key" bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  key="$(down_notice_key hook-input "codex"$'\n'"$TEST_PROJECT")"
+  down_notice_set "$key" degraded 'stdin timed out' 'agmsg doctor'
+  down_notice_set hook-input.other-project degraded 'foreign reason' 'agmsg doctor'
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   grep -q 'hook input degraded: stdin timed out' <<<"$output"
-  grep -q 'inspect with: check the hook runtime' <<<"$output"
+  grep -q 'inspect with: agmsg doctor' <<<"$output"
   if [[ "$output" == *'foreign reason'* ]]; then return 1; fi
 }
 

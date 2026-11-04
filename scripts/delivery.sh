@@ -942,10 +942,9 @@ print_hook_input_notice() {
   local type="$1" project="$2" component key reason recovery since state
   [ -r "$SCRIPT_DIR/lib/down-notice.sh" ] || return 0
   . "$SCRIPT_DIR/lib/down-notice.sh"
-  . "$SCRIPT_DIR/lib/hash.sh"
-  key="$(printf '%s\n%s' "$type" "$project" | agmsg_sha1)"
+  key="$(down_notice_key hook-input "$type"$'\n'"$project")"
   while IFS=$'\t' read -r component state since reason recovery; do
-    [ "$component" = "hook-input.$key" ] || continue
+    [ "$component" = "$key" ] || continue
     printf 'hook input degraded: %s\n' "$reason"
     printf '  inspect with: %s\n' "$recovery"
   done < <(down_notice_list)

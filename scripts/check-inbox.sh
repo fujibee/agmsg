@@ -92,7 +92,7 @@ emit_status_json() {
 # The shared helper owns persistence and presentation. Missing helper code is
 # reported, never made into a new hook refusal during a rolling update.
 _hook_input_notice() {
-  local action="$1" reason="${2:-}" component recovery project_key
+  local action="$1" reason="${2:-}" component recovery
   if ! declare -F down_notice_set >/dev/null 2>&1; then
     if [ -r "$SCRIPT_DIR/lib/down-notice.sh" ]; then
       . "$SCRIPT_DIR/lib/down-notice.sh"
@@ -101,9 +101,7 @@ _hook_input_notice() {
       return 0
     fi
   fi
-  . "$SCRIPT_DIR/lib/hash.sh"
-  project_key="$(printf '%s\n%s' "$TYPE" "$PROJECT" | agmsg_sha1)"
-  component="hook-input.$project_key"
+  component="$(down_notice_key hook-input "$TYPE"$'\n'"$PROJECT")"
   if [ "$action" = clear ]; then
     down_notice_clear "$component" >&2 || printf 'agmsg: could not clear the recovered hook input notice.\n' >&2
   else
