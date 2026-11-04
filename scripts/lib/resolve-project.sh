@@ -703,10 +703,10 @@ agmsg_ancestor_project() {
 # Keep the chosen project as the only stdout datum. Persist the reason for an
 # inferred fallback so stderr capture in an entry point cannot hide it.
 _agmsg_project_fallback_notice() {
-  local action="$1" input="$2" type="$3" reason="${4:-}" key
+  local action="$1" input="$2" type="$3" reason="${4:-}" key root="${BASH_SOURCE[0]%/*}/../.."
   if [ "$action" = set ]; then printf 'agmsg: %s\n' "$reason" >&2; fi
-  [ -r "$SKILL_DIR/scripts/lib/down-notice.sh" ] || return 0
-  . "$SKILL_DIR/scripts/lib/down-notice.sh"
+  [ -r "$root/scripts/lib/down-notice.sh" ] || return 0
+  . "$root/scripts/lib/down-notice.sh"
   key="$(down_notice_key project "$type"$'\n'"$input")"
   if [ "$action" = set ]; then
     down_notice_set "$key" degraded "$reason" 'agmsg doctor' >&2 || true

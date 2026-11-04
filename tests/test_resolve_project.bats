@@ -49,10 +49,10 @@ reg() {
   [ "$(agmsg_resolve_project "$ROOT" claude-code 2>/dev/null)" = "$ROOT" ]
   local component
   component="$(down_notice_key project "claude-code"$'\n'"$ROOT")"
-  [[ "$(down_notice_list)" == "$component"$'\tdegraded\t'* ]]
-  [[ "$(down_notice_list)" == *'using invocation directory'* ]]
+  down_notice_list | grep -Fq "$component"$'\tdegraded\t'
+  down_notice_list | grep -Fq 'using invocation directory'
   [ "$(AGMSG_RESOLVE_PROJECT=0 agmsg_resolve_project "$ROOT/sub" claude-code)" = "$ROOT/sub" ]
-  [[ "$(down_notice_list)" == "$component"$'\tdegraded\t'* ]]
+  down_notice_list | grep -Fq "$component"$'\tdegraded\t'
   [ "$(AGMSG_RESOLVE_PROJECT=0 agmsg_resolve_project "$ROOT" claude-code)" = "$ROOT" ]
   [ -z "$(down_notice_list)" ]
 }
