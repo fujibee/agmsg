@@ -30,6 +30,21 @@ _agmsg_detect_order() {
     LC_ALL=C sort -n -k1,1 -k2,2 | cut -f2-
 }
 
+# Preserve stdout as a single type token. The shared helper makes a fallback
+# visible even when a caller captures or suppresses this function's stderr.
+_agmsg_type_fallback_notice() {
+  local action="$1" reason="${2:-}" root="${BASH_SOURCE[0]%/*}/../.." key component
+  if [ "$action" = set ]; then printf 'agmsg: %s\n' "$reason" >&2; fi
+  [ -n "$root" ] && [ -r "$root/scripts/lib/down-notice.sh" ] || return 0
+  . "$root/scripts/lib/down-notice.sh"
+  component="$(down_notice_key cli-type "${PWD:-.}")"
+  if [ "$action" = set ]; then
+    down_notice_set "$component" degraded "$reason (directory ${PWD:-.})" 'agmsg doctor' >&2 || true
+  else
+    down_notice_clear "$component" >&2 || true
+  fi
+}
+
 agmsg_detect_cli_type() {
   # `detect=` / `detect_proc=` tokens are split with `read -ra` (IFS word-split,
   # NO pathname expansion) rather than an unquoted `for x in $list` — a file in
@@ -60,7 +75,7 @@ agmsg_detect_cli_type() {
   # auto-detected. Weak credentials such as GEMINI_API_KEY are deferred until
   # process evidence has had a chance to identify the actual CLI.
   local _t _v _detect _fallback _toks _fallback_toks
-  local _fallback_type=""
+  local _fallback_type="" _fallback_env=""
   while IFS= read -r _t; do
     [ -n "$_t" ] || continue
     _detect="$(agmsg_type_get "$_t" detect)"
@@ -71,6 +86,7 @@ agmsg_detect_cli_type() {
     for _v in "${_toks[@]}"; do
       if [ -n "${!_v:-}" ]; then
         _AGMSG_DETECT_CLI_TYPE_OUT="$_t"
+        _agmsg_type_fallback_notice clear
         echo "$_t"
         return 0
       fi
@@ -81,6 +97,7 @@ agmsg_detect_cli_type() {
       for _v in "${_fallback_toks[@]}"; do
         if [ -n "${!_v:-}" ] && [ -z "$_fallback_type" ]; then
           _fallback_type="$_t"
+          _fallback_env="$_v"
           break
         fi
       done
@@ -104,7 +121,7 @@ agmsg_detect_cli_type() {
           # process name; read -ra already kept it out of pathname expansion.
           # shellcheck disable=SC2254
           case "$proc_name" in
-            $_pat) _AGMSG_DETECT_CLI_TYPE_OUT="$_t"; echo "$_t"; return 0 ;;
+            $_pat) _AGMSG_DETECT_CLI_TYPE_OUT="$_t"; _agmsg_type_fallback_notice clear; echo "$_t"; return 0 ;;
           esac
         done
       done < <(_agmsg_detect_order)
@@ -119,6 +136,7 @@ agmsg_detect_cli_type() {
   # not hide a stronger process marker for another CLI.
   if [ -n "$_fallback_type" ]; then
     _AGMSG_DETECT_CLI_TYPE_OUT="$_fallback_type"
+    _agmsg_type_fallback_notice set "CLI type fallback: no runtime marker or matching ancestor process; using $_fallback_type from the weak environment key $_fallback_env. Specify the agent type explicitly if this is not the intended CLI."
     echo "$_fallback_type"
     return 0
   fi
@@ -132,5 +150,6 @@ agmsg_detect_cli_type() {
   # as it always did.
   _AGMSG_DETECT_CLI_TYPE_DEFAULTED=1
   _AGMSG_DETECT_CLI_TYPE_OUT="claude-code"
+  _agmsg_type_fallback_notice set "CLI type fallback: no runtime marker or matching process within $max_depth ancestor observations; using the compatibility default claude-code. Specify the agent type explicitly if this is not the intended CLI."
   echo "claude-code"
 }

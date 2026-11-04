@@ -45,6 +45,9 @@ if [ -n "${2:-}" ] && ! agmsg_is_known_type "$AGENT_TYPE"; then
   exit 1
 fi
 
+# An explicit validated type is an intentional selection, not a guessed default.
+if [ -n "${2:-}" ]; then _agmsg_type_fallback_notice clear; fi
+
 # SCRIPT_DIR is already resolved above (before sourcing the type registry).
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
