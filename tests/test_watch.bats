@@ -1640,6 +1640,45 @@ STUB
   kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 }
 
+@test "watch: a degraded record that could not be written or removed is retried, and the stdout lines are not repeated (#1045)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  bash "$SCRIPTS/send.sh" team bob alice "SEED" >/dev/null
+  local realsqlite; realsqlite="$(command -v sqlite3)"
+  local stub="$TEST_SKILL_DIR/sqstub7"; mkdir -p "$stub"
+  cat > "$stub/sqlite3" <<STUB
+#!/usr/bin/env bash
+[ -e "$stub/clear" ] || for _a in "\$@"; do case "\$_a" in *message_sent*) exit 1 ;; esac; done
+exec "$realsqlite" "\$@"
+STUB
+  chmod +x "$stub/sqlite3"
+  local down="$TEST_SKILL_DIR/run/down" out="$TEST_SKILL_DIR/notice-retry.log"
+  mkdir -p "$down"; chmod 555 "$down"
+  AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
+    sess-noticeretry "$PROJ" claude-code alice >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  _bg_track "$w"
+  if ! _wait_for_file_contains "$out" "cannot read delivery state"; then chmod 755 "$down"; kill "$w" 2>/dev/null || true; false; fi
+  # The record cannot be written yet; the watcher is up and the line was said once.
+  sleep 2
+  [ -z "$(ls "$down" 2>/dev/null)" ]
+  kill -0 "$w" 2>/dev/null
+  # Repaired: the next try writes it, and the line is not repeated.
+  chmod 755 "$down"
+  _wait_for_file_contains "$down/watch.$w.json" '"state":"degraded"' || { kill "$w" 2>/dev/null || true; false; }
+  [ "$(grep -c "cannot read delivery state" "$out")" -eq 1 ]
+  # The store reads again while the record cannot be removed: the removal stays pending.
+  chmod 555 "$down"
+  : > "$stub/clear"
+  if ! _wait_for_file_contains "$out" "can be read again"; then chmod 755 "$down"; kill "$w" 2>/dev/null || true; false; fi
+  sleep 2
+  [ -e "$down/watch.$w.json" ]
+  kill -0 "$w" 2>/dev/null
+  chmod 755 "$down"
+  _wait_for_file_gone "$down/watch.$w.json" || { kill "$w" 2>/dev/null || true; false; }
+  [ "$(grep -c "can be read again" "$out")" -eq 1 ]
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+}
+
 # --- the watcher re-asserts this pane's name (#1044) --------------------------
 #
 # Naming is an invariant re-asserted wherever the session id is known, not an

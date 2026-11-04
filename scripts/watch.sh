@@ -1185,12 +1185,27 @@ _watch_pair_not_observed() {   # <team:agent>
 
 # Down/degraded notice (shown by doctor, status and the session-start hook) while
 # any pair is in one of those states; cleared when none is.
+#
+# A write or removal that did not verifiably happen (the helper returns non-zero)
+# stays pending and is tried again from the top of the poll loop, no sooner than
+# _WATCH_NOTICE_RETRY seconds after the last failure; nothing here stops the watcher.
+_WATCH_NOTICE_RETRY=10
+_WATCH_NOTICE_DIRTY=""
+_WATCH_NOTICE_RETRY_AT=0
 _watch_notice_sync() {
+  local rc=0
   if [ -n "$READ_FAILING$STUCK_REPORTED" ]; then
-    down_notice_set "watch.$$" degraded "the inbox watcher is running but cannot deliver: ${READ_FAILING:+store read failing for ${READ_FAILING//$'\n'/ }}${STUCK_REPORTED:+ read cursor stuck for ${STUCK_REPORTED//$'\n'/ }}; it retries every cycle" "restart this session or run /agmsg actas <name> if it does not clear" || true
+    down_notice_set "watch.$$" degraded "the inbox watcher is running but cannot deliver: ${READ_FAILING:+store read failing for ${READ_FAILING//$'\n'/ }}${STUCK_REPORTED:+ read cursor stuck for ${STUCK_REPORTED//$'\n'/ }}; it retries every cycle" "restart this session or run /agmsg actas <name> if it does not clear" || rc=$?
   else
-    down_notice_clear "watch.$$" || true
+    down_notice_clear "watch.$$" || rc=$?
   fi
+  if [ "$rc" -eq 0 ]; then
+    _WATCH_NOTICE_DIRTY=""
+  else
+    _WATCH_NOTICE_DIRTY=1
+    _WATCH_NOTICE_RETRY_AT=$((SECONDS + _WATCH_NOTICE_RETRY))
+  fi
+  return 0
 }
 # The watcher was told to fold itself, released its role, and the pane is STILL
 # THERE. A distinct code, because the operator's next
@@ -1359,6 +1374,11 @@ _watch_renew_or_stop() {
 while true; do
   # Renewal point: see _watch_renew_or_stop above.
   [ -n "$WATCH_MAX_SECONDS" ] && _watch_renew_or_stop
+  # A degraded record that could not be written or removed last time: try again
+  # (builtins only while nothing is pending).
+  if [ -n "$_WATCH_NOTICE_DIRTY" ] && [ "$SECONDS" -ge "$_WATCH_NOTICE_RETRY_AT" ]; then
+    _watch_notice_sync
+  fi
   # Advance the per-cycle cache epoch as a PLAIN STATEMENT (never via $(...) —
   # see the actas-lock cache warming below for why): this is what lets
   # _agmsg_partition_load's per-team driver cache (lib/storage.sh) reuse one
