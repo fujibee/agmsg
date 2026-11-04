@@ -11,7 +11,8 @@
 #   down_notice_set <component> <down|degraded> <reason> <recovery command>
 #   down_notice_clear <component>
 #   down_notice_list    "<component>\t<state>\t<since>\t<reason>\t<recovery>" per record
-#   down_notice_key <prefix> <value>   a valid component key built from free text
+#   down_notice_key <prefix> <value>   a valid component key built from free text,
+#                                      ending in a hash of the raw text
 #   down_notice_print   the records as text for a person; nothing when none
 #   down_notice_print_once  the same, once per record per session start
 #
@@ -22,7 +23,7 @@
 # write it (one line on stderr says so).
 #
 # Process launches: set = `date` + `mv` (+ `mkdir` the first time), clear = `rm`,
-# list/print/key = none. No locking: one writer per key by construction.
+# list/print/key = none (the key's hash is shell arithmetic). No locking: one writer per key by construction.
 #
 # The record is JSON, written without any escaping logic: `"` and `\` in free
 # text become `'` and `/`, newlines and tabs become a space, so every field is a
@@ -32,11 +33,15 @@
 _AGMSG_DOWN_NOTICE_SH=1
 
 # The install this file ships in, not the caller's cwd or an ambient SKILL_DIR:
-# tests get their sandbox copy for free.
+# tests get their sandbox copy for free. A caller can set AGMSG_DOWN_NOTICE_ROOT
+# for its own calls (see _down_notice_dir).
 _AGMSG_DOWN_NOTICE_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." 2>/dev/null && pwd)"
 
 _down_notice_dir() {
-  local root="${AGMSG_SYNC_CONNECTION_DIR:-$_AGMSG_DOWN_NOTICE_ROOT}"
+  # AGMSG_DOWN_NOTICE_ROOT is for a caller that keeps its state elsewhere and says
+  # so itself (remote.sh passes its connection root for the sync engine). No
+  # ambient variable redirects the records of every component.
+  local root="${AGMSG_DOWN_NOTICE_ROOT:-$_AGMSG_DOWN_NOTICE_ROOT}"
   [ -n "$root" ] || return 1
   printf '%s/run/down\n' "$root"
 }
@@ -63,8 +68,18 @@ _down_notice_field() {
   printf '%s' "${rest%%\"*}"
 }
 
-down_notice_key() {   # <prefix> <free text> -> prefix.text as a valid key
-  local v="${2-}" out="" i ch
+# A key from free text: folded to lowercase with unusable characters as `-`, then
+# an 8-hex hash of the RAW text, so two different texts never share a key just
+# because they fold alike ('My Team' and 'my-team'). The hash is FNV-1a over the
+# bytes, in shell arithmetic and builtins only: no process is started.
+down_notice_key() {   # <prefix> <free text> -> prefix.slug-<8 hex>
+  local LC_ALL=C v="${2-}" slug="" i ch n h=2166136261 hex
+  for ((i = 0; i < ${#v}; i++)); do
+    ch="${v:i:1}"
+    printf -v n '%d' "'$ch"
+    h=$(( ((h ^ n) * 16777619) & 4294967295 ))
+  done
+  printf -v hex '%08x' "$h"
   v="${v//A/a}"; v="${v//B/b}"; v="${v//C/c}"; v="${v//D/d}"; v="${v//E/e}"; v="${v//F/f}"
   v="${v//G/g}"; v="${v//H/h}"; v="${v//I/i}"; v="${v//J/j}"; v="${v//K/k}"; v="${v//L/l}"
   v="${v//M/m}"; v="${v//N/n}"; v="${v//O/o}"; v="${v//P/p}"; v="${v//Q/q}"; v="${v//R/r}"
@@ -72,9 +87,13 @@ down_notice_key() {   # <prefix> <free text> -> prefix.text as a valid key
   v="${v//Y/y}"; v="${v//Z/z}"
   for ((i = 0; i < ${#v}; i++)); do
     ch="${v:i:1}"
-    case "$ch" in [a-z0-9._-]) out="$out$ch" ;; *) out="$out-" ;; esac
+    case "$ch" in [a-z0-9._-]) slug="$slug$ch" ;; *) slug="$slug-" ;; esac
   done
-  printf '%s.%s\n' "$1" "$out"
+  # prefix + "." + slug + "-" + 8 hex must fit the 100-character limit.
+  local room=$(( 100 - ${#1} - 10 ))
+  [ "$room" -gt 0 ] || room=0
+  slug="${slug:0:room}"
+  printf '%s.%s-%s\n' "$1" "$slug" "$hex"
 }
 
 down_notice_set() {   # <component> <down|degraded> <reason> <recovery>

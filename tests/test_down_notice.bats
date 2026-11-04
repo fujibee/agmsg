@@ -78,9 +78,43 @@ teardown() { teardown_test_env; }
 }
 
 @test "down_notice_key makes a valid key from free text" {
-  [ "$(down_notice_key sync "My Team/1")" = "sync.my-team-1" ]
-  down_notice_set "$(down_notice_key sync "My Team/1")" down r c
-  [ -f "$DIR/sync.my-team-1.json" ]
+  local k
+  k="$(down_notice_key sync "My Team/1")"
+  case "$k" in sync.my-team-1-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) echo "$k"; return 1 ;; esac
+  down_notice_set "$k" down r c
+  [ -f "$DIR/$k.json" ]
+}
+
+@test "down_notice_key: texts that fold alike get different keys, and the same text the same key" {
+  [ "$(down_notice_key sync "My Team")" != "$(down_notice_key sync "my-team")" ]
+  [ "$(down_notice_key sync "My Team")" != "$(down_notice_key sync "my team")" ]
+  [ "$(down_notice_key sync "My Team")" = "$(down_notice_key sync "My Team")" ]
+  down_notice_set "$(down_notice_key sync "My Team")" down r c
+  down_notice_set "$(down_notice_key sync "my-team")" down r c
+  down_notice_clear "$(down_notice_key sync "my-team")"
+  [ -f "$DIR/$(down_notice_key sync "My Team").json" ]
+}
+
+@test "down_notice_key: a long or non-ASCII text still yields a valid key of at most 100 characters" {
+  local k
+  k="$(down_notice_key sync "$(printf 'x%.0s' $(seq 1 300))")"
+  [ "${#k}" -le 100 ]
+  run down_notice_set "$k" down r c
+  [ "$status" -eq 0 ]
+  [ -f "$DIR/$k.json" ]
+  k="$(down_notice_key sync "チーム")"
+  run down_notice_set "$k" down r c
+  [ "$status" -eq 0 ]
+  [ -f "$DIR/$k.json" ]
+}
+
+@test "no ambient variable redirects the records; only AGMSG_DOWN_NOTICE_ROOT, set by the caller, does" {
+  export AGMSG_SYNC_CONNECTION_DIR="$BATS_TEST_TMPDIR/elsewhere"
+  down_notice_set c9 down r c
+  [ -f "$TEST_SKILL_DIR/run/down/c9.json" ]
+  [ ! -e "$BATS_TEST_TMPDIR/elsewhere" ]
+  AGMSG_DOWN_NOTICE_ROOT="$BATS_TEST_TMPDIR/own" down_notice_set c9 down r c
+  [ -f "$BATS_TEST_TMPDIR/own/run/down/c9.json" ]
 }
 
 @test "print_once shows a record once, and again only when it changes" {
