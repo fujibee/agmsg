@@ -87,13 +87,13 @@ Options:
   --interval <sec>        watch-once poll interval (default: 2).
   --owner <id>            actas owner token used to retain this session's locks.
   --max-wakes <n>         Stop after n wakeups, useful for tests.
-  --stale-wake-limit <n>  Stop after n repeated unchanged wakeups (default: 1).
+  --stale-wake-limit <n>  Back off after n repeated unchanged wakeups; 0 disables (default: 1).
   --connect-timeout-ms <ms>
                           Max wait for direct app-server connect/upgrade (default: 10000).
   --request-timeout-ms <ms>
                           Max wait for each app-server request (default: 30000).
   --watch-failure-limit <n>
-                          Stop after n consecutive watch-once failures; 0 disables (default: 3).
+                          Escalate backoff after n watch-once failures; 0 disables (default: 3).
   --app-server <url>      Connect through an existing app-server endpoint.
                           Supports unix://PATH or ws://host:port over WebSocket.
   --thread <id|current|loaded>
@@ -998,6 +998,15 @@ class CodexBridge {
     this.staleWakeCount = 0;
     this.watchFailureCount = 0;
     this.watchRearmTimer = null;
+    this.nextWatchAt = 0;
+    this.staleRetryArmed = false;
+    this.watchNoticeSignature = null;
+    let watchProject = opts.project;
+    try { watchProject = fs.realpathSync(opts.project); } catch (_) { /* keep the supplied path when unavailable */ }
+    const watchProjectHash = crypto.createHash("sha1").update(toPosixPath(watchProject)).digest("hex");
+    const watchIdentityHash = crypto.createHash("sha1")
+      .update(JSON.stringify(identities.map((pair) => JSON.stringify([pair.team, pair.name])).sort())).digest("hex");
+    this.watchNoticeComponent = `codex-watch.${watchProjectHash}.${watchIdentityHash}`;
     this.lastArmAt = 0;
     this.inlineInboxText = "";
     this.stopping = false;
@@ -1077,6 +1086,26 @@ class CodexBridge {
     // After armWatch, not before: the seat is a claim that this role is being
     // delivered to, and until the watch is armed that is not yet true.
     this.recordSeat();
+  }
+
+  watchNotice(state, reason) {
+    const signature = JSON.stringify([state, reason]);
+    if (signature === this.watchNoticeSignature) return;
+    this.watchNoticeSignature = signature;
+    const helper = toPosixPath(path.join(SCRIPTS_DIR, "lib", "down-notice.sh"));
+    const command = state
+      ? 'source "$1"; down_notice_set "$2" "$3" "$4" "$5"'
+      : 'source "$1"; down_notice_clear "$2"';
+    const args = ["-c", command, "_", helper, this.watchNoticeComponent];
+    if (state) args.push(state, reason, "agmsg delivery status");
+    const result = spawnSync(BASH_BIN, args, { cwd: SKILL_DIR, encoding: "utf8" });
+    if (result.error || result.status !== 0) {
+      console.error(`codex-bridge: could not publish watch recovery notice: ${result.error?.message || result.stderr || result.status}`);
+    }
+  }
+
+  watchBackoff(excess) {
+    return Math.min(60000, WATCH_REARM_MS * Math.pow(2, Math.min(16, Math.max(0, excess))));
   }
 
   // Write the seat from the thread the bridge actually armed on (#579). Seating
@@ -1373,7 +1402,7 @@ class CodexBridge {
     // arm was too recent, defer this one to fill the interval rather than spawn
     // now; the watchHandle guard above and clearWatchRearmTimer keep a single
     // pending arm. Nothing is dropped -- a deferred arm still runs.
-    const wait = MIN_ARM_INTERVAL_MS - (Date.now() - this.lastArmAt);
+    const wait = Math.max(MIN_ARM_INTERVAL_MS - (Date.now() - this.lastArmAt), this.nextWatchAt - Date.now());
     if (wait > 0) {
       this.watchRearmTimer = setTimeout(() => {
         this.watchRearmTimer = null;
@@ -1381,6 +1410,7 @@ class CodexBridge {
       }, wait);
       return;
     }
+    this.nextWatchAt = 0;
     this.lastArmAt = Date.now();
     const handle = `agmsg-watch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     this.watchHandle = handle;
@@ -1429,10 +1459,18 @@ class CodexBridge {
       // signal -- a full timeout ran end to end -- and still resets outright.
       this.watchFailureCount = Math.max(0, this.watchFailureCount - 1);
       const maxId = parseMaxId(params.stdout);
-      if (this.isStaleWake(maxId)) {
-        await this.shutdown();
-        process.exit(1);
+      const stale = this.isStaleWake(maxId);
+      if (stale && !this.staleRetryArmed) {
+        this.staleRetryArmed = true;
+        const delay = this.watchBackoff(Math.floor((this.staleWakeCount - this.opts.staleWakeLimit) / 2));
+        this.watchNotice("degraded", `Codex unread frontier is unchanged; retrying after ${delay}ms backoff`);
+        this.scheduleWatchRearm(delay);
+        return;
       }
+      // Recheck through watch-once before retrying a stale wake. If it was
+      // consumed during backoff, no new model turn is started.
+      this.staleRetryArmed = false;
+      if (!stale) this.watchNotice(null, "");
       this.pendingWake = true;
       this.wakeCount += 1;
       console.error(`codex-bridge: wakeup ${this.wakeCount} for ${this.identity.team}/${this.identity.name}`);
@@ -1442,6 +1480,10 @@ class CodexBridge {
 
     if (params.exitCode === 2) {
       this.watchFailureCount = 0;
+      this.staleWakeCount = 0;
+      this.lastWakeMaxId = "";
+      this.staleRetryArmed = false;
+      this.watchNotice(null, "");
       await this.armWatch();
       return;
     }
@@ -1449,22 +1491,22 @@ class CodexBridge {
     this.watchFailureCount += 1;
     const detail = [params.stderr, params.stdout].filter(Boolean).join("\n").trim();
     console.error(`codex-bridge: watch-once failed with exit ${params.exitCode}${detail ? `: ${detail}` : ""}`);
+    let delay = WATCH_REARM_MS;
     if (this.opts.watchFailureLimit > 0 && this.watchFailureCount >= this.opts.watchFailureLimit) {
-      console.error(
-        `codex-bridge: stopping after ${this.watchFailureCount} consecutive watch-once failure(s)`,
-      );
-      await this.shutdown();
-      process.exit(1);
+      delay = this.watchBackoff(this.watchFailureCount - this.opts.watchFailureLimit);
+      console.error(`codex-bridge: watch failure threshold reached (${this.watchFailureCount}); retrying after ${delay}ms`);
+      this.watchNotice("degraded", `Codex watch failed ${this.watchFailureCount} times; retrying after ${delay}ms backoff`);
     }
-    this.scheduleWatchRearm();
+    this.scheduleWatchRearm(delay);
   }
 
-  scheduleWatchRearm() {
+  scheduleWatchRearm(delay = WATCH_REARM_MS) {
     if (this.stopping || this.watchHandle || this.watchRearmTimer) return;
+    this.nextWatchAt = Date.now() + delay;
     this.watchRearmTimer = setTimeout(() => {
       this.watchRearmTimer = null;
       this.armWatch().catch((error) => this.failClientHandler("process/exited", error));
-    }, WATCH_REARM_MS);
+    }, delay);
   }
 
   clearWatchRearmTimer() {
@@ -1826,7 +1868,7 @@ class CodexBridge {
       `codex-bridge: unread max_id is still ${maxId}; inbox was not marked read after the prior wakeup`,
     );
     if (this.opts.staleWakeLimit > 0 && this.staleWakeCount >= this.opts.staleWakeLimit) {
-      console.error("codex-bridge: stopping to avoid a repeated wakeup loop");
+      console.error("codex-bridge: unchanged unread frontier; retrying with backoff");
       return true;
     }
     return false;
