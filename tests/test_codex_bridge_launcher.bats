@@ -89,13 +89,24 @@ _pairs_hash="$(printf '%s' "$(printf '%s' "$_ph" | LC_ALL=C sort | sed '/^$/d')"
     "$(printf '%s' "$_proj" | agmsg_sha1)" \
     "$_pairs_hash" \
     "$(hostname)" "$$" "$_start" "$_ssrc" ; } > "$_lease.tmp" && mv "$_lease.tmp" "$_lease"
-trap 'rm -f "$_lease"' EXIT
-[ -z "${MOCK_BRIDGE_SLEEP:-}" ] || sleep "$MOCK_BRIDGE_SLEEP"
+_sleep_pid=""
+trap '[ -z "$_sleep_pid" ] || kill "$_sleep_pid" 2>/dev/null || true; rm -f "$_lease"' EXIT
+trap 'exit 0' TERM INT
+if [ -n "${MOCK_BRIDGE_SLEEP:-}" ]; then
+  sleep "$MOCK_BRIDGE_SLEEP" & _sleep_pid=$!
+  wait "$_sleep_pid" || true
+fi
 exit 0
 EOF
   chmod +x "$SCRIPTS/drivers/types/codex/codex-bridge.js"
   export AGMSG_NODE="$(command -v bash)"
   export LAUNCHER="$SCRIPTS/drivers/types/codex/codex-bridge-launcher.sh"
+  # Isolate the notice transport; these tests exercise launcher recovery and
+  # the shared helper calls, not the helper's persistence implementation.
+  cat > "$SCRIPTS/lib/down-notice.sh" <<'EOF'
+down_notice_set() { printf '%s\n' "$3" > "$RUN_DIR/test-down.$1"; }
+down_notice_clear() { rm -f "$RUN_DIR/test-down.$1"; }
+EOF
 }
 
 # PIDs of live per-role child launchers for this test's project: any process
@@ -534,7 +545,7 @@ EOF
   # the mock lifetime below wait_for_child_count's 10-second ceiling so this
   # test measures deregistration, not the intentionally blocking test adapter.
   export MOCK_BRIDGE_SLEEP=2
-  sleep 20 3>&- & local parent=$!
+  sleep 180 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
   local dispatcher=$!
   [ "$(wait_for_child_count 1)" -eq 1 ]
@@ -1033,4 +1044,229 @@ _run_start_token() { # <pid> -> runs _start_token in a subshell
   [ "${output%%"$tab"*}" = pwsh ]
   local tok="${output#*"$tab"}"
   case "$tok" in ''|*[!0-9]*) false ;; esac
+}
+
+@test "launcher: startup identity discovery retries beyond twenty empty observations" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=60
+  mv "$SCRIPTS/identities.sh" "$SCRIPTS/identities-real.sh"
+  cat > "$SCRIPTS/identities.sh" <<'EOF'
+#!/usr/bin/env bash
+n=0
+[ ! -f "$RUN_DIR/identity-attempts" ] || read -r n < "$RUN_DIR/identity-attempts"
+n=$((n + 1)); printf '%s\n' "$n" > "$RUN_DIR/identity-attempts"
+[ "$n" -gt 21 ] || exit 0
+exec "$SCRIPTS/identities-real.sh" "$@"
+EOF
+  chmod +x "$SCRIPTS/identities.sh"
+  # Compress only the fixture's retry sleeps, preserving the attempt count.
+  mkdir -p "$TEST_SKILL_DIR/bin"
+  local real_sleep
+  real_sleep="$(command -v sleep)"
+  printf '#!/usr/bin/env bash\nexec "%s" 0.01\n' "$real_sleep" > "$TEST_SKILL_DIR/bin/sleep"
+  chmod +x "$TEST_SKILL_DIR/bin/sleep"
+  sleep 180 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  PATH="$TEST_SKILL_DIR/bin:$PATH" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" $'team\talice' >"$TEST_SKILL_DIR/startup-launcher.log" 2>&1 3>&- &
+  local attempt seen=0
+  for attempt in {1..300}; do
+    if [ -f "$CAPTURE" ]; then seen=1; break; fi
+    sleep 0.1
+  done
+  if [ "$seen" -ne 1 ]; then cat "$TEST_SKILL_DIR/startup-launcher.log"; fi
+  [ "$seen" -eq 1 ]
+  [ "$(cat "$RUN_DIR/identity-attempts")" -gt 21 ]
+}
+
+@test "launcher: repeated empty observations do not retire a registered live bridge" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=60
+  sleep 180 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  wait_for_bridge_capture
+  local bridge_pid
+  bridge_pid="$(cat "$RUN_DIR"/codex-bridge.*.pid)"
+  # Force valid-but-empty discovery without changing the authoritative config.
+  cp "$SCRIPTS/identities.sh" "$SCRIPTS/identities-saved.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$SCRIPTS/identities.sh"
+  touch "$TEST_SKILL_DIR/teams/team/config.json"
+  local i pending=0
+  for i in {1..100}; do
+    if grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then pending=1; break; fi
+    sleep 0.1
+  done
+  [ "$pending" -eq 1 ]
+  sleep 3
+  kill -0 "$bridge_pid"
+  [ "$(wait_for_stable_child_count 1)" -eq 1 ]
+  cp "$SCRIPTS/identities-saved.sh" "$SCRIPTS/identities.sh"
+  local recovered=0
+  for i in {1..100}; do
+    if ! grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then recovered=1; break; fi
+    sleep 0.1
+  done
+  [ "$recovered" -eq 1 ]
+  kill -0 "$bridge_pid"
+}
+
+@test "launcher: invalid registry data is unknown and recovers without another config change" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=60
+  cp "$TEST_SKILL_DIR/teams/team/config.json" "$TEST_SKILL_DIR/saved-config.json"
+  printf '{' > "$TEST_SKILL_DIR/teams/team/config.json"
+  sleep 180 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" $'team\talice' >/dev/null 2>&1 3>&- &
+  sleep 2
+  [ ! -f "$CAPTURE" ]
+  cp "$TEST_SKILL_DIR/saved-config.json" "$TEST_SKILL_DIR/teams/team/config.json"
+  wait_for_bridge_capture
+}
+
+@test "launcher: valid JSON with a broken registration schema stays unknown until repaired" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=60
+  cp "$TEST_SKILL_DIR/teams/team/config.json" "$TEST_SKILL_DIR/saved-config.json"
+  sleep 180 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  wait_for_bridge_capture
+  local bridge_pid
+  bridge_pid="$(cat "$RUN_DIR"/codex-bridge.*.pid)"
+  printf '{"name":"team","agents":{"alice":{"registrations":[{}]}}}' > "$TEST_SKILL_DIR/teams/team/config.json"
+  local i pending=0
+  for i in {1..100}; do
+    if grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then pending=1; break; fi
+    sleep 0.1
+  done
+  [ "$pending" -eq 1 ]
+  sleep 3
+  kill -0 "$bridge_pid"
+  [ "$(wait_for_stable_child_count 1)" -eq 1 ]
+  printf '{"name":"team","agents":{"alice":null}}' > "$TEST_SKILL_DIR/teams/team/config.json"
+  sleep 3
+  kill -0 "$bridge_pid"
+  [ "$(wait_for_stable_child_count 1)" -eq 1 ]
+  cp "$TEST_SKILL_DIR/saved-config.json" "$TEST_SKILL_DIR/teams/team/config.json"
+  local recovered=0
+  for i in {1..100}; do
+    if ! grep -l 'identity discovery' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then recovered=1; break; fi
+    sleep 0.1
+  done
+  [ "$recovered" -eq 1 ]
+  kill -0 "$bridge_pid"
+}
+
+@test "launcher: repeated failed identity observations retain the polling backoff" {
+  # Load the actual functions without starting a dispatcher or bridge. Override
+  # only the registry observation and sleep transports; reset policy is real.
+  run bash -s "$LAUNCHER" "$TEST_SKILL_DIR" <<'EOF'
+set -euo pipefail
+launcher="$1"; sandbox="$2"
+source "$SCRIPTS/lib/hash.sh"
+NOTICE_COMPONENT=test
+NOTICE_REASON=''
+RUN_DIR="$sandbox/run"
+TEAMS_DIR="$sandbox/teams"
+IDENTITY_CACHE=''
+IDENTITY_CACHE_COUNT=-1
+IDENTITY_CACHE_MARKER="$RUN_DIR/cache-probe"
+IDENTITY_CACHE_FRESH=0
+IDENTITY_CACHE_CHANGED=0
+IDENTITY_OBSERVATION_STATE=unobserved
+extract() { sed -n "/^$1()/,/^}/p" "$launcher"; }
+eval "$(extract identity_cache_is_fresh)"
+eval "$(extract refresh_identity_cache)"
+eval "$(sed -n '/^POLL_STEPS=/,/^# Any change/p' "$launcher" | sed '$d')"
+resolve_identity() { return 1; }
+identity_pending() { :; }
+sleep() { printf '%s\n' "$1"; }
+for tick in 1 2 3 4 5; do
+  refresh_identity_cache
+  [ "$IDENTITY_CACHE_CHANGED" != 1 ] || poll_reset
+  poll_sleep
+done
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" = $'0.3\n0.6\n1.2\n2\n2' ]
+}
+
+unknown_requests_keep_bridge() {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=180
+  sleep 240 3>&- & local parent=$!
+  TEST_LIFETIME_PIDS="$parent"
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  wait_for_bridge_capture
+  local bridge_pid request="$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  bridge_pid="$(cat "$RUN_DIR"/codex-bridge.*.pid)"
+  local row i pending recovered
+  for row in \
+    $'codex\tthread-alice\tws://127.0.0.1:1\t' \
+    $'codex\tthread-alice\tws://127.0.0.1:1\tteam\t' \
+    $'codex\tthread-alice\tws://127.0.0.1:1\t\talice' \
+    $'codex\tthread-alice\tws://127.0.0.1:1\tteam\tbad.name'; do
+    printf '%s\n' "$row" > "$request"
+    pending=0
+    for i in {1..100}; do
+      if grep -l 'no proven pair' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then pending=1; break; fi
+      sleep 0.1
+    done
+    [ "$pending" -eq 1 ] || return 1
+    kill -0 "$bridge_pid" || return 1
+    write_request thread-alice team alice
+    recovered=0
+    for i in {1..100}; do
+      if ! grep -l 'no proven pair' "$RUN_DIR"/test-down.* >/dev/null 2>&1; then recovered=1; break; fi
+      sleep 0.1
+    done
+    [ "$recovered" -eq 1 ] || return 1
+    kill -0 "$bridge_pid" || return 1
+  done
+  # A positively different, registered pair still retires the old bridge.
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team bob thread-bob "$PROJ" codex
+  write_request thread-bob team bob
+  wait_for_pid_exit "$bridge_pid" || return 1
+
+}
+
+@test "launcher: unknown request pairs preserve the normal bridge and recover in place" {
+  unknown_requests_keep_bridge
+}
+
+@test "launcher: unknown request pairs preserve a custom bridge and recover in place" {
+  export AGMSG_CODEX_BRIDGE_CMD="$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  unknown_requests_keep_bridge
+}
+
+@test "launcher: identity notices retry real helper I/O failures without failing discovery" {
+  run bash - "$SCRIPTS/lib/down-notice.sh" "$TYPES/codex/codex-bridge-launcher.sh" "$TEST_SKILL_DIR" <<'SH'
+set -e
+source "$1"
+source <(sed -n '/^identity_ready() {/,/^# Positive removal proof:/ { /^# Positive removal proof:/!p; }' "$2")
+AGMSG_DOWN_NOTICE_ROOT="$3/identity-notice-io"
+mkdir -p "$AGMSG_DOWN_NOTICE_ROOT"
+printf blocked > "$AGMSG_DOWN_NOTICE_ROOT/run"
+NOTICE_COMPONENT=fixture
+NOTICE_REASON=unobserved
+identity_pending pending
+[ "$NOTICE_REASON" = unobserved ]
+mv "$AGMSG_DOWN_NOTICE_ROOT/run" "$AGMSG_DOWN_NOTICE_ROOT/blocked"
+identity_pending pending
+[ "$NOTICE_REASON" = pending ]
+record="$AGMSG_DOWN_NOTICE_ROOT/run/down/fixture.json"
+[ -f "$record" ]
+mv "$record" "$AGMSG_DOWN_NOTICE_ROOT/previous"
+mkdir "$record"
+identity_ready
+[ "$NOTICE_REASON" = pending ]
+rmdir "$record"
+mv "$AGMSG_DOWN_NOTICE_ROOT/previous" "$record"
+identity_ready
+[ -z "$NOTICE_REASON" ]
+[ ! -e "$record" ]
+SH
+  [ "$status" -eq 0 ]
 }
