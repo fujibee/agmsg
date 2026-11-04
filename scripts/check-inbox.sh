@@ -103,10 +103,10 @@ _hook_input_notice() {
   fi
   component="$(down_notice_key hook-input "$TYPE"$'\n'"$PROJECT")"
   if [ "$action" = clear ]; then
-    down_notice_clear "$component" >&2 || printf 'agmsg: could not clear the recovered hook input notice.\n' >&2
+    down_notice_clear "$component" >&2 || :
   else
     recovery='agmsg doctor'
-    down_notice_set "$component" degraded "$reason" "$recovery" >&2 || printf 'agmsg: could not record the degraded hook input notice.\n' >&2
+    down_notice_set "$component" degraded "$reason" "$recovery" >&2 || :
   fi
 }
 

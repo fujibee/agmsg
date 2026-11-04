@@ -1758,6 +1758,28 @@ EOF
   [ -z "$(down_notice_list)" ]
 }
 
+@test "check-inbox: notice I/O failures cannot stop degraded or healthy reads" {
+  local bindir="$TEST_SKILL_DIR/failing-notice-bin"
+  mkdir -p "$bindir"
+  cat > "$bindir/timeout" <<'EOF'
+#!/bin/sh
+printf '%s' '{"stop_hook_active":true}'
+exit "${HOOK_READ_EXIT:-0}"
+EOF
+  chmod +x "$bindir/timeout"
+  cat >> "$SCRIPTS/lib/down-notice.sh" <<'EOF'
+down_notice_set() { printf 'injected notice I/O failure\n' >&2; return 1; }
+down_notice_clear() { printf 'injected notice I/O failure\n' >&2; return 1; }
+EOF
+  local rc out="$TEST_PROJECT/failure.stdout" err="$TEST_PROJECT/failure.stderr"
+  for rc in 124 0; do
+    run env PATH="$bindir:$PATH" HOOK_READ_EXIT="$rc" bash -c 'bash -e "$1" codex "$2" </dev/null >"$3" 2>"$4"' _ "$SCRIPTS/check-inbox.sh" "$TEST_PROJECT" "$out" "$err"
+    [ "$status" -eq 0 ]
+    [ ! -s "$out" ]
+    grep -q 'injected notice I/O failure' "$err"
+  done
+}
+
 @test "delivery status: shows only this project's degraded hook input record" {
   source "$SCRIPTS/lib/down-notice.sh"
   local key
