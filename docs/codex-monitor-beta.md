@@ -187,6 +187,23 @@ flowchart TD
   ended --> watch
 ```
 
+### Connection recovery
+
+Connection and RPC deadlines bound one attempt. The bridge stays resident and
+retries connection failures with backoff. Loaded-thread discovery continues
+after `--loaded-timeout` and reports the delayed destination. A live app-server
+is preserved during recovery; a bridge-owned stdio child is replaced after it
+exits. `agmsg delivery status` and `agmsg doctor` show recovery notices for the
+project, and SessionStart presents new notices.
+
+Before sending `turn/start`, the bridge records a scoped intent under
+`<install>/run/codex-turn-intent.<hash>.json`. A missing acknowledgement leaves
+that intent in place across reconnects and bridge restarts. Idle status or a
+completion from another turn cannot authorize a replay. A completion attributed
+to the intended turn releases it; otherwise the notice gives the exact record
+to remove after confirming the turn outcome in Codex, followed by a bridge
+restart. The record contains a generation token and turn ID, not message text.
+
 ## Worker Guardrails
 
 > ⚠️ **Never poll agmsg by launching a full Codex/Claude session on a short
