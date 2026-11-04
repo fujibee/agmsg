@@ -371,6 +371,29 @@ closure intersects the diff; always run everything for a release PR and
 once a day on a schedule. About -40 % per commit on its own (section 3),
 more combined with (b2).
 
+## Status of the follow-up work
+
+| item | branch | state |
+|---|---|---|
+| (a1) test_install.bats install templates | `tests/install-shared-base` | ready; local 388 s -> 300 s, 159k -> 120k processes |
+| (a2) pin `AGMSG_AGENT_PID=""` in 26 files | `tests/pin-agent-pid` | ready; 59 candidates checked (57 safe, 2 with one walk-dependent test, no flips on a refutation pass); the 26 files 2618 s -> 1987 s locally; one join.sh 325-347 -> 274-275 processes |
+| (b1) skip the bats shards on a push whose tree already passed | `ci/reuse-green-tree` | implemented with tests; workflow change, waiting for a GO |
+
+## Side findings
+
+- `tests/test_sqlite_sync_jq_binary.bats` (lines 239, 407) writes `2>err1`
+  with a relative path, so a run from the repository root leaves `err1`
+  there; it belongs under `$BATS_TEST_TMPDIR`.
+- `scripts/drivers/types/antigravity/bridge-read-guard.mjs` (around line
+  90) appends to `reservation.violations` and its `.lock`; when a
+  reservation has no `violations` field that path is `undefined`, and the
+  guard writes files named `undefined` and `undefined.lock` into the
+  current directory (seen after a suite run from the repository root).
+- Running as root (this survey's container) makes the chmod-based
+  write-failure fixtures unable to fail: test_spawn #97,
+  test_terminal_registry #134/#178, test_roster_journal #14-#16 fail there
+  with and without any change. CI runners are not root.
+
 ## What could not be obtained
 
 - Runner queue wait per job (job-level listings are large through the
