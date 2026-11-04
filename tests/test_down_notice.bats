@@ -128,6 +128,16 @@ teardown() { teardown_test_env; }
   printf '%s\n' "$output" | grep -qF "down differently"
 }
 
+@test "print_once does not show a record again just because it was set again unchanged" {
+  down_notice_set c5 down "same reason" "same fix"
+  run down_notice_print_once
+  printf '%s\n' "$output" | grep -qF "c5 is down since"
+  sleep 1
+  down_notice_set c5 down "same reason" "same fix"
+  run down_notice_print_once
+  [ -z "$output" ]
+}
+
 @test "an unwritable run directory is not an error for the caller" {
   mkdir -p "$TEST_SKILL_DIR/run"
   : > "$TEST_SKILL_DIR/run/down"      # a file where the directory should be
@@ -138,19 +148,39 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 0 ]
 }
 
-@test "doctor shows every record" {
+@test "agmsg doctor lists every record as a warning, and exits 1" {
+  down_notice_set sync.t1 down "the engine is down" "bash remote.sh sync start t1"
+  down_notice_set watch.s1 degraded "slow" "restart it"
+  run bash "$SCRIPTS/doctor.sh"
+  [ "$status" -eq 1 ]
+  printf '%s\n' "$output" | grep -qF "sync.t1 is down since"
+  printf '%s\n' "$output" | grep -qF "recover with: bash remote.sh sync start t1"
+  printf '%s\n' "$output" | grep -qF "watch.s1 is degraded since"
+  printf '%s\n' "$output" | grep -qF "2 warning(s)"
+}
+
+@test "agmsg doctor is unchanged when there is no record" {
+  run bash "$SCRIPTS/doctor.sh"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "no warnings."
+}
+
+@test "remote.sh doctor shows its own family only, from the root it passes" {
   down_notice_set sync.t1 down "the engine is down" "bash remote.sh sync start t1"
   down_notice_set watch.s1 degraded "slow" "restart it"
   run bash "$SCRIPTS/remote.sh" doctor
   printf '%s\n' "$output" | grep -qF "AGMSG: sync.t1 is down since"
-  printf '%s\n' "$output" | grep -qF "recover with: bash remote.sh sync start t1"
-  printf '%s\n' "$output" | grep -qF "AGMSG: watch.s1 is degraded since"
+  refute grep -qF "watch.s1" <<<"$output"
 }
 
-@test "doctor prints nothing extra when there is no record" {
-  run bash "$SCRIPTS/remote.sh" doctor
-  refute grep -qF "is down since" <<<"$output"
-  refute grep -qF "is degraded since" <<<"$output"
+@test "remote.sh doctor reads the sync records from its connection root, not the install root" {
+  local other="$BATS_TEST_TMPDIR/conn"
+  mkdir -p "$other/run/down"
+  printf '{"component":"sync.t2","state":"down","reason":"r","recovery":"c","since":"2026-11-04T00:00:00Z","updated":"2026-11-04T00:00:00Z"}\n' > "$other/run/down/sync.t2.json"
+  down_notice_set watch.s1 degraded "slow" "restart it"
+  run env AGMSG_SYNC_CONNECTION_DIR="$other" bash "$SCRIPTS/remote.sh" doctor
+  printf '%s\n' "$output" | grep -qF "AGMSG: sync.t2 is down since"
+  refute grep -qF "watch.s1" <<<"$output"
 }
 
 @test "the session-start hook shows a record once, and again after it changes" {

@@ -13,7 +13,7 @@
 #   down_notice_list    "<component>\t<state>\t<since>\t<reason>\t<recovery>" per record
 #   down_notice_key <prefix> <value>   a valid component key built from free text,
 #                                      ending in a hash of the raw text
-#   down_notice_print   the records as text for a person; nothing when none
+#   down_notice_print [prefix]  the records (of one family) as text; nothing when none
 #   down_notice_print_once  the same, once per record per session start
 #
 # <component> matches ^[a-z0-9][a-z0-9._-]{0,99}$; anything else is refused
@@ -161,23 +161,28 @@ _down_notice_text() {   # records on stdin
   done
 }
 
+# An optional prefix limits it to one component family (`sync.`).
 down_notice_print() {
-  down_notice_list | _down_notice_text
+  local prefix="${1-}"
+  down_notice_list | awk -F'\t' -v p="$prefix" 'index($1, p) == 1' | _down_notice_text
   return 0
 }
 
-# Shown once per record: the marker holds the record it was shown for, so a
-# changed record (new state, new reason) is shown again.
+# Shown once per record: the marker holds the record it was shown for (state,
+# since, reason, recovery -- not `updated`, which changes every time the same
+# record is set again), so a record that changed is shown again and one that did
+# not is not.
 down_notice_print_once() {
-  local dir f json
+  local dir f json row
   dir="$(_down_notice_dir)" || return 0
   for f in "$dir"/*.json; do
     [ -f "$f" ] || continue
     json="$(cat "$f" 2>/dev/null)" || continue
     [ -n "$json" ] || continue
-    if [ -f "$f.shown" ] && [ "$(cat "$f.shown" 2>/dev/null)" = "$json" ]; then continue; fi
-    _down_notice_row "$json" | _down_notice_text
-    printf '%s\n' "$json" >"$f.shown" 2>/dev/null || true
+    row="$(_down_notice_row "$json")"
+    if [ -f "$f.shown" ] && [ "$(cat "$f.shown" 2>/dev/null)" = "$row" ]; then continue; fi
+    printf '%s\n' "$row" | _down_notice_text
+    printf '%s\n' "$row" >"$f.shown" 2>/dev/null || true
   done
   return 0
 }
