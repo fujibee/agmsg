@@ -435,10 +435,10 @@ EOF
   [ "$output" = gemini ]
   grep -q 'weak environment key GEMINI_API_KEY' <<<"$stderr"
   if [[ "$stderr" == *never-print-this-value* ]]; then return 1; fi
-  [[ "$(down_notice_list)" == *"weak environment key GEMINI_API_KEY"* ]]
+  down_notice_list | grep -Fq 'weak environment key GEMINI_API_KEY'
   local component
   component="$(down_notice_key cli-type "$PWD")"
-  [[ "$(down_notice_list)" == "$component"$'\tdegraded\t'* ]]
+  down_notice_list | grep -Fq "$component"$'\tdegraded\t'
   run --separate-stderr env -i PATH="$PATH" SKILL_DIR="$TEST_SKILL_DIR" bash -c "$script" _ "$SCRIPTS"
   [ "$status" -eq 0 ]
   [ "$output" = claude-code ]
