@@ -2580,3 +2580,47 @@ for (const state of [null, "degraded"]) {
 JS
   [ "$status" -eq 0 ]
 }
+
+@test "codex-bridge: real helper I/O failures retry the same set and clear transitions" {
+  run node - "$TYPES/codex/codex-bridge.js" "$TEST_SKILL_DIR" <<'JS'
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+const assert = require("assert");
+const { spawnSync } = require("child_process");
+const root = fs.mkdtempSync(path.join(process.argv[3], "notice-io-"));
+fs.mkdirSync(path.join(root, "scripts/lib"), { recursive: true });
+fs.copyFileSync(path.join(process.argv[3], "scripts/lib/down-notice.sh"), path.join(root, "scripts/lib/down-notice.sh"));
+const source = fs.readFileSync(process.argv[2], "utf8");
+const method = source.match(/  notice\(state, reason, recovery = "agmsg doctor"\) \{[\s\S]*?\n  \}/)[0];
+let attempts = 0;
+const instance = vm.runInNewContext(`({${method}})`, {
+  path, toPosixPath: (value) => value, SCRIPTS_DIR: path.join(root, "scripts"),
+  SKILL_DIR: root, BASH_BIN: "bash", console: { error() {} },
+  spawnSync: (...args) => { attempts++; return spawnSync(...args); },
+});
+instance.noticeComponent = "fixture";
+const runDir = path.join(root, "run");
+const record = path.join(runDir, "down/fixture.json");
+fs.writeFileSync(runDir, "blocked");
+instance.notice("degraded", "reason");
+assert.strictEqual(instance.noticeSignature, undefined);
+fs.unlinkSync(runDir);
+instance.notice("degraded", "reason");
+assert.strictEqual(JSON.parse(fs.readFileSync(record)).reason, "reason");
+instance.notice("degraded", "reason");
+assert.strictEqual(attempts, 2);
+const previous = fs.readFileSync(record);
+fs.unlinkSync(record);
+fs.mkdirSync(record);
+instance.notice(null, "");
+assert.strictEqual(attempts, 3);
+fs.rmdirSync(record);
+fs.writeFileSync(record, previous);
+instance.notice(null, "");
+assert.strictEqual(fs.existsSync(record), false);
+instance.notice(null, "");
+assert.strictEqual(attempts, 4);
+JS
+  [ "$status" -eq 0 ]
+}
