@@ -246,6 +246,7 @@ cancel_startup() {
   down_notice_clear "$NOTICE_COMPONENT" || :
   exit 130
 }
+unset AGMSG_CODEX_MONITOR_NOTICE_DIRTY
 server_bg=""
 trap cancel_startup INT TERM
 start_app_server
@@ -267,10 +268,12 @@ while :; do
   PORT="$(sed -n -e "s/${ansi_esc}\[[0-9;]*m//g" -e 's#.*listening on: ws://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p' "$SEAT_LOG" | head -1)"
   if [ -n "$PORT" ]; then
     if port_alive "$PORT"; then
-      if down_notice_clear "$NOTICE_COMPONENT"; then break; fi
-      echo "codex-monitor: readiness notice could not be cleared; keeping the live server and retrying" >&2
-      sleep 2
-      continue
+      # Notice storage never gates the ready handoff. The existing dispatcher
+      # retries a dirty clear on later passes, outside this launch path.
+      if ! down_notice_clear "$NOTICE_COMPONENT"; then
+        export AGMSG_CODEX_MONITOR_NOTICE_DIRTY=1
+      fi
+      break
     fi
     startup_notice degraded "Codex app-server port is not reachable yet; keeping the live server and retrying"
   fi

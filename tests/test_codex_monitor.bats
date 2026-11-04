@@ -226,11 +226,32 @@ EOF
 }
 
 @test "codex-monitor: real notice I/O failure keeps startup alive and retries set and clear" {
+  export MONITOR_TEST_LAUNCHER_PID_FILE="$TEST_PROJECT/io-launcher.pid"
+  local retry_launcher="$TEST_PROJECT/retry-launcher"
+  cat > "$retry_launcher" <<'SH'
+#!/usr/bin/env bash
+exec 2>>"$TEST_PROJECT/retry-debug.log"
+printf '%s\n' "$$" > "$MONITOR_TEST_LAUNCHER_PID_FILE"
+SCRIPT_DIR="$TYPES/codex"
+source "$SCRIPTS/lib/hash.sh"
+PROJECT_PHYS="$2"
+SEAT_KEY="$AGMSG_CODEX_SEAT_KEY"
+ROLE_PAIR=""
+sed -n '/^MONITOR_NOTICE_DIRTY=/,/^# End monitor notice recovery/p' "$SCRIPT_DIR/codex-bridge-launcher.sh" > "$TEST_PROJECT/retry-functions.sh"
+source "$TEST_PROJECT/retry-functions.sh"
+for i in $(seq 1 100); do
+  monitor_notice_retry
+  [ "$MONITOR_NOTICE_DIRTY" = 1 ] || exit 0
+  sleep 0.1
+done
+exit 1
+SH
+  chmod +x "$retry_launcher"
   local notice_root="$TEST_PROJECT/notice-io" monitor_pid record child_pid result=0
   mkdir "$notice_root"
   printf blocked > "$notice_root/run"
   env AGMSG_DOWN_NOTICE_ROOT="$notice_root" FAKE_CODEX_MODE=blocked-port \
-    AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$retry_launcher" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex \
     >"$TEST_PROJECT/io.log" 2>&1 &
   monitor_pid=$!
@@ -248,16 +269,19 @@ EOF
     mkdir "$record"
     : > "$TEST_PROJECT/release-port"
     if ! wait_for_file_contains "$TEST_PROJECT/io.log" 'could not clear'; then result=1; fi
-    kill -0 "$monitor_pid" 2>/dev/null || result=1
+    # Delivery hands off while the failed clear is still dirty.
+    if ! wait_for_file_contains "$CALL_LOG" '<--remote>'; then result=1; fi
+    [ -d "$record" ] || result=1
     rmdir "$record"
     mv "$notice_root/previous" "$record"
-    if ! wait_for_file_contains "$CALL_LOG" '<--remote>'; then result=1; fi
+    if ! wait_for_missing "$record"; then result=1; fi
   else
     result=1
   fi
   kill "$monitor_pid" 2>/dev/null || true
   wait "$monitor_pid" 2>/dev/null || true
   cat "$TEST_PROJECT/io.log"
+  [ ! -f "$TEST_PROJECT/retry-debug.log" ] || cat "$TEST_PROJECT/retry-debug.log"
   [ "$result" -eq 0 ]
   [ ! -e "$record" ]
   grep -q -- '<--remote> <ws://' "$CALL_LOG"
