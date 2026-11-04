@@ -8,6 +8,8 @@ _AGMSG_BOOT_ID_FILE=/proc/sys/kernel/random/boot_id
 _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/down-notice.sh"
 
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
@@ -197,9 +199,20 @@ agmsg_daemon_warn_if_stopped() {
     [ "$((now - last))" -ge 600 ] || return 0
   fi
   agmsg_daemon_read_state
-  [ "$AGMSGD_DESIRED" = on ] && [ "$AGMSGD_HEALTH" != ready ] || return 0
+  if [ "$AGMSGD_DESIRED" != on ] || [ "$AGMSGD_HEALTH" = ready ]; then
+    # Nothing to recover, or recovered since the last check -- any notice
+    # from an earlier call of this function no longer applies (decision
+    # 11-04: a down/degraded record must clear itself once the thing it
+    # was about is observed healthy again).
+    down_notice_clear agmsgd
+    return 0
+  fi
   # Not being able to look is not a stop: say nothing on ordinary commands.
   [ "$AGMSGD_HEALTH" != unchecked ] || [ "${1:-}" = always ] || return 0
+  # Record it (doctor / status / session-start show this) whenever the
+  # state is unambiguously "stopped" -- not for "unchecked"/"unverifiable",
+  # which are "cannot tell", not "down" (#1821, #1872's own distinction).
+  [ "$AGMSGD_HEALTH" != stopped ] || down_notice_set agmsgd down "$AGMSGD_REASON" "agmsg daemon start"
   if [ "${1:-}" = always ]; then
     agmsg_daemon_recovery_text >&2
     return 0

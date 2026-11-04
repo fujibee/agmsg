@@ -759,6 +759,36 @@ _pid_gone_harness() {   # <kill message>
   [ "$owner_state" = "ready" ]
 }
 
+@test "install: --update clears a down_notice left by an earlier failed restart once the daemon comes back (decision 11-04, S01/S14)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on';"
+  # Simulate a down_notice left behind by an earlier failed restart attempt.
+  ( . "$SK/scripts/lib/down-notice.sh" && down_notice_set agmsgd down stale stale )
+  [ -f "$SK/run/down/agmsgd.json" ]
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ ! -f "$SK/run/down/agmsgd.json" ]
+  bash "$SK/scripts/daemon.sh" stop || true
+}
+
+@test "install: --update records a down_notice when its one restart attempt fails, instead of only a terminal line (decision 11-04, S01/S14)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '$(command -v node)'; UPDATE daemon_intent SET desired = 'on';"
+  # AGMSG_NODE is authoritative over both the recorded node_path and
+  # whatever real Node is on PATH (agmsg_resolve_node's own documented
+  # behavior), so this makes every candidate _resolve_node tries fail and
+  # the installer's single restart attempt fails too -- exactly the
+  # S01/S14 gap: the daemon stays down and, before this fix, that was
+  # reported ONLY as a line in this run's own stderr.
+  sqlite3 "$SK/run/install.db" "UPDATE meta SET node_path = '/no/such/node';"
+  HOME="$FAKE_HOME" AGMSG_NODE=/no/such/node run bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+  [ "${output#*did not start after the update}" != "$output" ]
+  [ -f "$SK/run/down/agmsgd.json" ]
+  grep -q '"component":"agmsgd"' "$SK/run/down/agmsgd.json"
+  grep -q '"state":"down"' "$SK/run/down/agmsgd.json"
+  grep -q 'agmsg daemon start' "$SK/run/down/agmsgd.json"
+}
+
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
   # setup.sh's temp checkout is deleted right after install, so a copy inside
   # the skill dir is the only uninstaller npx/curl-installed users ever have.

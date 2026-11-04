@@ -339,6 +339,41 @@ WRAPPER
   done
 }
 
+@test "warn_if_stopped records a down_notice for a genuinely stopped daemon and clears it once ready (decision 11-04, S01/S14)" {
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  grep -q '"component":"agmsgd"' "$TEST_SKILL_DIR/run/down/agmsgd.json"
+  grep -q '"state":"down"' "$TEST_SKILL_DIR/run/down/agmsgd.json"
+  grep -q 'no usable Node recorded' "$TEST_SKILL_DIR/run/down/agmsgd.json"
+  # Health observed ready again (or desired flips off) clears it, even
+  # though neither of those paths is the one that set it.
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+}
+
+@test "warn_if_stopped never records a down_notice for 'unchecked' (cannot tell is not down)" {
+  local boot
+  case "$(uname -s)" in
+    Darwin) boot="$(sysctl -n kern.bootsessionuuid)" ;;
+    Linux) boot="$(tr -d "[:space:]" < /proc/sys/kernel/random/boot_id 2>/dev/null || sed -n "s/^btime //p" /proc/stat)" ;;
+    *) skip 'POSIX beta executor evidence' ;;
+  esac
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_owner SET state='ready', executor_pid=$$, executor_boot_id='$boot', executor_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  mkdir -p "$BATS_TEST_TMPDIR/denied"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/denied/ps"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/denied/getconf"
+  chmod +x "$BATS_TEST_TMPDIR/denied/ps" "$BATS_TEST_TMPDIR/denied/getconf"
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s\n" "$AGMSGD_HEALTH"'
+  [ "$output" = unchecked ]
+  run env PATH="$BATS_TEST_TMPDIR/denied:$PATH" bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+}
+
 @test "a digest-mismatch failure advises --update instead of daemon start (#1761)" {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','digest verification failed: digest mismatch: scripts/daemon/schema.sql',0);"
   run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'

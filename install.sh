@@ -239,8 +239,27 @@ agmsg_install_restart_daemon() {   # <skill_dir>
     sleep 1
   done
   echo "  ~ agmsgd is turned on; starting the updated version"
-  if ! bash "$skill/scripts/daemon.sh" start --only-if-op-gen "$op_gen"; then
+  # down-notice.sh resolves its own install root from where IT is sourced
+  # from, not from any variable -- so the copy that matters here is the
+  # one inside the install being updated ($skill), never this installer
+  # script's own location (can be a world away: an npx tarball, this dev
+  # repo, ...). Sourced in a subshell so its own include guard never
+  # suppresses a later, correct source of a different install's copy.
+  if bash "$skill/scripts/daemon.sh" start --only-if-op-gen "$op_gen"; then
+    # A later run (another --update, or a manual `agmsg daemon start`)
+    # may be recovering from an EARLIER failed attempt; this success
+    # clears that stale record.
+    ( . "$skill/scripts/lib/down-notice.sh" 2>/dev/null && down_notice_clear agmsgd ) || true
+  else
     echo "  ! agmsgd did not start after the update; run: bash $(printf '%q' "$skill/scripts/agmsg") daemon start" >&2
+    # This was the installer's one restart attempt (decision 11-04,
+    # S01/S14): record it so it is not only a line in this terminal --
+    # `agmsg doctor`, `agmsg daemon status`, and the next session-start
+    # all surface it, so the enabled intent stays visibly recoverable
+    # (`agmsg daemon start`) even once this terminal is gone.
+    ( . "$skill/scripts/lib/down-notice.sh" 2>/dev/null && down_notice_set agmsgd down \
+      "agmsgd did not start after the update" \
+      "agmsg daemon start" ) || true
   fi
   rm -f "$skill/run/agmsgd-updating"
 }
