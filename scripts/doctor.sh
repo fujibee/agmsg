@@ -519,6 +519,33 @@ _team_filter_lines() {
   return 0
 }
 
+# --- Codex app-server daemon health (#1886) --------------------------------
+CODEX_DAEMON_LINES=""
+_doctor_scan_codex_daemons() {
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/codex-daemon-health.sh"
+  local profile shown
+  while IFS= read -r profile; do
+    [ -n "$profile" ] || continue
+    shown="$(_redact_text "$profile" "$SKILL_DIR")"
+    agmsg_codex_daemon_probe "$profile" always
+    case "${CDH_STATE:-}" in
+      absent) CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: no daemon"$'\n' ;;
+      stale) CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: daemon.pid is stale (${CDH_REASON:-})"$'\n' ;;
+      unchecked) CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: ${CDH_REASON:-}"$'\n' ;;
+      running)
+        CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}  $shown: pid ${CDH_PID:-}, age $(agmsg_codex_daemon_age_text "${CDH_AGE_SECONDS:-}"), footprint $(agmsg_codex_daemon_footprint_text "${CDH_FOOTPRINT_MB:-}")"$'\n'
+        if [ "${CDH_OVER:-}" = 1 ]; then
+          _warn "$(_redact_text "$(agmsg_codex_daemon_warning_text "$profile")" "$SKILL_DIR")"
+        fi
+        ;;
+    esac
+  done <<< "$(agmsg_codex_daemon_profiles "$RUN_DIR")"
+  if [ -f "$RUN_DIR/codex-daemon-health" ]; then
+    CODEX_DAEMON_LINES="${CODEX_DAEMON_LINES}$(sed -n 's/^notice\t/  last agmsgd notice: /p' "$RUN_DIR/codex-daemon-health" | tail -n 1)"$'\n'
+  fi
+}
+
 # --- scope: build the (project, type) pairs to scan --------------------
 #
 # One output format regardless of which filters were given: newline-separated
@@ -1092,6 +1119,10 @@ _doctor_scan_stale_outcome_files
 if [ -n "$STALE_OUTCOME_FILES" ]; then
   _warn "$(_agmsg_stale_outcome_dir) holds leaked storage sync driver outcome file(s) from before #1572 (see 'leaked storage sync driver outcome files' above); fix them with: doctor.sh --fix"
 fi
+# Codex app-server daemon, one per profile (#1886): installation-wide, read-only,
+# warns past 6 GB footprint AND 12 h age. Never stops or restarts it; the
+# remediation is printed for a person to run.
+_doctor_scan_codex_daemons
 WARN_COUNT="$(printf '%s\n' "$WARNINGS" | grep -c . || true)"
 
 echo "$TEAM_COUNT team(s), $TOTAL_PAIR_COUNT registration(s), $WARN_COUNT warning(s)"
@@ -1104,6 +1135,11 @@ printf '%s' "$REPORT_BLOCKS"
 _doctor_print_orphans
 _doctor_print_locks
 _doctor_print_stale_outcome_files
+if [ -n "$CODEX_DAEMON_LINES" ]; then
+  echo "Codex app-server daemon:"
+  printf '%s' "$CODEX_DAEMON_LINES" | grep -v '^$'
+  echo
+fi
 
 if [ -n "$WARNINGS" ]; then
   echo "warnings:"

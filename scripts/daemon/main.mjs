@@ -19,6 +19,7 @@ import { classify } from "./status.mjs";
 import { createCodexQueueChannel } from "./channels/codex-queue.mjs";
 import { ensureCodexChannelSchema } from "./channels/codex-queue-store.mjs";
 import { createClaudeCodeQueueChannel } from "./channels/claude-code-queue.mjs";
+import { createCodexDaemonHealthChannel } from "./channels/codex-daemon-health.mjs";
 import { ensureClaudeCodeChannelSchema } from "./channels/claude-code-queue-store.mjs";
 
 import { withDeadline, PollDeadlineError, CHANNEL_DEADLINE_MS, CYCLE_DEADLINE_MS, STOP_DEADLINE_MS } from './poll-deadline.mjs';
@@ -244,6 +245,7 @@ export async function main(db, { installRoot, manifest, manifestText, expectedDe
   channelHooks.push(...(createChannels ? createChannels({ db, installRoot, expectedOpGen }) : [
     createCodexQueueChannel({ db, installRoot, expectedOpGen }),
     createClaudeCodeQueueChannel({ db, installRoot, expectedOpGen }),
+    createCodexDaemonHealthChannel({ installRoot }),
   ]));
 
   process.on("SIGTERM", () => doStop("normal"));

@@ -823,6 +823,15 @@ cmd_stop() {
   return 1
 }
 
+# The latest Codex app-server daemon health notice agmsgd recorded (#1886), if
+# any. A read of one run/ file; nothing here checks or restarts the daemon.
+_codex_daemon_health_notice() {
+  local record="$SKILL_DIR/run/codex-daemon-health" line
+  [ -f "$record" ] || return 0
+  line="$(sed -n 's/^notice\t//p' "$record" | tail -n 1)"
+  [ -z "$line" ] || printf 'last Codex daemon notice: %s\n' "$line"
+}
+
 cmd_status() {
   _require_install_db
   local json=false AGMSG_DAEMON_ALL=0 option
@@ -854,6 +863,7 @@ cmd_status() {
         "$node_path" --disable-warning=ExperimentalWarning "$SCRIPT_DIR/daemon/status.mjs" "$SKILL_DIR" || status_rc=$?
       fi
       agmsg_daemon_seat_report status
+      _codex_daemon_health_notice
     fi
     return "$status_rc"
   fi
