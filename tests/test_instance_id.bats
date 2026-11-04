@@ -7,6 +7,7 @@
 # the fix turns on.
 
 load test_helper
+bats_require_minimum_version 1.5.0
 
 setup() {
   setup_test_env
@@ -1054,4 +1055,11 @@ require_eperm_pid() {
   comp=0; agmsg_instance_alive "sid-live.$$"          || comp=$?
   [ "$bare" -eq 0 ]
   [ "$comp" -eq 0 ]
+}
+
+@test "notice I/O failures cannot stop fallback or recovery under errexit" {
+  local script='source "$1/lib/down-notice.sh"; down_notice_set() { return 1; }; down_notice_clear() { return 1; }; source "$1/lib/instance-id.sh"; agmsg_instance_id_for_pid sess codex ""; printf "\n"; agmsg_instance_id_for_pid sess codex 4242'
+  run --separate-stderr bash -e -c "$script" _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'sess\nsess.4242')" ]
 }

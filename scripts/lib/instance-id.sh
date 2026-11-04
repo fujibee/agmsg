@@ -369,9 +369,9 @@ _agmsg_instance_notice() {
   . "$root/scripts/lib/down-notice.sh"
   key="$(down_notice_key instance-id "$type"$'\n'"$sid")"
   if [ "$action" = set ]; then
-    down_notice_set "$key" degraded "Agent PID unresolved for $type; using bare session_id, so parallel resume isolation is degraded. Restart the agent session from its own terminal to retry PID resolution" 'agmsg doctor' >&2 || true
+    down_notice_set "$key" degraded "Agent PID unresolved for $type; using bare session_id, so parallel resume isolation is degraded. Restart the agent session from its own terminal to retry PID resolution" 'agmsg doctor' >&2 || :
   else
-    down_notice_clear "$key" >&2 || true
+    down_notice_clear "$key" >&2 || :
   fi
 }
 
