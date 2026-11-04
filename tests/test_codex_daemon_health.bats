@@ -161,3 +161,39 @@ _field() {   # <n>  (1-based tab field of the first line)
   [ "$(wc -l < "$BATS_TEST_TMPDIR/ps-calls" | tr -d ' ')" = 4 ]
   [ "$(wc -l < "$BATS_TEST_TMPDIR/fp-calls" | tr -d ' ')" = 4 ]
 }
+
+@test "health: a profile whose footprint hangs is unchecked after the read limit and does not starve the next one" {
+  mkdir -p "$BATS_TEST_TMPDIR/p2/app-server-daemon" "$TEST_SKILL_DIR/run"
+  cp "$CODEX_HOME/app-server-daemon/daemon.pid" "$BATS_TEST_TMPDIR/p2/app-server-daemon/daemon.pid"
+  printf 'codex_home=%s\n' "$BATS_TEST_TMPDIR/p2" > "$TEST_SKILL_DIR/run/role-session.x"
+  # First call hangs (exec, so the killed pid is the sleep itself), the second answers over the limit.
+  _stub footprint 'if [ ! -e '"$BATS_TEST_TMPDIR"'/first-done ]; then : > '"$BATS_TEST_TMPDIR"'/first-done; exec sleep 30; fi; printf "phys_footprint: 7516192768 B\nphys_footprint_peak: 8589934592 B\n"'
+  _stub_ps "5-00:00:00" "$START"
+  AGMSG_CODEX_DAEMON_READ_SECONDS=1 _health
+  [ "$(printf '%s\n' "$output" | sed -n 1p | cut -f2)" = unchecked ]
+  [ "$(printf '%s\n' "$output" | sed -n 2p | cut -f2)" = running ]
+  [ "$(printf '%s\n' "$output" | sed -n 2p | cut -f7)" = 1 ]
+  case "$(printf '%s\n' "$output" | sed -n 1p | cut -f9)" in *footprint*) ;; *) false ;; esac
+}
+
+@test "health: stopping the reader mid-read takes its footprint child down with it" {
+  _stub footprint 'echo $$ > '"$BATS_TEST_TMPDIR"'/child-pid; exec sleep 3141'
+  _stub_ps "5-00:00:00" "$START"
+  PATH="$BATS_TEST_TMPDIR/stubs:$PATH" bash "$SCRIPTS/codex-daemon-health.sh" > /dev/null 2>&1 3>&- 4>&- &
+  local reader=$!
+  _wait_child_pid
+  local child
+  child="$(cat "$BATS_TEST_TMPDIR/child-pid")"
+  kill -0 "$child"
+  kill "$reader"
+  wait "$reader" 2>/dev/null || true
+  local i=0
+  while kill -0 "$child" 2>/dev/null && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.1; done
+  ! kill -0 "$child" 2>/dev/null
+}
+
+_wait_child_pid() {
+  local i=0
+  while [ ! -s "$BATS_TEST_TMPDIR/child-pid" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
+  [ -s "$BATS_TEST_TMPDIR/child-pid" ]
+}

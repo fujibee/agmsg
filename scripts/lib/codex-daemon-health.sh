@@ -79,7 +79,9 @@ _agmsg_cdh_pid_alive() {
 #   CDH_CLIENTS    only when over the limit; empty when it could not be counted
 # Spawns: one single-pid ps per live daemon, plus per daemon at least 12 h old one
 # footprint, and readlink/lsof/grep only for
-# one that is over. uname once per process, one sed for all seat records.
+# one that is over; a footprint or lsof that takes over AGMSG_CODEX_DAEMON_READ_SECONDS
+# (5) is killed and that profile reads unchecked, so a slow one cannot starve the
+# profiles after it. A temp file (mktemp, rm) is used once the first footprint runs. uname once per process, one sed for all seat records.
 # The callback runs as each profile is finished, so a caller that is cut off
 # part-way still has the earlier profiles.
 agmsg_codex_daemon_scan() {   # <run_dir> <callback>
@@ -130,10 +132,45 @@ agmsg_codex_daemon_scan() {   # <run_dir> <callback>
     [ "$CDH_STATE" != alive ] || _agmsg_cdh_finish "${profiles[$i]}"
     "$cb" "${profiles[$i]}"
   done
+  if [ -n "${_AGMSG_CDH_TMP:-}" ]; then
+    rm -f "$_AGMSG_CDH_TMP"
+    _AGMSG_CDH_TMP=""
+  fi
 }
 
 _agmsg_cdh_reset() {
   CDH_STATE=absent CDH_REASON="" CDH_PID="" CDH_START="" CDH_AGE_SECONDS="" CDH_FOOTPRINT_MB="" CDH_PEAK_MB="" CDH_OVER=0 CDH_CLIENTS=""
+}
+
+# Runs <cmd...> with its stdout in <outfile>, giving up on it after the read limit
+# (AGMSG_CODEX_DAEMON_READ_SECONDS, default 5) so one slow or hung daemon cannot
+# starve the profiles after it. The child is killed on timeout; returns 1 then.
+# The pid is kept in _AGMSG_CDH_CHILD so a caller's TERM trap can reap it.
+_agmsg_cdh_bounded() {   # <outfile> <cmd...>
+  local out="$1" limit="${AGMSG_CODEX_DAEMON_READ_SECONDS:-5}" ticks=0 rc=0
+  shift
+  case "$limit" in ''|*[!0-9]*|0) limit=5 ;; esac
+  "$@" > "$out" 2>/dev/null &
+  _AGMSG_CDH_CHILD=$!
+  while kill -0 "$_AGMSG_CDH_CHILD" 2>/dev/null; do
+    if [ "$ticks" -ge $(( limit * 10 )) ]; then
+      kill "$_AGMSG_CDH_CHILD" 2>/dev/null
+      wait "$_AGMSG_CDH_CHILD" 2>/dev/null
+      _AGMSG_CDH_CHILD=""
+      return 1
+    fi
+    sleep 0.1
+    ticks=$(( ticks + 1 ))
+  done
+  wait "$_AGMSG_CDH_CHILD" 2>/dev/null || rc=$?
+  _AGMSG_CDH_CHILD=""
+  return "$rc"
+}
+
+# Kills the read in flight, if any. For a caller's TERM/INT trap.
+agmsg_codex_daemon_reap_child() {
+  [ -z "${_AGMSG_CDH_CHILD:-}" ] || kill "$_AGMSG_CDH_CHILD" 2>/dev/null
+  return 0
 }
 
 # A live pid: match it to the shared ps output, then read its footprint if it is
@@ -162,7 +199,11 @@ _agmsg_cdh_finish() {   # <profile dir>
   }
   CDH_STATE=running
   [ "$CDH_AGE_SECONDS" -ge "$AGMSG_CODEX_DAEMON_AGE_LIMIT_SECONDS" ] || return 0
-  fpout="$(footprint -p "$pid" --noCategories -f bytes 2>/dev/null)" || fpout=""
+  [ -n "${_AGMSG_CDH_TMP:-}" ] || _AGMSG_CDH_TMP="$(mktemp 2>/dev/null)" || _AGMSG_CDH_TMP=""
+  fpout=""
+  if [ -n "$_AGMSG_CDH_TMP" ] && _agmsg_cdh_bounded "$_AGMSG_CDH_TMP" footprint -p "$pid" --noCategories -f bytes; then
+    fpout="$(<"$_AGMSG_CDH_TMP")"
+  fi
   [[ "$fpout" =~ phys_footprint:[[:space:]]*([0-9]+) ]] && bytes="${BASH_REMATCH[1]}" || bytes=""
   CDH_FOOTPRINT_MB="$(_agmsg_codex_daemon_bytes_mb "$bytes")" || {
     CDH_STATE=unchecked CDH_REASON="could not read the daemon's memory footprint"; return 0
@@ -173,8 +214,10 @@ _agmsg_cdh_finish() {   # <profile dir>
     CDH_OVER=1
     sock="$(readlink "$profile/app-server-control/app-server-control.sock" 2>/dev/null)" || sock=""
     if [ -n "$sock" ]; then
-      n="$(lsof -a -p "$pid" -U 2>/dev/null | grep -cF "$sock")" || n=0
-      [ "$n" -gt 0 ] && CDH_CLIENTS=$(( n - 1 ))
+      if _agmsg_cdh_bounded "$_AGMSG_CDH_TMP" lsof -a -p "$pid" -U; then
+        n="$(grep -cF "$sock" "$_AGMSG_CDH_TMP")" || n=0
+        [ "$n" -gt 0 ] && CDH_CLIENTS=$(( n - 1 ))
+      fi
     fi
   fi
   return 0

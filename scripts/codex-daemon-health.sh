@@ -15,4 +15,5 @@ _print_profile() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "${CDH_STATE:-}" "${CDH_PID:-}" "${CDH_START:-}" \
     "${CDH_AGE_SECONDS:-}" "${CDH_FOOTPRINT_MB:-}" "${CDH_OVER:-}" "${CDH_CLIENTS:-}" "${CDH_REASON:-}" "${CDH_PEAK_MB:-}"
 }
+trap 'agmsg_codex_daemon_reap_child; exit 143' TERM INT
 agmsg_codex_daemon_scan "$SKILL_DIR/run" _print_profile
