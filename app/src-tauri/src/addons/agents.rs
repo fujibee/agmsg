@@ -223,7 +223,7 @@ fn read_team_id(config: &Path) -> Option<String> {
 pub const OPEN_EVENT: &str = "addon-agent-open";
 
 /// A token for "this process, started then": the start time as the OS prints it. One `ps` launch on
-/// macOS and Linux, one PowerShell launch on Windows; asked when an agent's pane has started and once per
+/// macOS and Linux, none on Windows (the creation time from the process handle); asked when an agent's pane has started and once per
 /// `running` entry after a restart.
 pub fn process_start_token(pid: u32) -> Option<String> {
     #[cfg(unix)]
@@ -238,17 +238,25 @@ pub fn process_start_token(pid: u32) -> Option<String> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        let out = std::process::Command::new("powershell")
-            .creation_flags(0x0800_0000)
-            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')")])
-            .output()
-            .ok()?;
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if out.status.success() && !s.is_empty() {
-            Some(s)
-        } else {
-            None
+        // Read in-process (no program is started): a PowerShell start took about 5 s on the Windows test machine and
+        // sat inside the 15 s wait of agents.spawn. The token is the creation time (100 ns ticks since 1601), and a
+        // process that has exited has no token, like a pid that ps cannot find.
+        use windows::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        const STILL_ACTIVE: u32 = 259;
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let zero = FILETIME::default();
+            let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+            let mut code = 0u32;
+            let alive = GetExitCodeProcess(h, &mut code).is_ok() && code == STILL_ACTIVE;
+            let times = GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user);
+            let _ = CloseHandle(h);
+            if alive && times.is_ok() {
+                Some(format!("{}", ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64))
+            } else {
+                None
+            }
         }
     }
 }
