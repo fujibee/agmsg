@@ -8,7 +8,7 @@
 // install-baseline.mjs is shared by the startup verifier and daemon.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readlinkSync } from "node:fs";
 import { platform, uptime } from "node:os";
 
 // A boot-scoped id: the same value for every process on this machine
@@ -94,10 +94,23 @@ export function sameBoot(recorded, plat = platform(), current = bootId()) {
   return current === recorded;
 }
 
+// The PID namespace this process runs in ("pid:[4026531836]"), or null where
+// there is no such thing to read (anything but Linux, or /proc without it). A
+// process in another PID namespace cannot see this one's pid, so a failed pid
+// lookup there says nothing about whether the executor is alive.
+export function pidNamespace(plat = platform()) {
+  if (plat !== "linux") return null;
+  try {
+    return readlinkSync("/proc/self/ns/pid") || null;
+  } catch {
+    return null;
+  }
+}
+
 // This process's own executor triple, as of the call. `role` and `pid` are
 // the caller's own; `bootId` is captured fresh (see above).
 export function currentExecutor() {
-  return { pid: process.pid, bootId: bootId() };
+  return { pid: process.pid, bootId: bootId(), pidNs: pidNamespace() };
 }
 
 // True/false/null for "living" / "confirmed dead" / "cannot tell", given a
@@ -111,13 +124,18 @@ export function currentExecutor() {
 // (confirmed dead) without even checking the pid -- this is the one case
 // where a stale boot id is itself the proof, not a reason to say "cannot
 // tell".
-export function isAlive({ pid, bootId: capturedBootId }, { plat = platform(), current = bootId() } = {}) {
+export function isAlive({ pid, bootId: capturedBootId, pidNs: capturedPidNs = null }, { plat = platform(), current = bootId(), currentPidNs = pidNamespace(plat) } = {}) {
   const sameBootId = sameBoot(capturedBootId, plat, current);
   if (sameBootId === false) return false;
   try {
     process.kill(pid, 0);
   } catch (error) {
-    if (error?.code === "ESRCH") return false;
+    if (error?.code === "ESRCH") {
+      // From another PID namespace the pid is simply not there to see. Only a
+      // record that names its namespace can say so; one without it is read as before.
+      if (capturedPidNs && currentPidNs && capturedPidNs !== currentPidNs) return null;
+      return false;
+    }
     // EPERM: a process at that pid exists but this user cannot signal it --
     // that is itself proof it is alive (Node only reports it as a
     // permission fact, but a permission-denied answer to `kill(pid, 0)`

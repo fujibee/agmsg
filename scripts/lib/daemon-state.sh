@@ -5,9 +5,21 @@
 _AGMSG_DAEMON_STATE_SH=1
 # Where the Linux boot id is read from; a test points it at a file it can remove.
 _AGMSG_BOOT_ID_FILE=/proc/sys/kernel/random/boot_id
+_AGMSG_OSRELEASE_FILE=/proc/sys/kernel/osrelease
 _AGMSG_DAEMON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance-id.sh"
+
+# True when this shell is in a different PID namespace than the recorded
+# executor's. Linux only; read lazily because only a pid that cannot be found
+# needs it. An older record (no namespace kept) or an unreadable one is not "other".
+_agmsg_daemon_in_other_pid_namespace() {
+  [ "$(uname -s)" = Linux ] || return 1
+  local mine recorded
+  mine="$(readlink /proc/self/ns/pid 2>/dev/null)" || return 1
+  recorded="$(sqlite3 -readonly -cmd '.timeout 100' "$_AGMSG_DAEMON_ROOT/run/install.db" "SELECT COALESCE(executor_pid_ns,'') FROM daemon_owner;" 2>/dev/null)" || return 1
+  [ -n "$mine" ] && [ -n "$recorded" ] && [ "$mine" != "$recorded" ]
+}
 
 agmsg_daemon_read_state() {
   AGMSGD_DESIRED=unknown; AGMSGD_HEALTH=unknown; AGMSGD_REASON="install record unavailable"
@@ -53,7 +65,7 @@ agmsg_daemon_read_state() {
       # A stepped clock also moves that start time, by as much as the step, so
       # there it cannot say a pid was reused after the owner's claim.
       local osrelease=""
-      read -r osrelease 2>/dev/null < /proc/sys/kernel/osrelease || true
+      read -r osrelease 2>/dev/null < "$_AGMSG_OSRELEASE_FILE" || true
       case "$osrelease" in
         *[Mm]icrosoft*) start_unreliable=1 ;;
       esac
@@ -123,9 +135,25 @@ agmsg_daemon_read_state() {
     AGMSGD_REASON="executor start evidence does not match ($AGMSGD_REASON)"
     return 0
   fi
+  # The start time is not used on WSL, so the branch below is not reached there;
+  # an executor that cannot be seen from another PID namespace must still read
+  # as not checkable rather than as an exited process.
+  if [ -n "$start_unreliable" ] && [ -n "$current_boot" ] && [ "$(_agmsg_pid_signal_presence "$pid")" = gone ] && _agmsg_daemon_in_other_pid_namespace; then
+    AGMSGD_HEALTH=unchecked
+    AGMSGD_REASON="the daemon runs in another PID namespace, so its process cannot be seen from here"
+    return 0
+  fi
   if [ -z "$current_boot" ] || { [ -z "$started_epoch" ] && [ -z "$start_unreliable" ]; }; then
     case "$(_agmsg_pid_signal_presence "$pid")" in
-      gone) ;;
+      gone)
+        # Seen from another PID namespace (a Codex sandbox) the executor's pid
+        # is simply not there. The record names the namespace it was started
+        # in; a record without one is read as before.
+        if _agmsg_daemon_in_other_pid_namespace; then
+          AGMSGD_HEALTH=unchecked
+          AGMSGD_REASON="the daemon runs in another PID namespace, so its process cannot be seen from here"
+          return 0
+        fi ;;
       *)
         AGMSGD_HEALTH=unchecked
         AGMSGD_REASON="the boot id or process start time cannot be read from here"
