@@ -293,8 +293,9 @@ export function createClaudeCodeQueueChannel({
             lastLookup.set(seat, { at: now(), state: lookupState, reason: lookupReason });
           }
         } else {
-          lookupState = before.state;
-          lookupReason = before.reason;
+          // A socket found earlier that no longer answers: reachable by nobody.
+          lookupState = before.state === "found" ? "unreachable" : before.state;
+          lookupReason = before.state === "found" ? "sessions_file_socket_missing" : before.reason;
         }
       }
     }

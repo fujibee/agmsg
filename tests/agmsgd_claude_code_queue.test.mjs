@@ -647,3 +647,16 @@ test('a seat that answers again clears its record', async (t) => {
   assert.ok(f.calls.clears.length >= 1);
   assert.equal(f.db.prepare('SELECT state FROM beta_claude_seat').get().state, 'addressable');
 });
+
+test('a found socket that stops answering is down after 10 minutes without waiting for the next lookup', async (t) => {
+  let up = true;
+  const f = missingSocketFixture(t, () => ({ state: 'found', socket: '/tmp/cc-socks/9.sock', pid: 9 }),
+    (p) => (p === '/tmp/cc-socks/9.sock' && up ? { state: 'ok' } : { state: 'unreadable', reason: 'messaging_socket_missing' }));
+  await f.channel.pollOnce();
+  assert.equal(f.calls.sends.length, 1);
+  up = false;
+  f.state.minutes = 0.5; await f.channel.pollOnce();
+  f.state.minutes = 11; await f.channel.pollOnce();
+  assert.equal(f.calls.sets.length, 1);
+  assert.equal(f.calls.sets[0].st, 'down');
+});
