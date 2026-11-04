@@ -874,6 +874,15 @@ cmd_status() {
     esac
   done
   if [ "$(_os)" = linux ]; then _linux_recover_if_failed || true; fi
+  # Show agmsgd's own down_notice record (if any) in the TEXT output only --
+  # the JSON contract (status.mjs's object, or the K14 fallback's
+  # json_object(...) below) is unchanged (review round 2). The record
+  # outlives any single call site that set it (install.sh's own failed
+  # restart attempt, this function's own _linux_recover_if_failed above),
+  # so this is the one place "agmsg daemon status" always surfaces it.
+  if [ "$json" != true ]; then
+    down_notice_list 2>/dev/null | awk -F'\t' '$1 == "agmsgd"' | _down_notice_text
+  fi
   local owner_tables
   # Only a database that answers and has no daemon_owner table is "not in use
   # yet"; a query that fails (corrupt, locked) falls through to the normal

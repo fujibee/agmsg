@@ -1050,6 +1050,7 @@ _fake_recover_systemctl() {
   cat > "$FAKE_LINUX/systemctl" <<'EOF'
 #!/usr/bin/env bash
 state_dir="$TEST_SKILL_DIR/fake-linux"
+printf '%s\n' "$2" >> "$state_dir/call-log"
 case "$2" in
   show-environment) exit 0 ;;
   is-active)
@@ -1105,18 +1106,47 @@ EOF
   grep -q 'reset-failed' "$TEST_SKILL_DIR/run/down/agmsgd.json"
 }
 
-@test "_linux_recover_if_failed does nothing when the unit is already active (no reset-failed/start calls)" {
+@test "_linux_recover_if_failed does nothing when the unit is already active (no reset-failed/start calls, review round 2)" {
   _seed_install_db
   _fake_recover_systemctl
   local fns
   fns="$(_daemon_fns)"
   : > "$TEST_SKILL_DIR/fake-linux/active"
   PATH="$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
-    run bash -c 'set -u; source "$1"; _register_linux "$2" >/dev/null 2>&1 || true; _linux_recover_if_failed' \
-    _ "$fns" "/bin"
+    run bash -c 'set -u; source "$1"; _register_linux "$2" >/dev/null 2>&1 || true; : > "$3/fake-linux/call-log"; _linux_recover_if_failed' \
+    _ "$fns" "/bin" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]
   [ ! -f "$TEST_SKILL_DIR/fake-linux/failed" ]
   [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  refute grep -qx 'reset-failed' "$TEST_SKILL_DIR/fake-linux/call-log"
+  refute grep -qx 'start' "$TEST_SKILL_DIR/fake-linux/call-log"
+  refute grep -qx 'is-failed' "$TEST_SKILL_DIR/fake-linux/call-log"
+  grep -qx 'is-active' "$TEST_SKILL_DIR/fake-linux/call-log"
+}
+
+@test "daemon.sh status: a retry failure's reason and recovery are shown in text, JSON stays an object (review round 2)" {
+  _seed_install_db
+  _fake_recover_systemctl
+  local fns
+  fns="$(_daemon_fns)"
+  : > "$TEST_SKILL_DIR/fake-linux/start-fails"
+  PATH="$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    bash -c 'set -u; source "$1"; _register_linux "$2" >/dev/null 2>&1 || true; : > "$3/fake-linux/failed"; _linux_recover_if_failed' \
+    _ "$fns" "/bin" "$TEST_SKILL_DIR"
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  # _os is only reachable through daemon.sh's own dispatch (sourced fns strip
+  # it), so this exercises cmd_status directly rather than the full CLI --
+  # same function `agmsg daemon status` calls.
+  PATH="$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _os() { echo linux; }; _require_install_db() { :; }; cmd_status' \
+    _ "$fns"
+  [ "$status" -eq 0 ] || [ "$status" -eq 1 ]
+  grep -q 'is down since' <<<"$output"
+  grep -q 'reset-failed' <<<"$output"
+  PATH="$FAKE_LINUX:$PATH" AGMSGD_SYSTEMCTL="$FAKE_LINUX/systemctl" \
+    run bash -c 'set -u; source "$1"; _os() { echo linux; }; _require_install_db() { :; }; cmd_status --json' \
+    _ "$fns"
+  refute grep -q 'is down since' <<<"$output"
 }
 
 @test "daemon.sh enable: no Codex warning when no Codex seat is registered, one when a Codex seat is" {
