@@ -155,7 +155,7 @@ running stays unread and is delivered after the turn completes. The turn ends
 via `turn/completed`, a `thread/status` idle, or a watchdog (the real app-server
 does not reliably send `turn/completed`); only then is the next `watch-once`
 armed. If a turn does not consume the unread message, the same `max_id` reappears
-and the bridge stops instead of looping.
+and the bridge backs off, then rechecks unread state before retrying delivery. Repeated watch failures also use capped backoff instead of ending the bridge. A degraded notice and project-scoped `agmsg delivery status` describe either condition; a changed frontier or a successful empty watch clears it. Backoff starts at five seconds and caps at one minute, while the watch-child deadline and minimum arm interval remain in force.
 
 ```mermaid
 flowchart TD
