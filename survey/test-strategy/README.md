@@ -393,6 +393,25 @@ more combined with (b2).
   write-failure fixtures unable to fail: test_spawn #97,
   test_terminal_registry #134/#178, test_roster_journal #14-#16 fail there
   with and without any change. CI runners are not root.
+- **Run as root, `tests/test_apply_fail_stderr.bats` #1 deletes
+  `/dev/null`.** It sets `jq_err=/dev/null; sql_file=/dev/null` and runs
+  the driver's `_sqlite_sync_apply_fail`, which ends with
+  `rm -f "$sql_file" "$jq_err"`. A non-root CI user gets a permission
+  error and nothing happens; as root the device node is removed and the
+  next `> /dev/null` creates a regular file. Everything after it in the
+  same machine then runs with a `/dev/null` that keeps and returns data.
+  Seen here: `test_plugin_install.bats` (which sets
+  `GIT_CONFIG_GLOBAL=/dev/null`) failed 50 of 51 tests, and through its
+  `w="$(mk_repo ...)"` pattern, a failed commit's output became part of a
+  path relative to the current directory, so one test committed a stray
+  file into the checkout the suite was run from. With `/dev/null` intact the
+  same file passes 51/51. Fix: give the test files under
+  `$BATS_TEST_TMPDIR`; and have `mk_repo` callers check that the captured
+  path is a directory before running git in it.
+- Data caveat: the strace sweep (section 3) and the deep-dive agents' local
+  micro-benchmarks ran partly after `/dev/null` had been deleted this way;
+  the CI-derived numbers (sections 1, 2, 4) and the measurements quoted for
+  the follow-up branches were taken with `/dev/null` intact.
 
 ## What could not be obtained
 
