@@ -39,9 +39,9 @@ _agmsg_type_fallback_notice() {
   . "$root/scripts/lib/down-notice.sh"
   component="$(down_notice_key cli-type "${PWD:-.}")"
   if [ "$action" = set ]; then
-    down_notice_set "$component" degraded "$reason (directory ${PWD:-.})" 'agmsg doctor' >&2 || true
+    down_notice_set "$component" degraded "$reason (directory ${PWD:-.})" 'agmsg doctor' >&2 || :
   else
-    down_notice_clear "$component" >&2 || true
+    down_notice_clear "$component" >&2 || :
   fi
 }
 

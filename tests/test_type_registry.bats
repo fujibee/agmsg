@@ -607,3 +607,10 @@ YAML
   grep -Fq "no warnings." <<<"$output"
   refute grep -Fq "delivery.sh status exited" <<<"$output"
 }
+
+@test "notice I/O failures cannot stop fallback or recovery under errexit" {
+  local script='source "$1/lib/down-notice.sh"; down_notice_set() { return 1; }; down_notice_clear() { return 1; }; source "$1/lib/type-registry.sh"; source "$1/lib/compat.sh"; source "$1/lib/detect-cli-type.sh"; compat_get_comm() { :; }; compat_get_ppid() { echo 1; }; GEMINI_API_KEY=fixture; agmsg_detect_cli_type; CODEX_THREAD_ID=fixture; agmsg_detect_cli_type'
+  run --separate-stderr bash -e -c "$script" _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'gemini\ncodex')" ]
+}
