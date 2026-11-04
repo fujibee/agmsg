@@ -766,8 +766,12 @@ _pid_gone_harness() {   # <kill message>
   ( . "$SK/scripts/lib/down-notice.sh" && down_notice_set agmsgd down stale stale )
   [ -f "$SK/run/down/agmsgd.json" ]
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
-  [ ! -f "$SK/run/down/agmsgd.json" ]
+  # Stop before any assertion below can fail, same ordering the existing
+  # "starts an agmsgd that was turned on again" test above uses -- a
+  # failed assertion must not leave a real background daemon running
+  # past this test.
   bash "$SK/scripts/daemon.sh" stop || true
+  [ ! -f "$SK/run/down/agmsgd.json" ]
 }
 
 @test "install: --update records a down_notice when its one restart attempt fails, instead of only a terminal line (decision 11-04, S01/S14)" {
@@ -787,6 +791,62 @@ _pid_gone_harness() {   # <kill message>
   grep -q '"component":"agmsgd"' "$SK/run/down/agmsgd.json"
   grep -q '"state":"down"' "$SK/run/down/agmsgd.json"
   grep -q 'agmsg daemon start' "$SK/run/down/agmsgd.json"
+}
+
+_install_fns() {
+  local fns="$BATS_TEST_TMPDIR/install-fns.sh"
+  awk '/^# --- Defaults ---/ {exit} {print}' "$REPO_ROOT/install.sh" > "$fns"
+  printf '%s' "$fns"
+}
+
+@test "agmsg_install_restart_daemon: a restart that hits lock contention is retried once; op_gen is reused unchanged (decision 11-04, S01/S14 scope ruling)" {
+  local fns fake="$FAKE_HOME/fake-skill"
+  mkdir -p "$fake/run" "$fake/scripts"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',7); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+tries_file="$fake/tries"
+n=0
+[ -f "\$tries_file" ] && n="\$(cat "\$tries_file")"
+n=\$((n + 1))
+printf '%s\n' "\$n" > "\$tries_file"
+printf '%s\n' "\$*" >> "$fake/argv-log"
+if [ "\$n" = 1 ]; then
+  echo "agmsg daemon: could not acquire the install operation lock (another agmsg install or daemon command holds it). Nothing was changed; try again in a moment." >&2
+  exit 1
+fi
+echo "agmsg daemon start: running"
+exit 0
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$fake/tries")" = 2 ]
+  grep -qx 'start --only-if-op-gen 7' "$fake/argv-log"
+  [ "$(sort -u "$fake/argv-log" | wc -l | tr -d ' ')" = 1 ]
+  [ "${output#*trying once more}" != "$output" ]
+  [ ! -f "$fake/run/down/agmsgd.json" ]
+}
+
+@test "agmsg_install_restart_daemon: a permanent failure (no usable Node) is NOT retried" {
+  local fns fake="$FAKE_HOME/fake-skill2"
+  mkdir -p "$fake/run" "$fake/scripts"
+  sqlite3 "$fake/run/install.db" "CREATE TABLE daemon_intent(desired TEXT, op_gen INT); INSERT INTO daemon_intent VALUES('on',3); CREATE TABLE daemon_owner(state TEXT); INSERT INTO daemon_owner VALUES('none');"
+  fns="$(_install_fns)"
+  cat > "$fake/scripts/daemon.sh" <<EOF
+#!/usr/bin/env bash
+tries_file="$fake/tries"
+n=0
+[ -f "\$tries_file" ] && n="\$(cat "\$tries_file")"
+n=\$((n + 1))
+printf '%s\n' "\$n" > "\$tries_file"
+echo "agmsg daemon start: no usable Node found (need >= 22.13.0 with node:sqlite), so agmsgd cannot start. Nothing was changed." >&2
+exit 1
+EOF
+  chmod +x "$fake/scripts/daemon.sh"
+  run bash -c 'set -u; source "$1"; agmsg_install_restart_daemon "$2"' _ "$fns" "$fake"
+  [ "$(cat "$fake/tries")" = 1 ]
 }
 
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {

@@ -239,13 +239,34 @@ agmsg_install_restart_daemon() {   # <skill_dir>
     sleep 1
   done
   echo "  ~ agmsgd is turned on; starting the updated version"
+  # A transient lock contention (another agmsg command or install holds
+  # the install operation lock right now) is worth one more try after a
+  # short wait -- the op_gen is unchanged (the guarded UPDATE never
+  # applied when the lock itself could not be acquired, so nothing about
+  # the install moved between attempts) -- but a permanent failure (no
+  # usable Node, a bind failure, ...) is not: retrying it immediately
+  # would only repeat the same error.
+  local start_output start_rc=0
+  start_output="$(bash "$skill/scripts/daemon.sh" start --only-if-op-gen "$op_gen" 2>&1)" || start_rc=$?
+  if [ "$start_rc" -ne 0 ]; then
+    case "$start_output" in
+      *"could not acquire the install operation lock"*)
+        printf '%s\n' "$start_output" >&2
+        echo "  ~ the install operation lock was busy; trying once more" >&2
+        sleep 2
+        start_rc=0
+        start_output="$(bash "$skill/scripts/daemon.sh" start --only-if-op-gen "$op_gen" 2>&1)" || start_rc=$?
+        ;;
+    esac
+  fi
+  printf '%s\n' "$start_output"
   # down-notice.sh resolves its own install root from where IT is sourced
   # from, not from any variable -- so the copy that matters here is the
   # one inside the install being updated ($skill), never this installer
   # script's own location (can be a world away: an npx tarball, this dev
   # repo, ...). Sourced in a subshell so its own include guard never
   # suppresses a later, correct source of a different install's copy.
-  if bash "$skill/scripts/daemon.sh" start --only-if-op-gen "$op_gen"; then
+  if [ "$start_rc" -eq 0 ]; then
     # A later run (another --update, or a manual `agmsg daemon start`)
     # may be recovering from an EARLIER failed attempt; this success
     # clears that stale record.

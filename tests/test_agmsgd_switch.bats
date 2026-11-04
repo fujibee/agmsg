@@ -374,6 +374,42 @@ WRAPPER
   [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
 }
 
+@test "warn_if_stopped never erases an existing down_notice on an UNOBSERVED (install.db missing) check (review round 1 NEEDS FIX)" {
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  mv "$TEST_SKILL_DIR/run/install.db" "$TEST_SKILL_DIR/run/install.db.saved"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_read_state; printf "%s|%s\n" "$AGMSGD_DESIRED" "$AGMSGD_HEALTH"'
+  [ "$output" = "unknown|unknown" ]
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  mv "$TEST_SKILL_DIR/run/install.db.saved" "$TEST_SKILL_DIR/run/install.db"
+}
+
+@test "warn_if_stopped clears a down_notice once desired is confirmed off, same as once health is confirmed ready" {
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','no usable Node recorded',0);"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+  sqlite3 "$TEST_SKILL_DIR/run/install.db" "UPDATE daemon_intent SET desired='off';"
+  run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/down/agmsgd.json" ]
+}
+
+@test "self-heal never re-triggers itself (AGMSG_DAEMON_SELF_HEAL guard, no recursion)" {
+  # Point daemon.sh at a shim that would record a call if one ever happened,
+  # so the guard's effect is checked by its absence, not just the function's
+  # own early return.
+  mkdir -p "$TEST_SKILL_DIR/selfheal-root/scripts"
+  printf '#!/usr/bin/env bash\necho called >> "%s/selfheal-called"\n' "$TEST_SKILL_DIR" > "$TEST_SKILL_DIR/selfheal-root/scripts/daemon.sh"
+  chmod +x "$TEST_SKILL_DIR/selfheal-root/scripts/daemon.sh"
+  run env AGMSG_DAEMON_SELF_HEAL=1 bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; _AGMSG_DAEMON_ROOT="$1"; _agmsg_daemon_self_heal; echo done' _ "$TEST_SKILL_DIR/selfheal-root"
+  [ "$status" -eq 0 ]
+  [ "$output" = done ]
+  [ ! -f "$TEST_SKILL_DIR/selfheal-called" ]
+}
+
 @test "a digest-mismatch failure advises --update instead of daemon start (#1761)" {
   sqlite3 "$TEST_SKILL_DIR/run/install.db" "DELETE FROM daemon_start_attempts; INSERT INTO daemon_start_attempts VALUES ('2099-01-01','digest verification failed: digest mismatch: scripts/daemon/schema.sql',0);"
   run bash -c 'source "$SCRIPTS/lib/daemon-state.sh"; agmsg_daemon_warn_if_stopped always'
