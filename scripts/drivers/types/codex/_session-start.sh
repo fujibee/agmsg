@@ -157,8 +157,9 @@ agmsg_session_start() {
   if ! declare -F down_notice_set >/dev/null 2>&1; then
     source "${SKILL_DIR:-}/scripts/lib/down-notice.sh"
   fi
-  local destination_notice
-  destination_notice="codex-thread.$(printf '%s\n%s\n%s' "${PROJECT:-}" "${AGMSG_CODEX_SEAT_KEY:-}" "${SESSION_ID:-}" | agmsg_sha1)"
+  local destination_notice notice_project_hash
+  notice_project_hash="$(printf '%s' "$(agmsg_canonical_path "${PROJECT:-}" 2>/dev/null || printf '%s' "${PROJECT:-}")" | agmsg_sha1)"
+  destination_notice="codex-thread.$notice_project_hash.$(printf '%s\n%s\n%s' "${PROJECT:-}" "${AGMSG_CODEX_SEAT_KEY:-}" "${SESSION_ID:-}" | agmsg_sha1)"
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
   if [ -z "$thread_id" ]; then
     # The finite hook does not guess a destination or end the resident launcher.
