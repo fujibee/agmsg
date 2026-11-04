@@ -16,8 +16,10 @@ const reject = (e: unknown) => ({ __reject: e });
 describe("live source", () => {
   it("engine: enabled -> ok, disabled -> reasons, failure -> off with the message", async () => {
     expect(await createLiveSource(recorder({ addon_gate_status: { enabled: true, reasons: [] } }).invoke).engine()).toEqual({ ok: true });
-    expect(await createLiveSource(recorder({ addon_gate_status: { enabled: false, reasons: ["a", "b"] } }).invoke).engine()).toEqual({ ok: false, reasons: ["a", "b"] });
-    expect(await createLiveSource(recorder({ addon_gate_status: reject("no gate") }).invoke).engine()).toEqual({ ok: false, reasons: ["no gate"] });
+    expect(await createLiveSource(recorder({ addon_gate_status: { enabled: false, reasons: ["a", "b"], codes: ["frame-guard", "webrtc-udp"] } }).invoke).engine()).toEqual({ ok: false, reasons: ["a", "b"], codes: ["frame-guard", "webrtc-udp"] });
+    // a gate answer without codes still gives the UI a reason to show
+    expect(await createLiveSource(recorder({ addon_gate_status: { enabled: false, reasons: ["x"] } }).invoke).engine()).toEqual({ ok: false, reasons: ["x"], codes: ["unavailable"] });
+    expect(await createLiveSource(recorder({ addon_gate_status: reject("no gate") }).invoke).engine()).toEqual({ ok: false, reasons: ["no gate"], codes: ["unavailable"] });
   });
 
   const pane = { id: 3, url: "http://127.0.0.1:1/t/", port: 1, commit: "c1", title: "Diff view", permissions: ["files:read"], network: "" };

@@ -150,10 +150,10 @@ export function createLiveSource(invoke: Invoke) {
     /** addon_gate_status → the engine state; a failure to ask counts as off, with the reason. */
     async engine(): Promise<EngineState> {
       try {
-        const g = (await invoke("addon_gate_status")) as { enabled: boolean; reasons: string[] };
-        return g.enabled ? { ok: true } : { ok: false, reasons: g.reasons };
+        const g = (await invoke("addon_gate_status")) as { enabled: boolean; reasons: string[]; codes?: string[] };
+        return g.enabled ? { ok: true } : { ok: false, reasons: g.reasons, codes: g.codes?.length ? g.codes : ["unavailable"] };
       } catch (e) {
-        return { ok: false, reasons: [toCommandError(e).message] };
+        return { ok: false, reasons: [toCommandError(e).message], codes: ["unavailable"] };
       }
     },
     async list(): Promise<InstalledAddon[]> {
@@ -198,7 +198,7 @@ export function createLiveSource(invoke: Invoke) {
       }
     },
     /** addon_recheck: run the startup check again (does nothing while one is running). */
-    recheck: () => attempt(async () => (await invoke("addon_recheck")) as { enabled: boolean; reasons: string[] }),
+    recheck: () => attempt(async () => (await invoke("addon_recheck")) as { enabled: boolean; reasons: string[]; codes?: string[] }),
     /** addon_resolve_folder: the real path a picked folder would be granted as; nothing is granted. */
     resolveFolder: (path: string) => attempt(async () => (await invoke("addon_resolve_folder", { path })) as string),
     async revokeTeam(id: number): Promise<void> {

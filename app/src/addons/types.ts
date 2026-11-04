@@ -64,8 +64,11 @@ export type AddonsSnapshot = {
 };
 
 /** Why add-ons are off on this computer (the engine check did not pass). */
-/** addon_gate_status(): `reasons` are already plain English from the Rust side. */
-export type EngineState = { ok: true } | { ok: false; reasons: string[] };
+/**
+ * addon_gate_status(): `codes` are the stable reason codes the UI localizes; `reasons` is the
+ * English diagnostic text (logs only, never shown).
+ */
+export type EngineState = { ok: true } | { ok: false; codes: string[]; reasons: string[] };
 
 /** The install-failure table, one case per row. */
 export type InstallError =

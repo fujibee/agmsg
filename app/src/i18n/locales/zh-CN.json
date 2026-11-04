@@ -268,6 +268,15 @@
     "engineReasons": "Reason: {{reasons}}",
     "checking": "Checking…",
     "checkAgain": "Check again",
+    "reason": {
+      "notVerified": "此 Windows 版本暂不支持附加组件。",
+      "platform": "此操作系统不支持附加组件。",
+      "network": "此系统的 Web 引擎无法阻止附加组件访问网络,因此附加组件保持关闭。",
+      "navigation": "此系统的 Web 引擎无法确认附加组件会留在其窗格内,因此附加组件保持关闭。",
+      "isolation": "此系统的 Web 引擎无法确认附加组件在隔离环境中运行,因此附加组件保持关闭。",
+      "unfinished": "安全检查未完成,请重试。",
+      "generic": "安全检查未通过,因此此电脑上的附加组件保持关闭。"
+    },
     "builtin": {
       "title": "Built in",
       "source": "内置"

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { AddonsSnapshot, EngineState, InstallError, InstalledAddon } from "./types";
 import { declaredPermissions, addonNetwork, grantText, grantsOf, installErrorText, parseRepoInput, permissionRow, shortSha, type Translate } from "./model";
-import { isChecking, offersRecheck } from "./recheck";
+import { engineOffText, isChecking, offersRecheck } from "./recheck";
 import { BusyButton } from "../busy";
 
 // Settings → Add-ons (S1, S4). One intro line, the install field, then
@@ -125,12 +125,12 @@ export function AddonsSettings(props: Props) {
         <Alerts {...props} />
         <p className="addon-engine-off" role="status">
           {t("addons.engineOff")}{" "}
-          {isChecking(engine.reasons)
+          {isChecking(engine.codes)
             ? t("addons.checking")
-            : engine.reasons.length > 0 && t("addons.engineReasons", { reasons: engine.reasons.join("; ") })}
+            : engine.codes.length > 0 && t("addons.engineReasons", { reasons: engineOffText(engine.codes, t) })}
         </p>
-        {(offersRecheck(engine.reasons) || isChecking(engine.reasons)) && props.onRecheck && (
-          <BusyButton type="button" className="addon-btn" busy={isChecking(engine.reasons)} onClick={() => props.onRecheck?.()}>
+        {(offersRecheck(engine.codes) || isChecking(engine.codes)) && props.onRecheck && (
+          <BusyButton type="button" className="addon-btn" busy={isChecking(engine.codes)} onClick={() => props.onRecheck?.()}>
             {t("addons.checkAgain")}
           </BusyButton>
         )}

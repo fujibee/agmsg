@@ -27,7 +27,7 @@ const source = createLiveSource((cmd, args) => invoke(cmd, args));
 
 export function useAddonCatalog(): Catalog {
   const [state, setState] = useState<{ ready: boolean; addons: InstalledAddon[]; engine: EngineState; listError?: string }>(
-    live ? { ready: false, addons: [], engine: { ok: false, reasons: [] } } : { ready: true, addons: mockSnapshot.addons, engine: mockEngine },
+    live ? { ready: false, addons: [], engine: { ok: false, reasons: [], codes: [] } } : { ready: true, addons: mockSnapshot.addons, engine: mockEngine },
   );
   const reload = useCallback(() => {
     if (!live) return;
